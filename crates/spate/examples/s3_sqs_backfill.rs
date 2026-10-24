@@ -164,8 +164,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     while rows() < OBJECTS * RECORDS_PER_OBJECT && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(200));
     }
-    // A unit's delete follows its last commit; give the last ones a moment.
-    std::thread::sleep(Duration::from_secs(2));
     shutdown.trigger();
     let report = run.join().map_err(|_| "the pipeline thread panicked")??;
     println!(

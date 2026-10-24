@@ -129,10 +129,12 @@ A worker receives each unit hidden from the other workers for
 each unit handed to its reader or renewed since the last extension, back to
 the full period. Units the feed has received and not yet handed out are
 extended on the same tick while the reader keeps calling the feed, so a unit
-waiting for room in the reader keeps its place. A worker that stops renewing,
-because it crashed or its control loop stalled, loses its units at most one
-visibility period after their last extension, those not yet handed out
-included, and SQS hands them to another worker.
+waiting for room in the reader keeps its place. From a stop until the feed
+closes, every unit handed to the reader is extended on each tick, renewed or
+not (see [Stop](#stop)). A worker that stops renewing, because it crashed or
+its control loop stalled, loses its units at most one visibility period after
+their last extension, those not yet handed out included, and SQS hands them
+to another worker.
 
 The long-poll wait is `visibility / 3` seconds, rounded down and at most 20.
 A unit that arrives at the end of a poll therefore still has two renewal
@@ -171,8 +173,9 @@ dead-letter queue. The feed never sends to the dead-letter queue itself.
 ## Redrive
 
 Every receive counts toward `maxReceiveCount`: a worker failing the unit, a
-worker that stopped with it held, a crash loop around a sink outage, and a
-receive that drops a unit too close to its lapse. Set `maxReceiveCount` above
+worker that handed it back at a stop or crashed with it held, a crash loop
+around a sink outage, and a receive that drops a unit too close to its
+lapse. Set `maxReceiveCount` above
 the number of such receives a unit can see, or a unit that would have been
 read reaches the dead-letter queue.
 
@@ -221,11 +224,33 @@ queue that also receives storage notifications keeps the window from closing.
 
 ## Stop
 
-A stop does not wait for queued deletes. A delete still queued when the
-pipeline stops is dropped, and its unit returns after one visibility period
-and is read again. A stop can also drop units already received for the
-reader and not yet handed to it, which costs each of them a receive toward
-`maxReceiveCount`.
+A stop follows
+[the drain choreography](../../../03-guides/graceful-shutdown.mdx#the-drain-choreography).
+Once it begins, the feed receives nothing more and sets each unit it received
+and had not handed to the reader visible at once. A receive already waiting
+returns its units the same way, and one that answers after the feed closes
+leaves its units to return after one visibility period. That receive can take
+a unit the reader has just handed back. The feed then hands it back again,
+which costs the unit one more receive toward `maxReceiveCount`, and the close
+waits up to a second after the last hand-back for that receive to answer.
+Until each unit is
+acknowledged or handed back, the feed extends every unit it has handed out on
+each renewal tick.
+
+A unit the reader hands back is set visible at once, and another worker can
+receive it. A unit already past its deadline is visible again, and the feed
+sends it nothing; a deadline never falls after
+[the 12-hour hold](#the-12-hour-hold) ends. Each handed-back unit keeps the
+receive it used toward `maxReceiveCount`.
+
+After the final commit the feed sends its queued deletes and sets each unit it
+still holds visible, within what is left of `checkpoint.drain_timeout`. A
+delete not sent by then leaves its unit to return after one visibility period
+and be read again, and so does every unit of a worker killed before its
+hand-back reaches SQS.
+
+Startup refuses a `checkpoint.drain_timeout` of `5s` or less with the SQS feed
+(see [`checkpoint:`](../../../07-reference/configuration.mdx#checkpoint)).
 
 ## Message mapping
 
@@ -270,7 +295,8 @@ The bucket's side, and which records the source reads, are on the
 
 Each unit costs a send, a receive and a delete, each batched up to ten to a
 request, plus one visibility change per renewal period while it is held,
-batched the same way. A worker that wants more units than it holds keeps one
+batched the same way. A unit handed back at a stop costs one more visibility
+change. A worker that wants more units than it holds keeps one
 long poll open, so an idle worker sends a receive every `visibility / 3`
 seconds, at most every 20: three a minute at the default visibility, and
 thirty a minute at `6s`.

@@ -14,11 +14,12 @@
 //! threshold under which the feed drops it unseen.
 
 use object_store::ObjectStoreExt as _;
+use spate_core::clock::TestClock as StopClock;
 use spate_core::clock::tokio::TestClock;
 use spate_core::config::{FeedSection, PipelineConfig};
 use spate_core::feed::{
-    Confirmation, Delivery, DepthOf, DepthReading, Feed, FeedError, FeedWaker, Receipt, Unit,
-    wake_channel,
+    Confirmation, Delivery, DepthOf, DepthReading, Feed, FeedError, FeedWaker, Receipt,
+    STOP_RESERVE, Unit, wake_channel,
 };
 use spate_core::ops::chain_owned;
 use spate_core::pipeline::{ExitState, Pipeline, RuntimeOptions, ShutdownHandle};
@@ -40,6 +41,13 @@ const DEADLINE: Duration = Duration::from_secs(60);
 
 /// The visibility period of the pipeline tests.
 const VISIBILITY: Duration = Duration::from_secs(6);
+
+/// The default `checkpoint.drain_timeout`, from which the stop's reserve
+/// falls `STOP_RESERVE` early.
+const DRAIN_TIMEOUT: Duration = Duration::from_secs(25);
+
+/// The `checkpoint:` section of every worker but the startup check's.
+const CHECKPOINT: &str = "{ interval: 100ms }";
 
 /// Creates `name` with a dead-letter queue of its own, five receives before
 /// a unit moves there, and returns the queue's URL.
@@ -69,13 +77,16 @@ fn feed_yaml(mq: &ElasticMq, queue_url: &str, visibility: Duration, extra: &str)
 }
 
 /// A [`Feed`] that passes every call to the SQS feed and records each
-/// delivery's count and when the reader took it, and counts the reads of the
-/// queue's depth.
+/// delivery's count, receipt and when the reader took it, counts the reads
+/// of the queue's depth and the stops, and records each hand-back and close.
 #[derive(Clone)]
 struct Recording {
     inner: Arc<SqsFeed>,
-    seen: Arc<Mutex<Vec<(u32, Instant)>>>,
+    seen: Arc<Mutex<Vec<(u32, Receipt, Instant)>>>,
     depth_reads: Arc<AtomicUsize>,
+    stops: Arc<AtomicUsize>,
+    handed_back: Arc<Mutex<Vec<Receipt>>>,
+    closes: Arc<Mutex<Vec<Duration>>>,
 }
 
 impl Recording {
@@ -84,7 +95,26 @@ impl Recording {
             inner,
             seen: Arc::default(),
             depth_reads: Arc::default(),
+            stops: Arc::default(),
+            handed_back: Arc::default(),
+            closes: Arc::default(),
         }
+    }
+
+    fn receipts(&self) -> Vec<Receipt> {
+        self.seen.lock().unwrap().iter().map(|(_, r, _)| *r).collect()
+    }
+
+    fn stopped_receiving(&self) -> usize {
+        self.stops.load(Ordering::SeqCst)
+    }
+
+    fn handed_back(&self) -> Vec<Receipt> {
+        self.handed_back.lock().unwrap().clone()
+    }
+
+    fn closes(&self) -> Vec<Duration> {
+        self.closes.lock().unwrap().clone()
     }
 
     /// Reads of the queue's depth, the startup probe included.
@@ -93,11 +123,11 @@ impl Recording {
     }
 
     fn deliveries(&self) -> Vec<u32> {
-        self.seen.lock().unwrap().iter().map(|(n, _)| *n).collect()
+        self.seen.lock().unwrap().iter().map(|(n, _, _)| *n).collect()
     }
 
     fn first_seen(&self) -> Option<(u32, Instant)> {
-        self.seen.lock().unwrap().first().copied()
+        self.seen.lock().unwrap().first().map(|(n, _, at)| (*n, *at))
     }
 }
 
@@ -116,7 +146,7 @@ impl Feed for Recording {
         self.seen
             .lock()
             .unwrap()
-            .extend(got.iter().map(|d| (d.deliveries, now)));
+            .extend(got.iter().map(|d| (d.deliveries, d.receipt, now)));
         Ok(got)
     }
 
@@ -141,6 +171,25 @@ impl Feed for Recording {
             self.depth_reads.fetch_add(1, Ordering::SeqCst);
         }
         self.inner.read_depth(of)
+    }
+
+    fn hands_back(&self) -> bool {
+        self.inner.hands_back()
+    }
+
+    fn stop_receiving(&self) {
+        self.stops.fetch_add(1, Ordering::SeqCst);
+        self.inner.stop_receiving();
+    }
+
+    fn hand_back(&self, receipt: Receipt) -> Result<(), FeedError> {
+        self.handed_back.lock().unwrap().push(receipt);
+        self.inner.hand_back(receipt)
+    }
+
+    fn close(&self, within: Duration) -> Option<Confirmation> {
+        self.closes.lock().unwrap().push(within);
+        self.inner.close(within)
     }
 }
 
@@ -167,29 +216,61 @@ fn launch_with_source(
     feed_section: &str,
     pre: impl FnOnce(&SinkScript),
 ) -> Worker {
-    launch_customized(data, source_extra, feed_section, pre, |source| source)
+    launch_customized(
+        data,
+        source_extra,
+        feed_section,
+        pre,
+        |source| source,
+        CHECKPOINT,
+        None,
+    )
 }
 
-/// The pipeline file every worker and lister run reads.
-fn pipeline_yaml(data: &Path, source_extra: &str, feed_section: &str) -> String {
+/// [`launch_with_source`], with the stop timed on `clock`.
+fn launch_stopping(
+    data: &Path,
+    source_extra: &str,
+    feed_section: &str,
+    clock: &Arc<StopClock>,
+    pre: impl FnOnce(&SinkScript),
+) -> Worker {
+    launch_customized(
+        data,
+        source_extra,
+        feed_section,
+        pre,
+        |source| source,
+        CHECKPOINT,
+        Some(Arc::clone(clock)),
+    )
+}
+
+/// The pipeline file every worker and lister run reads, with `checkpoint` as
+/// its `checkpoint:` section.
+fn pipeline_yaml(data: &Path, source_extra: &str, feed_section: &str, checkpoint: &str) -> String {
     format!(
         "pipeline: {{ name: sqs-feed, threads: 1 }}\nadmin: {{ listen: none }}\n\
-         checkpoint: {{ interval: 100ms }}\nmetrics: {{ exporter: none }}\n\
+         checkpoint: {checkpoint}\nmetrics: {{ exporter: none }}\n\
          source:\n  s3:\n    url: \"file://{}/\"\n{source_extra}\
          sink: {{ capture: {{ chunk: {{ target_bytes: 64 }} }} }}\n{feed_section}",
         data.display()
     )
 }
 
-/// [`launch_with_source`], with `customize` applied to the source.
+/// [`launch_with_source`], with `customize` applied to the source, the
+/// `checkpoint:` section `checkpoint`, and the stop timed on `stop_clock`
+/// when one is given.
 fn launch_customized(
     data: &Path,
     source_extra: &str,
     feed_section: &str,
     pre: impl FnOnce(&SinkScript),
     customize: impl FnOnce(S3Source) -> S3Source,
+    checkpoint: &str,
+    stop_clock: Option<Arc<StopClock>>,
 ) -> Worker {
-    let yaml = pipeline_yaml(data, source_extra, feed_section);
+    let yaml = pipeline_yaml(data, source_extra, feed_section, checkpoint);
     let mut config = PipelineConfig::from_str(&yaml).unwrap();
     config.pipeline.name = spate_test::unique_name(&config.pipeline.name);
     let pipeline = Pipeline::from_config(config).unwrap();
@@ -231,6 +312,10 @@ fn launch_customized(
         })
         .into_runtime(source)
         .unwrap();
+    let runtime = match stop_clock {
+        Some(clock) => runtime.with_stop_clock(clock),
+        None => runtime,
+    };
     let shutdown = runtime.shutdown_handle();
     let run = PipelineRun::spawn(move || runtime.run());
     Worker {
@@ -296,6 +381,20 @@ fn stage_with_etag(data: &Path, name: &str, rows: &[String]) -> Unit {
         .unwrap();
     object.etag = Some(meta.e_tag.expect("the file store reports an ETag"));
     Unit::new(name, descriptor.encode().unwrap())
+}
+
+/// The source setting under which [`two_range_unit`] is read in two ranges.
+const TWO_RANGES: &str = "    split_target_bytes: 1MiB\n";
+
+/// Stage a unit read in two byte ranges under [`TWO_RANGES`], named
+/// `prefix`, and return it with its rows: 68 lines of 16 KiB, 1 MiB + 64 KiB.
+fn two_range_unit(data: &Path, prefix: &str) -> (Unit, Vec<String>) {
+    let pad = "p".repeat(16 * 1024 - 24);
+    let rows: Vec<String> = (0..68)
+        .map(|i| format!("{{\"k\":\"{prefix}-{i:04}\",\"pad\":\"{pad}\"}}"))
+        .collect();
+    let unit = stage_with_etag(data, &format!("{prefix}.ndjson"), &rows);
+    (unit, rows)
 }
 
 /// `n` records, each longer than the sink's 64-byte chunk target so each
@@ -384,16 +483,11 @@ fn a_unit_read_in_ranges_is_deleted_after_its_last_range_is_acknowledged() {
     let url = queue_with_dead_letter(&mq, "ranged");
     let dir = tempfile::tempdir().unwrap();
     let data = data_dir(&dir);
-    // 68 lines of 16 KiB: 1 MiB + 64 KiB, two ranges at a 1 MiB target.
-    let pad = "p".repeat(16 * 1024 - 24);
-    let rows: Vec<String> = (0..68)
-        .map(|i| format!("{{\"k\":\"r-{i:04}\",\"pad\":\"{pad}\"}}"))
-        .collect();
-    let unit = stage_with_etag(&data, "r.ndjson", &rows);
+    let (unit, rows) = two_range_unit(&data, "r");
 
     let worker = launch_with_source(
         &data,
-        "    split_target_bytes: 1MiB\n",
+        TWO_RANGES,
         &feed_yaml(&mq, &url, VISIBILITY, ""),
         |sink| {
             for _ in 1..rows.len() {
@@ -519,6 +613,241 @@ fn held_units_are_renewed_while_the_sink_stalls() {
     assert_eq!(got, sorted(rows), "each row written once");
     assert_eq!(worker.recording.deliveries(), [1]);
     assert_eq!(worker.stop(), ExitState::Completed);
+}
+
+/// Pins that a stopping worker reads its unit to its end inside the drain
+/// deadline: with the reserve never reached, the unit is read whole after the
+/// stop, written once, never handed back, and deleted by the close before the
+/// run exits.
+#[test]
+#[ignore = "requires Docker"]
+fn a_stopping_worker_finishes_units_inside_the_drain_deadline() {
+    let mq = ElasticMq::start().unwrap();
+    let url = queue_with_dead_letter(&mq, "finished");
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    let (unit, rows) = two_range_unit(&data, "f");
+    let clock = StopClock::frozen();
+    let worker = launch_stopping(
+        &data,
+        TWO_RANGES,
+        &feed_yaml(&mq, &url, VISIBILITY, ""),
+        &clock,
+        |sink| sink.enqueue_global(WriteOutcome::ok().held()),
+    );
+    publish(&worker.feed, unit);
+    wait_until(DEADLINE, "the first write is held", || {
+        worker.script.held_writes() == 1
+    });
+    assert!(worker.script.writes().len() < rows.len());
+    worker.shutdown.trigger();
+    wait_until(DEADLINE, "the stop begins", || {
+        worker.recording.stopped_receiving() == 1
+    });
+    worker.script.release_held();
+    let report = worker
+        .run
+        .wait_exit(DEADLINE)
+        .expect("the run exits")
+        .unwrap();
+    assert_eq!(report.state, ExitState::Completed);
+    assert_eq!(
+        written(&worker.script),
+        sorted(rows),
+        "each row written once"
+    );
+    assert_eq!(worker.recording.deliveries(), [1]);
+    assert!(worker.recording.handed_back().is_empty());
+    assert_eq!(worker.recording.closes().len(), 1);
+    assert_eq!(
+        mq.approximate_counts(path_of(&url)).unwrap(),
+        (0, 0),
+        "the unit is deleted by the time the run exits"
+    );
+}
+
+/// Pins that a stopping worker hands back at the reserve the unit it has not
+/// finished, and SQS hands it to another worker at once: at a 300 s
+/// visibility the peer receives it within 10 s, as its second delivery, and
+/// writes every row.
+#[test]
+#[ignore = "requires Docker"]
+fn a_stopping_worker_hands_back_what_it_still_holds_at_once() {
+    let mq = ElasticMq::start().unwrap();
+    let url = queue_with_dead_letter(&mq, "handed");
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    let (unit, rows) = two_range_unit(&data, "h");
+    let section = feed_yaml(&mq, &url, Duration::from_secs(300), "");
+    // One unit held, so A has no receive in flight to take the unit back.
+    let held_one = feed_yaml(&mq, &url, Duration::from_secs(300), "  units_held: 1\n");
+    let clock = StopClock::frozen();
+    let a = launch_stopping(&data, TWO_RANGES, &held_one, &clock, |sink| {
+        sink.enqueue_global(WriteOutcome::ok().held());
+    });
+    publish(&a.feed, unit);
+    wait_until(DEADLINE, "A holds the unit's first write", || {
+        a.script.held_writes() == 1
+    });
+    let b = launch_with_source(&data, TWO_RANGES, &section, |_| {});
+    a.shutdown.trigger();
+    wait_until(DEADLINE, "A's stop begins", || {
+        a.recording.stopped_receiving() == 1
+    });
+    clock.advance(DRAIN_TIMEOUT - STOP_RESERVE);
+    let receipt = a.recording.receipts()[0];
+    wait_until(DEADLINE, "A hands the unit back", || {
+        a.recording.handed_back() == [receipt]
+    });
+    a.script.release_held();
+    wait_until(Duration::from_secs(10), "B receives the unit", || {
+        b.recording.first_seen().is_some()
+    });
+    assert_eq!(b.recording.deliveries(), [2]);
+    let report = a.run.wait_exit(DEADLINE).expect("A exits").unwrap();
+    assert_eq!(report.state, ExitState::Completed);
+    wait_until(
+        DEADLINE,
+        "B writes every row and the unit is deleted",
+        || {
+            written(&b.script) == sorted(rows.clone())
+                && mq.approximate_counts(path_of(&url)).unwrap() == (0, 0)
+        },
+    );
+    assert_eq!(b.stop(), ExitState::Completed);
+}
+
+/// Pins that a unit the stopping worker's own receive takes back after its
+/// hand-back is handed back again before the worker exits: at a 300 s
+/// visibility, a peer started after the exit receives it within 10 s, as its
+/// third delivery.
+#[test]
+#[ignore = "requires Docker"]
+fn a_unit_a_stopping_worker_receives_again_is_handed_back_again() {
+    let mq = ElasticMq::start().unwrap();
+    let url = queue_with_dead_letter(&mq, "again");
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    let (unit, rows) = two_range_unit(&data, "a");
+    let section = feed_yaml(&mq, &url, Duration::from_secs(300), "");
+    let clock = StopClock::frozen();
+    // A wants more units than it holds, so its 20 s receive is in flight
+    // when it hands the unit back, and no other worker is receiving.
+    let a = launch_stopping(&data, TWO_RANGES, &section, &clock, |sink| {
+        sink.enqueue_global(WriteOutcome::ok().held());
+    });
+    publish(&a.feed, unit);
+    wait_until(DEADLINE, "A holds the unit's first write", || {
+        a.script.held_writes() == 1
+    });
+    a.shutdown.trigger();
+    wait_until(DEADLINE, "A's stop begins", || {
+        a.recording.stopped_receiving() == 1
+    });
+    clock.advance(DRAIN_TIMEOUT - STOP_RESERVE);
+    wait_until(DEADLINE, "A hands the unit back", || {
+        !a.recording.handed_back().is_empty()
+    });
+    a.script.release_held();
+    let report = a.run.wait_exit(DEADLINE).expect("A exits").unwrap();
+    assert_eq!(report.state, ExitState::Completed);
+
+    let b = launch_with_source(&data, TWO_RANGES, &section, |_| {});
+    wait_until(Duration::from_secs(10), "B receives the unit", || {
+        b.recording.first_seen().is_some()
+    });
+    assert_eq!(b.recording.deliveries(), [3]);
+    wait_until(
+        DEADLINE,
+        "B writes every row and the unit is deleted",
+        || {
+            written(&b.script) == sorted(rows.clone())
+                && mq.approximate_counts(path_of(&url)).unwrap() == (0, 0)
+        },
+    );
+    assert_eq!(b.stop(), ExitState::Completed);
+}
+
+/// Pins the order of a stop on SQS inside the drain timeout: the unit not
+/// finished at the reserve is handed back, the sink drains the finished one,
+/// and the close deletes it, with no clock moved past the reserve. At a 300 s
+/// visibility the queue then holds only the handed-back unit, visible.
+#[test]
+#[ignore = "requires Docker"]
+fn the_hand_back_and_sink_drain_finish_inside_the_drain_timeout() {
+    let mq = ElasticMq::start().unwrap();
+    let url = queue_with_dead_letter(&mq, "drained");
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    let finished = stage(&data, "f.ndjson", &recs("f", 1));
+    let (unfinished, _) = two_range_unit(&data, "u");
+    let clock = StopClock::frozen();
+    let worker = launch_stopping(
+        &data,
+        TWO_RANGES,
+        &feed_yaml(&mq, &url, Duration::from_secs(300), ""),
+        &clock,
+        |sink| sink.enqueue_global(WriteOutcome::ok().held()),
+    );
+    publish(&worker.feed, finished);
+    wait_until(DEADLINE, "the finished unit's write is held", || {
+        worker.script.held_writes() == 1
+    });
+    publish(&worker.feed, unfinished);
+    wait_until(DEADLINE, "the unfinished unit is received", || {
+        worker.recording.deliveries().len() == 2
+    });
+    worker.shutdown.trigger();
+    wait_until(DEADLINE, "the stop begins", || {
+        worker.recording.stopped_receiving() == 1
+    });
+    clock.advance(DRAIN_TIMEOUT - STOP_RESERVE);
+    let receipt = worker.recording.receipts()[1];
+    wait_until(DEADLINE, "the unfinished unit is handed back", || {
+        worker.recording.handed_back() == [receipt]
+    });
+    worker.script.release_held();
+    let report = worker
+        .run
+        .wait_exit(DEADLINE)
+        .expect("the run exits")
+        .unwrap();
+    assert_eq!(report.state, ExitState::Completed);
+    wait_until(
+        Duration::from_secs(10),
+        "the unfinished unit is visible and the finished one deleted",
+        || mq.approximate_counts(path_of(&url)).unwrap() == (1, 0),
+    );
+}
+
+/// Pins that startup refuses a `checkpoint.drain_timeout` within the stop's
+/// reserve on the SQS feed, naming the key and the feed.
+#[test]
+#[ignore = "requires Docker"]
+fn startup_refuses_a_drain_timeout_within_the_stop_reserve() {
+    let mq = ElasticMq::start().unwrap();
+    let url = queue_with_dead_letter(&mq, "reserve");
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    let worker = launch_customized(
+        &data,
+        "",
+        &feed_yaml(&mq, &url, VISIBILITY, ""),
+        |_| {},
+        |source| source,
+        "{ interval: 100ms, drain_timeout: 5s }",
+        None,
+    );
+    let e = worker
+        .run
+        .wait_exit(DEADLINE)
+        .expect("the run exits")
+        .unwrap_err();
+    let message = e.to_string();
+    assert!(
+        message.contains("checkpoint.drain_timeout") && message.contains("`sqs`"),
+        "{message}"
+    );
 }
 
 /// Pins that a failed unit is made visible at once: at a 300 s visibility,
@@ -686,7 +1015,8 @@ fn bounded_yaml(mq: &ElasticMq, url: &str, dir: &tempfile::TempDir) -> (String, 
 /// Run the job's lister once: publish a unit per object under `data` to
 /// the queue and write the fingerprint and the end marker at the location.
 fn list_once(data: &Path, feed_section: &str) {
-    let config = PipelineConfig::from_str(&pipeline_yaml(data, "", feed_section)).unwrap();
+    let config =
+        PipelineConfig::from_str(&pipeline_yaml(data, "", feed_section, CHECKPOINT)).unwrap();
     let section = config.feed.clone().unwrap();
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(1)
@@ -711,6 +1041,8 @@ fn launch_bounded(data: &Path, feed_section: &str, clock: &Arc<TestClock>) -> Wo
         feed_section,
         |_| {},
         move |source| source.with_clock(clock),
+        CHECKPOINT,
+        None,
     )
 }
 
@@ -864,7 +1196,8 @@ fn an_idle_worker_reads_a_unit_redelivered_after_its_owner_dies() {
     list_once(&data, &section);
 
     // The owner takes the unit and stops as a crashed worker would.
-    let config = PipelineConfig::from_str(&pipeline_yaml(&data, "", &section)).unwrap();
+    let config =
+        PipelineConfig::from_str(&pipeline_yaml(&data, "", &section, CHECKPOINT)).unwrap();
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(1)
         .enable_all()

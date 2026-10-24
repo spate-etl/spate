@@ -99,10 +99,12 @@ the process.
   (surfaced in `spate_json_deser_records_dropped_total`); NDJSON isolates errors
   per line.
 - **Amazon SQS (feed)** — a unit is deleted only after every record in it
-  is acknowledged; a unit whose reader stops returns to the queue after its
-  visibility lapses, and a failed one returns at once. The queue's redrive
-  policy moves a unit to its dead-letter queue after `maxReceiveCount`
-  receives. See [the connector page](feeds/sqs/README.mdx).
+  is acknowledged. A failed unit, and a unit a stopping worker has not
+  finished, return to the queue at once; one whose worker crashed returns
+  after its visibility lapses. The queue's redrive policy moves a unit to its
+  dead-letter queue after `maxReceiveCount` receives. See
+  [the connector page](feeds/sqs/README.mdx) and
+  [how a stop runs](feeds/sqs/README.mdx#stop).
 - **Kafka (feed)** — a unit's offset is committed only after every record in
   it is acknowledged and its attempt record is tombstoned, or after the write
   moving it to the retry or dead-letter topic is confirmed; a unit whose

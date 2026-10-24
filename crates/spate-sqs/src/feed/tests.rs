@@ -462,7 +462,8 @@ async fn a_fatal_receive_is_sticky_and_a_retryable_one_is_returned_once() {
 }
 
 /// A [`ScriptedQueue`] whose whole calls can be failed until a flag is
-/// cleared, and which records when each fail and delete was sent.
+/// cleared, whose visibility calls can be held unanswered, and which records
+/// when each fail and delete was sent.
 #[derive(Debug, Default)]
 struct Gated {
     inner: ScriptedQueue,
@@ -472,8 +473,25 @@ struct Gated {
     delete_down: AtomicBool,
     /// Fail every `DeleteMessageBatch` as Fatal.
     delete_fatal: AtomicBool,
+    /// Hold each `ChangeMessageVisibilityBatch`, once recorded, until
+    /// [`release_visibility`](Gated::release_visibility), or until its
+    /// `within` passes, when it fails as Retryable as an SDK timeout does.
+    visibility_held: AtomicBool,
+    release: Notify,
     visibility_at: Mutex<Vec<Instant>>,
     deletes_at: Mutex<Vec<Instant>>,
+}
+
+impl Gated {
+    fn hold_visibility(&self) {
+        self.visibility_held.store(true, Ordering::SeqCst);
+    }
+
+    /// Answer every held call, and hold no later one.
+    fn release_visibility(&self) {
+        self.visibility_held.store(false, Ordering::SeqCst);
+        self.release.notify_waiters();
+    }
 }
 
 impl Queue for Gated {
@@ -494,10 +512,30 @@ impl Queue for Gated {
         within: Option<Duration>,
     ) -> BoxFuture<'_, Result<BatchOutcome, CallError>> {
         self.visibility_at.lock().unwrap().push(Instant::now());
-        self.inner.change_visibility_batch(e, within)
+        let held = self.visibility_held.load(Ordering::SeqCst);
+        let call = self.inner.change_visibility_batch(e, within);
+        Box::pin(async move {
+            let outcome = call.await;
+            if held {
+                let release = self.release.notified();
+                match within {
+                    Some(within) => {
+                        if tokio::time::timeout(within, release).await.is_err() {
+                            return Err(CallError::retryable("operation timeout"));
+                        }
+                    }
+                    None => release.await,
+                }
+            }
+            outcome
+        })
     }
 
-    fn delete_batch(&self, e: Vec<DeleteEntry>) -> BoxFuture<'_, Result<BatchOutcome, CallError>> {
+    fn delete_batch(
+        &self,
+        e: Vec<DeleteEntry>,
+        within: Option<Duration>,
+    ) -> BoxFuture<'_, Result<BatchOutcome, CallError>> {
         self.deletes_at.lock().unwrap().push(Instant::now());
         if self.delete_fatal.load(Ordering::SeqCst) {
             return Box::pin(async { Err(CallError::fatal("AccessDenied")) });
@@ -505,7 +543,7 @@ impl Queue for Gated {
         if self.delete_down.load(Ordering::SeqCst) {
             return Box::pin(async { Err(CallError::retryable("InternalError")) });
         }
-        self.inner.delete_batch(e)
+        self.inner.delete_batch(e, within)
     }
 }
 
@@ -1563,4 +1601,728 @@ async fn a_reply_without_the_counts_reads_as_fatal() {
             "{e}"
         );
     }
+}
+
+/// The handles of the entries set visible at once, in call order.
+fn handed_back(calls: &[Vec<VisibilityEntry>]) -> Vec<String> {
+    calls
+        .iter()
+        .flatten()
+        .filter(|e| e.seconds == 0)
+        .map(|e| e.handle.clone())
+        .collect()
+}
+
+/// The handles of the entries extended, in call order.
+fn extended(calls: &[Vec<VisibilityEntry>]) -> Vec<String> {
+    calls
+        .iter()
+        .flatten()
+        .filter(|e| e.seconds > 0)
+        .map(|e| e.handle.clone())
+        .collect()
+}
+
+/// Pins that the feed reports it hands back, which turns on the reserve
+/// check at startup and the read to the reserve at a stop.
+#[tokio::test(start_paused = true)]
+async fn an_sqs_feed_hands_back() {
+    let (feed, _queue) = start(MINUTE);
+    assert!(feed.hands_back());
+}
+
+/// Pins that a handed-back unit is set visible at once, with no tick, bounded
+/// by its deadline, and that its receipt is gone afterwards.
+#[tokio::test(start_paused = true)]
+async fn a_handed_back_unit_is_set_visible_at_once() {
+    let (feed, queue) = start(MINUTE);
+    let (waker, park) = wake_channel();
+    feed.set_waker(waker);
+    queue.ready(Message::new("u"));
+    let d = receive_n(&feed, &park, 1).await.remove(0);
+    let deadline = feed.deadline_of(d.receipt).unwrap();
+    feed.hand_back(d.receipt).unwrap();
+    let at = Instant::now();
+    settle_tasks().await;
+    assert_eq!(Instant::now(), at, "no time moved");
+    assert_eq!(handed_back(&queue.visibility()), ["h0"]);
+    assert_eq!(queue.visibility().len(), 1, "one call");
+    assert_eq!(queue.visibility_within(), [Some(deadline - at)]);
+    assert_eq!(feed.renew(d.receipt).unwrap_err().kind, FeedErrorKind::Gone);
+    assert_eq!(
+        feed.acknowledge(d.receipt).unwrap_err().kind,
+        FeedErrorKind::Gone
+    );
+    assert_eq!(
+        feed.hand_back(d.receipt).unwrap_err().kind,
+        FeedErrorKind::Gone
+    );
+}
+
+/// Pins the hand-back's deadline rule at its boundary: at the deadline the
+/// receipt is gone and nothing is sent, and a second before it the unit is
+/// set visible.
+#[tokio::test(start_paused = true)]
+async fn a_hand_back_at_its_deadline_is_gone_and_unsent() {
+    for (before, sent) in [(Duration::ZERO, false), (Duration::from_secs(1), true)] {
+        let (feed, queue) = start(MINUTE);
+        let (waker, park) = wake_channel();
+        feed.set_waker(waker);
+        queue.ready(Message::new("u"));
+        let d = receive_n(&feed, &park, 1).await.remove(0);
+        // The tick at 20 s extends the unit, as handed out; no later tick
+        // does.
+        tokio::time::advance(Duration::from_secs(21)).await;
+        until("the tick extends the unit", || queue.visibility().len() == 1).await;
+        settle_tasks().await;
+        let deadline = feed.deadline_of(d.receipt).unwrap();
+        tokio::time::advance(deadline - before - Instant::now()).await;
+        settle_tasks().await;
+        let answer = feed.hand_back(d.receipt);
+        settle_tasks().await;
+        if sent {
+            answer.unwrap();
+            assert_eq!(handed_back(&queue.visibility()), ["h0"]);
+        } else {
+            assert_eq!(answer.unwrap_err().kind, FeedErrorKind::Gone);
+            assert!(handed_back(&queue.visibility()).is_empty());
+        }
+    }
+}
+
+/// Pins that a hand-back of a receipt gone after a refused extension, of an
+/// unknown receipt, and of a receipt still buffered is `Gone` and sends
+/// nothing.
+#[tokio::test(start_paused = true)]
+async fn a_gone_unknown_or_buffered_receipt_handed_back_is_gone() {
+    let (feed, queue) = start(MINUTE);
+    let taken = one_taken_one_buffered(&feed, &queue).await;
+    let buffered = Receipt(feed.lock().buffered[0]);
+    queue.fail_next_visibility(vec![failure(0, "ReceiptHandleIsInvalid")]);
+    step(Duration::from_secs(20)).await;
+    until("the tick extends the units", || queue.visibility().len() == 1).await;
+    for receipt in [taken.receipt, Receipt(999), buffered] {
+        assert_eq!(
+            feed.hand_back(receipt).unwrap_err().kind,
+            FeedErrorKind::Gone,
+            "{receipt}"
+        );
+    }
+    settle_tasks().await;
+    assert!(handed_back(&queue.visibility()).is_empty());
+}
+
+/// Pins that a hand-back whose unit's deadline passes while it waits behind
+/// an extension call is dropped unsent, and one still before its deadline is
+/// sent.
+#[tokio::test(start_paused = true)]
+async fn a_hand_back_whose_deadline_passes_while_queued_is_dropped_unsent() {
+    let (feed, queue) = start_gated(MINUTE);
+    let (waker, park) = wake_channel();
+    feed.set_waker(waker);
+    queue.inner.ready(Message::new("b"));
+    let b = receive_n(&feed, &park, 1).await.remove(0);
+    tokio::time::advance(Duration::from_secs(21)).await;
+    until("the tick extends `b`", || queue.inner.visibility().len() == 1).await;
+    // `a` and `c` hold until 5 s after `b`.
+    tokio::time::advance(Duration::from_secs(5)).await;
+    queue.inner.ready(Message::new("a"));
+    queue.inner.ready(Message::new("c"));
+    let got = receive_n(&feed, &park, 2).await;
+    let c = got[1].receipt;
+    queue.hold_visibility();
+    step(Duration::from_secs(20)).await;
+    until("the tick's extension of `a` is held", || {
+        queue.inner.visibility().len() == 2
+    })
+    .await;
+    let b_deadline = feed.deadline_of(b.receipt).unwrap();
+    let c_deadline = feed.deadline_of(c).unwrap();
+    assert!(b_deadline < c_deadline);
+    feed.hand_back(b.receipt).unwrap();
+    feed.hand_back(c).unwrap();
+    tokio::time::advance(b_deadline + (c_deadline - b_deadline) / 2 - Instant::now()).await;
+    queue.release_visibility();
+    settle_tasks().await;
+    assert_eq!(handed_back(&queue.inner.visibility()), ["h2"]);
+}
+
+/// Pins that hand-backs queued together go out in one batch, bounded by the
+/// earliest deadline among them.
+#[tokio::test(start_paused = true)]
+async fn a_hand_back_batch_is_bounded_by_its_earliest_deadline() {
+    let (feed, queue) = start(MINUTE);
+    let (waker, park) = wake_channel();
+    feed.set_waker(waker);
+    queue.ready(Message::new("a"));
+    let a = receive_n(&feed, &park, 1).await.remove(0);
+    tokio::time::advance(Duration::from_secs(10)).await;
+    queue.ready(Message::new("b"));
+    let b = receive_n(&feed, &park, 1).await.remove(0);
+    let earlier = feed.deadline_of(a.receipt).unwrap();
+    assert!(earlier < feed.deadline_of(b.receipt).unwrap());
+    feed.hand_back(b.receipt).unwrap();
+    feed.hand_back(a.receipt).unwrap();
+    let at = Instant::now();
+    settle_tasks().await;
+    assert_eq!(queue.visibility().len(), 1, "one batch");
+    assert_eq!(handed_back(&queue.visibility()), ["h1", "h0"]);
+    assert_eq!(queue.visibility_within(), [Some(earlier - at)]);
+}
+
+/// Pins that a hand-back entry SQS refuses is dropped, never sent again, and
+/// leaves the feed working.
+#[tokio::test(start_paused = true)]
+async fn a_refused_hand_back_entry_is_dropped() {
+    let (feed, queue) = start(MINUTE);
+    let (waker, park) = wake_channel();
+    feed.set_waker(waker);
+    queue.ready(Message::new("u"));
+    let d = receive_n(&feed, &park, 1).await.remove(0);
+    queue.fail_next_visibility(vec![failure(0, "AWS.SimpleQueueService.MessageNotInflight")]);
+    feed.hand_back(d.receipt).unwrap();
+    settle_tasks().await;
+    step(Duration::from_secs(60)).await;
+    assert_eq!(handed_back(&queue.visibility()), ["h0"], "sent once");
+    assert!(feed.receive(1).is_ok());
+}
+
+/// Pins that a hand-back call the queue fails whole is retried with backoff,
+/// and not past its unit's deadline.
+#[tokio::test(start_paused = true)]
+async fn a_failed_hand_back_call_is_retried_within_its_bound() {
+    let (feed, queue) = start_gated(MINUTE);
+    let (waker, park) = wake_channel();
+    feed.set_waker(waker);
+    queue.inner.ready(Message::new("u"));
+    let d = receive_n(&feed, &park, 1).await.remove(0);
+    let deadline = feed.deadline_of(d.receipt).unwrap();
+    for _ in 0..100 {
+        queue
+            .inner
+            .fail_next_visibility_call(CallError::retryable("InternalError"));
+    }
+    feed.hand_back(d.receipt).unwrap();
+    step(Duration::from_secs(90)).await;
+    let sent = queue.visibility_at.lock().unwrap().clone();
+    assert!(sent.len() > 1, "the hand-back was not retried");
+    assert!(
+        sent.iter().all(|t| *t < deadline),
+        "a hand-back was sent at or past {deadline:?}: {sent:?}"
+    );
+}
+
+/// Pins the stop's log lines: one counts the buffered units handed back, a
+/// hand-back is logged as one, and no line reads as a failure.
+#[test]
+fn the_stop_logs_buffered_units_and_no_failure() {
+    let lines = spate_test::capture_logs(tracing::Level::DEBUG, || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .start_paused(true)
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let (feed, queue) = start(MINUTE);
+            let taken = one_taken_one_buffered(&feed, &queue).await;
+            // The buffered unit is entry 0, the handed-out one entry 1.
+            queue.fail_next_visibility(vec![failure(1, "ReceiptHandleIsInvalid")]);
+            feed.stop_receiving();
+            feed.hand_back(taken.receipt).unwrap();
+            settle_tasks().await;
+            assert_eq!(handed_back(&queue.visibility()), ["h1", "h0"]);
+        });
+    });
+    assert!(
+        lines.iter().any(|l| l.contains("buffered=1")),
+        "{lines:#?}"
+    );
+    assert!(
+        lines.iter().any(|l| l.contains("handing back")),
+        "{lines:#?}"
+    );
+    assert!(
+        !lines.iter().any(|l| l.to_lowercase().contains("fail")),
+        "{lines:#?}"
+    );
+}
+
+/// Pins that a stop sets each unit received and not yet handed out visible
+/// at once, and hands out nothing more.
+#[tokio::test(start_paused = true)]
+async fn buffered_units_are_handed_back_when_the_feed_stops_receiving() {
+    let (feed, queue) = start(MINUTE);
+    one_taken_one_buffered(&feed, &queue).await;
+    feed.stop_receiving();
+    settle_tasks().await;
+    assert_eq!(handed_back(&queue.visibility()), ["h1"]);
+    assert_eq!(feed.buffered(), 0);
+    assert!(feed.receive(1).unwrap().is_empty());
+}
+
+/// Pins that a stopped feed sends no further receive, though the reader
+/// asked for more units than it got.
+#[tokio::test(start_paused = true)]
+async fn a_stopped_feed_sends_no_receive() {
+    let (feed, queue) = start(MINUTE);
+    assert!(feed.receive(3).unwrap().is_empty());
+    until("a receive is sent", || queue.receives().len() == 1).await;
+    feed.stop_receiving();
+    step(Duration::from_secs(40)).await;
+    assert_eq!(queue.receives().len(), 1);
+}
+
+/// Pins that a receive waiting at the stop runs to its reply, whose unit is
+/// set visible at once and never buffered, and that no receive follows.
+#[tokio::test(start_paused = true)]
+async fn a_receive_answered_after_the_stop_is_handed_back() {
+    let (feed, queue) = start(MINUTE);
+    queue.answer_at_end_of_poll();
+    assert!(feed.receive(2).unwrap().is_empty());
+    until("the poll is sent", || queue.receives().len() == 1).await;
+    queue.ready(Message::new("late"));
+    feed.stop_receiving();
+    step(Duration::from_secs(20)).await;
+    assert_eq!(handed_back(&queue.visibility()), ["h0"]);
+    assert_eq!(feed.buffered(), 0);
+    step(Duration::from_secs(20)).await;
+    assert_eq!(queue.receives().len(), 1);
+}
+
+/// Pins that from the stop every unit handed out is extended on each tick,
+/// renewed or not, until it is acknowledged or handed back, each call
+/// bounded by the stop's bound.
+#[tokio::test(start_paused = true)]
+async fn held_units_are_extended_from_the_stop_until_close() {
+    let visibility = Duration::from_secs(3);
+    let (feed, queue) = start(visibility);
+    let (waker, park) = wake_channel();
+    feed.set_waker(waker);
+    queue.ready(Message::new("a"));
+    queue.ready(Message::new("b"));
+    let got = receive_n(&feed, &park, 2).await;
+    feed.renew(got[0].receipt).unwrap();
+    feed.stop_receiving();
+    for tick in 1..=4 {
+        let before: Vec<Instant> = got
+            .iter()
+            .map(|d| feed.deadline_of(d.receipt).unwrap())
+            .collect();
+        step(Duration::from_secs(1)).await;
+        assert_eq!(queue.visibility().len(), tick, "tick {tick}");
+        assert_eq!(extended(&queue.visibility()[tick - 1..]), ["h0", "h1"]);
+        for (d, before) in got.iter().zip(before) {
+            assert!(feed.deadline_of(d.receipt).unwrap() > before, "tick {tick}");
+        }
+    }
+    assert!(
+        queue
+            .visibility_within()
+            .iter()
+            .all(|w| *w == Some(STOP_EXTENSION_BOUND))
+    );
+    feed.acknowledge(got[0].receipt).unwrap();
+    feed.hand_back(got[1].receipt).unwrap();
+    settle_tasks().await;
+    let after = queue.visibility().len();
+    step(Duration::from_secs(3)).await;
+    assert_eq!(handed_back(&queue.visibility()), ["h1"]);
+    assert!(extended(&queue.visibility()[after..]).is_empty());
+    assert_eq!(queue.deletes().len(), 1);
+    assert_eq!(queue.deletes()[0][0].handle, "h0");
+}
+
+/// Pins that a hand-back waits for an extension of the same unit already in
+/// flight, and that no extension of it follows: within one chunk, and when
+/// the unit is in a later chunk of the same tick.
+#[tokio::test(start_paused = true)]
+async fn a_hand_back_is_sent_after_an_extension_of_the_same_receipt_in_flight() {
+    for units in [1, 11] {
+        let (feed, queue) = start_gated(MINUTE);
+        let (waker, park) = wake_channel();
+        feed.set_waker(waker);
+        for i in 0..units {
+            queue.inner.ready(Message::new(&format!("u{i}")));
+        }
+        let got = receive_n(&feed, &park, units).await;
+        let r = got.last().unwrap().receipt;
+        let handle = format!("h{}", units - 1);
+        queue.hold_visibility();
+        step(Duration::from_secs(20)).await;
+        until("the first chunk is held", || {
+            queue.inner.visibility().len() == 1
+        })
+        .await;
+        feed.hand_back(r).unwrap();
+        settle_tasks().await;
+        assert_eq!(queue.inner.visibility().len(), 1, "sent behind the chunk");
+        queue.release_visibility();
+        settle_tasks().await;
+        step(Duration::from_secs(40)).await;
+        let calls = queue.inner.visibility();
+        let back = calls
+            .iter()
+            .position(|c| c.iter().any(|e| e.handle == handle && e.seconds == 0))
+            .expect("the hand-back was sent");
+        assert_eq!(back, 1, "{units} units: {calls:?}");
+        assert!(
+            !extended(&calls[back..]).contains(&handle),
+            "{units} units: extended after its hand-back: {calls:?}"
+        );
+        if units == 1 {
+            assert_eq!(extended(&calls[..back]), [handle]);
+        }
+    }
+}
+
+/// Pins that during a stop an extension call is bounded, so a hand-back
+/// queued behind one that SQS does not answer is sent once the bound passes.
+#[tokio::test(start_paused = true)]
+async fn a_hand_back_waits_at_most_the_stop_bound_behind_an_extension() {
+    let (feed, queue) = start_gated(MINUTE);
+    let (waker, park) = wake_channel();
+    feed.set_waker(waker);
+    queue.inner.ready(Message::new("a"));
+    queue.inner.ready(Message::new("b"));
+    let got = receive_n(&feed, &park, 2).await;
+    feed.stop_receiving();
+    queue.hold_visibility();
+    step(Duration::from_secs(20)).await;
+    until("the extension is held", || queue.inner.visibility().len() == 1).await;
+    queue.visibility_held.store(false, Ordering::SeqCst);
+    feed.hand_back(got[1].receipt).unwrap();
+    settle_tasks().await;
+    assert_eq!(queue.inner.visibility().len(), 1, "sent behind the extension");
+    tokio::time::advance(STOP_EXTENSION_BOUND).await;
+    settle_tasks().await;
+    assert_eq!(handed_back(&queue.inner.visibility()), ["h1"]);
+    assert_eq!(
+        queue.inner.visibility_within()[0],
+        Some(STOP_EXTENSION_BOUND)
+    );
+}
+
+/// Pins that two receipts for one message settle apart: handing back the
+/// second leaves the first held, extended and deleted on its own.
+#[tokio::test(start_paused = true)]
+async fn a_second_receipt_handed_back_leaves_the_first_held() {
+    let (feed, queue) = start(MINUTE);
+    let (waker, park) = wake_channel();
+    feed.set_waker(waker);
+    queue.ready(Message::new("u"));
+    queue.ready(Message::new("u").same_message_as("m0"));
+    let got = receive_n(&feed, &park, 2).await;
+    feed.stop_receiving();
+    feed.hand_back(got[1].receipt).unwrap();
+    settle_tasks().await;
+    step(Duration::from_secs(20)).await;
+    feed.acknowledge(got[0].receipt).unwrap();
+    settle_tasks().await;
+    let calls = queue.visibility();
+    assert_eq!(handed_back(&calls), ["h1"]);
+    assert_eq!(extended(&calls[1..]), ["h0"], "{calls:?}");
+    assert_eq!(queue.deletes().len(), 1);
+    assert_eq!(queue.deletes()[0][0].handle, "h0");
+}
+
+/// Pins that `close` sends the deletes still queued, each call bounded by
+/// the close, and settles only once they are sent.
+#[tokio::test(start_paused = true)]
+async fn close_sends_queued_deletes_within_its_bound() {
+    let (feed, queue) = start(MINUTE);
+    let (waker, park) = wake_channel();
+    feed.set_waker(waker);
+    queue.ready(Message::new("u"));
+    let d = receive_n(&feed, &park, 1).await.remove(0);
+    let deadline = feed.deadline_of(d.receipt).unwrap();
+    feed.acknowledge(d.receipt).unwrap();
+    let within = Duration::from_secs(10);
+    let mut closed = feed.close(within).unwrap();
+    assert!(closed.try_outcome().is_none(), "settled before the delete");
+    settle_tasks().await;
+    assert_eq!(queue.deletes().len(), 1);
+    assert_eq!(queue.deletes()[0][0].handle, "h0");
+    assert_eq!(queue.delete_within(), [Some(within)]);
+    assert!(within <= deadline - Instant::now());
+    assert!(closed.try_outcome().unwrap().is_ok());
+}
+
+/// Pins that `close` waits for the delete batch the settle task is already
+/// sending.
+#[tokio::test(start_paused = true)]
+async fn close_settles_after_the_batch_in_flight() {
+    let (feed, queue) = start_gated(MINUTE);
+    let (waker, park) = wake_channel();
+    feed.set_waker(waker);
+    queue.inner.ready(Message::new("a"));
+    queue.inner.ready(Message::new("b"));
+    let got = receive_n(&feed, &park, 2).await;
+    queue.delete_down.store(true, Ordering::SeqCst);
+    for d in &got {
+        feed.acknowledge(d.receipt).unwrap();
+    }
+    settle_tasks().await;
+    assert_eq!(queue.deletes_at.lock().unwrap().len(), 1, "in flight");
+    let mut closed = feed.close(Duration::from_secs(10)).unwrap();
+    settle_tasks().await;
+    assert!(closed.try_outcome().is_none());
+    queue.delete_down.store(false, Ordering::SeqCst);
+    tokio::time::advance(BACKOFF_START).await;
+    settle_tasks().await;
+    assert_eq!(queue.inner.deletes().len(), 1);
+    assert_eq!(queue.inner.deletes()[0].len(), 2);
+    assert!(closed.try_outcome().unwrap().is_ok());
+}
+
+/// Pins that `close` sets every unit still held visible at once, bounded by
+/// the close, and that no extension follows.
+#[tokio::test(start_paused = true)]
+async fn close_gives_up_every_unit_still_held() {
+    let (feed, queue) = start(MINUTE);
+    let (waker, park) = wake_channel();
+    feed.set_waker(waker);
+    queue.ready(Message::new("a"));
+    queue.ready(Message::new("b"));
+    let got = receive_n(&feed, &park, 2).await;
+    feed.acknowledge(got[0].receipt).unwrap();
+    let within = Duration::from_secs(10);
+    let mut closed = feed.close(within).unwrap();
+    settle_tasks().await;
+    assert_eq!(queue.deletes().len(), 1);
+    assert_eq!(queue.deletes()[0][0].handle, "h0");
+    assert_eq!(handed_back(&queue.visibility()), ["h1"]);
+    assert_eq!(queue.visibility_within(), [Some(within)]);
+    assert!(closed.try_outcome().unwrap().is_ok());
+    step(Duration::from_secs(40)).await;
+    assert_eq!(queue.visibility().len(), 1, "extended after the close");
+}
+
+/// Pins that a close with nothing to send settles at once, with no call,
+/// though a long poll is waiting.
+#[tokio::test(start_paused = true)]
+async fn an_idle_close_settles_at_once() {
+    let (feed, queue) = start(MINUTE);
+    assert!(feed.receive(1).unwrap().is_empty());
+    until("a receive is sent", || queue.receives().len() == 1).await;
+    let mut closed = feed.close(Duration::from_secs(10)).unwrap();
+    assert!(closed.try_outcome().unwrap().is_ok());
+    assert!(queue.visibility().is_empty());
+    assert!(queue.deletes().is_empty());
+}
+
+/// Pins that a close given no time sends nothing and settles rejected.
+#[tokio::test(start_paused = true)]
+async fn a_close_with_no_time_left_sends_nothing() {
+    let (feed, queue) = start(MINUTE);
+    let (waker, park) = wake_channel();
+    feed.set_waker(waker);
+    queue.ready(Message::new("u"));
+    let d = receive_n(&feed, &park, 1).await.remove(0);
+    feed.acknowledge(d.receipt).unwrap();
+    let mut closed = feed.close(Duration::ZERO).unwrap();
+    settle_tasks().await;
+    assert!(queue.deletes().is_empty());
+    assert!(closed.try_outcome().unwrap().is_err());
+}
+
+/// Pins that a delete failing at close is retried only until the close's
+/// bound, and that the close has settled by then.
+#[tokio::test(start_paused = true)]
+async fn a_failing_delete_at_close_is_retried_only_until_within() {
+    let (feed, queue) = start_gated(MINUTE);
+    let (waker, park) = wake_channel();
+    feed.set_waker(waker);
+    queue.inner.ready(Message::new("u"));
+    let d = receive_n(&feed, &park, 1).await.remove(0);
+    queue.delete_down.store(true, Ordering::SeqCst);
+    feed.acknowledge(d.receipt).unwrap();
+    let within = Duration::from_secs(2);
+    let bound = Instant::now() + within;
+    let mut closed = feed.close(within).unwrap();
+    step(within).await;
+    assert!(closed.try_outcome().unwrap().is_err());
+    step(Duration::from_secs(3)).await;
+    let sent = queue.deletes_at.lock().unwrap().clone();
+    assert!(sent.len() > 1, "the delete was not retried");
+    assert!(
+        sent.iter().all(|t| *t < bound),
+        "a delete was sent at or past {bound:?}: {sent:?}"
+    );
+}
+
+/// Pins that `close` called off the runtime, as the pipeline calls it,
+/// bounds its calls by the runtime's clock.
+#[test]
+fn close_called_off_the_runtime_bounds_by_tokio_time() {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .start_paused(true)
+        .build()
+        .unwrap();
+    let start_on = |queue: &Arc<ScriptedQueue>| {
+        SqsFeed::start(
+            Arc::clone(queue) as Arc<dyn Queue>,
+            Arc::clone(queue) as Arc<dyn startup::QueueAttributes>,
+            DEAD_URL.to_owned(),
+            &config(MINUTE),
+            rt.handle(),
+        )
+    };
+    let queue = Arc::new(ScriptedQueue::default());
+    let feed = start_on(&queue);
+    let (waker, park) = wake_channel();
+    feed.set_waker(waker);
+    queue.ready(Message::new("u"));
+    let d = rt.block_on(receive_n(&feed, &park, 1)).remove(0);
+    feed.acknowledge(d.receipt).unwrap();
+    let within = Duration::from_secs(5);
+    let closed = feed.close(within).unwrap();
+    rt.block_on(closed).unwrap();
+    assert_eq!(queue.deletes().len(), 1);
+    assert_eq!(queue.delete_within(), [Some(within)]);
+
+    let idle = start_on(&Arc::new(ScriptedQueue::default()));
+    rt.block_on(idle.close(Duration::ZERO).unwrap()).unwrap();
+}
+
+/// Pins that `close` without a stop first stops receiving and sets every
+/// buffered unit visible at once, and that it waits for the receive in
+/// flight for a second after that hand-back, and no longer.
+#[tokio::test(start_paused = true)]
+async fn close_without_a_stop_stops_receiving_and_gives_up_buffered_units() {
+    let (feed, queue) = start(MINUTE);
+    queue.ready(Message::new("a"));
+    queue.ready(Message::new("b"));
+    assert!(feed.receive(3).unwrap().is_empty());
+    until("both units are buffered", || feed.buffered() == 2).await;
+    until("the next poll is sent", || queue.receives().len() == 2).await;
+    let mut closed = feed.close(Duration::from_secs(10)).unwrap();
+    settle_tasks().await;
+    assert_eq!(handed_back(&queue.visibility()), ["h0", "h1"]);
+    step(RECEIVE_GRACE - Duration::from_millis(100)).await;
+    assert!(closed.try_outcome().is_none(), "settled within the grace");
+    step(Duration::from_millis(100)).await;
+    assert!(closed.try_outcome().unwrap().is_ok());
+    step(Duration::from_secs(40)).await;
+    assert_eq!(queue.receives().len(), 2, "received after the close");
+}
+
+/// Pins that a close waits for a receive in flight that takes a unit just
+/// handed back, and hands that unit back again before it settles.
+#[tokio::test(start_paused = true)]
+async fn a_unit_received_again_at_close_is_handed_back_again() {
+    // Each poll waits 1 s.
+    let (feed, queue) = start(Duration::from_secs(3));
+    let (waker, park) = wake_channel();
+    feed.set_waker(waker);
+    queue.answer_at_end_of_poll();
+    queue.ready(Message::new("u"));
+    assert!(feed.receive(2).unwrap().is_empty());
+    until("the first poll is sent", || queue.receives().len() == 1).await;
+    tokio::time::advance(Duration::from_secs(1)).await;
+    until("the unit is buffered", || park.park(Duration::ZERO)).await;
+    until("the next poll is sent", || queue.receives().len() == 2).await;
+    let d = feed.receive(2).unwrap().remove(0);
+    feed.stop_receiving();
+    step(Duration::from_millis(500)).await;
+    feed.hand_back(d.receipt).unwrap();
+    settle_tasks().await;
+    assert_eq!(handed_back(&queue.visibility()), ["h0"]);
+    // The poll in flight takes the unit as SQS makes it visible again.
+    queue.ready(Message::new("u").redelivered(2).same_message_as("m0"));
+    let mut closed = feed.close(Duration::from_secs(10)).unwrap();
+    settle_tasks().await;
+    assert!(closed.try_outcome().is_none(), "settled with a receive in flight");
+    step(Duration::from_millis(500)).await;
+    assert_eq!(handed_back(&queue.visibility()), ["h0", "h1"]);
+    assert!(closed.try_outcome().unwrap().is_ok());
+}
+
+/// Pins that once the feed has stopped on a Fatal, a stop sends nothing, a
+/// hand-back answers the Fatal, and a close settles with it at once.
+#[tokio::test(start_paused = true)]
+async fn the_stop_methods_on_a_fatal_feed_answer_at_once() {
+    let (feed, queue) = start_gated(MINUTE);
+    let (waker, park) = wake_channel();
+    feed.set_waker(waker);
+    queue.inner.ready(Message::new("a"));
+    queue.inner.ready(Message::new("b"));
+    let got = receive_n(&feed, &park, 2).await;
+    queue.delete_fatal.store(true, Ordering::SeqCst);
+    feed.acknowledge(got[0].receipt).unwrap();
+    until("the feed stops", || feed.receive(1).is_err()).await;
+    feed.stop_receiving();
+    assert_eq!(
+        feed.hand_back(got[1].receipt).unwrap_err().kind,
+        FeedErrorKind::Fatal
+    );
+    let mut closed = feed.close(Duration::from_secs(10)).unwrap();
+    assert_eq!(
+        closed.try_outcome().unwrap().unwrap_err().kind,
+        FeedErrorKind::Fatal
+    );
+    settle_tasks().await;
+    assert!(queue.inner.visibility().is_empty());
+}
+
+/// Pins that a Fatal while a close waits rejects the close with it before
+/// the bound.
+#[tokio::test(start_paused = true)]
+async fn a_fatal_during_close_rejects_it() {
+    let (feed, queue) = start(MINUTE);
+    let (waker, park) = wake_channel();
+    feed.set_waker(waker);
+    queue.ready(Message::new("u"));
+    let d = receive_n(&feed, &park, 1).await.remove(0);
+    queue.fail_next_delete_call(CallError::retryable("InternalError"));
+    queue.fail_next_delete_call(CallError::fatal("AccessDenied"));
+    feed.acknowledge(d.receipt).unwrap();
+    let within = Duration::from_secs(10);
+    let bound = Instant::now() + within;
+    let mut closed = feed.close(within).unwrap();
+    settle_tasks().await;
+    assert!(closed.try_outcome().is_none());
+    tokio::time::advance(BACKOFF_START).await;
+    settle_tasks().await;
+    assert!(Instant::now() < bound);
+    assert_eq!(
+        closed.try_outcome().unwrap().unwrap_err().kind,
+        FeedErrorKind::Fatal
+    );
+}
+
+/// Pins that an abandoned feed sends nothing for a stop, a hand-back or a
+/// close: a hand-back answers `Ok` and a close `None`.
+#[tokio::test(start_paused = true)]
+async fn the_stop_methods_on_an_abandoned_feed_send_nothing() {
+    let (feed, queue) = start(MINUTE);
+    let (waker, park) = wake_channel();
+    feed.set_waker(waker);
+    queue.ready(Message::new("a"));
+    queue.ready(Message::new("b"));
+    let got = receive_n(&feed, &park, 2).await;
+    feed.abandon();
+    feed.stop_receiving();
+    feed.hand_back(got[0].receipt).unwrap();
+    assert!(feed.close(Duration::from_secs(10)).is_none());
+    step(Duration::from_secs(40)).await;
+    assert!(queue.visibility().is_empty());
+    assert!(queue.deletes().is_empty());
+}
+
+/// Pins that a close whose delete SQS refuses settles rejected, naming how
+/// many entries it gave up.
+#[tokio::test(start_paused = true)]
+async fn a_close_that_drops_a_delete_settles_err() {
+    let (feed, queue) = start(MINUTE);
+    let (waker, park) = wake_channel();
+    feed.set_waker(waker);
+    queue.ready(Message::new("u"));
+    let d = receive_n(&feed, &park, 1).await.remove(0);
+    queue.fail_next_delete(vec![failure(0, "ReceiptHandleIsInvalid")]);
+    feed.acknowledge(d.receipt).unwrap();
+    let mut closed = feed.close(Duration::from_secs(10)).unwrap();
+    settle_tasks().await;
+    let e = closed.try_outcome().unwrap().unwrap_err();
+    assert!(e.to_string().contains(" 1 "), "{e}");
 }

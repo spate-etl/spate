@@ -331,8 +331,9 @@ pub trait Feed: Send + Sync {
     fn stop_receiving(&self) {}
 
     /// Return a held unit for another reader to take at once. The
-    /// delivery does not count as a failure, and the unit does not move to
-    /// the dead-letter destination.
+    /// delivery does not count as a failure; a backend that counts
+    /// deliveries toward a dead-letter limit counts this one as it counts
+    /// any delivery.
     ///
     /// The default accepts the call and leaves the unit held, so it returns
     /// through redelivery; a backend whose positions move only by commit

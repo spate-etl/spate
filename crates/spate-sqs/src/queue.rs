@@ -98,9 +98,12 @@ pub(crate) trait Queue: Send + Sync + std::fmt::Debug + 'static {
         within: Option<Duration>,
     ) -> BoxFuture<'_, Result<BatchOutcome, CallError>>;
 
+    /// A `DeleteMessageBatch`, bounded by `within` as
+    /// [`change_visibility_batch`](Queue::change_visibility_batch) is.
     fn delete_batch(
         &self,
         entries: Vec<DeleteEntry>,
+        within: Option<Duration>,
     ) -> BoxFuture<'_, Result<BatchOutcome, CallError>>;
 }
 
@@ -157,6 +160,18 @@ fn built<T>(entry: Result<T, aws_sdk_sqs::error::BuildError>) -> Result<T, CallE
         class: Class::Fatal,
         batch_shape: true,
         message: format!("building a batch entry: {e}"),
+    })
+}
+
+/// The timeouts that end a call and its retries after `within`. They set
+/// only timeouts, so the client's retry config, and with it the attempt
+/// count, still applies.
+fn bounded(within: Option<Duration>) -> Option<aws_sdk_sqs::config::Builder> {
+    within.map(|within| {
+        aws_sdk_sqs::config::Builder::default().timeout_config(client::timeouts(
+            client::READ_TIMEOUT,
+            within.min(client::OPERATION_TIMEOUT),
+        ))
     })
 }
 
@@ -269,16 +284,9 @@ impl Queue for SdkQueue {
                         .build(),
                 )?);
             }
-            // The override sets only timeouts, so the client's retry
-            // config, and with it the attempt count, still applies.
             let call = call.customize();
-            let call = match within {
-                Some(within) => call.config_override(
-                    aws_sdk_sqs::config::Builder::default().timeout_config(client::timeouts(
-                        client::READ_TIMEOUT,
-                        within.min(client::OPERATION_TIMEOUT),
-                    )),
-                ),
+            let call = match bounded(within) {
+                Some(timeouts) => call.config_override(timeouts),
                 None => call,
             };
             let out = call
@@ -295,6 +303,7 @@ impl Queue for SdkQueue {
     fn delete_batch(
         &self,
         entries: Vec<DeleteEntry>,
+        within: Option<Duration>,
     ) -> BoxFuture<'_, Result<BatchOutcome, CallError>> {
         Box::pin(async move {
             let mut call = self
@@ -309,6 +318,11 @@ impl Queue for SdkQueue {
                         .build(),
                 )?);
             }
+            let call = call.customize();
+            let call = match bounded(within) {
+                Some(timeouts) => call.config_override(timeouts),
+                None => call,
+            };
             let out = call
                 .send()
                 .await
@@ -364,11 +378,9 @@ mod tests {
         assert!(e.message.contains("UnknownIssuer"), "{}", e.message);
     }
 
-    /// Pins that `within` bounds a `ChangeMessageVisibilityBatch` and its
-    /// retries: against a server that never answers, the call fails as
-    /// Retryable after `within` and before twice `within`.
-    #[tokio::test]
-    async fn a_visibility_call_ends_within_its_bound() {
+    /// An [`SdkQueue`] over a listener that reads every request and never
+    /// answers, with tokio time paused.
+    async fn silent_queue() -> SdkQueue {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
@@ -380,6 +392,15 @@ mod tests {
         });
         let queue = queue_at(&format!("http://{addr}")).await;
         tokio::time::pause();
+        queue
+    }
+
+    /// Pins that `within` bounds a `ChangeMessageVisibilityBatch` and its
+    /// retries: against a server that never answers, the call fails as
+    /// Retryable after `within` and before twice `within`.
+    #[tokio::test]
+    async fn a_visibility_call_ends_within_its_bound() {
+        let queue = silent_queue().await;
         let within = Duration::from_secs(1);
         let started = tokio::time::Instant::now();
         let entry = VisibilityEntry {
@@ -389,6 +410,30 @@ mod tests {
         };
         let e = queue
             .change_visibility_batch(vec![entry], Some(within))
+            .await
+            .unwrap_err();
+        let elapsed = started.elapsed();
+        assert_eq!(e.class, Class::Retryable, "{}", e.message);
+        assert!(
+            elapsed >= within && elapsed < within * 2,
+            "ended after {elapsed:?}: {}",
+            e.message
+        );
+    }
+
+    /// Pins that `within` bounds a `DeleteMessageBatch` and its retries, as
+    /// it does a visibility change.
+    #[tokio::test]
+    async fn a_delete_call_ends_within_its_bound() {
+        let queue = silent_queue().await;
+        let within = Duration::from_secs(1);
+        let started = tokio::time::Instant::now();
+        let entry = DeleteEntry {
+            id: "0".to_owned(),
+            handle: "h".to_owned(),
+        };
+        let e = queue
+            .delete_batch(vec![entry], Some(within))
             .await
             .unwrap_err();
         let elapsed = started.elapsed();

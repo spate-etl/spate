@@ -21,6 +21,8 @@ it to `Pipeline::feed`.
   and returns to the queue at most one visibility period after the renewals
   stop.
 - A unit is deleted only once every record in it is acknowledged.
+- A stopping worker hands back the units it has not finished, each visible to
+  another worker at once, and sends its last deletes before it exits.
 - A failed unit is made visible at once, and the queue's redrive policy moves a
   unit that keeps failing to its dead-letter queue.
 - A bounded job reads the queue's and the dead-letter queue's approximate

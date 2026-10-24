@@ -77,6 +77,7 @@ struct Script {
     visibility: Vec<Vec<VisibilityEntry>>,
     visibility_within: Vec<Option<Duration>>,
     deletes: Vec<Vec<DeleteEntry>>,
+    delete_within: Vec<Option<Duration>>,
     /// Each queue's message counts, or the error a read of them fails with.
     /// A queue with neither reports all three as `0`.
     counts: HashMap<String, Result<[u64; 3], CallError>>,
@@ -182,6 +183,11 @@ impl ScriptedQueue {
         self.lock().deletes.clone()
     }
 
+    /// The bound each `DeleteMessageBatch` was given, in call order.
+    pub(crate) fn delete_within(&self) -> Vec<Option<Duration>> {
+        self.lock().delete_within.clone()
+    }
+
     /// Up to `max` messages.
     fn take(&self, max: usize) -> Vec<Received> {
         let mut script = self.lock();
@@ -281,11 +287,13 @@ impl Queue for ScriptedQueue {
     fn delete_batch(
         &self,
         entries: Vec<DeleteEntry>,
+        within: Option<Duration>,
     ) -> BoxFuture<'_, Result<BatchOutcome, CallError>> {
         Box::pin(async move {
             let mut script = self.lock();
             let ids: Vec<String> = entries.iter().map(|e| e.id.clone()).collect();
             script.deletes.push(entries);
+            script.delete_within.push(within);
             if let Some(e) = script.delete_errors.pop_front() {
                 return Err(e);
             }

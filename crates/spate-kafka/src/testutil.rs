@@ -1,4 +1,4 @@
-//! librdkafka statistics fixtures shared by the source and sink metrics tests.
+//! Shared test fixtures: librdkafka statistics values and a refused broker address.
 
 use rdkafka::statistics::{Broker, Window};
 

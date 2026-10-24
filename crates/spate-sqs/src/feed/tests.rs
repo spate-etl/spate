@@ -1804,8 +1804,16 @@ async fn a_failed_hand_back_call_is_retried_within_its_bound() {
     }
     feed.hand_back(d.receipt).unwrap();
     step(Duration::from_secs(90)).await;
-    let sent = queue.visibility_at.lock().unwrap().clone();
-    assert!(sent.len() > 1, "the hand-back was not retried");
+    // Each call is recorded by both, in the same order.
+    let calls = queue.inner.visibility();
+    let at = queue.visibility_at.lock().unwrap().clone();
+    let sent: Vec<Instant> = calls
+        .iter()
+        .zip(&at)
+        .filter(|(call, _)| call.iter().any(|e| e.seconds == 0))
+        .map(|(_, t)| *t)
+        .collect();
+    assert!(sent.len() > 1, "the hand-back was not retried: {calls:?}");
     assert!(
         sent.iter().all(|t| *t < deadline),
         "a hand-back was sent at or past {deadline:?}: {sent:?}"

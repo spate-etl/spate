@@ -1943,10 +1943,11 @@ async fn held_units_are_extended_from_the_stop_until_close() {
 
 /// Pins that a hand-back waits for an extension of the same unit already in
 /// flight, and that no extension of it follows: within one chunk, and when
-/// the unit is in a later chunk of the same tick.
+/// the unit is in the last of three chunks of the same tick, where the
+/// hand-back goes out right after the chunk in flight.
 #[tokio::test(start_paused = true)]
 async fn a_hand_back_is_sent_after_an_extension_of_the_same_receipt_in_flight() {
-    for units in [1, 11] {
+    for units in [1, 21] {
         let (feed, queue) = start_gated(MINUTE);
         let (waker, park) = wake_channel();
         feed.set_waker(waker);

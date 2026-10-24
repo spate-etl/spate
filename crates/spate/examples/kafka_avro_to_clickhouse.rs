@@ -67,7 +67,7 @@
 // ANCHOR: imports
 use serde::{Deserialize, Serialize};
 use spate::avro::AvroDeserializerBuilder;
-use spate::clickhouse::{ClickHouseEncoder, ClickHouseRow, DateTime64Millis};
+use spate::clickhouse::{self, ClickHouseEncoder, ClickHouseRow, DateTime64Millis};
 use spate::kafka::KafkaSource;
 use spate::prelude::*;
 use std::path::Path;
@@ -157,10 +157,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // fails here with a readable diff.
     // ANCHOR: sink
     let sink = pipeline.block_on(
-        spate::clickhouse::config::from_component_config(
-            pipeline.config().sink_config("default")?,
-        )?
-        .with_row::<Owned<OrderRow>>(),
+        clickhouse::config::from_component_config(pipeline.config().sink_config("default")?)?
+            .with_row::<Owned<OrderRow>>(),
     )?;
     // ANCHOR_END: sink
 

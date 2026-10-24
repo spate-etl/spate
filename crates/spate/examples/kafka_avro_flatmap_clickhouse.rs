@@ -96,7 +96,7 @@
 
 use serde::{Deserialize, Serialize};
 use spate::avro::AvroDeserializerBuilder;
-use spate::clickhouse::{ClickHouseRow, DateTime64Millis, NativeEncoder, ShardKey};
+use spate::clickhouse::{self, ClickHouseRow, DateTime64Millis, NativeEncoder, ShardKey};
 use spate::kafka::KafkaSource;
 use spate::prelude::*;
 use std::path::Path;
@@ -183,10 +183,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // shard.
     // ANCHOR: router
     let sink = pipeline.block_on(
-        spate::clickhouse::config::from_component_config(
-            pipeline.config().sink_config("default")?,
-        )?
-        .with_row::<Owned<OrderLineRow>>(),
+        clickhouse::config::from_component_config(pipeline.config().sink_config("default")?)?
+            .with_row::<Owned<OrderLineRow>>(),
     )?;
     // No-op unless the YAML opts into `distributed_check`; with it, startup
     // fails fast if the sink topology drifts from the cluster + DDL.

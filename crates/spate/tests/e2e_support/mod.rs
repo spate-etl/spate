@@ -21,6 +21,7 @@ use apache_avro::Schema;
 use apache_avro::to_avro_datum;
 use http_body_util::Full;
 use hyper::body::Bytes;
+use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
 use rdkafka::ClientConfig;
@@ -29,7 +30,7 @@ use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::producer::{BaseProducer, BaseRecord, Producer};
 use serde::{Deserialize, Serialize};
 use spate::avro::AvroDeserializerBuilder;
-use spate::clickhouse::ClickHouseEncoder;
+use spate::clickhouse::{ClickHouseEncoder, config};
 use spate::config::PipelineConfig;
 use spate::error::ErrorPolicy;
 use spate::kafka::KafkaSource;
@@ -340,7 +341,7 @@ impl Harness {
                 .build_serde::<Event>()
                 .expect("apache builder");
         let sink = pipeline.block_on(
-            spate::clickhouse::config::from_component_config(
+            config::from_component_config(
                 pipeline
                     .config()
                     .sink_config("default")
@@ -583,9 +584,7 @@ async fn serve_stub_registry(schemas: Schemas) -> SocketAddr {
                         )
                     }
                 });
-                let _ = hyper::server::conn::http1::Builder::new()
-                    .serve_connection(io, service)
-                    .await;
+                let _ = http1::Builder::new().serve_connection(io, service).await;
             });
         }
     });

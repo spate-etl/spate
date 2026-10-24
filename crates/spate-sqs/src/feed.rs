@@ -342,8 +342,6 @@ impl Shared {
         if let Some(close) = close {
             close.reject(error.clone());
         }
-        // Ends a close task waiting for progress.
-        self.progress.notify_one();
         let unknown = FeedError::new(
             FeedErrorKind::Retryable,
             format!(
@@ -634,7 +632,7 @@ impl Feed for SqsFeed {
             if let Some(e) = st.retryable.take() {
                 return Err(e);
             }
-            if st.abandoned || st.stopping {
+            if st.abandoned {
                 return Ok(Vec::new());
             }
             let now = Instant::now();
@@ -855,7 +853,7 @@ impl Feed for SqsFeed {
     fn stop_receiving(&self) {
         {
             let mut st = self.lock();
-            if st.fatal.is_some() || st.abandoned || st.stopping {
+            if st.fatal.is_some() || st.stopping {
                 return;
             }
             let buffered = st.begin_stop();
@@ -964,10 +962,9 @@ async fn close_task(shared: Arc<Shared>) {
         // still ends the wait.
         let progress = shared.progress.notified();
         let wake_at = {
+            // A Fatal settles the close itself, and leaves this task to end
+            // at the bound with no confirmer to settle.
             let mut st = shared.lock();
-            if st.fatal.is_some() || st.abandoned {
-                return;
-            }
             let now = Instant::now();
             let unsent = st.unsent();
             let grace = st

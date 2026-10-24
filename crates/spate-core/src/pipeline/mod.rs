@@ -24,7 +24,8 @@
 //! to every driver → each driver flushes its chain, drops its lanes, and arrives at
 //! the barrier → main joins driver threads (dropping chains closes the
 //! shard queues) → the sink drains under the remaining deadline → the
-//! controller runs a final drain + commit + `flush_commits` → the process
+//! controller runs a final drain + commit + `flush_commits` → main closes the
+//! pipeline's feed within what is left of the deadline → the process
 //! reports an [`ExitReport`]. A sink that cannot flush by the deadline is
 //! abandoned loudly; unacknowledged offsets are never committed, so the
 //! data replays after restart (at-least-once).

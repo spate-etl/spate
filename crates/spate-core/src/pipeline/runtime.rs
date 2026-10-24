@@ -63,13 +63,66 @@ const IO_BUSY_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Triggers a graceful drain from anywhere (tests, custom signal wiring).
 #[derive(Clone, Debug)]
-pub struct ShutdownHandle(Arc<AtomicBool>);
+pub struct ShutdownHandle(Arc<StopRequest>);
 
 impl ShutdownHandle {
     /// Begin the graceful stop: a source that reads on what it holds
-    /// finishes first, then the drain runs. Idempotent.
+    /// finishes first, then the drain runs. The drain deadline counts from
+    /// the first call. Idempotent.
     pub fn trigger(&self) {
-        self.0.store(true, Ordering::Relaxed);
+        self.0.trigger();
+    }
+}
+
+/// A graceful stop's request: the flag the controller and `StopSignal` read,
+/// and the instant of the first trigger, read on the stop clock.
+pub(crate) struct StopRequest {
+    flag: Arc<AtomicBool>,
+    at: std::sync::Mutex<Option<Instant>>,
+    clock: std::sync::Mutex<Arc<dyn Clock + Send + Sync>>,
+}
+
+impl StopRequest {
+    fn new(clock: Arc<dyn Clock + Send + Sync>) -> StopRequest {
+        StopRequest {
+            flag: Arc::new(AtomicBool::new(false)),
+            at: std::sync::Mutex::new(None),
+            clock: std::sync::Mutex::new(clock),
+        }
+    }
+
+    fn trigger(&self) {
+        {
+            let mut at = self.at.lock().expect("stop request lock");
+            if at.is_none() {
+                *at = Some(self.clock.lock().expect("stop request lock").now());
+            }
+        }
+        // Stored after the instant, so a reader that sees the flag finds it.
+        self.flag.store(true, Ordering::Release);
+    }
+
+    /// Whether a stop was asked for.
+    pub(crate) fn is_set(&self) -> bool {
+        self.flag.load(Ordering::Acquire)
+    }
+
+    /// When the stop was first asked for, if it was.
+    pub(crate) fn triggered_at(&self) -> Option<Instant> {
+        *self.at.lock().expect("stop request lock")
+    }
+
+    pub(crate) fn flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.flag)
+    }
+}
+
+impl std::fmt::Debug for StopRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StopRequest")
+            .field("set", &self.is_set())
+            .field("at", &self.triggered_at())
+            .finish_non_exhaustive()
     }
 }
 
@@ -109,7 +162,7 @@ pub struct PipelineRuntime<S: Source> {
     sink: SinkRuntime,
     budget: Arc<InflightBudget>,
     // Set by a stop request; the controller reads on to the reserve.
-    stop: Arc<AtomicBool>,
+    stop: Arc<StopRequest>,
     // Set when the drain begins; the drivers read it.
     shutdown: Arc<AtomicBool>,
     stop_clock: Arc<dyn Clock + Send + Sync>,
@@ -145,7 +198,7 @@ impl<S: Source + 'static> PipelineRuntime<S> {
             chains: Box::new(chains),
             sink,
             budget,
-            stop: Arc::new(AtomicBool::new(false)),
+            stop: Arc::new(StopRequest::new(Arc::new(SystemClock))),
             shutdown: Arc::new(AtomicBool::new(false)),
             stop_clock: Arc::new(SystemClock),
             options: RuntimeOptions::default(),
@@ -215,6 +268,7 @@ impl<S: Source + 'static> PipelineRuntime<S> {
     #[doc(hidden)]
     #[must_use]
     pub fn with_stop_clock(mut self, clock: Arc<dyn Clock + Send + Sync>) -> Self {
+        *self.stop.clock.lock().expect("stop request lock") = Arc::clone(&clock);
         self.stop_clock = clock;
         self
     }
@@ -395,7 +449,7 @@ impl<S: Source + 'static> PipelineRuntime<S> {
             io.spawn(async move {
                 wait_for_signal().await;
                 tracing::info!("shutdown signal received; draining");
-                stop.store(true, Ordering::Relaxed);
+                stop.trigger();
             });
         }
 
@@ -714,9 +768,8 @@ impl<S: Source + 'static> PipelineRuntime<S> {
             state = ExitState::Failed(report);
         }
 
-        // After the final commit, and before the source drops: the source's
-        // drop releases its handle, and this one keeps the feed alive for its
-        // close.
+        // After the final commit. This handle keeps the feed alive for its
+        // close, whether or not the source has dropped its own.
         if let (Some(feed), Some(close_by)) = (&kept_feed, close_by) {
             close_feed(
                 &io,

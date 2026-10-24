@@ -2807,3 +2807,256 @@ fn a_source_that_failed_to_open_is_not_asked_to_stop_reading() {
     assert!(matches!(report.state, ExitState::Failed(_)), "{report:?}");
     assert_eq!(h.shared.lock().unwrap().stop_reading_calls, 0);
 }
+
+/// A lane whose batch blocks, assigned and revoked, with the revocation
+/// waiting on the blocked driver when this returns.
+fn revoke_a_blocked_lane(h: &Harness) {
+    assign_one_lane(h, std::slice::from_ref(&(0..10)));
+    wait_for(
+        "the blocked batch pauses the lane",
+        Duration::from_secs(5),
+        || !h.shared.lock().unwrap().pauses.is_empty(),
+    );
+    h.script
+        .lock()
+        .unwrap()
+        .push_back(Script::Revoke(vec![LaneId(0)]));
+    wait_for(
+        "the revocation is delivered",
+        Duration::from_secs(5),
+        || {
+            h.shared
+                .lock()
+                .unwrap()
+                .log
+                .iter()
+                .any(|e| e == "revoke-delivered")
+        },
+    );
+}
+
+fn blocked_chain(shared: Arc<ChainShared>, log: Arc<Mutex<SourceLog>>) -> FakeChain {
+    FakeChain {
+        shared,
+        log,
+        mode: ChainMode::BlockForever,
+        batches_seen: 0,
+    }
+}
+
+/// Pins that a stop which arrives while a revocation waits on a driver held
+/// by a blocked batch reaches that driver when the source reads nothing on,
+/// so the run drains without waiting out the revocation's budget.
+#[test]
+fn a_stop_during_a_blocked_revocation_drains_at_once() {
+    let clock = crate::clock::TestClock::frozen();
+    let h = start_stopping(
+        stop_config(Duration::from_secs(600)),
+        false,
+        &clock,
+        |_| None,
+        blocked_chain,
+    );
+    revoke_a_blocked_lane(&h);
+    h.shutdown.trigger();
+    joined(&h);
+    assert_eq!(h.join.join().unwrap().unwrap().state, ExitState::Completed);
+    assert_eq!(h.chain.consumed.load(Ordering::Relaxed), 0);
+}
+
+/// Pins that a revocation during the stop's reading, waiting on a blocked
+/// batch, ends at the reserve, so the hand-back and the drain still run.
+#[test]
+fn a_revocation_during_the_read_phase_ends_at_the_reserve() {
+    let drain_timeout = Duration::from_secs(600);
+    let clock = crate::clock::TestClock::frozen();
+    let h = start_stopping(
+        stop_config(drain_timeout),
+        true,
+        &clock,
+        |_| None,
+        blocked_chain,
+    );
+    h.shutdown.trigger();
+    wait_for("the read phase", Duration::from_secs(5), || {
+        h.shared.lock().unwrap().reading_on_stop_calls > 0
+    });
+    revoke_a_blocked_lane(&h);
+    clock.advance(drain_timeout - crate::feed::STOP_RESERVE);
+    joined(&h);
+    assert_eq!(h.join.join().unwrap().unwrap().state, ExitState::Completed);
+    assert_eq!(h.shared.lock().unwrap().stop_reading_calls, 1);
+}
+
+/// Pins that the drain deadline counts from the trigger: a stop asked for
+/// before the source finished opening leaves the close what is left after
+/// the open.
+#[test]
+fn the_drain_deadline_counts_from_the_trigger() {
+    let drain_timeout = Duration::from_secs(600);
+    let opening = Duration::from_secs(10);
+    let clock = crate::clock::TestClock::frozen();
+    let mut cfg = stop_config(drain_timeout);
+    cfg.feed = feed_section("sqs: {}");
+    let kept = Arc::new(Mutex::new(None::<Arc<HandingBack>>));
+    let keep = Arc::clone(&kept);
+    let in_open = Arc::clone(&clock);
+    let stop_clock = Arc::clone(&clock);
+    let h = start_prepared(
+        cfg,
+        test_options(),
+        |log| {
+            log.accept_feed = true;
+            log.advance_in_open = Some((in_open, opening));
+        },
+        move |runtime, _| {
+            let feed = Arc::new(HandingBack::new("sqs"));
+            *keep.lock().unwrap() = Some(Arc::clone(&feed));
+            let runtime = runtime.with_stop_clock(stop_clock).with_feed(feed);
+            runtime.shutdown_handle().trigger();
+            runtime
+        },
+        ok_chain,
+    );
+    joined(&h);
+    assert_eq!(h.join.join().unwrap().unwrap().state, ExitState::Completed);
+    let feed = kept.lock().unwrap().take().unwrap();
+    assert_eq!(*feed.closes.lock().unwrap(), vec![drain_timeout - opening]);
+}
+
+/// Pins that the runtime waits for a close that settles after the wait
+/// begins, with no warning.
+#[test]
+fn a_close_that_settles_later_is_waited_for() {
+    let clock = crate::clock::TestClock::frozen();
+    let mut cfg = stop_config(Duration::from_secs(600));
+    cfg.feed = feed_section("sqs: {}");
+    let kept = Arc::new(Mutex::new(None::<Arc<HandingBack>>));
+    let keep = Arc::clone(&kept);
+    let h = start_stopping(
+        cfg,
+        false,
+        &clock,
+        move |_| {
+            let feed = Arc::new(HandingBack::new("sqs").holding_its_close());
+            *keep.lock().unwrap() = Some(Arc::clone(&feed));
+            Some(feed)
+        },
+        ok_chain,
+    );
+    let feed = kept.lock().unwrap().clone().unwrap();
+    h.shutdown.trigger();
+    wait_for("the close", Duration::from_secs(5), || {
+        !feed.closes.lock().unwrap().is_empty()
+    });
+    feed.settle_held_closes();
+    joined(&h);
+    assert_eq!(h.join.join().unwrap().unwrap().state, ExitState::Completed);
+    let warnings = h.warnings.0.lock().unwrap().clone();
+    assert!(
+        !warnings.iter().any(|fields| fields
+            .iter()
+            .any(|(name, value)| name == "message" && value.contains("did not close"))),
+        "{warnings:#?}"
+    );
+}
+
+/// Pins that a feed that does not hand back leaves the sink drain the whole
+/// deadline.
+#[test]
+fn a_feed_that_does_not_hand_back_leaves_the_sink_the_whole_deadline() {
+    let drain_timeout = Duration::from_secs(600);
+    let clock = crate::clock::TestClock::frozen();
+    let mut cfg = stop_config(drain_timeout);
+    cfg.feed = feed_section("memory: {}");
+    let h = start_stopping(cfg, false, &clock, |_| None, ok_chain);
+    h.script.lock().unwrap().push_back(Script::Drained);
+    joined(&h);
+    assert_eq!(h.join.join().unwrap().unwrap().state, ExitState::Completed);
+    assert_eq!(*h.sink_budgets.lock().unwrap(), vec![drain_timeout]);
+}
+
+/// Pins that an assignment during the stop's reading leaves the pipeline in
+/// the draining state.
+#[test]
+fn an_assignment_during_the_read_phase_keeps_the_pipeline_draining() {
+    let drain_timeout = Duration::from_secs(600);
+    let mut cfg = stop_config(drain_timeout);
+    cfg.metrics.exporter = crate::config::MetricsExporter::Prometheus;
+    let pipeline_name = cfg.pipeline.name.clone();
+    let handle = install_prometheus(&cfg);
+    let clock = crate::clock::TestClock::frozen();
+    let h = start_stopping(cfg, true, &clock, |_| None, ok_chain);
+    h.shutdown.trigger();
+    wait_for("the read phase", Duration::from_secs(5), || {
+        h.shared.lock().unwrap().reading_on_stop_calls > 0
+    });
+    assign_one_lane(&h, std::slice::from_ref(&(0..10)));
+    wait_for("payloads consumed", Duration::from_secs(5), || {
+        h.chain.consumed.load(Ordering::Relaxed) == 10
+    });
+    let state = |name: &str| {
+        let line = format!(r#"pipeline="{pipeline_name}","#);
+        handle
+            .render()
+            .lines()
+            .find(|l| {
+                l.starts_with("spate_pipeline_state{")
+                    && l.contains(&line)
+                    && l.contains(&format!(r#"state="{name}""#))
+            })
+            .map(str::to_owned)
+    };
+    assert!(
+        state("draining").is_some_and(|l| l.ends_with(" 1")),
+        "{:?}",
+        state("draining")
+    );
+    assert!(
+        state("running").is_some_and(|l| l.ends_with(" 0")),
+        "{:?}",
+        state("running")
+    );
+    clock.advance(drain_timeout);
+    joined(&h);
+    assert_eq!(h.join.join().unwrap().unwrap().state, ExitState::Completed);
+}
+
+/// Pins that SIGTERM begins the graceful stop, so the run drains and
+/// returns.
+#[cfg(unix)]
+#[test]
+fn a_sigterm_stops_the_run() {
+    // A listener of the test's own replaces the default action first, so a
+    // SIGTERM sent before the runtime listens does not end the test process.
+    let signals = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let _listener = signals.block_on(async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).unwrap()
+    });
+    let mut options = test_options();
+    options.handle_signals = true;
+    let h = start_with(test_config(1), options, |runtime| runtime, ok_chain);
+    assign_one_lane(&h, std::slice::from_ref(&(0..10)));
+    wait_for("payloads consumed", Duration::from_secs(5), || {
+        h.chain.consumed.load(Ordering::Relaxed) == 10
+    });
+    let pid = std::process::id().to_string();
+    // The runtime's listener may not be installed yet, so the signal is
+    // sent until the run ends.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !h.join.is_finished() {
+        assert!(Instant::now() < deadline, "SIGTERM did not stop the run");
+        let sent = std::process::Command::new("kill")
+            .args(["-TERM", &pid])
+            .status()
+            .unwrap();
+        assert!(sent.success());
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let report = h.join.join().unwrap().unwrap();
+    assert_eq!(report.state, ExitState::Completed);
+    assert_eq!(report.final_watermarks, vec![(PartitionId(0), 10)]);
+}

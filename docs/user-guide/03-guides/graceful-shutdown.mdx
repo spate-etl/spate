@@ -24,7 +24,7 @@ from the same `checkpoint.drain_timeout`. Any other source starts the drain at
 once.
 
 :::note Connector specifics
-How each feed hands units back and closes:
+How each feed stops:
 [SQS](../04-connectors/feeds/sqs/README.mdx#stop) ·
 [Kafka](../04-connectors/feeds/kafka/README.mdx#stop).
 :::
@@ -60,7 +60,7 @@ revocation, one choreography tested constantly by every rebalance:
    under one budget, `coordination.op_timeout`, for all its splits together.
    Splits it does not reach before the budget ends keep their last committed
    position, and the next owner may replay records from it. The runtime then
-   closes the pipeline's feed: the feed sends the acknowledgments it still
+   closes a feed that hands back: the feed sends the acknowledgments it still
    has queued and gives up the units it holds, within what is left of the
    deadline. A unit it cannot give up in time comes back after the feed's
    redelivery delay.

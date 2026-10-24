@@ -543,22 +543,22 @@ pub fn wake_channel() -> (FeedWaker, FeedPark) {
     (FeedWaker(tx.clone()), FeedPark { rx, _tx: tx })
 }
 
-/// The backend's half of a [`Confirmation`]: settles one publish.
+/// The backend's half of a [`Confirmation`]: settles one publish or close.
 ///
 /// Dropping it unsettled resolves the confirmation as
 /// [`Retryable`](FeedErrorKind::Retryable), since the feed may or may not
-/// have stored the unit.
+/// have finished.
 #[derive(Debug)]
 pub struct Confirmer(tokio::sync::oneshot::Sender<Result<(), FeedError>>);
 
 impl Confirmer {
-    /// Report that the feed has stored the unit.
+    /// Report that the feed has stored the unit, or finished closing.
     pub fn confirm(self) {
         // A dropped `Confirmation` means nobody is waiting for the outcome.
         let _ = self.0.send(Ok(()));
     }
 
-    /// Report that the feed did not store the unit, and why.
+    /// Report that the feed did not store the unit or close cleanly, and why.
     pub fn reject(self, error: FeedError) {
         // A dropped `Confirmation` means nobody is waiting for the outcome.
         let _ = self.0.send(Err(error));
@@ -580,7 +580,7 @@ pub struct Confirmation {
 }
 
 impl Confirmation {
-    /// The outcome if the feed has settled the publish, `None` while it is
+    /// The outcome if the feed has settled the call, `None` while it is
     /// pending. Never waits. Once settled, every later call returns the same
     /// outcome.
     pub fn try_outcome(&mut self) -> Option<Result<(), FeedError>> {
@@ -613,8 +613,8 @@ impl Future for Confirmation {
     }
 }
 
-/// A publish's two halves: the backend settles the [`Confirmer`], and the
-/// publisher reads the [`Confirmation`].
+/// A publish's or a close's two halves: the backend settles the
+/// [`Confirmer`], and the caller reads the [`Confirmation`].
 #[must_use]
 pub fn confirmation() -> (Confirmer, Confirmation) {
     let (tx, rx) = tokio::sync::oneshot::channel();
@@ -624,7 +624,8 @@ pub fn confirmation() -> (Confirmer, Confirmation) {
 fn unsettled() -> FeedError {
     FeedError::new(
         FeedErrorKind::Retryable,
-        "the feed dropped the publish before settling it; the unit may or may not be stored",
+        "the feed dropped the confirmation before settling it; the publish or close may or may \
+         not have finished",
     )
 }
 

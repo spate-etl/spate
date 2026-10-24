@@ -65,6 +65,9 @@ pub(crate) struct SourceLog {
     pub(crate) log_lane_drops: bool,
     /// When set, `open` fails fatally.
     pub(crate) fail_open: bool,
+    /// Moved forward by this much in `open`, modeling a source that takes
+    /// that long to open.
+    pub(crate) advance_in_open: Option<(Arc<crate::clock::TestClock>, Duration)>,
 }
 
 pub(crate) enum Script {
@@ -138,6 +141,9 @@ impl Source for FakeSource {
             }
             log.opened = true;
             log.stage_metrics_attached = ctx.stage_metrics.is_some();
+            if let Some((clock, by)) = &log.advance_in_open {
+                clock.advance(*by);
+            }
         }
         // Publish a lag figure like a real source would, so a test can tell
         // whether the handle set it was given owns the series. Only the owner
@@ -426,6 +432,13 @@ impl HandingBack {
     pub(crate) fn holding_its_close(mut self) -> HandingBack {
         self.hold_close = true;
         self
+    }
+
+    /// Settle every close held so far.
+    pub(crate) fn settle_held_closes(&self) {
+        for confirmer in self.held.lock().unwrap().drain(..) {
+            confirmer.confirm();
+        }
     }
 
     /// Log `close` into `log` beside the source's entries.

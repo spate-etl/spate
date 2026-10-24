@@ -804,6 +804,7 @@ impl<S: CoordinationStore + Clone> Drop for StoreCoordinator<S> {
 mod tests {
     use super::*;
     use crate::store::memory::MemoryStore;
+    use spate_core::clock::tokio::TestClock;
     use std::sync::atomic::{AtomicBool, Ordering};
 
     /// A command waiting for room in a full command queue gives up once the
@@ -893,7 +894,7 @@ mod tests {
 
     fn poll_until(
         c: &mut StoreCoordinator<MemoryStore>,
-        clock: &spate_core::clock::tokio::TestClock,
+        clock: &TestClock,
         seen: &mut Vec<CoordinationEvent>,
         what: &str,
         done: impl Fn(&[CoordinationEvent]) -> bool,
@@ -922,7 +923,7 @@ mod tests {
     /// tenancy's commits land. Regression for #1014.
     #[test]
     fn a_commit_queued_under_an_ended_tenancy_is_fenced_in_the_next() {
-        use spate_core::clock::tokio::TestClock;
+        use TestClock;
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()

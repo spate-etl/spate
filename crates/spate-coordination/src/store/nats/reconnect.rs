@@ -125,9 +125,9 @@ fn rejection(last_error: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::nats::NatsConfig;
     use crate::store::nats::test_tls::{INFO_REQUIRING_TLS, TestCa, serve_nats};
     use crate::store::nats::tests::serve_authorization_violation;
+    use crate::store::nats::{self, NatsConfig};
     use async_nats::ConnectError;
     use async_nats::rustls::{self, AlertDescription, CertificateError, PeerIncompatible};
     use std::time::Duration;
@@ -412,9 +412,7 @@ mod tests {
         let config = NatsConfig::new(vec![format!("nats://127.0.0.1:{plain}")], "reconnect");
         let servers = config.validate().unwrap();
         let rejection = Arc::new(Rejection::default());
-        let client = crate::store::nats::client(&config, &servers, &rejection)
-            .await
-            .unwrap();
+        let client = nats::client(&config, &servers, &rejection).await.unwrap();
         rejection.check(&client).unwrap();
         client.set_server_pool(target).await.unwrap();
         client.force_reconnect().await.unwrap();
@@ -489,7 +487,7 @@ mod tests {
         let plain = serve_plain().await;
         let config = NatsConfig::new(vec![format!("nats://127.0.0.1:{plain}")], "reconnect");
         let servers = config.validate().unwrap();
-        let client = crate::store::nats::client(&config, &servers, &Arc::default())
+        let client = nats::client(&config, &servers, &Arc::default())
             .await
             .unwrap();
         let connects = client.statistics().connects.load(Ordering::Relaxed);

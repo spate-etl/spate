@@ -41,6 +41,7 @@ use super::{
     CasOutcome, CoordinationStore, Entry, Keyspace, Revision, StoreError, WatchEvent, WatchStream,
 };
 use async_nats::jetstream::consumer::{DeliverPolicy, ReplayPolicy, push};
+use async_nats::jetstream::message::StreamMessage;
 use async_nats::jetstream::response::Response;
 use async_nats::jetstream::stream::LastRawMessageErrorKind;
 use async_nats::jetstream::{kv, stream};
@@ -726,7 +727,7 @@ fn check_adopted(wanted: &kv::Config, existing: &stream::Config) -> Result<(), S
 async fn last_on_leader(
     bucket: &kv::Store,
     key: &str,
-) -> Result<Option<async_nats::jetstream::message::StreamMessage>, StoreError> {
+) -> Result<Option<StreamMessage>, StoreError> {
     let subject = format!("{}{}", bucket.prefix, key);
     match bucket
         .stream

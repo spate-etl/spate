@@ -29,6 +29,7 @@
 
 use crate::error::fatal;
 use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD;
 use serde::{Deserialize, Serialize};
 use spate_core::coordination::{
     CoordinationError, PlanFinality, SplitId, SplitProgress, SplitSpec,
@@ -596,13 +597,11 @@ pub(crate) fn validate_instance_id(id: &str) -> Result<(), CoordinationError> {
 /// Standard-alphabet, padded base64 for the descriptor/state payloads —
 /// they must round-trip byte-exactly through JSON strings.
 pub(crate) fn b64_encode(bytes: &[u8]) -> String {
-    base64::engine::general_purpose::STANDARD.encode(bytes)
+    STANDARD.encode(bytes)
 }
 
 pub(crate) fn b64_decode(s: &str) -> Result<Vec<u8>, String> {
-    base64::engine::general_purpose::STANDARD
-        .decode(s)
-        .map_err(|e| e.to_string())
+    STANDARD.decode(s).map_err(|e| e.to_string())
 }
 
 #[cfg(test)]

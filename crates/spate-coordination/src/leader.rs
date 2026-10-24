@@ -912,10 +912,12 @@ async fn seed<S: CoordinationStore>(
 mod tests {
     use super::*;
     use crate::store::memory::MemoryStore;
+    use crate::store::metered::Metered;
     use crate::store::{Entry, WatchStream};
     use spate_core::clock::tokio::TestClock;
     use spate_core::coordination::SplitSpec;
     use std::sync::atomic::AtomicU64;
+    use std::sync::mpsc as std_mpsc;
 
     /// Holds each spec create until the test releases permits; the first of
     /// every four among the first 64 fails with a retryable error.
@@ -1011,9 +1013,9 @@ mod tests {
             gate: Arc::new(tokio::sync::Semaphore::new(0)),
         };
         let budget = Duration::from_millis(200);
-        let metered = crate::store::metered::Metered::new(store.clone(), budget, None);
+        let metered = Metered::new(store.clone(), budget, None);
         let (_, commands) = mpsc::channel(1);
-        let (events, _) = std::sync::mpsc::channel();
+        let (events, _) = std_mpsc::channel();
         let config = crate::CoordinationConfig {
             op_timeout: budget,
             ..Default::default()
@@ -1067,7 +1069,7 @@ mod tests {
             panic!("the plan record is new");
         };
         let (_, commands) = mpsc::channel(1);
-        let (events, _) = std::sync::mpsc::channel();
+        let (events, _) = std_mpsc::channel();
         let mut task = Task::new(
             store.clone(),
             crate::CoordinationConfig::default(),
@@ -1129,7 +1131,7 @@ mod tests {
             panic!("the finalising write holds the current revision");
         };
         let (_, commands) = mpsc::channel(1);
-        let (events, _) = std::sync::mpsc::channel();
+        let (events, _) = std_mpsc::channel();
         let mut task = Task::new(
             store.clone(),
             crate::CoordinationConfig::default(),
@@ -1348,7 +1350,7 @@ mod tests {
             armed: Arc::new(AtomicBool::new(true)),
         };
         let (_, commands) = mpsc::channel(1);
-        let (events, _) = std::sync::mpsc::channel();
+        let (events, _) = std_mpsc::channel();
         let mut task = Task::new(
             store.clone(),
             crate::CoordinationConfig::default(),

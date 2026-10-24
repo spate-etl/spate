@@ -6,6 +6,7 @@ use crate::records::{SCHEMA, WorkerVal};
 use crate::store::memory::MemoryStore;
 use spate_core::clock::tokio::TestClock;
 use spate_core::coordination::{PlanContext, SplitPlan};
+use tokio::sync::watch;
 
 const FINGERPRINT: &str = "assignment-tests:v1";
 
@@ -547,7 +548,7 @@ mod ready_bursts {
         memory: MemoryStore,
         burst_ks: Keyspace,
         burst: Arc<Mutex<Option<Vec<Entry>>>>,
-        follower: tokio::sync::watch::Sender<(usize, Vec<String>)>,
+        follower: watch::Sender<(usize, Vec<String>)>,
     }
 
     impl CoordinationStore for ReadyBurst {
@@ -749,7 +750,7 @@ mod ready_bursts {
             burst: Vec<Entry>,
             done: impl Fn(&[String]) -> bool,
         ) -> usize {
-            let (follower, mut written) = tokio::sync::watch::channel((0, Vec::new()));
+            let (follower, mut written) = watch::channel((0, Vec::new()));
             let store = ReadyBurst {
                 memory: self.store,
                 burst_ks,
@@ -845,7 +846,7 @@ mod ready_bursts {
     #[derive(Clone)]
     struct BreakAfterEvent {
         memory: MemoryStore,
-        durable_watches: tokio::sync::watch::Sender<usize>,
+        durable_watches: watch::Sender<usize>,
         ends: bool,
     }
 
@@ -937,7 +938,7 @@ mod ready_bursts {
     #[tokio::test(start_paused = true)]
     async fn a_break_met_while_draining_is_watched_again() {
         let fleet = Fleet::new(1).await;
-        let (durable_watches, mut watches) = tokio::sync::watch::channel(0);
+        let (durable_watches, mut watches) = watch::channel(0);
         let store = BreakAfterEvent {
             memory: fleet.store.clone(),
             durable_watches,
@@ -974,7 +975,7 @@ mod ready_bursts {
     #[tokio::test(start_paused = true)]
     async fn an_end_met_while_draining_is_watched_again() {
         let fleet = Fleet::new(1).await;
-        let (durable_watches, mut watches) = tokio::sync::watch::channel(0);
+        let (durable_watches, mut watches) = watch::channel(0);
         let store = BreakAfterEvent {
             memory: fleet.store.clone(),
             durable_watches,

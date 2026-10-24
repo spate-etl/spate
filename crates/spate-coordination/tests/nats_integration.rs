@@ -16,6 +16,7 @@ mod support;
 #[macro_use]
 mod scenarios;
 
+use async_nats::jetstream::{kv, stream};
 use futures_util::StreamExt as _;
 use spate_coordination::store::nats::{NatsConfig, NatsCredentials, NatsStore, Secret};
 use spate_coordination::store::{
@@ -330,11 +331,7 @@ fn delete_outcomes_match_the_trait() {
 
 /// Fills the job's lease bucket with more keys than a listing buffers
 /// before flow control pauses delivery, all written within one lease.
-async fn fill_lease_bucket(
-    store: &NatsStore,
-    port: u16,
-    job: &str,
-) -> async_nats::jetstream::stream::Stream {
+async fn fill_lease_bucket(store: &NatsStore, port: u16, job: &str) -> stream::Stream {
     // Provisions both buckets.
     store
         .get(Keyspace::Ephemeral, "none")
@@ -715,7 +712,7 @@ fn an_existing_state_bucket_gains_message_ttls() {
     let stream_name = format!("KV_{}", state_bucket_name("upgrade"));
     let (js, store) = rt.block_on(async {
         let js = jetstream(port).await;
-        js.create_key_value(async_nats::jetstream::kv::Config {
+        js.create_key_value(kv::Config {
             bucket: state_bucket_name("upgrade"),
             description: "operator note".into(),
             history: 1,
@@ -825,7 +822,7 @@ authorization {
         async_nats::jetstream::new(client)
     });
     rt.block_on(async {
-        js.create_key_value(async_nats::jetstream::kv::Config {
+        js.create_key_value(kv::Config {
             bucket: state_bucket_name("denied"),
             history: 1,
             ..Default::default()
@@ -1089,7 +1086,7 @@ fn an_existing_bucket_with_another_replica_count_is_rejected() {
             (state_bucket_name("replicas"), Duration::ZERO),
             ("spate_coordination_replicas_lease".to_string(), LEASE),
         ] {
-            js.create_key_value(async_nats::jetstream::kv::Config {
+            js.create_key_value(kv::Config {
                 bucket,
                 history: 1,
                 max_age,

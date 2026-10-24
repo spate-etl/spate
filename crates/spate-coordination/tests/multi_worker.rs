@@ -20,7 +20,9 @@ use support::{Held, LEASE, PhasedPlanner, crash, runtime};
 multi_worker_scenarios!(support::MemoryBackend::new());
 
 mod polled {
-    multi_worker_scenarios!(crate::support::polled::PolledBackend::new());
+    use crate::support::polled::PolledBackend;
+
+    multi_worker_scenarios!(PolledBackend::new());
 }
 
 // ----------------------------------------------------------------------

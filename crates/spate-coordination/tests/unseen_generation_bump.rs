@@ -12,7 +12,7 @@ use spate_coordination::store::{
 };
 use spate_coordination::{SplitCoordinator as _, StoreCoordinator};
 use spate_core::clock::tokio::Clock;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use support::{Held, LEASE, PhasedPlanner, TestClock, config, runtime};
@@ -43,7 +43,7 @@ struct ReplyLost<S> {
     reread_refused: Arc<AtomicBool>,
     refusing: Arc<AtomicBool>,
     /// Leader-key creates, one per election.
-    elections: Arc<std::sync::atomic::AtomicUsize>,
+    elections: Arc<AtomicUsize>,
 }
 
 impl<S: CoordinationStore + Clone> CoordinationStore for ReplyLost<S> {
@@ -173,7 +173,7 @@ fn elect_with<S: CoordinationStore + Clone + Send + Sync + 'static>(
         refuse_reread,
         reread_refused: Arc::new(AtomicBool::new(false)),
         refusing: Arc::new(AtomicBool::new(false)),
-        elections: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        elections: Arc::new(AtomicUsize::new(0)),
     };
     let mut worker = StoreCoordinator::with_clock(
         store.clone(),

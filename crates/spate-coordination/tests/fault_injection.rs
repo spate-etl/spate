@@ -19,6 +19,7 @@ use spate_coordination::{
 use spate_core::clock::tokio::Clock;
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use support::tap::TapStore;
@@ -2374,7 +2375,7 @@ fn drop_during_revocation(
     // `Drop` runs the direct release and blocks, so it gets its own thread.
     // The clock does not move until it returns.
     fleet.forget("worker-a");
-    let (dropped_tx, dropped) = std::sync::mpsc::channel();
+    let (dropped_tx, dropped) = mpsc::channel();
     std::thread::spawn(move || {
         drop(a);
         let _ = dropped_tx.send(());

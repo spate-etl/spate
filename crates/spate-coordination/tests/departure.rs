@@ -19,6 +19,7 @@ use spate_coordination::{
 };
 use spate_core::source::StopSignal;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use support::{Held, LEASE, PhasedPlanner, TestClock, config_for, drive, runtime};
@@ -4171,9 +4172,9 @@ fn a_crashed_workers_mid_poll_task_ends_before_crash_returns() {
         .expect("test runtime");
     let (worker, _) = claimed_clocked(&rt, support::store(), &clock, "worker-a", &["r0"]);
     let crashed = Arc::new(AtomicBool::new(false));
-    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
-    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
-    let (saw_tx, saw_rx) = std::sync::mpsc::channel();
+    let (entered_tx, entered_rx) = std_mpsc::channel();
+    let (release_tx, release_rx) = std_mpsc::channel::<()>();
+    let (saw_tx, saw_rx) = std_mpsc::channel();
     // Holds its worker thread inside one poll until shutdown drops the task below.
     rt.spawn({
         let crashed = crashed.clone();

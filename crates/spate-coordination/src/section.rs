@@ -1,6 +1,7 @@
 //! A coordinator described by the pipeline's `coordination:` section.
 
 use crate::config::CoordinationConfig;
+use crate::store::memory::MemoryStore;
 use spate_core::config::{ConfigError, CoordinationSection};
 use spate_core::coordination::{CoordinationError, SplitCoordinator};
 use spate_core::metrics::CoordinationMetrics;
@@ -58,7 +59,7 @@ impl CoordinatorSpec {
                              pipeline shares it, its progress is lost when the process exits, \
                              and a restart replays the whole job"
                         );
-                        let store = crate::store::memory::MemoryStore::new(tuning.lease_duration);
+                        let store = MemoryStore::new(tuning.lease_duration);
                         let coordinator = crate::StoreCoordinator::new(store, tuning, io, metrics)?;
                         Ok(Box::new(coordinator) as Box<dyn SplitCoordinator>)
                     }),

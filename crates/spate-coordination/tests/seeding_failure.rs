@@ -21,6 +21,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering::SeqCst;
 use std::time::{Duration, Instant};
 use support::{CountingStore, PhasedPlanner, TestClock, runtime, store_with_clock};
+use tokio::sync::watch;
 
 const SPLITS: usize = 100;
 
@@ -241,7 +242,7 @@ fn a_run_that_keeps_seeding_outlasts_replan_interval() {
 #[derive(Clone)]
 struct GatedStore {
     inner: CountingStore,
-    shut: Arc<tokio::sync::watch::Sender<bool>>,
+    shut: Arc<watch::Sender<bool>>,
 }
 
 impl CoordinationStore for GatedStore {
@@ -306,7 +307,7 @@ fn a_run_deposed_during_its_recount_publishes_nothing() {
     counting.fail_create_always("spec.c000");
     let store = GatedStore {
         inner: counting.clone(),
-        shut: Arc::new(tokio::sync::watch::Sender::new(false)),
+        shut: Arc::new(watch::Sender::new(false)),
     };
     let mut config = support::config(Some("solo"));
     config.replan_interval = Duration::from_secs(60);

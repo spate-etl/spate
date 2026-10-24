@@ -5,7 +5,7 @@ use super::NatsTls;
 use crate::store::StoreError;
 use async_nats::rustls::pki_types::pem::PemObject;
 use async_nats::rustls::pki_types::{CertificateDer, PrivateKeyDer};
-use async_nats::rustls::{ClientConfig, RootCertStore};
+use async_nats::rustls::{ClientConfig, RootCertStore, crypto};
 use rustls_native_certs::CertificateResult;
 use std::path::Path;
 use std::sync::Arc;
@@ -21,12 +21,10 @@ pub(super) fn client_config(
     let (roots, fallback) = root_store(tls, tls_certain, system)?;
     // rustls has no process-wide default provider when a build enables both
     // `ring` and `aws-lc-rs`.
-    let builder = ClientConfig::builder_with_provider(Arc::new(
-        async_nats::rustls::crypto::ring::default_provider(),
-    ))
-    .with_safe_default_protocol_versions()
-    .expect("ring supports rustls's default protocol versions")
-    .with_root_certificates(roots);
+    let builder = ClientConfig::builder_with_provider(Arc::new(crypto::ring::default_provider()))
+        .with_safe_default_protocol_versions()
+        .expect("ring supports rustls's default protocol versions")
+        .with_root_certificates(roots);
     let identity = tls.and_then(|t| t.client_cert.as_deref().zip(t.client_key.as_deref()));
     let config = match identity {
         Some((cert_file, key_file)) => {

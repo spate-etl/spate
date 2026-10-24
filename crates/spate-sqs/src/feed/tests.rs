@@ -1673,7 +1673,10 @@ async fn a_hand_back_at_its_deadline_is_gone_and_unsent() {
         // The tick at 20 s extends the unit, as handed out; no later tick
         // does.
         tokio::time::advance(Duration::from_secs(21)).await;
-        until("the tick extends the unit", || queue.visibility().len() == 1).await;
+        until("the tick extends the unit", || {
+            queue.visibility().len() == 1
+        })
+        .await;
         settle_tasks().await;
         let deadline = feed.deadline_of(d.receipt).unwrap();
         tokio::time::advance(deadline - before - Instant::now()).await;
@@ -1700,7 +1703,10 @@ async fn a_gone_unknown_or_buffered_receipt_handed_back_is_gone() {
     let buffered = Receipt(feed.lock().buffered[0]);
     queue.fail_next_visibility(vec![failure(0, "ReceiptHandleIsInvalid")]);
     step(Duration::from_secs(20)).await;
-    until("the tick extends the units", || queue.visibility().len() == 1).await;
+    until("the tick extends the units", || {
+        queue.visibility().len() == 1
+    })
+    .await;
     for receipt in [taken.receipt, Receipt(999), buffered] {
         assert_eq!(
             feed.hand_back(receipt).unwrap_err().kind,
@@ -1723,7 +1729,10 @@ async fn a_hand_back_whose_deadline_passes_while_queued_is_dropped_unsent() {
     queue.inner.ready(Message::new("b"));
     let b = receive_n(&feed, &park, 1).await.remove(0);
     tokio::time::advance(Duration::from_secs(21)).await;
-    until("the tick extends `b`", || queue.inner.visibility().len() == 1).await;
+    until("the tick extends `b`", || {
+        queue.inner.visibility().len() == 1
+    })
+    .await;
     // `a` and `c` hold until 5 s after `b`.
     tokio::time::advance(Duration::from_secs(5)).await;
     queue.inner.ready(Message::new("a"));
@@ -1779,7 +1788,10 @@ async fn a_refused_hand_back_entry_is_dropped() {
     feed.set_waker(waker);
     queue.ready(Message::new("u"));
     let d = receive_n(&feed, &park, 1).await.remove(0);
-    queue.fail_next_visibility(vec![failure(0, "AWS.SimpleQueueService.MessageNotInflight")]);
+    queue.fail_next_visibility(vec![failure(
+        0,
+        "AWS.SimpleQueueService.MessageNotInflight",
+    )]);
     feed.hand_back(d.receipt).unwrap();
     settle_tasks().await;
     step(Duration::from_secs(60)).await;
@@ -1998,11 +2010,18 @@ async fn a_hand_back_waits_at_most_the_stop_bound_behind_an_extension() {
     feed.stop_receiving();
     queue.hold_visibility();
     step(Duration::from_secs(20)).await;
-    until("the extension is held", || queue.inner.visibility().len() == 1).await;
+    until("the extension is held", || {
+        queue.inner.visibility().len() == 1
+    })
+    .await;
     queue.visibility_held.store(false, Ordering::SeqCst);
     feed.hand_back(got[1].receipt).unwrap();
     settle_tasks().await;
-    assert_eq!(queue.inner.visibility().len(), 1, "sent behind the extension");
+    assert_eq!(
+        queue.inner.visibility().len(),
+        1,
+        "sent behind the extension"
+    );
     tokio::time::advance(STOP_EXTENSION_BOUND).await;
     settle_tasks().await;
     assert_eq!(handed_back(&queue.inner.visibility()), ["h1"]);
@@ -2242,7 +2261,10 @@ async fn a_unit_received_again_at_close_is_handed_back_again() {
     queue.ready(Message::new("u").redelivered(2).same_message_as("m0"));
     let mut closed = feed.close(Duration::from_secs(10)).unwrap();
     settle_tasks().await;
-    assert!(closed.try_outcome().is_none(), "settled with a receive in flight");
+    assert!(
+        closed.try_outcome().is_none(),
+        "settled with a receive in flight"
+    );
     step(Duration::from_millis(500)).await;
     assert_eq!(handed_back(&queue.visibility()), ["h0", "h1"]);
     assert!(closed.try_outcome().unwrap().is_ok());
@@ -2368,10 +2390,16 @@ async fn close_waits_for_a_hand_back_in_flight() {
     let d = receive_n(&feed, &park, 1).await.remove(0);
     queue.hold_visibility();
     feed.hand_back(d.receipt).unwrap();
-    until("the hand-back is held", || queue.inner.visibility().len() == 1).await;
+    until("the hand-back is held", || {
+        queue.inner.visibility().len() == 1
+    })
+    .await;
     let mut closed = feed.close(Duration::from_secs(10)).unwrap();
     settle_tasks().await;
-    assert!(closed.try_outcome().is_none(), "settled with a hand-back in flight");
+    assert!(
+        closed.try_outcome().is_none(),
+        "settled with a hand-back in flight"
+    );
     queue.release_visibility();
     settle_tasks().await;
     assert!(closed.try_outcome().unwrap().is_ok());
@@ -2389,7 +2417,10 @@ async fn a_close_reaching_its_bound_with_entries_unsent_settles_err() {
     receive_n(&feed, &park, 1).await;
     queue.hold_visibility();
     step(Duration::from_secs(20)).await;
-    until("the extension is held", || queue.inner.visibility().len() == 1).await;
+    until("the extension is held", || {
+        queue.inner.visibility().len() == 1
+    })
+    .await;
     let within = Duration::from_secs(2);
     let mut closed = feed.close(within).unwrap();
     step(within - Duration::from_millis(100)).await;
@@ -2397,7 +2428,11 @@ async fn a_close_reaching_its_bound_with_entries_unsent_settles_err() {
     // tokio rounds a timer up to the next millisecond.
     step(Duration::from_millis(200)).await;
     let e = closed.try_outcome().unwrap().unwrap_err();
-    assert!(e.to_string().contains("1 deletes, fails or hand-backs unsent"), "{e}");
+    assert!(
+        e.to_string()
+            .contains("1 deletes, fails or hand-backs unsent"),
+        "{e}"
+    );
 }
 
 /// Pins that a receive answered with nothing does not wake the reader.

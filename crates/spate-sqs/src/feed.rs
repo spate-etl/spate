@@ -1182,9 +1182,7 @@ async fn renewal_task(shared: Arc<Shared>) {
             let due = st
                 .held
                 .iter_mut()
-                .filter(|(_, h)| {
-                    !h.gone && (stopping || h.marked || (active && h.unit.is_some()))
-                })
+                .filter(|(_, h)| !h.gone && (stopping || h.marked || (active && h.unit.is_some())))
                 .filter_map(|(&receipt, h)| {
                     h.marked = false;
                     if now >= h.deadline {

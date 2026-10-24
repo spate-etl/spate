@@ -102,7 +102,12 @@ impl Recording {
     }
 
     fn receipts(&self) -> Vec<Receipt> {
-        self.seen.lock().unwrap().iter().map(|(_, r, _)| *r).collect()
+        self.seen
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(_, r, _)| *r)
+            .collect()
     }
 
     fn stopped_receiving(&self) -> usize {
@@ -123,11 +128,20 @@ impl Recording {
     }
 
     fn deliveries(&self) -> Vec<u32> {
-        self.seen.lock().unwrap().iter().map(|(n, _, _)| *n).collect()
+        self.seen
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(n, _, _)| *n)
+            .collect()
     }
 
     fn first_seen(&self) -> Option<(u32, Instant)> {
-        self.seen.lock().unwrap().first().map(|(n, _, at)| (*n, *at))
+        self.seen
+            .lock()
+            .unwrap()
+            .first()
+            .map(|(n, _, at)| (*n, *at))
     }
 }
 
@@ -1196,8 +1210,7 @@ fn an_idle_worker_reads_a_unit_redelivered_after_its_owner_dies() {
     list_once(&data, &section);
 
     // The owner takes the unit and stops as a crashed worker would.
-    let config =
-        PipelineConfig::from_str(&pipeline_yaml(&data, "", &section, CHECKPOINT)).unwrap();
+    let config = PipelineConfig::from_str(&pipeline_yaml(&data, "", &section, CHECKPOINT)).unwrap();
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(1)
         .enable_all()

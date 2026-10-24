@@ -23,6 +23,7 @@ use spate_core::record::{PartitionId, RawPayload, stable_key_hash};
 use spate_core::sink::{KeyHashRouter, ShardRouter};
 use spate_test_support::pin;
 use std::collections::BTreeSet;
+use std::sync::atomic::Ordering;
 
 #[path = "../benches/support/ack_traffic.rs"]
 mod ack_traffic;
@@ -574,11 +575,11 @@ fn every_chunk_target_seals_on_a_record_boundary() {
 #[test]
 fn the_coded_chunk_case_seals_sixteen_chunks() {
     let target = BORROWED_BATCH_BYTES / 16;
-    let before = chain_rig::COPY_CODEC_CALLS.load(std::sync::atomic::Ordering::Relaxed);
+    let before = chain_rig::COPY_CODEC_CALLS.load(Ordering::Relaxed);
     let chunks = chain_rig::coded_rig_with(target).drive_chunks();
     assert_eq!(chunks.len(), 16, "chain_chunk_sixteenth_batch_coded seals");
     assert_eq!(
-        chain_rig::COPY_CODEC_CALLS.load(std::sync::atomic::Ordering::Relaxed) - before,
+        chain_rig::COPY_CODEC_CALLS.load(Ordering::Relaxed) - before,
         16,
         "every seal runs the codec"
     );

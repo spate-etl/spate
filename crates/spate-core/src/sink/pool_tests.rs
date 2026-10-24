@@ -9,9 +9,10 @@ use crate::metrics::{ComponentLabels, E2eBasis, SinkShardMetrics};
 use crate::pipeline::fakes::wait_for;
 use bytes::Bytes;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tokio::sync::watch;
 
 #[derive(Clone, Debug)]
 enum Outcome {
@@ -66,7 +67,7 @@ struct MockWriter {
     max_concurrent: AtomicUsize,
     /// Cuts an `Outcome::BlockThread` short, so a test that has proved its
     /// point does not pay for the rest of the block at runtime teardown.
-    release: std::sync::atomic::AtomicBool,
+    release: AtomicBool,
 }
 
 impl MockWriter {
@@ -77,7 +78,7 @@ impl MockWriter {
             log: Mutex::new(Vec::new()),
             concurrent: AtomicUsize::new(0),
             max_concurrent: AtomicUsize::new(0),
-            release: std::sync::atomic::AtomicBool::new(false),
+            release: AtomicBool::new(false),
         })
     }
 
@@ -169,11 +170,8 @@ struct Fixture {
 }
 
 fn next_component() -> String {
-    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    format!(
-        "sink-{}",
-        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    )
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    format!("sink-{}", NEXT.fetch_add(1, Ordering::Relaxed))
 }
 
 fn fixture(shards: usize, replicas: usize, cfg: SinkPoolConfig, queue_cap: usize) -> Fixture {
@@ -1172,7 +1170,7 @@ fn a_worker_that_ignores_the_deadline_is_force_aborted() {
                 &["r0".into()],
                 E2eBasis::Ingest,
             ))];
-            let (drain_tx, _drain_rx) = tokio::sync::watch::channel(None);
+            let (drain_tx, _drain_rx) = watch::channel(None);
             let wedged = tokio::spawn(async {
                 std::future::pending::<()>().await;
                 unreachable!()

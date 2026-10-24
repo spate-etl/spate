@@ -23,6 +23,7 @@ use crate::source::PayloadBatch;
 use crate::telemetry::RateLimit;
 use std::marker::PhantomData;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 /// Per-batch lifecycle cascade implemented by every stage. Combinators
@@ -58,7 +59,7 @@ pub(crate) struct OpMeter {
     /// Set by the first [`fatal_error`](Self::fatal_error) and never cleared,
     /// so a stage counts one fatal however often it is re-entered. Atomic to
     /// keep the stage structs `Sync`, which `ChainFactory` promises.
-    tripped: std::sync::atomic::AtomicBool,
+    tripped: AtomicBool,
     records_in: u64,
     records_out: u64,
     filtered: u64,
@@ -114,10 +115,7 @@ impl OpMeter {
     /// the handle, since a fatal can be latched after the last `on_batch_end`
     /// where an accumulated count would never flush.
     pub(crate) fn fatal_error(&self) {
-        if self
-            .tripped
-            .swap(true, std::sync::atomic::Ordering::Relaxed)
-        {
+        if self.tripped.swap(true, Ordering::Relaxed) {
             return;
         }
         if let Some(h) = &self.handle {

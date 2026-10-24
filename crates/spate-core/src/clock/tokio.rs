@@ -10,6 +10,7 @@ use std::pin::Pin;
 // Only `TestClock` needs `Duration`; the trait and `SystemClock` do not.
 #[cfg(any(test, feature = "testing"))]
 use std::time::Duration;
+use tokio::sync::watch;
 use tokio::time::Instant;
 
 /// A future that resolves when a [`Clock`] reaches some instant.
@@ -58,7 +59,7 @@ pub struct TestClock {
     /// Nanoseconds elapsed on this clock's timeline. The watch channel is
     /// the single source of truth for "now" *and* the wakeup for parked
     /// [`Clock::sleep_until`] futures, so the two can never disagree.
-    offset_nanos: tokio::sync::watch::Sender<u64>,
+    offset_nanos: watch::Sender<u64>,
 }
 
 #[cfg(any(test, feature = "testing"))]
@@ -69,7 +70,7 @@ impl TestClock {
     pub fn frozen() -> std::sync::Arc<TestClock> {
         std::sync::Arc::new(TestClock {
             base: Instant::now(),
-            offset_nanos: tokio::sync::watch::Sender::new(0),
+            offset_nanos: watch::Sender::new(0),
         })
     }
 

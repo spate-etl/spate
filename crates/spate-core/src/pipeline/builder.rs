@@ -891,6 +891,7 @@ mod tests {
     use crate::sink::{SealedBatch, SinkParts, SinkPoolConfig};
     use crate::source::LaneId;
     use std::sync::Mutex;
+    use std::sync::atomic::Ordering;
     use std::time::Duration;
 
     struct NullWriter;
@@ -1118,10 +1119,7 @@ mod tests {
         let shutdown = runtime.shutdown_handle();
         let join = std::thread::spawn(move || runtime.run());
         wait_for("payloads consumed", Duration::from_secs(5), || {
-            chain_shared
-                .consumed
-                .load(std::sync::atomic::Ordering::Relaxed)
-                == 20
+            chain_shared.consumed.load(Ordering::Relaxed) == 20
         });
         shutdown.trigger();
         let report = join.join().unwrap().unwrap();
@@ -1485,7 +1483,7 @@ mod tests {
         let shutdown = runtime.shutdown_handle();
         std::thread::spawn(move || {
             wait_for("payloads consumed", Duration::from_secs(5), || {
-                consumed.consumed.load(std::sync::atomic::Ordering::Relaxed) == 5
+                consumed.consumed.load(Ordering::Relaxed) == 5
             });
             shutdown.trigger();
         });

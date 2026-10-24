@@ -106,6 +106,7 @@ impl Backoff {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::num;
     use proptest::prelude::*;
 
     fn cfg(jitter: f64) -> RetryConfig {
@@ -308,7 +309,7 @@ mod tests {
     /// realistic policy is ever built, and under 0.1% of them pass
     /// [`RetryConfig::validate`].
     fn any_duration() -> impl Strategy<Value = Duration> {
-        (0u32..128, proptest::num::u128::ANY).prop_map(|(magnitude, raw)| {
+        (0u32..128, num::u128::ANY).prop_map(|(magnitude, raw)| {
             let nanos = raw >> (127 - magnitude);
             Duration::new(
                 (nanos / 1_000_000_000).min(u64::MAX as u128) as u64,
@@ -328,9 +329,9 @@ mod tests {
         fn any_config_saturates_without_collapsing(
             initial in any_duration(),
             max in any_duration(),
-            multiplier in proptest::num::f64::ANY,
-            jitter in proptest::num::f64::ANY,
-            seed in proptest::num::u64::ANY,
+            multiplier in num::f64::ANY,
+            jitter in num::f64::ANY,
+            seed in num::u64::ANY,
         ) {
             let cfg = RetryConfig { initial, max, multiplier, jitter, max_attempts: 0 };
             // The only policy with no non-zero delay available to it.
@@ -357,7 +358,7 @@ mod tests {
             span_nanos in 0u64..=86_400_000_000_000,
             multiplier in 1.0f64..=1e9,
             jitter in 0.0f64..=1.0,
-            seed in proptest::num::u64::ANY,
+            seed in num::u64::ANY,
         ) {
             let initial = Duration::from_nanos(initial_nanos);
             let cfg = RetryConfig {

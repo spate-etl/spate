@@ -23,6 +23,7 @@ use std::time::{Duration, Instant};
 
 use http_body_util::Full;
 use hyper::body::Bytes;
+use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use tokio::net::TcpListener;
@@ -206,7 +207,7 @@ impl AdminServer {
                             let health = Arc::clone(&health);
                             async move { respond(&req, render.as_ref(), &health) }
                         });
-                        if let Err(err) = hyper::server::conn::http1::Builder::new()
+                        if let Err(err) = http1::Builder::new()
                             .serve_connection(io, service)
                             .await
                         {

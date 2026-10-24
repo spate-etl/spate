@@ -1281,6 +1281,7 @@ mod tests {
     use std::cell::RefCell;
     use std::collections::{HashMap, HashSet, VecDeque};
     use std::rc::Rc;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::Instant;
 
@@ -1312,7 +1313,7 @@ mod tests {
         /// The signal `set_stop` handed over.
         stop: Option<crate::source::StopSignal>,
         /// A split whose commit sets this flag before it is answered.
-        stop_on_commit: Option<(String, Arc<std::sync::atomic::AtomicBool>)>,
+        stop_on_commit: Option<(String, Arc<AtomicBool>)>,
     }
 
     #[derive(Clone, Default)]
@@ -1379,7 +1380,7 @@ mod tests {
             self.0.lock().unwrap().stop.clone()
         }
 
-        fn stop_on_commit(&self, split: &str, flag: &Arc<std::sync::atomic::AtomicBool>) {
+        fn stop_on_commit(&self, split: &str, flag: &Arc<AtomicBool>) {
             self.0.lock().unwrap().stop_on_commit = Some((split.to_string(), Arc::clone(flag)));
         }
     }
@@ -1415,7 +1416,7 @@ mod tests {
             if let Some((target, flag)) = &s.stop_on_commit
                 && target == split.as_str()
             {
-                flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                flag.store(true, Ordering::SeqCst);
             }
             if let Some(kinds) = s.commit_outcomes.get_mut(split.as_str())
                 && let Some(kind) = kinds.pop_front()
@@ -2047,7 +2048,7 @@ mod tests {
         let script = Script::default();
         let mut d = driver(&script);
         let mut s = TestSource::default();
-        let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = Arc::new(AtomicBool::new(false));
         d.set_stop(crate::source::StopSignal::new(Arc::clone(&flag)));
         script.push(vec![gained("a", 1, None), gained("b", 1, None)]);
         poll(&mut d, &mut s);
@@ -2081,9 +2082,9 @@ mod tests {
         let script = Script::default();
         let mut d = driver(&script);
         let mut s = TestSource::default();
-        d.set_stop(crate::source::StopSignal::new(Arc::new(
-            std::sync::atomic::AtomicBool::new(true),
-        )));
+        d.set_stop(crate::source::StopSignal::new(Arc::new(AtomicBool::new(
+            true,
+        ))));
         script.push(vec![gained("a", 1, None), gained("b", 1, None)]);
         poll(&mut d, &mut s);
         let pa = s.opened[0].3;
@@ -2100,9 +2101,9 @@ mod tests {
     fn set_stop_reaches_the_coordinator() {
         let script = Script::default();
         let mut d = driver(&script);
-        let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = Arc::new(AtomicBool::new(false));
         d.set_stop(crate::source::StopSignal::new(Arc::clone(&flag)));
-        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        flag.store(true, Ordering::SeqCst);
         assert!(script.stop().is_some_and(|stop| stop.is_set()));
     }
 
@@ -2113,9 +2114,9 @@ mod tests {
         let script = Script::default();
         let mut d = driver(&script);
         let mut s = TestSource::default();
-        d.set_stop(crate::source::StopSignal::new(Arc::new(
-            std::sync::atomic::AtomicBool::new(true),
-        )));
+        d.set_stop(crate::source::StopSignal::new(Arc::new(AtomicBool::new(
+            true,
+        ))));
         script.push(vec![gained("a", 1, None)]);
         poll(&mut d, &mut s);
         script.fail_next_report("a", CoordinationErrorKind::Retryable);
@@ -3157,7 +3158,7 @@ mod tests {
         let script = Script::default();
         let mut d = driver(&script);
         let mut s = TestSource::default();
-        let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = Arc::new(AtomicBool::new(false));
         d.set_stop(crate::source::StopSignal::new(Arc::clone(&flag)));
         script.push(vec![gained("a", 1, None)]);
         poll(&mut d, &mut s);

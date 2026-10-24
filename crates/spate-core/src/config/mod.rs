@@ -88,6 +88,7 @@ pub use feed::FeedSection;
 pub use serde_yaml::Value as YamlValue;
 
 use bytesize::ByteSize;
+use humantime_serde::re::humantime::format_duration;
 use serde::Deserialize;
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -776,9 +777,9 @@ impl PipelineConfig {
         if window < floor || window > CEILING {
             return Err(ConfigError::Validation(format!(
                 "`feed.settling_window` must be from {} to {}; found {}",
-                humantime_serde::re::humantime::format_duration(floor),
-                humantime_serde::re::humantime::format_duration(CEILING),
-                humantime_serde::re::humantime::format_duration(window)
+                format_duration(floor),
+                format_duration(CEILING),
+                format_duration(window)
             )));
         }
         Ok(())

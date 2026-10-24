@@ -17,6 +17,7 @@ use spate_core::source::PayloadBatch;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use tokio::sync::mpsc;
 
 struct CountingAlloc;
 
@@ -145,7 +146,7 @@ impl<'a> PayloadBatch<'a> for TestBatch<'a> {
 
 fn run_iters(
     c: &mut Box<dyn spate_core::ops::RunnableChain>,
-    rx: &mut tokio::sync::mpsc::Receiver<spate_core::sink::EncodedChunk>,
+    rx: &mut mpsc::Receiver<spate_core::sink::EncodedChunk>,
     payloads: &[Vec<u8>],
     iters: usize,
 ) -> u64 {

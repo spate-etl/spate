@@ -7,16 +7,20 @@ use super::fakes::*;
 use super::*;
 use crate::config::PipelineConfig;
 use crate::error::{ErrorClass, SourceError};
+use crate::feed::memory::MemoryFeed;
 use crate::metrics::names;
 use crate::ops::RunnableChain;
-use crate::pipeline::runtime::PipelineRuntime;
+use crate::pipeline::runtime::{PipelineRuntime, default_thread_count};
 use crate::record::PartitionId;
 use crate::sink::shard_queues;
 use crate::source::{LaneId, Source, SourceCtx, SourceEvent};
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+#[cfg(unix)]
+use tokio::signal::unix::{SignalKind, signal};
 
 fn test_sink() -> (SinkRuntime, Arc<AtomicBool>) {
     test_sink_recording(Arc::default())
@@ -1122,7 +1126,7 @@ fn current_thread_io_runtime_fails_startup() {
     let (source, shared, _script) = FakeSource::new();
     let chain_shared = Arc::new(ChainShared::default());
     let log = Arc::new(Mutex::new(SourceLog::default()));
-    let chains_built = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let chains_built = Arc::new(AtomicUsize::new(0));
     let chains_built_in = Arc::clone(&chains_built);
     let runtime = PipelineRuntime::new(
         test_config(1),
@@ -1191,7 +1195,7 @@ fn the_source_drops_before_the_io_runtime_stops() {
     }
     impl Drop for NeedsIoOnDrop {
         fn drop(&mut self) {
-            let (tx, rx) = std::sync::mpsc::channel();
+            let (tx, rx) = mpsc::channel();
             // Outlives the moment main would stop the runtime if it did not
             // wait for this thread. A stopped runtime drops the task, and
             // with it the sender.
@@ -1400,7 +1404,7 @@ fn a_memory_feed_passed_in_with_a_location_is_refused() {
     let h = start_with(
         cfg,
         test_options(),
-        |runtime| runtime.with_feed(Arc::new(crate::feed::memory::MemoryFeed::new())),
+        |runtime| runtime.with_feed(Arc::new(MemoryFeed::new())),
         ok_chain,
     );
     let err = config_error_before_open(h);
@@ -1420,7 +1424,7 @@ fn a_memory_feed_passed_in_with_a_settling_window_is_refused() {
     let h = start_with(
         cfg,
         test_options(),
-        |runtime| runtime.with_feed(Arc::new(crate::feed::memory::MemoryFeed::new())),
+        |runtime| runtime.with_feed(Arc::new(MemoryFeed::new())),
         ok_chain,
     );
     let err = config_error_before_open(h);
@@ -1466,7 +1470,7 @@ fn the_default_configure_feed_refuses_the_section() {
     let err = source
         .configure_feed(
             &section,
-            Arc::new(crate::feed::memory::MemoryFeed::new()),
+            Arc::new(MemoryFeed::new()),
             crate::feed::FeedOrigin::Section,
         )
         .unwrap_err()
@@ -1501,7 +1505,7 @@ fn the_source_learns_where_its_feed_came_from() {
         )
         .with_options(test_options());
         if given {
-            runtime = runtime.with_feed(Arc::new(crate::feed::memory::MemoryFeed::new()));
+            runtime = runtime.with_feed(Arc::new(MemoryFeed::new()));
         }
         let report = runtime.run().expect("the source accepts the section");
         assert_eq!(report.state, ExitState::Completed);
@@ -1541,7 +1545,7 @@ fn a_feed_given_without_a_feed_section_fails_startup() {
     let h = start_with(
         test_config(1),
         test_options(),
-        |runtime| runtime.with_feed(Arc::new(crate::feed::memory::MemoryFeed::new())),
+        |runtime| runtime.with_feed(Arc::new(MemoryFeed::new())),
         ok_chain,
     );
     let err = config_error_before_open(h);
@@ -1557,7 +1561,7 @@ fn a_feed_whose_backend_differs_from_the_section_fails_startup() {
     let h = start_with(
         cfg,
         test_options(),
-        |runtime| runtime.with_feed(Arc::new(crate::feed::memory::MemoryFeed::new())),
+        |runtime| runtime.with_feed(Arc::new(MemoryFeed::new())),
         ok_chain,
     );
     let err = config_error_before_open(h);
@@ -1584,16 +1588,16 @@ fn a_key_in_the_memory_body_fails_startup() {
 fn a_refused_feed_section_builds_no_pipeline_thread() {
     let mut cfg = test_config(1);
     cfg.feed = feed_section("memory: {}");
-    let built = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let built = Arc::new(AtomicUsize::new(0));
     let counter = Arc::clone(&built);
     let h = start_with_config(cfg, move |shared, log| {
-        counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        counter.fetch_add(1, Ordering::SeqCst);
         ok_chain(shared, log)
     });
     let err = config_error_before_open(h);
     assert!(err.contains("reads no feed"), "{err}");
     assert_eq!(
-        built.load(std::sync::atomic::Ordering::SeqCst),
+        built.load(Ordering::SeqCst),
         0,
         "no chain may be built before the section is accepted"
     );
@@ -2329,7 +2333,7 @@ fn the_default_thread_count_reserves_half_a_core_per_io_worker() {
         (32, 8, 27),
     ] {
         assert_eq!(
-            crate::pipeline::runtime::default_thread_count(cores, io_threads),
+            default_thread_count(cores, io_threads),
             threads,
             "{cores} cores, io_threads: {io_threads}"
         );
@@ -2348,7 +2352,7 @@ fn an_unset_thread_count_starts_the_derived_number_of_drivers() {
         let mut cfg = test_config(1);
         cfg.pipeline.threads = None;
         cfg.pipeline.io_threads = io_threads;
-        let built = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let built = Arc::new(AtomicUsize::new(0));
         let counter = Arc::clone(&built);
         let h = start_with_config(cfg, move |shared, log| {
             counter.fetch_add(1, Ordering::Relaxed);
@@ -2366,7 +2370,7 @@ fn an_unset_thread_count_starts_the_derived_number_of_drivers() {
         let cores = std::thread::available_parallelism().map_or(2, usize::from);
         assert_eq!(
             built.load(Ordering::Relaxed),
-            crate::pipeline::runtime::default_thread_count(cores, io_threads),
+            default_thread_count(cores, io_threads),
             "{cores} cores, io_threads: {io_threads}"
         );
     }
@@ -2457,7 +2461,7 @@ fn a_feed_refuses_a_drain_timeout_within_the_read_reserve() {
     }
     let mut cfg = stop_config(crate::feed::STOP_RESERVE);
     cfg.feed = feed_section("memory: {}");
-    completes(cfg, Some(Arc::new(crate::feed::memory::MemoryFeed::new())));
+    completes(cfg, Some(Arc::new(MemoryFeed::new())));
 }
 
 /// Pins that a stop reads on while the source answers `reading_on_stop`
@@ -3114,9 +3118,7 @@ fn a_sigterm_stops_the_run() {
         .enable_all()
         .build()
         .unwrap();
-    let _listener = signals.block_on(async {
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).unwrap()
-    });
+    let _listener = signals.block_on(async { signal(SignalKind::terminate()).unwrap() });
     let mut options = test_options();
     options.handle_signals = true;
     let h = start_with(test_config(1), options, |runtime| runtime, ok_chain);

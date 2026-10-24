@@ -74,6 +74,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::Duration;
+use tokio::sync::oneshot;
 
 mod end_check;
 pub mod memory;
@@ -450,7 +451,7 @@ impl fmt::Display for Depth {
 /// Dropping it unsettled resolves the reading as
 /// [`Retryable`](FeedErrorKind::Retryable).
 #[derive(Debug)]
-pub struct DepthReporter(tokio::sync::oneshot::Sender<Result<Depth, FeedError>>);
+pub struct DepthReporter(oneshot::Sender<Result<Depth, FeedError>>);
 
 impl DepthReporter {
     /// Report the counts read, or why they could not be read.
@@ -467,7 +468,7 @@ impl DepthReporter {
 /// [`try_outcome`](DepthReading::try_outcome).
 #[derive(Debug)]
 pub struct DepthReading {
-    rx: tokio::sync::oneshot::Receiver<Result<Depth, FeedError>>,
+    rx: oneshot::Receiver<Result<Depth, FeedError>>,
     // The settled outcome, kept so a check after settling repeats it.
     outcome: Option<Result<Depth, FeedError>>,
 }
@@ -478,7 +479,7 @@ impl DepthReading {
     /// outcome.
     pub fn try_outcome(&mut self) -> Option<Result<Depth, FeedError>> {
         if self.outcome.is_none() {
-            use tokio::sync::oneshot::error::TryRecvError;
+            use oneshot::error::TryRecvError;
             self.outcome = match self.rx.try_recv() {
                 Ok(outcome) => Some(outcome),
                 Err(TryRecvError::Empty) => None,
@@ -496,7 +497,7 @@ impl DepthReading {
 /// the source checks the [`DepthReading`].
 #[must_use]
 pub fn depth_reading() -> (DepthReporter, DepthReading) {
-    let (tx, rx) = tokio::sync::oneshot::channel();
+    let (tx, rx) = oneshot::channel();
     (DepthReporter(tx), DepthReading { rx, outcome: None })
 }
 
@@ -550,7 +551,7 @@ pub fn wake_channel() -> (FeedWaker, FeedPark) {
 /// [`Retryable`](FeedErrorKind::Retryable), since the feed may or may not
 /// have finished.
 #[derive(Debug)]
-pub struct Confirmer(tokio::sync::oneshot::Sender<Result<(), FeedError>>);
+pub struct Confirmer(oneshot::Sender<Result<(), FeedError>>);
 
 impl Confirmer {
     /// Report that the feed has stored the unit, or finished closing.
@@ -574,7 +575,7 @@ impl Confirmer {
 /// stored the unit, or finished closing.
 #[derive(Debug)]
 pub struct Confirmation {
-    rx: tokio::sync::oneshot::Receiver<Result<(), FeedError>>,
+    rx: oneshot::Receiver<Result<(), FeedError>>,
     // The settled outcome, kept so a check after settling repeats it and the
     // receiver is never polled again once it has yielded.
     outcome: Option<Result<(), FeedError>>,
@@ -586,7 +587,7 @@ impl Confirmation {
     /// outcome.
     pub fn try_outcome(&mut self) -> Option<Result<(), FeedError>> {
         if self.outcome.is_none() {
-            use tokio::sync::oneshot::error::TryRecvError;
+            use oneshot::error::TryRecvError;
             self.outcome = match self.rx.try_recv() {
                 Ok(outcome) => Some(outcome),
                 Err(TryRecvError::Empty) => None,
@@ -618,7 +619,7 @@ impl Future for Confirmation {
 /// [`Confirmer`], and the caller reads the [`Confirmation`].
 #[must_use]
 pub fn confirmation() -> (Confirmer, Confirmation) {
-    let (tx, rx) = tokio::sync::oneshot::channel();
+    let (tx, rx) = oneshot::channel();
     (Confirmer(tx), Confirmation { rx, outcome: None })
 }
 

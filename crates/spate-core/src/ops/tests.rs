@@ -5,6 +5,7 @@ use crate::backpressure::InflightBudget;
 use crate::checkpoint::{AckMsg, AckRef, AckStatus};
 use crate::deser::{BytesPassthrough, Deserializer, EmitRecord, Owned, RecFamily};
 use crate::error::{DeserError, ErrorPolicy, SinkError};
+use crate::metrics::names;
 use crate::record::{PartitionId, RawPayload, Record};
 use crate::sink::{
     EncodedChunk, FrameCodec, FrameCodecFactory, KeyHashRouter, RecordRouter, RowEncoder,
@@ -14,6 +15,7 @@ use crate::source::PayloadBatch;
 use bytes::BytesMut;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use tokio::sync::mpsc;
 
 // ---- fixtures --------------------------------------------------------------
 
@@ -427,7 +429,7 @@ fn decode_rows(frame: &[u8]) -> Vec<Vec<u8>> {
     rows
 }
 
-fn drain_rows(rx: &mut tokio::sync::mpsc::Receiver<EncodedChunk>) -> Vec<Vec<u8>> {
+fn drain_rows(rx: &mut mpsc::Receiver<EncodedChunk>) -> Vec<Vec<u8>> {
     let mut rows = Vec::new();
     while let Ok(chunk) = rx.try_recv() {
         rows.extend(decode_rows(&chunk.frame));
@@ -1501,7 +1503,7 @@ fn probe_rec(payload: &[u8]) -> (Record<Vec<u8>>, crossbeam_channel::Receiver<Ac
 /// so parked chunks follow, and return the rows in arrival order.
 fn drain_relieving<R>(
     handoff: &mut SinkHandoff<Owned<Vec<u8>>, VecEncoder, R>,
-    rx: &mut tokio::sync::mpsc::Receiver<EncodedChunk>,
+    rx: &mut mpsc::Receiver<EncodedChunk>,
 ) -> Vec<Vec<u8>> {
     let mut order = Vec::new();
     while let Ok(chunk) = rx.try_recv() {
@@ -2185,12 +2187,7 @@ fn stages_flush_batch_metrics() {
 fn error_series(rendered: &str) -> Vec<String> {
     let mut out: Vec<String> = rendered
         .lines()
-        .filter(|l| {
-            l.starts_with(&format!(
-                "{}{{",
-                crate::metrics::names::OPERATOR_ERRORS_TOTAL
-            ))
-        })
+        .filter(|l| l.starts_with(&format!("{}{{", names::OPERATOR_ERRORS_TOTAL)))
         .map(str::to_owned)
         .collect();
     out.sort();
@@ -2211,7 +2208,7 @@ fn branch_labels(sink: &str) -> String {
 /// [`error_series`] order. Handles register eagerly, so a stage that has not
 /// erred still renders both values at `0`.
 fn stage_errors(labels: &str, record_level: u64, fatal: u64) -> Vec<String> {
-    let name = crate::metrics::names::OPERATOR_ERRORS_TOTAL;
+    let name = names::OPERATOR_ERRORS_TOTAL;
     vec![
         format!(r#"{name}{{{labels},error_type="fatal"}} {fatal}"#),
         format!(r#"{name}{{{labels},error_type="record_level"}} {record_level}"#),
@@ -2774,7 +2771,7 @@ fn a_fatal_deser_error_stops_the_chain_under_skip() {
         ack_status = Some(ack_rx.try_recv().expect("batch resolved").status);
     });
     assert_eq!(ack_status, Some(AckStatus::Failed));
-    let name = crate::metrics::names::DESER_RECORDS_TOTAL;
+    let name = names::DESER_RECORDS_TOTAL;
     assert_eq!(
         series_value(&rendered, name, r#"outcome="error""#),
         1,
@@ -2783,7 +2780,7 @@ fn a_fatal_deser_error_stops_the_chain_under_skip() {
     assert_eq!(
         series_value(
             &rendered,
-            crate::metrics::names::DESER_RECORDS_DROPPED_TOTAL,
+            names::DESER_RECORDS_DROPPED_TOTAL,
             r#"reason="skip_policy""#
         ),
         0,
@@ -2831,7 +2828,7 @@ fn a_fatal_on_replay_fails_the_batch_and_clears_the_stash() {
         statuses.push(ack2_rx.try_recv().expect("batch 2 resolved").status);
     });
     assert_eq!(statuses[0], AckStatus::Failed);
-    let name = crate::metrics::names::DESER_NOT_READY_TOTAL;
+    let name = names::DESER_NOT_READY_TOTAL;
     assert_eq!(series_value(&rendered, name, "fataltest"), 1, "{rendered}");
 }
 

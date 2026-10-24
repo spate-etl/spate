@@ -19,6 +19,7 @@ use spate_core::record::{PartitionId, RawPayload, Record, RecordMeta};
 use spate_core::sink::{EncodedChunk, RowEncoder, ShardRouter, shard_queues};
 use spate_core::source::PayloadBatch;
 use std::sync::Arc;
+use tokio::sync::mpsc;
 
 /// Payloads per driven batch.
 ///
@@ -270,7 +271,7 @@ impl<'a> PayloadBatch<'a> for TestBatch<'a> {
 /// runs.
 pub(crate) struct Rig {
     chain: Box<dyn RunnableChain>,
-    rxs: Vec<tokio::sync::mpsc::Receiver<EncodedChunk>>,
+    rxs: Vec<mpsc::Receiver<EncodedChunk>>,
     corpus: Vec<Vec<u8>>,
     /// Rows the batch must produce. Asserted rather than returned
     /// unchecked, so a corpus that silently stopped reaching a branch cannot

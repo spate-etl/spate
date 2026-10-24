@@ -21,6 +21,9 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
+#[cfg(unix)]
+use tokio::signal::unix::{SignalKind, signal};
+use tokio::sync::watch;
 
 /// Knobs that are not part of the user-facing YAML (loop granularities,
 /// test hooks). The defaults suit production; tests shrink the timings.
@@ -611,7 +614,7 @@ impl<S: Source + 'static> PipelineRuntime<S> {
                         return Err(StartError::AdminBind { addr, source });
                     }
                 };
-                let (admin_stop_tx, admin_stop_rx) = tokio::sync::watch::channel(false);
+                let (admin_stop_tx, admin_stop_rx) = watch::channel(false);
                 tracing::info!(addr = %admin.local_addr(), "admin server listening");
                 io.spawn(admin.run(admin_stop_rx));
                 Some(admin_stop_tx)
@@ -938,15 +941,14 @@ pub fn metrics_settings(config: &PipelineConfig) -> MetricsSettings {
 async fn wait_for_signal() {
     #[cfg(unix)]
     {
-        let mut term =
-            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::error!(error = %e, "failed to install SIGTERM handler");
-                    std::future::pending::<()>().await;
-                    return;
-                }
-            };
+        let mut term = match signal(SignalKind::terminate()) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::error!(error = %e, "failed to install SIGTERM handler");
+                std::future::pending::<()>().await;
+                return;
+            }
+        };
         tokio::select! {
             _ = term.recv() => {}
             r = tokio::signal::ctrl_c() => {

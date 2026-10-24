@@ -282,7 +282,7 @@ fn busy_total(metrics: &tokio::runtime::RuntimeMetrics) -> Duration {
 mod tests {
     use super::*;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     const SECS: fn(u64) -> Duration = Duration::from_secs;
 
@@ -633,7 +633,7 @@ mod tests {
             .expect("runtime");
         let metrics = io.handle().metrics();
         let (t0, base) = (Instant::now(), busy_total(&metrics));
-        let started = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let started = Arc::new(AtomicUsize::new(0));
         let deadline = Instant::now() + SECS(10);
         let mut tasks = Vec::with_capacity(held);
         for n in 1..=held {

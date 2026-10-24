@@ -410,6 +410,7 @@ impl ShardHealthTransition {
 mod tests {
     use super::*;
     use crate::metrics::ComponentLabels;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::Duration;
 
     /// A component name unique to each `set()` call. `SinkShardMetrics` owns
@@ -419,11 +420,8 @@ mod tests {
     /// level-drive test below reads the rendered gauge, so it must own the
     /// series it inspects.
     fn breaker_component() -> String {
-        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        format!(
-            "breaker-{}",
-            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        )
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        format!("breaker-{}", NEXT.fetch_add(1, Ordering::Relaxed))
     }
 
     fn set(replicas: usize, threshold: u32) -> BreakerSet {

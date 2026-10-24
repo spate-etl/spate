@@ -22,6 +22,8 @@ use spate_core::sink::{
 };
 use spate_core::source::PayloadBatch;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use tokio::sync::mpsc;
 
 struct LogEvent<'buf> {
     body: &'buf [u8],
@@ -113,12 +115,11 @@ struct CopyCodec {
 
 /// Calls to [`CopyCodec::encode_frame`], so a fixture can tell the coded rig
 /// from an uncoded one that ships the same bytes.
-pub(crate) static COPY_CODEC_CALLS: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
+pub(crate) static COPY_CODEC_CALLS: AtomicUsize = AtomicUsize::new(0);
 
 impl FrameCodec for CopyCodec {
     fn encode_frame(&mut self, chunk: &[u8]) -> Result<&[u8], spate_core::error::SinkError> {
-        COPY_CODEC_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        COPY_CODEC_CALLS.fetch_add(1, Ordering::Relaxed);
         self.out.clear();
         self.out.extend_from_slice(chunk);
         Ok(&self.out)
@@ -249,7 +250,7 @@ fn keep(e: &LogEvent<'_>) -> bool {
 
 pub(crate) struct Rig {
     chain: Box<dyn RunnableChain>,
-    rxs: Vec<tokio::sync::mpsc::Receiver<EncodedChunk>>,
+    rxs: Vec<mpsc::Receiver<EncodedChunk>>,
     corpus: Corpus,
 }
 

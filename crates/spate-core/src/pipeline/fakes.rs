@@ -9,14 +9,15 @@ use crate::config::{
     MetricsSection, PinningMode, PipelineConfig, PipelineSection,
 };
 use crate::error::{ErrorClass, FatalError, SourceError};
+use crate::feed::memory::MemoryFeed;
 use crate::ops::{BlockReason, PushOutcome, RunnableChain};
-use crate::pipeline::runtime::RuntimeOptions;
+use crate::pipeline::runtime::{RuntimeOptions, ShutdownHandle};
 use crate::record::{PartitionId, RawPayload};
 use crate::source::{
     DrainBarrier, LaneId, PayloadBatch, Source, SourceCtx, SourceEvent, SourceLane,
 };
 use std::collections::{BTreeMap, VecDeque};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -42,7 +43,7 @@ pub(crate) struct SourceLog {
     pub(crate) log: Vec<String>,
     /// Taken and triggered by the next `commit` with a position, modeling a
     /// stop that arrives while a tick commit waits on its store.
-    pub(crate) trigger_in_commit: Option<crate::pipeline::runtime::ShutdownHandle>,
+    pub(crate) trigger_in_commit: Option<ShutdownHandle>,
     /// The positions of each `commit` that saw the stop signal set and failed
     /// retryably, as a coordinated source does.
     pub(crate) stopped_commits: Vec<Vec<(PartitionId, i64)>>,
@@ -407,7 +408,7 @@ impl<'a> PayloadBatch<'a> for FakeBatch<'a> {
 /// test names. It records each `close` and its bound, and settles the close
 /// at once unless told to hold it.
 pub(crate) struct HandingBack {
-    inner: crate::feed::memory::MemoryFeed,
+    inner: MemoryFeed,
     backend: &'static str,
     hold_close: bool,
     log: Option<SharedLog>,
@@ -419,7 +420,7 @@ pub(crate) struct HandingBack {
 impl HandingBack {
     pub(crate) fn new(backend: &'static str) -> HandingBack {
         HandingBack {
-            inner: crate::feed::memory::MemoryFeed::new(),
+            inner: MemoryFeed::new(),
             backend,
             hold_close: false,
             log: None,
@@ -620,11 +621,8 @@ impl RunnableChain for FakeChain {
 /// collide and the second fails to start. Naming them apart keeps the two
 /// runners equivalent.
 pub(crate) fn test_pipeline_name() -> String {
-    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    format!(
-        "test-{}",
-        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    )
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    format!("test-{}", NEXT.fetch_add(1, Ordering::Relaxed))
 }
 
 pub(crate) fn test_config(threads: usize) -> PipelineConfig {

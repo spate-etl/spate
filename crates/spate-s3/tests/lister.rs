@@ -1762,8 +1762,8 @@ impl Feed for AsMemory {
     }
 }
 
-/// Pins that a solo run stopped while it reads its first listed unit reads
-/// that unit to its end and receives no other unit its lister published.
+/// Pins that a solo run stopped once it has received its first listed unit
+/// acknowledges that unit and receives no other unit its lister published.
 #[test]
 fn a_stopping_solo_run_receives_nothing_more_from_its_lister() {
     let dir = tempfile::tempdir().unwrap();

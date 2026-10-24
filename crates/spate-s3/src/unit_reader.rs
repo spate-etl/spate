@@ -358,22 +358,20 @@ impl UnitReader {
     /// end, or a fail waits for the feed. The first call begins the stop. A
     /// feed that does not hand back reads nothing on.
     ///
-    /// The controller calls this only while the stop is set.
+    /// The controller calls this only while the stop is set. It reads the
+    /// lanes' reports, so an overwrite publishes its re-enqueue here, and
+    /// makes only non-waiting feed calls.
     pub(crate) fn reading_on_stop(&mut self) -> bool {
         if !self.hands_back {
             return false;
         }
         self.begin_stop();
-        let ended = |partition: PartitionId| {
-            self.lanes
-                .get(&partition)
-                .is_some_and(|lane| lane.tracker.terminal().is_some())
-        };
+        let ended = self.ended_then_reports();
         !self.unsent_fails.is_empty()
             || self
                 .deliveries
                 .values()
-                .any(|held| !held.read_to_its_end(ended))
+                .any(|held| !held.read_to_its_end(|p| ended.contains(&p)))
     }
 
     /// End a stop's reading: hand back every held unit not read to its end,
@@ -392,16 +390,7 @@ impl UnitReader {
             return Ok(());
         }
         self.begin_stop();
-        // A lane sends its overwrite report before it decides end-of-input,
-        // so the lanes that have decided are taken before the reports are
-        // read.
-        let ended: BTreeSet<PartitionId> = self
-            .lanes
-            .iter()
-            .filter(|(_, lane)| lane.tracker.terminal().is_some())
-            .map(|(&partition, _)| partition)
-            .collect();
-        self.read_reports();
+        let ended = self.ended_then_reports();
         let mut first = self.check_re_enqueues().err();
         let unread: Vec<u32> = self
             .deliveries
@@ -428,6 +417,12 @@ impl UnitReader {
             }
             self.release(delivery);
         }
+        // After the hand-back, so a fatal answer here leaves nothing unread
+        // held.
+        if let Err(e) = self.settle() {
+            first.get_or_insert(e);
+        }
+        // Counted after the settle, whose renewal can let a kept unit go.
         let kept = self
             .deliveries
             .values()
@@ -438,11 +433,6 @@ impl UnitReader {
             handed_back,
             "the stop handed back the units not read to their end"
         );
-        // After the hand-back, so a fatal answer here leaves nothing unread
-        // held.
-        if let Err(e) = self.settle() {
-            first.get_or_insert(e);
-        }
         let failing: Vec<u32> = self
             .deliveries
             .iter()
@@ -453,6 +443,20 @@ impl UnitReader {
             self.release(delivery);
         }
         first.map_or(Ok(()), Err)
+    }
+
+    /// The lanes that have decided end-of-input, then every report the lanes
+    /// sent. A lane sends its overwrite report before it decides, so each
+    /// lane in the set has its report read.
+    fn ended_then_reports(&mut self) -> BTreeSet<PartitionId> {
+        let ended = self
+            .lanes
+            .iter()
+            .filter(|(_, lane)| lane.tracker.terminal().is_some())
+            .map(|(&partition, _)| partition)
+            .collect();
+        self.read_reports();
+        ended
     }
 
     /// Begin the stop once: the feed receives nothing more for this reader.
@@ -2335,12 +2339,18 @@ mod tests {
         }
         assert_eq!(script.delivered().len(), 1, "received while stopping");
 
+        // The feed's depth reads empty, so the end check would run its
+        // closing receive.
         let (mut reader, script, rt) = stopping_reader();
         end_solo(&mut reader, &rt);
         start(&mut reader);
         assert!(!reader.reading_on_stop());
         script.deliver(descriptor_unit(0));
         for _ in 0..3 {
+            script.answer_depth(
+                spate_core::feed::DepthOf::Feed,
+                Ok(spate_core::feed::Depth::new("empty", false)),
+            );
             assert!(!matches!(poll(&mut reader), SourceEvent::Drained));
         }
         assert!(script.delivered().is_empty(), "the end check received");
@@ -2679,6 +2689,98 @@ mod tests {
             assert_idle(poll(&mut reader));
         });
         assert_eq!(objects_remaining(&rendered, &pipeline), 0.0);
+    }
+
+    /// Pins that `reading_on_stop` reads on for a unit whose lane reported an
+    /// overwrite and then decided end-of-input since the last poll, so the
+    /// stop waits for the re-enqueue to confirm.
+    #[test]
+    fn reading_on_stop_reads_an_overwrite_sent_before_the_terminal() {
+        let (mut reader, script, _rt) = stopping_reader();
+        script.hold_publishes();
+        let (r, lanes) = open_notification(&mut reader, &script, &[("a.ndjson", 10)], 0);
+        report_overwrite(&reader, lanes[0], "a.ndjson", 20);
+        reader.lanes[&lanes[0]].tracker.set_terminal(3);
+        assert!(reader.reading_on_stop(), "its re-enqueue is unconfirmed");
+        assert_eq!(script.published().len(), 1);
+        script.confirm_held_publishes();
+        reader.commit(&[(lanes[0], 3)]).unwrap();
+        poll(&mut reader);
+        assert!(!reader.reading_on_stop());
+        reader.stop_reading().unwrap();
+        assert_eq!(script.acknowledged(), vec![r]);
+        assert!(script.handed_back().is_empty());
+    }
+
+    /// Pins that a fatal answer to a re-enqueue that the stop reads first
+    /// fails `stop_reading`, after the unit is handed back.
+    #[test]
+    fn a_fatal_re_enqueue_read_at_the_stop_fails_stop_reading() {
+        let (mut reader, script, _rt) = stopping_reader();
+        script.refuse_next_publish(FeedErrorKind::Fatal);
+        let (r, lanes) = open_notification(&mut reader, &script, &[("a.ndjson", 10)], 0);
+        report_overwrite(&reader, lanes[0], "a.ndjson", 20);
+        let outcome = reader.stop_reading();
+        assert_eq!(script.published().len(), 1, "the re-enqueue was published");
+        assert_eq!(script.handed_back(), vec![r]);
+        let Err(SourceError::Client { reason, .. }) = outcome else {
+            panic!("a fatal re-enqueue at the stop did not fail the call: {outcome:?}");
+        };
+        assert!(reason.contains("re-enqueueing"), "{reason}");
+    }
+
+    /// Pins that a unit whose hand-back the feed answers `Gone` is let go in
+    /// the hand-back and its lane revoked, though the feed still renews it.
+    #[test]
+    fn a_hand_back_answered_gone_lets_the_unit_go() {
+        let (mut reader, feed, script, _rt) = stopping_refusing();
+        start(&mut reader);
+        let (p, first, _) = hold_one(&mut reader, &script);
+        *feed.hand_back.lock().unwrap() = Some((first, FeedErrorKind::Gone));
+        reader.stop_reading().unwrap();
+        assert!(reader.deliveries.is_empty(), "the unit is still held");
+        assert!(!reader.lanes.contains_key(&p), "its lane is still held");
+        assert_eq!(lanes_revoked(poll(&mut reader)).len(), 1);
+    }
+
+    /// Pins that the stop's log counts as kept only the units held for the
+    /// final commit: no failing unit, and no unit its renewal at the stop
+    /// lets go.
+    #[test]
+    fn the_stop_counts_as_kept_only_units_held_for_the_final_commit() {
+        let (mut reader, script, _rt) = stopping_reader_holding(2);
+        script.deliver(descriptor_unit(0));
+        script.deliver(descriptor_unit(1));
+        start(&mut reader);
+        let lanes = partitions(&lanes_added(poll(&mut reader)));
+        reader.lanes[&lanes[0]].tracker.set_terminal(5);
+        report_poison(&reader, lanes[1]);
+        let logs = spate_test::capture_logs(tracing::Level::INFO, || {
+            reader.stop_reading().unwrap();
+        });
+        assert_eq!(script.failed().len(), 1);
+        assert!(script.handed_back().is_empty());
+        assert!(
+            logs.iter()
+                .any(|l| l.contains("kept=1") && l.contains("handed_back=0")),
+            "a failing unit counted: {logs:?}"
+        );
+
+        let (mut reader, script, _rt) = stopping_reader();
+        start(&mut reader);
+        let (_, a, ta) = hold_one(&mut reader, &script);
+        ta.set_terminal(5);
+        script.redeliver(a);
+        let logs = spate_test::capture_logs(tracing::Level::INFO, || {
+            reader.stop_reading().unwrap();
+        });
+        assert!(script.gone().contains(&a), "the renewal was answered Gone");
+        assert!(reader.deliveries.is_empty(), "the unit was let go");
+        assert!(
+            logs.iter()
+                .any(|l| l.contains("kept=0") && l.contains("handed_back=0")),
+            "a unit let go counted: {logs:?}"
+        );
     }
 
     // ------------------------------------------------------ overwrites --

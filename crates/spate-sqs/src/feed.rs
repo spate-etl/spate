@@ -555,10 +555,10 @@ impl SqsFeed {
     /// Stop the feed as a crashed worker would: its tasks end, and buffered
     /// units and queued deletes, fails, hand-backs and publishes are dropped
     /// unsent. Held units return to the queue at their deadlines. Afterwards
-    /// [`renew`](Feed::renew) answers `Ok` until each deadline, then
-    /// [`Gone`](FeedErrorKind::Gone); [`stop_receiving`](Feed::stop_receiving)
-    /// and [`hand_back`](Feed::hand_back) send nothing, `hand_back` answering
-    /// `Ok`; and [`close`](Feed::close) answers `None`.
+    /// [`renew`](Feed::renew) and [`hand_back`](Feed::hand_back) answer `Ok`
+    /// until each deadline, then [`Gone`](FeedErrorKind::Gone);
+    /// [`stop_receiving`](Feed::stop_receiving) and `hand_back` send nothing;
+    /// and [`close`](Feed::close) answers `None`.
     #[cfg(feature = "testing")]
     #[doc(hidden)]
     pub fn abandon(&self) {
@@ -979,7 +979,7 @@ async fn close_task(shared: Arc<Shared>) {
                 grace.map(|end| end.min(bound))
             };
             let Some(at) = wake_at else {
-                settle_close(&mut st, unsent);
+                settle_close(&mut st, unsent, grace.is_some());
                 return;
             };
             at
@@ -991,8 +991,10 @@ async fn close_task(shared: Arc<Shared>) {
 }
 
 /// Settle the close's confirmation: confirmed when every entry was applied,
-/// rejected with the count when some were given up or `unsent` remain.
-fn settle_close(st: &mut State, unsent: usize) {
+/// rejected with the count when some were given up or `unsent` remain, and
+/// rejected when `receiving`: a receive still in flight may hold a unit just
+/// handed back.
+fn settle_close(st: &mut State, unsent: usize, receiving: bool) {
     let Some(close) = st.close.as_mut() else {
         return;
     };
@@ -1000,7 +1002,12 @@ fn settle_close(st: &mut State, unsent: usize) {
         return;
     };
     let dropped = close.dropped;
-    let reason = if unsent > 0 {
+    let reason = if unsent > 0 && dropped > 0 {
+        format!(
+            "the close reached its bound with {unsent} deletes, fails or hand-backs unsent \
+             and gave up {dropped} unapplied; those units return after their visibility period"
+        )
+    } else if unsent > 0 {
         format!(
             "the close reached its bound with {unsent} deletes, fails or hand-backs unsent; \
              those units return after their visibility period"
@@ -1010,6 +1017,10 @@ fn settle_close(st: &mut State, unsent: usize) {
             "the close gave up {dropped} of its deletes, fails and hand-backs unapplied; \
              those units return after their visibility period"
         )
+    } else if receiving {
+        "the close reached its bound with a receive in flight; a unit it takes returns \
+         after its visibility period"
+            .to_owned()
     } else {
         confirmer.confirm();
         return;
@@ -1167,7 +1178,7 @@ async fn renewal_task(shared: Arc<Shared>) {
             continue;
         }
         let now = Instant::now();
-        let (stopping, mut due): (bool, Vec<(u64, String, Duration)>) = {
+        let mut due: Vec<(u64, String, Duration)> = {
             let mut st = shared.lock();
             if st.fatal.is_some() || st.abandoned {
                 return;
@@ -1179,8 +1190,7 @@ async fn renewal_task(shared: Arc<Shared>) {
             // back.
             let active = std::mem::take(&mut st.reader_active);
             let stopping = st.stopping;
-            let due = st
-                .held
+            st.held
                 .iter_mut()
                 .filter(|(_, h)| !h.gone && (stopping || h.marked || (active && h.unit.is_some())))
                 .filter_map(|(&receipt, h)| {
@@ -1191,20 +1201,22 @@ async fn renewal_task(shared: Arc<Shared>) {
                     extension(settings.visibility, h.hold_end, now)
                         .map(|ext| (receipt, h.handle.clone(), ext))
                 })
-                .collect();
-            (stopping, due)
+                .collect()
         };
         due.sort_by_key(|(receipt, _, _)| *receipt);
-        let within = stopping.then_some(STOP_EXTENSION_BOUND);
         for chunk in due.chunks(BATCH_ENTRIES) {
             // Re-read: a unit handed back or settled while an earlier chunk
-            // was in flight is extended no more.
-            let chunk: Vec<&(u64, String, Duration)> = {
+            // was in flight is extended no more, and a stop that came in
+            // the meantime bounds the calls left.
+            let (chunk, within): (Vec<&(u64, String, Duration)>, _) = {
                 let st = shared.lock();
-                chunk
-                    .iter()
-                    .filter(|(receipt, _, _)| st.held.contains_key(receipt))
-                    .collect()
+                (
+                    chunk
+                        .iter()
+                        .filter(|(receipt, _, _)| st.held.contains_key(receipt))
+                        .collect(),
+                    st.stopping.then_some(STOP_EXTENSION_BOUND),
+                )
             };
             if chunk.is_empty() {
                 continue;
@@ -1277,12 +1289,13 @@ async fn renewal_task(shared: Arc<Shared>) {
 /// `Err` when the feed has stopped.
 async fn send_hand_backs(shared: &Shared) -> Result<(), ()> {
     loop {
-        let chunk: Vec<Settle> = {
+        let (chunk, dropped): (Vec<Settle>, bool) = {
             let mut st = shared.lock();
             if st.fatal.is_some() || st.abandoned {
                 return Err(());
             }
             let now = Instant::now();
+            let queued = st.hand_backs.len();
             st.hand_backs.retain(|s| now < s.deadline);
             if let Some(bound) = st.close_bound()
                 && now >= bound
@@ -1290,11 +1303,16 @@ async fn send_hand_backs(shared: &Shared) -> Result<(), ()> {
                 let n = std::mem::take(&mut st.hand_backs).len();
                 st.dropped(n);
             }
+            let dropped = st.hand_backs.len() < queued;
             let n = st.hand_backs.len().min(BATCH_ENTRIES);
             st.handing_back += n;
-            st.hand_backs.drain(..n).collect()
+            (st.hand_backs.drain(..n).collect(), dropped)
         };
         let Some(oldest) = chunk.iter().map(|s| s.deadline).min() else {
+            // A close waits on what is unsent, and dropping changed it.
+            if dropped {
+                shared.progress.notify_one();
+            }
             return Ok(());
         };
         let entries: Vec<VisibilityEntry> = chunk

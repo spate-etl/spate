@@ -17,9 +17,9 @@ feed:
 `main()` builds the feed from that section with `SqsFeed::connect` and passes
 it to `Pipeline::feed`.
 
-- A received unit stays hidden from other workers while its reader renews it,
-  and returns to the queue at most one visibility period after the renewals
-  stop.
+- A received unit stays hidden from other workers while its reader renews it
+  or its worker is stopping, and returns to the queue at most one visibility
+  period after both end.
 - A unit is deleted only once every record in it is acknowledged.
 - A stopping worker hands back the units it has not finished, each visible to
   another worker at once, and sends its last deletes before it exits.

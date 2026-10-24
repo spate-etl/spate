@@ -2960,6 +2960,51 @@ fn the_drain_deadline_counts_from_the_trigger() {
     assert_eq!(*feed.closes.lock().unwrap(), vec![drain_timeout - opening]);
 }
 
+/// Pins that a close the feed rejects ends the run completed, with a
+/// warning that carries the feed's reason.
+#[test]
+fn a_rejected_close_warns_with_its_reason() {
+    let clock = crate::clock::TestClock::frozen();
+    let mut cfg = stop_config(Duration::from_secs(600));
+    cfg.feed = feed_section("sqs: {}");
+    let kept = Arc::new(Mutex::new(None::<Arc<HandingBack>>));
+    let keep = Arc::clone(&kept);
+    let h = start_stopping(
+        cfg,
+        false,
+        &clock,
+        move |_| {
+            let feed = Arc::new(HandingBack::new("sqs").holding_its_close());
+            *keep.lock().unwrap() = Some(Arc::clone(&feed));
+            Some(feed)
+        },
+        ok_chain,
+    );
+    let feed = kept.lock().unwrap().clone().unwrap();
+    h.shutdown.trigger();
+    wait_for("the close", Duration::from_secs(5), || {
+        !feed.closes.lock().unwrap().is_empty()
+    });
+    feed.reject_held_closes(&crate::feed::FeedError::new(
+        crate::feed::FeedErrorKind::Retryable,
+        "2 units not handed back",
+    ));
+    joined(&h);
+    assert_eq!(h.join.join().unwrap().unwrap().state, ExitState::Completed);
+    let warnings = h.warnings.0.lock().unwrap().clone();
+    assert!(
+        warnings.iter().any(|fields| {
+            fields
+                .iter()
+                .any(|(name, value)| name == "message" && value.contains("did not close cleanly"))
+                && fields.iter().any(|(name, value)| {
+                    name == "error" && value.contains("2 units not handed back")
+                })
+        }),
+        "{warnings:#?}"
+    );
+}
+
 /// Pins that the runtime waits for a close that settles after the wait
 /// begins, with no warning.
 #[test]

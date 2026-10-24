@@ -434,6 +434,13 @@ impl HandingBack {
         self
     }
 
+    /// Reject every close held so far with `error`.
+    pub(crate) fn reject_held_closes(&self, error: &crate::feed::FeedError) {
+        for confirmer in self.held.lock().unwrap().drain(..) {
+            confirmer.reject(error.clone());
+        }
+    }
+
     /// Settle every close held so far.
     pub(crate) fn settle_held_closes(&self) {
         for confirmer in self.held.lock().unwrap().drain(..) {

@@ -1110,3 +1110,61 @@ fn load_summary(log: &str) -> serde_json::Value {
     );
     summaries.into_iter().next().expect("one summary")
 }
+
+// ── ElasticMQ only ─────────────────────────────────────────────────────────
+
+/// `s3_sqs_backfill`: a bounded job on the `sqs` feed. The example's lister
+/// run writes the fingerprint and the end marker at `JOB_LOCATION`, the worker
+/// reads every unit, and the job ends `Completed` on its own once the queue
+/// has read empty for its settling window. Nothing reaches the dead-letter
+/// queue.
+#[cfg(all(feature = "s3", feature = "json", feature = "sqs"))]
+#[test]
+#[ignore = "requires Docker"]
+fn s3_sqs_bounded_example_ends_on_its_own() {
+    use spate_test_support::ElasticMq;
+
+    let mq = ElasticMq::start().expect("start ElasticMQ");
+    let dead = mq
+        .create_queue_with_attributes("jobs-dlq", &[("MessageRetentionPeriod", "1209600")])
+        .expect("create the dead-letter queue");
+    let arn = mq.queue_arn(&dead).expect("dead-letter queue ARN");
+    let policy = format!(r#"{{"deadLetterTargetArn":"{arn}","maxReceiveCount":"5"}}"#);
+    let queue = mq
+        .create_queue_with_attributes("jobs", &[("RedrivePolicy", &policy)])
+        .expect("create the queue");
+    let jobs = tempfile::tempdir().expect("job location dir");
+
+    let log = spawn(
+        "s3_sqs_backfill",
+        None,
+        &[
+            ("SQS_QUEUE_URL", format!("{}{queue}", mq.endpoint())),
+            ("JOB_LOCATION", format!("file://{}/", jobs.path().display())),
+            ("AWS_ENDPOINT_URL", mq.endpoint()),
+            ("AWS_REGION", "eu-west-2".to_owned()),
+            ("AWS_ACCESS_KEY_ID", "x".to_owned()),
+            ("AWS_SECRET_ACCESS_KEY", "x".to_owned()),
+        ],
+    )
+    .wait_exit(OUTPUT_DEADLINE);
+
+    assert_eq!(
+        log.lines()
+            .filter(|l| *l == "pipeline exit: Completed; rows written: 240")
+            .count(),
+        1,
+        "expected one exit line\n--- log ---\n{log}"
+    );
+    for marker in ["fingerprint", "end"] {
+        assert!(
+            jobs.path().join(marker).is_file(),
+            "the lister wrote no `{marker}` at the job location\n--- log ---\n{log}"
+        );
+    }
+    assert_eq!(
+        mq.approximate_counts(&dead).expect("dead-letter queue counts"),
+        (0, 0),
+        "a unit reached the dead-letter queue\n--- log ---\n{log}"
+    );
+}

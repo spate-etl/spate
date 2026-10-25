@@ -586,14 +586,24 @@ it names none. Every worker of a bounded job reads the job fingerprint at the
 reads a unit. A continuous job's workers read no job location. The in-process
 feed refuses a `location`.
 
-```yaml
-feed:
-  sqs:
-    queue_url: https://sqs.eu-west-2.amazonaws.com/123456789012/events-backfill-0042
-  location: s3://ops-bucket/spate-jobs/events-backfill-0042/
+```yaml file=crates/spate/examples/s3_sqs_backfill.rs region=feed title="s3_sqs_backfill.rs"
 ```
 
-The location is a prefix, and `…/events-backfill-0042` names the same one.
+The block is rendered from
+[`s3_sqs_backfill.rs`](repo:crates/spate/examples/s3_sqs_backfill.rs), which
+stages a `file://` backfill and runs it as one bounded job, taking its queue
+and its location from the environment. The job ends about a minute after its
+last unit, once the queue has read empty for the `settling_window`. The
+[SQS feed](../../feeds/sqs/README.mdx) page says how to stand up the queue:
+
+```sh
+JOB_LOCATION="file://$(mktemp -d)/" \
+  SQS_QUEUE_URL=http://127.0.0.1:9324/000000000000/jobs \
+  cargo run -p spate --features s3,json,sqs --example s3_sqs_backfill
+```
+
+The location is a prefix, so `s3://ops-bucket/jobs/events-0042/` and
+`s3://ops-bucket/jobs/events-0042` name the same one.
 The job fingerprint is the object named `fingerprint` there, which the job's
 lister creates before it publishes a unit. A lister run also deletes an object
 named `end` there before its first publish, and writes `end` once the feed has
@@ -899,7 +909,7 @@ unit's object is re-enqueued instead, as
 ## Testing
 
 The whole feed path runs against `file://` URLs with no infrastructure, which
-is what the example this page draws on does. The Docker-gated suites run
+is what [`s3_backfill.rs`](repo:crates/spate/examples/s3_backfill.rs) does. The Docker-gated suites run
 against a **RustFS** S3 store
 (`cargo test -p spate-s3 -- --ignored --test-threads=1`).
 

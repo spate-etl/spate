@@ -93,7 +93,7 @@ Work that finishes, and work shared across instances.
 |---|---|---|---|
 | [`s3_backfill`](s3_backfill.rs) | How to backfill historical records from object storage and stop when the prefix is done with **object storage** | `s3,json` | nothing; it stages a `file://` bucket |
 | [`s3_kafka_backfill`](s3_kafka_backfill.rs) | How to read an object-storage backfill's work from Kafka topics with **object storage and Kafka** | `s3,json,kafka` | Kafka |
-| [`s3_sqs_backfill`](s3_sqs_backfill.rs) | How to read an object-storage backfill's work from a queue with **object storage and Amazon SQS** | `s3,json,sqs` | an SQS queue and a dead-letter queue with a longer retention, and AWS credentials |
+| [`s3_sqs_backfill`](s3_sqs_backfill.rs) | How to run an object-storage backfill as a bounded job whose work arrives through a queue with **object storage and Amazon SQS** | `s3,json,sqs` | an SQS queue and a dead-letter queue with a longer retention, and AWS credentials |
 
 ## 4. Operating
 

@@ -21,10 +21,11 @@ and pass it to `Pipeline::feed`:
 
 That code comes from
 [`s3_sqs_backfill.rs`](repo:crates/spate/examples/s3_sqs_backfill.rs), which
-reads a staged `file://` backfill through a queue:
+reads a staged `file://` backfill through a queue as one bounded job:
 
 ```sh
-SQS_QUEUE_URL=https://sqs.eu-west-2.amazonaws.com/111122223333/jobs \
+JOB_LOCATION="file://$(mktemp -d)/" \
+  SQS_QUEUE_URL=https://sqs.eu-west-2.amazonaws.com/111122223333/jobs \
   cargo run -p spate --features s3,json,sqs --example s3_sqs_backfill
 ```
 

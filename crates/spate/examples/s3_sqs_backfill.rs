@@ -1,20 +1,23 @@
-//! An S3 backfill whose work arrives through an SQS queue: the pipeline file
-//! names the queue in its `feed:` section, `main()` builds the feed from that
-//! section, publishes one unit per object, and the S3 source reads each unit
-//! the queue hands it.
+//! A bounded S3 backfill whose work arrives through an SQS queue: the
+//! pipeline file names the queue and a job location in its `feed:` section,
+//! `main()` builds the feed from that section, a lister run publishes one unit
+//! per object, and the S3 source reads each unit the queue hands it.
 //!
 //! The objects are a local directory (`file://`), so the only thing to stand
 //! up is the queue. A unit is deleted from the queue only once every record
 //! in its object is written, and a unit whose worker dies returns to the
 //! queue after the visibility period, for this process or another to read.
-//! A job with no `location` never ends on its own, so this demo stops itself
-//! once every row is written.
+//! The lister writes the job's `fingerprint` and, once every unit is
+//! published, its `end` marker at the location. The job ends on its own about
+//! a minute after its last unit, once the queue has read empty for the `1m`
+//! settling window.
 //!
 //! # Run it
 //!
 //! A standard queue with a dead-letter queue that keeps messages longer than
-//! the queue, and AWS credentials and a region in the environment. Against a
-//! local ElasticMQ:
+//! the queue, a job location, and AWS credentials and a region in the
+//! environment. Each job takes a queue pair and a location of its own. Against
+//! a local ElasticMQ:
 //!
 //! ```sh
 //! docker run --rm -p 9324:9324 "$(cargo xtask container-image --pull elasticmq)"
@@ -23,28 +26,28 @@
 //! aws sqs create-queue --queue-name jobs-dlq --attributes MessageRetentionPeriod=1209600
 //! aws sqs create-queue --queue-name jobs --attributes \
 //!   '{"RedrivePolicy":"{\"deadLetterTargetArn\":\"arn:aws:sqs:elasticmq:000000000000:jobs-dlq\",\"maxReceiveCount\":\"5\"}"}'
-//! SQS_QUEUE_URL=http://127.0.0.1:9324/000000000000/jobs \
+//! JOB_LOCATION="file://$(mktemp -d)/" \
+//!   SQS_QUEUE_URL=http://127.0.0.1:9324/000000000000/jobs \
 //!   cargo run -p spate --features s3,json,sqs --example s3_sqs_backfill
 //! ```
 
 // The examples index renders these fields; see crates/spate/tests/examples_index.rs.
 // INDEX-TIER:  bounded-jobs
-// INDEX-GOAL:  read an object-storage backfill's work from a queue
+// INDEX-GOAL:  run an object-storage backfill as a bounded job whose work arrives through a queue
 // INDEX-TECH:  object storage and Amazon SQS
 // INDEX-NEEDS: an SQS queue and a dead-letter queue with a longer retention, and AWS credentials
 
 // Examples talk to their user on stdout/stderr by design.
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
-use spate::feed::{Feed, Unit};
+use spate::feed::Feed;
 use spate::json::NdjsonFramer;
 use spate::prelude::*;
-use spate::s3::{DescriptorObject, S3Source, SplitDescriptor};
+use spate::s3::S3Source;
 use spate::sqs::SqsFeed;
 use spate_test::{TestDeserializer, TestEncoder, capture_sink, decode_rows};
 use std::path::Path;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
 const OBJECTS: usize = 12;
 const RECORDS_PER_OBJECT: usize = 20;
@@ -58,6 +61,8 @@ feed:
     queue_url: "${SQS_QUEUE_URL}"
     visibility: 60s
   units_held: 8
+  location: "${JOB_LOCATION}"
+  settling_window: 1m
 # ANCHOR_END: feed
 "#;
 
@@ -75,21 +80,6 @@ sink: {{ capture: {{}} }}
 {FEED}"#,
         data = data.display(),
     )
-}
-
-/// The unit naming one staged object: a one-member split descriptor.
-fn unit_over(data: &Path, name: &str) -> Result<Unit, Box<dyn std::error::Error>> {
-    let path = data.join(name);
-    let object = DescriptorObject {
-        key: path.to_string_lossy().trim_start_matches('/').to_owned(),
-        size: std::fs::metadata(&path)?.len(),
-        etag: None,
-        last_modified_ms: 1,
-    };
-    Ok(Unit::new(
-        name,
-        SplitDescriptor::new(vec![object]).encode()?,
-    ))
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -119,18 +109,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let pipeline = pipeline.feed(Arc::clone(&feed) as Arc<dyn Feed>);
     // ANCHOR_END: connect
 
-    // This job names no `location`, so no lister run publishes its units;
-    // `main()` publishes them by hand.
-    for o in 0..OBJECTS {
-        let confirmation = feed.publish(unit_over(&data, &format!("obj-{o:02}.ndjson"))?);
-        pipeline.block_on(confirmation)?;
-    }
-    println!("published {OBJECTS} units");
+    // A lister run blocks its thread and refuses a Tokio runtime context, so
+    // it runs here on `main`'s thread, before the worker starts.
+    S3Source::from_component_config(&pipeline.config().source, pipeline.io_handle())?
+        .with_framer(|| Box::new(NdjsonFramer::new(1 << 20)))
+        .list_once(&section, Arc::clone(&feed) as Arc<dyn Feed>)?;
+    println!("listed {OBJECTS} objects");
 
     let source = S3Source::from_component_config(&pipeline.config().source, pipeline.io_handle())?
         .with_framer(|| Box::new(NdjsonFramer::new(1 << 20)));
     let (sink, script) = capture_sink(1, 1);
-    let runtime = pipeline
+    let report = pipeline
         .sink(sink)?
         .chains(|ctx| {
             let chunk_cfg = ctx.chunk();
@@ -149,27 +138,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             handle_signals: false,
             ..RuntimeOptions::default()
         })
-        .into_runtime(source)?;
-    let shutdown = runtime.shutdown_handle();
-    let run = std::thread::spawn(move || runtime.run());
+        // The bounded job completes the pipeline itself: `run` returns once
+        // the end marker is read and the queue has stayed empty for the
+        // settling window.
+        .run(source)?;
 
-    let rows = || -> usize {
-        script
-            .writes()
-            .iter()
-            .map(|w| decode_rows(&w.payload).len())
-            .sum()
-    };
-    let deadline = Instant::now() + Duration::from_secs(120);
-    while rows() < OBJECTS * RECORDS_PER_OBJECT && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(200));
-    }
-    shutdown.trigger();
-    let report = run.join().map_err(|_| "the pipeline thread panicked")??;
-    println!(
-        "pipeline exit: {:?}; rows written: {}",
-        report.state,
-        rows()
-    );
+    let rows: usize = script
+        .writes()
+        .iter()
+        .map(|w| decode_rows(&w.payload).len())
+        .sum();
+    println!("pipeline exit: {:?}; rows written: {rows}", report.state);
+    assert_eq!(report.state, ExitState::Completed);
+    assert_eq!(rows, OBJECTS * RECORDS_PER_OBJECT);
     Ok(())
 }

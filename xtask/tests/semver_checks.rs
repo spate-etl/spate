@@ -997,7 +997,7 @@ fn the_workflow_reads_the_step_output_this_writes() {
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .unwrap()
-            .join(".github/workflows/ci.yml"),
+            .join(".github/workflows/release-checks.yml"),
     )
     .unwrap();
     let readers = workflow

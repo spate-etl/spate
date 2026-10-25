@@ -1,6 +1,6 @@
 name: Performance label
 
-# Syncs the `affects-performance` label from the flag artifact ci.yml's report
+# Syncs the `affects-performance` label from the flag artifact perf.yml's report
 # step writes. `cargo xtask tidy perf-report` holds the write side of that
 # contract.
 #

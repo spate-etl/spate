@@ -1,0 +1,232 @@
+name: Tests
+
+# The workspace test suites, rustdoc, the feature matrix, MSRV and loom.
+# Called from ci.yml, whose `changes` job computes every input.
+on:
+  workflow_call:
+    inputs:
+      rust:
+        type: string
+        required: true
+    secrets:
+      CODECOV_TOKEN:
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test and coverage
+    runs-on: ubuntu-latest
+    if: inputs.rust == 'true'
+    timeout-minutes: 30
+    # `checks: write` for the JUnit publish step below.
+    permissions:
+      contents: read
+      checks: write
+    env:
+      # Coverage builds a second target tree; at the default `debuginfo=2` the
+      # disk fills and the linker dies with SIGBUS, reading as a compile failure.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      # `secrets` is not available in a step-level `if:`. See the upload step.
+      HAS_CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN != '' }}
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
+          df -h /
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          components: llvm-tools-preview, clippy
+          tools: nextest,cargo-llvm-cov
+          # Its own key: llvm-cov builds into `target/llvm-cov-target`, not the
+          # `target/debug` that lint, features and doctests share.
+          shared-key: coverage
+
+      - name: Test and coverage
+        run: >
+          cargo llvm-cov nextest --profile ci --workspace --all-features --locked
+          --lcov --output-path lcov.info
+          --ignore-filename-regex '/(tests|examples)/'
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: coverage-lcov
+          path: lcov.info
+
+      - name: Upload to Codecov
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
+        # Keyed on the token's presence, not on a fork check: Dependabot resolves
+        # `secrets.*` from a separate store, so a bot pull request has none and
+        # `fail_ci_if_error` sinks it. Do not move to `pull_request_target`.
+        if: env.HAS_CODECOV_TOKEN == 'true'
+        with:
+          files: lcov.info
+          token: ${{ secrets.CODECOV_TOKEN }}
+          # Loud: a silently failed upload leaves the coverage check permanently
+          # absent.
+          fail_ci_if_error: true
+          flags: unit
+
+      - name: Publish test report
+        uses: mikepenz/action-junit-report@6ef3fdcfcd5f0b5d14df3e659ef19b8c6820f93d # v6.6.1
+        if: always()
+        with:
+          report_paths: target/nextest/ci/junit.xml
+          check_name: Test results
+          detailed_summary: true
+          include_passed: false
+          fail_on_failure: false
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: junit-nextest
+          path: target/nextest/ci/junit.xml
+
+  mutants:
+    name: Mutants over the diff
+    runs-on: ubuntu-latest
+    # Pull requests only: the merge queue carries the same diff, and a push has
+    # none to scope a run to.
+    if: github.event_name == 'pull_request' && inputs.rust == 'true'
+    timeout-minutes: 45
+    steps:
+      # Full history: the merge base has to be resolvable.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: ./.github/actions/setup-rust
+        with:
+          components: clippy
+          tools: nextest,cargo-mutants
+          # `--in-place` builds into this checkout's `target/`, so the
+          # dependencies restored from this entry are reused.
+          shared-key: dev-allfeatures
+          cache-save: never
+      - name: Mutants
+        # Advisory: survivors are listed in the job summary. The step's own
+        # timeout sits below the job's, so a long run ends the step and not
+        # the job, which `ci-gate` would count as cancelled.
+        continue-on-error: true
+        timeout-minutes: 40
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: cargo xtask mutants --since "$BASE_SHA" --in-place
+
+  doctests:
+    name: Doc tests and rustdoc
+    runs-on: ubuntu-latest
+    if: inputs.rust == 'true'
+    timeout-minutes: 30
+    # A separate job: `cargo test --doc` builds into `target/debug` and
+    # `cargo llvm-cov` into `target/llvm-cov-target`, so pairing them with
+    # `test` compiles the workspace twice.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          shared-key: dev-allfeatures
+      - run: cargo xtask doctest
+      - run: cargo xtask doc
+
+  docsrs:
+    name: Rustdoc as docs.rs builds it
+    runs-on: ubuntu-latest
+    if: inputs.rust == 'true'
+    timeout-minutes: 30
+    # docs.rs builds each crate alone, on nightly, applying that crate's own
+    # `[package.metadata.docs.rs]`. `cargo xtask doc` builds the workspace
+    # together on stable, which unifies features across members and leaves
+    # `docsrs` unset, so the `rustdoc-args` and the nightly rustdoc features
+    # gated on that cfg reach no other job.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: rust
+        uses: ./.github/actions/setup-rust
+        with:
+          toolchain-file: .github/toolchains/nightly/rust-toolchain.toml
+          # Its own entry: a nightly rustdoc build shares no artefact with the
+          # stable dev-profile trees the other jobs cache.
+          shared-key: docsrs
+      # `+nightly` would name the floating channel and resolve past the pin.
+      - env:
+          NIGHTLY: ${{ steps.rust.outputs.toolchain }}
+        run: cargo xtask docsrs --nightly "$NIGHTLY"
+
+  features:
+    name: Feature matrix and default-feature tests
+    runs-on: ubuntu-latest
+    if: inputs.rust == 'true'
+    # Linear; the exhaustive powerset runs in scheduled.yml.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          tools: cargo-hack,nextest
+          shared-key: dev-allfeatures
+      - run: cargo xtask hack
+
+  alloc-assertions:
+    name: Allocation assertions (spate-core)
+    runs-on: ubuntu-latest
+    if: inputs.rust == 'true'
+    timeout-minutes: 30
+    # `chain_alloc`'s bounds are calibrated against optimized code, so `--release`
+    # is a requirement; a debug build allocates differently and proves nothing.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          shared-key: release
+      - run: cargo test -p spate-core --release --test chain_alloc --locked
+
+  loom:
+    name: Loom models (spate-core)
+    runs-on: ubuntu-latest
+    # INV-3. The models are the only thing that checks it, and `--cfg loom` is
+    # the only build that compiles their side of the cfg pairs.
+    if: inputs.rust == 'true'
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          # `--cfg loom` rebuilds the world against loom-typed primitives. Same
+          # key as the scheduled job, so whichever runs first warms the other.
+          shared-key: loom
+      - run: cargo xtask loom
+
+  msrv:
+    name: Check (MSRV)
+    runs-on: ubuntu-latest
+    if: inputs.rust == 'true'
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          toolchain: msrv
+          shared-key: msrv
+      # `--locked` is what makes this ask about the graph we ship: free to
+      # resolve, it would pass on an older graph than the committed lockfile.
+      - run: cargo xtask check

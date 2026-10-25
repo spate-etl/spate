@@ -255,11 +255,275 @@ fn ci_gate_needs_every_job() {
 
 /// The text of `ci.yml`.
 fn ci_yml() -> String {
-    let workflow = Path::new(env!("CARGO_MANIFEST_DIR"))
+    std::fs::read_to_string(workflows().join("ci.yml")).unwrap()
+}
+
+/// `.github/workflows` in this checkout.
+fn workflows() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()
-        .join(".github/workflows/ci.yml");
-    std::fs::read_to_string(&workflow).unwrap()
+        .join(".github/workflows")
+}
+
+fn yaml(text: &str) -> serde_yaml::Value {
+    serde_yaml::from_str(text).unwrap()
+}
+
+/// One job of `ci.yml` that calls a workflow in this directory.
+struct Unit {
+    caller: String,
+    caller_job: serde_yaml::Value,
+    file: String,
+    text: String,
+}
+
+/// Each workflow `ci.yml` calls by local path, with the job that calls it.
+fn ci_units() -> Vec<Unit> {
+    let ci = yaml(&ci_yml());
+    let jobs = ci["jobs"].as_mapping().unwrap();
+    jobs.iter()
+        .filter_map(|(caller, job)| {
+            let uses = job["uses"].as_str()?;
+            let file = uses.strip_prefix("./.github/workflows/")?.to_owned();
+            let text = std::fs::read_to_string(workflows().join(&file)).unwrap();
+            Some(Unit {
+                caller: caller.as_str().unwrap().to_owned(),
+                caller_job: job.clone(),
+                file,
+                text,
+            })
+        })
+        .collect()
+}
+
+/// Each `inputs.<key>` the text reads, the key running to the end of its
+/// identifier.
+fn inputs_read(text: &str) -> Vec<&str> {
+    text.match_indices("inputs.")
+        .map(|(at, _)| {
+            let rest = &text[at + "inputs.".len()..];
+            let end = rest
+                .find(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_')
+                .unwrap_or(rest.len());
+            &rest[..end]
+        })
+        .collect()
+}
+
+/// Every input a unit reads is a string input it declares as required, named
+/// for a classifier key, and passed by its caller from that key. A boolean
+/// input compared with `'true'` is always false, and a dropped `with:` line
+/// reads as the empty string; either skips the job with `CI gate` green.
+#[test]
+fn every_unit_input_is_declared_passed_and_read() {
+    let units = ci_units();
+    assert!(!units.is_empty(), "ci.yml calls no unit");
+    for unit in &units {
+        let file = &unit.file;
+        let parsed = yaml(&unit.text);
+        let declared = parsed["on"]["workflow_call"]["inputs"]
+            .as_mapping()
+            .cloned()
+            .unwrap_or_default();
+        let read = inputs_read(&unit.text);
+        for key in &read {
+            assert!(
+                declared.contains_key(*key),
+                "{file} reads inputs.{key} and does not declare it"
+            );
+        }
+        for (key, spec) in &declared {
+            let key = key.as_str().unwrap();
+            assert!(
+                KEYS.contains(&key),
+                "{file} declares {key}, not a classifier key"
+            );
+            assert_eq!(spec["type"].as_str(), Some("string"), "{file}: {key}");
+            assert_eq!(spec["required"].as_bool(), Some(true), "{file}: {key}");
+            assert!(
+                read.contains(&key),
+                "{file} declares {key} and reads it nowhere"
+            );
+            assert_eq!(
+                unit.caller_job["with"][key].as_str(),
+                Some(format!("${{{{ needs.changes.outputs.{key} }}}}").as_str()),
+                "{} does not pass {key} to {file}",
+                unit.caller
+            );
+        }
+        if let Some(with) = unit.caller_job["with"].as_mapping() {
+            for key in with.keys() {
+                assert!(
+                    declared.contains_key(key),
+                    "{} passes an undeclared {key:?}",
+                    unit.caller
+                );
+            }
+        }
+    }
+}
+
+/// A unit runs only as a call, and every callable workflow here has a caller.
+/// `concurrency` stays on `ci.yml`, whose group every unit shares.
+#[test]
+fn every_unit_is_called_from_ci_and_runs_only_there() {
+    let units = ci_units();
+    assert!(!units.is_empty(), "ci.yml calls no unit");
+    for unit in &units {
+        let parsed = yaml(&unit.text);
+        let on: Vec<&str> = parsed["on"]
+            .as_mapping()
+            .unwrap()
+            .keys()
+            .map(|k| k.as_str().unwrap())
+            .collect();
+        assert_eq!(on, ["workflow_call"], "{} has another trigger", unit.file);
+        assert!(
+            !unit.text.contains("concurrency:"),
+            "{} sets its own concurrency",
+            unit.file
+        );
+    }
+    let mut texts = Vec::new();
+    for entry in std::fs::read_dir(workflows()).unwrap() {
+        let path = entry.unwrap().path();
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        texts.push((name, std::fs::read_to_string(&path).unwrap()));
+    }
+    for (name, text) in &texts {
+        if yaml(text)["on"].get("workflow_call").is_none() {
+            continue;
+        }
+        let call = format!("uses: ./.github/workflows/{name}");
+        assert!(
+            texts.iter().any(|(_, t)| t.contains(&call)),
+            "nothing calls {name}"
+        );
+    }
+}
+
+/// No job `ci.yml` runs holds a deployment credential: none enters an
+/// environment, requests an OIDC token or reads a Cloudflare secret, and no
+/// unit takes the name of a workflow that does.
+#[test]
+fn no_ci_unit_enters_an_environment() {
+    let units = ci_units();
+    assert!(!units.is_empty(), "ci.yml calls no unit");
+    let mut files = vec![("ci.yml".to_owned(), ci_yml())];
+    files.extend(units.into_iter().map(|u| (u.file, u.text)));
+    for (file, text) in &files {
+        assert!(
+            !["release.yml", "release-build.yml", "scheduled.yml"].contains(&file.as_str()),
+            "ci.yml calls {file}"
+        );
+        assert!(
+            !text.contains("secrets.CLOUDFLARE_"),
+            "{file} reads a Cloudflare secret"
+        );
+        let parsed = yaml(text);
+        for (job, body) in parsed["jobs"].as_mapping().unwrap() {
+            let job = job.as_str().unwrap();
+            assert!(
+                body.get("environment").is_none(),
+                "{file}: {job} enters an environment"
+            );
+            assert!(
+                body["permissions"].get("id-token").is_none(),
+                "{file}: {job} requests an OIDC token"
+            );
+        }
+    }
+}
+
+/// The changelog and licence checks run in a unit only `CI gate` waits on, so a
+/// missing release note fails the gate without skipping the test tier.
+#[test]
+fn tier_two_does_not_wait_on_the_changelog() {
+    let units = ci_units();
+    let jobs_of = |u: &Unit| -> Vec<String> {
+        yaml(&u.text)["jobs"]
+            .as_mapping()
+            .unwrap()
+            .keys()
+            .map(|k| k.as_str().unwrap().to_owned())
+            .collect()
+    };
+    let policy = units
+        .iter()
+        .find(|u| jobs_of(u).iter().any(|j| j == "changelog"))
+        .expect("no unit holds the changelog job");
+    assert!(
+        jobs_of(policy).iter().any(|j| j == "deny"),
+        "deny is not beside changelog"
+    );
+    for unit in &units {
+        let needs = &unit.caller_job["needs"];
+        let waits = match needs {
+            serde_yaml::Value::String(one) => one == &policy.caller,
+            serde_yaml::Value::Sequence(all) => all
+                .iter()
+                .any(|n| n.as_str() == Some(policy.caller.as_str())),
+            _ => false,
+        };
+        assert!(!waits, "{} waits on {}", unit.caller, policy.caller);
+    }
+}
+
+/// `CI gate` keeps the context name the ruleset requires, runs whatever its
+/// dependencies did unless the run was cancelled, and fails on `cancelled`.
+#[test]
+fn the_gate_keeps_its_name_condition_and_cancel_rule() {
+    let ci = yaml(&ci_yml());
+    let gate = &ci["jobs"]["ci-gate"];
+    assert_eq!(gate["name"].as_str(), Some("CI gate"));
+    assert_eq!(gate["if"].as_str(), Some("${{ !cancelled() }}"));
+    let script = gate["steps"][0]["run"].as_str().unwrap();
+    assert!(
+        script.contains(r#".value.result == "cancelled""#),
+        "{script}"
+    );
+}
+
+/// `setup-rust` sets the debuginfo level every job builds with before the
+/// cache step hashes `CARGO*` variables into its key, and no workflow it serves
+/// sets them at the top, where a called workflow would not see them.
+#[test]
+fn setup_rust_exports_the_profile_env_before_the_cache() {
+    let action =
+        std::fs::read_to_string(workflows().join("../actions/setup-rust/action.yml")).unwrap();
+    let steps = yaml(&action)["runs"]["steps"]
+        .as_sequence()
+        .unwrap()
+        .clone();
+    let export = steps
+        .iter()
+        .position(|s| {
+            s["run"].as_str().is_some_and(|r| {
+                r.contains(r#">>"$GITHUB_ENV""#)
+                    && r.contains("CARGO_TERM_COLOR=always")
+                    && r.contains("CARGO_PROFILE_DEV_DEBUG=line-tables-only")
+                    && r.contains("CARGO_PROFILE_TEST_DEBUG=line-tables-only")
+            })
+        })
+        .expect("setup-rust exports no CARGO_PROFILE_* debuginfo level");
+    let cache = steps
+        .iter()
+        .position(|s| {
+            s["uses"]
+                .as_str()
+                .is_some_and(|u| u.starts_with("Swatinem/rust-cache@"))
+        })
+        .expect("setup-rust has no rust-cache step");
+    assert!(export < cache, "the export follows the cache step");
+    let mut files = vec![("ci.yml".to_owned(), ci_yml())];
+    files.extend(ci_units().into_iter().map(|u| (u.file, u.text)));
+    for (file, text) in &files {
+        assert!(
+            yaml(text).get("env").is_none(),
+            "{file} sets a workflow-level env"
+        );
+    }
 }
 
 /// A directory of this run's own, removed with its contents.

@@ -1,0 +1,132 @@
+name: Containers
+
+# The Docker container suites and the extra ClickHouse server lanes.
+# Called from ci.yml, whose `changes` job computes every input.
+on:
+  workflow_call:
+    inputs:
+      containers:
+        type: string
+        required: true
+      container-args:
+        type: string
+        required: true
+      clickhouse-lanes:
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  containers:
+    name: Container suites
+    runs-on: ubuntu-latest
+    if: inputs.containers == 'true'
+    timeout-minutes: 60
+    # `checks: write` for the JUnit report: without it the publish step logs
+    # `Resource not accessible by integration` and leaves the job green.
+    permissions:
+      contents: read
+      checks: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          tools: nextest
+          # Separate key: the `#[ignore]`d suites link binaries `test` does not.
+          shared-key: docker
+      # By digest, and re-tagged locally, so the suite runs the pinned bytes.
+      # testcontainers creates the container before it pulls, so the local tag
+      # is what it finds.
+      - name: Pull the pinned ClickHouse image
+        if: contains(inputs.container-args, 'spate-clickhouse')
+        run: cargo xtask container-image --pull clickhouse
+      # Serial: 2 cores and ~7 GB across RustFS, ElasticMQ, NATS, Kafka and
+      # ClickHouse OOMs in parallel.
+      - name: Container suites
+        env:
+          PKGS: ${{ inputs.container-args }}
+        # "This happens to split correctly" is a property that breaks silently.
+        run: |
+          read -ra pkgs <<< "$PKGS"
+          cargo nextest run --profile docker "${pkgs[@]}" --all-features --locked \
+            --run-ignored ignored-only --test-threads 1
+
+      - name: Publish container test report
+        uses: mikepenz/action-junit-report@6ef3fdcfcd5f0b5d14df3e659ef19b8c6820f93d # v6.6.1
+        if: always()
+        with:
+          report_paths: target/nextest/docker/junit.xml
+          check_name: Container test results
+          detailed_summary: true
+          include_passed: false
+          flaky_summary: true
+          fail_on_failure: false
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: junit-nextest-docker
+          path: target/nextest/docker/junit.xml
+
+  # The ClickHouse server versions beyond the one `containers` runs: the older
+  # supported LTS line, and the newest release once it moves ahead of that LTS.
+  # `ci/clickhouse/<lane>/Dockerfile` pins each, and Dependabot moves them.
+  clickhouse-versions:
+    name: ClickHouse ${{ matrix.lane }}
+    runs-on: ubuntu-latest
+    # A matrix expanding to zero jobs is a workflow-level error, and a false
+    # `if:` is what prevents the expansion. The classifier already empties the
+    # array unless the ClickHouse suite was selected, so this one clause covers
+    # both questions.
+    if: inputs.clickhouse-lanes != '[]'
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      checks: write
+    strategy:
+      # fail-fast would cancel the other legs, and a cancelled leg fails `CI gate`
+      # as a failure does, so one real failure would read as several.
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(inputs.clickhouse-lanes) }}
+    env:
+      SPATE_CLICKHOUSE_LANE: ${{ matrix.lane }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          tools: nextest
+          shared-key: docker
+          # A consumer of the entry `containers` owns. These legs build one
+          # crate and would otherwise win the race to write a cache holding the
+          # whole container tier.
+          cache-save: never
+      - name: Pull the pinned ClickHouse image
+        run: cargo xtask container-image --pull clickhouse "$SPATE_CLICKHOUSE_LANE"
+      - name: ClickHouse suite
+        run: |
+          cargo nextest run --profile docker -p spate-clickhouse --all-features \
+            --locked --run-ignored ignored-only --test-threads 1
+
+      # Both names carry the lane: upload-artifact rejects a duplicate name
+      # within one run, and two checks sharing a name are unattributable.
+      - name: Publish ClickHouse test report
+        uses: mikepenz/action-junit-report@6ef3fdcfcd5f0b5d14df3e659ef19b8c6820f93d # v6.6.1
+        if: always()
+        with:
+          report_paths: target/nextest/docker/junit.xml
+          check_name: ClickHouse ${{ matrix.lane }} test results
+          detailed_summary: true
+          include_passed: false
+          flaky_summary: true
+          fail_on_failure: false
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: junit-nextest-clickhouse-${{ matrix.lane }}
+          path: target/nextest/docker/junit.xml

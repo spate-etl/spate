@@ -1,0 +1,62 @@
+name: Checks
+
+# Formatting, lint and the repository checks every tier-2 unit waits on.
+# Called from ci.yml, whose `changes` job computes every input.
+on:
+  workflow_call:
+    inputs:
+      rust:
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Format and lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          components: rustfmt, clippy
+          shared-key: dev-allfeatures
+      - run: cargo xtask fmt --check
+      - if: inputs.rust == 'true'
+        run: cargo xtask clippy
+
+  workflows:
+    name: Repository checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          # The entry the `changes` job owns. A consumer that also wrote it
+          # would race the owner the first time it is missing.
+          shared-key: xtask
+          cache-save: never
+      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        with:
+          # zizmor alone carries a version: a release can relax the default
+          # audit policy this job rests on, and the action's own bump would
+          # move it with nothing in the title to say so. Bumped by hand, after
+          # reading the release notes for audit changes. rumdl carries one for
+          # the same reason: a release can change what MD013 reflows, so a bump
+          # lands in a pull request that shows the diff. install-action has no
+          # manifest for it and installs it through cargo-binstall.
+          tool: zizmor@1.28.0,shellcheck,rumdl@0.3.0
+      # `changelog` is outside this set: it reads the pull request's own fields
+      # and has a job that supplies them. Without GH_TOKEN zizmor skips the API
+      # audits and reports "No findings", exit 0, against a known-vulnerable
+      # action.
+      - run: cargo xtask tidy
+        env:
+          GH_TOKEN: ${{ github.token }}

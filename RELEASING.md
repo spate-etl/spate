@@ -161,15 +161,16 @@ that a previous release exercised; the last runs inside the real publish. It
 does not attest or verify; only a real release signs with
 `release-build.yml`'s identity.
 
-The same proof also runs continuously. `ci.yml` runs
+The same proof also runs continuously. The `publish-dry-run` job in
+`release-checks.yml`, which `ci.yml` calls, runs
 `cargo xtask release package`, the packaging step `prepare` runs, at a
 simulated bump on pushes to `main` that reach a manifest. `scheduled.yml` runs
 `cargo xtask release dry-run --stand-in-post` nightly at the derived version,
 with `gh`, `cargo-about` and `cargo-cyclonedx` installed as a release gets
 them, so a packaging problem or a change in those tools surfaces before
-release day. `ci.yml` runs the same rehearsal on a pull request that changes
-the release workflows, `.github/actions/setup-rust/`, `xtask/src/release/`,
-`ci.yml` or `xtask/src/ci/`. While a release is in flight, after its
+release day. `release-checks.yml` runs the same rehearsal on a pull request
+that changes the release workflows, `.github/actions/setup-rust/`,
+`xtask/src/release/`, `ci.yml`, `release-checks.yml` or `xtask/src/ci/`. While a release is in flight, after its
 `release: vX.Y.Z` commit lands and before the publish tags it, that run fails
 in `derive`; a re-run after the tag lands passes. A re-run keeps the run's
 merge commit, so a run made before the release commit landed needs a push, or

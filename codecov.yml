@@ -1,6 +1,6 @@
 # Codecov configuration. Two flags, uploaded by two different jobs:
 #
-#   unit            — the docker-free suite, from ci.yml, on every pull request.
+#   unit            — the docker-free suite, from tests.yml, on every pull request.
 #                     The status checks below gate on this one alone.
 #   with-containers — the docker-free run merged with the `#[ignore]`d
 #                     testcontainers suites, from scheduled.yml's weekly tier.

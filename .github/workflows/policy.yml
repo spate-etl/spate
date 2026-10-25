@@ -1,0 +1,64 @@
+name: Policy
+
+# Licenses, advisories and the changelog entry. Only `CI gate` waits on this unit,
+# so a missing release note does not skip the test tier.
+# Called from ci.yml, whose `changes` job computes every input.
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  deny:
+    name: Licenses and advisories
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # The RustSec advisory database moves with no file here changing, so this
+    # runs on every pull request.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Not cargo-deny-action: it builds a container from a Dockerfile that pipes
+      # an unverified release tarball into /usr/bin.
+      - uses: ./.github/actions/setup-rust
+        with:
+          components: clippy
+          tools: cargo-deny
+
+      - run: cargo xtask deny
+
+      - run: cargo xtask tidy self-test
+
+  changelog:
+    name: Changelog entry
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-rust
+        with:
+          shared-key: xtask
+          cache-save: never
+
+      # The title is the squash subject on `main`. Each step reports on its
+      # own, so one failure does not hide the other.
+      - env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+        run: cargo xtask tidy title
+
+      - if: ${{ !cancelled() }}
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: cargo xtask tidy changelog

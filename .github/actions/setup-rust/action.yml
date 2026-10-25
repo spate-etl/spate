@@ -3,9 +3,8 @@ description: >
   Toolchain, prebuilt cargo tools and a shared build cache, the preamble every
   Rust job in this repo needs. Callers must run actions/checkout first.
 
-# Composite rather than a reusable workflow: a reusable workflow is a separate
-# job, and it renames every status check to "caller / job", breaking branch
-# protection.
+# Composite because it runs as steps inside the job that checked out the tree
+# and builds there; a reusable workflow is a job of its own.
 
 inputs:
   toolchain:
@@ -62,6 +61,20 @@ outputs:
 runs:
   using: composite
   steps:
+    # Written before rust-cache runs, which hashes `CARGO*` variables into its
+    # key. A full-DWARF build of the `spate` end-to-end test binaries exhausted
+    # the runner: `rustc-LLVM ERROR: ... No space left on device`. Both profile
+    # keys: `cargo test` builds the target under `test`, its dependencies under
+    # `dev`.
+    - run: |
+        set -euo pipefail
+        {
+          echo "CARGO_TERM_COLOR=always"
+          echo "CARGO_PROFILE_DEV_DEBUG=line-tables-only"
+          echo "CARGO_PROFILE_TEST_DEBUG=line-tables-only"
+        } >>"$GITHUB_ENV"
+      shell: bash
+
     # The path goes through `env:`. Interpolating it into the `run:` block
     # splices the caller's text into generated shell.
     - id: resolve

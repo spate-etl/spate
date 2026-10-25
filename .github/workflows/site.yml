@@ -1,0 +1,120 @@
+name: Site
+
+# Builds and tests the documentation site.
+# Called from ci.yml, whose `changes` job computes every input.
+on:
+  workflow_call:
+    inputs:
+      site:
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  site:
+    name: Build site
+    runs-on: ubuntu-latest
+    if: inputs.site == 'true'
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Full history so Docusaurus can derive per-page "last updated" times.
+          fetch-depth: 0
+          # The benchmark data the site renders under /benchmarks.
+          submodules: true
+          # The token in `.git/config` would reach `npm ci` and the site build.
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+          cache: npm
+          # Required: the lockfile is not at the repo root, and without it
+          # setup-node silently never caches.
+          cache-dependency-path: website/package-lock.json
+
+      - uses: ./.github/actions/setup-rust
+        with:
+          shared-key: docs
+
+      - name: Install dependencies
+        working-directory: website
+        run: npm ci
+
+      # After `npm ci`, not before: npm ci removes node_modules, so a cache
+      # restored earlier is deleted and the step silently does nothing.
+      # Restore-only; the scheduled deploy produces this entry.
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: website/node_modules/.cache
+          key: docusaurus-${{ runner.os }}-${{ hashFiles('website/package-lock.json') }}
+          restore-keys: docusaurus-${{ runner.os }}-
+
+      # SWC strips types without checking them; without this step a type error
+      # merges green.
+      - name: Typecheck the site
+        working-directory: website
+        run: npm run typecheck
+
+      # The benchmark data layer and the neutrality rule. Nothing in the build
+      # exercises them.
+      - name: Test the site
+        working-directory: website
+        run: npm test
+
+      # `CI=true` registers client-redirects, so a redirect to a deleted page
+      # fails the build.
+      - name: Build Docusaurus site
+        working-directory: website
+        env:
+          CI: "true"
+        run: npm run build
+
+      - name: Site is complete
+        run: cargo xtask site-check
+
+      # Its own step because it is also the cache key below. A browser build
+      # from a different Playwright version is unusable, so the key names the
+      # resolved version rather than a lockfile hash.
+      - name: Resolve the Playwright version
+        id: playwright-version
+        working-directory: website
+        run: |
+          set -euo pipefail
+          version=$(node -p "require('@playwright/test/package.json').version")
+          echo "version=$version" >>"$GITHUB_OUTPUT"
+
+      - name: Cache Playwright browsers
+        id: playwright-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-browsers-${{ runner.os }}-${{ steps.playwright-version.outputs.version }}
+
+      # The apt-installed system libraries live outside the cached directory,
+      # so a cache hit still needs them, just not the browser download.
+      - name: Install Playwright Chromium
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        working-directory: website
+        run: npx playwright install --with-deps chromium
+
+      - name: Install Playwright's system dependencies
+        if: steps.playwright-cache.outputs.cache-hit == 'true'
+        working-directory: website
+        run: npx playwright install-deps chromium
+
+      # axe-core is DOM analysis, not rendering, so chromium alone covers it;
+      # see website/tests/e2e/README.md for when firefox and webkit earn a run.
+      - name: Accessibility and end-to-end tests
+        working-directory: website
+        run: npx playwright test --project=chromium
+
+      - name: Upload the Playwright report
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: playwright-report
+          path: website/playwright-report

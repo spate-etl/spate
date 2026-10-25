@@ -54,7 +54,7 @@ DOM analysis, not rendering, so the other two engines would triple the cost
 for the same result. They exist so a rendering or interaction spec has the
 engines available: locally that is `npm run test:e2e` with no `--project`
 flag, and in CI it is the browser added to the install step in
-`.github/workflows/ci.yml` and the `--project` flag dropped from the run
+`.github/workflows/site.yml` and the `--project` flag dropped from the run
 beside it.
 
 ## Running locally

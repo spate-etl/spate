@@ -1,0 +1,55 @@
+name: Fuzz
+
+# Builds every fuzz target.
+# Called from ci.yml, whose `changes` job computes every input.
+on:
+  workflow_call:
+    inputs:
+      fuzz:
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  # Builds every target with libFuzzer's instrumentation, which needs nightly.
+  # It runs none of them; the nightly tier in scheduled.yml is
+  # what fuzzes, and is also the backstop for a crate change that breaks the
+  # harness without touching `fuzz/`.
+  fuzz:
+    name: Fuzz targets build
+    runs-on: ubuntu-latest
+    if: inputs.fuzz == 'true'
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: rust
+        uses: ./.github/actions/setup-rust
+        with:
+          # libFuzzer's `-Z sanitizer` codegen is nightly-only.
+          toolchain-file: .github/toolchains/nightly/rust-toolchain.toml
+          # Its own entry: every artefact here is an instrumented release build
+          # and shares nothing with the dev-profile trees the other jobs cache.
+          shared-key: fuzz
+
+      # install-action carries no manifest for cargo-fuzz and falls back to
+      # cargo-binstall, which resolves a release binary nothing here checksums.
+      - run: cargo xtask fuzz install
+
+      - name: Build every fuzz target
+        # `+nightly` would name the floating channel and resolve past the pin.
+        env:
+          NIGHTLY: ${{ steps.rust.outputs.toolchain }}
+        run: |
+          set -euo pipefail
+          cargo "+$NIGHTLY" fuzz list >targets.txt
+          targets=$(wc -l <targets.txt)
+          if [[ "$targets" -eq 0 ]]; then
+            echo "::error::the fuzz crate declares no target; this job built nothing"
+            exit 1
+          fi
+          echo "building $targets target(s)"
+          cargo xtask fuzz build --nightly "$NIGHTLY"

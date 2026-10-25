@@ -187,7 +187,7 @@ fn gate(root: &Path, fields: &Fields, in_actions: bool, github_event: &str) -> O
              would have checked nothing and passed.\n\n  \
              The job that runs this has to pass EVENT_NAME, BASE_SHA, HEAD_SHA and PR_BODY\n  \
              through `env:`, and its checkout needs `fetch-depth: 0`. See the `changelog`\n  \
-             job in .github/workflows/ci.yml.",
+             job in .github/workflows/policy.yml.",
         ));
     }
 

@@ -1,0 +1,287 @@
+name: Release checks
+
+# Semver, packaging, the release rehearsal and the declared version floors.
+# Called from ci.yml, whose `changes` job computes every input.
+on:
+  workflow_call:
+    inputs:
+      rust:
+        type: string
+        required: true
+      semver:
+        type: string
+        required: true
+      semver-pkgs:
+        type: string
+        required: true
+      manifests:
+        type: string
+        required: true
+      release-tooling:
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  # The API of the crates this pull request can move, against the published
+  # release. That baseline is what the version number is a claim about, and it
+  # moves only at a release, which is what tokio, hyper, diesel and rustls all
+  # compare against.
+  #
+  # A finding passes with a notice when a changelog fragment opening with
+  # `**Breaking:**` is in the tree, which is what the release derivation reads.
+  # The excuse is workspace-wide. After the first announced break of a release
+  # cycle, a later pull request breaking a different crate passes here without
+  # a fragment of its own; the version still derives as a minor and the
+  # release note for that second break is what goes missing. This is the trade
+  # the published baseline carries and it is taken deliberately.
+  #
+  # The set comes from the CI selector's reverse-dependency closure over the
+  # changed crates, which is why a change confined to one connector no longer
+  # rebuilds every crate's rustdoc.
+  semver:
+    name: Semver (cargo-semver-checks)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' && inputs.semver == 'true'
+    timeout-minutes: 45
+    steps:
+      # The tool builds a rustdoc tree per crate per side and shares nothing
+      # between them; the runner's stock disk has drowned under less.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
+          df -h /
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The tags: the newest names the baseline and the crates it published.
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          tools: cargo-semver-checks
+          # Reads the lint cache for the tree's side. The baselines come from
+          # the cache below instead, which rust-cache would not hold: it prunes
+          # target/ to what it recognizes.
+          shared-key: dev-allfeatures
+          cache-save: never
+
+      - id: baseline-key
+        run: cargo xtask semver-checks --cache-key
+
+      # Restore-only; the baseline-cache job below produces this entry. The
+      # tool writes the parsed rustdoc for each published baseline under
+      # target/semver-checks/cache and reuses it in place of the build, which
+      # is the expensive half of a comparison. The build trees beside it are
+      # scratch and are not cached: they run to gigabytes.
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target/semver-checks/cache
+          key: ${{ steps.baseline-key.outputs.key }}
+
+      - env:
+          # Crate names this workflow computed, not event data. The gate
+          # rejects anything that is not a directory under crates/.
+          SEMVER_PKGS: ${{ inputs.semver-pkgs }}
+        run: cargo xtask semver-checks --against-registry --packages "$SEMVER_PKGS"
+
+  # Fills the baseline cache the pull-request gate restores. The key names the
+  # published release, so this runs once a release cycle and is a no-op on
+  # every other push.
+  #
+  # The verdict is not this job's business: a pull request is where a break is
+  # judged, and failing here would report a break nobody can act on from a
+  # commit already on `main`. The run is for the artefacts it leaves behind.
+  semver-baseline:
+    name: Semver baseline cache
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && inputs.rust == 'true'
+    timeout-minutes: 45
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
+          df -h /
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          tools: cargo-semver-checks
+          shared-key: dev-allfeatures
+          cache-save: never
+
+      - id: baseline-key
+        run: cargo xtask semver-checks --cache-key
+
+      - id: restore
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target/semver-checks/cache
+          key: ${{ steps.baseline-key.outputs.key }}
+          lookup-only: true
+
+      # Every crate, so the entry serves whichever crates a later pull request
+      # selects. A breaking verdict is expected here whenever an announced
+      # break has landed, and is not this job's to report.
+      #
+      # The run producing nothing is the case to catch: an unreachable index
+      # fails before any baseline is parsed, and saving that would serve an
+      # empty entry as a hit until the next release moves the key.
+      - if: steps.restore.outputs.cache-hit != 'true'
+        id: fill
+        run: |
+          cargo xtask semver-checks --against-registry || true
+          if [ -n "$(ls -A target/semver-checks/cache 2>/dev/null)" ]; then
+            echo "filled=true" >>"$GITHUB_OUTPUT"
+          else
+            echo "::warning::no baseline was parsed; leaving the cache unset."
+          fi
+
+      - if: steps.fill.outputs.filled == 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target/semver-checks/cache
+          key: ${{ steps.baseline-key.outputs.key }}
+
+  # Packages and verify-builds every crate at a simulated next version. At
+  # the version already on the registry every sibling resolves from there, so
+  # the bump is what exercises the resolution a release performs; it is
+  # committed locally and never pushed.
+  #
+  # Push to `main` only: a `pull_request` run executes the pull request's own
+  # copy of this workflow. The job holds no credential and no environment, and
+  # runs the release's own packaging step. Skipped on the release push,
+  # where the publish runs this for real.
+  publish-dry-run:
+    name: Publish dry run
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'push' &&
+      inputs.manifests == 'true' &&
+      !startsWith(github.event.head_commit.message, 'release: v')
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          shared-key: publish
+
+      - name: Bump to the next patch and commit it locally
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml)
+          next="${version%.*}.$(( ${version##*.} + 1 ))"
+          cargo xtask release version bump "$next"
+          # Packaging refuses a dirty worktree.
+          git config user.name 'spate-release[bot]'
+          git config user.email 'spate-release[bot]@users.noreply.github.com'
+          git commit --all --quiet --message "workspace: simulate the release bump to $next"
+
+      # Packaging cannot see these: it packages a crate with no description
+      # or license with a warning and exit 0, while the upload rejects it
+      # (cargo issue 14249).
+      - name: Prove the upload metadata is present
+        run: cargo xtask release version check-metadata
+
+      - name: Prove every crate packages
+        run: cargo xtask release package
+
+  # Runs the nightly release rehearsal on a pull request that changes the
+  # release's tooling: the release workflows, the `setup-rust` action that
+  # installs `cargo-about` and `cargo-cyclonedx` through the
+  # `taiki-e/install-action` pin, the release sequence in xtask, or the
+  # selector that decides this job runs. A Dependabot bump of that pin is the
+  # change this exists for.
+  #
+  # A `pull_request` run executes the pull request's own copy of this job,
+  # including every build script and proc macro the rehearsal compiles. The
+  # token can only read, and the job holds no secret and no environment, the
+  # same posture as `workflows` in `checks.yml`. Pull requests only, like
+  # `semver`, so the merge queue does not repeat a run of up to an hour; the
+  # nightly in `scheduled.yml` rehearses `main`.
+  release-dry-run:
+    name: Release dry run
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' && inputs.release-tooling == 'true'
+    permissions:
+      contents: read
+      pull-requests: read
+    timeout-minutes: 60
+    steps:
+      # The full history and tags: `derive` reads the newest tag and counts
+      # the commits since it.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          tools: cargo-about,cargo-cyclonedx
+          shared-key: publish
+
+      # The skip when no commit is past the newest tag does not fire on a pull
+      # request, since the pull request's own commits are past the tag. While
+      # a release is in flight, `main` holds its `release: vX.Y.Z` commit
+      # before the publish creates the tag, so `derive` refuses with "a
+      # release is half-finished" and the job fails until the tag lands; a
+      # re-run then passes. A re-run keeps the run's merge commit, so a run made
+      # before the release commit landed needs a push, or the pull request
+      # closed and reopened. A checkout with no tag fails in `derive`.
+      - name: Derive the version to rehearse
+        id: version
+        run: |
+          set -euo pipefail
+          tag=$(git tag --list 'v[0-9]*' --sort=-v:refname | sed -n 1p)
+          if [ -n "$tag" ] && [ "$(git rev-list --no-merges --count "$tag..HEAD")" = 0 ]; then
+            echo "::notice::No commits since $tag, so there is no release to rehearse."
+            echo "skip=true" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+          rc=0
+          next=$(cargo xtask release version derive 2>>"$RUNNER_TEMP/publish.log") || rc=$?
+          cat "$RUNNER_TEMP/publish.log" >&2
+          if [ "$rc" -ne 0 ]; then
+            exit "$rc"
+          fi
+          echo "next=$next" >>"$GITHUB_OUTPUT"
+
+      # `--stand-in-post` commits a draft post in the rehearsal's worktree
+      # when the version is a minor with no post yet, since a minor release
+      # needs its post committed first (website/blog/README.md).
+      - name: Rehearse the release
+        id: dry-run
+        if: steps.version.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          NEXT: ${{ steps.version.outputs.next }}
+        run: |
+          set -o pipefail
+          rc=0
+          cargo xtask release dry-run --version "$NEXT" --stand-in-post 2>&1 | tee -a "$RUNNER_TEMP/publish.log" || rc=$?
+          exit "$rc"
+
+  # Catches a floor mismatch this diff introduces, before merge.
+  minimal-versions:
+    name: Declared version floors build
+    runs-on: ubuntu-latest
+    if: inputs.manifests == 'true'
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          toolchain-file: .github/toolchains/nightly/rust-toolchain.toml
+          shared-key: minimal-versions
+      - name: Resolve every direct dependency to its declared floor
+        run: cargo generate-lockfile -Z direct-minimal-versions
+      # `--all-targets` holds dev-dependency floors to the same standard.
+      - run: cargo check --workspace --all-targets --all-features --locked

@@ -21,7 +21,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  # See ci.yml for the measurement behind these.
+  # setup-rust sets the same values and records the measurement behind them.
   CARGO_PROFILE_DEV_DEBUG: line-tables-only
   CARGO_PROFILE_TEST_DEBUG: line-tables-only
 
@@ -512,7 +512,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: plan
     if: needs.plan.outputs.nightly == 'true'
-    # The backstop for the manifest-selected gate in ci.yml: a packaging
+    # The backstop for the manifest-selected gate in release-checks.yml: a packaging
     # break can arrive with nothing in this repository changing (a yank, a
     # toolchain release). The release's tools drift the same way: `gh` comes
     # from the runner image, and `cargo-about` and `cargo-cyclonedx` from the
@@ -1043,7 +1043,7 @@ jobs:
       - uses: ./.github/actions/setup-rust
         with:
           tools: nextest
-          # Same key as ci.yml's container job: both build the plain dev-profile
+          # Same key as containers.yml's container job: both build the plain dev-profile
           # test binaries for the `#[ignore]`d suites.
           shared-key: docker
       # `--ignore-default-filter` plus an explicit expression is what selects a
@@ -1093,7 +1093,7 @@ jobs:
           components: llvm-tools-preview
           tools: nextest,cargo-llvm-cov
           # Not `docker`: this builds instrumented into `target/llvm-cov-target`,
-          # where ci.yml's container job builds plain.
+          # where containers.yml's container job builds plain.
           shared-key: coverage-docker
 
       - name: Clean coverage state

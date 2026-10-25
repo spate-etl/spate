@@ -539,6 +539,17 @@ mod tests {
         cp.extend_epoch(&[P1]).unwrap();
     }
 
+    /// An extension with no partitions leaves the mark where it was, so a
+    /// partition revoked earlier in the epoch stays refused.
+    #[test]
+    fn an_empty_extension_keeps_the_admission_mark() {
+        let (mut cp, _issuer) = checkpointer(&[P0]);
+        cp.revoke(&[P0]);
+        cp.extend_epoch(&[]).unwrap();
+        let err = cp.extend_epoch(&[P0]).unwrap_err();
+        assert!(err.reason.contains("is not above partition 0"), "{err}");
+    }
+
     /// A partition below the highest admitted is refused even though it was
     /// never in the epoch, and the refusal leaves the epoch unchanged.
     #[test]

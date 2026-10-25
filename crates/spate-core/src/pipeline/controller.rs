@@ -140,6 +140,7 @@ pub(crate) fn run_controller<S: Source>(ctx: ControllerContext<S>) {
         epoch: 0,
         pending_commit: BTreeMap::new(),
         committed: BTreeMap::new(),
+        revoked_committed: BTreeMap::new(),
         failure: None,
     };
 
@@ -646,6 +647,11 @@ struct State {
     /// Last committed watermark of each partition still tracked (for the
     /// exit report).
     committed: BTreeMap<PartitionId, i64>,
+    /// Exit-report entries of partitions revoked since the last assignment.
+    /// The next assignment moves back the ones it hands back and drops the
+    /// rest; a lane gain drops them all, since a revoked partition returns
+    /// only in a new epoch.
+    revoked_committed: BTreeMap<PartitionId, i64>,
     failure: Option<FatalError>,
 }
 
@@ -806,9 +812,11 @@ fn commit_cycle<S: Source>(
             for &(p, o) in &positions {
                 state.pending_commit.remove(&p);
                 // A retried commit can land after its partition left; the
-                // source has it, but the exit report lists held partitions.
+                // exit report lists it only if an assignment hands it back.
                 if checkpointer.tracks(p) {
                     state.committed.insert(p, o);
+                } else {
+                    state.revoked_committed.insert(p, o);
                 }
             }
         }
@@ -885,6 +893,13 @@ fn handle_assign<S: Source>(
     }
     let partitions: Vec<PartitionId> = groups.keys().copied().collect();
     checkpointer.begin_epoch(&partitions, state.epoch);
+    // An eager rebalance revokes every lane before handing most partitions
+    // back; a partition handed back keeps its watermark in the exit report.
+    for (p, o) in std::mem::take(&mut state.revoked_committed) {
+        if groups.contains_key(&p) {
+            state.committed.entry(p).or_insert(o);
+        }
+    }
 
     for (partition, group) in groups {
         let thread = state
@@ -927,6 +942,9 @@ fn handle_added<S: Source>(
     if lanes.is_empty() {
         return;
     }
+    // A revoked partition cannot return in this epoch, so its exit-report
+    // entry has nowhere to go.
+    state.revoked_committed.clear();
     let mut groups: HashMap<PartitionId, Vec<S::Lane>> = HashMap::new();
     for lane in lanes {
         groups.entry(lane.partition()).or_default().push(lane);
@@ -1123,9 +1141,9 @@ fn revoke_lanes<S: Source>(
         }
         state.paused.remove(lane);
     }
-    // Drop tracking and the exit-report entry only for partitions with no
-    // remaining lanes; their late acknowledgments are then discarded as
-    // stale.
+    // Drop tracking only for partitions with no remaining lanes; their late
+    // acknowledgments are then discarded as stale. Their exit-report entries
+    // wait for the next assignment, which may hand them back.
     let live_partitions: HashSet<PartitionId> =
         state.assignment.values().map(|&(p, _)| p).collect();
     let to_revoke: Vec<PartitionId> = revoked_parts
@@ -1134,7 +1152,9 @@ fn revoke_lanes<S: Source>(
         .collect();
     checkpointer.revoke(&to_revoke);
     for p in &to_revoke {
-        state.committed.remove(p);
+        if let Some(o) = state.committed.remove(p) {
+            state.revoked_committed.insert(*p, o);
+        }
     }
 }
 

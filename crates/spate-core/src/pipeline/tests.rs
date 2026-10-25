@@ -870,6 +870,133 @@ fn a_commit_retried_after_revocation_is_not_listed() {
     assert_eq!(report.final_watermarks, vec![(PartitionId(0), 10)]);
 }
 
+fn ok_harness() -> Harness {
+    start(|shared, log| FakeChain {
+        shared,
+        log,
+        mode: ChainMode::Ok,
+        batches_seen: 0,
+    })
+}
+
+fn revoke_and_wait(h: &Harness, lanes: Vec<LaneId>) {
+    let flushes = h.shared.lock().unwrap().flush_commits;
+    h.script.lock().unwrap().push_back(Script::Revoke(lanes));
+    wait_for("revocation processed", Duration::from_secs(5), || {
+        logged(h, "revoke-delivered") && h.shared.lock().unwrap().flush_commits > flushes
+    });
+}
+
+fn lane(id: u32, partition: u32, ranges: &[std::ops::Range<i64>]) -> LaneSpec {
+    LaneSpec {
+        id: LaneId(id),
+        partition: PartitionId(partition),
+        batches: batches(ranges),
+    }
+}
+
+fn wait_committed(h: &Harness, partition: u32, at: i64) {
+    wait_for("the partition commits", Duration::from_secs(5), || {
+        h.shared
+            .lock()
+            .unwrap()
+            .committed
+            .get(&PartitionId(partition))
+            == Some(&at)
+    });
+}
+
+/// A partition an eager rebalance revokes and hands straight back keeps its
+/// `final_watermarks` entry though nothing commits on it afterwards.
+#[test]
+fn a_partition_assigned_back_keeps_its_final_watermark() {
+    let h = ok_harness();
+    two_committed_partitions(&h);
+    revoke_and_wait(&h, vec![LaneId(0), LaneId(1)]);
+    h.script.lock().unwrap().push_back(Script::Assign(vec![
+        lane(2, 0, &[]),
+        lane(3, 2, std::slice::from_ref(&(0..3))),
+    ]));
+    wait_committed(&h, 2, 3);
+    h.shutdown.trigger();
+    let report = h.join.join().unwrap().unwrap();
+    assert_eq!(report.state, ExitState::Completed);
+    assert_eq!(
+        report.final_watermarks,
+        vec![(PartitionId(0), 10), (PartitionId(2), 3)],
+        "partition 0 is held again; partition 1 went elsewhere"
+    );
+}
+
+/// A lane gain drops the entries of partitions revoked earlier in the
+/// epoch, so a later assignment that hands one back lists it only once it
+/// commits again.
+#[test]
+fn a_lane_gain_drops_revoked_partitions_from_the_final_watermarks() {
+    let h = ok_harness();
+    two_committed_partitions(&h);
+    revoke_and_wait(&h, vec![LaneId(1)]);
+    h.script.lock().unwrap().push_back(Script::Add(vec![lane(
+        2,
+        2,
+        std::slice::from_ref(&(0..3)),
+    )]));
+    wait_committed(&h, 2, 3);
+    h.script.lock().unwrap().push_back(Script::Assign(vec![
+        lane(3, 1, &[]),
+        lane(4, 3, std::slice::from_ref(&(0..2))),
+    ]));
+    wait_committed(&h, 3, 2);
+    h.shutdown.trigger();
+    let report = h.join.join().unwrap().unwrap();
+    assert_eq!(report.state, ExitState::Completed);
+    assert_eq!(report.final_watermarks, vec![(PartitionId(3), 2)]);
+}
+
+/// A commit retried after its partition's revocation is listed once an
+/// assignment hands the partition back.
+#[test]
+fn a_commit_retried_after_revocation_is_listed_once_assigned_back() {
+    let h = ok_harness();
+    h.shared.lock().unwrap().fail_commits = true;
+    h.script.lock().unwrap().push_back(Script::Assign(vec![
+        lane(0, 0, std::slice::from_ref(&(0..10))),
+        lane(1, 1, std::slice::from_ref(&(0..5))),
+    ]));
+    wait_for("all payloads consumed", Duration::from_secs(5), || {
+        h.chain.consumed.load(Ordering::Relaxed) == 15
+    });
+    h.script
+        .lock()
+        .unwrap()
+        .push_back(Script::Revoke(vec![LaneId(1)]));
+    wait_for(
+        "the revocation's commit fails",
+        Duration::from_secs(5),
+        || {
+            let log = h.shared.lock().unwrap();
+            log.log
+                .iter()
+                .position(|e| e == "revoke-delivered")
+                .is_some_and(|at| log.log[at..].iter().any(|e| e == "commit-failed"))
+        },
+    );
+    h.shared.lock().unwrap().fail_commits = false;
+    wait_committed(&h, 1, 5);
+    h.script.lock().unwrap().push_back(Script::Assign(vec![
+        lane(2, 1, &[]),
+        lane(3, 2, std::slice::from_ref(&(0..3))),
+    ]));
+    wait_committed(&h, 2, 3);
+    h.shutdown.trigger();
+    let report = h.join.join().unwrap().unwrap();
+    assert_eq!(report.state, ExitState::Completed);
+    assert_eq!(
+        report.final_watermarks,
+        vec![(PartitionId(1), 5), (PartitionId(2), 3)]
+    );
+}
+
 /// An added lane on a partition that is still live fails the run from the
 /// checkpointer before the lane reaches a thread.
 #[test]

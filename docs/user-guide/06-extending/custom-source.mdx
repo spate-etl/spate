@@ -181,9 +181,10 @@ Assignment changes are where at-least-once is won or lost:
 - **`LanesAdded` is the additive alternative**: new lanes join the
   *current* epoch; existing lanes and their in-flight acks are untouched.
   Lane ids must be new, never reused from the source's lifetime,
-  and each lane's partition must be above every partition already in
-  the epoch. Feed readers emit this for each unit part they take up, so a
-  routine gain never drains flowing lanes.
+  and each lane's partition must be above every partition admitted to
+  the epoch so far, revoked and retired ones included. Feed readers emit
+  this for each unit part they take up, so a routine gain never drains
+  flowing lanes.
 - **`LanesRevoked` carries a `DrainBarrier`.** The runtime trips it for the
   owning pipeline threads, which stop the lanes, flush in-flight records,
   and arrive at the barrier. Complete the revocation, final synchronous

@@ -187,7 +187,8 @@ pub struct ExitReport {
     pub sink_drain: Option<DrainReport>,
     /// The last committed watermark of each partition the source still held
     /// at the final commit. A partition whose lanes were retired or revoked
-    /// during the run is not listed.
+    /// during the run is not listed unless a later assignment handed it
+    /// back.
     pub final_watermarks: Vec<(PartitionId, i64)>,
 }
 

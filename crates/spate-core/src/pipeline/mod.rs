@@ -185,10 +185,11 @@ pub struct ExitReport {
     /// The sink's drain report (absent when the sink drain hook could not
     /// run, e.g. the I/O runtime was already gone).
     pub sink_drain: Option<DrainReport>,
-    /// The last committed watermark of each partition the source still held
-    /// at the final commit. A partition whose lanes were retired or revoked
-    /// during the run is not listed unless a later assignment handed it
-    /// back.
+    /// The last committed watermark of the partitions the source held at the
+    /// final commit. A partition whose lanes were retired or revoked during
+    /// the run is left out. One that the next assignment hands back keeps
+    /// its entry when no lanes were added since its revocation; otherwise it
+    /// is listed once it commits again.
     pub final_watermarks: Vec<(PartitionId, i64)>,
 }
 

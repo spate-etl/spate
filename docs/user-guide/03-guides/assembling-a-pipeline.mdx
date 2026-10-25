@@ -219,9 +219,11 @@ Skipping a step is caught here: `BuildError::MissingSink` /
 ## Step 7: the `ExitReport`
 
 `run` returns an `ExitReport` carrying the terminal state (`Completed` or
-`Failed`), the sink's drain report, and the last committed watermark of each
-partition the source still held when the run ended. These methods cover the
-common endings of `main`:
+`Failed`), the sink's drain report, and the last committed watermark of the
+partitions the source still held when the run ended. A partition handed back
+after a revocation is listed straight away when no lanes were added in
+between, and otherwise once it commits again. These methods cover the common
+endings of `main`:
 
 - `report.log()` — log the outcome at the matching level (`info` clean,
   `error` failed).

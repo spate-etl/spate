@@ -743,6 +743,14 @@ mod tests {
     }
 
     #[test]
+    fn a_workflow_change_selects_every_suite() {
+        assert_eq!(
+            run(&[".github/workflows/containers.yml"]).container_pkgs,
+            *graph().all_container_pkgs()
+        );
+    }
+
+    #[test]
     fn labels_only_add() {
         let ctx = Context {
             author: String::new(),

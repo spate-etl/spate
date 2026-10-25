@@ -1041,3 +1041,80 @@ fn the_advisory_check_alone_waits_on_a_dependency_change() {
         .count();
     assert_eq!(deny_steps, 2);
 }
+
+/// The arm64 lane runs what the x64 jobs run: the container suites through the
+/// one matrix job, and the workspace suite with the `test` job's condition and
+/// nextest arguments, less the coverage wrapper.
+#[test]
+fn the_arm64_lane_runs_what_the_x64_jobs_run() {
+    let containers = yaml(&read_workflow("containers.yml"));
+    let job = &containers["jobs"]["containers"];
+    assert_eq!(job["runs-on"].as_str(), Some("${{ matrix.runner }}"));
+    let legs = job["strategy"]["matrix"]["include"].as_sequence().unwrap();
+    assert_eq!(
+        *legs,
+        vec![
+            yaml("{arch: x64, runner: ubuntu-latest}"),
+            yaml("{arch: arm64, runner: ubuntu-26.04-arm}"),
+        ]
+    );
+
+    let tests = yaml(&read_workflow("tests.yml"));
+    let x64 = &tests["jobs"]["test"];
+    let arm64 = &tests["jobs"]["test-arm64"];
+    assert_eq!(arm64["runs-on"].as_str(), Some("ubuntu-26.04-arm"));
+    assert_eq!(arm64["if"], x64["if"]);
+    let nextest = |job: &serde_yaml::Value| -> Vec<String> {
+        let runs: Vec<&str> = job["steps"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .filter_map(|s| s["run"].as_str())
+            .filter(|r| r.contains("nextest"))
+            .collect();
+        assert_eq!(runs.len(), 1, "{runs:?}");
+        runs[0].split_whitespace().map(str::to_owned).collect()
+    };
+    let mut expected = Vec::new();
+    let mut words = nextest(x64).into_iter();
+    while let Some(word) = words.next() {
+        match word.as_str() {
+            "llvm-cov" | "--lcov" => {}
+            "--output-path" | "--ignore-filename-regex" => drop(words.next()),
+            _ => expected.push(word),
+        }
+    }
+    assert_eq!(nextest(arm64), expected);
+}
+
+/// Each JUnit check and artifact in a CI run has its own name: upload-artifact
+/// rejects a duplicate within one run, and two checks sharing a name cannot be
+/// told apart. A matrix job's name carries a matrix value, since every leg
+/// publishes one.
+#[test]
+fn each_report_and_artifact_in_a_ci_run_has_its_own_name() {
+    let mut texts = vec![ci_yml()];
+    texts.extend(ci_units().into_iter().map(|u| u.text));
+    let mut seen = std::collections::BTreeSet::new();
+    for text in &texts {
+        for (job_name, job) in jobs(&yaml(text)) {
+            let matrix = job["strategy"].get("matrix").is_some();
+            for step in job["steps"].as_sequence().into_iter().flatten() {
+                let uses = step["uses"].as_str().unwrap_or_default();
+                let key = if uses.starts_with("mikepenz/action-junit-report@") {
+                    "check_name"
+                } else if uses.starts_with("actions/upload-artifact@") {
+                    "name"
+                } else {
+                    continue;
+                };
+                let name = step["with"][key].as_str().unwrap().to_owned();
+                assert!(
+                    !matrix || name.contains("${{ matrix."),
+                    "{job_name}: {name:?}"
+                );
+                assert!(seen.insert((key, name.clone())), "{job_name}: {name:?}");
+            }
+        }
+    }
+}

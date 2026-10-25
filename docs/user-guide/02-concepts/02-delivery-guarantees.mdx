@@ -82,8 +82,7 @@ discarded rather than advancing a watermark that is no longer its own.
 
 That fence does not rely on the outgoing owner finishing in time, only on it
 being unable to succeed afterwards. The choreography is in
-[ADR-0012](../../adr/0012-single-kafka-consumer-with-split-partition-queues.md),
-and the fleet-level view in [The work feed](09-work-feed.mdx).
+[ADR-0012](../../adr/0012-single-kafka-consumer-with-split-partition-queues.md).
 
 :::note Connector specifics
 How each source is told its assignment changed:

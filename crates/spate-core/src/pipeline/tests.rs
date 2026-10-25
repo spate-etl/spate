@@ -926,6 +926,79 @@ fn a_failed_final_commit_counts_one_error_outcome() {
     );
 }
 
+/// A stored commit records an `ok` outcome and no `error` outcome.
+#[test]
+fn a_stored_commit_counts_an_ok_outcome() {
+    let mut cfg = test_config(1);
+    cfg.pipeline.name = "ok-commit-outcome".into();
+    cfg.metrics.exporter = crate::config::MetricsExporter::Prometheus;
+    let pipeline_name = cfg.pipeline.name.clone();
+    let handle = crate::metrics::install(&crate::metrics::MetricsSettings {
+        exporter: crate::metrics::Exporter::Prometheus,
+        per_partition_detail: cfg.metrics.per_partition_detail,
+        e2e_basis: crate::metrics::E2eBasis::Ingest,
+    })
+    .expect("install the exporter");
+    let h = start_with_config(cfg, |shared, log| FakeChain {
+        shared,
+        log,
+        mode: ChainMode::Ok,
+        batches_seen: 0,
+    });
+    assign_one_lane(&h, std::slice::from_ref(&(0..10)));
+    wait_for("all payloads consumed", Duration::from_secs(5), || {
+        h.chain.consumed.load(Ordering::Relaxed) == 10
+    });
+    h.shutdown.trigger();
+    h.join.join().unwrap().unwrap();
+
+    let rendered = handle.render();
+    assert!(
+        commits_counter(&rendered, &pipeline_name, "ok").is_some_and(|n| n >= 1.0),
+        "{rendered}"
+    );
+    assert!(
+        commits_counter(&rendered, &pipeline_name, "error").is_none_or(|n| n == 0.0),
+        "{rendered}"
+    );
+}
+
+/// A fatal commit error in the final pass fails the run with the commit's own
+/// reason.
+#[test]
+fn a_fatal_final_commit_fails_the_run_with_its_reason() {
+    let h = start(|shared, log| FakeChain {
+        shared,
+        log,
+        mode: ChainMode::Ok,
+        batches_seen: 0,
+    });
+    h.shared.lock().unwrap().fail_commits = true;
+    assign_one_lane(&h, &[0..10, 10..20]);
+    wait_for("all payloads consumed", Duration::from_secs(5), || {
+        h.chain.consumed.load(Ordering::Relaxed) == 20
+    });
+    wait_for("a tick commit", Duration::from_secs(5), || {
+        h.shared
+            .lock()
+            .unwrap()
+            .log
+            .iter()
+            .any(|e| e == "commit-failed")
+    });
+    h.shared.lock().unwrap().fatal_commits = true;
+    h.script.lock().unwrap().push_back(Script::Drained);
+    let report = h.join.join().unwrap().unwrap();
+    let ExitState::Failed(failure) = report.state else {
+        panic!("a fatal final commit must fail the run");
+    };
+    assert!(
+        failure.reason.contains("commit failed fatally"),
+        "{}",
+        failure.reason
+    );
+}
+
 /// A commit-ready hint commits the named partitions ahead of the tick and
 /// leaves the others to it.
 #[test]

@@ -15,7 +15,7 @@ export function faq(msrv: string, edition: string): Array<{q: string; a: string}
     },
     {
       q: 'How is it tested?',
-      a: 'Property tests cover the checkpoint tracker, the codecs; loom models the tracker directly. Kafka runs against a mock cluster on every pull request, and brokers, ClickHouse and object stores run against real containers whenever a change reaches them.',
+      a: 'Property tests cover the checkpoint tracker and the codecs; loom models the tracker directly. Kafka runs against a mock cluster on every pull request, and brokers, ClickHouse and object stores run against real containers whenever a change reaches them.',
     },
     {
       q: 'Can I write my own source or sink?',

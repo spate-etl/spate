@@ -103,7 +103,7 @@ A definition often needs a concrete anchor to land. In the glossary, and only in
 the glossary, a term may carry one standardized trailing line:
 
 ```markdown
-*Connector mapping:* [Kafka](…) — one partition queue · [S3](…) — one in-flight split.
+*Connector mapping:* [Kafka](…) — one partition queue · [S3](…) — one object or byte range in progress.
 ```
 
 One clause per connector, always linked. A new connector adds an entry; it does
@@ -227,7 +227,7 @@ walkthroughs (those go in `03-guides/configuring-pipelines.mdx`).
   (`batch`/`inflight`/`retry`/`breaker`) tables live here and nowhere else.
   Connector pages link to `#sink-pool` instead of restating those defaults.
 - **Connector-owned keys stay on the connector page** and are indexed from the
-  appendix's `source:/deserializer:/sink:/feed:` mapping table. The
+  appendix's `source:/deserializer:/sink:` mapping table. The
   appendix carries a non-exhaustive disclaimer.
 
 ## 5. Cross-cutting content — single source of truth

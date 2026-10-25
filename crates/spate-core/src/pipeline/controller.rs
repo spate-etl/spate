@@ -759,9 +759,9 @@ fn commit_cycle<S: Source>(
     metrics.set_pending_max(max_pending);
     // Gathering the counts allocates, so the default configuration must not
     // pay for it. The chase pass is skipped for the same reason. It runs at
-    // `FAST_COMMIT_POLL` for a whole `commit_interval` per hinted partition,
-    // and a feed reader reaches it once per finished lane. The periodic tick still fires during a chase, so
-    // the detail trails the aggregate by at most one interval.
+    // `FAST_COMMIT_POLL` for a whole `commit_interval` per hinted partition.
+    // The periodic tick still fires during a chase, so the detail trails the
+    // aggregate by at most one interval.
     if only.is_none() && metrics.publishes_partition_detail() {
         let pending = checkpointer.pending_by_partition();
         for &(partition, n) in &pending {

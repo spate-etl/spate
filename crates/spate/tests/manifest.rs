@@ -172,13 +172,6 @@ fn the_examples_are_discovered() {
     );
 }
 
-/// Every example file is declared, not auto-discovered. `autoexamples` is left
-/// at its default, so a file added under `examples/` without a `[[example]]`
-/// stanza becomes a target anyway, carrying no `required-features` and no
-/// `test = true`, which is the one shape nothing else here reports. Counting
-/// rather than matching names is enough in both directions: a stanza naming a
-/// file that does not exist fails `cargo metadata` outright, so equal counts
-/// mean equal sets.
 /// The facade declares neither coordination feature, and no target asks for
 /// one.
 #[test]
@@ -198,6 +191,13 @@ fn the_removed_coordination_features_are_gone() {
     }
 }
 
+/// Every example file is declared, not auto-discovered. `autoexamples` is left
+/// at its default, so a file added under `examples/` without a `[[example]]`
+/// stanza becomes a target anyway, carrying no `required-features` and no
+/// `test = true`, which is the one shape nothing else here reports. Counting
+/// rather than matching names is enough in both directions: a stanza naming a
+/// file that does not exist fails `cargo metadata` outright, so equal counts
+/// mean equal sets.
 #[test]
 fn every_example_file_has_a_stanza() {
     let pkg = spate_package();

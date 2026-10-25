@@ -150,8 +150,8 @@ a `spate-core` change checks every published crate.
 
 The macOS lane runs the workspace suite on each merge-queue entry that changes
 Rust and on each push to `main`. On a pull request it runs when the diff touches
-a manifest, `Cargo.lock`, a `build.rs`, the cargo or nextest configuration, or
-the workflow that runs it.
+a workspace manifest, `Cargo.lock`, a `build.rs`, the cargo or nextest
+configuration, or the workflow, action or classifier that runs it.
 
 For a change whose reach those paths do not show, such as a refactor moving code
 between crates or a dependency swap, a maintainer can label the pull request

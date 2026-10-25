@@ -192,7 +192,7 @@ pub(crate) fn is_macos_input(path: &str) -> bool {
             "Cargo.toml",
             "Cargo.lock",
             "crates/*/Cargo.toml",
-            "crates/*/build.rs",
+            "*/build.rs",
             "bench/Cargo.toml",
             "test-support/Cargo.toml",
             "xtask/Cargo.toml",
@@ -953,6 +953,9 @@ mod tests {
             "Cargo.lock",
             "crates/spate-s3/Cargo.toml",
             "crates/spate-kafka/build.rs",
+            "bench/build.rs",
+            "test-support/build.rs",
+            "xtask/build.rs",
             "bench/Cargo.toml",
             "test-support/Cargo.toml",
             "xtask/Cargo.toml",
@@ -991,6 +994,9 @@ mod tests {
         };
         assert!(queue("crates/spate-core/src/lib.rs").macos);
         assert!(!queue("docs/a.md").macos);
+        // A pull-request selector path that builds nothing leaves it off too.
+        assert!(run(&[".config/README.md"]).macos);
+        assert!(!queue(".config/README.md").macos);
     }
 
     /// The Dependabot deferral gives up the container suites and keeps the

@@ -1148,25 +1148,24 @@ fn the_macos_lane_runs_what_the_arm64_lane_runs() {
     assert_eq!(macos["if"].as_str(), Some("inputs.macos == 'true'"));
     assert!(macos["timeout-minutes"].as_u64().is_some());
     assert!(macos.get("continue-on-error").is_none());
-    let steps = |job: &serde_yaml::Value| job["steps"].as_sequence().unwrap().clone();
-    for step in steps(macos) {
-        assert!(step.get("continue-on-error").is_none(), "{step:?}");
-    }
-    let run_of = |job: &serde_yaml::Value| -> Vec<String> {
-        steps(job)
-            .iter()
-            .filter_map(|s| s["run"].as_str().map(str::to_owned))
-            .collect()
+    // Every step matches once the check and artifact names, which differ per
+    // lane, are set aside.
+    let steps = |job: &serde_yaml::Value| -> Vec<serde_yaml::Value> {
+        let mut steps = job["steps"].as_sequence().unwrap().clone();
+        for step in &mut steps {
+            assert!(step.get("continue-on-error").is_none(), "{step:?}");
+            let uses = step["uses"].as_str().unwrap_or_default().to_owned();
+            if let Some(with) = step.get_mut("with").and_then(|w| w.as_mapping_mut()) {
+                if uses.starts_with("mikepenz/action-junit-report@") {
+                    with.remove("check_name");
+                } else if uses.starts_with("actions/upload-artifact@") {
+                    with.remove("name");
+                }
+            }
+        }
+        steps
     };
-    assert_eq!(run_of(macos), run_of(arm64));
-    let setup = |job: &serde_yaml::Value| -> serde_yaml::Value {
-        steps(job)
-            .into_iter()
-            .find(|s| s["uses"].as_str() == Some("./.github/actions/setup-rust"))
-            .unwrap()["with"]
-            .clone()
-    };
-    assert_eq!(setup(macos), setup(arm64));
+    assert_eq!(steps(macos), steps(arm64));
 }
 
 /// Each JUnit check and artifact in a CI run has its own name: upload-artifact

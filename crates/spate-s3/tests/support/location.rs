@@ -184,7 +184,7 @@ impl ObjectStore for LocationStore {
         }
         let failing = hooks
             .failing_gets
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1));
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1));
         if failing.is_ok() {
             return Err(object_store::Error::Generic {
                 store: "scripted",

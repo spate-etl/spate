@@ -8,9 +8,8 @@
 //! and `sink` sections are single-key mappings selecting a component type;
 //! their bodies are opaque [`ComponentConfig`]s handed to the component's
 //! factory, which deserializes its own typed config. The optional
-//! `coordination` section is a [`CoordinationSection`] handed to a
-//! coordinated source, and the optional `feed` section is a [`FeedSection`]
-//! naming the work feed a feed-reading source reads.
+//! `feed` section is a [`FeedSection`] naming the work feed a feed-reading
+//! source reads.
 //!
 //! ```yaml
 //! pipeline: { name: orders, threads: 4, io_threads: 2 }
@@ -61,18 +60,14 @@
 //! assert_eq!(cfg.source.type_tag(), "memory");
 //! ```
 
-#![expect(deprecated, reason = "v0.4.0 removes this with spate-coordination")]
-
 mod chunk;
 mod component;
-mod coordination;
 mod error;
 mod feed;
 mod interpolate;
 pub mod redact;
 
 pub use component::ComponentConfig;
-pub use coordination::CoordinationSection;
 pub use error::ConfigError;
 pub use feed::FeedSection;
 
@@ -138,10 +133,6 @@ pub struct PipelineConfig {
     /// with `sink`. Resolve via [`sink_config`](Self::sink_config).
     #[serde(default)]
     pub sinks: Option<BTreeMap<String, ComponentConfig>>,
-    /// Coordinator tuning and the shared store for a coordinated source.
-    /// `None` leaves the source to its own default.
-    #[serde(default)]
-    pub coordination: Option<CoordinationSection>,
     /// The work feed a feed-reading source reads, and the keys every feed
     /// backend shares. `None` hands the source no feed.
     #[serde(default)]
@@ -543,7 +534,6 @@ impl PipelineConfig {
             deserializer: None,
             sink,
             sinks,
-            coordination: None,
             feed: None,
         }
     }
@@ -676,7 +666,6 @@ impl PipelineConfig {
             }
         }
         self.reject_stray_chunk()?;
-        self.reject_feed_with_coordination()?;
         self.reject_location_on_memory()?;
         self.reject_bad_settling_window()?;
         // Resolve every declared sink's `chunk:` block now, so a malformed
@@ -719,18 +708,6 @@ impl PipelineConfig {
         {
             return Err(ConfigError::Validation(
                 "`chunk:` is only valid on a sink section, not `feed`".into(),
-            ));
-        }
-        Ok(())
-    }
-
-    /// Reject a `feed:` section beside a `coordination:` section. Split out
-    /// of [`validate`](Self::validate) so the runtime, which a programmatic
-    /// config reaches without validation, enforces it too.
-    pub(crate) fn reject_feed_with_coordination(&self) -> Result<(), ConfigError> {
-        if self.feed.is_some() && self.coordination.is_some() {
-            return Err(ConfigError::Validation(
-                "`feed:` and `coordination:` both divide the source's work; keep one".into(),
             ));
         }
         Ok(())
@@ -1065,32 +1042,30 @@ sink: { memory: {} }
         assert!(err.contains("source"), "{err}");
     }
 
+    /// A `coordination:` section in any spelling fails at load, and the
+    /// message does not echo a secret the section carried.
     #[test]
-    fn coordination_section_is_optional_and_parsed_when_present() {
+    fn a_coordination_key_fails_to_load() {
         let base = "pipeline: { name: demo }\nsource: { memory: {} }\nsink: { memory: {} }\n";
-        assert!(
-            PipelineConfig::from_str(base)
-                .unwrap()
-                .coordination
-                .is_none()
-        );
-
-        let yaml =
-            format!("{base}coordination:\n  lease_duration: 10s\n  store: {{ nats: {{}} }}\n");
-        let cfg = PipelineConfig::from_str(&yaml).unwrap();
-        let section = cfg.coordination.expect("section");
-        assert_eq!(section.store().type_tag(), "nats");
-
-        let yaml = format!("{base}coordination: {{ lease_duration: 10s }}\n");
-        let err = PipelineConfig::from_str(&yaml).unwrap_err().to_string();
-        assert!(err.contains("coordination"), "{err}");
-        assert!(err.contains("store"), "{err}");
+        for section in [
+            "coordination: ~\n",
+            "coordination: {}\n",
+            "coordination: { store: { nats: { servers: [\"nats://u:hunter2@n:4222\"], job: j } } }\n",
+            "feed: { memory: {} }\ncoordination: { store: { memory: {} } }\n",
+        ] {
+            let err = PipelineConfig::from_str(&format!("{base}{section}"))
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("unknown field"), "{section}: {err}");
+            assert!(err.contains("coordination"), "{section}: {err}");
+            assert!(!err.contains("hunter2"), "{section}: {err}");
+        }
     }
 
     /// Pins that the loader parses a `feed:` section, with its error paths
-    /// rooted at `feed`, and refuses one beside `coordination:`.
+    /// rooted at `feed`.
     #[test]
-    fn feed_section_is_parsed_and_refused_beside_coordination() {
+    fn feed_section_is_parsed() {
         let base = "pipeline: { name: demo }\nsource: { memory: {} }\nsink: { memory: {} }\n";
         assert!(PipelineConfig::from_str(base).unwrap().feed.is_none());
 
@@ -1101,12 +1076,6 @@ sink: { memory: {} }
             .unwrap_err()
             .to_string();
         assert!(err.contains("`feed`"), "{err}");
-
-        let yaml = format!(
-            "{base}feed: {{ memory: {{}} }}\ncoordination: {{ store: {{ memory: {{}} }} }}\n"
-        );
-        let err = PipelineConfig::from_str(&yaml).unwrap_err().to_string();
-        assert!(err.contains("keep one"), "{err}");
     }
 
     #[test]

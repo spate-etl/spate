@@ -176,7 +176,7 @@ pub fn find_source<'a, T: std::error::Error + 'static>(
 /// parameter with the client (`PeerIncompatible`).
 ///
 /// The first argument is the path to the caller's `rustls` crate, such as
-/// `rustls` or `async_nats::rustls`, and the second an
+/// `rustls`, or the path a crate re-exports it under, and the second an
 /// `&(dyn Error + 'static)`. It expands against the caller's rustls, so
 /// spate-core itself does not depend on rustls.
 ///

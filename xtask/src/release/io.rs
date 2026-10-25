@@ -1422,9 +1422,15 @@ mod tests {
         .unwrap();
         let facade: toml::Table = toml::from_str(&facade).unwrap();
         let declared = facade["features"].as_table().unwrap();
-        for feature in smoke["dependencies"]["spate"]["features"].as_array().unwrap() {
+        for feature in smoke["dependencies"]["spate"]["features"]
+            .as_array()
+            .unwrap()
+        {
             let feature = feature.as_str().unwrap();
-            assert!(declared.contains_key(feature), "`{feature}` is not a facade feature");
+            assert!(
+                declared.contains_key(feature),
+                "`{feature}` is not a facade feature"
+            );
         }
     }
 }

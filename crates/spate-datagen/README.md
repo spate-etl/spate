@@ -2,9 +2,8 @@
 
 Synthetic commerce-event source for the
 [Spate](https://github.com/spate-etl/spate) framework. It removes the
-infrastructure prerequisite from a pipeline: no broker, no bucket, no
-coordination store — just a stream of storefront events on as many partitions
-as you ask for.
+infrastructure prerequisite from a pipeline: no broker and no bucket,
+just a stream of storefront events on as many partitions as you ask for.
 
 Applications should depend on the **`spate`** facade crate with the
 **`datagen`** feature rather than on this crate directly.

@@ -29,8 +29,6 @@ pub const L_REPLICA: &str = "replica";
 pub const L_REASON: &str = "reason";
 /// Outcome label (`ok`, `error`).
 pub const L_OUTCOME: &str = "outcome";
-/// Store-primitive label on coordination store-op timings.
-pub const L_OP: &str = "op";
 /// Rebalance event label (`assign`, `revoke`).
 pub const L_EVENT: &str = "event";
 /// Error class label. [`SINK_ERRORS_TOTAL`] carries the class the connector
@@ -127,33 +125,6 @@ metric_names! {
 
         /// Source commit calls, by [`L_OUTCOME`].
         CHECKPOINT_COMMITS_TOTAL = "spate_checkpoint_commits_total",
-
-        // Coordination (multi-instance split leases for broker-less sources).
-
-        /// Split acquisitions, by [`L_REASON`] (`create`, `reclaimed`, `expired`,
-        /// `reassigned`).
-        COORDINATION_ACQUISITIONS_TOTAL = "spate_coordination_acquisitions_total",
-        /// Splits lost involuntarily, by [`L_REASON`] (`fenced`, `starved`,
-        /// `revoked`).
-        COORDINATION_SPLIT_LOSSES_TOTAL = "spate_coordination_split_losses_total",
-        /// Voluntary split releases (graceful shutdown or scale-down).
-        COORDINATION_RELEASES_TOTAL = "spate_coordination_releases_total",
-        /// Split revocations, by [`L_OUTCOME`] (`requested`, `drained`, `forced`,
-        /// `cancelled`), the leader moving a split away from a live owner. All
-        /// four count on the releasing worker; `drained` is the replay-free
-        /// outcome, and `cancelled` is the leader taking the move back.
-        COORDINATION_REVOCATIONS_TOTAL = "spate_coordination_revocations_total",
-        /// Splits written into the plan by this worker while leader (seeded
-        /// create-if-absent; replayed ids that already exist are not counted).
-        COORDINATION_SPLITS_PLANNED_TOTAL = "spate_coordination_splits_planned_total",
-        /// Planner runs while leader, by [`L_OUTCOME`] (`ok`, `error`, `noop`).
-        COORDINATION_REPLANS_TOTAL = "spate_coordination_replans_total",
-        /// Explicit split failure reports (`SplitCoordinator::fail`).
-        COORDINATION_SPLIT_FAILURES_TOTAL = "spate_coordination_split_failures_total",
-        /// Splits parked after exhausting their delivery attempts.
-        COORDINATION_QUARANTINES_TOTAL = "spate_coordination_quarantines_total",
-        /// Split-record writes, by [`L_OUTCOME`] (`ok`, `conflict`, `error`).
-        COORDINATION_WRITES_TOTAL = "spate_coordination_writes_total",
     }
 }
 
@@ -219,26 +190,6 @@ metric_names! {
         /// alert signal.
         CHECKPOINT_WATERMARK_AGE_SECONDS = "spate_checkpoint_watermark_age_seconds",
 
-        // Coordination (multi-instance split leases for broker-less sources).
-
-        /// Splits currently leased by this worker.
-        COORDINATION_SPLITS_OWNED = "spate_coordination_splits_owned",
-        /// Splits observed completed across the fleet (bounded jobs).
-        COORDINATION_SPLITS_COMPLETED = "spate_coordination_splits_completed",
-        /// Splits parked in quarantine after exhausting delivery attempts.
-        COORDINATION_SPLITS_QUARANTINED = "spate_coordination_splits_quarantined",
-        /// Distinct live workers observed, including this instance; a worker that
-        /// has handed back its last split through `SplitCoordinator::release`
-        /// counts itself only while its own presence key is in its view.
-        COORDINATION_LIVE_WORKERS = "spate_coordination_live_workers",
-        /// 1 while this worker holds the planner leadership lease.
-        COORDINATION_LEADER = "spate_coordination_leader",
-        /// 1 while this worker owns no splits and observes as a standby.
-        COORDINATION_IDLE = "spate_coordination_idle",
-        /// Splits this worker is currently draining away under revocation,
-        /// including a drain whose revocation was cancelled and which is still
-        /// winding down. This is the drain count rather than the revocation count.
-        COORDINATION_SPLITS_DRAINING = "spate_coordination_splits_draining",
 
         // Pipeline.
 
@@ -307,30 +258,6 @@ metric_names! {
         /// Commit round-trip time.
         CHECKPOINT_COMMIT_DURATION_SECONDS = "spate_checkpoint_commit_duration_seconds",
 
-        // Coordination (multi-instance split leases for broker-less sources).
-
-        /// Split-record write round-trip time.
-        COORDINATION_WRITE_DURATION_SECONDS = "spate_coordination_write_duration_seconds",
-        /// One planner run while leader (enumeration included).
-        COORDINATION_REPLAN_DURATION_SECONDS = "spate_coordination_replan_duration_seconds",
-        /// One full reconcile listing (the watch-loss backstop).
-        COORDINATION_RECONCILE_DURATION_SECONDS = "spate_coordination_reconcile_duration_seconds",
-        /// Store primitive round-trip time, by [`L_OP`] (`get`, `put`, `delete`,
-        /// `list`, `watch`).
-        COORDINATION_STORE_OP_DURATION_SECONDS = "spate_coordination_store_op_duration_seconds",
-        /// Cooperative drain time on the **releasing** worker: revocation
-        /// requested to the release landing. Only drains that end a revocation
-        /// cooperatively are observed. A forced release is a `forced` revocation,
-        /// not a drain, and a drain whose revocation was `cancelled` is no longer
-        /// ending a revocation when it lands.
-        COORDINATION_DRAIN_DURATION_SECONDS = "spate_coordination_drain_duration_seconds",
-        /// Assignment convergence on the **gaining** worker: a split appearing in
-        /// this worker's assignment to this worker holding its lease.
-        COORDINATION_ASSIGNMENT_LATENCY_SECONDS = "spate_coordination_assignment_latency_seconds",
-        /// Time left before the owning worker's starvation self-fence when a
-        /// split-lease renewal is confirmed, on that worker's clock. 0 when none was
-        /// left.
-        COORDINATION_SPLIT_LEASE_HEADROOM_SECONDS = "spate_coordination_split_lease_headroom_seconds",
 
         // End to end.
 
@@ -351,7 +278,8 @@ pub const PREFIX: &str = "spate_";
 
 /// The `spate_<root>_` segments the framework's own stage taxonomy owns. A
 /// `Meter` rejects any custom name whose first segment after `PREFIX` is one
-/// of these.
+/// of these. `coordination` has no framework emitter and stays reserved, so
+/// that no custom family reuses a `spate_coordination_` name.
 pub const RESERVED_ROOTS: &[&str] = &[
     "source",
     "deser",

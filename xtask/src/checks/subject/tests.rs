@@ -18,13 +18,7 @@ fn verdict(subject: &str) -> String {
 #[test]
 fn a_crate_area_is_its_directory_less_the_prefix() {
     let areas = tree_areas();
-    for area in [
-        "core",
-        "kafka",
-        "clickhouse-derive",
-        "sqs",
-        "spate",
-    ] {
+    for area in ["core", "kafka", "clickhouse-derive", "sqs", "spate"] {
         assert!(
             areas.iter().any(|a| a == area),
             "{area} missing from {areas:?}"

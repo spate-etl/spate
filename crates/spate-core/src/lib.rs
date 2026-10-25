@@ -34,9 +34,6 @@ pub mod clock;
 // `ops` out of loom model builds (nothing loom-modelled reads config).
 #[cfg(not(loom))]
 pub mod config;
-// References `source` types, so it shares the source module's loom gate.
-#[cfg(not(loom))]
-pub mod coordination;
 pub mod deser;
 pub mod error;
 // Kept out of loom model builds: nothing loom-modelled reads a feed.

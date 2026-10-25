@@ -75,7 +75,7 @@ pub(crate) struct SpyOptions {
     /// assertion instead of hanging the run.
     pub(crate) gate_deadline: Duration,
     /// Latency injected into every GET, for runs that must outlive a
-    /// coordination tick.
+    /// commit tick.
     pub(crate) hold: Duration,
     /// Yield this many entries of each listing, then hold the rest until
     /// [`StoreSpy::release_lists`].

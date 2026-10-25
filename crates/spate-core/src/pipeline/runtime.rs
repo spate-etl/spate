@@ -305,9 +305,6 @@ impl<S: Source + 'static> PipelineRuntime<S> {
             ));
         }
         self.config
-            .reject_feed_with_coordination()
-            .map_err(|e| StartError::Config(e.to_string()))?;
-        self.config
             .reject_location_on_memory()
             .map_err(|e| StartError::Config(e.to_string()))?;
         self.config
@@ -321,16 +318,6 @@ impl<S: Source + 'static> PipelineRuntime<S> {
                     feed.backend()
                 )));
             }
-        }
-        if let Some(section) = &self.config.coordination {
-            tracing::warn!(
-                "the `coordination:` section is deprecated, and v0.4.0 removes it; a work feed \
-                 replaces split coordination (https://github.com/spate-etl/spate/issues/1088)"
-            );
-            #[expect(deprecated, reason = "v0.4.0 removes this with spate-coordination")]
-            self.source
-                .configure_coordination(section)
-                .map_err(|e| StartError::Config(e.to_string()))?;
         }
         let mut kept_feed = None;
         match (&self.config.feed, self.feed.take()) {
@@ -430,7 +417,7 @@ impl<S: Source + 'static> PipelineRuntime<S> {
 
         // I/O runtime: sink workers (spawned by the caller-built SinkPool
         // onto this runtime via its own handle), admin server, upkeep,
-        // signals, the source's coordinator. A caller-owned runtime
+        // signals, the feed's tasks. A caller-owned runtime
         // (`with_io_runtime`) is adopted instead of built; either way this
         // function shuts it down, after the source has dropped once the
         // controller has started.
@@ -784,7 +771,8 @@ impl<S: Source + 'static> PipelineRuntime<S> {
             let _ = tx.send(true);
         }
         // The controller drops the source on its way out, and a source's
-        // `Drop` may still need the io runtime (a coordinator's hand-back).
+        // `Drop` may still need the io runtime (the S3 source aborts its lister
+        // there).
         let _ = controller_handle.join();
         io.shutdown_timeout(Duration::from_secs(2));
 

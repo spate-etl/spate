@@ -2,9 +2,9 @@
 //! with nothing installed.
 //!
 //! Every other source in this workspace needs infrastructure before it says
-//! anything: a broker, a bucket, a coordination store. That prerequisite is
-//! the first thing between a reader and a running pipeline, and it is the only
-//! thing this crate removes. Point a pipeline at a [`DatagenSource`] and it
+//! anything: a broker or a bucket. That prerequisite is the first thing
+//! between a reader and a running pipeline, and it is the only thing this
+//! crate removes. Point a pipeline at a [`DatagenSource`] and it
 //! produces a stream of storefront events (orders, their payments, and
 //! refunds against those payments) on as many partitions as you ask for, at a
 //! rate you set, for as long as you want.

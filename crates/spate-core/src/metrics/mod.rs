@@ -47,7 +47,6 @@
 
 mod backpressure;
 mod checkpoint;
-mod coordination;
 mod deser;
 mod labels;
 mod meter;
@@ -65,10 +64,6 @@ pub use backpressure::BackpressureMetrics;
 // refuses to start, so this stays crate-internal.
 pub(crate) use backpressure::InflightBudgetMetrics;
 pub use checkpoint::CheckpointMetrics;
-pub use coordination::{
-    AcquireReason, CoordinationMetrics, ReplanOutcome, RevocationOutcome, SplitLossReason, StoreOp,
-    WriteOutcome,
-};
 pub use deser::DeserMetrics;
 pub use labels::ComponentLabels;
 pub use meter::Meter;
@@ -273,17 +268,6 @@ fn configured_builder() -> Result<PrometheusBuilder, BuildError> {
             Matcher::Full(names::E2E_LATENCY_SECONDS.into()),
             DURATION_SECONDS_BUCKETS,
         )?
-        // Ends in `_latency_seconds`, not `_duration_seconds`, so the suffix
-        // matcher misses it. Matched by full name to get the same
-        // second-scale buckets as every other coordination timing.
-        .set_buckets_for_metric(
-            Matcher::Full(names::COORDINATION_ASSIGNMENT_LATENCY_SECONDS.into()),
-            DURATION_SECONDS_BUCKETS,
-        )?
-        .set_buckets_for_metric(
-            Matcher::Full(names::COORDINATION_SPLIT_LEASE_HEADROOM_SECONDS.into()),
-            DURATION_SECONDS_BUCKETS,
-        )?
         .set_buckets_for_metric(
             Matcher::Full(names::SINK_BATCH_ROWS.into()),
             BATCH_ROWS_BUCKETS,
@@ -453,32 +437,6 @@ mod tests {
             cp.commit(true, Duration::from_millis(4));
             cp.set_watermark_age(Duration::from_secs(1));
 
-            let coord = CoordinationMetrics::new(&labels("orders_kafka"));
-            coord.set_splits_owned(3);
-            coord.set_splits_completed(1);
-            coord.set_splits_quarantined(1);
-            coord.set_live_workers(2);
-            coord.set_leader(true);
-            coord.set_idle(false);
-            coord.acquired(AcquireReason::Expired);
-            coord.acquired(AcquireReason::Reassigned);
-            coord.lost(SplitLossReason::Fenced);
-            coord.released(1);
-            coord.revocation(RevocationOutcome::Requested);
-            coord.revocation(RevocationOutcome::Drained);
-            coord.revocation(RevocationOutcome::Forced);
-            coord.revocation(RevocationOutcome::Cancelled);
-            coord.assignment_latency(Duration::from_millis(900));
-            coord.drain_duration(Duration::from_millis(120));
-            coord.set_splits_draining(2);
-            coord.planned(8);
-            coord.replan(ReplanOutcome::Noop, Duration::from_millis(20));
-            coord.failed();
-            coord.quarantined();
-            coord.write(WriteOutcome::Conflict, Duration::from_millis(8));
-            coord.reconcile(Duration::from_millis(15));
-            coord.store_op(StoreOp::Put, Duration::from_micros(600));
-
             let pl = PipelineMetrics::new(&labels("orders_kafka"), "0.1.0");
             pl.set_state(PipelineState::Running);
             pl.set_threads(4);
@@ -500,17 +458,6 @@ mod tests {
             r#"spate_sink_replica_errors_total{pipeline="orders",component="orders_kafka",component_type="kafka",shard="3",replica="ch-3-1"} 1"#,
             r#"spate_sink_shard_healthy{pipeline="orders",component="orders_kafka",component_type="kafka",shard="3"} 0"#,
             r#"spate_checkpoint_commits_total{pipeline="orders",component="orders_kafka",component_type="kafka",outcome="ok"} 1"#,
-            r#"spate_coordination_acquisitions_total{pipeline="orders",component="orders_kafka",component_type="kafka",reason="expired"} 1"#,
-            r#"spate_coordination_acquisitions_total{pipeline="orders",component="orders_kafka",component_type="kafka",reason="reassigned"} 1"#,
-            r#"spate_coordination_split_losses_total{pipeline="orders",component="orders_kafka",component_type="kafka",reason="fenced"} 1"#,
-            r#"spate_coordination_revocations_total{pipeline="orders",component="orders_kafka",component_type="kafka",outcome="requested"} 1"#,
-            r#"spate_coordination_revocations_total{pipeline="orders",component="orders_kafka",component_type="kafka",outcome="drained"} 1"#,
-            r#"spate_coordination_revocations_total{pipeline="orders",component="orders_kafka",component_type="kafka",outcome="forced"} 1"#,
-            r#"spate_coordination_revocations_total{pipeline="orders",component="orders_kafka",component_type="kafka",outcome="cancelled"} 1"#,
-            r#"spate_coordination_splits_draining{pipeline="orders",component="orders_kafka",component_type="kafka"} 2"#,
-            r#"spate_coordination_replans_total{pipeline="orders",component="orders_kafka",component_type="kafka",outcome="noop"} 1"#,
-            r#"spate_coordination_writes_total{pipeline="orders",component="orders_kafka",component_type="kafka",outcome="conflict"} 1"#,
-            r#"spate_coordination_leader{pipeline="orders",component="orders_kafka",component_type="kafka"} 1"#,
             r#"spate_pipeline_state{pipeline="orders",component="orders_kafka",component_type="kafka",state="running"} 1"#,
             r#"spate_pipeline_info{pipeline="orders",component="orders_kafka",component_type="kafka",version="0.1.0"} 1"#,
         ] {
@@ -800,6 +747,13 @@ mod tests {
         Meter::with_namespace("sink", "p", "c", "t");
     }
 
+    /// `coordination` has no framework emitter and stays a reserved root.
+    #[test]
+    #[should_panic(expected = "reserved framework root")]
+    fn coordination_stays_a_reserved_namespace() {
+        Meter::with_namespace("coordination", "p", "c", "t");
+    }
+
     #[test]
     #[should_panic(expected = "lowercase")]
     fn custom_meter_rejects_invalid_namespace() {
@@ -967,15 +921,13 @@ mod tests {
     }
 
     /// Pins that every declared histogram renders with configured buckets,
-    /// and that the split-lease headroom handle records into its bucket grid.
+    /// and that a second-scale family records into the second-scale grid.
     #[test]
     fn every_histogram_renders_buckets() {
         let rendered = render_local(|| {
             for name in names::HISTOGRAMS {
                 metrics::histogram!(*name).record(0.5);
             }
-            CoordinationMetrics::new(&labels("every_histogram"))
-                .split_lease_headroom(Duration::from_millis(400));
         });
         for name in names::HISTOGRAMS {
             assert!(
@@ -983,13 +935,13 @@ mod tests {
                 "`{name}` renders without buckets:\n{rendered}"
             );
         }
-        let series = r#"spate_coordination_split_lease_headroom_seconds_bucket{pipeline="orders",component="every_histogram",component_type="kafka""#;
+        let series = "spate_e2e_latency_seconds_bucket";
         assert!(
-            rendered.contains(&format!(r#"{series},le="0.5"}} 1"#)),
+            rendered.contains(&format!(r#"{series}{{le="0.5"}} 1"#)),
             "{rendered}"
         );
         assert!(
-            rendered.contains(&format!(r#"{series},le="0.25"}} 0"#)),
+            rendered.contains(&format!(r#"{series}{{le="0.25"}} 0"#)),
             "{rendered}"
         );
     }

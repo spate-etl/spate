@@ -231,7 +231,7 @@ fn happy_path_consumes_and_commits() {
 
 /// A tick commit that fails because the stop began during it leaves its
 /// positions pending, and the final commit, run with the stop signal clear,
-/// stores and reports them.
+/// stores them.
 #[test]
 fn a_tick_commit_cut_by_the_stop_goes_out_in_the_final_commit() {
     let h = start(|shared, log| FakeChain {
@@ -249,12 +249,12 @@ fn a_tick_commit_cut_by_the_stop_goes_out_in_the_final_commit() {
     assert_eq!(report.final_watermarks, vec![(PartitionId(0), 10)]);
     let log = h.shared.lock().unwrap();
     assert_eq!(log.stopped_commits, vec![vec![(PartitionId(0), 10)]]);
-    assert!(
-        !log.log.iter().any(|entry| entry == "commit"),
+    assert_eq!(
+        log.log.iter().filter(|entry| *entry == "commit").count(),
+        1,
         "{:?}",
         log.log
     );
-    assert_eq!(log.final_saw_stop, Some(false));
     assert_eq!(log.committed.get(&PartitionId(0)), Some(&10));
 }
 
@@ -816,10 +816,10 @@ fn drained_with_failing_commit_fails_instead_of_completing() {
     );
 }
 
-/// The last commit of a stop goes through `Source::commit_final`, once, and
-/// the tick commits before it through `commit`.
+/// The last commit of a stop goes through `Source::commit`, once, after the
+/// drain.
 #[test]
-fn final_pass_calls_commit_final() {
+fn the_final_commit_runs_after_the_drain_through_commit() {
     let h = start(|shared, log| FakeChain {
         shared,
         log,
@@ -832,30 +832,26 @@ fn final_pass_calls_commit_final() {
         h.chain.consumed.load(Ordering::Relaxed) == 20
     });
     wait_for("a tick commit", Duration::from_secs(5), || {
-        let log = &h.shared.lock().unwrap().log;
-        log.iter()
-            .any(|e| e == "commit-failed" || e == "commit_final")
+        h.shared
+            .lock()
+            .unwrap()
+            .log
+            .iter()
+            .any(|e| e == "commit-failed")
     });
     h.script.lock().unwrap().push_back(Script::Drained);
     let report = h.join.join().unwrap().unwrap();
 
     let log = h.shared.lock().unwrap().log.clone();
-    let finals: Vec<usize> = log
-        .iter()
-        .enumerate()
-        .filter(|(_, e)| *e == "commit_final")
-        .map(|(i, _)| i)
-        .collect();
     let drained = log
         .iter()
         .position(|e| e == "drained-delivered")
         .expect("the drain was delivered");
-    assert_eq!(finals.len(), 1, "one final commit: {log:?}");
-    assert!(finals[0] > drained, "after the drain: {log:?}");
-    assert!(
-        !log.iter().any(|e| e == "commit"),
-        "every tick commit failed: {log:?}"
-    );
+    let finals = log[drained..]
+        .iter()
+        .filter(|e| *e == "commit-failed")
+        .count();
+    assert_eq!(finals, 1, "one final commit after the drain: {log:?}");
     assert!(report.final_watermarks.is_empty(), "nothing was committed");
     let ExitState::Failed(failure) = report.state else {
         panic!("a drained exit with nothing committed must fail");
@@ -867,11 +863,10 @@ fn final_pass_calls_commit_final() {
     );
 }
 
-/// A final commit that stores some partitions counts exactly those as
-/// committed, leaves the rest to the drained-exit backstop, and records a
-/// failed commit.
+/// A failed final commit records one error outcome, the same as a failed
+/// tick commit, and leaves every position to the drained-exit backstop.
 #[test]
-fn a_partial_final_commit_commits_the_stored_partitions() {
+fn a_failed_final_commit_counts_one_error_outcome() {
     let mut cfg = test_config(1);
     cfg.metrics.exporter = crate::config::MetricsExporter::Prometheus;
     let pipeline_name = cfg.pipeline.name.clone();
@@ -888,11 +883,7 @@ fn a_partial_final_commit_commits_the_stored_partitions() {
         mode: ChainMode::Ok,
         batches_seen: 0,
     });
-    {
-        let mut log = h.shared.lock().unwrap();
-        log.fail_commits = true;
-        log.final_unstored = Some(vec![PartitionId(1)]);
-    }
+    h.shared.lock().unwrap().fail_commits = true;
     h.script.lock().unwrap().push_back(Script::Assign(vec![
         LaneSpec {
             id: LaneId(0),
@@ -912,29 +903,109 @@ fn a_partial_final_commit_commits_the_stored_partitions() {
     let report = h.join.join().unwrap().unwrap();
 
     let log = h.shared.lock().unwrap();
-    assert_eq!(
-        report.final_watermarks,
-        vec![(PartitionId(0), log.committed[&PartitionId(0)])]
-    );
+    assert!(report.final_watermarks.is_empty());
     let ExitState::Failed(failure) = report.state else {
-        panic!("a drained exit with an unstored partition must fail");
+        panic!("a drained exit with nothing committed must fail");
     };
     assert!(
-        failure.reason.contains("(1 partition(s) uncommitted"),
+        failure.reason.contains("(2 partition(s) uncommitted"),
         "{}",
         failure.reason
     );
 
     let rendered = handle.render();
-    let failed_ticks = log.log.iter().filter(|e| *e == "commit-failed").count();
+    let failed = log.log.iter().filter(|e| *e == "commit-failed").count();
     assert_eq!(
         commits_counter(&rendered, &pipeline_name, "error"),
-        Some(failed_ticks as f64 + 1.0),
+        Some(failed as f64),
         "{rendered}"
     );
     assert!(
         commits_counter(&rendered, &pipeline_name, "ok").is_none_or(|n| n == 0.0),
         "{rendered}"
+    );
+}
+
+/// A commit-ready hint commits the named partitions ahead of the tick and
+/// leaves the others to it.
+#[test]
+fn a_commit_ready_hint_commits_only_the_chased_partitions() {
+    let mut cfg = test_config(1);
+    cfg.checkpoint.interval = Duration::from_secs(60);
+    let h = start_with_config(cfg, |shared, log| FakeChain {
+        shared,
+        log,
+        mode: ChainMode::Ok,
+        batches_seen: 0,
+    });
+    h.script.lock().unwrap().push_back(Script::Assign(vec![
+        LaneSpec {
+            id: LaneId(0),
+            partition: PartitionId(0),
+            batches: batches(std::slice::from_ref(&(0..10))),
+        },
+        LaneSpec {
+            id: LaneId(1),
+            partition: PartitionId(1),
+            batches: batches(std::slice::from_ref(&(0..10))),
+        },
+    ]));
+    wait_for("all payloads consumed", Duration::from_secs(5), || {
+        h.chain.consumed.load(Ordering::Relaxed) == 20
+    });
+    {
+        let mut script = h.script.lock().unwrap();
+        script.push_back(Script::CommitReady(vec![PartitionId(9)]));
+        script.push_back(Script::CommitReady(vec![PartitionId(0)]));
+    }
+    wait_for(
+        "the chased partition committed",
+        Duration::from_secs(5),
+        || {
+            h.shared
+                .lock()
+                .unwrap()
+                .committed
+                .contains_key(&PartitionId(0))
+        },
+    );
+    {
+        let log = h.shared.lock().unwrap();
+        assert!(
+            !log.committed.contains_key(&PartitionId(1)),
+            "{:?}",
+            log.log
+        );
+        assert_eq!(
+            log.log.iter().filter(|e| *e == "commit").count(),
+            1,
+            "{:?}",
+            log.log
+        );
+    }
+    h.shutdown.trigger();
+    h.join.join().unwrap().unwrap();
+}
+
+/// A fatal commit error fails the run.
+#[test]
+fn a_fatal_commit_fails_the_run() {
+    let h = start(|shared, log| FakeChain {
+        shared,
+        log,
+        mode: ChainMode::Ok,
+        batches_seen: 0,
+    });
+    h.shared.lock().unwrap().fatal_commits = true;
+    assign_one_lane(&h, std::slice::from_ref(&(0..10)));
+    let report = h.join.join().unwrap().unwrap();
+    let ExitState::Failed(failure) = report.state else {
+        panic!("a fatal commit must fail the run");
+    };
+    assert!(
+        failure.reason.contains("commit failed fatally"),
+        "{}",
+        failure.reason
     );
 }
 
@@ -1300,32 +1371,6 @@ fn startup_error_after_driver_spawn_stops_drivers_and_returns_err() {
     drop(occupied);
 }
 
-/// A `coordination:` section on a source that does not take one fails `run`
-/// before the source opens.
-#[test]
-fn coordination_section_on_an_uncoordinated_source_fails_startup() {
-    let mut cfg = test_config(1);
-    cfg.coordination = Some(
-        serde_yaml::from_str("store: { nats: { servers: [\"nats://n:4222\"], job: j } }")
-            .expect("section"),
-    );
-    let h = start_with_config(cfg, |shared, log| FakeChain {
-        shared,
-        log,
-        mode: ChainMode::Ok,
-        batches_seen: 0,
-    });
-    let result = h.join.join().unwrap();
-    let Err(err @ StartError::Config(_)) = result else {
-        panic!("expected StartError::Config, got {result:?}");
-    };
-    assert!(
-        err.to_string().contains("does not use coordination"),
-        "{err}"
-    );
-    assert!(!h.shared.lock().unwrap().opened, "the source must not open");
-}
-
 /// The text of the `StartError::Config` a run returns before its source
 /// opens. Waits for the run under a deadline, so a run that opens the source
 /// and keeps going fails the test there.
@@ -1363,18 +1408,6 @@ fn a_source_without_a_feed_rejects_the_feed_section() {
     let h = start_with_config(cfg, ok_chain);
     let err = config_error_before_open(h);
     assert!(err.contains("reads no feed"), "{err}");
-}
-
-/// Pins that `run` refuses a `feed:` section beside a `coordination:`
-/// section, which a programmatic config reaches without validation.
-#[test]
-fn a_feed_section_beside_coordination_fails_startup() {
-    let mut cfg = test_config(1);
-    cfg.feed = feed_section("memory: {}");
-    cfg.coordination = Some(serde_yaml::from_str("store: { memory: {} }").expect("section"));
-    let h = start_with_config(cfg, ok_chain);
-    let err = config_error_before_open(h);
-    assert!(err.contains("keep one"), "{err}");
 }
 
 /// Pins that `run` refuses a `location` on the in-process feed it builds,

@@ -34,21 +34,17 @@ pub(crate) struct SourceLog {
     pub(crate) stage_metrics_attached: bool,
     /// When set, `commit` and `flush_commits` fail retryably, modeling a
     /// checkpoint store outage; nothing is recorded as committed.
-    /// `commit_final` fails the same way unless `final_unstored` is set.
     pub(crate) fail_commits: bool,
-    /// When set, `commit_final` stores every other position and reports
-    /// these partitions as not stored.
-    pub(crate) final_unstored: Option<Vec<PartitionId>>,
+    /// When set, `commit` fails with a fatal error.
+    pub(crate) fatal_commits: bool,
     /// Interleaved ordering log shared with the chain fake.
     pub(crate) log: Vec<String>,
     /// Taken and triggered by the next `commit` with a position, modeling a
     /// stop that arrives while a tick commit waits on its store.
     pub(crate) trigger_in_commit: Option<ShutdownHandle>,
     /// The positions of each `commit` that saw the stop signal set and failed
-    /// retryably, as a coordinated source does.
+    /// retryably, as a source whose store refuses writes during a stop does.
     pub(crate) stopped_commits: Vec<Vec<(PartitionId, i64)>>,
-    /// Whether the stop signal read set when `commit_final` ran.
-    pub(crate) final_saw_stop: Option<bool>,
     /// When set, `configure_feed` accepts the section, as a feed-reading
     /// source does; otherwise it refuses it as the trait default does.
     pub(crate) accept_feed: bool,
@@ -73,10 +69,12 @@ pub(crate) struct SourceLog {
 
 pub(crate) enum Script {
     Assign(Vec<LaneSpec>),
-    /// Additive gain. Lanes join the *current* epoch, as a coordinated
-    /// source emits for an incremental unit of work.
+    /// Additive gain. Lanes join the *current* epoch, as a feed reader
+    /// emits for each unit part it takes up.
     Add(Vec<LaneSpec>),
     Revoke(Vec<LaneId>),
+    /// Hint that the named partitions should be committed ahead of the tick.
+    CommitReady(Vec<PartitionId>),
     /// Report the source permanently exhausted, modeling a bounded source
     /// (backfill) requesting the graceful completion drain.
     Drained,
@@ -199,6 +197,7 @@ impl Source for FakeSource {
                     lanes: ids,
                 })
             }
+            Some(Script::CommitReady(partitions)) => Ok(SourceEvent::CommitReady { partitions }),
             Some(Script::Drained) => {
                 self.shared
                     .lock()
@@ -227,6 +226,12 @@ impl Source for FakeSource {
                 reason: "the stop began during this commit".into(),
             });
         }
+        if log.fatal_commits {
+            return Err(SourceError::Client {
+                class: ErrorClass::Fatal,
+                reason: "scripted fatal commit failure".into(),
+            });
+        }
         if log.fail_commits {
             log.log.push("commit-failed".into());
             return Err(SourceError::Client {
@@ -240,30 +245,6 @@ impl Source for FakeSource {
         }
         log.log.push("commit".into());
         Ok(())
-    }
-
-    fn commit_final(
-        &mut self,
-        watermarks: &[(PartitionId, i64)],
-    ) -> Result<Vec<PartitionId>, SourceError> {
-        let mut log = self.shared.lock().unwrap();
-        log.log.push("commit_final".into());
-        log.final_saw_stop = Some(self.stop.is_set());
-        let unstored = match log.final_unstored.clone() {
-            Some(unstored) => unstored,
-            None if log.fail_commits => {
-                return Err(SourceError::Client {
-                    class: ErrorClass::Retryable,
-                    reason: "scripted commit failure".into(),
-                });
-            }
-            None => Vec::new(),
-        };
-        for &(p, o) in watermarks.iter().filter(|(p, _)| !unstored.contains(p)) {
-            let slot = log.committed.entry(p).or_insert(o);
-            *slot = (*slot).max(o);
-        }
-        Ok(unstored)
     }
 
     fn flush_commits(&mut self) -> Result<(), SourceError> {
@@ -654,7 +635,6 @@ pub(crate) fn test_config(threads: usize) -> PipelineConfig {
         deserializer: None,
         sink: Some(ComponentConfig::new("fake", serde_yaml::Value::Null)),
         sinks: None,
-        coordination: None,
         feed: None,
     }
 }

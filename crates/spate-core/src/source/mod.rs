@@ -17,8 +17,7 @@ pub use barrier::DrainBarrier;
 
 use crate::checkpoint::AckIssuer;
 use crate::checkpoint::AckRef;
-#[expect(deprecated, reason = "v0.4.0 removes this with spate-coordination")]
-use crate::config::{ConfigError, CoordinationSection, FeedSection};
+use crate::config::{ConfigError, FeedSection};
 use crate::error::SourceError;
 use crate::feed::{Feed, FeedOrigin};
 use crate::framing::FramingContract;
@@ -83,8 +82,8 @@ pub enum SourceEvent<L> {
     LanesAssigned(Vec<L>),
     /// Additional lanes join the *current* assignment epoch; existing
     /// lanes are untouched and their in-flight batches keep resolving.
-    /// Coordinated sources emit this for incremental split gains so a
-    /// routine gain never drains flowing lanes (contrast
+    /// A feed reader emits this for each unit part it takes up, so a routine
+    /// gain never drains flowing lanes (contrast
     /// [`SourceEvent::LanesAssigned`], whose eager-rebalance contract
     /// replaces the full lane set). Lane ids must be new (never reuse an
     /// id from this source's lifetime), and each lane's partition must be
@@ -101,8 +100,8 @@ pub enum SourceEvent<L> {
         barrier: DrainBarrier,
     },
     /// Lanes whose work is finished are leaving the assignment: their
-    /// input is fully delivered, acknowledged, *and committed* (e.g. a
-    /// coordinated split whose terminal progress reached the store), so
+    /// input is fully delivered, acknowledged, *and committed* (e.g. a feed
+    /// unit part whose last record was acknowledged and settled), so
     /// by contract nothing unflushed or uncommitted can exist behind
     /// them. The runtime removes them without a drain barrier, so there is
     /// no pipeline stall. Sources must use
@@ -116,8 +115,8 @@ pub enum SourceEvent<L> {
     Idle,
     /// A hint that a commit outside the periodic tick is worthwhile *now*
     /// for the named partitions: their lanes have decided end-of-input,
-    /// and the source cannot finalize their unit of work (e.g. complete a
-    /// coordinated split, freeing its working-set slot) until the acked
+    /// and the source cannot finalize their unit of work (e.g. settle a
+    /// feed unit part, freeing its held-unit slot) until the acked
     /// watermark reaches it through `Source::commit`. The runtime responds
     /// by briefly tightening its commit cadence *for those partitions
     /// only* (flowing partitions keep the periodic tick) until their
@@ -219,9 +218,7 @@ pub struct SourceCtx {
     /// `spate_source_lag_records`; consumer lag has no aggregate series to fall
     /// back to, so it always publishes per partition.
     pub per_partition_detail: bool,
-    /// The run's stop. A coordinated source passes it to
-    /// [`CoordinationDriver::set_stop`](crate::coordination::driver::CoordinationDriver::set_stop).
-    /// A feed-reading source reads it to stop receiving and to answer
+    /// The run's stop. A feed-reading source reads it to stop receiving and to answer
     /// [`Source::reading_on_stop`].
     pub stop: StopSignal,
 }
@@ -302,29 +299,6 @@ pub trait Source: Send {
         FramingContract::WholePayload
     }
 
-    /// Accept the pipeline's `coordination:` section. The runtime calls this
-    /// once, before [`open`](Self::open) and before the pipeline threads start,
-    /// and only when the section is present.
-    ///
-    /// A coordinated source validates the section here and builds its
-    /// coordinator from it in `open`. The default rejects the section, so a
-    /// source that does not coordinate fails at startup when one is set.
-    #[deprecated(
-        since = "0.3.0",
-        note = "removed in v0.4.0, where a work feed replaces split coordination; see https://github.com/spate-etl/spate/issues/1088"
-    )]
-    #[expect(deprecated, reason = "v0.4.0 removes this with spate-coordination")]
-    fn configure_coordination(&mut self, section: &CoordinationSection) -> Result<(), ConfigError> {
-        let _ = section;
-        Err(ConfigError::Component {
-            context: "coordination".into(),
-            message: format!(
-                "the source (`{}`) does not use coordination; remove the section",
-                self.component_type()
-            ),
-        })
-    }
-
     /// Accept the pipeline's `feed:` section and the feed it names. The
     /// runtime calls this once, before [`open`](Self::open) and before the
     /// pipeline threads start, and only when the section is present.
@@ -363,27 +337,11 @@ pub trait Source: Send {
     /// Store per-partition committable positions (each is the offset one
     /// past the last acknowledged record). Positions are durable per the
     /// source's own policy (e.g. interval auto-commit of stored offsets).
-    fn commit(&mut self, watermarks: &[(PartitionId, i64)]) -> Result<(), SourceError>;
-
-    /// The last commit of a stop, which a source committing to a remote
-    /// store may bound as a whole.
     ///
-    /// `Ok` lists the partitions among `watermarks` that the source still
-    /// holds and whose commit it could not confirm; the runtime counts every
-    /// other position as committed, as `commit` does for a partition the
-    /// source no longer holds. `Err` counts none of them as committed, and a
-    /// fatal error fails the run. An unconfirmed commit may or may not have
-    /// been stored, and positions past the stored one may replay.
-    #[deprecated(
-        since = "0.3.0",
-        note = "removed in v0.4.0, where a work feed replaces split coordination; see https://github.com/spate-etl/spate/issues/1088"
-    )]
-    fn commit_final(
-        &mut self,
-        watermarks: &[(PartitionId, i64)],
-    ) -> Result<Vec<PartitionId>, SourceError> {
-        self.commit(watermarks).map(|()| Vec::new())
-    }
+    /// The last commit of a stop is this call too. It runs on the controller
+    /// thread, so a source that commits to a remote store bounds the call
+    /// itself.
+    fn commit(&mut self, watermarks: &[(PartitionId, i64)]) -> Result<(), SourceError>;
 
     /// Synchronously flush stored positions (shutdown, revocation).
     fn flush_commits(&mut self) -> Result<(), SourceError> {

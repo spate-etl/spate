@@ -25,7 +25,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 /// Poll cadence while fast-commit partitions are being chased
-/// ([`SourceEvent::CommitReady`]). Tight enough that a finishing split's
+/// ([`SourceEvent::CommitReady`]). Tight enough that a finishing lane's
 /// final ack commits within ~a millisecond of resolving, bounded to one
 /// commit interval by the chase deadline.
 const FAST_COMMIT_POLL: Duration = Duration::from_millis(1);
@@ -760,8 +760,7 @@ fn commit_cycle<S: Source>(
     // Gathering the counts allocates, so the default configuration must not
     // pay for it. The chase pass is skipped for the same reason. It runs at
     // `FAST_COMMIT_POLL` for a whole `commit_interval` per hinted partition,
-    // and only a coordinated source reaches it, which is the assignment most
-    // likely to be large. The periodic tick still fires during a chase, so
+    // and a feed reader reaches it once per finished lane. The periodic tick still fires during a chase, so
     // the detail trails the aggregate by at most one interval.
     if only.is_none() && metrics.publishes_partition_detail() {
         let pending = checkpointer.pending_by_partition();
@@ -789,7 +788,7 @@ fn commit_cycle<S: Source>(
     }
     // A fast-commit pass (`only`) sends just the chased partitions; the
     // rest keep the periodic cadence so a hint never amplifies commit
-    // traffic for splits that are still flowing.
+    // traffic for lanes that are still flowing.
     let positions: Vec<(PartitionId, i64)> = state
         .pending_commit
         .iter()
@@ -800,30 +799,12 @@ fn commit_cycle<S: Source>(
         return;
     }
     let started = Instant::now();
-    #[expect(deprecated, reason = "v0.4.0 removes this with spate-coordination")]
-    let result = if final_pass {
-        source.commit_final(&positions)
-    } else {
-        source.commit(&positions).map(|()| Vec::new())
-    };
-    match result {
-        Ok(unstored) => {
-            let unstored: BTreeSet<PartitionId> = unstored
-                .into_iter()
-                .filter(|p| positions.iter().any(|&(q, _)| q == *p))
-                .collect();
-            metrics.commit(unstored.is_empty(), started.elapsed());
+    match source.commit(&positions) {
+        Ok(()) => {
+            metrics.commit(true, started.elapsed());
             for &(p, o) in &positions {
-                if !unstored.contains(&p) {
-                    state.pending_commit.remove(&p);
-                    state.committed.insert(p, o);
-                }
-            }
-            if !unstored.is_empty() {
-                tracing::warn!(
-                    uncommitted = unstored.len(),
-                    "final commit incomplete; uncommitted positions may replay"
-                );
+                state.pending_commit.remove(&p);
+                state.committed.insert(p, o);
             }
         }
         Err(e) if is_fatal(&e) => {
@@ -1016,9 +997,9 @@ fn handle_revoke<S: Source>(
 /// dropping the lanes and carrying straight on polling.
 ///
 /// A hot path. A bounded backfill retires one lane per completed unit of
-/// work (a coordinated split), so anything synchronous here is paid
-/// O(splits) times. Routing it through `StopLanes` instead would run a full
-/// `flush_until` per completed split, fragmenting sink batches and parking
+/// work (a feed unit part), so anything synchronous here is paid
+/// once per unit part. Routing it through `StopLanes` instead would run a full
+/// `flush_until` per completed unit part, fragmenting sink batches and parking
 /// the owning thread on a blocked chain.
 fn handle_retired<S: Source>(
     lanes: Vec<LaneId>,

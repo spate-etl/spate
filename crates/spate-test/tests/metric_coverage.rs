@@ -160,22 +160,22 @@ fn the_witness_separates_written_series_from_registered_ones() {
         );
     }
 
-    // The scenario runs no coordinator, so this family stays unwritten.
+    // The memory source publishes no consumer lag, so this family stays
+    // unwritten.
     assert!(
-        !written.contains(names::COORDINATION_LEADER),
-        "the scenario runs no coordinator, so this cannot have been written"
+        !written.contains(names::SOURCE_LAG_RECORDS),
+        "the memory source publishes no consumer lag, so this cannot have been written"
     );
 }
 
 /// The framework series this scenario reaches while the pipeline runs.
 ///
 /// The scenario is one pipeline over `spate-test`'s mocks: a memory source, a
-/// passthrough chain and a capture sink, run to a clean drain. It has no
-/// coordinator, no Kafka consumer and no failures.
+/// passthrough chain and a capture sink, run to a clean drain. It has no Kafka
+/// consumer and no failures.
 ///
-/// Series outside that path are asserted where they occur. Coordination is
-/// covered in `crates/spate-coordination/tests/revocation_metrics.rs`,
-/// consumer lag in `crates/spate-kafka/tests/mock_cluster.rs`, and the failure
+/// Series outside that path are asserted where they occur. Consumer lag is
+/// covered in `crates/spate-kafka/tests/mock_cluster.rs`, and the failure
 /// paths in the Docker-gated `crates/spate/tests/e2e_*.rs`.
 const EXERCISED_WHILE_RUNNING: &[&str] = &[
     names::BACKPRESSURE_INFLIGHT_BYTES,

@@ -147,6 +147,7 @@ pub(crate) fn is_manifest(path: &str) -> bool {
             "xtask/Cargo.toml",
             "xtask/*",
             ".github/workflows/ci.yml",
+            ".github/workflows/release-checks.yml",
             ".github/toolchains/*",
         ],
     )
@@ -166,6 +167,7 @@ pub(crate) fn is_release_tooling(path: &str) -> bool {
             ".github/actions/setup-rust/*",
             "xtask/src/release/*",
             ".github/workflows/ci.yml",
+            ".github/workflows/release-checks.yml",
             "xtask/src/ci/*",
         ],
     )
@@ -296,6 +298,7 @@ pub(crate) fn classify(
                     "Cargo.lock",
                     "Cargo.toml",
                     ".github/workflows/ci.yml",
+                    ".github/workflows/release-checks.yml",
                     ".github/actions/*",
                     "xtask/*",
                 ],
@@ -319,7 +322,12 @@ pub(crate) fn classify(
             // the one that never runs them.
             if any_glob(
                 path,
-                &["xtask/*", ".github/workflows/ci.yml", ".github/actions/*"],
+                &[
+                    "xtask/*",
+                    ".github/workflows/ci.yml",
+                    ".github/workflows/perf.yml",
+                    ".github/actions/*",
+                ],
             ) {
                 out.bench = true;
                 bench_pkgs.extend(graph.all_bench_pkgs().iter().cloned());
@@ -333,6 +341,7 @@ pub(crate) fn classify(
                     "fuzz/*",
                     "xtask/*",
                     ".github/workflows/ci.yml",
+                    ".github/workflows/fuzz.yml",
                     ".github/actions/*",
                     ".github/toolchains/*",
                 ],
@@ -643,6 +652,47 @@ mod tests {
         assert_eq!(out.bench_shards.len(), graph().all_bench_pkgs().len() + 1);
     }
 
+    /// The workflow that passes the counted tier its inputs, and the unit that
+    /// runs it, both select every bench; another unit selects none.
+    #[test]
+    fn a_bench_apparatus_change_selects_every_bench() {
+        for path in [".github/workflows/ci.yml", ".github/workflows/perf.yml"] {
+            let out = run(&[path]);
+            assert!(out.bench, "{path}");
+            assert_eq!(
+                out.bench_shards.len(),
+                graph().all_bench_pkgs().len() + 1,
+                "{path}"
+            );
+        }
+        assert!(!run(&[".github/workflows/site.yml"]).bench);
+    }
+
+    /// The semver gate's workflows reach every published API; another unit
+    /// reaches none.
+    #[test]
+    fn a_semver_apparatus_change_reaches_every_public_signature() {
+        for path in [
+            ".github/workflows/ci.yml",
+            ".github/workflows/release-checks.yml",
+        ] {
+            assert_eq!(
+                run(&[path]).semver_pkgs,
+                *graph().all_semver_pkgs(),
+                "{path}"
+            );
+        }
+        assert!(run(&[".github/workflows/site.yml"]).semver_pkgs.is_empty());
+    }
+
+    /// The fuzz job's workflows build the harness; another unit does not.
+    #[test]
+    fn the_fuzz_unit_builds_the_harness() {
+        assert!(run(&[".github/workflows/ci.yml"]).fuzz);
+        assert!(run(&[".github/workflows/fuzz.yml"]).fuzz);
+        assert!(!run(&[".github/workflows/site.yml"]).fuzz);
+    }
+
     /// A fuzz target is a workspace member's source, so it builds the harness
     /// and everything `--workspace` reaches, and moves no manifest.
     #[test]
@@ -884,12 +934,14 @@ mod tests {
             ".github/actions/setup-rust/action.yml",
             "xtask/src/release/io.rs",
             ".github/workflows/ci.yml",
+            ".github/workflows/release-checks.yml",
             "xtask/src/ci/classify.rs",
         ] {
             assert!(run(&[path]).release_tooling, "{path}");
         }
         for path in [
             ".github/workflows/scheduled.yml",
+            ".github/workflows/site.yml",
             ".github/actions/file-issue/action.yml",
             "xtask/src/checks/adr.rs",
             "crates/spate-core/src/lib.rs",
@@ -954,6 +1006,7 @@ mod tests {
             "xtask/src/ci/classify.rs",
             "xtask/src/release/mod.rs",
             ".github/workflows/ci.yml",
+            ".github/workflows/release-checks.yml",
             ".github/toolchains/nightly/rust-toolchain.toml",
         ] {
             assert!(run(&[path]).manifests, "{path}");
@@ -963,6 +1016,7 @@ mod tests {
             "faults/src/lib.rs",
             "test-support/src/lib.rs",
             ".github/workflows/scheduled.yml",
+            ".github/workflows/site.yml",
             "deny.toml",
             "docs/a.md",
         ] {

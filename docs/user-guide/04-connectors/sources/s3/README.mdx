@@ -1,29 +1,22 @@
 ---
-description: "The S3 source reads a bucket prefix as a coordinated, bounded backfill, or reads work units and storage notifications from a feed."
+description: "The S3 source reads the objects and byte ranges that work units name, and the objects that storage notifications announce, from a feed."
 ---
 
 # S3 (object storage) source
 
-The S3 source (`spate-s3`, feature `s3` on the `spate` facade) runs a
-**coordinated, bounded backfill** over a bucket prefix, or, with a `feed:`
-section, reads work units and storage notifications from a feed (see
-[Reading from a feed](#reading-from-a-feed)). On a backfill it streams every
-object's records through the pipeline, and it terminates the pipeline
-itself: `run()` returns `ExitState::Completed` once every split of the
-prefix is committed complete. `Completed` is a strong claim here. Every
-record was durably written by the sink(s) *and* committed. An
-unacknowledged tail converts the exit into a failure, so an incomplete
-backfill is never reported as done.
-
-Work is planned as [**splits**](../../../07-reference/glossary.mdx#split). The
-fleet's elected leader lists the prefix once and packs the sorted listing into
-splits of roughly `split_target_bytes`, with deterministic ids and
-self-contained descriptors (member keys, sizes, ETags). A split is a batch of
-whole objects, or one byte range of a
-[large object](#large-objects-and-byte-ranges). Workers lease splits through the
-coordination store and read them straight from the descriptors, so
-**workers never list**. Solo and multi-worker are the same code path; the only
-difference is which coordination store the coordinator points at.
+The S3 source (`spate-s3`, feature `s3` on the `spate` facade) reads work
+units and storage notifications from a feed (see
+[Reading from a feed](#reading-from-a-feed)), and a pipeline with no `feed:`
+section fails at start. A [**work unit**](../../../07-reference/glossary.mdx#work-unit)
+names one object or one byte range of a
+[large object](#large-objects-and-byte-ranges), with its key, size and ETag, so
+a reader never lists. On a bounded backfill the source streams every object's
+records through the pipeline and terminates the pipeline itself: `run()`
+returns `ExitState::Completed` once the feed has given out every unit and the
+sink has acknowledged every record. `Completed` is a strong claim here. Every
+record was durably written by the sink(s) *and* committed. An unacknowledged
+tail converts the exit into a failure, so an incomplete backfill is never
+reported as done.
 
 Built on the [`object_store`](https://crates.io/crates/object_store)
 client (internal only, with no `object_store` types in the public API), so
@@ -37,22 +30,20 @@ runtime handle and a framer (the framer is **required**; see
 ```rust file=crates/spate/examples/s3_backfill.rs region=source
 ```
 
-Runnable examples carry the Rust on this page, and none needs
-infrastructure; each stages a `file://` bucket in a temporary directory.
-[`s3_backfill.rs`](repo:crates/spate/examples/s3_backfill.rs) runs the solo
-backfill (`cargo run -p spate --features s3,json --example s3_backfill`), and
-[`s3_coordinated_backfill.rs`](repo:crates/spate/examples/s3_coordinated_backfill.rs)
-runs two instances over one shared store
-(`cargo run -p spate --features s3,json,coordination --example s3_coordinated_backfill`).
+The runnable example carries the Rust on this page and needs no
+infrastructure; it stages a `file://` bucket in a temporary directory.
+[`s3_backfill.rs`](repo:crates/spate/examples/s3_backfill.rs) runs a backfill on
+the in-process feed
+(`cargo run -p spate --features s3,json --example s3_backfill`).
 
 ## Configuration
 
 The `source: { s3: ... }` section deserializes into `S3SourceConfig`
 ([`spate-s3/src/config.rs`](repo:crates/spate-s3/src/config.rs)); unknown
-fields are rejected with the offending key. Coordination is not a key of the
+fields are rejected with the offending key. The feed is not a key of the
 source body: it is the pipeline's top-level
-[`coordination:` section](../../../07-reference/configuration.mdx#coordination),
-covered under [Scaling out](#scaling-out-and-the-solo-default).
+[`feed:` section](../../../07-reference/configuration.mdx#feed), covered under
+[Reading from a feed](#reading-from-a-feed).
 
 ```yaml
 source:
@@ -66,11 +57,10 @@ source:
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `url` | string | `required` | Bucket and prefix to backfill. Every object under the prefix is read. `file://` works for local runs; `memory://` fails at load, because it builds a fresh empty store per component and so cannot be shared. Part of the job fingerprint — byte-identical across every worker of a coordinated job or a [bounded feed job](#bounded-jobs-and-the-job-location). |
-| `compression` | `auto` \| `none` \| `gzip` \| `zstd` | `auto` | Object codec. `auto` decides per object by extension (`.gz`/`.gzip`, `.zst`/`.zstd`, else uncompressed). Multi-member gzip and multi-frame zstd are read fully; truncated or corrupt streams [poison the split](#object-errors-poison-the-split). Part of the job fingerprint. |
-| `split_target_bytes` | bytes | `64MiB` | Target size of one split — the unit of distribution. Objects pack toward it in listing order with a per-object cost floor of a sixteenth of the target (so ≤ ~16 objects per split). An object above the target is [cut into byte ranges](#large-objects-and-byte-ranges) when it qualifies, and otherwise gets a split of its own. On the [feed path](#reading-from-a-feed) nothing packs, and the target sets the size of the byte ranges a whole-object unit is cut into. Floor `1MiB`. Part of the job fingerprint. |
-| `refresh_listing` | bool | `false` | Re-list on the coordinator's replan interval, planning new objects as additional splits. `true` makes the job **open** (never self-terminates). Part of a coordinated job's fingerprint; the feed path never reads it. |
-| `prefetch_bytes` | bytes | `8MiB` | Target window size for ETag-pinned ranged GETs; see [read-ahead memory sizing](#read-parallelism-on-a-solo-run). Must be at least `chunk_bytes`; a smaller value fails at load. |
+| `url` | string | `required` | Bucket and prefix to backfill. Every object under the prefix is read. `file://` works for local runs; `memory://` fails at load, because it builds a fresh empty store per component and so cannot be shared. Part of the job fingerprint — byte-identical across every worker of a [bounded job](#bounded-jobs-and-the-job-location). |
+| `compression` | `auto` \| `none` \| `gzip` \| `zstd` | `auto` | Object codec. `auto` decides per object by extension (`.gz`/`.gzip`, `.zst`/`.zstd`, else uncompressed). Multi-member gzip and multi-frame zstd are read fully; truncated or corrupt streams [fail their unit](#object-errors-fail-the-unit). Part of the job fingerprint. |
+| `split_target_bytes` | bytes | `64MiB` | Size above which an object is [cut into byte ranges](#large-objects-and-byte-ranges) when it qualifies, each range at most this size and one unit each. Any other object is one unit. Floor `1MiB`. Part of the job fingerprint. |
+| `prefetch_bytes` | bytes | `8MiB` | Target window size for ETag-pinned ranged GETs; see [read-ahead memory sizing](#read-parallelism). Must be at least `chunk_bytes`; a smaller value fails at load. |
 | `chunk_bytes` | bytes | `512KiB` | Target size of one buffered chunk. Zero fails at load. |
 | `store` | string map | `{}` | Raw `object_store` options, applied on top of the environment. Bucket keys fail at load, and so do keys `object_store` does not recognize under an S3 URL — see [the `store` denylist](#the-store-passthrough-and-the-denylist). |
 
@@ -91,50 +81,48 @@ owns no framing. The format's framer is wired into the source in code (see
 [Decoding records](#decoding-records)); the per-record size bound lives on the
 framer (e.g. `NdjsonFramer::new(max_record_bytes)`), not in this table.
 
-A stale config still carrying `lanes` (read parallelism is the coordinator's
-`max_in_flight`, one data lane per in-flight split; see
-[Read parallelism on a solo run](#read-parallelism-on-a-solo-run)) or the
-source's own `checkpoint:` block (progress lives in the coordination store)
-fails at load with the offending key. The pipeline-level
+A stale config still carrying `lanes` (read parallelism is the feed's
+`units_held`, one data lane per held unit; see
+[Read parallelism](#read-parallelism)), `refresh_listing`, or the source's own
+`checkpoint:` block (progress lives in the feed) fails at load with the
+offending key. The pipeline-level
 [`checkpoint:`](../../../07-reference/configuration.mdx#checkpoint) section is
 unaffected and still governs commit cadence.
 
-### Sizing splits against `pipeline.threads`
+### Sizing units against `pipeline.threads`
 
-A split is read by one lane, and a lane is pinned to the pipeline thread it
-was handed to; there is no work stealing between threads. So the split
-count, not just the split size, sets how evenly the work divides: a plan
-yielding five equal splits across two threads gives one thread three and the
-other two, and the job finishes when the loaded thread does.
+A unit is read by one lane, and a lane is pinned to the pipeline thread it
+was handed to; there is no work stealing between threads. So the unit
+count, not just the unit size, sets how evenly the work divides: five equal
+units across two threads give one thread three and the other two, and the job
+finishes when the loaded thread does.
 
-Aim for a split count that is a multiple of `pipeline.threads`, or large
-enough that one extra split is a small share of the total. Prefixes of many
-small objects get this for free (packing coalesces them), and so do large
-objects cut into byte ranges. A handful of large objects read whole is where
-it bites, since each gets a split of its own and the count is then fixed by
-the data. Raising `split_target_bytes` coarsens the split set and can make
-imbalance *worse*, so check the resulting count instead of assuming bigger is
-better.
+Aim for a unit count that is a multiple of `pipeline.threads`, or large
+enough that one extra unit is a small share of the total. Prefixes of many
+objects get this for free, and so do large objects cut into byte ranges. A
+handful of large objects read whole is where it bites, since each is a unit of
+its own and the count is then fixed by the data. Raising `split_target_bytes`
+makes fewer, larger ranges and can make imbalance *worse*, so check the
+resulting count instead of assuming bigger is better.
 
 ### Large objects and byte ranges
 
-The planner cuts an object above `split_target_bytes` into
-`ceil(size / split_target_bytes)` byte ranges of near-equal length, one split
+The source cuts an object above `split_target_bytes` into
+`ceil(size / split_target_bytes)` byte ranges of near-equal length, one lane
 each, when all of these hold:
 
 - the object is uncompressed under `compression`;
-- the listing reports an ETag for it;
+- the listing or notification reports an ETag for it;
 - the framer declares a resync delimiter (see
   [Decoding records](#decoding-records));
 - it is at most 50,000 GiB, the largest object S3 can hold;
 - the S3 client can address its key (see
-  [Object errors poison the split](#object-errors-poison-the-split)).
+  [Object errors fail the unit](#object-errors-fail-the-unit)).
 
-Any other object at or above the target gets a split of its own, and one lane
-reads it from start to end.
+Any other object at or above the target is read by one lane from start to end.
 
-A byte-range split owns the records whose first byte lies inside its range, so
-each record of the object belongs to exactly one split. The split reads from
+A byte range owns the records whose first byte lies inside it, so each record
+of the object belongs to exactly one range. The range reads from
 the byte before its range to find the first record that starts inside it, and
 past the range's end to finish its last record. The bytes around each boundary
 are therefore read twice. Records within one range reach the pipeline in
@@ -273,72 +261,39 @@ most about a minute. A refusal after the handshake, when the alert arrives, is
 not retried. Any other TLS failure, such as a malformed message or an
 `InternalError` alert, is retried like a transport error.
 
-Any other failed listing is retried on each replan tick, and the pipeline fails
-with the listing error after eight consecutive failures. Credentials that
-cannot be resolved or refreshed, including a `401` or `403` from the credential
-endpoint, are retried like a transport error. For a read, the split is then
-handed back and quarantined at the attempt cap. Non-S3 schemes (`file://`) do
+Any other failed listing fails the lister run after `object_store`'s own
+retries. Credentials that cannot be resolved or refreshed, including a `401` or
+`403` from the credential endpoint, are retried like a transport error. For a
+read, the unit is then failed back to the feed, which dead-letters it at its
+cap. Non-S3 schemes (`file://`) do
 not read the AWS environment. See
 [Securing connections](../../../03-guides/securing-connections.mdx) for the
 generic model.
 
-## Scaling out and the solo default
+## Scaling out
 
-Point the pipeline's
-[`coordination:` section](../../../07-reference/configuration.mdx#coordination)
-at a durable [coordination store](../../coordination/README.mdx), and every
-worker running the same pipeline shares the backfill. Splits are leased, moved
-between live workers by the elected leader, and taken over from dead ones, with
-per-split [fenced](../../../07-reference/glossary.mdx#fencing-token) commits
-making revocations replay-safe. The source builds its coordinator from the
-section when the pipeline starts, with no code in `main`:
+Every worker of a pipeline reads the same feed, and the feed divides the work:
+a unit goes to one worker at a time, returns to the feed when its worker stops
+before the sink acknowledges all of it, and is read again from its start. The
+[work feed](../../../02-concepts/09-work-feed.mdx) page states the rule, and
+each [feed backend's page](../../feeds/README.mdx) says how it delivers, how
+long it holds a unit and what it does with one that keeps failing. A
+single instance that must resume runs as a fleet of one with a durable feed, a
+dead-letter destination and a separate [lister run](#the-lister-run).
+[Scaling out](../../../05-deployment/scaling-out.mdx) covers the deployment
+shape and the failure modes.
 
-```yaml file=crates/spate/examples/nats_coordinated_backfill.rs region=coordination title="nats_coordinated_backfill.rs"
-```
+### Read parallelism
 
-[NATS JetStream](../../coordination/nats/README.mdx) is the durable store.
-Deployment shape, the production values, and failure modes are in
-[Scaling out](../../../05-deployment/scaling-out.mdx).
-
-A coordinator built in code goes in through `with_coordinator(...)` instead,
-and setting both it and the section fails startup. The in-process example
-below uses it, because two instances in one process need one shared in-memory
-store:
-
-```rust file=crates/spate/examples/s3_coordinated_backfill.rs region=coordinator title="s3_coordinated_backfill.rs"
-```
-
-:::warning Solo runs have **ephemeral** progress
-
-With no `coordination:` section and no `with_coordinator(...)`, the source
-runs the same coordinated path over an internal in-process store with the
-default tuning. A section naming `store: { memory: {} }` runs that store with
-the section's tuning. Either way the store dies with the process, so **a
-restart replays the whole prefix** (at-least-once: wasteful, never lossy), and
-no other instance shares it: a second instance reads the whole prefix again. A
-startup WARN says this. Durable resume requires a durable coordination store,
-which is the only place split progress lives.
-
-:::
-
-### Read parallelism on a solo run
-
-A solo run reads `max_in_flight` splits at once, one lane each, and the default
-is 8. A lane is pinned to one pipeline thread, so with the default no more than
-8 pipeline threads do source work. Select the in-process store in the
-`coordination:` section to raise it:
-
-```yaml
-coordination:
-  max_in_flight: 48
-  store: { memory: {} }
-```
+A worker reads `units_held` units at once, one lane each, and the default is
+96. A lane is pinned to one pipeline thread, so no more pipeline threads do
+source work than there are lanes.
 
 On the ETag-pinned ranged path, read-ahead memory grows with active lanes,
 current GET windows and backing windows retained by queued chunks. As
 [`spate-s3/src/fetch.rs`](repo:crates/spate-s3/src/fetch.rs) shows, chunks share
 an entire GET buffer, so a previous full window and the next full window can
-coexist. That overlap uses about `2 × max_in_flight × prefetch_bytes` across
+coexist. That overlap uses about `2 × units_held × prefetch_bytes` across
 fully active lanes. This is an overlap estimate: short windows can leave
 several distinct backing buffers queued, and byte-range boundary reads can
 add `chunk_bytes` to a GET window, as specified in
@@ -346,13 +301,14 @@ add `chunk_bytes` to a GET window, as specified in
 decompression, decoded records and client overhead require additional memory.
 The estimate gives no total-process memory ceiling.
 
-The split count still sets how evenly the lanes divide over threads; see
-[Sizing splits against `pipeline.threads`](#sizing-splits-against-pipelinethreads).
+The unit count still sets how evenly the lanes divide over threads; see
+[Sizing units against `pipeline.threads`](#sizing-units-against-pipelinethreads).
 
 ## Reading from a feed
 
-A [`feed:` section](../../../07-reference/configuration.mdx#feed) moves the
-source onto the feed path. It reads
+The pipeline's [`feed:` section](../../../07-reference/configuration.mdx#feed)
+names the feed, and a pipeline with none fails at start with an error that
+names the section to add. The source reads
 [work units](../../../07-reference/glossary.mdx#work-unit) from the feed the
 section names. On a durable feed it lists nothing itself: a bounded job's units
 come from a [lister run](#the-lister-run), and a continuous job's from
@@ -377,8 +333,7 @@ A unit the lister publishes names one object or one byte range of one object, as
 an encoded `SplitDescriptor`, and a notification message is one unit with one
 part per non-empty created object (see
 [Storage notifications](#storage-notifications)). A unit whose body is neither,
-or a descriptor naming more than one object, is failed back to the feed. Nothing
-packs on the feed path. A whole-object part is cut into byte ranges on the
+or a descriptor naming more than one object, is failed back to the feed. A whole-object part is cut into byte ranges on the
 conditions in [Large objects and byte ranges](#large-objects-and-byte-ranges),
 with the ETag taken from the descriptor or the notification, so a part with no
 ETag is read whole on one lane. A unit naming a byte range is failed back when
@@ -405,8 +360,8 @@ waiting delivery's offset holds back its partition's commit point.
 `units_held` bounds the lanes the source reads at once, one per whole object or
 range, and with them its read parallelism. The default is 96.
 
-The default has two costs. Read-ahead memory follows the overlap estimate
-above with the units held in place of `max_in_flight`: about
+The default has two costs. Read-ahead memory follows the
+[overlap estimate](#read-parallelism): about
 `2 × units_held × prefetch_bytes`, which is 2 × 96 × 8 MiB = 1,536 MiB at the
 defaults. This is arithmetic and has not been measured. A unit is acknowledged,
 and its slot freed, only after the sink has written its last row, so a batch of
@@ -432,8 +387,7 @@ as [How a bounded job ends](#how-a-bounded-job-ends) describes, and so does a
 solo run on the in-process feed the runtime built, once its listing is read. A
 run given a `MemoryFeed` in code, and any job on a durable feed with no
 `location`, ends at a shutdown. A lister run ends once it has published the
-listing. Without a `feed:` section the source plans
-splits as described above.
+listing.
 
 ### A graceful stop
 
@@ -623,7 +577,7 @@ overwrite that sent no notification is lost.
 :::
 
 Units from a lister keep the classification in
-[Object errors poison the split](#object-errors-poison-the-split).
+[Object errors fail the unit](#object-errors-fail-the-unit).
 
 ### Bounded jobs and the job location
 
@@ -806,8 +760,8 @@ publish-only handle where it has one, such as the Kafka feed's
 [publish-only handle](../../feeds/kafka/README.mdx#a-publish-only-handle),
 which joins no group the workers read. It refuses the in-process feed, a section
 with no `location`, a feed other than the one the section names, a source
-given a coordinator, and a call from a thread in a Tokio runtime context,
-such as async code or a `spawn_blocking` closure.
+and a call from a thread in a Tokio runtime context, such as async code or a
+`spawn_blocking` closure.
 
 A unit the feed rejects as retryable is published again, up to five attempts,
 after waits of 200 ms, 400 ms, 800 ms and 1.6 s. A unit the feed refuses, or
@@ -836,82 +790,43 @@ Two lister runs over one prefix:
   wrote one, the conditional create refuses the later run only on a store
   that honors `If-None-Match`.
 
-## Split identity and drift
+## Unit identity and drift
 
-A split's id digests its sorted member keys **and their ETags** (plus a
-packing-version constant), and a byte-range split's id also digests its range
-and delimiter. Every GET is pinned `If-Match` to the descriptor's ETag. What
-that buys:
+A unit's id digests its sorted member keys **and their ETags** (plus a
+version constant), and a byte-range unit's id also digests its range and
+delimiter. Every GET is pinned `If-Match` to the descriptor's ETag. What that
+buys:
 
-- **Replans are no-ops** over an unchanged prefix: same listing, same
-  packing, same ids; create-if-absent in the store, completed splits
-  stay completed.
-- **An overwritten object can never splice.** Under an in-flight split
-  the pin trips (a `Precondition` failure poisons the split); on a
-  replanned listing the new content is a *new* split id, never a silent
-  match against stale progress.
-- **A deleted object** poisons only the splits that still needed it.
+- **Publishing again is idempotent in identity.** The same listing gives the
+  same ids, so a lister that resumes republishes the units after its
+  checkpoint under the ids it used before.
+- **An overwritten object can never splice.** Under an in-flight unit the pin
+  trips (a `Precondition` failure fails the unit); a later listing sees the new
+  content under a *new* id, never a silent match against stale progress.
+- **A deleted object** fails only the units that still need it.
 
 An **append-only prefix** is the right shape for the lifetime of a backfill.
-By default the listing is taken once (`refresh_listing: false`), so keys
-that arrive later are not part of the job; with
-`refresh_listing: true` the leader re-lists on the coordinator's replan
-interval and plans new objects as additional splits (an **open** job that
-never self-terminates; stop it with a signal drain).
+The lister takes the listing once, so keys that arrive later are not part of the
+job; a continuous job reads them through
+[storage notifications](#storage-notifications).
 
 ## Offsets, progress, resume
 
-A lane's `i64` offset packs
-*(member ordinal within the split, record index within the object)*, which keeps
-one monotonic offset stream per split across object boundaries, the same
-watermark contract every other source honors. A byte-range split has one member,
-at ordinal 0, and counts record indexes from the first record its range owns.
-`commit` routes acked watermarks into **per-split fenced progress records** in
-the coordination store; each carries a versioned key/ETag pin for its position.
-Fencing means a split's previous owner can never overwrite its successor's
-progress. A stale commit loses the CAS, writes nothing, and the split replays
-its uncommitted tail on the new owner.
+A lane's `i64` offset packs *(member ordinal within the unit, record index
+within the object)*, which keeps one monotonic offset stream per lane across
+object boundaries, the same watermark contract every other source honors. A
+byte-range unit has one member, at ordinal 0, and counts record indexes from the
+first record its range owns.
 
-On a gain with carried progress, the source drift-checks the progress against
-the split's descriptor (key and ETag at the watermark's ordinal; a mid-object
-resume with no pin anywhere is refused), replays the in-progress object or byte
-range from its start discarding exactly the committed record count, and
-continues. Delivery is **at-least-once**. Everything after the last committed
-watermark replays after a crash or forced revocation; duplicates are possible,
-loss is not.
+The source keeps no progress of its own. It acknowledges a unit to the feed once
+the sink has acknowledged every record in it, and a unit delivered again is read
+from its start. Everything in a unit not yet acknowledged replays after a crash
+or a stop; duplicates are possible, loss is not. A unit is as large as one
+object or one byte range, so a replay re-reads at most that.
 
 Limits: ~1.1 × 10¹² records per object or byte range (2⁴⁰ − 2); an object
-that overflows it **poisons its split** before any offset can be corrupted:
-handed back, retried, and quarantined at the attempt cap like any other
-[object-terminal failure](#object-errors-poison-the-split). Split
-member counts are structurally capped by the packing floor, far below the
-ordinal limit.
-
-The leader holds the **whole listing** in memory for the duration of a plan:
-one entry per object, carrying that object's key and ETag. Packing moves those
-entries into splits rather than copying them, so the keys are held once. Peak
-scales with object count *and* key length: a prefix of long keys costs
-materially more than the same number of short ones. A
-[cut object](#large-objects-and-byte-ranges) adds one split and one encoded
-descriptor per range, so its cost also grows with its size divided by
-`split_target_bytes`. At the default target, one 50,000 GiB object plans 800,000
-splits and takes the leader about 362 MB to plan, measured by planning that one
-listing entry in a release build. Planning runs on the leader only, once per
-plan and, for an open plan, on every replan tick.
-
-Every instance keeps the records of the splits it tracks in memory until the
-job ends, and by the time the job ends, every instance tracks every split. A
-completed split costs up to about 1,100 bytes with a 16-byte key, plus about
-2.7 bytes per further key byte, since its descriptor and its resume state carry
-the key as JSON and then base64. That object's 800,000 splits therefore hold
-up to about 878 MB on each instance with 16-byte keys, and up to about 1.30 GB
-with 212-byte keys. These figures assume the default 38-character
-`instance_id` and a 40-character ETag, and a longer `instance_id` adds bytes
-per split; they were measured by building those records under a counting
-allocator. The
-coordination store holds two records per split, so seeding them is 1.6 million
-store writes, and each `reconcile_interval` the reconcile listing reads every
-split record again.
+that overflows it fails its unit before any offset can be corrupted, as any
+other [object-terminal failure](#object-errors-fail-the-unit).
 
 ## Decoding records
 
@@ -947,54 +862,47 @@ via `S3Source::with_framer` or another format's framer, and no fork is
 required. The framer is **required**: a source built without one refuses to
 start.
 
-A framer takes part in [byte-range splits](#large-objects-and-byte-ranges)
+A framer takes part in [byte ranges](#large-objects-and-byte-ranges)
 through `RecordFramer::resync_delimiter`. Returning `Some(byte)` declares that
 a record starts after every occurrence of that byte, which `NdjsonFramer` does
 with `\n`. A format with a header, a byte-order mark, magic bytes or a quoted
-delimiter, as CSV has, returns `None`, which is the default. The planner then
-reads every object whole, and the source logs that at `INFO` when it opens.
+delimiter, as CSV has, returns `None`, which is the default. The source then
+reads every object whole, and logs that at `INFO` when it opens.
 
-## Object errors poison the split
+## Object errors fail the unit
 
 Object-level read problems are not record errors, and they are not instant
 pipeline failures either. Transient failures are retried inside the source
 (capped backoff, ranged re-reads pinned to the ETag). Anything object-terminal
-**poisons the split**: a key deleted after planning, an overwrite tripping the
+**fails the unit**: a key deleted after listing, an overwrite tripping the
 `If-Match` pin, corrupt or truncated content, or an exhausted retry budget. The
-split is handed back to the coordinator (counted in
-`spate_s3_source_objects_failed_total{reason}`), retried on another
-delivery attempt, and
-[**quarantined**](../../../07-reference/glossary.mdx#quarantine) at the attempt
-cap. A bounded job with quarantined splits ends **stalled**, which is fatal by
-default, so `run()` returns `ExitState::Failed` rather than a silently partial
-`Completed`. `CoordinationDriver::stall_drains(true)` trades that for a drain
-with a WARN. Either way, alert on
-`spate_coordination_splits_quarantined > 0`.
+unit is failed back to the feed (counted in
+`spate_s3_source_objects_failed_total{reason}`) and delivered again, until the
+feed dead-letters it at its
+cap. A bounded job with a dead-lettered unit ends **stalled**, which is fatal,
+so `run()` returns `ExitState::Failed` rather than a silently partial
+`Completed`, as [How a bounded job ends](#how-a-bounded-job-ends) describes.
 
-A key the S3 client cannot address poisons as well. The client rejects a key
+A key the S3 client cannot address fails as well. The client rejects a key
 with an empty segment (`d//x.ndjson`), a `.` or `..` segment, or an ASCII
 control character, and reads a key that starts or ends with `/` under a
 different key. The listing still returns every other object. Each object with
-such a key is planned in a split of its own, which poisons on its first read
-and names the key, and the objects listed beside it are read. An object with
-such a key and no bytes, such as a folder marker `dir/`, holds no records and
-is not planned.
+such a key is a unit of its own, which fails on its first read and names the
+key, and the objects listed beside it are read. An object with such a key and no
+bytes, such as a folder marker `dir/`, holds no records and gets no unit.
 
 There is no skip-an-object mode; the reasoning is in
 [ADR-0035](../../../../adr/0035-s3-poison-policy.md), which also covers why
-credential and configuration failures fail the pipeline instead. Quarantine
-lets the rest of the backfill finish first. An overwrite of a notification
+credential and configuration failures fail the pipeline instead. Failing the
+unit lets the rest of the backfill finish first. An overwrite of a notification
 unit's object is re-enqueued instead, as
 [Reading a notification's object](#reading-a-notifications-object) describes.
 
 ## Testing
 
-The whole coordinated lifecycle runs against `file://` URLs with no
-infrastructure, which is what the examples this page draws on do: solo,
-and two-instance over a shared in-process store. The Docker-gated suites run
-against a **RustFS** S3 store, and, for durable resume and multi-instance
-over the production backend, RustFS plus a
-[NATS](../../coordination/nats/README.mdx#supported-server-versions) container
+The whole feed path runs against `file://` URLs with no infrastructure, which
+is what the example this page draws on does. The Docker-gated suites run
+against a **RustFS** S3 store
 (`cargo test -p spate-s3 -- --ignored --test-threads=1`).
 
 The S3 source ends a listing at the first `ListObjectsV2` page that carries no
@@ -1017,29 +925,23 @@ noted per family.
 
 | Metric | Type | Extra labels | Description |
 |---|---|---|---|
-| `spate_s3_source_objects_listed_total` | counter | | Objects enumerated by the planner's listing. **Leader-only**: only the worker that runs the plan increments it (once per plan run; open plans re-count on every replan tick). |
-| `spate_s3_source_objects_completed_total` | counter | | Objects fully framed and handed to the pipeline by this worker. A cut object counts once per range, so completed over listed can exceed 100%. |
-| `spate_s3_source_objects_remaining` | gauge | | Objects not yet completed across **this worker's currently-held splits** (rises on split gain, falls per completed object, settles on split close). A cut object counts once per range. Fleet totals come from the `spate_coordination_*` split gauges, not from summing this. |
-| `spate_s3_source_bytes_read_total` | counter | | Bytes read from the store, as stored (pre-decompression), including the bytes a byte-range split reads around its range and drops. |
-| `spate_s3_source_bytes_decoded_total` | counter | | Bytes after decompression; for a byte-range split, the bytes of the records it owns. Equals `bytes_read` for uncompressed objects read whole; the ratio is the effective compression. |
-| `spate_s3_source_get_retries_total` | counter | | Object GET and HEAD attempts beyond the first (transient failures, resumed with ranged reads). A rising rate means a flaky store or network; an exhausted attempt budget poisons the split rather than failing the pipeline. |
-| `spate_s3_source_objects_failed_total` | counter | `reason` | Objects, or byte ranges of one, that poisoned their split: `not_found` (deleted after planning, or a key that is not a valid object path), `etag_drift` (overwritten under the `If-Match` pin, or content shorter than committed progress; a notification unit's re-enqueued overwrite is counted in `objects_overwritten_total` instead), `undecodable` (corrupt/truncated content, over the per-object record limit, or unverifiable without an ETag), `retries_exhausted`. Each report hands the split back; quarantine at the attempt cap shows up in `spate_coordination_splits_quarantined`. |
+| `spate_s3_source_objects_completed_total` | counter | | Objects fully framed and handed to the pipeline by this worker. A cut object counts once per range, so the count can exceed the number of objects. |
+| `spate_s3_source_objects_remaining` | gauge | | Objects not yet completed across **this worker's currently-held units** (rises when a lane opens, falls per completed object, settles when the lane closes). A cut object counts once per range. |
+| `spate_s3_source_bytes_read_total` | counter | | Bytes read from the store, as stored (pre-decompression), including the bytes a byte range reads around its edges and drops. |
+| `spate_s3_source_bytes_decoded_total` | counter | | Bytes after decompression; for a byte range, the bytes of the records it owns. Equals `bytes_read` for uncompressed objects read whole; the ratio is the effective compression. |
+| `spate_s3_source_get_retries_total` | counter | | Object GET and HEAD attempts beyond the first (transient failures, resumed with ranged reads). A rising rate means a flaky store or network; an exhausted attempt budget fails the unit rather than the pipeline. |
+| `spate_s3_source_objects_failed_total` | counter | `reason` | Objects, or byte ranges of one, that failed their unit: `not_found` (deleted after listing, or a key that is not a valid object path), `etag_drift` (overwritten under the `If-Match` pin; a notification unit's re-enqueued overwrite is counted in `objects_overwritten_total` instead), `undecodable` (corrupt/truncated content, over the per-object record limit, or unverifiable without an ETag), `retries_exhausted`. Each report fails the unit back to the feed, which dead-letters it at its cap. |
 | `spate_s3_source_objects_overwritten_total` | counter | | Objects a notification unit's read found overwritten under its ETag pin, once per object and delivery, whether re-enqueued or not. See [Reading a notification's object](#reading-a-notifications-object). |
 | `spate_s3_source_overwrites_dropped_total` | counter | | Of those, the objects whose unit was at the re-enqueue cap and was acknowledged without a re-enqueue. A non-zero value means an overwrite may have been dropped. |
 
-A coordinated run adds the framework's `spate_coordination_*` families. See
-[Metrics](../../../../METRICS.md).
-
 ## Related
 
-- [Coordination stores](../../coordination/README.mdx) — what a durable
-  backfill needs behind it, and the shipped backends.
+- [Work feed](../../../02-concepts/09-work-feed.mdx) — the rule the feed
+  path follows: when a unit is acknowledged, redelivered and dead-lettered.
 - [Scaling out](../../../05-deployment/scaling-out.mdx) — running a fleet:
   deployment shape, tuning knobs and failure modes.
-- [Source coordination](../../../02-concepts/07-source-coordination.mdx) — why a
-  broker-less source coordinates at all.
 - [Delivery guarantees](../../../02-concepts/02-delivery-guarantees.mdx) — where
-  the fenced per-split commits sit in the at-least-once story.
+  the feed's acknowledgement sits in the at-least-once story.
 - [JSON format](../../formats/json/README.mdx) — the `NdjsonFramer` this source
   takes, and the deserializer behind it.
 - [Instrumenting connectors](../../../06-extending/instrumenting-connectors.mdx)

@@ -91,9 +91,7 @@ Work that finishes, and work shared across instances.
 
 | Example | What it shows | Features | Needs |
 |---|---|---|---|
-| [`nats_coordinated_backfill`](nats_coordinated_backfill.rs) | How to coordinate a fleet over the durable store with **NATS JetStream** | `s3,json,coordination-nats` | a NATS server with JetStream; run the binary twice |
 | [`s3_backfill`](s3_backfill.rs) | How to backfill historical records from object storage and stop when the prefix is done with **object storage** | `s3,json` | nothing; it stages a `file://` bucket |
-| [`s3_coordinated_backfill`](s3_coordinated_backfill.rs) | How to split one backfill across two instances without either duplicating it with **object storage and coordination** | `s3,json,coordination` | nothing |
 | [`s3_kafka_backfill`](s3_kafka_backfill.rs) | How to read an object-storage backfill's work from Kafka topics with **object storage and Kafka** | `s3,json,kafka` | Kafka |
 | [`s3_sqs_backfill`](s3_sqs_backfill.rs) | How to read an object-storage backfill's work from a queue with **object storage and Amazon SQS** | `s3,json,sqs` | an SQS queue and a dead-letter queue with a longer retention, and AWS credentials |
 

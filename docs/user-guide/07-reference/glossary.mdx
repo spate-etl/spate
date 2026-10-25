@@ -197,7 +197,7 @@ lane ids are never reused. `spate_source_lanes_active` counts them.
 *Connector mapping:*
 [Kafka source](../04-connectors/sources/kafka/README.mdx#lanes-partitions-on-pipeline-threads)
 — one partition queue ·
-[S3 source](../04-connectors/sources/s3/README.mdx#sizing-splits-against-pipelinethreads)
+[S3 source](../04-connectors/sources/s3/README.mdx#sizing-units-against-pipelinethreads)
 — one in-flight split ·
 [Datagen source](../04-connectors/sources/datagen/README.mdx#configuration) —
 one generator, `partitions` of them.
@@ -240,7 +240,7 @@ continues from its last committed watermark. Distinct from a [lane](#lane)
 (local execution) and a [partition](#partition) (checkpoint bookkeeping).
 
 *Connector mapping:*
-[S3 source](../04-connectors/sources/s3/README.mdx#split-identity-and-drift) —
+[S3 source](../04-connectors/sources/s3/README.mdx#unit-identity-and-drift) —
 a bin-packed batch of whole objects, identified by its members' keys and ETags,
 or one byte range of a large object, identified by its key, ETag and range.
 A database source would instead plan an id range.

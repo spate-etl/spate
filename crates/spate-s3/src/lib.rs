@@ -1,17 +1,17 @@
-//! Coordinated object-storage (S3) backfill source for Spate.
+//! Object-storage (S3) source for Spate, reading through a work feed.
 //!
-//! Point the source at a bucket/prefix and it streams every object's
-//! records through the pipeline: a **bounded** job that self-terminates
-//! (the pipeline exits [`Completed`](spate_core::pipeline::ExitState)) once
-//! the prefix is exhausted. Delivery is at-least-once: a resume replays
-//! from the last committed position, so duplicates are possible and loss
-//! is not.
+//! Point the source at a bucket/prefix and a pipeline `feed:` section, and it
+//! streams every object's records through the pipeline: a **bounded** job
+//! self-terminates (the pipeline exits
+//! [`Completed`](spate_core::pipeline::ExitState)) once the prefix is
+//! exhausted. Delivery is at-least-once: a unit that its worker did not finish
+//! is read again from its start, so duplicates are possible and loss is not.
+//! A pipeline with no `feed:` section fails to start.
 //!
-//! A pipeline `feed:` section selects the feed path. The source reads work
-//! units from the feed the section names, each unit naming one object or one
-//! byte range of one object, and storage notifications, one part per
-//! non-empty created object. On a durable feed it lists nothing itself: a
-//! bounded job's units come from a separate lister run,
+//! The source reads work units from the feed the section names, each unit
+//! naming one object or one byte range of one object, and storage
+//! notifications, one part per non-empty created object. On a durable feed it
+//! lists nothing itself: a bounded job's units come from a separate lister run,
 //! [`S3Source::list_once`], once per job, and a continuous job's from storage
 //! notifications or code. On the in-process feed the run lists its own prefix
 //! into the feed. A whole object that qualifies for byte ranges is
@@ -26,43 +26,29 @@
 //!
 //! # Shape
 //!
-//! - **Work is planned as splits.** The fleet's elected leader lists the
-//!   prefix once and packs the sorted listing into **splits** of ~64 MiB by
-//!   default: small batches of whole objects, or one byte range of a large
-//!   uncompressed object. Each has a deterministic identity
+//! - **Work is a stream of units.** Each unit has a deterministic identity
 //!   ([`split_id_for`], [`split_id_for_range`]) and a self-contained
-//!   [`SplitDescriptor`] carrying its member keys, sizes, and ETags, and its
-//!   range. Workers lease splits through the coordination store and read
-//!   them straight from the descriptors: **workers never list**.
-//! - **One lane per in-flight split.** A gained split materializes one
+//!   [`SplitDescriptor`] carrying its member key, size and ETag, and its range.
+//!   Workers read units straight from their descriptors: **workers never
+//!   list**.
+//! - **One lane per unit in progress.** A received unit materializes one
 //!   data lane (one framework partition, one monotonic offset stream); a
-//!   record's `i64` offset packs (member ordinal within the split, record
-//!   index within the object, or within the range for a split over a byte
-//!   range). `coordination.max_in_flight` bounds the working set and
-//!   therefore read parallelism, and `feed.units_held` bounds it on the
-//!   feed path.
-//! - **Split progress lives in the coordination store.** Commits
-//!   are fenced per-split writes; a lost or stolen split resumes on its
-//!   next owner from the acked watermark, drift-checked against the
-//!   descriptor's ETag pins. Point the pipeline's `coordination:` section
-//!   at a shared store (or hand in a coordinator built in code via
-//!   [`S3Source::with_coordinator`]) and every replica of the pipeline
-//!   shares the backfill, takes a leader-assigned share, and takes over
-//!   from the dead. Without one the source runs solo over an in-process
-//!   store with default tuning, and `store: { memory: {} }` runs that store
-//!   with the section's tuning: correct, but a restart replays the prefix (a
-//!   startup WARN says so). This crate names no concrete backend and has no store feature.
-//!   On the feed path the source acknowledges each finished unit to the
-//!   feed, and a redelivered unit is read again from its start.
-//! - **Bad objects poison their split, not the pipeline.** An object
-//!   deleted after planning, overwritten under its ETag pin, corrupt, or
-//!   unreadable past the retry budget hands its split back (surfaced in
-//!   `spate_s3_source_objects_failed_total{reason}`); at the attempt cap
-//!   the split is quarantined. A bounded job with quarantined splits ends
-//!   **failed**, never silently incomplete. A rejected object read and a
-//!   client-configuration error are immediately fatal. On the feed path a
-//!   notification unit's object overwritten under its pin is re-enqueued at
-//!   its current ETag instead.
+//!   record's `i64` offset packs (member ordinal within the unit, record
+//!   index within the object, or within the range for a unit over a byte
+//!   range). `feed.units_held` bounds the lanes and therefore read
+//!   parallelism.
+//! - **Progress lives in the feed.** The source acknowledges each finished
+//!   unit to the feed once the sink has acknowledged every record in it, and a
+//!   redelivered unit is read again from its start. This crate names no
+//!   concrete backend and has no feed feature.
+//! - **Bad objects fail their unit, not the pipeline.** An object deleted
+//!   after listing, overwritten under its ETag pin, corrupt, or unreadable
+//!   past the retry budget fails its unit back to the feed (surfaced in
+//!   `spate_s3_source_objects_failed_total{reason}`), which dead-letters it at
+//!   its cap. A bounded job with a dead-lettered unit ends **failed**, never
+//!   silently incomplete. A rejected object read and a client-configuration
+//!   error are immediately fatal. A notification unit's object overwritten
+//!   under its pin is re-enqueued at its current ETag instead.
 //! - **Records are framed, not decoded, here.** The source is
 //!   format-agnostic: it streams object bytes (after gzip/zstd decompression)
 //!   through a [`RecordFramer`](spate_core::framing::RecordFramer) *you supply*
@@ -72,23 +58,20 @@
 //!   framed record. Deserialization then stays in the operator chain
 //!   (`spate-json` etc.), as with the Kafka source.
 //!
-//! # Split identity and drift
+//! # Unit identity and drift
 //!
-//! A split's id digests its sorted member keys **and ETags** (plus the
-//! packing-algorithm version, and a byte-range split's range), and every GET
-//! is pinned `If-Match` to the descriptor's ETag. The consequences:
+//! A unit's id digests its sorted member keys **and ETags** (plus a version
+//! constant, and a byte-range unit's range), and every GET is pinned
+//! `If-Match` to the descriptor's ETag. The consequences:
 //!
-//! - Replanning an unchanged prefix reproduces identical ids, so replans
-//!   are create-if-absent no-ops and completed splits stay completed.
-//! - An **overwritten** object shows up as a new split (new id) on the
-//!   next plan; under an in-flight split it trips the `If-Match` pin and
-//!   poisons the split. Either way it can never silently splice into
-//!   committed progress.
-//! - A **deleted** object poisons only the splits that still needed it.
+//! - Listing an unchanged prefix again reproduces identical ids.
+//! - An **overwritten** object shows up as a new unit (new id) on the next
+//!   listing; under an in-flight unit it trips the `If-Match` pin and fails
+//!   the unit. Either way it can never silently splice into earlier progress.
+//! - A **deleted** object fails only the units that still need it.
 //!
-//! Prefer an append-only prefix for the lifetime of a backfill; by
-//! default the listing is taken once (`refresh_listing: false`), so
-//! late-arriving keys are not part of the job.
+//! Prefer an append-only prefix for the lifetime of a backfill: the lister
+//! takes the listing once, so late-arriving keys are not part of the job.
 //!
 //! No `object_store` types appear in this crate's public API (the same
 //! dependency policy that keeps rdkafka out of `spate-kafka`'s). The one

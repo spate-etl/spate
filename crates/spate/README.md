@@ -21,7 +21,7 @@ tree, and never resolves `rdkafka` into its lockfile.
 | --- | --- |
 | `kafka` | Kafka source, sink and work feed ([`spate-kafka`](https://crates.io/crates/spate-kafka)) |
 | `clickhouse` | ClickHouse sink ([`spate-clickhouse`](https://crates.io/crates/spate-clickhouse)) |
-| `s3` | Coordinated object-storage backfill source ([`spate-s3`](https://crates.io/crates/spate-s3)) |
+| `s3` | Object-storage source that reads from a work feed ([`spate-s3`](https://crates.io/crates/spate-s3)) |
 | `sqs` | Amazon SQS work feed ([`spate-sqs`](https://crates.io/crates/spate-sqs)) |
 | `avro` | Avro deserialization ([`spate-avro`](https://crates.io/crates/spate-avro)) |
 | `json` | JSON deserialization ([`spate-json`](https://crates.io/crates/spate-json)) |

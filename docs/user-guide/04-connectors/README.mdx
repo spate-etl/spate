@@ -59,16 +59,14 @@ the process.
   synchronously before partitions are released. Backpressure pauses
   partitions without ever blocking the poll loop, so sink slowness cannot
   cause a consumer-group eviction. One topic per pipeline.
-- **S3 (source)** — a coordinated, bounded backfill: the elected leader
-  plans the prefix into splits and assigns them to live replicas, and
-  progress lives as per-split fenced commits in the coordination store
-  (object storage has no broker-side commit). Resumes drift-check carried
-  progress against the split's ETag-pinned descriptor; bad objects
-  quarantine their split instead of silently skipping; the
-  self-terminating `Completed` exit additionally guarantees every record
-  was acknowledged and committed. Scales horizontally by running more
-  replicas with a shared coordinator; see
-  [the connector page](sources/s3/README.mdx).
+- **S3 (source)** — reads the objects and byte ranges that work units name,
+  and the objects that storage notifications announce, from the feed the
+  pipeline's `feed:` section names (object storage has no broker-side commit,
+  so the feed holds the work). Every read is pinned to the object's ETag; bad
+  objects fail their unit back to the feed instead of silently skipping; the
+  self-terminating `Completed` exit additionally guarantees every record was
+  acknowledged and committed. Scales horizontally by running more replicas on
+  one durable feed; see [the connector page](sources/s3/README.mdx).
 - **Datagen (source)** — no durable upstream, so it claims no resumability:
   a restart begins every lane at offset 0 and the whole stream replays, which
   is strictly more duplication than a real source produces. Its one durability

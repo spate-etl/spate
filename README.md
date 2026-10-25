@@ -161,7 +161,7 @@ ClickHouse pattern).
 |---|---|---|
 | [`spate-kafka`](https://crates.io/crates/spate-kafka) | `kafka` | Kafka source, sink and work feed on `rdkafka`: one consumer per process, partitions fanned across pipeline threads as zero-copy lanes; the feed commits a unit's offset once every record is written. |
 | [`spate-clickhouse`](https://crates.io/crates/spate-clickhouse) | `clickhouse` | ClickHouse sink: Native or RowBinary encoded on pipeline threads, one deduplication-tokened `INSERT` per batch, replica rotation. |
-| [`spate-s3`](https://crates.io/crates/spate-s3) | `s3` | Coordinated object-storage backfill source: a leader plans a prefix into splits, workers lease them with fenced progress. |
+| [`spate-s3`](https://crates.io/crates/spate-s3) | `s3` | Object-storage source: workers read objects and byte ranges as units from a work feed. |
 | [`spate-sqs`](https://crates.io/crates/spate-sqs) | `sqs` | Amazon SQS work feed: units in a standard queue, renewed while a worker reads them and deleted once every record is written. |
 | [`spate-avro`](https://crates.io/crates/spate-avro) | `avro` | Avro deserialization: Confluent wire format, async schema-registry fetching that never blocks a pipeline thread. |
 | [`spate-json`](https://crates.io/crates/spate-json) | `json` | JSON deserialization: single, NDJSON and array framings, with an optional SIMD backend. |

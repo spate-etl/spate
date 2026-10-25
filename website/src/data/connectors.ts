@@ -30,7 +30,7 @@ export const CONNECTORS: Connector[] = [
     role: 'source',
     crate: 'spate-s3',
     feature: 's3',
-    summary: 'Coordinated backfill: a leader plans a prefix into splits, workers lease them with fenced progress.',
+    summary: 'Reads objects and byte ranges as work units from a feed, pinned to ETags; a bounded backfill ends on its own.',
     docs: '/docs/user-guide/connectors/sources/s3',
   },
   {

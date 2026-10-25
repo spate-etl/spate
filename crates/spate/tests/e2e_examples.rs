@@ -1161,7 +1161,8 @@ fn s3_sqs_bounded_example_ends_on_its_own() {
         );
     }
     assert_eq!(
-        mq.approximate_counts(&dead).expect("dead-letter queue counts"),
+        mq.approximate_counts(&dead)
+            .expect("dead-letter queue counts"),
         (0, 0),
         "a unit reached the dead-letter queue\n--- log ---\n{log}"
     );

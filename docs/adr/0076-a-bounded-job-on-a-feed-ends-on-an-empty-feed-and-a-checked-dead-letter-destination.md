@@ -67,7 +67,7 @@ the job `Stalled`, which exits non-zero. On SQS that is the sum of the
 dead-letter queue's visible, in-flight and delayed counts. On Kafka it is the
 job's dead-letter topic, which Spate writes
 ([ADR-0070](0070-on-kafka-a-units-attempt-is-recorded-before-the-unit-is-read.md)).
-Each job uses fresh topics (the feed-section record), so an end offset above
+Each job uses fresh topics (the [feed-section record](0079-the-feed-is-configured-in-a-top-level-section-and-provisioned-by-the-operator.md)), so an end offset above
 zero on any of its partitions ends the job `Stalled`, whether or not retention
 has since deleted the record. On the in-process feed it is the in-memory
 dead-letter list. A depth read the feed refuses for good, such as for a
@@ -115,7 +115,7 @@ both announce twice.
   ends a bounded job with no exit status. A bounded job's workers run with a
   fixed count, or with a scaler whose minimum is one.
 - Bad, because each bounded job needs a queue and a dead-letter destination of
-  its own (the feed-section record), so the operator provisions a pair per job.
+  its own (the [feed-section record](0079-the-feed-is-configured-in-a-top-level-section-and-provisioned-by-the-operator.md)), so the operator provisions a pair per job.
   A dead-letter destination an earlier job wrote ends a clean job `Stalled`.
 - Bad, because a backfill and continuous ingestion need separate feeds.
 - Bad, because records copied after a re-run has seen its end marker and an
@@ -169,7 +169,7 @@ than the five-minute default and the one-minute floor the SQS feed sets.
 - Landed in the pull request that closed #1096.
 - [ADR-0035](0035-s3-poison-policy.md) — the `Stalled` rule this record
   carries onto a feed.
-- The feed-section record — the finished `feed:` section, `settling_window`
+- The [feed-section record](0079-the-feed-is-configured-in-a-top-level-section-and-provisioned-by-the-operator.md) — the finished `feed:` section, `settling_window`
   among its keys.
 - [Work feed](../user-guide/02-concepts/09-work-feed.mdx#how-a-bounded-job-ends)
   and

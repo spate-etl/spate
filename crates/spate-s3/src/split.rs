@@ -550,7 +550,9 @@ mod tests {
 
     #[test]
     fn empty_member_set_is_rejected() {
-        assert!(split_id_for(std::iter::empty()).is_err());
+        let err = split_id_for(std::iter::empty()).unwrap_err();
+        assert_eq!(err.to_string(), err.reason);
+        assert!(err.reason.contains("empty member set"), "{}", err.reason);
     }
 
     #[test]

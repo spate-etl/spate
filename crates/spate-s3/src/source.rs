@@ -1069,6 +1069,68 @@ mod tests {
         assert_eq!(DEFAULT_RE_ENQUEUE_CAP, 10);
     }
 
+    /// Pins that `pause` and `resume` reach the lanes the source holds.
+    #[test]
+    fn pause_and_resume_reach_the_held_lanes() {
+        use crate::split::{DescriptorObject, SplitDescriptor};
+        use spate_core::checkpoint::Checkpointer;
+        use spate_core::feed::Unit;
+        use spate_core::feed::memory::MemoryFeed;
+        use spate_core::source::{SourceCtx, SourceLane as _};
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.ndjson"), b"{\"k\":1}\n").unwrap();
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let feed = MemoryFeed::new();
+        let key = dir
+            .path()
+            .join("a.ndjson")
+            .to_string_lossy()
+            .trim_start_matches('/')
+            .to_owned();
+        let body = SplitDescriptor::new(vec![DescriptorObject {
+            key,
+            size: 9,
+            etag: None,
+            last_modified_ms: 1,
+        }])
+        .encode()
+        .unwrap();
+        drop(feed.publish(Unit::new("a", body)));
+        let mut source = S3Source::from_component_config(
+            &spate_test::component_config(
+                "s3",
+                &format!("url: \"file://{}/\"\n", dir.path().display()),
+            ),
+            rt.handle().clone(),
+        )
+        .unwrap()
+        .with_framer(|| Box::new(crate::testutil::TestLineFramer::new(1 << 20)))
+        .with_feed(Arc::new(feed));
+        source
+            .open(SourceCtx::new(Checkpointer::new().handle()))
+            .unwrap();
+        let lane = loop {
+            if let SourceEvent::LanesAdded(mut lanes) =
+                source.poll_events(Duration::from_millis(50)).unwrap()
+            {
+                break lanes.remove(0).id();
+            }
+        };
+        let paused = |source: &S3Source| match &source.state {
+            State::Feed(reader) => reader.is_paused(lane),
+            State::Created => None,
+        };
+        assert_eq!(paused(&source), Some(false));
+        source.pause(&[lane]).unwrap();
+        assert_eq!(paused(&source), Some(true));
+        source.resume(&[lane]).unwrap();
+        assert_eq!(paused(&source), Some(false));
+    }
+
     /// Every key `validate` accepts reaches the builder, in any case.
     #[test]
     fn apply_options_applies_upper_case_keys() {

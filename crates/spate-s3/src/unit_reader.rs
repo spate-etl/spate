@@ -515,6 +515,16 @@ impl UnitReader {
         }
     }
 
+    /// Whether the held lane `lane` is paused, or `None` when no held lane has
+    /// that id.
+    #[cfg(test)]
+    pub(crate) fn is_paused(&self, lane: LaneId) -> Option<bool> {
+        self.lanes
+            .values()
+            .find(|l| l.lane == lane)
+            .map(|l| l.pause.load(Ordering::Relaxed))
+    }
+
     /// Settle what the lanes and the feed left since the last poll (poison
     /// reports, refused fails, finished lanes and units), then renew every
     /// unit still held.

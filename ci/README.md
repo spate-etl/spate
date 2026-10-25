@@ -28,7 +28,6 @@ are testing, so adding either is a change inside `ci/`.
 | [`debian`](debian/README.md) | `trixie` | `spate-kafka`'s `tls_system_ca`, as its vendored OpenSSL client image |
 | [`elasticmq`](elasticmq/README.md) | `stable` | `spate-sqs`, and `spate-test-support`'s smoke tests |
 | [`kafka`](kafka/README.md) | `stable` | `spate-kafka`, and `spate`'s end-to-end suites |
-| [`nats`](nats/README.md) | `floor`, `below-floor`, `async` | `spate-coordination` |
 | [`rust`](rust/README.md) | `stable` | `spate-kafka`'s `tls_system_ca`, as its system OpenSSL builder and client image |
 | [`rustfs`](rustfs/README.md) | `stable` | `spate-s3`, `spate-kafka`'s notification suite, and `spate-test-support`'s smoke test |
 
@@ -79,15 +78,14 @@ digest on every run.
 **Exact tags**, the vendor's full release version, so a bump diff names the
 release it moved to: `YY.M.P.B` for ClickHouse, `MAJOR.POINT` for Debian,
 `MAJOR.MINOR.PATCH` for ElasticMQ, Kafka and RustFS,
-`MAJOR.MINOR.PATCH-alpine` for NATS, `MAJOR.MINOR.PATCH-bookworm` for Rust.
+`MAJOR.MINOR.PATCH-bookworm` for Rust.
 
 ## Support claims
 
 `cargo xtask tidy supported-versions` holds a page listed in `DOCS` to the lanes.
 Every release line its `## Supported` table names, and every image tag its code
 blocks run, must be a line some lane pins. A lane listed in `UNSUPPORTED` pins a
-fixture and backs no claim: NATS's `below-floor` is a server the software
-refuses, and `async` runs one test.
+fixture and backs no claim, as a server the software refuses does.
 Nothing else reads either file.
 
 ## What CI runs
@@ -129,8 +127,7 @@ The bump usually cannot be fixed inside its own pull request, so:
 4. The suite's harness reads its manifest through the same helper.
 5. `cargo xtask ci-changes` maps `ci/<service>/*` to that suite. A service with
    more than one lane the suite runs on also has its extra lanes read for the
-   matrix, and a `containers.yml` job consuming them. A lane only one test boots, such as
-   NATS's `below-floor`, is not read.
+   matrix, and a `containers.yml` job consuming them. A lane only one test boots is not read.
 6. The Dependabot entries.
 
 Steps 1 to 3 are this tree, and `cargo xtask integration-test` picks the service up from

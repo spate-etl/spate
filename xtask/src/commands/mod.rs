@@ -573,24 +573,8 @@ fn hack(root: &Path, explain: bool, sel: &Select) -> Outcome {
             .args(fuzz_and_xtask),
     ];
     // Stripping dev-dependencies drops test and bench targets, so the run
-    // above reaches no test target in any crate. These steps build them, on
-    // the axes it covers for the library: features off, then the default set.
-    if match sel {
-        Select::Workspace => true,
-        Select::Packages(pkgs) => pkgs.iter().any(|p| p == "spate-coordination"),
-    } {
-        steps.push(Step::new(
-            "cargo",
-            [
-                "check",
-                "-p",
-                "spate-coordination",
-                "--no-default-features",
-                "--tests",
-                "--locked",
-            ],
-        ));
-    }
+    // above reaches no test target in any crate. This step builds them on the
+    // default feature set.
     // The workspace-wide build on default features. spate-fuzz is excluded
     // because the `fuzz` CI job builds it under nightly with libFuzzer
     // instrumentation.

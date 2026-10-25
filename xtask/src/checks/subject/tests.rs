@@ -22,7 +22,7 @@ fn a_crate_area_is_its_directory_less_the_prefix() {
         "core",
         "kafka",
         "clickhouse-derive",
-        "coordination",
+        "sqs",
         "spate",
     ] {
         assert!(
@@ -47,7 +47,7 @@ fn the_rule_over_a_table_of_subjects() {
             "ok",
         ),
         ("core: `Clock` moves into spate_core::clock", "ok"),
-        ("coordination: make a TLS alert fatal", "ok"),
+        ("sqs: make a TLS alert fatal", "ok"),
         ("spate: re-export the clock module", "ok"),
         (
             "workspace: bump the cargo group across 1 directory with 5 updates",

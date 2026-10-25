@@ -44,7 +44,7 @@ jobs:
       - name: Pull the pinned ClickHouse image
         if: contains(inputs.container-args, 'spate-clickhouse')
         run: cargo xtask container-image --pull clickhouse
-      # Serial: 2 cores and ~7 GB across RustFS, ElasticMQ, NATS, Kafka and
+      # Serial: 2 cores and ~7 GB across RustFS, ElasticMQ, Kafka and
       # ClickHouse OOMs in parallel.
       - name: Container suites
         env:

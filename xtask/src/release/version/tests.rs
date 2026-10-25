@@ -16,8 +16,7 @@ rust-version = "1.94"
 
 [workspace.dependencies]
 spate-core = { version = "=0.2.0", path = "crates/spate-core" }
-# Defaults off keeps async-nats out of a memory-only embedding.
-spate-coordination = { version = "=0.2.0", path = "crates/spate-coordination", default-features = false }
+spate-json = { version = "=0.2.0", path = "crates/spate-json", default-features = false }
 spate-s3 = {version = "=0.2.0", path = "crates/spate-s3"}
 spate-bench = { path = "bench" }
 foldhash = "0.2"
@@ -28,8 +27,7 @@ rust-version = "1.94"
 
 [workspace.dependencies]
 spate-core = { version = "=0.3.0", path = "crates/spate-core" }
-# Defaults off keeps async-nats out of a memory-only embedding.
-spate-coordination = { version = "=0.3.0", path = "crates/spate-coordination", default-features = false }
+spate-json = { version = "=0.3.0", path = "crates/spate-json", default-features = false }
 spate-s3 = {version = "=0.3.0", path = "crates/spate-s3"}
 spate-bench = { path = "bench" }
 foldhash = "0.2"

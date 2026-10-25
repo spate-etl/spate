@@ -23,7 +23,6 @@ serde_json = { workspace = true }
 zstd = { workspace = true }
 spate-avro = { workspace = true }
 spate-clickhouse = { workspace = true }
-spate-coordination = { workspace = true, features = ["testing"] }
 spate-core = { workspace = true }
 spate-json = { workspace = true }
 spate-s3 = { workspace = true, features = ["testing"] }
@@ -62,13 +61,6 @@ bench = false
 [[bin]]
 name = "config_parse"
 path = "fuzz_targets/config_parse.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "coordination_records"
-path = "fuzz_targets/coordination_records.rs"
 test = false
 doc = false
 bench = false

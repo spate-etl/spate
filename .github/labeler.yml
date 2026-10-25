@@ -40,10 +40,6 @@
   - changed-files:
       - any-glob-to-any-file: crates/spate-avro/**
 
-"crate: spate-coordination":
-  - changed-files:
-      - any-glob-to-any-file: crates/spate-coordination/**
-
 "crate: spate-datagen":
   - changed-files:
       - any-glob-to-any-file: crates/spate-datagen/**

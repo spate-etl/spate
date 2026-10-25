@@ -9,7 +9,6 @@ members = [
     "crates/spate-kafka",
     "crates/spate-clickhouse",
     "crates/spate-clickhouse-derive",
-    "crates/spate-coordination",
     "crates/spate-datagen",
     "crates/spate-s3",
     "crates/spate-sqs",
@@ -37,8 +36,6 @@ spate-json = { version = "=0.3.0", path = "crates/spate-json" }
 spate-kafka = { version = "=0.3.0", path = "crates/spate-kafka" }
 spate-clickhouse = { version = "=0.3.0", path = "crates/spate-clickhouse" }
 spate-clickhouse-derive = { version = "=0.3.0", path = "crates/spate-clickhouse-derive" }
-# Defaults off keeps async-nats out of a memory-only embedding.
-spate-coordination = { version = "=0.3.0", path = "crates/spate-coordination", default-features = false }
 spate-datagen = { version = "=0.3.0", path = "crates/spate-datagen" }
 spate-s3 = { version = "=0.3.0", path = "crates/spate-s3" }
 spate-sqs = { version = "=0.3.0", path = "crates/spate-sqs" }
@@ -84,8 +81,8 @@ twox-hash = { version = "2.1.4", default-features = false, features = ["xxhash64
 # silently, so this must resist adversarially-named keys.
 sha2 = "0.11"
 
-# The connector clients below (rdkafka, clickhouse, apache-avro, object_store,
-# async-nats) are internal only, never in public signatures (INV-6).
+# The connector clients below (rdkafka, clickhouse, apache-avro, object_store)
+# are internal only, never in public signatures (INV-6).
 rdkafka = { version = "0.39", features = ["zstd"] }
 # Not used directly. rdkafka-sys takes zstd-sys with its default features, and
 # this floor is the first release rdkafka-sys accepts whose defaults leave out
@@ -107,7 +104,6 @@ object_store = "0.14.1"
 quick-xml = { version = "0.41.0", features = ["serialize", "overlapped-lists"] }
 # The `server_2_11` default feature gates the limit-marker KV config the lease
 # buckets depend on.
-async-nats = "0.50"
 rustls-native-certs = "0.8.4"
 webpki-roots = "1.0.10"
 # The same Mozilla bundle as whole certificates, for a client that takes PEM.

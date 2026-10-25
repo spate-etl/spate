@@ -15,7 +15,7 @@ running the affected version, and there is no way to take it back.
 A report is easier to act on with:
 
 - the version or commit, and which features were enabled (`kafka`, `s3`,
-  `sqs`, `coordination-nats`, …);
+  `sqs`, `kafka-tls`, …);
 - what an attacker gains, and what they need in order to reach it;
 - the smallest reproduction you have. A failing test against `spate-test`'s mocks
   is ideal, but a description of the sequence is enough.
@@ -56,7 +56,7 @@ This framework is a library that runs inside your own pipelines.
 **Not in scope**
 
 - Vulnerabilities in the systems this framework connects to. Report those to
-  Kafka, ClickHouse, NATS, or your object-store vendor.
+  Kafka, ClickHouse, or your object-store vendor.
 - Resource exhaustion from configuration you chose, such as setting a queue
   capacity larger than available memory.
 - Advisories against a dependency where the vulnerable code path is not

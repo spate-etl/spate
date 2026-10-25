@@ -234,11 +234,6 @@ pub(crate) fn classify(
                 image_suites.extend(graph.container_suites_for("spate-kafka"));
                 out.container_pkgs.extend(image_suites.iter().cloned());
             }
-            // The server the NATS suites run against.
-            if glob(path, "ci/nats/*") {
-                image_suites.extend(["spate-coordination"].map(String::from));
-                out.container_pkgs.extend(image_suites.iter().cloned());
-            }
             // The S3 store the spate-s3 suites run against, and the queue the
             // shared helpers start. The Kafka feed's notification suite boots
             // it beside the broker.
@@ -509,7 +504,6 @@ mod tests {
             [
                 "spate",
                 "spate-clickhouse",
-                "spate-coordination",
                 "spate-kafka",
                 "spate-s3",
                 "spate-sqs"
@@ -546,7 +540,6 @@ mod tests {
             [
                 "spate",
                 "spate-clickhouse",
-                "spate-coordination",
                 "spate-kafka",
                 "spate-s3",
                 "spate-sqs",
@@ -812,23 +805,6 @@ mod tests {
         let image = vec!["ci/kafka/stable/Dockerfile".to_string()];
         let out = classify(&image, Event::PullRequest, &ctx, &graph(), &[]);
         assert_eq!(suites(&out), ["spate", "spate-kafka"]);
-    }
-
-    /// A NATS server bump selects the suites that boot NATS, on a Dependabot
-    /// pull request too.
-    #[test]
-    fn a_nats_image_bump_selects_the_suites_that_boot_nats() {
-        for lane in ["floor", "below-floor"] {
-            let image = vec![format!("ci/nats/{lane}/Dockerfile")];
-            assert_eq!(suites(&run(&[image[0].as_str()])), ["spate-coordination"]);
-
-            let ctx = Context {
-                author: "dependabot[bot]".into(),
-                labels: vec![],
-            };
-            let out = classify(&image, Event::PullRequest, &ctx, &graph(), &[]);
-            assert_eq!(suites(&out), ["spate-coordination"]);
-        }
     }
 
     /// A RustFS bump selects the suites that boot RustFS and an ElasticMQ bump

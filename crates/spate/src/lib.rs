@@ -22,9 +22,7 @@
 //! | `json` | [`json`] — JSON deserialization (single-document, NDJSON, top-level array) |
 //! | `json-float-roundtrip`, `json-arbitrary-precision`, `json-raw-value` | Opt-in `serde_json` fidelity knobs for [`json`]. `arbitrary-precision` is crate-wide |
 //! | `json-simd` | SIMD decode backend for [`json`] (`simd-json` replacing `serde_json`). The fidelity knobs above do not apply under it |
-//! | `coordination` | **Deprecated; removed in v0.4.0.** [`coordination`] backend — multi-instance leader-assigned work distribution for broker-less sources: the protocol, `StoreCoordinator`, and the in-memory store (zero-infrastructure embedding). The seam types and the `CoordinationDriver` live in `spate::coordination` without any feature |
-//! | `coordination-nats` | **Deprecated; removed in v0.4.0.** The production NATS JetStream KV store (server >= 2.11), selected by `coordination.store.nats`, on top of [`coordination`]; pulls the async-nats dependency tree |
-//! | `datagen` | [`datagen`] — synthetic storefront-event source (orders, payments, refunds) for a pipeline that needs no broker, bucket or coordination store. A demo and test source: it keeps no durable progress |
+//! | `datagen` | [`datagen`] — synthetic storefront-event source (orders, payments, refunds) for a pipeline that needs no broker or bucket. A demo and test source: it keeps no durable progress |
 //! | `datagen-avro` | Avro payloads from [`datagen`] instead of JSON (implies `datagen`) |
 //!
 //! [Kafka security section]: https://spate.kainth.dev/docs/user-guide/connectors/sources/kafka#security-tls-mtls-sasl
@@ -184,18 +182,6 @@ pub use spate_sqs as sqs;
 /// A demo and test source; it keeps no durable progress.
 #[cfg(feature = "datagen")]
 pub use spate_datagen as datagen;
-
-// Without the feature, `spate::coordination` resolves to the seam module
-// (traits, events, the driver) through the `spate_core::*` glob above. With
-// it, this explicit re-export shadows the glob with the backend crate,
-// which itself re-exports the same seam types, so the one path serves both
-// worlds and the backend types appear alongside.
-/// Multi-instance leader-assigned coordination backend (NATS JetStream KV
-/// + in-memory store). The seam and driver need no feature.
-///
-/// Deprecated with every item it defines; v0.4.0 removes it.
-#[cfg(feature = "coordination")]
-pub use spate_coordination as coordination;
 
 /// Compile-checks the README's example, so it cannot drift from the builder
 /// API.

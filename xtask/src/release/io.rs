@@ -961,7 +961,7 @@ fn smoke_manifest(version: Version) -> String {
          edition = \"2021\"\n\
          \n\
          [dependencies]\n\
-         spate = {{ version = \"={version}\", features = [\"kafka\", \"clickhouse\", \"avro\", \"s3\", \"sqs\", \"json\", \"coordination-nats\"] }}\n\
+         spate = {{ version = \"={version}\", features = [\"kafka\", \"clickhouse\", \"avro\", \"s3\", \"sqs\", \"json\"] }}\n\
          \n\
          [dev-dependencies]\n\
          spate-test = \"={version}\"\n"

@@ -52,8 +52,7 @@ fn table() -> Vec<(&'static str, String)> {
         ),
         (
             "supported-versions",
-            "(reads ci/clickhouse/*/Dockerfile and ci/clickhouse/UNSUPPORTED against docs/user-guide/04-connectors/sinks/clickhouse/README.mdx)\n\
-             (reads ci/nats/*/Dockerfile and ci/nats/UNSUPPORTED against docs/user-guide/04-connectors/coordination/nats/README.mdx)\n"
+            "(reads ci/clickhouse/*/Dockerfile and ci/clickhouse/UNSUPPORTED against docs/user-guide/04-connectors/sinks/clickhouse/README.mdx)\n"
                 .to_owned(),
         ),
         (

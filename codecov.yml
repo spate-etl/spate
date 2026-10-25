@@ -68,9 +68,6 @@ component_management:
     - component_id: core
       name: spate-core
       paths: ["crates/spate-core/**"]
-    - component_id: coordination
-      name: spate-coordination
-      paths: ["crates/spate-coordination/**"]
     - component_id: kafka
       name: spate-kafka
       paths: ["crates/spate-kafka/**"]

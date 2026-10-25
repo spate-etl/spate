@@ -18,7 +18,7 @@ slow-timeout = { period = "30s", terminate-after = 4 }
 # Docker/testcontainers runs:
 #   cargo nextest run --profile docker --run-ignored all --all-features
 #
-# These boot real containers (RustFS, ElasticMQ, NATS, Kafka, ClickHouse). Warn
+# These boot real containers (RustFS, ElasticMQ, Kafka, ClickHouse). Warn
 # late and do not terminate: a cold image pull exceeds any period worth setting,
 # and a SIGKILL reports TIMEOUT, indistinguishable from a genuine hang, leaving
 # the container orphaned.

@@ -14,7 +14,6 @@ categories.workspace = true
 [dependencies]
 spate-core = { workspace = true }
 spate-avro = { workspace = true, optional = true }
-spate-coordination = { workspace = true, optional = true }
 spate-datagen = { workspace = true, optional = true }
 spate-json = { workspace = true, optional = true }
 spate-kafka = { workspace = true, optional = true }
@@ -155,11 +154,6 @@ required-features = ["s3", "json"]
 test = true
 
 [[example]]
-name = "custom_coordinated_source"
-required-features = ["coordination"]
-test = true
-
-[[example]]
 name = "s3_sqs_backfill"
 required-features = ["s3", "json", "sqs"]
 
@@ -177,10 +171,6 @@ json-raw-value = ["json", "spate-json/raw-value"]
 json-simd = ["json", "spate-json/simd"]
 kafka = ["dep:spate-kafka"]
 clickhouse = ["dep:spate-clickhouse"]
-# Deprecated: v0.4.0 removes it, where a work feed replaces split coordination.
-coordination = ["dep:spate-coordination"]
-# Deprecated: v0.4.0 removes it, where a work feed replaces split coordination.
-coordination-nats = ["coordination", "spate-coordination/nats"]
 s3 = ["dep:spate-s3"]
 sqs = ["dep:spate-sqs"]
 datagen = ["dep:spate-datagen"]

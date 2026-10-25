@@ -79,7 +79,6 @@ body:
         - SQS feed (spate-sqs)
         - JSON deserializer (spate-json)
         - Avro deserializer (spate-avro)
-        - Coordination (spate-coordination)
         - Synthetic data source (spate-datagen)
         - A connector I wrote
     validations:

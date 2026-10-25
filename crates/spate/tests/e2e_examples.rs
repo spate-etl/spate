@@ -3,7 +3,7 @@
 //!
 //! The infrastructure-free examples carry `[[example]] test = true` and run on
 //! every pull request. The ones whose stanza carries no `test = true` cannot:
-//! they need a broker, a table, or a coordination store, and most of them run
+//! they need a broker or a table, and most of them run
 //! until SIGTERM. This binary runs those, one test per infrastructure
 //! shape, each booting its containers once and then spawning the real example
 //! binaries against them.

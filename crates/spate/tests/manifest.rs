@@ -179,6 +179,25 @@ fn the_examples_are_discovered() {
 /// rather than matching names is enough in both directions: a stanza naming a
 /// file that does not exist fails `cargo metadata` outright, so equal counts
 /// mean equal sets.
+/// The facade declares neither coordination feature, and no target asks for
+/// one.
+#[test]
+fn the_removed_coordination_features_are_gone() {
+    let pkg = spate_package();
+    for feature in ["coordination", "coordination-nats"] {
+        assert!(
+            !pkg.features.contains_key(feature),
+            "`{feature}` is declared"
+        );
+        assert!(
+            pkg.targets
+                .iter()
+                .all(|t| !t.required_features.iter().any(|f| f == feature)),
+            "a target requires `{feature}`"
+        );
+    }
+}
+
 #[test]
 fn every_example_file_has_a_stanza() {
     let pkg = spate_package();
@@ -276,8 +295,7 @@ fn the_tests_are_discovered() {
 /// The declared features a source reaches through `spate::<module>` paths,
 /// counting each member of a `spate::{…}` group.
 ///
-/// A path through an alias (`use spate as s`) is not seen. Panics on
-/// `spate::coordination`, which also resolves without its feature.
+/// A path through an alias (`use spate as s`) is not seen.
 fn connector_features(src: &str, declared: &BTreeSet<&str>) -> BTreeSet<String> {
     fn ident(s: &str) -> &str {
         let s = s.trim_start();
@@ -320,11 +338,6 @@ fn connector_features(src: &str, declared: &BTreeSet<&str>) -> BTreeSet<String> 
             None => names.push(ident(rest)),
         }
         for name in names {
-            assert_ne!(
-                name, "coordination",
-                "`spate::coordination` resolves with or without the `coordination` \
-                 feature, so whether a target needs it is decided by hand"
-            );
             if declared.contains(name) {
                 found.insert(name.to_owned());
             }

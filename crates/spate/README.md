@@ -25,8 +25,6 @@ tree, and never resolves `rdkafka` into its lockfile.
 | `sqs` | Amazon SQS work feed ([`spate-sqs`](https://crates.io/crates/spate-sqs)) |
 | `avro` | Avro deserialization ([`spate-avro`](https://crates.io/crates/spate-avro)) |
 | `json` | JSON deserialization ([`spate-json`](https://crates.io/crates/spate-json)) |
-| `coordination` | Multi-instance work assignment, in-memory store (deprecated) |
-| `coordination-nats` | The same over NATS JetStream KV (deprecated) |
 | `datagen` | Synthetic storefront source, no infrastructure ([`spate-datagen`](https://crates.io/crates/spate-datagen)) — keeps no durable progress |
 | `datagen-avro` | Avro payloads from that generator instead of JSON (implies `datagen`) |
 

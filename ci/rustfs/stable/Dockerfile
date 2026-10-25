@@ -1,6 +1,6 @@
 # The primary lane: the newest RustFS release. The S3 store the spate-s3
 # container suites, spate-kafka's notification suite, spate-test-support's
-# smoke test and the fault runs in `faults/` boot.
+# smoke test boot.
 #
 # No Dependabot `ignore` applies, so this lane follows every release.
 # ../README.md has the account.

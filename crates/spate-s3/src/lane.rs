@@ -28,11 +28,10 @@
 use crate::config::Compression;
 use crate::fetch::{ChunkMsg, SplitFailure};
 use crate::framer::{Codec, FramerFactory, ObjectFramer};
+use crate::lane_ctx::{PoisonKind, PoisonReport, SplitTracker};
 use crate::metrics::S3Metrics;
 use crate::offset::{MAX_RECORD_INDEX, Position};
-use crate::split_ctx::{PoisonKind, PoisonReport, SplitTracker};
 use spate_core::checkpoint::{AckIssuer, AckRef};
-use spate_core::coordination::{ControlWaker, LeaseEpoch, SplitId};
 use spate_core::error::{ErrorClass, SourceError};
 use spate_core::feed::FeedWaker;
 use spate_core::record::{PartitionId, RawPayload};
@@ -43,41 +42,22 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TryRecvError;
 
-/// The control-plane waker a lane signals when it ends or fails.
-pub(crate) enum LaneWaker {
-    /// A coordinated source's driver waker, signalled on every call.
-    Control(ControlWaker),
-    /// A feed reader's waker, signalled on the first call only. End-of-input
-    /// and poison share the flag, since either one ends the lane. One signal
-    /// suffices: the slot holds it until a park consumes it, and the reader
-    /// re-reads the lane's state on every pass.
-    Feed { waker: FeedWaker, sent: bool },
+/// The control-plane waker a lane signals when it ends or fails. It fires on
+/// the first call only. End-of-input and poison share the flag, since either
+/// one ends the lane. One signal suffices: the slot holds it until a park
+/// consumes it, and the reader re-reads the lane's state on every pass.
+struct LaneWaker {
+    waker: FeedWaker,
+    sent: bool,
 }
 
 impl LaneWaker {
     /// Signal the control plane. Never blocks.
     fn wake(&mut self) {
-        match self {
-            LaneWaker::Control(waker) => waker.wake(),
-            LaneWaker::Feed { waker, sent } => {
-                if !*sent {
-                    *sent = true;
-                    waker.wake();
-                }
-            }
+        if !self.sent {
+            self.sent = true;
+            self.waker.wake();
         }
-    }
-}
-
-impl From<ControlWaker> for LaneWaker {
-    fn from(waker: ControlWaker) -> LaneWaker {
-        LaneWaker::Control(waker)
-    }
-}
-
-impl From<FeedWaker> for LaneWaker {
-    fn from(waker: FeedWaker) -> LaneWaker {
-        LaneWaker::Feed { waker, sent: false }
     }
 }
 
@@ -118,10 +98,6 @@ pub struct S3Lane {
     /// once the queue drains.
     pending_end: bool,
     held: Vec<HeldRecord>,
-    /// The split this lane reads; names the work in poison reports.
-    split: SplitId,
-    /// The epoch of the tenancy this lane reads under; poison reports carry it.
-    epoch: LeaseEpoch,
     /// Carries the terminal watermark to the control plane at the
     /// end-of-input decision.
     tracker: Arc<SplitTracker>,
@@ -172,11 +148,9 @@ impl S3Lane {
         compression: Compression,
         make_framer: FramerFactory,
         resume: Option<Position>,
-        split: SplitId,
-        epoch: LeaseEpoch,
         tracker: Arc<SplitTracker>,
         poison_tx: std_mpsc::Sender<PoisonReport>,
-        waker: impl Into<LaneWaker>,
+        waker: FeedWaker,
         metrics: Option<S3Metrics>,
     ) -> S3Lane {
         let watermark_candidate = resume.map_or(0, |p| {
@@ -196,11 +170,9 @@ impl S3Lane {
             current: None,
             pending_end: false,
             held: Vec::new(),
-            split,
-            epoch,
             tracker,
             poison_tx,
-            waker: waker.into(),
+            waker: LaneWaker { waker, sent: false },
             poisoned: false,
             truncated: false,
             watermark_candidate,
@@ -228,8 +200,7 @@ impl S3Lane {
         self.poisoned = true;
         // The receiver disappearing (shutdown) makes the report moot.
         let _ = self.poison_tx.send(PoisonReport {
-            split: self.split.clone(),
-            epoch: self.epoch,
+            partition: self.partition,
             kind,
             reason,
             overwrite: None,
@@ -247,8 +218,7 @@ impl S3Lane {
         self.pending_end = false;
         // The receiver disappearing (shutdown) makes the report moot.
         let _ = self.poison_tx.send(PoisonReport {
-            split: self.split.clone(),
-            epoch: self.epoch,
+            partition: self.partition,
             kind: PoisonKind::EtagDrift,
             reason: format!("\"{}\" was overwritten while it was read", overwrite.key),
             overwrite: Some(overwrite),
@@ -667,10 +637,10 @@ mod tests {
     }
 
     fn rig(resume: Option<Position>) -> LaneRig {
-        rig_with(resume, ControlWaker::inert())
+        rig_with(resume, wake_channel().0)
     }
 
-    fn rig_with(resume: Option<Position>, waker: impl Into<LaneWaker>) -> LaneRig {
+    fn rig_with(resume: Option<Position>, waker: FeedWaker) -> LaneRig {
         let rt = runtime();
         let (tx, rx) = mpsc::channel(64);
         let checkpointer = Checkpointer::new();
@@ -685,8 +655,6 @@ mod tests {
             Compression::Auto,
             Arc::new(|| Box::new(TestLineFramer::new(1 << 20))),
             resume,
-            SplitId::new("s3-test").unwrap(),
-            LeaseEpoch(1),
             Arc::clone(&tracker),
             poison_tx,
             waker,
@@ -871,7 +839,6 @@ mod tests {
         assert!(poll_batch(&mut r.lane, 512).is_none());
         let report = r.poison_rx.try_recv().expect("a poison report");
         assert!(report.reason.contains("short"), "{}", report.reason);
-        assert_eq!(report.split.as_str(), "s3-test");
         // Quiescent thereafter: no error, no duplicate report, no
         // terminal watermark (the split did not finish).
         assert!(poll_batch(&mut r.lane, 512).is_none());

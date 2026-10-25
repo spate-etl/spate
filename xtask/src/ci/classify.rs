@@ -141,7 +141,6 @@ pub(crate) fn is_manifest(path: &str) -> bool {
             "Cargo.lock",
             "crates/*/Cargo.toml",
             "bench/Cargo.toml",
-            "faults/Cargo.toml",
             "fuzz/Cargo.toml",
             "test-support/Cargo.toml",
             "xtask/Cargo.toml",
@@ -240,8 +239,7 @@ pub(crate) fn classify(
             }
             // The S3 store the spate-s3 suites run against, and the queue the
             // shared helpers start. The Kafka feed's notification suite boots
-            // it beside the broker, and the fault runs boot it too, outside
-            // the container suites.
+            // it beside the broker.
             if glob(path, "ci/rustfs/*") {
                 image_suites
                     .extend(["spate-kafka", "spate-s3", "spate-test-support"].map(String::from));
@@ -667,11 +665,6 @@ mod tests {
     }
 
     #[test]
-    fn the_faults_manifest_is_a_manifest() {
-        assert!(run(&["faults/Cargo.toml"]).manifests);
-    }
-
-    #[test]
     fn a_fuzz_dependency_builds_the_harness() {
         assert!(run(&["crates/spate-core/src/lib.rs"]).fuzz);
         assert!(!run(&["crates/spate-test/src/lib.rs"]).fuzz);
@@ -947,7 +940,6 @@ mod tests {
             "Cargo.lock",
             "crates/spate-s3/Cargo.toml",
             "bench/Cargo.toml",
-            "faults/Cargo.toml",
             "fuzz/Cargo.toml",
             "test-support/Cargo.toml",
             "xtask/Cargo.toml",
@@ -960,7 +952,6 @@ mod tests {
         }
         for path in [
             "bench/src/lib.rs",
-            "faults/src/lib.rs",
             "test-support/src/lib.rs",
             ".github/workflows/scheduled.yml",
             "deny.toml",

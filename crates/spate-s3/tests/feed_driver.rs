@@ -11,7 +11,6 @@ mod support;
 use spate_core::checkpoint::Checkpointer;
 use spate_core::clock::TestClock;
 use spate_core::config::PipelineConfig;
-use spate_core::error::{ErrorClass, SourceError};
 use spate_core::feed::memory::{FeedCounts, MemoryFeed};
 use spate_core::feed::{
     Confirmation, Delivery, Feed, FeedError, FeedErrorKind, FeedWaker, Receipt, STOP_RESERVE, Unit,
@@ -52,7 +51,9 @@ fn data_dir(dir: &tempfile::TempDir) -> std::path::PathBuf {
 }
 
 fn launch_on_feed(data: &Path, feed: Arc<dyn Feed>, pre: impl FnOnce(&SinkScript)) -> Launched {
-    let yaml = PipelineYaml::file("s3-feed-test", data).build();
+    let yaml = PipelineYaml::file("s3-feed-test", data)
+        .fed_by_code()
+        .build();
     launch_customized(&yaml, test_options(), pre, move |source, _io| {
         line_framer(source).with_feed(feed)
     })
@@ -285,15 +286,15 @@ fn in_process_units_are_acknowledged_or_dead_lettered_at_the_cap() {
         // `recs` rows are 12 bytes, so the range owns `o-0` alone.
         Unit::new(
             "ranged",
-            support::ranged_spec(&data, "other.ndjson", 0, 12, b'\n').descriptor,
+            support::ranged_spec(&data, "other.ndjson", 0, 12, b'\n'),
         ),
         Unit::new(
             "ranged-cr",
-            support::ranged_spec(&data, "other.ndjson", 0, 12, b'\r').descriptor,
+            support::ranged_spec(&data, "other.ndjson", 0, 12, b'\r'),
         ),
         Unit::new(
             "ranged-gz",
-            support::ranged_spec(&data, "x.ndjson.gz", 0, gz.len() as u64, b'\n').descriptor,
+            support::ranged_spec(&data, "x.ndjson.gz", 0, gz.len() as u64, b'\n'),
         ),
     ] {
         drop(feed.publish(unit));
@@ -330,42 +331,38 @@ fn in_process_units_are_acknowledged_or_dead_lettered_at_the_cap() {
     );
 }
 
-/// Pins that a source reading a feed refuses a `coordination:` section when
-/// the runtime offers it, and refuses a coordinator handed to it in code
-/// when it opens.
+/// Pins that a pipeline naming no feed fails at start, naming the section to
+/// add, and that its object store is never read.
 #[test]
-#[expect(deprecated, reason = "v0.4.0 removes this with spate-coordination")]
-fn a_feed_refuses_coordination_on_the_same_source() {
+fn a_pipeline_with_no_feed_fails_at_start() {
     let dir = tempfile::tempdir().unwrap();
     let data = data_dir(&dir);
-    let yaml = PipelineYaml::file("s3-feed-conflict", &data)
-        .section(&support::unreachable_nats("feed-conflict"))
+    stage(&data, "r.ndjson", &recs("r", 3));
+    let yaml = PipelineYaml::file("s3-no-feed", &data)
+        .fed_by_code()
         .build();
-    let config = PipelineConfig::from_str(&yaml).unwrap();
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(1)
-        .enable_all()
-        .build()
-        .unwrap();
-    let source = || {
-        let source = S3Source::from_component_config(&config.source, rt.handle().clone()).unwrap();
-        line_framer(source).with_feed(Arc::new(MemoryFeed::new()))
+    let (spy_store, spy) = spying_local_store(SpyOptions::default());
+    let l = launch_customized(
+        &yaml,
+        test_options(),
+        |_| {},
+        move |source, _io| line_framer(source).with_store(spy_store),
+    );
+    let report = l
+        .run
+        .wait_exit(DEADLINE)
+        .expect("the run exits")
+        .expect("no start error");
+    let ExitState::Failed(failure) = report.state else {
+        panic!("a source with no feed must fail, got {:?}", report.state);
     };
-
-    let section = config.coordination.as_ref().expect("the section parses");
-    let err = source().configure_coordination(section).unwrap_err();
-    assert!(err.to_string().contains("feed"), "{err}");
-
-    let (coordinator, _script) = spate_test::scripted_coordinator();
-    let mut both = source().with_coordinator(Box::new(coordinator));
-    let err = both
-        .open(SourceCtx::new(Checkpointer::new().handle()))
-        .unwrap_err();
-    let SourceError::Client { class, reason } = err else {
-        panic!("a client error, got {err:?}");
-    };
-    assert_eq!(class, ErrorClass::Fatal);
-    assert!(reason.contains("coordinator"), "{reason}");
+    assert!(
+        failure.reason.contains("feed: { memory: {} }"),
+        "the error names the section to add: {}",
+        failure.reason
+    );
+    assert!(captured_rows(&l.script).is_empty());
+    assert!(spy.gets().is_empty(), "no object was read");
 }
 
 /// Pins that the source over a feed reads a whole-object unit in the byte
@@ -392,7 +389,9 @@ fn a_whole_unit_over_a_large_object_is_read_in_ranges() {
     let (feed, script) = scripted_feed();
     let receipt = script.deliver(unit);
     let (store, spy) = spying_local_store(SpyOptions::default());
-    let yaml = PipelineYaml::file("s3-feed-ranges", &data).build();
+    let yaml = PipelineYaml::file("s3-feed-ranges", &data)
+        .fed_by_code()
+        .build();
     let l = launch_customized(
         &yaml,
         test_options(),
@@ -493,6 +492,7 @@ fn launch_one_row_writes(
     pre: impl FnOnce(&SinkScript),
 ) -> Launched {
     let yaml = PipelineYaml::file("s3-feed-row-writes", data)
+        .fed_by_code()
         .threads(1)
         .build()
         .replace(
@@ -818,6 +818,7 @@ fn a_finished_unit_is_acknowledged_before_the_poll_timeout() {
     // signal. Past it, a sink write still in flight leaves the acknowledgment
     // to the 60 s park, so the interval outlasts any write under load.
     let yaml = PipelineYaml::file("s3-feed-wake", &data)
+        .fed_by_code()
         .checkpoint("30s")
         .build();
     let mut config = PipelineConfig::from_str(&yaml).unwrap();
@@ -898,11 +899,10 @@ fn a_zero_byte_folder_marker_unit_is_acknowledged() {
     assert_eq!((c.dead_lettered, c.acknowledged), (0, 1));
 }
 
-/// Pins that a source given a feed or a coordinator in code refuses a
-/// `feed:` section when the runtime offers it.
+/// Pins that a source given a feed in code refuses a `feed:` section when the
+/// runtime offers it.
 #[test]
-#[expect(deprecated, reason = "v0.4.0 removes this with spate-coordination")]
-fn a_feed_section_is_refused_beside_a_feed_or_coordinator_given_in_code() {
+fn a_feed_section_is_refused_beside_a_feed_given_in_code() {
     let dir = tempfile::tempdir().unwrap();
     let data = data_dir(&dir);
     let yaml = PipelineYaml::file("s3-feed-section-conflict", &data)
@@ -928,17 +928,6 @@ fn a_feed_section_is_refused_beside_a_feed_or_coordinator_given_in_code() {
         )
         .unwrap_err();
     assert!(err.to_string().contains("with_feed"), "{err}");
-
-    let (coordinator, _script) = spate_test::scripted_coordinator();
-    let err = source()
-        .with_coordinator(Box::new(coordinator))
-        .configure_feed(
-            section,
-            Arc::new(MemoryFeed::new()),
-            spate_core::feed::FeedOrigin::Section,
-        )
-        .unwrap_err();
-    assert!(err.to_string().contains("with_coordinator"), "{err}");
 }
 
 /// A run over `<scheme>://b/data/` whose store is the directory `root`, so a
@@ -950,6 +939,7 @@ fn launch_on_notifications(
     pre: impl FnOnce(&SinkScript),
 ) -> Launched {
     let yaml = PipelineYaml::endpoint("s3-notification-test", "http://127.0.0.1:9")
+        .fed_by_code()
         .build()
         .replace("\"s3://b/data/\"", &format!("\"{scheme}://b/data/\""));
     let store = Arc::new(object_store::local::LocalFileSystem::new_with_prefix(root).unwrap());
@@ -1154,6 +1144,7 @@ fn launch_on_store_on_clock(
 
 fn overwrite_yaml() -> String {
     PipelineYaml::endpoint("s3-overwrite-test", "http://127.0.0.1:9")
+        .fed_by_code()
         .source("chunk_bytes", "64KiB")
         .source("prefetch_bytes", "64KiB")
         .build()

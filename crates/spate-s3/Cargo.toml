@@ -1,6 +1,6 @@
 [package]
 name = "spate-s3"
-description = "Coordinated object-storage (S3) backfill source for the Spate pipeline framework: an elected leader plans the prefix into splits, workers lease them with fenced per-split progress in a coordination store, resume is drift-checked against ETag pins, and the job self-terminates when the plan completes. Applications should depend on the `spate` facade crate with the `s3` feature."
+description = "Object-storage (S3) source for the Spate pipeline framework: workers read objects and byte ranges as units from a work feed, filled by a lister run or by storage notifications, with reads pinned to ETags. Applications should depend on the `spate` facade crate with the `s3` feature."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -22,7 +22,6 @@ base64 = { workspace = true }
 bytes = { workspace = true }
 bytesize = { workspace = true }
 chrono = { workspace = true }
-spate-coordination = { workspace = true }
 spate-core = { workspace = true }
 flate2 = { workspace = true }
 futures-util = { workspace = true }
@@ -43,7 +42,6 @@ zstd = { workspace = true }
 spate-s3 = { path = ".", features = ["testing"] }
 # `clock::tokio::TestClock`, which the job location tests advance.
 spate-core = { workspace = true, features = ["testing"] }
-spate-coordination = { workspace = true, features = ["nats"] }
 spate-bench = { workspace = true }
 spate-test = { workspace = true }
 spate-test-support = { workspace = true, features = ["rustfs", "tls"] }
@@ -53,10 +51,6 @@ proptest = { workspace = true }
 tempfile = { workspace = true }
 testcontainers = { workspace = true, features = ["blocking"] }
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "test-util"] }
-
-[[bench]]
-name = "split_gungraun"
-harness = false
 
 [[bench]]
 name = "framing_gungraun"

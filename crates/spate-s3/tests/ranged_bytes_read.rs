@@ -1,22 +1,21 @@
-//! `bytes_read_total` for a ranged split. Its own test binary because it
+//! `bytes_read_total` for a ranged unit. Its own test binary because it
 //! installs the process-wide metrics recorder.
-
-#![expect(deprecated, reason = "v0.4.0 removes this with spate-coordination")]
 
 mod support;
 
+use spate_core::feed::Unit;
 use spate_core::metrics::{Exporter, MetricsSettings, install};
-use spate_core::pipeline::ExitState;
-use spate_test::{metric_value, scripted_coordinator, wait_until};
+use spate_test::{metric_value, scripted_feed, wait_until};
 use std::fs;
+use std::sync::Arc;
 use std::time::Duration;
 use support::spy::{RangeKind, SpyOptions, spying_local_store};
 use support::{
     PipelineYaml, launch_customized, line_framer, line_starts, lines_bytes, ranged_spec, recs,
-    test_options,
+    stop, test_options,
 };
 
-/// A ranged split's `bytes_read_total` equals the bytes of every window it
+/// A ranged unit's `bytes_read_total` equals the bytes of every window it
 /// fetched from the store, trimmed bytes included.
 #[test]
 fn a_ranged_split_counts_every_fetched_byte_as_read() {
@@ -31,14 +30,14 @@ fn a_ranged_split_counts_every_fetched_byte_as_read() {
     let lines = recs("r", 20);
     fs::write(data.join("big.ndjson"), lines_bytes(&lines)).unwrap();
     let starts = line_starts(&lines);
-    let spec = ranged_spec(&data, "big.ndjson", starts[5], starts[10] + 3, b'\n');
-    let id = spec.id.clone();
+    let body = ranged_spec(&data, "big.ndjson", starts[5], starts[10] + 3, b'\n');
 
-    let (coordinator, script) = scripted_coordinator();
-    script.gain(spec, 1, None);
+    let (feed, script) = scripted_feed();
+    script.deliver(Unit::new("ranged", body));
     let (spy_store, spy) = spying_local_store(SpyOptions::default());
     let yaml = PipelineYaml::file("s3-ranged-bytes-read", &data)
         .threads(1)
+        .fed_by_code()
         .build();
     let l = launch_customized(
         &yaml,
@@ -46,19 +45,14 @@ fn a_ranged_split_counts_every_fetched_byte_as_read() {
         |_| {},
         move |source, _| {
             line_framer(source)
-                .with_coordinator(Box::new(coordinator))
+                .with_feed(Arc::new(feed))
                 .with_store(spy_store)
         },
     );
-    wait_until(Duration::from_secs(30), "terminal commit", || {
-        script
-            .commits()
-            .iter()
-            .any(|(sid, p)| sid == &id && p.completed)
+    wait_until(Duration::from_secs(30), "the unit is acknowledged", || {
+        script.acknowledged().len() == 1
     });
-    script.all_complete();
-    let report = l.run.wait_exit(Duration::from_secs(30)).unwrap().unwrap();
-    assert_eq!(report.state, ExitState::Completed);
+    stop(&l);
 
     let fetched: u64 = spy
         .gets()

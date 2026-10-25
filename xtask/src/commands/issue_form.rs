@@ -184,16 +184,6 @@ pub(super) const BUG: [Field; 10] = [
 /// 65,536 characters.
 pub(super) const MAX_LOG_CHARS: usize = 25_000;
 
-/// Every field as a section, in order, each answered by its own entry of
-/// `answers`.
-pub(super) fn form<const N: usize>(fields: &[Field; N], answers: [String; N]) -> String {
-    let mut body = String::new();
-    for (field, answer) in fields.iter().zip(answers) {
-        section(&mut body, field.label, field.render, &answer);
-    }
-    body
-}
-
 /// One `###` section; an empty answer reads `_No response_`, as GitHub
 /// renders an unanswered field.
 pub(super) fn section(body: &mut String, label: &str, render: Option<&str>, answer: &str) {

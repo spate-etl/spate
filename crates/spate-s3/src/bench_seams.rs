@@ -1,14 +1,14 @@
 //! Measurable entry points into work this crate does not otherwise expose.
 //!
-//! Benches in this workspace drive their crate's public API. Two do not: this
-//! module, and `spate-coordination`'s.
+//! Benches in this workspace drive their crate's public API. This module is
+//! an exception.
 //!
 //! This crate's public entry point is [`S3Source`](crate::S3Source), which is
 //! asynchronous and driven by object-store I/O. Both properties stop an
 //! instruction count being deterministic: under a runtime the number becomes
-//! a function of how the scheduler interleaved polls. Packing, split identity
-//! and record framing are pure, synchronous, on the per-object path and so
-//! countable, but reaching them means reaching past the async surface.
+//! a function of how the scheduler interleaved polls. Record framing is pure,
+//! synchronous, on the per-object path and so countable, but reaching it means
+//! reaching past the async surface.
 //!
 //! The rules a future seam has to honor:
 //!
@@ -20,86 +20,21 @@
 //!   to change; only the shape of the work is fixed. `MakeFramer` is an alias
 //!   over `std` and `spate-core` types, which a caller must be able to name to
 //!   supply a framer at all.
-//! - Each function is one whole unit of the work a stage does (a plan, an
-//!   object run) rather than one internal call. Attribution below that level
+//! - Each function is one whole unit of the work a stage does (an object
+//!   run) rather than one internal call. Attribution below that level
 //!   comes from the callgrind profile the bench already writes.
 
 use crate::config::Compression;
-use crate::fetch::ObjectEntry;
 use crate::framer::{Codec, ObjectFramer};
-use crate::split::{Packing, SplitRange, pack};
+use crate::split::SplitRange;
 use crate::trim::RangeTrim;
 use bytes::Bytes;
-use spate_core::coordination::SplitId;
 use spate_core::framing::RecordFramer;
-use std::hint::black_box;
 use std::io;
 use std::sync::Arc;
 
 /// Builds a fresh record framer, as the source does per object.
 pub type MakeFramer = Arc<dyn Fn() -> Box<dyn RecordFramer> + Send + Sync>;
-
-/// Pack a listing into splits, mint each split's id, and encode each
-/// descriptor: the whole of what the leader's planner does with a listing,
-/// once per plan.
-///
-/// `objects` is `(key, size_bytes, etag)` **sorted by key**, which is the
-/// order `list_all` hands the planner; packing preserves listing order, so
-/// feeding it anything else measures a arrangement production never produces.
-/// Taken by value so the keys move into the entries rather than being cloned
-/// inside the measured region.
-///
-/// `delimiter` is the framer's resync delimiter, as the source probes it, and
-/// packing runs under `Compression::Auto`. With `None` every object is read
-/// whole.
-///
-/// The three stages are one function because the planner does them as one
-/// pass per split and a change to any of them moves the others: the id
-/// digests the member keys and ETags, and the descriptor serializes the same
-/// members immediately afterwards. Splitting them would measure the parts
-/// while missing the per-split loop that carries all three, and the
-/// serialization is the term most likely to dominate.
-///
-/// # Panics
-///
-/// If a packed bin is empty, which `pack` cannot produce, or if a descriptor
-/// fails to encode. Neither is reachable from a well-formed listing; both are
-/// asserted rather than propagated because a bench has no policy to apply.
-#[must_use]
-pub fn plan_listing(
-    objects: Vec<(String, u64, String)>,
-    target_bytes: u64,
-    delimiter: Option<u8>,
-) -> Vec<SplitId> {
-    let entries: Vec<ObjectEntry> = objects
-        .into_iter()
-        .map(|(key, size, etag)| ObjectEntry {
-            key,
-            size,
-            etag: Some(etag),
-            last_modified_ms: 0,
-        })
-        .collect();
-
-    let packing = Packing {
-        target_bytes,
-        compression: Compression::Auto,
-        delimiter,
-    };
-    pack(entries, &packing)
-        .into_iter()
-        .map(|split| {
-            let id = split.id().expect("pack never returns an empty bin");
-            // The planner encodes the descriptor here too, and its cost is
-            // charged to the plan rather than hoisted out: the members are
-            // consumed by it, so the measured region ends where the planner's
-            // per-split work ends rather than part-way through it.
-            let encoded = split.descriptor().encode().expect("a packed split encodes");
-            black_box(encoded);
-            id
-        })
-        .collect()
-}
 
 /// Frame a run of objects into records through one framer, returning how
 /// many records they produced in total.

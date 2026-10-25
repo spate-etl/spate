@@ -41,15 +41,11 @@ use rdkafka::ClientConfig;
 use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::producer::{BaseProducer, BaseRecord, Producer};
 use spate_test::metric_sum;
-use spate_test_support::container_image;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 use support::{CH_PASSWORD, Harness, http_get};
-use testcontainers::core::{IntoContainerPort, WaitFor};
-use testcontainers::runners::SyncRunner;
-use testcontainers::{Container, GenericImage, ImageExt};
 
 /// How long an example may take to reach its expected output before the test
 /// gives up. Sized for a cold start against a freshly booted broker, where
@@ -1113,98 +1109,4 @@ fn load_summary(log: &str) -> serde_json::Value {
         "expected one summary line\n--- log ---\n{log}"
     );
     summaries.into_iter().next().expect("one summary")
-}
-
-// ── NATS JetStream ─────────────────────────────────────────────────────────
-
-/// `nats_coordinated_backfill`: a bounded backfill divided over the durable
-/// coordination store. A single instance is assigned every split and exits
-/// `Completed` once they are all done, so this one also stops on its own.
-///
-/// Coverage on its own is not a coordination result: an `S3Source` with no
-/// coordinator injected reads the whole prefix too, over an in-process store
-/// that dies with it. Durability separates the two, so this asserts on the
-/// store: the first run must not fall back to the solo store, and a second
-/// run against the same NATS must find the job already finished.
-#[test]
-#[ignore = "requires Docker"]
-fn nats_coordinated_backfill_example_covers_the_prefix() {
-    // The server `ci/nats/` pins, fetched by digest and re-tagged so this
-    // starts the pinned bytes.
-    let (nats_image, nats_tag) = container_image(&["--pull", "nats"]);
-    let nats: Container<GenericImage> = GenericImage::new(&nats_image, &nats_tag)
-        .with_exposed_port(4222.tcp())
-        .with_wait_for(WaitFor::message_on_stderr("Server is ready"))
-        .with_cmd(["-js"])
-        .start()
-        .unwrap_or_else(|e| panic!("start NATS container {nats_image}:{nats_tag}: {e}"));
-    let port = nats.get_host_port_ipv4(4222).expect("nats client port");
-    let url = format!("nats://127.0.0.1:{port}");
-
-    // The example builds its config in code and stages its own objects, so it
-    // needs no `SPATE_CONFIG`; the environment supplies the store and the
-    // instance identity a deployment would.
-    let env = vec![
-        ("NATS_URL", url.clone()),
-        ("POD_NAME", "worker-e2e-a".to_string()),
-    ];
-    // The example paces itself at 2ms a record over 96 objects of 250, so a
-    // single instance spends about a minute on the backfill by design.
-    let first = spawn_as(
-        "nats_coordinated_backfill",
-        "nats_coordinated_backfill.1",
-        None,
-        &env,
-    )
-    .wait_exit(Duration::from_secs(300));
-
-    // The source logs this WARN at open whenever no coordinator was injected
-    // and it built the in-process one instead. Its absence is what says the
-    // NATS store is the store this run used.
-    assert!(
-        !first.contains("no coordinator injected"),
-        "the example ran against the durable store, not the solo fallback\n--- log ---\n{first}"
-    );
-    // The example prints its own share. One instance holds every split, so its
-    // share is the whole prefix, and every record of every object.
-    assert!(
-        first.contains("24000 records, covering 96 of 96 objects"),
-        "the sole instance covered the whole prefix\n--- log ---\n{first}"
-    );
-
-    // Second instance, second identity, same job and same NATS. The split
-    // records the first run committed are durable, so this one finds every
-    // split complete, holds none, reads nothing, and still exits 0. A run
-    // over the solo in-process store cannot reach this state: its store went
-    // with the process, so it would list the prefix and cover it again.
-    let env = vec![("NATS_URL", url), ("POD_NAME", "worker-e2e-b".to_string())];
-    let second = spawn_as(
-        "nats_coordinated_backfill",
-        "nats_coordinated_backfill.2",
-        None,
-        &env,
-    )
-    .wait_exit(Duration::from_secs(120));
-    assert!(
-        second.contains("0 records, covering 0 of 96 objects"),
-        "a finished job stays finished: the second instance read nothing\n--- log ---\n{second}"
-    );
-    assert_clean_departure("worker-e2e-a", &first);
-    assert_clean_departure("worker-e2e-b", &second);
-}
-
-/// Fails when a coordinated run's log shows its departure failing or falling
-/// back to direct writes, or its store watches breaking as the process stops.
-fn assert_clean_departure(pod: &str, log: &str) {
-    for warn in [
-        "graceful departure reported an error",
-        "releasing directly",
-        "re-watching",
-        "watch establishment failed",
-    ] {
-        assert!(
-            !log.contains(warn),
-            "{pod} logged {warn:?} on its way out\n--- log ---\n{log}"
-        );
-    }
 }

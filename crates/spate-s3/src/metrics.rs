@@ -6,15 +6,12 @@
 //! incremented at batch/object/chunk boundaries per the taxonomy's
 //! hot-path discipline.
 
-use crate::split_ctx::PoisonKind;
+use crate::lane_ctx::PoisonKind;
 use spate_core::metrics::{Counter, Gauge, Meter};
 
 /// Pre-registered `spate_s3_source_*` handles.
 #[derive(Clone)]
 pub(crate) struct S3Metrics {
-    /// Objects enumerated by the planner's listing (leader-only: only the
-    /// instance that runs the plan increments it).
-    pub(crate) objects_listed: Counter,
     /// Objects, or byte ranges of one, fully framed and handed to the
     /// pipeline.
     pub(crate) objects_completed: Counter,
@@ -58,7 +55,6 @@ impl S3Metrics {
             meter.counter("objects_failed_total", &[("reason", reason.into())])
         };
         S3Metrics {
-            objects_listed: meter.counter("objects_listed_total", &[]),
             objects_completed: meter.counter("objects_completed_total", &[]),
             objects_remaining: meter.gauge("objects_remaining", &[]),
             bytes_read: meter.counter("bytes_read_total", &[]),

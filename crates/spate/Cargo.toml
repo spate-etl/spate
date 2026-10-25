@@ -77,7 +77,7 @@ required-features = ["kafka", "clickhouse", "avro"]
 
 [[test]]
 name = "e2e_examples"
-required-features = ["kafka", "clickhouse", "avro", "s3", "json", "coordination-nats", "datagen-avro"]
+required-features = ["kafka", "clickhouse", "avro", "s3", "json", "datagen-avro"]
 
 [[example]]
 name = "memory_pipeline"
@@ -150,10 +150,6 @@ required-features = ["json"]
 test = true
 
 [[example]]
-name = "nats_coordinated_backfill"
-required-features = ["s3", "json", "coordination-nats"]
-
-[[example]]
 name = "s3_backfill"
 required-features = ["s3", "json"]
 test = true
@@ -170,11 +166,6 @@ required-features = ["s3", "json", "sqs"]
 [[example]]
 name = "s3_kafka_backfill"
 required-features = ["s3", "json", "kafka"]
-
-[[example]]
-name = "s3_coordinated_backfill"
-required-features = ["s3", "json", "coordination"]
-test = true
 
 [features]
 default = []

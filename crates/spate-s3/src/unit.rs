@@ -15,11 +15,11 @@ use crate::fetch::{ObjectEntry, Overwrite};
 use crate::framer::Codec;
 use crate::listing::addressable;
 use crate::split::{
-    DescriptorObject, Packing, SplitDescriptor, SplitRange, split_id_for, split_id_for_range, tile,
+    DescriptorObject, Packing, SplitDescriptor, SplitError, SplitRange, split_id_for,
+    split_id_for_range, tile,
 };
 use object_store::path::Path;
 use serde::Deserialize;
-use spate_core::coordination::CoordinationError;
 use spate_core::feed::Unit;
 use std::iter::Peekable;
 use std::sync::Arc;
@@ -156,12 +156,12 @@ pub(crate) fn parts_of(object: Arc<Vec<ObjectEntry>>, packing: Packing, origin: 
 ///
 /// # Errors
 ///
-/// An item is [`Fatal`](spate_core::coordination::CoordinationErrorKind::Fatal)
-/// when a descriptor or an id cannot be built, which no listed object causes.
+/// An item is an error when a descriptor or an id cannot be built, which no
+/// listed object causes.
 pub(crate) fn units(
     entry: ObjectEntry,
     packing: Packing,
-) -> impl Iterator<Item = Result<Unit, CoordinationError>> {
+) -> impl Iterator<Item = Result<Unit, SplitError>> {
     let object = DescriptorObject {
         key: entry.key.clone(),
         size: entry.size,
@@ -186,7 +186,7 @@ pub(crate) fn units(
                 SplitDescriptor::with_range(object.clone(), range),
             ),
         };
-        Ok(Unit::new(id.as_str(), descriptor.encode()?))
+        Ok(Unit::new(id, descriptor.encode()?))
     })
 }
 
@@ -501,8 +501,8 @@ fn form_decoded(key: &str) -> Result<String, String> {
 /// cannot be read.
 ///
 /// A ranged unit is refused when its delimiter is not the framer's or its
-/// object is compressed, the refusals the coordinated path makes when it
-/// opens a ranged split.
+/// object is compressed, the refusals of a unit that cannot be
+/// read as a range.
 fn descriptor_parts(body: &[u8], packing: Packing) -> Result<Cursor, String> {
     let descriptor = SplitDescriptor::decode(body)
         .map_err(|e| format!("the unit's body is not a descriptor: {}", e.reason))?;
@@ -1242,7 +1242,7 @@ mod tests {
                             range,
                         )
                         .unwrap();
-                        prop_assert_eq!(id.as_str(), want.as_str());
+                        prop_assert_eq!(id, &want);
                         next = range.end;
                     }
                     prop_assert_eq!(next, entry.size, "the ranges do not tile the object");
@@ -1252,7 +1252,7 @@ mod tests {
                     prop_assert_eq!(d.range, None);
                     let want =
                         split_id_for([(entry.key.as_str(), entry.etag.as_deref())]).unwrap();
-                    prop_assert_eq!(id.as_str(), want.as_str());
+                    prop_assert_eq!(id, &want);
                 }
             }
             prop_assert_eq!(seen, got.len(), "a unit names no listed object");

@@ -108,15 +108,14 @@ mod framer;
 pub mod fuzz_seams;
 mod job_end;
 mod lane;
+mod lane_ctx;
 mod lister;
 mod listing;
 mod location;
 mod metrics;
 mod offset;
-mod planner;
 mod source;
 mod split;
-mod split_ctx;
 #[cfg(test)]
 mod test_servers;
 #[cfg(test)]
@@ -129,6 +128,6 @@ pub use config::{Compression, S3SourceConfig};
 pub use lane::{S3Batch, S3Lane};
 pub use source::S3Source;
 pub use split::{
-    DESCRIPTOR_VERSION, DescriptorObject, SplitDescriptor, SplitRange, split_id_for,
+    DESCRIPTOR_VERSION, DescriptorObject, SplitDescriptor, SplitError, SplitRange, split_id_for,
     split_id_for_range,
 };

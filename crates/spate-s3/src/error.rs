@@ -177,8 +177,8 @@ fn range_not_satisfiable(e: &object_store::Error) -> bool {
 
 /// Classify an object-level (non-pipeline-fatal, non-retryable) failure
 /// into the bounded poison taxonomy.
-pub(crate) fn poison_kind(e: &object_store::Error) -> crate::split_ctx::PoisonKind {
-    use crate::split_ctx::PoisonKind;
+pub(crate) fn poison_kind(e: &object_store::Error) -> crate::lane_ctx::PoisonKind {
+    use crate::lane_ctx::PoisonKind;
     use object_store::Error as E;
     match e {
         E::NotFound { .. } => PoisonKind::NotFound,
@@ -587,7 +587,7 @@ mod tests {
         assert_eq!(classify(&e), ErrorClass::Fatal);
         assert!(!is_pipeline_fatal(&e));
         assert!(!is_overwrite(&e, &notification(None)));
-        assert_eq!(poison_kind(&e), crate::split_ctx::PoisonKind::NotFound);
+        assert_eq!(poison_kind(&e), crate::lane_ctx::PoisonKind::NotFound);
     }
 
     /// Pins that a 403 on a notification unit's read fails the pipeline, as

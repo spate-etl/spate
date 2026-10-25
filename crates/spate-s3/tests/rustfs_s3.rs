@@ -2,9 +2,8 @@
 //!
 //! This suite covers what the local-filesystem suite cannot: real
 //! ListObjectsV2 pagination across pages (>1000 keys) feeding the
-//! planner, and HTTP endpoint/option passthrough through the `store`
-//! map. Durable resume across restarts needs a durable coordination
-//! store and lives in the NATS-backed suite (`coordinated_nats`).
+//! lister, and HTTP endpoint/option passthrough through the `store`
+//! map.
 //!
 //! Ignored by default; run with Docker available:
 //!
@@ -23,9 +22,8 @@ fn config_yaml(gw: &Gateway) -> String {
     PipelineYaml::bucket("s3-rustfs-test", gw).build()
 }
 
-/// More than 1000 keys forces ListObjectsV2 pagination; ordering must
-/// hold across page boundaries for the planner's packing, and with it
-/// every split id and composite offset, to be stable.
+/// More than 1000 keys forces ListObjectsV2 pagination; every key must reach
+/// the feed exactly as listed across page boundaries.
 #[test]
 #[ignore = "requires Docker"]
 fn paginated_listing_backfills_completely() {

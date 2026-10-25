@@ -48,7 +48,6 @@ These sit outside `ci`, by cost or by dependency:
 | `cargo xtask bench ab`, `cargo xtask bench arms`, `cargo xtask bench list`, `cargo xtask bench compare` | Wall clock; never a gate |
 | `cargo xtask attribution` | `THIRD-PARTY.md` is regenerated at release; the nightly tier checks that it still generates |
 | `cargo xtask fuzz build`, `cargo xtask fuzz run` | Needs a nightly toolchain; the nightly tier fuzzes |
-| `cargo xtask fault-test` | Needs Docker; runs worker processes for minutes; the weekly tier runs it |
 | `cargo xtask mutants` | Runs a package's suite once per mutant; CI runs it on each pull request, advisory |
 
 Three commands omit `--locked`, which everything else passes because CI does.
@@ -96,9 +95,6 @@ The profiles in `.config/nextest.toml`:
 - **`docker`** — warns at 120 seconds and **never terminates**: a cold image pull
   can exceed any figure worth setting, and a SIGKILL reports as a timeout
   indistinguishable from a hang. One retry, JUnit report.
-- **`faults`** — what `cargo xtask fault-test` runs. Warns at 300 seconds and
-  never terminates, with no retry, so a failing seed is never reported as
-  flaky. JUnit report.
 
 Container-backed tests use testcontainers and are `#[ignore]`d, so a normal run
 skips them. `cargo xtask integration-test` is what selects them.
@@ -125,26 +121,6 @@ cargo nextest run --profile docker -p spate --all-features --locked \
 `--all-features` turns on `spate-kafka/tls`, which compiles OpenSSL from source.
 When you are not touching the TLS surface, replace it with the features the
 `e2e_examples` stanza in `crates/spate/Cargo.toml` requires.
-
-The fault scenarios in `faults/` run coordinated S3 workers as separate
-processes against RustFS and NATS, inject faults on a seeded schedule, and
-judge each run against the five delivery properties the `spate-faults` crate
-doc states. They need Docker, and the `docker` profile's `default-filter` holds
-them back from every other nextest run. One command runs them:
-
-```sh
-cargo xtask fault-test [--seed N] [FILTER]
-```
-
-It prints the seed first, drawing one from the clock when `--seed` is absent. A
-seed fixes the data set and the fault schedule. It does not fix the
-interleaving, so a replay can pass where the original run failed. A failure
-message carries the command that replays its seed. A run writes its journals,
-logs and outcomes under `target/fault-runs/`.
-
-The weekly scheduled tier runs every scenario under a fresh seed. A failure
-opens an issue naming the seed and the replay command, or comments on the one
-already open.
 
 **On macOS every freshly linked binary stalls for tens of seconds at 0% CPU on
 its first exec** while Gatekeeper scans it. Across this workspace that alone

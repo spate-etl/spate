@@ -1,38 +1,16 @@
-//! The control plane: [`S3Source`] implements the framework's
-//! [`Source`] trait by delegating the entire assignment choreography to
-//! the coordination layer's `CoordinationDriver`.
+//! The control plane: [`S3Source`] implements the framework's [`Source`]
+//! trait over a work feed.
 //!
-//! Lifecycle: `open` builds the data store, takes its coordinator (one
-//! injected with [`S3Source::with_coordinator`], else one built from the
-//! pipeline's `coordination:` section, else a solo in-process one), and
-//! stashes the planner; the
-//! first `poll_events` joins the job via `driver.start` (leader-only
-//! listing + packing happen in the planner), and every later call drains
-//! poison reports into `driver.fail` and then delegates to
-//! `driver.poll_events`. Split gains materialize lanes through the
-//! sibling [`SplitCtx`], losses retire them, and `AllComplete` drains the
-//! pipeline. `commit` routes acked watermarks into per-split fenced
-//! progress commits; the coordination store is the source's **only**
-//! progress store.
-//!
-//! A source given a feed, by the pipeline's `feed:` section or through the
-//! `testing`-gated `with_feed`, reads work units through
-//! `unit_reader::UnitReader` in place of all of the above. When the section
-//! names a `location`, `open` first waits for the lister's job fingerprint
-//! there and refuses a mismatch, and the job ends on the lister's end marker
-//! once the feed reads empty over a settling window. A solo run on the
-//! in-process feed the runtime built ends once its lister has finished and
-//! the feed reads empty. On a graceful stop over a feed that hands back, the
-//! reader reads on to the stop reserve and hands back what it has not read
-//! to its end; see `unit_reader`.
-//!
-//! No coordination backend appears in this crate's public API or in its
-//! cargo features. The store comes from the `coordination:` section through
-//! `spate-coordination`, whose features decide which stores a build has.
-//! The one backend this crate links itself is the in-process `MemoryStore`,
-//! unconditionally, as the solo fallback below.
-
-#![expect(deprecated, reason = "v0.4.0 removes this with spate-coordination")]
+//! The source reads work units through `unit_reader::UnitReader`, one lane per
+//! object or byte range in progress. `open` refuses a source with no feed,
+//! given by the pipeline's `feed:` section or through the `testing`-gated
+//! `with_feed`. When the section names a `location`, `open` first waits for
+//! the lister's job fingerprint there and refuses a mismatch, and the job ends
+//! on the lister's end marker once the feed reads empty over a settling
+//! window. A solo run on the in-process feed the runtime built ends once its
+//! lister has finished and the feed reads empty. On a graceful stop over a
+//! feed that hands back, the reader reads on to the stop reserve and hands
+//! back what it has not read to its end; see `unit_reader`.
 
 use crate::config::{S3SourceConfig, s3_store_key};
 use crate::job_end::{Finish, JobEnd, no_depth};
@@ -40,24 +18,17 @@ use crate::lane::S3Lane;
 use crate::listing::{UnaddressableConnector, UnaddressableKeys};
 use crate::location::{Location, await_fingerprint, feed_fingerprint};
 use crate::metrics::S3Metrics;
-use crate::planner::{S3Planner, job_fingerprint};
 use crate::split::Packing;
-use crate::split_ctx::SplitCtx;
 use crate::unit::Scope;
 use crate::unit_reader::{LaneParts, UnitReader};
 use futures_util::FutureExt as _;
 use object_store::aws::{AmazonS3, AmazonS3Builder, AmazonS3ConfigKey};
 use object_store::{ClientConfigKey, ObjectStore, ObjectStoreScheme};
-use spate_coordination::store::memory::MemoryStore;
-use spate_coordination::{CoordinationConfig, CoordinatorSpec, StoreCoordinator};
 use spate_core::clock::tokio::{Clock, SystemClock};
-use spate_core::config::{ComponentConfig, ConfigError, CoordinationSection, FeedSection};
-use spate_core::coordination::driver::CoordinationDriver;
-use spate_core::coordination::{PlanFinality, SplitCoordinator};
+use spate_core::config::{ComponentConfig, ConfigError, FeedSection};
 use spate_core::error::{ErrorClass, SourceError};
 use spate_core::feed::{DepthOf, Feed, FeedOrigin};
 use spate_core::framing::{FramingContract, RecordFramer};
-use spate_core::metrics::CoordinationMetrics;
 use spate_core::record::PartitionId;
 use spate_core::source::{LaneId, Source, SourceCtx, SourceEvent};
 use std::num::{NonZeroU32, NonZeroUsize};
@@ -77,24 +48,12 @@ pub(crate) const DEFAULT_RE_ENQUEUE_CAP: u32 = 10;
 enum State {
     /// Constructed, not yet opened.
     Created,
-    /// Opened: driver and lane-assembly context live side by side (they
-    /// borrow disjointly); the planner is handed to the driver on the
-    /// first `poll_events`. Boxed: the open state dwarfs `Created` and
-    /// lives once per source.
-    Open(Box<OpenState>),
     /// Opened over a feed: units are read one lane per part in progress.
     Feed(Box<UnitReader>),
 }
 
-/// The contents of [`State::Open`].
-struct OpenState {
-    driver: CoordinationDriver,
-    ctx: SplitCtx,
-    planner: Option<S3Planner>,
-}
-
-/// Coordinated object-storage backfill source. See the crate docs for the
-/// delivery model and the split identity/drift contract.
+/// Object-storage (S3) source that reads work units from a feed. See the
+/// crate docs for the delivery model and the unit identity and drift contract.
 pub struct S3Source {
     config: S3SourceConfig,
     handle: tokio::runtime::Handle,
@@ -102,10 +61,6 @@ pub struct S3Source {
     /// [`with_framer`](S3Source::with_framer). Required before the pipeline
     /// opens the source; `spate-s3` is a transport and owns no framing itself.
     framer: Option<crate::framer::FramerFactory>,
-    /// A coordinator injected via [`with_coordinator`](S3Source::with_coordinator).
-    coordinator: Option<Box<dyn SplitCoordinator>>,
-    /// The pipeline's `coordination:` section, validated and built in `open`.
-    spec: Option<CoordinatorSpec>,
     /// A data store injected via the `testing`-gated `with_store` seam.
     store: Option<Arc<dyn ObjectStore>>,
     /// The feed to read units from: the one the `feed:` section names, or
@@ -154,7 +109,7 @@ impl S3Source {
     ///
     /// The handle **must belong to a multi-thread runtime** that outlives
     /// the pipeline (the pipeline's I/O runtime satisfies both): the
-    /// source, its lanes, and the coordinator briefly block pipeline
+    /// source and its lanes briefly block pipeline
     /// threads on it, which a current-thread runtime cannot drive.
     #[must_use]
     pub fn new(config: S3SourceConfig, io: tokio::runtime::Handle) -> S3Source {
@@ -162,8 +117,6 @@ impl S3Source {
             config,
             handle: io,
             framer: None,
-            coordinator: None,
-            spec: None,
             store: None,
             feed: None,
             units_held: None,
@@ -210,25 +163,6 @@ impl S3Source {
         self
     }
 
-    /// Hand the source a coordinator built in code, such as a
-    /// `StoreCoordinator` over a custom store. Must be called before the
-    /// pipeline opens the source, and conflicts with a `coordination:`
-    /// section in the pipeline config.
-    ///
-    /// Without either the source runs **solo** over an in-process store with
-    /// default tuning; a section naming `store: { memory: {} }` runs it with
-    /// the section's tuning. Either way progress is ephemeral, and a restart
-    /// replays the whole prefix (a startup WARN says so).
-    #[must_use]
-    #[deprecated(
-        since = "0.3.0",
-        note = "removed in v0.4.0, where a work feed replaces split coordination; see https://github.com/spate-etl/spate/issues/1088"
-    )]
-    pub fn with_coordinator(mut self, coordinator: Box<dyn SplitCoordinator>) -> S3Source {
-        self.coordinator = Some(coordinator);
-        self
-    }
-
     /// Test seam: replace the data store built from `config.url` (the URL
     /// still supplies the listing prefix). Lets tests wrap the store with
     /// failure- or call-counting decorators. On the feed path a source given
@@ -251,15 +185,12 @@ impl S3Source {
         self
     }
 
-    /// Test seam: read work units from `feed` in place of coordinated
-    /// splits. Each unit's body is a [`SplitDescriptor`] naming one object,
+    /// Test seam: read work units from `feed` in place of the `feed:` section. Each unit's body is a [`SplitDescriptor`] naming one object,
     /// whole or one byte range of it, or a storage notification read as one
     /// part per non-empty created object; any other body is failed back to
     /// the feed. A whole object that qualifies for byte ranges under
-    /// `split_target_bytes` is read in ranges. Conflicts with
-    /// [`with_coordinator`](S3Source::with_coordinator), with a
-    /// `coordination:` section and with a `feed:` section, reads no job
-    /// location, and never reports the input drained, so the run ends at a
+    /// `split_target_bytes` is read in ranges. Conflicts with a `feed:`
+    /// section, reads no job location, and never reports the input drained, so the run ends at a
     /// shutdown.
     ///
     /// Behind the off-by-default `testing` feature, outside the semver
@@ -332,8 +263,7 @@ impl S3Source {
     ///
     /// Fatal, before any store request, for a `location` that does not
     /// parse, the in-process feed, a durable feed with no `location`, a
-    /// `feed` other than the one `section` names, a source given a
-    /// coordinator, and a call from a thread in a Tokio runtime context:
+    /// `feed` other than the one `section` names, and a call from a thread in a Tokio runtime context:
     /// async code, a `spawn_blocking` closure, or a thread holding a
     /// `Handle::enter` guard. Fatal too for a source with no framer, a source
     /// configuration that fails validation, a store the source or its
@@ -426,13 +356,6 @@ impl S3Source {
                  the `{}` feed; build the feed the section names",
                 feed.backend()
             )));
-        }
-        if self.coordinator.is_some() {
-            return Err(fatal(
-                "the S3 source was given a coordinator with `with_coordinator`, and a lister \
-                 run publishes to a feed; drop `with_coordinator`"
-                    .into(),
-            ));
         }
         if tokio::runtime::Handle::try_current().is_ok() {
             return Err(fatal(
@@ -608,27 +531,6 @@ impl Source for S3Source {
         FramingContract::PerRecord
     }
 
-    fn configure_coordination(&mut self, section: &CoordinationSection) -> Result<(), ConfigError> {
-        if self.feed.is_some() {
-            return Err(ConfigError::Component {
-                context: "coordination".into(),
-                message: "the S3 source reads from a feed given with `with_feed`; \
-                          remove the `coordination:` section"
-                    .into(),
-            });
-        }
-        if self.coordinator.is_some() {
-            return Err(ConfigError::Component {
-                context: "coordination".into(),
-                message: "the S3 source was also given a coordinator with `with_coordinator`; \
-                          remove the `coordination:` section or drop `with_coordinator`"
-                    .into(),
-            });
-        }
-        self.spec = Some(CoordinatorSpec::from_section(section)?);
-        Ok(())
-    }
-
     fn configure_feed(
         &mut self,
         section: &FeedSection,
@@ -640,14 +542,6 @@ impl Source for S3Source {
                 context: "feed".into(),
                 message: "the S3 source was also given a feed with `with_feed`; \
                           remove the `feed:` section or drop `with_feed`"
-                    .into(),
-            });
-        }
-        if self.coordinator.is_some() {
-            return Err(ConfigError::Component {
-                context: "feed".into(),
-                message: "the S3 source was also given a coordinator with `with_coordinator`; \
-                          remove the `feed:` section or drop `with_coordinator`"
                     .into(),
             });
         }
@@ -698,204 +592,134 @@ impl Source for S3Source {
             reason: e.to_string(),
         })?;
 
+        // Checked before the store is built, so a run with no feed touches no
+        // store.
+        let Some(feed) = self.feed.take() else {
+            return Err(SourceError::Client {
+                class: ErrorClass::Fatal,
+                reason: "the S3 source reads work units from a feed, and the pipeline names \
+                         none; add a `feed:` section, such as `feed: { memory: {} }` for a run \
+                         in one process"
+                    .into(),
+            });
+        };
         let (store, prefix, unaddressable, bucket, resume) = self.data_store()?;
 
         let metrics = ctx.meter.as_ref().map(S3Metrics::new);
-        if let Some(feed) = self.feed.take() {
-            if self.coordinator.is_some() {
-                return Err(SourceError::Client {
-                    class: ErrorClass::Fatal,
-                    reason: "the S3 source was given both a feed and a coordinator; \
-                             drop `with_coordinator`"
-                        .into(),
-                });
-            }
-            let delimiter = make_framer().resync_delimiter();
-            if delimiter.is_none() {
-                tracing::info!(
-                    "the record framer declares no resync delimiter, so objects above \
-                     split_target_bytes are read whole and units naming a byte range are \
-                     failed back to the feed"
-                );
-            }
-            // Each depth is asked once here, before the fingerprint wait, so a
-            // feed that cannot count fails the job at its start, never at its
-            // end.
-            if (self.location.is_some() || self.solo_ends)
-                && [DepthOf::Feed, DepthOf::DeadLetters]
-                    .into_iter()
-                    .any(|of| feed.read_depth(of).is_none())
-            {
-                return Err(no_depth(feed.as_ref()));
-            }
-            let mut finish = None;
-            if let Some(location) = &self.location {
-                let location_store = self.location_store(location)?;
-                let mine = feed_fingerprint(
-                    &self.config.url,
-                    self.config.compression,
-                    self.config.split_target_bytes.as_u64(),
-                    delimiter,
-                );
-                tracing::info!(
-                    location = %location.shown(),
-                    window = ?self.settling_window,
-                    "waiting for the job fingerprint at the job location"
-                );
-                self.handle.block_on(await_fingerprint(
-                    location_store.as_ref(),
-                    location,
-                    &mine,
-                    self.clock.as_ref(),
-                    &ctx.stop,
-                    self.settling_window,
-                ))?;
-                finish = Some(Finish::Marker {
-                    store: location_store,
-                    location: location.clone(),
-                    window: self.settling_window,
-                });
-            } else if self.solo_ends {
-                finish = Some(Finish::Solo { finished: false });
-            }
-            let end = finish.map(|finish| {
-                JobEnd::new(
-                    finish,
-                    Arc::clone(&self.clock),
-                    self.handle.clone(),
-                    ctx.stop.clone(),
-                )
-            });
-            let lister_store = Arc::clone(&store);
-            let parts = LaneParts {
-                store,
-                handle: self.handle.clone(),
-                issuer: ctx.issuer,
-                make_framer,
-                packing: Packing {
-                    target_bytes: self.config.split_target_bytes.as_u64(),
-                    compression: self.config.compression,
-                    delimiter,
-                },
-                chunk_bytes: self.config.chunk_bytes.as_u64() as usize,
-                range_bytes: self.config.prefetch_bytes.as_u64() as usize,
-                retry_base: RETRY_BASE,
-                metrics,
-                re_enqueue_cap: self.re_enqueue_cap,
-            };
-            if self.solo_lister {
-                tracing::warn!(
-                    "this run lists the prefix into the in-process feed, which keeps nothing \
-                     across a restart, so a restart lists and reads the prefix from the \
-                     beginning; a run that must resume reads a durable feed with a `location`, \
-                     filled by a separate lister run"
-                );
-                let lister = crate::lister::Lister {
-                    store: lister_store,
-                    prefix: prefix.clone(),
-                    packing: parts.packing,
-                    feed: Arc::clone(&feed),
-                    location: None,
-                    resume,
-                    checkpoint_every: crate::lister::CHECKPOINT_EVERY,
-                    unaddressable,
-                    fingerprint: String::new(),
-                    retry_base: crate::lister::LISTER_RETRY_BASE,
-                };
-                // On the I/O runtime, so the source thread reads units while
-                // the listing runs; `poll_events` checks its outcome.
-                self.lister_task = Some(self.handle.spawn(lister.run()));
-            } else {
-                tracing::warn!(
-                    feed = feed.backend(),
-                    "the S3 source lists nothing on this feed: it reads the units and storage \
-                     notifications published to it, and publishes only a notification unit it \
-                     re-enqueues after an overwrite"
-                );
-            }
-            let scope = Scope {
-                bucket,
-                prefix: prefix.clone(),
-            };
-            self.state = State::Feed(Box::new(UnitReader::new(
-                feed,
-                parts,
-                scope,
-                self.units_held,
-                end,
-            )));
-            return Ok(());
-        }
-        // Coordination metrics are constructor-injected (there is no later
-        // hook); a coordinator built here shares the source's labels.
-        let coord_metrics = || {
-            ctx.meter
-                .as_ref()
-                .map(|m| CoordinationMetrics::new(m.labels()))
-        };
-        let coordinator = match (self.coordinator.take(), self.spec.take()) {
-            (Some(injected), _) => injected,
-            (None, Some(spec)) => {
-                spec.build(self.handle.clone(), coord_metrics())
-                    .map_err(|e| SourceError::Client {
-                        class: e.class(),
-                        reason: format!("building the coordinator from `coordination:`: {e}"),
-                    })?
-            }
-            (None, None) => solo_coordinator(self.handle.clone(), coord_metrics())?,
-        };
-
-        let finality = if self.config.refresh_listing {
-            PlanFinality::Open
-        } else {
-            PlanFinality::Final
-        };
         let delimiter = make_framer().resync_delimiter();
         if delimiter.is_none() {
             tracing::info!(
                 "the record framer declares no resync delimiter, so objects above \
-                 split_target_bytes are read whole, one split each"
+                     split_target_bytes are read whole and units naming a byte range are \
+                     failed back to the feed"
             );
         }
-        let planner = S3Planner::new(
-            Arc::clone(&store),
-            Some(prefix),
-            self.handle.clone(),
-            Packing {
+        // Each depth is asked once here, before the fingerprint wait, so a
+        // feed that cannot count fails the job at its start, never at its
+        // end.
+        if (self.location.is_some() || self.solo_ends)
+            && [DepthOf::Feed, DepthOf::DeadLetters]
+                .into_iter()
+                .any(|of| feed.read_depth(of).is_none())
+        {
+            return Err(no_depth(feed.as_ref()));
+        }
+        let mut finish = None;
+        if let Some(location) = &self.location {
+            let location_store = self.location_store(location)?;
+            let mine = feed_fingerprint(
+                &self.config.url,
+                self.config.compression,
+                self.config.split_target_bytes.as_u64(),
+                delimiter,
+            );
+            tracing::info!(
+                location = %location.shown(),
+                window = ?self.settling_window,
+                "waiting for the job fingerprint at the job location"
+            );
+            self.handle.block_on(await_fingerprint(
+                location_store.as_ref(),
+                location,
+                &mine,
+                self.clock.as_ref(),
+                &ctx.stop,
+                self.settling_window,
+            ))?;
+            finish = Some(Finish::Marker {
+                store: location_store,
+                location: location.clone(),
+                window: self.settling_window,
+            });
+        } else if self.solo_ends {
+            finish = Some(Finish::Solo { finished: false });
+        }
+        let end = finish.map(|finish| {
+            JobEnd::new(
+                finish,
+                Arc::clone(&self.clock),
+                self.handle.clone(),
+                ctx.stop.clone(),
+            )
+        });
+        let lister_store = Arc::clone(&store);
+        let parts = LaneParts {
+            store,
+            handle: self.handle.clone(),
+            issuer: ctx.issuer,
+            make_framer,
+            packing: Packing {
                 target_bytes: self.config.split_target_bytes.as_u64(),
                 compression: self.config.compression,
                 delimiter,
             },
-            finality,
-            job_fingerprint(
-                &self.config.url,
-                self.config.compression,
-                self.config.split_target_bytes.as_u64(),
-                self.config.refresh_listing,
-                delimiter,
-            ),
-            metrics.clone(),
-        )
-        .with_unaddressable(unaddressable);
-        let split_ctx = SplitCtx::new(
-            store,
-            self.handle.clone(),
-            ctx.issuer,
-            make_framer,
-            delimiter,
-            self.config.compression,
-            self.config.chunk_bytes.as_u64() as usize,
-            self.config.prefetch_bytes.as_u64() as usize,
-            RETRY_BASE,
+            chunk_bytes: self.config.chunk_bytes.as_u64() as usize,
+            range_bytes: self.config.prefetch_bytes.as_u64() as usize,
+            retry_base: RETRY_BASE,
             metrics,
-        );
-        let mut driver = CoordinationDriver::new(coordinator);
-        driver.set_stop(ctx.stop.clone());
-        self.state = State::Open(Box::new(OpenState {
-            driver,
-            ctx: split_ctx,
-            planner: Some(planner),
-        }));
+            re_enqueue_cap: self.re_enqueue_cap,
+        };
+        if self.solo_lister {
+            tracing::warn!(
+                "this run lists the prefix into the in-process feed, which keeps nothing \
+                     across a restart, so a restart lists and reads the prefix from the \
+                     beginning; a run that must resume reads a durable feed with a `location`, \
+                     filled by a separate lister run"
+            );
+            let lister = crate::lister::Lister {
+                store: lister_store,
+                prefix: prefix.clone(),
+                packing: parts.packing,
+                feed: Arc::clone(&feed),
+                location: None,
+                resume,
+                checkpoint_every: crate::lister::CHECKPOINT_EVERY,
+                unaddressable,
+                fingerprint: String::new(),
+                retry_base: crate::lister::LISTER_RETRY_BASE,
+            };
+            // On the I/O runtime, so the source thread reads units while
+            // the listing runs; `poll_events` checks its outcome.
+            self.lister_task = Some(self.handle.spawn(lister.run()));
+        } else {
+            tracing::warn!(
+                feed = feed.backend(),
+                "the S3 source lists nothing on this feed: it reads the units and storage \
+                     notifications published to it, and publishes only a notification unit it \
+                     re-enqueues after an overwrite"
+            );
+        }
+        let scope = Scope {
+            bucket,
+            prefix: prefix.clone(),
+        };
+        self.state = State::Feed(Box::new(UnitReader::new(
+            feed,
+            parts,
+            scope,
+            self.units_held,
+            end,
+        )));
         Ok(())
     }
 
@@ -924,77 +748,27 @@ impl Source for S3Source {
                 });
             }
         }
-        let open = match &mut self.state {
-            State::Open(open) => open,
-            State::Feed(reader) => return reader.poll_events(timeout),
-            State::Created => {
-                return Err(SourceError::Client {
-                    class: ErrorClass::Fatal,
-                    reason: "poll_events before open".into(),
-                });
-            }
-        };
-        let OpenState {
-            driver,
-            ctx,
-            planner,
-        } = open.as_mut();
-        if let Some(planner) = planner.take() {
-            // Join the job; the ready signal is empty, and splits arrive
-            // as later assignments while claims race.
-            return driver.start(Box::new(planner));
+        match &mut self.state {
+            State::Feed(reader) => reader.poll_events(timeout),
+            State::Created => Err(SourceError::Client {
+                class: ErrorClass::Fatal,
+                reason: "poll_events before open".into(),
+            }),
         }
-        // Object-level failures first: hand each poisoned split back (a
-        // delivery attempt is consumed; quarantine happens at the cap).
-        for report in ctx.drain_poison() {
-            tracing::warn!(
-                split = %report.split,
-                reason = report.kind.reason_label(),
-                detail = %report.reason,
-                "object-level failure; handing the split back to the coordinator"
-            );
-            driver.fail(ctx, &report.split, report.epoch, &report.reason)?;
-        }
-        driver.poll_events(ctx, timeout)
     }
 
     fn commit(&mut self, watermarks: &[(PartitionId, i64)]) -> Result<(), SourceError> {
-        let open = match &mut self.state {
-            State::Open(open) => open,
-            State::Feed(reader) => return reader.commit(watermarks),
+        match &mut self.state {
+            State::Feed(reader) => reader.commit(watermarks),
             State::Created => {
                 debug_assert!(watermarks.is_empty(), "watermarks before open");
-                return Ok(());
+                Ok(())
             }
-        };
-        let OpenState { driver, ctx, .. } = open.as_mut();
-        driver.commit(ctx, watermarks)
+        }
     }
-
-    fn commit_final(
-        &mut self,
-        watermarks: &[(PartitionId, i64)],
-    ) -> Result<Vec<PartitionId>, SourceError> {
-        let open = match &mut self.state {
-            State::Open(open) => open,
-            State::Feed(reader) => return reader.commit(watermarks).map(|()| Vec::new()),
-            State::Created => {
-                debug_assert!(watermarks.is_empty(), "watermarks before open");
-                return Ok(Vec::new());
-            }
-        };
-        let OpenState { driver, ctx, .. } = open.as_mut();
-        driver.commit_final(ctx, watermarks)
-    }
-
-    // `flush_commits` keeps the trait's no-op default. An Ok commit is
-    // durable in the store. A Retryable tick commit is cached and carried on
-    // this split's next commit. A final commit returns the partitions it did
-    // not store, and those splits may replay under their next owner.
 
     fn pause(&mut self, lanes: &[LaneId]) -> Result<(), SourceError> {
         match &self.state {
-            State::Open(open) => open.ctx.set_paused(lanes, true),
             State::Feed(reader) => reader.set_paused(lanes, true),
             State::Created => {}
         }
@@ -1003,7 +777,6 @@ impl Source for S3Source {
 
     fn resume(&mut self, lanes: &[LaneId]) -> Result<(), SourceError> {
         match &self.state {
-            State::Open(open) => open.ctx.set_paused(lanes, false),
             State::Feed(reader) => reader.set_paused(lanes, false),
             State::Created => {}
         }
@@ -1013,15 +786,14 @@ impl Source for S3Source {
     fn reading_on_stop(&mut self) -> bool {
         match &mut self.state {
             State::Feed(reader) => reader.reading_on_stop(),
-            // A coordinated source stops through `Drop`.
-            State::Open(_) | State::Created => false,
+            State::Created => false,
         }
     }
 
     fn stop_reading(&mut self) -> Result<(), SourceError> {
         match &mut self.state {
             State::Feed(reader) => reader.stop_reading(),
-            State::Open(_) | State::Created => Ok(()),
+            State::Created => Ok(()),
         }
     }
 }
@@ -1033,36 +805,7 @@ impl Drop for S3Source {
             // lost.
             task.abort();
         }
-        if let State::Open(open) = &mut self.state {
-            // Graceful departure: peers take over this worker's splits and
-            // roles without waiting out a lease. Fetchers are detached and
-            // exit as their lanes drop.
-            open.driver.release();
-        }
     }
-}
-
-/// The fallback when no coordinator was injected: a solo, in-process
-/// coordinator with default tuning. Correct and self-terminating, but its
-/// store dies with the process, hence the WARN.
-fn solo_coordinator(
-    handle: tokio::runtime::Handle,
-    metrics: Option<CoordinationMetrics>,
-) -> Result<Box<dyn SplitCoordinator>, SourceError> {
-    tracing::warn!(
-        "no coordinator injected: running solo over an in-process store; progress is \
-         EPHEMERAL and a restart replays the entire prefix (at-least-once, safe but \
-         wasteful) — configure a durable store under `coordination:` for durable resume \
-         and multi-instance sharing"
-    );
-    let tuning = CoordinationConfig::default();
-    let store = MemoryStore::new(tuning.lease_duration);
-    let coordinator =
-        StoreCoordinator::new(store, tuning, handle, metrics).map_err(|e| SourceError::Client {
-            class: e.class(),
-            reason: format!("building the solo coordinator: {e}"),
-        })?;
-    Ok(Box::new(coordinator))
 }
 
 fn parse(url: &str) -> Result<Url, SourceError> {

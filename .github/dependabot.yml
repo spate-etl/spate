@@ -274,25 +274,10 @@ updates:
     cooldown:
       default-days: 7
 
-  # -------------------------------------------------- Docker (Toxiproxy) ----
-  # `ci/toxiproxy/stable/Dockerfile` pins the proxy the fault runs boot. No
-  # `ignore`, so it follows every release.
-  - package-ecosystem: docker
-    directory: "/ci/toxiproxy/stable"
-    schedule:
-      interval: monthly
-      day: friday
-    open-pull-requests-limit: 1
-    labels: ["dependencies", "area: ci"]
-    commit-message:
-      prefix: "ci"
-    cooldown:
-      default-days: 7
-
   # ----------------------------------------------- Docker (RustFS store) ----
   # `ci/rustfs/stable/Dockerfile` pins the S3 store the spate-s3 container
-  # suites, spate-kafka's notification suite, spate-test-support's smoke test
-  # and the fault runs boot. No `ignore`, so it follows every release.
+  # suites, spate-kafka's notification suite and spate-test-support's smoke
+  # test boot. No `ignore`, so it follows every release.
   - package-ecosystem: docker
     directory: "/ci/rustfs/stable"
     schedule:

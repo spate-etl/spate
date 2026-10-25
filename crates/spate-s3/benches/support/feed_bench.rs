@@ -1,6 +1,6 @@
 //! The rig for `feed_small_objects_wall.rs`: a staged corpus of small
 //! newline-delimited objects, and one whole pipeline per run that reads it
-//! through the feed path or the coordinated solo path.
+//! through the feed path.
 //!
 //! `tests/feed_bench_fixture.rs` drives the same rig at a smaller object count,
 //! so what a case measures is also what the test checks: every row reaches the
@@ -31,8 +31,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-/// Objects in the benchmark corpus: three waves of 96 coordinated splits at
-/// 16 objects a split.
+/// Objects in the benchmark corpus: 48 waves of 96 units held.
 pub(crate) const OBJECTS: usize = 4_608;
 
 /// Lines in every object.
@@ -41,25 +40,11 @@ pub(crate) const LINES: usize = 1_000;
 /// Bytes in every line, its newline included.
 pub(crate) const LINE_BYTES: usize = 64;
 
-/// Splits the coordinated arm holds at once, the lane count of the measured
-/// cloud runs.
-pub(crate) const READ_PARALLELISM: u32 = 96;
-
-/// Pipeline threads, the same for both arms.
+/// Pipeline threads.
 pub(crate) const THREADS: usize = 4;
 
 /// Sink linger of every case, the value the measured cloud runs used.
 pub(crate) const SHORT_LINGER: Duration = Duration::from_millis(5);
-
-/// How each run reads the corpus.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Arm {
-    /// One one-object unit per object from a fresh in-process feed.
-    Feed,
-    /// The coordinated solo path over a fresh in-process store, at
-    /// [`READ_PARALLELISM`] splits in flight.
-    Coordinated,
-}
 
 /// The staged file name of object `object`.
 pub(crate) fn object_name(object: usize) -> String {
@@ -87,17 +72,16 @@ pub(crate) fn object_bytes(object: usize) -> Vec<u8> {
 pub(crate) struct Rig {
     _dir: tempfile::TempDir,
     data: PathBuf,
-    arm: Arm,
     hold: Duration,
     linger: Duration,
     deadline: Duration,
     /// One descriptor body per object, carrying the size and ETag the store
-    /// reports, as the coordinated planner's descriptors do.
+    /// reports.
     bodies: Vec<(String, Vec<u8>)>,
 }
 
 impl Rig {
-    /// Stages `objects` objects and fixes how each run reads them.
+    /// Stages `objects` objects and fixes the settings every run shares.
     ///
     /// `hold` is added before every GET. `linger` is the sink's batch linger.
     /// A run that has not finished within `deadline` panics.
@@ -105,13 +89,7 @@ impl Rig {
     /// # Panics
     ///
     /// Panics when the corpus cannot be written or read back.
-    pub(crate) fn new(
-        arm: Arm,
-        objects: usize,
-        hold: Duration,
-        linger: Duration,
-        deadline: Duration,
-    ) -> Rig {
+    pub(crate) fn new(objects: usize, hold: Duration, linger: Duration, deadline: Duration) -> Rig {
         let dir = tempfile::tempdir().expect("a temporary directory");
         let data = dir.path().join("data");
         fs::create_dir_all(&data).expect("the data directory");
@@ -123,7 +101,6 @@ impl Rig {
         Rig {
             _dir: dir,
             data,
-            arm,
             hold,
             linger,
             deadline,
@@ -136,17 +113,14 @@ impl Rig {
         self.bodies.len()
     }
 
-    /// Builds one run: its feed or coordination section, store wrapper, sink
-    /// and a uniquely named pipeline. Nothing is shared with an earlier run.
+    /// Builds one run: its feed, store wrapper, sink and a uniquely named
+    /// pipeline. Nothing is shared with an earlier run.
     ///
     /// # Panics
     ///
     /// Panics when the pipeline does not assemble.
     pub(crate) fn make(&self) -> Run {
-        let feed = match self.arm {
-            Arm::Feed => Some(Arc::new(self.feed())),
-            Arm::Coordinated => None,
-        };
+        let feed = Arc::new(self.feed());
         let mut config = PipelineConfig::from_str(&self.yaml()).expect("the config parses");
         config.pipeline.name = spate_test::unique_name(&config.pipeline.name);
         let pipeline = Pipeline::from_config(config).expect("the pipeline builds");
@@ -155,13 +129,11 @@ impl Rig {
             inner: LocalFileSystem::new(),
             hold: self.hold,
         });
-        let mut source = S3Source::from_component_config(&pipeline.config().source, io)
+        let source = S3Source::from_component_config(&pipeline.config().source, io)
             .expect("the source config")
             .with_framer(|| Box::new(NdjsonFramer::new(LINE_BYTES)))
-            .with_store(store);
-        if let Some(feed) = &feed {
-            source = source.with_feed(Arc::clone(feed) as Arc<dyn Feed>);
-        }
+            .with_store(store)
+            .with_feed(Arc::clone(&feed) as Arc<dyn Feed>);
         let rows = Arc::new(AtomicU64::new(0));
         let mut pool = SinkPoolConfig::default();
         pool.batch.linger = self.linger;
@@ -213,20 +185,14 @@ impl Rig {
     }
 
     fn yaml(&self) -> String {
-        let mut yaml = format!(
+        format!(
             "pipeline: {{ name: s3-feed-bench, threads: {THREADS} }}\n\
              admin: {{ listen: none }}\n\
              metrics: {{ exporter: none }}\n\
              source:\n  s3:\n    url: \"file://{}/\"\n    split_target_bytes: 1MiB\n\
              sink: {{ count: {{}} }}\n",
             self.data.display()
-        );
-        if self.arm == Arm::Coordinated {
-            yaml.push_str(&format!(
-                "coordination:\n  max_in_flight: {READ_PARALLELISM}\n  store: {{ memory: {{}} }}\n"
-            ));
-        }
-        yaml
+        )
     }
 }
 
@@ -263,7 +229,7 @@ fn descriptor_bodies(data: &Path, objects: usize) -> Vec<(String, Vec<u8>)> {
 pub(crate) struct Run {
     runtime: PipelineRuntime<S3Source>,
     shutdown: ShutdownHandle,
-    feed: Option<Arc<BenchFeed>>,
+    feed: Arc<BenchFeed>,
     rows: Arc<AtomicU64>,
     objects: u64,
     deadline: Duration,
@@ -274,19 +240,17 @@ pub(crate) struct Run {
 pub(crate) struct Drove {
     /// Rows this run's sink wrote.
     pub(crate) rows: u64,
-    /// Units the feed acknowledged during this run; `None` on the coordinated
-    /// arm.
-    pub(crate) acknowledged: Option<u64>,
+    /// Units the feed acknowledged during this run.
+    pub(crate) acknowledged: u64,
 }
 
 impl Run {
     /// Runs the pipeline to its end and reports what it did.
     ///
-    /// The coordinated arm ends on its own when the plan completes. A feed job
-    /// with no location never drains, so the feed arm waits until every unit is
-    /// acknowledged, then triggers shutdown and wakes the reader through the
-    /// waker the feed was handed, so the run pays no poll timeout after its
-    /// last unit.
+    /// A feed job with no location never drains, so the run waits until every
+    /// unit is acknowledged, then triggers shutdown and wakes the reader through
+    /// the waker the feed was handed, so it pays no poll timeout after its last
+    /// unit.
     ///
     /// # Panics
     ///
@@ -301,13 +265,11 @@ impl Run {
             deadline,
         } = self;
         let started = Instant::now();
-        let before = feed.as_ref().map(|f| f.acknowledged());
+        let before = feed.acknowledged();
         let run = PipelineRun::spawn(move || runtime.run());
-        if let Some(feed) = &feed {
-            feed.wait_for(objects, deadline);
-            shutdown.trigger();
-            feed.wake();
-        }
+        feed.wait_for(before + objects, deadline);
+        shutdown.trigger();
+        feed.wake();
         let left = deadline.saturating_sub(started.elapsed());
         let report = run
             .wait_exit(left)
@@ -316,10 +278,7 @@ impl Run {
         assert_eq!(report.state, ExitState::Completed, "the run completes");
         Drove {
             rows: rows.load(Ordering::Relaxed),
-            acknowledged: feed
-                .as_ref()
-                .zip(before)
-                .map(|(f, before)| f.acknowledged() - before),
+            acknowledged: feed.acknowledged() - before,
         }
     }
 }

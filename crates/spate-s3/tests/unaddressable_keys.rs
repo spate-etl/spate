@@ -1,16 +1,12 @@
 //! Bounded backfills over S3 listings that hold keys `object_store` cannot
 //! address, run against a local S3 stub.
 
-#![expect(deprecated, reason = "v0.4.0 removes this with spate-coordination")]
-
 mod support;
 
 use spate_core::pipeline::ExitState;
 use std::time::Duration;
 use support::s3_stub::s3_stub;
-use support::{
-    PipelineYaml, captured_rows, launch_tuned, shared_store, sorted, test_options, test_tuning,
-};
+use support::{PipelineYaml, captured_rows, launch, sorted, test_options};
 
 /// Every object beside a key with an empty segment is read, the key's own
 /// split quarantines, and the bounded job ends stalled. Regression for #1082.
@@ -23,9 +19,7 @@ fn a_listing_with_an_unaddressable_key_reads_every_other_object() {
         ("data/z.ndjson", b"{\"k\":\"z\"}\n"),
     ]);
     let yaml = PipelineYaml::endpoint("unaddressable", &endpoint).build();
-    let mut tuning = test_tuning();
-    tuning.max_attempts = 2;
-    let l = launch_tuned(&yaml, test_options(), &shared_store(), tuning, |_| {});
+    let l = launch(&yaml, test_options());
     let report = l
         .run
         .wait_exit(Duration::from_secs(60))
@@ -58,9 +52,7 @@ fn an_empty_key_that_decodes_alike_does_not_hide_one_with_bytes() {
         ("data/c\rr.ndjson", b"{\"k\":\"x\"}\n"),
     ]);
     let yaml = PipelineYaml::endpoint("decode-alike", &endpoint).build();
-    let mut tuning = test_tuning();
-    tuning.max_attempts = 2;
-    let l = launch_tuned(&yaml, test_options(), &shared_store(), tuning, |_| {});
+    let l = launch(&yaml, test_options());
     let report = l
         .run
         .wait_exit(Duration::from_secs(60))

@@ -1570,29 +1570,6 @@ fn a_lister_run_called_from_async_code_refuses() {
     refused(outcome, &script);
 }
 
-/// Pins that a lister run on a source given a coordinator refuses before
-/// it publishes.
-#[test]
-#[expect(deprecated, reason = "v0.4.0 removes this with spate-coordination")]
-fn a_lister_run_given_a_coordinator_refuses() {
-    let dir = tempfile::tempdir().unwrap();
-    let data = data_dir(&dir);
-    fs::write(data.join("a.ndjson"), lines_bytes(&recs("a", 5))).unwrap();
-    let (location, path) = file_location(&dir);
-    let rt = runtime();
-    let (coordinator, _) = spate_test::scripted_coordinator();
-    let (feed, script) = scripted_feed();
-    let err = lister_source(&data, &rt, "")
-        .with_coordinator(Box::new(coordinator))
-        .list_once(&section("scripted", Some(&location)), Arc::new(feed))
-        .unwrap_err();
-    let (class, reason) = client_error(&err);
-    assert_eq!(class, spate_core::error::ErrorClass::Fatal, "{err}");
-    assert!(reason.contains("with_coordinator"), "{reason}");
-    assert!(script.published().is_empty());
-    assert!(!path.exists(), "no location request");
-}
-
 /// A solo pipeline on the in-process feed the runtime builds from the
 /// file, over `data` behind `store`.
 fn launch_solo(data: &Path, store: Arc<dyn object_store::ObjectStore>) -> Launched {

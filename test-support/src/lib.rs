@@ -10,8 +10,6 @@ mod http;
 mod rustfs;
 #[cfg(feature = "tls")]
 mod tls;
-#[cfg(feature = "toxiproxy")]
-mod toxiproxy;
 
 pub use child::{ChildTest, run_in_child};
 pub use corpus::{fnv1a, pin};
@@ -22,8 +20,6 @@ pub use http::{http, http_with_body, http_with_headers};
 pub use rustfs::{ACCESS_KEY, REGION, Rustfs, S3_PORT, SECRET_KEY};
 #[cfg(feature = "tls")]
 pub use tls::{TestCa, native_certs, pem, serve_tls};
-#[cfg(feature = "toxiproxy")]
-pub use toxiproxy::{API_PORT, LISTEN_PORTS, Stream, Toxic, Toxiproxy};
 
 use std::path::Path;
 use std::process::Command;

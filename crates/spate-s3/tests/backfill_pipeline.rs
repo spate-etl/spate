@@ -4,29 +4,20 @@
 //! Each test assembles a real `Pipeline` (controller, drivers, capture
 //! sink) around an [`S3Source`](spate_s3::S3Source) pointed at `file://`
 //! URLs in a tempdir, and relies on the bounded-job contract: the
-//! pipeline exits `Completed` on its own when every split is committed
-//! complete, and `Completed` means every record was durably written and
-//! committed.
+//! pipeline exits `Completed` on its own when the in-process feed's lister has
+//! finished and every unit is acknowledged, and `Completed` means every record
+//! was durably written and committed.
 //!
-//! Progress lives in the coordination store. Plain `launch` runs solo
-//! over the source's internal in-process store (ephemeral by design);
-//! `launch_on_store` shares one in-process store across launches, the
-//! infrastructure-free stand-in for a durable backend, which is what
-//! makes resume-across-restart testable here.
-
-#![expect(deprecated, reason = "v0.4.0 removes this with spate-coordination")]
 
 mod support;
 
-use spate_coordination::store::memory::MemoryStore;
 use spate_core::pipeline::{ExitState, RuntimeOptions};
-use spate_test::{WriteOutcome, wait_until};
+use spate_test::WriteOutcome;
 use std::fs;
 use std::path::PathBuf;
 use std::time::Duration;
 use support::{
-    PipelineYaml, captured_rows, launch, launch_on_store, launch_scripted, launch_tuned,
-    lines_bytes, recs, shared_store, sorted, test_options, test_tuning,
+    PipelineYaml, captured_rows, launch, launch_scripted, lines_bytes, recs, sorted, test_options,
 };
 
 /// A tempdir holding the object prefix (`data/`).
@@ -64,9 +55,8 @@ impl Fixture {
         .unwrap();
     }
 
-    /// Pipeline YAML. `split_target_bytes` stays at the 1MiB floor so the
-    /// per-object cost floor is 64KiB: sixteen small objects per split,
-    /// letting fixtures shape split counts deterministically.
+    /// Pipeline YAML. `split_target_bytes` stays at the 1MiB floor, so an
+    /// uncompressed object above it is cut into ranges.
     fn config_yaml(&self, extra_sections: &str) -> String {
         PipelineYaml::file("s3-backfill-test", &self.dir.path().join("data"))
             .section(extra_sections)
@@ -97,220 +87,9 @@ fn full_backfill_completes_itself() {
     assert_eq!(sorted(captured_rows(&l.script)), sorted(expected));
     assert!(
         !report.final_watermarks.is_empty(),
-        "the split tenancy committed: {:?}",
+        "the units committed: {:?}",
         report.final_watermarks
     );
-}
-
-#[test]
-fn shutdown_handoff_resumes_from_committed_progress() {
-    let fx = Fixture::new();
-    // One split (8 objects < 16), big enough that run 1 is interrupted
-    // mid-split: the resume is a genuine mid-split watermark carry.
-    for i in 0..8 {
-        fx.write_plain(&format!("part-{i:02}.ndjson"), &recs(&format!("p{i}"), 400));
-    }
-    let mut expected: Vec<String> = Vec::new();
-    for i in 0..8 {
-        expected.extend(recs(&format!("p{i}"), 400));
-    }
-    let store = shared_store();
-
-    // Run 1: stop once data is flowing; the drain commits acked progress
-    // and gracefully releases the split back to the store.
-    let l1 = launch_on_store(&fx.config_yaml(""), test_options(), &store, |_| {});
-    wait_until(Duration::from_secs(30), "first rows captured", || {
-        !captured_rows(&l1.script).is_empty()
-    });
-    l1.shutdown.trigger();
-    let r1 = l1.run.join().expect("run 1 exits");
-    assert_eq!(r1.state, ExitState::Completed, "signal shutdown drains");
-    let rows1 = captured_rows(&l1.script);
-
-    // Run 2: fresh pipeline over the same store; it must finish the job.
-    let l2 = launch_on_store(&fx.config_yaml(""), test_options(), &store, |_| {});
-    let r2 = l2
-        .run
-        .wait_exit(Duration::from_secs(60))
-        .expect("run 2 completes on its own")
-        .expect("no start error");
-    assert_eq!(r2.state, ExitState::Completed);
-    let rows2 = captured_rows(&l2.script);
-
-    // At-least-once: the union covers everything; overlap (replay) is fine.
-    let mut union: Vec<String> = rows1.iter().chain(rows2.iter()).cloned().collect();
-    union.sort();
-    union.dedup();
-    assert_eq!(
-        union,
-        sorted(expected),
-        "no record may be lost across a restart"
-    );
-}
-
-#[test]
-fn completed_job_reruns_to_zero_rows() {
-    let fx = Fixture::new();
-    fx.write_plain("a.ndjson", &recs("a", 5));
-    fx.write_gzip("b.ndjson.gz", &recs("b", 4));
-    let store = shared_store();
-
-    let l1 = launch_on_store(&fx.config_yaml(""), test_options(), &store, |_| {});
-    let r1 = l1.run.wait_exit(Duration::from_secs(30)).unwrap().unwrap();
-    assert_eq!(r1.state, ExitState::Completed);
-    assert_eq!(captured_rows(&l1.script).len(), 9);
-
-    // Completed splits are never re-offered: the rerun observes
-    // AllComplete and drains without reading anything.
-    let l2 = launch_on_store(&fx.config_yaml(""), test_options(), &store, |_| {});
-    let r2 = l2.run.wait_exit(Duration::from_secs(30)).unwrap().unwrap();
-    assert_eq!(r2.state, ExitState::Completed);
-    assert_eq!(
-        captured_rows(&l2.script),
-        Vec::<String>::new(),
-        "everything was already committed"
-    );
-}
-
-#[test]
-fn restart_replays_fully_on_an_ephemeral_store() {
-    // The solo contract: no coordinator injected means an internal
-    // in-process store, so a rerun replays the whole prefix (at-least-once
-    // keeps it safe; the startup WARN says so).
-    let fx = Fixture::new();
-    fx.write_plain("a.ndjson", &recs("a", 5));
-
-    for _ in 0..2 {
-        let l = launch(&fx.config_yaml(""), test_options());
-        let r = l.run.wait_exit(Duration::from_secs(30)).unwrap().unwrap();
-        assert_eq!(r.state, ExitState::Completed);
-        assert_eq!(
-            captured_rows(&l.script),
-            recs("a", 5),
-            "full replay each run"
-        );
-    }
-}
-
-/// Publish a plan over `fx` into `store`, without completing any of it.
-///
-/// The mutation tests need a *planned* prefix (split descriptors holding
-/// each member's key and ETag) that they can then mutate underneath.
-/// Doing that by racing a running pipeline (mutate while the first split
-/// streams, hoping the victim is still unclaimed) is a timing assumption
-/// that silently stops holding the moment split completion gets faster.
-///
-/// So: run a pipeline whose sink writes all fail. The plan is published
-/// before any split can be claimed, so it always reaches the store, while
-/// the failing writes mean no batch is ever acknowledged and therefore no
-/// split can ever be committed complete. Stop it as soon as the plan is
-/// durable. What is left behind is a planned, wholly incomplete job, and
-/// the mutation then happens with no pipeline running at all.
-fn plan_only_run(fx: &Fixture, store: &MemoryStore) {
-    let l = launch_tuned(
-        &fx.config_yaml(""),
-        test_options(),
-        store,
-        test_tuning(),
-        |script| {
-            for _ in 0..64 {
-                script.enqueue_global(WriteOutcome::fatal("hold the planning run"));
-            }
-        },
-    );
-    wait_until(
-        Duration::from_secs(30),
-        "the plan reaching the store",
-        || !split_progress(store).is_empty(),
-    );
-    l.shutdown.trigger();
-    let _ = l.run.join().expect("no start error");
-
-    let splits = split_progress(store);
-    assert!(!splits.is_empty(), "the plan reached the store");
-    assert!(
-        splits.iter().all(|s| s["status"] != "completed"),
-        "no split may complete before the mutation: {splits:?}"
-    );
-}
-
-/// Every split progress record in the store, decoded as JSON.
-fn split_progress(store: &MemoryStore) -> Vec<serde_json::Value> {
-    use spate_coordination::store::{CoordinationStore as _, Keyspace};
-    let rt = tokio::runtime::Runtime::new().expect("runtime");
-    rt.block_on(store.list(Keyspace::Durable, "split."))
-        .expect("list")
-        .iter()
-        .map(|e| serde_json::from_slice(&e.value).expect("progress record"))
-        .collect()
-}
-
-/// Run the planned job to its terminal state and assert it stalled.
-fn assert_stalls(fx: &Fixture, store: &MemoryStore) {
-    let l = launch_tuned(
-        &fx.config_yaml(""),
-        test_options(),
-        store,
-        {
-            let mut tuning = test_tuning();
-            tuning.max_attempts = 2;
-            tuning
-        },
-        |_| {},
-    );
-    let report = l
-        .run
-        .wait_exit(Duration::from_secs(60))
-        .expect("the job reaches a verdict")
-        .expect("no start error");
-    let ExitState::Failed(failure) = report.state else {
-        panic!(
-            "a quarantined split must stall the bounded job, got {:?}",
-            report.state
-        );
-    };
-    assert!(
-        failure.reason.contains("quarantined") || failure.reason.contains("stalled"),
-        "actionable stall error: {}",
-        failure.reason
-    );
-}
-
-#[test]
-fn deleting_a_planned_object_quarantines_its_split() {
-    let fx = Fixture::new();
-    for i in 0..4 {
-        fx.write_plain(
-            &format!("obj-{i:02}.ndjson"),
-            &recs(&format!("o{i:02}"), 20),
-        );
-    }
-    let store = shared_store();
-    plan_only_run(&fx, &store);
-
-    // Deleted after planning: the descriptor still names it, so the split
-    // 404s on every delivery attempt until the budget quarantines it.
-    fs::remove_file(fx.object_path("obj-00.ndjson")).unwrap();
-    assert_stalls(&fx, &store);
-}
-
-#[test]
-fn overwriting_a_planned_object_quarantines_its_split() {
-    let fx = Fixture::new();
-    for i in 0..4 {
-        fx.write_plain(
-            &format!("obj-{i:02}.ndjson"),
-            &recs(&format!("o{i:02}"), 20),
-        );
-    }
-    let store = shared_store();
-    plan_only_run(&fx, &store);
-
-    // Same key, different content (size changes, so the `file://` ETag
-    // does too): the planned split's If-Match pin must trip rather than
-    // splice the new content into the old descriptor's offsets.
-    fx.write_plain("obj-00.ndjson", &recs("rewritten", 7));
-    assert_stalls(&fx, &store);
 }
 
 #[test]
@@ -344,39 +123,14 @@ fn one_huge_object_spans_many_batches_in_order() {
     assert_eq!(
         rows,
         recs("big", n),
-        "single split, single shard: exact order"
+        "single unit, single shard: exact order"
     );
 }
 
-/// A plain object of three times the 1 MiB split target plans into three
-/// byte-range splits, and each of its lines arrives exactly once.
 #[test]
-fn a_large_plain_object_is_read_as_three_byte_ranges() {
+fn more_units_than_threads_still_completes() {
     let fx = Fixture::new();
-    // 64-byte lines, so the object is exactly 3 MiB.
-    let lines: Vec<String> = (0..3 * 1024 * 1024 / 64)
-        .map(|i| format!("{{\"k\":\"r-{i:08}\",\"pad\":\"{}\"}}", "x".repeat(36)))
-        .collect();
-    fx.write_plain("big.ndjson", &lines);
-    assert_eq!(
-        fs::metadata(fx.object_path("big.ndjson")).unwrap().len(),
-        3 * 1024 * 1024
-    );
-    let store = shared_store();
-
-    let l = launch_on_store(&fx.config_yaml(""), test_options(), &store, |_| {});
-    let report = l.run.wait_exit(Duration::from_secs(60)).unwrap().unwrap();
-    assert_eq!(report.state, ExitState::Completed);
-
-    let splits = split_progress(&store);
-    assert_eq!(splits.len(), 3, "{splits:?}");
-    assert_eq!(sorted(captured_rows(&l.script)), sorted(lines));
-}
-
-#[test]
-fn more_splits_than_threads_still_completes() {
-    let fx = Fixture::new();
-    // 48 objects → 3 splits at the 16-member cap, over 2 pipeline threads.
+    // 48 objects are 48 units, over 2 pipeline threads.
     for i in 0..48 {
         fx.write_plain(&format!("obj-{i:02}.ndjson"), &recs(&format!("o{i}"), 25));
     }
@@ -407,55 +161,14 @@ fn slow_sink_backpressure_does_not_deadlock_the_backfill() {
 }
 
 #[test]
-fn blank_line_heavy_objects_survive_a_rerun_consistently() {
-    let fx = Fixture::new();
-    // Records interleaved with blank and whitespace-only lines: indexes
-    // count emitted records only, so the rerun's discard math must align.
-    let mut lines = Vec::new();
-    for i in 0..50 {
-        lines.push(format!("{{\"k\":\"w-{i}\"}}"));
-        lines.push(String::new());
-        lines.push("   ".to_string());
-    }
-    fx.write_plain("weird.ndjson", &lines);
-    fx.write_gzip("weird2.ndjson.gz", &lines);
-    let store = shared_store();
-
-    let l1 = launch_on_store(&fx.config_yaml(""), test_options(), &store, |_| {});
-    let r1 = l1.run.wait_exit(Duration::from_secs(30)).unwrap().unwrap();
-    assert_eq!(r1.state, ExitState::Completed);
-    assert_eq!(captured_rows(&l1.script).len(), 100);
-
-    let l2 = launch_on_store(&fx.config_yaml(""), test_options(), &store, |_| {});
-    let r2 = l2.run.wait_exit(Duration::from_secs(30)).unwrap().unwrap();
-    assert_eq!(r2.state, ExitState::Completed);
-    assert!(
-        captured_rows(&l2.script).is_empty(),
-        "blank lines must not desynchronize resume positions"
-    );
-}
-
-#[test]
-fn corrupt_object_quarantines_its_split_and_stalls() {
+fn a_corrupt_object_dead_letters_its_unit_and_stalls() {
     let fx = Fixture::new();
     fx.write_plain("a.ndjson", &recs("a", 2));
     fs::write(fx.object_path("bad.ndjson.gz"), b"this is not gzip").unwrap();
-    let store = shared_store();
 
-    // Both objects share one split: the corrupt member poisons it on
-    // every delivery attempt, so the bounded job must end stalled: a
-    // loud failure, never a silently partial "Completed".
-    let l = launch_tuned(
-        &fx.config_yaml(""),
-        test_options(),
-        &store,
-        {
-            let mut tuning = test_tuning();
-            tuning.max_attempts = 2;
-            tuning
-        },
-        |_| {},
-    );
+    // The corrupt object fails its unit on every delivery, so the bounded job
+    // must end stalled: a loud failure, never a silently partial "Completed".
+    let l = launch(&fx.config_yaml(""), test_options());
     let report = l.run.wait_exit(Duration::from_secs(60)).unwrap().unwrap();
     let ExitState::Failed(failure) = report.state else {
         panic!(
@@ -468,92 +181,6 @@ fn corrupt_object_quarantines_its_split_and_stalls() {
         "actionable stall error: {}",
         failure.reason
     );
-}
-
-#[test]
-fn mismatched_planner_config_is_rejected_at_startup() {
-    let fx = Fixture::new();
-    fx.write_plain("a.ndjson", &recs("a", 3));
-    let store = shared_store();
-
-    let l1 = launch_on_store(&fx.config_yaml(""), test_options(), &store, |_| {});
-    let r1 = l1.run.wait_exit(Duration::from_secs(30)).unwrap().unwrap();
-    assert_eq!(r1.state, ExitState::Completed);
-
-    // A second instance whose planner config diverges (different split
-    // target ⇒ different fingerprint) must be refused: divergent
-    // configurations can never share a coordinated job.
-    let divergent = fx
-        .config_yaml("")
-        .replace("split_target_bytes: 1MiB", "split_target_bytes: 2MiB");
-    let l2 = launch_on_store(&divergent, test_options(), &store, |_| {});
-    let report = l2.run.wait_exit(Duration::from_secs(30)).unwrap().unwrap();
-    let ExitState::Failed(failure) = report.state else {
-        panic!(
-            "a fingerprint mismatch must fail startup, got {:?}",
-            report.state
-        );
-    };
-    assert!(
-        failure.reason.contains("fingerprint"),
-        "actionable mismatch error: {}",
-        failure.reason
-    );
-}
-
-/// A framer that declares no resync delimiter.
-#[derive(Default)]
-struct NoResync(support::LineFramer);
-
-impl spate_core::framing::RecordFramer for NoResync {
-    fn push(&mut self, bytes: &[u8]) -> std::io::Result<()> {
-        self.0.push(bytes)
-    }
-    fn finish(&mut self) -> std::io::Result<()> {
-        self.0.finish()
-    }
-    fn pop(&mut self) -> Option<Vec<u8>> {
-        self.0.pop()
-    }
-    fn decoded_bytes(&self) -> u64 {
-        self.0.decoded_bytes()
-    }
-}
-
-/// A worker whose framer declares a different resync delimiter is refused at
-/// startup on the job fingerprint.
-#[test]
-fn a_worker_with_another_delimiter_is_refused_at_startup() {
-    let fx = Fixture::new();
-    fx.write_plain("a.ndjson", &recs("a", 3));
-    let store = shared_store();
-
-    let l1 = launch_on_store(&fx.config_yaml(""), test_options(), &store, |_| {});
-    let r1 = l1.run.wait_exit(Duration::from_secs(30)).unwrap().unwrap();
-    assert_eq!(r1.state, ExitState::Completed);
-
-    let store2 = store.clone();
-    let l2 = support::launch_customized(
-        &fx.config_yaml(""),
-        test_options(),
-        |_| {},
-        move |source, io| {
-            let coordinator =
-                spate_coordination::StoreCoordinator::new(store2, test_tuning(), io, None)
-                    .expect("coordinator builds");
-            source
-                .with_framer(|| Box::new(NoResync::default()))
-                .with_coordinator(Box::new(coordinator))
-        },
-    );
-    let report = l2.run.wait_exit(Duration::from_secs(30)).unwrap().unwrap();
-    let ExitState::Failed(failure) = report.state else {
-        panic!(
-            "a delimiter mismatch must fail startup, got {:?}",
-            report.state
-        );
-    };
-    assert!(failure.reason.contains("fingerprint"), "{}", failure.reason);
 }
 
 /// A gzip object above the target whose key has no codec extension is read
@@ -569,12 +196,11 @@ fn forced_gzip_without_extension_is_read_whole() {
     enc.write_all(&lines_bytes(&lines)).unwrap();
     fs::write(fx.object_path("big.ndjson"), enc.finish().unwrap()).unwrap();
     assert!(fs::metadata(fx.object_path("big.ndjson")).unwrap().len() > 1024 * 1024);
-    let store = shared_store();
 
     let yaml = PipelineYaml::file("s3-forced-gzip", &fx.dir.path().join("data"))
         .source("compression", "gzip")
         .build();
-    let l = launch_on_store(&yaml, test_options(), &store, |_| {});
+    let l = launch(&yaml, test_options());
     let report = l.run.wait_exit(Duration::from_secs(60)).unwrap().unwrap();
     assert_eq!(report.state, ExitState::Completed);
     assert_eq!(sorted(captured_rows(&l.script)), sorted(lines));

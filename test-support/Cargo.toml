@@ -22,8 +22,6 @@ tls = [
     "dep:tokio",
     "dep:tokio-rustls",
 ]
-# `Toxiproxy`.
-toxiproxy = ["dep:serde_json", "dep:testcontainers"]
 # `Rustfs`.
 rustfs = ["dep:http", "dep:object_store", "dep:testcontainers", "dep:tokio"]
 # `ElasticMq`.
@@ -37,7 +35,6 @@ object_store = { workspace = true, optional = true, features = ["aws"] }
 rcgen = { workspace = true, optional = true }
 rustls = { workspace = true, optional = true }
 rustls-native-certs = { workspace = true, optional = true }
-serde_json = { workspace = true, optional = true }
 testcontainers = { workspace = true, optional = true, features = ["blocking"] }
 tokio = { workspace = true, optional = true, features = ["io-util", "net", "rt"] }
 tokio-rustls = { workspace = true, optional = true }

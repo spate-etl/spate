@@ -30,8 +30,7 @@ are testing, so adding either is a change inside `ci/`.
 | [`kafka`](kafka/README.md) | `stable` | `spate-kafka`, and `spate`'s end-to-end suites |
 | [`nats`](nats/README.md) | `floor`, `below-floor`, `async` | `spate-coordination`, `spate-s3`'s `coordinated_nats`, and `spate`'s examples tier |
 | [`rust`](rust/README.md) | `stable` | `spate-kafka`'s `tls_system_ca`, as its system OpenSSL builder and client image |
-| [`rustfs`](rustfs/README.md) | `stable` | `spate-s3`, `spate-kafka`'s notification suite, `spate-test-support`'s smoke test, and `spate-faults`, in the weekly fault run |
-| [`toxiproxy`](toxiproxy/README.md) | `stable` | `spate-faults`, in the weekly fault run |
+| [`rustfs`](rustfs/README.md) | `stable` | `spate-s3`, `spate-kafka`'s notification suite, and `spate-test-support`'s smoke test |
 
 A service's own README carries what is specific to it: which release lines it
 has, its vendor's support window, and why those lanes.
@@ -79,7 +78,7 @@ digest on every run.
 
 **Exact tags**, the vendor's full release version, so a bump diff names the
 release it moved to: `YY.M.P.B` for ClickHouse, `MAJOR.POINT` for Debian,
-`MAJOR.MINOR.PATCH` for ElasticMQ, Kafka, RustFS and Toxiproxy,
+`MAJOR.MINOR.PATCH` for ElasticMQ, Kafka and RustFS,
 `MAJOR.MINOR.PATCH-alpine` for NATS, `MAJOR.MINOR.PATCH-bookworm` for Rust.
 
 ## Support claims

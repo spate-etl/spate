@@ -4600,28 +4600,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "spate-faults"
-version = "0.3.0"
-dependencies = [
- "base64 0.22.1",
- "bytes",
- "futures-util",
- "libc",
- "object_store",
- "serde",
- "serde_json",
- "spate-coordination",
- "spate-core",
- "spate-json",
- "spate-s3",
- "spate-test",
- "spate-test-support",
- "tempfile",
- "testcontainers",
- "tokio",
-]
-
-[[package]]
 name = "spate-fuzz"
 version = "0.3.0"
 dependencies = [
@@ -4714,7 +4692,6 @@ dependencies = [
  "serde_json",
  "sha2 0.11.1",
  "spate-bench",
- "spate-coordination",
  "spate-core",
  "spate-json",
  "spate-s3",
@@ -4786,7 +4763,6 @@ dependencies = [
  "rcgen",
  "rustls",
  "rustls-native-certs",
- "serde_json",
  "tempfile",
  "testcontainers",
  "tokio",

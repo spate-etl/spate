@@ -1,44 +1,30 @@
-//! Split descriptors, deterministic split identity, and listing-order
-//! packing. These are the shared vocabulary between the leader's planner and
-//! every split reader.
+//! Unit descriptors and deterministic unit identity.
 //!
-//! A **split** is one leasable unit of work: a small batch of whole objects,
-//! or one byte range of a large object. The planner packs the sorted listing
-//! into splits; the [`SplitDescriptor`] carries each split's member objects
-//! (keys, sizes, ETags) and its range, if it has one, verbatim to whichever
-//! worker gains it, so workers never list.
+//! A unit of work is one object or one byte range of one object. The
+//! [`SplitDescriptor`] carries the unit's member objects (keys, sizes, ETags)
+//! and its range, if it has one, verbatim to whichever worker receives the
+//! unit, so workers never list.
 //!
 //! # Identity
 //!
-//! [`split_id_for`] digests the member set (keys **and** ETags) plus the
-//! packing-algorithm version into a stable [`SplitId`];
-//! [`split_id_for_range`] digests one object's key, ETag and range the same
-//! way. The consequences:
+//! [`split_id_for`] digests the member set (keys **and** ETags) plus a
+//! version into a stable id; [`split_id_for_range`] digests one object's key,
+//! ETag and range the same way. The consequences:
 //!
-//! - Replanning unchanged work reproduces the same ids, so re-submitting a
-//!   plan is a store-side create-if-absent no-op.
-//! - An overwritten object (new ETag) yields a **new** split id: the new
-//!   content is new work, never silently skipped against stale progress.
-//! - A change to the packing algorithm bumps the digested version, retiring
-//!   every old id as an explicit epoch instead of silently re-reading a
-//!   reshuffled listing against orphaned progress records.
+//! - Publishing unchanged work again reproduces the same ids.
+//! - An overwritten object (new ETag) yields a **new** id: the new content is
+//!   new work, never silently skipped against stale progress.
+//! - A change to the version retires every old id as an explicit epoch.
 //!
-//! The digest is truncated SHA-256: split ids are persisted identity, and a
+//! The digest is truncated SHA-256: ids are persisted identity, and a
 //! collision would silently drop one member set, so the digest must hold up
 //! even for adversarially-named keys.
 //!
-//! # Packing
+//! # Cutting
 //!
-//! [`pack`] walks the sorted listing in order and first-fits each object
-//! into one of a bounded window of open bins. It never reorders by size, so
-//! the output is a pure function of the listing order and objects sharing a
-//! key prefix stay in the same split. Each object costs at least
-//! `target / 16`, an open-cost floor that stops thousands of tiny objects
-//! coalescing into one split, so a split holds at most ~16 members. The planner
-//! validates each descriptor against its portable raw byte limit. An object above the
-//! target that [`Packing::delimiter_for`] accepts is cut into byte ranges of
-//! at most the target, one split each; any other object at or above the
-//! target lands alone in its own split.
+//! An object above the target that [`Packing::delimiter_for`] accepts is cut
+//! by [`tile`] into byte ranges of at most the target, one unit each; any
+//! other object is read whole.
 
 use crate::config::Compression;
 use crate::fetch::ObjectEntry;
@@ -47,34 +33,45 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
-use spate_core::coordination::{CoordinationError, CoordinationErrorKind, SplitId};
-use std::collections::VecDeque;
-use std::rc::Rc;
 
 /// Version of the [`SplitDescriptor`] wire encoding. Bumped on any change
 /// to the descriptor's schema; a worker refuses a descriptor written by an
 /// incompatible release instead of misreading it.
 pub const DESCRIPTOR_VERSION: u32 = 2;
 
-/// Version of the packing algorithm, folded into every split id by
-/// [`split_id_for`]. Bumping it retires all previously planned ids as an
-/// explicit epoch (see the module docs).
+/// Version folded into every id by [`split_id_for`] and
+/// [`split_id_for_range`]. It is part of the persisted identity, so a change
+/// retires every id already minted.
 pub(crate) const PACKING_VERSION: u32 = 2;
 
-/// Largest object [`pack`] cuts into byte ranges: 50,000 GiB, the largest
+/// Largest object a unit is cut into byte ranges: 50,000 GiB, the largest
 /// object S3 can hold (10,000 parts of 5 GiB). A listing reporting a larger
 /// size is read whole.
 pub(crate) const MAX_SUBDIVIDABLE_BYTES: u64 = 50_000 << 30;
 
-/// Maximum number of bins held open during packing. Bounds the open-bin
-/// window and how far out of listing order a member can land. The listing
-/// itself is resident for the whole plan, so planner memory scales with the
-/// listing rather than with this.
-pub(crate) const PACKING_LOOKBACK: usize = 10;
+/// Why a unit descriptor or id could not be built or decoded.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct SplitError {
+    /// What was wrong, naming the object or range where there is one.
+    pub reason: String,
+}
 
-/// Denominator of the per-object open-cost floor: each member costs at
-/// least `target / OPEN_COST_DIVISOR`, capping members per split at ~16.
-pub(crate) const OPEN_COST_DIVISOR: u64 = 16;
+impl SplitError {
+    fn new(reason: impl Into<String>) -> SplitError {
+        SplitError {
+            reason: reason.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for SplitError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.reason)
+    }
+}
+
+impl std::error::Error for SplitError {}
 
 /// One member object inside a [`SplitDescriptor`].
 ///
@@ -209,6 +206,7 @@ impl SplitDescriptor {
     }
 
     /// Build a descriptor from listed entries, preserving their order.
+    #[cfg(test)]
     pub(crate) fn from_entries(entries: &[ObjectEntry]) -> SplitDescriptor {
         SplitDescriptor::new(
             entries
@@ -227,21 +225,17 @@ impl SplitDescriptor {
     ///
     /// # Errors
     ///
-    /// [`Fatal`](CoordinationErrorKind::Fatal) when the descriptor's
+    /// When the descriptor's
     /// version is not [`DESCRIPTOR_VERSION`], or when it has a range and
     /// not exactly one member, a member without an ETag, or a range that is
-    /// empty or extends past the member's size. A descriptor written under a
-    /// wrong version fails pipeline-fatal on every worker that leases it.
-    pub fn encode(&self) -> Result<Vec<u8>, CoordinationError> {
+    /// empty or extends past the member's size.
+    pub fn encode(&self) -> Result<Vec<u8>, SplitError> {
         if self.v != DESCRIPTOR_VERSION {
-            return Err(CoordinationError::new(
-                CoordinationErrorKind::Fatal,
-                format!(
-                    "descriptor version {} is not the supported {DESCRIPTOR_VERSION}; \
+            return Err(SplitError::new(format!(
+                "descriptor version {} is not the supported {DESCRIPTOR_VERSION}; \
                      construct via SplitDescriptor::new",
-                    self.v
-                ),
-            ));
+                self.v
+            )));
         }
         self.validate_range()?;
         Ok(serde_json::to_vec(self).expect("descriptor serialization is infallible: no non-string map keys, no fallible Serialize impls"))
@@ -251,12 +245,12 @@ impl SplitDescriptor {
     ///
     /// # Errors
     ///
-    /// [`Fatal`](CoordinationErrorKind::Fatal) when the bytes do not parse,
+    /// When the bytes do not parse,
     /// were written under a different [`DESCRIPTOR_VERSION`], or carry a range
     /// [`encode`](SplitDescriptor::encode) would refuse. A worker must never
     /// guess at an incompatible descriptor.
-    pub fn decode(bytes: &[u8]) -> Result<SplitDescriptor, CoordinationError> {
-        let fatal = |reason: String| CoordinationError::new(CoordinationErrorKind::Fatal, reason);
+    pub fn decode(bytes: &[u8]) -> Result<SplitDescriptor, SplitError> {
+        let fatal = SplitError::new;
         let probe: VersionProbe = serde_json::from_slice(bytes)
             .map_err(|e| fatal(format!("split descriptor is not valid JSON: {e}")))?;
         if probe.v != DESCRIPTOR_VERSION {
@@ -274,11 +268,11 @@ impl SplitDescriptor {
 
     /// Refuse a ranged descriptor unless it has exactly one member, that
     /// member has an ETag, and `start < end <= size`.
-    fn validate_range(&self) -> Result<(), CoordinationError> {
+    fn validate_range(&self) -> Result<(), SplitError> {
         let Some(range) = self.range else {
             return Ok(());
         };
-        let fatal = |reason: String| CoordinationError::new(CoordinationErrorKind::Fatal, reason);
+        let fatal = SplitError::new;
         let [object] = self.objects.as_slice() else {
             return Err(fatal(format!(
                 "a ranged split descriptor has exactly one member, this one has {}",
@@ -302,12 +296,12 @@ impl SplitDescriptor {
     }
 }
 
-/// Mint the deterministic split id for a member set.
+/// Mint the deterministic unit id for a member set.
 ///
 /// `members` are `(key, etag)` pairs; order does not matter (they are
 /// sorted by key before digesting). The id digests keys, ETags, and the
-/// packing version; see the module docs for why each is included. The
-/// result is always a valid [`SplitId`]: 25 bytes of `[A-Za-z0-9_-]`
+/// version; see the module docs for why each is included. The
+/// result is always a valid id: 25 bytes of `[A-Za-z0-9_-]`
 /// regardless of what the keys contain.
 ///
 /// Public so out-of-process producers mint byte-identical ids for the same
@@ -338,15 +332,14 @@ impl SplitDescriptor {
 ///     ("exports/2026/part-001.ndjson", None),
 /// ])
 /// .expect("non-empty member set");
-/// assert!(id.as_str().starts_with("s3-"));
-/// assert_eq!(id.as_str().len(), 25);
+/// assert!(id.starts_with("s3-"));
+/// assert_eq!(id.len(), 25);
 /// ```
 ///
 /// # Errors
 ///
-/// [`Fatal`](CoordinationErrorKind::Fatal) for an empty member set; a
-/// split with no members is meaningless.
-pub fn split_id_for<'a, I>(members: I) -> Result<SplitId, CoordinationError>
+/// When the member set is empty; a unit with no members is meaningless.
+pub fn split_id_for<'a, I>(members: I) -> Result<String, SplitError>
 where
     I: IntoIterator<Item = (&'a str, Option<&'a str>)>,
 {
@@ -355,14 +348,13 @@ where
 
 /// [`split_id_for`] with an explicit packing version. The seam lets tests
 /// pin version sensitivity.
-fn split_id_with_version<'a, I>(members: I, version: u32) -> Result<SplitId, CoordinationError>
+fn split_id_with_version<'a, I>(members: I, version: u32) -> Result<String, SplitError>
 where
     I: IntoIterator<Item = (&'a str, Option<&'a str>)>,
 {
     let mut members: Vec<(&str, Option<&str>)> = members.into_iter().collect();
     if members.is_empty() {
-        return Err(CoordinationError::new(
-            CoordinationErrorKind::Fatal,
+        return Err(SplitError::new(
             "cannot mint a split id for an empty member set",
         ));
     }
@@ -404,25 +396,18 @@ where
 ///     SplitRange::new(0, 64 << 20, b'\n'),
 /// )
 /// .expect("non-empty range");
-/// assert_eq!(id.as_str().len(), 25);
+/// assert_eq!(id.len(), 25);
 /// ```
 ///
 /// # Errors
 ///
-/// [`Fatal`](CoordinationErrorKind::Fatal) when `range.start >= range.end`.
-pub fn split_id_for_range(
-    key: &str,
-    etag: &str,
-    range: SplitRange,
-) -> Result<SplitId, CoordinationError> {
+/// When `range.start >= range.end`.
+pub fn split_id_for_range(key: &str, etag: &str, range: SplitRange) -> Result<String, SplitError> {
     if range.start >= range.end {
-        return Err(CoordinationError::new(
-            CoordinationErrorKind::Fatal,
-            format!(
-                "cannot mint a split id for the empty range [{}, {})",
-                range.start, range.end
-            ),
-        ));
+        return Err(SplitError::new(format!(
+            "cannot mint a split id for the empty range [{}, {})",
+            range.start, range.end
+        )));
     }
     let mut hasher = Sha256::new();
     hasher.update(b"spate-s3-range\n");
@@ -450,12 +435,12 @@ fn digest_member(hasher: &mut Sha256, key: &str, etag: Option<&str>) {
 }
 
 /// The `s3-` id over the first 16 bytes of the digest, base64url unpadded.
-fn id_from_digest(hasher: Sha256) -> Result<SplitId, CoordinationError> {
+fn id_from_digest(hasher: Sha256) -> Result<String, SplitError> {
     let digest = hasher.finalize();
-    SplitId::new(format!("s3-{}", URL_SAFE_NO_PAD.encode(&digest[..16])))
+    Ok(format!("s3-{}", URL_SAFE_NO_PAD.encode(&digest[..16])))
 }
 
-/// What [`pack`] needs besides the listing.
+/// What cutting a unit into ranges needs besides the object.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Packing {
     /// The split target, in bytes. Never zero.
@@ -481,59 +466,6 @@ impl Packing {
     }
 }
 
-/// One split [`pack`] produces.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Packed {
-    /// Whole objects, in listing order.
-    Objects(Vec<ObjectEntry>),
-    /// One byte range of one object, which has an ETag. The object's ranges
-    /// share one entry.
-    Range(Rc<ObjectEntry>, SplitRange),
-}
-
-impl Packed {
-    /// The split's deterministic id.
-    pub(crate) fn id(&self) -> Result<SplitId, CoordinationError> {
-        match self {
-            Packed::Objects(members) => {
-                split_id_for(members.iter().map(|m| (m.key.as_str(), m.etag.as_deref())))
-            }
-            Packed::Range(entry, range) => split_id_for_range(
-                &entry.key,
-                entry
-                    .etag
-                    .as_deref()
-                    .expect("pack cuts only an object with an ETag"),
-                *range,
-            ),
-        }
-    }
-
-    /// The split's descriptor.
-    pub(crate) fn descriptor(&self) -> SplitDescriptor {
-        match self {
-            Packed::Objects(members) => SplitDescriptor::from_entries(members),
-            Packed::Range(entry, range) => SplitDescriptor {
-                range: Some(*range),
-                ..SplitDescriptor::from_entries(std::slice::from_ref(&**entry))
-            },
-        }
-    }
-
-    /// The split's weight: its objects' summed sizes, or its range's length,
-    /// at least 1.
-    pub(crate) fn weight(&self) -> u64 {
-        match self {
-            // Saturating: sizes are remote listing data.
-            Packed::Objects(members) => members
-                .iter()
-                .fold(0u64, |acc, m| acc.saturating_add(m.size)),
-            Packed::Range(_, range) => range.end - range.start,
-        }
-        .max(1)
-    }
-}
-
 /// Cut `[0, size)` into `ceil(size / target)` contiguous ranges, each
 /// between `target / 2` and `target` bytes long when `size > target`.
 pub(crate) fn tile(size: u64, target: u64, delimiter: u8) -> impl Iterator<Item = SplitRange> {
@@ -542,86 +474,6 @@ pub(crate) fn tile(size: u64, target: u64, delimiter: u8) -> impl Iterator<Item 
     // target floor.
     let boundary = move |i: u64| (u128::from(i) * u128::from(size) / u128::from(n)) as u64;
     (0..n).map(move |i| SplitRange::new(boundary(i), boundary(i + 1), delimiter))
-}
-
-/// Pack the sorted listing into splits of roughly `packing.target_bytes`
-/// each.
-///
-/// A pure function of `(entries, packing)`: walking the listing in order,
-/// each object costs `max(size, target_bytes / 16)` and first-fits into the
-/// oldest of at most [`PACKING_LOOKBACK`] open bins with room; a bin at or
-/// above the target closes, so an object costing the whole target lands
-/// alone in its own split. An object [`Packing::delimiter_for`] accepts is
-/// instead cut into `ceil(size / target)` byte ranges, emitted at its listing
-/// position in ascending order. It evicts an open bin as an oversized object
-/// does, so the other objects' bins are the same whether or not it is cut.
-/// Returned splits preserve listing order both across splits (by first
-/// member) and within each split.
-pub(crate) fn pack(entries: Vec<ObjectEntry>, packing: &Packing) -> Vec<Packed> {
-    let target_bytes = packing.target_bytes;
-    debug_assert!(
-        target_bytes > 0,
-        "config validation rejects a zero split target"
-    );
-    struct Bin {
-        members: Vec<ObjectEntry>,
-        cost: u64,
-        /// Set on a byte-range bin, which has no members and is never open.
-        range: Option<(Rc<ObjectEntry>, SplitRange)>,
-    }
-    let floor = (target_bytes / OPEN_COST_DIVISOR).max(1);
-    let mut bins: Vec<Bin> = Vec::new();
-    // Indexes into `bins` still accepting members, oldest first.
-    let mut open: VecDeque<usize> = VecDeque::new();
-    for entry in entries {
-        if let Some(delimiter) = packing.delimiter_for(&entry) {
-            if open.len() == PACKING_LOOKBACK {
-                open.pop_front();
-            }
-            let entry = Rc::new(entry);
-            bins.extend(tile(entry.size, target_bytes, delimiter).map(|range| Bin {
-                members: Vec::new(),
-                cost: range.end - range.start,
-                range: Some((Rc::clone(&entry), range)),
-            }));
-            continue;
-        }
-        let cost = entry.size.max(floor);
-        // Saturating: sizes are remote listing data and may be
-        // adversarially close to u64::MAX; the fit test must not overflow.
-        let idx = match open
-            .iter()
-            .position(|&i| bins[i].cost.saturating_add(cost) <= target_bytes)
-        {
-            Some(pos) => open[pos],
-            None => {
-                if open.len() == PACKING_LOOKBACK {
-                    open.pop_front();
-                }
-                bins.push(Bin {
-                    members: Vec::new(),
-                    cost: 0,
-                    range: None,
-                });
-                let idx = bins.len() - 1;
-                open.push_back(idx);
-                idx
-            }
-        };
-        bins[idx].members.push(entry);
-        bins[idx].cost = bins[idx].cost.saturating_add(cost);
-        if bins[idx].cost >= target_bytes
-            && let Some(pos) = open.iter().position(|&i| i == idx)
-        {
-            open.remove(pos);
-        }
-    }
-    bins.into_iter()
-        .map(|Bin { members, range, .. }| match range {
-            Some((entry, range)) => Packed::Range(entry, range),
-            None => Packed::Objects(members),
-        })
-        .collect()
 }
 
 #[cfg(test)]
@@ -640,94 +492,6 @@ mod tests {
 
     const MB: u64 = 1024 * 1024;
 
-    /// A target that is not a multiple of 16 rounds the open-cost floor down.
-    #[test]
-    fn the_open_cost_floor_rounds_down() {
-        let target = "1.1MiB".parse::<bytesize::ByteSize>().unwrap().as_u64();
-        assert_ne!(target % 16, 0);
-        let listing: Vec<ObjectEntry> = (0..32).map(|i| entry(&format!("k{i:02}"), 1)).collect();
-        let bins: Vec<usize> = object_bins(&pack(listing, &whole(target)))
-            .iter()
-            .map(Vec::len)
-            .collect();
-        assert_eq!(bins, [16, 16]);
-    }
-
-    /// Whole objects land in the same bins whether or not cutting is on,
-    /// pinned with literal bins and lookback counts.
-    #[test]
-    fn whole_object_bins_are_pinned() {
-        let keys = |packed: Vec<Packed>| -> Vec<Vec<String>> {
-            object_bins(&packed)
-                .into_iter()
-                .map(|b| b.into_iter().map(|e| e.key).collect())
-                .collect()
-        };
-        for packing in [whole(64 * MB), cut(64 * MB)] {
-            // First fit: `c` joins the oldest bin with room.
-            let first_fit = vec![
-                entry("a", 40 * MB),
-                entry("b", 50 * MB),
-                entry("c", 10 * MB),
-            ];
-            assert_eq!(keys(pack(first_fit, &packing)), [vec!["a", "c"], vec!["b"]]);
-
-            // Ten open bins: the eleventh evicts `a`, so `z` cannot join it.
-            let mut evicted = vec![entry("a", 40 * MB)];
-            evicted.extend((0..10).map(|i| entry(&format!("m{i}"), 60 * MB)));
-            evicted.push(entry("z", 20 * MB));
-            assert_eq!(keys(pack(evicted, &packing)).len(), 12, "{packing:?}");
-
-            // A bin exactly at the target closes, so it does not hold a
-            // lookback slot.
-            let mut exact = vec![entry("a", 40 * MB), entry("b", 64 * MB)];
-            exact.extend((0..9).map(|i| entry(&format!("m{i}"), 60 * MB)));
-            exact.push(entry("z", 20 * MB));
-            let bins = keys(pack(exact, &packing));
-            assert_eq!(bins[0], ["a", "z"], "{packing:?}");
-        }
-    }
-
-    /// The whole-object packing this crate shipped before byte-range
-    /// subdivision, as the reference [`pack`] must reproduce with cutting off.
-    fn reference_pack(entries: Vec<ObjectEntry>, target_bytes: u64) -> Vec<Vec<ObjectEntry>> {
-        struct Bin {
-            members: Vec<ObjectEntry>,
-            cost: u64,
-        }
-        let floor = (target_bytes / 16).max(1);
-        let mut bins: Vec<Bin> = Vec::new();
-        let mut open: VecDeque<usize> = VecDeque::new();
-        for entry in entries {
-            let cost = entry.size.max(floor);
-            let idx = match open
-                .iter()
-                .position(|&i| bins[i].cost.saturating_add(cost) <= target_bytes)
-            {
-                Some(pos) => open[pos],
-                None => {
-                    if open.len() == 10 {
-                        open.pop_front();
-                    }
-                    bins.push(Bin {
-                        members: Vec::new(),
-                        cost: 0,
-                    });
-                    open.push_back(bins.len() - 1);
-                    bins.len() - 1
-                }
-            };
-            bins[idx].members.push(entry);
-            bins[idx].cost = bins[idx].cost.saturating_add(cost);
-            if bins[idx].cost >= target_bytes
-                && let Some(pos) = open.iter().position(|&i| i == idx)
-            {
-                open.remove(pos);
-            }
-        }
-        bins.into_iter().map(|b| b.members).collect()
-    }
-
     /// Packing that reads every object whole.
     fn whole(target: u64) -> Packing {
         Packing {
@@ -745,17 +509,6 @@ mod tests {
         }
     }
 
-    /// The members of every whole-object split, in order.
-    fn object_bins(packed: &[Packed]) -> Vec<Vec<ObjectEntry>> {
-        packed
-            .iter()
-            .filter_map(|p| match p {
-                Packed::Objects(members) => Some(members.clone()),
-                Packed::Range(..) => None,
-            })
-            .collect()
-    }
-
     // --- identity ---
 
     #[test]
@@ -768,7 +521,7 @@ mod tests {
             ("exports/2026/part-001.ndjson", None),
         ])
         .unwrap();
-        assert_eq!(id.as_str(), "s3-xje_MfL-wSNqMCft5ellCg");
+        assert_eq!(id, "s3-xje_MfL-wSNqMCft5ellCg");
     }
 
     #[test]
@@ -854,7 +607,6 @@ mod tests {
             range: None,
         };
         let err = rogue.encode().unwrap_err();
-        assert_eq!(err.kind, CoordinationErrorKind::Fatal);
         assert!(
             err.reason.contains("SplitDescriptor::new"),
             "reason: {}",
@@ -871,14 +623,12 @@ mod tests {
             br#"{"v":1,"objects":[{"key":"k","size":5,"etag":null,"last_modified_ms":1}]}"#,
         )
         .unwrap_err();
-        assert_eq!(err.kind, CoordinationErrorKind::Fatal);
         assert!(err.reason.contains("version 1"), "reason: {}", err.reason);
     }
 
     #[test]
     fn unknown_descriptor_version_is_rejected_actionably() {
         let err = SplitDescriptor::decode(br#"{"v":999,"objects":[]}"#).unwrap_err();
-        assert_eq!(err.kind, CoordinationErrorKind::Fatal);
         assert!(err.reason.contains("version 999"), "reason: {}", err.reason);
         assert!(
             err.reason.contains("incompatible release"),
@@ -887,7 +637,11 @@ mod tests {
         );
 
         let garbage = SplitDescriptor::decode(b"not json").unwrap_err();
-        assert_eq!(garbage.kind, CoordinationErrorKind::Fatal);
+        assert!(
+            garbage.reason.contains("not valid JSON"),
+            "{}",
+            garbage.reason
+        );
     }
 
     fn ranged_object(size: u64, etag: Option<&str>) -> DescriptorObject {
@@ -951,12 +705,10 @@ mod tests {
         ];
         for (needle, desc) in cases {
             let err = desc.encode().unwrap_err();
-            assert_eq!(err.kind, CoordinationErrorKind::Fatal);
             assert!(err.reason.contains(needle), "encode: {}", err.reason);
             // The same bytes written by a producer that skipped validation.
             let raw = serde_json::to_vec(&desc).unwrap();
             let err = SplitDescriptor::decode(&raw).unwrap_err();
-            assert_eq!(err.kind, CoordinationErrorKind::Fatal);
             assert!(err.reason.contains(needle), "decode: {}", err.reason);
         }
         // A range covering the whole object is valid.
@@ -974,7 +726,7 @@ mod tests {
             SplitRange::new(0, 64 * MB, b'\n'),
         )
         .unwrap();
-        assert_eq!(id.as_str(), "s3-fA0wNRW2MyDxquwFvNy0JA");
+        assert_eq!(id, "s3-fA0wNRW2MyDxquwFvNy0JA");
     }
 
     /// Every input of a ranged id moves it, and no ranged id equals the
@@ -997,75 +749,16 @@ mod tests {
 
     // --- packing ---
 
-    /// A listing entry whose shape `kind` picks: plain, gzip, zstd, or plain
-    /// without an ETag.
-    fn shaped(i: usize, size: u64, kind: u8) -> ObjectEntry {
-        let key = format!(
-            "k{i:04}.ndjson{}",
-            ["", ".gz", ".zst", ""][kind as usize % 4]
-        );
-        ObjectEntry {
-            etag: (kind % 4 != 3).then(|| format!("\"etag-{i}\"")),
-            ..entry(&key, size)
-        }
-    }
-
-    #[test]
-    fn packing_is_deterministic_for_a_fixed_listing() {
-        let listing: Vec<ObjectEntry> = (0..200)
-            .map(|i| entry(&format!("k{i:04}"), (i % 90) * MB))
-            .collect();
-        let a = pack(listing.clone(), &cut(64 * MB));
-        let b = pack(listing, &cut(64 * MB));
-        assert_eq!(a, b);
-    }
-
-    #[test]
-    fn tiny_objects_coalesce_under_the_open_cost_floor() {
-        // 64 tiny objects at a 64 MB target: each costs the 4 MB floor, so
-        // exactly 16 fill a bin.
-        let listing: Vec<ObjectEntry> = (0..64).map(|i| entry(&format!("k{i:02}"), 1)).collect();
-        let bins = object_bins(&pack(listing, &whole(64 * MB)));
-        assert_eq!(bins.len(), 4);
-        assert!(bins.iter().all(|b| b.len() == 16));
-    }
-
-    #[test]
-    fn adversarial_listing_sizes_do_not_overflow_the_fit_test() {
-        // Sizes come from remote listing metadata; a u64::MAX entry must
-        // neither panic in debug nor share a bin, and is read whole.
-        let listing = vec![
-            entry("a", 10 * MB),
-            entry("huge", u64::MAX),
-            entry("z", 10 * MB),
-        ];
-        let packed = pack(listing, &cut(64 * MB));
-        let bins = object_bins(&packed);
-        assert_eq!(bins.len(), packed.len(), "nothing is cut");
-        let huge_bin = bins
-            .iter()
-            .find(|b| b.iter().any(|e| e.key == "huge"))
-            .unwrap();
-        assert_eq!(huge_bin.len(), 1, "the oversized object lands alone");
-        let total: usize = bins.iter().map(Vec::len).sum();
-        assert_eq!(total, 3, "nothing lost, nothing duplicated");
-    }
-
     /// An object above [`MAX_SUBDIVIDABLE_BYTES`] is read whole, and one at
     /// the limit, or of 6 TiB, is cut.
     #[test]
     fn an_object_above_the_subdivision_limit_stays_whole() {
-        let target = 1 << 30;
-        let six_tib = pack(vec![entry("6tib", 6 << 40)], &cut(target));
-        assert_eq!(six_tib.len(), 6 << 10);
+        let packing = cut(1 << 30);
+        assert_eq!(packing.delimiter_for(&entry("6tib", 6 << 40)), Some(b'\n'));
+        let at = entry("at", MAX_SUBDIVIDABLE_BYTES);
+        assert_eq!(packing.delimiter_for(&at), Some(b'\n'));
         let over = entry("over", MAX_SUBDIVIDABLE_BYTES + 1);
-        assert_eq!(
-            pack(vec![over.clone()], &cut(target)),
-            [Packed::Objects(vec![over])]
-        );
-        let at = pack(vec![entry("at", MAX_SUBDIVIDABLE_BYTES)], &cut(target));
-        assert_eq!(at.len() as u64, MAX_SUBDIVIDABLE_BYTES / target);
-        assert!(at.iter().all(|p| matches!(p, Packed::Range(..))));
+        assert_eq!(packing.delimiter_for(&over), None);
     }
 
     /// An object is read whole when it is compressed by extension or by
@@ -1092,58 +785,16 @@ mod tests {
             (cut(target), entry("at.ndjson", target)),
         ] {
             assert_eq!(
-                pack(vec![object.clone()], &packing),
-                [Packed::Objects(vec![object.clone()])],
+                packing.delimiter_for(&object),
+                None,
                 "{packing:?} {object:?}"
             );
         }
         assert_eq!(
-            pack(vec![entry("over.ndjson", target + 1)], &cut(target)).len(),
-            2,
+            cut(target).delimiter_for(&entry("over.ndjson", target + 1)),
+            Some(b'\n'),
             "one byte above the target is cut"
         );
-    }
-
-    #[test]
-    fn oversized_object_gets_its_own_split() {
-        let listing = vec![
-            entry("a", 10 * MB),
-            entry("huge", 500 * MB),
-            entry("b", 10 * MB),
-        ];
-        let bins = object_bins(&pack(listing, &whole(64 * MB)));
-        let huge_bin = bins
-            .iter()
-            .find(|b| b.iter().any(|e| e.key == "huge"))
-            .unwrap();
-        assert_eq!(
-            huge_bin.len(),
-            1,
-            "an oversized object never shares a split"
-        );
-    }
-
-    /// A large plain object is cut into ranges emitted at its listing
-    /// position, between its neighbors' splits.
-    #[test]
-    fn a_large_plain_object_is_cut_in_place() {
-        let listing = vec![
-            entry("a", 60 * MB),
-            entry("huge", 500 * MB),
-            entry("z", 60 * MB),
-        ];
-        let packed = pack(listing, &cut(64 * MB));
-        let keys: Vec<&str> = packed
-            .iter()
-            .map(|p| match p {
-                Packed::Objects(members) => members[0].key.as_str(),
-                Packed::Range(entry, _) => entry.key.as_str(),
-            })
-            .collect();
-        let mut want = vec!["a"];
-        want.extend(["huge"; 8]);
-        want.push("z");
-        assert_eq!(keys, want);
     }
 
     /// Every size from one byte above the target to eight times it, and the
@@ -1177,139 +828,7 @@ mod tests {
         assert_eq!(next, size, "size {size} target {target}");
     }
 
-    #[test]
-    fn packing_preserves_listing_order_within_and_across_bins() {
-        let listing: Vec<ObjectEntry> = (0..50)
-            .map(|i| {
-                entry(
-                    &format!("k{i:02}"),
-                    if i % 7 == 0 { 60 * MB } else { 3 * MB },
-                )
-            })
-            .collect();
-        let bins = object_bins(&pack(listing, &whole(64 * MB)));
-        for bin in &bins {
-            let keys: Vec<&str> = bin.iter().map(|e| e.key.as_str()).collect();
-            let mut sorted = keys.clone();
-            sorted.sort_unstable();
-            assert_eq!(keys, sorted, "members stay in listing order within a bin");
-        }
-        let firsts: Vec<&str> = bins.iter().map(|b| b[0].key.as_str()).collect();
-        let mut sorted = firsts.clone();
-        sorted.sort_unstable();
-        assert_eq!(
-            firsts, sorted,
-            "bins emerge in listing order of their first member"
-        );
-    }
-
-    #[test]
-    fn lookback_bounds_how_long_a_bin_stays_open() {
-        // A bin that never fills is force-closed once PACKING_LOOKBACK
-        // newer bins have opened: no unbounded open-bin growth.
-        let mut listing = vec![entry("a-half-full", 40 * MB)];
-        // Each of these fills a fresh bin exactly (nothing fits alongside
-        // 40 MB in a 64 MB bin except <= 24 MB; use 60 MB so none fit).
-        for i in 0..PACKING_LOOKBACK + 2 {
-            listing.push(entry(&format!("b{i:02}"), 60 * MB));
-        }
-        listing.sort_unstable_by(|a, b| a.key.cmp(&b.key));
-        let bins = object_bins(&pack(listing, &whole(64 * MB)));
-        // The half-full bin closed with its single member; every 60 MB
-        // object got its own bin.
-        assert_eq!(bins.len(), PACKING_LOOKBACK + 3);
-        assert!(bins.iter().all(|b| b.len() == 1));
-    }
-
     proptest! {
-        /// Every object lands whole in exactly one split, or is tiled in
-        /// order by ranged splits and appears in no whole-object split.
-        #[test]
-        fn prop_packing_partitions_the_listing_exactly(
-            objects in proptest::collection::vec((0u64..300 * MB, 0u8..4), 0..120),
-            target_mb in 1u64..129,
-        ) {
-            let listing: Vec<ObjectEntry> = objects
-                .iter()
-                .enumerate()
-                .map(|(i, &(size, kind))| shaped(i, size, kind))
-                .collect();
-            let packed = pack(listing.clone(), &cut(target_mb * MB));
-            for object in &listing {
-                let whole_count = object_bins(&packed)
-                    .iter()
-                    .flatten()
-                    .filter(|e| *e == object)
-                    .count();
-                let ranges: Vec<SplitRange> = packed
-                    .iter()
-                    .filter_map(|p| match p {
-                        Packed::Range(e, range) if **e == *object => Some(*range),
-                        _ => None,
-                    })
-                    .collect();
-                if ranges.is_empty() {
-                    prop_assert_eq!(whole_count, 1, "{:?}", object);
-                } else {
-                    prop_assert_eq!(whole_count, 0, "{:?}", object);
-                    let mut next = 0;
-                    for range in ranges {
-                        prop_assert_eq!(range.start, next);
-                        next = range.end;
-                    }
-                    prop_assert_eq!(next, object.size);
-                }
-            }
-            prop_assert!(object_bins(&packed).iter().all(|b| !b.is_empty()));
-        }
-
-        /// Cutting an object replaces its whole-object split with its ranges
-        /// and changes no other split.
-        #[test]
-        fn prop_small_object_bins_do_not_depend_on_cutting(
-            objects in proptest::collection::vec((0u64..300 * MB, 0u8..4), 0..120),
-            target_mb in 1u64..129,
-        ) {
-            let listing: Vec<ObjectEntry> = objects
-                .iter()
-                .enumerate()
-                .map(|(i, &(size, kind))| shaped(i, size, kind))
-                .collect();
-            let packing = cut(target_mb * MB);
-            let expanded: Vec<Packed> = pack(listing.clone(), &whole(target_mb * MB))
-                .into_iter()
-                .flat_map(|split| match &split {
-                    Packed::Objects(members) if members.len() == 1 => {
-                        match packing.delimiter_for(&members[0]) {
-                            Some(delimiter) => tile(members[0].size, packing.target_bytes, delimiter)
-                                .map(|range| Packed::Range(Rc::new(members[0].clone()), range))
-                                .collect(),
-                            None => vec![split],
-                        }
-                    }
-                    _ => vec![split],
-                })
-                .collect();
-            prop_assert_eq!(pack(listing, &packing), expanded);
-        }
-
-        /// With cutting off, every split is the one the reference packing
-        /// makes. Sizes are whole MiB so bins often fill exactly.
-        #[test]
-        fn prop_whole_object_packing_matches_the_reference(
-            objects in proptest::collection::vec((0u64..300, 0u8..4), 0..120),
-            target_mb in 1u64..129,
-        ) {
-            let listing: Vec<ObjectEntry> = objects
-                .iter()
-                .enumerate()
-                .map(|(i, &(size_mb, kind))| shaped(i, size_mb * MB, kind))
-                .collect();
-            let packed = pack(listing.clone(), &whole(target_mb * MB));
-            prop_assert_eq!(object_bins(&packed).len(), packed.len());
-            prop_assert_eq!(object_bins(&packed), reference_pack(listing, target_mb * MB));
-        }
-
         #[test]
         fn prop_ranges_tile_large_objects(
             target in 1u64..=1 << 32,
@@ -1322,22 +841,6 @@ mod tests {
         }
 
         #[test]
-        fn prop_member_count_is_bounded_by_the_floor(
-            sizes in proptest::collection::vec(0u64..300 * MB, 0..120),
-        ) {
-            let target = 64 * MB;
-            let listing: Vec<ObjectEntry> = sizes
-                .iter()
-                .enumerate()
-                .map(|(i, &s)| entry(&format!("k{i:04}"), s))
-                .collect();
-            let bins = object_bins(&pack(listing, &cut(target)));
-            // floor = target/16 divides target exactly, so a bin never
-            // holds more than 16 members, the structural descriptor bound.
-            prop_assert!(bins.iter().all(|b| b.len() <= 16));
-        }
-
-        #[test]
         fn prop_split_ids_are_valid_for_arbitrary_keys(
             keys in proptest::collection::btree_set("[ -~]{1,64}", 1..8),
             etag in proptest::option::of("[ -~]{1,16}"),
@@ -1347,25 +850,9 @@ mod tests {
             let members: Vec<(&str, Option<&str>)> =
                 keys.iter().map(|k| (k.as_str(), etag.as_deref())).collect();
             let id = split_id_for(members).unwrap();
-            prop_assert!(id.as_str().starts_with("s3-"));
-            prop_assert_eq!(id.as_str().len(), 25);
+            prop_assert!(id.starts_with("s3-"));
+            prop_assert_eq!(id.len(), 25);
         }
 
-        #[test]
-        fn prop_packing_and_ids_are_deterministic(
-            sizes in proptest::collection::vec(0u64..200 * MB, 1..60),
-        ) {
-            let listing: Vec<ObjectEntry> = sizes
-                .iter()
-                .enumerate()
-                .map(|(i, &s)| entry(&format!("k{i:04}"), s))
-                .collect();
-            let ids = |packed: &[Packed]| -> Vec<SplitId> {
-                packed.iter().map(|p| p.id().unwrap()).collect()
-            };
-            let a = pack(listing.clone(), &cut(32 * MB));
-            let b = pack(listing, &cut(32 * MB));
-            prop_assert_eq!(ids(&a), ids(&b));
-        }
     }
 }

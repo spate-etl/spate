@@ -1,4 +1,4 @@
-//! Request-shape gates for a bounded backfill.
+//! Request-shape gates for a bounded backfill on the in-process feed.
 //!
 //! These assert *counters*, never timings: how many LISTs a run issues, how
 //! many GETs each object costs, which byte ranges those GETs ask for, and how
@@ -10,12 +10,8 @@
 //! The metrics layer cannot stand in for the store: it counts bytes and
 //! objects, not requests.
 
-#![expect(deprecated, reason = "v0.4.0 removes this with spate-coordination")]
-
 mod support;
 
-use spate_coordination::StoreCoordinator;
-use spate_coordination::store::memory::MemoryStore;
 use spate_core::feed::memory::MemoryFeed;
 use spate_core::feed::{Confirmation, Delivery, Feed, FeedError, FeedWaker, Receipt, Unit};
 use spate_core::pipeline::ExitState;
@@ -24,25 +20,23 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use support::spy::{GetRecord, RangeKind, SpyOptions, StoreSpy, spying_local_store};
 use support::{
-    Launched, PipelineYaml, TEST_LEASE, captured_rows, fingerprint, launch_customized,
-    launch_with_feed, line_framer, lines_bytes, recs, shared_store, sorted, stop, test_options,
-    test_tuning, unit_over,
+    Launched, PipelineYaml, captured_rows, fingerprint, launch_customized, launch_with_feed,
+    line_framer, lines_bytes, recs, sorted, stop, test_options, unit_over,
 };
 
-/// A bounded backfill over `data`, with the read-window knobs a test needs to
-/// choose (`prefetch_bytes` is the size of one ranged GET).
-///
-/// `refresh_listing: false` is the default and is stated anyway: it is the
-/// field these tests are about, since it makes the plan final, and a final
-/// plan is never re-listed.
-fn config_yaml(data: &std::path::Path, prefetch: &str, chunk: &str) -> String {
+/// A bounded backfill over `data` on the in-process feed holding
+/// `units_held` units, with the read-window knobs a test needs to choose
+/// (`prefetch_bytes` is the size of one ranged GET).
+fn config_yaml(data: &std::path::Path, prefetch: &str, chunk: &str, units_held: u32) -> String {
     PipelineYaml::file("s3-request-shape", data)
-        .source("refresh_listing", "false")
         .source("prefetch_bytes", prefetch)
         .source("chunk_bytes", chunk)
+        .section(&format!(
+            "feed:\n  memory: {{}}\n  units_held: {units_held}\n"
+        ))
         .build()
 }
 
@@ -66,10 +60,8 @@ impl Staged {
     }
 }
 
-/// Write `objects` NDJSON objects of `records` lines each. At the 1 MiB split
-/// target the planner's open-cost floor is 64 KiB per object, so these tiny
-/// objects pack sixteen to a split, so the number of objects chooses the
-/// number of splits and with it the read parallelism available.
+/// Write `objects` NDJSON objects of `records` lines each. Each is one unit, so
+/// the number of objects chooses the read parallelism available.
 fn stage(objects: usize, records: usize) -> Staged {
     let dir = tempfile::tempdir().unwrap();
     let data = dir.path().join("data");
@@ -92,30 +84,14 @@ fn stage(objects: usize, records: usize) -> Staged {
     }
 }
 
-/// Launch one coordinated instance reading through the request spy.
-fn launch_spied(
-    yaml: &str,
-    store: &MemoryStore,
-    instance: &str,
-    max_in_flight: u32,
-    options: SpyOptions,
-) -> (Launched, StoreSpy) {
+/// Launch one instance reading through the request spy.
+fn launch_spied(yaml: &str, options: SpyOptions) -> (Launched, StoreSpy) {
     let (spy_store, spy) = spying_local_store(options);
-    let store = store.clone();
-    let mut tuning = test_tuning();
-    tuning.instance_id = Some(instance.to_string());
-    tuning.max_in_flight = max_in_flight;
     let launched = launch_customized(
         yaml,
         test_options(),
         |_| {},
-        move |source, io| {
-            let coordinator =
-                StoreCoordinator::new(store, tuning, io, None).expect("coordinator builds");
-            line_framer(source)
-                .with_coordinator(Box::new(coordinator))
-                .with_store(spy_store)
-        },
+        move |source, _| line_framer(source).with_store(spy_store),
     );
     (launched, spy)
 }
@@ -164,17 +140,11 @@ fn assert_tiles_exactly(name: &str, ranges: &[RangeKind], size: u64) {
 
 #[test]
 fn a_bounded_backfill_lists_once_and_reads_each_object_in_one_get() {
-    // Sixteen objects fill exactly one split. Every object is far below the
-    // 8 MiB read window, so one GET per object is the whole read plan.
+    // Every object is far below the 8 MiB read window, so one GET per object
+    // is the whole read plan.
     let staged = stage(16, 20);
-    let yaml = config_yaml(&staged.data, "8MiB", "512KiB");
-    let (l, spy) = launch_spied(
-        &yaml,
-        &shared_store(),
-        "shape-one-get",
-        4,
-        SpyOptions::default(),
-    );
+    let yaml = config_yaml(&staged.data, "8MiB", "512KiB", 4);
+    let (l, spy) = launch_spied(&yaml, SpyOptions::default());
 
     let report = l.run.wait_exit(Duration::from_secs(60)).unwrap().unwrap();
     assert_eq!(report.state, ExitState::Completed);
@@ -188,8 +158,8 @@ fn a_bounded_backfill_lists_once_and_reads_each_object_in_one_get() {
     assert_eq!(
         spy.lists(),
         1,
-        "one LIST for the whole run: the elected leader's plan. Workers read \
-         descriptors, never listings"
+        "one LIST for the whole run: the solo lister's. Readers take units, \
+         never listings"
     );
 
     let gets = by_object(&spy.gets());
@@ -214,14 +184,8 @@ fn windowed_reads_tile_each_object_without_overlap_or_repeat() {
     // A 4 KiB read window against ~7 KiB objects: every object spans several
     // ranged GETs, which is where duplicated or overlapping ranges could hide.
     let staged = stage(8, 400);
-    let yaml = config_yaml(&staged.data, "4KiB", "1KiB");
-    let (l, spy) = launch_spied(
-        &yaml,
-        &shared_store(),
-        "shape-windows",
-        4,
-        SpyOptions::default(),
-    );
+    let yaml = config_yaml(&staged.data, "4KiB", "1KiB", 4);
+    let (l, spy) = launch_spied(&yaml, SpyOptions::default());
 
     let report = l.run.wait_exit(Duration::from_secs(60)).unwrap().unwrap();
     assert_eq!(report.state, ExitState::Completed);
@@ -246,19 +210,16 @@ fn windowed_reads_tile_each_object_without_overlap_or_repeat() {
 
 #[test]
 fn concurrent_reads_reach_the_in_flight_budget() {
-    // Read parallelism is one fetcher task per in-flight split and not a knob
-    // of its own, so 64 objects (four splits) against `max_in_flight: 4` must
-    // put four reads in flight together. The spy holds each GET until four are
+    // Read parallelism is one fetcher task per held unit and not a knob of its
+    // own, so 64 units against `units_held: 4` must put four reads in flight
+    // together. The spy holds each GET until four are
     // in flight, so the observation is the source's parallelism and not a
     // scheduler artifact; its deadline latches the gate open, so a collapse to
     // one fetcher fails this assertion instead of hanging the run.
     let staged = stage(64, 20);
-    let yaml = config_yaml(&staged.data, "8MiB", "512KiB");
+    let yaml = config_yaml(&staged.data, "8MiB", "512KiB", 4);
     let (l, spy) = launch_spied(
         &yaml,
-        &shared_store(),
-        "shape-depth",
-        4,
         SpyOptions {
             gate_depth: 4,
             ..SpyOptions::default()
@@ -275,7 +236,7 @@ fn concurrent_reads_reach_the_in_flight_budget() {
     assert_eq!(
         spy.peak_concurrent_gets(),
         4,
-        "four in-flight splits must issue four concurrent get_opts calls"
+        "four held units must issue four concurrent get_opts calls"
     );
     assert_eq!(spy.lists(), 1, "still one LIST across four lanes");
     assert_eq!(
@@ -283,42 +244,6 @@ fn concurrent_reads_reach_the_in_flight_budget() {
         staged.names().len(),
         "one GET per object, whichever lane read it"
     );
-}
-
-/// A `coordination:` section selecting the in-process store sets a solo run's
-/// read parallelism: `max_in_flight: 12` over sixteen splits puts twelve reads
-/// in flight, above the default of eight. Regression for #866.
-#[test]
-fn the_memory_store_section_sets_solo_read_parallelism() {
-    let staged = stage(256, 20);
-    let yaml = PipelineYaml::file("s3-request-shape-memory", &staged.data)
-        .source("prefetch_bytes", "8MiB")
-        .source("chunk_bytes", "512KiB")
-        .section("coordination:\n  max_in_flight: 12\n  store: { memory: {} }\n")
-        .build();
-    let (spy_store, spy) = spying_local_store(SpyOptions {
-        gate_depth: 12,
-        ..SpyOptions::default()
-    });
-    let l = launch_customized(
-        &yaml,
-        test_options(),
-        |_| {},
-        move |source, _| line_framer(source).with_store(spy_store),
-    );
-
-    let report = l.run.wait_exit(Duration::from_secs(60)).unwrap().unwrap();
-    assert_eq!(report.state, ExitState::Completed);
-    assert_eq!(
-        sorted(captured_rows(&l.script)),
-        sorted(staged.expected.clone())
-    );
-    assert_eq!(
-        spy.peak_concurrent_gets(),
-        12,
-        "twelve in-flight splits must issue twelve concurrent get_opts calls"
-    );
-    assert_eq!(spy.lists(), 1, "one LIST across twelve lanes");
 }
 
 /// A `feed:` section's `units_held` sets the feed path's read parallelism:
@@ -450,50 +375,4 @@ fn a_worker_on_a_durable_feed_issues_no_listing() {
         );
         assert_eq!(spy.lists(), 0, "a worker on {tag} never lists");
     }
-}
-
-#[test]
-fn a_final_plan_is_never_re_listed() {
-    // `refresh_listing: false` makes the plan final, and a final plan
-    // disables replanning outright, so no tick is ever attempted. What this
-    // test establishes is therefore that the run outlived the interval at
-    // which an *open* plan would have re-listed, and still cost one LIST.
-    // The injected per-GET latency is what guarantees that span: twelve
-    // objects on one lane pay it twelve times over, so the elapsed lower
-    // bound below holds however fast the machine is.
-    let staged = stage(12, 20);
-    let yaml = config_yaml(&staged.data, "8MiB", "512KiB");
-    let hold = Duration::from_millis(300);
-    let (l, spy) = launch_spied(
-        &yaml,
-        &shared_store(),
-        "shape-final-plan",
-        1,
-        SpyOptions {
-            hold,
-            ..SpyOptions::default()
-        },
-    );
-
-    let started = Instant::now();
-    let report = l.run.wait_exit(Duration::from_secs(120)).unwrap().unwrap();
-    let elapsed = started.elapsed();
-    assert_eq!(report.state, ExitState::Completed);
-    assert_eq!(
-        sorted(captured_rows(&l.script)),
-        sorted(staged.expected.clone())
-    );
-
-    // An open plan under `test_tuning` would re-list on the lease interval;
-    // without spanning it, the LIST count below would pass vacuously.
-    assert!(
-        elapsed > TEST_LEASE * 2,
-        "the run must outlive the interval an open plan re-lists at, or \
-         lists == 1 proves nothing: {elapsed:?}"
-    );
-    assert_eq!(
-        spy.lists(),
-        1,
-        "a final plan is never re-listed, however long the job runs"
-    );
 }

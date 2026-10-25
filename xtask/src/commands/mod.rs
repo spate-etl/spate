@@ -3,8 +3,6 @@
 
 mod bench;
 mod docs;
-mod fault_report;
-mod fault_test;
 mod fuzz;
 mod hooks;
 mod issue_form;
@@ -71,18 +69,6 @@ pub(crate) enum Command {
 
     /// Container-backed suites (needs Docker; lanes per ci/README.md)
     IntegrationTest,
-
-    /// Seeded multi-process fault scenarios in faults/ (needs Docker)
-    FaultTest {
-        /// Run seed, in decimal or 0x hex; drawn from the clock when absent
-        #[arg(long, value_name = "SEED")]
-        seed: Option<String>,
-        /// Run only the scenarios whose names contain FILTER
-        #[arg(value_name = "FILTER")]
-        filter: Option<String>,
-        #[command(subcommand)]
-        cmd: Option<fault_report::FaultTestCommand>,
-    },
 
     /// cargo-mutants over the diff against REF; survivors exit 2 (needs
     /// cargo-mutants; untracked files are not in the diff)
@@ -302,12 +288,6 @@ pub(crate) fn dispatch(root: &Path, explain: bool, cmd: Command) -> Outcome {
                 ),
             )
         }
-        Command::FaultTest { cmd: Some(cmd), .. } => fault_report::dispatch(root, explain, cmd),
-        Command::FaultTest {
-            seed,
-            filter,
-            cmd: None,
-        } => fault_test::fault_test(root, explain, seed.as_deref(), filter.as_deref()),
         // `--lib` matters: the models are unit tests inside the crate, and a
         // `--test` run builds integration targets the cfg leaves empty.
         Command::Loom => run::run(
@@ -578,14 +558,7 @@ fn hack(root: &Path, explain: bool, sel: &Select) -> Outcome {
     let (fuzz, fuzz_and_xtask): (&[&str], &[&str]) = match sel {
         Select::Workspace => (
             &["--exclude", "spate-fuzz"],
-            &[
-                "--exclude",
-                "spate-xtask",
-                "--exclude",
-                "spate-fuzz",
-                "--exclude",
-                "spate-faults",
-            ],
+            &["--exclude", "spate-xtask", "--exclude", "spate-fuzz"],
         ),
         Select::Packages(_) => (&[], &[]),
     };
@@ -629,7 +602,7 @@ fn hack(root: &Path, explain: bool, sel: &Select) -> Outcome {
     );
     // The test suite on default features, which runs the feature-off arm of
     // tests that `--all-features` skips. spate-fuzz has no tests, and
-    // spate-faults and spate-xtask have no features.
+    // spate-xtask has no features.
     steps.push(
         Step::new("cargo", ["nextest", "run"])
             .args(sel.args())

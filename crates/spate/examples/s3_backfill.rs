@@ -2,13 +2,13 @@
 //!
 //! Point the S3 source at a bucket prefix and it streams every object's
 //! NDJSON records through the pipeline and **terminates the pipeline
-//! itself** once the prefix is exhausted, with no shutdown trigger. Solo (no
-//! coordinator injected) the source keeps its progress in an in-process
-//! store, so a second run replays the whole prefix. That is at-least-once,
-//! safe but wasteful, and the startup WARN says so. Durable resume and
-//! multi-instance sharing come from injecting a coordinator over a
-//! durable backend via `with_coordinator`; see the
-//! `s3_coordinated_backfill` example.
+//! itself** once the prefix is exhausted, with no shutdown trigger. The
+//! `feed: { memory: {} }` section runs the source on the in-process feed, which
+//! keeps nothing across a restart, so a second run lists and reads the whole
+//! prefix again. That is at-least-once, safe but wasteful, and the startup
+//! WARN says so. Resume and multi-instance sharing come from a durable feed
+//! filled by a separate lister run; see the `s3_sqs_backfill` and
+//! `s3_kafka_backfill` examples.
 //!
 //! Object storage here is a local directory (`file://`); against real S3
 //! swap the URLs (`s3://bucket/prefix/`) and pass credentials/region
@@ -54,6 +54,8 @@ pipeline: {{ name: s3-backfill-demo, threads: 1 }}
 admin: {{ listen: none }}
 checkpoint: {{ interval: 200ms }}
 metrics: {{ exporter: none }}
+feed:
+  memory: {{}}
 source:
   s3:
     url: "file://{data}/"
@@ -169,12 +171,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("rows written ({}): {rows:?}", rows.len());
     assert_eq!(rows.len(), 4);
 
-    println!("\n── run 2: rerun on an ephemeral (solo) store ──");
+    println!("\n── run 2: rerun on the in-process feed ──");
     let mut rows = run_once(&yaml)?;
     rows.sort();
     println!(
-        "rows written ({}): solo progress died with run 1, so the rerun replayed \
-         the prefix — inject a coordinator over a durable backend for real resume",
+        "rows written ({}): the in-process feed died with run 1, so the rerun \
+         replayed the prefix; a durable feed is what resumes",
         rows.len()
     );
     assert_eq!(rows.len(), 4);

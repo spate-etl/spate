@@ -1,5 +1,4 @@
-//! The bench corpora are reproducible, and pack and frame the way the benches
-//! claim.
+//! The bench corpora are reproducible, and frame the way the benches claim.
 //!
 //! An instruction count only means something if both legs of a comparison ran
 //! on byte-identical input, so "the corpus is a pure function of nothing" is a
@@ -7,17 +6,13 @@
 //! cannot carry it: they need Linux, valgrind and a matching runner. This runs
 //! everywhere `cargo test` does.
 
-use spate_core::coordination::SplitId;
 use spate_json::NdjsonFramer;
-use spate_s3::bench_seams::{MakeFramer, frame_objects, frame_range, plan_listing};
-use spate_s3::{Compression, SplitDescriptor};
-use std::collections::HashSet;
+use spate_s3::Compression;
+use spate_s3::bench_seams::{MakeFramer, frame_objects, frame_range};
 use std::sync::Arc;
 
 #[path = "../benches/support/descriptors.rs"]
 mod descriptors;
-#[path = "../benches/support/listing.rs"]
-mod listing;
 #[path = "../benches/support/ndjson.rs"]
 mod ndjson;
 
@@ -26,204 +21,7 @@ fn framer() -> MakeFramer {
 }
 
 #[test]
-fn the_listing_corpora_are_reproducible() {
-    assert_eq!(listing::uniform_small(), listing::uniform_small());
-    assert_eq!(listing::big_objects(), listing::big_objects());
-    assert_eq!(listing::mixed_tail(), listing::mixed_tail());
-    assert_eq!(listing::deep_keys(), listing::deep_keys());
-}
-
-/// Two calls in one process only prove the generator is pure. The property
-/// the benches need is stronger: the corpus must be the same *across
-/// revisions*, since a merge-base leg and a head leg run different builds. A
-/// pinned split count is the cheapest witness: any edit to a seed, a size
-/// range, a key format or a count moves it, and moving it silently would
-/// re-baseline every comparison without anything failing.
-#[test]
-fn the_corpora_are_pinned_across_revisions() {
-    for (name, corpus, want) in [
-        ("uniform_small", listing::uniform_small(), 625),
-        ("big_objects", listing::big_objects(), 21_097),
-        ("mixed_tail", listing::mixed_tail(), 407),
-        ("deep_keys", listing::deep_keys(), 63),
-    ] {
-        let got = plan_listing(corpus, listing::TARGET_BYTES, Some(b'\n')).len();
-        assert_eq!(
-            got, want,
-            "{name} planned {got} splits, not {want} — if that is intended, \
-             the comparison it anchors has been re-baselined and every \
-             recorded count for this bench is against a different corpus"
-        );
-    }
-}
-
-/// `mixed_tail` drives the open-bin deque to `PACKING_LOOKBACK`, and that
-/// property is invisible in a split count. The profile it replaced produced
-/// the same 407 splits while leaving the deque holding one bin, so it
-/// measured nothing `uniform_small` did not.
-///
-/// The deque is private, so this asserts the shape that fills it: the large
-/// objects must stay *below* the target. One at or above it closes its bin on
-/// placement and the scan never runs.
-#[test]
-fn the_mixed_tail_large_objects_stay_under_the_target() {
-    let corpus = listing::mixed_tail();
-    let large: Vec<u64> = corpus
-        .iter()
-        .map(|(_, size, _)| *size)
-        .filter(|s| *s > 64 * 1_024)
-        .collect();
-    assert!(!large.is_empty(), "the profile has no large objects at all");
-    for size in large {
-        assert!(
-            size < listing::TARGET_BYTES,
-            "a {size}-byte object is at or above the target, so it closes its \
-             bin immediately and the lookback scan is never exercised"
-        );
-    }
-}
-
-/// The source sorts the listing by key before packing, so a corpus generated
-/// out of key order is packed in an arrangement production never produces.
-#[test]
-fn the_corpora_are_generated_in_key_order() {
-    for (name, corpus) in [
-        ("uniform_small", listing::uniform_small()),
-        ("big_objects", listing::big_objects()),
-        ("mixed_tail", listing::mixed_tail()),
-        ("deep_keys", listing::deep_keys()),
-    ] {
-        let keys: Vec<&str> = corpus.iter().map(|(k, _, _)| k.as_str()).collect();
-        let mut sorted = keys.clone();
-        sorted.sort_unstable();
-        assert_eq!(keys, sorted, "{name} is not generated in sorted key order");
-    }
-}
-
-#[test]
-fn every_planned_split_has_a_distinct_id() {
-    for corpus in [
-        listing::uniform_small(),
-        listing::big_objects(),
-        listing::mixed_tail(),
-        listing::deep_keys(),
-    ] {
-        let ids = plan_listing(corpus, listing::TARGET_BYTES, Some(b'\n'));
-        let unique: HashSet<&str> = ids.iter().map(SplitId::as_str).collect();
-        assert!(!ids.is_empty());
-        assert_eq!(unique.len(), ids.len(), "two splits minted the same id");
-    }
-}
-
-/// The profiles have to stay *different* from each other, or the parameter is
-/// decorative. `big_objects` in particular must be cut into byte ranges, the
-/// behavior the profile is here to measure, and read whole one object per
-/// split when the framer declares no delimiter.
-#[test]
-fn the_profiles_pack_differently() {
-    let uniform = listing::uniform_small();
-    let big = listing::big_objects();
-
-    let uniform_splits = plan_listing(uniform.clone(), listing::TARGET_BYTES, Some(b'\n')).len();
-    let big_splits = plan_listing(big.clone(), listing::TARGET_BYTES, Some(b'\n')).len();
-    let big_whole = plan_listing(big.clone(), listing::TARGET_BYTES, None).len();
-
-    let ranges: u64 = big
-        .iter()
-        .map(|(_, size, _)| size.div_ceil(listing::TARGET_BYTES))
-        .sum();
-    assert_eq!(
-        big_splits as u64, ranges,
-        "an object above the target should be cut into ceil(size / target) ranges"
-    );
-    assert_eq!(
-        big_whole,
-        big.len(),
-        "an object at or above the target should close a bin on its own"
-    );
-    assert!(
-        uniform_splits * 4 < uniform.len(),
-        "small objects should share bins, got {uniform_splits} splits for {} objects",
-        uniform.len()
-    );
-}
-
-/// `deep_keys` moves key length and nothing else. If it drifted into
-/// varying the sizes or the ETags too, its count would no longer attribute to
-/// key length, and the profile would be measuring an unlabeled mixture.
-#[test]
-fn the_deep_key_profile_varies_only_the_key() {
-    let deep = listing::deep_keys();
-    let shallow = listing::uniform_small();
-    assert!(
-        deep.len() * 10 == shallow.len(),
-        "deep_keys is meant to be uniform_small's first tenth, got {} against {}",
-        deep.len(),
-        shallow.len()
-    );
-    for (i, ((_, deep_size, deep_etag), (_, size, etag))) in
-        deep.iter().zip(shallow.iter()).enumerate()
-    {
-        assert_eq!(deep_size, size, "object {i} draws a different size");
-        assert_eq!(deep_etag, etag, "object {i} draws a different ETag");
-    }
-}
-
-/// The deep keys have to be deep, and have to stay inside what an
-/// object store will accept: a profile whose keys quietly shrank would report
-/// a smaller count that read as an improvement in the code under measurement.
-#[test]
-fn the_deep_keys_sit_just_under_the_key_limit() {
-    /// The object store's own cap on a key.
-    const STORE_LIMIT: usize = 1024;
-
-    for (key, _, _) in listing::deep_keys() {
-        assert_eq!(
-            key.len(),
-            listing::DEEP_KEY_BYTES,
-            "a deep key is {} bytes, not the {} the profile is built around: {key}",
-            key.len(),
-            listing::DEEP_KEY_BYTES
-        );
-        assert!(
-            key.len() <= STORE_LIMIT,
-            "a deep key exceeds the store's cap"
-        );
-    }
-    let shallow = listing::uniform_small()[0].0.len();
-    assert!(
-        listing::DEEP_KEY_BYTES > shallow * 10,
-        "deep keys ({}) are not meaningfully longer than ordinary ones ({shallow})",
-        listing::DEEP_KEY_BYTES
-    );
-}
-
-/// The descriptor corpora group members by a plain chunking because `pack` is
-/// crate-private. This is what keeps that from being a guess: the real
-/// planner packs a listing of uniformly small objects into exactly
-/// `objects / MEMBERS_PER_SPLIT` splits, so a change to the open-cost floor,
-/// the thing that caps members per split, fails here rather than leaving the
-/// descriptor fixture describing a shape the planner no longer produces.
-#[test]
-fn the_chunked_grouping_matches_the_real_packer() {
-    let corpus = listing::uniform_small();
-    let objects = corpus.len();
-    let splits = plan_listing(corpus, listing::TARGET_BYTES, Some(b'\n')).len();
-    assert_eq!(
-        splits,
-        objects / descriptors::MEMBERS_PER_SPLIT,
-        "the planner packs {objects} uniformly small objects into {splits} splits, \
-         not the {} the descriptor corpus assumes",
-        objects / descriptors::MEMBERS_PER_SPLIT
-    );
-}
-
-#[test]
 fn the_descriptor_corpora_are_reproducible() {
-    assert_eq!(
-        descriptors::full_split_plan(),
-        descriptors::full_split_plan()
-    );
     assert_eq!(
         descriptors::single_member_plan(),
         descriptors::single_member_plan()
@@ -240,53 +38,20 @@ fn the_descriptor_corpora_are_reproducible() {
 /// function of the bytes' length and layout, not of which hex digits are in
 /// them.
 #[test]
-fn the_descriptor_corpora_are_pinned_across_revisions() {
-    for (name, plan, documents, bytes) in [
-        (
-            "full_splits",
-            descriptors::full_split_plan(),
-            descriptors::MEMBERS / descriptors::MEMBERS_PER_SPLIT,
-            1_025_200_usize,
-        ),
-        (
-            "single_member_splits",
-            descriptors::single_member_plan(),
-            descriptors::MEMBERS,
-            1_139_200_usize,
-        ),
-    ] {
-        assert_eq!(
-            plan.len(),
-            documents,
-            "{name} encoded a different document count"
-        );
-        let total: usize = plan.iter().map(Vec::len).sum();
-        assert_eq!(
-            total, bytes,
-            "{name} encodes to {total} bytes, not {bytes} — if that is intended, \
-             the comparison it anchors has been re-baselined and every recorded \
-             count for this bench is against a different corpus"
-        );
-    }
-}
-
-/// The two arrangements must carry the same members, or the pair is not a
-/// comparison of document shape but of how much work each does.
-#[test]
-fn both_descriptor_arrangements_decode_to_the_same_members() {
-    let members = |plan: Vec<Vec<u8>>| -> Vec<spate_s3::DescriptorObject> {
-        plan.iter()
-            .flat_map(|bytes| {
-                SplitDescriptor::decode(bytes)
-                    .expect("the corpus decodes")
-                    .objects
-            })
-            .collect()
-    };
-    let full = members(descriptors::full_split_plan());
-    let single = members(descriptors::single_member_plan());
-    assert_eq!(full.len(), descriptors::MEMBERS);
-    assert_eq!(full, single, "the arrangements carry different members");
+fn the_descriptor_corpus_is_pinned_across_revisions() {
+    let plan = descriptors::single_member_plan();
+    assert_eq!(
+        plan.len(),
+        descriptors::MEMBERS,
+        "the corpus encoded a different document count"
+    );
+    let total: usize = plan.iter().map(Vec::len).sum();
+    assert_eq!(
+        total, 1_139_200,
+        "the corpus encodes to {total} bytes, not 1,139,200 — if that is intended, \
+         the comparison it anchors has been re-baselined and every recorded \
+         count for this bench is against a different corpus"
+    );
 }
 
 #[test]

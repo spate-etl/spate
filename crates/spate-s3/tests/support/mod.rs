@@ -1,7 +1,6 @@
 //! Shared pipeline-assembly helpers for the spate-s3 integration suites.
 // Each test binary compiles this module independently and uses a subset.
 #![allow(dead_code)]
-#![expect(deprecated, reason = "v0.4.0 removes this with spate-coordination")]
 
 pub(crate) mod location;
 pub(crate) mod rustfs;
@@ -10,17 +9,14 @@ pub(crate) mod scripted_store;
 pub(crate) mod spy;
 
 use object_store::ObjectStoreExt as _;
-use spate_coordination::store::memory::MemoryStore;
-use spate_coordination::{CoordinationConfig, StoreCoordinator};
 use spate_core::clock::TestClock;
 use spate_core::config::PipelineConfig;
-use spate_core::coordination::SplitSpec;
 use spate_core::feed::{Feed, Unit};
 use spate_core::framing::RecordFramer;
 use spate_core::ops::chain_owned;
 use spate_core::pipeline::{ExitState, Pipeline, RuntimeOptions, ShutdownHandle};
 use spate_core::sink::KeyHashRouter;
-use spate_s3::{DescriptorObject, S3Source, SplitDescriptor, SplitRange, split_id_for_range};
+use spate_s3::{DescriptorObject, S3Source, SplitDescriptor, SplitRange};
 use spate_test::{BytesPassthrough, PipelineRun, SinkScript, TestEncoder, capture_sink};
 use std::collections::VecDeque;
 use std::fs;
@@ -45,6 +41,8 @@ pub(crate) struct PipelineYaml {
     source: Vec<(String, String)>,
     store: Option<String>,
     sections: String,
+    /// The test hands the source its feed in code, so the file names none.
+    fed_by_code: bool,
 }
 
 impl PipelineYaml {
@@ -79,6 +77,7 @@ impl PipelineYaml {
             source: vec![("split_target_bytes".to_owned(), "1MiB".to_owned())],
             store,
             sections: String::new(),
+            fed_by_code: false,
         }
     }
 
@@ -95,6 +94,13 @@ impl PipelineYaml {
     /// Adds `key: value` under `source.s3`.
     pub(crate) fn source(mut self, key: &str, value: &str) -> Self {
         self.source.push((key.to_owned(), value.to_owned()));
+        self
+    }
+
+    /// Leaves out the in-process `feed:` section [`build`](Self::build) adds
+    /// to a file naming none, for a test that passes the source a feed in code.
+    pub(crate) fn fed_by_code(mut self) -> Self {
+        self.fed_by_code = true;
         self
     }
 
@@ -120,23 +126,11 @@ impl PipelineYaml {
         }
         yaml.push_str("sink: { capture: {} }\n");
         yaml.push_str(&self.sections);
+        if !self.fed_by_code && !self.sections.lines().any(|l| l.starts_with("feed:")) {
+            yaml.push_str("feed:\n  memory: {}\n");
+        }
         yaml
     }
-}
-
-/// A `coordination:` section naming a NATS server on a port nothing listens
-/// on, with timeouts short enough that startup fails fast.
-pub(crate) fn unreachable_nats(job: &str) -> String {
-    format!(
-        "coordination:
-  op_timeout: 100ms
-  lease_duration: 2s
-  replan_interval: 2s
-  startup_max_attempts: 1
-  store:
-    nats: {{ servers: [\"nats://127.0.0.1:1\"], job: {job} }}
-"
-    )
 }
 
 /// A newline-delimited [`RecordFramer`] for the integration suites: `spate-s3`
@@ -221,81 +215,9 @@ pub(crate) fn launch_scripted(
     launch_customized(yaml, options, pre, |source, _io| line_framer(source))
 }
 
-/// Coordination tuning every suite shares: floors-compliant and fast.
-/// The store a test builds (via [`shared_store`]) must use
-/// [`TEST_LEASE`]; the coordinator fails fast on a store/config lease
-/// divergence.
-pub(crate) const TEST_LEASE: Duration = Duration::from_secs(1);
-
-pub(crate) fn test_tuning() -> CoordinationConfig {
-    let mut cfg = CoordinationConfig::default();
-    cfg.lease_duration = TEST_LEASE;
-    cfg.op_timeout = Duration::from_millis(200);
-    cfg.replan_interval = TEST_LEASE;
-    // Both below are sized against the 30s production lease; left at their
-    // defaults they dwarf a 1s test one, and every takeover test pays the
-    // full production grace window in wall clock — `rebalance_delay` alone
-    // was ~20s of the 32s `coordinated_takeover` run. Scaled here rather
-    // than in `Default` so production keeps the documented values, the same
-    // split `spate-coordination`'s own `config()` helper makes.
-    cfg.reconcile_interval = Duration::from_millis(300);
-    // Zero: these suites assert that a dead instance's splits flow back
-    // promptly, and a grace window is pure latency on every one of them. No
-    // spate-s3 test asserts the withhold behavior; the two arms that do are
-    // `spate-coordination`'s, and they set the window themselves.
-    cfg.rebalance_delay = Duration::ZERO;
-    // NOT scaled with the lease. This one bounds how long a *data plane*
-    // takes to drain, not how long a protocol step takes, and these sinks
-    // are paced at ~100ms/write. Cut to a fraction of a test lease it
-    // silently forces drains that would have completed cooperatively: same
-    // green suite, different code path, and replayed tails instead of clean
-    // releases. It only costs wall clock when a drain wedges, which is the
-    // case it bounds.
-    cfg.drain_deadline = Duration::from_secs(5);
-    cfg
-}
-
-/// An in-process coordination store tests share across pipeline launches
-/// (the "durable" store of the infrastructure-free suites: it outlives a
-/// pipeline, not the process).
-pub(crate) fn shared_store() -> MemoryStore {
-    MemoryStore::new(TEST_LEASE)
-}
-
-/// Launch a pipeline whose source coordinates over `store`, the seam that
-/// lets several launches (sequential resumes or concurrent instances) share
-/// one job.
-pub(crate) fn launch_on_store(
-    yaml: &str,
-    options: RuntimeOptions,
-    store: &MemoryStore,
-    pre: impl FnOnce(&SinkScript),
-) -> Launched {
-    launch_tuned(yaml, options, store, test_tuning(), pre)
-}
-
-/// [`launch_on_store`] with explicit coordinator tuning (instance ids,
-/// working-set bounds, attempt caps). `tuning.lease_duration` must stay
-/// [`TEST_LEASE`] to match the store.
-pub(crate) fn launch_tuned(
-    yaml: &str,
-    options: RuntimeOptions,
-    store: &MemoryStore,
-    tuning: CoordinationConfig,
-    pre: impl FnOnce(&SinkScript),
-) -> Launched {
-    let store = store.clone();
-    launch_customized(yaml, options, pre, move |source, io| {
-        let coordinator =
-            StoreCoordinator::new(store, tuning, io, None).expect("coordinator builds");
-        line_framer(source).with_coordinator(Box::new(coordinator))
-    })
-}
-
 /// Like [`launch_scripted`], but `make_source` may customize the source
-/// (e.g. `.with_framer(...)`, `.with_coordinator(...)`) before it is
-/// handed to the runtime; it receives the pipeline's I/O handle for
-/// coordinator construction.
+/// (e.g. `.with_framer(...)`, `.with_store(...)`) before it is handed to the
+/// runtime; it receives the pipeline's I/O handle.
 pub(crate) fn launch_customized(
     yaml: &str,
     options: RuntimeOptions,
@@ -356,8 +278,6 @@ fn launch_inner(
     // and the pipeline name is part of every key, so two launches of one
     // config (tests running concurrently in a `cargo test` process, or a
     // multi-instance test running two workers in-process) would collide.
-    // Coordination is unaffected: splits are namespaced by the store, not by
-    // the pipeline name.
     config.pipeline.name = spate_test::unique_name(&config.pipeline.name);
     let mut pipeline = Pipeline::from_config(config).expect("pipeline builds");
     if let Some(feed) = feed {
@@ -528,15 +448,9 @@ pub(crate) fn key_of(data: &Path, name: &str) -> String {
         .to_string()
 }
 
-/// A `SplitSpec` for the byte range `[start, end)` of the staged file `name`,
-/// pinned to the ETag the `file://` store reports for it.
-pub(crate) fn ranged_spec(
-    data: &Path,
-    name: &str,
-    start: u64,
-    end: u64,
-    delimiter: u8,
-) -> SplitSpec {
+/// The descriptor body for the byte range `[start, end)` of the staged file
+/// `name`, pinned to the ETag the `file://` store reports for it.
+pub(crate) fn ranged_spec(data: &Path, name: &str, start: u64, end: u64, delimiter: u8) -> Vec<u8> {
     let key = key_of(data, name);
     let rt = tokio::runtime::Builder::new_current_thread()
         .build()
@@ -552,10 +466,7 @@ pub(crate) fn ranged_spec(
         etag: Some(etag.clone()),
         last_modified_ms: 1,
     };
-    SplitSpec::new(
-        split_id_for_range(&key, &etag, range).unwrap(),
-        SplitDescriptor::with_range(object, range).encode().unwrap(),
-    )
+    SplitDescriptor::with_range(object, range).encode().unwrap()
 }
 
 /// Byte offset at which each line of `lines_bytes(lines)` starts.

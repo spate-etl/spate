@@ -1365,7 +1365,7 @@ mod tests {
     }
 
     /// Packaging, verified or not, leaves out every unpublished member,
-    /// `spate-faults` among them, and keeps the caller's excludes. Regression
+    /// `spate-test-support` among them, and keeps the caller's excludes. Regression
     /// for #1062.
     #[test]
     fn packaging_leaves_out_the_unpublished_members() {
@@ -1377,7 +1377,7 @@ mod tests {
             .into_iter()
             .filter_map(|(p, publishable)| (!publishable).then_some(p.name))
             .collect();
-        assert!(unpublished.iter().any(|n| n == "spate-faults"));
+        assert!(unpublished.iter().any(|n| n == "spate-test-support"));
         let mut expected = vec!["spate-core"];
         expected.extend(unpublished.iter().map(String::as_str));
         for verify in [true, false] {

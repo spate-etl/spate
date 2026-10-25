@@ -18,7 +18,6 @@
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
-use spate_core::coordination::SplitId;
 use spate_s3::{SplitRange, split_id_for, split_id_for_range};
 use std::collections::BTreeSet;
 
@@ -40,7 +39,7 @@ struct Ranged {
 }
 
 /// The ranged id of `r`, or `None` for an empty range.
-fn ranged_id(r: &Ranged) -> Option<SplitId> {
+fn ranged_id(r: &Ranged) -> Option<String> {
     let id = split_id_for_range(
         &r.key,
         &r.etag,
@@ -50,8 +49,7 @@ fn ranged_id(r: &Ranged) -> Option<SplitId> {
     id.ok()
 }
 
-fn assert_shape(id: &SplitId) {
-    let id = id.as_str();
+fn assert_shape(id: &str) {
     assert_eq!(id.len(), 25, "id `{id}` is not 25 characters");
     assert!(id.starts_with("s3-"), "id `{id}` lacks the s3- prefix");
     assert!(

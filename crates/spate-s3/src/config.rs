@@ -1,16 +1,10 @@
 //! S3 source configuration: typed fields plus a validated raw
 //! `object_store` option passthrough.
 //!
-//! Deliberately absent: coordination. The store and its tuning come from
-//! the pipeline's top-level `coordination:` section.
-//!
-//! What is here splits in two. `url`, `compression`, `split_target_bytes`
-//! and `refresh_listing` shape the **work itself**: they feed the job
-//! fingerprint and must be byte-equal across every instance of a
-//! coordinated job. A bounded feed job's fingerprint covers the same keys
-//! except `refresh_listing`, which the feed path never reads.
-//! `prefetch_bytes`, `chunk_bytes` and `store` are how *this* instance reads
-//! that work, and may differ per replica.
+//! `url`, `compression` and `split_target_bytes` shape the **work itself**:
+//! they feed a bounded feed job's fingerprint, which every instance must
+//! agree on. `prefetch_bytes`, `chunk_bytes` and `store` are how *this*
+//! instance reads that work, and may differ per replica.
 
 use bytesize::ByteSize;
 use object_store::ObjectStoreScheme;
@@ -49,9 +43,8 @@ fn default_split_target_bytes() -> ByteSize {
     ByteSize::mib(64)
 }
 
-/// Floor for `split_target_bytes`: below ~1 MiB the per-object open-cost
-/// floor collapses and packing degenerates into thousands of one-object
-/// splits, taxing the coordination store for no read-parallelism gain.
+/// Floor for `split_target_bytes`: below ~1 MiB a large object is cut into so
+/// many ranges that the per-unit cost outweighs the read parallelism gained.
 const SPLIT_TARGET_FLOOR: u64 = 1024 * 1024;
 
 /// Compression codec of the objects under the prefix.
@@ -89,23 +82,13 @@ pub struct S3SourceConfig {
     /// Compression codec of the objects.
     #[serde(default)]
     pub compression: Compression,
-    /// Target size of one split, the unit of work distribution and the
-    /// unit the leader balances. Objects are packed toward it in listing
-    /// order with a per-object cost floor of a sixteenth of the target, so a
-    /// split holds at most ~16 objects. An object above the target is cut into
-    /// byte ranges of at most the target when it is uncompressed, has an ETag
-    /// and is at most 50,000 GiB, and the framer declares a resync delimiter;
-    /// any other object at or above the target gets a split of its own. Part of the job fingerprint: every instance
-    /// of a coordinated job or a bounded feed job must agree on it. Default
-    /// 64 MiB.
+    /// Size above which an uncompressed object with an ETag, at most 50,000
+    /// GiB, is cut into byte ranges of at most this size, one unit each, when
+    /// the framer declares a resync delimiter. Any other object is one unit.
+    /// Part of the bounded feed job fingerprint: every instance of a bounded
+    /// job must agree on it. Default 64 MiB.
     #[serde(default = "default_split_target_bytes")]
     pub split_target_bytes: ByteSize,
-    /// Re-list the prefix on the coordinator's replan interval, planning
-    /// newly arrived objects as additional splits (an **open** plan: the
-    /// job never self-terminates). Default `false`: one listing, a
-    /// bounded backfill that completes.
-    #[serde(default)]
-    pub refresh_listing: bool,
     /// Target GET window size for ETag-pinned reads. Queued chunks retain
     /// backing windows while a later GET is fetched; decoded records require
     /// additional memory. Byte-range boundary windows can add `chunk_bytes`
@@ -137,7 +120,6 @@ impl std::fmt::Debug for S3SourceConfig {
             url,
             compression,
             split_target_bytes,
-            refresh_listing,
             prefetch_bytes,
             chunk_bytes,
             store,
@@ -146,7 +128,6 @@ impl std::fmt::Debug for S3SourceConfig {
             .field("url", url)
             .field("compression", compression)
             .field("split_target_bytes", split_target_bytes)
-            .field("refresh_listing", refresh_listing)
             .field("prefetch_bytes", prefetch_bytes)
             .field("chunk_bytes", chunk_bytes)
             .field("store", &redact::map(store.keys()))
@@ -163,7 +144,6 @@ impl S3SourceConfig {
             url: url.into(),
             compression: Compression::default(),
             split_target_bytes: default_split_target_bytes(),
-            refresh_listing: false,
             prefetch_bytes: default_prefetch_bytes(),
             chunk_bytes: default_chunk_bytes(),
             store: BTreeMap::new(),
@@ -269,7 +249,6 @@ mod tests {
         assert_eq!(cfg.prefetch_bytes, ByteSize::mib(8));
         assert_eq!(cfg.chunk_bytes, ByteSize::kib(512));
         assert_eq!(cfg.split_target_bytes, ByteSize::mib(64));
-        assert!(!cfg.refresh_listing);
         assert!(cfg.store.is_empty());
     }
 
@@ -284,14 +263,10 @@ mod tests {
     }
 
     #[test]
-    fn planner_knobs_parse_and_floor() {
-        let body = format!(
-            "{}  split_target_bytes: 32MB\n  refresh_listing: true\n",
-            minimal()
-        );
+    fn split_target_parses_and_floors() {
+        let body = format!("{}  split_target_bytes: 32MB\n", minimal());
         let cfg = S3SourceConfig::from_component_config(&section(&body)).unwrap();
         assert_eq!(cfg.split_target_bytes, ByteSize::mb(32));
-        assert!(cfg.refresh_listing);
 
         let low = format!("{}  split_target_bytes: 64KB\n", minimal());
         let err = S3SourceConfig::from_component_config(&section(&low)).unwrap_err();
@@ -300,10 +275,11 @@ mod tests {
 
     #[test]
     fn removed_knobs_are_rejected() {
-        // None of these are source keys; `coordination:` sits at the top
-        // level of the pipeline config.
+        // None of these are source keys; `coordination:` is no longer a
+        // pipeline section either.
         for extra in [
             "  lanes: 4\n",
+            "  refresh_listing: true\n",
             "  checkpoint:\n    url: s3://bucket/_etl/b.json\n",
             "  coordination:\n    nats:\n      servers: [\"nats://n:4222\"]\n",
         ] {

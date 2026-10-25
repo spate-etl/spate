@@ -14,7 +14,6 @@ members = [
     "crates/spate-s3",
     "crates/spate-sqs",
     "crates/spate-test",
-    "faults",
     "test-support",
     "fuzz",
     "xtask",

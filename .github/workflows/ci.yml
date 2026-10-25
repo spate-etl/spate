@@ -145,6 +145,7 @@ jobs:
       # an unverified release tarball into /usr/bin.
       - uses: ./.github/actions/setup-rust
         with:
+          components: clippy
           tools: cargo-deny
 
       - run: cargo xtask deny
@@ -480,7 +481,7 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/setup-rust
         with:
-          components: llvm-tools-preview
+          components: llvm-tools-preview, clippy
           tools: nextest,cargo-llvm-cov
           # Its own key: llvm-cov builds into `target/llvm-cov-target`, not the
           # `target/debug` that lint, features and doctests share.
@@ -543,6 +544,7 @@ jobs:
           fetch-depth: 0
       - uses: ./.github/actions/setup-rust
         with:
+          components: clippy
           tools: nextest,cargo-mutants
           # `--in-place` builds into this checkout's `target/`, so the
           # dependencies restored from this entry are reused.

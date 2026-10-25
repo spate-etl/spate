@@ -1409,4 +1409,22 @@ mod tests {
             Some("=0.3.0")
         );
     }
+
+    /// Every feature the smoke consumer enables is declared by the facade, so
+    /// removing a feature fails here and not in the post-publish smoke build.
+    #[test]
+    fn the_smoke_consumer_names_only_declared_features() {
+        let smoke: toml::Table =
+            toml::from_str(&smoke_manifest(Version::parse("0.3.0").unwrap())).unwrap();
+        let facade = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../crates/spate/Cargo.toml"),
+        )
+        .unwrap();
+        let facade: toml::Table = toml::from_str(&facade).unwrap();
+        let declared = facade["features"].as_table().unwrap();
+        for feature in smoke["dependencies"]["spate"]["features"].as_array().unwrap() {
+            let feature = feature.as_str().unwrap();
+            assert!(declared.contains_key(feature), "`{feature}` is not a facade feature");
+        }
+    }
 }

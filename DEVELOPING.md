@@ -46,6 +46,7 @@ These sit outside `ci`, by cost or by dependency:
 | `cargo xtask docs` | Needs Node; runs nightly and on documentation changes |
 | `cargo xtask bench check` | Builds the whole tree again in the release profile |
 | `cargo xtask bench counted` | Needs Linux and valgrind |
+| `cargo xtask bench alloc` | Builds each snapshotted crate in the release profile; its committed counts are for Linux x86_64 and aarch64 |
 | `cargo xtask bench gungraun --check` | Proves only that the benches build, not what they count |
 | `cargo xtask bench ab`, `cargo xtask bench arms`, `cargo xtask bench list`, `cargo xtask bench compare` | Wall clock; never a gate |
 | `cargo xtask attribution` | `THIRD-PARTY.md` is regenerated at release; the nightly tier checks that it still generates |
@@ -228,8 +229,8 @@ titled `[bug] A fuzz target found a crashing input`.
 
 ## Benchmarks
 
-The tiers below answer different questions. Only the counted one gates a pull
-request.
+The tiers below answer different questions. Two of them gate a pull request: the
+counted tier and the allocation snapshots.
 
 None of them sweeps this framework's own settings against each other end to end,
 and neither does the
@@ -286,6 +287,35 @@ CI runs one job per (package, arm), and the arm table is `feature_arms_for` in
 the benches execute, not for every feature key; each arm is another pair of
 builds and valgrind runs. `cargo xtask tidy self-test` holds every arm to a feature its
 package declares.
+
+### Allocation snapshots
+
+`cargo xtask bench alloc` runs each `benches/<name>_alloc.rs` target in the
+release profile, on the stable release pinned in `.github/toolchains/stable/`,
+once per feature arm. It compares what each prints with
+`benches/alloc/<name>.<arm>.<arch>.tsv`, and any difference fails CI. `--bless`
+rewrites the files for the host's architecture. It runs on Linux x86_64 and
+aarch64 only, and refuses any other host.
+
+`spate_test_support::alloc::Counting` counts three figures per case. `allocs`
+is each successful `alloc` and `alloc_zeroed`. `reallocs` is each successful
+`realloc`, growing or not. `bytes` is the requested size of each allocation,
+plus the growth of each growing `realloc`. Only the Rust global allocator is
+seen, so what libzstd allocates through `malloc` is absent; the counted tier's
+DHAT heap rows include it. Each case is counted once, after one uncounted pass.
+
+A failing run uploads the files it would have written as the
+`alloc-snapshots-<arch>` artifact. A change that moves a count, including a
+dependency or toolchain bump, is accepted by committing those files from both
+legs on its pull request. Dependabot stops rebasing a pull request once someone
+else has pushed a commit to it, so a bump that needed new files is rebased by
+hand from then on.
+
+Adding one means naming the file `benches/<name>_alloc.rs`, declaring it as a
+`[[bench]]` with `harness = false`, and calling
+`spate_test_support::alloc::main_with` from its `main`. The command discovers it
+by that name. A case whose pass reads the clock, as the skip-path warning's rate
+limiter does, is left out.
 
 ### The wall-clock tier
 

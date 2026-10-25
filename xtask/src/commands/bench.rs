@@ -4,7 +4,7 @@ use std::path::Path;
 
 use clap::Subcommand;
 
-use crate::checks::{collected_region, gungraun, perf_report};
+use crate::checks::{alloc_snapshot, collected_region, gungraun, perf_report};
 use crate::run::{self, Outcome, Step};
 
 /// Cases carry their own flags, so the driver's `--package` repeats instead of
@@ -35,6 +35,14 @@ pub(crate) enum Bench {
     /// The counted tier: run every instruction-count bench, then guard the
     /// collected regions
     Counted,
+
+    /// The allocation snapshots: compare each committed count (Linux x86_64
+    /// and aarch64, release profile)
+    Alloc {
+        /// Rewrite this architecture's files from the run
+        #[arg(long)]
+        bless: bool,
+    },
 
     /// The instruction-count benches alone (needs Linux, valgrind)
     Gungraun {
@@ -127,6 +135,7 @@ pub(crate) fn dispatch(root: &Path, explain: bool, cmd: Bench) -> Outcome {
             gungraun::run(root, explain, gungraun::Mode::Run, &[], "")?;
             collected_region::check(root, explain, None, None)
         }
+        Bench::Alloc { bless } => alloc_snapshot::run(root, explain, bless),
         Bench::Gungraun {
             run: pkgs,
             check,

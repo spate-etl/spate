@@ -280,6 +280,35 @@ jobs:
           shared-key: release
       - run: cargo test -p spate-core --release --test chain_alloc --locked
 
+  alloc-snapshots:
+    name: Allocation snapshots (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    if: inputs.rust == 'true'
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      # One leg per architecture the committed files are keyed by.
+      matrix:
+        include:
+          - {arch: x86_64, runner: ubuntu-latest}
+          - {arch: aarch64, runner: ubuntu-26.04-arm}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          toolchain-file: .github/toolchains/stable/rust-toolchain.toml
+          shared-key: alloc-snapshot
+      - run: cargo xtask bench alloc
+      # The files this run would commit, for a change that moves a count.
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: failure()
+        with:
+          name: alloc-snapshots-${{ matrix.arch }}
+          path: target/alloc-snapshots/
+          if-no-files-found: ignore
+
   loom:
     name: Loom models (spate-core)
     runs-on: ubuntu-latest

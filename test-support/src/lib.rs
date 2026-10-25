@@ -1,6 +1,7 @@
 //! Test helpers shared across this workspace's crates. Not published: some
 //! depend on this repository's layout and its `cargo xtask` task runner.
 
+pub mod alloc;
 mod child;
 mod corpus;
 #[cfg(feature = "elasticmq")]

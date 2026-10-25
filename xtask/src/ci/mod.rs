@@ -1,6 +1,6 @@
 //! The `ci-changes` entry point and the four modules it drives.
 
-mod classify;
+pub(crate) mod classify;
 mod event;
 mod graph;
 mod outputs;

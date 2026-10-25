@@ -1,0 +1,9 @@
+# The stable release the allocation snapshots are taken with, named by
+# `toolchain-file` on the setup-rust action and run by `cargo xtask bench
+# alloc` as `cargo +<channel>`. Dependabot bumps it; a bump that moves a count
+# carries the rewritten `benches/alloc/` files.
+#
+# Keep it off the repository root, for the reason the nightly pin gives.
+
+[toolchain]
+channel = "1.99.1"

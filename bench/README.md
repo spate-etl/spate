@@ -7,8 +7,9 @@ exists inside the repository to measure it, and is `publish = false`.
 Benchmarks here answer one question — *did this change move it* — by measuring
 two builds against each other in one sitting, on one machine. Nothing is stored:
 a comparison is produced, read, and thrown away. Nothing here is a gate, and no
-CI job runs it; the instruction-count tier is what gates a pull request, because
-counting is comparable across shared machines and timing is not.
+CI job runs it; the instruction-count tier and the allocation snapshots gate a
+pull request, because counting is comparable across shared machines and timing
+is not.
 
 ```sh
 cargo xtask bench list                              # every case, with its flags

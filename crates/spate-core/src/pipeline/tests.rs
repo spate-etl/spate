@@ -666,6 +666,241 @@ fn a_partition_at_the_ceiling_gates_only_its_own_lanes() {
     assert_eq!(report.state, ExitState::Completed);
 }
 
+/// Lane 0 on partition 0 and lane 1 on partition 1, one batch each, both
+/// committed. Returns once the source has both commits.
+fn two_committed_partitions(h: &Harness) {
+    h.script.lock().unwrap().push_back(Script::Assign(vec![
+        LaneSpec {
+            id: LaneId(0),
+            partition: PartitionId(0),
+            batches: batches(std::slice::from_ref(&(0..10))),
+        },
+        LaneSpec {
+            id: LaneId(1),
+            partition: PartitionId(1),
+            batches: batches(std::slice::from_ref(&(0..5))),
+        },
+    ]));
+    wait_for("both partitions commit", Duration::from_secs(5), || {
+        let shared = h.shared.lock().unwrap();
+        shared.committed.get(&PartitionId(0)) == Some(&10)
+            && shared.committed.get(&PartitionId(1)) == Some(&5)
+    });
+}
+
+fn logged(h: &Harness, entry: &str) -> bool {
+    h.shared.lock().unwrap().log.iter().any(|e| e == entry)
+}
+
+/// A partition whose only lane retires leaves `final_watermarks`, so the
+/// report lists only what the source still holds.
+#[test]
+fn a_retired_partition_leaves_the_final_watermarks() {
+    let h = start(|shared, log| FakeChain {
+        shared,
+        log,
+        mode: ChainMode::Ok,
+        batches_seen: 0,
+    });
+    two_committed_partitions(&h);
+    h.script
+        .lock()
+        .unwrap()
+        .push_back(Script::Retire(vec![LaneId(1)]));
+    wait_for("retirement delivered", Duration::from_secs(5), || {
+        logged(&h, "retire-delivered")
+    });
+    h.shutdown.trigger();
+    let report = h.join.join().unwrap().unwrap();
+    assert_eq!(report.state, ExitState::Completed);
+    assert_eq!(report.final_watermarks, vec![(PartitionId(0), 10)]);
+}
+
+/// A partition whose only lane is revoked leaves `final_watermarks`.
+#[test]
+fn a_revoked_partition_leaves_the_final_watermarks() {
+    let h = start(|shared, log| FakeChain {
+        shared,
+        log,
+        mode: ChainMode::Ok,
+        batches_seen: 0,
+    });
+    two_committed_partitions(&h);
+    let flushes = h.shared.lock().unwrap().flush_commits;
+    h.script
+        .lock()
+        .unwrap()
+        .push_back(Script::Revoke(vec![LaneId(1)]));
+    wait_for("revocation processed", Duration::from_secs(5), || {
+        logged(&h, "revoke-delivered") && h.shared.lock().unwrap().flush_commits > flushes
+    });
+    h.shutdown.trigger();
+    let report = h.join.join().unwrap().unwrap();
+    assert_eq!(report.state, ExitState::Completed);
+    assert_eq!(report.final_watermarks, vec![(PartitionId(0), 10)]);
+}
+
+/// Lane 0 on partition 0 with one committed batch, and lane 1 on the same
+/// partition with no input, so it holds the partition and issues nothing.
+fn two_lanes_on_one_committed_partition(h: &Harness) {
+    h.script.lock().unwrap().push_back(Script::Assign(vec![
+        LaneSpec {
+            id: LaneId(0),
+            partition: PartitionId(0),
+            batches: batches(std::slice::from_ref(&(0..10))),
+        },
+        LaneSpec {
+            id: LaneId(1),
+            partition: PartitionId(0),
+            batches: Vec::new(),
+        },
+    ]));
+    wait_for("partition 0 commits", Duration::from_secs(5), || {
+        h.shared.lock().unwrap().committed.get(&PartitionId(0)) == Some(&10)
+    });
+}
+
+/// Retiring one of a partition's lanes keeps its `final_watermarks` entry
+/// while another lane still holds it.
+#[test]
+fn a_partition_keeps_its_final_watermark_while_a_lane_of_it_remains() {
+    let h = start(|shared, log| FakeChain {
+        shared,
+        log,
+        mode: ChainMode::Ok,
+        batches_seen: 0,
+    });
+    two_lanes_on_one_committed_partition(&h);
+    h.script
+        .lock()
+        .unwrap()
+        .push_back(Script::Retire(vec![LaneId(1)]));
+    wait_for("retirement delivered", Duration::from_secs(5), || {
+        logged(&h, "retire-delivered")
+    });
+    h.shutdown.trigger();
+    let report = h.join.join().unwrap().unwrap();
+    assert_eq!(report.state, ExitState::Completed);
+    assert_eq!(report.final_watermarks, vec![(PartitionId(0), 10)]);
+}
+
+/// Revoking one of a partition's lanes keeps its `final_watermarks` entry
+/// while another lane still holds it.
+#[test]
+fn a_partition_keeps_its_final_watermark_after_a_revocation() {
+    let h = start(|shared, log| FakeChain {
+        shared,
+        log,
+        mode: ChainMode::Ok,
+        batches_seen: 0,
+    });
+    two_lanes_on_one_committed_partition(&h);
+    let flushes = h.shared.lock().unwrap().flush_commits;
+    h.script
+        .lock()
+        .unwrap()
+        .push_back(Script::Revoke(vec![LaneId(1)]));
+    wait_for("revocation processed", Duration::from_secs(5), || {
+        logged(&h, "revoke-delivered") && h.shared.lock().unwrap().flush_commits > flushes
+    });
+    h.shutdown.trigger();
+    let report = h.join.join().unwrap().unwrap();
+    assert_eq!(report.state, ExitState::Completed);
+    assert_eq!(report.final_watermarks, vec![(PartitionId(0), 10)]);
+}
+
+/// A commit that fails during a revocation and succeeds on a later tick
+/// reaches the source, and its partition stays out of `final_watermarks`.
+#[test]
+fn a_commit_retried_after_revocation_is_not_listed() {
+    let h = start(|shared, log| FakeChain {
+        shared,
+        log,
+        mode: ChainMode::Ok,
+        batches_seen: 0,
+    });
+    // Set before any lane runs, so partition 1's position is still pending
+    // when its lane is revoked.
+    h.shared.lock().unwrap().fail_commits = true;
+    h.script.lock().unwrap().push_back(Script::Assign(vec![
+        LaneSpec {
+            id: LaneId(0),
+            partition: PartitionId(0),
+            batches: batches(std::slice::from_ref(&(0..10))),
+        },
+        LaneSpec {
+            id: LaneId(1),
+            partition: PartitionId(1),
+            batches: batches(std::slice::from_ref(&(0..5))),
+        },
+    ]));
+    wait_for("all payloads consumed", Duration::from_secs(5), || {
+        h.chain.consumed.load(Ordering::Relaxed) == 15
+    });
+    h.script
+        .lock()
+        .unwrap()
+        .push_back(Script::Revoke(vec![LaneId(1)]));
+    wait_for(
+        "the revocation's commit fails",
+        Duration::from_secs(5),
+        || {
+            let log = h.shared.lock().unwrap();
+            log.log
+                .iter()
+                .position(|e| e == "revoke-delivered")
+                .is_some_and(|at| log.log[at..].iter().any(|e| e == "commit-failed"))
+        },
+    );
+    h.shared.lock().unwrap().fail_commits = false;
+    wait_for(
+        "the retry commits partition 1",
+        Duration::from_secs(5),
+        || {
+            h.shared
+                .lock()
+                .unwrap()
+                .committed
+                .contains_key(&PartitionId(1))
+        },
+    );
+    h.shutdown.trigger();
+    let report = h.join.join().unwrap().unwrap();
+    assert_eq!(report.state, ExitState::Completed);
+    assert_eq!(report.final_watermarks, vec![(PartitionId(0), 10)]);
+}
+
+/// An added lane on a partition that is still live fails the run from the
+/// checkpointer before the lane reaches a thread.
+#[test]
+fn an_added_live_partition_fails_the_run() {
+    let h = start(|shared, log| FakeChain {
+        shared,
+        log,
+        mode: ChainMode::Ok,
+        batches_seen: 0,
+    });
+    assign_one_lane(&h, std::slice::from_ref(&(0..5)));
+    h.script
+        .lock()
+        .unwrap()
+        .push_back(Script::Add(vec![LaneSpec {
+            id: LaneId(1),
+            partition: PartitionId(0),
+            batches: batches(std::slice::from_ref(&(5..10))),
+        }]));
+    let report = h.join.join().unwrap().unwrap();
+    let ExitState::Failed(failure) = report.state else {
+        panic!("re-adding a live partition must fail the run");
+    };
+    assert_eq!(failure.component, "checkpoint");
+    assert!(
+        failure.reason.contains("already tracked"),
+        "{}",
+        failure.reason
+    );
+}
+
 #[test]
 fn shutdown_flushes_chain_before_exit() {
     let h = start(|shared, log| FakeChain {

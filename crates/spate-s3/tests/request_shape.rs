@@ -246,6 +246,43 @@ fn concurrent_reads_reach_the_in_flight_budget() {
     );
 }
 
+/// A run that reads many one-object units through the feed ends with
+/// `final_watermarks` holding at most the units it holds, since a partition
+/// leaves the report when its lane retires.
+#[test]
+fn a_feed_run_ends_holding_at_most_units_held_watermarks() {
+    let staged = stage(32, 1);
+    let yaml = PipelineYaml::file("s3-request-shape-held-watermarks", &staged.data)
+        .section("feed:\n  memory: {}\n  units_held: 4\n")
+        .build();
+    let feed = MemoryFeed::new();
+    let l = launch_with_feed(
+        &yaml,
+        test_options(),
+        |_| {},
+        Arc::new(feed.clone()),
+        |source, _| line_framer(source),
+    );
+
+    spate_test::wait_until(
+        Duration::from_secs(60),
+        "every unit is acknowledged",
+        || feed.counts().acknowledged == 32,
+    );
+    l.shutdown.trigger();
+    let report = l
+        .run
+        .wait_exit(Duration::from_secs(30))
+        .expect("the run exits")
+        .expect("no start error");
+    assert_eq!(report.state, ExitState::Completed);
+    assert!(
+        report.final_watermarks.len() <= 4,
+        "at most the four held units are listed: {:?}",
+        report.final_watermarks
+    );
+}
+
 /// A `feed:` section's `units_held` sets the feed path's read parallelism:
 /// `units_held: 12` over sixteen one-object units puts twelve reads in
 /// flight, below the reader's default of 96, and the solo run on the

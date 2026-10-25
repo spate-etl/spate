@@ -73,6 +73,10 @@ pub(crate) enum Script {
     /// emits for each unit part it takes up.
     Add(Vec<LaneSpec>),
     Revoke(Vec<LaneId>),
+    /// Finished lanes, whose input is delivered, acknowledged and committed,
+    /// as a feed reader retires a unit part. Push only after the lanes'
+    /// commit is observed.
+    Retire(Vec<LaneId>),
     /// Hint that the named partitions should be committed ahead of the tick.
     CommitReady(Vec<PartitionId>),
     /// Report the source permanently exhausted, modeling a bounded source
@@ -196,6 +200,11 @@ impl Source for FakeSource {
                     barrier: DrainBarrier::new(ids.len()),
                     lanes: ids,
                 })
+            }
+            Some(Script::Retire(lanes)) => {
+                let mut log = self.shared.lock().unwrap();
+                log.log.push("retire-delivered".into());
+                Ok(SourceEvent::LanesRetired { lanes })
             }
             Some(Script::CommitReady(partitions)) => Ok(SourceEvent::CommitReady { partitions }),
             Some(Script::Drained) => {

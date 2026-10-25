@@ -86,8 +86,8 @@ fn full_backfill_completes_itself() {
     }
     assert_eq!(sorted(captured_rows(&l.script)), sorted(expected));
     assert!(
-        !report.final_watermarks.is_empty(),
-        "the units committed: {:?}",
+        report.final_watermarks.is_empty(),
+        "every unit retired before the drained exit: {:?}",
         report.final_watermarks
     );
 }

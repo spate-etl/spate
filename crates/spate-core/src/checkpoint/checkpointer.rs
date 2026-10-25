@@ -279,6 +279,13 @@ impl Checkpointer {
         self.gates.get(&partition).cloned()
     }
 
+    /// Whether `partition` is tracked in the current epoch: assigned or
+    /// added, and not revoked since.
+    #[must_use]
+    pub(crate) fn tracks(&self, partition: PartitionId) -> bool {
+        self.trackers.contains_key(&partition)
+    }
+
     /// Apply all pending registrations and resolutions.
     ///
     /// Two passes exploit the causal order guaranteed by [`AckIssuer`]

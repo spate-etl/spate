@@ -643,7 +643,8 @@ struct State {
     /// Watermarks taken from the checkpointer but not yet successfully
     /// committed (merged by max; retried every tick).
     pending_commit: BTreeMap<PartitionId, i64>,
-    /// Everything successfully committed (for the exit report).
+    /// Last committed watermark of each partition still tracked (for the
+    /// exit report).
     committed: BTreeMap<PartitionId, i64>,
     failure: Option<FatalError>,
 }
@@ -804,7 +805,11 @@ fn commit_cycle<S: Source>(
             metrics.commit(true, started.elapsed());
             for &(p, o) in &positions {
                 state.pending_commit.remove(&p);
-                state.committed.insert(p, o);
+                // A retried commit can land after its partition left; the
+                // source has it, but the exit report lists held partitions.
+                if checkpointer.tracks(p) {
+                    state.committed.insert(p, o);
+                }
             }
         }
         Err(e) if is_fatal(&e) => {
@@ -1030,8 +1035,9 @@ fn handle_retired<S: Source>(
         }
         state.paused.remove(lane);
     }
-    // Drop tracking only for partitions with no remaining lanes; their
-    // late acknowledgments (none exist by contract) would be stale.
+    // Drop tracking and the exit-report entry only for partitions with no
+    // remaining lanes; their late acknowledgments (none exist by contract)
+    // would be stale.
     let live_partitions: HashSet<PartitionId> =
         state.assignment.values().map(|&(p, _)| p).collect();
     let to_revoke: Vec<PartitionId> = retired_parts
@@ -1039,6 +1045,9 @@ fn handle_retired<S: Source>(
         .filter(|p| !live_partitions.contains(p))
         .collect();
     checkpointer.revoke(&to_revoke);
+    for p in &to_revoke {
+        state.committed.remove(p);
+    }
     source_metrics.set_lanes_active(state.assignment.len());
 }
 
@@ -1114,8 +1123,9 @@ fn revoke_lanes<S: Source>(
         }
         state.paused.remove(lane);
     }
-    // Drop tracking only for partitions with no remaining lanes; their
-    // late acknowledgments are then discarded as stale.
+    // Drop tracking and the exit-report entry only for partitions with no
+    // remaining lanes; their late acknowledgments are then discarded as
+    // stale.
     let live_partitions: HashSet<PartitionId> =
         state.assignment.values().map(|&(p, _)| p).collect();
     let to_revoke: Vec<PartitionId> = revoked_parts
@@ -1123,6 +1133,9 @@ fn revoke_lanes<S: Source>(
         .filter(|p| !live_partitions.contains(p))
         .collect();
     checkpointer.revoke(&to_revoke);
+    for p in &to_revoke {
+        state.committed.remove(p);
+    }
 }
 
 #[cfg(test)]

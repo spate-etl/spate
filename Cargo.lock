@@ -4447,7 +4447,7 @@ name = "spate-s3"
 version = "0.3.0"
 dependencies = [
  "async-trait",
- "base64 0.22.1",
+ "base64 0.23.1",
  "bytes",
  "bytesize",
  "chrono",
@@ -4483,7 +4483,7 @@ dependencies = [
  "aws-config",
  "aws-sdk-sqs",
  "aws-smithy-http-client",
- "base64 0.22.1",
+ "base64 0.23.1",
  "humantime-serde",
  "object_store",
  "rustls",
@@ -4526,7 +4526,7 @@ dependencies = [
 name = "spate-test-support"
 version = "0.3.0"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "futures-util",
  "http",
  "object_store",

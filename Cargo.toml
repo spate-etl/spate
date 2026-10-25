@@ -120,7 +120,7 @@ hyper-rustls = { version = "0.27.9", default-features = false, features = ["http
 rustls = { version = "0.23.45", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
 url = "2.5.4"
 futures-util = { version = "0.3.31", default-features = false }
-base64 = "0.22.1"
+base64 = "0.23.1"
 flate2 = "1.1"
 # clickhouse requires ^0.13, so 0.14 adds a second copy of the crate. Tracked
 # in #562.

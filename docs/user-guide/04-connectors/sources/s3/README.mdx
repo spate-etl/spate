@@ -909,8 +909,8 @@ unit's object is re-enqueued instead, as
 ## Testing
 
 The whole feed path runs against `file://` URLs with no infrastructure, which
-is what [`s3_backfill.rs`](repo:crates/spate/examples/s3_backfill.rs) does. The Docker-gated suites run
-against a **RustFS** S3 store
+is what [`s3_backfill.rs`](repo:crates/spate/examples/s3_backfill.rs) does.
+The Docker-gated suites run against a **RustFS** S3 store
 (`cargo test -p spate-s3 -- --ignored --test-threads=1`).
 
 The S3 source ends a listing at the first `ListObjectsV2` page that carries no

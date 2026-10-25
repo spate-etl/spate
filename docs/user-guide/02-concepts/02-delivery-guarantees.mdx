@@ -99,9 +99,9 @@ a feed that hands back first finishes the units it holds that it can read by 5s
 before the deadline, and hands back the rest, which another instance reads again
 from its start. Lanes stop, chains flush, sinks force-seal and drain in-flight
 batches under `checkpoint.drain_timeout` (default 25s), then a final synchronous
-commit. If a sink is down at the deadline, the remaining batches are abandoned loudly
-(`spate_sink_abandoned_batches_total` plus a log line) and their offsets are
-*not* committed, so they replay on restart. See
+commit. If a sink is down at the deadline, the remaining batches are abandoned
+loudly (`spate_sink_abandoned_batches_total` plus a log line) and their offsets
+are *not* committed, so they replay on restart. See
 [Graceful shutdown](../03-guides/graceful-shutdown.mdx).
 
 **Crash (SIGKILL, OOM, panic-and-exit):** nothing was committed past the

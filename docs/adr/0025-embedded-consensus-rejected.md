@@ -1,13 +1,14 @@
 ---
-description: "Rejects embedding consensus for work distribution, since a single compare-and-set already gives the fencing safety a voter set would only duplicate."
+description: "Rejects embedding consensus for work distribution, since one compare-and-set gives the fencing a voter set would duplicate. Superseded by ADR-0080."
 ---
 
 # ADR-0025 — Embedded consensus is not used for work distribution
 
-- **Status:** accepted
+- **Status:** superseded
 - **Date:** 2026-07-17 (recorded 2026-08-06 from the decision log)
 - **Supersedes:** —
-- **Superseded by:** —
+- **Superseded by:**
+  [ADR-0080](0080-a-work-feed-replaces-leased-fenced-split-coordination.md)
 
 ## Context and problem statement
 

@@ -1,13 +1,14 @@
 ---
-description: "Each split persists as two records, an immutable spec and a small progress record, so compare-and-set commit cost stays independent of descriptor size."
+description: "Each split persists as an immutable spec and a small progress record, so commit cost is independent of descriptor size. Superseded by ADR-0080."
 ---
 
 # ADR-0030 — Two durable records per split: an immutable spec and a small progress record
 
-- **Status:** accepted
+- **Status:** superseded
 - **Date:** 2026-07-17 (recorded 2026-08-06 from the decision log)
 - **Supersedes:** —
-- **Superseded by:** —
+- **Superseded by:**
+  [ADR-0080](0080-a-work-feed-replaces-leased-fenced-split-coordination.md)
 
 ## Context and problem statement
 

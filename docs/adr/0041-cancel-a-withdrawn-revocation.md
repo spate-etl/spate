@@ -1,13 +1,14 @@
 ---
-description: "A revocation the leader withdraws is canceled without forcing a release, but a no-progress timeout still frees a split whose drain has stalled."
+description: "A revocation the leader withdraws is cancelled without a forced release; a no-progress timeout still frees a stalled drain. Superseded by ADR-0080."
 ---
 
 # ADR-0041 — A revocation the leader takes back is cancelled, leaving a no-progress timeout behind
 
-- **Status:** accepted
+- **Status:** superseded
 - **Date:** 2026-07-22 (recorded 2026-08-06 from the decision log)
 - **Supersedes:** —
-- **Superseded by:** —
+- **Superseded by:**
+  [ADR-0080](0080-a-work-feed-replaces-leased-fenced-split-coordination.md)
 
 ## Context and problem statement
 

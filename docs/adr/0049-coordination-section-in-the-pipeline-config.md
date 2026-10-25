@@ -1,13 +1,14 @@
 ---
-description: "A top-level coordination: section names the store and the coordinator's tuning, and a coordinated source builds its coordinator from it. Supersedes ADR-0036."
+description: "A top-level coordination: section names the store and tuning, and a coordinated source builds its coordinator from it. Superseded by ADR-0079."
 ---
 
 # ADR-0049 — The coordination store is configured in a top-level pipeline section, and the source builds its coordinator from it
 
-- **Status:** accepted
+- **Status:** superseded
 - **Date:** 2026-09-27
 - **Supersedes:** [ADR-0036](0036-coordinator-wiring-at-assembly.md)
-- **Superseded by:** —
+- **Superseded by:**
+  [ADR-0079](0079-the-feed-is-configured-in-a-top-level-section-and-provisioned-by-the-operator.md)
 
 ## Context and problem statement
 
@@ -94,5 +95,5 @@ coordination families.
   replaces. [ADR-0029](0029-framework-owned-coordination-driver.md)'s
   statement that backends are injected at assembly holds only for coordinators
   built in code.
-- [Configuration reference](../user-guide/07-reference/configuration.mdx#coordination)
+- [Configuration reference](https://github.com/spate-etl/spate/blob/ab71fb0ceddf1cafa0d5ad4b3defc503603dbaa8/docs/user-guide/07-reference/configuration.mdx#coordination)
   lists the section's keys.

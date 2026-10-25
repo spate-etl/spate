@@ -1,13 +1,14 @@
 ---
-description: "Coordination state lives in an external low-latency KV store behind a six-primitive trait, reversing an earlier compare-and-set design over object storage."
+description: "Coordination state lives in an external KV store behind a six-primitive trait, reversing a compare-and-set design over object storage. Superseded by ADR-0080."
 ---
 
 # ADR-0024 — An external low-latency KV store behind a six-primitive trait
 
-- **Status:** accepted
+- **Status:** superseded
 - **Date:** 2026-07-17 (recorded 2026-08-06 from the decision log)
 - **Supersedes:** —
-- **Superseded by:** —
+- **Superseded by:**
+  [ADR-0080](0080-a-work-feed-replaces-leased-fenced-split-coordination.md)
 
 ## Context and problem statement
 

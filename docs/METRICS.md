@@ -421,6 +421,6 @@ Configured on the exporter, by name suffix or full name:
   after it: the answer is shards, `inflight.max_per_shard`, or a quarantined
   replica set, not the server. Keep a flush-duration alert too if you have a
   commit-lag SLO, since that is the family the watermark waits on, but do not
-  read it as sink latency.
-Each connector adds alerts over its own families; those live in the connector's
-`## Metrics` section, indexed under [Connector families](#connector-families).
+  read it as sink latency. Each connector adds alerts over its own families;
+  those live in the connector's `## Metrics` section, indexed under
+  [Connector families](#connector-families).

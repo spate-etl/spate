@@ -1,13 +1,14 @@
 ---
-description: "The plan record names the worker whose election wrote its generation, so a leader keeps an election whose bump reply was lost. A 0.2 worker cannot read it."
+description: "The plan record names the worker whose election wrote its generation, so a leader keeps an election whose reply was lost. Superseded by ADR-0080."
 ---
 
 # ADR-0060 — The plan record names the worker whose election wrote its generation
 
-- **Status:** accepted
+- **Status:** superseded
 - **Date:** 2026-10-04
 - **Supersedes:** —
-- **Superseded by:** —
+- **Superseded by:**
+  [ADR-0080](0080-a-work-feed-replaces-leased-fenced-split-coordination.md)
 
 ## Context and problem statement
 

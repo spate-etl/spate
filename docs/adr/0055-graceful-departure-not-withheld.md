@@ -1,13 +1,14 @@
 ---
-description: "A crashed instance's splits are withheld briefly before reassignment; a graceful departure hands its splits back and they move at once. Supersedes ADR-0040."
+description: "A crashed instance's splits are withheld briefly before reassignment; a graceful departure's splits move at once. Superseded by ADR-0078."
 ---
 
 # ADR-0055 — A crashed instance's splits are withheld briefly, and a graceful departure's are not
 
-- **Status:** accepted
+- **Status:** superseded
 - **Date:** 2026-10-01
 - **Supersedes:** [ADR-0040](0040-rebalance-delay.md)
-- **Superseded by:** —
+- **Superseded by:**
+  [ADR-0078](0078-a-stopping-worker-reads-to-a-reserve-before-the-drain-deadline.md)
 
 ## Context and problem statement
 

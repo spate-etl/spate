@@ -1,13 +1,14 @@
 ---
-description: "A coordinated source's final commit at shutdown runs under one op_timeout budget for all its splits, and the splits it does not reach may replay."
+description: "A coordinated source's final commit at shutdown runs under one op_timeout budget, and splits it does not reach may replay. Superseded by ADR-0066."
 ---
 
 # ADR-0059 — The final coordinated commit runs under one op_timeout budget, and the splits it does not reach may replay
 
-- **Status:** accepted
+- **Status:** superseded
 - **Date:** 2026-10-04
 - **Supersedes:** —
-- **Superseded by:** —
+- **Superseded by:**
+  [ADR-0066](0066-a-feed-trait-replaces-the-split-coordination-traits.md)
 
 ## Context and problem statement
 

@@ -264,11 +264,12 @@ body holds that backend's own keys. `units_held` applies whatever the backend;
 honor it refuses it; a source that re-enqueues units caps them at it, and its
 page says so. `location` names a job location for a source that reads one, and
 `settling_window` times the end of a job that names one; the in-process feed
-refuses both. Set on a source that reads no feed, the section fails startup. The common keys and the backend count are checked when the file loads, and
-so are a `location` or a `settling_window` beside `memory` and a
-`settling_window` out of range, which the runtime also refuses when code passes
-the feed. The `memory` body is checked when the pipeline starts, before the
-source opens, unless code passes a feed to `Pipeline::feed`.
+refuses both. Set on a source that reads no feed, the section fails startup. The
+common keys and the backend count are checked when the file loads, and so are a
+`location` or a `settling_window` beside `memory` and a `settling_window` out of
+range, which the runtime also refuses when code passes the feed. The `memory`
+body is checked when the pipeline starts, before the source opens, unless code
+passes a feed to `Pipeline::feed`.
 
 ```yaml
 feed:

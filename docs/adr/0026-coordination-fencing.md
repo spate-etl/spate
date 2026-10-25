@@ -1,13 +1,14 @@
 ---
-description: "Ownership safety rests solely on a monotonic revision checked by compare-and-set on every write; lease TTLs and watches affect latency only, never correctness."
+description: "Ownership safety rests on a monotonic revision checked by compare-and-set on every write; TTLs and watches affect latency only. Superseded by ADR-0080."
 ---
 
 # ADR-0026 — The durable record's compare-and-set revision is the only correctness mechanism
 
-- **Status:** accepted
+- **Status:** superseded
 - **Date:** 2026-07-17 (recorded 2026-08-06 from the decision log)
 - **Supersedes:** —
-- **Superseded by:** —
+- **Superseded by:**
+  [ADR-0080](0080-a-work-feed-replaces-leased-fenced-split-coordination.md)
 
 ## Context and problem statement
 
@@ -76,5 +77,6 @@ pause to find itself fenced.
   lock with a TTL is not a lock unless writes carry a fencing token.
 - [ADR-0025](0025-embedded-consensus-rejected.md) — this is the guarantee that
   makes consensus unnecessary.
-- [Work assignment](../user-guide/02-concepts/08-work-assignment.mdx) — the
-  normative specification, whose numbered invariants name the property tests.
+- [Work assignment](https://github.com/spate-etl/spate/blob/ab71fb0ceddf1cafa0d5ad4b3defc503603dbaa8/docs/user-guide/02-concepts/08-work-assignment.mdx)
+  — the normative specification, whose numbered invariants name the property
+  tests.

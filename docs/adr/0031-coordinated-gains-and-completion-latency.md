@@ -1,13 +1,14 @@
 ---
-description: "Lane gains extend the current epoch additively instead of forcing a full drain, and a lane reaching end of input triggers an eager terminal commit."
+description: "Lane gains extend the current epoch additively, and a lane reaching end of input triggers an eager terminal commit. Superseded by ADR-0066."
 ---
 
 # ADR-0031 — Additive lane gains and eager terminal commits
 
-- **Status:** accepted
+- **Status:** superseded
 - **Date:** 2026-07-18 (recorded 2026-08-06 from the decision log)
 - **Supersedes:** —
-- **Superseded by:** —
+- **Superseded by:**
+  [ADR-0066](0066-a-feed-trait-replaces-the-split-coordination-traits.md)
 
 ## Context and problem statement
 

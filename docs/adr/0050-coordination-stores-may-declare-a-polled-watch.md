@@ -1,13 +1,14 @@
 ---
-description: "A coordination store may back its watch by polling and declare it; the coordinator then narrows its durable watch and reads what a poll can miss."
+description: "A coordination store may back its watch by polling and declare it, and the coordinator reads what a poll can miss. Superseded by ADR-0080."
 ---
 
 # ADR-0050 — A coordination store may declare a polled watch, and the coordinator reads what it misses
 
-- **Status:** accepted
+- **Status:** superseded
 - **Date:** 2026-09-29
 - **Supersedes:** —
-- **Superseded by:** —
+- **Superseded by:**
+  [ADR-0080](0080-a-work-feed-replaces-leased-fenced-split-coordination.md)
 
 ## Context and problem statement
 
@@ -74,7 +75,7 @@ multi-worker scenarios run over the polled test store in default CI.
 
 - Landed in #815.
 - The user guide's
-  [work assignment](../user-guide/02-concepts/08-work-assignment.mdx#discovery)
+  [work assignment](https://github.com/spate-etl/spate/blob/ab71fb0ceddf1cafa0d5ad4b3defc503603dbaa8/docs/user-guide/02-concepts/08-work-assignment.mdx#discovery)
   page describes discovery on each kind of store.
 - This record qualifies ADR-0024's consequence that "`watch` exists, so a worker
   learns about a change instead of discovering it on its next poll": on a store

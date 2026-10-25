@@ -18,8 +18,8 @@ description: "A feed trait with a spate-test double replaces spate-core's SplitP
 with `spate_test::scripted_coordinator` as their test double.
 `Source::configure_coordination` and `commit_final` were added after it. Their
 contract is a lease: a fenced durable commit, epochs, and a `Lost` outcome. The
-work-feed record moves work distribution to a queue, which has a visibility
-lease and no fence.
+[work-feed record](0080-a-work-feed-replaces-leased-fenced-split-coordination.md)
+moves work distribution to a queue, which has a visibility lease and no fence.
 
 ## Considered options
 
@@ -54,11 +54,13 @@ signature, so INV-6 holds.
 
 A second delivery of a unit the worker holds arrives under a new receipt and is
 read again from its start. INV-1 allows the duplicate, and no backend
-deduplicates by unit id. `spate-core` gains an in-process feed for one
-instance, and `spate-test` gains a scripted feed, so a source's behavior under
-redelivery, duplicate delivery and dead-lettering is testable without a queue.
-The coordination traits and `scripted_coordinator` leave in the v0.4.0 removal
-that the work-feed record describes.
+deduplicates by unit id. `spate-core` gains an in-process feed for one instance,
+and `spate-test` gains a scripted feed, so a source's behavior under redelivery,
+duplicate delivery and dead-lettering is testable without a queue. The
+coordination traits and `scripted_coordinator` leave in the v0.4.0 removal that
+the
+[work-feed record](0080-a-work-feed-replaces-leased-fenced-split-coordination.md)
+describes.
 
 ### Consequences
 
@@ -68,8 +70,10 @@ that the work-feed record describes.
   first-party double.
 - Bad, because a custom source that implemented the coordination traits has
   to be rewritten against the feed trait.
-- Bad, because the measurement behind the work-feed record ran on the
-  coordination traits, so no figure measures the trait this record ships.
+- Bad, because the measurement behind the
+  [work-feed record](0080-a-work-feed-replaces-leased-fenced-split-coordination.md)
+  ran on the coordination traits, so no figure measures the trait this record
+  ships.
 - Bad, because the driver's settled behaviors go with it: additive gains
   (ADR-0031), the single wait point (ADR-0037) and the bounded final commit
   (ADR-0059).
@@ -93,8 +97,10 @@ review; nothing checks the trait's signatures.
 ## More information
 
 - Landed in #1124.
-- The work-feed record — the work feed this trait serves, and the break that
-  removes the coordination traits.
+- The
+  [work-feed record](0080-a-work-feed-replaces-leased-fenced-split-coordination.md)
+  — the work feed this trait serves, and the break that removes the coordination
+  traits.
 - [Work feed](../user-guide/02-concepts/09-work-feed.mdx) — units, the ack
   rule, redelivery and dead-lettering as a source sees them.
 - [Feed-reading sources](../user-guide/06-extending/custom-source.mdx#feed-reading-sources)

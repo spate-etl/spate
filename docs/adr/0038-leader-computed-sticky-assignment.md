@@ -1,13 +1,14 @@
 ---
-description: "Leader-computed sticky assignment on split weight replaces peer-to-peer work stealing, removing the partial-view bugs that stealing kept producing."
+description: "Leader-computed sticky assignment on split weight replaces peer-to-peer work stealing and its partial-view bugs. Superseded by ADR-0080."
 ---
 
 # ADR-0038 — Leader-computed sticky assignment replaces peer-to-peer work stealing
 
-- **Status:** accepted
+- **Status:** superseded
 - **Date:** 2026-07-21 (recorded 2026-08-06 from the decision log)
 - **Supersedes:** [ADR-0023](0023-dynamic-work-stealing-coordination.md)
-- **Superseded by:** —
+- **Superseded by:**
+  [ADR-0080](0080-a-work-feed-replaces-leased-fenced-split-coordination.md)
 
 ## Context and problem statement
 
@@ -86,5 +87,5 @@ unchanged and still rests entirely on
   record is kept: the reasoning that led there was sound for what was known at
   the time, and the convergence proof was correct about a property that turned
   out not to be the problem.
-- [Work assignment](../user-guide/02-concepts/08-work-assignment.mdx) — the
-  normative specification.
+- [Work assignment](https://github.com/spate-etl/spate/blob/ab71fb0ceddf1cafa0d5ad4b3defc503603dbaa8/docs/user-guide/02-concepts/08-work-assignment.mdx)
+  — the normative specification.

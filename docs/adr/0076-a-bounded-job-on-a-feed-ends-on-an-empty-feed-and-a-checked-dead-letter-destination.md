@@ -154,18 +154,19 @@ exact counts, so nothing tests the window against SQS's approximate ones.
 
 ## Evidence
 
-ingestbench records, for every queue arm in the work-feed record's session, the
-time of the last unit's acknowledgement and of the last host's exit. Its exit
-rule is the benchmark's own: the lister's done marker exists and the queue
-reports zero visible, delayed and in-flight messages (Kafka: zero work-topic
-lag) on three reads 20 s apart. Each read is logged. Measured by
-spate-etl/ingestbench `queue-arms` at 7475b28 against spate b7a9a9ce; results
-at fc958df. The last host exited 81.3–120.0 s after the last acknowledgement
-on Q-SQS (six reps at N=4 and N=8) and 60.2–60.3 s after it on Q-KAFKA (four
-reps). Less the rule's 40 s window, SQS's approximate counts first read zero
-about 41–80 s after the last acknowledgement, and Kafka's lag about 20 s after
-it. The rule reads no dead-letter destination, and its 40 s window is shorter
-than the five-minute default and the one-minute floor the SQS feed sets.
+ingestbench records, for every queue arm in the
+[work-feed record](0080-a-work-feed-replaces-leased-fenced-split-coordination.md)'s
+session, the time of the last unit's acknowledgement and of the last host's
+exit. Its exit rule is the benchmark's own: the lister's done marker exists and
+the queue reports zero visible, delayed and in-flight messages (Kafka: zero
+work-topic lag) on three reads 20 s apart. Each read is logged. Measured by
+spate-etl/ingestbench `queue-arms` at 7475b28 against spate b7a9a9ce; results at
+fc958df. The last host exited 81.3–120.0 s after the last acknowledgement on
+Q-SQS (six reps at N=4 and N=8) and 60.2–60.3 s after it on Q-KAFKA (four reps).
+Less the rule's 40 s window, SQS's approximate counts first read zero about
+41–80 s after the last acknowledgement, and Kafka's lag about 20 s after it. The
+rule reads no dead-letter destination, and its 40 s window is shorter than the
+five-minute default and the one-minute floor the SQS feed sets.
 
 ## More information
 

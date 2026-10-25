@@ -1,13 +1,14 @@
 ---
-description: "The object-storage source is always coordinated, using an in-process store for solo runs, and its earlier manifest checkpoint mechanism is removed."
+description: "The object-storage source is always coordinated, with an in-process store for solo runs; the manifest checkpoint is removed. Superseded by ADR-0080."
 ---
 
 # ADR-0032 — The object-storage source is always coordinated; the manifest checkpoint is deleted
 
-- **Status:** accepted
+- **Status:** superseded
 - **Date:** 2026-07-18 (recorded 2026-08-06 from the decision log)
 - **Supersedes:** —
-- **Superseded by:** —
+- **Superseded by:**
+  [ADR-0080](0080-a-work-feed-replaces-leased-fenced-split-coordination.md)
 
 ## Context and problem statement
 

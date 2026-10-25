@@ -1,13 +1,14 @@
 ---
-description: "The coordination: section can select the in-process store, so a solo run takes its tuning from the file; that store is never shared between processes."
+description: "The coordination: section can select the in-process store, so a solo run takes its tuning from the file. Superseded by ADR-0079."
 ---
 
 # ADR-0056 — A solo run takes its coordinator tuning from the `coordination:` section by selecting the in-process store
 
-- **Status:** accepted
+- **Status:** superseded
 - **Date:** 2026-10-01
 - **Supersedes:** —
-- **Superseded by:** —
+- **Superseded by:**
+  [ADR-0079](0079-the-feed-is-configured-in-a-top-level-section-and-provisioned-by-the-operator.md)
 
 ## Context and problem statement
 
@@ -81,5 +82,5 @@ Code-only tuning is what the change replaces.
 - [ADR-0049](0049-coordination-section-in-the-pipeline-config.md) defines the
   section, and [ADR-0032](0032-s3-always-coordinated.md) the solo fallback this
   store backs.
-- [Coordination stores](../user-guide/04-connectors/coordination/README.mdx)
+- [Coordination stores](https://github.com/spate-etl/spate/blob/ab71fb0ceddf1cafa0d5ad4b3defc503603dbaa8/docs/user-guide/04-connectors/coordination/README.mdx)
   lists the store and its key.

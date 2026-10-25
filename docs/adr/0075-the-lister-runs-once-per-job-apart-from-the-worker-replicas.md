@@ -35,7 +35,9 @@ queue.
 Chosen option: "A separate one-shot lister run", because an election needs a
 lease, which brings back a store or the queue's own primitive, and disjoint
 listing is static sharding, with the fixed replica count and lack of failover
-the work-feed record rejects.
+the
+[work-feed record](0080-a-work-feed-replaces-leased-fenced-split-coordination.md)
+rejects.
 
 The lister run's entry point is `S3Source::list_once`, an API in `spate-s3`
 that the user's `main()` calls, for instance when the binary's first argument
@@ -94,9 +96,10 @@ startup WARN says so.
 - Neutral, because on the Kafka feed the lister run publishes through
   `KafkaFeedPublisher`, which joins no consumer group, so it takes no
   partition from the workers and charges no unit an attempt.
-- Neutral, because the work-feed record removes coordination, after which a
-  solo run on the in-process feed is the only way the S3 source lists for
-  itself.
+- Neutral, because the
+  [work-feed record](0080-a-work-feed-replaces-leased-fenced-split-coordination.md)
+  removes coordination, after which a solo run on the in-process feed is the
+  only way the S3 source lists for itself.
 
 ### Confirmation
 

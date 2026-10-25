@@ -1,13 +1,14 @@
 ---
-description: "A framework-owned driver in spate-core runs the source-coordination choreography once behind planner and coordinator seam traits, not per connector."
+description: "A framework-owned driver in spate-core runs the coordination choreography once behind planner and coordinator traits. Superseded by ADR-0066."
 ---
 
 # ADR-0029 — Seam traits plus a framework-owned coordination driver
 
-- **Status:** accepted
+- **Status:** superseded
 - **Date:** 2026-07-17 (recorded 2026-08-06 from the decision log)
 - **Supersedes:** —
-- **Superseded by:** —
+- **Superseded by:**
+  [ADR-0066](0066-a-feed-trait-replaces-the-split-coordination-traits.md)
 
 ## Context and problem statement
 
@@ -66,4 +67,4 @@ without a store.
 - Landed in `d92b3d4` (#40).
 - [ADR-0036](0036-coordinator-wiring-at-assembly.md) — why the backend is
   injected at assembly rather than configured per connector.
-- [Source coordination](../user-guide/02-concepts/07-source-coordination.mdx).
+- [Source coordination](https://github.com/spate-etl/spate/blob/ab71fb0ceddf1cafa0d5ad4b3defc503603dbaa8/docs/user-guide/02-concepts/07-source-coordination.mdx).

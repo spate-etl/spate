@@ -12,10 +12,11 @@ description: "Spate does not reconcile missed storage notifications by re-listin
 ## Context and problem statement
 
 Continuous ingestion learns of new objects from storage notifications. AWS
-designs S3 notifications for at-least-once delivery. Ceph RGW retries only on
-a persistent topic. RustFS replays only with a `queue_dir`. A periodic
-re-listing would catch a lost event, but it also re-announces every object
-already ingested, so it needs a record of what was seen. The work-feed record
+designs S3 notifications for at-least-once delivery. Ceph RGW retries only on a
+persistent topic. RustFS replays only with a `queue_dir`. A periodic re-listing
+would catch a lost event, but it also re-announces every object already
+ingested, so it needs a record of what was seen. The
+[work-feed record](0080-a-work-feed-replaces-leased-fenced-split-coordination.md)
 removes `refresh_listing`, the re-listing mode that
 [ADR-0028](0028-deterministic-split-ids.md)'s create-if-absent made cheap.
 

@@ -15,8 +15,8 @@ description: "A work unit is one object or one byte range of one object, from th
 pack small objects first-fit into up to ten open bins, about sixteen objects to
 a split, and cut a qualifying large object into byte ranges. A storage
 notification names one object. The unit's size sets the replay cost in the
-work-feed record, the queue requests per object, and what the lister's
-checkpoint waits on in
+[work-feed record](0080-a-work-feed-replaces-leased-fenced-split-coordination.md),
+the queue requests per object, and what the lister's checkpoint waits on in
 [the lister-resume record](0074-a-lister-resumes-after-the-last-key-it-checkpointed-once-the-feed-confirmed-it.md).
 
 ## Considered options
@@ -66,9 +66,10 @@ from the decoded key, or an ETag holding a control byte other than a tab, which
 `If-Match` cannot carry. A unit Spate published with such an ETag is
 dead-lettered the same way. A message is one unit whose created records of
 non-empty objects give one part each, acknowledged once after every part has
-retired under the work-feed record's ack rule; a worker reads a part's ranges as
-ADR-0054 cuts them, and each range in progress counts toward the units it holds
-(the
+retired under the
+[work-feed record](0080-a-work-feed-replaces-leased-fenced-split-coordination.md)'s
+ack rule; a worker reads a part's ranges as ADR-0054 cuts them, and each range
+in progress counts toward the units it holds (the
 [feed-section record](0079-the-feed-is-configured-in-a-top-level-section-and-provisioned-by-the-operator.md)).
 
 ### Consequences

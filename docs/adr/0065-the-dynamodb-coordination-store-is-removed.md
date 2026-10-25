@@ -78,5 +78,5 @@ Structural: `spate-coordination` has no `dynamodb` feature or module, and
 ## More information
 
 - Landed in the pull request titled `coordination: remove the DynamoDB store`.
-- [Coordination stores](../user-guide/04-connectors/coordination/README.mdx)
+- [Coordination stores](https://github.com/spate-etl/spate/blob/ab71fb0ceddf1cafa0d5ad4b3defc503603dbaa8/docs/user-guide/04-connectors/coordination/README.mdx)
   — the stores that remain.

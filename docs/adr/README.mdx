@@ -57,24 +57,24 @@ record appears in the table below.
 | [0021](0021-kafka-sink-retry-duplicates-stance.md) | Retry unless provably permanent, accepting known duplicates | accepted | 2026-07-13 |
 | [0022](0022-kafka-producer-teardown-and-stats.md) | Rely on rdkafka's own producer teardown; defer per-partition statistics | accepted | 2026-07-13 |
 | [0023](0023-dynamic-work-stealing-coordination.md) | Dynamic work-stealing splits for source coordination | superseded | 2026-07-17 |
-| [0024](0024-coordination-store-external-kv.md) | An external low-latency KV store behind a six-primitive trait | accepted | 2026-07-17 |
-| [0025](0025-embedded-consensus-rejected.md) | Embedded consensus is not used for work distribution | accepted | 2026-07-17 |
-| [0026](0026-coordination-fencing.md) | The durable record's compare-and-set revision is the only correctness mechanism | accepted | 2026-07-17 |
-| [0027](0027-split-delivery-attempts-and-quarantine.md) | Delivery attempts count only non-graceful tenancy ends | accepted | 2026-07-17 |
+| [0024](0024-coordination-store-external-kv.md) | An external low-latency KV store behind a six-primitive trait | superseded | 2026-07-17 |
+| [0025](0025-embedded-consensus-rejected.md) | Embedded consensus is not used for work distribution | superseded | 2026-07-17 |
+| [0026](0026-coordination-fencing.md) | The durable record's compare-and-set revision is the only correctness mechanism | superseded | 2026-07-17 |
+| [0027](0027-split-delivery-attempts-and-quarantine.md) | Delivery attempts count only non-graceful tenancy ends | superseded | 2026-07-17 |
 | [0028](0028-deterministic-split-ids.md) | Split ids are deterministic and planner-derived | accepted | 2026-07-17 |
-| [0029](0029-framework-owned-coordination-driver.md) | Seam traits plus a framework-owned coordination driver | accepted | 2026-07-17 |
-| [0030](0030-split-record-layout.md) | Two durable records per split: an immutable spec and a small progress record | accepted | 2026-07-17 |
-| [0031](0031-coordinated-gains-and-completion-latency.md) | Additive lane gains and eager terminal commits | accepted | 2026-07-18 |
-| [0032](0032-s3-always-coordinated.md) | The object-storage source is always coordinated; the manifest checkpoint is deleted | accepted | 2026-07-18 |
+| [0029](0029-framework-owned-coordination-driver.md) | Seam traits plus a framework-owned coordination driver | superseded | 2026-07-17 |
+| [0030](0030-split-record-layout.md) | Two durable records per split: an immutable spec and a small progress record | superseded | 2026-07-17 |
+| [0031](0031-coordinated-gains-and-completion-latency.md) | Additive lane gains and eager terminal commits | superseded | 2026-07-18 |
+| [0032](0032-s3-always-coordinated.md) | The object-storage source is always coordinated; the manifest checkpoint is deleted | superseded | 2026-07-18 |
 | [0033](0033-s3-split-packing.md) | Listing-order first-fit packing with a bounded lookback and a per-object open cost | superseded | 2026-07-18 |
 | [0034](0034-s3-split-identity.md) | Split identity is a truncated digest over member keys, versions and a packing version | accepted | 2026-07-18 |
 | [0035](0035-s3-poison-policy.md) | Object-level failures poison the split; credential and configuration failures are fatal | accepted | 2026-07-18 |
 | [0036](0036-coordinator-wiring-at-assembly.md) | The coordination backend is injected at assembly, never configured per connector | superseded | 2026-07-18 |
-| [0037](0037-control-plane-wait-ownership.md) | The driver owns the wait, not the coordination backend | accepted | 2026-07-18 |
-| [0038](0038-leader-computed-sticky-assignment.md) | Leader-computed sticky assignment replaces peer-to-peer work stealing | accepted | 2026-07-21 |
-| [0039](0039-split-revocation-cooperative-then-forced.md) | Split revocation is cooperative first, forced second | accepted | 2026-07-21 |
+| [0037](0037-control-plane-wait-ownership.md) | The driver owns the wait, not the coordination backend | superseded | 2026-07-18 |
+| [0038](0038-leader-computed-sticky-assignment.md) | Leader-computed sticky assignment replaces peer-to-peer work stealing | superseded | 2026-07-21 |
+| [0039](0039-split-revocation-cooperative-then-forced.md) | Split revocation is cooperative first, forced second | superseded | 2026-07-21 |
 | [0040](0040-rebalance-delay.md) | A departed instance's splits are withheld briefly, and zero is a distinct path | superseded | 2026-07-21 |
-| [0041](0041-cancel-a-withdrawn-revocation.md) | A revocation the leader takes back is cancelled, leaving a no-progress timeout behind | accepted | 2026-07-22 |
+| [0041](0041-cancel-a-withdrawn-revocation.md) | A revocation the leader takes back is cancelled, leaving a no-progress timeout behind | superseded | 2026-07-22 |
 | [0042](0042-first-party-load-generator-source.md) | A first-party load generator shipping one named dataset, not a schema language | accepted | 2026-08-08 |
 | [0043](0043-clickhouse-columns-from-the-row-struct.md) | The row struct is the ClickHouse insert column list, replacing configured `columns` | accepted | 2026-08-21 |
 | [0044](0044-clickhouse-self-describing-wire-formats.md) | Both ClickHouse wire formats carry the schema, so it is always fetched | accepted | 2026-09-06 |
@@ -82,19 +82,19 @@ record appears in the table below.
 | [0046](0046-fatal-deserializer-error-outside-the-record-policy.md) | A deserializer can stop the pipeline outside its record policy | accepted | 2026-09-24 |
 | [0047](0047-a-rejected-credential-or-tls-handshake-is-fatal.md) | A rejected credential or TLS handshake is fatal in every connector | accepted | 2026-09-26 |
 | [0048](0048-changelog-fragments-are-the-release-signal.md) | Changelog fragments carry the release signal, so subjects carry none | accepted | 2026-09-27 |
-| [0049](0049-coordination-section-in-the-pipeline-config.md) | The coordination store is configured in a top-level pipeline section, and the source builds its coordinator from it | accepted | 2026-09-27 |
-| [0050](0050-coordination-stores-may-declare-a-polled-watch.md) | A coordination store may declare a polled watch, and the coordinator reads what it misses | accepted | 2026-09-29 |
+| [0049](0049-coordination-section-in-the-pipeline-config.md) | The coordination store is configured in a top-level pipeline section, and the source builds its coordinator from it | superseded | 2026-09-27 |
+| [0050](0050-coordination-stores-may-declare-a-polled-watch.md) | A coordination store may declare a polled watch, and the coordinator reads what it misses | superseded | 2026-09-29 |
 | [0051](0051-lease-expiry-judged-by-each-observer.md) | Lease expiry may be judged by each observer, and the DynamoDB store does so | superseded | 2026-09-29 |
 | [0052](0052-dynamodb-store-polls-without-streams.md) | The DynamoDB store discovers changes by polling, without Streams | deprecated | 2026-09-29 |
 | [0053](0053-one-dynamodb-table-holds-every-job.md) | One operator-provisioned table holds every job, keyed by job and keyspace | deprecated | 2026-09-29 |
 | [0054](0054-s3-byte-range-subdivision.md) | A large uncompressed object is cut into byte-range splits, and the rest pack as before | accepted | 2026-10-01 |
-| [0055](0055-graceful-departure-not-withheld.md) | A crashed instance's splits are withheld briefly, and a graceful departure's are not | accepted | 2026-10-01 |
-| [0056](0056-in-process-store-selectable-in-coordination-section.md) | A solo run takes its coordinator tuning from the `coordination:` section by selecting the in-process store | accepted | 2026-10-01 |
+| [0055](0055-graceful-departure-not-withheld.md) | A crashed instance's splits are withheld briefly, and a graceful departure's are not | superseded | 2026-10-01 |
+| [0056](0056-in-process-store-selectable-in-coordination-section.md) | A solo run takes its coordinator tuning from the `coordination:` section by selecting the in-process store | superseded | 2026-10-01 |
 | [0057](0057-a-deleted-dynamodb-ephemeral-key-leaves-a-revision-floor.md) | A deleted DynamoDB ephemeral key leaves a revision floor that every create checks | superseded | 2026-10-04 |
 | [0058](0058-a-dynamodb-ephemeral-write-leaves-its-predecessors-removal-revision.md) | A DynamoDB ephemeral write leaves its predecessor's removal revision free | superseded | 2026-10-04 |
-| [0059](0059-final-coordinated-commit-runs-under-one-op-timeout-budget.md) | The final coordinated commit runs under one op_timeout budget, and the splits it does not reach may replay | accepted | 2026-10-04 |
-| [0060](0060-the-plan-record-names-the-worker-whose-election-wrote-its-generation.md) | The plan record names the worker whose election wrote its generation | accepted | 2026-10-04 |
-| [0061](0061-a-watch-delete-orders-above-what-its-handle-has-seen.md) | A watch delete orders above what its handle has seen of the key | accepted | 2026-10-05 |
+| [0059](0059-final-coordinated-commit-runs-under-one-op-timeout-budget.md) | The final coordinated commit runs under one op_timeout budget, and the splits it does not reach may replay | superseded | 2026-10-04 |
+| [0060](0060-the-plan-record-names-the-worker-whose-election-wrote-its-generation.md) | The plan record names the worker whose election wrote its generation | superseded | 2026-10-04 |
+| [0061](0061-a-watch-delete-orders-above-what-its-handle-has-seen.md) | A watch delete orders above what its handle has seen of the key | superseded | 2026-10-05 |
 | [0062](0062-the-release-sequence-is-rust-in-xtask.md) | The release sequence moves from Bash into xtask, behind traits a test can fail | accepted | 2026-10-10 |
 | [0063](0063-releases-are-attested-by-a-reusable-build-workflow.md) | A reusable build workflow signs every release attestation | accepted | 2026-10-10 |
 | [0064](0064-releases-are-immutable-and-published-from-a-complete-draft.md) | GitHub releases are immutable, published only from a complete draft | accepted | 2026-10-10 |
@@ -113,6 +113,7 @@ record appears in the table below.
 | [0077](0077-a-notification-units-read-classifies-a-deleted-or-overwritten-object.md) | A notification unit's read classifies a deleted or overwritten object | accepted | 2026-10-24 |
 | [0078](0078-a-stopping-worker-reads-to-a-reserve-before-the-drain-deadline.md) | A stopping worker reads to a reserve before the drain deadline, then hands back what it holds | accepted | 2026-10-24 |
 | [0079](0079-the-feed-is-configured-in-a-top-level-section-and-provisioned-by-the-operator.md) | The feed is configured in a top-level section and provisioned by the operator | accepted | 2026-10-25 |
+| [0080](0080-a-work-feed-replaces-leased-fenced-split-coordination.md) | A work feed replaces leased, fenced split coordination | accepted | 2026-10-25 |
 
 ## Related
 

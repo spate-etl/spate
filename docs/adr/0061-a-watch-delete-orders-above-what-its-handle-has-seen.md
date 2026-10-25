@@ -1,17 +1,19 @@
 ---
-description: "A watch delete orders above every revision of the key its own handle returned or delivered before the deletion, and may sit at or below another handle's."
+description: "A watch delete orders above every revision of the key its own handle returned or delivered. Superseded by ADR-0065 and ADR-0080."
 ---
 
 # ADR-0061 — A watch delete orders above what its handle has seen of the key
 
-- **Status:** accepted
+- **Status:** superseded
 - **Date:** 2026-10-05
 - **Supersedes:**
   [ADR-0058](0058-a-dynamodb-ephemeral-write-leaves-its-predecessors-removal-revision.md)
   (the #959 consequence)
 - **Superseded by:**
   [ADR-0065](0065-the-dynamodb-coordination-store-is-removed.md) (DynamoDB
-  re-create exception)
+  re-create exception),
+  [ADR-0080](0080-a-work-feed-replaces-leased-fenced-split-coordination.md) (the
+  delete-revision rule)
 
 ## Context and problem statement
 

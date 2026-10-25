@@ -12,11 +12,13 @@ description: "A stopping worker reads until 5 s before the drain deadline, then 
 ## Context and problem statement
 
 [ADR-0055](0055-graceful-departure-not-withheld.md) hands a gracefully departing
-instance's splits back so they move at once. The work-feed record removes the
-store that hand-back ran through. On SQS a unit a stopped worker held returns
-after one visibility period unless it is handed back, and each hand-back still
-costs one receive. On Kafka a member that leaves causes a rebalance. A unit
-stopped mid-read replays whole (the work-feed record).
+instance's splits back so they move at once. The
+[work-feed record](0080-a-work-feed-replaces-leased-fenced-split-coordination.md)
+removes the store that hand-back ran through. On SQS a unit a stopped worker
+held returns after one visibility period unless it is handed back, and each
+hand-back still costs one receive. On Kafka a member that leaves causes a
+rebalance. A unit stopped mid-read replays whole (the
+[work-feed record](0080-a-work-feed-replaces-leased-fenced-split-coordination.md)).
 
 ## Considered options
 
@@ -55,8 +57,10 @@ continues until each unit is acknowledged or handed back.
 - Good, because on SQS a handed-back unit moves to a peer at once, unless SQS
   has received it three or more times and moves it to the back of the queue.
 - Bad, because on Kafka a stop cuts every member's in-flight units under the
-  eager assignment the work-feed record fixes, so the drain saves only the
-  stopping member's units. Each of those reads has used an attempt
+  eager assignment the
+  [work-feed record](0080-a-work-feed-replaces-leased-fenced-split-coordination.md)
+  fixes, so the drain saves only the stopping member's units. Each of those
+  reads has used an attempt
   ([ADR-0070](0070-on-kafka-a-units-attempt-is-recorded-before-the-unit-is-read.md)).
 - Bad, because a stop takes up to the drain deadline, and a unit that needs
   longer than the deadline less 5 s replays whole.

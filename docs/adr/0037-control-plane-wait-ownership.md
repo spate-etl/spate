@@ -1,13 +1,14 @@
 ---
-description: "The coordination driver owns the single wait point, with a mandatory lane waker, so a finishing lane wakes it immediately instead of on the next poll."
+description: "The coordination driver owns the single wait point, with a mandatory lane waker, so a finishing lane wakes it at once. Superseded by ADR-0066."
 ---
 
 # ADR-0037 — The driver owns the wait, not the coordination backend
 
-- **Status:** accepted
+- **Status:** superseded
 - **Date:** 2026-07-18 (recorded 2026-08-06 from the decision log)
 - **Supersedes:** —
-- **Superseded by:** —
+- **Superseded by:**
+  [ADR-0066](0066-a-feed-trait-replaces-the-split-coordination-traits.md)
 
 ## Context and problem statement
 

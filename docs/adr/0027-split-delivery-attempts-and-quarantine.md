@@ -1,10 +1,10 @@
 ---
-description: "Only non-graceful tenancy ends count toward a split's quarantine threshold, and a quarantined split blocks a bounded job from reporting completion."
+description: "Only non-graceful tenancy ends count toward quarantine, and a quarantined split blocks completion. Superseded by ADR-0070 and ADR-0076."
 ---
 
 # ADR-0027 — Delivery attempts count only non-graceful tenancy ends
 
-- **Status:** accepted
+- **Status:** superseded
 - **Date:** 2026-07-17 (recorded 2026-08-06 from the decision log)
 - **Supersedes:** —
 - **Superseded by:**

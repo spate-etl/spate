@@ -51,12 +51,13 @@ revocation, one choreography tested constantly by every rebalance:
    deadline, which leaves that second for the feed's close in step 4.
 4. **Offsets commit.** The controller drains the checkpointer and runs a final
    synchronous commit + `flush_commits`, committing only watermarks that cover
-   durably written data, per the at-least-once invariant. The runtime then closes a feed that hands back: the feed sends the
-   acknowledgments it still has queued and gives up the units it holds, within
-   what is left of the deadline. A unit it cannot give up in time comes back
-   after the feed's redelivery delay. A feed whose backend gives a commit or a
-   group leave no bound can finish them after the deadline, and `run` waits for
-   it; the connector page's "Stop" section says when.
+   durably written data, per the at-least-once invariant. The runtime then
+   closes a feed that hands back: the feed sends the acknowledgments it still
+   has queued and gives up the units it holds, within what is left of the
+   deadline. A unit it cannot give up in time comes back after the feed's
+   redelivery delay. A feed whose backend gives a commit or a group leave no
+   bound can finish them after the deadline, and `run` waits for it; the
+   connector page's "Stop" section says when.
 5. **The source closes.** It releases what it holds, such as a consumer
    group membership.
 

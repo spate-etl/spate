@@ -1,13 +1,14 @@
 ---
-description: "Split revocation asks the current owner to drain cooperatively first, then forces release at a deadline, bounding a rebalance despite a stalled worker."
+description: "Split revocation asks the owner to drain cooperatively, then forces release at a deadline, bounding a rebalance. Superseded by ADR-0080."
 ---
 
 # ADR-0039 — Split revocation is cooperative first, forced second
 
-- **Status:** accepted
+- **Status:** superseded
 - **Date:** 2026-07-21 (recorded 2026-08-06 from the decision log)
 - **Supersedes:** —
-- **Superseded by:** —
+- **Superseded by:**
+  [ADR-0080](0080-a-work-feed-replaces-leased-fenced-split-coordination.md)
 
 ## Context and problem statement
 
@@ -70,4 +71,4 @@ so a late write loses its compare-and-set whatever the drain was doing.
 - Landed in `e79dfc2` (#64).
 - [ADR-0041](0041-cancel-a-withdrawn-revocation.md) — what happens when the
   leader takes the revocation back before the deadline.
-- [Work assignment](../user-guide/02-concepts/08-work-assignment.mdx).
+- [Work assignment](https://github.com/spate-etl/spate/blob/ab71fb0ceddf1cafa0d5ad4b3defc503603dbaa8/docs/user-guide/02-concepts/08-work-assignment.mdx).

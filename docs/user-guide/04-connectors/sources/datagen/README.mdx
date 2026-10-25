@@ -6,9 +6,10 @@ description: "The Datagen source generates a synthetic storefront event stream i
 
 The datagen source (`spate-datagen`, feature `datagen` on the `spate` facade)
 generates a synthetic storefront event stream in process, so a pipeline can be
-assembled, run and measured with no broker or bucket behind it. **It keeps no durable progress**, since every run regenerates its stream
-from the beginning, which makes it reproducible and not resumable. It is a demo
-and test source, and a pipeline that depends on it for delivery is depending on
+assembled, run and measured with no broker or bucket behind it.
+**It keeps no durable progress**, since every run regenerates its stream from
+the beginning, which makes it reproducible and not resumable. It is a demo and
+test source, and a pipeline that depends on it for delivery is depending on
 something that replays in full after any restart.
 [ADR-0042](../../../../adr/0042-first-party-load-generator-source.md) records
 why it ships one named dataset rather than a schema language.

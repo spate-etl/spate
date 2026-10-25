@@ -302,7 +302,10 @@ renewal answers `Gone`:
 
 `FeedScript` also scripts a duplicate delivery (`deliver` with an id already
 delivered), a dead letter, a publish that is refused or held until the test
-confirms it, and the answers to depth reads (`answer_depth`). With
+confirms it, and the answers to depth reads (`answer_depth`). It scripts a
+refusal of the next `receive`, `renew`, `acknowledge` or `fail` with a given
+error kind (`refuse_next_receive` and its siblings), which leaves the feed's
+state as it was, and `refusals_left` counts the refusals not yet served. With
 `hand_back_on_stop` it answers `hands_back` with `true`. It records every
 acknowledgment, failure, renewal, depth read, `Gone` answer, `stop_receiving`
 call (`stopped_receiving`), hand-back (`handed_back`) and close bound

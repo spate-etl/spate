@@ -2,8 +2,9 @@
 //!
 //! [`scripted_feed`] pairs a [`Feed`] implementation with a [`FeedScript`]
 //! handle. The test scripts deliveries, redeliveries, duplicates,
-//! dead-lettering, publish outcomes and depth reads, the source under test
-//! reads through the trait, and the script observes every acknowledgement,
+//! dead-lettering, publish outcomes, refusals of `receive`, `renew`,
+//! `acknowledge` and `fail`, and depth reads, the source under test reads
+//! through the trait, and the script observes every acknowledgement,
 //! failure, renewal, publish, depth read and stop call. There is no queue and
 //! no clock, and behavior is deterministic.
 
@@ -14,6 +15,26 @@ use spate_core::feed::{
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
+
+/// A reader call [`FeedScript`] can script an error answer for.
+#[derive(Clone, Copy, Debug)]
+enum Call {
+    Receive,
+    Renew,
+    Acknowledge,
+    Fail,
+}
+
+impl Call {
+    fn name(self) -> &'static str {
+        match self {
+            Call::Receive => "receive",
+            Call::Renew => "renew",
+            Call::Acknowledge => "acknowledge",
+            Call::Fail => "fail",
+        }
+    }
+}
 
 #[derive(Default)]
 struct State {
@@ -36,6 +57,8 @@ struct State {
     published: Vec<Unit>,
     dead_lettered: Vec<Unit>,
     publish_outcomes: VecDeque<FeedErrorKind>,
+    /// Scripted error answers per [`Call`], indexed by `Call as usize`.
+    answers: [VecDeque<FeedErrorKind>; 4],
     hold_publishes: bool,
     held_publishes: Vec<(Unit, Confirmer)>,
     /// Scripted answers to depth reads of the feed, served first.
@@ -88,6 +111,15 @@ impl State {
         }
     }
 
+    /// Serve the next scripted answer to `call`, if any. The caller returns
+    /// it before touching any other state.
+    fn answer(&mut self, call: Call) -> Result<(), FeedError> {
+        match self.answers[call as usize].pop_front() {
+            Some(kind) => Err(FeedError::new(kind, "refused by the feed script")),
+            None => Ok(()),
+        }
+    }
+
     fn wake(&self) {
         if let Some(waker) = &self.waker {
             waker.wake();
@@ -105,8 +137,8 @@ impl std::fmt::Debug for State {
     }
 }
 
-/// A [`Feed`] whose deliveries and publish outcomes are scripted by the
-/// paired [`FeedScript`]. Build both with [`scripted_feed`].
+/// A [`Feed`] whose deliveries, publish outcomes and call refusals are
+/// scripted by the paired [`FeedScript`]. Build both with [`scripted_feed`].
 ///
 /// `receive` hands out scripted deliveries in the order they were scripted.
 /// `fail` records the report and lets go of the delivery, and delivers
@@ -231,6 +263,118 @@ impl FeedScript {
     pub fn refuse_next_publish(&self, kind: FeedErrorKind) {
         let mut state = self.lock();
         state.publish_outcomes.push_back(kind);
+        state.wake();
+    }
+
+    /// Answer the next `receive` with `kind` (repeat to script a sequence).
+    ///
+    /// The call changes nothing in the feed: it takes no delivery, so
+    /// [`held`](Self::held) and [`delivered`](Self::delivered) are as before
+    /// it, and it sends no signal. Every kind but `Gone` is accepted,
+    /// including ones the trait does not list for `receive`, to reach a
+    /// reader's arm for them.
+    ///
+    /// # Panics
+    ///
+    /// If `kind` is [`Gone`](FeedErrorKind::Gone), which has no meaning for
+    /// `receive`.
+    pub fn refuse_next_receive(&self, kind: FeedErrorKind) {
+        self.refuse_next(Call::Receive, kind);
+    }
+
+    /// Answer the next `renew` with `kind` (repeat to script a sequence).
+    ///
+    /// The call changes nothing in the feed: [`held`](Self::held) and
+    /// [`renewed`](Self::renewed) are as before it. The answer goes to the
+    /// next `renew` whatever its receipt, a lapsed one included. Every kind
+    /// but `Gone` is accepted, including ones the trait does not list for
+    /// `renew`, to reach a reader's arm for them.
+    ///
+    /// # Panics
+    ///
+    /// If `kind` is [`Gone`](FeedErrorKind::Gone): the feed answers `Gone`
+    /// itself for a receipt it does not hold, and
+    /// [`redeliver`](Self::redeliver) or [`dead_letter`](Self::dead_letter)
+    /// lapses one.
+    pub fn refuse_next_renew(&self, kind: FeedErrorKind) {
+        self.refuse_next(Call::Renew, kind);
+    }
+
+    /// Answer the next `acknowledge` with `kind` (repeat to script a
+    /// sequence).
+    ///
+    /// The call changes nothing in the feed: [`held`](Self::held) and
+    /// [`acknowledged`](Self::acknowledged) are as before it, so the
+    /// delivery stays held for the reader to acknowledge again. The answer
+    /// goes to the next `acknowledge` whatever its receipt. Every kind but
+    /// `Gone` is accepted, including ones the trait does not list for
+    /// `acknowledge`, to reach a reader's arm for them.
+    ///
+    /// # Panics
+    ///
+    /// If `kind` is [`Gone`](FeedErrorKind::Gone): the feed answers `Gone`
+    /// itself for a receipt it does not hold, and
+    /// [`redeliver`](Self::redeliver) or [`dead_letter`](Self::dead_letter)
+    /// lapses one.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use spate_core::feed::{Feed, FeedErrorKind, Unit};
+    ///
+    /// let (feed, script) = spate_test::scripted_feed();
+    /// let receipt = script.deliver(Unit::new("day-1", b"2026-10-01".to_vec()));
+    /// feed.receive(8).unwrap();
+    /// script.refuse_next_acknowledge(FeedErrorKind::Retryable);
+    ///
+    /// let refused = feed.acknowledge(receipt).unwrap_err();
+    /// assert_eq!(refused.kind, FeedErrorKind::Retryable);
+    /// assert_eq!(script.held(), vec![receipt]);
+    /// assert_eq!(script.refusals_left(), 0);
+    ///
+    /// feed.acknowledge(receipt).unwrap();
+    /// assert_eq!(script.acknowledged(), vec![receipt]);
+    /// ```
+    pub fn refuse_next_acknowledge(&self, kind: FeedErrorKind) {
+        self.refuse_next(Call::Acknowledge, kind);
+    }
+
+    /// Answer the next `fail` with `kind` (repeat to script a sequence).
+    ///
+    /// The call changes nothing in the feed: [`held`](Self::held) and
+    /// [`failed`](Self::failed) are as before it, so the delivery stays held
+    /// for the reader to fail again. The answer goes to the next `fail`
+    /// whatever its receipt. Every kind but `Gone` is accepted, including
+    /// ones the trait does not list for `fail`, to reach a reader's arm for
+    /// them.
+    ///
+    /// # Panics
+    ///
+    /// If `kind` is [`Gone`](FeedErrorKind::Gone): the feed answers `Gone`
+    /// itself for a receipt it does not hold, and
+    /// [`redeliver`](Self::redeliver) or [`dead_letter`](Self::dead_letter)
+    /// lapses one.
+    pub fn refuse_next_fail(&self, kind: FeedErrorKind) {
+        self.refuse_next(Call::Fail, kind);
+    }
+
+    /// How many scripted refusals of `publish`, `receive`, `renew`,
+    /// `acknowledge` and `fail` are not yet served.
+    #[must_use]
+    pub fn refusals_left(&self) -> usize {
+        let state = self.lock();
+        state.publish_outcomes.len() + state.answers.iter().map(VecDeque::len).sum::<usize>()
+    }
+
+    fn refuse_next(&self, call: Call, kind: FeedErrorKind) {
+        assert!(
+            kind != FeedErrorKind::Gone,
+            "refuse_next_{}: the feed answers Gone itself for a receipt it does not hold; \
+             lapse one with redeliver or dead_letter",
+            call.name()
+        );
+        let mut state = self.lock();
+        state.answers[call as usize].push_back(kind);
         state.wake();
     }
 
@@ -436,6 +580,7 @@ impl Feed for ScriptedFeed {
 
     fn receive(&self, max: usize) -> Result<Vec<Delivery>, FeedError> {
         let mut state = self.lock();
+        state.answer(Call::Receive)?;
         let take = max.min(state.queued.len());
         let out: Vec<Delivery> = state.queued.drain(..take).collect();
         for delivery in &out {
@@ -451,14 +596,18 @@ impl Feed for ScriptedFeed {
     }
 
     fn renew(&self, receipt: Receipt) -> Result<(), FeedError> {
-        self.lock().on_held(receipt, |state| {
+        let mut state = self.lock();
+        state.answer(Call::Renew)?;
+        state.on_held(receipt, |state| {
             state.renewed.push(receipt);
             Ok(())
         })
     }
 
     fn acknowledge(&self, receipt: Receipt) -> Result<(), FeedError> {
-        self.lock().on_held(receipt, |state| {
+        let mut state = self.lock();
+        state.answer(Call::Acknowledge)?;
+        state.on_held(receipt, |state| {
             state.held.remove(&receipt);
             state.acknowledged.push(receipt);
             Ok(())
@@ -466,7 +615,9 @@ impl Feed for ScriptedFeed {
     }
 
     fn fail(&self, receipt: Receipt, reason: &str) -> Result<(), FeedError> {
-        self.lock().on_held(receipt, |state| {
+        let mut state = self.lock();
+        state.answer(Call::Fail)?;
+        state.on_held(receipt, |state| {
             state.held.remove(&receipt);
             state.failed.push((receipt, reason.to_owned()));
             Ok(())
@@ -790,6 +941,173 @@ mod tests {
             park.park(Duration::ZERO),
             "refuse_next_publish did not wake the reader"
         );
+    }
+
+    /// One reader call on `receipt`, as its scripted answer sees it.
+    fn call(feed: &ScriptedFeed, call: Call, receipt: Receipt) -> Result<(), FeedError> {
+        match call {
+            Call::Receive => feed.receive(0).map(drop),
+            Call::Renew => feed.renew(receipt),
+            Call::Acknowledge => feed.acknowledge(receipt),
+            Call::Fail => feed.fail(receipt, "poison"),
+        }
+    }
+
+    fn refuse(script: &FeedScript, call: Call, kind: FeedErrorKind) {
+        match call {
+            Call::Receive => script.refuse_next_receive(kind),
+            Call::Renew => script.refuse_next_renew(kind),
+            Call::Acknowledge => script.refuse_next_acknowledge(kind),
+            Call::Fail => script.refuse_next_fail(kind),
+        }
+    }
+
+    const CALLS: [Call; 4] = [Call::Receive, Call::Renew, Call::Acknowledge, Call::Fail];
+
+    /// Pins that each call's scripted answers are served in order, one per
+    /// call, and that the call answers as unscripted once they are spent.
+    #[test]
+    fn scripted_answers_are_served_in_order_then_spent() {
+        for c in CALLS {
+            let (feed, script) = scripted_feed();
+            let receipt = script.deliver(unit("a"));
+            let _ = feed.receive(8).unwrap();
+            refuse(&script, c, FeedErrorKind::Retryable);
+            refuse(&script, c, FeedErrorKind::Fatal);
+            assert_eq!(script.refusals_left(), 2);
+            assert_eq!(
+                kind(call(&feed, c, receipt)),
+                FeedErrorKind::Retryable,
+                "{c:?}"
+            );
+            assert_eq!(script.refusals_left(), 1);
+            assert_eq!(kind(call(&feed, c, receipt)), FeedErrorKind::Fatal, "{c:?}");
+            assert_eq!(script.refusals_left(), 0);
+            call(&feed, c, receipt).unwrap_or_else(|e| panic!("{c:?} after the script: {e}"));
+        }
+    }
+
+    /// Pins that a scripted answer to `renew`, `acknowledge` or `fail`
+    /// leaves the feed's records and held set as they were, and that the
+    /// next unscripted call lands.
+    #[test]
+    fn a_scripted_error_changes_nothing() {
+        let (feed, script) = scripted_feed();
+        let receipt = script.deliver(unit("a"));
+        script.deliver(unit("b"));
+        let _ = feed.receive(1).unwrap();
+        for c in [Call::Renew, Call::Acknowledge, Call::Fail] {
+            refuse(&script, c, FeedErrorKind::Retryable);
+            assert_eq!(kind(call(&feed, c, receipt)), FeedErrorKind::Retryable);
+            assert_eq!(script.held(), vec![receipt], "{c:?} changed the held set");
+            assert!(script.renewed().is_empty(), "{c:?} recorded a renewal");
+            assert!(script.acknowledged().is_empty(), "{c:?} recorded an ack");
+            assert!(script.failed().is_empty(), "{c:?} recorded a fail");
+            assert!(script.gone().is_empty(), "{c:?} recorded Gone");
+        }
+        feed.renew(receipt).unwrap();
+        feed.acknowledge(receipt).unwrap();
+        assert_eq!(script.renewed(), vec![receipt]);
+        assert_eq!(script.acknowledged(), vec![receipt]);
+    }
+
+    /// Pins that a scripted answer to `receive` takes no delivery: nothing
+    /// is held or recorded, and the next `receive` hands out what is queued.
+    #[test]
+    fn a_scripted_receive_error_takes_nothing() {
+        let (feed, script) = scripted_feed();
+        let queued = script.deliver(unit("a"));
+        script.refuse_next_receive(FeedErrorKind::Retryable);
+        assert_eq!(feed.receive(8).unwrap_err().kind, FeedErrorKind::Retryable);
+        assert!(script.held().is_empty());
+        assert!(script.delivered().is_empty());
+        let got = feed.receive(8).unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].receipt, queued);
+    }
+
+    /// Pins that a scripted answer goes only to its own call: the other
+    /// calls answer as unscripted while it waits.
+    #[test]
+    fn a_scripted_answer_waits_for_its_own_call() {
+        for scripted in CALLS {
+            let (feed, script) = scripted_feed();
+            for id in ["a", "b", "c", "d"] {
+                script.deliver(unit(id));
+            }
+            let receipts: Vec<Receipt> =
+                feed.receive(4).unwrap().iter().map(|d| d.receipt).collect();
+            refuse(&script, scripted, FeedErrorKind::Fatal);
+            // Each other call gets a receipt of its own, so an acknowledge
+            // or fail does not lapse the receipt a later call uses.
+            for (i, c) in CALLS.into_iter().enumerate() {
+                if c as usize != scripted as usize {
+                    call(&feed, c, receipts[i])
+                        .unwrap_or_else(|e| panic!("{c:?} took {scripted:?}'s answer: {e}"));
+                }
+            }
+            assert_eq!(script.refusals_left(), 1);
+            let own = receipts[scripted as usize];
+            assert_eq!(kind(call(&feed, scripted, own)), FeedErrorKind::Fatal);
+        }
+    }
+
+    /// Pins that a scripted answer is served before the held check, so a
+    /// call with a lapsed receipt takes it and is not recorded as Gone.
+    #[test]
+    fn a_scripted_answer_goes_to_a_lapsed_receipt_first() {
+        let (feed, script) = scripted_feed();
+        let old = script.deliver(unit("a"));
+        let _ = feed.receive(8).unwrap();
+        script.redeliver(old);
+        script.refuse_next_renew(FeedErrorKind::Retryable);
+        assert_eq!(kind(feed.renew(old)), FeedErrorKind::Retryable);
+        assert!(script.gone().is_empty());
+        assert_eq!(kind(feed.renew(old)), FeedErrorKind::Gone);
+        assert_eq!(script.gone(), vec![old]);
+    }
+
+    #[test]
+    #[should_panic(expected = "Gone")]
+    fn scripting_gone_panics_for_receive() {
+        scripted_feed().1.refuse_next_receive(FeedErrorKind::Gone);
+    }
+
+    #[test]
+    #[should_panic(expected = "Gone")]
+    fn scripting_gone_panics_for_renew() {
+        scripted_feed().1.refuse_next_renew(FeedErrorKind::Gone);
+    }
+
+    #[test]
+    #[should_panic(expected = "Gone")]
+    fn scripting_gone_panics_for_acknowledge() {
+        scripted_feed()
+            .1
+            .refuse_next_acknowledge(FeedErrorKind::Gone);
+    }
+
+    #[test]
+    #[should_panic(expected = "Gone")]
+    fn scripting_gone_panics_for_fail() {
+        scripted_feed().1.refuse_next_fail(FeedErrorKind::Gone);
+    }
+
+    /// Pins that scripting a refusal of any reader call wakes the reader,
+    /// as every scripting call does.
+    #[test]
+    fn refusing_the_next_call_wakes_the_reader() {
+        for c in CALLS {
+            let (feed, script) = scripted_feed();
+            let (waker, park) = wake_channel();
+            feed.set_waker(waker);
+            assert!(!park.park(Duration::ZERO));
+            refuse(&script, c, FeedErrorKind::Retryable);
+            assert!(
+                park.park(Duration::ZERO),
+                "refusing the next {c:?} did not wake the reader"
+            );
+        }
     }
 
     /// Pins that a later `set_waker` replaces the waker: a scripting call

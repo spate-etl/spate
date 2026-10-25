@@ -12,8 +12,8 @@ zero infrastructure.
   write outcomes (success, retryable failure, fatal, delays on tokio test
   time) and inspect every captured batch down to decoded rows.
 - `scripted_feed()` → `ScriptedFeed` + `FeedScript`: script deliveries,
-  redeliveries, duplicates, dead letters, publish outcomes and depth reads
-  for a source that reads a work feed, and observe every acknowledgement,
+  redeliveries, duplicates, dead letters, publish outcomes, refused feed
+  calls and depth reads for a source that reads a work feed, and observe every acknowledgement,
   failure, renewal and depth read.
 - `TestDeserializer` (passthrough / split / fail-on-prefix),
   `TestEncoder`/`decode_rows`, and `EmitCollector` for exercising stages

@@ -1,5 +1,5 @@
 ---
-description: "Every metric family and its labels, plus alerting starting points for sink, source, and coordination signals."
+description: "Every metric family and its labels, plus alerting starting points for sink and source signals."
 ---
 
 # Metrics
@@ -328,84 +328,23 @@ way to reason about where a flush went, not an identity to compute.
 | Metric | Type | Extra labels | Description |
 |---|---|---|---|
 | `spate_checkpoint_pending_batches` | gauge | `partition` ⚠ | Unacknowledged batches tracked. The unlabeled series is the max across partitions; a labeled series is published for every partition the checkpointer tracks, including one with nothing unacknowledged. A partition that leaves the assignment is zeroed rather than deleted, on the first commit cycle after it goes, for the reason in [Absent, zero, and stale](#absent-zero-and-stale). Select the aggregate with `{partition=""}`. A `sum` over the bare name adds the max to the per-partition counts. Bounded by `checkpoint.max_pending_batches` — a reading above the limit is a defect. |
-| `spate_checkpoint_commits_total` | counter | `outcome` (`ok`\|`error`) | Source commit calls. A final commit that cannot confirm every partition the source still holds counts as `error`. |
+| `spate_checkpoint_commits_total` | counter | `outcome` (`ok`\|`error`) | Source commit calls. The final commit of a stop counts as one call. |
 | `spate_checkpoint_commit_duration_seconds` | histogram | | Commit round-trip. |
 | `spate_checkpoint_watermark_age_seconds` | gauge | | Age of the oldest unacknowledged batch — the primary "stuck pipeline" alert signal. |
 
-## Coordination (`spate_coordination_*`)
-
-Registered only when a source's coordinator was built with a
-`CoordinationMetrics`. A coordinator built in code and handed to a source has
-these families only when that code passed one. They fire alongside the source's
-own `spate_source_rebalances_total` / `spate_source_lanes_active`.
-
-| Metric | Type | Extra labels | Description |
-|---|---|---|---|
-| `spate_coordination_splits_owned` | gauge | | Splits this worker currently leases (its working set). |
-| `spate_coordination_splits_completed` | gauge | | Splits observed completed across the fleet (bounded jobs). On a store whose watch is polled, a worker other than the leader observes only the splits it has read, until the verdict. |
-| `spate_coordination_splits_quarantined` | gauge | | Splits parked after exhausting delivery attempts — **alert on > 0**: a bounded job with quarantined splits ends stalled, not complete. |
-| `spate_coordination_live_workers` | gauge | | Distinct live workers observed (the fleet view), including this one. A worker that has handed back its last split through `SplitCoordinator::release` counts itself only while its own presence key is in its view. |
-| `spate_coordination_leader` | gauge | | 1 while this worker holds the planner leadership lease. |
-| `spate_coordination_idle` | gauge | | 1 while this worker owns no splits and observes as a standby. |
-| `spate_coordination_splits_draining` | gauge | | Splits this worker is currently draining away under revocation — the **drain** count, so a drain whose revocation was cancelled keeps counting until it actually lands. It falls when the drain ends by any route: the release, a terminal commit, a `fail`, a fence. Sitting non-zero on one worker while the fleet stays visibly unbalanced means drains are not finishing — look at that worker's sink health, then at `drain_deadline`. |
-| `spate_coordination_acquisitions_total` | counter | `reason` (`create`\|`reclaimed`\|`expired`\|`reassigned`) | Split leases acquired, by how the split became claimable. `reassigned` is the healthy rebalance path: the previous owner cleared the record before letting go — a drained revocation, or a shutdown/scale-down hand-back — so the claim replays nothing. (The two are one label because a claiming worker cannot tell them apart: both present as a cleared owner and a vanished lease. Use `revocations_total{outcome="drained"}` on the releasing side to count revocations specifically.) `expired` spikes mean workers are dying — a dead owner's uncommitted tail replays. |
-| `spate_coordination_split_losses_total` | counter | `reason` (`fenced`\|`starved`\|`revoked`) | Splits lost involuntarily: `fenced` by a higher epoch, a peer's or this worker's own quarantining report read back, `starved` (self-fenced after a full lease with no successful write — store unreachable; when a renewal whose reply was lost turns out to have written, the lease counts from the first failed renewal since the last successful write), or `revoked` — a cooperative drain that never completed, so this worker forced its own release and the uncommitted tail replays. Either the leader had un-assigned the split and the drain was declined or outran `drain_deadline`, or the revocation was `cancelled` and the drain it left behind then committed nothing for a full `drain_deadline` (a stalled drain is released too, or the split stays owned with nothing reading it — that one is usually re-claimed by this same worker). `revoked` and `spate_coordination_revocations_total{outcome="forced"}` are not the same event: a release after a cancelled drain counts `revoked` with no revocation outcome at all, and a fence mid-drain counts `forced` alongside `fenced`. |
-| `spate_coordination_releases_total` | counter | | Voluntary hand-backs (graceful shutdown, scale-down). |
-| `spate_coordination_revocations_total` | counter | `outcome` (`requested`\|`drained`\|`forced`\|`cancelled`) | Splits the leader moved away from this worker by dropping them from its assignment. All four count on the **releasing** worker — one lifecycle, not two sides of a negotiation. `requested` is the denominator and every revocation terminates in exactly one of the other three — including when the split completes or is `fail`ed mid-drain, or when the process shuts down while draining — so `requested - drained - forced - cancelled` is the **revocations** still in flight. That is *not* `spate_coordination_splits_draining`, which counts **drains**: `cancelled` ends a revocation and leaves its drain running, so the gauge reads higher for as long as that drain takes. `drained` completed cooperatively and replays nothing; the gaining worker counts the matching `acquisitions_total{reason="reassigned"}`. `forced` means the source declined, the drain outran `drain_deadline`, or the split was fenced away before the release landed — the uncommitted tail replays. Sustained `forced` is the alert: `drain_deadline` is too tight for the source's commit interval, or a lane is wedged. `cancelled` means the leader took the revocation back — it named the split for this worker again while this worker still held it — so a drain slower than `drain_deadline` gets to finish cleanly instead of being charged a replay for a move nobody wants. If the source had already stopped intake, that drain still ends by handing the split back and this worker re-claims it replay-free (an `acquisitions_total{reason="reassigned"}` with no matching `drained`); if the source had declined, the split stays. Sustained `cancelled` means membership is flapping faster than a drain takes. `forced` does not imply a `spate_coordination_split_losses_total`: a `fail` mid-drain forces without one, except that a revocation forced after a failure report whose reply was lost counts `revoked`, or `fenced` if the report quarantined the split and the release read it back before the watch delivered it; a quarantining report the watch delivers first ends the revocation `forced` with no loss, and a fence mid-drain counts under `fenced` rather than `revoked`. |
-| `spate_coordination_splits_planned_total` | counter | | Splits this worker wrote into the plan while leader. |
-| `spate_coordination_replans_total` | counter | `outcome` (`ok`\|`error`\|`noop`) | Planner runs while leader; `noop` = the enumeration produced nothing new (the normal steady state of an open plan); `error` = the run ended without a confirmed plan-record write, because the planner, a split write, the recount or the plan write failed, or leadership moved during the run; splits it seeded stay in the store and count as planned. |
-| `spate_coordination_split_failures_total` | counter | | Poison reports for a split: an explicit `fail` from the source, and a gain whose carried progress the source refused on resume. Counted when the report is offered rather than when it lands, and a refused report is re-offered until it lands or its split is lost or quarantined, so a split can count more than once per tenancy. A report for a tenancy this worker no longer holds is fenced and not counted, except that a re-send of an ended tenancy's own report that already applied returns `Ok` and is counted. |
-| `spate_coordination_quarantines_total` | counter | | Splits parked at the attempt cap. |
-| `spate_coordination_writes_total` | counter | `outcome` (`ok`\|`conflict`\|`error`) | Split-record writes. `conflict` is a lost compare-and-swap — fencing working as designed, alarming only in bulk. |
-| `spate_coordination_write_duration_seconds` | histogram | | Split-record write round-trip. |
-| `spate_coordination_replan_duration_seconds` | histogram | | One planner run (enumeration and seeding included). |
-| `spate_coordination_reconcile_duration_seconds` | histogram | | One full reconcile listing (the missed-watch-event backstop). |
-| `spate_coordination_store_op_duration_seconds` | histogram | `op` (`get`\|`put`\|`delete`\|`list`\|`watch`) | Store primitive round-trips — the NATS latency view. |
-| `spate_coordination_drain_duration_seconds` | histogram | | One cooperative drain, on the **releasing** worker: revocation requested to the release landing — stopping intake at a safe boundary, committing the drained tail, giving the split up. Only drains that end a revocation cooperatively are observed; a forced release is a *failed* drain and is counted as `revocations_total{outcome="forced"}` instead, so `drain_deadline` never shows up as a spike in this distribution. A drain whose revocation was `cancelled` is not observed either — when it lands it is no longer ending a revocation, so timing it would mix "how long a revocation takes" with "how long a withdrawn one took to unwind". Read it against `drain_deadline`: a p99 creeping toward it means forced revocations are imminent. |
-| `spate_coordination_assignment_latency_seconds` | histogram | | One assignment wait, on the **gaining** worker: a split appearing in this worker's assignment to this worker holding its lease. This is time-to-balance as an operator experiences it — how long work the leader had already decided this worker should be doing sat undone. It spans whatever stood in the way, including the previous owner's drain, rather than flattering itself by timing only the final claim. |
-| `spate_coordination_split_lease_headroom_seconds` | histogram | | Time left before this worker's starvation self-fence, observed on the owning worker each time a split-lease renewal is confirmed. It is measured on this worker's clock and can be longer or shorter than the lease the store still grants. 0 means the renewal was confirmed a full lease or more after the last confirmed write. When a renewal whose reply was lost turns out to have written, the value is measured from the first failed renewal, as `starved` counts. Leadership and presence renewals are not included. |
-
-### The coordination latencies do not compose
-
-`drain_duration_seconds` and `assignment_latency_seconds` are separate
-families. One family split by a `phase` label would assert a containment
-that does not hold, so do not add, subtract, or otherwise combine them.
-
-They are measured in different processes. A drain is timed on the worker
-*losing* a split, anchored on that worker observing its own `assign` record
-shrink. An assignment wait is timed on the worker *gaining* a split,
-anchored on that worker observing its own `assign` record grow. The leader
-publishes those two records separately and each worker sees its own on its
-own clock, so even for a single split's move neither window reliably
-contains the other. A gaining worker that observes its assignment late can
-start its wait after the drain has already finished.
-
-Their populations differ too. Every assigned split is waited for, including
-brand-new splits that no worker has held and a dead owner's work reclaimed
-after lease expiry; no revocation was involved in either, and no drain was
-timed.
-`assignment_latency_seconds` is therefore not a revocation measurement at
-all, which is the deeper reason it is not a `phase` of one.
-
-Two families rather than one label also makes the meaningless query
-unwritable instead of discouraged: with a shared family,
-`histogram_quantile` over `sum by (le)`, aggregating the `phase` away,
-looks like an ordinary panel expression while merging two populations
-recorded on two machines.
-
-Cardinality note: a coordinated source's checkpoint partitions are minted
-per split *tenancy* (monotonic), so per-partition series under
-`metrics.per_partition_detail: true` grow over a long, churny job; the
-default (off) is unaffected. A retired tenancy's checkpoint series is zeroed
-once the checkpointer stops tracking it, which keeps a `sum` over the family
-honest. Zeroing bounds nothing else. The exporter holds the series and its
-labels for the life of the process, so scrape size and memory both grow by one
-series per retired tenancy and never shrink, and the figure to budget against
-is the number of tenancies a job retires rather than the number it holds at
-once. `spate_source_lag_records` is ungated, so a source that both publishes
-lag and mints monotonic partition ids would grow without bound. No shipped
-source does (Kafka's partitions are bounded by the topic; the S3 source
-publishes no lag), but a new connector must not.
+Cardinality note: a feed reader mints a checkpoint partition for each lane it
+runs, and a partition id is never reused. Per-partition series under
+`metrics.per_partition_detail: true` therefore grow over a long job; the
+default (off) is unaffected. A retired lane's checkpoint series is zeroed once
+the checkpointer stops tracking it, which keeps a `sum` over the family honest.
+Zeroing bounds nothing else. The exporter holds the series and its labels for
+the life of the process, so scrape size and memory both grow by one series per
+retired lane and never shrink, and the figure to budget against is the number
+of lanes a job retires rather than the number it holds at once.
+`spate_source_lag_records` is ungated, so a source that both publishes lag and
+mints monotonic partition ids would grow without bound. No shipped source does
+(Kafka's partitions are bounded by the topic; the S3 source publishes no lag),
+but a new connector must not.
 
 ## End-to-end
 
@@ -427,9 +366,7 @@ publishes no lag), but a new connector must not.
 
 Configured on the exporter, by name suffix or full name:
 
-- `*_duration_seconds`, `spate_e2e_latency_seconds`,
-  `spate_coordination_assignment_latency_seconds` and
-  `spate_coordination_split_lease_headroom_seconds`: exponential
+- `*_duration_seconds` and `spate_e2e_latency_seconds`: exponential
   `0.001 .. 60` (1ms, 2.5ms, 5ms, 10ms, 25ms, 50ms, 100ms, 250ms, 500ms,
   1s, 2.5s, 5s, 10s, 30s, 60s).
 - `spate_sink_batch_rows`: powers of 4 from `64` to `1_048_576`.
@@ -485,14 +422,5 @@ Configured on the exporter, by name suffix or full name:
   replica set, not the server. Keep a flush-duration alert too if you have a
   commit-lag SLO, since that is the family the watermark waits on, but do not
   read it as sink latency.
-- A worker came within 2.5s of self-fencing a split, on its own clock. At the
-  default 30s lease, alert on this expression:
-
-  ```promql
-  increase(spate_coordination_split_lease_headroom_seconds_bucket{le="2.5"}[15m]) > 0
-  ```
-
-  Use a bucket boundary from [Histogram buckets](#histogram-buckets) at or below
-  the margin you want; any other `le` matches no series. Each connector adds
-  alerts over its own families; those live in the connector's `## Metrics`
-  section, indexed under [Connector families](#connector-families).
+Each connector adds alerts over its own families; those live in the connector's
+`## Metrics` section, indexed under [Connector families](#connector-families).

@@ -114,14 +114,9 @@ deadline.
 
 ### Epoch
 
-Several generations share the name, all monotonic, all fencing something:
-the **assignment epoch** in the checkpointer, bumped on every rebalance
+The **assignment epoch** in the checkpointer, bumped on every rebalance
 (`Checkpointer::begin_epoch`) so acks issued under a previous assignment
-are discarded; the **lease epoch** (`LeaseEpoch`) on a coordinated
-[split](#split), bumped on every ownership change so a stale owner's
-commit loses its compare-and-swap; and the **plan generation**, bumped by
-every newly elected coordination leader so a deposed leader's plan write
-is rejected.
+are discarded.
 
 ### Feed
 
@@ -139,15 +134,6 @@ the source's re-enqueue cap it acknowledges the unit without one and counts
 it. On a graceful stop, a feed that [hands back](#hand-back) takes the units a
 source has not read to its end. The in-process feed (`MemoryFeed`) serves one
 instance and keeps nothing across a restart.
-
-### Fencing token
-
-A monotonically increasing number a writer must present with a write, so
-that a writer whose authority lapsed (an expired lease, a paused process)
-is *rejected by the store* rather than trusted. In coordinated sources
-the token is the split record's revision/epoch, and the fenced write is
-the progress commit itself: a fenced commit writes **nothing**. Leases
-alone cannot provide this; only the store-side check can.
 
 ### Frame codec
 
@@ -190,9 +176,8 @@ and one given a feed in code ends at a shutdown.
 
 The data-plane unit of a source (`SourceLane`): one pollable stream pinned
 to one pipeline thread, yielding borrowed payload batches. Lanes map m:n
-onto pipeline threads. In a coordinated source, lanes are purely local: the
-`CoordinationDriver` materializes one lane per in-flight [split](#split), and
-lane ids are never reused. `spate_source_lanes_active` counts them.
+onto pipeline threads. Lane ids are never reused. `spate_source_lanes_active`
+counts them.
 
 *Connector mapping:*
 [Kafka source](../04-connectors/sources/kafka/README.mdx#lanes-partitions-on-pipeline-threads)
@@ -201,15 +186,6 @@ lane ids are never reused. `spate_source_lanes_active` counts them.
 — one object or byte range in progress ·
 [Datagen source](../04-connectors/sources/datagen/README.mdx#configuration) —
 one generator, `partitions` of them.
-
-### Lease
-
-A time-bounded claim on one [split](#split): a TTL'd key in the
-coordination store that the owner rewrites (heartbeats) at a third of the
-lease duration. A dead owner stops heartbeating and the lease expires,
-releasing the split to the fleet; a live owner that cannot reach the
-store self-fences after one full lease. Leases provide *liveness*;
-correctness comes from the [fencing token](#fencing-token).
 
 ### Lister
 
@@ -223,65 +199,6 @@ solo run on the in-process feed lists its own input.
 *Connector mapping:*
 [S3 source](../04-connectors/sources/s3/README.mdx#the-lister-run)
 — `S3Source::list_once`.
-
-### Quarantine
-
-Where poison [splits](#split) go: a split whose tenancies keep ending in
-failure consumes a delivery attempt per non-graceful end and is parked at
-the cap, where it stays visible, is never re-offered, and blocks `AllComplete`
-(a bounded job with quarantined work ends stalled, not falsely complete).
-
-### Split
-
-The leasable unit of work of a coordinated source, enumerated by the
-source's `SplitPlanner`. Deterministic id, opaque descriptor, weight hint;
-progress commits are per-split, fenced, and resumable, so a taken-over split
-continues from its last committed watermark. Distinct from a [lane](#lane)
-(local execution) and a [partition](#partition) (checkpoint bookkeeping).
-
-A database source would plan an id range.
-
-### Assignment
-
-How a coordinated fleet stays balanced: the elected leader computes which
-[splits](#split) every live worker should hold and publishes one
-`assign.{instance}` record per worker; each worker reconciles toward its
-own record, claiming what is named and cooperatively giving up what is
-not. Workers never select work for themselves. Balance is on split
-*weight* (not count), and sticky. A split stays with the worker holding its
-lease, else the worker it was last assigned to, else the owner on its
-progress record, whichever first is alive with a free lane. It moves only
-when that strictly reduces imbalance, because every move costs a
-[revocation](#cooperative-revocation).
-
-An assignment is an *instruction, not a fence*: it says what a worker
-should hold, never what it may write. Ownership and safety come from the
-[lease](#lease) and the [fencing token](#fencing-token), so two leaders
-publishing contradictory assignments still cannot produce two owners. The
-normative spec is [Work assignment](../02-concepts/08-work-assignment.mdx).
-
-### Cooperative revocation
-
-How a split leaves a live worker: it disappears from that worker's
-[assignment](#assignment), and the worker stops the split's intake at a
-safe boundary, lets everything it already emitted reach the sink and
-acknowledge, commits the final watermark, and releases the split. The next
-owner resumes from that commit, covering everything the previous one
-emitted, with zero replay.
-
-`drain_deadline` bounds it. A source that declines to stop at a safe
-boundary, or a drain still running at the deadline, has its release
-**forced** instead: the split goes back anyway and its uncommitted tail
-replays under the next owner, bounded by one commit interval. Forcing
-keeps one wedged drain from pinning a rebalance open; the leader's
-revocation is a decision, not a request.
-
-If the leader takes the revocation back mid-drain, it is **cancelled** and
-the deadline no longer applies: nothing is waiting for the split, so a slow
-drain gets to finish cleanly. The drain is then bounded by silence instead:
-committing nothing for `drain_deadline` releases it anyway, so a wedged
-drain cannot leave a split owned with nothing reading it. See
-[Work assignment](../02-concepts/08-work-assignment.mdx#revocation).
 
 ### Partition
 
@@ -349,8 +266,7 @@ rather than being skipped. Distinct from the
 One piece of work a [feed](#feed) carries (`Unit`): an id, and an opaque body
 the source decodes to find the input it reads. A unit is acknowledged once,
 as a whole, and carries no progress, so a unit delivered again is read again
-from its start. Distinct from a [split](#split), whose progress a coordinated
-source commits as it reads.
+from its start.
 
 *Connector mapping:*
 [S3 source](../04-connectors/sources/s3/README.mdx#unit-identity-and-drift) —

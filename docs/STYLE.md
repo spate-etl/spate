@@ -65,7 +65,7 @@ tuning numbers, vendor troubleshooting, or vendor client-library behavior.
 State the rule in framework vocabulary and let the connector page carry the
 mechanism. Usually the neutral statement is the *truer* one. The statement
 "a source that stops servicing its liveness protocol loses its work assignment"
-holds for a consumer group, a lease TTL and a coordinated assignment alike,
+holds for a consumer group and a queue visibility timeout alike,
 where the vendor-specific version holds for one of them.
 
 **Connector pages name one vendor: their own.** A connector page must not
@@ -138,7 +138,6 @@ Connectors live under `docs/user-guide/04-connectors/`, grouped by role:
   sources/              feed the pipeline        (README.mdx card index + one folder per source)
   sinks/                write records out        (README.mdx card index + one folder per sink)
   formats/              decode payloads          (README.mdx card index + one folder per format)
-  coordination/         back the coordination seam (README.mdx card index + one folder per store)
   feeds/                carry work units to a source (README.mdx card index + one folder per backend)
   memory.mdx            dual-role test connector — the one deliberate flat-file exception
 ```
@@ -152,9 +151,6 @@ Rules:
 - **A crate that is both a source and a sink** is documented as two pages, one
   under `sources/` and one under `sinks/`, because the reader is looking for a
   role, not a crate.
-- **A coordination store is a connector.** It plugs into a trait seam, ships
-  behind its own facade feature, and carries config and metrics like any other,
-  so it is documented like any other, under `coordination/`.
 - **A feed backend is a connector.** It plugs into the feed trait, ships
   behind its own facade feature, and carries config like any other, so it is
   documented like any other, under `feeds/`.
@@ -170,7 +166,7 @@ Rules:
 
 Copy `04-connectors/_template.mdx`. The heading order is fixed:
 
-1. `# <Connector> (source|sink|format|coordination store|feed)`, then a
+1. `# <Connector> (source|sink|format|feed)`, then a
    one-paragraph summary in the canonical shape: "The X <role> (`crate`,
    feature `f` on the `spate` facade) …".
 2. A construct-it snippet, introduced with the canonical sentence
@@ -231,7 +227,7 @@ walkthroughs (those go in `03-guides/configuring-pipelines.mdx`).
   (`batch`/`inflight`/`retry`/`breaker`) tables live here and nowhere else.
   Connector pages link to `#sink-pool` instead of restating those defaults.
 - **Connector-owned keys stay on the connector page** and are indexed from the
-  appendix's `source:/deserializer:/sink:/coordination:` mapping table. The
+  appendix's `source:/deserializer:/sink:/feed:` mapping table. The
   appendix carries a non-exhaustive disclaimer.
 
 ## 5. Cross-cutting content — single source of truth
@@ -502,7 +498,7 @@ Reach past that only for something an example cannot show (a connector's own
 wiring, or a test whose subject is testing).
 
 Name a region for what the code *is*, never for where it sits on a page:
-`chain`, `encoder`, `coordinator`, not `step_3`. Pages get reorganized and the
+`chain`, `encoder`, `reader`, not `step_3`. Pages get reorganized and the
 region outlives the heading above it. A region is one contiguous stretch, so a
 page wanting to stitch two apart wants two fences with the sentence that belongs
 between them.

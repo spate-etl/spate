@@ -76,9 +76,3 @@ An invariant states a property; it does not argue for it. The argument is in the
 decision record that established it. [`adr/`](adr/README.mdx) indexes them, and
 each record's `Confirmation` section names the invariant, test or gate that
 holds it.
-
-One documentation page is normative rather than descriptive:
-[`user-guide/02-concepts/08-work-assignment.mdx`](user-guide/02-concepts/08-work-assignment.mdx).
-Its own numbered invariants name the property tests that enforce them, and are
-separate from these. Changing the balancer means changing that page in the same
-commit.

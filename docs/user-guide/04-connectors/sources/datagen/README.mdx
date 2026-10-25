@@ -6,8 +6,7 @@ description: "The Datagen source generates a synthetic storefront event stream i
 
 The datagen source (`spate-datagen`, feature `datagen` on the `spate` facade)
 generates a synthetic storefront event stream in process, so a pipeline can be
-assembled, run and measured with no broker, bucket or coordination store behind
-it. **It keeps no durable progress**, since every run regenerates its stream
+assembled, run and measured with no broker or bucket behind it. **It keeps no durable progress**, since every run regenerates its stream
 from the beginning, which makes it reproducible and not resumable. It is a demo
 and test source, and a pipeline that depends on it for delivery is depending on
 something that replays in full after any restart.

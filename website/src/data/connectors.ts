@@ -1,7 +1,7 @@
 /** The connector inventory the homepage renders. One entry per crate, as the README's table. */
 export type Connector = {
   name: string;
-  role: 'source' | 'sink' | 'source · sink' | 'source · sink · feed' | 'format' | 'store' | 'feed';
+  role: 'source' | 'sink' | 'source · sink' | 'source · sink · feed' | 'format' | 'feed';
   crate: string;
   feature: string;
   summary: string;
@@ -56,14 +56,6 @@ export const CONNECTORS: Connector[] = [
     feature: 'json',
     summary: 'Single, NDJSON and array framings, with an optional SIMD backend.',
     docs: '/docs/user-guide/connectors/formats/json',
-  },
-  {
-    name: 'Coordination',
-    role: 'store',
-    crate: 'spate-coordination',
-    feature: 'coordination',
-    summary: 'Leader-computed sticky assignment over a pluggable store.',
-    docs: '/docs/user-guide/connectors/coordination/',
   },
   {
     name: 'Datagen',

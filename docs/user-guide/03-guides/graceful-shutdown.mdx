@@ -35,10 +35,7 @@ revocation, one choreography tested constantly by every rebalance:
 
 1. **Lanes stop.** The controller stops event polling and tells every
    driver thread to shut down. Each driver stops polling its lanes and
-   drops them, so no new data enters the pipeline. A coordinated source
-   that passes the stop to its driver, as the built-in sources do, also
-   stops waiting on its coordination store. A commit, failure report or
-   revocation reply already waiting returns at once, and the positions of a
+   drops them, so no new data enters the pipeline. The positions of a
    commit the stop cuts short go out in the final commit in step 4.
 2. **Chains flush.** Each driver flushes its operator chain: parked chunks
    and partial buffers are pushed to the shard queues, then the chain (and
@@ -54,22 +51,14 @@ revocation, one choreography tested constantly by every rebalance:
    deadline, which leaves that second for the feed's close in step 4.
 4. **Offsets commit.** The controller drains the checkpointer and runs a final
    synchronous commit + `flush_commits`, committing only watermarks that cover
-   durably written data, per the at-least-once invariant. A coordinated source
-   that forwards `Source::commit_final` to `CoordinationDriver::commit_final`
-   runs this commit under one budget, `coordination.op_timeout`, for all its
-   splits together. Splits it does not reach before the budget ends keep their
-   last committed position, and the next owner may replay records from it. The
-   runtime then closes a feed that hands back: the feed sends the
+   durably written data, per the at-least-once invariant. The runtime then closes a feed that hands back: the feed sends the
    acknowledgments it still has queued and gives up the units it holds, within
    what is left of the deadline. A unit it cannot give up in time comes back
    after the feed's redelivery delay. A feed whose backend gives a commit or a
    group leave no bound can finish them after the deadline, and `run` waits for
    it; the connector page's "Stop" section says when.
-5. **The source closes.** A coordinated source departs its job: it hands
-   back its splits, its leadership and its membership, so peers take over
-   without waiting out a lease. The departure is bounded by
-   [`coordination.op_timeout`](../07-reference/configuration.mdx#coordination);
-   whatever it cannot hand back expires.
+5. **The source closes.** It releases what it holds, such as a consumer
+   group membership.
 
 The I/O runtime stops only after the source has closed. Then everything
 joins and `run` returns an `ExitReport`.
@@ -89,25 +78,7 @@ pool's one-second backstop, the final commit (step 4), the source closing (step
 one, raise the other. With a feed that hands back, the stop's reading and the
 feed's close also run inside the budget, and startup refuses a `drain_timeout`
 of 5s or less. A feed's close that outlasts what is left of the budget falls
-into the gap too. A coordinated source that forwards `Source::commit_final` can
-take up to `coordination.op_timeout` (10s by default) for the final commit
-against a slow store, and up to `op_timeout` again to close. Where a slow store
-at shutdown is likely, size the gap to at least twice `op_timeout` plus a few
-seconds. At the default that is more than the 5s gap. The same sizing holds when
-the store stopped answering before SIGTERM, because the stop ends any wait on
-the store already under way. A coordinated source that does not forward
-`Source::commit_final` can take up to three times `op_timeout` for each split in
-turn at the final commit. One whose `open` does not pass `SourceCtx::stop` to
-`CoordinationDriver::set_stop` can wait as long for a commit already under way
-at SIGTERM, and one whose coordinator ignores `SplitCoordinator::set_stop` can
-wait up to three times `op_timeout` for the one command under way
-([Custom sources](../06-extending/custom-source.mdx#3-delegate-the-choreography-coordinationdriver)).
-Keep `op_timeout` above about (2N + 3) times your store's write latency,
-where N is the number of splits an instance holds (at most `max_in_flight`).
-Below that, the final commit leaves splits to replay even on a healthy
-store. That figure is derived from the commit and heartbeat path and was not
-measured
-([ADR-0059](../../adr/0059-final-coordinated-commit-runs-under-one-op-timeout-budget.md)).
+into the gap too.
 :::
 
 ```yaml
@@ -117,9 +88,7 @@ checkpoint:
 
 A SIGKILL mid-drain is still safe for data (nothing uncommitted is lost;
 it replays), but it forfeits the clean commit, so the restart replays more
-than it needed to. A SIGKILL while the source closes costs what a crash costs
-for whatever it had not handed back: those leases expire, and each takeover of
-one of those splits consumes a delivery attempt. In the same way, a SIGKILL
+than it needed to. A SIGKILL
 before a feed's hand-back leaves each unit the instance held to come back
 after the feed's redelivery delay.
 

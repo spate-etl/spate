@@ -43,14 +43,6 @@ router tiers (meta-only `KeyHashRouter` and record-aware `RecordRouter`), why
 one saturated shard pauses the whole pipeline, and the limit that hot shards
 are your data's shape, not the router's choice.
 
-## [7. Source coordination](07-source-coordination.mdx)
-
-How several pipeline replicas divide one broker-less source's work: a
-leader-elected planner enumerates splits, workers lease them with heartbeats and
-reconcile toward a leader-computed assignment, and epoch-fenced commits make
-stale writes impossible. At-least-once is preserved, and the failure mode is
-duplicates, never loss.
-
 ## [9. Work feed](09-work-feed.mdx)
 
 How a source reads work units from a queue: the ack rule that ties a unit's

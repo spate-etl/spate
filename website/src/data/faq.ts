@@ -11,11 +11,11 @@ export function faq(msrv: string, edition: string): Array<{q: string; a: string}
     },
     {
       q: 'Which connectors ship?',
-      a: 'Kafka as a source, a sink and a work feed, a ClickHouse sink, an S3 backfill source, an SQS work feed, Avro and JSON formats, a coordination store and a synthetic source for demos and tests. Each sits behind one feature on the facade crate, and nothing is enabled by default.',
+      a: 'Kafka as a source, a sink and a work feed, a ClickHouse sink, an S3 backfill source, an SQS work feed, Avro and JSON formats and a synthetic source for demos and tests. Each sits behind one feature on the facade crate, and nothing is enabled by default.',
     },
     {
       q: 'How is it tested?',
-      a: 'Property tests cover the checkpoint tracker, the codecs and the assignment protocol; loom models the tracker directly. Kafka runs against a mock cluster on every pull request, and brokers, ClickHouse and object stores run against real containers whenever a change reaches them.',
+      a: 'Property tests cover the checkpoint tracker, the codecs; loom models the tracker directly. Kafka runs against a mock cluster on every pull request, and brokers, ClickHouse and object stores run against real containers whenever a change reaches them.',
     },
     {
       q: 'Can I write my own source or sink?',

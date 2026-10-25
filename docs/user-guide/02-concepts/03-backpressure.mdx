@@ -17,20 +17,15 @@ queues with `try_send`, never a blocking `send`. When a queue rejects (or
 the byte budget crosses its high watermark), the source loop **pauses the
 offending [lanes](../07-reference/glossary.mdx#lane) and keeps polling**.
 
-The source loop is what services the
-[assignment protocol](08-work-assignment.mdx),
-and a loop parked inside `send()` stops servicing it. For a source whose
-liveness proof rides the read loop itself, the proof lapses and the
-assignment is withdrawn. For a source whose liveness runs in the
-background, the [leases](../07-reference/glossary.mdx#lease) stay healthy
-but the parked loop cannot answer a reassignment request, so the revocation
-stalls to its deadline and the work is
-[revoked forcibly](../07-reference/glossary.mdx#cooperative-revocation)
-and replayed by the next owner. Either way the damage is fleet-wide. Peers
-absorb the moved work, they pause in turn, and "the sink is slow" has been
-converted into a churning fleet. Pausing lanes while keeping the loop
-running keeps the protocol serviced and confines the slowdown to where it
-belongs.
+The source loop is what services the source's liveness protocol, and a loop
+parked inside `send()` stops servicing it. For a source whose liveness proof
+rides the read loop itself, the proof lapses and the assignment is withdrawn.
+A feed reader renews the units it holds from the same loop, so a parked loop
+lets them lapse, and the feed redelivers each to another instance, which reads
+it again from its start. Either way the damage is fleet-wide. Peers absorb the
+moved work, they pause in turn, and "the sink is slow" has been converted into a
+churning fleet. Pausing lanes while keeping the loop running keeps the protocol
+serviced and confines the slowdown to where it belongs.
 
 The same reasoning protects the ack path: acknowledgments travel over an
 unbounded channel and atomic counters, so a full data path can never block

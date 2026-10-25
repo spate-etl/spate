@@ -85,7 +85,7 @@ A single shared multi-thread tokio runtime (default 2 workers,
   concrete sink.
 - **The admin HTTP server** — `/metrics`, `/healthz`, `/readyz`. See
   [Monitoring](../05-deployment/monitoring.mdx).
-- **Async edge work** — a schema-registry fetch, a coordination heartbeat.
+- **Async edge work** — a schema-registry fetch, a feed lease renewal.
   Connectors get a handle to this runtime before `run` via
   `pipeline.io_handle()` and `pipeline.block_on(..)`.
 

@@ -182,8 +182,8 @@ Assignment changes are where at-least-once is won or lost:
   *current* epoch; existing lanes and their in-flight acks are untouched.
   Lane ids must be new, never reused from the source's lifetime,
   and each lane's partition must be fresh, not one revoked earlier in
-  the epoch. Coordinated sources emit this for split gains, so a routine gain
-  never drains flowing lanes.
+  the epoch. Feed readers emit this for each unit part they take up, so a
+  routine gain never drains flowing lanes.
 - **`LanesRevoked` carries a `DrainBarrier`.** The runtime trips it for the
   owning pipeline threads, which stop the lanes, flush in-flight records,
   and arrive at the barrier. Complete the revocation, final synchronous
@@ -192,7 +192,7 @@ Assignment changes are where at-least-once is won or lost:
   [Delivery guarantees](../02-concepts/02-delivery-guarantees.mdx).
 - **`LanesRetired` removes finished lanes without a barrier**, strictly
   for lanes whose input is fully delivered, acknowledged, *and committed*
-  (e.g. a coordinated split whose terminal progress reached the store), so
+  (e.g. a feed unit part whose last record was acknowledged and settled), so
   by contract nothing unflushed or uncommitted can exist behind them. If
   any in-flight data or uncommitted acknowledgment may remain, use
   `LanesRevoked`.

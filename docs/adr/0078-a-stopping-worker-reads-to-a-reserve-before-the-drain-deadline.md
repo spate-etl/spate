@@ -63,10 +63,10 @@ continues until each unit is acknowledged or handed back.
 - Bad, because the hand-back runs inside the same budget as the sink drain,
   and a pod killed before it lands returns its units only after one visibility
   period, on Kafka after the session timeout.
-- Bad, because the sink drain has the 5 s reserve less 1 s for the feed's
-  close, and a longer drain is cut. With a feed on SQS or Kafka, startup
-  refuses a `checkpoint.drain_timeout` of 5 s or less (the [feed-section
-  record](0079-the-feed-is-configured-in-a-top-level-section-and-provisioned-by-the-operator.md)).
+- Bad, because the sink drain has the 5 s reserve less 1 s for the feed's close,
+  and a longer drain is cut. With a feed on SQS or Kafka, startup refuses a
+  `checkpoint.drain_timeout` of 5 s or less (the
+  [feed-section record](0079-the-feed-is-configured-in-a-top-level-section-and-provisioned-by-the-operator.md)).
 - Bad, because on Kafka a commit waiting on a slow coordinator, and a leave the
   broker does not answer for up to 5 s, finish after the deadline, on the
   consumer thread.
@@ -88,8 +88,9 @@ period, is read again by the partition's next owner.
 `the_hand_back_and_sink_drain_finish_inside_the_drain_timeout`.
 `crates/spate-kafka/tests/feed_kafka.rs`'s
 `a_stopping_worker_commits_finished_units_before_leaving_the_group`. The
-[feed-section record](0079-the-feed-is-configured-in-a-top-level-section-and-provisioned-by-the-operator.md)'s `a_feed_refuses_a_drain_timeout_within_the_read_reserve`
-pins the reserve's lower bound.
+[feed-section record](0079-the-feed-is-configured-in-a-top-level-section-and-provisioned-by-the-operator.md)'s
+`a_feed_refuses_a_drain_timeout_within_the_read_reserve` pins the reserve's
+lower bound.
 
 ## More information
 

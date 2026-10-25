@@ -147,9 +147,10 @@ receives only while it holds fewer.
 The operator provisions a feed's queues, topics and dead-letter destinations,
 and the notification rules that publish to it. The framework creates none of
 them. At startup the feed reads the settings it depends on and refuses a
-destination it cannot read. A backend that can compare retention also refuses
-a dead-letter destination that would expire a unit before the source queue does. A bounded job uses a queue and a dead-letter destination of its own.
-Each feed backend's page lists its checks and the permissions its roles need.
+destination it cannot read. A backend that can compare retention also refuses a
+dead-letter destination that would expire a unit before the source queue does. A
+bounded job uses a queue and a dead-letter destination of its own. Each feed
+backend's page lists its checks and the permissions its roles need.
 
 ## Related
 

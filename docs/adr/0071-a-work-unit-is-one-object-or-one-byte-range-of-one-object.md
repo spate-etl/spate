@@ -68,7 +68,8 @@ dead-lettered the same way. A message is one unit whose created records of
 non-empty objects give one part each, acknowledged once after every part has
 retired under the work-feed record's ack rule; a worker reads a part's ranges as
 ADR-0054 cuts them, and each range in progress counts toward the units it holds
-(the [feed-section record](0079-the-feed-is-configured-in-a-top-level-section-and-provisioned-by-the-operator.md)).
+(the
+[feed-section record](0079-the-feed-is-configured-in-a-top-level-section-and-provisioned-by-the-operator.md)).
 
 ### Consequences
 

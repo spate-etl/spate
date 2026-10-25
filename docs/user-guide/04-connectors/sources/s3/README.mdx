@@ -244,6 +244,22 @@ these permissions besides `s3:GetObject`:
 RustFS and Ceph RGW have not been tested with a role that lacks list
 permission.
 
+The operator provisions the feed's queues and the store's notification rules.
+Spate creates neither. Each role needs:
+
+- **A worker:** the read permissions above, read access at the
+  [job location](#bounded-jobs-and-the-job-location), and the feed's receive,
+  acknowledge and send permissions.
+- **A lister run:** list access to the prefix, read, write and delete access at
+  the job location, and the feed's send permission.
+- **The operator:** whatever creates the queue, its dead-letter queue and the
+  bucket's notification configuration. The worker's startup check reads both
+  queues' attributes or the topics' configuration.
+
+The [SQS feed](../../feeds/sqs/README.mdx#security-credentials-permissions-and-tls)
+and [Kafka feed](../../feeds/kafka/README.mdx#startup-checks) pages list the
+feed's own actions.
+
 A TLS rejection by the store or by the credential endpoint fails the pipeline
 the same way. That covers a certificate that fails verification, including one
 expired by the client's clock, and a TLS alert with which the server rejects
@@ -386,7 +402,21 @@ back to the queue unread, one receive closer to `maxReceiveCount`. On Kafka a
 waiting delivery's offset holds back its partition's commit point.
 
 `units_held` bounds the lanes the source reads at once, one per whole object or
-range, and with them its read parallelism. The default is 96. On a durable
+range, and with them its read parallelism. The default is 96.
+
+The default has two costs. Read-ahead memory follows the overlap estimate
+above with the units held in place of `max_in_flight`: about
+`2 × units_held × prefetch_bytes`, which is 2 × 96 × 8 MiB = 1,536 MiB at the
+defaults. This is arithmetic and has not been measured. A unit is acknowledged,
+and its slot freed, only after the sink has written its last row, so a batch of
+small units waits up to `batch.linger` for a seal. A worker completes at most
+`units_held / batch.linger` small units a second: 96 a second at the defaults.
+With 96 units held, 4,608 local objects of 64 KB and 20 ms of added GET
+latency on one laptop, a run read 93.4 objects a second at the default 1 s
+linger and 3,124 at 5 ms. A lower `batch.linger` or more units held raises the
+ceiling.
+
+On a durable
 feed the source lists nothing. It reads the units and storage notifications
 published to the feed, and publishes only the notification unit it
 re-enqueues after an overwrite; a startup WARN says so. On

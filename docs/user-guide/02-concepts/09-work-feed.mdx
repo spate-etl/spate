@@ -142,6 +142,15 @@ that takes nothing raises none, so the control plane receives what it has room
 for before it waits. A source holds a bounded number of units at once and
 receives only while it holds fewer.
 
+## Who provisions the feed
+
+The operator provisions a feed's queues, topics and dead-letter destinations,
+and the notification rules that publish to it. The framework creates none of
+them. At startup the feed reads the settings it depends on and refuses a
+destination it cannot read. A backend that can compare retention also refuses
+a dead-letter destination that would expire a unit before the source queue does. A bounded job uses a queue and a dead-letter destination of its own.
+Each feed backend's page lists its checks and the permissions its roles need.
+
 ## Related
 
 - [Feed-reading sources](../06-extending/custom-source.mdx#feed-reading-sources)

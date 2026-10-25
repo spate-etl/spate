@@ -95,6 +95,7 @@ retried.
 
 ## Startup checks
 
+The operator creates the queue and its dead-letter queue. Spate creates neither.
 `SqsFeed::connect` refuses a queue it cannot dead-letter from:
 
 - a FIFO queue, told by the `.fifo` ending of the name in its ARN;

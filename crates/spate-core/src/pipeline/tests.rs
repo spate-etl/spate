@@ -1395,6 +1395,51 @@ fn a_memory_feed_with_a_location_is_refused() {
     );
 }
 
+/// Pins the defaults `spate-core` owns for the `feed:` section: no key set
+/// leaves the source's own default in force, a bounded job settles for five
+/// minutes, the in-process feed dead-letters a unit on its tenth failed
+/// delivery, and a stop reserves five seconds of the 25 s drain. The SQS,
+/// Kafka and S3 defaults are pinned in their crates.
+#[test]
+fn the_feed_section_defaults() {
+    use crate::feed::Feed;
+
+    for yaml in ["memory: {}", "sqs: {}"] {
+        let section = feed_section(yaml).expect("section");
+        assert_eq!(section.units_held, None, "{yaml}");
+        assert_eq!(section.attempt_cap, None, "{yaml}");
+        assert_eq!(section.location, None, "{yaml}");
+        assert_eq!(section.settling_window, None, "{yaml}");
+        assert_eq!(
+            section.settling_window_or_default(),
+            Duration::from_secs(300),
+            "{yaml}"
+        );
+    }
+
+    let section = feed_section("memory: {}").expect("section");
+    let feed = MemoryFeed::from_section(&section).expect("feed");
+    drop(feed.publish(crate::feed::Unit::new("poison", b"poison".to_vec())));
+    // The cap is written out: a loop bound read from the constant would
+    // follow a changed cap.
+    for attempt in 1..=10 {
+        let delivery = feed.receive(usize::MAX).unwrap().remove(0);
+        assert_eq!(delivery.deliveries, attempt);
+        feed.fail(delivery.receipt, "unreadable").unwrap();
+        let counts = feed.counts();
+        let dead = u64::from(attempt == 10);
+        assert_eq!(counts.dead_lettered, dead, "after attempt {attempt}");
+        assert_eq!(counts.visible, 1 - dead, "after attempt {attempt}");
+    }
+
+    let cfg = PipelineConfig::from_str(
+        "pipeline: { name: demo }\nsource: { memory: {} }\nsink: { memory: {} }\n",
+    )
+    .expect("config");
+    assert_eq!(cfg.checkpoint.drain_timeout, Duration::from_secs(25));
+    assert_eq!(crate::feed::STOP_RESERVE, Duration::from_secs(5));
+}
+
 /// Pins that `run` refuses a `location` on an in-process feed passed in
 /// through `Pipeline::feed`, which skips building the feed from the section.
 #[test]

@@ -41,6 +41,7 @@ use rdkafka::ClientConfig;
 use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::producer::{BaseProducer, BaseRecord, Producer};
 use spate_test::metric_sum;
+use spate_test_support::ElasticMq;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -1118,12 +1119,9 @@ fn load_summary(log: &str) -> serde_json::Value {
 /// reads every unit, and the job ends `Completed` on its own once the queue
 /// has read empty for its settling window. Nothing reaches the dead-letter
 /// queue.
-#[cfg(all(feature = "s3", feature = "json", feature = "sqs"))]
 #[test]
 #[ignore = "requires Docker"]
 fn s3_sqs_bounded_example_ends_on_its_own() {
-    use spate_test_support::ElasticMq;
-
     let mq = ElasticMq::start().expect("start ElasticMQ");
     let dead = mq
         .create_queue_with_attributes("jobs-dlq", &[("MessageRetentionPeriod", "1209600")])

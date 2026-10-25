@@ -641,6 +641,10 @@ fn the_nightly_jobs_run_when_the_cron_leaves_the_tier_empty() {
         "publish-dry-run-report",
         "report",
     ];
+    assert!(
+        parsed["jobs"]["docs-build"].get("if").is_none(),
+        "docs-build does not run on every trigger"
+    );
     for (name, job) in jobs(&parsed) {
         let cond = job["if"].as_str().unwrap_or("").trim();
         if ungated.contains(&name.as_str()) {
@@ -757,6 +761,54 @@ fn every_scheduled_job_reports_its_failure_once() {
     assert_ne!(titles[0], titles[1]);
 }
 
+/// A job that files an issue about the jobs it needs runs when one of them
+/// failed. Without `always()` its `if` is ANDed with `success()`, so it would
+/// skip exactly then.
+#[test]
+fn each_scheduled_reporter_runs_when_a_need_failed() {
+    for file in SCHEDULED {
+        for (name, job) in jobs(&yaml(&read_workflow(file))) {
+            if needs(&job).is_empty() {
+                continue;
+            }
+            let files_issue = job["steps"]
+                .as_sequence()
+                .unwrap()
+                .iter()
+                .any(|s| s["uses"].as_str() == Some("./.github/actions/file-issue"));
+            if !files_issue {
+                continue;
+            }
+            let cond = job["if"].as_str().unwrap_or("");
+            assert!(
+                cond.trim_start().starts_with("always() &&"),
+                "{file}: {name} skips when a job it needs fails"
+            );
+        }
+    }
+}
+
+/// Each scheduled workflow queues a second run behind the first and never
+/// cancels one: a cancelled weekly run can leave the criterion baseline half
+/// written, and a release's docs dispatch waits for a running night.
+#[test]
+fn each_scheduled_workflow_queues_and_never_cancels() {
+    for file in SCHEDULED {
+        let parsed = yaml(&read_workflow(file));
+        let group = format!("{}-${{{{ github.ref }}}}", file.trim_end_matches(".yml"));
+        assert_eq!(
+            parsed["concurrency"]["group"].as_str(),
+            Some(group.as_str()),
+            "{file}"
+        );
+        assert_eq!(
+            parsed["concurrency"]["cancel-in-progress"].as_bool(),
+            Some(false),
+            "{file}"
+        );
+    }
+}
+
 /// The site deploy is the one job that enters `cloudflare-workers`, and it keeps
 /// the posture a production credential needs: read-only token, `main` only,
 /// serialised and never cancelled, no checkout or restored cache, an artifact
@@ -794,11 +846,9 @@ fn the_docs_deploy_holds_its_credential_alone() {
         ("nightly.yml", "docs-deploy")
     );
     assert_eq!(job["permissions"], yaml("contents: read"));
-    assert!(
-        job["if"]
-            .as_str()
-            .unwrap()
-            .contains("github.ref == 'refs/heads/main'"),
+    assert_eq!(
+        job["if"].as_str().map(str::trim),
+        Some("github.ref == 'refs/heads/main'"),
         "the deploy runs off main"
     );
     assert!(needs(job).contains(&"docs-build".to_owned()));

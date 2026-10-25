@@ -87,7 +87,8 @@ pub enum SourceEvent<L> {
     /// [`SourceEvent::LanesAssigned`], whose eager-rebalance contract
     /// replaces the full lane set). Lane ids must be new (never reuse an
     /// id from this source's lifetime), and each lane's partition must be
-    /// fresh, not one revoked earlier in the epoch.
+    /// above every partition already in the epoch, so a revoked or retired
+    /// partition returns only in a new epoch.
     LanesAdded(Vec<L>),
     /// Lanes are being revoked. The runtime trips the [`DrainBarrier`] for
     /// the owning threads, which stop the lanes, flush in-flight records,

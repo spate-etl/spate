@@ -15,7 +15,7 @@ use super::tracker::{PartitionTracker, ResolveOutcome};
 use super::{AckMsg, AckRef, BatchId};
 use crate::error::FatalError;
 use crate::record::PartitionId;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Instant;
@@ -130,10 +130,12 @@ pub struct Checkpointer {
     /// of the pending-ceiling gate the owning driver reads at the poll
     /// boundary. Created and dropped in lockstep with `trackers`.
     gates: HashMap<PartitionId, AdvanceCounter>,
-    /// Every partition admitted to the current epoch, including ones since
-    /// revoked. `trackers` alone cannot enforce the additive contract: a
-    /// revocation removes the tracker, so a re-add would look fresh.
-    admitted: HashSet<PartitionId>,
+    /// The highest partition admitted to the current epoch. `extend_epoch`
+    /// admits only partitions above it, so a revoked partition cannot return
+    /// in the epoch while the ledger stays one value. `trackers` alone cannot
+    /// enforce this: a revocation removes the tracker, so a re-add would look
+    /// fresh.
+    admitted_through: Option<PartitionId>,
 }
 
 impl Default for Checkpointer {
@@ -160,7 +162,7 @@ impl Checkpointer {
             epoch: 0,
             trackers: HashMap::new(),
             gates: HashMap::new(),
-            admitted: HashSet::new(),
+            admitted_through: None,
         }
     }
 
@@ -199,10 +201,10 @@ impl Checkpointer {
             .iter()
             .map(|&p| (p, AdvanceCounter::new()))
             .collect();
-        // A new epoch clears the admission ledger: every issuer restarts its
+        // A new epoch resets the admission mark: every issuer restarts its
         // sequences on the epoch change, so a partition may legitimately
         // reappear here.
-        self.admitted = partitions.iter().copied().collect();
+        self.admitted_through = partitions.iter().copied().max();
         // Publish after trackers exist, so an issuer that observes the new
         // epoch has its registrations accepted.
         self.shared_epoch.store(epoch, Ordering::Release);
@@ -211,18 +213,20 @@ impl Checkpointer {
     /// Add partitions to the *current* epoch without disturbing existing
     /// trackers (additive lane gains, [`SourceEvent::LanesAdded`]). The
     /// epoch does not change, so in-flight batches for existing partitions
-    /// keep resolving. Only new partitions may be added. A partition revoked
-    /// mid-epoch can only return in a new epoch, and re-adding a live
-    /// partition would discard its ack state.
+    /// keep resolving. Only partitions above every partition already admitted
+    /// to the epoch may be added. A partition revoked mid-epoch can only
+    /// return in a new epoch, and re-adding a live partition would discard
+    /// its ack state.
     ///
     /// Ordering contract: as with [`Checkpointer::begin_epoch`], call this
     /// *before* distributing the new lanes to pipeline threads.
     ///
     /// # Errors
     ///
-    /// Returns a [`FatalError`] if a partition was already admitted to this
-    /// epoch, whether it is still live or has since been revoked. Both are
-    /// source bugs. The revoked case is the dangerous one. Its tracker is
+    /// Returns a [`FatalError`] if a partition is still live, or is at or
+    /// below the highest partition admitted to this epoch, which covers every
+    /// partition revoked earlier in it. Both are source bugs. The revoked
+    /// case is the dangerous one. Its tracker is
     /// gone, so it *looks* fresh, while issuers keep their sequence counters
     /// until the epoch changes. Admitting it would pair a mid-sequence
     /// registration with a tracker expecting zero, and
@@ -236,28 +240,31 @@ impl Checkpointer {
         // Check before mutating. A rejected extension must leave the epoch
         // exactly as it was.
         for &p in partitions {
-            if self.admitted.contains(&p) {
-                let live = if self.trackers.contains_key(&p) {
-                    "is already tracked"
-                } else {
-                    "was revoked earlier in this epoch"
-                };
-                return Err(FatalError {
-                    component: "checkpoint".into(),
-                    reason: format!(
-                        "additive assignment reused partition {} which {live}; every \
-                         added lane must carry a partition never seen in this epoch \
-                         (a returning partition needs a new epoch)",
-                        p.0
-                    ),
-                });
-            }
+            let why = if self.trackers.contains_key(&p) {
+                "is already tracked".to_owned()
+            } else if let Some(mark) = self.admitted_through.filter(|&mark| p <= mark) {
+                format!(
+                    "is not above partition {}, the highest admitted in this epoch",
+                    mark.0
+                )
+            } else {
+                continue;
+            };
+            return Err(FatalError {
+                component: "checkpoint".into(),
+                reason: format!(
+                    "additive assignment added partition {} which {why}; every added \
+                     lane must carry a partition above any already admitted in this \
+                     epoch (a returning partition needs a new epoch)",
+                    p.0
+                ),
+            });
         }
         for &p in partitions {
             self.trackers.insert(p, PartitionTracker::new());
             self.gates.insert(p, AdvanceCounter::new());
-            self.admitted.insert(p);
         }
+        self.admitted_through = self.admitted_through.max(partitions.iter().copied().max());
         Ok(())
     }
 
@@ -517,10 +524,7 @@ mod tests {
 
         let err = cp.extend_epoch(&[P0]).unwrap_err();
         assert_eq!(err.component, "checkpoint");
-        assert!(
-            err.reason.contains("revoked earlier in this epoch"),
-            "{err}"
-        );
+        assert!(err.reason.contains("is not above partition 0"), "{err}");
 
         // Rejected means unchanged. The partition is still revoked, so the
         // issuer's next batch is discarded as stale rather than registered,
@@ -533,6 +537,41 @@ mod tests {
         // A new epoch is how it returns.
         cp.begin_epoch(&[P0], 2);
         cp.extend_epoch(&[P1]).unwrap();
+    }
+
+    /// A partition below the highest admitted is refused even though it was
+    /// never in the epoch, and the refusal leaves the epoch unchanged.
+    #[test]
+    fn extend_epoch_rejects_a_partition_below_the_highest_admitted() {
+        let mut cp = Checkpointer::new();
+        cp.begin_epoch(&[], 1);
+        let mut issuer = cp.handle();
+        cp.extend_epoch(&[PartitionId(2)]).unwrap();
+
+        let err = cp.extend_epoch(&[P1]).unwrap_err();
+        assert_eq!(err.component, "checkpoint");
+        assert!(err.reason.contains("is not above partition 2"), "{err}");
+
+        drop(issuer.issue(P1, 9));
+        let stats = cp.drain();
+        assert_eq!(stats.applied, 0);
+        assert_eq!(stats.stale_epoch, 2);
+    }
+
+    /// Extending and revoking one partition at a time keeps succeeding for
+    /// the whole epoch, and the checkpointer holds state for the live
+    /// partitions and one admission mark.
+    #[test]
+    fn admission_holds_only_live_partitions_over_extend_and_revoke() {
+        let mut cp = Checkpointer::new();
+        cp.begin_epoch(&[], 1);
+        for n in 1..=1000 {
+            cp.extend_epoch(&[PartitionId(n)]).unwrap();
+            cp.revoke(&[PartitionId(n - 1)]);
+            assert!(cp.trackers.len() <= 2, "{} trackers", cp.trackers.len());
+            assert!(cp.gates.len() <= 2, "{} gates", cp.gates.len());
+        }
+        assert_eq!(cp.admitted_through, Some(PartitionId(1000)));
     }
 
     #[test]
@@ -707,16 +746,21 @@ mod proptests {
         Issue { partition: u8, fail: bool },
         ResolveOldest,
         Rebalance { partitions: Vec<u8> },
+        Extend { partition: u8 },
+        Revoke { partition: u8 },
         DrainAndTake,
     }
 
     fn ops() -> impl Strategy<Value = Vec<Op>> {
         prop::collection::vec(
             prop_oneof![
-                (0..3u8, any::<bool>()).prop_map(|(partition, fail)| Op::Issue { partition, fail }),
+                (0..16u8, any::<bool>())
+                    .prop_map(|(partition, fail)| Op::Issue { partition, fail }),
                 Just(Op::ResolveOldest),
                 prop::collection::vec(0..3u8, 1..3)
                     .prop_map(|partitions| Op::Rebalance { partitions }),
+                (0..16u8).prop_map(|partition| Op::Extend { partition }),
+                (0..16u8).prop_map(|partition| Op::Revoke { partition }),
                 Just(Op::DrainAndTake),
             ],
             0..120,
@@ -725,14 +769,20 @@ mod proptests {
 
     proptest! {
         /// Watermarks are per-partition monotonic, never move for
-        /// unassigned partitions, and acknowledgments issued under an old
-        /// epoch never affect a newer epoch's watermarks.
+        /// unassigned or revoked partitions, and acknowledgments issued under
+        /// an old epoch never affect a newer epoch's watermarks. An extension
+        /// succeeds exactly when its partition is not live and is above every
+        /// partition admitted to the epoch.
         #[test]
         fn epoch_churn_never_leaks_stale_acks(ops in ops()) {
             let mut cp = Checkpointer::new();
             let mut epoch = 1u32;
             let mut assigned: Vec<PartitionId> = vec![PartitionId(0), PartitionId(1), PartitionId(2)];
             cp.begin_epoch(&assigned, epoch);
+            let mut mark: Option<PartitionId> = assigned.iter().copied().max();
+            // One issuer for every partition: a partition re-admitted while it
+            // holds a sequence counter registers mid-sequence and panics, so
+            // the shared issuer also checks that no such re-admission occurs.
             let mut issuer = cp.handle();
             let mut offsets: std::collections::HashMap<PartitionId, i64> =
                 std::collections::HashMap::new();
@@ -769,10 +819,32 @@ mod proptests {
                             .into_iter()
                             .collect();
                         cp.begin_epoch(&assigned, epoch);
+                        mark = assigned.iter().copied().max();
                         // Sequences and offsets restart with the epoch;
                         // watermark monotonicity is per-epoch.
                         offsets.clear();
                         last_watermark.clear();
+                    }
+                    Op::Extend { partition } => {
+                        let p = PartitionId(u32::from(partition));
+                        // The model's own rule: never live, and above every
+                        // partition admitted to the epoch.
+                        let legal = !assigned.contains(&p) && mark.is_none_or(|m| p > m);
+                        let trackers_before = cp.trackers.len();
+                        let result = cp.extend_epoch(&[p]);
+                        prop_assert_eq!(result.is_ok(), legal, "extend {:?} under mark {:?}", p, mark);
+                        if legal {
+                            assigned.push(p);
+                            mark = Some(p);
+                        } else {
+                            prop_assert_eq!(cp.trackers.len(), trackers_before);
+                            prop_assert_eq!(cp.admitted_through, mark);
+                        }
+                    }
+                    Op::Revoke { partition } => {
+                        let p = PartitionId(u32::from(partition));
+                        cp.revoke(&[p]);
+                        assigned.retain(|&q| q != p);
                     }
                     Op::DrainAndTake => {
                         cp.drain();

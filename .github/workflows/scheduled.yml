@@ -512,9 +512,9 @@ jobs:
     runs-on: ubuntu-latest
     needs: plan
     if: needs.plan.outputs.nightly == 'true'
-    # The backstop for the manifest-selected gate in release-checks.yml: a packaging
-    # break can arrive with nothing in this repository changing (a yank, a
-    # toolchain release). The release's tools drift the same way: `gh` comes
+    # The backstop for the manifest-selected gate in release-checks.yml: a
+    # packaging break can arrive with nothing in this repository changing (a
+    # yank, a toolchain release). The release's tools drift the same way: `gh` comes
     # from the runner image, and `cargo-about` and `cargo-cyclonedx` from the
     # `taiki-e/install-action` pin in setup-rust.
     # The rehearsal runs every build script and proc macro with this job's
@@ -1043,8 +1043,8 @@ jobs:
       - uses: ./.github/actions/setup-rust
         with:
           tools: nextest
-          # Same key as containers.yml's container job: both build the plain dev-profile
-          # test binaries for the `#[ignore]`d suites.
+          # Same key as containers.yml's container job: both build the plain
+          # dev-profile test binaries for the `#[ignore]`d suites.
           shared-key: docker
       # `--ignore-default-filter` plus an explicit expression is what selects a
       # suite the profile excludes; the filter alone leaves nothing to run.

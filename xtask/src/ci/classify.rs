@@ -153,7 +153,8 @@ pub(crate) fn is_manifest(path: &str) -> bool {
 }
 
 /// Files that can change what the advisories check finds, or whether it
-/// blocks: the dependency graph, its policy and the gate itself. The selector's
+/// blocks: the dependency graph, `deny.toml`, the workflows that run the check,
+/// the action that installs cargo-deny and the command's own file. The selector's
 /// own files are included, so an edit that drops an entry blocks on its own
 /// pull request, and `the_advisory_selector_covers_the_graph_and_its_own_policy`
 /// pins the list.

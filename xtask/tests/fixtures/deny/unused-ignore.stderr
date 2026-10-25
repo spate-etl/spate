@@ -1,0 +1,2 @@
+{"fields":{"code":"advisory-not-detected","labels":[{"column":12,"line":7,"message":"no crate matched advisory criteria","span":"RUSTSEC-2020-0001"}],"message":"advisory was not encountered","severity":"warning"},"type":"diagnostic"}
+{"fields":{"advisories":{"errors":0,"helps":0,"notes":0,"warnings":1}},"type":"summary"}

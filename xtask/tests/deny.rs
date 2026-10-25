@@ -132,18 +132,21 @@ impl Shim {
     /// Runs `deny advisories --dependency-change <value>` against the shim,
     /// with the job summary in the scratch directory.
     fn run(&self, value: &str) -> (Output, Option<String>) {
+        self.run_with(value, true)
+    }
+
+    /// As [`Shim::run`], with no job summary, as a local run has.
+    fn run_with(&self, value: &str, on_ci: bool) -> (Output, Option<String>) {
         let path = std::env::join_paths(std::iter::once(self.dir.clone()).chain(
             std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
         ))
         .unwrap();
         let summary = self.dir.join("summary.md");
-        let got = xtask(
-            &["deny", "advisories", "--dependency-change", value],
-            &[
-                ("PATH", path.to_str().unwrap()),
-                ("GITHUB_STEP_SUMMARY", summary.to_str().unwrap()),
-            ],
-        );
+        let mut env = vec![("PATH", path.to_str().unwrap())];
+        if on_ci {
+            env.push(("GITHUB_STEP_SUMMARY", summary.to_str().unwrap()));
+        }
+        let got = xtask(&["deny", "advisories", "--dependency-change", value], &env);
         (got, std::fs::read_to_string(summary).ok())
     }
 
@@ -220,6 +223,10 @@ fn a_dependency_change_fails_on_an_advisory() {
         )
     );
     assert_eq!(
+        String::from_utf8_lossy(&got.stdout),
+        "::error::1 advisory finding(s) fail this change, listed in the job summary\n"
+    );
+    assert_eq!(
         shim.argv(),
         format!("{ADVISORIES}\n")
             .strip_prefix("cargo ")
@@ -263,4 +270,63 @@ fn a_clean_run_passes_and_writes_nothing() {
     assert_eq!(summary, None);
     assert_eq!(String::from_utf8_lossy(&got.stdout), "");
     assert_eq!(String::from_utf8_lossy(&got.stderr), "");
+}
+
+/// A blocking run whose findings are all warnings passes, and the summary says
+/// so. cargo-deny reports an `ignore` entry that matches nothing at warning
+/// severity.
+#[cfg(unix)]
+#[test]
+fn a_blocking_run_of_warnings_passes_and_says_so() {
+    let shim = Shim::new("unused", "unused-ignore.stderr", 0);
+    let (got, summary) = shim.run("true");
+    assert_eq!(got.status.code(), Some(0));
+    assert_eq!(
+        summary.as_deref(),
+        Some(
+            "## Advisories\n\n\
+             This change touches the dependency inputs. Each finding is a warning, so none fails it.\n\n\
+             ```\n\
+             advisory-not-detected: advisory was not encountered\n  \
+             RUSTSEC-2020-0001\n\
+             ```\n"
+        )
+    );
+}
+
+/// A `deny.toml` cargo-deny rejects fails the run with the cause on stderr and
+/// writes no summary: cargo-deny reports it as a diagnostic before any check.
+#[cfg(unix)]
+#[test]
+fn a_rejected_config_reaches_the_step_log() {
+    let shim = Shim::new("invalid", "invalid-config.stderr", 1);
+    let (got, summary) = shim.run("false");
+    assert_eq!(got.status.code(), Some(1));
+    assert_eq!(summary, None);
+    assert_eq!(
+        String::from_utf8_lossy(&got.stderr),
+        "ERROR: failed to deserialize config from 'deny.toml'\n\
+         unexpected-value: expected '[\"allow\", \"warn\", \"deny\"]'\n  \
+         nope\n"
+    );
+    assert_eq!(String::from_utf8_lossy(&got.stdout), "");
+}
+
+/// With no job summary, as on a laptop, the findings go to stdout.
+#[cfg(unix)]
+#[test]
+fn a_local_run_lists_its_findings() {
+    let shim = Shim::new("local", "reported.stderr", 0);
+    let (got, summary) = shim.run_with("false", false);
+    assert_eq!(got.status.code(), Some(0));
+    assert_eq!(summary, None);
+    assert_eq!(
+        String::from_utf8_lossy(&got.stdout),
+        format!(
+            "## Advisories\n\n\
+             This change leaves the dependency inputs alone, so no finding fails it. \
+             The nightly scan raises them against `main`.\n\n{SMALLVEC}\
+             ::warning::1 advisory finding(s), listed in the job summary\n"
+        )
+    );
 }

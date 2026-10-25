@@ -134,6 +134,69 @@ fn a_push_with_no_before_fails_the_manifest_gate_closed() {
     );
 }
 
+/// Runs git in `repo` with an identity and no signing, returning trimmed stdout.
+fn git(repo: &Path, args: &[&str]) -> String {
+    let got = Command::new("git")
+        .args([
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "commit.gpgsign=false",
+        ])
+        .args(args)
+        .current_dir(repo)
+        .output()
+        .unwrap();
+    assert!(got.status.success(), "git {args:?}");
+    String::from_utf8(got.stdout).unwrap().trim().to_owned()
+}
+
+/// Classifies a push of `before..HEAD` in a scratch repository whose last
+/// commit writes `changed`, or nothing when `changed` is `None`.
+fn push_of(name: &str, changed: Option<&str>) -> String {
+    let repo = std::env::temp_dir().join(format!("spate-push-{name}.{}", std::process::id()));
+    drop(std::fs::remove_dir_all(&repo));
+    std::fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init", "-q"]);
+    std::fs::write(repo.join("README.md"), "a\n").unwrap();
+    git(&repo, &["add", "-A"]);
+    git(&repo, &["commit", "-q", "-m", "one"]);
+    let before = git(&repo, &["rev-parse", "HEAD"]);
+    if let Some(path) = changed {
+        std::fs::write(repo.join(path), "\n").unwrap();
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-q", "-m", "two"]);
+    }
+    let git_dir = repo.join(".git");
+    let got = xtask(
+        &["ci-changes"],
+        &[
+            ("EVENT_NAME", "push"),
+            ("EVENT_BEFORE", &before),
+            ("GIT_DIR", git_dir.to_str().unwrap()),
+        ],
+    );
+    drop(std::fs::remove_dir_all(&repo));
+    let stdout = String::from_utf8(got.stdout).unwrap();
+    assert_eq!(got.status.code(), Some(0), "{stdout}");
+    stdout
+}
+
+/// A push that changes `deny.toml` alone turns the advisories gate on and
+/// leaves the manifest gate off, and a push that changes nothing turns both
+/// off.
+#[test]
+fn a_push_selects_the_advisories_gate_on_its_own_diff() {
+    let block = push_of("deny", Some("deny.toml"));
+    assert_eq!(field(&block, "manifests"), "false");
+    assert_eq!(field(&block, "advisories"), "true");
+    let block = push_of("empty", None);
+    assert_eq!(field(&block, "manifests"), "false");
+    assert_eq!(field(&block, "advisories"), "false");
+}
+
 /// A path list is classified as a pull request whatever the environment names,
 /// so a push run over a documentation page selects the site alone.
 #[test]

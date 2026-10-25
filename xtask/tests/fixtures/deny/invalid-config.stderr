@@ -1,0 +1,2 @@
+{"fields":{"code":"unexpected-value","labels":[{"column":11,"line":6,"message":"unexpected value","span":"nope"}],"message":"expected '[\"allow\", \"warn\", \"deny\"]'","severity":"error"},"type":"diagnostic"}
+{"fields":{"level":"ERROR","message":"failed to deserialize config from 'deny.toml'","timestamp":"2026-10-25T00:00:00Z"},"type":"log"}

@@ -31,7 +31,8 @@ const HEADING: &str = "## Advisories\n\n";
 /// # Errors
 ///
 /// With cargo-deny's exit code when a check fails or cargo-deny cannot run,
-/// and when `dependency_change` is given with another check.
+/// when the advisories check exits 0 without its summary record, and when
+/// `dependency_change` is given with another check.
 pub(super) fn run(
     root: &Path,
     explain: bool,
@@ -85,19 +86,32 @@ fn advisories(root: &Path, explain: bool, blocking: bool) -> Outcome {
     for line in &report.log {
         eprintln!("{line}");
     }
-    let text = report.render(blocking);
-    if let Some(text) = &text {
+    let Some(found) = report.found else {
+        // Without its summary record cargo-deny stopped before checking, so
+        // each diagnostic is a config error and belongs in the step log.
+        for line in &report.findings {
+            eprintln!("{line}");
+        }
+        return Err(match done.code {
+            0 => Error::msg("cargo-deny did not report its summary"),
+            code => Error::status(code),
+        });
+    };
+    let failed = done.code != 0;
+    if let Some(text) = report.render(blocking, failed) {
         match std::env::var_os("GITHUB_STEP_SUMMARY") {
-            Some(path) => Summary::at(path.into()).write(text),
+            Some(path) => Summary::at(path.into()).write(&text),
             None => print!("{text}"),
         }
     }
-    if done.code != 0 {
+    if failed {
+        // cargo-deny exits non-zero after its summary only for an error-level
+        // finding, so the count is at least one.
+        println!(
+            "::error::{found} advisory finding(s) fail this change, listed in the job summary"
+        );
         return Err(Error::status(done.code));
     }
-    let Some(found) = report.found else {
-        return Err(Error::msg("cargo-deny did not report its summary"));
-    };
     if found > 0 {
         println!("::warning::{found} advisory finding(s), listed in the job summary");
     }
@@ -145,14 +159,18 @@ impl Report {
     }
 
     /// The job summary, or none when the run found nothing.
-    fn render(&self, blocking: bool) -> Option<String> {
+    fn render(&self, blocking: bool, failed: bool) -> Option<String> {
         if self.findings.is_empty() {
             return None;
         }
         let body = self.findings.join("\n");
         let fence = fence(&body);
-        let verdict = if blocking {
+        // cargo-deny fails a run on an error alone, so a blocking run whose
+        // findings are all warnings passes.
+        let verdict = if failed {
             "This change touches the dependency inputs, so each finding fails it."
+        } else if blocking {
+            "This change touches the dependency inputs. Each finding is a warning, so none fails it."
         } else {
             "This change leaves the dependency inputs alone, so no finding fails it. \
              The nightly scan raises them against `main`."
@@ -191,7 +209,7 @@ mod tests {
         let report = Report::parse(
             r#"{"type":"diagnostic","fields":{"code":"vulnerability","message":"a ````` b","labels":[]}}"#,
         );
-        let text = report.render(false).expect("a finding");
+        let text = report.render(false, false).expect("a finding");
         assert!(
             text.contains("\n``````\nvulnerability: a ````` b\n``````\n"),
             "{text}"
@@ -207,6 +225,6 @@ mod tests {
         );
         assert_eq!(report.log, ["ERROR: failed", "plain"]);
         assert_eq!(report.found, None);
-        assert_eq!(report.render(true), None);
+        assert_eq!(report.render(true, true), None);
     }
 }

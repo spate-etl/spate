@@ -32,6 +32,7 @@ fn table() -> Vec<(&'static str, String)> {
             "shellcheck",
             format!("shellcheck {}\n", shell_scripts().join(" ")),
         ),
+        ("markdown", "rumdl check\n".to_owned()),
         ("self-test", "cargo test -p spate-xtask --locked\n".to_owned()),
         (
             "adr",

@@ -14,6 +14,8 @@ pub(crate) enum TidyCheck {
     Zizmor,
     /// The shell scripts lint clean
     Shellcheck,
+    /// The docs pages stay wrapped at the width `rumdl.toml` sets
+    Markdown,
     /// The checkers themselves still work
     SelfTest,
     /// A user-visible change carries a changelog fragment
@@ -38,6 +40,7 @@ pub(crate) enum TidyCheck {
 pub(super) const ALL: &[TidyCheck] = &[
     TidyCheck::Zizmor,
     TidyCheck::Shellcheck,
+    TidyCheck::Markdown,
     TidyCheck::SelfTest,
     TidyCheck::Adr,
     TidyCheck::PerfReport,
@@ -93,6 +96,8 @@ fn one_check(root: &Path, explain: bool, check: TidyCheck) -> Outcome {
                 &Step::new("shellcheck", [] as [&str; 0]).args(scripts),
             )
         }
+        // `rumdl.toml` carries the file set and the rules.
+        TidyCheck::Markdown => run::run(root, explain, &Step::new("rumdl", ["check"])),
         TidyCheck::SelfTest => run::run(
             root,
             explain,

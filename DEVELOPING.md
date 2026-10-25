@@ -11,6 +11,10 @@ bar and covers formatting, clippy, the type check, the loom models, the test
 suite, doctests, rustdoc, the feature matrix, licenses and advisories, and
 `cargo xtask tidy`, the repository consistency checks.
 
+`cargo xtask tidy markdown` runs `rumdl check` and needs `rumdl` on `PATH`. It
+fails when a page under `docs/` runs past the width `rumdl.toml` sets, and
+`rumdl fmt` rewraps the page.
+
 `cargo xtask ci --since [REF]` narrows the Rust gates to the packages the diff
 against REF (default `origin/main`) can affect: the changed crates and
 everything that depends on them, over normal and dev edges. The diff covers

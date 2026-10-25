@@ -121,8 +121,11 @@ jobs:
           # zizmor alone carries a version: a release can relax the default
           # audit policy this job rests on, and the action's own bump would
           # move it with nothing in the title to say so. Bumped by hand, after
-          # reading the release notes for audit changes.
-          tool: zizmor@1.28.0,shellcheck
+          # reading the release notes for audit changes. rumdl carries one for
+          # the same reason: a release can change what MD013 reflows, so a bump
+          # lands in a pull request that shows the diff. install-action has no
+          # manifest for it and installs it through cargo-binstall.
+          tool: zizmor@1.28.0,shellcheck,rumdl@0.3.0
       # `changelog` is outside this set: it reads the pull request's own fields
       # and has a job that supplies them. Without GH_TOKEN zizmor skips the API
       # audits and reports "No findings", exit 0, against a known-vulnerable

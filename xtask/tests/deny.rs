@@ -252,3 +252,15 @@ fn a_tool_error_fails_a_report_only_run() {
         String::from_utf8_lossy(&got.stderr)
     );
 }
+
+/// A run that finds nothing passes silently and writes no summary.
+#[cfg(unix)]
+#[test]
+fn a_clean_run_passes_and_writes_nothing() {
+    let shim = Shim::new("clean", "clean.stderr", 0);
+    let (got, summary) = shim.run("false");
+    assert_eq!(got.status.code(), Some(0));
+    assert_eq!(summary, None);
+    assert_eq!(String::from_utf8_lossy(&got.stdout), "");
+    assert_eq!(String::from_utf8_lossy(&got.stderr), "");
+}

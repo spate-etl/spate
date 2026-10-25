@@ -92,7 +92,7 @@ The profiles in `.config/nextest.toml`:
 - **`default`** — `fail-fast = false`, and a 30-second slow warning that
   terminates after four periods, so a hard kill at 120s. The container suites are
   excluded here and nothing left should take that long.
-- **`ci`** — what the test and coverage job runs. 60 seconds, terminating after
+- **`ci`** — what the test jobs run. 60 seconds, terminating after
   four, with no retry and a JUnit report.
 - **`docker`** — warns at 120 seconds and **never terminates**: a cold image pull
   can exceed any figure worth setting, and a SIGKILL reports as a timeout
@@ -268,8 +268,8 @@ to 30,086,540.
 rather than from the source: a case must attribute at least 10% of its collected
 instructions to the binary under measurement, and must collect at least 1,000 of
 them, since a region can also be lost by leaving almost nothing rather than by
-leaving the allocator. Observed cases bottom out at 33.35% on the runner
-architecture and 28.67% on arm64. `cargo xtask bench counted`
+leaving the allocator. Observed cases bottom out at 33.35% on x86_64 and
+28.67% on arm64. `cargo xtask bench counted`
 runs it after the benches, and CI runs it per shard as a *gate*: the counts are
 advisory, a bench measuring the allocator is not. `cargo xtask tidy self-test`
 holds the guard itself to captured profiles of both shapes, and needs no

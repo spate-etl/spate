@@ -89,6 +89,46 @@ jobs:
           name: junit-nextest
           path: target/nextest/ci/junit.xml
 
+  # The workspace suite on aarch64, without coverage.
+  test-arm64:
+    name: Test (arm64)
+    runs-on: ubuntu-26.04-arm
+    if: inputs.rust == 'true'
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      checks: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          # `clippy` for `xtask/tests/clippy_gate.rs`, as in `test`.
+          components: clippy
+          tools: nextest
+          # The `target/debug` tree lint, features and doctests build. rust-cache
+          # keys on the runner's arch, so this entry is apart from theirs.
+          shared-key: dev-allfeatures
+
+      - name: Test
+        run: cargo nextest run --profile ci --workspace --all-features --locked
+
+      - name: Publish test report
+        uses: mikepenz/action-junit-report@6ef3fdcfcd5f0b5d14df3e659ef19b8c6820f93d # v6.6.1
+        if: always()
+        with:
+          report_paths: target/nextest/ci/junit.xml
+          check_name: Test results (arm64)
+          detailed_summary: true
+          include_passed: false
+          fail_on_failure: false
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: junit-nextest-arm64
+          path: target/nextest/ci/junit.xml
+
   mutants:
     name: Mutants over the diff
     runs-on: ubuntu-latest

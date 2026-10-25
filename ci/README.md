@@ -12,9 +12,10 @@ ci/<service>/UNSUPPORTED          lanes that back no support claim (optional)
 ```
 
 Each `Dockerfile` holds a single `FROM` carrying an exact release tag and the
-digest that tag resolves to. Nothing builds them. They exist so one file names
-the image, readable by Dependabot, by the task runner, and by the test
-harness.
+digest that tag resolves to. The digest is the tag's image index, which each CI
+architecture resolves to its own image. Nothing builds them. They exist so one
+file names the image, readable by Dependabot, by the task runner, and by the
+test harness.
 
 Services and lanes are discovered from this tree. The task runner, the CI
 classifier and the test harness name no lane and no service beyond the one they
@@ -96,6 +97,8 @@ lane resolving to a different image gets a job of its own, one runner each. A
 lane resolving to the primary lane's image is dropped, and
 `cargo xtask ci-changes` logs which and why, so a service whose `stable` and
 `lts` point at one release costs no extra job until they diverge.
+
+The `containers` job runs on x86_64 and arm64; the extra lanes run on x86_64.
 
 ## Bumps
 

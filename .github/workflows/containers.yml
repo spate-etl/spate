@@ -20,8 +20,10 @@ permissions:
 
 jobs:
   containers:
-    name: Container suites
-    runs-on: ubuntu-latest
+    # Each name below carries the arch, for the reason given at the lane names
+    # in `clickhouse-versions`.
+    name: Container suites (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
     if: inputs.containers == 'true'
     timeout-minutes: 60
     # `checks: write` for the JUnit report: without it the publish step logs
@@ -29,6 +31,13 @@ jobs:
     permissions:
       contents: read
       checks: write
+    strategy:
+      # As in `clickhouse-versions`: a cancelled leg fails `CI gate` too.
+      fail-fast: false
+      matrix:
+        include:
+          - {arch: x64, runner: ubuntu-latest}
+          - {arch: arm64, runner: ubuntu-26.04-arm}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -44,8 +53,8 @@ jobs:
       - name: Pull the pinned ClickHouse image
         if: contains(inputs.container-args, 'spate-clickhouse')
         run: cargo xtask container-image --pull clickhouse
-      # Serial: 2 cores and ~7 GB across RustFS, ElasticMQ, Kafka and
-      # ClickHouse OOMs in parallel.
+      # Serial: RustFS, ElasticMQ, Kafka and ClickHouse in parallel OOM a
+      # hosted runner.
       - name: Container suites
         env:
           PKGS: ${{ inputs.container-args }}
@@ -60,7 +69,7 @@ jobs:
         if: always()
         with:
           report_paths: target/nextest/docker/junit.xml
-          check_name: Container test results
+          check_name: Container test results (${{ matrix.arch }})
           detailed_summary: true
           include_passed: false
           flaky_summary: true
@@ -68,7 +77,7 @@ jobs:
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
-          name: junit-nextest-docker
+          name: junit-nextest-docker-${{ matrix.arch }}
           path: target/nextest/docker/junit.xml
 
   # The ClickHouse server versions beyond the one `containers` runs: the older

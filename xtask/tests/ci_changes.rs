@@ -1075,11 +1075,14 @@ fn the_arm64_lane_runs_what_the_x64_jobs_run() {
         assert_eq!(runs.len(), 1, "{runs:?}");
         runs[0].split_whitespace().map(str::to_owned).collect()
     };
-    let mut expected = Vec::new();
-    let mut words = nextest(x64).into_iter();
+    let x64 = nextest(x64);
+    // `cargo llvm-cov nextest` is `cargo nextest run` under coverage.
+    assert_eq!(x64[..3], ["cargo", "llvm-cov", "nextest"]);
+    let mut expected = vec!["cargo".to_owned(), "nextest".to_owned(), "run".to_owned()];
+    let mut words = x64.into_iter().skip(3);
     while let Some(word) = words.next() {
         match word.as_str() {
-            "llvm-cov" | "--lcov" => {}
+            "--lcov" => {}
             "--output-path" | "--ignore-filename-regex" => drop(words.next()),
             _ => expected.push(word),
         }

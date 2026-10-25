@@ -12,13 +12,12 @@ use spate_core::error::ErrorClass;
 /// - `NotFound` / `Precondition` and friends mean the planned key set moved
 ///   under the backfill (a deleted key, an overwritten object failing its
 ///   `if_match`). Retrying the same read cannot help, but the fact is about
-///   **one object**, so it becomes split poison rather than a fleet-wide
+///   **one object**, so it becomes unit poison rather than a fleet-wide
 ///   failure. A failed precondition on a notification unit that names no
 ///   version is an overwrite instead, which [`is_overwrite`] decides.
 /// - Authentication, permission, and configuration errors hold for every
 ///   object on every instance: non-retryable *and* pipeline-fatal. A listing
-///   the store answers 401 or 403 is non-retryable, and the planner fails the
-///   pipeline on it.
+///   the store answers 401 or 403 is non-retryable, and the lister run fails on it.
 /// - A TLS rejection ([`tls_rejection!`](spate_core::tls_rejection)) by the
 ///   store or the credential endpoint is non-retryable and pipeline-fatal.
 /// - Everything else (other `Generic` failures, timeouts, 5xx) is retryable.
@@ -52,9 +51,9 @@ pub(crate) fn classify(e: &object_store::Error) -> ErrorClass {
 /// for every object on every instance, and no peer will fare better, so they
 /// stay pipeline-fatal. The rest of the non-retryable classes (`NotFound`,
 /// `Precondition`, `NotModified`, `AlreadyExists`) are facts about **one
-/// object** (deleted after planning, overwritten under its ETag pin) and
-/// are handled as split poison: the split is handed back, retried
-/// elsewhere, and quarantined at the attempt cap instead of killing a
+/// object** (deleted after listing, overwritten under its ETag pin) and
+/// are handled as unit poison: the unit is failed back to the feed, delivered
+/// again, and dead-lettered at the feed's cap instead of killing a
 /// fleet-wide backfill.
 pub(crate) fn is_pipeline_fatal(e: &object_store::Error) -> bool {
     use object_store::Error as E;

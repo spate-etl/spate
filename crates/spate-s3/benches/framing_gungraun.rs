@@ -32,9 +32,9 @@
 //!   the trim drops the partial leading line and the case asserts one record
 //!   fewer than `plain_mid_offset`. The difference between the two is the
 //!   trim plus the window copy that stands in for the GET.
-//! - `plain_many_small` — sixteen small objects through one framer. The
-//!   open-cost floor caps a split at ~16 members, so this is a full split's
-//!   worth of per-object codec resolution and state reset.
+//! - `plain_many_small` — sixteen small objects through one framer: the
+//!   per-object codec resolution and state reset a descriptor of several
+//!   members pays.
 //!
 //! Bodies are compressed in the fixture, never in the measured region, so
 //! these count decompression only. Framing is done with `spate-json`'s
@@ -175,7 +175,7 @@ fn plain_range() -> RangeRig {
     }
 }
 
-/// A full split's worth of members through one framer.
+/// Sixteen small members through one framer.
 fn plain_many_small() -> Rig {
     let (objects_n, records_each) = (ndjson::RUN_OBJECTS, ndjson::RUN_RECORDS_EACH);
     let objects = (0..objects_n)

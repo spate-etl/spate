@@ -91,14 +91,13 @@ pub struct DescriptorObject {
     pub last_modified_ms: i64,
 }
 
-/// A byte range `[start, end)` of one object, read as a split of its own.
+/// A byte range `[start, end)` of one object, read as a unit of its own.
 ///
 /// The range owns the records whose first byte lies in `[start, end)`, where a
 /// record starts at byte 0 and after every `delimiter` byte, so each record of
 /// an object belongs to exactly one range of a tiling. The object must be
-/// uncompressed. When the reader's `compression` setting decodes the key, a
-/// coordinated reader fails the pipeline on the split and a feed reader fails
-/// the unit back.
+/// uncompressed. When the reader's `compression` setting decodes the key, the
+/// reader fails the unit back to the feed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct SplitRange {
@@ -107,7 +106,7 @@ pub struct SplitRange {
     /// One past the last byte of the range.
     pub end: u64,
     /// The framer's [`resync_delimiter`](spate_core::framing::RecordFramer::resync_delimiter).
-    /// A reader whose framer declares a different one refuses the split.
+    /// A reader whose framer declares a different one refuses the unit.
     pub delimiter: u8,
 }
 
@@ -123,14 +122,13 @@ impl SplitRange {
     }
 }
 
-/// The opaque payload carried in a
-/// [`SplitSpec::descriptor`](spate_core::coordination::SplitSpec): the
-/// split's member objects, in listing order.
+/// The body of a feed unit that names objects to read: the unit's member
+/// objects, in listing order.
 ///
 /// The encoding is versioned JSON ([`DESCRIPTOR_VERSION`]); member order is
 /// meaningful (composite offsets index into it). Out-of-process producers
-/// (an event-notification planner, a single-shot invocation minting one
-/// split from an S3 event) construct via [`SplitDescriptor::new`] or
+/// (an event-notification handler, a single-shot invocation minting one
+/// unit from an S3 event) construct via [`SplitDescriptor::new`] or
 /// [`SplitDescriptor::with_range`] (which stamp the version;
 /// [`encode`](SplitDescriptor::encode) refuses anything else) and mint ids
 /// with [`split_id_for`] or [`split_id_for_range`] respectively, which
@@ -143,7 +141,7 @@ pub struct SplitDescriptor {
     pub(crate) v: u32,
     /// Member objects, in listing (and therefore read) order.
     pub objects: Vec<DescriptorObject>,
-    /// The byte range of the one member this split reads, or `None` when it
+    /// The byte range of the one member this unit reads, or `None` when it
     /// reads every member whole.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub range: Option<SplitRange>,
@@ -252,16 +250,16 @@ impl SplitDescriptor {
     pub fn decode(bytes: &[u8]) -> Result<SplitDescriptor, SplitError> {
         let fatal = SplitError::new;
         let probe: VersionProbe = serde_json::from_slice(bytes)
-            .map_err(|e| fatal(format!("split descriptor is not valid JSON: {e}")))?;
+            .map_err(|e| fatal(format!("unit descriptor is not valid JSON: {e}")))?;
         if probe.v != DESCRIPTOR_VERSION {
             return Err(fatal(format!(
-                "split descriptor version {} is not this release's version \
-                 {DESCRIPTOR_VERSION}; the split was planned by an incompatible release",
+                "unit descriptor version {} is not this release's version \
+                 {DESCRIPTOR_VERSION}; the unit was written by an incompatible release",
                 probe.v
             )));
         }
         let descriptor: SplitDescriptor = serde_json::from_slice(bytes)
-            .map_err(|e| fatal(format!("split descriptor failed to decode: {e}")))?;
+            .map_err(|e| fatal(format!("unit descriptor failed to decode: {e}")))?;
         descriptor.validate_range()?;
         Ok(descriptor)
     }
@@ -275,19 +273,19 @@ impl SplitDescriptor {
         let fatal = SplitError::new;
         let [object] = self.objects.as_slice() else {
             return Err(fatal(format!(
-                "a ranged split descriptor has exactly one member, this one has {}",
+                "a ranged unit descriptor has exactly one member, this one has {}",
                 self.objects.len()
             )));
         };
         if object.etag.is_none() {
             return Err(fatal(format!(
-                "ranged split descriptor over \"{}\" has no ETag to pin its reads to",
+                "ranged unit descriptor over \"{}\" has no ETag to pin its reads to",
                 object.key
             )));
         }
         if range.start >= range.end || range.end > object.size {
             return Err(fatal(format!(
-                "ranged split descriptor over \"{}\" has range [{}, {}), which is empty or \
+                "ranged unit descriptor over \"{}\" has range [{}, {}), which is empty or \
                  extends past the object's {} bytes",
                 object.key, range.start, range.end, object.size
             )));
@@ -355,7 +353,7 @@ where
     let mut members: Vec<(&str, Option<&str>)> = members.into_iter().collect();
     if members.is_empty() {
         return Err(SplitError::new(
-            "cannot mint a split id for an empty member set",
+            "cannot mint a unit id for an empty member set",
         ));
     }
     members.sort_unstable_by_key(|(key, _)| *key);
@@ -369,7 +367,7 @@ where
     id_from_digest(hasher)
 }
 
-/// Mint the deterministic split id for the byte `range` of one object.
+/// Mint the deterministic unit id for the byte `range` of one object.
 ///
 /// The id digests the key, the ETag, the range and the packing version, and
 /// never equals an id [`split_id_for`] mints. The digest preimage is wire
@@ -405,7 +403,7 @@ where
 pub fn split_id_for_range(key: &str, etag: &str, range: SplitRange) -> Result<String, SplitError> {
     if range.start >= range.end {
         return Err(SplitError::new(format!(
-            "cannot mint a split id for the empty range [{}, {})",
+            "cannot mint a unit id for the empty range [{}, {})",
             range.start, range.end
         )));
     }

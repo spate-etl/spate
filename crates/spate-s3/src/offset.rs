@@ -15,7 +15,7 @@
 //!   non-negative `i64`.
 //! - Ordinals order objects within one lane's slice of the listing; record
 //!   indexes order records within one object, or within the byte range a
-//!   ranged split reads, whose one member has ordinal 0. Lexicographic
+//!   ranged unit reads, whose one member has ordinal 0. Lexicographic
 //!   packing makes the composite ordering match (ordinal, index) ordering
 //!   exactly.
 //! - A record is never emitted at index `MAX_RECORD_INDEX + 1 = 2^40 - 1`
@@ -105,6 +105,7 @@ impl Position {
 
     /// Decode a non-negative `i64` offset (or watermark) back into a
     /// position.
+    #[cfg(any(test, feature = "testing"))]
     pub(crate) fn decode(offset: i64) -> Position {
         debug_assert!(offset >= 0, "composite offsets are non-negative");
         Position {

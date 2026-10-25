@@ -6,7 +6,7 @@
 //! notification, which [`decode`](crate::unit::decode) reads into one part per
 //! created object. A notification with no object to read is acknowledged, and
 //! one the source cannot read is failed back. A whole-object part over an
-//! object the planner would cut is read in the ranges
+//! object the lister would cut is read in the ranges
 //! [`parts_of`](crate::unit::parts_of) yields, each opened when there is room
 //! for it. Every part opens its own lane and partition and resumes from no
 //! committed position, so a redelivery and a duplicate are each read in

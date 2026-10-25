@@ -4,19 +4,19 @@ description: "The S3 source reads the objects and byte ranges that work units na
 
 # S3 (object storage) source
 
-The S3 source (`spate-s3`, feature `s3` on the `spate` facade) reads work
-units and storage notifications from a feed (see
+The S3 source (`spate-s3`, feature `s3` on the `spate` facade) reads work units
+and storage notifications from a feed (see
 [Reading from a feed](#reading-from-a-feed)), and a pipeline with no `feed:`
-section fails at start. A [**work unit**](../../../07-reference/glossary.mdx#work-unit)
-names one object or one byte range of a
-[large object](#large-objects-and-byte-ranges), with its key, size and ETag, so
-a reader never lists. On a bounded backfill the source streams every object's
-records through the pipeline and terminates the pipeline itself: `run()`
-returns `ExitState::Completed` once the feed has given out every unit and the
-sink has acknowledged every record. `Completed` is a strong claim here. Every
-record was durably written by the sink(s) *and* committed. An unacknowledged
-tail converts the exit into a failure, so an incomplete backfill is never
-reported as done.
+section fails at start. A
+[**work unit**](../../../07-reference/glossary.mdx#work-unit) names one object
+or one byte range of a [large object](#large-objects-and-byte-ranges), with its
+key, size and ETag, so a reader never lists. On a bounded backfill the source
+streams every object's records through the pipeline and terminates the pipeline
+itself: `run()` returns `ExitState::Completed` once the feed has given out every
+unit and the sink has acknowledged every record. `Completed` is a strong claim
+here. Every record was durably written by the sink(s) *and* committed. An
+unacknowledged tail converts the exit into a failure, so an incomplete backfill
+is never reported as done.
 
 Built on the [`object_store`](https://crates.io/crates/object_store)
 client (internal only, with no `object_store` types in the public API), so
@@ -333,15 +333,16 @@ A unit the lister publishes names one object or one byte range of one object, as
 an encoded `SplitDescriptor`, and a notification message is one unit with one
 part per non-empty created object (see
 [Storage notifications](#storage-notifications)). A unit whose body is neither,
-or a descriptor naming more than one object, is failed back to the feed. A whole-object part is cut into byte ranges on the
-conditions in [Large objects and byte ranges](#large-objects-and-byte-ranges),
-with the ETag taken from the descriptor or the notification, so a part with no
-ETag is read whole on one lane. A unit naming a byte range is failed back when
-its range is cut on a delimiter other than the framer's, or when `compression`
-decodes its object. The unit is acknowledged once, after every part and range
-has been read and committed. An object failure on one range fails the whole unit
-back, and its other parts and ranges stop. An overwrite of a notification unit's
-object stops that object's ranges and re-enqueues the object once, as
+or a descriptor naming more than one object, is failed back to the feed. A
+whole-object part is cut into byte ranges on the conditions in
+[Large objects and byte ranges](#large-objects-and-byte-ranges), with the ETag
+taken from the descriptor or the notification, so a part with no ETag is read
+whole on one lane. A unit naming a byte range is failed back when its range is
+cut on a delimiter other than the framer's, or when `compression` decodes its
+object. The unit is acknowledged once, after every part and range has been read
+and committed. An object failure on one range fails the whole unit back, and its
+other parts and ranges stop. An overwrite of a notification unit's object stops
+that object's ranges and re-enqueues the object once, as
 [Reading a notification's object](#reading-a-notifications-object) describes.
 
 The lister publishes no unit for an object of size 0, which holds no records.

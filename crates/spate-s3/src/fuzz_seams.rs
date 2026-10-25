@@ -87,7 +87,7 @@ where
     (records, outcome)
 }
 
-/// The bytes a split reading `[start, end)` of `object` forwards, fetched in
+/// The bytes a unit reading `[start, end)` of `object` forwards, fetched in
 /// the windows the fetcher schedules for `range_bytes` and `chunk_bytes`.
 /// `None` when the range is empty or extends past the object.
 ///

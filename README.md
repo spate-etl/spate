@@ -23,8 +23,8 @@
 
 [Documentation](https://spate.kainth.dev/) ·
 [Benchmarks](https://spate.kainth.dev/benchmarks) ·
-[Quickstart](https://spate.kainth.dev/docs/user-guide/getting-started/quickstart) ·
-[Examples](crates/spate/examples) ·
+[Quickstart](https://spate.kainth.dev/docs/user-guide/getting-started/quickstart)
+· [Examples](crates/spate/examples) ·
 [Changelog](CHANGELOG.md)
 
 </div>
@@ -139,8 +139,7 @@ Start at the [examples index](crates/spate/examples/README.md), which lists
 every example by what it shows, in five tiers, with what each one needs in
 order to run. `kafka_avro_to_clickhouse` is the fully-commented production
 assembly, `custom_source_sink` is the connector-author tutorial, and
-`s3_coordinated_backfill` runs two instances sharing one bounded backfill
-without either duplicating it.
+`s3_backfill` runs a bounded object-storage backfill that ends on its own.
 [`examples/docker`](examples/docker) covers containers and Kubernetes:
 probes, drain timeouts, sizing.
 

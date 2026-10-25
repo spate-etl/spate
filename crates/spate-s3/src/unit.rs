@@ -3,7 +3,7 @@
 //! notification is one unit with one part per non-empty created object.
 //!
 //! [`parts_of`] decides whether an object is read whole or cut, by the rule
-//! the planner applies to a listing ([`Packing::delimiter_for`] and
+//! the lister applies to a listing ([`Packing::delimiter_for`] and
 //! [`tile`]), and [`units`] mints one feed unit per part. The reader cuts a
 //! whole-object unit through the same [`Cursor`], so a unit's ranges are the
 //! same whichever side cuts them. [`decode`] reads a delivery's body, a

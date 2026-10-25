@@ -1,4 +1,4 @@
-//! The byte trim for a split that reads a [`SplitRange`] of one object.
+//! The byte trim for a unit that reads a [`SplitRange`] of one object.
 //!
 //! A range `[start, end)` owns the records whose first byte lies inside it,
 //! where a record starts at byte 0 and after every delimiter. [`RangeTrim`]

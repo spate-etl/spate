@@ -77,7 +77,7 @@ required-features = ["kafka", "clickhouse", "avro"]
 
 [[test]]
 name = "e2e_examples"
-required-features = ["kafka", "clickhouse", "avro", "s3", "json", "datagen-avro"]
+required-features = ["kafka", "clickhouse", "avro", "datagen-avro"]
 
 [[example]]
 name = "memory_pipeline"

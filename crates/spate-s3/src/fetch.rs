@@ -24,11 +24,11 @@
 //! ranged GET **conditioned on the object's ETag**, so a splice of two
 //! different object versions is impossible. Persistent failure (attempt
 //! budget exhausted) and the object-level non-retryable classes (missing
-//! key, failed precondition) **poison the split**, which is handed back for
-//! a peer to retry and quarantined at the attempt cap, while
+//! key, failed precondition) **poison the unit**, which is failed back to the
+//! feed for another delivery and dead-lettered at the feed's cap, while
 //! credentials/configuration failures stay fatal for the pipeline. An
 //! object whose store returns no ETag cannot be resumed mid-stream safely
-//! and poisons the split on a mid-object break instead.
+//! and poisons the unit on a mid-object break instead.
 //!
 //! A failed precondition on a notification unit that names no version, or a
 //! range the store cannot satisfy on one, is an overwrite
@@ -84,15 +84,15 @@ pub(crate) enum ChunkMsg {
     LaneFailed(SplitFailure),
 }
 
-/// How a split read failed. The classification decides whether one object
-/// condemns the split (poison, handled by the coordinator) or the whole
+/// How a unit read failed. The classification decides whether one object
+/// condemns the unit (poison, failed back to the feed) or the whole
 /// pipeline (fatal).
 #[derive(Debug)]
 pub(crate) enum SplitFailure {
-    /// Object-level failure: a member was deleted after planning, was
+    /// Object-level failure: a member was deleted after listing, was
     /// overwritten under its ETag pin, is corrupt, or exhausted its read
-    /// budget. The split is handed back for a peer to retry; it never
-    /// fails the pipeline directly.
+    /// budget. The unit is failed back to the feed; it never fails the
+    /// pipeline directly.
     Poison(PoisonKind, String),
     /// Instance- or configuration-level failure (credentials, permissions,
     /// client misconfiguration): terminal for the pipeline.
@@ -172,7 +172,7 @@ pub(crate) struct FetcherParams {
     pub(crate) retry_base: Duration,
     /// `spate_s3_source_get_retries_total`, when metrics are attached.
     pub(crate) retries: Option<spate_core::metrics::Counter>,
-    /// The byte range of the slice's one member, for a ranged split.
+    /// The byte range of the slice's one member, for a ranged unit.
     pub(crate) range: Option<SplitRange>,
     /// `spate_s3_source_bytes_read_total`, counting the bytes a ranged read
     /// fetches and trims; the lane counts the bytes it forwards.
@@ -182,10 +182,8 @@ pub(crate) struct FetcherParams {
     pub(crate) origin: Origin,
 }
 
-/// How many attempts one object GET, and in the planner one prefix
-/// listing, gets before escalating. Failing fast (a poisoned split, a
-/// fatal plan) beats a backfill wedged invisibly in an endless retry
-/// loop.
+/// How many attempts one object GET gets before escalating. Failing fast (a
+/// poisoned unit) beats a backfill wedged invisibly in an endless retry loop.
 pub(crate) const MAX_ATTEMPTS: u32 = 8;
 pub(crate) const BACKOFF_CAP: Duration = Duration::from_secs(5);
 const PAUSE_POLL: Duration = Duration::from_millis(25);
@@ -211,8 +209,8 @@ pub(crate) async fn run_fetcher(params: FetcherParams) {
     } = params;
 
     for (ordinal, entry) in slice.iter().enumerate().skip(start_ordinal as usize) {
-        // The planner's member cap bounds split sizes, so ordinals always
-        // fit the composite-offset layout.
+        // A unit holds one member, so ordinals always fit the composite-offset
+        // layout.
         let ordinal = ordinal as u32;
         // Pin the GET to the exact content the offsets were (or will be)
         // minted against: the committed ETag for the resume object, the
@@ -610,7 +608,7 @@ fn version_of(origin: &Origin) -> Option<String> {
 /// `pinned` (see [`is_overwrite`](crate::error::is_overwrite)), and report
 /// what the key holds now.
 ///
-/// A HEAD answering the pinned ETag poisons the split as `EtagDrift`, since
+/// A HEAD answering the pinned ETag poisons the unit as `EtagDrift`, since
 /// re-enqueueing at the same content would fail the same way. Any other
 /// answer, an absent ETag included, is [`SplitFailure::Overwritten`]. A HEAD
 /// that fails is classified as a read is: 404 poisons, 401 and 403 are
@@ -691,7 +689,7 @@ async fn head_after_overwrite(
 /// `Path::from` would read the key as unencoded parts and percent-encode `%`,
 /// `#`, `[`, non-ASCII and other reserved bytes, addressing a different
 /// object. A key that is not [`addressable`](crate::listing::addressable)
-/// cannot be read, or would be read under another key, and poisons the split.
+/// cannot be read, or would be read under another key, and poisons the unit.
 fn object_path(split: &LaneLabel, entry: &ObjectEntry) -> Result<Path, SplitFailure> {
     match Path::parse(&entry.key) {
         Ok(path) if path.as_ref() == entry.key => Ok(path),
@@ -1171,7 +1169,7 @@ mod tests {
         assert_eq!(got, verbatim_bodies());
     }
 
-    /// A key that is not a valid store path poisons the split as `NotFound`
+    /// A key that is not a valid store path poisons the unit as `NotFound`
     /// on both read paths, before any GET, and does not fail the pipeline.
     #[tokio::test]
     async fn an_unparseable_key_poisons_the_split() {
@@ -1194,7 +1192,7 @@ mod tests {
         }
     }
 
-    /// A key that parses to a different key poisons the split rather than
+    /// A key that parses to a different key poisons the unit rather than
     /// reading the object the parsed key names. Regression for #1116.
     #[tokio::test]
     async fn a_key_the_store_would_rewrite_poisons_the_split() {
@@ -1676,7 +1674,7 @@ mod tests {
         assert_cut(&reason);
     }
 
-    /// A read answered 404 with a 64 KiB body poisons the split as
+    /// A read answered 404 with a 64 KiB body poisons the unit as
     /// `NotFound`, with the store's text cut to the bound.
     #[tokio::test]
     async fn a_missing_object_with_a_large_body_poisons_and_cut() {
@@ -1752,7 +1750,7 @@ mod tests {
         assert!(e.to_string().contains("HandshakeFailure"), "{e}");
     }
 
-    /// A read failing past its attempt budget poisons the split with the
+    /// A read failing past its attempt budget poisons the unit with the
     /// last error's text cut to the bound.
     #[tokio::test(start_paused = true)]
     async fn a_read_failing_past_the_budget_with_a_large_error_is_cut() {
@@ -2512,7 +2510,7 @@ mod tests {
     }
 
     /// Pins that a failed precondition on a lister's unit or on a read that
-    /// names a version poisons the split as `EtagDrift` without a HEAD.
+    /// names a version poisons the unit as `EtagDrift` without a HEAD.
     #[tokio::test]
     async fn a_412_on_a_lister_or_versioned_read_poisons_without_a_head() {
         for origin in [Origin::Lister, notified(Some("v1"))] {
@@ -2673,7 +2671,7 @@ mod tests {
 
     /// Pins that a transient HEAD failure after a 412 is retried and counted
     /// in `get_retries`, and that a HEAD failing past the attempt budget
-    /// poisons the split as `RetriesExhausted`.
+    /// poisons the unit as `RetriesExhausted`.
     #[tokio::test(start_paused = true)]
     async fn a_retryable_head_after_a_412_is_retried() {
         let transient = || object_store::Error::Generic {

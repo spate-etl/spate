@@ -26,7 +26,7 @@ const CLOSED: u32 = 1 << 31;
 ///
 /// `terminal` is one-shot (the end-of-input decision); `objects_done`
 /// counts fully framed member objects so the control plane can settle the
-/// `objects_remaining` gauge when a split closes mid-way. After
+/// `objects_remaining` gauge when a unit closes mid-way. After
 /// [`close`](Self::close), the lane takes back the count of each object it
 /// framed before the close and the closer takes back the rest.
 #[derive(Debug)]
@@ -78,7 +78,7 @@ impl SplitTracker {
     }
 }
 
-/// What kind of object-level poison a split hit. This is the bounded
+/// What kind of object-level poison a unit hit. This is the bounded
 /// `reason` label of `spate_s3_source_objects_failed_total`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PoisonKind {

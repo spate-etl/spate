@@ -6,8 +6,8 @@
 //! would be read under that other key. [`UnaddressableConnector`] wraps the S3
 //! client: it takes each such object out of a listing page before
 //! `object_store` parses it and records it in [`UnaddressableKeys`], so the
-//! listing returns every other key, and the planner and the lister still read
-//! this one as a unit of its own.
+//! listing returns every other key, and the lister still publishes this one
+//! as a unit of its own.
 
 use crate::fetch::ObjectEntry;
 use bytes::Bytes;
@@ -32,8 +32,7 @@ pub(crate) fn addressable(key: &str) -> bool {
 }
 
 /// The objects [`UnaddressableConnector`] took out of listing pages, in page
-/// order. Shared between the connector and the planner or lister that drains
-/// it.
+/// order. Shared between the connector and the lister that drains it.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct UnaddressableKeys(Arc<Mutex<Vec<ObjectEntry>>>);
 

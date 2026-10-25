@@ -1,8 +1,8 @@
 name: Policy
 
-# Licenses, advisories and the changelog entry. Only `CI gate` waits on this unit,
-# so a missing release note does not skip the test tier.
-# Called from ci.yml, whose `changes` job computes every input.
+# Licenses, advisories and the changelog entry. Only `CI gate` waits on this
+# unit, so a missing release note does not skip the test tier. Called from
+# ci.yml with no inputs, so its jobs run on every event.
 on:
   workflow_call:
 

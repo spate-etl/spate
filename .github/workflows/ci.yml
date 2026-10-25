@@ -24,7 +24,7 @@ permissions:
   contents: read
 
 jobs:
-  # What changed. Each unit's `if:` reads these outputs, passed as inputs.
+  # What changed. Every unit but `policy` takes these outputs as inputs.
   changes:
     name: Detect changes
     runs-on: ubuntu-latest

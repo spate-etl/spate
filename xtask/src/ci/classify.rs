@@ -155,9 +155,10 @@ pub(crate) fn is_manifest(path: &str) -> bool {
 
 /// Files that can change whether a release assembles: the release workflows,
 /// the action that installs its tools, and its xtask sequence. The selector's
-/// own files are included, so a change to the selector runs the rehearsal on
-/// its pull request. An edit that drops those entries deselects its own pull
-/// request, so `release_tooling_selects_the_release_rehearsal` pins the list.
+/// own files and the workflow holding the rehearsal job are included, so a
+/// change to either runs the rehearsal on its pull request. An edit that drops
+/// those entries deselects its own pull request, so
+/// `release_tooling_selects_the_release_rehearsal` pins the list.
 pub(crate) fn is_release_tooling(path: &str) -> bool {
     any_glob(
         path,

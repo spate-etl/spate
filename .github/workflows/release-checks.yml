@@ -195,9 +195,9 @@ jobs:
   # Runs the nightly release rehearsal on a pull request that changes the
   # release's tooling: the release workflows, the `setup-rust` action that
   # installs `cargo-about` and `cargo-cyclonedx` through the
-  # `taiki-e/install-action` pin, the release sequence in xtask, or the
-  # selector that decides this job runs. A Dependabot bump of that pin is the
-  # change this exists for.
+  # `taiki-e/install-action` pin, the release sequence in xtask, the selector
+  # that decides this job runs, or this file. A Dependabot bump of that pin is
+  # the change this exists for.
   #
   # A `pull_request` run executes the pull request's own copy of this job,
   # including every build script and proc macro the rehearsal compiles. The

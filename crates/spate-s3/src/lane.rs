@@ -245,7 +245,7 @@ impl S3Lane {
                 .expect("framed records only exist within an object");
             if cur.next_record > MAX_RECORD_INDEX {
                 // A property of the object's content: it will overflow on
-                // every owner, which is what quarantine is for.
+                // every delivery, which is what the feed's dead-letter cap is for.
                 let key = cur.key.clone();
                 self.poison(
                     PoisonKind::Undecodable,

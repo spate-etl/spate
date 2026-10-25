@@ -450,8 +450,7 @@ Further practicalities:
 - **The planner brings its own I/O.** `PlanContext` carries no client and
   no runtime handle, so capture both at construction. `plan` runs on the
   blocking pool, so `Handle::block_on(async_listing())` inside it is the
-  intended shape (worked reference: [`spate-s3`](repo:crates/spate-s3)'s
-  planner).
+  intended shape.
 - **`SplitId`s are `[A-Za-z0-9_-]`, 1–128 bytes, `.` reserved.** Resource
   names (object keys, table names) rarely qualify, so never embed them. Digest
   them instead. The worked reference ([`spate-s3`](repo:crates/spate-s3))
@@ -644,8 +643,7 @@ a poll error: the lane sends a report over a channel (`std::sync::mpsc`
 works; the lane goes quiescent, returning empty polls), carrying the epoch
 the lane was opened under, and the source
 drains that channel at the top of `poll_events`, calling `driver.fail`
-for each report before delegating to `driver.poll_events`. Worked reference:
-[`spate-s3`](repo:crates/spate-s3)'s lane/context pair.
+for each report before delegating to `driver.poll_events`.
 
 **Signal the waker on the edges the control plane cannot see.** The
 driver owns the control-plane wait rather than the backend, because the two
@@ -743,8 +741,7 @@ Shipped stores: [NATS JetStream](../04-connectors/coordination/nats/README.mdx)
 ### Retrofitting an existing source
 
 A source that already implements `Source` with its own lane dealing and a
-whole-source checkpoint retrofits in the moves below (worked reference:
-[`spate-s3`](repo:crates/spate-s3), which carries the shape they produce):
+whole-source checkpoint retrofits in the moves below:
 
 1. **Extract the lane assembly** out of the source into the sibling
    context struct: everything `open_split` needs to spawn a fetcher and

@@ -2,8 +2,8 @@
 //!
 //! It is the teeth behind two properties the store is the only place to
 //! observe. LIST counting backs the "workers never list" acceptance
-//! criterion: a coordinated job's total LIST count across every instance
-//! must be exactly the planner's. GET recording backs `request_shape.rs`:
+//! criterion: a job's total LIST count across every instance must be
+//! exactly the lister's. GET recording backs `request_shape.rs`:
 //! how many reads a run issues, which byte ranges it asks for, and how many
 //! it keeps in flight are all invisible to the metrics layer, which counts
 //! bytes rather than requests.

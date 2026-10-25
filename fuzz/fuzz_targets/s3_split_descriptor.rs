@@ -1,8 +1,8 @@
 //! Split-descriptor decoding over arbitrary bytes, and the encode/decode
 //! round trip.
 //!
-//! A descriptor is read back out of a coordination store, so the bytes handed
-//! to `decode` are whatever that store held. The target drives three arms. The
+//! A descriptor is read out of a feed unit's body, so the bytes handed to
+//! `decode` are whatever the feed held. The target drives three arms. The
 //! decode arm asserts that a decoded descriptor carries `DESCRIPTOR_VERSION`
 //! and re-encodes to bytes that decode back to an equal descriptor. The
 //! round-trip arm asserts that a descriptor built from arbitrary member

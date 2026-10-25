@@ -1,5 +1,5 @@
 //! The async edge: the shared listing helper and one fetcher task per
-//! gained split, reading its member objects' bytes to the pipeline thread.
+//! unit part in progress, reading its member objects' bytes to the pipeline thread.
 //!
 //! Runs on the pipeline's I/O runtime. Every channel send `await`s, so a
 //! fetcher never blocks a runtime worker and sink workers sharing the

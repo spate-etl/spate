@@ -365,6 +365,27 @@ fn a_pipeline_with_no_feed_fails_at_start() {
     assert!(spy.gets().is_empty(), "no object was read");
 }
 
+/// Pins that a source with no feed names the missing `feed:` section even when
+/// its object store cannot be built, so a misconfigured run touches no store.
+#[test]
+fn a_missing_feed_is_reported_before_the_store_is_built() {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    let mut source = line_framer(
+        S3Source::from_component_config(
+            &spate_test::component_config("s3", "url: \"gs://bucket/p/\"\n"),
+            rt.handle().clone(),
+        )
+        .unwrap(),
+    );
+    let err = source
+        .open(SourceCtx::new(Checkpointer::new().handle()))
+        .expect_err("a source with no feed fails to open")
+        .to_string();
+    assert!(err.contains("feed:"), "{err}");
+}
+
 /// Pins that the source over a feed reads a whole-object unit in the byte
 /// ranges its `split_target_bytes` cuts: with a 1 MiB target, a unit over an
 /// object of 1 MiB + 64 KiB with an ETag is read by two ranged lanes, the

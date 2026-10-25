@@ -403,9 +403,20 @@ fn every_unit_is_called_from_ci_and_runs_only_there() {
     }
 }
 
+/// Whether a `permissions:` value hands out an OIDC token, by name or through
+/// `write-all`.
+fn grants_id_token(permissions: &serde_yaml::Value) -> bool {
+    match permissions {
+        serde_yaml::Value::String(all) => all == "write-all",
+        serde_yaml::Value::Mapping(map) => map.contains_key("id-token"),
+        _ => false,
+    }
+}
+
 /// No job `ci.yml` runs holds a deployment credential: none enters an
-/// environment, requests an OIDC token or reads a Cloudflare secret, and no
-/// unit takes the name of a workflow that does.
+/// environment, is granted an OIDC token at the job or the workflow level, or
+/// reads a Cloudflare secret, and no unit takes the name of a workflow that
+/// does.
 #[test]
 fn no_ci_unit_enters_an_environment() {
     let units = ci_units();
@@ -422,6 +433,10 @@ fn no_ci_unit_enters_an_environment() {
             "{file} reads a Cloudflare secret"
         );
         let parsed = yaml(text);
+        assert!(
+            !grants_id_token(&parsed["permissions"]),
+            "{file} grants every job an OIDC token"
+        );
         for (job, body) in parsed["jobs"].as_mapping().unwrap() {
             let job = job.as_str().unwrap();
             assert!(
@@ -429,7 +444,7 @@ fn no_ci_unit_enters_an_environment() {
                 "{file}: {job} enters an environment"
             );
             assert!(
-                body["permissions"].get("id-token").is_none(),
+                !grants_id_token(&body["permissions"]),
                 "{file}: {job} requests an OIDC token"
             );
         }
@@ -482,6 +497,16 @@ fn the_gate_keeps_its_name_condition_and_cancel_rule() {
     assert!(
         script.contains(r#".value.result == "cancelled""#),
         "{script}"
+    );
+    let bad = script
+        .split(r#"if [ -n "$bad" ]; then"#)
+        .nth(1)
+        .expect("the gate tests no bad result");
+    assert!(
+        bad.lines()
+            .take_while(|l| l.trim() != "fi")
+            .any(|l| l.trim() == "exit 1"),
+        "the gate does not fail on a bad result"
     );
 }
 

@@ -3,9 +3,9 @@
 //! Point the S3 source at a bucket prefix and it streams every object's
 //! NDJSON records through the pipeline and **terminates the pipeline
 //! itself** once the prefix is exhausted, with no shutdown trigger. The
-//! `feed: { memory: {} }` section runs the source on the in-process feed, which
-//! keeps nothing across a restart, so a second run lists and reads the whole
-//! prefix again. That is at-least-once, safe but wasteful, and the startup
+//! `feed:` section's `memory` backend runs the source on the in-process feed,
+//! which keeps nothing across a restart, so a second run lists and reads the
+//! whole prefix again. That is at-least-once, safe but wasteful, and the startup
 //! WARN says so. Resume and multi-instance sharing come from a durable feed
 //! filled by a separate lister run; see the `s3_sqs_backfill` and
 //! `s3_kafka_backfill` examples.
@@ -47,6 +47,16 @@ struct PaymentCaptured {
     amount_cents: u64,
 }
 
+/// The `feed:` section, kept out of `format!` so the page that transcludes it
+/// shows the text a pipeline file holds.
+const FEED: &str = r#"
+# ANCHOR: feed
+feed:
+  memory: {}
+  units_held: 32
+# ANCHOR_END: feed
+"#;
+
 fn config_yaml(root: &std::path::Path) -> String {
     format!(
         r#"
@@ -54,9 +64,7 @@ pipeline: {{ name: s3-backfill-demo, threads: 1 }}
 admin: {{ listen: none }}
 checkpoint: {{ interval: 200ms }}
 metrics: {{ exporter: none }}
-feed:
-  memory: {{}}
-source:
+{FEED}source:
   s3:
     url: "file://{data}/"
 deserializer:

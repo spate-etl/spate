@@ -321,10 +321,7 @@ the exceptions: a notification unit whose object is overwritten while it is
 read, as [Reading a notification's object](#reading-a-notifications-object)
 describes, and a unit handed back at a [graceful stop](#a-graceful-stop).
 
-```yaml
-feed:
-  memory: {}
-  units_held: 32
+```yaml file=crates/spate/examples/s3_backfill.rs region=feed
 ```
 
 ### Work units

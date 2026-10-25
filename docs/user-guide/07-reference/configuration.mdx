@@ -271,11 +271,11 @@ range, which the runtime also refuses when code passes the feed. The `memory`
 body is checked when the pipeline starts, before the source opens, unless code
 passes a feed to `Pipeline::feed`.
 
-```yaml
-feed:
-  memory: {}
-  units_held: 32
+```yaml file=crates/spate/examples/s3_backfill.rs region=feed
 ```
+
+The block is rendered from
+[`s3_backfill.rs`](repo:crates/spate/examples/s3_backfill.rs).
 
 | Key | Type | Default | Description |
 |---|---|---|---|

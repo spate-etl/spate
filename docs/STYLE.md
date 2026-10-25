@@ -536,9 +536,23 @@ so a copy of the lines it maintains falls behind at the next bump (§ 5).
 `examples/docker/Dockerfile` is the worked case, with image pins that move on a
 schedule the page cannot follow.
 
-`file=` accepts `crates/` and `examples/`. A YAML, TOML or shell block written
-for the page, with no file in the repository behind it, is unaffected; its
-correctness is checked against the config structs by review (§ 3).
+`file=` accepts `crates/` and `examples/`.
+
+### Config blocks an example holds
+
+A YAML or TOML block whose text an example under `crates/spate/examples/` holds
+is rendered from that example. The example keeps the section in a constant
+outside `format!`, so the region shows the text a pipeline file holds, and
+splices the constant into the file it parses. In YAML the anchor comments take
+`#`, as in `# ANCHOR: feed`. `s3_sqs_backfill.rs` is the worked case.
+
+`cargo xtask tidy transclusions` fails when the region moves. Clippy compiles
+the constant without parsing it, so the text is checked only where the example
+runs. An example with `test = true` parses and runs it on every pull request,
+and one in the container tier runs it nightly.
+
+A YAML, TOML or shell block that no file in the repository holds is checked
+against the config structs by review (§ 3).
 
 ## 11. Site pages and the blog
 

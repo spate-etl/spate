@@ -1,0 +1,3 @@
+**A captured write reads `Pending` until it resolves** (`spate-test`)
+
+`SinkScript::writes()` lists each write when it starts, with `CapturedWrite.result` set to the new `ScriptedResult::Pending` until the write returns. A write still in its `.after()` delay, a held write, and one whose future was dropped before it resolved read `Pending`. In previous versions a write scripted with `.after()` read its scripted result from the moment it started. A test that counts `result == ScriptedResult::Ok` as rows written no longer counts a write that has not finished.

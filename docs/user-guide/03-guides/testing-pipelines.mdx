@@ -150,7 +150,9 @@ failure paths:
 - `script.enqueue_for(shard, replica, WriteOutcome::retryable("boom"))` —
   the next write to that endpoint fails retryably (the framework retries the
   same sealed batch, rotating replicas); `WriteOutcome::fatal(...)` abandons
-  the batch and stalls the watermark; `.after(duration)` adds a delay.
+  the batch and stalls the watermark; `.after(duration)` adds a delay, and
+  `script.writes()` shows the write as `ScriptedResult::Pending` until it
+  resolves.
 - `WriteOutcome::ok().held()` — the write stays open until
   `script.release_held()`, whatever the clock does, so a test can assert
   what the pipeline does while a write is outstanding.

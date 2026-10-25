@@ -8,8 +8,8 @@ use spate_core::record::{Flow, PartitionId, RawPayload};
 use spate_core::sink::{RowEncoder, SealedBatch, ShardWriter};
 use spate_core::source::{LaneId, PayloadBatch, Source, SourceCtx, SourceEvent, SourceLane};
 use spate_test::{
-    EmitCollector, ReplicaTag, TestDeserializer, TestEncoder, WriteOutcome, capture_writer,
-    decode_rows, memory_source, raw_payload, record, test_ack,
+    EmitCollector, ReplicaTag, ScriptedResult, TestDeserializer, TestEncoder, WriteOutcome,
+    capture_writer, decode_rows, memory_source, raw_payload, record, test_ack,
 };
 use std::time::Duration;
 
@@ -338,8 +338,8 @@ async fn poll_once<F: std::future::Future>(
 }
 
 /// Pins that a held write stays open across any amount of tokio time until
-/// the script releases it, and that a release reaches only the writes held
-/// when it was called.
+/// the script releases it, that a release reaches only the writes held when
+/// it was called, and that each write reads `Pending` until it resolves.
 #[tokio::test(start_paused = true)]
 async fn a_held_write_resolves_only_when_released() {
     let (writer, script) = capture_writer();
@@ -359,10 +359,12 @@ async fn a_held_write_resolves_only_when_released() {
         poll_once(first.as_mut()).await.is_pending(),
         "time does not release a held write"
     );
+    assert_eq!(script.writes()[0].result, ScriptedResult::Pending);
 
     script.release_held();
     first.await.unwrap();
     assert_eq!(script.held_writes(), 0);
+    assert_eq!(script.writes()[0].result, ScriptedResult::Ok);
 
     let second_batch = sealed("held-2", b"");
     let mut second = std::pin::pin!(writer.write_batch(&ep, &second_batch));
@@ -370,12 +372,87 @@ async fn a_held_write_resolves_only_when_released() {
         poll_once(second.as_mut()).await.is_pending(),
         "an earlier release does not reach a later hold"
     );
+    assert_eq!(script.writes()[1].result, ScriptedResult::Pending);
     script.release_held();
     assert!(
         second.await.is_err(),
         "the scripted result follows the hold"
     );
-    assert_eq!(script.writes().len(), 2);
+    let writes = script.writes();
+    assert_eq!(writes.len(), 2);
+    assert_eq!(
+        writes[1].result,
+        ScriptedResult::Retryable("later".to_owned())
+    );
+}
+
+/// Pins that a delayed write reads `Pending` for its whole delay and its
+/// scripted result once it returns.
+#[tokio::test(start_paused = true)]
+async fn a_delayed_write_reads_as_pending_until_its_delay_ends() {
+    let (writer, script) = capture_writer();
+    script.enqueue_global(WriteOutcome::ok().after(Duration::from_secs(30)));
+    let ep = ReplicaTag {
+        shard: 0,
+        replica: 0,
+    };
+    let batch = sealed("slow", b"");
+    let mut write = std::pin::pin!(writer.write_batch(&ep, &batch));
+    assert!(poll_once(write.as_mut()).await.is_pending());
+    assert_eq!(script.writes()[0].result, ScriptedResult::Pending);
+    tokio::time::advance(Duration::from_secs(30) - Duration::from_millis(1)).await;
+    assert!(poll_once(write.as_mut()).await.is_pending());
+    assert_eq!(
+        script.writes()[0].result,
+        ScriptedResult::Pending,
+        "a write still in its delay read as resolved"
+    );
+    tokio::time::advance(Duration::from_millis(1)).await;
+    write.await.unwrap();
+    assert_eq!(script.writes()[0].result, ScriptedResult::Ok);
+}
+
+/// Pins that writes resolving out of start order each record their own
+/// result, in the order they started.
+#[tokio::test(start_paused = true)]
+async fn writes_resolving_out_of_order_keep_their_own_results() {
+    let (writer, script) = capture_writer();
+    script.enqueue_global(WriteOutcome::ok().after(Duration::from_secs(30)));
+    script.enqueue_global(WriteOutcome::retryable("r"));
+    let ep = ReplicaTag {
+        shard: 0,
+        replica: 0,
+    };
+    let slow_batch = sealed("slow", b"");
+    let fast_batch = sealed("fast", b"");
+    let mut slow = std::pin::pin!(writer.write_batch(&ep, &slow_batch));
+    assert!(poll_once(slow.as_mut()).await.is_pending());
+    assert!(writer.write_batch(&ep, &fast_batch).await.is_err());
+    let writes = script.writes();
+    assert_eq!(writes[0].dedup_token, "slow");
+    assert_eq!(writes[0].result, ScriptedResult::Pending);
+    assert_eq!(writes[1].result, ScriptedResult::Retryable("r".to_owned()));
+    tokio::time::advance(Duration::from_secs(30)).await;
+    slow.await.unwrap();
+    let writes = script.writes();
+    assert_eq!(writes[0].result, ScriptedResult::Ok);
+    assert_eq!(writes[1].result, ScriptedResult::Retryable("r".to_owned()));
+}
+
+/// Pins that an outcome scripted to resolve as `Pending` is refused when
+/// its write resolves.
+#[tokio::test]
+#[should_panic(expected = "Pending")]
+async fn a_write_scripted_pending_panics() {
+    let (writer, script) = capture_writer();
+    let mut outcome = WriteOutcome::ok();
+    outcome.result = ScriptedResult::Pending;
+    script.enqueue_global(outcome);
+    let ep = ReplicaTag {
+        shard: 0,
+        replica: 0,
+    };
+    let _ = writer.write_batch(&ep, &sealed("pending", b"")).await;
 }
 
 #[tokio::test]
@@ -473,7 +550,7 @@ fn collector_reports_flow() {
 }
 
 /// Pins that a held write dropped before its release no longer counts as
-/// held.
+/// held, and stays recorded as `Pending`.
 #[tokio::test]
 async fn a_dropped_held_write_is_no_longer_held() {
     let (writer, script) = capture_writer();
@@ -488,4 +565,27 @@ async fn a_dropped_held_write_is_no_longer_held() {
     assert_eq!(script.held_writes(), 1);
     drop(write);
     assert_eq!(script.held_writes(), 0);
+    let writes = script.writes();
+    assert_eq!(writes.len(), 1);
+    assert_eq!(writes[0].result, ScriptedResult::Pending);
+}
+
+/// Pins that a delayed write dropped before its delay ends stays recorded
+/// as `Pending`.
+#[tokio::test(start_paused = true)]
+async fn a_dropped_delayed_write_stays_pending() {
+    let (writer, script) = capture_writer();
+    script.enqueue_global(WriteOutcome::ok().after(Duration::from_secs(30)));
+    let ep = ReplicaTag {
+        shard: 0,
+        replica: 0,
+    };
+    let batch = sealed("slow", b"");
+    let mut write = Box::pin(writer.write_batch(&ep, &batch));
+    assert!(poll_once(write.as_mut()).await.is_pending());
+    drop(write);
+    tokio::time::advance(Duration::from_secs(30)).await;
+    let writes = script.writes();
+    assert_eq!(writes.len(), 1);
+    assert_eq!(writes[0].result, ScriptedResult::Pending);
 }

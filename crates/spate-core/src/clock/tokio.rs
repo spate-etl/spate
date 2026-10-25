@@ -10,6 +10,7 @@ use std::pin::Pin;
 // Only `TestClock` needs `Duration`; the trait and `SystemClock` do not.
 #[cfg(any(test, feature = "testing"))]
 use std::time::Duration;
+#[cfg(any(test, feature = "testing"))]
 use tokio::sync::watch;
 use tokio::time::Instant;
 

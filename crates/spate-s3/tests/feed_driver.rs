@@ -12,9 +12,7 @@ use spate_core::checkpoint::Checkpointer;
 use spate_core::clock::TestClock;
 use spate_core::config::PipelineConfig;
 use spate_core::feed::memory::{FeedCounts, MemoryFeed};
-use spate_core::feed::{
-    Confirmation, Delivery, Feed, FeedError, FeedErrorKind, FeedWaker, Receipt, STOP_RESERVE, Unit,
-};
+use spate_core::feed::{Feed, FeedErrorKind, Receipt, STOP_RESERVE, Unit};
 use spate_core::ops::chain_owned;
 use spate_core::pipeline::{ExitState, Pipeline, RuntimeOptions};
 use spate_core::sink::{KeyHashRouter, SinkPoolConfig};
@@ -24,11 +22,9 @@ use spate_test::{
     BytesPassthrough, FeedScript, PipelineRun, SinkScript, TestEncoder, WriteOutcome, capture_sink,
     scripted_feed, wait_until,
 };
-use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 use support::scripted_store::{HeadAnswer, ScriptedStore};
 use support::spy::{SpyOptions, spying_local_store};
@@ -593,6 +589,11 @@ fn a_unit_over_several_writes_is_acknowledged_with_every_row_written() {
             .all(|w| w.result == spate_test::ScriptedResult::Ok),
         "the writes before the held one succeeded"
     );
+    assert_eq!(
+        writes[2].result,
+        spate_test::ScriptedResult::Pending,
+        "the held write read as resolved"
+    );
 
     l.script.release_held();
     wait_until(DEADLINE, "the unit is acknowledged", || {
@@ -644,145 +645,64 @@ fn a_receipt_answered_gone_on_renewal_is_let_go() {
     assert_eq!(seen, sorted(rows), "every record at least once");
 }
 
-/// A feed over [`MemoryFeed`] that answers the first `acknowledge` and the
-/// first `fail` of each receipt with `Retryable`.
-struct FirstCallRetryable {
-    inner: MemoryFeed,
-    seen: Mutex<HashSet<(bool, Receipt)>>,
-}
-
-impl FirstCallRetryable {
-    fn first(&self, ack: bool, receipt: Receipt) -> bool {
-        self.seen.lock().unwrap().insert((ack, receipt))
-    }
-}
-
-impl Feed for FirstCallRetryable {
-    fn backend(&self) -> &str {
-        self.inner.backend()
-    }
-    fn set_waker(&self, waker: FeedWaker) {
-        self.inner.set_waker(waker);
-    }
-    fn receive(&self, max: usize) -> Result<Vec<Delivery>, FeedError> {
-        self.inner.receive(max)
-    }
-    fn renew(&self, receipt: Receipt) -> Result<(), FeedError> {
-        self.inner.renew(receipt)
-    }
-    fn acknowledge(&self, receipt: Receipt) -> Result<(), FeedError> {
-        if self.first(true, receipt) {
-            return Err(FeedError::new(FeedErrorKind::Retryable, "throttled"));
-        }
-        self.inner.acknowledge(receipt)
-    }
-    fn fail(&self, receipt: Receipt, reason: &str) -> Result<(), FeedError> {
-        if self.first(false, receipt) {
-            return Err(FeedError::new(FeedErrorKind::Retryable, "throttled"));
-        }
-        self.inner.fail(receipt, reason)
-    }
-    fn publish(&self, unit: Unit) -> Confirmation {
-        self.inner.publish(unit)
-    }
-
-    fn read_depth(&self, of: spate_core::feed::DepthOf) -> Option<spate_core::feed::DepthReading> {
-        self.inner.read_depth(of)
-    }
-    fn hands_back(&self) -> bool {
-        self.inner.hands_back()
-    }
-    fn stop_receiving(&self) {
-        self.inner.stop_receiving();
-    }
-    fn hand_back(&self, receipt: Receipt) -> Result<(), FeedError> {
-        self.inner.hand_back(receipt)
-    }
-    fn close(&self, within: std::time::Duration) -> Option<Confirmation> {
-        self.inner.close(within)
-    }
-}
-
-/// Pins that an `acknowledge` or `fail` answered `Retryable` is sent again:
-/// a unit with rows is acknowledged, and a unit over a missing object and an
-/// undecodable unit are failed until they dead-letter.
+/// Pins that an `acknowledge` answered `Retryable` is sent again, and the
+/// unit is acknowledged once.
 #[test]
-fn a_retryable_answer_is_sent_again() {
+fn a_retryable_acknowledgement_is_sent_again() {
     let dir = tempfile::tempdir().unwrap();
     let data = data_dir(&dir);
     stage(&data, "rows.ndjson", &recs("y", 10));
-    let inner = MemoryFeed::new();
-    drop(inner.publish(unit_over(&data, "rows.ndjson")));
-    drop(inner.publish(unit_over(&data, "missing.ndjson")));
-    drop(inner.publish(Unit::new("not-a-descriptor", b"{".to_vec())));
-    let feed = FirstCallRetryable {
-        inner: inner.clone(),
-        seen: Mutex::default(),
-    };
+    let (feed, script) = scripted_feed();
+    script.refuse_next_acknowledge(FeedErrorKind::Retryable);
+    let receipt = script.deliver(unit_over(&data, "rows.ndjson"));
     let l = launch_on_feed(&data, Arc::new(feed), |_| {});
-
-    let counts = |c: FeedCounts| (c.visible, c.held, c.dead_lettered, c.acknowledged);
-    wait_until(DEADLINE, "acknowledged and dead-lettered", || {
-        counts(inner.counts()) == (0, 0, 2, 1)
+    wait_until(DEADLINE, "the unit is acknowledged", || {
+        script.acknowledged() == vec![receipt]
     });
     stop(&l);
+    assert_eq!(script.refusals_left(), 0);
+    assert!(script.failed().is_empty());
+    assert!(script.gone().is_empty());
 }
 
-/// A feed over [`MemoryFeed`] that answers the first `receive` and the first
-/// `renew` of each receipt with `Retryable`.
-struct RetryableReceiveAndRenew {
-    inner: MemoryFeed,
-    receives: Mutex<usize>,
-    refused: Mutex<HashSet<Receipt>>,
+/// Pins that a `fail` answered `Retryable` is sent again for a lane that
+/// fails: a unit over a missing object is failed once.
+#[test]
+fn a_retryable_fail_of_a_failed_lane_is_sent_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    let (feed, script) = scripted_feed();
+    script.refuse_next_fail(FeedErrorKind::Retryable);
+    let receipt = script.deliver(unit_over(&data, "missing.ndjson"));
+    let l = launch_on_feed(&data, Arc::new(feed), |_| {});
+    wait_until(DEADLINE, "the unit is failed", || {
+        !script.failed().is_empty()
+    });
+    stop(&l);
+    let failed: Vec<Receipt> = script.failed().into_iter().map(|(r, _)| r).collect();
+    assert_eq!(failed, vec![receipt]);
+    assert_eq!(script.refusals_left(), 0);
+    assert!(script.gone().is_empty());
 }
 
-impl Feed for RetryableReceiveAndRenew {
-    fn backend(&self) -> &str {
-        self.inner.backend()
-    }
-    fn set_waker(&self, waker: FeedWaker) {
-        self.inner.set_waker(waker);
-    }
-    fn receive(&self, max: usize) -> Result<Vec<Delivery>, FeedError> {
-        let mut receives = self.receives.lock().unwrap();
-        *receives += 1;
-        if *receives == 1 {
-            return Err(FeedError::new(FeedErrorKind::Retryable, "throttled"));
-        }
-        drop(receives);
-        self.inner.receive(max)
-    }
-    fn renew(&self, receipt: Receipt) -> Result<(), FeedError> {
-        if self.refused.lock().unwrap().insert(receipt) {
-            return Err(FeedError::new(FeedErrorKind::Retryable, "throttled"));
-        }
-        self.inner.renew(receipt)
-    }
-    fn acknowledge(&self, receipt: Receipt) -> Result<(), FeedError> {
-        self.inner.acknowledge(receipt)
-    }
-    fn fail(&self, receipt: Receipt, reason: &str) -> Result<(), FeedError> {
-        self.inner.fail(receipt, reason)
-    }
-    fn publish(&self, unit: Unit) -> Confirmation {
-        self.inner.publish(unit)
-    }
-
-    fn read_depth(&self, of: spate_core::feed::DepthOf) -> Option<spate_core::feed::DepthReading> {
-        self.inner.read_depth(of)
-    }
-    fn hands_back(&self) -> bool {
-        self.inner.hands_back()
-    }
-    fn stop_receiving(&self) {
-        self.inner.stop_receiving();
-    }
-    fn hand_back(&self, receipt: Receipt) -> Result<(), FeedError> {
-        self.inner.hand_back(receipt)
-    }
-    fn close(&self, within: std::time::Duration) -> Option<Confirmation> {
-        self.inner.close(within)
-    }
+/// Pins that a `fail` answered `Retryable` is sent again for a unit the
+/// reader cannot decode: it is failed once.
+#[test]
+fn a_retryable_fail_of_an_unread_unit_is_sent_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    let (feed, script) = scripted_feed();
+    script.refuse_next_fail(FeedErrorKind::Retryable);
+    let receipt = script.deliver(Unit::new("not-a-descriptor", b"{".to_vec()));
+    let l = launch_on_feed(&data, Arc::new(feed), |_| {});
+    wait_until(DEADLINE, "the unit is failed", || {
+        !script.failed().is_empty()
+    });
+    stop(&l);
+    let failed: Vec<Receipt> = script.failed().into_iter().map(|(r, _)| r).collect();
+    assert_eq!(failed, vec![receipt]);
+    assert_eq!(script.refusals_left(), 0);
+    assert!(script.gone().is_empty());
 }
 
 /// Pins that a `receive` or a renewal answered `Retryable` is tried again:
@@ -792,27 +712,25 @@ fn a_retryable_receive_or_renewal_is_tried_again() {
     let dir = tempfile::tempdir().unwrap();
     let data = data_dir(&dir);
     stage(&data, "rows.ndjson", &recs("k", 10));
-    let inner = MemoryFeed::new();
-    drop(inner.publish(unit_over(&data, "rows.ndjson")));
-    let feed = Arc::new(RetryableReceiveAndRenew {
-        inner: inner.clone(),
-        receives: Mutex::default(),
-        refused: Mutex::default(),
-    });
-    let l = launch_on_feed(&data, feed.clone(), |sink| {
+    let (feed, script) = scripted_feed();
+    script.refuse_next_receive(FeedErrorKind::Retryable);
+    script.refuse_next_renew(FeedErrorKind::Retryable);
+    let receipt = script.deliver(unit_over(&data, "rows.ndjson"));
+    let l = launch_on_feed(&data, Arc::new(feed), |sink| {
         sink.enqueue_global(WriteOutcome::ok().held());
     });
     wait_until(DEADLINE, "the write is held", || {
         l.script.held_writes() == 1
     });
-    wait_until(DEADLINE, "a renewal is refused", || {
-        !feed.refused.lock().unwrap().is_empty()
+    wait_until(DEADLINE, "the receive and the renewal are refused", || {
+        script.refusals_left() == 0
     });
     l.script.release_held();
     wait_until(DEADLINE, "the unit is acknowledged", || {
-        inner.counts().acknowledged == 1
+        script.acknowledged() == vec![receipt]
     });
     stop(&l);
+    assert_eq!(script.delivered().len(), 1);
 }
 
 /// Pins that a lane reaching the end of its unit wakes the control plane:
@@ -1632,54 +1550,6 @@ fn a_feed_that_does_not_hand_back_drains_at_once_on_a_stop() {
     assert!(script.handed_back().is_empty());
 }
 
-/// A scripted feed whose `renew` answers `Fatal` once the test says so.
-struct FatalRenew {
-    inner: spate_test::ScriptedFeed,
-    fatal: AtomicBool,
-}
-
-impl Feed for FatalRenew {
-    fn backend(&self) -> &str {
-        self.inner.backend()
-    }
-    fn set_waker(&self, waker: FeedWaker) {
-        self.inner.set_waker(waker);
-    }
-    fn receive(&self, max: usize) -> Result<Vec<Delivery>, FeedError> {
-        self.inner.receive(max)
-    }
-    fn renew(&self, receipt: Receipt) -> Result<(), FeedError> {
-        if self.fatal.load(Ordering::Relaxed) {
-            return Err(FeedError::new(
-                FeedErrorKind::Fatal,
-                "the test fails the run",
-            ));
-        }
-        self.inner.renew(receipt)
-    }
-    fn acknowledge(&self, receipt: Receipt) -> Result<(), FeedError> {
-        self.inner.acknowledge(receipt)
-    }
-    fn fail(&self, receipt: Receipt, reason: &str) -> Result<(), FeedError> {
-        self.inner.fail(receipt, reason)
-    }
-    fn publish(&self, unit: Unit) -> Confirmation {
-        self.inner.publish(unit)
-    }
-    fn hands_back(&self) -> bool {
-        self.inner.hands_back()
-    }
-    fn stop_receiving(&self) {
-        self.inner.stop_receiving();
-    }
-    fn hand_back(&self, receipt: Receipt) -> Result<(), FeedError> {
-        self.inner.hand_back(receipt)
-    }
-    fn close(&self, within: Duration) -> Option<Confirmation> {
-        self.inner.close(within)
-    }
-}
-
 /// Pins that a failed run on a feed that hands back hands back its unread
 /// unit at once, with no reading.
 #[test]
@@ -1687,22 +1557,16 @@ fn a_failed_run_hands_back_its_unread_units_at_once() {
     let dir = tempfile::tempdir().unwrap();
     let data = data_dir(&dir);
     let (unit, _) = two_range_unit(&data);
-    let (inner, script) = scripted_feed();
+    let (feed, script) = scripted_feed();
     script.hand_back_on_stop();
     let receipt = script.deliver(unit);
-    let feed = Arc::new(FatalRenew {
-        inner,
-        fatal: AtomicBool::new(false),
-    });
-    let l = launch_stopping(
-        &data,
-        Arc::clone(&feed) as Arc<dyn Feed>,
-        TestClock::frozen(),
-    );
+    let l = launch_stopping(&data, Arc::new(feed), TestClock::frozen());
     wait_until(DEADLINE, "the first write is held", || {
         l.script.held_writes() == 1
     });
-    feed.fatal.store(true, Ordering::Relaxed);
+    // The section holds one unit, so the next renewal is of this one, and
+    // a `Fatal` renewal fails the run.
+    script.refuse_next_renew(FeedErrorKind::Fatal);
     wait_until(DEADLINE, "the unit is handed back", || {
         script.handed_back() == vec![receipt]
     });

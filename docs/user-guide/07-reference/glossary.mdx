@@ -198,7 +198,7 @@ lane ids are never reused. `spate_source_lanes_active` counts them.
 [Kafka source](../04-connectors/sources/kafka/README.mdx#lanes-partitions-on-pipeline-threads)
 — one partition queue ·
 [S3 source](../04-connectors/sources/s3/README.mdx#sizing-units-against-pipelinethreads)
-— one in-flight split ·
+— one object or byte range in progress ·
 [Datagen source](../04-connectors/sources/datagen/README.mdx#configuration) —
 one generator, `partitions` of them.
 
@@ -239,11 +239,7 @@ progress commits are per-split, fenced, and resumable, so a taken-over split
 continues from its last committed watermark. Distinct from a [lane](#lane)
 (local execution) and a [partition](#partition) (checkpoint bookkeeping).
 
-*Connector mapping:*
-[S3 source](../04-connectors/sources/s3/README.mdx#unit-identity-and-drift) —
-one whole object, identified by its key and ETag, or one byte range of a large
-object, identified by its key, ETag and range.
-A database source would instead plan an id range.
+A database source would plan an id range.
 
 ### Assignment
 
@@ -296,7 +292,7 @@ Watermarks, epochs, and the contiguity tracker are all per-partition.
 [Kafka source](../04-connectors/sources/kafka/README.mdx) — literally the topic
 partition ·
 [S3 source](../04-connectors/sources/s3/README.mdx#offsets-progress-resume) —
-one per [split](#split), with the offset packing member ordinal and record
+one per lane, with the offset packing member ordinal and record
 index within the object or byte range ·
 [Datagen source](../04-connectors/sources/datagen/README.mdx#configuration) —
 one per generated lane, set by `partitions`.
@@ -355,3 +351,8 @@ the source decodes to find the input it reads. A unit is acknowledged once,
 as a whole, and carries no progress, so a unit delivered again is read again
 from its start. Distinct from a [split](#split), whose progress a coordinated
 source commits as it reads.
+
+*Connector mapping:*
+[S3 source](../04-connectors/sources/s3/README.mdx#unit-identity-and-drift) —
+one whole object, identified by its key and ETag, or one byte range of a large
+object, identified by its key, ETag and range.

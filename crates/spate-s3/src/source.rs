@@ -1114,13 +1114,20 @@ mod tests {
         source
             .open(SourceCtx::new(Checkpointer::new().handle()))
             .unwrap();
-        let lane = loop {
-            if let SourceEvent::LanesAdded(mut lanes) =
-                source.poll_events(Duration::from_millis(50)).unwrap()
-            {
-                break lanes.remove(0).id();
-            }
-        };
+        let mut added = None;
+        spate_test::wait_until(
+            Duration::from_secs(30),
+            "the source adds the unit's lane",
+            || {
+                if let SourceEvent::LanesAdded(mut lanes) =
+                    source.poll_events(Duration::from_millis(50)).unwrap()
+                {
+                    added = Some(lanes.remove(0).id());
+                }
+                added.is_some()
+            },
+        );
+        let lane = added.expect("a lane was added");
         let paused = |source: &S3Source| match &source.state {
             State::Feed(reader) => reader.is_paused(lane),
             State::Created => None,

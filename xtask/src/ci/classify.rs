@@ -231,8 +231,7 @@ pub(crate) fn classify(
                 image_suites.extend(graph.container_suites_for("spate-kafka"));
                 out.container_pkgs.extend(image_suites.iter().cloned());
             }
-            // The server the NATS suites run against. `spate` boots it only in
-            // its examples tier, which the container suites leave out.
+            // The server the NATS suites run against.
             if glob(path, "ci/nats/*") {
                 image_suites.extend(["spate-coordination"].map(String::from));
                 out.container_pkgs.extend(image_suites.iter().cloned());

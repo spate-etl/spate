@@ -33,8 +33,8 @@
 //!   fewer than `plain_mid_offset`. The difference between the two is the
 //!   trim plus the window copy that stands in for the GET.
 //! - `plain_many_small` — sixteen small objects through one framer: the
-//!   per-object codec resolution and state reset a descriptor of several
-//!   members pays.
+//!   per-object codec resolution and state reset of a framer reused across
+//!   objects.
 //!
 //! Bodies are compressed in the fixture, never in the measured region, so
 //! these count decompression only. Framing is done with `spate-json`'s

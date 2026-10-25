@@ -55,8 +55,7 @@ revocation, one choreography tested constantly by every rebalance:
 4. **Offsets commit.** The controller drains the checkpointer and runs a final
    synchronous commit + `flush_commits`, committing only watermarks that cover
    durably written data, per the at-least-once invariant. A coordinated source
-   that forwards `Source::commit_final` to `CoordinationDriver::commit_final`,
-   as the built-in [S3 source](../04-connectors/sources/s3/README.mdx) does,
+   that forwards `Source::commit_final` to `CoordinationDriver::commit_final`
    runs this commit under one budget, `coordination.op_timeout`, for all its
    splits together. Splits it does not reach before the budget ends keep their
    last committed position, and the next owner may replay records from it. The

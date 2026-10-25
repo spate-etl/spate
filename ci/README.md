@@ -28,7 +28,7 @@ are testing, so adding either is a change inside `ci/`.
 | [`debian`](debian/README.md) | `trixie` | `spate-kafka`'s `tls_system_ca`, as its vendored OpenSSL client image |
 | [`elasticmq`](elasticmq/README.md) | `stable` | `spate-sqs`, and `spate-test-support`'s smoke tests |
 | [`kafka`](kafka/README.md) | `stable` | `spate-kafka`, and `spate`'s end-to-end suites |
-| [`nats`](nats/README.md) | `floor`, `below-floor`, `async` | `spate-coordination`, and `spate`'s examples tier |
+| [`nats`](nats/README.md) | `floor`, `below-floor`, `async` | `spate-coordination` |
 | [`rust`](rust/README.md) | `stable` | `spate-kafka`'s `tls_system_ca`, as its system OpenSSL builder and client image |
 | [`rustfs`](rustfs/README.md) | `stable` | `spate-s3`, `spate-kafka`'s notification suite, and `spate-test-support`'s smoke test |
 

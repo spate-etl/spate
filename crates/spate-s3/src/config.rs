@@ -275,8 +275,7 @@ mod tests {
 
     #[test]
     fn removed_knobs_are_rejected() {
-        // None of these are source keys; `coordination:` is no longer a
-        // pipeline section either.
+        // None of these are keys of the source body.
         for extra in [
             "  lanes: 4\n",
             "  refresh_listing: true\n",

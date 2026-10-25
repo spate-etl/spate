@@ -63,7 +63,7 @@ jobs:
       # Container fixtures pass a throwaway password to a server they start
       # and drop, which `rust/hard-coded-cryptographic-value` reports as a
       # credential. Every alert it has raised here has been one of those.
-      - uses: github/codeql-action/init@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
+      - uses: github/codeql-action/init@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee # v4.39.0
         with:
           languages: ${{ matrix.language }}
           build-mode: ${{ matrix.build-mode }}
@@ -76,6 +76,6 @@ jobs:
 
       # `category` keeps each language's results in its own SARIF namespace, so
       # one language's run does not retire the other's alerts.
-      - uses: github/codeql-action/analyze@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
+      - uses: github/codeql-action/analyze@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee # v4.39.0
         with:
           category: "/language:${{ matrix.language }}"

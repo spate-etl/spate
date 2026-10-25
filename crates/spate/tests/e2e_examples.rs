@@ -1154,6 +1154,16 @@ fn s3_sqs_bounded_example_ends_on_its_own() {
         1,
         "expected one exit line\n--- log ---\n{log}"
     );
+    assert_eq!(
+        log.lines()
+            .filter(|l| l.contains(
+                "the bounded job has read all of its work and its dead-letter \
+                 destination is empty; ending the run"
+            ))
+            .count(),
+        1,
+        "the run did not end through the bounded job's end check\n--- log ---\n{log}"
+    );
     for marker in ["fingerprint", "end"] {
         assert!(
             jobs.path().join(marker).is_file(),

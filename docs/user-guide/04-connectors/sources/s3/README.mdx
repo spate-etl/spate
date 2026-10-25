@@ -594,10 +594,13 @@ The block is rendered from
 stages a `file://` backfill and runs it as one bounded job, taking its queue
 and its location from the environment. The job ends about a minute after its
 last unit, once the queue has read empty for the `settling_window`. The
-[SQS feed](../../feeds/sqs/README.mdx) page says how to stand up the queue:
+example's header creates a queue pair on a local queue server, with AWS
+credentials and a region in the environment. The run points the client at that
+server:
 
 ```sh
 JOB_LOCATION="file://$(mktemp -d)/" \
+  AWS_ENDPOINT_URL=http://127.0.0.1:9324 \
   SQS_QUEUE_URL=http://127.0.0.1:9324/000000000000/jobs \
   cargo run -p spate --features s3,json,sqs --example s3_sqs_backfill
 ```

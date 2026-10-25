@@ -1,5 +1,5 @@
 ---
-description: "Adding the spate crate, choosing Kafka, ClickHouse, Avro, or S3 features, and the Rust MSRV and edition requirements."
+description: "Adding the spate crate, choosing Kafka, ClickHouse, Avro, or S3 features, the supported platforms, and the Rust MSRV and edition requirements."
 ---
 
 # Installation
@@ -70,6 +70,17 @@ is documented as exempt from Spate's stability promises.
 - The `kafka-tls` feature also compiles OpenSSL from vendored sources, which
   needs Perl 5 with its core modules on the build host. The standard `rust`
   Docker images include it.
+
+## Supported platforms
+
+- **Linux on x86_64 and aarch64** is supported. CI runs the test suites on
+  both.
+- **macOS on Apple silicon** is supported for development. CI runs the
+  workspace tests on macOS before each code change merges.
+- **Windows** is not supported. The `kafka` feature builds librdkafka with its
+  `configure` script, and `rdkafka-sys` builds on Windows only through CMake,
+  which Spate does not enable. A pipeline built for a non-Unix target also
+  stops on Ctrl-C alone, with no SIGTERM handler.
 
 ## Verifying the install
 

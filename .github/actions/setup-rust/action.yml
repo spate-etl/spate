@@ -128,7 +128,7 @@ runs:
       with:
         tool: ${{ inputs.tools }}
 
-    # `save-if` restricted to main holds one warm baseline per architecture
+    # `save-if` restricted to main holds one warm baseline per OS and architecture
     # against the 10 GB per-repo cache ceiling. Left at its default, every job on every pull
     # request writes its own entry, and the LRU budget evicts that baseline. A
     # run may read its own branch, the default branch, and its pull request

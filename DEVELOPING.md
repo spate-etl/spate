@@ -92,8 +92,8 @@ The profiles in `.config/nextest.toml`:
 - **`default`** — `fail-fast = false`, and a 30-second slow warning that
   terminates after four periods, so a hard kill at 120s. The container suites are
   excluded here and nothing left should take that long.
-- **`ci`** — what `Test and coverage` and `Test (arm64)` run. 60 seconds,
-  terminating after four, with no retry and a JUnit report.
+- **`ci`** — what `Test and coverage`, `Test (arm64)` and `Test (macOS)` run.
+  60 seconds, terminating after four, with no retry and a JUnit report.
 - **`docker`** — warns at 120 seconds and **never terminates**: a cold image pull
   can exceed any figure worth setting, and a SIGKILL reports as a timeout
   indistinguishable from a hang. One retry, JUnit report.
@@ -147,6 +147,11 @@ everything depends on it, and a crate without one selects nothing. The semver
 gate follows a third closure over the same paths, this one over the non-dev
 dependency edges: a connector change checks that connector and the facade, and
 a `spate-core` change checks every published crate.
+
+The macOS lane runs the workspace suite on each merge-queue entry that changes
+Rust and on each push to `main`. On a pull request it runs when the diff touches
+a manifest, `Cargo.lock`, a `build.rs`, the cargo or nextest configuration, or
+the workflow that runs it.
 
 For a change whose reach those paths do not show, such as a refactor moving code
 between crates or a dependency swap, a maintainer can label the pull request

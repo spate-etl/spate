@@ -179,6 +179,33 @@ pub(crate) fn is_advisory_input(path: &str) -> bool {
     )
 }
 
+/// Files that can break a macOS build or test run while the Linux lanes pass:
+/// the dependency graph, a native build script, cargo and nextest config, and
+/// the workflow and action that run the lane. The selector's own files are
+/// included, so an edit that drops an entry runs the lane on its own pull
+/// request, and `a_build_input_change_runs_the_macos_lane_on_a_pull_request`
+/// pins the list.
+pub(crate) fn is_macos_input(path: &str) -> bool {
+    any_glob(
+        path,
+        &[
+            "Cargo.toml",
+            "Cargo.lock",
+            "crates/*/Cargo.toml",
+            "crates/*/build.rs",
+            "bench/Cargo.toml",
+            "test-support/Cargo.toml",
+            "xtask/Cargo.toml",
+            ".cargo/*",
+            ".config/*",
+            ".github/workflows/ci.yml",
+            ".github/workflows/tests.yml",
+            ".github/actions/setup-rust/*",
+            "xtask/src/ci/*",
+        ],
+    )
+}
+
 /// Files that can change whether a release assembles: the release workflows,
 /// the action that installs its tools, and its xtask sequence. The selector's
 /// own files and the workflow holding the rehearsal job are included, so a
@@ -223,6 +250,7 @@ pub(crate) fn classify(
         out.manifests = true;
         out.advisories = true;
         out.release_tooling = true;
+        out.macos = true;
         bench_pkgs = graph.all_bench_pkgs().clone();
         out.container_pkgs = graph.all_container_pkgs().clone();
         out.semver_pkgs = graph.all_semver_pkgs().clone();
@@ -232,6 +260,7 @@ pub(crate) fn classify(
             out.manifests |= is_manifest(path);
             out.advisories |= is_advisory_input(path);
             out.release_tooling |= is_release_tooling(path);
+            out.macos |= is_macos_input(path);
             match kind_of(path) {
                 Kind::Skip => continue,
                 Kind::SiteOnly => {
@@ -373,6 +402,11 @@ pub(crate) fn classify(
             if crate_of(path).is_some_and(|c| graph.is_fuzz_dependency(c)) {
                 out.fuzz = true;
             }
+        }
+        // The merge queue is the macOS lane's gate: every entry that builds
+        // runs it, whatever its paths.
+        if event == Event::MergeGroup {
+            out.macos = out.rust;
         }
     }
 
@@ -904,9 +938,83 @@ mod tests {
                 && out.manifests
                 && out.advisories
                 && out.release_tooling
+                && out.macos
         );
         assert_eq!(out.container_pkgs, *graph().all_container_pkgs());
         assert_eq!(out.semver_pkgs, *graph().all_semver_pkgs());
+    }
+
+    /// On a pull request the macOS lane follows the paths that can break a
+    /// macOS build, and a crate source change leaves it to the merge queue.
+    #[test]
+    fn a_build_input_change_runs_the_macos_lane_on_a_pull_request() {
+        for path in [
+            "Cargo.toml",
+            "Cargo.lock",
+            "crates/spate-s3/Cargo.toml",
+            "crates/spate-kafka/build.rs",
+            "bench/Cargo.toml",
+            "test-support/Cargo.toml",
+            "xtask/Cargo.toml",
+            ".cargo/config.toml",
+            ".config/nextest.toml",
+            ".github/workflows/ci.yml",
+            ".github/workflows/tests.yml",
+            ".github/actions/setup-rust/action.yml",
+            "xtask/src/ci/classify.rs",
+        ] {
+            assert!(run(&[path]).macos, "{path}");
+        }
+        for path in [
+            "crates/spate-core/src/lib.rs",
+            "fuzz/Cargo.toml",
+            ".github/workflows/containers.yml",
+            "xtask/src/commands/lint.rs",
+            "docs/a.md",
+        ] {
+            assert!(!run(&[path]).macos, "{path}");
+        }
+    }
+
+    /// Every merge-queue entry that builds runs the macOS lane, and one that
+    /// changes only prose does not.
+    #[test]
+    fn the_merge_queue_runs_the_macos_lane_on_every_rust_change() {
+        let queue = |path: &str| {
+            classify(
+                &[path.to_string()],
+                Event::MergeGroup,
+                &Context::default(),
+                &graph(),
+                &[],
+            )
+        };
+        assert!(queue("crates/spate-core/src/lib.rs").macos);
+        assert!(!queue("docs/a.md").macos);
+    }
+
+    /// The Dependabot deferral gives up the container suites and keeps the
+    /// macOS lane, so a lockfile bump builds on macOS before it queues.
+    #[test]
+    fn a_bot_lock_bump_runs_the_macos_lane() {
+        let ctx = Context {
+            author: "dependabot[bot]".into(),
+            labels: vec![],
+        };
+        let paths = vec!["Cargo.lock".to_string()];
+        let out = classify(&paths, Event::PullRequest, &ctx, &graph(), &[]);
+        assert!(out.macos);
+        assert!(out.container_pkgs.is_empty());
+    }
+
+    #[test]
+    fn the_macos_selection_reaches_the_output() {
+        assert!(run(&["Cargo.lock"]).to_string().contains("\nmacos=true\n"));
+        assert!(
+            run(&["crates/spate-core/src/lib.rs"])
+                .to_string()
+                .contains("\nmacos=false\n")
+        );
     }
 
     #[test]

@@ -8,6 +8,9 @@ on:
       rust:
         type: string
         required: true
+      macos:
+        type: string
+        required: true
     secrets:
       CODECOV_TOKEN:
         required: false
@@ -127,6 +130,47 @@ jobs:
         if: always()
         with:
           name: junit-nextest-arm64
+          path: target/nextest/ci/junit.xml
+
+  # The workspace suite on macOS, the platform contributors develop on. The
+  # classifier selects it for every merge-queue entry that builds.
+  test-macos:
+    name: Test (macOS)
+    runs-on: macos-26
+    if: inputs.macos == 'true'
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      checks: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          # `clippy` for `xtask/tests/clippy_gate.rs`, as in `test`.
+          components: clippy
+          tools: nextest
+          # rust-cache keys on the runner's OS, so this entry is apart from the
+          # Linux ones.
+          shared-key: dev-allfeatures
+
+      - name: Test
+        run: cargo nextest run --profile ci --workspace --all-features --locked
+
+      - name: Publish test report
+        uses: mikepenz/action-junit-report@6ef3fdcfcd5f0b5d14df3e659ef19b8c6820f93d # v6.6.1
+        if: always()
+        with:
+          report_paths: target/nextest/ci/junit.xml
+          check_name: Test results (macOS)
+          detailed_summary: true
+          include_passed: false
+          fail_on_failure: false
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: junit-nextest-macos
           path: target/nextest/ci/junit.xml
 
   mutants:

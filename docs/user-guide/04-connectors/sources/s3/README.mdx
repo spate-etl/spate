@@ -249,12 +249,12 @@ Spate creates neither. Each role needs:
 
 - **A worker:** the read permissions above, read access at the
   [job location](#bounded-jobs-and-the-job-location), and the feed's receive,
-  acknowledge and send permissions.
+  acknowledge and send permissions, and the reads its startup check makes.
 - **A lister run:** list access to the prefix, read, write and delete access at
-  the job location, and the feed's send permission.
+  the job location, the feed's send permission, and the reads its startup
+  check makes.
 - **The operator:** whatever creates the queue, its dead-letter queue and the
-  bucket's notification configuration. The worker's startup check reads both
-  queues' attributes or the topics' configuration.
+  bucket's notification configuration.
 
 The [SQS feed](../../feeds/sqs/README.mdx#security-credentials-permissions-and-tls)
 and [Kafka feed](../../feeds/kafka/README.mdx#startup-checks) pages list the
@@ -409,8 +409,11 @@ above with the units held in place of `max_in_flight`: about
 `2 × units_held × prefetch_bytes`, which is 2 × 96 × 8 MiB = 1,536 MiB at the
 defaults. This is arithmetic and has not been measured. A unit is acknowledged,
 and its slot freed, only after the sink has written its last row, so a batch of
-small units waits up to `batch.linger` for a seal. A worker completes at most
-`units_held / batch.linger` small units a second: 96 a second at the defaults.
+small units waits up to `batch.linger` for a seal. While the held units total
+fewer rows than `batch.max_rows` and fewer bytes than `batch.max_bytes`, a
+worker completes at most `units_held / batch.linger` units a second: 96 a
+second at the defaults. A batch that reaches either threshold seals without
+waiting for the linger.
 With 96 units held, 4,608 local objects of 64 KB and 20 ms of added GET
 latency on one laptop, a run read 93.4 objects a second at the default 1 s
 linger and 3,124 at 5 ms. A lower `batch.linger` or more units held raises the

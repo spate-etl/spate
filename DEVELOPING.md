@@ -92,8 +92,8 @@ The profiles in `.config/nextest.toml`:
 - **`default`** — `fail-fast = false`, and a 30-second slow warning that
   terminates after four periods, so a hard kill at 120s. The container suites are
   excluded here and nothing left should take that long.
-- **`ci`** — what the test jobs run. 60 seconds, terminating after
-  four, with no retry and a JUnit report.
+- **`ci`** — what `Test and coverage` and `Test (arm64)` run. 60 seconds,
+  terminating after four, with no retry and a JUnit report.
 - **`docker`** — warns at 120 seconds and **never terminates**: a cold image pull
   can exceed any figure worth setting, and a SIGKILL reports as a timeout
   indistinguishable from a hang. One retry, JUnit report.

@@ -1044,9 +1044,22 @@ fn the_advisory_check_alone_waits_on_a_dependency_change() {
 
 /// The arm64 lane runs what the x64 jobs run: the container suites through the
 /// one matrix job, and the workspace suite with the `test` job's condition and
-/// nextest arguments, less the coverage wrapper.
+/// nextest arguments, less the coverage wrapper. No job or step of the lane
+/// lets a failure through to `CI gate`.
 #[test]
 fn the_arm64_lane_runs_what_the_x64_jobs_run() {
+    for (file, name) in [
+        ("tests.yml", "test-arm64"),
+        ("containers.yml", "containers"),
+    ] {
+        let parsed = yaml(&read_workflow(file));
+        let job = &parsed["jobs"][name];
+        assert!(job.get("continue-on-error").is_none(), "{file}");
+        for step in job["steps"].as_sequence().unwrap() {
+            assert!(step.get("continue-on-error").is_none(), "{file}: {step:?}");
+        }
+    }
+
     let containers = yaml(&read_workflow("containers.yml"));
     let job = &containers["jobs"]["containers"];
     assert_eq!(job["runs-on"].as_str(), Some("${{ matrix.runner }}"));

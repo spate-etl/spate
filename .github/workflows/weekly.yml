@@ -170,7 +170,7 @@ jobs:
         run: cargo llvm-cov clean --workspace --locked
       - name: Coverage (unit and integration)
         run: cargo llvm-cov --no-report nextest --profile ci --workspace --all-features --locked
-      # Serial: 2 cores / ~7 GB across five servers; concurrency OOMs.
+      # Serial: the container servers in parallel OOM a hosted runner.
       - name: Coverage (docker suites)
         run: >
           cargo llvm-cov --no-report nextest --profile docker

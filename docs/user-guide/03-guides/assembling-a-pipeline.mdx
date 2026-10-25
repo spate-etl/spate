@@ -220,7 +220,8 @@ Skipping a step is caught here: `BuildError::MissingSink` /
 
 `run` returns an `ExitReport` carrying the terminal state (`Completed` or
 `Failed`), the sink's drain report, and the last committed watermark of each
-partition the source still held when the run ended. These methods cover the common endings of `main`:
+partition the source still held when the run ended. These methods cover the
+common endings of `main`:
 
 - `report.log()` — log the outcome at the matching level (`info` clean,
   `error` failed).

@@ -172,16 +172,18 @@ pub(crate) fn resolve(event: Event, diff: &dyn Diff) -> (Event, Vec<String>, boo
     }
 }
 
-/// Whether a push reaches a manifest. Push mode force-runs every other job, so
-/// the packaging and floors gates select on their own diff.
-pub(crate) fn manifest_reach(diff: &dyn Diff) -> Option<bool> {
+/// Whether a push reaches a path `selects` holds. Push mode force-runs every
+/// other job, so the packaging, floors and advisories gates select on their own
+/// diff.
+pub(crate) fn reach(diff: &dyn Diff, selects: fn(&str) -> bool) -> Option<bool> {
     diff.push_paths()
-        .map(|paths| paths.iter().any(|p| super::classify::is_manifest(p)))
+        .map(|paths| paths.iter().any(|p| selects(p)))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ci::classify::{is_advisory_input, is_manifest};
 
     struct Fake {
         changed: Option<Vec<String>>,
@@ -317,7 +319,7 @@ mod tests {
 
     #[test]
     fn a_push_without_a_usable_before_fails_closed() {
-        assert_eq!(manifest_reach(&unresolvable()), None);
+        assert_eq!(reach(&unresolvable(), is_manifest), None);
     }
 
     #[test]
@@ -326,12 +328,29 @@ mod tests {
             changed: None,
             push: Some(vec!["crates/spate/Cargo.toml".into()]),
         };
-        assert_eq!(manifest_reach(&fake), Some(true));
+        assert_eq!(reach(&fake, is_manifest), Some(true));
         let fake = Fake {
             changed: None,
             push: Some(vec!["docs/a.md".into()]),
         };
-        assert_eq!(manifest_reach(&fake), Some(false));
+        assert_eq!(reach(&fake, is_manifest), Some(false));
+    }
+
+    /// A push of the advisory policy alone reaches the advisories gate and
+    /// leaves the manifest gate off.
+    #[test]
+    fn a_push_reaching_an_advisory_input_is_seen() {
+        let fake = Fake {
+            changed: None,
+            push: Some(vec!["deny.toml".into()]),
+        };
+        assert_eq!(reach(&fake, is_advisory_input), Some(true));
+        assert_eq!(reach(&fake, is_manifest), Some(false));
+        let fake = Fake {
+            changed: None,
+            push: Some(vec!["docs/a.md".into()]),
+        };
+        assert_eq!(reach(&fake, is_advisory_input), Some(false));
     }
 }
 

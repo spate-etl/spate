@@ -23,7 +23,7 @@ const READS: [&str; 10] = [
 ];
 
 /// The keys the workflow reads, in the order the block writes them.
-const KEYS: [&str; 12] = [
+const KEYS: [&str; 13] = [
     "rust",
     "site",
     "fuzz",
@@ -33,6 +33,7 @@ const KEYS: [&str; 12] = [
     "semver-pkgs",
     "bench",
     "manifests",
+    "advisories",
     "release-tooling",
     "bench-shards",
     "clickhouse-lanes",
@@ -49,6 +50,7 @@ const SITE_ONLY: &str = "rust=false\n\
      semver-pkgs=\n\
      bench=false\n\
      manifests=false\n\
+     advisories=false\n\
      release-tooling=false\n\
      bench-shards=[]\n\
      clickhouse-lanes=[]\n";
@@ -99,6 +101,7 @@ fn force_all() -> String {
     assert_eq!(keys, KEYS);
     assert_eq!(field(&block, "rust"), "true");
     assert_eq!(field(&block, "manifests"), "true");
+    assert_eq!(field(&block, "advisories"), "true");
     block
 }
 
@@ -115,8 +118,8 @@ fn an_unresolvable_diff_reports_the_fallback_and_runs_everything() {
     );
 }
 
-/// A push with no `before..HEAD` to read says so and leaves the manifest gate
-/// on. Nothing else in a push run checks the manifests.
+/// A push with no `before..HEAD` to read says so and leaves the manifest and
+/// advisories gates on. Nothing else in a push run checks either.
 #[test]
 fn a_push_with_no_before_fails_the_manifest_gate_closed() {
     held(
@@ -124,7 +127,7 @@ fn a_push_with_no_before_fails_the_manifest_gate_closed() {
         &[("EVENT_NAME", "push")],
         0,
         &format!(
-            "note: no usable before..HEAD diff; the manifest gate fails closed.\n{}",
+            "note: no usable before..HEAD diff; the manifest and advisories gates fail closed.\n{}",
             force_all()
         ),
         "",
@@ -351,6 +354,18 @@ fn every_unit_input_is_declared_passed_and_read() {
                 unit.caller_job["with"][key].as_str(),
                 Some(format!("${{{{ needs.changes.outputs.{key} }}}}").as_str()),
                 "{} does not pass {key} to {file}",
+                unit.caller
+            );
+        }
+        if !declared.is_empty() {
+            let needs = &unit.caller_job["needs"];
+            let waits = needs.as_str() == Some("changes")
+                || needs
+                    .as_sequence()
+                    .is_some_and(|n| n.iter().any(|j| j.as_str() == Some("changes")));
+            assert!(
+                waits,
+                "{} reads needs.changes.outputs without needing changes",
                 unit.caller
             );
         }
@@ -919,4 +934,47 @@ impl Drop for Dir {
     fn drop(&mut self) {
         drop(std::fs::remove_dir_all(&self.0));
     }
+}
+
+/// The advisories check alone waits on a dependency change: the policy half
+/// blocks on every event, the advisories half reads the classifier's key
+/// through `env:`, and nothing in the unit lets a failure through.
+#[test]
+fn the_advisory_check_alone_waits_on_a_dependency_change() {
+    let unit = ci_units()
+        .into_iter()
+        .find(|u| u.file == "policy.yml")
+        .expect("ci.yml calls policy.yml");
+    let parsed = yaml(&unit.text);
+    for (name, job) in parsed["jobs"].as_mapping().unwrap() {
+        assert!(job.get("continue-on-error").is_none(), "{name:?}");
+        for step in job["steps"].as_sequence().unwrap() {
+            assert!(
+                step.get("continue-on-error").is_none(),
+                "{name:?}: {step:?}"
+            );
+        }
+    }
+    let steps = parsed["jobs"]["deny"]["steps"].as_sequence().unwrap();
+    let at = steps
+        .iter()
+        .position(|s| s["run"].as_str() == Some("cargo xtask deny policy"))
+        .expect("a policy step");
+    assert_eq!(steps[at].get("if"), None);
+    assert_eq!(steps[at].get("env"), None);
+    let advisories = &steps[at + 1];
+    assert_eq!(
+        advisories["run"].as_str(),
+        Some(r#"cargo xtask deny advisories --dependency-change "$DEPENDENCY_CHANGE""#)
+    );
+    assert_eq!(
+        advisories["env"],
+        yaml("DEPENDENCY_CHANGE: ${{ inputs.advisories }}")
+    );
+    assert_eq!(advisories["if"].as_str(), Some("${{ !cancelled() }}"));
+    let deny_steps = steps
+        .iter()
+        .filter(|s| s["run"].as_str().is_some_and(|r| r.contains("xtask deny")))
+        .count();
+    assert_eq!(deny_steps, 2);
 }

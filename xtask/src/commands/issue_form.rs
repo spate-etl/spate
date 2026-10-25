@@ -7,6 +7,7 @@ use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use super::step_summary::fence;
 use crate::run::{Error, Outcome};
 
 /// The arguments of `cargo xtask bug-report`.
@@ -202,12 +203,6 @@ pub(super) fn section(body: &mut String, label: &str, render: Option<&str>, answ
             let _ = write!(body, "{answer}\n\n");
         }
     }
-}
-
-/// A backtick fence longer than any backtick run in `text`.
-fn fence(text: &str) -> String {
-    let longest = text.split(|c| c != '`').map(str::len).max().unwrap_or(0);
-    "`".repeat(longest.max(2) + 1)
 }
 
 #[cfg(test)]

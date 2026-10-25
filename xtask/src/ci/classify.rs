@@ -152,6 +152,32 @@ pub(crate) fn is_manifest(path: &str) -> bool {
     )
 }
 
+/// Files that can change what the advisories check finds, or whether it
+/// blocks: the dependency graph, its policy and the gate itself. The selector's
+/// own files are included, so an edit that drops an entry blocks on its own
+/// pull request, and `the_advisory_selector_covers_the_graph_and_its_own_policy`
+/// pins the list.
+pub(crate) fn is_advisory_input(path: &str) -> bool {
+    any_glob(
+        path,
+        &[
+            "Cargo.toml",
+            "Cargo.lock",
+            "crates/*/Cargo.toml",
+            "bench/Cargo.toml",
+            "fuzz/Cargo.toml",
+            "test-support/Cargo.toml",
+            "xtask/Cargo.toml",
+            "deny.toml",
+            ".github/workflows/ci.yml",
+            ".github/workflows/policy.yml",
+            ".github/actions/setup-rust/*",
+            "xtask/src/ci/*",
+            "xtask/src/commands/deny.rs",
+        ],
+    )
+}
+
 /// Files that can change whether a release assembles: the release workflows,
 /// the action that installs its tools, and its xtask sequence. The selector's
 /// own files and the workflow holding the rehearsal job are included, so a
@@ -194,6 +220,7 @@ pub(crate) fn classify(
         out.fuzz = true;
         out.bench = true;
         out.manifests = true;
+        out.advisories = true;
         out.release_tooling = true;
         bench_pkgs = graph.all_bench_pkgs().clone();
         out.container_pkgs = graph.all_container_pkgs().clone();
@@ -202,6 +229,7 @@ pub(crate) fn classify(
         for path in paths {
             let path = path.as_str();
             out.manifests |= is_manifest(path);
+            out.advisories |= is_advisory_input(path);
             out.release_tooling |= is_release_tooling(path);
             match kind_of(path) {
                 Kind::Skip => continue,
@@ -884,7 +912,13 @@ mod tests {
     fn force_all_selects_everything() {
         let out = classify(&[], Event::ForceAll, &Context::default(), &graph(), &[]);
         assert!(
-            out.rust && out.site && out.fuzz && out.bench && out.manifests && out.release_tooling
+            out.rust
+                && out.site
+                && out.fuzz
+                && out.bench
+                && out.manifests
+                && out.advisories
+                && out.release_tooling
         );
         assert_eq!(out.container_pkgs, *graph().all_container_pkgs());
         assert_eq!(out.semver_pkgs, *graph().all_semver_pkgs());
@@ -1012,6 +1046,39 @@ mod tests {
             "docs/a.md",
         ] {
             assert!(!run(&[path]).manifests, "{path}");
+        }
+    }
+
+    /// The advisories gate blocks on the dependency graph, its policy and its
+    /// own apparatus, and on nothing else in the tree.
+    #[test]
+    fn the_advisory_selector_covers_the_graph_and_its_own_policy() {
+        for path in [
+            "Cargo.toml",
+            "Cargo.lock",
+            "crates/spate-s3/Cargo.toml",
+            "bench/Cargo.toml",
+            "fuzz/Cargo.toml",
+            "test-support/Cargo.toml",
+            "xtask/Cargo.toml",
+            "deny.toml",
+            ".github/workflows/policy.yml",
+            ".github/workflows/ci.yml",
+            ".github/actions/setup-rust/action.yml",
+            "xtask/src/ci/classify.rs",
+            "xtask/src/commands/deny.rs",
+        ] {
+            assert!(run(&[path]).advisories, "{path}");
+        }
+        for path in [
+            "xtask/src/commands/lint.rs",
+            "crates/spate-s3/src/lib.rs",
+            ".github/workflows/site.yml",
+            ".github/workflows/release-checks.yml",
+            ".github/toolchains/nightly/rust-toolchain.toml",
+            "docs/a.md",
+        ] {
+            assert!(!run(&[path]).advisories, "{path}");
         }
     }
 

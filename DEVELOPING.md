@@ -9,7 +9,9 @@ mechanics.
 `cargo xtask tidy --list` names the checks. `cargo xtask ci` is the pull request
 bar and covers formatting, clippy, the type check, the loom models, the test
 suite, doctests, rustdoc, the feature matrix, licenses and advisories, and
-`cargo xtask tidy`, the repository consistency checks.
+`cargo xtask tidy`, the repository consistency checks. An advisory is listed
+without failing; CI fails on one only when a pull request changes the
+dependency inputs.
 
 `cargo xtask tidy markdown` runs `rumdl check` and needs `rumdl` on `PATH`. It
 fails when a page under `docs/` runs past the width `rumdl.toml` sets, and

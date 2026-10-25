@@ -91,7 +91,8 @@ cargo xtask --help   # the commands, each with its own --help
 doctests, the feature matrix, licenses and advisories, and the repository's own
 consistency checks. CI runs the same commands, so one that passes here is what
 runs there. It is necessary and not sufficient: other jobs spell out
-invocations of their own.
+invocations of their own. An advisory is listed without failing the run here;
+in CI it fails only a pull request that changes the dependency inputs.
 
 `cargo xtask ci --since` runs the Rust gates over the packages your diff can
 affect, which is faster between edits; a change to `spate-core` reaches most of

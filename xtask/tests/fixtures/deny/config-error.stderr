@@ -1,0 +1,1 @@
+{"fields":{"level":"ERROR","message":"failed to parse config from 'deny.toml': unexpected eof encountered","timestamp":"2026-10-25T00:00:00Z"},"type":"log"}

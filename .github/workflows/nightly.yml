@@ -95,8 +95,8 @@ jobs:
     runs-on: ubuntu-latest
     if: inputs.tier != 'docs'
     timeout-minutes: 20
-    # An advisory against a crate already in Cargo.lock stays invisible until a
-    # pull request is opened.
+    # A pull request that leaves the dependency inputs alone only reports an
+    # advisory, so this job is where one against `main` is raised.
     permissions:
       contents: read
       issues: write

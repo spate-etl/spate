@@ -49,10 +49,20 @@ pub(crate) fn changes(args: &[String]) -> Result<(), String> {
     // Push mode force-runs every other job as the last line of defence, while
     // the packaging and floors gates select on their own diff.
     if std::env::var("EVENT_NAME").as_deref() == Ok("push") {
-        out.manifests = event::manifest_reach(diff.as_ref()).unwrap_or_else(|| {
-            println!("note: no usable before..HEAD diff; the manifest gate fails closed.");
-            true
-        });
+        match event::reach(diff.as_ref(), classify::is_manifest) {
+            Some(reached) => {
+                out.manifests = reached;
+                out.advisories =
+                    event::reach(diff.as_ref(), classify::is_advisory_input).unwrap_or(true);
+            }
+            None => {
+                println!(
+                    "note: no usable before..HEAD diff; the manifest and advisories gates fail closed."
+                );
+                out.manifests = true;
+                out.advisories = true;
+            }
+        }
     }
 
     print!("{out}");

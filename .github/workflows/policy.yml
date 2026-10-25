@@ -1,10 +1,14 @@
 name: Policy
 
 # Licenses, advisories and the changelog entry. Only `CI gate` waits on this
-# unit, so a missing release note does not skip the test tier. Called from
-# ci.yml with no inputs, so its jobs run on every event.
+# unit, so a missing release note does not skip the test tier. Its jobs run on
+# every event; the advisories check blocks unless `advisories` is `false`.
 on:
   workflow_call:
+    inputs:
+      advisories:
+        type: string
+        required: true
 
 permissions:
   contents: read
@@ -14,8 +18,9 @@ jobs:
     name: Licenses and advisories
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    # The RustSec advisory database moves with no file here changing, so this
-    # runs on every pull request.
+    # The RustSec advisory database moves with no file here changing. A finding
+    # fails a change to the dependency inputs and is reported on any other; the
+    # nightly scan raises it against `main`. A tool error fails either way.
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -27,7 +32,14 @@ jobs:
           components: clippy
           tools: cargo-deny
 
-      - run: cargo xtask deny
+      - run: cargo xtask deny policy
+
+      # Runs when the policy step fails, so its findings still reach the
+      # summary. The input reaches the shell through `env:` only.
+      - if: ${{ !cancelled() }}
+        env:
+          DEPENDENCY_CHANGE: ${{ inputs.advisories }}
+        run: cargo xtask deny advisories --dependency-change "$DEPENDENCY_CHANGE"
 
       - run: cargo xtask tidy self-test
 

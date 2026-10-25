@@ -2,12 +2,14 @@
 //! dispatch that runs one.
 
 mod bench;
+mod deny;
 mod docs;
 mod fuzz;
 mod hooks;
 mod issue_form;
 mod lint;
 mod mutants;
+mod step_summary;
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -94,8 +96,14 @@ pub(crate) enum Command {
         cmd: bench::Bench,
     },
 
-    /// Licenses, advisories, bans, sources
-    Deny,
+    /// Licenses, advisories, bans, sources; `policy` or `advisories` runs one half
+    Deny {
+        #[arg(value_enum)]
+        check: Option<deny::DenyCheck>,
+        /// With `advisories`: `false` reports findings without failing
+        #[arg(long, value_name = "BOOL")]
+        dependency_change: Option<String>,
+    },
 
     /// Regenerate THIRD-PARTY.md
     Attribution,
@@ -301,14 +309,10 @@ pub(crate) fn dispatch(root: &Path, explain: bool, cmd: Command) -> Outcome {
         ),
         Command::Hack => hack(root, explain, &Select::Workspace),
         Command::Bench { cmd } => bench::dispatch(root, explain, cmd),
-        Command::Deny => run::run(
-            root,
-            explain,
-            &Step::new(
-                "cargo",
-                ["deny", "--all-features", "--locked", "check", "all"],
-            ),
-        ),
+        Command::Deny {
+            check,
+            dependency_change,
+        } => deny::run(root, explain, check, dependency_change.as_deref()),
         Command::Attribution => attribution::generate(root, explain),
         Command::Tidy { check, list } => lint::tidy(root, explain, check, list),
         Command::Adr { cmd } => match cmd {
@@ -433,7 +437,15 @@ fn full_ci(root: &Path, explain: bool) -> Outcome {
     dispatch(root, explain, Command::Doctest)?;
     dispatch(root, explain, Command::Doc)?;
     dispatch(root, explain, Command::Hack)?;
-    dispatch(root, explain, Command::Deny)?;
+    // The blocking half first. Locally an advisory is reported, as on a pull
+    // request that leaves the dependency inputs alone.
+    deny::run(root, explain, Some(deny::DenyCheck::Policy), None)?;
+    deny::run(
+        root,
+        explain,
+        Some(deny::DenyCheck::Advisories),
+        Some("false"),
+    )?;
     tidy_gates(root, explain)
 }
 

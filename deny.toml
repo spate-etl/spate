@@ -3,6 +3,7 @@ all-features = true
 
 [advisories]
 version = 2
+# Evaluated by the advisories check, so a yank follows its blocking rule.
 yanked = "deny"
 
 [licenses]

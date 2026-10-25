@@ -1,8 +1,9 @@
 //! `cargo xtask mutants`: cargo-mutants over the diff against a base, with the
 //! survivors written to the job summary on a CI runner.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
+use super::step_summary::Summary;
 use crate::run::{self, Error, Outcome, Step, Streams};
 
 /// Where the patch and cargo-mutants' `mutants.out` land, under the root. It
@@ -75,39 +76,6 @@ fn clear_report(dir: &Path) -> Outcome {
             Err(Error::msg(format!("{}: {e}", dir.display())))
         }
         _ => Ok(()),
-    }
-}
-
-/// The job summary file. Each write replaces what this run wrote before and
-/// keeps what the file held when the run started.
-struct Summary {
-    path: PathBuf,
-    from: u64,
-}
-
-impl Summary {
-    fn at(path: PathBuf) -> Self {
-        let from = std::fs::metadata(&path).map_or(0, |m| m.len());
-        Self { path, from }
-    }
-
-    /// Writes `text` after what the file held at the start. A failure is
-    /// reported on stderr and is not an error of the run.
-    fn write(&self, text: &str) {
-        use std::io::{Seek, SeekFrom, Write};
-        let written = std::fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(false)
-            .open(&self.path)
-            .and_then(|mut f| {
-                f.set_len(self.from)?;
-                f.seek(SeekFrom::End(0))?;
-                f.write_all(text.as_bytes())
-            });
-        if let Err(e) = written {
-            eprintln!("{}: {e}", self.path.display());
-        }
     }
 }
 
@@ -197,6 +165,8 @@ fn unfinished(cause: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
 
     #[test]

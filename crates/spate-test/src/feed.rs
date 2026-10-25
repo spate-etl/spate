@@ -1068,19 +1068,19 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Gone")]
+    #[should_panic(expected = "refuse_next_receive: the feed answers Gone")]
     fn scripting_gone_panics_for_receive() {
         scripted_feed().1.refuse_next_receive(FeedErrorKind::Gone);
     }
 
     #[test]
-    #[should_panic(expected = "Gone")]
+    #[should_panic(expected = "refuse_next_renew: the feed answers Gone")]
     fn scripting_gone_panics_for_renew() {
         scripted_feed().1.refuse_next_renew(FeedErrorKind::Gone);
     }
 
     #[test]
-    #[should_panic(expected = "Gone")]
+    #[should_panic(expected = "refuse_next_acknowledge: the feed answers Gone")]
     fn scripting_gone_panics_for_acknowledge() {
         scripted_feed()
             .1
@@ -1088,7 +1088,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Gone")]
+    #[should_panic(expected = "refuse_next_fail: the feed answers Gone")]
     fn scripting_gone_panics_for_fail() {
         scripted_feed().1.refuse_next_fail(FeedErrorKind::Gone);
     }

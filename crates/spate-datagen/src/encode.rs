@@ -213,7 +213,6 @@ impl serde::Serialize for AvroRecord<'_, crate::events::RefundIssued> {
 }
 
 #[cfg(test)]
-#[expect(deprecated, reason = "fixtures call the datum free functions directly")]
 mod tests {
     use super::*;
     use crate::config::DatagenSourceConfig;
@@ -320,6 +319,7 @@ mod tests {
     /// test rather than on a consumer.
     #[cfg(feature = "avro")]
     #[test]
+    #[expect(deprecated, reason = "fixtures call the datum free functions directly")]
     fn every_avro_datum_reads_back_field_for_field() {
         use apache_avro::types::Value;
 

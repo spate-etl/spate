@@ -168,7 +168,7 @@ jobs:
     name: Feature matrix and default-feature tests
     runs-on: ubuntu-latest
     if: inputs.rust == 'true'
-    # Linear; the exhaustive powerset runs in scheduled.yml.
+    # Linear; the exhaustive powerset runs in weekly.yml.
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

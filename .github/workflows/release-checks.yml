@@ -204,7 +204,7 @@ jobs:
   # token can only read, and the job holds no secret and no environment, the
   # same posture as `workflows` in `checks.yml`. Pull requests only, like
   # `semver`, so the merge queue does not repeat a run of up to an hour; the
-  # nightly in `scheduled.yml` rehearses `main`.
+  # nightly run in `nightly.yml` rehearses `main`.
   release-dry-run:
     name: Release dry run
     runs-on: ubuntu-latest

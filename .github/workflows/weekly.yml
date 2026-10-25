@@ -1,0 +1,311 @@
+name: Weekly
+
+# What belongs here is the world changing underneath a static tree; anything
+# whose job is to stop a change entering `main` belongs in ci.yml.
+on:
+  schedule:
+    # Off the hour: scheduled runs queue at peak, and the hour is the peak.
+    - cron: "43 4 * * 1" # Monday
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A manual dispatch must not race the cron over the criterion baseline cache,
+# and cancelling one mid-write leaves the baseline half written.
+concurrency:
+  group: weekly-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  beta:
+    name: Build and test on beta
+    runs-on: ubuntu-latest
+    # Uncached, so both steps build from cold, librdkafka and OpenSSL included.
+    timeout-minutes: 60
+    # Every other Rust job takes whatever `stable` resolves to on the day, so a
+    # toolchain regression reaches `main` and every open pull request in the
+    # same hour. Beta is that release about six weeks early. Beta publishes
+    # roughly every six days, so a weekly run still leaves about five weeks.
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          toolchain: beta
+          components: clippy
+          tools: nextest
+          # No shared key. An entry keyed on beta's compiler shares nothing
+          # with the stable trees and would evict them from the 10 GB budget.
+
+      # Both steps always run, so one report covers both.
+      - id: clippy
+        run: |
+          set -o pipefail
+          rc=0
+          cargo xtask clippy 2>&1 | tee "$RUNNER_TEMP/clippy.log" || rc=$?
+          exit "$rc"
+        continue-on-error: true
+      - id: test
+        run: |
+          set -o pipefail
+          rc=0
+          cargo xtask test 2>&1 | tee "$RUNNER_TEMP/test.log" || rc=$?
+          exit "$rc"
+        continue-on-error: true
+
+      # continue-on-error reports a failed step's `conclusion` as `success`,
+      # so the real result is in `outcome`.
+      - name: Write the issue body
+        id: body
+        if: >-
+          always() &&
+          (steps.clippy.outcome == 'failure' ||
+           steps.test.outcome == 'failure')
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          SHA: ${{ github.sha }}
+          CLIPPY_FAILED: ${{ steps.clippy.outcome == 'failure' }}
+          TEST_OUTCOME: ${{ steps.test.outcome }}
+        run: |
+          set -euo pipefail
+          if [ "$CLIPPY_FAILED" = "true" ]; then
+            title='[bug] Clippy fails on the beta toolchain'
+            log="$RUNNER_TEMP/clippy.log"
+            what="\`cargo xtask clippy\` failed on beta, on the [weekly run]($RUN_URL). Once beta becomes stable this blocks every pull request, because the lint job denies warnings."
+            if [ "$TEST_OUTCOME" = "failure" ]; then
+              what="$what \`cargo xtask test\` also failed on the same run."
+            elif [ "$TEST_OUTCOME" = "success" ]; then
+              what="$what \`cargo xtask test\` passed on the same run."
+            else
+              what="$what \`cargo xtask test\` outcome on the same run: \`${TEST_OUTCOME}\`."
+            fi
+          else
+            title='[bug] Tests fail on the beta toolchain'
+            log="$RUNNER_TEMP/test.log"
+            what="\`cargo xtask test\` failed on beta while \`cargo xtask clippy\` passed, on the [weekly run]($RUN_URL). Clippy stops at the check build, so this is codegen, linking or behavior."
+          fi
+          # The title is written before xtask runs, so the filing step has it
+          # when beta cannot build xtask.
+          echo "title=$title" >>"$GITHUB_OUTPUT"
+          where=$'Build, CI, or the examples\n\nThe `Build and test on beta` job of the weekly scheduled run.'
+          version="\`main\` at $SHA"
+          expected='Clippy and the tests pass on beta. Beta reaches stable within six weeks, at which point this blocks every open pull request at once. The run log names the release it was found on.'
+          cargo xtask bug-report --out "$RUNNER_TEMP/body.md" \
+            --answer components="$where" \
+            --answer version="$version" \
+            --answer what="$what" \
+            --answer expected="$expected" \
+            --answer-file logs="$log"
+          again="Still failing at $SHA, in the [weekly run]($RUN_URL)."
+          cargo xtask bug-report --out "$RUNNER_TEMP/comment.md" \
+            --answer what="$again" \
+            --answer-file logs="$log"
+      - name: Report the failure as an issue
+        if: >-
+          always() &&
+          (steps.clippy.outcome == 'failure' ||
+           steps.test.outcome == 'failure')
+        uses: ./.github/actions/file-issue
+        with:
+          title: ${{ steps.body.outputs.title }}
+          body-file: ${{ runner.temp }}/body.md
+          comment-file: ${{ runner.temp }}/comment.md
+
+      - name: Fail the job on either outcome
+        if: >-
+          always() &&
+          (steps.clippy.outcome == 'failure' ||
+           steps.test.outcome == 'failure')
+        run: exit 1
+
+  features-powerset:
+    name: Feature powerset (exhaustive)
+    runs-on: ubuntu-latest
+    # 2^18 combinations, several building librdkafka or OpenSSL: ~48 minutes. A
+    # cancelled run leaves manifests stripped.
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          tools: cargo-hack
+          shared-key: dev-allfeatures
+      - run: cargo hack check --workspace --feature-powerset --no-dev-deps
+
+  coverage-containers:
+    name: Coverage (with containers)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    # The docker-inclusive number, under its own Codecov flag.
+    env:
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
+          df -h /
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          components: llvm-tools-preview
+          tools: nextest,cargo-llvm-cov
+          # Not `docker`: this builds instrumented into `target/llvm-cov-target`,
+          # where containers.yml's container job builds plain.
+          shared-key: coverage-docker
+
+      - name: Clean coverage state
+        # Not redundant with the steps below: `clean` shells out to `cargo
+        # metadata` and runs *first*, so without `--locked` it quietly repairs a
+        # stale lockfile and the later `--locked` flags can never fire.
+        run: cargo llvm-cov clean --workspace --locked
+      - name: Coverage (unit and integration)
+        run: cargo llvm-cov --no-report nextest --profile ci --workspace --all-features --locked
+      # Serial: 2 cores / ~7 GB across five servers; concurrency OOMs.
+      - name: Coverage (docker suites)
+        run: >
+          cargo llvm-cov --no-report nextest --profile docker
+          --workspace --all-features --locked --run-ignored ignored-only --test-threads 1
+      - name: Merge coverage
+        run: >
+          cargo llvm-cov report --lcov --locked --output-path lcov-full.info
+          --ignore-filename-regex '/(tests|examples)/'
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: coverage-lcov-full
+          path: lcov-full.info
+
+      - name: Upload to Codecov
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
+        with:
+          files: lcov-full.info
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: true
+          flags: with-containers
+
+  bench:
+    name: Criterion micro benches
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          # Release-profile artifacts; shares nothing with the dev-profile jobs.
+          shared-key: release
+
+      # BEFORE the benches: restoring afterwards extracts a tar over
+      # `target/criterion`, overwriting the results just measured and freezing
+      # the baseline. The prefix restore-key is what carries state between runs.
+      - name: Restore last week's criterion baseline
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target/criterion
+          key: criterion-baseline-${{ github.run_id }}
+          restore-keys: criterion-baseline-
+
+      - run: cargo xtask bench check
+      # The target is named because a bare `-p X -- --save-baseline` reaches the
+      # lib's libtest harness too, which rejects it. Given one baseline critcmp
+      # prints a column of 1.00 ratios and exits 0, and a bench never run leaves
+      # no `current` and drops out of the comparison silently.
+      - run: cargo bench -p spate-clickhouse --locked --bench encode -- --save-baseline current
+
+      # Built from source: install-action has no checksummed prebuilt for it.
+      - run: cargo install critcmp --locked --version 0.1.8
+
+      - name: Compare against last week's baseline
+        run: |
+          set -euo pipefail
+          if find target/criterion -type d -name previous | grep -q .; then
+            critcmp previous current
+          else
+            echo "::notice::No previous baseline yet; this run establishes one."
+          fi
+
+      # Rotate so next week has a `previous`. The cache saves at post-job from
+      # the tree as it stands here.
+      - name: Rotate this week's baseline
+        run: |
+          set -euo pipefail
+          rotated=0
+          while IFS= read -r dir; do
+            rm -rf "${dir%/current}/previous"
+            mv "$dir" "${dir%/current}/previous"
+            rotated=$((rotated + 1))
+          done < <(find target/criterion -type d -name current)
+          echo "rotated $rotated baseline director(ies) to 'previous'"
+          if [ "$rotated" -eq 0 ]; then
+            echo "::error::criterion wrote no 'current' baseline; the comparison above proved nothing."
+            exit 1
+          fi
+
+  # ===========================================================================
+  # Catch-all failure reporting. `beta` files its own issues and is absent from
+  # `needs` below so it is not reported twice.
+  # ===========================================================================
+  report:
+    name: Report weekly failures
+    runs-on: ubuntu-latest
+    needs:
+      - features-powerset
+      - coverage-containers
+      - bench
+    if: always() && contains(needs.*.result, 'failure')
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The toolchain is for xtask, which writes the body.
+      - uses: ./.github/actions/setup-rust
+        with:
+          # The entry ci.yml's `changes` job owns.
+          shared-key: xtask
+          cache-save: never
+      - name: Write the issue body
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          SHA: ${{ github.sha }}
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          set -euo pipefail
+          failed=$(echo "$RESULTS" | jq -r '
+            to_entries | map(select(.value.result == "failure")) | .[].key' | sort | tr '\n' ' ')
+          where=$'Build, CI, or the examples\n\nThe weekly run, in a job that files no issue of its own.'
+          version="\`main\` at $SHA"
+          what="Failed jobs on the [weekly run]($RUN_URL): ${failed}"
+          expected='Every job passes. The weekly run detects the world changing underneath a static tree, so a failure here is usually not caused by the last commit. Check the run before assuming a regression.'
+          cargo xtask bug-report --out "$RUNNER_TEMP/body.md" \
+            --answer components="$where" \
+            --answer version="$version" \
+            --answer what="$what" \
+            --answer expected="$expected"
+          again="Still failing at $SHA. Failed jobs on the [weekly run]($RUN_URL): ${failed}"
+          cargo xtask bug-report --out "$RUNNER_TEMP/comment.md" \
+            --answer what="$again"
+      # Runs after a failed body step too, so a toolchain that cannot build
+      # xtask still leaves an issue.
+      - name: Open or update the tracking issue
+        if: ${{ !cancelled() }}
+        uses: ./.github/actions/file-issue
+        with:
+          title: "[bug] Weekly run is failing"
+          body-file: ${{ runner.temp }}/body.md
+          comment-file: ${{ runner.temp }}/comment.md

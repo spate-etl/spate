@@ -1,6 +1,8 @@
 //! The process-level contract of `cargo xtask ci-changes`: the event each run
 //! classifies under, the note it prints when a diff cannot be resolved, the
 //! bytes it appends to `$GITHUB_OUTPUT`, and the keys `ci.yml` reads back.
+//! Also the structure of `ci.yml`, the units it calls and the scheduled
+//! workflows.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -419,15 +421,21 @@ fn grants_id_token(permissions: &serde_yaml::Value) -> bool {
 /// does.
 #[test]
 fn no_ci_unit_enters_an_environment() {
+    let deployers = [
+        "release.yml",
+        "release-build.yml",
+        "nightly.yml",
+        "weekly.yml",
+    ];
+    for name in deployers {
+        assert!(workflows().join(name).is_file(), "{name} does not exist");
+    }
     let units = ci_units();
     assert!(!units.is_empty(), "ci.yml calls no unit");
     let mut files = vec![("ci.yml".to_owned(), ci_yml())];
     files.extend(units.into_iter().map(|u| (u.file, u.text)));
     for (file, text) in &files {
-        assert!(
-            !["release.yml", "release-build.yml", "scheduled.yml"].contains(&file.as_str()),
-            "ci.yml calls {file}"
-        );
+        assert!(!deployers.contains(&file.as_str()), "ci.yml calls {file}");
         assert!(
             !text.contains("secrets.CLOUDFLARE_"),
             "{file} reads a Cloudflare secret"
@@ -543,12 +551,292 @@ fn setup_rust_exports_the_profile_env_before_the_cache() {
     assert!(export < cache, "the export follows the cache step");
     let mut files = vec![("ci.yml".to_owned(), ci_yml())];
     files.extend(ci_units().into_iter().map(|u| (u.file, u.text)));
+    files.extend(SCHEDULED.map(|f| (f.to_owned(), read_workflow(f))));
     for (file, text) in &files {
         assert!(
             yaml(text).get("env").is_none(),
             "{file} sets a workflow-level env"
         );
     }
+}
+
+/// The workflows that run on a cron.
+const SCHEDULED: [&str; 2] = ["nightly.yml", "weekly.yml"];
+
+/// The text of one file in `.github/workflows`.
+fn read_workflow(name: &str) -> String {
+    let path = workflows().join(name);
+    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+}
+
+/// Each job key of a parsed workflow, with its body.
+fn jobs(parsed: &serde_yaml::Value) -> Vec<(String, serde_yaml::Value)> {
+    parsed["jobs"]
+        .as_mapping()
+        .unwrap()
+        .iter()
+        .map(|(k, v)| (k.as_str().unwrap().to_owned(), v.clone()))
+        .collect()
+}
+
+/// A job's `needs`, whether written as one name or a list.
+fn needs(job: &serde_yaml::Value) -> Vec<String> {
+    match &job["needs"] {
+        serde_yaml::Value::String(one) => vec![one.clone()],
+        serde_yaml::Value::Sequence(all) => {
+            all.iter().map(|n| n.as_str().unwrap().to_owned()).collect()
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Each scheduled workflow fires on one cron or a manual dispatch, so no job
+/// has to work out which cron started the run.
+#[test]
+fn each_scheduled_workflow_has_one_cron_and_a_dispatch() {
+    for file in SCHEDULED {
+        let text = read_workflow(file);
+        let parsed = yaml(&text);
+        let on: Vec<&str> = parsed["on"]
+            .as_mapping()
+            .unwrap()
+            .keys()
+            .map(|k| k.as_str().unwrap())
+            .collect();
+        assert_eq!(on, ["schedule", "workflow_dispatch"], "{file}");
+        assert_eq!(
+            parsed["on"]["schedule"].as_sequence().map(Vec::len),
+            Some(1),
+            "{file} has more than one cron"
+        );
+        assert!(
+            !text.contains("github.event.schedule"),
+            "{file} reads which cron fired"
+        );
+        assert!(
+            parsed["jobs"].get("plan").is_none(),
+            "{file} has a plan job"
+        );
+    }
+}
+
+/// A cron run leaves `inputs.tier` empty, so every nightly job is gated on not
+/// being a `docs` dispatch. A gate on `== 'nightly'` would skip the whole night
+/// and report green.
+#[test]
+fn the_nightly_jobs_run_when_the_cron_leaves_the_tier_empty() {
+    let parsed = yaml(&read_workflow("nightly.yml"));
+    let tier = &parsed["on"]["workflow_dispatch"]["inputs"]["tier"];
+    assert_eq!(tier["default"].as_str(), Some("nightly"));
+    let options: Vec<&str> = tier["options"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .map(|o| o.as_str().unwrap())
+        .collect();
+    assert_eq!(options, ["nightly", "docs"]);
+    let ungated = [
+        "docs-build",
+        "docs-deploy",
+        "publish-dry-run-report",
+        "report",
+    ];
+    for (name, job) in jobs(&parsed) {
+        let cond = job["if"].as_str().unwrap_or("").trim();
+        if ungated.contains(&name.as_str()) {
+            assert!(
+                !cond.contains("inputs.tier"),
+                "nightly.yml: {name} reads the tier"
+            );
+        } else {
+            assert_eq!(cond, "inputs.tier != 'docs'", "nightly.yml: {name}");
+        }
+    }
+    assert!(
+        !read_workflow("weekly.yml").contains("inputs."),
+        "weekly.yml reads an input"
+    );
+}
+
+/// Each scheduled job runs in the file whose cadence its purpose needs.
+#[test]
+fn each_scheduled_job_runs_in_one_file() {
+    let keys = |file| -> Vec<String> {
+        let mut k: Vec<String> = jobs(&yaml(&read_workflow(file)))
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        k.sort();
+        k
+    };
+    assert_eq!(
+        keys("nightly.yml"),
+        [
+            "advisories",
+            "attribution",
+            "docs-build",
+            "docs-deploy",
+            "examples-containers",
+            "fuzz",
+            "loom",
+            "minimal-versions",
+            "osv",
+            "publish-dry-run",
+            "publish-dry-run-report",
+            "release-verify",
+            "report",
+        ]
+    );
+    assert_eq!(
+        keys("weekly.yml"),
+        [
+            "bench",
+            "beta",
+            "coverage-containers",
+            "features-powerset",
+            "report",
+        ]
+    );
+}
+
+/// In each scheduled workflow a failed job files one issue: its own, the one
+/// the job that needs it files, or the `report` job's, under a title that
+/// names the workflow.
+#[test]
+fn every_scheduled_job_reports_its_failure_once() {
+    let mut titles = Vec::new();
+    for file in SCHEDULED {
+        let parsed = yaml(&read_workflow(file));
+        let all = jobs(&parsed);
+        let files_own = |job: &serde_yaml::Value| {
+            job["steps"].as_sequence().unwrap().iter().any(|s| {
+                s["uses"].as_str() == Some("./.github/actions/file-issue")
+                    || s["run"]
+                        .as_str()
+                        .is_some_and(|r| r.contains("gh issue create"))
+            })
+        };
+        let mut reported: Vec<String> = Vec::new();
+        for (name, job) in &all {
+            if name != "report" && files_own(job) {
+                reported.push(name.clone());
+                reported.extend(needs(job));
+            }
+        }
+        let report = &parsed["jobs"]["report"];
+        let report_needs = needs(report);
+        for (name, _) in &all {
+            if name == "report" {
+                continue;
+            }
+            let in_report = report_needs.contains(name);
+            let elsewhere = reported.contains(name);
+            assert!(
+                in_report != elsewhere,
+                "{file}: {name} is reported {}",
+                if in_report { "twice" } else { "nowhere" }
+            );
+        }
+        for need in &report_needs {
+            assert!(
+                all.iter().any(|(n, _)| n == need),
+                "{file}: report needs {need}"
+            );
+        }
+        let title = report["steps"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .find_map(|s| s["with"]["title"].as_str())
+            .unwrap()
+            .to_owned();
+        let tier = file.trim_end_matches(".yml");
+        assert!(title.to_lowercase().contains(tier), "{file}: {title}");
+        titles.push(title);
+    }
+    assert_ne!(titles[0], titles[1]);
+}
+
+/// The site deploy is the one job that enters `cloudflare-workers`, and it keeps
+/// the posture a production credential needs: read-only token, `main` only,
+/// serialised and never cancelled, no checkout or restored cache, an artifact
+/// from its own run, and npm lifecycle scripts off around the token.
+#[test]
+fn the_docs_deploy_holds_its_credential_alone() {
+    let mut deployers = Vec::new();
+    for entry in std::fs::read_dir(workflows()).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().and_then(|e| e.to_str()) != Some("yml") {
+            continue;
+        }
+        let file = path.file_name().unwrap().to_str().unwrap().to_owned();
+        let parsed = yaml(&std::fs::read_to_string(&path).unwrap());
+        for (name, job) in jobs(&parsed) {
+            let env = job["environment"]["name"]
+                .as_str()
+                .or_else(|| job["environment"].as_str());
+            if env == Some("cloudflare-workers") {
+                deployers.push((file.clone(), name.clone(), job.clone()));
+            } else {
+                assert!(
+                    !serde_yaml::to_string(&job)
+                        .unwrap()
+                        .contains("secrets.CLOUDFLARE_"),
+                    "{file}: {name} reads a Cloudflare secret"
+                );
+            }
+        }
+    }
+    assert_eq!(deployers.len(), 1, "jobs entering cloudflare-workers");
+    let (file, name, job) = &deployers[0];
+    assert_eq!(
+        (file.as_str(), name.as_str()),
+        ("nightly.yml", "docs-deploy")
+    );
+    assert_eq!(job["permissions"], yaml("contents: read"));
+    assert!(
+        job["if"]
+            .as_str()
+            .unwrap()
+            .contains("github.ref == 'refs/heads/main'"),
+        "the deploy runs off main"
+    );
+    assert!(needs(job).contains(&"docs-build".to_owned()));
+    assert_eq!(
+        job["concurrency"],
+        yaml("group: cloudflare-workers\ncancel-in-progress: false")
+    );
+    let steps = job["steps"].as_sequence().unwrap();
+    for step in steps {
+        let uses = step["uses"].as_str().unwrap_or("");
+        let action = uses.split('@').next().unwrap();
+        assert!(
+            ![
+                "actions/checkout",
+                "actions/cache",
+                "actions/cache/restore",
+                "./.github/actions/setup-rust",
+            ]
+            .contains(&action),
+            "the deploy uses {action}"
+        );
+        if action == "actions/download-artifact" {
+            assert!(step["with"].get("run-id").is_none());
+            assert!(step["with"].get("github-token").is_none());
+        }
+        if action == "cloudflare/wrangler-action" {
+            assert_eq!(
+                step["env"]["NPM_CONFIG_IGNORE_SCRIPTS"].as_str(),
+                Some("true")
+            );
+        }
+    }
+    assert!(
+        steps.iter().any(|s| s["uses"]
+            .as_str()
+            .is_some_and(|u| u.starts_with("cloudflare/wrangler-action@"))),
+        "the deploy has no wrangler step"
+    );
 }
 
 /// A directory of this run's own, removed with its contents.

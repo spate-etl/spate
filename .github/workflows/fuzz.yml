@@ -14,9 +14,9 @@ permissions:
 
 jobs:
   # Builds every target with libFuzzer's instrumentation, which needs nightly.
-  # It runs none of them; the nightly tier in scheduled.yml is
-  # what fuzzes, and is also the backstop for a crate change that breaks the
-  # harness without touching `fuzz/`.
+  # It runs none of them; `nightly.yml` is what fuzzes, and is also the
+  # backstop for a crate change that breaks the harness without touching
+  # `fuzz/`.
   fuzz:
     name: Fuzz targets build
     runs-on: ubuntu-latest

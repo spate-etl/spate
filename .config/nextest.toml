@@ -23,7 +23,7 @@ slow-timeout = { period = "30s", terminate-after = 4 }
 # and a SIGKILL reports TIMEOUT, indistinguishable from a genuine hang, leaving
 # the container orphaned.
 [profile.docker]
-# The example container tier is opt-in. `scheduled.yml` selects it back with an
+# The example container tier is opt-in. `nightly.yml` selects it back with an
 # explicit `-E 'binary(e2e_examples)' --ignore-default-filter`.
 default-filter = 'not binary(e2e_examples)'
 slow-timeout = { period = "120s" }

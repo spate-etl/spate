@@ -480,13 +480,7 @@ impl Forge for Gh<'_> {
         // `workflow_dispatch` is the documented exception to the rule that
         // events raised by GITHUB_TOKEN trigger nothing.
         let token = required_env("DISPATCH_TOKEN", "the docs deploy")?;
-        self.run(
-            &Step::new(
-                "gh",
-                ["workflow", "run", "scheduled.yml", "--field", "tier=docs"],
-            )
-            .env("GH_TOKEN", token),
-        )
+        self.run(&docs_dispatch_step().env("GH_TOKEN", token))
     }
 
     fn verify_attestation(
@@ -503,6 +497,15 @@ impl Forge for Gh<'_> {
             &attestation_step(file, bundle, signer_workflow, predicate_type, commit),
         )
     }
+}
+
+/// `gh workflow run` for the docs deploy. The workflow it names must declare
+/// each `--field` as a `workflow_dispatch` input.
+fn docs_dispatch_step() -> Step<'static> {
+    Step::new(
+        "gh",
+        ["workflow", "run", "nightly.yml", "--field", "tier=docs"],
+    )
 }
 
 /// `gh attestation verify` pinned to `signer_workflow` on `main`, to `commit`,
@@ -1104,6 +1107,53 @@ impl Forge for DryForge<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The docs dispatch names a workflow that declares the tier it asks for
+    /// and holds the deploy job.
+    #[test]
+    fn the_docs_dispatch_runs_the_nightly_docs_tier() {
+        let step = docs_dispatch_step();
+        assert_eq!(step.program, "gh");
+        assert_eq!(
+            step.args,
+            ["workflow", "run", "nightly.yml", "--field", "tier=docs"]
+        );
+        let path = crate::repo_root()
+            .unwrap()
+            .join(".github/workflows")
+            .join(&step.args[2]);
+        let text =
+            std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        let doc: serde_yaml::Value = serde_yaml::from_str(&text).unwrap();
+        let inputs = &doc["on"]["workflow_dispatch"]["inputs"];
+        for field in step
+            .args
+            .iter()
+            .skip_while(|a| *a != "--field")
+            .skip(1)
+            .step_by(2)
+        {
+            let (key, value) = field.split_once('=').unwrap();
+            let options = inputs[key]["options"]
+                .as_sequence()
+                .unwrap_or_else(|| panic!("{} declares no `{key}` options", path.display()));
+            assert!(
+                options.iter().any(|o| o.as_str() == Some(value)),
+                "{} offers no `{key}: {value}`",
+                path.display()
+            );
+        }
+        let deploys = doc["jobs"]
+            .as_mapping()
+            .unwrap()
+            .values()
+            .any(|job| job["environment"]["name"].as_str() == Some("cloudflare-workers"));
+        assert!(
+            deploys,
+            "{} holds no cloudflare-workers job",
+            path.display()
+        );
+    }
 
     /// The verification is pinned to the signer's main ref, the release commit
     /// and hosted runners.

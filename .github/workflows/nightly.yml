@@ -1,85 +1,38 @@
-name: Scheduled
+name: Nightly
 
-# Two tiers in one file, selected by which cron fired. What belongs here is the
-# world changing underneath a static tree; anything whose job is to stop a
-# change entering `main` belongs in ci.yml.
+# What belongs here is the world changing underneath a static tree; anything
+# whose job is to stop a change entering `main` belongs in ci.yml.
 on:
   schedule:
     # Off the hour: scheduled runs queue at peak, and the hour is the peak.
-    - cron: "17 3 * * *" # nightly
-    - cron: "43 4 * * 1" # weekly, Monday
+    - cron: "17 3 * * *"
   workflow_dispatch:
     inputs:
       tier:
         description: >-
-          Which tier to run. `docs` builds and deploys the site alone; the
-          release dispatches it after a publish so the install snippets go
-          live without dragging the whole nightly tier along.
+          `docs` builds and deploys the site alone. The release dispatches it
+          after a publish so the install snippets go live without the rest of
+          the night. A cron run leaves this empty.
         type: choice
         default: nightly
-        options: [nightly, weekly, both, docs]
-
-env:
-  CARGO_TERM_COLOR: always
-  # setup-rust sets the same values and records the measurement behind them.
-  CARGO_PROFILE_DEV_DEBUG: line-tables-only
-  CARGO_PROFILE_TEST_DEBUG: line-tables-only
+        options: [nightly, docs]
 
 permissions:
   contents: read
 
-# A manual dispatch must not race the cron over the criterion baseline cache,
-# and cancelling one mid-write leaves the baseline half written.
+# One run at a time per ref, never cancelled. A release's docs dispatch that
+# lands during a night waits for that night to finish.
 concurrency:
-  group: scheduled-${{ github.ref }}
+  group: nightly-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  plan:
-    name: Select tier
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    outputs:
-      nightly: ${{ steps.select.outputs.nightly }}
-      weekly: ${{ steps.select.outputs.weekly }}
-      docs: ${{ steps.select.outputs.docs }}
-    steps:
-      - id: select
-        env:
-          SCHEDULE: ${{ github.event.schedule }}
-          TIER: ${{ inputs.tier }}
-        run: |
-          nightly=false
-          weekly=false
-          docs=false
-          case "${SCHEDULE:-}" in
-            "17 3 * * *") nightly=true ;;
-            "43 4 * * 1") weekly=true ;;
-          esac
-          case "${TIER:-}" in
-            nightly) nightly=true ;;
-            weekly)  weekly=true ;;
-            both)    nightly=true; weekly=true ;;
-            docs)    docs=true ;;
-          esac
-          # These cron strings are duplicated from `on: schedule:`. Editing one
-          # copy and not the other selects no tier: every job skips and the run
-          # reports green.
-          if [ "$nightly" = false ] && [ "$weekly" = false ] && [ "$docs" = false ]; then
-            echo "::error::No tier selected (schedule='${SCHEDULE:-}', tier='${TIER:-}')."
-            echo "::error::The cron strings here must match the ones in 'on: schedule:'."
-            exit 1
-          fi
-          { echo "nightly=$nightly"; echo "weekly=$weekly"; echo "docs=$docs"; } | tee -a "$GITHUB_OUTPUT"
-
-  # ===========================================================================
-  # NIGHTLY
-  # ===========================================================================
   attribution:
     name: Attribution inventory
     runs-on: ubuntu-latest
-    needs: plan
-    if: needs.plan.outputs.nightly == 'true'
+    # A cron run leaves `inputs.tier` empty, so only a `docs` dispatch skips
+    # this.
+    if: inputs.tier != 'docs'
     timeout-minutes: 20
     # Proves the inventory still generates before a release depends on it.
     # THIRD-PARTY.md may lag `Cargo.lock` here; the release regenerates it.
@@ -140,8 +93,7 @@ jobs:
   advisories:
     name: Advisories (RustSec)
     runs-on: ubuntu-latest
-    needs: plan
-    if: needs.plan.outputs.nightly == 'true'
+    if: inputs.tier != 'docs'
     timeout-minutes: 20
     # An advisory against a crate already in Cargo.lock stays invisible until a
     # pull request is opened.
@@ -199,8 +151,7 @@ jobs:
   osv:
     name: Advisories (OSV)
     runs-on: ubuntu-latest
-    needs: plan
-    if: needs.plan.outputs.nightly == 'true'
+    if: inputs.tier != 'docs'
     timeout-minutes: 20
     # cargo-deny reads only the crates the workspace compiles. This reads every
     # package in every tracked manifest, including lockfile entries no build
@@ -289,8 +240,7 @@ jobs:
   fuzz:
     name: Fuzz targets
     runs-on: ubuntu-latest
-    needs: plan
-    if: needs.plan.outputs.nightly == 'true'
+    if: inputs.tier != 'docs'
     # MAX_TOTAL_TIME below times the number of targets, plus a cold instrumented
     # build of all of them.
     timeout-minutes: 120
@@ -442,8 +392,7 @@ jobs:
   minimal-versions:
     name: Declared version floors build
     runs-on: ubuntu-latest
-    needs: plan
-    if: needs.plan.outputs.nightly == 'true'
+    if: inputs.tier != 'docs'
     # Builds every direct dependency at its requirement's lowest version. A red
     # run means a floor is fiction: raise it to what builds, do not lower it to
     # pass.
@@ -510,8 +459,7 @@ jobs:
   publish-dry-run:
     name: Release dry run
     runs-on: ubuntu-latest
-    needs: plan
-    if: needs.plan.outputs.nightly == 'true'
+    if: inputs.tier != 'docs'
     # The backstop for the manifest-selected gate in release-checks.yml: a
     # packaging break can arrive with nothing in this repository changing (a
     # yank, a toolchain release). The release's tools drift the same way: `gh` comes
@@ -666,8 +614,6 @@ jobs:
   docs-build:
     name: Build site for deploy
     runs-on: ubuntu-latest
-    needs: plan
-    if: needs.plan.outputs.nightly == 'true' || needs.plan.outputs.docs == 'true'
     timeout-minutes: 30
     # The artifact this uploads is what docs-deploy publishes.
     steps:
@@ -736,10 +682,8 @@ jobs:
   docs-deploy:
     name: Deploy to Cloudflare Workers
     runs-on: ubuntu-latest
-    needs: [plan, docs-build]
-    if: >-
-      (needs.plan.outputs.nightly == 'true' || needs.plan.outputs.docs == 'true') &&
-      github.ref == 'refs/heads/main'
+    needs: [docs-build]
+    if: github.ref == 'refs/heads/main'
     timeout-minutes: 20
     permissions:
       contents: read
@@ -781,8 +725,7 @@ jobs:
   release-verify:
     name: Verify the latest release
     runs-on: ubuntu-latest
-    needs: plan
-    if: needs.plan.outputs.nightly == 'true'
+    if: inputs.tier != 'docs'
     timeout-minutes: 30
     # A published release cannot change, so a failure here means `gh`,
     # crates.io or the GitHub API moved or was unreachable, the tag's xtask no
@@ -877,141 +820,12 @@ jobs:
           body-file: ${{ runner.temp }}/body.md
           comment-file: ${{ runner.temp }}/comment.md
 
-  # ===========================================================================
-  # WEEKLY
-  # ===========================================================================
-  beta:
-    name: Build and test on beta
-    runs-on: ubuntu-latest
-    needs: plan
-    if: needs.plan.outputs.weekly == 'true'
-    # Uncached, so both steps build from cold, librdkafka and OpenSSL included.
-    timeout-minutes: 60
-    # Every other Rust job takes whatever `stable` resolves to on the day, so a
-    # toolchain regression reaches `main` and every open pull request in the
-    # same hour. Beta is that release about six weeks early. Beta publishes
-    # roughly every six days, so a weekly run still leaves about five weeks.
-    permissions:
-      contents: read
-      issues: write
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: ./.github/actions/setup-rust
-        with:
-          toolchain: beta
-          components: clippy
-          tools: nextest
-          # No shared key. An entry keyed on beta's compiler shares nothing
-          # with the stable trees and would evict them from the 10 GB budget.
-
-      # Both steps always run, so one report covers both.
-      - id: clippy
-        run: |
-          set -o pipefail
-          rc=0
-          cargo xtask clippy 2>&1 | tee "$RUNNER_TEMP/clippy.log" || rc=$?
-          exit "$rc"
-        continue-on-error: true
-      - id: test
-        run: |
-          set -o pipefail
-          rc=0
-          cargo xtask test 2>&1 | tee "$RUNNER_TEMP/test.log" || rc=$?
-          exit "$rc"
-        continue-on-error: true
-
-      # continue-on-error reports a failed step's `conclusion` as `success`,
-      # so the real result is in `outcome`.
-      - name: Write the issue body
-        id: body
-        if: >-
-          always() &&
-          (steps.clippy.outcome == 'failure' ||
-           steps.test.outcome == 'failure')
-        env:
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          SHA: ${{ github.sha }}
-          CLIPPY_FAILED: ${{ steps.clippy.outcome == 'failure' }}
-          TEST_OUTCOME: ${{ steps.test.outcome }}
-        run: |
-          set -euo pipefail
-          if [ "$CLIPPY_FAILED" = "true" ]; then
-            title='[bug] Clippy fails on the beta toolchain'
-            log="$RUNNER_TEMP/clippy.log"
-            what="\`cargo xtask clippy\` failed on beta, on the [weekly run]($RUN_URL). Once beta becomes stable this blocks every pull request, because the lint job denies warnings."
-            if [ "$TEST_OUTCOME" = "failure" ]; then
-              what="$what \`cargo xtask test\` also failed on the same run."
-            elif [ "$TEST_OUTCOME" = "success" ]; then
-              what="$what \`cargo xtask test\` passed on the same run."
-            else
-              what="$what \`cargo xtask test\` outcome on the same run: \`${TEST_OUTCOME}\`."
-            fi
-          else
-            title='[bug] Tests fail on the beta toolchain'
-            log="$RUNNER_TEMP/test.log"
-            what="\`cargo xtask test\` failed on beta while \`cargo xtask clippy\` passed, on the [weekly run]($RUN_URL). Clippy stops at the check build, so this is codegen, linking or behavior."
-          fi
-          # The title is written before xtask runs, so the filing step has it
-          # when beta cannot build xtask.
-          echo "title=$title" >>"$GITHUB_OUTPUT"
-          where=$'Build, CI, or the examples\n\nThe `Build and test on beta` job of the weekly scheduled run.'
-          version="\`main\` at $SHA"
-          expected='Clippy and the tests pass on beta. Beta reaches stable within six weeks, at which point this blocks every open pull request at once. The run log names the release it was found on.'
-          cargo xtask bug-report --out "$RUNNER_TEMP/body.md" \
-            --answer components="$where" \
-            --answer version="$version" \
-            --answer what="$what" \
-            --answer expected="$expected" \
-            --answer-file logs="$log"
-          again="Still failing at $SHA, in the [weekly run]($RUN_URL)."
-          cargo xtask bug-report --out "$RUNNER_TEMP/comment.md" \
-            --answer what="$again" \
-            --answer-file logs="$log"
-      - name: Report the failure as an issue
-        if: >-
-          always() &&
-          (steps.clippy.outcome == 'failure' ||
-           steps.test.outcome == 'failure')
-        uses: ./.github/actions/file-issue
-        with:
-          title: ${{ steps.body.outputs.title }}
-          body-file: ${{ runner.temp }}/body.md
-          comment-file: ${{ runner.temp }}/comment.md
-
-      - name: Fail the job on either outcome
-        if: >-
-          always() &&
-          (steps.clippy.outcome == 'failure' ||
-           steps.test.outcome == 'failure')
-        run: exit 1
-
-  features-powerset:
-    name: Feature powerset (exhaustive)
-    runs-on: ubuntu-latest
-    needs: plan
-    if: needs.plan.outputs.weekly == 'true'
-    # 2^18 combinations, several building librdkafka or OpenSSL: ~48 minutes. A
-    # cancelled run leaves manifests stripped.
-    timeout-minutes: 90
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: ./.github/actions/setup-rust
-        with:
-          tools: cargo-hack
-          shared-key: dev-allfeatures
-      - run: cargo hack check --workspace --feature-powerset --no-dev-deps
-
   loom:
     name: Loom models (spate-core)
     runs-on: ubuntu-latest
-    needs: plan
     # INV-3 against a moving compiler: `setup-rust` installs the stable
     # channel, so this runs the models on whatever stable shipped that day.
-    if: needs.plan.outputs.nightly == 'true'
+    if: inputs.tier != 'docs'
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1028,10 +842,9 @@ jobs:
   examples-containers:
     name: Example container tier
     runs-on: ubuntu-latest
-    needs: plan
     # The only thing driving a shipped example binary through SIGTERM and a real
     # drain.
-    if: needs.plan.outputs.nightly == 'true'
+    if: inputs.tier != 'docs'
     timeout-minutes: 60
     permissions:
       contents: read
@@ -1070,143 +883,21 @@ jobs:
           name: junit-nextest-examples
           path: target/nextest/docker/junit.xml
 
-  coverage-containers:
-    name: Coverage (with containers)
-    runs-on: ubuntu-latest
-    needs: plan
-    if: needs.plan.outputs.weekly == 'true'
-    timeout-minutes: 90
-    # The docker-inclusive number, under its own Codecov flag.
-    env:
-      CARGO_PROFILE_DEV_DEBUG: line-tables-only
-    steps:
-      - name: Free disk space
-        run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
-                      /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
-          df -h /
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: ./.github/actions/setup-rust
-        with:
-          components: llvm-tools-preview
-          tools: nextest,cargo-llvm-cov
-          # Not `docker`: this builds instrumented into `target/llvm-cov-target`,
-          # where containers.yml's container job builds plain.
-          shared-key: coverage-docker
-
-      - name: Clean coverage state
-        # Not redundant with the steps below: `clean` shells out to `cargo
-        # metadata` and runs *first*, so without `--locked` it quietly repairs a
-        # stale lockfile and the later `--locked` flags can never fire.
-        run: cargo llvm-cov clean --workspace --locked
-      - name: Coverage (unit and integration)
-        run: cargo llvm-cov --no-report nextest --profile ci --workspace --all-features --locked
-      # Serial: 2 cores / ~7 GB across five servers; concurrency OOMs.
-      - name: Coverage (docker suites)
-        run: >
-          cargo llvm-cov --no-report nextest --profile docker
-          --workspace --all-features --locked --run-ignored ignored-only --test-threads 1
-      - name: Merge coverage
-        run: >
-          cargo llvm-cov report --lcov --locked --output-path lcov-full.info
-          --ignore-filename-regex '/(tests|examples)/'
-
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        if: always()
-        with:
-          name: coverage-lcov-full
-          path: lcov-full.info
-
-      - name: Upload to Codecov
-        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
-        with:
-          files: lcov-full.info
-          token: ${{ secrets.CODECOV_TOKEN }}
-          fail_ci_if_error: true
-          flags: with-containers
-
-  bench:
-    name: Criterion micro benches
-    runs-on: ubuntu-latest
-    needs: plan
-    if: needs.plan.outputs.weekly == 'true'
-    timeout-minutes: 90
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: ./.github/actions/setup-rust
-        with:
-          # Release-profile artifacts; shares nothing with the dev-profile jobs.
-          shared-key: release
-
-      # BEFORE the benches: restoring afterwards extracts a tar over
-      # `target/criterion`, overwriting the results just measured and freezing
-      # the baseline. The prefix restore-key is what carries state between runs.
-      - name: Restore last week's criterion baseline
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: target/criterion
-          key: criterion-baseline-${{ github.run_id }}
-          restore-keys: criterion-baseline-
-
-      - run: cargo xtask bench check
-      # The target is named because a bare `-p X -- --save-baseline` reaches the
-      # lib's libtest harness too, which rejects it. Given one baseline critcmp
-      # prints a column of 1.00 ratios and exits 0, and a bench never run leaves
-      # no `current` and drops out of the comparison silently.
-      - run: cargo bench -p spate-clickhouse --locked --bench encode -- --save-baseline current
-
-      # Built from source: install-action has no checksummed prebuilt for it.
-      - run: cargo install critcmp --locked --version 0.1.8
-
-      - name: Compare against last week's baseline
-        run: |
-          set -euo pipefail
-          if find target/criterion -type d -name previous | grep -q .; then
-            critcmp previous current
-          else
-            echo "::notice::No previous baseline yet; this run establishes one."
-          fi
-
-      # Rotate so next week has a `previous`. The cache saves at post-job from
-      # the tree as it stands here.
-      - name: Rotate this week's baseline
-        run: |
-          set -euo pipefail
-          rotated=0
-          while IFS= read -r dir; do
-            rm -rf "${dir%/current}/previous"
-            mv "$dir" "${dir%/current}/previous"
-            rotated=$((rotated + 1))
-          done < <(find target/criterion -type d -name current)
-          echo "rotated $rotated baseline director(ies) to 'previous'"
-          if [ "$rotated" -eq 0 ]; then
-            echo "::error::criterion wrote no 'current' baseline; the comparison above proved nothing."
-            exit 1
-          fi
-
   # ===========================================================================
   # Catch-all failure reporting. `attribution`, `advisories`, `osv`, `fuzz`,
-  # `minimal-versions`, `publish-dry-run` (through `publish-dry-run-report`),
-  # `release-verify` and `beta` file their own issues and are
-  # absent from `needs` below so they are not reported twice.
+  # `minimal-versions`, `publish-dry-run` (through `publish-dry-run-report`) and
+  # `release-verify` file their own issues and are absent from `needs` below so
+  # they are not reported twice.
   # ===========================================================================
   report:
-    name: Report scheduled failures
+    name: Report nightly failures
     runs-on: ubuntu-latest
     needs:
-      - plan
       - docs-build
       - docs-deploy
-      - features-powerset
       - loom
       - examples-containers
-      - coverage-containers
-      - bench
-    # Skipped dependencies, meaning the whole other tier, are not failures.
+    # A `docs` dispatch skips the nightly jobs, and a skipped job is not a failure.
     if: always() && contains(needs.*.result, 'failure')
     timeout-minutes: 10
     permissions:
@@ -1231,16 +922,16 @@ jobs:
           set -euo pipefail
           failed=$(echo "$RESULTS" | jq -r '
             to_entries | map(select(.value.result == "failure")) | .[].key' | sort | tr '\n' ' ')
-          where=$'Build, CI, or the examples\n\nThe scheduled run, in a job that files no issue of its own.'
+          where=$'Build, CI, or the examples\n\nThe nightly run, in a job that files no issue of its own.'
           version="\`main\` at $SHA"
-          what="Failed jobs on the [scheduled run]($RUN_URL): ${failed}"
-          expected='Every job passes. The scheduled tier detects the world changing underneath a static tree, so a failure here is usually not caused by the last commit. Check the run before assuming a regression.'
+          what="Failed jobs on the [nightly run]($RUN_URL): ${failed}"
+          expected='Every job passes. The nightly run detects the world changing underneath a static tree, so a failure here is usually not caused by the last commit. Check the run before assuming a regression.'
           cargo xtask bug-report --out "$RUNNER_TEMP/body.md" \
             --answer components="$where" \
             --answer version="$version" \
             --answer what="$what" \
             --answer expected="$expected"
-          again="Still failing at $SHA. Failed jobs on the [scheduled run]($RUN_URL): ${failed}"
+          again="Still failing at $SHA. Failed jobs on the [nightly run]($RUN_URL): ${failed}"
           cargo xtask bug-report --out "$RUNNER_TEMP/comment.md" \
             --answer what="$again"
       # Runs after a failed body step too, so a toolchain that cannot build
@@ -1249,6 +940,6 @@ jobs:
         if: ${{ !cancelled() }}
         uses: ./.github/actions/file-issue
         with:
-          title: "[bug] Scheduled run is failing"
+          title: "[bug] Nightly run is failing"
           body-file: ${{ runner.temp }}/body.md
           comment-file: ${{ runner.temp }}/comment.md

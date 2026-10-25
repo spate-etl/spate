@@ -214,7 +214,7 @@ A pull request touching `fuzz/`, `ci.yml`, `fuzz.yml`, `.github/actions/`, the
 nightly pin or `xtask/` builds every target with instrumentation and runs none
 of them, and so does one touching a workspace crate the harness depends on
 directly.
-The nightly tier in `scheduled.yml` fuzzes each for five minutes, set by
+`nightly.yml` fuzzes each for five minutes, set by
 `MAX_TOTAL_TIME`, and carries `fuzz/corpus` between nights in a cache entry.
 A crash uploads the input as the `fuzz-artifacts` artifact and opens an issue
 titled `[bug] A fuzz target found a crashing input`.

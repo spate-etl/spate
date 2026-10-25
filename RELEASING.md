@@ -164,7 +164,7 @@ does not attest or verify; only a real release signs with
 The same proof also runs continuously. The `publish-dry-run` job in
 `release-checks.yml`, which `ci.yml` calls, runs
 `cargo xtask release package`, the packaging step `prepare` runs, at a
-simulated bump on pushes to `main` that reach a manifest. `scheduled.yml` runs
+simulated bump on pushes to `main` that reach a manifest. `nightly.yml` runs
 `cargo xtask release dry-run --stand-in-post` nightly at the derived version,
 with `gh`, `cargo-about` and `cargo-cyclonedx` installed as a release gets
 them, so a packaging problem or a change in those tools surfaces before
@@ -179,7 +179,7 @@ the pull request closed and reopened. The nightly skips the night after a
 release when nothing has merged since the tag. When the derived version is a
 minor with no post yet, the flag commits a stand-in draft post in the
 rehearsal's worktree.
-`scheduled.yml` also generates `THIRD-PARTY.md` nightly, so a generator
+`nightly.yml` also generates `THIRD-PARTY.md` each night, so a generator
 failure surfaces the same way.
 
 ## Judging a release
@@ -199,7 +199,7 @@ attested and carries every asset. GitHub's attestation of an immutable release
 binds the tag to its git object and to every asset's digest. It needs `gh`
 2.102.0 or later, authenticated, and a clean checkout of the tag, whose
 members are the crates it checks. It fails for 0.2.0 and earlier, which predate
-attestations. `scheduled.yml` runs it nightly against the newest `v*` tag from
+attestations. `nightly.yml` runs it each night against the newest `v*` tag from
 a checkout of that tag, so a `gh`, crates.io or API change that breaks a call
 `finish` also makes surfaces there first. To check by hand:
 

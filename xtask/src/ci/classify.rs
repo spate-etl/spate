@@ -930,7 +930,8 @@ mod tests {
             assert!(run(&[path]).release_tooling, "{path}");
         }
         for path in [
-            ".github/workflows/scheduled.yml",
+            ".github/workflows/nightly.yml",
+            ".github/workflows/weekly.yml",
             ".github/workflows/site.yml",
             ".github/actions/file-issue/action.yml",
             "xtask/src/checks/adr.rs",
@@ -947,7 +948,8 @@ mod tests {
         let out = run(&[
             ".github/actions/setup-rust/action.yml",
             ".github/workflows/ci.yml",
-            ".github/workflows/scheduled.yml",
+            ".github/workflows/nightly.yml",
+            ".github/workflows/weekly.yml",
         ]);
         assert!(out.release_tooling);
     }
@@ -1003,7 +1005,8 @@ mod tests {
         for path in [
             "bench/src/lib.rs",
             "test-support/src/lib.rs",
-            ".github/workflows/scheduled.yml",
+            ".github/workflows/nightly.yml",
+            ".github/workflows/weekly.yml",
             ".github/workflows/site.yml",
             "deny.toml",
             "docs/a.md",

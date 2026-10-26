@@ -132,7 +132,8 @@ enum Count {
 ///
 /// # Errors
 ///
-/// [`SqsError::Refused`] for a FIFO queue, a missing or unreadable redrive
+/// [`SqsError::Refused`] for a read of the queue that SQS refuses, a FIFO
+/// queue, a missing or unreadable redrive
 /// policy, a dead-letter ARN that is not an SQS queue's, an unreadable
 /// dead-letter queue, one that keeps messages no longer than the queue, or a
 /// queue of the two that does not report its message counts;

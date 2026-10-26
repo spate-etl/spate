@@ -2780,3 +2780,75 @@ async fn an_extension_during_a_stop_is_bounded_at_one_second() {
     step(Duration::from_secs(20)).await;
     assert_eq!(queue.visibility_within(), [Some(Duration::from_secs(1))]);
 }
+
+/// Pins that a Fatal visibility extension is returned by every later call.
+#[tokio::test(start_paused = true)]
+async fn a_fatal_renewal_is_sticky() {
+    let (feed, queue) = start(MINUTE);
+    let (waker, park) = wake_channel();
+    feed.set_waker(waker);
+    queue.ready(Message::new("u"));
+    let delivery = receive_n(&feed, &park, 1).await.remove(0);
+    feed.renew(delivery.receipt).unwrap();
+    queue.fail_next_visibility_call(CallError::fatal("InvalidAction"));
+    tokio::time::advance(Duration::from_secs(20)).await;
+    until("the extension is sent", || queue.visibility().len() == 1).await;
+    until("the failure wakes the reader", || park.park(Duration::ZERO)).await;
+    for _ in 0..2 {
+        assert_eq!(feed.receive(1).unwrap_err().kind, FeedErrorKind::Fatal);
+    }
+}
+
+/// Pins that `connect` refuses a queue whose attribute read SQS answers
+/// with a coded 400, in AWS's wire shape and ElasticMQ's. Regression for
+/// #1188.
+#[test]
+fn an_unlisted_sender_error_refuses_connect() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let io = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    let shapes = [
+        (
+            "x-amzn-query-error: InvalidAction;Sender",
+            r#"{"__type":"com.amazon.coral.service#InvalidAction","message":"bad"}"#,
+        ),
+        (
+            "X-Amzn-Query-Error: com.amazonaws.sqs#InvalidAction",
+            r#"{"__type":"com.amazonaws.sqs#InvalidAction","message":"bad"}"#,
+        ),
+    ];
+    for (header, body) in shapes {
+        let listener = io
+            .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        io.spawn(async move {
+            while let Ok((mut tcp, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 65536];
+                    let _ = tcp.read(&mut buf).await;
+                    let reply = format!(
+                        "HTTP/1.1 400 Bad Request\r\nContent-Type: application/x-amz-json-1.0\r\n\
+                         {header}\r\nContent-Length: {}\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = tcp.write_all(reply.as_bytes()).await;
+                    let _ = tokio::io::copy(&mut tcp, &mut tokio::io::sink()).await;
+                });
+            }
+        });
+        let section: FeedSection = serde_yaml::from_str(&format!(
+            "sqs: {{ queue_url: \"http://{addr}/000000000000/jobs\", \
+             region: eu-west-2, endpoint: \"http://{addr}\" }}"
+        ))
+        .unwrap();
+        match SqsFeed::connect_with_static_credentials(&section, io.handle(), "x", "x") {
+            Err(SqsError::Refused(m)) => assert!(m.contains("InvalidAction"), "{header}: {m}"),
+            Err(e) => panic!("{header}: {e}"),
+            Ok(_) => panic!("{header}: connected"),
+        }
+    }
+}

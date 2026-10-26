@@ -411,8 +411,8 @@ impl SqsFeed {
     /// [`SqsError::Config`] for a section the feed cannot read, a
     /// `queue_url` ending in `.fifo` and a `settling_window` below one
     /// minute among them.
-    /// [`SqsError::Refused`] when SQS refuses the credentials or the queue,
-    /// and for a queue the feed cannot dead-letter from: one whose ARN names
+    /// [`SqsError::Refused`] when SQS refuses the credentials, the queue or a
+    /// request no retry can fix, and for a queue the feed cannot dead-letter from: one whose ARN names
     /// a FIFO queue, one with no redrive policy or one the feed cannot read,
     /// or one whose dead-letter queue cannot be read or keeps messages no
     /// longer than the queue does. Also when the queue or its dead-letter

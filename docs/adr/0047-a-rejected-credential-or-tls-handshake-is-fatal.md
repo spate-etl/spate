@@ -1,13 +1,14 @@
 ---
-description: "Every connector fails on a credential or TLS handshake that is identifiably rejected, and retries a failure to obtain credentials or reach the server."
+description: "Every connector fails on a credential or TLS handshake that is identifiably rejected, and retries a failure to obtain credentials or reach the server. Superseded by ADR-0081."
 ---
 
 # ADR-0047 — A rejected credential or TLS handshake is fatal in every connector
 
-- **Status:** accepted
+- **Status:** superseded
 - **Date:** 2026-09-26
 - **Supersedes:** —
-- **Superseded by:** —
+- **Superseded by:**
+  [ADR-0081](0081-a-rejected-credential-or-tls-handshake-is-fatal-unless-throttled.md)
 
 ## Context and problem statement
 

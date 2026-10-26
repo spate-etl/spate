@@ -85,14 +85,15 @@ uses the Mozilla root bundle compiled into the binary. It goes through the
 proxy that `HTTPS_PROXY`, `HTTP_PROXY` or `ALL_PROXY` names, except for the
 hosts in `NO_PROXY`.
 
-A rejected credential, signature or token, a 401 or 403 answer, a missing
-queue, a rejected TLS handshake and a KMS key the queue cannot use (access
-denied, disabled, not found, in an invalid state, needing opt-in, or not
-usable for the operation) are
-fatal: connecting fails with them, and after startup the feed returns the
-error to every call and the pipeline stops. Throttling, KMS throttling
-included, a 5xx answer, a timeout and a failure to load credentials are
-retried.
+A rejected credential, signature or token, a 401 or 403 answer that is not
+throttling, a missing queue, a rejected TLS handshake, a KMS key the queue
+cannot use (access denied, disabled, not found, in an invalid state, needing
+opt-in, or not usable for the operation) and any other 400 answer that
+carries an error code are fatal: connecting fails with them, and after
+startup the feed returns the error to every call and the pipeline stops.
+Throttling, KMS throttling included, and the in-flight message limit are
+retried at 400 or 403, and so are a 5xx answer, a 400 with no error code, a
+timeout and a failure to load credentials.
 
 ## Startup checks
 

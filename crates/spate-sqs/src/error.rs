@@ -1,9 +1,11 @@
 //! The crate's public error, and SDK errors classified as Fatal or Retryable.
 //!
 //! A credential, permission or TLS rejection, a KMS key the queue cannot
-//! use, a missing queue and a malformed batch are Fatal: retrying cannot
-//! succeed. Everything else, throttling, 5xx, timeouts and a failure to load
-//! credentials included, is Retryable.
+//! use, a missing queue, a malformed batch and any other 400 answer that
+//! carries an error code are Fatal: retrying cannot succeed. Throttling, the
+//! in-flight message limit and a request timeout are Retryable whatever
+//! status carries them, as is everything else: 5xx, timeouts, an answer with
+//! no code and a failure to load credentials.
 
 use aws_sdk_sqs::config::http::HttpResponse;
 use aws_sdk_sqs::error::{ProvideErrorMetadata, SdkError};
@@ -25,7 +27,8 @@ pub enum SqsError {
     Config(#[from] ConfigError),
     /// The feed cannot start, and starting again fails the same way: SQS
     /// refused a request, for a rejected credential, a missing permission or
-    /// queue, or a rejected TLS handshake; the TLS context could not be
+    /// queue, a rejected TLS handshake, or a request it rejects as one no
+    /// retry can fix; the TLS context could not be
     /// built; or the queue failed one of the feed's startup checks.
     #[error("the SQS feed cannot start: {0}")]
     Refused(String),
@@ -73,6 +76,30 @@ const KMS_KEY: &[&str] = &[
     "KMS.InvalidStateException",
     "KMS.OptInRequired",
     "KMS.InvalidKeyUsageException",
+];
+
+/// Codes for a limit or a timeout that clears without an operator, whatever
+/// status carries them: the SDK's own throttling and transient codes, plus
+/// SQS's KMS throttling and in-flight message limit.
+const RETRYABLE: &[&str] = &[
+    "Throttling",
+    "ThrottlingException",
+    "ThrottledException",
+    "RequestThrottledException",
+    "TooManyRequestsException",
+    "ProvisionedThroughputExceededException",
+    "TransactionInProgressException",
+    "RequestLimitExceeded",
+    "BandwidthLimitExceeded",
+    "LimitExceededException",
+    "RequestThrottled",
+    "SlowDown",
+    "PriorRequestNotComplete",
+    "EC2ThrottledException",
+    "RequestTimeout",
+    "RequestTimeoutException",
+    "KMS.ThrottlingException",
+    "OverLimit",
 ];
 
 /// Whether `code` is `name`, bare or with SQS's `AWS.SimpleQueueService.`
@@ -219,9 +246,10 @@ impl TypedFatal for DeleteMessageBatchError {
     }
 }
 
-/// Fatal for a TLS rejection, a 401 or 403 the service answered, or a Fatal
-/// code in either spelling; Retryable for everything else. The message
-/// carries the error's source chain.
+/// Retryable for a code in [`RETRYABLE`] at any status; otherwise Fatal for a
+/// TLS rejection, a batch-shape code, a 401 or 403 the service answered, a
+/// Fatal code in either spelling, or a 400 that carries a code; Retryable for
+/// everything else. The message carries the error's source chain.
 pub(crate) fn classify<E>(op: &str, e: &SdkError<E, HttpResponse>) -> CallError
 where
     E: ProvideErrorMetadata + TypedFatal + Error + Send + Sync + 'static,
@@ -230,6 +258,11 @@ where
     let fatal = |message, batch_shape| CallError {
         class: Class::Fatal,
         batch_shape,
+        message,
+    };
+    let retryable = |message| CallError {
+        class: Class::Retryable,
+        batch_shape: false,
         message,
     };
     if let Some(tls) = spate_core::tls_rejection!(rustls, e) {
@@ -243,11 +276,17 @@ where
     let typed = e.as_service_error();
     let batch_shape =
         code_in(code, BATCH_SHAPE) || typed.is_some_and(TypedFatal::typed_batch_shape);
-    let rejected = e
-        .raw_response()
-        .is_some_and(|r| matches!(r.status().as_u16(), 401 | 403));
+    // Checked before the status: SQS documents its throttling codes as 403
+    // as well as 400.
+    if !batch_shape && code_in(code, RETRYABLE) {
+        return retryable(message);
+    }
+    let status = e.raw_response().map(|r| r.status().as_u16());
+    let rejected = matches!(status, Some(401 | 403));
+    let sender = status == Some(400) && !code.is_empty();
     if batch_shape
         || rejected
+        || sender
         || code_in(code, MISSING_QUEUE)
         || code_in(code, REJECTED)
         || code_in(code, KMS_KEY)
@@ -255,11 +294,7 @@ where
     {
         fatal(message, batch_shape)
     } else {
-        CallError {
-            class: Class::Retryable,
-            batch_shape: false,
-            message,
-        }
+        retryable(message)
     }
 }
 
@@ -457,6 +492,172 @@ mod tests {
         );
         assert_eq!(
             classify("SendMessageBatch", &batch_error("KMS.ThrottlingException")).class,
+            Class::Retryable
+        );
+    }
+
+    /// Pins that a 400 carrying a code no list names is Fatal, whatever its
+    /// fault type, and that the message names the code. Regression for #1188.
+    #[test]
+    fn an_unlisted_sender_error_is_fatal() {
+        for code in [
+            "InvalidAction",
+            "AWS.SimpleQueueService.InvalidAction",
+            "AccessDeniedException",
+            "NotAuthorized",
+            "IncompleteSignature",
+            "InvalidParameterCombination",
+            "InvalidParameterValue",
+            "InvalidQueryParameter",
+            "MissingAction",
+            "MissingParameter",
+            "ValidationError",
+            "RequestExpired",
+            "SomeNewSenderError",
+        ] {
+            let e = classify("ReceiveMessage", &receive_error(code));
+            assert_eq!(e.class, Class::Fatal, "{code}");
+            assert!(e.message.contains(code), "{code}: {}", e.message);
+        }
+        for fault in ["Sender", "Receiver"] {
+            let meta = ErrorMetadata::builder()
+                .code("InvalidAction")
+                .custom("type", fault)
+                .build();
+            let e = service(ReceiveMessageError::generic(meta), 400);
+            assert_eq!(
+                classify("ReceiveMessage", &e).class,
+                Class::Fatal,
+                "{fault}"
+            );
+        }
+    }
+
+    /// Pins that a coded 400 is Fatal on every call the feed makes, and is
+    /// never read as a batch-shape fault.
+    #[test]
+    fn a_sender_error_on_any_call_is_fatal_and_not_batch_shape() {
+        let meta = || ErrorMetadata::builder().code("InvalidAction").build();
+        let cases = [
+            classify(
+                "ReceiveMessage",
+                &service(ReceiveMessageError::generic(meta()), 400),
+            ),
+            classify(
+                "GetQueueAttributes",
+                &service(GetQueueAttributesError::generic(meta()), 400),
+            ),
+            classify(
+                "SendMessageBatch",
+                &service(SendMessageBatchError::generic(meta()), 400),
+            ),
+            classify(
+                "ChangeMessageVisibilityBatch",
+                &service(ChangeMessageVisibilityBatchError::generic(meta()), 400),
+            ),
+            classify(
+                "DeleteMessageBatch",
+                &service(DeleteMessageBatchError::generic(meta()), 400),
+            ),
+        ];
+        for e in cases {
+            assert_eq!(e.class, Class::Fatal, "{}", e.message);
+            assert!(!e.batch_shape, "{}", e.message);
+        }
+    }
+
+    /// Pins that throttling, the in-flight limit and a request timeout are
+    /// Retryable at 400 and at 403, bare, prefixed or typed.
+    #[test]
+    fn throttling_and_the_in_flight_limit_are_retryable_at_400_and_403() {
+        use aws_sdk_sqs::types::error::{OverLimit, RequestThrottled};
+        for status in [400, 403] {
+            for code in [
+                "RequestThrottled",
+                "AWS.SimpleQueueService.RequestThrottled",
+                "ThrottlingException",
+                "KMS.ThrottlingException",
+                "OverLimit",
+                "AWS.SimpleQueueService.OverLimit",
+                "RequestTimeout",
+                "TooManyRequestsException",
+            ] {
+                let meta = || {
+                    ErrorMetadata::builder()
+                        .code(code)
+                        .custom("type", "Sender")
+                        .build()
+                };
+                let receive = service(ReceiveMessageError::generic(meta()), status);
+                assert_eq!(
+                    classify("ReceiveMessage", &receive).class,
+                    Class::Retryable,
+                    "{code} at {status}"
+                );
+                let send = service(SendMessageBatchError::generic(meta()), status);
+                assert_eq!(
+                    classify("SendMessageBatch", &send).class,
+                    Class::Retryable,
+                    "{code} at {status}"
+                );
+            }
+        }
+        let meta = || ErrorMetadata::builder().message("scripted").build();
+        let receive =
+            ReceiveMessageError::RequestThrottled(RequestThrottled::builder().meta(meta()).build());
+        let attributes = GetQueueAttributesError::RequestThrottled(
+            RequestThrottled::builder().meta(meta()).build(),
+        );
+        let over = ReceiveMessageError::OverLimit(OverLimit::builder().meta(meta()).build());
+        assert_eq!(
+            classify("ReceiveMessage", &service(receive, 400)).class,
+            Class::Retryable
+        );
+        assert_eq!(
+            classify("GetQueueAttributes", &service(attributes, 400)).class,
+            Class::Retryable
+        );
+        assert_eq!(
+            classify("ReceiveMessage", &service(over, 400)).class,
+            Class::Retryable
+        );
+    }
+
+    /// Pins that the sender rule needs a 400 the service answered with a
+    /// code: a codeless 400, another 4xx, a 5xx and a timeout stay Retryable.
+    #[test]
+    fn the_sender_rule_needs_a_400_with_a_code() {
+        let codeless = ReceiveMessageError::generic(ErrorMetadata::builder().build());
+        assert_eq!(
+            classify("ReceiveMessage", &service(codeless, 400)).class,
+            Class::Retryable
+        );
+        let raw = HttpResponse::new(400.try_into().unwrap(), "".into());
+        let unparsed: SdkError<ReceiveMessageError, HttpResponse> =
+            SdkError::response_error("unparsed", raw);
+        assert_eq!(
+            classify("ReceiveMessage", &unparsed).class,
+            Class::Retryable
+        );
+        for status in [404, 408, 429] {
+            let meta = ErrorMetadata::builder().code("InvalidAction").build();
+            let e = service(ReceiveMessageError::generic(meta), status);
+            assert_eq!(
+                classify("ReceiveMessage", &e).class,
+                Class::Retryable,
+                "{status}"
+            );
+        }
+        let meta = ErrorMetadata::builder()
+            .code("InternalError")
+            .custom("type", "Receiver")
+            .build();
+        let failed = service(ReceiveMessageError::generic(meta), 500);
+        assert_eq!(classify("ReceiveMessage", &failed).class, Class::Retryable);
+        let timed_out: SdkError<ReceiveMessageError, HttpResponse> =
+            SdkError::timeout_error("timed out");
+        assert_eq!(
+            classify("ReceiveMessage", &timed_out).class,
             Class::Retryable
         );
     }

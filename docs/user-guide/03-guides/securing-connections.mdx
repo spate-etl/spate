@@ -61,7 +61,7 @@ gives you nothing to leak.
 ## What a security failure does at runtime
 
 Every connector applies one rule
-([ADR-0047](../../adr/0047-a-rejected-credential-or-tls-handshake-is-fatal.md)).
+([ADR-0081](../../adr/0081-a-rejected-credential-or-tls-handshake-is-fatal-unless-throttled.md)).
 A rejection is fatal:
 
 - a certificate the client's TLS stack fails to verify;
@@ -70,7 +70,8 @@ A rejection is fatal:
 - no protocol version, cipher suite or other handshake parameter in common with
   the server;
 - an authentication or authorization error from the server;
-- a `401` or `403` from the service.
+- a `401` or `403` from the service, unless its error code names throttling
+  or a limit that clears by itself.
 
 A failure to obtain credentials or reach the server is retryable, and so are a
 connection reset, closed or timed out during the handshake, a malformed TLS

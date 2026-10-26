@@ -112,7 +112,7 @@ the frames) happens when the worker calls it, not when the future is polled:
   reports, so make it name the cause. A rejected credential or TLS handshake is
   `Fatal`, and a failure to obtain credentials or reach the server is
   `Retryable`
-  ([ADR-0047](../../adr/0047-a-rejected-credential-or-tls-handshake-is-fatal.md)).
+  ([ADR-0081](../../adr/0081-a-rejected-credential-or-tls-handshake-is-fatal-unless-throttled.md)).
   `spate::error::find_source` finds the TLS library's error behind the client's
   wrappers, and `spate::error::TLS_REJECTION_ALERTS` lists the alerts that
   reject a handshake. With a rustls client,

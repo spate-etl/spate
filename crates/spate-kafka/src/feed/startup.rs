@@ -1221,7 +1221,7 @@ mod tests {
     }
 
     /// Pins that a connection closed during the SASL mechanism handshake
-    /// leaves connecting unavailable at the bound. ADR-0047 keeps that case
+    /// leaves connecting unavailable at the bound. ADR-0081 keeps that case
     /// retryable.
     #[cfg(feature = "tls")]
     #[test]

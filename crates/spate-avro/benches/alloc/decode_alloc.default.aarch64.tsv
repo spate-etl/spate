@@ -17,6 +17,7 @@ decode_resolved.reordered_fields	44000	2000	3581120
 decode_resolved.writer_schema_only	30000	0	943120
 decode_serde_typed.flat_record	49	0	1814
 decode_shapes.logical_types	15000	0	462827
+decode_single_object.matching_fingerprint	51000	0	3096520
 decode_single_object.stale_fingerprint	2000	0	264000
 decode_value.batch50	305	0	16078
 decode_value.flat_record	26	0	1571

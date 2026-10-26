@@ -1,13 +1,15 @@
 //! Allocation snapshot of this crate's decode paths.
 //!
-//! Each case drives the same rig and the same region the counted tier in
-//! `decode_gungraun.rs` measures, under the same case names, and prints its
-//! allocation, reallocation and byte counts for `cargo xtask bench alloc` to
-//! compare with `benches/alloc/`. Harness-free, so every case runs on the main
+//! Each case drives a rig the counted tier in `decode_gungraun.rs` measures,
+//! under the same case names, and prints its allocation, reallocation and
+//! byte counts for `cargo xtask bench alloc` to compare with `benches/alloc/`.
+//! Harness-free, so every case runs on the main
 //! thread. The Confluent rigs stop their stub registry before they are handed
 //! over, and every rig's runtime is current-thread, so nothing else allocates
 //! while a case is counted. Each case is counted once after one uncounted
-//! pass, so the schema memo and the held reader are already in place.
+//! pass, so the schema memo and the held reader are already in place. The
+//! counted tier counts its single-payload cases cold, so it prices building
+//! the held reader; these rows price the steady-state decode only.
 //!
 //! `poisoned_schema_id` is left out. Each lookup of a negative-cached id
 //! compares the entry's age with the cache's TTL, so it reads the wall clock.
@@ -29,7 +31,7 @@ use decode_rig::{
     batch_datum_rig, batch_value_rig, confluent_cached_rig, confluent_unknown_rig, decode_batch,
     decode_once, decode_once_err, evolution_rig, flat_datum_rig, flat_serde_rig,
     flat_value_malformed_rig, flat_value_rig, map_heavy_rig, recursive_rig, shapes_rig,
-    stale_fingerprint_rig, truncated_datum_rig, truncated_serde_rig,
+    single_object_rig, stale_fingerprint_rig, truncated_datum_rig, truncated_serde_rig,
 };
 
 #[global_allocator]
@@ -106,6 +108,10 @@ fn batches(report: &mut Report) {
     });
     let mut r = truncated_serde_rig();
     report.case("decode_malformed_serde_typed.truncated_datum", || {
+        decode_batch(&mut r);
+    });
+    let mut r = single_object_rig();
+    report.case("decode_single_object.matching_fingerprint", || {
         decode_batch(&mut r);
     });
     let mut r = stale_fingerprint_rig();

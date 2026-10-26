@@ -99,6 +99,11 @@ harness = false
 name = "write_wall"
 harness = false
 
+# The allocation snapshot, driven by `cargo xtask bench alloc`.
+[[bench]]
+name = "encode_alloc"
+harness = false
+
 [package.metadata.docs.rs]
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]

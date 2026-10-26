@@ -696,7 +696,7 @@ fn a_dead_letter_topic_entry_ends_the_job_stalled() {
 /// Pins that the committed offsets a worker reads through its consumer
 /// outside the group cover every member's partitions: two workers share a
 /// two-partition work topic, and each ends `Completed` only once both
-/// partitions are committed. Regression for #1418.
+/// partitions are committed.
 #[test]
 #[ignore = "requires Docker"]
 fn a_bounded_job_ends_once_every_workers_partitions_are_committed() {

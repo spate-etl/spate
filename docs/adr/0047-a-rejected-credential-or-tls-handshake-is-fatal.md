@@ -1,5 +1,5 @@
 ---
-description: "Every connector fails on a credential or TLS handshake that is identifiably rejected, and retries a failure to obtain credentials or reach the server. Superseded by ADR-0081."
+description: "Every connector fails on a rejected credential or TLS handshake, and retries a failure to get credentials or reach the server. Superseded by ADR-0081."
 ---
 
 # ADR-0047 — A rejected credential or TLS handshake is fatal in every connector

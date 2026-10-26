@@ -623,6 +623,55 @@ mod tests {
         );
     }
 
+    /// Pins each code on the Retryable list as Retryable at 400 and 403, so
+    /// dropping one turns that throttle into a sticky Fatal.
+    #[test]
+    fn every_retryable_code_is_retryable_at_400_and_403() {
+        for status in [400, 403] {
+            for code in [
+                "Throttling",
+                "ThrottlingException",
+                "ThrottledException",
+                "RequestThrottledException",
+                "TooManyRequestsException",
+                "ProvisionedThroughputExceededException",
+                "TransactionInProgressException",
+                "RequestLimitExceeded",
+                "BandwidthLimitExceeded",
+                "LimitExceededException",
+                "RequestThrottled",
+                "SlowDown",
+                "PriorRequestNotComplete",
+                "EC2ThrottledException",
+                "RequestTimeout",
+                "RequestTimeoutException",
+                "KMS.ThrottlingException",
+                "OverLimit",
+            ] {
+                let meta = ErrorMetadata::builder().code(code).build();
+                let e = service(ReceiveMessageError::generic(meta), status);
+                assert_eq!(
+                    classify("ReceiveMessage", &e).class,
+                    Class::Retryable,
+                    "{code} at {status}"
+                );
+            }
+        }
+    }
+
+    /// Pins that a 401 the service answered is Fatal with a code no list
+    /// names and with no code.
+    #[test]
+    fn a_401_is_fatal_whatever_its_code() {
+        for meta in [
+            ErrorMetadata::builder().code("SomethingElse").build(),
+            ErrorMetadata::builder().build(),
+        ] {
+            let e = service(ReceiveMessageError::generic(meta), 401);
+            assert_eq!(classify("ReceiveMessage", &e).class, Class::Fatal);
+        }
+    }
+
     /// Pins that the sender rule needs a 400 the service answered with a
     /// code: a codeless 400, another 4xx, a 5xx and a timeout stay Retryable.
     #[test]

@@ -92,8 +92,9 @@ opt-in, or not usable for the operation) and any other 400 answer that
 carries an error code are fatal: connecting fails with them, and after
 startup the feed returns the error to every call and the pipeline stops.
 Throttling, KMS throttling included, and the in-flight message limit are
-retried at 400 or 403, and so are a 5xx answer, a 400 with no error code, a
-timeout and a failure to load credentials.
+retried at 400 or 403, and so are a 5xx answer, a 400 with no error code,
+any other 4xx answer such as a 408 or 429, a timeout and a failure to load
+credentials.
 
 ## Startup checks
 

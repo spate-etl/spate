@@ -152,7 +152,10 @@ closes, every unit handed to the reader is extended on each tick, renewed or
 not (see [Stop](#stop)). A worker that stops renewing, because it crashed or
 its control loop stalled, loses its units at most one visibility period after
 their last extension, those not yet handed out included, and SQS hands them
-to another worker.
+to another worker. During a revocation's drain the worker keeps renewing its
+units, for as long as `checkpoint.drain_timeout` allows. A unit the feed has
+received and not yet handed out is kept the same way only while the worker
+still holds a unit it renews.
 
 The long-poll wait is `visibility / 3` seconds, rounded down and at most 20.
 A unit that arrives at the end of a poll therefore still has two renewal

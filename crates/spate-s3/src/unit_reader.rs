@@ -194,6 +194,9 @@ pub(crate) struct UnitReader {
     /// Lanes to stop through a drain barrier: records they emitted may be
     /// in flight.
     revoked: Vec<LaneId>,
+    /// A fatal answer to a renewal from [`renew_held`](Self::renew_held),
+    /// returned by the next `poll_events`.
+    renew_error: Option<SourceError>,
     /// Lanes whose records are all committed, leaving with nothing in
     /// flight.
     retired: Vec<LaneId>,
@@ -251,6 +254,7 @@ impl UnitReader {
             deliveries: BTreeMap::new(),
             lanes: BTreeMap::new(),
             revoked: Vec::new(),
+            renew_error: None,
             retired: Vec::new(),
             unsent_fails: Vec::new(),
             poison_tx,
@@ -529,6 +533,9 @@ impl UnitReader {
     /// reports, refused fails, finished lanes and units), then renew every
     /// unit still held.
     fn settle(&mut self) -> Result<(), SourceError> {
+        if let Some(e) = self.renew_error.take() {
+            return Err(e);
+        }
         self.read_reports();
         self.check_re_enqueues()?;
         let failing: Vec<u32> = self
@@ -587,7 +594,23 @@ impl UnitReader {
         for delivery in finished {
             self.acknowledge(delivery)?;
         }
+        self.renew_each()
+    }
 
+    /// Renew every unit held, from a revocation's wait for its drain.
+    ///
+    /// Settles and acknowledges nothing, so no position moves before the
+    /// revocation's commit. A unit answered `Gone` is let go, and its lanes
+    /// leave on the next `poll_events`. A fatal answer is kept, and the next
+    /// `poll_events` returns it before it settles anything.
+    pub(crate) fn renew_held(&mut self) {
+        if self.renew_error.is_none() {
+            self.renew_error = self.renew_each().err();
+        }
+    }
+
+    /// Renew every unit held, letting go of each one answered `Gone`.
+    fn renew_each(&mut self) -> Result<(), SourceError> {
         let receipts: Vec<(u32, Receipt)> = self
             .deliveries
             .iter()
@@ -598,7 +621,13 @@ impl UnitReader {
                 Ok(()) => {}
                 // The feed delivered the unit again or settled it, so this
                 // reading is no longer the unit's.
-                Err(e) if e.kind == FeedErrorKind::Gone => self.release(delivery),
+                Err(e) if e.kind == FeedErrorKind::Gone => {
+                    tracing::warn!(
+                        %receipt,
+                        "a held unit's lease lapsed or the feed delivered it again; letting it go"
+                    );
+                    self.release(delivery);
+                }
                 Err(e) if e.kind == FeedErrorKind::Retryable => {
                     tracing::warn!(%receipt, error = %e, "renewing a held unit failed; retrying");
                 }
@@ -1499,6 +1528,83 @@ mod tests {
 
         reader.settle().unwrap();
         assert_eq!(script.acknowledged(), vec![at_receipt]);
+    }
+
+    /// Pins that renewing from a revocation's wait renews every held unit
+    /// and acknowledges none, though one has reached its terminal watermark,
+    /// and that the next sweep acknowledges it. Regression for #1278.
+    #[test]
+    fn renewing_during_a_drain_renews_every_held_unit_and_settles_nothing() {
+        let (mut reader, script, _rt) = reader();
+        start(&mut reader);
+        let (_, open, _) = hold_one(&mut reader, &script);
+        let (at, at_receipt, at_tracker) = hold_one(&mut reader, &script);
+        reader.commit(&[(at, 5)]).unwrap();
+        at_tracker.set_terminal(5);
+
+        reader.renew_held();
+        assert_eq!(script.renewed(), vec![open, at_receipt]);
+        assert_eq!(script.acknowledged(), vec![], "acknowledged by the hook");
+
+        reader.settle().unwrap();
+        assert_eq!(script.acknowledged(), vec![at_receipt]);
+    }
+
+    /// Pins that a unit answered `Gone` while renewing from a revocation's
+    /// wait leaves through a revocation on the next poll. Regression for
+    /// #1278.
+    #[test]
+    fn a_unit_gone_during_a_drain_is_revoked_at_the_next_poll() {
+        let (mut reader, script, _rt) = reader();
+        start(&mut reader);
+        let (p, receipt, _) = hold_one(&mut reader, &script);
+        script.redeliver(receipt);
+
+        reader.renew_held();
+        assert!(script.gone().contains(&receipt));
+        assert_eq!(lanes_revoked(poll(&mut reader)), vec![LaneId(p.0)]);
+    }
+
+    /// Pins that a fatal answer to a renewal from a revocation's wait fails
+    /// the next poll before it settles anything, and that a later renewal
+    /// does not clear it. Regression for #1278.
+    #[test]
+    fn a_renew_error_during_a_drain_fails_the_next_poll() {
+        let (mut reader, script, _rt) = reader();
+        start(&mut reader);
+        let (at, _, at_tracker) = hold_one(&mut reader, &script);
+        reader.commit(&[(at, 5)]).unwrap();
+        at_tracker.set_terminal(5);
+        script.refuse_next_renew(FeedErrorKind::Fatal);
+
+        reader.renew_held();
+        reader.renew_held();
+        let Err(SourceError::Client { reason, .. }) = reader.poll_events(Duration::ZERO) else {
+            panic!("a fatal renewal did not fail the poll");
+        };
+        assert!(reason.contains("renewing a held unit"), "{reason}");
+        assert_eq!(script.acknowledged(), vec![], "settled before failing");
+    }
+
+    /// Pins that a held unit answered `Gone` on renewal logs one warning
+    /// naming its receipt.
+    #[test]
+    fn a_unit_answered_gone_is_logged_once() {
+        let (mut reader, script, _rt) = reader();
+        start(&mut reader);
+        let (_, receipt, _) = hold_one(&mut reader, &script);
+        script.redeliver(receipt);
+
+        let logs = spate_test::capture_logs(tracing::Level::WARN, || {
+            reader.renew_held();
+            poll(&mut reader);
+            poll(&mut reader);
+        });
+        let named: Vec<_> = logs
+            .iter()
+            .filter(|l| l.contains(&receipt.to_string()))
+            .collect();
+        assert_eq!(named.len(), 1, "{logs:?}");
     }
 
     /// A unit whose body is a descriptor naming one object, `object-{i}`.

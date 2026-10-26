@@ -443,6 +443,38 @@ fn a_whole_unit_over_a_large_object_is_read_in_ranges() {
     );
 }
 
+/// Pins that `Source::renew_held` on a source reading a feed renews the
+/// unit it holds. Regression for #1278.
+#[test]
+fn renew_held_renews_the_unit_the_source_holds() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    stage(&data, "a.ndjson", &[r#"{"k":1}"#.to_owned()]);
+    let config =
+        PipelineConfig::from_str(&PipelineYaml::file("s3-feed-renew-held", &data).build()).unwrap();
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    let (feed, script) = scripted_feed();
+    let receipt = script.deliver(unit_over(&data, "a.ndjson"));
+    let mut source =
+        line_framer(S3Source::from_component_config(&config.source, rt.handle().clone()).unwrap())
+            .with_feed(Arc::new(feed));
+    source
+        .open(SourceCtx::new(Checkpointer::new().handle()))
+        .unwrap();
+    wait_until(DEADLINE, "the unit is held", || {
+        source.poll_events(Duration::ZERO).unwrap();
+        script.held() == vec![receipt]
+    });
+
+    let before = renewals_of(&script, receipt);
+    source.renew_held();
+    assert_eq!(renewals_of(&script, receipt), before + 1);
+}
+
 /// A framer that declares no resync delimiter.
 #[derive(Default)]
 struct NoResync(support::LineFramer);

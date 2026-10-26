@@ -784,6 +784,13 @@ impl Source for S3Source {
         Ok(())
     }
 
+    fn renew_held(&mut self) {
+        match &mut self.state {
+            State::Feed(reader) => reader.renew_held(),
+            State::Created => {}
+        }
+    }
+
     fn reading_on_stop(&mut self) -> bool {
         match &mut self.state {
             State::Feed(reader) => reader.reading_on_stop(),

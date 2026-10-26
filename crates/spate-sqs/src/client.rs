@@ -167,14 +167,17 @@ pub(crate) fn trust_roots(loaded: CertificateResult) -> (String, Option<String>)
     let found = loaded.certs.len();
     let mut check = rustls::RootCertStore::empty();
     let mut bundle = String::new();
+    let mut parsed = 0;
     for cert in loaded.certs {
         if check.add(cert.clone()).is_ok() {
             push_pem(&mut bundle, &cert);
+            parsed += 1;
         }
     }
-    if !bundle.is_empty() {
-        if !errors.is_empty() {
-            tracing::debug!(%errors, "errors reading the system trust store");
+    if parsed > 0 {
+        let refused = found - parsed;
+        if refused > 0 || !errors.is_empty() {
+            tracing::debug!(refused, %errors, "part of the system trust store did not load");
         }
         return (bundle, None);
     }
@@ -249,6 +252,93 @@ mod tests {
         let (bundle, warning) = trust_roots(native_certs(vec![ca.der()]));
         assert_eq!(warning, None);
         assert_eq!(bundle, pem("CERTIFICATE", &ca.der()));
+    }
+
+    /// A read error as `rustls-native-certs` reports one for an unreadable
+    /// bundle file.
+    fn read_error(path: &str) -> rustls_native_certs::Error {
+        rustls_native_certs::Error {
+            context: "failed to read PEM from file",
+            kind: rustls_native_certs::ErrorKind::Io {
+                inner: std::io::Error::other("permission denied"),
+                path: path.into(),
+            },
+        }
+    }
+
+    /// Pins the debug line beside a parsable store: none when the store
+    /// loaded whole, and one counting refused certificates and carrying the
+    /// read errors otherwise.
+    #[test]
+    fn a_partly_loaded_store_logs_at_debug() {
+        let ca = TestCa::new("private");
+        let unparsable = || CertificateDer::from(vec![0u8; 8]);
+        let lines = spate_test::capture_logs(tracing::Level::DEBUG, || {
+            trust_roots(native_certs(vec![ca.der()]));
+        });
+        assert_eq!(lines, Vec::<String>::new());
+
+        let lines = spate_test::capture_logs(tracing::Level::DEBUG, || {
+            trust_roots(native_certs(vec![ca.der(), unparsable()]));
+        });
+        assert_eq!(
+            lines,
+            [
+                "DEBUG spate_sqs::client: part of the system trust store did not load refused=1 \
+              errors="
+            ]
+        );
+
+        let mut loaded = native_certs(vec![ca.der()]);
+        loaded.errors.push(read_error("/etc/ssl/a.pem"));
+        let lines = spate_test::capture_logs(tracing::Level::DEBUG, || {
+            trust_roots(loaded);
+        });
+        assert_eq!(
+            lines,
+            [
+                "DEBUG spate_sqs::client: part of the system trust store did not load refused=0 \
+              errors=failed to read PEM from file: permission denied at '/etc/ssl/a.pem'"
+            ]
+        );
+    }
+
+    /// Pins that the fallback warning carries every read error the store
+    /// lookup reported, joined by `; `.
+    #[test]
+    fn the_fallback_warning_carries_the_read_errors() {
+        let mut loaded = native_certs(vec![CertificateDer::from(vec![0u8; 8])]);
+        loaded.errors.push(read_error("/etc/ssl/a.pem"));
+        loaded.errors.push(read_error("/etc/ssl/b.pem"));
+        let (_, warning) = trust_roots(loaded);
+        assert_eq!(
+            warning.as_deref(),
+            Some(
+                "none of the 1 certificates in the system trust store parsed; verifying SQS \
+                 against the Mozilla root bundle (errors reading the store: failed to read PEM \
+                 from file: permission denied at '/etc/ssl/a.pem'; failed to read PEM from \
+                 file: permission denied at '/etc/ssl/b.pem')"
+            )
+        );
+    }
+
+    /// Pins that building the client logs the fallback warning at warn.
+    #[test]
+    fn the_fallback_warning_is_logged() {
+        let lines = spate_test::capture_logs(tracing::Level::WARN, || {
+            tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap()
+                .block_on(http_client(CertificateResult::default))
+                .unwrap();
+        });
+        assert_eq!(
+            lines,
+            [
+                " WARN spate_sqs::client: the system trust store has no certificates; \
+              verifying SQS against the Mozilla root bundle"
+            ]
+        );
     }
 
     /// Pins the missing-region error: its context, and a message naming the

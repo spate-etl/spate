@@ -57,9 +57,10 @@ through the queue's `maxReceiveCount`.
 
 In another AWS partition, the feed reads the region from the queue URL's host
 when the SDK's partition table lists that partition. A VPC endpoint host, a
-legacy queue host or a region the SDK does not list gives no region, so set
-`region`. Calls go to the region's endpoint in the SDK's partition table. For a
-private endpoint, or a region the SDK does not list, set `endpoint` as well. A
+legacy queue host or a host in a partition the SDK does not list gives no
+region, so set `region`. Calls go to the region's endpoint in the SDK's
+partition table. For a private endpoint, or a partition the SDK does not list,
+set `endpoint` as well. A
 FIPS or dual-stack host gives only the region: `AWS_USE_FIPS_ENDPOINT` and
 `AWS_USE_DUALSTACK_ENDPOINT` choose those endpoints. With `endpoint` set, leave
 both unset and give the FIPS or dual-stack host as the endpoint.
@@ -90,8 +91,9 @@ and the two KMS actions above on a queue a customer-managed key encrypts.
 The client verifies SQS against the system trust store. When `SSL_CERT_FILE`
 or `SSL_CERT_DIR` is set, the certificates they name replace the system store.
 A private CA is trusted once it is in the system trust store. A bundle that
-`SSL_CERT_FILE` names replaces that store for every TLS connection in the
-process, so it holds the private CA and every public root the process needs.
+`SSL_CERT_FILE` names replaces that store for the feed's SQS, region and
+credential calls, so it holds the private CA and every public root those calls
+need.
 If the store yields no certificate the client can parse, it logs a warning and
 uses the Mozilla root bundle compiled into the binary. It goes through the
 proxy that `HTTPS_PROXY`, `HTTP_PROXY` or `ALL_PROXY` names, except for the

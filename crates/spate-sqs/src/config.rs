@@ -245,6 +245,17 @@ pub(crate) mod tests {
         }
     }
 
+    /// Pins that a region the SDK's partition table does not list is read
+    /// when its partition's region pattern matches and the SDK builds that
+    /// host for it.
+    #[tokio::test]
+    async fn an_unlisted_region_in_a_listed_partition_is_read() {
+        assert_eq!(
+            region_of("sqs.eu-west-9.amazonaws.com").await.as_deref(),
+            Some("eu-west-9")
+        );
+    }
+
     /// Pins that a host whose region label belongs to another partition than
     /// its suffix gives no region, so calls never go to a host the queue URL
     /// does not name.

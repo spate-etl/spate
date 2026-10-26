@@ -169,10 +169,10 @@ impl Source for FakeSource {
         let next = self.script.lock().unwrap().pop_front();
         {
             let mut log = self.shared.lock().unwrap();
-            log.poll_timeouts.push(timeout);
             if matches!(next, Some(Script::CommitReady(_))) {
-                log.hinted_at = Some(log.poll_timeouts.len() - 1);
+                log.hinted_at = Some(log.poll_timeouts.len());
             }
+            log.poll_timeouts.push(timeout);
         }
         match next {
             Some(Script::Assign(specs)) => {

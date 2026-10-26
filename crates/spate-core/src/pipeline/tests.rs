@@ -1488,6 +1488,59 @@ fn a_hinted_partition_acked_after_its_window_commits_before_the_tick() {
     h.join.join().unwrap().unwrap();
 }
 
+/// A hinted partition inside its window is polled at the tightened cadence
+/// while its acks are outstanding.
+#[test]
+fn a_hinted_partition_in_its_window_is_polled_at_the_tightened_cadence() {
+    let held: Arc<Mutex<Vec<crate::checkpoint::AckRef>>> = Arc::new(Mutex::new(Vec::new()));
+    let release = Arc::new(AtomicBool::new(false));
+    let held_c = Arc::clone(&held);
+    let release_c = Arc::clone(&release);
+    let mut cfg = test_config(1);
+    cfg.checkpoint.interval = Duration::from_secs(60);
+    let h = start_with_config(cfg, move |shared, log| FakeChain {
+        shared,
+        log,
+        mode: ChainMode::HoldAcks {
+            held: Arc::clone(&held_c),
+            release: Arc::clone(&release_c),
+        },
+        batches_seen: 0,
+    });
+    assign_one_lane(&h, std::slice::from_ref(&(0..10)));
+    wait_for("all payloads consumed", Duration::from_secs(5), || {
+        h.chain.consumed.load(Ordering::Relaxed) == 10
+    });
+    h.script
+        .lock()
+        .unwrap()
+        .push_back(Script::CommitReady(vec![PartitionId(0)]));
+    wait_for("a poll after the hint", Duration::from_secs(5), || {
+        let log = h.shared.lock().unwrap();
+        log.hinted_at
+            .is_some_and(|at| log.poll_timeouts.len() > at + 1)
+    });
+    {
+        let log = h.shared.lock().unwrap();
+        let at = log.hinted_at.unwrap();
+        assert_eq!(
+            log.poll_timeouts[at + 1],
+            super::controller::FAST_COMMIT_POLL,
+            "{:?}",
+            &log.poll_timeouts[at..]
+        );
+    }
+    release.store(true, Ordering::Relaxed);
+    held.lock().unwrap().clear();
+    wait_for(
+        "the hinted partition committed",
+        Duration::from_secs(5),
+        || h.shared.lock().unwrap().committed.get(&PartitionId(0)) == Some(&10),
+    );
+    h.shutdown.trigger();
+    h.join.join().unwrap().unwrap();
+}
+
 /// A hinted partition past its window leaves the tightened poll cadence while
 /// its acks are still outstanding.
 #[test]

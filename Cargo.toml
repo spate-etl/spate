@@ -122,11 +122,11 @@ url = "2.5.4"
 futures-util = { version = "0.3.31", default-features = false }
 base64 = "0.23.1"
 flate2 = "1.1"
-# clickhouse requires ^0.13, so 0.14 adds a second copy of the crate. Tracked
-# in #562.
-# spate-clickhouse's frame codec needs a `Sync` `CCtx`. This floor is the first
-# release that guarantees one.
-zstd = "0.13.1"
+# clickhouse requires ^0.13, so its copy stays in the graph beside this one.
+# Tracked in #562. The floor is the first release whose streaming decoder
+# commits no output from a failed call. Default features are off for
+# spate-clickhouse's compressor, and spate-s3 names the ones its decoder takes.
+zstd = { version = "0.14.3", default-features = false }
 # spate-avro's schema registry client; internal only (INV-6).
 reqwest = { version = "0.13.4", default-features = false }
 

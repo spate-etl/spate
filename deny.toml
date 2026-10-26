@@ -5,6 +5,15 @@ all-features = true
 version = 2
 # Evaluated by the advisories check, so a yank follows its blocking rule.
 yanked = "deny"
+# zstd 0.13.3 and zstd-safe 7.2.4 stay in the graph only because clickhouse
+# requires zstd ^0.13 (#562); every spate crate takes 0.14. Each ignore names
+# an id, so a new advisory against either copy still fails the check, and an
+# ignore that stops matching when #562 lands is reported as unused.
+ignore = [
+    { id = "RUSTSEC-2026-0391", reason = "clickhouse's zstd 0.13.3 calls no `with_context` constructor" },
+    { id = "RUSTSEC-2026-0398", reason = "the `seekable` feature is off" },
+    { id = "RUSTSEC-2026-0403", reason = "clickhouse's response decoder writes into an initialized slice and returns the error" },
+]
 
 [licenses]
 version = 2

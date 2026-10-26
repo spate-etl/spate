@@ -1,0 +1,3 @@
+**zstd objects decode with a patched decoder** (`spate-s3`, `spate-clickhouse`)
+
+The S3 source decodes `.zst` objects with `zstd` 0.14.3 and `zstd-safe` 8.2.0. In previous versions it used `zstd` 0.13.3 and `zstd-safe` 7.2.4, whose streaming decoder could carry up to 32 KiB of uninitialized heap memory into its output when decoding failed inside a legacy (zstd v0.4 to v0.7) frame (RUSTSEC-2026-0403). Whoever can write an object under the source's prefix can supply such a frame. An object holding one fails its unit as undecodable either way. The ClickHouse sink's compressor moves to the same release and is not affected by the advisory.

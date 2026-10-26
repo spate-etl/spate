@@ -24,17 +24,6 @@ updates:
       semver-major-days: 14
 
     ignore:
-      # clickhouse requires zstd ^0.13 and spate-clickhouse enables its `zstd`
-      # feature, so zstd 0.14 adds a second copy of the crate and a second
-      # zstd-safe, leaving 0.13.3 in the graph. Nothing on spate-s3's
-      # decompression path changed at 0.14, so the bump buys two duplicates and
-      # two THIRD-PARTY.md rows.
-      #
-      # Delete this when clickhouse moves to ^0.14. Tracked in #562.
-      - dependency-name: "zstd"
-        update-types:
-          - "version-update:semver-minor"
-          - "version-update:semver-major"
       # spate-s3 decodes listing pages with the quick-xml decoder object_store
       # runs, so the two must resolve to one copy. object_store requires
       # quick-xml ^0.41, and a quick-xml bump on its own leaves spate-s3 on a

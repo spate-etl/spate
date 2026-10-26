@@ -13,7 +13,7 @@ depends on the source:
 |---|---|
 | Brokered | Native: the source's own group protocol divides the work across replicas. Nothing extra to deploy. |
 | Feed-reading | Workers read [work units](../07-reference/glossary.mdx#work-unit) from a durable [feed](../04-connectors/feeds/README.mdx) that one [lister](../07-reference/glossary.mdx#lister) run per job fills. Nothing elects a leader. See [Reading from a feed](#reading-from-a-feed). |
-| Custom | A source reads [work units](../07-reference/glossary.mdx#work-unit) from a feed, as the S3 source does. See [custom sources](../06-extending/custom-source.mdx#feed-reading-sources). |
+| Custom | A source reads [work units](../07-reference/glossary.mdx#work-unit) from a feed. See [custom sources](../06-extending/custom-source.mdx#feed-reading-sources). |
 
 :::note Connector specifics
 Which kind each shipped source is, and how to wire it:
@@ -76,8 +76,12 @@ run and its end marker.
 ## Observability
 
 Which worker holds how much of the job shows in `spate_source_lanes_active`
-and `spate_source_rebalances_total` (see [Metrics](../../METRICS.md)). The S3
-source adds `spate_s3_source_objects_remaining` and
-`spate_s3_source_objects_failed_total`. A bounded job that ends with dead
-letters reports it as a stalled end. The depth of the feed's dead-letter
-destination is read from the backend that holds it.
+and `spate_source_rebalances_total` (see [Metrics](../../METRICS.md)). A
+bounded job that ends with dead letters reports it as a stalled end. The depth
+of the feed's dead-letter destination is read from the backend that holds it.
+
+:::note Connector specifics
+Each source's own families:
+[Kafka source](../04-connectors/sources/kafka/README.mdx#metrics) ·
+[S3 source](../04-connectors/sources/s3/README.mdx#metrics).
+:::

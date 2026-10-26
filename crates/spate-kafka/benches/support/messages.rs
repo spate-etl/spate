@@ -1,5 +1,5 @@
 //! Record corpora and the header-stamping encoder for the message-encode
-//! bench.
+//! benches.
 //!
 //! An instruction count only compares across two legs that encoded
 //! byte-identical input, so nothing here may vary between runs: payload bytes
@@ -22,12 +22,12 @@
 //! claim is checked wherever `cargo test` runs rather than only under
 //! valgrind.
 
-// The bench and the fixture test each compile this module separately and use a
-// different subset of it: the declared header total and the typed key
-// extractor are there for the test to check, and no case measures them. An
-// item is therefore dead in one target while live in the other, which needs a
-// module-wide `allow` rather than a per-item `expect`: an `expect` would
-// itself go unfulfilled in whichever target does use the item.
+// Each includer compiles this module separately and uses a different subset of
+// it: the declared header total and the typed key extractor are there for the
+// test to check, and no case measures them. An item is therefore dead in one
+// target while live in another, which needs a module-wide `allow` rather than
+// a per-item `expect`: an `expect` would itself go unfulfilled in whichever
+// target does use the item.
 #![allow(dead_code, reason = "each target uses a different subset")]
 
 use serde::Serialize;

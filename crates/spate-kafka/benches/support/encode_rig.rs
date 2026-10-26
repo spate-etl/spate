@@ -67,8 +67,8 @@ where
 /// never resolves one, so the only traffic is the single message the last handle
 /// sends as it drops, and leaking the receiver keeps the channel connected so
 /// that send is delivered rather than discarded. Either way it costs the
-/// measurement nothing: the rig is returned rather than dropped, so the drop
-/// happens at teardown, outside the collected region.
+/// measurement nothing: the rig outlives the measured closure, so the drop
+/// happens at teardown, outside the counted region.
 fn records<T>(payloads: Vec<T>) -> Vec<Record<T>> {
     let (ack, rx) = AckRef::test_pair();
     std::mem::forget(rx);

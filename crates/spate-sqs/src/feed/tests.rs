@@ -939,6 +939,36 @@ async fn a_running_extension_is_bounded_by_the_period_and_the_time_left() {
     );
 }
 
+/// Pins that a unit whose deadline passes while an earlier chunk's call is in
+/// flight is left out of its own chunk, so it does not cut the bound of the
+/// units sent with it. Regression for #1446.
+#[tokio::test(start_paused = true)]
+async fn a_unit_lapsed_behind_a_slow_chunk_does_not_bound_its_own() {
+    let (feed, queue) = start(Duration::from_secs(30));
+    let (waker, park) = wake_channel();
+    feed.set_waker(waker);
+    for i in 0..12 {
+        queue.ready(Message::new(&format!("u{i}")));
+    }
+    let got = receive_n(&feed, &park, 12).await;
+    // At the tick near 10 s, SQS refuses the extension of `h10` only, so its
+    // deadline stays at 30 s and the others' moves to 40 s.
+    queue.fail_next_visibility(Vec::new());
+    queue.fail_next_visibility(vec![failure(0, "InvalidParameterValue")]);
+    step(Duration::from_secs(15)).await;
+    for d in &got {
+        feed.renew(d.receipt).unwrap();
+    }
+    // The first chunk's call at 20 s is given up at 30 s, `h10`'s deadline,
+    // and sent once more at once.
+    queue.delay_next_visibility_call(MINUTE);
+    step(Duration::from_millis(15_100)).await;
+    let calls = queue.visibility();
+    assert_eq!(calls.len(), 5, "{:?}", queue.visibility_within());
+    assert_eq!(extended_handles(&calls[4..]), ["h11"]);
+    assert_eq!(queue.visibility_within()[4], Some(Duration::from_secs(5)));
+}
+
 /// Buffer one unit about 19.5 s into a feed at a one-minute visibility, and
 /// hand it out at about 59.5 s, one renewal period from its deadline and
 /// just before the tick near 60 s.

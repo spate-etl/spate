@@ -1210,7 +1210,8 @@ async fn renewal_task(shared: Arc<Shared>) {
             let mut once_more = true;
             loop {
                 // Re-read: a unit handed back, settled or past its deadline
-                // while an earlier call was in flight is extended no more. A
+                // while an earlier call was in flight is extended no more,
+                // and does not cut the bound of the units sent with it. A
                 // call takes at most half the time left to the batch's
                 // earliest deadline, so one given up leaves the other half for
                 // the call sent once more, and at most a period, so a buffered
@@ -1222,9 +1223,7 @@ async fn renewal_task(shared: Arc<Shared>) {
                     let chunk: Vec<&(u64, String, Duration)> = chunk
                         .iter()
                         .filter(|(receipt, _, _)| {
-                            st.held
-                                .get(receipt)
-                                .is_some_and(|h| !h.gone && now < h.deadline)
+                            st.held.get(receipt).is_some_and(|h| now < h.deadline)
                         })
                         .collect();
                     let earliest = chunk

@@ -12,12 +12,18 @@
 //! choreography:
 //!
 //! **Assignment** (all inside one `poll_events` call):
-//! 1. read the committed offsets and give every partition a concrete start
-//!    offset, applying `auto.offset.reset` where none is committed;
+//! 1. read the committed offsets and give each partition a concrete start
+//!    offset, applying the reset policy (`auto.offset.reset`) where none is
+//!    committed. The start offset is left for librdkafka to resolve for a
+//!    partition whose committed offset could not be read (the lookup failed
+//!    or timed out, or returned an error for that partition) and for one
+//!    with no committed offset under the reset policy `error`;
 //! 2. `assign(tpl)` — accept the partitions. With concrete offsets the
-//!    fetchers start before `assign` returns. A fetcher librdkafka starts
-//!    later can lose its start to a concurrent `pause`/`resume`, which
-//!    leaves the partition unfetched until the next rebalance
+//!    fetchers start before `assign` returns. The fetcher of a partition
+//!    left for librdkafka does not start before `assign` returns, and a
+//!    fetcher librdkafka starts later can lose its start to a concurrent
+//!    `pause`/`resume`, which leaves the partition unfetched until the next
+//!    rebalance
 //!    ([librdkafka#5591](https://github.com/confluentinc/librdkafka/issues/5591));
 //! 3. `pause(tpl)` — a fetch that completed before it is discarded as
 //!    outdated and refetched, so no message leaks onto the main queue;

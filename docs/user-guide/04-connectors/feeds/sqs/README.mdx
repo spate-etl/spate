@@ -160,9 +160,10 @@ still holds a unit it renews.
 Each extension, the SDK's retries included, is given up after one renewal
 period, or half the time left to the earliest deadline among the units in its
 batch if that is shorter, and never after more than 30 seconds; a request
-already sent by then can still reach SQS just after. A batch given up with one
-renewal period or less to that deadline is sent once more at once, so a unit
-the worker renews outlives one extension call that SQS does not answer.
+already sent by then can still reach SQS just after. From a stop until the
+feed closes, each is given up after one second. A batch given up with one
+renewal period or less to its earliest deadline is sent once more at once, so
+a unit the worker renews outlives one extension call that SQS does not answer.
 
 The long-poll wait is `visibility / 3` seconds, rounded down and at most 20.
 A unit that arrives at the end of a poll therefore still has two renewal

@@ -6,10 +6,7 @@ on:
   push:
     branches: [main]
   # `edited` re-runs the title and changelog gates: they read the pull request
-  # title and body, and a retitle after a green run would land unchecked. The opt-in `ci: docker`
-  # and `ci: bench` labels take effect on the branch's next push. `ci.yml`
-  # classifies each run from the event that triggered it, so a manual re-run of
-  # an already-started run carries the labels that run started with.
+  # title and body, and a retitle after a green run would land unchecked.
   pull_request:
     types: [opened, synchronize, reopened, edited]
   merge_group:
@@ -67,7 +64,6 @@ jobs:
           # The pull request's author, not `github.actor`: the latter is whoever
           # last triggered the run and changes on a manual re-run.
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
-          PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
           # For the `manifests` and `advisories` outputs on push, where no
           # pull-request diff exists. Empty or unresolvable fails both closed.
           EVENT_BEFORE: ${{ github.event.before }}

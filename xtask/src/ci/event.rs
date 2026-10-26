@@ -31,12 +31,12 @@ fn env(name: &str) -> String {
 pub(crate) fn from_environment() -> (Event, Context) {
     // `github.actor` changes on a re-run, so the author comes from the pull
     // request itself.
-    from_values(&env("EVENT_NAME"), &env("PR_AUTHOR"), &env("PR_LABELS"))
+    from_values(&env("EVENT_NAME"), &env("PR_AUTHOR"))
 }
 
 /// The event shape and the context one set of runner values names. An unset
 /// variable arrives as an empty string.
-fn from_values(event_name: &str, author: &str, labels: &str) -> (Event, Context) {
+fn from_values(event_name: &str, author: &str) -> (Event, Context) {
     let event = match event_name {
         "pull_request" => Event::PullRequest,
         "merge_group" => Event::MergeGroup,
@@ -46,11 +46,6 @@ fn from_values(event_name: &str, author: &str, labels: &str) -> (Event, Context)
     };
     let ctx = Context {
         author: author.to_string(),
-        labels: labels
-            .split(',')
-            .map(|l| l.trim().to_string())
-            .filter(|l| !l.is_empty())
-            .collect(),
     };
     (event, ctx)
 }
@@ -209,8 +204,8 @@ mod tests {
     /// The two events carrying a diff are the two that select one.
     #[test]
     fn the_two_events_with_a_diff_select_themselves() {
-        assert_eq!(from_values("pull_request", "", "").0, Event::PullRequest);
-        assert_eq!(from_values("merge_group", "", "").0, Event::MergeGroup);
+        assert_eq!(from_values("pull_request", "").0, Event::PullRequest);
+        assert_eq!(from_values("merge_group", "").0, Event::MergeGroup);
     }
 
     /// Every other event name runs everything, an unset `EVENT_NAME` and a
@@ -219,7 +214,7 @@ mod tests {
     fn every_other_event_name_runs_everything() {
         for name in ["push", "schedule", "workflow_dispatch", "", "pull-request"] {
             assert_eq!(
-                from_values(name, "", "").0,
+                from_values(name, "").0,
                 Event::ForceAll,
                 "EVENT_NAME='{name}'"
             );
@@ -230,23 +225,10 @@ mod tests {
     #[test]
     fn the_author_reaches_the_context() {
         assert_eq!(
-            from_values("pull_request", "dependabot[bot]", "").1.author,
+            from_values("pull_request", "dependabot[bot]").1.author,
             "dependabot[bot]"
         );
-        assert_eq!(from_values("push", "", "").1.author, "");
-    }
-
-    /// `PR_LABELS` is one comma-separated line, and a label carries spaces.
-    #[test]
-    fn the_labels_split_on_commas_and_drop_the_empty_entries() {
-        let labels = |text| from_values("pull_request", "", text).1.labels;
-        assert_eq!(labels("ci: docker,ci: bench"), ["ci: docker", "ci: bench"]);
-        assert_eq!(
-            labels(" ci: docker , ci: bench "),
-            ["ci: docker", "ci: bench"]
-        );
-        assert_eq!(labels(",, ,ci: bench,"), ["ci: bench"]);
-        assert!(labels("").is_empty());
+        assert_eq!(from_values("push", "").1.author, "");
     }
 
     fn git(dir: &Path, args: &[&str]) {

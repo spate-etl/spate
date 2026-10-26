@@ -22,7 +22,6 @@ pub(crate) enum Event {
 #[derive(Debug, Default)]
 pub(crate) struct Context {
     pub(crate) author: String,
-    pub(crate) labels: Vec<String>,
 }
 
 /// `default` labels the unmodified build. It is not a cargo feature name:
@@ -411,7 +410,6 @@ pub(crate) fn classify(
     }
 
     apply_deferrals(&mut out, event, ctx, &image_suites);
-    apply_labels(&mut out, &mut bench_pkgs, ctx, graph);
 
     out.bench_shards = bench_pkgs
         .iter()
@@ -473,29 +471,6 @@ fn apply_deferrals(
             out.semver_pkgs.clear();
         }
         _ => {}
-    }
-}
-
-/// `ci: docker` and `ci: bench` force a suite on for a change whose paths would
-/// not have selected it. They can only add: an override able to clear a
-/// selection would make the classifier fail open.
-///
-/// Applied after the deferrals, so labelling a bot's pull request overrides one
-/// for that one bump.
-fn apply_labels(
-    out: &mut Outputs,
-    bench_pkgs: &mut BTreeSet<String>,
-    ctx: &Context,
-    graph: &Graph,
-) {
-    let has = |name: &str| ctx.labels.iter().any(|l| l == name);
-    if has("ci: docker") {
-        out.container_pkgs
-            .extend(graph.all_container_pkgs().iter().cloned());
-    }
-    if has("ci: bench") {
-        out.bench = true;
-        bench_pkgs.extend(graph.all_bench_pkgs().iter().cloned());
     }
 }
 
@@ -784,26 +759,23 @@ mod tests {
         );
     }
 
+    /// A dependency or cargo configuration change selects every container
+    /// suite, which is the route a dependency swap takes.
     #[test]
-    fn labels_only_add() {
-        let ctx = Context {
-            author: String::new(),
-            labels: vec!["ci: docker".into()],
-        };
-        let paths = vec!["docs/a.md".to_string()];
-        let out = classify(&paths, Event::PullRequest, &ctx, &graph(), &[]);
-        assert_eq!(out.container_pkgs, *graph().all_container_pkgs());
-        assert!(
-            !out.rust,
-            "an override cannot clear the path-derived baseline"
-        );
+    fn a_dependency_change_selects_every_suite() {
+        for path in ["Cargo.lock", "Cargo.toml", ".cargo/config.toml"] {
+            assert_eq!(
+                run(&[path]).container_pkgs,
+                *graph().all_container_pkgs(),
+                "{path}"
+            );
+        }
     }
 
     #[test]
     fn dependabot_defers_the_suites_but_not_an_image_bump() {
         let ctx = Context {
             author: "dependabot[bot]".into(),
-            labels: vec![],
         };
         let lock = vec!["Cargo.lock".to_string()];
         assert!(
@@ -828,7 +800,6 @@ mod tests {
 
         let ctx = Context {
             author: "dependabot[bot]".into(),
-            labels: vec![],
         };
         let image = vec!["ci/debian/trixie/Dockerfile".to_string()];
         let out = classify(&image, Event::PullRequest, &ctx, &graph(), &[]);
@@ -846,7 +817,6 @@ mod tests {
 
         let ctx = Context {
             author: "dependabot[bot]".into(),
-            labels: vec![],
         };
         let image = vec!["ci/rust/stable/Dockerfile".to_string()];
         let out = classify(&image, Event::PullRequest, &ctx, &graph(), &[]);
@@ -871,7 +841,6 @@ mod tests {
 
         let ctx = Context {
             author: "dependabot[bot]".into(),
-            labels: vec![],
         };
         let image = vec!["ci/kafka/stable/Dockerfile".to_string()];
         let out = classify(&image, Event::PullRequest, &ctx, &graph(), &[]);
@@ -885,7 +854,6 @@ mod tests {
     fn a_test_store_image_bump_selects_the_suites_that_boot_it() {
         let ctx = Context {
             author: "dependabot[bot]".into(),
-            labels: vec![],
         };
         for (image, expected) in [
             (
@@ -908,7 +876,6 @@ mod tests {
     fn the_release_pull_request_defers_the_semver_gate_too() {
         let ctx = Context {
             author: "spate-release[bot]".into(),
-            labels: vec![],
         };
         let paths = vec!["Cargo.lock".to_string()];
         let out = classify(&paths, Event::PullRequest, &ctx, &graph(), &[]);
@@ -920,7 +887,6 @@ mod tests {
     fn a_deferral_applies_to_pull_requests_alone() {
         let ctx = Context {
             author: "dependabot[bot]".into(),
-            labels: vec![],
         };
         let paths = vec!["Cargo.lock".to_string()];
         let out = classify(&paths, Event::MergeGroup, &ctx, &graph(), &[]);
@@ -1005,7 +971,6 @@ mod tests {
     fn a_bot_lock_bump_runs_the_macos_lane() {
         let ctx = Context {
             author: "dependabot[bot]".into(),
-            labels: vec![],
         };
         let paths = vec!["Cargo.lock".to_string()];
         let out = classify(&paths, Event::PullRequest, &ctx, &graph(), &[]);
@@ -1093,7 +1058,6 @@ mod tests {
     fn a_dependabot_tool_bump_keeps_the_release_rehearsal() {
         let ctx = Context {
             author: "dependabot[bot]".into(),
-            labels: vec![],
         };
         let paths = vec![".github/actions/setup-rust/action.yml".to_string()];
         let out = classify(&paths, Event::PullRequest, &ctx, &graph(), &[]);

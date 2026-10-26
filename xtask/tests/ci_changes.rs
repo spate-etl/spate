@@ -9,7 +9,7 @@ use std::process::{Command, Output};
 
 /// The variables the classifier and its `git` invocations read, cleared so
 /// nothing on the host reaches the child.
-const READS: [&str; 10] = [
+const READS: [&str; 9] = [
     "EVENT_NAME",
     "BASE_SHA",
     "HEAD_SHA",
@@ -17,7 +17,6 @@ const READS: [&str; 10] = [
     "MERGE_HEAD_SHA",
     "EVENT_BEFORE",
     "PR_AUTHOR",
-    "PR_LABELS",
     "GITHUB_OUTPUT",
     "GITHUB_ACTIONS",
 ];
@@ -209,6 +208,21 @@ fn a_path_list_classifies_as_a_pull_request_under_any_event() {
     held(
         &["ci-changes", "--classify-paths", &list],
         &[("EVENT_NAME", "push")],
+        0,
+        SITE_ONLY,
+        "",
+    );
+}
+
+/// A pull request's labels select nothing: a documentation page selects the
+/// site alone whatever `PR_LABELS` carries.
+#[test]
+fn a_label_in_the_environment_selects_nothing() {
+    let dir = Dir::new("a_label_in_the_environment_selects_nothing");
+    let list = dir.write("paths", b"docs/a.md\0");
+    held(
+        &["ci-changes", "--classify-paths", &list],
+        &[("PR_LABELS", "ci: docker,ci: bench")],
         0,
         SITE_ONLY,
         "",

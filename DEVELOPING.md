@@ -139,7 +139,7 @@ it, so a mutant only they would catch reports as missed. Its summary, printed
 at the end of a local run and written to the job summary in CI, names the
 mutant forms the tool does not generate, which stay a review step.
 
-### What CI selects, and how to widen it
+### What CI selects
 
 CI picks the container suites from the paths a pull request changed. Which
 counted benches run is derived the same way, from the benches themselves: a crate
@@ -147,21 +147,13 @@ with a bench selects its own, `spate-core` selects every benched crate because
 everything depends on it, and a crate without one selects nothing. The semver
 gate follows a third closure over the same paths, this one over the non-dev
 dependency edges: a connector change checks that connector and the facade, and
-a `spate-core` change checks every published crate.
+a `spate-core` change checks every published crate. `cargo xtask tidy self-test`
+checks each classifier against the crate graph.
 
 The macOS lane runs the workspace suite on each merge-queue entry that changes
 Rust and on each push to `main`. On a pull request it runs when the diff touches
 a workspace manifest, `Cargo.lock`, a `build.rs`, the cargo or nextest
 configuration, or the workflow, action or classifier that runs it.
-
-For a change whose reach those paths do not show, such as a refactor moving code
-between crates or a dependency swap, a maintainer can label the pull request
-`ci: docker` or `ci: bench`. The label takes effect on the branch's next push:
-`ci.yml` classifies each run from the event that triggered it, so a re-run of an
-already-started run carries the labels that run started with. They only ever add
-work; none can switch a suite off, and none reaches the semver gate, which
-follows the crate graph alone. `cargo xtask tidy self-test` checks each
-classifier against that graph.
 
 ## Testing conventions
 

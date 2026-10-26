@@ -10,7 +10,6 @@
 #   crate:     which crate, by package name.
 #   area:      the non-crate surfaces.
 #   platform:  where it happens, when that is the point.
-#   ci:        opt a pull request into a suite its paths would not select.
 #   needs:     what is blocking the issue, not what it is about.
 #   priority:  how soon an issue with no milestone is taken.
 #
@@ -144,21 +143,6 @@
 - name: "platform: kubernetes"
   color: "006b75"
   description: "Specific to running under Kubernetes"
-
-# --------------------------------------------------------------------- ci ----
-#
-# Triggers, not descriptions. `cargo xtask ci-changes` selects the expensive
-# suites from the changed paths and fails closed; these labels turn a suite
-# **on** for a pull request whose paths would not have selected it. Each adds
-# work; none switches a suite off.
-
-- name: "ci: docker"
-  color: "fbca04"
-  description: "Force the container suites to run on this pull request"
-
-- name: "ci: bench"
-  color: "fbca04"
-  description: "Force the instruction-count benches to run on this pull request"
 
 # ------------------------------------------------------------------ needs ----
 #

@@ -472,3 +472,69 @@ fn the_stamp_perf_yml_writes_names_every_key_the_report_reads() {
         .collect();
     assert_eq!(keys, ["package", "features", "baseline", "rustc", "arch"]);
 }
+
+/// The stamp step writes the matrix leg's own architecture, arm and package
+/// into `spate_shard`.
+#[test]
+fn the_stamp_step_writes_the_legs_architecture() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    let text = std::fs::read_to_string(root.join(".github/workflows/perf.yml")).unwrap();
+    let wf: serde_yaml::Value = serde_yaml::from_str(&text).unwrap();
+    let step = wf["jobs"]["perf-counters"]["steps"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .find(|s| s["name"].as_str() == Some("Stamp this shard's summaries"))
+        .expect("the stamp step");
+    let context = [
+        ("matrix.package", "spate-json"),
+        ("matrix.arm", "simd"),
+        ("matrix.arch", "aarch64"),
+        ("steps.base.outputs.measured", "true"),
+        ("steps.base.outputs.merge-base", "0123456789abcdef"),
+        ("steps.rust.outputs.rustc", "rustc 1.0"),
+    ];
+    let expand = |v: &str| -> String {
+        let mut out = v.to_owned();
+        while let Some(start) = out.find("${{") {
+            let end = start + out[start..].find("}}").unwrap() + 2;
+            let expr = out[start + 3..end - 2].trim();
+            let val = context
+                .iter()
+                .find(|(k, _)| *k == expr)
+                .unwrap_or_else(|| panic!("unknown expression {expr}"))
+                .1;
+            out.replace_range(start..end, val);
+        }
+        out
+    };
+    let dir =
+        Path::new(env!("CARGO_TARGET_TMPDIR")).join("the_stamp_step_writes_the_legs_architecture");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("target/gungraun/b")).unwrap();
+    std::fs::write(
+        dir.join("target/gungraun/b/summary.json"),
+        "{\"version\":\"7\"}\n",
+    )
+    .unwrap();
+    let mut cmd = Command::new("bash");
+    cmd.arg("-c")
+        .arg(step["run"].as_str().unwrap())
+        .current_dir(&dir);
+    for (k, v) in step["env"].as_mapping().unwrap() {
+        cmd.env(k.as_str().unwrap(), expand(v.as_str().unwrap()));
+    }
+    let out = cmd.output().unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let line = std::fs::read_to_string(dir.join("shard/spate-json.simd.jsonl")).unwrap();
+    let got: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+    let shard = &got["spate_shard"];
+    assert_eq!(shard["package"], "spate-json", "{line}");
+    assert_eq!(shard["features"], "simd", "{line}");
+    assert_eq!(shard["arch"], "aarch64", "{line}");
+}

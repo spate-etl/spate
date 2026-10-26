@@ -1176,3 +1176,80 @@ fn an_old_block_count_with_no_new_side_is_an_error() {
     assert_eq!(render(&parsed, "base").err(), want);
     assert_eq!(regressions(&parsed).err(), want);
 }
+
+/// A heap-only summary of `p` stamped with the architecture named.
+fn heap_twin(arch: &str, blocks: u32) -> String {
+    summary(&format!(
+        r#""spate_shard":{{"package":"p","baseline":"b","arch":"{arch}"}},"package_dir":"/w/c/p","module_path":"b_gungraun::g::case","id":"one",{}"#,
+        profiles(&[dhat_profile(&format!(
+            r#""TotalBlocks":{}"#,
+            new_only(blocks)
+        ))])
+    ))
+}
+
+/// One shard on two architectures names each architecture in the heap table.
+#[test]
+fn the_heap_table_names_the_architecture() {
+    let text = format!(
+        "{}\n{}\n",
+        heap_twin("x86_64", 40),
+        heap_twin("aarch64", 38)
+    );
+    let report = rendered(&text, "b");
+    let heap: Vec<&str> = report
+        .lines()
+        .skip_while(|l| !l.starts_with("| --- | --- | --- | --- |"))
+        .skip(1)
+        .take_while(|l| l.starts_with("| "))
+        .collect();
+    assert_eq!(
+        heap,
+        [
+            "| p | aarch64 | g::case one | TotalBlocks | 38 | — | *new* |",
+            "| p | x86_64 | g::case one | TotalBlocks | 40 | — | *new* |",
+        ],
+        "{report}"
+    );
+}
+
+/// One shard on two architectures heads each fold block with its own key.
+#[test]
+fn each_fold_block_names_the_architecture() {
+    let rows = format!(
+        "{}{}",
+        stamped(
+            r#"{"package":"p","baseline":"b","arch":"x86_64"}"#,
+            "m_gungraun::a::a",
+            "x",
+            1
+        ),
+        stamped(
+            r#"{"package":"p","baseline":"b","arch":"aarch64"}"#,
+            "m_gungraun::a::a",
+            "x",
+            2
+        ),
+    );
+    let report = rendered(&rows, "b");
+    let headings: Vec<&str> = report.lines().filter(|l| l.starts_with("**p")).collect();
+    assert_eq!(
+        headings,
+        [
+            "**p — aarch64 — a::a x** — callgrind",
+            "**p — x86_64 — a::a x** — callgrind"
+        ],
+        "{report}"
+    );
+}
+
+/// A row with no instruction count still names its architecture.
+#[test]
+fn a_row_with_no_instruction_count_names_the_architecture() {
+    let report = rendered(&format!("{}\n", heap_twin("aarch64", 38)), "b");
+    assert_eq!(
+        ir_rows(&report),
+        ["| p | aarch64 | g::case one | — | — | *no callgrind profile* |"],
+        "{report}"
+    );
+}

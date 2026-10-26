@@ -293,7 +293,7 @@ package declares.
 `cargo xtask bench alloc` runs each `benches/<name>_alloc.rs` target in the
 release profile, on the stable release pinned in `.github/toolchains/stable/`,
 once per feature arm. It compares what each prints with
-`benches/alloc/<name>.<arm>.<arch>.tsv`, and any difference fails CI. `--bless`
+`benches/alloc/<name>_alloc.<arm>.<arch>.tsv`, and any difference fails CI. `--bless`
 rewrites the files for the host's architecture. It runs on Linux x86_64 and
 aarch64 only, and refuses any other host.
 

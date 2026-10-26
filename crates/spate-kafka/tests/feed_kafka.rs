@@ -696,7 +696,7 @@ fn a_dead_letter_topic_entry_ends_the_job_stalled() {
 /// Pins that the committed offsets a worker reads through its consumer
 /// outside the group cover every member's partitions: two workers share a
 /// two-partition work topic, and each ends `Completed` only once both
-/// partitions are committed.
+/// partitions are committed. Regression for #1418.
 #[test]
 #[ignore = "requires Docker"]
 fn a_bounded_job_ends_once_every_workers_partitions_are_committed() {
@@ -707,14 +707,19 @@ fn a_bounded_job_ends_once_every_workers_partitions_are_committed() {
     let group = spate_test::unique_name("two-workers");
     let dir = tempfile::tempdir().unwrap();
     let data = data_dir(&dir);
+    let section = bounded_section(&brokers, &group, &dir);
+    list_once(publisher_on(&section), &data, &section);
+    // A listed unit's id hashes the object's temporary path, so four listed
+    // units can all land on one partition. These ids are fixed, and their
+    // keys reach both partitions under librdkafka's partitioners.
+    let (publisher, _io) = publisher_on(&section);
+    let publisher = publisher.expect("connect");
     let mut rows = Vec::new();
     for name in ["a", "b", "c", "d"] {
         let r = recs(name, 2);
-        let _unit = stage(&data, &format!("{name}.ndjson"), &r);
+        support::feed::publish_to(&publisher, stage(&data, &format!("{name}.ndjson"), &r));
         rows.extend(r);
     }
-    let section = bounded_section(&brokers, &group, &dir);
-    list_once(publisher_on(&section), &data, &section);
     assert!(
         (0..2).all(|p| high_watermark_of(&brokers, WORK, p) > 0),
         "the units span both partitions"

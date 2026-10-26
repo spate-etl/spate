@@ -147,6 +147,7 @@ fn the_lane_variable_selects_the_lane() {
         vec!["--ref", SERVICE],
         vec!["--pull", SERVICE],
         vec!["--pull-all"],
+        vec!["--selected-lane", SERVICE],
     ] {
         let out = xtask(&shim, Some(ghost), &args);
         assert_eq!(out.status.code(), Some(1), "{args:?}: {}", stderr(&out));
@@ -158,6 +159,56 @@ fn the_lane_variable_selects_the_lane() {
         assert_eq!(stdout(&out), "", "{args:?}");
     }
     assert!(shim.calls().is_empty(), "{:?}", shim.calls());
+}
+
+/// With no lane variable, `--selected-lane` prints the lane `PRIMARY` names.
+#[test]
+fn the_selected_lane_mode_prints_the_primary_lane_when_unset() {
+    let shim = Shim::new("selected-primary");
+    let primary = std::fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!("../ci/{SERVICE}/PRIMARY")),
+    )
+    .unwrap();
+    let out = xtask(&shim, None, &["--selected-lane", SERVICE]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(stdout(&out), format!("{}\n", primary.trim()));
+    assert!(shim.calls().is_empty(), "{:?}", shim.calls());
+}
+
+/// `--selected-lane` prints the lane the variable names, so a test harness
+/// learns which lane it runs without parsing the variable itself.
+#[test]
+fn the_selected_lane_mode_prints_the_lane_the_variable_names() {
+    let shim = Shim::new("selected-named");
+    let lanes = lanes_of(SERVICE);
+    let primary = std::fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!("../ci/{SERVICE}/PRIMARY")),
+    )
+    .unwrap();
+    let other = lanes
+        .iter()
+        .find(|lane| **lane != primary.trim())
+        .expect("a service with a second lane");
+    let out = xtask(
+        &shim,
+        Some(OsStr::new(other)),
+        &["--selected-lane", SERVICE],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(stdout(&out), format!("{other}\n"));
+}
+
+/// The lane directories of one service, sorted.
+fn lanes_of(service: &str) -> Vec<String> {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!("../ci/{service}"));
+    let mut out: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|e| e.path().join("Dockerfile").is_file())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    out.sort();
+    out
 }
 
 /// A value that is not UTF-8 names no lane, and fails rather than resolving.

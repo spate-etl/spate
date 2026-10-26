@@ -103,6 +103,24 @@ pub(crate) fn print_extra_lanes(root: &Path, explain: bool, service: &str) -> Ou
     Ok(())
 }
 
+/// Prints the lane a service's suites run against: the one its lane variable
+/// names, or its primary lane.
+///
+/// # Errors
+///
+/// When the selected lane has no pinned `Dockerfile`, so a misspelt lane fails
+/// here instead of starting another lane's image.
+pub(crate) fn print_selected_lane(root: &Path, explain: bool, service: &str) -> Outcome {
+    if explain {
+        println!("(reads {} and {DIR}/{service}/)", lane_var(service));
+        return Ok(());
+    }
+    let lane = selected_lane(root, service)?;
+    reference_for(root, service, &lane)?;
+    println!("{lane}");
+    Ok(())
+}
+
 /// The `name:tag` a lane pins.
 pub(crate) fn tagged_for(root: &Path, service: &str, lane: &str) -> Result<String, Error> {
     reference_for(root, service, lane).map(|r| tagged(&r).to_owned())

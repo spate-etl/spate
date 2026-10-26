@@ -206,6 +206,9 @@ pub(crate) struct ImageArgs {
     pull_all: bool,
     #[arg(long, value_name = "SERVICE", group = "mode")]
     extra_lanes: Option<String>,
+    /// Print the lane a service's suites run against
+    #[arg(long, value_name = "SERVICE", group = "mode")]
+    selected_lane: Option<String>,
     /// The service the mode applies to, and optionally the lane
     #[arg(value_name = "SERVICE")]
     service: Option<String>,
@@ -391,6 +394,14 @@ fn container_image(root: &Path, explain: bool, args: &ImageArgs) -> Outcome {
             ));
         }
         return image::print_extra_lanes(root, explain, svc);
+    }
+    if let Some(svc) = &args.selected_lane {
+        if spare {
+            return Err(Error::msg(
+                "usage: cargo xtask container-image --selected-lane <service>",
+            ));
+        }
+        return image::print_selected_lane(root, explain, svc);
     }
     let Some(svc) = &args.service else {
         return Err(Error::msg(
@@ -909,12 +920,17 @@ mod tests {
     #[test]
     fn a_spare_positional_argument_is_a_usage_error() {
         let root = crate::repo_root().unwrap();
-        let call = |pull_all, extra: Option<&str>, service: Option<&str>, lane: Option<&str>| {
+        let call = |pull_all,
+                    extra: Option<&str>,
+                    selected: Option<&str>,
+                    service: Option<&str>,
+                    lane: Option<&str>| {
             let args = super::ImageArgs {
                 r#ref: false,
                 pull: false,
                 pull_all,
                 extra_lanes: extra.map(str::to_owned),
+                selected_lane: selected.map(str::to_owned),
                 service: service.map(str::to_owned),
                 lane: lane.map(str::to_owned),
             };
@@ -923,19 +939,23 @@ mod tests {
                 .message
         };
         assert_eq!(
-            call(true, None, Some("clickhouse"), None),
+            call(true, None, None, Some("clickhouse"), None),
             "usage: cargo xtask container-image --pull-all"
         );
         assert_eq!(
-            call(false, Some("clickhouse"), Some("lts"), None),
+            call(false, Some("clickhouse"), None, Some("lts"), None),
             "usage: cargo xtask container-image --extra-lanes <service>"
         );
         assert_eq!(
-            call(false, None, None, Some("lts")),
+            call(false, None, Some("clickhouse"), Some("lts"), None),
+            "usage: cargo xtask container-image --selected-lane <service>"
+        );
+        assert_eq!(
+            call(false, None, None, None, Some("lts")),
             "usage: cargo xtask container-image [--ref|--pull] <service> [lane]"
         );
         assert_eq!(
-            call(false, None, None, None),
+            call(false, None, None, None, None),
             "usage: cargo xtask container-image [--ref|--pull] <service> [lane]"
         );
     }

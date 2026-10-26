@@ -57,5 +57,10 @@ tracing-subscriber = { workspace = true, features = ["fmt"] }
 name = "encode_gungraun"
 harness = false
 
+# The allocation snapshot, driven by `cargo xtask bench alloc`.
+[[bench]]
+name = "encode_alloc"
+harness = false
+
 [lints]
 workspace = true

@@ -369,10 +369,13 @@ pub(crate) fn classify(
             // The measuring apparatus: a change to what is discovered, which
             // crates are chosen, or how results are read alters every crate's
             // outcome. Without this, the change rewriting bench selection is
-            // the one that never runs them.
+            // the one that never runs them. The root manifest holds the build
+            // profiles and the workspace pins that every crate's codegen
+            // follows.
             if any_glob(
                 path,
                 &[
+                    "Cargo.toml",
                     "xtask/*",
                     ".github/workflows/ci.yml",
                     ".github/workflows/perf.yml",
@@ -695,6 +698,32 @@ mod tests {
             );
         }
         assert!(!run(&[".github/workflows/site.yml"]).bench);
+    }
+
+    /// The root manifest selects every bench; a lockfile, a policy file or a
+    /// page selects none. A bot's manifest bump keeps its benches while its
+    /// container suites are deferred.
+    #[test]
+    fn a_manifest_change_selects_every_bench() {
+        let out = run(&["Cargo.toml"]);
+        assert!(out.bench);
+        assert_eq!(out.bench_shards.len(), graph().all_bench_pkgs().len() + 1);
+        for path in [
+            "Cargo.lock",
+            "deny.toml",
+            ".github/workflows/site.yml",
+            "docs/a.md",
+        ] {
+            assert!(!run(&[path]).bench, "{path}");
+        }
+
+        let ctx = Context {
+            author: "dependabot[bot]".into(),
+        };
+        let bump = vec!["Cargo.toml".to_string(), "Cargo.lock".to_string()];
+        let out = classify(&bump, Event::PullRequest, &ctx, &graph(), &[]);
+        assert!(out.bench);
+        assert!(out.container_pkgs.is_empty());
     }
 
     /// The semver gate's workflows reach every published API; another unit

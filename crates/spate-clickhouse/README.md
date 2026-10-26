@@ -31,8 +31,9 @@ the sanctioned pattern for replay tolerance.
 
 Insert bodies are compressed on the wire. The sink compresses them on the
 pipeline threads when each chunk seals. Responses to the sink's own queries
-arrive uncompressed. This is **transport compression only**, independent of the on-disk
-column `CODEC`s you declare in table DDL, which remain your responsibility.
+arrive uncompressed. This is **transport compression only**, independent of the
+on-disk column `CODEC`s you declare in table DDL, which remain your
+responsibility.
 
 ```yaml
 sink:

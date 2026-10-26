@@ -319,6 +319,21 @@ mod tests {
         );
     }
 
+    /// A zstd v0.7 frame decodes, so an object written by a legacy encoder
+    /// still frames.
+    #[test]
+    fn a_legacy_v07_zstd_frame_is_read() {
+        let content = b"alpha\nbeta\n";
+        // Magic, a frame header with a 1 KiB window and no content size, one
+        // raw block, then the end block.
+        let mut object = vec![0x27, 0xB5, 0x2F, 0xFD, 0x00, 0x00];
+        object.extend([0x40, 0x00, u8::try_from(content.len()).unwrap()]);
+        object.extend_from_slice(content);
+        object.extend([0xC0, 0x00, 0x00]);
+        let records = frame_all(Codec::Zstd, &[&object]).unwrap();
+        assert_eq!(records, vec![b"alpha".to_vec(), b"beta".to_vec()]);
+    }
+
     #[test]
     fn truncated_gzip_is_an_error() {
         let object = gzip(b"only\nline\n");

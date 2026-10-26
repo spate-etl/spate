@@ -263,6 +263,40 @@ pub(crate) mod tests {
         }
     }
 
+    /// Pins that a partition table the SDK loads from
+    /// `SMITHY_CLIENT_SDK_CUSTOM_PARTITION` is read, in a child process since
+    /// the SDK reads it once per process. Its partition has no FIPS, so the
+    /// dual-stack host is read only past a FIPS form the SDK refuses.
+    #[test]
+    fn a_partition_table_the_sdk_loads_is_read() {
+        const NAME: &str = "config::tests::a_partition_table_the_sdk_loads_is_read";
+        const VAR: &str = "SMITHY_CLIENT_SDK_CUSTOM_PARTITION";
+        if std::env::var_os(VAR).is_some() {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap();
+            for host in [
+                "sqs.test-east-1.example.test",
+                "sqs.test-east-1.api.example.test",
+            ] {
+                let region = rt.block_on(region_of(host));
+                assert_eq!(region.as_deref(), Some("test-east-1"), "{host}");
+            }
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("partitions.json");
+        std::fs::write(
+            &path,
+            r#"{"version":"1.1","partitions":[{"id":"test","regionRegex":"^test\\-\\w+\\-\\d+$",
+                "regions":{"test-east-1":{}},"outputs":{"name":"test","dnsSuffix":"example.test",
+                "dualStackDnsSuffix":"api.example.test","implicitGlobalRegion":"test-east-1",
+                "supportsFIPS":false,"supportsDualStack":true}}]}"#,
+        )
+        .unwrap();
+        spate_test_support::run_in_child(NAME, |child| child.env(VAR, &path));
+    }
+
     /// Pins the visibility range at both ends and the whole-second rule.
     #[test]
     fn visibility_is_whole_seconds_from_3s_to_12h() {

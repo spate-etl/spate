@@ -322,7 +322,9 @@ limiter does, is left out.
 `spate-bench`, in [`bench/`](bench/README.md), plus `*_wall.rs` targets in the
 crates themselves. Nothing it produces is stored and nothing here is a gate. A
 wall-clock number answers "did this change move it" for a specific change on a
-machine you control.
+machine you control. CI runs the same comparison weekly on one hosted runner,
+`main` against `main` a week earlier, advisory, with its report in the job
+summary.
 
 ```sh
 cargo xtask bench list                 # every case, with its flags
@@ -359,4 +361,4 @@ happens to is dropped. Nothing interleaves them either.
 ### Criterion
 
 `crates/spate-clickhouse/benches/encode.rs` is a criterion target, outside both
-conventions above. `cargo xtask bench check` compiles it and the weekly job runs it.
+conventions above. `cargo xtask bench check` compiles it and no job runs it.

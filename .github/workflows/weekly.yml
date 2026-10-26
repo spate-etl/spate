@@ -11,8 +11,8 @@ on:
 permissions:
   contents: read
 
-# A manual dispatch must not race the cron over the criterion baseline cache,
-# and cancelling one mid-write leaves the baseline half written.
+# A manual dispatch queues behind the cron: a cancelled run ends `cancelled`,
+# which `report` does not file.
 concurrency:
   group: weekly-${{ github.ref }}
   cancel-in-progress: false
@@ -195,63 +195,103 @@ jobs:
           flags: with-containers
 
   bench:
-    name: Criterion micro benches
+    name: Wall-clock A/B against last week's main
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # The base leg is a commit from a week of history back.
+          fetch-depth: 0
           persist-credentials: false
       - uses: ./.github/actions/setup-rust
         with:
           # Release-profile artifacts; shares nothing with the dev-profile jobs.
           shared-key: release
 
-      # BEFORE the benches: restoring afterwards extracts a tar over
-      # `target/criterion`, overwriting the results just measured and freezing
-      # the baseline. The prefix restore-key is what carries state between runs.
-      - name: Restore last week's criterion baseline
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: target/criterion
-          key: criterion-baseline-${{ github.run_id }}
-          restore-keys: criterion-baseline-
-
       - run: cargo xtask bench check
-      # The target is named because a bare `-p X -- --save-baseline` reaches the
-      # lib's libtest harness too, which rejects it. Given one baseline critcmp
-      # prints a column of 1.00 ratios and exits 0, and a bench never run leaves
-      # no `current` and drops out of the comparison silently.
-      - run: cargo bench -p spate-clickhouse --locked --bench encode -- --save-baseline current
 
-      # Built from source: install-action has no checksummed prebuilt for it.
-      - run: cargo install critcmp --locked --version 0.1.8
-
-      - name: Compare against last week's baseline
+      - name: Resolve last week's main
+        id: base
         run: |
           set -euo pipefail
-          if find target/criterion -type d -name previous | grep -q .; then
-            critcmp previous current
-          else
-            echo "::notice::No previous baseline yet; this run establishes one."
-          fi
-
-      # Rotate so next week has a `previous`. The cache saves at post-job from
-      # the tree as it stands here.
-      - name: Rotate this week's baseline
-        run: |
-          set -euo pipefail
-          rotated=0
-          while IFS= read -r dir; do
-            rm -rf "${dir%/current}/previous"
-            mv "$dir" "${dir%/current}/previous"
-            rotated=$((rotated + 1))
-          done < <(find target/criterion -type d -name current)
-          echo "rotated $rotated baseline director(ies) to 'previous'"
-          if [ "$rotated" -eq 0 ]; then
-            echo "::error::criterion wrote no 'current' baseline; the comparison above proved nothing."
+          base=$(git rev-list -n 1 --first-parent --before='7 days ago' HEAD)
+          if ! [[ "$base" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::No first-parent commit is older than seven days, so there is no base to compare against."
             exit 1
           fi
+          if [ "$base" = "$(git rev-parse HEAD)" ]; then
+            echo "::notice::No commit on main this week; nothing to compare."
+            echo "sha=" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+          {
+            echo "sha=$base"
+            echo "head=$(git rev-parse HEAD)"
+            echo "count=$(git rev-list --count "$base..HEAD")"
+          } >>"$GITHUB_OUTPUT"
+
+      # A non-zero driver exit fails the job, so `report` files it: a build
+      # failure, a guard refusal, or nothing comparable. A regression exits 0
+      # and is read in the summary.
+      - name: Compare against last week's main
+        if: steps.base.outputs.sha != ''
+        # Below the job's, so a slow run fails this step and the summary still
+        # runs.
+        timeout-minutes: 85
+        env:
+          BASE: ${{ steps.base.outputs.sha }}
+          OUT: ${{ runner.temp }}/wall
+          REPORT: ${{ runner.temp }}/report.md
+          ERR: ${{ runner.temp }}/bench.err
+          JUDGED: ${{ runner.temp }}/compare.json
+        run: |
+          set +e -u
+          # Redirected, never piped, so `rc` is the driver's own exit code.
+          cargo xtask bench ab --ref "$BASE" --replicates 20 --format markdown --out "$OUT" >"$REPORT" 2>"$ERR"
+          rc=$?
+          cat "$ERR" >&2
+          echo "bench ab exited $rc"
+          if [ "$rc" -ne 0 ]; then
+            last=$(awk '/^bench:/ { line = $0 } END { print line }' "$ERR")
+            echo "::error::bench ab exited $rc. ${last}"
+            exit "$rc"
+          fi
+          # A week of rows that were all erratic or undecided passes, and says so.
+          cargo xtask bench compare "$OUT/base" "$OUT/head" --format json >"$JUDGED" || exit 1
+          judged=$(jq '[.rows[] | select((.erratic | not) and .verdict != "no_verdict")] | length' "$JUDGED") || exit 1
+          if [ "$judged" -eq 0 ]; then
+            echo "::warning::No row reached a verdict this week; the summary lists each one undecided."
+          fi
+
+      # Re-renders from the kept legs when the step above was cut short, so a
+      # timeout still reports what it measured.
+      - name: Write the job summary
+        if: always() && steps.base.outputs.sha != ''
+        env:
+          BASE: ${{ steps.base.outputs.sha }}
+          HEAD: ${{ steps.base.outputs.head }}
+          COUNT: ${{ steps.base.outputs.count }}
+          OUT: ${{ runner.temp }}/wall
+          REPORT: ${{ runner.temp }}/report.md
+        run: |
+          set -euo pipefail
+          if [ ! -s "$REPORT" ] && [ -d "$OUT/base" ] && [ -d "$OUT/head" ]; then
+            if ! cargo xtask bench compare "$OUT/base" "$OUT/head" --format markdown >"$REPORT"; then
+              echo "::warning::The kept legs did not re-render; the log above has the cause."
+            fi
+          fi
+          {
+            echo "## Wall clock: \`$HEAD\` against \`$BASE\`"
+            echo
+            echo "$COUNT commits on main since the base."
+            echo
+            if [ -s "$REPORT" ]; then
+              cat "$REPORT"
+            else
+              echo "The run produced no report; the log of the step above has the cause."
+            fi
+          } >>"$GITHUB_STEP_SUMMARY"
 
   # ===========================================================================
   # Catch-all failure reporting. `beta` files its own issues and is absent from

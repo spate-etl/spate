@@ -900,8 +900,8 @@ fn each_scheduled_reporter_runs_when_a_need_failed() {
 }
 
 /// Each scheduled workflow queues a second run behind the first and never
-/// cancels one: a cancelled weekly run can leave the criterion baseline half
-/// written, and a release's docs dispatch waits for a running night.
+/// cancels one: a cancelled run ends `cancelled`, which its `report` job does
+/// not file, and a release's docs dispatch waits for a running night.
 #[test]
 fn each_scheduled_workflow_queues_and_never_cancels() {
     for file in SCHEDULED {

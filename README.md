@@ -189,8 +189,9 @@ than elapsed time, so a regression they report is a property of the change and
 not of how busy the runner was.
 
 Wall-clock benches sit beside them as `cargo bench` targets, and nothing
-gates on one: a wall-clock figure is only worth reading against another taken
-on the same quiet hardware, and a shared CI runner is not that.
+gates on one. Each week CI compares `main` against `main` a week earlier on one
+runner, with the two builds' runs interleaved, and reports the result without
+gating on it.
 
 ## Testing
 

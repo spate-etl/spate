@@ -1541,6 +1541,225 @@ fn a_hinted_partition_in_its_window_is_polled_at_the_tightened_cadence() {
     h.join.join().unwrap().unwrap();
 }
 
+/// A post-window commit that fails retryably is not sent again on every pass:
+/// with nothing new harvested, the next attempt waits for the periodic tick.
+#[test]
+fn a_failed_post_window_commit_is_not_retried_every_pass() {
+    let held: Arc<Mutex<Vec<crate::checkpoint::AckRef>>> = Arc::new(Mutex::new(Vec::new()));
+    let release = Arc::new(AtomicBool::new(false));
+    let held_c = Arc::clone(&held);
+    let release_c = Arc::clone(&release);
+    let mut cfg = test_config(1);
+    cfg.checkpoint.interval = Duration::from_secs(60);
+    let h = start_with(
+        cfg,
+        test_options(),
+        |runtime| runtime.with_chase_window(Duration::ZERO),
+        move |shared, log| FakeChain {
+            shared,
+            log,
+            mode: ChainMode::HoldAcks {
+                held: Arc::clone(&held_c),
+                release: Arc::clone(&release_c),
+            },
+            batches_seen: 0,
+        },
+    );
+    assign_one_lane(&h, std::slice::from_ref(&(0..10)));
+    wait_for("all payloads consumed", Duration::from_secs(5), || {
+        h.chain.consumed.load(Ordering::Relaxed) == 10
+    });
+    h.shared.lock().unwrap().fail_commits = true;
+    h.script
+        .lock()
+        .unwrap()
+        .push_back(Script::CommitReady(vec![PartitionId(0)]));
+    wait_for("the hint delivered", Duration::from_secs(5), || {
+        h.shared.lock().unwrap().hinted_at.is_some()
+    });
+    release.store(true, Ordering::Relaxed);
+    held.lock().unwrap().clear();
+    let failed = |h: &Harness| {
+        h.shared
+            .lock()
+            .unwrap()
+            .log
+            .iter()
+            .filter(|e| *e == "commit-failed")
+            .count()
+    };
+    wait_for("the first commit attempt", Duration::from_secs(5), || {
+        failed(&h) >= 1
+    });
+    let polls = h.shared.lock().unwrap().poll_timeouts.len();
+    wait_for("forty more passes", Duration::from_secs(5), || {
+        h.shared.lock().unwrap().poll_timeouts.len() >= polls + 40
+    });
+    let attempts = failed(&h);
+    h.shutdown.trigger();
+    h.join.join().unwrap().unwrap();
+    assert_eq!(attempts, 1, "commit attempts over forty passes");
+}
+
+/// An ack of a post-window partition that resolves while the controller waits
+/// on the source is committed on that same pass.
+#[test]
+fn a_post_window_ack_resolved_during_the_poll_commits_on_that_pass() {
+    let held: Arc<Mutex<Vec<crate::checkpoint::AckRef>>> = Arc::new(Mutex::new(Vec::new()));
+    let release = Arc::new(AtomicBool::new(false));
+    let held_c = Arc::clone(&held);
+    let release_c = Arc::clone(&release);
+    let mut cfg = test_config(1);
+    cfg.checkpoint.interval = Duration::from_secs(60);
+    let h = start_with(
+        cfg,
+        test_options(),
+        |runtime| runtime.with_chase_window(Duration::ZERO),
+        move |shared, log| FakeChain {
+            shared,
+            log,
+            mode: ChainMode::HoldAcks {
+                held: Arc::clone(&held_c),
+                release: Arc::clone(&release_c),
+            },
+            batches_seen: 0,
+        },
+    );
+    assign_one_lane(&h, std::slice::from_ref(&(0..10)));
+    wait_for("all payloads consumed", Duration::from_secs(5), || {
+        h.chain.consumed.load(Ordering::Relaxed) == 10
+    });
+    release.store(true, Ordering::Relaxed);
+    {
+        let mut script = h.script.lock().unwrap();
+        script.push_back(Script::CommitReady(vec![PartitionId(0)]));
+        script.push_back(Script::ReleaseHeld(Arc::clone(&held)));
+    }
+    wait_for(
+        "the hinted partition committed",
+        Duration::from_secs(5),
+        || h.shared.lock().unwrap().committed.get(&PartitionId(0)) == Some(&10),
+    );
+    {
+        let log = h.shared.lock().unwrap();
+        let released_at = log.released_at.unwrap();
+        assert_eq!(
+            log.commit_polls.first().copied(),
+            Some(released_at + 1),
+            "acks resolved in poll {released_at}; commits after polls {:?}",
+            log.commit_polls
+        );
+    }
+    h.shutdown.trigger();
+    h.join.join().unwrap().unwrap();
+}
+
+/// A hinted partition whose lane retires inside its window stands down, so
+/// the controller returns to the event poll timeout.
+#[test]
+fn a_retired_hinted_partition_leaves_the_tightened_cadence() {
+    let mut cfg = test_config(1);
+    cfg.checkpoint.interval = Duration::from_secs(60);
+    let h = start_with_config(cfg, |shared, log| FakeChain {
+        shared,
+        log,
+        mode: ChainMode::Ok,
+        batches_seen: 0,
+    });
+    assign_one_lane(&h, std::slice::from_ref(&(0..10)));
+    wait_for("all payloads consumed", Duration::from_secs(5), || {
+        h.chain.consumed.load(Ordering::Relaxed) == 10
+    });
+    h.script
+        .lock()
+        .unwrap()
+        .push_back(Script::CommitReady(vec![PartitionId(0)]));
+    wait_for("partition 0 committed", Duration::from_secs(5), || {
+        h.shared.lock().unwrap().committed.get(&PartitionId(0)) == Some(&10)
+    });
+    h.script
+        .lock()
+        .unwrap()
+        .push_back(Script::Retire(vec![LaneId(0)]));
+    wait_for("retirement delivered", Duration::from_secs(5), || {
+        logged(&h, "retire-delivered")
+    });
+    let after = h.shared.lock().unwrap().poll_timeouts.len();
+    wait_for(
+        "two polls after the retirement",
+        Duration::from_secs(5),
+        || h.shared.lock().unwrap().poll_timeouts.len() > after + 2,
+    );
+    {
+        let log = h.shared.lock().unwrap();
+        assert!(
+            !log.poll_timeouts[after..].contains(&super::controller::FAST_COMMIT_POLL),
+            "{:?}",
+            &log.poll_timeouts[after..]
+        );
+    }
+    h.shutdown.trigger();
+    h.join.join().unwrap().unwrap();
+}
+
+/// An assignment that hands a hinted partition back inside its window ends
+/// that partition's chase as well.
+#[test]
+fn a_new_assignment_inside_the_window_ends_the_chase() {
+    let mut cfg = test_config(1);
+    cfg.checkpoint.interval = Duration::from_secs(60);
+    let h = start_with_config(cfg, |shared, log| FakeChain {
+        shared,
+        log,
+        mode: ChainMode::Ok,
+        batches_seen: 0,
+    });
+    assign_one_lane(&h, std::slice::from_ref(&(0..10)));
+    wait_for("the first epoch consumed", Duration::from_secs(5), || {
+        h.chain.consumed.load(Ordering::Relaxed) == 10
+    });
+    h.script
+        .lock()
+        .unwrap()
+        .push_back(Script::CommitReady(vec![PartitionId(0)]));
+    wait_for("partition 0 committed", Duration::from_secs(5), || {
+        h.shared.lock().unwrap().committed.get(&PartitionId(0)) == Some(&10)
+    });
+    h.script.lock().unwrap().push_back(Script::Assign(vec![
+        LaneSpec {
+            id: LaneId(1),
+            partition: PartitionId(0),
+            batches: batches(std::slice::from_ref(&(10..20))),
+        },
+        LaneSpec {
+            id: LaneId(2),
+            partition: PartitionId(1),
+            batches: batches(std::slice::from_ref(&(0..10))),
+        },
+    ]));
+    wait_for("the second epoch consumed", Duration::from_secs(5), || {
+        h.chain.consumed.load(Ordering::Relaxed) == 30
+    });
+    h.script
+        .lock()
+        .unwrap()
+        .push_back(Script::CommitReady(vec![PartitionId(1)]));
+    wait_for("partition 1 committed", Duration::from_secs(5), || {
+        h.shared.lock().unwrap().committed.get(&PartitionId(1)) == Some(&10)
+    });
+    {
+        let log = h.shared.lock().unwrap();
+        assert_eq!(
+            log.committed.get(&PartitionId(0)),
+            Some(&10),
+            "{:?}",
+            log.committed
+        );
+    }
+    h.shutdown.trigger();
+    h.join.join().unwrap().unwrap();
+}
+
 /// A hinted partition past its window leaves the tightened poll cadence while
 /// its acks are still outstanding.
 #[test]

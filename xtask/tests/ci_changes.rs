@@ -899,6 +899,34 @@ fn each_scheduled_reporter_runs_when_a_need_failed() {
     }
 }
 
+/// The step that runs `bench ab` times out below its job, and the step that
+/// writes the job summary runs under `always()`, so a failed or cut
+/// measurement still reports what the kept legs hold.
+#[test]
+fn the_weekly_summary_runs_after_a_cut_measurement() {
+    let parsed = yaml(&read_workflow("weekly.yml"));
+    let job = &parsed["jobs"]["bench"];
+    let steps = job["steps"].as_sequence().unwrap();
+    let run = |s: &serde_yaml::Value| s["run"].as_str().unwrap_or("").to_owned();
+    let measure = steps
+        .iter()
+        .find(|s| run(s).contains("cargo xtask bench ab "))
+        .expect("a step runs bench ab");
+    let summary = steps
+        .iter()
+        .find(|s| run(s).contains("GITHUB_STEP_SUMMARY"))
+        .expect("a step writes the summary");
+    let job_limit = job["timeout-minutes"].as_u64().unwrap();
+    let step_limit = measure["timeout-minutes"].as_u64().unwrap();
+    assert!(step_limit < job_limit, "{step_limit} >= {job_limit}");
+    let cond = summary["if"].as_str().unwrap_or("");
+    assert!(cond.trim_start().starts_with("always() &&"), "{cond}");
+    assert!(
+        run(summary).contains("bench compare"),
+        "the summary re-renders from the legs"
+    );
+}
+
 /// Each scheduled workflow queues a second run behind the first and never
 /// cancels one: a cancelled run ends `cancelled`, which its `report` job does
 /// not file, and a release's docs dispatch waits for a running night.

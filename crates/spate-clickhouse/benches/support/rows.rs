@@ -18,10 +18,10 @@
 //! is pinned: growing it would silently re-baseline every count ever recorded
 //! against it.
 //!
-//! Shared verbatim with the wall-clock sibling: `encode_wall.rs` and
-//! `encode_gungraun.rs` both pull this module in, so the two tiers encode
-//! byte-identical corpora and a count here and a throughput number there
-//! describe the same work rather than comparable work.
+//! Shared verbatim with the encode benches: `encode_gungraun.rs`,
+//! `encode_alloc.rs` and `encode_wall.rs` all pull this module in, so the
+//! three tiers encode byte-identical corpora and their figures describe the
+//! same work.
 //!
 //! Row values are pure functions of the index, with no random source,
 //! because an instruction count is only comparable when both legs encoded

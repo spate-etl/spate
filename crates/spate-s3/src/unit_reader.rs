@@ -195,7 +195,7 @@ pub(crate) struct UnitReader {
     /// in flight.
     revoked: Vec<LaneId>,
     /// A fatal answer to a renewal from [`renew_held`](Self::renew_held),
-    /// returned by the next `poll_events`.
+    /// returned by the next `poll_events` or `stop_reading`.
     renew_error: Option<SourceError>,
     /// Lanes whose records are all committed, leaving with nothing in
     /// flight.
@@ -391,7 +391,7 @@ impl UnitReader {
     /// yet handed back held, for the feed's close.
     pub(crate) fn stop_reading(&mut self) -> Result<(), SourceError> {
         if !self.hands_back {
-            return Ok(());
+            return self.renew_error.take().map_or(Ok(()), Err);
         }
         self.begin_stop();
         let ended = self.ended_then_reports();
@@ -531,7 +531,9 @@ impl UnitReader {
 
     /// Settle what the lanes and the feed left since the last poll (poison
     /// reports, refused fails, finished lanes and units), then renew every
-    /// unit still held.
+    /// unit still held. A fatal renewal kept by
+    /// [`renew_held`](Self::renew_held) is returned first, before anything
+    /// is settled.
     fn settle(&mut self) -> Result<(), SourceError> {
         if let Some(e) = self.renew_error.take() {
             return Err(e);
@@ -602,7 +604,8 @@ impl UnitReader {
     /// Settles and acknowledges nothing, so no position moves before the
     /// revocation's commit. A unit answered `Gone` is let go, and its lanes
     /// leave on the next `poll_events`. A fatal answer is kept, and the next
-    /// `poll_events` returns it before it settles anything.
+    /// `poll_events` or `stop_reading` returns it before it acknowledges
+    /// anything.
     pub(crate) fn renew_held(&mut self) {
         if self.renew_error.is_none() {
             self.renew_error = self.renew_each().err();
@@ -1584,6 +1587,41 @@ mod tests {
         };
         assert!(reason.contains("renewing a held unit"), "{reason}");
         assert_eq!(script.acknowledged(), vec![], "settled before failing");
+    }
+
+    /// Pins that a fatal answer to a renewal from a revocation's wait fails a
+    /// stop that follows it, before the stop acknowledges anything.
+    #[test]
+    fn a_renew_error_during_a_drain_fails_the_stop() {
+        let (mut reader, script, _rt) = stopping_reader();
+        start(&mut reader);
+        let (at, _, at_tracker) = hold_one(&mut reader, &script);
+        reader.commit(&[(at, 5)]).unwrap();
+        at_tracker.set_terminal(5);
+        script.refuse_next_renew(FeedErrorKind::Fatal);
+
+        reader.renew_held();
+        let Err(SourceError::Client { reason, .. }) = reader.stop_reading() else {
+            panic!("a fatal renewal did not fail the stop");
+        };
+        assert!(reason.contains("renewing a held unit"), "{reason}");
+        assert_eq!(script.acknowledged(), vec![], "settled before failing");
+    }
+
+    /// Pins that a fatal answer to a renewal from a revocation's wait fails a
+    /// stop on a feed that does not hand back.
+    #[test]
+    fn a_renew_error_during_a_drain_fails_a_stop_that_hands_nothing_back() {
+        let (mut reader, script, _rt) = reader();
+        start(&mut reader);
+        hold_one(&mut reader, &script);
+        script.refuse_next_renew(FeedErrorKind::Fatal);
+
+        reader.renew_held();
+        let Err(SourceError::Client { reason, .. }) = reader.stop_reading() else {
+            panic!("a fatal renewal did not fail the stop");
+        };
+        assert!(reason.contains("renewing a held unit"), "{reason}");
     }
 
     /// Pins that a held unit answered `Gone` on renewal logs one warning

@@ -3841,6 +3841,31 @@ fn a_stop_during_a_blocked_revocation_drains_at_once() {
     assert_revoked_while_blocked(&h.shared);
 }
 
+/// Pins that while a revocation waits on a driver held by a blocked batch,
+/// the controller lets the source renew what it holds on more than one pass.
+/// Regression for #1278.
+#[test]
+fn a_revocation_waiting_on_its_drain_lets_the_source_renew() {
+    let clock = crate::clock::TestClock::frozen();
+    let h = start_stopping(
+        stop_config(Duration::from_secs(600)),
+        false,
+        &clock,
+        |_| None,
+        blocked_chain,
+    );
+    revoke_a_blocked_lane(&h);
+    wait_for(
+        "the source renews during the wait",
+        Duration::from_secs(5),
+        || h.shared.lock().unwrap().renew_held_calls >= 2,
+    );
+    h.shutdown.trigger();
+    joined(&h);
+    assert_eq!(h.join.join().unwrap().unwrap().state, ExitState::Completed);
+    assert_revoked_while_blocked(&h.shared);
+}
+
 /// The lane's batch blocked and its revocation reached the controller.
 fn assert_revoked_while_blocked(shared: &SharedLog) {
     let log = shared.lock().unwrap();

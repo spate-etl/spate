@@ -55,6 +55,8 @@ pub(crate) struct SourceLog {
     pub(crate) read_on_stop: bool,
     /// How many times the controller asked `reading_on_stop`.
     pub(crate) reading_on_stop_calls: usize,
+    /// How many times the controller called `renew_held`.
+    pub(crate) renew_held_calls: usize,
     /// How many times the controller called `stop_reading`.
     pub(crate) stop_reading_calls: usize,
     /// When set, a dropped lane logs `lane-dropped`, which a stop's drain
@@ -305,6 +307,10 @@ impl Source for FakeSource {
     fn resume(&mut self, lanes: &[LaneId]) -> Result<(), SourceError> {
         self.shared.lock().unwrap().resumes.push(lanes.to_vec());
         Ok(())
+    }
+
+    fn renew_held(&mut self) {
+        self.shared.lock().unwrap().renew_held_calls += 1;
     }
 
     fn reading_on_stop(&mut self) -> bool {

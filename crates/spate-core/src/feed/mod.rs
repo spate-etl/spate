@@ -272,7 +272,9 @@ pub trait Feed: Send + Sync {
     ///
     /// The backend extends the unit's lease on its own schedule, and only for
     /// units marked since its last extension. A caller renews every unit it
-    /// holds from the controller thread. On a backend that leases units, a
+    /// holds from the controller thread, on each `poll_events` and from
+    /// [`Source::renew_held`](crate::source::Source::renew_held) while a
+    /// revocation drains. On a backend that leases units, a
     /// controller that stops running stops renewing, and its units return to
     /// the feed for another reader.
     ///

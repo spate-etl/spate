@@ -630,6 +630,9 @@ fn wait_revocation<S: Source>(
         if left <= STOP_POLL {
             return false;
         }
+        // The source gets no `poll_events` while the drain runs, so a lease
+        // it holds would lapse unless it renews here.
+        source.renew_held();
         if !watch.shutdown.load(Ordering::Relaxed) && watch.ends_the_wait(source) {
             watch.shutdown.store(true, Ordering::Relaxed);
         }

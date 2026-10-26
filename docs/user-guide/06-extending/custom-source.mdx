@@ -265,9 +265,12 @@ Your source follows these rules:
 - **Let go of a delivery whose receipt answers `Gone`.** The feed has
   delivered that unit again or already settled it, so retrying the call
   cannot succeed.
-- **Renew every unit you hold on each `poll_events` call.** A backend that
-  leases units extends a lease only while its holder renews it, so a control
-  plane that stops running gives its units back to the feed.
+- **Renew every unit you hold on each `poll_events` call, and in
+  `renew_held`.** A backend that leases units extends a lease only while its
+  holder renews it, so a control plane that stops running gives its units
+  back to the feed. While a revocation waits for its drain, for up to
+  `checkpoint.drain_timeout`, the runtime calls `renew_held` and no other
+  method. Renew there, and settle and report nothing.
 - **Never wait on the feed inside `poll_events`.** Hand the feed a waker from
   `wake_channel` with `set_waker`. When there is nothing to do, park on the
   paired `FeedPark` for at most the `timeout` that `poll_events` was given. A

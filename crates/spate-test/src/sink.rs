@@ -154,6 +154,15 @@ impl Drop for Holding {
     }
 }
 
+/// Refuse an outcome scripted to resolve as `Pending`, at the test's own
+/// call rather than inside a pipeline's sink task.
+fn refuse_pending(outcome: &WriteOutcome) {
+    assert!(
+        outcome.result != ScriptedResult::Pending,
+        "a write cannot be scripted to resolve as Pending; script it with WriteOutcome::held()"
+    );
+}
+
 /// Build a paired scriptable writer and its handle.
 #[must_use]
 pub fn capture_writer() -> (CaptureWriter, SinkScript) {
@@ -180,12 +189,22 @@ impl SinkScript {
 
     /// Queue an outcome consumed by the next otherwise-unscripted write to
     /// **any** endpoint (FIFO). Endpoint-specific scripts take precedence.
+    ///
+    /// # Panics
+    ///
+    /// If `outcome.result` is [`Pending`](ScriptedResult::Pending).
     pub fn enqueue_global(&self, outcome: WriteOutcome) {
+        refuse_pending(&outcome);
         self.lock().global.push_back(outcome);
     }
 
     /// Queue an outcome for the next write to `(shard, replica)` (FIFO).
+    ///
+    /// # Panics
+    ///
+    /// If `outcome.result` is [`Pending`](ScriptedResult::Pending).
     pub fn enqueue_for(&self, shard: usize, replica: usize, outcome: WriteOutcome) {
+        refuse_pending(&outcome);
         self.lock()
             .per_endpoint
             .entry((shard, replica))
@@ -324,10 +343,9 @@ impl ShardWriter for CaptureWriter {
                     class: ErrorClass::Fatal,
                     reason: reason.clone(),
                 }),
-                ScriptedResult::Pending => panic!(
-                    "a write cannot be scripted to resolve as Pending; \
-                     script it with WriteOutcome::held()"
-                ),
+                ScriptedResult::Pending => {
+                    unreachable!("the enqueue methods refuse a Pending outcome")
+                }
             };
             // Recorded before the future returns, so a test that reads
             // `writes()` after anything the return causes sees the result.

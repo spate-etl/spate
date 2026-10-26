@@ -439,20 +439,26 @@ async fn writes_resolving_out_of_order_keep_their_own_results() {
     assert_eq!(writes[1].result, ScriptedResult::Retryable("r".to_owned()));
 }
 
-/// Pins that an outcome scripted to resolve as `Pending` is refused when
-/// its write resolves.
-#[tokio::test]
-#[should_panic(expected = "Pending")]
-async fn a_write_scripted_pending_panics() {
-    let (writer, script) = capture_writer();
+fn pending_outcome() -> WriteOutcome {
     let mut outcome = WriteOutcome::ok();
     outcome.result = ScriptedResult::Pending;
-    script.enqueue_global(outcome);
-    let ep = ReplicaTag {
-        shard: 0,
-        replica: 0,
-    };
-    let _ = writer.write_batch(&ep, &sealed("pending", b"")).await;
+    outcome
+}
+
+/// Pins that `enqueue_global` refuses an outcome scripted to resolve as
+/// `Pending`, at the call that scripts it.
+#[test]
+#[should_panic(expected = "cannot be scripted to resolve as Pending")]
+fn enqueue_global_refuses_a_pending_outcome() {
+    capture_writer().1.enqueue_global(pending_outcome());
+}
+
+/// Pins that `enqueue_for` refuses an outcome scripted to resolve as
+/// `Pending`, at the call that scripts it.
+#[test]
+#[should_panic(expected = "cannot be scripted to resolve as Pending")]
+fn enqueue_for_refuses_a_pending_outcome() {
+    capture_writer().1.enqueue_for(0, 0, pending_outcome());
 }
 
 #[tokio::test]

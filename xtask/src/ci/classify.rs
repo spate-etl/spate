@@ -1115,7 +1115,6 @@ mod tests {
         }
     }
 
-    /// The manifest selector covers each build input without absorbing nearby files.
     /// A committed snapshot file and the toolchain it was taken with each
     /// select the Rust jobs, which carry the snapshot job.
     #[test]
@@ -1128,6 +1127,7 @@ mod tests {
         }
     }
 
+    /// The manifest selector covers each build input without absorbing nearby files.
     /// Regression for #1240.
     #[test]
     fn the_manifest_selector_covers_its_build_and_gate_inputs() {

@@ -85,8 +85,8 @@ updates:
 
   # ----------------------------------------- Rust (the snapshot stable) ----
   # The exact stable the allocation snapshots run on. A release that moves a
-  # count then fails on its own pull request, where the rewritten files are
-  # committed, and not on every open one.
+  # count then fails only on its own pull request, where the rewritten files
+  # are committed.
   - package-ecosystem: rust-toolchain
     directory: "/.github/toolchains/stable"
     schedule:

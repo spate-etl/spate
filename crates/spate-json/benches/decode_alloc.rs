@@ -1,13 +1,14 @@
 //! Allocation snapshot of this crate's decode paths.
 //!
-//! Each case drives the same rig and the same `decode_run` region the counted
-//! tier in `decode_gungraun.rs` measures, under the same case names, and
-//! prints its allocation, reallocation and byte counts for
-//! `cargo xtask bench alloc` to compare with `benches/alloc/`. Harness-free, so
+//! Each case drives the same rig and the same region the counted tier in
+//! `decode_gungraun.rs` measures, under the same case names, and prints its
+//! allocation, reallocation and byte counts for `cargo xtask bench alloc` to
+//! compare with `benches/alloc/`. Harness-free, so
 //! every case runs on the main thread and nothing else allocates while one is
 //! counted. Each case is counted once after one uncounted pass, so lazily
 //! built state such as the `simd` backend's thread-local scratch is already in
-//! place.
+//! place. The four reference cases are counted warm here, where the counted
+//! tier counts them cold.
 //!
 //! The skip-path cases (`ndjson_syntax_10pct`, `ndjson_type_10pct`,
 //! `ndjson_syntax_all`, `array_bad_last`, `dup_guard_hit`) are left out. Each

@@ -10,6 +10,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::env::consts;
+use std::io::Write;
 use std::path::Path;
 
 use crate::ci::classify::feature_arms_for;
@@ -279,22 +280,30 @@ fn check_one(
     bless: bool,
 ) -> Result<(), String> {
     let rel = inv.file(arch);
-    let run = parse(text).map_err(|e| format!("{}: {e}", inv.bench))?;
-    if run.rows.is_empty() {
-        return Err(format!(
+    let no_case = || {
+        format!(
             "{}: the run printed no case; a snapshot target is a `[[bench]]` with \
              `harness = false` whose `main` calls `spate_test_support::alloc::main_with`",
             inv.bench
-        ));
+        )
+    };
+    // A target left on the libtest harness exits 0 and prints libtest's
+    // summary, which has no column line.
+    if !text.lines().any(|l| l == COLUMNS) {
+        return Err(no_case());
+    }
+    let run = parse(text).map_err(|e| format!("{}: {e}", inv.bench))?;
+    if run.rows.is_empty() {
+        return Err(no_case());
     }
     if bless {
         return write(&root.join(&rel), text);
     }
     let diffs = match std::fs::read_to_string(root.join(&rel)) {
-        Ok(committed) => {
-            let file = parse(&committed).map_err(|e| format!("{rel}: {e}"))?;
-            differences(&file, &run)
-        }
+        Ok(committed) => match parse(&committed) {
+            Ok(file) => differences(&file, &run),
+            Err(e) => vec![format!("the file does not parse: {e}")],
+        },
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => vec!["not committed".to_owned()],
         Err(e) => return Err(format!("{rel}: {e}")),
     };
@@ -343,6 +352,21 @@ fn plan(root: &Path) -> Result<(String, Vec<Invocation>), String> {
 pub(crate) fn run(root: &Path, explain: bool, bless: bool) -> Outcome {
     let arch = consts::ARCH;
     gated_arch(consts::OS, arch)?;
+    compare(root, arch, explain, bless, &mut std::io::stdout(), |step| {
+        run::capture(root, step)
+    })
+}
+
+/// The body of [`run`] past the host gate, with each step's stdout taken from
+/// `capture` and `--explain`'s lines written to `out`.
+fn compare(
+    root: &Path,
+    arch: &str,
+    explain: bool,
+    bless: bool,
+    out: &mut impl Write,
+    mut capture: impl FnMut(&Step<'_>) -> Result<String, Error>,
+) -> Outcome {
     let (pin, invs) = plan(root)?;
     let rustc = Step::new("rustc", [format!("+{pin}"), "--version".to_owned()]);
     let steps: Vec<Step<'_>> = invs
@@ -350,17 +374,25 @@ pub(crate) fn run(root: &Path, explain: bool, bless: bool) -> Outcome {
         .map(|i| Step::new("cargo", i.args(&pin)))
         .collect();
     if explain {
-        println!("{}", rustc.display());
-        for s in &steps {
-            println!("{}", s.display());
+        for s in std::iter::once(&rustc).chain(&steps) {
+            writeln!(out, "{}", s.display()).map_err(|e| Error::msg(format!("stdout: {e}")))?;
         }
         return Ok(());
     }
-    let version = run::capture(root, &rustc)?;
+    let version = capture(&rustc)?;
     let mut failures = Vec::new();
     for (inv, step) in invs.iter().zip(&steps) {
         eprintln!("+ {}", step.display());
-        let text = header(version.trim(), inv, arch) + &run::capture(root, step)?;
+        // A failed arm is reported with the rest, so the differences earlier
+        // arms found still print.
+        let printed = match capture(step) {
+            Ok(printed) => printed,
+            Err(e) => {
+                failures.push(e.message);
+                continue;
+            }
+        };
+        let text = header(version.trim(), inv, arch) + &printed;
         if let Err(e) = check_one(root, inv, arch, &text, bless) {
             failures.push(e);
         }
@@ -374,10 +406,11 @@ pub(crate) fn run(root: &Path, explain: bool, bless: bool) -> Outcome {
 #[cfg(test)]
 mod tests {
     use super::{
-        Invocation, PIN, Snapshot, Target, channel, check_one, differences, discover, gated_arch,
-        header, invocations, orphans, parse, plan,
+        Invocation, PIN, Snapshot, Target, channel, check_one, compare, differences, discover,
+        gated_arch, header, invocations, orphans, parse, plan,
     };
     use crate::checks::scratch::Scratch;
+    use crate::run::{Error, Step};
 
     fn inv(pkg: &str, bench: &str, arm: &'static str, features: &'static str) -> Invocation {
         Invocation {
@@ -764,6 +797,155 @@ mod tests {
                 "1.0.0".to_owned(),
                 vec![inv("spate-x", "d_alloc", "default", "")]
             ))
+        );
+    }
+
+    #[test]
+    fn a_libtest_target_is_refused_by_name() {
+        let scratch = Scratch::new("alloc-libtest").unwrap();
+        let i = inv("spate-x", "d_alloc", "default", "");
+        let text = "# rustc: r1\n\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; \
+                    0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n";
+        let err = check_one(scratch.dir(), &i, "x86_64", text, false).unwrap_err();
+        assert!(err.contains("harness = false"), "{err}");
+    }
+
+    /// A committed file that no longer parses, as after a merge conflict, is
+    /// a difference, so the failing leg still leaves its replacement.
+    #[test]
+    fn an_unparseable_committed_file_still_leaves_the_replacement() {
+        let scratch = Scratch::new("alloc-conflict").unwrap();
+        let i = inv("spate-x", "d_alloc", "default", "");
+        let rel = i.file("x86_64");
+        super::write(
+            &scratch.join(&rel),
+            "# rustc: r1\ncase\tallocs\treallocs\tbytes\n<<<<<<< HEAD\na\t3\t1\t40\n",
+        )
+        .unwrap();
+        let err = check_one(scratch.dir(), &i, "x86_64", RUN, false).unwrap_err();
+        assert!(
+            err.contains(
+                "the file does not parse: line 3: a case line has four tab-separated fields"
+            ),
+            "{err}"
+        );
+        assert!(
+            scratch
+                .join(&format!("target/alloc-snapshots/{rel}"))
+                .exists()
+        );
+    }
+
+    /// The command refuses an ungated host before it plans or runs anything.
+    #[test]
+    fn the_run_refuses_a_host_it_does_not_gate() {
+        let root = crate::repo_root().unwrap();
+        let outcome = super::run(&root, true, false).map_err(|e| e.message);
+        match gated_arch(super::consts::OS, super::consts::ARCH) {
+            Ok(()) => assert!(outcome.is_ok(), "{outcome:?}"),
+            Err(e) => assert_eq!(outcome, Err(e)),
+        }
+    }
+
+    /// A two-arm tree whose files hold what `body` prints for each arm.
+    fn two_arms(body: impl Fn(&str) -> String) -> Scratch {
+        let scratch = tree(&["crates/spate-json/benches/d_alloc.rs"]);
+        for i in [
+            inv("spate-json", "d_alloc", "default", ""),
+            inv("spate-json", "d_alloc", "simd", "simd"),
+        ] {
+            let text = header("rustc r1", &i, "x86_64") + &body(i.arm);
+            super::write(&scratch.join(&i.file("x86_64")), &text).unwrap();
+        }
+        scratch
+    }
+
+    fn body(arm: &str, allocs: u64) -> String {
+        format!("# arm: {arm}\ncase\tallocs\treallocs\tbytes\na\t{allocs}\t0\t8\n")
+    }
+
+    /// Runs `compare` over `scratch` with each arm printing `printed(arm)`.
+    fn compare_with(
+        scratch: &Scratch,
+        printed: impl Fn(&str) -> Result<String, Error>,
+    ) -> Result<(), String> {
+        compare(
+            scratch.dir(),
+            "x86_64",
+            false,
+            false,
+            &mut Vec::new(),
+            |step: &Step<'_>| {
+                if step.program == "rustc" {
+                    return Ok("rustc r1\n".to_owned());
+                }
+                printed(if step.args.iter().any(|a| a == "simd") {
+                    "simd"
+                } else {
+                    "default"
+                })
+            },
+        )
+        .map_err(|e| e.message)
+    }
+
+    #[test]
+    fn the_command_compares_every_arm() {
+        let scratch = two_arms(|arm| body(arm, 1));
+        assert_eq!(compare_with(&scratch, |arm| Ok(body(arm, 1))), Ok(()));
+        for moved in ["default", "simd"] {
+            let err = compare_with(&scratch, |arm| {
+                Ok(body(arm, if arm == moved { 2 } else { 1 }))
+            })
+            .unwrap_err();
+            let file =
+                format!("crates/spate-json/benches/alloc/d_alloc.{moved}.x86_64.tsv differs");
+            assert!(
+                err.starts_with(&file) && err.contains("case `a`: allocs 1 -> 2"),
+                "{err}"
+            );
+            assert_eq!(err.matches("differs").count(), 1, "{err}");
+        }
+    }
+
+    /// An arm that fails to build is reported alongside an earlier arm's
+    /// difference.
+    #[test]
+    fn a_failed_arm_keeps_the_differences_of_the_others() {
+        let scratch = two_arms(|arm| body(arm, 1));
+        let err = compare_with(&scratch, |arm| {
+            if arm == "simd" {
+                Err(Error::msg("`cargo bench` exited 101"))
+            } else {
+                Ok(body(arm, 2))
+            }
+        })
+        .unwrap_err();
+        assert!(
+            err.contains("d_alloc.default.x86_64.tsv differs")
+                && err.ends_with("`cargo bench` exited 101"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn explain_prints_every_step_and_runs_none() {
+        let scratch = two_arms(|arm| body(arm, 1));
+        let mut out = Vec::new();
+        compare(
+            scratch.dir(),
+            "x86_64",
+            true,
+            false,
+            &mut out,
+            |step: &Step<'_>| panic!("ran {}", step.display()),
+        )
+        .unwrap();
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "rustc +1.0.0 --version\n\
+             cargo +1.0.0 bench -p spate-json --bench d_alloc --locked\n\
+             cargo +1.0.0 bench -p spate-json --bench d_alloc --locked --features simd\n"
         );
     }
 }

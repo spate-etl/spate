@@ -212,7 +212,8 @@ impl Report {
 /// # Panics
 ///
 /// Panics in a debug build, whose allocations differ from the release build
-/// the committed files hold, and when a case panics.
+/// the committed files hold, when a case panics, and when stdout cannot be
+/// written, as when its reader has closed the pipe.
 pub fn main_with(f: impl FnOnce(&mut Report)) {
     if cfg!(debug_assertions) {
         panic!("allocation snapshots are taken in release; run `cargo xtask bench alloc`");

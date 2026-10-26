@@ -90,6 +90,9 @@ pub(crate) enum Bench {
         reps: Replication,
         #[command(flatten)]
         select: Selection,
+        /// Write the legs to DIR/base and DIR/head
+        #[arg(long, value_name = "DIR")]
+        out: Option<String>,
     },
 
     /// Compare two feature arms of this tree
@@ -169,11 +172,15 @@ pub(crate) fn dispatch(root: &Path, explain: bool, cmd: Bench) -> Outcome {
             r#ref,
             reps,
             select,
+            out,
         } => {
-            let s = driver(["ab"])
+            let mut s = driver(["ab"])
                 .arg(&r#ref)
                 .args(reps.flags())
                 .args(select.flags());
+            if let Some(out) = &out {
+                s = s.arg("--out").arg(out);
+            }
             run::run(root, explain, &s)
         }
         Bench::Arms {

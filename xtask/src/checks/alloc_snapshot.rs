@@ -317,27 +317,33 @@ fn write(path: &Path, text: &str) -> Result<(), String> {
     std::fs::write(path, text).map_err(|e| format!("{}: {e}", path.display()))
 }
 
+/// The pinned channel and every invocation, after refusing a tree with no
+/// target or with a file no invocation writes.
+fn plan(root: &Path) -> Result<(String, Vec<Invocation>), String> {
+    let pin_text = std::fs::read_to_string(root.join(PIN)).map_err(|e| format!("{PIN}: {e}"))?;
+    let pin = channel(&pin_text)?;
+    let invs = invocations(&discover(root));
+    if invs.is_empty() {
+        return Err(format!(
+            "no allocation snapshot target was discovered; a target is `crates/<c>/benches/<name>{SUFFIX}`"
+        ));
+    }
+    let orphaned = orphans(root, &invs);
+    if !orphaned.is_empty() {
+        return Err(format!(
+            "no snapshot target and arm writes these files:\n  {}",
+            orphaned.join("\n  ")
+        ));
+    }
+    Ok((pin, invs))
+}
+
 /// `cargo xtask bench alloc`: compares every snapshot on this host's
 /// architecture, or rewrites them under `bless`.
 pub(crate) fn run(root: &Path, explain: bool, bless: bool) -> Outcome {
     let arch = consts::ARCH;
     gated_arch(consts::OS, arch)?;
-    let pin_text =
-        std::fs::read_to_string(root.join(PIN)).map_err(|e| Error::msg(format!("{PIN}: {e}")))?;
-    let pin = channel(&pin_text)?;
-    let invs = invocations(&discover(root));
-    if invs.is_empty() {
-        return Err(Error::msg(format!(
-            "no allocation snapshot target was discovered; a target is `crates/<c>/benches/<name>{SUFFIX}`"
-        )));
-    }
-    let orphaned = orphans(root, &invs);
-    if !orphaned.is_empty() {
-        return Err(Error::msg(format!(
-            "no snapshot target and arm writes these files:\n  {}",
-            orphaned.join("\n  ")
-        )));
-    }
+    let (pin, invs) = plan(root)?;
     let rustc = Step::new("rustc", [format!("+{pin}"), "--version".to_owned()]);
     let steps: Vec<Step<'_>> = invs
         .iter()
@@ -369,7 +375,7 @@ pub(crate) fn run(root: &Path, explain: bool, bless: bool) -> Outcome {
 mod tests {
     use super::{
         Invocation, PIN, Snapshot, Target, channel, check_one, differences, discover, gated_arch,
-        invocations, orphans, parse,
+        header, invocations, orphans, parse, plan,
     };
     use crate::checks::scratch::Scratch;
 
@@ -673,6 +679,91 @@ mod tests {
         assert_eq!(
             channel("[toolchain]\n"),
             Err(format!("{PIN} names no `channel = \"…\"`"))
+        );
+    }
+
+    #[test]
+    fn the_header_names_the_compiler_features_and_arch() {
+        let covers = super::COVERS;
+        assert_eq!(
+            header(
+                "rustc 1.0.0",
+                &inv("spate-x", "d_alloc", "default", ""),
+                "x86_64"
+            ),
+            format!("# rustc: rustc 1.0.0\n# features: none\n# arch: x86_64\n# counts: {covers}\n")
+        );
+        assert_eq!(
+            header(
+                "rustc 1.0.0",
+                &inv("spate-x", "d_alloc", "simd", "simd"),
+                "aarch64"
+            ),
+            format!(
+                "# rustc: rustc 1.0.0\n# features: simd\n# arch: aarch64\n# counts: {covers}\n"
+            )
+        );
+    }
+
+    /// A committed path that exists but cannot be read is reported as that,
+    /// and writes no replacement.
+    #[test]
+    fn an_unreadable_file_is_an_error_and_not_a_missing_one() {
+        let scratch = Scratch::new("alloc-unreadable").unwrap();
+        let i = inv("spate-x", "d_alloc", "default", "");
+        std::fs::create_dir_all(scratch.join(&i.file("x86_64"))).unwrap();
+        let e = check_one(scratch.dir(), &i, "x86_64", ONE, false).unwrap_err();
+        assert!(
+            e.starts_with("crates/spate-x/benches/alloc/d_alloc.default.x86_64.tsv: ")
+                && !e.contains("differs"),
+            "{e}"
+        );
+        assert!(!scratch.join("target").exists());
+    }
+
+    fn tree(files: &[&str]) -> Scratch {
+        let scratch = Scratch::new("alloc-plan").unwrap();
+        super::write(&scratch.join(PIN), "[toolchain]\nchannel = \"1.0.0\"\n").unwrap();
+        for rel in files {
+            super::write(&scratch.join(rel), "").unwrap();
+        }
+        scratch
+    }
+
+    #[test]
+    fn the_plan_refuses_an_orphaned_file() {
+        let scratch = tree(&[
+            "crates/spate-x/benches/d_alloc.rs",
+            "crates/spate-x/benches/alloc/gone_alloc.default.x86_64.tsv",
+        ]);
+        assert_eq!(
+            plan(scratch.dir()),
+            Err("no snapshot target and arm writes these files:\n  \
+                 crates/spate-x/benches/alloc/gone_alloc.default.x86_64.tsv"
+                .to_owned())
+        );
+    }
+
+    #[test]
+    fn the_plan_refuses_a_tree_with_no_target() {
+        let scratch = tree(&[]);
+        assert_eq!(
+            plan(scratch.dir()),
+            Err("no allocation snapshot target was discovered; a target is \
+                 `crates/<c>/benches/<name>_alloc.rs`"
+                .to_owned())
+        );
+    }
+
+    #[test]
+    fn the_plan_carries_the_pin_and_each_invocation() {
+        let scratch = tree(&["crates/spate-x/benches/d_alloc.rs"]);
+        assert_eq!(
+            plan(scratch.dir()),
+            Ok((
+                "1.0.0".to_owned(),
+                vec![inv("spate-x", "d_alloc", "default", "")]
+            ))
         );
     }
 }

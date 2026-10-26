@@ -7,7 +7,8 @@
 //! every case runs on the main thread and nothing else allocates while one is
 //! counted. Each case is counted once after one uncounted chunk, so the Native
 //! encoder's columns have been reset by `finish_chunk` and keep their
-//! capacity, and RowBinary's first-record check has run.
+//! capacity. The RowBinary rig's encoder skips the first-record check;
+//! `tests/encoder_alloc.rs` pins that a checked encoder runs it once.
 
 use spate_test_support::alloc::{Counting, main_with};
 

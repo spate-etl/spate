@@ -113,8 +113,10 @@ body.
 advisory IDs), callers (which, how many, how often), a tour of visible control
 flow, line numbers.
 
-A test's doc says what the test pins, plus `Regression for #N.` where it guards
-a fixed defect.
+A test's doc says what the test pins. Add `Regression for #N.` when issue #N
+reports a defect in the code the test exercises and the test fails without its
+fix. A change that fixes the test itself, such as a flaky setup, adds no such
+line.
 
 In comments, commit messages and pull request bodies, avoid the dramatic
 em-dash, the colon reveal, antithesis framing, evaluative tails and empty

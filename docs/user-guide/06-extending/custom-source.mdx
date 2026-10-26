@@ -202,8 +202,9 @@ Assignment changes are where at-least-once is won or lost:
   worthwhile now. The runtime commits those partitions only, at a
   tightened cadence for one commit interval and then on every
   control-plane poll, until their lanes leave through `LanesRetired` or
-  `LanesRevoked`. A partition whose lane never leaves stays on that
-  cadence for the life of the lane. Correctness never depends on it.
+  `LanesRevoked` or a new `LanesAssigned` begins. A partition whose lane
+  never leaves stays on that cadence for the life of the lane. Correctness
+  never depends on it.
 
 :::warning
 Never block inside `poll_events` waiting on data-plane progress you

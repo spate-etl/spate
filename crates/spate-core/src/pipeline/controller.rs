@@ -173,8 +173,10 @@ pub(crate) fn run_controller<S: Source>(ctx: ControllerContext<S>) {
     let mut fast_commit: BTreeMap<PartitionId, Instant> = BTreeMap::new();
     // Hinted partitions past their window. Each is committed on any pass that
     // harvested an advance for it, at the ordinary poll cadence, until its
-    // lanes leave, so an ack resolving after the window skips the tick.
-    let mut after_window: BTreeSet<PartitionId> = BTreeSet::new();
+    // lanes leave, so an ack resolving after the window skips the tick. The
+    // value is the position last sent, so a commit that failed retryably is
+    // retried on the next advance or the tick.
+    let mut after_window: BTreeMap<PartitionId, Option<i64>> = BTreeMap::new();
     // Set when the source reports `SourceEvent::Drained`. The loop exits into
     // the ordinary drain sequence, and `Completed` is additionally required
     // to mean "everything acknowledged and committed" (see the backstop after
@@ -392,17 +394,25 @@ pub(crate) fn run_controller<S: Source>(ctx: ControllerContext<S>) {
             fast_commit.retain(|&p, &mut until| {
                 let open = now < until;
                 if !open {
-                    after_window.insert(p);
+                    after_window.entry(p).or_insert(None);
                 }
                 open
             });
-            let late_advance = after_window
-                .iter()
-                .any(|p| state.pending_commit.contains_key(p));
+            // An ack that resolved while `poll_events` waited is not in this
+            // pass's first harvest.
+            if !after_window.is_empty() {
+                harvest(&mut checkpointer, &mut state);
+            }
+            let late_advance = after_window.iter().any(|(p, sent)| {
+                state
+                    .pending_commit
+                    .get(p)
+                    .is_some_and(|&o| Some(o) != *sent)
+            });
             if !fast_commit.is_empty() || late_advance {
                 let chasing: BTreeSet<PartitionId> = fast_commit
                     .keys()
-                    .chain(after_window.iter())
+                    .chain(after_window.keys())
                     .copied()
                     .collect();
                 commit_cycle(
@@ -414,6 +424,11 @@ pub(crate) fn run_controller<S: Source>(ctx: ControllerContext<S>) {
                     Some(&chasing),
                     false,
                 );
+                for (p, sent) in &mut after_window {
+                    if let Some(&o) = state.pending_commit.get(p) {
+                        *sent = Some(o);
+                    }
+                }
             }
             // Stand down when the unit of work is done, meaning its lane
             // left the assignment, not because its acks look quiet for an
@@ -423,7 +438,7 @@ pub(crate) fn run_controller<S: Source>(ctx: ControllerContext<S>) {
             // full commit interval.
             let assigned = |p: PartitionId| state.assignment.values().any(|&(part, _)| part == p);
             fast_commit.retain(|&p, _| assigned(p));
-            after_window.retain(|&p| assigned(p));
+            after_window.retain(|&p, _| assigned(p));
         }
     }
 
@@ -791,7 +806,8 @@ fn commit_cycle<S: Source>(
     metrics.set_pending_max(max_pending);
     // Gathering the counts allocates, so the default configuration must not
     // pay for it. The chase pass is skipped for the same reason. It runs at
-    // `FAST_COMMIT_POLL` for a whole `commit_interval` per hinted partition.
+    // `FAST_COMMIT_POLL` through each hinted partition's window, then on
+    // every advancing pass until the partition's lanes leave.
     // The periodic tick still fires during a chase, so the detail trails the
     // aggregate by at most one interval.
     if only.is_none() && metrics.publishes_partition_detail() {

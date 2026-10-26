@@ -54,5 +54,10 @@ harness = false
 name = "wire_wall"
 harness = false
 
+# The allocation snapshot, driven by `cargo xtask bench alloc`.
+[[bench]]
+name = "decode_alloc"
+harness = false
+
 [lints]
 workspace = true

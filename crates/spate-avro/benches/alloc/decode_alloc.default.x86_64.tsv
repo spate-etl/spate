@@ -1,0 +1,23 @@
+# rustc: rustc 1.99.1 (58cf8f9c3 2026-10-13)
+# features: none
+# arch: x86_64
+# counts: Rust global allocator only; allocations C code makes through malloc (libzstd) are not counted; steady state after one warm pass
+case	allocs	reallocs	bytes
+decode_batch_datum_typed.batch50	102	4	4191
+decode_confluent.cached_schema	51000	0	3096520
+decode_confluent.unknown_schema_id	2062	0	177920
+decode_datum_typed.flat_record	8	0	142
+decode_malformed_datum_typed.truncated_datum	11666	2000	354161
+decode_malformed_serde_typed.truncated_datum	35844	0	3369272
+decode_map_heavy.map_heavy	2050000	0	143220000
+decode_recursive.recursive_refs	62000	0	992000
+decode_resolved.added_default_field	52000	2000	3637120
+decode_resolved.promoted_numerics	44000	2000	3597120
+decode_resolved.reordered_fields	44000	2000	3597120
+decode_resolved.writer_schema_only	30000	0	943120
+decode_serde_typed.flat_record	49	0	1814
+decode_shapes.logical_types	15000	0	478827
+decode_single_object.stale_fingerprint	2000	0	264000
+decode_value.batch50	305	0	16078
+decode_value.flat_record	26	0	1571
+decode_value_malformed.flat_record_malformed	16	0	1633

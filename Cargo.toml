@@ -85,9 +85,10 @@ sha2 = "0.11"
 # are internal only, never in public signatures (INV-6).
 rdkafka = { version = "0.39", features = ["zstd"] }
 # Not used directly. rdkafka-sys takes zstd-sys with its default features, and
-# this floor is the first release rdkafka-sys accepts whose defaults leave out
-# bindgen, which needs libclang on the build host.
-zstd-sys = { version = "2.1", default-features = false }
+# from 2.1 those defaults leave out bindgen, which needs libclang on the build
+# host. The floor is 2.1.2 because the zstd-safe behind the workspace's zstd
+# requires it.
+zstd-sys = { version = "2.1.2", default-features = false }
 openssl-sys = "0.9.108"
 # Default features are off: the sink compresses insert bodies itself, and the
 # client's `lz4` default would only compress query responses.

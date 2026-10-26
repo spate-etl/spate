@@ -1,0 +1,20 @@
+# rustc: rustc 1.99.1 (58cf8f9c3 2026-10-13)
+# features: none
+# arch: x86_64
+# counts: Rust global allocator only; allocations C code makes through malloc (libzstd) are not counted; steady state after one warm pass
+# backend: serde_json
+case	allocs	reallocs	bytes
+array_batch50	301	4	12706
+array_clean	12001	9	454992
+deep_nested	17881	4	1663448
+dup_guard_deep	23001	4	2513368
+dup_guard_wide	5676	0	876268
+large_string	7	13	1049221
+ndjson_batch50	300	0	6050
+ndjson_clean	12000	0	242000
+ndjson_fail_bad_last	12001	13	455213
+ndjson_fail_clean	12001	9	454992
+numeric_array	1	14	2097152
+single_typed	8	0	62
+single_value	26	0	2141
+wide_flat	5664	0	466576

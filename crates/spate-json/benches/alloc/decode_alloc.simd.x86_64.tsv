@@ -1,0 +1,21 @@
+# rustc: rustc 1.99.1 (58cf8f9c3 2026-10-13)
+# features: simd
+# arch: x86_64
+# counts: Rust global allocator only; allocations C code makes through malloc (libzstd) are not counted; steady state after one warm pass
+# backend: simd-json
+# simd-json: AVX2
+case	allocs	reallocs	bytes
+array_batch50	302	0	53274
+array_clean	12002	0	2130024
+deep_nested	17882	4	2890352
+dup_guard_deep	23002	4	3740272
+dup_guard_wide	5677	0	1260292
+large_string	7	0	525245
+ndjson_batch50	350	0	46850
+ndjson_clean	14000	0	1874000
+ndjson_fail_bad_last	13997	13	2086991
+ndjson_fail_clean	14001	9	2086992
+numeric_array	2	14	4017176
+single_typed	9	0	1526
+single_value	27	0	3605
+wide_flat	5665	0	850600

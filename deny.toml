@@ -5,8 +5,9 @@ all-features = true
 version = 2
 # Evaluated by the advisories check, so a yank follows its blocking rule.
 yanked = "deny"
-# zstd 0.13.3 and zstd-safe 7.2.4 stay in the graph only because clickhouse
-# requires zstd ^0.13 (#562); every spate crate takes 0.14. Each ignore names
+# zstd 0.13.3 and zstd-safe 7.2.4 stay in the graph only through the codec
+# features of spate-clickhouse's clickhouse dev-dependency, because clickhouse
+# requires zstd ^0.13 (#562). No published crate reaches them. Each ignore names
 # an id, so a new advisory against either copy still fails the check, and an
 # ignore that stops matching when #562 lands is reported as unused.
 ignore = [

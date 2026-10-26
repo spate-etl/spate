@@ -189,7 +189,7 @@ sink:
     compression: lz4     # lz4 (default) | zstd | zstd:N | off
 ```
 
-This compresses the HTTP insert body and the responses to the sink's queries.
+This compresses the HTTP insert body.
 The sink compresses each chunk on the pipeline thread that sealed it, so
 compression costs pipeline-thread CPU and scales with `pipeline.threads`. On a
 host where the pipeline threads are already the limit, compression costs rows

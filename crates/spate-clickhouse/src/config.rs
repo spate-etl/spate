@@ -92,7 +92,7 @@ pub struct ClickHouseSinkConfig {
     /// Client-side send/end timeouts.
     #[serde(default)]
     pub timeouts: TimeoutSection,
-    /// Transport compression of insert bodies and query responses. `lz4` by
+    /// Transport compression of insert bodies. `lz4` by
     /// default (see [`Compression`]).
     #[serde(default)]
     pub compression: Compression,
@@ -185,7 +185,7 @@ impl Format {
     }
 }
 
-/// Transport compression of insert bodies and query responses.
+/// Transport compression of insert bodies.
 ///
 /// This is wire-level compression, unrelated to on-disk column `CODEC`s
 /// declared in table DDL, which stay the caller's responsibility.
@@ -203,8 +203,8 @@ impl Format {
 /// codec ([`ClickHouseSink::frame_codec`]) turns each chunk into one
 /// compressed block when the chunk seals, reusing one zstd context per
 /// pipeline thread, and the writer sends the blocks with `decompress=1`. A
-/// retry resends the stored blocks. Query responses are decompressed by the
-/// client.
+/// retry resends the stored blocks. Responses to the sink's own queries
+/// arrive uncompressed.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Compression {
@@ -253,16 +253,6 @@ impl<'de> Deserialize<'de> for Compression {
         // rather than deriving a tagged enum; serde attaches the field path.
         let s = String::deserialize(deserializer)?;
         s.parse().map_err(de::Error::custom)
-    }
-}
-
-/// Map our stable [`Compression`] onto the `clickhouse` crate's enum. Private:
-/// the 0.x library type must never surface in this crate's public API.
-fn to_client_compression(c: Compression) -> clickhouse::Compression {
-    match c {
-        Compression::None => clickhouse::Compression::None,
-        Compression::Lz4 => clickhouse::Compression::Lz4,
-        Compression::Zstd(level) => clickhouse::Compression::Zstd(level),
     }
 }
 
@@ -791,7 +781,10 @@ fn client_for(url: &str, cfg: &ClickHouseSinkConfig, tls: &ClientConfig) -> clic
     if let Some(password) = &cfg.password {
         client = client.with_password(password);
     }
-    client.with_compression(to_client_compression(cfg.compression))
+    // The sink's frame codec compresses insert bodies itself. Explicit because
+    // the client's default codec follows its features, and another crate in
+    // the build can turn them on.
+    client.with_compression(clickhouse::Compression::None)
 }
 
 /// One connected client per replica, `[shard][replica]`.
@@ -1686,5 +1679,40 @@ settings: { insert_quorum: "auto" }
                 "expected `{needle}` for `{check}`: {err}"
             );
         }
+    }
+
+    /// A sink query sends no `Accept-Encoding` whatever `compression` names,
+    /// so the server answers it uncompressed.
+    #[tokio::test]
+    async fn a_sink_query_asks_for_an_uncompressed_response() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut tcp, _) = listener.accept().await.unwrap();
+            let mut head = Vec::new();
+            let mut buf = [0u8; 1024];
+            while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                let n = tcp.read(&mut buf).await.unwrap();
+                assert_ne!(n, 0, "the request ended inside its head");
+                head.extend_from_slice(&buf[..n]);
+            }
+            tcp.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n")
+                .await
+                .unwrap();
+            String::from_utf8(head).unwrap().to_ascii_lowercase()
+        });
+        let mut cfg = ClickHouseSinkConfig::new("t", vec![ShardConfig::new(vec![url])]);
+        cfg.compression = Compression::Zstd(3);
+        let builder = build(cfg).unwrap();
+        builder.endpoints[0][0]
+            .client()
+            .query("SELECT 1")
+            .execute()
+            .await
+            .unwrap();
+        let head = server.await.unwrap();
+        assert!(head.starts_with("post "), "{head}");
+        assert!(!head.contains("accept-encoding"), "{head}");
     }
 }

@@ -13,22 +13,12 @@ use std::time::Duration;
 /// breaking releases never become ours.
 pub struct ClickHouseEndpoint {
     client: clickhouse::Client,
-    /// `client` with compression off, sharing its connection pool, for
-    /// inserts whose blocks the sink's frame codec already made.
-    insert_client: clickhouse::Client,
     url: String,
 }
 
 impl ClickHouseEndpoint {
     pub(crate) fn new(client: clickhouse::Client, url: String) -> Self {
-        let insert_client = client
-            .clone()
-            .with_compression(clickhouse::Compression::None);
-        ClickHouseEndpoint {
-            client,
-            insert_client,
-            url,
-        }
+        ClickHouseEndpoint { client, url }
     }
 
     /// The replica URL this endpoint writes to.
@@ -143,14 +133,11 @@ impl ShardWriter for ClickHouseWriter {
         endpoint: &ClickHouseEndpoint,
         batch: &SealedBatch,
     ) -> Result<(), SinkError> {
-        let client = match self.coded {
-            Some(method) => {
-                check_frames(method, batch)?;
-                &endpoint.insert_client
-            }
-            None => &endpoint.client,
-        };
-        let mut insert = client
+        if let Some(method) = self.coded {
+            check_frames(method, batch)?;
+        }
+        let mut insert = endpoint
+            .client
             .insert_formatted_with(self.insert_sql.clone())
             .with_setting("insert_deduplicate", "1")
             .with_setting("wait_end_of_query", "1")

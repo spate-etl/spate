@@ -14,7 +14,7 @@ categories.workspace = true
 [dependencies]
 bytes = { workspace = true }
 bytesize = { workspace = true }
-clickhouse = { workspace = true, features = ["lz4", "zstd"] }
+clickhouse = { workspace = true }
 cityhash-rs = { workspace = true }
 lz4_flex = { workspace = true }
 zstd = { workspace = true }
@@ -56,6 +56,8 @@ testing = []
 [dev-dependencies]
 spate-clickhouse = { path = ".", features = ["testing"] }
 gungraun = { workspace = true }
+# The codec features serve the stock client the insert tests and benches
+# compare the sink's frames against.
 clickhouse = { workspace = true, features = ["lz4", "zstd", "test-util"] }
 spate-test = { workspace = true }
 spate-test-support = { workspace = true, features = ["tls"] }

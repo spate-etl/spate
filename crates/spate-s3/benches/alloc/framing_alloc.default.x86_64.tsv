@@ -1,0 +1,13 @@
+# rustc: rustc 1.99.1 (58cf8f9c3 2026-10-13)
+# features: none
+# arch: x86_64
+# counts: Rust global allocator only; allocations C code makes through malloc (libzstd) are not counted; steady state after one warm pass
+case	allocs	reallocs	bytes
+gzip_multi_member	16052	152	6494170
+gzip_whole	16007	160	5349131
+plain_many_small	3234	102	996716
+plain_mid_offset	7978	22	2336671
+plain_range	7979	22	4582283
+plain_whole	16004	26	4575145
+zstd_multi_frame	16005	152	5309786
+zstd_whole	16005	160	5305827

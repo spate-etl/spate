@@ -64,5 +64,10 @@ harness = false
 name = "feed_small_objects_wall"
 harness = false
 
+# The allocation snapshot, driven by `cargo xtask bench alloc`.
+[[bench]]
+name = "framing_alloc"
+harness = false
+
 [lints]
 workspace = true

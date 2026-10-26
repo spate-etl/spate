@@ -30,8 +30,8 @@ use support::scripted_store::{HeadAnswer, ScriptedStore};
 use support::spy::{SpyOptions, spying_local_store};
 use support::{
     DRAIN_TIMEOUT, Launched, PipelineYaml, captured_rows, etag_of, key_of, launch_customized,
-    launch_customized_on_clock, launch_with_feed_on_clock, line_framer, lines_bytes, recs, sorted,
-    stop, test_options, two_range_unit, unit_over,
+    launch_customized_on_clock, launch_on_notifications, launch_with_feed_on_clock, line_framer,
+    lines_bytes, notification, recs, sorted, stop, test_options, two_range_unit, unit_over,
 };
 
 const DEADLINE: Duration = Duration::from_secs(30);
@@ -518,6 +518,7 @@ fn launch_one_row_writes(
         );
     let mut config = PipelineConfig::from_str(&yaml).unwrap();
     config.pipeline.name = spate_test::unique_name(&config.pipeline.name);
+    let name = config.pipeline.name.clone();
     let pipeline = Pipeline::from_config(config).unwrap();
     let io = pipeline.io_handle();
     let source =
@@ -555,6 +556,7 @@ fn launch_one_row_writes(
         run,
         script,
         shutdown,
+        pipeline: name,
     }
 }
 
@@ -932,44 +934,6 @@ fn a_feed_section_is_refused_beside_a_feed_given_in_code() {
         )
         .unwrap_err();
     assert!(err.to_string().contains("with_feed"), "{err}");
-}
-
-/// A run over `<scheme>://b/data/` whose store is the directory `root`, so a
-/// notification for bucket `b` names the file `root/<key>`.
-fn launch_on_notifications(
-    scheme: &str,
-    root: &Path,
-    feed: Arc<dyn Feed>,
-    pre: impl FnOnce(&SinkScript),
-) -> Launched {
-    let yaml = PipelineYaml::endpoint("s3-notification-test", "http://127.0.0.1:9")
-        .fed_by_code()
-        .build()
-        .replace("\"s3://b/data/\"", &format!("\"{scheme}://b/data/\""));
-    let store = Arc::new(object_store::local::LocalFileSystem::new_with_prefix(root).unwrap());
-    launch_customized(&yaml, test_options(), pre, move |source, _io| {
-        line_framer(source).with_store(store).with_feed(feed)
-    })
-}
-
-/// A notification whose records each create the object of that size under
-/// that key in bucket `b`, with no ETag, so a local file reads unpinned.
-fn notification(objects: &[(&str, u64)]) -> Unit {
-    let records: Vec<serde_json::Value> = objects
-        .iter()
-        .map(|(key, size)| {
-            serde_json::json!({
-                "eventVersion": "2.1",
-                "eventSource": "aws:s3",
-                "eventName": "ObjectCreated:Put",
-                "s3": { "bucket": { "name": "b" }, "object": { "key": key, "size": size } },
-            })
-        })
-        .collect();
-    Unit::new(
-        "notification",
-        serde_json::to_vec(&serde_json::json!({ "Records": records })).unwrap(),
-    )
 }
 
 /// Pins that a notification naming two objects is acknowledged once, only

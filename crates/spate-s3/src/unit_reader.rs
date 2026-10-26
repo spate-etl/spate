@@ -2211,13 +2211,13 @@ mod tests {
 
     // ------------------------------------------------------------ stop --
 
-    /// A poison report for the lane on `partition`.
-    fn report_poison(reader: &UnitReader, partition: PartitionId) {
+    /// A poison report of `kind` for the lane on `partition`.
+    fn report_poison(reader: &UnitReader, partition: PartitionId, kind: PoisonKind) {
         reader
             .poison_tx
             .send(PoisonReport {
                 partition,
-                kind: PoisonKind::NotFound,
+                kind,
                 reason: "gone".into(),
                 overwrite: None,
             })
@@ -2482,6 +2482,79 @@ mod tests {
         assert_eq!(run(false), 0.0, "each retired lane takes its count back");
     }
 
+    /// Pins that a unit read in two ranges counts one object failure per
+    /// range that reports one, and is failed back to the feed once.
+    #[test]
+    fn a_poisoned_range_counts_once_per_report() {
+        let pipeline = unique_name("reader");
+        let rendered = render_local(|| {
+            let metrics =
+                S3Metrics::new(&Meter::with_namespace("s3", pipeline.clone(), "src", "s3"));
+            let (feed, script) = scripted_feed();
+            let (mut reader, _rt) = reader_over(Arc::new(feed), Some(2), Some(metrics));
+            script.deliver(ranged_unit("a", 2));
+            start(&mut reader);
+            let lanes = partitions(&lanes_added(poll(&mut reader)));
+            assert_eq!(lanes.len(), 2);
+            for p in &lanes {
+                report_poison(&reader, *p, PoisonKind::NotFound);
+            }
+            poll(&mut reader);
+            assert_eq!(script.failed().len(), 1);
+        });
+        assert_eq!(
+            metric_value(
+                &rendered,
+                "spate_s3_objects_failed_total",
+                &[("pipeline", &pipeline), ("reason", "not_found")],
+            ),
+            Some(2.0),
+            "{rendered}"
+        );
+    }
+
+    /// Pins that each poison kind counts under its own `reason` label. Each
+    /// kind sends a different number of reports, so two kinds that swap
+    /// handles or labels move a count to the wrong series.
+    #[test]
+    fn each_poison_kind_counts_under_its_own_reason() {
+        let kinds = [
+            (PoisonKind::NotFound, "not_found", 1),
+            (PoisonKind::EtagDrift, "etag_drift", 2),
+            (PoisonKind::Undecodable, "undecodable", 3),
+            (PoisonKind::RetriesExhausted, "retries_exhausted", 4),
+        ];
+        let pipeline = unique_name("reader");
+        let rendered = render_local(|| {
+            let metrics =
+                S3Metrics::new(&Meter::with_namespace("s3", pipeline.clone(), "src", "s3"));
+            let (feed, script) = scripted_feed();
+            let (mut reader, _rt) = reader_over(Arc::new(feed), Some(1), Some(metrics));
+            script.deliver(ranged_unit("a", 1));
+            start(&mut reader);
+            let lanes = partitions(&lanes_added(poll(&mut reader)));
+            assert_eq!(lanes.len(), 1);
+            for (kind, _, n) in kinds {
+                for _ in 0..n {
+                    report_poison(&reader, lanes[0], kind);
+                }
+            }
+            poll(&mut reader);
+            assert_eq!(script.failed().len(), 1);
+        });
+        for (_, reason, n) in kinds {
+            assert_eq!(
+                metric_value(
+                    &rendered,
+                    "spate_s3_objects_failed_total",
+                    &[("pipeline", &pipeline), ("reason", reason)],
+                ),
+                Some(f64::from(n)),
+                "{reason}: {rendered}"
+            );
+        }
+    }
+
     /// Pins that a hand-back takes its lanes' counts out of
     /// `objects_remaining` at once, and a kept unit's at its commit.
     #[test]
@@ -2558,7 +2631,7 @@ mod tests {
         let r = script.deliver(descriptor_unit(0));
         start(&mut reader);
         let lanes = partitions(&lanes_added(poll(&mut reader)));
-        report_poison(&reader, lanes[0]);
+        report_poison(&reader, lanes[0], PoisonKind::NotFound);
         reader.stop_reading().unwrap();
         assert_eq!(script.failed().len(), 1);
         assert_eq!(script.failed()[0].0, r);
@@ -2573,7 +2646,7 @@ mod tests {
         start(&mut reader);
         let lanes = partitions(&lanes_added(poll(&mut reader)));
         *feed.fail.lock().unwrap() = Some(FeedErrorKind::Retryable);
-        report_poison(&reader, lanes[0]);
+        report_poison(&reader, lanes[0], PoisonKind::NotFound);
         reader.stop_reading().unwrap();
         assert!(script.handed_back().is_empty());
         assert!(reader.lanes.is_empty(), "its lane is still held");
@@ -2749,7 +2822,7 @@ mod tests {
         start(&mut reader);
         let lanes = partitions(&lanes_added(poll(&mut reader)));
         reader.lanes[&lanes[0]].tracker.set_terminal(5);
-        report_poison(&reader, lanes[1]);
+        report_poison(&reader, lanes[1], PoisonKind::NotFound);
         let logs = spate_test::capture_logs(tracing::Level::INFO, || {
             reader.stop_reading().unwrap();
         });

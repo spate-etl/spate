@@ -201,6 +201,9 @@ pub(crate) struct Launched {
     pub(crate) run: PipelineRun,
     pub(crate) script: SinkScript,
     pub(crate) shutdown: ShutdownHandle,
+    /// The pipeline name the run got from its per-launch rename, which every
+    /// metric series of the run carries as its `pipeline` label.
+    pub(crate) pipeline: String,
 }
 
 /// Assemble and launch a byte-passthrough pipeline over the YAML config's
@@ -279,6 +282,7 @@ fn launch_inner(
     // config (tests running concurrently in a `cargo test` process, or a
     // multi-instance test running two workers in-process) would collide.
     config.pipeline.name = spate_test::unique_name(&config.pipeline.name);
+    let name = config.pipeline.name.clone();
     let mut pipeline = Pipeline::from_config(config).expect("pipeline builds");
     if let Some(feed) = feed {
         pipeline = pipeline.feed(feed);
@@ -319,6 +323,7 @@ fn launch_inner(
         run,
         script,
         shutdown,
+        pipeline: name,
     }
 }
 
@@ -355,6 +360,44 @@ pub(crate) fn unit_over(data: &Path, name: &str) -> Unit {
     };
     let body = SplitDescriptor::new(vec![object]).encode().unwrap();
     Unit::new(name, body)
+}
+
+/// A run over `<scheme>://b/data/` whose store is the directory `root`, so a
+/// notification for bucket `b` names the file `root/<key>`.
+pub(crate) fn launch_on_notifications(
+    scheme: &str,
+    root: &Path,
+    feed: Arc<dyn Feed>,
+    pre: impl FnOnce(&SinkScript),
+) -> Launched {
+    let yaml = PipelineYaml::endpoint("s3-notification-test", "http://127.0.0.1:9")
+        .fed_by_code()
+        .build()
+        .replace("\"s3://b/data/\"", &format!("\"{scheme}://b/data/\""));
+    let store = Arc::new(object_store::local::LocalFileSystem::new_with_prefix(root).unwrap());
+    launch_customized(&yaml, test_options(), pre, move |source, _io| {
+        line_framer(source).with_store(store).with_feed(feed)
+    })
+}
+
+/// A notification whose records each create the object of that size under
+/// that key in bucket `b`, with no ETag, so a local file reads unpinned.
+pub(crate) fn notification(objects: &[(&str, u64)]) -> Unit {
+    let records: Vec<serde_json::Value> = objects
+        .iter()
+        .map(|(key, size)| {
+            serde_json::json!({
+                "eventVersion": "2.1",
+                "eventSource": "aws:s3",
+                "eventName": "ObjectCreated:Put",
+                "s3": { "bucket": { "name": "b" }, "object": { "key": key, "size": size } },
+            })
+        })
+        .collect();
+    Unit::new(
+        "notification",
+        serde_json::to_vec(&serde_json::json!({ "Records": records })).unwrap(),
+    )
 }
 
 /// The default `checkpoint.drain_timeout`, from which a stop's reserve

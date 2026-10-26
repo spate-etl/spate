@@ -6,7 +6,7 @@ use crate::error::SqsError;
 use crate::queue::SdkQueue;
 use aws_config::environment::region::EnvironmentVariableRegionProvider;
 use aws_config::imds::region::ImdsRegionProvider;
-use aws_config::meta::region::RegionProviderChain;
+use aws_config::meta::region::{ProvideRegion, RegionProviderChain};
 use aws_config::profile::region::ProfileFileRegionProvider;
 use aws_config::provider_config::ProviderConfig;
 use aws_sdk_sqs::Client;
@@ -48,7 +48,11 @@ pub(crate) async fn sdk_queue(
     set("loading the system trust store");
     let http = http_client(rustls_native_certs::load_native_certs).await?;
     set("resolving the AWS region");
-    let region = match config.region.clone().or_else(|| config.region_from_url()) {
+    let region = match config.region.clone() {
+        Some(region) => Some(region),
+        None => config.region_from_url().await,
+    };
+    let region = match region {
         Some(region) => Region::new(region),
         None => chain_region(&http).await?,
     };
@@ -99,11 +103,16 @@ async fn chain_region(http: &SharedHttpClient) -> Result<Region, SqsError> {
                 .build(),
         )
         .or_else(ImdsRegionProvider::builder().configure(&conf).build());
+    first_region(&chain).await
+}
+
+/// The region `chain` names, or the error that lists where to set one.
+async fn first_region(chain: &impl ProvideRegion) -> Result<Region, SqsError> {
     chain.region().await.ok_or_else(|| {
         SqsError::Config(ConfigError::Component {
             context: "feed.sqs.region".into(),
-            message: "no AWS region: set `region`, use a queue URL on \
-                      `sqs.<region>.amazonaws.com`, or set AWS_REGION in the environment"
+            message: "no AWS region: set `region`, set AWS_REGION in the environment, or set \
+                      `region` in the shared config file's profile"
                 .into(),
         })
     })
@@ -118,11 +127,8 @@ pub(crate) async fn http_client(
     let (roots, fallback) = tokio::task::spawn_blocking(move || trust_roots(system()))
         .await
         .map_err(|e| SqsError::Unavailable(format!("loading the system trust store: {e}")))?;
-    if fallback {
-        tracing::warn!(
-            "the system trust store has no certificates; verifying SQS against the Mozilla \
-             root bundle"
-        );
+    if let Some(warning) = fallback {
+        tracing::warn!("{warning}");
     }
     let tls = TlsContext::builder()
         .with_trust_store(TrustStore::empty().with_pem_certificate(roots))
@@ -147,20 +153,18 @@ pub(crate) async fn http_client(
 }
 
 /// The parsable certificates in `loaded` as one PEM bundle, or the Mozilla
-/// roots when there are none, and whether it fell back.
+/// roots when there are none, with the warning to log when it fell back.
 ///
 /// The SDK panics on a certificate it cannot parse, so only those rustls
 /// accepts are passed on.
-pub(crate) fn trust_roots(loaded: CertificateResult) -> (String, bool) {
-    if !loaded.errors.is_empty() {
-        let errors = loaded
-            .errors
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>()
-            .join("; ");
-        tracing::debug!(%errors, "errors reading the system trust store");
-    }
+pub(crate) fn trust_roots(loaded: CertificateResult) -> (String, Option<String>) {
+    let errors = loaded
+        .errors
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("; ");
+    let found = loaded.certs.len();
     let mut check = rustls::RootCertStore::empty();
     let mut bundle = String::new();
     for cert in loaded.certs {
@@ -168,13 +172,25 @@ pub(crate) fn trust_roots(loaded: CertificateResult) -> (String, bool) {
             push_pem(&mut bundle, &cert);
         }
     }
-    let fallback = bundle.is_empty();
-    if fallback {
-        for cert in webpki_root_certs::TLS_SERVER_ROOT_CERTS {
-            push_pem(&mut bundle, cert);
+    if !bundle.is_empty() {
+        if !errors.is_empty() {
+            tracing::debug!(%errors, "errors reading the system trust store");
         }
+        return (bundle, None);
     }
-    (bundle, fallback)
+    for cert in webpki_root_certs::TLS_SERVER_ROOT_CERTS {
+        push_pem(&mut bundle, cert);
+    }
+    let mut warning = if found == 0 {
+        "the system trust store has no certificates".to_owned()
+    } else {
+        format!("none of the {found} certificates in the system trust store parsed")
+    };
+    warning.push_str("; verifying SQS against the Mozilla root bundle");
+    if !errors.is_empty() {
+        warning.push_str(&format!(" (errors reading the store: {errors})"));
+    }
+    (bundle, Some(warning))
 }
 
 fn push_pem(out: &mut String, der: &[u8]) {
@@ -192,13 +208,65 @@ fn push_pem(out: &mut String, der: &[u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rustls::pki_types::CertificateDer;
+    use spate_test_support::{TestCa, native_certs, pem};
 
     /// Pins the fallback to the bundled roots when the system store yields
     /// nothing parsable, so an empty store does not panic the SDK.
     #[test]
     fn an_empty_system_store_falls_back_to_the_bundled_roots() {
-        let (bundle, fallback) = trust_roots(CertificateResult::default());
-        assert!(fallback);
+        let (bundle, warning) = trust_roots(CertificateResult::default());
+        assert_eq!(
+            warning.as_deref(),
+            Some(
+                "the system trust store has no certificates; verifying SQS against the Mozilla \
+                 root bundle"
+            )
+        );
         assert!(bundle.starts_with("-----BEGIN CERTIFICATE-----\n"));
+    }
+
+    /// Pins the warning for a store whose certificates all fail to parse:
+    /// it counts them, where an empty store says it has none.
+    #[test]
+    fn a_store_whose_certificates_do_not_parse_says_so() {
+        let unparsable = CertificateDer::from(vec![0u8; 8]);
+        let (bundle, warning) = trust_roots(native_certs(vec![unparsable]));
+        assert_eq!(
+            warning.as_deref(),
+            Some(
+                "none of the 1 certificates in the system trust store parsed; verifying SQS \
+                 against the Mozilla root bundle"
+            )
+        );
+        assert!(bundle.starts_with("-----BEGIN CERTIFICATE-----\n"));
+    }
+
+    /// Pins that a store with a parsable certificate is used with no warning.
+    #[test]
+    fn a_parsable_store_is_used_without_a_warning() {
+        let ca = TestCa::new("private");
+        let (bundle, warning) = trust_roots(native_certs(vec![ca.der()]));
+        assert_eq!(warning, None);
+        assert_eq!(bundle, pem("CERTIFICATE", &ca.der()));
+    }
+
+    /// Pins the missing-region error: its context, and a message naming the
+    /// three places an operator sets a region.
+    #[tokio::test]
+    async fn a_missing_region_names_each_way_to_give_one() {
+        let Err(SqsError::Config(ConfigError::Component { context, message })) =
+            first_region(&None::<Region>).await
+        else {
+            panic!("expected a config error");
+        };
+        assert_eq!(context, "feed.sqs.region");
+        assert_eq!(
+            message,
+            "no AWS region: set `region`, set AWS_REGION in the environment, or set `region` in \
+             the shared config file's profile"
+        );
+        let region = first_region(&Some(Region::new("eu-west-2"))).await.unwrap();
+        assert_eq!(region.as_ref(), "eu-west-2");
     }
 }

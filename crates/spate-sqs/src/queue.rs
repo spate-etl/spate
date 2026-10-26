@@ -341,28 +341,100 @@ impl Queue for SdkQueue {
 mod tests {
     use super::*;
     use crate::config::SqsFeedConfig;
-    use spate_test_support::{TestCa, serve_tls};
+    use crate::config::tests::{PARTITION_REGIONS, sdk_host};
+    use aws_sdk_sqs::config::{BehaviorVersion, Credentials, Region, SharedCredentialsProvider};
+    use spate_test_support::{TestCa, native_certs, serve_tls};
     use std::time::Duration;
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
-    /// An [`SdkQueue`] over `endpoint`, with a static access key.
-    async fn queue_at(endpoint: &str) -> SdkQueue {
-        let config = SqsFeedConfig {
-            queue_url: format!("{endpoint}/000000000000/jobs"),
-            visibility: Duration::from_secs(60),
-            region: Some("eu-west-2".to_owned()),
-            endpoint: Some(endpoint.to_owned()),
-        };
-        let credentials = aws_sdk_sqs::config::Credentials::new("x", "x", None, None, "test");
+    /// An [`SdkQueue`] over `config`, with a static access key.
+    async fn queue_for(config: &SqsFeedConfig) -> SdkQueue {
+        let credentials = Credentials::new("x", "x", None, None, "test");
         let step = std::sync::Mutex::new("starting");
         crate::client::sdk_queue(
-            &config,
-            Some(aws_sdk_sqs::config::SharedCredentialsProvider::new(
-                credentials,
-            )),
+            config,
+            Some(SharedCredentialsProvider::new(credentials)),
             &step,
         )
         .await
         .unwrap()
+    }
+
+    /// An [`SdkQueue`] over `endpoint`, with a static access key.
+    async fn queue_at(endpoint: &str) -> SdkQueue {
+        queue_for(&SqsFeedConfig {
+            queue_url: format!("{endpoint}/000000000000/jobs"),
+            visibility: Duration::from_secs(60),
+            region: Some("eu-west-2".to_owned()),
+            endpoint: Some(endpoint.to_owned()),
+        })
+        .await
+    }
+
+    /// Pins that the client takes its region from the queue URL's host, in
+    /// one region per partition the SDK lists, when `region` is unset.
+    #[tokio::test]
+    async fn the_client_takes_its_region_from_the_queue_url_host() {
+        for region in PARTITION_REGIONS {
+            let host = sdk_host(region, false, false).await;
+            let queue = queue_for(&SqsFeedConfig {
+                queue_url: format!("https://{host}/000000000000/jobs"),
+                visibility: Duration::from_secs(60),
+                region: None,
+                endpoint: Some("http://127.0.0.1:1".to_owned()),
+            })
+            .await;
+            assert_eq!(
+                queue.client.config().region(),
+                Some(&Region::new(region)),
+                "{host}"
+            );
+        }
+    }
+
+    /// Pins that a private CA the system trust store yields is trusted: a
+    /// `GetQueueAttributes` call to a server it signed succeeds.
+    #[tokio::test]
+    async fn a_private_ca_in_the_system_store_is_trusted() {
+        let ca = TestCa::new("private");
+        let addr = serve_tls(ca.server_config(None), |mut tls| async move {
+            let mut buf = vec![0u8; 65536];
+            let _ = tls.read(&mut buf).await;
+            let body = r#"{"Attributes":{"QueueArn":"arn:aws:sqs:eu-west-2:000000000000:jobs"}}"#;
+            let reply = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/x-amz-json-1.0\r\n\
+                 Content-Length: {}\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = tls.write_all(reply.as_bytes()).await;
+            let _ = tokio::io::copy(&mut tls, &mut tokio::io::sink()).await;
+        })
+        .await;
+        let der = ca.der();
+        let http = crate::client::http_client(move || native_certs(vec![der]))
+            .await
+            .unwrap();
+        let endpoint = format!("https://{addr}");
+        let conf = aws_sdk_sqs::Config::builder()
+            .behavior_version(BehaviorVersion::latest())
+            .http_client(http)
+            .endpoint_url(&endpoint)
+            .region(Region::new("eu-west-2"))
+            .credentials_provider(Credentials::new("x", "x", None, None, "test"))
+            .build();
+        let queue = SdkQueue {
+            client: Client::from_conf(conf),
+            queue_url: format!("{endpoint}/000000000000/jobs"),
+            receive_timeouts: aws_sdk_sqs::config::Builder::default(),
+        };
+        let attributes = queue
+            .attributes(&queue.queue_url, &["QueueArn"])
+            .await
+            .unwrap();
+        assert_eq!(
+            attributes.get("QueueArn").map(String::as_str),
+            Some("arn:aws:sqs:eu-west-2:000000000000:jobs")
+        );
     }
 
     /// Pins that a server whose certificate the client does not trust fails

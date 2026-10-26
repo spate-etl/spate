@@ -1,5 +1,6 @@
 //! The `sqs:` body of a `feed:` section, decoded and checked.
 
+use aws_sdk_sqs::config::endpoint::{DefaultResolver, Params, ResolveEndpoint as _};
 use serde::Deserialize;
 use spate_core::config::{ConfigError, FeedSection};
 use std::time::Duration;
@@ -104,23 +105,30 @@ impl SqsFeedConfig {
         self.visibility / 3
     }
 
-    /// The region the queue URL's host names, for `sqs.<region>.amazonaws.com`
-    /// and its FIPS and dual-stack forms.
-    pub(crate) fn region_from_url(&self) -> Option<String> {
+    /// The region the queue URL's host names: the region whose SQS endpoint,
+    /// as the SDK resolves it with or without FIPS and dual-stack, is that
+    /// host.
+    pub(crate) async fn region_from_url(&self) -> Option<String> {
         let url = Url::parse(&self.queue_url).ok()?;
         let host = url.host_str()?;
-        let mut labels = host.split('.');
-        let service = labels.next()?;
-        if !matches!(service, "sqs" | "sqs-fips") {
-            return None;
+        let region = host.split('.').nth(1)?;
+        let resolver = DefaultResolver::new();
+        for (fips, dual_stack) in [(false, false), (true, false), (false, true), (true, true)] {
+            let params = Params::builder()
+                .region(region)
+                .use_fips(fips)
+                .use_dual_stack(dual_stack)
+                .build()
+                .ok()?;
+            let Ok(endpoint) = resolver.resolve_endpoint(&params).await else {
+                continue;
+            };
+            let resolved = Url::parse(endpoint.url()).ok();
+            if resolved.as_ref().and_then(Url::host_str) == Some(host) {
+                return Some(region.to_owned());
+            }
         }
-        let region = labels.next()?;
-        let rest: Vec<&str> = labels.collect();
-        let known = matches!(
-            rest.as_slice(),
-            ["amazonaws", "com"] | ["amazonaws", "com", "cn"] | ["api", "aws"]
-        );
-        known.then(|| region.to_owned())
+        None
     }
 }
 
@@ -132,7 +140,7 @@ fn error(message: String) -> ConfigError {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::num::NonZeroU32;
 
@@ -145,14 +153,14 @@ mod tests {
     }
 
     /// Pins the defaults and every key read.
-    #[test]
-    fn the_body_is_read_with_its_defaults() {
+    #[tokio::test]
+    async fn the_body_is_read_with_its_defaults() {
         let config =
             parse("sqs: { queue_url: \"https://sqs.eu-west-2.amazonaws.com/1/jobs\" }").unwrap();
         assert_eq!(config.visibility, Duration::from_secs(60));
         assert_eq!(config.renewal_period(), Duration::from_secs(20));
         assert_eq!(config.region, None);
-        assert_eq!(config.region_from_url().as_deref(), Some("eu-west-2"));
+        assert_eq!(config.region_from_url().await.as_deref(), Some("eu-west-2"));
 
         let config = parse(
             "sqs: { queue_url: \"http://127.0.0.1:9324/000000000000/q\", visibility: 6s, \
@@ -161,21 +169,97 @@ mod tests {
         .unwrap();
         assert_eq!(config.visibility, Duration::from_secs(6));
         assert_eq!(config.region.as_deref(), Some("us-east-1"));
-        assert_eq!(config.region_from_url(), None);
+        assert_eq!(config.region_from_url().await, None);
     }
 
-    /// Pins the queue URL hosts the region is read from.
-    #[test]
-    fn the_region_is_read_from_every_sqs_host_form() {
-        for (host, region) in [
-            ("sqs.eu-west-2.amazonaws.com", Some("eu-west-2")),
-            ("sqs-fips.us-east-1.amazonaws.com", Some("us-east-1")),
-            ("sqs.cn-north-1.amazonaws.com.cn", Some("cn-north-1")),
-            ("sqs.us-east-2.api.aws", Some("us-east-2")),
-            ("sqs.eu-west-2.example.com", None),
+    /// One region in each partition of the SDK's partition table.
+    pub(crate) const PARTITION_REGIONS: [&str; 8] = [
+        "eu-west-2",
+        "cn-north-1",
+        "eusc-de-east-1",
+        "us-iso-east-1",
+        "us-isob-east-1",
+        "eu-isoe-west-1",
+        "us-isof-south-1",
+        "us-gov-west-1",
+    ];
+
+    /// The SQS host the SDK resolves for `region` with `fips` and
+    /// `dual_stack`.
+    pub(crate) async fn sdk_host(region: &str, fips: bool, dual_stack: bool) -> String {
+        let params = Params::builder()
+            .region(region)
+            .use_fips(fips)
+            .use_dual_stack(dual_stack)
+            .build()
+            .unwrap();
+        let endpoint = DefaultResolver::new()
+            .resolve_endpoint(&params)
+            .await
+            .unwrap();
+        Url::parse(endpoint.url())
+            .unwrap()
+            .host_str()
+            .unwrap()
+            .to_owned()
+    }
+
+    async fn region_of(host: &str) -> Option<String> {
+        let config = parse(&format!("sqs: {{ queue_url: \"https://{host}/1/q\" }}")).unwrap();
+        config.region_from_url().await
+    }
+
+    /// Pins that a queue URL's host gives its region exactly when the SDK
+    /// resolves that region to the host: every FIPS and dual-stack form in
+    /// one region per partition the SDK lists, and none of the near misses.
+    #[tokio::test]
+    async fn the_region_is_read_from_every_sqs_host_form() {
+        for region in PARTITION_REGIONS {
+            for (fips, dual_stack) in [(false, false), (true, false), (false, true), (true, true)] {
+                let host = sdk_host(region, fips, dual_stack).await;
+                assert_eq!(region_of(&host).await.as_deref(), Some(region), "{host}");
+            }
+        }
+        assert_eq!(
+            region_of("SQS.EU-WEST-2.AMAZONAWS.COM").await.as_deref(),
+            Some("eu-west-2")
+        );
+        assert_eq!(
+            region_of("sqs.eu-west-2.amazonaws.com:8443")
+                .await
+                .as_deref(),
+            Some("eu-west-2")
+        );
+        for host in [
+            "sqs.eu-west-2.example.com",
+            "sns.eu-west-2.amazonaws.com",
+            "vpce-0abc-xyz.sqs.eu-west-2.vpce.amazonaws.com",
+            "sqs.eu-west-2.amazonaws.com.example.com",
+            "sqs.eu-west-2.notamazonaws.com",
+            "sqs.eu-west-2.amazonaws.com.",
+            "eu-west-2.queue.amazonaws.com",
+            "sqs.eu_west_2.amazonaws.com",
+            "sqs..amazonaws.com",
         ] {
-            let config = parse(&format!("sqs: {{ queue_url: \"https://{host}/1/q\" }}")).unwrap();
-            assert_eq!(config.region_from_url().as_deref(), region, "{host}");
+            assert_eq!(region_of(host).await, None, "{host}");
+        }
+    }
+
+    /// Pins that a host whose region label belongs to another partition than
+    /// its suffix gives no region, so calls never go to a host the queue URL
+    /// does not name.
+    #[tokio::test]
+    async fn a_host_mixing_two_partitions_gives_no_region() {
+        for region in PARTITION_REGIONS {
+            for other in PARTITION_REGIONS {
+                let host = sdk_host(region, false, false)
+                    .await
+                    .replacen(region, other, 1);
+                // Two partitions can share a suffix, and the swap then gives
+                // the other region's own host.
+                let expected = (host == sdk_host(other, false, false).await).then_some(other);
+                assert_eq!(region_of(&host).await.as_deref(), expected, "{host}");
+            }
         }
     }
 

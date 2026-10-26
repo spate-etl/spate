@@ -48,12 +48,21 @@ fields are rejected with the offending key.
 |---|---|---|---|
 | `queue_url` | string | `required` | The queue's URL, as `GetQueueUrl` returns it. An `http` or `https` URL. A FIFO queue, whose URL ends in `.fifo`, is refused. |
 | `visibility` | duration | `60s` | How long a received unit stays hidden from other workers without a renewal. Whole seconds from `3s` to `12h`. |
-| `region` | string | `none` | The AWS region. Unset, the region in a `sqs.<region>.amazonaws.com` queue URL applies, then `AWS_REGION`, the shared config file and instance metadata. |
+| `region` | string | `none` | The AWS region. Unset, the region in the queue URL's host applies when the AWS SDK builds that host for the region (`sqs.<region>.amazonaws.com` and its FIPS and dual-stack forms, in every AWS partition the SDK lists), then `AWS_REGION`, the shared config file and instance metadata. |
 | `endpoint` | string | `none` | An endpoint in place of the region's, such as a local emulator or a VPC endpoint. Calls go to this endpoint when it is set, and to the region's otherwise, so a VPC endpoint in `queue_url` is reached only when it is also set here. `AWS_ENDPOINT_URL` in the environment sets one too. |
 
 `units_held` beside `sqs:` sets how many units a worker holds at once. The
 section's `attempt_cap` is refused on `sqs`, because SQS counts deliveries
 through the queue's `maxReceiveCount`.
+
+In another AWS partition, the feed reads the region from the queue URL's host
+when the SDK's partition table lists that partition. A VPC endpoint host, a
+legacy queue host or a region the SDK does not list gives no region, so set
+`region`. Calls go to the region's endpoint in the SDK's partition table. For a
+private endpoint, or a region the SDK does not list, set `endpoint` as well. A
+FIPS or dual-stack host gives only the region: `AWS_USE_FIPS_ENDPOINT` and
+`AWS_USE_DUALSTACK_ENDPOINT` choose those endpoints. With `endpoint` set, leave
+both unset and give the FIPS or dual-stack host as the endpoint.
 
 ## Security (credentials, permissions and TLS)
 
@@ -80,6 +89,9 @@ and the two KMS actions above on a queue a customer-managed key encrypts.
 
 The client verifies SQS against the system trust store. When `SSL_CERT_FILE`
 or `SSL_CERT_DIR` is set, the certificates they name replace the system store.
+A private CA is trusted once it is in the system trust store. A bundle that
+`SSL_CERT_FILE` names replaces that store for every TLS connection in the
+process, so it holds the private CA and every public root the process needs.
 If the store yields no certificate the client can parse, it logs a warning and
 uses the Mozilla root bundle compiled into the binary. It goes through the
 proxy that `HTTPS_PROXY`, `HTTP_PROXY` or `ALL_PROXY` names, except for the

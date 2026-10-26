@@ -193,7 +193,7 @@ pub(crate) async fn check(
     let dead_letter = dead_letter_url(&source_url, &dead_letter_arn).ok_or_else(|| {
         SqsError::Refused(format!(
             "the queue {arn} has a redrive policy that names `{dead_letter_arn}`, which is \
-             not an SQS queue ARN (arn:aws:sqs:<region>:<account>:<queue>)"
+             not an SQS queue ARN (arn:<partition>:sqs:<region>:<account>:<queue>)"
         ))
     })?;
 
@@ -510,8 +510,8 @@ mod tests {
 
     /// Pins that the dead-letter URL is the source queue URL with its last
     /// segment replaced by the dead-letter queue's name, with or without a
-    /// path prefix or an account segment, and refuses an ARN that is not an
-    /// SQS queue's.
+    /// path prefix, an account segment or a trailing `/`, whatever the ARN's
+    /// partition, and refuses an ARN that is not an SQS queue's.
     #[test]
     fn the_dead_letter_url_keeps_the_source_scheme_and_host() {
         let url = |s: &str| Url::parse(s).unwrap();
@@ -549,6 +549,21 @@ mod tests {
                 .as_str(),
             "http://127.0.0.1:9324/jobs-dlq"
         );
+        assert_eq!(
+            dead_letter_url(&url("http://127.0.0.1:9324/000000000000/jobs/"), DEAD_ARN)
+                .unwrap()
+                .as_str(),
+            DEAD_URL
+        );
+        assert_eq!(
+            dead_letter_url(
+                &url(SOURCE),
+                "arn:other:sqs:elasticmq:000000000000:jobs-dlq"
+            )
+            .unwrap()
+            .as_str(),
+            DEAD_URL
+        );
         for arn in [
             "arn:aws:sns:eu-west-2:111122223333:jobs-dlq",
             "arn:aws:sqs:eu-west-2:jobs-dlq",
@@ -557,6 +572,24 @@ mod tests {
         ] {
             assert!(dead_letter_url(&url(SOURCE), arn).is_none(), "{arn}");
         }
+    }
+
+    /// Pins that startup reads the dead-letter queue a redrive policy names
+    /// with a partition other than `aws`, at the URL built from the source's.
+    #[test]
+    fn startup_reads_a_dead_letter_queue_outside_the_standard_partition() {
+        let policy = r#"{"deadLetterTargetArn":"arn:other:sqs:elasticmq:000000000000:jobs-dlq","maxReceiveCount":5}"#;
+        let queue = Scripted::default()
+            .queue(
+                SOURCE,
+                &[
+                    ("QueueArn", "arn:other:sqs:elasticmq:000000000000:jobs"),
+                    ("RedrivePolicy", policy),
+                ],
+            )
+            .queue(DEAD_URL, &[]);
+        assert_eq!(run(&queue).unwrap().dead_letter_url, DEAD_URL);
+        assert_eq!(*queue.read.lock().unwrap(), [SOURCE, DEAD_URL]);
     }
 
     /// Pins the retention comparison: a dead-letter queue that keeps messages
@@ -658,7 +691,7 @@ mod tests {
             ),
             (
                 r#"{"deadLetterTargetArn":"arn:aws:sns:r:1:q","maxReceiveCount":5}"#,
-                "not an SQS queue ARN",
+                "not an SQS queue ARN (arn:<partition>:sqs:",
             ),
         ] {
             let bad = Scripted::default().queue(SOURCE, &[arn, ("RedrivePolicy", policy)]);

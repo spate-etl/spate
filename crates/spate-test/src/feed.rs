@@ -145,7 +145,8 @@ impl std::fmt::Debug for State {
 /// nothing again on its own: the script decides what the feed does next. A
 /// call with a receipt the feed no longer holds returns
 /// [`Gone`](FeedErrorKind::Gone) and is recorded by
-/// [`FeedScript::gone`]. Its [`backend`](Feed::backend) key is `scripted`,
+/// [`FeedScript::gone`]. A scripted refusal of that call is served before
+/// this check. Its [`backend`](Feed::backend) key is `scripted`,
 /// so a pipeline it is passed to names `scripted` in its `feed:` section.
 #[derive(Debug)]
 pub struct ScriptedFeed {
@@ -367,10 +368,16 @@ impl FeedScript {
     }
 
     fn refuse_next(&self, call: Call, kind: FeedErrorKind) {
+        let why = match call {
+            Call::Receive => "Gone has no meaning for receive",
+            _ => {
+                "the feed answers Gone itself for a receipt it does not hold; \
+                 lapse one with redeliver or dead_letter"
+            }
+        };
         assert!(
             kind != FeedErrorKind::Gone,
-            "refuse_next_{}: the feed answers Gone itself for a receipt it does not hold; \
-             lapse one with redeliver or dead_letter",
+            "refuse_next_{}: {why}",
             call.name()
         );
         let mut state = self.lock();
@@ -1052,23 +1059,58 @@ mod tests {
         }
     }
 
-    /// Pins that a scripted answer is served before the held check, so a
-    /// call with a lapsed receipt takes it and is not recorded as Gone.
+    /// Pins that a scripted answer to `renew`, `acknowledge` or `fail` is
+    /// served before the held check, so a call with a lapsed receipt takes
+    /// it and is not recorded as Gone, and the next call is.
     #[test]
     fn a_scripted_answer_goes_to_a_lapsed_receipt_first() {
+        for c in [Call::Renew, Call::Acknowledge, Call::Fail] {
+            let (feed, script) = scripted_feed();
+            let old = script.deliver(unit("a"));
+            let _ = feed.receive(8).unwrap();
+            script.redeliver(old);
+            refuse(&script, c, FeedErrorKind::Retryable);
+            assert_eq!(kind(call(&feed, c, old)), FeedErrorKind::Retryable, "{c:?}");
+            assert!(script.gone().is_empty(), "{c:?} recorded Gone");
+            assert_eq!(script.refusals_left(), 0, "{c:?}");
+            assert_eq!(kind(call(&feed, c, old)), FeedErrorKind::Gone, "{c:?}");
+            assert_eq!(script.gone(), vec![old], "{c:?}");
+        }
+    }
+
+    /// Pins that a scripted answer to `receive` sends no signal.
+    #[test]
+    fn a_refused_receive_sends_no_signal() {
         let (feed, script) = scripted_feed();
-        let old = script.deliver(unit("a"));
-        let _ = feed.receive(8).unwrap();
-        script.redeliver(old);
-        script.refuse_next_renew(FeedErrorKind::Retryable);
-        assert_eq!(kind(feed.renew(old)), FeedErrorKind::Retryable);
-        assert!(script.gone().is_empty());
-        assert_eq!(kind(feed.renew(old)), FeedErrorKind::Gone);
-        assert_eq!(script.gone(), vec![old]);
+        let (waker, park) = wake_channel();
+        feed.set_waker(waker);
+        script.deliver(unit("a"));
+        script.refuse_next_receive(FeedErrorKind::Retryable);
+        assert!(park.park(Duration::ZERO));
+        assert_eq!(feed.receive(8).unwrap_err().kind, FeedErrorKind::Retryable);
+        assert!(
+            !park.park(Duration::ZERO),
+            "a refused receive signalled the reader"
+        );
+    }
+
+    /// Pins that `refusals_left` counts the publish refusals not yet served.
+    #[test]
+    fn refusals_left_counts_unserved_publish_refusals() {
+        let (feed, script) = scripted_feed();
+        script.refuse_next_publish(FeedErrorKind::Refused);
+        script.refuse_next_receive(FeedErrorKind::Retryable);
+        assert_eq!(script.refusals_left(), 2);
+        let mut refused = feed.publish(unit("a"));
+        assert_eq!(
+            refused.try_outcome().unwrap().unwrap_err().kind,
+            FeedErrorKind::Refused
+        );
+        assert_eq!(script.refusals_left(), 1);
     }
 
     #[test]
-    #[should_panic(expected = "refuse_next_receive: the feed answers Gone")]
+    #[should_panic(expected = "refuse_next_receive: Gone has no meaning for receive")]
     fn scripting_gone_panics_for_receive() {
         scripted_feed().1.refuse_next_receive(FeedErrorKind::Gone);
     }

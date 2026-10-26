@@ -368,9 +368,10 @@ pub trait Source: Send {
     /// Renew the feed units the source holds, and nothing else.
     ///
     /// The controller calls this on each pass of a revocation's wait for its
-    /// drain. That wait lasts up to `checkpoint.drain_timeout`, and the
-    /// controller calls no other method during it, so a source that holds
-    /// leased units renews them here. Never waits. Settles, acknowledges and
+    /// drain. That wait lasts up to `checkpoint.drain_timeout` and makes no
+    /// [`poll_events`](Self::poll_events) call, so a source that holds leased
+    /// units renews them here. Once a stop is set, the wait also asks
+    /// [`reading_on_stop`](Self::reading_on_stop) on each pass. Never waits. Settles, acknowledges and
     /// emits nothing: what the renewal finds is reported by the next
     /// [`poll_events`](Self::poll_events). The default does nothing.
     fn renew_held(&mut self) {}

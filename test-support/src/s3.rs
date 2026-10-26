@@ -347,6 +347,27 @@ mod tests {
         assert_eq!(Store::Rustfs.lane(), "rustfs");
     }
 
+    /// The port, readiness path and name RustFS serves and reports under.
+    #[test]
+    fn rustfs_is_reached_on_its_own_port_and_readiness_path() {
+        assert_eq!(Store::Rustfs.container_port(), 9000);
+        assert_eq!(Store::Rustfs.ready_path(), "/health/ready");
+        assert_eq!(Store::Rustfs.to_string(), "RustFS");
+    }
+
+    /// The notification configuration points every created object at the
+    /// Kafka target the notifying container sets up.
+    #[test]
+    fn the_rustfs_notification_configuration_names_its_kafka_target() {
+        assert_eq!(
+            rustfs::notification_configuration(),
+            "<NotificationConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
+             <QueueConfiguration><Id>spate-test</Id>\
+             <Queue>arn:rustfs:sqs::primary:kafka</Queue>\
+             <Event>s3:ObjectCreated:*</Event></QueueConfiguration></NotificationConfiguration>"
+        );
+    }
+
     #[test]
     fn an_unknown_s3_lane_is_rejected_naming_it() {
         let err = Store::from_lane("nope").unwrap_err();

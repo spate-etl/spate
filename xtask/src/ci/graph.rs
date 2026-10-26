@@ -248,18 +248,14 @@ impl Graph {
             .collect()
     }
 
-    /// Whose instruction counts can a change to `crate_name` move? The unit is
-    /// the whole crate, because codegen is crate-global.
+    /// Whose instruction counts can a change to `crate_name` move? The
+    /// transitive dependents over dev edges too, `crate_name` included,
+    /// intersected with the crates that own a counted bench. The unit is the
+    /// whole crate, because codegen is crate-global.
     pub(crate) fn bench_pkgs_for(&self, crate_name: &str) -> BTreeSet<String> {
-        // Every crate depends on the core, so a change there is measured
-        // everywhere a bench exists.
-        if crate_name == "spate-core" {
-            return self.bench_pkgs.clone();
-        }
-        self.bench_pkgs
-            .get(crate_name)
+        closure(&self.container_rdeps, crate_name)
+            .intersection(&self.bench_pkgs)
             .cloned()
-            .into_iter()
             .collect()
     }
 

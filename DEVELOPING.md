@@ -142,10 +142,10 @@ mutant forms the tool does not generate, which stay a review step.
 ### What CI selects
 
 CI picks the container suites from the paths a pull request changed. Which
-counted benches run is derived the same way, from the benches themselves: a crate
-with a bench selects its own, `spate-core` selects every benched crate because
-everything depends on it, and a crate without one selects nothing. A change to
-the root `Cargo.toml`, which holds the build profiles, selects every one. The semver
+counted benches run is derived the same way, from the benches themselves: a
+change to a crate selects the benched crates that depend on it, its own
+included, over normal and dev edges, and a change to the root `Cargo.toml`,
+which holds the build profiles, selects every one. The semver
 gate follows a third closure over the same paths, this one over the non-dev
 dependency edges: a connector change checks that connector and the facade, and
 a `spate-core` change checks every published crate. `cargo xtask tidy self-test`

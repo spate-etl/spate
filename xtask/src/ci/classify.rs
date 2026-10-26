@@ -611,7 +611,7 @@ mod tests {
 
     #[test]
     fn an_unbenched_crate_runs_no_shards() {
-        let out = run(&["crates/spate-test/src/lib.rs"]);
+        let out = run(&["crates/spate-sqs/src/lib.rs"]);
         assert!(!out.bench);
         assert!(
             out.bench_shards.is_empty(),
@@ -629,6 +629,45 @@ mod tests {
                 .map(|s| s.package.as_str())
                 .collect::<Vec<_>>(),
             ["spate-kafka"]
+        );
+    }
+
+    /// A change to the core is measured wherever a bench exists.
+    #[test]
+    fn a_core_change_selects_every_bench() {
+        let out = run(&["crates/spate-core/src/lib.rs"]);
+        assert!(out.bench);
+        assert_eq!(out.bench_shards.len(), graph().all_bench_pkgs().len() + 1);
+    }
+
+    /// A change to a crate selects the benched crates that depend on it, over
+    /// normal and dev edges.
+    #[test]
+    fn a_dependency_of_a_benched_crate_selects_its_benches() {
+        let pkgs = |path| {
+            run(&[path])
+                .bench_shards
+                .iter()
+                .map(|s| s.package.clone())
+                .collect::<BTreeSet<_>>()
+        };
+        assert!(pkgs("crates/spate-json/src/lib.rs").contains("spate-s3"));
+        assert_eq!(
+            pkgs("crates/spate-clickhouse-derive/src/lib.rs"),
+            BTreeSet::from(["spate-clickhouse".to_string()])
+        );
+        assert_eq!(
+            pkgs("crates/spate-test/src/lib.rs"),
+            BTreeSet::from(
+                [
+                    "spate-avro",
+                    "spate-clickhouse",
+                    "spate-json",
+                    "spate-kafka",
+                    "spate-s3"
+                ]
+                .map(String::from)
+            )
         );
     }
 
@@ -670,7 +709,11 @@ mod tests {
     #[test]
     fn the_second_arm_gets_its_own_shard() {
         let shards = run(&["crates/spate-json/src/lib.rs"]).bench_shards;
-        let arms: Vec<&str> = shards.iter().map(|s| s.arm.as_str()).collect();
+        let arms: Vec<&str> = shards
+            .iter()
+            .filter(|s| s.package == "spate-json")
+            .map(|s| s.arm.as_str())
+            .collect();
         assert_eq!(arms, ["default", "simd"]);
     }
 

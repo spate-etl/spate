@@ -22,5 +22,7 @@ Dependabot proposes a release once Apache points `latest` at it. A tag above
 repository are never proposed.
 
 The lane may pin a release before Apache points `latest` at it, when that
-release carries a fix the suites need. Dependabot then proposes the next release
-once `latest` moves past the pin.
+release carries a fix the suites need. While the pin sits above `latest`,
+Dependabot counts the pin itself as a pre-release, so it proposes the next
+release as soon as Apache publishes it. The `-rcN` tags still stay out, because
+a tag with a suffix is never compared against a plain release tag.

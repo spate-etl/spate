@@ -21,6 +21,9 @@ const DIR: &str = "ci";
 /// The file naming the lane a service runs when nothing selects one.
 const PRIMARY: &str = "PRIMARY";
 
+/// The file naming what a lane's server supports.
+const CAPABILITIES: &str = "CAPABILITIES";
+
 /// The digest marker a pinned reference carries.
 const DIGEST: &str = "@sha256:";
 
@@ -146,6 +149,50 @@ pub(crate) fn extra_lanes(root: &Path, service: &str) -> Result<Vec<String>, Err
         }
     }
     Ok(out)
+}
+
+/// What a lane's server supports, as its `CAPABILITIES` file names it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Capability {
+    /// The Kafka feed reads this store's storage notifications, so the
+    /// notification suite runs on the lane.
+    Notifications,
+}
+
+impl Capability {
+    fn from_word(word: &str) -> Option<Capability> {
+        match word {
+            "notifications" => Some(Capability::Notifications),
+            _ => None,
+        }
+    }
+}
+
+/// The capabilities `ci/<service>/<lane>/CAPABILITIES` declares, one word per
+/// line. An absent file declares none.
+///
+/// # Errors
+///
+/// When the file cannot be read, or names a word no [`Capability`] has.
+pub(crate) fn lane_capabilities(
+    root: &Path,
+    service: &str,
+    lane: &str,
+) -> Result<Vec<Capability>, Error> {
+    let name = format!("{DIR}/{service}/{lane}/{CAPABILITIES}");
+    let path = root.join(DIR).join(service).join(lane).join(CAPABILITIES);
+    if !path.is_file() {
+        return Ok(Vec::new());
+    }
+    let text = std::fs::read_to_string(&path).map_err(|e| Error::msg(format!("{name}: {e}")))?;
+    text.lines()
+        .map(str::trim)
+        .filter(|word| !word.is_empty())
+        .map(|word| {
+            Capability::from_word(word)
+                .ok_or_else(|| Error::msg(format!("{name}: unknown capability `{word}`")))
+        })
+        .collect()
 }
 
 /// Fetches a lane by digest, re-tags it locally, and returns the local
@@ -520,6 +567,34 @@ mod tests {
     }
 
     #[test]
+    fn a_lane_capabilities_file_names_its_capabilities() {
+        let s = Scratch::new("capabilities");
+        s.file("db/vendor-main/CAPABILITIES", "notifications\n\n");
+        assert_eq!(
+            lane_capabilities(s.root(), "db", "vendor-main").unwrap(),
+            [Capability::Notifications]
+        );
+    }
+
+    #[test]
+    fn a_lane_with_no_capabilities_file_has_none() {
+        let s = Scratch::new("no-capabilities");
+        assert_eq!(lane_capabilities(s.root(), "db", "old").unwrap(), []);
+    }
+
+    #[test]
+    fn an_unknown_capability_is_rejected_naming_it() {
+        let s = Scratch::new("unknown-capability");
+        s.file("db/old/CAPABILITIES", "notifications\nteleport\n");
+        assert_eq!(
+            lane_capabilities(s.root(), "db", "old")
+                .unwrap_err()
+                .message,
+            "ci/db/old/CAPABILITIES: unknown capability `teleport`"
+        );
+    }
+
+    #[test]
     fn the_primary_lane_comes_from_the_primary_file() {
         let s = Scratch::new("primary");
         assert_eq!(primary_lane(s.root(), "db").unwrap(), "vendor-main");
@@ -796,6 +871,19 @@ mod tests {
                 "{service}: PRIMARY names '{primary}', which is not a lane"
             );
         }
+    }
+
+    /// The primary S3 lane runs in `containers` with no filter, so it runs
+    /// every S3 store suite and has to declare every capability they need.
+    #[test]
+    fn the_primary_s3_lane_declares_every_capability() {
+        let root = crate::repo_root().unwrap();
+        let primary = primary_lane(&root, "s3").unwrap();
+        assert_eq!(primary, "rustfs");
+        assert_eq!(
+            lane_capabilities(&root, "s3", &primary).unwrap(),
+            [Capability::Notifications]
+        );
     }
 
     /// The primary lane is covered by the job every service already gets, so it

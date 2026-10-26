@@ -22,7 +22,7 @@ const READS: [&str; 9] = [
 ];
 
 /// The keys the workflow reads, in the order the block writes them.
-const KEYS: [&str; 14] = [
+const KEYS: [&str; 15] = [
     "rust",
     "site",
     "fuzz",
@@ -37,6 +37,7 @@ const KEYS: [&str; 14] = [
     "macos",
     "bench-shards",
     "clickhouse-lanes",
+    "s3-lanes",
 ];
 
 /// The block one documentation page selects. Nothing here builds or tests
@@ -54,7 +55,8 @@ const SITE_ONLY: &str = "rust=false\n\
      release-tooling=false\n\
      macos=false\n\
      bench-shards=[]\n\
-     clickhouse-lanes=[]\n";
+     clickhouse-lanes=[]\n\
+     s3-lanes=[]\n";
 
 fn xtask(args: &[&str], env: &[(&str, &str)]) -> Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_spate-xtask"));

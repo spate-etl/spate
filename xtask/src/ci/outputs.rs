@@ -5,6 +5,8 @@ use std::fmt;
 
 use serde::Serialize;
 
+use crate::checks::container_image::Capability;
+
 /// One classification result, in the order the workflow reads it.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct Outputs {
@@ -20,6 +22,7 @@ pub(crate) struct Outputs {
     pub(crate) semver_pkgs: BTreeSet<String>,
     pub(crate) bench_shards: Vec<Shard>,
     pub(crate) clickhouse_lanes: Vec<Lane>,
+    pub(crate) s3_lanes: Vec<StoreLane>,
 }
 
 /// One `strategy.matrix.include` entry of the counter tier.
@@ -39,6 +42,31 @@ pub(crate) struct Shard {
 #[derive(Debug, PartialEq, Eq, Serialize)]
 pub(crate) struct Lane {
     pub(crate) lane: String,
+}
+
+/// One `strategy.matrix.include` entry of the S3 store tier: a lane, and the
+/// nextest filterset selecting the store tests its store supports.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub(crate) struct StoreLane {
+    pub(crate) lane: String,
+    pub(crate) filter: String,
+}
+
+impl StoreLane {
+    /// The entry for `lane`, whose store has `capabilities`.
+    pub(crate) fn new(lane: &str, capabilities: &[Capability]) -> StoreLane {
+        let mut filter = String::from(
+            "package(spate-s3) | (package(spate-test-support) & binary(containers) \
+             & test(=s3_store_round_trips_an_object))",
+        );
+        if capabilities.contains(&Capability::Notifications) {
+            filter.push_str(" | (package(spate-kafka) & binary(feed_notifications))");
+        }
+        StoreLane {
+            lane: lane.to_owned(),
+            filter,
+        }
+    }
 }
 
 impl Outputs {
@@ -82,7 +110,8 @@ impl fmt::Display for Outputs {
             f,
             "clickhouse-lanes={}",
             compact_json(&self.clickhouse_lanes)
-        )
+        )?;
+        writeln!(f, "s3-lanes={}", compact_json(&self.s3_lanes))
     }
 }
 
@@ -90,4 +119,22 @@ impl fmt::Display for Outputs {
 /// branch chooses, so every value is escaped.
 fn compact_json<T: Serialize>(value: &T) -> String {
     serde_json::to_string(value).expect("matrix entries are plain strings")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A store without notifications drops the notification suite from its
+    /// lane, so the lane reports no failure for a store that cannot publish.
+    #[test]
+    fn a_store_lane_filter_runs_the_notification_suite_only_with_notifications() {
+        let base = "package(spate-s3) | (package(spate-test-support) & binary(containers) \
+                    & test(=s3_store_round_trips_an_object))";
+        assert_eq!(StoreLane::new("plain", &[]).filter, base);
+        assert_eq!(
+            StoreLane::new("notifying", &[Capability::Notifications]).filter,
+            format!("{base} | (package(spate-kafka) & binary(feed_notifications))")
+        );
+    }
 }

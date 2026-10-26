@@ -1,6 +1,7 @@
 name: Containers
 
-# The Docker container suites and the extra ClickHouse server lanes.
+# The Docker container suites, and the extra ClickHouse server and S3 store
+# lanes.
 # Called from ci.yml, whose `changes` job computes every input.
 on:
   workflow_call:
@@ -12,6 +13,9 @@ on:
         type: string
         required: true
       clickhouse-lanes:
+        type: string
+        required: true
+      s3-lanes:
         type: string
         required: true
 
@@ -138,4 +142,60 @@ jobs:
         if: always()
         with:
           name: junit-nextest-clickhouse-${{ matrix.lane }}
+          path: target/nextest/docker/junit.xml
+
+  # The S3 stores beyond the one `containers` runs. `ci/s3/<store>/Dockerfile`
+  # pins each, and Dependabot moves them. A store lacking a capability its
+  # `CAPABILITIES` file does not declare drops the tests needing it through
+  # the lane's filter.
+  s3-stores:
+    name: S3 ${{ matrix.lane }}
+    runs-on: ubuntu-latest
+    # A false `if:` prevents a zero-leg matrix, as in `clickhouse-versions`.
+    if: inputs.s3-lanes != '[]'
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      checks: write
+    strategy:
+      # As in `clickhouse-versions`: a cancelled leg fails `CI gate` too.
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(inputs.s3-lanes) }}
+    env:
+      SPATE_S3_LANE: ${{ matrix.lane }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          tools: nextest
+          shared-key: docker
+          # A consumer of the entry `containers` owns; see `clickhouse-versions`.
+          cache-save: never
+      # The suites pull their store by digest through
+      # `spate_test_support::S3Store`, so there is no pull step.
+      - name: S3 store suites
+        env:
+          FILTER: ${{ matrix.filter }}
+        run: |
+          cargo nextest run --profile docker -p spate-s3 -p spate-kafka \
+            -p spate-test-support --all-features --locked \
+            --run-ignored ignored-only --test-threads 1 -E "$FILTER"
+
+      - name: Publish S3 store test report
+        uses: mikepenz/action-junit-report@6ef3fdcfcd5f0b5d14df3e659ef19b8c6820f93d # v6.6.1
+        if: always()
+        with:
+          report_paths: target/nextest/docker/junit.xml
+          check_name: S3 ${{ matrix.lane }} test results
+          detailed_summary: true
+          include_passed: false
+          flaky_summary: true
+          fail_on_failure: false
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: junit-nextest-s3-${{ matrix.lane }}
           path: target/nextest/docker/junit.xml

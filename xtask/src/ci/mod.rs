@@ -19,7 +19,7 @@ use crate::repo_root;
 pub(crate) fn changes(args: &[String]) -> Result<(), String> {
     let root = repo_root()?;
     let graph = graph::Graph::load(&root)?;
-    let lanes = extra_clickhouse_lanes(&root)?;
+    let lanes = extra_lanes(&root)?;
     let (ev, ctx) = event::from_environment();
 
     // An argument, so no exported variable can turn a real classification
@@ -94,11 +94,22 @@ pub(crate) fn merge_base(root: &Path, base: &str) -> Option<String> {
     event::GitDiff::new(root, classify::Event::PullRequest).merge_base(base, "HEAD")
 }
 
-/// The ClickHouse lanes needing a job beyond the primary one. The lane names
-/// live in the repository's `ci/clickhouse/`, so adding or repointing one
+/// The ClickHouse server lanes and S3 store lanes needing a job beyond the
+/// primary one, each S3 lane with its store's capabilities. The lanes live in
+/// the repository's `ci/clickhouse/` and `ci/s3/`, so adding or repointing one
 /// needs no edit here.
-fn extra_clickhouse_lanes(root: &Path) -> Result<Vec<String>, String> {
-    container_image::extra_lanes(root, "clickhouse").map_err(|e| e.message)
+fn extra_lanes(root: &Path) -> Result<classify::ExtraLanes, String> {
+    let clickhouse = container_image::extra_lanes(root, "clickhouse").map_err(|e| e.message)?;
+    let s3 = container_image::extra_lanes(root, "s3")
+        .map_err(|e| e.message)?
+        .iter()
+        .map(|lane| {
+            container_image::lane_capabilities(root, "s3", lane)
+                .map(|caps| outputs::StoreLane::new(lane, &caps))
+                .map_err(|e| e.message)
+        })
+        .collect::<Result<_, _>>()?;
+    Ok(classify::ExtraLanes { clickhouse, s3 })
 }
 
 #[cfg(test)]

@@ -45,6 +45,10 @@ jobs:
       # beyond the `lts` one `containers` runs, which are those pinning a
       # different image from `lts`.
       clickhouse-lanes: ${{ steps.classify.outputs.clickhouse-lanes }}
+      # A JSON array of `{lane, filter}` objects: the S3 store lanes needing a
+      # job beyond the primary one `containers` runs, each with the nextest
+      # filterset selecting the tests its store supports.
+      s3-lanes: ${{ steps.classify.outputs.s3-lanes }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -119,6 +123,7 @@ jobs:
       containers: ${{ needs.changes.outputs.containers }}
       container-args: ${{ needs.changes.outputs.container-args }}
       clickhouse-lanes: ${{ needs.changes.outputs.clickhouse-lanes }}
+      s3-lanes: ${{ needs.changes.outputs.s3-lanes }}
 
   perf:
     name: Perf

@@ -1150,6 +1150,75 @@ fn the_arm64_lane_runs_what_the_x64_jobs_run() {
     assert_eq!(nextest(arm64), expected);
 }
 
+/// The counted tier runs each shard on the runner the classifier names for its
+/// architecture, keys both caches and each artifact by that architecture, and
+/// warms one cache entry per architecture the shards carry. No job or step
+/// lets a failure through to `CI gate` except the merge-base leg.
+#[test]
+fn the_counted_tier_runs_on_each_architecture() {
+    let dir = Dir::new("the_counted_tier_runs_on_each_architecture");
+    let list = dir.write("paths", b".github/workflows/perf.yml\0");
+    let got = xtask(&["ci-changes", "--classify-paths", &list], &[]);
+    assert_eq!(got.status.code(), Some(0));
+    let block = String::from_utf8(got.stdout).unwrap();
+    let shards: Vec<serde_json::Value> =
+        serde_json::from_str(field(&block, "bench-shards")).unwrap();
+    let pair = |leg: &dyn Fn(&str) -> String| (leg("arch"), leg("runner"));
+    let emitted: std::collections::BTreeSet<(String, String)> = shards
+        .iter()
+        .map(|s| pair(&|k| s[k].as_str().unwrap().to_owned()))
+        .collect();
+    assert_eq!(emitted.len(), 2, "{block}");
+
+    let perf = yaml(&read_workflow("perf.yml"));
+    let counters = &perf["jobs"]["perf-counters"];
+    assert_eq!(counters["runs-on"].as_str(), Some("${{ matrix.runner }}"));
+    assert_eq!(
+        counters["strategy"]["matrix"]["include"].as_str(),
+        Some("${{ fromJSON(inputs.bench-shards) }}")
+    );
+    let steps = counters["steps"].as_sequence().unwrap();
+    let with_of = |action: &str| -> Vec<&serde_yaml::Value> {
+        steps
+            .iter()
+            .filter(|s| s["uses"].as_str().unwrap_or_default().starts_with(action))
+            .map(|s| &s["with"])
+            .collect()
+    };
+    let keys = with_of("actions/cache@");
+    assert_eq!(keys.len(), 2);
+    for with in keys {
+        let key = with["key"].as_str().unwrap();
+        assert!(key.contains("${{ runner.arch }}"), "{key}");
+    }
+    let uploads = with_of("actions/upload-artifact@");
+    assert_eq!(uploads.len(), 1);
+    let name = uploads[0]["name"].as_str().unwrap();
+    assert!(name.starts_with("perf-summaries-"), "{name}");
+    assert!(name.contains("${{ matrix.arch }}"), "{name}");
+
+    let warm = &perf["jobs"]["perf-warm"];
+    assert_eq!(warm["runs-on"].as_str(), Some("${{ matrix.runner }}"));
+    let legs: std::collections::BTreeSet<(String, String)> = warm["strategy"]["matrix"]["include"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .map(|l| pair(&|k| l[k].as_str().unwrap().to_owned()))
+        .collect();
+    assert_eq!(legs, emitted);
+
+    for name in ["perf-warm", "perf-counters"] {
+        let job = &perf["jobs"][name];
+        assert!(job.get("continue-on-error").is_none(), "{name}");
+        for step in job["steps"].as_sequence().unwrap() {
+            if step["id"].as_str() == Some("base") {
+                continue;
+            }
+            assert!(step.get("continue-on-error").is_none(), "{name}: {step:?}");
+        }
+    }
+}
+
 /// The macOS lane runs the arm64 lane's workspace suite on its own runner,
 /// gated by the classifier's `macos` key alone, and lets no failure through
 /// to `CI gate`.

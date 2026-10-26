@@ -23,11 +23,16 @@ pub(crate) struct Outputs {
 }
 
 /// One `strategy.matrix.include` entry of the counter tier.
+///
+/// `arch` names the architecture the shard measures and `runner` the runner
+/// label `runs-on:` takes for it.
 #[derive(Debug, PartialEq, Eq, Serialize)]
 pub(crate) struct Shard {
     pub(crate) package: String,
     pub(crate) arm: String,
     pub(crate) cargo_features: String,
+    pub(crate) arch: String,
+    pub(crate) runner: String,
 }
 
 /// One `strategy.matrix.include` entry of the ClickHouse version tier.

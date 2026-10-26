@@ -26,9 +26,9 @@ Advisory: numbers never block a merge; a bench that stops running does.
 A **bold** delta crossed a provisional threshold and syncs the
 `affects-performance` label; nothing else happens.
 
-| Shard | Bench | PR | baseline | Δ |
-| --- | --- | ---: | ---: | ---: |
-| spate-json | decode::decode_value flat_record | 107000 | 100000 | **+7%** (over threshold) |
+| Shard | Arch | Bench | PR | baseline | Δ |
+| --- | --- | --- | ---: | ---: | ---: |
+| spate-json |  | decode::decode_value flat_record | 107000 | 100000 | **+7%** (over threshold) |
 
 <details><summary>All metrics</summary>
 
@@ -156,7 +156,7 @@ fn a_run_that_crossed_no_threshold_writes_false() {
             .lines()
             .filter(|l| l.starts_with("| spate-json |"))
             .collect::<Vec<_>>(),
-        ["| spate-json | decode::decode_value flat_record | 100000 | 99000 | +1% |"]
+        ["| spate-json |  | decode::decode_value flat_record | 100000 | 99000 | +1% |"]
     );
     assert_eq!(scratch.flag_body().as_deref(), Some("false\n"));
 }
@@ -185,7 +185,7 @@ fn the_baseline_label_names_the_old_column() {
                 .lines()
                 .filter(|l| l.starts_with("| Shard |"))
                 .collect::<Vec<_>>(),
-            [format!("| Shard | Bench | PR | {header} | Δ |")],
+            [format!("| Shard | Arch | Bench | PR | {header} | Δ |")],
             "{label:?}"
         );
     }
@@ -449,4 +449,26 @@ fn the_flag_file_matches_an_arm_the_label_workflow_acts_on() {
         assert_eq!(stripped, want);
         assert!(arms.contains(&stripped.as_str()), "{stripped}");
     }
+}
+
+/// The stamp `perf.yml` writes carries every key the report reads from
+/// `spate_shard`, the architecture included.
+#[test]
+fn the_stamp_perf_yml_writes_names_every_key_the_report_reads() {
+    let workflow = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join(".github/workflows/perf.yml"),
+    )
+    .unwrap();
+    let (_, rest) = workflow
+        .split_once("spate_shard: {")
+        .expect("perf.yml stamps a spate_shard object");
+    let (object, _) = rest.split_once('}').unwrap();
+    let keys: Vec<&str> = object
+        .split(',')
+        .map(|field| field.split_once(':').unwrap().0.trim())
+        .collect();
+    assert_eq!(keys, ["package", "features", "baseline", "rustc", "arch"]);
 }

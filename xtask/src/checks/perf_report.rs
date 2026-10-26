@@ -13,15 +13,17 @@
 //!
 //! # Shard identity
 //!
-//! A summary carries neither the package nor the feature arm, so over a matrix
-//! of (package, feature arm) nothing tells two rows apart. Each job stamps its
-//! own summaries with one object this module reads and gungraun never writes:
+//! A summary carries neither the package, the feature arm nor the
+//! architecture, so over a matrix of (package, feature arm, architecture)
+//! nothing tells two rows apart. Each job stamps its own summaries with one
+//! object this module reads and gungraun never writes:
 //!
 //! ```text
 //! {"spate_shard": {"package": "spate-json",
 //!                  "features": "simd",
 //!                  "baseline": "main @ 0123456789ab",
-//!                  "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)"}}
+//!                  "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+//!                  "arch": "aarch64"}}
 //! ```
 //!
 //! `package` is the cargo package built. `features` labels the feature arm, and
@@ -30,9 +32,11 @@
 //! measured none and its rows read *no baseline*, and an absent key falls back
 //! to the label the caller passes. `rustc` names the compiler both legs of that
 //! job ran under, since codegen moves a count; every distinct value is named.
+//! `arch` names the CI runner's architecture and renders as the `Arch` column;
+//! the empty string or an absent key leaves the cell blank.
 //!
 //! Without the stamp, `package` falls back to the last segment of `package_dir`
-//! and the feature arm stays blank. Two rows landing on one identity are
+//! and the feature arm and architecture stay blank. Two rows landing on one identity are
 //! rendered with a warning naming the key they share.
 
 use std::fmt;
@@ -158,6 +162,7 @@ struct Shard {
     features: Option<String>,
     baseline: Option<String>,
     rustc: Option<String>,
+    arch: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -388,11 +393,18 @@ struct Row<'a> {
     bench: String,
     baseline: String,
     rustc: String,
+    arch: String,
 }
 
 impl Row<'_> {
+    /// The identity no two rows may share. An empty architecture is left out,
+    /// so an unstamped row keeps its two-part key.
     fn key(&self) -> String {
-        format!("{} — {}", self.shard, self.bench)
+        if self.arch.is_empty() {
+            format!("{} — {}", self.shard, self.bench)
+        } else {
+            format!("{} — {} — {}", self.shard, self.arch, self.bench)
+        }
     }
 
     /// What a metric with no comparison reads as: a bench with no baseline at
@@ -463,6 +475,7 @@ fn row<'a>(summary: &'a Summary, base: &str) -> Row<'a> {
             .and_then(|s| s.baseline.clone())
             .unwrap_or_else(|| base.to_owned()),
         rustc: shard.and_then(|s| s.rustc.clone()).unwrap_or_default(),
+        arch: shard.and_then(|s| s.arch.clone()).unwrap_or_default(),
     }
 }
 
@@ -494,11 +507,12 @@ fn bench_name(summary: &Summary) -> String {
 
 /// Renders every summary as one Markdown report.
 ///
-/// Rows are sorted by shard and bench up front: jobs merge by concatenation and
-/// artifacts download in no particular order, so input order is not an order.
+/// Rows are sorted by shard, bench and architecture up front: jobs merge by
+/// concatenation and artifacts download in no particular order, so input order
+/// is not an order.
 fn render(summaries: &[Summary], base: &str) -> Result<String, String> {
     let mut rows: Vec<Row<'_>> = summaries.iter().map(|s| row(s, base)).collect();
-    rows.sort_by(|a, b| (&a.shard, &a.bench).cmp(&(&b.shard, &b.bench)));
+    rows.sort_by(|a, b| (&a.shard, &a.bench, &a.arch).cmp(&(&b.shard, &b.bench, &b.arch)));
 
     let bases = unique(rows.iter().map(|r| r.baseline.clone()));
     // One column header can only name one baseline. Jobs that disagree take a
@@ -543,27 +557,32 @@ fn render(summaries: &[Summary], base: &str) -> Result<String, String> {
     if bases.len() > 1 {
         out.push(String::new());
         out.push("Baseline per shard:".to_owned());
-        for (baseline, shard) in legend(&rows) {
+        for (baseline, shard, arch) in legend(&rows) {
             let named = if baseline.is_empty() {
                 "*none measured*"
             } else {
                 baseline.as_str()
             };
-            out.push(format!("- `{shard}` — {named}"));
+            if arch.is_empty() {
+                out.push(format!("- `{shard}` — {named}"));
+            } else {
+                out.push(format!("- `{shard}` on {arch} — {named}"));
+            }
         }
     }
     out.push(String::new());
-    out.push(format!("| Shard | Bench | PR | {header} | Δ |"));
-    out.push("| --- | --- | ---: | ---: | ---: |".to_owned());
+    out.push(format!("| Shard | Arch | Bench | PR | {header} | Δ |"));
+    out.push("| --- | --- | --- | ---: | ---: | ---: |".to_owned());
     for r in &rows {
         out.push(match r.tool(Tool::Callgrind).and_then(|m| m.get("Ir")) {
             None => format!(
-                "| {} | {} | {DASH} | {DASH} | *no callgrind profile* |",
-                r.shard, r.bench
+                "| {} | {} | {} | {DASH} | {DASH} | *no callgrind profile* |",
+                r.shard, r.arch, r.bench
             ),
             Some(ir) => format!(
-                "| {} | {} | {} | {} | {} |",
+                "| {} | {} | {} | {} | {} | {} |",
                 r.shard,
+                r.arch,
                 r.bench,
                 cell(new_side(ir)),
                 old_side(ir).unwrap_or_else(|| DASH.to_owned()),
@@ -583,8 +602,10 @@ fn render(summaries: &[Summary], base: &str) -> Result<String, String> {
             "DHAT heap blocks and peak bytes per bench: pull request vs {header}."
         ));
         out.push(String::new());
-        out.push(format!("| Shard | Bench | Metric | PR | {header} | Δ |"));
-        out.push("| --- | --- | --- | ---: | ---: | ---: |".to_owned());
+        out.push(format!(
+            "| Shard | Arch | Bench | Metric | PR | {header} | Δ |"
+        ));
+        out.push("| --- | --- | --- | --- | ---: | ---: | ---: |".to_owned());
         for r in &rows {
             let Some(dhat) = r.tool(Tool::Dhat) else {
                 continue;
@@ -599,8 +620,9 @@ fn render(summaries: &[Summary], base: &str) -> Result<String, String> {
                     flag_pct_increase(metric, PEAK_THRESHOLD_PCT)?
                 };
                 out.push(format!(
-                    "| {} | {} | {key} | {} | {} | {} |",
+                    "| {} | {} | {} | {key} | {} | {} | {} |",
                     r.shard,
+                    r.arch,
                     r.bench,
                     cell(new_side(metric)),
                     old_side(metric).unwrap_or_else(|| DASH.to_owned()),
@@ -618,7 +640,7 @@ fn render(summaries: &[Summary], base: &str) -> Result<String, String> {
             let Some(metrics) = r.tool(tool) else {
                 continue;
             };
-            out.push(format!("**{} — {}** — {}", r.shard, r.bench, tool.label()));
+            out.push(format!("**{}** — {}", r.key(), tool.label()));
             out.push(String::new());
             out.push(format!("| Metric | PR | {header} | Δ |"));
             out.push("| --- | ---: | ---: | ---: |".to_owned());
@@ -663,11 +685,11 @@ fn duplicates(keys: impl Iterator<Item = String>) -> Vec<String> {
     out
 }
 
-/// The per-shard baseline legend, ordered by baseline and then by shard.
-fn legend(rows: &[Row<'_>]) -> Vec<(String, String)> {
-    let mut out: Vec<(String, String)> = rows
+/// The per-shard baseline legend, ordered by baseline, shard and architecture.
+fn legend(rows: &[Row<'_>]) -> Vec<(String, String, String)> {
+    let mut out: Vec<(String, String, String)> = rows
         .iter()
-        .map(|r| (r.baseline.clone(), r.shard.clone()))
+        .map(|r| (r.baseline.clone(), r.shard.clone(), r.arch.clone()))
         .collect();
     out.sort();
     out.dedup();
@@ -745,6 +767,15 @@ const COLLIDE: &str = concat!(
     "\n",
 );
 
+/// One shard measured on two architectures: alike in package, feature arm and
+/// bench, told apart by the stamp's `arch` alone.
+const CROSS_ARCH: &str = concat!(
+    r#"{"version":"7","spate_shard":{"package":"spate-json","features":"simd","baseline":"main @ 0123456789ab","arch":"x86_64"},"package_dir":"/w/crates/spate-json","module_path":"decode_gungraun::decode::decode_value","id":"flat_record","profiles":[{"tool":"Callgrind","data":{"total":{"metrics":{"Ir":{"values":{"new":61000,"old":60000},"change":{"diff_pct":"1.67"}}}}}}]}"#,
+    "\n",
+    r#"{"version":"7","spate_shard":{"package":"spate-json","features":"simd","baseline":"main @ 0123456789ab","arch":"aarch64"},"package_dir":"/w/crates/spate-json","module_path":"decode_gungraun::decode::decode_value","id":"flat_record","profiles":[{"tool":"Callgrind","data":{"total":{"metrics":{"Ir":{"values":{"new":52000,"old":51000},"change":{"diff_pct":"1.96"}}}}}}]}"#,
+    "\n",
+);
+
 /// The write side of the `perf-label.yml` contract, executable: the flag file
 /// must hold the bare `true` or `false` the label workflow's `case` accepts, and
 /// threshold crossings must mark rows.
@@ -813,7 +844,7 @@ fn run_self_test(dir: &Path) -> Outcome {
     count_is(
         &report,
         1,
-        "| spate-json | decode::decode_value flat_record | 107000 |",
+        "| spate-json |  | decode::decode_value flat_record | 107000 |",
         "hot fixture",
     )?;
 
@@ -839,13 +870,13 @@ fn run_self_test(dir: &Path) -> Outcome {
     count_is(
         &report,
         1,
-        "| spate-json (default) | decode::decode_value flat_record | 100000 |",
+        "| spate-json (default) |  | decode::decode_value flat_record | 100000 |",
         "matrix fixture",
     )?;
     count_is(
         &report,
         1,
-        "| spate-json (simd) | decode::decode_value flat_record | 61000 |",
+        "| spate-json (simd) |  | decode::decode_value flat_record | 61000 |",
         "matrix fixture",
     )?;
     // A job whose merge-base leg failed must not read like a bench that is new,
@@ -854,13 +885,13 @@ fn run_self_test(dir: &Path) -> Outcome {
     count_is(
         &report,
         1,
-        "| spate-core (default) | chain::forward one_stage | 50000 | — | *no baseline* |",
+        "| spate-core (default) |  | chain::forward one_stage | 50000 | — | *no baseline* |",
         "matrix fixture",
     )?;
     count_is(
         &report,
         1,
-        "| spate-json (default) | decode::decode_value nested_record | 211000 | — | *new* |",
+        "| spate-json (default) |  | decode::decode_value nested_record | 211000 | — | *new* |",
         "matrix fixture",
     )?;
     if !report.contains("Baseline per shard") {
@@ -897,6 +928,26 @@ fn run_self_test(dir: &Path) -> Outcome {
     if !report.contains("Duplicate shard identity") {
         return Err(fail(
             "collision fixture: two identically stamped jobs are reported as one shard, unremarked",
+        ));
+    }
+
+    // Twins on two architectures are two shards, each with its own row.
+    let (report, _) = render_fixture("cross-arch", CROSS_ARCH)?;
+    count_is(
+        &report,
+        1,
+        "| spate-json (simd) | x86_64 | decode::decode_value flat_record | 61000 |",
+        "cross-arch fixture",
+    )?;
+    count_is(
+        &report,
+        1,
+        "| spate-json (simd) | aarch64 | decode::decode_value flat_record | 52000 |",
+        "cross-arch fixture",
+    )?;
+    if report.contains("Duplicate shard identity") {
+        return Err(fail(
+            "cross-arch fixture: one shard on two architectures was reported as a collision",
         ));
     }
     Ok(())

@@ -16,15 +16,24 @@ permissions:
   contents: read
 
 jobs:
-  # The instruction-count tier: one shard per (package, feature arm). gungraun's
-  # summary path carries no feature component, so two feature builds of one bench
-  # in one workspace overwrite each other's summary and baseline, silently.
+  # The instruction-count tier: one shard per (package, feature arm,
+  # architecture). gungraun's summary path carries no feature component, so two
+  # feature builds of one bench in one workspace overwrite each other's summary
+  # and baseline, silently.
   perf-warm:
-    name: Warm the counter-tier build cache
-    runs-on: ubuntu-latest
+    name: Warm the counter-tier build cache (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
     # `main` only: rust-cache writes from `main` alone.
     if: github.event_name == 'push' && inputs.bench == 'true'
     timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      # rust-cache keys its entry by architecture, so each architecture needs a
+      # leg to own it. These are the `(arch, runner)` pairs the shards carry.
+      matrix:
+        include:
+          - {arch: x86_64, runner: ubuntu-latest}
+          - {arch: aarch64, runner: ubuntu-26.04-arm}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -37,11 +46,14 @@ jobs:
       - name: Build every bench arm
         env:
           BENCH_SHARDS: ${{ inputs.bench-shards }}
+          ARCH: ${{ matrix.arch }}
         run: |
           set -euo pipefail
           # Materialised and counted, not streamed: a `while read` whose producer
           # died iterates zero times and exits 0, having warmed nothing.
-          jq -r '.[] | [.package, .cargo_features] | @tsv' <<<"$BENCH_SHARDS" >arms.tsv
+          jq -r --arg arch "$ARCH" \
+            '.[] | select(.arch == $arch) | [.package, .cargo_features] | @tsv' \
+            <<<"$BENCH_SHARDS" >arms.tsv
           arms=$(wc -l <arms.tsv)
           if [[ "$arms" -eq 0 ]]; then
             echo "::error::the bench matrix is empty; there is nothing to warm"
@@ -60,8 +72,8 @@ jobs:
           fi
 
   perf-counters:
-    name: Instruction counts (${{ matrix.package }} / ${{ matrix.arm }})
-    runs-on: ubuntu-latest
+    name: Instruction counts (${{ matrix.package }} / ${{ matrix.arm }} / ${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
     # The second clause is required: a matrix expanding to zero jobs is a
     # workflow-level error, and a false `if:` is what prevents the expansion.
     if: inputs.bench == 'true' && inputs.bench-shards != '[]'
@@ -91,11 +103,12 @@ jobs:
           # A pure consumer of the entry `perf-warm` owns.
           cache-save: never
 
-      # The version is part of the measurement: valgrind emulates CPUID, so
-      # changing `VALGRIND_VERSION` can move a count. Built from source because
-      # Ubuntu 24.04's apt valgrind 3.22 can load no symbols or CFI for a bench
-      # binary whose two RW segments abut (valgrind bug 492663, fixed in 3.24),
-      # and DHAT then records frames gungraun-runner rejects.
+      # The version is part of the measurement: valgrind emulates CPUID on
+      # x86_64 and masks `AT_HWCAP` on aarch64, so changing `VALGRIND_VERSION`
+      # can move a count. Built from source because Ubuntu 24.04's apt valgrind
+      # 3.22 can load no symbols or CFI for a bench binary whose two RW segments
+      # abut (valgrind bug 492663, fixed in 3.24), and DHAT then records frames
+      # gungraun-runner rejects.
       - name: Cache valgrind
         id: valgrind-cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -134,13 +147,14 @@ jobs:
           echo "version=$version" >>"$GITHUB_OUTPUT"
 
       # Built from source: install-action has no checksummed prebuilt for it.
-      # The key names no shard, so the matrix shares one entry.
+      # The key names the architecture and no shard, so each architecture's
+      # legs share one entry.
       - name: Cache gungraun-runner
         id: runner-cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.gungraun/bin
-          key: gungraun-runner-${{ runner.os }}-${{ steps.runner-version.outputs.version }}
+          key: gungraun-runner-${{ runner.os }}-${{ runner.arch }}-${{ steps.runner-version.outputs.version }}
 
       - name: Install gungraun-runner
         if: steps.runner-cache.outputs.cache-hit != 'true'
@@ -238,13 +252,13 @@ jobs:
       # number becomes a baseline later comparisons inherit. Head leg only.
       - name: Reject a degenerate collected region
         env:
-          PACKAGE: ${{ matrix.package }}
-          ARM: ${{ matrix.arm }}
-        run: cargo xtask bench region --shard "$PACKAGE ($ARM)"
+          SHARD: ${{ matrix.package }} (${{ matrix.arm }}, ${{ matrix.arch }})
+        run: cargo xtask bench region --shard "$SHARD"
 
-      # A gungraun summary carries the package only as a directory path and the
-      # feature arm not at all, so shard identity is stamped here for
-      # `cargo xtask bench report`. Empty `baseline` renders as *no baseline*.
+      # A gungraun summary carries the package only as a directory path and
+      # neither the feature arm nor the architecture, so shard identity is
+      # stamped here for `cargo xtask bench report`. Empty `baseline` renders as
+      # *no baseline*.
       #
       # The compiler is stamped alongside it. Codegen moves a count, and both
       # legs of this job run under one toolchain.
@@ -252,18 +266,19 @@ jobs:
         env:
           PACKAGE: ${{ matrix.package }}
           ARM: ${{ matrix.arm }}
+          ARCH: ${{ matrix.arch }}
           BASE_MEASURED: ${{ steps.base.outputs.measured }}
           MERGE_BASE: ${{ steps.base.outputs.merge-base }}
           RUSTC: ${{ steps.rust.outputs.rustc }}
         run: |
           set -euo pipefail
           if [[ ! -d target/gungraun ]]; then
-            echo "::error::$PACKAGE ($ARM) ran its benches but wrote no target/gungraun"
+            echo "::error::$PACKAGE ($ARM, $ARCH) ran its benches but wrote no target/gungraun"
             exit 1
           fi
           find target/gungraun -name summary.json -exec cat {} + >raw.jsonl
           if [[ ! -s raw.jsonl ]]; then
-            echo "::error::$PACKAGE ($ARM) wrote no summary.json; GUNGRAUN_SAVE_SUMMARY may no longer be honoured"
+            echo "::error::$PACKAGE ($ARM, $ARCH) wrote no summary.json; GUNGRAUN_SAVE_SUMMARY may no longer be honoured"
             exit 1
           fi
           if [[ "$BASE_MEASURED" == "true" ]]; then
@@ -273,13 +288,13 @@ jobs:
           fi
           mkdir -p shard
           jq -c --arg p "$PACKAGE" --arg a "$ARM" --arg b "$baseline" \
-            --arg r "$RUSTC" \
-            '. + {spate_shard: {package: $p, features: $a, baseline: $b, rustc: $r}}' \
+            --arg r "$RUSTC" --arg h "$ARCH" \
+            '. + {spate_shard: {package: $p, features: $a, baseline: $b, rustc: $r, arch: $h}}' \
             raw.jsonl >"shard/$PACKAGE.$ARM.jsonl"
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: perf-summaries-${{ matrix.package }}-${{ matrix.arm }}
+          name: perf-summaries-${{ matrix.package }}-${{ matrix.arm }}-${{ matrix.arch }}
           path: shard/
           if-no-files-found: error
 

@@ -36,6 +36,11 @@ pub(crate) fn feature_arms_for(pkg: &str) -> Vec<(&'static str, &'static str)> {
     }
 }
 
+/// The `(arch, runner)` legs every counter shard runs on, spelled as the
+/// `alloc-snapshots` matrix in `tests.yml` spells them.
+const BENCH_LEGS: [(&str, &str); 2] =
+    [("x86_64", "ubuntu-latest"), ("aarch64", "ubuntu-26.04-arm")];
+
 /// True when `path` matches a bash `case` glob, where `*` spans `/` as well.
 fn glob(path: &str, pattern: &str) -> bool {
     debug_assert!(
@@ -419,10 +424,14 @@ pub(crate) fn classify(
         .flat_map(|pkg| {
             feature_arms_for(pkg)
                 .into_iter()
-                .map(move |(arm, feats)| Shard {
-                    package: pkg.clone(),
-                    arm: arm.to_string(),
-                    cargo_features: feats.to_string(),
+                .flat_map(move |(arm, feats)| {
+                    BENCH_LEGS.iter().map(move |(arch, runner)| Shard {
+                        package: pkg.clone(),
+                        arm: arm.to_string(),
+                        cargo_features: feats.to_string(),
+                        arch: (*arch).to_string(),
+                        runner: (*runner).to_string(),
+                    })
                 })
         })
         .collect();
@@ -628,7 +637,7 @@ mod tests {
                 .iter()
                 .map(|s| s.package.as_str())
                 .collect::<Vec<_>>(),
-            ["spate-kafka"]
+            ["spate-kafka", "spate-kafka"]
         );
     }
 
@@ -637,7 +646,10 @@ mod tests {
     fn a_core_change_selects_every_bench() {
         let out = run(&["crates/spate-core/src/lib.rs"]);
         assert!(out.bench);
-        assert_eq!(out.bench_shards.len(), graph().all_bench_pkgs().len() + 1);
+        assert_eq!(
+            out.bench_shards.len(),
+            2 * (graph().all_bench_pkgs().len() + 1)
+        );
     }
 
     /// A change to a crate selects the benched crates that depend on it, over
@@ -711,7 +723,7 @@ mod tests {
         let shards = run(&["crates/spate-json/src/lib.rs"]).bench_shards;
         let arms: Vec<&str> = shards
             .iter()
-            .filter(|s| s.package == "spate-json")
+            .filter(|s| s.package == "spate-json" && s.arch == "x86_64")
             .map(|s| s.arm.as_str())
             .collect();
         assert_eq!(arms, ["default", "simd"]);
@@ -724,7 +736,33 @@ mod tests {
             out.bench,
             "the change rewriting bench selection must run them"
         );
-        assert_eq!(out.bench_shards.len(), graph().all_bench_pkgs().len() + 1);
+        assert_eq!(
+            out.bench_shards.len(),
+            2 * (graph().all_bench_pkgs().len() + 1)
+        );
+    }
+
+    /// Every (package, arm) of the counter tier runs once on each
+    /// architecture, on that architecture's runner.
+    #[test]
+    fn every_shard_runs_on_each_architecture() {
+        let shards = run(&[".github/workflows/perf.yml"]).bench_shards;
+        let mut legs: std::collections::BTreeMap<(&str, &str), Vec<(&str, &str)>> =
+            std::collections::BTreeMap::new();
+        for s in &shards {
+            legs.entry((s.package.as_str(), s.arm.as_str()))
+                .or_default()
+                .push((s.arch.as_str(), s.runner.as_str()));
+        }
+        assert!(!legs.is_empty());
+        for (shard, mut got) in legs {
+            got.sort_unstable();
+            assert_eq!(
+                got,
+                [("aarch64", "ubuntu-26.04-arm"), ("x86_64", "ubuntu-latest")],
+                "{shard:?}"
+            );
+        }
     }
 
     /// The workflow that passes the counted tier its inputs, and the unit that
@@ -736,7 +774,7 @@ mod tests {
             assert!(out.bench, "{path}");
             assert_eq!(
                 out.bench_shards.len(),
-                graph().all_bench_pkgs().len() + 1,
+                2 * (graph().all_bench_pkgs().len() + 1),
                 "{path}"
             );
         }
@@ -750,7 +788,10 @@ mod tests {
     fn a_manifest_change_selects_every_bench() {
         let out = run(&["Cargo.toml"]);
         assert!(out.bench);
-        assert_eq!(out.bench_shards.len(), graph().all_bench_pkgs().len() + 1);
+        assert_eq!(
+            out.bench_shards.len(),
+            2 * (graph().all_bench_pkgs().len() + 1)
+        );
         for path in [
             "Cargo.lock",
             "deny.toml",

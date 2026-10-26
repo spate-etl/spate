@@ -235,9 +235,10 @@ single component. A claim no tier here can measure is stated as unmeasured.
 ### The counted tier
 
 `cargo xtask bench counted` counts instructions under valgrind rather than measuring
-wall time, so its numbers are comparable across machines. It needs Linux,
-valgrind 3.24 or later, and a `gungraun-runner` at the version `Cargo.lock`
-pins for `gungraun`; a mismatch is a hard error. On macOS the most you can
+wall time, so its numbers are comparable across machines of one architecture.
+In CI, each architecture's rows compare its own merge base and head. It needs
+Linux, valgrind 3.24 or later, and a `gungraun-runner` at the version
+`Cargo.lock` pins for `gungraun`; a mismatch is a hard error. On macOS the most you can
 check is that the benches build, with `cargo xtask bench gungraun --check`.
 
 Adding one means naming the file `benches/<something>_gungraun.rs` and declaring
@@ -275,10 +276,11 @@ holds the guard itself to captured profiles of both shapes, and needs no
 valgrind.
 
 Measuring a crate under more than one compiled feature arm *is* a second edit:
-CI runs one job per (package, arm), and the arm table is `feature_arms_for` in
-`xtask/src/ci/classify.rs`. Add an arm when a feature swaps an implementation
-the benches execute, not for every feature key; each arm is another pair of
-builds and valgrind runs. `cargo xtask tidy self-test` holds every arm to a feature its
+CI runs one job per (package, arm, architecture), on Linux x86_64 and aarch64,
+and the arm table is `feature_arms_for` in `xtask/src/ci/classify.rs`. Add an
+arm when a feature swaps an implementation the benches execute, not for every
+feature key; each arm is another pair of builds and valgrind runs on each
+architecture. `cargo xtask tidy self-test` holds every arm to a feature its
 package declares.
 
 ### Allocation snapshots

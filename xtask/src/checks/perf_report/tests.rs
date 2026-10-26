@@ -94,7 +94,7 @@ fn fold_rows(report: &str) -> Vec<&str> {
 fn ir_rows(report: &str) -> Vec<&str> {
     report
         .lines()
-        .skip_while(|l| !l.starts_with("| --- | --- | ---: |"))
+        .skip_while(|l| !l.starts_with("| --- | --- | --- | ---: |"))
         .skip(1)
         .take_while(|l| l.starts_with("| "))
         .collect()
@@ -117,9 +117,9 @@ Advisory: numbers never block a merge; a bench that stops running does.
 A **bold** delta crossed a provisional threshold and syncs the
 `affects-performance` label; nothing else happens.
 
-| Shard | Bench | PR | baseline | Δ |
-| --- | --- | ---: | ---: | ---: |
-| spate-json | g::case one | 107000 | 100000 | **+7%** (over threshold) |
+| Shard | Arch | Bench | PR | baseline | Δ |
+| --- | --- | --- | ---: | ---: | ---: |
+| spate-json |  | g::case one | 107000 | 100000 | **+7%** (over threshold) |
 
 <details><summary>All metrics</summary>
 
@@ -150,18 +150,18 @@ Advisory: numbers never block a merge; a bench that stops running does.
 A **bold** delta crossed a provisional threshold and syncs the
 `affects-performance` label; nothing else happens.
 
-| Shard | Bench | PR | base | Δ |
-| --- | --- | ---: | ---: | ---: |
-| spate-json | g::case one | 100 | 100 | 0% |
+| Shard | Arch | Bench | PR | base | Δ |
+| --- | --- | --- | ---: | ---: | ---: |
+| spate-json |  | g::case one | 100 | 100 | 0% |
 
 ## Heap (DHAT)
 
 DHAT heap blocks and peak bytes per bench: pull request vs base.
 
-| Shard | Bench | Metric | PR | base | Δ |
-| --- | --- | --- | ---: | ---: | ---: |
-| spate-json | g::case one | TotalBlocks | 38 | 40 | **-5%** (over threshold) |
-| spate-json | g::case one | AtTGmaxBytes | 4342 | 4096 | **+6%** (over threshold) |
+| Shard | Arch | Bench | Metric | PR | base | Δ |
+| --- | --- | --- | --- | ---: | ---: | ---: |
+| spate-json |  | g::case one | TotalBlocks | 38 | 40 | **-5%** (over threshold) |
+| spate-json |  | g::case one | AtTGmaxBytes | 4342 | 4096 | **+6%** (over threshold) |
 
 <details><summary>All metrics</summary>
 
@@ -196,8 +196,8 @@ Advisory: numbers never block a merge; a bench that stops running does.
 A **bold** delta crossed a provisional threshold and syncs the
 `affects-performance` label; nothing else happens.
 
-| Shard | Bench | PR | baseline | Δ |
-| --- | --- | ---: | ---: | ---: |
+| Shard | Arch | Bench | PR | baseline | Δ |
+| --- | --- | --- | ---: | ---: | ---: |
 
 <details><summary>All metrics</summary>
 
@@ -241,7 +241,7 @@ fn a_percentage_renders_rounded_to_two_places() {
         assert_eq!(
             ir_rows(&report),
             [format!(
-                "| spate-json | g::case one | 105000 | 100000 | {want} |"
+                "| spate-json |  | g::case one | 105000 | 100000 | {want} |"
             )],
             "{pct}"
         );
@@ -268,7 +268,7 @@ fn the_instruction_threshold_is_read_before_rounding() {
         assert_eq!(
             ir_rows(&rendered(&text, "baseline")),
             [format!(
-                "| spate-json | g::case one | 105000 | 100000 | {want} |"
+                "| spate-json |  | g::case one | 105000 | 100000 | {want} |"
             )],
             "{pct}"
         );
@@ -372,7 +372,7 @@ fn the_sides_render_from_new_and_old() {
         assert_eq!(
             ir_rows(&report),
             [format!(
-                "| spate-json | g::case one | {new} | {old} | *new* |"
+                "| spate-json |  | g::case one | {new} | {old} | *new* |"
             )],
             "{metrics}"
         );
@@ -397,7 +397,9 @@ fn a_metric_renders_as_the_literal_the_summary_holds() {
         );
         assert_eq!(
             ir_rows(&report),
-            [format!("| spate-json | g::case one | {want} | — | *new* |")],
+            [format!(
+                "| spate-json |  | g::case one | {want} | — | *new* |"
+            )],
             "{literal}"
         );
     }
@@ -432,7 +434,7 @@ fn the_shard_column_names_the_package_and_the_feature_arm() {
         ));
         assert_eq!(
             ir_rows(&rendered(&text, "baseline")),
-            [format!("| {want} | g::case one | 1 | — | *new* |")],
+            [format!("| {want} |  | g::case one | 1 | — | *new* |")],
             "{shard:?} {dir}"
         );
     }
@@ -447,7 +449,7 @@ fn an_empty_stamped_package_is_the_shard_name() {
     );
     assert_eq!(
         ir_rows(&rendered(&text, "baseline")),
-        ["|  | g::case one | 1 | — | *new* |"]
+        ["|  |  | g::case one | 1 | — | *new* |"]
     );
 }
 
@@ -470,7 +472,7 @@ fn the_bench_column_drops_the_bench_file_segment() {
         ));
         assert_eq!(
             ir_rows(&rendered(&text, "baseline")),
-            [format!("| p | {want} | 1 | — | *new* |")],
+            [format!("| p |  | {want} | 1 | — | *new* |")],
             "{path}{id}"
         );
     }
@@ -493,7 +495,7 @@ fn a_shard_with_no_baseline_is_told_apart_from_a_new_bench() {
         );
         assert_eq!(
             ir_rows(&rendered(&text, "fallback")),
-            [format!("| p | g::case one | 1 | — | {want} |")],
+            [format!("| p |  | g::case one | 1 | — | {want} |")],
             "{baseline}"
         );
     }
@@ -507,7 +509,7 @@ fn an_unstamped_baseline_falls_back_to_the_label() {
         let text = ir(r#"{"values":{"new":1}}"#, Some(r#"{"package":"p"}"#));
         assert_eq!(
             ir_rows(&rendered(&text, label)),
-            [format!("| p | g::case one | 1 | — | {want} |")],
+            [format!("| p |  | g::case one | 1 | — | {want} |")],
             "{label}"
         );
     }
@@ -545,7 +547,7 @@ fn shards_that_disagree_take_a_legend() {
         ]
     );
     assert!(
-        report.contains("| Shard | Bench | PR | baseline | Δ |"),
+        report.contains("| Shard | Arch | Bench | PR | baseline | Δ |"),
         "{report}"
     );
 }
@@ -560,7 +562,7 @@ fn a_single_unmeasured_baseline_names_the_column() {
     );
     let report = rendered(&text, "fallback");
     assert!(
-        report.contains("| Shard | Bench | PR | no baseline | Δ |"),
+        report.contains("| Shard | Arch | Bench | PR | no baseline | Δ |"),
         "{report}"
     );
     assert!(!report.contains("Baseline per shard"), "{report}");
@@ -568,11 +570,23 @@ fn a_single_unmeasured_baseline_names_the_column() {
 
 // ── Merge ──────────────────────────────────────────────────────────────
 
-/// Rows sort by shard and then bench whatever order the summaries arrive in,
-/// and the sort is by codepoint.
+/// Rows sort by shard, then bench, then architecture whatever order the
+/// summaries arrive in, and the sort is by codepoint.
 #[test]
 fn rows_sort_by_shard_then_bench() {
     let rows: String = [
+        (
+            r#"{"package":"alpha","features":"simd","baseline":"b","arch":"x86_64"}"#,
+            "m_gungraun::a::a",
+            "c",
+            6,
+        ),
+        (
+            r#"{"package":"alpha","features":"simd","baseline":"b","arch":"aarch64"}"#,
+            "m_gungraun::a::a",
+            "c",
+            7,
+        ),
         (
             r#"{"package":"zeta","baseline":"b"}"#,
             "m_gungraun::z::z",
@@ -610,11 +624,13 @@ fn rows_sort_by_shard_then_bench() {
     assert_eq!(
         ir_rows(&rendered(&rows, "baseline")),
         [
-            "| alpha | a::a A | 5 | — | *new* |",
-            "| alpha | a::a a | 2 | — | *new* |",
-            "| alpha (simd) | a::a b | 1 | — | *new* |",
-            "| zeta | z::z a | 3 | — | *new* |",
-            "| Ålpha | a::a a | 4 | — | *new* |",
+            "| alpha |  | a::a A | 5 | — | *new* |",
+            "| alpha |  | a::a a | 2 | — | *new* |",
+            "| alpha (simd) |  | a::a b | 1 | — | *new* |",
+            "| alpha (simd) | aarch64 | a::a c | 7 | — | *new* |",
+            "| alpha (simd) | x86_64 | a::a c | 6 | — | *new* |",
+            "| zeta |  | z::z a | 3 | — | *new* |",
+            "| Ålpha |  | a::a a | 4 | — | *new* |",
         ]
     );
 }
@@ -653,6 +669,84 @@ fn a_repeated_shard_identity_is_named_once() {
           Either two jobs stamped themselves alike, or one package has two bench files whose group, \
           bench and case names coincide (the bench-file stem is not part of the name). Either way \
           the rows below cannot be told apart."
+        ]
+    );
+}
+
+/// One shard measured on two architectures renders a row per architecture,
+/// each naming it, and is no collision.
+#[test]
+fn the_same_shard_on_two_architectures_is_two_rows() {
+    let rows = format!(
+        "{}{}",
+        stamped(
+            r#"{"package":"p","features":"a","baseline":"b","arch":"x86_64"}"#,
+            "m_gungraun::a::a",
+            "x",
+            1
+        ),
+        stamped(
+            r#"{"package":"p","features":"a","baseline":"b","arch":"aarch64"}"#,
+            "m_gungraun::a::a",
+            "x",
+            2
+        ),
+    );
+    let report = rendered(&rows, "baseline");
+    assert_eq!(
+        ir_rows(&report),
+        [
+            "| p (a) | aarch64 | a::a x | 2 | — | *new* |",
+            "| p (a) | x86_64 | a::a x | 1 | — | *new* |",
+        ]
+    );
+    assert!(!report.contains("Duplicate shard identity"), "{report}");
+}
+
+/// A stamp with no `arch` key and a summary with no stamp both leave the
+/// architecture cell blank.
+#[test]
+fn an_unstamped_architecture_renders_a_blank_cell() {
+    for stamp in [Some(r#"{"package":"spate-json","baseline":"b"}"#), None] {
+        let text = ir(&new_only(1), stamp);
+        assert_eq!(
+            ir_rows(&rendered(&text, "b")),
+            ["| spate-json |  | g::case one | 1 | — | *new* |"],
+            "{stamp:?}"
+        );
+    }
+}
+
+/// Twins whose baselines differ name their architecture in the legend.
+#[test]
+fn a_baseline_measured_on_one_architecture_only_names_it_in_the_legend() {
+    let rows = format!(
+        "{}{}",
+        stamped(
+            r#"{"package":"p","baseline":"main @ x","arch":"x86_64"}"#,
+            "m_gungraun::a::a",
+            "x",
+            1
+        ),
+        stamped(
+            r#"{"package":"p","baseline":"","arch":"aarch64"}"#,
+            "m_gungraun::a::a",
+            "x",
+            2
+        ),
+    );
+    let report = rendered(&rows, "baseline");
+    let legend: Vec<&str> = report
+        .lines()
+        .skip_while(|l| *l != "Baseline per shard:")
+        .skip(1)
+        .take_while(|l| l.starts_with("- "))
+        .collect();
+    assert_eq!(
+        legend,
+        [
+            "- `p` on aarch64 — *none measured*",
+            "- `p` on x86_64 — main @ x",
         ]
     );
 }
@@ -740,7 +834,7 @@ fn a_summary_with_no_instruction_count_renders_an_explicit_row() {
         ));
         assert_eq!(
             ir_rows(&rendered(&text, "baseline")),
-            ["| p | g::case one | — | — | *no callgrind profile* |"],
+            ["| p |  | g::case one | — | — | *no callgrind profile* |"],
             "{body}"
         );
     }
@@ -757,7 +851,7 @@ fn a_complete_summary_is_read_through_the_fields_the_report_walks() {
     assert_eq!(
         ir_rows(&report),
         [
-            "| spate-json | decode::decode_value flat_record | 107000 | 100000 | **+7%** (over threshold) |"
+            "| spate-json |  | decode::decode_value flat_record | 107000 | 100000 | **+7%** (over threshold) |"
         ]
     );
     assert_eq!(
@@ -769,7 +863,7 @@ fn a_complete_summary_is_read_through_the_fields_the_report_walks() {
     );
     assert!(
         report.contains(
-            "| spate-json | decode::decode_value flat_record | TotalBlocks | 38 | 40 | **-5%** (over threshold) |"
+            "| spate-json |  | decode::decode_value flat_record | TotalBlocks | 38 | 40 | **-5%** (over threshold) |"
         ),
         "{report}"
     );
@@ -783,7 +877,7 @@ fn the_first_profile_for_a_tool_is_the_one_read() {
     );
     assert_eq!(
         ir_rows(&rendered(&text, "baseline")),
-        ["| p | g::case one | 1 | — | *new* |"]
+        ["| p |  | g::case one | 1 | — | *new* |"]
     );
 }
 
@@ -800,15 +894,15 @@ fn the_heap_table_is_ordered_and_the_fold_is_not() {
     let report = rendered(&text, "base");
     let heap: Vec<&str> = report
         .lines()
-        .skip_while(|l| !l.starts_with("| --- | --- | --- |"))
+        .skip_while(|l| !l.starts_with("| --- | --- | --- | --- |"))
         .skip(1)
         .take_while(|l| l.starts_with("| "))
         .collect();
     assert_eq!(
         heap,
         [
-            "| p | g::case one | TotalBlocks | 44 | 40 | **+10%** (over threshold) |",
-            "| p | g::case one | AtTGmaxBytes | 4200 | 4096 | +2.5% |",
+            "| p |  | g::case one | TotalBlocks | 44 | 40 | **+10%** (over threshold) |",
+            "| p |  | g::case one | AtTGmaxBytes | 4200 | 4096 | +2.5% |",
         ]
     );
     let fold: Vec<&str> = report
@@ -959,7 +1053,7 @@ fn a_null_side_is_absent() {
         assert_eq!(
             ir_rows(&rendered(&ir(metrics, None), "baseline")),
             [format!(
-                "| spate-json | g::case one | {new} | {old} | *new* |"
+                "| spate-json |  | g::case one | {new} | {old} | *new* |"
             )],
             "{metrics}"
         );
@@ -977,7 +1071,7 @@ fn a_repeated_metric_name_collapses_to_one_entry() {
         new_only(2),
     ))]));
     let report = rendered(&text, "base");
-    assert_eq!(ir_rows(&report), ["| p | g::case one | 2 | — | *new* |"]);
+    assert_eq!(ir_rows(&report), ["| p |  | g::case one | 2 | — | *new* |"]);
     assert_eq!(
         fold_rows(&report),
         ["| Ir | 2 | — | *new* |", "| Dr | 9 | — | *new* |"]
@@ -998,6 +1092,29 @@ fn one_crossed_threshold_flags_the_whole_run() {
         assert!(regressions(&parse(&rows).unwrap()).unwrap(), "{rows}");
     }
     assert!(!regressions(&parse(&format!("{quiet}\n{quiet}\n")).unwrap()).unwrap());
+}
+
+/// An `aarch64` row over its threshold flags the run and carries the marker,
+/// beside a quiet `x86_64` twin.
+#[test]
+fn an_arm64_row_over_threshold_flags_the_run() {
+    let hot = ir(
+        &both("107000", "100000", "7.0"),
+        Some(r#"{"package":"p","baseline":"b","arch":"aarch64"}"#),
+    );
+    let quiet = ir(
+        &both("100000", "99000", "1.0"),
+        Some(r#"{"package":"p","baseline":"b","arch":"x86_64"}"#),
+    );
+    let rows = parse(&format!("{quiet}\n{hot}\n")).unwrap();
+    assert!(regressions(&rows).unwrap());
+    assert_eq!(
+        ir_rows(&render(&rows, "baseline").unwrap()),
+        [
+            "| p | aarch64 | g::case one | 107000 | 100000 | **+7%** (over threshold) |",
+            "| p | x86_64 | g::case one | 100000 | 99000 | +1% |",
+        ]
+    );
 }
 
 /// A crossed instruction threshold flags the run even where the heap metrics
@@ -1029,16 +1146,23 @@ fn the_flag_file_is_the_bare_boolean_the_label_workflow_parses() {
 /// report emboldens is a row the label acts on.
 #[test]
 fn the_flag_agrees_with_the_markers() {
-    for pct in ["7.0", "1.0", "5.0", "4.999", "inf", "-inf", "NaN"] {
-        let text = ir(&both("105000", "100000", pct), None);
-        let rows = parse(&text).unwrap();
-        assert_eq!(
-            regressions(&rows).unwrap(),
-            render(&rows, "baseline")
-                .unwrap()
-                .contains("(over threshold)"),
-            "{pct}"
-        );
+    let stamps = [
+        None,
+        Some(r#"{"package":"p","arch":"x86_64"}"#),
+        Some(r#"{"package":"p","arch":"aarch64"}"#),
+    ];
+    for stamp in stamps {
+        for pct in ["7.0", "1.0", "5.0", "4.999", "inf", "-inf", "NaN"] {
+            let text = ir(&both("105000", "100000", pct), stamp);
+            let rows = parse(&text).unwrap();
+            assert_eq!(
+                regressions(&rows).unwrap(),
+                render(&rows, "baseline")
+                    .unwrap()
+                    .contains("(over threshold)"),
+                "{stamp:?} {pct}"
+            );
+        }
     }
 }
 

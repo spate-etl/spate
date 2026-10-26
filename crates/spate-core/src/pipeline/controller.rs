@@ -28,7 +28,7 @@ use std::time::{Duration, Instant};
 /// ([`SourceEvent::CommitReady`]). Tight enough that a finishing lane's
 /// final ack commits within ~a millisecond of resolving, bounded to one
 /// commit interval by the chase deadline.
-const FAST_COMMIT_POLL: Duration = Duration::from_millis(1);
+pub(crate) const FAST_COMMIT_POLL: Duration = Duration::from_millis(1);
 
 /// How long before the drain deadline the drivers and the sink drain end
 /// when the pipeline's feed hands back, so the feed's close has this time
@@ -78,6 +78,8 @@ pub(crate) struct ControllerContext<S: Source> {
     pub close_share: Duration,
     pub health: Arc<HealthState>,
     pub commit_interval: Duration,
+    /// How long a `CommitReady` partition is chased at [`FAST_COMMIT_POLL`].
+    pub chase_window: Duration,
     pub drain_timeout: Duration,
     pub event_poll_timeout: Duration,
     /// A partition watermark stalled behind a failed batch for longer than
@@ -120,6 +122,7 @@ pub(crate) fn run_controller<S: Source>(ctx: ControllerContext<S>) {
         close_share,
         health,
         commit_interval,
+        chase_window,
         drain_timeout,
         event_poll_timeout,
         stalled_fail_after,
@@ -348,7 +351,7 @@ pub(crate) fn run_controller<S: Source>(ctx: ControllerContext<S>) {
                 }
                 // Each hinted partition gets its own window; re-hinting one
                 // that is already being chased does not extend it.
-                let until = Instant::now() + commit_interval;
+                let until = Instant::now() + chase_window;
                 for p in partitions {
                     fast_commit.entry(p).or_insert(until);
                 }

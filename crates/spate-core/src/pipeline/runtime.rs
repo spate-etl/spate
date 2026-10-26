@@ -169,6 +169,9 @@ pub struct PipelineRuntime<S: Source> {
     // Set when the drain begins; the drivers read it.
     shutdown: Arc<AtomicBool>,
     stop_clock: Arc<dyn Clock + Send + Sync>,
+    // How long a `CommitReady` partition keeps the tightened cadence; `None`
+    // is one `checkpoint.interval`.
+    chase_window: Option<Duration>,
     options: RuntimeOptions,
     io: Option<tokio::runtime::Runtime>,
     feed: Option<Arc<dyn Feed>>,
@@ -204,6 +207,7 @@ impl<S: Source + 'static> PipelineRuntime<S> {
             stop: Arc::new(StopRequest::new(Arc::new(SystemClock))),
             shutdown: Arc::new(AtomicBool::new(false)),
             stop_clock: Arc::new(SystemClock),
+            chase_window: None,
             options: RuntimeOptions::default(),
             io: None,
             feed: None,
@@ -273,6 +277,16 @@ impl<S: Source + 'static> PipelineRuntime<S> {
     pub fn with_stop_clock(mut self, clock: Arc<dyn Clock + Send + Sync>) -> Self {
         *self.stop.clock.lock().expect("stop request lock") = Arc::clone(&clock);
         self.stop_clock = clock;
+        self
+    }
+
+    /// Close each `CommitReady` partition's tightened window after `window`,
+    /// so a test reaches the end of a window without a clock.
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_chase_window(mut self, window: Duration) -> Self {
+        self.chase_window = Some(window);
         self
     }
 
@@ -640,6 +654,7 @@ impl<S: Source + 'static> PipelineRuntime<S> {
             },
             health: Arc::clone(&health),
             commit_interval: self.config.checkpoint.interval,
+            chase_window: self.chase_window.unwrap_or(self.config.checkpoint.interval),
             drain_timeout: self.config.checkpoint.drain_timeout,
             event_poll_timeout: self.options.event_poll_timeout,
             stalled_fail_after: self.config.checkpoint.stalled_fail_after,

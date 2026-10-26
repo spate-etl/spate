@@ -65,6 +65,11 @@ pub(crate) struct SourceLog {
     /// Moved forward by this much in `open`, modeling a source that takes
     /// that long to open.
     pub(crate) advance_in_open: Option<(Arc<crate::clock::TestClock>, Duration)>,
+    /// The timeout of every `poll_events` call, in order.
+    pub(crate) poll_timeouts: Vec<Duration>,
+    /// The index into `poll_timeouts` of the last call that returned
+    /// `CommitReady`.
+    pub(crate) hinted_at: Option<usize>,
 }
 
 pub(crate) enum Script {
@@ -162,6 +167,13 @@ impl Source for FakeSource {
 
     fn poll_events(&mut self, timeout: Duration) -> Result<SourceEvent<FakeLane>, SourceError> {
         let next = self.script.lock().unwrap().pop_front();
+        {
+            let mut log = self.shared.lock().unwrap();
+            log.poll_timeouts.push(timeout);
+            if matches!(next, Some(Script::CommitReady(_))) {
+                log.hinted_at = Some(log.poll_timeouts.len() - 1);
+            }
+        }
         match next {
             Some(Script::Assign(specs)) => {
                 let issuer = self.issuer.as_ref().expect("open before assign");

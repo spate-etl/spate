@@ -120,11 +120,13 @@ pub enum SourceEvent<L> {
     /// and the source cannot finalize their unit of work (e.g. settle a
     /// feed unit part, freeing its held-unit slot) until the acked
     /// watermark reaches it through `Source::commit`. The runtime responds
-    /// by briefly tightening its commit cadence *for those partitions
-    /// only* (flowing partitions keep the periodic tick) until their
-    /// acks quiesce or one commit interval elapses. This is a latency
-    /// optimization; correctness does not depend on it, and sources that
-    /// never emit it get the periodic cadence.
+    /// by committing those partitions *only* (flowing partitions keep the
+    /// periodic tick) at a tightened cadence for one commit interval, then
+    /// on every control-plane poll while any of their lanes remains
+    /// assigned. A partition leaves when its lanes are retired or revoked,
+    /// or a new assignment begins. This is a latency optimization;
+    /// correctness does not depend on it, and sources that never emit it
+    /// get the periodic cadence.
     CommitReady {
         /// Partitions whose final acks are worth chasing.
         partitions: Vec<PartitionId>,

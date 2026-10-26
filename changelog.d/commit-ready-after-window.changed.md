@@ -1,0 +1,3 @@
+**A `CommitReady` partition is committed until its lanes leave** (`spate-core`)
+
+A partition named in `SourceEvent::CommitReady` is committed on a 1 ms cadence for one `checkpoint.interval`. After that, it is committed on every control-plane poll that harvested an acknowledgment for it, until its lanes are retired or revoked or a new assignment begins. An acknowledgment of its final records that resolves after the first interval is committed within one event poll timeout. In previous versions the partition returned to the periodic commit after one `checkpoint.interval`, so such an acknowledgment waited up to one more interval. The positions committed are unchanged, and a source that never emits the hint keeps the periodic commit.

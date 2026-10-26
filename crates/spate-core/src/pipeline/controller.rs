@@ -27,7 +27,8 @@ use std::time::{Duration, Instant};
 /// Poll cadence while fast-commit partitions are being chased
 /// ([`SourceEvent::CommitReady`]). Tight enough that a finishing lane's
 /// final ack commits within ~a millisecond of resolving, bounded to one
-/// commit interval by the chase deadline.
+/// commit interval by the chase deadline, after which the partition is
+/// committed on the ordinary cadence.
 pub(crate) const FAST_COMMIT_POLL: Duration = Duration::from_millis(1);
 
 /// How long before the drain deadline the drivers and the sink drain end
@@ -170,6 +171,10 @@ pub(crate) fn run_controller<S: Source>(ctx: ControllerContext<S>) {
     // deadline is re-armed by every new hint, pinning the controller at
     // `FAST_COMMIT_POLL` while any partition stays stalled.
     let mut fast_commit: BTreeMap<PartitionId, Instant> = BTreeMap::new();
+    // Hinted partitions past their window. Each is committed on any pass that
+    // harvested an advance for it, at the ordinary poll cadence, until its
+    // lanes leave, so an ack resolving after the window skips the tick.
+    let mut after_window: BTreeSet<PartitionId> = BTreeSet::new();
     // Set when the source reports `SourceEvent::Drained`. The loop exits into
     // the ordinary drain sequence, and `Completed` is additionally required
     // to mean "everything acknowledged and committed" (see the backstop after
@@ -291,6 +296,10 @@ pub(crate) fn run_controller<S: Source>(ctx: ControllerContext<S>) {
                     revoke_budget,
                     watch,
                 );
+                // A new epoch may hand back a hinted partition id after
+                // revoking its lanes above; its new lanes have not hinted.
+                fast_commit.clear();
+                after_window.clear();
                 // An assignment marks the pipeline running; the stop is still
                 // under way.
                 if stopping.is_some() {
@@ -374,17 +383,28 @@ pub(crate) fn run_controller<S: Source>(ctx: ControllerContext<S>) {
         }
 
         // Chase fast-commit partitions: commit just them, standing down once
-        // each is fully resolved and flushed, or at the deadline, so a
-        // stalled batch falls back to the periodic tick instead of spinning
-        // here.
-        if !fast_commit.is_empty() && state.failure.is_none() {
-            // Age out partitions past their own window first. A batch that
-            // never resolves falls back to the periodic tick instead of
-            // holding the tightened cadence open.
+        // each lane leaves the assignment. Past its window a partition moves
+        // to `after_window`, so a stalled batch does not spin here.
+        if (!fast_commit.is_empty() || !after_window.is_empty()) && state.failure.is_none() {
+            // A partition past its window leaves the 1 ms cadence and is
+            // committed on ordinary passes.
             let now = Instant::now();
-            fast_commit.retain(|_, &mut until| now < until);
-            if !fast_commit.is_empty() {
-                let chasing: BTreeSet<PartitionId> = fast_commit.keys().copied().collect();
+            fast_commit.retain(|&p, &mut until| {
+                let open = now < until;
+                if !open {
+                    after_window.insert(p);
+                }
+                open
+            });
+            let late_advance = after_window
+                .iter()
+                .any(|p| state.pending_commit.contains_key(p));
+            if !fast_commit.is_empty() || late_advance {
+                let chasing: BTreeSet<PartitionId> = fast_commit
+                    .keys()
+                    .chain(after_window.iter())
+                    .copied()
+                    .collect();
                 commit_cycle(
                     &mut source,
                     &mut checkpointer,
@@ -394,14 +414,16 @@ pub(crate) fn run_controller<S: Source>(ctx: ControllerContext<S>) {
                     Some(&chasing),
                     false,
                 );
-                // Stand down when the unit of work is done, meaning its lane
-                // left the assignment, not because its acks look quiet for an
-                // instant. A momentary lull between the flush and the sink's
-                // acknowledgment would otherwise end the chase early and
-                // leave the final watermark to the periodic tick, costing a
-                // full commit interval.
-                fast_commit.retain(|&p, _| state.assignment.values().any(|&(part, _)| part == p));
             }
+            // Stand down when the unit of work is done, meaning its lane
+            // left the assignment, not because its acks look quiet for an
+            // instant. A momentary lull between the flush and the sink's
+            // acknowledgment would otherwise end the chase early and
+            // leave the final watermark to the periodic tick, costing a
+            // full commit interval.
+            let assigned = |p: PartitionId| state.assignment.values().any(|&(part, _)| part == p);
+            fast_commit.retain(|&p, _| assigned(p));
+            after_window.retain(|&p| assigned(p));
         }
     }
 

@@ -812,6 +812,71 @@ fn a_finished_unit_is_acknowledged_before_the_poll_timeout() {
     assert_eq!(sorted(written_rows(&sink_script)), sorted(recs("w", 30)));
 }
 
+/// Pins that a unit whose last sink write resolves after its partition's
+/// tightened commit window is acknowledged within the control plane's poll
+/// timeout, long before the periodic checkpoint.
+#[test]
+fn a_unit_whose_write_outlasts_the_chase_is_acknowledged_before_the_tick() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    stage(&data, "w.ndjson", &recs("w", 30));
+    let (feed, script) = scripted_feed();
+    let receipt = script.deliver(unit_over(&data, "w.ndjson"));
+
+    let yaml = PipelineYaml::file("s3-feed-late-ack", &data)
+        .fed_by_code()
+        .checkpoint("300s")
+        .build();
+    let mut config = PipelineConfig::from_str(&yaml).unwrap();
+    config.pipeline.name = spate_test::unique_name(&config.pipeline.name);
+    let pipeline = Pipeline::from_config(config).unwrap();
+    let io = pipeline.io_handle();
+    let source =
+        line_framer(S3Source::from_component_config(&pipeline.config().source, io).unwrap())
+            .with_feed(Arc::new(feed));
+    let mut pool = SinkPoolConfig::default();
+    pool.batch.linger = Duration::from_millis(10);
+    let (sink, sink_script) = capture_sink(1, 1);
+    sink_script.enqueue_global(WriteOutcome::ok().held());
+    let runtime = pipeline
+        .sink(sink.with_pool_config(pool))
+        .unwrap()
+        .chains(|ctx| {
+            let chunk_cfg = ctx.chunk();
+            chain_owned::<Vec<u8>, _>(BytesPassthrough)
+                .sink(
+                    TestEncoder,
+                    KeyHashRouter,
+                    chunk_cfg,
+                    ctx.queues,
+                    ctx.budget,
+                )
+                .build()
+        })
+        .runtime_options(RuntimeOptions {
+            event_poll_timeout: Duration::from_millis(100),
+            ..test_options()
+        })
+        .into_runtime(source)
+        .unwrap()
+        .with_chase_window(Duration::ZERO);
+    let shutdown = runtime.shutdown_handle();
+    let run = PipelineRun::spawn(move || runtime.run());
+
+    wait_until(DEADLINE, "the write is held", || {
+        sink_script.held_writes() == 1
+    });
+    sink_script.release_held();
+    wait_until(DEADLINE, "the unit is acknowledged", || {
+        script.acknowledged() == vec![receipt]
+    });
+
+    shutdown.trigger();
+    let report = run.wait_exit(DEADLINE).expect("the run exits").unwrap();
+    assert_eq!(report.state, ExitState::Completed);
+    assert_eq!(sorted(written_rows(&sink_script)), sorted(recs("w", 30)));
+}
+
 /// A unit naming a zero-byte object whose key ends in `/` is acknowledged
 /// without a read, as the planner leaves such an object out of a plan.
 #[test]

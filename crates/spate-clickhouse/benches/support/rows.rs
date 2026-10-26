@@ -18,7 +18,7 @@
 //! is pinned: growing it would silently re-baseline every count ever recorded
 //! against it.
 //!
-//! Shared verbatim with the wall-clock sibling: `encode.rs` and
+//! Shared verbatim with the wall-clock sibling: `encode_wall.rs` and
 //! `encode_gungraun.rs` both pull this module in, so the two tiers encode
 //! byte-identical corpora and a count here and a throughput number there
 //! describe the same work rather than comparable work.

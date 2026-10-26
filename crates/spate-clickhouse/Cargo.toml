@@ -60,7 +60,6 @@ testing = []
 [dev-dependencies]
 spate-clickhouse = { path = ".", features = ["testing"] }
 gungraun = { workspace = true }
-criterion = { workspace = true }
 clickhouse = { workspace = true, features = ["lz4", "zstd", "test-util"] }
 spate-test = { workspace = true }
 spate-test-support = { workspace = true, features = ["tls"] }
@@ -76,10 +75,6 @@ testcontainers-modules = { workspace = true, features = ["clickhouse"] }
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "time"] }
 
 [[bench]]
-name = "encode"
-harness = false
-
-[[bench]]
 name = "encode_gungraun"
 harness = false
 
@@ -89,6 +84,10 @@ harness = false
 
 [[bench]]
 name = "frame_gungraun"
+harness = false
+
+[[bench]]
+name = "encode_wall"
 harness = false
 
 [[bench]]

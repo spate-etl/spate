@@ -1,5 +1,6 @@
-//! The encode rig both the counted tier and the allocation snapshot drive:
-//! one encoder, the records it encodes, and the buffer it writes into.
+//! The encode rig the counted tier, the allocation snapshot and the wall-clock
+//! tier drive: one encoder, the records it encodes, and the buffer it writes
+//! into.
 //!
 //! Included with `#[path]`: a bench target is its own crate, so two targets
 //! measure one region only by compiling the same source. Each includer also
@@ -99,4 +100,12 @@ pub(crate) fn rowbinary_events() -> Rig<ClickHouseEncoder<Owned<EventRow>>, Even
 
 pub(crate) fn rowbinary_metrics() -> Rig<ClickHouseEncoder<Owned<MetricRow>>, MetricRow> {
     rowbinary_rig(rows::metrics(ROWS))
+}
+
+#[allow(
+    dead_code,
+    reason = "the counted tier and the allocation snapshot run `exotic` through Native only"
+)]
+pub(crate) fn rowbinary_exotic() -> Rig<ClickHouseEncoder<Owned<ExoticRow>>, ExoticRow> {
+    rowbinary_rig(rows::exotic(ROWS))
 }

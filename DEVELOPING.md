@@ -357,8 +357,3 @@ each arm into its own directory. **Two `bench run`s and a `bench compare` are
 not a substitute for either**: a lone leg calibrates its own iteration count, so
 two of them pin two different counts for the same case, and every case that
 happens to is dropped. Nothing interleaves them either.
-
-### Criterion
-
-`crates/spate-clickhouse/benches/encode.rs` is a criterion target, outside both
-conventions above. `cargo xtask bench check` compiles it and no job runs it.

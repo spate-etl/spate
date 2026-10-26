@@ -1531,6 +1531,28 @@ mod tests {
         );
     }
 
+    /// A run stopped between the two legs of its last replicate leaves the
+    /// base one record ahead. Re-rendering those legs still compares the case
+    /// over the replicates both legs finished, and names the unpaired one.
+    #[test]
+    fn compare_reads_a_run_cut_between_legs() {
+        let values = ten(1000.0);
+        let base = Builder::new("base").series("a", &values).build();
+        let head = Builder::new("head").series("a", &values[..9]).build();
+        let out = compare(base, head, &[]).expect("a cut run still compares");
+
+        assert_eq!(out.rows.len(), 1);
+        assert_eq!(out.rows[0].analysis.replicates, 9);
+        assert_eq!(out.rows[0].analysis.verdict, Verdict::NoChange);
+        assert!(
+            out.not_comparable
+                .iter()
+                .any(|n| n.why.contains("[9]") && n.why.contains("one leg only")),
+            "{:?}",
+            out.not_comparable
+        );
+    }
+
     #[test]
     fn a_per_case_digest_mismatch_demotes_only_that_case() {
         let mut base_builder = Builder::new("base");

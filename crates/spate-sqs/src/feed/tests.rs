@@ -841,6 +841,193 @@ async fn a_unit_handed_out_before_a_tick_is_kept_by_its_first_renew() {
     );
 }
 
+/// Renew each of `receipts` every 100 ms for `d`, asserting every renew is
+/// accepted.
+async fn renew_through(feed: &SqsFeed, receipts: &[Receipt], d: Duration, what: &str) {
+    let start = Instant::now();
+    for _ in 0..d.as_millis() / 100 {
+        for &receipt in receipts {
+            assert_eq!(
+                feed.renew(receipt).map_err(|e| e.kind),
+                Ok(()),
+                "{what}: the unit lapsed {:?} in, renewed every 100 ms",
+                Instant::now() - start
+            );
+        }
+        step(Duration::from_millis(100)).await;
+    }
+}
+
+/// Pins that a held unit the reader keeps renewing survives one extension
+/// call SQS does not answer, at visibilities either side of the 45 s edge:
+/// the call is given up after one renewal period and sent once more at once,
+/// with half the time left. Regression for #1446.
+#[tokio::test(start_paused = true)]
+async fn a_renewed_unit_survives_one_slow_extension_call() {
+    let ms = Duration::from_millis;
+    for (visibility, first, second) in [
+        (3, ms(1_000), ms(500)),
+        (30, ms(10_000), ms(5_000)),
+        (45, ms(15_000), ms(7_500)),
+        (60, ms(20_000), ms(10_000)),
+    ] {
+        let visibility = Duration::from_secs(visibility);
+        let (feed, queue) = start(visibility);
+        let (waker, park) = wake_channel();
+        feed.set_waker(waker);
+        queue.ready(Message::new("u"));
+        let held = receive_n(&feed, &park, 1).await.remove(0);
+        queue.delay_next_visibility_call(MINUTE);
+        renew_through(
+            &feed,
+            &[held.receipt],
+            2 * visibility,
+            &format!("visibility {visibility:?}"),
+        )
+        .await;
+        assert_eq!(
+            queue.visibility_within()[..2],
+            [Some(first), Some(second)],
+            "visibility {visibility:?}"
+        );
+    }
+}
+
+/// Pins the running bound of an extension call: one renewal period, or half
+/// the time left to the batch's earliest deadline when that is shorter.
+/// Regression for #1446.
+#[tokio::test(start_paused = true)]
+async fn a_running_extension_is_bounded_by_the_period_and_the_time_left() {
+    let secs = Duration::from_secs;
+    // The 12 h hold ends 12 h − 30 s after the receive, so 8 h − 30 s is left
+    // at the first tick.
+    for (visibility, within) in [
+        (secs(3), secs(1)),
+        (MINUTE, secs(20)),
+        (HOLD, HOLD / 3 - secs(15)),
+    ] {
+        let (feed, queue) = start(visibility);
+        let (waker, park) = wake_channel();
+        feed.set_waker(waker);
+        queue.ready(Message::new("u"));
+        let held = receive_n(&feed, &park, 1).await.remove(0);
+        feed.renew(held.receipt).unwrap();
+        tokio::time::advance(visibility / 3).await;
+        until("the tick extends the unit", || {
+            queue.visibility().len() == 1
+        })
+        .await;
+        assert_eq!(
+            queue.visibility_within(),
+            [Some(within)],
+            "visibility {visibility:?}"
+        );
+    }
+
+    let (feed, queue) = start(MINUTE);
+    let started = Instant::now();
+    let held = hand_out_one_period_from_its_deadline(&feed, &queue).await;
+    let deadline = feed.deadline_of(held.receipt).unwrap();
+    let calls = queue.visibility_within().len();
+    step(Duration::from_millis(600)).await;
+    let tick = started + MINUTE;
+    assert_eq!(
+        queue.visibility_within()[calls..],
+        [Some((deadline - tick) / 2)],
+        "the tick near 60 s, {:?} before the deadline",
+        deadline - tick
+    );
+}
+
+/// Buffer one unit about 19.5 s into a feed at a one-minute visibility, and
+/// hand it out at about 59.5 s, one renewal period from its deadline and
+/// just before the tick near 60 s.
+async fn hand_out_one_period_from_its_deadline(feed: &SqsFeed, queue: &ScriptedQueue) -> Delivery {
+    let (waker, _park) = wake_channel();
+    feed.set_waker(waker);
+    settle_tasks().await;
+    step(Duration::from_millis(19_500)).await;
+    queue.ready(Message::new("u"));
+    assert!(feed.receive(1).unwrap().is_empty());
+    until("buffered", || feed.buffered() == 1).await;
+    step(Duration::from_secs(40)).await;
+    let mut got = feed.receive(1).unwrap();
+    assert_eq!(
+        got.len(),
+        1,
+        "a unit one period from its deadline is handed out"
+    );
+    got.remove(0)
+}
+
+/// Pins that a unit handed out with one renewal period left survives one
+/// extension call SQS does not answer at the tick that follows.
+/// Regression for #1446.
+#[tokio::test(start_paused = true)]
+async fn a_unit_handed_out_one_period_from_its_deadline_survives_one_slow_extension_call() {
+    let (feed, queue) = start(MINUTE);
+    let held = hand_out_one_period_from_its_deadline(&feed, &queue).await;
+    queue.delay_next_visibility_call(MINUTE);
+    renew_through(&feed, &[held.receipt], 2 * MINUTE, "handed out").await;
+}
+
+/// Pins that the units of a later chunk survive a slow call for an earlier
+/// chunk in the same tick, and a slow call of their own.
+/// Regression for #1446.
+#[tokio::test(start_paused = true)]
+async fn units_after_a_slow_chunk_survive_it() {
+    let visibility = Duration::from_secs(30);
+    let (feed, queue) = start(visibility);
+    let (waker, park) = wake_channel();
+    feed.set_waker(waker);
+    for i in 0..21 {
+        queue.ready(Message::new(&format!("u{i}")));
+    }
+    let got = receive_n(&feed, &park, 21).await;
+    let receipts: Vec<Receipt> = got.iter().map(|d| d.receipt).collect();
+    queue.delay_next_visibility_call(MINUTE);
+    queue.delay_next_visibility_call(Duration::ZERO);
+    queue.delay_next_visibility_call(MINUTE);
+    renew_through(&feed, &receipts, 2 * visibility, "21 units").await;
+}
+
+/// Pins that a buffered unit survives one extension call SQS does not answer
+/// and is still handed out, since the call sent once more keeps it one
+/// renewal period from its deadline. Regression for #1446.
+#[tokio::test(start_paused = true)]
+async fn a_buffered_unit_survives_one_slow_extension_call() {
+    let (feed, queue) = start(Duration::from_secs(30));
+    let taken = one_taken_one_buffered(&feed, &queue).await;
+    queue.delay_next_visibility_call(MINUTE);
+    renew_through(&feed, &[taken.receipt], Duration::from_secs(25), "taken").await;
+    let got = feed.receive(1).unwrap();
+    assert_eq!(
+        got.iter().map(|d| d.unit.id.as_str()).collect::<Vec<_>>(),
+        ["u1"],
+        "the buffered unit is handed out at 25 s: {:?}",
+        queue.visibility_within()
+    );
+}
+
+/// Pins that an extension answered just before its bound counts from when
+/// it was sent, as SQS counts it.
+#[tokio::test(start_paused = true)]
+async fn an_extension_answered_just_before_its_bound_counts_from_when_it_was_sent() {
+    let (feed, queue) = start(MINUTE);
+    let (waker, park) = wake_channel();
+    feed.set_waker(waker);
+    queue.ready(Message::new("u"));
+    let started = Instant::now();
+    let held = receive_n(&feed, &park, 1).await.remove(0);
+    queue.delay_next_visibility_call(Duration::from_millis(19_900));
+    step(Duration::from_millis(39_900)).await;
+    assert_eq!(queue.visibility().len(), 1, "one extension, answered");
+    assert_eq!(
+        feed.deadline_of(held.receipt),
+        Some(started + Duration::from_secs(20) + MINUTE)
+    );
+}
+
 /// Pins the drop rule at its boundary: a buffered unit exactly one renewal
 /// period from its deadline is handed out, and one a millisecond closer is
 /// dropped unread.
@@ -978,7 +1165,8 @@ async fn a_publish_retry_stops_once_the_feed_stops() {
 }
 
 /// Pins that a fail call is bounded by the time left to the earliest
-/// deadline in its batch, and that an extension call is not bounded.
+/// deadline in its batch, and that an extension call carries the running
+/// bound.
 #[tokio::test(start_paused = true)]
 async fn a_fail_call_is_bounded_by_the_earliest_deadline_in_its_batch() {
     let (feed, queue) = start(MINUTE);
@@ -1007,7 +1195,14 @@ async fn a_fail_call_is_bounded_by_the_earliest_deadline_in_its_batch() {
     feed.fail(got[1].receipt, "unreadable").unwrap();
     until("the fails are sent", || queue.visibility().len() == 3).await;
     assert_eq!(queue.visibility()[2].len(), 2, "one batch");
-    assert_eq!(queue.visibility_within(), [None, None, Some(b - failed_at)]);
+    assert_eq!(
+        queue.visibility_within(),
+        [
+            Some(Duration::from_secs(20)),
+            Some(Duration::from_secs(20)),
+            Some(b - failed_at)
+        ]
+    );
 }
 
 /// Pins that a send failed Fatal after the same batch failed Retryable
@@ -2496,9 +2691,14 @@ async fn an_extension_sent_after_a_stop_in_a_tick_begun_before_it_is_bounded() {
     feed.hand_back(got[20].receipt).unwrap();
     step(Duration::from_secs(2)).await;
     assert_eq!(
+        queue.inner.visibility_within()[0],
+        Some(Duration::from_secs(20)),
+        "the extension sent before the stop does not take the running bound"
+    );
+    assert_eq!(
         queue.inner.visibility_within()[1],
         Some(STOP_EXTENSION_BOUND),
-        "the extension sent after the stop is unbounded"
+        "the extension sent after the stop does not take the stop bound"
     );
     assert_eq!(
         handed_back(&queue.inner.visibility()),

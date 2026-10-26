@@ -1,6 +1,7 @@
 //! [`ScriptedQueue`]: a [`Queue`] the unit tests script, which records every
 //! call the feed makes.
 
+use crate::client::OPERATION_TIMEOUT;
 use crate::error::CallError;
 use crate::queue::{
     BatchOutcome, BoxFuture, DeleteEntry, EntryFailure, Queue, ReceiveRequest, Received, SendEntry,
@@ -68,6 +69,7 @@ struct Script {
     receive_error: Option<CallError>,
     send_errors: VecDeque<CallError>,
     visibility_errors: VecDeque<CallError>,
+    visibility_delays: VecDeque<Duration>,
     delete_errors: VecDeque<CallError>,
     send_failures: VecDeque<Vec<Failure>>,
     visibility_failures: VecDeque<Vec<Failure>>,
@@ -141,6 +143,15 @@ impl ScriptedQueue {
     /// `ChangeMessageVisibilityBatch`.
     pub(crate) fn fail_next_visibility_call(&self, e: CallError) {
         self.lock().visibility_errors.push_back(e);
+    }
+
+    /// Answer the next `ChangeMessageVisibilityBatch` only after `d` has
+    /// passed in tokio time, as a call SQS is slow to answer. A call whose
+    /// bound, or else the client's operation timeout, ends first fails
+    /// `Retryable` at its bound, as `SdkQueue`'s does. Each call queues one
+    /// more delay, and `Duration::ZERO` answers at once.
+    pub(crate) fn delay_next_visibility_call(&self, d: Duration) {
+        self.lock().visibility_delays.push_back(d);
     }
 
     /// As [`fail_next_send_call`](Self::fail_next_send_call), for
@@ -272,15 +283,28 @@ impl Queue for ScriptedQueue {
         within: Option<Duration>,
     ) -> BoxFuture<'_, Result<BatchOutcome, CallError>> {
         Box::pin(async move {
-            let mut script = self.lock();
-            let ids: Vec<String> = entries.iter().map(|e| e.id.clone()).collect();
-            script.visibility.push(entries);
-            script.visibility_within.push(within);
-            if let Some(e) = script.visibility_errors.pop_front() {
-                return Err(e);
+            let (answer, delay) = {
+                let mut script = self.lock();
+                let ids: Vec<String> = entries.iter().map(|e| e.id.clone()).collect();
+                script.visibility.push(entries);
+                script.visibility_within.push(within);
+                let answer = match script.visibility_errors.pop_front() {
+                    Some(e) => Err(e),
+                    None => {
+                        let failures = script.visibility_failures.pop_front().unwrap_or_default();
+                        Ok(outcome(ids.into_iter(), failures))
+                    }
+                };
+                (answer, script.visibility_delays.pop_front())
+            };
+            if let Some(d) = delay {
+                let bound = within.map_or(OPERATION_TIMEOUT, |w| w.min(OPERATION_TIMEOUT));
+                tokio::time::sleep(d.min(bound)).await;
+                if d > bound {
+                    return Err(CallError::retryable("operation timeout"));
+                }
             }
-            let failures = script.visibility_failures.pop_front().unwrap_or_default();
-            Ok(outcome(ids.into_iter(), failures))
+            answer
         })
     }
 

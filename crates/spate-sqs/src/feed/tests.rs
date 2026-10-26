@@ -861,7 +861,8 @@ async fn renew_through(feed: &SqsFeed, receipts: &[Receipt], d: Duration, what: 
 /// Pins that a held unit the reader keeps renewing survives one extension
 /// call SQS does not answer, at visibilities either side of the 45 s edge:
 /// the call is given up after one renewal period and sent once more at once,
-/// with half the time left. Regression for #1446.
+/// with half the time left, and the next tick, with three periods left, is
+/// bounded by one period. Regression for #1446.
 #[tokio::test(start_paused = true)]
 async fn a_renewed_unit_survives_one_slow_extension_call() {
     let ms = Duration::from_millis;
@@ -886,8 +887,8 @@ async fn a_renewed_unit_survives_one_slow_extension_call() {
         )
         .await;
         assert_eq!(
-            queue.visibility_within()[..2],
-            [Some(first), Some(second)],
+            queue.visibility_within()[..3],
+            [Some(first), Some(second), Some(first)],
             "visibility {visibility:?}"
         );
     }
@@ -999,6 +1000,26 @@ async fn a_unit_handed_out_one_period_from_its_deadline_survives_one_slow_extens
     let held = hand_out_one_period_from_its_deadline(&feed, &queue).await;
     queue.delay_next_visibility_call(MINUTE);
     renew_through(&feed, &[held.receipt], 2 * MINUTE, "handed out").await;
+}
+
+/// Pins that a batch is sent at most twice in a tick, so a call SQS keeps
+/// failing does not loop on ever shorter bounds until its unit lapses.
+#[tokio::test(start_paused = true)]
+async fn a_batch_is_sent_at_most_twice_in_a_tick() {
+    let (feed, queue) = start(MINUTE);
+    let held = hand_out_one_period_from_its_deadline(&feed, &queue).await;
+    feed.renew(held.receipt).unwrap();
+    let calls = queue.visibility_within().len();
+    for _ in 0..5 {
+        queue.delay_next_visibility_call(MINUTE);
+    }
+    step(Duration::from_secs(19)).await;
+    assert_eq!(
+        queue.visibility_within()[calls..].len(),
+        2,
+        "{:?}",
+        queue.visibility_within()
+    );
 }
 
 /// Pins that the units of a later chunk survive a slow call for an earlier

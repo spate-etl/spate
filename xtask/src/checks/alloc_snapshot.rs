@@ -357,7 +357,7 @@ pub(crate) fn run(root: &Path, explain: bool, bless: bool) -> Outcome {
     })
 }
 
-/// The body of [`run`] past the host gate, with each step's stdout taken from
+/// The body of [`run()`] past the host gate, with each step's stdout taken from
 /// `capture` and `--explain`'s lines written to `out`.
 fn compare(
     root: &Path,

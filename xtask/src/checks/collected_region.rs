@@ -34,7 +34,7 @@ const MIN_APPLICATION_PCT: i64 = 10;
 /// The second signal. A lost region can also leave almost nothing: a handful of
 /// instructions belonging to the toggled wrapper. That is application code, and
 /// the composition rule passes it. The floor is 1,000 against a smallest real
-/// case of 6,656.
+/// case of 6,919 on x86_64 and 6,139 on aarch64.
 const MIN_COLLECTED_IR: i64 = 1000;
 
 /// Judges every case under `dir`, defaulting to the tree the benches write to.

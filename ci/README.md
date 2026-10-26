@@ -2,11 +2,12 @@
 
 The container suites boot real servers, and some run their clients in a pinned
 image too. This tree records the image each one runs, one directory per service
-and one per release line under it:
+and one per lane under it: a release line, or for `s3` a store:
 
 ```
 ci/<service>/PRIMARY              the lane to use when nothing selects one
 ci/<service>/<lane>/Dockerfile    the pin for that lane
+ci/<service>/<lane>/CAPABILITIES  what the lane's server supports (optional)
 ci/<service>/DOCS                 pages whose support claims the lanes back (optional)
 ci/<service>/UNSUPPORTED          lanes that back no support claim (optional)
 ```
@@ -17,9 +18,10 @@ architecture resolves to its own image. Nothing builds them. They exist so one
 file names the image, readable by Dependabot, by the task runner, and by the
 test harness.
 
-Services and lanes are discovered from this tree. The task runner, the CI
-classifier and the test harness name no lane and no service beyond the one they
-are testing, so adding either is a change inside `ci/`.
+Services and lanes are discovered from this tree. The task runner and the CI
+classifier name no lane and no service beyond the one they are testing. The test
+harness names none either, except the S3 stores: each `ci/s3/<store>/` lane needs
+that store's startup in `spate_test_support::S3Store`.
 
 ## Services
 
@@ -30,17 +32,18 @@ are testing, so adding either is a change inside `ci/`.
 | [`elasticmq`](elasticmq/README.md) | `stable` | `spate-sqs`, `spate-test-support`'s smoke tests, and `spate`'s examples tier |
 | [`kafka`](kafka/README.md) | `stable` | `spate-kafka`, and `spate`'s end-to-end suites |
 | [`rust`](rust/README.md) | `stable` | `spate-kafka`'s `tls_system_ca`, as its system OpenSSL builder and client image |
-| [`rustfs`](rustfs/README.md) | `stable` | `spate-s3`, `spate-kafka`'s notification suite, and `spate-test-support`'s smoke test |
+| [`s3`](s3/README.md) | `rustfs` | `spate-s3`, `spate-kafka`'s notification suite on a lane declaring `notifications`, and `spate-test-support`'s smoke test |
 
 A service's own README carries what is specific to it: which release lines it
-has, its vendor's support window, and why those lanes.
+has, or for `s3` which stores, its vendor's support window, and why those lanes.
 
 ## The convention
 
 **Lane names describe a release line.** `lts` and `stable` mean whatever they
 mean for that vendor today, so a lane keeps its name across a bump. A vendor with
 no LTS line has no `lts` lane. The names are per-service and there is no shared
-vocabulary to conform to.
+vocabulary to conform to. Under `ci/s3/` a lane is a store at its newest
+release, and `SPATE_S3_LANE` names a store.
 
 **One environment variable per service**, `SPATE_<SERVICE>_LANE`, falling back
 to the lane in `ci/<service>/PRIMARY`. Lanes are per-service, so a shared
@@ -55,6 +58,7 @@ cargo xtask container-image --ref <service> <lane>     # print name:tag@digest
 cargo xtask container-image --pull <service> <lane>    # pull, re-tag, print name:tag
 cargo xtask container-image --pull-all                 # every service's selected lane
 cargo xtask container-image --extra-lanes <service>    # lanes needing their own CI job
+cargo xtask container-image --selected-lane <service>  # print the selected lane
 ```
 
 `cargo xtask integration-test` runs `--pull-all`, which walks this tree. Select a lane
@@ -123,8 +127,10 @@ The bump usually cannot be fixed inside its own pull request, so:
 
 ## Adding a service
 
-1. `ci/<service>/<lane>/Dockerfile` per release line you want covered, each
-   pinned by tag and digest, and a `ci/<service>/PRIMARY` naming the default.
+1. `ci/<service>/<lane>/Dockerfile` per release line you want covered, or per
+   store for `s3`, each pinned by tag and digest, and a `ci/<service>/PRIMARY`
+   naming the default. A new S3 store lane also adds its arm to
+   `spate_test_support::Store` and declares its capabilities.
 2. A `ci/<service>/README.md` naming those lines and the reasoning.
 3. A row in the table above.
 4. The suite's harness reads its manifest through the same helper.

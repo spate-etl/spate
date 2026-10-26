@@ -3,10 +3,10 @@
 #![allow(dead_code)]
 
 pub(crate) mod location;
-pub(crate) mod rustfs;
 pub(crate) mod s3_stub;
 pub(crate) mod scripted_store;
 pub(crate) mod spy;
+pub(crate) mod store;
 
 use object_store::ObjectStoreExt as _;
 use spate_core::clock::TestClock;
@@ -52,7 +52,7 @@ impl PipelineYaml {
     }
 
     /// Reads `data/` in the gateway's bucket.
-    pub(crate) fn bucket(name: &str, gw: &rustfs::Gateway) -> Self {
+    pub(crate) fn bucket(name: &str, gw: &store::Gateway) -> Self {
         let url = format!("s3://{}/data/", gw.bucket);
         Self::over(name, url, Some(gw.store_options_yaml()))
     }

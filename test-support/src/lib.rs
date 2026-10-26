@@ -7,8 +7,8 @@ mod corpus;
 #[cfg(feature = "elasticmq")]
 mod elasticmq;
 mod http;
-#[cfg(feature = "rustfs")]
-mod rustfs;
+#[cfg(feature = "s3")]
+mod s3;
 #[cfg(feature = "tls")]
 mod tls;
 
@@ -17,8 +17,8 @@ pub use corpus::{fnv1a, pin};
 #[cfg(feature = "elasticmq")]
 pub use elasticmq::{ElasticMq, Message, QUERY_PORT};
 pub use http::{http, http_with_body, http_with_headers};
-#[cfg(feature = "rustfs")]
-pub use rustfs::{ACCESS_KEY, REGION, Rustfs, S3_PORT, SECRET_KEY};
+#[cfg(feature = "s3")]
+pub use s3::{ACCESS_KEY, REGION, S3Store, SECRET_KEY, Store};
 #[cfg(feature = "tls")]
 pub use tls::{TestCa, native_certs, pem, serve_tls};
 
@@ -37,6 +37,23 @@ use std::process::Command;
 /// Panics when the task runner fails, with its stderr, or prints no tag.
 #[must_use]
 pub fn container_image(args: &[&str]) -> (String, String) {
+    split_reference(&xtask_container_image(args))
+}
+
+/// Runs `cargo xtask container-image --selected-lane <service>` and returns the
+/// lane the service's suites run against: the one `SPATE_<SERVICE>_LANE`
+/// names, or its primary lane.
+///
+/// # Panics
+///
+/// Panics when the task runner fails, with its stderr.
+#[must_use]
+pub fn selected_lane(service: &str) -> String {
+    xtask_container_image(&["--selected-lane", service])
+}
+
+/// The line `cargo xtask container-image` prints for `args`.
+fn xtask_container_image(args: &[&str]) -> String {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
     let out = Command::new("cargo")
         .args(["xtask", "container-image"])
@@ -49,7 +66,7 @@ pub fn container_image(args: &[&str]) -> (String, String) {
         "cargo xtask container-image {args:?} failed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    split_reference(String::from_utf8_lossy(&out.stdout).trim())
+    String::from_utf8_lossy(&out.stdout).trim().to_owned()
 }
 
 fn split_reference(reference: &str) -> (String, String) {

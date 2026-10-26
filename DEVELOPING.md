@@ -103,7 +103,8 @@ Container-backed tests use testcontainers and are `#[ignore]`d, so a normal run
 skips them. `cargo xtask integration-test` is what selects them.
 
 A suite that boots a real server runs it at a pinned version, one lane per
-release line the vendor still supports, selected by a `SPATE_<SERVICE>_LANE`
+release line the vendor still supports, or per store for the S3 source,
+selected by a `SPATE_<SERVICE>_LANE`
 variable and pinned by tag and digest under `ci/<service>/`. CI runs the primary
 lane for the whole tier and gives every other lane a job of its own.
 [`ci/`](ci/README.md) is the account, and the services it covers are listed

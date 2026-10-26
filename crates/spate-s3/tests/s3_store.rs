@@ -1,4 +1,5 @@
-//! Backfill tests against a real S3 API: a RustFS container.
+//! Backfill tests against a real S3 API: the store `SPATE_S3_LANE` selects,
+//! in a container.
 //!
 //! This suite covers what the local-filesystem suite cannot: real
 //! ListObjectsV2 pagination across pages (>1000 keys) feeding the
@@ -8,18 +9,18 @@
 //! Ignored by default; run with Docker available:
 //!
 //! ```sh
-//! cargo test -p spate-s3 --test rustfs_s3 -- --ignored
+//! cargo test -p spate-s3 --test s3_store -- --ignored
 //! ```
 
 mod support;
 
 use spate_core::pipeline::ExitState;
 use std::time::Duration;
-use support::rustfs::Gateway;
+use support::store::Gateway;
 use support::{PipelineYaml, captured_rows, launch, lines_bytes, recs, sorted, test_options};
 
 fn config_yaml(gw: &Gateway) -> String {
-    PipelineYaml::bucket("s3-rustfs-test", gw).build()
+    PipelineYaml::bucket("s3-store-test", gw).build()
 }
 
 /// More than 1000 keys forces ListObjectsV2 pagination; every key must reach

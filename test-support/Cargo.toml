@@ -22,8 +22,8 @@ tls = [
     "dep:tokio",
     "dep:tokio-rustls",
 ]
-# `Rustfs`.
-rustfs = ["dep:http", "dep:object_store", "dep:testcontainers", "dep:tokio"]
+# `S3Store`.
+s3 = ["dep:http", "dep:object_store", "dep:testcontainers", "dep:tokio"]
 # `ElasticMq`.
 elasticmq = ["dep:testcontainers"]
 
@@ -46,4 +46,4 @@ tokio = { workspace = true, features = ["macros", "rt"] }
 
 [[test]]
 name = "containers"
-required-features = ["elasticmq", "rustfs"]
+required-features = ["elasticmq", "s3"]

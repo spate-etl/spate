@@ -3,8 +3,8 @@
 //!
 //! A lane is a directory under `ci/<service>/` holding a `Dockerfile` whose
 //! single `FROM` carries an exact tag and the digest that tag resolves to.
-//! Services and lanes are discovered from that tree, so adding either is a
-//! change inside `ci/`.
+//! Services and lanes are discovered from that tree, so resolving and pulling
+//! either needs no change outside `ci/`.
 //!
 //! [`Mode::Pull`] fetches by digest and re-tags locally. testcontainers builds
 //! its image reference as `name:tag` and has no digest form, so a run reaches

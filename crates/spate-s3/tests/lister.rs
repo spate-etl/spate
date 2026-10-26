@@ -1221,7 +1221,7 @@ fn a_lister_run_publishes_one_unit_per_listed_part() {
 #[ignore = "requires Docker"]
 fn a_second_conditional_create_at_the_location_reports_already_exists() {
     use object_store::{ObjectStoreExt as _, PutMode, PutPayload};
-    let gw = support::rustfs::Gateway::start("job-location");
+    let gw = support::store::Gateway::start("job-location");
     let key = object_store::path::Path::from("jobs/a/fingerprint");
     gw.rt.block_on(async {
         gw.client
@@ -1262,7 +1262,7 @@ fn resume_after_each_returned_key_publishes_the_rest() {
     use object_store::list::{PaginatedListOptions, PaginatedListStore as _};
     use object_store::path::Path as StorePath;
     use object_store::{ObjectStoreExt as _, PutPayload};
-    let gw = support::rustfs::Gateway::start("lister-resume");
+    let gw = support::store::Gateway::start("lister-resume");
     let named = [
         "data/a-c",
         "data/a/b/y",
@@ -1291,7 +1291,7 @@ fn resume_after_each_returned_key_publishes_the_rest() {
                     PutPayload::from_static(b"row\n"),
                 )
                 .await
-                .unwrap_or_else(|e| panic!("RustFS refused {key}: {e}"));
+                .unwrap_or_else(|e| panic!("the store refused {key}: {e}"));
         }
     });
     gw.put_raw("data/x/", "");
@@ -1307,7 +1307,7 @@ fn resume_after_each_returned_key_publishes_the_rest() {
     assert_eq!(
         first.result.objects.len(),
         1000,
-        "RustFS pages hold 1,000 keys"
+        "the store pages hold 1,000 keys"
     );
     assert_eq!((last.location.as_ref(), last.size), ("data/x", 0));
     assert!(first.page_token.is_some());
@@ -1328,7 +1328,7 @@ fn resume_after_each_returned_key_publishes_the_rest() {
         .copied()
         .chain(fillers.iter().map(String::as_str))
     {
-        assert!(listed.iter().any(|k| k == key), "RustFS lists {key}");
+        assert!(listed.iter().any(|k| k == key), "the store lists {key}");
     }
     assert_eq!(listed.len(), named.len() + fillers.len());
 

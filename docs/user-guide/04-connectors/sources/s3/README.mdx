@@ -909,12 +909,22 @@ unit lets the rest of the backfill finish first. An overwrite of a notification
 unit's object is re-enqueued instead, as
 [Reading a notification's object](#reading-a-notifications-object) describes.
 
+## Supported stores
+
+| Store | Basis |
+| --- | --- |
+| AWS S3 | AWS's documentation. CI does not run against AWS. |
+| RustFS | A CI lane runs the Docker-gated suites against the newest release. |
+| Ceph RGW | No CI lane. The source does not read RGW's [storage notifications](#storage-notifications). |
+| Garage | No CI lane. A [job location](#bounded-jobs-and-the-job-location) there needs `consistency_mode = "consistent"`. |
+
 ## Testing
 
 The whole feed path runs against `file://` URLs with no infrastructure, which
 is what [`s3_backfill.rs`](repo:crates/spate/examples/s3_backfill.rs) does.
-The Docker-gated suites run against a **RustFS** S3 store
-(`cargo test -p spate-s3 -- --ignored --test-threads=1`).
+The Docker-gated suites run against the store `SPATE_S3_LANE` selects, RustFS
+when it is unset (`SPATE_S3_LANE=rustfs cargo xtask integration-test`).
+[Supported stores](#supported-stores) lists which stores CI runs.
 
 The S3 source ends a listing at the first `ListObjectsV2` page that carries no
 continuation token. The store must return one on every page that has keys after

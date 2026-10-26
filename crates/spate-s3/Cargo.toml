@@ -44,7 +44,7 @@ spate-s3 = { path = ".", features = ["testing"] }
 spate-core = { workspace = true, features = ["testing"] }
 spate-bench = { workspace = true }
 spate-test = { workspace = true }
-spate-test-support = { workspace = true, features = ["rustfs", "tls"] }
+spate-test-support = { workspace = true, features = ["s3", "tls"] }
 spate-json = { workspace = true }
 gungraun = { workspace = true }
 proptest = { workspace = true }

@@ -296,10 +296,10 @@ pub(crate) fn classify(
                 image_suites.extend(graph.container_suites_for("spate-kafka"));
                 out.container_pkgs.extend(image_suites.iter().cloned());
             }
-            // The S3 store the spate-s3 suites run against, and the queue the
-            // shared helpers start. The Kafka feed's notification suite boots
-            // it beside the broker.
-            if glob(path, "ci/rustfs/*") {
+            // The S3 store lanes the spate-s3 suites run against, and the
+            // store the shared helpers start. The Kafka feed's notification
+            // suite boots one beside the broker.
+            if glob(path, "ci/s3/*") {
                 image_suites
                     .extend(["spate-kafka", "spate-s3", "spate-test-support"].map(String::from));
                 out.container_pkgs.extend(image_suites.iter().cloned());
@@ -960,9 +960,9 @@ mod tests {
         assert_eq!(suites(&out), ["spate", "spate-kafka"]);
     }
 
-    /// A RustFS bump selects the suites that boot RustFS and an ElasticMQ bump
-    /// the SQS feed's suite and the shared helpers' suite, on a Dependabot
-    /// pull request too.
+    /// A bump of any S3 store lane, or a change of the primary store, selects
+    /// the suites that boot an S3 store, and an ElasticMQ bump the SQS feed's
+    /// suite and the shared helpers' suite, on a Dependabot pull request too.
     #[test]
     fn a_test_store_image_bump_selects_the_suites_that_boot_it() {
         let ctx = Context {
@@ -970,7 +970,15 @@ mod tests {
         };
         for (image, expected) in [
             (
-                "ci/rustfs/stable/Dockerfile",
+                "ci/s3/rustfs/Dockerfile",
+                &["spate-kafka", "spate-s3", "spate-test-support"][..],
+            ),
+            (
+                "ci/s3/other/Dockerfile",
+                &["spate-kafka", "spate-s3", "spate-test-support"][..],
+            ),
+            (
+                "ci/s3/PRIMARY",
                 &["spate-kafka", "spate-s3", "spate-test-support"][..],
             ),
             (

@@ -1,14 +1,15 @@
-//! A RustFS S3 store in a container, the real-S3-API fixture shared by the
-//! Docker-gated suites, with one bucket and a signed client for seeding.
+//! The S3 store `SPATE_S3_LANE` selects, in a container: the real-S3-API
+//! fixture shared by the Docker-gated suites, with one bucket and a signed
+//! client for seeding.
 
 use object_store::aws::{AmazonS3, AmazonS3Builder, AwsAuthorizer, AwsCredential};
 use object_store::path::Path as StorePath;
 use object_store::{ObjectStore, ObjectStoreExt as _, PutPayload};
-use spate_test_support::{ACCESS_KEY, REGION, Rustfs, SECRET_KEY};
+use spate_test_support::{ACCESS_KEY, REGION, S3Store, SECRET_KEY};
 use std::sync::Arc;
 
 pub(crate) struct Gateway {
-    rustfs: Rustfs,
+    store: S3Store,
     pub(crate) bucket: String,
     /// One runtime and client for all seeding/assertion I/O. Some helpers
     /// are polled in `wait_until` loops, so per-call construction would
@@ -18,19 +19,19 @@ pub(crate) struct Gateway {
 }
 
 impl Gateway {
-    /// Start RustFS and create the test bucket.
+    /// Start the selected store and create the test bucket.
     pub(crate) fn start(bucket: &str) -> Gateway {
-        let rustfs = Rustfs::start(None)
-            .expect("start RustFS (is Docker running? first run pulls the image)");
-        rustfs.create_bucket(bucket).expect("create the bucket");
+        let store = S3Store::start(None)
+            .expect("start the S3 store (is Docker running? first run pulls the image)");
+        store.create_bucket(bucket).expect("create the bucket");
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
             .build()
             .unwrap();
-        let client = build_client(&rustfs, bucket);
+        let client = build_client(&store, bucket);
         Gateway {
-            rustfs,
+            store,
             bucket: bucket.to_string(),
             rt,
             client,
@@ -42,7 +43,7 @@ impl Gateway {
     pub(crate) fn store_options_yaml(&self) -> String {
         format!(
             "      endpoint: \"{}\"\n      allow_http: \"true\"\n      access_key_id: \"{ACCESS_KEY}\"\n      secret_access_key: \"{SECRET_KEY}\"\n      region: \"{REGION}\"",
-            self.rustfs.endpoint()
+            self.store.endpoint()
         )
     }
 
@@ -67,7 +68,7 @@ impl Gateway {
 
     /// The bucket's client as its concrete type, for its paginated listing.
     pub(crate) fn s3(&self) -> AmazonS3 {
-        builder(&self.rustfs, &self.bucket)
+        builder(&self.store, &self.bucket)
             .build()
             .expect("client builds")
     }
@@ -76,7 +77,7 @@ impl Gateway {
     /// hold, such as a folder marker ending in `/`. `key` is sent as written,
     /// so it must need no percent-encoding.
     pub(crate) fn put_raw(&self, key: &str, body: &str) {
-        let endpoint = self.rustfs.endpoint();
+        let endpoint = self.store.endpoint();
         let path = format!("/{}/{key}", self.bucket);
         let mut request = object_store::client::HttpRequest::new(body.to_owned().into());
         *request.method_mut() = "PUT".parse().unwrap();
@@ -107,13 +108,13 @@ impl Gateway {
 }
 
 /// A signed `object_store` client for seeding and assertions.
-fn build_client(rustfs: &Rustfs, bucket: &str) -> Arc<dyn ObjectStore> {
-    Arc::new(builder(rustfs, bucket).build().expect("client builds"))
+fn build_client(store: &S3Store, bucket: &str) -> Arc<dyn ObjectStore> {
+    Arc::new(builder(store, bucket).build().expect("client builds"))
 }
 
-fn builder(rustfs: &Rustfs, bucket: &str) -> AmazonS3Builder {
+fn builder(store: &S3Store, bucket: &str) -> AmazonS3Builder {
     AmazonS3Builder::new()
-        .with_endpoint(rustfs.endpoint())
+        .with_endpoint(store.endpoint())
         .with_allow_http(true)
         .with_bucket_name(bucket)
         .with_region(REGION)

@@ -20,3 +20,7 @@ broker change reaches CI first.
 Dependabot proposes a release once Apache points `latest` at it. A tag above
 `latest` counts as a pre-release, so the `-rcN` tags Apache pushes to the same
 repository are never proposed.
+
+The lane may pin a release before Apache points `latest` at it, when that
+release carries a fix the suites need. Dependabot then proposes the next release
+once `latest` moves past the pin.

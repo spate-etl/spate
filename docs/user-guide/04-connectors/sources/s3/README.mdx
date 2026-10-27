@@ -527,11 +527,14 @@ Each store needs its own settings for its notifications to arrive:
   produces each Kafka message without a key, and the
   [Kafka feed](../../feeds/kafka/README.mdx#message-mapping) names that
   message's unit by its position. On a persistent topic, RGW reserves 4 KB of
-  the topic's queue for each event. An event larger than that is dropped when
-  the queue is full, and the object's write still succeeds. An event carries
-  the object's key and its tags, so both stay short enough to keep each event
-  under 4 KB. RGW writes a record's key unencoded, and the source reads it as
-  written.
+  the topic's queue for each event before the write. An event carries the
+  object's key, its tags, its `x-amz-meta-*` metadata and the topic's
+  `OpaqueData`. An event larger than 4 KB is dropped, and its write still
+  succeeds, when the queue has room for the reservation but not for the whole
+  event. Once less than 4 KB is left, RGW refuses every write with 503
+  `SlowDown`. Keep the key, tags, metadata and `OpaqueData` short enough that
+  each event stays under 4 KB. RGW writes a record's key unencoded, and the
+  source reads it as written.
 
 #### Reading a notification's object
 

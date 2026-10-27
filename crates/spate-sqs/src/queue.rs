@@ -343,8 +343,12 @@ mod tests {
     use super::*;
     use crate::config::SqsFeedConfig;
     use crate::config::tests::{PARTITION_REGIONS, sdk_host};
+    use crate::test_stub::{ScriptedCredentials, queue_with, sqs_stub};
+    use aws_credential_types::provider::error::CredentialsError;
     use aws_sdk_sqs::config::{BehaviorVersion, Credentials, Region, SharedCredentialsProvider};
     use spate_test_support::{TestCa, native_certs, serve_tls};
+    use std::sync::Arc;
+    use std::sync::atomic::Ordering;
     use std::time::Duration;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
@@ -518,5 +522,163 @@ mod tests {
             "ended after {elapsed:?}: {}",
             e.message
         );
+    }
+
+    /// Calls the batch call `op` names with one entry, bounded by `within`.
+    async fn one_entry(
+        queue: &SdkQueue,
+        op: &str,
+        within: Option<Duration>,
+    ) -> Result<BatchOutcome, CallError> {
+        if op == "visibility" {
+            let entry = VisibilityEntry {
+                id: "0".to_owned(),
+                handle: "h".to_owned(),
+                seconds: 30,
+            };
+            queue.change_visibility_batch(vec![entry], within).await
+        } else {
+            let entry = DeleteEntry {
+                id: "0".to_owned(),
+                handle: "h".to_owned(),
+            };
+            queue.delete_batch(vec![entry], within).await
+        }
+    }
+
+    /// Pins that a credentials load a bounded call gives up on finishes for
+    /// the next call, while `within` still ends the call that gave up.
+    #[tokio::test]
+    async fn a_credentials_load_given_up_by_one_call_finishes_for_the_next() {
+        let within = Some(Duration::from_secs(1));
+        for op in ["visibility", "delete"] {
+            let (endpoint, answered) = sqs_stub().await;
+            let credentials = ScriptedCredentials::slow_reloads(Duration::from_millis(1_200));
+            let (queue, _) =
+                queue_with(&endpoint, Duration::from_secs(60), credentials.provider()).await;
+            tokio::time::pause();
+            one_entry(&queue, op, None).await.unwrap();
+            let started = tokio::time::Instant::now();
+            let e = one_entry(&queue, op, within).await.unwrap_err();
+            let elapsed = started.elapsed();
+            assert_eq!(e.class, Class::Retryable, "{op}: {}", e.message);
+            assert!(
+                elapsed >= Duration::from_secs(1) && elapsed < Duration::from_secs(2),
+                "{op}: ended after {elapsed:?}"
+            );
+            assert_eq!(
+                credentials.finished(),
+                1,
+                "{op}: the reload is still running"
+            );
+            let third = one_entry(&queue, op, within).await;
+            assert!(
+                third.is_ok(),
+                "{op}: {third:?}, loads started {}",
+                credentials.started()
+            );
+            assert_eq!(credentials.started(), 2, "{op}");
+            let reached = if op == "visibility" {
+                &answered.extended
+            } else {
+                &answered.deleted
+            };
+            assert_eq!(reached.load(Ordering::SeqCst), 2, "{op}");
+            tokio::time::resume();
+        }
+    }
+
+    /// An [`SdkQueue`] over the answering stub whose every credentials load
+    /// fails with `error`.
+    async fn failing_credentials(
+        error: impl Fn() -> CredentialsError + Send + Sync + 'static,
+    ) -> SdkQueue {
+        let (endpoint, _) = sqs_stub().await;
+        let error = Arc::new(error);
+        let credentials = ScriptedCredentials::new(move |_| {
+            let error = Arc::clone(&error);
+            Box::pin(async move { Err(error()) })
+        });
+        queue_with(&endpoint, Duration::from_secs(60), credentials.provider())
+            .await
+            .0
+    }
+
+    /// Pins that a failed credentials load fails the call as Retryable with
+    /// the load's cause in its message.
+    #[tokio::test]
+    async fn a_failed_credentials_load_reads_retryable_with_its_cause() {
+        let queue =
+            failing_credentials(|| CredentialsError::provider_error("no profile named ops")).await;
+        let e = one_entry(&queue, "visibility", Some(Duration::from_secs(1)))
+            .await
+            .unwrap_err();
+        assert_eq!(e.class, Class::Retryable, "{}", e.message);
+        assert!(e.message.contains("no profile named ops"), "{}", e.message);
+    }
+
+    /// Pins that a credentials load the TLS layer rejected fails the call
+    /// as Fatal with the TLS error in its message.
+    #[tokio::test]
+    async fn a_credentials_load_rejected_by_tls_keeps_its_class() {
+        let queue = failing_credentials(|| {
+            CredentialsError::provider_error(rustls::Error::InvalidCertificate(
+                rustls::CertificateError::UnknownIssuer,
+            ))
+        })
+        .await;
+        let e = one_entry(&queue, "visibility", Some(Duration::from_secs(1)))
+            .await
+            .unwrap_err();
+        assert_eq!(e.class, Class::Fatal, "{}", e.message);
+        assert!(e.message.contains("UnknownIssuer"), "{}", e.message);
+    }
+
+    /// Pins that a queue holding a finished credentials load nobody awaited
+    /// prints neither the secret key nor the session token.
+    #[tokio::test]
+    async fn a_queue_prints_no_secret_after_a_load() {
+        let (endpoint, _) = sqs_stub().await;
+        let credentials = ScriptedCredentials::slow_reloads(Duration::from_millis(1_200));
+        let (queue, _) =
+            queue_with(&endpoint, Duration::from_secs(60), credentials.provider()).await;
+        tokio::time::pause();
+        one_entry(&queue, "visibility", None).await.unwrap();
+        one_entry(&queue, "visibility", Some(Duration::from_secs(1)))
+            .await
+            .unwrap_err();
+        credentials.until_finished(2).await;
+        let printed = format!("{queue:?}");
+        assert!(!printed.contains("s3cr3t"), "{printed}");
+        assert!(!printed.contains("t0k3n"), "{printed}");
+    }
+
+    /// Pins that the client loads through [`SharedLoad`] on the AWS
+    /// provider chain as well as on a provider the caller passes.
+    ///
+    /// [`SharedLoad`]: crate::credentials::SharedLoad
+    #[tokio::test]
+    async fn the_default_chain_is_wrapped_too() {
+        let config = SqsFeedConfig {
+            queue_url: "http://127.0.0.1:1/000000000000/jobs".to_owned(),
+            visibility: Duration::from_secs(60),
+            region: Some("eu-west-2".to_owned()),
+            endpoint: Some("http://127.0.0.1:1".to_owned()),
+        };
+        let step = std::sync::Mutex::new("starting");
+        let given = Credentials::new("x", "x", None, None, "test");
+        for credentials in [None, Some(SharedCredentialsProvider::new(given))] {
+            let explicit = credentials.is_some();
+            let queue = crate::client::sdk_queue(&config, credentials, &step)
+                .await
+                .unwrap();
+            // The SDK's config has no getter for the provider it signs with;
+            // its `Debug` prints the identity resolvers.
+            let printed = format!("{:?}", queue.client.config());
+            assert!(
+                printed.contains("SharedLoad"),
+                "explicit {explicit}: {printed}"
+            );
+        }
     }
 }

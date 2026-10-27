@@ -3,6 +3,7 @@ use crate::queue::BoxFuture;
 use crate::scripted::{Failure, Message, ScriptedQueue};
 use spate_core::feed::{FeedPark, wake_channel};
 use std::sync::atomic::{AtomicBool, Ordering};
+use tokio::sync::oneshot;
 
 const MINUTE: Duration = Duration::from_secs(60);
 const QUEUE_URL: &str = "https://sqs.eu-west-2.amazonaws.com/111122223333/jobs";
@@ -3526,4 +3527,144 @@ fn a_hand_back_given_up_at_the_period_is_logged_with_its_error() {
             .any(|l| l.contains("sending it again") && l.contains("InternalError")),
         "{lines:#?}"
     );
+}
+
+/// A feed over a real [`SdkQueue`](crate::queue::SdkQueue) against the
+/// answering stub, loading credentials through `credentials`, with the
+/// reader holding the one unit the stub hands out. Tokio time is paused
+/// once the client is built.
+async fn holding_one_unit(
+    visibility: Duration,
+    credentials: &Arc<crate::test_stub::ScriptedCredentials>,
+) -> (SqsFeed, Delivery, Arc<crate::test_stub::Answered>) {
+    let (endpoint, answered) = crate::test_stub::sqs_stub().await;
+    let (queue, cfg) =
+        crate::test_stub::queue_with(&endpoint, visibility, credentials.provider()).await;
+    // Paused only now: building the client reads the trust store on a
+    // blocking thread.
+    tokio::time::pause();
+    let feed = SqsFeed::start(
+        Arc::new(queue) as Arc<dyn Queue>,
+        Arc::new(ScriptedQueue::default()) as Arc<dyn startup::QueueAttributes>,
+        DEAD_URL.to_owned(),
+        &cfg,
+        &tokio::runtime::Handle::current(),
+    );
+    let (waker, park) = wake_channel();
+    feed.set_waker(waker);
+    let held = receive_n(&feed, &park, 1).await.remove(0);
+    (feed, held, answered)
+}
+
+/// Renews `held` every 100 ms for `d`, asserting every renew is accepted,
+/// with the extensions SQS answered and the provider's loads in the message.
+async fn renew_with_counts(
+    feed: &SqsFeed,
+    held: &Delivery,
+    d: Duration,
+    answered: &crate::test_stub::Answered,
+    credentials: &crate::test_stub::ScriptedCredentials,
+) {
+    let start = Instant::now();
+    for _ in 0..d.as_millis() / 100 {
+        assert_eq!(
+            feed.renew(held.receipt).map_err(|e| e.kind),
+            Ok(()),
+            "the unit lapsed {:?} in: extensions answered {}, credential loads started {}, \
+             finished {}",
+            Instant::now() - start,
+            answered.extended.load(Ordering::SeqCst),
+            credentials.started(),
+            credentials.finished(),
+        );
+        step(Duration::from_millis(100)).await;
+    }
+    assert!(
+        answered.extended.load(Ordering::SeqCst) > 0,
+        "no extension reached SQS"
+    );
+}
+
+/// Pins that a renewed unit survives a credentials load slower than the
+/// running extension bound while no receive runs. At a 3 s visibility the
+/// tick at 1 s starts a 1.2 s load and gives up at 2 s; with 1 s left the
+/// batch is sent once more with 0.5 s, and that call is handed the load at
+/// 2.2 s. A 200 ms load is the control. Regression for #1455.
+#[tokio::test]
+async fn a_renewed_unit_outlives_a_credentials_load_slower_than_its_extension_bound() {
+    for reload in [Duration::from_millis(200), Duration::from_millis(1_200)] {
+        let credentials = crate::test_stub::ScriptedCredentials::slow_reloads(reload);
+        let (feed, held, answered) = holding_one_unit(Duration::from_secs(3), &credentials).await;
+        renew_with_counts(
+            &feed,
+            &held,
+            Duration::from_secs(4),
+            &answered,
+            &credentials,
+        )
+        .await;
+        drop(feed);
+        tokio::time::resume();
+    }
+}
+
+/// Pins that a unit held through a stop survives a credentials load slower
+/// than [`STOP_EXTENSION_BOUND`]. At a one-minute visibility the tick near
+/// 20 s starts a 1.2 s load and gives up after 1 s; the load finishes with
+/// no call waiting, and the tick near 40 s is handed it. Regression for
+/// #1455.
+#[tokio::test]
+async fn a_held_unit_outlives_a_credentials_load_slower_than_the_stop_bound() {
+    let credentials =
+        crate::test_stub::ScriptedCredentials::slow_reloads(Duration::from_millis(1_200));
+    let (feed, held, answered) = holding_one_unit(MINUTE, &credentials).await;
+    feed.stop_receiving();
+    renew_with_counts(
+        &feed,
+        &held,
+        Duration::from_secs(70),
+        &answered,
+        &credentials,
+    )
+    .await;
+}
+
+/// Pins that dropping the feed ends a credentials load under way.
+#[tokio::test]
+async fn dropping_the_feed_ends_a_credentials_load_in_flight() {
+    let (ended, mut dropped) = oneshot::channel::<()>();
+    let guard = std::sync::Mutex::new(Some(ended));
+    struct OnDrop(Option<oneshot::Sender<()>>);
+    impl Drop for OnDrop {
+        fn drop(&mut self) {
+            if let Some(ended) = self.0.take() {
+                let _ = ended.send(());
+            }
+        }
+    }
+    let credentials = crate::test_stub::ScriptedCredentials::new(move |n| {
+        let on_drop = OnDrop(if n == 0 {
+            None
+        } else {
+            guard.lock().unwrap().take()
+        });
+        Box::pin(async move {
+            if n == 0 {
+                return Ok(crate::test_stub::stale_keys());
+            }
+            let _on_drop = on_drop;
+            std::future::pending::<()>().await;
+            unreachable!()
+        })
+    });
+    let (feed, _held, _) = holding_one_unit(Duration::from_secs(3), &credentials).await;
+    while credentials.started() < 2 {
+        step(Duration::from_millis(100)).await;
+    }
+    assert!(dropped.try_recv().is_err(), "the load is under way");
+    drop(feed);
+    tokio::time::timeout(MINUTE, dropped)
+        .await
+        .expect("the load ended")
+        .unwrap();
 }

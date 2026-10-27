@@ -18,6 +18,7 @@ testing = []
 
 [dependencies]
 aws-config = { workspace = true }
+aws-credential-types = { workspace = true }
 aws-sdk-sqs = { workspace = true }
 aws-smithy-http-client = { workspace = true }
 base64 = { workspace = true }

@@ -2,6 +2,7 @@
 //! credentials, timeouts and retries.
 
 use crate::config::SqsFeedConfig;
+use crate::credentials::SharedLoad;
 use crate::error::SqsError;
 use crate::queue::SdkQueue;
 use aws_config::environment::region::EnvironmentVariableRegionProvider;
@@ -29,7 +30,7 @@ pub(crate) const OPERATION_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// `ReceiveMessage` waits up to 20 s for a message before its reply starts.
 const RECEIVE_READ_TIMEOUT: Duration = Duration::from_secs(25);
-const RECEIVE_OPERATION_TIMEOUT: Duration = Duration::from_secs(60);
+pub(crate) const RECEIVE_OPERATION_TIMEOUT: Duration = Duration::from_secs(60);
 
 const MAX_ATTEMPTS: u32 = 3;
 
@@ -67,6 +68,10 @@ pub(crate) async fn sdk_queue(
     set("loading the AWS configuration");
     let sdk = loader.load().await;
     let mut builder = aws_sdk_sqs::config::Builder::from(&sdk);
+    builder.set_credentials_provider(
+        sdk.credentials_provider()
+            .map(|p| SharedCredentialsProvider::new(SharedLoad::new(p))),
+    );
     if let Some(endpoint) = &config.endpoint {
         builder = builder.endpoint_url(endpoint);
     }
@@ -80,8 +85,6 @@ pub(crate) async fn sdk_queue(
 
 /// The client's timeouts with `read` and `operation`.
 pub(crate) fn timeouts(read: Duration, operation: Duration) -> TimeoutConfig {
-    // No attempt timeout: the SDK loads credentials inside an attempt, and a
-    // load that timeout cancels starts over on the next one.
     TimeoutConfig::builder()
         .connect_timeout(CONNECT_TIMEOUT)
         .read_timeout(read)

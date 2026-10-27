@@ -56,12 +56,15 @@
 
 mod client;
 mod config;
+mod credentials;
 mod error;
 mod feed;
 mod queue;
 #[cfg(test)]
 mod scripted;
 mod startup;
+#[cfg(test)]
+mod test_stub;
 
 pub use error::SqsError;
 pub use feed::SqsFeed;

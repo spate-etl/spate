@@ -4334,6 +4334,7 @@ name = "spate-sqs"
 version = "0.3.0"
 dependencies = [
  "aws-config",
+ "aws-credential-types",
  "aws-sdk-sqs",
  "aws-smithy-http-client",
  "base64 0.23.1",

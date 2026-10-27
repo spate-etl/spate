@@ -165,7 +165,11 @@ request already sent by then can still reach SQS just after. From a stop until
 the feed closes, each is given up after one second. A batch whose call fails,
 or is given up, with one renewal period or less to its earliest deadline is
 sent once more at once, so a unit the worker renews outlives one extension
-call that SQS does not answer.
+call that SQS does not answer. A credentials load that outlasts the call that
+started it keeps running, for up to a minute, and the next call that needs
+credentials waits for it. Each extension given up while it runs still fails,
+so a load that outlasts the time left to a unit's deadline lets that unit
+lapse.
 
 The long-poll wait is `visibility / 3` seconds, rounded down and at most 20.
 A unit that arrives at the end of a poll therefore still has two renewal

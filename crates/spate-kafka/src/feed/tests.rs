@@ -93,56 +93,108 @@ fn a_unit_fails_to_the_dead_letter_topic_from_the_cap() {
     }
 }
 
-/// Pins what a message names: a UTF-8 key is the unit's id and the value
-/// its body, and its attempts count under its publish identity: a retry
-/// copy's `spate.origin`, a work message's own position. A missing or
-/// non-UTF-8 key names no unit, and the message is kept as read for the
-/// dead-letter topic.
+/// Pins what a message names: a UTF-8 key, the empty key included, is the
+/// unit's id and the value its body, a message with no key takes its own
+/// position as its id, and its attempts count under its publish identity: a
+/// retry copy's `spate.origin`, a work message's own position. A non-UTF-8
+/// key names no unit, and the message is kept as read for the dead-letter
+/// topic.
 #[test]
 fn a_message_names_a_unit_by_its_key() {
     let topics = &core(10).topics;
-    let headers = vec![
-        ("other".to_owned(), Some(b"9".to_vec())),
-        ("spate.origin".to_owned(), Some(b"units/3/4".to_vec())),
-    ];
+    let unit_of = |read: Read| match read {
+        Read::Unit { unit, identity } => (unit, identity.to_string()),
+        other => panic!("{other:?}"),
+    };
+    let origin = || {
+        vec![
+            ("other".to_owned(), Some(b"9".to_vec())),
+            ("spate.origin".to_owned(), Some(b"units/3/4".to_vec())),
+        ]
+    };
+    assert_eq!(
+        unit_of(read(
+            ("units-retry", 0, 7),
+            Some(b"day-1"),
+            Some(b"body"),
+            origin(),
+            topics,
+        )),
+        (Unit::new("day-1", b"body".to_vec()), "units/3/4".to_owned())
+    );
+    let (unit, identity) = unit_of(read(
+        ("units", 1, 5),
+        Some(b"empty"),
+        None,
+        Vec::new(),
+        topics,
+    ));
+    assert!(unit.body.is_empty());
+    assert_eq!(identity, "units/1/5");
+    assert_eq!(
+        unit_of(read(
+            ("units", 1, 6),
+            Some(b""),
+            Some(b"raw"),
+            Vec::new(),
+            topics
+        )),
+        (Unit::new("", b"raw".to_vec()), "units/1/6".to_owned())
+    );
+    let keyless = vec![("h".to_owned(), None)];
+    assert_eq!(
+        unit_of(read(("units", 2, 9), None, Some(b"raw"), keyless, topics)),
+        (
+            Unit::new("units/2/9", b"raw".to_vec()),
+            "units/2/9".to_owned()
+        )
+    );
+    assert_eq!(
+        unit_of(read(
+            ("units-retry", 0, 7),
+            None,
+            Some(b"raw"),
+            origin(),
+            topics
+        )),
+        (
+            Unit::new("units-retry/0/7", b"raw".to_vec()),
+            "units/3/4".to_owned()
+        )
+    );
+    assert_eq!(
+        unit_of(read(
+            ("units-retry", 0, 7),
+            None,
+            Some(b"raw"),
+            Vec::new(),
+            topics
+        )),
+        (
+            Unit::new("units-retry/0/7", b"raw".to_vec()),
+            "units-retry/0/7".to_owned()
+        )
+    );
+    let (unit, identity) = unit_of(read(("units", 0, 3), None, None, Vec::new(), topics));
+    assert_eq!(unit, Unit::new("units/0/3", Vec::new()));
+    assert_eq!(identity, "units/0/3");
+    let key = Some(&[0xff, 0xfe][..]);
+    let headers = vec![("h".to_owned(), None)];
     match read(
-        ("units-retry", 0, 7),
-        Some(b"day-1"),
-        Some(b"body"),
-        headers,
+        ("units-retry", 0, 1),
+        key,
+        Some(b"raw"),
+        headers.clone(),
         topics,
     ) {
-        Read::Unit { unit, identity } => {
-            assert_eq!(unit, Unit::new("day-1", b"body".to_vec()));
-            assert_eq!(identity.to_string(), "units/3/4");
+        Read::NoUnit(out) => {
+            assert_eq!(&*out.topic, "units-retry");
+            assert_eq!(out.partition, None);
+            assert_eq!(out.key.as_deref(), key);
+            assert_eq!(out.payload.as_deref(), Some(&b"raw"[..]));
+            assert_eq!(out.headers, headers);
         }
         other => panic!("{other:?}"),
-    }
-    match read(("units", 1, 5), Some(b"empty"), None, Vec::new(), topics) {
-        Read::Unit { unit, identity } => {
-            assert!(unit.body.is_empty());
-            assert_eq!(identity.to_string(), "units/1/5");
-        }
-        other => panic!("{other:?}"),
-    }
-    for key in [None, Some(&[0xff, 0xfe][..])] {
-        let headers = vec![("h".to_owned(), None)];
-        match read(
-            ("units-retry", 0, 1),
-            key,
-            Some(b"raw"),
-            headers.clone(),
-            topics,
-        ) {
-            Read::NoUnit(out) => {
-                assert_eq!(&*out.topic, "units-retry");
-                assert_eq!(out.partition, None);
-                assert_eq!(out.key.as_deref(), key);
-                assert_eq!(out.payload.as_deref(), Some(&b"raw"[..]));
-                assert_eq!(out.headers, headers);
-            }
-            other => panic!("{other:?}"),
-        }
     }
 }
 
@@ -1684,6 +1736,15 @@ mod cluster {
     /// dead-letter topics, two of the attempt topic, and `n` messages keyed
     /// `u0`, `u1`, … on the work topic.
     fn cluster_with(n: usize) -> MockCluster<'static, rdkafka::producer::DefaultProducerContext> {
+        let keys: Vec<Vec<u8>> = (0..n).map(|i| format!("u{i}").into_bytes()).collect();
+        cluster_holding(keys.iter().map(|k| Some(&k[..])))
+    }
+
+    /// The topics of [`cluster_with`], with one message on the work topic
+    /// for each of `keys`, in order, `None` producing a message with no key.
+    fn cluster_holding<'k>(
+        keys: impl IntoIterator<Item = Option<&'k [u8]>>,
+    ) -> MockCluster<'static, rdkafka::producer::DefaultProducerContext> {
         let cluster = MockCluster::new(1).expect("mock cluster");
         for topic in ["units", "units-retry", "units-dead"] {
             cluster.create_topic(topic, 1, 1).unwrap();
@@ -1693,12 +1754,13 @@ mod cluster {
             .set("bootstrap.servers", cluster.bootstrap_servers())
             .create()
             .unwrap();
-        for i in 0..n {
-            let id = format!("u{i}");
-            producer
-                .send(BaseRecord::to("units").key(id.as_bytes()).payload(b"body"))
-                .map_err(|(e, _)| e)
-                .unwrap();
+        for key in keys {
+            let record = BaseRecord::<[u8], [u8]>::to("units").payload(b"body");
+            let record = match key {
+                Some(key) => record.key(key),
+                None => record,
+            };
+            producer.send(record).map_err(|(e, _)| e).unwrap();
         }
         producer.flush(Duration::from_secs(30)).unwrap();
         cluster
@@ -2161,6 +2223,53 @@ mod cluster {
             },
         );
         assert!(d.core.lock().gating.len() >= READY_CAPACITY);
+    }
+
+    /// Pins that keyless units waiting at the gate count against the buffer
+    /// as keyed ones do: with no gate to take them, a full gate queue of
+    /// keyless units pauses the partitions.
+    #[test]
+    fn a_full_gate_queue_of_keyless_units_pauses_the_partitions() {
+        let cluster = cluster_holding(std::iter::repeat_n(None, 2 * READY_CAPACITY));
+        let brokers = cluster.bootstrap_servers();
+        let group = spate_test::unique_name("gating-full-keyless");
+        let (_, _, _, mut d) = parts_for(&brokers, &group);
+        wait_until(
+            DEADLINE,
+            "the gate's queue fills and the thread pauses",
+            || {
+                d.poll();
+                d.serve_intents();
+                d.backpressure();
+                !d.paused.is_empty()
+            },
+        );
+        assert!(d.core.lock().gating.len() >= READY_CAPACITY);
+    }
+
+    /// Pins that a message with no key goes to the gate as a unit and logs
+    /// no dead-letter warning, while one whose key is not UTF-8 still does.
+    #[test]
+    fn a_keyless_message_logs_no_dead_letter_warning() {
+        let cluster = cluster_holding([Some(&[0xff, 0xfe][..]), None]);
+        let brokers = cluster.bootstrap_servers();
+        let group = spate_test::unique_name("keyless-warning");
+        let (_, _, _, mut d) = parts_for(&brokers, &group);
+        let lines = spate_test::capture_logs(tracing::Level::WARN, || {
+            drive(&mut d, "the keyless unit reaches the gate", |d| {
+                !d.core.lock().gating.is_empty()
+            });
+        });
+        let ids: Vec<String> = d
+            .core
+            .lock()
+            .gating
+            .iter()
+            .map(|g| g.unit.id.clone())
+            .collect();
+        assert_eq!(ids, ["units/0/1"]);
+        let warned = lines.iter().filter(|l| l.contains("names no unit")).count();
+        assert_eq!(warned, 1, "{lines:?}");
     }
 
     /// Pins that units whose attempt write is in flight count against the

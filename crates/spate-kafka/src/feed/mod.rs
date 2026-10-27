@@ -12,9 +12,11 @@
 //!
 //! # Offsets
 //!
-//! A unit is a message: its key is the unit's id and its value the unit's
-//! body. The feed's offset tracker holds every delivered offset until it
-//! finishes, and each partition commits up to its first unfinished offset.
+//! A unit is a message: its key, or its position
+//! `<topic>/<partition>/<offset>` when it has no key, is the unit's id, and
+//! its value the unit's body. The feed's offset tracker holds every delivered
+//! offset until it finishes, and each partition commits up to its first
+//! unfinished offset.
 //! An acknowledged unit's offset finishes once the tombstone of its attempt
 //! record is confirmed by its delivery report. A failed unit's offset
 //! finishes once its write to the retry topic is confirmed, or, for a write
@@ -435,8 +437,9 @@ impl Drop for LatchOnPanic {
 /// attempt cap goes to the dead-letter topic unread. An acknowledged unit's
 /// attempt record is tombstoned before its offset is committed. A failed
 /// unit is written to the retry topic, or to the dead-letter topic at the
-/// attempt cap, before its offset is. A message with no key, or a key that
-/// is not UTF-8, names no unit and goes to the dead-letter topic at once.
+/// attempt cap, before its offset is. A message with no key is a unit named
+/// by its position, `<topic>/<partition>/<offset>`. A message whose key is
+/// not UTF-8 names no unit and goes to the dead-letter topic at once.
 ///
 /// The runtime's [`close`](Feed::close) waits up to half of what it is
 /// given for the feed's writes in flight, commits each partition up to its

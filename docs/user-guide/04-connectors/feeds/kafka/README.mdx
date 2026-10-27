@@ -439,9 +439,12 @@ naming the partition and tries all its units again. A watermark read refused
 in a way retrying cannot fix, and an attempt record the worker cannot read,
 stop the feed.
 
-A message with no key, or a key that is not UTF-8, names no unit. It goes to
-the dead-letter topic at once, with its key, value and headers as read, and
-its offset finishes once that write is confirmed. A message librdkafka reports
+A message with no key is a unit named by its position,
+`<topic>/<partition>/<offset>` of the message as read, and is counted, read and
+finished like any other unit. Its retry and dead-letter copies carry that id as
+their key. A message whose key is not UTF-8 names no unit. It goes to the
+dead-letter topic at once, with its key, value and headers as read, and its
+offset finishes once that write is confirmed. A message librdkafka reports
 as corrupt, as `check.crcs` detects, stops the feed. librdkafka does not stop on
 such a message, and reports it again on each fetch that reads it. For a message
 in format v0 or v1, librdkafka skips its offset when the same fetch also returns
@@ -510,7 +513,7 @@ feed (see [`checkpoint:`](../../../07-reference/configuration.mdx#checkpoint)).
 
 | Unit | Message |
 |---|---|
-| Id | The key, as UTF-8. |
+| Id | The key, as UTF-8. A message with no key takes its own position, `<topic>/<partition>/<offset>`, as the unit's id. |
 | Body | The value. A message with no value is a unit with an empty body. |
 | Delivery count | The unit's attempt record, written before the read. |
 
@@ -520,10 +523,11 @@ confirmed by its delivery report. A unit over librdkafka's `message.max.bytes`
 failure that retrying can fix is reported as retryable, and one that it cannot
 stops the feed and is reported with the feed's error.
 
-A copy written to the retry or dead-letter topic carries the unit's publish
-identity in `spate.origin`, and the count of the delivery it was written from
-in `spate.deliveries`. The feed writes `spate.deliveries` for an operator
-reading the dead-letter topic, and does not read it.
+A copy written to the retry or dead-letter topic carries the unit's id as its
+key, the unit's publish identity in `spate.origin`, and the count of the
+delivery it was written from in `spate.deliveries`. The feed writes
+`spate.deliveries` for an operator reading the dead-letter topic, and does not
+read it.
 
 An attempt record's key is the unit's publish identity, and it lives on
 partition `(murmur2(identity) & 0x7fffffff) % partitions` of the attempt

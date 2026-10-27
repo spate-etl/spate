@@ -496,10 +496,11 @@ so the feed dead-letters its message at the cap. An object overwritten before or
 during its read is re-enqueued at its current ETag when its notification carries
 an ETag, and is read in its new contents when the notification carries none. A
 notification's unit is a unit of its own, with the feed message's id (the SQS
-`MessageId`, or the Kafka message key), so an object that both a listing and a
-notification announce is read twice. A unit the source re-enqueues keeps the id
-of the unit it replaces. A store sends no notification for an object written
-before the bucket's notification configuration takes effect; on AWS S3 that
+`MessageId`, or the Kafka message key, or its position when it has none), so
+an object that both a listing and a notification announce is read twice. A
+unit the source re-enqueues keeps the id of the unit it replaces. A store sends
+no notification for an object written before the bucket's notification
+configuration takes effect; on AWS S3 that
 window lasted at least 181 seconds after the configuration was written, in one
 measured run
 ([ADR-0072](../../../../adr/0072-missed-storage-notifications-are-not-reconciled-by-re-listing.md)).
@@ -521,12 +522,16 @@ Each store needs its own settings for its notifications to arrive:
   RustFS writes each event with timestamp 0, so the work topic needs the
   setting the [Kafka feed](../../feeds/kafka/README.mdx#topics) page states,
   and the feed refuses a work topic without it.
-- **Ceph RGW.** The source does not read RGW's notifications. RGW sends them
-  over HTTP, AMQP or Kafka, never to SQS
-  ([Ceph](https://docs.ceph.com/en/latest/radosgw/notifications/)), and it
-  produces each Kafka message without a key, which the
-  [Kafka feed](../../feeds/kafka/README.mdx#counting-deliveries) dead-letters.
-  RGW writes a record's key unencoded, and the source reads it as written.
+- **Ceph RGW.** RGW sends notifications over HTTP, AMQP or Kafka, never to
+  SQS ([Ceph](https://docs.ceph.com/en/latest/radosgw/notifications/)). It
+  produces each Kafka message without a key, and the
+  [Kafka feed](../../feeds/kafka/README.mdx#message-mapping) names that
+  message's unit by its position. On a persistent topic, RGW reserves 4 KB of
+  the topic's queue for each event. An event larger than that is dropped when
+  the queue is full, and the object's write still succeeds. An event carries
+  the object's key and its tags, so both stay short enough to keep each event
+  under 4 KB. RGW writes a record's key unencoded, and the source reads it as
+  written.
 
 #### Reading a notification's object
 
@@ -916,7 +921,7 @@ unit's object is re-enqueued instead, as
 | --- | --- |
 | AWS S3 | AWS's documentation. CI does not run against AWS. |
 | RustFS | A CI lane runs the Docker-gated suites against the newest release. |
-| Ceph RGW | No CI lane. The source does not read RGW's [storage notifications](#storage-notifications). A [job location](#bounded-jobs-and-the-job-location) there needs one zone. |
+| Ceph RGW | No CI lane. A [job location](#bounded-jobs-and-the-job-location) there needs one zone. |
 | Garage | No CI lane. A [job location](#bounded-jobs-and-the-job-location) there needs `consistency_mode = "consistent"`. |
 
 ## Testing

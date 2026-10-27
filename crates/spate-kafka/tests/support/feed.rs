@@ -620,13 +620,19 @@ pub(crate) fn section(yaml: &str) -> FeedSection {
 }
 
 pub(crate) fn direct(yaml: &str) -> Direct {
+    direct_with(ON_MOCK, yaml)
+}
+
+/// A feed from the `feed:` section of `yaml`, built through `connect`, that
+/// the test reads from directly, with no pipeline.
+pub(crate) fn direct_with(connect: Connect, yaml: &str) -> Direct {
     let section = section(yaml);
     let io = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(1)
         .enable_all()
         .build()
         .unwrap();
-    let feed = ON_MOCK(&section, io.handle()).unwrap();
+    let feed = connect(&section, io.handle()).unwrap();
     let (waker, park) = wake_channel();
     feed.set_waker(waker);
     Direct {

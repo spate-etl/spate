@@ -627,10 +627,11 @@ fn read_message(message: &BorrowedMessage<'_>, topics: &Topics) -> Read {
 }
 
 /// The unit a message names, given the message's topic, partition and
-/// offset in `at`: its key as the id, its value as the body, and the publish
-/// identity its attempts count under. Its count comes from its attempt
-/// record, which the gate reads. A message with no key, or a key that is not
-/// UTF-8, names no unit.
+/// offset in `at`: its key as the id, or its position
+/// `<topic>/<partition>/<offset>` when it has no key, its value as the body,
+/// and the publish identity its attempts count under. Its count comes from
+/// its attempt record, which the gate reads. A message whose key is not
+/// UTF-8 names no unit.
 pub(crate) fn read(
     at: (&str, i32, i64),
     key: Option<&[u8]>,
@@ -639,18 +640,25 @@ pub(crate) fn read(
     topics: &Topics,
 ) -> Read {
     let (topic, partition, offset) = at;
-    match key.map(std::str::from_utf8) {
-        Some(Ok(id)) => Read::Unit {
-            unit: Unit::new(id, payload.unwrap_or_default()),
-            identity: PublishId::of_message(topic, partition, offset, &headers, topics),
-        },
-        _ => Read::NoUnit(Outgoing {
-            topic: Arc::from(topic),
-            partition: None,
-            key: key.map(<[u8]>::to_vec),
-            payload: payload.map(<[u8]>::to_vec),
-            headers,
-        }),
+    let id = match key.map(std::str::from_utf8) {
+        Some(Ok(id)) => id.to_owned(),
+        // The message's own position, on whichever topic it was read from. A
+        // retry copy of the unit is keyed by this id, so the unit keeps it on
+        // every later delivery.
+        None => format!("{topic}/{partition}/{offset}"),
+        Some(Err(_)) => {
+            return Read::NoUnit(Outgoing {
+                topic: Arc::from(topic),
+                partition: None,
+                key: key.map(<[u8]>::to_vec),
+                payload: payload.map(<[u8]>::to_vec),
+                headers,
+            });
+        }
+    };
+    Read::Unit {
+        unit: Unit::new(id, payload.unwrap_or_default()),
+        identity: PublishId::of_message(topic, partition, offset, &headers, topics),
     }
 }
 

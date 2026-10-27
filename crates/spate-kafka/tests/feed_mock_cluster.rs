@@ -399,31 +399,113 @@ fn a_dead_lettered_unit_published_again_is_read() {
     assert_eq!(second.deliveries, 1);
 }
 
-/// Pins that a message with no key, and one whose key is not UTF-8, go to
-/// the dead-letter topic as read, with no retry, and that their offsets are
-/// committed once those writes are confirmed. No reader takes them.
+/// Pins that a message whose key is not UTF-8 goes to the dead-letter topic
+/// as read, with no retry, and that its offset is committed once that write
+/// is confirmed. No reader takes it.
 #[test]
 fn a_message_with_no_unit_goes_to_the_dead_letter_topic_at_once() {
     let cluster = cluster(1);
     let brokers = cluster.bootstrap_servers();
     let group = spate_test::unique_name("no-unit");
-    produce_raw(
-        &brokers,
-        WORK,
-        &[(None, b"keyless"), (Some(&[0xff, 0xfe]), b"not utf-8")],
-    );
+    produce_raw(&brokers, WORK, &[(Some(&[0xff, 0xfe]), b"not utf-8")]);
     let worker = direct(&feed_yaml(&brokers, &group, "", ""));
 
-    let dead = read_topic(&brokers, DEAD, 2);
-    assert_eq!(dead[0].key, None);
-    assert_eq!(dead[0].payload.as_deref(), Some(&b"keyless"[..]));
-    assert_eq!(dead[1].key.as_deref(), Some(&[0xff, 0xfe][..]));
-    assert_eq!(dead[1].payload.as_deref(), Some(&b"not utf-8"[..]));
-    wait_until(DEADLINE, "both offsets are committed", || {
-        committed(&brokers, &group, WORK) == Some(2)
+    let dead = read_topic(&brokers, DEAD, 1);
+    assert_eq!(dead[0].key.as_deref(), Some(&[0xff, 0xfe][..]));
+    assert_eq!(dead[0].payload.as_deref(), Some(&b"not utf-8"[..]));
+    wait_until(DEADLINE, "its offset is committed", || {
+        committed(&brokers, &group, WORK) == Some(1)
     });
     assert_eq!(high_watermark(&brokers, RETRY), 0, "nothing was retried");
     assert!(worker.feed.receive(8).unwrap().is_empty());
+}
+
+/// Pins that a message with no key is a unit named by its position, read,
+/// counted and committed like a keyed one, and that a message with an empty
+/// key keeps the empty key as its id.
+#[test]
+fn a_message_without_a_key_takes_its_position_as_its_id() {
+    let cluster = cluster(1);
+    let brokers = cluster.bootstrap_servers();
+    let group = spate_test::unique_name("keyless");
+    produce_raw(
+        &brokers,
+        WORK,
+        &[(Some(&b""[..]), &b"empty"[..]), (None, &b"keyless"[..])],
+    );
+    let worker = direct(&feed_yaml(&brokers, &group, "", ""));
+
+    let empty = worker.take("the empty-keyed message");
+    let keyless = worker.take("the keyless message");
+    assert_eq!(
+        [&*empty.unit.id, &*keyless.unit.id],
+        ["", "units/0/1"],
+        "the ids"
+    );
+    assert_eq!(empty.unit.body, b"empty");
+    assert_eq!(keyless.unit.body, b"keyless");
+    assert_eq!((empty.deliveries, keyless.deliveries), (1, 1));
+    worker.feed.acknowledge(empty.receipt).unwrap();
+    worker.feed.acknowledge(keyless.receipt).unwrap();
+    wait_until(DEADLINE, "both offsets are committed", || {
+        committed(&brokers, &group, WORK) == Some(2)
+    });
+    assert_eq!(
+        high_watermark(&brokers, DEAD),
+        0,
+        "nothing was dead-lettered"
+    );
+    assert_eq!(high_watermark(&brokers, RETRY), 0, "nothing was retried");
+    let counted: Vec<_> = read_attempts(&brokers, ATTEMPT_PARTITIONS, 4)
+        .into_iter()
+        .filter(|(_, id, _)| id == "units/0/1")
+        .map(|(_, _, count)| count)
+        .collect();
+    assert_eq!(counted, [Some(1), None]);
+}
+
+/// Pins that a keyless unit keeps the id its position gave it through its
+/// retries: each retry and dead-letter copy is keyed by that id and names it
+/// as its origin, and the unit's attempts count under it to the cap.
+#[test]
+fn a_keyless_unit_keeps_its_position_through_retries() {
+    let cluster = cluster(1);
+    let brokers = cluster.bootstrap_servers();
+    let group = spate_test::unique_name("keyless-retries");
+    produce_raw(
+        &brokers,
+        WORK,
+        &[(Some(&b"before"[..]), &b"x"[..]), (None, &b"keyless"[..])],
+    );
+    let worker = direct(&feed_yaml(&brokers, &group, "  attempt_cap: 2\n", ""));
+
+    let before = worker.take("the keyed message");
+    assert_eq!(before.unit.id, "before");
+    worker.feed.acknowledge(before.receipt).unwrap();
+    let first = worker.take("the keyless message");
+    assert_eq!((&*first.unit.id, first.deliveries), ("units/0/1", 1));
+    worker.feed.fail(first.receipt, "test").unwrap();
+    let retry = read_topic(&brokers, RETRY, 1);
+    assert_eq!(retry[0].key.as_deref(), Some(&b"units/0/1"[..]));
+    assert_eq!(retry[0].header("spate.origin"), Some("units/0/1"));
+    assert_eq!(retry[0].header("spate.deliveries"), Some("1"));
+    let second = worker.take("the retry copy");
+    assert_eq!((&*second.unit.id, second.deliveries), ("units/0/1", 2));
+    worker.feed.fail(second.receipt, "test").unwrap();
+    let dead = read_topic(&brokers, DEAD, 1);
+    assert_eq!(dead[0].key.as_deref(), Some(&b"units/0/1"[..]));
+    assert_eq!(dead[0].header("spate.origin"), Some("units/0/1"));
+    assert_eq!(dead[0].header("spate.deliveries"), Some("2"));
+    wait_until(DEADLINE, "both topics' offsets are committed", || {
+        committed(&brokers, &group, WORK) == Some(2)
+            && committed(&brokers, &group, RETRY) == Some(1)
+    });
+    let counted: Vec<_> = read_attempts(&brokers, ATTEMPT_PARTITIONS, 5)
+        .into_iter()
+        .filter(|(_, id, _)| id == "units/0/1")
+        .map(|(_, _, count)| count)
+        .collect();
+    assert_eq!(counted, [Some(1), Some(2), None]);
 }
 
 /// Pins that a retry write still queued when librdkafka marks its topic
@@ -496,7 +578,7 @@ fn a_topic_reported_missing_once_does_not_stop_the_feed() {
         "      topic.metadata.propagation.max.ms: \"1000\"\n      \
          topic.metadata.refresh.interval.ms: \"100\"\n",
     ));
-    produce_raw(&brokers, WORK, &[(None, &b"first"[..])]);
+    produce_raw(&brokers, WORK, &[(Some(&[0xff, 0xfe][..]), &b"first"[..])]);
     wait_until(DEADLINE, "the first message is dead-lettered", || {
         high_watermark(&brokers, DEAD) == 1
     });
@@ -514,7 +596,7 @@ fn a_topic_reported_missing_once_does_not_stop_the_feed() {
     cluster
         .topic_error(DEAD, RDKafkaRespErr::RD_KAFKA_RESP_ERR_NO_ERROR)
         .unwrap();
-    produce_raw(&brokers, WORK, &[(None, &b"second"[..])]);
+    produce_raw(&brokers, WORK, &[(Some(&[0xff, 0xfe][..]), &b"second"[..])]);
     let mut fatal = None;
     wait_until(
         DEADLINE,
@@ -958,7 +1040,11 @@ fn a_message_with_no_unit_ends_a_bounded_job_stalled() {
     let data = data_dir(&dir);
     let section = bounded_section(&brokers, &group, &dir);
     list_once(publisher_on_mock(&section), &data, &section);
-    produce_raw(&brokers, WORK, &[(None, b"keyless")]);
+    produce_raw(
+        &brokers,
+        WORK,
+        &[(Some(&[0xff, 0xfe][..]), &b"not utf-8"[..])],
+    );
 
     let clock = TestClock::frozen();
     let worker = launch_bounded(ON_MOCK, &data, &section, &clock);

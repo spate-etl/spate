@@ -19,7 +19,7 @@ use rdkafka::client::DefaultClientContext;
 use rdkafka::consumer::{BaseConsumer, Consumer};
 use spate_core::clock::TestClock as StopClock;
 use spate_core::clock::tokio::TestClock;
-use spate_core::feed::STOP_RESERVE;
+use spate_core::feed::{Feed, STOP_RESERVE, Unit};
 use spate_core::pipeline::ExitState;
 use spate_kafka::feed::{KafkaFeed, KafkaFeedError, KafkaFeedPublisher};
 use spate_test::{WriteOutcome, wait_until};
@@ -29,9 +29,9 @@ use std::time::{Duration, Instant};
 use support::broker;
 use support::feed::{
     ATTEMPT, ATTEMPT_PARTITIONS, DEAD, DEADLINE, DRAIN_TIMEOUT, TWO_RANGES, WORK, bounded_section,
-    committed, create_topics, data_dir, exists, feed_yaml, high_watermark, launch_bounded,
-    launch_source, launch_stopping, launch_with, list_once, produce_raw, publish, read_attempts,
-    recs, run_to_exit, sorted, stage, two_range_unit, written,
+    committed, create_topics, data_dir, direct_with, exists, feed_yaml, high_watermark,
+    launch_bounded, launch_source, launch_stopping, launch_with, list_once, produce_raw, publish,
+    read_attempts, recs, run_to_exit, sorted, stage, two_range_unit, written,
 };
 use testcontainers::runners::SyncRunner;
 use testcontainers_modules::kafka::apache::KAFKA_PORT;
@@ -642,6 +642,32 @@ fn publisher_on(
     (publisher, io)
 }
 
+/// Pins that a message with no key, as a broker stores and returns it, is
+/// read as a unit named by its position and committed once acknowledged.
+#[test]
+#[ignore = "requires Docker"]
+fn a_keyless_message_is_read_as_a_unit() {
+    let container = broker().start().expect("start kafka container");
+    let port = container.get_host_port_ipv4(KAFKA_PORT).expect("port");
+    let brokers = format!("127.0.0.1:{port}");
+    create_topics(&brokers);
+    let group = spate_test::unique_name("keyless");
+    produce_raw(&brokers, WORK, &[(None, &b"keyless"[..])]);
+
+    let worker = direct_with(KafkaFeed::connect, &section(&brokers, &group));
+    let delivery = worker.take("the keyless message");
+    assert_eq!(delivery.unit, Unit::new("units/0/0", b"keyless".to_vec()));
+    worker.feed.acknowledge(delivery.receipt).unwrap();
+    wait_until(DEADLINE, "its offset is committed", || {
+        committed(&brokers, &group, WORK) == Some(1)
+    });
+    assert_eq!(
+        high_watermark(&brokers, DEAD),
+        0,
+        "nothing was dead-lettered"
+    );
+}
+
 /// Pins that a dead-letter record ends a bounded job `Stalled` even once
 /// retention, here `DeleteRecords`, has removed it: the dead-letter read
 /// counts the topic's end offset, which the deletion leaves in place.
@@ -658,7 +684,11 @@ fn a_dead_letter_topic_entry_ends_the_job_stalled() {
     let data = data_dir(&dir);
     let section = bounded_section(&brokers, &group, &dir);
     list_once(publisher_on(&section), &data, &section);
-    produce_raw(&brokers, WORK, &[(None, b"keyless")]);
+    produce_raw(
+        &brokers,
+        WORK,
+        &[(Some(&[0xff, 0xfe][..]), &b"not utf-8"[..])],
+    );
 
     let clock = TestClock::frozen();
     let worker = launch_bounded(KafkaFeed::connect, &data, &section, &clock);

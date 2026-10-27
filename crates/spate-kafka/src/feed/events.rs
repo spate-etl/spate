@@ -11,7 +11,7 @@ pub(crate) enum Cause {
     /// whose recorded attempts had reached the cap, moved without being
     /// read.
     AttemptCap,
-    /// A message with no key, or a key that is not UTF-8.
+    /// A message whose key is not UTF-8.
     NoUnit,
 }
 

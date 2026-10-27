@@ -134,12 +134,13 @@ impl S3Store {
     ///
     /// # Errors
     ///
-    /// Fails when the selected lane names no store, or the container does not
-    /// start or is not ready within 60 seconds.
+    /// Fails when the selected lane is pinned but names no store, or the
+    /// container does not start or is not ready within 60 seconds.
     ///
     /// # Panics
     ///
-    /// Panics as [`container_image`] does.
+    /// Panics when `SPATE_S3_LANE` names a lane with no pinned `Dockerfile`,
+    /// as [`Store::selected`] does, and as [`container_image`] does.
     pub fn start(network: Option<&str>) -> Result<S3Store, String> {
         let store = Store::selected()?;
         let image = pinned(store).with_exposed_port(store.container_port().tcp());
@@ -176,12 +177,13 @@ impl S3Store {
     ///
     /// # Errors
     ///
-    /// Fails when the selected lane names no store, or the container does not
-    /// start or is not ready within 60 seconds.
+    /// Fails when the selected lane is pinned but names no store, or the
+    /// container does not start or is not ready within 60 seconds.
     ///
     /// # Panics
     ///
-    /// Panics as [`container_image`] does.
+    /// Panics when `SPATE_S3_LANE` names a lane with no pinned `Dockerfile`,
+    /// as [`Store::selected`] does, and as [`container_image`] does.
     pub fn start_notifying(
         owner_id: &str,
         s3_host_port: u16,

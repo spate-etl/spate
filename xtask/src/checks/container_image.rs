@@ -587,6 +587,18 @@ mod tests {
         );
     }
 
+    /// With the variable unset, the selected lane's capabilities are the
+    /// primary lane's.
+    #[test]
+    fn the_selected_capabilities_are_the_primary_lanes_when_unset() {
+        let s = Scratch::new("selected-capabilities");
+        s.file("db/vendor-main/CAPABILITIES", "notifications\n");
+        assert_eq!(
+            selected_capabilities(s.root(), "db").unwrap(),
+            [Capability::Notifications]
+        );
+    }
+
     #[test]
     fn a_capability_word_ignores_surrounding_whitespace() {
         let s = Scratch::new("capabilities-whitespace");

@@ -1012,6 +1012,37 @@ async fn units_after_a_slow_chunk_survive_it() {
     renew_through(&feed, &receipts, 2 * visibility, "21 units").await;
 }
 
+/// Pins that a unit one renewal period from its deadline at a tick survives
+/// one extension call SQS does not answer when another batch of the same
+/// tick takes most of a period to answer, since a batch is sent once more as
+/// soon as its own call is given up.
+#[tokio::test(start_paused = true)]
+async fn a_unit_survives_one_unanswered_call_beside_a_slow_batch() {
+    let (feed, queue) = start(MINUTE); // ticks near 20, 40, 60, 80
+    let (waker, park) = wake_channel();
+    feed.set_waker(waker);
+    settle_tasks().await;
+    step(Duration::from_millis(19_500)).await;
+    queue.ready(Message::new("u"));
+    assert!(feed.receive(1).unwrap().is_empty());
+    until("buffered", || feed.buffered() == 1).await; // deadline near 79.5 s
+    // SQS refuses the extension of `u` at the tick near 20 s, so its
+    // deadline stays near 79.5 s.
+    queue.fail_next_visibility(vec![failure(0, "InvalidParameterValue")]);
+    step(Duration::from_secs(40)).await; // t near 59.5 s, 20 s left
+    let mut held: Vec<Receipt> = feed.receive(1).unwrap().iter().map(|d| d.receipt).collect();
+    assert_eq!(held.len(), 1);
+    for i in 0..10 {
+        queue.ready(Message::new(&format!("f{i}")));
+    }
+    held.extend(receive_n(&feed, &park, 10).await.iter().map(|d| d.receipt));
+    // At the tick near 60 s, SQS does not answer the call for the batch
+    // holding `u`, and answers the other batch's call after 19.9 s.
+    queue.delay_next_visibility_call(MINUTE);
+    queue.delay_next_visibility_call(Duration::from_millis(19_900));
+    renew_through(&feed, &held, Duration::from_secs(40), "beside a slow batch").await;
+}
+
 /// Pins that every chunk of a tick survives extension calls that each take
 /// most of a renewal period, since no chunk waits behind another.
 #[tokio::test(start_paused = true)]

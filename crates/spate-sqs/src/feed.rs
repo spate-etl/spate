@@ -1208,26 +1208,24 @@ async fn renewal_task(shared: Arc<Shared>) {
         due.sort_by_key(|(receipt, _, _)| *receipt);
         // The tick's chunks go out together, so a slow call takes no time
         // from the others. Hand-backs wait for every call in flight.
-        let mut pending: Vec<&[(u64, String, Duration)]> = due.chunks(BATCH_ENTRIES).collect();
-        let mut once_more = true;
-        while !pending.is_empty() {
-            let extended = join_all(
-                pending
-                    .iter()
-                    .map(|chunk| extend_chunk(&shared, chunk, once_more))
-                    .collect(),
-            )
-            .await;
-            // `Err` too once a call failed Fatal.
-            if send_hand_backs(&shared).await.is_err() {
-                return;
-            }
-            pending = pending
-                .into_iter()
-                .zip(extended)
-                .filter_map(|(chunk, e)| (e == Extended::Again).then_some(chunk))
-                .collect();
-            once_more = false;
+        // A batch sent once more goes as soon as its own call fails, since
+        // its deadline does not wait for the slowest batch of the tick.
+        join_all(
+            due.chunks(BATCH_ENTRIES)
+                .map(|chunk| {
+                    let shared = &shared;
+                    async move {
+                        if extend_chunk(shared, chunk, true).await == Extended::Again {
+                            extend_chunk(shared, chunk, false).await;
+                        }
+                    }
+                })
+                .collect(),
+        )
+        .await;
+        // `Err` too once a call failed Fatal.
+        if send_hand_backs(&shared).await.is_err() {
+            return;
         }
     }
 }

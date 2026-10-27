@@ -250,8 +250,9 @@ mod tests {
         })
     }
 
-    /// Pins that a call given up during a load leaves it running, and that
-    /// the calls after it share that one load.
+    /// Pins that a call given up during a load leaves it running, that the
+    /// calls after it share that one load, and that the call after those
+    /// starts a new one.
     #[tokio::test(start_paused = true)]
     async fn overlapping_calls_share_one_inner_load() {
         let inner = every_load_takes(1_200 * MS);
@@ -265,6 +266,8 @@ mod tests {
         assert_eq!(b.unwrap().access_key_id(), "AKIDSCRIPTED");
         assert_eq!(c.unwrap().access_key_id(), "AKIDSCRIPTED");
         assert_eq!(inner.started(), 1);
+        wrapper.provide_credentials().await.unwrap();
+        assert_eq!(inner.started(), 2);
     }
 
     /// Pins that a load nobody awaits when it finishes is handed to the
@@ -307,7 +310,11 @@ mod tests {
         let inner = first_load_fails_after(Duration::ZERO);
         let wrapper = SharedLoad::new(inner.provider());
         let e = wrapper.provide_credentials().await.unwrap_err();
-        assert!(chain(&e).contains("no profile"), "{}", chain(&e));
+        assert_eq!(
+            chain(&e),
+            "an error occurred while loading credentials: an error occurred while loading \
+             credentials: no profile"
+        );
         wrapper.provide_credentials().await.unwrap();
         assert_eq!(inner.started(), 2);
 

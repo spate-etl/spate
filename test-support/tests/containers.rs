@@ -19,7 +19,7 @@ use spate_test_support::{ACCESS_KEY, ElasticMq, Message, REGION, S3Store, SECRET
 /// delete, and the container joins the network it was given. A store that
 /// takes its Kafka target through a topic, started without one, refuses a
 /// bucket's notification configuration naming `start_notifying`, and Garage
-/// refuses one naming notifications.
+/// refuses one, and refuses to start notifying, naming notifications.
 #[test]
 #[ignore = "requires Docker"]
 fn s3_store_round_trips_an_object() {
@@ -63,6 +63,9 @@ fn s3_store_round_trips_an_object() {
             let err = s3_store
                 .put_bucket_notification("smoke")
                 .expect_err("Garage refuses a notification configuration");
+            assert!(err.contains("notifications"), "{err}");
+            let err = S3Store::start_notifying("no-such-container", 0, "smoke")
+                .expect_err("Garage refuses to start notifying");
             assert!(err.contains("notifications"), "{err}");
         }
     }

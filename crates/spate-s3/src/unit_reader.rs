@@ -2699,6 +2699,44 @@ mod tests {
         }
     }
 
+    /// Pins that a notification naming a key that cannot be read under its
+    /// own name fails its message at decode and counts no object failure
+    /// under any reason.
+    #[test]
+    fn an_unaddressable_notification_key_fails_uncounted() {
+        let pipeline = unique_name("reader");
+        let rendered = render_local(|| {
+            let metrics =
+                S3Metrics::new(&Meter::with_namespace("s3", pipeline.clone(), "src", "s3"));
+            let (feed, script) = scripted_feed();
+            let (mut reader, _rt) = reader_over(Arc::new(feed), None, Some(metrics));
+            let receipt = script.deliver(Unit::new(
+                "unaddressable",
+                pinned_notification(&[("/x.ndjson", 10)], 0),
+            ));
+            start(&mut reader);
+            poll(&mut reader);
+            assert_eq!(script.failed().len(), 1);
+            assert_eq!(script.failed()[0].0, receipt);
+        });
+        for reason in [
+            "not_found",
+            "etag_drift",
+            "undecodable",
+            "retries_exhausted",
+        ] {
+            assert_eq!(
+                metric_value(
+                    &rendered,
+                    "spate_s3_objects_failed_total",
+                    &[("pipeline", &pipeline), ("reason", reason)],
+                ),
+                Some(0.0),
+                "{reason}: {rendered}"
+            );
+        }
+    }
+
     /// Pins that a hand-back takes its lanes' counts out of
     /// `objects_remaining` at once, and a kept unit's at its commit.
     #[test]

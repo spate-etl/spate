@@ -244,6 +244,10 @@ pub(crate) struct ExtraLanes {
 /// The container suites that boot an S3 store.
 const S3_STORE_SUITES: [&str; 3] = ["spate-kafka", "spate-s3", "spate-test-support"];
 
+/// The suites whose selection schedules the extra S3 store lanes. The shared
+/// helpers' suite is also selected by an image bump that boots no store.
+const S3_LANE_SUITES: [&str; 2] = ["spate-kafka", "spate-s3"];
+
 /// Classify a change. Pure: no git, no environment, no filesystem beyond the
 /// graph handed in.
 pub(crate) fn classify(
@@ -460,7 +464,7 @@ pub(crate) fn classify(
             .map(|l| Lane { lane: l.clone() })
             .collect();
     }
-    if S3_STORE_SUITES
+    if S3_LANE_SUITES
         .iter()
         .any(|suite| out.container_pkgs.contains(*suite))
     {
@@ -1159,6 +1163,29 @@ mod tests {
             &lanes,
         );
         assert!(out.clickhouse_lanes.is_empty());
+    }
+
+    /// An ElasticMQ image bump boots no S3 store, so it schedules no S3 store
+    /// lane.
+    #[test]
+    fn an_elasticmq_bump_runs_no_s3_store_lane() {
+        let lanes = ExtraLanes {
+            clickhouse: Vec::new(),
+            s3: vec![StoreLane::new("other", &[])],
+        };
+        for author in ["", "dependabot[bot]"] {
+            let ctx = Context {
+                author: author.into(),
+            };
+            let out = classify(
+                &["ci/elasticmq/Dockerfile".to_string()],
+                Event::PullRequest,
+                &ctx,
+                &graph(),
+                &lanes,
+            );
+            assert!(out.s3_lanes.is_empty(), "{author}: {:?}", out.s3_lanes);
+        }
     }
 
     /// The extra S3 store lanes run whenever a suite that boots a store runs,

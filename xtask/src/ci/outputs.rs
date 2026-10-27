@@ -137,4 +137,37 @@ mod tests {
             format!("{base} | (package(spate-kafka) & binary(feed_notifications))")
         );
     }
+
+    /// Each binary and test a store lane's filter names exists in its
+    /// package, so a renamed suite or test cannot leave the lane in silence.
+    #[test]
+    fn a_store_lane_filter_names_only_suites_and_tests_that_exist() {
+        let root = crate::repo_root().unwrap();
+        let filter = StoreLane::new("any", &[Capability::Notifications]).filter;
+        let inside = |clause: &str, predicate: &str| {
+            clause
+                .split_once(predicate)
+                .map(|(_, rest)| rest.split(')').next().unwrap_or_default().to_owned())
+        };
+        for clause in filter.split(" | ") {
+            let package = inside(clause, "package(").expect("each clause names a package");
+            let dir = match package.as_str() {
+                "spate-test-support" => root.join("test-support"),
+                other => root.join("crates").join(other),
+            };
+            assert!(dir.is_dir(), "{package}: no {}", dir.display());
+            let Some(binary) = inside(clause, "binary(") else {
+                continue;
+            };
+            let file = dir.join("tests").join(format!("{binary}.rs"));
+            let text = std::fs::read_to_string(&file)
+                .unwrap_or_else(|e| panic!("{package}: binary({binary}): {e}"));
+            if let Some(test) = inside(clause, "test(=") {
+                assert!(
+                    text.contains(&format!("fn {test}()")),
+                    "{package}: binary({binary}) has no test {test}"
+                );
+            }
+        }
+    }
 }

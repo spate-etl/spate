@@ -577,6 +577,16 @@ mod tests {
     }
 
     #[test]
+    fn a_capability_word_ignores_surrounding_whitespace() {
+        let s = Scratch::new("capabilities-whitespace");
+        s.file("db/spaced/CAPABILITIES", "  notifications \r\n");
+        assert_eq!(
+            lane_capabilities(s.root(), "db", "spaced").unwrap(),
+            [Capability::Notifications]
+        );
+    }
+
+    #[test]
     fn a_lane_with_no_capabilities_file_has_none() {
         let s = Scratch::new("no-capabilities");
         assert_eq!(lane_capabilities(s.root(), "db", "old").unwrap(), []);

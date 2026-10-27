@@ -940,36 +940,6 @@ async fn a_running_extension_is_bounded_by_the_period_and_the_time_left() {
     );
 }
 
-/// Pins that a unit whose deadline passes while an earlier chunk's call is in
-/// flight is left out of its own chunk, so it does not cut the bound of the
-/// units sent with it. Regression for #1446.
-#[tokio::test(start_paused = true)]
-async fn a_unit_lapsed_behind_a_slow_chunk_does_not_bound_its_own() {
-    let (feed, queue) = start(Duration::from_secs(30));
-    let (waker, park) = wake_channel();
-    feed.set_waker(waker);
-    for i in 0..12 {
-        queue.ready(Message::new(&format!("u{i}")));
-    }
-    let got = receive_n(&feed, &park, 12).await;
-    // At the tick near 10 s, SQS refuses the extension of `h10` only, so its
-    // deadline stays at 30 s and the others' moves to 40 s.
-    queue.fail_next_visibility(Vec::new());
-    queue.fail_next_visibility(vec![failure(0, "InvalidParameterValue")]);
-    step(Duration::from_secs(15)).await;
-    for d in &got {
-        feed.renew(d.receipt).unwrap();
-    }
-    // The first chunk's call at 20 s is given up at 30 s, `h10`'s deadline,
-    // and sent once more at once.
-    queue.delay_next_visibility_call(MINUTE);
-    step(Duration::from_millis(15_100)).await;
-    let calls = queue.visibility();
-    assert_eq!(calls.len(), 5, "{:?}", queue.visibility_within());
-    assert_eq!(extended_handles(&calls[4..]), ["h11"]);
-    assert_eq!(queue.visibility_within()[4], Some(Duration::from_secs(5)));
-}
-
 /// Buffer one unit about 19.5 s into a feed at a one-minute visibility, and
 /// hand it out at about 59.5 s, one renewal period from its deadline and
 /// just before the tick near 60 s.
@@ -1040,6 +1010,24 @@ async fn units_after_a_slow_chunk_survive_it() {
     queue.delay_next_visibility_call(Duration::ZERO);
     queue.delay_next_visibility_call(MINUTE);
     renew_through(&feed, &receipts, 2 * visibility, "21 units").await;
+}
+
+/// Pins that every chunk of a tick survives extension calls that each take
+/// most of a renewal period, since no chunk waits behind another.
+#[tokio::test(start_paused = true)]
+async fn every_chunk_survives_uniformly_slow_extension_calls() {
+    let (feed, queue) = start(MINUTE);
+    let (waker, park) = wake_channel();
+    feed.set_waker(waker);
+    for i in 0..11 {
+        queue.ready(Message::new(&format!("u{i}")));
+    }
+    let got = receive_n(&feed, &park, 11).await;
+    let receipts: Vec<Receipt> = got.iter().map(|d| d.receipt).collect();
+    for _ in 0..64 {
+        queue.delay_next_visibility_call(Duration::from_secs(15));
+    }
+    renew_through(&feed, &receipts, 3 * MINUTE, "11 units, 15 s calls").await;
 }
 
 /// Pins that a buffered unit survives one extension call SQS does not answer
@@ -1974,12 +1962,16 @@ async fn a_hand_back_whose_deadline_passes_while_queued_is_dropped_unsent() {
     feed.set_waker(waker);
     queue.inner.ready(Message::new("b"));
     let b = receive_n(&feed, &park, 1).await.remove(0);
+    // SQS refuses the tick's extension of `b`, so `b` lapses at 60 s, before
+    // the held extension of `a` and `c` below gives up at 61 s.
+    queue
+        .inner
+        .fail_next_visibility(vec![failure(0, "InvalidParameterValue")]);
     tokio::time::advance(Duration::from_secs(21)).await;
-    until("the tick extends `b`", || {
+    until("the tick tries to extend `b`", || {
         queue.inner.visibility().len() == 1
     })
     .await;
-    // `a` and `c` hold until 5 s after `b`.
     tokio::time::advance(Duration::from_secs(5)).await;
     queue.inner.ready(Message::new("a"));
     queue.inner.ready(Message::new("c"));
@@ -1996,9 +1988,7 @@ async fn a_hand_back_whose_deadline_passes_while_queued_is_dropped_unsent() {
     assert!(b_deadline < c_deadline);
     feed.hand_back(b.receipt).unwrap();
     feed.hand_back(c).unwrap();
-    tokio::time::advance(b_deadline - Instant::now()).await;
-    queue.release_visibility();
-    settle_tasks().await;
+    step(b_deadline - Instant::now() + Duration::from_secs(2)).await;
     assert_eq!(handed_back(&queue.inner.visibility()), ["h2"]);
 }
 
@@ -2201,8 +2191,8 @@ async fn held_units_are_extended_from_the_stop_until_close() {
 
 /// Pins that a hand-back waits for an extension of the same unit already in
 /// flight, and that no extension of it follows: within one chunk, and when
-/// the unit is in the last of three chunks of the same tick, where the
-/// hand-back goes out right after the chunk in flight.
+/// the unit is in the last of three chunks of the same tick, all in flight
+/// together, where the hand-back goes out once every chunk is answered.
 #[tokio::test(start_paused = true)]
 async fn a_hand_back_is_sent_after_an_extension_of_the_same_receipt_in_flight() {
     for units in [1, 21] {
@@ -2215,15 +2205,20 @@ async fn a_hand_back_is_sent_after_an_extension_of_the_same_receipt_in_flight() 
         let got = receive_n(&feed, &park, units).await;
         let r = got.last().unwrap().receipt;
         let handle = format!("h{}", units - 1);
+        let chunks = units.div_ceil(BATCH_ENTRIES);
         queue.hold_visibility();
         step(Duration::from_secs(20)).await;
-        until("the first chunk is held", || {
-            queue.inner.visibility().len() == 1
+        until("every chunk is held", || {
+            queue.inner.visibility().len() == chunks
         })
         .await;
         feed.hand_back(r).unwrap();
         settle_tasks().await;
-        assert_eq!(queue.inner.visibility().len(), 1, "sent behind the chunk");
+        assert_eq!(
+            queue.inner.visibility().len(),
+            chunks,
+            "sent behind the chunks"
+        );
         queue.release_visibility();
         settle_tasks().await;
         step(Duration::from_secs(40)).await;
@@ -2232,7 +2227,7 @@ async fn a_hand_back_is_sent_after_an_extension_of_the_same_receipt_in_flight() 
             .iter()
             .position(|c| c.iter().any(|e| e.handle == handle && e.seconds == 0))
             .expect("the hand-back was sent");
-        assert_eq!(back, 1, "{units} units: {calls:?}");
+        assert_eq!(back, chunks, "{units} units: {calls:?}");
         assert!(
             !extended(&calls[back..]).contains(&handle),
             "{units} units: extended after its hand-back: {calls:?}"
@@ -2714,9 +2709,9 @@ async fn a_hand_back_queued_as_the_feed_stops_is_not_sent() {
     assert!(queue.inner.visibility().is_empty());
 }
 
-/// Pins that an extension chunk sent after a stop, in a tick that began
-/// before it, is bounded by the stop bound, so a hand-back queued behind it
-/// waits at most that long.
+/// Pins that a batch sent once more after a stop, in a tick that began
+/// before it, is bounded by the stop bound, while the tick's own calls keep
+/// the running bound.
 #[tokio::test(start_paused = true)]
 async fn an_extension_sent_after_a_stop_in_a_tick_begun_before_it_is_bounded() {
     let (feed, queue) = start_gated(MINUTE);
@@ -2725,36 +2720,31 @@ async fn an_extension_sent_after_a_stop_in_a_tick_begun_before_it_is_bounded() {
     for i in 0..21 {
         queue.inner.ready(Message::new(&format!("u{i}")));
     }
-    let got = receive_n(&feed, &park, 21).await;
+    receive_n(&feed, &park, 21).await;
     queue.hold_visibility();
     step(Duration::from_secs(20)).await;
-    until("the first chunk is held", || {
-        queue.inner.visibility().len() == 1
+    until("every chunk is held", || {
+        queue.inner.visibility().len() == 3
     })
     .await;
     feed.stop_receiving();
-    // Answer the first chunk and keep holding later calls.
-    queue.release.notify_waiters();
-    until("the second chunk is sent", || {
-        queue.inner.visibility().len() == 2
+    // The tick's calls are given up at 40 s, with 20 s left, and sent once
+    // more under the stop.
+    step(Duration::from_secs(20)).await;
+    until("every chunk is sent once more", || {
+        queue.inner.visibility().len() == 6
     })
     .await;
-    feed.hand_back(got[20].receipt).unwrap();
-    step(Duration::from_secs(2)).await;
+    let within = queue.inner.visibility_within();
     assert_eq!(
-        queue.inner.visibility_within()[0],
-        Some(Duration::from_secs(20)),
-        "the extension sent before the stop does not take the running bound"
+        within[..3],
+        [Some(Duration::from_secs(20)); 3],
+        "the extensions sent before the stop do not take the running bound"
     );
     assert_eq!(
-        queue.inner.visibility_within()[1],
-        Some(STOP_EXTENSION_BOUND),
-        "the extension sent after the stop does not take the stop bound"
-    );
-    assert_eq!(
-        handed_back(&queue.inner.visibility()),
-        ["h20"],
-        "the hand-back still waits behind the extension"
+        within[3..],
+        [Some(STOP_EXTENSION_BOUND); 3],
+        "the extensions sent after the stop do not take the stop bound"
     );
 }
 

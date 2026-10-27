@@ -78,8 +78,8 @@ candidates appear.
 The image is `dxflrs/garage`, one static binary with no shell. The arm copies a
 config file to `/etc/garage.toml` and runs
 `/garage server --single-node --default-access-key`, which imports the fixed key
-pair from `GARAGE_DEFAULT_ACCESS_KEY` and `GARAGE_DEFAULT_SECRET_KEY`. The config
-sets `s3_region` to the suites' region, `replication_factor = 1` and
+pair from `GARAGE_DEFAULT_ACCESS_KEY` and `GARAGE_DEFAULT_SECRET_KEY`. The
+config sets `s3_region` to the suites' region, `replication_factor = 1` and
 `consistency_mode = "consistent"`. One node cannot show what `consistency_mode`
 changes. The arm reaches the S3 API on port 3900 and waits on `GET /health` on
 the admin API, port 3903, because the S3 API refuses unsigned requests.

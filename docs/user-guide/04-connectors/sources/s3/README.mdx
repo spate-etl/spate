@@ -652,10 +652,10 @@ keeps no checkpoint and logs a WARN: every run lists the prefix from the start.
 Resume finds every key while the store lists keys in the same order in the run
 that wrote `checkpoint` and in the run that resumes from it. AWS S3
 general-purpose buckets list in UTF-8 byte order; the CI suite checks resume on
-RustFS, Ceph RGW and Garage. Resume is unsupported on SeaweedFS, where it skips keys:
-SeaweedFS lists in directory-tree order, so a resume after a key that is also a
-directory prefix (`q/r` beside `q/r/s`) skips that directory. Its listings can
-also end early; see [Testing](#testing).
+RustFS, Ceph RGW and Garage. Resume is unsupported on SeaweedFS, where it skips
+keys: SeaweedFS lists in directory-tree order, so a resume after a key that is
+also a directory prefix (`q/r` beside `q/r/s`) skips that directory. Its
+listings can also end early; see [Testing](#testing).
 
 :::danger
 A run at a location that holds the job's fingerprint and a `checkpoint` never

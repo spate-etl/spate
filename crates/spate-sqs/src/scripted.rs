@@ -70,6 +70,11 @@ struct Script {
     send_errors: VecDeque<CallError>,
     visibility_errors: VecDeque<CallError>,
     visibility_delays: VecDeque<Duration>,
+    /// How long every zero-visibility call takes, in place of
+    /// `visibility_delays`.
+    hand_back_delay: Option<Duration>,
+    /// The error every zero-visibility call fails with at once.
+    hand_back_error: Option<CallError>,
     delete_errors: VecDeque<CallError>,
     send_failures: VecDeque<Vec<Failure>>,
     visibility_failures: VecDeque<Vec<Failure>>,
@@ -152,6 +157,22 @@ impl ScriptedQueue {
     /// more delay, and `Duration::ZERO` answers at once.
     pub(crate) fn delay_next_visibility_call(&self, d: Duration) {
         self.lock().visibility_delays.push_back(d);
+    }
+
+    /// Answer every `ChangeMessageVisibilityBatch` whose entries all set
+    /// visibility 0, as hand-backs and fails do, only after `d`, under the
+    /// bound rule of
+    /// [`delay_next_visibility_call`](Self::delay_next_visibility_call).
+    /// Such a call pops no queued delay. `None` answers them at once again.
+    pub(crate) fn slow_hand_backs(&self, d: Option<Duration>) {
+        self.lock().hand_back_delay = d;
+    }
+
+    /// Fail every `ChangeMessageVisibilityBatch` whose entries all set
+    /// visibility 0, as hand-backs and fails do, whole and at once with `e`.
+    /// `None` answers them again.
+    pub(crate) fn fail_hand_backs(&self, e: Option<CallError>) {
+        self.lock().hand_back_error = e;
     }
 
     /// As [`fail_next_send_call`](Self::fail_next_send_call), for
@@ -286,8 +307,12 @@ impl Queue for ScriptedQueue {
             let (answer, delay) = {
                 let mut script = self.lock();
                 let ids: Vec<String> = entries.iter().map(|e| e.id.clone()).collect();
+                let zero = entries.iter().all(|e| e.seconds == 0);
                 script.visibility.push(entries);
                 script.visibility_within.push(within);
+                if zero && let Some(e) = script.hand_back_error.clone() {
+                    return Err(e);
+                }
                 let answer = match script.visibility_errors.pop_front() {
                     Some(e) => Err(e),
                     None => {
@@ -295,7 +320,11 @@ impl Queue for ScriptedQueue {
                         Ok(outcome(ids.into_iter(), failures))
                     }
                 };
-                (answer, script.visibility_delays.pop_front())
+                let delay = match script.hand_back_delay {
+                    Some(d) if zero => Some(d),
+                    _ => script.visibility_delays.pop_front(),
+                };
+                (answer, delay)
             };
             if let Some(d) = delay {
                 let bound = within.map_or(OPERATION_TIMEOUT, |w| w.min(OPERATION_TIMEOUT));

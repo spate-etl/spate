@@ -1897,7 +1897,8 @@ async fn an_sqs_feed_hands_back() {
 }
 
 /// Pins that a handed-back unit is set visible at once, with no tick, bounded
-/// by its deadline, and that its receipt is gone afterwards.
+/// by one renewal period or its deadline, and that its receipt is gone
+/// afterwards.
 #[tokio::test(start_paused = true)]
 async fn a_handed_back_unit_is_set_visible_at_once() {
     let (feed, queue) = start(MINUTE);
@@ -1905,14 +1906,13 @@ async fn a_handed_back_unit_is_set_visible_at_once() {
     feed.set_waker(waker);
     queue.ready(Message::new("u"));
     let d = receive_n(&feed, &park, 1).await.remove(0);
-    let deadline = feed.deadline_of(d.receipt).unwrap();
     feed.hand_back(d.receipt).unwrap();
     let at = Instant::now();
     settle_tasks().await;
     assert_eq!(Instant::now(), at, "no time moved");
     assert_eq!(handed_back(&queue.visibility()), ["h0"]);
     assert_eq!(queue.visibility().len(), 1, "one call");
-    assert_eq!(queue.visibility_within(), [Some(deadline - at)]);
+    assert_eq!(queue.visibility_within(), [Some(MINUTE / 3)]);
     assert_eq!(feed.renew(d.receipt).unwrap_err().kind, FeedErrorKind::Gone);
     assert_eq!(
         feed.acknowledge(d.receipt).unwrap_err().kind,
@@ -2023,8 +2023,8 @@ async fn a_hand_back_whose_deadline_passes_while_queued_is_dropped_unsent() {
     assert_eq!(handed_back(&queue.inner.visibility()), ["h2"]);
 }
 
-/// Pins that hand-backs queued together go out in one batch, bounded by the
-/// earliest deadline among them.
+/// Pins that hand-backs queued together go out in one batch, in the order
+/// they were queued.
 #[tokio::test(start_paused = true)]
 async fn a_hand_back_batch_is_bounded_by_its_earliest_deadline() {
     let (feed, queue) = start(MINUTE);
@@ -2035,15 +2035,12 @@ async fn a_hand_back_batch_is_bounded_by_its_earliest_deadline() {
     tokio::time::advance(Duration::from_secs(10)).await;
     queue.ready(Message::new("b"));
     let b = receive_n(&feed, &park, 1).await.remove(0);
-    let earlier = feed.deadline_of(a.receipt).unwrap();
-    assert!(earlier < feed.deadline_of(b.receipt).unwrap());
     feed.hand_back(b.receipt).unwrap();
     feed.hand_back(a.receipt).unwrap();
-    let at = Instant::now();
     settle_tasks().await;
     assert_eq!(queue.visibility().len(), 1, "one batch");
     assert_eq!(handed_back(&queue.visibility()), ["h1", "h0"]);
-    assert_eq!(queue.visibility_within(), [Some(earlier - at)]);
+    assert_eq!(queue.visibility_within(), [Some(MINUTE / 3)]);
 }
 
 /// Pins that a hand-back entry SQS refuses is dropped, never sent again, and
@@ -3123,4 +3120,349 @@ fn an_unlisted_sender_error_refuses_connect() {
             Ok(_) => panic!("{header}: connected"),
         }
     }
+}
+
+/// The bound each hand-back call was given, in call order.
+fn hand_back_within(queue: &ScriptedQueue) -> Vec<Option<Duration>> {
+    queue
+        .visibility()
+        .iter()
+        .zip(queue.visibility_within())
+        .filter(|(call, _)| call.iter().all(|e| e.seconds == 0))
+        .map(|(_, within)| within)
+        .collect()
+}
+
+/// Receive a kept unit and one to hand back, and renew the kept one for
+/// nine tenths of a renewal period, just short of the first tick.
+async fn kept_and_other(
+    feed: &SqsFeed,
+    queue: &ScriptedQueue,
+    visibility: Duration,
+) -> [Receipt; 2] {
+    let (waker, park) = wake_channel();
+    feed.set_waker(waker);
+    queue.ready(Message::new("kept"));
+    queue.ready(Message::new("handed back"));
+    let got = receive_n(feed, &park, 2).await;
+    renew_through(feed, &[got[0].receipt], visibility * 3 / 10, "before").await;
+    [got[0].receipt, got[1].receipt]
+}
+
+/// Pins that a held unit the reader keeps renewing survives one hand-back
+/// call SQS is slow to answer, sent from the renewal task just before a
+/// tick. Regression for #1452.
+#[tokio::test(start_paused = true)]
+async fn a_renewed_unit_survives_one_slow_hand_back_call() {
+    for visibility in [3, 30, 60] {
+        let visibility = Duration::from_secs(visibility);
+        let (feed, queue) = start(visibility);
+        let [kept, other] = kept_and_other(&feed, &queue, visibility).await;
+        queue.delay_next_visibility_call(MINUTE);
+        feed.hand_back(other).unwrap();
+        let what = format!("visibility {visibility:?}, after the hand-back");
+        renew_through(&feed, &[kept], 2 * visibility, &what).await;
+    }
+}
+
+/// Pins that a held unit the reader keeps renewing survives hand-back calls
+/// SQS never answers, each followed by a retry that is slow again.
+/// Regression for #1452.
+#[tokio::test(start_paused = true)]
+async fn a_renewed_unit_survives_hand_back_calls_sqs_keeps_slow() {
+    for visibility in [3, 30] {
+        let visibility = Duration::from_secs(visibility);
+        let (feed, queue) = start(visibility);
+        let [kept, other] = kept_and_other(&feed, &queue, visibility).await;
+        queue.slow_hand_backs(Some(MINUTE));
+        feed.hand_back(other).unwrap();
+        let what = format!("visibility {visibility:?}, after the hand-back");
+        renew_through(&feed, &[kept], 2 * visibility, &what).await;
+    }
+}
+
+/// Pins that a held unit the reader keeps renewing survives a hand-back
+/// whose every call SQS fails at once, retried with backoff until a
+/// deadline later than the held unit's. Regression for #1452.
+#[tokio::test(start_paused = true)]
+async fn a_renewed_unit_survives_a_hand_back_sqs_keeps_failing() {
+    let visibility = Duration::from_secs(30);
+    let (feed, queue) = start(visibility);
+    let (waker, park) = wake_channel();
+    feed.set_waker(waker);
+    queue.ready(Message::new("kept"));
+    let kept = receive_n(&feed, &park, 1).await.remove(0).receipt;
+    renew_through(&feed, &[kept], Duration::from_secs(4), "before").await;
+    queue.ready(Message::new("handed back"));
+    let other = receive_n(&feed, &park, 1).await.remove(0).receipt;
+    renew_through(&feed, &[kept], Duration::from_secs(5), "before").await;
+    queue.fail_hand_backs(Some(CallError::retryable("InternalError")));
+    feed.hand_back(other).unwrap();
+    renew_through(&feed, &[kept], 2 * visibility, "after the hand-back").await;
+    assert!(handed_back(&queue.visibility()).len() > 2, "retried");
+}
+
+/// Pins that a held unit survives more hand-backs than one batch carries,
+/// queued over a renewal period while SQS answers none of them, and that a
+/// batch given up is sent again first. Regression for #1452.
+#[tokio::test(start_paused = true)]
+async fn held_units_survive_many_slow_hand_backs() {
+    let visibility = Duration::from_secs(30);
+    let (feed, queue) = start(visibility);
+    let (waker, park) = wake_channel();
+    feed.set_waker(waker);
+    for i in 0..22 {
+        queue.ready(Message::new(&format!("u{i}")));
+    }
+    let got = receive_n(&feed, &park, 22).await;
+    let kept = got[0].receipt;
+    renew_through(&feed, &[kept], Duration::from_secs(9), "before").await;
+    queue.slow_hand_backs(Some(MINUTE));
+    for d in &got[1..12] {
+        feed.hand_back(d.receipt).unwrap();
+    }
+    for d in &got[12..] {
+        renew_through(&feed, &[kept], Duration::from_secs(1), "handing back").await;
+        feed.hand_back(d.receipt).unwrap();
+    }
+    renew_through(&feed, &[kept], 2 * visibility, "after the hand-backs").await;
+    let calls: Vec<Vec<String>> = queue
+        .visibility()
+        .iter()
+        .filter(|call| call.iter().all(|e| e.seconds == 0))
+        .map(|call| call.iter().map(|e| e.handle.clone()).collect())
+        .collect();
+    assert!(calls.len() > 1, "{calls:?}");
+    assert_eq!(calls[1], calls[0], "the batch given up goes first");
+}
+
+/// Pins that a unit the worker holds through a stop keeps its lease while
+/// SQS answers none of the hand-backs of the units still buffered, and that
+/// those hand-backs carry only the buffered units, each before its deadline.
+/// Regression for #1452.
+#[tokio::test(start_paused = true)]
+async fn a_held_unit_survives_a_slow_hand_back_at_the_stop() {
+    let visibility = Duration::from_secs(30);
+    let (feed, queue) = start_gated(visibility);
+    let (waker, park) = wake_channel();
+    feed.set_waker(waker);
+    for i in 0..11 {
+        queue.inner.ready(Message::new(&format!("u{i}")));
+    }
+    assert!(feed.receive(11).unwrap().is_empty());
+    until("the units are buffered", || feed.buffered() == 11).await;
+    assert!(park.park(Duration::ZERO));
+    let taken = feed.receive(1).unwrap().remove(0);
+    let start = Instant::now();
+    queue.inner.slow_hand_backs(Some(MINUTE));
+    step(Duration::from_secs(9)).await;
+    feed.stop_receiving();
+    let mut deadline = feed.deadline_of(taken.receipt).unwrap();
+    let mut moved = 0;
+    for _ in 0..(2 * visibility).as_millis() / 100 {
+        step(Duration::from_millis(100)).await;
+        let now = feed.deadline_of(taken.receipt).unwrap();
+        assert!(
+            now > Instant::now(),
+            "lapsed {:?} in",
+            Instant::now() - start
+        );
+        moved += usize::from(now != deadline);
+        deadline = now;
+    }
+    assert!(moved >= 5, "extended on {moved} ticks");
+    feed.acknowledge(taken.receipt).unwrap();
+    let at = queue.visibility_at.lock().unwrap().clone();
+    let buffered: Vec<String> = (1..11).map(|i| format!("h{i}")).collect();
+    let hand_backs: Vec<_> = queue
+        .inner
+        .visibility()
+        .into_iter()
+        .zip(at)
+        .filter(|(call, _)| call.iter().all(|e| e.seconds == 0))
+        .collect();
+    assert!(!hand_backs.is_empty());
+    for (call, sent) in hand_backs {
+        assert!(sent < start + visibility, "sent {:?} in", sent - start);
+        for e in call {
+            assert!(buffered.contains(&e.handle), "{}", e.handle);
+        }
+    }
+}
+
+/// Pins the bound of a hand-back call: one renewal period from the start of
+/// its pass, or the time left to its batch's earliest deadline, or a
+/// close's bound, if that is shorter. A batch left when a pass ends waits
+/// for the next one. Regression for #1452.
+#[tokio::test(start_paused = true)]
+async fn a_hand_back_call_is_bounded_by_the_period_and_the_time_left() {
+    let s = Duration::from_secs;
+    // Hand back one unit `at` into its visibility, after SQS refuses the
+    // tick's extension so the deadline stays at 60 s.
+    for (at, within) in [(0, s(20)), (40, s(20)), (45, s(15))] {
+        let (feed, queue) = start(MINUTE);
+        let (waker, park) = wake_channel();
+        feed.set_waker(waker);
+        queue.ready(Message::new("u"));
+        let d = receive_n(&feed, &park, 1).await.remove(0);
+        queue.fail_next_visibility(vec![failure(0, "InvalidParameterValue")]);
+        step(s(at)).await;
+        feed.hand_back(d.receipt).unwrap();
+        settle_tasks().await;
+        assert_eq!(hand_back_within(&queue), [Some(within)], "at {at} s");
+    }
+    // A second unit, later in the batch, does not lengthen the bound.
+    let (feed, queue) = start(MINUTE);
+    let (waker, park) = wake_channel();
+    feed.set_waker(waker);
+    queue.ready(Message::new("a"));
+    let a = receive_n(&feed, &park, 1).await.remove(0);
+    queue.fail_next_visibility(vec![failure(0, "InvalidParameterValue")]);
+    step(s(26)).await;
+    queue.ready(Message::new("b"));
+    let b = receive_n(&feed, &park, 1).await.remove(0);
+    step(s(19)).await;
+    feed.hand_back(b.receipt).unwrap();
+    feed.hand_back(a.receipt).unwrap();
+    settle_tasks().await;
+    assert_eq!(handed_back(&queue.visibility()), ["h1", "h0"]);
+    assert_eq!(hand_back_within(&queue), [Some(s(15))], "earliest deadline");
+    // A close's bound past the period does not lengthen it.
+    let (feed, queue) = start(MINUTE);
+    let (waker, park) = wake_channel();
+    feed.set_waker(waker);
+    queue.ready(Message::new("u"));
+    receive_n(&feed, &park, 1).await;
+    let _closed = feed.close(s(30)).unwrap();
+    settle_tasks().await;
+    assert_eq!(hand_back_within(&queue), [Some(s(20))], "close");
+    // Eleven hand-backs: the second batch gets what is left of the pass,
+    // and none once the first takes all of it.
+    for (first, second) in [(s(5), s(15)), (s(20), s(20))] {
+        let (feed, queue) = start(MINUTE);
+        let (waker, park) = wake_channel();
+        feed.set_waker(waker);
+        for i in 0..11 {
+            queue.ready(Message::new(&format!("u{i}")));
+        }
+        let got = receive_n(&feed, &park, 11).await;
+        queue.delay_next_visibility_call(first);
+        for d in &got {
+            feed.hand_back(d.receipt).unwrap();
+        }
+        step(s(21)).await;
+        assert_eq!(
+            hand_back_within(&queue),
+            [Some(s(20)), Some(second)],
+            "first call {first:?}"
+        );
+    }
+}
+
+/// Pins that a hand-back call given up at the end of its pass is sent again
+/// at once, after the tick that is due by then.
+#[tokio::test(start_paused = true)]
+async fn a_hand_back_given_up_at_the_period_is_sent_again_at_once() {
+    let (feed, queue) = start_gated(MINUTE);
+    let (waker, park) = wake_channel();
+    feed.set_waker(waker);
+    queue.inner.ready(Message::new("u"));
+    let d = receive_n(&feed, &park, 1).await.remove(0);
+    let start = Instant::now();
+    queue.inner.delay_next_visibility_call(MINUTE);
+    feed.hand_back(d.receipt).unwrap();
+    settle_tasks().await;
+    step(Duration::from_secs(21)).await;
+    assert_eq!(handed_back(&queue.inner.visibility()), ["h0", "h0"]);
+    let at: Vec<Duration> = queue
+        .visibility_at
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|t| *t - start)
+        .collect();
+    assert_eq!(at, [Duration::ZERO, Duration::from_secs(20)]);
+}
+
+/// Pins that a close waits for a hand-back given up at the end of its pass
+/// and sent again, and counts it once when it is never answered.
+#[tokio::test(start_paused = true)]
+async fn a_close_waits_for_a_hand_back_given_up_at_the_period() {
+    let (feed, queue) = start(MINUTE);
+    let (waker, park) = wake_channel();
+    feed.set_waker(waker);
+    queue.ready(Message::new("u"));
+    let d = receive_n(&feed, &park, 1).await.remove(0);
+    queue.delay_next_visibility_call(MINUTE);
+    feed.hand_back(d.receipt).unwrap();
+    step(Duration::from_secs(10)).await;
+    let mut closed = feed.close(Duration::from_secs(30)).unwrap();
+    step(Duration::from_millis(9_900)).await;
+    assert!(closed.try_outcome().is_none(), "settled before the resend");
+    step(Duration::from_millis(200)).await;
+    assert!(closed.try_outcome().unwrap().is_ok());
+
+    let (feed, queue) = start(MINUTE);
+    let (waker, park) = wake_channel();
+    feed.set_waker(waker);
+    queue.ready(Message::new("u"));
+    let d = receive_n(&feed, &park, 1).await.remove(0);
+    queue.slow_hand_backs(Some(MINUTE));
+    feed.hand_back(d.receipt).unwrap();
+    step(Duration::from_secs(10)).await;
+    let mut closed = feed.close(Duration::from_secs(30)).unwrap();
+    step(Duration::from_secs(31)).await;
+    let e = closed.try_outcome().unwrap().unwrap_err().reason;
+    assert!(
+        e.starts_with("the close reached its bound with 1 deletes, fails or hand-backs unsent")
+            || e.starts_with("the close gave up 1 of"),
+        "{e}"
+    );
+}
+
+/// Pins that a hand-back given up at the end of its pass and queued again
+/// is not sent once its unit's deadline passes behind a held extension.
+#[tokio::test(start_paused = true)]
+async fn a_requeued_hand_back_is_not_sent_past_its_deadline() {
+    let s = Duration::from_secs;
+    let (feed, queue) = start_gated(MINUTE);
+    let (waker, park) = wake_channel();
+    feed.set_waker(waker);
+    queue.inner.ready(Message::new("kept"));
+    queue.inner.ready(Message::new("other"));
+    let got = receive_n(&feed, &park, 2).await;
+    let kept = got[0].receipt;
+    // SQS refuses the 20 s tick's extension of the other unit, so its
+    // deadline stays at 60 s.
+    queue
+        .inner
+        .fail_next_visibility(vec![failure(1, "InvalidParameterValue")]);
+    renew_through(&feed, &[kept], s(38), "before").await;
+    let other = feed.deadline_of(got[1].receipt).unwrap();
+    queue.inner.slow_hand_backs(Some(MINUTE));
+    feed.hand_back(got[1].receipt).unwrap();
+    renew_through(&feed, &[kept], s(12), "during the pass").await;
+    // The tick due at 40 s runs once the pass ends at 58 s, and its
+    // extension is held past the other unit's deadline.
+    queue.hold_visibility();
+    renew_through(&feed, &[kept], s(8), "the pass ends").await;
+    assert!(Instant::now() < other);
+    renew_through(&feed, &[kept], other - Instant::now() + s(2), "held").await;
+    queue.release_visibility();
+    renew_through(&feed, &[kept], s(10), "after").await;
+    assert_eq!(handed_back(&queue.inner.visibility()), ["h1"]);
+}
+
+/// Pins that a held unit the reader keeps renewing survives one slow
+/// hand-back and, at the tick it delays, one slow extension. Regression for
+/// #1452.
+#[tokio::test(start_paused = true)]
+async fn a_renewed_unit_survives_a_slow_hand_back_and_a_slow_extension() {
+    let visibility = Duration::from_secs(30);
+    let (feed, queue) = start(visibility);
+    let [kept, other] = kept_and_other(&feed, &queue, visibility).await;
+    queue.slow_hand_backs(Some(MINUTE));
+    queue.delay_next_visibility_call(MINUTE);
+    feed.hand_back(other).unwrap();
+    renew_through(&feed, &[kept], 2 * visibility, "after the hand-back").await;
 }

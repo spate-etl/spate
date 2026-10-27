@@ -2,15 +2,15 @@
 //!
 //! Four tasks on the I/O runtime do the queue's I/O. The receive task long
 //! polls while the reader wants more units than are buffered. The renewal
-//! task sends each hand-back as it is queued, and extends, every third of
-//! the visibility period, each unit handed out or renewed since the last
-//! extension, and each unit still buffered when the reader has called the
-//! feed since then; from a stop until the close, it extends every unit
-//! handed out. The settle task sends deletes and fails, and the publish task
-//! sends publishes, each in batches of up to ten. A close adds a task that
-//! settles its confirmation. The [`Feed`] methods only lock the shared
-//! state, change it and signal a task or spawn one, so none of them waits
-//! (INV-2).
+//! task sends each hand-back as it is queued, spending at most one renewal
+//! period at a time on them, and extends, every third of the visibility
+//! period, each unit handed out or renewed since the last extension, and
+//! each unit still buffered when the reader has called the feed since then;
+//! from a stop until the close, it extends every unit handed out. The settle
+//! task sends deletes and fails, and the publish task sends publishes, each
+//! in batches of up to ten. A close adds a task that settles its
+//! confirmation. The [`Feed`] methods only lock the shared state, change it
+//! and signal a task or spawn one, so none of them waits (INV-2).
 //!
 //! # The 12-hour hold
 //!
@@ -1146,12 +1146,13 @@ fn held_from(m: Received, sent_at: Instant, hold_end: Instant, visibility: Durat
     }
 }
 
-/// Sends each hand-back as it is queued. Every renewal period, extends each
-/// held unit marked since the last tick, and each buffered unit when the
-/// reader was active since the last tick; once the worker stops, every held
-/// unit. A tick's batches are extended together, each bounded as
-/// [`extend_chunk`] says, and a batch whose call fails with a renewal period
-/// or less left is sent once more at once.
+/// Sends each hand-back as it is queued, at most one renewal period at a
+/// time, and a tick's extensions before its hand-backs. Every renewal
+/// period, extends each held unit marked since the last tick, and each
+/// buffered unit when the reader was active since the last tick; once the
+/// worker stops, every held unit. A tick's batches are extended together,
+/// each bounded as [`extend_chunk`] says, and a batch whose call fails with
+/// a renewal period or less left is sent once more at once.
 ///
 /// Hand-backs and extensions go out from this one task, so a unit is never
 /// handed back while an extension of it is in flight from this task, and is
@@ -1173,10 +1174,12 @@ async fn renewal_task(shared: Arc<Shared>) {
             })
             .await
         };
-        if send_hand_backs(&shared).await.is_err() {
-            return;
-        }
+        // A tick's extensions go before the hand-backs, so a slow hand-back
+        // delays them by at most the one pass already running.
         if !ticked {
+            if send_hand_backs(&shared).await.is_err() {
+                return;
+            }
             continue;
         }
         let now = Instant::now();
@@ -1367,12 +1370,16 @@ async fn join_all<F: Future>(futures: Vec<F>) -> Vec<F::Output> {
 }
 
 /// Send the queued hand-backs, each setting its unit visible at once, in
-/// batches of up to ten. A hand-back past its unit's deadline is dropped
-/// unsent, since the unit is visible already, and so is one past a close's
-/// bound.
+/// batches of up to ten. A pass is given up one renewal period after it
+/// starts, each call and its retries included, or at a batch's earliest
+/// deadline or a close's bound if sooner. A batch not answered by then goes
+/// back to the front of the queue for the next pass; one past its deadline
+/// is dropped unsent, since the unit is visible already, and so is one past
+/// a close's bound.
 ///
 /// `Err` when the feed has stopped.
 async fn send_hand_backs(shared: &Shared) -> Result<(), ()> {
+    let pass_end = Instant::now() + shared.settings.period;
     loop {
         let chunk: Vec<Settle> = {
             let mut st = shared.lock();
@@ -1386,6 +1393,10 @@ async fn send_hand_backs(shared: &Shared) -> Result<(), ()> {
             {
                 let n = std::mem::take(&mut st.hand_backs).len();
                 st.dropped(n);
+            }
+            if now >= pass_end {
+                // What is left goes after the next tick's extensions.
+                return Ok(());
             }
             let n = st.hand_backs.len().min(BATCH_ENTRIES);
             st.handing_back += n;
@@ -1406,23 +1417,42 @@ async fn send_hand_backs(shared: &Shared) -> Result<(), ()> {
                 seconds: 0,
             })
             .collect();
-        let sent = settle_batch(shared, "handing back", &chunk, |bound| {
-            let left = until(oldest, bound).saturating_duration_since(Instant::now());
-            shared
-                .queue
-                .change_visibility_batch(entries.clone(), Some(left))
-        })
+        // The bound wraps only the call, so the bookkeeping below still runs
+        // when it elapses.
+        let sent = tokio::time::timeout_at(
+            pass_end,
+            settle_batch(shared, "handing back", &chunk, |bound| {
+                let left = until(oldest, bound)
+                    .min(pass_end)
+                    .saturating_duration_since(Instant::now());
+                shared
+                    .queue
+                    .change_visibility_batch(entries.clone(), Some(left))
+            }),
+        )
         .await;
         {
+            // One lock, so a close counts the batch once.
             let mut st = shared.lock();
             st.handing_back -= chunk.len();
             st.last_hand_back = Some(Instant::now());
-            if let Ok(unapplied) = sent {
-                st.dropped(unapplied);
+            match sent {
+                Ok(Ok(unapplied)) => st.dropped(unapplied),
+                Ok(Err(())) => {}
+                Err(_) => {
+                    tracing::debug!("a hand-back call took a renewal period; sending it again");
+                    st.hand_backs.splice(0..0, chunk);
+                }
             }
         }
         shared.progress.notify_one();
-        sent?;
+        match sent {
+            Ok(Ok(_)) => {}
+            Ok(Err(())) => return Err(()),
+            // The pass took a renewal period, so the next tick is due and
+            // its hand-back pass sends the batch again.
+            Err(_) => return Ok(()),
+        }
     }
 }
 

@@ -274,6 +274,14 @@ sends it nothing; a deadline never falls after
 [the 12-hour hold](#the-12-hour-hold) ends. Each handed-back unit keeps the
 receive it used toward `maxReceiveCount`.
 
+The feed spends at most one renewal period at a time on hand-backs, retries
+included, and gives each call up after at most 30 seconds; a request already
+sent by then can still reach SQS just after. A hand-back not answered in that
+time is sent again after the next renewal tick, until its unit's deadline, so
+a slow hand-back delays the extension of the other units by at most one
+renewal period. A unit whose hand-back is never answered returns when its
+visibility lapses.
+
 After the final commit the feed sends its queued deletes and sets each unit it
 still holds visible, within what is left of `checkpoint.drain_timeout`. A
 delete not sent by then leaves its unit to return after one visibility period

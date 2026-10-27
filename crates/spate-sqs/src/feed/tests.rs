@@ -3658,9 +3658,13 @@ async fn dropping_the_feed_ends_a_credentials_load_in_flight() {
         })
     });
     let (feed, _held, _) = holding_one_unit(Duration::from_secs(3), &credentials).await;
-    while credentials.started() < 2 {
+    for _ in 0..100 {
+        if credentials.started() >= 2 {
+            break;
+        }
         step(Duration::from_millis(100)).await;
     }
+    assert_eq!(credentials.started(), 2, "a tick started a reload");
     assert!(dropped.try_recv().is_err(), "the load is under way");
     drop(feed);
     tokio::time::timeout(MINUTE, dropped)

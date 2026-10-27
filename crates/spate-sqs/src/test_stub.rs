@@ -161,10 +161,13 @@ impl ScriptedCredentials {
         *self.finished.borrow()
     }
 
-    /// Waits until `n` loads have finished.
+    /// Waits until `n` loads have finished, for ten minutes of tokio time.
     pub(crate) async fn until_finished(&self, n: usize) {
         let mut seen = self.finished.subscribe();
-        seen.wait_for(|s| *s >= n).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(600), seen.wait_for(|s| *s >= n))
+            .await
+            .unwrap_or_else(|_| panic!("{n} loads never finished"))
+            .unwrap();
     }
 }
 

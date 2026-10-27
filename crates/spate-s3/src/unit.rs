@@ -224,8 +224,9 @@ pub(crate) enum Decoded {
 /// dropped. Every other record becomes one part with its ETag quoted. Its key
 /// is read as written when the record's `eventSource` is exactly `ceph:s3`,
 /// and is otherwise form-decoded (`+` is a space, then percent-decoding as
-/// UTF-8), so only a form-decoded key can fail to decode. A record whose
-/// `eventSource` is not a string fails the whole message, and so does one
+/// UTF-8), so only a form-decoded key can fail to decode. An absent or JSON
+/// null `eventSource` is form-decoded. A record whose `eventSource` is any
+/// other value that is not a string fails the whole message, and so does one
 /// whose key [`addressable`] refuses or whose ETag cannot be an `If-Match`
 /// value. A message with no part left is acknowledged.
 ///
@@ -822,8 +823,9 @@ mod tests {
     }
 
     /// Pins that a record whose `eventSource` is exactly `ceph:s3` is read at
-    /// its key as written, that any other source or none form-decodes, and
-    /// that an `eventSource` that is not a string fails the message.
+    /// its key as written, that any other source, none or JSON null
+    /// form-decodes, and that any other `eventSource` that is not a string
+    /// fails the message.
     #[test]
     fn a_ceph_notification_key_is_read_as_written() {
         for key in [
@@ -861,6 +863,9 @@ mod tests {
                 "{source:?}: {reason}"
             );
         }
+        let mut null = created("data/a+b.ndjson", 10);
+        null["eventSource"] = serde_json::Value::Null;
+        assert_eq!(keys(decoded(&[null])), ["data/a b.ndjson"]);
         let mut numbered = created("data/a.ndjson", 10);
         numbered["eventSource"] = 1.into();
         let reason = failed(decoded(&[numbered]));

@@ -38,9 +38,9 @@ and acknowledge the announced object unread. Each record names its producer in
 Chosen option: "Read the key as written when the record's `eventSource` is
 exactly `ceph:s3`", because the record already says which producer wrote it,
 so no operator setting can disagree with the store. The match is exact and
-case-sensitive. A record whose `eventSource` is absent, or any other string, is
-form-decoded, and a record whose `eventSource` is not a string fails its
-message as a record with a field of the wrong type does.
+case-sensitive. A record whose `eventSource` is absent, JSON null or any other
+string is form-decoded, and a record whose `eventSource` is any other JSON
+value fails its message as a record with a field of the wrong type does.
 
 A unit the source re-enqueues after an overwrite writes its key form-encoded
 and carries no `eventSource`, so it decodes to the key the store announced

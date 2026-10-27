@@ -743,10 +743,10 @@ fn a_unit_a_stopping_worker_receives_again_is_handed_back_again() {
     let dir = tempfile::tempdir().unwrap();
     let data = data_dir(&dir);
     let (unit, rows) = two_range_unit(&data, "a");
-    let section = feed_yaml(&mq, &url, Duration::from_secs(300), "");
+    let section = feed_yaml(&mq, &url, Duration::from_secs(300), "  units_held: 4\n");
     let clock = StopClock::frozen();
-    // A wants more units than it holds, so its 20 s receive is in flight
-    // when it hands the unit back, and no other worker is receiving.
+    // A holds room past the unit's two lanes, so its 20 s receive is in
+    // flight when it hands the unit back, and no other worker is receiving.
     let a = launch_stopping(&data, TWO_RANGES, &section, &clock, |sink| {
         sink.enqueue_global(WriteOutcome::ok().held());
     });

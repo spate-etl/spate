@@ -74,9 +74,10 @@ use std::sync::mpsc as std_mpsc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
-/// Units held at once when the `feed:` section sets no `units_held`. The
-/// reader receives only while it holds fewer.
-const UNITS_HELD: usize = 96;
+/// Units held at once when neither the `feed:` section's `units_held` nor a
+/// pipeline thread count gives one. The reader receives only while it holds
+/// fewer.
+pub(crate) const UNITS_HELD: NonZeroUsize = NonZeroUsize::new(96).expect("non-zero");
 
 /// What the reader needs to open a lane, fixed at `open`.
 pub(crate) struct LaneParts {
@@ -247,7 +248,7 @@ impl UnitReader {
             waker,
             parts,
             scope,
-            units_held: units_held.map_or(UNITS_HELD, NonZeroUsize::get),
+            units_held: units_held.unwrap_or(UNITS_HELD).get(),
             started: false,
             next_delivery: 0,
             next_lane: 0,
@@ -1724,8 +1725,8 @@ mod tests {
         reader.lanes[&partition].delivery
     }
 
-    /// Pins the cap on units held: the reader holds at most 96 units,
-    /// leaves the rest queued, and receives only into the room a settled
+    /// Pins the cap on units held when no section value or thread count is
+    /// given: the reader holds at most 96 units, leaves the rest queued, and receives only into the room a settled
     /// unit frees.
     #[test]
     fn the_reader_holds_at_most_96_units() {

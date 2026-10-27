@@ -285,8 +285,7 @@ fn a_feed_run_ends_holding_at_most_units_held_watermarks() {
 
 /// A `feed:` section's `units_held` sets the feed path's read parallelism:
 /// `units_held: 12` over sixteen one-object units puts twelve reads in
-/// flight, below the reader's default of 96, and the solo run on the
-/// in-process feed lists the prefix once.
+/// flight, and the solo run on the in-process feed lists the prefix once.
 #[test]
 fn the_feed_section_sets_read_parallelism() {
     let staged = stage(16, 20);

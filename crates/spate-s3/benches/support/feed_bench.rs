@@ -31,7 +31,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-/// Objects in the benchmark corpus: 48 waves of 96 units held.
+/// Objects in the benchmark corpus: 576 waves of 8 units held.
 pub(crate) const OBJECTS: usize = 4_608;
 
 /// Lines in every object.

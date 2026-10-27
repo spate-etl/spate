@@ -285,9 +285,10 @@ shape and the failure modes.
 
 ### Read parallelism
 
-A worker reads `units_held` units at once, one lane each, and the default is
-96. A lane is pinned to one pipeline thread, so no more pipeline threads do
-source work than there are lanes.
+A worker reads `units_held` units at once, one lane each. Unset, it holds two
+units per pipeline thread, so each thread has a second lane to read while the
+first opens its next object. A lane is pinned to one pipeline thread, so no
+more pipeline threads do source work than there are lanes.
 
 On the ETag-pinned ranged path, read-ahead memory grows with active lanes,
 current GET windows and backing windows retained by queued chunks. As
@@ -356,16 +357,21 @@ back to the queue unread, one receive closer to `maxReceiveCount`. On Kafka a
 waiting delivery's offset holds back its partition's commit point.
 
 `units_held` bounds the lanes the source reads at once, one per whole object or
-range, and with them its read parallelism. The default is 96.
+range, and with them its read parallelism. The default is twice the pipeline
+thread count, the value `spate_pipeline_threads` reports. A source opened
+outside a pipeline, with no thread count, holds 96. At startup the source logs
+at `INFO` the units it holds and whether `units_held` or the thread count set
+the figure.
 
 The default has two costs. Read-ahead memory follows the
 [overlap estimate](#read-parallelism): about
-`2 × units_held × prefetch_bytes`, which is 2 × 96 × 8 MiB = 1,536 MiB at the
-defaults. This is arithmetic and has not been measured. A unit is acknowledged,
-and its slot freed, only after the sink has written its last row, so a batch of
-small units waits up to `batch.linger` for a seal. While the held units total
-fewer rows than `batch.max_rows` and fewer bytes than `batch.max_bytes`, a
-worker completes at most `units_held / batch.linger` units a second: 96 a
+`2 × units_held × prefetch_bytes`, which at the defaults is 32 MiB per pipeline
+thread: 2 units of 2 × 8 MiB each. This is arithmetic and has not been
+measured. A unit is acknowledged, and its slot freed, only after the sink has
+written its last row, so a batch of small units waits up to `batch.linger` for
+a seal. While the held units total fewer rows than `batch.max_rows` and fewer
+bytes than `batch.max_bytes`, a worker completes at most
+`units_held / batch.linger` units a second: twice the pipeline thread count a
 second at the defaults. A batch that reaches either threshold seals without
 waiting for the linger.
 With 96 units held, 4,608 local objects of 64 KB and 20 ms of added GET

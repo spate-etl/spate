@@ -4,8 +4,8 @@
 //! rig that leaked state from one run into the next (a feed already drained, a
 //! counter already at its target) would report a fast, stable figure for a
 //! run that read nothing. These tests drive the rig twice from one setup at
-//! 192 objects, two feed waves at 96 units held and more than one at any
-//! smaller bound, and check what each run did on its own.
+//! 192 objects, 24 feed waves at the rig's 8 units held, and check what each
+//! run did on its own.
 
 use std::time::Duration;
 

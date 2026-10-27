@@ -1,5 +1,5 @@
 //! Wall-clock cases for the feed read path on many small objects at a read
-//! parallelism of 96.
+//! parallelism of 8.
 //!
 //! Every case reads 4,608 uncompressed newline-delimited objects of 64,000
 //! bytes (1,000 lines of 64 bytes) from a local directory, through a store
@@ -7,9 +7,9 @@
 //! counts rows and discards them. The figure is objects per second.
 //!
 //! Each run publishes one one-object unit per object to a fresh in-process
-//! feed. The reader holds up to `UNITS_HELD` units, so its read parallelism is
-//! that bound. The run uses 4 pipeline threads, the default runtime options and
-//! a sink linger of 5 ms, the linger of the measured cloud runs (the default is
+//! feed. The run uses 4 pipeline threads and leaves `units_held` unset, so the
+//! reader holds two units per thread, 8, and its read parallelism is 8. It uses
+//! the default runtime options and a sink linger of 5 ms, the linger of the measured cloud runs (the default is
 //! 1 s). Each unit carries the size and ETag the store reports, so the read
 //! goes through the pinned GET path.
 //!
@@ -23,11 +23,11 @@
 //!
 //! # Expected floors at 20 ms
 //!
-//! 4,608 GETs over 96 readers make a 960 ms floor of GET latency alone; over 8
-//! readers, 11.5 s. A unit holds its slot until the sink has written its last
-//! rows, and a wave of small units never fills a batch by size, so every wave
-//! also waits up to one linger: 48 waves at 96 units held (about 1.2 s, 3,840
-//! objects/s) and 576 waves at 8 (about 14.4 s, 320 objects/s).
+//! 4,608 GETs over 8 readers make an 11.5 s floor of GET latency alone; over
+//! 96 readers, 960 ms. A unit holds its slot until the sink has written its
+//! last rows, and a wave of small units never fills a batch by size, so every
+//! wave also waits up to one linger: 576 waves at 8 units held (about 14.4 s,
+//! 320 objects/s) and 48 waves at 96 (about 1.2 s, 3,840 objects/s).
 //!
 //! # Cases
 //!

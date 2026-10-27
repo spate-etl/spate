@@ -20,7 +20,7 @@ use crate::location::{Location, await_fingerprint, feed_fingerprint};
 use crate::metrics::S3Metrics;
 use crate::split::Packing;
 use crate::unit::Scope;
-use crate::unit_reader::{LaneParts, UnitReader};
+use crate::unit_reader::{LaneParts, UNITS_HELD, UnitReader};
 use futures_util::FutureExt as _;
 use object_store::aws::{AmazonS3, AmazonS3Builder, AmazonS3ConfigKey};
 use object_store::{ClientConfigKey, ObjectStore, ObjectStoreScheme};
@@ -605,6 +605,13 @@ impl Source for S3Source {
             });
         };
         let (store, prefix, unaddressable, bucket, resume) = self.data_store()?;
+        let (units, origin) = units_held(self.units_held, ctx.threads);
+        tracing::info!(
+            units_held = units.get(),
+            origin = origin.as_str(),
+            threads = ctx.threads.map(NonZeroUsize::get),
+            "the S3 source holds up to {units} units at once"
+        );
 
         let metrics = ctx.meter.as_ref().map(S3Metrics::new);
         let delimiter = make_framer().resync_delimiter();
@@ -718,7 +725,7 @@ impl Source for S3Source {
             feed,
             parts,
             scope,
-            self.units_held,
+            Some(units),
             end,
         )));
         Ok(())
@@ -813,6 +820,43 @@ impl Drop for S3Source {
             // lost.
             task.abort();
         }
+    }
+}
+
+/// Where the units held at once come from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UnitsHeldOrigin {
+    /// The `feed:` section's `units_held`.
+    Explicit,
+    /// Twice the pipeline thread count.
+    Derived,
+    /// [`UNITS_HELD`], for a source opened with neither.
+    Fallback,
+}
+
+impl UnitsHeldOrigin {
+    fn as_str(self) -> &'static str {
+        match self {
+            UnitsHeldOrigin::Explicit => "explicit",
+            UnitsHeldOrigin::Derived => "derived",
+            UnitsHeldOrigin::Fallback => "fallback",
+        }
+    }
+}
+
+/// The units the source holds at once: the section's `units_held`, else two
+/// per pipeline thread, else [`UNITS_HELD`].
+fn units_held(
+    explicit: Option<NonZeroUsize>,
+    threads: Option<NonZeroUsize>,
+) -> (NonZeroUsize, UnitsHeldOrigin) {
+    match (explicit, threads) {
+        (Some(units), _) => (units, UnitsHeldOrigin::Explicit),
+        (None, Some(threads)) => (
+            threads.saturating_mul(NonZeroUsize::new(2).expect("non-zero")),
+            UnitsHeldOrigin::Derived,
+        ),
+        (None, None) => (UNITS_HELD, UnitsHeldOrigin::Fallback),
     }
 }
 
@@ -1389,5 +1433,32 @@ mod tests {
         source
             .parse_location(&format!("file://{}/jobs/a/", dir.path().display()))
             .unwrap();
+    }
+
+    /// Pins the order the units held resolve in: the section's value, else
+    /// two per pipeline thread, else the fallback.
+    #[test]
+    fn units_held_resolves_the_section_then_the_thread_count_then_the_fallback() {
+        let n = |v: usize| NonZeroUsize::new(v);
+        let cases = [
+            ((None, None), (96, UnitsHeldOrigin::Fallback)),
+            ((None, n(1)), (2, UnitsHeldOrigin::Derived)),
+            ((None, n(3)), (6, UnitsHeldOrigin::Derived)),
+            (
+                (None, n(usize::MAX)),
+                (usize::MAX, UnitsHeldOrigin::Derived),
+            ),
+            ((n(5), n(3)), (5, UnitsHeldOrigin::Explicit)),
+            ((n(6), n(3)), (6, UnitsHeldOrigin::Explicit)),
+            ((n(7), None), (7, UnitsHeldOrigin::Explicit)),
+        ];
+        for ((explicit, threads), (units, origin)) in cases {
+            let (got, got_origin) = units_held(explicit, threads);
+            assert_eq!(
+                (got.get(), got_origin),
+                (units, origin),
+                "explicit {explicit:?}, threads {threads:?}"
+            );
+        }
     }
 }

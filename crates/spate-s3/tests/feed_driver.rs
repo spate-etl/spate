@@ -10,9 +10,9 @@ mod support;
 
 use spate_core::checkpoint::Checkpointer;
 use spate_core::clock::TestClock;
-use spate_core::config::PipelineConfig;
+use spate_core::config::{FeedSection, PipelineConfig};
 use spate_core::feed::memory::{FeedCounts, MemoryFeed};
-use spate_core::feed::{Feed, FeedErrorKind, Receipt, STOP_RESERVE, Unit};
+use spate_core::feed::{Feed, FeedErrorKind, FeedOrigin, Receipt, STOP_RESERVE, Unit};
 use spate_core::ops::chain_owned;
 use spate_core::pipeline::{ExitState, Pipeline, RuntimeOptions};
 use spate_core::sink::{KeyHashRouter, SinkPoolConfig};
@@ -23,6 +23,7 @@ use spate_test::{
     scripted_feed, wait_until,
 };
 use std::fs;
+use std::num::NonZeroUsize;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -30,8 +31,9 @@ use support::scripted_store::{HeadAnswer, ScriptedStore};
 use support::spy::{SpyOptions, spying_local_store};
 use support::{
     DRAIN_TIMEOUT, Launched, PipelineYaml, captured_rows, etag_of, key_of, launch_customized,
-    launch_customized_on_clock, launch_on_notifications, launch_with_feed_on_clock, line_framer,
-    lines_bytes, notification, recs, sorted, stop, test_options, two_range_unit, unit_over,
+    launch_customized_on_clock, launch_on_notifications, launch_with_feed,
+    launch_with_feed_on_clock, line_framer, lines_bytes, notification, recs, sorted, stop,
+    test_options, two_range_unit, unit_over,
 };
 
 const DEADLINE: Duration = Duration::from_secs(30);
@@ -531,6 +533,177 @@ fn a_framer_with_no_delimiter_is_reported_when_the_feed_path_opens() {
     assert!(said(&lines), "{lines:#?}");
     let lines = open_logs(true);
     assert!(!said(&lines), "{lines:#?}");
+}
+
+/// The units a pipeline at `threads` holds once its first receive lands,
+/// reading 16 queued one-object units from a `scripted` feed section that
+/// sets `units_held` to `explicit`. The store holds every GET, so no unit
+/// settles and frees room before the count is read.
+fn units_held_at_start(name: &str, threads: u32, explicit: Option<usize>) -> usize {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    stage(&data, "a.ndjson", &[r#"{"k":1}"#.to_owned()]);
+    let (feed, script) = scripted_feed();
+    for _ in 0..16 {
+        script.deliver(unit_over(&data, "a.ndjson"));
+    }
+    // A depth above the queued units is never reached, so the gate holds
+    // every GET until `open_gate`.
+    let (store, spy) = spying_local_store(SpyOptions {
+        gate_depth: 17,
+        gate_deadline: Duration::from_secs(300),
+        ..SpyOptions::default()
+    });
+    let section = match explicit {
+        Some(n) => format!("feed:\n  scripted: {{}}\n  units_held: {n}\n"),
+        None => "feed:\n  scripted: {}\n".to_owned(),
+    };
+    let yaml = PipelineYaml::file(name, &data)
+        .threads(threads)
+        .section(&section)
+        .build();
+    let l = launch_with_feed(
+        &yaml,
+        test_options(),
+        |_| {},
+        Arc::new(feed),
+        |source, _io| line_framer(source).with_store(store),
+    );
+    wait_until(DEADLINE, "the first receive lands", || {
+        !script.held().is_empty()
+    });
+    let held = script.held().len();
+    spy.open_gate();
+    stop(&l);
+    held
+}
+
+/// Pins that a pipeline whose `feed:` section sets no `units_held` holds two
+/// units per pipeline thread.
+#[test]
+fn an_unset_units_held_holds_twice_the_pipeline_threads() {
+    // 3 threads tell `2 × threads` from `2 + threads`; 1 thread pins that
+    // the rule has no floor.
+    for (threads, held) in [(1, 2), (3, 6)] {
+        assert_eq!(
+            units_held_at_start("s3-feed-derived", threads, None),
+            held,
+            "threads: {threads}"
+        );
+    }
+}
+
+/// Pins that the `feed:` section's `units_held` wins over the thread count,
+/// above it and below it.
+#[test]
+fn an_explicit_units_held_wins_over_the_thread_count() {
+    for units in [7, 2] {
+        assert_eq!(
+            units_held_at_start("s3-feed-explicit", 3, Some(units)),
+            units,
+            "units_held: {units}"
+        );
+    }
+}
+
+/// Pins that a source opened by hand, with no thread count and no section,
+/// holds 96 units.
+#[test]
+fn a_source_opened_without_a_thread_count_holds_96() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    stage(&data, "a.ndjson", &[r#"{"k":1}"#.to_owned()]);
+    let config =
+        PipelineConfig::from_str(&PipelineYaml::file("s3-feed-fallback", &data).build()).unwrap();
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    let (feed, script) = scripted_feed();
+    for _ in 0..98 {
+        script.deliver(unit_over(&data, "a.ndjson"));
+    }
+    let mut source =
+        line_framer(S3Source::from_component_config(&config.source, rt.handle().clone()).unwrap())
+            .with_feed(Arc::new(feed));
+    source
+        .open(SourceCtx::new(Checkpointer::new().handle()))
+        .unwrap();
+    wait_until(DEADLINE, "the first receive lands", || {
+        source.poll_events(Duration::ZERO).unwrap();
+        !script.held().is_empty()
+    });
+    assert_eq!(script.held().len(), 96);
+}
+
+/// Pins that `open` logs once the units the source holds and where the
+/// figure came from.
+#[test]
+fn the_open_log_states_units_held_and_its_origin() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    let config =
+        PipelineConfig::from_str(&PipelineYaml::file("s3-feed-held-log", &data).build()).unwrap();
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    let open_logs = |explicit: Option<usize>, threads: Option<usize>| {
+        let mut source = line_framer(
+            S3Source::from_component_config(&config.source, rt.handle().clone()).unwrap(),
+        );
+        match explicit {
+            Some(n) => {
+                let mut section = FeedSection::new(spate_test::component_config("scripted", "{}"));
+                section.units_held = NonZeroUsize::new(n);
+                source
+                    .configure_feed(&section, Arc::new(MemoryFeed::new()), FeedOrigin::Given)
+                    .unwrap();
+            }
+            None => source = source.with_feed(Arc::new(MemoryFeed::new())),
+        }
+        spate_test::capture_logs(tracing::Level::INFO, || {
+            source
+                .open(
+                    SourceCtx::new(Checkpointer::new().handle())
+                        .with_threads(threads.and_then(NonZeroUsize::new)),
+                )
+                .unwrap();
+        })
+    };
+    // An explicit value equal to the derived one still reads as explicit.
+    let cases = [
+        (
+            (None, Some(3)),
+            "6 units at once units_held=6 origin=\"derived\" threads=3",
+        ),
+        (
+            (Some(7), Some(3)),
+            "7 units at once units_held=7 origin=\"explicit\" threads=3",
+        ),
+        (
+            (Some(6), Some(3)),
+            "6 units at once units_held=6 origin=\"explicit\" threads=3",
+        ),
+        (
+            (None, None),
+            "96 units at once units_held=96 origin=\"fallback\"",
+        ),
+    ];
+    for ((explicit, threads), tail) in cases {
+        let lines = open_logs(explicit, threads);
+        let held: Vec<&str> = lines
+            .iter()
+            .filter_map(|l| l.find("the S3 source holds").map(|at| &l[at..]))
+            .collect();
+        assert_eq!(
+            held,
+            vec![format!("the S3 source holds up to {tail}").as_str()],
+            "{lines:#?}"
+        );
+    }
 }
 
 /// Launch over `feed` with one record per source batch and one row per sink

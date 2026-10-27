@@ -1726,8 +1726,8 @@ mod tests {
     }
 
     /// Pins the cap on units held when no section value or thread count is
-    /// given: the reader holds at most 96 units, leaves the rest queued, and receives only into the room a settled
-    /// unit frees.
+    /// given: the reader holds at most 96 units, leaves the rest queued, and
+    /// receives only into the room a settled unit frees.
     #[test]
     fn the_reader_holds_at_most_96_units() {
         let (mut reader, script, _rt) = reader();

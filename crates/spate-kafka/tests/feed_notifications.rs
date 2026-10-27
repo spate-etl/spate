@@ -500,6 +500,10 @@ fn notifying() -> Notifying {
     create_topics(&brokers);
     let s3 = S3Store::start_notifying(kafka.id(), s3_port, WORK).expect("start the S3 store");
     s3.create_bucket(BUCKET).expect("create bucket");
+    // A store's refusal reaches the caller: a bucket that does not exist has
+    // no notification configuration to set.
+    let refused = s3.put_bucket_notification("absent");
+    assert!(refused.is_err(), "{refused:?}");
     s3.put_bucket_notification(BUCKET)
         .expect("configure notifications");
     let client = AmazonS3Builder::new()

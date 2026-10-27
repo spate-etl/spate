@@ -2026,7 +2026,7 @@ async fn a_hand_back_whose_deadline_passes_while_queued_is_dropped_unsent() {
 /// Pins that hand-backs queued together go out in one batch, in the order
 /// they were queued.
 #[tokio::test(start_paused = true)]
-async fn a_hand_back_batch_is_bounded_by_its_earliest_deadline() {
+async fn hand_backs_queued_together_go_out_in_one_batch() {
     let (feed, queue) = start(MINUTE);
     let (waker, park) = wake_channel();
     feed.set_waker(waker);
@@ -3465,4 +3465,65 @@ async fn a_renewed_unit_survives_a_slow_hand_back_and_a_slow_extension() {
     queue.delay_next_visibility_call(MINUTE);
     feed.hand_back(other).unwrap();
     renew_through(&feed, &[kept], 2 * visibility, "after the hand-back").await;
+}
+
+/// Pins that a hand-back given up at the end of its pass and queued again
+/// is not sent once a close's bound has passed behind a slow extension.
+#[tokio::test(start_paused = true)]
+async fn a_requeued_hand_back_is_not_sent_past_a_close_bound() {
+    let s = Duration::from_secs;
+    let (feed, queue) = start_gated(MINUTE);
+    let start = Instant::now();
+    let [_kept, other] = kept_and_other(&feed, &queue.inner, MINUTE).await;
+    queue.inner.slow_hand_backs(Some(MINUTE));
+    queue.inner.delay_next_visibility_call(MINUTE);
+    feed.hand_back(other).unwrap();
+    step(s(22)).await;
+    let closed_at = Instant::now();
+    let _closed = feed.close(s(5)).unwrap();
+    step(s(60)).await;
+    let at = queue.visibility_at.lock().unwrap().clone();
+    let calls: Vec<(bool, Duration)> = queue
+        .inner
+        .visibility()
+        .into_iter()
+        .zip(at)
+        .map(|(call, t)| (call.iter().all(|e| e.seconds == 0), t - start))
+        .collect();
+    let bound = closed_at + s(5) - start;
+    assert!(
+        calls.iter().all(|&(zero, t)| !zero || t < bound),
+        "bound {bound:?}, calls (hand-back, at) {calls:?}"
+    );
+}
+
+/// Pins that a hand-back SQS fails with a transient error on every call,
+/// given up at the end of its pass and queued again, is logged with the
+/// error SQS returned.
+#[test]
+fn a_hand_back_given_up_at_the_period_is_logged_with_its_error() {
+    let lines = spate_test::capture_logs(tracing::Level::DEBUG, || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .start_paused(true)
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let (feed, queue) = start(MINUTE);
+            let (waker, park) = wake_channel();
+            feed.set_waker(waker);
+            queue.ready(Message::new("u"));
+            let d = receive_n(&feed, &park, 1).await.remove(0);
+            queue.fail_hand_backs(Some(CallError::retryable("InternalError")));
+            feed.hand_back(d.receipt).unwrap();
+            step(Duration::from_secs(25)).await;
+            assert!(handed_back(&queue.visibility()).len() > 2, "retried");
+        });
+    });
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("sending it again") && l.contains("InternalError")),
+        "{lines:#?}"
+    );
 }

@@ -1417,6 +1417,9 @@ async fn send_hand_backs(shared: &Shared) -> Result<(), ()> {
                 seconds: 0,
             })
             .collect();
+        // The last error, for the line logged when the pass ends:
+        // `settle_batch` logs none while it retries.
+        let last_error: Mutex<Option<String>> = Mutex::new(None);
         // The bound wraps only the call, so the bookkeeping below still runs
         // when it elapses.
         let sent = tokio::time::timeout_at(
@@ -1425,9 +1428,18 @@ async fn send_hand_backs(shared: &Shared) -> Result<(), ()> {
                 let left = until(oldest, bound)
                     .min(pass_end)
                     .saturating_duration_since(Instant::now());
-                shared
+                let call = shared
                     .queue
-                    .change_visibility_batch(entries.clone(), Some(left))
+                    .change_visibility_batch(entries.clone(), Some(left));
+                let last_error = &last_error;
+                async move {
+                    let answer = call.await;
+                    if let Err(e) = &answer {
+                        *last_error.lock().unwrap_or_else(PoisonError::into_inner) =
+                            Some(e.message.clone());
+                    }
+                    answer
+                }
             }),
         )
         .await;
@@ -1440,7 +1452,13 @@ async fn send_hand_backs(shared: &Shared) -> Result<(), ()> {
                 Ok(Ok(unapplied)) => st.dropped(unapplied),
                 Ok(Err(())) => {}
                 Err(_) => {
-                    tracing::debug!("a hand-back call took a renewal period; sending it again");
+                    let error = last_error
+                        .into_inner()
+                        .unwrap_or_else(PoisonError::into_inner);
+                    tracing::debug!(
+                        error = error.as_deref().unwrap_or("no answer"),
+                        "a hand-back batch was not applied within a renewal period; sending it again"
+                    );
                     st.hand_backs.splice(0..0, chunk);
                 }
             }

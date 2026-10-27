@@ -92,7 +92,8 @@ pub(crate) trait Queue: Send + Sync + std::fmt::Debug + 'static {
     -> BoxFuture<'_, Result<BatchOutcome, CallError>>;
 
     /// A `ChangeMessageVisibilityBatch`. With `within` set, the call and
-    /// its retries end after that long, as a Retryable timeout.
+    /// its retries end after that long, or after the client's operation
+    /// timeout if that is shorter, as a Retryable timeout.
     fn change_visibility_batch(
         &self,
         entries: Vec<VisibilityEntry>,

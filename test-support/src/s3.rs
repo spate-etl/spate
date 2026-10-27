@@ -233,8 +233,9 @@ impl S3Store {
         };
         match store {
             Store::Rustfs => {}
-            // RGW scans its persistent topics' queues on a fixed period, so
-            // the topic is created before the caller writes anything.
+            // RGW finds a new persistent topic's queue only on its next
+            // 30-second scan, so the topic is created before the caller
+            // writes anything.
             Store::Rgw => {
                 let body = rgw::create_topic_body(topic, rgw::OPAQUE_DATA);
                 let reply = started.signed(

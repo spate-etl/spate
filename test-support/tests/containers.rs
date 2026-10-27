@@ -16,7 +16,9 @@ use object_store::{ObjectStore as _, ObjectStoreExt as _, PutPayload};
 use spate_test_support::{ACCESS_KEY, ElasticMq, Message, REGION, S3Store, SECRET_KEY, Store};
 
 /// A bucket created through the helper takes a signed put, get, list and
-/// delete, and the container joins the network it was given.
+/// delete, and the container joins the network it was given. A store that
+/// takes its Kafka target through a topic, started without one, refuses a
+/// bucket's notification configuration naming `start_notifying`.
 #[test]
 #[ignore = "requires Docker"]
 fn s3_store_round_trips_an_object() {
@@ -48,6 +50,15 @@ fn s3_store_round_trips_an_object() {
         "{joined:?}"
     );
     s3_store.create_bucket("smoke").expect("create the bucket");
+    match s3_store.store() {
+        Store::Rustfs => {}
+        Store::Rgw => {
+            let err = s3_store
+                .put_bucket_notification("smoke")
+                .expect_err("a store with no topic refuses");
+            assert!(err.contains("start_notifying"), "{err}");
+        }
+    }
 
     let store = AmazonS3Builder::new()
         .with_endpoint(s3_store.endpoint())

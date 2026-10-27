@@ -132,6 +132,7 @@ fn shell_scripts(root: &Path) -> Result<Vec<String>, crate::run::Error> {
         ("scripts", ".sh"),
         (".githooks", ""),
         (".github/actions/file-issue", ".sh"),
+        ("test-support/src/s3", ".sh"),
     ] {
         let path = root.join(dir);
         for entry in std::fs::read_dir(&path)

@@ -76,9 +76,7 @@ suite that does not pull its own image.
 
 A bare `cargo nextest run --profile docker` skips that step, and testcontainers
 then pulls the tag unverified. An exact release tag is not re-pushed, so the
-bytes are the same; the digest is simply not checked. Ceph is the exception: it
-re-pushes an exact release tag with a later build, so only the digest pins its
-bytes, and a bare run of the `rgw` lane can differ from CI's. A suite that reads its
+bytes are the same; the digest is simply not checked. A suite that reads its
 image with `--pull`, through `spate_test_support::container_image`, pulls by
 digest on every run.
 

@@ -264,8 +264,8 @@ updates:
   # ------------------------------------------- Docker (S3 store lanes) ----
   # `ci/s3/<store>/Dockerfile` pins each store the spate-s3 container suites,
   # spate-kafka's notification suite and spate-test-support's smoke test run
-  # against. One entry per store, each without `ignore`, so each follows
-  # every release of its store.
+  # against. One entry per store, each following every stable release of its
+  # store.
   - package-ecosystem: docker
     directory: "/ci/s3/rustfs"
     schedule:
@@ -288,6 +288,14 @@ updates:
       prefix: "ci"
     cooldown:
       default-days: 7
+    # Ceph numbers a major's development builds x.0.z and its release
+    # candidates x.1.z, and its first stable release is x.2.0. Dependabot
+    # reads neither as a prerelease, so each upcoming major's x.0 and x.1
+    # tags are ignored here, one range per major, added before its
+    # candidates appear.
+    ignore:
+      - dependency-name: "*"
+        versions: [">= 21.0.0, < 21.2.0"]
 
   # -------------------------------------------- Docker (ElasticMQ queue) ----
   # `ci/elasticmq/stable/Dockerfile` pins the SQS-compatible queue the

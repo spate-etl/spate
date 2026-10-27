@@ -54,12 +54,19 @@ credentials once it listens.
 
 Once RGW is ready, `S3Store::start_notifying` creates a persistent topic named
 for the work topic, with the push endpoint `kafka://localhost:9093`, and a
-`PUT ?notification` points a bucket at the topic's ARN. RGW reads its
-persistent topics' queues on a fixed 30-second period, so a notification can
-take up to 30 seconds to reach the broker.
+`PUT ?notification` points a bucket at the topic's ARN. RGW finds a new
+persistent topic's queue on its next 30-second scan, so the first notification
+of a topic can take up to 30 seconds to reach the broker. Later ones arrive in
+well under a second.
 
 The image index carries `linux/amd64` and `linux/arm64`, so the lane runs
 locally on either. CI runs extra lanes on x86_64.
+
+Ceph numbers a major's development builds `x.0.z` and its release candidates
+`x.1.z`, and its first stable release is `x.2.0`. Dependabot reads neither as a
+prerelease, so the lane's entry in `.github/dependabot.yml` ignores the next
+major's `x.0` and `x.1` tags, one range per major, added before that major's
+candidates appear.
 
 ## What a bump runs
 

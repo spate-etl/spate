@@ -4,4 +4,4 @@
 # Dependabot holds this on the 26.8 line and takes patch releases. Moving it to
 # the next LTS is a maintainer edit. ../README.md has the account.
 
-FROM clickhouse/clickhouse-server:26.8.31.2@sha256:05d2e46507afdcf08da46e5528b68847104dbbed691c327e505414b4b7f4e4c8
+FROM clickhouse/clickhouse-server:26.8.32.14@sha256:7dfd56d5b9a5d17eb308bf79641b52c70e93800268e9f2137cad942b5e0e40c1

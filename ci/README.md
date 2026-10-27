@@ -32,7 +32,7 @@ that store's startup in `spate_test_support::S3Store`.
 | [`elasticmq`](elasticmq/README.md) | `stable` | `spate-sqs`, `spate-test-support`'s smoke tests, and `spate`'s examples tier |
 | [`kafka`](kafka/README.md) | `stable` | `spate-kafka`, and `spate`'s end-to-end suites |
 | [`rust`](rust/README.md) | `stable` | `spate-kafka`'s `tls_system_ca`, as its system OpenSSL builder and client image |
-| [`s3`](s3/README.md) | `rustfs` | `spate-s3`, `spate-kafka`'s notification suite on a lane declaring `notifications`, and `spate-test-support`'s smoke test |
+| [`s3`](s3/README.md) | `rustfs`, `rgw` | `spate-s3`, `spate-kafka`'s notification suite on a lane declaring `notifications`, and `spate-test-support`'s smoke test |
 
 A service's own README carries what is specific to it: which release lines it
 has, or for `s3` which stores, its vendor's support window, and why those lanes.
@@ -76,13 +76,16 @@ suite that does not pull its own image.
 
 A bare `cargo nextest run --profile docker` skips that step, and testcontainers
 then pulls the tag unverified. An exact release tag is not re-pushed, so the
-bytes are the same; the digest is simply not checked. A suite that reads its
+bytes are the same; the digest is simply not checked. Ceph is the exception: it
+re-pushes an exact release tag with a later build, so only the digest pins its
+bytes, and a bare run of the `rgw` lane can differ from CI's. A suite that reads its
 image with `--pull`, through `spate_test_support::container_image`, pulls by
 digest on every run.
 
 **Exact tags**, the vendor's full release version, so a bump diff names the
 release it moved to: `YY.M.P.B` for ClickHouse, `MAJOR.POINT` for Debian,
-`MAJOR.MINOR.PATCH` for ElasticMQ, Kafka and RustFS,
+`MAJOR.MINOR.PATCH` for ElasticMQ, Kafka and RustFS, `vMAJOR.MINOR.PATCH` for
+Ceph,
 `MAJOR.MINOR.PATCH-bookworm` for Rust.
 
 ## Support claims

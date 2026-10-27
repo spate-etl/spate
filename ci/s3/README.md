@@ -8,6 +8,7 @@ Each lane is one store at its newest release.
 | Lane | Store | Capabilities |
 | --- | --- | --- |
 | `rustfs` | The newest RustFS release. **Primary**: the lane the `containers` job runs, and the default. | `notifications` |
+| `rgw` | The newest Ceph release, running Ceph RGW. | `notifications` |
 
 `SPATE_S3_LANE` selects one:
 
@@ -18,7 +19,7 @@ SPATE_S3_LANE=rustfs cargo xtask integration-test
 The spate-s3 container suites, spate-kafka's notification suite and
 spate-test-support's smoke test start the selected store through
 `spate_test_support::S3Store`. Every store accepts one fixed access key pair and
-region, and refuses unsigned requests, so every client signs. What differs per
+region, and refuses unsigned writes, so every client signs. What differs per
 store, such as its credential settings, its S3 port and its readiness check, is
 that store's arm in `spate_test_support::Store`. A lane with no arm there fails
 `every_s3_lane_names_a_known_store` without Docker.
@@ -30,7 +31,8 @@ declares none.
 
 - `notifications`: the Kafka feed reads this store's storage notifications.
   spate-kafka's notification suite runs on the lane, and the store's arm
-  configures its Kafka target and a bucket's notification configuration.
+  configures its Kafka target, at start or through the store's topic API, and
+  a bucket's notification configuration.
   `S3Store::start_notifying` starts the store inside the broker container's
   network namespace, because the broker advertises `localhost:9093` to other
   containers.
@@ -41,6 +43,23 @@ The image is `rustfs/rustfs`. Its arm sets the key pair through
 `RUSTFS_ACCESS_KEY` and `RUSTFS_SECRET_KEY`, reaches the S3 API on port 9000, and
 waits on `GET /health/ready`. Its notification target comes from the
 `RUSTFS_NOTIFY_*` variables, and a `PUT ?notification` points a bucket at it.
+
+## Ceph RGW
+
+The image is `quay.io/ceph/ceph`, which runs no cluster by itself. The arm
+copies in a bootstrap, `test-support/src/s3/rgw.sh`, that starts one monitor and
+one memstore OSD on loopback, creates the fixed key pair's user, then runs
+`radosgw` on port 7480. It waits on `GET /`, which RGW answers without
+credentials once it listens.
+
+Once RGW is ready, `S3Store::start_notifying` creates a persistent topic named
+for the work topic, with the push endpoint `kafka://localhost:9093`, and a
+`PUT ?notification` points a bucket at the topic's ARN. RGW reads its
+persistent topics' queues on a fixed 30-second period, so a notification can
+take up to 30 seconds to reach the broker.
+
+The image index carries `linux/amd64` and `linux/arm64`, so the lane runs
+locally on either. CI runs extra lanes on x86_64.
 
 ## What a bump runs
 

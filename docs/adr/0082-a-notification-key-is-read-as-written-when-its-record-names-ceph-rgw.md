@@ -69,6 +69,9 @@ to the key the rule gives.
 `a_re_enqueued_ceph_unit_reads_the_key_rgw_announced`.
 `fuzz/fuzz_targets/s3_notification_decode.rs` predicts each record's key from
 its `eventSource` and how the key was built.
+`crates/spate-kafka/tests/feed_notifications.rs`'s
+`every_notified_key_reads_its_own_object` pins RGW's unencoded key and each
+key's read against Ceph RGW through the Kafka feed in the Docker job.
 
 ## More information
 

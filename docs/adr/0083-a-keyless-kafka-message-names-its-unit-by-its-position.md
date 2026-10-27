@@ -67,7 +67,8 @@ every copy does, so a retry copy is read back under the same id.
 `a_keyless_unit_keeps_its_position_through_retries`.
 `crates/spate-kafka/tests/feed_kafka.rs`'s
 `a_keyless_message_is_read_as_a_unit` pins the null key against Apache Kafka in
-the Docker job.
+the Docker job, and `crates/spate-kafka/tests/feed_notifications.rs`'s
+`every_notified_key_reads_its_own_object` pins the null key Ceph RGW sends.
 
 ## More information
 

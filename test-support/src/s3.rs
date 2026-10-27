@@ -5,6 +5,7 @@
 //! Each lane under `ci/s3/` is a store, and each store has an arm in
 //! [`Store`] holding what its startup needs that the S3 API does not carry.
 
+mod rgw;
 mod rustfs;
 
 use std::fmt;
@@ -31,6 +32,10 @@ pub const SECRET_KEY: &str = "spate-test-secret";
 /// The region clients sign for, which every store is configured to accept.
 pub const REGION: &str = "us-east-1";
 
+/// The `OpaqueData` of the topic a notifying Ceph RGW publishes through,
+/// which RGW copies into each event.
+pub const RGW_OPAQUE_DATA: &str = rgw::OPAQUE_DATA;
+
 const READY: Duration = Duration::from_secs(60);
 
 /// The broker address a store reaches from inside the broker's network
@@ -45,6 +50,8 @@ const SERVICE: &str = "s3";
 pub enum Store {
     /// RustFS.
     Rustfs,
+    /// Ceph RGW.
+    Rgw,
 }
 
 impl Store {
@@ -56,6 +63,7 @@ impl Store {
     pub fn from_lane(lane: &str) -> Result<Store, String> {
         match lane {
             "rustfs" => Ok(Store::Rustfs),
+            "rgw" => Ok(Store::Rgw),
             other => Err(format!(
                 "no store runs S3 lane `{other}`; each ci/s3/ lane needs its arm in `Store`"
             )),
@@ -81,6 +89,7 @@ impl Store {
     pub fn lane(self) -> &'static str {
         match self {
             Store::Rustfs => "rustfs",
+            Store::Rgw => "rgw",
         }
     }
 
@@ -90,12 +99,14 @@ impl Store {
     pub fn container_port(self) -> u16 {
         match self {
             Store::Rustfs => rustfs::PORT,
+            Store::Rgw => rgw::PORT,
         }
     }
 
     fn ready_path(self) -> &'static str {
         match self {
             Store::Rustfs => rustfs::READY_PATH,
+            Store::Rgw => rgw::READY_PATH,
         }
     }
 }
@@ -104,6 +115,7 @@ impl fmt::Display for Store {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Store::Rustfs => "RustFS",
+            Store::Rgw => "Ceph RGW",
         })
     }
 }
@@ -114,6 +126,8 @@ pub struct S3Store {
     store: Store,
     api: SocketAddr,
     name: Option<String>,
+    /// The topic a notifying RGW publishes through, once created.
+    topic_arn: Option<String>,
 }
 
 impl fmt::Debug for S3Store {
@@ -123,6 +137,7 @@ impl fmt::Debug for S3Store {
             .field("container", &self.container.id())
             .field("api", &self.api)
             .field("name", &self.name)
+            .field("topic_arn", &self.topic_arn)
             .finish()
     }
 }
@@ -146,6 +161,7 @@ impl S3Store {
         let image = pinned(store).with_exposed_port(store.container_port().tcp());
         let request = match store {
             Store::Rustfs => rustfs::configure(image),
+            Store::Rgw => rgw::configure(image),
         };
         let name = network.map(|n| format!("{n}-{}", store.lane()));
         let request = match (network, &name) {
@@ -163,6 +179,7 @@ impl S3Store {
             store,
             api,
             name,
+            topic_arn: None,
         })
     }
 
@@ -177,8 +194,9 @@ impl S3Store {
     ///
     /// # Errors
     ///
-    /// Fails when the selected lane is pinned but names no store, or the
-    /// container does not start or is not ready within 60 seconds.
+    /// Fails when the selected lane is pinned but names no store, the
+    /// container does not start or is not ready within 60 seconds, or a store
+    /// that takes its Kafka target through its topic API refuses the topic.
     ///
     /// # Panics
     ///
@@ -196,6 +214,7 @@ impl S3Store {
         // which it refuses, so the namespace is set on the host config.
         let request = match store {
             Store::Rustfs => rustfs::notifying(image, topic),
+            Store::Rgw => rgw::notifying(image),
         }
         .with_host_config_modifier(move |host| {
             host.network_mode = Some(mode.clone());
@@ -205,12 +224,29 @@ impl S3Store {
         let container = request.start().map_err(|e| format!("start {store}: {e}"))?;
         let api = SocketAddr::from(([127, 0, 0, 1], s3_host_port));
         ready(store, api)?;
-        Ok(S3Store {
+        let mut started = S3Store {
             container,
             store,
             api,
             name: None,
-        })
+            topic_arn: None,
+        };
+        match store {
+            Store::Rustfs => {}
+            // RGW scans its persistent topics' queues on a fixed period, so
+            // the topic is created before the caller writes anything.
+            Store::Rgw => {
+                let body = rgw::create_topic_body(topic, rgw::OPAQUE_DATA);
+                let reply = started.signed(
+                    Method::POST,
+                    "/",
+                    &body,
+                    "application/x-www-form-urlencoded",
+                )?;
+                started.topic_arn = Some(rgw::topic_arn(&reply)?);
+            }
+        }
+        Ok(started)
     }
 
     /// The store this container runs.
@@ -279,22 +315,57 @@ impl S3Store {
     }
 
     /// Sends every `s3:ObjectCreated:*` notification of `bucket` to the
-    /// Kafka target a container from [`S3Store::start_notifying`] has.
+    /// Kafka target or topic a container from [`S3Store::start_notifying`]
+    /// has.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the request cannot be signed or sent, the store answers
+    /// anything but `200`, or the store takes its Kafka target through a topic
+    /// and was started by [`S3Store::start`], which creates none.
+    pub fn put_bucket_notification(&self, bucket: &str) -> Result<(), String> {
+        let config = match self.store {
+            Store::Rustfs => rustfs::notification_configuration(),
+            Store::Rgw => {
+                let Some(arn) = &self.topic_arn else {
+                    return Err(format!(
+                        "{} has no topic for {bucket}: start it with `start_notifying`",
+                        self.store
+                    ));
+                };
+                rgw::notification_configuration(arn)
+            }
+        };
+        self.signed(
+            Method::PUT,
+            &format!("/{bucket}?notification"),
+            &config,
+            "application/xml",
+        )
+        .map(drop)
+    }
+
+    /// Sends `body` to `path` with `method`, signed with the fixed key pair,
+    /// and returns the reply.
     ///
     /// # Errors
     ///
     /// Fails when the request cannot be signed or sent, or the store answers
     /// anything but `200`.
-    pub fn put_bucket_notification(&self, bucket: &str) -> Result<(), String> {
-        let config = match self.store {
-            Store::Rustfs => rustfs::notification_configuration(),
-        };
-        let path = format!("/{bucket}?notification");
+    fn signed(
+        &self,
+        method: Method,
+        path: &str,
+        body: &str,
+        content_type: &str,
+    ) -> Result<String, String> {
+        let what = format!("{method} {path}");
         let mut request: HttpRequest = ::http::Request::builder()
-            .method(Method::PUT)
+            .method(method.clone())
             .uri(format!("http://{}{path}", self.api))
-            .body(config.clone().into())
-            .map_err(|e| format!("build PUT {path}: {e}"))?;
+            .header(::http::header::CONTENT_TYPE, content_type)
+            .body(body.to_owned().into())
+            .map_err(|e| format!("build {what}: {e}"))?;
         let credential = AwsCredential {
             key_id: ACCESS_KEY.to_owned(),
             secret_key: SECRET_KEY.to_owned(),
@@ -302,17 +373,17 @@ impl S3Store {
         };
         AwsAuthorizer::new(&credential, "s3", REGION)
             .try_authorize(&mut request, None)
-            .map_err(|e| format!("sign PUT {path}: {e}"))?;
+            .map_err(|e| format!("sign {what}: {e}"))?;
         let headers: Vec<(String, String)> = request
             .headers()
             .iter()
             .filter_map(|(name, value)| Some((name.to_string(), value.to_str().ok()?.to_owned())))
             .collect();
         let named = self.store;
-        match http_with_headers(self.api, "PUT", &path, &headers, &config) {
-            Ok((200, _)) => Ok(()),
-            Ok((status, reply)) => Err(format!("{named} PUT {path}: {status} {reply}")),
-            Err(e) => Err(format!("{named} PUT {path}: {e}")),
+        match http_with_headers(self.api, method.as_str(), path, &headers, body) {
+            Ok((200, reply)) => Ok(reply),
+            Ok((status, reply)) => Err(format!("{named} {what}: {status} {reply}")),
+            Err(e) => Err(format!("{named} {what}: {e}")),
         }
     }
 }
@@ -347,6 +418,65 @@ mod tests {
     fn a_named_s3_lane_selects_its_store() {
         assert_eq!(Store::from_lane("rustfs"), Ok(Store::Rustfs));
         assert_eq!(Store::Rustfs.lane(), "rustfs");
+        assert_eq!(Store::from_lane("rgw"), Ok(Store::Rgw));
+        assert_eq!(Store::Rgw.lane(), "rgw");
+    }
+
+    /// The port, readiness path and name Ceph RGW serves and reports under.
+    #[test]
+    fn rgw_is_reached_on_its_own_port_and_readiness_path() {
+        assert_eq!(Store::Rgw.container_port(), 7480);
+        assert_eq!(Store::Rgw.ready_path(), "/");
+        assert_eq!(Store::Rgw.to_string(), "Ceph RGW");
+    }
+
+    /// The notification configuration points every created object at the
+    /// topic it is given.
+    #[test]
+    fn the_rgw_notification_configuration_names_its_topic() {
+        assert_eq!(
+            rgw::notification_configuration("arn:aws:sns:default::units"),
+            "<NotificationConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
+             <TopicConfiguration><Id>spate-test</Id>\
+             <Topic>arn:aws:sns:default::units</Topic>\
+             <Event>s3:ObjectCreated:*</Event></TopicConfiguration></NotificationConfiguration>"
+        );
+    }
+
+    /// The topic produces to the broker's in-namespace listener, persists
+    /// each event until the broker acknowledges it, carries the opaque
+    /// marker, and leaves RGW's retry limits at their defaults.
+    #[test]
+    fn the_rgw_topic_pushes_to_the_broker_persistently() {
+        assert_eq!(
+            rgw::create_topic_body("units", RGW_OPAQUE_DATA),
+            "Action=CreateTopic&Name=units\
+             &Attributes.entry.1.key=push-endpoint\
+             &Attributes.entry.1.value=kafka%3A%2F%2Flocalhost%3A9093\
+             &Attributes.entry.2.key=persistent&Attributes.entry.2.value=true\
+             &Attributes.entry.3.key=kafka-ack-level&Attributes.entry.3.value=broker\
+             &Attributes.entry.4.key=OpaqueData&Attributes.entry.4.value=spate-test-opaque"
+        );
+    }
+
+    /// The topic's ARN comes from the `CreateTopic` reply, and a reply that
+    /// names none fails carrying the reply.
+    #[test]
+    fn the_topic_arn_is_read_from_the_create_topic_reply() {
+        let reply = "<CreateTopicResponse><CreateTopicResult>\
+                     <TopicArn>arn:aws:sns:default::units</TopicArn>\
+                     </CreateTopicResult></CreateTopicResponse>";
+        assert_eq!(
+            rgw::topic_arn(reply),
+            Ok("arn:aws:sns:default::units".to_owned())
+        );
+        for refused in [
+            "<Error><Code>InvalidArgument</Code></Error>",
+            "<TopicArn></TopicArn>",
+        ] {
+            let err = rgw::topic_arn(refused).unwrap_err();
+            assert!(err.contains(refused), "{err}");
+        }
     }
 
     /// The port, readiness path and name RustFS serves and reports under.

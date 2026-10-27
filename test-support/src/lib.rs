@@ -18,7 +18,7 @@ pub use corpus::{fnv1a, pin};
 pub use elasticmq::{ElasticMq, Message, QUERY_PORT};
 pub use http::{http, http_with_body, http_with_headers};
 #[cfg(feature = "s3")]
-pub use s3::{ACCESS_KEY, REGION, S3Store, SECRET_KEY, Store};
+pub use s3::{ACCESS_KEY, REGION, RGW_OPAQUE_DATA, S3Store, SECRET_KEY, Store};
 #[cfg(feature = "tls")]
 pub use tls::{TestCa, native_certs, pem, serve_tls};
 

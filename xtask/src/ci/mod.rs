@@ -156,6 +156,25 @@ mod tests {
         );
     }
 
+    /// The `rgw` lane declares `notifications`, so its leg runs the
+    /// notification suite. A missing or misspelt `CAPABILITIES` file drops
+    /// that suite from the leg and leaves it green.
+    #[test]
+    fn the_rgw_lane_runs_the_notification_suite() {
+        use super::outputs::StoreLane;
+        use crate::checks::container_image::Capability;
+
+        let root = crate::repo_root().unwrap();
+        let lanes = super::extra_lanes(&root).unwrap();
+        assert!(
+            lanes
+                .s3
+                .contains(&StoreLane::new("rgw", &[Capability::Notifications])),
+            "{:?}",
+            lanes.s3
+        );
+    }
+
     /// Each argument arm refuses what it does not define. The command line
     /// parser answers both shapes first, so neither refusal is reachable
     /// through the binary.

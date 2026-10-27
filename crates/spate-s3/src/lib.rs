@@ -42,13 +42,14 @@
 //!   redelivered unit is read again from its start. This crate names no
 //!   concrete backend and has no feed feature.
 //! - **Bad objects fail their unit, not the pipeline.** An object deleted
-//!   after listing, overwritten under its ETag pin, corrupt, or unreadable
-//!   past the retry budget fails its unit back to the feed (surfaced in
-//!   `spate_s3_source_objects_failed_total{reason}`), which dead-letters it at
-//!   its cap. A bounded job with a dead-lettered unit ends **failed**, never
-//!   silently incomplete. A rejected object read and a client-configuration
-//!   error are immediately fatal. A notification unit's object overwritten
-//!   under its pin is re-enqueued at its current ETag instead.
+//!   after it was listed or announced, overwritten under its ETag pin,
+//!   corrupt, or unreadable past the retry budget fails its unit back to the
+//!   feed (surfaced in `spate_s3_source_objects_failed_total{reason}`), which
+//!   dead-letters it at its cap. A bounded job with a dead-lettered unit ends
+//!   **failed**, never silently incomplete. A rejected object read and a
+//!   client-configuration error are immediately fatal. A notification unit's
+//!   object overwritten under its pin is re-enqueued at its current ETag
+//!   instead.
 //! - **Records are framed, not decoded, here.** The source is
 //!   format-agnostic: it streams object bytes (after gzip/zstd decompression)
 //!   through a [`RecordFramer`](spate_core::framing::RecordFramer) *you supply*

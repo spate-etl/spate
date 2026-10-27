@@ -33,8 +33,8 @@ pub(crate) struct S3Metrics {
     /// Of those, the keys acknowledged at the re-enqueue cap without a
     /// re-enqueue.
     pub(crate) overwrites_dropped: Counter,
-    /// Objects that poisoned their split, by bounded reason, with one
-    /// pre-registered handle per [`PoisonKind`].
+    /// Objects, or byte ranges of one, that failed their unit, by bounded
+    /// reason, with one pre-registered handle per [`PoisonKind`].
     objects_failed_not_found: Counter,
     objects_failed_etag_drift: Counter,
     objects_failed_undecodable: Counter,

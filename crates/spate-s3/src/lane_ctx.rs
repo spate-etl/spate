@@ -82,8 +82,8 @@ impl SplitTracker {
 /// `reason` label of `spate_s3_source_objects_failed_total`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PoisonKind {
-    /// A planned object no longer exists (deleted after planning), or its key
-    /// is not a valid object path.
+    /// A read of an object the unit names answered `404` (deleted after it
+    /// was listed or announced), or a listed key is not a valid object path.
     NotFound,
     /// The object's content changed under its pin: a failed `If-Match`
     /// precondition, or content that no longer matches committed progress.

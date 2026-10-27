@@ -95,7 +95,7 @@ window, so a marker from an earlier run waits one window like any other.
 - Bad, because one lister per location is an operator rule. The lister
   creates the fingerprint with `PutMode::Create`, which refuses a second
   lister with another fingerprint where the store honors `If-None-Match`. CI
-  checks that on RustFS, and it is unverified on Ceph RGW and Garage. Two
+  checks that on RustFS, and it is verified on Ceph RGW and Garage. Two
   listers with one fingerprint both publish.
 - Neutral, because the fingerprint includes the range target, though a worker
   given another target only cuts a whole-object unit into other ranges.

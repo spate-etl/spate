@@ -541,6 +541,9 @@ Each store needs its own settings for its notifications to arrive:
   stored part sizes, which is the object's size only when the bucket's placement
   neither compresses nor encrypts it. A notified bucket needs neither, since the
   source reads an object up to its announced size.
+- **Garage.** Garage implements no bucket notification configuration
+  ([Garage](https://garagehq.deuxfleurs.fr/documentation/reference-manual/s3-compatibility/)),
+  so a source on a Garage bucket reads only the units a lister run publishes.
 
 #### Reading a notification's object
 
@@ -649,7 +652,7 @@ keeps no checkpoint and logs a WARN: every run lists the prefix from the start.
 Resume finds every key while the store lists keys in the same order in the run
 that wrote `checkpoint` and in the run that resumes from it. AWS S3
 general-purpose buckets list in UTF-8 byte order; the CI suite checks resume on
-RustFS and Ceph RGW. Resume is unsupported on SeaweedFS, where it skips keys:
+RustFS, Ceph RGW and Garage. Resume is unsupported on SeaweedFS, where it skips keys:
 SeaweedFS lists in directory-tree order, so a resume after a key that is also a
 directory prefix (`q/r` beside `q/r/s`) skips that directory. Its listings can
 also end early; see [Testing](#testing).
@@ -723,7 +726,10 @@ absent, so a lister whose `store` sets `aws_conditional_put: disabled` fails.
 Run one lister per location: a second lister with another fingerprint is refused
 when it reads the first's fingerprint, and, when both read before either wrote
 one, by the conditional create on a store that honors `If-None-Match`, which the
-CI suite checks on RustFS and Ceph RGW. The location needs read-after-write and
+CI suite checks on RustFS and Ceph RGW. Garage ignores `If-None-Match`, so there
+only the read refuses the later lister
+([Garage](https://garagehq.deuxfleurs.fr/documentation/reference-manual/known-issues/)).
+The location needs read-after-write and
 read-after-delete consistency, which means `consistency_mode = "consistent"` on
 Garage and one zone on Ceph RGW. A `file://` location serves the processes of
 one host.
@@ -931,7 +937,7 @@ unit's object is re-enqueued instead, as
 | AWS S3 | AWS's documentation. CI does not run against AWS. |
 | RustFS | A CI lane runs the Docker-gated suites against the newest release. |
 | Ceph RGW | A CI lane runs the Docker-gated suites against the newest release. A [job location](#bounded-jobs-and-the-job-location) there needs one zone. |
-| Garage | No CI lane. A [job location](#bounded-jobs-and-the-job-location) there needs `consistency_mode = "consistent"`. |
+| Garage | A CI lane runs the Docker-gated suites against the newest release, except the notification suite, since Garage sends no bucket notifications. A [job location](#bounded-jobs-and-the-job-location) there needs `consistency_mode = "consistent"`. |
 
 ## Testing
 

@@ -16,13 +16,14 @@ use std::path::Path;
 
 use clap::Subcommand;
 
-use crate::checks::container_image::{Mode, pull_all};
+use crate::checks::container_image::{Capability, Mode, pull_all, selected_capabilities};
 use crate::checks::{adr, attribution, changelog, docsrs, site_check, subject, sync_labels};
 use crate::run::{self, Error, Outcome, Step};
 
 pub(crate) use lint::TidyCheck;
 
 use crate::ci::Scope;
+use crate::ci::outputs::NOTIFICATION_SUITE;
 
 #[derive(Subcommand)]
 pub(crate) enum Command {
@@ -280,24 +281,8 @@ pub(crate) fn dispatch(root: &Path, explain: bool, cmd: Command) -> Outcome {
         Command::Docsrs { toolchain } => docsrs::run(root, explain, toolchain.nightly()),
         Command::IntegrationTest => {
             pull_all(root, explain)?;
-            run::run(
-                root,
-                explain,
-                &Step::new(
-                    "cargo",
-                    [
-                        "nextest",
-                        "run",
-                        "--profile",
-                        "docker",
-                        "--workspace",
-                        "--all-features",
-                        "--locked",
-                        "--run-ignored",
-                        "ignored-only",
-                    ],
-                ),
-            )
+            let capabilities = selected_capabilities(root, "s3")?;
+            run::run(root, explain, &integration_test(&capabilities))
         }
         // `--lib` matters: the models are unit tests inside the crate, and a
         // `--test` run builds integration targets the cfg leaves empty.
@@ -619,12 +604,53 @@ fn hack(root: &Path, explain: bool, sel: &Select) -> Outcome {
     run::steps(root, explain, &steps)
 }
 
+/// Every Docker-gated suite, leaving out those the selected S3 store's
+/// `capabilities` do not declare.
+fn integration_test(capabilities: &[Capability]) -> Step<'static> {
+    let step = Step::new(
+        "cargo",
+        [
+            "nextest",
+            "run",
+            "--profile",
+            "docker",
+            "--workspace",
+            "--all-features",
+            "--locked",
+            "--run-ignored",
+            "ignored-only",
+        ],
+    );
+    if capabilities.contains(&Capability::Notifications) {
+        step
+    } else {
+        step.args(["-E".to_owned(), format!("not ({})", NOTIFICATION_SUITE)])
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use clap::{Parser, ValueEnum};
 
     use super::TidyCheck;
     use crate::Cli;
+    use crate::checks::container_image::Capability;
+
+    /// A selected S3 store without notifications runs every Docker-gated
+    /// suite but the notification suite, and one with them runs all.
+    #[test]
+    fn integration_test_leaves_out_the_suites_a_lane_does_not_declare() {
+        let all = "cargo nextest run --profile docker --workspace --all-features --locked \
+                   --run-ignored ignored-only";
+        assert_eq!(
+            super::integration_test(&[Capability::Notifications]).display(),
+            all
+        );
+        assert_eq!(
+            super::integration_test(&[]).display(),
+            format!("{all} -E 'not (package(spate-kafka) & binary(feed_notifications))'")
+        );
+    }
 
     /// Whether what precedes an occurrence puts it where a shell would run it.
     ///

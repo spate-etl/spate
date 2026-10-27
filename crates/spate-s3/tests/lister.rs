@@ -1215,12 +1215,15 @@ fn a_lister_run_publishes_one_unit_per_listed_part() {
     }
 }
 
-/// Pins the store behaviour the lister's conditional create rests on: a
-/// second create of one key reports `AlreadyExists`.
+/// Pins each store's answer to a second conditional create of one key, the
+/// answer the lister's read-first fingerprint check rests on. Garage stores
+/// the second body and answers `Ok`, as `HookStore::creates_overwrite`
+/// models it.
 #[test]
 #[ignore = "requires Docker"]
-fn a_second_conditional_create_at_the_location_reports_already_exists() {
+fn a_second_conditional_create_at_the_location_ends_as_the_store_answers() {
     use object_store::{ObjectStoreExt as _, PutMode, PutPayload};
+    use spate_test_support::Store;
     let gw = support::store::Gateway::start("job-location");
     let key = object_store::path::Path::from("jobs/a/fingerprint");
     gw.rt.block_on(async {
@@ -1239,15 +1242,102 @@ fn a_second_conditional_create_at_the_location_reports_already_exists() {
                 PutPayload::from_static(b"second"),
                 PutMode::Create.into(),
             )
-            .await
-            .unwrap_err();
-        assert!(
-            matches!(second, object_store::Error::AlreadyExists { .. }),
-            "{second:?}"
-        );
+            .await;
         let stored = gw.client.get(&key).await.unwrap().bytes().await.unwrap();
-        assert_eq!(&stored[..], b"first");
+        match gw.store() {
+            Store::Rustfs | Store::Rgw => {
+                assert!(
+                    matches!(second, Err(object_store::Error::AlreadyExists { .. })),
+                    "{second:?}"
+                );
+                assert_eq!(&stored[..], b"first");
+            }
+            Store::Garage => {
+                assert!(second.is_ok(), "{second:?}");
+                assert_eq!(&stored[..], b"second");
+            }
+        }
     });
+}
+
+/// Pins what a lister does on each store when a rival writes another
+/// fingerprint between its read and its conditional create. A store that
+/// honors `If-None-Match` refuses the create, and the lister fails naming
+/// both fingerprints before it publishes. Garage stores the create over the
+/// rival's, and the lister publishes.
+#[test]
+#[ignore = "requires Docker"]
+fn a_lister_whose_create_follows_a_rivals_write_ends_as_the_store_answers() {
+    use object_store::ObjectStoreExt as _;
+    use spate_test_support::Store;
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    fs::write(data.join("a.ndjson"), lines_bytes(&recs("a", 5))).unwrap();
+    let gw = support::store::Gateway::start("rival-lister");
+    let (store, hooks) = support::location::location_store_over(Arc::clone(&gw.client));
+    let theirs = fingerprint(&data, "None", "0a");
+    let mine = fingerprint(&data, "Auto", "0a");
+    hooks.on_next_create(OnCreate::PutFirst(theirs.clone().into_bytes()));
+    let rt = runtime();
+    let (feed, script) = scripted_feed();
+    let location = format!("s3://{}/jobs/a/", gw.bucket);
+    let run = lister_source(&data, &rt, "")
+        .with_location_store(store)
+        .list_once(&section("scripted", Some(&location)), Arc::new(feed));
+    let stored = gw.rt.block_on(async {
+        let key = object_store::path::Path::from("jobs/a/fingerprint");
+        gw.client.get(&key).await.unwrap().bytes().await.unwrap()
+    });
+    assert_eq!(hooks.creates(), 1);
+    match gw.store() {
+        Store::Rustfs | Store::Rgw => {
+            let err = run.unwrap_err().to_string();
+            assert!(err.contains(&theirs), "{err}");
+            assert!(err.contains(&mine), "{err}");
+            assert!(script.published().is_empty());
+            assert_eq!(&stored[..], theirs.as_bytes());
+        }
+        Store::Garage => {
+            run.unwrap();
+            assert_eq!(script.published().len(), 1);
+            assert_eq!(&stored[..], mine.as_bytes());
+        }
+    }
+}
+
+/// Pins that a lister with another fingerprint is refused by its read of the
+/// stored one on a real store, before it publishes. On a store that ignores
+/// `If-None-Match` the read is the only guard.
+#[test]
+#[ignore = "requires Docker"]
+fn a_lister_with_another_fingerprint_is_refused_by_its_read_on_the_store() {
+    use object_store::ObjectStoreExt as _;
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    fs::write(data.join("a.ndjson"), lines_bytes(&recs("a", 5))).unwrap();
+    let gw = support::store::Gateway::start("refused-lister");
+    let location = format!("s3://{}/jobs/a/", gw.bucket);
+    let rt = runtime();
+    let (feed, _) = scripted_feed();
+    lister_source(&data, &rt, "")
+        .with_location_store(Arc::clone(&gw.client))
+        .list_once(&section("scripted", Some(&location)), Arc::new(feed))
+        .unwrap();
+    let (feed, script) = scripted_feed();
+    let err = lister_source(&data, &rt, "compression: none\n")
+        .with_location_store(Arc::clone(&gw.client))
+        .list_once(&section("scripted", Some(&location)), Arc::new(feed))
+        .unwrap_err()
+        .to_string();
+    let first = fingerprint(&data, "Auto", "0a");
+    assert!(err.contains(&first), "{err}");
+    assert!(err.contains(&fingerprint(&data, "None", "0a")), "{err}");
+    assert!(script.published().is_empty());
+    let stored = gw.rt.block_on(async {
+        let key = object_store::path::Path::from("jobs/a/fingerprint");
+        gw.client.get(&key).await.unwrap().bytes().await.unwrap()
+    });
+    assert_eq!(&stored[..], first.as_bytes());
 }
 
 /// Pins resume against a real S3 API: after each chosen key the store

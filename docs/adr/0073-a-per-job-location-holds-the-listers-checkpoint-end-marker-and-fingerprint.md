@@ -119,6 +119,11 @@ window, so a marker from an earlier run waits one window like any other.
 `crates/spate-core/src/pipeline/tests.rs`:
 `a_memory_feed_with_a_location_is_refused`. The one-lister rule has no check
 beyond the conditional create.
+`crates/spate-s3/tests/lister.rs`'s
+`a_second_conditional_create_at_the_location_ends_as_the_store_answers` checks
+the conditional create on RustFS, Ceph RGW and Garage in the Docker job, and
+`a_lister_with_another_fingerprint_is_refused_by_its_read_on_the_store` checks
+the read on each.
 
 ## More information
 

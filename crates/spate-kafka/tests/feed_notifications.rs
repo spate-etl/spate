@@ -330,6 +330,7 @@ fn announced(store: Store, key: &str, event: &str) -> Announced {
             source: "ceph:s3",
             event_name: format!("ObjectCreated:{event}"),
         },
+        Store::Garage => unreachable!("Garage sends no bucket notifications"),
     }
 }
 
@@ -368,6 +369,7 @@ fn carries_store_fields(store: Store, record: &Value, tagged: bool, payload: usi
             assert_eq!(object["metadata"], metadata, "{payload} bytes: {record}");
             assert_eq!(object["tags"], tags, "{payload} bytes: {record}");
         }
+        Store::Garage => unreachable!("Garage sends no bucket notifications"),
     }
 }
 

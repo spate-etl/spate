@@ -9,6 +9,7 @@ Each lane is one store at its newest release.
 | --- | --- | --- |
 | `rustfs` | The newest RustFS release. **Primary**: the lane the `containers` job runs, and the default. | `notifications` |
 | `rgw` | The newest Ceph release, running Ceph RGW. | `notifications` |
+| `garage` | The newest Garage release. | None |
 
 `SPATE_S3_LANE` selects one:
 
@@ -16,8 +17,12 @@ Each lane is one store at its newest release.
 SPATE_S3_LANE=rustfs cargo xtask integration-test
 ```
 
-The spate-s3 container suites, spate-kafka's notification suite and
-spate-test-support's smoke test start the selected store through
+`integration-test` leaves out the suites the selected lane's `CAPABILITIES` does
+not declare.
+
+The spate-s3 container suites, spate-kafka's notification suite on a lane
+declaring `notifications`, and spate-test-support's smoke test start the
+selected store through
 `spate_test_support::S3Store`. Every store accepts one fixed access key pair and
 region, and refuses unsigned writes, so every client signs. What differs per
 store, such as its credential settings, its S3 port and its readiness check, is
@@ -67,6 +72,24 @@ Ceph numbers a major's development builds `x.0.z` and its release candidates
 prerelease, so the lane's entry in `.github/dependabot.yml` ignores the next
 major's `x.0` and `x.1` tags, one range per major, added before that major's
 candidates appear.
+
+## Garage
+
+The image is `dxflrs/garage`, one static binary with no shell. The arm copies a
+config file to `/etc/garage.toml` and runs
+`/garage server --single-node --default-access-key`, which imports the fixed key
+pair from `GARAGE_DEFAULT_ACCESS_KEY` and `GARAGE_DEFAULT_SECRET_KEY`. The config
+sets `s3_region` to the suites' region, `replication_factor = 1` and
+`consistency_mode = "consistent"`. One node cannot show what `consistency_mode`
+changes. The arm reaches the S3 API on port 3900 and waits on `GET /health` on
+the admin API, port 3903, because the S3 API refuses unsigned requests.
+
+Garage implements no bucket notification configuration, so the lane declares no
+capability. `S3Store::start_notifying` and `S3Store::put_bucket_notification`
+refuse a Garage store.
+
+The image index carries `linux/amd64` and `linux/arm64`, so the lane runs
+locally on either.
 
 ## What a bump runs
 

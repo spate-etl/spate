@@ -125,6 +125,11 @@ Docker job, seeded with `a/b/y`, `a/c`, `a-c`, `q/r`, `q/r/s` and a zero-byte
 `every_owned_property_and_alias_is_refused` in
 `crates/spate-kafka/src/feed/config.rs`. Nothing enforces SeaweedFS's
 exclusion.
+`resume_after_each_returned_key_publishes_the_rest` also runs against Ceph RGW
+and Garage on the `s3-stores` job, and
+`a_lister_whose_create_follows_a_rivals_write_ends_as_the_store_answers` pins
+that Garage answers a conditional create over an existing object 200 and
+stores it.
 
 ## Evidence
 

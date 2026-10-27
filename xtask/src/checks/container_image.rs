@@ -195,6 +195,17 @@ pub(crate) fn lane_capabilities(
         .collect()
 }
 
+/// The capabilities of the lane `SPATE_<SERVICE>_LANE` selects, or of the
+/// primary lane.
+///
+/// # Errors
+///
+/// As [`lane_capabilities`] does, and when the variable is not UTF-8 or the
+/// service has no primary lane.
+pub(crate) fn selected_capabilities(root: &Path, service: &str) -> Result<Vec<Capability>, Error> {
+    lane_capabilities(root, service, &selected_lane(root, service)?)
+}
+
 /// Fetches a lane by digest, re-tags it locally, and returns the local
 /// `name:tag`.
 fn pull_lane(root: &Path, explain: bool, service: &str, lane: &str) -> Result<String, Error> {

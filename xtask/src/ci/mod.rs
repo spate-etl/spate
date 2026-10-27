@@ -3,7 +3,7 @@
 pub(crate) mod classify;
 mod event;
 mod graph;
-mod outputs;
+pub(crate) mod outputs;
 mod scope;
 
 use std::path::Path;
@@ -170,6 +170,21 @@ mod tests {
             lanes
                 .s3
                 .contains(&StoreLane::new("rgw", &[Capability::Notifications])),
+            "{:?}",
+            lanes.s3
+        );
+    }
+
+    /// The `garage` lane declares no capability, so its leg leaves out the
+    /// notification suite: Garage sends no bucket notifications.
+    #[test]
+    fn the_garage_lane_declares_no_capability() {
+        use super::outputs::StoreLane;
+
+        let root = crate::repo_root().unwrap();
+        let lanes = super::extra_lanes(&root).unwrap();
+        assert!(
+            lanes.s3.contains(&StoreLane::new("garage", &[])),
             "{:?}",
             lanes.s3
         );

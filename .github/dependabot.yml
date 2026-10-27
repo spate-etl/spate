@@ -262,10 +262,10 @@ updates:
       default-days: 7
 
   # ------------------------------------------- Docker (S3 store lanes) ----
-  # `ci/s3/<store>/Dockerfile` pins each store the spate-s3 container suites,
-  # spate-kafka's notification suite and spate-test-support's smoke test run
-  # against. One entry per store, each following every stable release of its
-  # store.
+  # `ci/s3/<store>/Dockerfile` pins each store the spate-s3 container suites
+  # and spate-test-support's smoke test run against, and spate-kafka's
+  # notification suite on a store declaring `notifications`. One entry per
+  # store, each following every stable release of its store.
   - package-ecosystem: docker
     directory: "/ci/s3/rustfs"
     schedule:
@@ -296,6 +296,17 @@ updates:
     ignore:
       - dependency-name: "*"
         versions: [">= 21.0.0, < 21.2.0"]
+  - package-ecosystem: docker
+    directory: "/ci/s3/garage"
+    schedule:
+      interval: monthly
+      day: friday
+    open-pull-requests-limit: 1
+    labels: ["dependencies", "area: ci"]
+    commit-message:
+      prefix: "ci"
+    cooldown:
+      default-days: 7
 
   # -------------------------------------------- Docker (ElasticMQ queue) ----
   # `ci/elasticmq/stable/Dockerfile` pins the SQS-compatible queue the

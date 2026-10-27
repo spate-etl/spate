@@ -1,5 +1,5 @@
-//! An in-memory store for a job location that counts reads and fails, hangs
-//! or answers a conditional create as a test scripts.
+//! A store for a job location, in memory or over another store, that counts
+//! reads and fails, hangs or answers a conditional create as a test scripts.
 
 use futures_util::FutureExt as _;
 use futures_util::stream::BoxStream;
@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// How the store answers the next conditional create.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub(crate) enum OnCreate {
     /// Store the object, then answer `AlreadyExists`.
     StoreThenAlreadyExists,
@@ -22,15 +22,18 @@ pub(crate) enum OnCreate {
     AlreadyExistsOnce,
     /// Answer `NotImplemented`, as a client with conditional put turned off.
     NotImplemented,
+    /// Write these bytes at the create's path with a plain put, as a rival
+    /// lister would, then send the create.
+    PutFirst(Vec<u8>),
 }
 
 /// The test's handle on a [`location_store`].
 #[derive(Clone, Debug)]
 pub(crate) struct LocationHooks(Arc<Hooks>);
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct Hooks {
-    inner: InMemory,
+    inner: Arc<dyn ObjectStore>,
     gets: AtomicUsize,
     requests: AtomicUsize,
     failing_gets: AtomicUsize,
@@ -39,9 +42,25 @@ struct Hooks {
     creates: AtomicUsize,
 }
 
-/// A location store and its handle.
+/// An in-memory location store and its handle.
 pub(crate) fn location_store() -> (Arc<dyn ObjectStore>, LocationHooks) {
-    let hooks = LocationHooks(Arc::new(Hooks::default()));
+    location_store_over(Arc::new(InMemory::new()))
+}
+
+/// A location store over `inner` and its handle. The handle's direct reads
+/// and writes need an `inner` that completes at once.
+pub(crate) fn location_store_over(
+    inner: Arc<dyn ObjectStore>,
+) -> (Arc<dyn ObjectStore>, LocationHooks) {
+    let hooks = LocationHooks(Arc::new(Hooks {
+        inner,
+        gets: AtomicUsize::new(0),
+        requests: AtomicUsize::new(0),
+        failing_gets: AtomicUsize::new(0),
+        hang: AtomicBool::new(false),
+        on_create: Mutex::new(None),
+        creates: AtomicUsize::new(0),
+    }));
     (Arc::new(LocationStore(hooks.clone())), hooks)
 }
 
@@ -155,6 +174,9 @@ impl ObjectStore for LocationStore {
                         operation: "conditional put".into(),
                         implementer: "scripted".into(),
                     });
+                }
+                Some(OnCreate::PutFirst(rival)) => {
+                    hooks.inner.put(location, PutPayload::from(rival)).await?;
                 }
                 None => {}
             }

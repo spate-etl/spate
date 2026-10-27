@@ -32,7 +32,7 @@ that store's startup in `spate_test_support::S3Store`.
 | [`elasticmq`](elasticmq/README.md) | `stable` | `spate-sqs`, `spate-test-support`'s smoke tests, and `spate`'s examples tier |
 | [`kafka`](kafka/README.md) | `stable` | `spate-kafka`, and `spate`'s end-to-end suites |
 | [`rust`](rust/README.md) | `stable` | `spate-kafka`'s `tls_system_ca`, as its system OpenSSL builder and client image |
-| [`s3`](s3/README.md) | `rustfs`, `rgw` | `spate-s3`, `spate-kafka`'s notification suite on a lane declaring `notifications`, and `spate-test-support`'s smoke test |
+| [`s3`](s3/README.md) | `rustfs`, `rgw`, `garage` | `spate-s3`, `spate-kafka`'s notification suite on a lane declaring `notifications`, and `spate-test-support`'s smoke test |
 
 A service's own README carries what is specific to it: which release lines it
 has, or for `s3` which stores, its vendor's support window, and why those lanes.
@@ -83,8 +83,7 @@ digest on every run.
 **Exact tags**, the vendor's full release version, so a bump diff names the
 release it moved to: `YY.M.P.B` for ClickHouse, `MAJOR.POINT` for Debian,
 `MAJOR.MINOR.PATCH` for ElasticMQ, Kafka and RustFS, `vMAJOR.MINOR.PATCH` for
-Ceph,
-`MAJOR.MINOR.PATCH-bookworm` for Rust.
+Ceph and Garage, `MAJOR.MINOR.PATCH-bookworm` for Rust.
 
 ## Support claims
 

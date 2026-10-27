@@ -5,6 +5,7 @@
 //! Each lane under `ci/s3/` is a store, and each store has an arm in
 //! [`Store`] holding what its startup needs that the S3 API does not carry.
 
+mod garage;
 mod rgw;
 mod rustfs;
 
@@ -45,6 +46,10 @@ const BROKER_FROM_INSIDE: &str = "localhost:9093";
 /// The service whose lanes are stores.
 const SERVICE: &str = "s3";
 
+/// Why a Garage store refuses the notification calls: Garage implements no
+/// bucket notification configuration.
+const GARAGE_SENDS_NO_NOTIFICATIONS: &str = "Garage sends no bucket notifications";
+
 /// A store an S3 lane runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Store {
@@ -52,6 +57,8 @@ pub enum Store {
     Rustfs,
     /// Ceph RGW.
     Rgw,
+    /// Garage.
+    Garage,
 }
 
 impl Store {
@@ -64,6 +71,7 @@ impl Store {
         match lane {
             "rustfs" => Ok(Store::Rustfs),
             "rgw" => Ok(Store::Rgw),
+            "garage" => Ok(Store::Garage),
             other => Err(format!(
                 "no store runs S3 lane `{other}`; each ci/s3/ lane needs its arm in `Store`"
             )),
@@ -90,6 +98,7 @@ impl Store {
         match self {
             Store::Rustfs => "rustfs",
             Store::Rgw => "rgw",
+            Store::Garage => "garage",
         }
     }
 
@@ -100,6 +109,15 @@ impl Store {
         match self {
             Store::Rustfs => rustfs::PORT,
             Store::Rgw => rgw::PORT,
+            Store::Garage => garage::PORT,
+        }
+    }
+
+    /// The container port whose [`Store::ready_path`] reports readiness.
+    fn ready_port(self) -> u16 {
+        match self {
+            Store::Rustfs | Store::Rgw => self.container_port(),
+            Store::Garage => garage::ADMIN_PORT,
         }
     }
 
@@ -107,6 +125,7 @@ impl Store {
         match self {
             Store::Rustfs => rustfs::READY_PATH,
             Store::Rgw => rgw::READY_PATH,
+            Store::Garage => garage::READY_PATH,
         }
     }
 }
@@ -116,6 +135,7 @@ impl fmt::Display for Store {
         f.write_str(match self {
             Store::Rustfs => "RustFS",
             Store::Rgw => "Ceph RGW",
+            Store::Garage => "Garage",
         })
     }
 }
@@ -158,10 +178,14 @@ impl S3Store {
     /// as [`Store::selected`] does, and as [`container_image`] does.
     pub fn start(network: Option<&str>) -> Result<S3Store, String> {
         let store = Store::selected()?;
-        let image = pinned(store).with_exposed_port(store.container_port().tcp());
+        let mut image = pinned(store).with_exposed_port(store.container_port().tcp());
+        if store.ready_port() != store.container_port() {
+            image = image.with_exposed_port(store.ready_port().tcp());
+        }
         let request = match store {
             Store::Rustfs => rustfs::configure(image),
             Store::Rgw => rgw::configure(image),
+            Store::Garage => garage::configure(image),
         };
         let name = network.map(|n| format!("{n}-{}", store.lane()));
         let request = match (network, &name) {
@@ -173,7 +197,10 @@ impl S3Store {
             .get_host_port_ipv4(store.container_port())
             .map_err(|e| format!("{store} port: {e}"))?;
         let api = SocketAddr::from(([127, 0, 0, 1], port));
-        ready(store, api)?;
+        let ready_port = container
+            .get_host_port_ipv4(store.ready_port())
+            .map_err(|e| format!("{store} readiness port: {e}"))?;
+        ready(store, SocketAddr::from(([127, 0, 0, 1], ready_port)))?;
         Ok(S3Store {
             container,
             store,
@@ -194,9 +221,10 @@ impl S3Store {
     ///
     /// # Errors
     ///
-    /// Fails when the selected lane is pinned but names no store, the
-    /// container does not start or is not ready within 60 seconds, or a store
-    /// that takes its Kafka target through its topic API refuses the topic.
+    /// Fails when the selected lane is pinned but names no store, the store
+    /// sends no notifications, the container does not start or is not ready
+    /// within 60 seconds, or a store that takes its Kafka target through its
+    /// topic API refuses the topic.
     ///
     /// # Panics
     ///
@@ -215,6 +243,7 @@ impl S3Store {
         let request = match store {
             Store::Rustfs => rustfs::notifying(image, topic),
             Store::Rgw => rgw::notifying(image),
+            Store::Garage => return Err(GARAGE_SENDS_NO_NOTIFICATIONS.to_owned()),
         }
         .with_host_config_modifier(move |host| {
             host.network_mode = Some(mode.clone());
@@ -232,7 +261,7 @@ impl S3Store {
             topic_arn: None,
         };
         match store {
-            Store::Rustfs => {}
+            Store::Rustfs | Store::Garage => {}
             // RGW finds a new persistent topic's queue only on its next
             // 30-second scan, so the topic is created before the caller
             // writes anything.
@@ -321,9 +350,10 @@ impl S3Store {
     ///
     /// # Errors
     ///
-    /// Fails when the request cannot be signed or sent, the store answers
-    /// anything but `200`, or the store takes its Kafka target through a topic
-    /// and was started by [`S3Store::start`], which creates none.
+    /// Fails when the store sends no notifications, the request cannot be
+    /// signed or sent, the store answers anything but `200`, or the store
+    /// takes its Kafka target through a topic and was started by
+    /// [`S3Store::start`], which creates none.
     pub fn put_bucket_notification(&self, bucket: &str) -> Result<(), String> {
         let config = match self.store {
             Store::Rustfs => rustfs::notification_configuration(),
@@ -336,6 +366,7 @@ impl S3Store {
                 };
                 rgw::notification_configuration(arn)
             }
+            Store::Garage => return Err(GARAGE_SENDS_NO_NOTIFICATIONS.to_owned()),
         };
         self.signed(
             Method::PUT,
@@ -421,6 +452,47 @@ mod tests {
         assert_eq!(Store::Rustfs.lane(), "rustfs");
         assert_eq!(Store::from_lane("rgw"), Ok(Store::Rgw));
         assert_eq!(Store::Rgw.lane(), "rgw");
+        assert_eq!(Store::from_lane("garage"), Ok(Store::Garage));
+        assert_eq!(Store::Garage.lane(), "garage");
+    }
+
+    /// The ports, readiness path and name Garage serves and reports under.
+    /// Readiness is on the admin API, and the other stores report it on
+    /// their S3 port.
+    #[test]
+    fn garage_is_reached_on_its_own_ports_and_readiness_path() {
+        assert_eq!(Store::Garage.container_port(), 3900);
+        assert_eq!(Store::Garage.ready_port(), 3903);
+        assert_eq!(Store::Garage.ready_path(), "/health");
+        assert_eq!(Store::Garage.to_string(), "Garage");
+        for store in [Store::Rustfs, Store::Rgw] {
+            assert_eq!(store.ready_port(), store.container_port(), "{store}");
+        }
+    }
+
+    /// The config runs one node that accepts requests signed for the
+    /// suites' region and binds both APIs on the ports the arm maps.
+    #[test]
+    fn the_garage_config_is_the_one_the_lane_documents() {
+        assert_eq!(
+            garage::config(),
+            format!(
+                "metadata_dir = \"/var/lib/garage/meta\"\n\
+                 data_dir = \"/var/lib/garage/data\"\n\
+                 replication_factor = 1\n\
+                 consistency_mode = \"consistent\"\n\
+                 rpc_bind_addr = \"0.0.0.0:3901\"\n\
+                 rpc_secret = \"{}\"\n\
+                 \n\
+                 [s3_api]\n\
+                 s3_region = \"us-east-1\"\n\
+                 api_bind_addr = \"0.0.0.0:3900\"\n\
+                 \n\
+                 [admin]\n\
+                 api_bind_addr = \"0.0.0.0:3903\"\n",
+                "0".repeat(64)
+            )
+        );
     }
 
     /// The port, readiness path and name Ceph RGW serves and reports under.

@@ -44,6 +44,11 @@ pub(crate) struct Lane {
     pub(crate) lane: String,
 }
 
+/// The nextest filterset of the suite that reads a store's storage
+/// notifications, which runs only on a store declaring
+/// [`Capability::Notifications`].
+pub(crate) const NOTIFICATION_SUITE: &str = "package(spate-kafka) & binary(feed_notifications)";
+
 /// One `strategy.matrix.include` entry of the S3 store tier: a lane, and the
 /// nextest filterset selecting the store tests its store supports.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -60,7 +65,7 @@ impl StoreLane {
              & test(=s3_store_round_trips_an_object))",
         );
         if capabilities.contains(&Capability::Notifications) {
-            filter.push_str(" | (package(spate-kafka) & binary(feed_notifications))");
+            filter.push_str(&format!(" | ({NOTIFICATION_SUITE})"));
         }
         StoreLane {
             lane: lane.to_owned(),

@@ -5,7 +5,7 @@
 use object_store::aws::{AmazonS3, AmazonS3Builder, AwsAuthorizer, AwsCredential};
 use object_store::path::Path as StorePath;
 use object_store::{ObjectStore, ObjectStoreExt as _, PutPayload};
-use spate_test_support::{ACCESS_KEY, REGION, S3Store, SECRET_KEY};
+use spate_test_support::{ACCESS_KEY, REGION, S3Store, SECRET_KEY, Store};
 use std::sync::Arc;
 
 pub(crate) struct Gateway {
@@ -36,6 +36,11 @@ impl Gateway {
             rt,
             client,
         }
+    }
+
+    /// The store this gateway runs.
+    pub(crate) fn store(&self) -> Store {
+        self.store.store()
     }
 
     /// The `store:` passthrough options a source needs to reach this

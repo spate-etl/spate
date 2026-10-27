@@ -2,3 +2,73 @@
 #
 # An entry stops applying on its `ignoreUntil` date, and osv-scanner reports the
 # advisory again from that day. The date is the review point.
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0391"
+ignoreUntil = 2027-04-27
+reason = "zstd 0.13.3 reaches this tree only through the codec features of spate-clickhouse's clickhouse dev-dependency, so no published crate builds it. clickhouse creates each decoder with `Decoder::new()` and compresses with the one-shot `zstd_safe::compress`, and never calls a `with_context` constructor."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0395"
+ignoreUntil = 2027-04-27
+reason = "zstd-safe 7.2.4 reaches this tree only as clickhouse -> zstd 0.13.3, through the codec features of spate-clickhouse's clickhouse dev-dependency, so no published crate builds it. zstd 0.13.3 enables none of zstd-safe's optional features. `CParameter::StableInBuffer` needs the `experimental` feature, which is off."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0396"
+ignoreUntil = 2027-04-27
+reason = "zstd-safe 7.2.4 reaches this tree only as clickhouse -> zstd 0.13.3, through the codec features of spate-clickhouse's clickhouse dev-dependency, so no published crate builds it. zstd 0.13.3 enables none of zstd-safe's optional features. `Seekable` needs the `seekable` feature, which is off."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0397"
+ignoreUntil = 2027-04-27
+reason = "zstd-safe 7.2.4 reaches this tree only as clickhouse -> zstd 0.13.3, through the codec features of spate-clickhouse's clickhouse dev-dependency, so no published crate builds it. zstd 0.13.3 enables none of zstd-safe's optional features. Neither clickhouse nor zstd 0.13.3 calls `OutBuffer::around_pos`. clickhouse's response decoder passes an initialized `&mut [u8]` to `run_on_buffers`."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0398"
+ignoreUntil = 2027-04-27
+reason = "zstd-safe 7.2.4 reaches this tree only as clickhouse -> zstd 0.13.3, through the codec features of spate-clickhouse's clickhouse dev-dependency, so no published crate builds it. zstd 0.13.3 enables none of zstd-safe's optional features. `Seekable` needs the `seekable` feature, which is off."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0399"
+ignoreUntil = 2027-04-27
+reason = "zstd-safe 7.2.4 reaches this tree only as clickhouse -> zstd 0.13.3, through the codec features of spate-clickhouse's clickhouse dev-dependency, so no published crate builds it. zstd 0.13.3 enables none of zstd-safe's optional features. `init_using_cdict` and `init_using_ddict` need the `experimental` feature, which is off."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0400"
+ignoreUntil = 2027-04-27
+reason = "zstd-safe 7.2.4 reaches this tree only as clickhouse -> zstd 0.13.3, through the codec features of spate-clickhouse's clickhouse dev-dependency, so no published crate builds it. zstd 0.13.3 enables none of zstd-safe's optional features. clickhouse never mixes streaming and one-shot calls on one context. Its one-shot compression creates its own context, and each response gets a new streaming decoder."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0401"
+ignoreUntil = 2027-04-27
+reason = "zstd-safe 7.2.4 reaches this tree only as clickhouse -> zstd 0.13.3, through the codec features of spate-clickhouse's clickhouse dev-dependency, so no published crate builds it. zstd 0.13.3 enables none of zstd-safe's optional features. `train_from_buffer` needs the `zdict_builder` feature, which is off."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0402"
+ignoreUntil = 2027-04-27
+reason = "zstd-safe 7.2.4 reaches this tree only as clickhouse -> zstd 0.13.3, through the codec features of spate-clickhouse's clickhouse dev-dependency, so no published crate builds it. zstd 0.13.3 enables none of zstd-safe's optional features. `CCtx::try_clone` needs the `experimental` feature and the overflow needs `zstdmt`, and both are off."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0403"
+ignoreUntil = 2027-04-27
+reason = "zstd-safe 7.2.4 reaches this tree only as clickhouse -> zstd 0.13.3, through the codec features of spate-clickhouse's clickhouse dev-dependency, so no published crate builds it. zstd 0.13.3 enables none of zstd-safe's optional features. Legacy frames need the `legacy` feature, which is off, so a legacy frame fails before streaming decompression starts."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0404"
+ignoreUntil = 2027-04-27
+reason = "zstd-safe 7.2.4 reaches this tree only as clickhouse -> zstd 0.13.3, through the codec features of spate-clickhouse's clickhouse dev-dependency, so no published crate builds it. zstd 0.13.3 enables none of zstd-safe's optional features. `DCtx::try_clone` needs the `experimental` feature, which is off."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0405"
+ignoreUntil = 2027-04-27
+reason = "zstd-safe 7.2.4 reaches this tree only as clickhouse -> zstd 0.13.3, through the codec features of spate-clickhouse's clickhouse dev-dependency, so no published crate builds it. zstd 0.13.3 enables none of zstd-safe's optional features. The unchecked read is in `ZSTD_seekable_compressStream`, which needs the `seekable` feature, which is off."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0406"
+ignoreUntil = 2027-04-27
+reason = "zstd-safe 7.2.4 reaches this tree only as clickhouse -> zstd 0.13.3, through the codec features of spate-clickhouse's clickhouse dev-dependency, so no published crate builds it. zstd 0.13.3 enables none of zstd-safe's optional features. Multithreaded frames need the `zstdmt` feature, which is off."
+
+[[IgnoredVulns]]
+id = "GHSA-qwgh-2vcv-g2f7"
+ignoreUntil = 2027-04-27
+reason = "block-buffer 0.10.4 reaches this tree through digest 0.10, as object_store -> crc-fast and aws-config -> sha1. The advisory concerns a cursor stored inside the block buffer, which a panicking callback can overwrite. block-buffer 0.10.4 keeps the cursor in a separate field and writes it only after the callback returns, so a caught panic leaves it at its previous valid value. The advisory's `EagerBuffer` proof of concept passes under Miri against 0.10.4, and `ReadBuffer` does not exist in 0.10.4. The fix is in block-buffer 0.12, which needs digest 0.11, and neither crc-fast nor sha1 0.10 uses it."

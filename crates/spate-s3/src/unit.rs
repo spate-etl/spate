@@ -221,11 +221,13 @@ pub(crate) enum Decoded {
 /// not deserialise, or one for another bucket, for a key outside `scope`'s
 /// prefix, with no size, or with a key that does not decode fails the whole
 /// message, as does any other body. A created object of size 0 is then
-/// dropped. Every other record becomes one part, its key form-decoded (`+` is
-/// a space, then percent-decoding as UTF-8) and its ETag quoted, unless
-/// [`addressable`] refuses its key or its ETag cannot be an `If-Match` value,
-/// either of which fails the whole message. A message with no part left is
-/// acknowledged.
+/// dropped. Every other record becomes one part with its ETag quoted. Its key
+/// is read as written when the record's `eventSource` is exactly `ceph:s3`,
+/// and is otherwise form-decoded (`+` is a space, then percent-decoding as
+/// UTF-8), so only a form-decoded key can fail to decode. A record whose
+/// `eventSource` is not a string fails the whole message, and so does one
+/// whose key [`addressable`] refuses or whose ETag cannot be an `If-Match`
+/// value. A message with no part left is acknowledged.
 ///
 /// A record names a version when its `versionId` is a string other than `""`
 /// and `"null"`, and the part reads that version; absent, JSON null, `""` and
@@ -273,12 +275,18 @@ pub(crate) fn decode(body: &[u8], scope: &Scope, packing: Packing) -> Decoded {
 /// The longest `versionId` a notification record may carry.
 pub(crate) const MAX_VERSION_BYTES: usize = 1024;
 
+/// The `eventSource` of a record Ceph RGW writes, whose key is the object's
+/// name unencoded.
+const CEPH_SOURCE: &str = "ceph:s3";
+
 /// The field of a re-enqueued unit's record that counts its re-enqueues.
 const RE_ENQUEUES: &str = "spateReEnqueues";
 
 /// The fields of a notification record the source reads.
 #[derive(Deserialize)]
 struct Record {
+    #[serde(rename = "eventSource", default)]
+    event_source: Option<String>,
     #[serde(rename = "eventTime", default)]
     event_time: Option<String>,
     #[serde(rename = "spateReEnqueues", default)]
@@ -333,7 +341,13 @@ fn record_part(
             "the record names the bucket \"{bucket}\", which this source does not read"
         ));
     }
-    let key = form_decoded(&record.s3.object.key)?;
+    // A re-enqueued unit's record carries no `eventSource`, so the key
+    // `re_enqueue_body` form-encoded is decoded whatever store announced it.
+    let key = if record.event_source.as_deref() == Some(CEPH_SOURCE) {
+        record.s3.object.key
+    } else {
+        form_decoded(&record.s3.object.key)?
+    };
     let prefix = scope.prefix.as_ref();
     if !prefix.is_empty()
         && !key
@@ -408,8 +422,9 @@ fn record_part(
 /// key was overwritten while it was read: one `ObjectCreated:Put` record at
 /// the content `overwrite` names, counting `re_enqueues`.
 ///
-/// [`decode`] reads it as a notification: its key form-encoded, its ETag
-/// quoted when the store gave one, and no `versionId`. The body is ASCII
+/// [`decode`] reads it as a notification: its key form-encoded under no
+/// `eventSource`, its ETag quoted when the store gave one, and no
+/// `versionId`. The body is ASCII
 /// when the ETag is, as one read from a header always is.
 pub(crate) fn re_enqueue_body(bucket: &str, overwrite: &Overwrite, re_enqueues: u32) -> Vec<u8> {
     let mut object = serde_json::json!({
@@ -783,6 +798,126 @@ mod tests {
         }
         let reason = failed(decoded(&[created("data/%FF.ndjson", 10)]));
         assert!(reason.contains("does not decode as UTF-8"), "{reason}");
+    }
+
+    /// `record` with its `eventSource` set to `source`, or removed for
+    /// `None`.
+    fn from_source(mut record: serde_json::Value, source: Option<&str>) -> serde_json::Value {
+        match source {
+            Some(source) => record["eventSource"] = source.into(),
+            None => {
+                record
+                    .as_object_mut()
+                    .expect("a record is an object")
+                    .remove("eventSource");
+            }
+        }
+        record
+    }
+
+    /// A created record for `key` in the source's bucket, as Ceph RGW writes
+    /// it.
+    fn ceph(key: &str, size: u64) -> serde_json::Value {
+        from_source(created(key, size), Some("ceph:s3"))
+    }
+
+    /// Pins that a record whose `eventSource` is exactly `ceph:s3` is read at
+    /// its key as written, that any other source or none form-decodes, and
+    /// that an `eventSource` that is not a string fails the message.
+    #[test]
+    fn a_ceph_notification_key_is_read_as_written() {
+        for key in [
+            "data/a+b c%25.ndjson",
+            "data/a%2Fb.ndjson",
+            "data/a%41.ndjson",
+            "data/a%zz.ndjson",
+            "data/c%",
+            "data/é x.ndjson",
+        ] {
+            assert_eq!(keys(decoded(&[ceph(key, 10)])), [key], "{key}");
+        }
+        for source in [
+            Some("aws:s3"),
+            Some("rustfs:s3"),
+            None,
+            Some("Ceph:s3"),
+            Some("ceph:s3 "),
+            Some("ceph"),
+        ] {
+            let record = |key| from_source(created(key, 10), source);
+            assert_eq!(
+                keys(decoded(&[record("data/a+b c%25.ndjson")])),
+                ["data/a b c%.ndjson"],
+                "{source:?}"
+            );
+            assert_eq!(
+                keys(decoded(&[record("data/a%41.ndjson")])),
+                ["data/aA.ndjson"],
+                "{source:?}"
+            );
+            let reason = failed(decoded(&[record("data/a%zz.ndjson")]));
+            assert!(
+                reason.contains("malformed `%` escape"),
+                "{source:?}: {reason}"
+            );
+        }
+        let mut numbered = created("data/a.ndjson", 10);
+        numbered["eventSource"] = 1.into();
+        let reason = failed(decoded(&[numbered]));
+        assert!(reason.contains("the record is unreadable"), "{reason}");
+    }
+
+    /// Pins that a key read as written meets the prefix, size and path
+    /// checks that follow decoding, and that each record of one message
+    /// takes the rule its own `eventSource` names.
+    #[test]
+    fn a_ceph_key_meets_the_checks_that_follow_decoding() {
+        let reason = failed(decoded(&[ceph("data%2Fx.ndjson", 10)]));
+        assert!(
+            reason.contains("outside the source's prefix \"data/\""),
+            "{reason}"
+        );
+        for key in ["data//a.ndjson", "data/../x"] {
+            let reason = failed(decoded(&[ceph(key, 10)]));
+            assert!(
+                reason.contains("cannot be read under its own name"),
+                "{key}: {reason}"
+            );
+        }
+        let body = message(&[ceph("a/%2Fb.ndjson", 10)]);
+        assert_eq!(
+            keys(decode(&body, &whole_bucket(), packing())),
+            ["a/%2Fb.ndjson"]
+        );
+        acknowledged(decoded(&[ceph("data/a%zz", 0)]));
+        assert_eq!(
+            keys(decoded(&[
+                ceph("data/a+b.ndjson", 10),
+                created("data/a+b.ndjson", 10)
+            ])),
+            ["data/a+b.ndjson", "data/a b.ndjson"]
+        );
+    }
+
+    /// Pins that a unit re-enqueued for an object Ceph RGW announced decodes
+    /// to the key RGW wrote, though its body names no `eventSource`.
+    #[test]
+    fn a_re_enqueued_ceph_unit_reads_the_key_rgw_announced() {
+        let key = "data/a+b%2Fc d%25.ndjson";
+        let Decoded::Read(cursors) = decoded(&[ceph(key, 10)]) else {
+            panic!("not read");
+        };
+        let parts: Vec<Part> = cursors.into_iter().flatten().collect();
+        let entry = &parts[0].object[0];
+        assert_eq!(entry.key, key);
+        let overwrite = Overwrite {
+            key: entry.key.clone(),
+            etag: entry.etag.clone(),
+            size: entry.size,
+            last_modified_ms: entry.last_modified_ms,
+        };
+        let body = re_enqueue_body("bucket", &overwrite, 1);
+        assert_eq!(keys(decode(&body, &scope(), packing())), [key]);
     }
 
     /// Pins that a created record is read whether or not its `eventName`

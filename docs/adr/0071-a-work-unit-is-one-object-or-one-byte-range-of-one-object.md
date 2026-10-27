@@ -1,5 +1,5 @@
 ---
-description: "A work unit is one object or one byte range of one object, from the lister and from notifications, so small objects are unpacked."
+description: "A work unit is one object or one byte range, from the lister and from notifications, so small objects are unpacked. ADR-0082 supersedes its key decoding."
 ---
 
 # ADR-0071 — A work unit is one object or one byte range of one object
@@ -7,7 +7,9 @@ description: "A work unit is one object or one byte range of one object, from th
 - **Status:** accepted
 - **Date:** 2026-10-19
 - **Supersedes:** [ADR-0054](0054-s3-byte-range-subdivision.md) (packing)
-- **Superseded by:** —
+- **Superseded by:**
+  [ADR-0082](0082-a-notification-key-is-read-as-written-when-its-record-names-ceph-rgw.md),
+  for notification key decoding
 
 ## Context and problem statement
 

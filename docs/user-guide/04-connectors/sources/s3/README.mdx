@@ -449,9 +449,11 @@ Each record is decided on its own:
 - a record whose `eventName` is not `ObjectCreated:*`, with or without the
   `s3:` prefix, is dropped, whatever its bucket;
 - a created object of size 0 in the source's bucket, under its prefix and
-  with a key that decodes, is dropped, since it holds no records, even under a
-  key `object_store` cannot read under its own name;
+  with a key that decodes, or one read as written, is dropped, since it holds
+  no records, even under a key `object_store` cannot read under its own name;
 - every other created record is one part of the message's unit. Its key is
+  read as written when the record's `eventSource` is `ceph:s3`, as Ceph RGW
+  sends it. Any other key, and the key of a unit the source re-enqueued, is
   decoded as `application/x-www-form-urlencoded` (`+` is a space, then
   percent-decoding as UTF-8), so `%2F` and a raw `/` give the same key. Its
   ETag is sent quoted in `If-Match`.
@@ -465,7 +467,7 @@ any created record:
 - names a key outside the `url`'s prefix, taken with the `/` the listing
   appends;
 - has no size, or a size that is not a non-negative integer;
-- has a key that does not decode;
+- has a key that does not decode, when it is decoded;
 - has a key `object_store` cannot read under its own name, for an object of
   one byte or more: an empty, `.` or `..` segment, an ASCII control
   character, or a leading or trailing `/`;
@@ -524,8 +526,7 @@ Each store needs its own settings for its notifications to arrive:
   ([Ceph](https://docs.ceph.com/en/latest/radosgw/notifications/)), and it
   produces each Kafka message without a key, which the
   [Kafka feed](../../feeds/kafka/README.mdx#counting-deliveries) dead-letters.
-  RGW also writes a record's key unencoded, and the source decodes every key,
-  so a key holding `+` or `%` decodes to another key.
+  RGW writes a record's key unencoded, and the source reads it as written.
 
 #### Reading a notification's object
 

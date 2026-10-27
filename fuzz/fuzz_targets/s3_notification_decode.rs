@@ -3,20 +3,22 @@
 //! A unit's body comes from a queue or topic, so whoever can publish there
 //! chooses its bytes. The target builds a `Records` message for a source
 //! reading `bucket` under one of a few prefixes. Its records' event names,
-//! keys, sizes, ETags, versions and re-enqueue counts take the shapes the
-//! decoder's rules distinguish, and the target predicts each record's outcome
-//! from how it was built: dropped, read, or failing its message. A message
-//! with a failing record must read nothing. Any other message must read
-//! exactly the predicted parts, in order. Each part's key is under the prefix,
-//! accepted by `addressable` and equal to the key before it was encoded. Each
-//! ETag is quoted and accepted by `http` as a header value. Raw bytes are left
-//! to `s3_unit_decode`.
+//! sources, keys, sizes, ETags, versions and re-enqueue counts take the
+//! shapes the decoder's rules distinguish, and the target predicts each
+//! record's outcome from how it was built: dropped, read, or failing its
+//! message. A message with a failing record must read nothing. Any other
+//! message must read exactly the predicted parts, in order. Each part's key
+//! is under the prefix, accepted by `addressable` and equal to the key before
+//! it was encoded, or to the key as written when the record's `eventSource`
+//! is `ceph:s3`. Each ETag is quoted and accepted by `http` as a header
+//! value. Raw bytes are left to `s3_unit_decode`.
 //!
 //! The prediction follows the decoder's order where it decides between
 //! dropping a record and failing its message. A record whose fields do not
-//! deserialise fails even at size 0. A size of 0 then drops the record after
-//! the bucket, key decoding, prefix and size checks, and before the
-//! `addressable`, ETag and `versionId` checks.
+//! deserialise, an `eventSource` that is not a string included, fails even at
+//! size 0. A size of 0 then drops the record after the bucket, key decoding,
+//! prefix and size checks, and before the `addressable`, ETag and `versionId`
+//! checks.
 
 #![no_main]
 
@@ -42,6 +44,7 @@ struct Input {
 #[derive(Arbitrary, Debug)]
 struct Record {
     event: Event,
+    source: Source,
     /// `s3` is not an object, so the record does not deserialise.
     unreadable: bool,
     other_bucket: bool,
@@ -60,6 +63,36 @@ enum Event {
     Other(String),
     NotString(i64),
     Missing,
+}
+
+/// A record's `eventSource`.
+#[derive(Arbitrary, Debug)]
+enum Source {
+    Absent,
+    Aws,
+    Rustfs,
+    Ceph,
+    Other(String),
+    NotString(i64),
+}
+
+impl Source {
+    /// The `eventSource` written, `None` to leave the field out.
+    fn json(&self) -> Option<Value> {
+        match self {
+            Source::Absent => None,
+            Source::Aws => Some(json!("aws:s3")),
+            Source::Rustfs => Some(json!("rustfs:s3")),
+            Source::Ceph => Some(json!("ceph:s3")),
+            Source::Other(s) => Some(json!(s)),
+            Source::NotString(n) => Some(json!(n)),
+        }
+    }
+
+    /// Whether the decoder reads the record's key as written.
+    fn raw(&self) -> bool {
+        self.json().as_ref().and_then(Value::as_str) == Some("ceph:s3")
+    }
 }
 
 /// A key as the target means it, and how it is encoded into the record.
@@ -210,7 +243,7 @@ fuzz_target!(|input: Input| {
 
 /// One record's JSON and what the decoder must do with it.
 fn build(record: &Record, prefix: &str) -> (Value, Outcome) {
-    let (encoded, decoded) = record.key.encode(prefix);
+    let (encoded, decoded) = record.key.encode(prefix, record.source.raw());
     let size = match record.size {
         Size::Absent | Size::Null => None,
         Size::Zero => Some(0),
@@ -253,6 +286,9 @@ fn build(record: &Record, prefix: &str) -> (Value, Outcome) {
     if let Some(count) = record.re_enqueues.json() {
         value["spateReEnqueues"] = count;
     }
+    if let Some(source) = record.source.json() {
+        value["eventSource"] = source;
+    }
     let name = match &record.event {
         Event::Created { s3_prefix, suffix } => {
             Some(format!("{}ObjectCreated:{suffix}", s3_tag(*s3_prefix)))
@@ -289,7 +325,7 @@ fn predict(
     else {
         return Outcome::Fail;
     };
-    if record.unreadable || record.other_bucket {
+    if record.unreadable || record.other_bucket || matches!(record.source, Source::NotString(_)) {
         return Outcome::Fail;
     }
     let Some(key) = decoded else {
@@ -332,14 +368,22 @@ fn predict(
 
 impl Key {
     /// The key as a notification carries it, and as the decoder must read it
-    /// back, `None` when the encoding is malformed.
-    fn encode(&self, prefix: &str) -> (String, Option<String>) {
+    /// back, `None` when the encoding is malformed. A `raw` key is written
+    /// literally, its encodings and tail included, and read back as written.
+    fn encode(&self, prefix: &str, raw: bool) -> (String, Option<String>) {
         let mut decoded = String::new();
         let mut encoded = String::new();
         if self.under_prefix && !prefix.is_empty() {
             decoded.push_str(prefix);
             decoded.push('/');
             encoded.push_str(&decoded);
+        }
+        if raw {
+            for (c, _) in &self.chars {
+                encoded.push(c.get());
+            }
+            encoded.push_str(self.tail.text());
+            return (encoded.clone(), Some(encoded));
         }
         for (c, encoding) in &self.chars {
             let c = c.get();
@@ -353,16 +397,21 @@ impl Key {
                 (_, Encoding::Literal) => encoded.push(c),
             }
         }
-        let malformed = match self.tail {
-            Tail::None => None,
-            Tail::LonePercent => Some("%"),
-            Tail::NonHexEscape => Some("%G0"),
-            Tail::InvalidUtf8 => Some("%FF"),
-            Tail::TruncatedUtf8 => Some("%C3"),
-        };
-        match malformed {
-            None => (encoded, Some(decoded)),
-            Some(tail) => (encoded + tail, None),
+        match self.tail {
+            Tail::None => (encoded, Some(decoded)),
+            _ => (encoded + self.tail.text(), None),
+        }
+    }
+}
+
+impl Tail {
+    fn text(&self) -> &'static str {
+        match self {
+            Tail::None => "",
+            Tail::LonePercent => "%",
+            Tail::NonHexEscape => "%G0",
+            Tail::InvalidUtf8 => "%FF",
+            Tail::TruncatedUtf8 => "%C3",
         }
     }
 }

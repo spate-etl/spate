@@ -8,7 +8,8 @@
 //! spaces and control bytes, and a key under the source's prefix. One decode
 //! arm takes raw bytes; the other builds a notification record from arbitrary
 //! fields, so every run reaches the record parser, and asserts that a record
-//! read names the version and count it carried. The round-trip arm asserts
+//! read names the version and count it carried, and the key as written when
+//! its `eventSource` is `ceph:s3`. The round-trip arm asserts
 //! that a re-enqueued unit's body is ASCII when its ETag is, and that a body
 //! the source reads names the key, the quoted ETag and the count it was
 //! written with, and no version.
@@ -34,6 +35,9 @@ struct Input {
 /// One notification record's fields, any of which may be absent.
 #[derive(Arbitrary, Debug)]
 struct Record {
+    /// Write `ceph:s3` as the record's `eventSource`, whose key is read as
+    /// written.
+    ceph: bool,
     key: String,
     size: Option<u64>,
     etag: Option<String>,
@@ -61,9 +65,11 @@ fuzz_target!(|input: Input| {
 
 /// Decode a notification built from `record`'s fields.
 fn record(record: &Record) {
+    let key = format!("{PREFIX}/{}", record.key);
     let body = notification_body(
         BUCKET,
-        &format!("{PREFIX}/{}", record.key),
+        record.ceph.then_some("ceph:s3"),
+        &key,
         record.size,
         record.etag.as_deref(),
         record.version.as_deref(),
@@ -76,6 +82,9 @@ fn record(record: &Record) {
             .as_deref()
             .filter(|v| !v.is_empty() && *v != "null");
         for part in &parts {
+            if record.ceph {
+                assert_eq!(part.key, key, "{record:?}");
+            }
             assert_eq!(part.version.as_deref(), named, "{record:?}");
             assert_eq!(part.re_enqueues, record.re_enqueues.unwrap_or(0));
         }

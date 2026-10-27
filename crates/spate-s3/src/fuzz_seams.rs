@@ -218,6 +218,7 @@ pub fn quoted(etag: &str) -> String {
 #[must_use]
 pub fn notification_body(
     bucket: &str,
+    event_source: Option<&str>,
     key: &str,
     size: Option<u64>,
     etag: Option<&str>,
@@ -240,6 +241,9 @@ pub fn notification_body(
     });
     if let Some(n) = re_enqueues {
         record["spateReEnqueues"] = n.into();
+    }
+    if let Some(source) = event_source {
+        record["eventSource"] = source.into();
     }
     serde_json::to_vec(&serde_json::json!({ "Records": [record] }))
         .expect("a JSON value always serialises")

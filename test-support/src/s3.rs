@@ -276,7 +276,7 @@ impl S3Store {
         self.container.is_running().map_err(|e| e.to_string())
     }
 
-    /// Creates `bucket` with a signed `PUT`. Stores refuse unsigned requests.
+    /// Creates `bucket` with a signed `PUT`. Stores refuse unsigned writes.
     ///
     /// # Errors
     ///

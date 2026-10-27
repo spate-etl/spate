@@ -3352,7 +3352,7 @@ fn an_unset_thread_count_starts_the_derived_number_of_drivers() {
 /// resolved, whether `pipeline.threads` sets it or the host derives it.
 #[test]
 fn the_source_is_opened_with_the_pipeline_thread_count() {
-    // 3 differs from `test_config`'s `io_threads` of 1, so a count taken
+    // 3 differs from the `io_threads` of 2 set below, so a count taken
     // from the wrong setting fails.
     let cores = std::thread::available_parallelism().map_or(2, usize::from);
     for (threads, expected) in [(Some(3), 3), (None, default_thread_count(cores, 2))] {

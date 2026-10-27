@@ -20,6 +20,7 @@ use crate::record::PartitionId;
 use crate::sink::SinkFailures;
 use crate::source::{DrainBarrier, LaneId, Source, SourceCtx, SourceEvent, SourceLane};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -156,7 +157,8 @@ pub(crate) fn run_controller<S: Source>(ctx: ControllerContext<S>) {
             .with_stop(stop_signal.clone())
             .with_meter(source_meter)
             .with_stage_metrics(Some(Arc::clone(&source_metrics)))
-            .with_partition_detail(per_partition_detail),
+            .with_partition_detail(per_partition_detail)
+            .with_threads(NonZeroUsize::new(control_txs.len())),
     ) {
         state.failure = Some(FatalError {
             component: "source".into(),

@@ -23,6 +23,7 @@ use crate::feed::{Feed, FeedOrigin};
 use crate::framing::FramingContract;
 use crate::metrics::{Meter, SourceMetrics};
 use crate::record::{PartitionId, RawPayload};
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -222,6 +223,11 @@ pub struct SourceCtx {
     /// `spate_source_lag_records`; consumer lag has no aggregate series to fall
     /// back to, so it always publishes per partition.
     pub per_partition_detail: bool,
+    /// The pipeline thread count the runtime resolved, the value
+    /// `spate_pipeline_threads` reports, for a source that sizes its read
+    /// parallelism from it. `None` only when the source is driven outside a
+    /// pipeline (tests, or a direct `open` call).
+    pub threads: Option<NonZeroUsize>,
     /// The run's stop. A feed-reading source reads it to stop receiving and to answer
     /// [`Source::reading_on_stop`].
     pub stop: StopSignal,
@@ -238,6 +244,7 @@ impl SourceCtx {
             meter: None,
             stage_metrics: None,
             per_partition_detail: false,
+            threads: None,
             stop: StopSignal::default(),
         }
     }
@@ -271,6 +278,13 @@ impl SourceCtx {
     #[must_use]
     pub fn with_partition_detail(mut self, enabled: bool) -> Self {
         self.per_partition_detail = enabled;
+        self
+    }
+
+    /// Attach the pipeline thread count. Called by the runtime.
+    #[must_use]
+    pub fn with_threads(mut self, threads: Option<NonZeroUsize>) -> Self {
+        self.threads = threads;
         self
     }
 }
@@ -403,6 +417,7 @@ pub trait Source: Send {
 mod tests {
     use super::{SourceCtx, StopSignal};
     use crate::checkpoint::Checkpointer;
+    use std::num::NonZeroUsize;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -436,5 +451,15 @@ mod tests {
         assert!(ctx.meter.is_none());
         let ctx = SourceCtx::new(cp.handle()).with_partition_detail(true);
         assert!(ctx.per_partition_detail);
+    }
+
+    /// Pins that a context carries no thread count unless one is attached,
+    /// and carries the one attached.
+    #[test]
+    fn source_ctx_threads_defaults_to_none_and_round_trips() {
+        let cp = Checkpointer::new();
+        assert_eq!(SourceCtx::new(cp.handle()).threads, None);
+        let ctx = SourceCtx::new(cp.handle()).with_threads(NonZeroUsize::new(4));
+        assert_eq!(ctx.threads, NonZeroUsize::new(4));
     }
 }

@@ -3348,6 +3348,34 @@ fn an_unset_thread_count_starts_the_derived_number_of_drivers() {
     }
 }
 
+/// Pins that the source is opened with the thread count the runtime
+/// resolved, whether `pipeline.threads` sets it or the host derives it.
+#[test]
+fn the_source_is_opened_with_the_pipeline_thread_count() {
+    // 3 differs from `test_config`'s `io_threads` of 1, so a count taken
+    // from the wrong setting fails.
+    let cores = std::thread::available_parallelism().map_or(2, usize::from);
+    for (threads, expected) in [(Some(3), 3), (None, default_thread_count(cores, 2))] {
+        let mut cfg = test_config(1);
+        cfg.pipeline.threads = threads;
+        cfg.pipeline.io_threads = 2;
+        let h = start_with_config(cfg, |shared, log| FakeChain {
+            shared,
+            log,
+            mode: ChainMode::Ok,
+            batches_seen: 0,
+        });
+        h.script.lock().unwrap().push_back(Script::Drained);
+        let report = h.join.join().unwrap().unwrap();
+        assert_eq!(report.state, ExitState::Completed);
+        assert_eq!(
+            h.shared.lock().unwrap().threads,
+            std::num::NonZeroUsize::new(expected),
+            "pipeline.threads: {threads:?}"
+        );
+    }
+}
+
 // ------------------------------------------------------ graceful stop --
 
 /// A config whose stop has `drain_timeout` to run in.

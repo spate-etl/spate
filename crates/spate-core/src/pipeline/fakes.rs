@@ -17,6 +17,7 @@ use crate::source::{
     DrainBarrier, LaneId, PayloadBatch, Source, SourceCtx, SourceEvent, SourceLane,
 };
 use std::collections::{BTreeMap, VecDeque};
+use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -32,6 +33,8 @@ pub(crate) struct SourceLog {
     /// the seam a source publishes consumer lag through; if the handles never
     /// arrive, the lag gauge renders a permanent zero on every pipeline.
     pub(crate) stage_metrics_attached: bool,
+    /// The thread count `open` received.
+    pub(crate) threads: Option<NonZeroUsize>,
     /// When set, `commit` and `flush_commits` fail retryably, modeling a
     /// checkpoint store outage; nothing is recorded as committed.
     pub(crate) fail_commits: bool,
@@ -158,6 +161,7 @@ impl Source for FakeSource {
             }
             log.opened = true;
             log.stage_metrics_attached = ctx.stage_metrics.is_some();
+            log.threads = ctx.threads;
             if let Some((clock, by)) = &log.advance_in_open {
                 clock.advance(*by);
             }

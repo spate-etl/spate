@@ -41,15 +41,17 @@
 //!   unit to the feed once the sink has acknowledged every record in it, and a
 //!   redelivered unit is read again from its start. This crate names no
 //!   concrete backend and has no feed feature.
-//! - **Bad objects fail their unit, not the pipeline.** An object deleted
-//!   after it was listed or announced, overwritten under its ETag pin,
-//!   corrupt, or unreadable past the retry budget fails its unit back to the
-//!   feed (surfaced in `spate_s3_source_objects_failed_total{reason}`), which
+//! - **Bad objects fail their unit, not the pipeline.** An object read as
+//!   `404` after it was listed or announced, a listed key that is not a valid
+//!   object path, and an object overwritten under its ETag pin, corrupt, or
+//!   unreadable past the retry budget each fail their unit back to the feed
+//!   (surfaced in `spate_s3_source_objects_failed_total{reason}`), which
 //!   dead-letters it at its cap. A bounded job with a dead-lettered unit ends
-//!   **failed**, never silently incomplete. A rejected object read and a
-//!   client-configuration error are immediately fatal. A notification unit's
-//!   object overwritten under its pin is re-enqueued at its current ETag
-//!   instead.
+//!   **failed**, never silently incomplete. A read the store rejects with
+//!   `401` or `403` and a client-configuration error are immediately fatal.
+//!   AWS S3 answers a read of a deleted object with `403` to a role without
+//!   `s3:ListBucket`. A notification unit's object overwritten under its pin
+//!   is re-enqueued at its current ETag instead.
 //! - **Records are framed, not decoded, here.** The source is
 //!   format-agnostic: it streams object bytes (after gzip/zstd decompression)
 //!   through a [`RecordFramer`](spate_core::framing::RecordFramer) *you supply*

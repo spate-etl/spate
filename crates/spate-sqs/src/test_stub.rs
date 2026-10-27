@@ -135,7 +135,7 @@ impl ScriptedCredentials {
     }
 
     /// The first load answers at once with keys already inside the SDK's
-    /// refresh buffer, so every later call loads again; each later load
+    /// refresh buffer, so the next call loads again; each later load
     /// takes `slow` on tokio time and answers with keys that never expire.
     pub(crate) fn slow_reloads(slow: Duration) -> Arc<Self> {
         Self::new(move |n| {

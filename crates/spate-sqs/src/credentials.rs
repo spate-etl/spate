@@ -488,4 +488,87 @@ mod tests {
             ]
         );
     }
+
+    /// Pins that a call taking a load's outcome late leaves a newer load in
+    /// the slot, so a call during that newer load joins it.
+    #[tokio::test(start_paused = true)]
+    async fn a_late_taker_leaves_a_newer_load_in_place() {
+        use std::future::{Future as _, poll_fn};
+        use std::task::Poll;
+        let inner = every_load_takes(Duration::from_secs(1));
+        let wrapper = SharedLoad::new(inner.provider());
+        let mut late = std::pin::pin!(wrapper.provide_credentials());
+        let mut pending = std::pin::pin!(wrapper.provide_credentials());
+        assert!(poll_fn(|cx| Poll::Ready(late.as_mut().poll(cx).is_pending())).await);
+        inner.until_finished(1).await;
+        wrapper.provide_credentials().await.unwrap();
+        assert!(poll_fn(|cx| Poll::Ready(pending.as_mut().poll(cx).is_pending())).await);
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(inner.started(), 2);
+        late.await.unwrap();
+        wrapper.provide_credentials().await.unwrap();
+        assert_eq!(inner.started(), 2, "a call during the second load joins it");
+    }
+
+    /// Pins the one warning a load stuck past [`LOAD_BOUND`] logs when it
+    /// answers from the provider's fallback.
+    #[test]
+    fn a_load_answered_from_the_fallback_warns_once() {
+        let lines = spate_test::capture_logs(tracing::Level::WARN, || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_time()
+                .start_paused(true)
+                .build()
+                .unwrap()
+                .block_on(async {
+                    let fallback = Credentials::new("AKIDFALLBACK", "x", None, None, "fallback");
+                    let inner = first_load_hangs(Some(fallback));
+                    let wrapper = SharedLoad::new(inner.provider());
+                    let got = wrapper.provide_credentials().await.unwrap();
+                    assert_eq!(got.access_key_id(), "AKIDFALLBACK");
+                });
+        });
+        assert_eq!(
+            lines,
+            [
+                " WARN spate_sqs::credentials: loading AWS credentials took longer than 60s; using \
+              the provider's fallback credentials"
+            ]
+        );
+    }
+
+    /// Pins that a load stuck past [`LOAD_BOUND`] with no fallback fails the
+    /// call awaiting it as timed out.
+    #[tokio::test(start_paused = true)]
+    async fn a_load_stuck_past_its_bound_fails_as_timed_out() {
+        let inner = first_load_hangs(None);
+        let wrapper = SharedLoad::new(inner.provider());
+        let e = wrapper.provide_credentials().await.unwrap_err();
+        assert_eq!(
+            chain(&e),
+            "an error occurred while loading credentials: credentials provider timed out after \
+             60 seconds"
+        );
+    }
+
+    /// Pins that a panic with a formatted message, as `unwrap` and `expect`
+    /// raise, reaches the call with its text.
+    #[tokio::test(start_paused = true)]
+    async fn a_formatted_panic_reads_as_its_text() {
+        let inner = ScriptedCredentials::new(|n| {
+            Box::pin(async move {
+                assert!(n > 0, "boom on load {n}");
+                Ok(keys(None))
+            })
+        });
+        let wrapper = SharedLoad::new(inner.provider());
+        let e = wrapper.provide_credentials().await.unwrap_err();
+        assert!(
+            chain(&e).contains("panicked: boom on load 0"),
+            "{}",
+            chain(&e)
+        );
+    }
 }

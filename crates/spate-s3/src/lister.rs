@@ -2738,6 +2738,7 @@ mod tests {
             ("data/a", vec![b'a'; 4]),
             ("data/b", b"row\n".repeat(50)),
             ("data/c", vec![b'c'; 4]),
+            ("data/d", vec![b'd'; 4]),
         ];
         let objects: Vec<(&str, &[u8])> = objects.iter().map(|(k, b)| (*k, b.as_slice())).collect();
         let mut lister = packing_lister(&objects, Arc::new(feed));
@@ -2745,10 +2746,11 @@ mod tests {
         let lines = spate_test::capture_logs(tracing::Level::INFO, || {
             rt.block_on(lister.run()).unwrap();
         });
+        // `[a]`, four ranges of `b`, and `[c, d]`.
         assert!(
-            lines
-                .iter()
-                .any(|l| l.contains("listed the prefix") && l.contains("objects=3")),
+            lines.iter().any(|l| l.contains("listed the prefix")
+                && l.contains("units=6")
+                && l.contains("objects=4")),
             "{lines:#?}"
         );
     }

@@ -55,9 +55,15 @@ pub(crate) const PACK_MEMBERS: usize = 16;
 /// 1,024 bytes.
 pub(crate) const PACK_KEY_MAX_BYTES: usize = 1024;
 
+/// The longest ETag the lister packs with other objects. A longer ETag is
+/// published alone, so a packed unit's body stays under
+/// [`PACKED_BODY_MAX_BYTES`].
+pub(crate) const PACK_ETAG_MAX_BYTES: usize = 256;
+
 /// The largest body a packed unit carries: [`PACK_MEMBERS`] members whose
-/// keys of [`PACK_KEY_MAX_BYTES`] each escape to two bytes a byte in JSON,
-/// with an ETag, a size and a time each, come to about 36 KB. It sits under
+/// keys of [`PACK_KEY_MAX_BYTES`] and ETags of [`PACK_ETAG_MAX_BYTES`] each
+/// escape to two bytes a byte in JSON, with a size and a time each, come to
+/// about 43 KB. It sits under
 /// librdkafka's default `message.max.bytes` of 1,000,000 less 36 bytes of
 /// record overhead, and under the SQS feed's 1 MiB message less its
 /// attribute name and type, with room for a 25-byte id and a dead-letter

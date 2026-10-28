@@ -17,8 +17,8 @@ use crate::fetch::{ObjectEntry, Overwrite};
 use crate::framer::Codec;
 use crate::listing::addressable;
 use crate::split::{
-    DescriptorObject, MAX_UNIT_MEMBERS, PACK_KEY_MAX_BYTES, PACK_MEMBERS, Packing, SplitDescriptor,
-    SplitError, SplitRange, split_id_for, split_id_for_range, tile,
+    DescriptorObject, MAX_UNIT_MEMBERS, PACK_ETAG_MAX_BYTES, PACK_KEY_MAX_BYTES, PACK_MEMBERS,
+    Packing, SplitDescriptor, SplitError, SplitRange, split_id_for, split_id_for_range, tile,
 };
 use object_store::path::Path;
 use serde::Deserialize;
@@ -201,6 +201,9 @@ pub(crate) struct Minted {
     pub(crate) unit: Unit,
     pub(crate) first_key: String,
     pub(crate) objects: usize,
+    /// The objects this unit is the first to name: its members, or one for
+    /// an object's first range and none for its later ones.
+    pub(crate) listed: usize,
 }
 
 /// Packs listed objects read whole into shared units, in listing order, with
@@ -241,13 +244,14 @@ impl Packer {
         entry: ObjectEntry,
     ) -> impl Iterator<Item = Result<Minted, SplitError>> + use<> {
         let shared = self.shares(&entry);
-        let before = if !shared || self.open_bytes + entry.size > self.packing.target_bytes {
-            self.close()
-        } else {
-            None
-        };
+        let before =
+            if !shared || self.open_bytes.saturating_add(entry.size) > self.packing.target_bytes {
+                self.close()
+            } else {
+                None
+            };
         let (alone, after) = if shared {
-            self.open_bytes += entry.size;
+            self.open_bytes = self.open_bytes.saturating_add(entry.size);
             self.open.push(entry);
             let full = if self.open.len() == PACK_MEMBERS {
                 self.close()
@@ -291,7 +295,10 @@ impl Packer {
         self.packing.delimiter_for(entry).is_none()
             && addressable(&entry.key)
             && entry.key.len() <= PACK_KEY_MAX_BYTES
-            && entry.etag.as_deref().is_none_or(sendable)
+            && entry
+                .etag
+                .as_deref()
+                .is_none_or(|etag| etag.len() <= PACK_ETAG_MAX_BYTES && sendable(etag))
     }
 }
 
@@ -301,11 +308,12 @@ pub(crate) fn alone_units(
     packing: Packing,
 ) -> impl Iterator<Item = Result<Minted, SplitError>> {
     let first_key = entry.key.clone();
-    units(entry, packing).map(move |unit| {
+    units(entry, packing).enumerate().map(move |(i, unit)| {
         unit.map(|unit| Minted {
             unit,
             first_key: first_key.clone(),
             objects: 1,
+            listed: usize::from(i == 0),
         })
     })
 }
@@ -328,6 +336,7 @@ fn packed_unit(members: &[ObjectEntry]) -> Result<Minted, SplitError> {
         unit: Unit::new(id, descriptor.encode()?),
         first_key: members[0].key.clone(),
         objects: members.len(),
+        listed: members.len(),
     })
 }
 
@@ -1704,6 +1713,67 @@ mod tests {
         assert_eq!(minted[0].objects, 3);
     }
 
+    /// Pins that an object whose listed size takes the open unit past the
+    /// split target closes that unit, for any size the listing reports.
+    #[test]
+    fn a_listed_size_near_u64_max_closes_the_open_unit() {
+        let mut big = entry_tagged("a/big", Some("\"b\""));
+        big.size = u64::MAX - 5;
+        let minted = pack(&[entry_tagged("a/x", Some("\"x\"")), big], packing());
+        assert_eq!(member_keys(&minted), [["a/x"], ["a/big"]]);
+    }
+
+    /// Pins that sixteen members at the key and ETag caps, every byte one
+    /// JSON escapes to two, encode under the packed body bound.
+    #[test]
+    fn a_unit_at_every_packing_cap_stays_under_the_body_bound() {
+        let etag = format!("\"{}\"", "\"".repeat(crate::split::PACK_ETAG_MAX_BYTES - 2));
+        let entries: Vec<ObjectEntry> = (0..PACK_MEMBERS)
+            .map(|i| {
+                let key = format!("a/{i:02}{}", "\"".repeat(PACK_KEY_MAX_BYTES - 4));
+                entry_tagged(&key, Some(&etag))
+            })
+            .collect();
+        let minted = pack(
+            &entries,
+            Packing {
+                target_bytes: MIB,
+                ..packing()
+            },
+        );
+        assert_eq!(minted.len(), 1, "one unit of {PACK_MEMBERS}");
+        let body = minted[0].unit.body.len() + minted[0].unit.id.len();
+        assert!(
+            body <= crate::split::PACKED_BODY_MAX_BYTES,
+            "{body} bytes with the id"
+        );
+    }
+
+    /// Pins that an object whose ETag is longer than the packing cap is a
+    /// unit of its own, so a packed body stays under its bound whatever
+    /// ETags the listing reports.
+    #[test]
+    fn a_packed_body_stays_under_its_bound_with_long_etags() {
+        let long = format!("\"{}\"", "e".repeat(70_000));
+        let entries: Vec<ObjectEntry> = (0..PACK_MEMBERS)
+            .map(|i| entry_tagged(&format!("a/{i:02}"), Some(&long)))
+            .chain([
+                entry_tagged("a/x", Some("\"x\"")),
+                entry_tagged("a/y", Some("\"y\"")),
+            ])
+            .collect();
+        let minted = pack(&entries, packing());
+        for m in &minted {
+            if m.objects > 1 {
+                assert!(m.unit.body.len() <= crate::split::PACKED_BODY_MAX_BYTES);
+            }
+        }
+        let sizes: Vec<usize> = minted.iter().map(|m| m.objects).collect();
+        let mut want = vec![1; PACK_MEMBERS];
+        want.push(2);
+        assert_eq!(sizes, want);
+    }
+
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(64))]
 
@@ -1769,7 +1839,7 @@ mod tests {
                 !cut(item)
                     && !unaddressable
                     && e.key.len() <= 1024
-                    && !e.etag.as_deref().is_some_and(|t| t.contains('\u{1}'))
+                    && !e.etag.as_deref().is_some_and(|t| t.contains('\u{1}') || t.len() > 256)
             };
             // The expected groups: (keys, whether the group is one cut object).
             let mut want: Vec<(Vec<String>, bool)> = Vec::new();

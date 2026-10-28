@@ -60,7 +60,7 @@ source:
 |---|---|---|---|
 | `url` | string | `required` | Bucket and prefix to backfill. Every object under the prefix is read. `file://` works for local runs; `memory://` fails at load, because it builds a fresh empty store per component and so cannot be shared. Part of the job fingerprint — byte-identical across every worker of a [bounded job](#bounded-jobs-and-the-job-location). |
 | `compression` | `auto` \| `none` \| `gzip` \| `zstd` | `auto` | Object codec. `auto` decides per object by extension (`.gz`/`.gzip`, `.zst`/`.zstd`, else uncompressed). Multi-member gzip and multi-frame zstd are read fully; truncated or corrupt streams [fail their unit](#object-errors-fail-the-unit). Part of the job fingerprint. |
-| `split_target_bytes` | bytes | `64MiB` | Objects read whole are packed into shared units of at most this many bytes and 16 objects, in listing order. A larger object is [cut into byte ranges](#large-objects-and-byte-ranges) of at most this size when it qualifies, one unit each, and any other is one unit. Floor `1MiB`. Part of the job fingerprint. |
+| `split_target_bytes` | bytes | `64MiB` | Objects read whole are packed into shared units of at most this many bytes and 16 objects, in listing order, except one whose key is longer than 1,024 bytes or whose ETag is longer than 256. A larger object is [cut into byte ranges](#large-objects-and-byte-ranges) of at most this size when it qualifies, one unit each, and any other is one unit. Floor `1MiB`. Part of the job fingerprint. |
 | `prefetch_bytes` | bytes | `8MiB` | Target window size for ETag-pinned ranged GETs; see [read-ahead memory sizing](#read-parallelism). Must be at least `chunk_bytes`; a smaller value fails at load. |
 | `chunk_bytes` | bytes | `512KiB` | Target size of one buffered chunk. Zero fails at load. |
 | `store` | string map | `{}` | Raw `object_store` options, applied on top of the environment. Bucket keys fail at load, and so do keys `object_store` does not recognize under an S3 URL — see [the `store` denylist](#the-store-passthrough-and-the-denylist). |
@@ -335,7 +335,8 @@ describes, and a unit handed back at a [graceful stop](#a-graceful-stop).
 The lister packs objects read whole into units of at most 16 objects and
 `split_target_bytes` bytes, in listing order, and publishes each larger object
 alone or cut into byte ranges. An object whose key the S3 client cannot
-address, or whose ETag `If-Match` cannot carry, is a unit of its own. The
+address, whose key is longer than 1,024 bytes, or whose ETag `If-Match` cannot
+carry or is longer than 256 bytes, is a unit of its own. The
 largest body a lister unit carries is 48 KiB, under the message limit of the
 [SQS feed](../../feeds/sqs/README.mdx) and the
 [Kafka feed](../../feeds/kafka/README.mdx). Each unit is an encoded
@@ -849,7 +850,9 @@ buys:
 - **Publishing again is idempotent in identity.** On a store that lists keys
   in order, where the lister keeps a checkpoint, a resumed lister packs the
   keys after its checkpoint as the earlier run did and republishes them under
-  the same ids. Over a store that does not, such as an S3 directory bucket or
+  the same ids, unless an empty object listed between that checkpoint and the
+  next checkpoint write moved where the earlier run closed its units. Over a
+  store that does not, such as an S3 directory bucket or
   `file://`, two listings can pack differently, and a unit already read is
   read again under a new id.
 - **An overwritten object can never splice.** Under an in-flight unit the pin
@@ -874,7 +877,8 @@ The source keeps no progress of its own. It acknowledges a unit to the feed once
 the sink has acknowledged every record in it, and a unit delivered again is read
 from its start. Everything in a unit not yet acknowledged replays after a crash
 or a stop; duplicates are possible, loss is not. A unit is as large as one
-byte range or up to 16 small objects, so a replay re-reads at most that.
+byte range, up to 16 small objects, or one object read whole, so a replay
+re-reads at most that.
 
 Limits: ~1.1 × 10¹² records per object or byte range (2⁴⁰ − 2); an object
 that overflows it fails its unit before any offset can be corrupted, as any

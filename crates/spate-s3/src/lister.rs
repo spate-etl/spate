@@ -260,6 +260,7 @@ impl Lister {
             unit,
             first_key,
             objects,
+            listed,
         } = minted.map_err(|e| SourceError::Client {
             class: ErrorClass::Fatal,
             reason: format!("minting a unit: {e}"),
@@ -277,7 +278,7 @@ impl Lister {
             confirmation,
         });
         published.units += 1;
-        published.objects += objects;
+        published.objects += listed;
         Ok(())
     }
 
@@ -2725,6 +2726,31 @@ mod tests {
         assert_eq!(members(&at), [vec!["data/a", "data/b"], vec!["data/c"]]);
         let over = packed_at_64(&[("data/a", vec![b'a'; 32]), ("data/b", vec![b'b'; 33])]);
         assert_eq!(members(&over), [["data/a"], ["data/b"]]);
+    }
+
+    /// Pins that the end-of-run log counts each listed object once, though
+    /// a cut object is published as several units.
+    #[test]
+    fn the_end_log_counts_a_cut_object_once() {
+        let rt = runtime();
+        let (feed, _script) = spate_test::scripted_feed();
+        let objects = [
+            ("data/a", vec![b'a'; 4]),
+            ("data/b", b"row\n".repeat(50)),
+            ("data/c", vec![b'c'; 4]),
+        ];
+        let objects: Vec<(&str, &[u8])> = objects.iter().map(|(k, b)| (*k, b.as_slice())).collect();
+        let mut lister = packing_lister(&objects, Arc::new(feed));
+        lister.packing.target_bytes = 64;
+        let lines = spate_test::capture_logs(tracing::Level::INFO, || {
+            rt.block_on(lister.run()).unwrap();
+        });
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("listed the prefix") && l.contains("objects=3")),
+            "{lines:#?}"
+        );
     }
 
     /// Pins that only small whole objects share a unit: a cut object's

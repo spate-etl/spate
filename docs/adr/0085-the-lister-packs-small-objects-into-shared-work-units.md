@@ -45,12 +45,13 @@ lister whatever the feed, and units whose members are consecutive listed keys,
 which the checkpoint rule needs.
 
 An object shares a unit when it is read whole, its key is addressable and at
-most 1,024 bytes, and its ETag is absent or can be sent in `If-Match`. The
-open unit closes before an object whose bytes would take it past
-`split_target_bytes`, once it holds 16 objects, before any other object, before
-each checkpoint write and at the end of the listing. Any other object is
-minted as ADR-0071 mints it: one whole unit, or byte ranges as ADR-0054 cuts
-them. An object whose key the S3 client cannot address is a unit of its own.
+most 1,024 bytes, and its ETag is absent or at most 256 bytes and can be sent
+in `If-Match`. The open unit closes before a listed object whose bytes would
+take it past `split_target_bytes`, once it holds 16 objects, before any other
+listed object, before each checkpoint write and at the end of the listing. Any
+other listed object is minted as ADR-0071 mints it: one whole unit, or byte
+ranges as ADR-0054 cuts them. An object whose key the S3 client cannot address
+is a unit of its own, published ahead of the open unit, which stays open.
 A unit of one object keeps the id ADR-0071 gives it, and a unit of several
 takes `split_id_for` over its members, so `PACKING_VERSION` stays 2: no feed
 id has shipped, and nothing on the feed path keys progress by id
@@ -67,8 +68,9 @@ listed keys' sizes, at the member cap, and at each checkpoint write, never at
 a page boundary or on the feed's timing. On a store that lists keys in order,
 where the lister keeps a checkpoint, a run resumed at a checkpoint starts at a
 write point and mints the ids the earlier run minted after it. The exception is
-a run of zero-byte or uncheckpointable keys before the checkpoint key, which
-counts toward the cadence and moves where later units close. Over a store that
+a zero-byte or uncheckpointable key between a checkpoint key and the next
+write point, which counts toward the cadence and moves where later units
+close. Over a store that
 does not list in order, an S3 directory bucket or `file://`, the lister keeps
 no checkpoint, and two listings can pack differently. Different ids cost a
 duplicate read, which INV-1 permits.
@@ -95,9 +97,9 @@ lanes than `units_held` allows.
 - Bad, because the overlap a unit buys is bounded by the lane's hand-off
   depth, which starts the next GET only once the current object's last chunks
   fit it ([#877](https://github.com/spate-etl/spate/issues/877)).
-- Neutral, because a unit's body is at most about 36 KB by the member and key
-  caps, under the SQS and Kafka feeds' message limits, so the lister adds no
-  refusal.
+- Neutral, because a unit's body is at most about 43 KB by the member, key and
+  ETag caps, under the SQS and Kafka feeds' message limits, so the lister adds
+  no refusal.
 
 ### Confirmation
 

@@ -360,8 +360,8 @@ waiting delivery's offset holds back its partition's commit point.
 range, and with them its read parallelism. The default is twice the pipeline
 thread count, the value `spate_pipeline_threads` reports. A source opened
 outside a pipeline, with no thread count, holds 96. At startup the source logs
-at `INFO` the units it holds and whether `units_held` or the thread count set
-the figure.
+at `INFO` the units it holds and their `origin`: `explicit` for `units_held`,
+`derived` for the thread count and `fallback` for 96.
 
 The default has two costs. Read-ahead memory follows the
 [overlap estimate](#read-parallelism): about

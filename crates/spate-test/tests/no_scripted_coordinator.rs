@@ -6,7 +6,7 @@ use std::path::Path;
 fn no_scripted_coordinator() {
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     assert!(
-        !src.join("coordination.rs").exists(),
+        !src.join("coordination.rs").try_exists().unwrap(),
         "src/coordination.rs exists"
     );
     let lib = std::fs::read_to_string(src.join("lib.rs")).expect("read lib.rs");

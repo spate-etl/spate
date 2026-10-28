@@ -604,6 +604,24 @@ fn a_new_fragment_carries_the_template() {
     assert_eq!(std::fs::read_to_string(&path).unwrap(), TEMPLATE);
 }
 
+/// A fragment path that cannot be stat'd is refused with the error, under
+/// `--explain` as without it. Regression for #1495.
+#[cfg(unix)]
+#[test]
+fn a_fragment_path_that_cannot_be_checked_is_refused() {
+    let dir = scratch("a_fragment_path_that_cannot_be_checked_is_refused");
+    std::fs::write(dir.join(FRAGMENTS), "a file where the directory goes").unwrap();
+    for explain in [true, false] {
+        let message = new(dir.dir(), explain, "fixed", "a-thing")
+            .unwrap_err()
+            .message;
+        assert!(
+            message.starts_with("changelog.d/a-thing.fixed.md: "),
+            "explain={explain}: {message}"
+        );
+    }
+}
+
 /// A type or a slug that is not there is a usage error naming the six.
 #[test]
 fn a_missing_type_or_slug_is_a_usage_error() {

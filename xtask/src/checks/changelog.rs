@@ -249,8 +249,9 @@ fn gate(root: &Path, fields: &Fields, in_actions: bool, github_event: &str) -> O
 }
 
 /// Scaffolds a fragment. Under `--explain` the answer is the path this would
-/// write, so a type the six do not name, a slug the filename rules reject and a
-/// path already taken are refused under the flag as they are without it.
+/// write, so a type the six do not name, a slug the filename rules reject, a
+/// path already taken and a path that cannot be checked are refused under the
+/// flag as they are without it.
 pub(crate) fn new(root: &Path, explain: bool, kind: &str, slug: &str) -> Outcome {
     if kind.is_empty() || slug.is_empty() {
         return Err(Error::msg(format!(
@@ -273,8 +274,10 @@ pub(crate) fn new(root: &Path, explain: bool, kind: &str, slug: &str) -> Outcome
     }
 
     let path = format!("{FRAGMENTS}/{slug}.{kind}.md");
-    if root.join(&path).exists() {
-        return Err(Error::msg(format!("{path} already exists")));
+    match root.join(&path).try_exists() {
+        Ok(true) => return Err(Error::msg(format!("{path} already exists"))),
+        Ok(false) => {}
+        Err(e) => return Err(Error::msg(format!("{path}: {e}"))),
     }
     if explain {
         println!("(writes {path})");

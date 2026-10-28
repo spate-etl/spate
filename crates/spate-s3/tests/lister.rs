@@ -750,8 +750,14 @@ impl Feed for Observing {
     fn publish(&self, unit: Unit) -> Confirmation {
         self.first.lock().unwrap().get_or_insert_with(|| {
             (
-                self.location.join("end").exists(),
-                self.location.join("fingerprint").exists(),
+                self.location
+                    .join("end")
+                    .try_exists()
+                    .expect("stat the end marker"),
+                self.location
+                    .join("fingerprint")
+                    .try_exists()
+                    .expect("stat the fingerprint"),
             )
         });
         self.inner.publish(unit)
@@ -832,7 +838,7 @@ fn a_first_lister_run_on_an_empty_file_location_starts() {
         fs::read_to_string(path.join("fingerprint")).unwrap(),
         fingerprint(&data, "Auto", "0a")
     );
-    assert!(!path.join("checkpoint").exists());
+    assert!(!path.join("checkpoint").try_exists().unwrap());
 }
 
 /// Pins that a lister over a store given to `with_store` under a `file://`
@@ -852,8 +858,8 @@ fn a_lister_over_an_injected_store_under_a_file_url_keeps_no_checkpoint() {
         .list_once(&section("scripted", Some(&location)), Arc::new(feed))
         .unwrap();
     assert_eq!(script.published().len(), 1);
-    assert!(path.join("fingerprint").exists());
-    assert!(!path.join("checkpoint").exists());
+    assert!(path.join("fingerprint").try_exists().unwrap());
+    assert!(!path.join("checkpoint").try_exists().unwrap());
 }
 
 /// Pins that a lister finding another fingerprint, differing in the

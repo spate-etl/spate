@@ -1845,7 +1845,7 @@ fn stage_writes_nothing_once_a_crate_is_published() {
         &dir,
     )
     .unwrap();
-    assert!(!dir.exists());
+    assert!(!dir.try_exists().unwrap());
 }
 
 /// A pending crate this run did not package cannot be staged.

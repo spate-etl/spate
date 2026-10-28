@@ -552,7 +552,7 @@ mod tests {
         let i = inv("spate-x", "d_alloc", "default", "");
         super::write(&scratch.join(&i.file("x86_64")), ONE).unwrap();
         assert_eq!(check_one(scratch.dir(), &i, "x86_64", ONE, false), Ok(()));
-        assert!(!scratch.join("target").exists());
+        assert!(!scratch.join("target").try_exists().unwrap());
     }
 
     #[test]
@@ -583,7 +583,7 @@ mod tests {
                 )
             );
         }
-        assert!(!scratch.join("crates").exists());
+        assert!(!scratch.join("crates").try_exists().unwrap());
     }
 
     #[test]
@@ -601,7 +601,7 @@ mod tests {
             std::fs::read_to_string(scratch.join(&i.file("aarch64"))).unwrap(),
             ONE
         );
-        assert!(!scratch.join("target").exists());
+        assert!(!scratch.join("target").try_exists().unwrap());
     }
 
     #[test]
@@ -751,7 +751,7 @@ mod tests {
                 && !e.contains("differs"),
             "{e}"
         );
-        assert!(!scratch.join("target").exists());
+        assert!(!scratch.join("target").try_exists().unwrap());
     }
 
     fn tree(files: &[&str]) -> Scratch {
@@ -832,7 +832,8 @@ mod tests {
         assert!(
             scratch
                 .join(&format!("target/alloc-snapshots/{rel}"))
-                .exists()
+                .try_exists()
+                .unwrap()
         );
     }
 

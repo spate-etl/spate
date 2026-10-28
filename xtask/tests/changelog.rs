@@ -405,7 +405,8 @@ fn explain_names_the_path_it_would_write() {
     assert!(
         !Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../changelog.d/a-thing.fixed.md")
-            .exists()
+            .try_exists()
+            .unwrap()
     );
     held(
         &["--explain", "tidy", "changelog"],

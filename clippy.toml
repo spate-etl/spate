@@ -9,6 +9,10 @@ disallowed-macros = [
     { path = "metrics::histogram", reason = "register through a `Meter` or the stage constructors in `spate-core`'s `metrics::labels`; the raw facade is the INV-9 opt-out and takes an `expect` naming why" },
 ]
 
+disallowed-methods = [
+    { path = "std::path::Path::exists", replacement = "std::path::Path::try_exists", reason = "returns false on a stat error, so a permission or I/O failure reads as missing" },
+]
+
 await-holding-invalid-types = [
     { path = "tracing::span::Entered", reason = "the task can resume on another thread under the wrong span; use `Instrument::instrument` or `Span::in_scope`" },
     { path = "tracing::span::EnteredSpan", reason = "the task can resume on another thread under the wrong span; use `Instrument::instrument` or `Span::in_scope`" },

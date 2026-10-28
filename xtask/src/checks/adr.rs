@@ -81,8 +81,9 @@ pub(crate) fn check(root: &Path, explain: bool) -> Outcome {
 }
 
 /// Scaffolds the next record from the template. Under `--explain` the answer
-/// is the path this would write, so a slug the filename rules reject and a path
-/// already taken are refused under the flag as they are without it.
+/// is the path this would write, so a slug the filename rules reject, a path
+/// already taken and a path that cannot be checked are refused under the flag
+/// as they are without it.
 pub(crate) fn new(root: &Path, explain: bool, slug: &str) -> Outcome {
     if slug.is_empty() {
         return Err(Error::msg(
@@ -109,8 +110,10 @@ pub(crate) fn new(root: &Path, explain: bool, slug: &str) -> Outcome {
         slug,
         &today(),
     );
-    if root.join(&path).exists() {
-        return Err(Error::msg(format!("{path} already exists")));
+    match root.join(&path).try_exists() {
+        Ok(true) => return Err(Error::msg(format!("{path} already exists"))),
+        Ok(false) => {}
+        Err(e) => return Err(Error::msg(format!("{path}: {e}"))),
     }
     if explain {
         println!("(writes {path} from {TEMPLATE})");
@@ -803,6 +806,26 @@ description: \"REPLACE-ME\"
         assert_eq!(scratch.read("docs/adr/10000-b.md"), "held");
     }
 
+    /// A record path that cannot be stat'd is refused with the error, under
+    /// `--explain` as without it. Regression for #1495.
+    #[cfg(unix)]
+    #[test]
+    fn the_scaffolder_reports_a_record_path_it_cannot_check() {
+        use std::os::unix::fs::symlink;
+
+        let scratch = Scratch::section("unstattable");
+        scratch.record("9999-a", "accepted");
+        let looped = scratch.0.join(format!("{DIR}/10000-b.md"));
+        symlink(&looped, &looped).unwrap();
+        for explain in [true, false] {
+            let message = failure(new(&scratch.0, explain, "b"));
+            assert!(
+                message.starts_with("docs/adr/10000-b.md: "),
+                "explain={explain}: {message}"
+            );
+        }
+    }
+
     #[test]
     fn the_scaffolder_reports_a_missing_template() {
         let scratch = Scratch::section("no-template");
@@ -834,7 +857,13 @@ description: \"REPLACE-ME\"
     fn explaining_a_scaffold_writes_nothing() {
         let scratch = Scratch::section("explain");
         new(&scratch.0, true, "a-thing").unwrap();
-        assert!(!scratch.0.join(format!("{DIR}/0001-a-thing.md")).exists());
+        assert!(
+            !scratch
+                .0
+                .join(format!("{DIR}/0001-a-thing.md"))
+                .try_exists()
+                .unwrap()
+        );
     }
 
     /// The explained answer is the path the scaffold would write, so a slug

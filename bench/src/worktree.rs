@@ -25,7 +25,7 @@
 //! [`Worktree::add`] says how to remove a leftover.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, ExitStatus};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Overrides where base-leg worktrees and target directories are cached.
@@ -190,8 +190,8 @@ impl Worktree {
     ///
     /// # Errors
     ///
-    /// When `path` is inside the repository, when it already exists, or when
-    /// git refuses.
+    /// When `path` is inside the repository, when it already exists or cannot
+    /// be checked, or when git refuses.
     pub fn add(repo: &Path, commit: &str, path: &Path) -> Result<Self, String> {
         let repo_abs = repo
             .canonicalize()
@@ -206,14 +206,18 @@ impl Worktree {
             .ok_or_else(|| format!("{} has no parent directory", path.display()))?;
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
-        if path.exists() {
-            return Err(format!(
-                "{} already exists. A previous run was killed without unwinding; \
-                 remove it with `git worktree remove --force {}` (or \
-                 `git worktree prune` if the directory is already gone).",
-                path.display(),
-                path.display()
-            ));
+        match path.try_exists() {
+            Ok(true) => {
+                return Err(format!(
+                    "{} already exists. A previous run was killed without unwinding; \
+                     remove it with `git worktree remove --force {}` (or \
+                     `git worktree prune` if the directory is already gone).",
+                    path.display(),
+                    path.display()
+                ));
+            }
+            Ok(false) => {}
+            Err(e) => return Err(format!("cannot check {}: {e}", path.display())),
         }
 
         let status = Command::new("git")
@@ -262,20 +266,30 @@ impl Drop for Worktree {
                 &self.path.display().to_string(),
             ])
             .status();
-        let left_behind = match removed {
-            Ok(status) if status.success() => false,
-            _ => self.path.exists(),
-        };
-        if left_behind {
+        if let Some(text) = removal_warning(&removed, &self.path) {
             use std::io::Write as _;
-            let _ = writeln!(
-                std::io::stderr(),
-                "spate-bench: could not remove the worktree at {}. \
-                 Remove it with `git worktree remove --force {}`.",
-                self.path.display(),
-                self.path.display()
-            );
+            let _ = writeln!(std::io::stderr(), "{text}");
         }
+    }
+}
+
+/// The warning to print after an attempt to remove the checkout at `path`, or
+/// `None` when nothing can remain there.
+fn removal_warning(removed: &std::io::Result<ExitStatus>, path: &Path) -> Option<String> {
+    if matches!(removed, Ok(status) if status.success()) {
+        return None;
+    }
+    let p = path.display();
+    match path.try_exists() {
+        Ok(false) => None,
+        Ok(true) => Some(format!(
+            "spate-bench: could not remove the worktree at {p}. \
+             Remove it with `git worktree remove --force {p}`."
+        )),
+        Err(e) => Some(format!(
+            "spate-bench: could not remove the worktree at {p}, and cannot check it: {e}. \
+             Remove it with `git worktree remove --force {p}`."
+        )),
     }
 }
 
@@ -301,8 +315,19 @@ pub fn describe(dir: &Path) -> (Option<String>, bool) {
 #[cfg(test)]
 mod tests {
     use std::path::Path;
+    use std::process::Command;
 
-    use super::{CACHE_ENV, Worktree, arm_target_dir, cache_root, describe};
+    use super::{CACHE_ENV, Worktree, arm_target_dir, cache_root, describe, removal_warning};
+
+    /// Runs git in `dir` and asserts it succeeded.
+    fn git(dir: &Path, args: &[&str]) {
+        let status = Command::new("git")
+            .current_dir(dir)
+            .args(args)
+            .status()
+            .expect("git runs");
+        assert!(status.success(), "git {args:?} failed with {status}");
+    }
 
     /// The property the leg is in the key for. Two arms asked for identically
     /// is a legitimate run, the A/A of the mode, and cargo keeps one
@@ -371,7 +396,7 @@ mod tests {
         assert!(err.contains("inside the repository"), "{err}");
         assert!(err.contains(CACHE_ENV), "{err}");
         assert!(
-            !inside.parent().expect("has a parent").exists(),
+            !inside.parent().expect("has a parent").try_exists().unwrap(),
             "the refusal created the directory it refused"
         );
     }
@@ -411,5 +436,95 @@ mod tests {
         // must say nothing rather than inherit the driver's own.
         let outside = tempfile::tempdir().expect("scratch directory");
         assert_eq!(describe(outside.path()), (None, false));
+    }
+
+    /// A checkout path that cannot be stat'd is refused with the error before
+    /// git runs. Regression for #1495.
+    #[cfg(unix)]
+    #[test]
+    fn a_checkout_path_that_cannot_be_checked_is_refused_before_git_runs() {
+        use std::os::unix::fs::symlink;
+
+        let repo = tempfile::tempdir().expect("scratch repository");
+        let cache = tempfile::tempdir().expect("scratch cache");
+        let looped = cache.path().join("wt");
+        symlink(&looped, &looped).expect("symlink");
+        let err = Worktree::add(repo.path(), "HEAD", &looped).expect_err("refused");
+        assert!(err.starts_with("cannot check "), "{err}");
+        assert!(err.contains(&looped.display().to_string()), "{err}");
+        assert!(!err.contains("git worktree add"), "{err}");
+        assert!(!err.contains("already exists"), "{err}");
+    }
+
+    /// A checkout path that exists is refused with the command that removes
+    /// the leftover.
+    #[test]
+    fn an_existing_checkout_path_is_refused_with_the_recovery_command() {
+        let repo = tempfile::tempdir().expect("scratch repository");
+        let cache = tempfile::tempdir().expect("scratch cache");
+        let taken = cache.path().join("wt");
+        std::fs::create_dir(&taken).expect("create the leftover");
+        let err = Worktree::add(repo.path(), "HEAD", &taken).expect_err("refused");
+        assert!(err.contains("already exists"), "{err}");
+        assert!(err.contains("git worktree remove --force"), "{err}");
+    }
+
+    /// A failed removal warns while the checkout exists or cannot be stat'd,
+    /// and a successful one or a vanished checkout says nothing. Regression
+    /// for #1495.
+    #[cfg(unix)]
+    #[test]
+    fn a_removal_warning_is_given_only_when_the_checkout_may_remain() {
+        use std::os::unix::fs::symlink;
+        use std::os::unix::process::ExitStatusExt as _;
+
+        let cache = tempfile::tempdir().expect("scratch cache");
+        let present = cache.path().join("present");
+        std::fs::create_dir(&present).expect("create the checkout");
+        let absent = cache.path().join("absent");
+        let looped = cache.path().join("looped");
+        symlink(&looped, &looped).expect("symlink");
+        let failed = || Err(std::io::Error::other("git missing"));
+
+        assert_eq!(
+            removal_warning(&Ok(std::process::ExitStatus::from_raw(0)), &present),
+            None
+        );
+        assert_eq!(removal_warning(&failed(), &absent), None);
+        let warning = removal_warning(&failed(), &present).expect("warns");
+        assert!(warning.contains("git worktree remove --force"), "{warning}");
+        assert!(!warning.contains("cannot check"), "{warning}");
+        let warning = removal_warning(&failed(), &looped).expect("warns");
+        assert!(warning.contains("cannot check"), "{warning}");
+        assert!(warning.contains("git worktree remove --force"), "{warning}");
+    }
+
+    /// Dropping a worktree removes its checkout.
+    #[test]
+    fn dropping_a_worktree_removes_its_checkout() {
+        let repo = tempfile::tempdir().expect("scratch repository");
+        git(repo.path(), &["init", "--quiet"]);
+        git(
+            repo.path(),
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "--allow-empty",
+                "--quiet",
+                "-m",
+                "x",
+            ],
+        );
+        let cache = tempfile::tempdir().expect("scratch cache");
+        let path = cache.path().join("wt");
+        let worktree = Worktree::add(repo.path(), "HEAD", &path).expect("added");
+        assert!(path.try_exists().unwrap(), "the checkout was not created");
+        drop(worktree);
+        assert!(!path.try_exists().unwrap(), "the checkout was left behind");
     }
 }

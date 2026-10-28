@@ -290,7 +290,7 @@ mod tests {
         std::fs::create_dir_all(&report).expect("report dir");
         std::fs::write(report.join("missed.txt"), "stale\n").expect("write");
         assert!(clear_report(&report).is_ok());
-        assert!(!report.exists());
+        assert!(!report.try_exists().unwrap());
         assert!(
             clear_report(&report).is_ok(),
             "a missing report is not an error"
@@ -311,7 +311,7 @@ mod tests {
         std::fs::create_dir_all(out.join("mutants.out")).expect("report dir");
         std::fs::write(out.join("mutants.out/missed.txt"), "stale\n").expect("write");
         prepare(&dir, "main", &out, &diff).expect("prepared");
-        assert!(!out.join("mutants.out").exists());
+        assert!(!out.join("mutants.out").try_exists().unwrap());
         let patch = std::fs::read_to_string(&diff).expect("patch");
         assert!(patch.contains("+committed-edit"), "{patch}");
 

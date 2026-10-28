@@ -126,7 +126,9 @@ fn a_unit_whose_worker_is_killed_mid_read_is_delivered_again() {
             .env(CHILD_DATA, &data)
             .env(CHILD_MARKER, &marker)
     });
-    wait_until(DEADLINE, "A holds the unit's write", || marker.exists());
+    wait_until(DEADLINE, "A holds the unit's write", || {
+        marker.try_exists().expect("stat the marker")
+    });
     let status = a.kill();
     let killed = Instant::now();
     #[cfg(unix)]
@@ -199,7 +201,7 @@ fn a_unit_that_kills_its_worker_at_each_read_reaches_the_dead_letter_topic() {
                 .env(CHILD_CAP, "2")
         });
         wait_until(SESSION * 5, &format!("child {read} holds the unit"), || {
-            marker.exists()
+            marker.try_exists().expect("stat the marker")
         });
         child.kill();
     }

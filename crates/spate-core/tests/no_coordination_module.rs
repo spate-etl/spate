@@ -9,9 +9,12 @@ fn src(rel: &str) -> std::path::PathBuf {
 
 #[test]
 fn no_coordination_module() {
-    assert!(!src("coordination").exists(), "src/coordination exists");
     assert!(
-        !src("coordination.rs").exists(),
+        !src("coordination").try_exists().unwrap(),
+        "src/coordination exists"
+    );
+    assert!(
+        !src("coordination.rs").try_exists().unwrap(),
         "src/coordination.rs exists"
     );
     let lib = std::fs::read_to_string(src("lib.rs")).expect("read lib.rs");

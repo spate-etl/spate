@@ -61,6 +61,15 @@ useful thing you can attach.
 The same applies to performance claims: numbers are re-measured on reference
 hardware under the published protocol before they are acted on.
 
+## Good first issues
+
+Don't use AI tools to fix an issue labelled `good first issue`. These issues are
+rarely urgent, and they are kept for a new contributor to learn the codebase by
+working one through. Handing the fix to a tool spends that opportunity, whether
+or not you are new here. Asking an assistant to explain the code around the
+issue is fine, as [Getting oriented](#getting-oriented) describes; the change
+itself should be yours.
+
 ## Agentic contributions
 
 A pull request written by an agent is held to the bar above: understood by the

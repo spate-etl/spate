@@ -73,7 +73,9 @@ the next milestone once; if it misses that one too, it returns to the backlog
 with a priority label.
 
 To find something to work on, `good first issue` marks issues scoped for a first
-contribution, and `priority: high` marks the backlog that matters most now.
+contribution, and `priority: high` marks the backlog that matters most now. A
+`good first issue` is fixed without AI tools writing the change;
+[`AI_POLICY.md`](AI_POLICY.md#good-first-issues) says why.
 
 ## Building and testing
 

@@ -9,6 +9,11 @@
 //! [`Meter`](super::Meter) lives here too (also `pub(crate)`), so
 //! connector- and user-owned metric families inherit the same labels.
 
+#![expect(
+    clippy::disallowed_macros,
+    reason = "the stage constructors are the sanctioned path to the facade"
+)]
+
 use super::names;
 use crate::error::ErrorClass;
 use crate::record::PartitionId;

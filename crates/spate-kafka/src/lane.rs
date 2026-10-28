@@ -94,7 +94,9 @@ impl KafkaLane {
 
 /// Erase a borrowed message's phantom lifetime so the lane can own it.
 ///
-/// SAFETY: `BorrowedMessage<'a>` is
+/// # Safety
+///
+/// `BorrowedMessage<'a>` is
 /// `{ ptr: NativePtr<RDKafkaMessage>, _event: Arc<NativeEvent>,
 /// _owner: PhantomData<&'a u8> }`. The `'a` parameter affects no layout and
 /// no drop behavior, so transmuting the lifetime is sound. Validity of

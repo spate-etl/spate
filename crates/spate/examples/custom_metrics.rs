@@ -26,6 +26,10 @@
 
 // Examples talk to their user on stdout/stderr by design.
 #![allow(clippy::print_stdout, clippy::print_stderr)]
+#![expect(
+    clippy::disallowed_macros,
+    reason = "demonstrates the raw facade alongside `Meter`"
+)]
 
 use spate::metrics::{DeserMetrics, Meter, MetricsSettings, install};
 use std::time::Duration;

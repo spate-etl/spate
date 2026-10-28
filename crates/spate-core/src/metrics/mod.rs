@@ -923,6 +923,10 @@ mod tests {
     /// Pins that every declared histogram renders with configured buckets,
     /// and that a second-scale family records into the second-scale grid.
     #[test]
+    #[expect(
+        clippy::disallowed_macros,
+        reason = "renders every declared name without a stage"
+    )]
     fn every_histogram_renders_buckets() {
         let rendered = render_local(|| {
             for name in names::HISTOGRAMS {

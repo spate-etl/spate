@@ -207,6 +207,7 @@ spate_wait_seconds_count{pipeline="p"} 2
     /// Histograms render as buckets, the way an installed exporter renders
     /// them.
     #[test]
+    #[expect(clippy::disallowed_macros, reason = "a series with no Spate labels")]
     fn render_metrics_uses_the_production_buckets() {
         let rendered = render_metrics(|| {
             metrics::histogram!("t_render_duration_seconds").record(0.2);

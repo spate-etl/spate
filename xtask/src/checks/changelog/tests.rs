@@ -611,13 +611,15 @@ fn a_new_fragment_carries_the_template() {
 fn a_fragment_path_that_cannot_be_checked_is_refused() {
     let dir = scratch("a_fragment_path_that_cannot_be_checked_is_refused");
     std::fs::write(dir.join(FRAGMENTS), "a file where the directory goes").unwrap();
+    let path = "changelog.d/a-thing.fixed.md";
+    let cause = dir.join(path).try_exists().unwrap_err();
     for explain in [true, false] {
-        let message = new(dir.dir(), explain, "fixed", "a-thing")
-            .unwrap_err()
-            .message;
-        assert!(
-            message.starts_with("changelog.d/a-thing.fixed.md: "),
-            "explain={explain}: {message}"
+        assert_eq!(
+            new(dir.dir(), explain, "fixed", "a-thing")
+                .unwrap_err()
+                .message,
+            format!("{path}: {cause}"),
+            "explain={explain}"
         );
     }
 }

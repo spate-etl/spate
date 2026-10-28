@@ -817,11 +817,12 @@ description: \"REPLACE-ME\"
         scratch.record("9999-a", "accepted");
         let looped = scratch.0.join(format!("{DIR}/10000-b.md"));
         symlink(&looped, &looped).unwrap();
+        let cause = looped.try_exists().unwrap_err();
         for explain in [true, false] {
-            let message = failure(new(&scratch.0, explain, "b"));
-            assert!(
-                message.starts_with("docs/adr/10000-b.md: "),
-                "explain={explain}: {message}"
+            assert_eq!(
+                failure(new(&scratch.0, explain, "b")),
+                format!("docs/adr/10000-b.md: {cause}"),
+                "explain={explain}"
             );
         }
     }

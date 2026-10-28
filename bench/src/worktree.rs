@@ -190,8 +190,9 @@ impl Worktree {
     ///
     /// # Errors
     ///
-    /// When `path` is inside the repository, when it already exists or cannot
-    /// be checked, or when git refuses.
+    /// When `repo` does not resolve; when `path` is inside the repository, has
+    /// no parent, or its parent cannot be created; when `path` already exists
+    /// or cannot be checked; or when git refuses.
     pub fn add(repo: &Path, commit: &str, path: &Path) -> Result<Self, String> {
         let repo_abs = repo
             .canonicalize()
@@ -449,11 +450,11 @@ mod tests {
         let cache = tempfile::tempdir().expect("scratch cache");
         let looped = cache.path().join("wt");
         symlink(&looped, &looped).expect("symlink");
-        let err = Worktree::add(repo.path(), "HEAD", &looped).expect_err("refused");
-        assert!(err.starts_with("cannot check "), "{err}");
-        assert!(err.contains(&looped.display().to_string()), "{err}");
-        assert!(!err.contains("git worktree add"), "{err}");
-        assert!(!err.contains("already exists"), "{err}");
+        let cause = looped.try_exists().unwrap_err();
+        assert_eq!(
+            Worktree::add(repo.path(), "HEAD", &looped).expect_err("refused"),
+            format!("cannot check {}: {cause}", looped.display())
+        );
     }
 
     /// A checkout path that exists is refused with the command that removes
@@ -469,9 +470,9 @@ mod tests {
         assert!(err.contains("git worktree remove --force"), "{err}");
     }
 
-    /// A failed removal warns while the checkout exists or cannot be stat'd,
-    /// and a successful one or a vanished checkout says nothing. Regression
-    /// for #1495.
+    /// A removal that failed or that git refused warns while the checkout
+    /// exists or cannot be stat'd, and a successful one or a vanished checkout
+    /// says nothing. Regression for #1495.
     #[cfg(unix)]
     #[test]
     fn a_removal_warning_is_given_only_when_the_checkout_may_remain() {
@@ -491,6 +492,9 @@ mod tests {
             None
         );
         assert_eq!(removal_warning(&failed(), &absent), None);
+        let refused = Ok(std::process::ExitStatus::from_raw(128 << 8));
+        let warning = removal_warning(&refused, &present).expect("warns");
+        assert!(warning.contains("git worktree remove --force"), "{warning}");
         let warning = removal_warning(&failed(), &present).expect("warns");
         assert!(warning.contains("git worktree remove --force"), "{warning}");
         assert!(!warning.contains("cannot check"), "{warning}");

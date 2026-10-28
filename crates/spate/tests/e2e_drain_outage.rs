@@ -2,7 +2,7 @@
 //!
 //! [`e2e_sink_outage`](e2e_sink_outage.rs) recovers the sink before stopping,
 //! so it never exercises the drain against a sink that is still down. That
-//! is the case the graceful-shutdown guide names ("a ClickHouse outage
+//! is the case the graceful-shutdown guide names ("a destination outage
 //! mid-shutdown, say").
 //!
 //! With ClickHouse paused, `write_batch` does not return: the container holds

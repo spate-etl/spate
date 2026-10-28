@@ -1150,6 +1150,51 @@ fn overwrite_yaml() -> String {
         .build()
 }
 
+/// Pins that a pipeline thread holding a finished S3 lane keeps reading the
+/// sibling lane on the same thread to its end.
+#[test]
+fn a_finished_lane_does_not_starve_a_reading_lane_on_its_thread() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    let (rows_a, rows_b) = (recs("a", 20), recs("b", 20));
+    stage(&data, "a.ndjson", &rows_a);
+    stage(&data, "b.ndjson", &rows_b);
+    let (feed, script) = scripted_feed();
+    for name in ["a.ndjson", "b.ndjson"] {
+        let (etag, size) = (etag_of(&data, name), size_of(&data, name));
+        script.deliver(pinned_notification(name, size, &etag, 0));
+    }
+    // One object finishes while the other's GET is held, so the thread holds
+    // a finished lane beside a lane still waiting on its bytes.
+    let store = ScriptedStore::new(dir.path());
+    store.hold_get(2);
+    let yaml = PipelineYaml::endpoint("s3-finished-sibling", "http://127.0.0.1:9")
+        .fed_by_code()
+        .threads(1)
+        .build();
+    let feed: Arc<dyn Feed> = Arc::new(feed);
+    let held_store = Arc::clone(&store);
+    let l = launch_customized(
+        &yaml,
+        test_options(),
+        |_| {},
+        move |source, _io| line_framer(source).with_store(held_store).with_feed(feed),
+    );
+    wait_until(DEADLINE, "the second GET is held", || store.holding());
+    wait_until(DEADLINE, "the first unit is acknowledged", || {
+        script.acknowledged().len() == 1
+    });
+    store.release();
+    wait_until(DEADLINE, "both units are acknowledged", || {
+        script.acknowledged().len() == 2
+    });
+    stop(&l);
+    let every: Vec<String> = rows_a.iter().chain(&rows_b).cloned().collect();
+    let mut got = sorted(captured_rows(&l.script));
+    got.dedup();
+    assert_eq!(got, sorted(every));
+}
+
 /// A notification in bucket `b` creating `data/<name>` at `size` bytes,
 /// pinned to `etag` sent without its quotes, as S3 sends it, after
 /// `re_enqueues` re-enqueues.

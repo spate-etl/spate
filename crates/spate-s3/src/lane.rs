@@ -14,7 +14,10 @@
 //!   records the terminal watermark.
 //! - **Blocking is bounded.** When idle the lane waits on the channel via
 //!   the I/O runtime with the poll timeout applied, so it never busy-spins
-//!   and never parks longer than the driver allows.
+//!   and never parks longer than the driver allows. The poll that decides
+//!   end-of-input returns at once, and from then on the lane reports
+//!   [`finished`](SourceLane::finished), so the pipeline thread stops
+//!   polling it.
 //! - **Poison never surfaces as a poll error.** A lane `poll` error is
 //!   terminal for the whole pipeline, so object-level failures (deleted,
 //!   overwritten, corrupt, or unreadable objects) are reported through the
@@ -433,6 +436,10 @@ impl SourceLane for S3Lane {
         self.partition
     }
 
+    fn finished(&self) -> bool {
+        self.tracker.terminal().is_some()
+    }
+
     fn poll(
         &mut self,
         max_records: usize,
@@ -551,7 +558,7 @@ impl SourceLane for S3Lane {
                     // poll's Ok(None) is the end-of-input decision (see
                     // module docs). Everything emitted was already handed
                     // out, so `watermark_candidate` is the terminal
-                    // watermark.
+                    // watermark. From here on the lane reports `finished`.
                     self.tracker.set_terminal(self.watermark_candidate);
                     // Completion is decided here, on a pipeline thread, and
                     // the control plane reads it between waits. The terminal
@@ -734,13 +741,16 @@ mod tests {
         send(&r, ChunkMsg::Chunk(bytes::Bytes::from_static(b"only\n")));
         send(&r, ChunkMsg::ObjectEnd);
         r.tx.take(); // close the channel: input exhausted
+        assert!(!r.lane.finished());
         let records = poll_batch(&mut r.lane, 512).unwrap();
         assert_eq!(records.len(), 1);
         assert!(
             r.tracker.terminal().is_none(),
             "no terminal while the final batch is being handed out"
         );
+        assert!(!r.lane.finished(), "finished while the final batch is out");
         assert!(poll_batch(&mut r.lane, 512).is_none());
+        assert!(r.lane.finished(), "not finished after the deciding poll");
         let expected = Position {
             ordinal: 0,
             record: 1,
@@ -766,6 +776,7 @@ mod tests {
         r.tx.take(); // nothing to read
         assert!(poll_batch(&mut r.lane, 512).is_none());
         assert_eq!(r.tracker.terminal(), Some(resume.encode().unwrap()));
+        assert!(r.lane.finished());
     }
 
     #[test]
@@ -839,11 +850,13 @@ mod tests {
         assert!(poll_batch(&mut r.lane, 512).is_none());
         let report = r.poison_rx.try_recv().expect("a poison report");
         assert!(report.reason.contains("short"), "{}", report.reason);
+        assert!(!r.lane.finished(), "a poisoned lane is not finished");
         // Quiescent thereafter: no error, no duplicate report, no
         // terminal watermark (the split did not finish).
         assert!(poll_batch(&mut r.lane, 512).is_none());
         assert!(r.poison_rx.try_recv().is_err(), "poison reports once");
         assert!(r.tracker.terminal().is_none());
+        assert!(!r.lane.finished());
     }
 
     #[test]
@@ -865,6 +878,7 @@ mod tests {
         assert!(poll_batch(&mut r.lane, 512).is_none());
         let report = r.poison_rx.try_recv().expect("a poison report");
         assert!(report.reason.contains("vanished"), "{}", report.reason);
+        assert!(!r.lane.finished(), "a poisoned lane is not finished");
     }
 
     /// Pins the feed lane's signal at end-of-input: none while records
@@ -883,12 +897,14 @@ mod tests {
         assert!(!park.park(Duration::ZERO), "signalled while records remain");
         assert!(poll_batch(&mut r.lane, 512).is_none());
         assert!(r.tracker.terminal().is_some());
+        assert!(r.lane.finished());
         assert!(park.park(Duration::ZERO), "no signal at end-of-input");
         assert!(poll_batch(&mut r.lane, 512).is_none());
         assert!(
             !park.park(Duration::ZERO),
             "signalled again after end-of-input"
         );
+        assert!(r.lane.finished(), "finished turned back after a re-poll");
     }
 
     /// Pins the feed lane's signal on poison: the poll that poisons the lane
@@ -926,6 +942,7 @@ mod tests {
         let again = r.lane.poll(512, Duration::from_millis(50)).unwrap_err();
         assert!(again.to_string().contains("access denied"), "sticky");
         assert!(r.poison_rx.try_recv().is_err(), "fatal is not poison");
+        assert!(!r.lane.finished(), "a failed lane is not finished");
     }
 
     #[test]
@@ -942,6 +959,7 @@ mod tests {
             r.tracker.terminal().is_none(),
             "a dead lane never terminates"
         );
+        assert!(!r.lane.finished());
     }
 
     #[test]
@@ -996,6 +1014,7 @@ mod tests {
         drop(r.tx.take());
         assert!(poll_batch(&mut r.lane, 512).is_none());
         assert_eq!(r.tracker.terminal(), Some(0));
+        assert!(r.lane.finished());
         let report = r.poison_rx.try_recv().expect("an overwrite report");
         assert_eq!(report.overwrite.expect("the overwrite").key, "p/a.ndjson");
         assert!(r.poison_rx.try_recv().is_err(), "one report");
@@ -1021,8 +1040,10 @@ mod tests {
             r.tracker.terminal().is_none(),
             "decided before the batch was pushed"
         );
+        assert!(!r.lane.finished());
         assert!(poll_batch(&mut r.lane, 512).is_none());
         assert_eq!(r.tracker.terminal(), Some(records[1].0 + 1));
+        assert!(r.lane.finished());
         assert!(poll_batch(&mut r.lane, 512).is_none());
         assert!(poll_batch(&mut r.lane, 512).is_none());
         let report = r.poison_rx.try_recv().expect("an overwrite report");
@@ -1042,8 +1063,41 @@ mod tests {
         send(&r, overwrite());
         drop(r.tx.take());
         assert_eq!(poll_batch(&mut r.lane, 2).expect("two records").len(), 2);
+        assert!(!r.lane.finished());
         assert_eq!(poll_batch(&mut r.lane, 2).expect("one record").len(), 1);
+        assert!(!r.lane.finished());
         assert!(poll_batch(&mut r.lane, 2).is_none());
         assert!(r.tracker.terminal().is_some());
+        assert!(r.lane.finished());
+    }
+
+    /// Pins that a lane draining its framer across batches after its channel
+    /// closed reports `finished` only on the `Ok(None)` after the last batch.
+    /// Regression for #1478.
+    #[test]
+    fn finished_waits_for_the_batch_that_empties_the_framer() {
+        let mut r = rig(None);
+        start(&r, 0, "p/a.ndjson");
+        send(
+            &r,
+            ChunkMsg::Chunk(bytes::Bytes::from_static(b"1\n2\n3\n4\n5\n")),
+        );
+        send(&r, ChunkMsg::ObjectEnd);
+        r.tx.take();
+        for expected in [2, 2, 1] {
+            assert_eq!(poll_batch(&mut r.lane, 2).map(|b| b.len()), Some(expected));
+            assert!(!r.lane.finished(), "finished with records still framed");
+        }
+        assert!(poll_batch(&mut r.lane, 2).is_none());
+        assert!(r.lane.finished());
+    }
+
+    /// Pins that an idle lane, whose channel is open with nothing on it, does
+    /// not report `finished`.
+    #[test]
+    fn an_idle_lane_is_not_finished() {
+        let mut r = rig(None);
+        assert!(r.lane.poll(512, Duration::ZERO).unwrap().is_none());
+        assert!(!r.lane.finished());
     }
 }

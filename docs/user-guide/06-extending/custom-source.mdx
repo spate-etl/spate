@@ -52,7 +52,12 @@ What the framework holds you to:
 - **Idle lanes block, never spin.** `Ok(None)` means nothing arrived, but
   reach it by waiting up to `timeout` (a blocking queue read, a condvar,
   worst case a sleep). A zero-timeout poll loop busy-spins a pipeline
-  thread at 100% for nothing.
+  thread at 100% for nothing. A lane that reaches the end of its input can
+  say so through `finished`. Once a poll has returned the `Ok(None)` that
+  ends its input, the lane may report `finished`, and that poll need not
+  wait out `timeout`: the pipeline thread stops polling the lane and waits
+  on its control channel instead. A lane that never reports `finished`
+  keeps the rule above.
 
 The batch type holds one poll's payloads and streams them out one at a time,
 all sharing the batch lifetime:

@@ -16,7 +16,7 @@ use crate::record::{PartitionId, RawPayload};
 use crate::source::{
     DrainBarrier, LaneId, PayloadBatch, Source, SourceCtx, SourceEvent, SourceLane,
 };
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -35,6 +35,14 @@ pub(crate) struct SourceLog {
     pub(crate) stage_metrics_attached: bool,
     /// The thread count `open` received.
     pub(crate) threads: Option<NonZeroUsize>,
+    /// Lanes that report `finished` from the empty poll after their last
+    /// batch, returning it without waiting, as a lane that has decided its
+    /// end of input does.
+    pub(crate) finishing: BTreeSet<LaneId>,
+    /// Every lane poll, with the timeout the driver passed.
+    pub(crate) lane_polls: Vec<(LaneId, Duration)>,
+    /// How many times the driver asked each lane whether it has finished.
+    pub(crate) finished_calls: BTreeMap<LaneId, usize>,
     /// When set, `commit` and `flush_commits` fail retryably, modeling a
     /// checkpoint store outage; nothing is recorded as committed.
     pub(crate) fail_commits: bool,
@@ -202,6 +210,7 @@ impl Source for FakeSource {
                         current: Vec::new(),
                         issuer: issuer.clone(),
                         log: Arc::clone(&self.shared),
+                        finished: false,
                     })
                     .collect();
                 Ok(SourceEvent::LanesAssigned(lanes))
@@ -217,6 +226,7 @@ impl Source for FakeSource {
                         current: Vec::new(),
                         issuer: issuer.clone(),
                         log: Arc::clone(&self.shared),
+                        finished: false,
                     })
                     .collect();
                 Ok(SourceEvent::LanesAdded(lanes))
@@ -358,6 +368,7 @@ pub(crate) struct FakeLane {
     current: Vec<(i64, Vec<u8>)>,
     issuer: AckIssuer,
     log: SharedLog,
+    finished: bool,
 }
 
 impl Drop for FakeLane {
@@ -387,6 +398,11 @@ impl SourceLane for FakeLane {
         _max_records: usize,
         timeout: Duration,
     ) -> Result<Option<FakeBatch<'_>>, SourceError> {
+        let finishing = {
+            let mut log = self.log.lock().unwrap();
+            log.lane_polls.push((self.id, timeout));
+            log.finishing.contains(&self.id)
+        };
         match self.batches.pop_front() {
             Some(batch) => {
                 self.current = batch;
@@ -399,11 +415,26 @@ impl SourceLane for FakeLane {
                     ack,
                 }))
             }
+            None if finishing => {
+                self.finished = true;
+                Ok(None)
+            }
             None => {
                 std::thread::sleep(timeout.min(Duration::from_millis(2)));
                 Ok(None)
             }
         }
+    }
+
+    fn finished(&self) -> bool {
+        *self
+            .log
+            .lock()
+            .unwrap()
+            .finished_calls
+            .entry(self.id)
+            .or_default() += 1;
+        self.finished
     }
 }
 

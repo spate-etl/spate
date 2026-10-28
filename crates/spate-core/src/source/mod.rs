@@ -67,11 +67,32 @@ pub trait SourceLane: Send {
     /// Poll up to `max_records` payloads, waiting at most `timeout`.
     /// `Ok(None)` means nothing arrived; the driver treats it as idle.
     /// Implementations must not busy-spin when idle; block up to `timeout`.
+    /// A lane that reports [`finished`](Self::finished) may return its
+    /// end-of-input `Ok(None)` without waiting out `timeout`, because the
+    /// pipeline thread stops polling it.
     fn poll(
         &mut self,
         max_records: usize,
         timeout: Duration,
     ) -> Result<Option<Self::Batch<'_>>, SourceError>;
+
+    /// Whether this lane has reached the end of its input and will not be
+    /// polled again.
+    ///
+    /// It may turn `true` only after a `poll` on this lane returned the
+    /// `Ok(None)` that decided its end-of-input, with no batch left to emit,
+    /// the rule [`SourceEvent::Drained`] states. A lane that reports `true`
+    /// while it still holds data has that data never read. Once `true`, it
+    /// stays `true` for the life of the lane.
+    ///
+    /// The pipeline thread reads it before every poll and does not poll a
+    /// lane that reports `true`; the lane still receives its stop, drop and
+    /// shutdown. It is read on every turn, so it must be a cheap read that
+    /// does no I/O and never blocks. The default `false` keeps the lane
+    /// polled.
+    fn finished(&self) -> bool {
+        false
+    }
 }
 
 /// Control-plane event returned by [`Source::poll_events`].
@@ -420,6 +441,7 @@ mod tests {
     use std::num::NonZeroUsize;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
 
     /// A default signal never reads set.
     #[test]
@@ -461,5 +483,48 @@ mod tests {
         assert_eq!(SourceCtx::new(cp.handle()).threads, None);
         let ctx = SourceCtx::new(cp.handle()).with_threads(NonZeroUsize::new(4));
         assert_eq!(ctx.threads, NonZeroUsize::new(4));
+    }
+
+    /// A lane on every provided default; its batches are never built.
+    struct DefaultLane;
+
+    /// The batch type `DefaultLane` names and never returns.
+    struct NoBatch;
+
+    impl<'a> super::PayloadBatch<'a> for NoBatch {
+        fn next_payload(&mut self) -> Option<crate::record::RawPayload<'a>> {
+            None
+        }
+        fn ack(&self) -> &crate::checkpoint::AckRef {
+            unreachable!("`DefaultLane` never returns a batch")
+        }
+    }
+
+    impl super::SourceLane for DefaultLane {
+        type Batch<'a> = NoBatch;
+        fn id(&self) -> super::LaneId {
+            super::LaneId(0)
+        }
+        fn partition(&self) -> crate::record::PartitionId {
+            crate::record::PartitionId(0)
+        }
+        fn poll(
+            &mut self,
+            _max_records: usize,
+            _timeout: Duration,
+        ) -> Result<Option<NoBatch>, crate::error::SourceError> {
+            Ok(None)
+        }
+    }
+
+    /// Pins that a lane which does not override `finished` reports that it
+    /// has not finished, before and after a poll that returns nothing.
+    #[test]
+    fn a_lane_is_unfinished_unless_it_says_so() {
+        use super::SourceLane;
+        let mut lane = DefaultLane;
+        assert!(!lane.finished());
+        assert!(lane.poll(1, Duration::ZERO).unwrap().is_none());
+        assert!(!lane.finished());
     }
 }

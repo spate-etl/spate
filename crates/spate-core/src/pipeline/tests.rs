@@ -4212,3 +4212,304 @@ fn a_sigterm_stops_the_run() {
     assert_eq!(report.state, ExitState::Completed);
     assert_eq!(report.final_watermarks, vec![(PartitionId(0), 10)]);
 }
+
+// ------------------------------------------------------- finished lanes --
+
+const FINISH_DEADLINE: Duration = Duration::from_secs(5);
+
+/// Options whose lane-poll and idle-flush waits outlast any test, so a
+/// parked thread turns only on the control messages a test sends.
+fn parked_options() -> RuntimeOptions {
+    RuntimeOptions {
+        poll_timeout: Duration::from_secs(3600),
+        idle_flush: Duration::from_secs(3600),
+        ..test_options()
+    }
+}
+
+/// One pipeline thread whose `finishing` lanes report `finished` from the
+/// empty poll after their last batch, with no commit tick inside the test.
+fn start_finishing(
+    options: RuntimeOptions,
+    max_pending_batches: Option<usize>,
+    finishing: &[u32],
+    mode: impl Fn() -> ChainMode + Send + 'static,
+) -> Harness {
+    let mut cfg = test_config(1);
+    cfg.checkpoint.interval = Duration::from_secs(60);
+    if let Some(limit) = max_pending_batches {
+        cfg.checkpoint.max_pending_batches = limit;
+    }
+    let finishing: Vec<LaneId> = finishing.iter().map(|&id| LaneId(id)).collect();
+    start_prepared(
+        cfg,
+        options,
+        move |log| log.finishing.extend(finishing),
+        |runtime, _| runtime,
+        move |shared, log| FakeChain {
+            shared,
+            log,
+            mode: mode(),
+            batches_seen: 0,
+        },
+    )
+}
+
+/// `count` batches of ten records each, from offset 0.
+fn tens(count: i64) -> Vec<Vec<(i64, Vec<u8>)>> {
+    let ranges: Vec<std::ops::Range<i64>> = (0..count).map(|i| i * 10..i * 10 + 10).collect();
+    batches(&ranges)
+}
+
+/// Assign one lane per `(id, batches)` pair, each on partition `id`, with
+/// `batches` batches of ten records.
+fn assign(h: &Harness, lanes: &[(u32, i64)]) {
+    let specs = lanes
+        .iter()
+        .map(|&(id, count)| LaneSpec {
+            id: LaneId(id),
+            partition: PartitionId(id),
+            batches: tens(count),
+        })
+        .collect();
+    h.script.lock().unwrap().push_back(Script::Assign(specs));
+}
+
+fn polls_of(h: &Harness, id: u32) -> usize {
+    let log = h.shared.lock().unwrap();
+    log.lane_polls
+        .iter()
+        .filter(|(l, _)| *l == LaneId(id))
+        .count()
+}
+
+fn finished_calls(h: &Harness) -> usize {
+    h.shared.lock().unwrap().finished_calls.values().sum()
+}
+
+fn flushes(h: &Harness) -> usize {
+    h.chain.flushes.load(Ordering::Relaxed)
+}
+
+/// Wake the parked thread `times` times with a `CommitReady` for partition
+/// 0, each answered by the `FlushNow` it sends, and return the flushes the
+/// wakes added.
+fn wake(h: &Harness, times: usize) -> usize {
+    let before = flushes(h);
+    for i in 1..=times {
+        h.script
+            .lock()
+            .unwrap()
+            .push_back(Script::CommitReady(vec![PartitionId(0)]));
+        wait_for("the thread serves the wake", FINISH_DEADLINE, || {
+            flushes(h) >= before + i
+        });
+    }
+    flushes(h) - before
+}
+
+fn shut_down(h: Harness) {
+    h.shutdown.trigger();
+    wait_for("the driver exits", FINISH_DEADLINE, || h.join.is_finished());
+    let report = h.join.join().unwrap().unwrap();
+    assert_eq!(report.state, ExitState::Completed);
+}
+
+/// Pins that a thread whose lanes have all finished stops polling them and
+/// parks on its control channel, serving each `FlushNow` from the park.
+/// Regression for #1478.
+#[test]
+fn a_thread_whose_lanes_are_all_finished_parks() {
+    let h = start_finishing(parked_options(), None, &[0, 1], || ChainMode::Ok);
+    assign(&h, &[(0, 1), (1, 1)]);
+    wait_for("both lanes finish", FINISH_DEADLINE, || {
+        polls_of(&h, 0) == 2 && polls_of(&h, 1) == 2
+    });
+    let calls = finished_calls(&h);
+    let wakes = wake(&h, 5);
+    let asked = finished_calls(&h) - calls;
+    assert!(wakes >= 5, "{wakes} wakes");
+    // Each wake turns the loop at least once and parks again within a pass.
+    assert!(
+        (wakes..=2 * wakes + 2).contains(&asked),
+        "{asked} reads over {wakes} wakes"
+    );
+    assert_eq!((polls_of(&h, 0), polls_of(&h, 1)), (2, 2));
+    shut_down(h);
+}
+
+/// Pins that a finished lane is not polled again while a sibling on its
+/// thread still produces, and that the sibling is never handed a blocking
+/// timeout while it has data.
+#[test]
+fn a_finished_lane_is_skipped_while_its_sibling_flows() {
+    let h = start_finishing(parked_options(), None, &[0], || ChainMode::Ok);
+    assign(&h, &[(0, 1), (1, 50)]);
+    wait_for("every batch is consumed", FINISH_DEADLINE, || {
+        h.chain.consumed.load(Ordering::Relaxed) == 510
+    });
+    assert_eq!(polls_of(&h, 0), 2);
+    let log = h.shared.lock().unwrap();
+    let flowing_polls: Vec<Duration> = log
+        .lane_polls
+        .iter()
+        .filter(|(l, _)| *l == LaneId(1))
+        .map(|(_, t)| *t)
+        .take(50)
+        .collect();
+    drop(log);
+    assert!(
+        flowing_polls.iter().all(Duration::is_zero),
+        "{flowing_polls:?}"
+    );
+    shut_down(h);
+}
+
+/// Pins that a finished lane does not stop an empty sibling's pass from
+/// reaching the blocking poll timeout.
+#[test]
+fn a_finished_lane_beside_an_empty_one_lets_the_pass_block() {
+    let h = start_finishing(test_options(), None, &[0], || ChainMode::Ok);
+    assign(&h, &[(0, 0), (1, 0)]);
+    wait_for("the empty lane is polled 20 times", FINISH_DEADLINE, || {
+        polls_of(&h, 1) >= 20
+    });
+    assert_eq!(polls_of(&h, 0), 1);
+    let log = h.shared.lock().unwrap();
+    let timeouts: Vec<Duration> = log
+        .lane_polls
+        .iter()
+        .filter(|(l, _)| *l == LaneId(1))
+        .skip(1)
+        .map(|(_, t)| *t)
+        .collect();
+    drop(log);
+    assert!(
+        timeouts.iter().all(|t| *t == test_options().poll_timeout),
+        "{timeouts:?}"
+    );
+    shut_down(h);
+}
+
+/// Pins that a thread whose lanes are each gated or finished parks, and that
+/// the gated lane flows again once its acknowledgments retire.
+#[test]
+fn a_finished_lane_beside_a_gated_one_parks() {
+    let held: Arc<Mutex<Vec<crate::checkpoint::AckRef>>> = Arc::new(Mutex::new(Vec::new()));
+    let release = Arc::new(AtomicBool::new(false));
+    let (held_c, release_c) = (Arc::clone(&held), Arc::clone(&release));
+    let h = start_finishing(parked_options(), Some(3), &[1], move || {
+        ChainMode::HoldAcks {
+            held: Arc::clone(&held_c),
+            release: Arc::clone(&release_c),
+        }
+    });
+    assign(&h, &[(0, 6), (1, 0)]);
+    wait_for(
+        "the gate closes and the empty lane finishes",
+        FINISH_DEADLINE,
+        || held.lock().unwrap().len() == 3 && polls_of(&h, 1) == 1,
+    );
+    let calls = finished_calls(&h);
+    let wakes = wake(&h, 5);
+    let asked = finished_calls(&h) - calls;
+    assert!(wakes >= 5, "{wakes} wakes");
+    // Each wake turns the loop at least once and parks again within a pass.
+    assert!(
+        (wakes..=2 * wakes + 2).contains(&asked),
+        "{asked} reads over {wakes} wakes"
+    );
+    assert_eq!(polls_of(&h, 1), 1);
+    release.store(true, Ordering::Relaxed);
+    held.lock().unwrap().clear();
+    wake(&h, 1);
+    wait_for("the gated lane drains", FINISH_DEADLINE, || {
+        h.chain.consumed.load(Ordering::Relaxed) == 60
+    });
+    shut_down(h);
+}
+
+/// Pins that a thread parked on its finished lanes still flushes its chain
+/// once its lull outlasts the idle flush, so the tail's acknowledgments
+/// resolve.
+#[test]
+fn a_finished_thread_still_flushes_its_tail_when_idle() {
+    let held: Arc<Mutex<Vec<crate::checkpoint::AckRef>>> = Arc::new(Mutex::new(Vec::new()));
+    let held_c = Arc::clone(&held);
+    let h = start_finishing(test_options(), None, &[0], move || {
+        ChainMode::HoldAcksUntilFlush {
+            held: Arc::clone(&held_c),
+        }
+    });
+    assign(&h, &[(0, 1)]);
+    wait_for("the tail is flushed", FINISH_DEADLINE, || {
+        polls_of(&h, 0) == 2 && held.lock().unwrap().is_empty() && flushes(&h) >= 1
+    });
+    assert_eq!(polls_of(&h, 0), 2);
+    shut_down(h);
+}
+
+/// Pins that a thread parked on a finished lane takes a lane handed to it.
+#[test]
+fn a_finished_thread_takes_a_new_lane() {
+    let h = start_finishing(parked_options(), None, &[0], || ChainMode::Ok);
+    assign(&h, &[(0, 1)]);
+    wait_for("the lane finishes", FINISH_DEADLINE, || {
+        polls_of(&h, 0) >= 2
+    });
+    h.script
+        .lock()
+        .unwrap()
+        .push_back(Script::Add(vec![LaneSpec {
+            id: LaneId(1),
+            partition: PartitionId(1),
+            batches: tens(1),
+        }]));
+    wait_for("the new lane is read", FINISH_DEADLINE, || {
+        h.chain.consumed.load(Ordering::Relaxed) == 20
+    });
+    shut_down(h);
+}
+
+/// Pins that a thread parked on a finished lane stops it on a revocation and
+/// arrives at the revocation's barrier.
+#[test]
+fn a_finished_thread_stops_a_revoked_lane() {
+    let h = start_finishing(parked_options(), None, &[0], || ChainMode::Ok);
+    assign(&h, &[(0, 1)]);
+    wait_for("the lane finishes", FINISH_DEADLINE, || {
+        polls_of(&h, 0) >= 2
+    });
+    h.script
+        .lock()
+        .unwrap()
+        .push_back(Script::Revoke(vec![LaneId(0)]));
+    wait_for("the revocation commits", FINISH_DEADLINE, || {
+        logged(&h, "revoke-delivered")
+            && h.shared.lock().unwrap().committed.get(&PartitionId(0)) == Some(&10)
+    });
+    shut_down(h);
+}
+
+/// Pins that a thread parked on a finished lane drops it when it retires.
+#[test]
+fn a_finished_thread_drops_a_retired_lane() {
+    let h = start_finishing(parked_options(), None, &[0], || ChainMode::Ok);
+    h.shared.lock().unwrap().log_lane_drops = true;
+    assign(&h, &[(0, 1)]);
+    wait_for("the lane finishes", FINISH_DEADLINE, || {
+        polls_of(&h, 0) >= 2
+    });
+    wake(&h, 1);
+    wait_for("partition 0 commits", FINISH_DEADLINE, || {
+        h.shared.lock().unwrap().committed.get(&PartitionId(0)) == Some(&10)
+    });
+    h.script
+        .lock()
+        .unwrap()
+        .push_back(Script::Retire(vec![LaneId(0)]));
+    wait_for("the lane is dropped", FINISH_DEADLINE, || {
+        logged(&h, "lane-dropped")
+    });
+    shut_down(h);
+}

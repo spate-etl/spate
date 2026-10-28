@@ -191,6 +191,11 @@ A test that branches on `cfg!(feature = …)` runs its feature-on arm under
 `cargo xtask hack`, which runs the suite on default features. The feature-off
 arm of a default feature, or of one a dev-dependency enables, runs in neither.
 
+A test's doc says what the test pins. Add `Regression for #N.` when issue #N
+reports a defect in the code the test exercises and the test fails without its
+fix. A change that fixes the test itself, such as a flaky setup, adds no such
+line.
+
 ## Fuzzing
 
 `fuzz/` is a [cargo-fuzz](https://rust-fuzz.github.io/book/cargo-fuzz.html)

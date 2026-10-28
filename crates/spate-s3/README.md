@@ -7,7 +7,8 @@ you care to run.
 
 The pipeline's `feed:` section names the feed the source reads, and a pipeline
 with none fails to start. The source reads work units from the feed, each
-naming one object or one byte range of one object, and storage notifications,
+naming one object, one byte range of one object, or several objects read whole
+in turn on one lane, and storage notifications,
 one part per non-empty created object. It reads a large object in byte ranges.
 It acknowledges each finished unit to the feed, and every read is pinned to the
 object's ETag, so an object rewritten under a running job is detected rather

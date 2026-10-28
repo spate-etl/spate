@@ -42,9 +42,9 @@ pub(crate) enum Origin {
     },
 }
 
-/// One part of a unit: the object, whole or in one byte range.
+/// One part of a unit: its objects read whole, or one byte range of one object.
 pub(crate) struct Part {
-    /// The one object the part reads, shared by every part of the object.
+    /// The objects the part reads, shared by every part of the unit.
     pub(crate) object: Arc<Vec<ObjectEntry>>,
     /// The byte range read, or `None` for the whole object.
     pub(crate) range: Option<SplitRange>,
@@ -52,10 +52,10 @@ pub(crate) struct Part {
     pub(crate) origin: Origin,
 }
 
-/// The parts of one object, yielded lazily so an object cut into many
+/// The parts of a unit's objects, yielded lazily so an object cut into many
 /// ranges holds one range at a time.
 pub(crate) struct Cursor {
-    /// The one object every part clones.
+    /// The objects every part clones.
     pub(crate) object: Arc<Vec<ObjectEntry>>,
     /// The ranges still to yield, or `None` when the object is read whole.
     ranges: Option<Peekable<Box<dyn Iterator<Item = SplitRange> + Send>>>,
@@ -94,7 +94,8 @@ impl Cursor {
         }
     }
 
-    /// The key of the one object the cursor reads.
+    /// The key of the cursor's first object, its only one unless a
+    /// descriptor names several.
     pub(crate) fn key(&self) -> &str {
         &self.object[0].key
     }

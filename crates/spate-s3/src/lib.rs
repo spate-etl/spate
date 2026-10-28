@@ -9,7 +9,8 @@
 //! A pipeline with no `feed:` section fails to start.
 //!
 //! The source reads work units from the feed the section names, each unit
-//! naming one object or one byte range of one object, and storage
+//! naming one object, one byte range of one object, or several objects read
+//! whole in turn on one lane, and storage
 //! notifications, one part per non-empty created object. On a durable feed it
 //! lists nothing itself: a bounded job's units come from a separate lister run,
 //! [`S3Source::list_once`], once per job, and a continuous job's from storage

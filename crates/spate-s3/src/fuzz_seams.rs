@@ -260,3 +260,32 @@ pub fn notification_body(
 pub fn addressable(key: &str) -> bool {
     crate::listing::addressable(key)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::split::{DescriptorObject, SplitDescriptor};
+
+    /// Pins that every member of a descriptor naming several reaches the
+    /// fuzz targets as its own part, in order.
+    #[test]
+    fn decode_unit_yields_every_member_of_a_descriptor() {
+        let member = |key: &str, etag: &str| DescriptorObject {
+            key: key.into(),
+            size: 10,
+            etag: Some(etag.into()),
+            last_modified_ms: 1,
+        };
+        let body = SplitDescriptor::new(vec![
+            member("data/a.ndjson", "\"a\""),
+            member("data/b.ndjson", "\"b\""),
+        ])
+        .encode()
+        .unwrap();
+        let DecodedUnit::Read(parts) = decode_unit(&body, "bucket", "data") else {
+            panic!("the unit is read");
+        };
+        let keys: Vec<&str> = parts.iter().map(|p| p.key.as_str()).collect();
+        assert_eq!(keys, ["data/a.ndjson", "data/b.ndjson"]);
+    }
+}

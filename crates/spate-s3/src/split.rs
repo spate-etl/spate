@@ -1,6 +1,7 @@
 //! Unit descriptors and deterministic unit identity.
 //!
-//! A unit of work is one object or one byte range of one object. The
+//! A unit of work is one object, one byte range of one object, or several
+//! objects read whole in turn. The
 //! [`SplitDescriptor`] carries the unit's member objects (keys, sizes, ETags)
 //! and its range, if it has one, verbatim to whichever worker receives the
 //! unit, so workers never list.
@@ -139,10 +140,13 @@ impl SplitRange {
 /// with [`split_id_for`] or [`split_id_for_range`] respectively, which
 /// together are the whole cross-process contract. Fields are freely readable.
 ///
-/// The source reads a descriptor of one member whole, or in byte ranges when
-/// the member qualifies for cutting, and a descriptor of two or more members
-/// whole, member by member in order, on one lane. It fails back a descriptor
-/// naming no member or more than [`MAX_UNIT_MEMBERS`].
+/// The source reads a descriptor of one member whole, in byte ranges when the
+/// member qualifies for cutting, or as the byte range the descriptor names. It
+/// reads a descriptor of two or more members whole, member by member in order,
+/// on one lane, and a member named twice is read once per mention. It fails
+/// back a descriptor that names no member or more than [`MAX_UNIT_MEMBERS`],
+/// carries an ETag `If-Match` cannot send, or names a byte range cut on a
+/// delimiter other than the framer's or of an object the source decompresses.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SplitDescriptor {
     /// Encoding version; always [`DESCRIPTOR_VERSION`] at write. Private to

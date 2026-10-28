@@ -6,10 +6,11 @@
 //! runtime keep running while lanes are back-pressured.
 //!
 //! Each ETag-pinned object is read as a sequence of **bounded ranged GETs,
-//! each drained fully into memory before any chunk is forwarded**. The
-//! connection is released between windows, so a back-pressured lane parks on
-//! buffered bytes, never an idle S3 body that the client's request timeout
-//! (or an intermediary) would reset mid-stream. See [`stream_object`].
+//! each drained fully into memory before any of its chunks is forwarded**.
+//! The next window's GET runs while the current window is handed on. Each
+//! body is drained as it arrives, so a back-pressured lane parks on buffered
+//! bytes, never an idle S3 body that the client's request timeout (or an
+//! intermediary) would reset mid-stream. See [`stream_object`].
 //!
 //! # Determinism
 //!
@@ -43,9 +44,12 @@ use crate::trim::RangeTrim;
 use crate::unit::{Origin, quoted};
 use bytes::Bytes;
 use futures_util::StreamExt as _;
+use futures_util::future::{Either, select};
 use object_store::path::Path;
 use object_store::{GetOptions, GetRange, ObjectStore, ObjectStoreExt as _};
 use spate_core::error::{ErrorClass, SourceError};
+use std::future::Future;
+use std::pin::{Pin, pin};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -162,8 +166,9 @@ pub(crate) struct FetcherParams {
     /// Upper bound on a single [`ChunkMsg::Chunk`].
     pub(crate) chunk_bytes: usize,
     /// Target size of a bounded ranged GET (`prefetch_bytes`); byte-range
-    /// boundary windows can add `chunk_bytes`. Each GET is fully buffered and
-    /// its connection released before a backpressured handoff.
+    /// boundary windows can add `chunk_bytes`. Each GET is fully buffered
+    /// before its chunks are handed on, and the next window's GET runs while
+    /// they are.
     pub(crate) range_bytes: usize,
     pub(crate) tx: mpsc::Sender<ChunkMsg>,
     /// Backpressure pause (set by `Source::pause`): checked between sends.
@@ -207,6 +212,7 @@ pub(crate) async fn run_fetcher(params: FetcherParams) {
         bytes_read,
         origin,
     } = params;
+    let mut ahead = ReadAhead::default();
 
     for (ordinal, entry) in slice.iter().enumerate().skip(start_ordinal as usize) {
         // A unit holds at most `MAX_UNIT_MEMBERS` members, so ordinals always
@@ -220,19 +226,42 @@ pub(crate) async fn run_fetcher(params: FetcherParams) {
         } else {
             entry.etag.clone()
         };
-        if pause_gate(&pause, &tx).await.is_err() {
-            return;
-        }
-        let started = tx
-            .send(ChunkMsg::ObjectStart {
-                ordinal,
-                key: entry.key.clone(),
-                last_modified_ms: entry.last_modified_ms,
-            })
-            .await;
-        if started.is_err() {
+        let start = ChunkMsg::ObjectStart {
+            ordinal,
+            key: entry.key.clone(),
+            last_modified_ms: entry.last_modified_ms,
+        };
+        if !ahead.alongside(gated_send(&pause, &tx, start)).await {
             return; // lane dropped: shutdown
         }
+        // The next member's first window is read while this member is handed
+        // on. A byte-range unit has one member.
+        let next = match range {
+            Some(_) => None,
+            None => slice
+                .iter()
+                .skip(ordinal as usize + 1)
+                .find(|later| later.size > 0)
+                .and_then(|later| {
+                    // A later member is never the resume object, so its own
+                    // listed ETag pins it. One with no ETag takes the
+                    // streaming path, whose body must not open early.
+                    let etag = later.etag.clone()?;
+                    let path = object_path(&split, later).ok()?;
+                    Some(WindowRead {
+                        split: Arc::clone(&split),
+                        store: Arc::clone(&store),
+                        path,
+                        entry: later.clone(),
+                        etag,
+                        start: 0,
+                        end: (range_bytes.max(1) as u64).min(later.size),
+                        retry_base,
+                        retries: retries.clone(),
+                        origin: origin.clone(),
+                    })
+                }),
+        };
         match stream_object(
             &split,
             &store,
@@ -247,6 +276,8 @@ pub(crate) async fn run_fetcher(params: FetcherParams) {
             retries.as_ref(),
             bytes_read.as_ref(),
             &origin,
+            &mut ahead,
+            next,
         )
         .await
         {
@@ -257,7 +288,7 @@ pub(crate) async fn run_fetcher(params: FetcherParams) {
                 return;
             }
         }
-        if tx.send(ChunkMsg::ObjectEnd).await.is_err() {
+        if ahead.alongside(tx.send(ChunkMsg::ObjectEnd)).await.is_err() {
             return;
         }
     }
@@ -277,18 +308,153 @@ async fn pause_gate(pause: &AtomicBool, tx: &mpsc::Sender<ChunkMsg>) -> Result<(
     Ok(())
 }
 
+/// Wait out a pause, then send `msg`. `false` when the lane is gone.
+async fn gated_send(pause: &AtomicBool, tx: &mpsc::Sender<ChunkMsg>, msg: ChunkMsg) -> bool {
+    pause_gate(pause, tx).await.is_ok() && tx.send(msg).await.is_ok()
+}
+
+/// One window's bytes, or the failure that ended its read.
+type Window = Result<Bytes, SplitFailure>;
+
+/// One bounded ranged GET of an ETag-pinned object.
+struct WindowRead {
+    split: LaneLabel,
+    store: Arc<dyn ObjectStore>,
+    path: Path,
+    entry: ObjectEntry,
+    etag: String,
+    start: u64,
+    end: u64,
+    retry_base: Duration,
+    retries: Option<spate_core::metrics::Counter>,
+    origin: Origin,
+}
+
+impl WindowRead {
+    /// Read the window into memory, retrying a transient failure on a budget
+    /// of its own.
+    async fn fetch(self) -> Window {
+        let mut attempt: u32 = 0;
+        loop {
+            let options = GetOptions {
+                if_match: Some(self.etag.clone()),
+                range: Some(GetRange::Bounded(self.start..self.end)),
+                version: version_of(&self.origin),
+                ..Default::default()
+            };
+            // The body is drained before the window is handed on, so the
+            // connection is released and a back-pressured lane never leaves
+            // an idle S3 body open.
+            let fetched = match self.store.get_opts(&self.path, options).await {
+                Ok(result) => result.bytes().await,
+                Err(e) => Err(e),
+            };
+            match fetched {
+                // A conforming store never returns an empty bounded range;
+                // guard anyway so a misbehaving one poisons the object rather
+                // than spinning.
+                Ok(bytes) if bytes.is_empty() => {
+                    return Err(SplitFailure::Poison(
+                        PoisonKind::Undecodable,
+                        format!(
+                            "split {}: ranged read of \"{}\" at byte {} returned no bytes",
+                            self.split, self.entry.key, self.start
+                        ),
+                    ));
+                }
+                Ok(bytes) => return Ok(bytes),
+                Err(e) if crate::error::is_overwrite(&e, &self.origin) => {
+                    return Err(head_after_overwrite(
+                        &self.split,
+                        &self.store,
+                        &self.path,
+                        &self.entry,
+                        &self.etag,
+                        self.start,
+                        self.retry_base,
+                        self.retries.as_ref(),
+                    )
+                    .await);
+                }
+                Err(e) => {
+                    retry_or_fail(
+                        &self.split,
+                        &self.entry,
+                        &e,
+                        self.start,
+                        &mut attempt,
+                        self.retry_base,
+                        self.retries.as_ref(),
+                    )
+                    .await?;
+                }
+            }
+        }
+    }
+}
+
+/// The one window a fetcher reads ahead: the next window of the object it is
+/// handing on, or the first window of the unit's next member.
+///
+/// The read is a future of the fetcher's own task, polled only inside
+/// [`alongside`](Self::alongside) and [`take`](Self::take). Dropping the
+/// fetcher cancels it.
+#[derive(Default)]
+struct ReadAhead(Option<Ahead>);
+
+enum Ahead {
+    Reading(Pin<Box<dyn Future<Output = Window> + Send>>),
+    Read(Window),
+}
+
+impl ReadAhead {
+    /// Start reading `read`. At most one window is ahead at a time.
+    fn start(&mut self, read: WindowRead) {
+        debug_assert!(self.0.is_none(), "a second window read ahead");
+        self.0 = Some(Ahead::Reading(Box::pin(read.fetch())));
+    }
+
+    /// Run `work` to completion while the window ahead keeps reading.
+    async fn alongside<T>(&mut self, work: impl Future<Output = T>) -> T {
+        let work = pin!(work);
+        let Some(Ahead::Reading(reading)) = &mut self.0 else {
+            return work.await;
+        };
+        match select(work, reading.as_mut()).await {
+            Either::Left((out, _)) => out,
+            Either::Right((window, work)) => {
+                self.0 = Some(Ahead::Read(window));
+                work.await
+            }
+        }
+    }
+
+    /// The window read ahead, awaited to the end of its read, or `None` when
+    /// none was started.
+    async fn take(&mut self) -> Option<Window> {
+        Some(match self.0.take()? {
+            Ahead::Reading(reading) => reading.await,
+            Ahead::Read(window) => window,
+        })
+    }
+}
+
 /// Stream one object's bytes as bounded [`ChunkMsg::Chunk`]s. `Ok(true)` =
 /// complete, `Ok(false)` = receiver dropped (shutdown), `Err` = terminal
 /// failure.
 ///
 /// When the object's content is pinned by an ETag (S3 always supplies one, as
 /// does `object_store`'s `LocalFileSystem`) the read is a sequence of **bounded
-/// ranged GETs, each drained fully into memory before any chunk is forwarded**
-/// ([`stream_object_ranged`]), so a lane parked on backpressure only holds
-/// buffered bytes, never an idle GET body that S3 (or an intermediary)
-/// could reset or time out mid-stream. Without an ETag a resumed ranged read
-/// could splice two object versions, so such stores keep a single continuous
-/// stream ([`stream_object_streaming`]).
+/// ranged GETs, each drained fully into memory before any of its chunks is
+/// forwarded** ([`stream_object_ranged`]), so a lane parked on backpressure
+/// only holds buffered bytes, never an idle GET body that S3 (or an
+/// intermediary) could reset or time out mid-stream. Without an ETag a resumed
+/// ranged read could splice two object versions, so such stores keep a single
+/// continuous stream ([`stream_object_streaming`]).
+///
+/// `ahead` holds this object's first window when it was read ahead, and `next`
+/// is the next member's first window, read while this object's last window is
+/// handed on.
 #[expect(
     clippy::too_many_arguments,
     reason = "internal seam between run_fetcher and the read loops"
@@ -307,6 +473,8 @@ async fn stream_object(
     retries: Option<&spate_core::metrics::Counter>,
     bytes_read: Option<&spate_core::metrics::Counter>,
     origin: &Origin,
+    ahead: &mut ReadAhead,
+    next: Option<WindowRead>,
 ) -> Result<bool, SplitFailure> {
     // A whole object with no bytes is read without a request, so its key
     // need not be one the store can address.
@@ -329,6 +497,8 @@ async fn stream_object(
                 retries,
                 bytes_read,
                 origin,
+                ahead,
+                next,
             )
             .await
         }
@@ -357,10 +527,15 @@ async fn stream_object(
 }
 
 /// Pinned read path: walk the object in `range_bytes` windows, each a
-/// short-lived ranged GET fully buffered before the handoff. The connection
-/// is released when a window is read; queued chunks can retain its backing
-/// buffer while the next GET is fetched. The ETag pin keeps the multi-GET read
+/// short-lived ranged GET fully buffered before its hand-off. While one window
+/// is handed on, the next is read: the object's next window, or `next` after
+/// its last. Queued chunks can retain the previous window's buffer, so a lane
+/// holds up to three windows. The ETag pin keeps the multi-GET read
 /// splice-safe: an overwrite between windows trips the `if_match` precondition.
+///
+/// A window read ahead that fails is reported only after the window before it
+/// is handed on, so the lane sees the same messages as if it had been read
+/// later.
 ///
 /// With a `trim`, the windows follow [`RangeTrim::next_window`] and only the
 /// owned bytes are forwarded. A window reaching the range's end may run
@@ -383,74 +558,43 @@ async fn stream_object_ranged(
     retries: Option<&spate_core::metrics::Counter>,
     bytes_read: Option<&spate_core::metrics::Counter>,
     origin: &Origin,
+    ahead: &mut ReadAhead,
+    mut next: Option<WindowRead>,
 ) -> Result<bool, SplitFailure> {
     let path = object_path(split, entry)?;
     let window = range_bytes.max(1) as u64;
-    // `delivered` is the GET position of the next window, trimmed or not.
+    // The end of the window starting at `at`, or `None` past the last one.
+    // Saturating: `entry.size` is remote listing data and may be
+    // adversarially close to u64::MAX.
+    let window_end = |trim: &Option<RangeTrim>, at: u64| match trim {
+        Some(trim) => trim.next_window(at, window, chunk_bytes as u64),
+        None if at < entry.size => Some(at.saturating_add(window).min(entry.size)),
+        None => None,
+    };
+    let read_at = |start: u64, end: u64| WindowRead {
+        split: Arc::clone(split),
+        store: Arc::clone(store),
+        path: path.clone(),
+        entry: entry.clone(),
+        etag: etag.to_owned(),
+        start,
+        end,
+        retry_base,
+        retries: retries.cloned(),
+        origin: origin.clone(),
+    };
+    // `delivered` is the GET position of the window in hand.
     let mut delivered: u64 = trim.as_ref().map_or(0, RangeTrim::first_byte);
-    let mut attempt: u32 = 0;
+    let mut buffered = match ahead.take().await {
+        Some(window) => window?,
+        None => match window_end(&trim, delivered) {
+            Some(end) => read_at(delivered, end).fetch().await?,
+            None => return Ok(true),
+        },
+    };
 
     loop {
-        // Saturating: `entry.size` is remote listing data and may be
-        // adversarially close to u64::MAX.
-        let end = match &trim {
-            Some(trim) => match trim.next_window(delivered, window, chunk_bytes as u64) {
-                Some(end) => end,
-                None => break,
-            },
-            None if delivered < entry.size => delivered.saturating_add(window).min(entry.size),
-            None => break,
-        };
-        let options = GetOptions {
-            if_match: Some(etag.to_owned()),
-            range: Some(GetRange::Bounded(delivered..end)),
-            version: version_of(origin),
-            ..Default::default()
-        };
-        // One bounded request, drained fully into memory at network speed. The
-        // connection is released here, *before* the possibly-long hand-off
-        // below, so backpressure never leaves an idle S3 body open.
-        let fetched = match store.get_opts(&path, options).await {
-            Ok(result) => result.bytes().await,
-            Err(e) => Err(e),
-        };
-        let buffered = match fetched {
-            Ok(bytes) => bytes,
-            Err(e) if crate::error::is_overwrite(&e, origin) => {
-                return Err(head_after_overwrite(
-                    split, store, &path, entry, etag, delivered, retry_base, retries,
-                )
-                .await);
-            }
-            Err(e) => {
-                retry_or_fail(
-                    split,
-                    entry,
-                    &e,
-                    delivered,
-                    &mut attempt,
-                    retry_base,
-                    retries,
-                )
-                .await?;
-                continue;
-            }
-        };
         let read = buffered.len() as u64;
-        if read == 0 {
-            // A conforming store never returns an empty bounded range; guard
-            // anyway so a misbehaving one poisons the object rather than
-            // spinning.
-            return Err(SplitFailure::Poison(
-                PoisonKind::Undecodable,
-                format!(
-                    "split {split}: ranged read of \"{}\" at byte {delivered} returned no bytes",
-                    entry.key
-                ),
-            ));
-        }
-        // Forward the buffered window. No connection is open here, so a paused /
-        // back-pressured lane only parks on bytes already in memory.
         let mut bytes = match &mut trim {
             Some(trim) => {
                 let owned = trim.feed(delivered, buffered);
@@ -461,22 +605,37 @@ async fn stream_object_ranged(
             }
             None => buffered,
         };
+        // The trim is fed before the next window is planned: its end depends
+        // on whether this window reached the owned range's end.
+        let following = delivered + read;
+        let own_next = window_end(&trim, following);
+        match own_next {
+            Some(end) => ahead.start(read_at(following, end)),
+            None => {
+                if let Some(read) = next.take() {
+                    ahead.start(read);
+                }
+            }
+        }
         while !bytes.is_empty() {
             let take = bytes.len().min(chunk_bytes);
             let chunk = bytes.split_to(take);
-            if pause_gate(pause, tx).await.is_err() {
-                return Ok(false);
-            }
-            if tx.send(ChunkMsg::Chunk(chunk)).await.is_err() {
+            if !ahead
+                .alongside(gated_send(pause, tx, ChunkMsg::Chunk(chunk)))
+                .await
+            {
                 return Ok(false);
             }
         }
-        delivered += read;
-        // A completed window is progress: reset the retry budget so an object
-        // larger than one failure-free window still finishes.
-        attempt = 0;
+        if own_next.is_none() {
+            return Ok(true);
+        }
+        delivered = following;
+        let Some(window) = ahead.take().await else {
+            unreachable!("the object's next window was started above");
+        };
+        buffered = window?;
     }
-    Ok(true)
 }
 
 /// Unpinned read path (store reports no ETag): a single continuous stream. A
@@ -834,6 +993,48 @@ mod tests {
         /// never counts). This is the observable that separates "window
         /// fully buffered before hand-off" from "connection held open".
         bodies_drained: Arc<AtomicU32>,
+        /// Each GET's key and `If-Match`, in request order.
+        requests: std::sync::Mutex<Vec<(String, Option<String>)>>,
+        /// The GET, counted from 1, that waits for a permit on `release`
+        /// before it reads; 0 holds none.
+        hold_on: u32,
+        release: Arc<tokio::sync::Semaphore>,
+        /// Held GETs started, and held GET futures dropped, finished or not.
+        held: AtomicU32,
+        held_dropped: Arc<AtomicU32>,
+        /// Window buffers alive now and the most alive at once, counted when
+        /// `count_live` is set.
+        count_live: bool,
+        live: Arc<AtomicU32>,
+        max_live: Arc<AtomicU32>,
+    }
+
+    /// Counts its own drop.
+    struct DropCount(Arc<AtomicU32>);
+
+    impl Drop for DropCount {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// A window's bytes, counted alive until the last chunk sharing them is
+    /// dropped.
+    struct LiveWindow {
+        bytes: Bytes,
+        live: Arc<AtomicU32>,
+    }
+
+    impl AsRef<[u8]> for LiveWindow {
+        fn as_ref(&self) -> &[u8] {
+            &self.bytes
+        }
+    }
+
+    impl Drop for LiveWindow {
+        fn drop(&mut self) {
+            self.live.fetch_sub(1, Ordering::Relaxed);
+        }
     }
 
     impl FlakyStore {
@@ -850,7 +1051,20 @@ mod tests {
                 gets: AtomicU32::new(0),
                 ranges: std::sync::Mutex::new(Vec::new()),
                 bodies_drained: Arc::new(AtomicU32::new(0)),
+                requests: std::sync::Mutex::new(Vec::new()),
+                hold_on: 0,
+                release: Arc::new(tokio::sync::Semaphore::new(0)),
+                held: AtomicU32::new(0),
+                held_dropped: Arc::new(AtomicU32::new(0)),
+                count_live: false,
+                live: Arc::new(AtomicU32::new(0)),
+                max_live: Arc::new(AtomicU32::new(0)),
             }
+        }
+
+        /// Each GET's key and `If-Match`, in request order.
+        fn requests(&self) -> Vec<(String, Option<String>)> {
+            self.requests.lock().unwrap().clone()
         }
 
         fn bodies_drained(&self) -> u32 {
@@ -871,6 +1085,24 @@ mod tests {
                 GetResultPayload::Stream(s) => s,
                 #[allow(unreachable_patterns)]
                 _ => unreachable!("InMemory yields streams"),
+            };
+            let stream = if self.count_live {
+                let live = Arc::clone(&self.live);
+                let max_live = Arc::clone(&self.max_live);
+                stream
+                    .map(move |item| {
+                        item.map(|bytes| {
+                            let now = live.fetch_add(1, Ordering::Relaxed) + 1;
+                            max_live.fetch_max(now, Ordering::Relaxed);
+                            Bytes::from_owner(LiveWindow {
+                                bytes,
+                                live: Arc::clone(&live),
+                            })
+                        })
+                    })
+                    .boxed()
+            } else {
+                stream
             };
             let drained = Arc::clone(&self.bodies_drained);
             let marker = futures_util::stream::poll_fn(move |_| {
@@ -939,8 +1171,17 @@ mod tests {
             location: &Path,
             options: GetOptions,
         ) -> object_store::Result<GetResult> {
-            self.gets.fetch_add(1, Ordering::Relaxed);
+            let nth = self.gets.fetch_add(1, Ordering::Relaxed) + 1;
             self.ranges.lock().unwrap().push(range_kind(&options.range));
+            self.requests
+                .lock()
+                .unwrap()
+                .push((location.to_string(), options.if_match.clone()));
+            if nth == self.hold_on {
+                self.held.fetch_add(1, Ordering::Relaxed);
+                let _dropped = DropCount(Arc::clone(&self.held_dropped));
+                self.release.acquire().await.unwrap().forget();
+            }
             if self
                 .fail_gets
                 .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
@@ -1146,9 +1387,8 @@ mod tests {
     }
 
     /// Pins that the fetcher starts the next member's GET while its lane has
-    /// not read the previous member, once that member's messages fit the
-    /// lane's hand-off channel.
-    #[tokio::test]
+    /// not read the previous member.
+    #[tokio::test(start_paused = true)]
     async fn the_next_members_get_starts_before_the_lane_reads() {
         let store = Arc::new(FlakyStore::new(
             seeded(&[("a.ndjson", b"a\n"), ("b.ndjson", b"b\n")]).await,
@@ -1173,13 +1413,12 @@ mod tests {
             origin: Origin::Lister,
         };
         let task = tokio::spawn(run_fetcher(params));
-        tokio::time::timeout(Duration::from_secs(30), async {
-            while store.gets.load(Ordering::Relaxed) < 2 {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("the second member's GET started with nothing read");
+        park().await;
+        assert_eq!(
+            store.gets.load(Ordering::Relaxed),
+            2,
+            "the second member's GET started with nothing read"
+        );
         task.abort();
     }
 
@@ -1273,14 +1512,18 @@ mod tests {
 
     #[tokio::test]
     async fn start_ordinal_skips_committed_objects() {
-        let store: Arc<dyn ObjectStore> =
-            Arc::new(seeded(&[("p/a", b"first"), ("p/b", b"second")]).await);
+        let flaky = Arc::new(FlakyStore::new(
+            seeded(&[("p/a", b"first"), ("p/b", b"second")]).await,
+        ));
+        let store: Arc<dyn ObjectStore> = flaky.clone();
         let slice = listed(&store).await;
         let msgs = collect_fetch(store, slice, 1, 64, 64).await;
         assert_eq!(
             assembled(&msgs),
             vec![("p/b".to_string(), b"second".to_vec())]
         );
+        let keys: Vec<String> = flaky.requests().into_iter().map(|(k, _)| k).collect();
+        assert_eq!(keys, ["p/b"], "a skipped member is never read");
     }
 
     #[tokio::test]
@@ -1392,7 +1635,8 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn pause_halts_fetching_and_resume_continues() {
-        let store: Arc<dyn ObjectStore> = Arc::new(seeded(&[("p/a", b"abcdefgh")]).await);
+        let flaky = Arc::new(FlakyStore::new(seeded(&[("p/a", b"abcdefgh")]).await));
+        let store: Arc<dyn ObjectStore> = flaky.clone();
         let slice = listed(&store).await;
         let (tx, mut rx) = mpsc::channel(1); // tiny: sends interleave with pauses
         let pause = Arc::new(AtomicBool::new(true));
@@ -1420,6 +1664,7 @@ mod tests {
             rx.try_recv().is_err(),
             "paused fetcher must not deliver messages"
         );
+        assert_eq!(flaky.gets.load(Ordering::Relaxed), 0, "nor read ahead");
         pause.store(false, Ordering::Relaxed);
         let mut msgs = Vec::new();
         while let Some(m) = rx.recv().await {
@@ -1488,24 +1733,25 @@ mod tests {
         );
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn a_backpressured_lane_buffers_one_window_and_fetches_no_further() {
-        // With ObjectStart filling the undrained capacity-1 channel, the first
-        // GET completes before the blocked first chunk send prevents a second GET.
-        let flaky = Arc::new(FlakyStore::new(
-            seeded(&[("p/a", b"0123456789abcdef")]).await,
-        ));
-        let store: Arc<dyn ObjectStore> = flaky.clone();
-        let slice = listed(&store).await;
-        let (tx, _rx) = mpsc::channel(1); // ObjectStart fills the one slot; never drained
-        let params = FetcherParams {
+    const DEPTH: usize = crate::lane_ctx::LANE_HANDOFF_CHUNKS;
+
+    /// Fetcher parameters over a whole-object unit, unpaused, with no
+    /// metrics.
+    fn fetcher(
+        store: Arc<dyn ObjectStore>,
+        slice: Vec<ObjectEntry>,
+        chunk_bytes: usize,
+        range_bytes: usize,
+        tx: mpsc::Sender<ChunkMsg>,
+    ) -> FetcherParams {
+        FetcherParams {
             split: "s3-test".into(),
-            store: Arc::clone(&store),
+            store,
             slice: Arc::new(slice),
             start_ordinal: 0,
             resume_etag: None,
-            chunk_bytes: 4,
-            range_bytes: 8,
+            chunk_bytes,
+            range_bytes,
             tx,
             pause: Arc::new(AtomicBool::new(false)),
             retry_base: Duration::from_millis(1),
@@ -1513,28 +1759,467 @@ mod tests {
             range: None,
             bytes_read: None,
             origin: Origin::Lister,
-        };
-        let task = tokio::spawn(run_fetcher(params));
-        // On paused time the sleep returns only once the fetcher is parked.
+        }
+    }
+
+    /// Returns once every task is idle: on paused time the sleep fires only
+    /// when nothing else can run.
+    async fn park() {
         tokio::time::sleep(Duration::from_millis(80)).await;
+    }
+
+    async fn drain(rx: &mut mpsc::Receiver<ChunkMsg>) -> Vec<ChunkMsg> {
+        let mut msgs = Vec::new();
+        while let Some(m) = rx.recv().await {
+            msgs.push(m);
+        }
+        msgs
+    }
+
+    fn debugged(msgs: &[ChunkMsg]) -> Vec<String> {
+        msgs.iter().map(|m| format!("{m:?}")).collect()
+    }
+
+    /// Pins that a lane blocked on its hand-off holds the window it is
+    /// handing on and the next one, each drained in full, and starts no
+    /// third. Regression for #877.
+    #[tokio::test(start_paused = true)]
+    async fn a_blocked_lane_holds_two_windows_and_fetches_no_further() {
+        let flaky = Arc::new(FlakyStore::new(seeded(&[("p/a", &[b'x'; 48][..])]).await));
+        let store: Arc<dyn ObjectStore> = flaky.clone();
+        let slice = listed(&store).await;
+        let (tx, _rx) = mpsc::channel(DEPTH);
+        let task = tokio::spawn(run_fetcher(fetcher(store, slice, 2, 16, tx)));
+        park().await;
         assert_eq!(
             flaky.recorded_ranges(),
-            vec![RangeKind::Bounded(0, 8)],
-            "one window fetched: the second is not started while the \
-             hand-off is blocked"
+            vec![RangeKind::Bounded(0, 16), RangeKind::Bounded(16, 32)],
+            "the second window is read while the first is handed on"
         );
-        // Issuance alone can't distinguish "window fully buffered before
-        // the hand-off" from "body held open while blocked on the send":
-        // the drain marker fires only when the payload stream is read to
-        // its natural end, so a regression to lazy streaming (connection
-        // pinned during backpressure) fails here.
+        // The drain marker fires only when a body is read to its end, so a
+        // read-ahead that held its body open fails here.
+        assert_eq!(flaky.bodies_drained(), 2);
+        task.abort();
+    }
+
+    /// Pins that the next member's first window is read, under that
+    /// member's own ETag, while the lane has not taken the last window of
+    /// the member before it, and that the lane receives the same messages as
+    /// a lane that never blocks. Regression for #877.
+    #[tokio::test(start_paused = true)]
+    async fn the_next_members_get_starts_while_the_last_window_is_queued() {
+        let flaky = Arc::new(FlakyStore::new(
+            seeded(&[("p/a", &[b'a'; 16][..]), ("p/b", &[b'b'; 12][..])]).await,
+        ));
+        let store: Arc<dyn ObjectStore> = flaky.clone();
+        let slice = listed(&store).await;
+        assert_ne!(slice[0].etag, slice[1].etag);
+        let (tx, mut rx) = mpsc::channel(DEPTH);
+        let task = tokio::spawn(run_fetcher(fetcher(
+            Arc::clone(&store),
+            slice.clone(),
+            2,
+            16,
+            tx,
+        )));
+        park().await;
+        assert_eq!(
+            flaky.requests(),
+            vec![
+                ("p/a".to_string(), slice[0].etag.clone()),
+                ("p/b".to_string(), slice[1].etag.clone()),
+            ]
+        );
+        let msgs = drain(&mut rx).await;
+        task.await.unwrap();
+        let unblocked = collect_fetch(store, slice, 0, 2, 16).await;
+        assert_eq!(debugged(&msgs), debugged(&unblocked));
+    }
+
+    /// Pins that the read-ahead skips an empty member, which is read without
+    /// a request, and reads the next member that has bytes. Its
+    /// `ObjectStart`/`ObjectEnd` pair still reaches the lane in place.
+    #[tokio::test(start_paused = true)]
+    async fn a_zero_byte_member_is_skipped_by_the_read_ahead() {
+        let flaky = Arc::new(FlakyStore::new(
+            seeded(&[
+                ("p/a", &[b'a'; 16][..]),
+                ("p/b", b""),
+                ("p/c", &[b'c'; 12][..]),
+            ])
+            .await,
+        ));
+        let store: Arc<dyn ObjectStore> = flaky.clone();
+        let slice = listed(&store).await;
+        let (tx, mut rx) = mpsc::channel(DEPTH);
+        let task = tokio::spawn(run_fetcher(fetcher(
+            Arc::clone(&store),
+            slice.clone(),
+            2,
+            16,
+            tx,
+        )));
+        park().await;
+        let keys: Vec<String> = flaky.requests().into_iter().map(|(k, _)| k).collect();
+        assert_eq!(keys, ["p/a", "p/c"]);
+        let msgs = drain(&mut rx).await;
+        task.await.unwrap();
+        let unblocked = collect_fetch(store, slice, 0, 2, 16).await;
+        assert_eq!(debugged(&msgs), debugged(&unblocked));
+        assert_eq!(
+            assembled(&msgs),
+            vec![
+                ("p/a".to_string(), vec![b'a'; 16]),
+                ("p/b".to_string(), Vec::new()),
+                ("p/c".to_string(), vec![b'c'; 12]),
+            ]
+        );
+    }
+
+    /// Pins that a fetcher paused mid-object finishes the one window it is
+    /// reading ahead while it waits, and starts no other.
+    #[tokio::test(start_paused = true)]
+    async fn a_paused_lane_finishes_its_read_ahead_and_fetches_no_further() {
+        let mut flaky = FlakyStore::new(seeded(&[("p/a", &[b'x'; 48][..])]).await);
+        flaky.hold_on = 2;
+        let flaky = Arc::new(flaky);
+        let store: Arc<dyn ObjectStore> = flaky.clone();
+        let slice = listed(&store).await;
+        let (tx, mut rx) = mpsc::channel(DEPTH);
+        let params = fetcher(store, slice, 2, 16, tx);
+        let pause = Arc::clone(&params.pause);
+        let task = tokio::spawn(run_fetcher(params));
+        park().await;
+        assert!(matches!(
+            rx.recv().await,
+            Some(ChunkMsg::ObjectStart { .. })
+        ));
+        assert!(matches!(rx.recv().await, Some(ChunkMsg::Chunk(_))));
+        pause.store(true, Ordering::Relaxed);
+        park().await;
+        assert_eq!(flaky.bodies_drained(), 1, "the read-ahead is still held");
+        flaky.release.add_permits(1);
+        park().await;
+        assert_eq!(
+            flaky.recorded_ranges(),
+            vec![RangeKind::Bounded(0, 16), RangeKind::Bounded(16, 32)]
+        );
         assert_eq!(
             flaky.bodies_drained(),
-            1,
-            "the first window's body must be fully drained (connection \
-             released) before the fetcher blocks on the hand-off"
+            2,
+            "the read-ahead finished while the fetcher waited out the pause"
         );
         task.abort();
+    }
+
+    /// Pins that a byte-range read plans its next window only after the
+    /// trim has seen the window in hand, so a read ahead never runs past the
+    /// owned bytes.
+    #[tokio::test(start_paused = true)]
+    async fn a_blocked_ranged_read_stops_at_the_owned_bytes() {
+        let flaky = Arc::new(FlakyStore::new(
+            seeded(&[("p/a", b"aa\nbbbb\ncc\r\n \ndddddd\nee\nfff")]).await,
+        ));
+        let store: Arc<dyn ObjectStore> = flaky.clone();
+        let slice = listed(&store).await;
+        // ObjectStart fills the one slot, so the fetcher blocks on the first
+        // chunk of the first window.
+        let (tx, mut rx) = mpsc::channel(1);
+        let mut params = fetcher(store, slice, 2, 4, tx);
+        params.range = Some(SplitRange::new(8, 21, b'\n'));
+        let task = tokio::spawn(run_fetcher(params));
+        park().await;
+        assert_eq!(
+            flaky.recorded_ranges(),
+            vec![RangeKind::Bounded(7, 11), RangeKind::Bounded(11, 15)]
+        );
+        let msgs = drain(&mut rx).await;
+        task.await.unwrap();
+        assert_eq!(assembled(&msgs)[0].1, b"cc\r\n \ndddddd\n");
+        assert_eq!(
+            flaky.recorded_ranges(),
+            vec![
+                RangeKind::Bounded(7, 11),
+                RangeKind::Bounded(11, 15),
+                RangeKind::Bounded(15, 19),
+                RangeKind::Bounded(19, 23),
+            ]
+        );
+    }
+
+    /// Pins the read-ahead's memory bound: the window queued chunks retain,
+    /// the window being handed on and the window read ahead, and no fourth.
+    #[tokio::test(start_paused = true)]
+    async fn a_lane_holds_at_most_three_windows() {
+        let mut flaky = FlakyStore::new(seeded(&[("p/a", &[b'x'; 80][..])]).await);
+        flaky.count_live = true;
+        let flaky = Arc::new(flaky);
+        let store: Arc<dyn ObjectStore> = flaky.clone();
+        let slice = listed(&store).await;
+        let (tx, mut rx) = mpsc::channel(DEPTH);
+        let task = tokio::spawn(run_fetcher(fetcher(store, slice, 2, 16, tx)));
+        loop {
+            park().await;
+            // Dropped at once, as a lane drops each chunk once it is framed.
+            if rx.recv().await.is_none() {
+                break;
+            }
+        }
+        task.await.unwrap();
+        assert_eq!(flaky.recorded_ranges().len(), 5);
+        assert_eq!(flaky.live.load(Ordering::Relaxed), 0);
+        assert_eq!(flaky.max_live.load(Ordering::Relaxed), 3);
+    }
+
+    /// Pins that a failed read ahead within an object reaches the lane only
+    /// after every chunk of the window before it.
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_read_ahead_reaches_the_lane_after_the_earlier_window() {
+        for (origin, overwritten) in [(notified(None), true), (Origin::Lister, false)] {
+            let (inner, entry) = thirty_bytes().await;
+            let store = Arc::new(
+                HeadStore::new(inner, 2).head_answers(vec![Ok(meta(Some("\"moved\""), 30))]),
+            );
+            let (tx, mut rx) = mpsc::channel(DEPTH);
+            let mut params = fetcher(store, vec![entry], 2, 10, tx);
+            params.origin = origin;
+            let task = tokio::spawn(run_fetcher(params));
+            park().await;
+            let mut msgs = drain(&mut rx).await;
+            task.await.unwrap();
+            let failure = match msgs.pop() {
+                Some(ChunkMsg::LaneFailed(failure)) => failure,
+                other => panic!("the read did not fail: {other:?}"),
+            };
+            match failure {
+                SplitFailure::Overwritten(_) => assert!(overwritten),
+                SplitFailure::Poison(PoisonKind::EtagDrift, _) => assert!(!overwritten),
+                other => panic!("unexpected failure: {other}"),
+            }
+            assert!(matches!(msgs[0], ChunkMsg::ObjectStart { .. }));
+            assert_eq!(msgs.len(), 6, "ObjectStart and five chunks");
+            assert_eq!(assembled(&msgs)[0].1, b"0123456789");
+        }
+    }
+
+    /// Pins that a next member whose read ahead fails is reported after its
+    /// own `ObjectStart`, where a read started at that point would report it.
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_member_read_ahead_follows_that_members_start() {
+        let store: Arc<dyn ObjectStore> = Arc::new(seeded(&[("p/a", &[b'a'; 16][..])]).await);
+        let mut slice = listed(&store).await;
+        slice.push(entry("p/gone", 12, Some("\"gone\"")));
+        let (tx, mut rx) = mpsc::channel(DEPTH);
+        let task = tokio::spawn(run_fetcher(fetcher(store, slice, 2, 16, tx)));
+        park().await;
+        let msgs = drain(&mut rx).await;
+        task.await.unwrap();
+        let tail: Vec<String> = debugged(&msgs[msgs.len() - 3..])
+            .into_iter()
+            .map(|m| m.split([' ', '(']).next().unwrap().to_owned())
+            .collect();
+        assert_eq!(tail, ["ObjectEnd", "ObjectStart", "LaneFailed"]);
+        assert!(matches!(
+            msgs.last(),
+            Some(ChunkMsg::LaneFailed(SplitFailure::Poison(
+                PoisonKind::NotFound,
+                _
+            )))
+        ));
+    }
+
+    /// Pins that each window of an object retries on a budget of its own:
+    /// failures of one window never count against the next.
+    #[tokio::test(start_paused = true)]
+    async fn each_window_gets_its_own_retry_budget() {
+        // Window 2 (8..16) fails one attempt short of the budget, then one
+        // attempt past it.
+        for (window_two_failures, completes) in [(MAX_ATTEMPTS - 1, true), (MAX_ATTEMPTS, false)] {
+            let mut flaky = FlakyStore::new(seeded(&[("p/a", b"0123456789abcdef")]).await);
+            flaky.fail_gets = AtomicU32::new(MAX_ATTEMPTS - 1);
+            flaky.fail_past = 8;
+            flaky.fail_past_gets = AtomicU32::new(window_two_failures);
+            let flaky = Arc::new(flaky);
+            let store: Arc<dyn ObjectStore> = flaky.clone();
+            let slice = listed(&store).await;
+            let (tx, mut rx) = mpsc::channel(DEPTH);
+            let task = tokio::spawn(run_fetcher(fetcher(store, slice, 2, 8, tx)));
+            let msgs = drain(&mut rx).await;
+            task.await.unwrap();
+            if completes {
+                assert_eq!(
+                    assembled(&msgs),
+                    vec![("p/a".to_string(), b"0123456789abcdef".to_vec())]
+                );
+                assert_eq!(flaky.gets.load(Ordering::Relaxed), 2 * MAX_ATTEMPTS);
+            } else {
+                assert!(matches!(
+                    msgs.last(),
+                    Some(ChunkMsg::LaneFailed(SplitFailure::Poison(
+                        PoisonKind::RetriesExhausted,
+                        _
+                    )))
+                ));
+                assert_eq!(assembled(&msgs[..msgs.len() - 1])[0].1, b"01234567");
+                assert_eq!(flaky.gets.load(Ordering::Relaxed), 2 * MAX_ATTEMPTS);
+            }
+        }
+    }
+
+    /// Pins that a lane dropped while a window is read ahead ends the
+    /// fetcher and cancels that read.
+    #[tokio::test(start_paused = true)]
+    async fn dropping_the_lane_mid_read_ahead_ends_the_fetcher() {
+        for paused in [false, true] {
+            let mut flaky = FlakyStore::new(seeded(&[("p/a", &[b'x'; 48][..])]).await);
+            flaky.hold_on = 2;
+            let flaky = Arc::new(flaky);
+            let store: Arc<dyn ObjectStore> = flaky.clone();
+            let slice = listed(&store).await;
+            let (tx, mut rx) = mpsc::channel(DEPTH);
+            let params = fetcher(store, slice, 2, 16, tx);
+            params.pause.store(paused, Ordering::Relaxed);
+            let pause = Arc::clone(&params.pause);
+            let task = tokio::spawn(run_fetcher(params));
+            park().await;
+            if paused {
+                assert_eq!(
+                    flaky.held.load(Ordering::Relaxed),
+                    0,
+                    "paused before any GET"
+                );
+                pause.store(false, Ordering::Relaxed);
+                park().await;
+                // One slot frees, so the fetcher's next send waits out the
+                // pause instead of the full hand-off.
+                pause.store(true, Ordering::Relaxed);
+                assert!(rx.recv().await.is_some());
+                park().await;
+            }
+            assert_eq!(flaky.held.load(Ordering::Relaxed), 1);
+            drop(rx);
+            tokio::time::timeout(Duration::from_secs(5), task)
+                .await
+                .expect("the fetcher ends when its lane is dropped")
+                .unwrap();
+            assert_eq!(flaky.held_dropped.load(Ordering::Relaxed), 1);
+        }
+    }
+
+    /// Pins that a member the store reports no ETag for is never read
+    /// ahead: its un-ranged body must not open before its turn.
+    #[tokio::test(start_paused = true)]
+    async fn a_member_without_an_etag_is_not_read_ahead() {
+        let flaky = Arc::new(FlakyStore::new(
+            seeded(&[("p/a", &[b'a'; 16][..]), ("p/b", &[b'b'; 12][..])]).await,
+        ));
+        let store: Arc<dyn ObjectStore> = flaky.clone();
+        let mut slice = listed(&store).await;
+        slice[1].etag = None;
+        let (tx, mut rx) = mpsc::channel(DEPTH);
+        let task = tokio::spawn(run_fetcher(fetcher(store, slice, 2, 16, tx)));
+        park().await;
+        assert_eq!(flaky.recorded_ranges(), vec![RangeKind::Bounded(0, 16)]);
+        let msgs = drain(&mut rx).await;
+        task.await.unwrap();
+        assert_eq!(
+            flaky.recorded_ranges(),
+            vec![RangeKind::Bounded(0, 16), RangeKind::Full]
+        );
+        assert_eq!(assembled(&msgs)[1].1, vec![b'b'; 12]);
+    }
+
+    /// The messages a lane receives for whole members with these bodies,
+    /// read in `range_bytes` windows and `chunk_bytes` chunks.
+    fn expected_messages(
+        slice: &[ObjectEntry],
+        bodies: &[Vec<u8>],
+        chunk_bytes: usize,
+        range_bytes: usize,
+    ) -> Vec<String> {
+        let mut msgs = Vec::new();
+        for (ordinal, (entry, body)) in slice.iter().zip(bodies).enumerate() {
+            msgs.push(ChunkMsg::ObjectStart {
+                ordinal: ordinal as u32,
+                key: entry.key.clone(),
+                last_modified_ms: entry.last_modified_ms,
+            });
+            for window in body.chunks(range_bytes) {
+                for chunk in window.chunks(chunk_bytes) {
+                    msgs.push(ChunkMsg::Chunk(Bytes::copy_from_slice(chunk)));
+                }
+            }
+            msgs.push(ChunkMsg::ObjectEnd);
+        }
+        debugged(&msgs)
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(64))]
+
+        /// Pins that the messages a lane receives and the GETs a unit makes
+        /// depend on neither the hand-off depth nor how fast the lane reads.
+        #[test]
+        fn a_unit_streams_its_members_in_order_under_any_windows(
+            sizes in proptest::collection::vec(0usize..48, 1..7),
+            range_bytes in 1usize..20,
+            chunk_bytes in 1usize..8,
+            depth in 1usize..6,
+            park_every in 1usize..4,
+        ) {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_time()
+                .start_paused(true)
+                .build()
+                .unwrap();
+            let bodies: Vec<Vec<u8>> = sizes
+                .iter()
+                .enumerate()
+                .map(|(i, n)| (0..*n).map(|b| b'a' + ((b + i) % 26) as u8).collect())
+                .collect();
+            let (msgs, slice, ranges) = rt.block_on(async {
+                let keys: Vec<String> = (0..bodies.len()).map(|i| format!("p/{i}")).collect();
+                let objects: Vec<(&str, &[u8])> = keys
+                    .iter()
+                    .zip(&bodies)
+                    .map(|(k, b)| (k.as_str(), b.as_slice()))
+                    .collect();
+                let flaky = Arc::new(FlakyStore::new(seeded(&objects).await));
+                let store: Arc<dyn ObjectStore> = flaky.clone();
+                let slice = listed(&store).await;
+                let (tx, mut rx) = mpsc::channel(depth);
+                let task = tokio::spawn(run_fetcher(fetcher(
+                    store,
+                    slice.clone(),
+                    chunk_bytes,
+                    range_bytes,
+                    tx,
+                )));
+                let mut msgs = Vec::new();
+                while let Some(m) = rx.recv().await {
+                    msgs.push(m);
+                    if msgs.len() % park_every == 0 {
+                        park().await;
+                    }
+                }
+                task.await.unwrap();
+                (msgs, slice, flaky.recorded_ranges())
+            });
+            proptest::prop_assert_eq!(
+                debugged(&msgs),
+                expected_messages(&slice, &bodies, chunk_bytes, range_bytes)
+            );
+            let want: Vec<RangeKind> = bodies
+                .iter()
+                .flat_map(|body| {
+                    let size = body.len() as u64;
+                    (0..size)
+                        .step_by(range_bytes)
+                        .map(move |w| RangeKind::Bounded(w, (w + range_bytes as u64).min(size)))
+                })
+                .collect();
+            proptest::prop_assert_eq!(ranges, want);
+        }
     }
 
     /// Run a fetcher over one no-ETag object whose stream is cut after

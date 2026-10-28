@@ -60,3 +60,42 @@ fn paginated_listing_backfills_completely() {
     }
     assert_eq!(sorted(captured_rows(&l.script)), sorted(expected));
 }
+
+/// Objects larger than one GET window, packed sixteen to a unit, deliver
+/// every row once when each lane reads its next window, and the next member's
+/// first window, ahead under the member's ETag.
+#[test]
+#[ignore = "requires Docker"]
+fn windowed_reads_with_read_ahead_deliver_every_row() {
+    let gw = Gateway::start("spate-s3-read-ahead");
+    let total = 40usize;
+    // About 7 KiB each: two 4 KiB windows of 1 KiB chunks.
+    let objects: Vec<(String, Vec<u8>)> = (0..total)
+        .map(|i| {
+            (
+                format!("data/obj-{i:03}.ndjson"),
+                lines_bytes(&recs(&format!("o{i}"), 450)),
+            )
+        })
+        .collect();
+    gw.seed(objects);
+
+    let yaml = PipelineYaml::bucket("s3-read-ahead-test", &gw)
+        .source("prefetch_bytes", "4KiB")
+        .source("chunk_bytes", "1KiB")
+        .section("feed:\n  memory: {}\n  units_held: 2\n")
+        .build();
+    let l = launch(&yaml, test_options());
+    let report = l
+        .run
+        .wait_exit(Duration::from_secs(180))
+        .expect("bounded job exits on its own")
+        .expect("no start error");
+    assert_eq!(report.state, ExitState::Completed);
+
+    let mut expected: Vec<String> = Vec::new();
+    for i in 0..total {
+        expected.extend(recs(&format!("o{i}"), 450));
+    }
+    assert_eq!(sorted(captured_rows(&l.script)), sorted(expected));
+}

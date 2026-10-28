@@ -62,7 +62,7 @@ source:
 | `compression` | `auto` \| `none` \| `gzip` \| `zstd` | `auto` | Object codec. `auto` decides per object by extension (`.gz`/`.gzip`, `.zst`/`.zstd`, else uncompressed). Multi-member gzip and multi-frame zstd are read fully; truncated or corrupt streams [fail their unit](#object-errors-fail-the-unit). Part of the job fingerprint. |
 | `split_target_bytes` | bytes | `64MiB` | Objects read whole are packed into shared units of at most this many bytes and 16 objects, in listing order, except one whose key is longer than 1,024 bytes or whose ETag is longer than 256. A larger object is [cut into byte ranges](#large-objects-and-byte-ranges) of at most this size when it qualifies, one unit each, and any other is one unit. Floor `1MiB`. Part of the job fingerprint. |
 | `prefetch_bytes` | bytes | `8MiB` | Target window size for ETag-pinned ranged GETs; see [read-ahead memory sizing](#read-parallelism). Must be at least `chunk_bytes`; a smaller value fails at load. |
-| `chunk_bytes` | bytes | `512KiB` | Target size of one buffered chunk. Zero fails at load. |
+| `chunk_bytes` | bytes | `512KiB` | Target size of one buffered chunk. Read-ahead does not depend on it. Zero fails at load. |
 | `store` | string map | `{}` | Raw `object_store` options, applied on top of the environment. Bucket keys fail at load, and so do keys `object_store` does not recognize under an S3 URL — see [the `store` denylist](#the-store-passthrough-and-the-denylist). |
 
 Mind the units on the fingerprinted keys: `MB` and `MiB` parse to
@@ -296,11 +296,13 @@ more pipeline threads do source work than there are lanes. A unit naming
 several objects takes one of `units_held`, and its lane reads them in turn.
 
 On the ETag-pinned ranged path, read-ahead memory grows with active lanes,
-current GET windows and backing windows retained by queued chunks. As
+current GET windows and backing windows retained by queued chunks. A lane reads
+its next window while it hands on the current one, including the first window
+of the next object in a unit. As
 [`spate-s3/src/fetch.rs`](repo:crates/spate-s3/src/fetch.rs) shows, chunks share
-an entire GET buffer, so a previous full window and the next full window can
-coexist. That overlap uses about `2 × units_held × prefetch_bytes` across
-fully active lanes. This is an overlap estimate: short windows can leave
+an entire GET buffer, so the previous window, the current window and the next
+window can coexist. That overlap uses about `3 × units_held × prefetch_bytes`
+across fully active lanes. This is an overlap estimate: short windows can leave
 several distinct backing buffers queued, and byte-range boundary reads can
 add `chunk_bytes` to a GET window, as specified in
 [`spate-s3/src/trim.rs`](repo:crates/spate-s3/src/trim.rs). Framing,
@@ -379,8 +381,8 @@ at `INFO` the units it holds and their `origin`: `explicit` for `units_held`,
 
 The default has two costs. Read-ahead memory follows the
 [overlap estimate](#read-parallelism): about
-`2 × units_held × prefetch_bytes`, which at the defaults is 32 MiB per pipeline
-thread: 2 units of 2 × 8 MiB each. This is arithmetic and has not been
+`3 × units_held × prefetch_bytes`, which at the defaults is 48 MiB per pipeline
+thread: 2 units of 3 × 8 MiB each. This is arithmetic and has not been
 measured. A unit is acknowledged, and its slot freed, only after the sink has
 written its last row, so a batch of small units waits up to `batch.linger` for
 a seal. While the held units total fewer rows than `batch.max_rows` and fewer

@@ -10,7 +10,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
 
 /// Fetcher→lane channel depth, in messages. Queued zero-copy chunks can retain
-/// earlier GET buffers while the fetcher buffers the next window.
+/// an earlier GET buffer while the fetcher hands on the current window and
+/// reads the next.
 pub(crate) const LANE_HANDOFF_CHUNKS: usize = 4;
 
 /// Names the work a lane reads in failure reports and logs.

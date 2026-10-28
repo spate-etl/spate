@@ -1,4 +1,4 @@
-//! E2E scenario: shutdown *during* a sink outage (#83).
+//! E2E scenario: shutdown *during* a sink outage.
 //!
 //! [`e2e_sink_outage`](e2e_sink_outage.rs) recovers the sink before stopping,
 //! so it never exercises the drain against a sink that is still down. That
@@ -110,7 +110,7 @@ fn shutdown_during_a_sink_outage_still_exits_at_its_deadline() {
     assert!(
         finished,
         "pipeline did not exit within {EXIT_BOUND:?} of shutdown while the sink \
-         was down; drain_timeout was {} (#83)",
+         was down; drain_timeout was {}",
         params.drain_timeout
     );
     println!("drain-during-outage: exited in {exited_in:?}, report {report:?}");

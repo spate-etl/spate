@@ -817,7 +817,7 @@ async fn drain_force_seal_does_not_block_on_a_held_permit() {
     assert_eq!(f.budget.usage(), 0);
 }
 
-/// The same hazard as the force-seal above, on the *intake* path (#83).
+/// The same hazard as the force-seal above, on the *intake* path.
 /// Chunk B reaches `max_bytes` and so dispatches rather than sitting partial
 /// in the accumulator. A `dispatch` that awaits `acquire_owned()` parks the
 /// whole worker future outside both `select!`s, so the drain deadline is never
@@ -929,11 +929,12 @@ async fn chunks_left_in_a_gated_queue_are_sealed_at_drain() {
     assert_eq!(f.budget.usage(), 0);
 }
 
-/// The routine reachability of #83, with no hung write anywhere. The default
-/// `retry.max_attempts` is 0 (unbounded), so against a sink that is *down*
-/// every write task retries forever and never releases its permit. A shutdown
-/// during a sink outage, the case the guide names explicitly, therefore
-/// reaches the same wedge on the default configuration.
+/// A sink outage reaches the wedge in
+/// `a_held_permit_does_not_wedge_dispatch_at_shutdown` without a hung write.
+/// The default `retry.max_attempts` is 0 (unbounded), so every write task
+/// retries for the length of the outage and holds its permit. A `dispatch`
+/// that awaited `acquire_owned()` would then wedge shutdown on the default
+/// configuration.
 #[tokio::test(start_paused = true)]
 async fn a_down_sink_retrying_forever_does_not_wedge_dispatch_at_shutdown() {
     let mut cfg = SinkPoolConfig {
@@ -1653,13 +1654,13 @@ fn replica_errors_attribute_failures_asymmetrically() {
     );
 }
 
-/// The scenario behind #79, reproduced: two batches, one sink speed, two very
-/// different flush durations. `spate_sink_flush_duration_seconds` spans seal to
-/// settle, so the second batch (sealed at t=0, unable to start until the first
-/// released the shard's only in-flight permit at t=2) reads twice what the
-/// first did against an identically fast writer. The split families tell the
-/// two apart: write duration is flat at 2s across both, and the whole
-/// difference lands in the permit-wait histogram.
+/// Two batches, one sink speed, two very different flush durations.
+/// `spate_sink_flush_duration_seconds` spans seal to settle, so the second
+/// batch (sealed at t=0, unable to start until the first released the shard's
+/// only in-flight permit at t=2) reads twice what the first did against an
+/// identically fast writer. The split families tell the two apart: write
+/// duration is flat at 2s across both, and the whole difference lands in the
+/// permit-wait histogram.
 ///
 /// Paused time makes every figure exact rather than approximate. The only
 /// timers are the mock's own sleeps, so the runtime advances to them and

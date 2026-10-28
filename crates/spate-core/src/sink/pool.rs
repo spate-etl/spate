@@ -42,7 +42,7 @@ pub struct SinkPool<W: ShardWriter> {
 /// The deadline itself is cooperative. Workers watch it, abort their in-flight
 /// writes and abandon what is left. This constant is the backstop under that,
 /// so a worker that cannot honor the deadline degrades shutdown to a lost
-/// drain report rather than an unbounded hang (#83).
+/// drain report rather than an unbounded hang.
 ///
 /// The tightest constraint is the controller rather than the pod's
 /// `terminationGracePeriodSeconds`. The controller waits only `deadline + 2s`

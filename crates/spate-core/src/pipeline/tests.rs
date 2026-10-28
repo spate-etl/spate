@@ -4513,3 +4513,82 @@ fn a_finished_thread_drops_a_retired_lane() {
     });
     shut_down(h);
 }
+
+/// Pins that a lane-set change between skipped lanes does not carry the skip
+/// streak into the smaller rotation and park the thread while a sibling lane
+/// still holds batches.
+#[test]
+fn a_retire_between_skips_does_not_park_a_flowing_thread() {
+    let h = start_finishing(parked_options(), None, &[0, 1], || ChainMode::Ok);
+    let (reached_tx, reached_rx) = mpsc::channel();
+    let (go_tx, go_rx) = mpsc::channel();
+    h.shared.lock().unwrap().finished_hook = Some(FinishedHook {
+        polled: LaneId(2),
+        after: LaneId(0),
+        lane: LaneId(1),
+        reached: reached_tx,
+        go: go_rx,
+    });
+    // One lane per message, each read before the next is sent, so the
+    // thread holds the lanes in the order 0, 1, 2.
+    assign(&h, &[(0, 1)]);
+    for (id, count) in [(1, 1), (2, 200)] {
+        wait_for("the previous lane is read", FINISH_DEADLINE, || {
+            polls_of(&h, id - 1) >= 1
+        });
+        h.script
+            .lock()
+            .unwrap()
+            .push_back(Script::Add(vec![LaneSpec {
+                id: LaneId(id),
+                partition: PartitionId(id),
+                batches: tens(count),
+            }]));
+    }
+    // The driver is inside lane 1's read straight after skipping finished
+    // lane 0, so the streak counts lane 0.
+    reached_rx.recv_timeout(FINISH_DEADLINE).unwrap();
+    assert!(h.chain.consumed.load(Ordering::Relaxed) < 2020);
+    h.script
+        .lock()
+        .unwrap()
+        .push_back(Script::Retire(vec![LaneId(0)]));
+    wait_for("the retire is delivered", FINISH_DEADLINE, || {
+        logged(&h, "retire-delivered")
+    });
+    // A `poll_events` call after the delivering one means the retire's
+    // `DropLanes` is on the control channel.
+    let calls = h.shared.lock().unwrap().poll_timeouts.len();
+    wait_for("the retire is sent to the thread", FINISH_DEADLINE, || {
+        h.shared.lock().unwrap().poll_timeouts.len() > calls
+    });
+    go_tx.send(()).unwrap();
+    wait_for("lane 2 is read to its end", FINISH_DEADLINE, || {
+        h.chain.consumed.load(Ordering::Relaxed) == 2020
+    });
+    shut_down(h);
+}
+
+/// Pins that a thread parked on its finished lanes reads a lane added after
+/// a wake, so the pass after each park starts its skip count afresh.
+#[test]
+fn a_lane_added_after_a_wake_is_read() {
+    let h = start_finishing(parked_options(), None, &[0, 1], || ChainMode::Ok);
+    assign(&h, &[(0, 1), (1, 1)]);
+    wait_for("both lanes finish", FINISH_DEADLINE, || {
+        polls_of(&h, 0) == 2 && polls_of(&h, 1) == 2
+    });
+    wake(&h, 1);
+    h.script
+        .lock()
+        .unwrap()
+        .push_back(Script::Add(vec![LaneSpec {
+            id: LaneId(2),
+            partition: PartitionId(2),
+            batches: tens(1),
+        }]));
+    wait_for("the new lane is read", FINISH_DEADLINE, || {
+        h.chain.consumed.load(Ordering::Relaxed) == 30
+    });
+    shut_down(h);
+}

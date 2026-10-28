@@ -55,9 +55,9 @@ What the framework holds you to:
   thread at 100% for nothing. A lane that reaches the end of its input can
   say so through `finished`. Once a poll has returned the `Ok(None)` that
   ends its input, the lane may report `finished`, and that poll need not
-  wait out `timeout`: the pipeline thread stops polling the lane and waits
-  on its control channel instead. A lane that never reports `finished`
-  keeps the rule above.
+  wait out `timeout`: the pipeline thread stops polling the lane, and a
+  thread whose lanes have all finished waits on its control channel. A lane
+  that never reports `finished` keeps the rule above.
 
 The batch type holds one poll's payloads and streams them out one at a time,
 all sharing the batch lifetime:

@@ -154,6 +154,9 @@ pub(crate) fn run_driver<L: SourceLane>(ctx: DriverContext<L>) -> DriverExit {
                         !goes
                     });
                     prune_gates(&mut gates, &lanes);
+                    // A streak counted against the old rotation would park
+                    // the smaller one before it has seen every lane.
+                    skipped_streak = 0;
                     if stopped > 0 {
                         flush_until(
                             chain.as_mut(),
@@ -191,6 +194,7 @@ pub(crate) fn run_driver<L: SourceLane>(ctx: DriverContext<L>) -> DriverExit {
                     // emits a partial chunk once per completed unit.
                     lanes.retain(|l| !drop.contains(&l.id()));
                     prune_gates(&mut gates, &lanes);
+                    skipped_streak = 0;
                 }
                 ThreadControl::Shutdown { barrier, deadline } => {
                     flush_until(

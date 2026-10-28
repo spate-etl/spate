@@ -19,8 +19,19 @@ use crate::source::{
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
+
+/// Once `polled` has been polled, the first finished `finished()` read of
+/// `lane` that directly follows a finished read of `after` signals `reached`
+/// and blocks until `go` fires.
+pub(crate) struct FinishedHook {
+    pub(crate) polled: LaneId,
+    pub(crate) after: LaneId,
+    pub(crate) lane: LaneId,
+    pub(crate) reached: mpsc::Sender<()>,
+    pub(crate) go: mpsc::Receiver<()>,
+}
 
 #[derive(Default)]
 pub(crate) struct SourceLog {
@@ -43,6 +54,10 @@ pub(crate) struct SourceLog {
     pub(crate) lane_polls: Vec<(LaneId, Duration)>,
     /// How many times the driver asked each lane whether it has finished.
     pub(crate) finished_calls: BTreeMap<LaneId, usize>,
+    /// When set, blocks one `finished()` read; see [`FinishedHook`].
+    pub(crate) finished_hook: Option<FinishedHook>,
+    /// The previous `finished()` read: the lane and its answer.
+    pub(crate) last_finished_read: Option<(LaneId, bool)>,
     /// When set, `commit` and `flush_commits` fail retryably, modeling a
     /// checkpoint store outage; nothing is recorded as committed.
     pub(crate) fail_commits: bool,
@@ -427,13 +442,26 @@ impl SourceLane for FakeLane {
     }
 
     fn finished(&self) -> bool {
-        *self
-            .log
-            .lock()
-            .unwrap()
-            .finished_calls
-            .entry(self.id)
-            .or_default() += 1;
+        let hook = {
+            let mut log = self.log.lock().unwrap();
+            *log.finished_calls.entry(self.id).or_default() += 1;
+            let previous = log.last_finished_read.replace((self.id, self.finished));
+            if self.finished
+                && log.finished_hook.as_ref().is_some_and(|h| {
+                    h.lane == self.id
+                        && previous == Some((h.after, true))
+                        && log.lane_polls.iter().any(|(l, _)| *l == h.polled)
+                })
+            {
+                log.finished_hook.take()
+            } else {
+                None
+            }
+        };
+        if let Some(hook) = hook {
+            hook.reached.send(()).unwrap();
+            hook.go.recv().unwrap();
+        }
         self.finished
     }
 }

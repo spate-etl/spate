@@ -369,8 +369,8 @@ every hold 12 hours after the receive, so a delivery still waiting then goes
 back to the queue unread, one receive closer to `maxReceiveCount`. On Kafka a
 waiting delivery's offset holds back its partition's commit point.
 
-`units_held` bounds the lanes the source reads at once, one per unit or range
-in progress, and with them its read parallelism. The default is twice the pipeline
+`units_held` bounds the lanes the source reads at once, one per unit or range in
+progress, and with them its read parallelism. The default is twice the pipeline
 thread count, the value `spate_pipeline_threads` reports. A source opened
 outside a pipeline, with no thread count, holds 96. At startup the source logs
 at `INFO` the units it holds and their `origin`: `explicit` for `units_held`,
@@ -814,8 +814,9 @@ and a call from a thread in a Tokio runtime context, such as async code or a
 A unit the feed rejects as retryable is published again, up to five attempts,
 after waits of 200 ms, 400 ms, 800 ms and 1.6 s. A unit the feed refuses, or
 still rejects after the fifth attempt, fails the run, and the error names its
-first object and, for a unit of several, how many it holds. A failed run returns its error, so a binary that returns it from
-`main()` exits non-zero, and the next run resumes after the checkpoint.
+first object and, for a unit of several, how many it holds. A failed run returns
+its error, so a binary that returns it from `main()` exits non-zero, and the
+next run resumes after the checkpoint.
 
 The lister adds no timeout of its own. Each request to the store is bounded by
 `object_store`'s retries, about three minutes. A publish waits as long as its
@@ -925,16 +926,15 @@ reads every object whole, and logs that at `INFO` when it opens.
 Object-level read problems are not record errors, and they are not instant
 pipeline failures either. Transient failures are retried inside the source
 (capped backoff, ranged re-reads pinned to the ETag). Anything object-terminal
-**fails the unit**: a key deleted after it was listed or announced, an
-overwrite tripping the `If-Match` pin, corrupt or truncated content, or an
-exhausted retry budget. The
-unit is failed back to the feed (counted in
+**fails the unit**: a key deleted after it was listed or announced, an overwrite
+tripping the `If-Match` pin, corrupt or truncated content, or an exhausted retry
+budget. The unit is failed back to the feed (counted in
 `spate_s3_source_objects_failed_total{reason}`) and delivered again, until the
-feed dead-letters it at its
-cap. A unit of several small objects fails back with all of them, and the feed
-dead-letters them together. A bounded job with a dead-lettered unit ends **stalled**, which is fatal,
-so `run()` returns `ExitState::Failed` rather than a silently partial
-`Completed`, as [How a bounded job ends](#how-a-bounded-job-ends) describes.
+feed dead-letters it at its cap. A unit of several small objects fails back with
+all of them, and the feed dead-letters them together. A bounded job with a
+dead-lettered unit ends **stalled**, which is fatal, so `run()` returns
+`ExitState::Failed` rather than a silently partial `Completed`, as
+[How a bounded job ends](#how-a-bounded-job-ends) describes.
 
 A key the S3 client cannot address fails as well. The client rejects a key
 with an empty segment (`d//x.ndjson`), a `.` or `..` segment, or an ASCII

@@ -6,7 +6,9 @@ description: "The lister packs small objects into shared units of up to 16, so a
 
 - **Status:** accepted
 - **Date:** 2026-10-28
-- **Supersedes:** [ADR-0071](0071-a-work-unit-is-one-object-or-one-byte-range-of-one-object.md), for lister packing
+- **Supersedes:**
+  [ADR-0071](0071-a-work-unit-is-one-object-or-one-byte-range-of-one-object.md),
+  for lister packing
 - **Superseded by:** —
 
 ## Context and problem statement
@@ -110,14 +112,14 @@ RustFS, Ceph RGW and Garage in the Docker job.
 
 ## Evidence
 
-Measured on one c8g.16xlarge in eu-west-2 by spate-etl/coordbench's
-`backfill/` harness at 8c4ec84, reading 217,152 zstd objects of about 2.1 MB
-(16 MiB decoded) through the in-process feed with 48 pipeline threads,
-`io_threads: 12`, spate's default `prefetch_bytes` and `chunk_bytes`, a
-3-minute cap and a 149 s steady window per arm. The base build is spate
-80232259, which reads a descriptor of several objects but whose lister
-publishes one object per unit; the head build is 83af0b5e, this record's
-pull request before the record. The builds ran in ABBA order on one host, two passes each:
+Measured on one c8g.16xlarge in eu-west-2 by spate-etl/coordbench's `backfill/`
+harness at 8c4ec84, reading 217,152 zstd objects of about 2.1 MB (16 MiB
+decoded) through the in-process feed with 48 pipeline threads, `io_threads: 12`,
+spate's default `prefetch_bytes` and `chunk_bytes`, a 3-minute cap and a 149 s
+steady window per arm. The base build is spate 80232259, which reads a
+descriptor of several objects but whose lister publishes one object per unit;
+the head build is 83af0b5e, this record's pull request before the record. The
+builds ran in ABBA order on one host, two passes each:
 
 | `units_held` | Base decoded GB/s | Head decoded GB/s | Head over base | Busy pipeline threads, base / head |
 |---|---|---|---|---|

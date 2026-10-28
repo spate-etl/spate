@@ -10,8 +10,8 @@
 //! The sink here is not hung but *down*: every write fails retryably and
 //! `retry.max_attempts` defaults to 0 (unbounded), so each write task retries
 //! for the length of the outage and never releases its in-flight permit. A
-//! down sink therefore reaches the drain deadlock with no exotic client
-//! behavior.
+//! down sink therefore holds every permit with no exotic client behavior, and
+//! a `dispatch` that blocked on the semaphore would deadlock the drain.
 
 use spate_core::config::PipelineConfig;
 use spate_core::deser::Owned;

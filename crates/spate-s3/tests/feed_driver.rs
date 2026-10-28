@@ -1150,10 +1150,10 @@ fn overwrite_yaml() -> String {
         .build()
 }
 
-/// Pins that a pipeline thread holding a finished S3 lane keeps reading the
-/// sibling lane on the same thread to its end.
+/// Pins that a thread keeps reading a lane while a finished sibling lane on
+/// it waits on the sink for its acknowledgement.
 #[test]
-fn a_finished_lane_does_not_starve_a_reading_lane_on_its_thread() {
+fn a_finished_lane_waiting_on_the_sink_does_not_starve_its_sibling() {
     let dir = tempfile::tempdir().unwrap();
     let data = data_dir(&dir);
     let (rows_a, rows_b) = (recs("a", 20), recs("b", 20));
@@ -1164,11 +1164,9 @@ fn a_finished_lane_does_not_starve_a_reading_lane_on_its_thread() {
         let (etag, size) = (etag_of(&data, name), size_of(&data, name));
         script.deliver(pinned_notification(name, size, &etag, 0));
     }
-    // One object finishes while the other's GET is held, so the thread holds
-    // a finished lane beside a lane still waiting on its bytes.
     let store = ScriptedStore::new(dir.path());
     store.hold_get(2);
-    let yaml = PipelineYaml::endpoint("s3-finished-sibling", "http://127.0.0.1:9")
+    let yaml = PipelineYaml::endpoint("s3-finished-sibling-held", "http://127.0.0.1:9")
         .fed_by_code()
         .threads(1)
         .build();
@@ -1177,14 +1175,31 @@ fn a_finished_lane_does_not_starve_a_reading_lane_on_its_thread() {
     let l = launch_customized(
         &yaml,
         test_options(),
-        |_| {},
+        |sink| sink.enqueue_global(WriteOutcome::ok().held()),
         move |source, _io| line_framer(source).with_store(held_store).with_feed(feed),
     );
+    // The first object's write is held, so its lane stays on the thread,
+    // finished and unacknowledged, while the second object's bytes arrive.
     wait_until(DEADLINE, "the second GET is held", || store.holding());
-    wait_until(DEADLINE, "the first unit is acknowledged", || {
-        script.acknowledged().len() == 1
+    wait_until(DEADLINE, "the first object's write is held", || {
+        l.script.held_writes() == 1
     });
     store.release();
+    // Whichever object the held GET belongs to, its rows can only reach the
+    // sink in a second write, read while the first object's lane is still
+    // on the thread, finished and held.
+    wait_until(
+        DEADLINE,
+        "the second object is read beside the finished lane",
+        || l.script.writes().len() >= 2,
+    );
+    // Only the first object's write is held, so at most the second unit can
+    // have been acknowledged.
+    assert!(
+        script.acknowledged().len() < 2,
+        "the first unit is still held"
+    );
+    l.script.release_held();
     wait_until(DEADLINE, "both units are acknowledged", || {
         script.acknowledged().len() == 2
     });

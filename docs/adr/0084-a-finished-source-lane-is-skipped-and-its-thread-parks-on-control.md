@@ -59,8 +59,8 @@ return would keep the thread polling a lane that can produce nothing.
 
 - Good, because a thread whose S3 lanes have all finished uses no CPU while it
   waits for their acknowledgements.
-- Good, because a skipped lane costs one `finished()` read, with no allocation,
-  clock read or poll.
+- Good, because a skipped lane costs one `finished()` read and one turn of the
+  driver loop, with no allocation and no poll.
 - Bad, because a parked thread still wakes about 100 times a second at the
   10 ms `poll_timeout` default to heartbeat and check its lull.
 - Bad, because a thread with one reading lane beside k finished lanes makes

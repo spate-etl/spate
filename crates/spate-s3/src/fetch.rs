@@ -999,6 +999,9 @@ mod tests {
         /// before it reads; 0 holds none.
         hold_on: u32,
         release: Arc<tokio::sync::Semaphore>,
+        /// The GET, counted from 1, answered with an empty body; 0 answers
+        /// none.
+        empty_on: u32,
         /// Held GETs started, and held GET futures dropped, finished or not.
         held: AtomicU32,
         held_dropped: Arc<AtomicU32>,
@@ -1053,6 +1056,7 @@ mod tests {
                 bodies_drained: Arc::new(AtomicU32::new(0)),
                 requests: std::sync::Mutex::new(Vec::new()),
                 hold_on: 0,
+                empty_on: 0,
                 release: Arc::new(tokio::sync::Semaphore::new(0)),
                 held: AtomicU32::new(0),
                 held_dropped: Arc::new(AtomicU32::new(0)),
@@ -1205,6 +1209,12 @@ mod tests {
                 ));
             }
             let result = self.inner.get_opts(location, options).await?;
+            if nth == self.empty_on {
+                return Ok(GetResult {
+                    payload: GetResultPayload::Stream(Box::pin(futures_util::stream::empty())),
+                    ..result
+                });
+            }
             if self
                 .cut_streams
                 .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
@@ -2104,6 +2114,25 @@ mod tests {
                 .unwrap();
             assert_eq!(flaky.held_dropped.load(Ordering::Relaxed), 1);
         }
+    }
+
+    /// Pins that a bounded read answered with no bytes poisons the unit,
+    /// where reading the window again would succeed.
+    #[tokio::test(start_paused = true)]
+    async fn an_empty_ranged_read_poisons_the_unit() {
+        let mut flaky = FlakyStore::new(seeded(&[("p/a", b"0123456789")]).await);
+        flaky.empty_on = 1;
+        let store: Arc<dyn ObjectStore> = Arc::new(flaky);
+        let slice = listed(&store).await;
+        let msgs = collect_fetch(store, slice, 0, 4, 8).await;
+        assert!(
+            matches!(
+                msgs.last(),
+                Some(ChunkMsg::LaneFailed(SplitFailure::Poison(PoisonKind::Undecodable, reason)))
+                    if reason.contains("returned no bytes")
+            ),
+            "{msgs:?}"
+        );
     }
 
     /// Pins that a member the store reports no ETag for is never read

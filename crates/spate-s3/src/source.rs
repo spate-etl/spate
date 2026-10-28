@@ -187,7 +187,8 @@ impl S3Source {
 
     /// Test seam: read work units from `feed` in place of the `feed:` section.
     /// Each unit's body is a [`SplitDescriptor`] naming one object, whole or
-    /// one byte range of it, or a storage notification read as one
+    /// one byte range of it, or several objects read whole in turn, or a
+    /// storage notification read as one
     /// part per non-empty created object; any other body is failed back to
     /// the feed. A whole object that qualifies for byte ranges under
     /// `split_target_bytes` is read in ranges. Conflicts with a `feed:`
@@ -232,8 +233,10 @@ impl S3Source {
         self
     }
 
-    /// Run the lister once: list the prefix and publish one unit per object
-    /// or byte range to `feed`, then write the end marker at the job
+    /// Run the lister once: list the prefix and publish the listed objects to
+    /// `feed`, small ones packed into shared units toward
+    /// `split_target_bytes` and a large qualifying one cut into byte ranges,
+    /// then write the end marker at the job
     /// location. This is a lister run, which `main()` starts once per job in
     /// place of a worker. It reads the source and the `feed:` section of the
     /// workers' own pipeline file and builds no sink.

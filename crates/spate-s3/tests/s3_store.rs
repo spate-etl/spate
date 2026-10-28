@@ -21,8 +21,8 @@ use support::{PipelineYaml, captured_rows, launch, lines_bytes, recs, sorted, te
 
 fn config_yaml(gw: &Gateway) -> String {
     // A unit frees its slot only once the sink's batch seals, up to one
-    // linger later, so 1,200 small objects at two units per pipeline thread
-    // take hundreds of lingers. 96 held reads them in a few dozen.
+    // linger later. 1,200 small objects pack sixteen to a unit, 75 units, so
+    // 96 held reads them in one round.
     PipelineYaml::bucket("s3-store-test", gw)
         .section("feed:\n  memory: {}\n  units_held: 96\n")
         .build()

@@ -25,7 +25,8 @@
 //!
 //! An object above the target that [`Packing::delimiter_for`] accepts is cut
 //! by [`tile`] into byte ranges of at most the target, one unit each; any
-//! other object is read whole.
+//! other object is read whole, and the lister packs it into a unit with the
+//! objects listed beside it while their bytes stay within the target.
 
 use crate::config::Compression;
 use crate::fetch::ObjectEntry;
@@ -44,6 +45,29 @@ pub const DESCRIPTOR_VERSION: u32 = 2;
 /// A unit naming more is failed back. Far below the composite offset's
 /// ordinal space, so no unit's ordinal overflows it.
 pub const MAX_UNIT_MEMBERS: usize = 4096;
+
+/// The most objects one unit the lister publishes packs together.
+pub(crate) const PACK_MEMBERS: usize = 16;
+
+/// The longest key the lister packs with other objects. A longer key is
+/// published alone, so a packed unit's body stays under
+/// [`PACKED_BODY_MAX_BYTES`] on a store that allows keys longer than S3's
+/// 1,024 bytes.
+pub(crate) const PACK_KEY_MAX_BYTES: usize = 1024;
+
+/// The largest body a packed unit carries: [`PACK_MEMBERS`] members whose
+/// keys of [`PACK_KEY_MAX_BYTES`] each escape to two bytes a byte in JSON,
+/// with an ETag, a size and a time each, come to about 36 KB. It sits under
+/// librdkafka's default `message.max.bytes` of 1,000,000 less 36 bytes of
+/// record overhead, and under the SQS feed's 1 MiB message less its
+/// attribute name and type, with room for a 25-byte id and a dead-letter
+/// copy's headers.
+pub(crate) const PACKED_BODY_MAX_BYTES: usize = 48 * 1024;
+
+const _: () = assert!(PACK_MEMBERS <= MAX_UNIT_MEMBERS);
+const _: () = assert!(PACKED_BODY_MAX_BYTES + 1024 + 25 <= 1_000_000 - 36);
+const _: () =
+    assert!(PACKED_BODY_MAX_BYTES + 1024 + 25 <= 1_048_576 - "spate.unit".len() - "String".len());
 
 /// Version folded into every id by [`split_id_for`] and
 /// [`split_id_for_range`]. It is part of the persisted identity, so a change

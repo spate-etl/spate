@@ -1,7 +1,8 @@
 //! Work units of the feed path and their parts: a unit a lister publishes
-//! names one object, or one byte range of one object, a descriptor may name
-//! several objects read whole on one lane, and a storage notification is one
-//! unit with one part per non-empty created object.
+//! names one object, one byte range of one object, or up to
+//! [`PACK_MEMBERS`] small objects read whole on one lane, and a storage
+//! notification is one unit with one part per non-empty created object.
+//! [`Packer`] packs a listing's small objects into shared units.
 //!
 //! [`parts_of`] decides whether an object is read whole or cut, by the rule
 //! the lister applies to a listing ([`Packing::delimiter_for`] and
@@ -16,8 +17,8 @@ use crate::fetch::{ObjectEntry, Overwrite};
 use crate::framer::Codec;
 use crate::listing::addressable;
 use crate::split::{
-    DescriptorObject, MAX_UNIT_MEMBERS, Packing, SplitDescriptor, SplitError, SplitRange,
-    split_id_for, split_id_for_range, tile,
+    DescriptorObject, MAX_UNIT_MEMBERS, PACK_KEY_MAX_BYTES, PACK_MEMBERS, Packing, SplitDescriptor,
+    SplitError, SplitRange, split_id_for, split_id_for_range, tile,
 };
 use object_store::path::Path;
 use serde::Deserialize;
@@ -190,6 +191,143 @@ pub(crate) fn units(
             ),
         };
         Ok(Unit::new(id, descriptor.encode()?))
+    })
+}
+
+/// A unit the lister publishes, with the first object it names and how many
+/// it names.
+#[derive(Debug)]
+pub(crate) struct Minted {
+    pub(crate) unit: Unit,
+    pub(crate) first_key: String,
+    pub(crate) objects: usize,
+}
+
+/// Packs listed objects read whole into shared units, in listing order, with
+/// one unit open at a time.
+///
+/// An object shares a unit when it is read whole, its key is
+/// [`addressable`] and at most [`PACK_KEY_MAX_BYTES`], and its ETag is absent
+/// or can be sent in `If-Match`. The open unit closes before an object whose
+/// bytes would take it past the split target, and once it holds
+/// [`PACK_MEMBERS`] objects. Any other object closes the open unit and is
+/// minted by [`units`] alone. Which objects share a unit depends only on the
+/// sequence of keys, sizes and ETags pushed, so the same listing packs the
+/// same way.
+pub(crate) struct Packer {
+    packing: Packing,
+    open: Vec<ObjectEntry>,
+    open_bytes: u64,
+}
+
+impl Packer {
+    pub(crate) fn new(packing: Packing) -> Packer {
+        Packer {
+            packing,
+            open: Vec::new(),
+            open_bytes: 0,
+        }
+    }
+
+    /// Add `entry` and return the units it closes or mints, in listing
+    /// order. A cut object's ranges are minted as the iterator is drawn.
+    ///
+    /// # Errors
+    ///
+    /// An item is an error when a descriptor or an id cannot be built, which
+    /// no listed object causes.
+    pub(crate) fn push(
+        &mut self,
+        entry: ObjectEntry,
+    ) -> impl Iterator<Item = Result<Minted, SplitError>> + use<> {
+        let shared = self.shares(&entry);
+        let before = if !shared || self.open_bytes + entry.size > self.packing.target_bytes {
+            self.close()
+        } else {
+            None
+        };
+        let (alone, after) = if shared {
+            self.open_bytes += entry.size;
+            self.open.push(entry);
+            let full = if self.open.len() == PACK_MEMBERS {
+                self.close()
+            } else {
+                None
+            };
+            (None, full)
+        } else {
+            (Some(entry), None)
+        };
+        let packing = self.packing;
+        before.into_iter().chain(after).chain(
+            alone
+                .into_iter()
+                .flat_map(move |entry| alone_units(entry, packing)),
+        )
+    }
+
+    /// Mint the open unit, or `None` when no object is waiting in it.
+    ///
+    /// # Errors
+    ///
+    /// An error when a descriptor or an id cannot be built, which no listed
+    /// object causes.
+    pub(crate) fn close(&mut self) -> Option<Result<Minted, SplitError>> {
+        if self.open.is_empty() {
+            return None;
+        }
+        let mut members = std::mem::take(&mut self.open);
+        self.open_bytes = 0;
+        if members.len() == 1 {
+            // Minted as `units` mints it, so its id and body are an unpacked
+            // object's.
+            let entry = members.pop().expect("one member");
+            return alone_units(entry, self.packing).next();
+        }
+        Some(packed_unit(&members))
+    }
+
+    fn shares(&self, entry: &ObjectEntry) -> bool {
+        self.packing.delimiter_for(entry).is_none()
+            && addressable(&entry.key)
+            && entry.key.len() <= PACK_KEY_MAX_BYTES
+            && entry.etag.as_deref().is_none_or(sendable)
+    }
+}
+
+/// [`units`] over one object, each with that object as its first.
+pub(crate) fn alone_units(
+    entry: ObjectEntry,
+    packing: Packing,
+) -> impl Iterator<Item = Result<Minted, SplitError>> {
+    let first_key = entry.key.clone();
+    units(entry, packing).map(move |unit| {
+        unit.map(|unit| Minted {
+            unit,
+            first_key: first_key.clone(),
+            objects: 1,
+        })
+    })
+}
+
+/// One unit naming `members` whole, in order.
+fn packed_unit(members: &[ObjectEntry]) -> Result<Minted, SplitError> {
+    let id = split_id_for(members.iter().map(|e| (e.key.as_str(), e.etag.as_deref())))?;
+    let descriptor = SplitDescriptor::new(
+        members
+            .iter()
+            .map(|e| DescriptorObject {
+                key: e.key.clone(),
+                size: e.size,
+                etag: e.etag.clone(),
+                last_modified_ms: e.last_modified_ms,
+            })
+            .collect(),
+    );
+    Ok(Minted {
+        unit: Unit::new(id, descriptor.encode()?),
+        first_key: members[0].key.clone(),
+        objects: members.len(),
     })
 }
 
@@ -1497,6 +1635,206 @@ mod tests {
                     prop_assert_ne!(&a.id, &b.id, "the id ignores the ETag");
                 }
             }
+        }
+    }
+
+    /// Every unit `Packer` mints over `entries`, pushed in order and closed.
+    fn pack(entries: &[ObjectEntry], packing: Packing) -> Vec<Minted> {
+        let mut packer = Packer::new(packing);
+        let mut out: Vec<Minted> = Vec::new();
+        for entry in entries {
+            for minted in packer.push(entry.clone()) {
+                out.push(minted.unwrap());
+            }
+        }
+        out.extend(packer.close().map(Result::unwrap));
+        out
+    }
+
+    fn member_keys(minted: &[Minted]) -> Vec<Vec<String>> {
+        minted
+            .iter()
+            .map(|m| {
+                SplitDescriptor::decode(&m.unit.body)
+                    .unwrap()
+                    .objects
+                    .into_iter()
+                    .map(|o| o.key)
+                    .collect()
+            })
+            .collect()
+    }
+
+    fn entry_tagged(key: &str, etag: Option<&str>) -> ObjectEntry {
+        ObjectEntry {
+            key: key.into(),
+            size: 10,
+            etag: etag.map(str::to_owned),
+            last_modified_ms: 1,
+        }
+    }
+
+    /// Pins that an object whose ETag `If-Match` cannot carry is a unit of
+    /// its own between objects that would otherwise share one.
+    #[test]
+    fn an_object_whose_etag_cannot_be_sent_is_packed_alone() {
+        let entries = [
+            entry_tagged("a/x", Some("\"x\"")),
+            entry_tagged("a/bad", Some("\"a\u{1}b\"")),
+            entry_tagged("a/y", Some("\"y\"")),
+        ];
+        assert_eq!(
+            member_keys(&pack(&entries, packing())),
+            [["a/x"], ["a/bad"], ["a/y"]]
+        );
+    }
+
+    /// Pins that a small object with no ETag shares a unit with the objects
+    /// listed beside it.
+    #[test]
+    fn a_small_object_without_an_etag_shares_a_unit() {
+        let entries = [
+            entry_tagged("a/x", Some("\"x\"")),
+            entry_tagged("a/none", None),
+            entry_tagged("a/y", Some("\"y\"")),
+        ];
+        let minted = pack(&entries, packing());
+        assert_eq!(member_keys(&minted), [["a/x", "a/none", "a/y"]]);
+        assert_eq!(minted[0].first_key, "a/x");
+        assert_eq!(minted[0].objects, 3);
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
+
+        /// Pins the packing rule against a restatement of it: every listed
+        /// object is in exactly one unit, whole or in ranges tiling it; a
+        /// unit of several objects holds only objects read whole with an
+        /// addressable key of at most 1,024 bytes and a sendable ETag,
+        /// consecutive in listing order, at most sixteen and at most the
+        /// target in bytes, under the id of its member set; and two runs
+        /// mint the same units.
+        #[test]
+        fn prop_packed_units_tile_the_listing(
+            objects in proptest::collection::vec(
+                (0u8..7, any::<u64>(), 0usize..6, 0u8..6, 0u8..3, any::<bool>()),
+                0..40,
+            ),
+            target in target(),
+            codec in 0u8..4,
+            delimiter in proptest::option::of(Just(b'\n')),
+        ) {
+            let compression = compression(codec);
+            let packing = Packing { target_bytes: target, compression, delimiter };
+            let listing: Vec<(ObjectEntry, bool)> = objects
+                .iter()
+                .enumerate()
+                .map(|(i, &(size_shape, random, ext, key_shape, etag, long))| {
+                    let (mut key, unaddressable) = key(i, key_shape, EXTENSIONS[ext]);
+                    // Only an addressable key, so the padding keeps its shape.
+                    if long && key_shape == 0 {
+                        key = format!("{}{key}", "x".repeat(1025 - key.len()));
+                    }
+                    let etag = match etag {
+                        0 => None,
+                        1 => Some(format!("\"etag-{i}\"")),
+                        _ => Some(format!("\"bad\u{1}{i}\"")),
+                    };
+                    let entry = ObjectEntry {
+                        key,
+                        size: size(target, size_shape, random),
+                        etag,
+                        last_modified_ms: 1,
+                    };
+                    (entry, unaddressable)
+                })
+                .collect();
+            let entries: Vec<ObjectEntry> = listing.iter().map(|(e, _)| e.clone()).collect();
+            let got = pack(&entries, packing);
+            let again = pack(&entries, packing);
+            let units: Vec<&Unit> = got.iter().map(|m| &m.unit).collect();
+            prop_assert_eq!(units, again.iter().map(|m| &m.unit).collect::<Vec<_>>());
+
+            // The rule, restated: which objects are cut, and which share.
+            let cut = |(e, unaddressable): &(ObjectEntry, bool)| {
+                delimiter.is_some()
+                    && e.size > target
+                    && e.size <= MAX_SUBDIVIDABLE_BYTES
+                    && e.etag.is_some()
+                    && plain(compression, &e.key)
+                    && !unaddressable
+            };
+            let shares = |item: &(ObjectEntry, bool)| {
+                let (e, unaddressable) = item;
+                !cut(item)
+                    && !unaddressable
+                    && e.key.len() <= 1024
+                    && !e.etag.as_deref().is_some_and(|t| t.contains('\u{1}'))
+            };
+            // The expected groups: (keys, whether the group is one cut object).
+            let mut want: Vec<(Vec<String>, bool)> = Vec::new();
+            let mut open: Vec<String> = Vec::new();
+            let mut open_bytes = 0u64;
+            for item in &listing {
+                let (e, _) = item;
+                if shares(item) {
+                    if !open.is_empty() && open_bytes + e.size > target {
+                        want.push((std::mem::take(&mut open), false));
+                        open_bytes = 0;
+                    }
+                    open.push(e.key.clone());
+                    open_bytes += e.size;
+                    if open.len() == 16 {
+                        want.push((std::mem::take(&mut open), false));
+                        open_bytes = 0;
+                    }
+                } else {
+                    if !open.is_empty() {
+                        want.push((std::mem::take(&mut open), false));
+                        open_bytes = 0;
+                    }
+                    want.push((vec![e.key.clone()], cut(item)));
+                }
+            }
+            if !open.is_empty() {
+                want.push((open, false));
+            }
+
+            let mut at = 0;
+            for (keys, is_cut) in &want {
+                if *is_cut {
+                    let entry = &entries.iter().find(|e| e.key == keys[0]).unwrap();
+                    let mut next = 0;
+                    while next < entry.size {
+                        let d = SplitDescriptor::decode(&got[at].unit.body).unwrap();
+                        let range = d.range.expect("a cut object yields ranges");
+                        prop_assert_eq!(&d.objects[0].key, &keys[0]);
+                        prop_assert_eq!(range.start, next);
+                        next = range.end;
+                        at += 1;
+                    }
+                    continue;
+                }
+                let minted = &got[at];
+                let d = SplitDescriptor::decode(&minted.unit.body).unwrap();
+                let got_keys: Vec<&String> = d.objects.iter().map(|o| &o.key).collect();
+                prop_assert_eq!(got_keys, keys.iter().collect::<Vec<_>>());
+                prop_assert_eq!(d.range, None);
+                prop_assert!(keys.len() <= PACK_MEMBERS);
+                if keys.len() > 1 {
+                    let bytes: u64 = d.objects.iter().map(|o| o.size).sum();
+                    prop_assert!(bytes <= target, "{} bytes over a {} target", bytes, target);
+                }
+                let id = split_id_for(
+                    d.objects.iter().map(|o| (o.key.as_str(), o.etag.as_deref())),
+                )
+                .unwrap();
+                prop_assert_eq!(&minted.unit.id, &id);
+                prop_assert_eq!(&minted.first_key, &keys[0]);
+                prop_assert_eq!(minted.objects, keys.len());
+                at += 1;
+            }
+            prop_assert_eq!(at, got.len(), "a unit the rule does not account for");
         }
     }
 

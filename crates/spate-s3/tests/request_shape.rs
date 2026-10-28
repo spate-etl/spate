@@ -60,8 +60,9 @@ impl Staged {
     }
 }
 
-/// Write `objects` NDJSON objects of `records` lines each. Each is one unit, so
-/// the number of objects chooses the read parallelism available.
+/// Write `objects` NDJSON objects of `records` lines each. Sixteen small
+/// objects share a unit, so `objects / 16` chooses the read parallelism
+/// available.
 fn stage(objects: usize, records: usize) -> Staged {
     let dir = tempfile::tempdir().unwrap();
     let data = dir.path().join("data");
@@ -211,7 +212,8 @@ fn windowed_reads_tile_each_object_without_overlap_or_repeat() {
 #[test]
 fn concurrent_reads_reach_the_in_flight_budget() {
     // Read parallelism is one fetcher task per held unit and not a knob of its
-    // own, so 64 units against `units_held: 4` must put four reads in flight
+    // own, so 64 small objects, four units of sixteen, against
+    // `units_held: 4` must put four reads in flight
     // together. The spy holds each GET until four are
     // in flight, so the observation is the source's parallelism and not a
     // scheduler artifact; its deadline latches the gate open, so a collapse to
@@ -246,12 +248,12 @@ fn concurrent_reads_reach_the_in_flight_budget() {
     );
 }
 
-/// A run that reads many one-object units through the feed ends with
+/// A run that reads many units through the feed ends with
 /// `final_watermarks` holding at most the units it holds, since a partition
 /// leaves the report when its lane retires.
 #[test]
 fn a_feed_run_ends_holding_at_most_units_held_watermarks() {
-    let staged = stage(32, 1);
+    let staged = stage(128, 1);
     let yaml = PipelineYaml::file("s3-request-shape-held-watermarks", &staged.data)
         .section("feed:\n  memory: {}\n  units_held: 4\n")
         .build();
@@ -267,7 +269,7 @@ fn a_feed_run_ends_holding_at_most_units_held_watermarks() {
     spate_test::wait_until(
         Duration::from_secs(60),
         "every unit is acknowledged",
-        || feed.counts().acknowledged == 32,
+        || feed.counts().acknowledged == 8,
     );
     l.shutdown.trigger();
     let report = l
@@ -284,11 +286,12 @@ fn a_feed_run_ends_holding_at_most_units_held_watermarks() {
 }
 
 /// A `feed:` section's `units_held` sets the feed path's read parallelism:
-/// `units_held: 12` over sixteen one-object units puts twelve reads in
-/// flight, and the solo run on the in-process feed lists the prefix once.
+/// `units_held: 12` over twelve units of sixteen small objects puts twelve
+/// reads in flight, and the solo run on the in-process feed lists the
+/// prefix once.
 #[test]
 fn the_feed_section_sets_read_parallelism() {
-    let staged = stage(16, 20);
+    let staged = stage(192, 20);
     let yaml = PipelineYaml::file("s3-request-shape-feed", &staged.data)
         .section("feed:\n  memory: {}\n  units_held: 12\n")
         .build();
@@ -308,7 +311,7 @@ fn the_feed_section_sets_read_parallelism() {
     spate_test::wait_until(
         Duration::from_secs(60),
         "every unit is acknowledged",
-        || feed.counts().acknowledged == 16,
+        || feed.counts().acknowledged == 12,
     );
     stop(&l);
     assert_eq!(

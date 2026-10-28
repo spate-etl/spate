@@ -270,5 +270,6 @@ from its start.
 
 *Connector mapping:*
 [S3 source](../04-connectors/sources/s3/README.mdx#unit-identity-and-drift) —
-one whole object, identified by its key and ETag, or one byte range of a large
-object, identified by its key, ETag and range.
+one whole object, one byte range of a large object, or several small objects
+read whole in turn, identified by their keys and ETags (and a range's
+range).

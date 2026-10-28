@@ -1,15 +1,18 @@
 //! A one-pass lister for a feed job: it compares the job fingerprint at the
 //! job location, or creates it when there is none after deleting a
 //! checkpoint there, deletes an end marker an earlier run left, then
-//! publishes one unit per part of each listed object, after the lister's
-//! checkpoint when it matched the fingerprint, and writes the end marker.
+//! publishes the listed objects, after the lister's checkpoint when it
+//! matched the fingerprint, and writes the end marker. Small objects read
+//! whole share units, which [`Packer`] packs; the lister publishes the open
+//! unit before each checkpoint write and at the end, so a checkpoint never
+//! passes a key in an unconfirmed unit.
 //!
 //! The checkpoint is the last listed key whose units, and those of every key
 //! listed before it, the feed has confirmed. The lister rewrites it at most
 //! once each [`CHECKPOINT_EVERY`] listed keys and once at the end. It
 //! publishes nothing for an object of size 0, publishes each object whose key
-//! the S3 client cannot address as one whole unit, and checkpoints at
-//! neither. It writes the end marker after the feed confirmed every unit of
+//! the S3 client cannot address as one whole unit of its own, and
+//! checkpoints at neither. It writes the end marker after the feed confirmed every unit of
 //! the run and the last checkpoint is written. `S3Source::list_once` runs it
 //! for a lister run, and a solo run on the in-process feed runs it with no
 //! location.
@@ -20,8 +23,8 @@ use crate::listing::{UnaddressableKeys, addressable};
 use crate::location::{
     LOCATION_OBJECT_MAX_BYTES, Location, compare, io_error, read_error, read_object, starts_with,
 };
-use crate::split::Packing;
-use crate::unit::units;
+use crate::split::{Packing, SplitError};
+use crate::unit::{Minted, Packer, alone_units};
 use futures_util::StreamExt as _;
 use object_store::path::Path;
 use object_store::{ObjectStore, ObjectStoreExt as _, PutMode, PutPayload};
@@ -77,11 +80,20 @@ pub(crate) struct Lister {
 }
 
 /// A publish the lister has not settled: the unit, kept to publish again,
-/// the key of the object it names, and the feed's confirmation.
+/// the first object it names and how many it names, and the feed's
+/// confirmation.
 struct Pending {
     unit: Unit,
-    key: String,
+    first_key: String,
+    objects: usize,
     confirmation: Confirmation,
+}
+
+/// What a listing published.
+#[derive(Clone, Copy, Default)]
+struct Published {
+    units: usize,
+    objects: usize,
 }
 
 /// What the fingerprint write found at the location.
@@ -94,11 +106,12 @@ impl Lister {
     /// Read the fingerprint and compare it, or delete a checkpoint and create
     /// the fingerprint when there is none, read the checkpoint beside a
     /// fingerprint it matched, delete an earlier end marker, then publish
-    /// every listed object's units in the order the store lists them, after
-    /// the checkpoint when there is one. An object the S3 client cannot
-    /// address is published before the next key the listing yields after its
-    /// page is fetched, or when the listing ends, ahead of any key listed
-    /// before it on that page. With a location, it then writes the end
+    /// every listed object's units in the order the store lists them, a unit
+    /// of several objects in the order of its first, after the checkpoint
+    /// when there is one. An object the S3 client cannot address is
+    /// published before the next key the listing yields after its page is
+    /// fetched, or when the listing ends, ahead of any key listed before it
+    /// on that page or still waiting in the open unit. With a location, it then writes the end
     /// marker, holding an id fresh to this run, once the feed has confirmed
     /// every unit and the last checkpoint is written. A unit the feed rejects
     /// as retryable is published again in its place, up to
@@ -151,24 +164,27 @@ impl Lister {
             tracing::info!(
                 location = %location.shown(),
                 run = %run,
-                units = published,
+                units = published.units,
+                objects = published.objects,
                 "wrote the end marker at the job location after the feed confirmed every unit \
                  of this lister run"
             );
         } else {
             tracing::info!(
-                units = published,
+                units = published.units,
+                objects = published.objects,
                 "listed the prefix into the feed, which confirmed every unit"
             );
         }
         Ok(())
     }
 
-    /// Publish the listing after `start` and return how many units it
-    /// published.
-    async fn publish_listing(&self, start: Option<Path>) -> Result<usize, SourceError> {
+    /// Publish the listing after `start` and return the units and objects
+    /// it published.
+    async fn publish_listing(&self, start: Option<Path>) -> Result<Published, SourceError> {
         let mut pending: VecDeque<Pending> = VecDeque::new();
-        let mut published = 0;
+        let mut published = Published::default();
+        let mut packer = Packer::new(self.packing);
         let mut listing = match &start {
             Some(after) => self.store.list_with_offset(Some(&self.prefix), after),
             None => self.store.list(Some(&self.prefix)),
@@ -184,10 +200,15 @@ impl Lister {
             })?;
             // `object_store` fetches a page before it yields the page's first
             // key, so every unaddressable object up to this page is recorded.
-            published += self
-                .publish_unaddressable(&mut pending, &mut unaddressable_seen)
+            self.publish_unaddressable(&mut pending, &mut unaddressable_seen, &mut published)
                 .await?;
             if since_write >= self.checkpoint_every && candidate != written {
+                // The open unit holds keys up to the candidate, so it is
+                // published and confirmed before the checkpoint passes them.
+                if let Some(minted) = packer.close() {
+                    self.publish_unit(minted, &mut pending, &mut published)
+                        .await?;
+                }
                 self.settle_all(&mut pending).await?;
                 self.write_checkpoint(candidate.as_ref()).await?;
                 written.clone_from(&candidate);
@@ -206,14 +227,20 @@ impl Lister {
             };
             let fits =
                 addressable(&entry.key) && entry.key.len() as u64 <= LOCATION_OBJECT_MAX_BYTES;
-            published += self.publish(entry, &mut pending).await?;
+            for minted in packer.push(entry) {
+                self.publish_unit(minted, &mut pending, &mut published)
+                    .await?;
+            }
             if fits {
                 candidate = Some(meta.location);
             }
         }
-        published += self
-            .publish_unaddressable(&mut pending, &mut unaddressable_seen)
+        self.publish_unaddressable(&mut pending, &mut unaddressable_seen, &mut published)
             .await?;
+        if let Some(minted) = packer.close() {
+            self.publish_unit(minted, &mut pending, &mut published)
+                .await?;
+        }
         self.settle_all(&mut pending).await?;
         if candidate.is_some() && candidate != written {
             self.write_checkpoint(candidate.as_ref()).await?;
@@ -221,35 +248,37 @@ impl Lister {
         Ok(published)
     }
 
-    /// Publish every part of `entry`, settling the oldest publish first when
-    /// [`LISTER_IN_FLIGHT`] are unconfirmed, and return how many it
-    /// published.
-    async fn publish(
+    /// Publish `minted`, settling the oldest publish first when
+    /// [`LISTER_IN_FLIGHT`] are unconfirmed, and count it in `published`.
+    async fn publish_unit(
         &self,
-        entry: ObjectEntry,
+        minted: Result<Minted, SplitError>,
         pending: &mut VecDeque<Pending>,
-    ) -> Result<usize, SourceError> {
-        let key = entry.key.clone();
-        let mut published = 0;
-        for unit in units(entry, self.packing) {
-            let unit = unit.map_err(|e| SourceError::Client {
-                class: ErrorClass::Fatal,
-                reason: format!("minting a unit: {e}"),
-            })?;
-            if pending.len() == LISTER_IN_FLIGHT
-                && let Some(oldest) = pending.pop_front()
-            {
-                self.settle(oldest).await?;
-            }
-            let confirmation = self.feed.publish(unit.clone());
-            pending.push_back(Pending {
-                unit,
-                key: key.clone(),
-                confirmation,
-            });
-            published += 1;
+        published: &mut Published,
+    ) -> Result<(), SourceError> {
+        let Minted {
+            unit,
+            first_key,
+            objects,
+        } = minted.map_err(|e| SourceError::Client {
+            class: ErrorClass::Fatal,
+            reason: format!("minting a unit: {e}"),
+        })?;
+        if pending.len() == LISTER_IN_FLIGHT
+            && let Some(oldest) = pending.pop_front()
+        {
+            self.settle(oldest).await?;
         }
-        Ok(published)
+        let confirmation = self.feed.publish(unit.clone());
+        pending.push_back(Pending {
+            unit,
+            first_key,
+            objects,
+            confirmation,
+        });
+        published.units += 1;
+        published.objects += objects;
+        Ok(())
     }
 
     /// Wait for `pending`'s confirmation. A retryable rejection publishes the
@@ -258,7 +287,8 @@ impl Lister {
     async fn settle(&self, pending: Pending) -> Result<(), SourceError> {
         let Pending {
             unit,
-            key,
+            first_key,
+            objects,
             mut confirmation,
         } = pending;
         let mut attempt = 1;
@@ -271,7 +301,8 @@ impl Lister {
                     // Per retry, so DEBUG; a unit that exhausts its attempts
                     // fails the run with the feed's error.
                     tracing::debug!(
-                        key = ?key,
+                        key = ?first_key,
+                        objects,
                         attempt,
                         error = %e,
                         "the feed rejected a unit as retryable; publishing it again"
@@ -281,9 +312,17 @@ impl Lister {
                     attempt += 1;
                 }
                 Err(e) => {
+                    let reason = if objects == 1 {
+                        format!("publishing unit {} for {first_key:?}: {e}", unit.id)
+                    } else {
+                        format!(
+                            "publishing unit {} of {objects} objects from {first_key:?}: {e}",
+                            unit.id
+                        )
+                    };
                     return Err(SourceError::Client {
                         class: e.class(),
-                        reason: format!("publishing unit {} for {key:?}: {e}", unit.id),
+                        reason,
                     });
                 }
             }
@@ -305,11 +344,11 @@ impl Lister {
         &self,
         pending: &mut VecDeque<Pending>,
         seen: &mut HashSet<String>,
-    ) -> Result<usize, SourceError> {
+        published: &mut Published,
+    ) -> Result<(), SourceError> {
         let Some(keys) = &self.unaddressable else {
-            return Ok(0);
+            return Ok(());
         };
-        let mut published = 0;
         for entry in largest_per_key(keys.take()) {
             if entry.size == 0 {
                 tracing::debug!(key = ?entry.key, "not publishing an empty object whose key the store cannot address");
@@ -318,9 +357,11 @@ impl Lister {
             if !seen.insert(entry.key.clone()) {
                 continue;
             }
-            published += self.publish(entry, pending).await?;
+            for minted in alone_units(entry, self.packing) {
+                self.publish_unit(minted, pending, published).await?;
+            }
         }
-        Ok(published)
+        Ok(())
     }
 
     /// Overwrite the checkpoint with `key`.
@@ -504,7 +545,7 @@ async fn write_end(
 mod tests {
     use super::*;
     use crate::config::Compression;
-    use crate::split::SplitDescriptor;
+    use crate::split::{PACK_MEMBERS, PACKED_BODY_MAX_BYTES, SplitDescriptor};
     use crate::testutil::HookStore;
     use spate_core::feed::memory::MemoryFeed;
     use spate_core::feed::{
@@ -557,8 +598,23 @@ mod tests {
         }
     }
 
-    /// Pins that the lister publishes in the order the store lists, which
-    /// it neither sorts nor collects first.
+    /// Each published unit's member keys, in publish order.
+    fn members(units: &[Unit]) -> Vec<Vec<String>> {
+        units
+            .iter()
+            .map(|u| {
+                SplitDescriptor::decode(&u.body)
+                    .unwrap()
+                    .objects
+                    .into_iter()
+                    .map(|o| o.key)
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// Pins that the lister packs and publishes in the order the store lists,
+    /// which it neither sorts nor collects first.
     #[test]
     fn the_lister_publishes_in_the_order_the_store_lists() {
         let rt = runtime();
@@ -574,16 +630,10 @@ mod tests {
         let (feed, script) = spate_test::scripted_feed();
         rt.block_on(lister(Arc::new(store), Arc::new(feed)).run())
             .unwrap();
-        let published: Vec<String> = script
-            .published()
-            .iter()
-            .map(|u| {
-                SplitDescriptor::decode(&u.body).unwrap().objects[0]
-                    .key
-                    .clone()
-            })
-            .collect();
-        assert_eq!(published, ["data/c", "data/b", "data/a"]);
+        assert_eq!(
+            members(&script.published()),
+            [["data/c", "data/b", "data/a"]]
+        );
     }
 
     /// Pins that a fingerprint reported present and then read as absent on
@@ -688,7 +738,10 @@ mod tests {
         let keys: Vec<String> = (0..total).map(|i| format!("data/{i:03}")).collect();
         rt.block_on(stage(&store, &keys));
         let feed = Arc::new(HoldingFeed::default());
-        let run = rt.spawn(lister(Arc::new(store), Arc::clone(&feed) as Arc<dyn Feed>).run());
+        let mut lister = lister(Arc::new(store), Arc::clone(&feed) as Arc<dyn Feed>);
+        // The objects' size, so each is a unit of its own.
+        lister.packing.target_bytes = 4;
+        let run = rt.spawn(lister.run());
 
         let mut settled = 0;
         while settled < total {
@@ -725,12 +778,15 @@ mod tests {
         Hold,
     }
 
-    /// A feed that answers each publish by its unit's key and range, and
-    /// logs every publish and confirmation to a shared event log.
+    /// A feed that answers each publish by its unit's keys and range, and
+    /// logs every publish and confirmation to a shared event log. A unit
+    /// naming several objects takes the reply of the first member answered
+    /// `Reject`, else of the first answered `Hold`, else `Confirm`.
     struct KeyedFeed {
         events: EventLog,
         reply: fn(&str, Option<SplitRange>) -> Reply,
-        /// Each published unit's id, key and object size, in publish order.
+        /// Each published unit's id with each member's key and object size,
+        /// one row per member, in publish order.
         published: Mutex<Vec<(String, String, u64)>>,
         /// Each held unit's id and confirmer, in publish order.
         held: Mutex<Vec<(String, Confirmer)>>,
@@ -798,18 +854,29 @@ mod tests {
         }
         fn publish(&self, unit: Unit) -> Confirmation {
             let descriptor = SplitDescriptor::decode(&unit.body).unwrap();
-            let key = descriptor.objects[0].key.clone();
-            let size = descriptor.objects[0].size;
             self.events
                 .lock()
                 .unwrap()
                 .push(Event::Published(unit.id.clone()));
-            self.published
-                .lock()
-                .unwrap()
-                .push((unit.id.clone(), key.clone(), size));
+            self.published.lock().unwrap().extend(
+                descriptor
+                    .objects
+                    .iter()
+                    .map(|o| (unit.id.clone(), o.key.clone(), o.size)),
+            );
+            let replies: Vec<Reply> = descriptor
+                .objects
+                .iter()
+                .map(|o| (self.reply)(&o.key, descriptor.range))
+                .collect();
+            let reply = replies
+                .iter()
+                .find(|r| matches!(r, Reply::Reject(_)))
+                .or_else(|| replies.iter().find(|r| matches!(r, Reply::Hold)))
+                .cloned()
+                .unwrap_or(Reply::Confirm);
             let (confirmer, confirmation) = confirmation();
-            match (self.reply)(&key, descriptor.range) {
+            match reply {
                 Reply::Confirm => self.confirm(unit.id, confirmer),
                 Reply::Reject(kind) => confirmer.reject(FeedError::new(kind, "scripted")),
                 Reply::Hold => self.held.lock().unwrap().push((unit.id, confirmer)),
@@ -1576,9 +1643,10 @@ mod tests {
 
     /// Pins that each object the S3 client cannot address and that has bytes
     /// is published once as one whole unit, though keys that decode alike
-    /// span two pages, before the checkpoint after it is written, that one on
-    /// a last page holding no other key is published, and that none becomes
-    /// the checkpoint.
+    /// span two pages, before the checkpoint after it is written and ahead
+    /// of the keys still waiting in the open unit, that one on a last page
+    /// holding no other key is published, and that none becomes the
+    /// checkpoint.
     #[test]
     fn an_unaddressable_key_with_bytes_is_published_and_never_checkpointed() {
         let rt = runtime();
@@ -1615,11 +1683,11 @@ mod tests {
             feed.keys(),
             [
                 "data/d//x.ndjson",
+                "data/a\nb",
                 "data/a",
                 "data/b",
-                "data/a\nb",
-                "data/z",
-                "data/q//r"
+                "data/q//r",
+                "data/z"
             ]
         );
         // The empty object's key is logged escaped, on one line.
@@ -2122,8 +2190,8 @@ mod tests {
                 .iter()
                 .filter(|e| matches!(e, Event::Confirmed(_)))
                 .count(),
-            2,
-            "{events:#?}"
+            1,
+            "the two keys' one unit: {events:#?}"
         );
 
         let again = job.rerun();
@@ -2211,7 +2279,8 @@ mod tests {
     }
 
     /// Pins that an empty unaddressable object does not hide one whose key
-    /// decodes alike and that lists with bytes on a later page.
+    /// decodes alike and that lists with bytes on a later page, which is
+    /// published ahead of the keys waiting in the open unit.
     #[test]
     fn an_empty_unaddressable_key_does_not_hide_a_later_one_with_bytes() {
         let rt = runtime();
@@ -2232,7 +2301,7 @@ mod tests {
         lister.store = Arc::new(store);
         lister.unaddressable = Some(keys);
         rt.block_on(lister.run()).unwrap();
-        assert_eq!(feed.keys(), ["data/a", "data/e\nf", "data/z"]);
+        assert_eq!(feed.keys(), ["data/e\nf", "data/a", "data/z"]);
     }
 
     /// A source over the S3 stub at `endpoint`, its location in `ops`.
@@ -2537,7 +2606,8 @@ mod tests {
     }
 
     /// Pins that a lister run with no location, a solo run's, logs at INFO
-    /// how many units it published once the feed confirmed them.
+    /// how many units and objects it published once the feed confirmed
+    /// them.
     #[test]
     fn a_solo_listing_logs_its_unit_count_when_it_ends() {
         let rt = runtime();
@@ -2551,8 +2621,440 @@ mod tests {
         assert!(
             lines.iter().any(|l| l.contains("INFO")
                 && l.contains("listed the prefix")
-                && l.contains("units=3")),
+                && l.contains("units=1")
+                && l.contains("objects=3")),
             "{lines:#?}"
+        );
+    }
+
+    /// A lister over an in-memory store holding each `(key, bytes)`, with no
+    /// location.
+    fn packing_lister(objects: &[(&str, &[u8])], feed: Arc<dyn Feed>) -> Lister {
+        let store = HookStore::default();
+        let rt = runtime();
+        rt.block_on(async {
+            for (key, body) in objects {
+                store
+                    .inner
+                    .put(&Path::from(*key), PutPayload::from(body.to_vec()))
+                    .await
+                    .unwrap();
+            }
+        });
+        lister(Arc::new(store), feed)
+    }
+
+    /// Pins that objects far below the split target share a unit, named in
+    /// listing order, whose id is the member set's.
+    /// Regression for #1483.
+    #[test]
+    fn small_objects_share_a_unit() {
+        let rt = runtime();
+        let (feed, script) = spate_test::scripted_feed();
+        let objects = [
+            ("data/a", &b"row\n"[..]),
+            ("data/b", b"row\n"),
+            ("data/c", b"row\n"),
+            ("data/d", b"row\n"),
+        ];
+        let lister = packing_lister(&objects, Arc::new(feed));
+        rt.block_on(lister.run()).unwrap();
+        let published = script.published();
+        assert_eq!(
+            members(&published),
+            [["data/a", "data/b", "data/c", "data/d"]]
+        );
+        let descriptor = SplitDescriptor::decode(&published[0].body).unwrap();
+        let id = crate::split::split_id_for(
+            descriptor
+                .objects
+                .iter()
+                .map(|o| (o.key.as_str(), o.etag.as_deref())),
+        )
+        .unwrap();
+        assert_eq!(published[0].id, id);
+    }
+
+    /// The sizes of the units published over `n` one-byte objects.
+    fn unit_sizes_over(n: usize) -> (Vec<usize>, Vec<String>) {
+        let rt = runtime();
+        let keys: Vec<String> = (0..n).map(|i| format!("data/{i:05}")).collect();
+        let objects: Vec<(&str, &[u8])> = keys.iter().map(|k| (k.as_str(), &b"x"[..])).collect();
+        let (feed, script) = spate_test::scripted_feed();
+        rt.block_on(packing_lister(&objects, Arc::new(feed)).run())
+            .unwrap();
+        let units = members(&script.published());
+        let sizes = units.iter().map(Vec::len).collect();
+        (sizes, units.into_iter().flatten().collect())
+    }
+
+    /// Pins that a unit holds at most sixteen objects, and that a listing
+    /// past that starts the next unit with every key published once.
+    #[test]
+    fn a_listing_past_the_member_cap_starts_a_second_unit() {
+        assert_eq!(unit_sizes_over(16).0, [16]);
+        assert_eq!(unit_sizes_over(17).0, [16, 1]);
+        let (sizes, keys) = unit_sizes_over(4097);
+        assert!(sizes.iter().all(|&n| n <= PACK_MEMBERS), "{sizes:?}");
+        let want: Vec<String> = (0..4097).map(|i| format!("data/{i:05}")).collect();
+        assert_eq!(keys, want);
+    }
+
+    /// The member keys of the units published over `objects` at a 64-byte
+    /// split target, reading `.zst` keys as zstd.
+    fn packed_at_64(objects: &[(&str, Vec<u8>)]) -> Vec<Unit> {
+        let rt = runtime();
+        let objects: Vec<(&str, &[u8])> = objects.iter().map(|(k, b)| (*k, b.as_slice())).collect();
+        let (feed, script) = spate_test::scripted_feed();
+        let mut lister = packing_lister(&objects, Arc::new(feed));
+        lister.packing.target_bytes = 64;
+        lister.packing.compression = crate::config::Compression::Auto;
+        rt.block_on(lister.run()).unwrap();
+        script.published()
+    }
+
+    /// Pins that an object joins the open unit while the unit's bytes stay
+    /// at or under the split target, and starts the next one past it.
+    #[test]
+    fn a_unit_closes_before_its_bytes_pass_the_target() {
+        let at = packed_at_64(&[
+            ("data/a", vec![b'a'; 32]),
+            ("data/b", vec![b'b'; 32]),
+            ("data/c", vec![b'c'; 1]),
+        ]);
+        assert_eq!(members(&at), [vec!["data/a", "data/b"], vec!["data/c"]]);
+        let over = packed_at_64(&[("data/a", vec![b'a'; 32]), ("data/b", vec![b'b'; 33])]);
+        assert_eq!(members(&over), [["data/a"], ["data/b"]]);
+    }
+
+    /// Pins that only small whole objects share a unit: a cut object's
+    /// ranges and an object above the target read whole are units of their
+    /// own, minted as an unpacked object's are, and each closes the open
+    /// unit.
+    #[test]
+    fn a_mixed_listing_packs_only_small_whole_objects() {
+        let published = packed_at_64(&[
+            ("data/a", vec![b'a'; 4]),
+            ("data/b", b"row\n".repeat(50)),
+            ("data/c", vec![b'c'; 4]),
+            ("data/e.zst", vec![b'e'; 65]),
+            ("data/f", vec![b'f'; 4]),
+            ("data/g", vec![b'g'; 4]),
+        ]);
+        let shape: Vec<(Vec<String>, bool)> = published
+            .iter()
+            .map(|u| {
+                let d = SplitDescriptor::decode(&u.body).unwrap();
+                (
+                    d.objects.into_iter().map(|o| o.key).collect(),
+                    d.range.is_some(),
+                )
+            })
+            .collect();
+        let unit = |keys: &[&str], ranged: bool| {
+            (
+                keys.iter().map(|k| (*k).to_owned()).collect::<Vec<_>>(),
+                ranged,
+            )
+        };
+        assert_eq!(
+            shape,
+            [
+                unit(&["data/a"], false),
+                unit(&["data/b"], true),
+                unit(&["data/b"], true),
+                unit(&["data/b"], true),
+                unit(&["data/b"], true),
+                unit(&["data/c"], false),
+                unit(&["data/e.zst"], false),
+                unit(&["data/f", "data/g"], false),
+            ]
+        );
+        for u in &published {
+            let d = SplitDescriptor::decode(&u.body).unwrap();
+            if d.objects.len() == 1 && d.range.is_none() {
+                let o = &d.objects[0];
+                assert_eq!(
+                    u.id,
+                    crate::split::split_id_for([(o.key.as_str(), o.etag.as_deref())]).unwrap(),
+                    "{} keeps an unpacked object's id",
+                    o.key
+                );
+            }
+        }
+    }
+
+    /// Pins that the checkpoint passes a key only once the unit holding it
+    /// is confirmed, though the feed confirms the newest unit first.
+    #[test]
+    fn a_checkpoint_never_passes_a_key_in_an_unconfirmed_bin() {
+        let rt = runtime();
+        let job = Job::new();
+        rt.block_on(job.put_rows(&["data/a", "data/b", "data/c", "data/d", "data/e", "data/f"]));
+        let feed = KeyedFeed::new(&job.events, |_, _| Reply::Hold);
+        let lister = job.lister(Arc::clone(&feed) as Arc<dyn Feed>, 3);
+        let run = rt.spawn(lister.run());
+        while !run.is_finished() {
+            spate_test::wait_until(DEADLINE, "a held unit or the run's end", || {
+                !feed.held.lock().unwrap().is_empty() || run.is_finished()
+            });
+            feed.confirm_newest();
+        }
+        rt.block_on(run).unwrap().unwrap();
+
+        let published = feed.published.lock().unwrap().clone();
+        let mut per_unit: HashMap<&str, usize> = HashMap::new();
+        for (id, _, _) in &published {
+            *per_unit.entry(id.as_str()).or_default() += 1;
+        }
+        assert!(per_unit.values().any(|&n| n >= 2), "{published:?}");
+        let events = job.events.lock().unwrap().clone();
+        let mut confirmed = HashSet::new();
+        let mut writes = 0;
+        for event in &events {
+            match event {
+                Event::Confirmed(id) => {
+                    confirmed.insert(id.clone());
+                }
+                Event::Put(path, body) if path == CHECKPOINT => {
+                    writes += 1;
+                    let key = String::from_utf8(body.clone()).unwrap();
+                    for (id, unit_key, _) in &published {
+                        if *unit_key <= key {
+                            assert!(confirmed.contains(id), "{id} of {unit_key} before {key}");
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(writes, 2, "{events:#?}");
+    }
+
+    /// Each published unit's id and member keys.
+    fn ids_and_members(units: &[Unit]) -> Vec<(String, Vec<String>)> {
+        units
+            .iter()
+            .map(|u| u.id.clone())
+            .zip(members(units))
+            .collect()
+    }
+
+    /// Pins that a run resumed at a checkpoint packs the keys after it as
+    /// an uninterrupted run did, under the same ids, though a key before the
+    /// checkpoint was empty.
+    #[test]
+    fn a_resumed_run_mints_the_ids_the_first_run_minted_after_its_checkpoint() {
+        for keys in [
+            &[
+                "data/a", "data/b", "data/c", "data/d", "data/e", "data/f", "data/g",
+            ][..],
+            &[
+                "data/a", "data/a0", "data/b", "data/c", "data/d", "data/e", "data/f",
+            ][..],
+        ] {
+            let rt = runtime();
+            let job = Job::new();
+            rt.block_on(async {
+                for key in keys {
+                    let body: &[u8] = if *key == "data/a0" { b"" } else { b"row\n" };
+                    job.put(key, body).await;
+                }
+            });
+            let (feed, script) = spate_test::scripted_feed();
+            rt.block_on(job.lister(Arc::new(feed), 3).run()).unwrap();
+            let after_c: Vec<(String, Vec<String>)> = ids_and_members(&script.published())
+                .into_iter()
+                .filter(|(_, m)| m.iter().all(|k| k.as_str() > "data/c"))
+                .collect();
+            // An empty key counts toward the checkpoint cadence, so it moves
+            // where the units close, and only the keys are compared then.
+            let empty_before = keys.contains(&"data/a0");
+            if !empty_before {
+                assert!(after_c.iter().any(|(_, m)| m.len() >= 2), "{after_c:?}");
+            }
+
+            let again = job.rerun();
+            rt.block_on(again.seed_checkpoint(b"data/c"));
+            let (feed, script) = spate_test::scripted_feed();
+            rt.block_on(again.lister(Arc::new(feed), 3).run()).unwrap();
+            let resumed = ids_and_members(&script.published());
+            let resumed_keys: Vec<String> = resumed.iter().flat_map(|(_, m)| m.clone()).collect();
+            let want: Vec<String> = keys
+                .iter()
+                .filter(|k| **k > "data/c")
+                .map(|k| (*k).to_owned())
+                .collect();
+            assert_eq!(resumed_keys, want, "every key after the checkpoint, once");
+            if !empty_before {
+                assert_eq!(resumed, after_c);
+            }
+        }
+    }
+
+    /// Pins that a refused unit of several objects fails the run naming its
+    /// first object and how many it holds, and that a retry logs the count.
+    #[test]
+    fn a_refused_packed_unit_names_its_first_object_and_count() {
+        let rt = runtime();
+        let job = Job::new();
+        rt.block_on(job.put_rows(&["data/a", "data/b"]));
+        let (feed, script) = spate_test::scripted_feed();
+        script.refuse_next_publish(FeedErrorKind::Refused);
+        let err = rt
+            .block_on(job.lister(Arc::new(feed), CHECKPOINT_EVERY).run())
+            .unwrap_err();
+        let reason = err.to_string();
+        assert!(reason.contains("of 2 objects from \"data/a\""), "{reason}");
+
+        let job = Job::new();
+        rt.block_on(job.put_rows(&["data/a", "data/b"]));
+        let (feed, script) = spate_test::scripted_feed();
+        script.refuse_next_publish(FeedErrorKind::Retryable);
+        let lister = job.lister(Arc::new(feed), CHECKPOINT_EVERY);
+        let lines = spate_test::capture_logs(tracing::Level::DEBUG, || {
+            rt.block_on(lister.run()).unwrap();
+        });
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("publishing it again") && l.contains("objects=2")),
+            "{lines:#?}"
+        );
+    }
+
+    /// A lister over a listing server returning `pages`, recording the keys
+    /// the S3 client cannot address.
+    fn served_lister(pages: Vec<String>, feed: Arc<dyn Feed>) -> Lister {
+        let url = crate::test_servers::listing_server(pages);
+        let keys = UnaddressableKeys::default();
+        let store = crate::test_servers::builder_at(&url)
+            .with_access_key_id("AKIDTEST")
+            .with_secret_access_key("secret")
+            .with_http_connector(UnaddressableConnector::new(keys.clone()))
+            .build()
+            .unwrap();
+        let mut lister = lister(Arc::new(store), feed);
+        lister.unaddressable = Some(keys);
+        lister
+    }
+
+    /// Pins that a key the S3 client cannot address is a unit of its own,
+    /// and that the keys listed around it share a unit without it.
+    #[test]
+    fn an_unaddressable_key_is_never_packed() {
+        let rt = runtime();
+        let (feed, script) = spate_test::scripted_feed();
+        let lister = served_lister(
+            vec![list_page(
+                &[("data/a", 7), ("data/d//dbl.ndjson", 7), ("data/e", 7)],
+                None,
+            )],
+            Arc::new(feed),
+        );
+        rt.block_on(lister.run()).unwrap();
+        assert_eq!(
+            members(&script.published()),
+            [vec!["data/d//dbl.ndjson"], vec!["data/a", "data/e"]]
+        );
+    }
+
+    /// Pins that an unaddressable key on a later page leaves the units of
+    /// the addressable keys around it as they are without it.
+    #[test]
+    fn an_unaddressable_key_between_pages_leaves_the_bins_alone() {
+        let rt = runtime();
+        let run = |second: &[(&str, u64)]| {
+            let (feed, script) = spate_test::scripted_feed();
+            let lister = served_lister(
+                vec![
+                    list_page(&[("data/a", 7), ("data/b", 7)], Some("1")),
+                    list_page(second, None),
+                ],
+                Arc::new(feed),
+            );
+            rt.block_on(lister.run()).unwrap();
+            ids_and_members(&script.published())
+                .into_iter()
+                .filter(|(_, m)| !m.iter().any(|k| k.contains("//")))
+                .collect::<Vec<_>>()
+        };
+        let without = run(&[("data/c", 7), ("data/d", 7)]);
+        let with = run(&[("data/c", 7), ("data/x//y", 7), ("data/d", 7)]);
+        assert!(without.iter().all(|(_, m)| m.len() >= 2), "{without:?}");
+        assert_eq!(with, without);
+    }
+
+    /// One listing page whose objects all carry `etag`, unescaped in XML.
+    fn page_with_etag(keys: &[String], etag: &str) -> String {
+        let contents: String = keys
+            .iter()
+            .map(|key| {
+                let key = key.replace('&', "&amp;").replace('<', "&lt;");
+                format!(
+                    "<Contents><Key>{key}</Key><LastModified>2026-10-11T13:38:17.000Z\
+                     </LastModified><ETag>&quot;{etag}&quot;</ETag><Size>1</Size></Contents>"
+                )
+            })
+            .collect();
+        format!("<ListBucketResult><IsTruncated>false</IsTruncated>{contents}</ListBucketResult>")
+    }
+
+    /// A key of `len` bytes: `data/`, then `"`, then `tag`.
+    fn long_key(len: usize, tag: char) -> String {
+        format!("data/{}{tag}", "\"".repeat(len - "data/".len() - 1))
+    }
+
+    /// Pins that sixteen keys of S3's longest, each escaping to two bytes a
+    /// byte, with a multipart ETag, pack into one unit whose body, with its
+    /// id, stays under the packed body cap.
+    #[test]
+    fn a_bin_of_long_keys_stays_under_the_body_cap() {
+        let rt = runtime();
+        let keys: Vec<String> = ('a'..='p').map(|t| long_key(1024, t)).collect();
+        let (feed, script) = spate_test::scripted_feed();
+        let lister = served_lister(
+            vec![page_with_etag(
+                &keys,
+                "0123456789abcdef0123456789abcdef-10000",
+            )],
+            Arc::new(feed),
+        );
+        rt.block_on(lister.run()).unwrap();
+        let published = script.published();
+        assert_eq!(members(&published), std::slice::from_ref(&keys));
+        assert!(members(&published)[0].iter().all(|k| k.len() == 1024));
+        let unit = &published[0];
+        assert!(
+            unit.body.len() + unit.id.len() <= PACKED_BODY_MAX_BYTES,
+            "{} body bytes and a {}-byte id",
+            unit.body.len(),
+            unit.id.len()
+        );
+    }
+
+    /// Pins that a key past the packing cap is a unit of its own between
+    /// keys of S3's longest that pack.
+    #[test]
+    fn a_key_past_the_packing_cap_is_published_alone() {
+        let rt = runtime();
+        let keys = vec![
+            long_key(1024, 'a'),
+            long_key(1024, 'b'),
+            long_key(1025, 'c'),
+            long_key(1024, 'd'),
+            long_key(1024, 'e'),
+        ];
+        let (feed, script) = spate_test::scripted_feed();
+        let lister = served_lister(vec![page_with_etag(&keys, "e")], Arc::new(feed));
+        rt.block_on(lister.run()).unwrap();
+        assert_eq!(
+            members(&script.published()),
+            [
+                vec![keys[0].clone(), keys[1].clone()],
+                vec![keys[2].clone()],
+                vec![keys[3].clone(), keys[4].clone()],
+            ]
         );
     }
 }

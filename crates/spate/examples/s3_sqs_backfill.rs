@@ -1,11 +1,12 @@
 //! A bounded S3 backfill whose work arrives through an SQS queue: the
 //! pipeline file names the queue and a job location in its `feed:` section,
-//! `main()` builds the feed from that section, a lister run publishes one unit
-//! per object, and the S3 source reads each unit the queue hands it.
+//! `main()` builds the feed from that section, a lister run publishes the
+//! listed objects, small ones sharing a unit, and the S3 source reads each
+//! unit the queue hands it.
 //!
 //! The objects are a local directory (`file://`), so the only thing to stand
 //! up is the queue. A unit is deleted from the queue only once every record
-//! in its object is written, and a unit whose worker dies returns to the
+//! in its objects is written, and a unit whose worker dies returns to the
 //! queue after the visibility period, for this process or another to read.
 //! The lister writes the job's `fingerprint` and, once every unit is
 //! published, its `end` marker at the location. The job ends on its own about

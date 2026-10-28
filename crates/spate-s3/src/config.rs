@@ -84,9 +84,11 @@ pub struct S3SourceConfig {
     pub compression: Compression,
     /// Size above which an uncompressed object with an ETag, at most 50,000
     /// GiB, is cut into byte ranges of at most this size, one unit each, when
-    /// the framer declares a resync delimiter. Any other object is one unit.
-    /// Part of the bounded feed job fingerprint: every instance of a bounded
-    /// job must agree on it. Default 64 MiB.
+    /// the framer declares a resync delimiter. The lister packs objects read
+    /// whole into shared units of at most this many bytes and 16 objects, in
+    /// listing order; an object read whole above it is one unit. Part of the
+    /// bounded feed job fingerprint: every instance of a bounded job must
+    /// agree on it. Default 64 MiB.
     #[serde(default = "default_split_target_bytes")]
     pub split_target_bytes: ByteSize,
     /// Target GET window size for ETag-pinned reads. Queued chunks retain

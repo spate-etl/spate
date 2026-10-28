@@ -1,5 +1,5 @@
 ---
-description: "The feed is configured in a top-level feed: section and provisioned by the operator, who creates every queue, topic and notification rule; Spate reads their settings at startup."
+description: "The feed is configured in a top-level feed: section and provisioned by the operator. ADR-0086 supersedes its fixed default of 96 units held."
 ---
 
 # ADR-0079 — The feed is configured in a top-level section and provisioned by the operator
@@ -9,7 +9,9 @@ description: "The feed is configured in a top-level feed: section and provisione
 - **Supersedes:**
   [ADR-0049](0049-coordination-section-in-the-pipeline-config.md),
   [ADR-0056](0056-in-process-store-selectable-in-coordination-section.md)
-- **Superseded by:** —
+- **Superseded by:**
+  [ADR-0086](0086-an-unset-units-held-holds-twice-the-pipeline-thread-count.md),
+  for the default units held
 
 ## Context and problem statement
 

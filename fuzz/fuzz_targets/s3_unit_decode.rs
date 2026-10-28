@@ -2,8 +2,9 @@
 //! re-enqueued unit's body.
 //!
 //! A delivery's body is whatever a writer to the queue sent: a descriptor, a
-//! storage notification, or neither. The decode arms assert that every part
-//! the source would read carries a quoted ETag that `If-Match` can send, a
+//! storage notification, or neither. The decode arms assert that every object
+//! of every part the source would read, each member of a descriptor naming
+//! several, carries a quoted ETag that `If-Match` can send, a
 //! version that is non-empty, not `null`, at most 1,024 bytes and free of
 //! spaces and control bytes, and a key under the source's prefix. One decode
 //! arm takes raw bytes; the other builds a notification record from arbitrary

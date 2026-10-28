@@ -1,6 +1,7 @@
 //! Work units of the feed path and their parts: a unit a lister publishes
-//! names one object, or one byte range of one object, and a storage
-//! notification is one unit with one part per non-empty created object.
+//! names one object, or one byte range of one object, a descriptor may name
+//! several objects read whole on one lane, and a storage notification is one
+//! unit with one part per non-empty created object.
 //!
 //! [`parts_of`] decides whether an object is read whole or cut, by the rule
 //! the lister applies to a listing ([`Packing::delimiter_for`] and
@@ -15,8 +16,8 @@ use crate::fetch::{ObjectEntry, Overwrite};
 use crate::framer::Codec;
 use crate::listing::addressable;
 use crate::split::{
-    DescriptorObject, Packing, SplitDescriptor, SplitError, SplitRange, split_id_for,
-    split_id_for_range, tile,
+    DescriptorObject, MAX_UNIT_MEMBERS, Packing, SplitDescriptor, SplitError, SplitRange,
+    split_id_for, split_id_for_range, tile,
 };
 use object_store::path::Path;
 use serde::Deserialize;
@@ -128,7 +129,8 @@ impl Iterator for Cursor {
     }
 }
 
-/// The parts of the one object in `object`: the ranges [`tile`] cuts when
+/// The parts of the one object in `object`, a notification's object or a
+/// one-member descriptor's: the ranges [`tile`] cuts when
 /// [`Packing::delimiter_for`] accepts the object and its key is
 /// [`addressable`], and the whole object otherwise. Every part carries
 /// `origin`.
@@ -513,30 +515,40 @@ fn form_decoded(key: &str) -> Result<String, String> {
     String::from_utf8(out).map_err(|_| format!("the key \"{key}\" does not decode as UTF-8"))
 }
 
-/// The parts of the one object a descriptor body names, or why the unit
-/// cannot be read.
+/// The parts of the objects a descriptor body names, or why the unit cannot
+/// be read.
 ///
-/// A ranged unit is refused when its delimiter is not the framer's or its
-/// object is compressed, the refusals of a unit that cannot be
-/// read as a range.
+/// One member is read as [`parts_of`] cuts it, or as the byte range the
+/// descriptor names. Two or more are one whole part, read member by member
+/// on one lane. A unit naming no member, more than [`MAX_UNIT_MEMBERS`], or a
+/// member whose ETag cannot be sent in `If-Match` is refused, and so is a
+/// ranged unit whose delimiter is not the framer's or whose object is
+/// compressed.
 fn descriptor_parts(body: &[u8], packing: Packing) -> Result<Cursor, String> {
     let descriptor = SplitDescriptor::decode(body)
         .map_err(|e| format!("the unit's body is not a descriptor: {}", e.reason))?;
-    let object = match <[ObjectEntry; 1]>::try_from(descriptor.to_entries()) {
-        Ok([object]) => object,
-        Err(entries) => {
-            return Err(format!(
-                "the unit names {} objects; this source reads one object per unit",
-                entries.len()
-            ));
-        }
-    };
-    if object.etag.as_deref().is_some_and(|etag| !sendable(etag)) {
+    let entries = descriptor.to_entries();
+    if entries.is_empty() || entries.len() > MAX_UNIT_MEMBERS {
+        return Err(format!(
+            "the unit names {} objects; this source reads 1 to {MAX_UNIT_MEMBERS} per unit",
+            entries.len()
+        ));
+    }
+    if let Some(object) = entries
+        .iter()
+        .find(|e| e.etag.as_deref().is_some_and(|etag| !sendable(etag)))
+    {
         return Err(format!(
             "the unit's ETag for \"{}\" cannot be sent in `If-Match`",
             object.key
         ));
     }
+    let object = match <[ObjectEntry; 1]>::try_from(entries) {
+        Ok([object]) => object,
+        // `SplitDescriptor::decode` refuses a range on more than one member,
+        // so these are read whole.
+        Err(entries) => return Ok(Cursor::whole(Arc::new(entries), Origin::Lister)),
+    };
     let Some(range) = descriptor.range else {
         return Ok(parts_of(Arc::new(vec![object]), packing, Origin::Lister));
     };
@@ -1172,6 +1184,79 @@ mod tests {
             .encode()
             .unwrap();
         assert_eq!(keys(decode(&body, &scope(), packing())), ["data/a.ndjson"]);
+    }
+
+    fn member(key: &str, size: u64, etag: &str) -> DescriptorObject {
+        DescriptorObject {
+            key: key.into(),
+            size,
+            etag: Some(etag.to_owned()),
+            last_modified_ms: 1,
+        }
+    }
+
+    /// Pins that a descriptor of two members is one whole part naming both
+    /// in order, with no member cut, though the first qualifies for cutting.
+    #[test]
+    fn a_multi_member_descriptor_is_one_whole_part() {
+        let body = SplitDescriptor::new(vec![
+            member("data/big.ndjson", 3 * packing().target_bytes, "\"a\""),
+            member("data/small.ndjson", 10, "\"b\""),
+        ])
+        .encode()
+        .unwrap();
+        let Decoded::Read(cursors) = decode(&body, &scope(), packing()) else {
+            panic!("the unit is read");
+        };
+        let parts: Vec<Part> = cursors.into_iter().flatten().collect();
+        assert_eq!(parts.len(), 1);
+        assert!(parts[0].range.is_none());
+        let keys: Vec<&str> = parts[0].object.iter().map(|o| o.key.as_str()).collect();
+        assert_eq!(keys, ["data/big.ndjson", "data/small.ndjson"]);
+    }
+
+    /// Pins that every member's ETag is checked for `If-Match`, and the
+    /// refusal names the member that fails it.
+    #[test]
+    fn a_descriptor_with_an_unsendable_second_etag_fails() {
+        let body = SplitDescriptor::new(vec![
+            member("data/a.ndjson", 10, "\"abc\""),
+            member("data/b.ndjson", 10, "\"abc\u{1}\""),
+        ])
+        .encode()
+        .unwrap();
+        let reason = failed(decode(&body, &scope(), packing()));
+        assert!(
+            reason.contains("\"data/b.ndjson\" cannot be sent in `If-Match`"),
+            "{reason}"
+        );
+    }
+
+    /// Pins that a descriptor naming no member, or more than
+    /// `MAX_UNIT_MEMBERS`, fails, and that one at the bound is read.
+    #[test]
+    fn a_descriptor_of_no_members_or_past_the_bound_fails() {
+        let body = |n: usize| {
+            SplitDescriptor::new(
+                (0..n)
+                    .map(|i| member(&format!("data/{i}.ndjson"), 10, "\"e\""))
+                    .collect(),
+            )
+            .encode()
+            .unwrap()
+        };
+        for n in [0, MAX_UNIT_MEMBERS + 1] {
+            let reason = failed(decode(&body(n), &scope(), packing()));
+            assert!(
+                reason.contains(&format!("names {n} objects")),
+                "{n}: {reason}"
+            );
+        }
+        assert_eq!(
+            keys(decode(&body(MAX_UNIT_MEMBERS), &scope(), packing())).len(),
+            1,
+            "one whole part"
+        );
     }
 
     /// Pins that a created object of size 0 is dropped before its ETag is

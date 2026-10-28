@@ -119,7 +119,7 @@ pub fn read_range(
     Some(owned)
 }
 
-/// One part a delivery's body decodes to.
+/// One object of a part a delivery's body decodes to.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DecodedPart {
     /// The object key.
@@ -146,7 +146,8 @@ pub enum DecodedUnit {
 }
 
 /// Decode `body` as the source over `bucket` and `prefix` does, with no
-/// object cut into ranges, so the parts number at most one per record.
+/// object cut into ranges, one [`DecodedPart`] per object of each part, so a
+/// notification yields at most one per record.
 #[must_use]
 pub fn decode_unit(body: &[u8], bucket: &str, prefix: &str) -> DecodedUnit {
     let scope = crate::unit::Scope {
@@ -163,7 +164,7 @@ pub fn decode_unit(body: &[u8], bucket: &str, prefix: &str) -> DecodedUnit {
             cursors
                 .into_iter()
                 .flatten()
-                .map(|part| {
+                .flat_map(|part| {
                     let (version, re_enqueues) = match part.origin {
                         crate::unit::Origin::Notification {
                             version,
@@ -171,13 +172,17 @@ pub fn decode_unit(body: &[u8], bucket: &str, prefix: &str) -> DecodedUnit {
                         } => (version, re_enqueues),
                         crate::unit::Origin::Lister => (None, 0),
                     };
-                    DecodedPart {
-                        key: part.object[0].key.clone(),
-                        etag: part.object[0].etag.clone(),
-                        range: part.range.map(|r| (r.start, r.end)),
-                        version,
-                        re_enqueues,
-                    }
+                    let range = part.range.map(|r| (r.start, r.end));
+                    part.object
+                        .iter()
+                        .map(|object| DecodedPart {
+                            key: object.key.clone(),
+                            etag: object.etag.clone(),
+                            range,
+                            version: version.clone(),
+                            re_enqueues,
+                        })
+                        .collect::<Vec<_>>()
                 })
                 .collect(),
         ),

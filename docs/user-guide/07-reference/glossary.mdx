@@ -183,7 +183,7 @@ counts them.
 [Kafka source](../04-connectors/sources/kafka/README.mdx#lanes-partitions-on-pipeline-threads)
 — one partition queue ·
 [S3 source](../04-connectors/sources/s3/README.mdx#sizing-units-against-pipelinethreads)
-— one object or byte range in progress ·
+— one work unit in progress, its objects read in turn ·
 [Datagen source](../04-connectors/sources/datagen/README.mdx#configuration) —
 one generator, `partitions` of them.
 

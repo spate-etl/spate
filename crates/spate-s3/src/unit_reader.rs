@@ -2,7 +2,8 @@
 //! acknowledges each under the feed's ack rule.
 //!
 //! A unit's body is a [`SplitDescriptor`](crate::split::SplitDescriptor)
-//! naming one object, whole or one byte range of it, or a storage
+//! naming one object, whole or one byte range of it, or several objects read
+//! whole in turn on one lane, or a storage
 //! notification, which [`decode`](crate::unit::decode) reads into one part per
 //! created object. A notification with no object to read is acknowledged, and
 //! one the source cannot read is failed back. A whole-object part over an
@@ -169,6 +170,8 @@ struct LaneState {
     /// The re-enqueue count of the lane's notification unit, 0 for a
     /// lister's.
     re_enqueues: u32,
+    /// The objects the lane reads, its count in `objects_remaining`.
+    members: u64,
 }
 
 /// Reads work units from a feed, one lane per part in progress.
@@ -804,13 +807,13 @@ impl UnitReader {
         }
     }
 
-    /// Take back the lane's count in `objects_remaining`, less the object
+    /// Take back the lane's count in `objects_remaining`, less the objects
     /// it finished.
     fn settle_remaining(&self, lane: &LaneState) {
         if let Some(m) = &self.parts.metrics {
             let done = u64::from(lane.tracker.close());
             m.objects_remaining
-                .decrement(1u64.saturating_sub(done) as f64);
+                .decrement(lane.members.saturating_sub(done) as f64);
         }
     }
 
@@ -916,6 +919,12 @@ impl UnitReader {
             Origin::Notification { re_enqueues, .. } => *re_enqueues,
             Origin::Lister => 0,
         };
+        // A range reads one object; a whole part reads every member.
+        let members = if part.range.is_some() {
+            1
+        } else {
+            part.object.len() as u64
+        };
         // Detached: the fetcher exits when the lane drops its receiver.
         drop(parts.handle.spawn(run_fetcher(FetcherParams {
             split: label.clone(),
@@ -934,7 +943,7 @@ impl UnitReader {
             origin: part.origin,
         })));
         if let Some(m) = &parts.metrics {
-            m.objects_remaining.increment(1.0);
+            m.objects_remaining.increment(members as f64);
         }
         let s3_lane = S3Lane::new(
             lane,
@@ -960,6 +969,7 @@ impl UnitReader {
                 last_committed: None,
                 hinted: false,
                 re_enqueues,
+                members,
             },
         );
         self.deliveries
@@ -1255,6 +1265,7 @@ mod tests {
                 last_committed: None,
                 hinted: false,
                 re_enqueues: 0,
+                members: 1,
             },
         );
         (partition, receipt, tracker)
@@ -2765,6 +2776,74 @@ mod tests {
         };
         assert_eq!(run(false), 1.0, "the kept unit's lane");
         assert_eq!(run(true), 0.0);
+    }
+
+    /// A unit whose descriptor names `members` objects, `object-0` onwards.
+    fn multi_member_unit(members: usize) -> Unit {
+        let objects = (0..members)
+            .map(|i| DescriptorObject {
+                key: format!("object-{i}"),
+                size: 1,
+                etag: None,
+                last_modified_ms: 1,
+            })
+            .collect();
+        let body = SplitDescriptor::new(objects).encode().unwrap();
+        Unit::new("multi", body)
+    }
+
+    /// Pins that a descriptor of two objects opens one lane over both, in
+    /// order, and is acknowledged once when that lane's terminal watermark
+    /// is committed.
+    #[test]
+    fn a_two_member_unit_is_read_in_one_lane() {
+        let (mut reader, script, _rt) = reader();
+        let receipt = script.deliver(multi_member_unit(2));
+        start(&mut reader);
+        let lanes = partitions(&lanes_added(poll(&mut reader)));
+        assert_eq!(lanes.len(), 1);
+        assert!(script.failed().is_empty(), "{:?}", script.failed());
+        reader.lanes[&lanes[0]].tracker.set_terminal(5);
+        reader.commit(&[(lanes[0], 5)]).unwrap();
+        reader.settle().unwrap();
+        assert_eq!(script.acknowledged(), vec![receipt]);
+    }
+
+    /// Pins that `objects_remaining` counts every object of a lane's unit
+    /// when the lane opens, and that a hand-back takes back all but the
+    /// objects the lane finished, whose counts the lane takes back itself.
+    #[test]
+    fn objects_remaining_counts_every_member_of_a_lane() {
+        // `done` objects framed, then a hand-back when `stop` is set.
+        let run = |done: usize, stop: bool| {
+            let pipeline = unique_name("reader");
+            let rendered = render_local(|| {
+                let metrics =
+                    S3Metrics::new(&Meter::with_namespace("s3", pipeline.clone(), "src", "s3"));
+                let gauge = metrics.objects_remaining.clone();
+                let (feed, script) = scripted_feed();
+                script.hand_back_on_stop();
+                let (mut reader, _rt) = reader_over(Arc::new(feed), Some(2), Some(metrics));
+                script.deliver(multi_member_unit(3));
+                start(&mut reader);
+                let lanes = partitions(&lanes_added(poll(&mut reader)));
+                for _ in 0..done {
+                    // As the lane does for each object it frames.
+                    if reader.lanes[&lanes[0]].tracker.object_done() {
+                        gauge.decrement(1.0);
+                    }
+                }
+                if stop {
+                    reader.stop_reading().unwrap();
+                    assert_eq!(script.handed_back().len(), 1);
+                }
+            });
+            objects_remaining(&rendered, &pipeline)
+        };
+        assert_eq!(run(0, false), 3.0, "opened");
+        assert_eq!(run(1, false), 2.0, "one object framed");
+        assert_eq!(run(0, true), 0.0, "handed back unread");
+        assert_eq!(run(1, true), 0.0, "handed back after one object");
     }
 
     /// Pins how `stop_reading` settles each state a held unit can be in:

@@ -92,6 +92,69 @@ fn a_missing_object_counts_not_found_once_per_delivery() {
     );
 }
 
+/// Pins that a unit naming two objects, the second deleted, reads both on
+/// every delivery, counts one `not_found` per delivery, and is dead-lettered
+/// whole at the cap.
+#[test]
+fn a_missing_member_fails_its_whole_unit() {
+    const CAP: u32 = 2;
+    let handle = install_exporter();
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("data");
+    fs::create_dir_all(&data).unwrap();
+    fs::write(data.join("rows.ndjson"), lines_bytes(&recs("r", 3))).unwrap();
+
+    let member = |name: &str| {
+        let unit = unit_over(&data, name);
+        SplitDescriptor::decode(&unit.body).unwrap().objects[0].clone()
+    };
+    let body = SplitDescriptor::new(vec![member("rows.ndjson"), member("missing.ndjson")])
+        .encode()
+        .unwrap();
+    let feed = MemoryFeed::with_attempt_cap(NonZeroU32::new(CAP).unwrap());
+    drop(feed.publish(Unit::new("two-members", body)));
+    let (spy_store, spy) = spying_local_store(SpyOptions::default());
+    let yaml = PipelineYaml::file("s3-objects-failed-member", &data)
+        .fed_by_code()
+        .build();
+    let source_feed = Arc::new(feed.clone());
+    let l = launch_customized(
+        &yaml,
+        test_options(),
+        |_| {},
+        move |source, _| {
+            line_framer(source)
+                .with_feed(source_feed)
+                .with_store(spy_store)
+        },
+    );
+    wait_until(DEADLINE, "the unit is dead-lettered", || {
+        feed.counts().dead_lettered == 1
+    });
+    stop(&l);
+
+    let mut objects: Vec<String> = spy.gets().iter().map(|g| g.object().to_owned()).collect();
+    objects.sort();
+    assert_eq!(
+        objects,
+        [
+            "missing.ndjson",
+            "missing.ndjson",
+            "rows.ndjson",
+            "rows.ndjson"
+        ],
+        "both objects read on each delivery"
+    );
+    let dead: Vec<String> = feed.dead_letters().into_iter().map(|u| u.id).collect();
+    assert_eq!(dead, ["two-members"]);
+    assert_eq!(
+        objects_failed(&handle, &l),
+        [Some(f64::from(CAP)), Some(0.0), Some(0.0), Some(0.0)],
+        "{}",
+        handle.render()
+    );
+}
+
 /// Run `unit` over the files under `data` on a feed that dead-letters it on
 /// its first failure, and stop once it has.
 fn read_until_dead_lettered(name: &str, data: &Path, unit: Unit) -> Launched {

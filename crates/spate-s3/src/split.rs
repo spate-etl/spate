@@ -39,6 +39,11 @@ use sha2::{Digest as _, Sha256};
 /// incompatible release instead of misreading it.
 pub const DESCRIPTOR_VERSION: u32 = 2;
 
+/// The most member objects a descriptor may name for the source to read it.
+/// A unit naming more is failed back. Far below the composite offset's
+/// ordinal space, so no unit's ordinal overflows it.
+pub const MAX_UNIT_MEMBERS: usize = 4096;
+
 /// Version folded into every id by [`split_id_for`] and
 /// [`split_id_for_range`]. It is part of the persisted identity, so a change
 /// retires every id already minted.
@@ -133,6 +138,11 @@ impl SplitRange {
 /// [`encode`](SplitDescriptor::encode) refuses anything else) and mint ids
 /// with [`split_id_for`] or [`split_id_for_range`] respectively, which
 /// together are the whole cross-process contract. Fields are freely readable.
+///
+/// The source reads a descriptor of one member whole, or in byte ranges when
+/// the member qualifies for cutting, and a descriptor of two or more members
+/// whole, member by member in order, on one lane. It fails back a descriptor
+/// naming no member or more than [`MAX_UNIT_MEMBERS`].
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SplitDescriptor {
     /// Encoding version; always [`DESCRIPTOR_VERSION`] at write. Private to

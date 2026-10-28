@@ -241,12 +241,13 @@ fn a_unit_is_acknowledged_only_after_its_last_record_is_acknowledged() {
     stop(&l);
 }
 
-/// Pins the in-process feed end to end: a unit with rows, a zero-byte unit
-/// and a unit naming a byte range cut on the framer's delimiter are
-/// acknowledged, the range read alone. A unit over a missing object, a unit
-/// whose body names two objects, a unit whose body is not a descriptor, a
-/// range cut on another delimiter and a range of a compressed object are
-/// failed on every delivery until the feed dead-letters them.
+/// Pins the in-process feed end to end: a unit with rows, a zero-byte unit,
+/// a unit naming two objects and a unit naming a byte range cut on the
+/// framer's delimiter are acknowledged, the two objects each read whole and
+/// the range read alone. A unit over a missing object, a unit whose body is
+/// not a descriptor, a range cut on another delimiter and a range of a
+/// compressed object are failed on every delivery until the feed
+/// dead-letters them.
 #[test]
 fn in_process_units_are_acknowledged_or_dead_lettered_at_the_cap() {
     let dir = tempfile::tempdir().unwrap();
@@ -305,7 +306,7 @@ fn in_process_units_are_acknowledged_or_dead_lettered_at_the_cap() {
         c.visible == 0 && c.held == 0
     });
     stop(&l);
-    assert_eq!(counts(feed.counts()), (0, 0, 5, 3));
+    assert_eq!(counts(feed.counts()), (0, 0, 4, 4));
 
     let mut dead: Vec<String> = feed.dead_letters().into_iter().map(|u| u.id).collect();
     dead.sort();
@@ -316,16 +317,17 @@ fn in_process_units_are_acknowledged_or_dead_lettered_at_the_cap() {
             "not-a-descriptor",
             "ranged-cr",
             "ranged-gz",
-            "two-members"
         ]
     );
     let got = captured_rows(&l.script);
-    let mut want = rows;
+    let mut want = rows.clone();
+    want.extend(rows);
+    want.extend(other.iter().cloned());
     want.push(other[0].clone());
     assert_eq!(
         sorted(got),
         sorted(want),
-        "the rows unit and the range are each read once"
+        "the rows unit, both objects of the two-object unit and the range are each read once"
     );
 }
 

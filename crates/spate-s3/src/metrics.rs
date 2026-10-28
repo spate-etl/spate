@@ -16,8 +16,9 @@ pub(crate) struct S3Metrics {
     /// pipeline.
     pub(crate) objects_completed: Counter,
     /// Objects not yet completed across this worker's currently-held
-    /// units, a cut object counting once per range (rises when a lane opens,
-    /// falls per completed object, settles when the lane closes).
+    /// units, a cut object counting once per range (rises by the objects a
+    /// lane reads when it opens, falls per completed object, settles when the
+    /// lane closes).
     pub(crate) objects_remaining: Gauge,
     /// Bytes read from the store (as stored, pre-decompression).
     pub(crate) bytes_read: Counter,

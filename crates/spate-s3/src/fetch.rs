@@ -209,8 +209,8 @@ pub(crate) async fn run_fetcher(params: FetcherParams) {
     } = params;
 
     for (ordinal, entry) in slice.iter().enumerate().skip(start_ordinal as usize) {
-        // A unit holds one member, so ordinals always fit the composite-offset
-        // layout.
+        // A unit holds at most `MAX_UNIT_MEMBERS` members, so ordinals always
+        // fit the composite-offset layout.
         let ordinal = ordinal as u32;
         // Pin the GET to the exact content the offsets were (or will be)
         // minted against: the committed ETag for the resume object, the
@@ -1143,6 +1143,44 @@ mod tests {
             .collect();
         want.sort();
         want
+    }
+
+    /// Pins that the fetcher starts the next member's GET while its lane has
+    /// not read the previous member, once that member's messages fit the
+    /// lane's hand-off channel.
+    #[tokio::test]
+    async fn the_next_members_get_starts_before_the_lane_reads() {
+        let store = Arc::new(FlakyStore::new(
+            seeded(&[("a.ndjson", b"a\n"), ("b.ndjson", b"b\n")]).await,
+        ));
+        let slice = listed(&(Arc::clone(&store) as Arc<dyn ObjectStore>)).await;
+        assert!(slice.iter().all(|e| e.etag.is_some()), "the ranged path");
+        let (tx, _rx) = mpsc::channel(crate::lane_ctx::LANE_HANDOFF_CHUNKS);
+        let params = FetcherParams {
+            split: "s3-test".into(),
+            store: Arc::clone(&store) as Arc<dyn ObjectStore>,
+            slice: Arc::new(slice),
+            start_ordinal: 0,
+            resume_etag: None,
+            chunk_bytes: 64,
+            range_bytes: 64,
+            tx,
+            pause: Arc::new(AtomicBool::new(false)),
+            retry_base: Duration::from_millis(1),
+            retries: None,
+            range: None,
+            bytes_read: None,
+            origin: Origin::Lister,
+        };
+        let task = tokio::spawn(run_fetcher(params));
+        tokio::time::timeout(Duration::from_secs(30), async {
+            while store.gets.load(Ordering::Relaxed) < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the second member's GET started with nothing read");
+        task.abort();
     }
 
     /// A ranged read fetches each listed object under the key the listing

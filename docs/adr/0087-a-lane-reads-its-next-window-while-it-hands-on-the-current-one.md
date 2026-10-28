@@ -1,5 +1,5 @@
 ---
-description: "An S3 lane reads its next GET window while it hands on the current one, so its read-ahead no longer depends on chunk_bytes; a lane holds three windows."
+description: "An S3 lane reads its next GET window while it hands on the current one, so its read-ahead no longer depends on chunk_bytes; at the defaults a lane holds three windows."
 ---
 
 # ADR-0087 — A lane reads its next window while it hands on the current one
@@ -67,8 +67,9 @@ without fixing the boundary case.
   while its next GET runs, at the default `chunk_bytes`.
 - Good, because a packed unit of small objects reads its next object while
   the current one is handed on.
-- Bad, because a lane holds up to three windows: the one queued chunks
-  retain, the one being handed on and the one read ahead. Read-ahead memory
+- Bad, because a lane holds three windows when each spans at least four
+  chunks: the one queued chunks retain, the one being handed on and the one
+  read ahead. Shorter windows leave more of them queued. Read-ahead memory
   is about `3 × units_held × prefetch_bytes`, 48 MiB per pipeline thread at
   the defaults against 32 MiB, by arithmetic and not measurement. This is
   ADR-0054's memory ground, accepted.

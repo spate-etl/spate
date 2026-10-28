@@ -530,7 +530,9 @@ async fn stream_object(
 /// short-lived ranged GET fully buffered before its hand-off. While one window
 /// is handed on, the next is read: the object's next window, or `next` after
 /// its last. Queued chunks can retain the previous window's buffer, so a lane
-/// holds up to three windows. The ETag pin keeps the multi-GET read
+/// holds three windows when each spans at least
+/// [`LANE_HANDOFF_CHUNKS`](crate::lane_ctx::LANE_HANDOFF_CHUNKS) chunks, and
+/// more when windows are shorter. The ETag pin keeps the multi-GET read
 /// splice-safe: an overwrite between windows trips the `if_match` precondition.
 ///
 /// A window read ahead that fails is reported only after the window before it
@@ -609,6 +611,11 @@ async fn stream_object_ranged(
         // on whether this window reached the owned range's end.
         let following = delivered + read;
         let own_next = window_end(&trim, following);
+        // A paused lane opens no GET, including one a pause reached while
+        // the fetcher waited on the window it now holds.
+        if pause_gate(pause, tx).await.is_err() {
+            return Ok(false);
+        }
         match own_next {
             Some(end) => ahead.start(read_at(following, end)),
             None => {
@@ -1957,8 +1964,9 @@ mod tests {
         );
     }
 
-    /// Pins the read-ahead's memory bound: the window queued chunks retain,
-    /// the window being handed on and the window read ahead, and no fourth.
+    /// Pins the read-ahead's memory bound for windows of at least
+    /// `LANE_HANDOFF_CHUNKS` chunks: the window queued chunks retain, the
+    /// window being handed on and the window read ahead, and no fourth.
     #[tokio::test(start_paused = true)]
     async fn a_lane_holds_at_most_three_windows() {
         let mut flaky = FlakyStore::new(seeded(&[("p/a", &[b'x'; 80][..])]).await);
@@ -2133,6 +2141,62 @@ mod tests {
             ),
             "{msgs:?}"
         );
+    }
+
+    /// Pins that a pause reached while the fetcher waits on its read ahead,
+    /// with nothing left to send, stops it from opening the window after.
+    #[tokio::test(start_paused = true)]
+    async fn a_pause_during_the_read_ahead_wait_opens_no_further_get() {
+        let mut flaky = FlakyStore::new(seeded(&[("p/a", &[b'x'; 48][..])]).await);
+        flaky.hold_on = 2;
+        let flaky = Arc::new(flaky);
+        let store: Arc<dyn ObjectStore> = flaky.clone();
+        let slice = listed(&store).await;
+        let (tx, _rx) = mpsc::channel(DEPTH);
+        // One chunk per window fits the hand-off, so the fetcher waits on the
+        // held second GET with nothing left to send.
+        let params = fetcher(store, slice, 16, 16, tx);
+        let pause = Arc::clone(&params.pause);
+        let task = tokio::spawn(run_fetcher(params));
+        park().await;
+        assert_eq!(flaky.held.load(Ordering::Relaxed), 1);
+        pause.store(true, Ordering::Relaxed);
+        flaky.release.add_permits(1);
+        park().await;
+        assert_eq!(
+            flaky.recorded_ranges(),
+            vec![RangeKind::Bounded(0, 16), RangeKind::Bounded(16, 32)],
+            "a paused lane opened a GET"
+        );
+        task.abort();
+    }
+
+    /// Pins that the next member's read ahead keeps draining while the
+    /// fetcher waits to hand on the member boundary: the `ObjectEnd` of the
+    /// member before it, or its own `ObjectStart`.
+    #[tokio::test(start_paused = true)]
+    async fn a_read_ahead_drains_while_the_member_boundary_waits() {
+        // Member a is an `ObjectStart` and eight chunks, so a hand-off of
+        // nine waits on its `ObjectEnd` and one of ten on b's `ObjectStart`.
+        for depth in [9, 10] {
+            let mut flaky = FlakyStore::new(
+                seeded(&[("p/a", &[b'a'; 16][..]), ("p/b", &[b'b'; 12][..])]).await,
+            );
+            flaky.hold_on = 2;
+            let flaky = Arc::new(flaky);
+            let store: Arc<dyn ObjectStore> = flaky.clone();
+            let slice = listed(&store).await;
+            let (tx, mut rx) = mpsc::channel(depth);
+            let task = tokio::spawn(run_fetcher(fetcher(store, slice, 2, 16, tx)));
+            park().await;
+            assert_eq!(flaky.held.load(Ordering::Relaxed), 1, "depth {depth}");
+            flaky.release.add_permits(1);
+            park().await;
+            assert_eq!(flaky.bodies_drained(), 2, "depth {depth}");
+            let msgs = drain(&mut rx).await;
+            task.await.unwrap();
+            assert_eq!(assembled(&msgs)[1].1, vec![b'b'; 12]);
+        }
     }
 
     /// Pins that a member the store reports no ETag for is never read

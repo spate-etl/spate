@@ -93,8 +93,9 @@ pub struct S3SourceConfig {
     pub split_target_bytes: ByteSize,
     /// Target GET window size for ETag-pinned reads. A lane reads its next
     /// window while it hands on the current one, and queued chunks retain the
-    /// window before that, so a lane can hold three windows; decoded records
-    /// require additional memory. Byte-range boundary windows can add `chunk_bytes`
+    /// window before that, so a lane holds three windows when each spans at
+    /// least four `chunk_bytes`, and more when windows are shorter; decoded
+    /// records require additional memory. Byte-range boundary windows can add `chunk_bytes`
     /// to this size. Whole-object reads at or below this size use a single GET.
     ///
     /// Keep this modest. A large window is read as one long-held GET, which

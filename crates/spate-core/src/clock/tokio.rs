@@ -172,7 +172,8 @@ impl Clock for TestClock {
     }
 }
 
-#[cfg(test)]
+// Loom builds have no tokio timer driver.
+#[cfg(all(test, not(loom)))]
 mod tests {
     use super::*;
 

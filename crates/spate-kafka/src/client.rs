@@ -453,8 +453,8 @@ pub(crate) mod testing {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::client::testing::raw_config;
     use crate::KafkaSourceConfig;
+    use crate::client::testing::raw_config;
     use crate::config::Consumer;
     use crate::context::SourceHooks;
     use crate::feed::{FeedRole, KafkaFeedConfig};

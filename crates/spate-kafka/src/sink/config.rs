@@ -694,17 +694,55 @@ mod tests {
             "transactional.id",
             "delivery.report.only.error",
             "enable.gapless.guarantee",
+            "allow.auto.create.topics",
         ] {
-            for written in [key.to_owned(), format!("topic.{key}")] {
-                let body = format!("{}  rdkafka:\n    \"{written}\": \"x\"\n", minimal());
-                let msg = parse(&body).unwrap_err().to_string();
-                assert!(
-                    msg.contains(&format!("\"{written}\" cannot be overridden")),
-                    "{msg}"
-                );
-                assert!(msg.contains("sink.kafka"), "{msg}");
+            for extra in ["", "  statistics_interval: 0s\n", "  compression: gzip\n"] {
+                for written in [key.to_owned(), format!("topic.{key}")] {
+                    let body =
+                        format!("{}{extra}  rdkafka:\n    \"{written}\": \"x\"\n", minimal());
+                    let msg = parse(&body).unwrap_err().to_string();
+                    assert!(
+                        msg.contains(&format!(
+                            "sink.kafka: rdkafka.\"{written}\" cannot be overridden"
+                        )),
+                        "{msg}"
+                    );
+                }
             }
         }
+    }
+
+    /// A programmatic config is validated by `build`, so a passthrough key
+    /// the sink owns is refused there too.
+    #[test]
+    fn build_refuses_an_owned_key_in_a_programmatic_config() {
+        let mut cfg = KafkaSinkConfig::new("localhost:9092", "orders");
+        cfg.rdkafka
+            .insert("allow.auto.create.topics".to_owned(), "true".to_owned());
+        let Err(ConfigError::Validation(msg)) = build(cfg) else {
+            panic!("build accepted an owned key");
+        };
+        assert!(msg.contains("allow.auto.create.topics"), "{msg}");
+    }
+
+    /// Without the typed `compression` field, the passthrough may set the
+    /// codec under either name.
+    #[test]
+    fn a_passthrough_codec_loads_without_the_typed_field() {
+        for key in ["compression.type", "compression.codec"] {
+            let body = format!("{}  rdkafka:\n    {key}: gzip\n", minimal());
+            let cfg = parse(&body).expect("loads");
+            assert_eq!(cfg.client_config().get(key), Some("gzip"));
+        }
+    }
+
+    /// A refused key's value never reaches the error.
+    #[test]
+    fn rejection_never_prints_the_value() {
+        let body = format!("{}  rdkafka:\n    acks: secret-marker\n", minimal());
+        let msg = parse(&body).unwrap_err().to_string();
+        assert!(msg.contains("\"acks\""), "{msg}");
+        assert!(!msg.contains("secret-marker"), "{msg}");
     }
 
     /// Pins that `topic.acks` is refused with the reason `acks` gives, since
@@ -762,6 +800,11 @@ mod tests {
         assert_eq!(cc.get("message.timeout.ms"), Some("30000"));
         assert_eq!(cc.get("message.max.bytes"), Some("1000000"));
         assert_eq!(cc.get("statistics.interval.ms"), Some("5000"));
+        assert_eq!(cc.get("allow.auto.create.topics"), Some("false"));
+        assert_eq!(
+            cfg.probe_client_config().get("allow.auto.create.topics"),
+            Some("false")
+        );
     }
 
     /// Sink counterpart to the source's TLS/SASL capability probe: a security

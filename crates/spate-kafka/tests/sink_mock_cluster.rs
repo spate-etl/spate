@@ -314,6 +314,51 @@ fn shutdown_with_inflight_data_commits_only_delivered() {
     }
 }
 
+/// A write to a missing topic fails: fatal on the broker's answer, then
+/// retryable once librdkafka knows the topic is missing.
+#[tokio::test]
+async fn a_write_to_a_missing_topic_fails() {
+    let cluster = MockCluster::new(1).expect("mock cluster");
+    let brokers = cluster.bootstrap_servers();
+    let sink = sink(
+        &brokers,
+        "delivery_timeout: 10s\nrdkafka:\n  topic.metadata.propagation.max.ms: \"0\"\n",
+    );
+    let mut encoder = sink.encoder_bytes();
+    let mut frame = BytesMut::new();
+    encoder
+        .encode(&record(b"nowhere".to_vec()), &mut frame)
+        .expect("encode");
+    let batch = SealedBatch {
+        rows: 1,
+        bytes: frame.len() as u64,
+        frames: vec![frame.freeze()],
+        dedup_token: "unused".to_string(),
+    };
+    // The broker's answer is fatal and names the missing topic. librdkafka
+    // then knows the topic is missing and fails the next write locally,
+    // which stays retryable: the readiness probe carries the fatal signal.
+    for (attempt, expected, hint) in [
+        ("first", ErrorClass::Fatal, "does not exist"),
+        ("second", ErrorClass::Retryable, "Unknown topic"),
+    ] {
+        let err = tokio::time::timeout(
+            Duration::from_secs(60),
+            sink.writer.write_batch(&sink.endpoints[0][0], &batch),
+        )
+        .await
+        .expect("the write settles")
+        .expect_err("a missing topic fails the write");
+        match err {
+            SinkError::Client { class, reason } => {
+                assert_eq!(class, expected, "{attempt}: {reason}");
+                assert!(reason.contains(hint), "{attempt}: {reason}");
+            }
+            other => panic!("{attempt}: unexpected error shape: {other:?}"),
+        }
+    }
+}
+
 #[tokio::test]
 async fn delivery_failure_maps_to_retryable() {
     let cluster = MockCluster::new(1).expect("mock cluster");

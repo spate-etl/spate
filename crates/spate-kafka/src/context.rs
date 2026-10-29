@@ -213,6 +213,38 @@ mod tests {
         );
     }
 
+    /// A closing consumer completes an assign and a revoke inside the
+    /// callback and queues no intent, so the close inside
+    /// `BaseConsumer::drop` can finish.
+    #[test]
+    fn a_closing_context_completes_rebalances_inline() {
+        let consumer = consumer();
+        consumer.context().closing.store(true, Ordering::Release);
+        let mut tpl = TopicPartitionList::new();
+        tpl.add_partition("orders", 0);
+        consumer.context().rebalance(
+            &consumer,
+            RDKafkaRespErr::RD_KAFKA_RESP_ERR__ASSIGN_PARTITIONS,
+            &mut tpl,
+        );
+        assert_eq!(consumer.assignment().expect("assignment").count(), 1);
+        consumer.context().rebalance(
+            &consumer,
+            RDKafkaRespErr::RD_KAFKA_RESP_ERR__REVOKE_PARTITIONS,
+            &mut tpl,
+        );
+        assert_eq!(consumer.assignment().expect("assignment").count(), 0);
+        assert!(
+            consumer
+                .context()
+                .intents
+                .lock()
+                .expect("intent lock")
+                .is_empty(),
+            "a closing consumer queues no intent"
+        );
+    }
+
     /// Assign and revoke events keep deferring: the callback records the
     /// intent and leaves the rebalance legally in progress (no assign or
     /// unassign call) for the controller-side choreography to complete.

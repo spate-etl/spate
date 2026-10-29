@@ -428,6 +428,8 @@ mod tests {
 
     #[test]
     fn denylisted_properties_are_rejected_with_reasons() {
+        // Written out: a loop over the consumer's declarations would follow
+        // an entry removed from them.
         for key in [
             "enable.auto.offset.store",
             "enable.auto.commit",
@@ -439,12 +441,37 @@ mod tests {
             "group.id",
             "statistics.interval.ms",
             "group.protocol",
+            "allow.auto.create.topics",
         ] {
-            let body = format!("{}  rdkafka:\n    \"{key}\": \"x\"\n", minimal());
-            let err = KafkaSourceConfig::from_component_config(&section(&body)).unwrap_err();
-            let msg = err.to_string();
-            assert!(msg.contains(key), "error names the key: {msg}");
+            for stats in ["0s", "5s"] {
+                for written in [key.to_owned(), format!("topic.{key}")] {
+                    let body = format!(
+                        "{}  statistics_interval: {stats}\n  rdkafka:\n    \"{written}\": \"x\"\n",
+                        minimal()
+                    );
+                    let msg = KafkaSourceConfig::from_component_config(&section(&body))
+                        .unwrap_err()
+                        .to_string();
+                    assert!(
+                        msg.contains(&format!(
+                            "source.kafka.rdkafka.\"{written}\" cannot be overridden"
+                        )),
+                        "{msg}"
+                    );
+                }
+            }
         }
+    }
+
+    /// A global librdkafka property whose name starts with `topic.` is not a
+    /// topic-prefixed spelling of an owned property.
+    #[test]
+    fn a_global_topic_property_passes_validation() {
+        let body = format!(
+            "{}  rdkafka:\n    topic.metadata.refresh.interval.ms: \"1000\"\n",
+            minimal()
+        );
+        KafkaSourceConfig::from_component_config(&section(&body)).expect("not owned");
     }
 
     /// Regression: the librdkafka alias `metadata.broker.list` writes the same
@@ -502,6 +529,7 @@ mod tests {
         assert_eq!(cc.get("enable.auto.commit"), Some("true"));
         assert_eq!(cc.get("auto.commit.interval.ms"), Some("5000"));
         assert_eq!(cc.get("enable.partition.eof"), Some("false"));
+        assert_eq!(cc.get("allow.auto.create.topics"), Some("false"));
     }
 
     /// The framework must not set a prefetch cap of its own. Forcing

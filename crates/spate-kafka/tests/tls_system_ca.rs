@@ -18,6 +18,7 @@ use rdkafka::client::ClientContext;
 use rdkafka::config::RDKafkaLogLevel;
 use rdkafka::consumer::{BaseConsumer, ConsumerContext};
 use rdkafka::error::KafkaError;
+use rdkafka::producer::{BaseProducer, Producer as _};
 use spate_core::checkpoint::{AckRef, Checkpointer};
 use spate_core::record::{PartitionId, Record, RecordMeta};
 use spate_core::sink::{RowEncoder, SealedBatch, ShardWriter};
@@ -153,6 +154,7 @@ fn tls_broker() -> (String, Container<Kafka>, String) {
 }
 
 fn connector_clients(brokers: &str) {
+    create_topic(brokers);
     let tls = BTreeMap::from([("security.protocol".to_string(), "ssl".to_string())]);
 
     let mut sink_cfg = KafkaSinkConfig::new(brokers, TOPIC);
@@ -371,6 +373,22 @@ impl Drop for Scratch {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.0);
     }
+}
+
+/// Create the topic the connector clients use. The sink never creates a
+/// topic, so a raw producer's metadata read does it, under librdkafka's
+/// auto-create default and the CA `probe` finds.
+fn create_topic(brokers: &str) {
+    let producer: BaseProducer = raw(brokers)
+        .set("ssl.ca.location", "probe")
+        .build()
+        .expect("raw producer");
+    spate_test::wait_until(Duration::from_secs(60), "the topic exists", || {
+        producer
+            .client()
+            .fetch_metadata(Some(TOPIC), Duration::from_secs(10))
+            .is_ok_and(|m| m.topics().iter().all(|t| t.error().is_none()))
+    });
 }
 
 /// A raw TLS client configuration for `brokers`, with no CA setting.

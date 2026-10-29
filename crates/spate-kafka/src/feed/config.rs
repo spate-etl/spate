@@ -480,16 +480,33 @@ mod tests {
             "bootstrap.servers",
             "metadata.broker.list",
             "delivery.report.only.error",
+            "enable.gapless.guarantee",
         ] {
-            for written in [key.to_owned(), format!("topic.{key}")] {
-                let err = with_rdkafka(&written, "x").unwrap_err().to_string();
-                assert!(
-                    err.contains(&format!("\"{written}\" cannot be overridden")),
-                    "{err}"
-                );
-                assert!(err.contains("feed.kafka"), "{err}");
+            for stats in ["0s", "5s"] {
+                for written in [key.to_owned(), format!("topic.{key}")] {
+                    let err = parse(&format!(
+                        "{MINIMAL}  statistics_interval: {stats}\n  rdkafka:\n    \"{written}\": \"x\"\n"
+                    ))
+                    .unwrap_err()
+                    .to_string();
+                    assert!(
+                        err.contains(&format!("rdkafka.\"{written}\" cannot be overridden")),
+                        "{err}"
+                    );
+                    assert!(err.contains("feed.kafka"), "{err}");
+                }
             }
         }
+    }
+
+    /// A refused key's value never reaches the error.
+    #[test]
+    fn rejection_never_prints_the_value() {
+        let err = with_rdkafka("acks", "secret-marker")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("\"acks\""), "{err}");
+        assert!(!err.contains("secret-marker"), "{err}");
     }
 
     /// Pins that an eager assignment strategy is refused too: the feed owns

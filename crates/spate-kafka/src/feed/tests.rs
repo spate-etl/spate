@@ -403,6 +403,30 @@ fn a_confirmed_move_logs_its_time_on_the_feed_clock() {
     );
 }
 
+/// Pins that a confirmed attempt write logs how long it took on the feed's
+/// clock, from its first enqueue.
+#[test]
+fn a_confirmed_attempt_logs_its_time_on_the_feed_clock() {
+    let clock = TestClock::frozen();
+    let core = core_on(10, Arc::clone(&clock));
+    core.lock().tracker.assign([tp(0)]);
+    let entry = gated(&core, 0);
+    let write = attempt_write(&core, entry);
+    clock.advance(Duration::from_secs(3));
+    let capture = spate_test::LogCapture::new();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(capture.clone())
+        .with_max_level(tracing::Level::TRACE)
+        .with_ansi(false)
+        .finish();
+    tracing::subscriber::with_default(subscriber, || core.settle(write, Ok(())));
+    let logged = capture.lines().join("\n");
+    assert!(
+        logged.contains("a unit's attempt was recorded confirmed_in=3s"),
+        "{logged}"
+    );
+}
+
 /// Pins that a fatal write report stops the feed, drops the writes queued
 /// to be sent again, and leaves the offset open.
 #[test]
@@ -2078,6 +2102,40 @@ mod cluster {
         assert_eq!(committed(&brokers, &group), Some(1));
     }
 
+    /// Pins that the consumer thread sends a write queued to be sent again
+    /// once it is due on the feed's clock.
+    #[test]
+    fn a_queued_write_is_sent_once_due_on_the_feed_clock() {
+        use super::super::write::{Outgoing, Write};
+        let cluster = cluster_with(0);
+        let brokers = cluster.bootstrap_servers();
+        let group = spate_test::unique_name("resend-due");
+        let clock = TestClock::frozen();
+        // Ahead of real time, so a due time compared with the system clock
+        // is never reached.
+        clock.advance(Duration::from_secs(3600));
+        let (_, core, producer, d) = parts_on(&brokers, &group, SyncClock::new(clock.clone()));
+        let (confirmer, _confirmation) = spate_core::feed::confirmation();
+        let unit = Unit::new("u", b"x".to_vec());
+        let message = Outgoing::unit(Arc::clone(&core.topics.work), &unit, 0, None);
+        let due = core.clock().now();
+        core.lock()
+            .resends
+            .push((due, Write::Publish { message, confirmer }));
+        let feed = KafkaFeed {
+            core: Arc::clone(&core),
+            producer,
+            thread: Some(std::thread::spawn(move || consumer::run(d))),
+            gate: None,
+            follower: None,
+            depth: None,
+        };
+        wait_until(DEADLINE, "the queued write is sent", || {
+            core.lock().resends.is_empty()
+        });
+        drop(feed);
+    }
+
     /// Pins that the periodic commit falls due once the commit interval has
     /// passed on the feed's clock since the last commit, and not before.
     #[test]
@@ -2086,6 +2144,9 @@ mod cluster {
         let brokers = cluster.bootstrap_servers();
         let group = spate_test::unique_name("commit-cadence");
         let clock = TestClock::frozen();
+        // Ahead of real time, so a commit stamped on the system clock reads
+        // as long past.
+        clock.advance(Duration::from_secs(3600));
         let (config, core, producer, mut d) =
             parts_on(&brokers, &group, SyncClock::new(clock.clone()));
         let admission = admission(&config, &core, &producer, STEP);
@@ -3054,7 +3115,8 @@ mod cluster {
         assert_eq!(core.lock().ready[0].unit.id, format!("u{}", offsets[0]));
         let warning = capture.lines().join("\n");
         assert!(
-            warning.contains("partitions [2]") && warning.contains("slowest read, of partition 1"),
+            warning.contains("partitions [2]")
+                && warning.contains("slowest read, of partition 1, took 3600s"),
             "{warning}"
         );
         assert!(!warning.contains("did not catch up"), "{warning}");

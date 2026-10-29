@@ -117,8 +117,8 @@ impl Driver {
     }
 
     /// Commit the finished offsets once [`COMMIT_INTERVAL`] has passed on the
-    /// feed's clock since the last commit. `true` when the interval had
-    /// passed.
+    /// feed's clock since the last periodic, stop or close commit. `true`
+    /// when the interval had passed.
     pub(crate) fn commit_if_due(&mut self) -> bool {
         let since = self
             .core

@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::sync::watch;
+use tokio::sync::{oneshot, watch};
 
 #[derive(Clone, Debug)]
 enum Outcome {
@@ -1164,6 +1164,15 @@ async fn an_unabortable_write_does_not_hold_the_worker_past_its_grace() {
     let clock = TestClock::frozen();
     let f = fixture_on(&clock, 1, 1, cfg, 16);
     f.writer.set_default(Outcome::BlockThread);
+    // Releases the blocked runtime thread if the test panics, so the
+    // runtime's teardown does not wait on it forever.
+    struct ReleaseOnDrop(Arc<MockWriter>);
+    impl Drop for ReleaseOnDrop {
+        fn drop(&mut self) {
+            self.0.release_blocked();
+        }
+    }
+    let _release = ReleaseOnDrop(Arc::clone(&f.writer));
 
     let (ack, ack_rx) = AckRef::test_pair();
     f.queues.try_send(0, chunk(1, 8, &ack)).unwrap();
@@ -1260,7 +1269,8 @@ fn a_worker_that_ignores_the_deadline_is_force_aborted() {
             let drain = tokio::spawn(pool.drain(deadline));
             tokio::time::timeout(Duration::from_secs(600), async {
                 while !clock.has_slept_until(t0 + deadline + Duration::from_secs(1)) {
-                    tokio::task::yield_now().await;
+                    // A timer, so paused time can reach the deadline.
+                    tokio::time::sleep(Duration::from_millis(1)).await;
                 }
             })
             .await
@@ -2556,7 +2566,8 @@ async fn a_zero_drain_deadline_sweeps_without_the_clock_moving() {
 async fn wait_for_calls(writer: &MockWriter, n: usize) {
     tokio::time::timeout(Duration::from_secs(600), async {
         while writer.calls().len() < n {
-            tokio::task::yield_now().await;
+            // A timer, so paused time can reach the deadline.
+            tokio::time::sleep(Duration::from_millis(1)).await;
         }
     })
     .await
@@ -2665,7 +2676,7 @@ fn retry_backoff_sleeps_on_the_injected_clock() {
 }
 
 /// A backoff step past the `Instant` range waits until the drain abandons
-/// the batch, as tokio's saturating sleep did, instead of panicking the
+/// the batch, as `tokio::time::sleep` saturates, instead of panicking the
 /// write task.
 #[tokio::test(start_paused = true)]
 async fn an_unaddable_backoff_waits_instead_of_abandoning() {
@@ -2788,4 +2799,121 @@ fn ingest_latency_ignores_the_pool_clock() {
 fn sink_pool_keeps_its_auto_traits() {
     fn assert<T: Send + Sync>() {}
     assert::<SinkPool<MockWriter>>();
+}
+
+/// A shard that finishes in the same wake as the backstop comes due still
+/// reports its counts: the drain prefers the joined handle over the timer.
+#[tokio::test(start_paused = true)]
+async fn a_shard_finishing_as_the_backstop_fires_still_reports() {
+    let labels = ComponentLabels::new("test", next_component(), "mock");
+    let metrics = vec![Arc::new(SinkShardMetrics::new(
+        &labels,
+        0,
+        &["r0".into()],
+        E2eBasis::Ingest,
+    ))];
+    let (drain_tx, _drain_rx) = watch::channel(None);
+    let (finish_tx, finish_rx) = oneshot::channel::<()>();
+    let worker = tokio::spawn(async move {
+        let _ = finish_rx.await;
+        worker::WorkerReport {
+            flushed: 1,
+            abandoned: 0,
+        }
+    });
+    let clock = TestClock::frozen();
+    let pool = SinkPool::from_workers(
+        MockWriter::new(),
+        vec![worker],
+        drain_tx,
+        metrics,
+        Arc::clone(&clock) as _,
+    );
+
+    let t0 = clock.now();
+    let deadline = Duration::from_millis(200);
+    let backstop = deadline + Duration::from_secs(1);
+    let drain = tokio::spawn(pool.drain(deadline));
+    tokio::time::timeout(Duration::from_secs(600), async {
+        while !clock.has_slept_until(t0 + backstop) {
+            // A timer, so paused time can reach the deadline.
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("the drain arms its backstop");
+
+    // The worker is woken first, so it has finished by the time the drain
+    // task sees its backstop due.
+    finish_tx.send(()).unwrap();
+    clock.advance(backstop);
+    let report = tokio::time::timeout(Duration::from_secs(600), drain)
+        .await
+        .expect("the drain returns")
+        .unwrap();
+    assert_eq!(
+        report,
+        DrainReport {
+            flushed: 1,
+            abandoned: 0
+        },
+        "the finished shard's report was dropped for the backstop"
+    );
+}
+
+/// Counts error events whose message names the sweep's missed abort grace.
+#[derive(Clone, Default)]
+struct GraceMisses(Arc<AtomicUsize>);
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for GraceMisses {
+    fn on_event(
+        &self,
+        event: &tracing::Event<'_>,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        struct Message(String);
+        impl tracing::field::Visit for Message {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                if field.name() == "message" {
+                    self.0 = format!("{value:?}");
+                }
+            }
+        }
+        let mut message = Message(String::new());
+        event.record(&mut message);
+        if *event.metadata().level() == tracing::Level::ERROR
+            && message.0.contains("did not abort within the grace")
+        {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+}
+
+/// A sweep whose aborts all land logs no missed grace.
+#[tokio::test(start_paused = true)]
+async fn a_sweep_whose_aborts_land_logs_no_missed_grace() {
+    use tracing_subscriber::layer::SubscriberExt;
+    let misses = GraceMisses::default();
+    let _guard =
+        tracing::subscriber::set_default(tracing_subscriber::registry().with(misses.clone()));
+
+    let clock = TestClock::frozen();
+    let f = fixture_on(&clock, 1, 1, small_batches(), 16);
+    f.writer.set_default(Outcome::Hang);
+    let (ack, ack_rx) = AckRef::test_pair();
+    f.queues.try_send(0, chunk(1, 8, &ack)).unwrap();
+    drop(ack);
+    wait_for_calls(&f.writer, 1).await;
+    drop(f.queues);
+
+    let report = f.pool.drain(Duration::ZERO).await;
+    assert_eq!(
+        report,
+        DrainReport {
+            flushed: 0,
+            abandoned: 1
+        }
+    );
+    assert_eq!(ack_rx.try_recv().unwrap().status, AckStatus::Failed);
+    assert_eq!(misses.0.load(Ordering::SeqCst), 0, "logged a missed grace");
 }

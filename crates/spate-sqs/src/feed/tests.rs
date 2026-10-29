@@ -1,6 +1,7 @@
 use super::*;
 use crate::queue::BoxFuture;
 use crate::scripted::{Failure, Message, ScriptedQueue};
+use spate_core::clock::tokio::TestClock;
 use spate_core::feed::{FeedPark, wake_channel};
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::oneshot;
@@ -28,6 +29,27 @@ fn start(visibility: Duration) -> (SqsFeed, Arc<ScriptedQueue>) {
         &tokio::runtime::Handle::current(),
     );
     (feed, queue)
+}
+
+/// [`start`] with every deadline in the feed on `clock`.
+fn start_on_clock(visibility: Duration, clock: &Arc<TestClock>) -> (SqsFeed, Arc<ScriptedQueue>) {
+    let queue = Arc::new(ScriptedQueue::default());
+    let feed = SqsFeed::start_on(
+        Arc::clone(&queue) as Arc<dyn Queue>,
+        Arc::clone(&queue) as Arc<dyn startup::QueueAttributes>,
+        DEAD_URL.to_owned(),
+        &config(visibility),
+        &tokio::runtime::Handle::current(),
+        Arc::clone(clock) as Arc<dyn Clock>,
+    );
+    (feed, queue)
+}
+
+/// [`start`] on a test clock frozen at the runtime's current instant.
+fn start_clocked(visibility: Duration) -> (SqsFeed, Arc<ScriptedQueue>, Arc<TestClock>) {
+    let clock = TestClock::frozen();
+    let (feed, queue) = start_on_clock(visibility, &clock);
+    (feed, queue, clock)
 }
 
 /// Yield to the feed's tasks until `cond` holds. Never moves tokio time.
@@ -479,8 +501,15 @@ struct Gated {
     /// `within` passes, when it fails as Retryable as an SDK timeout does.
     visibility_held: AtomicBool,
     release: Notify,
+    /// Hold each `DeleteMessageBatch` under the rule of `visibility_held`,
+    /// until [`release_deletes`](Gated::release_deletes).
+    deletes_held: AtomicBool,
+    deletes_release: Notify,
     visibility_at: Mutex<Vec<Instant>>,
     deletes_at: Mutex<Vec<Instant>>,
+    /// Stamps calls and bounds held ones on this clock when set, and on
+    /// tokio time otherwise.
+    clock: Option<Arc<dyn Clock>>,
 }
 
 impl Gated {
@@ -492,6 +521,43 @@ impl Gated {
     fn release_visibility(&self) {
         self.visibility_held.store(false, Ordering::SeqCst);
         self.release.notify_waiters();
+    }
+
+    fn hold_deletes(&self) {
+        self.deletes_held.store(true, Ordering::SeqCst);
+    }
+
+    /// Answer every held delete call, and hold no later one.
+    fn release_deletes(&self) {
+        self.deletes_held.store(false, Ordering::SeqCst);
+        self.deletes_release.notify_waiters();
+    }
+
+    fn now(&self) -> Instant {
+        self.clock
+            .as_ref()
+            .map_or_else(Instant::now, |clock| clock.now())
+    }
+
+    /// Wait for `release`, failing Retryable as an SDK timeout does once
+    /// `within` passes.
+    async fn hold(&self, release: &Notify, within: Option<Duration>) -> Result<(), CallError> {
+        let release = release.notified();
+        let Some(within) = within else {
+            release.await;
+            return Ok(());
+        };
+        let released = match &self.clock {
+            Some(clock) => before(&**clock, clock.now() + within, release)
+                .await
+                .is_some(),
+            None => tokio::time::timeout(within, release).await.is_ok(),
+        };
+        if released {
+            Ok(())
+        } else {
+            Err(CallError::retryable("operation timeout"))
+        }
     }
 }
 
@@ -512,21 +578,13 @@ impl Queue for Gated {
         e: Vec<VisibilityEntry>,
         within: Option<Duration>,
     ) -> BoxFuture<'_, Result<BatchOutcome, CallError>> {
-        self.visibility_at.lock().unwrap().push(Instant::now());
+        self.visibility_at.lock().unwrap().push(self.now());
         let held = self.visibility_held.load(Ordering::SeqCst);
         let call = self.inner.change_visibility_batch(e, within);
         Box::pin(async move {
             let outcome = call.await;
             if held {
-                let release = self.release.notified();
-                match within {
-                    Some(within) => {
-                        if tokio::time::timeout(within, release).await.is_err() {
-                            return Err(CallError::retryable("operation timeout"));
-                        }
-                    }
-                    None => release.await,
-                }
+                self.hold(&self.release, within).await?;
             }
             outcome
         })
@@ -537,14 +595,22 @@ impl Queue for Gated {
         e: Vec<DeleteEntry>,
         within: Option<Duration>,
     ) -> BoxFuture<'_, Result<BatchOutcome, CallError>> {
-        self.deletes_at.lock().unwrap().push(Instant::now());
+        self.deletes_at.lock().unwrap().push(self.now());
         if self.delete_fatal.load(Ordering::SeqCst) {
             return Box::pin(async { Err(CallError::fatal("AccessDenied")) });
         }
         if self.delete_down.load(Ordering::SeqCst) {
             return Box::pin(async { Err(CallError::retryable("InternalError")) });
         }
-        self.inner.delete_batch(e, within)
+        let held = self.deletes_held.load(Ordering::SeqCst);
+        let call = self.inner.delete_batch(e, within);
+        Box::pin(async move {
+            let outcome = call.await;
+            if held {
+                self.hold(&self.deletes_release, within).await?;
+            }
+            outcome
+        })
     }
 }
 
@@ -558,6 +624,25 @@ fn start_gated(visibility: Duration) -> (SqsFeed, Arc<Gated>) {
         &tokio::runtime::Handle::current(),
     );
     (feed, queue)
+}
+
+/// [`start_gated`] with every deadline in the feed and in the [`Gated`]
+/// double on a frozen test clock.
+fn start_gated_clocked(visibility: Duration) -> (SqsFeed, Arc<Gated>, Arc<TestClock>) {
+    let clock = TestClock::frozen();
+    let queue = Arc::new(Gated {
+        clock: Some(Arc::clone(&clock) as Arc<dyn Clock>),
+        ..Gated::default()
+    });
+    let feed = SqsFeed::start_on(
+        Arc::clone(&queue) as Arc<dyn Queue>,
+        Arc::new(ScriptedQueue::default()),
+        DEAD_URL.to_owned(),
+        &config(visibility),
+        &tokio::runtime::Handle::current(),
+        Arc::clone(&clock) as Arc<dyn Clock>,
+    );
+    (feed, queue, clock)
 }
 
 /// Pins that a publish SQS keeps failing holds back no delete or fail: both
@@ -3671,4 +3756,542 @@ async fn dropping_the_feed_ends_a_credentials_load_in_flight() {
         .await
         .expect("the load ended")
         .unwrap();
+}
+
+/// Run `f` on a thread of its own, as a pipeline thread calls the feed. The
+/// runtime runs nothing until it returns.
+fn off_runtime<T: Send>(f: impl FnOnce() -> T + Send) -> T {
+    std::thread::scope(|s| s.spawn(f).join().unwrap())
+}
+
+/// Pins the renewal tick to the feed's clock: it is first due one renewal
+/// period after the feed starts on that clock, tokio time does not fire it,
+/// and the next is armed a period later.
+#[tokio::test(start_paused = true)]
+async fn the_renewal_tick_runs_on_the_injected_clock() {
+    let clock = TestClock::frozen();
+    let base = clock.now();
+    let period = MINUTE / 3;
+    // Tokio time moves before the feed starts, so a tick armed from tokio
+    // time is armed apart from the clock.
+    tokio::time::advance(MINUTE).await;
+    let (feed, queue) = start_on_clock(MINUTE, &clock);
+    let (waker, park) = wake_channel();
+    feed.set_waker(waker);
+    queue.ready(Message::new("u"));
+    receive_n(&feed, &park, 1).await;
+    tokio::time::advance(3 * period).await;
+    settle_tasks().await;
+    assert!(queue.visibility().is_empty(), "tokio time fired the tick");
+    until("the tick is armed", || clock.has_slept_until(base + period)).await;
+    clock.advance(period);
+    until("the tick extends the unit", || {
+        queue.visibility().len() == 1
+    })
+    .await;
+    let sent: Vec<i32> = queue.visibility()[0].iter().map(|e| e.seconds).collect();
+    assert_eq!(sent, [60]);
+    until("the next tick is armed", || {
+        clock.has_slept_until(base + 2 * period)
+    })
+    .await;
+    settle_tasks().await;
+    assert_eq!(queue.visibility().len(), 1, "one extension per tick");
+}
+
+/// Pins that hand-backs sent between two ticks do not postpone the next:
+/// it runs one renewal period after the feed started on its clock.
+#[tokio::test(start_paused = true)]
+async fn hand_backs_do_not_postpone_the_tick() {
+    let s = Duration::from_secs;
+    let period = MINUTE / 3;
+    let (feed, queue, clock) = start_clocked(MINUTE);
+    let base = clock.now();
+    let (waker, park) = wake_channel();
+    feed.set_waker(waker);
+    for i in 0..3 {
+        queue.ready(Message::new(&format!("u{i}")));
+    }
+    let got = receive_n(&feed, &park, 3).await;
+    tokio::time::advance(3 * period).await;
+    settle_tasks().await;
+    assert!(queue.visibility().is_empty(), "tokio time fired the tick");
+    clock.advance(s(5));
+    feed.hand_back(got[1].receipt).unwrap();
+    until("the first hand-back is sent", || {
+        handed_back(&queue.visibility()) == ["h1"]
+    })
+    .await;
+    clock.advance(s(10));
+    feed.hand_back(got[2].receipt).unwrap();
+    until("the second hand-back is sent", || {
+        handed_back(&queue.visibility()) == ["h1", "h2"]
+    })
+    .await;
+    settle_tasks().await;
+    assert!(extended(&queue.visibility()).is_empty());
+    clock.advance(base + period - clock.now());
+    until("the tick extends the kept unit", || {
+        extended(&queue.visibility()) == ["h0"]
+    })
+    .await;
+    assert!(clock.has_slept_until(base + 2 * period));
+}
+
+/// Pins the late-tick rule on the feed's clock: a tick a hand-back pass holds
+/// up runs as soon as the pass ends, and the next is armed a renewal period
+/// after it was seen when it ran over 5 ms late, and a period after it was
+/// due otherwise.
+#[tokio::test(start_paused = true)]
+async fn a_tick_missed_during_a_long_pass_runs_at_once_then_a_period_later() {
+    let period = MINUTE / 3;
+    for late in [Duration::from_millis(10), LATE_TICK] {
+        let (feed, queue, clock) = start_gated_clocked(MINUTE);
+        let base = clock.now();
+        let (waker, park) = wake_channel();
+        feed.set_waker(waker);
+        queue.inner.ready(Message::new("kept"));
+        queue.inner.ready(Message::new("other"));
+        let got = receive_n(&feed, &park, 2).await;
+        queue.hold_visibility();
+        feed.hand_back(got[1].receipt).unwrap();
+        until("the hand-back call is held", || {
+            queue.visibility_at.lock().unwrap().len() == 1
+        })
+        .await;
+        tokio::time::advance(2 * period).await;
+        settle_tasks().await;
+        assert_eq!(queue.visibility_at.lock().unwrap().len(), 1, "{late:?}");
+        until("the tick is armed", || clock.has_slept_until(base + period)).await;
+        // The held call answers `late` past the tick, and extensions after
+        // it are not held.
+        clock.advance(period + late);
+        queue.release_visibility();
+        until("the due tick runs", || {
+            extended(&queue.inner.visibility()) == ["h0"]
+        })
+        .await;
+        let (next, not) = if late > LATE_TICK {
+            (base + period + late + period, base + 2 * period)
+        } else {
+            (base + 2 * period, base + period + late + period)
+        };
+        until("the next tick is armed", || clock.has_slept_until(next)).await;
+        assert!(!clock.has_slept_until(not), "{late:?} late");
+    }
+}
+
+/// Pins that a tick due as a hand-back is queued sends its extension batch
+/// before the hand-back batch.
+#[tokio::test(start_paused = true)]
+async fn a_tick_due_with_a_hand_back_queued_extends_first() {
+    let period = MINUTE / 3;
+    let (feed, queue, clock) = start_clocked(MINUTE);
+    let (waker, park) = wake_channel();
+    feed.set_waker(waker);
+    queue.ready(Message::new("kept"));
+    queue.ready(Message::new("other"));
+    let got = receive_n(&feed, &park, 2).await;
+    tokio::time::advance(3 * period).await;
+    settle_tasks().await;
+    assert!(queue.visibility().is_empty(), "tokio time fired the tick");
+    until("the tick is armed", || {
+        clock.has_slept_until(clock.now() + period)
+    })
+    .await;
+    clock.advance(period);
+    feed.hand_back(got[1].receipt).unwrap();
+    until("both batches are sent", || queue.visibility().len() == 2).await;
+    let calls = queue.visibility();
+    assert_eq!(extended(&calls[..1]), ["h0"], "{calls:?}");
+    assert_eq!(handed_back(&calls[1..]), ["h1"], "{calls:?}");
+}
+
+/// Pins that `receive` on a pipeline thread drops a buffered unit by the
+/// feed's clock: exactly one renewal period from its deadline it is handed
+/// out, and a millisecond closer it is dropped unread.
+#[tokio::test(start_paused = true)]
+async fn receive_on_a_pipeline_thread_drops_by_the_injected_clock() {
+    let period = MINUTE / 3;
+    for (left, handed_out) in [(period, true), (period - Duration::from_millis(1), false)] {
+        let (feed, queue, clock) = start_clocked(MINUTE);
+        let (waker, _park) = wake_channel();
+        feed.set_waker(waker);
+        queue.ready(Message::new("u"));
+        assert!(feed.receive(1).unwrap().is_empty());
+        until("the unit is buffered", || feed.buffered() == 1).await;
+        let deadline = feed.lock().held.values().next().unwrap().deadline;
+        tokio::time::advance(MINUTE).await;
+        settle_tasks().await;
+        assert_eq!(feed.buffered(), 1, "{left:?}");
+        clock.advance(deadline - left - clock.now());
+        let got = off_runtime(|| feed.receive(1).unwrap());
+        assert_eq!(got.len() == 1, handed_out, "{left:?} from its deadline");
+        assert_eq!(feed.buffered(), 0);
+    }
+}
+
+/// Pins the deadline checks of `renew`, `fail` and `hand_back` on a pipeline
+/// thread to the feed's clock: with tokio time past the deadline and the
+/// clock short of it, each answers `Ok`; at the deadline on the clock each
+/// answers `Gone` and sends nothing; a millisecond before it, each answers
+/// `Ok` and `fail` and `hand_back` send their unit visible.
+#[tokio::test(start_paused = true)]
+async fn the_deadline_guards_on_a_pipeline_thread_read_the_injected_clock() {
+    #[derive(Clone, Copy, Debug)]
+    enum Call {
+        Renew,
+        Fail,
+        HandBack,
+    }
+    #[derive(Clone, Copy, Debug)]
+    enum When {
+        TokioPast,
+        AtDeadline,
+        JustBefore,
+    }
+    for call in [Call::Renew, Call::Fail, Call::HandBack] {
+        for when in [When::TokioPast, When::AtDeadline, When::JustBefore] {
+            let (feed, queue, clock) = start_clocked(MINUTE);
+            let (waker, park) = wake_channel();
+            feed.set_waker(waker);
+            queue.ready(Message::new("u"));
+            let receipt = receive_n(&feed, &park, 1).await.remove(0).receipt;
+            let deadline = feed.deadline_of(receipt).unwrap();
+            match when {
+                When::TokioPast => {
+                    tokio::time::advance(2 * MINUTE).await;
+                    settle_tasks().await;
+                }
+                When::AtDeadline => clock.advance(deadline - clock.now()),
+                When::JustBefore => {
+                    clock.advance(deadline - Duration::from_millis(1) - clock.now());
+                }
+            }
+            let answer = off_runtime(|| match call {
+                Call::Renew => feed.renew(receipt),
+                Call::Fail => feed.fail(receipt, "unreadable"),
+                Call::HandBack => feed.hand_back(receipt),
+            });
+            settle_tasks().await;
+            let sent = handed_back(&queue.visibility());
+            match when {
+                When::AtDeadline => {
+                    assert_eq!(
+                        answer.map_err(|e| e.kind),
+                        Err(FeedErrorKind::Gone),
+                        "{call:?} {when:?}"
+                    );
+                    assert!(sent.is_empty(), "{call:?} {when:?}: {sent:?}");
+                }
+                When::TokioPast | When::JustBefore => {
+                    assert_eq!(answer.map_err(|e| e.kind), Ok(()), "{call:?} {when:?}");
+                    let expected: &[&str] = match call {
+                        Call::Renew => &[],
+                        Call::Fail | Call::HandBack => &["h0"],
+                    };
+                    assert_eq!(sent, expected, "{call:?} {when:?}");
+                }
+            }
+        }
+    }
+}
+
+/// Pins a close's bound and its wait for a receive in flight to the feed's
+/// clock. The bound counts from the first task that reads it, after a close
+/// called on a pipeline thread, and tokio time ends neither wait.
+#[tokio::test(start_paused = true)]
+async fn the_close_bound_runs_on_the_injected_clock() {
+    let s = Duration::from_secs;
+    let (feed, queue, clock) = start_gated_clocked(MINUTE);
+    let base = clock.now();
+    let (waker, park) = wake_channel();
+    feed.set_waker(waker);
+    queue.inner.ready(Message::new("u"));
+    let d = receive_n(&feed, &park, 1).await.remove(0);
+    queue.delete_down.store(true, Ordering::SeqCst);
+    feed.acknowledge(d.receipt).unwrap();
+    until("the delete is sent", || {
+        queue.deletes_at.lock().unwrap().len() == 1
+    })
+    .await;
+    let within = s(5);
+    let mut closed = off_runtime(|| feed.close(within).unwrap());
+    // The clock moves before any task reads the bound.
+    clock.advance(s(1));
+    tokio::time::advance(MINUTE).await;
+    settle_tasks().await;
+    assert!(closed.try_outcome().is_none(), "tokio time ended the close");
+    let bound = base + s(1) + within;
+    until("the close waits for its bound", || {
+        clock.has_slept_until(bound)
+    })
+    .await;
+    clock.advance(within - s(1));
+    settle_tasks().await;
+    assert!(
+        closed.try_outcome().is_none(),
+        "settled before the first task's bound"
+    );
+    clock.advance(s(1));
+    until("the close settles at its bound", || {
+        closed.try_outcome().is_some()
+    })
+    .await;
+    assert!(closed.try_outcome().unwrap().is_err());
+
+    // A receive in flight after the last hand-back holds the close for
+    // `RECEIVE_GRACE` on the clock. The long poll waits 20 s of tokio time.
+    let (feed, queue, clock) = start_clocked(MINUTE);
+    let base = clock.now();
+    queue.ready(Message::new("a"));
+    assert!(feed.receive(2).unwrap().is_empty());
+    until("the unit is buffered", || feed.buffered() == 1).await;
+    until("the next poll is sent", || queue.receives().len() == 2).await;
+    let mut closed = feed.close(s(10)).unwrap();
+    settle_tasks().await;
+    assert_eq!(handed_back(&queue.visibility()), ["h0"]);
+    tokio::time::advance(s(10)).await;
+    settle_tasks().await;
+    assert!(closed.try_outcome().is_none(), "tokio time ended the grace");
+    until("the close waits out the grace", || {
+        clock.has_slept_until(base + RECEIVE_GRACE)
+    })
+    .await;
+    clock.advance(RECEIVE_GRACE - Duration::from_millis(1));
+    settle_tasks().await;
+    assert!(closed.try_outcome().is_none(), "settled within the grace");
+    clock.advance(Duration::from_millis(1));
+    until("the close settles at the grace's end", || {
+        closed.try_outcome().is_some()
+    })
+    .await;
+    assert!(closed.try_outcome().unwrap().is_ok());
+}
+
+/// Pins the retry of a failed settle call to the feed's clock: the backoff
+/// runs on it, and a batch is given up unsent once the backoff would reach
+/// its deadline on the clock, and retried with the time left when it would
+/// not.
+#[tokio::test(start_paused = true)]
+async fn a_settle_retry_is_given_up_by_the_injected_clock() {
+    let ms = Duration::from_millis;
+    let (feed, queue, clock) = start_clocked(MINUTE);
+    let (waker, park) = wake_channel();
+    feed.set_waker(waker);
+    queue.ready(Message::new("u"));
+    let d = receive_n(&feed, &park, 1).await.remove(0);
+    let deadline = feed.deadline_of(d.receipt).unwrap();
+    // Tokio time passes the deadline, which the clock is short of.
+    tokio::time::advance(2 * MINUTE).await;
+    queue.fail_next_visibility_call(CallError::retryable("throttled"));
+    let t0 = clock.now();
+    feed.fail(d.receipt, "unreadable").unwrap();
+    until("the fail is sent", || queue.visibility().len() == 1).await;
+    tokio::time::advance(MINUTE).await;
+    settle_tasks().await;
+    assert_eq!(queue.visibility().len(), 1, "tokio time ended the backoff");
+    until("the backoff waits on the clock", || {
+        clock.has_slept_until(t0 + BACKOFF_START)
+    })
+    .await;
+    clock.advance(BACKOFF_START);
+    until("the fail is retried", || queue.visibility().len() == 2).await;
+    assert_eq!(
+        queue.visibility_within(),
+        [Some(deadline - t0), Some(deadline - t0 - BACKOFF_START)]
+    );
+
+    for (left, retried) in [(ms(200), false), (ms(201), true)] {
+        let (feed, queue, clock) = start_clocked(MINUTE);
+        let (waker, park) = wake_channel();
+        feed.set_waker(waker);
+        queue.ready(Message::new("u"));
+        let d = receive_n(&feed, &park, 1).await.remove(0);
+        let deadline = feed.deadline_of(d.receipt).unwrap();
+        // The fail takes the unit before the tick due on this jump runs.
+        clock.advance(deadline - left - clock.now());
+        queue.fail_next_visibility_call(CallError::retryable("throttled"));
+        feed.fail(d.receipt, "unreadable").unwrap();
+        until("the fail is sent", || queue.visibility().len() == 1).await;
+        settle_tasks().await;
+        clock.advance(BACKOFF_START);
+        settle_tasks().await;
+        if retried {
+            assert_eq!(
+                queue.visibility_within(),
+                [Some(left), Some(left - BACKOFF_START)],
+                "{left:?} left"
+            );
+        } else {
+            assert_eq!(queue.visibility().len(), 1, "{left:?} left: retried");
+        }
+    }
+}
+
+/// Pins a hand-back pass's bound to the feed's clock: tokio time does not end
+/// a pass whose call is unanswered, and at a renewal period on the clock the
+/// batch is queued again, sent again with bounds from the clock, and counted
+/// once, and the time of its last hand-back is the clock's.
+#[tokio::test(start_paused = true)]
+async fn a_hand_back_pass_ends_by_the_injected_clock() {
+    let period = MINUTE / 3;
+    let (feed, queue, clock) = start_gated_clocked(MINUTE);
+    let base = clock.now();
+    let (waker, park) = wake_channel();
+    feed.set_waker(waker);
+    queue.inner.ready(Message::new("u"));
+    let d = receive_n(&feed, &park, 1).await.remove(0);
+    // Tokio time passes the unit's deadline, which the clock is short of.
+    tokio::time::advance(2 * MINUTE).await;
+    queue.hold_visibility();
+    feed.hand_back(d.receipt).unwrap();
+    until("the hand-back call is held", || {
+        queue.visibility_at.lock().unwrap().len() == 1
+    })
+    .await;
+    tokio::time::advance(2 * period).await;
+    settle_tasks().await;
+    assert_eq!(queue.visibility_at.lock().unwrap().len(), 1);
+    assert_eq!(feed.lock().handing_back, 1, "tokio time ended the pass");
+    until("the pass waits for its bound", || {
+        clock.has_slept_until(base + period)
+    })
+    .await;
+    clock.advance(period);
+    until("the batch is sent again", || {
+        queue.visibility_at.lock().unwrap().len() == 2
+    })
+    .await;
+    assert_eq!(handed_back(&queue.inner.visibility()), ["h0", "h0"]);
+    assert_eq!(hand_back_within(&queue.inner), [Some(period), Some(period)]);
+    assert_eq!(*queue.visibility_at.lock().unwrap(), [base, base + period]);
+    let st = feed.lock();
+    assert_eq!(st.last_hand_back, Some(base + period));
+    assert_eq!(st.unsent(), 1, "the batch is counted once");
+}
+
+/// Pins a unit's first deadline and the end of its hold to the feed's clock
+/// at the receive.
+#[tokio::test(start_paused = true)]
+async fn the_first_deadline_counts_from_the_injected_clock() {
+    let (feed, queue, clock) = start_clocked(MINUTE);
+    let (waker, park) = wake_channel();
+    feed.set_waker(waker);
+    tokio::time::advance(MINUTE).await;
+    clock.advance(Duration::from_secs(5));
+    let t = clock.now();
+    queue.ready(Message::new("u"));
+    let d = receive_n(&feed, &park, 1).await.remove(0);
+    assert_eq!(feed.deadline_of(d.receipt), Some(t + MINUTE));
+    let hold_end = feed.lock().held[&d.receipt.0].hold_end;
+    assert_eq!(hold_end, t + HOLD - MARGIN);
+}
+
+/// Pins an extension call's bound, the deadline it sets and the rule that
+/// sends a failed call once more to the feed's clock: the call is given half
+/// the time left on the clock when that is under a period, a failed call
+/// with a period left is sent once more and one with a period and a
+/// millisecond left is not, and an answered extension counts from the clock.
+#[tokio::test(start_paused = true)]
+async fn an_extension_bound_and_its_once_more_read_the_injected_clock() {
+    let period = MINUTE / 3;
+    for (offset, once_more) in [(Duration::ZERO, true), (Duration::from_millis(1), false)] {
+        let (feed, queue, clock) = start_clocked(MINUTE);
+        let base = clock.now();
+        let (waker, park) = wake_channel();
+        feed.set_waker(waker);
+        until("the tick is armed", || clock.has_slept_until(base + period)).await;
+        clock.advance(offset);
+        queue.ready(Message::new("u"));
+        let d = receive_n(&feed, &park, 1).await.remove(0);
+        let deadline = feed.deadline_of(d.receipt).unwrap();
+        // SQS refuses the first tick's extension, so the deadline stays.
+        queue.fail_next_visibility(vec![failure(0, "InvalidParameterValue")]);
+        tokio::time::advance(2 * MINUTE).await;
+        settle_tasks().await;
+        assert!(queue.visibility().is_empty(), "tokio time fired the tick");
+        clock.advance(base + period - clock.now());
+        until("the first tick", || queue.visibility().len() == 1).await;
+        feed.renew(d.receipt).unwrap();
+        queue.fail_next_visibility_call(CallError::retryable("throttled"));
+        until("the second tick is armed", || {
+            clock.has_slept_until(base + 2 * period)
+        })
+        .await;
+        clock.advance(period);
+        until("the second tick", || queue.visibility().len() >= 2).await;
+        settle_tasks().await;
+        let half = (deadline - (base + 2 * period)) / 2;
+        let mut expected = vec![Some(period), Some(half)];
+        if once_more {
+            expected.push(Some(half));
+        }
+        assert_eq!(queue.visibility_within(), expected, "{offset:?}");
+    }
+
+    let (feed, queue, clock) = start_clocked(MINUTE);
+    let base = clock.now();
+    let (waker, park) = wake_channel();
+    feed.set_waker(waker);
+    queue.ready(Message::new("u"));
+    let d = receive_n(&feed, &park, 1).await.remove(0);
+    tokio::time::advance(2 * MINUTE).await;
+    until("the tick is armed", || clock.has_slept_until(base + period)).await;
+    clock.advance(period);
+    until("the tick extends the unit", || {
+        queue.visibility().len() == 1
+    })
+    .await;
+    settle_tasks().await;
+    assert_eq!(feed.deadline_of(d.receipt), Some(base + period + MINUTE));
+}
+
+/// Pins a close's bound on queued deletes to the feed's clock: the first
+/// delete call is given the bound less the clock's time, and a chunk still
+/// queued when the clock passes the bound is counted given up and never
+/// sent.
+#[tokio::test(start_paused = true)]
+async fn close_drops_a_delete_past_its_bound_by_the_injected_clock() {
+    let s = Duration::from_secs;
+    let (feed, queue, clock) = start_gated_clocked(MINUTE);
+    let base = clock.now();
+    let (waker, park) = wake_channel();
+    feed.set_waker(waker);
+    for i in 0..11 {
+        queue.inner.ready(Message::new(&format!("u{i}")));
+    }
+    let got = receive_n(&feed, &park, 11).await;
+    tokio::time::advance(2 * MINUTE).await;
+    queue.hold_deletes();
+    for d in &got {
+        feed.acknowledge(d.receipt).unwrap();
+    }
+    let within = s(5);
+    let mut closed = feed.close(within).unwrap();
+    // The clock moves before any task reads the bound.
+    clock.advance(s(1));
+    let bound = base + s(1) + within;
+    until("the first chunk is held", || {
+        queue.inner.deletes().len() == 1
+    })
+    .await;
+    assert_eq!(queue.inner.delete_within(), [Some(bound - clock.now())]);
+    tokio::time::advance(MINUTE).await;
+    settle_tasks().await;
+    assert_eq!(queue.inner.deletes().len(), 1, "tokio time moved the close");
+    assert!(closed.try_outcome().is_none());
+    until("the close waits for its bound", || {
+        clock.has_slept_until(bound)
+    })
+    .await;
+    // The first chunk is answered once the clock is past the bound.
+    clock.advance(within);
+    queue.release_deletes();
+    until("the close settles", || closed.try_outcome().is_some()).await;
+    settle_tasks().await;
+    assert!(closed.try_outcome().unwrap().is_err());
+    assert_eq!(queue.inner.deletes().len(), 1, "the second chunk was sent");
+    assert_eq!(queue.inner.deletes()[0].len(), 10);
+    assert_eq!(feed.lock().close.as_ref().unwrap().dropped, 1);
 }

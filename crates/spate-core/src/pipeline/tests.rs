@@ -567,6 +567,9 @@ fn panicking_chain_fails_pipeline() {
 #[test]
 fn a_stall_fails_only_past_its_limit_on_the_injected_clock() {
     let clock = crate::clock::TestClock::frozen();
+    // An hour ahead of real time, so a stall stamped on any other clock
+    // reads an hour old.
+    clock.advance(Duration::from_secs(3600));
     let mut cfg = test_config(1);
     cfg.checkpoint.interval = Duration::from_secs(60);
     cfg.checkpoint.stalled_fail_after = Duration::from_secs(600);
@@ -4909,18 +4912,20 @@ fn http_status(addr: std::net::SocketAddr, path: &str) -> u16 {
 }
 
 /// A revocation whose flush stays blocked is waited on until its drain
-/// deadline on the stop clock, then completes with the run still running.
+/// deadline on the stop clock, then completes with the run still running,
+/// and the driver abandons the flush there so the run can stop.
 #[test]
-fn a_blocked_revocation_flush_ends_at_its_deadline_on_the_injected_clock() {
+fn a_blocked_revocation_flush_ends_at_its_deadline_on_the_stop_clock() {
     let clock = crate::clock::TestClock::frozen();
     let drain = Duration::from_secs(600);
     let mut cfg = stop_config(drain);
     cfg.checkpoint.interval = Duration::from_secs(3600);
-    let h = start_on_clock_with(
+    let stop_clock = Arc::clone(&clock);
+    let h = start_prepared(
         cfg,
         no_idle_flush(),
-        &clock,
-        |runtime| runtime,
+        |_| {},
+        move |runtime, _| runtime.with_stop_clock(stop_clock),
         blocked_flush_chain,
     );
     assign_one_lane(&h, std::slice::from_ref(&(0..10)));

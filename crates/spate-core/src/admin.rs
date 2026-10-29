@@ -21,7 +21,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use crate::clock::{Clock, SystemClock};
+use crate::clock::{SharedClock, SystemClock};
 
 use http_body_util::Full;
 use hyper::body::Bytes;
@@ -57,7 +57,7 @@ impl Default for HealthThresholds {
 /// Shared health state, updated by the pipeline runtime and read by the
 /// probes. All methods are lock-free and callable from any thread.
 pub struct HealthState {
-    clock: Arc<dyn Clock + Send + Sync>,
+    clock: SharedClock,
     epoch: Instant,
     thresholds: HealthThresholds,
     assignment_received: AtomicBool,
@@ -95,7 +95,7 @@ impl HealthState {
     pub(crate) fn with_clock(
         pipeline_threads: usize,
         thresholds: HealthThresholds,
-        clock: Arc<dyn Clock + Send + Sync>,
+        clock: SharedClock,
     ) -> Arc<Self> {
         Arc::new(HealthState {
             epoch: clock.now(),
@@ -316,6 +316,18 @@ mod tests {
         health.heartbeat(0);
         assert!(health.healthy_at(health.epoch + Duration::from_millis(1300)));
         assert!(!health.healthy_at(health.epoch + Duration::from_millis(1301)));
+    }
+
+    /// Liveness reads the injected clock: a heartbeat goes stale once that
+    /// clock moves past the threshold, with no real time passing.
+    #[test]
+    fn liveness_reads_the_injected_clock() {
+        let clock = crate::clock::TestClock::frozen();
+        let health = HealthState::with_clock(1, thresholds(1000, 60_000), clock.clone());
+        health.heartbeat(0);
+        assert!(health.healthy());
+        clock.advance(Duration::from_millis(1001));
+        assert!(!health.healthy());
     }
 
     /// The hand-written `Debug` names the type and its thresholds.

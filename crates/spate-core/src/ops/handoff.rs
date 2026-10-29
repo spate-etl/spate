@@ -247,6 +247,7 @@ where
             raw_len,
             rows: shard.rows,
             acks: std::mem::take(&mut shard.acks),
+            // Real time: the sink worker ages this stamp on the system clock.
             oldest_ingest: shard
                 .first_ingest
                 .take()
@@ -326,6 +327,7 @@ where
             Ok(()) => {
                 shard.rows += 1;
                 self.meter.0.out();
+                // Real time, as at the seal above.
                 shard.first_ingest.get_or_insert_with(|| SystemClock.now());
                 shard.oldest_event_ms = shard.oldest_event_ms.min(rec.meta.event_time_ms);
                 let bid = rec.ack.batch_id();

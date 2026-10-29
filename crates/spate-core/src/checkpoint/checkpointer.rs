@@ -13,7 +13,7 @@ use super::ack::AckTx;
 use super::gate::AdvanceCounter;
 use super::tracker::{PartitionTracker, ResolveOutcome};
 use super::{AckMsg, AckRef, BatchId};
-use crate::clock::{Clock, SystemClock};
+use crate::clock::{SharedClock, SystemClock};
 use crate::error::FatalError;
 use crate::record::PartitionId;
 use std::collections::HashMap;
@@ -138,7 +138,7 @@ pub struct Checkpointer {
     admitted_through: Option<PartitionId>,
     /// Stamps the start of a stall, so a health check that ages it reads
     /// the same timeline.
-    clock: Arc<dyn Clock + Send + Sync>,
+    clock: SharedClock,
 }
 
 impl std::fmt::Debug for Checkpointer {
@@ -181,7 +181,7 @@ impl Checkpointer {
     }
 
     /// Stamps stall starts on `clock`, the clock that ages them.
-    pub(crate) fn set_clock(&mut self, clock: Arc<dyn Clock + Send + Sync>) {
+    pub(crate) fn set_clock(&mut self, clock: SharedClock) {
         self.clock = clock;
     }
 

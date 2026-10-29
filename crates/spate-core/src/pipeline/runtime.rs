@@ -171,7 +171,7 @@ pub struct PipelineRuntime<S: Source> {
     stop_clock: Arc<dyn Clock + Send + Sync>,
     // Drives the commit tick, the fast-commit window, the stall check, the
     // idle flush and the health probe.
-    clock: Arc<dyn Clock + Send + Sync>,
+    clock: crate::clock::SharedClock,
     // How long a `CommitReady` partition keeps the tightened cadence; `None`
     // is one `checkpoint.interval`.
     chase_window: Option<Duration>,
@@ -273,8 +273,9 @@ impl<S: Source + 'static> PipelineRuntime<S> {
         ShutdownHandle(Arc::clone(&self.stop))
     }
 
-    /// Read a graceful stop's reserve and deadlines on `clock`, so a test
-    /// moves them by hand.
+    /// Read a graceful stop's reserve and deadlines, the revocation drain
+    /// deadline and the startup-error grace on `clock`, so a test moves them
+    /// by hand.
     #[cfg(any(test, feature = "testing"))]
     #[doc(hidden)]
     #[must_use]
@@ -286,11 +287,15 @@ impl<S: Source + 'static> PipelineRuntime<S> {
 
     /// Read the commit tick, the fast-commit window, the stall check, the
     /// idle flush and the health probe on `clock`, so a test moves them by
-    /// hand. The stop path keeps its own clock, set by `with_stop_clock`.
+    /// hand. Every drain deadline keeps its own clock, set by
+    /// `with_stop_clock`.
     #[cfg(any(test, feature = "testing"))]
     #[doc(hidden)]
     #[must_use]
-    pub fn with_clock(mut self, clock: Arc<dyn Clock + Send + Sync>) -> Self {
+    pub fn with_clock(
+        mut self,
+        clock: Arc<dyn Clock + Send + Sync + std::panic::RefUnwindSafe>,
+    ) -> Self {
         self.clock = clock;
         self
     }
@@ -585,7 +590,7 @@ impl<S: Source + 'static> PipelineRuntime<S> {
                     source_ct.clone(),
                 )),
                 shutdown: Arc::clone(&self.shutdown),
-                clock: Arc::clone(&self.clock),
+                clock: Arc::clone(&self.clock) as _,
                 stop_clock: Arc::clone(&self.stop_clock),
             };
             let core = core_ids.get(i).copied().flatten();
@@ -676,7 +681,7 @@ impl<S: Source + 'static> PipelineRuntime<S> {
             stop: Arc::clone(&self.stop),
             shutdown: Arc::clone(&self.shutdown),
             stop_clock: Arc::clone(&self.stop_clock),
-            clock: Arc::clone(&self.clock),
+            clock: Arc::clone(&self.clock) as _,
             close_share: if kept_feed.as_ref().is_some_and(|f| f.hands_back()) {
                 CLOSE_SHARE
             } else {

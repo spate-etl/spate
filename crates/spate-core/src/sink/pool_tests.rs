@@ -2506,6 +2506,51 @@ async fn linger_seals_on_the_injected_clock() {
     drain.await.unwrap();
 }
 
+/// A batch opened after one sealed by size lingers from its own first chunk,
+/// and the previous batch's armed linger does not seal it.
+#[tokio::test(start_paused = true)]
+async fn a_new_batch_lingers_from_its_own_first_chunk() {
+    let cfg = SinkPoolConfig {
+        batch: BatchConfig {
+            max_rows: 2,
+            max_bytes: u64::MAX,
+            linger: Duration::from_secs(1),
+        },
+        ..SinkPoolConfig::default()
+    };
+    let clock = TestClock::frozen();
+    let f = fixture_on(&clock, 1, 1, cfg, 16);
+    let (ack, _ack_rx) = AckRef::test_pair();
+
+    // The first batch opens at 0 and arms its linger for 1s.
+    f.queues.try_send(0, chunk(1, 1, &ack)).unwrap();
+    paused_hour().await;
+    clock.advance(Duration::from_millis(500));
+    f.queues.try_send(0, chunk(1, 1, &ack)).unwrap();
+    paused_hour().await;
+    assert_eq!(f.writer.calls().len(), 1, "the first batch seals by size");
+
+    // The second batch opens at 750ms, so it lingers until 1.75s.
+    clock.advance(Duration::from_millis(250));
+    f.queues.try_send(0, chunk(1, 1, &ack)).unwrap();
+    paused_hour().await;
+    clock.advance(Duration::from_millis(250));
+    paused_hour().await;
+    assert_eq!(
+        f.writer.calls().len(),
+        1,
+        "sealed at the previous batch's linger"
+    );
+    clock.advance(Duration::from_millis(750));
+    paused_hour().await;
+    assert_eq!(f.writer.calls().len(), 2, "sealed at its own linger");
+    drop(ack);
+
+    drop(f.queues);
+    let drain = tokio::spawn(f.pool.drain(Duration::ZERO));
+    drain.await.unwrap();
+}
+
 /// The drain deadline, the worker's sweep and the pool's backstop all run on
 /// the pool clock: a hung write is abandoned once that clock reaches the
 /// deadline, however long tokio's clock has run.

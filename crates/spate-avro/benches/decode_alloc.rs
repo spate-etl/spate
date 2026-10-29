@@ -12,7 +12,7 @@
 //! the held reader; these rows price the steady-state decode only.
 //!
 //! `poisoned_schema_id` is left out. Each lookup of a negative-cached id
-//! compares the entry's age with the cache's TTL, so it reads the wall clock.
+//! compares the entry's age with the cache's TTL, so it reads the cache's clock.
 
 use spate_test_support::alloc::{Counting, Report, main_with};
 

@@ -2,6 +2,8 @@
 //! the registry fetcher task (writer).
 
 use apache_avro::Schema;
+use spate_core::clock::Clock;
+use spate_core::clock::SyncClock;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
@@ -122,13 +124,17 @@ pub(crate) struct CacheSnapshot(Arc<HashMap<u32, Entry>>);
 pub(crate) struct SchemaCache {
     entries: RwLock<Arc<HashMap<u32, Entry>>>,
     negative_ttl: Duration,
+    /// Stamps and ages negative entries. The fetcher and the pipeline
+    /// threads read one clock, so they agree on whether an entry expired.
+    clock: SyncClock,
 }
 
 impl SchemaCache {
-    pub(crate) fn new(negative_ttl: Duration) -> Self {
+    pub(crate) fn new(negative_ttl: Duration, clock: SyncClock) -> Self {
         SchemaCache {
             entries: RwLock::new(Arc::new(HashMap::new())),
             negative_ttl,
+            clock,
         }
     }
 
@@ -144,7 +150,7 @@ impl SchemaCache {
     /// Shared-lock lookup. Used off the hot path (the fetcher's dedup check).
     pub(crate) fn get(&self, id: u32) -> Lookup {
         let entries = self.entries.read().expect("schema cache lock");
-        Self::eval(&entries, id, self.negative_ttl).unwrap_or(Lookup::Missing)
+        Self::eval(&entries, id, self.negative_ttl, &*self.clock).unwrap_or(Lookup::Missing)
     }
 
     /// Hot-path lookup that consults the caller's local `memo` first and only
@@ -157,18 +163,25 @@ impl SchemaCache {
     /// single `Arc` clone under the read lock) and re-evaluated, so a
     /// since-published schema or an expired negative entry is always observed.
     pub(crate) fn lookup(&self, memo: &mut CacheSnapshot, id: u32) -> Lookup {
-        if let Some(ready @ Lookup::Ready(_)) = Self::eval(&memo.0, id, self.negative_ttl) {
+        if let Some(ready @ Lookup::Ready(_)) =
+            Self::eval(&memo.0, id, self.negative_ttl, &*self.clock)
+        {
             return ready;
         }
         *memo = self.snapshot();
-        Self::eval(&memo.0, id, self.negative_ttl).unwrap_or(Lookup::Missing)
+        Self::eval(&memo.0, id, self.negative_ttl, &*self.clock).unwrap_or(Lookup::Missing)
     }
 
-    fn eval(map: &HashMap<u32, Entry>, id: u32, ttl: Duration) -> Option<Lookup> {
+    fn eval(
+        map: &HashMap<u32, Entry>,
+        id: u32,
+        ttl: Duration,
+        clock: &dyn Clock,
+    ) -> Option<Lookup> {
         match map.get(&id) {
             Some(Entry::Ready(schema)) => Some(Lookup::Ready(Arc::clone(schema))),
             Some(Entry::Failed { reason, at }) => {
-                if at.elapsed() >= ttl {
+                if clock.now().saturating_duration_since(*at) >= ttl {
                     // Expired: treat as absent so the caller re-fetches.
                     None
                 } else {
@@ -201,7 +214,7 @@ impl SchemaCache {
             id,
             Entry::Failed {
                 reason,
-                at: Instant::now(),
+                at: self.clock.now(),
             },
         );
         *guard = Arc::new(map);
@@ -211,6 +224,7 @@ impl SchemaCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use spate_core::clock::TestClock;
 
     const SCHEMA_JSON: &str =
         r#"{"type":"record","name":"T","fields":[{"name":"a","type":"long"}]}"#;
@@ -253,21 +267,24 @@ mod tests {
 
     #[test]
     fn ready_and_missing() {
-        let cache = SchemaCache::new(Duration::from_secs(30));
+        let cache = SchemaCache::new(Duration::from_secs(30), SyncClock::system());
         assert!(matches!(cache.get(1), Lookup::Missing));
         cache.insert_ready(compiled(1));
         assert!(matches!(cache.get(1), Lookup::Ready(s) if s.id == 1));
     }
 
+    /// A zero TTL expires a negative entry on a clock that has not moved,
+    /// and a long one keeps it.
     #[test]
     fn negative_entries_expire() {
-        let cache = SchemaCache::new(Duration::ZERO);
+        let clock = SyncClock::new(TestClock::frozen());
+        let cache = SchemaCache::new(Duration::ZERO, clock.clone());
         cache.insert_failed(9, "unknown id".into());
         // TTL zero: expired immediately, so it is treated as missing and a
         // refetch is allowed.
         assert!(matches!(cache.get(9), Lookup::Missing));
 
-        let cache = SchemaCache::new(Duration::from_secs(600));
+        let cache = SchemaCache::new(Duration::from_secs(600), clock);
         cache.insert_failed(9, "unknown id".into());
         assert!(matches!(cache.get(9), Lookup::Failed(r) if r.contains("unknown id")));
     }
@@ -276,7 +293,7 @@ mod tests {
     fn ready_is_never_downgraded_to_failed() {
         // Prewarm/fetcher race: a compiled schema must survive a concurrent
         // by-id fetch failing for the same id.
-        let cache = SchemaCache::new(Duration::from_secs(600));
+        let cache = SchemaCache::new(Duration::from_secs(600), SyncClock::system());
         cache.insert_ready(compiled(5));
         cache.insert_failed(5, "registry returned 500".into());
         assert!(
@@ -287,7 +304,7 @@ mod tests {
 
     #[test]
     fn memo_serves_ready_and_refreshes_on_non_ready() {
-        let cache = SchemaCache::new(Duration::from_secs(600));
+        let cache = SchemaCache::new(Duration::from_secs(600), SyncClock::system());
         let mut memo = SchemaCache::empty_snapshot();
 
         // Miss: refreshes the memo, reports Missing.

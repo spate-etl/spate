@@ -11,6 +11,11 @@ homepage.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
+[features]
+# Test-only. Off by default, not enabled by the `spate` facade, and outside
+# the semver surface.
+testing = []
+
 [dependencies]
 apache-avro = { workspace = true }
 ouroboros = { workspace = true }
@@ -31,9 +36,12 @@ tracing = { workspace = true }
 all-features = true
 
 [dev-dependencies]
+spate-avro = { path = ".", features = ["testing"] }
 gungraun = { workspace = true }
 proptest = { workspace = true }
 spate-bench = { workspace = true }
+# `testing`: `clock::TestClock`.
+spate-core = { workspace = true, features = ["testing"] }
 spate-test = { workspace = true }
 spate-test-support = { workspace = true, features = ["tls"] }
 http-body-util = { workspace = true }

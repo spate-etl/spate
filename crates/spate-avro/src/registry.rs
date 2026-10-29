@@ -39,6 +39,7 @@ use rustls::pki_types::pem::PemObject;
 use rustls::{AlertDescription, CertificateError, ClientConfig, RootCertStore};
 use rustls_native_certs::CertificateResult;
 use serde::Deserialize;
+use spate_core::clock::SyncClock;
 use spate_core::config::redact;
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
@@ -444,15 +445,38 @@ struct Backoff {
     next_allowed: Instant,
 }
 
+impl Backoff {
+    /// The backoff after an id's first transient failure at `now`.
+    fn first(now: Instant) -> Backoff {
+        Backoff {
+            delay: FETCH_BACKOFF_INITIAL,
+            next_allowed: now + FETCH_BACKOFF_INITIAL,
+        }
+    }
+
+    /// Double the delay, up to [`FETCH_BACKOFF_MAX`], after another
+    /// transient failure at `now`.
+    fn grow(&mut self, now: Instant) {
+        self.delay = (self.delay * 2).min(FETCH_BACKOFF_MAX);
+        self.next_allowed = now + self.delay;
+    }
+
+    /// Whether a fetch requested at `now` may start.
+    fn admits(&self, now: Instant) -> bool {
+        now >= self.next_allowed
+    }
+}
+
 /// Spawn the fetcher task on `handle` and return the requester side.
 pub(crate) fn spawn_fetcher(
     http: reqwest::Client,
     endpoint: Arc<Endpoint>,
     rejection: Rejection,
     negative_cache_ttl: Duration,
+    clock: SyncClock,
     runtime: &tokio::runtime::Handle,
 ) -> RegistryHandle {
-    let cache = Arc::new(SchemaCache::new(negative_cache_ttl));
+    let cache = Arc::new(SchemaCache::new(negative_cache_ttl, clock.clone()));
     let (tx, mut rx) = mpsc::unbounded_channel::<u32>();
     let task_cache = Arc::clone(&cache);
     let task_rejection = Arc::clone(&rejection);
@@ -481,18 +505,9 @@ pub(crate) fn spawn_fetcher(
                             backoff.remove(&id);
                         }
                         FetchOutcome::Transient => match backoff.get_mut(&id) {
-                            Some(b) => {
-                                b.delay = (b.delay * 2).min(FETCH_BACKOFF_MAX);
-                                b.next_allowed = Instant::now() + b.delay;
-                            }
+                            Some(b) => b.grow(clock.now()),
                             None => {
-                                backoff.insert(
-                                    id,
-                                    Backoff {
-                                        delay: FETCH_BACKOFF_INITIAL,
-                                        next_allowed: Instant::now() + FETCH_BACKOFF_INITIAL,
-                                    },
-                                );
+                                backoff.insert(id, Backoff::first(clock.now()));
                             }
                         },
                     }
@@ -511,7 +526,7 @@ pub(crate) fn spawn_fetcher(
                         continue;
                     }
                     // Honor per-id backoff after a transient failure.
-                    if backoff.get(&id).is_some_and(|b| Instant::now() < b.next_allowed) {
+                    if backoff.get(&id).is_some_and(|b| !b.admits(clock.now())) {
                         continue;
                     }
                     in_flight.insert(id);

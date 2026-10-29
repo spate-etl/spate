@@ -28,6 +28,7 @@ use crate::registry::{Endpoint, RegistryConfig, Rejection, http_client, spawn_fe
 use apache_avro::Schema;
 use apache_avro::rabin::Rabin;
 use serde::Deserialize;
+use spate_core::clock::SyncClock;
 use spate_core::config::{ComponentConfig, redact};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -276,6 +277,32 @@ impl AvroDeserializerBuilder {
         settings: &AvroSettings,
         runtime: &tokio::runtime::Handle,
     ) -> Result<Self, AvroConfigError> {
+        Self::from_settings_on(settings, runtime, SyncClock::system())
+    }
+
+    /// Test seam: time the negative cache and the fetch backoff on `clock`.
+    ///
+    /// Behind the off-by-default `testing` feature, outside the semver
+    /// surface.
+    ///
+    /// # Errors
+    ///
+    /// As [`from_settings`](Self::from_settings).
+    #[cfg(feature = "testing")]
+    #[doc(hidden)]
+    pub fn from_settings_with_clock(
+        settings: &AvroSettings,
+        runtime: &tokio::runtime::Handle,
+        clock: spate_core::clock::SharedClock,
+    ) -> Result<Self, AvroConfigError> {
+        Self::from_settings_on(settings, runtime, SyncClock::new(clock))
+    }
+
+    fn from_settings_on(
+        settings: &AvroSettings,
+        runtime: &tokio::runtime::Handle,
+        clock: SyncClock,
+    ) -> Result<Self, AvroConfigError> {
         if settings.mode == AvroMode::Confluent
             && settings.registry.as_ref().is_some_and(|registry| {
                 reqwest::Url::parse(&registry.url)
@@ -339,6 +366,7 @@ impl AvroDeserializerBuilder {
                     Arc::clone(&endpoint),
                     Arc::clone(&rejection),
                     settings.negative_cache_ttl,
+                    clock,
                     runtime,
                 );
                 if !settings.prewarm_subjects.is_empty() {

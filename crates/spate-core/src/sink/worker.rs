@@ -17,7 +17,7 @@ use super::{EncodedChunk, SealedBatch, ShardWriter, SinkFailures};
 use crate::backpressure::InflightBudget;
 use crate::checkpoint::AckSet;
 use crate::clock::Clock as _;
-use crate::clock::tokio::{Clock, Stopwatch};
+use crate::clock::tokio::{Clock, Sleep, Stopwatch};
 use crate::error::{ErrorClass, SinkError};
 use crate::metrics::{AttemptOutcome, FlushReason, SinkShardMetrics};
 use std::collections::{HashMap, VecDeque};
@@ -249,9 +249,10 @@ impl<W: ShardWriter> ShardWorker<W> {
         // plus the drain force-seal.
         let mut waiting: VecDeque<(u64, SealedBatch, Stopwatch)> = VecDeque::new();
 
-        // A local handle, so the `select!` branch expressions below borrow it
-        // and not `self`, which the branch bodies need mutably.
         let clock = Arc::clone(&self.clock);
+        // The armed linger sleep, kept across intake passes so a lingering
+        // batch boxes a single sleep.
+        let mut linger: Option<(Instant, Sleep)> = None;
         loop {
             let linger_at = acc.first_at.map(|t| t + self.cfg.batch.linger);
             tokio::select! {
@@ -299,7 +300,9 @@ impl<W: ShardWriter> ShardWorker<W> {
                     }
                 }
 
-                () = sleep_until_set(&*clock, linger_at), if linger_at.is_some() && waiting.is_empty() => {
+                () = linger_sleep(&*clock, &mut linger, linger_at), if linger_at.is_some() && waiting.is_empty() => {
+                    // A finished sleep is never polled again.
+                    linger = None;
                     self.dispatch(&mut acc, FlushReason::Linger, &mut seq, &mut ledger, &mut tasks, &semaphore, &breakers, &mut waiting);
                 }
             }
@@ -785,6 +788,19 @@ async fn sleep_until_set(clock: &dyn Clock, at: Option<Instant>) {
         Some(at) => clock.sleep_until(at).await,
         None => std::future::pending().await,
     }
+}
+
+/// Sleep on `clock` until `at`, reusing the sleep in `slot` while it is
+/// armed for the same instant, or forever when `at` is `None`.
+async fn linger_sleep(clock: &dyn Clock, slot: &mut Option<(Instant, Sleep)>, at: Option<Instant>) {
+    let Some(at) = at else {
+        return std::future::pending().await;
+    };
+    let sleep = match slot {
+        Some((armed, sleep)) if *armed == at => sleep,
+        _ => &mut slot.insert((at, clock.sleep_until(at))).1,
+    };
+    sleep.as_mut().await;
 }
 
 /// The outcome of one trip round the replica picker: either a replica to write

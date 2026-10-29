@@ -603,8 +603,9 @@ impl PipelineConfig {
         if self.pipeline.threads == Some(0) {
             return fail("pipeline.threads must be at least 1 when set".into());
         }
-        // The commit loop fires whenever `last_commit.elapsed() >= interval`,
-        // so an interval below a poll cycle commits on nearly every loop.
+        // The commit loop fires once `interval` has passed since the last
+        // commit, so an interval below a poll cycle commits on nearly every
+        // loop.
         // A floor keeps sub-100ms intervals from hammering the source's
         // offset store for no durability gain. The sink write is the
         // durability boundary, not the checkpoint.

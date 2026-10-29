@@ -321,7 +321,7 @@ impl SinkShardMetrics {
     pub fn e2e_observed(&self, ingest_age: Duration, oldest_event_ms: i64) {
         let latency = match self.e2e_basis {
             E2eBasis::Event if oldest_event_ms != i64::MAX => {
-                let now_ms = std::time::SystemTime::now()
+                let now_ms = crate::clock::wall_now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
                     .unwrap_or(0);

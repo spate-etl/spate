@@ -40,12 +40,17 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+use crate::clock::{Clock, SystemClock};
+
 /// Monotonic reference point shared by every [`RateLimit`], so a window
 /// deadline can be stored as a plain `AtomicU64` of nanoseconds and compared
 /// on the lock-free fast path.
+///
+/// On the system clock: every limiter is a process-wide `static`, so no
+/// pipeline can hand it a clock of its own.
 fn base_instant() -> Instant {
     static BASE: OnceLock<Instant> = OnceLock::new();
-    *BASE.get_or_init(Instant::now)
+    *BASE.get_or_init(|| SystemClock.now())
 }
 
 fn nanos_since_base(now: Instant) -> u64 {
@@ -157,9 +162,9 @@ impl RateLimit {
         }
     }
 
-    /// Decide whether to log an event happening now.
+    /// Decide whether to log an event happening now, on the system clock.
     pub fn check(&self) -> Decision {
-        self.check_at(Instant::now())
+        self.check_at(SystemClock.now())
     }
 
     /// Decide for an event at `now` (injectable for tests).

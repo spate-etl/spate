@@ -27,6 +27,8 @@ use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::clock::{Clock, SystemClock};
+
 /// Tuning for the terminal stage's per-shard chunking.
 #[derive(Clone, Copy, Debug)]
 pub struct ChunkConfig {
@@ -245,7 +247,10 @@ where
             raw_len,
             rows: shard.rows,
             acks: std::mem::take(&mut shard.acks),
-            oldest_ingest: shard.first_ingest.take().unwrap_or_else(Instant::now),
+            oldest_ingest: shard
+                .first_ingest
+                .take()
+                .unwrap_or_else(|| SystemClock.now()),
             oldest_event_ms: shard.oldest_event_ms,
         };
         shard.rows = 0;
@@ -321,7 +326,7 @@ where
             Ok(()) => {
                 shard.rows += 1;
                 self.meter.0.out();
-                shard.first_ingest.get_or_insert_with(Instant::now);
+                shard.first_ingest.get_or_insert_with(|| SystemClock.now());
                 shard.oldest_event_ms = shard.oldest_event_ms.min(rec.meta.event_time_ms);
                 let bid = rec.ack.batch_id();
                 if shard.last_batch != Some(bid) {

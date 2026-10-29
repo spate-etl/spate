@@ -626,6 +626,9 @@ pub(crate) enum ChainMode {
     HoldAcksUntilFlush {
         held: Arc<Mutex<Vec<crate::checkpoint::AckRef>>>,
     },
+    /// Take every batch, and report every flush blocked, as a terminal whose
+    /// sink queue stays full does. A drain's flush then runs to its deadline.
+    FlushBlocked,
 }
 
 pub(crate) struct FakeChain {
@@ -689,6 +692,12 @@ impl RunnableChain for FakeChain {
     fn flush(&mut self) -> PushOutcome {
         self.shared.flushes.fetch_add(1, Ordering::Relaxed);
         self.log.lock().unwrap().log.push("flush".into());
+        if matches!(self.mode, ChainMode::FlushBlocked) {
+            return PushOutcome::Blocked {
+                resume_at: 0,
+                reason: BlockReason::Capacity,
+            };
+        }
         if let ChainMode::HoldAcksUntilFlush { held } = &self.mode {
             // Dropping the stashed clones resolves the batches Delivered, the
             // fake equivalent of sealing a partial chunk and having the sink

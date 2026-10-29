@@ -10,6 +10,7 @@ use super::{DriverEvent, ThreadControl};
 use crate::admin::HealthState;
 use crate::backpressure::{InflightBudget, Transition, WatermarkController};
 use crate::checkpoint::{AckRef, AdvanceCounter};
+use crate::clock::{Clock, Stopwatch, SystemClock};
 use crate::error::{ErrorClass, FatalError, SourceError};
 use crate::metrics::{BackpressureMetrics, SourceMetrics};
 use crate::ops::{BlockReason, PushOutcome, RunnableChain};
@@ -77,6 +78,10 @@ pub(crate) struct DriverContext<L> {
     /// long-running inner loops (blocked-batch retries) so a wedged batch
     /// cannot defer shutdown to the barrier timeout.
     pub shutdown: Arc<AtomicBool>,
+    /// Drives the idle flush.
+    pub clock: Arc<dyn Clock + Send + Sync>,
+    /// Reads the drain deadlines, which the stop path cuts on this clock.
+    pub stop_clock: Arc<dyn Clock + Send + Sync>,
 }
 
 /// Run one driver thread to completion.
@@ -93,13 +98,15 @@ pub(crate) fn run_driver<L: SourceLane>(ctx: DriverContext<L>) -> DriverExit {
         bp_metrics,
         source_metrics,
         shutdown,
+        clock,
+        stop_clock,
     } = ctx;
 
     let mut lanes: Vec<L> = Vec::new();
     let mut next_lane = 0usize;
-    let mut last_data = Instant::now();
+    let mut last_data = clock.now();
     let mut flushed_since_data = false;
-    let mut pause_started: Option<Instant> = None;
+    let mut pause_started: Option<Stopwatch> = None;
     // Consecutive empty or failed lane polls since the last batch; a skipped
     // lane does not count.
     let mut empty_polls: usize = 0;
@@ -161,6 +168,7 @@ pub(crate) fn run_driver<L: SourceLane>(ctx: DriverContext<L>) -> DriverExit {
                         flush_until(
                             chain.as_mut(),
                             deadline,
+                            &*stop_clock,
                             &mut bp,
                             &events,
                             &health,
@@ -200,6 +208,7 @@ pub(crate) fn run_driver<L: SourceLane>(ctx: DriverContext<L>) -> DriverExit {
                     flush_until(
                         chain.as_mut(),
                         deadline,
+                        &*stop_clock,
                         &mut bp,
                         &events,
                         &health,
@@ -236,7 +245,7 @@ pub(crate) fn run_driver<L: SourceLane>(ctx: DriverContext<L>) -> DriverExit {
             park_on_control(&control, &mut parked, params.poll_timeout);
             idle_flush(
                 chain.as_mut(),
-                &mut last_data,
+                clock.now().saturating_duration_since(last_data),
                 &mut flushed_since_data,
                 params.idle_flush,
                 &mut bp,
@@ -299,7 +308,7 @@ pub(crate) fn run_driver<L: SourceLane>(ctx: DriverContext<L>) -> DriverExit {
                 park_on_control(&control, &mut parked, params.poll_timeout);
                 idle_flush(
                     chain.as_mut(),
-                    &mut last_data,
+                    clock.now().saturating_duration_since(last_data),
                     &mut flushed_since_data,
                     params.idle_flush,
                     &mut bp,
@@ -315,15 +324,15 @@ pub(crate) fn run_driver<L: SourceLane>(ctx: DriverContext<L>) -> DriverExit {
         // The poll result borrows the lane's buffers, so the fatal is latched
         // here and acted on once this block ends.
         let fatal_reported = {
-            let poll_started = Instant::now();
+            let poll_started = Stopwatch::start(&SystemClock);
             let polled = lanes[lane_idx].poll(params.max_records, lane_timeout);
-            source_metrics.poll_duration(poll_started.elapsed());
+            source_metrics.poll_duration(poll_started.elapsed(&SystemClock));
 
             let mut fatal_reported = false;
             match polled {
                 Ok(Some(mut batch)) => {
                     empty_polls = 0;
-                    last_data = Instant::now();
+                    last_data = clock.now();
                     flushed_since_data = false;
                     if let Some(g) = gates.get_mut(&partition) {
                         let id = batch.ack().batch_id();
@@ -362,7 +371,7 @@ pub(crate) fn run_driver<L: SourceLane>(ctx: DriverContext<L>) -> DriverExit {
                     empty_polls = empty_polls.saturating_add(1);
                     idle_flush(
                         chain.as_mut(),
-                        &mut last_data,
+                        clock.now().saturating_duration_since(last_data),
                         &mut flushed_since_data,
                         params.idle_flush,
                         &mut bp,
@@ -522,7 +531,7 @@ fn drive_batch(
     owned: &[LaneId],
     health: &HealthState,
     bp_metrics: &BackpressureMetrics,
-    pause_started: &mut Option<Instant>,
+    pause_started: &mut Option<Stopwatch>,
     shutdown: &AtomicBool,
 ) -> Result<(), FatalError> {
     // Cloned before the first push. If the chain panics the batch may be
@@ -620,6 +629,7 @@ impl<'buf> PayloadBatch<'buf> for CountingBatch<'_, 'buf> {
 fn flush_until(
     chain: &mut dyn RunnableChain,
     deadline: Instant,
+    stop_clock: &dyn Clock,
     bp: &mut WatermarkController,
     events: &crossbeam_channel::Sender<DriverEvent>,
     health: &HealthState,
@@ -631,7 +641,7 @@ fn flush_until(
             PushOutcome::Done => return,
             PushOutcome::Blocked { .. } => {
                 bp.on_send_rejected();
-                if Instant::now() >= deadline {
+                if stop_clock.now() >= deadline {
                     tracing::error!(
                         thread,
                         "drain deadline exceeded with the chain still blocked; \
@@ -649,17 +659,18 @@ fn flush_until(
     }
 }
 
-/// Flush partial terminal state once per data lull.
+/// Flush partial terminal state once per data lull, once `quiet_for` since
+/// the last data reaches `after`.
 fn idle_flush(
     chain: &mut dyn RunnableChain,
-    last_data: &mut Instant,
+    quiet_for: Duration,
     flushed_since_data: &mut bool,
     after: Duration,
     bp: &mut WatermarkController,
     events: &crossbeam_channel::Sender<DriverEvent>,
     thread: usize,
 ) {
-    if *flushed_since_data || last_data.elapsed() < after {
+    if *flushed_since_data || quiet_for < after {
         return;
     }
     match chain.flush() {
@@ -680,11 +691,11 @@ fn apply_transition(
     owned: &[LaneId],
     events: &crossbeam_channel::Sender<DriverEvent>,
     bp_metrics: &BackpressureMetrics,
-    pause_started: &mut Option<Instant>,
+    pause_started: &mut Option<Stopwatch>,
 ) {
     match t {
         Transition::Pause => {
-            *pause_started = Some(Instant::now());
+            *pause_started = Some(Stopwatch::start(&SystemClock));
             bp_metrics.pause_started();
             let _ = events.send(DriverEvent::PauseLanes {
                 lanes: owned.to_vec(),
@@ -693,7 +704,7 @@ fn apply_transition(
         Transition::Resume => {
             let paused_for = pause_started
                 .take()
-                .map(|s| s.elapsed())
+                .map(|s| s.elapsed(&SystemClock))
                 .unwrap_or_default();
             bp_metrics.pause_ended(paused_for);
             let _ = events.send(DriverEvent::ResumeLanes {

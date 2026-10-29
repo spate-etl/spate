@@ -2,7 +2,9 @@
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use crate::clock::{Clock, SystemClock};
 
 #[derive(Debug)]
 struct Inner {
@@ -60,10 +62,12 @@ impl DrainBarrier {
     /// whether the drain completed.
     #[must_use]
     pub fn wait(&self, timeout: Duration) -> bool {
-        let deadline = Instant::now() + timeout;
+        // Real time: a test clock cannot wake the condvar. Callers own the
+        // deadline and pass what is left of it.
+        let deadline = SystemClock.now() + timeout;
         let mut done = self.inner.done.lock().expect("barrier lock");
         while !*done {
-            let now = Instant::now();
+            let now = SystemClock.now();
             if now >= deadline {
                 return false;
             }

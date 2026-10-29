@@ -24,7 +24,9 @@ use crate::telemetry::RateLimit;
 use std::marker::PhantomData;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use crate::clock::{Stopwatch, SystemClock};
 
 /// Per-batch lifecycle cascade implemented by every stage. Combinators
 /// handle their own concern and delegate downstream; the terminal stage
@@ -706,7 +708,7 @@ where
             };
         }
 
-        let started = Instant::now();
+        let started = Stopwatch::start(&SystemClock);
         let mut ok: u64 = 0;
         let mut errors: u64 = 0;
         let mut not_ready: u64 = 0;
@@ -764,7 +766,7 @@ where
             }
         }
 
-        let elapsed = started.elapsed();
+        let elapsed = started.elapsed(&SystemClock);
         if let Some(m) = &self.deser_metrics {
             m.batch(ok, errors + fatal, elapsed);
             if errors > 0 && matches!(self.deser_policy, ErrorPolicy::Skip) {

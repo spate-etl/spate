@@ -12,6 +12,7 @@
 //! checkpointer's channel.
 
 use super::AckStatus;
+use crate::clock::{Clock, SystemClock};
 use std::collections::VecDeque;
 use std::time::Instant;
 
@@ -138,6 +139,11 @@ impl PartitionTracker {
     /// Everything delivered *before* the failure is still reported (commit
     /// up to the failure is correct), but nothing past it ever will be.
     pub fn advance(&mut self) -> Option<i64> {
+        self.advance_on(&SystemClock)
+    }
+
+    /// [`advance`](Self::advance), stamping a new stall with `clock`.
+    pub(crate) fn advance_on(&mut self, clock: &dyn Clock) -> Option<i64> {
         let mut committable = None;
         while let Some(slot) = self.ring.front() {
             match slot.state {
@@ -148,7 +154,7 @@ impl PartitionTracker {
                 }
                 SlotState::Failed => {
                     if self.stalled_since.is_none() {
-                        self.stalled_since = Some(Instant::now());
+                        self.stalled_since = Some(clock.now());
                         self.stalled_seq = Some(self.head_seq);
                     }
                     break;

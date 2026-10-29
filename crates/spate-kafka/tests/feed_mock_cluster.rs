@@ -18,11 +18,11 @@ use spate_kafka::feed::KafkaFeedError;
 use spate_test::{WriteOutcome, wait_until};
 use std::time::{Duration, Instant};
 use support::feed::{
-    ATTEMPT, ATTEMPT_PARTITIONS, COMMIT_PERIOD, DEAD, DEADLINE, ON_MOCK, RETRY, WORK,
-    bounded_section, committed, data_dir, direct, exists, feed_yaml, high_watermark,
-    high_watermarks, launch, launch_bounded, launch_customized, launch_stopping, list_once,
-    produce_raw, publish, publish_to, publisher_on_mock, read_attempts, read_topic, recs,
-    run_to_exit, sorted, stage, written,
+    ATTEMPT, ATTEMPT_PARTITIONS, DEAD, DEADLINE, FeedClock, ON_MOCK, RETRY, WORK, bounded_section,
+    committed, data_dir, direct, direct_on, exists, feed_yaml, high_watermark, high_watermarks,
+    launch, launch_bounded, launch_customized, launch_on, launch_stopping, list_once, produce_raw,
+    publish, publish_to, publisher_on_mock, read_attempts, read_topic, recs, run_to_exit, sorted,
+    stage, written,
 };
 use support::{corrupt_batch, produce_batch};
 
@@ -51,9 +51,10 @@ fn attempts_on(
     }
 }
 
-/// Pins INV-1 on Kafka: while the unit's last write is held over several
-/// commit periods, the group never commits past the unit's offset; once the
-/// write succeeds the offset is committed with every row written.
+/// Pins INV-1 on Kafka: while the unit's last write is held across a
+/// periodic commit on the feed's clock, the group never commits past the
+/// unit's offset; once the write succeeds the offset is committed with every
+/// row written.
 #[test]
 fn a_unit_is_deleted_only_after_its_last_record_is_acknowledged() {
     let cluster = cluster(1);
@@ -64,27 +65,30 @@ fn a_unit_is_deleted_only_after_its_last_record_is_acknowledged() {
     let rows = recs("d", 3);
     let unit = stage(&data, "d.ndjson", &rows);
 
-    let worker = launch(&data, &feed_yaml(&brokers, &group, "", ""), |sink| {
-        sink.enqueue_global(WriteOutcome::ok());
-        sink.enqueue_global(WriteOutcome::ok());
-        sink.enqueue_global(WriteOutcome::ok().held());
-    });
+    let clock = FeedClock::frozen();
+    let worker = launch_on(
+        &clock,
+        &data,
+        &feed_yaml(&brokers, &group, "", ""),
+        |sink| {
+            sink.enqueue_global(WriteOutcome::ok());
+            sink.enqueue_global(WriteOutcome::ok());
+            sink.enqueue_global(WriteOutcome::ok().held());
+        },
+    );
     publish(&worker.feed, unit);
     wait_until(DEADLINE, "the last write is held", || {
         worker.script.held_writes() == 1
     });
 
-    // Elapsed time is the property: the hold outlasts several commits.
-    for _ in 0..8 {
-        std::thread::sleep(COMMIT_PERIOD / 2);
-        let at = committed(&brokers, &group, WORK);
-        assert!(
-            at.is_none_or(|at| at <= 0),
-            "the group committed {at:?} while the unit's last write was held"
-        );
-    }
+    clock.commit_window();
+    let at = committed(&brokers, &group, WORK);
+    assert!(
+        at.is_none_or(|at| at <= 0),
+        "the group committed {at:?} while the unit's last write was held"
+    );
     worker.script.release_held();
-    wait_until(DEADLINE, "the unit's offset is committed", || {
+    clock.advance_until("the unit's offset is committed", || {
         committed(&brokers, &group, WORK) == Some(1)
     });
     assert_eq!(written(&worker.script), sorted(rows));
@@ -94,8 +98,8 @@ fn a_unit_is_deleted_only_after_its_last_record_is_acknowledged() {
 
 /// Pins that a failed unit's offset completes only once the write to the
 /// retry topic is confirmed: with the retry topic's leader down, the work
-/// partition's committed offset holds at the unit over several commit
-/// periods, and passes it once the leader is back.
+/// partition's committed offset holds at the unit across a periodic commit
+/// on the feed's clock, and passes it once the leader is back.
 #[test]
 fn the_offset_completes_only_after_the_retry_write_is_confirmed() {
     let cluster = cluster(2);
@@ -112,7 +116,9 @@ fn the_offset_completes_only_after_the_retry_write_is_confirmed() {
     let dir = tempfile::tempdir().unwrap();
     let data = data_dir(&dir);
 
-    let worker = launch(
+    let clock = FeedClock::frozen();
+    let worker = launch_on(
+        &clock,
         &data,
         &feed_yaml(&brokers, &group, "  attempt_cap: 2\n", ""),
         |_| {},
@@ -126,18 +132,14 @@ fn the_offset_completes_only_after_the_retry_write_is_confirmed() {
         !worker.recording.seen.lock().unwrap().is_empty()
     });
 
-    // Elapsed time is the property: the report is held over several
-    // commits.
-    for _ in 0..8 {
-        std::thread::sleep(COMMIT_PERIOD / 2);
-        let at = committed(&brokers, &group, WORK);
-        assert!(
-            at.is_none_or(|at| at <= 0),
-            "the group committed {at:?} before the retry write was confirmed"
-        );
-    }
+    clock.commit_window();
+    let at = committed(&brokers, &group, WORK);
+    assert!(
+        at.is_none_or(|at| at <= 0),
+        "the group committed {at:?} before the retry write was confirmed"
+    );
     cluster.broker_up(2).unwrap();
-    wait_until(DEADLINE, "the unit's offset is committed", || {
+    clock.advance_until("the unit's offset is committed", || {
         committed(&brokers, &group, WORK) == Some(1)
     });
     assert_eq!(worker.stop(), ExitState::Completed);
@@ -254,8 +256,8 @@ fn a_completed_unit_read_again_counts_from_zero() {
 /// the dead-letter topic without being read. The record is seeded by a
 /// librdkafka producer set to `partitioner=murmur2`, so librdkafka places
 /// it. While the dead-letter topic's leader is down, the reader gets
-/// nothing and the unit's offset stays uncommitted over several commit
-/// periods; once the leader is back, the offset is committed and the
+/// nothing and the unit's offset stays uncommitted across a periodic commit
+/// on the feed's clock; once the leader is back, the offset is committed and the
 /// record is tombstoned on the partition the seed landed on. The window
 /// opens once a unit behind it on the partition is read, which the gate
 /// admits after the capped unit, so it covers commits after the move is
@@ -298,31 +300,32 @@ fn a_unit_at_the_cap_goes_to_the_dead_letter_topic_unread() {
     let seeded = read_attempts(&brokers, ATTEMPT_PARTITIONS, 1);
     cluster.broker_down(2).unwrap();
 
-    let worker = direct(&feed_yaml(&brokers, &group, "  attempt_cap: 3\n", ""));
+    let clock = FeedClock::frozen();
+    let worker = direct_on(
+        &clock,
+        &feed_yaml(&brokers, &group, "  attempt_cap: 3\n", ""),
+    );
     let behind = worker.take("the unit behind the capped one");
     assert_eq!(behind.unit.id, "behind");
     assert_eq!(behind.deliveries, 1);
-    // Elapsed time is the property: the move is held over several commits.
-    for _ in 0..8 {
-        std::thread::sleep(COMMIT_PERIOD / 2);
-        assert!(
-            worker.feed.receive(8).map_or_else(
-                |e| {
-                    assert_eq!(e.kind, FeedErrorKind::Retryable, "{e}");
-                    true
-                },
-                |got| got.is_empty()
-            ),
-            "the unit was read"
-        );
-        let at = committed(&brokers, &group, WORK);
-        assert!(
-            at.is_none_or(|at| at <= 0),
-            "the group committed {at:?} before the dead-letter write was confirmed"
-        );
-    }
+    clock.commit_window();
+    assert!(
+        worker.feed.receive(8).map_or_else(
+            |e| {
+                assert_eq!(e.kind, FeedErrorKind::Retryable, "{e}");
+                true
+            },
+            |got| got.is_empty()
+        ),
+        "the unit was read"
+    );
+    let at = committed(&brokers, &group, WORK);
+    assert!(
+        at.is_none_or(|at| at <= 0),
+        "the group committed {at:?} before the dead-letter write was confirmed"
+    );
     cluster.broker_up(2).unwrap();
-    wait_until(DEADLINE, "the unit's offset is committed", || {
+    clock.advance_until("the unit's offset is committed", || {
         committed(&brokers, &group, WORK) == Some(1)
     });
     let dead = read_topic(&brokers, DEAD, 1);

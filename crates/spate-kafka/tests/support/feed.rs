@@ -44,9 +44,90 @@ pub(crate) const ATTEMPT: &str = "units-attempts";
 /// The attempt topic's partition count on the MockCluster and the broker.
 pub(crate) const ATTEMPT_PARTITIONS: i32 = 2;
 
-/// The feed's commit interval, read from the outside: several of these pass
-/// in a window that pins an offset as not committed.
-pub(crate) const COMMIT_PERIOD: Duration = Duration::from_secs(1);
+/// The feed's commit interval, read from the outside: each advance of a
+/// test's feed clock by this much makes one periodic commit due.
+pub(crate) const COMMIT_INTERVAL: Duration = Duration::from_secs(1);
+
+/// The reads of the feed's clock on its consumer thread that follow a
+/// periodic commit made due by an advance.
+///
+/// A pass reads the clock to send resends that are due and again to check
+/// the commit interval, and a commit that runs stamps its time before it
+/// commits. Counted from an advance, the worst case is a cadence read made
+/// before it, then the next pass's resend read, the cadence read that fires,
+/// the stamp and, once the commit has returned, the next resend read. A
+/// message that names no unit adds a read on this thread, so a test that
+/// counts sends keyed units only.
+pub(crate) const PASS_READS: usize = 4;
+
+/// A feed clock that moves only when the test moves it, and counts the
+/// reads the feed's consumer thread makes.
+#[derive(Debug)]
+pub(crate) struct FeedClock {
+    inner: Arc<StopClock>,
+    /// Reads on the consumer thread. Held across each read and each advance,
+    /// so a read counted after an advance's sample reads the advanced clock.
+    reads: Mutex<usize>,
+}
+
+impl FeedClock {
+    pub(crate) fn frozen() -> Arc<FeedClock> {
+        Arc::new(FeedClock {
+            inner: StopClock::frozen(),
+            reads: Mutex::new(0),
+        })
+    }
+
+    fn reads(&self) -> usize {
+        *self.reads.lock().unwrap()
+    }
+
+    /// Advance by `by`, returning the reads counted before it.
+    fn advance(&self, by: Duration) -> usize {
+        let reads = self.reads.lock().unwrap();
+        self.inner.advance(by);
+        *reads
+    }
+
+    /// Make one periodic commit due, and wait until the consumer thread has
+    /// run it.
+    pub(crate) fn commit_window(&self) {
+        let sample = self.advance(COMMIT_INTERVAL);
+        wait_until(DEADLINE, "a consumer pass after the advance", || {
+            self.reads() >= sample + PASS_READS
+        });
+    }
+
+    /// Wait until `done` holds, making a periodic commit due after each
+    /// consumer pass. Panics past ten advances.
+    pub(crate) fn advance_until(&self, what: &str, mut done: impl FnMut() -> bool) {
+        let mut sample = self.reads();
+        let mut advances = 0;
+        wait_until(DEADLINE, what, || {
+            if done() {
+                return true;
+            }
+            if self.reads() >= sample + PASS_READS {
+                advances += 1;
+                assert!(advances <= 10, "{what}: not after ten commit intervals");
+                sample = self.advance(COMMIT_INTERVAL);
+            }
+            false
+        });
+    }
+}
+
+impl spate_core::clock::Clock for FeedClock {
+    fn now(&self) -> std::time::Instant {
+        let mut reads = self.reads.lock().unwrap();
+        // The consumer thread's exact name: the feed's other threads share
+        // it as a prefix.
+        if std::thread::current().name() == Some("spate-kafka-feed") {
+            *reads += 1;
+        }
+        self.inner.now()
+    }
+}
 
 /// A `feed:` section for `group` on `brokers`, with `body` appended to the
 /// `kafka:` body and `section` to the section.
@@ -285,11 +366,31 @@ pub(crate) fn pipeline_yaml_with(
     )
 }
 
+/// [`launch`] with the feed's timed reads on `clock`.
+pub(crate) fn launch_on(
+    clock: &Arc<FeedClock>,
+    data: &Path,
+    feed_section: &str,
+    pre: impl FnOnce(&SinkScript),
+) -> Worker {
+    let source = format!("  s3:\n    url: \"file://{}/\"\n", data.display());
+    let clock = Arc::clone(clock);
+    launch_customized(
+        move |section, io| KafkaFeed::connect_without_config_checks_on(section, io, clock),
+        &source,
+        feed_section,
+        pre,
+        |source| source,
+        CHECKPOINT,
+        None,
+    )
+}
+
 /// [`launch_source`], with `customize` applied to the source, the
 /// `checkpoint:` section `checkpoint`, and the stop timed on `stop_clock`
 /// when one is given.
 pub(crate) fn launch_customized(
-    connect: Connect,
+    connect: impl FnOnce(&FeedSection, &Handle) -> Result<KafkaFeed, KafkaFeedError>,
     source_yaml: &str,
     feed_section: &str,
     pre: impl FnOnce(&SinkScript),
@@ -623,9 +724,21 @@ pub(crate) fn direct(yaml: &str) -> Direct {
     direct_with(ON_MOCK, yaml)
 }
 
+/// [`direct`] with the feed's timed reads on `clock`.
+pub(crate) fn direct_on(clock: &Arc<FeedClock>, yaml: &str) -> Direct {
+    let clock = Arc::clone(clock);
+    direct_with(
+        move |section, io| KafkaFeed::connect_without_config_checks_on(section, io, clock),
+        yaml,
+    )
+}
+
 /// A feed from the `feed:` section of `yaml`, built through `connect`, that
 /// the test reads from directly, with no pipeline.
-pub(crate) fn direct_with(connect: Connect, yaml: &str) -> Direct {
+pub(crate) fn direct_with(
+    connect: impl FnOnce(&FeedSection, &Handle) -> Result<KafkaFeed, KafkaFeedError>,
+    yaml: &str,
+) -> Direct {
     let section = section(yaml);
     let io = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(1)

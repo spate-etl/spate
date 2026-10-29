@@ -274,8 +274,8 @@ impl<S: Source + 'static> PipelineRuntime<S> {
     }
 
     /// Read a graceful stop's reserve and deadlines, the revocation drain
-    /// deadline and the startup-error grace on `clock`, so a test moves them
-    /// by hand.
+    /// deadline, the startup-error grace and the sink's drain budget on
+    /// `clock`, so a test moves them by hand.
     #[cfg(any(test, feature = "testing"))]
     #[doc(hidden)]
     #[must_use]
@@ -287,8 +287,9 @@ impl<S: Source + 'static> PipelineRuntime<S> {
 
     /// Read the commit tick, the fast-commit window, the stall check, the
     /// idle flush and the health probe on `clock`, so a test moves them by
-    /// hand. Every drain deadline keeps its own clock, set by
-    /// `with_stop_clock`.
+    /// hand. Every drain deadline is computed on the stop clock set by
+    /// `with_stop_clock`, and the sink pool counts its share down on its own
+    /// tokio clock.
     #[cfg(any(test, feature = "testing"))]
     #[doc(hidden)]
     #[must_use]

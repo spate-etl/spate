@@ -16,6 +16,8 @@ use super::retry::Backoff;
 use super::{EncodedChunk, SealedBatch, ShardWriter, SinkFailures};
 use crate::backpressure::InflightBudget;
 use crate::checkpoint::AckSet;
+use crate::clock::Clock as _;
+use crate::clock::tokio::{Clock, Stopwatch};
 use crate::error::{ErrorClass, SinkError};
 use crate::metrics::{AttemptOutcome, FlushReason, SinkShardMetrics};
 use std::collections::{HashMap, VecDeque};
@@ -31,7 +33,7 @@ use tokio::time::Instant;
 /// pool's own backstop (`SinkPool::drain`) so an overrunning worker still
 /// returns its own report instead of being force-aborted and losing it.
 /// Generous for the intended case, where a writer parked on I/O aborts at once.
-const ABORT_GRACE: Duration = Duration::from_millis(500);
+pub(crate) const ABORT_GRACE: Duration = Duration::from_millis(500);
 
 /// Bounds on the quarantine re-check heartbeat, which is otherwise
 /// `breaker.open_for`.
@@ -109,7 +111,7 @@ struct Pending {
     /// sink's round-trip is a separate family,
     /// `spate_sink_write_duration_seconds`. Do not narrow this stamp to recover
     /// a write time.
-    started: Instant,
+    started: Stopwatch,
     /// Ingest time of the oldest record in the batch (e2e latency, ingest
     /// basis).
     oldest_ingest: std::time::Instant,
@@ -181,6 +183,8 @@ pub(crate) struct ShardWorker<W: ShardWriter> {
     /// Deduplication tokens are `"{prefix}{seq}"`; the prefix carries the
     /// pipeline name and shard index.
     pub(crate) token_prefix: String,
+    /// Every timer and timestamp the worker and its write tasks take.
+    pub(crate) clock: Arc<dyn Clock>,
 }
 
 /// Worker-loop state that outcome handling needs together.
@@ -243,8 +247,11 @@ impl<W: ShardWriter> ShardWorker<W> {
         // sink whose writes never return then deadlocks shutdown. Intake
         // is gated on this being empty, which bounds it to one `recv_many` pass
         // plus the drain force-seal.
-        let mut waiting: VecDeque<(u64, SealedBatch, Instant)> = VecDeque::new();
+        let mut waiting: VecDeque<(u64, SealedBatch, Stopwatch)> = VecDeque::new();
 
+        // A local handle, so the `select!` branch expressions below borrow it
+        // and not `self`, which the branch bodies need mutably.
+        let clock = Arc::clone(&self.clock);
         loop {
             let linger_at = acc.first_at.map(|t| t + self.cfg.batch.linger);
             tokio::select! {
@@ -267,7 +274,7 @@ impl<W: ShardWriter> ShardWorker<W> {
                     if n == 0 {
                         break;
                     }
-                    let now = Instant::now();
+                    let now = clock.now();
                     for chunk in recv_buf.drain(..) {
                         acc.push(chunk, now);
                         if let Some(reason) = self.seal_reason(&acc) {
@@ -292,7 +299,7 @@ impl<W: ShardWriter> ShardWorker<W> {
                     }
                 }
 
-                () = tokio::time::sleep_until(linger_at.unwrap_or_else(Instant::now)), if linger_at.is_some() && waiting.is_empty() => {
+                () = sleep_until_set(&*clock, linger_at), if linger_at.is_some() && waiting.is_empty() => {
                     self.dispatch(&mut acc, FlushReason::Linger, &mut seq, &mut ledger, &mut tasks, &semaphore, &breakers, &mut waiting);
                 }
             }
@@ -303,7 +310,7 @@ impl<W: ShardWriter> ShardWorker<W> {
         // not empty. A chunk dropped unsealed with the receiver fails its acks
         // with no `abandoned` count, no log and no `DrainReport` entry.
         while let Ok(chunk) = self.rx.try_recv() {
-            acc.push(chunk, Instant::now());
+            acc.push(chunk, clock.now());
             if let Some(reason) = self.seal_reason(&acc) {
                 self.dispatch(
                     &mut acc,
@@ -363,7 +370,7 @@ impl<W: ShardWriter> ShardWorker<W> {
                     }
                 }
 
-                () = tokio::time::sleep_until(deadline.unwrap_or_else(Instant::now)), if deadline.is_some() => {
+                () = sleep_until_set(&*clock, deadline), if deadline.is_some() => {
                     self.sweep(&mut tasks, &mut waiting, &mut ledger).await;
                     break;
                 }
@@ -402,7 +409,7 @@ impl<W: ShardWriter> ShardWorker<W> {
     fn launch_waiting(
         &self,
         permit: tokio::sync::OwnedSemaphorePermit,
-        waiting: &mut VecDeque<(u64, SealedBatch, Instant)>,
+        waiting: &mut VecDeque<(u64, SealedBatch, Stopwatch)>,
         tasks: &mut JoinSet<WriteDone>,
         breakers: &Arc<Mutex<BreakerSet>>,
         ledger: &mut Ledger,
@@ -410,7 +417,7 @@ impl<W: ShardWriter> ShardWorker<W> {
         let (this_seq, batch, queued_at) = waiting
             .pop_front()
             .expect("callers guard on a non-empty `waiting`");
-        self.metrics.permit_waited(queued_at.elapsed());
+        self.metrics.permit_waited(queued_at.elapsed(&*self.clock));
         self.spawn_write(batch, this_seq, permit, tasks, breakers, &mut ledger.ids);
     }
 
@@ -420,16 +427,19 @@ impl<W: ShardWriter> ShardWorker<W> {
     async fn sweep(
         &self,
         tasks: &mut JoinSet<WriteDone>,
-        waiting: &mut VecDeque<(u64, SealedBatch, Instant)>,
+        waiting: &mut VecDeque<(u64, SealedBatch, Stopwatch)>,
         ledger: &mut Ledger,
     ) {
         // An abort only lands at a yield point, so a writer blocking its thread
         // holds us here indefinitely and `SinkPool::drain`'s backstop would
         // force-abort this worker and lose its report.
-        if tokio::time::timeout(ABORT_GRACE, tasks.shutdown())
-            .await
-            .is_err()
-        {
+        let grace_at = self.clock.now() + ABORT_GRACE;
+        let shut_down = tokio::select! {
+            biased;
+            () = tasks.shutdown() => true,
+            () = self.clock.sleep_until(grace_at) => false,
+        };
+        if !shut_down {
             tracing::error!(
                 shard = self.shard,
                 grace = ?ABORT_GRACE,
@@ -484,9 +494,13 @@ impl<W: ShardWriter> ShardWorker<W> {
             return;
         };
         self.metrics
-            .flushed(p.reason, p.rows, p.bytes, p.started.elapsed());
-        self.metrics
-            .e2e_observed(p.oldest_ingest.elapsed(), p.oldest_event_ms);
+            .flushed(p.reason, p.rows, p.bytes, p.started.elapsed(&*self.clock));
+        // The system clock: the handoff stamps `oldest_ingest` on it, on the
+        // pipeline thread.
+        let ingest_age = crate::clock::SystemClock
+            .now()
+            .saturating_duration_since(p.oldest_ingest);
+        self.metrics.e2e_observed(ingest_age, p.oldest_event_ms);
         self.budget
             .sub(usize::try_from(p.bytes).unwrap_or(usize::MAX));
         self.metrics.set_inflight(ledger.pending.len());
@@ -543,8 +557,11 @@ impl<W: ShardWriter> ShardWorker<W> {
                 rows: full.rows,
                 bytes: full.bytes,
                 reason,
-                started: Instant::now(),
-                oldest_ingest: full.oldest_ingest.unwrap_or_else(std::time::Instant::now),
+                started: Stopwatch::start(&*self.clock),
+                // The system clock, as at the handoff that stamps it.
+                oldest_ingest: full
+                    .oldest_ingest
+                    .unwrap_or_else(|| crate::clock::SystemClock.now()),
                 oldest_event_ms: full.oldest_event_ms,
             },
         );
@@ -570,6 +587,7 @@ impl<W: ShardWriter> ShardWorker<W> {
         let endpoints = Arc::clone(&self.endpoints);
         let breakers = Arc::clone(breakers);
         let metrics = Arc::clone(&self.metrics);
+        let clock = Arc::clone(&self.clock);
         let retry = self.cfg.retry;
         let backstop = quarantine_backstop(self.cfg.breaker.open_for);
         let shard = self.shard;
@@ -590,7 +608,7 @@ impl<W: ShardWriter> ShardWorker<W> {
                     // `next_replica` also promotes deadlines against. Reading
                     // the clock twice can hand `sleep_until` an instant already
                     // gone, which with no backoff step underneath it is a spin.
-                    let now = Instant::now();
+                    let now = clock.now();
                     let (picked, probe_at) = {
                         let mut b = breakers.lock().expect("breaker lock");
                         let probe_at = b.next_probe_at(now);
@@ -620,11 +638,11 @@ impl<W: ShardWriter> ShardWorker<W> {
                                 // ever stops outliving this receiver.
                                 changed = wake.changed() => {
                                     if changed.is_err() {
-                                        tokio::time::sleep_until(until).await;
+                                        clock.sleep_until(until).await;
                                     }
                                 }
 
-                                () = tokio::time::sleep_until(until) => {}
+                                () = clock.sleep_until(until) => {}
                             }
                         }
                     }
@@ -641,7 +659,7 @@ impl<W: ShardWriter> ShardWorker<W> {
                 // Timed around `write_batch` alone: the replica pick, the probe
                 // wait and the backoff sleep sit outside it, so this histogram
                 // measures the sink's own round-trip. `flush_duration` does not.
-                let attempt_at = Instant::now();
+                let attempt_at = Stopwatch::start(&*clock);
                 let outcome = writer.write_batch(&endpoints[replica], &batch).await;
                 metrics.write_attempt(
                     if outcome.is_ok() {
@@ -649,7 +667,7 @@ impl<W: ShardWriter> ShardWorker<W> {
                     } else {
                         AttemptOutcome::Error
                     },
-                    attempt_at.elapsed(),
+                    attempt_at.elapsed(&*clock),
                 );
                 // Reporting clears the budget, so the guard has nothing left to
                 // hand back. Disarming keeps the release harmless if an outcome
@@ -674,7 +692,7 @@ impl<W: ShardWriter> ShardWorker<W> {
                         let transition = breakers
                             .lock()
                             .expect("breaker lock")
-                            .on_failure(replica, Instant::now());
+                            .on_failure(replica, clock.now());
                         if let Some(t) = transition {
                             t.log(shard);
                         }
@@ -697,7 +715,12 @@ impl<W: ShardWriter> ShardWorker<W> {
                         let delay = backoff.next_delay();
                         {
                             let _backoff = metrics.backing_off(this_seq, delay);
-                            tokio::time::sleep(delay).await;
+                            // A ceiling past the `Instant` range sleeps
+                            // forever, as `tokio::time::sleep` saturates.
+                            match clock.now().checked_add(delay) {
+                                Some(at) => clock.sleep_until(at).await,
+                                None => std::future::pending::<()>().await,
+                            }
                         }
                     }
                 }
@@ -732,24 +755,35 @@ impl<W: ShardWriter> ShardWorker<W> {
         tasks: &mut JoinSet<WriteDone>,
         semaphore: &Arc<Semaphore>,
         breakers: &Arc<Mutex<BreakerSet>>,
-        waiting: &mut VecDeque<(u64, SealedBatch, Instant)>,
+        waiting: &mut VecDeque<(u64, SealedBatch, Stopwatch)>,
     ) {
         if acc.is_empty() {
             return;
         }
         let (this_seq, batch) = self.seal(acc, reason, seq, ledger);
-        let queued_at = Instant::now();
+        let queued_at = Stopwatch::start(&*self.clock);
         // Strict FIFO. Overtaking a parked batch is harmless for delivery (a
         // shard's batches already settle out of order) but charges the
         // overtaken batch's `permit_wait` for a queue it led.
         if waiting.is_empty()
             && let Ok(permit) = Arc::clone(semaphore).try_acquire_owned()
         {
-            self.metrics.permit_waited(queued_at.elapsed());
+            self.metrics.permit_waited(queued_at.elapsed(&*self.clock));
             self.spawn_write(batch, this_seq, permit, tasks, breakers, &mut ledger.ids);
         } else {
             waiting.push_back((this_seq, batch, queued_at));
         }
+    }
+}
+
+/// Sleep on `clock` until `at`, or forever when it is `None`.
+///
+/// Its body runs on first poll, so a `select!` branch whose guard is off
+/// builds no sleep.
+async fn sleep_until_set(clock: &dyn Clock, at: Option<Instant>) {
+    match at {
+        Some(at) => clock.sleep_until(at).await,
+        None => std::future::pending().await,
     }
 }
 

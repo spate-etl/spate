@@ -4,6 +4,7 @@
 use super::*;
 use crate::backpressure::InflightBudget;
 use crate::checkpoint::{AckMsg, AckRef, AckStatus};
+use crate::clock::tokio::{Clock as _, TestClock};
 use crate::error::ErrorClass;
 use crate::metrics::{ComponentLabels, E2eBasis, SinkShardMetrics};
 use crate::pipeline::fakes::wait_for;
@@ -27,9 +28,10 @@ enum Outcome {
     /// the breaker mutex. `ProbeGuard::drop`'s poison tolerance stays
     /// uncovered by this.
     Panic(Duration),
-    /// Block the runtime thread outright, so an abort cannot land until it
-    /// returns (simulates a writer doing synchronous work between awaits).
-    BlockThread(Duration),
+    /// Block the runtime thread outright until [`MockWriter::release_blocked`],
+    /// so an abort cannot land until it returns (simulates a writer doing
+    /// synchronous work between awaits).
+    BlockThread,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -48,9 +50,10 @@ struct Call {
     /// The batch's frames, sharing the attempt's allocations, so a test can
     /// tell a resent frame from a copy of it.
     frames: Vec<Bytes>,
-    /// When the attempt started, on the (usually paused) tokio clock. Lets a
-    /// test assert *when* a parked batch resumed, which is the only way to
-    /// tell a wake driven by an event from one driven by a timer.
+    /// When the attempt started: on the writer's injected clock when one is
+    /// set, otherwise on the (usually paused) tokio clock. Lets a test assert
+    /// *when* a parked batch resumed, which is the only way to tell a wake
+    /// driven by an event from one driven by a timer.
     ///
     /// Explicitly tokio's `Instant`, not the `std` one this module inherits
     /// from `sink`. Only tokio's tracks `start_paused` time; the `std` one
@@ -65,9 +68,10 @@ struct MockWriter {
     log: Mutex<Vec<Call>>,
     concurrent: AtomicUsize,
     max_concurrent: AtomicUsize,
-    /// Cuts an `Outcome::BlockThread` short, so a test that has proved its
-    /// point does not pay for the rest of the block at runtime teardown.
+    /// Ends an `Outcome::BlockThread`.
     release: AtomicBool,
+    /// Stamps `Call::at` and runs the scripted delays, when set.
+    clock: Mutex<Option<Arc<TestClock>>>,
 }
 
 impl MockWriter {
@@ -79,10 +83,24 @@ impl MockWriter {
             concurrent: AtomicUsize::new(0),
             max_concurrent: AtomicUsize::new(0),
             release: AtomicBool::new(false),
+            clock: Mutex::new(None),
         })
     }
 
-    /// Let any in-progress [`Outcome::BlockThread`] return early.
+    /// The writer's clock, if one is set.
+    fn clock(&self) -> Option<Arc<TestClock>> {
+        self.clock.lock().unwrap().clone()
+    }
+
+    /// Wait `delay` on the writer's clock, or on tokio's when none is set.
+    async fn pause(&self, delay: Duration) {
+        match self.clock() {
+            Some(clock) => clock.sleep_until(clock.now() + delay).await,
+            None => tokio::time::sleep(delay).await,
+        }
+    }
+
+    /// Let any in-progress [`Outcome::BlockThread`] return.
     fn release_blocked(&self) {
         self.release.store(true, Ordering::SeqCst);
     }
@@ -122,17 +140,19 @@ impl ShardWriter for MockWriter {
             rows: batch.rows,
             bytes: batch.bytes,
             frames: batch.frames.clone(),
-            at: tokio::time::Instant::now(),
+            at: self
+                .clock()
+                .map_or_else(tokio::time::Instant::now, |c| c.now()),
         });
         let now = self.concurrent.fetch_add(1, Ordering::SeqCst) + 1;
         self.max_concurrent.fetch_max(now, Ordering::SeqCst);
         let result = match outcome {
             Outcome::Write(delay) => {
-                tokio::time::sleep(delay).await;
+                self.pause(delay).await;
                 Ok(())
             }
             Outcome::Fail(class, delay) => {
-                tokio::time::sleep(delay).await;
+                self.pause(delay).await;
                 Err(SinkError::Client {
                     class,
                     reason: "scripted failure".into(),
@@ -143,17 +163,16 @@ impl ShardWriter for MockWriter {
                 std::future::pending::<()>().await;
                 unreachable!()
             }
-            Outcome::BlockThread(d) => {
+            Outcome::BlockThread => {
                 // A blocking loop rather than an await. The task never reaches
                 // a yield point, so `abort` cannot land on it.
-                let until = std::time::Instant::now() + d;
-                while std::time::Instant::now() < until && !self.release.load(Ordering::SeqCst) {
-                    std::thread::sleep(Duration::from_millis(5));
+                while !self.release.load(Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(1));
                 }
                 Ok(())
             }
             Outcome::Panic(d) => {
-                tokio::time::sleep(d).await;
+                self.pause(d).await;
                 panic!("scripted sink write panic")
             }
         };
@@ -175,7 +194,29 @@ fn next_component() -> String {
 }
 
 fn fixture(shards: usize, replicas: usize, cfg: SinkPoolConfig, queue_cap: usize) -> Fixture {
+    fixture_with(None, shards, replicas, cfg, queue_cap)
+}
+
+/// [`fixture`], with the pool's deadlines and the writer's delays on `clock`.
+fn fixture_on(
+    clock: &Arc<TestClock>,
+    shards: usize,
+    replicas: usize,
+    cfg: SinkPoolConfig,
+    queue_cap: usize,
+) -> Fixture {
+    fixture_with(Some(Arc::clone(clock)), shards, replicas, cfg, queue_cap)
+}
+
+fn fixture_with(
+    clock: Option<Arc<TestClock>>,
+    shards: usize,
+    replicas: usize,
+    cfg: SinkPoolConfig,
+    queue_cap: usize,
+) -> Fixture {
     let writer = MockWriter::new();
+    writer.clock.lock().unwrap().clone_from(&clock);
     let (mut queues, receivers) = shard_queues(shards, queue_cap);
     let budget = Arc::new(InflightBudget::new());
     // A distinct component per fixture. The shard gauges are owned by one live
@@ -206,18 +247,35 @@ fn fixture(shards: usize, replicas: usize, cfg: SinkPoolConfig, queue_cap: usize
             .with_queue(queues.metrics(), s)
         })
         .collect();
-    let pool = SinkPool::spawn(
-        Arc::clone(&writer),
-        endpoints,
-        receivers,
-        cfg,
-        Arc::clone(&budget),
-        metrics,
-        "test",
-        "test",
-        SinkFailures::new(),
-        &tokio::runtime::Handle::current(),
-    );
+    let runtime = tokio::runtime::Handle::current();
+    let pool = match clock {
+        Some(clock) => SinkPool::spawn_on_clock(
+            Arc::clone(&writer),
+            endpoints,
+            receivers,
+            cfg,
+            Arc::clone(&budget),
+            metrics,
+            "test",
+            "test",
+            SinkFailures::new(),
+            &runtime,
+            clock,
+        ),
+        // The public entry point, which runs on `SystemClock`.
+        None => SinkPool::spawn(
+            Arc::clone(&writer),
+            endpoints,
+            receivers,
+            cfg,
+            Arc::clone(&budget),
+            metrics,
+            "test",
+            "test",
+            SinkFailures::new(),
+            &runtime,
+        ),
+    };
     Fixture {
         writer,
         queues,
@@ -1086,13 +1144,12 @@ async fn drain_returns_under_any_permit_pressure() {
 }
 
 /// A write that blocks its runtime thread cannot be aborted; `abort` only
-/// lands at a yield point. The drain sweep bounds that wait rather than
-/// inheriting it, so the worker still runs its abandon accounting and still
-/// returns its own report instead of being force-aborted by the pool.
+/// lands at a yield point. The drain sweep bounds that wait on the pool's clock
+/// rather than inheriting it, so the worker abandons the batch itself at its
+/// grace, before the pool's backstop, and still returns its own report.
 ///
-/// Real time and a multi-threaded runtime on purpose. `std::thread::sleep`
-/// does not participate in paused time, and the worker needs a thread of its
-/// own while the write task holds one.
+/// A multi-threaded runtime, since the worker needs a thread of its own while
+/// the write task holds one; the injected clock stands in for paused time.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_unabortable_write_does_not_hold_the_worker_past_its_grace() {
     let mut cfg = SinkPoolConfig {
@@ -1104,11 +1161,9 @@ async fn an_unabortable_write_does_not_hold_the_worker_past_its_grace() {
         ..SinkPoolConfig::default()
     };
     cfg.inflight.max_per_shard = 1;
-    let f = fixture(1, 1, cfg, 16);
-    // Far longer than the sweep's abort grace, so the test fails loudly if the
-    // sweep ever waits this out instead of bounding it.
-    f.writer
-        .set_default(Outcome::BlockThread(Duration::from_secs(30)));
+    let clock = TestClock::frozen();
+    let f = fixture_on(&clock, 1, 1, cfg, 16);
+    f.writer.set_default(Outcome::BlockThread);
 
     let (ack, ack_rx) = AckRef::test_pair();
     f.queues.try_send(0, chunk(1, 8, &ack)).unwrap();
@@ -1121,15 +1176,25 @@ async fn an_unabortable_write_does_not_hold_the_worker_past_its_grace() {
     drop(ack);
     drop(f.queues);
 
-    let started = std::time::Instant::now();
-    let report = tokio::time::timeout(
-        Duration::from_secs(20),
-        f.pool.drain(Duration::from_millis(100)),
-    )
-    .await
-    .expect("the sweep must bound its wait for aborts it cannot land");
-    let elapsed = started.elapsed();
-    // The point is proved; skip the rest of the block at teardown.
+    let t0 = clock.now();
+    let deadline = Duration::from_millis(100);
+    let drain = tokio::spawn(f.pool.drain(deadline));
+    wait_for(
+        "the worker arms its deadline",
+        Duration::from_secs(5),
+        || clock.has_slept_until(t0 + deadline),
+    );
+    clock.advance(deadline);
+    // The sweep's grace timer; the pool's backstop sits a second past the
+    // deadline, so the worker's grace must come due first.
+    wait_for("the sweep arms its grace", Duration::from_secs(5), || {
+        clock.has_slept_until(t0 + deadline + worker::ABORT_GRACE)
+    });
+    clock.advance(worker::ABORT_GRACE);
+    wait_for("the drain returns", Duration::from_secs(5), || {
+        drain.is_finished()
+    });
+    let report = drain.await.unwrap();
     f.writer.release_blocked();
 
     assert_eq!(
@@ -1139,11 +1204,6 @@ async fn an_unabortable_write_does_not_hold_the_worker_past_its_grace() {
             abandoned: 1
         },
         "the unabortable batch is abandoned by the worker itself"
-    );
-    assert!(
-        elapsed < Duration::from_secs(10),
-        "drain took {elapsed:?}; it should return about one abort grace after \
-         the deadline, not wait out the blocking write"
     );
     assert_eq!(ack_rx.try_recv().unwrap().status, AckStatus::Failed);
     assert_eq!(f.budget.usage(), 0);
@@ -1176,14 +1236,47 @@ fn a_worker_that_ignores_the_deadline_is_force_aborted() {
                 std::future::pending::<()>().await;
                 unreachable!()
             });
-            let pool = SinkPool::from_workers(MockWriter::new(), vec![wedged], drain_tx, metrics);
+            let clock = TestClock::frozen();
+            let pool = SinkPool::from_workers(
+                MockWriter::new(),
+                vec![wedged],
+                drain_tx,
+                metrics,
+                Arc::clone(&clock) as _,
+            );
+            // Read before any overrun, when the counter may not render yet.
+            let overruns = || {
+                handle
+                    .render()
+                    .lines()
+                    .find(|l| {
+                        l.starts_with("spate_sink_drain_overrun_total") && l.contains("shard=\"0\"")
+                    })
+                    .map_or(0.0, |l| l.rsplit(' ').next().unwrap().parse().unwrap())
+            };
 
-            let report = tokio::time::timeout(
-                Duration::from_secs(600),
-                pool.drain(Duration::from_millis(200)),
-            )
+            let t0 = clock.now();
+            let deadline = Duration::from_millis(200);
+            let drain = tokio::spawn(pool.drain(deadline));
+            tokio::time::timeout(Duration::from_secs(600), async {
+                while !clock.has_slept_until(t0 + deadline + Duration::from_secs(1)) {
+                    tokio::task::yield_now().await;
+                }
+            })
             .await
-            .expect("the backstop must make drain return regardless");
+            .expect("the drain arms its backstop");
+            clock.advance(
+                Duration::from_millis(200) + Duration::from_secs(1) - Duration::from_nanos(1),
+            );
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+            assert!(!drain.is_finished(), "the backstop fired early");
+            assert!(overruns() == 0.0, "no overrun before the backstop");
+
+            clock.advance(Duration::from_nanos(1));
+            let report = tokio::time::timeout(Duration::from_secs(600), drain)
+                .await
+                .expect("the backstop must make drain return regardless")
+                .unwrap();
             assert_eq!(
                 report,
                 DrainReport::default(),
@@ -1216,6 +1309,7 @@ fn random_streams_conserve_rows_and_resolve_every_ack() {
             |(chunks, max_rows)| {
                 let rt = tokio::runtime::Builder::new_current_thread()
                     .enable_time()
+                    .start_paused(true)
                     .build()
                     .unwrap();
                 rt.block_on(async {
@@ -2348,4 +2442,341 @@ fn a_released_probe_slot_wakes_the_batch_that_was_waiting_for_it() {
              heartbeat"
         );
     });
+}
+
+// ---------------------------------------------------------- injected clock --
+//
+// Each test runs on paused time with a frozen pool clock. A paused hour lets
+// tokio's own clock run ahead while the pool clock stays put, so a timer or
+// timestamp left on tokio's clock fires or reads wrong during it. Another
+// paused hour after each `advance` lets the tasks it woke run.
+
+/// Let the runtime auto-advance an hour of paused time.
+async fn paused_hour() {
+    tokio::time::sleep(Duration::from_secs(3600)).await;
+}
+
+/// The linger timer seals a partial batch once the pool clock reaches it,
+/// and not before.
+#[tokio::test(start_paused = true)]
+async fn linger_seals_on_the_injected_clock() {
+    let cfg = SinkPoolConfig {
+        batch: BatchConfig {
+            max_rows: u64::MAX,
+            max_bytes: u64::MAX,
+            linger: Duration::from_secs(1),
+        },
+        ..SinkPoolConfig::default()
+    };
+    let clock = TestClock::frozen();
+    let f = fixture_on(&clock, 1, 1, cfg, 16);
+    let (ack, ack_rx) = AckRef::test_pair();
+    for _ in 0..3 {
+        f.queues.try_send(0, chunk(1, 1, &ack)).unwrap();
+    }
+    drop(ack);
+
+    paused_hour().await;
+    assert!(f.writer.calls().is_empty(), "sealed on tokio's clock");
+    clock.advance(Duration::from_secs(1) - Duration::from_nanos(1));
+    paused_hour().await;
+    assert!(f.writer.calls().is_empty(), "sealed before the linger");
+    clock.advance(Duration::from_nanos(1));
+    paused_hour().await;
+    let calls = f.writer.calls();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].rows, 3);
+    assert_eq!(ack_rx.try_recv().unwrap().status, AckStatus::Delivered);
+
+    drop(f.queues);
+    let drain = tokio::spawn(f.pool.drain(Duration::ZERO));
+    drain.await.unwrap();
+}
+
+/// The drain deadline, the worker's sweep and the pool's backstop all run on
+/// the pool clock: a hung write is abandoned once that clock reaches the
+/// deadline, however long tokio's clock has run.
+#[tokio::test(start_paused = true)]
+async fn the_drain_deadline_runs_on_the_injected_clock() {
+    let clock = TestClock::frozen();
+    let f = fixture_on(&clock, 1, 1, small_batches(), 16);
+    f.writer.set_default(Outcome::Hang);
+    let (ack, ack_rx) = AckRef::test_pair();
+    f.queues.try_send(0, chunk(1, 8, &ack)).unwrap();
+    f.budget.add(8);
+    drop(ack);
+    drop(f.queues);
+
+    let drain = tokio::spawn(f.pool.drain(Duration::from_millis(200)));
+    paused_hour().await;
+    assert!(!drain.is_finished(), "the drain ended on tokio's clock");
+    assert!(ack_rx.try_recv().is_err(), "the ack resolved early");
+
+    clock.advance(Duration::from_millis(200));
+    let report = drain.await.unwrap();
+    assert_eq!(
+        report,
+        DrainReport {
+            flushed: 0,
+            abandoned: 1
+        }
+    );
+    assert_eq!(ack_rx.try_recv().unwrap().status, AckStatus::Failed);
+    assert_eq!(f.budget.usage(), 0);
+}
+
+/// A drain deadline already past on the pool clock abandons a hung write at
+/// once, with the clock never moving.
+#[tokio::test(start_paused = true)]
+async fn a_zero_drain_deadline_sweeps_without_the_clock_moving() {
+    let clock = TestClock::frozen();
+    let f = fixture_on(&clock, 1, 1, small_batches(), 16);
+    f.writer.set_default(Outcome::Hang);
+    let (ack, ack_rx) = AckRef::test_pair();
+    f.queues.try_send(0, chunk(1, 8, &ack)).unwrap();
+    drop(ack);
+    wait_for_calls(&f.writer, 1).await;
+    drop(f.queues);
+
+    let report = f.pool.drain(Duration::ZERO).await;
+    assert_eq!(
+        report,
+        DrainReport {
+            flushed: 0,
+            abandoned: 1
+        }
+    );
+    assert_eq!(ack_rx.try_recv().unwrap().status, AckStatus::Failed);
+}
+
+/// Yield until `writer` has seen `n` calls.
+async fn wait_for_calls(writer: &MockWriter, n: usize) {
+    tokio::time::timeout(Duration::from_secs(600), async {
+        while writer.calls().len() < n {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the writer is called");
+}
+
+/// A replica opened by a failure is probed once its open window passes on the
+/// pool clock: not while tokio's clock runs, and not a nanosecond early.
+#[tokio::test(start_paused = true)]
+async fn an_open_breaker_waits_for_the_injected_clock() {
+    let open_for = Duration::from_secs(5);
+    let mut cfg = small_batches();
+    cfg.breaker.failure_threshold = 1;
+    cfg.breaker.open_for = open_for;
+    cfg.retry.initial = Duration::ZERO;
+    cfg.retry.max = Duration::ZERO;
+    let clock = TestClock::frozen();
+    let f = fixture_on(&clock, 1, 1, cfg, 16);
+    f.writer.script(
+        0,
+        0,
+        [
+            Outcome::Fail(ErrorClass::Retryable, Duration::ZERO),
+            Outcome::Write(Duration::ZERO),
+        ],
+    );
+    let (ack, ack_rx) = AckRef::test_pair();
+    f.queues.try_send(0, chunk(1, 8, &ack)).unwrap();
+    drop(ack);
+
+    paused_hour().await;
+    assert_eq!(f.writer.calls().len(), 1, "probed on tokio's clock");
+    clock.advance(open_for - Duration::from_nanos(1));
+    paused_hour().await;
+    assert_eq!(f.writer.calls().len(), 1, "probed before the window");
+    clock.advance(Duration::from_nanos(1));
+    paused_hour().await;
+    let calls = f.writer.calls();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(
+        calls[1].at,
+        clock.now(),
+        "the probe ran at the window's end"
+    );
+    assert_eq!(ack_rx.try_recv().unwrap().status, AckStatus::Delivered);
+
+    drop(f.queues);
+    f.pool.drain(Duration::ZERO).await;
+}
+
+/// The retry backoff sleeps on the pool clock, and its gauge reads the step
+/// for the length of the sleep.
+#[test]
+fn retry_backoff_sleeps_on_the_injected_clock() {
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    metrics::with_local_recorder(&recorder, || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .start_paused(true)
+            .build()
+            .expect("runtime");
+        rt.block_on(async {
+            let delay = Duration::from_secs(2);
+            let mut cfg = small_batches();
+            cfg.retry.initial = delay;
+            cfg.retry.max = delay;
+            cfg.breaker.failure_threshold = u32::MAX;
+            let clock = TestClock::frozen();
+            let f = fixture_on(&clock, 1, 1, cfg, 16);
+            f.writer.script(
+                0,
+                0,
+                [
+                    Outcome::Fail(ErrorClass::Retryable, Duration::ZERO),
+                    Outcome::Write(Duration::ZERO),
+                ],
+            );
+            let (ack, ack_rx) = AckRef::test_pair();
+            f.queues.try_send(0, chunk(1, 8, &ack)).unwrap();
+            drop(ack);
+            let backoff = || {
+                handle
+                    .render()
+                    .lines()
+                    .find(|l| l.starts_with("spate_sink_retry_backoff_seconds"))
+                    .map_or(0.0, |l| l.rsplit(' ').next().unwrap().parse().unwrap())
+            };
+
+            paused_hour().await;
+            assert_eq!(f.writer.calls().len(), 1, "retried on tokio's clock");
+            assert!(backoff() == 2.0, "the gauge reads the step it sleeps");
+            clock.advance(delay);
+            paused_hour().await;
+            assert_eq!(f.writer.calls().len(), 2);
+            assert!(backoff() == 0.0, "the gauge is withdrawn after the sleep");
+            assert_eq!(ack_rx.try_recv().unwrap().status, AckStatus::Delivered);
+
+            drop(f.queues);
+            f.pool.drain(Duration::ZERO).await;
+        });
+    });
+}
+
+/// A backoff step past the `Instant` range waits until the drain abandons
+/// the batch, as tokio's saturating sleep did, instead of panicking the
+/// write task.
+#[tokio::test(start_paused = true)]
+async fn an_unaddable_backoff_waits_instead_of_abandoning() {
+    let mut cfg = small_batches();
+    cfg.retry.initial = Duration::MAX;
+    cfg.retry.max = Duration::MAX;
+    cfg.retry.max_attempts = 0;
+    cfg.breaker.failure_threshold = u32::MAX;
+    let clock = TestClock::frozen();
+    let f = fixture_on(&clock, 1, 1, cfg, 16);
+    f.writer
+        .script(0, 0, [Outcome::Fail(ErrorClass::Retryable, Duration::ZERO)]);
+    let (ack, ack_rx) = AckRef::test_pair();
+    f.queues.try_send(0, chunk(1, 8, &ack)).unwrap();
+    drop(ack);
+
+    paused_hour().await;
+    assert!(ack_rx.try_recv().is_err(), "the batch ended during backoff");
+    drop(f.queues);
+    let report = f.pool.drain(Duration::ZERO).await;
+    assert_eq!(
+        report,
+        DrainReport {
+            flushed: 0,
+            abandoned: 1
+        }
+    );
+    assert_eq!(ack_rx.try_recv().unwrap().status, AckStatus::Failed);
+}
+
+/// The worker's durations, write, permit wait and seal to settle, are
+/// measured on the pool clock.
+#[test]
+fn sink_durations_are_measured_on_the_injected_clock() {
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    metrics::with_local_recorder(&recorder, || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .start_paused(true)
+            .build()
+            .expect("runtime");
+        rt.block_on(async {
+            let mut cfg = small_batches();
+            cfg.inflight.max_per_shard = 1;
+            let clock = TestClock::frozen();
+            let f = fixture_on(&clock, 1, 1, cfg, 16);
+            f.writer.set_default(Outcome::Write(Duration::from_secs(2)));
+            let (ack, _rx) = AckRef::test_pair();
+            f.queues.try_send(0, chunk(1, 1, &ack)).expect("send");
+            f.queues.try_send(0, chunk(1, 1, &ack)).expect("send");
+            drop(ack);
+            drop(f.queues);
+            let drain = tokio::spawn(f.pool.drain(Duration::from_secs(600)));
+            for _ in 0..2 {
+                paused_hour().await;
+                clock.advance(Duration::from_secs(2));
+            }
+            assert_eq!(
+                drain.await.unwrap(),
+                DrainReport {
+                    flushed: 2,
+                    abandoned: 0
+                }
+            );
+        });
+    });
+
+    let rendered = handle.render();
+    let value = |name: &str, label: &str| metric_value(&rendered, name, label);
+    assert_eq!(
+        value("spate_sink_write_duration_seconds_sum", "outcome=\"ok\""),
+        4.0
+    );
+    assert_eq!(
+        value("spate_sink_permit_wait_duration_seconds_sum", "shard=\"0\""),
+        2.0
+    );
+    assert_eq!(
+        value("spate_sink_flush_duration_seconds_sum", "shard=\"0\""),
+        6.0
+    );
+}
+
+/// End-to-end latency ages the ingest stamp on the system clock that stamped
+/// it, so moving the pool clock does not move it.
+#[test]
+fn ingest_latency_ignores_the_pool_clock() {
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    metrics::with_local_recorder(&recorder, || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .start_paused(true)
+            .build()
+            .expect("runtime");
+        rt.block_on(async {
+            let clock = TestClock::frozen();
+            let f = fixture_on(&clock, 1, 1, small_batches(), 16);
+            clock.advance(Duration::from_secs(3600));
+            let (ack, ack_rx) = AckRef::test_pair();
+            f.queues.try_send(0, chunk(1, 1, &ack)).unwrap();
+            drop(ack);
+            paused_hour().await;
+            assert_eq!(ack_rx.try_recv().unwrap().status, AckStatus::Delivered);
+            drop(f.queues);
+            f.pool.drain(Duration::ZERO).await;
+        });
+    });
+
+    let sum = metric_value(&handle.render(), "spate_e2e_latency_seconds_sum", "");
+    assert!(sum < 3600.0, "aged on the pool clock: {sum}");
+}
+
+/// `SinkPool` stays `Send` and `Sync` with the clock it holds.
+#[test]
+fn sink_pool_keeps_its_auto_traits() {
+    fn assert<T: Send + Sync>() {}
+    assert::<SinkPool<MockWriter>>();
 }

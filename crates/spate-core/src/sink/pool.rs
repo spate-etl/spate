@@ -4,6 +4,7 @@ use super::config::SinkPoolConfig;
 use super::worker::{ShardWorker, WorkerReport};
 use super::{EncodedChunk, ShardWriter, SinkFailures};
 use crate::backpressure::InflightBudget;
+use crate::clock::tokio::{Clock, SystemClock};
 use crate::error::SinkError;
 use crate::metrics::SinkShardMetrics;
 use std::sync::Arc;
@@ -34,6 +35,8 @@ pub struct SinkPool<W: ShardWriter> {
     workers: Vec<JoinHandle<WorkerReport>>,
     drain_tx: watch::Sender<Option<Instant>>,
     metrics: Vec<Arc<SinkShardMetrics>>,
+    /// The clock every deadline in the pool and its workers runs on.
+    clock: Arc<dyn Clock>,
 }
 
 /// How long past the drain deadline a shard worker gets before `drain` gives
@@ -50,7 +53,8 @@ pub struct SinkPool<W: ShardWriter> {
 /// anyway (`pipeline::controller`). At an equal 2s the backstop could never
 /// fire *before* that, so the commit would race a pool still resolving.
 /// Ordering, tightest first: the worker's own `ABORT_GRACE` (500ms) < this <
-/// the controller's 2s.
+/// the controller's 2s. The ordering holds on real time, where the stop clock
+/// and the pool's `SystemClock` agree.
 const BACKSTOP_GRACE: Duration = Duration::from_secs(1);
 
 impl<W: ShardWriter> SinkPool<W> {
@@ -82,6 +86,39 @@ impl<W: ShardWriter> SinkPool<W> {
         sink_name: &str,
         failures: SinkFailures,
         runtime: &tokio::runtime::Handle,
+    ) -> Self {
+        Self::spawn_on_clock(
+            writer,
+            shard_endpoints,
+            receivers,
+            config,
+            budget,
+            metrics,
+            pipeline_name,
+            sink_name,
+            failures,
+            runtime,
+            Arc::new(SystemClock),
+        )
+    }
+
+    /// [`spawn`](Self::spawn), with every deadline in the pool on `clock`.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "construction-time wiring call, used once by the pipeline runtime"
+    )]
+    pub(crate) fn spawn_on_clock(
+        writer: Arc<W>,
+        shard_endpoints: Vec<Vec<W::Endpoint>>,
+        receivers: Vec<mpsc::Receiver<EncodedChunk>>,
+        config: SinkPoolConfig,
+        budget: Arc<InflightBudget>,
+        metrics: Vec<SinkShardMetrics>,
+        pipeline_name: &str,
+        sink_name: &str,
+        failures: SinkFailures,
+        runtime: &tokio::runtime::Handle,
+        clock: Arc<dyn Clock>,
     ) -> Self {
         assert_eq!(
             shard_endpoints.len(),
@@ -146,6 +183,7 @@ impl<W: ShardWriter> SinkPool<W> {
                     metrics: shard_metrics,
                     drain_deadline: drain_rx.clone(),
                     token_prefix: format!("{pipeline_name}-{nonce}-{shard}-"),
+                    clock: Arc::clone(&clock),
                 };
                 runtime.spawn(worker.run())
             })
@@ -157,6 +195,7 @@ impl<W: ShardWriter> SinkPool<W> {
             workers,
             drain_tx,
             metrics,
+            clock,
         }
     }
 
@@ -168,6 +207,7 @@ impl<W: ShardWriter> SinkPool<W> {
         workers: Vec<JoinHandle<WorkerReport>>,
         drain_tx: watch::Sender<Option<Instant>>,
         metrics: Vec<Arc<SinkShardMetrics>>,
+        clock: Arc<dyn Clock>,
     ) -> Self {
         SinkPool {
             writer,
@@ -175,6 +215,7 @@ impl<W: ShardWriter> SinkPool<W> {
             workers,
             drain_tx,
             metrics,
+            clock,
         }
     }
 
@@ -192,7 +233,7 @@ impl<W: ShardWriter> SinkPool<W> {
     /// Drain the pool. Workers force-seal partial batches, then in-flight
     /// writes get until `deadline` before being aborted and abandoned.
     ///
-    /// Always returns. A worker that does not stop by `deadline` is
+    /// `deadline` runs on the pool's clock. Always returns. A worker that does not stop by `deadline` is
     /// force-aborted `BACKSTOP_GRACE` later; its acknowledgments fail with
     /// it (so at-least-once holds and the data replays), but its counts are
     /// missing from the returned report.
@@ -201,7 +242,7 @@ impl<W: ShardWriter> SinkPool<W> {
     /// [`ShardQueues`](super::ShardQueues) clone first. Workers only enter
     /// their drain phase once their queue closes.
     pub async fn drain(self, deadline: Duration) -> DrainReport {
-        let deadline_at = Instant::now() + deadline;
+        let deadline_at = self.clock.now() + deadline;
         let _ = self.drain_tx.send(Some(deadline_at));
         // Absolute, so joining the shards in sequence still bounds the whole
         // drain. One wedged shard spends the budget once, and the shards
@@ -210,12 +251,19 @@ impl<W: ShardWriter> SinkPool<W> {
         let mut report = WorkerReport::default();
         let mut forced = 0usize;
         for (shard, mut handle) in self.workers.into_iter().enumerate() {
-            match tokio::time::timeout_at(hard_at, &mut handle).await {
-                Ok(Ok(r)) => report.absorb(r),
-                Ok(Err(join_err)) => {
+            // Biased with the handle first, so a shard that finished as the
+            // backstop came due still reports.
+            let joined = tokio::select! {
+                biased;
+                joined = &mut handle => Some(joined),
+                () = self.clock.sleep_until(hard_at) => None,
+            };
+            match joined {
+                Some(Ok(r)) => report.absorb(r),
+                Some(Err(join_err)) => {
                     tracing::error!(shard, error = %join_err, "sink shard worker panicked");
                 }
-                Err(_) => {
+                None => {
                     handle.abort();
                     self.metrics[shard].drain_overrun();
                     // `hard_at` is absolute, which bounds the whole sequential
@@ -253,8 +301,8 @@ impl<W: ShardWriter> SinkPool<W> {
     }
 }
 
-/// A short id unique across process runs (boot time, pid, and an in-process
-/// counter), embedded in every deduplication token.
+/// A short id unique across process runs (the wall-clock time, pid, and an
+/// in-process counter), embedded in every deduplication token.
 ///
 /// Without it, tokens are `{pipeline}-{shard}-{seq}` with `seq` restarting
 /// at 0 on every start. A restarted (or same-named concurrent) pipeline
@@ -267,7 +315,7 @@ impl<W: ShardWriter> SinkPool<W> {
 fn run_nonce() -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let nanos = std::time::SystemTime::now()
+    let nanos = crate::clock::wall_now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos() as u64)
         .unwrap_or(0);

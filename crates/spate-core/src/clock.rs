@@ -5,7 +5,8 @@
 //! [`Clock`] on OS threads, and [`tokio::Clock`] on the tokio runtime, whose
 //! deadlines run on the tokio timer. A read that must stay on the real clock
 //! names [`SystemClock`] at the site and says why. A duration that is only
-//! measured goes through [`Stopwatch`], and a wall-clock timestamp through
+//! measured goes through the `Stopwatch` of the clock module the code reads,
+//! [`Stopwatch`] or [`tokio::Stopwatch`], and a wall-clock timestamp through
 //! [`wall_now`].
 
 pub mod tokio;

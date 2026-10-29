@@ -6,9 +6,9 @@
 use std::path::{Path, PathBuf};
 
 /// Paths under `src` the scan does not read: the clock module, whose
-/// `SystemClock` is the one allowed read, a test-only file not named as one,
-/// and the sink pool, which moves onto the tokio clock separately.
-const SKIPPED: &[&str] = &["clock.rs", "clock/", "pipeline/fakes.rs", "sink/"];
+/// `SystemClock` is the one allowed read, and a test-only file not named as
+/// one.
+const SKIPPED: &[&str] = &["clock.rs", "clock/", "pipeline/fakes.rs"];
 
 /// Whether `rel` names a file that holds only tests.
 fn is_test_file(rel: &str) -> bool {

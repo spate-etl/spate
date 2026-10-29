@@ -3,12 +3,11 @@
 //!
 //! [`SystemClock`] follows the runtime's clock, so paused tokio time applies
 //! to it. `TestClock` moves only when a test advances it, for code on a
-//! multi-thread runtime, where tokio time cannot be paused.
+//! multi-thread runtime, where tokio time cannot be paused. A duration that
+//! is only measured on this timeline goes through [`Stopwatch`].
 
 use std::future::Future;
 use std::pin::Pin;
-// Only `TestClock` needs `Duration`; the trait and `SystemClock` do not.
-#[cfg(any(test, feature = "testing"))]
 use std::time::Duration;
 #[cfg(any(test, feature = "testing"))]
 use tokio::sync::watch;
@@ -48,6 +47,34 @@ impl Clock for SystemClock {
     }
 }
 
+/// Measures how far a [`Clock`] moves between two reads.
+///
+/// It exposes no [`Instant`], so a measurement cannot feed a deadline. Pass
+/// the same clock to [`start`](Self::start) and [`elapsed`](Self::elapsed).
+#[derive(Clone, Copy, Debug)]
+pub struct Stopwatch {
+    started: Instant,
+}
+
+impl Stopwatch {
+    /// Starts measuring at `clock`'s current instant.
+    #[inline]
+    #[must_use]
+    pub fn start<C: Clock + ?Sized>(clock: &C) -> Self {
+        Self {
+            started: clock.now(),
+        }
+    }
+
+    /// Time `clock` has moved since [`start`](Self::start), zero if it reads
+    /// earlier.
+    #[inline]
+    #[must_use]
+    pub fn elapsed<C: Clock + ?Sized>(&self, clock: &C) -> Duration {
+        clock.now().saturating_duration_since(self.started)
+    }
+}
+
 /// A clock that only moves when a test moves it.
 ///
 /// Wired into production code, it stops every timer drawn from it.
@@ -61,6 +88,9 @@ pub struct TestClock {
     /// the single source of truth for "now" *and* the wakeup for parked
     /// [`Clock::sleep_until`] futures, so the two can never disagree.
     offset_nanos: watch::Sender<u64>,
+    /// Every deadline passed to [`Clock::sleep_until`], so a test can wait
+    /// until code under test has armed a timer.
+    slept_until: std::sync::Mutex<Vec<Instant>>,
 }
 
 #[cfg(any(test, feature = "testing"))]
@@ -72,7 +102,17 @@ impl TestClock {
         std::sync::Arc::new(TestClock {
             base: Instant::now(),
             offset_nanos: watch::Sender::new(0),
+            slept_until: std::sync::Mutex::new(Vec::new()),
         })
+    }
+
+    /// Whether anything has called [`Clock::sleep_until`] for `deadline`.
+    #[must_use]
+    pub fn has_slept_until(&self, deadline: Instant) -> bool {
+        self.slept_until
+            .lock()
+            .expect("test clock lock")
+            .contains(&deadline)
     }
 
     /// Move the clock forward, waking everything parked on a deadline this
@@ -110,6 +150,10 @@ impl Clock for TestClock {
     }
 
     fn sleep_until(&self, deadline: Instant) -> Sleep {
+        self.slept_until
+            .lock()
+            .expect("test clock lock")
+            .push(deadline);
         let base = self.base;
         let mut rx = self.offset_nanos.subscribe();
         Box::pin(async move {
@@ -125,5 +169,21 @@ impl Clock for TestClock {
                 }
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A stopwatch reports exactly how far its clock moved, and nothing before
+    /// it moves.
+    #[tokio::test]
+    async fn a_tokio_stopwatch_reports_the_time_its_clock_moved() {
+        let clock = TestClock::frozen();
+        let watch = Stopwatch::start(&*clock);
+        assert_eq!(watch.elapsed(&*clock), Duration::ZERO);
+        clock.advance(Duration::from_millis(250));
+        assert_eq!(watch.elapsed(&*clock), Duration::from_millis(250));
     }
 }

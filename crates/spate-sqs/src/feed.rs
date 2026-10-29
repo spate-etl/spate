@@ -30,6 +30,7 @@ use crate::queue::{
     VisibilityEntry,
 };
 use crate::startup::{self, COUNT_ATTRIBUTES, QueueAttributes, counts};
+use spate_core::clock::tokio::{Clock, SystemClock};
 use spate_core::config::{FeedSection, redact};
 use spate_core::feed::{
     Confirmation, Confirmer, Delivery, Depth, DepthOf, DepthReading, Feed, FeedError,
@@ -41,7 +42,7 @@ use std::task::Poll;
 use std::time::Duration;
 use tokio::sync::Notify;
 use tokio::task::AbortHandle;
-use tokio::time::{Instant, MissedTickBehavior};
+use tokio::time::Instant;
 
 /// How long SQS keeps a message hidden, counted from the receive that issued
 /// its receipt handle.
@@ -74,6 +75,11 @@ const RECEIVE_GRACE: Duration = Duration::from_secs(1);
 const BACKOFF_START: Duration = Duration::from_millis(200);
 const BACKOFF_MAX: Duration = Duration::from_secs(5);
 
+/// A renewal tick seen later than this past its due time schedules the next
+/// a period after it was seen, so a long pass does not leave a burst of
+/// ticks behind it.
+const LATE_TICK: Duration = Duration::from_millis(5);
+
 /// How long [`SqsFeed::connect`] may take, every step included.
 const CONNECT_BOUND: Duration = Duration::from_secs(30);
 
@@ -83,6 +89,8 @@ async fn bounded<T>(
     step: &Mutex<&'static str>,
     connect: impl Future<Output = Result<T, SqsError>>,
 ) -> Result<T, SqsError> {
+    // Real time: no feed or clock exists yet, and the SDK times these calls
+    // on its own tokio sleep.
     match tokio::time::timeout(CONNECT_BOUND, connect).await {
         Ok(result) => result,
         Err(_) => {
@@ -190,9 +198,10 @@ struct Settle {
 #[derive(Debug)]
 struct Closing {
     within: Duration,
-    /// When the close gives up. Set from the runtime's clock by the first
-    /// task that reads it, since the caller of `close` may run off the
-    /// runtime, where tokio's clock is not the one the tasks read.
+    /// When the close gives up. Set from the feed's clock by the first task
+    /// that reads it, since the caller of `close` may run off the runtime,
+    /// where the system clock reads the OS clock in place of a paused
+    /// runtime's.
     bound: Option<Instant>,
     confirmer: Option<Confirmer>,
     /// Entries given up unapplied since the close began.
@@ -266,10 +275,10 @@ impl State {
 
     /// When the close gives up, once one has begun. Call it only on the
     /// runtime.
-    fn close_bound(&mut self) -> Option<Instant> {
+    fn close_bound(&mut self, clock: &dyn Clock) -> Option<Instant> {
         let close = self.close.as_mut()?;
         let within = close.within;
-        Some(*close.bound.get_or_insert_with(|| Instant::now() + within))
+        Some(*close.bound.get_or_insert_with(|| clock.now() + within))
     }
 
     /// Count `n` entries given up unapplied, toward a close under way.
@@ -316,11 +325,17 @@ struct Shared {
     queue_url: String,
     dead_letter_url: String,
     settings: Settings,
+    /// The clock every deadline in the feed is read and waited on.
+    clock: Arc<dyn Clock>,
 }
 
 impl Shared {
     fn lock(&self) -> MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn now(&self) -> Instant {
+        self.clock.now()
     }
 
     /// Make `e` the answer to every later call, reject with it every publish
@@ -522,6 +537,28 @@ impl SqsFeed {
         config: &SqsFeedConfig,
         io: &tokio::runtime::Handle,
     ) -> SqsFeed {
+        Self::start_on(
+            queue,
+            attributes,
+            dead_letter_url,
+            config,
+            io,
+            Arc::new(SystemClock),
+        )
+    }
+
+    /// [`start`](Self::start), with every deadline in the feed on `clock`.
+    ///
+    /// A test clock drives only a feed over a test double: the SDK times its
+    /// own calls on tokio time.
+    fn start_on(
+        queue: Arc<dyn Queue>,
+        attributes: Arc<dyn QueueAttributes>,
+        dead_letter_url: String,
+        config: &SqsFeedConfig,
+        io: &tokio::runtime::Handle,
+        clock: Arc<dyn Clock>,
+    ) -> SqsFeed {
         let shared = Arc::new(Shared {
             state: Mutex::new(State::default()),
             receive: Notify::new(),
@@ -538,6 +575,7 @@ impl SqsFeed {
                 period: config.renewal_period(),
                 wait: wait_seconds(config.visibility),
             },
+            clock,
         });
         let tasks = vec![
             io.spawn(receive_task(Arc::clone(&shared))).abort_handle(),
@@ -635,7 +673,7 @@ impl Feed for SqsFeed {
             if st.abandoned {
                 return Ok(Vec::new());
             }
-            let now = Instant::now();
+            let now = self.shared.now();
             // A unit this close to its deadline would lapse before the next
             // renewal could keep it, and a gone one no longer holds its
             // message. A unit kept is marked when handed out, so
@@ -688,7 +726,7 @@ impl Feed for SqsFeed {
         if let Some(fatal) = &st.fatal {
             return Err(fatal.clone());
         }
-        let now = Instant::now();
+        let now = self.shared.now();
         match st.held.get_mut(&receipt.0) {
             Some(h) if h.unit.is_none() && !h.gone && now < h.deadline => {
                 h.marked = true;
@@ -734,7 +772,7 @@ impl Feed for SqsFeed {
             if let Some(fatal) = &st.fatal {
                 return Err(fatal.clone());
             }
-            let now = Instant::now();
+            let now = self.shared.now();
             match st.held.get(&receipt.0) {
                 Some(h) if h.unit.is_none() => {}
                 _ => return Err(gone(receipt)),
@@ -879,7 +917,7 @@ impl Feed for SqsFeed {
             if let Some(fatal) = &st.fatal {
                 return Err(fatal.clone());
             }
-            let now = Instant::now();
+            let now = self.shared.now();
             match st.held.get(&receipt.0) {
                 Some(h) if h.unit.is_none() => {}
                 _ => return Err(gone(receipt)),
@@ -954,7 +992,7 @@ impl Feed for SqsFeed {
 /// Settles the close's confirmation once nothing is left to send and no
 /// receive in flight may hold a unit just handed back, or at its bound.
 async fn close_task(shared: Arc<Shared>) {
-    let Some(bound) = shared.lock().close_bound() else {
+    let Some(bound) = shared.lock().close_bound(&*shared.clock) else {
         return;
     };
     loop {
@@ -965,7 +1003,7 @@ async fn close_task(shared: Arc<Shared>) {
             // A Fatal settles the close itself, and leaves this task to end
             // at the bound with no confirmer to settle.
             let mut st = shared.lock();
-            let now = Instant::now();
+            let now = shared.now();
             let unsent = st.unsent();
             let grace = st
                 .last_hand_back
@@ -986,7 +1024,7 @@ async fn close_task(shared: Arc<Shared>) {
         };
         // A timeout ends the wait as progress does: the loop reads the state
         // again.
-        let _ = tokio::time::timeout_at(wake_at, progress).await;
+        let _ = before(&*shared.clock, wake_at, progress).await;
     }
 }
 
@@ -1058,7 +1096,7 @@ async fn receive_task(shared: Arc<Shared>) {
             visibility,
             wait: settings.wait,
         };
-        let sent_at = Instant::now();
+        let sent_at = shared.now();
         let received = shared.queue.receive(request).await;
         // A close waits for this receive, so it ends under the same lock
         // that queues its units.
@@ -1071,7 +1109,7 @@ async fn receive_task(shared: Arc<Shared>) {
             }
             Ok(messages) => {
                 backoff = BACKOFF_START;
-                let hold_end = hold_end(Instant::now());
+                let hold_end = hold_end(shared.now());
                 let (waker, handed_back) = {
                     let mut st = shared.lock();
                     ended(&mut st);
@@ -1120,6 +1158,7 @@ async fn receive_task(shared: Arc<Shared>) {
                     waker.wake();
                 }
                 shared.progress.notify_one();
+                // Real time: it paces retries and no deadline reads it.
                 tokio::time::sleep(backoff).await;
                 backoff = (backoff * 2).min(BACKOFF_MAX);
             }
@@ -1161,13 +1200,14 @@ async fn renewal_task(shared: Arc<Shared>) {
     let settings = shared.settings;
     // No tick at start: a unit received before the first one still has its
     // whole visibility left, and extending it would only spend a call.
-    let mut tick = tokio::time::interval_at(Instant::now() + settings.period, settings.period);
-    tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let mut due = shared.now() + settings.period;
+    // Kept across hand-back turns, so a hand-back never postpones the tick.
+    let mut tick = shared.clock.sleep_until(due);
     loop {
         let ticked = {
             let mut handed_back = std::pin::pin!(shared.hand_back.notified());
             std::future::poll_fn(|cx| {
-                if tick.poll_tick(cx).is_ready() {
+                if tick.as_mut().poll(cx).is_ready() {
                     return Poll::Ready(true);
                 }
                 handed_back.as_mut().poll(cx).map(|()| false)
@@ -1182,7 +1222,14 @@ async fn renewal_task(shared: Arc<Shared>) {
             }
             continue;
         }
-        let now = Instant::now();
+        let seen = shared.now();
+        due = if seen > due + LATE_TICK {
+            seen + settings.period
+        } else {
+            due + settings.period
+        };
+        tick = shared.clock.sleep_until(due);
+        let now = shared.now();
         let mut due: Vec<(u64, String, Duration)> = {
             let mut st = shared.lock();
             if st.fatal.is_some() || st.abandoned {
@@ -1269,7 +1316,7 @@ async fn extend_chunk(
         let within = if st.stopping {
             STOP_EXTENSION_BOUND
         } else {
-            let left = earliest.map_or(Duration::ZERO, |d| d - Instant::now());
+            let left = earliest.map_or(Duration::ZERO, |d| d - shared.now());
             // At most a period, so a buffered unit keeps the period
             // `receive` asks of it.
             settings.period.min(left / 2)
@@ -1289,7 +1336,7 @@ async fn extend_chunk(
             seconds: ext.as_secs() as i32,
         })
         .collect();
-    let sent_at = Instant::now();
+    let sent_at = shared.now();
     match shared
         .queue
         .change_visibility_batch(entries, Some(within))
@@ -1329,7 +1376,7 @@ async fn extend_chunk(
             // With a period or less left, the next tick comes too late.
             // Otherwise the units are marked again, so the next tick tries
             // them with a fresh extension.
-            if once_more && earliest.saturating_duration_since(Instant::now()) <= settings.period {
+            if once_more && earliest.saturating_duration_since(shared.now()) <= settings.period {
                 return Extended::Again;
             }
             let mut st = shared.lock();
@@ -1379,16 +1426,16 @@ async fn join_all<F: Future>(futures: Vec<F>) -> Vec<F::Output> {
 ///
 /// `Err` when the feed has stopped.
 async fn send_hand_backs(shared: &Shared) -> Result<(), ()> {
-    let pass_end = Instant::now() + shared.settings.period;
+    let pass_end = shared.now() + shared.settings.period;
     loop {
         let chunk: Vec<Settle> = {
             let mut st = shared.lock();
             if st.fatal.is_some() || st.abandoned {
                 return Err(());
             }
-            let now = Instant::now();
+            let now = shared.now();
             st.hand_backs.retain(|s| now < s.deadline);
-            if let Some(bound) = st.close_bound()
+            if let Some(bound) = st.close_bound(&*shared.clock)
                 && now >= bound
             {
                 let n = std::mem::take(&mut st.hand_backs).len();
@@ -1422,12 +1469,13 @@ async fn send_hand_backs(shared: &Shared) -> Result<(), ()> {
         let last_error: Mutex<Option<String>> = Mutex::new(None);
         // The bound wraps only the call, so the bookkeeping below still runs
         // when it elapses.
-        let sent = tokio::time::timeout_at(
+        let sent = before(
+            &*shared.clock,
             pass_end,
             settle_batch(shared, "handing back", &chunk, |bound| {
                 let left = until(oldest, bound)
                     .min(pass_end)
-                    .saturating_duration_since(Instant::now());
+                    .saturating_duration_since(shared.now());
                 let call = shared
                     .queue
                     .change_visibility_batch(entries.clone(), Some(left));
@@ -1447,11 +1495,11 @@ async fn send_hand_backs(shared: &Shared) -> Result<(), ()> {
             // One lock, so a close counts the batch once.
             let mut st = shared.lock();
             st.handing_back -= chunk.len();
-            st.last_hand_back = Some(Instant::now());
+            st.last_hand_back = Some(shared.now());
             match sent {
-                Ok(Ok(unapplied)) => st.dropped(unapplied),
-                Ok(Err(())) => {}
-                Err(_) => {
+                Some(Ok(unapplied)) => st.dropped(unapplied),
+                Some(Err(())) => {}
+                None => {
                     let error = last_error
                         .into_inner()
                         .unwrap_or_else(PoisonError::into_inner);
@@ -1465,11 +1513,11 @@ async fn send_hand_backs(shared: &Shared) -> Result<(), ()> {
         }
         shared.progress.notify_one();
         match sent {
-            Ok(Ok(_)) => {}
-            Ok(Err(())) => return Err(()),
+            Some(Ok(_)) => {}
+            Some(Err(())) => return Err(()),
             // The pass took a renewal period, so the next tick is due and
             // its hand-back pass sends the batch again.
-            Err(_) => return Ok(()),
+            None => return Ok(()),
         }
     }
 }
@@ -1477,6 +1525,20 @@ async fn send_hand_backs(shared: &Shared) -> Result<(), ()> {
 /// The earlier of `deadline` and a close's `bound`.
 fn until(deadline: Instant, bound: Option<Instant>) -> Instant {
     bound.map_or(deadline, |bound| bound.min(deadline))
+}
+
+/// `fut`, or `None` once `clock` reaches `at`. `fut` is polled first, so an
+/// answer ready as the deadline passes counts.
+async fn before<F: Future>(clock: &dyn Clock, at: Instant, fut: F) -> Option<F::Output> {
+    let mut fut = std::pin::pin!(fut);
+    let mut deadline = clock.sleep_until(at);
+    std::future::poll_fn(|cx| {
+        if let Poll::Ready(output) = fut.as_mut().poll(cx) {
+            return Poll::Ready(Some(output));
+        }
+        deadline.as_mut().poll(cx).map(|()| None)
+    })
+    .await
 }
 
 /// The answer a batch gave entry `i`: applied, failed, or neither.
@@ -1510,8 +1572,8 @@ async fn settle_task(shared: Arc<Shared>) {
             continue;
         }
         for chunk in deletes.chunks(BATCH_ENTRIES) {
-            let bound = shared.lock().close_bound();
-            if bound.is_some_and(|bound| Instant::now() >= bound) {
+            let bound = shared.lock().close_bound(&*shared.clock);
+            if bound.is_some_and(|bound| shared.now() >= bound) {
                 shared.lock().dropped(chunk.len());
                 continue;
             }
@@ -1526,7 +1588,7 @@ async fn settle_task(shared: Arc<Shared>) {
             // Unbounded outside a close: a delete still applies past its
             // unit's deadline.
             let sent = settle_batch(&shared, "deleting", chunk, |bound| {
-                let left = bound.map(|bound| bound.saturating_duration_since(Instant::now()));
+                let left = bound.map(|bound| bound.saturating_duration_since(shared.now()));
                 shared.queue.delete_batch(entries.clone(), left)
             });
             match sent.await {
@@ -1539,9 +1601,9 @@ async fn settle_task(shared: Arc<Shared>) {
             // The deletes before a fail can take until their own deadlines.
             // A fail sent past its unit's deadline could reach a message SQS
             // has handed to another reader.
-            let now = Instant::now();
+            let now = shared.now();
             fails.retain(|s| now < s.deadline);
-            let bound = shared.lock().close_bound();
+            let bound = shared.lock().close_bound(&*shared.clock);
             if bound.is_some_and(|bound| now >= bound) {
                 let n = std::mem::take(&mut fails).len();
                 shared.lock().dropped(n);
@@ -1564,7 +1626,7 @@ async fn settle_task(shared: Arc<Shared>) {
             // by the earliest deadline. A request already sent when the bound
             // ends can still reach SQS after it.
             let sent = settle_batch(&shared, "failing", &chunk, |bound| {
-                let left = until(oldest, bound).saturating_duration_since(Instant::now());
+                let left = until(oldest, bound).saturating_duration_since(shared.now());
                 shared
                     .queue
                     .change_visibility_batch(entries.clone(), Some(left))
@@ -1600,7 +1662,7 @@ where
     let oldest = chunk.iter().map(|s| s.deadline).min().expect("a chunk");
     let mut backoff = BACKOFF_START;
     loop {
-        let bound = shared.lock().close_bound();
+        let bound = shared.lock().close_bound(&*shared.clock);
         match call(bound).await {
             Ok(outcome) => {
                 for failure in &outcome.failed {
@@ -1617,12 +1679,13 @@ where
                 return Err(());
             }
             Err(e) => {
-                let bound = shared.lock().close_bound();
-                if Instant::now() + backoff >= until(oldest, bound) {
+                let bound = shared.lock().close_bound(&*shared.clock);
+                let now = shared.now();
+                if now + backoff >= until(oldest, bound) {
                     tracing::debug!(error = %e.message, "dropping a batch {doing} units past its deadline");
                     return Ok(chunk.len());
                 }
-                tokio::time::sleep(backoff).await;
+                shared.clock.sleep_until(now + backoff).await;
                 backoff = (backoff * 2).min(BACKOFF_MAX);
             }
         }
@@ -1741,6 +1804,7 @@ async fn publish_batch(shared: &Shared, entries: Vec<SendEntry>) -> Result<(), (
             Err(e) => {
                 tracing::warn!(error = %e.message, "publishing to SQS failed; retrying");
                 retried = true;
+                // Real time: it paces retries and no deadline reads it.
                 tokio::time::sleep(backoff).await;
                 backoff = (backoff * 2).min(BACKOFF_MAX);
             }

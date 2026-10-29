@@ -54,7 +54,9 @@ pub(crate) struct SharedLoad {
 
 impl SharedLoad {
     pub(crate) fn new(inner: SharedCredentialsProvider) -> Self {
-        Self::with_clock(inner, SystemTime::now)
+        // The expiry is a provider's wall-clock time, compared as the SDK's
+        // identity cache compares it.
+        Self::with_clock(inner, spate_core::clock::wall_now)
     }
 
     fn with_clock(inner: SharedCredentialsProvider, now: fn() -> SystemTime) -> Self {
@@ -172,6 +174,8 @@ async fn load(inner: SharedCredentialsProvider, send: watch::Sender<Option<Outco
     let mut call = AbortOnDrop(tokio::spawn(
         async move { provider.provide_credentials().await },
     ));
+    // Real time: it bounds a provider task on the SDK's runtime, before any
+    // feed or clock exists.
     let outcome = match tokio::time::timeout(LOAD_BOUND, &mut call.0).await {
         Ok(Ok(result)) => result,
         Ok(Err(join)) => Err(CredentialsError::provider_error(ended(join))),

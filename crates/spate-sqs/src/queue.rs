@@ -168,6 +168,9 @@ fn built<T>(entry: Result<T, aws_sdk_sqs::error::BuildError>) -> Result<T, CallE
 /// The timeouts that end a call and its retries after `within`. They set
 /// only timeouts, so the client's retry config, and with it the attempt
 /// count, still applies.
+///
+/// `within` comes from the feed's clock and the SDK enforces it on tokio
+/// time, which is the same timeline in production.
 fn bounded(within: Option<Duration>) -> Option<aws_sdk_sqs::config::Builder> {
     within.map(|within| {
         aws_sdk_sqs::config::Builder::default().timeout_config(client::timeouts(

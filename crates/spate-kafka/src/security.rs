@@ -1,5 +1,5 @@
-//! TLS/SASL handling shared by the source and sink: the load-time guard for
-//! the opt-in transport, and the CA default applied to the client config.
+//! TLS/SASL handling shared by every Kafka client: the load-time guard for
+//! the opt-in transport, and the CA default the client factory applies.
 //!
 //! TLS/mTLS and SASL are configured entirely through each connector's raw
 //! `rdkafka` property passthrough (`security.protocol`, `ssl.*`, `sasl.*`).

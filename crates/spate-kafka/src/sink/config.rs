@@ -679,7 +679,7 @@ mod tests {
     /// bare and with the `topic.` prefix librdkafka strips.
     #[test]
     fn every_owned_property_and_alias_is_refused() {
-        // Written out: a loop over `DENYLIST` would follow an entry removed
+        // Written out: a loop over the roles' declarations would follow an entry removed
         // from it.
         for key in [
             "bootstrap.servers",

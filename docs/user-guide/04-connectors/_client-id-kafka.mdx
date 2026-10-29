@@ -1,0 +1,7 @@
+## Client identity
+
+Each Kafka client sends a `client.id` of `spate-<section>-<role>`, such as
+`spate-source-consumer` or `spate-sink-probe`, so broker logs and metrics name
+the client. A `client.id` in the `rdkafka` map replaces it on every client the
+section builds. A broker quota matches the value exactly, so a quota set on
+that value covers all of them.

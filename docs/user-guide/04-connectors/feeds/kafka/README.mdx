@@ -6,6 +6,7 @@ description: "The Kafka feed: work units on a work topic one consumer group read
 
 import SecuringKafka from '../../_securing-kafka.mdx';
 import LoggingKafka from '../../_logging-kafka.mdx';
+import ClientIdKafka from '../../_client-id-kafka.mdx';
 
 The Kafka feed (`spate-kafka`, feature `kafka` on the `spate` facade) carries
 [work units](../../../07-reference/glossary.mdx#work-unit) as messages on a work
@@ -80,12 +81,14 @@ attempts have reached it, which moves without being read (see
 One map configures the feed's consumer, its attempt follower, its depth
 reader, its producer, and the two clients its startup checks read the topics
 with. A property that
-applies to one client only draws a warning from librdkafka in the others.
+applies to one client only draws a warning from librdkafka in the others. A
+`client.id` in the map puts all six clients under one identity, and so in one
+broker quota.
 Properties the feed owns are **rejected at load time with an explanation**,
 under their own name and under `topic.<name>`. librdkafka reads
 `topic.<name>` as `<name>` when `<name>` is a topic-level property, as `acks`
-and `message.timeout.ms` are. Aliases are denied beside the canonical names,
-because passthrough and feed values apply in unspecified order.
+and `message.timeout.ms` are. Every name librdkafka accepts for the same setting
+is denied, because passthrough and feed values apply in unspecified order.
 
 | Denied property | Why |
 |---|---|
@@ -94,17 +97,19 @@ because passthrough and feed values apply in unspecified order.
 | `group.protocol` | The feed runs the classic consumer group protocol with eager assignment. |
 | `partition.assignment.strategy` | The feed relies on eager assignment, under which a rebalance revokes every partition before it assigns any. Any value is refused. |
 | `auto.offset.reset` | A partition with no committed offset starts at its earliest offset. |
-| `enable.auto.commit`, `auto.commit.enable` (alias) | The feed commits each partition up to its first unfinished unit itself. |
+| `enable.auto.commit` | The feed commits each partition up to its first unfinished unit itself. |
+| `auto.commit.enable` | librdkafka's legacy topic-level auto-commit property; the feed commits each partition up to its first unfinished unit itself. |
 | `enable.auto.offset.store` | The feed decides which offsets may be committed. |
 | `enable.partition.eof` | The feed reads only messages from the consumer. |
-| `acks`, `request.required.acks` (alias) | Forced to `all`: a unit is read once the delivery report confirms its attempt write, and its offset completes once the report confirms its tombstone or retry write. |
+| `acks`, `request.required.acks` | Forced to `all`: a unit is read once the delivery report confirms its attempt write, and its offset completes once the report confirms its tombstone or retry write. |
 | `enable.idempotence` | Forced on, so librdkafka's own retries neither reorder nor duplicate a write. |
 | `transactional.id` | The feed does not use transactions; a write is confirmed by its delivery report. |
-| `message.timeout.ms`, `delivery.timeout.ms` (alias) | Owned by the typed `delivery_timeout` field. |
+| `message.timeout.ms`, `delivery.timeout.ms` | Owned by the typed `delivery_timeout` field. |
 | `delivery.report.only.error` | A unit is read only once its attempt write is confirmed, and its offset finishes only once its tombstone or retry write is, both by their delivery reports. |
 | `allow.auto.create.topics` | Forced off: a write to a missing topic, or a startup check's read of one, fails, and never creates the topic with the broker's defaults. |
 | `statistics.interval.ms` | Owned by the typed `statistics_interval` field. |
-| `bootstrap.servers`, `metadata.broker.list` (alias) | Owned by the typed `brokers` field. |
+| `bootstrap.servers`, `metadata.broker.list` | One librdkafka property, owned by the typed `brokers` field. |
+| `enable.gapless.guarantee` | Raises a fatal producer error on any gap, which stops the feed. |
 
 The attempt follower sets the same group, offset and commit properties the
 consumer does, so the denylist covers it too.
@@ -137,6 +142,8 @@ the same way through its producer. An attempt, tombstone, retry or dead-letter
 write that times out is sent again.
 
 <LoggingKafka />
+
+<ClientIdKafka />
 
 ## A publish-only handle
 

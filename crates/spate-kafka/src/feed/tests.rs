@@ -11,15 +11,13 @@ use super::consumer::{
 use super::events::Cause;
 use super::gate::admission;
 use super::inflight::Tp;
-use super::producer::FeedProducerContext;
-use super::write::Producer;
+use super::producer::FeedProducerHooks;
 use super::write::{
     self, Attempt, BACKOFF_START, DELIVERIES_HEADER, Destination, Failure, Finish, Move, Outgoing,
     Tombstone, Write, WriteClass, classify, route,
 };
 use super::{Core, Gating, KafkaFeed, KafkaFeedError, KafkaFeedPublisher, Ready};
 use crate::clock::SyncClock;
-use rdkafka::config::FromClientConfigAndContext;
 use rdkafka::error::{KafkaError, RDKafkaErrorCode as C};
 use spate_core::clock::TestClock;
 use spate_core::config::FeedSection;
@@ -574,9 +572,9 @@ fn a_unit_is_written_with_its_count() {
 /// arrives as the identical pair of callbacks rdkafka makes.
 #[test]
 fn a_producer_error_event_is_logged_once() {
-    use rdkafka::client::ClientContext;
+    use crate::client::Hooks;
     const DOWN: &str = "1/1 brokers are down";
-    let context = FeedProducerContext::new(Arc::new(core(10)));
+    let context = FeedProducerHooks::new(Arc::new(core(10)));
     let lines = spate_test::capture_logs(tracing::Level::WARN, || {
         for _ in 0..4 {
             context.error(KafkaError::Global(C::AllBrokersDown), DOWN);
@@ -601,9 +599,9 @@ fn unreachable_config(extra: &str) -> KafkaFeedConfig {
 fn idle_feed() -> KafkaFeed {
     let config = unreachable_config("");
     let core = Arc::new(Core::new(&config, TWO, SyncClock::system()));
-    let producer = Producer::from_config_and_context(
-        &config.producer_config(false),
-        FeedProducerContext::new(Arc::clone(&core)),
+    let producer = config.base(false).create::<super::write::Producer, _>(
+        &config.client(crate::feed::config::FeedRole::Producer),
+        FeedProducerHooks::new(Arc::clone(&core)),
     )
     .unwrap();
     KafkaFeed {
@@ -619,9 +617,9 @@ fn idle_feed() -> KafkaFeed {
 /// A publisher whose producer reaches no broker, over `config`.
 fn idle_publisher_over(config: &KafkaFeedConfig) -> KafkaFeedPublisher {
     let core = Arc::new(Core::new(config, TWO, SyncClock::system()));
-    let producer = Producer::from_config_and_context(
-        &config.producer_config(false),
-        FeedProducerContext::new(Arc::clone(&core)),
+    let producer = config.base(false).create::<super::write::Producer, _>(
+        &config.client(crate::feed::config::FeedRole::Producer),
+        FeedProducerHooks::new(Arc::clone(&core)),
     )
     .unwrap();
     KafkaFeedPublisher::from_parts(core, producer)
@@ -802,9 +800,9 @@ fn an_inline_fatal_enqueue_settles_without_deadlock() {
     let config = unreachable_config("");
     let owner = Arc::new(Core::new(&config, TWO, SyncClock::system()));
     let producer = Arc::new(
-        Producer::from_config_and_context(
-            &config.producer_config(false),
-            FeedProducerContext::new(Arc::clone(&owner)),
+        config.base(false).create::<super::write::Producer, _>(
+        &config.client(crate::feed::config::FeedRole::Producer),
+        FeedProducerHooks::new(Arc::clone(&owner)),
         )
         .unwrap(),
     );
@@ -1333,9 +1331,9 @@ fn a_gate_pass_puts_back_the_deliveries_of_each_failed_watermark_read() {
         NonZeroU32::new(4).unwrap(),
         SyncClock::system(),
     ));
-    let producer = Producer::from_config_and_context(
-        &config.producer_config(false),
-        FeedProducerContext::new(Arc::clone(&core)),
+    let producer = config.base(false).create::<super::write::Producer, _>(
+        &config.client(crate::feed::config::FeedRole::Producer),
+        FeedProducerHooks::new(Arc::clone(&core)),
     )
     .unwrap();
     let mut seen = std::collections::BTreeSet::new();
@@ -1417,9 +1415,9 @@ fn a_gate_waiting_on_an_unreachable_attempt_partition_lets_the_feed_drop() {
 fn a_delivery_revoked_during_a_pass_is_not_put_back() {
     let config = unreachable_config("  delivery_timeout: 1h\n");
     let core = Arc::new(Core::new(&config, TWO, SyncClock::system()));
-    let producer = Producer::from_config_and_context(
-        &config.producer_config(false),
-        FeedProducerContext::new(Arc::clone(&core)),
+    let producer = config.base(false).create::<super::write::Producer, _>(
+        &config.client(crate::feed::config::FeedRole::Producer),
+        FeedProducerHooks::new(Arc::clone(&core)),
     )
     .unwrap();
     {
@@ -1460,9 +1458,9 @@ fn a_delivery_revoked_during_a_pass_is_not_put_back() {
 fn a_latched_feed_ends_its_gate_thread() {
     let config = unreachable_config("");
     let core = Arc::new(Core::new(&config, TWO, SyncClock::system()));
-    let producer = Producer::from_config_and_context(
-        &config.producer_config(false),
-        FeedProducerContext::new(Arc::clone(&core)),
+    let producer = config.base(false).create::<super::write::Producer, _>(
+        &config.client(crate::feed::config::FeedRole::Producer),
+        FeedProducerHooks::new(Arc::clone(&core)),
     )
     .unwrap();
     let handle = super::gate::Gate::new(Arc::clone(&core), producer, config.delivery_timeout)
@@ -1493,9 +1491,9 @@ fn a_feed_that_ends_during_a_pass_ends_it_before_the_next_read() {
             NonZeroU32::new(4).unwrap(),
             SyncClock::system(),
         ));
-        let producer = Producer::from_config_and_context(
-            &config.producer_config(false),
-            FeedProducerContext::new(Arc::clone(&core)),
+        let producer = config.base(false).create::<super::write::Producer, _>(
+        &config.client(crate::feed::config::FeedRole::Producer),
+        FeedProducerHooks::new(Arc::clone(&core)),
         )
         .unwrap();
         let mut seen = std::collections::BTreeSet::new();
@@ -1709,7 +1707,7 @@ mod cluster {
     use super::super::consumer::{self, COMMIT_INTERVAL, Driver, POLL_BATCH};
     use super::super::gate::Gate;
     use super::super::inflight::Tp;
-    use super::super::producer::FeedProducerContext;
+    use super::super::producer::FeedProducerHooks;
     use super::super::startup::{CONNECT_BOUND, Scope};
     use super::super::write::Producer;
     use super::super::{Core, Gating, KafkaFeed, READY_CAPACITY};
@@ -2601,9 +2599,9 @@ mod cluster {
         let clock = TestClock::frozen();
         let core = Arc::new(Core::new(&config, TWO, SyncClock::new(clock.clone())));
         let producer: Producer =
-            rdkafka::config::FromClientConfigAndContext::from_config_and_context(
-                &config.producer_config(false),
-                FeedProducerContext::new(Arc::clone(&core)),
+            config.base(false).create::<super::write::Producer, _>(
+        &config.client(crate::feed::config::FeedRole::Producer),
+        FeedProducerHooks::new(Arc::clone(&core)),
             )
             .unwrap();
         {
@@ -2669,9 +2667,9 @@ mod cluster {
         let config = KafkaFeedConfig::from_section(&section(&brokers, &group)).unwrap();
         let core = Arc::new(Core::new(&config, TWO, SyncClock::system()));
         let producer: Producer =
-            rdkafka::config::FromClientConfigAndContext::from_config_and_context(
-                &config.producer_config(false),
-                FeedProducerContext::new(Arc::clone(&core)),
+            config.base(false).create::<super::write::Producer, _>(
+        &config.client(crate::feed::config::FeedRole::Producer),
+        FeedProducerHooks::new(Arc::clone(&core)),
             )
             .unwrap();
         {
@@ -2727,9 +2725,9 @@ mod cluster {
         let core = Arc::new(Core::new(&config, TWO, SyncClock::system()));
         attempt::lock(&core.ledger).apply(0, 0, b"other", attempt::Entry::Count(1));
         let producer: Producer =
-            rdkafka::config::FromClientConfigAndContext::from_config_and_context(
-                &config.producer_config(false),
-                FeedProducerContext::new(Arc::clone(&core)),
+            config.base(false).create::<super::write::Producer, _>(
+        &config.client(crate::feed::config::FeedRole::Producer),
+        FeedProducerHooks::new(Arc::clone(&core)),
             )
             .unwrap();
         let on = |partition| {
@@ -2781,9 +2779,9 @@ mod cluster {
         let config = KafkaFeedConfig::from_section(&section(&brokers, &group)).unwrap();
         let core = Arc::new(Core::new(&config, TWO, SyncClock::system()));
         let producer: Producer =
-            rdkafka::config::FromClientConfigAndContext::from_config_and_context(
-                &config.producer_config(false),
-                FeedProducerContext::new(Arc::clone(&core)),
+            config.base(false).create::<super::write::Producer, _>(
+        &config.client(crate::feed::config::FeedRole::Producer),
+        FeedProducerHooks::new(Arc::clone(&core)),
             )
             .unwrap();
         let on = |partition| {
@@ -2842,9 +2840,9 @@ mod cluster {
         let config = KafkaFeedConfig::from_section(&section(&brokers, &group)).unwrap();
         let core = Arc::new(Core::new(&config, TWO, SyncClock::system()));
         let producer: Producer =
-            rdkafka::config::FromClientConfigAndContext::from_config_and_context(
-                &config.producer_config(false),
-                FeedProducerContext::new(Arc::clone(&core)),
+            config.base(false).create::<super::write::Producer, _>(
+        &config.client(crate::feed::config::FeedRole::Producer),
+        FeedProducerHooks::new(Arc::clone(&core)),
             )
             .unwrap();
         let offset = (0..)
@@ -2907,9 +2905,9 @@ mod cluster {
         let clock = TestClock::frozen();
         let core = Arc::new(Core::new(&config, TWO, SyncClock::new(clock.clone())));
         let producer: Producer =
-            rdkafka::config::FromClientConfigAndContext::from_config_and_context(
-                &config.producer_config(false),
-                FeedProducerContext::new(Arc::clone(&core)),
+            config.base(false).create::<super::write::Producer, _>(
+        &config.client(crate::feed::config::FeedRole::Producer),
+        FeedProducerHooks::new(Arc::clone(&core)),
             )
             .unwrap();
         {
@@ -2965,9 +2963,9 @@ mod cluster {
         let config = KafkaFeedConfig::from_section(&section(&brokers, &group)).unwrap();
         let core = Arc::new(Core::new(&config, TWO, SyncClock::system()));
         let producer: Producer =
-            rdkafka::config::FromClientConfigAndContext::from_config_and_context(
-                &config.producer_config(false),
-                FeedProducerContext::new(Arc::clone(&core)),
+            config.base(false).create::<super::write::Producer, _>(
+        &config.client(crate::feed::config::FeedRole::Producer),
+        FeedProducerHooks::new(Arc::clone(&core)),
             )
             .unwrap();
         {
@@ -3050,9 +3048,9 @@ mod cluster {
             SyncClock::new(clock.clone()),
         ));
         let producer: Producer =
-            rdkafka::config::FromClientConfigAndContext::from_config_and_context(
-                &config.producer_config(false),
-                FeedProducerContext::new(Arc::clone(&core)),
+            config.base(false).create::<super::write::Producer, _>(
+        &config.client(crate::feed::config::FeedRole::Producer),
+        FeedProducerHooks::new(Arc::clone(&core)),
             )
             .unwrap();
         let on = |partition| {
@@ -3152,9 +3150,9 @@ mod cluster {
             SyncClock::new(clock.clone()),
         ));
         let producer: Producer =
-            rdkafka::config::FromClientConfigAndContext::from_config_and_context(
-                &config.producer_config(false),
-                FeedProducerContext::new(Arc::clone(&core)),
+            config.base(false).create::<super::write::Producer, _>(
+        &config.client(crate::feed::config::FeedRole::Producer),
+        FeedProducerHooks::new(Arc::clone(&core)),
             )
             .unwrap();
         {
@@ -3203,9 +3201,9 @@ mod cluster {
         let config = KafkaFeedConfig::from_section(&section(&brokers, &group)).unwrap();
         let core = Arc::new(Core::new(&config, TWO, SyncClock::system()));
         let producer: Producer =
-            rdkafka::config::FromClientConfigAndContext::from_config_and_context(
-                &config.producer_config(false),
-                FeedProducerContext::new(Arc::clone(&core)),
+            config.base(false).create::<super::write::Producer, _>(
+        &config.client(crate::feed::config::FeedRole::Producer),
+        FeedProducerHooks::new(Arc::clone(&core)),
             )
             .unwrap();
         let offset = (0..)
@@ -3279,9 +3277,9 @@ mod cluster {
         let config = KafkaFeedConfig::from_section(&section(&brokers, &group)).unwrap();
         let core = Arc::new(Core::new(&config, TWO, SyncClock::system()));
         let producer: Producer =
-            rdkafka::config::FromClientConfigAndContext::from_config_and_context(
-                &config.producer_config(false),
-                FeedProducerContext::new(Arc::clone(&core)),
+            config.base(false).create::<super::write::Producer, _>(
+        &config.client(crate::feed::config::FeedRole::Producer),
+        FeedProducerHooks::new(Arc::clone(&core)),
             )
             .unwrap();
         let gate = Gate::new(
@@ -3357,9 +3355,9 @@ mod cluster {
         let config = KafkaFeedConfig::from_section(&section(&brokers, &group)).unwrap();
         let core = Arc::new(Core::new(&config, TWO, SyncClock::system()));
         let producer: Producer =
-            rdkafka::config::FromClientConfigAndContext::from_config_and_context(
-                &config.producer_config(false),
-                FeedProducerContext::new(Arc::clone(&core)),
+            config.base(false).create::<super::write::Producer, _>(
+        &config.client(crate::feed::config::FeedRole::Producer),
+        FeedProducerHooks::new(Arc::clone(&core)),
             )
             .unwrap();
         let gate = Gate::new(
@@ -4136,7 +4134,7 @@ mod docker {
     use super::super::attempt::{self, Follower};
     use super::super::config::KafkaFeedConfig;
     use super::super::gate::Gate;
-    use super::super::producer::FeedProducerContext;
+    use super::super::producer::FeedProducerHooks;
     use super::super::{Core, Gating};
     use super::cluster::{
         acknowledge_first, admission, committed, drive, owns, parts_for, section,
@@ -4145,7 +4143,6 @@ mod docker {
     use crate::feed::KafkaFeed;
     use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
     use rdkafka::client::DefaultClientContext;
-    use rdkafka::config::FromClientConfigAndContext;
     use rdkafka::consumer::{BaseConsumer, Consumer};
     use rdkafka::message::Message;
     use rdkafka::producer::{BaseProducer, BaseRecord, Producer};
@@ -4273,9 +4270,9 @@ mod docker {
     /// Run one gate pass over a unit on each attempt partition of `core`,
     /// with a bound of 10 s, and assert that it admitted every unit.
     fn gate_admits(config: &KafkaFeedConfig, core: &Arc<Core>) {
-        let producer = super::super::write::Producer::from_config_and_context(
-            &config.producer_config(false),
-            FeedProducerContext::new(Arc::clone(core)),
+        let producer = config.base(false).create::<super::write::Producer, _>(
+        &config.client(crate::feed::config::FeedRole::Producer),
+        FeedProducerHooks::new(Arc::clone(core)),
         )
         .unwrap();
         {

@@ -28,9 +28,9 @@
 //! source offsets past it. Weaker settings would silently turn
 //! at-least-once into at-most-once.
 
+use crate::client::{Base, Keys, Role, canonical};
 use crate::clock::SyncClock;
-use crate::error::redacted_client_error;
-use crate::sink::context::SinkContext;
+use crate::sink::context::{SinkContext, SinkHooks};
 use crate::sink::encoder::{
     DEFAULT_MAX_MESSAGE_BYTES, KafkaBytesEncoder, KafkaEncoder, KafkaJsonEncoder, MessageEncoder,
 };
@@ -50,79 +50,78 @@ use std::panic::RefUnwindSafe;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-/// Properties the sink owns. Setting them through the passthrough is
-/// rejected at load time with an explanation; overriding them would break
-/// the durable-ack contract, the delivery-report countdown, or a typed
-/// field's ownership.
-///
-/// As on the source side, every librdkafka alias of a reserved property is
-/// denied alongside its canonical name (`_RK_C_ALIAS` entries write the
-/// same underlying setting, and the passthrough and framework values are
-/// distinct `ClientConfig` keys applied in unspecified order). The aliases
-/// here: `metadata.broker.list` ↔ `bootstrap.servers`,
-/// `delivery.timeout.ms` ↔ `message.timeout.ms`, and
-/// `acks` ↔ `request.required.acks`. librdkafka also reads `topic.<name>`
-/// as the topic property `<name>`, so a key is checked with that prefix
-/// removed.
-const DENYLIST: &[(&str, &str)] = &[
-    ("bootstrap.servers", "owned by the typed `brokers` field"),
-    (
-        "metadata.broker.list",
-        "librdkafka alias of `bootstrap.servers`, owned by the typed \
-         `brokers` field",
-    ),
-    (
-        "statistics.interval.ms",
-        "owned by the typed `statistics_interval` field",
-    ),
-    (
-        "delivery.timeout.ms",
-        "owned by the typed `delivery_timeout` field, which also bounds how \
-         long a batch write awaits its delivery reports",
-    ),
-    (
-        "message.timeout.ms",
-        "librdkafka alias of `delivery.timeout.ms`, owned by the typed \
-         `delivery_timeout` field",
-    ),
-    (
-        "message.max.bytes",
-        "owned by the typed `max_message_bytes` field, which keeps the \
-         client-side limit aligned with the sink's encode-time guard",
-    ),
-    (
-        "acks",
-        "forced to `all`: the framework commits source offsets once a \
-         delivery report confirms, so a report under weaker acks would \
-         turn at-least-once into at-most-once",
-    ),
-    (
-        "request.required.acks",
-        "librdkafka alias of `acks`, which is forced to `all` (a confirmed \
-         delivery report must mean a durable write)",
-    ),
-    (
-        "enable.idempotence",
-        "forced on: librdkafka's internal retries must not reorder or \
-         duplicate within a session, and disabling it silently weakens the \
-         delivery guarantees this sink documents",
-    ),
-    (
-        "transactional.id",
-        "transactions/exactly-once are not supported; the sink's ack model \
-         is per-batch delivery confirmation, not a two-phase commit",
-    ),
-    (
-        "delivery.report.only.error",
-        "the sink counts every delivery report to acknowledge a batch; \
-         suppressing success reports would hang every write",
-    ),
-    (
-        "enable.gapless.guarantee",
-        "raises librdkafka fatal errors on any gap, conflicting with the \
-         framework's retry-and-replay model",
-    ),
-];
+/// The sink's producer, or its probe, and the properties both own beyond the
+/// base in [`crate::client`]. Setting one through the passthrough is rejected
+/// at load time with the reason given here; overriding it would break the
+/// durable-ack contract, the delivery-report countdown, or a typed field's
+/// ownership.
+pub(crate) struct Producer<'a> {
+    pub(crate) config: &'a KafkaSinkConfig,
+    /// The readiness probe's producer, which reports no statistics: only the
+    /// main producer's context translates them.
+    pub(crate) probe: bool,
+}
+
+impl Role for Producer<'_> {
+    fn name(&self) -> &'static str {
+        if self.probe { "probe" } else { "producer" }
+    }
+
+    fn statistics(&self) -> bool {
+        !self.probe
+    }
+
+    fn declare(&self, keys: &mut Keys<'_>) {
+        let cfg = self.config;
+        if let Some(compression) = cfg.compression {
+            keys.set("compression.codec", compression.codec());
+        }
+        // The durable-ack contract (see the module docs).
+        keys.own(
+            "enable.idempotence",
+            "true",
+            "forced on: librdkafka's internal retries must not reorder or \
+             duplicate within a session, and disabling it silently weakens the \
+             delivery guarantees this sink documents",
+        );
+        keys.own(
+            "acks",
+            "all",
+            "forced to `all`: the framework commits source offsets once a \
+             delivery report confirms, so a report under weaker acks would \
+             turn at-least-once into at-most-once",
+        );
+        keys.own_if(
+            true,
+            "message.timeout.ms",
+            || cfg.delivery_timeout.as_millis().to_string(),
+            "owned by the typed `delivery_timeout` field, which also bounds how \
+             long a batch write awaits its delivery reports",
+        );
+        keys.own_if(
+            true,
+            "message.max.bytes",
+            || cfg.max_message_bytes.as_u64().to_string(),
+            "owned by the typed `max_message_bytes` field, which keeps the \
+             client-side limit aligned with the sink's encode-time guard",
+        );
+        keys.forbid(
+            "transactional.id",
+            "transactions/exactly-once are not supported; the sink's ack model \
+             is per-batch delivery confirmation, not a two-phase commit",
+        );
+        keys.forbid(
+            "delivery.report.only.error",
+            "the sink counts every delivery report to acknowledge a batch; \
+             suppressing success reports would hang every write",
+        );
+        keys.forbid(
+            "enable.gapless.guarantee",
+            "raises librdkafka fatal errors on any gap, conflicting with the \
+             framework's retry-and-replay model",
+        );
+    }
+}
 
 /// librdkafka's default `reconnect.backoff.max.ms`.
 const DEFAULT_RECONNECT_BACKOFF_MAX: Duration = Duration::from_secs(10);
@@ -356,17 +355,17 @@ impl KafkaSinkConfig {
             return fail(why.to_string());
         }
 
-        for key in self.rdkafka.keys() {
-            let name = key.strip_prefix("topic.").unwrap_or(key);
-            if let Some((_, why)) = DENYLIST.iter().find(|(owned, _)| *owned == name) {
-                return fail(format!("rdkafka.\"{key}\" cannot be overridden: {why}"));
-            }
+        let roles = [
+            &Producer { config: self, probe: false } as &dyn Role,
+            &Producer { config: self, probe: true },
+        ];
+        if let Err(refusal) = self.base(false).denied(&roles) {
+            return fail(refusal.to_string());
         }
         crate::security::check_tls_feature(&self.rdkafka, "sink.kafka")?;
         if self.compression.is_some() {
             for key in self.rdkafka.keys() {
-                let name = key.strip_prefix("topic.").unwrap_or(key);
-                if matches!(name, "compression.codec" | "compression.type") {
+                if canonical(key) == "compression.codec" {
                     return fail(format!(
                         "rdkafka.\"{key}\" conflicts with the typed \
                          `compression` field; set one, not both"
@@ -394,56 +393,27 @@ impl KafkaSinkConfig {
         self.delivery_timeout + DELIVERY_GRACE + REPEATED_ERROR_INTERVAL + reconnect_backoff_max
     }
 
-    /// Build the effective librdkafka producer configuration.
+    /// What the sink's producers share with every Kafka client.
+    pub(crate) fn base(&self, openssl_env: bool) -> Base<'_> {
+        Base {
+            section: "sink.kafka",
+            brokers: &self.brokers,
+            rdkafka: &self.rdkafka,
+            statistics_interval: self.statistics_interval,
+            openssl_env,
+        }
+    }
+
+    /// The main producer's librdkafka configuration.
+    #[cfg(test)]
     pub(crate) fn client_config(&self) -> rdkafka::ClientConfig {
-        self.client_config_impl(true, crate::security::openssl_env_overrides())
+        self.base(false).config(&Producer { config: self, probe: false })
     }
 
-    /// The probe producer's configuration: identical, minus statistics —
-    /// only the main producer's context translates statistics, so a second
-    /// emitting client would be pure overhead.
+    /// The probe producer's librdkafka configuration.
+    #[cfg(test)]
     fn probe_client_config(&self) -> rdkafka::ClientConfig {
-        self.client_config_impl(false, crate::security::openssl_env_overrides())
-    }
-
-    /// Takes the OpenSSL env check as an argument: on Linux, cargo exports
-    /// `SSL_CERT_FILE` and `SSL_CERT_DIR` to every process it runs, so a test
-    /// reading them always sees them set.
-    fn client_config_impl(
-        &self,
-        with_statistics: bool,
-        openssl_env: bool,
-    ) -> rdkafka::ClientConfig {
-        let mut cc = rdkafka::ClientConfig::new();
-        // rdkafka reads the log facade by default; tracing filters these events.
-        cc.set_log_level(rdkafka::config::RDKafkaLogLevel::Debug);
-        // User passthrough first: sink-owned settings below always win.
-        for (k, v) in &self.rdkafka {
-            cc.set(k, v);
-        }
-        crate::security::apply_ca_default(&mut cc, &self.rdkafka, openssl_env);
-        if let Some(compression) = self.compression {
-            cc.set("compression.codec", compression.codec());
-        }
-        cc.set("bootstrap.servers", &self.brokers);
-        // The durable-ack contract (see the module docs).
-        cc.set("enable.idempotence", "true");
-        cc.set("acks", "all");
-        cc.set(
-            "message.timeout.ms",
-            self.delivery_timeout.as_millis().to_string(),
-        );
-        cc.set(
-            "message.max.bytes",
-            self.max_message_bytes.as_u64().to_string(),
-        );
-        if with_statistics && !self.statistics_interval.is_zero() {
-            cc.set(
-                "statistics.interval.ms",
-                self.statistics_interval.as_millis().to_string(),
-            );
-        }
-        cc
+        self.base(false).config(&Producer { config: self, probe: true })
     }
 }
 
@@ -565,27 +535,28 @@ fn build_on(
     // fills it) to the main producer's context (whose `stats` callback
     // publishes through it).
     let stats_slot = Arc::new(Mutex::new(None));
-    let producer: ThreadedProducer<SinkContext> = cfg
-        .client_config()
-        .create_with_context(SinkContext::new(Arc::clone(&stats_slot), clock.clone()))
-        .map_err(|e| {
-            ConfigError::Validation(format!(
-                "sink.kafka: producer creation failed: {}",
-                redacted_client_error(&e)
-            ))
+    let base = cfg.base(crate::security::openssl_env_overrides());
+    let producer: ThreadedProducer<SinkContext> = base
+        .create(
+            &Producer { config: &cfg, probe: false },
+            SinkHooks::new(Arc::clone(&stats_slot), clock.clone()),
+        )
+        .map_err(|reason| {
+            ConfigError::Validation(format!("sink.kafka: producer creation failed: {reason}"))
         })?;
     let label = format!("{}/{}", cfg.brokers, cfg.topic);
     let endpoint = KafkaEndpoint::new(producer, label.clone());
     let endpoints: Vec<Vec<KafkaEndpoint>> =
         (0..cfg.shards).map(|_| vec![endpoint.clone()]).collect();
 
-    let probe_producer: ThreadedProducer<SinkContext> = cfg
-        .probe_client_config()
-        .create_with_context(SinkContext::detached(clock))
-        .map_err(|e| {
+    let probe_producer: ThreadedProducer<SinkContext> = base
+        .create(
+            &Producer { config: &cfg, probe: true },
+            SinkHooks::detached(clock),
+        )
+        .map_err(|reason| {
             ConfigError::Validation(format!(
-                "sink.kafka: probe producer creation failed: {}",
-                redacted_client_error(&e)
+                "sink.kafka: probe producer creation failed: {reason}"
             ))
         })?;
     let probe_endpoints = Arc::new(vec![vec![KafkaEndpoint::new(probe_producer, label)]]);
@@ -612,7 +583,6 @@ fn build_on(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::security::tests::assert_ca_cases;
 
     fn section(body: &str) -> ComponentConfig {
         spate_test::component_config("kafka", body)
@@ -873,7 +843,8 @@ mod tests {
         let cfg = parse(&minimal()).unwrap();
         for with_statistics in [true, false] {
             let ca = |env| {
-                cfg.client_config_impl(with_statistics, env)
+                cfg.base(env)
+                    .config(&Producer { config: &cfg, probe: !with_statistics })
                     .get("ssl.ca.location")
                     .map(str::to_owned)
             };
@@ -890,26 +861,8 @@ mod tests {
         );
         let cfg = parse(&body).unwrap();
         assert_eq!(
-            cfg.client_config_impl(true, false).get("ssl.ca.location"),
+            cfg.client_config().get("ssl.ca.location"),
             Some("/etc/kafka/ca.pem")
-        );
-    }
-
-    /// The writer and readiness configurations each carry `probe` only in a
-    /// vendored-OpenSSL `tls` build with no CA named and no OpenSSL environment
-    /// override, and keep a named CA as given. Regression for #825.
-    #[test]
-    fn sink_ca_default_reads_the_openssl_environment() {
-        assert_ca_cases(
-            "sink::config::tests::sink_ca_default_reads_the_openssl_environment",
-            |rdkafka| {
-                let mut cfg = KafkaSinkConfig::new("localhost:9092", "orders");
-                cfg.rdkafka = rdkafka;
-                vec![
-                    ("writer", cfg.client_config()),
-                    ("readiness", cfg.probe_client_config()),
-                ]
-            },
         );
     }
 

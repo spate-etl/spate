@@ -484,8 +484,7 @@ mod tests {
     use super::*;
     use crate::clock::SyncClock;
     use crate::feed::config::KafkaFeedConfig;
-    use crate::feed::producer::FeedProducerContext;
-    use rdkafka::config::FromClientConfigAndContext;
+    use crate::feed::producer::FeedProducerHooks;
     use rdkafka::error::RDKafkaErrorCode as C;
     use std::num::NonZeroU32;
     use std::sync::mpsc;
@@ -504,9 +503,9 @@ mod tests {
         let config = KafkaFeedConfig::from_section(&section).unwrap();
         for how in ["stopped", "latched"] {
             let core = Arc::new(Core::new(&config, NonZeroU32::MIN, SyncClock::system()));
-            let producer = Producer::from_config_and_context(
-                &config.producer_config(false),
-                FeedProducerContext::new(Arc::clone(&core)),
+            let producer = config.base(false).create::<crate::feed::write::Producer, _>(
+        &config.client(crate::feed::config::FeedRole::Producer),
+        FeedProducerHooks::new(Arc::clone(&core)),
             )
             .unwrap();
             let gate = Gate::new(Arc::clone(&core), producer, config.delivery_timeout)
@@ -541,9 +540,9 @@ mod tests {
         .unwrap();
         let config = KafkaFeedConfig::from_section(&section).unwrap();
         let core = Arc::new(Core::new(&config, NonZeroU32::MIN, SyncClock::system()));
-        let producer = Producer::from_config_and_context(
-            &config.producer_config(false),
-            FeedProducerContext::new(Arc::clone(&core)),
+        let producer = config.base(false).create::<crate::feed::write::Producer, _>(
+        &config.client(crate::feed::config::FeedRole::Producer),
+        FeedProducerHooks::new(Arc::clone(&core)),
         )
         .unwrap();
         let gate = Gate::new(Arc::clone(&core), producer, config.delivery_timeout);

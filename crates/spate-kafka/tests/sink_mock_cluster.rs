@@ -379,6 +379,43 @@ async fn probe_verifies_topic_and_fails_fast_on_unknown_topic() {
     }
 }
 
+/// The readiness probe reports a missing topic as fatal and leaves it
+/// missing: its metadata read never asks the broker to create the topic.
+#[tokio::test]
+async fn the_probe_does_not_create_a_missing_topic() {
+    let cluster = MockCluster::new(1).expect("mock cluster");
+    let brokers = cluster.bootstrap_servers();
+    let sink = sink(&brokers, "");
+
+    let err = sink.probe_fn()()
+        .await
+        .expect_err("a missing topic must fail the probe");
+    match err {
+        SinkError::Client { class, reason } => {
+            assert_eq!(class, ErrorClass::Fatal, "a missing topic is fatal: {reason}");
+            assert!(reason.contains("does not exist"), "actionable: {reason}");
+        }
+        other => panic!("unexpected error shape: {other:?}"),
+    }
+
+    let consumer: rdkafka::consumer::BaseConsumer = rdkafka::ClientConfig::new()
+        .set("bootstrap.servers", &brokers)
+        .create()
+        .expect("consumer");
+    let metadata = rdkafka::consumer::Consumer::fetch_metadata(
+        &consumer,
+        Some(TOPIC),
+        Duration::from_secs(10),
+    )
+    .expect("metadata");
+    let topic = &metadata.topics()[0];
+    assert_eq!(
+        topic.error(),
+        Some(RDKafkaRespErr::RD_KAFKA_RESP_ERR_UNKNOWN_TOPIC_OR_PART),
+        "the topic stays missing"
+    );
+}
+
 #[test]
 fn statistics_populate_kafka_sink_fixed_families() {
     let cluster = MockCluster::new(1).expect("mock cluster");

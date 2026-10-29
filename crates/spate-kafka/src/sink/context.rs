@@ -20,10 +20,9 @@
 
 use crate::clock::SyncClock;
 use crate::sink::metrics::KafkaSinkStatsMetrics;
-use rdkafka::client::ClientContext;
+use crate::client::{Hooks, ProducerHooks, SpateContext, log_error};
 use rdkafka::error::RDKafkaErrorCode;
 use rdkafka::message::DeliveryResult;
-use rdkafka::producer::ProducerContext;
 use rdkafka::statistics::Statistics;
 use spate_core::clock::tokio::Clock as IoClock;
 use std::future::Future as _;
@@ -113,14 +112,16 @@ impl BatchInflight {
     }
 }
 
-/// Client context for the sink's producers and the client the feed's
-/// startup checks read metadata through: routes librdkafka logs to
-/// `tracing` (mirroring the source's context), translates delivery
-/// reports into batch countdowns, publishes statistics snapshots
-/// through the slot shared with the writer, and records the latest
+/// The context the sink's producers, and the client the feed's startup
+/// checks read metadata through, run under.
+pub(crate) type SinkContext = SpateContext<SinkHooks>;
+
+/// Hooks for the sink's producers and the feed's metadata reader:
+/// translates delivery reports into batch countdowns, publishes statistics
+/// snapshots through the slot shared with the writer, and records the latest
 /// rejection by a broker.
 #[derive(Debug)]
-pub(crate) struct SinkContext {
+pub(crate) struct SinkHooks {
     /// Filled by the writer's `attach_metrics` (main producer only, and
     /// only when statistics are enabled); the `stats` callback publishes
     /// through it from the producer's poll thread.
@@ -134,10 +135,10 @@ pub(crate) struct SinkContext {
     unpaired_error: Mutex<Option<(Option<RDKafkaErrorCode>, String)>>,
 }
 
-impl SinkContext {
-    /// The main producer's context, sharing the writer's statistics slot.
+impl SinkHooks {
+    /// The main producer's hooks, sharing the writer's statistics slot.
     pub(crate) fn new(stats: Arc<Mutex<Option<KafkaSinkStatsMetrics>>>, clock: SyncClock) -> Self {
-        SinkContext {
+        SinkHooks {
             stats,
             rejection: Mutex::new(None),
             clock,
@@ -145,12 +146,12 @@ impl SinkContext {
         }
     }
 
-    /// A context for probe producers: its slot is never filled (and the
-    /// probe client config sets no statistics interval), so it publishes
-    /// nothing. The single main producer stays the sole statistics source,
-    /// which keeps the absolute-counter mapping sound.
+    /// Hooks for probe producers: the slot is never filled (and the probe
+    /// role sets no statistics interval), so they publish nothing. The single
+    /// main producer stays the sole statistics source, which keeps the
+    /// absolute-counter mapping sound.
     pub(crate) fn detached(clock: SyncClock) -> Self {
-        SinkContext::new(Arc::new(Mutex::new(None)), clock)
+        SinkHooks::new(Arc::new(Mutex::new(None)), clock)
     }
 
     /// Record an error callback's `text` as the latest rejection, stamped on
@@ -197,7 +198,7 @@ impl SinkContext {
     }
 }
 
-impl ClientContext for SinkContext {
+impl Hooks for SinkHooks {
     /// Runs on the producer's poll thread, once per statistics interval —
     /// never on the record path.
     fn stats(&self, statistics: Statistics) {
@@ -206,30 +207,18 @@ impl ClientContext for SinkContext {
         }
     }
 
-    fn log(&self, level: rdkafka::config::RDKafkaLogLevel, fac: &str, log_message: &str) {
-        use rdkafka::config::RDKafkaLogLevel as L;
-        match level {
-            L::Emerg | L::Alert | L::Critical | L::Error => {
-                tracing::error!(target: "librdkafka", fac, "{log_message}");
-            }
-            L::Warning => tracing::warn!(target: "librdkafka", fac, "{log_message}"),
-            L::Notice | L::Info => tracing::info!(target: "librdkafka", fac, "{log_message}"),
-            L::Debug => tracing::debug!(target: "librdkafka", fac, "{log_message}"),
-        }
-    }
-
     fn error(&self, error: rdkafka::error::KafkaError, reason: &str) {
         if self.repeats_previous(error.rdkafka_error_code(), reason) {
             return;
         }
-        tracing::warn!(target: "librdkafka", %error, "{reason}");
+        log_error(&error, reason);
         if let Some(code) = error.rdkafka_error_code() {
             self.note_error(code, reason);
         }
     }
 }
 
-impl ProducerContext for SinkContext {
+impl ProducerHooks for SinkHooks {
     type DeliveryOpaque = Arc<BatchInflight>;
 
     /// Runs on the producer's poll thread. Never block here.
@@ -244,14 +233,16 @@ impl ProducerContext for SinkContext {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use rdkafka::client::ClientContext;
+    use rdkafka::producer::ProducerContext;
     use spate_core::clock::TestClock;
     use spate_core::clock::tokio::{SystemClock as IoSystemClock, TestClock as IoTestClock};
     use std::time::Duration;
 
     /// A detached context on a frozen clock, and that clock.
-    pub(crate) fn on_test_clock() -> (SinkContext, Arc<TestClock>) {
+    pub(crate) fn on_test_clock() -> (SinkHooks, Arc<TestClock>) {
         let clock = TestClock::frozen();
-        let ctx = SinkContext::detached(SyncClock::new(Arc::clone(&clock) as _));
+        let ctx = SinkHooks::detached(SyncClock::new(Arc::clone(&clock) as _));
         (ctx, clock)
     }
 
@@ -533,8 +524,8 @@ pub(crate) mod tests {
     }
 
     /// rdkafka's producer hands each error event to its context twice in a
-    /// row, which `SinkContext::repeats_previous` and the feed's
-    /// `FeedProducerContext::repeats_previous` depend on.
+    /// row, which `SinkHooks::repeats_previous` and the feed's
+    /// `FeedProducerHooks::repeats_previous` depend on.
     #[test]
     fn rdkafka_delivers_each_producer_error_twice() {
         use rdkafka::ClientConfig;
@@ -553,7 +544,7 @@ pub(crate) mod tests {
         assert!(
             calls.len() % 2 == 0 && calls.chunks(2).all(|pair| pair[0] == pair[1]),
             "rdkafka no longer repeats error callbacks: delete \
-             `SinkContext::repeats_previous`, `FeedProducerContext::repeats_previous` \
+             `SinkHooks::repeats_previous`, `FeedProducerHooks::repeats_previous` \
              and this test. Calls: {calls:#?}"
         );
     }

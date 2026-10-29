@@ -8,7 +8,7 @@
 //! protocol: for the **assignment and revocation events** the callback may
 //! return without calling `assign`/`unassign`; the rebalance then stays in
 //! progress until the application calls them later.
-//! [`SourceContext::rebalance`] records those two as intents, and
+//! [`SourceHooks::rebalance`] records those two as intents, and
 //! [`KafkaSource::poll_events`](crate::KafkaSource) performs the
 //! assign/pause/split (assignments) or barrier-drain/commit/unassign
 //! (revocations) choreography from the controller thread.
@@ -20,9 +20,9 @@
 //! intent for `poll_events` to surface, the one sanctioned exception on
 //! the normal-operation path to "the callback never acknowledges".
 
+use crate::client::{ConsumerHooks, Hooks, SpateContext, log_error};
 use rdkafka::TopicPartitionList;
-use rdkafka::client::ClientContext;
-use rdkafka::consumer::{BaseConsumer, Consumer, ConsumerContext};
+use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::error::RDKafkaErrorCode;
 use rdkafka::statistics::Statistics;
 use rdkafka::types::RDKafkaRespErr;
@@ -60,9 +60,12 @@ impl Intent {
     }
 }
 
+/// The context the source's consumer, and the feed's consumers, run under.
+pub(crate) type SourceContext = SpateContext<SourceHooks>;
+
 /// Shared state between the librdkafka callbacks and [`KafkaSource`].
 #[derive(Debug, Default)]
-pub(crate) struct SourceContext {
+pub(crate) struct SourceHooks {
     pub(crate) intents: Mutex<VecDeque<Intent>>,
     pub(crate) stats: Mutex<Option<Box<Statistics>>>,
     /// Set when the source is shutting down. From then on the rebalance
@@ -78,7 +81,7 @@ pub(crate) struct SourceContext {
     last_error: Mutex<HashMap<ThreadId, (RDKafkaErrorCode, String)>>,
 }
 
-impl SourceContext {
+impl SourceHooks {
     /// The text of this thread's latest error callback, when its code is
     /// `code`. The entry is removed either way.
     pub(crate) fn take_error(&self, code: RDKafkaErrorCode) -> Option<String> {
@@ -91,26 +94,14 @@ impl SourceContext {
     }
 }
 
-impl ClientContext for SourceContext {
+impl Hooks for SourceHooks {
     fn stats(&self, statistics: Statistics) {
         // Latest wins; parsing/aggregation happens on the controller thread.
         *self.stats.lock().expect("stats lock") = Some(Box::new(statistics));
     }
 
-    fn log(&self, level: rdkafka::config::RDKafkaLogLevel, fac: &str, log_message: &str) {
-        use rdkafka::config::RDKafkaLogLevel as L;
-        match level {
-            L::Emerg | L::Alert | L::Critical | L::Error => {
-                tracing::error!(target: "librdkafka", fac, "{log_message}");
-            }
-            L::Warning => tracing::warn!(target: "librdkafka", fac, "{log_message}"),
-            L::Notice | L::Info => tracing::info!(target: "librdkafka", fac, "{log_message}"),
-            L::Debug => tracing::debug!(target: "librdkafka", fac, "{log_message}"),
-        }
-    }
-
     fn error(&self, error: rdkafka::error::KafkaError, reason: &str) {
-        tracing::warn!(target: "librdkafka", %error, "{reason}");
+        log_error(&error, reason);
         if let Some(code) = error.rdkafka_error_code() {
             self.last_error
                 .lock()
@@ -120,7 +111,7 @@ impl ClientContext for SourceContext {
     }
 }
 
-impl ConsumerContext for SourceContext {
+impl ConsumerHooks for SourceHooks {
     /// Full override of the rebalance handler. Assignment and revocation
     /// events are recorded and returned WITHOUT acknowledgment (no
     /// `assign`/`unassign`), deferring completion to the controller-side
@@ -129,7 +120,7 @@ impl ConsumerContext for SourceContext {
     /// (see the module docs), and only its code is recorded.
     fn rebalance(
         &self,
-        base_consumer: &BaseConsumer<Self>,
+        base_consumer: &BaseConsumer<SourceContext>,
         err: RDKafkaRespErr,
         tpl: &mut TopicPartitionList,
     ) {
@@ -171,16 +162,18 @@ impl ConsumerContext for SourceContext {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rdkafka::ClientConfig;
-    use rdkafka::config::FromClientConfigAndContext;
+    use crate::KafkaSourceConfig;
+    use crate::config::Consumer as Role;
+    use rdkafka::client::ClientContext;
+    use rdkafka::consumer::ConsumerContext;
 
-    /// A lazily-connecting consumer with this crate's context; no broker is
+    /// A lazily-connecting consumer built by the factory; no broker is
     /// contacted (assign/unassign/assignment are local operations).
     fn consumer() -> BaseConsumer<SourceContext> {
-        let mut cc = ClientConfig::new();
-        cc.set("bootstrap.servers", "127.0.0.1:1");
-        cc.set("group.id", "ctx-test");
-        BaseConsumer::from_config_and_context(&cc, SourceContext::default()).expect("consumer")
+        let cfg = KafkaSourceConfig::new("127.0.0.1:1", "orders", "ctx-test");
+        cfg.base(false)
+            .create(&Role(&cfg), SourceHooks::default())
+            .expect("consumer")
     }
 
     /// The contract this pins (librdkafka `rd_kafka_conf_set_rebalance_cb`):
@@ -253,7 +246,8 @@ mod tests {
     /// under the code it polled.
     #[test]
     fn take_error_pairs_by_thread_and_code() {
-        let ctx = SourceContext::default();
+        let consumer = consumer();
+        let ctx = consumer.context();
         let error = |code| rdkafka::error::KafkaError::Global(code);
         ctx.error(error(RDKafkaErrorCode::SSL), "handshake");
         thread::scope(|s| {

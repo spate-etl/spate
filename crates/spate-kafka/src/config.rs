@@ -3,71 +3,65 @@
 
 use serde::Deserialize;
 use spate_core::config::{ComponentConfig, ConfigError, redact};
+use crate::client::{Base, Keys, Role};
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-/// Properties the framework owns. Setting them through the passthrough is
-/// rejected at load time with an explanation, because overriding them
-/// silently breaks the framework's delivery guarantees or its threading
-/// model.
-///
-/// librdkafka accepts several property names that write the same underlying
-/// setting (`_RK_C_ALIAS` entries in `rdkafka_conf.c`). Because the
-/// passthrough and the framework's own values are distinct `ClientConfig`
-/// map keys applied in unspecified order, an alias of an owned property would
-/// non-deterministically override it. Every alias of a reserved property is
-/// therefore denied alongside its canonical name. Auditing the reserved set
-/// against librdkafka's config table yields two alias names to add; the
-/// other reserved properties (`group.id`, `enable.auto.offset.store`,
-/// `auto.commit.interval.ms`, `enable.partition.eof`, `statistics.interval.ms`,
-/// `group.protocol`, `partition.assignment.strategy`) have no alias.
-const DENYLIST: &[(&str, &str)] = &[
-    (
-        "enable.auto.offset.store",
-        "the framework stores offsets itself when checkpoint watermarks \
-         advance; overriding this breaks at-least-once delivery",
-    ),
-    (
-        "enable.auto.commit",
-        "interval auto-commit of framework-stored offsets is the commit \
-         mechanism; disabling it means nothing is ever committed",
-    ),
-    (
-        // librdkafka's deprecated topic-level alias that `enable.auto.commit`
-        // maps to; denied so auto-commit cannot be disabled by the back door.
-        "auto.commit.enable",
-        "deprecated librdkafka alias of `enable.auto.commit`; interval \
-         auto-commit of framework-stored offsets is the commit mechanism, \
-         disabling it means nothing is ever committed",
-    ),
-    (
-        "auto.commit.interval.ms",
-        "owned by the typed `commit_interval` field",
-    ),
-    (
-        "enable.partition.eof",
-        "EOF events would pollute the partition queues the pipeline polls",
-    ),
-    ("bootstrap.servers", "owned by the typed `brokers` field"),
-    (
-        // librdkafka's canonical name for `bootstrap.servers`; both write the
-        // same broker list, so denying only one leaves the framework's
-        // broker list overridable through the other.
-        "metadata.broker.list",
-        "librdkafka alias of `bootstrap.servers`, owned by the typed \
-         `brokers` field",
-    ),
-    ("group.id", "owned by the typed `group_id` field"),
-    (
-        "statistics.interval.ms",
-        "owned by the typed `statistics_interval` field",
-    ),
-    (
-        "group.protocol",
-        "only the classic consumer group protocol is supported today \
-         (eager assignment is a framework invariant)",
-    ),
-];
+/// The source's consumer, and the properties it owns beyond the base in
+/// [`crate::client`]. Setting one through the passthrough is rejected at load
+/// time with the reason given here, because overriding it silently breaks the
+/// framework's delivery guarantees or its threading model.
+pub(crate) struct Consumer<'a>(pub(crate) &'a KafkaSourceConfig);
+
+impl Role for Consumer<'_> {
+    fn name(&self) -> &'static str {
+        "consumer"
+    }
+
+    fn statistics(&self) -> bool {
+        true
+    }
+
+    fn declare(&self, keys: &mut Keys<'_>) {
+        keys.own("group.id", &self.0.group_id, "owned by the typed `group_id` field");
+        // The framework's commit mechanism: offsets are stored explicitly
+        // when checkpoint watermarks advance and committed on an interval.
+        keys.own(
+            "enable.auto.offset.store",
+            "false",
+            "the framework stores offsets itself when checkpoint watermarks \
+             advance; overriding this breaks at-least-once delivery",
+        );
+        keys.own(
+            "enable.auto.commit",
+            "true",
+            "interval auto-commit of framework-stored offsets is the commit \
+             mechanism; disabling it means nothing is ever committed",
+        );
+        keys.own_if(
+            true,
+            "auto.commit.interval.ms",
+            || self.0.commit_interval.as_millis().to_string(),
+            "owned by the typed `commit_interval` field",
+        );
+        keys.own(
+            "enable.partition.eof",
+            "false",
+            "EOF events would pollute the partition queues the pipeline polls",
+        );
+        keys.forbid(
+            "auto.commit.enable",
+            "a deprecated librdkafka topic property the consumer does not \
+             read; the framework commits through `enable.auto.commit`, which \
+             it owns",
+        );
+        keys.forbid(
+            "group.protocol",
+            "only the classic consumer group protocol is supported today \
+             (eager assignment is a framework invariant)",
+        );
+    }
+}
 
 fn default_commit_interval() -> Duration {
     Duration::from_secs(5)
@@ -229,12 +223,8 @@ impl KafkaSourceConfig {
                 "source.kafka.group_id must not be empty".into(),
             ));
         }
-        for (key, why) in DENYLIST {
-            if self.rdkafka.contains_key(*key) {
-                return Err(ConfigError::Validation(format!(
-                    "source.kafka.rdkafka.\"{key}\" cannot be overridden: {why}"
-                )));
-            }
+        if let Err(refusal) = self.base(false).denied(&[&Consumer(self)]) {
+            return Err(ConfigError::Validation(format!("source.kafka.{refusal}")));
         }
         if self.rdkafka.contains_key("auto.offset.reset")
             && self.rdkafka.contains_key("topic.auto.offset.reset")
@@ -284,62 +274,41 @@ impl KafkaSourceConfig {
             .is_none_or(|level| level.eq_ignore_ascii_case("read_committed"))
     }
 
-    /// Build the effective librdkafka client configuration.
-    pub(crate) fn client_config(&self) -> rdkafka::ClientConfig {
-        self.client_config_with(crate::security::openssl_env_overrides())
+    /// What the source's consumer shares with every Kafka client.
+    pub(crate) fn base(&self, openssl_env: bool) -> Base<'_> {
+        Base {
+            section: "source.kafka",
+            brokers: &self.brokers,
+            rdkafka: &self.rdkafka,
+            statistics_interval: self.statistics_interval,
+            openssl_env,
+        }
     }
 
-    /// Takes the OpenSSL env check as an argument: on Linux, cargo exports
-    /// `SSL_CERT_FILE` and `SSL_CERT_DIR` to every process it runs, so a test
-    /// reading them always sees them set.
-    fn client_config_with(&self, openssl_env: bool) -> rdkafka::ClientConfig {
-        let mut cc = rdkafka::ClientConfig::new();
-        // rdkafka reads the log facade by default; tracing filters these events.
-        cc.set_log_level(rdkafka::config::RDKafkaLogLevel::Debug);
-        // User passthrough first: framework-owned settings below always win.
-        for (k, v) in &self.rdkafka {
-            cc.set(k, v);
-        }
-        crate::security::apply_ca_default(&mut cc, &self.rdkafka, openssl_env);
-        // Prefetch depth is deliberately left at librdkafka's own defaults
-        // (`queued.min.messages` 100000, `queued.max.messages.kbytes` 65536)
-        // so behavior is predictable and reasoning transfers from librdkafka's
-        // documentation like it does for every other Kafka client.
-        //
-        // Forcing `queued.min.messages` to 1000 as a memory backstop cost,
-        // measured on a backlogged consumer by a rig this repository no longer
-        // carries: ~11x end-to-end (193k -> 2.11M msg/s through the full
-        // pipeline) and 22-76x on the raw client path depending on message
-        // size, because the local fetch queue sits empty and every driver
-        // thread blocks on the broker. A memory cap that costs an order of
-        // magnitude of throughput is the wrong default; deployments that need
-        // the memory bounded set it through `rdkafka` below, where the trade
-        // is visible.
-        cc.set("bootstrap.servers", &self.brokers);
-        cc.set("group.id", &self.group_id);
-        // The framework's commit mechanism: offsets are stored explicitly
-        // when checkpoint watermarks advance and committed on an interval.
-        cc.set("enable.auto.offset.store", "false");
-        cc.set("enable.auto.commit", "true");
-        cc.set(
-            "auto.commit.interval.ms",
-            self.commit_interval.as_millis().to_string(),
-        );
-        cc.set("enable.partition.eof", "false");
-        if !self.statistics_interval.is_zero() {
-            cc.set(
-                "statistics.interval.ms",
-                self.statistics_interval.as_millis().to_string(),
-            );
-        }
-        cc
+    /// The consumer's librdkafka configuration.
+    ///
+    /// Prefetch depth is left at librdkafka's own defaults
+    /// (`queued.min.messages` 100000, `queued.max.messages.kbytes` 65536), so
+    /// behavior is predictable and reasoning transfers from librdkafka's
+    /// documentation like it does for every other Kafka client. Forcing
+    /// `queued.min.messages` to 1000 as a memory backstop cost ~11x end to end
+    /// on a backlogged consumer, because the local fetch queue sits empty and
+    /// every driver thread blocks on the broker; deployments that need memory
+    /// bounded set it through `rdkafka`, where the trade is visible.
+    #[cfg(test)]
+    pub(crate) fn client_config(&self) -> rdkafka::ClientConfig {
+        self.client_config_with(false)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn client_config_with(&self, openssl_env: bool) -> rdkafka::ClientConfig {
+        self.base(openssl_env).config(&Consumer(self))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::security::tests::assert_ca_cases;
     use spate_core::config::ComponentConfig;
 
     fn section(body: &str) -> ComponentConfig {
@@ -664,21 +633,6 @@ mod tests {
         assert_eq!(
             cfg.client_config_with(false).get("ssl.ca.location"),
             Some("/etc/kafka/ca.pem")
-        );
-    }
-
-    /// The consumer configuration carries `probe` only in a vendored-OpenSSL
-    /// `tls` build with no CA named and no OpenSSL environment override, and
-    /// keeps a named CA as given. Regression for #825.
-    #[test]
-    fn source_ca_default_reads_the_openssl_environment() {
-        assert_ca_cases(
-            "config::tests::source_ca_default_reads_the_openssl_environment",
-            |rdkafka| {
-                let mut cfg = KafkaSourceConfig::new("localhost:9092", "orders", "spate");
-                cfg.rdkafka = rdkafka;
-                vec![("consumer", cfg.client_config())]
-            },
         );
     }
 

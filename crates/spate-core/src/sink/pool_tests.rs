@@ -2470,6 +2470,9 @@ async fn linger_seals_on_the_injected_clock() {
     };
     let clock = TestClock::frozen();
     let f = fixture_on(&clock, 1, 1, cfg, 16);
+    // An hour ahead on tokio's clock before anything is stamped, so a
+    // stamp taken there reads an hour off the pool clock.
+    paused_hour().await;
     let (ack, ack_rx) = AckRef::test_pair();
     for _ in 0..3 {
         f.queues.try_send(0, chunk(1, 1, &ack)).unwrap();
@@ -2580,6 +2583,9 @@ async fn an_open_breaker_waits_for_the_injected_clock() {
             Outcome::Write(Duration::ZERO),
         ],
     );
+    // An hour ahead on tokio's clock before anything is stamped, so a
+    // stamp taken there reads an hour off the pool clock.
+    paused_hour().await;
     let (ack, ack_rx) = AckRef::test_pair();
     f.queues.try_send(0, chunk(1, 8, &ack)).unwrap();
     drop(ack);
@@ -2708,6 +2714,9 @@ fn sink_durations_are_measured_on_the_injected_clock() {
             let clock = TestClock::frozen();
             let f = fixture_on(&clock, 1, 1, cfg, 16);
             f.writer.set_default(Outcome::Write(Duration::from_secs(2)));
+            // An hour ahead on tokio's clock before anything is stamped, so a
+            // stamp taken there reads an hour off the pool clock.
+            paused_hour().await;
             let (ack, _rx) = AckRef::test_pair();
             f.queues.try_send(0, chunk(1, 1, &ack)).expect("send");
             f.queues.try_send(0, chunk(1, 1, &ack)).expect("send");

@@ -18,14 +18,19 @@
 //!
 //! [`write_batch`]: spate_core::sink::ShardWriter::write_batch
 
+use crate::clock::SyncClock;
 use crate::sink::metrics::KafkaSinkStatsMetrics;
 use rdkafka::client::ClientContext;
 use rdkafka::error::RDKafkaErrorCode;
 use rdkafka::message::DeliveryResult;
 use rdkafka::producer::ProducerContext;
 use rdkafka::statistics::Statistics;
+use spate_core::clock::tokio::Clock as IoClock;
+use std::future::Future as _;
+use std::pin::pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::task::Poll;
 use std::time::{Duration, Instant};
 use tokio::sync::Notify;
 
@@ -67,20 +72,31 @@ impl BatchInflight {
         }
     }
 
-    /// Await all reports up to `deadline`. Returns `false` on timeout.
-    /// Lost-wakeup-safe: the `Notify` future is created before each
-    /// re-check of the countdown, so a `notify_one` racing the check is
+    /// Await all reports until `clock` reaches `deadline`. Returns `false`
+    /// on timeout. Lost-wakeup-safe: the `Notify` future is created before
+    /// each re-check of the countdown, so a `notify_one` racing the check is
     /// stored as a permit and observed by the next await.
-    pub(crate) async fn wait(&self, deadline: Instant) -> bool {
+    pub(crate) async fn wait(&self, deadline: tokio::time::Instant, clock: &dyn IoClock) -> bool {
+        let mut timeout = clock.sleep_until(deadline);
         loop {
             let notified = self.done.notified();
             if self.remaining.load(Ordering::Acquire) == 0 {
                 return true;
             }
-            let Some(left) = deadline.checked_duration_since(Instant::now()) else {
-                return self.remaining.load(Ordering::Acquire) == 0;
-            };
-            if tokio::time::timeout(left, notified).await.is_err() {
+            let mut notified = pin!(notified);
+            // The report first, so a countdown finished as the deadline
+            // comes due still counts.
+            let reported = std::future::poll_fn(|cx| {
+                if notified.as_mut().poll(cx).is_ready() {
+                    Poll::Ready(true)
+                } else if timeout.as_mut().poll(cx).is_ready() {
+                    Poll::Ready(false)
+                } else {
+                    Poll::Pending
+                }
+            })
+            .await;
+            if !reported {
                 return self.remaining.load(Ordering::Acquire) == 0;
             }
         }
@@ -109,18 +125,22 @@ pub(crate) struct SinkContext {
     /// only when statistics are enabled); the `stats` callback publishes
     /// through it from the producer's poll thread.
     stats: Arc<Mutex<Option<KafkaSinkStatsMetrics>>>,
-    /// When the latest SASL or TLS rejection arrived, and its text.
+    /// When the latest SASL or TLS rejection arrived, on `clock`, and its
+    /// text.
     rejection: Mutex<Option<(Instant, String)>>,
+    /// The clock rejections are stamped and aged on.
+    clock: SyncClock,
     /// The last error callback, until the identical call that repeats it.
     unpaired_error: Mutex<Option<(Option<RDKafkaErrorCode>, String)>>,
 }
 
 impl SinkContext {
     /// The main producer's context, sharing the writer's statistics slot.
-    pub(crate) fn new(stats: Arc<Mutex<Option<KafkaSinkStatsMetrics>>>) -> Self {
+    pub(crate) fn new(stats: Arc<Mutex<Option<KafkaSinkStatsMetrics>>>, clock: SyncClock) -> Self {
         SinkContext {
             stats,
             rejection: Mutex::new(None),
+            clock,
             unpaired_error: Mutex::new(None),
         }
     }
@@ -129,31 +149,34 @@ impl SinkContext {
     /// probe client config sets no statistics interval), so it publishes
     /// nothing. The single main producer stays the sole statistics source,
     /// which keeps the absolute-counter mapping sound.
-    pub(crate) fn detached() -> Self {
-        SinkContext::new(Arc::new(Mutex::new(None)))
+    pub(crate) fn detached(clock: SyncClock) -> Self {
+        SinkContext::new(Arc::new(Mutex::new(None)), clock)
     }
 
-    /// Record an error callback's `text` as the latest rejection, arrived at
-    /// `now`, when `code` and `text` report a
+    /// Record an error callback's `text` as the latest rejection, stamped on
+    /// the context's clock, when `code` and `text` report a
     /// [`rejection`](crate::error::rejection). Any other error leaves the
     /// record as it is.
-    pub(crate) fn note_error(&self, code: RDKafkaErrorCode, text: &str, now: Instant) {
+    pub(crate) fn note_error(&self, code: RDKafkaErrorCode, text: &str) {
         if crate::error::rejection(code, text) {
-            *self.rejection.lock().expect("rejection lock") = Some((now, text.to_owned()));
+            *self.rejection.lock().expect("rejection lock") =
+                Some((self.clock.now(), text.to_owned()));
         }
     }
 
-    /// The latest rejection's age at `now` and its text, when that age is at
-    /// most `window`.
-    pub(crate) fn rejection_within(
-        &self,
-        now: Instant,
-        window: Duration,
-    ) -> Option<(Duration, String)> {
+    /// The latest rejection's age on the context's clock and its text, when
+    /// that age is at most `window`.
+    pub(crate) fn rejection_within(&self, window: Duration) -> Option<(Duration, String)> {
         let rejection = self.rejection.lock().expect("rejection lock");
         let (at, text) = rejection.as_ref()?;
-        let age = now.saturating_duration_since(*at);
+        let age = self.clock.now().saturating_duration_since(*at);
         (age <= window).then(|| (age, text.clone()))
+    }
+
+    /// The latest rejection's text, however long ago it arrived.
+    pub(crate) fn latest_rejection(&self) -> Option<String> {
+        let rejection = self.rejection.lock().expect("rejection lock");
+        rejection.as_ref().map(|(_, text)| text.clone())
     }
 
     /// Whether this error callback repeats the previous one, which it then
@@ -201,7 +224,7 @@ impl ClientContext for SinkContext {
         }
         tracing::warn!(target: "librdkafka", %error, "{reason}");
         if let Some(code) = error.rdkafka_error_code() {
-            self.note_error(code, reason, Instant::now());
+            self.note_error(code, reason);
         }
     }
 }
@@ -221,16 +244,39 @@ impl ProducerContext for SinkContext {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use spate_core::clock::TestClock;
+    use spate_core::clock::tokio::{SystemClock as IoSystemClock, TestClock as IoTestClock};
     use std::time::Duration;
+
+    /// A detached context on a frozen clock, and that clock.
+    pub(crate) fn on_test_clock() -> (SinkContext, Arc<TestClock>) {
+        let clock = TestClock::frozen();
+        let ctx = SinkContext::detached(SyncClock::new(Arc::clone(&clock) as _));
+        (ctx, clock)
+    }
+
+    /// Yields until `clock` has a sleep armed for `deadline`.
+    async fn armed(clock: &IoTestClock, deadline: tokio::time::Instant) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !clock.has_slept_until(deadline) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the wait arms its deadline");
+    }
 
     #[tokio::test]
     async fn countdown_completes_on_last_delivery() {
         let inflight = Arc::new(BatchInflight::new(3));
         let waiter = {
             let inflight = Arc::clone(&inflight);
-            tokio::spawn(
-                async move { inflight.wait(Instant::now() + Duration::from_secs(5)).await },
-            )
+            tokio::spawn(async move {
+                let clock = IoSystemClock;
+                inflight
+                    .wait(clock.now() + Duration::from_secs(5), &clock)
+                    .await
+            })
         };
         // Reports fire from a foreign (non-tokio) thread, as librdkafka's
         // poll thread would.
@@ -246,12 +292,36 @@ pub(crate) mod tests {
         reporter.join().unwrap();
     }
 
+    /// The countdown waits until its clock reaches the deadline: a report one
+    /// nanosecond before it completes the batch, and a report still missing
+    /// at it times the wait out.
     #[tokio::test]
-    async fn wait_times_out_when_reports_are_missing() {
-        let inflight = BatchInflight::new(2);
+    async fn a_missing_report_times_out_at_the_deadline() {
+        let clock = IoTestClock::frozen();
+        let window = Duration::from_secs(5);
+
+        let inflight = Arc::new(BatchInflight::new(2));
         inflight.complete_one();
-        let deadline = Instant::now() + Duration::from_millis(50);
-        assert!(!inflight.wait(deadline).await, "one report missing → false");
+        let deadline = clock.now() + window;
+        let waiter = tokio::spawn({
+            let (inflight, clock) = (Arc::clone(&inflight), Arc::clone(&clock));
+            async move { inflight.wait(deadline, &*clock).await }
+        });
+        armed(&clock, deadline).await;
+        clock.advance(window - Duration::from_nanos(1));
+        tokio::task::yield_now().await;
+        inflight.complete_one();
+        assert!(waiter.await.unwrap(), "timed out before the deadline");
+
+        let inflight = Arc::new(BatchInflight::new(1));
+        let deadline = clock.now() + window;
+        let waiter = tokio::spawn({
+            let (inflight, clock) = (Arc::clone(&inflight), Arc::clone(&clock));
+            async move { inflight.wait(deadline, &*clock).await }
+        });
+        armed(&clock, deadline).await;
+        clock.advance(window);
+        assert!(!waiter.await.unwrap(), "one report missing → false");
     }
 
     #[tokio::test]
@@ -270,7 +340,12 @@ pub(crate) mod tests {
                 inflight.complete_one();
             })
         };
-        assert!(inflight.wait(Instant::now() + Duration::from_secs(5)).await);
+        let clock = IoSystemClock;
+        assert!(
+            inflight
+                .wait(clock.now() + Duration::from_secs(5), &clock)
+                .await
+        );
         reporter.join().unwrap();
         let (code, reason) = inflight.first_error().expect("an error was recorded");
         assert_eq!(*code, Some(RDKafkaErrorCode::MessageTimedOut));
@@ -283,11 +358,12 @@ pub(crate) mod tests {
         // A write_batch future aborted at the drain deadline drops its
         // waiter; late reports must still decrement harmlessly and release
         // their references.
+        let clock = IoSystemClock;
         let inflight = Arc::new(BatchInflight::new(2));
         let opaques = [Arc::clone(&inflight), Arc::clone(&inflight)];
         {
             // Waiter is created and dropped without resolving (the abort).
-            let _abandoned = inflight.wait(Instant::now());
+            let _abandoned = inflight.wait(clock.now(), &clock);
         }
         for opaque in opaques {
             opaque.record_failure(None, "purged at teardown".to_string());
@@ -300,7 +376,7 @@ pub(crate) mod tests {
             "all opaque references reclaimed"
         );
         // A late waiter (none exists in practice) would still see completion.
-        assert!(inflight.wait(Instant::now()).await);
+        assert!(inflight.wait(clock.now(), &clock).await);
     }
 
     /// librdkafka's text for a SASL PLAIN login the broker refused.
@@ -314,31 +390,55 @@ pub(crate) mod tests {
 
     /// A SASL failure and a certificate the client failed to verify are
     /// recorded, the latest wins, and it holds for exactly the window after
-    /// its arrival.
+    /// its arrival on the context's clock.
     #[test]
     fn a_rejection_is_recorded_for_the_window() {
         use RDKafkaErrorCode as C;
-        let ctx = SinkContext::detached();
+        let (ctx, clock) = on_test_clock();
         let window = Duration::from_secs(75);
-        let t0 = Instant::now();
 
-        ctx.note_error(C::Authentication, SASL_REFUSED, t0);
+        ctx.note_error(C::Authentication, SASL_REFUSED);
+        clock.advance(window);
         assert_eq!(
-            ctx.rejection_within(t0 + window, window),
+            ctx.rejection_within(window),
             Some((window, SASL_REFUSED.to_owned()))
         );
-        assert_eq!(
-            ctx.rejection_within(t0 + window + Duration::from_millis(1), window),
-            None
-        );
+        clock.advance(Duration::from_nanos(1));
+        assert_eq!(ctx.rejection_within(window), None);
 
-        let t1 = t0 + Duration::from_secs(1);
-        ctx.note_error(C::SSL, CERTIFICATE_UNVERIFIED, t1);
-        ctx.note_error(C::AllBrokersDown, "1/1 brokers are down", t1);
+        ctx.note_error(C::SSL, CERTIFICATE_UNVERIFIED);
+        ctx.note_error(C::AllBrokersDown, "1/1 brokers are down");
         assert_eq!(
-            ctx.rejection_within(t1, window),
+            ctx.rejection_within(window),
             Some((Duration::ZERO, CERTIFICATE_UNVERIFIED.to_owned())),
             "a later error that is not a rejection leaves the record"
+        );
+    }
+
+    /// A rejection the producer's error callback reports is stamped on the
+    /// context's clock and holds for the window from there.
+    #[test]
+    fn a_rejection_from_the_callback_holds_for_the_window() {
+        use rdkafka::error::KafkaError;
+        let (ctx, clock) = on_test_clock();
+        let window = Duration::from_secs(75);
+
+        clock.advance(Duration::from_secs(3600));
+        ctx.error(
+            KafkaError::Global(RDKafkaErrorCode::Authentication),
+            SASL_REFUSED,
+        );
+        clock.advance(window);
+        assert_eq!(
+            ctx.rejection_within(window),
+            Some((window, SASL_REFUSED.to_owned()))
+        );
+        clock.advance(Duration::from_nanos(1));
+        assert_eq!(ctx.rejection_within(window), None);
+        assert_eq!(
+            ctx.latest_rejection().as_deref(),
+            Some(SASL_REFUSED),
+            "an aged rejection is still the latest"
         );
     }
 
@@ -350,13 +450,12 @@ pub(crate) mod tests {
         const DROPPED: &str = "sasl_plaintext://127.0.0.1:63121/bootstrap: SASL PLAIN mechanism \
             handshake failed: Local: Broker transport failure: broker's supported mechanisms: \
             (n/a) (after 0ms in state DOWN)";
-        let ctx = SinkContext::detached();
-        let now = Instant::now();
-        ctx.note_error(RDKafkaErrorCode::Authentication, DROPPED, now);
-        assert_eq!(ctx.rejection_within(now, Duration::MAX), None);
-        ctx.note_error(RDKafkaErrorCode::Authentication, SASL_REFUSED, now);
+        let (ctx, _clock) = on_test_clock();
+        ctx.note_error(RDKafkaErrorCode::Authentication, DROPPED);
+        assert_eq!(ctx.latest_rejection(), None);
+        ctx.note_error(RDKafkaErrorCode::Authentication, SASL_REFUSED);
         assert_eq!(
-            ctx.rejection_within(now, Duration::MAX),
+            ctx.rejection_within(Duration::MAX),
             Some((Duration::ZERO, SASL_REFUSED.to_owned()))
         );
     }
@@ -366,8 +465,7 @@ pub(crate) mod tests {
     #[test]
     fn other_errors_record_nothing() {
         use RDKafkaErrorCode as C;
-        let ctx = SinkContext::detached();
-        let now = Instant::now();
+        let (ctx, _clock) = on_test_clock();
         for (code, text) in [
             (
                 C::BrokerTransportFailure,
@@ -387,12 +485,8 @@ pub(crate) mod tests {
                  routines::wrong version number (after 0ms in state SSL_HANDSHAKE)",
             ),
         ] {
-            ctx.note_error(code, text, now);
-            assert_eq!(
-                ctx.rejection_within(now, Duration::MAX),
-                None,
-                "{code:?}: {text}"
-            );
+            ctx.note_error(code, text);
+            assert_eq!(ctx.latest_rejection(), None, "{code:?}: {text}");
         }
     }
 
@@ -404,7 +498,7 @@ pub(crate) mod tests {
         use RDKafkaErrorCode as C;
         use rdkafka::error::KafkaError;
         const DOWN: &str = "1/1 brokers are down";
-        let ctx = SinkContext::detached();
+        let (ctx, _clock) = on_test_clock();
         let calls = [(C::AllBrokersDown, DOWN); 4]
             .into_iter()
             .chain([(C::Authentication, SASL_REFUSED); 2]);
@@ -416,10 +510,7 @@ pub(crate) mod tests {
         let count = |text: &str| lines.iter().filter(|line| line.contains(text)).count();
         assert_eq!(count(DOWN), 2, "two events, one line each: {lines:#?}");
         assert_eq!(count(SASL_REFUSED), 1, "one event, one line: {lines:#?}");
-        assert!(
-            ctx.rejection_within(Instant::now(), Duration::MAX)
-                .is_some()
-        );
+        assert!(ctx.latest_rejection().is_some());
     }
 
     /// Records every error callback a producer receives.

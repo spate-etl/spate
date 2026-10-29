@@ -26,11 +26,13 @@ use crate::sink::metrics::KafkaSinkStatsMetrics;
 use rdkafka::error::RDKafkaErrorCode;
 use rdkafka::message::{Header, OwnedHeaders};
 use rdkafka::producer::{BaseRecord, Producer, ThreadedProducer};
+use spate_core::clock::tokio::Clock as IoClock;
 use spate_core::error::{ErrorClass, SinkError};
 use spate_core::metrics::Meter;
 use spate_core::sink::{SealedBatch, ShardWriter};
+use std::panic::RefUnwindSafe;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// Extra time granted past `delivery_timeout` for the countdown await:
 /// `delivery.timeout.ms` bounds time-to-report only from each message's
@@ -97,6 +99,8 @@ pub struct KafkaWriter {
     /// it; filled by [`attach_metrics`](ShardWriter::attach_metrics).
     stats_slot: Arc<Mutex<Option<KafkaSinkStatsMetrics>>>,
     statistics_enabled: bool,
+    /// The clock the send and report deadlines run on.
+    io_clock: Arc<dyn IoClock + RefUnwindSafe>,
 }
 
 impl KafkaWriter {
@@ -106,6 +110,7 @@ impl KafkaWriter {
         delivery_timeout: Duration,
         stats_slot: Arc<Mutex<Option<KafkaSinkStatsMetrics>>>,
         statistics_enabled: bool,
+        io_clock: Arc<dyn IoClock + RefUnwindSafe>,
     ) -> Self {
         KafkaWriter {
             rejection_window,
@@ -113,6 +118,7 @@ impl KafkaWriter {
             delivery_timeout,
             stats_slot,
             statistics_enabled,
+            io_clock,
         }
     }
 
@@ -122,7 +128,7 @@ impl KafkaWriter {
         endpoint
             .producer
             .context()
-            .rejection_within(Instant::now(), self.rejection_window)
+            .rejection_within(self.rejection_window)
     }
 
     fn parse_messages<'a>(&self, batch: &'a SealedBatch) -> Result<Vec<MessageRef<'a>>, SinkError> {
@@ -176,7 +182,7 @@ impl ShardWriter for KafkaWriter {
         let messages = self.parse_messages(batch)?;
         let total = messages.len();
         let inflight = Arc::new(BatchInflight::new(total));
-        let send_deadline = Instant::now() + self.delivery_timeout + DELIVERY_GRACE;
+        let send_deadline = self.io_clock.now() + self.delivery_timeout + DELIVERY_GRACE;
 
         // Phase 2: produce, absorbing queue-full pushback bounded by the
         // deadline. On a definitive send error librdkafka returns the
@@ -210,7 +216,7 @@ impl ShardWriter for KafkaWriter {
                     Err((error, returned))
                         if error.rdkafka_error_code() == Some(RDKafkaErrorCode::QueueFull) =>
                     {
-                        if Instant::now() >= send_deadline {
+                        if self.io_clock.now() >= send_deadline {
                             return Err(SinkError::Client {
                                 class: ErrorClass::Retryable,
                                 reason: format!(
@@ -221,6 +227,8 @@ impl ShardWriter for KafkaWriter {
                                 ),
                             });
                         }
+                        // Real time: it paces librdkafka's queue drain, which
+                        // runs on the poll thread's own clock.
                         tokio::time::sleep(backoff).await;
                         backoff = (backoff * 2).min(QUEUE_FULL_BACKOFF_MAX);
                         record = returned;
@@ -242,8 +250,8 @@ impl ShardWriter for KafkaWriter {
         // messages were only just enqueued. A shared start-anchored deadline
         // would time the wait out while they were still legitimately in flight
         // and force a duplicate-producing retry under sustained queue-full.
-        let wait_deadline = Instant::now() + self.delivery_timeout + DELIVERY_GRACE;
-        if !inflight.wait(wait_deadline).await {
+        let wait_deadline = self.io_clock.now() + self.delivery_timeout + DELIVERY_GRACE;
+        if !inflight.wait(wait_deadline, &*self.io_clock).await {
             return Err(report_error(
                 Some(RDKafkaErrorCode::MessageTimedOut),
                 &format!(
@@ -393,7 +401,9 @@ pub(crate) fn report_class(code: Option<RDKafkaErrorCode>) -> ErrorClass {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sink::context::tests::on_test_clock;
     use crate::sink::frame::write_message;
+    use spate_core::clock::tokio::SystemClock as IoSystemClock;
 
     fn test_writer(statistics_enabled: bool) -> KafkaWriter {
         KafkaWriter::new(
@@ -402,6 +412,7 @@ mod tests {
             Duration::from_secs(1),
             Arc::new(Mutex::new(None)),
             statistics_enabled,
+            Arc::new(IoSystemClock),
         )
     }
 
@@ -482,10 +493,10 @@ mod tests {
     #[test]
     fn a_timed_out_report_after_a_rejection_is_fatal() {
         use crate::sink::context::tests::SASL_REFUSED;
-        let ctx = SinkContext::detached();
-        let t0 = Instant::now();
-        ctx.note_error(RDKafkaErrorCode::Authentication, SASL_REFUSED, t0);
-        let rejection = ctx.rejection_within(t0 + Duration::from_secs(2), Duration::from_secs(75));
+        let (ctx, clock) = on_test_clock();
+        ctx.note_error(RDKafkaErrorCode::Authentication, SASL_REFUSED);
+        clock.advance(Duration::from_secs(2));
+        let rejection = ctx.rejection_within(Duration::from_secs(75));
 
         for reason in [
             "1 of 1 delivery reports failed; first: Message production error: MessageTimedOut \

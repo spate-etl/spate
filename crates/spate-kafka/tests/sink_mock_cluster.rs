@@ -20,6 +20,8 @@ use bytes::BytesMut;
 use rdkafka::message::{Headers, Message};
 use rdkafka::mocking::MockCluster;
 use rdkafka::types::RDKafkaRespErr;
+use spate_core::clock::SystemClock;
+use spate_core::clock::tokio::{Clock as IoClock, Sleep, TestClock as IoTestClock};
 use spate_core::config::PipelineConfig;
 use spate_core::deser::{BytesPassthrough, Owned};
 use spate_core::error::{ErrorClass, SinkError};
@@ -30,6 +32,9 @@ use spate_core::sink::{KeyHashRouter, RowEncoder, SealedBatch, ShardWriter};
 use spate_core::source::LaneId;
 use spate_kafka::sink::{KafkaEncoder, KafkaMessage, KafkaSink, KafkaSinkConfig, MessageEncoder};
 use spate_test::{PipelineRun, memory_source, record, unique_name, wait_until};
+use std::panic::RefUnwindSafe;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use support::consume;
 
@@ -401,4 +406,181 @@ fn statistics_populate_kafka_sink_fixed_families() {
         rendered.contains("spate_kafka_tx_requests_total")
             && rendered.contains("spate_kafka_produce_queue_messages")
     });
+}
+
+/// A tokio-timeline test clock that counts how often the writer reads it.
+#[derive(Debug)]
+struct CountingClock {
+    inner: Arc<IoTestClock>,
+    reads: AtomicUsize,
+}
+
+impl IoClock for CountingClock {
+    fn now(&self) -> tokio::time::Instant {
+        self.reads.fetch_add(1, Ordering::SeqCst);
+        self.inner.now()
+    }
+
+    fn sleep_until(&self, deadline: tokio::time::Instant) -> Sleep {
+        self.inner.sleep_until(deadline)
+    }
+}
+
+/// The writer's grace past `delivery_timeout`, `DELIVERY_GRACE` in the
+/// writer.
+const DELIVERY_GRACE: Duration = Duration::from_secs(5);
+
+/// A sink whose writer runs its deadlines on `io_clock`.
+fn sink_on(brokers: &str, extra: &str, io_clock: Arc<dyn IoClock + RefUnwindSafe>) -> KafkaSink {
+    spate_kafka::sink::build_on_clocks(sink_config(brokers, extra), Arc::new(SystemClock), io_clock)
+        .expect("sink build")
+}
+
+/// A batch of `rows` one-byte payloads.
+fn rows_batch(sink: &KafkaSink, rows: u64) -> SealedBatch {
+    let mut encoder = sink.encoder_bytes();
+    let mut frame = BytesMut::new();
+    for _ in 0..rows {
+        encoder
+            .encode(&record(b"x".to_vec()), &mut frame)
+            .expect("encode");
+    }
+    SealedBatch {
+        rows,
+        bytes: frame.len() as u64,
+        frames: vec![frame.freeze()],
+        dedup_token: "unused".to_string(),
+    }
+}
+
+/// Runs `write_batch` for `batch` on `io` and returns its handle.
+fn spawn_write(
+    io: &tokio::runtime::Runtime,
+    sink: &KafkaSink,
+    batch: SealedBatch,
+) -> tokio::task::JoinHandle<Result<(), SinkError>> {
+    let (writer, endpoint) = (sink.writer.clone(), sink.endpoints[0][0].clone());
+    io.spawn(async move { writer.write_batch(&endpoint, &batch).await })
+}
+
+/// The retryable reason `result` carries.
+fn retryable_reason(result: Result<(), SinkError>) -> String {
+    match result {
+        Err(SinkError::Client {
+            class: ErrorClass::Retryable,
+            reason,
+        }) => reason,
+        other => panic!("expected a retryable error, got {other:?}"),
+    }
+}
+
+/// A producer queue that stays full fails the batch once the writer's clock
+/// reaches the send deadline, and a queue that drains one nanosecond before
+/// it delivers the batch.
+#[test]
+fn a_full_queue_fails_the_batch_at_the_send_deadline() {
+    let cluster = MockCluster::new(1).expect("mock cluster");
+    cluster.create_topic(TOPIC, 1, 1).expect("create topic");
+    let brokers = cluster.bootstrap_servers();
+    let io = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let test_clock = io.block_on(async { IoTestClock::frozen() });
+    let clock = Arc::new(CountingClock {
+        inner: Arc::clone(&test_clock),
+        reads: AtomicUsize::new(0),
+    });
+    let delivery_timeout = Duration::from_secs(300);
+    let send_window = delivery_timeout + DELIVERY_GRACE;
+    let sink = sink_on(
+        &brokers,
+        "delivery_timeout: 300s\nrdkafka:\n  queue.buffering.max.messages: \"1\"\n",
+        Arc::clone(&clock) as _,
+    );
+
+    // The first send reads the deadline and fills the queue, so every
+    // further read is a queue-full retry.
+    let in_backoff = |from: usize| {
+        wait_until(Duration::from_secs(30), "a queue-full retry", || {
+            clock.reads.load(Ordering::SeqCst) >= from + 2
+        });
+    };
+
+    cluster.broker_down(1).expect("broker down");
+    let write = spawn_write(&io, &sink, rows_batch(&sink, 2));
+    in_backoff(0);
+    test_clock.advance(send_window - Duration::from_nanos(1));
+    let reads = clock.reads.load(Ordering::SeqCst);
+    wait_until(Duration::from_secs(30), "a retry after the advance", || {
+        clock.reads.load(Ordering::SeqCst) > reads
+    });
+    cluster.broker_up(1).expect("broker up");
+    io.block_on(write)
+        .expect("write task")
+        .expect("the queue drained before the deadline");
+
+    cluster.broker_down(1).expect("broker down");
+    let reads = clock.reads.load(Ordering::SeqCst);
+    let write = spawn_write(&io, &sink, rows_batch(&sink, 2));
+    in_backoff(reads);
+    test_clock.advance(send_window);
+    let result = io
+        .block_on(async { tokio::time::timeout(Duration::from_secs(30), write).await })
+        .expect("the write ends at the send deadline")
+        .expect("write task");
+    let reason = retryable_reason(result);
+    assert!(
+        reason.starts_with("producer queue stayed full past the delivery deadline"),
+        "{reason}"
+    );
+    cluster.broker_up(1).expect("broker up");
+}
+
+/// A delivery report still missing when the writer's clock reaches the
+/// report deadline fails the batch, and one that arrives one nanosecond
+/// before it delivers the batch.
+#[test]
+fn missing_reports_fail_the_batch_at_the_wait_deadline() {
+    let cluster = MockCluster::new(1).expect("mock cluster");
+    cluster.create_topic(TOPIC, 1, 1).expect("create topic");
+    let brokers = cluster.bootstrap_servers();
+    let io = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let clock = io.block_on(async { IoTestClock::frozen() });
+    let wait_window = Duration::from_secs(300) + DELIVERY_GRACE;
+    let sink = sink_on(
+        &brokers,
+        "delivery_timeout: 300s\n",
+        Arc::clone(&clock) as _,
+    );
+    let armed = |deadline| {
+        wait_until(Duration::from_secs(30), "the report wait", || {
+            clock.has_slept_until(deadline)
+        });
+    };
+
+    cluster.broker_down(1).expect("broker down");
+    let deadline = clock.now() + wait_window;
+    let write = spawn_write(&io, &sink, rows_batch(&sink, 1));
+    armed(deadline);
+    clock.advance(wait_window - Duration::from_nanos(1));
+    cluster.broker_up(1).expect("broker up");
+    io.block_on(write)
+        .expect("write task")
+        .expect("the report arrived before the deadline");
+
+    cluster.broker_down(1).expect("broker down");
+    let deadline = clock.now() + wait_window;
+    let write = spawn_write(&io, &sink, rows_batch(&sink, 1));
+    armed(deadline);
+    clock.advance(wait_window);
+    let reason = retryable_reason(io.block_on(write).expect("write task"));
+    assert!(
+        reason.starts_with("delivery reports missing past the deadline"),
+        "{reason}"
+    );
+    cluster.broker_up(1).expect("broker up");
 }

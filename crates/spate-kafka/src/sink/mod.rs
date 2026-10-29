@@ -27,6 +27,8 @@ pub(crate) mod frame;
 mod metrics;
 mod writer;
 
+#[cfg(feature = "testing")]
+pub use config::build_on_clocks;
 pub use config::{Compression, KafkaSink, KafkaSinkConfig, build, from_component_config};
 pub(crate) use context::SinkContext;
 pub use encoder::{

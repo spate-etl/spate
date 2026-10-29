@@ -63,6 +63,7 @@
 //!
 //! [the metrics reference]: https://spate.kainth.dev/docs/METRICS
 
+mod clock;
 mod config;
 mod context;
 mod error;
@@ -82,3 +83,24 @@ pub use sink::{
     KafkaWriter, MessageEncoder,
 };
 pub use source::KafkaSource;
+
+#[cfg(test)]
+mod tests {
+    use std::panic::{RefUnwindSafe, UnwindSafe};
+
+    /// The public types keep their auto traits: each is `Send` and `Sync`,
+    /// and `KafkaWriter`, which holds the sink's clocks, is also
+    /// `UnwindSafe` and `RefUnwindSafe`.
+    #[test]
+    fn public_types_keep_their_auto_traits() {
+        fn shared<T: Send + Sync>() {}
+        fn unwind_safe<T: UnwindSafe + RefUnwindSafe>() {}
+        shared::<crate::KafkaSource>();
+        shared::<crate::KafkaSink>();
+        shared::<crate::KafkaWriter>();
+        shared::<crate::sink::KafkaEndpoint>();
+        shared::<crate::feed::KafkaFeed>();
+        shared::<crate::feed::KafkaFeedPublisher>();
+        unwind_safe::<crate::KafkaWriter>();
+    }
+}

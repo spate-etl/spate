@@ -28,6 +28,7 @@
 //! source offsets past it. Weaker settings would silently turn
 //! at-least-once into at-most-once.
 
+use crate::clock::SyncClock;
 use crate::error::redacted_client_error;
 use crate::sink::context::SinkContext;
 use crate::sink::encoder::{
@@ -37,6 +38,7 @@ use crate::sink::writer::{DELIVERY_GRACE, KafkaEndpoint, KafkaWriter};
 use bytesize::ByteSize;
 use rdkafka::producer::ThreadedProducer;
 use serde::Deserialize;
+use spate_core::clock::tokio::{Clock as IoClock, SystemClock as IoSystemClock};
 use spate_core::config::{ComponentConfig, ConfigError, redact};
 use spate_core::deser::{Owned, RecFamily};
 use spate_core::sink::{
@@ -44,6 +46,7 @@ use spate_core::sink::{
     SinkProbeFn, endpoint_probe,
 };
 use std::collections::BTreeMap;
+use std::panic::RefUnwindSafe;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -531,6 +534,31 @@ pub fn from_component_config(section: &ComponentConfig) -> Result<KafkaSink, Con
 /// creation, so a passthrough that conflicts with the forced durability
 /// settings fails at startup here rather than on the first batch.
 pub fn build(cfg: KafkaSinkConfig) -> Result<KafkaSink, ConfigError> {
+    build_on(cfg, SyncClock::system(), Arc::new(IoSystemClock))
+}
+
+/// [`build`] with the clocks the sink reads: `clock` stamps and ages a
+/// broker's rejection, and `io_clock` runs the writer's send and report
+/// deadlines.
+///
+/// # Errors
+///
+/// As [`build`].
+#[cfg(feature = "testing")]
+#[doc(hidden)]
+pub fn build_on_clocks(
+    cfg: KafkaSinkConfig,
+    clock: crate::clock::SharedClock,
+    io_clock: Arc<dyn IoClock + RefUnwindSafe>,
+) -> Result<KafkaSink, ConfigError> {
+    build_on(cfg, SyncClock::new(clock), io_clock)
+}
+
+fn build_on(
+    cfg: KafkaSinkConfig,
+    clock: SyncClock,
+    io_clock: Arc<dyn IoClock + RefUnwindSafe>,
+) -> Result<KafkaSink, ConfigError> {
     cfg.validate()?;
 
     // The statistics slot connects the writer (whose `attach_metrics`
@@ -539,7 +567,7 @@ pub fn build(cfg: KafkaSinkConfig) -> Result<KafkaSink, ConfigError> {
     let stats_slot = Arc::new(Mutex::new(None));
     let producer: ThreadedProducer<SinkContext> = cfg
         .client_config()
-        .create_with_context(SinkContext::new(Arc::clone(&stats_slot)))
+        .create_with_context(SinkContext::new(Arc::clone(&stats_slot), clock.clone()))
         .map_err(|e| {
             ConfigError::Validation(format!(
                 "sink.kafka: producer creation failed: {}",
@@ -553,7 +581,7 @@ pub fn build(cfg: KafkaSinkConfig) -> Result<KafkaSink, ConfigError> {
 
     let probe_producer: ThreadedProducer<SinkContext> = cfg
         .probe_client_config()
-        .create_with_context(SinkContext::detached())
+        .create_with_context(SinkContext::detached(clock))
         .map_err(|e| {
             ConfigError::Validation(format!(
                 "sink.kafka: probe producer creation failed: {}",
@@ -572,6 +600,7 @@ pub fn build(cfg: KafkaSinkConfig) -> Result<KafkaSink, ConfigError> {
             cfg.delivery_timeout,
             stats_slot,
             !cfg.statistics_interval.is_zero(),
+            io_clock,
         ),
         endpoints,
         pool,

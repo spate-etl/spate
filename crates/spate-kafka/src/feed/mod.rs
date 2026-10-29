@@ -674,7 +674,7 @@ fn check_topics(
     })?;
     let reader = ThreadedProducer::from_config_and_context(
         &admin_config,
-        crate::sink::SinkContext::detached(),
+        crate::sink::SinkContext::detached(crate::clock::SyncClock::system()),
     )
     .map_err(|e| {
         KafkaFeedError::Refused(format!(

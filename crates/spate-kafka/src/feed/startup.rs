@@ -206,10 +206,7 @@ impl TopicAdmin for Brokers {
     }
 
     fn rejection(&self) -> Option<String> {
-        self.reader
-            .context()
-            .rejection_within(Instant::now(), Duration::MAX)
-            .map(|(_, text)| text)
+        self.reader.context().latest_rejection()
     }
 }
 
@@ -1081,6 +1078,26 @@ mod tests {
             "{message}"
         );
         assert!(message.ends_with(ALERT_40), "{message}");
+    }
+
+    /// The connect check reads the metadata client's latest rejection
+    /// however long ago it arrived.
+    #[test]
+    fn a_rejection_refuses_the_connect_check_at_any_age() {
+        use rdkafka::ClientConfig;
+        let clock = spate_core::clock::TestClock::frozen();
+        let context = SinkContext::detached(crate::clock::SyncClock::new(Arc::clone(&clock) as _));
+        let mut config = ClientConfig::new();
+        config.set("bootstrap.servers", crate::testutil::refused_broker());
+        let brokers = Brokers::new(
+            config.create().expect("admin client"),
+            config
+                .create_with_context(context)
+                .expect("metadata client"),
+        );
+        brokers.reader.context().note_error(C::SSL, ALERT_40);
+        clock.advance(Duration::from_secs(3600));
+        assert_eq!(brokers.rejection().as_deref(), Some(ALERT_40));
     }
 
     /// Pins that a rejection the client records ends the checks with a

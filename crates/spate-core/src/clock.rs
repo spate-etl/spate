@@ -27,6 +27,7 @@ pub trait Clock {
 ///
 /// `RefUnwindSafe`, so a public type holding it stays `UnwindSafe` and
 /// `RefUnwindSafe`.
+#[cfg(not(loom))]
 pub(crate) type SharedClock = std::sync::Arc<dyn Clock + Send + Sync + std::panic::RefUnwindSafe>;
 
 /// The production clock, over [`Instant::now`].
@@ -153,15 +154,6 @@ mod tests {
             [10, 20, 25].map(Duration::from_millis),
             "one reading per step, the last one short"
         );
-    }
-
-    /// The public types that hold a [`SharedClock`] stay `UnwindSafe` and
-    /// `RefUnwindSafe`.
-    #[test]
-    fn types_holding_a_clock_stay_unwind_safe() {
-        fn unwind_safe<T: std::panic::UnwindSafe + std::panic::RefUnwindSafe>() {}
-        unwind_safe::<crate::admin::HealthState>();
-        unwind_safe::<crate::checkpoint::Checkpointer>();
     }
 
     /// A stopwatch reports exactly how far its clock moved.

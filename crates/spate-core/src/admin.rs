@@ -330,6 +330,14 @@ mod tests {
         assert!(!health.healthy());
     }
 
+    /// The clock it holds leaves `HealthState` `UnwindSafe` and
+    /// `RefUnwindSafe`.
+    #[test]
+    fn health_state_stays_unwind_safe() {
+        fn unwind_safe<T: std::panic::UnwindSafe + std::panic::RefUnwindSafe>() {}
+        unwind_safe::<HealthState>();
+    }
+
     /// The hand-written `Debug` names the type and its thresholds.
     #[test]
     fn debug_names_the_health_state_and_its_thresholds() {

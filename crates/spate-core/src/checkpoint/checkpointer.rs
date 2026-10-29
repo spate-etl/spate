@@ -461,6 +461,14 @@ mod tests {
     const P0: PartitionId = PartitionId(0);
     const P1: PartitionId = PartitionId(1);
 
+    /// The clock it holds leaves `Checkpointer` `UnwindSafe` and
+    /// `RefUnwindSafe`.
+    #[test]
+    fn checkpointer_stays_unwind_safe() {
+        fn unwind_safe<T: std::panic::UnwindSafe + std::panic::RefUnwindSafe>() {}
+        unwind_safe::<Checkpointer>();
+    }
+
     /// The hand-written `Debug` names the type and its epoch.
     #[test]
     fn debug_names_the_checkpointer_and_its_epoch() {

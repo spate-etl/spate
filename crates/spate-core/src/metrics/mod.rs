@@ -378,6 +378,32 @@ mod tests {
         ComponentLabels::new("orders", component.to_owned(), "kafka")
     }
 
+    /// On the event basis, end-to-end latency ages the oldest event time on
+    /// the wall clock, and falls back to the ingest age without one.
+    #[test]
+    fn event_basis_e2e_latency_ages_the_oldest_event_on_the_wall_clock() {
+        let an_hour_ago = i64::try_from(
+            (crate::clock::wall_now() - Duration::from_secs(3600))
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+        )
+        .unwrap();
+        let rendered = render_local(|| {
+            let shard =
+                SinkShardMetrics::new(&labels("e2e_event"), 0, &["r".into()], E2eBasis::Event);
+            shard.e2e_observed(Duration::from_secs(500), an_hour_ago);
+            shard.e2e_observed(Duration::from_secs(500), i64::MAX);
+        });
+        let sum: f64 = rendered
+            .lines()
+            .find(|l| l.starts_with("spate_e2e_latency_seconds_sum"))
+            .and_then(|l| l.rsplit(' ').next())
+            .and_then(|v| v.parse().ok())
+            .unwrap_or_else(|| panic!("no e2e sum in:\n{rendered}"));
+        assert!((4100.0..4101.0).contains(&sum), "{sum}");
+    }
+
     #[test]
     fn handle_structs_register_and_render_the_taxonomy() {
         let rendered = render_local(|| {

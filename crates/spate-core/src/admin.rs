@@ -318,6 +318,14 @@ mod tests {
         assert!(!health.healthy_at(health.epoch + Duration::from_millis(1301)));
     }
 
+    /// The hand-written `Debug` names the type and its thresholds.
+    #[test]
+    fn debug_names_the_health_state_and_its_thresholds() {
+        let text = format!("{:?}", HealthState::new(1, thresholds(1000, 2000)));
+        assert!(text.starts_with("HealthState {"), "{text}");
+        assert!(text.contains("heartbeat_stale: 1s"), "{text}");
+    }
+
     #[test]
     fn readiness_requires_assignment_and_sinks() {
         let health = HealthState::new(2, HealthThresholds::default());

@@ -461,6 +461,15 @@ mod tests {
     const P0: PartitionId = PartitionId(0);
     const P1: PartitionId = PartitionId(1);
 
+    /// The hand-written `Debug` names the type and its epoch.
+    #[test]
+    fn debug_names_the_checkpointer_and_its_epoch() {
+        let (cp, _issuer) = checkpointer(&[P0]);
+        let text = format!("{cp:?}");
+        assert!(text.starts_with("Checkpointer {"), "{text}");
+        assert!(text.contains("epoch: 1"), "{text}");
+    }
+
     fn checkpointer(partitions: &[PartitionId]) -> (Checkpointer, AckIssuer) {
         let mut cp = Checkpointer::new();
         cp.begin_epoch(partitions, 1);

@@ -797,4 +797,20 @@ mod tests {
             assert!(err.contains("feed.kafka.rdkafka"), "{err}");
         }
     }
+
+    /// Pins which of the feed's clients emit statistics: the consumer and
+    /// the producer, whose snapshots the feed reads, and no other.
+    #[test]
+    fn only_the_consumer_and_producer_emit_statistics() {
+        let config = parse(&format!("{MINIMAL}  statistics_interval: 2s\n")).unwrap();
+        for role in FeedRole::ALL {
+            let expected =
+                matches!(role, FeedRole::Consumer | FeedRole::Producer).then_some("2000");
+            assert_eq!(
+                config.config(role, true).get("statistics.interval.ms"),
+                expected,
+                "{role:?}"
+            );
+        }
+    }
 }

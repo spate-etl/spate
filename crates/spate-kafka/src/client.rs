@@ -60,6 +60,11 @@ pub(crate) fn canonical(key: &str) -> &str {
         return key;
     }
     let name = key.strip_prefix("topic.").unwrap_or(key);
+    // In topic scope `enable.auto.commit` is librdkafka's alias of the topic
+    // property `auto.commit.enable`, distinct from the global one.
+    if name != key && name == "enable.auto.commit" {
+        return "auto.commit.enable";
+    }
     ALIASES
         .iter()
         .find(|(alias, _)| *alias == name)
@@ -218,7 +223,12 @@ impl Base<'_> {
             cc.set(k, v);
         }
         crate::security::apply_ca_default(&mut cc, self.rdkafka, self.openssl_env);
-        if !self.rdkafka.keys().any(|k| canonical(k) == "client.id") {
+        // librdkafka reads an empty value as unset and sends `rdkafka`.
+        if !self
+            .rdkafka
+            .iter()
+            .any(|(k, v)| canonical(k) == "client.id" && !v.is_empty())
+        {
             let kind = self.section.split('.').next().unwrap_or(self.section);
             cc.set("client.id", format!("spate-{kind}-{}", role.name()));
         }
@@ -613,13 +623,21 @@ mod tests {
     }
 
     /// `auto.commit.enable` is librdkafka's legacy topic property, distinct
-    /// from the global `enable.auto.commit` the source owns.
+    /// from the global `enable.auto.commit` the source owns, and
+    /// `topic.enable.auto.commit` is the topic property's alias.
     #[test]
     fn auto_commit_enable_is_not_an_alias_of_enable_auto_commit() {
-        let mut cc = raw_config();
-        cc.set("auto.commit.enable", "false");
-        let native = cc.create_native_config().expect("native config");
-        assert_eq!(native.get("enable.auto.commit").as_deref(), Ok("true"));
+        for key in ["auto.commit.enable", "topic.enable.auto.commit"] {
+            let mut cc = raw_config();
+            cc.set(key, "false");
+            let native = cc.create_native_config().expect("native config");
+            assert_eq!(
+                native.get("enable.auto.commit").as_deref(),
+                Ok("true"),
+                "{key}"
+            );
+            assert_eq!(canonical(key), "auto.commit.enable", "{key}");
+        }
         assert_ne!(
             canonical("auto.commit.enable"),
             canonical("enable.auto.commit")
@@ -782,6 +800,18 @@ mod tests {
                     .as_str()
                 )
             );
+        }
+    }
+
+    /// An empty `client.id`, which librdkafka reads as unset, leaves the
+    /// default in place.
+    #[test]
+    fn an_empty_client_id_keeps_the_spate_default() {
+        let sections = Sections::over(&map(&[("client.id", "")]));
+        for (label, cc) in sections.configs(false) {
+            let native = cc.create_native_config().expect("native config");
+            let expected = format!("spate-{}", label.replacen(".kafka-", "-", 1));
+            assert_eq!(native.get("client.id"), Ok(expected), "{label}");
         }
     }
 

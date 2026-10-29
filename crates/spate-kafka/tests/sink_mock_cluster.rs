@@ -314,8 +314,10 @@ fn shutdown_with_inflight_data_commits_only_delivered() {
     }
 }
 
-/// A write to a missing topic fails: fatal on the broker's answer, then
-/// retryable once librdkafka knows the topic is missing.
+/// A write to a missing topic fails. With `topic.metadata.propagation.max.ms`
+/// below `delivery_timeout`, the broker's answer fails the first write as
+/// fatal, and the next fails locally as retryable. At the defaults, 30 s each,
+/// the first write times out as retryable instead.
 #[tokio::test]
 async fn a_write_to_a_missing_topic_fails() {
     let cluster = MockCluster::new(1).expect("mock cluster");
@@ -337,7 +339,8 @@ async fn a_write_to_a_missing_topic_fails() {
     };
     // The broker's answer is fatal and names the missing topic. librdkafka
     // then knows the topic is missing and fails the next write locally,
-    // which stays retryable: the readiness probe carries the fatal signal.
+    // which stays retryable. The readiness probe reports the missing topic
+    // as fatal whatever the timeouts.
     for (attempt, expected, hint) in [
         ("first", ErrorClass::Fatal, "does not exist"),
         ("second", ErrorClass::Retryable, "Unknown topic"),

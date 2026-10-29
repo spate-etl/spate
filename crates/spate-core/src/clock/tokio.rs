@@ -172,15 +172,14 @@ impl Clock for TestClock {
     }
 }
 
-// Loom builds have no tokio timer driver.
-#[cfg(all(test, not(loom)))]
+#[cfg(test)]
 mod tests {
     use super::*;
 
     /// A stopwatch reports exactly how far its clock moved, and nothing before
     /// it moves.
-    #[tokio::test]
-    async fn a_tokio_stopwatch_reports_the_time_its_clock_moved() {
+    #[test]
+    fn a_tokio_stopwatch_reports_the_time_its_clock_moved() {
         let clock = TestClock::frozen();
         let watch = Stopwatch::start(&*clock);
         assert_eq!(watch.elapsed(&*clock), Duration::ZERO);

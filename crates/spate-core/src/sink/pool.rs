@@ -105,7 +105,7 @@ impl<W: ShardWriter> SinkPool<W> {
     /// [`spawn`](Self::spawn), with every deadline in the pool on `clock`.
     #[expect(
         clippy::too_many_arguments,
-        reason = "construction-time wiring call, used once by the pipeline runtime"
+        reason = "construction-time wiring call: `spawn`'s parameters plus the clock"
     )]
     pub(crate) fn spawn_on_clock(
         writer: Arc<W>,

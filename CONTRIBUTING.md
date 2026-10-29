@@ -120,6 +120,61 @@ What belongs in the change rather than in a follow-up: the connector page built
 from the template in [`docs/STYLE.md`](docs/STYLE.md) § 3, and keeping your own
 types out of `spate-core`'s public API (INV-6).
 
+### Building the vendor client
+
+A connector that talks to a service builds that service's client the way
+[ADR-0088](docs/adr/0088-a-connector-builds-its-vendor-client-in-one-place.md)
+records. `crates/spate-kafka/src/client.rs` is the worked example. Each line
+below links the record behind it, and an open issue marks a rule still being
+settled.
+
+- **One constructor.** Build each client in one private function, and ban the
+  library's constructors in `clippy.toml` the way the rdkafka entries do. A test
+  or example that builds a raw client takes an `expect` naming why (ADR-0088).
+- **Settings in three layers.** Your defaults first, then the passthrough, which
+  may replace any of them, then the settings a guarantee depends on. Apply those
+  last, and refuse them in the passthrough at load under every spelling the
+  library accepts
+  ([ADR-0009](docs/adr/0009-yaml-configuration-with-opaque-passthrough.md),
+  [ADR-0018](docs/adr/0018-kafka-sink-forced-durability.md), ADR-0088). #1537
+  moves the refusal into one `spate-core` check.
+- **Public types.** Keep the client and its config types out of `spate-core`'s
+  public API and public trait bounds. A connector crate that re-exports its
+  client crate documents the re-export as exempt (INV-6,
+  [ADR-0011](docs/adr/0011-msrv-and-dependency-policy.md)).
+- **Trust roots.** On rustls, trust the system store and fall back to the
+  Mozilla bundle with a warning when it yields no usable certificate. Where a
+  library verifies through the platform's own verifier, as reqwest does on
+  Apple, Windows and Android, keep it. A `root_ca` key adds to the system roots, fails
+  at load naming the key and the path when the file does not give a usable
+  certificate, and is refused when no endpoint is `https://`. Kafka, on
+  OpenSSL, takes its CA through the passthrough. #1542 decides where the shared
+  code lives.
+- **Verification off.** An operator may turn certificate verification off only
+  through the library's own key, such as `object_store`'s
+  `allow_invalid_certificates` or librdkafka's
+  `enable.ssl.certificate.verification`. Never default it off.
+- **Timeouts.** Bound connecting, reading and the whole request, either
+  explicitly or through a library default the code names. Say what the library
+  retries inside one call, since the engine's retry runs on top of it. A typed
+  bound the user sets, such as the Kafka sink's `delivery_timeout`, covers the
+  whole request. The
+  [graceful-shutdown guide](docs/user-guide/03-guides/graceful-shutdown.mdx)
+  says why a sink's client needs a request timeout.
+- **Identity.** Send a Spate client identity the passthrough can replace, as
+  the Kafka clients' `client.id` default does.
+- **Logs.** Route a library's log callback to `tracing`, as
+  `SpateContext::log` does for librdkafka. A library that logs through the
+  `log` facade reaches `tracing` only when the application's subscriber bridges
+  it, which `tracing-subscriber`'s default `init()` does. Spate installs no
+  subscriber.
+- **Redaction.** Print every passthrough map through
+  `spate_core::config::redact::map` and every URL through `redact::url`, in a
+  hand-written `Debug` that destructures every field.
+- **Errors.** Build on a TLS stack whose rejection `tls_rejection!` can read,
+  and classify the client's errors under
+  [ADR-0081](docs/adr/0081-a-rejected-credential-or-tls-handshake-is-fatal-unless-throttled.md).
+
 ## Opening a pull request
 
 Fork and open a pull request against `main`. Nobody pushes to `main` directly,

@@ -34,6 +34,11 @@ use std::time::Duration;
 const TWO: NonZeroU32 = NonZeroU32::new(2).expect("non-zero");
 
 fn core(cap: u32) -> Core {
+    core_on(cap, TestClock::frozen())
+}
+
+/// [`core`] with the feed's timed reads on `clock`.
+fn core_on(cap: u32, clock: Arc<TestClock>) -> Core {
     let section: FeedSection = serde_yaml::from_str(&format!(
         "attempt_cap: {cap}\nkafka:\n  brokers: localhost:9092\n  group_id: workers\n  \
          topic: units\n  retry_topic: units-retry\n  dead_letter_topic: units-dead\n  \
@@ -43,7 +48,7 @@ fn core(cap: u32) -> Core {
     Core::new(
         &KafkaFeedConfig::from_section(&section).unwrap(),
         TWO,
-        SyncClock::new(TestClock::frozen()),
+        SyncClock::new(clock),
     )
 }
 
@@ -351,6 +356,51 @@ fn a_failed_write_is_due_after_its_backoff_on_the_feed_clock() {
         "not due before its backoff"
     );
     assert_eq!(take_due(&mut st, now + BACKOFF_START).len(), 1);
+}
+
+/// Pins that a write failed transiently is not queued to be sent again once
+/// the feed has stopped.
+#[test]
+fn a_write_failed_on_a_stopped_feed_is_not_sent_again() {
+    let core = core(10);
+    let receipt = {
+        let mut st = core.lock();
+        st.tracker.assign([tp(0)]);
+        st.tracker.deliver(&tp(0), 1).unwrap()
+    };
+    let write = moving(&core, receipt);
+    core.stop.store(true, Ordering::Release);
+    core.settle(*write, Err(failure(C::MessageTimedOut)));
+    assert!(core.lock().resends.is_empty());
+}
+
+/// Pins that a confirmed move logs how long it took on the feed's clock,
+/// from its first enqueue.
+#[test]
+fn a_confirmed_move_logs_its_time_on_the_feed_clock() {
+    let clock = TestClock::frozen();
+    let core = core_on(10, Arc::clone(&clock));
+    let receipt = {
+        let mut st = core.lock();
+        st.tracker.assign([tp(0)]);
+        st.tracker.deliver(&tp(0), 1).unwrap()
+    };
+    let write = moving(&core, receipt);
+    clock.advance(Duration::from_secs(3));
+    let capture = spate_test::LogCapture::new();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(capture.clone())
+        .with_max_level(tracing::Level::DEBUG)
+        .with_ansi(false)
+        .finish();
+    tracing::subscriber::with_default(subscriber, || core.settle(*write, Ok(())));
+    let logged = capture.lines().join("\n");
+    assert!(
+        logged.contains(
+            "a failed unit was written to the retry topic unit=\"u\" deliveries=1 confirmed_in=3s"
+        ),
+        "{logged}"
+    );
 }
 
 /// Pins that a fatal write report stops the feed, drops the writes queued

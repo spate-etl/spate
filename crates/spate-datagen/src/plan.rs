@@ -183,13 +183,16 @@ impl EventPlan {
     /// event *this lane* has already produced, so a lane's timestamps are a
     /// function of its position in its own stream and nothing else: no wall
     /// clock, no interleaving, no dependence on how the runtime scheduled the
-    /// threads. The sum saturates, so an `epoch_ms` within a stream's length
-    /// of [`i64::MAX`] pins every timestamp there.
+    /// threads. The sum caps at `i64::MAX - 1` to reserve `i64::MAX` for
+    /// `RecordMeta::NO_EVENT_TIME`.
     ///
     /// Under [`Clock::Wall`] it is the host clock and none of that holds.
     fn event_time(&self) -> i64 {
         match self.clock {
-            Clock::Fixed => self.epoch_ms.saturating_add(self.produced as i64),
+            Clock::Fixed => self
+                .epoch_ms
+                .saturating_add(self.produced.min(i64::MAX as u64) as i64)
+                .min(i64::MAX - 1),
             Clock::Wall => SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map_or(0, |d| d.as_millis() as i64),
@@ -547,10 +550,10 @@ mod tests {
         }
     }
 
-    /// An `epoch_ms` within a few events of `i64::MAX` saturates there, so the
-    /// fixed clock never steps backwards.
+    /// The fixed clock stops at `i64::MAX - 1` so it never emits the
+    /// no-event-time sentinel.
     #[test]
-    fn the_fixed_clock_saturates_at_i64_max() {
+    fn the_fixed_clock_clamps_before_no_event_time() {
         let cfg = DatagenSourceConfig {
             epoch_ms: i64::MAX - 2,
             ..config(1, 1)
@@ -562,10 +565,10 @@ mod tests {
             [
                 i64::MAX - 2,
                 i64::MAX - 1,
-                i64::MAX,
-                i64::MAX,
-                i64::MAX,
-                i64::MAX
+                i64::MAX - 1,
+                i64::MAX - 1,
+                i64::MAX - 1,
+                i64::MAX - 1
             ]
         );
     }

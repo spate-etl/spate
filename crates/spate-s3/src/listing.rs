@@ -17,6 +17,7 @@ use object_store::client::{
     ReqwestConnector,
 };
 use object_store::path::Path;
+use spate_core::record::RecordMeta;
 use std::sync::{Arc, Mutex};
 
 const CONTENTS_OPEN: &[u8] = b"<Contents>";
@@ -165,7 +166,7 @@ fn unaddressable(element: &[u8]) -> Option<ObjectEntry> {
         return None;
     }
     let last_modified_ms = chrono::DateTime::parse_from_rfc3339(&contents.last_modified)
-        .map_or(0, |t| t.timestamp_millis());
+        .map_or(RecordMeta::NO_EVENT_TIME, |t| t.timestamp_millis());
     Some(ObjectEntry {
         key: contents.key,
         size: contents.size,
@@ -261,6 +262,16 @@ mod tests {
                 },
             ]
         );
+    }
+
+    /// An unparseable LastModified has no event time. Regression for #1285.
+    #[test]
+    fn malformed_last_modified_uses_no_event_time_sentinel() {
+        let input =
+            page(&["d//bad.ndjson"], None).replace("2026-10-11T13:38:17.000Z", "not-a-date");
+        let (_, removed) = filter_page(input.as_bytes()).expect("key removed");
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].last_modified_ms, RecordMeta::NO_EVENT_TIME);
     }
 
     /// A key reaches the predicate unescaped, character references included.

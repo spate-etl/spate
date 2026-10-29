@@ -504,10 +504,10 @@ once, after every part of it has been read and committed.
 The records read for a notification take its `eventTime` as their event time,
 and those read for a listed object take the listing's `LastModified`. The
 records of a unit the source re-enqueued take the `LastModified` its HEAD
-reported. A
-notification with no `eventTime`, or one that does not parse, gives its records
-event time 0, which under `metrics.e2e_basis: event` counts their end-to-end
-latency from 1970.
+reported. A notification with no `eventTime`, or one that does not parse, has
+no event time. Under `metrics.e2e_basis: event`, records without an event time
+use their ingest age for the end-to-end latency calculation rather than
+counting from the Unix epoch.
 
 A notification names an object, and its read pins the ETag the notification
 carries. An object deleted before it is read fails that read on every delivery,

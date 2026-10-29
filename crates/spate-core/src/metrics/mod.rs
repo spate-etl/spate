@@ -976,6 +976,38 @@ mod tests {
         );
     }
 
+    /// Event-basis latency falls back to ingest age for missing event time;
+    /// epoch remains a valid source timestamp. Regression for #1285.
+    #[test]
+    fn event_basis_uses_ingest_age_only_when_event_time_is_absent() {
+        let rendered = render_local(|| {
+            for (component, event_time_ms) in
+                [("missing_event_time", i64::MAX), ("epoch_event_time", 0)]
+            {
+                let shard = SinkShardMetrics::new(&labels(component), 0, &[], E2eBasis::Event);
+                shard.e2e_observed(Duration::from_secs(7), event_time_ms);
+            }
+        });
+
+        let histogram_sum = |component: &str| {
+            let line = rendered
+                .lines()
+                .find(|line| {
+                    line.starts_with("spate_e2e_latency_seconds_sum{")
+                        && line.contains(&format!(r#"component="{component}""#))
+                })
+                .unwrap_or_else(|| panic!("no end-to-end sum for {component}:\n{rendered}"));
+            line.rsplit(' ')
+                .next()
+                .expect("histogram sum value")
+                .parse::<f64>()
+                .expect("numeric histogram sum")
+        };
+
+        assert_eq!(histogram_sum("missing_event_time"), 7.0, "{rendered}");
+        assert!(histogram_sum("epoch_event_time") > 1.0e9, "{rendered}");
+    }
+
     #[test]
     fn noop_exporter_renders_empty() {
         let handle = install(&MetricsSettings {

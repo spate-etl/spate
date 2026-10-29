@@ -22,10 +22,10 @@ use crate::context::SourceContext;
 use rdkafka::Message;
 use rdkafka::consumer::base_consumer::PartitionQueue;
 use rdkafka::error::KafkaError;
-use rdkafka::message::BorrowedMessage;
+use rdkafka::message::{BorrowedMessage, Timestamp};
 use spate_core::checkpoint::{AckIssuer, AckRef};
 use spate_core::error::SourceError;
-use spate_core::record::{PartitionId, RawPayload};
+use spate_core::record::{PartitionId, RawPayload, RecordMeta};
 use spate_core::source::{LaneId, PayloadBatch, SourceLane};
 use std::sync::Arc;
 use std::time::Duration;
@@ -187,11 +187,32 @@ impl<'a> PayloadBatch<'a> for KafkaBatch<'a> {
             key: msg.key(),
             partition: self.partition,
             offset: msg.offset(),
-            timestamp_ms: msg.timestamp().to_millis().unwrap_or(0),
+            timestamp_ms: source_event_time_ms(msg.timestamp()),
         })
     }
 
     fn ack(&self) -> &AckRef {
         &self.ack
+    }
+}
+
+fn source_event_time_ms(timestamp: Timestamp) -> i64 {
+    timestamp.to_millis().unwrap_or(RecordMeta::NO_EVENT_TIME)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::source_event_time_ms;
+    use rdkafka::message::Timestamp;
+    use spate_core::record::RecordMeta;
+
+    /// A missing Kafka timestamp is distinct from Unix epoch. Regression for #1285.
+    #[test]
+    fn unavailable_timestamp_uses_no_event_time_sentinel() {
+        assert_eq!(
+            source_event_time_ms(Timestamp::NotAvailable),
+            RecordMeta::NO_EVENT_TIME
+        );
+        assert_eq!(source_event_time_ms(Timestamp::CreateTime(0)), 0);
     }
 }

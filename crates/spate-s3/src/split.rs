@@ -124,6 +124,8 @@ pub struct DescriptorObject {
     /// precondition failure instead of a silent content splice.
     pub etag: Option<String>,
     /// Last-modified time (ms since epoch), used as the records' event time.
+    /// [`spate_core::record::RecordMeta::NO_EVENT_TIME`] means the time is
+    /// unknown and the records carry no event time.
     pub last_modified_ms: i64,
 }
 

@@ -23,6 +23,7 @@ use crate::split::{
 use object_store::path::Path;
 use serde::Deserialize;
 use spate_core::feed::Unit;
+use spate_core::record::RecordMeta;
 use std::iter::Peekable;
 use std::sync::Arc;
 
@@ -555,7 +556,7 @@ fn record_part(
         .event_time
         .as_deref()
         .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
-        .map_or(0, |t| t.timestamp_millis());
+        .map_or(RecordMeta::NO_EVENT_TIME, |t| t.timestamp_millis());
     let entry = ObjectEntry {
         key,
         size,
@@ -1487,7 +1488,8 @@ mod tests {
 
     /// Pins that a message's created records give one part each, in record
     /// order, that a qualifying object is cut into ranges, and that
-    /// `eventTime` becomes the object's time, 0 when absent or unreadable.
+    /// `eventTime` becomes the object's time, [`RecordMeta::NO_EVENT_TIME`]
+    /// when absent or unreadable. Regression for #1285.
     #[test]
     fn a_message_with_several_records_gives_one_part_each() {
         let parts = read(decoded(&[
@@ -1532,7 +1534,10 @@ mod tests {
             let Decoded::Read(cursors) = decoded(&[record]) else {
                 panic!("not read");
             };
-            assert_eq!(cursors[0].object[0].last_modified_ms, 0);
+            assert_eq!(
+                cursors[0].object[0].last_modified_ms,
+                RecordMeta::NO_EVENT_TIME
+            );
         }
     }
 

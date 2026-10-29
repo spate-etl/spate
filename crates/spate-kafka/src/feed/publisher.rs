@@ -8,6 +8,7 @@
 use super::config::{BACKEND, KafkaFeedConfig};
 use super::write::Producer;
 use super::{Core, KafkaFeedError, check_topics, gone, producer_parts, publish_unit, startup};
+use crate::clock::SyncClock;
 use spate_core::config::FeedSection;
 use spate_core::feed::{
     Confirmation, Delivery, Feed, FeedError, FeedErrorKind, FeedWaker, Receipt, Unit,
@@ -123,8 +124,11 @@ impl KafkaFeedPublisher {
         bound: Duration,
     ) -> Result<KafkaFeedPublisher, KafkaFeedError> {
         let config = KafkaFeedConfig::from_section(section)?;
-        let checked = check_topics(&config, io, scope, bound)?;
-        let (core, producer) = producer_parts(&config, checked.attempt_partitions)?;
+        // A publisher's only timed read is the connect bound, which the
+        // feed's tests drive on a test clock.
+        let clock = SyncClock::system();
+        let checked = check_topics(&config, io, scope, bound, clock.clone())?;
+        let (core, producer) = producer_parts(&config, checked.attempt_partitions, clock)?;
         log_started(&config, &checked);
         Ok(KafkaFeedPublisher { core, producer })
     }

@@ -2,6 +2,7 @@
 //! metric family for it has one place to count.
 
 use super::write::{Destination, Move};
+use spate_core::clock::Clock;
 use std::time::Duration;
 
 /// Why a message went to the dead-letter topic.
@@ -42,8 +43,8 @@ pub(crate) fn tombstoned() {
 }
 
 /// A move to the retry or dead-letter topic was confirmed.
-pub(crate) fn moved(moving: &Move) {
-    let confirmed_in = moving.started.elapsed();
+pub(crate) fn moved(moving: &Move, clock: &dyn Clock) {
+    let confirmed_in = moving.started.elapsed(clock);
     match moving.to {
         Destination::Retry => retry_written(moving, confirmed_in),
         Destination::DeadLetter(cause) => dead_lettered(moving, cause, confirmed_in),

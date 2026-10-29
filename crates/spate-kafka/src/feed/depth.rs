@@ -308,6 +308,7 @@ impl Offsets for Brokers {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::clock::SyncClock;
     use std::collections::HashMap;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -421,7 +422,7 @@ mod tests {
         )
         .unwrap();
         let config = crate::feed::KafkaFeedConfig::from_section(&section).unwrap();
-        let core = Core::new(&config, std::num::NonZeroU32::MIN);
+        let core = Core::new(&config, std::num::NonZeroU32::MIN, SyncClock::system());
         let serving = Serving::default();
         let (requests, received) = mpsc::channel::<(DepthOf, DepthReporter)>();
         std::thread::scope(|s| {
@@ -447,7 +448,7 @@ mod tests {
         )
         .unwrap();
         let config = crate::feed::KafkaFeedConfig::from_section(&section).unwrap();
-        let core = Core::new(&config, std::num::NonZeroU32::MIN);
+        let core = Core::new(&config, std::num::NonZeroU32::MIN, SyncClock::system());
         let (waker, park) = spate_core::feed::wake_channel();
         core.lock().waker = Some(waker);
         let offsets = Scripted::default().topic("units-dead", &[(0, Offset::Invalid, 0, 0)]);
@@ -687,7 +688,7 @@ mod tests {
         )
         .unwrap();
         let config = crate::feed::KafkaFeedConfig::from_section(&section).unwrap();
-        let core = Core::new(&config, std::num::NonZeroU32::MIN);
+        let core = Core::new(&config, std::num::NonZeroU32::MIN, SyncClock::system());
         core.stop.store(true, Ordering::Release);
         let offsets = Scripted::default().topic("units-dead", &[(0, Offset::Invalid, 0, 0)]);
         let (requests, received) = mpsc::channel();
@@ -711,7 +712,7 @@ mod tests {
         )
         .unwrap();
         let config = crate::feed::KafkaFeedConfig::from_section(&section).unwrap();
-        let core = Core::new(&config, std::num::NonZeroU32::MIN);
+        let core = Core::new(&config, std::num::NonZeroU32::MIN, SyncClock::system());
         core.latch("the broker rejected the credential");
         let offsets = Scripted::default().topic("units-dead", &[(0, Offset::Invalid, 0, 0)]);
         let (requests, received) = mpsc::channel();

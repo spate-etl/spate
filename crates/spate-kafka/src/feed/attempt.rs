@@ -440,6 +440,7 @@ impl Follower {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::clock::SyncClock;
     use proptest::prelude::*;
 
     fn topics() -> Topics {
@@ -680,7 +681,7 @@ mod tests {
     }
 
     fn follower(config: &KafkaFeedConfig) -> Result<Follower, KafkaFeedError> {
-        let core = Arc::new(Core::new(config, NonZeroU32::MIN));
+        let core = Arc::new(Core::new(config, NonZeroU32::MIN, SyncClock::system()));
         Follower::new(config, core)
     }
 
@@ -760,6 +761,7 @@ mod tests {
         //! The follower against rdkafka's in-process MockCluster.
 
         use super::super::*;
+        use crate::clock::SyncClock;
         use rdkafka::ClientConfig;
         use rdkafka::mocking::MockCluster;
         use rdkafka::producer::{BaseProducer, BaseRecord, Producer};
@@ -846,7 +848,7 @@ mod tests {
 
         impl Running {
             fn start(rig: &Rig) -> (Running, SharedLedger) {
-                let core = Arc::new(Core::new(&rig.config, TWO));
+                let core = Arc::new(Core::new(&rig.config, TWO, SyncClock::system()));
                 let follower = Follower::new(&rig.config, Arc::clone(&core)).unwrap();
                 let ledger = follower.ledger();
                 let thread = Some(follower.spawn().unwrap());

@@ -104,6 +104,7 @@ impl Driver {
         producer: Producer,
         lookup_timeout: Duration,
     ) -> Driver {
+        let core_now = core.clock().now();
         Driver {
             core,
             consumer,
@@ -111,8 +112,24 @@ impl Driver {
             paused: BTreeSet::new(),
             lookup_timeout,
             assigned_once: false,
-            last_commit: Instant::now(),
+            last_commit: core_now,
         }
+    }
+
+    /// Commit the finished offsets once [`COMMIT_INTERVAL`] has passed on the
+    /// feed's clock since the last commit. `true` when the interval had
+    /// passed.
+    pub(crate) fn commit_if_due(&mut self) -> bool {
+        let since = self
+            .core
+            .clock()
+            .now()
+            .saturating_duration_since(self.last_commit);
+        if since < COMMIT_INTERVAL {
+            return false;
+        }
+        self.commit_finished("periodic");
+        true
     }
 }
 
@@ -129,9 +146,7 @@ pub(crate) fn run(mut d: Driver) {
         d.poll();
         d.serve_intents();
         d.backpressure();
-        if d.last_commit.elapsed() >= COMMIT_INTERVAL {
-            d.commit_finished("periodic");
-        }
+        d.commit_if_due();
     }
     let close = core.lock().close.take();
     let flushed = if core.latched() {
@@ -197,7 +212,8 @@ fn settle_close(core: &Core, close: Closing, flushed: bool, committed: bool) {
 impl Driver {
     /// Send the writes whose backoff has passed.
     fn resend_due(&mut self) {
-        let due = take_due(&mut self.core.lock(), Instant::now());
+        let now = self.core.clock().now();
+        let due = take_due(&mut self.core.lock(), now);
         for w in due {
             write::send(&self.core, &self.producer, Box::new(w));
         }
@@ -466,7 +482,7 @@ impl Driver {
         if self.core.latched() {
             return false;
         }
-        self.last_commit = Instant::now();
+        self.last_commit = self.core.clock().now();
         commit_moved(&self.core, |points| commit(&self.consumer, points, what))
     }
 }
@@ -672,5 +688,6 @@ fn no_unit_move(core: &Core, mut message: Outgoing, position: Position) -> Move 
         None,
         1,
         Finish::Complete,
+        &**core.clock(),
     )
 }

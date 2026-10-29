@@ -57,6 +57,7 @@ mod write;
 pub use error::KafkaFeedError;
 pub use publisher::KafkaFeedPublisher;
 
+use crate::clock::SyncClock;
 use crate::context::SourceContext;
 use crate::error::redacted_client_error;
 use attempt::{Follower, Ledger, PublishId, SharedLedger};
@@ -233,6 +234,9 @@ pub(crate) struct Core {
     attempt_partitions: NonZeroU32,
     /// The attempt counts the follower reads and the gate answers from.
     ledger: SharedLedger,
+    /// The clock the feed's timed reads take: the commit cadence, resend due
+    /// times, the gate's pass bound and the durations it logs.
+    clock: SyncClock,
     /// How many watermark calls the gate has begun, counted just before
     /// each `fetch_watermarks` and each `list_offset`.
     #[cfg(test)]
@@ -240,7 +244,7 @@ pub(crate) struct Core {
 }
 
 impl Core {
-    fn new(config: &KafkaFeedConfig, attempt_partitions: NonZeroU32) -> Core {
+    fn new(config: &KafkaFeedConfig, attempt_partitions: NonZeroU32, clock: SyncClock) -> Core {
         Core {
             state: Mutex::new(State::default()),
             gate_wake: Condvar::new(),
@@ -249,6 +253,7 @@ impl Core {
             attempt_cap: config.attempt_cap,
             attempt_partitions,
             ledger: Arc::new((Mutex::new(Ledger::new(attempt_partitions)), Condvar::new())),
+            clock,
             #[cfg(test)]
             gate_reads: AtomicUsize::new(0),
         }
@@ -256,6 +261,10 @@ impl Core {
 
     pub(crate) fn lock(&self) -> MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    pub(crate) fn clock(&self) -> &SyncClock {
+        &self.clock
     }
 
     pub(crate) fn topics(&self) -> &Topics {
@@ -329,17 +338,17 @@ impl Core {
                         // Queued for the consumer thread to send: `Core`
                         // holds no producer, since the producer's context
                         // holds `Core`.
+                        let due = self.clock.now();
                         let mut st = self.lock();
                         if st.fatal.is_none() && !self.stopped() {
-                            st.resends
-                                .push((Instant::now(), Write::Tombstone(tombstone)));
+                            st.resends.push((due, Write::Tombstone(tombstone)));
                         }
                     }
                 }
-                events::moved(&moving);
+                events::moved(&moving, &*self.clock);
             }
             Write::Attempt(attempt) => {
-                events::attempt_written(attempt.started.elapsed());
+                events::attempt_written(attempt.started.elapsed(&*self.clock));
                 let mut st = self.lock();
                 st.admitting = st.admitting.saturating_sub(1);
                 // `None` when the partition was given up or the copy was
@@ -399,11 +408,12 @@ impl Core {
                     "writing {} failed; sending it again",
                     write.what()
                 );
+                let due = self.clock.now() + retry_in;
                 let mut st = self.lock();
                 // A resent attempt write keeps its share of `admitting`
                 // until it settles or `take_due` drops it.
                 if st.fatal.is_none() && !self.stopped() {
-                    st.resends.push((Instant::now() + retry_in, write));
+                    st.resends.push((due, write));
                 }
             }
         }
@@ -527,7 +537,13 @@ impl KafkaFeed {
         section: &FeedSection,
         io: &tokio::runtime::Handle,
     ) -> Result<KafkaFeed, KafkaFeedError> {
-        Self::connect_with(section, io, startup::Scope::All, startup::CONNECT_BOUND)
+        Self::connect_with(
+            section,
+            io,
+            startup::Scope::All,
+            startup::CONNECT_BOUND,
+            SyncClock::system(),
+        )
     }
 
     /// [`connect`](Self::connect) with only the checks that the topics
@@ -548,6 +564,34 @@ impl KafkaFeed {
             io,
             startup::Scope::Existence,
             startup::CONNECT_BOUND,
+            SyncClock::system(),
+        )
+    }
+
+    /// [`connect_without_config_checks`](Self::connect_without_config_checks)
+    /// with the feed's timed reads on `clock`: the connect bound, the commit
+    /// cadence, resend due times, the gate's pass bound and the durations it
+    /// logs.
+    ///
+    /// librdkafka's timers stay on real time. A clock that does not move
+    /// never ends the connect checks at the bound.
+    ///
+    /// # Errors
+    ///
+    /// As [`connect_without_config_checks`](Self::connect_without_config_checks).
+    #[cfg(feature = "testing")]
+    #[doc(hidden)]
+    pub fn connect_without_config_checks_on(
+        section: &FeedSection,
+        io: &tokio::runtime::Handle,
+        clock: crate::clock::SharedClock,
+    ) -> Result<KafkaFeed, KafkaFeedError> {
+        Self::connect_with(
+            section,
+            io,
+            startup::Scope::Existence,
+            startup::CONNECT_BOUND,
+            SyncClock::new(clock),
         )
     }
 
@@ -556,10 +600,11 @@ impl KafkaFeed {
         io: &tokio::runtime::Handle,
         scope: startup::Scope,
         bound: Duration,
+        clock: SyncClock,
     ) -> Result<KafkaFeed, KafkaFeedError> {
         let config = KafkaFeedConfig::from_section(section)?;
-        let checked = check_topics(&config, io, scope, bound)?;
-        let (core, producer, driver) = parts(&config, checked.attempt_partitions)?;
+        let checked = check_topics(&config, io, scope, bound, clock.clone())?;
+        let (core, producer, driver) = parts(&config, checked.attempt_partitions, clock)?;
         let follower = Follower::new(&config, Arc::clone(&core))?
             .spawn()
             .map_err(|e| {
@@ -656,13 +701,14 @@ fn log_started(config: &KafkaFeedConfig, checked: &startup::Checked) {
 }
 
 /// Run the startup checks over the topics `config` names, on the runtime
-/// `io`, under `bound`, with the rejection watch over the checking clients,
-/// which are dropped when it returns.
+/// `io`, under `bound` on `clock`, with the rejection watch over the checking
+/// clients, which are dropped when it returns.
 fn check_topics(
     config: &KafkaFeedConfig,
     io: &tokio::runtime::Handle,
     scope: startup::Scope,
     bound: Duration,
+    clock: SyncClock,
 ) -> Result<startup::Checked, KafkaFeedError> {
     let openssl_env = crate::security::openssl_env_overrides();
     let admin_config = config.admin_config(openssl_env);
@@ -674,7 +720,7 @@ fn check_topics(
     })?;
     let reader = ThreadedProducer::from_config_and_context(
         &admin_config,
-        crate::sink::SinkContext::detached(crate::clock::SyncClock::system()),
+        crate::sink::SinkContext::detached(clock.clone()),
     )
     .map_err(|e| {
         KafkaFeedError::Refused(format!(
@@ -689,6 +735,7 @@ fn check_topics(
     io.block_on(startup::bounded(
         &step,
         bound,
+        clock,
         move || watched.rejection(),
         startup::check(&*admin, &topics, scope, &step),
     ))
@@ -699,9 +746,10 @@ fn check_topics(
 fn producer_parts(
     config: &KafkaFeedConfig,
     attempt_partitions: NonZeroU32,
+    clock: SyncClock,
 ) -> Result<(Arc<Core>, Producer), KafkaFeedError> {
     let openssl_env = crate::security::openssl_env_overrides();
-    let core = Arc::new(Core::new(config, attempt_partitions));
+    let core = Arc::new(Core::new(config, attempt_partitions, clock));
     let producer = Producer::from_config_and_context(
         &config.producer_config(openssl_env),
         FeedProducerContext::new(Arc::clone(&core)),
@@ -721,9 +769,10 @@ fn producer_parts(
 fn parts(
     config: &KafkaFeedConfig,
     attempt_partitions: NonZeroU32,
+    clock: SyncClock,
 ) -> Result<(Arc<Core>, Producer, Driver), KafkaFeedError> {
     let openssl_env = crate::security::openssl_env_overrides();
-    let (core, producer) = producer_parts(config, attempt_partitions)?;
+    let (core, producer) = producer_parts(config, attempt_partitions, clock)?;
     let consumer_config = config.consumer_config(openssl_env);
     let lookup_timeout = consumer::committed_lookup_timeout(&consumer_config);
     let consumer =
@@ -900,6 +949,7 @@ impl Feed for KafkaFeed {
                 Some(handed.unit.id),
                 handed.deliveries,
                 finish,
+                &**self.core.clock(),
             )
         };
         match moving.to {

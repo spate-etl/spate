@@ -17,6 +17,7 @@
 //! connecting with the rejection's text, as soon as the client reports it.
 
 use super::{KafkaFeedError, Topics};
+use crate::clock::SyncClock;
 use crate::sink::SinkContext;
 use rdkafka::admin::{AdminClient, AdminOptions, ResourceSpecifier};
 use rdkafka::client::DefaultClientContext;
@@ -31,7 +32,7 @@ use std::sync::mpsc;
 use std::sync::mpsc::RecvTimeoutError;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::task::Poll;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::sync::oneshot;
 
 /// How long the checks may take, every step included.
@@ -420,15 +421,15 @@ pub(crate) async fn check(
     Ok(checked)
 }
 
-/// `checks` under a bound of `limit`, ended early by a rejection
+/// `checks` under a bound of `limit` on `clock`, ended early by a rejection
 /// `rejection` returns. Past the bound, an [`KafkaFeedError::Unavailable`]
 /// naming the step `step` holds.
 ///
 /// The bound is timed on a thread of its own, so it fires on any runtime:
 /// one whose timer nothing drives, as under `Handle::block_on` on a
 /// current-thread runtime, one with timers disabled, and one that has shut
-/// down. The thread calls `rejection` every [`REJECTION_TICK`], and ends
-/// when `checks` does.
+/// down. The thread calls `rejection` every [`REJECTION_TICK`] of real time,
+/// reading `clock` each time, and ends when `checks` does.
 ///
 /// # Errors
 ///
@@ -438,6 +439,7 @@ pub(crate) async fn check(
 pub(crate) async fn bounded<T>(
     step: &Mutex<String>,
     limit: Duration,
+    clock: SyncClock,
     rejection: impl Fn() -> Option<String> + Send + 'static,
     checks: impl Future<Output = Result<T, KafkaFeedError>>,
 ) -> Result<T, KafkaFeedError> {
@@ -445,12 +447,12 @@ pub(crate) async fn bounded<T>(
     let (fire, mut fired) = oneshot::channel::<Option<String>>();
     // Held until `checks` ends: dropping it ends the timing thread.
     let (_finished, done) = mpsc::channel::<()>();
-    let deadline = Instant::now() + limit;
+    let deadline = clock.now() + limit;
     std::thread::Builder::new()
         .name("spate-kafka-feed-bound".to_owned())
         .spawn(move || {
             loop {
-                let left = deadline.saturating_duration_since(Instant::now());
+                let left = deadline.saturating_duration_since(clock.now());
                 if done.recv_timeout(left.min(REJECTION_TICK)) != Err(RecvTimeoutError::Timeout) {
                     return;
                 }
@@ -460,7 +462,7 @@ pub(crate) async fn bounded<T>(
                     let _ = fire.send(Some(text));
                     return;
                 }
-                if Instant::now() >= deadline {
+                if clock.now() >= deadline {
                     let _ = fire.send(None);
                     return;
                 }
@@ -950,7 +952,13 @@ mod tests {
             let topics = topics();
             let checks = check(&admin, &topics, Scope::All, &step);
             let rejection = move || rejection.map(str::to_owned);
-            let _ = tx.send(io.block_on(bounded(&step, limit, rejection, checks)));
+            let _ = tx.send(io.block_on(bounded(
+                &step,
+                limit,
+                SyncClock::system(),
+                rejection,
+                checks,
+            )));
         });
         rx.recv_timeout(DEADLINE).ok()
     }
@@ -1124,7 +1132,14 @@ mod tests {
     /// when nothing came back within [`DEADLINE`].
     fn connect_to(brokers: &str, rdkafka: &str, limit: Duration) -> Option<KafkaFeedError> {
         connect_with_to(brokers, rdkafka, limit, |section, io, limit| {
-            crate::feed::KafkaFeed::connect_with(section, io, Scope::All, limit).err()
+            crate::feed::KafkaFeed::connect_with(
+                section,
+                io,
+                Scope::All,
+                limit,
+                SyncClock::system(),
+            )
+            .err()
         })
     }
 

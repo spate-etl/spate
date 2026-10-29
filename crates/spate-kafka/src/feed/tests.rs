@@ -18,6 +18,7 @@ use super::write::{
     Write, WriteClass, classify, route,
 };
 use super::{Core, Gating, KafkaFeed, KafkaFeedError, KafkaFeedPublisher, Ready};
+use crate::clock::SyncClock;
 use rdkafka::config::FromClientConfigAndContext;
 use rdkafka::error::{KafkaError, RDKafkaErrorCode as C};
 use spate_core::config::FeedSection;
@@ -38,7 +39,11 @@ fn core(cap: u32) -> Core {
          attempt_topic: units-attempts\n"
     ))
     .unwrap();
-    Core::new(&KafkaFeedConfig::from_section(&section).unwrap(), TWO)
+    Core::new(
+        &KafkaFeedConfig::from_section(&section).unwrap(),
+        TWO,
+        SyncClock::system(),
+    )
 }
 
 fn tp(partition: i32) -> Tp {
@@ -252,6 +257,7 @@ fn moving(core: &Core, receipt: Receipt) -> Box<Write> {
         Some(unit.id),
         1,
         Finish::Complete,
+        &**core.clock(),
     )))
 }
 
@@ -497,7 +503,7 @@ fn unreachable_config(extra: &str) -> KafkaFeedConfig {
 /// A feed with no threads, whose producer reaches no broker.
 fn idle_feed() -> KafkaFeed {
     let config = unreachable_config("");
-    let core = Arc::new(Core::new(&config, TWO));
+    let core = Arc::new(Core::new(&config, TWO, SyncClock::system()));
     let producer = Producer::from_config_and_context(
         &config.producer_config(false),
         FeedProducerContext::new(Arc::clone(&core)),
@@ -515,7 +521,7 @@ fn idle_feed() -> KafkaFeed {
 
 /// A publisher whose producer reaches no broker, over `config`.
 fn idle_publisher_over(config: &KafkaFeedConfig) -> KafkaFeedPublisher {
-    let core = Arc::new(Core::new(config, TWO));
+    let core = Arc::new(Core::new(config, TWO, SyncClock::system()));
     let producer = Producer::from_config_and_context(
         &config.producer_config(false),
         FeedProducerContext::new(Arc::clone(&core)),
@@ -697,7 +703,7 @@ fn an_inline_fatal_enqueue_settles_without_deadlock() {
     use rdkafka::producer::Producer as _;
     use rdkafka::types::RDKafkaRespErr;
     let config = unreachable_config("");
-    let owner = Arc::new(Core::new(&config, TWO));
+    let owner = Arc::new(Core::new(&config, TWO, SyncClock::system()));
     let producer = Arc::new(
         Producer::from_config_and_context(
             &config.producer_config(false),
@@ -717,7 +723,7 @@ fn an_inline_fatal_enqueue_settles_without_deadlock() {
     assert_eq!(raised, RDKafkaRespErr::RD_KAFKA_RESP_ERR_NO_ERROR);
     // A core no callback has latched yet, as between librdkafka raising the
     // fatal error and the poll thread reporting it.
-    let fresh = Arc::new(Core::new(&config, TWO));
+    let fresh = Arc::new(Core::new(&config, TWO, SyncClock::system()));
     let (core, sender) = (Arc::clone(&fresh), Arc::clone(&producer));
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
@@ -913,6 +919,7 @@ fn dead_lettering(core: &Core, offset: i64) -> Write {
         Some(unit.id),
         3,
         Finish::Tombstone(identity),
+        &**core.clock(),
     ))
 }
 
@@ -984,6 +991,7 @@ fn attempt_write(core: &Core, entry: Gating) -> Write {
         1,
         entry.receipt,
         entry.unit,
+        &**core.clock(),
     ))
 }
 
@@ -1222,7 +1230,11 @@ fn returns_within(limit: Duration, f: impl FnOnce() + Send + 'static) -> bool {
 fn a_gate_pass_puts_back_the_deliveries_of_each_failed_watermark_read() {
     const STEP: Duration = Duration::from_millis(100);
     let config = unreachable_config("  delivery_timeout: 1h\n");
-    let core = Arc::new(Core::new(&config, NonZeroU32::new(4).unwrap()));
+    let core = Arc::new(Core::new(
+        &config,
+        NonZeroU32::new(4).unwrap(),
+        SyncClock::system(),
+    ));
     let producer = Producer::from_config_and_context(
         &config.producer_config(false),
         FeedProducerContext::new(Arc::clone(&core)),
@@ -1306,7 +1318,7 @@ fn a_gate_waiting_on_an_unreachable_attempt_partition_lets_the_feed_drop() {
 #[test]
 fn a_delivery_revoked_during_a_pass_is_not_put_back() {
     let config = unreachable_config("  delivery_timeout: 1h\n");
-    let core = Arc::new(Core::new(&config, TWO));
+    let core = Arc::new(Core::new(&config, TWO, SyncClock::system()));
     let producer = Producer::from_config_and_context(
         &config.producer_config(false),
         FeedProducerContext::new(Arc::clone(&core)),
@@ -1349,7 +1361,7 @@ fn a_delivery_revoked_during_a_pass_is_not_put_back() {
 #[test]
 fn a_latched_feed_ends_its_gate_thread() {
     let config = unreachable_config("");
-    let core = Arc::new(Core::new(&config, TWO));
+    let core = Arc::new(Core::new(&config, TWO, SyncClock::system()));
     let producer = Producer::from_config_and_context(
         &config.producer_config(false),
         FeedProducerContext::new(Arc::clone(&core)),
@@ -1378,7 +1390,11 @@ fn a_feed_that_ends_during_a_pass_ends_it_before_the_next_read() {
     const STEP: Duration = Duration::from_secs(2);
     let config = unreachable_config("  delivery_timeout: 1h\n");
     for how in ["stopped", "latched"] {
-        let core = Arc::new(Core::new(&config, NonZeroU32::new(4).unwrap()));
+        let core = Arc::new(Core::new(
+            &config,
+            NonZeroU32::new(4).unwrap(),
+            SyncClock::system(),
+        ));
         let producer = Producer::from_config_and_context(
             &config.producer_config(false),
             FeedProducerContext::new(Arc::clone(&core)),
@@ -1600,6 +1616,7 @@ mod cluster {
     use super::super::write::Producer;
     use super::super::{Core, Gating, KafkaFeed, READY_CAPACITY};
     use super::{TWO, returns_within};
+    use crate::clock::SyncClock;
     use crate::context::Intent;
     use rdkafka::consumer::{BaseConsumer, Consumer, ConsumerContext};
     use rdkafka::mocking::MockCluster;
@@ -1649,6 +1666,7 @@ mod cluster {
             io.handle(),
             Scope::Existence,
             CONNECT_BOUND,
+            SyncClock::system(),
         )
         .unwrap()
     }
@@ -1773,7 +1791,7 @@ mod cluster {
         group: &str,
     ) -> (KafkaFeedConfig, Arc<Core>, Producer, Driver) {
         let config = KafkaFeedConfig::from_section(&section(brokers, group)).unwrap();
-        let (core, producer, d) = super::super::parts(&config, TWO).unwrap();
+        let (core, producer, d) = super::super::parts(&config, TWO, SyncClock::system()).unwrap();
         (config, core, producer, d)
     }
 
@@ -2378,7 +2396,7 @@ mod cluster {
         }
         records.flush(Duration::from_secs(30)).unwrap();
         let config = KafkaFeedConfig::from_section(&section(&brokers, &group)).unwrap();
-        let core = Arc::new(Core::new(&config, TWO));
+        let core = Arc::new(Core::new(&config, TWO, SyncClock::system()));
         let producer: Producer =
             rdkafka::config::FromClientConfigAndContext::from_config_and_context(
                 &config.producer_config(false),
@@ -2430,7 +2448,7 @@ mod cluster {
             &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_TOPIC_AUTHORIZATION_FAILED; 50],
         );
         let config = KafkaFeedConfig::from_section(&section(&brokers, &group)).unwrap();
-        let core = Arc::new(Core::new(&config, TWO));
+        let core = Arc::new(Core::new(&config, TWO, SyncClock::system()));
         let producer: Producer =
             rdkafka::config::FromClientConfigAndContext::from_config_and_context(
                 &config.producer_config(false),
@@ -2487,7 +2505,7 @@ mod cluster {
             .unwrap();
         records.flush(Duration::from_secs(30)).unwrap();
         let config = KafkaFeedConfig::from_section(&section(&brokers, &group)).unwrap();
-        let core = Arc::new(Core::new(&config, TWO));
+        let core = Arc::new(Core::new(&config, TWO, SyncClock::system()));
         attempt::lock(&core.ledger).apply(0, 0, b"other", attempt::Entry::Count(1));
         let producer: Producer =
             rdkafka::config::FromClientConfigAndContext::from_config_and_context(
@@ -2542,7 +2560,7 @@ mod cluster {
         let brokers = cluster.bootstrap_servers();
         let group = spate_test::unique_name("leaderless");
         let config = KafkaFeedConfig::from_section(&section(&brokers, &group)).unwrap();
-        let core = Arc::new(Core::new(&config, TWO));
+        let core = Arc::new(Core::new(&config, TWO, SyncClock::system()));
         let producer: Producer =
             rdkafka::config::FromClientConfigAndContext::from_config_and_context(
                 &config.producer_config(false),
@@ -2603,7 +2621,7 @@ mod cluster {
         let brokers = cluster.bootstrap_servers();
         let group = spate_test::unique_name("gate-no-rest");
         let config = KafkaFeedConfig::from_section(&section(&brokers, &group)).unwrap();
-        let core = Arc::new(Core::new(&config, TWO));
+        let core = Arc::new(Core::new(&config, TWO, SyncClock::system()));
         let producer: Producer =
             rdkafka::config::FromClientConfigAndContext::from_config_and_context(
                 &config.producer_config(false),
@@ -2667,7 +2685,7 @@ mod cluster {
         }
         records.flush(Duration::from_secs(30)).unwrap();
         let config = KafkaFeedConfig::from_section(&section(&brokers, &group)).unwrap();
-        let core = Arc::new(Core::new(&config, TWO));
+        let core = Arc::new(Core::new(&config, TWO, SyncClock::system()));
         let producer: Producer =
             rdkafka::config::FromClientConfigAndContext::from_config_and_context(
                 &config.producer_config(false),
@@ -2732,7 +2750,7 @@ mod cluster {
         let brokers = cluster.bootstrap_servers();
         let group = spate_test::unique_name("refused-reread");
         let config = KafkaFeedConfig::from_section(&section(&brokers, &group)).unwrap();
-        let core = Arc::new(Core::new(&config, TWO));
+        let core = Arc::new(Core::new(&config, TWO, SyncClock::system()));
         let producer: Producer =
             rdkafka::config::FromClientConfigAndContext::from_config_and_context(
                 &config.producer_config(false),
@@ -2813,7 +2831,11 @@ mod cluster {
         ))
         .unwrap();
         let config = KafkaFeedConfig::from_section(&section).unwrap();
-        let core = Arc::new(Core::new(&config, std::num::NonZeroU32::new(3).unwrap()));
+        let core = Arc::new(Core::new(
+            &config,
+            std::num::NonZeroU32::new(3).unwrap(),
+            SyncClock::system(),
+        ));
         let producer: Producer =
             rdkafka::config::FromClientConfigAndContext::from_config_and_context(
                 &config.producer_config(false),
@@ -2911,7 +2933,11 @@ mod cluster {
         ))
         .unwrap();
         let config = KafkaFeedConfig::from_section(&section).unwrap();
-        let core = Arc::new(Core::new(&config, std::num::NonZeroU32::MIN));
+        let core = Arc::new(Core::new(
+            &config,
+            std::num::NonZeroU32::MIN,
+            SyncClock::system(),
+        ));
         let producer: Producer =
             rdkafka::config::FromClientConfigAndContext::from_config_and_context(
                 &config.producer_config(false),
@@ -2963,7 +2989,7 @@ mod cluster {
         let brokers = cluster.bootstrap_servers();
         let group = spate_test::unique_name("gate-rest");
         let config = KafkaFeedConfig::from_section(&section(&brokers, &group)).unwrap();
-        let core = Arc::new(Core::new(&config, TWO));
+        let core = Arc::new(Core::new(&config, TWO, SyncClock::system()));
         let producer: Producer =
             rdkafka::config::FromClientConfigAndContext::from_config_and_context(
                 &config.producer_config(false),
@@ -3039,7 +3065,7 @@ mod cluster {
         }
         records.flush(Duration::from_secs(30)).unwrap();
         let config = KafkaFeedConfig::from_section(&section(&brokers, &group)).unwrap();
-        let core = Arc::new(Core::new(&config, TWO));
+        let core = Arc::new(Core::new(&config, TWO, SyncClock::system()));
         let producer: Producer =
             rdkafka::config::FromClientConfigAndContext::from_config_and_context(
                 &config.producer_config(false),
@@ -3117,7 +3143,7 @@ mod cluster {
         }
         records.flush(Duration::from_secs(30)).unwrap();
         let config = KafkaFeedConfig::from_section(&section(&brokers, &group)).unwrap();
-        let core = Arc::new(Core::new(&config, TWO));
+        let core = Arc::new(Core::new(&config, TWO, SyncClock::system()));
         let producer: Producer =
             rdkafka::config::FromClientConfigAndContext::from_config_and_context(
                 &config.producer_config(false),
@@ -3177,7 +3203,8 @@ mod cluster {
             "    queue.buffering.max.messages: \"1\"\n",
         ))
         .unwrap();
-        let (core, producer, mut d) = super::super::parts(&config, TWO).unwrap();
+        let (core, producer, mut d) =
+            super::super::parts(&config, TWO, SyncClock::system()).unwrap();
         let admission = admission(&config, &core, &producer, STEP);
         drive(&mut d, "the unit is buffered", |d| {
             !d.core.lock().ready.is_empty()
@@ -3572,7 +3599,8 @@ mod cluster {
         ))
         .unwrap();
         let config = KafkaFeedConfig::from_section(&section).unwrap();
-        let (core, producer, mut d) = super::super::parts(&config, TWO).unwrap();
+        let (core, producer, mut d) =
+            super::super::parts(&config, TWO, SyncClock::system()).unwrap();
         let feed = feed_over(&core, &producer, None);
         let admission = admission(&config, &core, &producer, STEP);
         drive(&mut d, "the unit is buffered", |d| {
@@ -3901,6 +3929,7 @@ mod docker {
     use super::cluster::{
         acknowledge_first, admission, committed, drive, owns, parts_for, section,
     };
+    use crate::clock::SyncClock;
     use crate::feed::KafkaFeed;
     use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
     use rdkafka::client::DefaultClientContext;
@@ -4080,7 +4109,7 @@ mod docker {
         ))
         .unwrap();
         let config = KafkaFeedConfig::from_section(&section).unwrap();
-        let core = Arc::new(Core::new(&config, NonZeroU32::MIN));
+        let core = Arc::new(Core::new(&config, NonZeroU32::MIN, SyncClock::system()));
         let thread = Follower::new(&config, Arc::clone(&core))
             .unwrap()
             .spawn()
@@ -4166,7 +4195,11 @@ mod docker {
             },
         );
         let config = KafkaFeedConfig::from_section(&section(&brokers, "emptied")).unwrap();
-        let core = Arc::new(Core::new(&config, NonZeroU32::new(2).unwrap()));
+        let core = Arc::new(Core::new(
+            &config,
+            NonZeroU32::new(2).unwrap(),
+            SyncClock::system(),
+        ));
         gate_admits(&config, &core);
     }
 

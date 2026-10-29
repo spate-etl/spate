@@ -708,6 +708,36 @@ mod tests {
         }
     }
 
+    /// An id's fetch delay starts at 200 ms and doubles on each transient
+    /// failure until it holds at the 5 s cap, each measured from the
+    /// failure.
+    #[test]
+    fn backoff_doubles_from_200ms_to_the_5s_cap() {
+        let start = Instant::now();
+        let mut backoff = Backoff::first(start);
+        let mut delays = vec![backoff.delay];
+        assert_eq!(backoff.next_allowed, start + FETCH_BACKOFF_INITIAL);
+        for step in 1..=6 {
+            let now = start + Duration::from_secs(step);
+            backoff.grow(now);
+            assert_eq!(backoff.next_allowed, now + backoff.delay);
+            delays.push(backoff.delay);
+        }
+        assert_eq!(
+            delays,
+            [200, 400, 800, 1600, 3200, 5000, 5000].map(Duration::from_millis)
+        );
+    }
+
+    /// A backoff refuses a fetch until its clock reaches `next_allowed`,
+    /// and admits one from that instant.
+    #[test]
+    fn backoff_admits_exactly_at_next_allowed() {
+        let backoff = Backoff::first(Instant::now());
+        assert!(!backoff.admits(backoff.next_allowed - Duration::from_nanos(1)));
+        assert!(backoff.admits(backoff.next_allowed));
+    }
+
     /// Serves `SCHEMA` as every registry response on `127.0.0.1`, over a
     /// certificate `ca` signed, and returns the `https://` URL. With `clients`
     /// set, the server requires a client certificate that CA signed.

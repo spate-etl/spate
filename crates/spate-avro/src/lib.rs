@@ -51,3 +51,19 @@ pub use config::{
 pub use datum::AvroDatumDeserializer;
 pub use deser::{AvroSerdeDeserializer, AvroValue, AvroValueDeserializer};
 pub use wire::{parse_confluent, parse_single_object};
+
+#[cfg(test)]
+mod tests {
+    use std::panic::{RefUnwindSafe, UnwindSafe};
+
+    /// The public deserializer types stay `Send`, `Sync`, `UnwindSafe` and
+    /// `RefUnwindSafe` while they hold the schema cache's clock.
+    #[test]
+    fn public_types_keep_their_auto_traits() {
+        fn auto_traits<T: Send + Sync + UnwindSafe + RefUnwindSafe>() {}
+        auto_traits::<crate::AvroDeserializerBuilder>();
+        auto_traits::<crate::AvroValueDeserializer>();
+        auto_traits::<crate::AvroSerdeDeserializer<u8>>();
+        auto_traits::<crate::AvroDatumDeserializer<spate_core::deser::Owned<u8>>>();
+    }
+}

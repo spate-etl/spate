@@ -289,6 +289,35 @@ mod tests {
         assert!(matches!(cache.get(9), Lookup::Failed(r) if r.contains("unknown id")));
     }
 
+    /// A negative entry answers `Failed` until its clock has moved exactly
+    /// the TTL past its stamp, then `Missing`, on both the shared-lock and
+    /// the memo lookup.
+    #[test]
+    fn a_negative_entry_expires_exactly_at_its_ttl() {
+        let ttl = Duration::from_millis(300);
+        let clock = TestClock::frozen();
+        let cache = SchemaCache::new(ttl, SyncClock::new(clock.clone()));
+        let mut memo = SchemaCache::empty_snapshot();
+        cache.insert_failed(9, "unknown id".into());
+
+        clock.advance(ttl - Duration::from_nanos(1));
+        assert!(
+            matches!(cache.get(9), Lookup::Failed(_)),
+            "one nanosecond short of the TTL"
+        );
+        assert!(
+            matches!(cache.lookup(&mut memo, 9), Lookup::Failed(_)),
+            "one nanosecond short of the TTL"
+        );
+
+        clock.advance(Duration::from_nanos(1));
+        assert!(matches!(cache.get(9), Lookup::Missing), "at the TTL");
+        assert!(
+            matches!(cache.lookup(&mut memo, 9), Lookup::Missing),
+            "at the TTL"
+        );
+    }
+
     #[test]
     fn ready_is_never_downgraded_to_failed() {
         // Prewarm/fetcher race: a compiled schema must survive a concurrent

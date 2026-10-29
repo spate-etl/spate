@@ -14,6 +14,7 @@ use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
 use spate_avro::{AvroDeserializerBuilder, AvroMode, AvroSettings, AvroValue, RegistrySection};
 use spate_core::checkpoint::AckRef;
+use spate_core::clock::TestClock;
 use spate_core::deser::{Deserializer, EmitRecord, RecFamily};
 use spate_core::error::DeserError;
 use spate_core::record::{Flow, Record};
@@ -171,6 +172,46 @@ fn settings_at(url: String, ttl: Duration) -> AvroSettings {
     }
 }
 
+/// A builder whose negative cache and fetch backoff read `clock`.
+fn builder_on(
+    addr: std::net::SocketAddr,
+    ttl: Duration,
+    clock: &Arc<TestClock>,
+) -> AvroDeserializerBuilder {
+    AvroDeserializerBuilder::from_settings_with_clock(
+        &settings(addr, ttl),
+        &tokio::runtime::Handle::current(),
+        Arc::clone(clock) as _,
+    )
+    .unwrap()
+}
+
+/// [`drive_until_ready`] for a deserializer built on `clock`: each
+/// `NotReady` moves `clock` past the longest fetch backoff, so a transient
+/// failure's refetch waits only for the HTTP round trip.
+fn drive_until_ready_on<F, O>(
+    deser: &mut dyn Deserializer<F>,
+    payload: &[u8],
+    out: &mut O,
+    clock: &TestClock,
+) -> Result<(), DeserError>
+where
+    F: RecFamily,
+    O: for<'buf> EmitRecord<'buf, F::Rec<'buf>>,
+{
+    let (ack, _rx) = AckRef::test_pair();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        match deser.deserialize(&raw_payload(payload), &ack, out) {
+            Err(DeserError::NotReady { .. }) if Instant::now() < deadline => {
+                clock.advance(Duration::from_secs(5));
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            other => return other,
+        }
+    }
+}
+
 /// Retry `deserialize` until the async fetch lands or the deadline passes.
 ///
 /// Generic over the deserializer family and emitter so the value path and the
@@ -244,17 +285,14 @@ async fn retriable_registry_errors_are_retried() {
     stub.script("/schemas/ids/9", 200, &schema_body(SCHEMA_V1), 0);
     let addr = stub.clone().serve().await;
 
-    let builder = AvroDeserializerBuilder::from_settings(
-        &settings(addr, Duration::from_secs(30)),
-        &tokio::runtime::Handle::current(),
-    )
-    .unwrap();
+    let clock = TestClock::frozen();
+    let builder = builder_on(addr, Duration::from_secs(30), &clock);
     let mut deser = builder.build_value().expect("apache builder");
     let payload = confluent_payload(9, 1);
 
     let rows = tokio::task::spawn_blocking(move || {
         let mut out = Collected(Vec::new());
-        drive_until_ready(&mut deser, &payload, &mut out).map(|()| out.0)
+        drive_until_ready_on(&mut deser, &payload, &mut out, &clock).map(|()| out.0)
     })
     .await
     .unwrap()
@@ -268,11 +306,8 @@ async fn unknown_id_negative_caches_until_ttl_expiry() {
     // No script for id 5: the stub answers 404 (and counts hits).
     let addr = stub.clone().serve().await;
 
-    let builder = AvroDeserializerBuilder::from_settings(
-        &settings(addr, Duration::from_millis(300)),
-        &tokio::runtime::Handle::current(),
-    )
-    .unwrap();
+    let clock = TestClock::frozen();
+    let builder = builder_on(addr, Duration::from_millis(300), &clock);
     let mut deser = builder.build_value().expect("apache builder");
     let payload = confluent_payload(5, 1);
 
@@ -291,7 +326,8 @@ async fn unknown_id_negative_caches_until_ttl_expiry() {
     );
     let hits_after_first = stub.hits.load(Ordering::Relaxed);
 
-    // Within the TTL: answered from the negative cache, no new requests.
+    // Within the TTL, with the clock unmoved: answered from the negative
+    // cache, no new requests.
     let payload = confluent_payload(5, 1);
     let (ack, _rx) = AckRef::test_pair();
     let mut out = Collected(Vec::new());
@@ -303,7 +339,7 @@ async fn unknown_id_negative_caches_until_ttl_expiry() {
 
     // After expiry the schema exists now: refetch succeeds.
     stub.script("/schemas/ids/5", 200, &schema_body(SCHEMA_V1), 0);
-    std::thread::sleep(Duration::from_millis(350));
+    clock.advance(Duration::from_millis(300));
     let rows = tokio::task::spawn_blocking(move || {
         let mut out = Collected(Vec::new());
         drive_until_ready(&mut deser, &payload, &mut out).map(|()| out.0)
@@ -325,22 +361,50 @@ async fn transient_503s_then_success_decodes_and_never_drops() {
     stub.script("/schemas/ids/42", 200, &schema_body(SCHEMA_V1), 0);
     let addr = stub.clone().serve().await;
 
-    let builder = AvroDeserializerBuilder::from_settings(
-        &settings(addr, Duration::from_secs(30)),
-        &tokio::runtime::Handle::current(),
-    )
-    .unwrap();
+    let clock = TestClock::frozen();
+    let builder = builder_on(addr, Duration::from_secs(30), &clock);
     let mut deser = builder.build_value().expect("apache builder");
     let payload = confluent_payload(42, 7);
 
     let rows = tokio::task::spawn_blocking(move || {
         let mut out = Collected(Vec::new());
-        drive_until_ready(&mut deser, &payload, &mut out).map(|()| out.0)
+        drive_until_ready_on(&mut deser, &payload, &mut out, &clock).map(|()| out.0)
     })
     .await
     .unwrap()
     .unwrap();
     assert_eq!(rows.len(), 1, "record decodes after the transient blips");
+}
+
+/// Each refetch of a transiently failing id waits on the deserializer's
+/// clock: six 503s grow the backoff to its cap, and the id decodes as fast as
+/// the clock moves, with one request per failure. On real time the six waits
+/// add up to 11.2 s, past the driver's 10 s deadline.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_transient_id_is_refetched_once_its_backoff_passes() {
+    let stub = StubRegistry::default();
+    stub.script("/schemas/ids/11", 503, "shard warming up", 6);
+    stub.script("/schemas/ids/11", 200, &schema_body(SCHEMA_V1), 0);
+    let addr = stub.clone().serve().await;
+
+    let clock = TestClock::frozen();
+    let builder = builder_on(addr, Duration::from_secs(30), &clock);
+    let mut deser = builder.build_value().expect("apache builder");
+    let payload = confluent_payload(11, 1);
+
+    let rows = tokio::task::spawn_blocking(move || {
+        let mut out = Collected(Vec::new());
+        drive_until_ready_on(&mut deser, &payload, &mut out, &clock).map(|()| out.0)
+    })
+    .await
+    .unwrap()
+    .expect("the id decodes once its backoff passes on the clock");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        stub.path_hits("/schemas/ids/11"),
+        7,
+        "one request per failure, then the schema"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -355,17 +419,14 @@ async fn non_retriable_5xx_is_transient_not_poison() {
     stub.script("/schemas/ids/7", 200, &schema_body(SCHEMA_V1), 0);
     let addr = stub.clone().serve().await;
 
-    let builder = AvroDeserializerBuilder::from_settings(
-        &settings(addr, Duration::from_secs(30)),
-        &tokio::runtime::Handle::current(),
-    )
-    .unwrap();
+    let clock = TestClock::frozen();
+    let builder = builder_on(addr, Duration::from_secs(30), &clock);
     let mut deser = builder.build_value().expect("apache builder");
     let payload = confluent_payload(7, 1);
 
     let rows = tokio::task::spawn_blocking(move || {
         let mut out = Collected(Vec::new());
-        drive_until_ready(&mut deser, &payload, &mut out).map(|()| out.0)
+        drive_until_ready_on(&mut deser, &payload, &mut out, &clock).map(|()| out.0)
     })
     .await
     .unwrap()

@@ -34,6 +34,7 @@ use crate::encode::Encoder;
 use crate::metrics::LaneCounters;
 use crate::plan::EventPlan;
 use spate_core::checkpoint::{AckIssuer, AckRef};
+use spate_core::clock::SyncClock;
 use spate_core::error::SourceError;
 use spate_core::record::{PartitionId, RawPayload};
 use spate_core::source::{LaneId, PayloadBatch, SourceLane};
@@ -100,6 +101,7 @@ pub(crate) struct LaneParts {
     pub(crate) budget: u64,
     pub(crate) tick_interval: Duration,
     pub(crate) events_per_tick: usize,
+    pub(crate) clock: SyncClock,
 }
 
 /// One partition's data plane.
@@ -120,6 +122,8 @@ pub struct DatagenLane {
     tick_interval: Duration,
     events_per_tick: usize,
     next_tick: Instant,
+    /// Times the rate gate.
+    clock: SyncClock,
     /// Events left in the current tick's quota, spent across as many polls as
     /// `max_records` takes. Always 0 when unthrottled.
     tick_budget: usize,
@@ -145,7 +149,8 @@ impl DatagenLane {
             events_per_tick: parts.events_per_tick,
             // The first tick is due immediately: the first poll releases a
             // batch.
-            next_tick: Instant::now(),
+            next_tick: parts.clock.now(),
+            clock: parts.clock,
             tick_budget: 0,
             arena: Vec::new(),
             items: Vec::new(),
@@ -165,7 +170,7 @@ impl DatagenLane {
         if self.tick_budget > 0 {
             return Some(self.tick_budget);
         }
-        let now = Instant::now();
+        let now = self.clock.now();
         if now < self.next_tick {
             park(Duration::min(self.next_tick - now, timeout));
             return None;
@@ -315,6 +320,9 @@ impl<'a> PayloadBatch<'a> for DatagenBatch<'a> {
 
 /// Block the calling thread for `how_long`. Neither a lane nor the control
 /// plane may busy-spin when it has nothing to hand over.
+///
+/// A real sleep, since the sync clock has no sleep of its own; every caller
+/// bounds it by the poll timeout, so a frozen test clock cannot wedge a lane.
 pub(crate) fn park(how_long: Duration) {
     if !how_long.is_zero() {
         std::thread::sleep(how_long);

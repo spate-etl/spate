@@ -123,3 +123,16 @@ pub mod storefront {
         OrderLine, OrderPlaced, PaymentCaptured, RefundIssued, StorefrontEvent,
     };
 }
+
+#[cfg(test)]
+mod tests {
+    /// The public types keep their auto traits: each is `Send` and `Sync`.
+    /// Neither is `UnwindSafe`, because the metrics handles both can hold are
+    /// not, so the test does not ask for it.
+    #[test]
+    fn public_types_keep_their_auto_traits() {
+        fn shared<T: Send + Sync>() {}
+        shared::<crate::DatagenSource>();
+        shared::<crate::DatagenLane>();
+    }
+}

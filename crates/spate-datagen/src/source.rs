@@ -12,6 +12,7 @@ use crate::lane::{DatagenLane, LaneParts, Shared, park};
 use crate::metrics::DatagenMetrics;
 use crate::plan::EventPlan;
 use spate_core::checkpoint::AckIssuer;
+use spate_core::clock::SyncClock;
 use spate_core::config::{ComponentConfig, ConfigError};
 use spate_core::error::{ErrorClass, SourceError};
 use spate_core::framing::FramingContract;
@@ -44,6 +45,8 @@ pub struct DatagenSource {
     watermarks: BTreeMap<PartitionId, i64>,
     handed_out: bool,
     drained: bool,
+    /// Times every lane's rate gate.
+    clock: SyncClock,
 }
 
 impl DatagenSource {
@@ -56,7 +59,16 @@ impl DatagenSource {
             watermarks: BTreeMap::new(),
             handed_out: false,
             drained: false,
+            clock: SyncClock::system(),
         }
+    }
+
+    /// Test seam: time the lanes' rate gates on `clock`.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn with_clock(mut self, clock: spate_core::clock::SharedClock) -> DatagenSource {
+        self.clock = SyncClock::new(clock);
+        self
     }
 
     /// Build from the pipeline's opaque `source: { datagen: ... }` section.
@@ -138,6 +150,7 @@ impl Source for DatagenSource {
     fn poll_events(&mut self, timeout: Duration) -> Result<SourceEvent<DatagenLane>, SourceError> {
         if !self.handed_out {
             let config = self.config.clone();
+            let clock = self.clock.clone();
             let state = self.open_state()?;
             let lanes = (0..config.partitions)
                 .map(|index| {
@@ -155,6 +168,7 @@ impl Source for DatagenSource {
                             .map_or(u64::MAX, |b| b[index as usize]),
                         tick_interval: config.tick_interval,
                         events_per_tick: config.events_per_tick as usize,
+                        clock: clock.clone(),
                     })
                 })
                 .collect();
@@ -251,7 +265,10 @@ mod tests {
     use super::*;
     use crate::events::StorefrontEvent;
     use spate_core::checkpoint::Checkpointer;
+    use spate_core::clock::{SharedClock, TestClock};
+    use spate_core::metrics::Meter;
     use spate_core::source::{PayloadBatch, SourceLane};
+    use spate_test::render_metrics;
 
     const POLL: Duration = Duration::from_millis(1);
 
@@ -267,13 +284,51 @@ mod tests {
 
     /// Open a source and take its one assignment.
     fn start(config: DatagenSourceConfig) -> (DatagenSource, Checkpointer, Vec<DatagenLane>) {
+        start_with(DatagenSource::new(config), None)
+    }
+
+    /// Open `source`, with lane counters under `meter` when one is given, and
+    /// take its one assignment.
+    fn start_with(
+        mut source: DatagenSource,
+        meter: Option<Meter>,
+    ) -> (DatagenSource, Checkpointer, Vec<DatagenLane>) {
         let cp = Checkpointer::new();
-        let mut source = DatagenSource::new(config);
-        source.open(SourceCtx::new(cp.handle())).unwrap();
+        source
+            .open(SourceCtx::new(cp.handle()).with_meter(meter))
+            .unwrap();
         let SourceEvent::LanesAssigned(lanes) = source.poll_events(POLL).unwrap() else {
             panic!("the first poll assigns every lane");
         };
         (source, cp, lanes)
+    }
+
+    /// A throttled one-lane source whose gate reads `clock`.
+    fn throttled(
+        clock: &Arc<TestClock>,
+        tick_interval: Duration,
+        events_per_tick: u32,
+        meter: Option<Meter>,
+    ) -> (DatagenSource, Checkpointer, Vec<DatagenLane>) {
+        let cfg = DatagenSourceConfig {
+            partitions: 1,
+            count: None,
+            tick_interval,
+            events_per_tick,
+            ..DatagenSourceConfig::default()
+        };
+        let clock: SharedClock = clock.clone();
+        start_with(DatagenSource::new(cfg).with_clock(clock), meter)
+    }
+
+    /// Events one poll releases, or `None` when the gate holds it.
+    fn released(lane: &mut DatagenLane, max_records: usize) -> Option<usize> {
+        let mut batch = lane.poll(max_records, Duration::ZERO).unwrap()?;
+        let mut count = 0;
+        while batch.next_payload().is_some() {
+            count += 1;
+        }
+        Some(count)
     }
 
     /// Drain a lane to exhaustion, returning every payload it produced as
@@ -444,32 +499,21 @@ mod tests {
         assert!(source.open(SourceCtx::new(cp.handle())).is_err());
     }
 
-    /// A throttled lane releases its quota and then parks, rather than
-    /// draining its whole budget on the first poll.
+    /// A throttled lane releases `events_per_tick` and then holds until the
+    /// lane's clock reaches the next tick, and not a nanosecond before.
     #[test]
     fn the_rate_gate_releases_one_quota_per_cadence() {
-        let cfg = DatagenSourceConfig {
-            partitions: 1,
-            count: Some(100),
-            tick_interval: Duration::from_millis(50),
-            events_per_tick: 3,
-            ..DatagenSourceConfig::default()
-        };
-        let (_source, _cp, mut lanes) = start(cfg);
-        let mut batch = lanes[0].poll(64, POLL).unwrap().expect("the first tick");
-        let mut released = 0;
-        while batch.next_payload().is_some() {
-            released += 1;
-        }
-        assert_eq!(
-            released, 3,
-            "a tick releases events_per_tick, not the budget"
-        );
-        drop(batch);
-        assert!(
-            lanes[0].poll(64, POLL).unwrap().is_none(),
-            "the next cadence is not due yet"
-        );
+        let interval = Duration::from_secs(60);
+        let clock = TestClock::frozen();
+        let (_source, _cp, mut lanes) = throttled(&clock, interval, 3, None);
+        let lane = &mut lanes[0];
+
+        assert_eq!(released(lane, 64), Some(3), "the first tick is due at once");
+        assert_eq!(released(lane, 64), None, "the quota is spent");
+        clock.advance(interval - Duration::from_nanos(1));
+        assert_eq!(released(lane, 64), None, "the next tick is not due yet");
+        clock.advance(Duration::from_nanos(1));
+        assert_eq!(released(lane, 64), Some(3), "the next tick is due");
     }
 
     /// A tick's quota survives a `max_records` smaller than itself: it is
@@ -484,7 +528,8 @@ mod tests {
             events_per_tick: 50,
             ..DatagenSourceConfig::default()
         };
-        let (_source, _cp, mut lanes) = start(cfg);
+        let clock: SharedClock = TestClock::frozen();
+        let (_source, _cp, mut lanes) = start_with(DatagenSource::new(cfg).with_clock(clock), None);
 
         // One cadence, polled in batches of 8. The second tick is a minute
         // out, so everything counted here belongs to the first.
@@ -495,6 +540,68 @@ mod tests {
             }
         }
         assert_eq!(released, 50, "the whole quota, not one max_records batch");
+    }
+
+    /// A tick polled before a whole interval has passed since it fell due is
+    /// on time; one polled a whole interval late counts an overrun and
+    /// re-anchors the cadence to the present.
+    #[test]
+    fn the_rate_gate_counts_an_overrun_only_a_whole_interval_late() {
+        let interval = Duration::from_secs(60);
+        let nano = Duration::from_nanos(1);
+        let clock = TestClock::frozen();
+        let rendered = render_metrics(|| {
+            let meter = Meter::with_namespace("datagen", "orders", "overrun", "datagen");
+            let (_source, _cp, mut lanes) = throttled(&clock, interval, 3, Some(meter));
+            let lane = &mut lanes[0];
+
+            assert_eq!(released(lane, 64), Some(3), "tick 1 at t0");
+            clock.advance(2 * interval - nano);
+            assert_eq!(
+                released(lane, 64),
+                Some(3),
+                "tick 2, a nanosecond short of late"
+            );
+            clock.advance(interval + nano);
+            assert_eq!(released(lane, 64), Some(3), "tick 3, a whole interval late");
+            assert_eq!(
+                released(lane, 64),
+                None,
+                "the cadence re-anchored to t0 + 4 intervals"
+            );
+        });
+        for want in [
+            r#"spate_datagen_ticks_total{pipeline="orders",component="overrun",component_type="datagen"} 3"#,
+            r#"spate_datagen_tick_overrun_total{pipeline="orders",component="overrun",component_type="datagen"} 1"#,
+        ] {
+            assert!(
+                rendered.lines().any(|line| line == want),
+                "missing {want} in:\n{rendered}"
+            );
+        }
+    }
+
+    /// A `tick_interval` past the clock's range leaves no next deadline, so
+    /// the lane never releases, however far its clock moves.
+    #[test]
+    fn an_interval_past_the_clock_range_never_releases() {
+        let clock = TestClock::frozen();
+        let rendered = render_metrics(|| {
+            let meter = Meter::with_namespace("datagen", "orders", "past-range", "datagen");
+            let (_source, _cp, mut lanes) = throttled(&clock, Duration::MAX, 3, Some(meter));
+            let lane = &mut lanes[0];
+
+            assert_eq!(released(lane, 64), None, "no deadline, so no first tick");
+            clock.advance(Duration::from_secs(3600));
+            for _ in 0..3 {
+                assert_eq!(released(lane, 64), None);
+            }
+        });
+        let want = r#"spate_datagen_ticks_total{pipeline="orders",component="past-range",component_type="datagen"} 0"#;
+        assert!(
+            rendered.lines().any(|line| line == want),
+            "missing {want} in:\n{rendered}"
+        );
     }
 
     /// `events_remaining` answers for a bounded run from the moment the lanes

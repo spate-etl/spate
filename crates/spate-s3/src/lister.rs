@@ -308,6 +308,8 @@ impl Lister {
                         error = %e,
                         "the feed rejected a unit as retryable; publishing it again"
                     );
+                    // The tokio timer, not the source's clock, so a frozen
+                    // test clock cannot hold a retrying publish.
                     tokio::time::sleep(self.retry_base * 2u32.pow(attempt - 1)).await;
                     confirmation = self.feed.publish(unit.clone());
                     attempt += 1;

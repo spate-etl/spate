@@ -119,3 +119,15 @@ pub use split::{
     DESCRIPTOR_VERSION, DescriptorObject, MAX_UNIT_MEMBERS, SplitDescriptor, SplitError,
     SplitRange, split_id_for, split_id_for_range,
 };
+
+#[cfg(test)]
+mod tests {
+    /// The public types keep their auto traits: the lane and the source are
+    /// each `Send`.
+    #[test]
+    fn public_types_keep_their_auto_traits() {
+        fn send<T: Send>() {}
+        send::<crate::S3Lane>();
+        send::<crate::S3Source>();
+    }
+}

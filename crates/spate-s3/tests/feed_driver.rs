@@ -10,6 +10,7 @@ mod support;
 
 use spate_core::checkpoint::Checkpointer;
 use spate_core::clock::TestClock;
+use spate_core::clock::tokio::{Clock as _, TestClock as LaneClock};
 use spate_core::config::{FeedSection, PipelineConfig};
 use spate_core::feed::memory::{FeedCounts, MemoryFeed};
 use spate_core::feed::{Feed, FeedErrorKind, FeedOrigin, Receipt, STOP_RESERVE, Unit};
@@ -1285,6 +1286,62 @@ fn a_notification_outside_the_urls_prefix_is_failed_back() {
         "an object outside the prefix was read"
     );
     stop(&l);
+}
+
+/// Pins that the clock `with_clock` sets times the lanes' receive deadline:
+/// a live lane whose object read is held waits on that clock for the
+/// driver's poll timeout, and the run stops by moving it.
+#[test]
+fn the_lane_clock_reaches_the_lanes() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    let rows = recs("held", 3);
+    stage(&data, "a.ndjson", &rows);
+    let (feed, script) = scripted_feed();
+    script.deliver(notification(&[(
+        "data/a.ndjson",
+        size_of(&data, "a.ndjson"),
+    )]));
+    let store = ScriptedStore::new(dir.path());
+    store.hold_get(1);
+    let clock = LaneClock::frozen();
+    let poll = test_options().poll_timeout;
+    let deadline = clock.now() + poll;
+    let (held_store, lane_clock) = (Arc::clone(&store), Arc::clone(&clock));
+    let feed: Arc<dyn Feed> = Arc::new(feed);
+    let l = launch_customized(
+        &overwrite_yaml(),
+        test_options(),
+        |_| {},
+        move |source, _io| {
+            line_framer(source)
+                .with_store(held_store)
+                .with_feed(feed)
+                .with_clock(lane_clock)
+        },
+    );
+
+    wait_until(DEADLINE, "the object's GET is held", || store.holding());
+    wait_until(DEADLINE, "the idle lane waits on the clock", || {
+        clock.has_slept_until(deadline)
+    });
+    store.release();
+    wait_until(DEADLINE, "the object is read and acknowledged", || {
+        script.acknowledged().len() == 1
+    });
+    assert_eq!(sorted(captured_rows(&l.script)), sorted(rows));
+
+    l.shutdown.trigger();
+    let mut report = None;
+    wait_until(DEADLINE, "the run exits", || {
+        report = l.run.wait_exit(Duration::ZERO);
+        if report.is_none() && clock.has_slept_until(clock.now() + poll) {
+            clock.advance(poll);
+        }
+        report.is_some()
+    });
+    let report = report.expect("the run exits").expect("the run starts");
+    assert_eq!(report.state, ExitState::Completed);
 }
 
 /// A run over `s3://b/data/` that reads the directory `root` through `store`,

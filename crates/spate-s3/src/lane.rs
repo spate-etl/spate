@@ -34,14 +34,17 @@ use crate::framer::{Codec, FramerFactory, ObjectFramer};
 use crate::lane_ctx::{PoisonKind, PoisonReport, SplitTracker};
 use crate::metrics::S3Metrics;
 use crate::offset::{MAX_RECORD_INDEX, Position};
+use futures_util::future::{Either, select};
 use spate_core::checkpoint::{AckIssuer, AckRef};
+use spate_core::clock::tokio::Clock;
 use spate_core::error::{ErrorClass, SourceError};
 use spate_core::feed::FeedWaker;
 use spate_core::record::{PartitionId, RawPayload};
 use spate_core::source::{LaneId, PayloadBatch, SourceLane};
+use std::pin::pin;
 use std::sync::Arc;
 use std::sync::mpsc as std_mpsc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TryRecvError;
 
@@ -88,6 +91,8 @@ pub struct S3Lane {
     partition: PartitionId,
     rx: mpsc::Receiver<ChunkMsg>,
     handle: tokio::runtime::Handle,
+    /// Times each poll's receive deadline.
+    clock: Arc<dyn Clock>,
     issuer: AckIssuer,
     compression: Compression,
     framer: ObjectFramer,
@@ -147,6 +152,7 @@ impl S3Lane {
         partition: PartitionId,
         rx: mpsc::Receiver<ChunkMsg>,
         handle: tokio::runtime::Handle,
+        clock: Arc<dyn Clock>,
         issuer: AckIssuer,
         compression: Compression,
         make_framer: FramerFactory,
@@ -165,6 +171,7 @@ impl S3Lane {
             partition,
             rx,
             handle,
+            clock,
             issuer,
             compression,
             framer: ObjectFramer::new(make_framer),
@@ -454,12 +461,13 @@ impl SourceLane for S3Lane {
         if self.poisoned {
             // Quiescent until the control plane retires the lane; bounded
             // idle, never a busy-spin, never an error (a poll error would
-            // fail the pipeline; poison must not).
+            // fail the pipeline; poison must not). Real time, so a frozen
+            // test clock cannot wedge a retired lane.
             std::thread::sleep(timeout);
             return Ok(None);
         }
         self.held.clear();
-        let deadline = Instant::now() + timeout;
+        let deadline = self.clock.now() + timeout;
         // Whether this poll has already tried the channel. The deadline
         // must not short-circuit the *first* receive: with `timeout` zero
         // (the driver's head-of-line rotation) `now >= deadline` is true
@@ -497,7 +505,7 @@ impl SourceLane for S3Lane {
             // poll still consumes one ready chunk (and the framing pass at
             // the top of the next iteration turns it into records) before
             // this bails.
-            if recv_attempted && Instant::now() >= deadline {
+            if recv_attempted && self.clock.now() >= deadline {
                 if self.held.is_empty() {
                     return Ok(None);
                 }
@@ -510,21 +518,27 @@ impl SourceLane for S3Lane {
                     if !self.held.is_empty() {
                         break; // hand over what we have instead of waiting
                     }
-                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    let remaining = deadline.saturating_duration_since(self.clock.now());
                     if remaining.is_zero() {
                         return Ok(None);
                     }
                     let rx = &mut self.rx;
-                    // Constructed inside the runtime context (the timer
-                    // registers with the ambient reactor); blocks this
-                    // pipeline thread only, bounded by the poll timeout.
-                    match self
-                        .handle
-                        .block_on(async { tokio::time::timeout(remaining, rx.recv()).await })
-                    {
-                        Ok(Some(m)) => Some(m),
-                        Ok(None) => None,
-                        Err(_) => return Ok(None), // timed out idle
+                    let clock = &self.clock;
+                    // The sleep is built inside `block_on` because a tokio
+                    // timer registers with the runtime it is created in.
+                    // Blocks this pipeline thread only, bounded by the poll
+                    // timeout.
+                    let received = self.handle.block_on(async {
+                        let sleep = clock.sleep_until(deadline);
+                        match select(pin!(rx.recv()), sleep).await {
+                            Either::Left((received, _)) => Some(received),
+                            Either::Right(_) => None,
+                        }
+                    });
+                    match received {
+                        Some(Some(m)) => Some(m),
+                        Some(None) => None,
+                        None => return Ok(None), // timed out idle
                     }
                 }
                 Err(TryRecvError::Disconnected) => None,
@@ -625,6 +639,7 @@ mod tests {
     use super::*;
     use crate::testutil::TestLineFramer;
     use spate_core::checkpoint::Checkpointer;
+    use spate_core::clock::tokio::{SystemClock, TestClock};
     use spate_core::feed::wake_channel;
 
     fn runtime() -> tokio::runtime::Runtime {
@@ -644,11 +659,33 @@ mod tests {
     }
 
     fn rig(resume: Option<Position>) -> LaneRig {
-        rig_with(resume, wake_channel().0)
+        rig_with(resume, wake_channel().0, || Arc::new(SystemClock))
     }
 
-    fn rig_with(resume: Option<Position>, waker: FeedWaker) -> LaneRig {
+    /// A rig whose lane times its receive deadline on a frozen clock.
+    fn frozen_rig() -> (LaneRig, Arc<TestClock>) {
+        let mut frozen = None;
+        let rig = rig_with(None, wake_channel().0, || {
+            let clock = TestClock::frozen();
+            frozen = Some(Arc::clone(&clock));
+            clock
+        });
+        (rig, frozen.expect("the rig built the clock"))
+    }
+
+    /// A rig over a lane built with `waker` and the clock `make_clock`
+    /// returns, which runs inside the rig's runtime so a tokio clock reads
+    /// that runtime's time.
+    fn rig_with(
+        resume: Option<Position>,
+        waker: FeedWaker,
+        make_clock: impl FnOnce() -> Arc<dyn Clock>,
+    ) -> LaneRig {
         let rt = runtime();
+        let clock = {
+            let _entered = rt.enter();
+            make_clock()
+        };
         let (tx, rx) = mpsc::channel(64);
         let checkpointer = Checkpointer::new();
         let tracker = Arc::new(SplitTracker::new());
@@ -658,6 +695,7 @@ mod tests {
             PartitionId(0),
             rx,
             rt.handle().clone(),
+            clock,
             checkpointer.handle(),
             Compression::Auto,
             Arc::new(|| Box::new(TestLineFramer::new(1 << 20))),
@@ -887,7 +925,7 @@ mod tests {
     #[test]
     fn end_of_input_wakes_the_control_plane() {
         let (waker, park) = wake_channel();
-        let mut r = rig_with(None, waker);
+        let mut r = rig_with(None, waker, || Arc::new(SystemClock));
         start(&r, 0, "p/a.ndjson");
         send(&r, ChunkMsg::Chunk(bytes::Bytes::from_static(b"a1\na2\n")));
         send(&r, ChunkMsg::ObjectEnd);
@@ -912,7 +950,7 @@ mod tests {
     #[test]
     fn poison_wakes_the_control_plane() {
         let (waker, park) = wake_channel();
-        let mut r = rig_with(None, waker);
+        let mut r = rig_with(None, waker, || Arc::new(SystemClock));
         start(&r, 0, "p/a.ndjson");
         send(&r, ChunkMsg::Chunk(bytes::Bytes::from_static(b"a1\n")));
         send(
@@ -980,17 +1018,103 @@ mod tests {
         assert_eq!(third[0].1, b"5".to_vec());
     }
 
+    /// Bounds every wait for a poll thread to reach its idle wait.
+    const ARMED: Duration = Duration::from_secs(10);
+
+    /// Moves the clock past every deadline when the test panics, so the
+    /// thread scope's join does not wait on a poll parked on the frozen
+    /// clock.
+    struct AdvanceOnPanic<'a>(&'a TestClock);
+
+    impl Drop for AdvanceOnPanic<'_> {
+        fn drop(&mut self) {
+            if std::thread::panicking() {
+                self.0.advance(Duration::from_secs(3600));
+            }
+        }
+    }
+
+    /// Pins that an idle poll waits on the lane's clock until its timeout,
+    /// then returns `Ok(None)` without deciding end-of-input.
     #[test]
-    fn idle_poll_times_out_with_none() {
-        let mut r = rig(None);
-        let started = Instant::now();
-        let polled = r.lane.poll(512, Duration::from_millis(60)).unwrap();
-        assert!(polled.is_none());
-        assert!(
-            started.elapsed() >= Duration::from_millis(50),
-            "idle poll must block up to the timeout, not busy-spin"
-        );
+    fn an_idle_poll_parks_until_the_clock_reaches_its_timeout() {
+        let (mut r, clock) = frozen_rig();
+        let timeout = Duration::from_millis(60);
+        let deadline = clock.now() + timeout;
+        let lane = &mut r.lane;
+        std::thread::scope(|scope| {
+            let polling = scope.spawn(move || lane.poll(512, timeout).map(|b| b.is_none()));
+            let _release = AdvanceOnPanic(&clock);
+            spate_test::wait_until(ARMED, "the poll arms its deadline", || {
+                clock.has_slept_until(deadline)
+            });
+            assert!(!polling.is_finished(), "returned before the clock moved");
+            clock.advance(timeout);
+            let idle = polling.join().expect("the poll thread").expect("poll");
+            assert!(idle, "an idle poll returned a batch");
+        });
         assert!(r.tracker.terminal().is_none(), "idle is not end-of-input");
+    }
+
+    /// Pins that a zero-timeout poll still takes one ready message, so the
+    /// next poll frames the chunk behind it, and that neither poll waits.
+    #[test]
+    fn a_zero_timeout_poll_still_takes_a_ready_chunk() {
+        let (mut r, _clock) = frozen_rig();
+        start(&r, 0, "p/a.ndjson");
+        send(&r, ChunkMsg::Chunk(bytes::Bytes::from_static(b"a\n")));
+        assert!(r.lane.poll(512, Duration::ZERO).unwrap().is_none());
+        let batch = r.lane.poll(512, Duration::ZERO).unwrap();
+        let mut batch = batch.expect("the chunk's record");
+        assert_eq!(batch.next_payload().map(|p| p.bytes), Some(b"a".as_slice()));
+        assert!(batch.next_payload().is_none(), "one record");
+    }
+
+    /// Pins that the deadline caps a poll whose chunks frame no record: the
+    /// poll returns after one receive past the deadline, leaving the next
+    /// chunk queued.
+    #[test]
+    fn the_deadline_caps_a_poll_that_frames_nothing() {
+        let (mut r, _clock) = frozen_rig();
+        start(&r, 0, "p/a.ndjson");
+        send(&r, ChunkMsg::Chunk(bytes::Bytes::from_static(b"ab")));
+        send(&r, ChunkMsg::Chunk(bytes::Bytes::from_static(b"c\n")));
+        assert!(r.lane.poll(512, Duration::ZERO).unwrap().is_none());
+        assert!(r.lane.poll(512, Duration::ZERO).unwrap().is_none());
+        let tx = r.tx.as_ref().unwrap();
+        assert_eq!(tx.max_capacity() - tx.capacity(), 1, "b\"c\\n\" was taken");
+        let batch = r.lane.poll(512, Duration::ZERO).unwrap();
+        let mut batch = batch.expect("the joined record");
+        assert_eq!(
+            batch.next_payload().map(|p| p.bytes),
+            Some(b"abc".as_slice())
+        );
+    }
+
+    /// Pins that the channel closing while a poll waits on the clock ends the
+    /// lane: the poll returns `Ok(None)` and records the terminal watermark.
+    #[test]
+    fn closing_the_channel_while_a_poll_waits_ends_the_lane() {
+        let (mut r, clock) = frozen_rig();
+        start(&r, 0, "p/a.ndjson");
+        send(&r, ChunkMsg::Chunk(bytes::Bytes::from_static(b"a\n")));
+        send(&r, ChunkMsg::ObjectEnd);
+        assert_eq!(poll_batch(&mut r.lane, 512).map(|b| b.len()), Some(1));
+        let timeout = Duration::from_millis(60);
+        let deadline = clock.now() + timeout;
+        let tx = r.tx.take();
+        let lane = &mut r.lane;
+        std::thread::scope(|scope| {
+            let polling = scope.spawn(move || lane.poll(512, timeout).map(|b| b.is_none()));
+            let _release = AdvanceOnPanic(&clock);
+            spate_test::wait_until(ARMED, "the poll arms its deadline", || {
+                clock.has_slept_until(deadline)
+            });
+            drop(tx);
+            let idle = polling.join().expect("the poll thread").expect("poll");
+            assert!(idle, "a closed lane returned a batch");
+        });
+        assert!(r.tracker.terminal().is_some(), "the close ended the lane");
     }
 
     fn overwrite() -> ChunkMsg {

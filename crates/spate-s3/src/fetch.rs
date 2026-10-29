@@ -303,6 +303,8 @@ async fn pause_gate(pause: &AtomicBool, tx: &mpsc::Sender<ChunkMsg>) -> Result<(
         if tx.is_closed() {
             return Err(());
         }
+        // The tokio timer, not the source's clock, so a frozen test clock
+        // cannot hold a paused fetcher.
         tokio::time::sleep(PAUSE_POLL).await;
     }
     Ok(())
@@ -933,6 +935,8 @@ async fn retry_or_fail(
         error = %crate::error::bounded_reason(e),
         "transient object read failure; backing off and resuming with a ranged get"
     );
+    // The tokio timer, not the source's clock, so a frozen test clock cannot
+    // hold a retrying read.
     tokio::time::sleep(backoff).await;
     Ok(())
 }
@@ -2731,6 +2735,7 @@ mod tests {
         use crate::lane::S3Lane;
         use crate::lane_ctx::SplitTracker;
         use crate::offset::Position;
+        use spate_core::clock::tokio::SystemClock;
         use spate_core::source::{PayloadBatch as _, SourceLane as _};
 
         let flaky = FlakyStore {
@@ -2771,6 +2776,7 @@ mod tests {
             spate_core::record::PartitionId(0),
             rx,
             rt.handle().clone(),
+            Arc::new(SystemClock),
             spate_core::checkpoint::Checkpointer::new().handle(),
             crate::config::Compression::None,
             Arc::new(|| Box::new(crate::testutil::TestLineFramer::new(1 << 20))),

@@ -60,6 +60,7 @@ use crate::metrics::S3Metrics;
 use crate::split::Packing;
 use crate::unit::{Cursor, Decoded, Origin, Part, Scope, decode, re_enqueue_body};
 use spate_core::checkpoint::AckIssuer;
+use spate_core::clock::tokio::Clock;
 use spate_core::error::SourceError;
 use spate_core::feed::{
     Confirmation, Delivery, Feed, FeedError, FeedErrorKind, FeedPark, FeedWaker, Receipt, Unit,
@@ -84,6 +85,8 @@ pub(crate) const UNITS_HELD: NonZeroUsize = NonZeroUsize::new(96).expect("non-ze
 pub(crate) struct LaneParts {
     pub(crate) store: Arc<dyn object_store::ObjectStore>,
     pub(crate) handle: tokio::runtime::Handle,
+    /// Times each lane's receive deadline.
+    pub(crate) clock: Arc<dyn Clock>,
     pub(crate) issuer: AckIssuer,
     pub(crate) make_framer: FramerFactory,
     /// Which whole objects are read in ranges, and which ranged units the
@@ -950,6 +953,7 @@ impl UnitReader {
             partition,
             rx,
             parts.handle.clone(),
+            Arc::clone(&parts.clock),
             parts.issuer.clone(),
             parts.packing.compression,
             Arc::clone(&parts.make_framer),
@@ -1017,7 +1021,7 @@ mod tests {
     use crate::split::{DescriptorObject, SplitDescriptor};
     use crate::testutil::TestLineFramer;
     use spate_core::checkpoint::Checkpointer;
-    use spate_core::clock::tokio::{Clock, TestClock};
+    use spate_core::clock::tokio::{Clock, SystemClock, TestClock};
     use spate_core::feed::{Confirmation, Unit};
     use spate_core::metrics::{Meter, render_local};
     use spate_core::source::SourceLane as _;
@@ -1042,6 +1046,7 @@ mod tests {
         let parts = LaneParts {
             store: Arc::new(object_store::memory::InMemory::new()),
             handle: rt.handle().clone(),
+            clock: Arc::new(SystemClock),
             issuer: Checkpointer::new().handle(),
             make_framer: Arc::new(|| Box::new(TestLineFramer::new(1 << 20))),
             packing: Packing {
@@ -1472,6 +1477,7 @@ mod tests {
         let parts = LaneParts {
             store: Arc::new(object_store::memory::InMemory::new()),
             handle: rt.handle().clone(),
+            clock: Arc::new(SystemClock),
             issuer: Checkpointer::new().handle(),
             make_framer: Arc::new(|| Box::new(TestLineFramer::new(1 << 20))),
             packing: Packing {
@@ -2087,6 +2093,7 @@ mod tests {
                 let parts = LaneParts {
                     store: Arc::new(store),
                     handle: rt.handle().clone(),
+                    clock: Arc::new(SystemClock),
                     issuer: Checkpointer::new().handle(),
                     make_framer: Arc::new(|| Box::new(TestLineFramer::new(1 << 20))),
                     packing: Packing {

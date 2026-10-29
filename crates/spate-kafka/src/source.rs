@@ -623,7 +623,10 @@ impl Source for KafkaSource {
         let consumer: BaseConsumer<SourceContext> = self
             .config
             .base(crate::security::openssl_env_overrides())
-            .create(&crate::config::Consumer(&self.config), SourceHooks::default())
+            .create(
+                &crate::config::Consumer(&self.config),
+                SourceHooks::default(),
+            )
             .map_err(|reason| SourceError::Client {
                 class: ErrorClass::Fatal,
                 reason: format!("create consumer: {reason}"),

@@ -248,7 +248,11 @@ impl Base<'_> {
         }
         for written in self.rdkafka.keys() {
             let name = canonical(written);
-            if let Some((owned, why)) = keys.owned.iter().find(|(owned, _)| canonical(owned) == name) {
+            if let Some((owned, why)) = keys
+                .owned
+                .iter()
+                .find(|(owned, _)| canonical(owned) == name)
+            {
                 return Err(Refusal {
                     written,
                     owned,
@@ -273,10 +277,18 @@ impl Base<'_> {
     }
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the one place a Kafka client configuration starts"
+)]
 fn new_config() -> ClientConfig {
     ClientConfig::new()
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the one place a Kafka client is built"
+)]
 fn construct<T, C>(config: &ClientConfig, context: C) -> Result<T, KafkaError>
 where
     C: ClientContext,
@@ -399,11 +411,49 @@ pub(crate) mod testing {
         }
         construct(&cc, SpateContext(hooks)).expect("client")
     }
+
+    /// A configuration a test builds itself, outside every role.
+    pub(crate) fn raw_config() -> ClientConfig {
+        new_config()
+    }
+
+    /// Builds a client from a [`raw_config`].
+    pub(crate) trait Raw {
+        fn build<T: rdkafka::config::FromClientConfig>(&self) -> Result<T, KafkaError>;
+
+        fn build_with<C, T>(&self, context: C) -> Result<T, KafkaError>
+        where
+            C: ClientContext,
+            T: FromClientConfigAndContext<C>;
+    }
+
+    impl Raw for ClientConfig {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "a test client is built outside every role"
+        )]
+        fn build<T: rdkafka::config::FromClientConfig>(&self) -> Result<T, KafkaError> {
+            self.create()
+        }
+
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "a test client is built outside every role"
+        )]
+        fn build_with<C, T>(&self, context: C) -> Result<T, KafkaError>
+        where
+            C: ClientContext,
+            T: FromClientConfigAndContext<C>,
+        {
+            self.create_with_context(context)
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::client::testing::raw_config;
     use crate::KafkaSourceConfig;
     use crate::config::Consumer;
     use crate::context::SourceHooks;
@@ -535,17 +585,25 @@ mod tests {
         for (alias, target) in ALIASES {
             assert_eq!(canonical(alias), canonical(target), "{alias}");
             assert_eq!(canonical(alias), target, "{alias}");
-            assert_eq!(canonical(&format!("topic.{alias}")), target, "topic.{alias}");
+            assert_eq!(
+                canonical(&format!("topic.{alias}")),
+                target,
+                "topic.{alias}"
+            );
             let value = match target {
                 "metadata.broker.list" => "broker-a:9092",
                 "request.required.acks" => "-1",
                 "message.timeout.ms" => "12345",
                 _ => "gzip",
             };
-            let mut cc = ClientConfig::new();
+            let mut cc = raw_config();
             cc.set(alias, value);
             let native = cc.create_native_config().expect("native config");
-            assert_eq!(native.get(target).as_deref(), Ok(value), "{alias} writes {target}");
+            assert_eq!(
+                native.get(target).as_deref(),
+                Ok(value),
+                "{alias} writes {target}"
+            );
         }
         assert_eq!(
             canonical("topic.metadata.propagation.max.ms"),
@@ -558,11 +616,14 @@ mod tests {
     /// from the global `enable.auto.commit` the source owns.
     #[test]
     fn auto_commit_enable_is_not_an_alias_of_enable_auto_commit() {
-        let mut cc = ClientConfig::new();
+        let mut cc = raw_config();
         cc.set("auto.commit.enable", "false");
         let native = cc.create_native_config().expect("native config");
         assert_eq!(native.get("enable.auto.commit").as_deref(), Ok("true"));
-        assert_ne!(canonical("auto.commit.enable"), canonical("enable.auto.commit"));
+        assert_ne!(
+            canonical("auto.commit.enable"),
+            canonical("enable.auto.commit")
+        );
     }
 
     /// Each key a role sets is refused in its section's passthrough under
@@ -613,7 +674,12 @@ mod tests {
             let cc = wronged_base.config(&*wronged_role);
             for (key, value) in expected.config_map() {
                 if !NOT_OWNED.contains(&key) {
-                    assert_eq!(cc.get(key), Some(value), "{section:?} {} {key}", role.name());
+                    assert_eq!(
+                        cc.get(key),
+                        Some(value),
+                        "{section:?} {} {key}",
+                        role.name()
+                    );
                 }
             }
             if matches!(role.name(), "producer" | "probe") {
@@ -690,7 +756,14 @@ mod tests {
             assert!(base.denied(&[&*role]).is_ok(), "{}", role.name());
             assert_eq!(
                 base.config(&*role).get("client.id"),
-                Some(format!("spate-{}-{}", base.section.split('.').next().unwrap(), role.name()).as_str())
+                Some(
+                    format!(
+                        "spate-{}-{}",
+                        base.section.split('.').next().unwrap(),
+                        role.name()
+                    )
+                    .as_str()
+                )
             );
         }
     }
@@ -720,10 +793,17 @@ mod tests {
         for (_, base, role) in sections.roles(false) {
             let err = match role.name() {
                 "consumer" | "depth" | "follower" => base
-                    .create::<BaseConsumer<SpateContext<SourceHooks>>, _>(&*role, SourceHooks::default())
+                    .create::<BaseConsumer<SpateContext<SourceHooks>>, _>(
+                        &*role,
+                        SourceHooks::default(),
+                    )
                     .err(),
-                "admin" => base.create::<AdminClient<SpateContext<()>>, _>(&*role, ()).err(),
-                _ => base.create::<BaseProducer<SpateContext<()>>, _>(&*role, ()).err(),
+                "admin" => base
+                    .create::<AdminClient<SpateContext<()>>, _>(&*role, ())
+                    .err(),
+                _ => base
+                    .create::<BaseProducer<SpateContext<()>>, _>(&*role, ())
+                    .err(),
             }
             .unwrap_or_else(|| panic!("{} accepted the value", role.name()));
             assert!(err.contains("debug"), "{err}");
@@ -736,7 +816,10 @@ mod tests {
     fn base_debug_never_prints_passthrough_values() {
         let rdkafka = map(&[
             ("ssl.key.pem", "PRIVATE-KEY"),
-            ("sasl.oauthbearer.client.credentials.client.secret", "hunter2"),
+            (
+                "sasl.oauthbearer.client.credentials.client.secret",
+                "hunter2",
+            ),
         ]);
         let base = Base {
             section: "source.kafka",

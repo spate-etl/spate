@@ -10,6 +10,8 @@
 
 mod support;
 
+use support::Raw as _;
+
 use bytes::BytesMut;
 use rdkafka::ClientConfig;
 use rdkafka::client::ClientContext;
@@ -373,7 +375,7 @@ impl Drop for Scratch {
 
 /// A raw TLS client configuration for `brokers`, with no CA setting.
 fn raw(brokers: &str) -> ClientConfig {
-    let mut cc = ClientConfig::new();
+    let mut cc = support::raw_config();
     cc.set("bootstrap.servers", brokers)
         .set("security.protocol", "ssl")
         .set("group.id", "tls-system-ca-raw");
@@ -388,7 +390,7 @@ fn verifies(cc: &ClientConfig) -> bool {
         .clone()
         .set("debug", "security")
         .set_log_level(RDKafkaLogLevel::Debug)
-        .create_with_context(lines.clone())
+        .build_with(lines.clone())
         .expect("raw consumer");
     let mut verified = None;
     spate_test::wait_until(

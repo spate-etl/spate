@@ -17,10 +17,10 @@
 //! connecting with the rejection's text, as soon as the client reports it.
 
 use super::{KafkaFeedError, Topics};
+use crate::client::SpateContext;
 use crate::clock::SyncClock;
 use crate::sink::SinkContext;
 use rdkafka::admin::{AdminClient, AdminOptions, ResourceSpecifier};
-use crate::client::SpateContext;
 use rdkafka::error::{KafkaError, RDKafkaErrorCode};
 use rdkafka::producer::{Producer, ThreadedProducer};
 use spate_core::error::ErrorClass;
@@ -1115,7 +1115,8 @@ mod tests {
     fn a_rejection_refuses_the_connect_check_at_any_age() {
         use crate::client::testing::raw;
         let clock = spate_core::clock::TestClock::frozen();
-        let hooks = crate::sink::SinkHooks::detached(crate::clock::SyncClock::new(Arc::clone(&clock) as _));
+        let hooks =
+            crate::sink::SinkHooks::detached(crate::clock::SyncClock::new(Arc::clone(&clock) as _));
         let broker = crate::testutil::refused_broker();
         let properties = [("bootstrap.servers", broker.as_str())];
         let brokers = Brokers::new(raw(&properties, ()), raw(&properties, hooks));

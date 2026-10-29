@@ -308,7 +308,10 @@ impl Offsets for Brokers {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::client::SpateContext;
+    use crate::client::testing::raw;
     use crate::clock::SyncClock;
+    use crate::context::SourceHooks;
     use std::collections::HashMap;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -599,9 +602,12 @@ mod tests {
         use rdkafka::mocking::MockCluster;
         let cluster = MockCluster::new(1).expect("mock cluster");
         cluster.create_topic("work", 1, 1).expect("create topic");
-        let consumer = crate::client::testing::raw(
-            &[("bootstrap.servers", &cluster.bootstrap_servers()), ("group.id", "depth-partition-error")],
-            crate::context::SourceHooks::default(),
+        let consumer = raw(
+            &[
+                ("bootstrap.servers", &cluster.bootstrap_servers()),
+                ("group.id", "depth-partition-error"),
+            ],
+            SourceHooks::default(),
         );
         let reads = Brokers { consumer };
         let e = reads.committed(&[(Arc::from("work"), 9)]).unwrap_err();
@@ -616,9 +622,13 @@ mod tests {
         use rdkafka::consumer::Consumer as _;
         use rdkafka::mocking::MockCluster;
         let cluster = MockCluster::new(1).expect("mock cluster");
-        let consumer = crate::client::testing::raw(
-            &[("bootstrap.servers", &cluster.bootstrap_servers()), ("group.id", "depth-serve"), ("statistics.interval.ms", "10")],
-            crate::context::SourceHooks::default(),
+        let consumer = raw(
+            &[
+                ("bootstrap.servers", &cluster.bootstrap_servers()),
+                ("group.id", "depth-serve"),
+                ("statistics.interval.ms", "10"),
+            ],
+            SourceHooks::default(),
         );
         let reads = Brokers { consumer };
         spate_test::wait_until(
@@ -660,9 +670,12 @@ mod tests {
                 RDKafkaRespErr::RD_KAFKA_RESP_ERR_UNKNOWN_TOPIC_OR_PART,
             )
             .unwrap();
-        let consumer = crate::client::testing::raw(
-            &[("bootstrap.servers", &cluster.bootstrap_servers()), ("group.id", "depth-unknown")],
-            crate::context::SourceHooks::default(),
+        let consumer = raw(
+            &[
+                ("bootstrap.servers", &cluster.bootstrap_servers()),
+                ("group.id", "depth-unknown"),
+            ],
+            SourceHooks::default(),
         );
         let reads = Brokers { consumer };
         let e = reads.partitions(&Arc::from("dead")).unwrap_err();
@@ -729,8 +742,7 @@ mod tests {
         let cluster = MockCluster::new(1).expect("mock cluster");
         cluster.create_topic("work", 2, 1).expect("create topic");
         let brokers = cluster.bootstrap_servers();
-        let producer: BaseProducer<crate::client::SpateContext<()>> =
-            crate::client::testing::raw(&[("bootstrap.servers", &brokers)], ());
+        let producer: BaseProducer<SpateContext<()>> = raw(&[("bootstrap.servers", &brokers)], ());
         for _ in 0..3 {
             producer
                 .send(
@@ -742,9 +754,9 @@ mod tests {
                 .unwrap();
         }
         producer.flush(Duration::from_secs(30)).unwrap();
-        let consumer = crate::client::testing::raw(
+        let consumer = raw(
             &[("bootstrap.servers", &brokers), ("group.id", "depth-test")],
-            crate::context::SourceHooks::default(),
+            SourceHooks::default(),
         );
         let reads = Brokers { consumer };
         let work: Arc<str> = Arc::from("work");
@@ -794,9 +806,12 @@ mod tests {
         use rdkafka::types::{RDKafkaApiKey, RDKafkaRespErr};
         let cluster = MockCluster::new(1).expect("mock cluster");
         cluster.create_topic("work", 1, 1).expect("create topic");
-        let consumer = crate::client::testing::raw(
-            &[("bootstrap.servers", &cluster.bootstrap_servers()), ("group.id", "depth-denied")],
-            crate::context::SourceHooks::default(),
+        let consumer = raw(
+            &[
+                ("bootstrap.servers", &cluster.bootstrap_servers()),
+                ("group.id", "depth-denied"),
+            ],
+            SourceHooks::default(),
         );
         let reads = Brokers { consumer };
         let one = [(Arc::from("work"), 0)];

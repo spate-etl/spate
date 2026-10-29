@@ -16,6 +16,8 @@
 
 mod support;
 
+use support::Raw as _;
+
 use bytes::BytesMut;
 use rdkafka::message::{Headers, Message};
 use rdkafka::mocking::MockCluster;
@@ -392,15 +394,19 @@ async fn the_probe_does_not_create_a_missing_topic() {
         .expect_err("a missing topic must fail the probe");
     match err {
         SinkError::Client { class, reason } => {
-            assert_eq!(class, ErrorClass::Fatal, "a missing topic is fatal: {reason}");
+            assert_eq!(
+                class,
+                ErrorClass::Fatal,
+                "a missing topic is fatal: {reason}"
+            );
             assert!(reason.contains("does not exist"), "actionable: {reason}");
         }
         other => panic!("unexpected error shape: {other:?}"),
     }
 
-    let consumer: rdkafka::consumer::BaseConsumer = rdkafka::ClientConfig::new()
+    let consumer: rdkafka::consumer::BaseConsumer = support::raw_config()
         .set("bootstrap.servers", &brokers)
-        .create()
+        .build()
         .expect("consumer");
     let metadata = rdkafka::consumer::Consumer::fetch_metadata(
         &consumer,

@@ -98,6 +98,10 @@ fn unit_over(data: &Path, name: &str) -> Result<Unit, Box<dyn std::error::Error>
 }
 
 /// Create the feed's four topics on `brokers`, leaving any that exist.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the demo creates its topics with a plain admin client; the connector builds its own clients"
+)]
 fn create_topics(pipeline: &Pipeline, brokers: &str) -> Result<(), Box<dyn std::error::Error>> {
     let admin: AdminClient<DefaultClientContext> = ClientConfig::new()
         .set("bootstrap.servers", brokers)

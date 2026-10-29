@@ -18,9 +18,9 @@
 //!
 //! [`write_batch`]: spate_core::sink::ShardWriter::write_batch
 
+use crate::client::{Hooks, ProducerHooks, SpateContext, log_error};
 use crate::clock::SyncClock;
 use crate::sink::metrics::KafkaSinkStatsMetrics;
-use crate::client::{Hooks, ProducerHooks, SpateContext, log_error};
 use rdkafka::error::RDKafkaErrorCode;
 use rdkafka::message::DeliveryResult;
 use rdkafka::statistics::Statistics;
@@ -233,6 +233,7 @@ impl ProducerHooks for SinkHooks {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::client::testing::{Raw as _, raw_config};
     use rdkafka::client::ClientContext;
     use rdkafka::producer::ProducerContext;
     use spate_core::clock::TestClock;
@@ -528,11 +529,10 @@ pub(crate) mod tests {
     /// `FeedProducerHooks::repeats_previous` depend on.
     #[test]
     fn rdkafka_delivers_each_producer_error_twice() {
-        use rdkafka::ClientConfig;
         use rdkafka::producer::{Producer, ThreadedProducer};
-        let producer: ThreadedProducer<ErrorCalls> = ClientConfig::new()
+        let producer: ThreadedProducer<ErrorCalls> = raw_config()
             .set("bootstrap.servers", crate::testutil::refused_broker())
-            .create_with_context(ErrorCalls::default())
+            .build_with(ErrorCalls::default())
             .expect("producer");
         let context = Arc::clone(producer.context());
         spate_test::wait_until(Duration::from_secs(10), "two error callbacks", || {

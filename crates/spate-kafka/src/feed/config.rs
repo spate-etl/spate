@@ -150,7 +150,11 @@ impl Role for Client<'_> {
 /// The group settings of a feed consumer that never commits through
 /// librdkafka.
 fn group(keys: &mut Keys<'_>, cfg: &KafkaFeedConfig) {
-    keys.own("group.id", &cfg.group_id, "owned by the typed `group_id` field");
+    keys.own(
+        "group.id",
+        &cfg.group_id,
+        "owned by the typed `group_id` field",
+    );
     keys.own(
         "auto.offset.reset",
         "earliest",
@@ -650,7 +654,7 @@ mod tests {
              rdkafka:\n    session.timeout.ms: \"6000\"\n"
         ))
         .unwrap();
-        let consumer = config.config(crate::feed::config::FeedRole::Consumer, true);
+        let consumer = config.config(FeedRole::Consumer, true);
         for (key, value) in [
             ("bootstrap.servers", "localhost:9092"),
             ("group.id", "workers"),
@@ -668,7 +672,7 @@ mod tests {
         }
         assert_eq!(consumer.get("acks"), None);
 
-        let producer = config.config(crate::feed::config::FeedRole::Producer, true);
+        let producer = config.config(FeedRole::Producer, true);
         for (key, value) in [
             ("bootstrap.servers", "localhost:9092"),
             ("acks", "all"),
@@ -681,7 +685,7 @@ mod tests {
         }
         assert_eq!(producer.get("group.id"), None);
 
-        let admin = config.config(crate::feed::config::FeedRole::Admin, true);
+        let admin = config.config(FeedRole::Admin, true);
         for (key, value) in [
             ("bootstrap.servers", "localhost:9092"),
             ("allow.auto.create.topics", "false"),
@@ -693,11 +697,15 @@ mod tests {
 
         let quiet = parse(&format!("{MINIMAL}  statistics_interval: 0s\n")).unwrap();
         assert_eq!(
-            quiet.config(crate::feed::config::FeedRole::Consumer, true).get("statistics.interval.ms"),
+            quiet
+                .config(FeedRole::Consumer, true)
+                .get("statistics.interval.ms"),
             None
         );
         assert_eq!(
-            quiet.config(crate::feed::config::FeedRole::Producer, true).get("statistics.interval.ms"),
+            quiet
+                .config(FeedRole::Producer, true)
+                .get("statistics.interval.ms"),
             None
         );
     }
@@ -722,7 +730,7 @@ mod tests {
         ] {
             config.rdkafka.insert(key.to_owned(), value.to_owned());
         }
-        let follower = config.config(crate::feed::config::FeedRole::Follower, true);
+        let follower = config.config(FeedRole::Follower, true);
         for (key, value) in [
             ("bootstrap.servers", "localhost:9092"),
             ("group.id", "workers"),

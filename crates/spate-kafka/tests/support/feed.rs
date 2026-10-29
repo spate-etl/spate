@@ -3,8 +3,8 @@
 //! readers of committed offsets and of the retry, dead-letter and attempt
 //! topics.
 
+use super::Raw as _;
 use object_store::ObjectStoreExt as _;
-use rdkafka::ClientConfig;
 use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
 use rdkafka::client::DefaultClientContext;
 use rdkafka::consumer::{BaseConsumer, Consumer};
@@ -270,9 +270,9 @@ pub(crate) struct Worker {
 /// work topic stamped on append, and the compacted attempt topic. The feed
 /// never creates a topic.
 pub(crate) fn create_topics(brokers: &str) {
-    let admin: AdminClient<DefaultClientContext> = ClientConfig::new()
+    let admin: AdminClient<DefaultClientContext> = super::raw_config()
         .set("bootstrap.servers", brokers)
-        .create()
+        .build()
         .expect("admin client");
     let mut topics = vec![
         NewTopic::new(WORK, 1, TopicReplication::Fixed(1))
@@ -535,10 +535,10 @@ pub(crate) fn sorted(mut rows: Vec<String>) -> Vec<String> {
 
 /// The offset `group` has committed for partition 0 of `topic`, if any.
 pub(crate) fn committed(brokers: &str, group: &str, topic: &str) -> Option<i64> {
-    let probe: BaseConsumer = ClientConfig::new()
+    let probe: BaseConsumer = super::raw_config()
         .set("bootstrap.servers", brokers)
         .set("group.id", group)
-        .create()
+        .build()
         .expect("probe consumer");
     let mut tpl = TopicPartitionList::new();
     tpl.add_partition(topic, 0);
@@ -570,10 +570,10 @@ impl Read {
 
 /// The first `n` messages of partition 0 of `topic`, read from its start.
 pub(crate) fn read_topic(brokers: &str, topic: &str, n: usize) -> Vec<Read> {
-    let consumer: BaseConsumer = ClientConfig::new()
+    let consumer: BaseConsumer = super::raw_config()
         .set("bootstrap.servers", brokers)
         .set("group.id", format!("read-{topic}"))
-        .create()
+        .build()
         .expect("reader");
     let mut tpl = TopicPartitionList::new();
     tpl.add_partition_offset(topic, 0, Offset::Beginning)
@@ -608,10 +608,10 @@ pub(crate) type AttemptRecord = (i32, String, Option<u32>);
 /// The first `n` records of the attempt topic's `partitions` partitions,
 /// read from their start, in offset order within each partition.
 pub(crate) fn read_attempts(brokers: &str, partitions: i32, n: usize) -> Vec<AttemptRecord> {
-    let consumer: BaseConsumer = ClientConfig::new()
+    let consumer: BaseConsumer = super::raw_config()
         .set("bootstrap.servers", brokers)
         .set("group.id", spate_test::unique_name("read-attempts"))
-        .create()
+        .build()
         .expect("reader");
     let mut tpl = TopicPartitionList::new();
     for partition in 0..partitions {
@@ -638,9 +638,9 @@ pub(crate) fn read_attempts(brokers: &str, partitions: i32, n: usize) -> Vec<Att
 
 /// How many messages partition 0 of `topic` holds.
 pub(crate) fn high_watermark(brokers: &str, topic: &str) -> i64 {
-    let consumer: BaseConsumer = ClientConfig::new()
+    let consumer: BaseConsumer = super::raw_config()
         .set("bootstrap.servers", brokers)
-        .create()
+        .build()
         .expect("watermark reader");
     consumer
         .fetch_watermarks(topic, 0, Duration::from_secs(10))
@@ -651,9 +651,9 @@ pub(crate) fn high_watermark(brokers: &str, topic: &str) -> i64 {
 /// How many messages the first `partitions` partitions of `topic` hold
 /// between them.
 pub(crate) fn high_watermarks(brokers: &str, topic: &str, partitions: i32) -> i64 {
-    let consumer: BaseConsumer = ClientConfig::new()
+    let consumer: BaseConsumer = super::raw_config()
         .set("bootstrap.servers", brokers)
-        .create()
+        .build()
         .expect("watermark reader");
     (0..partitions)
         .map(|partition| {
@@ -684,9 +684,9 @@ pub(crate) fn publisher_on_mock(
 
 /// Produce `messages` to partition 0 of `topic` as given, key included.
 pub(crate) fn produce_raw(brokers: &str, topic: &str, messages: &[(Option<&[u8]>, &[u8])]) {
-    let producer: BaseProducer = ClientConfig::new()
+    let producer: BaseProducer = super::raw_config()
         .set("bootstrap.servers", brokers)
-        .create()
+        .build()
         .expect("producer");
     for (key, payload) in messages {
         let mut record = BaseRecord::<[u8], [u8]>::to(topic)
@@ -778,10 +778,10 @@ impl Direct {
 /// Whether `topic` exists on the cluster at `brokers`, read with
 /// auto-creation off so the read cannot create it.
 pub(crate) fn exists(brokers: &str, topic: &str) -> bool {
-    let probe: AdminClient<DefaultClientContext> = ClientConfig::new()
+    let probe: AdminClient<DefaultClientContext> = super::raw_config()
         .set("bootstrap.servers", brokers)
         .set("allow.auto.create.topics", "false")
-        .create()
+        .build()
         .expect("admin client");
     let metadata = probe
         .inner()

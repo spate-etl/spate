@@ -21,6 +21,7 @@
 //! tombstone: the unit has no attempts recorded. A reader refuses a value at
 //! any other `v`, with a field it does not know, or that is not that object.
 
+use super::FeedRole;
 use super::config::KafkaFeedConfig;
 use super::consumer::POLL_TIMEOUT;
 use super::{Core, KafkaFeedError, LatchOnPanic, Topics};
@@ -346,10 +347,7 @@ impl Follower {
         let openssl_env = crate::security::openssl_env_overrides();
         let consumer: BaseConsumer<SourceContext> = config
             .base(openssl_env)
-            .create(
-                &config.client(crate::feed::config::FeedRole::Follower),
-                SourceHooks::default(),
-            )
+            .create(&config.client(FeedRole::Follower), SourceHooks::default())
             .map_err(|reason| {
                 KafkaFeedError::Refused(format!("creating the attempt follower: {reason}"))
             })?;
@@ -758,8 +756,8 @@ mod tests {
         //! The follower against rdkafka's in-process MockCluster.
 
         use super::super::*;
+        use crate::client::testing::{Raw as _, raw_config};
         use crate::clock::SyncClock;
-        use rdkafka::ClientConfig;
         use rdkafka::mocking::MockCluster;
         use rdkafka::producer::{BaseProducer, BaseRecord, Producer};
         use spate_core::config::FeedSection;
@@ -786,10 +784,10 @@ mod tests {
             }
             cluster.create_topic(ATTEMPTS, 2, 1).unwrap();
             let brokers = cluster.bootstrap_servers();
-            let producer = ClientConfig::new()
+            let producer = raw_config()
                 .set("bootstrap.servers", &brokers)
                 .set("acks", "all")
-                .create()
+                .build()
                 .unwrap();
             let section: FeedSection = serde_yaml::from_str(&format!(
                 "kafka:\n  brokers: \"{brokers}\"\n  group_id: {}\n  topic: units\n  \

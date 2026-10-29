@@ -356,8 +356,14 @@ impl KafkaSinkConfig {
         }
 
         let roles = [
-            &Producer { config: self, probe: false } as &dyn Role,
-            &Producer { config: self, probe: true },
+            &Producer {
+                config: self,
+                probe: false,
+            } as &dyn Role,
+            &Producer {
+                config: self,
+                probe: true,
+            },
         ];
         if let Err(refusal) = self.base(false).denied(&roles) {
             return fail(refusal.to_string());
@@ -407,13 +413,19 @@ impl KafkaSinkConfig {
     /// The main producer's librdkafka configuration.
     #[cfg(test)]
     pub(crate) fn client_config(&self) -> rdkafka::ClientConfig {
-        self.base(false).config(&Producer { config: self, probe: false })
+        self.base(false).config(&Producer {
+            config: self,
+            probe: false,
+        })
     }
 
     /// The probe producer's librdkafka configuration.
     #[cfg(test)]
     fn probe_client_config(&self) -> rdkafka::ClientConfig {
-        self.base(false).config(&Producer { config: self, probe: true })
+        self.base(false).config(&Producer {
+            config: self,
+            probe: true,
+        })
     }
 }
 
@@ -538,7 +550,10 @@ fn build_on(
     let base = cfg.base(crate::security::openssl_env_overrides());
     let producer: ThreadedProducer<SinkContext> = base
         .create(
-            &Producer { config: &cfg, probe: false },
+            &Producer {
+                config: &cfg,
+                probe: false,
+            },
             SinkHooks::new(Arc::clone(&stats_slot), clock.clone()),
         )
         .map_err(|reason| {
@@ -551,7 +566,10 @@ fn build_on(
 
     let probe_producer: ThreadedProducer<SinkContext> = base
         .create(
-            &Producer { config: &cfg, probe: true },
+            &Producer {
+                config: &cfg,
+                probe: true,
+            },
             SinkHooks::detached(clock),
         )
         .map_err(|reason| {
@@ -583,6 +601,7 @@ fn build_on(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::client::testing::Raw as _;
 
     fn section(body: &str) -> ComponentConfig {
         spate_test::component_config("kafka", body)
@@ -770,7 +789,7 @@ mod tests {
                     "security passthrough survives into the client (not denylisted)"
                 );
                 let producer: rdkafka::producer::BaseProducer = cc
-                    .create()
+                    .build()
                     .expect("SSL/SASL compiled in: producer creation succeeds");
                 drop(producer);
             } else {
@@ -826,7 +845,7 @@ mod tests {
             let cfg = parse(&body).expect("config load does not check the mechanism");
             let Err(err) = cfg
                 .client_config()
-                .create::<rdkafka::producer::BaseProducer>()
+                .build::<rdkafka::producer::BaseProducer>()
             else {
                 panic!("producer creation succeeded with {sasl:?}");
             };
@@ -844,7 +863,10 @@ mod tests {
         for with_statistics in [true, false] {
             let ca = |env| {
                 cfg.base(env)
-                    .config(&Producer { config: &cfg, probe: !with_statistics })
+                    .config(&Producer {
+                        config: &cfg,
+                        probe: !with_statistics,
+                    })
                     .get("ssl.ca.location")
                     .map(str::to_owned)
             };
@@ -984,7 +1006,7 @@ mod tests {
             let cfg = parse(&format!("{}  compression: {codec}\n", minimal())).unwrap();
             let producer: rdkafka::producer::BaseProducer = cfg
                 .client_config()
-                .create()
+                .build()
                 .unwrap_or_else(|e| panic!("{codec}: {e}"));
             drop(producer);
         }

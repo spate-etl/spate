@@ -1,9 +1,9 @@
 //! Kafka source configuration: typed fields plus a validated raw
 //! librdkafka property passthrough.
 
+use crate::client::{Base, Keys, Role};
 use serde::Deserialize;
 use spate_core::config::{ComponentConfig, ConfigError, redact};
-use crate::client::{Base, Keys, Role};
 use std::collections::BTreeMap;
 use std::time::Duration;
 
@@ -23,7 +23,11 @@ impl Role for Consumer<'_> {
     }
 
     fn declare(&self, keys: &mut Keys<'_>) {
-        keys.own("group.id", &self.0.group_id, "owned by the typed `group_id` field");
+        keys.own(
+            "group.id",
+            &self.0.group_id,
+            "owned by the typed `group_id` field",
+        );
         // The framework's commit mechanism: offsets are stored explicitly
         // when checkpoint watermarks advance and committed on an interval.
         keys.own(
@@ -309,6 +313,7 @@ impl KafkaSourceConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::client::testing::Raw as _;
     use spate_core::config::ComponentConfig;
 
     fn section(body: &str) -> ComponentConfig {
@@ -550,7 +555,7 @@ mod tests {
                     "security passthrough survives into the client (not denylisted)"
                 );
                 let consumer: rdkafka::consumer::BaseConsumer = cc
-                    .create()
+                    .build()
                     .expect("SSL/SASL compiled in: consumer creation succeeds");
                 drop(consumer);
             } else {
@@ -587,7 +592,7 @@ mod tests {
                 .expect("config load does not check the mechanism");
             let Err(err) = cfg
                 .client_config()
-                .create::<rdkafka::consumer::BaseConsumer>()
+                .build::<rdkafka::consumer::BaseConsumer>()
             else {
                 panic!("consumer creation succeeded with {sasl:?}");
             };
@@ -608,7 +613,7 @@ mod tests {
             .expect("tls build accepts the flags at load");
         let consumer: rdkafka::consumer::BaseConsumer = cfg
             .client_config()
-            .create()
+            .build()
             .expect("OpenSSL compiled in: consumer creation succeeds");
         drop(consumer);
     }

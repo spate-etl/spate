@@ -41,7 +41,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::task::Poll;
 use std::time::Duration;
 use tokio::sync::Notify;
-use tokio::task::AbortHandle;
+use tokio::task::{AbortHandle, coop};
 use tokio::time::Instant;
 
 /// How long SQS keeps a message hidden, counted from the receive that issued
@@ -1531,7 +1531,9 @@ fn until(deadline: Instant, bound: Option<Instant>) -> Instant {
 /// answer ready as the deadline passes counts.
 async fn before<F: Future>(clock: &dyn Clock, at: Instant, fut: F) -> Option<F::Output> {
     let mut fut = std::pin::pin!(fut);
-    let mut deadline = clock.sleep_until(at);
+    // Unconstrained, as `timeout_at` polls its deadline once `fut` has
+    // spent the coop budget, or a future that always spends it never ends.
+    let mut deadline = std::pin::pin!(coop::unconstrained(clock.sleep_until(at)));
     std::future::poll_fn(|cx| {
         if let Poll::Ready(output) = fut.as_mut().poll(cx) {
             return Poll::Ready(Some(output));

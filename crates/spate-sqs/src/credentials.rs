@@ -174,8 +174,8 @@ async fn load(inner: SharedCredentialsProvider, send: watch::Sender<Option<Outco
     let mut call = AbortOnDrop(tokio::spawn(
         async move { provider.provide_credentials().await },
     ));
-    // Real time: it bounds a provider task on the SDK's runtime, before any
-    // feed or clock exists.
+    // Real time: the client's provider serves every call and holds no feed
+    // clock, and the SDK times those calls on tokio time.
     let outcome = match tokio::time::timeout(LOAD_BOUND, &mut call.0).await {
         Ok(Ok(result)) => result,
         Ok(Err(join)) => Err(CredentialsError::provider_error(ended(join))),

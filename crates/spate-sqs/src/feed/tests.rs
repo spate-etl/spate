@@ -3838,6 +3838,97 @@ async fn hand_backs_do_not_postpone_the_tick() {
     assert!(clock.has_slept_until(base + 2 * period));
 }
 
+/// Pins that `before` ends at a deadline already past even when the future
+/// it races spends the task's coop budget on every poll.
+#[tokio::test]
+async fn before_ends_when_the_future_spends_the_budget() {
+    // Spends the whole budget each task poll, and ends on its own only
+    // after 1000 task polls.
+    let busy = async {
+        for _ in 0..1000 {
+            for _ in 0..200 {
+                coop::consume_budget().await;
+            }
+        }
+    };
+    let out = before(&SystemClock, Instant::now(), busy).await;
+    assert!(
+        out.is_none(),
+        "the deadline was past at the call, yet `before` waited for the future to end"
+    );
+}
+
+/// Pins the bound a close sets when only its own task reads it to the feed's
+/// clock: with tokio time a minute ahead, a close shorter than the receive
+/// grace settles rejected at its bound on the clock.
+#[tokio::test(start_paused = true)]
+async fn a_close_bound_set_by_the_close_task_reads_the_injected_clock() {
+    let (feed, queue, clock) = start_clocked(MINUTE);
+    let (waker, _park) = wake_channel();
+    feed.set_waker(waker);
+    queue.ready(Message::new("u"));
+    assert!(feed.receive(2).unwrap().is_empty());
+    until("the unit is buffered", || feed.buffered() == 1).await;
+    let d = feed.receive(2).unwrap().remove(0);
+    feed.hand_back(d.receipt).unwrap();
+    until("the hand-back is sent", || {
+        handed_back(&queue.visibility()) == ["h0"] && feed.lock().last_hand_back.is_some()
+    })
+    .await;
+    tokio::time::advance(MINUTE).await;
+    settle_tasks().await;
+    assert!(feed.lock().receiving, "a receive is in flight");
+    let mut closed = feed.close(Duration::from_millis(500)).unwrap();
+    settle_tasks().await;
+    assert!(closed.try_outcome().is_none());
+    clock.advance(Duration::from_millis(500));
+    until("the close settles at its bound", || {
+        closed.try_outcome().is_some()
+    })
+    .await;
+    assert!(closed.try_outcome().unwrap().is_err());
+}
+
+/// Pins the bound a close sets when a hand-back pass reads it first to the
+/// feed's clock: with tokio time a minute ahead and a delete still unsent, a
+/// close begun as a held hand-back call answers settles rejected at its bound
+/// on the clock.
+#[tokio::test(start_paused = true)]
+async fn a_close_bound_set_by_a_hand_back_pass_reads_the_injected_clock() {
+    let s = Duration::from_secs;
+    let (feed, queue, clock) = start_gated_clocked(MINUTE);
+    let (waker, park) = wake_channel();
+    feed.set_waker(waker);
+    queue.inner.ready(Message::new("a"));
+    queue.inner.ready(Message::new("b"));
+    let got = receive_n(&feed, &park, 2).await;
+    queue.delete_down.store(true, Ordering::SeqCst);
+    feed.acknowledge(got[0].receipt).unwrap();
+    until("the delete is sent", || {
+        queue.deletes_at.lock().unwrap().len() == 1
+    })
+    .await;
+    queue.hold_visibility();
+    feed.hand_back(got[1].receipt).unwrap();
+    until("the hand-back call is held", || {
+        queue.visibility_at.lock().unwrap().len() == 1
+    })
+    .await;
+    tokio::time::advance(MINUTE).await;
+    settle_tasks().await;
+    // The hand-back pass wakes before the close's own task is spawned.
+    queue.release_visibility();
+    let mut closed = feed.close(s(5)).unwrap();
+    settle_tasks().await;
+    assert!(closed.try_outcome().is_none());
+    clock.advance(s(5));
+    until("the close settles at its bound", || {
+        closed.try_outcome().is_some()
+    })
+    .await;
+    assert!(closed.try_outcome().unwrap().is_err());
+}
+
 /// Pins the late-tick rule on the feed's clock: a tick a hand-back pass holds
 /// up runs as soon as the pass ends, and the next is armed a renewal period
 /// after it was seen when it ran over 5 ms late, and a period after it was
@@ -3845,7 +3936,7 @@ async fn hand_backs_do_not_postpone_the_tick() {
 #[tokio::test(start_paused = true)]
 async fn a_tick_missed_during_a_long_pass_runs_at_once_then_a_period_later() {
     let period = MINUTE / 3;
-    for late in [Duration::from_millis(10), LATE_TICK] {
+    for late in [Duration::from_millis(6), Duration::from_millis(5)] {
         let (feed, queue, clock) = start_gated_clocked(MINUTE);
         let base = clock.now();
         let (waker, park) = wake_channel();
@@ -3871,7 +3962,7 @@ async fn a_tick_missed_during_a_long_pass_runs_at_once_then_a_period_later() {
             extended(&queue.inner.visibility()) == ["h0"]
         })
         .await;
-        let (next, not) = if late > LATE_TICK {
+        let (next, not) = if late > Duration::from_millis(5) {
             (base + period + late + period, base + 2 * period)
         } else {
             (base + 2 * period, base + period + late + period)

@@ -6,6 +6,7 @@ use rdkafka::ClientConfig;
 use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::mocking::MockCluster;
 use spate_core::checkpoint::Checkpointer;
+use spate_core::clock::TestClock;
 use spate_core::error::{ErrorClass, SourceError};
 use spate_core::record::PartitionId;
 use spate_core::source::{PayloadBatch, Source, SourceCtx, SourceEvent, SourceLane};
@@ -454,8 +455,10 @@ fn startup_without_brokers_times_out_fatally() {
     let mut cfg = config("127.0.0.1:1", "nope");
     cfg.startup_timeout = Duration::from_secs(2);
     let cp = Checkpointer::new();
-    let mut source = KafkaSource::new(cfg);
+    let clock = TestClock::frozen();
+    let mut source = KafkaSource::new(cfg).with_clock(Arc::clone(&clock) as _);
     source.open(SourceCtx::new(cp.handle())).expect("open");
+    clock.advance(Duration::from_secs(3));
 
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
@@ -648,12 +651,9 @@ fn empty_assignment_completes_rebalance_protocol() {
 /// ordering is pinned by the unit tests; the member here may join straight
 /// into its empty assignment and never have owned anything at all.
 ///
-/// `DEADLINE` sits above the mock broker's rebalance pacing
-/// (`session.timeout.ms - 1000`, so 5s with the 6000 this file's `config`
-/// sets), since the gap between a revoke and the assignment that follows it
-/// is time the member legitimately holds nothing. The test costs the
-/// deadline plus the settle, so the margin over that 5s is what it can
-/// afford to trade for wall-clock.
+/// Both members read one frozen clock, so the gaps in the mock broker's
+/// rebalance pacing, where a member legitimately holds nothing, do not count
+/// toward `DEADLINE` while the group settles.
 #[test]
 fn an_empty_member_survives_the_assignment_deadline() {
     const DEADLINE: Duration = Duration::from_secs(8);
@@ -662,10 +662,11 @@ fn an_empty_member_survives_the_assignment_deadline() {
     cluster.create_topic(TOPIC, 1, 1).expect("create topic");
     let brokers = cluster.bootstrap_servers();
 
+    let clock = TestClock::frozen();
     let member = |group: &str| {
         let mut cfg = config(&brokers, group);
         cfg.assignment_timeout = DEADLINE;
-        KafkaSource::new(cfg)
+        KafkaSource::new(cfg).with_clock(Arc::clone(&clock) as _)
     };
     let mut cp_a = Checkpointer::new();
     let mut cp_b = Checkpointer::new();
@@ -723,8 +724,8 @@ fn an_empty_member_survives_the_assignment_deadline() {
     } else {
         (b, a, a_lanes, cp_a, a_ep)
     };
-    let until = Instant::now() + DEADLINE + Duration::from_secs(2);
-    while Instant::now() < until {
+    clock.advance(DEADLINE + Duration::from_secs(2));
+    for _ in 0..25 {
         drive_step(
             &mut owner,
             &mut owner_lanes,

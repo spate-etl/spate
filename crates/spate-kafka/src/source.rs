@@ -64,6 +64,7 @@
 //! [`Source::poll_events`] stands against a librdkafka that stops holding
 //! the contract.
 
+use crate::clock::SyncClock;
 use crate::config::KafkaSourceConfig;
 use crate::context::{Intent, SourceContext};
 use crate::error::redacted_client_error;
@@ -75,6 +76,7 @@ use rdkafka::message::Message;
 use rdkafka::statistics::Statistics;
 use rdkafka::{Offset, TopicPartitionList};
 use spate_core::checkpoint::AckIssuer;
+use spate_core::clock::Stopwatch;
 use spate_core::error::{ErrorClass, SourceError};
 use spate_core::metrics::SourceMetrics;
 use spate_core::record::PartitionId;
@@ -133,16 +135,18 @@ pub struct KafkaSource {
     /// assignment, and from every later loss of the last one. The deadline is
     /// measured from `since`; an accepted assignment, empty or not, clears it.
     assignment_wait: Option<AssignmentWait>,
-    /// The latest consumer poll error other than `AllBrokersDown`, and when
-    /// it arrived, for the deadline error to name. Cleared with
+    /// The latest consumer poll error other than `AllBrokersDown`, timed
+    /// from its arrival, for the deadline error to name. Cleared with
     /// `assignment_wait` by an accepted assignment.
-    last_consumer_error: Option<(Instant, String)>,
+    last_consumer_error: Option<(Stopwatch, String)>,
     /// Messages that leaked onto the main queue and were rewound.
     main_queue_rewinds: u64,
     /// Committed offset per held partition, read before its assignment.
     /// Stands in for librdkafka's committed position in the lag statistic,
     /// which the lookup does not update.
     committed_at_assign: HashMap<i32, i64>,
+    /// The clock the assignment windows and the error's age read.
+    clock: SyncClock,
 }
 
 impl std::fmt::Debug for KafkaSource {
@@ -175,7 +179,18 @@ impl KafkaSource {
             last_consumer_error: None,
             main_queue_rewinds: 0,
             committed_at_assign: HashMap::new(),
+            clock: SyncClock::system(),
         }
+    }
+
+    /// Read the assignment windows from `clock` in place of the system
+    /// clock.
+    #[cfg(feature = "testing")]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_clock(mut self, clock: crate::clock::SharedClock) -> KafkaSource {
+        self.clock = SyncClock::new(clock);
+        self
     }
 
     /// Create a source from the pipeline's opaque `source: { kafka: ... }`
@@ -381,7 +396,7 @@ impl KafkaSource {
             Some(wait) => wait.cause = Some(cause),
             None => {
                 self.assignment_wait = Some(AssignmentWait {
-                    since: Instant::now(),
+                    since: self.clock.now(),
                     cause: Some(cause),
                 })
             }
@@ -622,7 +637,7 @@ impl Source for KafkaSource {
         // The startup window opens here: no assignment yet, so
         // `startup_timeout` governs until the first one arrives.
         self.assignment_wait = Some(AssignmentWait {
-            since: Instant::now(),
+            since: self.clock.now(),
             cause: None,
         });
         Ok(())
@@ -636,11 +651,11 @@ impl Source for KafkaSource {
         if let Some(wait) = &self.assignment_wait
             && let Some(e) = assignment_deadline_error(
                 &self.config,
-                wait.since.elapsed(),
+                self.clock.now().saturating_duration_since(wait.since),
                 wait.cause.as_deref(),
                 self.last_consumer_error
                     .as_ref()
-                    .map(|(at, error)| (at.elapsed(), error.as_str())),
+                    .map(|(at, error)| (at.elapsed(&*self.clock), error.as_str())),
             )
         {
             return Err(e);
@@ -724,7 +739,8 @@ impl Source for KafkaSource {
                     // Every broker's failure is followed by `AllBrokersDown`,
                     // which would otherwise hide it from the deadline error.
                     if code != Some(rdkafka::error::RDKafkaErrorCode::AllBrokersDown) {
-                        self.last_consumer_error = Some((Instant::now(), reason.clone()));
+                        self.last_consumer_error =
+                            Some((Stopwatch::start(&*self.clock), reason.clone()));
                     }
                     return Err(SourceError::Client { class, reason });
                 }
@@ -962,6 +978,14 @@ mod tests {
     use super::*;
     use rdkafka::error::RDKafkaErrorCode;
     use spate_core::checkpoint::Checkpointer;
+    use spate_core::clock::TestClock;
+
+    /// Put `source` on a frozen clock, and return the clock.
+    fn freeze(source: &mut KafkaSource) -> Arc<TestClock> {
+        let clock = TestClock::frozen();
+        source.clock = SyncClock::new(Arc::clone(&clock) as _);
+        clock
+    }
 
     fn test_config() -> KafkaSourceConfig {
         KafkaSourceConfig {
@@ -1075,6 +1099,7 @@ mod tests {
     fn opened_source_with(mut cfg: KafkaSourceConfig, lanes: &[(u32, i32)]) -> KafkaSource {
         cfg.brokers = crate::testutil::refused_broker();
         let mut source = KafkaSource::new(cfg);
+        freeze(&mut source);
         let cp = Checkpointer::new();
         source.open(SourceCtx::new(cp.handle())).expect("open");
         // A member that has had an assignment: past the startup window, so
@@ -1471,7 +1496,9 @@ mod tests {
             let mut cfg = test_config();
             cfg.assignment_timeout = Duration::from_millis(1);
             let mut source = opened_source_with(cfg, &[]);
+            let clock = freeze(&mut source);
             source.note_assignment_loss("a revocation".to_owned());
+            clock.advance(Duration::from_millis(2));
 
             match next_outcome(&mut source) {
                 Err(SourceError::Client { class, reason }) => {
@@ -1524,8 +1551,10 @@ mod tests {
             let mut cfg = test_config();
             cfg.brokers = crate::testutil::refused_broker();
             let mut source = KafkaSource::new(cfg);
+            let clock = freeze(&mut source);
             let cp = Checkpointer::new();
             source.open(SourceCtx::new(cp.handle())).expect("open");
+            clock.advance(Duration::from_secs(10));
             spate_test::wait_until(Duration::from_secs(20), "a consumer error", || {
                 let _ = source.poll_events(Duration::from_millis(50));
                 source.last_consumer_error.is_some()
@@ -1533,11 +1562,15 @@ mod tests {
 
             // The deadline passed 1ns after `open`, before the error arrived.
             source.config.startup_timeout = Duration::from_nanos(1);
+            clock.advance(Duration::from_secs(2));
             match source.poll_events(Duration::from_millis(50)) {
                 Err(SourceError::Client { class, reason }) => {
                     assert_eq!(class, ErrorClass::Fatal, "{reason}");
                     assert!(!reason.contains("before the deadline"), "{reason}");
-                    assert!(reason.contains(" ago: consumer poll: "), "{reason}");
+                    assert!(
+                        reason.contains("; last consumer error 2s ago: consumer poll: "),
+                        "{reason}"
+                    );
                 }
                 other => panic!("expected the deadline error, got {other:?}"),
             }
@@ -1551,11 +1584,13 @@ mod tests {
             let mut cfg = test_config();
             cfg.brokers = crate::testutil::refused_broker();
             let mut source = KafkaSource::new(cfg);
+            let clock = freeze(&mut source);
             let cp = Checkpointer::new();
             source.open(SourceCtx::new(cp.handle())).expect("open");
 
             poll_until_brokers_down(&mut source);
             source.config.startup_timeout = Duration::from_nanos(1);
+            clock.advance(Duration::from_secs(1));
             assert_names_the_transport_failure(&mut source, "no partition assignment within");
         }
 
@@ -1565,11 +1600,106 @@ mod tests {
         #[test]
         fn the_assignment_deadline_names_the_last_consumer_error() {
             let mut source = opened_source(&[]);
+            let clock = freeze(&mut source);
             source.note_assignment_loss("a revocation".to_owned());
 
             poll_until_brokers_down(&mut source);
             source.config.assignment_timeout = Duration::from_nanos(1);
+            clock.advance(Duration::from_secs(1));
             assert_names_the_transport_failure(&mut source, "no partition assignment for");
+        }
+
+        /// Whether `outcome` is the assignment deadline's error.
+        fn is_deadline_error(outcome: &Result<SourceEvent<KafkaLane>, SourceError>) -> bool {
+            matches!(outcome, Err(SourceError::Client { reason, .. })
+                if reason.starts_with("no partition assignment"))
+        }
+
+        /// The startup window runs on the source's clock from `open` and
+        /// ends once that clock is past `startup_timeout`.
+        #[test]
+        fn the_startup_window_ends_at_startup_timeout() {
+            let mut cfg = test_config();
+            cfg.brokers = crate::testutil::refused_broker();
+            cfg.startup_timeout = Duration::from_secs(30);
+            let mut source = KafkaSource::new(cfg);
+            let clock = freeze(&mut source);
+            let cp = Checkpointer::new();
+            source.open(SourceCtx::new(cp.handle())).expect("open");
+
+            clock.advance(Duration::from_secs(30));
+            let outcome = source.poll_events(Duration::from_millis(50));
+            assert!(!is_deadline_error(&outcome), "{outcome:?}");
+            clock.advance(Duration::from_nanos(1));
+            match source.poll_events(Duration::from_millis(50)) {
+                Err(SourceError::Client { class, reason }) => {
+                    assert_eq!(class, ErrorClass::Fatal, "{reason}");
+                    assert!(
+                        reason.starts_with("no partition assignment within 30.000000001s"),
+                        "{reason}"
+                    );
+                }
+                other => panic!("expected the deadline error, got {other:?}"),
+            }
+        }
+
+        /// The assignment window runs on the source's clock from the loss of
+        /// the last partition and ends once that clock is past
+        /// `assignment_timeout`.
+        #[test]
+        fn the_assignment_window_runs_from_the_loss() {
+            let mut cfg = test_config();
+            cfg.assignment_timeout = Duration::from_secs(300);
+            let mut source = opened_source_with(cfg, &[]);
+            let clock = freeze(&mut source);
+            clock.advance(Duration::from_secs(3600));
+            source.note_assignment_loss("a revocation".to_owned());
+
+            clock.advance(Duration::from_secs(300));
+            let outcome = source.poll_events(Duration::from_millis(50));
+            assert!(!is_deadline_error(&outcome), "{outcome:?}");
+            clock.advance(Duration::from_nanos(1));
+            match source.poll_events(Duration::from_millis(50)) {
+                Err(SourceError::Client { class, reason }) => {
+                    assert_eq!(class, ErrorClass::Fatal, "{reason}");
+                    assert!(
+                        reason.starts_with(
+                            "no partition assignment for 300.000000001s after a revocation"
+                        ),
+                        "{reason}"
+                    );
+                }
+                other => panic!("expected the deadline error, got {other:?}"),
+            }
+        }
+
+        /// The deadline error gives the last consumer error's age on the
+        /// source's clock.
+        #[test]
+        fn the_deadline_error_gives_the_last_errors_age() {
+            let mut cfg = test_config();
+            cfg.brokers = crate::testutil::refused_broker();
+            let mut source = KafkaSource::new(cfg);
+            let clock = freeze(&mut source);
+            let cp = Checkpointer::new();
+            source.open(SourceCtx::new(cp.handle())).expect("open");
+            spate_test::wait_until(Duration::from_secs(20), "a consumer error", || {
+                let _ = source.poll_events(Duration::from_millis(50));
+                source.last_consumer_error.is_some()
+            });
+
+            source.config.startup_timeout = Duration::from_secs(10);
+            clock.advance(Duration::from_secs(12));
+            match source.poll_events(Duration::from_millis(50)) {
+                Err(SourceError::Client { class, reason }) => {
+                    assert_eq!(class, ErrorClass::Fatal, "{reason}");
+                    assert!(
+                        reason.contains("; last consumer error 12s ago: consumer poll: "),
+                        "{reason}"
+                    );
+                }
+                other => panic!("expected the deadline error, got {other:?}"),
+            }
         }
 
         /// The revocation that releases a member's last partitions arms the
@@ -1612,7 +1742,10 @@ mod tests {
                 "the error arms the deadline and names itself: {cause}"
             );
 
-            source.last_consumer_error = Some((Instant::now(), "consumer poll: SSL".to_owned()));
+            source.last_consumer_error = Some((
+                Stopwatch::start(&*source.clock),
+                "consumer poll: SSL".to_owned(),
+            ));
             push_intent(&source, Intent::Assign(TopicPartitionList::new()));
             poll_until_cleared(&mut source);
             assert!(source.last_consumer_error.is_none());

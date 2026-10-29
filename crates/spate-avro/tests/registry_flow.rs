@@ -14,7 +14,7 @@ use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
 use spate_avro::{AvroDeserializerBuilder, AvroMode, AvroSettings, AvroValue, RegistrySection};
 use spate_core::checkpoint::AckRef;
-use spate_core::clock::TestClock;
+use spate_core::clock::{Clock, TestClock};
 use spate_core::deser::{Deserializer, EmitRecord, RecFamily};
 use spate_core::error::DeserError;
 use spate_core::record::{Flow, Record};
@@ -374,6 +374,121 @@ async fn transient_503s_then_success_decodes_and_never_drops() {
     .unwrap()
     .unwrap();
     assert_eq!(rows.len(), 1, "record decodes after the transient blips");
+}
+
+/// After a transient failure the fetcher sends no request for that id while
+/// the deserializer's clock stays short of the backoff, however often the
+/// payload is replayed, and refetches once the clock passes it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn no_refetch_while_the_backoff_holds() {
+    let stub = StubRegistry::default();
+    stub.script("/schemas/ids/13", 503, "shard warming up", 1);
+    stub.script("/schemas/ids/13", 200, &schema_body(SCHEMA_V1), 0);
+    let addr = stub.clone().serve().await;
+
+    let clock = TestClock::frozen();
+    let builder = builder_on(addr, Duration::from_secs(30), &clock);
+    let mut deser = builder.build_value().expect("apache builder");
+    let payload = confluent_payload(13, 1);
+    let probe = stub.clone();
+
+    let (frozen_hits, rows) = tokio::task::spawn_blocking(move || {
+        let (ack, _rx) = AckRef::test_pair();
+        let mut out = Collected(Vec::new());
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while probe.path_hits("/schemas/ids/13") == 0 && Instant::now() < deadline {
+            let _ = deser.deserialize(&raw_payload(&payload), &ack, &mut out);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        // Elapsed real time is the property: replays over one second on a
+        // frozen clock issue no second request.
+        for _ in 0..50 {
+            let _ = deser.deserialize(&raw_payload(&payload), &ack, &mut out);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let frozen_hits = probe.path_hits("/schemas/ids/13");
+        let mut out = Collected(Vec::new());
+        let r = drive_until_ready_on(&mut deser, &payload, &mut out, &clock).map(|()| out.0);
+        (frozen_hits, r)
+    })
+    .await
+    .unwrap();
+    assert_eq!(frozen_hits, 1, "no refetch before the backoff passes");
+    assert_eq!(
+        rows.expect("decodes once the clock passes the backoff")
+            .len(),
+        1
+    );
+}
+
+/// A frozen [`TestClock`] that counts its reads.
+struct CountingClock {
+    inner: Arc<TestClock>,
+    reads: AtomicUsize,
+}
+
+impl Clock for CountingClock {
+    fn now(&self) -> Instant {
+        self.reads.fetch_add(1, Ordering::SeqCst);
+        self.inner.now()
+    }
+}
+
+/// The fetcher stamps each transient failure on the deserializer's clock:
+/// the refetch is admitted once that clock has moved exactly the backoff past
+/// the failure, first 200 ms and then 400 ms.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_transient_failure_is_stamped_on_the_deserializers_clock() {
+    let stub = StubRegistry::default();
+    stub.script("/schemas/ids/11", 503, "shard warming up", 2);
+    stub.script("/schemas/ids/11", 200, &schema_body(SCHEMA_V1), 0);
+    let addr = stub.clone().serve().await;
+
+    let test_clock = TestClock::frozen();
+    let clock = Arc::new(CountingClock {
+        inner: Arc::clone(&test_clock),
+        reads: AtomicUsize::new(0),
+    });
+    let builder = AvroDeserializerBuilder::from_settings_with_clock(
+        &settings(addr, Duration::from_secs(30)),
+        &tokio::runtime::Handle::current(),
+        Arc::clone(&clock) as _,
+    )
+    .unwrap();
+    let mut deser = builder.build_value().expect("apache builder");
+    let payload = confluent_payload(11, 1);
+
+    let rows = tokio::task::spawn_blocking(move || {
+        let (ack, _rx) = AckRef::test_pair();
+        let mut out = Collected(Vec::new());
+        let reads = || clock.reads.load(Ordering::SeqCst);
+        // No backoff and no negative entry yet, so the first read is the
+        // stamp of the first 503.
+        assert!(matches!(
+            deser.deserialize(&raw_payload(&payload), &ack, &mut out),
+            Err(DeserError::NotReady { .. })
+        ));
+        spate_test::wait_until(Duration::from_secs(10), "the first 503 is stamped", || {
+            reads() >= 1
+        });
+        test_clock.advance(Duration::from_millis(200));
+        // One request: the gate's read admits it, the second 503's stamp is
+        // the next read.
+        assert!(matches!(
+            deser.deserialize(&raw_payload(&payload), &ack, &mut out),
+            Err(DeserError::NotReady { .. })
+        ));
+        spate_test::wait_until(Duration::from_secs(10), "the second 503 is stamped", || {
+            reads() >= 3
+        });
+        test_clock.advance(Duration::from_millis(400));
+        drive_until_ready(&mut deser, &payload, &mut out).map(|()| out.0)
+    })
+    .await
+    .unwrap()
+    .expect("the id decodes once the clock passes each backoff");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(stub.path_hits("/schemas/ids/11"), 3);
 }
 
 /// Each refetch of a transiently failing id waits on the deserializer's

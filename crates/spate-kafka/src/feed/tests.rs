@@ -2815,7 +2815,7 @@ mod cluster {
             .client()
             .fetch_metadata(Some(ATTEMPTS), Duration::from_secs(10))
             .unwrap();
-        let bound = Duration::from_millis(500);
+        let bound = Duration::from_secs(3600);
         let gate = Gate::new(Arc::clone(&core), Producer::clone(&producer), bound).with_step(STEP);
         let capture = spate_test::LogCapture::new();
         let dispatch = warnings_to(&capture);
@@ -2889,8 +2889,8 @@ mod cluster {
     }
 
     /// Pins that a pass which reaches its bound while reading watermarks
-    /// keeps what it read: with `delivery_timeout` at 500 ms and attempt
-    /// partition 1 led by a broker that answers after 5 s, the unit on
+    /// keeps what it read: with a bound of an hour on the feed's clock, and
+    /// attempt partition 1 led by a broker that answers after 5 s, the unit on
     /// partition 0, read first, is admitted, the units on partitions 1 and
     /// 2 wait at the gate, and the warning names partition 2 as not read
     /// and partition 1 as the slowest read. Partition 2 holds a record, so
@@ -2928,8 +2928,7 @@ mod cluster {
         let section: FeedSection = serde_yaml::from_str(&format!(
             "kafka:\n  brokers: \"{brokers}\"\n  group_id: {group}\n  topic: units\n  \
              retry_topic: units-retry\n  dead_letter_topic: units-dead\n  \
-             attempt_topic: {ATTEMPTS}\n  statistics_interval: 0s\n  \
-             delivery_timeout: 500ms\n"
+             attempt_topic: {ATTEMPTS}\n  statistics_interval: 0s\n"
         ))
         .unwrap();
         let config = KafkaFeedConfig::from_section(&section).unwrap();
@@ -2981,17 +2980,13 @@ mod cluster {
             .broker_round_trip_time(2, Duration::from_secs(5))
             .unwrap();
         let capture = spate_test::LogCapture::new();
-        let gate = Gate::new(Arc::clone(&core), producer, config.delivery_timeout)
-            .with_step(Duration::from_secs(1));
+        let bound = Duration::from_secs(3600);
+        let gate = Gate::new(Arc::clone(&core), producer, bound).with_step(Duration::from_secs(1));
         // Three requests read empty partition 0; the fourth is partition 1's,
         // which its broker holds past the read's one-second step.
-        pass_advancing(
-            &gate,
-            &warnings_to(&capture),
-            &clock,
-            config.delivery_timeout,
-            || core.gate_reads.load(Ordering::SeqCst) == 4,
-        );
+        pass_advancing(&gate, &warnings_to(&capture), &clock, bound, || {
+            core.gate_reads.load(Ordering::SeqCst) == 4
+        });
         let waiting: Vec<String> = core
             .lock()
             .gating
@@ -3016,9 +3011,9 @@ mod cluster {
     }
 
     /// Pins that equal watermarks are read again only before the pass's
-    /// bound: with `delivery_timeout` at 200 ms and attempt partition 0,
-    /// empty, led by a broker that answers after 300 ms, the watermark read
-    /// returns past the bound, the unit waits at the gate, and the warning
+    /// bound: with a bound of an hour on the feed's clock, passed while the
+    /// watermark read of empty attempt partition 0 waits on a broker that
+    /// answers after 300 ms, the read returns past the bound, the unit waits at the gate, and the warning
     /// names partition 0 as not read.
     #[test]
     fn equal_watermarks_read_past_the_bound_are_not_read_again() {
@@ -3034,8 +3029,7 @@ mod cluster {
         let section: FeedSection = serde_yaml::from_str(&format!(
             "kafka:\n  brokers: \"{brokers}\"\n  group_id: {group}\n  topic: units\n  \
              retry_topic: units-retry\n  dead_letter_topic: units-dead\n  \
-             attempt_topic: {ATTEMPTS}\n  statistics_interval: 0s\n  \
-             delivery_timeout: 200ms\n"
+             attempt_topic: {ATTEMPTS}\n  statistics_interval: 0s\n"
         ))
         .unwrap();
         let config = KafkaFeedConfig::from_section(&section).unwrap();
@@ -3071,16 +3065,12 @@ mod cluster {
             .broker_round_trip_time(2, Duration::from_millis(300))
             .unwrap();
         let capture = spate_test::LogCapture::new();
-        let gate = Gate::new(Arc::clone(&core), producer, config.delivery_timeout)
-            .with_step(Duration::from_secs(1));
+        let bound = Duration::from_secs(3600);
+        let gate = Gate::new(Arc::clone(&core), producer, bound).with_step(Duration::from_secs(1));
         // Advanced while the round trip holds the watermark read.
-        pass_advancing(
-            &gate,
-            &warnings_to(&capture),
-            &clock,
-            config.delivery_timeout,
-            || core.gate_reads.load(Ordering::SeqCst) == 1,
-        );
+        pass_advancing(&gate, &warnings_to(&capture), &clock, bound, || {
+            core.gate_reads.load(Ordering::SeqCst) == 1
+        });
         assert_eq!(core.gate_reads.load(Ordering::SeqCst), 1, "read again");
         let st = core.lock();
         assert_eq!(st.gating.len(), 1, "the unit was admitted");

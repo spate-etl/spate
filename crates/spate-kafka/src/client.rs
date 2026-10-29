@@ -718,6 +718,23 @@ mod tests {
         }
     }
 
+    /// A role with no error hook of its own, such as the admin client, logs
+    /// each error event as a warning under the `librdkafka` target.
+    #[test]
+    fn the_default_error_hook_logs_a_warning() {
+        let context = SpateContext(());
+        let lines = spate_test::capture_logs(tracing::Level::WARN, || {
+            context.error(
+                KafkaError::Global(rdkafka::error::RDKafkaErrorCode::AllBrokersDown),
+                "1/1 brokers are down",
+            );
+        });
+        assert_eq!(lines.len(), 1, "{lines:#?}");
+        assert!(lines[0].contains("WARN"), "{}", lines[0]);
+        assert!(lines[0].contains("librdkafka"), "{}", lines[0]);
+        assert!(lines[0].contains("1/1 brokers are down"), "{}", lines[0]);
+    }
+
     /// Each role sends its own `client.id` unless the passthrough names one,
     /// which then reaches every client unchanged.
     #[test]

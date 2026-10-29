@@ -3997,6 +3997,37 @@ async fn the_deadline_guards_on_a_pipeline_thread_read_the_injected_clock() {
     }
 }
 
+/// Pins that a fail or a hand-back still queued when its unit's deadline
+/// arrives on the feed's clock is dropped unsent: SQS may hand the message to
+/// another reader from that instant.
+#[tokio::test(start_paused = true)]
+async fn a_fail_or_hand_back_queued_until_its_deadline_is_dropped_unsent() {
+    for fail in [true, false] {
+        let (feed, queue, clock) = start_clocked(MINUTE);
+        let (waker, park) = wake_channel();
+        feed.set_waker(waker);
+        queue.ready(Message::new("u"));
+        let receipt = receive_n(&feed, &park, 1).await.remove(0).receipt;
+        let deadline = feed.deadline_of(receipt).unwrap();
+        clock.advance(deadline - Duration::from_millis(1) - clock.now());
+        let answer = off_runtime(|| {
+            if fail {
+                feed.fail(receipt, "unreadable")
+            } else {
+                feed.hand_back(receipt)
+            }
+        });
+        assert_eq!(answer.map_err(|e| e.kind), Ok(()), "fail {fail}");
+        // The runtime has not run since the call, so the send is still queued.
+        clock.advance(Duration::from_millis(1));
+        settle_tasks().await;
+        assert!(
+            handed_back(&queue.visibility()).is_empty(),
+            "fail {fail}: sent at its deadline"
+        );
+    }
+}
+
 /// Pins a close's bound and its wait for a receive in flight to the feed's
 /// clock. The bound counts from the first task that reads it, after a close
 /// called on a pipeline thread, and tokio time ends neither wait.

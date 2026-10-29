@@ -89,7 +89,7 @@ mod tests {
     use std::panic::{RefUnwindSafe, UnwindSafe};
 
     /// The public types keep their auto traits: each is `Send` and `Sync`,
-    /// and `KafkaWriter`, which holds the sink's clocks, is also
+    /// and `KafkaWriter`, which holds the writer's clock, is also
     /// `UnwindSafe` and `RefUnwindSafe`.
     #[test]
     fn public_types_keep_their_auto_traits() {

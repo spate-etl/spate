@@ -453,34 +453,33 @@ fn second_member_triggers_revoke_then_fresh_assignment() {
 #[test]
 fn startup_without_brokers_times_out_fatally() {
     let mut cfg = config("127.0.0.1:1", "nope");
-    cfg.startup_timeout = Duration::from_secs(2);
+    // Out of real time's reach, so only the injected clock can end it.
+    cfg.startup_timeout = Duration::from_secs(300);
     let cp = Checkpointer::new();
     let clock = TestClock::frozen();
     let mut source = KafkaSource::new(cfg).with_clock(Arc::clone(&clock) as _);
     source.open(SourceCtx::new(cp.handle())).expect("open");
-    clock.advance(Duration::from_secs(3));
+    clock.advance(Duration::from_secs(301));
 
-    let deadline = Instant::now() + Duration::from_secs(20);
-    loop {
-        assert!(Instant::now() < deadline, "startup timeout never fired");
+    wait_until(Duration::from_secs(20), "the startup timeout", || {
         match source.poll_events(Duration::from_millis(100)) {
-            Ok(_) => continue,
+            Ok(_) => false,
             // Transient transport errors are expected with no broker; the
             // runtime logs and keeps polling on Retryable, and so does this
             // loop. Only the fatal startup timeout ends it.
             Err(SourceError::Client {
                 class: ErrorClass::Retryable,
                 ..
-            }) => continue,
+            }) => false,
             Err(e) => {
                 assert!(
                     e.to_string().contains("no partition assignment"),
                     "unexpected error: {e}"
                 );
-                break;
+                true
             }
         }
-    }
+    });
 }
 
 /// Drive one source one step, mirroring the runtime driver: apply a new

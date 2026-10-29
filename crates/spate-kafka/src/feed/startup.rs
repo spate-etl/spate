@@ -1261,80 +1261,6 @@ mod tests {
         }
     }
 
-    /// A broker that answers ApiVersions, accepts the SASL `PLAIN`
-    /// mechanism, and refuses the login with `SASL_AUTHENTICATION_FAILED`,
-    /// as a broker does for a wrong password. Returns its address.
-    #[cfg(feature = "tls")]
-    fn refuses_sasl_login() -> std::net::SocketAddr {
-        use std::io::{Read, Write};
-        fn string(body: &mut Vec<u8>, s: &str) {
-            body.extend_from_slice(&(s.len() as i16).to_be_bytes());
-            body.extend_from_slice(s.as_bytes());
-        }
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-        std::thread::spawn(move || {
-            for stream in listener.incoming() {
-                let Ok(mut s) = stream else { return };
-                std::thread::spawn(move || {
-                    loop {
-                        let mut len = [0u8; 4];
-                        if s.read_exact(&mut len).is_err() {
-                            return;
-                        }
-                        let mut req = vec![0u8; u32::from_be_bytes(len) as usize];
-                        if s.read_exact(&mut req).is_err() {
-                            return;
-                        }
-                        let key = i16::from_be_bytes([req[0], req[1]]);
-                        let ver = i16::from_be_bytes([req[2], req[3]]);
-                        let mut body = req[4..8].to_vec();
-                        match (key, ver) {
-                            (18, v) if v > 0 => {
-                                body.extend_from_slice(&35i16.to_be_bytes());
-                                body.extend_from_slice(&0i32.to_be_bytes());
-                            }
-                            (18, _) => {
-                                body.extend_from_slice(&0i16.to_be_bytes());
-                                let apis: [(i16, i16, i16); 4] =
-                                    [(18, 0, 0), (17, 0, 1), (36, 0, 0), (3, 0, 0)];
-                                body.extend_from_slice(&(apis.len() as i32).to_be_bytes());
-                                for (k, lo, hi) in apis {
-                                    body.extend_from_slice(&k.to_be_bytes());
-                                    body.extend_from_slice(&lo.to_be_bytes());
-                                    body.extend_from_slice(&hi.to_be_bytes());
-                                }
-                            }
-                            // SaslHandshake: no error, the one mechanism.
-                            (17, _) => {
-                                body.extend_from_slice(&0i16.to_be_bytes());
-                                body.extend_from_slice(&1i32.to_be_bytes());
-                                string(&mut body, "PLAIN");
-                            }
-                            // SaslAuthenticate v0: SASL_AUTHENTICATION_FAILED,
-                            // its message, and no auth bytes.
-                            (36, _) => {
-                                body.extend_from_slice(&58i16.to_be_bytes());
-                                string(
-                                    &mut body,
-                                    "Authentication failed: Invalid username or password",
-                                );
-                                body.extend_from_slice(&0i32.to_be_bytes());
-                            }
-                            _ => return,
-                        }
-                        let mut frame = (body.len() as u32).to_be_bytes().to_vec();
-                        frame.extend_from_slice(&body);
-                        if s.write_all(&frame).is_err() {
-                            return;
-                        }
-                    }
-                });
-            }
-        });
-        addr
-    }
-
     /// The passthrough of a client that logs in with SASL `PLAIN`.
     #[cfg(feature = "tls")]
     const SASL_PLAIN: &str = "    security.protocol: sasl_plaintext\n    sasl.mechanism: PLAIN\n    \
@@ -1377,7 +1303,7 @@ mod tests {
         /// feed with the broker's text, without waiting out the bound.
         #[test]
         fn a_wrong_sasl_password_refuses_the_feed_at_connect() {
-            let brokers = refuses_sasl_login().to_string();
+            let brokers = crate::testutil::refuses_sasl_login().to_string();
             let message = refused_with_text(connect_to(&brokers, SASL_PLAIN, LONG));
             assert!(message.contains("Authentication failed"), "{message}");
         }
@@ -1386,7 +1312,7 @@ mod tests {
         /// publisher with the broker's text, without waiting out the bound.
         #[test]
         fn a_wrong_sasl_password_refuses_the_publisher_at_connect() {
-            let brokers = refuses_sasl_login().to_string();
+            let brokers = crate::testutil::refuses_sasl_login().to_string();
             let message = refused_with_text(connect_publisher_to(&brokers, SASL_PLAIN, LONG));
             assert!(message.contains("Authentication failed"), "{message}");
         }
@@ -1396,7 +1322,7 @@ mod tests {
         /// broker's text.
         #[test]
         fn the_public_publisher_connect_refuses_a_wrong_sasl_password() {
-            let brokers = refuses_sasl_login().to_string();
+            let brokers = crate::testutil::refuses_sasl_login().to_string();
             let message = refused_with_text(connect_with_to(
                 &brokers,
                 SASL_PLAIN,

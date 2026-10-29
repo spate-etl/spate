@@ -644,4 +644,31 @@ mod tests {
             }
         }
     }
+
+    /// `build_on_clocks` stamps and ages a broker's rejection on the clock
+    /// it is given.
+    #[cfg(feature = "tls")]
+    #[test]
+    fn build_on_clocks_ages_a_rejection_on_the_given_clock() {
+        let brokers = crate::testutil::refuses_sasl_login();
+        let body = format!(
+            "  brokers: {brokers}\n  topic: orders\n  rdkafka:\n    security.protocol: \
+             sasl_plaintext\n    sasl.mechanism: PLAIN\n    sasl.username: u\n    \
+             sasl.password: wrong\n"
+        );
+        let cfg: crate::sink::KafkaSinkConfig = spate_test::component_config("kafka", &body)
+            .deserialize_into()
+            .expect("config");
+        let clock = spate_core::clock::TestClock::frozen();
+        let sink =
+            crate::sink::build_on_clocks(cfg, Arc::clone(&clock) as _, Arc::new(IoSystemClock))
+                .expect("sink");
+        let endpoint = &sink.endpoints[0][0];
+        spate_test::wait_until(Duration::from_secs(20), "the rejection", || {
+            endpoint.producer.context().latest_rejection().is_some()
+        });
+        assert!(sink.writer.rejection(endpoint).is_some());
+        clock.advance(sink.writer.rejection_window + Duration::from_nanos(1));
+        assert_eq!(sink.writer.rejection(endpoint), None);
+    }
 }

@@ -308,7 +308,7 @@ impl Offsets for Brokers {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::clock::SyncClock;
+    use spate_core::clock::SyncClock;
     use std::collections::HashMap;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};

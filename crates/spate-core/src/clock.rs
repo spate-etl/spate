@@ -29,7 +29,44 @@ pub trait Clock {
 /// `RefUnwindSafe`, so a public type holding it stays `UnwindSafe` and
 /// `RefUnwindSafe`.
 #[cfg(not(loom))]
-pub(crate) type SharedClock = std::sync::Arc<dyn Clock + Send + Sync + std::panic::RefUnwindSafe>;
+pub type SharedClock = std::sync::Arc<dyn Clock + Send + Sync + std::panic::RefUnwindSafe>;
+
+/// A [`SharedClock`] that implements `Debug`, which [`Clock`] does not
+/// require, so a type that holds one can derive it.
+#[cfg(not(loom))]
+#[derive(Clone)]
+pub struct SyncClock(SharedClock);
+
+#[cfg(not(loom))]
+impl SyncClock {
+    /// Holds `clock`.
+    #[must_use]
+    pub fn new(clock: SharedClock) -> Self {
+        SyncClock(clock)
+    }
+
+    /// Holds the production clock, [`SystemClock`].
+    #[must_use]
+    pub fn system() -> Self {
+        SyncClock(std::sync::Arc::new(SystemClock))
+    }
+}
+
+#[cfg(not(loom))]
+impl std::ops::Deref for SyncClock {
+    type Target = dyn Clock + Send + Sync + std::panic::RefUnwindSafe;
+
+    fn deref(&self) -> &Self::Target {
+        &*self.0
+    }
+}
+
+#[cfg(not(loom))]
+impl std::fmt::Debug for SyncClock {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SyncClock")
+    }
+}
 
 /// The production clock, over [`Instant::now`].
 #[derive(Clone, Copy, Debug, Default)]
@@ -139,6 +176,14 @@ impl Clock for &TestClock {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Pins that a holder's derived `Debug` names the clock field without
+    /// the trait object behind it.
+    #[cfg(not(loom))]
+    #[test]
+    fn a_sync_clock_debugs_as_its_name() {
+        assert_eq!(format!("{:?}", SyncClock::system()), "SyncClock");
+    }
 
     /// `advance_stepped` lands exactly on `total`, with a short last step,
     /// and runs `between` once per step.

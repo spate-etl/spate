@@ -28,7 +28,6 @@
 //! source offsets past it. Weaker settings would silently turn
 //! at-least-once into at-most-once.
 
-use crate::clock::SyncClock;
 use crate::error::redacted_client_error;
 use crate::sink::context::SinkContext;
 use crate::sink::encoder::{
@@ -38,6 +37,7 @@ use crate::sink::writer::{DELIVERY_GRACE, KafkaEndpoint, KafkaWriter};
 use bytesize::ByteSize;
 use rdkafka::producer::ThreadedProducer;
 use serde::Deserialize;
+use spate_core::clock::SyncClock;
 use spate_core::clock::tokio::{Clock as IoClock, SystemClock as IoSystemClock};
 use spate_core::config::{ComponentConfig, ConfigError, redact};
 use spate_core::deser::{Owned, RecFamily};
@@ -548,7 +548,7 @@ pub fn build(cfg: KafkaSinkConfig) -> Result<KafkaSink, ConfigError> {
 #[doc(hidden)]
 pub fn build_on_clocks(
     cfg: KafkaSinkConfig,
-    clock: crate::clock::SharedClock,
+    clock: spate_core::clock::SharedClock,
     io_clock: Arc<dyn IoClock + RefUnwindSafe>,
 ) -> Result<KafkaSink, ConfigError> {
     build_on(cfg, SyncClock::new(clock), io_clock)

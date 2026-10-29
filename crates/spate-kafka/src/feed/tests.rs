@@ -18,9 +18,9 @@ use super::write::{
     Tombstone, Write, WriteClass, classify, route,
 };
 use super::{Core, Gating, KafkaFeed, KafkaFeedError, KafkaFeedPublisher, Ready};
-use crate::clock::SyncClock;
 use rdkafka::config::FromClientConfigAndContext;
 use rdkafka::error::{KafkaError, RDKafkaErrorCode as C};
+use spate_core::clock::SyncClock;
 use spate_core::clock::TestClock;
 use spate_core::config::FeedSection;
 use spate_core::feed::{Feed, FeedError, FeedErrorKind, Receipt, Unit, confirmation, wake_channel};
@@ -1714,13 +1714,13 @@ mod cluster {
     use super::super::write::Producer;
     use super::super::{Core, Gating, KafkaFeed, READY_CAPACITY};
     use super::{TWO, returns_within};
-    use crate::clock::SyncClock;
     use crate::context::Intent;
     use rdkafka::consumer::{BaseConsumer, Consumer, ConsumerContext};
     use rdkafka::mocking::MockCluster;
     use rdkafka::producer::{BaseProducer, BaseRecord, Producer as _};
     use rdkafka::types::{RDKafkaApiKey, RDKafkaRespErr};
     use rdkafka::{ClientConfig, Offset, TopicPartitionList};
+    use spate_core::clock::SyncClock;
     use spate_core::clock::TestClock;
     use spate_core::config::FeedSection;
     use spate_core::feed::{Feed, FeedErrorKind, Unit};
@@ -4141,7 +4141,6 @@ mod docker {
     use super::cluster::{
         acknowledge_first, admission, committed, drive, owns, parts_for, section,
     };
-    use crate::clock::SyncClock;
     use crate::feed::KafkaFeed;
     use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
     use rdkafka::client::DefaultClientContext;
@@ -4150,6 +4149,7 @@ mod docker {
     use rdkafka::message::Message;
     use rdkafka::producer::{BaseProducer, BaseRecord, Producer};
     use rdkafka::{ClientConfig, Offset, TopicPartitionList};
+    use spate_core::clock::SyncClock;
     use spate_core::feed::Unit;
     use spate_test::wait_until;
     use std::num::NonZeroU32;

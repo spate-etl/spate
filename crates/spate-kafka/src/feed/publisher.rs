@@ -8,7 +8,7 @@
 use super::config::{BACKEND, KafkaFeedConfig};
 use super::write::Producer;
 use super::{Core, KafkaFeedError, check_topics, gone, producer_parts, publish_unit, startup};
-use crate::clock::SyncClock;
+use spate_core::clock::SyncClock;
 use spate_core::config::FeedSection;
 use spate_core::feed::{
     Confirmation, Delivery, Feed, FeedError, FeedErrorKind, FeedWaker, Receipt, Unit,

@@ -18,13 +18,13 @@
 //!
 //! [`write_batch`]: spate_core::sink::ShardWriter::write_batch
 
-use crate::clock::SyncClock;
 use crate::sink::metrics::KafkaSinkStatsMetrics;
 use rdkafka::client::ClientContext;
 use rdkafka::error::RDKafkaErrorCode;
 use rdkafka::message::DeliveryResult;
 use rdkafka::producer::ProducerContext;
 use rdkafka::statistics::Statistics;
+use spate_core::clock::SyncClock;
 use spate_core::clock::tokio::Clock as IoClock;
 use std::future::Future as _;
 use std::pin::pin;

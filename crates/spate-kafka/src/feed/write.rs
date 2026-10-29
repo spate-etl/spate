@@ -21,7 +21,7 @@ use std::time::Duration;
 /// writes it for an operator and never reads it.
 pub(crate) const DELIVERIES_HEADER: &str = "spate.deliveries";
 
-const BACKOFF_START: Duration = Duration::from_millis(200);
+pub(crate) const BACKOFF_START: Duration = Duration::from_millis(200);
 const BACKOFF_MAX: Duration = Duration::from_secs(5);
 
 /// The feed's producer.

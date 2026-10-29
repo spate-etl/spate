@@ -14,20 +14,21 @@ use super::inflight::Tp;
 use super::producer::FeedProducerContext;
 use super::write::Producer;
 use super::write::{
-    self, Attempt, DELIVERIES_HEADER, Destination, Failure, Finish, Move, Outgoing, Tombstone,
-    Write, WriteClass, classify, route,
+    self, Attempt, BACKOFF_START, DELIVERIES_HEADER, Destination, Failure, Finish, Move, Outgoing,
+    Tombstone, Write, WriteClass, classify, route,
 };
 use super::{Core, Gating, KafkaFeed, KafkaFeedError, KafkaFeedPublisher, Ready};
 use crate::clock::SyncClock;
 use rdkafka::config::FromClientConfigAndContext;
 use rdkafka::error::{KafkaError, RDKafkaErrorCode as C};
+use spate_core::clock::TestClock;
 use spate_core::config::FeedSection;
 use spate_core::feed::{Feed, FeedError, FeedErrorKind, Receipt, Unit, confirmation, wake_channel};
 use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// The attempt topic's partition count in these tests.
 const TWO: NonZeroU32 = NonZeroU32::new(2).expect("non-zero");
@@ -42,7 +43,7 @@ fn core(cap: u32) -> Core {
     Core::new(
         &KafkaFeedConfig::from_section(&section).unwrap(),
         TWO,
-        SyncClock::system(),
+        SyncClock::new(TestClock::frozen()),
     )
 }
 
@@ -319,15 +320,37 @@ fn a_resend_for_a_partition_given_up_is_dropped() {
     );
     let mut st = core.lock();
     st.tracker.revoke(&[tp(1)]);
-    let soon = Instant::now();
-    assert!(take_due(&mut st, soon).is_empty(), "not due yet");
-    let due = take_due(&mut st, soon + Duration::from_secs(1));
+    let now = core.clock().now();
+    assert!(take_due(&mut st, now).is_empty(), "not due yet");
+    let due = take_due(&mut st, now + Duration::from_secs(1));
     assert_eq!(due.len(), 1);
     match &due[0] {
         Write::Move(moving) => assert_eq!(moving.position.tp, tp(0)),
         other => panic!("{other:?}"),
     }
     assert!(st.resends.is_empty());
+}
+
+/// Pins that a write failed transiently is due again once its backoff has
+/// passed on the feed's clock, and not before.
+#[test]
+fn a_failed_write_is_due_after_its_backoff_on_the_feed_clock() {
+    let core = core(10);
+    let receipt = {
+        let mut st = core.lock();
+        st.tracker.assign([tp(0)]);
+        st.tracker.deliver(&tp(0), 1).unwrap()
+    };
+    let now = core.clock().now();
+    let write = moving(&core, receipt);
+    core.settle(*write, Err(failure(C::MessageTimedOut)));
+    let mut st = core.lock();
+    let early = now + BACKOFF_START - Duration::from_nanos(1);
+    assert!(
+        take_due(&mut st, early).is_empty(),
+        "not due before its backoff"
+    );
+    assert_eq!(take_due(&mut st, now + BACKOFF_START).len(), 1);
 }
 
 /// Pins that a fatal write report stops the feed, drops the writes queued
@@ -937,9 +960,9 @@ fn a_dead_lettered_unit_finishes_only_once_its_tombstone_is_confirmed() {
         let mut st = core.lock();
         assert_eq!(st.tracker.commit_point(&tp(0)), Some(4));
         assert_eq!(st.resends.len(), 1);
-        let (at, write) = st.resends.pop().unwrap();
-        assert!(at <= Instant::now(), "due at once");
-        write
+        let mut due = take_due(&mut st, core.clock().now());
+        assert_eq!(due.len(), 1, "due at once on a clock that has not moved");
+        due.pop().unwrap()
     };
     let identity = identity(&core, 4);
     match &tombstone {
@@ -1035,9 +1058,9 @@ fn a_resent_attempt_for_a_revoked_partition_is_dropped() {
     let entry = gated(&core, 0);
     let write = attempt_write(&core, entry);
     let mut st = core.lock();
-    st.resends.push((Instant::now(), write));
+    st.resends.push((core.clock().now(), write));
     st.tracker.revoke(&[tp(0)]);
-    assert!(take_due(&mut st, Instant::now() + Duration::from_secs(1)).is_empty());
+    assert!(take_due(&mut st, core.clock().now() + Duration::from_secs(1)).is_empty());
     assert_eq!(st.admitting, 0);
 }
 
@@ -1051,7 +1074,8 @@ fn a_failed_attempt_write_is_sent_again_and_delivers_the_unit() {
     let entry = gated(&core, 7);
     let write = admission(&core, entry).expect("admitted below the cap");
     core.settle(write, Err(failure(C::MessageTimedOut)));
-    let mut due = take_due(&mut core.lock(), Instant::now() + Duration::from_secs(1));
+    let now = core.clock().now();
+    let mut due = take_due(&mut core.lock(), now + Duration::from_secs(1));
     assert_eq!(due.len(), 1);
     core.settle(due.pop().unwrap(), Ok(()));
     {
@@ -1608,7 +1632,7 @@ mod cluster {
 
     use super::super::attempt::{self, Follower};
     use super::super::config::KafkaFeedConfig;
-    use super::super::consumer::{self, Driver, POLL_BATCH};
+    use super::super::consumer::{self, COMMIT_INTERVAL, Driver, POLL_BATCH};
     use super::super::gate::Gate;
     use super::super::inflight::Tp;
     use super::super::producer::FeedProducerContext;
@@ -1623,6 +1647,7 @@ mod cluster {
     use rdkafka::producer::{BaseProducer, BaseRecord, Producer as _};
     use rdkafka::types::{RDKafkaApiKey, RDKafkaRespErr};
     use rdkafka::{ClientConfig, Offset, TopicPartitionList};
+    use spate_core::clock::TestClock;
     use spate_core::config::FeedSection;
     use spate_core::feed::{Feed, FeedErrorKind, Unit};
     use spate_test::wait_until;
@@ -1790,9 +1815,48 @@ mod cluster {
         brokers: &str,
         group: &str,
     ) -> (KafkaFeedConfig, Arc<Core>, Producer, Driver) {
+        parts_on(brokers, group, SyncClock::system())
+    }
+
+    /// [`parts_for`] with the feed's timed reads on `clock`.
+    fn parts_on(
+        brokers: &str,
+        group: &str,
+        clock: SyncClock,
+    ) -> (KafkaFeedConfig, Arc<Core>, Producer, Driver) {
         let config = KafkaFeedConfig::from_section(&section(brokers, group)).unwrap();
-        let (core, producer, d) = super::super::parts(&config, TWO, SyncClock::system()).unwrap();
+        let (core, producer, d) = super::super::parts(&config, TWO, clock).unwrap();
         (config, core, producer, d)
+    }
+
+    /// Run one pass of `gate` under `dispatch`, and advance `clock` by `by`
+    /// once `at` holds or the pass has ended.
+    fn pass_advancing(
+        gate: &Gate,
+        dispatch: &tracing::Dispatch,
+        clock: &TestClock,
+        by: Duration,
+        at: impl Fn() -> bool,
+    ) {
+        std::thread::scope(|scope| {
+            let pass = scope.spawn(|| tracing::dispatcher::with_default(dispatch, || gate.pass()));
+            wait_until(DEADLINE, "the pass reaches the advance", || {
+                at() || pass.is_finished()
+            });
+            clock.advance(by);
+            pass.join().expect("the pass returns");
+        });
+    }
+
+    /// A dispatch that writes WARN and above to `capture`.
+    fn warnings_to(capture: &spate_test::LogCapture) -> tracing::Dispatch {
+        tracing::Dispatch::new(
+            tracing_subscriber::fmt()
+                .with_writer(capture.clone())
+                .with_max_level(tracing::Level::WARN)
+                .with_ansi(false)
+                .finish(),
+        )
     }
 
     /// The feed's follower and gate, each on its own thread as `connect`
@@ -1962,6 +2026,32 @@ mod cluster {
         feed.acknowledge(delivery.receipt).unwrap();
         consumer::run(d);
         assert_eq!(committed(&brokers, &group), Some(1));
+    }
+
+    /// Pins that the periodic commit falls due once the commit interval has
+    /// passed on the feed's clock since the last commit, and not before.
+    #[test]
+    fn the_periodic_commit_falls_due_on_the_feed_clock() {
+        let cluster = cluster_with(1);
+        let brokers = cluster.bootstrap_servers();
+        let group = spate_test::unique_name("commit-cadence");
+        let clock = TestClock::frozen();
+        let (config, core, producer, mut d) =
+            parts_on(&brokers, &group, SyncClock::new(clock.clone()));
+        let admission = admission(&config, &core, &producer, STEP);
+        drive(&mut d, "the unit is buffered", |d| {
+            !d.core.lock().ready.is_empty()
+        });
+        admission.stop();
+        acknowledge_first(&d);
+        assert!(!d.commit_if_due(), "due on a clock that has not moved");
+        clock.advance(COMMIT_INTERVAL - Duration::from_nanos(1));
+        assert!(!d.commit_if_due(), "due before the interval");
+        assert_eq!(committed(&brokers, &group), None);
+        clock.advance(Duration::from_nanos(1));
+        assert!(d.commit_if_due(), "not due at the interval");
+        assert_eq!(committed(&brokers, &group), Some(1));
+        assert!(!d.commit_if_due(), "due again with no time passed");
     }
 
     /// Pins that a revocation commits the offsets its partitions finished,
@@ -2370,10 +2460,11 @@ mod cluster {
         assert!(dropped, "dropping the feed did not return");
     }
 
-    /// Pins that a gate pass whose follower does not catch up within the
-    /// delivery timeout ends, with its unit back at the gate and its share
-    /// of `admitting` given back: with no follower, the gate waits on a
-    /// record it never sees, in steps of 10 ms, for 200 ms.
+    /// Pins that a gate pass whose follower does not catch up ends once the
+    /// delivery timeout has passed on the feed's clock, and not before, with
+    /// its unit back at the gate and its share of `admitting` given back:
+    /// with no follower, the gate waits on a record it never sees, in steps
+    /// of 10 ms.
     #[test]
     fn a_pass_the_follower_does_not_catch_up_on_ends_at_the_delivery_timeout() {
         let cluster = cluster_with(0);
@@ -2396,7 +2487,8 @@ mod cluster {
         }
         records.flush(Duration::from_secs(30)).unwrap();
         let config = KafkaFeedConfig::from_section(&section(&brokers, &group)).unwrap();
-        let core = Arc::new(Core::new(&config, TWO, SyncClock::system()));
+        let clock = TestClock::frozen();
+        let core = Arc::new(Core::new(&config, TWO, SyncClock::new(clock.clone())));
         let producer: Producer =
             rdkafka::config::FromClientConfigAndContext::from_config_and_context(
                 &config.producer_config(false),
@@ -2419,13 +2511,29 @@ mod cluster {
             .client()
             .fetch_metadata(Some(ATTEMPTS), Duration::from_secs(10))
             .unwrap();
-        let gate = Gate::new(
-            Arc::clone(&core),
-            Producer::clone(&producer),
-            Duration::from_millis(200),
-        )
-        .with_step(STEP);
-        let ended = returns_within(Duration::from_secs(10), move || gate.pass());
+        let bound = Duration::from_secs(3600);
+        let gate = Gate::new(Arc::clone(&core), Producer::clone(&producer), bound).with_step(STEP);
+        let (ended, end) = mpsc::channel();
+        std::thread::spawn(move || {
+            gate.pass();
+            let _ = ended.send(());
+        });
+        let waits = || attempt::lock(&core.ledger).gate_waits;
+        // A wait counted after an advance follows a bound check that read
+        // the advanced clock only once the next wait is counted too.
+        wait_until(DEADLINE, "the gate waits twice", || waits() >= 2);
+        assert!(end.try_recv().is_err(), "the pass ended on a frozen clock");
+        let sample = {
+            let ledger = attempt::lock(&core.ledger);
+            clock.advance(bound - Duration::from_nanos(1));
+            ledger.gate_waits
+        };
+        wait_until(DEADLINE, "the gate checks the advanced clock", || {
+            waits() >= sample + 2
+        });
+        assert!(end.try_recv().is_err(), "the pass ended before its bound");
+        clock.advance(Duration::from_nanos(1));
+        let ended = end.recv_timeout(DEADLINE).is_ok();
         if !ended {
             std::mem::forget(cluster);
         }
@@ -2685,7 +2793,8 @@ mod cluster {
         }
         records.flush(Duration::from_secs(30)).unwrap();
         let config = KafkaFeedConfig::from_section(&section(&brokers, &group)).unwrap();
-        let core = Arc::new(Core::new(&config, TWO, SyncClock::system()));
+        let clock = TestClock::frozen();
+        let core = Arc::new(Core::new(&config, TWO, SyncClock::new(clock.clone())));
         let producer: Producer =
             rdkafka::config::FromClientConfigAndContext::from_config_and_context(
                 &config.producer_config(false),
@@ -2706,37 +2815,30 @@ mod cluster {
             .client()
             .fetch_metadata(Some(ATTEMPTS), Duration::from_secs(10))
             .unwrap();
-        let gate = Gate::new(
-            Arc::clone(&core),
-            Producer::clone(&producer),
-            Duration::from_millis(500),
-        )
-        .with_step(STEP);
+        let bound = Duration::from_millis(500);
+        let gate = Gate::new(Arc::clone(&core), Producer::clone(&producer), bound).with_step(STEP);
         let capture = spate_test::LogCapture::new();
-        let subscriber = tracing_subscriber::fmt()
-            .with_writer(capture.clone())
-            .with_max_level(tracing::Level::WARN)
-            .with_ansi(false)
-            .finish();
+        let dispatch = warnings_to(&capture);
         // librdkafka serves the refusal as the read's error when its reply
         // is served alone; only a pass that waits for the follower took the
         // equal watermarks the test is about.
-        tracing::subscriber::with_default(subscriber, || {
-            wait_until(DEADLINE, "a pass waits for the follower", || {
-                cluster.request_errors(
-                    RDKafkaApiKey::ListOffsets,
-                    &[
-                        RDKafkaRespErr::RD_KAFKA_RESP_ERR_NOT_LEADER_FOR_PARTITION,
-                        RDKafkaRespErr::RD_KAFKA_RESP_ERR_NO_ERROR,
-                    ],
-                );
-                gate.pass();
-                assert_eq!(core.lock().gating.len(), 1, "admitted with an empty ledger");
-                capture
-                    .lines()
-                    .iter()
-                    .any(|l| l.contains("did not catch up"))
+        wait_until(DEADLINE, "a pass waits for the follower", || {
+            cluster.request_errors(
+                RDKafkaApiKey::ListOffsets,
+                &[
+                    RDKafkaRespErr::RD_KAFKA_RESP_ERR_NOT_LEADER_FOR_PARTITION,
+                    RDKafkaRespErr::RD_KAFKA_RESP_ERR_NO_ERROR,
+                ],
+            );
+            let waited = attempt::lock(&core.ledger).gate_waits;
+            pass_advancing(&gate, &dispatch, &clock, bound, || {
+                attempt::lock(&core.ledger).gate_waits > waited
             });
+            assert_eq!(core.lock().gating.len(), 1, "admitted with an empty ledger");
+            capture
+                .lines()
+                .iter()
+                .any(|l| l.contains("did not catch up"))
         });
     }
 
@@ -2831,10 +2933,11 @@ mod cluster {
         ))
         .unwrap();
         let config = KafkaFeedConfig::from_section(&section).unwrap();
+        let clock = TestClock::frozen();
         let core = Arc::new(Core::new(
             &config,
             std::num::NonZeroU32::new(3).unwrap(),
-            SyncClock::system(),
+            SyncClock::new(clock.clone()),
         ));
         let producer: Producer =
             rdkafka::config::FromClientConfigAndContext::from_config_and_context(
@@ -2878,14 +2981,17 @@ mod cluster {
             .broker_round_trip_time(2, Duration::from_secs(5))
             .unwrap();
         let capture = spate_test::LogCapture::new();
-        let subscriber = tracing_subscriber::fmt()
-            .with_writer(capture.clone())
-            .with_max_level(tracing::Level::WARN)
-            .with_ansi(false)
-            .finish();
         let gate = Gate::new(Arc::clone(&core), producer, config.delivery_timeout)
             .with_step(Duration::from_secs(1));
-        tracing::subscriber::with_default(subscriber, || gate.pass());
+        // Three requests read empty partition 0; the fourth is partition 1's,
+        // which its broker holds past the read's one-second step.
+        pass_advancing(
+            &gate,
+            &warnings_to(&capture),
+            &clock,
+            config.delivery_timeout,
+            || core.gate_reads.load(Ordering::SeqCst) == 4,
+        );
         let waiting: Vec<String> = core
             .lock()
             .gating
@@ -2933,10 +3039,11 @@ mod cluster {
         ))
         .unwrap();
         let config = KafkaFeedConfig::from_section(&section).unwrap();
+        let clock = TestClock::frozen();
         let core = Arc::new(Core::new(
             &config,
             std::num::NonZeroU32::MIN,
-            SyncClock::system(),
+            SyncClock::new(clock.clone()),
         ));
         let producer: Producer =
             rdkafka::config::FromClientConfigAndContext::from_config_and_context(
@@ -2964,14 +3071,17 @@ mod cluster {
             .broker_round_trip_time(2, Duration::from_millis(300))
             .unwrap();
         let capture = spate_test::LogCapture::new();
-        let subscriber = tracing_subscriber::fmt()
-            .with_writer(capture.clone())
-            .with_max_level(tracing::Level::WARN)
-            .with_ansi(false)
-            .finish();
         let gate = Gate::new(Arc::clone(&core), producer, config.delivery_timeout)
             .with_step(Duration::from_secs(1));
-        tracing::subscriber::with_default(subscriber, || gate.pass());
+        // Advanced while the round trip holds the watermark read.
+        pass_advancing(
+            &gate,
+            &warnings_to(&capture),
+            &clock,
+            config.delivery_timeout,
+            || core.gate_reads.load(Ordering::SeqCst) == 1,
+        );
+        assert_eq!(core.gate_reads.load(Ordering::SeqCst), 1, "read again");
         let st = core.lock();
         assert_eq!(st.gating.len(), 1, "the unit was admitted");
         assert!(st.fatal.is_none());

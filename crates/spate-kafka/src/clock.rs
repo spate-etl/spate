@@ -43,3 +43,15 @@ impl fmt::Debug for SyncClock {
         f.write_str("SyncClock")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A holder's derived `Debug` names the clock field without the trait
+    /// object behind it.
+    #[test]
+    fn a_sync_clock_debugs_as_its_name() {
+        assert_eq!(format!("{:?}", SyncClock::system()), "SyncClock");
+    }
+}

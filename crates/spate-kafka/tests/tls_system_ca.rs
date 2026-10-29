@@ -153,8 +153,10 @@ fn tls_broker() -> (String, Container<Kafka>, String) {
     )
 }
 
-fn connector_clients(brokers: &str) {
-    create_topic(brokers);
+/// Runs a sink, its readiness probe and a source over TLS with the connector's
+/// CA default, after creating the topic with a raw client naming `ca_location`.
+fn connector_clients(brokers: &str, ca_location: &str) {
+    create_topic(brokers, ca_location);
     let tls = BTreeMap::from([("security.protocol".to_string(), "ssl".to_string())]);
 
     let mut sink_cfg = KafkaSinkConfig::new(brokers, TOPIC);
@@ -225,7 +227,7 @@ fn client_arm() -> bool {
     };
     let brokers = std::env::var(BROKERS).expect("broker address");
     match arm.as_str() {
-        "probe" => connector_clients(&brokers),
+        "probe" => connector_clients(&brokers, "probe"),
         "untrusted" => {
             let unrelated = TestCa::new("spate-kafka-test unrelated CA");
             let pem = pem("CERTIFICATE", &unrelated.der());
@@ -262,7 +264,8 @@ fn system_arm(brokers: &str) {
         !verifies(raw(brokers).set("ssl.ca.location", "probe")),
         "explicit probe verified with the CA outside the bundle"
     );
-    connector_clients(brokers);
+    // `probe` misses the CA here, so the topic is created through the directory.
+    connector_clients(brokers, "/etc/ssl/certs");
 }
 
 /// A client container on the host network that runs `binary` as `arm`.
@@ -377,10 +380,10 @@ impl Drop for Scratch {
 
 /// Create the topic the connector clients use. The sink never creates a
 /// topic, so a raw producer's metadata read does it, under librdkafka's
-/// auto-create default and the CA `probe` finds.
-fn create_topic(brokers: &str) {
+/// auto-create default and the CA at `ca_location`.
+fn create_topic(brokers: &str, ca_location: &str) {
     let producer: BaseProducer = raw(brokers)
-        .set("ssl.ca.location", "probe")
+        .set("ssl.ca.location", ca_location)
         .build()
         .expect("raw producer");
     spate_test::wait_until(Duration::from_secs(60), "the topic exists", || {

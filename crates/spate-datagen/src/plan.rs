@@ -41,7 +41,7 @@ use crate::dims::{CUSTOMERS, REFUND_REASONS, REGIONS, SKUS, UNIT_CENTS};
 use crate::events::{OrderLine, OrderPlaced, PaymentCaptured, RefundIssued, StorefrontEvent};
 use crate::rng::SplitMix64;
 use std::borrow::Cow;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::UNIX_EPOCH;
 
 /// How many orders a lane remembers, in each of its two rings. Bounded so a
 /// lane's footprint does not grow with its runtime.
@@ -190,7 +190,7 @@ impl EventPlan {
     fn event_time(&self) -> i64 {
         match self.clock {
             Clock::Fixed => self.epoch_ms.saturating_add(self.produced as i64),
-            Clock::Wall => SystemTime::now()
+            Clock::Wall => spate_core::clock::wall_now()
                 .duration_since(UNIX_EPOCH)
                 .map_or(0, |d| d.as_millis() as i64),
         }

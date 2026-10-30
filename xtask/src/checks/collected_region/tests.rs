@@ -462,7 +462,7 @@ fn name_compression_does_not_cross_a_part_boundary() {
 /// the name itself.
 #[test]
 fn deref_reads_the_forms_callgrind_writes() {
-    let mut names = HashMap::new();
+    let mut names = BTreeMap::new();
     assert_eq!(deref(&mut names, "/lib/libc.so.6"), "/lib/libc.so.6");
     assert_eq!(deref(&mut names, "(7"), "(7");
     assert_eq!(deref(&mut names, "(9)"), "");

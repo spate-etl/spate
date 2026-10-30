@@ -32,6 +32,11 @@ disallowed-methods = [
     { path = "std::thread::Builder::spawn_unchecked", reason = "spawn through `spate_core::task::spawn_thread`, whose handle joins the thread on drop and logs its panic; a site that keeps a raw spawn takes an `expect` saying what ends the thread" },
 ]
 
+disallowed-types = [
+    { path = "std::collections::HashMap", reason = "use `spate_core::hash::FastMap` (`FastSet`), or `QualityMap` (`QualitySet`) for keys an outside party chooses; a site that keeps a std map takes an `expect` naming why" },
+    { path = "std::collections::HashSet", reason = "use `spate_core::hash::FastMap` (`FastSet`), or `QualityMap` (`QualitySet`) for keys an outside party chooses; a site that keeps a std map takes an `expect` naming why" },
+]
+
 await-holding-invalid-types = [
     { path = "tracing::span::Entered", reason = "the task can resume on another thread under the wrong span; use `Instrument::instrument` or `Span::in_scope`" },
     { path = "tracing::span::EnteredSpan", reason = "the task can resume on another thread under the wrong span; use `Instrument::instrument` or `Span::in_scope`" },

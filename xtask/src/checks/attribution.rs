@@ -12,7 +12,7 @@
 //! counts are recomputed from those rows. The generator's own counts are row
 //! counts.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Write;
 use std::path::Path;
@@ -173,21 +173,21 @@ fn first_party(meta: &Metadata) -> Result<Vec<String>, Error> {
 ///
 /// Anything outside it is build-time tooling for this repository, which no
 /// release distributes and so nothing has to attribute.
-fn distributed(meta: &Metadata) -> Result<HashSet<String>, Error> {
+fn distributed(meta: &Metadata) -> Result<BTreeSet<String>, Error> {
     let Some(resolve) = &meta.resolve else {
         return Err(Error::msg(
             "cargo metadata carried no resolve graph, so the distribution\n  \
              filter is blind",
         ));
     };
-    let nodes: HashMap<&str, &Node> = resolve.nodes.iter().map(|n| (n.id.as_str(), n)).collect();
-    let name_of: HashMap<&str, &str> = meta
+    let nodes: BTreeMap<&str, &Node> = resolve.nodes.iter().map(|n| (n.id.as_str(), n)).collect();
+    let name_of: BTreeMap<&str, &str> = meta
         .packages
         .iter()
         .map(|p| (p.id.as_str(), p.name.as_str()))
         .collect();
 
-    let mut seen: HashSet<&str> = HashSet::new();
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
     let mut queue: Vec<&str> = meta
         .packages
         .iter()
@@ -241,7 +241,7 @@ struct Inventory {
 fn rebuild(
     generated: &str,
     first_party: &[String],
-    distributed: &HashSet<String>,
+    distributed: &BTreeSet<String>,
 ) -> Result<Inventory, Error> {
     let lines = records(generated);
 
@@ -297,7 +297,7 @@ fn rebuild(
     // Drop the first-party rows, and the rows for crates no release carries,
     // before anything is counted, so every check below judges the filtered
     // table.
-    let names: HashSet<&str> = first_party.iter().map(String::as_str).collect();
+    let names: BTreeSet<&str> = first_party.iter().map(String::as_str).collect();
     let rows_carried: Vec<&str> = rows_raw
         .iter()
         .copied()
@@ -375,7 +375,7 @@ fn rebuild(
 /// Counts by license id, ordered as cargo-about orders them: most used first,
 /// ties by id ascending.
 fn summary<'a>(rows: &[&'a str]) -> Vec<(&'a str, usize)> {
-    let mut tally: HashMap<&str, usize> = HashMap::new();
+    let mut tally: BTreeMap<&str, usize> = BTreeMap::new();
     for row in rows {
         *tally.entry(field(row, 4)).or_default() += 1;
     }
@@ -459,7 +459,7 @@ mod tests {
 
     /// Every crate a fixture names, so the distribution filter drops nothing
     /// and the test isolates the behaviour it is about.
-    fn carries_all(text: &str) -> HashSet<String> {
+    fn carries_all(text: &str) -> BTreeSet<String> {
         records(text)
             .iter()
             .filter(|l| l.starts_with("| "))
@@ -561,7 +561,7 @@ mod tests {
     #[test]
     fn an_undistributed_row_is_dropped_and_counted() {
         // `anyhow` holds two rows in the fixture, one per license text.
-        let carried: HashSet<String> = ["serde", "spate", "spate-core"]
+        let carried: BTreeSet<String> = ["serde", "spate", "spate-core"]
             .iter()
             .map(|s| (*s).to_string())
             .collect();

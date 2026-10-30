@@ -19,7 +19,7 @@
 //! DEVELOPING.md states the bench-authoring rule this enforces and where the
 //! thresholds come from.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use crate::run::{Error, Outcome};
@@ -353,7 +353,7 @@ struct Part {
     /// cost line belongs to the callee or the branch. Callgrind excludes both
     /// from its totals.
     pending: bool,
-    names: HashMap<String, String>,
+    names: BTreeMap<String, String>,
 }
 
 impl Default for Part {
@@ -367,7 +367,7 @@ impl Default for Part {
             declared: 0.0,
             declared_here: false,
             pending: false,
-            names: HashMap::new(),
+            names: BTreeMap::new(),
         }
     }
 }
@@ -538,7 +538,7 @@ fn read_line(
 /// `cob=` shares the namespace of `ob=`, so a name introduced on the called side
 /// is recorded too. An id no part of this file introduced resolves to the empty
 /// name.
-fn deref(names: &mut HashMap<String, String>, v: &str) -> String {
+fn deref(names: &mut BTreeMap<String, String>, v: &str) -> String {
     if !v.starts_with('(') {
         return v.to_owned();
     }

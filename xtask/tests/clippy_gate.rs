@@ -1,6 +1,6 @@
-//! The `absolute_paths` lint and the thread spawn bans as the workspace
-//! configures them, and the `-D warnings` the clippy gate appends, which a
-//! warn-level entry relies on.
+//! The `absolute_paths` lint, the thread spawn bans and the std map bans as
+//! the workspace configures them, and the `-D warnings` the clippy gate
+//! appends, which a warn-level entry relies on.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -115,8 +115,8 @@ pub fn three_segments() -> std::sync::Mutex<u8> {
     std::sync::Mutex::new(0)
 }
 
-pub fn four_segments() -> usize {
-    std::collections::hash_map::HashMap::<u8, u8>::new().len()
+pub fn four_segments() -> u8 {
+    std::sync::atomic::AtomicU8::new(0).into_inner()
 }
 ";
     let (passed, stderr) = clippy_probe("limit-probe", source);
@@ -126,7 +126,7 @@ pub fn four_segments() -> usize {
         stderr.contains("consider bringing this path into scope"),
         "{stderr}"
     );
-    let four = line_of(source, "hash_map::HashMap");
+    let four = line_of(source, "atomic::AtomicU8");
     assert!(stderr.contains(&format!("src/lib.rs:{four}:")), "{stderr}");
     for line in [
         line_of(source, "-> std::sync::Mutex"),
@@ -180,6 +180,82 @@ pub fn unchecked() {
             "no `{path}` finding at line {line}\n{stderr}"
         );
     }
+}
+
+/// A crate under the repository's `clippy.toml` that names std's
+/// `HashMap` or `HashSet`, by import, by annotation, by a type-relative call
+/// or through the `hash_map` module, fails `clippy -D warnings` with
+/// `disallowed_types` at each line, which pins both entries.
+#[test]
+fn disallowed_std_maps_fail_the_gate() {
+    let source = "\
+use std::collections::HashMap;
+use std::collections::HashSet;
+
+pub fn annotated() -> usize {
+    let set: std::collections::HashSet<u8> = [1].into_iter().collect();
+    set.len()
+}
+
+pub fn constructed() -> usize {
+    HashMap::<u8, u8>::new().len()
+}
+
+pub fn through_module(map: &std::collections::hash_map::HashMap<u8, u8>) -> usize {
+    map.len()
+}
+
+pub fn imported(set: &HashSet<u8>) -> usize {
+    set.len()
+}
+";
+    let (passed, stderr) = clippy_probe("map-probe", source);
+
+    assert!(!passed, "{stderr}");
+    for (needle, path) in [
+        ("use std::collections::HashMap;", "std::collections::HashMap"),
+        ("use std::collections::HashSet;", "std::collections::HashSet"),
+        ("let set: std::collections::HashSet", "std::collections::HashSet"),
+        ("HashMap::<u8, u8>::new()", "std::collections::HashMap"),
+        ("hash_map::HashMap<u8, u8>", "std::collections::HashMap"),
+    ] {
+        let line = line_of(source, needle);
+        let reported = format!("src/lib.rs:{line}:");
+        let message = format!("use of a disallowed type `{path}`");
+        assert!(
+            stderr
+                .lines()
+                .any(|l| l.starts_with(&reported) && l.contains(&message)),
+            "no `{path}` finding at line {line}\n{stderr}"
+        );
+    }
+}
+
+/// An alias over std's map with another hasher, defined under an `expect`,
+/// passes the gate when it is used as an annotation, through `default`,
+/// through `collect` and through a method call, which is the shape
+/// `spate_core::hash` takes.
+#[test]
+fn std_map_aliases_pass_the_gate() {
+    let source = "\
+use std::hash::{BuildHasherDefault, DefaultHasher};
+
+#[expect(clippy::disallowed_types, reason = \"the alias is the one sanctioned spelling\")]
+pub type Map<K, V> = std::collections::HashMap<K, V, BuildHasherDefault<DefaultHasher>>;
+
+#[expect(clippy::disallowed_types, reason = \"the alias is the one sanctioned spelling\")]
+pub type Set<T> = std::collections::HashSet<T, BuildHasherDefault<DefaultHasher>>;
+
+pub fn used() -> usize {
+    let mut map: Map<u8, u8> = Map::default();
+    map.insert(1, 1);
+    let set = [1u8].into_iter().collect::<Set<_>>();
+    map.len() + set.len()
+}
+";
+    let (passed, stderr) = clippy_probe("alias-probe", source);
+
+    assert!(passed, "{stderr}");
 }
 
 /// The gate appends `-D warnings`, so a lint at `warn` fails the run, and

@@ -1,5 +1,6 @@
-//! The `absolute_paths` lint as the workspace configures it, and the
-//! `-D warnings` the clippy gate appends, which a warn-level entry relies on.
+//! The `absolute_paths` lint and the thread spawn bans as the workspace
+//! configures them, and the `-D warnings` the clippy gate appends, which a
+//! warn-level entry relies on.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -57,38 +58,25 @@ fn line_of(source: &str, needle: &str) -> usize {
         + 1
 }
 
-/// A crate that takes the workspace's clippy lint table and the repository's
-/// `clippy.toml` calls one standard library item through a three-segment path
-/// and another through a four-segment path. The four-segment path fails
-/// `clippy -D warnings` and the three-segment path does not, which pins both
-/// the `absolute_paths` entry and the limit in `clippy.toml`.
-#[test]
-fn absolute_paths_limit_is_three() {
-    let scratch = Scratch::new("clippy-limit");
+/// Runs `cargo clippy -D warnings` over a crate holding `source` as its
+/// library, which takes the workspace's clippy lint table and the
+/// repository's `clippy.toml`, and returns whether it passed and its stderr.
+fn clippy_probe(name: &str, source: &str) -> (bool, String) {
+    let scratch = Scratch::new(name);
     let root = &scratch.0;
 
     let manifest = format!(
-        "[package]\nname = \"limit-probe\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n\
+        "[package]\nname = \"{name}\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n\
          [workspace]\n\n[lints.clippy]\n{}",
         workspace_clippy_lints()
     );
     fs::write(root.join("Cargo.toml"), manifest).unwrap();
     fs::write(
         root.join("Cargo.lock"),
-        "version = 4\n\n[[package]]\nname = \"limit-probe\"\nversion = \"0.0.0\"\n",
+        format!("version = 4\n\n[[package]]\nname = \"{name}\"\nversion = \"0.0.0\"\n"),
     )
     .unwrap();
     fs::copy(repo_root().join("clippy.toml"), root.join("clippy.toml")).unwrap();
-
-    let source = "\
-pub fn three_segments() -> std::sync::Mutex<u8> {
-    std::sync::Mutex::new(0)
-}
-
-pub fn four_segments() -> usize {
-    std::collections::hash_map::HashMap::<u8, u8>::new().len()
-}
-";
     fs::write(root.join("src/lib.rs"), source).unwrap();
 
     let got = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
@@ -109,9 +97,31 @@ pub fn four_segments() -> usize {
         .env_remove("RUSTC_WORKSPACE_WRAPPER")
         .output()
         .unwrap();
-    let stderr = String::from_utf8_lossy(&got.stderr);
+    (
+        got.status.success(),
+        String::from_utf8_lossy(&got.stderr).into_owned(),
+    )
+}
 
-    assert!(!got.status.success(), "{stderr}");
+/// A crate that takes the workspace's clippy lint table and the repository's
+/// `clippy.toml` calls one standard library item through a three-segment path
+/// and another through a four-segment path. The four-segment path fails
+/// `clippy -D warnings` and the three-segment path does not, which pins both
+/// the `absolute_paths` entry and the limit in `clippy.toml`.
+#[test]
+fn absolute_paths_limit_is_three() {
+    let source = "\
+pub fn three_segments() -> std::sync::Mutex<u8> {
+    std::sync::Mutex::new(0)
+}
+
+pub fn four_segments() -> usize {
+    std::collections::hash_map::HashMap::<u8, u8>::new().len()
+}
+";
+    let (passed, stderr) = clippy_probe("limit-probe", source);
+
+    assert!(!passed, "{stderr}");
     assert!(
         stderr.contains("consider bringing this path into scope"),
         "{stderr}"
@@ -125,6 +135,42 @@ pub fn four_segments() -> usize {
         assert!(
             !stderr.contains(&format!("src/lib.rs:{line}:")),
             "line {line} is a three-segment path\n{stderr}"
+        );
+    }
+}
+
+/// A crate under the repository's `clippy.toml` that starts a thread through
+/// `std::thread::spawn` and through `std::thread::Builder::spawn` fails
+/// `clippy -D warnings` with `disallowed_methods` at each call, which pins
+/// both thread entries.
+#[test]
+fn disallowed_thread_spawns_fail_the_gate() {
+    let source = "\
+use std::thread;
+
+pub fn plain() {
+    thread::spawn(|| ()).join().unwrap();
+}
+
+pub fn built() {
+    thread::Builder::new().spawn(|| ()).unwrap().join().unwrap();
+}
+";
+    let (passed, stderr) = clippy_probe("spawn-probe", source);
+
+    assert!(!passed, "{stderr}");
+    for (needle, path) in [
+        ("thread::spawn(", "std::thread::spawn"),
+        (".spawn(|| ())", "std::thread::Builder::spawn"),
+    ] {
+        let line = line_of(source, needle);
+        let reported = format!("src/lib.rs:{line}:");
+        let message = format!("use of a disallowed method `{path}`");
+        assert!(
+            stderr
+                .lines()
+                .any(|l| l.starts_with(&reported) && l.contains(&message)),
+            "no `{path}` finding at line {line}\n{stderr}"
         );
     }
 }

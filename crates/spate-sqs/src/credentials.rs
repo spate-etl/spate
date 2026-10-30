@@ -5,12 +5,12 @@ use crate::error::chain;
 use aws_credential_types::Credentials;
 use aws_credential_types::provider::error::CredentialsError;
 use aws_credential_types::provider::{ProvideCredentials, SharedCredentialsProvider, future};
+use spate_core::task::{self, TaskHandle};
 use std::error::Error;
 use std::fmt;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, SystemTime};
 use tokio::sync::watch;
-use tokio::task::{AbortHandle, JoinHandle};
 use tracing::Instrument as _;
 
 /// How long one load runs before it ends as timed out: the longest bound
@@ -26,7 +26,8 @@ type Outcome = Result<Credentials, Arc<CredentialsError>>;
 /// A load under way or finished, until a caller takes its outcome.
 struct Load {
     outcome: watch::Receiver<Option<Outcome>>,
-    task: AbortHandle,
+    /// Aborted when the load leaves the slot or the provider drops.
+    _task: TaskHandle<()>,
 }
 
 /// What a call does with the slot: await a load, or take credentials a
@@ -87,12 +88,13 @@ impl SharedLoad {
             }
         }
         let (send, outcome) = watch::channel(None);
-        let task =
-            tokio::spawn(load(self.inner.clone(), send).instrument(tracing::Span::current()))
-                .abort_handle();
+        let task = task::spawn(
+            "sqs-credentials-load",
+            load(self.inner.clone(), send).instrument(tracing::Span::current()),
+        );
         *slot = Some(Load {
             outcome: outcome.clone(),
-            task,
+            _task: task,
         });
         Joined::Await(outcome)
     }
@@ -140,15 +142,6 @@ impl ProvideCredentials for SharedLoad {
     }
 }
 
-impl Drop for SharedLoad {
-    fn drop(&mut self) {
-        let slot = self.slot.get_mut().unwrap_or_else(PoisonError::into_inner);
-        if let Some(load) = slot.take() {
-            load.task.abort();
-        }
-    }
-}
-
 impl fmt::Debug for SharedLoad {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SharedLoad")
@@ -157,26 +150,18 @@ impl fmt::Debug for SharedLoad {
     }
 }
 
-/// Aborts the task it holds when dropped, so aborting a load ends the
-/// provider's own future too.
-struct AbortOnDrop<T>(JoinHandle<T>);
-
-impl<T> Drop for AbortOnDrop<T> {
-    fn drop(&mut self) {
-        self.0.abort();
-    }
-}
-
 /// Runs one load of `inner` and sends its outcome. The provider runs on a
 /// task of its own so that a panic in it reaches the callers as an error.
 async fn load(inner: SharedCredentialsProvider, send: watch::Sender<Option<Outcome>>) {
     let provider = inner.clone();
-    let mut call = AbortOnDrop(tokio::spawn(
-        async move { provider.provide_credentials().await },
-    ));
+    // Aborting the load drops this handle, which ends the provider's own
+    // future too.
+    let mut call = task::spawn("sqs-credentials-provider", async move {
+        provider.provide_credentials().await
+    });
     // Real time: the client's provider serves every call and holds no feed
     // clock, and the SDK times those calls on tokio time.
-    let outcome = match tokio::time::timeout(LOAD_BOUND, &mut call.0).await {
+    let outcome = match tokio::time::timeout(LOAD_BOUND, &mut call).await {
         Ok(Ok(result)) => result,
         Ok(Err(join)) => Err(CredentialsError::provider_error(ended(join))),
         Err(_) => match fallback(&inner) {
@@ -209,12 +194,10 @@ fn ended(join: tokio::task::JoinError) -> String {
         return "the credentials load was cancelled".to_owned();
     }
     let payload = join.into_panic();
-    let text = payload
-        .downcast_ref::<&str>()
-        .copied()
-        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
-        .unwrap_or("a non-string payload");
-    format!("the credentials provider panicked: {text}")
+    format!(
+        "the credentials provider panicked: {}",
+        task::panic_text(&*payload)
+    )
 }
 
 /// One load's error, handed to each caller that awaited the load. Its text

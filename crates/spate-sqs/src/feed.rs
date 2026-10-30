@@ -36,12 +36,13 @@ use spate_core::feed::{
     Confirmation, Confirmer, Delivery, Depth, DepthOf, DepthReading, Feed, FeedError,
     FeedErrorKind, FeedWaker, Receipt, Unit, confirmation, depth_reading,
 };
+use spate_core::task::{self, TaskHandle};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::task::Poll;
 use std::time::Duration;
 use tokio::sync::Notify;
-use tokio::task::{AbortHandle, coop};
+use tokio::task::coop;
 use tokio::time::Instant;
 
 /// How long SQS keeps a message hidden, counted from the receive that issued
@@ -399,7 +400,13 @@ impl Shared {
 /// visibility period.
 pub struct SqsFeed {
     shared: Arc<Shared>,
-    tasks: Vec<AbortHandle>,
+    /// The receive, renewal, settle and publish tasks, aborted when the feed
+    /// drops.
+    #[cfg_attr(
+        not(feature = "testing"),
+        expect(dead_code, reason = "held for its drop, which aborts the tasks")
+    )]
+    tasks: Vec<TaskHandle<()>>,
     /// Runs each depth read.
     io: tokio::runtime::Handle,
 }
@@ -578,10 +585,10 @@ impl SqsFeed {
             clock,
         });
         let tasks = vec![
-            io.spawn(receive_task(Arc::clone(&shared))).abort_handle(),
-            io.spawn(renewal_task(Arc::clone(&shared))).abort_handle(),
-            io.spawn(settle_task(Arc::clone(&shared))).abort_handle(),
-            io.spawn(publish_task(Arc::clone(&shared))).abort_handle(),
+            task::spawn_on("sqs-receive", receive_task(Arc::clone(&shared)), io),
+            task::spawn_on("sqs-renewal", renewal_task(Arc::clone(&shared)), io),
+            task::spawn_on("sqs-settle", settle_task(Arc::clone(&shared)), io),
+            task::spawn_on("sqs-publish", publish_task(Arc::clone(&shared)), io),
         ];
         SqsFeed {
             shared,
@@ -628,14 +635,6 @@ impl SqsFeed {
     #[cfg(test)]
     fn buffered(&self) -> usize {
         self.lock().buffered.len()
-    }
-}
-
-impl Drop for SqsFeed {
-    fn drop(&mut self) {
-        for task in &self.tasks {
-            task.abort();
-        }
     }
 }
 
@@ -850,7 +849,7 @@ impl Feed for SqsFeed {
         let shared = Arc::clone(&self.shared);
         // Detached: the reporter settles the reading, or reads as Retryable
         // when the runtime drops the task.
-        drop(self.io.spawn(async move {
+        let read = async move {
             let outcome = match attributes.attributes(&url, COUNT_ATTRIBUTES).await {
                 Ok(read) => counts(&read)
                     .map(|c| {
@@ -877,7 +876,8 @@ impl Feed for SqsFeed {
             if let Some(waker) = waker {
                 waker.wake();
             }
-        }));
+        };
+        task::spawn_on("sqs-depth", read, &self.io).detach();
         Some(reading)
     }
 
@@ -982,7 +982,7 @@ impl Feed for SqsFeed {
             });
         }
         // Detached: it ends at the bound at the latest.
-        drop(self.io.spawn(close_task(Arc::clone(&self.shared))));
+        task::spawn_on("sqs-close", close_task(Arc::clone(&self.shared)), &self.io).detach();
         self.shared.settle.notify_one();
         self.shared.hand_back.notify_one();
         Some(confirmation)

@@ -41,6 +41,7 @@ use spate_core::error::{ErrorClass, SourceError};
 use spate_core::feed::FeedWaker;
 use spate_core::record::{PartitionId, RawPayload};
 use spate_core::source::{LaneId, PayloadBatch, SourceLane};
+use spate_core::task::TaskHandle;
 use std::pin::pin;
 use std::sync::Arc;
 use std::sync::mpsc as std_mpsc;
@@ -90,6 +91,11 @@ pub struct S3Lane {
     id: LaneId,
     partition: PartitionId,
     rx: mpsc::Receiver<ChunkMsg>,
+    /// The fetcher sending on `rx`, aborted when the lane drops. A fetcher in
+    /// retry backoff would otherwise notice the closed channel only at its
+    /// next send. It holds no receipt or ack issuer, so the abort loses
+    /// nothing durable.
+    _fetcher: TaskHandle<()>,
     handle: tokio::runtime::Handle,
     /// Times each poll's receive deadline.
     clock: Arc<dyn Clock>,
@@ -151,6 +157,7 @@ impl S3Lane {
         id: LaneId,
         partition: PartitionId,
         rx: mpsc::Receiver<ChunkMsg>,
+        fetcher: TaskHandle<()>,
         handle: tokio::runtime::Handle,
         clock: Arc<dyn Clock>,
         issuer: AckIssuer,
@@ -170,6 +177,7 @@ impl S3Lane {
             id,
             partition,
             rx,
+            _fetcher: fetcher,
             handle,
             clock,
             issuer,
@@ -690,10 +698,13 @@ mod tests {
         let checkpointer = Checkpointer::new();
         let tracker = Arc::new(SplitTracker::new());
         let (poison_tx, poison_rx) = std_mpsc::channel();
+        // The rig sends the chunks itself, so the lane's fetcher only waits.
+        let fetcher = spate_core::task::spawn_on("s3-fetcher", std::future::pending(), rt.handle());
         let lane = S3Lane::new(
             LaneId(0),
             PartitionId(0),
             rx,
+            fetcher,
             rt.handle().clone(),
             clock,
             checkpointer.handle(),

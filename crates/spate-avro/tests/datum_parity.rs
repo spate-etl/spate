@@ -10,6 +10,7 @@
 //! acceptance superset) are pinned by their own tests at the bottom.
 
 #![expect(deprecated, reason = "fixtures call the datum free functions directly")]
+#![expect(clippy::disallowed_types, reason = "a user decodes into std's map")]
 
 use apache_avro::types::Value;
 use apache_avro::{Schema, to_avro_datum};

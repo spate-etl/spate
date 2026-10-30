@@ -5,6 +5,8 @@
 //! [`QualityMap`] and [`QualitySet`] are for keys an outside party chooses,
 //! such as payload object keys or column values: their hasher adds a final
 //! mix that spreads every input bit into the bits the table indexes on.
+//! The workspace `clippy.toml` bans std's `HashMap` and `HashSet`; a site that
+//! keeps one takes an `expect` naming why.
 //!
 //! Both states draw a fresh seed per instance, so iteration order differs
 //! between maps and between runs. Neither hasher claims resistance against an
@@ -30,15 +32,31 @@
 use std::hash::{BuildHasher, Hasher};
 
 /// A [`HashMap`](std::collections::HashMap) for keys Spate produces.
+#[expect(
+    clippy::disallowed_types,
+    reason = "the aliases are the sanctioned spelling of std's map"
+)]
 pub type FastMap<K, V> = std::collections::HashMap<K, V, FastState>;
 
 /// A [`HashSet`](std::collections::HashSet) for keys Spate produces.
+#[expect(
+    clippy::disallowed_types,
+    reason = "the aliases are the sanctioned spelling of std's map"
+)]
 pub type FastSet<T> = std::collections::HashSet<T, FastState>;
 
 /// A [`HashMap`](std::collections::HashMap) for keys an outside party chooses.
+#[expect(
+    clippy::disallowed_types,
+    reason = "the aliases are the sanctioned spelling of std's map"
+)]
 pub type QualityMap<K, V> = std::collections::HashMap<K, V, QualityState>;
 
 /// A [`HashSet`](std::collections::HashSet) for keys an outside party chooses.
+#[expect(
+    clippy::disallowed_types,
+    reason = "the aliases are the sanctioned spelling of std's map"
+)]
 pub type QualitySet<T> = std::collections::HashSet<T, QualityState>;
 
 macro_rules! seeded_state {

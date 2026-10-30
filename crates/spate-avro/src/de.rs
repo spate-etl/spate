@@ -1586,6 +1586,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(clippy::disallowed_types, reason = "a user decodes into std's map")]
     fn invalid_utf8_in_map_key_is_an_error() {
         let mut datum = zig(1);
         datum.extend(zig(2));
@@ -1601,6 +1602,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(clippy::disallowed_types, reason = "a user decodes into std's map")]
     fn multi_block_map_decodes() {
         let mut datum = zig(1);
         datum.extend(avro_str("a"));

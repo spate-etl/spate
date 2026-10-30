@@ -64,6 +64,7 @@
 // and the fixtures test reads items no bench drives. So an item dead in one
 // target is live in another, and the allow is module-wide.
 #![allow(dead_code, reason = "each bench target uses a different subset")]
+#![expect(clippy::disallowed_types, reason = "a user decodes into std's map")]
 
 use apache_avro::types::Value;
 use apache_avro::{Decimal, Schema, Uuid, to_avro_datum};

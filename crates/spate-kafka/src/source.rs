@@ -976,6 +976,10 @@ impl Drop for KafkaSource {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::disallowed_types,
+    reason = "rdkafka's `Statistics` fields are std maps"
+)]
 mod tests {
     use super::*;
     use rdkafka::error::RDKafkaErrorCode;

@@ -550,6 +550,10 @@ fn ms_to_secs(v: i64) -> f64 {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::disallowed_types,
+    reason = "rdkafka's `Statistics` fields are std maps"
+)]
 mod tests {
     use super::*;
     use crate::testutil::{broker, window};

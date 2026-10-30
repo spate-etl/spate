@@ -497,6 +497,7 @@ fn the_single_payload_fixtures_still_decode_and_fail_as_documented() {
 /// `to_avro_datum` produces different bytes on every run. The corpus frames
 /// the map itself; this is what proves the framing agrees with the schema.
 #[test]
+#[expect(clippy::disallowed_types, reason = "a user decodes into std's map")]
 fn the_hand_framed_map_decodes_to_its_entries() {
     let schema = corpora::shapes_schema();
     let datums = corpora::shapes_datums();

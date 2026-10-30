@@ -213,9 +213,18 @@ pub fn imported(set: &HashSet<u8>) -> usize {
 
     assert!(!passed, "{stderr}");
     for (needle, path) in [
-        ("use std::collections::HashMap;", "std::collections::HashMap"),
-        ("use std::collections::HashSet;", "std::collections::HashSet"),
-        ("let set: std::collections::HashSet", "std::collections::HashSet"),
+        (
+            "use std::collections::HashMap;",
+            "std::collections::HashMap",
+        ),
+        (
+            "use std::collections::HashSet;",
+            "std::collections::HashSet",
+        ),
+        (
+            "let set: std::collections::HashSet",
+            "std::collections::HashSet",
+        ),
         ("HashMap::<u8, u8>::new()", "std::collections::HashMap"),
         ("hash_map::HashMap<u8, u8>", "std::collections::HashMap"),
     ] {

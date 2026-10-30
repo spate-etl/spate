@@ -19,8 +19,9 @@ use crate::checkpoint::AckSet;
 use crate::clock::Clock as _;
 use crate::clock::tokio::{Clock, Sleep, Stopwatch};
 use crate::error::{ErrorClass, SinkError};
+use crate::hash::FastMap;
 use crate::metrics::{AttemptOutcome, FlushReason, SinkShardMetrics};
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::{Semaphore, mpsc, watch};
@@ -189,12 +190,12 @@ pub(crate) struct ShardWorker<W: ShardWriter> {
 
 /// Worker-loop state that outcome handling needs together.
 struct Ledger {
-    pending: HashMap<u64, Pending>,
+    pending: FastMap<u64, Pending>,
     /// Tokio task id → batch seq. A panicked write task's `JoinError`
     /// carries no seq, only the task id, so this map lets us abandon exactly
     /// the batch that died instead of guessing by age (which strands the
     /// victim's acks and budget forever).
-    ids: HashMap<tokio::task::Id, u64>,
+    ids: FastMap<tokio::task::Id, u64>,
     report: WorkerReport,
     /// Held so the reservations of anything still pending are released even
     /// when the worker never gets to sweep, whether because `SinkPool::drain`'s
@@ -217,8 +218,8 @@ impl<W: ShardWriter> ShardWorker<W> {
     pub(crate) async fn run(mut self) -> WorkerReport {
         let mut acc = Accumulator::new();
         let mut ledger = Ledger {
-            pending: HashMap::new(),
-            ids: HashMap::new(),
+            pending: FastMap::default(),
+            ids: FastMap::default(),
             report: WorkerReport::default(),
             budget: Arc::clone(&self.budget),
         };
@@ -584,7 +585,7 @@ impl<W: ShardWriter> ShardWorker<W> {
         permit: tokio::sync::OwnedSemaphorePermit,
         tasks: &mut JoinSet<WriteDone>,
         breakers: &Arc<Mutex<BreakerSet>>,
-        ids: &mut HashMap<tokio::task::Id, u64>,
+        ids: &mut FastMap<tokio::task::Id, u64>,
     ) {
         let writer = Arc::clone(&self.writer);
         let endpoints = Arc::clone(&self.endpoints);

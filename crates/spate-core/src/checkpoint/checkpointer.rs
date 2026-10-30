@@ -15,8 +15,8 @@ use super::tracker::{PartitionTracker, ResolveOutcome};
 use super::{AckMsg, AckRef, BatchId};
 use crate::clock::{SharedClock, SystemClock};
 use crate::error::FatalError;
+use crate::hash::FastMap;
 use crate::record::PartitionId;
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Instant;
@@ -55,7 +55,7 @@ pub struct AckIssuer {
     reg_tx: crossbeam_channel::Sender<Registration>,
     shared_epoch: Arc<AtomicU32>,
     local_epoch: u32,
-    seqs: HashMap<PartitionId, u64>,
+    seqs: FastMap<PartitionId, u64>,
 }
 
 impl Clone for AckIssuer {
@@ -65,7 +65,7 @@ impl Clone for AckIssuer {
             reg_tx: self.reg_tx.clone(),
             shared_epoch: Arc::clone(&self.shared_epoch),
             local_epoch: self.local_epoch,
-            seqs: HashMap::new(),
+            seqs: FastMap::default(),
         }
     }
 }
@@ -125,11 +125,11 @@ pub struct Checkpointer {
     reg_rx: crossbeam_channel::Receiver<Registration>,
     shared_epoch: Arc<AtomicU32>,
     epoch: u32,
-    trackers: HashMap<PartitionId, PartitionTracker>,
+    trackers: FastMap<PartitionId, PartitionTracker>,
     /// One advance counter per tracked partition: the controller-side half
     /// of the pending-ceiling gate the owning driver reads at the poll
     /// boundary. Created and dropped in lockstep with `trackers`.
-    gates: HashMap<PartitionId, AdvanceCounter>,
+    gates: FastMap<PartitionId, AdvanceCounter>,
     /// The highest partition admitted to the current epoch. `extend_epoch`
     /// admits only partitions above it, so a revoked partition cannot return
     /// in the epoch while the ledger stays one value. `trackers` alone cannot
@@ -173,8 +173,8 @@ impl Checkpointer {
             reg_rx,
             shared_epoch: Arc::new(AtomicU32::new(0)),
             epoch: 0,
-            trackers: HashMap::new(),
-            gates: HashMap::new(),
+            trackers: FastMap::default(),
+            gates: FastMap::default(),
             admitted_through: None,
             clock: Arc::new(SystemClock),
         }
@@ -199,7 +199,7 @@ impl Checkpointer {
             reg_tx: self.reg_tx.clone(),
             shared_epoch: Arc::clone(&self.shared_epoch),
             local_epoch: self.shared_epoch.load(Ordering::Acquire),
-            seqs: HashMap::new(),
+            seqs: FastMap::default(),
         }
     }
 
@@ -839,13 +839,13 @@ mod proptests {
             // holds a sequence counter registers mid-sequence and panics, so
             // the shared issuer also checks that no such re-admission occurs.
             let mut issuer = cp.handle();
-            let mut offsets: std::collections::HashMap<PartitionId, i64> =
-                std::collections::HashMap::new();
+            let mut offsets: FastMap<PartitionId, i64> =
+                FastMap::default();
             // Held (unresolved) acks with the epoch they were issued under.
             let mut held: std::collections::VecDeque<(AckRef, u32, bool)> =
                 std::collections::VecDeque::new();
-            let mut last_watermark: std::collections::HashMap<PartitionId, i64> =
-                std::collections::HashMap::new();
+            let mut last_watermark: FastMap<PartitionId, i64> =
+                FastMap::default();
 
             for op in ops {
                 match op {

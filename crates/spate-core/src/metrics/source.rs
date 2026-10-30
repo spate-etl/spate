@@ -12,9 +12,9 @@ use super::MetricsError;
 use super::labels::{ComponentLabels, OwnedGauge, PartitionGauges};
 use super::names;
 use super::ownership::{SeriesClaim, series_key};
+use crate::hash::FastMap;
 use crate::record::PartitionId;
 use metrics::{Counter, Histogram};
-use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -106,7 +106,7 @@ impl SourceMetrics {
             partition_lag: PartitionGauges {
                 name: names::SOURCE_LAG_RECORDS,
                 labels: labels.clone(),
-                gauges: Mutex::new(HashMap::new()),
+                gauges: Mutex::new(FastMap::default()),
                 owned,
             },
             _claim: claim,

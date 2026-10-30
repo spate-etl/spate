@@ -16,12 +16,12 @@
 
 use super::names;
 use crate::error::ErrorClass;
+use crate::hash::FastMap;
 use crate::record::PartitionId;
 use metrics::{
     Counter, Gauge, Histogram, Key, Label, Level, Metadata, SharedString, counter, gauge,
     histogram, with_recorder,
 };
-use std::collections::HashMap;
 use std::sync::Mutex;
 
 /// The standard label set attached to every framework metric.
@@ -377,7 +377,7 @@ impl ErrorClass {
 pub(crate) struct PartitionGauges {
     pub(crate) name: &'static str,
     pub(crate) labels: ComponentLabels,
-    pub(crate) gauges: Mutex<HashMap<u32, Gauge>>,
+    pub(crate) gauges: Mutex<FastMap<u32, Gauge>>,
     /// Whether the owning handle set owns this series (see [`OwnedGauge`]).
     /// A shadow registers nothing here and publishes nothing.
     pub(crate) owned: bool,

@@ -14,8 +14,9 @@ use super::{
     FeedWaker, Receipt, Unit, confirmation, depth_reading,
 };
 use crate::config::{ConfigError, FeedSection};
+use crate::hash::FastMap;
 use serde::Deserialize;
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::num::NonZeroU32;
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -59,7 +60,7 @@ impl Default for MemoryFeed {
 struct State {
     /// Units waiting to be received, with the deliveries each has had.
     visible: VecDeque<(Unit, u32)>,
-    held: HashMap<Receipt, (Unit, u32)>,
+    held: FastMap<Receipt, (Unit, u32)>,
     dead: Vec<Unit>,
     acknowledged: u64,
     next_receipt: u64,
@@ -89,7 +90,7 @@ impl MemoryFeed {
         MemoryFeed {
             state: Arc::new(Mutex::new(State {
                 visible: VecDeque::new(),
-                held: HashMap::new(),
+                held: FastMap::default(),
                 dead: Vec::new(),
                 acknowledged: 0,
                 next_receipt: 0,

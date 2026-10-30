@@ -7,8 +7,8 @@ use super::ownership::{SeriesClaim, series_key};
 use super::queue::QueueMetrics;
 use super::{E2eBasis, MetricsError};
 use crate::error::ErrorClass;
+use crate::hash::FastMap;
 use metrics::{Counter, Histogram, SharedString};
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -82,7 +82,7 @@ pub struct SinkShardMetrics {
     /// sleeping between write attempts, keyed by batch sequence number. The
     /// gauge publishes the max; the map is bounded by `inflight.max_per_shard`
     /// and empties back to nothing whenever the shard stops backing off.
-    backoff_steps: Mutex<HashMap<u64, f64>>,
+    backoff_steps: Mutex<FastMap<u64, f64>>,
     err_retryable: Counter,
     err_record: Counter,
     err_fatal: Counter,
@@ -271,7 +271,7 @@ impl SinkShardMetrics {
             ),
             retries: labels.counter1(names::SINK_RETRIES_TOTAL, names::L_SHARD, shard.clone()),
             retry_backoff,
-            backoff_steps: Mutex::new(HashMap::new()),
+            backoff_steps: Mutex::new(FastMap::default()),
             err_retryable: labels.counter2(
                 names::SINK_ERRORS_TOTAL,
                 names::L_SHARD,
@@ -474,7 +474,7 @@ impl SinkShardMetrics {
 
     /// Mutate the backing-off set and republish the max (`0` when empty).
     /// Called only from the retry path, never per record.
-    fn publish_backoff(&self, mutate: impl FnOnce(&mut HashMap<u64, f64>)) {
+    fn publish_backoff(&self, mutate: impl FnOnce(&mut FastMap<u64, f64>)) {
         // Poison-tolerant because this also runs from `BackoffGuard::drop`.
         // A panicking `expect` there, reached while already unwinding, aborts
         // the process. The critical section only inserts, removes and folds,

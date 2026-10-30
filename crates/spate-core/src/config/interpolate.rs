@@ -179,10 +179,10 @@ fn err_at(input: &str, offset: usize, reason: impl Into<String>) -> ConfigError 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
+    use crate::hash::FastMap;
 
     fn env(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
-        let map: HashMap<String, String> = pairs
+        let map: FastMap<String, String> = pairs
             .iter()
             .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
             .collect();

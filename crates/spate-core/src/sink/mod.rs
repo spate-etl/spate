@@ -510,8 +510,7 @@ mod tests {
         let a = r.route(&meta(None, 0), 4);
         let b = r.route(&meta(None, 0), 4);
         assert_eq!(a, b);
-        let spread: std::collections::HashSet<_> =
-            (0..16).map(|p| r.route(&meta(None, p), 4)).collect();
+        let spread: crate::hash::FastSet<_> = (0..16).map(|p| r.route(&meta(None, p), 4)).collect();
         assert!(spread.len() > 1, "keyless records must not all colocate");
     }
 

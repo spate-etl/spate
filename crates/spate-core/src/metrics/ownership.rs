@@ -21,11 +21,11 @@
 
 use super::MetricsError;
 use super::labels::ComponentLabels;
-use std::collections::HashSet;
+use crate::hash::FastSet;
 use std::sync::{LazyLock, Mutex, PoisonError};
 
 /// Series keys with a live owner. Touched at build time only.
-static CLAIMS: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
+static CLAIMS: LazyLock<Mutex<FastSet<String>>> = LazyLock::new(|| Mutex::new(FastSet::default()));
 
 /// Ownership of one handle set's gauge series, held for as long as the owning
 /// struct lives.
@@ -80,7 +80,7 @@ impl SeriesClaim {
     /// Poison-tolerant because `Drop` runs during unwinding, where a panicking
     /// `expect` would abort the process. The critical section only inserts and
     /// removes, so a poisoned set is not a corrupt one.
-    fn registry() -> std::sync::MutexGuard<'static, HashSet<String>> {
+    fn registry() -> std::sync::MutexGuard<'static, FastSet<String>> {
         CLAIMS.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }

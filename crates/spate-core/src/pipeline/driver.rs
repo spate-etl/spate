@@ -12,13 +12,13 @@ use crate::backpressure::{InflightBudget, Transition, WatermarkController};
 use crate::checkpoint::{AckRef, AdvanceCounter};
 use crate::clock::{Clock, Stopwatch, SystemClock};
 use crate::error::{ErrorClass, FatalError, SourceError};
+use crate::hash::FastMap;
 use crate::metrics::{BackpressureMetrics, SourceMetrics};
 use crate::ops::{BlockReason, PushOutcome, RunnableChain};
 use crate::record::{PartitionId, RawPayload};
 use crate::sink::ShardQueues;
 use crate::source::{LaneId, PayloadBatch, SourceLane};
 use crate::telemetry::RateLimit;
-use std::collections::HashMap;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -117,7 +117,7 @@ pub(crate) fn run_driver<L: SourceLane>(ctx: DriverContext<L>) -> DriverExit {
     // batches this thread registered, `advanced` is the controller's
     // retirement counter. A lane is skipped while the difference is at
     // `checkpoint.max_pending_batches`.
-    let mut gates: HashMap<PartitionId, GateState> = HashMap::new();
+    let mut gates: FastMap<PartitionId, GateState> = FastMap::default();
     // Consecutive lanes skipped as gated or finished; a full skipped pass
     // parks on the control channel.
     let mut skipped_streak = 0usize;
@@ -450,7 +450,7 @@ fn park_on_control<L>(
 }
 
 /// Drop gates for partitions that no longer have a lane on this thread.
-fn prune_gates<L: SourceLane>(gates: &mut HashMap<PartitionId, GateState>, lanes: &[L]) {
+fn prune_gates<L: SourceLane>(gates: &mut FastMap<PartitionId, GateState>, lanes: &[L]) {
     gates.retain(|p, _| lanes.iter().any(|l| l.partition() == *p));
 }
 

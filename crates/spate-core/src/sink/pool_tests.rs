@@ -11,10 +11,10 @@ use crate::backpressure::InflightBudget;
 use crate::checkpoint::{AckMsg, AckRef, AckStatus};
 use crate::clock::tokio::{Clock as _, TestClock};
 use crate::error::ErrorClass;
+use crate::hash::FastMap;
 use crate::metrics::{ComponentLabels, E2eBasis, SinkShardMetrics};
 use crate::pipeline::fakes::wait_for;
 use bytes::Bytes;
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -68,7 +68,7 @@ struct Call {
 
 #[derive(Debug)]
 struct MockWriter {
-    script: Mutex<HashMap<(usize, usize), std::collections::VecDeque<Outcome>>>,
+    script: Mutex<FastMap<(usize, usize), std::collections::VecDeque<Outcome>>>,
     global_default: Mutex<Outcome>,
     log: Mutex<Vec<Call>>,
     concurrent: AtomicUsize,
@@ -82,7 +82,7 @@ struct MockWriter {
 impl MockWriter {
     fn new() -> Arc<Self> {
         Arc::new(MockWriter {
-            script: Mutex::new(HashMap::new()),
+            script: Mutex::new(FastMap::default()),
             global_default: Mutex::new(Outcome::Write(Duration::ZERO)),
             log: Mutex::new(Vec::new()),
             concurrent: AtomicUsize::new(0),

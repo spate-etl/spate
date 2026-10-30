@@ -351,7 +351,8 @@ pub const ROLE_SEGMENTS: &[&str] = &["source", "sink"];
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::{BTreeSet, HashSet};
+    use crate::hash::FastSet;
+    use std::collections::BTreeSet;
 
     #[test]
     fn names_follow_prometheus_conventions() {
@@ -389,7 +390,7 @@ mod tests {
             .chain(HISTOGRAMS)
             .copied()
             .collect();
-        let unique: HashSet<&str> = all.iter().copied().collect();
+        let unique: FastSet<&str> = all.iter().copied().collect();
         assert_eq!(unique.len(), all.len(), "duplicate metric name");
         for name in &all {
             assert!(name.starts_with(PREFIX), "`{name}` must be spate_-prefixed");

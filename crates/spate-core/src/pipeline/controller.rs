@@ -13,13 +13,14 @@ use crate::checkpoint::Checkpointer;
 use crate::clock::{Clock, Stopwatch, SystemClock};
 use crate::error::{ErrorClass, FatalError, SourceError};
 use crate::feed::STOP_RESERVE;
+use crate::hash::{FastMap, FastSet};
 use crate::metrics::{
     CheckpointMetrics, InflightBudgetMetrics, Meter, PipelineMetrics, PipelineState, SourceMetrics,
 };
 use crate::record::PartitionId;
 use crate::sink::SinkFailures;
 use crate::source::{DrainBarrier, LaneId, Source, SourceCtx, SourceEvent, SourceLane};
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -142,9 +143,9 @@ pub(crate) fn run_controller<S: Source>(ctx: ControllerContext<S>) {
     } = ctx;
 
     let mut state = State {
-        assignment: HashMap::new(),
+        assignment: FastMap::default(),
         thread_load: vec![0usize; control_txs.len()],
-        paused: HashSet::new(),
+        paused: FastSet::default(),
         epoch: 0,
         pending_commit: BTreeMap::new(),
         committed: BTreeMap::new(),
@@ -686,11 +687,11 @@ fn lanes_deadline(now: Instant, deadline: Instant, close_share: Duration) -> Ins
 
 struct State {
     /// Lane → (partition, owning thread).
-    assignment: HashMap<LaneId, (PartitionId, usize)>,
+    assignment: FastMap<LaneId, (PartitionId, usize)>,
     /// Lanes owned per thread (assignment balancing).
     thread_load: Vec<usize>,
     /// Lanes paused at the source by a driver's backpressure request.
-    paused: HashSet<LaneId>,
+    paused: FastSet<LaneId>,
     /// Assignment epoch counter (strictly increasing).
     epoch: u32,
     /// Watermarks taken from the checkpointer but not yet successfully
@@ -941,7 +942,7 @@ fn handle_assign<S: Source>(
     // Lanes of one partition must share a thread (per-partition sequence
     // counters are issuer-local); group by partition, then place groups on
     // the least-loaded thread.
-    let mut groups: HashMap<PartitionId, Vec<S::Lane>> = HashMap::new();
+    let mut groups: FastMap<PartitionId, Vec<S::Lane>> = FastMap::default();
     for lane in lanes {
         groups.entry(lane.partition()).or_default().push(lane);
     }
@@ -999,7 +1000,7 @@ fn handle_added<S: Source>(
     // A revoked partition cannot return in this epoch, so its exit-report
     // entry has nowhere to go.
     state.revoked_committed.clear();
-    let mut groups: HashMap<PartitionId, Vec<S::Lane>> = HashMap::new();
+    let mut groups: FastMap<PartitionId, Vec<S::Lane>> = FastMap::default();
     for lane in lanes {
         groups.entry(lane.partition()).or_default().push(lane);
     }
@@ -1085,7 +1086,7 @@ fn handle_retired<S: Source>(
     control_txs: &[crossbeam_channel::Sender<ThreadControl<S::Lane>>],
     source_metrics: &SourceMetrics,
 ) {
-    let mut by_thread: HashMap<usize, Vec<LaneId>> = HashMap::new();
+    let mut by_thread: FastMap<usize, Vec<LaneId>> = FastMap::default();
     for lane in &lanes {
         if let Some(&(_, thread)) = state.assignment.get(lane) {
             by_thread.entry(thread).or_default().push(*lane);
@@ -1097,7 +1098,7 @@ fn handle_retired<S: Source>(
         let _ = control_txs[thread].send(ThreadControl::DropLanes { lanes: subset });
     }
 
-    let mut retired_parts: HashSet<PartitionId> = lanes
+    let mut retired_parts: FastSet<PartitionId> = lanes
         .iter()
         .filter_map(|l| state.assignment.get(l).map(|&(p, _)| p))
         .collect();
@@ -1110,7 +1111,7 @@ fn handle_retired<S: Source>(
     // Drop tracking and the exit-report entry only for partitions with no
     // remaining lanes; their late acknowledgments (none exist by contract)
     // would be stale.
-    let live_partitions: HashSet<PartitionId> =
+    let live_partitions: FastSet<PartitionId> =
         state.assignment.values().map(|&(p, _)| p).collect();
     let to_revoke: Vec<PartitionId> = retired_parts
         .drain()
@@ -1143,7 +1144,7 @@ fn revoke_lanes<S: Source>(
     watch: StopWatch<'_>,
 ) {
     let deadline = watch.clock.now() + drain_timeout;
-    let mut by_thread: HashMap<usize, Vec<LaneId>> = HashMap::new();
+    let mut by_thread: FastMap<usize, Vec<LaneId>> = FastMap::default();
     for lane in lanes {
         match state.assignment.get(lane) {
             Some(&(_, thread)) => by_thread.entry(thread).or_default().push(*lane),
@@ -1185,7 +1186,7 @@ fn revoke_lanes<S: Source>(
         tracing::warn!(error = %e, "flush of stored commits failed during revocation");
     }
 
-    let mut revoked_parts: HashSet<PartitionId> = lanes
+    let mut revoked_parts: FastSet<PartitionId> = lanes
         .iter()
         .filter_map(|l| state.assignment.get(l).map(|&(p, _)| p))
         .collect();
@@ -1198,7 +1199,7 @@ fn revoke_lanes<S: Source>(
     // Drop tracking only for partitions with no remaining lanes; their late
     // acknowledgments are then discarded as stale. Their exit-report entries
     // wait for the next assignment, which may hand them back.
-    let live_partitions: HashSet<PartitionId> =
+    let live_partitions: FastSet<PartitionId> =
         state.assignment.values().map(|&(p, _)| p).collect();
     let to_revoke: Vec<PartitionId> = revoked_parts
         .drain()

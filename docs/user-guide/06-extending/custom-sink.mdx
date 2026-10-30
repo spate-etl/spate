@@ -167,7 +167,8 @@ workers, their queues and their metric labels from the topology it carries.
 - `.with_probe(...)` — an optional repeatable connectivity probe. The
   runtime polls it at startup and periodically, driving the
   sinks-connected half of `/readyz`. Without one, readiness can't reflect
-  your sink. Probes should use their **own** client set. Sharing the
+  your sink. A probe returns a failure as `Err`. A panic stops the probe,
+  and `/readyz` reports not ready for the rest of the run. Probes should use their **own** client set. Sharing the
   writer's connections would report the insert path healthy because
   probing keeps it warm.
 - `.with_frame_codec(...)` — an optional `FrameCodecFactory`. The builder

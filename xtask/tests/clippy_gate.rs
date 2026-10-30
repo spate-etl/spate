@@ -155,6 +155,12 @@ pub fn plain() {
 pub fn built() {
     thread::Builder::new().spawn(|| ()).unwrap().join().unwrap();
 }
+
+pub fn unchecked() {
+    // SAFETY: the closure borrows nothing, so it outlives no reference.
+    let handle = unsafe { thread::Builder::new().spawn_unchecked(|| ()) };
+    handle.unwrap().join().unwrap();
+}
 ";
     let (passed, stderr) = clippy_probe("spawn-probe", source);
 
@@ -162,6 +168,7 @@ pub fn built() {
     for (needle, path) in [
         ("thread::spawn(", "std::thread::spawn"),
         (".spawn(|| ())", "std::thread::Builder::spawn"),
+        (".spawn_unchecked(", "std::thread::Builder::spawn_unchecked"),
     ] {
         let line = line_of(source, needle);
         let reported = format!("src/lib.rs:{line}:");

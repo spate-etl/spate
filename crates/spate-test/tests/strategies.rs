@@ -3,11 +3,11 @@
 #![cfg(feature = "proptest")]
 
 use proptest::prelude::*;
+use spate_core::hash::FastSet;
 use spate_core::record::PartitionId;
 use spate_core::source::LaneId;
 use spate_test::strategies;
 use spate_test::{ScriptedResult, TestEncoder, decode_rows, record};
-use std::collections::HashSet;
 
 proptest! {
     /// Arbitrary payload sets round-trip through the length-prefixed
@@ -27,8 +27,8 @@ proptest! {
     #[test]
     fn lane_layouts_are_unique_and_dense(layout in strategies::lane_layout(8, 64)) {
         prop_assert!(!layout.is_empty());
-        let lanes: HashSet<LaneId> = layout.iter().map(|&(l, _)| l).collect();
-        let partitions: HashSet<PartitionId> = layout.iter().map(|&(_, p)| p).collect();
+        let lanes: FastSet<LaneId> = layout.iter().map(|&(l, _)| l).collect();
+        let partitions: FastSet<PartitionId> = layout.iter().map(|&(_, p)| p).collect();
         prop_assert_eq!(lanes.len(), layout.len());
         prop_assert_eq!(partitions.len(), layout.len());
         prop_assert!(layout.iter().enumerate().all(|(i, &(l, _))| l == LaneId(i as u32)));

@@ -9,11 +9,12 @@
 
 use spate_core::checkpoint::AckIssuer;
 use spate_core::error::{ErrorClass, SourceError};
+use spate_core::hash::FastMap;
 use spate_core::record::{PartitionId, RawPayload};
 use spate_core::source::{
     DrainBarrier, LaneId, PayloadBatch, Source, SourceCtx, SourceEvent, SourceLane,
 };
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeSet, VecDeque};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -43,8 +44,8 @@ enum ScriptEvent {
 
 #[derive(Debug, Default)]
 struct Shared {
-    partitions: HashMap<PartitionId, PartitionQueue>,
-    active: HashMap<LaneId, PartitionId>,
+    partitions: FastMap<PartitionId, PartitionQueue>,
+    active: FastMap<LaneId, PartitionId>,
     paused: BTreeSet<LaneId>,
     committed: Vec<(PartitionId, i64)>,
     flush_commits_calls: usize,

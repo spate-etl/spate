@@ -12,7 +12,8 @@ use spate_core::feed::{
     Confirmation, Confirmer, Delivery, Depth, DepthOf, DepthReading, Feed, FeedError,
     FeedErrorKind, FeedWaker, Receipt, Unit, confirmation, depth_reading,
 };
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use spate_core::hash::{FastMap, FastSet};
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -45,9 +46,9 @@ struct State {
     /// Deliveries so far per unit id that `deliver` scripted. `deliver`
     /// raises it, and so does `redeliver` of a receipt in `scripted`, so
     /// duplicates and their redeliveries share a count.
-    counts: HashMap<String, u32>,
+    counts: FastMap<String, u32>,
     /// Receipts of deliveries `deliver` scripted, and of their redeliveries.
-    scripted: HashSet<Receipt>,
+    scripted: FastSet<Receipt>,
     next_receipt: u64,
     delivered: Vec<Delivery>,
     acknowledged: Vec<Receipt>,

@@ -4,13 +4,14 @@
 use bytes::{BufMut, Bytes, BytesMut};
 use spate_core::deser::Owned;
 use spate_core::error::{ErrorClass, SinkError};
+use spate_core::hash::FastMap;
 use spate_core::metrics::Meter;
 use spate_core::record::Record;
 use spate_core::sink::{
     FrameCodecFactory, RowEncoder, SealedBatch, ShardWriter, SinkBundle, SinkParts, SinkPoolConfig,
     endpoint_probe,
 };
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::task::{Poll, Waker};
 use std::time::Duration;
@@ -130,8 +131,8 @@ pub struct CapturedWrite {
 #[derive(Debug, Default)]
 struct SinkState {
     global: VecDeque<WriteOutcome>,
-    per_endpoint: HashMap<(usize, usize), VecDeque<WriteOutcome>>,
-    probe_failures: HashMap<(usize, usize), String>,
+    per_endpoint: FastMap<(usize, usize), VecDeque<WriteOutcome>>,
+    probe_failures: FastMap<(usize, usize), String>,
     writes: Vec<CapturedWrite>,
     /// Count of `release_held` calls. A held write waits for this to pass
     /// the count it read when it started.

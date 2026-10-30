@@ -31,6 +31,7 @@ use spate_core::feed::{DepthOf, Feed, FeedOrigin};
 use spate_core::framing::{FramingContract, RecordFramer};
 use spate_core::record::PartitionId;
 use spate_core::source::{LaneId, Source, SourceCtx, SourceEvent};
+use spate_core::task::{self, TaskHandle};
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::sync::Arc;
 use std::time::Duration;
@@ -89,8 +90,9 @@ pub struct S3Source {
     /// in-process feed the runtime built, since code holding a `MemoryFeed`
     /// it passed in may publish into it after the listing.
     solo_ends: bool,
-    /// The solo run's lister, while it runs.
-    lister_task: Option<tokio::task::JoinHandle<Result<(), SourceError>>>,
+    /// The solo run's lister, while it runs. Dropping the source aborts it;
+    /// its units live in this process's feed, so nothing durable is lost.
+    lister_task: Option<TaskHandle<Result<(), SourceError>>>,
     state: State,
 }
 
@@ -718,7 +720,7 @@ impl Source for S3Source {
             };
             // On the I/O runtime, so the source thread reads units while
             // the listing runs; `poll_events` checks its outcome.
-            self.lister_task = Some(self.handle.spawn(lister.run()));
+            self.lister_task = Some(task::spawn_on("s3-lister", lister.run(), &self.handle));
         } else {
             tracing::warn!(
                 feed = feed.backend(),
@@ -819,16 +821,6 @@ impl Source for S3Source {
         match &mut self.state {
             State::Feed(reader) => reader.stop_reading(),
             State::Created => Ok(()),
-        }
-    }
-}
-
-impl Drop for S3Source {
-    fn drop(&mut self) {
-        if let Some(task) = &self.lister_task {
-            // Its units live in this process's feed, so nothing durable is
-            // lost.
-            task.abort();
         }
     }
 }

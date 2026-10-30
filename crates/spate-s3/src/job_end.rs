@@ -17,6 +17,7 @@ use spate_core::feed::{
     DepthOf, DepthReading, EndAction, EndCheck, EndOutcome, Feed, FeedWaker, MarkerRead,
 };
 use spate_core::source::StopSignal;
+use spate_core::task::{self, TaskHandle};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::oneshot;
@@ -33,6 +34,9 @@ pub(crate) enum Finish {
     Solo { finished: bool },
 }
 
+/// The answer of one end-marker read.
+type MarkerAnswer = oneshot::Receiver<Result<Option<String>, SourceError>>;
+
 /// The end check of one bounded job, held by its unit reader.
 pub(crate) struct JobEnd {
     finish: Finish,
@@ -44,8 +48,9 @@ pub(crate) struct JobEnd {
     stop: StopSignal,
     /// Signalled when a marker read finishes, so the reader's park ends.
     waker: Option<FeedWaker>,
-    /// The marker read's answer, sent before its task signals the waker.
-    marker_read: Option<oneshot::Receiver<Result<Option<String>, SourceError>>>,
+    /// The marker read's task, aborted when dropped, and its answer, sent
+    /// before the task signals the waker.
+    marker_read: Option<(TaskHandle<()>, MarkerAnswer)>,
     depth_read: Option<DepthReading>,
     /// What the last depth read asked for, so a failure names it.
     depth_of: Option<DepthOf>,
@@ -102,7 +107,7 @@ impl JobEnd {
 
     /// The reader holds work: send the check back to its opening read, and
     /// drop any read outstanding, as `EndCheck::restart` asks. A marker read
-    /// still running finishes on its own, unread.
+    /// still running is aborted.
     pub(crate) fn busy(&mut self) {
         self.due = None;
         self.closed = false;
@@ -152,7 +157,7 @@ impl JobEnd {
         let Some(check) = &mut self.check else {
             return Ok(false);
         };
-        if let Some(answer) = &mut self.marker_read
+        if let Some((_, answer)) = &mut self.marker_read
             && let Some(outcome) = match answer.try_recv() {
                 Ok(outcome) => Some(Some(outcome)),
                 Err(oneshot::error::TryRecvError::Empty) => None,
@@ -194,15 +199,19 @@ impl JobEnd {
                     let location = location.clone();
                     let waker = self.waker.clone();
                     let (answer, answered) = oneshot::channel();
-                    self.marker_read = Some(answered);
                     // The answer is sent before the wake, so the poll the
                     // wake starts finds it.
-                    drop(self.handle.spawn(async move {
-                        let _ = answer.send(read_end(store.as_ref(), &location).await);
-                        if let Some(waker) = waker {
-                            waker.wake();
-                        }
-                    }));
+                    let read = task::spawn_on(
+                        "s3-end-marker-read",
+                        async move {
+                            let _ = answer.send(read_end(store.as_ref(), &location).await);
+                            if let Some(waker) = waker {
+                                waker.wake();
+                            }
+                        },
+                        &self.handle,
+                    );
+                    self.marker_read = Some((read, answered));
                 }
                 EndAction::ReadDepth(of) => {
                     self.depth_of = Some(of);

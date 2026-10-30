@@ -50,6 +50,7 @@ pub mod record;
 pub mod sink;
 #[cfg(not(loom))]
 pub mod source;
+pub mod task;
 pub mod telemetry;
 
 pub use error::{DeserError, ErrorClass, ErrorPolicy, FatalError, SinkError, SourceError};

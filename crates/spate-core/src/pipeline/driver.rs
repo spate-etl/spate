@@ -580,7 +580,10 @@ fn drive_batch(
                 ack.fail();
                 return Err(FatalError {
                     component: format!("driver-{}", params.thread),
-                    reason: format!("operator chain panicked: {}", panic_message(panic.as_ref())),
+                    reason: format!(
+                        "operator chain panicked: {}",
+                        crate::task::panic_text(panic.as_ref())
+                    ),
                 });
             }
         }
@@ -711,15 +714,5 @@ fn apply_transition(
                 lanes: owned.to_vec(),
             });
         }
-    }
-}
-
-fn panic_message(panic: &(dyn std::any::Any + Send)) -> String {
-    if let Some(s) = panic.downcast_ref::<&str>() {
-        (*s).to_string()
-    } else if let Some(s) = panic.downcast_ref::<String>() {
-        s.clone()
-    } else {
-        "non-string panic payload".to_string()
     }
 }

@@ -79,8 +79,9 @@ impl<T> std::fmt::Debug for TaskHandle<T> {
 
 /// Spawn `future` as a task named `name` on the current tokio runtime.
 ///
-/// Returns without blocking, locking or awaiting, so it may be called from a
-/// non-blocking path. A panic in the task is logged at `ERROR` with `name`.
+/// Returns without awaiting or waiting on the task, so a non-blocking path may
+/// call it; tokio takes a brief internal lock to queue the task. A panic in
+/// the task is logged at `ERROR` with `name`.
 ///
 /// # Panics
 ///
@@ -108,7 +109,7 @@ where
 
 /// Spawn `future` as a task named `name` on the runtime behind `handle`.
 ///
-/// Returns without blocking, locking or awaiting, as [`spawn`] does, and may
+/// Returns without awaiting or waiting on the task, as [`spawn`] does, and may
 /// be called from outside any runtime.
 pub fn spawn_on<F>(
     name: &'static str,

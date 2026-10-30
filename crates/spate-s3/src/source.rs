@@ -224,6 +224,11 @@ impl S3Source {
     /// Test seam: time the wait for the job fingerprint, the end check and
     /// the lanes' receive deadline on `clock`.
     ///
+    /// An idle lane waits on `clock` until a chunk arrives, its channel
+    /// closes or `clock` reaches the poll's deadline. On a clock that does not
+    /// move, a lane whose read sends nothing holds its pipeline thread, so a
+    /// test that stops such a run advances `clock` until it exits.
+    ///
     /// Behind the off-by-default `testing` feature, outside the semver
     /// surface.
     #[cfg(feature = "testing")]

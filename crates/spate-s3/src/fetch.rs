@@ -303,8 +303,8 @@ async fn pause_gate(pause: &AtomicBool, tx: &mpsc::Sender<ChunkMsg>) -> Result<(
         if tx.is_closed() {
             return Err(());
         }
-        // The tokio timer, not the source's clock, so a frozen test clock
-        // cannot hold a paused fetcher.
+        // Tokio's own timer, so a frozen test clock cannot hold a paused
+        // fetcher.
         tokio::time::sleep(PAUSE_POLL).await;
     }
     Ok(())
@@ -935,8 +935,8 @@ async fn retry_or_fail(
         error = %crate::error::bounded_reason(e),
         "transient object read failure; backing off and resuming with a ranged get"
     );
-    // The tokio timer, not the source's clock, so a frozen test clock cannot
-    // hold a retrying read.
+    // Tokio's own timer, so a frozen test clock cannot hold a retrying
+    // read.
     tokio::time::sleep(backoff).await;
     Ok(())
 }

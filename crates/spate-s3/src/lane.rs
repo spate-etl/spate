@@ -1070,6 +1070,50 @@ mod tests {
         assert!(batch.next_payload().is_none(), "one record");
     }
 
+    /// Pins that the deadline cap reads the lane's clock: real time past the
+    /// deadline does not end a poll while that clock stands still.
+    #[test]
+    fn the_deadline_cap_reads_the_lanes_clock() {
+        let (mut r, clock) = frozen_rig();
+        let timeout = Duration::from_millis(1);
+        start(&r, 0, "p/a.ndjson");
+        send(&r, ChunkMsg::Chunk(bytes::Bytes::from_static(b"ab")));
+        send(&r, ChunkMsg::Chunk(bytes::Bytes::from_static(b"c\n")));
+        let deadline = clock.now() + timeout;
+        spate_test::wait_until(ARMED, "real time passes the deadline", || {
+            tokio::time::Instant::now() > deadline
+        });
+        let batch = r.lane.poll(512, timeout).unwrap();
+        let mut batch = batch.expect("the joined record");
+        assert_eq!(
+            batch.next_payload().map(|p| p.bytes),
+            Some(b"abc".as_slice())
+        );
+    }
+
+    /// Pins that the idle wait's remaining time reads the lane's clock: a
+    /// poll whose deadline real time has passed still parks on that clock.
+    #[test]
+    fn the_idle_wait_reads_the_lanes_clock() {
+        let (mut r, clock) = frozen_rig();
+        let timeout = Duration::from_millis(1);
+        let deadline = clock.now() + timeout;
+        spate_test::wait_until(ARMED, "real time passes the deadline", || {
+            tokio::time::Instant::now() > deadline
+        });
+        let lane = &mut r.lane;
+        std::thread::scope(|scope| {
+            let polling = scope.spawn(move || lane.poll(512, timeout).map(|b| b.is_none()));
+            let _release = AdvanceOnPanic(&clock);
+            spate_test::wait_until(ARMED, "the poll arms its deadline", || {
+                clock.has_slept_until(deadline)
+            });
+            clock.advance(timeout);
+            let idle = polling.join().expect("the poll thread").expect("poll");
+            assert!(idle, "an idle poll returned a batch");
+        });
+    }
+
     /// Pins that the deadline caps a poll whose chunks frame no record: the
     /// poll returns after one receive past the deadline, leaving the next
     /// chunk queued.

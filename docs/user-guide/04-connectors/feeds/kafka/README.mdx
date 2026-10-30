@@ -222,8 +222,9 @@ work topic's retention does not limit how long a moved unit is kept:
 - the retry topic's retention bounds how long a failed unit can wait to be
   read again. A retry backlog older than that loses the unit;
 - the dead-letter topic's retention is how long a unit that reached the
-  attempt cap waits for someone to inspect it or publish it again. Set it
-  for that window, or to `-1` to keep messages without limit.
+  attempt cap waits for someone to inspect it or
+  [copy it back](#copying-dead-lettered-units-back). Set it for that window,
+  or to `-1` to keep messages without limit.
 
 The attempt topic holds one record, keyed by the unit's publish identity,
 for each unit in flight or waiting to be retried, and for each unit lost to
@@ -326,6 +327,44 @@ it.
 
 A rebalance that fails gives up every partition with nothing committed. The
 units read since the last commit are delivered again.
+
+## Copying dead-lettered units back
+
+A job with no `location` keeps running past the units in its dead-letter
+topic, which `spate_feed_dead_letter_units` counts (see [Metrics](#metrics)).
+Kafka has no redrive of its own. A unit there is read again only once its
+message is copied back to the work topic with its key and value, since the
+key is the unit's id. The copy is a new publish, so
+its attempts count from zero under its own position. The feed ignores the
+`spate.origin` and `spate.deliveries` headers on a work-topic message, so the
+copy may keep or drop them. Do not copy a unit to the retry topic. A message
+there counts under its `spate.origin`. A unit whose dead-letter write was not
+followed by a confirmed tombstone, as during a [stop](#stop), keeps its
+attempt record at the cap, so its copy goes back to the dead-letter topic
+unread.
+
+A copied unit is read from its start, as any delivery is, and the records it
+delivered before it failed reach the sink again. The broker stamps the copy as
+it appends it, so the work topic's retention counts from the copy, and the
+copy is read after the units already on its partition.
+
+A unit whose cause persists returns to the dead-letter topic after
+`attempt_cap` more reads, so copy it back once the cause is fixed. The
+[S3 source](../../sources/s3/README.mdx#object-errors-fail-the-unit) says which
+of its failures persist. A message whose key is not UTF-8 names no unit, and
+its copy goes back to the dead-letter topic at once, unread. Until it is
+copied, the dead-letter topic's [retention](#topics), counted from the move,
+deletes the unit.
+
+The gauge never falls, so it cannot show which units were copied back. Copy
+with a consumer in a group of its own, never the feed's `group_id`, and commit
+each offset once the copy's write is confirmed. That group's lag on the
+dead-letter topic is what is left to copy. A copier that stops between a write
+and its commit copies those messages again, and each copy is read.
+
+The identity that copies needs `Read` on the dead-letter topic and on its own
+group, and `Write` on the work topic. A worker's identity needs no `Read` on the
+dead-letter topic.
 
 ## Ending a bounded job
 
@@ -552,8 +591,8 @@ the calls a source makes on it under the framework's `spate_feed_*` families,
 with `component_type="kafka"`; see [Metrics](../../../../METRICS.md).
 
 `spate_feed_dead_letter_units` reads the dead-letter topic as the sum of its
-partitions' end offsets, so it counts every record ever written there, redriven
-or deleted by retention included, and never falls. Alert on a rise, such as
+partitions' end offsets, so it counts every record ever written there, copied
+back or deleted by retention included, and never falls. Alert on a rise, such as
 `max by (pipeline) (delta(spate_feed_dead_letter_units[10m])) > 0`, rather than
 on a non-zero value.
 

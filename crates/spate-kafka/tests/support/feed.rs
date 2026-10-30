@@ -8,7 +8,7 @@ use object_store::ObjectStoreExt as _;
 use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
 use rdkafka::client::DefaultClientContext;
 use rdkafka::consumer::{BaseConsumer, Consumer};
-use rdkafka::message::{Headers, Message};
+use rdkafka::message::{Header, Headers, Message, OwnedHeaders};
 use rdkafka::producer::{BaseProducer, BaseRecord, Producer};
 use rdkafka::{Offset, TopicPartitionList};
 use spate_core::clock::TestClock as StopClock;
@@ -697,6 +697,35 @@ pub(crate) fn produce_raw(brokers: &str, topic: &str, messages: &[(Option<&[u8]>
         }
         producer.send(record).map_err(|(e, _)| e).expect("enqueue");
     }
+    producer.flush(Duration::from_secs(30)).expect("flush");
+}
+
+/// Produce `message` to partition 0 of `topic` with its key, value and
+/// headers as read.
+pub(crate) fn produce_copy(brokers: &str, topic: &str, message: &Read) {
+    let producer: BaseProducer = super::raw_config()
+        .set("bootstrap.servers", brokers)
+        .build()
+        .expect("producer");
+    let headers = message
+        .headers
+        .iter()
+        .fold(OwnedHeaders::new(), |headers, (key, value)| {
+            headers.insert(Header {
+                key,
+                value: value.as_deref(),
+            })
+        });
+    let mut record = BaseRecord::<[u8], [u8]>::to(topic)
+        .partition(0)
+        .headers(headers);
+    if let Some(key) = &message.key {
+        record = record.key(key);
+    }
+    if let Some(payload) = &message.payload {
+        record = record.payload(payload);
+    }
+    producer.send(record).map_err(|(e, _)| e).expect("enqueue");
     producer.flush(Duration::from_secs(30)).expect("flush");
 }
 

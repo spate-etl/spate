@@ -22,9 +22,9 @@ use std::time::{Duration, Instant};
 use support::feed::{
     ATTEMPT, ATTEMPT_PARTITIONS, DEAD, DEADLINE, FeedClock, ON_MOCK, RETRY, WORK, bounded_section,
     committed, data_dir, direct, direct_on, exists, feed_yaml, high_watermark, high_watermarks,
-    launch, launch_bounded, launch_customized, launch_on, launch_stopping, list_once, produce_raw,
-    publish, publish_to, publisher_on_mock, read_attempts, read_topic, recs, run_to_exit, sorted,
-    stage, written,
+    launch, launch_bounded, launch_customized, launch_on, launch_stopping, list_once, produce_copy,
+    produce_raw, publish, publish_to, publisher_on_mock, read_attempts, read_topic, recs,
+    run_to_exit, sorted, stage, written,
 };
 use support::{corrupt_batch, produce_batch};
 
@@ -402,6 +402,38 @@ fn a_dead_lettered_unit_published_again_is_read() {
     let second = worker.take("the second publish");
     assert_eq!(second.unit.body, b"second");
     assert_eq!(second.deliveries, 1);
+}
+
+/// Pins that a dead-letter copy written back to the work topic as read,
+/// `spate.origin` and `spate.deliveries` included, counts under its own
+/// position: at `attempt_cap: 1` the unit fails to the dead-letter topic, and
+/// two copies of it are each read with 1 while the first is still held.
+#[test]
+fn a_dead_letter_copy_written_back_to_the_work_topic_is_read() {
+    let cluster = cluster(1);
+    let brokers = cluster.bootstrap_servers();
+    let group = spate_test::unique_name("copied-back");
+    let worker = direct(&feed_yaml(&brokers, &group, "  attempt_cap: 1\n", ""));
+    publish(&worker.feed, Unit::new("u", b"body".to_vec()));
+    let first = worker.take("the first publish");
+    worker.feed.fail(first.receipt, "test").unwrap();
+    let dead = read_topic(&brokers, DEAD, 1);
+    assert_eq!(dead[0].header("spate.origin"), Some("units/0/0"));
+
+    produce_copy(&brokers, WORK, &dead[0]);
+    let copy = worker.take("the first copy");
+    produce_copy(&brokers, WORK, &dead[0]);
+    let again = worker.take("the second copy");
+    for copy in [&copy, &again] {
+        assert_eq!(copy.unit.id, "u");
+        assert_eq!(copy.unit.body, b"body");
+        assert_eq!(copy.deliveries, 1);
+    }
+    assert_eq!(
+        high_watermark(&brokers, DEAD),
+        1,
+        "no copy was dead-lettered"
+    );
 }
 
 /// Pins that a message whose key is not UTF-8 goes to the dead-letter topic

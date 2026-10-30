@@ -1387,8 +1387,8 @@ fn a_gate_pass_puts_back_the_deliveries_of_each_failed_watermark_read() {
 }
 
 /// Pins that a feed whose gate waits on a watermark read of an unreachable
-/// attempt partition drops within a few steps: each read is bounded by the
-/// gate's step.
+/// attempt partition drops within a few steps, each read bounded by the
+/// gate's step, and that the drop returns once the gate thread has ended.
 #[test]
 fn a_gate_waiting_on_an_unreachable_attempt_partition_lets_the_feed_drop() {
     let mut feed = idle_feed();
@@ -1416,6 +1416,11 @@ fn a_gate_waiting_on_an_unreachable_attempt_partition_lets_the_feed_drop() {
     assert!(
         returns_within(Duration::from_secs(10), move || drop(feed)),
         "dropping the feed did not return"
+    );
+    assert_eq!(
+        Arc::strong_count(&core),
+        1,
+        "the gate thread outlived the drop"
     );
 }
 
@@ -3437,6 +3442,43 @@ mod cluster {
             std::mem::forget(cluster);
         }
         assert!(dropped, "dropping the feed did not return");
+    }
+
+    /// Pins that dropping a feed returns once its follower thread has
+    /// ended: the follower's share of the ledger is gone when the drop
+    /// returns, although its poll can take up to `POLL_TIMEOUT` to end.
+    #[test]
+    fn dropping_a_feed_joins_its_follower_thread() {
+        let cluster = cluster_with(0);
+        let brokers = cluster.bootstrap_servers();
+        let group = spate_test::unique_name("drop-follower");
+        let (config, core, producer, d) = parts_for(&brokers, &group);
+        drop(d);
+        // A clone held here keeps the producer's shutdown out of the drop,
+        // which would otherwise give an unjoined follower time to end.
+        let _producer = producer.clone();
+        let follower = Follower::new(&config, Arc::clone(&core))
+            .unwrap()
+            .spawn()
+            .unwrap();
+        let feed = KafkaFeed {
+            core: Arc::clone(&core),
+            producer,
+            thread: None,
+            gate: None,
+            follower: Some(follower),
+            depth: None,
+        };
+        let dropped = returns_within(Duration::from_secs(10), move || drop(feed));
+        if !dropped {
+            std::mem::forget(cluster);
+        }
+        assert!(dropped, "dropping the feed did not return");
+        assert_eq!(
+            Arc::strong_count(&core.ledger),
+            1,
+            "the follower thread outlived the drop"
+        );
     }
 
     /// Pins that acknowledging returns when librdkafka refuses the

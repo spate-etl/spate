@@ -6,6 +6,7 @@ description: "The Kafka sink writes to one topic per instance through a single p
 
 import SecuringKafka from '../../_securing-kafka.mdx';
 import LoggingKafka from '../../_logging-kafka.mdx';
+import ClientIdKafka from '../../_client-id-kafka.mdx';
 
 The Kafka sink (`spate-kafka`, feature `kafka` on the `spate` facade) is the
 producer half of the Kafka connector: pipelines terminate in a Kafka topic,
@@ -79,21 +80,22 @@ batching via `linger.ms` / `batch.num.messages`, buffer sizing, security)
 without waiting for a typed field. Properties the sink owns for correctness are
 **rejected at load time with an explanation**, under their own name and under
 `topic.<name>`. librdkafka reads `topic.<name>` as `<name>` when `<name>` is a
-topic-level property, as `acks` and `message.timeout.ms` are. Aliases are denied
-alongside canonical names (passthrough and framework values apply in unspecified
-order).
+topic-level property, as `acks` and `message.timeout.ms` are. Every name
+librdkafka accepts for the same setting is denied (passthrough and framework
+values apply in unspecified order).
 
 | Denied property | Why |
 |---|---|
-| `bootstrap.servers`, `metadata.broker.list` (alias) | Owned by the typed `brokers` field. |
+| `bootstrap.servers`, `metadata.broker.list` | One librdkafka property, owned by the typed `brokers` field. |
 | `statistics.interval.ms` | Owned by the typed `statistics_interval` field. |
-| `delivery.timeout.ms`, `message.timeout.ms` (alias) | Owned by the typed `delivery_timeout` field, which also bounds the batch-write await. |
+| `delivery.timeout.ms`, `message.timeout.ms` | Owned by the typed `delivery_timeout` field, which also bounds the batch-write await. |
 | `message.max.bytes` | Owned by the typed `max_message_bytes` field, keeping the client limit aligned with the encode-time guard. |
-| `acks`, `request.required.acks` (alias) | **Forced to `all`.** The framework commits source offsets once a delivery report confirms; a report under weaker acks would turn at-least-once into at-most-once. |
+| `acks`, `request.required.acks` | **Forced to `all`.** The framework commits source offsets once a delivery report confirms; a report under weaker acks would turn at-least-once into at-most-once. |
 | `enable.idempotence` | **Forced on.** librdkafka's internal retries must not reorder or duplicate within a session. |
 | `transactional.id` | Transactions/exactly-once are not supported (documented non-goal); the ack model is per-batch delivery confirmation, not a two-phase commit. |
 | `delivery.report.only.error` | The sink counts every report to acknowledge a batch; suppressing success reports would hang every write. |
 | `enable.gapless.guarantee` | Raises librdkafka fatal errors on any gap, conflicting with the framework's retry-and-replay model. |
+| `allow.auto.create.topics` | **Forced off.** A write to a missing topic, or the readiness probe's read of one, fails, and never creates the topic with the broker's defaults. |
 
 The producer is created **at startup**, so a passthrough that conflicts
 with the forced durability settings (e.g. `max.in.flight` > 5 or
@@ -105,6 +107,8 @@ anything runs.
 <SecuringKafka />
 
 <LoggingKafka />
+
+<ClientIdKafka />
 
 ## How a batch becomes durable
 

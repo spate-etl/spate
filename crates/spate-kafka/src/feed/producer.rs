@@ -1,19 +1,21 @@
-//! The feed producer's context: delivery reports, the latest statistics
-//! snapshot and librdkafka's errors and logs.
+//! The feed producer's hooks: delivery reports, the latest statistics
+//! snapshot and librdkafka's errors.
 
 use super::Core;
 use super::write::{Failure, Write};
-use rdkafka::client::ClientContext;
+use crate::client::{Hooks, ProducerHooks, SpateContext, log_error};
 use rdkafka::error::RDKafkaErrorCode;
 use rdkafka::message::DeliveryResult;
-use rdkafka::producer::ProducerContext;
 use rdkafka::statistics::Statistics;
 use std::sync::{Arc, Mutex};
 
-/// The context of the feed's producer. Its callbacks run on the producer's
+/// The context the feed's producer runs under.
+pub(crate) type FeedProducerContext = SpateContext<FeedProducerHooks>;
+
+/// The hooks of the feed's producer. Its callbacks run on the producer's
 /// poll thread and take the feed's state lock only briefly.
 #[derive(Debug)]
-pub(crate) struct FeedProducerContext {
+pub(crate) struct FeedProducerHooks {
     core: Arc<Core>,
     /// The latest statistics snapshot, latest wins.
     stats: Mutex<Option<Box<Statistics>>>,
@@ -21,9 +23,9 @@ pub(crate) struct FeedProducerContext {
     unpaired_error: Mutex<Option<(Option<RDKafkaErrorCode>, String)>>,
 }
 
-impl FeedProducerContext {
-    pub(crate) fn new(core: Arc<Core>) -> FeedProducerContext {
-        FeedProducerContext {
+impl FeedProducerHooks {
+    pub(crate) fn new(core: Arc<Core>) -> FeedProducerHooks {
+        FeedProducerHooks {
             core,
             stats: Mutex::new(None),
             unpaired_error: Mutex::new(None),
@@ -51,21 +53,9 @@ impl FeedProducerContext {
     }
 }
 
-impl ClientContext for FeedProducerContext {
+impl Hooks for FeedProducerHooks {
     fn stats(&self, statistics: Statistics) {
         *self.stats.lock().expect("stats lock") = Some(Box::new(statistics));
-    }
-
-    fn log(&self, level: rdkafka::config::RDKafkaLogLevel, fac: &str, log_message: &str) {
-        use rdkafka::config::RDKafkaLogLevel as L;
-        match level {
-            L::Emerg | L::Alert | L::Critical | L::Error => {
-                tracing::error!(target: "librdkafka", fac, "{log_message}");
-            }
-            L::Warning => tracing::warn!(target: "librdkafka", fac, "{log_message}"),
-            L::Notice | L::Info => tracing::info!(target: "librdkafka", fac, "{log_message}"),
-            L::Debug => tracing::debug!(target: "librdkafka", fac, "{log_message}"),
-        }
     }
 
     /// Log the error, and stop the feed on a fatal producer error or a
@@ -81,7 +71,7 @@ impl ClientContext for FeedProducerContext {
         if self.repeats_previous(code, reason) {
             return;
         }
-        tracing::warn!(target: "librdkafka", %error, "{reason}");
+        log_error(&error, reason);
         match code {
             Some(
                 RDKafkaErrorCode::Fatal
@@ -107,7 +97,7 @@ impl ClientContext for FeedProducerContext {
     }
 }
 
-impl ProducerContext for FeedProducerContext {
+impl ProducerHooks for FeedProducerHooks {
     type DeliveryOpaque = Box<Write>;
 
     fn delivery(&self, result: &DeliveryResult<'_>, write: Box<Write>) {

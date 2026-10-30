@@ -10,12 +10,15 @@
 
 mod support;
 
+use support::Raw as _;
+
 use bytes::BytesMut;
 use rdkafka::ClientConfig;
 use rdkafka::client::ClientContext;
 use rdkafka::config::RDKafkaLogLevel;
 use rdkafka::consumer::{BaseConsumer, ConsumerContext};
 use rdkafka::error::KafkaError;
+use rdkafka::producer::{BaseProducer, Producer as _};
 use spate_core::checkpoint::{AckRef, Checkpointer};
 use spate_core::record::{PartitionId, Record, RecordMeta};
 use spate_core::sink::{RowEncoder, SealedBatch, ShardWriter};
@@ -150,7 +153,10 @@ fn tls_broker() -> (String, Container<Kafka>, String) {
     )
 }
 
-fn connector_clients(brokers: &str) {
+/// Runs a sink, its readiness probe and a source over TLS with the connector's
+/// CA default, after creating the topic with a raw client naming `ca_location`.
+fn connector_clients(brokers: &str, ca_location: &str) {
+    create_topic(brokers, ca_location);
     let tls = BTreeMap::from([("security.protocol".to_string(), "ssl".to_string())]);
 
     let mut sink_cfg = KafkaSinkConfig::new(brokers, TOPIC);
@@ -221,7 +227,7 @@ fn client_arm() -> bool {
     };
     let brokers = std::env::var(BROKERS).expect("broker address");
     match arm.as_str() {
-        "probe" => connector_clients(&brokers),
+        "probe" => connector_clients(&brokers, "probe"),
         "untrusted" => {
             let unrelated = TestCa::new("spate-kafka-test unrelated CA");
             let pem = pem("CERTIFICATE", &unrelated.der());
@@ -258,7 +264,8 @@ fn system_arm(brokers: &str) {
         !verifies(raw(brokers).set("ssl.ca.location", "probe")),
         "explicit probe verified with the CA outside the bundle"
     );
-    connector_clients(brokers);
+    // `probe` misses the CA here, so the topic is created through the directory.
+    connector_clients(brokers, "/etc/ssl/certs");
 }
 
 /// A client container on the host network that runs `binary` as `arm`.
@@ -371,9 +378,25 @@ impl Drop for Scratch {
     }
 }
 
+/// Create the topic the connector clients use. The sink never creates a
+/// topic, so a raw producer's metadata read does it, under librdkafka's
+/// auto-create default and the CA at `ca_location`.
+fn create_topic(brokers: &str, ca_location: &str) {
+    let producer: BaseProducer = raw(brokers)
+        .set("ssl.ca.location", ca_location)
+        .build()
+        .expect("raw producer");
+    spate_test::wait_until(Duration::from_secs(60), "the topic exists", || {
+        producer
+            .client()
+            .fetch_metadata(Some(TOPIC), Duration::from_secs(10))
+            .is_ok_and(|m| m.topics().iter().all(|t| t.error().is_none()))
+    });
+}
+
 /// A raw TLS client configuration for `brokers`, with no CA setting.
 fn raw(brokers: &str) -> ClientConfig {
-    let mut cc = ClientConfig::new();
+    let mut cc = support::raw_config();
     cc.set("bootstrap.servers", brokers)
         .set("security.protocol", "ssl")
         .set("group.id", "tls-system-ca-raw");
@@ -388,7 +411,7 @@ fn verifies(cc: &ClientConfig) -> bool {
         .clone()
         .set("debug", "security")
         .set_log_level(RDKafkaLogLevel::Debug)
-        .create_with_context(lines.clone())
+        .build_with(lines.clone())
         .expect("raw consumer");
     let mut verified = None;
     spate_test::wait_until(

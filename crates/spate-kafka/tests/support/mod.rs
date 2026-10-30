@@ -21,6 +21,48 @@ use testcontainers_modules::kafka::apache::Kafka;
 
 pub(crate) mod feed;
 
+/// A client configuration a test builds itself, outside the crate's client
+/// factory: a seeding producer, a reading consumer, an admin client.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "a test client is configured outside the factory's roles"
+)]
+pub(crate) fn raw_config() -> ClientConfig {
+    ClientConfig::new()
+}
+
+/// Builds a client from a [`raw_config`].
+pub(crate) trait Raw {
+    fn build<T: rdkafka::config::FromClientConfig>(&self) -> rdkafka::error::KafkaResult<T>;
+
+    fn build_with<C, T>(&self, context: C) -> rdkafka::error::KafkaResult<T>
+    where
+        C: rdkafka::client::ClientContext,
+        T: rdkafka::config::FromClientConfigAndContext<C>;
+}
+
+impl Raw for ClientConfig {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "a test client is built outside the factory's roles"
+    )]
+    fn build<T: rdkafka::config::FromClientConfig>(&self) -> rdkafka::error::KafkaResult<T> {
+        self.create()
+    }
+
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "a test client is built outside the factory's roles"
+    )]
+    fn build_with<C, T>(&self, context: C) -> rdkafka::error::KafkaResult<T>
+    where
+        C: rdkafka::client::ClientContext,
+        T: rdkafka::config::FromClientConfigAndContext<C>,
+    {
+        self.create_with_context(context)
+    }
+}
+
 /// A broker on the image `ci/kafka/` pins, pulled by digest.
 pub(crate) fn broker() -> ContainerRequest<Kafka> {
     let (name, tag) = container_image(&["--pull", "kafka"]);
@@ -36,10 +78,10 @@ pub(crate) fn produce(
     partitions: i32,
     tag: &str,
 ) {
-    let producer: BaseProducer = ClientConfig::new()
+    let producer: BaseProducer = raw_config()
         .set("bootstrap.servers", brokers)
         .set("message.timeout.ms", "30000")
-        .create()
+        .build()
         .expect("producer");
     for p in 0..partitions {
         for i in 0..per_partition {
@@ -90,12 +132,12 @@ pub(crate) fn consume<T>(
     timeout: Duration,
     mut keep: impl FnMut(&BorrowedMessage<'_>) -> Option<T>,
 ) -> Vec<T> {
-    let consumer: BaseConsumer = ClientConfig::new()
+    let consumer: BaseConsumer = raw_config()
         .set("bootstrap.servers", brokers)
         .set("group.id", group)
         .set("auto.offset.reset", "earliest")
         .set_log_level(RDKafkaLogLevel::Alert)
-        .create()
+        .build()
         .expect("consumer");
     consumer.subscribe(&[topic]).expect("subscribe");
     let deadline = Instant::now() + timeout;

@@ -54,20 +54,17 @@ mod startup;
 mod tests;
 mod write;
 
+pub(crate) use config::{FeedRole, KafkaFeedConfig};
 pub use error::KafkaFeedError;
 pub use publisher::KafkaFeedPublisher;
 
-use crate::context::SourceContext;
-use crate::error::redacted_client_error;
+use crate::context::SourceHooks;
 use attempt::{Follower, Ledger, PublishId, SharedLedger};
-use config::{BACKEND, KafkaFeedConfig};
+use config::BACKEND;
 use consumer::Driver;
 use inflight::Tracker;
-use producer::FeedProducerContext;
-use rdkafka::admin::AdminClient;
-use rdkafka::config::{FromClientConfig, FromClientConfigAndContext};
+use producer::FeedProducerHooks;
 use rdkafka::consumer::{BaseConsumer, Consumer};
-use rdkafka::producer::ThreadedProducer;
 use spate_core::clock::SyncClock;
 use spate_core::config::FeedSection;
 use spate_core::feed::{
@@ -655,16 +652,12 @@ fn start_depth(
     let openssl_env = crate::security::openssl_env_overrides();
     // The feed's group, never subscribed: it reads the group's committed
     // offsets without joining the group.
-    let consumer = BaseConsumer::from_config_and_context(
-        &config.depth_config(openssl_env),
-        SourceContext::default(),
-    )
-    .map_err(|e| {
-        KafkaFeedError::Refused(format!(
-            "creating the depth reader: {}",
-            redacted_client_error(&e)
-        ))
-    })?;
+    let consumer = config
+        .base(openssl_env)
+        .create(&config.client(FeedRole::Depth), SourceHooks::default())
+        .map_err(|reason| {
+            KafkaFeedError::Refused(format!("creating the depth reader: {reason}"))
+        })?;
     let (tx, rx) = mpsc::channel();
     let core = Arc::clone(core);
     std::thread::Builder::new()
@@ -711,23 +704,20 @@ fn check_topics(
     clock: SyncClock,
 ) -> Result<startup::Checked, KafkaFeedError> {
     let openssl_env = crate::security::openssl_env_overrides();
-    let admin_config = config.admin_config(openssl_env);
-    let admin = AdminClient::from_config(&admin_config).map_err(|e| {
-        KafkaFeedError::Refused(format!(
-            "creating the admin client: {}",
-            redacted_client_error(&e)
-        ))
-    })?;
-    let reader = ThreadedProducer::from_config_and_context(
-        &admin_config,
-        crate::sink::SinkContext::detached(clock.clone()),
-    )
-    .map_err(|e| {
-        KafkaFeedError::Refused(format!(
-            "creating the metadata client: {}",
-            redacted_client_error(&e)
-        ))
-    })?;
+    let base = config.base(openssl_env);
+    let admin = base
+        .create(&config.client(FeedRole::Admin), ())
+        .map_err(|reason| {
+            KafkaFeedError::Refused(format!("creating the admin client: {reason}"))
+        })?;
+    let reader = base
+        .create(
+            &config.client(FeedRole::Reader),
+            crate::sink::SinkHooks::detached(clock.clone()),
+        )
+        .map_err(|reason| {
+            KafkaFeedError::Refused(format!("creating the metadata client: {reason}"))
+        })?;
     let topics = Topics::new(config);
     let step = Mutex::new("starting".to_owned());
     let admin = Arc::new(startup::Brokers::new(admin, reader));
@@ -750,16 +740,13 @@ fn producer_parts(
 ) -> Result<(Arc<Core>, Producer), KafkaFeedError> {
     let openssl_env = crate::security::openssl_env_overrides();
     let core = Arc::new(Core::new(config, attempt_partitions, clock));
-    let producer = Producer::from_config_and_context(
-        &config.producer_config(openssl_env),
-        FeedProducerContext::new(Arc::clone(&core)),
-    )
-    .map_err(|e| {
-        KafkaFeedError::Refused(format!(
-            "creating the producer: {}",
-            redacted_client_error(&e)
-        ))
-    })?;
+    let producer = config
+        .base(openssl_env)
+        .create(
+            &config.client(FeedRole::Producer),
+            FeedProducerHooks::new(Arc::clone(&core)),
+        )
+        .map_err(|reason| KafkaFeedError::Refused(format!("creating the producer: {reason}")))?;
     Ok((core, producer))
 }
 
@@ -773,17 +760,12 @@ fn parts(
 ) -> Result<(Arc<Core>, Producer, Driver), KafkaFeedError> {
     let openssl_env = crate::security::openssl_env_overrides();
     let (core, producer) = producer_parts(config, attempt_partitions, clock)?;
-    let consumer_config = config.consumer_config(openssl_env);
-    let lookup_timeout = consumer::committed_lookup_timeout(&consumer_config);
-    let consumer =
-        BaseConsumer::from_config_and_context(&consumer_config, SourceContext::default()).map_err(
-            |e| {
-                KafkaFeedError::Refused(format!(
-                    "creating the consumer: {}",
-                    redacted_client_error(&e)
-                ))
-            },
-        )?;
+    let base = config.base(openssl_env);
+    let role = config.client(FeedRole::Consumer);
+    let lookup_timeout = consumer::committed_lookup_timeout(&base.config(&role));
+    let consumer: BaseConsumer<crate::context::SourceContext> = base
+        .create(&role, SourceHooks::default())
+        .map_err(|reason| KafkaFeedError::Refused(format!("creating the consumer: {reason}")))?;
     consumer
         .subscribe(&[&config.topic, &config.retry_topic])
         .map_err(|e| KafkaFeedError::Refused(format!("subscribing: {e}")))?;

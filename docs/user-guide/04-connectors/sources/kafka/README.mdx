@@ -6,6 +6,7 @@ description: "The Kafka source: one consumer per process, its partitions split i
 
 import SecuringKafka from '../../_securing-kafka.mdx';
 import LoggingKafka from '../../_logging-kafka.mdx';
+import ClientIdKafka from '../../_client-id-kafka.mdx';
 
 The Kafka source (`spate-kafka`, feature `kafka` on the `spate` facade) is built
 on `rdkafka` with a **single consumer per process**: one consumer-group member
@@ -63,18 +64,21 @@ The passthrough exists to reach anything librdkafka exposes
 defaults; see [performance tuning](./performance-tuning.mdx#prefetch))
 without waiting for a typed field. But
 properties the framework owns for correctness are **rejected at load time
-with an explanation**, because overriding them silently breaks the delivery
-guarantees or the threading model. Aliases librdkafka accepts for the same
-setting are denied alongside the canonical names, because passthrough and
-framework values apply in unspecified order.
+with an explanation**, under their own name and under `topic.<name>`, because
+overriding them silently breaks the delivery guarantees or the threading
+model. librdkafka reads `topic.<name>` as `<name>` when `<name>` is a
+topic-level property. Every name librdkafka accepts for the same setting is
+denied, because passthrough and framework values apply in unspecified order.
 
 | Denied property | Why |
 |---|---|
 | `enable.auto.offset.store` | The framework stores offsets itself when checkpoint watermarks advance; overriding breaks at-least-once. |
-| `enable.auto.commit`, `auto.commit.enable` (alias) | Interval auto-commit of framework-stored offsets *is* the commit mechanism; disabling it means nothing is ever committed. |
+| `enable.auto.commit` | Interval auto-commit of framework-stored offsets *is* the commit mechanism; disabling it means nothing is ever committed. |
+| `auto.commit.enable` | librdkafka's legacy topic-level auto-commit property, which the consumer does not read; the framework commits through `enable.auto.commit`. |
 | `auto.commit.interval.ms` | Owned by the typed `commit_interval` field. |
 | `enable.partition.eof` | EOF events would pollute the partition queues the pipeline polls. |
-| `bootstrap.servers`, `metadata.broker.list` (alias) | Owned by the typed `brokers` field. |
+| `bootstrap.servers`, `metadata.broker.list` | One librdkafka property, owned by the typed `brokers` field. |
+| `allow.auto.create.topics` | Forced off: a metadata read of a missing topic fails, and never creates the topic with the broker's defaults. |
 | `group.id` | Owned by the typed `group_id` field. |
 | `statistics.interval.ms` | Owned by the typed `statistics_interval` field. |
 | `group.protocol` | Only the classic consumer protocol is supported; eager assignment is a framework invariant. |
@@ -97,6 +101,8 @@ error names the id.
 <SecuringKafka />
 
 <LoggingKafka />
+
+<ClientIdKafka />
 
 ## Compression codecs
 

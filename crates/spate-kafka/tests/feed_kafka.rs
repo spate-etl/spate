@@ -13,7 +13,8 @@
 
 mod support;
 
-use rdkafka::ClientConfig;
+use support::Raw as _;
+
 use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
 use rdkafka::client::DefaultClientContext;
 use rdkafka::consumer::{BaseConsumer, Consumer};
@@ -227,9 +228,9 @@ fn a_unit_that_kills_its_worker_at_each_read_reaches_the_dead_letter_topic() {
 /// Create each topic of `topics`, one partition each, with its
 /// configuration entries.
 fn create_configured(brokers: &str, topics: &[(String, Vec<(&str, &str)>)]) {
-    let admin: AdminClient<DefaultClientContext> = ClientConfig::new()
+    let admin: AdminClient<DefaultClientContext> = support::raw_config()
         .set("bootstrap.servers", brokers)
-        .create()
+        .build()
         .expect("admin client");
     let new: Vec<NewTopic<'_>> = topics
         .iter()
@@ -515,11 +516,11 @@ fn a_confirmed_write_is_below_the_next_high_watermark() {
     let port = container.get_host_port_ipv4(KAFKA_PORT).expect("port");
     let brokers = format!("127.0.0.1:{port}");
     create_topics(&brokers);
-    let producer: FutureProducer = ClientConfig::new()
+    let producer: FutureProducer = support::raw_config()
         .set("bootstrap.servers", &brokers)
         .set("acks", "all")
         .set("enable.idempotence", "true")
-        .create()
+        .build()
         .expect("producer");
     let io = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -553,9 +554,9 @@ fn a_confirmed_write_is_below_the_next_high_watermark() {
 /// Create the work topic `work` with `entries` and its retry, dead-letter
 /// and compacted attempt topics, one partition each.
 fn create_topics_of(brokers: &str, work: &str, entries: &[(&str, &str)]) {
-    let admin: AdminClient<DefaultClientContext> = ClientConfig::new()
+    let admin: AdminClient<DefaultClientContext> = support::raw_config()
         .set("bootstrap.servers", brokers)
-        .create()
+        .build()
         .expect("admin client");
     let retry = format!("{work}-retry");
     let dead = format!("{work}-dead");
@@ -699,9 +700,9 @@ fn a_dead_letter_topic_entry_ends_the_job_stalled() {
         "the message is dead-lettered and committed",
         || high_watermark(&brokers, DEAD) == 1 && committed(&brokers, &group, WORK) == Some(1),
     );
-    let admin: AdminClient<DefaultClientContext> = ClientConfig::new()
+    let admin: AdminClient<DefaultClientContext> = support::raw_config()
         .set("bootstrap.servers", &brokers)
-        .create()
+        .build()
         .expect("admin client");
     let mut before = TopicPartitionList::new();
     before
@@ -777,9 +778,9 @@ fn a_bounded_job_ends_once_every_workers_partitions_are_committed() {
 
 /// Create the topics with a two-partition work topic.
 fn create_two_partition_work(brokers: &str) {
-    let admin: AdminClient<DefaultClientContext> = ClientConfig::new()
+    let admin: AdminClient<DefaultClientContext> = support::raw_config()
         .set("bootstrap.servers", brokers)
-        .create()
+        .build()
         .expect("admin client");
     let topics = [
         NewTopic::new(WORK, 2, TopicReplication::Fixed(1))
@@ -804,9 +805,9 @@ fn create_two_partition_work(brokers: &str) {
 /// The high watermark of `topic` partition `partition`.
 fn high_watermark_of(brokers: &str, topic: &str, partition: i32) -> i64 {
     use rdkafka::consumer::{BaseConsumer, Consumer};
-    let consumer: BaseConsumer = ClientConfig::new()
+    let consumer: BaseConsumer = support::raw_config()
         .set("bootstrap.servers", brokers)
-        .create()
+        .build()
         .expect("consumer");
     consumer
         .fetch_watermarks(topic, partition, Duration::from_secs(10))
@@ -868,9 +869,9 @@ fn a_stopping_worker_commits_finished_units_before_leaving_the_group() {
     assert_eq!(report.state, ExitState::Completed);
     assert_eq!(committed(&brokers, &group, WORK), Some(1));
     assert_eq!(a.recording.closes().len(), 1);
-    let probe: BaseConsumer = ClientConfig::new()
+    let probe: BaseConsumer = support::raw_config()
         .set("bootstrap.servers", &brokers)
-        .create()
+        .build()
         .expect("probe");
     wait_until(Duration::from_secs(15), "A leaves the group", || {
         let groups = probe

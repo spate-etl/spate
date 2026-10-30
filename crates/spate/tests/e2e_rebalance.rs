@@ -46,6 +46,10 @@ fn rebalance_under_load_preserves_every_record() {
         let topic = params.topic.clone();
         let group = params.group.clone();
         std::thread::spawn(move || {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "the intruder is a plain group member outside the connector's client factory"
+            )]
             let consumer: BaseConsumer = ClientConfig::new()
                 .set("bootstrap.servers", &brokers)
                 .set("group.id", &group)

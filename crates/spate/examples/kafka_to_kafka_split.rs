@@ -30,8 +30,8 @@
 //!
 //! # Run it
 //!
-//! Needs Kafka (`KAFKA_BROKERS`) with the three topics (or topic
-//! auto-creation). SIGTERM drains gracefully; probes:
+//! Needs Kafka (`KAFKA_BROKERS`) with the three topics created: the sink
+//! never creates a topic. SIGTERM drains gracefully; probes:
 //! `curl localhost:9090/readyz`.
 //!
 //! ```sh

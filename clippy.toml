@@ -11,6 +11,12 @@ disallowed-macros = [
 
 disallowed-methods = [
     { path = "std::path::Path::exists", replacement = "std::path::Path::try_exists", reason = "returns false on a stat error, so a permission or I/O failure reads as missing" },
+    { path = "rdkafka::config::ClientConfig::new", reason = "build Kafka clients through `spate-kafka`'s `client::Base`, which owns the settings every client shares; a test outside every role takes an `expect` naming why" },
+    { path = "rdkafka::config::ClientConfig::create", reason = "build Kafka clients through `spate-kafka`'s `client::Base`, which owns the settings every client shares; a test outside every role takes an `expect` naming why" },
+    { path = "rdkafka::config::ClientConfig::create_with_context", reason = "build Kafka clients through `spate-kafka`'s `client::Base`, which owns the settings every client shares; a test outside every role takes an `expect` naming why" },
+    { path = "rdkafka::config::FromClientConfig::from_config", reason = "build Kafka clients through `spate-kafka`'s `client::Base`, which owns the settings every client shares; a test outside every role takes an `expect` naming why" },
+    { path = "rdkafka::config::FromClientConfigAndContext::from_config_and_context", reason = "build Kafka clients through `spate-kafka`'s `client::Base`, which owns the settings every client shares; a test outside every role takes an `expect` naming why" },
+    { path = "rdkafka::client::Client::new", reason = "build Kafka clients through `spate-kafka`'s `client::Base`, which owns the settings every client shares; a test outside every role takes an `expect` naming why" },
 ]
 
 await-holding-invalid-types = [

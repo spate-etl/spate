@@ -429,6 +429,31 @@ async fn probe_verifies_topic_and_fails_fast_on_unknown_topic() {
     }
 }
 
+/// Pins that a probe whose metadata read panics on its blocking thread
+/// returns a retryable error instead of unwinding into the caller:
+/// librdkafka refuses a topic name over 512 bytes, and rdkafka panics on
+/// the refusal.
+#[tokio::test]
+async fn a_probe_with_an_overlong_topic_fails_without_panicking() {
+    let cluster = MockCluster::new(1).expect("mock cluster");
+    let brokers = cluster.bootstrap_servers();
+    let topic = "t".repeat(513);
+    let yaml = format!("brokers: {brokers}\ntopic: {topic}\nstatistics_interval: 0s\n");
+    let config: KafkaSinkConfig = serde_yaml::from_str(&yaml).expect("sink config");
+    let sink = spate_kafka::sink::build(config).expect("sink build");
+
+    let err = sink.probe_fn()()
+        .await
+        .expect_err("an overlong topic must fail the probe");
+    match err {
+        SinkError::Client { class, reason } => {
+            assert_eq!(class, ErrorClass::Retryable, "{reason}");
+            assert!(reason.starts_with("probe task failed"), "{reason}");
+        }
+        other => panic!("unexpected error shape: {other:?}"),
+    }
+}
+
 /// The readiness probe reports a missing topic as fatal and leaves it
 /// missing: its metadata read never asks the broker to create the topic.
 #[tokio::test]

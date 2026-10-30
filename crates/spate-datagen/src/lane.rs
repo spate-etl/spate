@@ -148,7 +148,8 @@ impl DatagenLane {
             tick_interval: parts.tick_interval,
             events_per_tick: parts.events_per_tick,
             // The first tick is due immediately: the first poll releases a
-            // batch.
+            // batch, unless `tick_interval` overflows the clock (see the
+            // module docs).
             next_tick: parts.clock.now(),
             clock: parts.clock,
             tick_budget: 0,

@@ -630,4 +630,54 @@ mod tests {
                 .all(|r| r.load(Ordering::Acquire) == 0)
         );
     }
+    /// A poll the gate holds on a frozen clock parks for its timeout and
+    /// returns, however far out the next tick is.
+    #[test]
+    fn a_held_poll_returns_within_its_timeout_on_a_frozen_clock() {
+        use std::sync::mpsc;
+
+        let clock = TestClock::frozen();
+        let (_source, _cp, mut lanes) = throttled(&clock, Duration::from_secs(3600), 3, None);
+        let mut lane = lanes.remove(0);
+        assert_eq!(
+            released(&mut lane, 64),
+            Some(3),
+            "the first tick is due at once"
+        );
+
+        let timeout = Duration::from_millis(20);
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let start = std::time::Instant::now();
+            let held = lane.poll(64, timeout).unwrap().is_none();
+            tx.send((held, start.elapsed())).unwrap();
+        });
+        let (held, parked) = rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the held poll returns within its timeout");
+        assert!(held, "the next tick is an hour out");
+        assert!(
+            parked >= timeout,
+            "the held poll parks for its timeout, parked {parked:?}"
+        );
+    }
+
+    /// A lane with no next deadline parks for the poll timeout on every poll
+    /// instead of returning at once, so its thread does not spin.
+    #[test]
+    fn a_lane_past_the_clock_range_parks_for_the_poll_timeout() {
+        let clock = TestClock::frozen();
+        let (_source, _cp, mut lanes) = throttled(&clock, Duration::MAX, 3, None);
+        let timeout = Duration::from_millis(20);
+        let start = std::time::Instant::now();
+        assert!(
+            lanes[0].poll(64, timeout).unwrap().is_none(),
+            "no deadline, so no tick"
+        );
+        let parked = start.elapsed();
+        assert!(
+            parked >= timeout,
+            "the poll parks for its timeout, parked {parked:?}"
+        );
+    }
 }

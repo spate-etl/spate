@@ -11,7 +11,8 @@
 
 mod support;
 
-use rdkafka::ClientConfig;
+use support::Raw as _;
+
 use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
 use rdkafka::client::DefaultClientContext;
 use rdkafka::consumer::{BaseConsumer, Consumer};
@@ -59,9 +60,9 @@ fn the_attempt_follower_leaves_the_feed_members_assignment_alone() {
         .enable_all()
         .build()
         .unwrap();
-    let admin: AdminClient<DefaultClientContext> = ClientConfig::new()
+    let admin: AdminClient<DefaultClientContext> = support::raw_config()
         .set("bootstrap.servers", &brokers)
-        .create()
+        .build()
         .expect("admin client");
     let mut topics = vec![
         NewTopic::new(WORK, 1, TopicReplication::Fixed(1))
@@ -115,9 +116,9 @@ fn the_attempt_follower_leaves_the_feed_members_assignment_alone() {
 
     assert_eq!(assignments(&capture), 1, "{:#?}", capture.lines());
     assert!(seen.iter().all(|&count| count == 1), "{seen:?}");
-    let probe: BaseConsumer = ClientConfig::new()
+    let probe: BaseConsumer = support::raw_config()
         .set("bootstrap.servers", &brokers)
-        .create()
+        .build()
         .expect("probe");
     let groups = probe
         .fetch_group_list(Some(&group), Duration::from_secs(10))

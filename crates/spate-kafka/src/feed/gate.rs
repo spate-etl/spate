@@ -482,9 +482,9 @@ pub(crate) fn admission(core: &Core, entry: Gating) -> Option<Write> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::feed::FeedRole;
     use crate::feed::config::KafkaFeedConfig;
-    use crate::feed::producer::FeedProducerContext;
-    use rdkafka::config::FromClientConfigAndContext;
+    use crate::feed::producer::FeedProducerHooks;
     use rdkafka::error::RDKafkaErrorCode as C;
     use spate_core::clock::SyncClock;
     use std::num::NonZeroU32;
@@ -504,11 +504,13 @@ mod tests {
         let config = KafkaFeedConfig::from_section(&section).unwrap();
         for how in ["stopped", "latched"] {
             let core = Arc::new(Core::new(&config, NonZeroU32::MIN, SyncClock::system()));
-            let producer = Producer::from_config_and_context(
-                &config.producer_config(false),
-                FeedProducerContext::new(Arc::clone(&core)),
-            )
-            .unwrap();
+            let producer = config
+                .base(false)
+                .create::<Producer, _>(
+                    &config.client(FeedRole::Producer),
+                    FeedProducerHooks::new(Arc::clone(&core)),
+                )
+                .unwrap();
             let gate = Gate::new(Arc::clone(&core), producer, config.delivery_timeout)
                 .with_step(Duration::from_secs(3600));
             if how == "stopped" {
@@ -541,11 +543,13 @@ mod tests {
         .unwrap();
         let config = KafkaFeedConfig::from_section(&section).unwrap();
         let core = Arc::new(Core::new(&config, NonZeroU32::MIN, SyncClock::system()));
-        let producer = Producer::from_config_and_context(
-            &config.producer_config(false),
-            FeedProducerContext::new(Arc::clone(&core)),
-        )
-        .unwrap();
+        let producer = config
+            .base(false)
+            .create::<Producer, _>(
+                &config.client(FeedRole::Producer),
+                FeedProducerHooks::new(Arc::clone(&core)),
+            )
+            .unwrap();
         let gate = Gate::new(Arc::clone(&core), producer, config.delivery_timeout);
 
         let halt = gate.watermark_error(0, &KafkaError::MetadataFetch(C::OperationTimedOut));

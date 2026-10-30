@@ -346,6 +346,10 @@ fn ch_env(h: &Harness) -> Vec<(&'static str, String)> {
 /// Produce keyed payloads to `topic`, letting the client's default partitioner
 /// place them, so an example that routes on the key sees the placement a
 /// real producer would give it.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the harness seeds the topic outside the connector's client factory"
+)]
 fn produce_raw(brokers: &str, topic: &str, payloads: &[(Vec<u8>, Vec<u8>)]) {
     let producer: BaseProducer = ClientConfig::new()
         .set("bootstrap.servers", brokers)
@@ -389,6 +393,10 @@ fn encode(schema: &Schema, fields: Vec<(&str, Value)>) -> Vec<u8> {
 /// exact and immediate, an empty topic answers `0` without waiting out a quiet
 /// period, and there is no consumer group whose initial rebalance delay could
 /// be mistaken for an exhausted topic.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the harness reads the topic's watermarks outside the connector's client factory"
+)]
 fn topic_count(brokers: &str, topic: &str) -> usize {
     let probe: BaseConsumer = ClientConfig::new()
         .set("bootstrap.servers", brokers)

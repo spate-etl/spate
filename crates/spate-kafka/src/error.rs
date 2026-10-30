@@ -159,13 +159,13 @@ pub(crate) fn classify_poll_error(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::client::testing::{Raw as _, raw_config};
     use rdkafka::error::RDKafkaErrorCode as C;
 
     /// Rejected values never reach the rendered error, whatever shape
     /// librdkafka quotes them in, and the property key stays.
     #[test]
     fn client_error_omits_the_value() {
-        use rdkafka::ClientConfig;
         use rdkafka::consumer::BaseConsumer;
 
         let long = format!("hunter2{}", "x".repeat(600));
@@ -177,10 +177,10 @@ mod tests {
             ("partition.assignment.strategy", "hunter2".to_string()),
         ];
         for (key, value) in cases {
-            let err = ClientConfig::new()
+            let err = raw_config()
                 .set("bootstrap.servers", "localhost:1")
                 .set(key, &value)
-                .create::<BaseConsumer>()
+                .build::<BaseConsumer>()
                 .err()
                 .expect("value is rejected");
             let msg = redacted_client_error(&err);
@@ -190,13 +190,12 @@ mod tests {
 
     #[test]
     fn client_config_error_names_the_key() {
-        use rdkafka::ClientConfig;
         use rdkafka::consumer::BaseConsumer;
 
-        let err = ClientConfig::new()
+        let err = raw_config()
             .set("bootstrap.servers", "localhost:1")
             .set("auto.offset.reset", "hunter2")
-            .create::<BaseConsumer>()
+            .build::<BaseConsumer>()
             .err()
             .expect("value is rejected");
         assert!(

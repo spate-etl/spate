@@ -17,9 +17,9 @@
 //! connecting with the rejection's text, as soon as the client reports it.
 
 use super::{KafkaFeedError, Topics};
+use crate::client::SpateContext;
 use crate::sink::SinkContext;
 use rdkafka::admin::{AdminClient, AdminOptions, ResourceSpecifier};
-use rdkafka::client::DefaultClientContext;
 use rdkafka::error::{KafkaError, RDKafkaErrorCode};
 use rdkafka::producer::{Producer, ThreadedProducer};
 use spate_core::clock::SyncClock;
@@ -100,16 +100,14 @@ pub(crate) trait TopicAdmin: Send + Sync {
 /// rejection. Every topic's metadata is read before any configuration, so a
 /// rejection is met first on `reader`.
 pub(crate) struct Brokers {
-    admin: Arc<AdminClient<DefaultClientContext>>,
+    admin: Arc<AdminClient<SpateContext<()>>>,
     reader: Arc<ThreadedProducer<SinkContext>>,
 }
 
 impl Brokers {
-    /// Wraps `admin` and `reader`, which must both be built with
-    /// `allow.auto.create.topics` off: with it on, a metadata read of a
-    /// missing topic creates the topic with the broker's defaults.
+    /// Wraps `admin` and `reader`.
     pub(crate) fn new(
-        admin: AdminClient<DefaultClientContext>,
+        admin: AdminClient<SpateContext<()>>,
         reader: ThreadedProducer<SinkContext>,
     ) -> Brokers {
         Brokers {
@@ -1115,17 +1113,12 @@ mod tests {
     /// however long ago it arrived.
     #[test]
     fn a_rejection_refuses_the_connect_check_at_any_age() {
-        use rdkafka::ClientConfig;
+        use crate::client::testing::raw;
         let clock = spate_core::clock::TestClock::frozen();
-        let context = SinkContext::detached(SyncClock::new(Arc::clone(&clock) as _));
-        let mut config = ClientConfig::new();
-        config.set("bootstrap.servers", crate::testutil::refused_broker());
-        let brokers = Brokers::new(
-            config.create().expect("admin client"),
-            config
-                .create_with_context(context)
-                .expect("metadata client"),
-        );
+        let hooks = crate::sink::SinkHooks::detached(SyncClock::new(Arc::clone(&clock) as _));
+        let broker = crate::testutil::refused_broker();
+        let properties = [("bootstrap.servers", broker.as_str())];
+        let brokers = Brokers::new(raw(&properties, ()), raw(&properties, hooks));
         brokers.reader.context().note_error(C::SSL, ALERT_40);
         clock.advance(Duration::from_secs(3600));
         assert_eq!(brokers.rejection().as_deref(), Some(ALERT_40));

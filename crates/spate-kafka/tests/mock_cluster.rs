@@ -2,7 +2,8 @@
 
 mod support;
 
-use rdkafka::ClientConfig;
+use support::Raw as _;
+
 use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::mocking::MockCluster;
 use spate_core::checkpoint::Checkpointer;
@@ -117,10 +118,10 @@ fn full_lifecycle_polls_acks_and_commits() {
     source.flush_commits().expect("sync commit");
 
     // A probe consumer in the same group sees the committed positions.
-    let probe: BaseConsumer = ClientConfig::new()
+    let probe: BaseConsumer = support::raw_config()
         .set("bootstrap.servers", &brokers)
         .set("group.id", "life")
-        .create()
+        .build()
         .expect("probe");
     let mut tpl = rdkafka::TopicPartitionList::new();
     for p in 0..3 {
@@ -245,10 +246,10 @@ fn the_fetcher_starts_before_the_lane_is_handed_out() {
 
 /// Commit `offset` on partition 0 for `group`, as a previous member would.
 fn commit_as(brokers: &str, group: &str, offset: i64) {
-    let probe: BaseConsumer = ClientConfig::new()
+    let probe: BaseConsumer = support::raw_config()
         .set("bootstrap.servers", brokers)
         .set("group.id", group)
-        .create()
+        .build()
         .expect("probe");
     let mut tpl = rdkafka::TopicPartitionList::new();
     tpl.add_partition_offset(TOPIC, 0, rdkafka::Offset::Offset(offset))
@@ -387,11 +388,11 @@ fn second_member_triggers_revoke_then_fresh_assignment() {
     let stop = Arc::new(AtomicBool::new(false));
     let stop2 = std::sync::Arc::clone(&stop);
     let joiner = std::thread::spawn(move || {
-        let c: BaseConsumer = ClientConfig::new()
+        let c: BaseConsumer = support::raw_config()
             .set("bootstrap.servers", &brokers2)
             .set("group.id", "grp")
             .set("auto.offset.reset", "earliest")
-            .create()
+            .build()
             .expect("second consumer");
         c.subscribe(&[TOPIC]).expect("subscribe");
         while !stop2.load(Ordering::Relaxed) {
@@ -1026,10 +1027,10 @@ fn a_backlogged_consumer_publishes_its_lag() {
 /// A directly assigned consumer (no group coordination), positioned at the
 /// beginning of every partition.
 fn assigned_consumer(brokers: &str, group: &str, partitions: i32) -> std::sync::Arc<BaseConsumer> {
-    let consumer: BaseConsumer = ClientConfig::new()
+    let consumer: BaseConsumer = support::raw_config()
         .set("bootstrap.servers", brokers)
         .set("group.id", group)
-        .create()
+        .build()
         .expect("consumer");
     let mut tpl = rdkafka::TopicPartitionList::new();
     for p in 0..partitions {
@@ -1148,11 +1149,11 @@ fn zstd_batches_are_read() {
     let cluster = MockCluster::new(1).expect("mock cluster");
     cluster.create_topic(TOPIC, 1, 1).expect("create topic");
     let brokers = cluster.bootstrap_servers();
-    let producer: BaseProducer = ClientConfig::new()
+    let producer: BaseProducer = support::raw_config()
         .set("bootstrap.servers", &brokers)
         .set("compression.codec", "zstd")
         .set("linger.ms", "100")
-        .create()
+        .build()
         .expect("zstd producer");
     for i in 0..20 {
         let payload = format!("z-{i}");

@@ -3,6 +3,7 @@
 //! settling a write against the tracker, and the lock discipline around
 //! commits.
 
+use super::FeedRole;
 use super::attempt::{self, Entry, PublishId, decode, partition_of};
 use super::config::KafkaFeedConfig;
 use super::consumer::{
@@ -11,14 +12,13 @@ use super::consumer::{
 use super::events::Cause;
 use super::gate::admission;
 use super::inflight::Tp;
-use super::producer::FeedProducerContext;
-use super::write::Producer;
+use super::producer::FeedProducerHooks;
 use super::write::{
     self, Attempt, BACKOFF_START, DELIVERIES_HEADER, Destination, Failure, Finish, Move, Outgoing,
     Tombstone, Write, WriteClass, classify, route,
 };
 use super::{Core, Gating, KafkaFeed, KafkaFeedError, KafkaFeedPublisher, Ready};
-use rdkafka::config::FromClientConfigAndContext;
+use crate::client::testing::raw_config;
 use rdkafka::error::{KafkaError, RDKafkaErrorCode as C};
 use spate_core::clock::SyncClock;
 use spate_core::clock::TestClock;
@@ -244,7 +244,7 @@ fn a_failed_write_is_classified_by_the_sink_table() {
 /// reaches.
 #[test]
 fn the_committed_offset_read_is_bounded_by_the_poll_interval() {
-    let mut cc = rdkafka::ClientConfig::new();
+    let mut cc = raw_config();
     assert_eq!(committed_lookup_timeout(&cc), Duration::from_secs(10));
     cc.set("max.poll.interval.ms", "6000");
     assert_eq!(committed_lookup_timeout(&cc), Duration::from_millis(1500));
@@ -574,9 +574,9 @@ fn a_unit_is_written_with_its_count() {
 /// arrives as the identical pair of callbacks rdkafka makes.
 #[test]
 fn a_producer_error_event_is_logged_once() {
-    use rdkafka::client::ClientContext;
+    use crate::client::Hooks;
     const DOWN: &str = "1/1 brokers are down";
-    let context = FeedProducerContext::new(Arc::new(core(10)));
+    let context = FeedProducerHooks::new(Arc::new(core(10)));
     let lines = spate_test::capture_logs(tracing::Level::WARN, || {
         for _ in 0..4 {
             context.error(KafkaError::Global(C::AllBrokersDown), DOWN);
@@ -601,11 +601,13 @@ fn unreachable_config(extra: &str) -> KafkaFeedConfig {
 fn idle_feed() -> KafkaFeed {
     let config = unreachable_config("");
     let core = Arc::new(Core::new(&config, TWO, SyncClock::system()));
-    let producer = Producer::from_config_and_context(
-        &config.producer_config(false),
-        FeedProducerContext::new(Arc::clone(&core)),
-    )
-    .unwrap();
+    let producer = config
+        .base(false)
+        .create::<super::write::Producer, _>(
+            &config.client(FeedRole::Producer),
+            FeedProducerHooks::new(Arc::clone(&core)),
+        )
+        .unwrap();
     KafkaFeed {
         core,
         producer,
@@ -619,11 +621,13 @@ fn idle_feed() -> KafkaFeed {
 /// A publisher whose producer reaches no broker, over `config`.
 fn idle_publisher_over(config: &KafkaFeedConfig) -> KafkaFeedPublisher {
     let core = Arc::new(Core::new(config, TWO, SyncClock::system()));
-    let producer = Producer::from_config_and_context(
-        &config.producer_config(false),
-        FeedProducerContext::new(Arc::clone(&core)),
-    )
-    .unwrap();
+    let producer = config
+        .base(false)
+        .create::<super::write::Producer, _>(
+            &config.client(FeedRole::Producer),
+            FeedProducerHooks::new(Arc::clone(&core)),
+        )
+        .unwrap();
     KafkaFeedPublisher::from_parts(core, producer)
 }
 
@@ -802,11 +806,13 @@ fn an_inline_fatal_enqueue_settles_without_deadlock() {
     let config = unreachable_config("");
     let owner = Arc::new(Core::new(&config, TWO, SyncClock::system()));
     let producer = Arc::new(
-        Producer::from_config_and_context(
-            &config.producer_config(false),
-            FeedProducerContext::new(Arc::clone(&owner)),
-        )
-        .unwrap(),
+        config
+            .base(false)
+            .create::<super::write::Producer, _>(
+                &config.client(FeedRole::Producer),
+                FeedProducerHooks::new(Arc::clone(&owner)),
+            )
+            .unwrap(),
     );
     // SAFETY: the pointer is a live client owned by `producer`, and the
     // reason is a NUL-terminated literal.
@@ -1333,11 +1339,13 @@ fn a_gate_pass_puts_back_the_deliveries_of_each_failed_watermark_read() {
         NonZeroU32::new(4).unwrap(),
         SyncClock::system(),
     ));
-    let producer = Producer::from_config_and_context(
-        &config.producer_config(false),
-        FeedProducerContext::new(Arc::clone(&core)),
-    )
-    .unwrap();
+    let producer = config
+        .base(false)
+        .create::<super::write::Producer, _>(
+            &config.client(FeedRole::Producer),
+            FeedProducerHooks::new(Arc::clone(&core)),
+        )
+        .unwrap();
     let mut seen = std::collections::BTreeSet::new();
     let mut offsets = Vec::new();
     for offset in 0.. {
@@ -1417,11 +1425,13 @@ fn a_gate_waiting_on_an_unreachable_attempt_partition_lets_the_feed_drop() {
 fn a_delivery_revoked_during_a_pass_is_not_put_back() {
     let config = unreachable_config("  delivery_timeout: 1h\n");
     let core = Arc::new(Core::new(&config, TWO, SyncClock::system()));
-    let producer = Producer::from_config_and_context(
-        &config.producer_config(false),
-        FeedProducerContext::new(Arc::clone(&core)),
-    )
-    .unwrap();
+    let producer = config
+        .base(false)
+        .create::<super::write::Producer, _>(
+            &config.client(FeedRole::Producer),
+            FeedProducerHooks::new(Arc::clone(&core)),
+        )
+        .unwrap();
     {
         let mut st = core.lock();
         st.tracker.assign([tp(0)]);
@@ -1460,11 +1470,13 @@ fn a_delivery_revoked_during_a_pass_is_not_put_back() {
 fn a_latched_feed_ends_its_gate_thread() {
     let config = unreachable_config("");
     let core = Arc::new(Core::new(&config, TWO, SyncClock::system()));
-    let producer = Producer::from_config_and_context(
-        &config.producer_config(false),
-        FeedProducerContext::new(Arc::clone(&core)),
-    )
-    .unwrap();
+    let producer = config
+        .base(false)
+        .create::<super::write::Producer, _>(
+            &config.client(FeedRole::Producer),
+            FeedProducerHooks::new(Arc::clone(&core)),
+        )
+        .unwrap();
     let handle = super::gate::Gate::new(Arc::clone(&core), producer, config.delivery_timeout)
         .with_step(Duration::from_millis(10))
         .spawn()
@@ -1493,11 +1505,13 @@ fn a_feed_that_ends_during_a_pass_ends_it_before_the_next_read() {
             NonZeroU32::new(4).unwrap(),
             SyncClock::system(),
         ));
-        let producer = Producer::from_config_and_context(
-            &config.producer_config(false),
-            FeedProducerContext::new(Arc::clone(&core)),
-        )
-        .unwrap();
+        let producer = config
+            .base(false)
+            .create::<super::write::Producer, _>(
+                &config.client(FeedRole::Producer),
+                FeedProducerHooks::new(Arc::clone(&core)),
+            )
+            .unwrap();
         let mut seen = std::collections::BTreeSet::new();
         let mut offsets = Vec::new();
         for offset in 0.. {
@@ -1709,17 +1723,19 @@ mod cluster {
     use super::super::consumer::{self, COMMIT_INTERVAL, Driver, POLL_BATCH};
     use super::super::gate::Gate;
     use super::super::inflight::Tp;
-    use super::super::producer::FeedProducerContext;
+    use super::super::producer::FeedProducerHooks;
     use super::super::startup::{CONNECT_BOUND, Scope};
     use super::super::write::Producer;
     use super::super::{Core, Gating, KafkaFeed, READY_CAPACITY};
     use super::{TWO, returns_within};
+    use crate::client::testing::{Raw as _, raw_config};
     use crate::context::Intent;
+    use crate::feed::FeedRole;
     use rdkafka::consumer::{BaseConsumer, Consumer, ConsumerContext};
     use rdkafka::mocking::MockCluster;
     use rdkafka::producer::{BaseProducer, BaseRecord, Producer as _};
     use rdkafka::types::{RDKafkaApiKey, RDKafkaRespErr};
-    use rdkafka::{ClientConfig, Offset, TopicPartitionList};
+    use rdkafka::{Offset, TopicPartitionList};
     use spate_core::clock::SyncClock;
     use spate_core::clock::TestClock;
     use spate_core::config::FeedSection;
@@ -1796,9 +1812,9 @@ mod cluster {
         cluster.create_topic("units-dead", 1, 1).unwrap();
         cluster.create_topic(ATTEMPTS, 2, 1).unwrap();
         let brokers = cluster.bootstrap_servers();
-        let producer: BaseProducer = ClientConfig::new()
+        let producer: BaseProducer = raw_config()
             .set("bootstrap.servers", &brokers)
-            .create()
+            .build()
             .unwrap();
         let mut ids = BTreeSet::new();
         for p in 0..2 {
@@ -1867,9 +1883,9 @@ mod cluster {
             cluster.create_topic(topic, 1, 1).unwrap();
         }
         cluster.create_topic(ATTEMPTS, 2, 1).unwrap();
-        let producer: BaseProducer = ClientConfig::new()
+        let producer: BaseProducer = raw_config()
             .set("bootstrap.servers", cluster.bootstrap_servers())
-            .create()
+            .build()
             .unwrap();
         for key in keys {
             let record = BaseRecord::<[u8], [u8]>::to("units").payload(b"body");
@@ -2006,10 +2022,10 @@ mod cluster {
 
     /// The offset `group` has committed for the work topic's partition.
     pub(super) fn committed(brokers: &str, group: &str) -> Option<i64> {
-        let probe: BaseConsumer = ClientConfig::new()
+        let probe: BaseConsumer = raw_config()
             .set("bootstrap.servers", brokers)
             .set("group.id", group)
-            .create()
+            .build()
             .unwrap();
         let mut tpl = TopicPartitionList::new();
         tpl.add_partition("units", 0);
@@ -2554,9 +2570,9 @@ mod cluster {
         wait_until(DEADLINE, "the consumer owns its partitions", || {
             owned(&feed) == 1
         });
-        let units: BaseProducer = ClientConfig::new()
+        let units: BaseProducer = raw_config()
             .set("bootstrap.servers", &brokers)
-            .create()
+            .build()
             .unwrap();
         units
             .send(BaseRecord::to("units").key("late").payload(b"body"))
@@ -2581,9 +2597,9 @@ mod cluster {
         let cluster = cluster_with(0);
         let brokers = cluster.bootstrap_servers();
         let group = spate_test::unique_name("gate-timeout");
-        let records: BaseProducer = ClientConfig::new()
+        let records: BaseProducer = raw_config()
             .set("bootstrap.servers", &brokers)
-            .create()
+            .build()
             .unwrap();
         for partition in 0..2 {
             records
@@ -2600,10 +2616,11 @@ mod cluster {
         let config = KafkaFeedConfig::from_section(&section(&brokers, &group)).unwrap();
         let clock = TestClock::frozen();
         let core = Arc::new(Core::new(&config, TWO, SyncClock::new(clock.clone())));
-        let producer: Producer =
-            rdkafka::config::FromClientConfigAndContext::from_config_and_context(
-                &config.producer_config(false),
-                FeedProducerContext::new(Arc::clone(&core)),
+        let producer: Producer = config
+            .base(false)
+            .create::<super::write::Producer, _>(
+                &config.client(FeedRole::Producer),
+                FeedProducerHooks::new(Arc::clone(&core)),
             )
             .unwrap();
         {
@@ -2668,10 +2685,11 @@ mod cluster {
         );
         let config = KafkaFeedConfig::from_section(&section(&brokers, &group)).unwrap();
         let core = Arc::new(Core::new(&config, TWO, SyncClock::system()));
-        let producer: Producer =
-            rdkafka::config::FromClientConfigAndContext::from_config_and_context(
-                &config.producer_config(false),
-                FeedProducerContext::new(Arc::clone(&core)),
+        let producer: Producer = config
+            .base(false)
+            .create::<super::write::Producer, _>(
+                &config.client(FeedRole::Producer),
+                FeedProducerHooks::new(Arc::clone(&core)),
             )
             .unwrap();
         {
@@ -2709,9 +2727,9 @@ mod cluster {
         let cluster = cluster_with(0);
         let brokers = cluster.bootstrap_servers();
         let group = spate_test::unique_name("refused-pass");
-        let records: BaseProducer = ClientConfig::new()
+        let records: BaseProducer = raw_config()
             .set("bootstrap.servers", &brokers)
-            .create()
+            .build()
             .unwrap();
         records
             .send(
@@ -2726,10 +2744,11 @@ mod cluster {
         let config = KafkaFeedConfig::from_section(&section(&brokers, &group)).unwrap();
         let core = Arc::new(Core::new(&config, TWO, SyncClock::system()));
         attempt::lock(&core.ledger).apply(0, 0, b"other", attempt::Entry::Count(1));
-        let producer: Producer =
-            rdkafka::config::FromClientConfigAndContext::from_config_and_context(
-                &config.producer_config(false),
-                FeedProducerContext::new(Arc::clone(&core)),
+        let producer: Producer = config
+            .base(false)
+            .create::<super::write::Producer, _>(
+                &config.client(FeedRole::Producer),
+                FeedProducerHooks::new(Arc::clone(&core)),
             )
             .unwrap();
         let on = |partition| {
@@ -2780,10 +2799,11 @@ mod cluster {
         let group = spate_test::unique_name("leaderless");
         let config = KafkaFeedConfig::from_section(&section(&brokers, &group)).unwrap();
         let core = Arc::new(Core::new(&config, TWO, SyncClock::system()));
-        let producer: Producer =
-            rdkafka::config::FromClientConfigAndContext::from_config_and_context(
-                &config.producer_config(false),
-                FeedProducerContext::new(Arc::clone(&core)),
+        let producer: Producer = config
+            .base(false)
+            .create::<super::write::Producer, _>(
+                &config.client(FeedRole::Producer),
+                FeedProducerHooks::new(Arc::clone(&core)),
             )
             .unwrap();
         let on = |partition| {
@@ -2841,10 +2861,11 @@ mod cluster {
         let group = spate_test::unique_name("gate-no-rest");
         let config = KafkaFeedConfig::from_section(&section(&brokers, &group)).unwrap();
         let core = Arc::new(Core::new(&config, TWO, SyncClock::system()));
-        let producer: Producer =
-            rdkafka::config::FromClientConfigAndContext::from_config_and_context(
-                &config.producer_config(false),
-                FeedProducerContext::new(Arc::clone(&core)),
+        let producer: Producer = config
+            .base(false)
+            .create::<super::write::Producer, _>(
+                &config.client(FeedRole::Producer),
+                FeedProducerHooks::new(Arc::clone(&core)),
             )
             .unwrap();
         let offset = (0..)
@@ -2887,9 +2908,9 @@ mod cluster {
         let cluster = cluster_with(0);
         let brokers = cluster.bootstrap_servers();
         let group = spate_test::unique_name("lwm");
-        let records: BaseProducer = ClientConfig::new()
+        let records: BaseProducer = raw_config()
             .set("bootstrap.servers", &brokers)
-            .create()
+            .build()
             .unwrap();
         for partition in 0..2 {
             records
@@ -2906,10 +2927,11 @@ mod cluster {
         let config = KafkaFeedConfig::from_section(&section(&brokers, &group)).unwrap();
         let clock = TestClock::frozen();
         let core = Arc::new(Core::new(&config, TWO, SyncClock::new(clock.clone())));
-        let producer: Producer =
-            rdkafka::config::FromClientConfigAndContext::from_config_and_context(
-                &config.producer_config(false),
-                FeedProducerContext::new(Arc::clone(&core)),
+        let producer: Producer = config
+            .base(false)
+            .create::<super::write::Producer, _>(
+                &config.client(FeedRole::Producer),
+                FeedProducerHooks::new(Arc::clone(&core)),
             )
             .unwrap();
         {
@@ -2964,10 +2986,11 @@ mod cluster {
         let group = spate_test::unique_name("refused-reread");
         let config = KafkaFeedConfig::from_section(&section(&brokers, &group)).unwrap();
         let core = Arc::new(Core::new(&config, TWO, SyncClock::system()));
-        let producer: Producer =
-            rdkafka::config::FromClientConfigAndContext::from_config_and_context(
-                &config.producer_config(false),
-                FeedProducerContext::new(Arc::clone(&core)),
+        let producer: Producer = config
+            .base(false)
+            .create::<super::write::Producer, _>(
+                &config.client(FeedRole::Producer),
+                FeedProducerHooks::new(Arc::clone(&core)),
             )
             .unwrap();
         {
@@ -3021,9 +3044,9 @@ mod cluster {
                 .unwrap();
         }
         let brokers = cluster.bootstrap_servers();
-        let records: BaseProducer = ClientConfig::new()
+        let records: BaseProducer = raw_config()
             .set("bootstrap.servers", &brokers)
-            .create()
+            .build()
             .unwrap();
         records
             .send(
@@ -3049,10 +3072,11 @@ mod cluster {
             std::num::NonZeroU32::new(3).unwrap(),
             SyncClock::new(clock.clone()),
         ));
-        let producer: Producer =
-            rdkafka::config::FromClientConfigAndContext::from_config_and_context(
-                &config.producer_config(false),
-                FeedProducerContext::new(Arc::clone(&core)),
+        let producer: Producer = config
+            .base(false)
+            .create::<super::write::Producer, _>(
+                &config.client(FeedRole::Producer),
+                FeedProducerHooks::new(Arc::clone(&core)),
             )
             .unwrap();
         let on = |partition| {
@@ -3151,10 +3175,11 @@ mod cluster {
             std::num::NonZeroU32::MIN,
             SyncClock::new(clock.clone()),
         ));
-        let producer: Producer =
-            rdkafka::config::FromClientConfigAndContext::from_config_and_context(
-                &config.producer_config(false),
-                FeedProducerContext::new(Arc::clone(&core)),
+        let producer: Producer = config
+            .base(false)
+            .create::<super::write::Producer, _>(
+                &config.client(FeedRole::Producer),
+                FeedProducerHooks::new(Arc::clone(&core)),
             )
             .unwrap();
         {
@@ -3202,10 +3227,11 @@ mod cluster {
         let group = spate_test::unique_name("gate-rest");
         let config = KafkaFeedConfig::from_section(&section(&brokers, &group)).unwrap();
         let core = Arc::new(Core::new(&config, TWO, SyncClock::system()));
-        let producer: Producer =
-            rdkafka::config::FromClientConfigAndContext::from_config_and_context(
-                &config.producer_config(false),
-                FeedProducerContext::new(Arc::clone(&core)),
+        let producer: Producer = config
+            .base(false)
+            .create::<super::write::Producer, _>(
+                &config.client(FeedRole::Producer),
+                FeedProducerHooks::new(Arc::clone(&core)),
             )
             .unwrap();
         let offset = (0..)
@@ -3260,9 +3286,9 @@ mod cluster {
         let cluster = cluster_with(0);
         let brokers = cluster.bootstrap_servers();
         let group = spate_test::unique_name("follower-wakes");
-        let records: BaseProducer = ClientConfig::new()
+        let records: BaseProducer = raw_config()
             .set("bootstrap.servers", &brokers)
-            .create()
+            .build()
             .unwrap();
         for partition in 0..2 {
             records
@@ -3278,10 +3304,11 @@ mod cluster {
         records.flush(Duration::from_secs(30)).unwrap();
         let config = KafkaFeedConfig::from_section(&section(&brokers, &group)).unwrap();
         let core = Arc::new(Core::new(&config, TWO, SyncClock::system()));
-        let producer: Producer =
-            rdkafka::config::FromClientConfigAndContext::from_config_and_context(
-                &config.producer_config(false),
-                FeedProducerContext::new(Arc::clone(&core)),
+        let producer: Producer = config
+            .base(false)
+            .create::<super::write::Producer, _>(
+                &config.client(FeedRole::Producer),
+                FeedProducerHooks::new(Arc::clone(&core)),
             )
             .unwrap();
         let gate = Gate::new(
@@ -3338,9 +3365,9 @@ mod cluster {
         let cluster = cluster_with(0);
         let brokers = cluster.bootstrap_servers();
         let group = spate_test::unique_name("gate-follower");
-        let records: BaseProducer = ClientConfig::new()
+        let records: BaseProducer = raw_config()
             .set("bootstrap.servers", &brokers)
-            .create()
+            .build()
             .unwrap();
         for partition in 0..2 {
             records
@@ -3356,10 +3383,11 @@ mod cluster {
         records.flush(Duration::from_secs(30)).unwrap();
         let config = KafkaFeedConfig::from_section(&section(&brokers, &group)).unwrap();
         let core = Arc::new(Core::new(&config, TWO, SyncClock::system()));
-        let producer: Producer =
-            rdkafka::config::FromClientConfigAndContext::from_config_and_context(
-                &config.producer_config(false),
-                FeedProducerContext::new(Arc::clone(&core)),
+        let producer: Producer = config
+            .base(false)
+            .create::<super::write::Producer, _>(
+                &config.client(FeedRole::Producer),
+                FeedProducerHooks::new(Arc::clone(&core)),
             )
             .unwrap();
         let gate = Gate::new(
@@ -3946,9 +3974,9 @@ mod cluster {
     }
 
     fn work_high_watermark(brokers: &str) -> i64 {
-        let probe: BaseConsumer = ClientConfig::new()
+        let probe: BaseConsumer = raw_config()
             .set("bootstrap.servers", brokers)
-            .create()
+            .build()
             .unwrap();
         probe
             .fetch_watermarks("units", 0, Duration::from_secs(10))
@@ -4136,19 +4164,20 @@ mod docker {
     use super::super::attempt::{self, Follower};
     use super::super::config::KafkaFeedConfig;
     use super::super::gate::Gate;
-    use super::super::producer::FeedProducerContext;
+    use super::super::producer::FeedProducerHooks;
     use super::super::{Core, Gating};
     use super::cluster::{
         acknowledge_first, admission, committed, drive, owns, parts_for, section,
     };
+    use crate::client::testing::{Raw as _, raw_config};
+    use crate::feed::FeedRole;
     use crate::feed::KafkaFeed;
     use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
     use rdkafka::client::DefaultClientContext;
-    use rdkafka::config::FromClientConfigAndContext;
     use rdkafka::consumer::{BaseConsumer, Consumer};
     use rdkafka::message::Message;
     use rdkafka::producer::{BaseProducer, BaseRecord, Producer};
-    use rdkafka::{ClientConfig, Offset, TopicPartitionList};
+    use rdkafka::{Offset, TopicPartitionList};
     use spate_core::clock::SyncClock;
     use spate_core::feed::Unit;
     use spate_test::wait_until;
@@ -4181,9 +4210,9 @@ mod docker {
             .enable_all()
             .build()
             .unwrap();
-        let admin: AdminClient<DefaultClientContext> = ClientConfig::new()
+        let admin: AdminClient<DefaultClientContext> = raw_config()
             .set("bootstrap.servers", &brokers)
-            .create()
+            .build()
             .unwrap();
         let mut topics = vec![
             NewTopic::new("units", 1, TopicReplication::Fixed(1))
@@ -4201,9 +4230,9 @@ mod docker {
         {
             created.unwrap();
         }
-        let producer: BaseProducer = ClientConfig::new()
+        let producer: BaseProducer = raw_config()
             .set("bootstrap.servers", &brokers)
-            .create()
+            .build()
             .unwrap();
         for i in 0..UNITS {
             let id = format!("u{i}");
@@ -4236,9 +4265,9 @@ mod docker {
     /// Create the one-partition topic `name`, compacted, with segments that
     /// roll and clean within a test's time.
     fn create_compacted(brokers: &str, io: &tokio::runtime::Runtime, name: &str) {
-        let admin: AdminClient<DefaultClientContext> = ClientConfig::new()
+        let admin: AdminClient<DefaultClientContext> = raw_config()
             .set("bootstrap.servers", brokers)
-            .create()
+            .build()
             .unwrap();
         let topic = NewTopic::new(name, 1, TopicReplication::Fixed(1))
             .set("cleanup.policy", "compact")
@@ -4256,9 +4285,9 @@ mod docker {
     /// Write each `(key, value)` to partition 0 of `topic`, a `None` value
     /// as a tombstone, and wait for the writes' reports.
     fn write(brokers: &str, topic: &str, records: &[(&str, Option<&[u8]>)]) {
-        let producer: BaseProducer = ClientConfig::new()
+        let producer: BaseProducer = raw_config()
             .set("bootstrap.servers", brokers)
-            .create()
+            .build()
             .unwrap();
         for (key, value) in records {
             let mut record = BaseRecord::<str, [u8]>::to(topic).partition(0).key(*key);
@@ -4273,11 +4302,13 @@ mod docker {
     /// Run one gate pass over a unit on each attempt partition of `core`,
     /// with a bound of 10 s, and assert that it admitted every unit.
     fn gate_admits(config: &KafkaFeedConfig, core: &Arc<Core>) {
-        let producer = super::super::write::Producer::from_config_and_context(
-            &config.producer_config(false),
-            FeedProducerContext::new(Arc::clone(core)),
-        )
-        .unwrap();
+        let producer = config
+            .base(false)
+            .create::<super::write::Producer, _>(
+                &config.client(FeedRole::Producer),
+                FeedProducerHooks::new(Arc::clone(core)),
+            )
+            .unwrap();
         {
             let mut st = core.lock();
             st.tracker.assign([super::tp(0)]);
@@ -4326,9 +4357,9 @@ mod docker {
             .unwrap()
             .spawn()
             .unwrap();
-        let reader: BaseConsumer = ClientConfig::new()
+        let reader: BaseConsumer = raw_config()
             .set("bootstrap.servers", brokers)
-            .create()
+            .build()
             .unwrap();
         wait_until(
             Duration::from_secs(10),
@@ -4357,9 +4388,9 @@ mod docker {
             .enable_all()
             .build()
             .unwrap();
-        let admin: AdminClient<DefaultClientContext> = ClientConfig::new()
+        let admin: AdminClient<DefaultClientContext> = raw_config()
             .set("bootstrap.servers", &brokers)
-            .create()
+            .build()
             .unwrap();
         let topic = NewTopic::new("units-attempts", 2, TopicReplication::Fixed(1));
         for created in io
@@ -4368,9 +4399,9 @@ mod docker {
         {
             created.unwrap();
         }
-        let producer: BaseProducer = ClientConfig::new()
+        let producer: BaseProducer = raw_config()
             .set("bootstrap.servers", &brokers)
-            .create()
+            .build()
             .unwrap();
         for _ in 0..3 {
             producer
@@ -4417,10 +4448,10 @@ mod docker {
 
     /// The offset of the first record a fresh read of `topic` finds.
     fn first_offset(brokers: &str, topic: &str) -> Option<i64> {
-        let consumer: BaseConsumer = ClientConfig::new()
+        let consumer: BaseConsumer = raw_config()
             .set("bootstrap.servers", brokers)
             .set("group.id", spate_test::unique_name("first"))
-            .create()
+            .build()
             .unwrap();
         let mut tpl = TopicPartitionList::new();
         tpl.add_partition_offset(topic, 0, Offset::Beginning)

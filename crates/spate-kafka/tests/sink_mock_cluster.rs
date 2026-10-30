@@ -16,6 +16,8 @@
 
 mod support;
 
+use support::Raw as _;
+
 use bytes::BytesMut;
 use rdkafka::message::{Headers, Message};
 use rdkafka::mocking::MockCluster;
@@ -312,6 +314,54 @@ fn shutdown_with_inflight_data_commits_only_delivered() {
     }
 }
 
+/// A write to a missing topic fails. With `topic.metadata.propagation.max.ms`
+/// below `delivery_timeout`, the broker's answer fails the first write as
+/// fatal, and the next fails locally as retryable. At the defaults, 30 s each,
+/// the first write times out as retryable instead.
+#[tokio::test]
+async fn a_write_to_a_missing_topic_fails() {
+    let cluster = MockCluster::new(1).expect("mock cluster");
+    let brokers = cluster.bootstrap_servers();
+    let sink = sink(
+        &brokers,
+        "delivery_timeout: 10s\nrdkafka:\n  topic.metadata.propagation.max.ms: \"0\"\n",
+    );
+    let mut encoder = sink.encoder_bytes();
+    let mut frame = BytesMut::new();
+    encoder
+        .encode(&record(b"nowhere".to_vec()), &mut frame)
+        .expect("encode");
+    let batch = SealedBatch {
+        rows: 1,
+        bytes: frame.len() as u64,
+        frames: vec![frame.freeze()],
+        dedup_token: "unused".to_string(),
+    };
+    // The broker's answer is fatal and names the missing topic. librdkafka
+    // then knows the topic is missing and fails the next write locally,
+    // which stays retryable. The readiness probe reports the missing topic
+    // as fatal whatever the timeouts.
+    for (attempt, expected, hint) in [
+        ("first", ErrorClass::Fatal, "does not exist"),
+        ("second", ErrorClass::Retryable, "Unknown topic"),
+    ] {
+        let err = tokio::time::timeout(
+            Duration::from_secs(60),
+            sink.writer.write_batch(&sink.endpoints[0][0], &batch),
+        )
+        .await
+        .expect("the write settles")
+        .expect_err("a missing topic fails the write");
+        match err {
+            SinkError::Client { class, reason } => {
+                assert_eq!(class, expected, "{attempt}: {reason}");
+                assert!(reason.contains(hint), "{attempt}: {reason}");
+            }
+            other => panic!("{attempt}: unexpected error shape: {other:?}"),
+        }
+    }
+}
+
 #[tokio::test]
 async fn delivery_failure_maps_to_retryable() {
     let cluster = MockCluster::new(1).expect("mock cluster");
@@ -377,6 +427,47 @@ async fn probe_verifies_topic_and_fails_fast_on_unknown_topic() {
         }
         other => panic!("unexpected error shape: {other:?}"),
     }
+}
+
+/// The readiness probe reports a missing topic as fatal and leaves it
+/// missing: its metadata read never asks the broker to create the topic.
+#[tokio::test]
+async fn the_probe_does_not_create_a_missing_topic() {
+    let cluster = MockCluster::new(1).expect("mock cluster");
+    let brokers = cluster.bootstrap_servers();
+    let sink = sink(&brokers, "");
+
+    let err = sink.probe_fn()()
+        .await
+        .expect_err("a missing topic must fail the probe");
+    match err {
+        SinkError::Client { class, reason } => {
+            assert_eq!(
+                class,
+                ErrorClass::Fatal,
+                "a missing topic is fatal: {reason}"
+            );
+            assert!(reason.contains("does not exist"), "actionable: {reason}");
+        }
+        other => panic!("unexpected error shape: {other:?}"),
+    }
+
+    let consumer: rdkafka::consumer::BaseConsumer = support::raw_config()
+        .set("bootstrap.servers", &brokers)
+        .build()
+        .expect("consumer");
+    let metadata = rdkafka::consumer::Consumer::fetch_metadata(
+        &consumer,
+        Some(TOPIC),
+        Duration::from_secs(10),
+    )
+    .expect("metadata");
+    let topic = &metadata.topics()[0];
+    assert_eq!(
+        topic.error(),
+        Some(RDKafkaRespErr::RD_KAFKA_RESP_ERR_UNKNOWN_TOPIC_OR_PART),
+        "the topic stays missing"
+    );
 }
 
 #[test]

@@ -8,7 +8,8 @@
 
 mod support;
 
-use rdkafka::ClientConfig;
+use support::Raw as _;
+
 use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::message::Message;
 use rdkafka::producer::{BaseProducer, BaseRecord, Producer};
@@ -55,10 +56,10 @@ fn sink_config(brokers: &str, topic: &str) -> KafkaSinkConfig {
 /// image auto-creates topics) so the pipeline's sinks and probes never see
 /// a not-yet-created topic.
 fn produce(brokers: &str, topic: &str, payloads: &[Vec<u8>]) {
-    let producer: BaseProducer = ClientConfig::new()
+    let producer: BaseProducer = support::raw_config()
         .set("bootstrap.servers", brokers)
         .set("message.timeout.ms", "30000")
-        .create()
+        .build()
         .expect("producer");
     for payload in payloads {
         producer
@@ -159,10 +160,10 @@ fn kafka_to_kafka_split_round_trip() {
 
     // The source group commits the full input once both destinations have
     // durably written (worst-status ack merge across the split).
-    let probe: BaseConsumer = ClientConfig::new()
+    let probe: BaseConsumer = support::raw_config()
         .set("bootstrap.servers", &brokers)
         .set("group.id", GROUP)
-        .create()
+        .build()
         .expect("probe");
     wait_until(
         Duration::from_secs(30),

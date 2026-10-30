@@ -308,6 +308,9 @@ impl Offsets for Brokers {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::client::SpateContext;
+    use crate::client::testing::raw;
+    use crate::context::SourceHooks;
     use spate_core::clock::SyncClock;
     use std::collections::HashMap;
     use std::sync::Mutex;
@@ -596,15 +599,16 @@ mod tests {
     /// committed-offset read fails the read, naming the partition.
     #[test]
     fn a_partition_error_in_a_committed_read_fails_it() {
-        use rdkafka::ClientConfig;
         use rdkafka::mocking::MockCluster;
         let cluster = MockCluster::new(1).expect("mock cluster");
         cluster.create_topic("work", 1, 1).expect("create topic");
-        let consumer = ClientConfig::new()
-            .set("bootstrap.servers", cluster.bootstrap_servers())
-            .set("group.id", "depth-partition-error")
-            .create_with_context(crate::context::SourceContext::default())
-            .unwrap();
+        let consumer = raw(
+            &[
+                ("bootstrap.servers", &cluster.bootstrap_servers()),
+                ("group.id", "depth-partition-error"),
+            ],
+            SourceHooks::default(),
+        );
         let reads = Brokers { consumer };
         let e = reads.committed(&[(Arc::from("work"), 9)]).unwrap_err();
         assert!(e.reason.contains("`work` partition 9"), "{e}");
@@ -615,16 +619,17 @@ mod tests {
     /// through a serve.
     #[test]
     fn serving_the_depth_client_drains_its_events() {
-        use rdkafka::ClientConfig;
         use rdkafka::consumer::Consumer as _;
         use rdkafka::mocking::MockCluster;
         let cluster = MockCluster::new(1).expect("mock cluster");
-        let consumer = ClientConfig::new()
-            .set("bootstrap.servers", cluster.bootstrap_servers())
-            .set("group.id", "depth-serve")
-            .set("statistics.interval.ms", "10")
-            .create_with_context(crate::context::SourceContext::default())
-            .unwrap();
+        let consumer = raw(
+            &[
+                ("bootstrap.servers", &cluster.bootstrap_servers()),
+                ("group.id", "depth-serve"),
+                ("statistics.interval.ms", "10"),
+            ],
+            SourceHooks::default(),
+        );
         let reads = Brokers { consumer };
         spate_test::wait_until(
             std::time::Duration::from_secs(10),
@@ -655,7 +660,6 @@ mod tests {
     /// drained.
     #[test]
     fn a_topic_reporting_no_partitions_fails_the_read() {
-        use rdkafka::ClientConfig;
         use rdkafka::mocking::MockCluster;
         use rdkafka::types::RDKafkaRespErr;
         let cluster = MockCluster::new(1).expect("mock cluster");
@@ -666,11 +670,13 @@ mod tests {
                 RDKafkaRespErr::RD_KAFKA_RESP_ERR_UNKNOWN_TOPIC_OR_PART,
             )
             .unwrap();
-        let consumer = ClientConfig::new()
-            .set("bootstrap.servers", cluster.bootstrap_servers())
-            .set("group.id", "depth-unknown")
-            .create_with_context(crate::context::SourceContext::default())
-            .unwrap();
+        let consumer = raw(
+            &[
+                ("bootstrap.servers", &cluster.bootstrap_servers()),
+                ("group.id", "depth-unknown"),
+            ],
+            SourceHooks::default(),
+        );
         let reads = Brokers { consumer };
         let e = reads.partitions(&Arc::from("dead")).unwrap_err();
         assert_eq!(e.kind, FeedErrorKind::Retryable, "{e}");
@@ -731,16 +737,12 @@ mod tests {
     /// topic lacks failing, naming the kind of read.
     #[test]
     fn the_brokers_read_each_partition_of_a_topic() {
-        use rdkafka::ClientConfig;
         use rdkafka::mocking::MockCluster;
         use rdkafka::producer::{BaseProducer, BaseRecord, Producer as _};
         let cluster = MockCluster::new(1).expect("mock cluster");
         cluster.create_topic("work", 2, 1).expect("create topic");
         let brokers = cluster.bootstrap_servers();
-        let producer: BaseProducer = ClientConfig::new()
-            .set("bootstrap.servers", &brokers)
-            .create()
-            .unwrap();
+        let producer: BaseProducer<SpateContext<()>> = raw(&[("bootstrap.servers", &brokers)], ());
         for _ in 0..3 {
             producer
                 .send(
@@ -752,11 +754,10 @@ mod tests {
                 .unwrap();
         }
         producer.flush(Duration::from_secs(30)).unwrap();
-        let consumer = rdkafka::ClientConfig::new()
-            .set("bootstrap.servers", &brokers)
-            .set("group.id", "depth-test")
-            .create_with_context(crate::context::SourceContext::default())
-            .unwrap();
+        let consumer = raw(
+            &[("bootstrap.servers", &brokers), ("group.id", "depth-test")],
+            SourceHooks::default(),
+        );
         let reads = Brokers { consumer };
         let work: Arc<str> = Arc::from("work");
         assert_eq!(reads.partitions(&work).unwrap(), vec![0, 1]);
@@ -801,16 +802,17 @@ mod tests {
     /// committed and end offset reads: both are Fatal.
     #[test]
     fn a_broker_refusing_an_offset_read_on_authorization_fails_it_as_fatal() {
-        use rdkafka::ClientConfig;
         use rdkafka::mocking::MockCluster;
         use rdkafka::types::{RDKafkaApiKey, RDKafkaRespErr};
         let cluster = MockCluster::new(1).expect("mock cluster");
         cluster.create_topic("work", 1, 1).expect("create topic");
-        let consumer = ClientConfig::new()
-            .set("bootstrap.servers", cluster.bootstrap_servers())
-            .set("group.id", "depth-denied")
-            .create_with_context(crate::context::SourceContext::default())
-            .unwrap();
+        let consumer = raw(
+            &[
+                ("bootstrap.servers", &cluster.bootstrap_servers()),
+                ("group.id", "depth-denied"),
+            ],
+            SourceHooks::default(),
+        );
         let reads = Brokers { consumer };
         let one = [(Arc::from("work"), 0)];
         cluster.request_errors(

@@ -540,6 +540,21 @@ mod tests {
         );
     }
 
+    /// Pins the placeholder a provider panic with a payload that is not a
+    /// string reaches the call with.
+    #[tokio::test(start_paused = true)]
+    async fn a_non_string_panic_reads_as_the_placeholder() {
+        let inner =
+            ScriptedCredentials::new(|_| Box::pin(async move { std::panic::panic_any(7_u32) }));
+        let wrapper = SharedLoad::new(inner.provider());
+        let e = wrapper.provide_credentials().await.unwrap_err();
+        assert_eq!(
+            chain(&e),
+            "an error occurred while loading credentials: an error occurred while loading \
+             credentials: the credentials provider panicked: non-string panic payload"
+        );
+    }
+
     /// Pins that a panic with a formatted message, as `unwrap` and `expect`
     /// raise, reaches the call with its text.
     #[tokio::test(start_paused = true)]

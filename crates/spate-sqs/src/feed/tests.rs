@@ -2701,6 +2701,20 @@ async fn the_stop_methods_on_an_abandoned_feed_send_nothing() {
     assert!(queue.deletes().is_empty());
 }
 
+/// Pins `abandon`'s rustdoc that the feed's tasks end, the ones parked with
+/// no work queued among them.
+#[tokio::test(start_paused = true)]
+async fn abandon_ends_every_task() {
+    let (feed, _queue) = start(MINUTE);
+    settle_tasks().await;
+    assert!(feed.tasks.iter().all(|t| !t.is_finished()), "the tasks run");
+    feed.abandon();
+    until("every task ended", || {
+        feed.tasks.iter().all(TaskHandle::is_finished)
+    })
+    .await;
+}
+
 /// Pins that a close whose delete SQS refuses settles rejected, naming how
 /// many entries it gave up.
 #[tokio::test(start_paused = true)]

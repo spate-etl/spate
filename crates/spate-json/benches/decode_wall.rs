@@ -362,13 +362,11 @@ fn suite() -> Suite {
     // than a cost.
     //
     // Neither is marked erratic, and the counted tier's caveat about them does
-    // not transfer. There the guard's `HashSet` is built once and the case is
-    // one drive, so that construction's seed decides the count, a spread of
-    // up to 1.74% between processes. `check_no_duplicate_keys` builds a fresh
-    // set per object per document, and `RandomState::new()` reseeds on every
-    // construction rather than once per process, so a region running hundreds
-    // of iterations averages over hundreds of seeds. Measured A/A, these are
-    // the quietest cases in the run at ±0.2%.
+    // not transfer. There the guard's set is built once and the case is one
+    // drive, so that construction's seed decides the count.
+    // `check_no_duplicate_keys` builds a fresh set per object per document,
+    // and each set draws its own seed, so a region running hundreds of
+    // iterations averages over hundreds of seeds.
     let suite = shape_case(suite, "decode_dup_guard_wide", shapes::wide_flat, true, 1);
     let suite = shape_case(
         suite,

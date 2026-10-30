@@ -86,18 +86,14 @@
 //! These three are the only cases in this file observed **not** to be
 //! bit-identical from run to run, and the reason is worth knowing before a
 //! delta on one of them is read as a regression. The guard's visitor collects
-//! the keys it has seen into a `HashSet`, whose default hasher is seeded per
-//! process from the operating system, so the same document hashes into a
-//! different number of probes on every run, and at four thousand keys
-//! potentially a different rehash schedule too.
+//! the keys it has seen into a set whose hasher draws a fresh seed each time
+//! it is built, so the same document hashes into a different number of probes
+//! on every run, and at four thousand keys potentially a different rehash
+//! schedule too.
 //!
-//! The spread is usually tiny and occasionally is not. Over three runs of one
-//! revision on two architectures, giving twelve guard-to-guard deltas, eleven
-//! were under a tenth of a per cent and the twelfth was **1.74%**: `dup_guard_wide`
-//! read 17,164,046 and then 17,463,060 with nothing between them but a new
-//! process. Every other case in this file repeated to the instruction across
-//! those same runs, which is what attributes the movement to the seed rather
-//! than to the runner.
+//! The spread is usually tiny and occasionally is not. Every other case in
+//! this file repeats to the instruction between runs, which is what
+//! attributes a guard row's movement to the seed rather than to the runner.
 //!
 //! So a guard row is not evidence on its own. A change that moved the guard
 //! would move `dup_guard_wide` and `dup_guard_deep` together and in proportion,

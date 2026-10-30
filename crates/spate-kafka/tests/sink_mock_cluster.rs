@@ -570,6 +570,10 @@ fn rows_batch(sink: &KafkaSink, rows: u64) -> SealedBatch {
 }
 
 /// Runs `write_batch` for `batch` on `io` and returns its handle.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the caller awaits the returned handle"
+)]
 fn spawn_write(
     io: &tokio::runtime::Runtime,
     sink: &KafkaSink,

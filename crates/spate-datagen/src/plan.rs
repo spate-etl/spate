@@ -387,6 +387,7 @@ mod tests {
     /// Determinism, which the CPU-pinned fan-out has to leave alone: a lane's
     /// stream is a function of its seed and its index, not of scheduling.
     #[test]
+    #[expect(clippy::disallowed_methods, reason = "the test joins the thread")]
     fn a_lane_replays_identically_and_differs_from_its_siblings() {
         let cfg = config(4, 42);
         assert_eq!(run(&cfg, 0, 500), run(&cfg, 0, 500));

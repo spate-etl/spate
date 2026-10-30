@@ -20,6 +20,10 @@ use std::time::Duration;
 pub fn tls_alert_server(preamble: &'static [u8], alert: u8) -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind a local port");
     let addr = listener.local_addr().expect("local address");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the server's threads serve until the process exits, as the rustdoc states"
+    )]
     std::thread::spawn(move || {
         for stream in listener.incoming().flatten() {
             std::thread::spawn(move || {

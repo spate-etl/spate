@@ -23,6 +23,10 @@ use support::*;
 
 #[test]
 #[ignore = "requires Docker"]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the test joins the intruder thread"
+)]
 fn rebalance_under_load_preserves_every_record() {
     let h = Harness::up();
     let params = PipelineParams::defaults("e2e-rebalance", 19183);

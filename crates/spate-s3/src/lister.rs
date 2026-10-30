@@ -544,6 +544,10 @@ async fn write_end(
     Ok(())
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "a test task ends when the test's runtime drops"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;

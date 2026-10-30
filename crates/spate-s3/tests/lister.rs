@@ -483,6 +483,7 @@ fn a_read_in_flight_is_checked_at_the_next_step_only() {
 /// Pins that a wait whose every read fails retryably ends at the window
 /// with the last read's error, logged at WARN as each read fails.
 #[test]
+#[expect(clippy::disallowed_methods, reason = "the test joins the thread")]
 fn a_location_failing_every_read_reports_the_last_error_at_the_window() {
     let dir = tempfile::tempdir().unwrap();
     let data = data_dir(&dir);
@@ -596,6 +597,7 @@ fn a_read_finding_nothing_clears_an_earlier_failure() {
 /// Pins the INFO line naming the location and the window when the wait
 /// starts, and that the source becomes ready once the fingerprint matches.
 #[test]
+#[expect(clippy::disallowed_methods, reason = "the test joins the thread")]
 fn the_fingerprint_wait_logs_the_location_and_window() {
     let dir = tempfile::tempdir().unwrap();
     let data = data_dir(&dir);
@@ -1690,6 +1692,10 @@ fn a_lister_run_refuses_a_feed_the_section_does_not_name() {
 /// refuses: from async code, where blocking on the I/O handle would panic,
 /// from a `spawn_blocking` closure and under a `Handle::enter` guard.
 #[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "awaited here; the listing ends on its own"
+)]
 fn a_lister_run_called_from_async_code_refuses() {
     let dir = tempfile::tempdir().unwrap();
     let data = data_dir(&dir);

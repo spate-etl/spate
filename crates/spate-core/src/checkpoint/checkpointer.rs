@@ -716,6 +716,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(clippy::disallowed_methods, reason = "the test joins both threads")]
     fn cross_thread_issue_and_resolve() {
         let (mut cp, issuer) = checkpointer(&[P0, P1]);
         let handles: Vec<_> = [P0, P1]

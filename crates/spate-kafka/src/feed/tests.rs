@@ -3,6 +3,11 @@
 //! settling a write against the tracker, and the lock discipline around
 //! commits.
 
+#![expect(
+    clippy::disallowed_methods,
+    reason = "a test thread ends with the call it runs, or serves a stub until the test process exits"
+)]
+
 use super::FeedRole;
 use super::attempt::{self, Entry, PublishId, decode, partition_of};
 use super::config::KafkaFeedConfig;

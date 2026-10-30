@@ -606,6 +606,10 @@ impl<S: Source + 'static> PipelineRuntime<S> {
                 stop_clock: Arc::clone(&self.stop_clock),
             };
             let core = core_ids.get(i).copied().flatten();
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "`run` joins every driver thread, on each early return too"
+            )]
             let spawned = std::thread::Builder::new()
                 .name(format!("spate-pipeline-{i}"))
                 .spawn(move || {
@@ -714,6 +718,10 @@ impl<S: Source + 'static> PipelineRuntime<S> {
             per_partition_detail: self.config.metrics.per_partition_detail,
             pipeline_metrics,
         };
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "`run` joins the controller after the driver threads, and on each early return"
+        )]
         let controller_handle = match std::thread::Builder::new()
             .name("spate-controller".into())
             .spawn(move || run_controller(controller_ctx))

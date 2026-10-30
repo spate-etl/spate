@@ -120,6 +120,10 @@ where
     tracing::subscriber::with_default(subscriber, f);
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "each test joins its thread at once"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;

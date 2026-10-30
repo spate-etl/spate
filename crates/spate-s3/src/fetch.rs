@@ -943,6 +943,10 @@ async fn retry_or_fail(
     Ok(())
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "a fetcher task ends when the test aborts it or the test's runtime drops"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;

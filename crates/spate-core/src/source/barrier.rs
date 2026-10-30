@@ -87,6 +87,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[expect(clippy::disallowed_methods, reason = "the test joins the thread")]
     fn completes_when_all_arrive() {
         let barrier = DrainBarrier::new(2);
         let b2 = barrier.clone();

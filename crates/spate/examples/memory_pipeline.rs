@@ -50,6 +50,10 @@ sink: { capture: {} }
 "#;
 // ANCHOR_END: config
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the example joins the pipeline thread before it returns"
+)]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Init telemetry BEFORE the builder, or the builder's JSON default wins
     // (first init wins). The builder owns the rest of process init: the

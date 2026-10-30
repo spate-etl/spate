@@ -8,6 +8,10 @@ use std::sync::Arc;
 /// Serves bucket `b` path-style: a `ListObjectsV2` request gets one page
 /// listing `objects`, a GET of a listed key gets its body, and anything else
 /// a 404. Listed without ETags, so every object is read with one plain GET.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the stub server's threads serve until the test process exits"
+)]
 pub(crate) fn s3_stub(objects: &[(&str, &[u8])]) -> String {
     let contents: String = objects
         .iter()

@@ -43,6 +43,10 @@ pub(crate) fn refused_broker() -> String {
 /// mechanism, and refuses the login with `SASL_AUTHENTICATION_FAILED`,
 /// as a broker does for a wrong password. Returns its address.
 #[cfg(feature = "tls")]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the stub server's threads serve until the test process exits"
+)]
 pub(crate) fn refuses_sasl_login() -> std::net::SocketAddr {
     use std::io::{Read, Write};
     fn string(body: &mut Vec<u8>, s: &str) {

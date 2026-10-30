@@ -401,6 +401,10 @@ impl Harness {
             .into_runtime(source)
             .expect("into_runtime");
         let shutdown = runtime.shutdown_handle();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "`RunningPipeline` joins the pipeline thread"
+        )]
         let join = std::thread::Builder::new()
             .name("e2e-pipeline".into())
             .spawn(move || runtime.run())
@@ -555,6 +559,10 @@ fn docker(args: &[&str]) {
 /// `/schemas/ids/{id}`, with `SCHEMA_JSON` under `SCHEMA_ID` out of the box,
 /// and 404s everything else, including the subject lookups a `prewarm_subjects`
 /// list makes (a pre-warm miss is logged, never fatal).
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the stub server's tasks end when the test's runtime drops"
+)]
 async fn serve_stub_registry(schemas: Schemas) -> SocketAddr {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await

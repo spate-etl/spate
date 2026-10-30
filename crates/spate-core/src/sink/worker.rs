@@ -594,6 +594,10 @@ impl<W: ShardWriter> ShardWorker<W> {
         let retry = self.cfg.retry;
         let backstop = quarantine_backstop(self.cfg.breaker.open_for);
         let shard = self.shard;
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the worker joins each write task through its set, and dropping the set aborts the rest"
+        )]
         let handle = tasks.spawn(async move {
             let _permit = permit;
             let mut backoff = Backoff::new(retry, this_seq);

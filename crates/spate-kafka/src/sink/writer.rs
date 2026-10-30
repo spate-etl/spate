@@ -281,6 +281,10 @@ impl ShardWriter for KafkaWriter {
     async fn probe(&self, endpoint: &KafkaEndpoint) -> Result<(), SinkError> {
         let producer = endpoint.producer.clone();
         let topic = self.topic.clone();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the metadata read ends within `PROBE_TIMEOUT`, and a blocking task cannot be aborted"
+        )]
         let outcome = tokio::task::spawn_blocking(move || {
             let metadata = producer
                 .client()

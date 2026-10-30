@@ -346,6 +346,10 @@ struct Proxy {
 }
 
 impl Proxy {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the proxy's drop aborts the accept task, and each connection task ends when the test's runtime drops"
+    )]
     async fn start(upstream: &str, lose_first: bool) -> Self {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await

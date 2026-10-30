@@ -493,6 +493,10 @@ mod tests {
     /// feed that stopped or latched before the wait began, whose notify has
     /// already fired or never fires: with a step of an hour, `rest` returns.
     #[test]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the thread ends when `rest` returns"
+    )]
     fn the_wait_after_a_partial_pass_is_skipped_once_the_feed_ends() {
         let section: spate_core::config::FeedSection = serde_yaml::from_str(
             "kafka:\n  brokers: 127.0.0.1:1\n  group_id: workers\n  topic: units\n  \

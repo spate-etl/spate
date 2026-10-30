@@ -658,6 +658,10 @@ fn start_depth(
         })?;
     let (tx, rx) = mpsc::channel();
     let core = Arc::clone(core);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the depth thread ends once the feed drops the returned sender, after any read in flight"
+    )]
     std::thread::Builder::new()
         .name("spate-kafka-feed-depth".to_owned())
         .spawn(move || {

@@ -230,6 +230,10 @@ impl ProducerHooks for SinkHooks {
     }
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "a test thread ends with the call it runs, and a test task ends when the test's runtime drops"
+)]
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;

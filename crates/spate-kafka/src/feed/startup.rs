@@ -139,6 +139,10 @@ impl TopicAdmin for Brokers {
         // `fetch_metadata` blocks, so it runs on a thread of its own, which
         // ends with the read at most `CONNECT_BOUND` later even when the
         // connect bound has already passed.
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the check thread ends with its metadata read, at most `CONNECT_BOUND` after it starts"
+        )]
         let spawned = std::thread::Builder::new()
             .name("spate-kafka-feed-check".to_owned())
             .spawn(move || {
@@ -446,6 +450,10 @@ pub(crate) async fn bounded<T>(
     // Held until `checks` ends: dropping it ends the timing thread.
     let (_finished, done) = mpsc::channel::<()>();
     let deadline = clock.now() + limit;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the timing thread ends when the bound fires or when `_finished` drops after `checks`"
+    )]
     std::thread::Builder::new()
         .name("spate-kafka-feed-bound".to_owned())
         .spawn(move || {
@@ -485,6 +493,10 @@ pub(crate) async fn bounded<T>(
     .await
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "a test thread ends with the call it runs, or serves a stub until the test process exits"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;

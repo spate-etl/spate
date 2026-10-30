@@ -836,6 +836,10 @@ fn combine_drains(drains: Vec<SinkDrainFn>) -> SinkDrainFn {
         Box::pin(async move {
             let mut set = tokio::task::JoinSet::new();
             for drain in drains {
+                #[expect(
+                    clippy::disallowed_methods,
+                    reason = "the set drops with the drain future, which aborts every sink's drain still running"
+                )]
                 set.spawn(drain(deadline));
             }
             let mut total = DrainReport::default();
@@ -879,6 +883,10 @@ fn combine_probes(probes: Vec<SinkProbeFn>) -> Option<SinkProbeFn> {
     }))
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "a test thread ends with the call it runs, or serves a stub until the test process exits"
+)]
 #[cfg(all(test, not(loom)))]
 mod tests {
     use super::*;

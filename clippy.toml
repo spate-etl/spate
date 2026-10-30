@@ -17,6 +17,18 @@ disallowed-methods = [
     { path = "rdkafka::config::FromClientConfig::from_config", reason = "build Kafka clients through `spate-kafka`'s `client::Base`, which owns the settings every client shares; a test outside every role takes an `expect` naming why" },
     { path = "rdkafka::config::FromClientConfigAndContext::from_config_and_context", reason = "build Kafka clients through `spate-kafka`'s `client::Base`, which owns the settings every client shares; a test outside every role takes an `expect` naming why" },
     { path = "rdkafka::client::Client::new", reason = "build Kafka clients through `spate-kafka`'s `client::Base`, which owns the settings every client shares; a test outside every role takes an `expect` naming why" },
+    { path = "tokio::task::spawn", reason = "spawn through `spate_core::task`, whose handle aborts the task on drop and logs its panic; a site that keeps a raw spawn takes an `expect` saying what ends the task" },
+    { path = "tokio::task::spawn_blocking", reason = "spawn through `spate_core::task`, whose handle aborts the task on drop and logs its panic; a site that keeps a raw spawn takes an `expect` saying what ends the task" },
+    { path = "tokio::runtime::Handle::spawn", reason = "spawn through `spate_core::task`, whose handle aborts the task on drop and logs its panic; a site that keeps a raw spawn takes an `expect` saying what ends the task" },
+    { path = "tokio::runtime::Handle::spawn_blocking", reason = "spawn through `spate_core::task`, whose handle aborts the task on drop and logs its panic; a site that keeps a raw spawn takes an `expect` saying what ends the task" },
+    { path = "tokio::runtime::Runtime::spawn", reason = "spawn through `spate_core::task`, whose handle aborts the task on drop and logs its panic; a site that keeps a raw spawn takes an `expect` saying what ends the task" },
+    { path = "tokio::runtime::Runtime::spawn_blocking", reason = "spawn through `spate_core::task`, whose handle aborts the task on drop and logs its panic; a site that keeps a raw spawn takes an `expect` saying what ends the task" },
+    { path = "tokio::task::JoinSet::spawn", reason = "spawn through `spate_core::task`, whose handle aborts the task on drop and logs its panic; a site that keeps a raw spawn takes an `expect` saying what ends the task" },
+    { path = "tokio::task::JoinSet::spawn_on", reason = "spawn through `spate_core::task`, whose handle aborts the task on drop and logs its panic; a site that keeps a raw spawn takes an `expect` saying what ends the task" },
+    { path = "tokio::task::JoinSet::spawn_blocking", reason = "spawn through `spate_core::task`, whose handle aborts the task on drop and logs its panic; a site that keeps a raw spawn takes an `expect` saying what ends the task" },
+    { path = "tokio::task::JoinSet::spawn_blocking_on", reason = "spawn through `spate_core::task`, whose handle aborts the task on drop and logs its panic; a site that keeps a raw spawn takes an `expect` saying what ends the task" },
+    { path = "std::thread::spawn", reason = "spawn through `spate_core::task`, whose handle aborts the task on drop and logs its panic; a site that keeps a raw spawn takes an `expect` saying what ends the task" },
+    { path = "std::thread::Builder::spawn", reason = "spawn through `spate_core::task`, whose handle aborts the task on drop and logs its panic; a site that keeps a raw spawn takes an `expect` saying what ends the task" },
 ]
 
 await-holding-invalid-types = [

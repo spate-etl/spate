@@ -4,6 +4,10 @@
 //! loads subjects at startup.
 
 #![expect(deprecated, reason = "fixtures call the datum free functions directly")]
+#![expect(
+    clippy::disallowed_methods,
+    reason = "the stub registry's tasks end when the test's runtime drops, and each test awaits its blocking decodes"
+)]
 
 use apache_avro::Schema;
 use apache_avro::to_avro_datum;

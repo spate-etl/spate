@@ -105,6 +105,10 @@ impl BenchServer {
         Self::start(columns, true, Some((code, Bytes::from(body.to_owned()))))
     }
 
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the server's drop shuts its runtime down, which ends every task"
+    )]
     fn start(columns: &[(&str, &str)], record: bool, insert_error: Option<(u32, Bytes)>) -> Self {
         let specs: Vec<(&str, &str, &str)> = columns.iter().map(|(n, t)| (*n, *t, "")).collect();
         let state = Arc::new(State {

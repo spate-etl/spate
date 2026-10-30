@@ -462,6 +462,10 @@ mod tests {
 
     /// An [`SdkQueue`] over a listener that reads every request and never
     /// answers, with tokio time paused.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the stub server's tasks end when the test's runtime drops"
+    )]
     async fn silent_queue() -> SdkQueue {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();

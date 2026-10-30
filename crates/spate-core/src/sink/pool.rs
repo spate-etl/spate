@@ -166,6 +166,10 @@ impl<W: ShardWriter> SinkPool<W> {
         // Shared with the workers rather than moved into them; `drain` needs
         // the handles too, to report a shard that overruns its deadline.
         let metrics: Vec<Arc<SinkShardMetrics>> = metrics.into_iter().map(Arc::new).collect();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "`SinkPool::drain` awaits each worker, and the io runtime's shutdown ends any it did not"
+        )]
         let workers = receivers
             .into_iter()
             .zip(metrics.iter().map(Arc::clone))

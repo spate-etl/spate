@@ -362,6 +362,10 @@ source: { counter: {} }
 sink: { stdout: {} }
 "#;
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the example joins the pipeline thread before it returns"
+)]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Pretty logs for a demo: first init wins, the builder's JSON default
     // becomes a no-op. The builder then owns the metrics exporter (before

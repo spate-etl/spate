@@ -543,6 +543,10 @@ pub(crate) fn spawn_fetcher(
                     let http = http.clone();
                     let endpoint = Arc::clone(&endpoint);
                     let rejection = Arc::clone(&task_rejection);
+                    #[expect(
+                        clippy::disallowed_methods,
+                        reason = "the set belongs to the fetcher loop, so the loop's end drops it and aborts each per-id fetch"
+                    )]
                     tasks.spawn(async move {
                         let outcome = fetch_one(id, &http, &endpoint, &cache, &rejection).await;
                         (id, outcome)
@@ -702,6 +706,10 @@ pub(crate) async fn prewarm(
     }
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "a test task ends when the test's runtime drops"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -21,6 +21,10 @@ impl PipelineRun {
     /// result is sent over the channel when it returns.
     pub fn spawn(run: impl FnOnce() -> Result<ExitReport, StartError> + Send + 'static) -> Self {
         let (tx, rx) = crossbeam_channel::bounded(1);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the thread ends when `run` returns; `PipelineRun::join` joins it, and dropping a run never blocks"
+        )]
         let join = std::thread::spawn(move || {
             // The receiver may already be gone (test dropped early); that's fine.
             let _ = tx.send(run());

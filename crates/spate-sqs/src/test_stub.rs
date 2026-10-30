@@ -20,6 +20,10 @@ pub(crate) struct Answered {
 
 /// An SQS endpoint on loopback: one message on the first receive and none
 /// after, and every visibility change and delete accepted.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the stub server's tasks end when the test's runtime drops"
+)]
 pub(crate) async fn sqs_stub() -> (String, Arc<Answered>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();

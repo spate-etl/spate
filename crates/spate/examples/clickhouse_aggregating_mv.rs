@@ -111,6 +111,10 @@ fn parse_order(line: &[u8]) -> Option<OrderRollup> {
     })
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the example joins the pipeline thread before it returns"
+)]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Demos want pretty logs: init telemetry before the builder's JSON
     // default becomes a no-op (first init wins).

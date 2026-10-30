@@ -232,6 +232,10 @@ impl AdminServer {
                     };
                     let render = self.render.clone();
                     let health = Arc::clone(&self.health);
+                    #[expect(
+                        clippy::disallowed_methods,
+                        reason = "the set is local to `run`, so returning drops it and aborts every open connection"
+                    )]
                     conns.spawn(async move {
                         let io = hyper_util::rt::TokioIo::new(stream);
                         let service = service_fn(move |req| {
@@ -313,6 +317,10 @@ fn plain(status: StatusCode, body: &'static str) -> Response<Full<Bytes>> {
         .expect("static response parts are valid")
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "a test task ends when the test's runtime drops"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;

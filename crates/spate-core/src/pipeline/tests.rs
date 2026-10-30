@@ -3,6 +3,11 @@
 //! bundle. The Checkpointer, DrainBarrier, and WatermarkController in the
 //! loop are the real implementations.
 
+#![expect(
+    clippy::disallowed_methods,
+    reason = "each test joins its pipeline thread, and its io tasks end when the io runtime drops"
+)]
+
 use super::fakes::*;
 use super::*;
 use crate::config::PipelineConfig;

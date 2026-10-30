@@ -632,6 +632,10 @@ fn spawn_worker(
         first_partition,
         slots,
     } = worker;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the caller joins the returned handle"
+    )]
     std::thread::spawn(move || {
         let window = slots.len();
         // Sized once, here, and only ever cleared. A drive must not measure a

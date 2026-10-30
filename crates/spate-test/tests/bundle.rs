@@ -112,6 +112,10 @@ fn a_capture_sinks_codec_codes_every_captured_frame() {
 
 /// Run `alpha`, `beta` and `gamma` through a one-thread pipeline into `sink`,
 /// and stop once the source commits past them.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the test joins the pipeline thread"
+)]
 fn run_three_records(sink: CaptureSink) {
     let (source, handle) = memory_source();
 

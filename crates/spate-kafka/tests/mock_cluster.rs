@@ -370,6 +370,7 @@ fn a_restarted_member_publishes_lag_before_committing() {
 }
 
 #[test]
+#[expect(clippy::disallowed_methods, reason = "the test joins the thread")]
 fn second_member_triggers_revoke_then_fresh_assignment() {
     let cluster = MockCluster::new(1).expect("mock cluster");
     cluster.create_topic(TOPIC, 4, 1).expect("create topic");

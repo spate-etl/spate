@@ -133,6 +133,10 @@ fn build_pipeline(
 /// by sealing the branch's partial shard buffer before it reaches
 /// `target_bytes`.
 #[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the test joins the pipeline thread"
+)]
 fn commits_advance_past_low_volume_branch_under_sustained_load() {
     let (source, handle) = memory_source();
     let (sink_hot, script_hot) = capture_sink(1, 1);
@@ -282,6 +286,10 @@ fn commits_advance_past_low_volume_branch_under_sustained_load() {
 /// buffer. Every record reaches its sink here, so what the test above
 /// measures is when the held acks resolve.
 #[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the test joins the pipeline thread"
+)]
 fn low_volume_branch_acks_resolve_once_load_stops() {
     let (source, handle) = memory_source();
     let (sink_hot, _script_hot) = capture_sink(1, 1);

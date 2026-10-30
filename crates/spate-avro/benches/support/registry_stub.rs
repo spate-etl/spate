@@ -86,6 +86,10 @@ impl StubRegistry {
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = Arc::clone(&stop);
 
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the stub's drop stops the accept loop and joins the thread"
+        )]
         let thread = std::thread::spawn(move || {
             loop {
                 match listener.accept() {

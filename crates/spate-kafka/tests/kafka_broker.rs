@@ -98,6 +98,7 @@ fn real_broker_full_lifecycle() {
 /// so this case can only be verified against a real broker.
 #[test]
 #[ignore = "requires Docker"]
+#[expect(clippy::disallowed_methods, reason = "the test joins the thread")]
 fn real_broker_revocation_commit_persists_revoked_offsets() {
     let container = broker().start().expect("start kafka container");
     let port = container.get_host_port_ipv4(KAFKA_PORT).expect("port");

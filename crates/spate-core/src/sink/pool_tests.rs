@@ -1,6 +1,11 @@
 //! Behavioral tests for the sink worker pool, driven through a scriptable
 //! mock writer.
 
+#![expect(
+    clippy::disallowed_methods,
+    reason = "a test task ends when the test's runtime drops"
+)]
+
 use super::*;
 use crate::backpressure::InflightBudget;
 use crate::checkpoint::{AckMsg, AckRef, AckStatus};

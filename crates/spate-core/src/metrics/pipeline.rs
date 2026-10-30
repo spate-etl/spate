@@ -594,6 +594,10 @@ mod tests {
     /// A worker kept busy by a spinning task reads as busy through the
     /// runtime's own metrics.
     #[test]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "a test task ends when the test's runtime drops"
+    )]
     fn a_spinning_worker_reads_busy() {
         let io = one_worker_runtime();
         let stop = Arc::new(AtomicBool::new(false));
@@ -625,6 +629,10 @@ mod tests {
 
     /// Holds `held` of a two-worker runtime's workers for one 500 ms poll each
     /// and returns the ratio over that span once the busy time is published.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "a test task ends when the test's runtime drops"
+    )]
     fn two_worker_ratio(held: usize) -> f64 {
         let io = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)

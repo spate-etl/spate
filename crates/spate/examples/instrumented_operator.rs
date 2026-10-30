@@ -77,6 +77,10 @@ fn parse(record: &[u8]) -> Option<Event<'_>> {
     })
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the example joins the pipeline thread before it returns"
+)]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     spate::telemetry::init(spate::telemetry::LogFormat::Pretty, "info");
     let pipeline = Pipeline::from_config(PipelineConfig::from_str(CONFIG)?)?;

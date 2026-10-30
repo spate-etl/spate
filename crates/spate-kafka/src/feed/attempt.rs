@@ -431,6 +431,10 @@ impl Follower {
     }
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "a test thread ends with the call it runs, or serves a stub until the test process exits"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -27,6 +27,10 @@ sinks:
 "#;
 
 #[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the test joins the pipeline thread"
+)]
 fn split_routes_to_named_sinks_and_commits_at_least_once() {
     let (source, handle) = memory_source();
     let (sink_a, script_a) = capture_sink(1, 1);

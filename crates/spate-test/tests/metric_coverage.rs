@@ -52,6 +52,10 @@ struct Coverage {
 }
 
 /// Run a scripted pipeline to a clean drain and report what it wrote.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the test joins the pipeline thread"
+)]
 fn run_scenario(config: &str) -> Coverage {
     // Installed before anything builds. `spate-core`'s own `install` then finds
     // the global slot taken, warns, and runs against this recorder with a

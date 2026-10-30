@@ -148,6 +148,10 @@ fn an_entry_that_is_not_an_object_is_an_error() {
 // ── The curl reply ─────────────────────────────────────────────────────
 
 /// Serves one canned HTTP reply per connection, in order, on a loopback port.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the stub thread ends after its scripted replies"
+)]
 fn serve(replies: &'static [(&'static str, &'static str)]) -> String {
     use std::io::{BufRead, BufReader, Write};
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();

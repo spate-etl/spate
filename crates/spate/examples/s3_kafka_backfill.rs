@@ -125,6 +125,10 @@ fn create_topics(pipeline: &Pipeline, brokers: &str) -> Result<(), Box<dyn std::
     Ok(())
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the example joins the pipeline thread before it returns"
+)]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     spate::telemetry::init(spate::telemetry::LogFormat::Pretty, "info");
 

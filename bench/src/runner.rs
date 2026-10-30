@@ -287,6 +287,10 @@ impl Watchdog {
         R: Fn(&str) + Send + 'static,
     {
         let (done, idle) = mpsc::channel::<()>();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the watchdog's drop disconnects the loop and joins the thread"
+        )]
         let thread = thread::spawn(move || {
             let mut periods: u32 = 0;
             while let Err(mpsc::RecvTimeoutError::Timeout) = idle.recv_timeout(period) {

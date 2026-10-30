@@ -509,6 +509,7 @@ mod tests {
     use spate_core::checkpoint::Checkpointer;
 
     #[test]
+    #[expect(clippy::disallowed_methods, reason = "the test joins the thread")]
     fn poll_blocks_until_a_push_from_another_thread() {
         let mut cp = Checkpointer::new();
         let (mut source, handle) = memory_source();

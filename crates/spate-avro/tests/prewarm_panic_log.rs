@@ -80,6 +80,10 @@ impl Subscriber for PanicOnPrewarm {
 /// Pins that a panic in the pre-warm task is logged with the task name
 /// `avro-registry-prewarm`.
 #[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the stub server's tasks end when the test's runtime drops"
+)]
 fn a_prewarm_panic_is_logged_with_its_name() {
     let panics = Arc::new(Mutex::new(Vec::new()));
     let seen = Arc::new(tokio::sync::Notify::new());

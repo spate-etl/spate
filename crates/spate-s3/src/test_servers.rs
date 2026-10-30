@@ -1,6 +1,11 @@
 //! Local HTTP and TLS servers for the crate's unit tests, and S3 stores that
 //! point at them.
 
+#![expect(
+    clippy::disallowed_methods,
+    reason = "the stub server's threads serve until the test process exits"
+)]
+
 use object_store::RetryConfig;
 use object_store::aws::AmazonS3Builder;
 use std::io::{Read, Write};

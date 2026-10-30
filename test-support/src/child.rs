@@ -70,6 +70,10 @@ impl ChildTest {
         // libtest prints `running N tests` before it starts any. The rest of
         // the output is read and dropped, so a full pipe never blocks the
         // child.
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the reader ends at the end of the child's output, when the child exits"
+        )]
         std::thread::spawn(move || {
             let mut tx = Some(tx);
             for line in BufReader::new(stdout).lines() {
@@ -201,6 +205,10 @@ mod tests {
     /// A spawned filter that matches two tests fails, and the child, which
     /// could run for ever, is killed.
     #[test]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the thread ends when the child closes its output"
+    )]
     fn a_spawned_filter_matching_two_tests_kills_the_child() {
         use std::io::Read as _;
         let (mut reader, writer) = std::io::pipe().expect("a pipe");

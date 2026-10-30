@@ -53,6 +53,10 @@ source: { memory: {} }
 sink: { capture: {} }
 "#;
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the example joins the pipeline thread before it returns"
+)]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ANCHOR: init
     let config = PipelineConfig::from_str(CONFIG)?;

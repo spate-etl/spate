@@ -127,6 +127,10 @@ async fn first_region(chain: &impl ProvideRegion) -> Result<Region, SqsError> {
 pub(crate) async fn http_client(
     system: impl FnOnce() -> CertificateResult + Send + 'static,
 ) -> Result<SharedHttpClient, SqsError> {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "awaited here; the trust-store read ends on its own, and a blocking task cannot be aborted"
+    )]
     let (roots, fallback) = tokio::task::spawn_blocking(move || trust_roots(system()))
         .await
         .map_err(|e| SqsError::Unavailable(format!("loading the system trust store: {e}")))?;

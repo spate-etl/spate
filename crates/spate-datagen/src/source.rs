@@ -633,6 +633,10 @@ mod tests {
     /// A poll the gate holds on a frozen clock parks for its timeout and
     /// returns, however far out the next tick is.
     #[test]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the thread ends when its timed poll returns"
+    )]
     fn a_held_poll_returns_within_its_timeout_on_a_frozen_clock() {
         use std::sync::mpsc;
 

@@ -732,6 +732,7 @@ fn a_dead_letter_topic_entry_ends_the_job_stalled() {
 /// partitions are committed.
 #[test]
 #[ignore = "requires Docker"]
+#[expect(clippy::disallowed_methods, reason = "the test joins the thread")]
 fn a_bounded_job_ends_once_every_workers_partitions_are_committed() {
     let container = broker().start().expect("start kafka container");
     let port = container.get_host_port_ipv4(KAFKA_PORT).expect("port");

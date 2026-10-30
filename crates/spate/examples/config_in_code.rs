@@ -77,6 +77,10 @@ fn empty_body() -> YamlValue {
 }
 // ANCHOR_END: config
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the example joins the pipeline thread before it returns"
+)]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     spate::telemetry::init(LogFormat::Pretty, "info");
 

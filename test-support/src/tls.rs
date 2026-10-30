@@ -183,6 +183,10 @@ where
     let acceptor = TlsAcceptor::from(config);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the server's tasks end when the runtime shuts down, as the rustdoc states"
+    )]
     tokio::spawn(async move {
         while let Ok((tcp, _)) = listener.accept().await {
             let (acceptor, serve) = (acceptor.clone(), serve.clone());

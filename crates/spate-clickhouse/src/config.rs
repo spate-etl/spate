@@ -1684,6 +1684,10 @@ settings: { insert_quorum: "auto" }
     /// A sink query sends no `Accept-Encoding` whatever `compression` names,
     /// so the server answers it uncompressed.
     #[tokio::test]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "a test task ends when the test's runtime drops"
+    )]
     async fn a_sink_query_asks_for_an_uncompressed_response() {
         use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

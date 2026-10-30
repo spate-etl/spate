@@ -27,6 +27,10 @@ sink: { capture: {} }
 "#;
 
 #[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the test joins the pipeline thread"
+)]
 fn source_and_sink_receive_role_scoped_meters() {
     let (source, handle) = memory_source();
     let (sink, script) = capture_sink(1, 1);

@@ -103,6 +103,10 @@ pub(crate) mod tests {
     }
 
     /// Serves one connection: returns its request and answers `response`.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test joins the server thread"
+    )]
     pub(crate) fn serve_once(
         response: &'static str,
     ) -> (SocketAddr, std::thread::JoinHandle<Request>) {

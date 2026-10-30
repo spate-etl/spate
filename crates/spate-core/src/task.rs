@@ -99,6 +99,10 @@ impl<T> std::fmt::Debug for TaskHandle<T> {
 /// drop(spate_core::task::spawn("forever", std::future::pending::<()>()));
 /// # }
 /// ```
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the returned `TaskHandle` aborts the task when dropped"
+)]
 pub fn spawn<F>(name: &'static str, future: F) -> TaskHandle<F::Output>
 where
     F: Future + Send + 'static,
@@ -111,6 +115,10 @@ where
 ///
 /// Returns without awaiting or waiting on the task, as [`spawn`] does, and may
 /// be called from outside any runtime.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the returned `TaskHandle` aborts the task when dropped"
+)]
 pub fn spawn_on<F>(
     name: &'static str,
     future: F,
@@ -226,6 +234,10 @@ where
     let dispatch = tracing::dispatcher::get_default(|d| {
         (!d.is::<tracing::subscriber::NoSubscriber>()).then(|| d.clone())
     });
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the returned `ThreadHandle` joins the thread when dropped"
+    )]
     let inner = std::thread::Builder::new()
         .name(name.to_owned())
         .spawn(move || {
@@ -559,5 +571,50 @@ mod tests {
                     .to_owned()
             ]
         );
+    }
+
+    /// Pins that each spawn path `clippy.toml` bans with no call site of its
+    /// own resolves: clippy reports a banned call only at a path it resolves,
+    /// so an entry naming no item leaves its `expect` here unfulfilled.
+    #[test]
+    fn banned_spawn_paths_resolve() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "proves the `Runtime::spawn_blocking` entry resolves; awaited below"
+        )]
+        let on_runtime = runtime.spawn_blocking(|| 1);
+        let total = runtime.block_on(async {
+            let handle = tokio::runtime::Handle::current();
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "proves the `Handle::spawn_blocking` entry resolves; awaited below"
+            )]
+            let on_handle = handle.spawn_blocking(|| 2);
+            let mut set = tokio::task::JoinSet::new();
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "proves the `JoinSet::spawn_on` entry resolves; joined below"
+            )]
+            set.spawn_on(async { 3 }, &handle);
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "proves the `JoinSet::spawn_blocking` entry resolves; joined below"
+            )]
+            set.spawn_blocking(|| 4);
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "proves the `JoinSet::spawn_blocking_on` entry resolves; joined below"
+            )]
+            set.spawn_blocking_on(|| 5, &handle);
+            let mut total = on_runtime.await.unwrap() + on_handle.await.unwrap();
+            while let Some(joined) = set.join_next().await {
+                total += joined.unwrap();
+            }
+            total
+        });
+        assert_eq!(total, 15);
     }
 }

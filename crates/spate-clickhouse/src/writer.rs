@@ -495,6 +495,10 @@ mod tests {
     /// A rustls error that is not a certificate rejection, behind the same
     /// `io::Error` wrappers, stays `Retryable`.
     #[tokio::test]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "a test task ends when the test's runtime drops"
+    )]
     async fn a_tls_protocol_failure_stays_retryable() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("https://{}", listener.local_addr().unwrap());

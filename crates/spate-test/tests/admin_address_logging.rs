@@ -50,6 +50,10 @@ fn logged_addr(capture: &LogCapture) -> Option<SocketAddr> {
 }
 
 #[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the test joins the pipeline thread"
+)]
 fn the_bound_admin_address_is_logged_and_serves() {
     let capture = LogCapture::new();
     // `info` is the level a deployment runs at, and the level

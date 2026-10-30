@@ -1,3 +1,8 @@
+#![expect(
+    clippy::disallowed_methods,
+    reason = "a test task ends when the test's runtime drops"
+)]
+
 use super::*;
 use crate::queue::BoxFuture;
 use crate::scripted::{Failure, Message, ScriptedQueue};

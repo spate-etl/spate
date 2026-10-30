@@ -71,6 +71,7 @@ use spate_core::feed::{
     Confirmation, Confirmer, Delivery, DepthOf, DepthReading, DepthReporter, Feed, FeedError,
     FeedErrorKind, FeedWaker, Receipt, Unit, confirmation, depth_reading,
 };
+use spate_core::task::{ThreadHandle, spawn_thread};
 use startup::TopicAdmin as _;
 use std::collections::{HashMap, VecDeque};
 use std::num::NonZeroU32;
@@ -465,9 +466,9 @@ impl Drop for LatchOnPanic {
 pub struct KafkaFeed {
     core: Arc<Core>,
     producer: Producer,
-    thread: Option<std::thread::JoinHandle<()>>,
-    gate: Option<std::thread::JoinHandle<()>>,
-    follower: Option<std::thread::JoinHandle<()>>,
+    thread: Option<ThreadHandle<()>>,
+    gate: Option<ThreadHandle<()>>,
+    follower: Option<ThreadHandle<()>>,
     /// Hands depth reads to the depth thread, which ends once this drops.
     depth: Option<Mutex<mpsc::Sender<(DepthOf, DepthReporter)>>>,
 }
@@ -626,12 +627,9 @@ impl KafkaFeed {
             KafkaFeedError::Unavailable(format!("starting the feed's gate thread: {e}"))
         })?);
         feed.thread = Some(
-            std::thread::Builder::new()
-                .name("spate-kafka-feed".to_owned())
-                .spawn(move || consumer::run(driver))
-                .map_err(|e| {
-                    KafkaFeedError::Unavailable(format!("starting the feed's consumer thread: {e}"))
-                })?,
+            spawn_thread("spate-kafka-feed", move || consumer::run(driver)).map_err(|e| {
+                KafkaFeedError::Unavailable(format!("starting the feed's consumer thread: {e}"))
+            })?,
         );
         feed.depth = Some(Mutex::new(start_depth(&config, &feed.core)?));
         log_started(&config, &checked);
@@ -781,17 +779,10 @@ fn parts(
 impl Drop for KafkaFeed {
     fn drop(&mut self) {
         stop(&self.core);
-        for (name, thread) in [
-            ("gate", self.gate.take()),
-            ("follower", self.follower.take()),
-            ("consumer", self.thread.take()),
-        ] {
-            if let Some(thread) = thread
-                && thread.join().is_err()
-            {
-                tracing::error!("the Kafka feed's {name} thread panicked");
-            }
-        }
+        // Each drop joins its thread; a panic in one was logged as it ended.
+        drop(self.gate.take());
+        drop(self.follower.take());
+        drop(self.thread.take());
     }
 }
 

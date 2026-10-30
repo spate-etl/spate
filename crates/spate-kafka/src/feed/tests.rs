@@ -1482,11 +1482,9 @@ fn a_latched_feed_ends_its_gate_thread() {
         .spawn()
         .unwrap();
     core.latch("probe");
-    spate_test::wait_until(Duration::from_secs(10), "the gate thread ends", || {
-        handle.is_finished()
-    });
+    let ended = returns_within(Duration::from_secs(10), move || handle.join().unwrap());
     super::stop(&core);
-    handle.join().unwrap();
+    assert!(ended, "the gate thread did not end");
 }
 
 /// Pins that a feed that stops or latches while a pass reads its
@@ -1740,12 +1738,12 @@ mod cluster {
     use spate_core::clock::TestClock;
     use spate_core::config::FeedSection;
     use spate_core::feed::{Feed, FeedErrorKind, Unit};
+    use spate_core::task::{ThreadHandle, spawn_thread};
     use spate_test::wait_until;
     use std::collections::BTreeSet;
     use std::sync::Arc;
     use std::sync::atomic::Ordering;
     use std::sync::mpsc;
-    use std::thread::JoinHandle;
     use std::time::Duration;
 
     const DEADLINE: Duration = Duration::from_secs(60);
@@ -1953,7 +1951,7 @@ mod cluster {
     /// starts them. Stopped and joined by [`Admission::stop`], or on drop.
     pub(super) struct Admission {
         core: Arc<Core>,
-        threads: Vec<JoinHandle<()>>,
+        threads: Vec<ThreadHandle<()>>,
     }
 
     /// Start the follower and the gate, the gate at `step`, beside a
@@ -2039,9 +2037,9 @@ mod cluster {
     }
 
     /// Pins that a panic on the feed's thread while it holds partitions
-    /// stops the feed with a Fatal error naming the consumer thread, and
-    /// that dropping the feed then returns: the unwind closes the consumer
-    /// as a normal stop does.
+    /// stops the feed with a Fatal error naming the consumer thread, that
+    /// dropping the feed then returns, the unwind closing the consumer as a
+    /// normal stop does, and that the panic is logged once beside the stop.
     #[test]
     fn a_panic_on_the_feed_thread_stops_the_feed_and_its_drop_returns() {
         let cluster = cluster_with(0);
@@ -2050,30 +2048,33 @@ mod cluster {
         let (_, core, producer, mut d) = parts_for(&brokers, &group);
         drive(&mut d, "the driver owns its partitions", |d| owns(d) == 2);
         let context = Arc::clone(d.consumer.context());
-        let thread = std::thread::spawn(move || consumer::run(d));
-        // A poisoned intent lock makes the thread's next look at it panic.
-        let _ = std::thread::spawn(move || {
-            let _held = context.intents.lock().unwrap();
-            panic!("poisoning the intent lock");
-        })
-        .join();
-        let feed = KafkaFeed {
-            core,
-            producer,
-            thread: Some(thread),
-            gate: None,
-            follower: None,
-            depth: None,
-        };
         let mut reason = None;
-        wait_until(DEADLINE, "the feed stops", || match feed.receive(1) {
-            Err(e) if e.kind == FeedErrorKind::Fatal => {
-                reason = Some(e.reason);
-                true
-            }
-            _ => false,
+        let mut dropped = false;
+        let lines = spate_test::capture_logs(tracing::Level::ERROR, || {
+            let thread = spawn_thread("spate-kafka-feed", move || consumer::run(d)).unwrap();
+            // A poisoned intent lock makes the thread's next look at it panic.
+            let _ = std::thread::spawn(move || {
+                let _held = context.intents.lock().unwrap();
+                panic!("poisoning the intent lock");
+            })
+            .join();
+            let feed = KafkaFeed {
+                core,
+                producer,
+                thread: Some(thread),
+                gate: None,
+                follower: None,
+                depth: None,
+            };
+            wait_until(DEADLINE, "the feed stops", || match feed.receive(1) {
+                Err(e) if e.kind == FeedErrorKind::Fatal => {
+                    reason = Some(e.reason);
+                    true
+                }
+                _ => false,
+            });
+            dropped = returns_within(Duration::from_secs(30), move || drop(feed));
         });
-        let dropped = returns_within(Duration::from_secs(30), move || drop(feed));
         if !dropped {
             // Its clients are still connected; dropping it would wait on them.
             std::mem::forget(cluster);
@@ -2082,6 +2083,15 @@ mod cluster {
         assert_eq!(
             reason.as_deref(),
             Some("the Kafka feed's consumer thread panicked")
+        );
+        assert_eq!(
+            lines,
+            [
+                "ERROR spate_kafka::feed: the Kafka feed stopped \
+                 error=the Kafka feed's consumer thread panicked",
+                "ERROR spate_core::task: background thread panicked \
+                 thread=\"spate-kafka-feed\" panic=\"intent lock: PoisonError { .. }\"",
+            ]
         );
     }
 
@@ -2141,7 +2151,7 @@ mod cluster {
         let feed = KafkaFeed {
             core: Arc::clone(&core),
             producer,
-            thread: Some(std::thread::spawn(move || consumer::run(d))),
+            thread: Some(spawn_thread("spate-kafka-feed", move || consumer::run(d)).unwrap()),
             gate: None,
             follower: None,
             depth: None,
@@ -2562,7 +2572,7 @@ mod cluster {
         let feed = KafkaFeed {
             core,
             producer,
-            thread: Some(std::thread::spawn(move || consumer::run(d))),
+            thread: Some(spawn_thread("spate-kafka-feed", move || consumer::run(d)).unwrap()),
             gate: Some(gate),
             follower: Some(follower),
             depth: None,
@@ -3528,7 +3538,7 @@ mod cluster {
     fn feed_over(
         core: &Arc<Core>,
         producer: &Producer,
-        thread: Option<JoinHandle<()>>,
+        thread: Option<ThreadHandle<()>>,
     ) -> KafkaFeed {
         KafkaFeed {
             core: Arc::clone(core),
@@ -3717,17 +3727,18 @@ mod cluster {
         let group = spate_test::unique_name("close-idle");
         let (_, core, producer, mut d) = parts_for(&brokers, &group);
         drive(&mut d, "the driver owns its partitions", |d| owns(d) == 2);
-        let thread = std::thread::spawn(move || consumer::run(d));
-        let feed = feed_over(&core, &producer, Some(thread));
+        let thread = spawn_thread("spate-kafka-feed", move || consumer::run(d)).unwrap();
+        let mut feed = feed_over(&core, &producer, Some(thread));
         let mut closing = feed.close(Duration::from_secs(10)).expect("a close");
         wait_until(DEADLINE, "the close settles", || {
             closing.try_outcome().is_some()
         });
         assert_eq!(closing.try_outcome(), Some(Ok(())));
-        let thread = feed.thread.as_ref().expect("the consumer thread");
-        wait_until(DEADLINE, "the consumer thread ends", || {
-            thread.is_finished()
-        });
+        let thread = feed.thread.take().expect("the consumer thread");
+        assert!(
+            returns_within(DEADLINE, move || drop(thread)),
+            "the consumer thread did not end"
+        );
     }
 
     /// Pins that a close given no time rejects as Retryable when a

@@ -26,6 +26,7 @@ use rdkafka::producer::Producer as _;
 use rdkafka::{Offset, TopicPartitionList};
 use spate_core::clock::Stopwatch;
 use spate_core::error::ErrorClass;
+use spate_core::task::{ThreadHandle, spawn_thread};
 use std::collections::BTreeSet;
 #[cfg(test)]
 use std::sync::atomic::Ordering;
@@ -94,10 +95,8 @@ impl Gate {
     /// # Errors
     ///
     /// When the thread cannot be started.
-    pub(crate) fn spawn(self) -> std::io::Result<std::thread::JoinHandle<()>> {
-        std::thread::Builder::new()
-            .name("spate-kafka-feed-gate".to_owned())
-            .spawn(move || self.run())
+    pub(crate) fn spawn(self) -> std::io::Result<ThreadHandle<()>> {
+        spawn_thread("spate-kafka-feed-gate", move || self.run())
     }
 
     fn run(self) {

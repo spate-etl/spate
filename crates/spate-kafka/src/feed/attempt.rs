@@ -32,6 +32,7 @@ use rdkafka::message::{BorrowedMessage, Message};
 use rdkafka::{Offset, TopicPartitionList};
 use serde::{Deserialize, Serialize};
 use spate_core::error::ErrorClass;
+use spate_core::task::{ThreadHandle, spawn_thread};
 use std::collections::HashMap;
 use std::num::NonZeroU32;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
@@ -379,10 +380,8 @@ impl Follower {
     /// # Errors
     ///
     /// When the thread cannot be started.
-    pub(crate) fn spawn(self) -> std::io::Result<std::thread::JoinHandle<()>> {
-        std::thread::Builder::new()
-            .name("spate-kafka-feed-follower".to_owned())
-            .spawn(move || self.run())
+    pub(crate) fn spawn(self) -> std::io::Result<ThreadHandle<()>> {
+        spawn_thread("spate-kafka-feed-follower", move || self.run())
     }
 
     fn run(self) {
@@ -763,7 +762,7 @@ mod tests {
         use spate_core::config::FeedSection;
         use spate_test::wait_until;
         use std::sync::atomic::Ordering;
-        use std::thread::JoinHandle;
+        use std::sync::mpsc;
         use std::time::Duration;
 
         const DEADLINE: Duration = Duration::from_secs(30);
@@ -838,7 +837,7 @@ mod tests {
         /// waits on it.
         struct Running {
             core: Arc<Core>,
-            thread: Option<JoinHandle<()>>,
+            thread: Option<ThreadHandle<()>>,
         }
 
         impl Running {
@@ -932,12 +931,17 @@ mod tests {
         #[test]
         fn the_follower_exits_once_the_feed_latches() {
             let rig = rig();
-            let (running, _) = Running::start(&rig);
+            let (mut running, _) = Running::start(&rig);
             running.core.latch("probe");
-            let thread = running.thread.as_ref().unwrap();
-            wait_until(DEADLINE, "the follower exits once the feed latches", || {
-                thread.is_finished()
+            let thread = running.thread.take().unwrap();
+            let (joined, ended) = mpsc::channel();
+            std::thread::spawn(move || {
+                drop(thread);
+                let _ = joined.send(());
             });
+            ended
+                .recv_timeout(DEADLINE)
+                .expect("the follower exits once the feed latches");
         }
     }
 }

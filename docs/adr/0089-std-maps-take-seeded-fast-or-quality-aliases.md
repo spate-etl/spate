@@ -96,8 +96,8 @@ Callgrind instruction counts from the counted tier in CI, pull request against
   `dup_guard_hit` 37–40% fewer, `dup_guard_wide` 12–14%, `dup_guard_deep` 9–11%.
 - Quality hasher on the JSON guard, #1566 (run 41083059689): `dup_guard_hit`
   36–40% fewer, `dup_guard_wide` 11–14%, `dup_guard_deep` 8–11%, both backends
-  and both architectures. Against the fast run, quality costs one to two points
-  on these rows.
+  and both architectures. Against the fast run, quality costs under one point
+  on most of these rows and up to two on `dup_guard_hit` on aarch64.
 - Quality hasher on the ClickHouse LowCardinality dictionary, #1567 (run
   41087588527): `encode_native_events` +1.02% on x86_64 and +1.89% on aarch64. A
   probe with the fast alias on the same dictionary (run 41089127464) measured

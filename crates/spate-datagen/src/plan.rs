@@ -256,7 +256,7 @@ impl EventPlan {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
+    use spate_core::hash::{FastMap, FastSet};
 
     fn config(partitions: u32, seed: u64) -> DatagenSourceConfig {
         DatagenSourceConfig {
@@ -277,9 +277,9 @@ mod tests {
     #[test]
     fn every_reference_resolves_to_an_earlier_event_in_the_same_lane() {
         let cfg = config(4, 7);
-        let mut placed: HashMap<u64, u64> = HashMap::new();
-        let mut captured: HashMap<u64, u64> = HashMap::new();
-        let mut refunded: std::collections::HashSet<u64> = std::collections::HashSet::new();
+        let mut placed: FastMap<u64, u64> = FastMap::default();
+        let mut captured: FastMap<u64, u64> = FastMap::default();
+        let mut refunded: FastSet<u64> = FastSet::default();
         let mut seen_capture = 0usize;
         let mut seen_refund = 0usize;
 
@@ -367,7 +367,7 @@ mod tests {
     /// property.
     #[test]
     fn a_reference_never_precedes_the_order_it_names() {
-        let mut first_seen: HashMap<u64, usize> = HashMap::new();
+        let mut first_seen: FastMap<u64, usize> = FastMap::default();
         for (index, event) in run(&config(2, 3), 1, 10_000).into_iter().enumerate() {
             match &event {
                 StorefrontEvent::OrderPlaced(e) => {

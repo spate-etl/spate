@@ -88,8 +88,8 @@
 //! delta on one of them is read as a regression. The guard's visitor collects
 //! the keys it has seen into a set whose hasher draws a fresh seed each time
 //! it is built, so the same document hashes into a different number of probes
-//! on every run, and at four thousand keys potentially a different rehash
-//! schedule too.
+//! on every run. The set only inserts, so it grows at the same key counts
+//! whatever the seed.
 //!
 //! The spread is usually tiny and occasionally is not. Every other case in
 //! this file repeats to the instruction between runs, which is what

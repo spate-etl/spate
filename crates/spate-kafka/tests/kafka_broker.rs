@@ -7,7 +7,8 @@
 
 mod support;
 
-use rdkafka::ClientConfig;
+use support::Raw as _;
+
 use rdkafka::consumer::{BaseConsumer, Consumer};
 use spate_core::checkpoint::Checkpointer;
 use spate_core::source::{Source, SourceCtx, SourceEvent, SourceLane};
@@ -70,10 +71,10 @@ fn real_broker_full_lifecycle() {
     source.flush_commits().expect("sync commit");
 
     // The group's committed offset is visible to a probe member.
-    let probe: BaseConsumer = ClientConfig::new()
+    let probe: BaseConsumer = support::raw_config()
         .set("bootstrap.servers", &brokers)
         .set("group.id", "real-life")
-        .create()
+        .build()
         .expect("probe");
     let mut tpl = rdkafka::TopicPartitionList::new();
     tpl.add_partition(TOPIC, 0);
@@ -124,11 +125,11 @@ fn real_broker_revocation_commit_persists_revoked_offsets() {
     let stop = Arc::new(AtomicBool::new(false));
     let stop2 = std::sync::Arc::clone(&stop);
     let joiner = std::thread::spawn(move || {
-        let c: BaseConsumer = ClientConfig::new()
+        let c: BaseConsumer = support::raw_config()
             .set("bootstrap.servers", &brokers2)
             .set("group.id", "rev-commit")
             .set("auto.offset.reset", "earliest")
-            .create()
+            .build()
             .expect("second consumer");
         c.subscribe(&[TOPIC]).expect("subscribe");
         while !stop2.load(Ordering::Relaxed) {
@@ -166,10 +167,10 @@ fn real_broker_revocation_commit_persists_revoked_offsets() {
     assert!(stored, "revoke observed and drained offset stored");
 
     // The drained watermark is committed for the revoked partition.
-    let probe: BaseConsumer = ClientConfig::new()
+    let probe: BaseConsumer = support::raw_config()
         .set("bootstrap.servers", &brokers)
         .set("group.id", "rev-commit")
-        .create()
+        .build()
         .expect("probe");
     spate_test::wait_until(
         Duration::from_secs(30),
@@ -215,9 +216,9 @@ fn real_broker_backlog_reports_summable_lag() {
         .enable_all()
         .build()
         .expect("runtime");
-    let admin: AdminClient<_> = ClientConfig::new()
+    let admin: AdminClient<_> = support::raw_config()
         .set("bootstrap.servers", &brokers)
-        .create()
+        .build()
         .expect("admin client");
     rt.block_on(admin.create_topics(
         &[NewTopic::new(TOPIC, PARTITIONS, TopicReplication::Fixed(1))],

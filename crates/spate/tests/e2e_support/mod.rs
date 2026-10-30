@@ -202,6 +202,10 @@ impl Harness {
 
     // ── Kafka ──────────────────────────────────────────────────────────
 
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the harness administers the broker outside the connector's client factory"
+    )]
     pub fn create_topic(&self, topic: &str, partitions: i32) {
         let admin: AdminClient<_> = ClientConfig::new()
             .set("bootstrap.servers", &self.brokers)
@@ -221,6 +225,10 @@ impl Harness {
 
     /// Produce Confluent-framed Avro events, keyed by record id (the key
     /// drives shard routing). `events` are (partition, Event) pairs.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the harness seeds the topic outside the connector's client factory"
+    )]
     pub fn produce(&self, topic: &str, events: &[(i32, Event)]) {
         let producer: BaseProducer = ClientConfig::new()
             .set("bootstrap.servers", &self.brokers)
@@ -253,6 +261,10 @@ impl Harness {
 
     /// A payload that fails Avro decoding (valid Confluent header, torn
     /// datum), exercising the deserializer's Skip policy.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the harness seeds the topic outside the connector's client factory"
+    )]
     pub fn produce_poison(&self, topic: &str, partition: i32, n: usize) {
         let producer: BaseProducer = ClientConfig::new()
             .set("bootstrap.servers", &self.brokers)
@@ -290,6 +302,10 @@ impl Harness {
     }
 
     /// Committed offset per partition for a group (0 when none).
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the harness reads the group's offsets outside the connector's client factory"
+    )]
     pub fn committed(&self, topic: &str, group: &str, partitions: i32) -> Vec<i64> {
         let probe: BaseConsumer = ClientConfig::new()
             .set("bootstrap.servers", &self.brokers)

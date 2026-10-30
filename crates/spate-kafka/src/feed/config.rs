@@ -1,5 +1,6 @@
 //! The `kafka:` body of a `feed:` section, decoded and checked.
 
+use crate::client::{Base, Keys, Role};
 use serde::Deserialize;
 use spate_core::config::{ConfigError, FeedSection, redact};
 use std::collections::BTreeMap;
@@ -13,111 +14,170 @@ pub(crate) const BACKEND: &str = "kafka";
 /// unless the section sets `attempt_cap`.
 const ATTEMPT_CAP: NonZeroU32 = NonZeroU32::new(10).expect("non-zero");
 
-/// Properties the feed owns, refused in the `rdkafka:` passthrough with the
-/// reason. One passthrough map feeds the feed's consumer and its producer,
-/// so the list is the union of what either client owns.
-///
-/// librdkafka accepts several names for one setting, and the passthrough
-/// and the feed's own values are separate `ClientConfig` keys applied in no
-/// set order, so every alias of an owned property is refused beside it.
-/// librdkafka also reads `topic.<name>` as the topic property `<name>`, so a
-/// key is checked with that prefix removed.
-const DENYLIST: &[(&str, &str)] = &[
-    ("group.id", "owned by the typed `group_id` field"),
-    (
-        "group.instance.id",
-        "a static member sends no LeaveGroup when it closes, so its \
-         partitions wait out `session.timeout.ms` before another member reads \
-         them",
-    ),
-    (
-        "group.protocol",
-        "the feed runs the classic consumer group protocol with eager \
-         assignment",
-    ),
-    (
-        "partition.assignment.strategy",
-        "the feed relies on eager assignment, under which a rebalance revokes \
-         every partition before it assigns any",
-    ),
-    (
+/// One of the feed's six clients.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FeedRole {
+    /// The group member that reads the work and retry topics.
+    Consumer,
+    /// The producer for attempt, retry, dead-letter and tombstone writes.
+    Producer,
+    /// The depth reader: the group's committed offsets, never subscribed.
+    Depth,
+    /// The startup checks' admin client.
+    Admin,
+    /// The startup checks' metadata reader.
+    Reader,
+    /// The attempt follower, which assigns its own partitions.
+    Follower,
+}
+
+impl FeedRole {
+    pub(crate) const ALL: [FeedRole; 6] = [
+        FeedRole::Consumer,
+        FeedRole::Producer,
+        FeedRole::Depth,
+        FeedRole::Admin,
+        FeedRole::Reader,
+        FeedRole::Follower,
+    ];
+}
+
+/// A feed client, and the properties it owns beyond the base in
+/// [`crate::client`]. One passthrough map feeds all six clients, so the
+/// passthrough refuses the union of what any of them owns, each with the
+/// reason given here.
+pub(crate) struct Client<'a> {
+    pub(crate) config: &'a KafkaFeedConfig,
+    pub(crate) role: FeedRole,
+}
+
+impl Role for Client<'_> {
+    fn name(&self) -> &'static str {
+        match self.role {
+            FeedRole::Consumer => "consumer",
+            FeedRole::Producer => "producer",
+            FeedRole::Depth => "depth",
+            FeedRole::Admin => "admin",
+            FeedRole::Reader => "reader",
+            FeedRole::Follower => "follower",
+        }
+    }
+
+    fn statistics(&self) -> bool {
+        matches!(self.role, FeedRole::Consumer | FeedRole::Producer)
+    }
+
+    fn declare(&self, keys: &mut Keys<'_>) {
+        let cfg = self.config;
+        match self.role {
+            FeedRole::Consumer | FeedRole::Depth => {
+                group(keys, cfg);
+                keys.own(
+                    "group.protocol",
+                    "classic",
+                    "the feed runs the classic consumer group protocol with \
+                     eager assignment",
+                );
+                // Eager: a rebalance revokes every partition before it
+                // assigns any, and the tracker relies on that.
+                keys.own(
+                    "partition.assignment.strategy",
+                    "range,roundrobin",
+                    "the feed relies on eager assignment, under which a \
+                     rebalance revokes every partition before it assigns any",
+                );
+            }
+            // The follower joins the feed's group by `group.id` only:
+            // librdkafka refuses `assign` on a consumer with no group. It
+            // assigns its partitions itself, so it never takes part in a
+            // rebalance, and it commits nothing.
+            FeedRole::Follower => group(keys, cfg),
+            FeedRole::Producer => {
+                keys.own(
+                    "acks",
+                    "all",
+                    "forced to `all`: an offset completes once the delivery \
+                     report confirms its tombstone or retry write, and a unit \
+                     is read once its attempt write is confirmed, so a report \
+                     under weaker acks could lose the unit or its count",
+                );
+                keys.own(
+                    "enable.idempotence",
+                    "true",
+                    "forced on, so librdkafka's own retries neither reorder \
+                     nor duplicate a write",
+                );
+                keys.own_if(
+                    true,
+                    "message.timeout.ms",
+                    || cfg.delivery_timeout.as_millis().to_string(),
+                    "owned by the typed `delivery_timeout` field, which also \
+                     bounds how long the feed waits for a delivery report",
+                );
+            }
+            FeedRole::Admin | FeedRole::Reader => {}
+        }
+        keys.forbid(
+            "group.instance.id",
+            "a static member sends no LeaveGroup when it closes, so its \
+             partitions wait out `session.timeout.ms` before another member \
+             reads them",
+        );
+        keys.forbid(
+            "auto.commit.enable",
+            "librdkafka's legacy topic-level auto-commit property; the feed \
+             commits each partition up to its first unfinished unit itself",
+        );
+        keys.forbid(
+            "transactional.id",
+            "the feed does not use transactions; a write is confirmed by its \
+             delivery report",
+        );
+        keys.forbid(
+            "delivery.report.only.error",
+            "a unit is read only once its attempt write is confirmed, and its \
+             offset finishes only once its tombstone or retry write is, so \
+             suppressing success reports would stop the partition's reads and \
+             commits",
+        );
+        keys.forbid(
+            "enable.gapless.guarantee",
+            "raises a fatal producer error on any gap, which stops the feed",
+        );
+    }
+}
+
+/// The group settings of a feed consumer that never commits through
+/// librdkafka.
+fn group(keys: &mut Keys<'_>, cfg: &KafkaFeedConfig) {
+    keys.own(
+        "group.id",
+        &cfg.group_id,
+        "owned by the typed `group_id` field",
+    );
+    keys.own(
         "auto.offset.reset",
+        "earliest",
         "a partition with no committed offset starts at its earliest offset, \
          so a group whose offsets expired reads the topic from its start",
-    ),
-    (
+    );
+    keys.own(
         "enable.auto.commit",
+        "false",
         "the feed commits each partition up to its first unfinished unit \
          itself",
-    ),
-    (
-        "auto.commit.enable",
-        "librdkafka's legacy topic-level auto-commit property; the feed \
-         commits each partition up to its first unfinished unit itself",
-    ),
-    (
+    );
+    keys.own(
         "enable.auto.offset.store",
+        "false",
         "the feed decides which offsets may be committed",
-    ),
-    (
+    );
+    keys.own(
         "enable.partition.eof",
+        "false",
         "the feed reads only messages from the consumer",
-    ),
-    (
-        "acks",
-        "forced to `all`: an offset completes once the delivery report \
-         confirms its tombstone or retry write, and a unit is read once its \
-         attempt write is confirmed, so a report under weaker acks could lose \
-         the unit or its count",
-    ),
-    (
-        "request.required.acks",
-        "`acks` is the librdkafka alias of this property, which is forced to \
-         `all`",
-    ),
-    (
-        "enable.idempotence",
-        "forced on, so librdkafka's own retries neither reorder nor duplicate \
-         a write",
-    ),
-    (
-        "transactional.id",
-        "the feed does not use transactions; a write is confirmed by its \
-         delivery report",
-    ),
-    (
-        "message.timeout.ms",
-        "owned by the typed `delivery_timeout` field, which also bounds how \
-         long the feed waits for a delivery report",
-    ),
-    (
-        "delivery.timeout.ms",
-        "librdkafka alias of `message.timeout.ms`, owned by the typed \
-         `delivery_timeout` field",
-    ),
-    (
-        "allow.auto.create.topics",
-        "forced off: a write to a missing topic must fail, not create the \
-         topic with the broker's defaults",
-    ),
-    (
-        "statistics.interval.ms",
-        "owned by the typed `statistics_interval` field",
-    ),
-    ("bootstrap.servers", "owned by the typed `brokers` field"),
-    (
-        "metadata.broker.list",
-        "librdkafka's own name for `bootstrap.servers`, owned by the typed \
-         `brokers` field",
-    ),
-    (
-        "delivery.report.only.error",
-        "a unit is read only once its attempt write is confirmed, and its \
-         offset finishes only once its tombstone or retry write is, so \
-         suppressing success reports would stop the partition's reads and \
-         commits",
-    ),
-];
+    );
+}
 
 fn default_delivery_timeout() -> Duration {
     Duration::from_secs(30)
@@ -243,7 +303,7 @@ impl KafkaFeedConfig {
         Ok(config)
     }
 
-    fn validate(&self) -> Result<(), ConfigError> {
+    pub(crate) fn validate(&self) -> Result<(), ConfigError> {
         for (key, value) in [
             ("brokers", &self.brokers),
             ("group_id", &self.group_id),
@@ -303,105 +363,38 @@ impl KafkaFeedConfig {
                     .to_owned(),
             ));
         }
-        for key in self.rdkafka.keys() {
-            let name = key.strip_prefix("topic.").unwrap_or(key);
-            if let Some((_, why)) = DENYLIST.iter().find(|(owned, _)| *owned == name) {
-                return Err(error(format!(
-                    "rdkafka.\"{key}\" cannot be overridden: {why}"
-                )));
-            }
+        let clients = FeedRole::ALL.map(|role| Client { config: self, role });
+        let roles: Vec<&dyn Role> = clients.iter().map(|c| c as &dyn Role).collect();
+        if let Err(refusal) = self.base(false).denied(&roles) {
+            return Err(error(refusal.to_string()));
         }
         crate::security::check_tls_feature(&self.rdkafka, "feed.kafka")
     }
 
-    /// The consumer's librdkafka configuration: the passthrough, then the
-    /// properties the feed owns, which win.
+    /// What the feed's clients share with every Kafka client.
     ///
     /// Takes the OpenSSL env check as an argument: on Linux, cargo exports
     /// `SSL_CERT_FILE` and `SSL_CERT_DIR` to every process it runs, so a test
     /// reading them always sees them set.
-    pub(crate) fn consumer_config(&self, openssl_env: bool) -> rdkafka::ClientConfig {
-        let mut cc = self.client_config(openssl_env);
-        cc.set("group.id", &self.group_id);
-        cc.set("group.protocol", "classic");
-        // Eager: a rebalance revokes every partition before it assigns any,
-        // and the tracker relies on that.
-        cc.set("partition.assignment.strategy", "range,roundrobin");
-        cc.set("auto.offset.reset", "earliest");
-        cc.set("enable.auto.commit", "false");
-        cc.set("enable.auto.offset.store", "false");
-        cc.set("enable.partition.eof", "false");
-        cc
-    }
-
-    /// The depth reader's librdkafka configuration: the consumer's, with no
-    /// statistics, since nothing reads the depth reader's.
-    pub(crate) fn depth_config(&self, openssl_env: bool) -> rdkafka::ClientConfig {
-        let mut cc = self.consumer_config(openssl_env);
-        cc.remove("statistics.interval.ms");
-        cc
-    }
-
-    /// The producer's librdkafka configuration: the passthrough, then the
-    /// properties the feed owns, which win.
-    pub(crate) fn producer_config(&self, openssl_env: bool) -> rdkafka::ClientConfig {
-        let mut cc = self.client_config(openssl_env);
-        cc.set("acks", "all");
-        cc.set("enable.idempotence", "true");
-        cc.set(
-            "message.timeout.ms",
-            self.delivery_timeout.as_millis().to_string(),
-        );
-        cc
-    }
-
-    /// The configuration of the clients the startup checks read through:
-    /// the passthrough, then the shared properties the feed owns, with no
-    /// statistics, which nothing reads from them.
-    pub(crate) fn admin_config(&self, openssl_env: bool) -> rdkafka::ClientConfig {
-        let mut cc = self.client_config(openssl_env);
-        cc.remove("statistics.interval.ms");
-        cc
-    }
-
-    /// The attempt follower's librdkafka configuration: the passthrough,
-    /// then the properties the feed owns, which win, with no statistics.
-    ///
-    /// The follower joins the feed's group by `group.id` only: librdkafka
-    /// refuses `assign` on a consumer with no group. It assigns its
-    /// partitions itself, so it never takes part in a rebalance, and it
-    /// commits nothing.
-    pub(crate) fn follower_config(&self, openssl_env: bool) -> rdkafka::ClientConfig {
-        let mut cc = self.client_config(openssl_env);
-        // Statistics come back once the follower's numbers have a reader.
-        cc.remove("statistics.interval.ms");
-        cc.set("group.id", &self.group_id);
-        cc.set("auto.offset.reset", "earliest");
-        cc.set("enable.auto.commit", "false");
-        cc.set("enable.auto.offset.store", "false");
-        cc.set("enable.partition.eof", "false");
-        cc
-    }
-
-    fn client_config(&self, openssl_env: bool) -> rdkafka::ClientConfig {
-        let mut cc = rdkafka::ClientConfig::new();
-        // rdkafka reads the log facade by default; tracing filters these events.
-        cc.set_log_level(rdkafka::config::RDKafkaLogLevel::Debug);
-        for (k, v) in &self.rdkafka {
-            cc.set(k, v);
+    pub(crate) fn base(&self, openssl_env: bool) -> Base<'_> {
+        Base {
+            section: "feed.kafka",
+            brokers: &self.brokers,
+            rdkafka: &self.rdkafka,
+            statistics_interval: self.statistics_interval,
+            openssl_env,
         }
-        crate::security::apply_ca_default(&mut cc, &self.rdkafka, openssl_env);
-        cc.set("bootstrap.servers", &self.brokers);
-        // A write to, or a metadata read of, a missing topic must fail, and
-        // never create the topic with the broker's defaults.
-        cc.set("allow.auto.create.topics", "false");
-        if !self.statistics_interval.is_zero() {
-            cc.set(
-                "statistics.interval.ms",
-                self.statistics_interval.as_millis().to_string(),
-            );
-        }
-        cc
+    }
+
+    /// `role`'s client over this section.
+    pub(crate) fn client(&self, role: FeedRole) -> Client<'_> {
+        Client { config: self, role }
+    }
+
+    /// `role`'s librdkafka configuration.
+    #[cfg(test)]
+    pub(crate) fn config(&self, role: FeedRole, openssl_env: bool) -> rdkafka::ClientConfig {
+        self.base(openssl_env).config(&self.client(role))
     }
 }
 
@@ -464,7 +457,7 @@ mod tests {
     /// bare and with the `topic.` prefix librdkafka strips.
     #[test]
     fn every_owned_property_and_alias_is_refused() {
-        // Written out: a loop over `DENYLIST` would follow an entry removed
+        // Written out: a loop over the roles' declarations would follow an entry removed
         // from it.
         for key in [
             "group.id",
@@ -487,16 +480,33 @@ mod tests {
             "bootstrap.servers",
             "metadata.broker.list",
             "delivery.report.only.error",
+            "enable.gapless.guarantee",
         ] {
-            for written in [key.to_owned(), format!("topic.{key}")] {
-                let err = with_rdkafka(&written, "x").unwrap_err().to_string();
-                assert!(
-                    err.contains(&format!("\"{written}\" cannot be overridden")),
-                    "{err}"
-                );
-                assert!(err.contains("feed.kafka"), "{err}");
+            for stats in ["0s", "5s"] {
+                for written in [key.to_owned(), format!("topic.{key}")] {
+                    let err = parse(&format!(
+                        "{MINIMAL}  statistics_interval: {stats}\n  rdkafka:\n    \"{written}\": \"x\"\n"
+                    ))
+                    .unwrap_err()
+                    .to_string();
+                    assert!(
+                        err.contains(&format!("rdkafka.\"{written}\" cannot be overridden")),
+                        "{err}"
+                    );
+                    assert!(err.contains("feed.kafka"), "{err}");
+                }
             }
         }
+    }
+
+    /// A refused key's value never reaches the error.
+    #[test]
+    fn rejection_never_prints_the_value() {
+        let err = with_rdkafka("acks", "secret-marker")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("\"acks\""), "{err}");
+        assert!(!err.contains("secret-marker"), "{err}");
     }
 
     /// Pins that an eager assignment strategy is refused too: the feed owns
@@ -661,7 +671,7 @@ mod tests {
              rdkafka:\n    session.timeout.ms: \"6000\"\n"
         ))
         .unwrap();
-        let consumer = config.consumer_config(true);
+        let consumer = config.config(FeedRole::Consumer, true);
         for (key, value) in [
             ("bootstrap.servers", "localhost:9092"),
             ("group.id", "workers"),
@@ -679,7 +689,7 @@ mod tests {
         }
         assert_eq!(consumer.get("acks"), None);
 
-        let producer = config.producer_config(true);
+        let producer = config.config(FeedRole::Producer, true);
         for (key, value) in [
             ("bootstrap.servers", "localhost:9092"),
             ("acks", "all"),
@@ -692,7 +702,7 @@ mod tests {
         }
         assert_eq!(producer.get("group.id"), None);
 
-        let admin = config.admin_config(true);
+        let admin = config.config(FeedRole::Admin, true);
         for (key, value) in [
             ("bootstrap.servers", "localhost:9092"),
             ("allow.auto.create.topics", "false"),
@@ -704,11 +714,15 @@ mod tests {
 
         let quiet = parse(&format!("{MINIMAL}  statistics_interval: 0s\n")).unwrap();
         assert_eq!(
-            quiet.consumer_config(true).get("statistics.interval.ms"),
+            quiet
+                .config(FeedRole::Consumer, true)
+                .get("statistics.interval.ms"),
             None
         );
         assert_eq!(
-            quiet.producer_config(true).get("statistics.interval.ms"),
+            quiet
+                .config(FeedRole::Producer, true)
+                .get("statistics.interval.ms"),
             None
         );
     }
@@ -733,7 +747,7 @@ mod tests {
         ] {
             config.rdkafka.insert(key.to_owned(), value.to_owned());
         }
-        let follower = config.follower_config(true);
+        let follower = config.config(FeedRole::Follower, true);
         for (key, value) in [
             ("bootstrap.servers", "localhost:9092"),
             ("group.id", "workers"),
@@ -781,6 +795,22 @@ mod tests {
             let err = got.unwrap_err().to_string();
             assert!(err.contains("kafka-tls"), "{err}");
             assert!(err.contains("feed.kafka.rdkafka"), "{err}");
+        }
+    }
+
+    /// Pins which of the feed's clients emit statistics: the consumer and
+    /// the producer, whose snapshots the feed reads, and no other.
+    #[test]
+    fn only_the_consumer_and_producer_emit_statistics() {
+        let config = parse(&format!("{MINIMAL}  statistics_interval: 2s\n")).unwrap();
+        for role in FeedRole::ALL {
+            let expected =
+                matches!(role, FeedRole::Consumer | FeedRole::Producer).then_some("2000");
+            assert_eq!(
+                config.config(role, true).get("statistics.interval.ms"),
+                expected,
+                "{role:?}"
+            );
         }
     }
 }

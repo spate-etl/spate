@@ -8,6 +8,8 @@
 
 mod support;
 
+use support::Raw as _;
+
 use rdkafka::mocking::{MockCluster, MockCoordinator};
 use rdkafka::types::RDKafkaRespErr;
 use spate_core::clock::TestClock as StopClock;
@@ -283,10 +285,10 @@ fn a_unit_at_the_cap_goes_to_the_dead_letter_topic_unread() {
             (Some(&b"behind"[..]), &b"body"[..]),
         ],
     );
-    let seeder: rdkafka::producer::BaseProducer = rdkafka::ClientConfig::new()
+    let seeder: rdkafka::producer::BaseProducer = support::raw_config()
         .set("bootstrap.servers", &brokers)
         .set("partitioner", "murmur2")
-        .create()
+        .build()
         .unwrap();
     seeder
         .send(

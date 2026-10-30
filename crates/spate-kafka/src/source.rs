@@ -5,7 +5,7 @@
 //! librdkafka runs rebalance callbacks inside `poll()` on the thread that
 //! calls it, which here is the runtime controller calling
 //! [`Source::poll_events`]. For assignment and revocation events the
-//! callback ([`SourceContext::rebalance`]) only records an intent and
+//! callback ([`SourceHooks::rebalance`]) only records an intent and
 //! returns without acknowledging, which leaves the rebalance legally in
 //! progress until we call `assign`/`unassign`. Completion then happens on
 //! the controller thread, interleaved with the runtime's own drain
@@ -65,8 +65,7 @@
 //! the contract.
 
 use crate::config::KafkaSourceConfig;
-use crate::context::{Intent, SourceContext};
-use crate::error::redacted_client_error;
+use crate::context::{Intent, SourceContext, SourceHooks};
 use crate::lane::KafkaLane;
 use crate::metrics::KafkaStatsMetrics;
 use rdkafka::consumer::{BaseConsumer, Consumer};
@@ -623,11 +622,14 @@ impl Source for KafkaSource {
         };
         let consumer: BaseConsumer<SourceContext> = self
             .config
-            .client_config()
-            .create_with_context(SourceContext::default())
-            .map_err(|e| SourceError::Client {
+            .base(crate::security::openssl_env_overrides())
+            .create(
+                &crate::config::Consumer(&self.config),
+                SourceHooks::default(),
+            )
+            .map_err(|reason| SourceError::Client {
                 class: ErrorClass::Fatal,
-                reason: format!("create consumer: {}", redacted_client_error(&e)),
+                reason: format!("create consumer: {reason}"),
             })?;
         consumer
             .subscribe(&[&self.config.topic])

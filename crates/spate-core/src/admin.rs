@@ -30,6 +30,7 @@ use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use tokio::net::TcpListener;
 use tokio::sync::watch;
+use tokio::task::JoinSet;
 
 /// Renders the current metrics exposition snapshot.
 pub type RenderFn = Arc<dyn Fn() -> String + Send + Sync>;
@@ -219,16 +220,16 @@ impl AdminServer {
     }
 
     /// Accept and serve connections until `shutdown` observes `true`.
-    /// Probe connections are short-lived; in-flight requests finish on
-    /// their detached tasks after this returns.
+    /// Every open connection is closed when this returns.
     pub async fn run(self, mut shutdown: watch::Receiver<bool>) -> io::Result<()> {
+        let mut conns = JoinSet::new();
         loop {
             tokio::select! {
                 accepted = self.listener.accept() => {
                     let (stream, _peer) = accepted?;
                     let render = self.render.clone();
                     let health = Arc::clone(&self.health);
-                    tokio::spawn(async move {
+                    conns.spawn(async move {
                         let io = hyper_util::rt::TokioIo::new(stream);
                         let service = service_fn(move |req| {
                             let render = render.clone();
@@ -242,6 +243,16 @@ impl AdminServer {
                             tracing::debug!(error = %err, "admin connection error");
                         }
                     });
+                }
+                Some(joined) = conns.join_next(), if !conns.is_empty() => {
+                    if let Err(err) = joined
+                        && let Ok(payload) = err.try_into_panic()
+                    {
+                        tracing::error!(
+                            panic = crate::task::panic_text(&*payload),
+                            "admin connection panicked"
+                        );
+                    }
                 }
                 changed = shutdown.changed() => {
                     if changed.is_err() || *shutdown.borrow() {
@@ -298,6 +309,7 @@ fn plain(status: StatusCode, body: &'static str) -> Response<Full<Bytes>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::sync::mpsc;
 
     fn thresholds(stale_ms: u64, stuck_ms: u64) -> HealthThresholds {
         HealthThresholds {
@@ -423,6 +435,145 @@ mod tests {
             .map(|(_, b)| b.to_owned())
             .unwrap_or_default();
         (status, body)
+    }
+
+    /// Writes all of `bytes` to `stream`.
+    async fn write_all(stream: &tokio::net::TcpStream, bytes: &[u8]) {
+        let mut written = 0;
+        while written < bytes.len() {
+            stream.writable().await.expect("writable");
+            match stream.try_write(&bytes[written..]) {
+                Ok(n) => written += n,
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(e) => panic!("write failed: {e}"),
+            }
+        }
+    }
+
+    /// Reads from `stream` until `done` holds for what was read, or the peer
+    /// closes. Returns what was read.
+    async fn read_until(stream: &tokio::net::TcpStream, done: impl Fn(&[u8]) -> bool) -> Vec<u8> {
+        let mut buf = Vec::new();
+        while !done(&buf) {
+            stream.readable().await.expect("readable");
+            let mut chunk = [0u8; 4096];
+            match stream.try_read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => break,
+                Err(e) => panic!("read failed: {e}"),
+            }
+        }
+        buf
+    }
+
+    /// Pins that a kept-alive connection is closed when `run` returns: the
+    /// client reads end of stream and the connection releases the health
+    /// state it held.
+    #[tokio::test]
+    async fn a_kept_alive_connection_ends_when_run_returns() {
+        let health = HealthState::new(0, HealthThresholds::default());
+        let server = AdminServer::bind(
+            "127.0.0.1:0".parse().expect("addr"),
+            None,
+            Arc::clone(&health),
+        )
+        .await
+        .expect("bind");
+        let addr = server.local_addr();
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let running = tokio::spawn(server.run(shutdown_rx));
+
+        let stream = tokio::net::TcpStream::connect(addr).await.expect("connect");
+        write_all(&stream, b"GET /healthz HTTP/1.1\r\nHost: admin\r\n\r\n").await;
+        let response = read_until(&stream, |b| b.ends_with(b"\r\n\r\nok")).await;
+        assert!(
+            response.starts_with(b"HTTP/1.1 200"),
+            "{}",
+            String::from_utf8_lossy(&response)
+        );
+
+        shutdown_tx.send(true).expect("signal shutdown");
+        running
+            .await
+            .expect("server task joins")
+            .expect("clean shutdown");
+        let rest = tokio::time::timeout(Duration::from_secs(30), read_until(&stream, |_| false))
+            .await
+            .expect("the connection closes when run returns");
+        assert_eq!(rest, b"");
+        assert_eq!(
+            Arc::strong_count(&health),
+            1,
+            "the connection still holds the health state"
+        );
+    }
+
+    /// Pins that a connection whose request panics is logged once at
+    /// `ERROR` with the panic's text, while the server keeps running.
+    #[test]
+    fn a_panicking_connection_is_logged() {
+        #[derive(Clone)]
+        struct Lines(mpsc::UnboundedSender<String>);
+        impl std::io::Write for Lines {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                let _ = self.0.send(String::from_utf8_lossy(bytes).into_owned());
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let (lines_tx, mut lines_rx) = mpsc::unbounded_channel();
+        let writer = Lines(lines_tx);
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || writer.clone())
+            .with_ansi(false)
+            .without_time()
+            .with_target(false)
+            .with_max_level(tracing::Level::ERROR)
+            .finish();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        tracing::subscriber::with_default(subscriber, || {
+            runtime.block_on(async {
+                let health = HealthState::new(0, HealthThresholds::default());
+                let render: RenderFn = Arc::new(|| panic!("render boom"));
+                let server =
+                    AdminServer::bind("127.0.0.1:0".parse().expect("addr"), Some(render), health)
+                        .await
+                        .expect("bind");
+                let addr = server.local_addr();
+                let (shutdown_tx, shutdown_rx) = watch::channel(false);
+                let running = tokio::spawn(server.run(shutdown_rx));
+
+                let stream = tokio::net::TcpStream::connect(addr).await.expect("connect");
+                write_all(&stream, b"GET /metrics HTTP/1.1\r\nHost: admin\r\n\r\n").await;
+                let line = tokio::time::timeout(Duration::from_secs(30), lines_rx.recv())
+                    .await
+                    .expect("a line within the deadline")
+                    .expect("the subscriber is alive");
+                assert_eq!(
+                    line.trim(),
+                    r#"ERROR admin connection panicked panic="render boom""#
+                );
+
+                let (status, _) = get(addr, "/healthz").await;
+                assert_eq!(
+                    status, 200,
+                    "the server serves on after a connection panics"
+                );
+                shutdown_tx.send(true).expect("signal shutdown");
+                running
+                    .await
+                    .expect("server task joins")
+                    .expect("clean shutdown");
+                assert!(lines_rx.try_recv().is_err(), "one line only");
+            });
+        });
     }
 
     #[tokio::test]

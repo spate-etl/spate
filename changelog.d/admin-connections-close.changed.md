@@ -1,0 +1,3 @@
+**`AdminServer::run` closes every open connection when it returns** (`spate-core`)
+
+When `AdminServer::run` returns, it closes every connection it accepted, including a kept-alive connection and one whose request is still in progress. In previous versions each connection ran on a detached task that kept serving after `run` returned, until the client closed it or the tokio runtime shut down. A client that holds an admin connection open sees it close when the pipeline stops serving the admin endpoints. A connection whose request panics is logged at `ERROR` with the message `admin connection panicked`.

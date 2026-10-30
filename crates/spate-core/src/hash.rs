@@ -1,7 +1,7 @@
 //! Hash map and set aliases over seeded fast hashers.
 //!
-//! Every map in Spate picks one of two hashers. [`FastMap`] and [`FastSet`]
-//! are for keys Spate produces: partitions, sequence numbers, metric labels.
+//! A map takes one of two hashers. [`FastMap`] and [`FastSet`] are for keys
+//! Spate produces: partitions, sequence numbers, metric labels.
 //! [`QualityMap`] and [`QualitySet`] are for keys an outside party chooses,
 //! such as payload object keys or column values: their hasher adds a final
 //! mix that spreads every input bit into the bits the table indexes on.
@@ -44,8 +44,15 @@ pub type QualitySet<T> = std::collections::HashSet<T, QualityState>;
 macro_rules! seeded_state {
     ($(#[$state_doc:meta])* $state:ident, $(#[$hasher_doc:meta])* $hasher:ident, $inner:ident) => {
         $(#[$state_doc])*
-        #[derive(Clone, Debug, Default)]
+        #[derive(Clone, Default)]
         pub struct $state(foldhash::$inner::RandomState);
+
+        // Kept off the derive, which would print the seed.
+        impl std::fmt::Debug for $state {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.debug_struct(stringify!($state)).finish_non_exhaustive()
+            }
+        }
 
         impl BuildHasher for $state {
             type Hasher = $hasher;
@@ -181,5 +188,49 @@ mod tests {
         }
         check(&FastState::default());
         check(&QualityState::default());
+    }
+
+    /// A state's `Debug` names the state and prints no seed.
+    #[test]
+    fn state_debug_hides_the_seed() {
+        assert_eq!(format!("{:?}", FastState::default()), "FastState { .. }");
+        assert_eq!(
+            format!("{:?}", QualityState::default()),
+            "QualityState { .. }"
+        );
+    }
+
+    /// Two inputs differing only in the top bit of a write's width hash
+    /// differently, so no forwarded write narrows its value.
+    #[test]
+    fn each_write_keeps_its_top_bit() {
+        fn check<S: BuildHasher>(s: &S) {
+            assert_ne!(s.hash_one(1_u8), s.hash_one(1_u8 | 1 << 7), "write_u8");
+            assert_ne!(s.hash_one(1_u16), s.hash_one(1_u16 | 1 << 15), "write_u16");
+            assert_ne!(s.hash_one(1_u32), s.hash_one(1_u32 | 1 << 31), "write_u32");
+            assert_ne!(s.hash_one(1_u64), s.hash_one(1_u64 | 1 << 63), "write_u64");
+            assert_ne!(
+                s.hash_one(1_u128),
+                s.hash_one(1_u128 | 1 << 127),
+                "write_u128"
+            );
+            let top = 1_usize << (usize::BITS - 1);
+            assert_ne!(
+                s.hash_one(1_usize),
+                s.hash_one(1_usize | top),
+                "write_usize"
+            );
+        }
+        check(&FastState::default());
+        check(&QualityState::default());
+    }
+
+    /// Each state wraps the foldhash variant its docs name.
+    #[test]
+    fn each_state_wraps_its_foldhash_variant() {
+        let quality = std::any::type_name_of_val(&QualityState::default().0);
+        assert!(quality.starts_with("foldhash::quality::"), "{quality}");
+        let fast = std::any::type_name_of_val(&FastState::default().0);
+        assert!(fast.starts_with("foldhash::fast::"), "{fast}");
     }
 }

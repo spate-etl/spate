@@ -225,6 +225,38 @@ property (see [the invariants](../../../../INVARIANTS.md#inv-1)). A
 dead-letter queue deleted after the pipeline starts loses the units moved to
 it.
 
+## Redriving dead-lettered units
+
+A job with no `location` keeps running past the units in its dead-letter
+queue, which `spate_feed_dead_letter_units` counts
+([Metrics](../../../../METRICS.md#feed-spate_feed_)). A unit there is read
+again only once it is moved back to the queue with SQS's dead-letter queue
+redrive
+([AWS](https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/sqs-configure-dead-letter-queue-redrive.html)):
+**Start DLQ redrive** in the console, or `StartMessageMoveTask` with the
+dead-letter queue as its source.
+
+A redriven unit is read from its start, as any delivery is. Its body carries
+everything the source reads, so the records it delivered before it failed
+reach the sink again. SQS stores each redriven message as a new one, with a
+new message ID and its retention counted from the redrive. A storage
+notification's unit takes the new message ID as its id, which the source's log
+lines name.
+
+A redrive moves every message in the dead-letter queue and filters none. A
+unit whose cause persists returns to the dead-letter queue after
+`maxReceiveCount` more receives, so a redrive started before the cause is fixed
+moves the units back unread. The
+[S3 source](../../sources/s3/README.mdx#object-errors-fail-the-unit) says which
+of its failures persist. Until the redrive, the dead-letter queue's
+[retention](#retention), counted from the unit's first send, deletes it.
+
+The identity that starts a redrive needs `sqs:StartMessageMoveTask`,
+`sqs:ReceiveMessage`, `sqs:DeleteMessage` and `sqs:GetQueueAttributes` on the
+dead-letter queue and `sqs:SendMessage` on the queue, plus `kms:Decrypt` and
+`kms:GenerateDataKey` on the keys of encrypted queues. A worker's role holds
+none of the redrive actions.
+
 ## Ending a bounded job
 
 A [bounded job](../../sources/s3/README.mdx#how-a-bounded-job-ends) reads the

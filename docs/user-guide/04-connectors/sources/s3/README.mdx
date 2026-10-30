@@ -942,6 +942,16 @@ dead-lettered unit ends **stalled**, which is fatal, so `run()` returns
 `ExitState::Failed` rather than a silently partial `Completed`, as
 [How a bounded job ends](#how-a-bounded-job-ends) describes.
 
+A unit moved back from the dead-letter destination, as the
+[SQS feed](../../feeds/sqs/README.mdx#redriving-dead-lettered-units) describes,
+is read again from its start. One that failed on `retries_exhausted` reads in
+full once the store answers again. One that failed on `not_found` or
+`undecodable`, or a listed unit that failed on `etag_drift`, fails the same way
+on its next delivery unless its object has changed since. So does a
+notification the source refuses (see
+[Storage notifications](#storage-notifications)). Each object failure logs a
+WARN naming the unit, its `reason` and the key.
+
 A key the S3 client cannot address fails as well. The client rejects a key
 with an empty segment (`d//x.ndjson`), a `.` or `..` segment, or an ASCII
 control character, and reads a key that starts or ends with `/` under a

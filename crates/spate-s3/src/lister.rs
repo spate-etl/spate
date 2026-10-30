@@ -30,7 +30,8 @@ use object_store::path::Path;
 use object_store::{ObjectStore, ObjectStoreExt as _, PutMode, PutPayload};
 use spate_core::error::{ErrorClass, SourceError};
 use spate_core::feed::{Confirmation, Feed, FeedErrorKind, Unit};
-use std::collections::{HashMap, HashSet, VecDeque};
+use spate_core::hash::{QualityMap, QualitySet};
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -192,7 +193,8 @@ impl Lister {
         let mut written = start;
         let mut candidate: Option<Path> = None;
         let mut since_write = 0;
-        let mut unaddressable_seen = HashSet::new();
+        // Object keys are chosen by whoever writes the bucket.
+        let mut unaddressable_seen = QualitySet::default();
         while let Some(meta) = listing.next().await {
             let meta = meta.map_err(|e| SourceError::Client {
                 class: classify(&e),
@@ -346,7 +348,7 @@ impl Lister {
     async fn publish_unaddressable(
         &self,
         pending: &mut VecDeque<Pending>,
-        seen: &mut HashSet<String>,
+        seen: &mut QualitySet<String>,
         published: &mut Published,
     ) -> Result<(), SourceError> {
         let Some(keys) = &self.unaddressable else {
@@ -390,7 +392,9 @@ impl Lister {
 /// records.
 fn largest_per_key(entries: Vec<ObjectEntry>) -> Vec<ObjectEntry> {
     let mut kept: Vec<ObjectEntry> = Vec::with_capacity(entries.len());
-    let mut at: HashMap<String, usize> = HashMap::with_capacity(entries.len());
+    // Object keys are chosen by whoever writes the bucket.
+    let mut at: QualityMap<String, usize> =
+        QualityMap::with_capacity_and_hasher(entries.len(), Default::default());
     for entry in entries {
         match at.get(&entry.key) {
             Some(&i) if entry.size > kept[i].size => kept[i] = entry,
@@ -772,7 +776,7 @@ mod tests {
     use crate::split::SplitRange;
     use crate::testutil::{Event, EventLog, PutAnswer};
     use spate_core::feed::FeedErrorKind;
-    use std::collections::HashSet;
+    use spate_core::hash::{FastMap, FastSet};
 
     const LOCATION: &str = "s3://ops/jobs/a/";
     const CHECKPOINT: &str = "jobs/a/checkpoint";
@@ -1053,7 +1057,7 @@ mod tests {
             "data/b is read in four ranges"
         );
         let events = job.events.lock().unwrap().clone();
-        let mut confirmed = HashSet::new();
+        let mut confirmed = FastSet::default();
         let mut written = Vec::new();
         for event in &events {
             match event {
@@ -2837,13 +2841,13 @@ mod tests {
         rt.block_on(run).unwrap().unwrap();
 
         let published = feed.published.lock().unwrap().clone();
-        let mut per_unit: HashMap<&str, usize> = HashMap::new();
+        let mut per_unit: FastMap<&str, usize> = FastMap::default();
         for (id, _, _) in &published {
             *per_unit.entry(id.as_str()).or_default() += 1;
         }
         assert!(per_unit.values().any(|&n| n >= 2), "{published:?}");
         let events = job.events.lock().unwrap().clone();
-        let mut confirmed = HashSet::new();
+        let mut confirmed = FastSet::default();
         let mut writes = 0;
         for event in &events {
             match event {

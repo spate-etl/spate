@@ -349,7 +349,7 @@ it appends it, so the work topic's retention counts from the copy, and the
 copy is read after the units already on its partition.
 
 A unit whose cause persists returns to the dead-letter topic after
-`attempt_cap` more reads, so copy it back once the cause is fixed. The
+`attempt_cap` more reads. Once the cause is fixed, copy the unit back. The
 [S3 source](../../sources/s3/README.mdx#object-errors-fail-the-unit) says which
 of its failures persist. A message whose key is not UTF-8 names no unit, and
 its copy goes back to the dead-letter topic at once, unread. Until it is
@@ -357,8 +357,8 @@ copied, the dead-letter topic's [retention](#topics), counted from the move,
 deletes the unit.
 
 The gauge never falls, so it cannot show which units were copied back. Copy
-with a consumer in a group of its own, never the feed's `group_id`, and commit
-each offset once the copy's write is confirmed. That group's lag on the
+with a consumer in a group of its own. Once a copy's write is confirmed, commit
+its offset. That group's lag on the
 dead-letter topic is what is left to copy. A copier that stops between a write
 and its commit copies those messages again, and each copy is read.
 

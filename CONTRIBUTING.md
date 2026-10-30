@@ -131,23 +131,23 @@ settled.
 - **One constructor.** Build each client in one private function, and ban the
   library's constructors in `clippy.toml` the way the rdkafka entries do. A test
   or example that builds a raw client takes an `expect` naming why (ADR-0088).
-- **Settings in three layers.** Your defaults first, then the passthrough, which
-  may replace any of them, then the settings a guarantee depends on. Apply those
-  last, and refuse them in the passthrough at load under every spelling the
-  library accepts
+- **Settings in three layers.** The passthrough replaces any of your defaults,
+  whether you apply the default first or only where the passthrough leaves its
+  key unset. The settings a guarantee depends on go last, and the passthrough
+  refuses them at load under every spelling the library accepts
   ([ADR-0009](docs/adr/0009-yaml-configuration-with-opaque-passthrough.md),
   [ADR-0018](docs/adr/0018-kafka-sink-forced-durability.md), ADR-0088). #1537
   moves the refusal into one `spate-core` check.
 - **Public types.** Keep the client and its config types out of `spate-core`'s
-  public API and public trait bounds. A connector crate that re-exports its
-  client crate documents the re-export as exempt (INV-6,
-  [ADR-0011](docs/adr/0011-msrv-and-dependency-policy.md)).
+  public API, and keep 0.x dependency types out of any public trait bound. A
+  connector crate that re-exports its client crate documents the re-export as
+  exempt (INV-6, [ADR-0011](docs/adr/0011-msrv-and-dependency-policy.md)).
 - **Trust roots.** On rustls, trust the system store and fall back to the
   Mozilla bundle with a warning when it yields no usable certificate. Where a
   library verifies through the platform's own verifier, as reqwest does on
-  Apple, Windows and Android, keep it. A `root_ca` key adds to the system roots, fails
-  at load naming the key and the path when the file does not give a usable
-  certificate, and is refused when no endpoint is `https://`. Kafka, on
+  Apple, Windows and Android, keep it. A `root_ca` key adds to the system
+  roots, fails at load naming the key and the path when the file does not give
+  a usable certificate, and is refused when no endpoint is `https://`. Kafka, on
   OpenSSL, takes its CA through the passthrough. #1542 decides where the shared
   code lives.
 - **Verification off.** An operator may turn certificate verification off only
@@ -164,10 +164,11 @@ settled.
 - **Identity.** Send a Spate client identity the passthrough can replace, as
   the Kafka clients' `client.id` default does.
 - **Logs.** Route a library's log callback to `tracing`, as
-  `SpateContext::log` does for librdkafka. A library that logs through the
-  `log` facade reaches `tracing` only when the application's subscriber bridges
-  it, which `tracing-subscriber`'s default `init()` does. Spate installs no
-  subscriber.
+  `SpateContext::log` does for librdkafka. `Pipeline::from_config` installs
+  the global subscriber through `spate_core::telemetry::init`, which does not
+  bridge the `log` facade, so a line a library writes only through `log` is
+  dropped. Use the library's own hook where it has one. #1554 decides whether
+  `spate-core` bridges `log`.
 - **Redaction.** Print every passthrough map through
   `spate_core::config::redact::map` and every URL through `redact::url`, in a
   hand-written `Debug` that destructures every field.

@@ -27,8 +27,10 @@ it (#1513). #1490 replaced the three builders with one factory,
 `client::Base`, and banned rdkafka's constructors in `clippy.toml`.
 
 On the second, the connectors that take a passthrough mostly agreed without a
-record saying so. Kafka and S3 apply their defaults, then the passthrough, which
-may replace any of them, and refuse at load a key the connector owns. Kafka
+record saying so. In Kafka and S3 the passthrough replaces any default and a key
+the connector owns is refused at load. S3 applies its defaults and then the
+passthrough; Kafka applies the passthrough and then each default the
+passthrough left unset. Kafka
 applies its owned keys after the passthrough, and refuses each under every
 librdkafka alias, because rdkafka's `ClientConfig` applies keys in hash order.
 The ClickHouse sink sets its owned insert settings before the user's
@@ -62,14 +64,16 @@ constructor. A test, an example, or a build that sends nothing (the S3 source
 builds an `object_store` store to parse a bucket out of its URL) calls the
 library's constructor under an `expect` that names why.
 
-Settings come in three layers, applied in this order:
+Settings come in three layers, each taking precedence over the one before:
 
 1. **Defaults.** Values the connector picks because the library's are worse for
    Spate, such as a timeout, a CA location or a client identity. The
    passthrough may replace any of them. Where the library also reads the
    environment, as `AmazonS3Builder::from_env` does, the environment sits below
    the defaults.
-2. **The passthrough.** The operator's map, applied over the defaults.
+2. **The passthrough.** The operator's map. A connector applies it over the
+   defaults, or applies a default only where the passthrough leaves its key
+   unset, as the Kafka factory does.
 3. **Owned settings.** Values a delivery or correctness guarantee depends on,
    such as the Kafka sink's `acks=all`. They are applied after the passthrough
    wherever the library allows, and a passthrough key naming one is refused at

@@ -223,10 +223,13 @@ impl AdminServer {
     /// Every open connection is closed when this returns.
     pub async fn run(self, mut shutdown: watch::Receiver<bool>) -> io::Result<()> {
         let mut conns = JoinSet::new();
-        loop {
+        let result = loop {
             tokio::select! {
                 accepted = self.listener.accept() => {
-                    let (stream, _peer) = accepted?;
+                    let (stream, _peer) = match accepted {
+                        Ok(accepted) => accepted,
+                        Err(err) => break Err(err),
+                    };
                     let render = self.render.clone();
                     let health = Arc::clone(&self.health);
                     conns.spawn(async move {
@@ -256,11 +259,15 @@ impl AdminServer {
                 }
                 changed = shutdown.changed() => {
                     if changed.is_err() || *shutdown.borrow() {
-                        return Ok(());
+                        break Ok(());
                     }
                 }
             }
-        }
+        };
+        // Aborting alone leaves each connection open until its task is next
+        // polled; waiting here closes them before `run` returns.
+        conns.shutdown().await;
+        result
     }
 }
 
@@ -468,7 +475,7 @@ mod tests {
         buf
     }
 
-    /// Pins that a kept-alive connection is closed when `run` returns: the
+    /// Pins that a kept-alive connection is closed by the time `run` returns: the
     /// client reads end of stream and the connection releases the health
     /// state it held.
     #[tokio::test]
@@ -483,31 +490,34 @@ mod tests {
         .expect("bind");
         let addr = server.local_addr();
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
-        let running = tokio::spawn(server.run(shutdown_rx));
+        let (client_tx, client_rx) = tokio::sync::oneshot::channel();
+        let _client = tokio::spawn(async move {
+            let stream = tokio::net::TcpStream::connect(addr).await.expect("connect");
+            write_all(&stream, b"GET /healthz HTTP/1.1\r\nHost: admin\r\n\r\n").await;
+            let response = read_until(&stream, |b| b.ends_with(b"\r\n\r\nok")).await;
+            shutdown_tx.send(true).expect("signal shutdown");
+            let _ = client_tx.send((stream, response));
+        });
 
-        let stream = tokio::net::TcpStream::connect(addr).await.expect("connect");
-        write_all(&stream, b"GET /healthz HTTP/1.1\r\nHost: admin\r\n\r\n").await;
-        let response = read_until(&stream, |b| b.ends_with(b"\r\n\r\nok")).await;
-        assert!(
-            response.starts_with(b"HTTP/1.1 200"),
-            "{}",
-            String::from_utf8_lossy(&response)
-        );
-
-        shutdown_tx.send(true).expect("signal shutdown");
-        running
-            .await
-            .expect("server task joins")
-            .expect("clean shutdown");
-        let rest = tokio::time::timeout(Duration::from_secs(30), read_until(&stream, |_| false))
-            .await
-            .expect("the connection closes when run returns");
-        assert_eq!(rest, b"");
+        // Awaited inline, so no other task runs between `run` returning and
+        // the count below.
+        server.run(shutdown_rx).await.expect("clean shutdown");
         assert_eq!(
             Arc::strong_count(&health),
             1,
             "the connection still holds the health state"
         );
+
+        let (stream, response) = client_rx.await.expect("the client finished");
+        assert!(
+            response.starts_with(b"HTTP/1.1 200"),
+            "{}",
+            String::from_utf8_lossy(&response)
+        );
+        let rest = tokio::time::timeout(Duration::from_secs(30), read_until(&stream, |_| false))
+            .await
+            .expect("the connection closes when run returns");
+        assert_eq!(rest, b"");
     }
 
     /// Pins that a connection whose request panics is logged once at

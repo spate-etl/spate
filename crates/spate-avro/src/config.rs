@@ -372,10 +372,12 @@ impl AvroDeserializerBuilder {
                 if !settings.prewarm_subjects.is_empty() {
                     let subjects = settings.prewarm_subjects.clone();
                     let cache = Arc::clone(&handle.cache);
-                    runtime.spawn(async move {
+                    let prewarm = async move {
                         crate::registry::prewarm(&http, &endpoint, &subjects, &cache, &rejection)
                             .await;
-                    });
+                    };
+                    // Detached: the pre-warm ends once it has walked the subject list.
+                    spate_core::task::spawn_on("avro-registry-prewarm", prewarm, runtime).detach();
                 }
                 SchemaSourceMode::Confluent {
                     registry: handle,

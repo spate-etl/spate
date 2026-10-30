@@ -480,7 +480,7 @@ pub(crate) fn spawn_fetcher(
     let (tx, mut rx) = mpsc::unbounded_channel::<u32>();
     let task_cache = Arc::clone(&cache);
     let task_rejection = Arc::clone(&rejection);
-    runtime.spawn(async move {
+    let fetcher = async move {
         // Ids with a fetch currently running: dedup across the concurrency.
         let mut in_flight: HashSet<u32> = HashSet::new();
         // Per-id backoff after transient failures.
@@ -541,7 +541,10 @@ pub(crate) fn spawn_fetcher(
                 }
             }
         }
-    });
+    };
+    // Detached: every deserializer holds a clone of the `RegistryHandle`, so
+    // no one clone can own the task. It ends when the last sender drops.
+    spate_core::task::spawn_on("avro-registry-fetcher", fetcher, runtime).detach();
     RegistryHandle {
         tx,
         cache,
@@ -906,6 +909,59 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    /// A clock whose every read panics.
+    struct PanickingClock;
+
+    impl spate_core::clock::Clock for PanickingClock {
+        fn now(&self) -> Instant {
+            panic!("clock read")
+        }
+    }
+
+    /// Pins that a panic in the fetcher task is logged at `ERROR` with the
+    /// task's name. The fetcher reads the clock first when it records the
+    /// backoff after a transient failure, here a `500`.
+    #[test]
+    fn a_fetcher_panic_is_logged_with_its_name() {
+        let lines = spate_test::capture_logs(tracing::Level::ERROR, || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .start_paused(true)
+                .build()
+                .unwrap()
+                .block_on(async {
+                    let url = serve_raw(
+                        "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n",
+                        Vec::new(),
+                        None,
+                    )
+                    .await;
+                    let cfg = config(&url, None);
+                    let handle = spawn_fetcher(
+                        http_client(None).unwrap(),
+                        Arc::new(Endpoint::new(&cfg).unwrap()),
+                        Rejection::default(),
+                        Duration::from_secs(60),
+                        SyncClock::new(Arc::new(PanickingClock)),
+                        &tokio::runtime::Handle::current(),
+                    );
+                    handle.request(1);
+                    // The receiver drops once the panicked task's future is
+                    // dropped, after the panic is logged.
+                    tokio::time::timeout(REQUEST_TIMEOUT * 2, handle.tx.closed())
+                        .await
+                        .expect("the fetcher ends");
+                });
+        });
+        assert_eq!(
+            lines,
+            vec![
+                r#"ERROR spate_core::task: background task panicked task="avro-registry-fetcher" panic="clock read""#
+                    .to_owned()
+            ]
+        );
     }
 
     /// An error body is kept trimmed and cut to [`ERROR_BODY_LIMIT`] bytes on

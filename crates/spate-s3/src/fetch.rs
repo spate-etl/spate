@@ -910,9 +910,6 @@ async fn retry_or_fail(
         });
     }
     *attempt += 1;
-    if let Some(c) = retries {
-        c.increment(1);
-    }
     if *attempt >= MAX_ATTEMPTS {
         return Err(SplitFailure::Poison(
             PoisonKind::RetriesExhausted,
@@ -938,6 +935,11 @@ async fn retry_or_fail(
     // Tokio's own timer, so a frozen test clock cannot hold a retrying
     // read.
     tokio::time::sleep(backoff).await;
+    // Counted once the backoff ends, so a fetcher aborted while it waits
+    // counts no attempt it never made.
+    if let Some(c) = retries {
+        c.increment(1);
+    }
     Ok(())
 }
 

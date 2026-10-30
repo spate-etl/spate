@@ -1840,6 +1840,75 @@ mod tests {
         assert_eq!(gets(), 1, "the fetcher retried after its lane dropped");
     }
 
+    /// Pins that `get_retries_total` counts only the GET attempts made beyond
+    /// the first, also when a lane drops during its fetcher's backoff.
+    #[test]
+    fn a_lane_dropped_during_backoff_counts_no_retry() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static GETS: AtomicU32 = AtomicU32::new(0);
+        fn failing_get(
+            _: &object_store::path::Path,
+        ) -> Option<object_store::Result<object_store::GetResult>> {
+            GETS.fetch_add(1, Ordering::SeqCst);
+            Some(Err(object_store::Error::Generic {
+                store: "test",
+                source: "injected get failure".into(),
+            }))
+        }
+        let gets = || GETS.load(Ordering::SeqCst);
+
+        let pipeline = unique_name("retries");
+        let rendered = render_local(|| {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_time()
+                .start_paused(true)
+                .build()
+                .unwrap();
+            let (mut reader, script, _idle_rt) = reader();
+            reader.parts.metrics = Some(S3Metrics::new(&Meter::with_namespace(
+                "s3",
+                pipeline.clone(),
+                "src",
+                "s3",
+            )));
+            reader.parts.store = Arc::new(crate::testutil::HookStore {
+                get: Some(failing_get),
+                ..crate::testutil::HookStore::default()
+            });
+            reader.parts.handle = rt.handle().clone();
+            reader.parts.retry_base = Duration::from_secs(1);
+            script.deliver(descriptor_unit(0));
+            start(&mut reader);
+            let lanes = lanes_added(poll(&mut reader));
+            assert_eq!(lanes.len(), 1);
+            rt.block_on(async {
+                tokio::time::timeout(Duration::from_secs(10), async {
+                    while gets() == 0 {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("the fetcher's first GET within the deadline");
+                // Into the backoff that follows the failed GET.
+                tokio::time::sleep(Duration::from_millis(1)).await;
+                drop(lanes);
+                tokio::time::sleep(Duration::from_secs(30)).await;
+            });
+        });
+        assert_eq!(gets(), 1, "one GET was made");
+        let retries = metric_value(
+            &rendered,
+            "spate_s3_get_retries_total",
+            &[("pipeline", pipeline.as_str())],
+        )
+        .expect("the counter is registered");
+        assert_eq!(
+            retries,
+            f64::from(gets() - 1),
+            "get_retries_total against the GET attempts beyond the first"
+        );
+    }
+
     /// Pins that a whole unit over an object that qualifies for ranges opens
     /// one lane per range up to `units_held`, and that every range shares
     /// the cursor's one copy of the object's entry.

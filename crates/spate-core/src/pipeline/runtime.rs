@@ -979,7 +979,19 @@ pub fn metrics_settings(config: &PipelineConfig) -> MetricsSettings {
 
 /// Probe the sinks at once and then periodically, keeping the
 /// sinks-connected half of `/readyz` current. Runs until aborted.
+///
+/// A panic in `probe` marks the sinks not connected, so readiness does not
+/// keep the last probe's answer once nothing updates it.
 pub(crate) async fn probe_sinks(probe: SinkProbeFn, health: Arc<HealthState>) {
+    struct NotConnectedOnPanic<'a>(&'a HealthState);
+    impl Drop for NotConnectedOnPanic<'_> {
+        fn drop(&mut self) {
+            if std::thread::panicking() {
+                self.0.set_sinks_connected(false);
+            }
+        }
+    }
+    let _guard = NotConnectedOnPanic(&health);
     loop {
         let connected = match probe().await {
             Ok(()) => true,

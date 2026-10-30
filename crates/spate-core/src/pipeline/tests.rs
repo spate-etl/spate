@@ -5146,3 +5146,37 @@ fn a_thread_with_no_lanes_flushes_at_its_lull_on_the_injected_clock() {
     h.shutdown.trigger();
     h.join.join().unwrap().unwrap();
 }
+
+/// Pins that a sink probe panicking after a successful probe turns readiness
+/// off, so `/readyz` does not keep the last answer once nothing updates it.
+#[test]
+fn a_panicking_probe_does_not_leave_readiness_stale() {
+    let health = crate::admin::HealthState::new(0, crate::admin::HealthThresholds::default());
+    health.set_assignment_received(true);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let probe: super::SinkProbeFn = {
+        let calls = Arc::clone(&calls);
+        Box::new(move || {
+            assert_eq!(calls.fetch_add(1, Ordering::SeqCst), 0, "the probe panics");
+            Box::pin(async { Ok(()) })
+        })
+    };
+    let joined = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .start_paused(true)
+        .build()
+        .unwrap()
+        .block_on(async {
+            let probing = crate::task::spawn(
+                "sink-probe",
+                super::runtime::probe_sinks(probe, Arc::clone(&health)),
+            );
+            // Time is paused, so the 30 s recheck passes at once.
+            tokio::time::timeout(Duration::from_secs(120), probing)
+                .await
+                .expect("the probe loop ends within the deadline")
+        });
+    assert!(joined.unwrap_err().is_panic());
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert!(!health.ready(), "readiness kept the last probe's answer");
+}

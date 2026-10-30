@@ -236,17 +236,18 @@ redrive
 **Start DLQ redrive** in the console, or `StartMessageMoveTask` with the
 dead-letter queue as its source.
 
-A redriven unit is read from its start, as any delivery is. Its body carries
-everything the source reads, so the records it delivered before it failed
+A redriven unit is read from its start, as any delivery is, and its body
+carries everything the source reads. The records it delivered before it failed
 reach the sink again. SQS stores each redriven message as a new one, with a
 new message ID and its retention counted from the redrive. A storage
-notification's unit takes the new message ID as its id, which the source's log
-lines name.
+notification's unit takes its message ID as its id, so the source's log lines
+name a redriven one by the new ID. A unit the source re-enqueued may keep its
+earlier id.
 
 A redrive moves every message in the dead-letter queue and filters none. A
-unit whose cause persists returns to the dead-letter queue after
-`maxReceiveCount` more receives, so a redrive started before the cause is fixed
-moves the units back unread. The
+unit whose cause persists returns to the dead-letter queue once its receives
+reach `maxReceiveCount` again, so a redrive started before the cause is fixed
+sends the units back there. The
 [S3 source](../../sources/s3/README.mdx#object-errors-fail-the-unit) says which
 of its failures persist. Until the redrive, the dead-letter queue's
 [retention](#retention), counted from the unit's first send, deletes it.
@@ -254,8 +255,9 @@ of its failures persist. Until the redrive, the dead-letter queue's
 The identity that starts a redrive needs `sqs:StartMessageMoveTask`,
 `sqs:ReceiveMessage`, `sqs:DeleteMessage` and `sqs:GetQueueAttributes` on the
 dead-letter queue and `sqs:SendMessage` on the queue, plus `kms:Decrypt` and
-`kms:GenerateDataKey` on the keys of encrypted queues. A worker's role holds
-none of the redrive actions.
+`kms:GenerateDataKey` on the keys of encrypted queues. A worker's role lacks
+`sqs:StartMessageMoveTask` and the receive and delete on the dead-letter
+queue.
 
 ## Ending a bounded job
 

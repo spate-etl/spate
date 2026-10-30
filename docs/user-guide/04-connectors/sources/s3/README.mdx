@@ -945,12 +945,14 @@ dead-lettered unit ends **stalled**, which is fatal, so `run()` returns
 A unit moved back from the dead-letter destination, as the
 [SQS feed](../../feeds/sqs/README.mdx#redriving-dead-lettered-units) describes,
 is read again from its start. One that failed on `retries_exhausted` reads in
-full once the store answers again. One that failed on `not_found` or
-`undecodable`, or a listed unit that failed on `etag_drift`, fails the same way
-on its next delivery unless its object has changed since. So does a
-notification the source refuses (see
-[Storage notifications](#storage-notifications)). Each object failure logs a
-WARN naming the unit, its `reason` and the key.
+full once the store answers again. A listed unit keeps the ETag its listing
+saw, so once its object has changed it fails as `etag_drift` on every delivery.
+A unit that failed on `not_found` or `undecodable` fails the same way while its
+object stays deleted or unchanged. A notification unit that failed on
+`etag_drift`, and a notification the source refuses (see
+[Storage notifications](#storage-notifications)), fail the same way on every
+delivery. Each object failure logs a WARN naming the unit, its `reason` and the
+key.
 
 A key the S3 client cannot address fails as well. The client rejects a key
 with an empty segment (`d//x.ndjson`), a `.` or `..` segment, or an ASCII

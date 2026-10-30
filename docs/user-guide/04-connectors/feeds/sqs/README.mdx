@@ -336,6 +336,9 @@ queue receives the bucket's notifications only when
 The bucket's side, and which records the source reads, are on the
 [S3 source](../../sources/s3/README.mdx#storage-notifications) page.
 
+[`s3_sqs_notifications.rs`](repo:crates/spate/examples/s3_sqs_notifications.rs)
+reads a bucket's notifications from a queue as a continuous job.
+
 ## Cost per request
 
 Each unit costs a send, a receive and a delete, each batched up to ten to a

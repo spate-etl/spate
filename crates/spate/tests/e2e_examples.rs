@@ -41,7 +41,7 @@ use rdkafka::ClientConfig;
 use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::producer::{BaseProducer, BaseRecord, Producer};
 use spate_test::metric_sum;
-use spate_test_support::ElasticMq;
+use spate_test_support::{ACCESS_KEY, ElasticMq, REGION, S3Store, SECRET_KEY};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -1183,5 +1183,67 @@ fn s3_sqs_bounded_example_ends_on_its_own() {
             .expect("dead-letter queue counts"),
         (0, 0),
         "a unit reached the dead-letter queue\n--- log ---\n{log}"
+    );
+}
+
+/// `s3_sqs_notifications`: a continuous job on the `sqs` feed. The example
+/// writes its objects to the store and publishes their `ObjectCreated`
+/// notifications, the worker reads every object they announce and deletes
+/// each message once its records are written, and the job runs until
+/// `SIGTERM`. Nothing reaches the dead-letter queue.
+#[test]
+#[ignore = "requires Docker"]
+fn s3_sqs_notification_example_reads_every_object_until_sigterm() {
+    let mq = ElasticMq::start().expect("start ElasticMQ");
+    let store = S3Store::start(None).expect("start the S3 store");
+    store.create_bucket("events").expect("create the bucket");
+    let dead = mq
+        .create_queue_with_attributes("events-dlq", &[("MessageRetentionPeriod", "1209600")])
+        .expect("create the dead-letter queue");
+    let arn = mq.queue_arn(&dead).expect("dead-letter queue ARN");
+    let policy = format!(r#"{{"deadLetterTargetArn":"{arn}","maxReceiveCount":"5"}}"#);
+    let queue = mq
+        .create_queue_with_attributes("events", &[("RedrivePolicy", &policy)])
+        .expect("create the queue");
+
+    let mut example = spawn(
+        "s3_sqs_notifications",
+        None,
+        &[
+            ("S3_BUCKET", "events".to_owned()),
+            ("SQS_QUEUE_URL", format!("{}{queue}", mq.endpoint())),
+            ("AWS_ENDPOINT_URL", store.endpoint()),
+            ("AWS_ENDPOINT_URL_SQS", mq.endpoint()),
+            ("AWS_ALLOW_HTTP", "true".to_owned()),
+            ("AWS_REGION", REGION.to_owned()),
+            ("AWS_ACCESS_KEY_ID", ACCESS_KEY.to_owned()),
+            ("AWS_SECRET_ACCESS_KEY", SECRET_KEY.to_owned()),
+        ],
+    );
+    // The queue reads empty before the example publishes, so the wait starts
+    // from the publish line. A message is deleted only once the sink has
+    // written every record of the object it announces.
+    let log_path = example.log.clone();
+    example.wait_for("every notification deleted", || {
+        std::fs::read_to_string(&log_path)
+            .unwrap_or_default()
+            .lines()
+            .any(|l| l == "published 12 notifications")
+            && mq.approximate_counts(&queue).expect("queue counts") == (0, 0)
+    });
+    let log = example.terminate();
+
+    assert_eq!(
+        log.lines()
+            .filter(|l| *l == "pipeline exit: Completed; rows written: 240")
+            .count(),
+        1,
+        "expected one exit line\n--- log ---\n{log}"
+    );
+    assert_eq!(
+        mq.approximate_counts(&dead)
+            .expect("dead-letter queue counts"),
+        (0, 0),
+        "a notification reached the dead-letter queue\n--- log ---\n{log}"
     );
 }

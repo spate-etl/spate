@@ -4063,6 +4063,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "metrics",
+ "object_store",
  "rdkafka",
  "serde",
  "serde_json",

@@ -29,11 +29,12 @@ flate2 = { workspace = true }
 bytes = { workspace = true }
 clickhouse = { workspace = true }
 spate-test = { workspace = true }
-spate-test-support = { workspace = true, features = ["elasticmq"] }
+spate-test-support = { workspace = true, features = ["elasticmq", "s3"] }
 http-body-util = { workspace = true }
 hyper = { workspace = true, features = ["http1", "server"] }
 hyper-util = { workspace = true }
 metrics = { workspace = true }
+object_store = { workspace = true, features = ["aws"] }
 rdkafka = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -155,6 +156,10 @@ test = true
 
 [[example]]
 name = "s3_sqs_backfill"
+required-features = ["s3", "json", "sqs"]
+
+[[example]]
+name = "s3_sqs_notifications"
 required-features = ["s3", "json", "sqs"]
 
 [[example]]

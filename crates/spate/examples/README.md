@@ -84,6 +84,7 @@ The shapes a real deployment takes.
 | [`kafka_avro_to_clickhouse`](kafka_avro_to_clickhouse.rs) | How to load an Avro order stream from Kafka into ClickHouse with **Kafka, Avro and ClickHouse** | `kafka,clickhouse,avro` | Kafka, a schema registry and ClickHouse |
 | [`kafka_to_kafka_split`](kafka_to_kafka_split.rs) | How to fan an order stream out to per-region topics with **Kafka** | `kafka` | Kafka |
 | [`multi_table_split`](multi_table_split.rs) | How to route payments and refunds to a table each from one event stream with **Kafka and ClickHouse** | `kafka,clickhouse,avro` | Kafka and ClickHouse |
+| [`s3_sqs_notifications`](s3_sqs_notifications.rs) | How to run a continuous object-storage job on a bucket's storage notifications with **object storage and Amazon SQS** | `s3,json,sqs` | an S3 bucket, an SQS queue and a dead-letter queue, and AWS credentials |
 
 ## 3. Bounded jobs and scaling out
 

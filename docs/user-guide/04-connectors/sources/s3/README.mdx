@@ -525,6 +525,17 @@ measured run
 ([ADR-0072](../../../../adr/0072-missed-storage-notifications-are-not-reconciled-by-re-listing.md)).
 Spate does not re-list to find a notification the store never sent.
 
+[`s3_sqs_notifications.rs`](repo:crates/spate/examples/s3_sqs_notifications.rs)
+runs a continuous job on an SQS queue. Its `feed:` section names no
+`location`, so the job reads notifications until shutdown:
+
+```yaml file=crates/spate/examples/s3_sqs_notifications.rs region=feed title="s3_sqs_notifications.rs"
+```
+
+Of the supported stores only AWS S3 sends notifications to SQS, so on a local
+store the example writes its objects and publishes the notification for each
+itself.
+
 Each store needs its own settings for its notifications to arrive:
 
 - **AWS S3.** The bucket's notification configuration sends `s3:ObjectCreated:*`

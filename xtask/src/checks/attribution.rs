@@ -677,6 +677,27 @@ Prose.
         assert_eq!(summary(&rows), vec![("MIT", 2), ("ISC", 1), ("Zlib", 1)]);
     }
 
+    /// Ties stay in id order with enough ids that an unstable sort moves
+    /// equal elements, so the comparator alone sets their order.
+    #[test]
+    fn ties_in_a_long_summary_are_broken_by_id_ascending() {
+        let rows: Vec<String> = (0..64)
+            .flat_map(|i| {
+                let id = format!("L{i:02}");
+                (0..=i % 2).map(move |_| format!("| `c` | 1 | `{id}` |"))
+            })
+            .collect();
+        let rows: Vec<&str> = rows.iter().map(String::as_str).collect();
+        let mut want: Vec<(String, usize)> =
+            (0..64).map(|i| (format!("L{i:02}"), i % 2 + 1)).collect();
+        want.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        let got: Vec<(String, usize)> = summary(&rows)
+            .into_iter()
+            .map(|(id, n)| (id.to_owned(), n))
+            .collect();
+        assert_eq!(got, want);
+    }
+
     /// Rows whose order the comparator alone decides, each pair listed the
     /// wrong way round. One license id throughout, a name and a name it
     /// prefixes, two versions of one crate, and two rows tying on every key.

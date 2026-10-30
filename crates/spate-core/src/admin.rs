@@ -316,7 +316,7 @@ fn plain(status: StatusCode, body: &'static str) -> Response<Full<Bytes>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::sync::mpsc;
+    use tokio::sync::{mpsc, oneshot};
 
     fn thresholds(stale_ms: u64, stuck_ms: u64) -> HealthThresholds {
         HealthThresholds {
@@ -490,7 +490,7 @@ mod tests {
         .expect("bind");
         let addr = server.local_addr();
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
-        let (client_tx, client_rx) = tokio::sync::oneshot::channel();
+        let (client_tx, client_rx) = oneshot::channel();
         let _client = tokio::spawn(async move {
             let stream = tokio::net::TcpStream::connect(addr).await.expect("connect");
             write_all(&stream, b"GET /healthz HTTP/1.1\r\nHost: admin\r\n\r\n").await;

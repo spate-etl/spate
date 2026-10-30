@@ -17,9 +17,10 @@
 //!   the expected output has landed, signal, and require exit status 0 within
 //!   the drain deadline.
 //! - **Exit status is never the whole assertion.** Every example is asserted on
-//!   what it produced, and every example stopped by `SIGTERM` is additionally
-//!   asserted on the watermark its drain committed. Exit status 0 does not
-//!   imply one on a signal-initiated shutdown; see `Example::terminate`.
+//!   what it produced, and every example stopped by `SIGTERM` whose source
+//!   keeps a watermark is additionally asserted on the watermark its drain
+//!   committed. Exit status 0 does not imply one on a signal-initiated
+//!   shutdown; see `Example::terminate`.
 //!
 //! These are `#[ignore]`d and excluded from `[profile.docker]`'s default
 //! filter:
@@ -1245,5 +1246,16 @@ fn s3_sqs_notification_example_reads_every_object_until_sigterm() {
             .expect("dead-letter queue counts"),
         (0, 0),
         "a notification reached the dead-letter queue\n--- log ---\n{log}"
+    );
+    assert!(
+        !log.contains("was overwritten while it was read"),
+        "a notification's ETag did not match its object\n--- log ---\n{log}"
+    );
+    // A job with no `location` ends only at a shutdown, so the run must have
+    // drained on the signal.
+    assert_eq!(
+        log.matches("shutdown signal received; draining").count(),
+        1,
+        "the job did not end on SIGTERM\n--- log ---\n{log}"
     );
 }

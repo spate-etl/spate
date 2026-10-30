@@ -89,6 +89,7 @@ pub use source::SourceMetrics;
 // `docs/adr/0008-metrics-facade.md`).
 pub use metrics::{Counter, Gauge, Histogram, SharedString};
 
+use crate::task::{self, TaskHandle};
 use metrics_exporter_prometheus::{BuildError, Matcher, PrometheusBuilder, PrometheusHandle};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
@@ -228,11 +229,17 @@ impl MetricsHandle {
         }
     }
 
-    /// Spawn the periodic upkeep task on the current tokio runtime.
-    #[must_use]
-    pub fn spawn_upkeep(&self, period: Duration) -> tokio::task::JoinHandle<()> {
+    /// Spawn the periodic upkeep task on the current tokio runtime, ticking
+    /// every `period`.
+    ///
+    /// The task runs until the returned handle drops, which stops it.
+    ///
+    /// # Panics
+    ///
+    /// When called outside a tokio runtime.
+    pub fn spawn_upkeep(&self, period: Duration) -> TaskHandle<()> {
         let this = self.clone();
-        tokio::spawn(async move {
+        task::spawn("metrics-upkeep", async move {
             let mut tick = tokio::time::interval(period);
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
@@ -376,6 +383,35 @@ mod tests {
     /// recorders do not help; the claim registry is process-wide.
     fn labels(component: &str) -> ComponentLabels {
         ComponentLabels::new("orders", component.to_owned(), "kafka")
+    }
+
+    /// Pins that dropping the upkeep handle stops the upkeep task, which
+    /// releases the handle clone it holds.
+    #[test]
+    fn dropping_the_upkeep_handle_stops_the_upkeep() {
+        let process = Arc::new(metrics_process::Collector::default());
+        let handle = MetricsHandle {
+            inner: Inner::Noop,
+            process: Some(Arc::clone(&process)),
+        };
+        tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .start_paused(true)
+            .build()
+            .unwrap()
+            .block_on(async {
+                let upkeep = handle.spawn_upkeep(Duration::from_secs(5));
+                tokio::task::yield_now().await;
+                assert_eq!(Arc::strong_count(&process), 3, "the task holds a clone");
+                drop(upkeep);
+                for _ in 0..10 {
+                    if Arc::strong_count(&process) == 2 {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+                assert_eq!(Arc::strong_count(&process), 2, "the task still runs");
+            });
     }
 
     /// On the event basis, end-to-end latency ages the oldest event time on

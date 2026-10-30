@@ -8,7 +8,8 @@ use crate::queue::{
     VisibilityEntry,
 };
 use crate::startup::QueueAttributes;
-use std::collections::{HashMap, VecDeque};
+use spate_core::hash::FastMap;
+use std::collections::VecDeque;
 use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -87,7 +88,7 @@ struct Script {
     delete_within: Vec<Option<Duration>>,
     /// Each queue's message counts, or the error a read of them fails with.
     /// A queue with neither reports all three as `0`.
-    counts: HashMap<String, Result<[u64; 3], CallError>>,
+    counts: FastMap<String, Result<[u64; 3], CallError>>,
     /// The queue URL of each attribute read, in order.
     attribute_reads: Vec<String>,
     next: u64,
@@ -361,7 +362,7 @@ impl QueueAttributes for ScriptedQueue {
         &'a self,
         queue_url: &'a str,
         names: &'static [&'static str],
-    ) -> BoxFuture<'a, Result<HashMap<String, String>, CallError>> {
+    ) -> BoxFuture<'a, Result<FastMap<String, String>, CallError>> {
         let answer = {
             let mut script = self.lock();
             script.attribute_reads.push(queue_url.to_owned());

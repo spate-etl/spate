@@ -1521,13 +1521,13 @@ impl startup::QueueAttributes for Hangs {
         &'a self,
         queue_url: &'a str,
         _names: &'static [&'static str],
-    ) -> BoxFuture<'a, Result<HashMap<String, String>, CallError>> {
+    ) -> BoxFuture<'a, Result<FastMap<String, String>, CallError>> {
         let hang = queue_url == self.url;
         Box::pin(async move {
             if hang {
                 std::future::pending::<()>().await;
             }
-            Ok(HashMap::from([
+            Ok(FastMap::from_iter([
                 (
                     "QueueArn".to_owned(),
                     "arn:aws:sqs:x:000000000000:jobs".to_owned(),
@@ -1931,8 +1931,8 @@ impl startup::QueueAttributes for Uncounted {
         &'a self,
         _queue_url: &'a str,
         _names: &'static [&'static str],
-    ) -> BoxFuture<'a, Result<HashMap<String, String>, CallError>> {
-        Box::pin(async { Ok(HashMap::new()) })
+    ) -> BoxFuture<'a, Result<FastMap<String, String>, CallError>> {
+        Box::pin(async { Ok(FastMap::default()) })
     }
 }
 

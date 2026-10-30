@@ -36,8 +36,9 @@ use spate_core::feed::{
     Confirmation, Confirmer, Delivery, Depth, DepthOf, DepthReading, Feed, FeedError,
     FeedErrorKind, FeedWaker, Receipt, Unit, confirmation, depth_reading,
 };
+use spate_core::hash::FastMap;
 use spate_core::task::{self, TaskHandle};
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::task::Poll;
 use std::time::Duration;
@@ -230,7 +231,7 @@ struct State {
     reader_active: bool,
     /// Received units not yet handed out, oldest first.
     buffered: VecDeque<u64>,
-    held: HashMap<u64, Held>,
+    held: FastMap<u64, Held>,
     next: u64,
     deletes: Vec<Settle>,
     fails: Vec<Settle>,

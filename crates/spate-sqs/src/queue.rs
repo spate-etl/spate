@@ -14,7 +14,7 @@ use aws_sdk_sqs::types::{
     MessageAttributeValue, MessageSystemAttributeName, QueueAttributeName,
     SendMessageBatchRequestEntry,
 };
-use std::collections::HashMap;
+use spate_core::hash::FastMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
@@ -126,7 +126,7 @@ impl SdkQueue {
         &self,
         queue_url: &str,
         names: &[&str],
-    ) -> Result<HashMap<String, String>, CallError> {
+    ) -> Result<FastMap<String, String>, CallError> {
         let out = self
             .client
             .get_queue_attributes()
@@ -151,7 +151,7 @@ impl QueueAttributes for SdkQueue {
         &'a self,
         queue_url: &'a str,
         names: &'static [&'static str],
-    ) -> BoxFuture<'a, Result<HashMap<String, String>, CallError>> {
+    ) -> BoxFuture<'a, Result<FastMap<String, String>, CallError>> {
         Box::pin(SdkQueue::attributes(self, queue_url, names))
     }
 }

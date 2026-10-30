@@ -14,7 +14,7 @@ use crate::error::{CallError, Class, SqsError};
 use crate::queue::BoxFuture;
 use serde::Deserialize;
 use spate_core::config::ConfigError;
-use std::collections::HashMap;
+use spate_core::hash::FastMap;
 use url::Url;
 
 /// The attributes read from the queue the feed reads. SQS refuses the whole
@@ -63,7 +63,7 @@ const SHOWN_VALUE_CHARS: usize = 32;
 ///
 /// A message naming the first count that is absent or is not a `u64`, with
 /// the value cut to 32 characters.
-pub(crate) fn counts(attributes: &HashMap<String, String>) -> Result<Counts, String> {
+pub(crate) fn counts(attributes: &FastMap<String, String>) -> Result<Counts, String> {
     let read = |name: &str| -> Result<u64, String> {
         let value = attributes
             .get(name)
@@ -88,7 +88,7 @@ pub(crate) trait QueueAttributes: Send + Sync + std::fmt::Debug {
         &'a self,
         queue_url: &'a str,
         names: &'static [&'static str],
-    ) -> BoxFuture<'a, Result<HashMap<String, String>, CallError>>;
+    ) -> BoxFuture<'a, Result<FastMap<String, String>, CallError>>;
 }
 
 /// What the checks read, for the log line at connect.
@@ -256,7 +256,7 @@ pub(crate) async fn check(
 
 /// `MessageRetentionPeriod` in seconds, or `None` when the queue does not
 /// report it as a number.
-fn seconds(attributes: &HashMap<String, String>) -> Option<u64> {
+fn seconds(attributes: &FastMap<String, String>) -> Option<u64> {
     attributes.get("MessageRetentionPeriod")?.parse().ok()
 }
 
@@ -310,7 +310,7 @@ mod tests {
             &'a self,
             _queue_url: &'a str,
             names: &'static [&'static str],
-        ) -> BoxFuture<'a, Result<HashMap<String, String>, CallError>> {
+        ) -> BoxFuture<'a, Result<FastMap<String, String>, CallError>> {
             use aws_sdk_sqs::config::http::HttpResponse;
             use aws_sdk_sqs::error::{ErrorMetadata, SdkError};
             use aws_sdk_sqs::operation::get_queue_attributes::GetQueueAttributesError;
@@ -403,7 +403,7 @@ mod tests {
     /// have, and a queue is FIFO when its `QueueArn` ends in `.fifo`.
     #[derive(Debug, Default)]
     struct Scripted {
-        queues: HashMap<String, Result<HashMap<String, String>, CallError>>,
+        queues: FastMap<String, Result<FastMap<String, String>, CallError>>,
         read: Mutex<Vec<String>>,
     }
 
@@ -411,7 +411,7 @@ mod tests {
         /// A queue with `attributes`, and each message count `attributes`
         /// leaves out reported as `0`.
         fn queue(mut self, url: &str, attributes: &[(&str, &str)]) -> Scripted {
-            let mut attributes: HashMap<String, String> = attributes
+            let mut attributes: FastMap<String, String> = attributes
                 .iter()
                 .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
                 .collect();
@@ -469,7 +469,7 @@ mod tests {
             &'a self,
             queue_url: &'a str,
             names: &'static [&'static str],
-        ) -> BoxFuture<'a, Result<HashMap<String, String>, CallError>> {
+        ) -> BoxFuture<'a, Result<FastMap<String, String>, CallError>> {
             self.read.lock().unwrap().push(queue_url.to_owned());
             let answer = match self.queues.get(queue_url) {
                 Some(Ok(all)) => {
@@ -737,7 +737,7 @@ mod tests {
     /// the last quoted at most 32 characters long.
     #[test]
     fn a_count_that_is_not_a_u64_fails_the_read() {
-        let attributes = |visible: &str| -> HashMap<String, String> {
+        let attributes = |visible: &str| -> FastMap<String, String> {
             [
                 ("ApproximateNumberOfMessages", visible),
                 ("ApproximateNumberOfMessagesDelayed", "2"),

@@ -296,9 +296,9 @@ mod tests {
     fn duplicate_key_names_the_key() {
         let err = check_no_duplicate_keys(br#"{"id":1,"id":2}"#).unwrap_err();
         assert!(err.is_data, "{err}");
-        assert!(
-            err.to_string().starts_with("duplicate object key `id`"),
-            "{err}"
+        assert_eq!(
+            err.to_string(),
+            "duplicate object key `id` at line 1 column 12"
         );
     }
 

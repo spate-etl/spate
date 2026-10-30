@@ -25,7 +25,6 @@ rustls-native-certs = { workspace = true }
 webpki-roots = { workspace = true }
 spate-core = { workspace = true }
 spate-clickhouse-derive = { workspace = true }
-foldhash = { workspace = true }
 humantime-serde = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }

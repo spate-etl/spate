@@ -998,7 +998,8 @@ fn validate_columns(columns: &[&str]) -> Result<(), ConfigError> {
     if columns.is_empty() {
         return fail("ClickHouseRow::COLUMNS must list at least one column".into());
     }
-    let mut seen = std::collections::HashSet::with_capacity(columns.len());
+    let mut seen =
+        spate_core::hash::FastSet::with_capacity_and_hasher(columns.len(), Default::default());
     for &col in columns {
         if !is_column_name(col) {
             return fail(format!(

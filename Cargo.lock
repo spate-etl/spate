@@ -4134,7 +4134,6 @@ dependencies = [
  "chrono",
  "cityhash-rs",
  "clickhouse",
- "foldhash",
  "gungraun",
  "http-body-util",
  "humantime-serde",

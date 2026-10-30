@@ -33,12 +33,12 @@ use spate::backpressure::InflightBudget;
 use spate::checkpoint::{AckRef, Checkpointer};
 use spate::deser::{Deserializer, EmitRecord, Owned, RecFamily};
 use spate::error::{DeserError, ErrorPolicy};
+use spate::hash::QualitySet;
 use spate::ops::{ChunkConfig, PushOutcome, chain_owned};
 use spate::record::{PartitionId, RawPayload, Record};
 use spate::sink::{KeyHashRouter, shard_queues};
 use spate::source::{LaneId, Source, SourceCtx, SourceEvent, SourceLane};
 use spate_test::{TestDeserializer, TestEncoder, memory_source};
-use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -106,7 +106,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let budget = Arc::new(InflightBudget::new());
 
     // ANCHOR: chain
-    let mut seen: HashSet<Vec<u8>> = HashSet::new();
+    let mut seen: QualitySet<Vec<u8>> = QualitySet::default();
     let mut chain = chain_owned::<Vec<u8>, _>(TestDeserializer::passthrough())
         // Custom operator #1: stateful deduplication. `flat_map` emits
         // 0..N records; emitting zero drops the duplicate. Its ack share is

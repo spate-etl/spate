@@ -25,7 +25,8 @@ cargo run -p spate --example custom_operator
 
 `flat_map` is the general form: one record in, zero to N records out.
 Emitting zero is how an operator drops a record. A dedup set is a closure
-capturing a `HashSet`:
+capturing a `QualitySet`, the set type for keys an outside party chooses,
+here record payloads:
 
 ```rust file=crates/spate/examples/custom_operator.rs region=chain
 ```

@@ -52,13 +52,13 @@
 // Examples talk to their user on stdout/stderr by design.
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
+use spate::hash::{FastMap, FastSet};
 use spate::prelude::*;
 use spate::record::stable_key_hash;
 use spate_datagen::storefront::StorefrontEvent;
 use spate_datagen::{DatagenSource, DatagenSourceConfig};
 use spate_json::JsonDeserializerBuilder;
 use spate_test::{TestEncoder, capture_sink, decode_rows};
-use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::time::Duration;
 
@@ -280,11 +280,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // already wrote, and a refund names a payment it already wrote. Compared
     // as sets rather than counts, because at-least-once permits a replayed
     // duplicate after a retry.
-    let placed: HashSet<u64> = order_shards.keys().copied().collect();
+    let placed: FastSet<u64> = order_shards.keys().copied().collect();
     for id in payment_shards.keys() {
         assert!(placed.contains(id), "payment for unplaced order {id}");
     }
-    let paid: HashSet<u64> = payment_shards.keys().copied().collect();
+    let paid: FastSet<u64> = payment_shards.keys().copied().collect();
     for id in refund_shards.keys() {
         assert!(paid.contains(id), "refund against uncaptured order {id}");
     }
@@ -347,9 +347,9 @@ fn to_ledger(event: StorefrontEvent) -> Ledger {
 }
 
 /// Every row one sink recorded, plus the shard each order id landed on.
-fn captured(script: &spate_test::SinkScript) -> (Vec<String>, HashMap<u64, usize>) {
+fn captured(script: &spate_test::SinkScript) -> (Vec<String>, FastMap<u64, usize>) {
     let mut rows = Vec::new();
-    let mut shards = HashMap::new();
+    let mut shards = FastMap::default();
     for write in script.writes() {
         for row in decode_rows(&write.payload) {
             let row = String::from_utf8_lossy(&row).into_owned();

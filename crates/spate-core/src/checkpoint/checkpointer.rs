@@ -16,7 +16,7 @@ use super::{AckMsg, AckRef, BatchId};
 use crate::clock::{SharedClock, SystemClock};
 use crate::error::FatalError;
 use crate::record::PartitionId;
-use std::collections::HashMap;
+type HashMap<K, V> = std::collections::HashMap<K, V, foldhash::fast::RandomState>;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Instant;
@@ -65,7 +65,7 @@ impl Clone for AckIssuer {
             reg_tx: self.reg_tx.clone(),
             shared_epoch: Arc::clone(&self.shared_epoch),
             local_epoch: self.local_epoch,
-            seqs: HashMap::new(),
+            seqs: HashMap::default(),
         }
     }
 }
@@ -173,8 +173,8 @@ impl Checkpointer {
             reg_rx,
             shared_epoch: Arc::new(AtomicU32::new(0)),
             epoch: 0,
-            trackers: HashMap::new(),
-            gates: HashMap::new(),
+            trackers: HashMap::default(),
+            gates: HashMap::default(),
             admitted_through: None,
             clock: Arc::new(SystemClock),
         }
@@ -199,7 +199,7 @@ impl Checkpointer {
             reg_tx: self.reg_tx.clone(),
             shared_epoch: Arc::clone(&self.shared_epoch),
             local_epoch: self.shared_epoch.load(Ordering::Acquire),
-            seqs: HashMap::new(),
+            seqs: HashMap::default(),
         }
     }
 
@@ -840,12 +840,12 @@ mod proptests {
             // the shared issuer also checks that no such re-admission occurs.
             let mut issuer = cp.handle();
             let mut offsets: std::collections::HashMap<PartitionId, i64> =
-                std::collections::HashMap::new();
+                std::collections::HashMap::default();
             // Held (unresolved) acks with the epoch they were issued under.
             let mut held: std::collections::VecDeque<(AckRef, u32, bool)> =
                 std::collections::VecDeque::new();
             let mut last_watermark: std::collections::HashMap<PartitionId, i64> =
-                std::collections::HashMap::new();
+                std::collections::HashMap::default();
 
             for op in ops {
                 match op {

@@ -23,6 +23,7 @@ raw-value = ["serde_json/raw_value"]
 simd = ["dep:simd-json"]
 
 [dependencies]
+foldhash = { workspace = true }
 spate-core = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

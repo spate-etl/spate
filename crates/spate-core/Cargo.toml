@@ -16,6 +16,7 @@ categories.workspace = true
 testing = []
 
 [dependencies]
+foldhash = { workspace = true }
 bytes = { workspace = true }
 bytesize = { workspace = true }
 core_affinity = { workspace = true }

@@ -20,7 +20,7 @@ use spate_core::checkpoint::AckRef;
 use spate_core::deser::{Deserializer, EmitRecord, Owned};
 use spate_core::error::DeserError;
 use spate_core::record::{RawPayload, Record};
-use std::collections::HashMap;
+type HashMap<K, V> = std::collections::HashMap<K, V, foldhash::fast::RandomState>;
 use std::io::{self, Read};
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -192,7 +192,7 @@ impl DecoderCore {
         DecoderCore {
             mode,
             reader_schema,
-            held: HashMap::new(),
+            held: HashMap::default(),
         }
     }
 

@@ -17,6 +17,7 @@ categories.workspace = true
 testing = []
 
 [dependencies]
+foldhash = { workspace = true }
 apache-avro = { workspace = true }
 ouroboros = { workspace = true }
 bytes = { workspace = true }

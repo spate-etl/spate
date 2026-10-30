@@ -4,7 +4,7 @@
 use apache_avro::Schema;
 use spate_core::clock::Clock;
 use spate_core::clock::SyncClock;
-use std::collections::HashMap;
+type HashMap<K, V> = std::collections::HashMap<K, V, foldhash::fast::RandomState>;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
@@ -132,7 +132,7 @@ pub(crate) struct SchemaCache {
 impl SchemaCache {
     pub(crate) fn new(negative_ttl: Duration, clock: SyncClock) -> Self {
         SchemaCache {
-            entries: RwLock::new(Arc::new(HashMap::new())),
+            entries: RwLock::new(Arc::new(HashMap::default())),
             negative_ttl,
             clock,
         }
@@ -140,7 +140,7 @@ impl SchemaCache {
 
     /// A fresh, empty memo for a newly built deserializer.
     pub(crate) fn empty_snapshot() -> CacheSnapshot {
-        CacheSnapshot(Arc::new(HashMap::new()))
+        CacheSnapshot(Arc::new(HashMap::default()))
     }
 
     fn snapshot(&self) -> CacheSnapshot {

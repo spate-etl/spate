@@ -41,7 +41,7 @@ use rustls_native_certs::CertificateResult;
 use serde::Deserialize;
 use spate_core::clock::SyncClock;
 use spate_core::config::redact;
-use std::collections::{HashMap, HashSet};
+use spate_core::hash::{QualityMap, QualitySet};
 use std::error::Error;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
@@ -483,9 +483,9 @@ pub(crate) fn spawn_fetcher(
     let task_rejection = Arc::clone(&rejection);
     let fetcher = async move {
         // Ids with a fetch currently running: dedup across the concurrency.
-        let mut in_flight: HashSet<u32> = HashSet::new();
+        let mut in_flight: QualitySet<u32> = QualitySet::default();
         // Per-id backoff after transient failures.
-        let mut backoff: HashMap<u32, Backoff> = HashMap::new();
+        let mut backoff: QualityMap<u32, Backoff> = QualityMap::default();
         let mut tasks: JoinSet<(u32, FetchOutcome)> = JoinSet::new();
         loop {
             tokio::select! {

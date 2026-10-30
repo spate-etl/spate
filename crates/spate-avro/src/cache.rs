@@ -4,7 +4,7 @@
 use apache_avro::Schema;
 use spate_core::clock::Clock;
 use spate_core::clock::SyncClock;
-use std::collections::HashMap;
+use spate_core::hash::QualityMap;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
@@ -106,7 +106,7 @@ enum Entry {
 /// steady-state repeated-id path (the overwhelmingly common case) never
 /// touches the shared lock at all. See [`SchemaCache::lookup`].
 #[derive(Clone, Debug)]
-pub(crate) struct CacheSnapshot(Arc<HashMap<u32, Entry>>);
+pub(crate) struct CacheSnapshot(Arc<QualityMap<u32, Entry>>);
 
 /// Shared schema cache.
 ///
@@ -122,7 +122,7 @@ pub(crate) struct CacheSnapshot(Arc<HashMap<u32, Entry>>);
 /// writes are rare and the memo removes reads from the shared path.
 #[derive(Debug)]
 pub(crate) struct SchemaCache {
-    entries: RwLock<Arc<HashMap<u32, Entry>>>,
+    entries: RwLock<Arc<QualityMap<u32, Entry>>>,
     negative_ttl: Duration,
     /// Stamps and ages negative entries. The fetcher and the pipeline
     /// threads read one clock, so they agree on whether an entry expired.
@@ -132,7 +132,7 @@ pub(crate) struct SchemaCache {
 impl SchemaCache {
     pub(crate) fn new(negative_ttl: Duration, clock: SyncClock) -> Self {
         SchemaCache {
-            entries: RwLock::new(Arc::new(HashMap::new())),
+            entries: RwLock::new(Arc::new(QualityMap::default())),
             negative_ttl,
             clock,
         }
@@ -140,7 +140,7 @@ impl SchemaCache {
 
     /// A fresh, empty memo for a newly built deserializer.
     pub(crate) fn empty_snapshot() -> CacheSnapshot {
-        CacheSnapshot(Arc::new(HashMap::new()))
+        CacheSnapshot(Arc::new(QualityMap::default()))
     }
 
     fn snapshot(&self) -> CacheSnapshot {
@@ -173,7 +173,7 @@ impl SchemaCache {
     }
 
     fn eval(
-        map: &HashMap<u32, Entry>,
+        map: &QualityMap<u32, Entry>,
         id: u32,
         ttl: Duration,
         clock: &dyn Clock,

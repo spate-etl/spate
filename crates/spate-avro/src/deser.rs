@@ -19,8 +19,8 @@ use apache_avro::reader::datum::GenericDatumReader;
 use spate_core::checkpoint::AckRef;
 use spate_core::deser::{Deserializer, EmitRecord, Owned};
 use spate_core::error::DeserError;
+use spate_core::hash::QualityMap;
 use spate_core::record::{RawPayload, Record};
-use std::collections::HashMap;
 use std::io::{self, Read};
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -123,7 +123,7 @@ pub(crate) struct DecoderCore {
     /// into `CompiledSchema`: that is keyed by writer id and carries no
     /// reader-schema identity, so a reader stored there is correct only while
     /// every consumer of one cache shares one reader schema.
-    held: HashMap<u32, HeldReader>,
+    held: QualityMap<u32, HeldReader>,
 }
 
 /// A clone starts with no held readers and builds its own on first payload.
@@ -192,7 +192,7 @@ impl DecoderCore {
         DecoderCore {
             mode,
             reader_schema,
-            held: HashMap::new(),
+            held: QualityMap::default(),
         }
     }
 

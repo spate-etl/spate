@@ -21,10 +21,10 @@ use spate_core::checkpoint::AckRef;
 use spate_core::clock::{Clock, TestClock};
 use spate_core::deser::{Deserializer, EmitRecord, RecFamily};
 use spate_core::error::DeserError;
+use spate_core::hash::FastMap;
 use spate_core::record::{Flow, Record};
 use spate_test::raw_payload;
 use spate_test_support::run_in_child;
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -44,7 +44,7 @@ struct Scripted {
 /// Stub registry: path → response script queue; unmatched paths 404.
 #[derive(Clone, Default)]
 struct StubRegistry {
-    routes: Arc<Mutex<HashMap<String, Vec<Scripted>>>>,
+    routes: Arc<Mutex<FastMap<String, Vec<Scripted>>>>,
     hits: Arc<AtomicUsize>,
     paths: Arc<Mutex<Vec<String>>>,
     /// While `true`, requests to `hold_path` block until released, which

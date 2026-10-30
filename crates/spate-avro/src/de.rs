@@ -77,7 +77,7 @@ use apache_avro::schema::{
     DecimalSchema, InnerDecimalSchema, RecordSchema, UnionSchema, UuidSchema,
 };
 use serde::de::{self, DeserializeSeed, Visitor};
-use std::collections::HashMap;
+use spate_core::hash::QualityMap;
 use std::fmt;
 
 /// Named types (record/enum/fixed) keyed by namespace (`""` for none),
@@ -85,7 +85,7 @@ use std::fmt;
 /// `Schema::Ref` resolves with two borrowed-key lookups, with no per-datum
 /// `ResolvedSchema` allocation and no rendered-fullname `String` per
 /// occurrence.
-pub(crate) type Names = HashMap<String, HashMap<String, Schema>>;
+pub(crate) type Names = QualityMap<String, QualityMap<String, Schema>>;
 
 /// Recursion bound for the schema/data walk. apache-avro has no
 /// decode-side depth guard at all; 128 comfortably covers real schemas
@@ -275,7 +275,7 @@ impl<'de> Cursor<'de> {
 pub(crate) fn compile_spec(schema: &Schema) -> Result<Names, String> {
     let resolved = apache_avro::schema::ResolvedSchema::try_from(schema)
         .map_err(|e| format!("schema references cannot be resolved: {e}"))?;
-    let mut names = Names::new();
+    let mut names = Names::default();
     for (name, s) in resolved.get_names() {
         names
             .entry(name.namespace().unwrap_or_default().to_owned())
@@ -283,7 +283,7 @@ pub(crate) fn compile_spec(schema: &Schema) -> Result<Names, String> {
             .insert(name.name().to_owned(), (*s).clone());
     }
     scan_supported(schema)?;
-    for named in names.values().flat_map(HashMap::values) {
+    for named in names.values().flat_map(|types| types.values()) {
         scan_supported(named)?;
     }
     Ok(names)
@@ -1773,7 +1773,7 @@ mod tests {
             {"name":"s","type":"string"}]}"#;
         let datum = avro_str("borrowed");
         let sch = schema(SCH);
-        let names = Names::new();
+        let names = Names::default();
         let got: R<'_> = decode_datum(&sch, &names, &datum).unwrap();
         let datum_range = datum.as_ptr() as usize..datum.as_ptr() as usize + datum.len();
         assert!(datum_range.contains(&(got.s.as_ptr() as usize)));

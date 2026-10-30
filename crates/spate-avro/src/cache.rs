@@ -118,7 +118,7 @@ pub(crate) struct CacheSnapshot(Arc<QualityMap<u32, Entry>>);
 /// already-`Ready` id costs *zero* shared-lock acquisitions. A read lock per
 /// payload would ping-pong the lock's cache line across pinned pipeline
 /// threads. Kept std-only on purpose (no
-/// `arc-swap` dependency): a plain `RwLock<Arc<HashMap>>` is enough because
+/// `arc-swap` dependency): a plain `RwLock<Arc<..>>` is enough because
 /// writes are rare and the memo removes reads from the shared path.
 #[derive(Debug)]
 pub(crate) struct SchemaCache {

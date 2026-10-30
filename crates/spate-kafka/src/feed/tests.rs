@@ -1315,6 +1315,16 @@ fn a_replaced_copy_at_the_gate_leaves_the_buffer_count() {
     assert_eq!(st.held_for_reader(), 1);
 }
 
+/// Stops the feed's core when dropped. Declared after a thread handle, it
+/// drops first, so the handle's join returns when the test panics.
+pub(super) struct StopOnDrop(pub(super) Arc<Core>);
+
+impl Drop for StopOnDrop {
+    fn drop(&mut self) {
+        super::stop(&self.0);
+    }
+}
+
 /// Run `f` on a thread of its own and report whether it returned within
 /// `limit`.
 fn returns_within(limit: Duration, f: impl FnOnce() + Send + 'static) -> bool {
@@ -3334,6 +3344,7 @@ mod cluster {
         .with_step(Duration::from_secs(3600))
         .spawn()
         .unwrap();
+        let _stop = super::StopOnDrop(Arc::clone(&core));
         {
             let mut st = core.lock();
             st.tracker.assign([super::tp(0)]);
@@ -3413,6 +3424,7 @@ mod cluster {
         .with_step(Duration::from_secs(3600))
         .spawn()
         .unwrap();
+        let _stop = super::StopOnDrop(Arc::clone(&core));
         {
             let mut st = core.lock();
             st.tracker.assign([super::tp(0)]);
@@ -4410,6 +4422,7 @@ mod docker {
             .unwrap()
             .spawn()
             .unwrap();
+        let _stop = super::StopOnDrop(Arc::clone(&core));
         let reader: BaseConsumer = raw_config()
             .set("bootstrap.servers", brokers)
             .build()

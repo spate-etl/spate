@@ -23,7 +23,7 @@
 use super::leaf::put_string;
 use crate::schema::typeparse::ChType;
 use bytes::{BufMut, BytesMut};
-use spate_core::hash::QualityMap;
+use spate_core::hash::FastMap;
 
 // `map` is keyed by row values a producer chooses, so it takes the quality
 // hasher.
@@ -37,7 +37,7 @@ use spate_core::hash::QualityMap;
 pub(crate) struct LowCard {
     nullable: bool,
     /// Dictionary-entry raw bytes → assigned index.
-    map: QualityMap<Vec<u8>, u64>,
+    map: FastMap<Vec<u8>, u64>,
     /// Accumulated dictionary entries, each `[VarUInt len][bytes]`.
     dict: BytesMut,
     dict_count: u64,
@@ -59,7 +59,7 @@ impl LowCard {
         };
         let mut lc = LowCard {
             nullable,
-            map: QualityMap::default(),
+            map: FastMap::default(),
             dict: BytesMut::new(),
             dict_count: 0,
             keys: Vec::new(),

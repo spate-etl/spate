@@ -76,8 +76,9 @@ pub(crate) struct RegistryHandle {
 
 impl RegistryHandle {
     /// Request an asynchronous fetch of `id`. Never blocks; duplicate
-    /// requests are deduplicated by the fetcher. A dropped fetcher (I/O
-    /// runtime shut down) makes this a no-op; the pipeline is draining.
+    /// requests are deduplicated by the fetcher. Once the fetcher has ended,
+    /// because the I/O runtime shut down or the fetcher panicked, this is a
+    /// no-op.
     pub(crate) fn request(&self, id: u32) {
         let _ = self.tx.send(id);
     }
@@ -491,13 +492,21 @@ pub(crate) fn spawn_fetcher(
                 biased;
                 // Drain finished fetches first so slots free promptly.
                 Some(joined) = tasks.join_next(), if !tasks.is_empty() => {
-                    let Ok((id, outcome)) = joined else {
-                        // The known panic source, apache-avro's
-                        // `Schema::parse_str`, is caught in `fetch_one`. A
-                        // `JoinError` carries no schema id, so that id stays in
-                        // `in_flight` and is never refetched.
-                        tracing::error!("registry fetch task panicked");
-                        continue;
+                    let (id, outcome) = match joined {
+                        Ok(done) => done,
+                        Err(err) => {
+                            // The known panic source, apache-avro's
+                            // `Schema::parse_str`, is caught in `fetch_one`. A
+                            // `JoinError` carries no schema id, so that id stays
+                            // in `in_flight` and is never refetched.
+                            if let Ok(payload) = err.try_into_panic() {
+                                tracing::error!(
+                                    panic = spate_core::task::panic_text(&*payload),
+                                    "registry fetch task panicked"
+                                );
+                            }
+                            continue;
+                        }
                     };
                     in_flight.remove(&id);
                     match outcome {
@@ -959,6 +968,75 @@ mod tests {
             lines,
             vec![
                 r#"ERROR spate_core::task: background task panicked task="avro-registry-fetcher" panic="clock read""#
+                    .to_owned()
+            ]
+        );
+    }
+
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// A clock that records its first read and then panics.
+    struct FlaggingPanicClock(Arc<AtomicBool>);
+
+    impl spate_core::clock::Clock for FlaggingPanicClock {
+        fn now(&self) -> Instant {
+            self.0.store(true, Ordering::SeqCst);
+            panic!("clock read")
+        }
+    }
+
+    /// Pins that a panic in a per-id fetch task reaches `tracing` with its
+    /// panic text. A `404` makes the fetch task read the clock when it
+    /// negative-caches the id, so the panic is raised inside the fetch task.
+    #[test]
+    fn a_fetch_task_panic_is_logged_with_its_text() {
+        let lines = spate_test::capture_logs(tracing::Level::ERROR, || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async {
+                    let url = serve_raw(
+                        "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n",
+                        Vec::new(),
+                        None,
+                    )
+                    .await;
+                    let cfg = config(&url, None);
+                    let read = Arc::new(AtomicBool::new(false));
+                    let handle = spawn_fetcher(
+                        http_client(None).unwrap(),
+                        Arc::new(Endpoint::new(&cfg).unwrap()),
+                        Rejection::default(),
+                        Duration::from_secs(60),
+                        SyncClock::new(Arc::new(FlaggingPanicClock(Arc::clone(&read)))),
+                        &tokio::runtime::Handle::current(),
+                    );
+                    handle.request(1);
+                    tokio::time::timeout(Duration::from_secs(10), async {
+                        while !read.load(Ordering::SeqCst) {
+                            tokio::time::sleep(Duration::from_millis(1)).await;
+                        }
+                    })
+                    .await
+                    .expect("the fetch task reads the clock");
+                    // The fetcher drains the finished fetch before it sees the
+                    // closed channel, so it logs before it drops its cache clone.
+                    let cache = Arc::clone(&handle.cache);
+                    drop(handle);
+                    tokio::time::timeout(Duration::from_secs(10), async {
+                        while Arc::strong_count(&cache) > 1 {
+                            tokio::time::sleep(Duration::from_millis(1)).await;
+                        }
+                    })
+                    .await
+                    .expect("the fetcher ends");
+                });
+        });
+        assert_eq!(
+            lines,
+            vec![
+                r#"ERROR spate_avro::registry: registry fetch task panicked panic="clock read""#
                     .to_owned()
             ]
         );

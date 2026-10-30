@@ -38,14 +38,15 @@
 //!   resolution scan for its slot would move the first number and not the
 //!   second, and nothing else in the suite would notice.
 //!
-//! Both maps on the path (the issuer's per-partition sequence counters and
-//! the checkpointer's trackers) are seeded per instance, so these counts
-//! are not bit-identical run to run the way an allocation-free case is. The
-//! seed decides what order `take_watermarks` finds the trackers in, and so
-//! how much work the sort behind it does. Four partitions is few enough that
-//! the effect stays small, a drift of a few hundred instructions rather than
-//! a proportional one. A change to the code moves all three cases together in
-//! proportion to the batches they carry, not one case drifting on its own.
+//! The three maps on the path (the issuer's per-partition sequence counters,
+//! the checkpointer's trackers and its pending gates) are seeded per
+//! instance, so these counts are not bit-identical run to run the way an
+//! allocation-free case is. The seed decides what order `take_watermarks`
+//! finds the trackers in, and so how much work the sort behind it does. Four
+//! partitions is few enough that the effect stays small, a drift of a few
+//! hundred instructions rather than a proportional one. A change to the code
+//! moves all three cases together in proportion to the batches they carry,
+//! not one case drifting on its own.
 //!
 //! Run with `cargo xtask bench counted`.
 

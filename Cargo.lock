@@ -4187,6 +4187,7 @@ dependencies = [
  "bytesize",
  "core_affinity",
  "crossbeam-channel",
+ "foldhash",
  "gungraun",
  "http-body-util",
  "humantime-serde",

@@ -40,6 +40,7 @@ pub mod error;
 #[cfg(not(loom))]
 pub mod feed;
 pub mod framing;
+pub mod hash;
 pub mod metrics;
 #[cfg(not(loom))]
 pub mod ops;

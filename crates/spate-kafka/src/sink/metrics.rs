@@ -34,8 +34,8 @@
 //! [the metrics reference]: https://spate.kainth.dev/docs/METRICS
 
 use rdkafka::statistics::Statistics;
+use spate_core::hash::{FastMap, FastSet};
 use spate_core::metrics::{Counter, Gauge, Meter};
-use std::collections::{HashMap, HashSet};
 
 const TX_REQUESTS_TOTAL: &str = "tx_requests_total";
 const TX_BYTES_TOTAL: &str = "tx_bytes_total";
@@ -72,7 +72,7 @@ pub(crate) struct KafkaSinkStatsMetrics {
     produce_queue_bytes: Gauge,
     broker_tx_retries: Counter,
     broker_req_timeouts: Counter,
-    brokers: HashMap<String, BrokerHandles>,
+    brokers: FastMap<String, BrokerHandles>,
 }
 
 /// Per-broker series, labeled `broker="<host:port/id>"`, bounded by
@@ -136,7 +136,7 @@ impl KafkaSinkStatsMetrics {
             produce_queue_bytes: meter.gauge(PRODUCE_QUEUE_BYTES, &[]),
             broker_tx_retries: meter.counter(BROKER_TX_RETRIES_TOTAL, &[]),
             broker_req_timeouts: meter.counter(BROKER_REQ_TIMEOUTS_TOTAL, &[]),
-            brokers: HashMap::new(),
+            brokers: FastMap::default(),
             meter,
         }
     }
@@ -155,14 +155,14 @@ impl KafkaSinkStatsMetrics {
 
         let mut retries: u64 = 0;
         let mut timeouts: u64 = 0;
-        let mut seen: HashSet<&str> = HashSet::new();
+        let mut seen: FastSet<&str> = FastSet::default();
         let meter = &self.meter;
         // Same contract as the source: `logical` entries (coordinators) are
         // excluded from every sum and per-broker series, but a broker is up
         // if any connection to it, regular or logical, is up. The join
         // key is the resolved `nodename` (a logical entry's `nodeid` reads
         // -1 even once bound).
-        let logical_up: HashSet<&str> = stats
+        let logical_up: FastSet<&str> = stats
             .brokers
             .values()
             .filter(|b| b.source == "logical" && !b.nodename.is_empty() && b.state == "UP")
@@ -240,6 +240,7 @@ mod tests {
     use super::*;
     use crate::testutil::{broker, window};
     use spate_test::render_metrics;
+    use std::collections::HashMap;
 
     /// A test Meter under the `kafka` namespace: names render as
     /// `spate_kafka_<local>` (the runtime's role-scoped variant would be

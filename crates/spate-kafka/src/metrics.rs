@@ -34,9 +34,9 @@
 //! [the metrics reference]: https://spate.kainth.dev/docs/METRICS
 
 use rdkafka::statistics::{Partition, Statistics};
+use spate_core::hash::{FastMap, FastSet};
 use spate_core::metrics::{Counter, Gauge, Meter};
 use spate_core::record::PartitionId;
-use std::collections::{HashMap, HashSet};
 
 const TX_REQUESTS_TOTAL: &str = "tx_requests_total";
 const TX_BYTES_TOTAL: &str = "tx_bytes_total";
@@ -104,9 +104,9 @@ pub(crate) struct KafkaStatsMetrics {
     group_rebalances: Counter,
     group_assignment_size: Gauge,
     group_healthy: Gauge,
-    brokers: HashMap<String, BrokerHandles>,
-    partitions: HashMap<i32, PartitionHandles>,
-    not_fetching: HashMap<i32, NotFetching>,
+    brokers: FastMap<String, BrokerHandles>,
+    partitions: FastMap<i32, PartitionHandles>,
+    not_fetching: FastMap<i32, NotFetching>,
 }
 
 /// Per-broker series, labeled `broker="<host:port/id>"`, bounded by
@@ -222,9 +222,9 @@ impl KafkaStatsMetrics {
             group_rebalances: meter.counter(GROUP_REBALANCES_TOTAL, &[]),
             group_assignment_size: meter.gauge(GROUP_ASSIGNMENT_SIZE, &[]),
             group_healthy: meter.gauge(GROUP_HEALTHY, &[]),
-            brokers: HashMap::new(),
-            partitions: HashMap::new(),
-            not_fetching: HashMap::new(),
+            brokers: FastMap::default(),
+            partitions: FastMap::default(),
+            not_fetching: FastMap::default(),
             meter,
             per_partition_detail,
         }
@@ -279,7 +279,7 @@ impl KafkaStatsMetrics {
         let mut timeouts: u64 = 0;
         let mut connects: u64 = 0;
         let mut disconnects: u64 = 0;
-        let mut seen: HashSet<&str> = HashSet::new();
+        let mut seen: FastSet<&str> = FastSet::default();
         let meter = &self.meter;
         // `logical` entries (the group coordinator) are separate librdkafka
         // connections that mirror an underlying broker. The join key is the
@@ -290,7 +290,7 @@ impl KafkaStatsMetrics {
         // a broker as up if any connection to it, regular or logical, is
         // up. A broker whose only live link is the coordinator connection
         // is connected, not down.
-        let logical_up: HashSet<&str> = stats
+        let logical_up: FastSet<&str> = stats
             .brokers
             .values()
             .filter(|b| b.source == "logical" && !b.nodename.is_empty() && b.state == "UP")
@@ -377,7 +377,7 @@ impl KafkaStatsMetrics {
     fn update_partitions(&mut self, stats: &Statistics, topic: &str, owned: &[PartitionId]) {
         let mut fetchq_msgs: u64 = 0;
         let mut fetchq_bytes: u64 = 0;
-        let mut seen: HashSet<i32> = HashSet::new();
+        let mut seen: FastSet<i32> = FastSet::default();
         let meter = &self.meter;
         if let Some(t) = stats.topics.get(topic) {
             for (pid, p) in &t.partitions {
@@ -498,7 +498,7 @@ fn is_owned(owned: &[PartitionId], pid: i32) -> bool {
 ///
 /// Free function taking the run map so a unit test drives the state machine
 /// window by window, the same reason `publish_lag` is one.
-fn track_fetch_state(runs: &mut HashMap<i32, NotFetching>, pid: i32, p: &Partition) {
+fn track_fetch_state(runs: &mut FastMap<i32, NotFetching>, pid: i32, p: &Partition) {
     if p.fetch_state == FETCH_STATE_ACTIVE {
         if let Some(run) = runs.remove(&pid)
             && !run.reported.is_empty()
@@ -555,6 +555,7 @@ mod tests {
     use crate::testutil::{broker, window};
     use rdkafka::statistics::{ConsumerGroup, Topic};
     use spate_test::render_metrics;
+    use std::collections::HashMap;
 
     /// A test Meter under the `kafka` namespace: names render as
     /// `spate_kafka_<local>` (the runtime's role-scoped variant would be

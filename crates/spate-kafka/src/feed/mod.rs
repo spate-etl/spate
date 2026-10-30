@@ -71,9 +71,10 @@ use spate_core::feed::{
     Confirmation, Confirmer, Delivery, DepthOf, DepthReading, DepthReporter, Feed, FeedError,
     FeedErrorKind, FeedWaker, Receipt, Unit, confirmation, depth_reading,
 };
+use spate_core::hash::FastMap;
 use spate_core::task::{ThreadHandle, spawn_thread};
 use startup::TopicAdmin as _;
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::num::NonZeroU32;
 #[cfg(test)]
 use std::sync::atomic::AtomicUsize;
@@ -147,7 +148,7 @@ pub(crate) struct State {
     /// Deliveries not yet handed to the reader, oldest first.
     pub(crate) ready: VecDeque<Ready>,
     /// Deliveries handed to the reader, by receipt.
-    pub(crate) handed: HashMap<Receipt, Ready>,
+    pub(crate) handed: FastMap<Receipt, Ready>,
     pub(crate) fatal: Option<FeedError>,
     /// A transient consumer failure, returned by the next `receive` only.
     pub(crate) retryable: Option<FeedError>,

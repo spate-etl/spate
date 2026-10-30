@@ -32,8 +32,8 @@ use rdkafka::message::{BorrowedMessage, Message};
 use rdkafka::{Offset, TopicPartitionList};
 use serde::{Deserialize, Serialize};
 use spate_core::error::ErrorClass;
+use spate_core::hash::FastMap;
 use spate_core::task::{ThreadHandle, spawn_thread};
-use std::collections::HashMap;
 use std::num::NonZeroU32;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 
@@ -257,7 +257,7 @@ fn record_of<'a>(
 pub(crate) struct Ledger {
     /// Per partition, one past the last offset read.
     next: Vec<Option<i64>>,
-    counts: HashMap<Box<[u8]>, u32>,
+    counts: FastMap<Box<[u8]>, u32>,
     /// How many waits on the ledger's condvar the gate has begun, counted
     /// under the ledger's lock just before each.
     #[cfg(test)]
@@ -277,7 +277,7 @@ impl Ledger {
     pub(crate) fn new(partitions: NonZeroU32) -> Ledger {
         Ledger {
             next: vec![None; partitions.get() as usize],
-            counts: HashMap::new(),
+            counts: FastMap::default(),
             #[cfg(test)]
             gate_waits: 0,
         }

@@ -77,10 +77,10 @@ use spate_core::checkpoint::AckIssuer;
 use spate_core::clock::Stopwatch;
 use spate_core::clock::SyncClock;
 use spate_core::error::{ErrorClass, SourceError};
+use spate_core::hash::FastMap;
 use spate_core::metrics::SourceMetrics;
 use spate_core::record::PartitionId;
 use spate_core::source::{DrainBarrier, LaneId, Source, SourceCtx, SourceEvent};
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
@@ -113,13 +113,13 @@ pub struct KafkaSource {
     /// Meter (e.g. the source is driven outside a pipeline).
     stats_metrics: Option<KafkaStatsMetrics>,
     /// Lanes of the current assignment, by id.
-    assignment: HashMap<LaneId, i32>,
+    assignment: FastMap<LaneId, i32>,
     /// Lanes surfaced as revoked but not yet released by `unassign`. The
     /// member still owns these partitions (the rebalance is not acknowledged
     /// until `unassign`), so the post-drain final commit must still store
     /// their offsets; `commit` consults this alongside `assignment`. Cleared
     /// when `unassign` completes the revocation.
-    revoking: HashMap<LaneId, i32>,
+    revoking: FastMap<LaneId, i32>,
     next_lane: u32,
     saw_first_assignment: bool,
     /// A revocation was surfaced; `unassign` completes it on the next
@@ -143,7 +143,7 @@ pub struct KafkaSource {
     /// Committed offset per held partition, read before its assignment.
     /// Stands in for librdkafka's committed position in the lag statistic,
     /// which the lookup does not update.
-    committed_at_assign: HashMap<i32, i64>,
+    committed_at_assign: FastMap<i32, i64>,
     /// The clock the assignment windows and the error's age read.
     clock: SyncClock,
 }
@@ -168,8 +168,8 @@ impl KafkaSource {
             issuer: None,
             metrics: None,
             stats_metrics: None,
-            assignment: HashMap::new(),
-            revoking: HashMap::new(),
+            assignment: FastMap::default(),
+            revoking: FastMap::default(),
             next_lane: 0,
             saw_first_assignment: false,
             pending_unassign: false,
@@ -177,7 +177,7 @@ impl KafkaSource {
             assignment_wait: None,
             last_consumer_error: None,
             main_queue_rewinds: 0,
-            committed_at_assign: HashMap::new(),
+            committed_at_assign: FastMap::default(),
             clock: SyncClock::system(),
         }
     }
@@ -448,7 +448,7 @@ pub(crate) fn start_offset(
 fn fill_unknown_lag(
     stats: &mut Statistics,
     topic: &str,
-    committed: &HashMap<i32, i64>,
+    committed: &FastMap<i32, i64>,
     reads_committed: bool,
 ) {
     let Some(topic) = stats.topics.get_mut(topic) else {
@@ -2061,6 +2061,7 @@ mod tests {
         use super::*;
         use rdkafka::error::KafkaError;
         use rdkafka::statistics::{Partition, Topic};
+        use std::collections::HashMap;
 
         fn failed() -> KafkaResult<()> {
             Err(KafkaError::OffsetFetch(

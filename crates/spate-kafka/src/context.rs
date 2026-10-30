@@ -26,7 +26,8 @@ use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::error::RDKafkaErrorCode;
 use rdkafka::statistics::Statistics;
 use rdkafka::types::RDKafkaRespErr;
-use std::collections::{HashMap, VecDeque};
+use spate_core::hash::FastMap;
+use std::collections::VecDeque;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, ThreadId};
@@ -78,7 +79,7 @@ pub(crate) struct SourceHooks {
     /// The latest error callback's code and text, per polling thread.
     /// librdkafka runs the callback on the thread whose poll then returns
     /// the same event as an error.
-    last_error: Mutex<HashMap<ThreadId, (RDKafkaErrorCode, String)>>,
+    last_error: Mutex<FastMap<ThreadId, (RDKafkaErrorCode, String)>>,
 }
 
 impl SourceHooks {

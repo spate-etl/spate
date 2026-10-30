@@ -312,7 +312,7 @@ mod tests {
     use crate::client::testing::raw;
     use crate::context::SourceHooks;
     use spate_core::clock::SyncClock;
-    use std::collections::HashMap;
+    use spate_core::hash::FastMap;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::mpsc;
@@ -320,10 +320,10 @@ mod tests {
     /// Offsets per partition, scripted, and every call in order.
     #[derive(Default)]
     struct Scripted {
-        partitions: HashMap<String, Vec<i32>>,
-        committed: HashMap<(String, i32), Offset>,
-        starts: HashMap<(String, i32), i64>,
-        ends: HashMap<(String, i32), i64>,
+        partitions: FastMap<String, Vec<i32>>,
+        committed: FastMap<(String, i32), Offset>,
+        starts: FastMap<(String, i32), i64>,
+        ends: FastMap<(String, i32), i64>,
         fail_committed: Option<FeedError>,
         fail_listed: Option<FeedError>,
         calls: Mutex<Vec<String>>,

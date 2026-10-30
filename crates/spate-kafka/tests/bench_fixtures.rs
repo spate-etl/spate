@@ -16,11 +16,11 @@
 use bytes::BytesMut;
 use spate_core::deser::Owned;
 use spate_core::error::{ErrorClass, SinkError};
+use spate_core::hash::FastSet;
 use spate_core::sink::RowEncoder;
 use spate_kafka::sink::{KafkaBytesEncoder, KafkaEncoder, KafkaJsonEncoder, MessageEncoder};
 use spate_test::record;
 use spate_test_support::fnv1a;
-use std::collections::HashSet;
 
 #[path = "../benches/support/messages.rs"]
 mod messages;
@@ -255,7 +255,7 @@ fn the_payloads_have_the_declared_shape() {
         "a key is not the printable identifier the corpus documents"
     );
     assert_eq!(
-        keys.iter().collect::<HashSet<_>>().len(),
+        keys.iter().collect::<FastSet<_>>().len(),
         RECORDS,
         "the corpus repeats a key, so it does not partition the way a real one would"
     );

@@ -16,7 +16,8 @@
 //! uses it.
 
 use spate_core::feed::Receipt;
-use std::collections::{BTreeMap, HashMap};
+use spate_core::hash::FastMap;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 /// A partition of one of the topics the feed reads.
@@ -75,9 +76,9 @@ pub(crate) struct Tracker {
     /// Raised on every assignment change.
     generation: u64,
     next_receipt: u64,
-    partitions: HashMap<Tp, Partition>,
+    partitions: FastMap<Tp, Partition>,
     /// Deliveries the reader holds, by receipt.
-    held: HashMap<u64, Position>,
+    held: FastMap<u64, Position>,
 }
 
 impl Tracker {

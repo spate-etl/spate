@@ -457,4 +457,73 @@ mod tests {
         let err = end.idle(&feed, || Ok(Some(0))).unwrap_err().to_string();
         assert!(err.contains("not a lister run's end marker"), "{err}");
     }
+
+    /// Pins that `busy` aborts a marker read still in flight: the read's
+    /// body never ends, and the task reading it is dropped.
+    #[test]
+    fn busy_aborts_a_marker_read_in_flight() {
+        use futures_util::StreamExt as _;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        static STARTED: AtomicBool = AtomicBool::new(false);
+        static DROPPED: AtomicBool = AtomicBool::new(false);
+        struct Dropped;
+        impl Drop for Dropped {
+            fn drop(&mut self) {
+                DROPPED.store(true, Ordering::SeqCst);
+            }
+        }
+        fn hanging_get(
+            path: &object_store::path::Path,
+        ) -> Option<object_store::Result<object_store::GetResult>> {
+            STARTED.store(true, Ordering::SeqCst);
+            let guard = Dropped;
+            let body = futures_util::stream::poll_fn(move |_| {
+                let _ = &guard;
+                std::task::Poll::<Option<object_store::Result<bytes::Bytes>>>::Pending
+            })
+            .boxed();
+            let meta = object_store::ObjectMeta {
+                location: path.clone(),
+                last_modified: chrono::Utc::now(),
+                size: 10,
+                e_tag: None,
+                version: None,
+            };
+            Some(Ok(object_store::GetResult {
+                payload: object_store::GetResultPayload::Stream(body),
+                range: 0..meta.size,
+                meta,
+                attributes: Default::default(),
+                extensions: Default::default(),
+            }))
+        }
+        let rt = runtime();
+        let store: Arc<dyn ObjectStore> = Arc::new(crate::testutil::HookStore {
+            get: Some(hanging_get),
+            ..crate::testutil::HookStore::default()
+        });
+        let location = Location::parse("s3://ops/jobs/a/", "s3://data/events/").unwrap();
+        let mut end = JobEnd::new(
+            Finish::Marker {
+                store,
+                location,
+                window: Duration::from_secs(60),
+            },
+            TestClock::frozen(),
+            rt.handle().clone(),
+            StopSignal::default(),
+        );
+        let (feed, _script) = spate_test::scripted_feed();
+        assert!(!end.idle(&feed, || Ok(Some(0))).unwrap());
+        spate_test::wait_until(Duration::from_secs(30), "the marker read starts", || {
+            STARTED.load(Ordering::SeqCst)
+        });
+        assert!(!DROPPED.load(Ordering::SeqCst), "the read ended on its own");
+        end.busy();
+        spate_test::wait_until(
+            Duration::from_secs(30),
+            "the marker read is aborted",
+            || DROPPED.load(Ordering::SeqCst),
+        );
+    }
 }

@@ -539,8 +539,8 @@ mod tests {
     }
 
     /// The watchdog wraps the call rather than changing it: an answer parses as
-    /// it did before, and the guard ends with the call rather than at the end of
-    /// its period.
+    /// it did before, and the guard ends when the call returns, however long its
+    /// period.
     #[test]
     fn a_prompt_answer_parses_exactly_as_it_did_unwatched() {
         let runner = stub(Duration::from_secs(3600));

@@ -349,12 +349,14 @@ impl SinkMetricsCtx {
     /// # Examples
     ///
     /// ```
-    /// use spate_core::metrics::Meter;
+    /// use spate_core::metrics::{Meter, render_local};
     /// use spate_core::sink::SinkMetricsCtx;
     ///
     /// let meter = Meter::with_namespace("probe_sink", "orders", "sink", "probe");
     /// let cx = SinkMetricsCtx::new(Some(meter));
-    /// assert!(cx.meter.is_some());
+    /// let meter = cx.meter.expect("a scoped Meter");
+    /// let text = render_local(|| meter.counter("writes_total", &[]).increment(1));
+    /// assert!(text.contains("spate_probe_sink_writes_total{"));
     /// ```
     #[must_use]
     pub fn new(meter: Option<Meter>) -> Self {

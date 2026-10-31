@@ -209,10 +209,9 @@ Assignment changes are where at-least-once is won or lost:
   tightened cadence for one commit interval and then on each control-plane
   poll that finds a partition's acked watermark advanced, until their lanes
   leave through `LanesRetired` or `LanesRevoked` or a new `LanesAssigned`
-  begins. The periodic tick still commits those partitions, and retries a
-  failed commit when no other partition is at the tightened cadence. A
-  partition whose lane never leaves is committed this way for the life of
-  the lane. Correctness never depends on it.
+  begins. The periodic tick still commits those partitions and retries a
+  failed commit. A partition whose lane never leaves is committed this way
+  for the life of the lane. Correctness never depends on it.
 
 :::warning
 Never block inside `poll_events` waiting on data-plane progress you

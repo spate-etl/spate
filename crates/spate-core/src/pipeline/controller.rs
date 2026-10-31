@@ -178,10 +178,10 @@ pub(crate) fn run_controller<S: Source>(ctx: ControllerContext<S>) {
     // `FAST_COMMIT_POLL` while any partition stays stalled.
     let mut fast_commit: BTreeMap<PartitionId, Instant> = BTreeMap::new();
     // Hinted partitions past their window. Each is committed on any pass that
-    // harvested an advance for it, at the ordinary poll cadence, until its
-    // lanes leave, so an ack resolving after the window skips the tick. The
-    // value is the position last sent, so a commit that failed retryably is
-    // retried on the next advance or the tick.
+    // harvested an advance for it until its lanes leave, so an ack resolving
+    // after the window skips the tick. The value is the position the chase last
+    // sent, so a commit that failed retryably is retried on the next advance or
+    // the tick.
     let mut after_window: BTreeMap<PartitionId, Option<i64>> = BTreeMap::new();
     // Set when the source reports `SourceEvent::Drained`. The loop exits into
     // the ordinary drain sequence, and `Completed` is additionally required
@@ -411,18 +411,18 @@ pub(crate) fn run_controller<S: Source>(ctx: ControllerContext<S>) {
             if !after_window.is_empty() {
                 harvest(&mut checkpointer, &mut state);
             }
-            let late_advance = after_window.iter().any(|(p, sent)| {
+            let advanced = after_window.iter().filter(|(p, sent)| {
                 state
                     .pending_commit
                     .get(p)
-                    .is_some_and(|&o| Some(o) != *sent)
+                    .is_some_and(|&o| Some(o) != **sent)
             });
-            if !fast_commit.is_empty() || late_advance {
-                let chasing: BTreeSet<PartitionId> = fast_commit
-                    .keys()
-                    .chain(after_window.keys())
-                    .copied()
-                    .collect();
+            let chasing: BTreeSet<PartitionId> = fast_commit
+                .keys()
+                .chain(advanced.map(|(p, _)| p))
+                .copied()
+                .collect();
+            if !chasing.is_empty() {
                 commit_cycle(
                     &mut source,
                     &mut checkpointer,
@@ -432,8 +432,12 @@ pub(crate) fn run_controller<S: Source>(ctx: ControllerContext<S>) {
                     Some(&chasing),
                     false,
                 );
-                for (p, sent) in &mut after_window {
-                    if let Some(&o) = state.pending_commit.get(p) {
+                // The commit harvests again, and what that folds in for a
+                // partition outside this set was not sent.
+                for p in &chasing {
+                    if let (Some(sent), Some(&o)) =
+                        (after_window.get_mut(p), state.pending_commit.get(p))
+                    {
                         *sent = Some(o);
                     }
                 }
@@ -446,6 +450,8 @@ pub(crate) fn run_controller<S: Source>(ctx: ControllerContext<S>) {
             // full commit interval.
             let assigned = |p: PartitionId| state.assignment.values().any(|&(part, _)| part == p);
             fast_commit.retain(|&p, _| assigned(p));
+            // A partition that left cannot advance in this epoch, so this only
+            // bounds the map.
             after_window.retain(|&p, _| assigned(p));
         }
     }

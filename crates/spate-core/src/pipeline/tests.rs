@@ -5351,7 +5351,7 @@ fn a_later_hint_gets_a_window_of_its_own() {
 }
 
 /// A commit that failed past a partition's window is retried by the periodic
-/// tick, and not before it, when no other partition is in its window.
+/// tick, and not before it.
 #[test]
 fn a_failed_post_window_commit_is_retried_on_the_tick() {
     let clock = crate::clock::TestClock::frozen();
@@ -5388,10 +5388,141 @@ fn a_failed_post_window_commit_is_retried_on_the_tick() {
     h.join.join().unwrap().unwrap();
 }
 
-/// A revoked partition leaves the chase past its window, so a position it failed
+/// Past its window, a partition whose commit failed is not committed again
+/// while another partition is chased inside its window, and the tick retries it.
+/// Regression for #1595.
+#[test]
+fn a_failed_post_window_commit_waits_while_another_partition_is_chased() {
+    let clock = crate::clock::TestClock::frozen();
+    let window = Duration::from_secs(600);
+    let interval = Duration::from_secs(3600);
+    let mut cfg = test_config(1);
+    cfg.checkpoint.interval = interval;
+    let h = start_on_clock_with(
+        cfg,
+        no_idle_flush(),
+        &clock,
+        |runtime| runtime.with_chase_window(window),
+        ok_chain,
+    );
+    h.shared.lock().unwrap().fail_commits = true;
+    h.script.lock().unwrap().push_back(Script::Assign(vec![
+        LaneSpec {
+            id: LaneId(0),
+            partition: PartitionId(0),
+            batches: batches(std::slice::from_ref(&(0..10))),
+        },
+        LaneSpec {
+            id: LaneId(1),
+            partition: PartitionId(1),
+            batches: batches(&[]),
+        },
+    ]));
+    wait_for("the batch consumed", Duration::from_secs(5), || {
+        h.chain.consumed.load(Ordering::Relaxed) == 10
+    });
+    hint(&h, PartitionId(0));
+    clock.advance(window);
+    wait_for("a failed commit", Duration::from_secs(5), || {
+        logged(&h, "commit-failed")
+    });
+    passes(&h, 3);
+    let failed = |h: &Harness| {
+        h.shared
+            .lock()
+            .unwrap()
+            .log
+            .iter()
+            .filter(|e| *e == "commit-failed")
+            .count()
+    };
+    let before = failed(&h);
+
+    hint(&h, PartitionId(1));
+    passes(&h, 40);
+    assert_eq!(
+        failed(&h) - before,
+        0,
+        "commit attempts over forty passes with no advance"
+    );
+
+    h.shared.lock().unwrap().fail_commits = false;
+    clock.advance(interval - window);
+    wait_for("the tick retries", Duration::from_secs(5), || {
+        h.shared.lock().unwrap().committed.get(&PartitionId(0)) == Some(&10)
+    });
+
+    h.shutdown.trigger();
+    h.join.join().unwrap().unwrap();
+}
+
+/// Past its window, a partition whose commit failed is committed ahead of the
+/// tick when its position advances while another partition is chased inside its
+/// window.
+#[test]
+fn a_post_window_advance_commits_while_another_partition_is_chased() {
+    let clock = crate::clock::TestClock::frozen();
+    let window = Duration::from_secs(600);
+    let mut cfg = test_config(1);
+    cfg.checkpoint.interval = Duration::from_secs(3600);
+    let held: Arc<Mutex<Vec<crate::checkpoint::AckRef>>> = Arc::new(Mutex::new(Vec::new()));
+    let release = Arc::new(AtomicBool::new(false));
+    let held_c = Arc::clone(&held);
+    let h = start_on_clock_with(
+        cfg,
+        no_idle_flush(),
+        &clock,
+        |runtime| runtime.with_chase_window(window),
+        move |shared, log| FakeChain {
+            shared,
+            log,
+            mode: ChainMode::HoldAcks {
+                held: Arc::clone(&held_c),
+                release: Arc::clone(&release),
+            },
+            batches_seen: 0,
+        },
+    );
+    h.shared.lock().unwrap().fail_commits = true;
+    h.script.lock().unwrap().push_back(Script::Assign(vec![
+        LaneSpec {
+            id: LaneId(0),
+            partition: PartitionId(0),
+            batches: batches(&[0..10, 10..20]),
+        },
+        LaneSpec {
+            id: LaneId(1),
+            partition: PartitionId(1),
+            batches: batches(&[]),
+        },
+    ]));
+    wait_for("the batches held", Duration::from_secs(5), || {
+        held.lock().unwrap().len() == 2
+    });
+    hint(&h, PartitionId(0));
+    clock.advance(window);
+    passes(&h, 3);
+    hint(&h, PartitionId(1));
+
+    held.lock().unwrap().remove(0);
+    wait_for("a failed commit", Duration::from_secs(5), || {
+        logged(&h, "commit-failed")
+    });
+
+    h.shared.lock().unwrap().fail_commits = false;
+    held.lock().unwrap().clear();
+    wait_for("the advance commits", Duration::from_secs(5), || {
+        h.shared.lock().unwrap().committed.get(&PartitionId(0)) == Some(&20)
+    });
+
+    h.shutdown.trigger();
+    h.join.join().unwrap().unwrap();
+}
+
+/// After the pass handling a revocation, a position the revoked partition failed
 /// to commit waits for the tick while another partition's chase commits.
 #[test]
-fn a_revoked_partition_leaves_the_post_window_chase() {
+fn a_revoked_partitions_failed_commit_waits_while_another_is_chased() {
     let clock = crate::clock::TestClock::frozen();
     let window = Duration::from_secs(600);
     let mut cfg = test_config(1);
@@ -5436,7 +5567,7 @@ fn a_revoked_partition_leaves_the_post_window_chase() {
         h.shared.lock().unwrap().flush_commits > flushed
     });
     // The pass handling the revocation finishes before the next poll, and it is
-    // the pass that drops the revoked partition from the chase.
+    // the last that may send the revoked position.
     passes(&h, 2);
     h.shared.lock().unwrap().fail_commits = false;
 
@@ -5449,7 +5580,7 @@ fn a_revoked_partition_leaves_the_post_window_chase() {
             .unwrap()
             .committed
             .contains_key(&PartitionId(0)),
-        "a revoked partition stayed in the chase"
+        "a revoked partition's failed position was sent again"
     );
 
     h.shutdown.trigger();

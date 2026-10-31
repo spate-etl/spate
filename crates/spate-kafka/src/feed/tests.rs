@@ -3686,6 +3686,76 @@ mod cluster {
         assert_eq!(d.paused, owned, "after a rebalance error");
     }
 
+    /// Pins when the feed releases its per-partition statistics: a
+    /// revocation keeps every series, the next assignment zeroes the
+    /// partitions it dropped and keeps the rest, and a rebalance error zeroes
+    /// every one.
+    #[test]
+    fn per_partition_statistics_are_released_by_the_next_assignment() {
+        use spate_core::feed::FeedMetricsCtx;
+        use spate_core::metrics::Meter;
+        let cluster = cluster_with(0);
+        let brokers = cluster.bootstrap_servers();
+        let group = spate_test::unique_name("stats-release");
+        let mut config = KafkaFeedConfig::from_section(&section(&brokers, &group)).unwrap();
+        config.statistics_interval = Duration::from_secs(5);
+        let (core, _producer, mut d) =
+            super::super::parts(&config, TWO, SyncClock::system()).unwrap();
+        drive(&mut d, "the driver owns its partitions", |d| owns(d) == 2);
+        let assigned = d.consumer.assignment().unwrap();
+        let mut work_only = TopicPartitionList::new();
+        work_only.add_partition("units", 0);
+        let intents = |d: &Driver, intent: Intent| {
+            d.consumer
+                .context()
+                .intents
+                .lock()
+                .unwrap()
+                .push_back(intent);
+        };
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let prom = recorder.handle();
+        let queued = |topic: &str| {
+            spate_test::metric_value(
+                &prom.render(),
+                "spate_kafka_feed_partition_fetch_queue_messages",
+                &[("topic", topic), ("partition", "0")],
+            )
+        };
+        metrics::with_local_recorder(&recorder, || {
+            let meter = Meter::with_namespace("kafka_feed", group.clone(), "feed", "kafka");
+            core.attach_metrics(FeedMetricsCtx::new(Some(meter)).with_partition_detail(true));
+            let owned: Vec<Tp> = owned_tps(&core).into_iter().collect();
+            core.publish_consumer_stats(&super::feed_metrics::consumer_snapshot(4, 6), &owned);
+        });
+        assert_eq!(
+            (queued("units"), queued("units-retry")),
+            (Some(4.0), Some(6.0))
+        );
+
+        intents(&d, Intent::Revoke(assigned));
+        d.serve_intents();
+        assert_eq!(
+            (queued("units"), queued("units-retry")),
+            (Some(4.0), Some(6.0)),
+            "a revocation releases nothing"
+        );
+        intents(&d, Intent::Assign(work_only));
+        d.serve_intents();
+        assert_eq!(
+            (queued("units"), queued("units-retry")),
+            (Some(4.0), Some(0.0)),
+            "the assignment releases what it dropped"
+        );
+        d.consumer.context().rebalance(
+            &d.consumer,
+            RDKafkaRespErr::RD_KAFKA_RESP_ERR_REBALANCE_IN_PROGRESS,
+            &mut TopicPartitionList::new(),
+        );
+        d.serve_intents();
+        assert_eq!(queued("units"), Some(0.0), "a rebalance error releases all");
+    }
+
     /// Wait until `n` units are buffered, receive them all in the order of
     /// their ids, which is their offsets' order, and stop the follower and
     /// the gate. The gate buffers units in the order their attempt writes
@@ -4706,7 +4776,7 @@ mod feed_metrics {
 
     /// A consumer snapshot carrying the work and retry topics' partition 0,
     /// with `work` and `retry` messages in their fetch queues.
-    fn consumer_snapshot(work: i64, retry: i64) -> Statistics {
+    pub(super) fn consumer_snapshot(work: i64, retry: i64) -> Statistics {
         let topic = |name: &str, fetchq_cnt: i64| {
             (
                 name.to_owned(),

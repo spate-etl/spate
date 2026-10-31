@@ -59,6 +59,9 @@ fn any_glob(path: &str, patterns: &[&str]) -> bool {
     patterns.iter().any(|p| glob(path, p))
 }
 
+/// The root README, which `spate` compiles as a doctest.
+pub(super) const SPATE_README: &str = "README.md";
+
 /// The crate a `crates/<name>/...` path belongs to.
 pub(super) fn crate_of(path: &str) -> Option<&str> {
     path.strip_prefix("crates/")?.split('/').next()
@@ -282,6 +285,9 @@ pub(crate) fn classify(
             out.advisories |= is_advisory_input(path);
             out.release_tooling |= is_release_tooling(path);
             out.macos |= is_macos_input(path);
+            // Outside `kind_of` because `scope` widens any crate-less Rust path
+            // to the whole workspace.
+            out.rust |= path == SPATE_README;
             match kind_of(path) {
                 Kind::Skip => continue,
                 Kind::SiteOnly => {
@@ -543,10 +549,21 @@ mod tests {
 
     #[test]
     fn documentation_needs_no_build() {
-        let out = run(&["docs/INVARIANTS.md", "README.md", ".github/labels.yml"]);
+        let out = run(&["docs/INVARIANTS.md", ".github/labels.yml"]);
         assert!(!out.rust, "prose compiles nothing");
         assert!(!out.fuzz);
         assert!(out.container_pkgs.is_empty());
+    }
+
+    /// The root `README.md`, which `spate` compiles as a doctest, selects the
+    /// Rust jobs and nothing tied to a crate. Regression for #908.
+    #[test]
+    fn the_root_readme_selects_the_doctests() {
+        let out = run(&["README.md"]);
+        assert!(out.rust);
+        assert!(!out.site);
+        assert!(out.container_pkgs.is_empty());
+        assert!(out.semver_pkgs.is_empty());
     }
 
     #[test]

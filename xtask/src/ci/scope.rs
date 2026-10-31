@@ -2,7 +2,7 @@
 
 use std::collections::BTreeSet;
 
-use super::classify::{crate_of, is_manifest, is_rust_change};
+use super::classify::{SPATE_README, crate_of, is_manifest, is_rust_change};
 use super::graph::Graph;
 
 /// What a local run covers.
@@ -19,7 +19,7 @@ pub(crate) enum Scope {
 /// does not name. The root `README.md` is a doctest of `spate`.
 pub(crate) fn scope(paths: &[String], graph: &Graph) -> Scope {
     let mut pkgs = BTreeSet::new();
-    if paths.iter().any(|p| p == "README.md") {
+    if paths.iter().any(|p| p == SPATE_README) {
         pkgs.extend(graph.test_closure_for("spate"));
     }
     for path in paths.iter().filter(|p| is_rust_change(p)) {

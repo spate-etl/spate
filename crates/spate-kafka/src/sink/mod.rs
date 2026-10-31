@@ -24,7 +24,7 @@ mod config;
 mod context;
 mod encoder;
 pub(crate) mod frame;
-mod metrics;
+pub(crate) mod metrics;
 mod writer;
 
 #[cfg(test)]

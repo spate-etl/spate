@@ -97,7 +97,8 @@ impl SourceHooks {
 
 impl Hooks for SourceHooks {
     fn stats(&self, statistics: Statistics) {
-        // Latest wins; parsing/aggregation happens on the controller thread.
+        // Latest wins; the source's controller thread or the feed's consumer
+        // thread drains it.
         *self.stats.lock().expect("stats lock") = Some(Box::new(statistics));
     }
 

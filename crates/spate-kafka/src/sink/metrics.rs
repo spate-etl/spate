@@ -1,4 +1,5 @@
-//! librdkafka producer statistics → `spate_kafka_sink_*` metric families.
+//! librdkafka producer statistics → `spate_kafka_sink_*` and
+//! `spate_kafka_feed_*` metric families.
 //!
 //! [`KafkaSinkStatsMetrics`] translates the periodic
 //! [`Statistics`] snapshot into the connector-owned families [the metrics
@@ -7,7 +8,8 @@
 //! the producer's `ClientContext::stats` callback publishes directly from
 //! the producer's poll thread, once per statistics interval and never on
 //! the record path, through the shared slot the writer's `attach_metrics`
-//! fills (see the sink context module).
+//! fills (see the sink context module). A feed's producer publishes the same
+//! way, through the slot its `attach_metrics` fills.
 //!
 //! # Counter identity
 //!
@@ -33,9 +35,10 @@
 //!
 //! [the metrics reference]: https://spate.kainth.dev/docs/METRICS
 
+use crate::metrics::{ExtraLabels, L_CLIENT, with_extra};
 use rdkafka::statistics::Statistics;
 use spate_core::hash::{FastMap, FastSet};
-use spate_core::metrics::{Counter, Gauge, Meter};
+use spate_core::metrics::{Counter, Gauge, Meter, SharedString};
 
 const TX_REQUESTS_TOTAL: &str = "tx_requests_total";
 const TX_BYTES_TOTAL: &str = "tx_bytes_total";
@@ -57,11 +60,14 @@ const BROKER_OUTBUF_LATENCY_AVG_SECONDS: &str = "broker_outbuf_latency_avg_secon
 const BROKER_OUTBUF_LATENCY_P99_SECONDS: &str = "broker_outbuf_latency_p99_seconds";
 const L_BROKER: &str = "broker";
 
-/// Handles for the producer statistics families. Owned by the producer's
-/// context behind a mutex; only the poll thread updates them.
+/// Handles for the producer statistics families. Owned behind a mutex by
+/// the sink's producer context or the feed's `Core`; the poll thread updates
+/// them, and on a feed the consumer thread too during its close flush.
 #[derive(Debug)]
 pub(crate) struct KafkaSinkStatsMetrics {
     meter: Meter,
+    /// Labels on every series, ahead of `broker`.
+    extra: ExtraLabels,
     tx_requests: Counter,
     tx_bytes: Counter,
     rx_responses: Counter,
@@ -94,10 +100,17 @@ struct WindowGauges {
 }
 
 impl WindowGauges {
-    fn new(meter: &Meter, broker: &str, avg_name: &str, p99_name: &str) -> Self {
+    fn new(
+        meter: &Meter,
+        extra: &[(&'static str, SharedString)],
+        broker: &str,
+        avg_name: &str,
+        p99_name: &str,
+    ) -> Self {
+        let labels = with_extra(extra, &[(L_BROKER, broker.to_owned().into())]);
         WindowGauges {
-            avg: meter.gauge(avg_name, &[(L_BROKER, broker.to_owned().into())]),
-            p99: meter.gauge(p99_name, &[(L_BROKER, broker.to_owned().into())]),
+            avg: meter.gauge(avg_name, &labels),
+            p99: meter.gauge(p99_name, &labels),
         }
     }
 
@@ -108,13 +121,11 @@ impl WindowGauges {
 }
 
 impl BrokerHandles {
-    fn new(meter: &Meter, broker: &str) -> Self {
+    fn new(meter: &Meter, extra: &[(&'static str, SharedString)], broker: &str) -> Self {
+        let labels = with_extra(extra, &[(L_BROKER, broker.to_owned().into())]);
         BrokerHandles {
-            up: meter.gauge(BROKER_UP, &[(L_BROKER, broker.to_owned().into())]),
-            tx_errors: meter.counter(
-                BROKER_TX_ERRORS_TOTAL,
-                &[(L_BROKER, broker.to_owned().into())],
-            ),
+            up: meter.gauge(BROKER_UP, &labels),
+            tx_errors: meter.counter(BROKER_TX_ERRORS_TOTAL, &labels),
             rtt: None,
             int_latency: None,
             outbuf_latency: None,
@@ -125,24 +136,36 @@ impl BrokerHandles {
 impl KafkaSinkStatsMetrics {
     /// Resolve all fixed handles. Called once from `attach_metrics`.
     pub(crate) fn new(meter: Meter) -> Self {
+        Self::with_labels(meter, Vec::new())
+    }
+
+    /// Resolve all fixed handles for a feed's producer: every series carries
+    /// `client="producer"`. Called from the feed's `attach_metrics`.
+    pub(crate) fn for_feed(meter: Meter) -> Self {
+        Self::with_labels(meter, vec![(L_CLIENT, "producer".into())])
+    }
+
+    fn with_labels(meter: Meter, extra: ExtraLabels) -> Self {
+        let e = extra.as_slice();
         KafkaSinkStatsMetrics {
-            tx_requests: meter.counter(TX_REQUESTS_TOTAL, &[]),
-            tx_bytes: meter.counter(TX_BYTES_TOTAL, &[]),
-            rx_responses: meter.counter(RX_RESPONSES_TOTAL, &[]),
-            rx_bytes: meter.counter(RX_BYTES_TOTAL, &[]),
-            tx_messages: meter.counter(TX_MESSAGES_TOTAL, &[]),
-            tx_message_bytes: meter.counter(TX_MESSAGE_BYTES_TOTAL, &[]),
-            produce_queue_messages: meter.gauge(PRODUCE_QUEUE_MESSAGES, &[]),
-            produce_queue_bytes: meter.gauge(PRODUCE_QUEUE_BYTES, &[]),
-            broker_tx_retries: meter.counter(BROKER_TX_RETRIES_TOTAL, &[]),
-            broker_req_timeouts: meter.counter(BROKER_REQ_TIMEOUTS_TOTAL, &[]),
+            tx_requests: meter.counter(TX_REQUESTS_TOTAL, e),
+            tx_bytes: meter.counter(TX_BYTES_TOTAL, e),
+            rx_responses: meter.counter(RX_RESPONSES_TOTAL, e),
+            rx_bytes: meter.counter(RX_BYTES_TOTAL, e),
+            tx_messages: meter.counter(TX_MESSAGES_TOTAL, e),
+            tx_message_bytes: meter.counter(TX_MESSAGE_BYTES_TOTAL, e),
+            produce_queue_messages: meter.gauge(PRODUCE_QUEUE_MESSAGES, e),
+            produce_queue_bytes: meter.gauge(PRODUCE_QUEUE_BYTES, e),
+            broker_tx_retries: meter.counter(BROKER_TX_RETRIES_TOTAL, e),
+            broker_req_timeouts: meter.counter(BROKER_REQ_TIMEOUTS_TOTAL, e),
             brokers: FastMap::default(),
             meter,
+            extra,
         }
     }
 
-    /// Translate one statistics snapshot. Poll thread only; not on the
-    /// record path.
+    /// Translate one statistics snapshot. Poll thread, or a feed's consumer
+    /// thread during its close flush; not on the record path.
     pub(crate) fn update(&mut self, stats: &Statistics) {
         self.tx_requests.absolute(to_u64(stats.tx));
         self.tx_bytes.absolute(to_u64(stats.tx_bytes));
@@ -157,6 +180,7 @@ impl KafkaSinkStatsMetrics {
         let mut timeouts: u64 = 0;
         let mut seen: FastSet<&str> = FastSet::default();
         let meter = &self.meter;
+        let extra = self.extra.as_slice();
         // Same contract as the source: `logical` entries (coordinators) are
         // excluded from every sum and per-broker series, but a broker is up
         // if any connection to it, regular or logical, is up. The join
@@ -187,7 +211,7 @@ impl KafkaSinkStatsMetrics {
             let handles = self
                 .brokers
                 .entry(broker.name.clone())
-                .or_insert_with(|| BrokerHandles::new(meter, &broker.name));
+                .or_insert_with(|| BrokerHandles::new(meter, extra, &broker.name));
             let up = broker.state == "UP" || logical_up.contains(broker.nodename.as_str());
             handles.up.set(if up { 1.0 } else { 0.0 });
             handles.tx_errors.absolute(broker.txerrs);
@@ -213,7 +237,7 @@ impl KafkaSinkStatsMetrics {
             ] {
                 if let Some(w) = window.as_ref().filter(|w| w.cnt > 0) {
                     slot.get_or_insert_with(|| {
-                        WindowGauges::new(meter, &broker.name, avg_name, p99_name)
+                        WindowGauges::new(meter, extra, &broker.name, avg_name, p99_name)
                     })
                     .set(us_to_secs(w.avg), us_to_secs(w.p99));
                 }

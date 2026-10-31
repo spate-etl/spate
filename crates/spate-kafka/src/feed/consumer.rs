@@ -145,6 +145,7 @@ pub(crate) fn run(mut d: Driver) {
         d.resend_due();
         d.poll();
         d.serve_intents();
+        d.publish_stats();
         d.backpressure();
         d.commit_if_due();
     }
@@ -305,6 +306,24 @@ impl Driver {
         }
     }
 
+    /// Translate the consumer's latest statistics snapshot, if one arrived
+    /// since the last turn. The owned set is copied under the state lock and
+    /// translated after it is released.
+    pub(crate) fn publish_stats(&mut self) {
+        let Some(stats) = self
+            .consumer
+            .context()
+            .stats
+            .lock()
+            .expect("stats lock")
+            .take()
+        else {
+            return;
+        };
+        let owned: Vec<Tp> = self.core.lock().tracker.owned().cloned().collect();
+        self.core.publish_consumer_stats(&stats, &owned);
+    }
+
     /// Serve every rebalance the context recorded.
     pub(crate) fn serve_intents(&mut self) {
         loop {
@@ -345,11 +364,15 @@ impl Driver {
         }
         self.assigned_once = true;
         let tps = self.tps(tpl);
-        let pause = {
+        let (pause, owned) = {
             let mut st = self.core.lock();
             st.tracker.assign(tps.iter().cloned());
-            st.stopping || st.held_for_reader() >= READY_CAPACITY
+            let pause = st.stopping || st.held_for_reader() >= READY_CAPACITY;
+            (pause, st.tracker.owned().cloned().collect::<Vec<_>>())
         };
+        // Released here, never on the revoke: an eager rebalance revokes
+        // everything before handing most of it back.
+        self.core.release_consumer_partitions(&owned);
         if pause {
             self.pause(tps.clone());
         }
@@ -415,6 +438,7 @@ impl Driver {
             st.tracker.unassign_all();
             st.drop_unowned();
         }
+        self.core.release_consumer_partitions(&[]);
         let paused: Vec<Tp> = std::mem::take(&mut self.paused).into_iter().collect();
         self.resume(&paused);
         match crate::error::classify_consumer_error(code, self.assigned_once) {

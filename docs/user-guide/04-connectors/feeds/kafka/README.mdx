@@ -40,7 +40,8 @@ KAFKA_BROKERS=localhost:9092 \
 
 `KafkaFeed::connect` checks the feed's topics (see
 [Startup checks](#startup-checks)), then builds the feed's clients and starts
-its four threads: the consumer thread, which polls the group member; the
+its four threads: the consumer thread, which polls the group member and
+translates its statistics; the
 follower thread, which reads the attempt topic; the gate thread, which
 records each unit's attempt before the unit is read (see
 [Counting deliveries](#counting-deliveries)); and the depth thread, which
@@ -67,7 +68,7 @@ unknown fields are rejected with the offending key.
 | `dead_letter_topic` | string | `required` | Where a unit goes at the attempt cap, failed by its reader or moved unread, and a message that names no unit. A bounded job reads its end offsets, as [Ending a bounded job](#ending-a-bounded-job) describes. Must differ from `topic` and `retry_topic`. |
 | `attempt_topic` | string | `required` | The compacted topic each unit's attempt is recorded on before the unit is read (see [Topics](#topics)). Must differ from `topic`, `retry_topic` and `dead_letter_topic`. |
 | `delivery_timeout` | duration | `30s` | How long one write waits for its delivery report (librdkafka `message.timeout.ms`), and the bound on one pass of the gate, which can run up to 2 s past it. An attempt, tombstone, retry or dead-letter write that times out is sent again, and a publish that times out is reported to its caller as retryable. From `1ms` to about 24.8 days. |
-| `statistics_interval` | duration | `5s` | librdkafka's statistics interval for the feed's consumer and producer. The attempt follower sends no statistics. `0s` disables statistics; a non-zero value under `1ms` is refused. |
+| `statistics_interval` | duration | `5s` | librdkafka's statistics interval for the feed's consumer and producer, feeding the feed's [client statistics](#client-statistics). The attempt follower sends no statistics. `0s` disables statistics and those families with it; the feed's other families stay. A non-zero value under `1ms` is refused. |
 | `rdkafka` | string map | `{}` | Raw librdkafka properties for every client of the feed, applied after validation — see below. |
 
 `units_held` beside `kafka:` sets how many units a worker holds at once, and
@@ -158,7 +159,8 @@ passthrough, and the other three topic names serve its checks. Connecting runs
 the [startup checks](#startup-checks) a worker runs, then builds one producer
 with the settings the feed owns. The handle joins no group, starts none of the
 feed's four threads and writes no attempt record, so it takes no partition
-from the workers and charges no unit an attempt.
+from the workers and charges no unit an attempt. It registers no metric
+families of its own.
 
 A publish is confirmed by its delivery report and fails as
 [Message mapping](#message-mapping) describes. A credential a broker rejects,
@@ -586,9 +588,96 @@ error naming the record's offset.
 
 ## Metrics
 
-The Kafka feed registers no metric families of its own. The runtime records
-the calls a source makes on it under the framework's `spate_feed_*` families,
-with `component_type="kafka"`; see [Metrics](../../../../METRICS.md).
+The feed registers its families through the `Meter` the runtime hands it
+(backend key `kafka`, role `feed`), so every family is prefixed
+`spate_kafka_feed_`. The handles are resolved when the runtime starts the
+pipeline. Events before that, and on a feed handed to a source directly, are
+not counted. A feed run by a second pipeline counts under the pipeline that
+started last, and the first pipeline's series keep their last values. Standard
+labels (`pipeline`, `component="feed"`, `component_type="kafka"`) are on all of
+them. The runtime also records the calls a source makes on the feed under the
+framework's `spate_feed_*` families, with `component_type="kafka"`; see
+[Metrics](../../../../METRICS.md).
+
+| Metric | Type | Extra labels | Description |
+|---|---|---|---|
+| `spate_kafka_feed_attempt_write_duration_seconds` | histogram | | Time from an attempt record's first send to its confirmation, resends and their backoff included. Its `_count` is the attempt records written. |
+| `spate_kafka_feed_retry_writes_total` | counter | | Writes to the retry topic the brokers confirmed. |
+| `spate_kafka_feed_dead_letter_writes_total` | counter | `reason` (`attempt_cap`\|`no_unit`) | Writes to the dead-letter topic the brokers confirmed. `attempt_cap` is a unit failed at or past the attempt cap, or moved unread because its recorded attempts reached it; `no_unit` is a message whose key is not UTF-8. |
+
+These count each write the brokers confirmed, on this instance. A unit written
+again after a rebalance or a stop counts again, so sum them across instances.
+A write still in flight when the feed closes or stops on an error is not
+counted. `spate_feed_units_failed_total` counts the fails the feed accepted,
+before their write, and does not count a unit moved unread or a message with no
+unit.
+
+### Client statistics
+
+With a non-zero `statistics_interval`, the feed's consumer and producer
+translate librdkafka's statistics under the same prefix, labelled
+`client="consumer"` or `client="producer"`. Each family means what its
+counterpart on the Kafka source or sink means, and follows its conventions for
+counters, the `broker` label and the rolling-window gauges. The consumer's
+snapshot is drained on its own thread, and the producer's on its poll thread.
+A client's families stop updating when the feed closes or stops on an error,
+and keep their last values.
+
+The consumer reads the work and retry topics. Its fetch-queue gauges sum both,
+and its per-partition series carry `topic` beside `partition`. They appear only
+with `metrics.per_partition_detail: true`, and a partition the next assignment
+drops reads 0. The feed stores no offsets, so it reports no stored lag.
+
+| Metric | Type | Extra labels | As |
+|---|---|---|---|
+| `spate_kafka_feed_tx_requests_total` | counter | `client="consumer"` | [`spate_kafka_source_tx_requests_total`](../../sources/kafka/README.mdx#metrics) |
+| `spate_kafka_feed_tx_bytes_total` | counter | `client="consumer"` | [`spate_kafka_source_tx_bytes_total`](../../sources/kafka/README.mdx#metrics) |
+| `spate_kafka_feed_rx_responses_total` | counter | `client="consumer"` | [`spate_kafka_source_rx_responses_total`](../../sources/kafka/README.mdx#metrics) |
+| `spate_kafka_feed_rx_bytes_total` | counter | `client="consumer"` | [`spate_kafka_source_rx_bytes_total`](../../sources/kafka/README.mdx#metrics) |
+| `spate_kafka_feed_rx_messages_total` | counter | `client="consumer"` | [`spate_kafka_source_rx_messages_total`](../../sources/kafka/README.mdx#metrics) |
+| `spate_kafka_feed_rx_message_bytes_total` | counter | `client="consumer"` | [`spate_kafka_source_rx_message_bytes_total`](../../sources/kafka/README.mdx#metrics) |
+| `spate_kafka_feed_broker_tx_retries_total` | counter | `client="consumer"` | [`spate_kafka_source_broker_tx_retries_total`](../../sources/kafka/README.mdx#metrics) |
+| `spate_kafka_feed_broker_req_timeouts_total` | counter | `client="consumer"` | [`spate_kafka_source_broker_req_timeouts_total`](../../sources/kafka/README.mdx#metrics) |
+| `spate_kafka_feed_broker_connects_total` | counter | `client="consumer"` | [`spate_kafka_source_broker_connects_total`](../../sources/kafka/README.mdx#metrics) |
+| `spate_kafka_feed_broker_disconnects_total` | counter | `client="consumer"` | [`spate_kafka_source_broker_disconnects_total`](../../sources/kafka/README.mdx#metrics) |
+| `spate_kafka_feed_broker_up` | gauge | `client="consumer"`, `broker` | [`spate_kafka_source_broker_up`](../../sources/kafka/README.mdx#metrics) |
+| `spate_kafka_feed_broker_tx_errors_total` | counter | `client="consumer"`, `broker` | [`spate_kafka_source_broker_tx_errors_total`](../../sources/kafka/README.mdx#metrics) |
+| `spate_kafka_feed_broker_rtt_avg_seconds` | gauge | `client="consumer"`, `broker` | [`spate_kafka_source_broker_rtt_avg_seconds`](../../sources/kafka/README.mdx#metrics) |
+| `spate_kafka_feed_broker_rtt_p99_seconds` | gauge | `client="consumer"`, `broker` | [`spate_kafka_source_broker_rtt_p99_seconds`](../../sources/kafka/README.mdx#metrics) |
+| `spate_kafka_feed_broker_throttle_avg_seconds` | gauge | `client="consumer"`, `broker` | [`spate_kafka_source_broker_throttle_avg_seconds`](../../sources/kafka/README.mdx#metrics) |
+| `spate_kafka_feed_broker_throttle_p99_seconds` | gauge | `client="consumer"`, `broker` | [`spate_kafka_source_broker_throttle_p99_seconds`](../../sources/kafka/README.mdx#metrics) |
+| `spate_kafka_feed_fetch_queue_messages` | gauge | `client="consumer"` | [`spate_kafka_source_fetch_queue_messages`](../../sources/kafka/README.mdx#metrics) |
+| `spate_kafka_feed_fetch_queue_bytes` | gauge | `client="consumer"` | [`spate_kafka_source_fetch_queue_bytes`](../../sources/kafka/README.mdx#metrics) |
+| `spate_kafka_feed_reply_queue_depth` | gauge | `client="consumer"` | [`spate_kafka_source_reply_queue_depth`](../../sources/kafka/README.mdx#metrics) |
+| `spate_kafka_feed_group_rebalances_total` | counter | `client="consumer"` | [`spate_kafka_source_group_rebalances_total`](../../sources/kafka/README.mdx#metrics) |
+| `spate_kafka_feed_group_assignment_size` | gauge | `client="consumer"` | [`spate_kafka_source_group_assignment_size`](../../sources/kafka/README.mdx#metrics) |
+| `spate_kafka_feed_group_healthy` | gauge | `client="consumer"` | [`spate_kafka_source_group_healthy`](../../sources/kafka/README.mdx#metrics) |
+| `spate_kafka_feed_partition_fetch_queue_messages` | gauge | `client="consumer"`, `topic`, `partition` ⚠ | [`spate_kafka_source_partition_fetch_queue_messages`](../../sources/kafka/README.mdx#metrics) |
+| `spate_kafka_feed_partition_not_fetching` | gauge | `client="consumer"`, `topic`, `partition` ⚠ | [`spate_kafka_source_partition_not_fetching`](../../sources/kafka/README.mdx#metrics) |
+
+The producer's statistics are aggregate only, as the sink's are
+([ADR-0022](../../../../adr/0022-kafka-producer-teardown-and-stats.md)).
+
+| Metric | Type | Extra labels | As |
+|---|---|---|---|
+| `spate_kafka_feed_tx_requests_total` | counter | `client="producer"` | [`spate_kafka_sink_tx_requests_total`](../../sinks/kafka/README.mdx#metrics) |
+| `spate_kafka_feed_tx_bytes_total` | counter | `client="producer"` | [`spate_kafka_sink_tx_bytes_total`](../../sinks/kafka/README.mdx#metrics) |
+| `spate_kafka_feed_rx_responses_total` | counter | `client="producer"` | [`spate_kafka_sink_rx_responses_total`](../../sinks/kafka/README.mdx#metrics) |
+| `spate_kafka_feed_rx_bytes_total` | counter | `client="producer"` | [`spate_kafka_sink_rx_bytes_total`](../../sinks/kafka/README.mdx#metrics) |
+| `spate_kafka_feed_tx_messages_total` | counter | `client="producer"` | [`spate_kafka_sink_tx_messages_total`](../../sinks/kafka/README.mdx#metrics) |
+| `spate_kafka_feed_tx_message_bytes_total` | counter | `client="producer"` | [`spate_kafka_sink_tx_message_bytes_total`](../../sinks/kafka/README.mdx#metrics) |
+| `spate_kafka_feed_produce_queue_messages` | gauge | `client="producer"` | [`spate_kafka_sink_produce_queue_messages`](../../sinks/kafka/README.mdx#metrics) |
+| `spate_kafka_feed_produce_queue_bytes` | gauge | `client="producer"` | [`spate_kafka_sink_produce_queue_bytes`](../../sinks/kafka/README.mdx#metrics) |
+| `spate_kafka_feed_broker_tx_retries_total` | counter | `client="producer"` | [`spate_kafka_sink_broker_tx_retries_total`](../../sinks/kafka/README.mdx#metrics) |
+| `spate_kafka_feed_broker_req_timeouts_total` | counter | `client="producer"` | [`spate_kafka_sink_broker_req_timeouts_total`](../../sinks/kafka/README.mdx#metrics) |
+| `spate_kafka_feed_broker_up` | gauge | `client="producer"`, `broker` | [`spate_kafka_sink_broker_up`](../../sinks/kafka/README.mdx#metrics) |
+| `spate_kafka_feed_broker_tx_errors_total` | counter | `client="producer"`, `broker` | [`spate_kafka_sink_broker_tx_errors_total`](../../sinks/kafka/README.mdx#metrics) |
+| `spate_kafka_feed_broker_rtt_avg_seconds` | gauge | `client="producer"`, `broker` | [`spate_kafka_sink_broker_rtt_avg_seconds`](../../sinks/kafka/README.mdx#metrics) |
+| `spate_kafka_feed_broker_rtt_p99_seconds` | gauge | `client="producer"`, `broker` | [`spate_kafka_sink_broker_rtt_p99_seconds`](../../sinks/kafka/README.mdx#metrics) |
+| `spate_kafka_feed_broker_int_latency_avg_seconds` | gauge | `client="producer"`, `broker` | [`spate_kafka_sink_broker_int_latency_avg_seconds`](../../sinks/kafka/README.mdx#metrics) |
+| `spate_kafka_feed_broker_int_latency_p99_seconds` | gauge | `client="producer"`, `broker` | [`spate_kafka_sink_broker_int_latency_p99_seconds`](../../sinks/kafka/README.mdx#metrics) |
+| `spate_kafka_feed_broker_outbuf_latency_avg_seconds` | gauge | `client="producer"`, `broker` | [`spate_kafka_sink_broker_outbuf_latency_avg_seconds`](../../sinks/kafka/README.mdx#metrics) |
+| `spate_kafka_feed_broker_outbuf_latency_p99_seconds` | gauge | `client="producer"`, `broker` | [`spate_kafka_sink_broker_outbuf_latency_p99_seconds`](../../sinks/kafka/README.mdx#metrics) |
 
 `spate_feed_dead_letter_units` reads the dead-letter topic as the sum of its
 partitions' end offsets, so it counts every record ever written there, copied

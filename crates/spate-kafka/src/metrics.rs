@@ -1,13 +1,15 @@
-//! librdkafka statistics → `spate_kafka_source_*` metric families.
+//! librdkafka consumer statistics → `spate_kafka_source_*` and
+//! `spate_kafka_feed_*` metric families.
 //!
 //! [`KafkaStatsMetrics`] translates the periodic [`Statistics`] snapshot
-//! (captured by the `ClientContext::stats` callback, drained by
-//! `KafkaSource::publish_stats` on the controller thread) into the
+//! (captured by the `ClientContext::stats` callback) into the
 //! connector-owned families [the metrics reference] documents under Kafka
-//! source. All fixed handles are resolved from the runtime-minted
-//! [`Meter`](spate_core::metrics::Meter) once at `open`; per-broker and
-//! per-partition handles are registered lazily on first sighting, on a
-//! control-plane path and never per record.
+//! source and Kafka feed. `KafkaSource::publish_stats` drains it on the
+//! source's controller thread, and the feed's consumer thread drains the
+//! feed's. All fixed handles are resolved from the runtime-minted
+//! [`Meter`](spate_core::metrics::Meter) once, at `open` or at the feed's
+//! `attach_metrics`; per-broker and per-partition handles are registered
+//! lazily on first sighting, on a control-plane path and never per record.
 //!
 //! # Counter identity
 //!
@@ -17,7 +19,7 @@
 //! natively. That mapping is sound only while the totals are monotonic, i.e.
 //! scoped to a single consumer handle: `KafkaSource::open` creates the
 //! consumer exactly once per source lifetime (a second `open` is a hard
-//! error). If in-process consumer recreation is ever introduced, these
+//! error), and a `KafkaFeed` builds one consumer for its life. If in-process consumer recreation is ever introduced, these
 //! series would restart at zero and the fetch-max guard would silently
 //! flat-line them at the old high-water mark (see Vector issue #20697);
 //! switch to delta accumulation against the previous snapshot instead.
@@ -35,7 +37,7 @@
 
 use rdkafka::statistics::{Partition, Statistics};
 use spate_core::hash::{FastMap, FastSet};
-use spate_core::metrics::{Counter, Gauge, Meter};
+use spate_core::metrics::{Counter, Gauge, Meter, SharedString};
 use spate_core::record::PartitionId;
 
 const TX_REQUESTS_TOTAL: &str = "tx_requests_total";
@@ -65,6 +67,15 @@ const PARTITION_LAG_STORED_RECORDS: &str = "partition_lag_stored_records";
 const PARTITION_NOT_FETCHING: &str = "partition_not_fetching";
 const L_BROKER: &str = "broker";
 const L_PARTITION: &str = "partition";
+const L_TOPIC: &str = "topic";
+/// Which of a feed's two clients a statistics series describes.
+pub(crate) const L_CLIENT: &str = "client";
+
+/// Labels every family a translator registers carries before its own.
+pub(crate) type ExtraLabels = Vec<(&'static str, SharedString)>;
+
+/// A partition of one topic, the key of the per-partition maps.
+type TopicPartition = (Box<str>, i32);
 
 /// The librdkafka fetch state in which a partition is being consumed. The
 /// others in `rd_kafka_fetch_states[]` are `none`, `stopping`, `stopped`,
@@ -81,13 +92,18 @@ const NOT_FETCHING_WARN_WINDOWS: u32 = 2;
 /// read part-way through a run still carries it.
 const NOT_FETCHING_REPEAT_WINDOWS: u32 = 60;
 
-/// Handles for the librdkafka statistics families. Owned by `KafkaSource`
-/// and only touched from the controller thread, so the lazy maps need no
-/// locking.
+/// Handles for the librdkafka statistics families. Owned by its one drain,
+/// the source's controller thread or the feed's consumer thread, so the lazy
+/// maps need no locking.
 #[derive(Debug)]
 pub(crate) struct KafkaStatsMetrics {
     meter: Meter,
     per_partition_detail: bool,
+    /// Labels on every series, ahead of `broker`, `topic` and `partition`.
+    extra: ExtraLabels,
+    /// Whether per-partition series and the not-fetching line name the topic,
+    /// for a consumer that reads more than one.
+    topic_label: bool,
     tx_requests: Counter,
     tx_bytes: Counter,
     rx_responses: Counter,
@@ -105,8 +121,16 @@ pub(crate) struct KafkaStatsMetrics {
     group_assignment_size: Gauge,
     group_healthy: Gauge,
     brokers: FastMap<String, BrokerHandles>,
-    partitions: FastMap<i32, PartitionHandles>,
-    not_fetching: FastMap<i32, NotFetching>,
+    partitions: FastMap<TopicPartition, PartitionHandles>,
+    not_fetching: FastMap<TopicPartition, NotFetching>,
+}
+
+/// `extra` followed by `more`, the label set of one series.
+pub(crate) fn with_extra(
+    extra: &[(&'static str, SharedString)],
+    more: &[(&'static str, SharedString)],
+) -> ExtraLabels {
+    extra.iter().chain(more).cloned().collect()
 }
 
 /// Per-broker series, labeled `broker="<host:port/id>"`, bounded by
@@ -128,10 +152,17 @@ struct WindowGauges {
 }
 
 impl WindowGauges {
-    fn new(meter: &Meter, broker: &str, avg_name: &str, p99_name: &str) -> Self {
+    fn new(
+        meter: &Meter,
+        extra: &[(&'static str, SharedString)],
+        broker: &str,
+        avg_name: &str,
+        p99_name: &str,
+    ) -> Self {
+        let labels = with_extra(extra, &[(L_BROKER, broker.to_owned().into())]);
         WindowGauges {
-            avg: meter.gauge(avg_name, &[(L_BROKER, broker.to_owned().into())]),
-            p99: meter.gauge(p99_name, &[(L_BROKER, broker.to_owned().into())]),
+            avg: meter.gauge(avg_name, &labels),
+            p99: meter.gauge(p99_name, &labels),
         }
     }
 
@@ -142,13 +173,11 @@ impl WindowGauges {
 }
 
 impl BrokerHandles {
-    fn new(meter: &Meter, broker: &str) -> Self {
+    fn new(meter: &Meter, extra: &[(&'static str, SharedString)], broker: &str) -> Self {
+        let labels = with_extra(extra, &[(L_BROKER, broker.to_owned().into())]);
         BrokerHandles {
-            up: meter.gauge(BROKER_UP, &[(L_BROKER, broker.to_owned().into())]),
-            tx_errors: meter.counter(
-                BROKER_TX_ERRORS_TOTAL,
-                &[(L_BROKER, broker.to_owned().into())],
-            ),
+            up: meter.gauge(BROKER_UP, &labels),
+            tx_errors: meter.counter(BROKER_TX_ERRORS_TOTAL, &labels),
             rtt: None,
             throttle: None,
         }
@@ -174,17 +203,11 @@ struct PartitionHandles {
 }
 
 impl PartitionHandles {
-    fn new(meter: &Meter, partition: i32) -> Self {
+    fn new(meter: &Meter, labels: &[(&'static str, SharedString)]) -> Self {
         PartitionHandles {
-            fetch_queue_messages: meter.gauge(
-                PARTITION_FETCH_QUEUE_MESSAGES,
-                &[(L_PARTITION, partition.to_string().into())],
-            ),
+            fetch_queue_messages: meter.gauge(PARTITION_FETCH_QUEUE_MESSAGES, labels),
             lag_stored: None,
-            not_fetching: meter.gauge(
-                PARTITION_NOT_FETCHING,
-                &[(L_PARTITION, partition.to_string().into())],
-            ),
+            not_fetching: meter.gauge(PARTITION_NOT_FETCHING, labels),
         }
     }
 }
@@ -205,32 +228,58 @@ struct NotFetching {
 impl KafkaStatsMetrics {
     /// Resolve all fixed handles. Build-time only (called from `open`).
     pub(crate) fn new(meter: Meter, per_partition_detail: bool) -> Self {
+        Self::with_labels(meter, per_partition_detail, Vec::new(), false)
+    }
+
+    /// Resolve all fixed handles for a feed's consumer, which reads a work and
+    /// a retry topic: every series carries `client="consumer"`, and a
+    /// per-partition series carries `topic`. Called from the feed's
+    /// `attach_metrics`.
+    pub(crate) fn for_feed(meter: Meter, per_partition_detail: bool) -> Self {
+        Self::with_labels(
+            meter,
+            per_partition_detail,
+            vec![(L_CLIENT, "consumer".into())],
+            true,
+        )
+    }
+
+    fn with_labels(
+        meter: Meter,
+        per_partition_detail: bool,
+        extra: ExtraLabels,
+        topic_label: bool,
+    ) -> Self {
+        let e = extra.as_slice();
         KafkaStatsMetrics {
-            tx_requests: meter.counter(TX_REQUESTS_TOTAL, &[]),
-            tx_bytes: meter.counter(TX_BYTES_TOTAL, &[]),
-            rx_responses: meter.counter(RX_RESPONSES_TOTAL, &[]),
-            rx_bytes: meter.counter(RX_BYTES_TOTAL, &[]),
-            rx_messages: meter.counter(RX_MESSAGES_TOTAL, &[]),
-            rx_message_bytes: meter.counter(RX_MESSAGE_BYTES_TOTAL, &[]),
-            broker_tx_retries: meter.counter(BROKER_TX_RETRIES_TOTAL, &[]),
-            broker_req_timeouts: meter.counter(BROKER_REQ_TIMEOUTS_TOTAL, &[]),
-            broker_connects: meter.counter(BROKER_CONNECTS_TOTAL, &[]),
-            broker_disconnects: meter.counter(BROKER_DISCONNECTS_TOTAL, &[]),
-            fetch_queue_messages: meter.gauge(FETCH_QUEUE_MESSAGES, &[]),
-            fetch_queue_bytes: meter.gauge(FETCH_QUEUE_BYTES, &[]),
-            reply_queue_depth: meter.gauge(REPLY_QUEUE_DEPTH, &[]),
-            group_rebalances: meter.counter(GROUP_REBALANCES_TOTAL, &[]),
-            group_assignment_size: meter.gauge(GROUP_ASSIGNMENT_SIZE, &[]),
-            group_healthy: meter.gauge(GROUP_HEALTHY, &[]),
+            tx_requests: meter.counter(TX_REQUESTS_TOTAL, e),
+            tx_bytes: meter.counter(TX_BYTES_TOTAL, e),
+            rx_responses: meter.counter(RX_RESPONSES_TOTAL, e),
+            rx_bytes: meter.counter(RX_BYTES_TOTAL, e),
+            rx_messages: meter.counter(RX_MESSAGES_TOTAL, e),
+            rx_message_bytes: meter.counter(RX_MESSAGE_BYTES_TOTAL, e),
+            broker_tx_retries: meter.counter(BROKER_TX_RETRIES_TOTAL, e),
+            broker_req_timeouts: meter.counter(BROKER_REQ_TIMEOUTS_TOTAL, e),
+            broker_connects: meter.counter(BROKER_CONNECTS_TOTAL, e),
+            broker_disconnects: meter.counter(BROKER_DISCONNECTS_TOTAL, e),
+            fetch_queue_messages: meter.gauge(FETCH_QUEUE_MESSAGES, e),
+            fetch_queue_bytes: meter.gauge(FETCH_QUEUE_BYTES, e),
+            reply_queue_depth: meter.gauge(REPLY_QUEUE_DEPTH, e),
+            group_rebalances: meter.counter(GROUP_REBALANCES_TOTAL, e),
+            group_assignment_size: meter.gauge(GROUP_ASSIGNMENT_SIZE, e),
+            group_healthy: meter.gauge(GROUP_HEALTHY, e),
             brokers: FastMap::default(),
             partitions: FastMap::default(),
             not_fetching: FastMap::default(),
             meter,
             per_partition_detail,
+            extra,
+            topic_label,
         }
     }
 
-    /// Translate one statistics snapshot. Controller thread only.
+    /// Translate one statistics snapshot of a consumer reading `topic`. Drain
+    /// thread only; see [`update_topics`](Self::update_topics).
     ///
     /// `owned` is the member's live assignment (see [`is_owned`] for why the
     /// snapshot needs this filter). Every per-partition series and the
@@ -243,6 +292,25 @@ impl KafkaStatsMetrics {
     /// the new one lands, so a partition handed straight back keeps its last
     /// recorded value rather than being reset in between.
     pub(crate) fn update(&mut self, stats: &Statistics, topic: &str, owned: &[PartitionId]) {
+        let owned: Vec<(&str, i32)> = owned
+            .iter()
+            .filter_map(|p| i32::try_from(p.0).ok().map(|pid| (topic, pid)))
+            .collect();
+        self.update_topics(stats, &[topic], &owned);
+    }
+
+    /// Translate one statistics snapshot of a consumer reading `topics`. Drain
+    /// thread only.
+    ///
+    /// The fetch-queue gauges sum every listed topic, and `owned` names the
+    /// held partitions by topic, so partition 0 of two topics stays two
+    /// series. The ownership rule is [`update`](Self::update)'s.
+    pub(crate) fn update_topics(
+        &mut self,
+        stats: &Statistics,
+        topics: &[&str],
+        owned: &[(&str, i32)],
+    ) {
         self.tx_requests.absolute(to_u64(stats.tx));
         self.tx_bytes.absolute(to_u64(stats.tx_bytes));
         self.rx_responses.absolute(to_u64(stats.rx));
@@ -252,7 +320,7 @@ impl KafkaStatsMetrics {
         self.reply_queue_depth.set(to_u64(stats.replyq) as f64);
 
         self.update_brokers(stats);
-        self.update_partitions(stats, topic, owned);
+        self.update_partitions(stats, topics, owned);
 
         if let Some(cgrp) = &stats.cgrp {
             self.group_rebalances.absolute(to_u64(cgrp.rebalance_cnt));
@@ -281,6 +349,7 @@ impl KafkaStatsMetrics {
         let mut disconnects: u64 = 0;
         let mut seen: FastSet<&str> = FastSet::default();
         let meter = &self.meter;
+        let extra = self.extra.as_slice();
         // `logical` entries (the group coordinator) are separate librdkafka
         // connections that mirror an underlying broker. The join key is the
         // resolved `nodename` (host:port); a logical entry reports
@@ -317,7 +386,7 @@ impl KafkaStatsMetrics {
             let handles = self
                 .brokers
                 .entry(broker.name.clone())
-                .or_insert_with(|| BrokerHandles::new(meter, &broker.name));
+                .or_insert_with(|| BrokerHandles::new(meter, extra, &broker.name));
             let up = broker.state == "UP" || logical_up.contains(broker.nodename.as_str());
             handles.up.set(if up { 1.0 } else { 0.0 });
             handles.tx_errors.absolute(broker.txerrs);
@@ -329,6 +398,7 @@ impl KafkaStatsMetrics {
                     .get_or_insert_with(|| {
                         WindowGauges::new(
                             meter,
+                            extra,
                             &broker.name,
                             BROKER_RTT_AVG_SECONDS,
                             BROKER_RTT_P99_SECONDS,
@@ -342,6 +412,7 @@ impl KafkaStatsMetrics {
                     .get_or_insert_with(|| {
                         WindowGauges::new(
                             meter,
+                            extra,
                             &broker.name,
                             BROKER_THROTTLE_AVG_SECONDS,
                             BROKER_THROTTLE_P99_SECONDS,
@@ -374,12 +445,15 @@ impl KafkaStatsMetrics {
     /// that still holds it, so a change of ownership is released by
     /// [`retain_partitions`](Self::retain_partitions) and this path releases
     /// nothing.
-    fn update_partitions(&mut self, stats: &Statistics, topic: &str, owned: &[PartitionId]) {
+    fn update_partitions(&mut self, stats: &Statistics, topics: &[&str], owned: &[(&str, i32)]) {
         let mut fetchq_msgs: u64 = 0;
         let mut fetchq_bytes: u64 = 0;
-        let mut seen: FastSet<i32> = FastSet::default();
+        let mut seen: FastSet<TopicPartition> = FastSet::default();
         let meter = &self.meter;
-        if let Some(t) = stats.topics.get(topic) {
+        for &topic in topics {
+            let Some(t) = stats.topics.get(topic) else {
+                continue;
+            };
             for (pid, p) in &t.partitions {
                 // Partition -1 is librdkafka's internal UnAssigned partition.
                 if *pid < 0 {
@@ -387,14 +461,16 @@ impl KafkaStatsMetrics {
                 }
                 fetchq_msgs += to_u64(p.fetchq_cnt);
                 fetchq_bytes += p.fetchq_size;
-                let held = is_owned(owned, *pid);
+                let held = owned.contains(&(topic, *pid));
+                let key: TopicPartition = (topic.into(), *pid);
                 if self.per_partition_detail {
-                    seen.insert(*pid);
+                    seen.insert(key.clone());
                     if held {
+                        let labels = self.partition_labels(topic, *pid);
                         let handles = self
                             .partitions
-                            .entry(*pid)
-                            .or_insert_with(|| PartitionHandles::new(meter, *pid));
+                            .entry(key.clone())
+                            .or_insert_with(|| PartitionHandles::new(meter, &labels));
                         handles
                             .fetch_queue_messages
                             .set(to_u64(p.fetchq_cnt) as f64);
@@ -402,10 +478,7 @@ impl KafkaStatsMetrics {
                             handles
                                 .lag_stored
                                 .get_or_insert_with(|| {
-                                    meter.gauge(
-                                        PARTITION_LAG_STORED_RECORDS,
-                                        &[(L_PARTITION, pid.to_string().into())],
-                                    )
+                                    meter.gauge(PARTITION_LAG_STORED_RECORDS, &labels)
                                 })
                                 .set(p.consumer_lag_stored as f64);
                         }
@@ -422,19 +495,33 @@ impl KafkaStatsMetrics {
                 // leaves the cardinality knob at its default still gets the
                 // log line.
                 if held {
-                    track_fetch_state(&mut self.not_fetching, *pid, p);
+                    let named = self.topic_label.then_some(topic);
+                    track_fetch_state(&mut self.not_fetching, key, named, p);
                 }
             }
         }
         self.fetch_queue_messages.set(fetchq_msgs as f64);
         self.fetch_queue_bytes.set(fetchq_bytes as f64);
         if self.per_partition_detail {
-            self.partitions.retain(|pid, _| seen.contains(pid));
+            self.partitions.retain(|key, _| seen.contains(key));
+        }
+    }
+
+    /// The label set of one per-partition series.
+    fn partition_labels(&self, topic: &str, pid: i32) -> ExtraLabels {
+        let partition: SharedString = pid.to_string().into();
+        if self.topic_label {
+            with_extra(
+                &self.extra,
+                &[(L_TOPIC, topic.to_owned().into()), (L_PARTITION, partition)],
+            )
+        } else {
+            with_extra(&self.extra, &[(L_PARTITION, partition)])
         }
     }
 
     /// Release the partitions this member lost in the rebalance that just
-    /// completed. Controller thread only.
+    /// completed. Drain thread only.
     ///
     /// A partition outside `owned` has every per-partition gauge read 0, and
     /// its not-fetching run is dropped, so a partition handed back later
@@ -452,8 +539,18 @@ impl KafkaStatsMetrics {
     /// and still owns everything it is about to be handed back. This runs
     /// once the new assignment is known.
     pub(crate) fn retain_partitions(&mut self, owned: &[PartitionId]) {
-        for (pid, handles) in &self.partitions {
-            if is_owned(owned, *pid) {
+        self.release(|_, pid| is_owned(owned, pid));
+    }
+
+    /// [`retain_partitions`](Self::retain_partitions) for a consumer reading
+    /// several topics, with `owned` named by topic. Drain thread only.
+    pub(crate) fn retain_owned(&mut self, owned: &[(&str, i32)]) {
+        self.release(|topic, pid| owned.contains(&(topic, pid)));
+    }
+
+    fn release(&mut self, held: impl Fn(&str, i32) -> bool) {
+        for ((topic, pid), handles) in &self.partitions {
+            if held(topic, *pid) {
                 continue;
             }
             handles.fetch_queue_messages.set(0.0);
@@ -462,7 +559,8 @@ impl KafkaStatsMetrics {
                 gauge.set(0.0);
             }
         }
-        self.not_fetching.retain(|pid, _| is_owned(owned, *pid));
+        self.not_fetching
+            .retain(|(topic, pid), _| held(topic, *pid));
     }
 }
 
@@ -498,12 +596,22 @@ fn is_owned(owned: &[PartitionId], pid: i32) -> bool {
 ///
 /// Free function taking the run map so a unit test drives the state machine
 /// window by window, the same reason `publish_lag` is one.
-fn track_fetch_state(runs: &mut FastMap<i32, NotFetching>, pid: i32, p: &Partition) {
+fn track_fetch_state(
+    runs: &mut FastMap<TopicPartition, NotFetching>,
+    key: TopicPartition,
+    topic: Option<&str>,
+    p: &Partition,
+) {
+    let pid = key.1;
+    // `None` records no field, so a single-topic consumer's line is
+    // unchanged.
+    let topic = topic.map(tracing::field::display);
     if p.fetch_state == FETCH_STATE_ACTIVE {
-        if let Some(run) = runs.remove(&pid)
+        if let Some(run) = runs.remove(&key)
             && !run.reported.is_empty()
         {
             tracing::info!(
+                topic,
                 partition = pid,
                 windows = run.windows,
                 "assigned partition resumed fetching"
@@ -511,7 +619,7 @@ fn track_fetch_state(runs: &mut FastMap<i32, NotFetching>, pid: i32, p: &Partiti
         }
         return;
     }
-    let run = runs.entry(pid).or_insert_with(|| NotFetching {
+    let run = runs.entry(key).or_insert_with(|| NotFetching {
         windows: 0,
         reported: Vec::new(),
     });
@@ -527,6 +635,7 @@ fn track_fetch_state(runs: &mut FastMap<i32, NotFetching>, pid: i32, p: &Partiti
         run.reported.push(p.fetch_state.clone());
     }
     tracing::warn!(
+        topic,
         partition = pid,
         state = %p.fetch_state,
         windows = run.windows,
@@ -981,9 +1090,9 @@ mod tests {
             m_holder = Some(m);
         });
         let m = m_holder.unwrap();
-        assert!(m.partitions.contains_key(&0));
+        assert!(m.partitions.contains_key(&("orders".into(), 0)));
         assert!(
-            !m.partitions.contains_key(&1),
+            !m.partitions.contains_key(&("orders".into(), 1)),
             "retain must drop the revoked partition"
         );
         // The exporter still renders partition 1's last value until its idle

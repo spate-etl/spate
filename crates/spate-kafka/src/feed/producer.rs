@@ -1,5 +1,5 @@
-//! The feed producer's hooks: delivery reports, the latest statistics
-//! snapshot and librdkafka's errors.
+//! The feed producer's hooks: delivery reports, statistics translated into
+//! the feed's families, and librdkafka's errors.
 
 use super::Core;
 use super::write::{Failure, Write};
@@ -17,8 +17,6 @@ pub(crate) type FeedProducerContext = SpateContext<FeedProducerHooks>;
 #[derive(Debug)]
 pub(crate) struct FeedProducerHooks {
     core: Arc<Core>,
-    /// The latest statistics snapshot, latest wins.
-    stats: Mutex<Option<Box<Statistics>>>,
     /// The last error callback, until the identical call that repeats it.
     unpaired_error: Mutex<Option<(Option<RDKafkaErrorCode>, String)>>,
 }
@@ -27,7 +25,6 @@ impl FeedProducerHooks {
     pub(crate) fn new(core: Arc<Core>) -> FeedProducerHooks {
         FeedProducerHooks {
             core,
-            stats: Mutex::new(None),
             unpaired_error: Mutex::new(None),
         }
     }
@@ -55,7 +52,7 @@ impl FeedProducerHooks {
 
 impl Hooks for FeedProducerHooks {
     fn stats(&self, statistics: Statistics) {
-        *self.stats.lock().expect("stats lock") = Some(Box::new(statistics));
+        self.core.publish_producer_stats(&statistics);
     }
 
     /// Log the error, and stop the feed on a fatal producer error or a

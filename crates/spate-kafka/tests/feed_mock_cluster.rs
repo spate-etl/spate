@@ -14,7 +14,10 @@ use rdkafka::mocking::{MockCluster, MockCoordinator};
 use rdkafka::types::RDKafkaRespErr;
 use spate_core::clock::TestClock as StopClock;
 use spate_core::clock::tokio::TestClock;
-use spate_core::feed::{Depth, DepthOf, Feed, FeedError, FeedErrorKind, Receipt, Unit};
+use spate_core::feed::{
+    Depth, DepthOf, Feed, FeedError, FeedErrorKind, FeedMetricsCtx, Receipt, Unit,
+};
+use spate_core::metrics::Meter;
 use spate_core::pipeline::ExitState;
 use spate_kafka::feed::KafkaFeedError;
 use spate_test::{WriteOutcome, wait_until};
@@ -455,6 +458,65 @@ fn a_message_with_no_unit_goes_to_the_dead_letter_topic_at_once() {
     });
     assert_eq!(high_watermark(&brokers, RETRY), 0, "nothing was retried");
     assert!(worker.feed.receive(8).unwrap().is_empty());
+}
+
+/// Pins that a feed the runtime attaches counts its confirmed attempt, retry
+/// and dead-letter writes, and publishes its consumer's and producer's
+/// librdkafka statistics apart under `client`. Per-broker series register on
+/// the clients' threads, which a test-local recorder cannot see, so the
+/// statistics half asserts fixed families only.
+#[test]
+fn the_feed_counts_its_writes_and_publishes_its_clients_statistics() {
+    let cluster = cluster(1);
+    let brokers = cluster.bootstrap_servers();
+    let group = spate_test::unique_name("feed-metrics");
+    let yaml = feed_yaml(&brokers, &group, "  attempt_cap: 2\n", "");
+    assert!(yaml.contains("statistics_interval: 0s"));
+    let worker = direct(&yaml.replace("statistics_interval: 0s", "statistics_interval: 100ms"));
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let prom = recorder.handle();
+    metrics::with_local_recorder(&recorder, || {
+        worker
+            .feed
+            .attach_metrics(FeedMetricsCtx::new(Some(Meter::with_namespace(
+                "kafka_feed",
+                group.clone(),
+                "feed",
+                "kafka",
+            ))));
+    });
+
+    publish(&worker.feed, Unit::new("poison", b"body".to_vec()));
+    for what in ["the first delivery", "the second delivery"] {
+        let delivery = worker.take(what);
+        worker.feed.fail(delivery.receipt, "unreadable").unwrap();
+    }
+
+    let value = |rendered: &str, name: &str, labels: &[(&str, &str)]| {
+        spate_test::metric_value(rendered, &format!("spate_kafka_feed_{name}"), labels)
+    };
+    wait_until(DEADLINE, "the writes and statistics render", || {
+        let r = prom.render();
+        value(&r, "attempt_write_duration_seconds_count", &[]) == Some(2.0)
+            && value(&r, "retry_writes_total", &[]) == Some(1.0)
+            && value(&r, "dead_letter_writes_total", &[("reason", "attempt_cap")]) == Some(1.0)
+            && value(&r, "group_assignment_size", &[("client", "consumer")]) == Some(2.0)
+            && value(&r, "produce_queue_messages", &[("client", "producer")]).is_some()
+    });
+    let rendered = prom.render();
+    assert_eq!(
+        value(
+            &rendered,
+            "dead_letter_writes_total",
+            &[("reason", "no_unit")]
+        ),
+        Some(0.0)
+    );
+    assert_eq!(
+        value(&rendered, "group_assignment_size", &[("component", "feed")]),
+        Some(2.0),
+        "only the consumer reports a group"
+    );
 }
 
 /// Pins that a message with no key is a unit named by its position, read,

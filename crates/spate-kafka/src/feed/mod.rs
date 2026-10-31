@@ -2,7 +2,8 @@
 //! dead-letter topic and a compacted attempt topic.
 //!
 //! The feed runs four threads. The consumer thread reads the work and
-//! retry topics as a member of the feed's group. The follower thread reads
+//! retry topics as a member of the feed's group and translates its
+//! statistics. The follower thread reads
 //! the attempt topic into memory. The gate thread records each delivered
 //! unit's attempt before the unit reaches the reader. The depth thread
 //! answers a bounded job's end check and the runtime's dead-letter reads.
@@ -60,17 +61,21 @@ pub use error::KafkaFeedError;
 pub use publisher::KafkaFeedPublisher;
 
 use crate::context::SourceHooks;
+use crate::metrics::KafkaStatsMetrics;
+use crate::sink::metrics::KafkaSinkStatsMetrics;
 use attempt::{Follower, Ledger, PublishId, SharedLedger};
 use config::BACKEND;
 use consumer::Driver;
-use inflight::Tracker;
+use events::KafkaFeedMetrics;
+use inflight::{Tp, Tracker};
 use producer::FeedProducerHooks;
 use rdkafka::consumer::{BaseConsumer, Consumer};
+use rdkafka::statistics::Statistics;
 use spate_core::clock::SyncClock;
 use spate_core::config::FeedSection;
 use spate_core::feed::{
     Confirmation, Confirmer, Delivery, DepthOf, DepthReading, DepthReporter, Feed, FeedError,
-    FeedErrorKind, FeedWaker, Receipt, Unit, confirmation, depth_reading,
+    FeedErrorKind, FeedMetricsCtx, FeedWaker, Receipt, Unit, confirmation, depth_reading,
 };
 use spate_core::hash::FastMap;
 use spate_core::task::{ThreadHandle, spawn_thread};
@@ -219,7 +224,9 @@ impl State {
 /// delivery reports and its [`Feed`] methods share.
 ///
 /// Lock order: the state lock, then the ledger's. The state lock is never
-/// taken while the ledger's is held.
+/// taken while the ledger's is held. The metric slots are leaves: none is
+/// held while another lock is taken, and none is taken while the state lock
+/// is held.
 #[derive(Debug)]
 pub(crate) struct Core {
     state: Mutex<State>,
@@ -237,6 +244,17 @@ pub(crate) struct Core {
     /// The clock the feed's timed reads take: the commit cadence, resend due
     /// times, the gate's pass bound and the durations it logs.
     clock: SyncClock,
+    /// Whether the consumer and producer emit statistics, from a non-zero
+    /// `statistics_interval`.
+    statistics_enabled: bool,
+    /// The write families, empty until `attach_metrics`. An `Arc` so a settle
+    /// counts without holding the slot.
+    metrics: Mutex<Option<Arc<KafkaFeedMetrics>>>,
+    /// The consumer's statistics translator, drained on the consumer thread.
+    consumer_stats: Mutex<Option<KafkaStatsMetrics>>,
+    /// The producer's statistics translator, updated in its `stats` hook on
+    /// the poll thread, and on the consumer thread during the close flush.
+    producer_stats: Mutex<Option<KafkaSinkStatsMetrics>>,
     /// How many watermark calls the gate has begun, counted just before
     /// each `fetch_watermarks` and each `list_offset`.
     #[cfg(test)]
@@ -254,6 +272,10 @@ impl Core {
             attempt_partitions,
             ledger: Arc::new((Mutex::new(Ledger::new(attempt_partitions)), Condvar::new())),
             clock,
+            statistics_enabled: !config.statistics_interval.is_zero(),
+            metrics: Mutex::new(None),
+            consumer_stats: Mutex::new(None),
+            producer_stats: Mutex::new(None),
             #[cfg(test)]
             gate_reads: AtomicUsize::new(0),
         }
@@ -261,6 +283,60 @@ impl Core {
 
     pub(crate) fn lock(&self) -> MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Resolve the feed's metric handles from `cx`, replacing any earlier
+    /// ones. Every handle is built before a slot is taken.
+    pub(crate) fn attach_metrics(&self, cx: FeedMetricsCtx) {
+        let events = cx
+            .meter
+            .as_ref()
+            .map(|m| Arc::new(KafkaFeedMetrics::new(m)));
+        let (consumer, producer) = match cx.meter.filter(|_| self.statistics_enabled) {
+            Some(meter) => (
+                Some(KafkaStatsMetrics::for_feed(
+                    meter.clone(),
+                    cx.per_partition_detail,
+                )),
+                Some(KafkaSinkStatsMetrics::for_feed(meter)),
+            ),
+            None => (None, None),
+        };
+        *slot(&self.metrics) = events;
+        *slot(&self.consumer_stats) = consumer;
+        *slot(&self.producer_stats) = producer;
+    }
+
+    /// The write families, cloned out so a settle holds no slot while it
+    /// counts.
+    fn event_metrics(&self) -> Option<Arc<KafkaFeedMetrics>> {
+        slot(&self.metrics).clone()
+    }
+
+    /// Translate the producer's statistics snapshot, dropped while nothing is
+    /// attached.
+    pub(crate) fn publish_producer_stats(&self, stats: &Statistics) {
+        if let Some(m) = slot(&self.producer_stats).as_mut() {
+            m.update(stats);
+        }
+    }
+
+    /// Translate the consumer's statistics snapshot over the work and retry
+    /// topics, with `owned` the partitions the tracker holds. Called on the
+    /// consumer thread without the state lock.
+    pub(crate) fn publish_consumer_stats(&self, stats: &Statistics, owned: &[Tp]) {
+        if let Some(m) = slot(&self.consumer_stats).as_mut() {
+            let owned = topic_partitions(owned);
+            m.update_topics(stats, &[&self.topics.work, &self.topics.retry], &owned);
+        }
+    }
+
+    /// Zero the per-partition statistics of every partition outside `owned`,
+    /// once a new assignment is known. Called without the state lock.
+    pub(crate) fn release_consumer_partitions(&self, owned: &[Tp]) {
+        if let Some(m) = slot(&self.consumer_stats).as_mut() {
+            m.retain_owned(&topic_partitions(owned));
+        }
     }
 
     pub(crate) fn clock(&self) -> &SyncClock {
@@ -345,10 +421,13 @@ impl Core {
                         }
                     }
                 }
-                events::moved(&moving, &*self.clock);
+                events::moved(self.event_metrics().as_deref(), &moving, &*self.clock);
             }
             Write::Attempt(attempt) => {
-                events::attempt_written(attempt.started.elapsed(&*self.clock));
+                events::attempt_written(
+                    self.event_metrics().as_deref(),
+                    attempt.started.elapsed(&*self.clock),
+                );
                 let mut st = self.lock();
                 st.admitting = st.admitting.saturating_sub(1);
                 // `None` when the partition was given up or the copy was
@@ -816,9 +895,26 @@ fn gone(receipt: Receipt) -> FeedError {
     )
 }
 
+/// Lock a metric slot, taking it over from a thread that panicked holding it.
+fn slot<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// `owned` as the translator names partitions.
+fn topic_partitions(owned: &[Tp]) -> Vec<(&str, i32)> {
+    owned.iter().map(|tp| (&*tp.topic, tp.partition)).collect()
+}
+
 impl Feed for KafkaFeed {
     fn backend(&self) -> &str {
         BACKEND
+    }
+
+    /// Resolve the feed's metric handles from `cx`. A later call replaces
+    /// them and the per-partition setting, and a context without a `Meter`
+    /// stops the counting. Events before the first call are not counted.
+    fn attach_metrics(&self, cx: FeedMetricsCtx) {
+        self.core.attach_metrics(cx);
     }
 
     fn set_waker(&self, waker: FeedWaker) {

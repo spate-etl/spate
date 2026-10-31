@@ -185,12 +185,17 @@ impl FeedMetricsCtx {
     ///
     /// ```
     /// use spate_core::feed::FeedMetricsCtx;
-    /// use spate_core::metrics::Meter;
+    /// use spate_core::metrics::{Meter, render_local};
     ///
-    /// let cx = FeedMetricsCtx::new(Some(Meter::new("orders", "feed", "probe")))
-    ///     .with_partition_detail(true);
-    /// assert!(cx.meter.is_some());
+    /// let meter = Meter::with_namespace("probe_feed", "orders", "feed", "probe");
+    /// let cx = FeedMetricsCtx::new(Some(meter)).with_partition_detail(true);
     /// assert!(cx.per_partition_detail);
+    ///
+    /// let meter = cx.meter.expect("a scoped Meter");
+    /// let text = render_local(|| meter.counter("receives_total", &[]).increment(1));
+    /// assert!(text.lines().any(|l| {
+    ///     l == r#"spate_probe_feed_receives_total{pipeline="orders",component="feed",component_type="probe"} 1"#
+    /// }));
     /// ```
     #[must_use]
     pub fn new(meter: Option<Meter>) -> Self {

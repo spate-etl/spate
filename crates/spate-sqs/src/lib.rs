@@ -60,6 +60,7 @@ mod config;
 mod credentials;
 mod error;
 mod feed;
+mod metrics;
 mod queue;
 #[cfg(test)]
 mod scripted;

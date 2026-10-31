@@ -8,6 +8,7 @@ use crate::queue::BoxFuture;
 use crate::scripted::{Failure, Message, ScriptedQueue};
 use spate_core::clock::tokio::TestClock;
 use spate_core::feed::{FeedPark, wake_channel};
+use spate_core::metrics::Meter;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::oneshot;
 
@@ -4435,4 +4436,685 @@ async fn close_drops_a_delete_past_its_bound_by_the_injected_clock() {
     assert_eq!(queue.inner.deletes().len(), 1, "the second chunk was sent");
     assert_eq!(queue.inner.deletes()[0].len(), 10);
     assert_eq!(feed.lock().close.as_ref().unwrap().dropped, 1);
+}
+
+const REFUSED: &str = "spate_sqs_feed_extensions_refused_total";
+const DROPPED: &str = "spate_sqs_feed_fails_dropped_total";
+const RETRIES: &str = "spate_sqs_feed_retries_total";
+const CODES: [&str; 3] = ["ReceiptHandleIsInvalid", "MessageNotInflight", "other"];
+const OPS: [&str; 6] = [
+    "receive",
+    "renew",
+    "acknowledge",
+    "fail",
+    "hand_back",
+    "publish",
+];
+
+/// The `Meter` the runtime hands the feed of `pipeline`.
+fn meter(pipeline: &str) -> Meter {
+    Meter::with_namespace("sqs_feed", pipeline.to_owned(), "feed", "sqs")
+}
+
+fn on_paused_runtime(f: impl Future<Output = ()>) {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .start_paused(true)
+        .build()
+        .unwrap()
+        .block_on(f);
+}
+
+/// Run `scenario` on a paused runtime under a recorder of its own, given the
+/// `Meter` of a pipeline no other test uses, and return the exposition.
+fn counted<F: Future<Output = ()>>(scenario: impl FnOnce(Meter) -> F) -> String {
+    let meter = meter(&spate_test::unique_name("sqs-feed"));
+    spate_test::render_metrics(|| on_paused_runtime(scenario(meter)))
+}
+
+/// The one sample of `name` with `labels`.
+fn sample(rendered: &str, name: &str, labels: &[(&str, &str)]) -> f64 {
+    spate_test::metric_value(rendered, name, labels)
+        .unwrap_or_else(|| panic!("no {name} sample with {labels:?} in:\n{rendered}"))
+}
+
+/// `retries_total` for each value of `op`, in [`OPS`] order.
+fn retries(rendered: &str) -> Vec<f64> {
+    OPS.iter()
+        .map(|op| sample(rendered, RETRIES, &[("op", op)]))
+        .collect()
+}
+
+/// [`retries`] when only `op` counted, `n` times.
+fn retried_only(op: &str, n: f64) -> Vec<f64> {
+    OPS.iter().map(|o| if *o == op { n } else { 0.0 }).collect()
+}
+
+/// Hold three units, renew them, and run the tick that extends them with
+/// `failures` scripted for its call. Returns the receipts and when the tick
+/// ran.
+async fn extend_three(
+    feed: &SqsFeed,
+    queue: &ScriptedQueue,
+    failures: Vec<Failure>,
+) -> (Vec<Receipt>, Instant) {
+    let (waker, park) = wake_channel();
+    feed.set_waker(waker);
+    for i in 0..3 {
+        queue.ready(Message::new(&format!("u{i}")));
+    }
+    let receipts: Vec<Receipt> = receive_n(feed, &park, 3)
+        .await
+        .iter()
+        .map(|d| d.receipt)
+        .collect();
+    for r in &receipts {
+        feed.renew(*r).unwrap();
+    }
+    queue.fail_next_visibility(failures);
+    tokio::time::advance(Duration::from_secs(20)).await;
+    let ticked = Instant::now();
+    until("the tick extends the units", || {
+        queue.visibility().len() == 1
+    })
+    .await;
+    settle_tasks().await;
+    (receipts, ticked)
+}
+
+/// Pins every `spate_sqs_feed_*` series at zero from the moment the feed is
+/// given its `Meter`, one per `code` and per `op` value.
+#[test]
+fn every_series_is_registered_at_attach() {
+    let rendered = counted(|meter| async move {
+        let (feed, _queue) = start(MINUTE);
+        feed.attach_metrics(Some(meter));
+    });
+    let mut codes: Vec<String> = spate_test::metric_series(&rendered, REFUSED, &[])
+        .iter()
+        .map(|s| s.label("code").unwrap().to_owned())
+        .collect();
+    codes.sort();
+    assert_eq!(
+        codes,
+        ["MessageNotInflight", "ReceiptHandleIsInvalid", "other"]
+    );
+    assert_eq!(spate_test::metric_sum(&rendered, REFUSED, &[]), Some(0.0));
+    assert_eq!(sample(&rendered, DROPPED, &[]), 0.0);
+    assert_eq!(retries(&rendered), [0.0; 6]);
+    assert_eq!(
+        spate_test::metric_series(&rendered, RETRIES, &[]).len(),
+        OPS.len()
+    );
+}
+
+/// Pins `extensions_refused_total` by code: either spelling of the two codes
+/// that take a unit counts under its bare name and makes the unit `Gone`, and
+/// any other code, an empty one included, counts as `other` and leaves the
+/// unit held.
+#[test]
+fn a_refused_extension_is_counted_by_its_code() {
+    for (code, label) in [
+        ("ReceiptHandleIsInvalid", "ReceiptHandleIsInvalid"),
+        (
+            "AWS.SimpleQueueService.ReceiptHandleIsInvalid",
+            "ReceiptHandleIsInvalid",
+        ),
+        ("MessageNotInflight", "MessageNotInflight"),
+        (
+            "AWS.SimpleQueueService.MessageNotInflight",
+            "MessageNotInflight",
+        ),
+        ("InvalidParameterValue", "other"),
+        ("", "other"),
+    ] {
+        let rendered = counted(|meter| async move {
+            let (feed, queue) = start(MINUTE);
+            feed.attach_metrics(Some(meter));
+            let (receipts, _) = extend_three(&feed, &queue, vec![failure(1, code)]).await;
+            let expected = if label == "other" {
+                Ok(())
+            } else {
+                Err(FeedErrorKind::Gone)
+            };
+            assert_eq!(
+                feed.renew(receipts[1]).map_err(|e| e.kind),
+                expected,
+                "{code:?}"
+            );
+        });
+        for l in CODES {
+            assert_eq!(
+                sample(&rendered, REFUSED, &[("code", l)]),
+                if l == label { 1.0 } else { 0.0 },
+                "{code:?} under {l}"
+            );
+        }
+    }
+}
+
+/// Pins that each refused entry of one extension call counts, and that a
+/// unit refused with a code that leaves it held keeps its deadline while the
+/// applied entry beside it is extended.
+#[test]
+fn refused_extensions_count_each_entry_and_a_lapsing_one_stays_held() {
+    let rendered = counted(|meter| async move {
+        let (feed, queue) = start(MINUTE);
+        feed.attach_metrics(Some(meter));
+        let (receipts, ticked) = extend_three(
+            &feed,
+            &queue,
+            vec![
+                failure(0, "ReceiptHandleIsInvalid"),
+                failure(2, "InvalidParameterValue"),
+            ],
+        )
+        .await;
+        assert_eq!(
+            feed.renew(receipts[0]).unwrap_err().kind,
+            FeedErrorKind::Gone
+        );
+        assert_eq!(feed.deadline_of(receipts[1]), Some(ticked + MINUTE));
+        feed.renew(receipts[2]).unwrap();
+    });
+    assert_eq!(
+        sample(&rendered, REFUSED, &[("code", "ReceiptHandleIsInvalid")]),
+        1.0
+    );
+    assert_eq!(sample(&rendered, REFUSED, &[("code", "other")]), 1.0);
+    assert_eq!(spate_test::metric_sum(&rendered, REFUSED, &[]), Some(2.0));
+}
+
+/// Pins that an entry SQS refuses for a unit acknowledged while the
+/// extension call was in flight is not counted: the feed no longer holds it.
+#[test]
+fn an_extension_refused_after_its_unit_was_settled_is_not_counted() {
+    let rendered = counted(|meter| async move {
+        let (feed, queue) = start_gated(MINUTE);
+        feed.attach_metrics(Some(meter));
+        let (waker, park) = wake_channel();
+        feed.set_waker(waker);
+        queue.inner.ready(Message::new("u"));
+        let d = receive_n(&feed, &park, 1).await.remove(0);
+        feed.renew(d.receipt).unwrap();
+        queue.hold_visibility();
+        queue
+            .inner
+            .fail_next_visibility(vec![failure(0, "ReceiptHandleIsInvalid")]);
+        tokio::time::advance(Duration::from_secs(20)).await;
+        until("the extension is in flight", || {
+            queue.visibility_at.lock().unwrap().len() == 1
+        })
+        .await;
+        settle_tasks().await;
+        feed.acknowledge(d.receipt).unwrap();
+        queue.release_visibility();
+        until("the delete is sent", || queue.inner.deletes().len() == 1).await;
+        settle_tasks().await;
+    });
+    assert_eq!(spate_test::metric_sum(&rendered, REFUSED, &[]), Some(0.0));
+}
+
+/// Pins that a fail or hand-back entry SQS refuses counts as neither a
+/// refused extension nor a dropped fail.
+#[test]
+fn a_refused_fail_or_hand_back_entry_is_not_a_refused_extension() {
+    for fail in [true, false] {
+        let rendered = counted(|meter| async move {
+            let (feed, queue) = start(MINUTE);
+            feed.attach_metrics(Some(meter));
+            let (waker, park) = wake_channel();
+            feed.set_waker(waker);
+            queue.ready(Message::new("u"));
+            let d = receive_n(&feed, &park, 1).await.remove(0);
+            queue.fail_next_visibility(vec![failure(0, "ReceiptHandleIsInvalid")]);
+            if fail {
+                feed.fail(d.receipt, "unreadable").unwrap();
+            } else {
+                feed.hand_back(d.receipt).unwrap();
+            }
+            until("the call is sent", || {
+                handed_back(&queue.visibility()).len() == 1
+            })
+            .await;
+            settle_tasks().await;
+        });
+        assert_eq!(
+            spate_test::metric_sum(&rendered, REFUSED, &[]),
+            Some(0.0),
+            "fail {fail}"
+        );
+        assert_eq!(sample(&rendered, DROPPED, &[]), 0.0, "fail {fail}");
+    }
+}
+
+/// Pins `fails_dropped_total` for fails still queued when their units'
+/// deadline arrives on the feed's clock: each one counts, and a fail the feed
+/// sends before its deadline does not.
+#[test]
+fn a_fail_dropped_at_its_deadline_is_counted() {
+    let ms = Duration::from_millis;
+    for (late, units) in [(Duration::ZERO, 1), (ms(1), 1), (ms(1), 2)] {
+        let rendered = counted(|meter| async move {
+            let (feed, queue, clock) = start_clocked(MINUTE);
+            feed.attach_metrics(Some(meter));
+            let (waker, park) = wake_channel();
+            feed.set_waker(waker);
+            for i in 0..units {
+                queue.ready(Message::new(&format!("u{i}")));
+            }
+            let receipts: Vec<Receipt> = receive_n(&feed, &park, units)
+                .await
+                .iter()
+                .map(|d| d.receipt)
+                .collect();
+            let deadline = feed.deadline_of(receipts[0]).unwrap();
+            assert!(
+                receipts
+                    .iter()
+                    .all(|r| feed.deadline_of(*r) == Some(deadline))
+            );
+            clock.advance(deadline - ms(1) - clock.now());
+            for r in &receipts {
+                feed.fail(*r, "unreadable").unwrap();
+            }
+            // The runtime has not run since the calls, so the fails are
+            // still queued.
+            clock.advance(late);
+            settle_tasks().await;
+            let sent = if late.is_zero() { units } else { 0 };
+            assert_eq!(handed_back(&queue.visibility()).len(), sent);
+        });
+        let dropped = if late.is_zero() { 0 } else { units };
+        assert_eq!(
+            sample(&rendered, DROPPED, &[]),
+            dropped as f64,
+            "{units} late by {late:?}"
+        );
+    }
+}
+
+/// Pins that a fail batch given up after a transient failure, because its
+/// next attempt would reach its deadline, counts as dropped, and that one
+/// retried in time does not.
+#[test]
+fn a_fail_batch_given_up_at_its_deadline_is_counted() {
+    let ms = Duration::from_millis;
+    for (left, given_up) in [(ms(200), true), (ms(201), false)] {
+        let rendered = counted(|meter| async move {
+            let (feed, queue, clock) = start_clocked(MINUTE);
+            feed.attach_metrics(Some(meter));
+            let (waker, park) = wake_channel();
+            feed.set_waker(waker);
+            queue.ready(Message::new("u"));
+            let d = receive_n(&feed, &park, 1).await.remove(0);
+            let deadline = feed.deadline_of(d.receipt).unwrap();
+            clock.advance(deadline - left - clock.now());
+            queue.fail_next_visibility_call(CallError::retryable("throttled"));
+            feed.fail(d.receipt, "unreadable").unwrap();
+            until("the fail is sent", || queue.visibility().len() == 1).await;
+            settle_tasks().await;
+            clock.advance(BACKOFF_START);
+            settle_tasks().await;
+            let calls = if given_up { 1 } else { 2 };
+            assert_eq!(queue.visibility().len(), calls, "{left:?} left");
+        });
+        assert_eq!(
+            sample(&rendered, DROPPED, &[]),
+            if given_up { 1.0 } else { 0.0 },
+            "{left:?} left"
+        );
+    }
+}
+
+/// Pins that a delete or a hand-back batch given up at its deadline after a
+/// transient failure is not a dropped fail.
+#[test]
+fn a_given_up_delete_or_hand_back_is_not_a_dropped_fail() {
+    for acknowledge in [true, false] {
+        let rendered = counted(|meter| async move {
+            let (feed, queue, clock) = start_clocked(MINUTE);
+            feed.attach_metrics(Some(meter));
+            let (waker, park) = wake_channel();
+            feed.set_waker(waker);
+            queue.ready(Message::new("u"));
+            let d = receive_n(&feed, &park, 1).await.remove(0);
+            let deadline = feed.deadline_of(d.receipt).unwrap();
+            clock.advance(deadline - BACKOFF_START - clock.now());
+            let calls = || {
+                if acknowledge {
+                    queue.deletes().len()
+                } else {
+                    handed_back(&queue.visibility()).len()
+                }
+            };
+            if acknowledge {
+                queue.fail_next_delete_call(CallError::retryable("throttled"));
+                feed.acknowledge(d.receipt).unwrap();
+            } else {
+                queue.fail_next_visibility_call(CallError::retryable("throttled"));
+                feed.hand_back(d.receipt).unwrap();
+            }
+            until("the call is sent", || calls() == 1).await;
+            settle_tasks().await;
+            clock.advance(BACKOFF_START);
+            settle_tasks().await;
+            assert_eq!(calls(), 1, "acknowledge {acknowledge}: retried");
+        });
+        assert_eq!(
+            sample(&rendered, DROPPED, &[]),
+            0.0,
+            "acknowledge {acknowledge}"
+        );
+    }
+}
+
+/// Pins what `fails_dropped_total` leaves out: fails a close gives up at its
+/// bound, queued or after a transient failure, which the close reports, and
+/// fails answered `Gone`, which the runtime counts.
+#[test]
+fn a_fail_given_up_by_a_close_or_answered_gone_is_not_a_deadline_drop() {
+    let queued = counted(|meter| async move {
+        let (feed, queue) = start(MINUTE);
+        feed.attach_metrics(Some(meter));
+        let (waker, park) = wake_channel();
+        feed.set_waker(waker);
+        queue.ready(Message::new("u"));
+        let d = receive_n(&feed, &park, 1).await.remove(0);
+        feed.fail(d.receipt, "unreadable").unwrap();
+        let mut closed = feed.close(Duration::ZERO).unwrap();
+        settle_tasks().await;
+        assert!(queue.visibility().is_empty());
+        let e = closed.try_outcome().unwrap().unwrap_err();
+        assert!(e.to_string().contains(" 1 "), "{e}");
+    });
+    assert_eq!(sample(&queued, DROPPED, &[]), 0.0, "given up queued");
+
+    let retried = counted(|meter| async move {
+        let (feed, queue, clock) = start_clocked(MINUTE);
+        feed.attach_metrics(Some(meter));
+        let (waker, park) = wake_channel();
+        feed.set_waker(waker);
+        queue.ready(Message::new("u"));
+        let d = receive_n(&feed, &park, 1).await.remove(0);
+        for _ in 0..10 {
+            queue.fail_next_visibility_call(CallError::retryable("throttled"));
+        }
+        feed.fail(d.receipt, "unreadable").unwrap();
+        until("the fail is sent", || queue.visibility().len() == 1).await;
+        settle_tasks().await;
+        // The bound falls before the next backoff ends, and long before the
+        // unit's deadline.
+        let mut closed = feed.close(Duration::from_millis(300)).unwrap();
+        settle_tasks().await;
+        clock.advance(BACKOFF_START);
+        until("the fail is retried", || queue.visibility().len() == 2).await;
+        settle_tasks().await;
+        clock.advance(BACKOFF_START);
+        until("the close settles", || closed.try_outcome().is_some()).await;
+        assert_eq!(queue.visibility().len(), 2, "sent past the close's bound");
+        let e = closed.try_outcome().unwrap().unwrap_err();
+        assert!(e.to_string().contains(" 1 "), "{e}");
+    });
+    assert_eq!(sample(&retried, DROPPED, &[]), 0.0, "given up retried");
+
+    let gone = counted(|meter| async move {
+        let (feed, queue) = start(MINUTE);
+        feed.attach_metrics(Some(meter));
+        let (receipts, _) =
+            extend_three(&feed, &queue, vec![failure(0, "ReceiptHandleIsInvalid")]).await;
+        assert_eq!(
+            feed.fail(receipts[0], "refused").unwrap_err().kind,
+            FeedErrorKind::Gone
+        );
+        tokio::time::advance(2 * MINUTE).await;
+        assert_eq!(
+            feed.fail(receipts[1], "late").unwrap_err().kind,
+            FeedErrorKind::Gone
+        );
+        settle_tasks().await;
+        assert!(handed_back(&queue.visibility()).is_empty());
+    });
+    assert_eq!(sample(&gone, DROPPED, &[]), 0.0, "answered gone");
+}
+
+/// Pins `retries_total` by operation: each whole call the feed sends again
+/// after a transient failure counts under its operation, and the first
+/// attempt does not.
+#[test]
+fn calls_sent_again_are_counted_by_operation() {
+    let retryable = || CallError::retryable("InternalError");
+
+    let rendered = counted(|meter| async move {
+        let (feed, queue) = start(MINUTE);
+        feed.attach_metrics(Some(meter));
+        let (waker, _park) = wake_channel();
+        feed.set_waker(waker);
+        queue.ready(Message::new("u"));
+        queue.fail_next_receive(retryable());
+        assert!(feed.receive(1).unwrap().is_empty());
+        until("the first receive fails", || queue.receives().len() == 1).await;
+        queue.fail_next_receive(retryable());
+        step(Duration::from_millis(300)).await;
+        until("the second receive fails", || queue.receives().len() == 2).await;
+        step(Duration::from_millis(500)).await;
+        until("the unit is buffered", || feed.buffered() == 1).await;
+        assert_eq!(queue.receives().len(), 3);
+    });
+    assert_eq!(retries(&rendered), retried_only("receive", 2.0), "receive");
+
+    let rendered = counted(|meter| async move {
+        let (feed, queue) = start(MINUTE);
+        feed.attach_metrics(Some(meter));
+        let held = hand_out_one_period_from_its_deadline(&feed, &queue).await;
+        feed.renew(held.receipt).unwrap();
+        let calls = queue.visibility().len();
+        for _ in 0..2 {
+            queue.fail_next_visibility_call(retryable());
+        }
+        step(Duration::from_secs(19)).await;
+        assert_eq!(queue.visibility().len() - calls, 2, "sent once more");
+    });
+    assert_eq!(retries(&rendered), retried_only("renew", 1.0), "renew");
+
+    let rendered = counted(|meter| async move {
+        let (feed, queue) = start(MINUTE);
+        feed.attach_metrics(Some(meter));
+        let (waker, park) = wake_channel();
+        feed.set_waker(waker);
+        queue.ready(Message::new("a"));
+        queue.ready(Message::new("b"));
+        queue.ready(Message::new("c"));
+        let got = receive_n(&feed, &park, 3).await;
+        for _ in 0..2 {
+            queue.fail_next_delete_call(retryable());
+        }
+        feed.acknowledge(got[0].receipt).unwrap();
+        step(Duration::from_secs(1)).await;
+        until("the delete is sent", || queue.deletes().len() == 3).await;
+        for _ in 0..2 {
+            queue.fail_next_visibility_call(retryable());
+        }
+        feed.fail(got[1].receipt, "unreadable").unwrap();
+        step(Duration::from_secs(1)).await;
+        until("the fail is sent", || {
+            handed_back(&queue.visibility()).len() == 3
+        })
+        .await;
+        for _ in 0..2 {
+            queue.fail_next_visibility_call(retryable());
+        }
+        feed.hand_back(got[2].receipt).unwrap();
+        step(Duration::from_secs(1)).await;
+        until("the hand-back is sent", || {
+            handed_back(&queue.visibility()).len() == 6
+        })
+        .await;
+        for _ in 0..2 {
+            queue.fail_next_send_call(retryable());
+        }
+        let mut published = feed.publish(Unit::new("p", "body"));
+        step(Duration::from_secs(1)).await;
+        assert!(published.try_outcome().unwrap().is_ok());
+        assert_eq!(queue.sends().len(), 3);
+    });
+    assert_eq!(
+        retries(&rendered),
+        [0.0, 0.0, 2.0, 2.0, 2.0, 2.0],
+        "settles"
+    );
+}
+
+/// Pins that an extension call failed with more than a renewal period left,
+/// and sent again at the next tick, is a fresh extension and no retry, and
+/// that a call failed Fatal is not sent again or counted.
+#[test]
+fn a_call_sent_at_the_next_tick_or_failed_fatal_is_no_retry() {
+    let rendered = counted(|meter| async move {
+        let (feed, queue) = start(MINUTE);
+        feed.attach_metrics(Some(meter));
+        let (waker, park) = wake_channel();
+        feed.set_waker(waker);
+        queue.ready(Message::new("u"));
+        let d = receive_n(&feed, &park, 1).await.remove(0);
+        feed.renew(d.receipt).unwrap();
+        queue.fail_next_visibility_call(CallError::retryable("InternalError"));
+        tokio::time::advance(Duration::from_secs(20)).await;
+        until("the first extension is sent", || {
+            queue.visibility().len() == 1
+        })
+        .await;
+        tokio::time::advance(Duration::from_secs(20)).await;
+        until("the extension is sent again", || {
+            queue.visibility().len() == 2
+        })
+        .await;
+        settle_tasks().await;
+    });
+    assert_eq!(retries(&rendered), [0.0; 6], "a fresh extension");
+
+    let fatal = || CallError::fatal("AccessDenied");
+    let rendered = counted(|meter| async move {
+        let (feed, queue) = start(MINUTE);
+        feed.attach_metrics(Some(meter.clone()));
+        queue.fail_next_receive(fatal());
+        assert!(feed.receive(1).unwrap().is_empty());
+        until("the receive fails", || feed.receive(1).is_err()).await;
+
+        let (feed, queue) = start(MINUTE);
+        feed.attach_metrics(Some(meter.clone()));
+        queue.fail_next_send_call(fatal());
+        let mut published = feed.publish(Unit::new("p", "body"));
+        until("the publish settles", || published.try_outcome().is_some()).await;
+
+        for acknowledge in [true, false] {
+            let (feed, queue) = start(MINUTE);
+            feed.attach_metrics(Some(meter.clone()));
+            let (waker, park) = wake_channel();
+            feed.set_waker(waker);
+            queue.ready(Message::new("u"));
+            let d = receive_n(&feed, &park, 1).await.remove(0);
+            if acknowledge {
+                queue.fail_next_delete_call(fatal());
+                feed.acknowledge(d.receipt).unwrap();
+            } else {
+                queue.fail_next_visibility_call(fatal());
+                feed.fail(d.receipt, "unreadable").unwrap();
+            }
+            until("the feed stops", || feed.receive(1).is_err()).await;
+        }
+        step(Duration::from_secs(1)).await;
+    });
+    assert_eq!(retries(&rendered), [0.0; 6], "fatal");
+}
+
+/// Pins that a hand-back batch carried to the next pass counts only the
+/// retries inside each pass: the first call of a pass is no retry.
+#[test]
+fn a_hand_back_carried_to_the_next_pass_counts_only_its_retries() {
+    let calls = std::cell::Cell::new(0);
+    let mut rendered = String::new();
+    let lines = spate_test::capture_logs(tracing::Level::DEBUG, || {
+        let calls = &calls;
+        rendered = counted(|meter| async move {
+            let (feed, queue) = start(MINUTE);
+            feed.attach_metrics(Some(meter));
+            let (waker, park) = wake_channel();
+            feed.set_waker(waker);
+            queue.ready(Message::new("u"));
+            let d = receive_n(&feed, &park, 1).await.remove(0);
+            queue.fail_hand_backs(Some(CallError::retryable("InternalError")));
+            feed.hand_back(d.receipt).unwrap();
+            step(Duration::from_secs(25)).await;
+            queue.fail_hand_backs(None);
+            step(Duration::from_secs(5)).await;
+            let sent = handed_back(&queue.visibility()).len();
+            settle_tasks().await;
+            step(Duration::from_secs(5)).await;
+            assert_eq!(handed_back(&queue.visibility()).len(), sent, "applied");
+            calls.set(sent);
+        });
+    });
+    let carried = lines
+        .iter()
+        .filter(|l| l.contains("sending it again"))
+        .count();
+    assert!(carried > 0, "the batch was not carried: {lines:#?}");
+    let passes = carried + 1;
+    assert_eq!(
+        retries(&rendered),
+        retried_only("hand_back", (calls.get() - passes) as f64),
+        "{} calls over {passes} passes",
+        calls.get()
+    );
+}
+
+/// Pins that the feed counts from the `Meter` on: a retry before it is not
+/// counted and does not fail, and one after it is, from the task already
+/// running.
+#[test]
+fn counters_start_at_the_meter() {
+    let rendered = counted(|meter| async move {
+        let (feed, queue) = start(MINUTE);
+        queue.fail_next_send_call(CallError::retryable("InternalError"));
+        let mut first = feed.publish(Unit::new("a", "body"));
+        step(Duration::from_secs(1)).await;
+        assert!(first.try_outcome().unwrap().is_ok());
+        assert_eq!(queue.sends().len(), 2);
+
+        feed.attach_metrics(Some(meter));
+        queue.fail_next_send_call(CallError::retryable("InternalError"));
+        let mut second = feed.publish(Unit::new("b", "body"));
+        step(Duration::from_secs(1)).await;
+        assert!(second.try_outcome().unwrap().is_ok());
+        assert_eq!(queue.sends().len(), 4);
+    });
+    assert_eq!(retries(&rendered), retried_only("publish", 1.0));
+}
+
+/// Pins that a second `Meter` replaces the first: the feed counts under the
+/// pipeline it was last given.
+#[test]
+fn a_second_meter_replaces_the_first() {
+    let first = spate_test::unique_name("sqs-feed-first");
+    let second = spate_test::unique_name("sqs-feed-second");
+    let rendered = spate_test::render_metrics(|| {
+        on_paused_runtime(async {
+            let (feed, queue) = start(MINUTE);
+            feed.attach_metrics(Some(meter(&first)));
+            feed.attach_metrics(Some(meter(&second)));
+            extend_three(&feed, &queue, vec![failure(0, "ReceiptHandleIsInvalid")]).await;
+        });
+    });
+    for (pipeline, n) in [(&first, 0.0), (&second, 1.0)] {
+        assert_eq!(
+            sample(
+                &rendered,
+                REFUSED,
+                &[("pipeline", pipeline), ("code", "ReceiptHandleIsInvalid")]
+            ),
+            n,
+            "{pipeline}"
+        );
+    }
 }

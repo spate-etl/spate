@@ -24,7 +24,8 @@
 
 use crate::client;
 use crate::config::{BACKEND, SqsFeedConfig};
-use crate::error::{CallError, Class, SqsError, code_is};
+use crate::error::{CallError, Class, SqsError};
+use crate::metrics::{Op, Refusal, SqsFeedMetrics};
 use crate::queue::{
     BatchOutcome, DeleteEntry, Queue, ReceiveRequest, Received, SendEntry, UNIT_ATTRIBUTE,
     VisibilityEntry,
@@ -37,6 +38,7 @@ use spate_core::feed::{
     FeedErrorKind, FeedWaker, Receipt, Unit, confirmation, depth_reading,
 };
 use spate_core::hash::FastMap;
+use spate_core::metrics::Meter;
 use spate_core::task::{self, TaskHandle};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -329,6 +331,9 @@ struct Shared {
     settings: Settings,
     /// The clock every deadline in the feed is read and waited on.
     clock: Arc<dyn Clock>,
+    /// The feed's own metric handles, once the runtime hands it a `Meter`.
+    /// A leaf lock: taken last, and never held across an `.await`.
+    metrics: Mutex<Option<SqsFeedMetrics>>,
 }
 
 impl Shared {
@@ -338,6 +343,13 @@ impl Shared {
 
     fn now(&self) -> Instant {
         self.clock.now()
+    }
+
+    /// Run `f` on the feed's metric handles, if it has been given any.
+    fn count(&self, f: impl FnOnce(&SqsFeedMetrics)) {
+        if let Some(metrics) = &*self.metrics.lock().unwrap_or_else(PoisonError::into_inner) {
+            f(metrics);
+        }
     }
 
     /// Make `e` the answer to every later call, reject with it every publish
@@ -584,6 +596,7 @@ impl SqsFeed {
                 wait: wait_seconds(config.visibility),
             },
             clock,
+            metrics: Mutex::new(None),
         });
         let tasks = vec![
             task::spawn_on("sqs-receive", receive_task(Arc::clone(&shared)), io),
@@ -657,6 +670,18 @@ impl Feed for SqsFeed {
             waker.wake();
         }
         st.waker = Some(waker);
+    }
+
+    /// Resolve the feed's `spate_sqs_feed_*` handles under `meter`. A later
+    /// call replaces them, and `None` stops the counting. Events before the
+    /// first call are not counted.
+    fn attach_metrics(&self, meter: Option<Meter>) {
+        let metrics = meter.as_ref().map(SqsFeedMetrics::new);
+        *self
+            .shared
+            .metrics
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = metrics;
     }
 
     fn receive(&self, max: usize) -> Result<Vec<Delivery>, FeedError> {
@@ -1073,6 +1098,7 @@ async fn receive_task(shared: Arc<Shared>) {
     // At most 12 h, so the cast cannot truncate.
     let visibility = settings.visibility.as_secs() as i32;
     let mut backoff = BACKOFF_START;
+    let mut retrying = false;
     loop {
         let want = {
             let mut st = shared.lock();
@@ -1097,6 +1123,9 @@ async fn receive_task(shared: Arc<Shared>) {
             visibility,
             wait: settings.wait,
         };
+        if std::mem::take(&mut retrying) {
+            shared.count(|m| m.retried(Op::Receive).increment(1));
+        }
         let sent_at = shared.now();
         let received = shared.queue.receive(request).await;
         // A close waits for this receive, so it ends under the same lock
@@ -1162,6 +1191,7 @@ async fn receive_task(shared: Arc<Shared>) {
                 // Real time: it paces retries and no deadline reads it.
                 tokio::time::sleep(backoff).await;
                 backoff = (backoff * 2).min(BACKOFF_MAX);
+                retrying = true;
             }
         }
     }
@@ -1327,6 +1357,9 @@ async fn extend_chunk(
     let Some(earliest) = earliest else {
         return Extended::Done;
     };
+    if !once_more {
+        shared.count(|m| m.retried(Op::Renew).increment(1));
+    }
     let entries = chunk
         .iter()
         .enumerate()
@@ -1352,17 +1385,19 @@ async fn extend_chunk(
                 match entry_result(&outcome, i) {
                     // `ext` was cut to the hold at the tick.
                     Some(Ok(())) => h.deadline = (sent_at + *ext).min(h.hold_end),
-                    Some(Err(failure))
-                        if code_is(&failure.code, "ReceiptHandleIsInvalid")
-                            || code_is(&failure.code, "MessageNotInflight") =>
-                    {
-                        h.gone = true;
+                    Some(Err(failure)) => {
+                        let refusal = Refusal::of(&failure.code);
+                        shared.count(|m| m.refused(refusal).increment(1));
+                        if refusal.takes_unit() {
+                            h.gone = true;
+                        } else {
+                            // It lapses at its own deadline.
+                            tracing::debug!(
+                                code = %failure.code,
+                                "SQS refused to extend a held unit"
+                            );
+                        }
                     }
-                    // It lapses at its own deadline.
-                    Some(Err(failure)) => tracing::debug!(
-                        code = %failure.code,
-                        "SQS refused to extend a held unit"
-                    ),
                     None => {}
                 }
             }
@@ -1473,7 +1508,7 @@ async fn send_hand_backs(shared: &Shared) -> Result<(), ()> {
         let sent = before(
             &*shared.clock,
             pass_end,
-            settle_batch(shared, "handing back", &chunk, |bound| {
+            settle_batch(shared, Settling::HandBack, &chunk, |bound| {
                 let left = until(oldest, bound)
                     .min(pass_end)
                     .saturating_duration_since(shared.now());
@@ -1590,7 +1625,7 @@ async fn settle_task(shared: Arc<Shared>) {
                 .collect();
             // Unbounded outside a close: a delete still applies past its
             // unit's deadline.
-            let sent = settle_batch(&shared, "deleting", chunk, |bound| {
+            let sent = settle_batch(&shared, Settling::Delete, chunk, |bound| {
                 let left = bound.map(|bound| bound.saturating_duration_since(shared.now()));
                 shared.queue.delete_batch(entries.clone(), left)
             });
@@ -1605,7 +1640,12 @@ async fn settle_task(shared: Arc<Shared>) {
             // A fail sent past its unit's deadline could reach a message SQS
             // has handed to another reader.
             let now = shared.now();
+            let before = fails.len();
             fails.retain(|s| now < s.deadline);
+            let lapsed = before - fails.len();
+            if lapsed > 0 {
+                shared.count(|m| m.fails_dropped.increment(lapsed as u64));
+            }
             let bound = shared.lock().close_bound(&*shared.clock);
             if bound.is_some_and(|bound| now >= bound) {
                 let n = std::mem::take(&mut fails).len();
@@ -1628,7 +1668,7 @@ async fn settle_task(shared: Arc<Shared>) {
             // The SDK retries inside one call, so the call itself is bounded
             // by the earliest deadline. A request already sent when the bound
             // ends can still reach SQS after it.
-            let sent = settle_batch(&shared, "failing", &chunk, |bound| {
+            let sent = settle_batch(&shared, Settling::Fail, &chunk, |bound| {
                 let left = until(oldest, bound).saturating_duration_since(shared.now());
                 shared
                     .queue
@@ -1644,6 +1684,33 @@ async fn settle_task(shared: Arc<Shared>) {
     }
 }
 
+/// What a batch [`settle_batch`] sends does to its units.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Settling {
+    Delete,
+    Fail,
+    HandBack,
+}
+
+impl Settling {
+    /// The batch's work, as its log lines name it.
+    fn doing(self) -> &'static str {
+        match self {
+            Settling::Delete => "deleting",
+            Settling::Fail => "failing",
+            Settling::HandBack => "handing back",
+        }
+    }
+
+    fn op(self) -> Op {
+        match self {
+            Settling::Delete => Op::Acknowledge,
+            Settling::Fail => Op::Fail,
+            Settling::HandBack => Op::HandBack,
+        }
+    }
+}
+
 /// Send one batch of deletes, fails or hand-backs, retrying a transient
 /// failure until the oldest entry's deadline, or a close's bound if that
 /// comes first. `call` takes the close's bound. An entry SQS fails
@@ -1654,7 +1721,7 @@ async fn settle_task(shared: Arc<Shared>) {
 /// stopped.
 async fn settle_batch<F, Fut>(
     shared: &Shared,
-    doing: &str,
+    settling: Settling,
     chunk: &[Settle],
     call: F,
 ) -> Result<usize, ()>
@@ -1662,6 +1729,7 @@ where
     F: Fn(Option<Instant>) -> Fut,
     Fut: std::future::Future<Output = Result<BatchOutcome, CallError>>,
 {
+    let doing = settling.doing();
     let oldest = chunk.iter().map(|s| s.deadline).min().expect("a chunk");
     let mut backoff = BACKOFF_START;
     loop {
@@ -1684,12 +1752,18 @@ where
             Err(e) => {
                 let bound = shared.lock().close_bound(&*shared.clock);
                 let now = shared.now();
-                if now + backoff >= until(oldest, bound) {
+                let limit = until(oldest, bound);
+                if now + backoff >= limit {
                     tracing::debug!(error = %e.message, "dropping a batch {doing} units past its deadline");
+                    // A close's bound reports its own drops.
+                    if settling == Settling::Fail && limit == oldest {
+                        shared.count(|m| m.fails_dropped.increment(chunk.len() as u64));
+                    }
                     return Ok(chunk.len());
                 }
                 shared.clock.sleep_until(now + backoff).await;
                 backoff = (backoff * 2).min(BACKOFF_MAX);
+                shared.count(|m| m.retried(settling.op()).increment(1));
             }
         }
     }
@@ -1758,6 +1832,9 @@ async fn publish_batch(shared: &Shared, entries: Vec<SendEntry>) -> Result<(), (
     loop {
         if shared.stopped() {
             return Err(());
+        }
+        if retried {
+            shared.count(|m| m.retried(Op::Publish).increment(1));
         }
         match shared.queue.send_batch(entries.clone()).await {
             Ok(outcome) => {

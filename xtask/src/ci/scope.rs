@@ -22,7 +22,12 @@ pub(crate) fn scope(paths: &[String], graph: &Graph) -> Scope {
     if paths.iter().any(|p| p == "README.md") {
         pkgs.extend(graph.test_closure_for("spate"));
     }
-    for path in paths.iter().filter(|p| is_rust_change(p)) {
+    // The root README is a doctest input of `spate`, named above; the
+    // crate-less catch-all below would otherwise widen it to `Full`.
+    for path in paths
+        .iter()
+        .filter(|p| p.as_str() != "README.md" && is_rust_change(p))
+    {
         if is_manifest(path) {
             return Scope::Full;
         }

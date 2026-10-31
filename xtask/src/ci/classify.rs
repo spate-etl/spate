@@ -115,6 +115,11 @@ fn kind_of(path: &str) -> Kind {
     if glob(path, "fuzz/*") {
         return Kind::Code;
     }
+    // `spate` compiles the root README into its doctests (`cfg(doctest)` +
+    // `include_str!`), so this sits ahead of the `*.md` arm.
+    if path == "README.md" {
+        return Kind::Code;
+    }
     // `.gitmodules` pins the benchmark data the site renders. `.node-version`
     // pins the Node the site build runs on.
     if any_glob(
@@ -543,7 +548,7 @@ mod tests {
 
     #[test]
     fn documentation_needs_no_build() {
-        let out = run(&["docs/INVARIANTS.md", "README.md", ".github/labels.yml"]);
+        let out = run(&["docs/INVARIANTS.md", ".github/labels.yml"]);
         assert!(!out.rust, "prose compiles nothing");
         assert!(!out.fuzz);
         assert!(out.container_pkgs.is_empty());
@@ -565,6 +570,17 @@ mod tests {
         // `#![doc = include_str!(...)]` can compile a crate README into the
         // library, so the `*.md` arm must not reach it.
         assert!(run(&["crates/spate/README.md"]).rust);
+    }
+
+    /// `spate` compiles the root README as a doctest, so it needs a build.
+    #[test]
+    fn the_root_readme_is_a_doctest_input() {
+        let out = run(&["README.md"]);
+        assert!(out.rust, "`spate`'s doctest includes it");
+        assert!(!out.site, "the site does not render the root README");
+        assert!(out.container_pkgs.is_empty());
+        assert!(out.semver_pkgs.is_empty());
+        assert!(out.bench_shards.is_empty());
     }
 
     #[test]

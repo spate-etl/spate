@@ -310,7 +310,8 @@ connector never wires the pipeline name, the labels, or the prefix.
   identical at either end.
 - **A feed backend** overrides
   [`Feed::attach_metrics`](../07-reference/README.mdx), which the runtime calls
-  before it hands the feed to the source. Its namespace is its `Feed::backend`
+  before it hands the feed to the source, with a `FeedMetricsCtx` holding the
+  `Meter` and the pipeline's `per_partition_detail`. Its namespace is its `Feed::backend`
   key, and its families land under `spate_<backend>_feed_*` with
   `component="feed"`, beside the framework's own `spate_feed_*` families for the
   same feed. The backend's own tasks and calls go without the `Meter` until it
@@ -332,9 +333,9 @@ fn open(&mut self, ctx: SourceCtx) -> Result<(), SourceError> {
 }
 ```
 
-`SourceCtx` also carries `per_partition_detail` (the `metrics` config flag), so
-a connector's own per-partition families honor the operator's cardinality
-choice. It gates your families and the framework's `spate_checkpoint_*` detail;
+`SourceCtx` carries `per_partition_detail` (the `metrics` config flag), and so
+does the `FeedMetricsCtx` a feed backend receives, so a connector's own
+per-partition families honor the operator's cardinality choice. It gates your families and the framework's `spate_checkpoint_*` detail;
 it does **not** gate `spate_source_lag_records`, which is ungated by design.
 
 The `Meter` is `None` when the `component_type` can't scope a family: a reserved

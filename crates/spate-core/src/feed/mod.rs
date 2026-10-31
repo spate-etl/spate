@@ -158,6 +158,57 @@ impl Delivery {
     }
 }
 
+/// What the runtime hands a feed backend for its own metric families, through
+/// [`Feed::attach_metrics`].
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct FeedMetricsCtx {
+    /// Scoped `spate_<backend>_feed_*` and pre-labeled with the pipeline,
+    /// `component="feed"` and the [`backend`](Feed::backend) key as
+    /// `component_type`. `None` when the backend key cannot scope a family: a
+    /// reserved root or `custom` opts out silently, and a malformed key is
+    /// logged and also yields `None`.
+    pub meter: Option<Meter>,
+    /// The calling pipeline's `metrics.per_partition_detail`. Gates the
+    /// backend's own per-partition families: when `false`, register and emit
+    /// only aggregate series. Set whether or not [`meter`](Self::meter) is
+    /// `Some`.
+    pub per_partition_detail: bool,
+}
+
+impl FeedMetricsCtx {
+    /// Context carrying `meter`, with per-partition detail off. Backends
+    /// outside this crate construct it here, as the struct is
+    /// `#[non_exhaustive]`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use spate_core::feed::FeedMetricsCtx;
+    /// use spate_core::metrics::Meter;
+    ///
+    /// let cx = FeedMetricsCtx::new(Some(Meter::new("orders", "feed", "probe")))
+    ///     .with_partition_detail(true);
+    /// assert!(cx.meter.is_some());
+    /// assert!(cx.per_partition_detail);
+    /// ```
+    #[must_use]
+    pub fn new(meter: Option<Meter>) -> Self {
+        FeedMetricsCtx {
+            meter,
+            per_partition_detail: false,
+        }
+    }
+
+    /// Enable cardinality-sensitive per-partition series. Called by the
+    /// runtime from `metrics.per_partition_detail`.
+    #[must_use]
+    pub fn with_partition_detail(mut self, enabled: bool) -> Self {
+        self.per_partition_detail = enabled;
+        self
+    }
+}
+
 /// How a caller must react to a [`FeedError`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -262,20 +313,16 @@ pub trait Feed: Send + Sync {
     /// `receive`; a later call replaces the waker.
     fn set_waker(&self, waker: FeedWaker);
 
-    /// Receive a [`Meter`] scoped `spate_<backend>_feed_*` for the backend's
-    /// own metric families, pre-labeled with the pipeline, `component="feed"`
-    /// and the [`backend`](Feed::backend) key as `component_type`. Called
-    /// before the source is handed the feed, once for each pipeline that runs
-    /// it, with that pipeline's labels. Resolve handles here and keep them,
-    /// which `&self` leaves to interior mutability.
+    /// Receive the [`Meter`] and per-partition setting for the backend's own
+    /// metric families. Called before the source is handed the feed, once for
+    /// each pipeline that runs it, with that pipeline's labels and that
+    /// pipeline's `metrics.per_partition_detail`. Resolve handles here and keep
+    /// them, which `&self` leaves to interior mutability.
     ///
     /// The backend's own tasks until this call, the calls made before it, and
     /// a feed the runtime is not given all go without a `Meter`, so treat the
-    /// handles as optional wherever they are used. `None` when the backend key
-    /// cannot scope a family: a reserved root or `custom` opts out silently,
-    /// and a malformed key is logged and also yields `None`. The default
-    /// ignores it.
-    fn attach_metrics(&self, _meter: Option<Meter>) {}
+    /// handles as optional wherever they are used. The default ignores it.
+    fn attach_metrics(&self, _cx: FeedMetricsCtx) {}
 
     /// Up to `max` deliveries the backend has buffered, oldest first. Never
     /// waits; returns an empty list when nothing is ready.
@@ -725,6 +772,17 @@ mod tests {
             confirmer.reject(FeedError::new(FeedErrorKind::Refused, "empty feed"));
             confirmation
         }
+    }
+
+    /// Pins that a feed metrics context carries no per-partition detail unless
+    /// it is enabled, and carries it once enabled.
+    #[test]
+    fn feed_metrics_ctx_partition_detail_defaults_off_and_round_trips() {
+        let cx = FeedMetricsCtx::new(None);
+        assert!(cx.meter.is_none());
+        assert!(!cx.per_partition_detail);
+        let cx = FeedMetricsCtx::new(None).with_partition_detail(true);
+        assert!(cx.per_partition_detail);
     }
 
     /// Pins that `Feed` is dyn-compatible and that one `Arc<dyn Feed>` can be

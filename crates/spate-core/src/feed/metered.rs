@@ -7,11 +7,11 @@
 //! dead-letter destination.
 
 use super::{
-    Confirmation, Delivery, DepthOf, DepthReading, Feed, FeedError, FeedErrorKind, FeedWaker,
-    Receipt, Unit,
+    Confirmation, Delivery, DepthOf, DepthReading, Feed, FeedError, FeedErrorKind, FeedMetricsCtx,
+    FeedWaker, Receipt, Unit,
 };
 use crate::clock::{SharedClock, Stopwatch};
-use crate::metrics::{FeedMetrics, FeedOp, Meter};
+use crate::metrics::{FeedMetrics, FeedOp};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -89,8 +89,8 @@ impl Feed for MeteredFeed {
         self.inner.set_waker(waker);
     }
 
-    fn attach_metrics(&self, meter: Option<Meter>) {
-        self.inner.attach_metrics(meter);
+    fn attach_metrics(&self, cx: FeedMetricsCtx) {
+        self.inner.attach_metrics(cx);
     }
 
     fn receive(&self, max: usize) -> Result<Vec<Delivery>, FeedError> {
@@ -212,7 +212,7 @@ mod tests {
     use super::*;
     use crate::clock::TestClock;
     use crate::feed::{Confirmer, Depth, DepthReporter, confirmation, depth_reading};
-    use crate::metrics::ComponentLabels;
+    use crate::metrics::{ComponentLabels, Meter};
     use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusRecorder};
     use std::collections::VecDeque;
     use std::sync::Mutex;
@@ -281,8 +281,12 @@ mod tests {
             self.log("set_waker".into());
         }
 
-        fn attach_metrics(&self, meter: Option<Meter>) {
-            self.log(format!("attach_metrics {}", meter.is_some()));
+        fn attach_metrics(&self, cx: FeedMetricsCtx) {
+            self.log(format!(
+                "attach_metrics {} {}",
+                cx.meter.is_some(),
+                cx.per_partition_detail
+            ));
         }
 
         fn receive(&self, max: usize) -> Result<Vec<Delivery>, FeedError> {
@@ -426,8 +430,9 @@ mod tests {
         rig.fake.deliver([7]);
 
         assert_eq!(rig.feed.backend(), "fake");
-        rig.feed
-            .attach_metrics(Some(Meter::new("p", "feed", "fake")));
+        rig.feed.attach_metrics(
+            FeedMetricsCtx::new(Some(Meter::new("p", "feed", "fake"))).with_partition_detail(true),
+        );
         rig.feed.set_waker(waker);
         let delivered = rig.feed.receive(4).unwrap();
         assert_eq!(delivered[0].receipt, Receipt(7));
@@ -449,7 +454,7 @@ mod tests {
         assert_eq!(
             *rig.fake.calls.lock().unwrap(),
             [
-                "attach_metrics true",
+                "attach_metrics true true",
                 "set_waker",
                 "receive 4",
                 "renew 7",

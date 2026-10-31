@@ -10,7 +10,8 @@ use crate::clock::{Clock, SystemClock};
 use crate::config::{MetricsExporter, PinningMode, PipelineConfig};
 use crate::feed::memory::MemoryFeed;
 use crate::feed::{
-    DEAD_LETTER_READ_INTERVAL, DeadLetterSampler, Feed, FeedOrigin, MeteredFeed, STOP_RESERVE,
+    DEAD_LETTER_READ_INTERVAL, DeadLetterSampler, Feed, FeedMetricsCtx, FeedOrigin, MeteredFeed,
+    STOP_RESERVE,
 };
 use crate::metrics::{
     self, BackpressureMetrics, CheckpointMetrics, ComponentLabels, E2eBasis, Exporter, FeedMetrics,
@@ -467,12 +468,15 @@ impl<S: Source + 'static> PipelineRuntime<S> {
                 ))
                 .map_err(|e| StartError::Metrics(e.to_string()))?;
                 let feed = Arc::new(MeteredFeed::new(feed, metrics, Arc::clone(&self.clock)));
-                feed.attach_metrics(Meter::for_component(
-                    feed.backend(),
-                    MetricRole::Feed,
-                    pipeline_name.clone(),
-                    "feed",
-                ));
+                feed.attach_metrics(
+                    FeedMetricsCtx::new(Meter::for_component(
+                        feed.backend(),
+                        MetricRole::Feed,
+                        pipeline_name.clone(),
+                        "feed",
+                    ))
+                    .with_partition_detail(self.config.metrics.per_partition_detail),
+                );
                 self.source
                     .configure_feed(section, Arc::clone(&feed) as Arc<dyn Feed>, origin)
                     .map_err(|e| StartError::Config(e.to_string()))?;

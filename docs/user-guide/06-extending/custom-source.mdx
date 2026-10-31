@@ -363,7 +363,7 @@ A backend also answers to its name in the `feed:` section:
   key differs from the one the section names. The scripted test feed returns
   `"scripted"`.
 - The key is also the namespace of your own metric families,
-  `spate_<key>_feed_*`, which you register through the `Meter` that
+  `spate_<key>_feed_*`, which you register through the `Meter` in the context
   `attach_metrics` hands you
   ([Instrumenting connectors](instrumenting-connectors.mdx#from-a-built-in-source-sink-or-feed-backend)).
 - Build the backend from a `FeedSection`, and refuse a section whose key is

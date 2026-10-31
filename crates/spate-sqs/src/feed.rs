@@ -1643,9 +1643,7 @@ async fn settle_task(shared: Arc<Shared>) {
             let before = fails.len();
             fails.retain(|s| now < s.deadline);
             let lapsed = before - fails.len();
-            if lapsed > 0 {
-                shared.count(|m| m.fails_dropped.increment(lapsed as u64));
-            }
+            shared.count(|m| m.fails_dropped.increment(lapsed as u64));
             let bound = shared.lock().close_bound(&*shared.clock);
             if bound.is_some_and(|bound| now >= bound) {
                 let n = std::mem::take(&mut fails).len();

@@ -4735,76 +4735,96 @@ fn a_fail_dropped_at_its_deadline_is_counted() {
 }
 
 /// Pins that a fail batch given up after a transient failure, because its
-/// next attempt would reach its deadline, counts as dropped, and that one
-/// retried in time does not.
+/// next attempt would reach its deadline, counts as dropped and is logged as
+/// a failing batch, and that one retried in time does neither.
 #[test]
 fn a_fail_batch_given_up_at_its_deadline_is_counted() {
     let ms = Duration::from_millis;
     for (left, given_up) in [(ms(200), true), (ms(201), false)] {
-        let rendered = counted(|meter| async move {
-            let (feed, queue, clock) = start_clocked(MINUTE);
-            feed.attach_metrics(Some(meter));
-            let (waker, park) = wake_channel();
-            feed.set_waker(waker);
-            queue.ready(Message::new("u"));
-            let d = receive_n(&feed, &park, 1).await.remove(0);
-            let deadline = feed.deadline_of(d.receipt).unwrap();
-            clock.advance(deadline - left - clock.now());
-            queue.fail_next_visibility_call(CallError::retryable("throttled"));
-            feed.fail(d.receipt, "unreadable").unwrap();
-            until("the fail is sent", || queue.visibility().len() == 1).await;
-            settle_tasks().await;
-            clock.advance(BACKOFF_START);
-            settle_tasks().await;
-            let calls = if given_up { 1 } else { 2 };
-            assert_eq!(queue.visibility().len(), calls, "{left:?} left");
+        let mut rendered = String::new();
+        let lines = spate_test::capture_logs(tracing::Level::DEBUG, || {
+            rendered = counted(|meter| async move {
+                let (feed, queue, clock) = start_clocked(MINUTE);
+                feed.attach_metrics(Some(meter));
+                let (waker, park) = wake_channel();
+                feed.set_waker(waker);
+                queue.ready(Message::new("u"));
+                let d = receive_n(&feed, &park, 1).await.remove(0);
+                let deadline = feed.deadline_of(d.receipt).unwrap();
+                clock.advance(deadline - left - clock.now());
+                queue.fail_next_visibility_call(CallError::retryable("throttled"));
+                feed.fail(d.receipt, "unreadable").unwrap();
+                until("the fail is sent", || queue.visibility().len() == 1).await;
+                settle_tasks().await;
+                clock.advance(BACKOFF_START);
+                settle_tasks().await;
+                let calls = if given_up { 1 } else { 2 };
+                assert_eq!(queue.visibility().len(), calls, "{left:?} left");
+            });
         });
         assert_eq!(
             sample(&rendered, DROPPED, &[]),
             if given_up { 1.0 } else { 0.0 },
             "{left:?} left"
         );
+        let logged = lines
+            .iter()
+            .any(|l| l.contains("dropping a batch failing units past its deadline"));
+        assert_eq!(logged, given_up, "{left:?} left: {lines:#?}");
     }
 }
 
 /// Pins that a delete or a hand-back batch given up at its deadline after a
-/// transient failure is not a dropped fail.
+/// transient failure is not a dropped fail, and is logged by its work.
 #[test]
 fn a_given_up_delete_or_hand_back_is_not_a_dropped_fail() {
     for acknowledge in [true, false] {
-        let rendered = counted(|meter| async move {
-            let (feed, queue, clock) = start_clocked(MINUTE);
-            feed.attach_metrics(Some(meter));
-            let (waker, park) = wake_channel();
-            feed.set_waker(waker);
-            queue.ready(Message::new("u"));
-            let d = receive_n(&feed, &park, 1).await.remove(0);
-            let deadline = feed.deadline_of(d.receipt).unwrap();
-            clock.advance(deadline - BACKOFF_START - clock.now());
-            let calls = || {
+        let mut rendered = String::new();
+        let lines = spate_test::capture_logs(tracing::Level::DEBUG, || {
+            rendered = counted(|meter| async move {
+                let (feed, queue, clock) = start_clocked(MINUTE);
+                feed.attach_metrics(Some(meter));
+                let (waker, park) = wake_channel();
+                feed.set_waker(waker);
+                queue.ready(Message::new("u"));
+                let d = receive_n(&feed, &park, 1).await.remove(0);
+                let deadline = feed.deadline_of(d.receipt).unwrap();
+                clock.advance(deadline - BACKOFF_START - clock.now());
+                let calls = || {
+                    if acknowledge {
+                        queue.deletes().len()
+                    } else {
+                        handed_back(&queue.visibility()).len()
+                    }
+                };
                 if acknowledge {
-                    queue.deletes().len()
+                    queue.fail_next_delete_call(CallError::retryable("throttled"));
+                    feed.acknowledge(d.receipt).unwrap();
                 } else {
-                    handed_back(&queue.visibility()).len()
+                    queue.fail_next_visibility_call(CallError::retryable("throttled"));
+                    feed.hand_back(d.receipt).unwrap();
                 }
-            };
-            if acknowledge {
-                queue.fail_next_delete_call(CallError::retryable("throttled"));
-                feed.acknowledge(d.receipt).unwrap();
-            } else {
-                queue.fail_next_visibility_call(CallError::retryable("throttled"));
-                feed.hand_back(d.receipt).unwrap();
-            }
-            until("the call is sent", || calls() == 1).await;
-            settle_tasks().await;
-            clock.advance(BACKOFF_START);
-            settle_tasks().await;
-            assert_eq!(calls(), 1, "acknowledge {acknowledge}: retried");
+                until("the call is sent", || calls() == 1).await;
+                settle_tasks().await;
+                clock.advance(BACKOFF_START);
+                settle_tasks().await;
+                assert_eq!(calls(), 1, "acknowledge {acknowledge}: retried");
+            });
         });
         assert_eq!(
             sample(&rendered, DROPPED, &[]),
             0.0,
             "acknowledge {acknowledge}"
+        );
+        let doing = if acknowledge {
+            "deleting"
+        } else {
+            "handing back"
+        };
+        let line = format!("dropping a batch {doing} units past its deadline");
+        assert!(
+            lines.iter().any(|l| l.contains(&line)),
+            "{line:?} not in {lines:#?}"
         );
     }
 }

@@ -311,12 +311,12 @@ connector never wires the pipeline name, the labels, or the prefix.
 - **A feed backend** overrides
   [`Feed::attach_metrics`](../07-reference/README.mdx), which the runtime calls
   before it hands the feed to the source, with a `FeedMetricsCtx` holding the
-  `Meter` and the pipeline's `per_partition_detail`. Its namespace is its `Feed::backend`
-  key, and its families land under `spate_<backend>_feed_*` with
-  `component="feed"`, beside the framework's own `spate_feed_*` families for the
-  same feed. The backend's own tasks and calls go without the `Meter` until it
-  arrives, and a feed handed to a source directly never receives one, so treat
-  the handles as optional.
+  `Meter` and the pipeline's `per_partition_detail`. Its namespace is its
+  `Feed::backend` key, and its families land under `spate_<backend>_feed_*`
+  with `component="feed"`, beside the framework's own `spate_feed_*` families
+  for the same feed. The backend's own tasks and calls go without the `Meter`
+  until it arrives, and a feed handed to a source directly never receives one,
+  so treat the handles as optional.
 
 The source's two methods below are a shape rather than a program: the
 `impl Source for` header is left out and the rest of `open` is elided at the
@@ -335,8 +335,9 @@ fn open(&mut self, ctx: SourceCtx) -> Result<(), SourceError> {
 
 `SourceCtx` carries `per_partition_detail` (the `metrics` config flag), and so
 does the `FeedMetricsCtx` a feed backend receives, so a connector's own
-per-partition families honor the operator's cardinality choice. It gates your families and the framework's `spate_checkpoint_*` detail;
-it does **not** gate `spate_source_lag_records`, which is ungated by design.
+per-partition families honor the operator's cardinality choice. It gates your
+families and the framework's `spate_checkpoint_*` detail; it does **not** gate
+`spate_source_lag_records`, which is ungated by design.
 
 The `Meter` is `None` when the `component_type` can't scope a family: a reserved
 root (an undeclared source keeps `"source"`) or the author-reserved `"custom"`

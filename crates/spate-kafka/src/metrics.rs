@@ -104,6 +104,10 @@ pub(crate) struct KafkaStatsMetrics {
     /// Whether per-partition series and the not-fetching line name the topic,
     /// for a consumer that reads more than one.
     topic_label: bool,
+    /// Whether each partition has a fetch queue of its own. A consumer that
+    /// does not split its partition queues forwards them all to one, and
+    /// librdkafka reports that one queue's length on every partition.
+    queue_per_partition: bool,
     tx_requests: Counter,
     tx_bytes: Counter,
     rx_responses: Counter,
@@ -197,15 +201,18 @@ impl BrokerHandles {
 /// own lag family.
 #[derive(Debug)]
 struct PartitionHandles {
-    fetch_queue_messages: Gauge,
+    /// `None` without a queue per partition, where the figure is the whole
+    /// consumer's.
+    fetch_queue_messages: Option<Gauge>,
     lag_stored: Option<Gauge>,
     not_fetching: Gauge,
 }
 
 impl PartitionHandles {
-    fn new(meter: &Meter, labels: &[(&'static str, SharedString)]) -> Self {
+    fn new(meter: &Meter, labels: &[(&'static str, SharedString)], own_queue: bool) -> Self {
         PartitionHandles {
-            fetch_queue_messages: meter.gauge(PARTITION_FETCH_QUEUE_MESSAGES, labels),
+            fetch_queue_messages: own_queue
+                .then(|| meter.gauge(PARTITION_FETCH_QUEUE_MESSAGES, labels)),
             lag_stored: None,
             not_fetching: meter.gauge(PARTITION_NOT_FETCHING, labels),
         }
@@ -228,19 +235,21 @@ struct NotFetching {
 impl KafkaStatsMetrics {
     /// Resolve all fixed handles. Build-time only (called from `open`).
     pub(crate) fn new(meter: Meter, per_partition_detail: bool) -> Self {
-        Self::with_labels(meter, per_partition_detail, Vec::new(), false)
+        Self::with_labels(meter, per_partition_detail, Vec::new(), false, true)
     }
 
     /// Resolve all fixed handles for a feed's consumer, which reads a work and
-    /// a retry topic: every series carries `client="consumer"`, and a
-    /// per-partition series carries `topic`. Called from the feed's
-    /// `attach_metrics`.
+    /// a retry topic through one queue: every series carries
+    /// `client="consumer"`, a per-partition series carries `topic`, and the
+    /// fetch queue is reported once, with no per-partition figure. Called
+    /// from the feed's `attach_metrics`.
     pub(crate) fn for_feed(meter: Meter, per_partition_detail: bool) -> Self {
         Self::with_labels(
             meter,
             per_partition_detail,
             vec![(L_CLIENT, "consumer".into())],
             true,
+            false,
         )
     }
 
@@ -249,6 +258,7 @@ impl KafkaStatsMetrics {
         per_partition_detail: bool,
         extra: ExtraLabels,
         topic_label: bool,
+        queue_per_partition: bool,
     ) -> Self {
         let e = extra.as_slice();
         KafkaStatsMetrics {
@@ -275,6 +285,7 @@ impl KafkaStatsMetrics {
             per_partition_detail,
             extra,
             topic_label,
+            queue_per_partition,
         }
     }
 
@@ -302,7 +313,7 @@ impl KafkaStatsMetrics {
     /// Translate one statistics snapshot of a consumer reading `topics`. Drain
     /// thread only.
     ///
-    /// The fetch-queue gauges sum every listed topic, and `owned` names the
+    /// The fetch-queue gauges cover every listed topic, and `owned` names the
     /// held partitions by topic, so partition 0 of two topics stays two
     /// series. The ownership rule is [`update`](Self::update)'s.
     pub(crate) fn update_topics(
@@ -459,21 +470,28 @@ impl KafkaStatsMetrics {
                 if *pid < 0 {
                     continue;
                 }
-                fetchq_msgs += to_u64(p.fetchq_cnt);
-                fetchq_bytes += p.fetchq_size;
+                if self.queue_per_partition {
+                    fetchq_msgs += to_u64(p.fetchq_cnt);
+                    fetchq_bytes += p.fetchq_size;
+                } else {
+                    // Every partition reports the one forwarded queue, so any
+                    // one figure is the whole; the largest is read in case a
+                    // partition's sample predates the last fetch.
+                    fetchq_msgs = fetchq_msgs.max(to_u64(p.fetchq_cnt));
+                    fetchq_bytes = fetchq_bytes.max(p.fetchq_size);
+                }
                 let held = owned.contains(&(topic, *pid));
                 let key: TopicPartition = (topic.into(), *pid);
                 if self.per_partition_detail {
                     seen.insert(key.clone());
                     if held {
                         let labels = self.partition_labels(topic, *pid);
-                        let handles = self
-                            .partitions
-                            .entry(key.clone())
-                            .or_insert_with(|| PartitionHandles::new(meter, &labels));
-                        handles
-                            .fetch_queue_messages
-                            .set(to_u64(p.fetchq_cnt) as f64);
+                        let handles = self.partitions.entry(key.clone()).or_insert_with(|| {
+                            PartitionHandles::new(meter, &labels, self.queue_per_partition)
+                        });
+                        if let Some(gauge) = handles.fetch_queue_messages.as_ref() {
+                            gauge.set(to_u64(p.fetchq_cnt) as f64);
+                        }
                         if p.consumer_lag_stored >= 0 {
                             handles
                                 .lag_stored
@@ -553,7 +571,9 @@ impl KafkaStatsMetrics {
             if held(topic, *pid) {
                 continue;
             }
-            handles.fetch_queue_messages.set(0.0);
+            if let Some(gauge) = handles.fetch_queue_messages.as_ref() {
+                gauge.set(0.0);
+            }
             handles.not_fetching.set(0.0);
             if let Some(gauge) = handles.lag_stored.as_ref() {
                 gauge.set(0.0);
@@ -1327,6 +1347,60 @@ mod tests {
         );
         assert!(warned[0].contains("state=offset-wait"), "{}", warned[0]);
         assert!(warned[1].contains("state=offset-query"), "{}", warned[1]);
+    }
+
+    /// Pins the not-fetching line's `topic` field: a feed's consumer names
+    /// the topic, and partition 0 of its two topics is two runs; a source's
+    /// line carries no `topic`.
+    #[test]
+    fn the_not_fetching_line_names_the_topic_on_a_feed_only() {
+        let stopped = |name: &str| {
+            let mut t = stats_with_states(&[(0, "stopped")])
+                .topics
+                .remove("orders")
+                .unwrap();
+            t.topic = name.to_owned();
+            (name.to_owned(), t)
+        };
+        let feed_stats = Statistics {
+            topics: HashMap::from([stopped("units"), stopped("units-retry")]),
+            ..Default::default()
+        };
+        let held = [("units", 0), ("units-retry", 0)];
+        let lines = capture_logs(|| {
+            render_metrics(|| {
+                let mut m = KafkaStatsMetrics::for_feed(meter(), false);
+                for _ in 0..NOT_FETCHING_WARN_WINDOWS {
+                    m.update_topics(&feed_stats, &["units", "units-retry"], &held);
+                }
+            });
+        });
+        let warned = lines_with(&lines, NOT_FETCHING);
+        assert_eq!(warned.len(), 2, "{}", lines.join("\n"));
+        for topic in ["topic=units partition=0", "topic=units-retry partition=0"] {
+            assert_eq!(
+                warned.iter().filter(|l| l.contains(topic)).count(),
+                1,
+                "{topic}: {}",
+                lines.join("\n")
+            );
+        }
+
+        let lines = capture_logs(|| {
+            render_metrics(|| {
+                let mut m = KafkaStatsMetrics::new(meter(), false);
+                for _ in 0..NOT_FETCHING_WARN_WINDOWS {
+                    m.update(
+                        &stats_with_states(&[(0, "stopped")]),
+                        "orders",
+                        &owned(&[0]),
+                    );
+                }
+            });
+        });
+        let warned = lines_with(&lines, NOT_FETCHING);
+        assert_eq!(warned.len(), 1, "{}", lines.join("\n"));
+        assert!(!warned[0].contains("topic="), "{}", warned[0]);
     }
 
     #[test]

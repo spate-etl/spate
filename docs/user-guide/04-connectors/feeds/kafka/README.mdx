@@ -606,11 +606,11 @@ framework's `spate_feed_*` families, with `component_type="kafka"`; see
 | `spate_kafka_feed_dead_letter_writes_total` | counter | `reason` (`attempt_cap`\|`no_unit`) | Writes to the dead-letter topic the brokers confirmed. `attempt_cap` is a unit failed at or past the attempt cap, or moved unread because its recorded attempts reached it; `no_unit` is a message whose key is not UTF-8. |
 
 These count each write the brokers confirmed, on this instance. A unit written
-again after a rebalance or a stop counts again, so sum them across instances.
-A write still in flight when the feed closes or stops on an error is not
-counted. `spate_feed_units_failed_total` counts the fails the feed accepted,
-before their write, and does not count a unit moved unread or a message with no
-unit.
+again after a rebalance or a stop counts again, so sum them across instances. A
+write still in flight when the feed is dropped is not counted, and one confirmed
+after a close or a stop on an error still counts.
+`spate_feed_units_failed_total` counts the fails the feed accepted, before their
+write, and does not count a unit moved unread or a message with no unit.
 
 ### Client statistics
 
@@ -620,13 +620,15 @@ translate librdkafka's statistics under the same prefix, labelled
 counterpart on the Kafka source or sink means, and follows its conventions for
 counters, the `broker` label and the rolling-window gauges. The consumer's
 snapshot is drained on its own thread, and the producer's on its poll thread.
-A client's families stop updating when the feed closes or stops on an error,
-and keep their last values.
+The consumer's families stop updating when the feed closes or stops on an
+error, and the producer's when the feed is dropped. Both keep their last
+values.
 
-The consumer reads the work and retry topics. Its fetch-queue gauges sum both,
-and its per-partition series carry `topic` beside `partition`. They appear only
-with `metrics.per_partition_detail: true`, and a partition the next assignment
-drops reads 0. The feed stores no offsets, so it reports no stored lag.
+The consumer reads the work and retry topics through one queue, so its
+fetch-queue gauges cover both topics and have no per-partition series. Its
+`partition_not_fetching` series carries `topic` beside `partition`, appears
+only with `metrics.per_partition_detail: true`, and reads 0 for a partition the
+next assignment drops. The feed stores no offsets, so it reports no stored lag.
 
 | Metric | Type | Extra labels | As |
 |---|---|---|---|
@@ -652,7 +654,6 @@ drops reads 0. The feed stores no offsets, so it reports no stored lag.
 | `spate_kafka_feed_group_rebalances_total` | counter | `client="consumer"` | [`spate_kafka_source_group_rebalances_total`](../../sources/kafka/README.mdx#metrics) |
 | `spate_kafka_feed_group_assignment_size` | gauge | `client="consumer"` | [`spate_kafka_source_group_assignment_size`](../../sources/kafka/README.mdx#metrics) |
 | `spate_kafka_feed_group_healthy` | gauge | `client="consumer"` | [`spate_kafka_source_group_healthy`](../../sources/kafka/README.mdx#metrics) |
-| `spate_kafka_feed_partition_fetch_queue_messages` | gauge | `client="consumer"`, `topic`, `partition` ⚠ | [`spate_kafka_source_partition_fetch_queue_messages`](../../sources/kafka/README.mdx#metrics) |
 | `spate_kafka_feed_partition_not_fetching` | gauge | `client="consumer"`, `topic`, `partition` ⚠ | [`spate_kafka_source_partition_not_fetching`](../../sources/kafka/README.mdx#metrics) |
 
 The producer's statistics are aggregate only, as the sink's are

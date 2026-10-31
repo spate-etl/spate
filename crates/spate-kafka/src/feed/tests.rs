@@ -3715,10 +3715,10 @@ mod cluster {
         };
         let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
         let prom = recorder.handle();
-        let queued = |topic: &str| {
+        let stopped = |topic: &str| {
             spate_test::metric_value(
                 &prom.render(),
-                "spate_kafka_feed_partition_fetch_queue_messages",
+                "spate_kafka_feed_partition_not_fetching",
                 &[("topic", topic), ("partition", "0")],
             )
         };
@@ -3726,25 +3726,25 @@ mod cluster {
             let meter = Meter::with_namespace("kafka_feed", group.clone(), "feed", "kafka");
             core.attach_metrics(FeedMetricsCtx::new(Some(meter)).with_partition_detail(true));
             let owned: Vec<Tp> = owned_tps(&core).into_iter().collect();
-            core.publish_consumer_stats(&super::feed_metrics::consumer_snapshot(4, 6), &owned);
+            core.publish_consumer_stats(&super::feed_metrics::consumer_snapshot(6), &owned);
         });
         assert_eq!(
-            (queued("units"), queued("units-retry")),
-            (Some(4.0), Some(6.0))
+            (stopped("units"), stopped("units-retry")),
+            (Some(1.0), Some(1.0))
         );
 
         intents(&d, Intent::Revoke(assigned));
         d.serve_intents();
         assert_eq!(
-            (queued("units"), queued("units-retry")),
-            (Some(4.0), Some(6.0)),
+            (stopped("units"), stopped("units-retry")),
+            (Some(1.0), Some(1.0)),
             "a revocation releases nothing"
         );
         intents(&d, Intent::Assign(work_only));
         d.serve_intents();
         assert_eq!(
-            (queued("units"), queued("units-retry")),
-            (Some(4.0), Some(0.0)),
+            (stopped("units"), stopped("units-retry")),
+            (Some(1.0), Some(0.0)),
             "the assignment releases what it dropped"
         );
         d.consumer.context().rebalance(
@@ -3753,7 +3753,50 @@ mod cluster {
             &mut TopicPartitionList::new(),
         );
         d.serve_intents();
-        assert_eq!(queued("units"), Some(0.0), "a rebalance error releases all");
+        assert_eq!(
+            stopped("units"),
+            Some(0.0),
+            "a rebalance error releases all"
+        );
+    }
+
+    /// Pins that the consumer loop's drain names the partitions the feed
+    /// holds, so each renders its own per-partition series.
+    #[test]
+    fn the_consumer_drain_publishes_the_partitions_it_holds() {
+        use spate_core::feed::FeedMetricsCtx;
+        use spate_core::metrics::Meter;
+        let cluster = cluster_with(0);
+        let brokers = cluster.bootstrap_servers();
+        let group = spate_test::unique_name("stats-drain");
+        let mut config = KafkaFeedConfig::from_section(&section(&brokers, &group)).unwrap();
+        // Long enough that librdkafka's own snapshot never replaces the one
+        // the test places.
+        config.statistics_interval = Duration::from_secs(3600);
+        let (core, _producer, mut d) =
+            super::super::parts(&config, TWO, SyncClock::system()).unwrap();
+        drive(&mut d, "the driver owns its partitions", |d| owns(d) == 2);
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let prom = recorder.handle();
+        metrics::with_local_recorder(&recorder, || {
+            let meter = Meter::with_namespace("kafka_feed", group.clone(), "feed", "kafka");
+            core.attach_metrics(FeedMetricsCtx::new(Some(meter)).with_partition_detail(true));
+            *d.consumer.context().stats.lock().unwrap() =
+                Some(Box::new(super::feed_metrics::consumer_snapshot(6)));
+            d.publish_stats();
+        });
+        let rendered = prom.render();
+        for topic in ["units", "units-retry"] {
+            assert_eq!(
+                spate_test::metric_value(
+                    &rendered,
+                    "spate_kafka_feed_partition_not_fetching",
+                    &[("topic", topic), ("partition", "0")],
+                ),
+                Some(1.0),
+                "{topic}"
+            );
+        }
     }
 
     /// Wait until `n` units are buffered, receive them all in the order of
@@ -4775,9 +4818,10 @@ mod feed_metrics {
     }
 
     /// A consumer snapshot carrying the work and retry topics' partition 0,
-    /// with `work` and `retry` messages in their fetch queues.
-    pub(super) fn consumer_snapshot(work: i64, retry: i64) -> Statistics {
-        let topic = |name: &str, fetchq_cnt: i64| {
+    /// both stopped, as a consumer with one forwarded queue reports them:
+    /// each partition with the whole queue's `queued` entries.
+    pub(super) fn consumer_snapshot(queued: i64) -> Statistics {
+        let topic = |name: &str| {
             (
                 name.to_owned(),
                 Topic {
@@ -4786,8 +4830,8 @@ mod feed_metrics {
                         0,
                         Partition {
                             partition: 0,
-                            fetchq_cnt,
-                            fetch_state: "active".to_owned(),
+                            fetchq_cnt: queued,
+                            fetch_state: "stopped".to_owned(),
                             consumer_lag_stored: -1,
                             ..Default::default()
                         },
@@ -4797,7 +4841,7 @@ mod feed_metrics {
             )
         };
         Statistics {
-            topics: HashMap::from([topic("units", work), topic("units-retry", retry)]),
+            topics: HashMap::from([topic("units"), topic("units-retry")]),
             cgrp: Some(ConsumerGroup {
                 state: "up".to_owned(),
                 join_state: "steady".to_owned(),
@@ -5007,6 +5051,54 @@ mod feed_metrics {
         }
     }
 
+    /// Pins that a second attach replaces the statistics translators too:
+    /// later snapshots render under the second pipeline with its
+    /// per-partition setting, and an attach without a `Meter` stops them.
+    #[test]
+    fn a_second_attach_replaces_the_statistics_translators() {
+        let core = Arc::new(core_with_statistics("5s"));
+        let hooks = FeedProducerHooks::new(Arc::clone(&core));
+        let (first, second) = (unique_name("first"), unique_name("second"));
+        let attach = |pipeline: &str, detail: bool| {
+            let meter = Meter::with_namespace("kafka_feed", pipeline.to_owned(), "feed", "kafka");
+            core.attach_metrics(FeedMetricsCtx::new(Some(meter)).with_partition_detail(detail));
+        };
+        let mut later = consumer_snapshot(6);
+        later.tx = 31;
+        let mut last = consumer_snapshot(6);
+        last.tx = 50;
+        let rendered = render_metrics(|| {
+            attach(&first, false);
+            attach(&second, true);
+            core.publish_consumer_stats(&later, &both_partition_zeros());
+            hooks.stats(snapshot(7));
+            core.attach_metrics(FeedMetricsCtx::new(None));
+            core.publish_consumer_stats(&last, &both_partition_zeros());
+            hooks.stats(snapshot(9));
+        });
+        for (client, tx) in [("consumer", 31.0), ("producer", 7.0)] {
+            for (pipeline, expected) in [(&first, 0.0), (&second, tx)] {
+                assert_eq!(
+                    value(
+                        &rendered,
+                        "tx_requests_total",
+                        &[("pipeline", pipeline), ("client", client)]
+                    ),
+                    Some(expected),
+                    "{pipeline} {client}"
+                );
+            }
+        }
+        assert_eq!(
+            value(
+                &rendered,
+                "partition_not_fetching",
+                &[("pipeline", &second), ("topic", "units")]
+            ),
+            Some(1.0)
+        );
+    }
+
     /// Pins that a zero `statistics_interval` registers the write families
     /// and no statistics family, and a non-zero one registers the fixed
     /// statistics families of both clients at the attach.
@@ -5042,7 +5134,7 @@ mod feed_metrics {
     fn the_feed_clients_statistics_render_apart() {
         let core = Arc::new(core_with_statistics("5s"));
         let hooks = FeedProducerHooks::new(Arc::clone(&core));
-        let mut consumer = consumer_snapshot(0, 0);
+        let mut consumer = consumer_snapshot(0);
         consumer.tx = 31;
         let rendered = render_metrics(|| {
             core.attach_metrics(attached(false));
@@ -5068,44 +5160,50 @@ mod feed_metrics {
     }
 
     /// Pins the per-partition statistics: absent without detail; with it,
-    /// one series per topic and partition held, and fetch-queue gauges that
-    /// sum the work and retry topics.
+    /// one series per topic and partition held. The fetch queue is reported
+    /// once, since every partition reports the one forwarded queue, and has
+    /// no per-partition series.
     #[test]
     fn per_partition_statistics_carry_the_topic() {
         let off = core_with_statistics("5s");
         let rendered = render_metrics(|| {
             off.attach_metrics(attached(false));
-            off.publish_consumer_stats(&consumer_snapshot(4, 6), &both_partition_zeros());
+            off.publish_consumer_stats(&consumer_snapshot(6), &both_partition_zeros());
         });
         assert!(!rendered.contains("partition=\""), "{rendered}");
-        assert_eq!(value(&rendered, "fetch_queue_messages", &[]), Some(10.0));
+        assert_eq!(value(&rendered, "fetch_queue_messages", &[]), Some(6.0));
 
         let on = core_with_statistics("5s");
         let rendered = render_metrics(|| {
             on.attach_metrics(attached(true));
-            on.publish_consumer_stats(&consumer_snapshot(4, 6), &both_partition_zeros());
+            on.publish_consumer_stats(&consumer_snapshot(6), &both_partition_zeros());
         });
-        for (topic, queued) in [("units", 4.0), ("units-retry", 6.0)] {
+        assert_eq!(value(&rendered, "fetch_queue_messages", &[]), Some(6.0));
+        for topic in ["units", "units-retry"] {
             assert_eq!(
                 value(
                     &rendered,
-                    "partition_fetch_queue_messages",
+                    "partition_not_fetching",
                     &[("topic", topic), ("partition", "0"), ("client", "consumer")]
                 ),
-                Some(queued),
+                Some(1.0),
                 "{topic}"
             );
         }
+        assert!(
+            !rendered.contains("partition_fetch_queue_messages"),
+            "{rendered}"
+        );
 
         let work_only = core_with_statistics("5s");
         let rendered = render_metrics(|| {
             work_only.attach_metrics(attached(true));
-            work_only.publish_consumer_stats(&consumer_snapshot(4, 6), &[tp(0)]);
+            work_only.publish_consumer_stats(&consumer_snapshot(6), &[tp(0)]);
         });
         assert_eq!(
             value(
                 &rendered,
-                "partition_fetch_queue_messages",
+                "partition_not_fetching",
                 &[("topic", "units-retry")]
             ),
             None
@@ -5119,21 +5217,17 @@ mod feed_metrics {
         let core = core_with_statistics("5s");
         let rendered = render_metrics(|| {
             core.attach_metrics(attached(true));
-            core.publish_consumer_stats(&consumer_snapshot(4, 6), &both_partition_zeros());
+            core.publish_consumer_stats(&consumer_snapshot(6), &both_partition_zeros());
             core.release_consumer_partitions(&[tp(0)]);
         });
         assert_eq!(
-            value(
-                &rendered,
-                "partition_fetch_queue_messages",
-                &[("topic", "units")]
-            ),
-            Some(4.0)
+            value(&rendered, "partition_not_fetching", &[("topic", "units")]),
+            Some(1.0)
         );
         assert_eq!(
             value(
                 &rendered,
-                "partition_fetch_queue_messages",
+                "partition_not_fetching",
                 &[("topic", "units-retry")]
             ),
             Some(0.0)

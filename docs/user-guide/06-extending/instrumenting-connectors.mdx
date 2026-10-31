@@ -345,6 +345,11 @@ also yields `None`. A component gets a scope only once it declares a
 distinct, well-formed `component_type`. A feed backend's `Meter` follows the
 same rule over its `Feed::backend` key.
 
+A feed backend family counted per feed call takes its `op` label from
+[`FeedOp::label`](../07-reference/README.mdx), the values the framework's
+`spate_feed_*` families use, so the two join on `op`. `FeedOp::ALL` lists every
+call, for resolving one handle per value in `attach_metrics`.
+
 Worked reference for the full production shape, including lazily-registered
 per-endpoint series and detail-gated per-partition series:
 [`spate-kafka/src/metrics.rs`](repo:crates/spate-kafka/src/metrics.rs), whose

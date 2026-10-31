@@ -15,21 +15,41 @@ use metrics::{Counter, Gauge, Histogram};
 use std::sync::OnceLock;
 use std::time::Duration;
 
-/// A feed call, as the `op` label names it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum FeedOp {
+/// A feed call, as the `op` label of the `spate_feed_*` families names it.
+///
+/// A feed backend labels its own per-call families with [`label`](FeedOp::label),
+/// so they join the framework's on `op`.
+///
+/// # Examples
+///
+/// ```
+/// use spate_core::metrics::{FeedOp, Meter};
+///
+/// let meter = Meter::with_namespace("queue_feed", "orders", "feed", "queue");
+/// let retries = FeedOp::ALL.map(|op| meter.counter("retries_total", &[("op", op.label().into())]));
+/// retries[FeedOp::Publish as usize].increment(1);
+/// assert_eq!(FeedOp::HandBack.label(), "hand_back");
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum FeedOp {
+    /// [`Feed::receive`](crate::feed::Feed::receive).
     Receive,
+    /// [`Feed::renew`](crate::feed::Feed::renew).
     Renew,
+    /// [`Feed::acknowledge`](crate::feed::Feed::acknowledge).
     Acknowledge,
+    /// [`Feed::fail`](crate::feed::Feed::fail).
     Fail,
+    /// [`Feed::hand_back`](crate::feed::Feed::hand_back).
     HandBack,
+    /// [`Feed::publish`](crate::feed::Feed::publish).
     Publish,
 }
 
 impl FeedOp {
     /// Every call, in discriminant order, so `op as usize` indexes a table
     /// built from it.
-    const ALL: [FeedOp; 6] = [
+    pub const ALL: [FeedOp; 6] = [
         FeedOp::Receive,
         FeedOp::Renew,
         FeedOp::Acknowledge,
@@ -38,7 +58,9 @@ impl FeedOp {
         FeedOp::Publish,
     ];
 
-    fn label(self) -> &'static str {
+    /// The `op` label value.
+    #[must_use]
+    pub fn label(self) -> &'static str {
         match self {
             FeedOp::Receive => "receive",
             FeedOp::Renew => "renew",

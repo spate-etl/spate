@@ -71,7 +71,9 @@ pub use deser::DeserMetrics;
 // A handle set built outside the runtime would take the feed's claim and stop
 // its pipeline starting, so this stays crate-internal.
 #[cfg(not(loom))]
-pub(crate) use feed::{FeedMetrics, FeedOp};
+pub(crate) use feed::FeedMetrics;
+#[cfg(not(loom))]
+pub use feed::FeedOp;
 pub use labels::ComponentLabels;
 pub use meter::Meter;
 // Role is derived by the runtime/builder from wiring position, never named by

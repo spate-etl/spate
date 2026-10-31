@@ -121,7 +121,7 @@ fn dead_lettered(
     tracing::info!(
         unit = moving.unit.as_deref().unwrap_or_default(),
         deliveries = moving.deliveries,
-        cause = cause.label(),
+        reason = cause.label(),
         ?confirmed_in,
         "a message was written to the dead-letter topic"
     );

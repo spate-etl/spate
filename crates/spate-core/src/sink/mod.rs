@@ -352,7 +352,8 @@ impl SinkMetricsCtx {
     /// use spate_core::metrics::Meter;
     /// use spate_core::sink::SinkMetricsCtx;
     ///
-    /// let cx = SinkMetricsCtx::new(Some(Meter::new("orders", "sink", "probe")));
+    /// let meter = Meter::with_namespace("probe_sink", "orders", "sink", "probe");
+    /// let cx = SinkMetricsCtx::new(Some(meter));
     /// assert!(cx.meter.is_some());
     /// ```
     #[must_use]

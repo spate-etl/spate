@@ -28,8 +28,7 @@ use rdkafka::message::{Header, OwnedHeaders};
 use rdkafka::producer::{BaseRecord, Producer, ThreadedProducer};
 use spate_core::clock::tokio::Clock as IoClock;
 use spate_core::error::{ErrorClass, SinkError};
-use spate_core::metrics::Meter;
-use spate_core::sink::{SealedBatch, ShardWriter};
+use spate_core::sink::{SealedBatch, ShardWriter, SinkMetricsCtx};
 use std::panic::RefUnwindSafe;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -162,11 +161,11 @@ impl ShardWriter for KafkaWriter {
     /// Resolve the `spate_kafka_sink_*` statistics handles into the slot the
     /// producer context publishes through. No-op when `statistics_interval`
     /// is zero; disabled statistics register no families.
-    fn attach_metrics(&mut self, meter: Option<Meter>) {
+    fn attach_metrics(&mut self, cx: SinkMetricsCtx) {
         if !self.statistics_enabled {
             return;
         }
-        if let Some(meter) = meter {
+        if let Some(meter) = cx.meter {
             *self.stats_slot.lock().expect("stats slot lock") =
                 Some(KafkaSinkStatsMetrics::new(meter));
         }
@@ -408,6 +407,7 @@ mod tests {
     use crate::sink::context::tests::on_test_clock;
     use crate::sink::frame::write_message;
     use spate_core::clock::tokio::SystemClock as IoSystemClock;
+    use spate_core::metrics::Meter;
 
     fn test_writer(statistics_enabled: bool) -> KafkaWriter {
         KafkaWriter::new(
@@ -574,19 +574,19 @@ mod tests {
     #[test]
     fn attach_metrics_gates_on_statistics_and_meter() {
         let mut disabled = test_writer(false);
-        disabled.attach_metrics(Some(Meter::with_namespace(
+        disabled.attach_metrics(SinkMetricsCtx::new(Some(Meter::with_namespace(
             "kafka", "orders", "out", "kafka",
-        )));
+        ))));
         assert!(disabled.stats_slot.lock().unwrap().is_none());
 
         let mut no_meter = test_writer(true);
-        no_meter.attach_metrics(None);
+        no_meter.attach_metrics(SinkMetricsCtx::new(None));
         assert!(no_meter.stats_slot.lock().unwrap().is_none());
 
         let mut enabled = test_writer(true);
-        enabled.attach_metrics(Some(Meter::with_namespace(
+        enabled.attach_metrics(SinkMetricsCtx::new(Some(Meter::with_namespace(
             "kafka", "orders", "out", "kafka",
-        )));
+        ))));
         assert!(enabled.stats_slot.lock().unwrap().is_some());
     }
 

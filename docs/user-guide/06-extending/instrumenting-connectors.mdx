@@ -301,9 +301,9 @@ connector never wires the pipeline name, the labels, or the prefix.
   `"custom"`) opt out (see below), and `"custom"` in particular is reserved for
   pipeline-author metrics.
 - **Receive the `Meter`.** A source reads `Option<Meter>` from `SourceCtx` in
-  `open`; a sink's writer overrides
-  `ShardWriter::attach_metrics(&mut self, Option<Meter>)` (called once before
-  the writer is shared). The runtime scopes it by **role**, `source` or `sink`
+  `open`; a sink's writer overrides `ShardWriter::attach_metrics`, which the
+  builder calls once before the writer is shared, with a `SinkMetricsCtx`
+  holding the `Meter`. The runtime scopes it by **role**, `source` or `sink`
   derived from the wiring position, so one crate's source families land under
   `spate_<namespace>_source_*` and its sink families under
   `spate_<namespace>_sink_*`, under distinct names. The connector's code is
@@ -334,8 +334,9 @@ fn open(&mut self, ctx: SourceCtx) -> Result<(), SourceError> {
 ```
 
 `SourceCtx` carries `per_partition_detail` (the `metrics` config flag), and so
-does the `FeedMetricsCtx` a feed backend receives, so a connector's own
-per-partition families honor the operator's cardinality choice. It gates your
+does the `FeedMetricsCtx` a feed backend receives; the sink's `SinkMetricsCtx`
+carries none. The flag lets a connector's own per-partition families honor the
+operator's cardinality choice. It gates your
 families and the framework's `spate_checkpoint_*` detail; it does **not** gate
 `spate_source_lag_records`, which is ungated by design.
 

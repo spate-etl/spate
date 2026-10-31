@@ -30,7 +30,7 @@ use spate_core::error::{ErrorClass, SinkError};
 use spate_core::ops::chain_owned;
 use spate_core::pipeline::{Pipeline, RuntimeOptions};
 use spate_core::record::{PartitionId, Record};
-use spate_core::sink::{KeyHashRouter, RowEncoder, SealedBatch, ShardWriter};
+use spate_core::sink::{KeyHashRouter, RowEncoder, SealedBatch, ShardWriter, SinkMetricsCtx};
 use spate_core::source::LaneId;
 use spate_kafka::sink::{KafkaEncoder, KafkaMessage, KafkaSink, KafkaSinkConfig, MessageEncoder};
 use spate_test::{PipelineRun, memory_source, record, unique_name, wait_until};
@@ -505,13 +505,9 @@ fn statistics_populate_kafka_sink_fixed_families() {
     let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
     let prom = recorder.handle();
     metrics::with_local_recorder(&recorder, || {
-        sink.writer
-            .attach_metrics(Some(spate_core::metrics::Meter::with_namespace(
-                "kafka",
-                "orders",
-                "orders_out",
-                "kafka",
-            )));
+        sink.writer.attach_metrics(SinkMetricsCtx::new(Some(
+            spate_core::metrics::Meter::with_namespace("kafka", "orders", "orders_out", "kafka"),
+        )));
     });
 
     // The poll thread publishes into the handles resolved above once per

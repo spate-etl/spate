@@ -69,8 +69,8 @@ use crate::metrics::{
 use crate::ops::{ChunkConfig, RunnableChain, SinkCtx};
 use crate::pipeline::ExitReport;
 use crate::sink::{
-    DrainReport, ShardQueues, ShardWriter, SinkBundle, SinkDrainFn, SinkFailures, SinkPool,
-    SinkProbeFn, shard_queues,
+    DrainReport, ShardQueues, ShardWriter, SinkBundle, SinkDrainFn, SinkFailures, SinkMetricsCtx,
+    SinkPool, SinkProbeFn, shard_queues,
 };
 use crate::source::Source;
 use crate::telemetry::{self, LogFormat};
@@ -656,7 +656,7 @@ impl Pipeline {
             })
             .collect::<Result<_, _>>()?;
         let mut writer = parts.writer;
-        writer.attach_metrics(sink_meter);
+        writer.attach_metrics(SinkMetricsCtx::new(sink_meter));
         let pool = SinkPool::spawn(
             Arc::new(writer),
             parts.shard_endpoints,
@@ -912,6 +912,20 @@ mod tests {
         }
     }
 
+    /// Records each [`SinkMetricsCtx::meter`] the builder hands it.
+    struct ProbeWriter {
+        seen: Arc<Mutex<Vec<Option<crate::metrics::Meter>>>>,
+    }
+    impl crate::sink::ShardWriter for ProbeWriter {
+        type Endpoint = ();
+        fn attach_metrics(&mut self, cx: SinkMetricsCtx) {
+            self.seen.lock().expect("probe lock").push(cx.meter);
+        }
+        async fn write_batch(&self, (): &(), _batch: &SealedBatch) -> Result<(), SinkError> {
+            Ok(())
+        }
+    }
+
     fn null_sink(shards: usize) -> SinkParts<NullWriter> {
         SinkParts::new(
             NullWriter,
@@ -951,6 +965,61 @@ mod tests {
             p.into_runtime(source).err(),
             Some(BuildError::MissingChains)
         ));
+    }
+
+    /// The builder hands a sink writer one context whose `Meter` is scoped to
+    /// the sink role and the declared `component_type`, and no `Meter` when
+    /// the sink keeps the default `"custom"`.
+    #[test]
+    fn a_sink_writer_receives_one_context_scoped_to_the_sink_role() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let cfg = test_config(1);
+        let name = cfg.pipeline.name.clone();
+        let parts = SinkParts::new(
+            ProbeWriter {
+                seen: Arc::clone(&seen),
+            },
+            vec![vec![()]],
+            SinkPoolConfig::default(),
+        )
+        .with_component_type("probe");
+        let _pipeline = Pipeline::from_config(cfg)
+            .expect("builder")
+            .sink(parts)
+            .expect("sink");
+        let meter = {
+            let mut seen = seen.lock().expect("probe lock");
+            assert_eq!(seen.len(), 1, "attach_metrics runs once per writer");
+            seen.pop()
+                .flatten()
+                .expect("a declared component_type scopes a Meter")
+        };
+        let rendered = crate::metrics::render_local(|| {
+            meter.counter("probe_total", &[]).increment(1);
+        });
+        let expected = format!(
+            "spate_probe_sink_probe_total{{pipeline=\"{name}\",component=\"sink\",component_type=\"probe\"}} 1"
+        );
+        assert!(
+            rendered.lines().any(|line| line == expected),
+            "missing `{expected}` in:\n{rendered}"
+        );
+
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let parts = SinkParts::new(
+            ProbeWriter {
+                seen: Arc::clone(&seen),
+            },
+            vec![vec![()]],
+            SinkPoolConfig::default(),
+        );
+        let _pipeline = Pipeline::from_config(test_config(1))
+            .expect("builder")
+            .sink(parts)
+            .expect("sink");
+        let seen = seen.lock().expect("probe lock");
+        assert_eq!(seen.len(), 1, "attach_metrics runs once per writer");
+        assert!(seen[0].is_none(), "the default `custom` type gets no Meter");
     }
 
     #[test]

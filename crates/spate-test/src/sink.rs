@@ -5,11 +5,10 @@ use bytes::{BufMut, Bytes, BytesMut};
 use spate_core::deser::Owned;
 use spate_core::error::{ErrorClass, SinkError};
 use spate_core::hash::FastMap;
-use spate_core::metrics::Meter;
 use spate_core::record::Record;
 use spate_core::sink::{
-    FrameCodecFactory, RowEncoder, SealedBatch, ShardWriter, SinkBundle, SinkParts, SinkPoolConfig,
-    endpoint_probe,
+    FrameCodecFactory, RowEncoder, SealedBatch, ShardWriter, SinkBundle, SinkMetricsCtx, SinkParts,
+    SinkPoolConfig, endpoint_probe,
 };
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -269,10 +268,10 @@ pub struct CaptureWriter {
 impl ShardWriter for CaptureWriter {
     type Endpoint = ReplicaTag;
 
-    fn attach_metrics(&mut self, meter: Option<Meter>) {
+    fn attach_metrics(&mut self, cx: SinkMetricsCtx) {
         // Exercise the connector-metrics seam: a family under the sink's
         // `spate_<component_type>_sink_*` namespace (e.g. `spate_capture_sink_*`).
-        if let Some(meter) = meter {
+        if let Some(meter) = cx.meter {
             meter.counter("attaches_total", &[]).increment(1);
         }
     }

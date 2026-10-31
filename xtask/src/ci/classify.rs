@@ -285,7 +285,8 @@ pub(crate) fn classify(
             out.advisories |= is_advisory_input(path);
             out.release_tooling |= is_release_tooling(path);
             out.macos |= is_macos_input(path);
-            // `kind_of` still files it as prose, so it selects no crate-scoped job.
+            // Outside `kind_of` because `scope` widens any crate-less Rust path
+            // to the whole workspace.
             out.rust |= path == SPATE_README;
             match kind_of(path) {
                 Kind::Skip => continue,

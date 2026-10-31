@@ -8,7 +8,7 @@ use crate::queue::BoxFuture;
 use crate::scripted::{Failure, Message, ScriptedQueue};
 use spate_core::clock::tokio::TestClock;
 use spate_core::feed::{FeedPark, wake_channel};
-use spate_core::metrics::Meter;
+use spate_core::metrics::{FeedOp, Meter};
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::oneshot;
 
@@ -4442,14 +4442,6 @@ const REFUSED: &str = "spate_sqs_feed_extensions_refused_total";
 const DROPPED: &str = "spate_sqs_feed_fails_dropped_total";
 const RETRIES: &str = "spate_sqs_feed_retries_total";
 const CODES: [&str; 3] = ["ReceiptHandleIsInvalid", "MessageNotInflight", "other"];
-const OPS: [&str; 6] = [
-    "receive",
-    "renew",
-    "acknowledge",
-    "fail",
-    "hand_back",
-    "publish",
-];
 
 /// The `Meter` the runtime hands the feed of `pipeline`.
 fn meter(pipeline: &str) -> Meter {
@@ -4478,16 +4470,20 @@ fn sample(rendered: &str, name: &str, labels: &[(&str, &str)]) -> f64 {
         .unwrap_or_else(|| panic!("no {name} sample with {labels:?} in:\n{rendered}"))
 }
 
-/// `retries_total` for each value of `op`, in [`OPS`] order.
+/// `retries_total` for each value of `op`, in [`FeedOp::ALL`] order.
 fn retries(rendered: &str) -> Vec<f64> {
-    OPS.iter()
-        .map(|op| sample(rendered, RETRIES, &[("op", op)]))
+    FeedOp::ALL
+        .iter()
+        .map(|op| sample(rendered, RETRIES, &[("op", op.label())]))
         .collect()
 }
 
 /// [`retries`] when only `op` counted, `n` times.
 fn retried_only(op: &str, n: f64) -> Vec<f64> {
-    OPS.iter().map(|o| if *o == op { n } else { 0.0 }).collect()
+    FeedOp::ALL
+        .iter()
+        .map(|o| if o.label() == op { n } else { 0.0 })
+        .collect()
 }
 
 /// Hold three units, renew them, and run the tick that extends them with
@@ -4528,7 +4524,7 @@ async fn extend_three(
 fn every_series_is_registered_at_attach() {
     let rendered = counted(|meter| async move {
         let (feed, _queue) = start(MINUTE);
-        feed.attach_metrics(Some(meter));
+        feed.attach_metrics(FeedMetricsCtx::new(Some(meter)));
     });
     let mut codes: Vec<String> = spate_test::metric_series(&rendered, REFUSED, &[])
         .iter()
@@ -4544,7 +4540,7 @@ fn every_series_is_registered_at_attach() {
     assert_eq!(retries(&rendered), [0.0; 6]);
     assert_eq!(
         spate_test::metric_series(&rendered, RETRIES, &[]).len(),
-        OPS.len()
+        FeedOp::ALL.len()
     );
 }
 
@@ -4570,7 +4566,7 @@ fn a_refused_extension_is_counted_by_its_code() {
     ] {
         let rendered = counted(|meter| async move {
             let (feed, queue) = start(MINUTE);
-            feed.attach_metrics(Some(meter));
+            feed.attach_metrics(FeedMetricsCtx::new(Some(meter)));
             let (receipts, _) = extend_three(&feed, &queue, vec![failure(1, code)]).await;
             let expected = if label == "other" {
                 Ok(())
@@ -4600,7 +4596,7 @@ fn a_refused_extension_is_counted_by_its_code() {
 fn refused_extensions_count_each_entry_and_a_lapsing_one_stays_held() {
     let rendered = counted(|meter| async move {
         let (feed, queue) = start(MINUTE);
-        feed.attach_metrics(Some(meter));
+        feed.attach_metrics(FeedMetricsCtx::new(Some(meter)));
         let (receipts, ticked) = extend_three(
             &feed,
             &queue,
@@ -4631,7 +4627,7 @@ fn refused_extensions_count_each_entry_and_a_lapsing_one_stays_held() {
 fn an_extension_refused_after_its_unit_was_settled_is_not_counted() {
     let rendered = counted(|meter| async move {
         let (feed, queue) = start_gated(MINUTE);
-        feed.attach_metrics(Some(meter));
+        feed.attach_metrics(FeedMetricsCtx::new(Some(meter)));
         let (waker, park) = wake_channel();
         feed.set_waker(waker);
         queue.inner.ready(Message::new("u"));
@@ -4662,7 +4658,7 @@ fn a_refused_fail_or_hand_back_entry_is_not_a_refused_extension() {
     for fail in [true, false] {
         let rendered = counted(|meter| async move {
             let (feed, queue) = start(MINUTE);
-            feed.attach_metrics(Some(meter));
+            feed.attach_metrics(FeedMetricsCtx::new(Some(meter)));
             let (waker, park) = wake_channel();
             feed.set_waker(waker);
             queue.ready(Message::new("u"));
@@ -4697,7 +4693,7 @@ fn a_fail_dropped_at_its_deadline_is_counted() {
     for (late, units) in [(Duration::ZERO, 1), (ms(1), 1), (ms(1), 2)] {
         let rendered = counted(|meter| async move {
             let (feed, queue, clock) = start_clocked(MINUTE);
-            feed.attach_metrics(Some(meter));
+            feed.attach_metrics(FeedMetricsCtx::new(Some(meter)));
             let (waker, park) = wake_channel();
             feed.set_waker(waker);
             for i in 0..units {
@@ -4745,7 +4741,7 @@ fn a_fail_batch_given_up_at_its_deadline_is_counted() {
         let lines = spate_test::capture_logs(tracing::Level::DEBUG, || {
             rendered = counted(|meter| async move {
                 let (feed, queue, clock) = start_clocked(MINUTE);
-                feed.attach_metrics(Some(meter));
+                feed.attach_metrics(FeedMetricsCtx::new(Some(meter)));
                 let (waker, park) = wake_channel();
                 feed.set_waker(waker);
                 queue.ready(Message::new("u"));
@@ -4783,7 +4779,7 @@ fn a_given_up_delete_or_hand_back_is_not_a_dropped_fail() {
         let lines = spate_test::capture_logs(tracing::Level::DEBUG, || {
             rendered = counted(|meter| async move {
                 let (feed, queue, clock) = start_clocked(MINUTE);
-                feed.attach_metrics(Some(meter));
+                feed.attach_metrics(FeedMetricsCtx::new(Some(meter)));
                 let (waker, park) = wake_channel();
                 feed.set_waker(waker);
                 queue.ready(Message::new("u"));
@@ -4836,7 +4832,7 @@ fn a_given_up_delete_or_hand_back_is_not_a_dropped_fail() {
 fn a_fail_given_up_by_a_close_or_answered_gone_is_not_a_deadline_drop() {
     let queued = counted(|meter| async move {
         let (feed, queue) = start(MINUTE);
-        feed.attach_metrics(Some(meter));
+        feed.attach_metrics(FeedMetricsCtx::new(Some(meter)));
         let (waker, park) = wake_channel();
         feed.set_waker(waker);
         queue.ready(Message::new("u"));
@@ -4852,7 +4848,7 @@ fn a_fail_given_up_by_a_close_or_answered_gone_is_not_a_deadline_drop() {
 
     let retried = counted(|meter| async move {
         let (feed, queue, clock) = start_clocked(MINUTE);
-        feed.attach_metrics(Some(meter));
+        feed.attach_metrics(FeedMetricsCtx::new(Some(meter)));
         let (waker, park) = wake_channel();
         feed.set_waker(waker);
         queue.ready(Message::new("u"));
@@ -4880,7 +4876,7 @@ fn a_fail_given_up_by_a_close_or_answered_gone_is_not_a_deadline_drop() {
 
     let gone = counted(|meter| async move {
         let (feed, queue) = start(MINUTE);
-        feed.attach_metrics(Some(meter));
+        feed.attach_metrics(FeedMetricsCtx::new(Some(meter)));
         let (receipts, _) =
             extend_three(&feed, &queue, vec![failure(0, "ReceiptHandleIsInvalid")]).await;
         assert_eq!(
@@ -4907,7 +4903,7 @@ fn calls_sent_again_are_counted_by_operation() {
 
     let rendered = counted(|meter| async move {
         let (feed, queue) = start(MINUTE);
-        feed.attach_metrics(Some(meter));
+        feed.attach_metrics(FeedMetricsCtx::new(Some(meter)));
         let (waker, _park) = wake_channel();
         feed.set_waker(waker);
         queue.ready(Message::new("u"));
@@ -4925,7 +4921,7 @@ fn calls_sent_again_are_counted_by_operation() {
 
     let rendered = counted(|meter| async move {
         let (feed, queue) = start(MINUTE);
-        feed.attach_metrics(Some(meter));
+        feed.attach_metrics(FeedMetricsCtx::new(Some(meter)));
         let held = hand_out_one_period_from_its_deadline(&feed, &queue).await;
         feed.renew(held.receipt).unwrap();
         let calls = queue.visibility().len();
@@ -4939,7 +4935,7 @@ fn calls_sent_again_are_counted_by_operation() {
 
     let rendered = counted(|meter| async move {
         let (feed, queue) = start(MINUTE);
-        feed.attach_metrics(Some(meter));
+        feed.attach_metrics(FeedMetricsCtx::new(Some(meter)));
         let (waker, park) = wake_channel();
         feed.set_waker(waker);
         queue.ready(Message::new("a"));
@@ -4992,7 +4988,7 @@ fn calls_sent_again_are_counted_by_operation() {
 fn a_call_sent_at_the_next_tick_or_failed_fatal_is_no_retry() {
     let rendered = counted(|meter| async move {
         let (feed, queue) = start(MINUTE);
-        feed.attach_metrics(Some(meter));
+        feed.attach_metrics(FeedMetricsCtx::new(Some(meter)));
         let (waker, park) = wake_channel();
         feed.set_waker(waker);
         queue.ready(Message::new("u"));
@@ -5016,20 +5012,20 @@ fn a_call_sent_at_the_next_tick_or_failed_fatal_is_no_retry() {
     let fatal = || CallError::fatal("AccessDenied");
     let rendered = counted(|meter| async move {
         let (feed, queue) = start(MINUTE);
-        feed.attach_metrics(Some(meter.clone()));
+        feed.attach_metrics(FeedMetricsCtx::new(Some(meter.clone())));
         queue.fail_next_receive(fatal());
         assert!(feed.receive(1).unwrap().is_empty());
         until("the receive fails", || feed.receive(1).is_err()).await;
 
         let (feed, queue) = start(MINUTE);
-        feed.attach_metrics(Some(meter.clone()));
+        feed.attach_metrics(FeedMetricsCtx::new(Some(meter.clone())));
         queue.fail_next_send_call(fatal());
         let mut published = feed.publish(Unit::new("p", "body"));
         until("the publish settles", || published.try_outcome().is_some()).await;
 
         for acknowledge in [true, false] {
             let (feed, queue) = start(MINUTE);
-            feed.attach_metrics(Some(meter.clone()));
+            feed.attach_metrics(FeedMetricsCtx::new(Some(meter.clone())));
             let (waker, park) = wake_channel();
             feed.set_waker(waker);
             queue.ready(Message::new("u"));
@@ -5058,7 +5054,7 @@ fn a_hand_back_carried_to_the_next_pass_counts_only_its_retries() {
         let calls = &calls;
         rendered = counted(|meter| async move {
             let (feed, queue) = start(MINUTE);
-            feed.attach_metrics(Some(meter));
+            feed.attach_metrics(FeedMetricsCtx::new(Some(meter)));
             let (waker, park) = wake_channel();
             feed.set_waker(waker);
             queue.ready(Message::new("u"));
@@ -5102,7 +5098,7 @@ fn counters_start_at_the_meter() {
         assert!(first.try_outcome().unwrap().is_ok());
         assert_eq!(queue.sends().len(), 2);
 
-        feed.attach_metrics(Some(meter));
+        feed.attach_metrics(FeedMetricsCtx::new(Some(meter)));
         queue.fail_next_send_call(CallError::retryable("InternalError"));
         let mut second = feed.publish(Unit::new("b", "body"));
         step(Duration::from_secs(1)).await;
@@ -5121,8 +5117,8 @@ fn a_second_meter_replaces_the_first() {
     let rendered = spate_test::render_metrics(|| {
         on_paused_runtime(async {
             let (feed, queue) = start(MINUTE);
-            feed.attach_metrics(Some(meter(&first)));
-            feed.attach_metrics(Some(meter(&second)));
+            feed.attach_metrics(FeedMetricsCtx::new(Some(meter(&first))));
+            feed.attach_metrics(FeedMetricsCtx::new(Some(meter(&second))));
             extend_three(&feed, &queue, vec![failure(0, "ReceiptHandleIsInvalid")]).await;
         });
     });
@@ -5146,7 +5142,7 @@ fn settle_retries_count_under_their_own_op() {
     let retryable = || CallError::retryable("InternalError");
     let rendered = counted(|meter| async move {
         let (feed, queue) = start(MINUTE);
-        feed.attach_metrics(Some(meter));
+        feed.attach_metrics(FeedMetricsCtx::new(Some(meter)));
         let (waker, park) = wake_channel();
         feed.set_waker(waker);
         queue.ready(Message::new("a"));
@@ -5185,7 +5181,7 @@ fn settle_retries_count_under_their_own_op() {
 fn only_the_receive_after_a_failure_is_a_retry() {
     let rendered = counted(|meter| async move {
         let (feed, queue) = start(MINUTE);
-        feed.attach_metrics(Some(meter));
+        feed.attach_metrics(FeedMetricsCtx::new(Some(meter)));
         let (waker, _park) = wake_channel();
         feed.set_waker(waker);
         queue.fail_next_receive(CallError::retryable("InternalError"));
@@ -5197,13 +5193,13 @@ fn only_the_receive_after_a_failure_is_a_retry() {
     assert_eq!(retries(&rendered), retried_only("receive", 1.0));
 }
 
-/// Pins that `attach_metrics(None)` stops the counting.
+/// Pins that `attach_metrics(FeedMetricsCtx::new(None))` stops the counting.
 #[test]
 fn no_meter_stops_the_counting() {
     let rendered = counted(|meter| async move {
         let (feed, queue) = start(MINUTE);
-        feed.attach_metrics(Some(meter));
-        feed.attach_metrics(None);
+        feed.attach_metrics(FeedMetricsCtx::new(Some(meter)));
+        feed.attach_metrics(FeedMetricsCtx::new(None));
         queue.fail_next_send_call(CallError::retryable("InternalError"));
         let mut published = feed.publish(Unit::new("p", "body"));
         step(Duration::from_secs(1)).await;

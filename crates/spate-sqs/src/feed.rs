@@ -25,7 +25,7 @@
 use crate::client;
 use crate::config::{BACKEND, SqsFeedConfig};
 use crate::error::{CallError, Class, SqsError};
-use crate::metrics::{Op, Refusal, SqsFeedMetrics};
+use crate::metrics::{Refusal, SqsFeedMetrics};
 use crate::queue::{
     BatchOutcome, DeleteEntry, Queue, ReceiveRequest, Received, SendEntry, UNIT_ATTRIBUTE,
     VisibilityEntry,
@@ -35,10 +35,10 @@ use spate_core::clock::tokio::{Clock, SystemClock};
 use spate_core::config::{FeedSection, redact};
 use spate_core::feed::{
     Confirmation, Confirmer, Delivery, Depth, DepthOf, DepthReading, Feed, FeedError,
-    FeedErrorKind, FeedWaker, Receipt, Unit, confirmation, depth_reading,
+    FeedErrorKind, FeedMetricsCtx, FeedWaker, Receipt, Unit, confirmation, depth_reading,
 };
 use spate_core::hash::FastMap;
-use spate_core::metrics::Meter;
+use spate_core::metrics::FeedOp;
 use spate_core::task::{self, TaskHandle};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -672,11 +672,12 @@ impl Feed for SqsFeed {
         st.waker = Some(waker);
     }
 
-    /// Resolve the feed's `spate_sqs_feed_*` handles under `meter`. A later
-    /// call replaces them, and `None` stops the counting. Events before the
-    /// first call are not counted.
-    fn attach_metrics(&self, meter: Option<Meter>) {
-        let metrics = meter.as_ref().map(SqsFeedMetrics::new);
+    /// Resolve the feed's `spate_sqs_feed_*` handles under `cx.meter`. A
+    /// later call replaces them, and a `None` meter stops the counting. Events
+    /// before the first call are not counted. The families have no partition
+    /// dimension, so `cx.per_partition_detail` changes nothing.
+    fn attach_metrics(&self, cx: FeedMetricsCtx) {
+        let metrics = cx.meter.as_ref().map(SqsFeedMetrics::new);
         *self
             .shared
             .metrics
@@ -1124,7 +1125,7 @@ async fn receive_task(shared: Arc<Shared>) {
             wait: settings.wait,
         };
         if std::mem::take(&mut retrying) {
-            shared.count(|m| m.retried(Op::Receive).increment(1));
+            shared.count(|m| m.retried(FeedOp::Receive).increment(1));
         }
         let sent_at = shared.now();
         let received = shared.queue.receive(request).await;
@@ -1358,7 +1359,7 @@ async fn extend_chunk(
         return Extended::Done;
     };
     if !once_more {
-        shared.count(|m| m.retried(Op::Renew).increment(1));
+        shared.count(|m| m.retried(FeedOp::Renew).increment(1));
     }
     let entries = chunk
         .iter()
@@ -1701,11 +1702,11 @@ impl Settling {
         }
     }
 
-    fn op(self) -> Op {
+    fn op(self) -> FeedOp {
         match self {
-            Settling::Delete => Op::Acknowledge,
-            Settling::Fail => Op::Fail,
-            Settling::HandBack => Op::HandBack,
+            Settling::Delete => FeedOp::Acknowledge,
+            Settling::Fail => FeedOp::Fail,
+            Settling::HandBack => FeedOp::HandBack,
         }
     }
 }
@@ -1833,7 +1834,7 @@ async fn publish_batch(shared: &Shared, entries: Vec<SendEntry>) -> Result<(), (
             return Err(());
         }
         if retried {
-            shared.count(|m| m.retried(Op::Publish).increment(1));
+            shared.count(|m| m.retried(FeedOp::Publish).increment(1));
         }
         match shared.queue.send_batch(entries.clone()).await {
             Ok(outcome) => {

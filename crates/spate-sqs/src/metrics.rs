@@ -6,7 +6,7 @@
 //! name per event.
 
 use crate::error::code_is;
-use spate_core::metrics::{Counter, Meter};
+use spate_core::metrics::{Counter, FeedOp, Meter};
 
 /// Why SQS refused to extend one entry, as the `code` label names it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -36,18 +36,6 @@ impl Refusal {
     }
 }
 
-/// A feed operation whose call the feed sends again, as the `op` label names
-/// it. The values are those of `spate_feed_errors_total`'s `op` label.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Op {
-    Receive,
-    Renew,
-    Acknowledge,
-    Fail,
-    HandBack,
-    Publish,
-}
-
 /// Pre-registered `spate_sqs_feed_*` handles.
 pub(crate) struct SqsFeedMetrics {
     refused_receipt_handle_is_invalid: Counter,
@@ -55,12 +43,8 @@ pub(crate) struct SqsFeedMetrics {
     refused_other: Counter,
     /// Fails the feed accepted and gave up unsent at their unit's deadline.
     pub(crate) fails_dropped: Counter,
-    retried_receive: Counter,
-    retried_renew: Counter,
-    retried_acknowledge: Counter,
-    retried_fail: Counter,
-    retried_hand_back: Counter,
-    retried_publish: Counter,
+    /// Calls sent again, one per [`FeedOp`], indexed by `op as usize`.
+    retried: [Counter; FeedOp::ALL.len()],
 }
 
 impl std::fmt::Debug for SqsFeedMetrics {
@@ -75,18 +59,13 @@ impl SqsFeedMetrics {
         let refused = |code: &'static str| {
             meter.counter("extensions_refused_total", &[("code", code.into())])
         };
-        let retried = |op: &'static str| meter.counter("retries_total", &[("op", op.into())]);
         SqsFeedMetrics {
             refused_receipt_handle_is_invalid: refused("ReceiptHandleIsInvalid"),
             refused_message_not_inflight: refused("MessageNotInflight"),
             refused_other: refused("other"),
             fails_dropped: meter.counter("fails_dropped_total", &[]),
-            retried_receive: retried("receive"),
-            retried_renew: retried("renew"),
-            retried_acknowledge: retried("acknowledge"),
-            retried_fail: retried("fail"),
-            retried_hand_back: retried("hand_back"),
-            retried_publish: retried("publish"),
+            retried: FeedOp::ALL
+                .map(|op| meter.counter("retries_total", &[("op", op.label().into())])),
         }
     }
 
@@ -100,14 +79,7 @@ impl SqsFeedMetrics {
     }
 
     /// The counter of calls sent again for `op`.
-    pub(crate) fn retried(&self, op: Op) -> &Counter {
-        match op {
-            Op::Receive => &self.retried_receive,
-            Op::Renew => &self.retried_renew,
-            Op::Acknowledge => &self.retried_acknowledge,
-            Op::Fail => &self.retried_fail,
-            Op::HandBack => &self.retried_hand_back,
-            Op::Publish => &self.retried_publish,
-        }
+    pub(crate) fn retried(&self, op: FeedOp) -> &Counter {
+        &self.retried[op as usize]
     }
 }

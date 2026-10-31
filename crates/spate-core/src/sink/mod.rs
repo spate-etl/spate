@@ -326,6 +326,41 @@ pub struct SealedBatch {
     pub dedup_token: String,
 }
 
+/// What the builder hands a sink writer for its own metric families, through
+/// [`ShardWriter::attach_metrics`].
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct SinkMetricsCtx {
+    /// Scoped `spate_<component_type>_sink_*` and pre-labeled with the
+    /// standard `pipeline`/`component`/`component_type`. `None` when the
+    /// sink's `component_type` cannot scope a family: the default `"custom"`
+    /// (reserved for pipeline-author metrics) or a reserved root opts out
+    /// silently, and a malformed value is logged and also yields `None`.
+    /// Declare a distinct `component_type` via
+    /// [`SinkParts::with_component_type`](crate::sink::SinkParts::with_component_type)
+    /// to receive a scope.
+    pub meter: Option<Meter>,
+}
+
+impl SinkMetricsCtx {
+    /// Context carrying `meter`. Connectors outside this crate construct it
+    /// here, as the struct is `#[non_exhaustive]`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use spate_core::metrics::Meter;
+    /// use spate_core::sink::SinkMetricsCtx;
+    ///
+    /// let cx = SinkMetricsCtx::new(Some(Meter::new("orders", "sink", "probe")));
+    /// assert!(cx.meter.is_some());
+    /// ```
+    #[must_use]
+    pub fn new(meter: Option<Meter>) -> Self {
+        SinkMetricsCtx { meter }
+    }
+}
+
 /// The I/O half of a sink connector: writes one sealed batch to one
 /// replica endpoint. Returning `Ok` is the durable-ack point; only then
 /// may the framework resolve the batch's acknowledgments.
@@ -333,20 +368,12 @@ pub trait ShardWriter: Send + Sync + 'static {
     /// A connected replica endpoint (e.g. one HTTP client per replica).
     type Endpoint: Send + Sync + 'static;
 
-    /// Receive a [`Meter`] scoped `spate_<component_type>_sink_*` for the sink's
-    /// own metric families, pre-labeled with the standard
-    /// `pipeline`/`component`/`component_type`. Called once by the builder
-    /// before the writer is shared across shard workers; resolve handles here
-    /// and store them (they are `Arc`-backed, so `write_batch`'s `&self` can
-    /// touch them). `None` when the sink's `component_type` cannot scope a
-    /// family: the default `"custom"` (reserved for pipeline-author metrics) or
-    /// a reserved root opts out silently, and a malformed value is logged and
-    /// also yields `None`. Declare a distinct `component_type` via
-    /// [`SinkParts::with_component_type`](crate::sink::SinkParts::with_component_type)
-    /// to receive a scope. Defaults to ignoring it.
-    fn attach_metrics(&mut self, meter: Option<Meter>) {
-        let _ = meter;
-    }
+    /// Receive the [`SinkMetricsCtx`] for the writer's own metric families.
+    /// Called once by the builder before the writer is shared across shard
+    /// workers; resolve handles here and store them (they are `Arc`-backed, so
+    /// `write_batch`'s `&self` can touch them). See [`SinkMetricsCtx::meter`]
+    /// for when it carries no `Meter`. The default ignores it.
+    fn attach_metrics(&mut self, _cx: SinkMetricsCtx) {}
 
     /// Write `batch` to `endpoint` durably.
     ///

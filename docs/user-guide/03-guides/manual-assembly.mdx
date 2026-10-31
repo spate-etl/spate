@@ -50,7 +50,7 @@ an assembly below it does not get for free.
   and a dashboard or an alert reading one needs a builder assembly.
 - **The sink writer's own `spate_<component_type>_sink_*` scope** — the
   `Meter` a connector registers its own families through. Attaching one is
-  public (`ShardWriter::attach_metrics`); the builder derives
+  public (`ShardWriter::attach_metrics`, through `SinkMetricsCtx::new`); the builder derives
   that namespace from the bundle's `component_type` and the writer's wiring
   position, so by hand you name it yourself with `Meter::with_namespace`, and
   a name that drifts from the connector's own docs takes its families with

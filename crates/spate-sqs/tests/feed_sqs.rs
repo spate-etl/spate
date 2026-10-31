@@ -21,6 +21,7 @@ use spate_core::feed::{
     Confirmation, Delivery, DepthOf, DepthReading, Feed, FeedError, FeedWaker, Receipt,
     STOP_RESERVE, Unit, wake_channel,
 };
+use spate_core::metrics::Meter;
 use spate_core::ops::chain_owned;
 use spate_core::pipeline::{ExitState, Pipeline, RuntimeOptions, ShutdownHandle};
 use spate_core::sink::{KeyHashRouter, SinkPoolConfig};
@@ -152,6 +153,10 @@ impl Feed for Recording {
 
     fn set_waker(&self, waker: FeedWaker) {
         self.inner.set_waker(waker);
+    }
+
+    fn attach_metrics(&self, meter: Option<Meter>) {
+        self.inner.attach_metrics(meter);
     }
 
     fn receive(&self, max: usize) -> Result<Vec<Delivery>, FeedError> {

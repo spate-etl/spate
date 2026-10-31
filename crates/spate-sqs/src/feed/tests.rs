@@ -5138,3 +5138,77 @@ fn a_second_meter_replaces_the_first() {
         );
     }
 }
+
+/// Pins that each settle operation counts its retries under its own `op`:
+/// one delete, two fail and three hand-back resends.
+#[test]
+fn settle_retries_count_under_their_own_op() {
+    let retryable = || CallError::retryable("InternalError");
+    let rendered = counted(|meter| async move {
+        let (feed, queue) = start(MINUTE);
+        feed.attach_metrics(Some(meter));
+        let (waker, park) = wake_channel();
+        feed.set_waker(waker);
+        queue.ready(Message::new("a"));
+        queue.ready(Message::new("b"));
+        queue.ready(Message::new("c"));
+        let got = receive_n(&feed, &park, 3).await;
+        queue.fail_next_delete_call(retryable());
+        feed.acknowledge(got[0].receipt).unwrap();
+        step(Duration::from_secs(1)).await;
+        until("the delete is sent", || queue.deletes().len() == 2).await;
+        for _ in 0..2 {
+            queue.fail_next_visibility_call(retryable());
+        }
+        feed.fail(got[1].receipt, "unreadable").unwrap();
+        step(Duration::from_secs(1)).await;
+        until("the fail is sent", || {
+            handed_back(&queue.visibility()).len() == 3
+        })
+        .await;
+        for _ in 0..3 {
+            queue.fail_next_visibility_call(retryable());
+        }
+        feed.hand_back(got[2].receipt).unwrap();
+        step(Duration::from_secs(2)).await;
+        until("the hand-back is sent", || {
+            handed_back(&queue.visibility()).len() == 7
+        })
+        .await;
+    });
+    assert_eq!(retries(&rendered), [0.0, 0.0, 1.0, 2.0, 3.0, 0.0]);
+}
+
+/// Pins that a receive counts as a retry only when it follows a failed one:
+/// the polls after a retried receive succeeds are not counted.
+#[test]
+fn only_the_receive_after_a_failure_is_a_retry() {
+    let rendered = counted(|meter| async move {
+        let (feed, queue) = start(MINUTE);
+        feed.attach_metrics(Some(meter));
+        let (waker, _park) = wake_channel();
+        feed.set_waker(waker);
+        queue.fail_next_receive(CallError::retryable("InternalError"));
+        assert!(feed.receive(1).unwrap().is_empty());
+        until("the first receive fails", || queue.receives().len() == 1).await;
+        step(Duration::from_secs(60)).await;
+        assert!(queue.receives().len() >= 3, "{}", queue.receives().len());
+    });
+    assert_eq!(retries(&rendered), retried_only("receive", 1.0));
+}
+
+/// Pins that `attach_metrics(None)` stops the counting.
+#[test]
+fn no_meter_stops_the_counting() {
+    let rendered = counted(|meter| async move {
+        let (feed, queue) = start(MINUTE);
+        feed.attach_metrics(Some(meter));
+        feed.attach_metrics(None);
+        queue.fail_next_send_call(CallError::retryable("InternalError"));
+        let mut published = feed.publish(Unit::new("p", "body"));
+        step(Duration::from_secs(1)).await;
+        assert!(published.try_outcome().unwrap().is_ok());
+        assert_eq!(queue.sends().len(), 2);
+    });
+    assert_eq!(retries(&rendered), [0.0; 6]);
+}

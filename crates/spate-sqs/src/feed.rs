@@ -1391,7 +1391,8 @@ async fn extend_chunk(
                         if refusal.takes_unit() {
                             h.gone = true;
                         } else {
-                            // It lapses at its own deadline.
+                            // It keeps its deadline until the next tick
+                            // extends it.
                             tracing::debug!(
                                 code = %failure.code,
                                 "SQS refused to extend a held unit"

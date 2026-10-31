@@ -14,7 +14,7 @@ use spate_core::backpressure::InflightBudget;
 use spate_core::checkpoint::AckRef;
 use spate_core::deser::{Deserializer, EmitRecord, RecFamily};
 use spate_core::error::{DeserError, ErrorPolicy, SinkError};
-use spate_core::ops::{ChunkConfig, PushOutcome, RunnableChain, SinkCtx, chain};
+use spate_core::ops::{ChunkConfig, PushOutcome, RunnableChain, SplitTarget, chain};
 use spate_core::record::{PartitionId, RawPayload, Record, RecordMeta};
 use spate_core::sink::{EncodedChunk, RowEncoder, ShardRouter, shard_queues};
 use spate_core::source::PayloadBatch;
@@ -346,12 +346,12 @@ pub(crate) fn two_branch_rig() -> Rig {
     let b0 = split.add::<RowF<0>, _, _>(
         TagEncoder::<0>,
         ToShardZero,
-        SinkCtx::new("b0".into(), q0, Arc::clone(&budget)).with_chunk(cfg),
+        SplitTarget::new("b0".into(), q0, Arc::clone(&budget)).with_chunk(cfg),
     );
     let b1 = split.add::<RowF<1>, _, _>(
         TagEncoder::<1>,
         ToShardZero,
-        SinkCtx::new("b1".into(), q1, Arc::clone(&budget)).with_chunk(cfg),
+        SplitTarget::new("b1".into(), q1, Arc::clone(&budget)).with_chunk(cfg),
     );
     let chain = split
         .route(move |e: LogEvent<'_>, out| match e.body[0] {
@@ -386,22 +386,22 @@ pub(crate) fn four_branch_rig(tags: Tags) -> Rig {
     let b0 = split.add::<RowF<0>, _, _>(
         TagEncoder::<0>,
         ToShardZero,
-        SinkCtx::new("b0".into(), q0, Arc::clone(&budget)).with_chunk(cfg),
+        SplitTarget::new("b0".into(), q0, Arc::clone(&budget)).with_chunk(cfg),
     );
     let b1 = split.add::<RowF<1>, _, _>(
         TagEncoder::<1>,
         ToShardZero,
-        SinkCtx::new("b1".into(), q1, Arc::clone(&budget)).with_chunk(cfg),
+        SplitTarget::new("b1".into(), q1, Arc::clone(&budget)).with_chunk(cfg),
     );
     let b2 = split.add::<RowF<2>, _, _>(
         TagEncoder::<2>,
         ToShardZero,
-        SinkCtx::new("b2".into(), q2, Arc::clone(&budget)).with_chunk(cfg),
+        SplitTarget::new("b2".into(), q2, Arc::clone(&budget)).with_chunk(cfg),
     );
     let b3 = split.add::<RowF<3>, _, _>(
         TagEncoder::<3>,
         ToShardZero,
-        SinkCtx::new("b3".into(), q3, Arc::clone(&budget)).with_chunk(cfg),
+        SplitTarget::new("b3".into(), q3, Arc::clone(&budget)).with_chunk(cfg),
     );
     let chain = split
         .route(move |e: LogEvent<'_>, out| match e.body[0] {

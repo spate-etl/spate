@@ -66,7 +66,7 @@ use crate::framing::FramingContract;
 use crate::metrics::{
     ComponentLabels, Meter, MetricRole, MetricsHandle, SharedString, SinkShardMetrics,
 };
-use crate::ops::{ChunkConfig, RunnableChain, SinkCtx};
+use crate::ops::{ChunkConfig, RunnableChain, SplitTarget};
 use crate::pipeline::ExitReport;
 use crate::sink::{
     DrainReport, ShardQueues, ShardWriter, SinkBundle, SinkDrainFn, SinkFailures, SinkPool,
@@ -185,7 +185,7 @@ impl ChainCtx {
     /// Panics if no sink was installed under `name`. The chain factory runs
     /// once per thread, on the cold path, before any data flows.
     #[must_use]
-    pub fn sink(&self, name: &str) -> SinkCtx {
+    pub fn sink(&self, name: &str) -> SplitTarget {
         let (_, queues, chunk) = self
             .named
             .iter()
@@ -194,7 +194,8 @@ impl ChainCtx {
                 let known: Vec<&str> = self.named.iter().map(|(n, _, _)| n.as_str()).collect();
                 panic!("ChainCtx::sink: no sink named {name:?} (installed sinks: {known:?})")
             });
-        SinkCtx::new(name.to_string(), queues.clone(), Arc::clone(&self.budget)).with_chunk(*chunk)
+        SplitTarget::new(name.to_string(), queues.clone(), Arc::clone(&self.budget))
+            .with_chunk(*chunk)
     }
 
     /// The **first** installed sink's resolved terminal-stage chunking, the

@@ -10,7 +10,9 @@ use super::chain::{
     TypedChain,
 };
 use super::handoff::{ChunkConfig, SinkHandoff};
-use super::split::{ErasedBranch, Sink, SinkCtx, SplitEmitter, SplitTerminal, new_branch};
+use super::split::{
+    ErasedBranch, SplitBranch, SplitEmitter, SplitTarget, SplitTerminal, new_branch,
+};
 use super::{Collector, Emitter, RunnableChain};
 use crate::backpressure::InflightBudget;
 use crate::deser::{Deserializer, Owned, RecFamily};
@@ -515,10 +517,10 @@ impl<DF: RecFamily, CurF: RecFamily, D, P> ChainBuilder<DF, CurF, D, P> {
     /// exactly one of several typed sink branches (each its own
     /// table/schema/encoder), declared with [`SplitBuilder::add`] and
     /// dispatched by the closure passed to [`SplitBuilder::route`]. Each
-    /// branch's chunking comes from its own [`SinkCtx`](crate::ops::SinkCtx)
-    /// (resolved from that sink's per-name YAML `chunk:` block, or
-    /// `SinkOptions::with_chunk`, or the default), so a split tunes each
-    /// destination independently. `unmatched` is the policy for a record that
+    /// branch's chunking comes from its own
+    /// [`SplitTarget`](crate::ops::SplitTarget) (resolved from that sink's
+    /// per-name YAML `chunk:` block, or `SinkOptions::with_chunk`, or the
+    /// default), so a split tunes each destination independently. `unmatched` is the policy for a record that
     /// reaches no branch. [`ErrorPolicy::Fail`] (the operator default) stops
     /// the pipeline; [`ErrorPolicy::Skip`] drops it and counts
     /// `spate_operator_records_dropped_total{reason="unrouted"}`.
@@ -736,13 +738,13 @@ impl<DF: RecFamily, CurF: RecFamily, D, P> std::fmt::Debug for SplitBuilder<DF, 
 
 impl<DF: RecFamily, CurF: RecFamily, D, P> SplitBuilder<DF, CurF, D, P> {
     /// Declare one destination branch of family `F` and return its typed,
-    /// `Copy` [`Sink<F>`] handle. `sink` comes from
+    /// `Copy` [`SplitBranch<F>`] handle. `sink` comes from
     /// [`ChainCtx::sink`](crate::pipeline::ChainCtx::sink); `encoder`/`router`
     /// are that table's, exactly as for [`ChainBuilder::sink`]. The declaration
     /// order fixes the handle indices; call once per destination, then
     /// [`route`](Self::route).
-    #[must_use = "a dropped Sink<F> handle leaves its branch permanently unreachable"]
-    pub fn add<F, E, R>(&mut self, encoder: E, router: R, sink: SinkCtx) -> Sink<F>
+    #[must_use = "a dropped SplitBranch<F> handle leaves its branch permanently unreachable"]
+    pub fn add<F, E, R>(&mut self, encoder: E, router: R, sink: SplitTarget) -> SplitBranch<F>
     where
         F: RecFamily + 'static,
         E: RowEncoder<F> + Clone + Send + 'static,
@@ -771,7 +773,7 @@ impl<DF: RecFamily, CurF: RecFamily, D, P> SplitBuilder<DF, CurF, D, P> {
             component,
         );
         self.branches.push(branch);
-        Sink::new(idx)
+        SplitBranch::new(idx)
     }
 
     /// Supply the routing closure (classify + extract per record in one

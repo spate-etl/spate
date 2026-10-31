@@ -124,7 +124,7 @@ pub use builder::{
 };
 pub use chain::{Emitter, Filter, FlatMap, Inspect, Map, StageLifecycle, TryMap, TypedChain};
 pub use handoff::{ChunkConfig, SinkHandoff};
-pub use split::{Sink, SinkCtx, SplitEmitter, SplitTerminal};
+pub use split::{SplitBranch, SplitEmitter, SplitTarget, SplitTerminal};
 
 use crate::deser::RecFamily;
 use crate::error::FatalError;

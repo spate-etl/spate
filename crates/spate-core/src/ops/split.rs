@@ -12,10 +12,11 @@
 //!
 //! Each branch is a [`SinkHandoff<F, BoxedEncoder<F>, BoxedRouter<F>>`](super::handoff::SinkHandoff).
 //! Its encoder and router are erased, so the branch's concrete type depends
-//! only on the destination family `F`. A [`Sink<F>`] handle (a plain index plus
-//! `F`) therefore names the exact concrete type, so [`SplitEmitter::emit`]
-//! recovers it with one `Any` downcast, then routes and encodes through the
-//! branch's boxed router/encoder straight into that branch's per-shard buffer.
+//! only on the destination family `F`. A [`SplitBranch<F>`] handle (a plain
+//! index plus `F`) therefore names the exact concrete type, so
+//! [`SplitEmitter::emit`] recovers it with one `Any` downcast, then routes and
+//! encodes through the branch's boxed router/encoder straight into that
+//! branch's per-shard buffer.
 //! That costs one virtual call each per record over the single-sink path's
 //! concrete types.
 //!
@@ -42,29 +43,29 @@ use std::time::Duration;
 /// The per-sink handles a split branch needs, resolved by name from the
 /// chain factory's [`ChainCtx`](crate::pipeline::ChainCtx) via
 /// [`ChainCtx::sink`](crate::pipeline::ChainCtx::sink). The bundle carries
-/// the sink's name, so [`SplitBuilder::add`](super::ChainBuilder) does not
+/// the sink's name, so [`SplitBuilder::add`](super::SplitBuilder::add) does not
 /// repeat it.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
-pub struct SinkCtx {
+pub struct SplitTarget {
     pub(crate) name: String,
     pub(crate) queues: ShardQueues,
     pub(crate) budget: Arc<InflightBudget>,
     /// This branch's resolved terminal-stage chunking (its per-sink YAML
     /// `chunk:` block, `SinkOptions::with_chunk`, or the default), applied by
-    /// [`SplitBuilder::add`](super::ChainBuilder).
+    /// [`SplitBuilder::add`](super::SplitBuilder::add).
     pub(crate) chunk: ChunkConfig,
 }
 
-impl SinkCtx {
+impl SplitTarget {
     /// Bundle a named sink's queues and the shared in-flight budget. Chunking
     /// starts at [`ChunkConfig::default`]; override it with
     /// [`with_chunk`](Self::with_chunk). (Builder pipelines do not call this;
     /// [`ChainCtx::sink`](crate::pipeline::ChainCtx::sink) hands out a fully
-    /// resolved `SinkCtx`.)
+    /// resolved `SplitTarget`.)
     #[must_use]
     pub fn new(name: String, queues: ShardQueues, budget: Arc<InflightBudget>) -> Self {
-        SinkCtx {
+        SplitTarget {
             name,
             queues,
             budget,
@@ -84,32 +85,34 @@ impl SinkCtx {
 /// A typed, `Copy` handle to one split branch, carrying a branch index plus
 /// the destination family, so [`SplitEmitter::emit`] both type-checks the row
 /// and recovers the branch with zero per-call lookup. Minted by
-/// [`SplitBuilder::add`](super::ChainBuilder).
-pub struct Sink<F: RecFamily> {
+/// [`SplitBuilder::add`](super::SplitBuilder::add).
+pub struct SplitBranch<F: RecFamily> {
     idx: usize,
     _f: PhantomData<fn() -> F>,
 }
 
-impl<F: RecFamily> Sink<F> {
+impl<F: RecFamily> SplitBranch<F> {
     pub(crate) fn new(idx: usize) -> Self {
-        Sink {
+        SplitBranch {
             idx,
             _f: PhantomData,
         }
     }
 }
 
-impl<F: RecFamily> Clone for Sink<F> {
+impl<F: RecFamily> Clone for SplitBranch<F> {
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl<F: RecFamily> Copy for Sink<F> {}
+impl<F: RecFamily> Copy for SplitBranch<F> {}
 
-impl<F: RecFamily> std::fmt::Debug for Sink<F> {
+impl<F: RecFamily> std::fmt::Debug for SplitBranch<F> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Sink").field("idx", &self.idx).finish()
+        f.debug_struct("SplitBranch")
+            .field("idx", &self.idx)
+            .finish()
     }
 }
 
@@ -239,10 +242,12 @@ where
 
 // ── The stack-borrowed emitter ──────────────────────────────────────────────
 
-/// Stack-borrowed emitter handed to a [`route`](super::ChainBuilder) closure.
+/// Stack-borrowed emitter handed to a [`route`](super::SplitBuilder::route)
+/// closure.
 /// [`emit`](Self::emit) routes one derived record to the branch named by a
-/// [`Sink<F>`] handle; a record that emits to no branch triggers the split's
-/// `unmatched` policy. One `Any` downcast per emit, no per-call name lookup.
+/// [`SplitBranch<F>`] handle; a record that emits to no branch triggers the
+/// split's `unmatched` policy. One `Any` downcast per emit, no per-call name
+/// lookup.
 pub struct SplitEmitter<'a> {
     branches: &'a mut [Box<dyn ErasedBranch>],
     meta: RecordMeta,
@@ -271,19 +276,24 @@ impl SplitEmitter<'_> {
     ///
     /// # Panics
     ///
-    /// Panics if `handle` does not name a branch of this split. That covers a
-    /// handle minted by a different split's builder, and one whose record
-    /// family does not match the branch at its index.
+    /// Panics if `handle`'s index lies past this split's branches, or its
+    /// record family does not match the branch at that index. A handle minted
+    /// by another split's builder whose index and family match a branch of
+    /// this split routes to that branch without a panic.
     #[inline]
-    pub fn emit<'buf, F: RecFamily + 'static>(&mut self, handle: Sink<F>, row: F::Rec<'buf>) {
+    pub fn emit<'buf, F: RecFamily + 'static>(
+        &mut self,
+        handle: SplitBranch<F>,
+        row: F::Rec<'buf>,
+    ) {
         let branch = self
             .branches
             .get_mut(handle.idx)
             .and_then(|b| b.as_any_mut().downcast_mut::<Branch<F>>())
             .expect(
-                "split branch/handle mismatch: this Sink<F> handle does not name a \
-                 branch of this split (a handle from another split, or the wrong \
-                 record family)",
+                "split branch/handle mismatch: this SplitBranch<F> handle does not \
+                 name a branch of this split (an index past its branches, or the \
+                 wrong record family)",
             );
         // A row emitted after a branch of this split latched is dropped, as a
         // `flat_map`'s later records are once one `SinkHandoff` latches. The

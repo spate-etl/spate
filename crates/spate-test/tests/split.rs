@@ -6,7 +6,7 @@
 use spate_core::config::PipelineConfig;
 use spate_core::deser::Owned;
 use spate_core::error::ErrorPolicy;
-use spate_core::ops::chain_owned;
+use spate_core::ops::{SplitBranch, chain_owned};
 use spate_core::pipeline::{ExitState, Pipeline, RuntimeOptions};
 use spate_core::record::PartitionId;
 use spate_core::sink::KeyHashRouter;
@@ -47,7 +47,8 @@ fn split_routes_to_named_sinks_and_commits_at_least_once() {
                 .with_metrics(ctx.pipeline.clone(), "main")
                 .split(ErrorPolicy::Skip);
             // Two branches over the same owned family, different capture sinks.
-            let a = split.add::<Owned<Vec<u8>>, _, _>(TestEncoder, KeyHashRouter, ctx.sink("a"));
+            let a: SplitBranch<Owned<Vec<u8>>> =
+                split.add(TestEncoder, KeyHashRouter, ctx.sink("a"));
             let b = split.add::<Owned<Vec<u8>>, _, _>(TestEncoder, KeyHashRouter, ctx.sink("b"));
             split
                 .route(move |row: Vec<u8>, out| match row.first() {

@@ -927,12 +927,12 @@ fn finish_failing_split(zero_q: ShardQueues, one_q: ShardQueues) -> Box<dyn Runn
     let zero = split.add::<Owned<Vec<u8>>, _, _>(
         SelectiveFinishEncoder::default(),
         ToZero,
-        SinkCtx::new("zero".into(), zero_q, Arc::clone(&budget)),
+        SplitTarget::new("zero".into(), zero_q, Arc::clone(&budget)),
     );
     let one = split.add::<Owned<Vec<u8>>, _, _>(
         SelectiveFinishEncoder::default(),
         ToZero,
-        SinkCtx::new("one".into(), one_q, budget),
+        SplitTarget::new("one".into(), one_q, budget),
     );
     split
         .route(move |b: Vec<u8>, out| {
@@ -1032,12 +1032,12 @@ fn a_branch_fatal_stops_the_other_branches() {
         let sub = split.add::<SubF, _, _>(
             SubEncoder,
             ToZero,
-            SinkCtx::new("sub".into(), sub_q, Arc::clone(&budget)),
+            SplitTarget::new("sub".into(), sub_q, Arc::clone(&budget)),
         );
         let key = split.add::<KeyF, _, _>(
             KeyEncoder,
             ToZero,
-            SinkCtx::new("key".into(), key_q, budget),
+            SplitTarget::new("key".into(), key_q, budget),
         );
         let mut c = split
             .route(move |e: SubEvent<'_>, out| {
@@ -1940,12 +1940,12 @@ fn split_routes_records_to_their_typed_branch() {
     let sub = split.add::<SubF, _, _>(
         SubEncoder,
         ToZero,
-        SinkCtx::new("sub".into(), sub_q, Arc::clone(&budget)),
+        SplitTarget::new("sub".into(), sub_q, Arc::clone(&budget)),
     );
     let key = split.add::<KeyF, _, _>(
         KeyEncoder,
         ToZero,
-        SinkCtx::new("key".into(), key_q, Arc::clone(&budget)),
+        SplitTarget::new("key".into(), key_q, Arc::clone(&budget)),
     );
     let mut c = split
         .route(move |e: LogEvent<'_>, out| {
@@ -1994,7 +1994,7 @@ fn split_unmatched_fail_stops_the_pipeline() {
     let sub = split.add::<SubF, _, _>(
         SubEncoder,
         ToZero,
-        SinkCtx::new("sub".into(), sub_q, budget),
+        SplitTarget::new("sub".into(), sub_q, budget),
     );
     let mut c = split
         .route(move |e: LogEvent<'_>, out| {
@@ -2015,6 +2015,86 @@ fn split_unmatched_fail_stops_the_pipeline() {
     assert_eq!(ack_rx.try_recv().unwrap().status, AckStatus::Failed);
 }
 
+/// Pins the type name a split handle's `Debug` output carries, reached through
+/// the `ops` re-export.
+#[test]
+fn a_split_handle_debug_names_its_type() {
+    let (sub_q, _rx) = shard_queues(1, 64);
+    let mut split = chain(LogDeser).split(ErrorPolicy::Skip);
+    let sub: crate::ops::SplitBranch<SubF> = split.add(
+        SubEncoder,
+        ToZero,
+        crate::ops::SplitTarget::new("sub".into(), sub_q, Arc::new(InflightBudget::new())),
+    );
+    assert_eq!(format!("{sub:?}"), "SplitBranch { idx: 0 }");
+}
+
+/// Pins that emitting a handle whose index lies past another split's branches
+/// panics with a message naming the handle type.
+#[test]
+#[should_panic(expected = "this SplitBranch<F> handle does not name a branch")]
+fn split_emit_panics_on_a_handle_from_another_split() {
+    let budget = Arc::new(InflightBudget::new());
+    let (a0_q, _a0_rx) = shard_queues(1, 64);
+    let (a1_q, _a1_rx) = shard_queues(1, 64);
+    let mut a = chain(LogDeser).split(ErrorPolicy::Skip);
+    let _a0 = a.add::<SubF, _, _>(
+        SubEncoder,
+        ToZero,
+        SplitTarget::new("a0".into(), a0_q, Arc::clone(&budget)),
+    );
+    let a1 = a.add::<SubF, _, _>(
+        SubEncoder,
+        ToZero,
+        SplitTarget::new("a1".into(), a1_q, Arc::clone(&budget)),
+    );
+
+    let (b_q, _b_rx) = shard_queues(1, 64);
+    let mut b = chain(LogDeser).split(ErrorPolicy::Skip);
+    let _b0 = b.add::<SubF, _, _>(
+        SubEncoder,
+        ToZero,
+        SplitTarget::new("b0".into(), b_q, budget),
+    );
+    let mut c = b
+        .route(move |e: LogEvent<'_>, out| out.emit(a1, SubEvent { chunk: e.body }))
+        .build();
+
+    let bufs = payloads(&["a1:x"]);
+    let (mut batch, _ack_rx) = TestBatch::new(&bufs);
+    let _ = c.push_batch(&mut batch, 0);
+}
+
+/// Pins that emitting a handle into a branch of another record family panics
+/// with a message naming the handle type.
+#[test]
+#[should_panic(expected = "this SplitBranch<F> handle does not name a branch")]
+fn split_emit_panics_on_a_handle_of_the_wrong_family() {
+    let budget = Arc::new(InflightBudget::new());
+    let (a_q, _a_rx) = shard_queues(1, 64);
+    let mut a = chain(LogDeser).split(ErrorPolicy::Skip);
+    let a0 = a.add::<SubF, _, _>(
+        SubEncoder,
+        ToZero,
+        SplitTarget::new("a0".into(), a_q, Arc::clone(&budget)),
+    );
+
+    let (b_q, _b_rx) = shard_queues(1, 64);
+    let mut b = chain(LogDeser).split(ErrorPolicy::Skip);
+    let _b0 = b.add::<KeyF, _, _>(
+        KeyEncoder,
+        ToZero,
+        SplitTarget::new("b0".into(), b_q, budget),
+    );
+    let mut c = b
+        .route(move |e: LogEvent<'_>, out| out.emit(a0, SubEvent { chunk: e.body }))
+        .build();
+
+    let bufs = payloads(&["a1:x"]);
+    let (mut batch, _ack_rx) = TestBatch::new(&bufs);
+    let _ = c.push_batch(&mut batch, 0);
+}
+
 #[test]
 fn split_holds_watermark_until_every_branch_is_written() {
     // A single source batch fans across two branches; the batch resolves
@@ -2028,12 +2108,12 @@ fn split_holds_watermark_until_every_branch_is_written() {
     let sub = split.add::<SubF, _, _>(
         SubEncoder,
         ToZero,
-        SinkCtx::new("sub".into(), sub_q, Arc::clone(&budget)),
+        SplitTarget::new("sub".into(), sub_q, Arc::clone(&budget)),
     );
     let key = split.add::<KeyF, _, _>(
         KeyEncoder,
         ToZero,
-        SinkCtx::new("key".into(), key_q, Arc::clone(&budget)),
+        SplitTarget::new("key".into(), key_q, Arc::clone(&budget)),
     );
     let mut c = split
         .route(move |e: LogEvent<'_>, out| {
@@ -2092,12 +2172,12 @@ fn split_one_branch_failure_fails_the_whole_batch() {
     let sub = split.add::<SubF, _, _>(
         SubEncoder,
         ToZero,
-        SinkCtx::new("sub".into(), sub_q, Arc::clone(&budget)),
+        SplitTarget::new("sub".into(), sub_q, Arc::clone(&budget)),
     );
     let key = split.add::<KeyF, _, _>(
         KeyEncoder,
         ToZero,
-        SinkCtx::new("key".into(), key_q, Arc::clone(&budget)),
+        SplitTarget::new("key".into(), key_q, Arc::clone(&budget)),
     );
     let mut c = split
         .route(move |e: LogEvent<'_>, out| {
@@ -2327,7 +2407,7 @@ fn split_unmatched_counts_a_fatal_only_under_the_fail_policy() {
         let sub = split.add::<SubF, _, _>(
             SubEncoder,
             ToZero,
-            SinkCtx::new("sub".into(), sub_q, Arc::new(InflightBudget::new())),
+            SplitTarget::new("sub".into(), sub_q, Arc::new(InflightBudget::new())),
         );
         let mut c = split
             .route(move |e: LogEvent<'_>, out| {
@@ -2356,7 +2436,7 @@ fn split_unmatched_counts_a_fatal_only_under_the_fail_policy() {
         let sub = split.add::<SubF, _, _>(
             SubEncoder,
             ToZero,
-            SinkCtx::new("sub".into(), sub_q, Arc::new(InflightBudget::new())),
+            SplitTarget::new("sub".into(), sub_q, Arc::new(InflightBudget::new())),
         );
         let mut c = split
             .route(move |e: LogEvent<'_>, out| {
@@ -3285,7 +3365,7 @@ fn split_branches_keep_their_queues_codec() {
     let sub = split.add::<SubF, _, _>(
         SubEncoder,
         ToZero,
-        SinkCtx::new(
+        SplitTarget::new(
             "sub".into(),
             sub_q.with_frame_codec(sub_codec),
             Arc::clone(&budget),
@@ -3294,7 +3374,7 @@ fn split_branches_keep_their_queues_codec() {
     let key = split.add::<KeyF, _, _>(
         KeyEncoder,
         ToZero,
-        SinkCtx::new(
+        SplitTarget::new(
             "key".into(),
             key_q.with_frame_codec(key_codec),
             Arc::clone(&budget),

@@ -242,7 +242,8 @@ where
 
 // ── The stack-borrowed emitter ──────────────────────────────────────────────
 
-/// Stack-borrowed emitter handed to a [`route`](super::ChainBuilder) closure.
+/// Stack-borrowed emitter handed to a [`route`](super::SplitBuilder::route)
+/// closure.
 /// [`emit`](Self::emit) routes one derived record to the branch named by a
 /// [`SplitBranch<F>`] handle; a record that emits to no branch triggers the
 /// split's `unmatched` policy. One `Any` downcast per emit, no per-call name
@@ -275,9 +276,10 @@ impl SplitEmitter<'_> {
     ///
     /// # Panics
     ///
-    /// Panics if `handle` does not name a branch of this split. That covers a
-    /// handle minted by a different split's builder, and one whose record
-    /// family does not match the branch at its index.
+    /// Panics if `handle`'s index lies past this split's branches, or its
+    /// record family does not match the branch at that index. A handle minted
+    /// by another split's builder whose index and family match a branch of
+    /// this split routes to that branch without a panic.
     #[inline]
     pub fn emit<'buf, F: RecFamily + 'static>(
         &mut self,
@@ -290,7 +292,7 @@ impl SplitEmitter<'_> {
             .and_then(|b| b.as_any_mut().downcast_mut::<Branch<F>>())
             .expect(
                 "split branch/handle mismatch: this SplitBranch<F> handle does not \
-                 name a branch of this split (a handle from another split, or the \
+                 name a branch of this split (an index past its branches, or the \
                  wrong record family)",
             );
         // A row emitted after a branch of this split latched is dropped, as a

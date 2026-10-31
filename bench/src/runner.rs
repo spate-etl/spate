@@ -277,12 +277,31 @@ struct Watchdog {
 }
 
 impl Watchdog {
-    /// Starts reporting `label` every `period` until the guard is dropped.
+    /// Starts reporting `label` every `period` of real time until the guard is
+    /// dropped.
     ///
-    /// Nothing is ever sent on the channel. The sender's lifetime is the
-    /// signal: dropping it disconnects the receiver, which ends the loop at
-    /// once rather than at the end of the period it is sitting in.
+    /// Nothing is sent on the channel. The sender's lifetime is the signal:
+    /// dropping it disconnects the receiver, which ends the loop at once rather
+    /// than at the end of the period it is sitting in.
     fn start<R>(period: Duration, label: String, report: R) -> Self
+    where
+        R: Fn(&str) + Send + 'static,
+    {
+        Self::start_on(period, label, report, wait_out_period)
+    }
+
+    /// Starts the reporting thread, with `wait` deciding when a period has
+    /// passed.
+    ///
+    /// `wait` returns `true` for each period that passed and `false` once the
+    /// receiver disconnects. `Drop` joins the thread after dropping the sender,
+    /// so a `wait` that ignores the disconnect hangs the drop.
+    fn start_on<R>(
+        period: Duration,
+        label: String,
+        report: R,
+        wait: fn(&mpsc::Receiver<()>, Duration) -> bool,
+    ) -> Self
     where
         R: Fn(&str) + Send + 'static,
     {
@@ -293,7 +312,7 @@ impl Watchdog {
         )]
         let thread = thread::spawn(move || {
             let mut periods: u32 = 0;
-            while let Err(mpsc::RecvTimeoutError::Timeout) = idle.recv_timeout(period) {
+            while wait(&idle, period) {
                 periods = periods.saturating_add(1);
                 report(&slow_line(&label, period.saturating_mul(periods)));
             }
@@ -315,6 +334,15 @@ impl Drop for Watchdog {
             let _ = thread.join();
         }
     }
+}
+
+/// Waits one `period` of real time and says whether it passed; `false` once the
+/// sender is dropped.
+fn wait_out_period(idle: &mpsc::Receiver<()>, period: Duration) -> bool {
+    matches!(
+        idle.recv_timeout(period),
+        Err(mpsc::RecvTimeoutError::Timeout)
+    )
 }
 
 /// The line an outstanding call earns.
@@ -362,7 +390,7 @@ fn hint(binary: &Path, args: &[String], why: &str) -> String {
 mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, mpsc};
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     use super::{PERIOD_MULTIPLE, Runner, SLOW_PERIOD, Watchdog, hint, slow_line, slow_period};
     use crate::fingerprint::BuildFingerprint;
@@ -397,52 +425,74 @@ mod tests {
         assert!(message.contains("--list-cases"), "{message}");
     }
 
-    /// The reported figure is the threshold crossed, so the count is one-sided:
-    /// a loaded machine may deliver fewer reports than the elapsed time allows,
-    /// and asserting an exact number would make this a test of the scheduler.
-    #[test]
-    fn a_call_that_outlives_a_period_is_reported_once_per_period() {
+    /// How long a test waits for a report it has released before failing.
+    const DEADLINE: Duration = Duration::from_secs(10);
+
+    /// A wait that passes one period for each `()` a test sends with
+    /// [`release`], and returns `false` once the guard drops its sender.
+    fn released(idle: &mpsc::Receiver<()>, _: Duration) -> bool {
+        idle.recv().is_ok()
+    }
+
+    /// Lets one period pass on a watchdog started with [`released`].
+    fn release(watchdog: &Watchdog) {
+        watchdog
+            .done
+            .as_ref()
+            .expect("a live watchdog holds its sender")
+            .send(())
+            .expect("the watchdog thread is waiting");
+    }
+
+    /// A watchdog on [`released`] whose reports arrive on the returned
+    /// receiver.
+    fn watched(label: &str) -> (Watchdog, mpsc::Receiver<String>) {
         let (tx, rx) = mpsc::channel();
-        let watchdog = Watchdog::start(
+        let watchdog = Watchdog::start_on(
             Duration::from_millis(20),
-            "base decode_wall --run decode/small".to_owned(),
+            label.to_owned(),
             move |line: &str| {
                 let _ = tx.send(line.to_owned());
             },
+            released,
         );
-        std::thread::sleep(Duration::from_millis(110));
+        (watchdog, rx)
+    }
+
+    /// Each period that passes earns one report, and its figure is the period
+    /// times the count so far.
+    #[test]
+    fn a_call_that_outlives_a_period_is_reported_once_per_period() {
+        let (watchdog, rx) = watched("base decode_wall --run decode/small");
+
+        release(&watchdog);
+        assert_eq!(
+            rx.recv_timeout(DEADLINE).as_deref(),
+            Ok("SLOW [> 0.020s] base decode_wall --run decode/small")
+        );
+        release(&watchdog);
+        release(&watchdog);
+        assert_eq!(
+            rx.recv_timeout(DEADLINE).as_deref(),
+            Ok("SLOW [> 0.040s] base decode_wall --run decode/small")
+        );
+        assert_eq!(
+            rx.recv_timeout(DEADLINE).as_deref(),
+            Ok("SLOW [> 0.060s] base decode_wall --run decode/small")
+        );
         drop(watchdog);
 
-        let lines: Vec<String> = rx.iter().collect();
-        assert!(!lines.is_empty(), "no report after five periods");
-        assert_eq!(
-            lines[0],
-            "SLOW [> 0.020s] base decode_wall --run decode/small"
-        );
-        for (index, line) in lines.iter().enumerate() {
-            let elapsed = 0.020 * (index + 1) as f64;
-            assert!(
-                line.starts_with(&format!("SLOW [> {elapsed:.3}s] ")),
-                "report {index} is {line}"
-            );
-        }
+        assert_eq!(rx.try_recv(), Err(mpsc::TryRecvError::Disconnected));
     }
 
     /// What makes the watchdog safe to arm on every call: a child that answers
     /// promptly is never mentioned.
     #[test]
     fn a_call_that_returns_before_the_first_period_is_never_reported() {
-        let (tx, rx) = mpsc::channel();
-        let watchdog = Watchdog::start(
-            Duration::from_secs(5),
-            "base decode_wall --list-cases".to_owned(),
-            move |line: &str| {
-                let _ = tx.send(line.to_owned());
-            },
-        );
+        let (watchdog, rx) = watched("base decode_wall --list-cases");
         drop(watchdog);
 
-        assert!(rx.try_recv().is_err());
+        assert_eq!(rx.try_recv(), Err(mpsc::TryRecvError::Disconnected));
     }
 
     /// A `Drop` that joined before dropping the sender would wait for a thread
@@ -452,23 +502,48 @@ mod tests {
     fn dropping_the_watchdog_stops_and_joins_its_thread() {
         let marker = Arc::new(());
         let held = Arc::clone(&marker);
-        let watchdog = Watchdog::start(Duration::from_millis(5), "base t --run c".to_owned(), {
-            move |_: &str| {
+        let (tx, rx) = mpsc::channel();
+        let watchdog = Watchdog::start_on(
+            Duration::from_millis(5),
+            "base t --run c".to_owned(),
+            move |line: &str| {
                 let _ = &held;
-            }
-        });
-        std::thread::sleep(Duration::from_millis(20));
+                let _ = tx.send(line.to_owned());
+            },
+            released,
+        );
+        release(&watchdog);
+        assert!(rx.recv_timeout(DEADLINE).is_ok());
         drop(watchdog);
 
         assert_eq!(Arc::strong_count(&marker), 1);
     }
 
+    /// The production wait reports a call once a real period has passed.
+    #[test]
+    fn the_real_wait_reports_a_call_that_outlives_its_period() {
+        let (tx, rx) = mpsc::channel();
+        let watchdog = Watchdog::start(
+            Duration::from_millis(1),
+            "base t --run c".to_owned(),
+            move |line: &str| {
+                let _ = tx.send(line.to_owned());
+            },
+        );
+
+        assert_eq!(
+            rx.recv_timeout(DEADLINE).as_deref(),
+            Ok("SLOW [> 0.001s] base t --run c")
+        );
+        drop(watchdog);
+    }
+
     /// The watchdog wraps the call rather than changing it: an answer parses as
-    /// it did before, and a period nothing reaches costs nothing.
+    /// it did before, and the guard ends with the call rather than at the end of
+    /// its period.
     #[test]
     fn a_prompt_answer_parses_exactly_as_it_did_unwatched() {
-        let runner = stub(Duration::from_secs(5));
-        let started = Instant::now();
+        let runner = stub(Duration::from_secs(3600));
         let answer: ProtocolVersion = runner
             .ask(&[
                 "-c".to_owned(),
@@ -477,10 +552,6 @@ mod tests {
             .expect("the stub answers the protocol");
 
         assert_eq!(answer.protocol, PROTOCOL_VERSION);
-        // Well inside the 5s period: the failure this rules out is a guard that
-        // waits the period out instead of disconnecting, and the margin is wide
-        // enough that a loaded machine is not what fails it.
-        assert!(started.elapsed() < Duration::from_secs(3));
     }
 
     #[test]

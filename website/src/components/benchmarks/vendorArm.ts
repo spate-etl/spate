@@ -21,7 +21,7 @@ export function useVendorArm(): VendorArm | null {
   return {row, entrant, env, basePath: data.basePath};
 }
 
-/** The comparability group with the most arms, and its rows in the data's order. */
+/** The comparability group with the most rows, the first one seen on a tie, and its rows in the data's order. */
 export function useRichestGroup(): {rows: Row[]; entrants: Entrant[]; environments: Env[]; basePath: string; groupKey: string | null; attempts: Attempt[]} {
   const data = (usePluginData('bench-data') as Data | undefined) ?? EMPTY;
   const rows = data.rows as Row[];

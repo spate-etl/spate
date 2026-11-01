@@ -99,6 +99,12 @@ enum Entry {
     },
 }
 
+/// Negative entries the cache holds at most. Schema ids are wire data, so
+/// without a bound a producer naming distinct unknown ids grows the map that
+/// every write clones under the lock. A full cache drops its oldest negative
+/// entry, which costs at most one more registry fetch for that id.
+const MAX_NEGATIVE_ENTRIES: usize = 1024;
+
 /// An immutable point-in-time view of the cache map.
 ///
 /// A deserializer keeps one of these as a lock-free local memo and refreshes
@@ -181,7 +187,7 @@ impl SchemaCache {
         match map.get(&id) {
             Some(Entry::Ready(schema)) => Some(Lookup::Ready(Arc::clone(schema))),
             Some(Entry::Failed { reason, at }) => {
-                if clock.now().saturating_duration_since(*at) >= ttl {
+                if Self::expired(*at, clock.now(), ttl) {
                     // Expired: treat as absent so the caller re-fetches.
                     None
                 } else {
@@ -192,9 +198,26 @@ impl SchemaCache {
         }
     }
 
+    fn expired(at: Instant, now: Instant, ttl: Duration) -> bool {
+        now.saturating_duration_since(at) >= ttl
+    }
+
+    /// A copy of `map` for a writer to mutate, without the negative entries
+    /// that have expired.
+    fn live_copy(&self, map: &QualityMap<u32, Entry>) -> QualityMap<u32, Entry> {
+        let now = self.clock.now();
+        map.iter()
+            .filter(|(_, entry)| match entry {
+                Entry::Ready(_) => true,
+                Entry::Failed { at, .. } => !Self::expired(*at, now, self.negative_ttl),
+            })
+            .map(|(id, entry)| (*id, entry.clone()))
+            .collect()
+    }
+
     pub(crate) fn insert_ready(&self, schema: CompiledSchema) {
         let mut guard = self.entries.write().expect("schema cache lock");
-        let mut map = (**guard).clone();
+        let mut map = self.live_copy(&guard);
         map.insert(schema.id, Entry::Ready(Arc::new(schema)));
         *guard = Arc::new(map);
     }
@@ -209,7 +232,18 @@ impl SchemaCache {
         if matches!(guard.get(&id), Some(Entry::Ready(_))) {
             return;
         }
-        let mut map = (**guard).clone();
+        let mut map = self.live_copy(&guard);
+        let negative = || {
+            map.iter().filter_map(|(id, entry)| match entry {
+                Entry::Failed { at, .. } => Some((*id, *at)),
+                Entry::Ready(_) => None,
+            })
+        };
+        if !map.contains_key(&id) && negative().count() >= MAX_NEGATIVE_ENTRIES {
+            if let Some((oldest, _)) = negative().min_by_key(|(_, at)| *at) {
+                map.remove(&oldest);
+            }
+        }
         map.insert(
             id,
             Entry::Failed {
@@ -316,6 +350,49 @@ mod tests {
             matches!(cache.lookup(&mut memo, 9), Lookup::Missing),
             "at the TTL"
         );
+    }
+
+    /// A negative entry past its TTL leaves the map at the next write, so
+    /// unknown schema ids named by records cannot grow the cache without
+    /// bound.
+    #[test]
+    fn expired_negative_entries_leave_the_map() {
+        let ttl = Duration::from_secs(30);
+        let clock = TestClock::frozen();
+        let cache = SchemaCache::new(ttl, SyncClock::new(clock.clone()));
+        cache.insert_ready(compiled(u32::MAX));
+        for id in 0..10_000u32 {
+            cache.insert_failed(id, format!("schema {id} unknown"));
+            clock.advance(ttl);
+        }
+        let held = cache.entries.read().expect("schema cache lock").len();
+        assert_eq!(held, 2, "the Ready schema and the newest negative entry");
+        cache.insert_ready(compiled(1));
+        let held = cache.entries.read().expect("schema cache lock").len();
+        assert_eq!(held, 2, "a Ready insert drops the expired negative entry");
+    }
+
+    /// Past [`MAX_NEGATIVE_ENTRIES`] live negative entries, a new one replaces
+    /// the oldest, and a Ready schema is never the one dropped.
+    #[test]
+    fn negative_entries_are_capped_oldest_first() {
+        let clock = TestClock::frozen();
+        let cache = SchemaCache::new(Duration::from_secs(3600), SyncClock::new(clock.clone()));
+        cache.insert_ready(compiled(u32::MAX));
+        let cap = u32::try_from(MAX_NEGATIVE_ENTRIES).unwrap();
+        for id in 0..=cap {
+            cache.insert_failed(id, format!("schema {id} unknown"));
+            clock.advance(Duration::from_millis(1));
+        }
+        let held = cache.entries.read().expect("schema cache lock").len();
+        assert_eq!(held, MAX_NEGATIVE_ENTRIES + 1);
+        assert!(matches!(cache.get(0), Lookup::Missing), "the oldest is dropped");
+        assert!(matches!(cache.get(1), Lookup::Failed(_)));
+        assert!(matches!(cache.get(cap), Lookup::Failed(_)));
+        assert!(matches!(cache.get(u32::MAX), Lookup::Ready(_)));
+        // Refreshing an id already held keeps the count and drops nothing.
+        cache.insert_failed(1, "schema 1 unknown".into());
+        assert!(matches!(cache.get(2), Lookup::Failed(_)));
     }
 
     #[test]

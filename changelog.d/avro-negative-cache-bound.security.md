@@ -1,0 +1,3 @@
+**Unknown schema ids no longer grow the schema cache without bound** (`spate-avro`)
+
+The schema cache removes a negative entry once its `negative_cache_ttl` has passed, and holds at most 1,024 negative entries, dropping the oldest for a new one. In previous versions an expired negative entry stayed in the map, so each distinct schema id the registry did not know added an entry for the life of the process. Each new entry also copied the whole map under the lock that schema lookups wait on, so a producer writing records with many distinct unknown ids to a Confluent wire-format topic could slow schema resolution for the pipeline. A dropped entry costs at most one more registry fetch for that id. Records whose schema is already cached were not affected.

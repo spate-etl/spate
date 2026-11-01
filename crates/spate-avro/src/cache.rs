@@ -149,6 +149,7 @@ impl SchemaCache {
         CacheSnapshot(Arc::new(QualityMap::default()))
     }
 
+    #[inline]
     fn snapshot(&self) -> CacheSnapshot {
         CacheSnapshot(Arc::clone(&self.entries.read().expect("schema cache lock")))
     }
@@ -168,8 +169,8 @@ impl SchemaCache {
     /// miss, or a `Failed`/expired memo answer, the memo is refreshed once (a
     /// single `Arc` clone under the read lock) and re-evaluated, so a
     /// since-published schema or an expired negative entry is always observed.
-    // Per-record path: the hint keeps it inlinable into the decoder whichever
-    // codegen unit the partitioner puts this module in.
+    // This and `snapshot` are on the per-record path. The hints keep them
+    // inlinable into the decoder whichever codegen unit holds this module.
     #[inline]
     pub(crate) fn lookup(&self, memo: &mut CacheSnapshot, id: u32) -> Lookup {
         if let Some(ready @ Lookup::Ready(_)) =

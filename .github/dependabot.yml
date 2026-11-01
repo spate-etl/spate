@@ -295,7 +295,7 @@ updates:
     # candidates appear.
     ignore:
       - dependency-name: "*"
-        versions: [">= 21.0.0, < 21.2.0"]
+        versions: [">= 22.0.0, < 22.2.0"]
   - package-ecosystem: docker
     directory: "/ci/s3/garage"
     schedule:

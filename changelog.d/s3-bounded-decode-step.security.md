@@ -1,0 +1,3 @@
+**A small compressed object no longer exhausts memory** (`spate-s3`)
+
+The S3 source decodes a gzip or zstd chunk in bounded steps and hands the records of each step to the pipeline before decoding the next. In previous versions one chunk, up to `source.s3.chunk_bytes` of compressed input, was decoded in full and every record it produced was queued at once. An object of a few kilobytes that expands to many short records could hold gigabytes of memory and stop the pipeline process. Anyone able to write an object under the source's prefix could trigger this, and the backfill lister read the object again on every pass. Uncompressed objects were not affected.

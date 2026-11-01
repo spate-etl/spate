@@ -393,19 +393,10 @@ impl Forge for Gh<'_> {
     }
 
     fn open_security_issues(&self, milestone: &str) -> Result<Vec<Issue>, Error> {
-        let milestones = self.capture(&[
-            "api",
-            "--paginate",
-            "--slurp",
-            "repos/{owner}/{repo}/milestones?state=all&per_page=100",
-        ])?;
-        let Some(number) = milestone_number(&milestones, milestone)? else {
-            return Ok(Vec::new());
-        };
-        let path = format!(
-            "repos/{{owner}}/{{repo}}/issues?milestone={number}&labels={SECURITY_LABEL}&state=open&per_page=100"
-        );
-        parse_issues(&self.capture(&["api", "--paginate", "--slurp", &path])?)
+        security_issues(
+            |path| self.capture(&["api", "--paginate", "--slurp", path]),
+            milestone,
+        )
     }
 
     fn close_pull(&self, number: u64, comment: &str) -> Outcome {
@@ -656,6 +647,22 @@ pub(crate) fn head_pull(raw: &str, head: &str) -> Result<Option<u64>, Error> {
         .into_iter()
         .find(|p| !p.cross_repository && p.head == head)
         .map(|p| p.number))
+}
+
+/// The open `security` issues on the milestone titled `milestone`, with `get`
+/// answering a REST path under the repository as `gh api --paginate --slurp`
+/// does. The issues are not read when no milestone has that title.
+pub(crate) fn security_issues(
+    get: impl Fn(&str) -> Result<String, Error>,
+    milestone: &str,
+) -> Result<Vec<Issue>, Error> {
+    let milestones = get("repos/{owner}/{repo}/milestones?state=all&per_page=100")?;
+    let Some(number) = milestone_number(&milestones, milestone)? else {
+        return Ok(Vec::new());
+    };
+    parse_issues(&get(&format!(
+        "repos/{{owner}}/{{repo}}/issues?milestone={number}&labels={SECURITY_LABEL}&state=open&per_page=100"
+    ))?)
 }
 
 /// The number of the milestone titled `title` in a `gh api --paginate --slurp`
@@ -1201,6 +1208,8 @@ impl Forge for DryForge<'_> {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
+
     use super::*;
 
     /// The docs dispatch names a workflow that declares the tier it asks for
@@ -1452,6 +1461,43 @@ mod tests {
         assert_eq!(milestone_number(raw, "v0.5").unwrap(), None);
         assert_eq!(milestone_number("[[]]", "v0.5.0").unwrap(), None);
         assert!(milestone_number(r#"[{"number":1}]"#, "v0.5.0").is_err());
+    }
+
+    /// The issues are read on the titled milestone's number with the
+    /// `security` label, and not read at all when no milestone has the title.
+    #[test]
+    fn security_issues_are_read_on_the_milestones_number() {
+        let asked = RefCell::new(Vec::new());
+        let get = |path: &str| {
+            asked.borrow_mut().push(path.to_owned());
+            Ok(if path.contains("/milestones?") {
+                r#"[[{"number":12,"title":"v0.5.0"}]]"#.to_owned()
+            } else {
+                r#"[[{"number":7,"title":"a defect","html_url":"https://x/7"}]]"#.to_owned()
+            })
+        };
+        assert_eq!(
+            security_issues(get, "v0.5.0").unwrap(),
+            [Issue {
+                number: 7,
+                title: "a defect".into(),
+                url: "https://x/7".into()
+            }]
+        );
+        assert_eq!(
+            *asked.borrow(),
+            [
+                "repos/{owner}/{repo}/milestones?state=all&per_page=100",
+                "repos/{owner}/{repo}/issues?milestone=12&labels=security&state=open&per_page=100",
+            ]
+        );
+
+        asked.borrow_mut().clear();
+        assert!(security_issues(get, "v0.4.1").unwrap().is_empty());
+        assert_eq!(asked.borrow().len(), 1);
+
+        let refused = |_: &str| Err(Error::msg("refused"));
+        assert!(security_issues(refused, "v0.5.0").is_err());
     }
 
     /// The issue listing keeps issues from every page and drops the pull

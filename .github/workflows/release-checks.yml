@@ -212,6 +212,7 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
+      issues: read
     timeout-minutes: 60
     steps:
       # The full history and tags: `derive` reads the newest tag and counts

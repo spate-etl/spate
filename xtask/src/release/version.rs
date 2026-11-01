@@ -106,6 +106,12 @@ impl Version {
         (self.patch == 0).then(|| format!("releases/{}", self.minor_of()))
     }
 
+    /// The minor release after this one, for a patch release, or `None` for
+    /// a minor release.
+    pub(crate) fn next_minor_of_patch(self) -> Option<Self> {
+        (self.patch != 0).then(|| self.next(Bump::Minor))
+    }
+
     fn next(self, bump: Bump) -> Self {
         match bump {
             Bump::Minor => Self {

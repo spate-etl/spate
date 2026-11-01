@@ -62,7 +62,11 @@ direction without a date, and say so where a design is still open.
 An issue gets a milestone once it is committed to a release: it is part of the
 release's feature, it breaks that feature, it is a delivery-correctness bug, or
 it is a fix the release takes for a crate it already changes. `release blocker`
-marks an issue the release cannot ship without. Work on CI, benchmarks and
+marks an issue the release cannot ship without. `security` marks a security
+defect on `main` that no release carries yet, and the release refuses to start
+while one is open on its milestone. A maintainer files these issues; anyone
+else reports a security defect privately, as
+[Security and legal](#security-and-legal) says. Work on CI, benchmarks and
 tooling carries no milestone unless a release depends on it.
 
 Everything else carries a priority instead: `priority: high`, `priority: medium`

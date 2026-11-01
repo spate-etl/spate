@@ -152,7 +152,7 @@ fn comment_char(root: &Path) -> char {
 /// `text` with each control character escaped, and the second `#` of `##[`
 /// escaped too. The Actions runner reads a `\r` as a line break, a line
 /// opening with `::` is a workflow command, and so is `##[` anywhere in a line.
-fn printable(text: &str) -> String {
+pub(crate) fn printable(text: &str) -> String {
     let escaped: String = text
         .chars()
         .map(|c| {

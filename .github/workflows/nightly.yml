@@ -471,6 +471,7 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
+      issues: read
     timeout-minutes: 60
     outputs:
       version-failed: ${{ steps.version.conclusion == 'failure' }}

@@ -168,6 +168,9 @@ impl SchemaCache {
     /// miss, or a `Failed`/expired memo answer, the memo is refreshed once (a
     /// single `Arc` clone under the read lock) and re-evaluated, so a
     /// since-published schema or an expired negative entry is always observed.
+    // Per-record path: the hint keeps it inlinable into the decoder whichever
+    // codegen unit the partitioner puts this module in.
+    #[inline]
     pub(crate) fn lookup(&self, memo: &mut CacheSnapshot, id: u32) -> Lookup {
         if let Some(ready @ Lookup::Ready(_)) =
             Self::eval(&memo.0, id, self.negative_ttl, &*self.clock)

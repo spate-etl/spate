@@ -2346,7 +2346,7 @@ fn a_tree_with_no_fragments_has_nothing_to_release() {
 }
 
 /// The release rehearsal's stand-in fragment is something to release, on a
-/// tree that holds no other fragment. Regression for #1640.
+/// tree that holds no other fragment.
 #[test]
 fn the_rehearsal_stand_in_is_something_to_release() {
     let release = Release::new("the_rehearsal_stand_in_is_something_to_release");

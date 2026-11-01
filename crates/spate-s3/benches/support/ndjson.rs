@@ -12,7 +12,7 @@
 
 use std::io::Write as _;
 
-/// Bytes per fetched chunk, the source's default (`chunk.target_bytes`,
+/// Bytes per fetched chunk, the source's default (`chunk_bytes`,
 /// 512 KiB), so the framer's work is split across `push_chunk` calls at the
 /// granularity production uses.
 pub(crate) const CHUNK_BYTES: usize = 512 * 1024;
@@ -110,10 +110,14 @@ pub(crate) fn concatenated(store: impl Fn(&[u8]) -> Vec<u8>) -> Vec<u8> {
 }
 
 /// Split a body into fetch-sized chunks.
+///
+/// The chunks are slices of one shared buffer, as the fetcher's are of its
+/// GET window, so cloning one in the measured region allocates nothing.
 pub(crate) fn chunks(bytes: &[u8]) -> Vec<bytes::Bytes> {
-    bytes
-        .chunks(CHUNK_BYTES)
-        .map(bytes::Bytes::copy_from_slice)
+    let body = bytes::Bytes::copy_from_slice(bytes);
+    (0..body.len())
+        .step_by(CHUNK_BYTES)
+        .map(|at| body.slice(at..body.len().min(at + CHUNK_BYTES)))
         .collect()
 }
 

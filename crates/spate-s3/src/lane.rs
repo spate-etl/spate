@@ -326,6 +326,7 @@ impl S3Lane {
                 m.objects_remaining.decrement(1.0);
             }
         }
+        self.report_decoded();
     }
 
     /// Apply one fetcher message to the framing state.
@@ -515,10 +516,11 @@ impl SourceLane for S3Lane {
             // stream of chunks that frames no records (one enormous line,
             // whitespace floods) must still return control to the driver —
             // heartbeats and shutdown are processed between polls. Checked
-            // only once a receive has been attempted, so a zero-timeout
-            // poll still consumes one ready chunk (and the framing pass at
-            // the top of the next iteration turns it into records) before
-            // this bails.
+            // only once a receive or a decode step has been attempted, so a
+            // zero-timeout poll still decodes one step of a pending chunk, or
+            // with none pending consumes one ready message (and the framing
+            // pass at the top of the next iteration turns it into records),
+            // before this bails.
             if recv_attempted && self.clock.now() >= deadline {
                 if self.held.is_empty() {
                     return Ok(None);

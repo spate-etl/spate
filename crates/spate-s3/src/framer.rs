@@ -22,8 +22,7 @@
 //!   [`ObjectFramer::finish_object`] (or at the failing chunk).
 //! - A chunk is decoded a step at a time. [`ObjectFramer::pump`] stops once a
 //!   step queues a record or [`PUMP_DECODED_BYTES`] reach the framer, so the
-//!   records one compressed chunk expands to are drained between steps
-//!   instead of all being queued at once.
+//!   lane drains the records one compressed chunk expands to between steps.
 
 use crate::config::Compression;
 use bytes::{Buf, Bytes};
@@ -42,6 +41,12 @@ pub(crate) type FramerFactory = Arc<dyn Fn() -> Box<dyn RecordFramer> + Send + S
 /// Decoded bytes one [`ObjectFramer::pump`] feeds the framer before it yields
 /// to the lane, which bounds the decoded output a compressed chunk queues.
 pub(crate) const PUMP_DECODED_BYTES: u64 = 256 * 1024;
+
+/// Codec steps one [`ObjectFramer::pump`] makes before it yields to the lane.
+/// Input that decodes to nothing, such as empty gzip members or empty zstd
+/// frames, never reaches the byte budget, and this bounds the time a pump
+/// spends on it.
+pub(crate) const PUMP_STEPS: usize = 256;
 
 /// Largest zstd window a lane decodes, as a power of two: 128 MiB. The
 /// decoder allocates the window a frame header declares, so this bounds the
@@ -206,9 +211,10 @@ impl ObjectFramer {
     }
 
     /// Feed the latest chunk to the codec until a step queues a record,
-    /// [`PUMP_DECODED_BYTES`] decoded bytes have reached the framer, or the
-    /// chunk is consumed. Call again while
-    /// [`has_pending_input`](Self::has_pending_input) holds, after draining.
+    /// [`PUMP_DECODED_BYTES`] decoded bytes have reached the framer,
+    /// [`PUMP_STEPS`] steps have run, or the chunk is consumed. Call again
+    /// while [`has_pending_input`](Self::has_pending_input) holds, after
+    /// draining.
     ///
     /// # Errors
     ///
@@ -219,7 +225,9 @@ impl ObjectFramer {
         let queued = self.ready.len();
         let start = sink.framer().decoded_bytes();
         let mut written = Ok(());
+        let mut steps = 0;
         while !self.pending.is_empty() {
+            steps += 1;
             match sink.write(&self.pending) {
                 Ok(0) => written = Err(io::ErrorKind::WriteZero.into()),
                 Ok(n) => self.pending.advance(n),
@@ -239,6 +247,7 @@ impl ObjectFramer {
             }
             if self.ready.len() > queued
                 || sink.framer().decoded_bytes() - start >= PUMP_DECODED_BYTES
+                || steps >= PUMP_STEPS
             {
                 break;
             }

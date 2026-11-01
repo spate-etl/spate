@@ -12,3 +12,13 @@ reason = "braces reaches this tree through @docusaurus/core -> chokidar and @doc
 id = "GHSA-ch52-4w7c-c8xp"
 ignoreUntil = 2027-04-12
 reason = "http-cache-semantics reaches this tree as @docusaurus/core -> update-notifier -> got -> cacheable-request, which caches the CLI's own version check against the npm registry. The advisory concerns a shared cache serving one user's response to another, and this tree never caches a response for more than one user. The advisory range covers every release up to and including 4.2.0, and 4.3.0 leaves the max-stale handling unchanged, so no upgrade clears it."
+
+[[IgnoredVulns]]
+id = "GHSA-g3hv-75wg-m249"
+ignoreUntil = 2027-05-01
+reason = "minimatch 3.1.5 reaches this tree only as @docusaurus/core -> serve-handler, which pins it exactly and serves the built site for local preview. The advisory's firstPhasePreProcess and optimizationLevel code first ships in minimatch 7, and 3.1.5 has neither. serve-handler matches request paths against patterns from its own config, so a visitor never supplies a pattern. The fix is 11.0.1, whose default export is no longer callable as serve-handler calls it, so an overrides entry would break `docusaurus serve`."
+
+[[IgnoredVulns]]
+id = "GHSA-gcqx-w48m-w2h4"
+ignoreUntil = 2027-05-01
+reason = "deepmerge reaches this tree as @docusaurus/plugin-svgr -> @svgr/webpack -> @svgr/plugin-svgo, which declares it but never requires it. No JavaScript under node_modules outside deepmerge itself imports it. The advisory range covers 4.3.1, the newest release, so no upgrade clears it."

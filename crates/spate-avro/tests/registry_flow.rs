@@ -354,6 +354,54 @@ async fn unknown_id_negative_caches_until_ttl_expiry() {
     assert_eq!(rows.len(), 1, "expired negative entry allows a refetch");
 }
 
+/// Records naming many distinct ids the registry does not know log the 404
+/// warning a bounded number of times, while every id is still fetched.
+#[test]
+fn unknown_id_warnings_are_rate_limited() {
+    const IDS: u32 = 20;
+    let stub = StubRegistry::default();
+    let hits = Arc::clone(&stub.hits);
+    let lines = spate_test::capture_logs(tracing::Level::WARN, || {
+        // Current-thread, so the fetcher's warnings reach this thread's
+        // subscriber.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let addr = stub.serve().await;
+            let clock = TestClock::frozen();
+            let mut deser = builder_on(addr, Duration::from_secs(3600), &clock)
+                .build_value()
+                .expect("apache builder");
+            let (ack, _rx) = AckRef::test_pair();
+            let mut out = Collected(Vec::new());
+            for id in 0..IDS {
+                let payload = confluent_payload(100 + id, 1);
+                let deadline = Instant::now() + Duration::from_secs(10);
+                loop {
+                    match deser.deserialize(&raw_payload(&payload), &ack, &mut out) {
+                        Err(DeserError::NotReady { .. }) if Instant::now() < deadline => {
+                            tokio::time::sleep(Duration::from_millis(1)).await;
+                        }
+                        Err(DeserError::SchemaUnavailable { .. }) => break,
+                        other => panic!("id {id}: {other:?}"),
+                    }
+                }
+            }
+        });
+    });
+    let warned = lines
+        .iter()
+        .filter(|l| l.contains("registry reports schema id unknown"))
+        .count();
+    assert!(
+        hits.load(Ordering::Relaxed) >= IDS as usize,
+        "every id is fetched"
+    );
+    assert!(warned <= 5, "{warned} warnings for {IDS} unknown ids");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn transient_503s_then_success_decodes_and_never_drops() {
     // The critical regression (registry.rs poison-cache): three transient

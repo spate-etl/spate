@@ -191,8 +191,10 @@ pub struct AvroSettings {
     pub registry: Option<RegistrySection>,
     /// Subjects whose latest schemas are fetched at startup.
     pub prewarm_subjects: Vec<String>,
-    /// How long a failed schema id stays negatively cached before a
-    /// refetch is allowed.
+    /// The longest a failed schema id stays negatively cached before a
+    /// refetch is allowed. The cache holds at most 1,024 failed ids and drops
+    /// the oldest for a new one, so a dropped id is refetched on its next
+    /// record.
     #[serde(with = "humantime_serde")]
     pub negative_cache_ttl: Duration,
     /// Optional reader schema pinning the resolved record shape

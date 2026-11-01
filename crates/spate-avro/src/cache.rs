@@ -393,9 +393,12 @@ mod tests {
         assert!(matches!(cache.get(1), Lookup::Failed(_)));
         assert!(matches!(cache.get(cap), Lookup::Failed(_)));
         assert!(matches!(cache.get(u32::MAX), Lookup::Ready(_)));
-        // Refreshing an id already held keeps the count and drops nothing.
-        cache.insert_failed(1, "schema 1 unknown".into());
-        assert!(matches!(cache.get(2), Lookup::Failed(_)));
+        // Refreshing an id already held keeps the count and drops nothing,
+        // so the oldest entry, id 1, survives a refresh of id 2.
+        cache.insert_failed(2, "schema 2 unknown".into());
+        let held = cache.entries.read().expect("schema cache lock").len();
+        assert_eq!(held, MAX_NEGATIVE_ENTRIES + 1);
+        assert!(matches!(cache.get(1), Lookup::Failed(_)));
     }
 
     #[test]

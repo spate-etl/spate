@@ -53,7 +53,7 @@ deserializer:
 | `registry.username` / `registry.password` | string | `none` | Basic auth (interpolate secrets via `${VAR}`). A password requires a username. The password and any userinfo in `registry.url` render `<redacted>` in `Debug` output. |
 | `registry.tls.root_ca` | path | `none` | PEM bundle of root CAs trusted in addition to the system trust store. Requires an `https://` URL. |
 | `prewarm_subjects` | string list | `[]` | Subjects whose latest schemas are fetched at startup (`confluent` mode only). |
-| `negative_cache_ttl` | duration | `30s` | How long a schema id the registry could not serve stays negatively cached before a refetch is allowed. |
+| `negative_cache_ttl` | duration | `30s` | The longest a schema id the registry could not serve stays negatively cached before a refetch is allowed. The cache holds at most 1,024 such ids and drops the oldest for a new one, so a dropped id is refetched on its next record. |
 | `reader_schema` | `{ inline }` or `{ path }` | `none` | Reader schema pinning the resolved record shape (`confluent` and `raw` modes; not `single_object`). |
 | `schema` | `{ inline }` or `{ path }` | `required` | The writer schema. Required in `raw` and `single_object` modes; rejected in `confluent` mode (writer schemas come from the registry there). |
 
@@ -181,8 +181,8 @@ edge cases:
 
 - `prewarm_subjects` fetches the configured subjects' latest schemas at
   startup, so the first batch does not pay the miss.
-- Ids the registry *cannot* serve are negatively cached for
-  `negative_cache_ttl` and then handled by the deserializer's
+- Ids the registry *cannot* serve are negatively cached for up to
+  `negative_cache_ttl`, and their records are handled by the deserializer's
   `ErrorPolicy` (Skip or Fail) like any other poison payload, so a permanent
   bad id cannot wedge the pipeline into an infinite retry.
 
@@ -190,10 +190,11 @@ edge cases:
 
 Undecodable payloads follow the deserializer's `ErrorPolicy`, Skip or Fail,
 like any other poison payload: Fail stops the pipeline on the first bad datum;
-Skip drops it and continues. A schema id the registry cannot serve reaches the
-same policy once its negative-cache entry expires, so a permanently bad id is
-an error rather than an infinite retry. A registry that rejects the client is
-not a payload error and stops the pipeline under either policy.
+Skip drops it and continues. A record naming a schema id the registry cannot
+serve reaches the same policy as soon as the registry's answer is negatively
+cached, so a permanently bad id is an error rather than an infinite retry. A
+registry that rejects the client is not a payload error and stops the pipeline
+under either policy.
 
 A datum decode that attempts to read past the payload returns a malformed
 record error and follows the configured Skip or Fail record error policy.

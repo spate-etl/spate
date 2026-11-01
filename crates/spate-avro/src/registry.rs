@@ -42,6 +42,7 @@ use serde::Deserialize;
 use spate_core::clock::SyncClock;
 use spate_core::config::redact;
 use spate_core::hash::{QualityMap, QualitySet};
+use spate_core::telemetry::RateLimit;
 use std::error::Error;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
@@ -62,6 +63,9 @@ const ERROR_BODY_LIMIT: usize = 256;
 /// Bound on one registry request, from connect to the end of the body. A
 /// fetch holds a slot in [`MAX_CONCURRENT_FETCHES`] until it ends.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// Bounds the per-404 warning. Schema ids are wire data, and an id evicted
+/// from the negative cache is fetched again, so a 404 can recur per record.
+static UNKNOWN_ID_WARN: RateLimit = RateLimit::new(5, Duration::from_secs(10));
 
 /// Why the registry rejected this client, set at most once.
 pub(crate) type Rejection = Arc<OnceLock<String>>;
@@ -603,7 +607,12 @@ async fn fetch_one(
         ) => {
             // Negative-cache the unknown id; the deserializer applies its
             // ErrorPolicy to the poison payload.
-            tracing::warn!(schema_id = id, error = %failure, "registry reports schema id unknown");
+            spate_core::rate_limited_warn!(
+                UNKNOWN_ID_WARN,
+                schema_id = id,
+                error = %failure,
+                "registry reports schema id unknown"
+            );
             cache.insert_failed(
                 id,
                 format!("registry fetch for schema {id} failed: {failure}"),

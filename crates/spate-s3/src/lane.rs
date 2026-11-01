@@ -1217,6 +1217,34 @@ mod tests {
         );
     }
 
+    /// Pins that the deadline caps a poll that decodes a compressed chunk
+    /// framing no record: a zero-timeout poll decodes one bounded step and
+    /// returns with the rest of the chunk pending.
+    #[test]
+    fn a_zero_timeout_poll_decodes_one_step_of_a_blank_compressed_chunk() {
+        let (mut r, _clock) = frozen_rig();
+        let blank = zstd::encode_all(&vec![b'\n'; 16 << 20][..], 19).unwrap();
+        start(&r, 0, "p/a.ndjson.zst");
+        send(&r, ChunkMsg::Chunk(bytes::Bytes::from(blank)));
+        send(&r, ChunkMsg::ObjectEnd);
+        // One poll takes the object start, the next takes the chunk.
+        assert!(r.lane.poll(512, Duration::ZERO).unwrap().is_none());
+        assert!(r.lane.poll(512, Duration::ZERO).unwrap().is_none());
+        for _ in 0..3 {
+            let before = r.lane.framer.decoded_bytes();
+            assert!(r.lane.poll(512, Duration::ZERO).unwrap().is_none());
+            let decoded = r.lane.framer.decoded_bytes() - before;
+            assert!(
+                r.lane.framer.has_pending_input(),
+                "a zero-timeout poll decoded the rest of the chunk"
+            );
+            assert!(
+                decoded < 2 * crate::framer::PUMP_DECODED_BYTES,
+                "one zero-timeout poll decoded {decoded} bytes"
+            );
+        }
+    }
+
     /// Pins that the channel closing while a poll waits on the clock ends the
     /// lane: the poll returns `Ok(None)` and records the terminal watermark.
     #[test]

@@ -648,6 +648,97 @@ mod tests {
         assert!(err.to_string().contains("too much memory"), "{err}");
     }
 
+    /// Pins that a pump stops at the first codec step that brings the decoded
+    /// bytes it fed the framer to 256 KiB.
+    #[test]
+    fn a_pump_stops_at_the_step_that_reaches_its_budget() {
+        let chunk = gzip_best(&vec![b'\n'; 4 << 20]);
+        // A second sink, stepped by hand, gives where each pump must stop.
+        let mut sink = Sink::new(Codec::Gzip, Box::new(TestLineFramer::new(TEST_CAP))).unwrap();
+        let mut rest = &chunk[..];
+        let mut want = Vec::new();
+        while want.len() < 4 {
+            let start = sink.framer().decoded_bytes();
+            while sink.framer().decoded_bytes() - start < 256 * 1024 {
+                let n = sink.write(rest).unwrap();
+                rest = &rest[n..];
+            }
+            want.push(sink.framer().decoded_bytes());
+        }
+        let mut framer = ObjectFramer::new(line_factory(TEST_CAP));
+        framer.begin_object(Codec::Gzip).unwrap();
+        framer.push_chunk(Bytes::from(chunk)).unwrap();
+        let mut got = vec![framer.decoded_bytes()];
+        while got.len() < 4 {
+            framer.pump().unwrap();
+            got.push(framer.decoded_bytes());
+        }
+        assert_eq!(got, want);
+    }
+
+    /// A chunk of empty gzip members decodes to no bytes, so neither the
+    /// record test nor the byte budget stops a pump; the step cap does, and
+    /// the next pump picks up where it stopped.
+    #[test]
+    fn a_pump_over_empty_gzip_members_stops_at_its_step_cap() {
+        let member = GzEncoder::new(Vec::new(), GzLevel::default())
+            .finish()
+            .unwrap();
+        let members = 4 * PUMP_STEPS;
+        let mut framer = ObjectFramer::new(line_factory(TEST_CAP));
+        framer.begin_object(Codec::Gzip).unwrap();
+        framer
+            .push_chunk(Bytes::from(member.repeat(members)))
+            .unwrap();
+        assert_eq!(framer.decoded_bytes(), 0);
+        let mut pumps = 1;
+        while framer.has_pending_input() {
+            framer.pump().unwrap();
+            pumps += 1;
+        }
+        assert!(pumps >= 2, "one pump consumed {members} empty members");
+        framer.finish_object().unwrap();
+    }
+
+    /// A chunk large enough that each pump stops mid-chunk frames the same
+    /// records as the reference, for each compressed codec.
+    #[test]
+    fn a_multi_step_chunk_frames_the_reference_records() {
+        let object: Vec<u8> = (0..200_000u32)
+            .flat_map(|i| {
+                let mut line = format!(
+                    "{{\"n\":{i},\"pad\":\"{}\"}}",
+                    "x".repeat((i % 97) as usize)
+                )
+                .into_bytes();
+                line.push(if i % 13 == 0 { b'\r' } else { b' ' });
+                line.push(b'\n');
+                line
+            })
+            .collect();
+        let expected = reference_frames(&object);
+        for codec_pick in 1..3 {
+            let (codec, encoded) = encode(codec_pick, &object);
+            let mut framer = ObjectFramer::new(line_factory(TEST_CAP));
+            framer.begin_object(codec).unwrap();
+            let mut framed = Vec::new();
+            let mut resumed = 0;
+            framer.push_chunk(Bytes::from(encoded)).unwrap();
+            loop {
+                framed.extend(std::iter::from_fn(|| framer.pop_record()));
+                if !framer.has_pending_input() {
+                    break;
+                }
+                framer.pump().unwrap();
+                resumed += 1;
+            }
+            framer.finish_object().unwrap();
+            framed.extend(std::iter::from_fn(|| framer.pop_record()));
+            assert!(resumed > 1, "{codec:?}: the chunk decoded in one pump");
+            assert_eq!(framed, expected, "{codec:?}");
+        }
+    }
+
     /// A decode error mid-chunk drops the rest of the chunk, so no later pump
     /// feeds the codec past the failure.
     #[test]

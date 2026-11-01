@@ -61,15 +61,15 @@ pub type MakeFramer = Arc<dyn Fn() -> Box<dyn RecordFramer> + Send + Sync>;
 pub fn frame_objects(
     compression: Compression,
     make_framer: MakeFramer,
-    objects: &[(String, Vec<Vec<u8>>)],
+    objects: &[(String, Vec<Bytes>)],
 ) -> io::Result<usize> {
     let mut framer = ObjectFramer::new(make_framer);
     let mut records = 0;
     for (key, chunks) in objects {
         framer.begin_object(Codec::resolve(compression, key))?;
         for chunk in chunks {
-            // Copied as a GET delivers it, into a buffer the framer owns.
-            framer.push_chunk(Bytes::copy_from_slice(chunk))?;
+            // A refcount bump, as the lane's own hand-off is.
+            framer.push_chunk(chunk.clone())?;
             // Drained per decode step, because the lane drains at the top of
             // every poll-loop iteration rather than at end of object. Draining
             // only at the end would hold a whole object's records live at
@@ -140,7 +140,10 @@ pub fn frame_range(
             while framer.pop_record().is_some() {
                 records += 1;
             }
-            debug_assert!(!framer.has_pending_input(), "a plain chunk decodes in one step");
+            debug_assert!(
+                !framer.has_pending_input(),
+                "a plain chunk decodes in one step"
+            );
         }
         pos = window_end;
     }

@@ -110,8 +110,11 @@ pub(crate) fn concatenated(store: impl Fn(&[u8]) -> Vec<u8>) -> Vec<u8> {
 }
 
 /// Split a body into fetch-sized chunks.
-pub(crate) fn chunks(bytes: &[u8]) -> Vec<Vec<u8>> {
-    bytes.chunks(CHUNK_BYTES).map(<[u8]>::to_vec).collect()
+pub(crate) fn chunks(bytes: &[u8]) -> Vec<bytes::Bytes> {
+    bytes
+        .chunks(CHUNK_BYTES)
+        .map(bytes::Bytes::copy_from_slice)
+        .collect()
 }
 
 /// gzip the body, as the object would be stored.

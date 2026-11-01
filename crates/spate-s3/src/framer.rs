@@ -158,7 +158,6 @@ impl std::fmt::Debug for ObjectFramer {
         f.debug_struct("ObjectFramer")
             .field("in_object", &self.sink.is_some())
             .field("ready", &self.ready.len())
-            .field("pending", &self.pending.len())
             .finish()
     }
 }
@@ -466,8 +465,7 @@ mod tests {
         let body = gzip(b"0123456789ABCDEF no newline anywhere");
         let mut framer = ObjectFramer::new(line_factory(8));
         framer.begin_object(Codec::Gzip).unwrap();
-        let result = push_all(&mut framer, &body)
-            .and_then(|()| framer.finish_object());
+        let result = push_all(&mut framer, &body).and_then(|()| framer.finish_object());
         assert!(
             result.unwrap_err().to_string().contains("max_record_bytes"),
             "gzip-decoded oversized line must fail"

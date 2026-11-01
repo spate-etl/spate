@@ -19,7 +19,7 @@ When reading it:
 
 - **This is the union across every optional feature** (`--all-features`). A
   default build links a strict subset; the extra crates come from opt-in
-  features such as `kafka-tls`, `coordination-nats` and `json-simd`. Attributing
+  features such as `kafka-tls`, `json-simd` and `datagen-avro`. Attributing
   more than you distribute is safe, so this file is the superset.
 - **Full license texts are not reproduced here**, to keep the file diffable.
   Most crates ship their own notice in their published source, at the version
@@ -44,11 +44,11 @@ version bump alone leaves this file unchanged.
 
 | License | Crates |
 |---|---|
-| `MIT` | 298 |
+| `MIT` | 285 |
+| `Apache-2.0` | 33 |
 | `Unicode-3.0` | 19 |
-| `Apache-2.0` | 13 |
+| `BSD-3-Clause` | 6 |
 | `ISC` | 6 |
-| `BSD-3-Clause` | 5 |
 | `CDLA-Permissive-2.0` | 2 |
 | `Zlib` | 1 |
 
@@ -68,35 +68,57 @@ above from what is left. The elected license ids are unaffected either way.
 | Crate | Version | License |
 |---|---|---|
 | `apache-avro` | 0.22.0 | `Apache-2.0` |
-| `async-nats` | 0.50.0 | `Apache-2.0` |
+| `aws-config` | 1.13.0 | `Apache-2.0` |
+| `aws-credential-types` | 1.3.1 | `Apache-2.0` |
 | `aws-lc-sys` | 0.45.0 | `Apache-2.0` |
+| `aws-runtime` | 1.10.2 | `Apache-2.0` |
+| `aws-sdk-sqs` | 1.114.0 | `Apache-2.0` |
+| `aws-sdk-sso` | 1.115.0 | `Apache-2.0` |
+| `aws-sdk-ssooidc` | 1.117.0 | `Apache-2.0` |
+| `aws-sdk-sts` | 1.120.0 | `Apache-2.0` |
+| `aws-sigv4` | 1.6.2 | `Apache-2.0` |
+| `aws-smithy-async` | 1.3.1 | `Apache-2.0` |
+| `aws-smithy-http` | 0.64.2 | `Apache-2.0` |
+| `aws-smithy-http-client` | 1.5.1 | `Apache-2.0` |
+| `aws-smithy-json` | 0.63.1 | `Apache-2.0` |
+| `aws-smithy-json` | 0.65.0 | `Apache-2.0` |
+| `aws-smithy-observability` | 0.3.0 | `Apache-2.0` |
+| `aws-smithy-query` | 0.64.0 | `Apache-2.0` |
+| `aws-smithy-runtime` | 1.16.1 | `Apache-2.0` |
+| `aws-smithy-runtime-api` | 1.19.1 | `Apache-2.0` |
+| `aws-smithy-runtime-api-macros` | 1.1.0 | `Apache-2.0` |
+| `aws-smithy-schema` | 0.2.1 | `Apache-2.0` |
+| `aws-smithy-schema` | 1.0.0 | `Apache-2.0` |
+| `aws-smithy-types` | 1.9.0 | `Apache-2.0` |
+| `aws-smithy-xml` | 0.64.0 | `Apache-2.0` |
+| `aws-types` | 1.7.0 | `Apache-2.0` |
 | `bytesize` | 2.7.0 | `Apache-2.0` |
 | `clang-sys` | 1.8.1 | `Apache-2.0` |
 | `dunce` | 1.0.5 | `Apache-2.0` |
 | `metrics-exporter-prometheus` | 0.18.3 | `Apache-2.0` |
-| `nkeys` | 0.4.5 | `Apache-2.0` |
-| `nuid` | 0.5.0 | `Apache-2.0` |
 | `ring` | 0.17.14 | `Apache-2.0` |
 | `ryu` | 1.0.23 | `Apache-2.0` |
 | `sketches-ddsketch` | 0.3.1 | `Apache-2.0` |
 | `sync_wrapper` | 1.0.2 | `Apache-2.0` |
 | `aws-lc-sys` | 0.45.0 | `BSD-3-Clause` |
 | `bindgen` | 0.72.1 | `BSD-3-Clause` |
-| `curve25519-dalek` | 4.1.3 | `BSD-3-Clause` |
-| `ed25519-dalek` | 2.2.0 | `BSD-3-Clause` |
 | `subtle` | 2.6.1 | `BSD-3-Clause` |
-| `webpki-roots` | 0.26.11 | `CDLA-Permissive-2.0` |
-| `webpki-roots` | 1.0.9 | `CDLA-Permissive-2.0` |
+| `zstd` | 0.14.3 | `BSD-3-Clause` |
+| `zstd-safe` | 8.2.0 | `BSD-3-Clause` |
+| `zstd-sys` | 2.1.2+zstd.1.5.7 | `BSD-3-Clause` |
+| `webpki-root-certs` | 1.0.10 | `CDLA-Permissive-2.0` |
+| `webpki-roots` | 1.0.10 | `CDLA-Permissive-2.0` |
 | `aws-lc-rs` | 1.18.1 | `ISC` |
 | `aws-lc-sys` | 0.45.0 | `ISC` |
 | `libloading` | 0.8.9 | `ISC` |
 | `ring` | 0.17.14 | `ISC` |
-| `rustls-webpki` | 0.103.15 | `ISC` |
+| `rustls-webpki` | 0.103.16 | `ISC` |
 | `untrusted` | 0.9.0 | `ISC` |
 | `adler2` | 2.0.1 | `MIT` |
 | `aho-corasick` | 1.1.4 | `MIT` |
 | `aliasable` | 0.1.3 | `MIT` |
 | `allocator-api2` | 0.2.21 | `MIT` |
+| `arc-swap` | 1.9.2 | `MIT` |
 | `arrayvec` | 0.7.8 | `MIT` |
 | `async-trait` | 0.1.92 | `MIT` |
 | `atomic-waker` | 1.1.2 | `MIT` |
@@ -104,10 +126,10 @@ above from what is left. The elected license ids are unaffected either way.
 | `aws-lc-sys` | 0.45.0 | `MIT` |
 | `base64` | 0.22.1 | `MIT` |
 | `base64` | 0.23.1 | `MIT` |
-| `base64ct` | 1.8.3 | `MIT` |
+| `base64-simd` | 0.8.0 | `MIT` |
 | `bigdecimal` | 0.4.10 | `MIT` |
-| `bit-set` | 0.8.0 | `MIT` |
-| `bit-vec` | 0.8.0 | `MIT` |
+| `bit-set` | 0.11.1 | `MIT` |
+| `bit-vec` | 0.10.1 | `MIT` |
 | `bitflags` | 2.13.0 | `MIT` |
 | `block-buffer` | 0.10.4 | `MIT` |
 | `block-buffer` | 0.12.1 | `MIT` |
@@ -116,6 +138,7 @@ above from what is left. The elected license ids are unaffected either way.
 | `bon-macros` | 3.9.3 | `MIT` |
 | `bstr` | 1.12.3 | `MIT` |
 | `bytes` | 1.12.1 | `MIT` |
+| `bytes-utils` | 0.1.4 | `MIT` |
 | `cc` | 1.2.66 | `MIT` |
 | `cexpr` | 0.6.0 | `MIT` |
 | `cfg-if` | 1.0.4 | `MIT` |
@@ -123,15 +146,16 @@ above from what is left. The elected license ids are unaffected either way.
 | `chacha20` | 0.10.2 | `MIT` |
 | `chrono` | 0.4.45 | `MIT` |
 | `cityhash-rs` | 1.0.1 | `MIT` |
-| `clickhouse` | 0.15.2 | `MIT` |
+| `clickhouse` | 0.15.3 | `MIT` |
 | `clickhouse-macros` | 0.3.0 | `MIT` |
-| `clickhouse-types` | 0.1.3 | `MIT` |
+| `clickhouse-types` | 0.1.4 | `MIT` |
 | `cmake` | 0.1.58 | `MIT` |
+| `cmov` | 0.5.4 | `MIT` |
 | `const-oid` | 0.10.2 | `MIT` |
-| `const-oid` | 0.9.6 | `MIT` |
 | `core-foundation` | 0.10.1 | `MIT` |
 | `core-foundation-sys` | 0.8.7 | `MIT` |
 | `core_affinity` | 0.8.3 | `MIT` |
+| `core_detect` | 1.0.0 | `MIT` |
 | `cpufeatures` | 0.2.17 | `MIT` |
 | `cpufeatures` | 0.3.0 | `MIT` |
 | `crc-fast` | 1.10.0 | `MIT` |
@@ -141,17 +165,14 @@ above from what is left. The elected license ids are unaffected either way.
 | `crossbeam-utils` | 0.8.21 | `MIT` |
 | `crypto-common` | 0.1.7 | `MIT` |
 | `crypto-common` | 0.2.2 | `MIT` |
-| `curve25519-dalek-derive` | 0.1.1 | `MIT` |
+| `ctutils` | 0.4.4 | `MIT` |
 | `darling` | 0.23.0 | `MIT` |
 | `darling_core` | 0.23.0 | `MIT` |
 | `darling_macro` | 0.23.0 | `MIT` |
-| `data-encoding` | 2.11.0 | `MIT` |
-| `der` | 0.7.10 | `MIT` |
 | `deranged` | 0.5.8 | `MIT` |
 | `digest` | 0.10.7 | `MIT` |
 | `digest` | 0.11.3 | `MIT` |
 | `displaydoc` | 0.2.6 | `MIT` |
-| `ed25519` | 2.2.3 | `MIT` |
 | `either` | 1.16.0 | `MIT` |
 | `equivalent` | 1.0.2 | `MIT` |
 | `errno` | 0.3.14 | `MIT` |
@@ -184,7 +205,8 @@ above from what is left. The elected license ids are unaffected either way.
 | `heck` | 0.4.1 | `MIT` |
 | `heck` | 0.5.0 | `MIT` |
 | `hex` | 0.4.3 | `MIT` |
-| `http` | 1.4.2 | `MIT` |
+| `hmac` | 0.13.0 | `MIT` |
+| `http` | 1.5.0 | `MIT` |
 | `http-body` | 1.0.1 | `MIT` |
 | `http-body-util` | 0.1.5 | `MIT` |
 | `httparse` | 1.10.1 | `MIT` |
@@ -192,7 +214,7 @@ above from what is left. The elected license ids are unaffected either way.
 | `humantime` | 2.4.0 | `MIT` |
 | `humantime-serde` | 1.1.1 | `MIT` |
 | `hybrid-array` | 0.4.13 | `MIT` |
-| `hyper` | 1.11.1 | `MIT` |
+| `hyper` | 1.12.0 | `MIT` |
 | `hyper-rustls` | 0.27.10 | `MIT` |
 | `hyper-util` | 0.1.21 | `MIT` |
 | `iana-time-zone` | 0.1.65 | `MIT` |
@@ -208,16 +230,16 @@ above from what is left. The elected license ids are unaffected either way.
 | `jobserver` | 0.1.34 | `MIT` |
 | `lazy_static` | 1.5.0 | `MIT` |
 | `left-right` | 0.11.7 | `MIT` |
-| `libc` | 0.2.190 | `MIT` |
+| `libc` | 0.2.191 | `MIT` |
 | `libm` | 0.2.16 | `MIT` |
 | `libproc` | 0.14.11 | `MIT` |
 | `libyaml-rs` | 0.3.0 | `MIT` |
-| `libz-sys` | 1.1.29 | `MIT` |
+| `libz-sys` | 1.1.31 | `MIT` |
 | `linux-raw-sys` | 0.12.1 | `MIT` |
 | `linux-raw-sys` | 0.4.15 | `MIT` |
 | `lock_api` | 0.4.14 | `MIT` |
 | `log` | 0.4.33 | `MIT` |
-| `lz4_flex` | 0.11.6 | `MIT` |
+| `lz4_flex` | 0.14.0 | `MIT` |
 | `mach2` | 0.6.0 | `MIT` |
 | `matchers` | 0.2.0 | `MIT` |
 | `md-5` | 0.11.0 | `MIT` |
@@ -246,14 +268,11 @@ above from what is left. The elected license ids are unaffected either way.
 | `openssl-sys` | 0.9.117 | `MIT` |
 | `ouroboros` | 0.18.5 | `MIT` |
 | `ouroboros_macro` | 0.18.5 | `MIT` |
+| `outref` | 0.5.2 | `MIT` |
 | `parking_lot` | 0.12.5 | `MIT` |
 | `parking_lot_core` | 0.9.12 | `MIT` |
-| `pem-rfc7468` | 0.7.0 | `MIT` |
 | `percent-encoding` | 2.3.2 | `MIT` |
-| `pin-project` | 1.1.13 | `MIT` |
-| `pin-project-internal` | 1.1.13 | `MIT` |
 | `pin-project-lite` | 0.2.17 | `MIT` |
-| `pkcs8` | 0.10.2 | `MIT` |
 | `pkg-config` | 0.3.33 | `MIT` |
 | `portable-atomic` | 1.13.1 | `MIT` |
 | `powerfmt` | 0.2.0 | `MIT` |
@@ -264,20 +283,17 @@ above from what is left. The elected license ids are unaffected either way.
 | `proc-macro2-diagnostics` | 0.10.1 | `MIT` |
 | `procfs` | 0.18.0 | `MIT` |
 | `procfs-core` | 0.18.0 | `MIT` |
-| `proptest` | 1.11.0 | `MIT` |
+| `proptest` | 1.12.0 | `MIT` |
 | `quanta` | 0.12.6 | `MIT` |
 | `quick-error` | 1.2.3 | `MIT` |
 | `quick-xml` | 0.41.0 | `MIT` |
 | `quote` | 1.0.47 | `MIT` |
 | `rand` | 0.10.2 | `MIT` |
-| `rand` | 0.8.6 | `MIT` |
 | `rand` | 0.9.4 | `MIT` |
-| `rand_chacha` | 0.3.1 | `MIT` |
 | `rand_chacha` | 0.9.0 | `MIT` |
 | `rand_core` | 0.10.1 | `MIT` |
-| `rand_core` | 0.6.4 | `MIT` |
 | `rand_core` | 0.9.5 | `MIT` |
-| `rand_xorshift` | 0.4.0 | `MIT` |
+| `rand_xorshift` | 0.5.0 | `MIT` |
 | `rand_xoshiro` | 0.7.0 | `MIT` |
 | `rapidhash` | 4.5.1 | `MIT` |
 | `raw-cpuid` | 11.6.0 | `MIT` |
@@ -296,8 +312,8 @@ above from what is left. The elected license ids are unaffected either way.
 | `rustc_version` | 0.4.1 | `MIT` |
 | `rustix` | 0.38.44 | `MIT` |
 | `rustix` | 1.1.4 | `MIT` |
-| `rustls` | 0.23.45 | `MIT` |
-| `rustls-native-certs` | 0.8.4 | `MIT` |
+| `rustls` | 0.23.46 | `MIT` |
+| `rustls-native-certs` | 0.8.5 | `MIT` |
 | `rustls-pki-types` | 1.15.0 | `MIT` |
 | `rustls-platform-verifier` | 0.7.0 | `MIT` |
 | `rustversion` | 1.0.22 | `MIT` |
@@ -312,19 +328,15 @@ above from what is left. The elected license ids are unaffected either way.
 | `serde_core` | 1.0.229 | `MIT` |
 | `serde_derive` | 1.0.229 | `MIT` |
 | `serde_derive_internals` | 0.29.1 | `MIT` |
-| `serde_json` | 1.0.151 | `MIT` |
-| `serde_nanos` | 0.1.4 | `MIT` |
+| `serde_json` | 1.0.154 | `MIT` |
 | `serde_path_to_error` | 0.1.20 | `MIT` |
-| `serde_repr` | 0.1.21 | `MIT` |
 | `serde_urlencoded` | 0.7.1 | `MIT` |
-| `sha2` | 0.10.9 | `MIT` |
-| `sha2` | 0.11.0 | `MIT` |
+| `sha1` | 0.10.7 | `MIT` |
+| `sha2` | 0.11.1 | `MIT` |
 | `sharded-slab` | 0.1.7 | `MIT` |
 | `shlex` | 1.3.0 | `MIT` |
 | `shlex` | 2.0.1 | `MIT` |
 | `signal-hook-registry` | 1.4.8 | `MIT` |
-| `signatory` | 0.27.1 | `MIT` |
-| `signature` | 2.2.0 | `MIT` |
 | `simd-adler32` | 0.3.9 | `MIT` |
 | `simd-json` | 0.18.1 | `MIT` |
 | `simdutf8` | 0.1.5 | `MIT` |
@@ -332,14 +344,13 @@ above from what is left. The elected license ids are unaffected either way.
 | `smallvec` | 1.15.2 | `MIT` |
 | `socket2` | 0.6.4 | `MIT` |
 | `spin` | 0.10.1 | `MIT` |
-| `spki` | 0.7.3 | `MIT` |
 | `stable_deref_trait` | 1.2.1 | `MIT` |
 | `static_assertions` | 1.1.0 | `MIT` |
 | `strsim` | 0.11.1 | `MIT` |
 | `strum` | 0.28.0 | `MIT` |
 | `strum_macros` | 0.28.0 | `MIT` |
 | `syn` | 2.0.119 | `MIT` |
-| `syn` | 3.0.6 | `MIT` |
+| `syn` | 3.0.9 | `MIT` |
 | `synstructure` | 0.13.2 | `MIT` |
 | `tempfile` | 3.27.0 | `MIT` |
 | `thiserror` | 2.0.21 | `MIT` |
@@ -348,13 +359,11 @@ above from what is left. The elected license ids are unaffected either way.
 | `time` | 0.3.55 | `MIT` |
 | `time-core` | 0.1.9 | `MIT` |
 | `time-macros` | 0.2.32 | `MIT` |
-| `tokio` | 1.53.2 | `MIT` |
+| `tokio` | 1.53.3 | `MIT` |
 | `tokio-macros` | 2.7.0 | `MIT` |
 | `tokio-rustls` | 0.26.6 | `MIT` |
-| `tokio-stream` | 0.1.18 | `MIT` |
 | `tokio-util` | 0.7.18 | `MIT` |
-| `tokio-websockets` | 0.10.1 | `MIT` |
-| `toml_datetime` | 1.1.1+spec-1.1.0 | `MIT` |
+| `toml_datetime` | 1.1.2+spec-1.1.0 | `MIT` |
 | `toml_edit` | 0.25.12+spec-1.1.0 | `MIT` |
 | `toml_parser` | 1.1.5+spec-1.1.0 | `MIT` |
 | `tower` | 0.5.3 | `MIT` |
@@ -367,30 +376,29 @@ above from what is left. The elected license ids are unaffected either way.
 | `tracing-serde` | 0.2.0 | `MIT` |
 | `tracing-subscriber` | 0.3.23 | `MIT` |
 | `try-lock` | 0.2.5 | `MIT` |
-| `tryhard` | 0.5.2 | `MIT` |
 | `twox-hash` | 2.1.5 | `MIT` |
 | `typenum` | 1.20.1 | `MIT` |
 | `unarray` | 0.1.4 | `MIT` |
 | `unicode-ident` | 1.0.24 | `MIT` |
 | `url` | 2.5.8 | `MIT` |
+| `urlencoding` | 2.1.3 | `MIT` |
 | `utf8_iter` | 1.0.4 | `MIT` |
-| `uuid` | 1.26.1 | `MIT` |
+| `uuid` | 1.28.0 | `MIT` |
 | `value-trait` | 0.12.2 | `MIT` |
 | `vcpkg` | 0.2.15 | `MIT` |
 | `version_check` | 0.9.5 | `MIT` |
+| `vsimd` | 0.8.0 | `MIT` |
 | `wait-timeout` | 0.2.1 | `MIT` |
 | `walkdir` | 2.5.0 | `MIT` |
-| `want` | 0.3.1 | `MIT` |
+| `want` | 0.3.2 | `MIT` |
 | `winnow` | 1.0.3 | `MIT` |
+| `xmlparser` | 0.13.6 | `MIT` |
 | `yaml_serde` | 0.10.4 | `MIT` |
 | `yansi` | 1.0.1 | `MIT` |
 | `zerocopy` | 0.8.52 | `MIT` |
 | `zerocopy-derive` | 0.8.52 | `MIT` |
 | `zeroize` | 1.9.0 | `MIT` |
 | `zmij` | 1.0.21 | `MIT` |
-| `zstd` | 0.13.3 | `MIT` |
-| `zstd-safe` | 7.2.4 | `MIT` |
-| `zstd-sys` | 2.0.16+zstd.1.5.7 | `MIT` |
 | `icu_collections` | 2.2.0 | `Unicode-3.0` |
 | `icu_locale_core` | 2.2.0 | `Unicode-3.0` |
 | `icu_normalizer` | 2.2.0 | `Unicode-3.0` |

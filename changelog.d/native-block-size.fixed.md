@@ -1,3 +1,0 @@
-**Native blocks reach `chunk.target_bytes`** (`spate-clickhouse`)
-
-A Native block closes at most 15 rows after its encoded size reaches `chunk.target_bytes`. In previous versions, the encoder over-estimated the block it was building, so blocks were sealed smaller than the target. The gap grew with each `LowCardinality` column. A table with four `LowCardinality(String)` columns and an `Array(LowCardinality(String))` column got blocks of about 42 KB at the default 64 KiB target. The same setting now gives fewer, larger blocks, so each insert carries fewer block headers and compressed frames. If you raised `chunk.target_bytes` to make up for small blocks, you can lower it again.

@@ -1,3 +1,0 @@
-**A dropped S3 lane stops reading its objects** (`spate-s3`)
-
-Dropping an S3 lane ends the task that reads its objects, also while that task waits to retry a failed read. In previous versions the task kept running after its lane was gone, so a read that kept failing went on retrying until it ran out of attempts, after a revocation or after the pipeline stopped. The task holds no acknowledgements, so ending it loses no records and replays none. `spate_s3_source_get_retries_total` counts a retry once its backoff ends, so it counts only the attempts actually made beyond the first. In previous versions it also counted a retry for the final failure of an exhausted attempt budget, and for a task that ended while it waited.

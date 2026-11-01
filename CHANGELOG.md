@@ -15,6 +15,400 @@ upgrading, and the second is what belongs here.
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-11-01
+
+### Added
+
+- **A bounded feed job ends on its own** (`spate-core`, `spate-s3`, `spate-sqs`, `spate-kafka`)
+
+  A job whose `feed:` section names a `location` ends once its lister run's end marker names the same run at the start and the end of a settling window over which every read of the feed, at most 20 seconds apart, finds no unit ready, delayed or held, and the worker holds none. The worker then reads the feed's dead-letter destination: empty ends the run completed, and any unit there fails it with an error that includes `bounded feed job stalled:` and names the destination and its count, so the process exits non-zero. The `feed:` section's `settling_window` sets the window, five minutes by default, from 20 seconds to 24 hours; it also bounds the wait for the job fingerprint. A solo S3 run on the in-process feed the runtime built ends once its listing is read and the feed is empty, with no window. A feed that cannot report its depth fails a bounded job at startup. The SQS feed reports the approximate message counts of its queue and its dead-letter queue, and refuses a `settling_window` below one minute, since SQS's counts take at least a minute to settle. The Kafka feed reports its group's lag on the work and retry topics, read through a consumer that never joins the group, and the dead-letter topic's end offsets.
+  ([#1330])
+- **A stopwatch and a wall-clock reader in `spate_core::clock`** (`spate-core`)
+
+  `spate_core::clock::Stopwatch` measures how far a `Clock` moves between two reads, and exposes no `Instant`, so a measurement cannot feed a deadline. `spate_core::clock::wall_now` returns the system's wall-clock time, for timestamps and identifiers only. A duration measured with `Stopwatch` on an injected `Clock` follows that clock, so a test that moves the clock measures the moved time.
+  ([#1508])
+- **A stopwatch on the tokio clock** (`spate-core`)
+
+  `spate_core::clock::tokio::Stopwatch` measures how far a tokio-timeline `Clock` moves between two reads, and exposes no `Instant`, so a measurement cannot feed a deadline. It mirrors `spate_core::clock::Stopwatch` for code on the tokio runtime.
+  ([#1509])
+- **Seeded hash map aliases in `spate_core::hash`** (`spate-core`)
+
+  `FastMap`, `FastSet`, `QualityMap` and `QualitySet` are std maps and sets over hashers seeded per instance, for operators and connectors that keep a map on the record path. `Fast*` is for keys the pipeline produces, and `Quality*` for keys an outside party chooses.
+  ([#1565])
+- **A shared clock holder in `spate_core::clock`** (`spate-core`)
+
+  `spate_core::clock::SharedClock` is an `Arc` of a `Clock` that is also `Send`, `Sync` and `RefUnwindSafe`, so a public type that holds one keeps those traits. `spate_core::clock::SyncClock` wraps a `SharedClock` and implements `Debug`, which `Clock` does not require, so a type that holds one can derive `Debug`. `SyncClock::system()` holds `SystemClock`, and `SyncClock::new` holds any shared clock, such as a test clock.
+  ([#1519])
+- **Task and thread handles in `spate_core::task`** (`spate-core`)
+
+  `spate_core::task::spawn` and `spawn_on` start a tokio task and return a `TaskHandle`. Dropping a `TaskHandle` aborts its task, and awaiting it returns the task's output or a `JoinError`. `TaskHandle::detach` lets a task run on with no owner. `spate_core::task::spawn_thread` starts a named OS thread and returns a `ThreadHandle`, which joins the thread when dropped. Each spawn takes a name, and a panic in the task or thread is logged at `ERROR` with that name. `spate_core::task::panic_text` returns the text of a panic payload.
+  ([#1556])
+- **Breaking:** **A feed backend receives a `Meter` of its own** (`spate-core`)
+
+  `Feed::attach_metrics` hands a feed backend a `FeedMetricsCtx`. Its `meter` is a `Meter` for the backend's own metric families, under `spate_<backend>_feed_*` with `component="feed"` and the backend's key as `component_type`. The runtime calls it before the source is handed the feed. Calls made before then, and a feed the runtime is not given, get no `Meter`. The context's `per_partition_detail` is the pipeline's `metrics.per_partition_detail`, which gates the backend's own per-partition families.
+
+  `feed` joins `ROLE_SEGMENTS`, so a `Meter` local name that starts with `feed_` panics, as one that starts with `source_` or `sink_` does. The rule holds in every namespace, including the `spate_custom_*` names `ChainCtx::meter` registers. v0.3.0 accepted such names, so a connector or pipeline author who registered one must rename it.
+  ([#1516])
+- **Breaking:** **The runtime publishes the feed's dead-letter depth** (`spate-core`)
+
+  `spate_feed_dead_letter_units` reports how many units the feed's dead-letter destination holds. Each instance reads it at startup and then once a minute, whether or not the job ends on its own, so a job that runs until a shutdown has a dead-letter alert. On a backend whose depth read is a request to its service, such as SQS, that is one request per instance each minute. An alert on `spate_coordination_splits_quarantined` from v0.3.0 can move to this gauge, aggregated across instances with `max`. On the Kafka feed the gauge never falls, so alert on a rise there.
+
+  `RuntimeOptions::dead_letter_read_interval` sets how often the runtime reads the depth, and `None` turns the reads off. Code that builds `RuntimeOptions` with a struct literal must set the new field or end with `..RuntimeOptions::default()`. A feed backend's `read_depth` may be called from a thread other than the source's. A test that scripts or counts dead-letter depth reads on a `spate-test` `FeedScript` also sees the runtime's reads, so it sets `dead_letter_read_interval` to `None`.
+  ([#1515])
+- **A stopping worker reads its feed units to a reserve before the drain deadline** (`spate-core`, `spate-kafka`, `spate-s3`, `spate-sqs`, `spate-test`)
+
+  On a graceful stop, a source whose feed hands back receives no more units and keeps reading the ones it holds until each is read to its end or until 5 s before `checkpoint.drain_timeout` runs out. It then hands back the units it has not read to its end, for another instance to read, at once on a feed that leases units. The drain deadline counts from the stop. The drivers and the sink drain end one second before it, and after the final commit the runtime closes the feed within what is left. Startup refuses a `checkpoint.drain_timeout` of 5 s or less with such a feed. Sources and feeds that do not opt in stop as before. A feed backend opts in through `Feed::hands_back`, `Feed::stop_receiving`, `Feed::hand_back` and `Feed::close`, and a source through `Source::reading_on_stop` and `Source::stop_reading`; `spate_core::feed::STOP_RESERVE` is the 5 s reserve, and `FeedScript::hand_back_on_stop` lets a test play such a feed. On such a feed the S3 source keeps each unit whose every object and byte range it has read to its end, for the final commit to acknowledge, fails back each unit with an object failure as before, and hands back the rest, whose records read before the stop are read again. The SQS feed hands back: it sets each unit the worker did not finish, and each unit it received and had not handed out, visible at once, keeps every unit it holds extended until it is acknowledged or handed back, and sends its queued deletes when the runtime closes it. The Kafka feed hands back: when the stop begins it pauses its partitions and records no attempt for a unit still at its gate, a handed-back unit stays held, and when the runtime closes it, it commits each partition up to its first unfinished unit and then leaves the group, so the next owner reads what it did not finish.
+  ([#1350])
+- **Breaking:** **The runtime records work feed calls under `spate_feed_*`** (`spate-core`)
+
+  When a pipeline's source reads a work feed named by the `feed:` section, the runtime records the calls the source makes on it, whatever the backend. The series sit under `spate_feed_*`, with `component="feed"` and the backend's key as `component_type`, and `docs/METRICS.md` describes each family.
+
+  `feed` is a reserved metric namespace. `Meter::with_namespace("feed", …)` panics, as it does for the other framework roots, and a source or sink whose `component_type` is `feed` receives no `Meter`. A connector or pipeline that registered its own `spate_feed_*` families must move them to another namespace.
+  ([#1514])
+- **A feed backend can label its families with the feed's operations** (`spate-core`)
+
+  `spate_core::metrics::FeedOp` names the calls a source makes on its feed, and `FeedOp::label` gives the `op` label value the `spate_feed_*` families use. A feed backend that counts something per call labels its own family with it, so the family joins the framework's on `op`. `FeedOp::ALL` lists every call in declaration order.
+  ([#1594])
+- **A `feed:` section selects the work feed** (`spate-core`, `spate-s3`, `spate-test`)
+
+  A pipeline file can name the feed its source reads with a top-level `feed:` section: one backend key, plus `units_held`, `attempt_cap`, `location`, a job location for a source that reads one, and `settling_window`, the settling window of a job that names one; the in-process feed refuses the last two, and `settling_window` is refused below 20 seconds and above 24 hours. The section is `spate_core::config::FeedSection`, and the runtime hands it to the source through `Source::configure_feed`, whose default refuses the section. The runtime builds the in-process feed itself for `feed: { memory: {} }`, through `MemoryFeed::from_section`. Any other backend is built in code and passed to `Pipeline::feed`, and the runtime refuses a feed whose `Feed::backend` key differs from the section's. `MemoryFeed::with_attempt_cap` sets the delivery on which the in-process feed dead-letters a failed unit. The S3 source reads work units from the feed the section names, with `units_held` bounding its read parallelism (by default twice the pipeline thread count). A unit the lister publishes names one object, one byte range of one object, or up to 16 small objects read whole in turn, and a notification message is one unit with one part per non-empty created object; a whole-object unit whose descriptor carries an ETag, over an object that qualifies for byte ranges, is read in ranges, each range in progress taking one of `units_held`. On a durable feed it lists nothing: it reads the units and storage notifications published to the feed, and publishes only the notification unit it re-enqueues after an overwrite, capping those re-enqueues at `attempt_cap`. On the in-process feed it lists its own prefix into the feed, and code can publish more units to a `MemoryFeed` it keeps a handle to and passes to `Pipeline::feed`, in which case the run ends only at a shutdown. Units from another process need a durable backend. A pipeline with no `feed:` section fails to start with the S3 source.
+  ([#1172])
+- **A feed trait for queue-fed sources** (`spate-core`, `spate-test`)
+
+  `spate_core::feed::Feed` is the contract a source uses to read work units from a queue. A source receives units, renews the ones it holds, and acknowledges or fails each one. A publisher adds units and reads a `Confirmation` that reports when the feed has stored each one. `spate_core::feed::memory::MemoryFeed` is an in-process feed for one instance. It keeps nothing across a restart and moves a unit that fails on its tenth delivery to an in-memory dead-letter list. A backend that can count what it holds answers `Feed::read_depth`, and `spate_core::feed::EndCheck` decides from those counts when a bounded job has read all of its work. `Source::configure_feed` learns from a `FeedOrigin` whether the runtime built the feed or code passed it in. `Source::renew_held` lets a source renew the units it holds while a revocation waits for its drain. `spate_test::scripted_feed` lets a test script redelivery, duplicate delivery, dead letters, publish outcomes, depth reads, and refusals of the next `receive`, `renew`, `acknowledge` or `fail` with a given `FeedErrorKind`.
+  ([#1123])
+- **Held writes in the capture sink** (`spate-test`)
+
+  `WriteOutcome::held()` scripts a capture-sink write that stays open until the test calls `SinkScript::release_held()`. No amount of real or tokio time releases it, so a test can check what a pipeline does while a write is outstanding without timing the write. `SinkScript::held_writes()` reports how many writes are waiting. Release every held write before you shut the run down, because a shutdown waits for them.
+  ([#1124])
+- **A gauge for how busy the I/O runtime is** (`spate-core`)
+
+  Each pipeline exports `spate_pipeline_io_busy_ratio`, the fraction of time the I/O runtime's async workers spent running tasks, from 0 to 1, averaged over the trailing 5 minutes (since start while shorter) and updated every 5 seconds. Previously no metric showed when those workers were the limit, so a saturated I/O runtime looked like a slow sink. When a full 5-minute window averages 0.9 or above, the pipeline logs one warning that names `pipeline.io_threads`, and logs it again only after the average has read below 0.9 for a full 5 minutes. A worker records its busy time about every 31 polls, so once the window is full a reading can be off by a few percent for polls under about 500 ms and by about 10% at 1 s polls. Longer polls read late and unevenly. The gauge does not count the blocking thread pool.
+  ([#1148])
+- **A bounded feed job checks its job fingerprint at a job location** (`spate-s3`)
+
+  When the `feed:` section names a `location`, the S3 source treats the job as bounded. Before it receives a unit, each worker reads the job fingerprint at that object-store prefix and compares it with its own. The fingerprint covers the unit format version, the source `url`, `compression`, `split_target_bytes` and the framer's delimiter. A worker whose fingerprint differs fails startup with both in the error, and one that finds none within the `feed:` section's `settling_window`, five minutes by default, exits non-zero. A location is written as `s3://<bucket>/<prefix>`, `s3a://<bucket>/<prefix>` or `file://`, and the source refuses any other form, one that carries userinfo, a query or a fragment, and one at or under its own prefix.
+  ([#1302])
+- **A Kafka feed backend** (`spate-kafka`, `spate`)
+
+  `spate_kafka::feed::KafkaFeed` reads work units from Kafka topics. `KafkaFeed::connect` builds it from a `feed: { kafka: … }` section, with `brokers`, `group_id`, the work `topic`, `retry_topic`, `dead_letter_topic`, `attempt_topic`, `delivery_timeout` (default 30 s), `statistics_interval` (default 5 s) and an `rdkafka:` passthrough, and code passes it to `Pipeline::feed`. Every worker reads the work and retry topics as one consumer group with eager assignment, and a publish writes a unit to the work topic with the unit's id as the key. Before a unit is read, the feed writes its attempt count to the compacted attempt topic as `{"v":1,"attempts":n}`, keyed by the publish identity `<topic>/<partition>/<offset>`, and the unit is read with that count once the write is confirmed. Every read counts, including one whose worker dies, though two copies of one publish read at the same time, as after a rebalance, can count once between them. A unit whose recorded attempts have reached the section's `attempt_cap` (default 10) goes to the dead-letter topic without being read. An acknowledged unit's attempt record is tombstoned, and its offset is committed once every record in it is acknowledged and the tombstone is confirmed. A failed unit is written to the retry topic, or to the dead-letter topic at the cap, with `spate.origin` and `spate.deliveries` headers, and its offset is committed only once that write is confirmed, and for the dead-letter topic once the tombstone after it is. A message with no key is a unit named by its position, `<topic>/<partition>/<offset>`, and a message whose key is not UTF-8 goes to the dead-letter topic at once. The feed never creates a topic. `KafkaFeed::connect` reads the four topics' metadata and configuration first, within 30 seconds, and refuses a missing topic, a work, retry or dead-letter topic whose `cleanup.policy` includes `compact`, an attempt topic whose `cleanup.policy` is anything but `compact` or that reports no partitions, and a work topic whose `message.timestamp.type` is not `LogAppendTime`, so the work topic's retention counts from when the broker appends each message, also for a store that stamps its notifications with timestamp 0. For a topic that goes missing after the feed connects, a write librdkafka still holds when it marks the topic missing stops the pipeline. After that, a publish to the missing work topic is reported to its caller as retryable, and an attempt, tombstone, retry or dead-letter write is sent again until the topic exists, with its partition committing nothing past it meanwhile. On a graceful stop the runtime closes the feed within what is left of `checkpoint.drain_timeout`: it waits up to half of that for its writes in flight, commits each partition up to its first unfinished unit and leaves the group; a feed dropped without a close waits up to 1 s. Startup refuses a `checkpoint.drain_timeout` of 5 s or less with the feed. `KafkaFeedPublisher::connect` builds a publish-only handle from the same section, for a process that only publishes, such as a lister run: it runs the same startup checks, then writes units to the work topic through one producer with the feed's settings, joins no group, reads no unit and writes no attempt record. Its `receive` fails as Fatal, and dropping it reports each publish it has not confirmed as retryable. Its identity needs `Describe` and `DescribeConfigs` on the four topics and `Write` on the work topic. A credential a broker rejects, or a TLS handshake either side rejects, after the feed or the handle connected, as its producer reports it, stops it with the reason, and so does a fatal producer error such as a refused idempotent producer id. `rdkafka:` refuses the properties the feed owns, such as `group.id`, `acks` and `partition.assignment.strategy`, `group.instance.id`, since a static member sends no LeaveGroup when it closes, and `enable.gapless.guarantee`, since a gap would stop the feed's producer. Each of the feed's six clients sends a `client.id` of `spate-feed-<role>`, such as `spate-feed-consumer`, unless `rdkafka:` sets one, which then applies to all six. A bounded job reads the feed's depth: the group's lag on the work and retry topics, read through a consumer that never joins the group, and the dead-letter topic's end offsets, which count a record retention has since deleted. The feed counts its confirmed retry and dead-letter writes, the latter by `reason`, and times its attempt writes under `spate_kafka_feed_*`, where its consumer's and producer's librdkafka statistics also register, labelled by `client`; the consumer's per-partition series carry `topic` and follow `metrics.per_partition_detail`.
+  ([#1211])
+- **A lister run publishes a bounded job's units** (`spate-s3`)
+
+  `S3Source::list_once` lists the source's prefix once and publishes the listed objects to a durable feed that `main()` builds from the `feed:` section, small ones packed into shared units toward `split_target_bytes` and large qualifying ones cut into byte ranges. It reads the workers' own pipeline file and builds no sink. It keeps its checkpoint at the job location and resumes after it, so a run that stops publishes the units after the last checkpoint again. Once the feed has confirmed every unit and the last checkpoint is written, it writes `end` at the location, holding an id fresh to the run; a run that fails writes none, except when the store kept the marker and its reply was lost. A unit the feed rejects as retryable is published again, up to five attempts, and one still rejected or refused fails the run. On the in-process feed a run lists its own prefix, keeps no checkpoint, lists and reads the prefix from the beginning after a restart, and says so in a startup WARN. Two lister runs at two locations publish every unit twice, and nothing detects it.
+  ([#1326])
+- **The S3 source reads a work unit that names several objects** (`spate-s3`)
+
+  On the feed path, a `SplitDescriptor` may name two or more objects. The S3 source reads them whole, one after another in descriptor order, on one lane, and acknowledges the unit once after the last is read. If one of them fails, the whole unit is failed back to the feed and is dead-lettered at its cap with every object it names. A descriptor that names no object, or more than `spate_s3::MAX_UNIT_MEMBERS` (4,096), is failed back. `spate_s3_source_objects_remaining` counts each object of such a unit.
+  ([#1484])
+- **The S3 source reads storage notifications from its feed** (`spate-s3`)
+
+  On the feed path, the S3 source reads storage notifications as well as the units a lister publishes. It reads an S3 `Records[]` message, the same records inside the envelope RustFS sends, and the S3 test event, which it acknowledges with nothing to read. Each `ObjectCreated:*` record becomes one part of the message's unit. Its key is decoded as `application/x-www-form-urlencoded`, or read as written when its record's `eventSource` is `ceph:s3`, and its ETag is sent quoted in `If-Match`. Records whose `eventName` creates nothing are dropped, and so are created objects of size 0 in the source's bucket, under its prefix and with a key that decodes or is read as written. The message is failed back to the feed, which dead-letters it at its cap, when any record has no `eventName` or one that is not a string, when any created record lacks `s3.bucket.name` or `s3.object.key`, carries a field of the wrong type, names another bucket, a key outside the source's prefix, no size, or a decoded key that does not decode, or when a created object of one byte or more has a key that `object_store` cannot read under its own name, an ETag that `If-Match` cannot carry, or a `versionId` longer than 1,024 bytes or holding a space or a control byte. A record whose `versionId` is a string other than `""` and `"null"` reads that version. The message is acknowledged once, after every part has been read. An object announced by both a listing and a notification is read twice. A `404` on a notification unit's read fails the unit back, and a `403` fails the pipeline. A notification unit whose object is overwritten under its ETag pin, on a read that names no version, delivers the records read before the overwrite and is re-enqueued through the feed at the key's current ETag, with a re-enqueue count one higher, and is acknowledged once the feed has stored the new unit and the sink has acknowledged every record read. At the `feed:` section's `attempt_cap`, 10 by default, the unit is acknowledged without a re-enqueue. `spate_s3_source_objects_overwritten_total` counts each overwritten read, and `spate_s3_source_overwrites_dropped_total` each one acknowledged at the cap.
+  ([#1284])
+- **A source learns the pipeline thread count at `open`** (`spate-core`)
+
+  `SourceCtx::threads` carries the number of pipeline threads the runtime resolved, the value `spate_pipeline_threads` reports, whether `pipeline.threads` sets it or the host derives it. A custom source can size its read parallelism from it. It is `None` when a source is opened by hand, as in a test, and `SourceCtx::with_threads` sets it there.
+  ([#1476])
+- **A source lane can report that it has finished** (`spate-core`)
+
+  `SourceLane::finished` lets a lane say it has reached the end of its input. The pipeline thread then stops polling it, and a thread whose lanes have all finished waits on its control channel until a lane is stopped, dropped or handed new work. Lanes that do not implement it are polled as before.
+  ([#1479])
+- **`spate-sqs`, an Amazon SQS feed backend** (`spate-sqs`, `spate`)
+
+  A new crate, `spate-sqs`, behind the `spate` feature `sqs`, reads work units from an SQS standard queue. `SqsFeed::connect` builds the feed from a `feed: { sqs: … }` section, with `queue_url`, `visibility` (default 60 s, renewed every third of it), `region` and `endpoint`, and code passes it to `Pipeline::feed`. A received unit stays hidden while its reader renews it, and the feed clamps every extension to the 12 hours SQS holds a message from the receive that issued its receipt handle. A unit is deleted once every record in it is acknowledged, and a failed unit is made visible at once, so the queue's redrive policy moves a unit that keeps failing to its dead-letter queue. A unit's body travels as the message text and its id in the `spate.unit` message attribute. `attempt_cap` is refused on `sqs`, where the queue's `maxReceiveCount` counts deliveries. `SqsFeed::connect` refuses a FIFO queue, a queue with no redrive policy, a dead-letter queue it cannot read or that keeps messages no longer than the queue, and a queue of the two that does not report its message counts. The feed reports the queue's and the dead-letter queue's approximate message counts to a bounded job's end check, and refuses a `settling_window` below one minute. The identity needs `sqs:GetQueueAttributes` on the dead-letter queue too. The feed counts the extensions SQS refuses by error code, the fails it drops past their deadline, and the calls it sends again by operation, under `spate_sqs_feed_extensions_refused_total`, `spate_sqs_feed_fails_dropped_total` and `spate_sqs_feed_retries_total`.
+  ([#1173])
+
+### Changed
+
+- **`AdminServer::run` closes every open connection when it returns** (`spate-core`)
+
+  When `AdminServer::run` returns, it closes every connection it accepted, including a kept-alive connection and one whose request is still in progress. In previous versions each connection ran on a detached task that kept serving after `run` returned, until the client closed it or the tokio runtime shut down. A client that holds an admin connection open sees it close when the pipeline stops serving the admin endpoints. A connection whose request panics is logged at `ERROR` with the message `admin connection panicked`.
+  ([#1556])
+- **Avro decoding hashes schema ids and names with a seeded quality hasher** (`spate-avro`)
+
+  The schema cache, the deserializer's held readers, the registry fetcher and the named-type index hash their keys with the quality variant of a seeded hasher. In previous versions they used std's SipHash. On the decode benchmarks a schema with recursive named references costs about 20–24% fewer instructions, and a payload whose schema id is cached as failed, such as an id the registry does not know, costs about 20% fewer. Resolving against a reader schema costs up to 2% fewer.
+  ([#1569])
+- **Breaking:** **A registry password without a username fails at load** (`spate-avro`)
+
+  The Avro deserializer rejects a `registry` section that sets `password` without `username` when the configuration loads, and the error names both fields. In previous versions the section loaded and the password was never sent. A registry that requires authentication then rejected the requests, and the pipeline stopped the first time it needed a schema from the registry. A registry that needs no authentication accepted the requests, so such a pipeline ran and now fails to start. Set `registry.username`, or remove `registry.password` if the registry needs no authentication. A username without a password is still accepted.
+  ([#1153])
+- **Schema registry task panics are logged** (`spate-avro`)
+
+  When the Avro deserializer's schema registry fetcher or its startup pre-warm panics, the panic is logged at `ERROR` with the message `background task panicked` and the task name `avro-registry-fetcher` or `avro-registry-prewarm`. In previous versions such a panic was only printed to standard error by the default panic hook, so it did not appear in the pipeline's `tracing` output. A panic while fetching one schema is logged as `registry fetch task panicked` with the panic's text. The tasks run and end as before.
+  ([#1557])
+- **Breaking:** **A captured write reads `Pending` until it resolves** (`spate-test`)
+
+  `SinkScript::writes()` lists each write when it starts, with `CapturedWrite.result` set to the new `ScriptedResult::Pending` until the write returns. A write still in its `.after()` delay, a held write, and one whose future was dropped before it resolved read `Pending`. In previous versions a write scripted with `.after()` read its scripted result from the moment it started. A test that counts `result == ScriptedResult::Ok` as rows written no longer counts a write that has not finished. A test that reads a delayed write's scripted result from `writes()` before the write returns reads `Pending` instead. Read the result after the write returns.
+  ([#1422])
+- **Breaking:** **The ClickHouse sink compresses insert bodies on pipeline threads** (`spate-clickhouse`)
+
+  With `compression: lz4` or `zstd`, the sink compresses each chunk on the pipeline thread when the chunk seals. It reuses one zstd context per thread. Previously the I/O runtime compressed every frame inside the send, and a retry compressed it again. A retry now resends the stored bytes. `compression: off` sends the same request as before. `settings: { decompress: … }` is now rejected, because the sink sets it. Under `lz4` or `zstd`, server error 271 means the server could not decode a block, and it now stops the sink instead of being retried. A stored block that passes its checksum and fails to decode, read by a materialized view during the insert, also answers 271 and stops the sink under `lz4` or `zstd`; this is rare. Under `compression: off`, 271 is retried as before. On a host where the pipeline threads are already the limit, compression now uses their CPU.
+
+  A manually assembled pipeline must attach the sink's codec. Take `parts.frame_codec` from `into_parts()` and pass it to `ShardQueues::with_frame_codec`, or call `ClickHouseSink::frame_codec()` before `into_parts`. A caller that uses `ClickHouseWriter::write_batch` directly must code its frames with that codec. Otherwise the sink records a fatal error and sends no request.
+  ([#1142])
+- **LowCardinality columns hash their values with a seeded quality hasher** (`spate-clickhouse`)
+
+  The native encoder's per-block LowCardinality dictionary hashes each value with the quality variant of its seeded hasher, which spreads every input bit into the bits the table indexes on. On the encode benchmarks this costs about 1% more instructions on x86_64 and 2% on aarch64 for a schema built around LowCardinality columns, and under 0.2% on the other encode cases. The encoded bytes are unchanged.
+  ([#1567])
+- **ClickHouse query responses arrive uncompressed** (`spate-clickhouse`)
+
+  The ClickHouse sink asks for its query responses uncompressed. These are the schema check, the `Distributed` guard and the breaker's `SELECT 1` probe. Previously the sink asked for them in the codec `compression` names, and the server compressed them when its `enable_http_compression` setting was on. Insert bodies are unchanged: `compression` still applies to them. The responses are a few rows, so throughput does not change.
+  ([#1451])
+- **A `CommitReady` partition is committed until its lanes leave** (`spate-core`)
+
+  A partition named in `SourceEvent::CommitReady` is committed on a 1 ms cadence for one `checkpoint.interval`. After that, it is committed on each control-plane poll that finds its acknowledged position advanced, until its lanes are retired or revoked or a new assignment begins. The periodic commit still covers the partition and retries a commit that failed. An acknowledgment of its final records that resolves after the first interval is committed within one event poll timeout. In previous versions the partition returned to the periodic commit after one `checkpoint.interval`, so such an acknowledgment waited up to one more interval. The positions committed are unchanged, and a source that never emits the hint keeps the periodic commit.
+  ([#1435])
+- **Breaking:** **`ExitReport.final_watermarks` lists only the partitions the source still holds** (`spate-core`)
+
+  `ExitReport.final_watermarks` lists the last committed watermark of the partitions the source held at the final commit. A partition whose lanes were retired or revoked during the run is left out. In previous versions the list kept every partition committed during the run, so a Kafka consumer's report named partitions a rebalance had moved to another member. A partition that the next assignment hands back keeps its entry when no lanes were added since its revocation, and is otherwise listed once it commits again. What the source commits is unchanged.
+
+  A source that emits `SourceEvent::LanesAdded` must give each added lane a partition above every partition admitted to the current epoch so far, revoked and retired ones included. `Checkpointer::extend_epoch` rejects a partition at or below the highest one admitted, and the run fails from the `checkpoint` component. In previous versions it rejected only a partition seen earlier in the epoch, and remembered every one for the rest of the epoch. A source that numbers its partitions in ascending order needs no change; a returning partition still needs a new epoch through `SourceEvent::LanesAssigned`.
+  ([#1415])
+- **Breaking:** **A sink can code each sealed chunk on the pipeline thread** (`spate-core`, `spate-test`)
+
+  A sink can supply a `FrameCodec` through `SinkParts::with_frame_codec`. The pipeline thread runs the codec once on each chunk when the chunk seals. The shard worker sends the coded bytes unchanged, including on retries. The in-flight budget and `batch.max_bytes` still count the bytes before coding, so sizing rules do not change. `EncodedChunk` has a new public field, `raw_len`, the frame's length before coding. Code that builds an `EncodedChunk` with a struct literal must set it.
+
+  A manually assembled pipeline attaches a sink's codec with `ShardQueues::with_frame_codec(..)`, using `parts.frame_codec`, before it hands the queues to chains. `CaptureSink::with_frame_codec` lets tests attach a codec to the capturing sink.
+  ([#1137])
+- **The derived pipeline thread count keeps fewer cores for the I/O runtime** (`spate-core`)
+
+  When `pipeline.threads` is unset, the pipeline now runs `available_parallelism` minus one core for every two `io_threads` workers (rounded up), minus one core for the controller. Previously it subtracted one core for each I/O worker. With the default `io_threads: 2`, a 4-core host now runs 2 pipeline threads instead of 1, and a 32-core host runs 30 instead of 29. Compression for a sink that supplies a frame codec runs on the pipeline threads, so the I/O workers no longer carry it. Pipelines that set `pipeline.threads` are unaffected. To keep the previous count, set `pipeline.threads` to it.
+  ([#1144])
+- **Rejecting duplicate JSON keys costs fewer instructions** (`spate-json`)
+
+  With `reject_duplicate_keys: true`, the guard that tracks each object's keys hashes them with a seeded quality hasher. In previous versions it used std's SipHash. On the decode benchmarks a clean document decoded with the guard on costs 8–14% fewer instructions, of which the guard's own share falls by about 19–40%. Rejecting a duplicate at the end of a wide object costs about 36–40% fewer. The error a duplicate raises is unchanged.
+  ([#1566])
+- **Breaking:** **`MetricsHandle::spawn_upkeep` returns a `TaskHandle`** (`spate-core`)
+
+  `MetricsHandle::spawn_upkeep` returns a `spate_core::task::TaskHandle<()>`, and dropping that handle stops the upkeep task. In previous versions it returned a `tokio::task::JoinHandle<()>`, and the task kept running after the handle was dropped. Code that discards the returned handle stops the upkeep at once. Keep the handle for as long as histograms and process metrics should stay current. The pipeline runtime holds its own upkeep handle until the run ends.
+  ([#1556])
+- **`spate_queue_depth` falls as the sink drains its queue** (`spate-core`)
+
+  The shard worker samples `spate_queue_depth` after each read from its queue, as well as the senders after each send. Previously only the senders sampled it, so once sends stopped it held the depth read at the last send even after the worker had emptied the queue. That reading was the queue's capacity when the last send found the queue full, and could be as low as 1 when the worker had kept up with the senders. A dashboard or alert that reads a depth stuck at capacity as a sign of backpressure sees it drop once the worker next reads from the queue. A send that lands as the worker empties the queue can leave its own reading in place until the next send. The reading still holds at capacity while the sink cannot take another batch, and a queue closed at shutdown keeps its last reading.
+  ([#1306])
+- **The S3 source reads a lane's next window while it hands on the current one** (`spate-s3`)
+
+  When a lane starts handing on a GET window, the source starts the GET for the next window. At the last window of an object in a unit, it reads the first window of the next object instead. In previous versions the next GET started only once the current window's last chunks fit the lane's hand-off of four chunks, so a lane with the default `chunk_bytes` of 512 KiB could wait on its next GET. The read-ahead no longer depends on `chunk_bytes`, and a lane still has at most one GET in flight. When each window spans at least four chunks, as at the defaults, a lane can hold three windows, about `3 × units_held × prefetch_bytes` in total, or 48 MiB per pipeline thread at the defaults, so a host with 30 pipeline threads can hold about 1.4 GiB. In previous versions a run read 8 lanes of two windows each by default, about 128 MiB whatever its pipeline thread count. Shorter windows leave more of them queued. Lower `prefetch_bytes` or `units_held` to bound the read-ahead.
+  ([#1505])
+- **Breaking:** **An unrecognized `store` key fails at load** (`spate-s3`)
+
+  For an S3 URL (`s3://`, `s3a://`, or an `https://` URL on an `amazonaws.com` or `r2.cloudflarestorage.com` host), a key under `store` that `object_store` does not recognize as an S3 option fails pipeline load, and the error names the key. In previous versions, the source skipped the key without a message. A misspelled `endpoint` therefore built a client for the default AWS endpoint and sent it requests signed with the configured credentials. Each request carried the access key ID and any session token. A configuration that carries such a key loads on v0.3.0 and fails on this version: correct the key's spelling or remove it. Keys under a `file://` URL are not checked.
+  ([#1237])
+- **Breaking:** **A sink writer receives its `Meter` through a `SinkMetricsCtx`** (`spate-core`)
+
+  `ShardWriter::attach_metrics` takes a `SinkMetricsCtx`, whose `meter` is the `Meter` for the writer's own `spate_<component_type>_sink_*` families. The builder calls it once before the writer is shared, as before. In previous versions it received the `Option<Meter>` directly.
+
+  An override becomes `fn attach_metrics(&mut self, cx: SinkMetricsCtx)` and reads `cx.meter`. A direct call wraps its argument in `SinkMetricsCtx::new`. A writer that takes the default needs no change.
+  ([#1614])
+- **Breaking:** **The split branch's bundle and handle are renamed** (`spate-core`)
+
+  The bundle that `ChainCtx::sink` returns for one split branch is `spate::ops::SplitTarget`, and the typed handle that `SplitBuilder::add` returns is `spate::ops::SplitBranch<F>`. In previous versions they were `spate::ops::SinkCtx` and `spate::ops::Sink<F>`, and the old names are removed. `ChainCtx::sink`, `SplitBuilder::add`, `SplitEmitter::emit`, `SplitTarget::new` and `SplitTarget::with_chunk` keep their names and behavior. A pipeline that passes `ctx.sink(..)` into `add` and emits the returned handle compiles unchanged.
+
+  To upgrade, change the names where code writes them: a split assembled by hand with `SinkCtx::new`, and a handle stored in a typed field or signature. The same paths apply without the facade, under `spate_core::ops`.
+  ([#1615])
+- **Dependency requirements** (`spate-avro`, `spate-clickhouse`, `spate-coordination`, `spate-core`, `spate-kafka`, `spate-s3`, `spate-sqs`, `spate-test`)
+
+  The published manifests of these crates carry new requirements for the
+  dependencies listed below. Cargo resolves your lockfile against these
+  requirements, so a raised requirement can raise the version your project builds
+  with. Each line shows the requirement in this release first, then the
+  requirement in the previous release. A crate can enable more features than a
+  line shows.
+
+  - `async-nats` (`spate-coordination`): no longer a dependency. Previously `0.50`.
+  - `aws-config` (`spate-sqs`): `1.13` without default features, with features `credentials-process`, `default-https-client`, `rt-tokio`, `sso`. New in this release.
+  - `aws-credential-types` (`spate-sqs`): `1.3.1`. New in this release.
+  - `aws-sdk-sqs` (`spate-sqs`): `1.114` without default features, with features `default-https-client`, `rt-tokio`. New in this release.
+  - `aws-smithy-http-client` (`spate-sqs`): `1.5.1` without default features, with features `rustls-aws-lc`. New in this release.
+  - `base64` (`spate-s3`): `0.23.1`. Previously `0.22.1`.
+  - `cityhash-rs` (`spate-clickhouse`): `1.0.1`. New in this release.
+  - `clickhouse` (`spate-clickhouse`): `0.15.3` without default features. Previously `0.15`.
+  - `lz4_flex` (`spate-clickhouse`): `0.14.0` without default features, with features `std`. New in this release.
+  - `object_store` (`spate-s3`): `0.14.1`. Previously `0.14`.
+  - `quick-xml` (`spate-s3`): `0.41.0` with features `overlapped-lists`, `serialize`. New in this release.
+  - `rdkafka` (`spate-kafka`): `0.39` with features `zstd`. Previously `0.39`.
+  - `tracing-subscriber` (`spate-core`, `spate-test`): `0.3.19` without default features. Previously `0.3.8` without default features.
+  - `twox-hash` (`spate-clickhouse`): `2.1.4` without default features, with features `xxhash64`. Previously `2.1` without default features, with features `xxhash64`.
+  - `webpki-root-certs` (`spate-sqs`): `1.0.10`. New in this release.
+  - `webpki-roots` (`spate-avro`, `spate-clickhouse`): `1.0.10`. Previously `1.0.8`.
+  - `zstd` (`spate-s3`): `0.14.3` without default features. Previously `0.13`.
+  - `zstd-sys` (`spate-kafka`): `2.1.2` without default features. New in this release.
+
+### Removed
+
+- **Breaking:** **`spate-s3` reads only through a feed** (`spate-s3`)
+
+  The S3 source reads work units and storage notifications from the feed that the pipeline's `feed:` section names. A pipeline with an S3 source and no `feed:` section fails to start, and the error names the section to add. `feed: { memory: {} }` runs the source in one process, which lists its own prefix. That feed keeps nothing across a restart, so a restart lists and reads the whole prefix again.
+
+  `S3Source::with_coordinator` and the `refresh_listing` source key are removed. A source file that sets `refresh_listing`, to `false` as well, fails to load: remove the key. `split_target_bytes` remains: objects at or below it are packed into units of at most 16 objects, larger ones that qualify for byte ranges are cut into ranges of at most it, and any other is one unit. A re-listing of an open prefix has no replacement: a continuous job reads storage notifications, and a bounded job lists once.
+
+  `split_id_for` and `split_id_for_range` now return `Result<String, SplitError>`, and `SplitDescriptor::encode` and `SplitDescriptor::decode` return `SplitError` in place of `CoordinationError`. `SplitError` carries the reason in its `reason` field. The ids they mint are unchanged.
+
+  The `spate_s3_source_objects_listed_total` counter is removed, since nothing increments it. Remove it from dashboards and alerts.
+  ([#1396])
+- **Breaking:** **`spate-coordination` and the coordination traits are removed** (`spate`, `spate-core`, `spate-coordination`, `spate-test`)
+
+  The `spate-coordination` crate is removed with its memory and NATS stores. A work feed replaces it: the S3 source reads its input only through a feed, which a `feed:` section names. The `spate` features `coordination` and `coordination-nats` and the `spate::coordination` path are removed, so a `Cargo.toml` that names either feature no longer resolves.
+
+  `spate_core::coordination` is removed with every item in it, among them `SplitPlanner`, `SplitCoordinator`, `SplitSource`, `CoordinationDriver`, `SplitId`, `SplitSpec`, `SplitPlan`, `LeaseEpoch` and `CoordinationError`. `spate-test` no longer exports `scripted_coordinator`, `ScriptedCoordinator` or `CoordinatorScript`. `Source::configure_coordination` and `Source::commit_final` are removed, so a source that overrides either stops compiling; the final commit of a stop is a call to `Source::commit`. `PipelineConfig::coordination` and `CoordinationSection` are removed, along with `CoordinationMetrics`, `AcquireReason`, `ReplanOutcome`, `RevocationOutcome`, `SplitLossReason` and `StoreOp`.
+
+  A pipeline file that keeps a `coordination:` section, in any spelling, fails to load. The section and the two `Source` methods first shipped in v0.3.0. The 23 `spate_coordination_*` metric families are removed, so update any dashboard or alert that reads them; the `coordination` prefix stays reserved for custom metric namespaces.
+
+  A coordinated job started on v0.3.0 cannot resume on this release. It has to finish on v0.3.0, or run again through a feed, which lists the prefix again, so a sink without idempotence sees those records twice.
+  ([#1410])
+
+### Fixed
+
+- **Breaking:** **A current-thread I/O runtime fails startup** (`spate-core`)
+
+  `PipelineRuntime::run` returns `StartError::Config` when the runtime passed to `PipelineRuntime::with_io_runtime` is a current-thread runtime. In previous versions, `run` accepted it. Tasks on that runtime, such as sink workers, the admin server and the upkeep task, ran only during brief startup and drain steps, and not while records flowed. Build the I/O runtime with `tokio::runtime::Builder::new_multi_thread`. Pipelines built with `Pipeline::from_config` are not affected.
+  ([#1158])
+- **Breaking:** **The Kafka sink no longer creates a missing topic, and the Kafka source and sink refuse more `rdkafka:` keys** (`spate-kafka`)
+
+  The sink's producer and readiness probe set `allow.auto.create.topics=false`. In previous versions they kept librdkafka's producer default, so a sink pointed at a missing topic created it with the broker's defaults wherever the broker allows auto-creation, as Apache Kafka does by default, and the readiness probe's metadata read was enough to do it. The probe reports the missing topic as fatal, and a write to it fails. `rdkafka:` refuses `allow.auto.create.topics` on the sink and the source, and the source refuses `topic.auto.commit.enable`, `topic.enable.auto.commit` and `topic.auto.commit.interval.ms`, which the consumer never read. Every Kafka client sends a `client.id` of `spate-<section>-<role>`, such as `spate-sink-producer`, unless `rdkafka:` sets one. In previous versions each sent librdkafka's default, `rdkafka`, so a broker quota set on `rdkafka` stops matching. A configuration that carries one of the refused keys could load on v0.3.0 and fails at load on this version: remove the key.
+  ([#1517])
+- **A connection dropped during the SASL handshake in the Kafka sink** (`spate-kafka`)
+
+  The Kafka sink no longer takes a connection that drops during the SASL mechanism handshake for a rejected credential. A write whose deliveries time out after such a drop is retryable, and a failed readiness probe no longer names the drop as a rejection by a broker. In previous versions, librdkafka's authentication error for the drop was recorded as a rejection, so a write whose deliveries timed out in the following window was fatal. This could happen when a broker, or a proxy in front of it, restarted while the producer was logging in. A broker that refuses the login, or answers the handshake with a mechanism it does not support, is still a rejection.
+  ([#1217])
+- **Breaking:** **The Kafka sink refuses an owned property written with a `topic.` prefix** (`spate-kafka`)
+
+  An `rdkafka:` key that librdkafka reads as an owned property, such as `topic.acks`, `topic.request.required.acks` or `topic.message.timeout.ms`, fails pipeline load with the same reason as the unprefixed key, and the error names the key as written. A `topic.compression.codec` or `topic.compression.type` key beside the typed `compression` field fails as a conflict. In previous versions, the sink accepted these keys. A `topic.message.timeout.ms` or `topic.delivery.timeout.ms` value could replace the typed `delivery_timeout`, depending on the order the client applied the keys. A `topic.compression.codec` or `topic.compression.type` value other than `inherit` always replaced the typed `compression`. A `topic.acks` or `topic.request.required.acks` value other than `all` made pipeline load fail on some runs, when librdkafka refused to create the producer. A configuration that carries such a key could load on v0.3.0 and fails at load on this version: remove the key, or use the typed field that owns it.
+  ([#1242])
+- **Breaking:** **The Kafka source stops on a corrupt message** (`spate-kafka`)
+
+  A message librdkafka reports as corrupt (`BadMessage`, as `check.crcs: "true"` detects) fails the pipeline with a fatal error. Records read before it that the sink has not yet written are not acknowledged. In previous versions the source retried the error, and could commit past the corrupt message. For message format v0 or v1, librdkafka skipped the offset when the same fetch held later messages, so the record never reached the sink and the group's committed offset passed it. For a record batch in format v2, the source either retried forever behind a healthy probe or, under `auto.offset.reset: latest`, committed past the corrupt batch and the valid records after it.
+
+  After a restart, a partition with a committed offset is read from it, and the pipeline stops again at the corrupt message, because librdkafka checks the same data again. A partition with no committed offset starts where `auto.offset.reset` says. Under `earliest` the pipeline stops again at the same message. Under `latest`, the default, it starts at the end of the partition and never reads the corrupt message or the unwritten records before it. To resume, move the group's committed offset past the corrupt message, which skips that record. librdkafka checks CRCs only when `check.crcs` is `true`, which is not its default.
+
+  A fatal error librdkafka reports for a partition after records in the same poll also fails the pipeline, such as `TopicAuthorizationFailed` after the consumer loses Read on the topic. In previous versions the source dropped a `TopicAuthorizationFailed` met this way, and the partition could stop reading with no error reported.
+  ([#1265])
+- **Breaking:** **The Kafka source reads `topic.auto.offset.reset` as its reset policy** (`spate-kafka`)
+
+  A partition with no committed offset starts where `topic.auto.offset.reset` says, as it does under `auto.offset.reset`. In previous versions the source read only `auto.offset.reset` and started such a partition at its end, while librdkafka applied the prefixed value. A new consumer group configured with `topic.auto.offset.reset: earliest` skipped every record already in the topic. A configuration that sets both `auto.offset.reset` and `topic.auto.offset.reset` fails at load. It could load on v0.3.0: remove one of the two keys.
+  ([#1274])
+- **Kafka reads and writes zstd batches** (`spate-kafka`)
+
+  The Kafka source and the Kafka feed read zstd-compressed batches, and the Kafka sink accepts `compression: zstd`. In previous versions librdkafka was built without zstd. The source retried a zstd batch until the topic's retention deleted it: it logged a warning, read nothing further from the partition, and the health probes stayed healthy. While the batch was still in the partition, no record was lost where the group had committed an offset for the partition. The committed offset did not move past the batch, and an upgraded pipeline on the same group resumes from it. A partition the group had never committed starts under `auto.offset.reset`. With the default, `latest`, an upgraded pipeline skips the zstd batch and every record written before it starts reading the partition. With `earliest`, it reads the partition from the start. Once retention deleted the batch, the source moved on by itself under `latest` or `earliest`. With `latest` it skipped every record still in the partition. With `earliest` it lost only the records retention deleted. With `error` it logged a warning and read nothing further from the partition. The sink failed to create its producer for `compression: zstd`. A batch in a codec librdkafka cannot read fails the pipeline with a fatal error, before any record after it is delivered, and so does a batch in a message format it does not know, read from its first record. librdkafka's error text for it is part of the error.
+  ([#1256])
+- **Native blocks reach `chunk.target_bytes`** (`spate-clickhouse`)
+
+  A Native block closes at most 15 rows after its encoded size reaches `chunk.target_bytes`. In previous versions, the encoder over-estimated the block it was building, so blocks were sealed smaller than the target. The gap grew with each `LowCardinality` column. A table with four `LowCardinality(String)` columns and an `Array(LowCardinality(String))` column got blocks of about 42 KB at the default 64 KiB target. The same setting now gives fewer, larger blocks, so each insert carries fewer block headers and compressed frames. If you raised `chunk.target_bytes` to make up for small blocks, you can lower it again.
+  ([#1161])
+- **Each pipeline thread sends a sink shard its chunks in seal order** (`spate-core`)
+
+  Each pipeline thread sends a sink shard's worker its chunks in the order it sealed them. In previous versions, a chunk sealed while an earlier chunk for the same shard waited for queue space could be sent first, when the shard's queue freed a slot before the waiting chunk was retried. Writes for one shard can still complete out of order while several batches are in flight, up to `inflight.max_per_shard`. Chunks from different pipeline threads can reach a shard in any order. No record was lost or duplicated, because each chunk carries its own acknowledgments.
+  ([#1145])
+- **A panicking sink probe turns readiness off** (`spate-core`)
+
+  When the sink connectivity probe panics, the pipeline marks the sinks not connected, so `/readyz` returns 503 and stays there. The panic is logged at `ERROR` with the task name `sink-probe`. In previous versions the probe stopped running after a panic and `/readyz` kept the answer of the last successful probe, so a pod could stay ready with no check behind it.
+  ([#1556])
+- **A dropped S3 lane stops reading its objects** (`spate-s3`)
+
+  Dropping an S3 lane ends the task that reads its objects, also while that task waits to retry a failed read. In previous versions the task kept running after its lane was gone, so a read that kept failing went on retrying until it ran out of attempts, after a revocation or after the pipeline stopped. The task holds no acknowledgements, so ending it loses no records and replays none. `spate_s3_source_get_retries_total` counts a retry once its backoff ends, so it counts only the attempts actually made beyond the first. In previous versions it also counted a retry for the final failure of an exhausted attempt budget, and for a task that ended while it waited.
+  ([#1558])
+- **A pipeline thread no longer polls S3 lanes that have read their input to the end** (`spate-s3`)
+
+  A thread whose S3 lanes have all reached the end of their input waits on its control channel until they are retired. In previous versions it polled those lanes in a loop and ran a full core until the sink acknowledged their last records, which for small objects is up to one `batch.linger`.
+  ([#1480])
+- **Objects with reserved characters in the key are read** (`spate-s3`)
+
+  The S3 source reads every listed object under the key the listing returned. In previous versions, the source requested a different key for an object whose key contained any non-ASCII character or one of `%` `#` `[` `]` `{` `}` `<` `>` `^` `~` `|` `\` `` ` `` `"` `*` `?`. The store answered that request with "not found". The split was retried, then quarantined at its attempt cap, and a bounded job ended `Stalled` with that object unread. Keys made only of other printable ASCII characters were not affected.
+  ([#1115])
+- **An S3 source error cuts the store's error body to a bound** (`spate-s3`)
+
+  An error from a failed object read or backfill listing carries at most 512 characters of the store's response body, with `…` where the body was cut. The request and the HTTP status ahead of the body are kept whole, and a TLS rejection behind the text is still named in full. In previous versions, such an error, and the log line that reported it, carried the store's whole response body, of any size. The error's class, and what the source does with the object or the listing, are unchanged.
+  ([#1351])
+- **A key the S3 client cannot address poisons a split of its own** (`spate-s3`)
+
+  The S3 source lists every object under the prefix even when some keys cannot be read through the S3 client. Such a key has an empty segment (`d//x.ndjson`), a `.` or `..` segment, or an ASCII control character, or starts or ends with `/`. Each object with such a key is planned in a split of its own, which poisons on its first read with the key in its reason, so a bounded job reads every other object and then ends stalled. An object with such a key and no bytes, such as a folder marker `dir/`, is not planned. In previous versions, one key with an empty, `.` or `..` segment or a control character failed the pipeline at its first listing. An object with bytes whose key started or ended with `/` was read under the key without it, pinned to its own listed ETag, so the read failed and poisoned its split and every object packed with it unless an object under that key had the same ETag.
+  ([#1169])
+
+### Security
+
+- **Unknown schema ids no longer grow the schema cache without bound** (`spate-avro`)
+
+  The schema cache removes a negative entry once its `negative_cache_ttl` has passed, and holds at most 1,024 negative entries, dropping the oldest for a new one. In previous versions an expired negative entry stayed in the map, so each distinct schema id the registry did not know added an entry for the life of the process. Each new entry also copied the whole map under the lock that schema lookups wait on, so a producer writing records with many distinct unknown ids to a Confluent wire-format topic could slow schema resolution for the pipeline. A dropped entry costs at most one more registry fetch for that id. The `registry reports schema id unknown` warning is rate-limited, so records naming many unknown ids no longer log one line each. Records whose schema is already cached were not affected.
+  ([#1626])
+- **A small compressed object no longer drives memory without bound** (`spate-s3`)
+
+  The S3 source decodes a gzip or zstd chunk in steps of about 256 KiB of output and moves each step's records into the batch before decoding the next. In previous versions one chunk, up to `source.s3.chunk_bytes` of compressed input, was decoded in full and every record it produced was queued at once. An object of a few kilobytes that expands to many short records could hold gigabytes of memory and stop the pipeline process. Anyone able to write an object under the source's prefix could trigger this, and the object was read again each time its unit was retried. The zstd decoder accepts a window of at most 128 MiB per lane, which is the zstd library's own default; a frame that declares a larger window fails its unit as undecodable. Uncompressed objects were not affected.
+  ([#1625])
+- **The Mozilla root bundle no longer trusts emSign ECC Root CA - G3** (`spate-avro`, `spate-clickhouse`)
+
+  The fallback root bundle these crates use requires `webpki-roots` 1.0.10, which removes the `emSign ECC Root CA - G3` root (RUSTSEC-2026-0381). The private keys of several intermediates under that root are public, so anyone can issue a certificate through them for any host name. In previous versions the crates accepted `webpki-roots` 1.0.8 and 1.0.9, which include the root. The bundle is used only when the system trust store yields no certificates, such as in a container image without CA certificates. It applies to the Avro schema registry client and the ClickHouse sink over `https`. A deployment in that situation could accept a forged certificate for those servers. Run `cargo update -p webpki-roots` if your lockfile resolves an older 1.x release. A trust store read from the system is not affected by this change; keep the operating system's CA certificates up to date.
+  ([#1319])
+- **zstd objects decode with a patched decoder** (`spate-s3`, `spate-clickhouse`)
+
+  The S3 source decodes `.zst` objects with `zstd` 0.14.3 and `zstd-safe` 8.2.0. In previous versions it used `zstd` 0.13.3 and `zstd-safe` 7.2.4, whose streaming decoder could carry up to 32 KiB of uninitialized heap memory into its output when decoding failed inside a legacy (zstd v0.4 to v0.7) frame (RUSTSEC-2026-0403). Whoever can write an object under the source's prefix can supply such a frame. An object holding one fails its unit as undecodable either way. The ClickHouse sink's compressor moves to the same release, and the sink no longer depends on `zstd` 0.13.3. The compressor is not affected by the advisory.
+  ([#1451])
+
+### Contributors
+
+- Marcus Kainth
+- Aaron
+- Danny Ward
+
+[#1115]: https://github.com/spate-etl/spate/pull/1115
+[#1123]: https://github.com/spate-etl/spate/pull/1123
+[#1124]: https://github.com/spate-etl/spate/pull/1124
+[#1137]: https://github.com/spate-etl/spate/pull/1137
+[#1142]: https://github.com/spate-etl/spate/pull/1142
+[#1144]: https://github.com/spate-etl/spate/pull/1144
+[#1145]: https://github.com/spate-etl/spate/pull/1145
+[#1148]: https://github.com/spate-etl/spate/pull/1148
+[#1153]: https://github.com/spate-etl/spate/pull/1153
+[#1158]: https://github.com/spate-etl/spate/pull/1158
+[#1161]: https://github.com/spate-etl/spate/pull/1161
+[#1169]: https://github.com/spate-etl/spate/pull/1169
+[#1172]: https://github.com/spate-etl/spate/pull/1172
+[#1173]: https://github.com/spate-etl/spate/pull/1173
+[#1211]: https://github.com/spate-etl/spate/pull/1211
+[#1217]: https://github.com/spate-etl/spate/pull/1217
+[#1237]: https://github.com/spate-etl/spate/pull/1237
+[#1242]: https://github.com/spate-etl/spate/pull/1242
+[#1256]: https://github.com/spate-etl/spate/pull/1256
+[#1265]: https://github.com/spate-etl/spate/pull/1265
+[#1274]: https://github.com/spate-etl/spate/pull/1274
+[#1284]: https://github.com/spate-etl/spate/pull/1284
+[#1302]: https://github.com/spate-etl/spate/pull/1302
+[#1306]: https://github.com/spate-etl/spate/pull/1306
+[#1319]: https://github.com/spate-etl/spate/pull/1319
+[#1326]: https://github.com/spate-etl/spate/pull/1326
+[#1330]: https://github.com/spate-etl/spate/pull/1330
+[#1350]: https://github.com/spate-etl/spate/pull/1350
+[#1351]: https://github.com/spate-etl/spate/pull/1351
+[#1396]: https://github.com/spate-etl/spate/pull/1396
+[#1410]: https://github.com/spate-etl/spate/pull/1410
+[#1415]: https://github.com/spate-etl/spate/pull/1415
+[#1422]: https://github.com/spate-etl/spate/pull/1422
+[#1435]: https://github.com/spate-etl/spate/pull/1435
+[#1451]: https://github.com/spate-etl/spate/pull/1451
+[#1476]: https://github.com/spate-etl/spate/pull/1476
+[#1479]: https://github.com/spate-etl/spate/pull/1479
+[#1480]: https://github.com/spate-etl/spate/pull/1480
+[#1484]: https://github.com/spate-etl/spate/pull/1484
+[#1505]: https://github.com/spate-etl/spate/pull/1505
+[#1508]: https://github.com/spate-etl/spate/pull/1508
+[#1509]: https://github.com/spate-etl/spate/pull/1509
+[#1514]: https://github.com/spate-etl/spate/pull/1514
+[#1515]: https://github.com/spate-etl/spate/pull/1515
+[#1516]: https://github.com/spate-etl/spate/pull/1516
+[#1517]: https://github.com/spate-etl/spate/pull/1517
+[#1519]: https://github.com/spate-etl/spate/pull/1519
+[#1556]: https://github.com/spate-etl/spate/pull/1556
+[#1557]: https://github.com/spate-etl/spate/pull/1557
+[#1558]: https://github.com/spate-etl/spate/pull/1558
+[#1565]: https://github.com/spate-etl/spate/pull/1565
+[#1566]: https://github.com/spate-etl/spate/pull/1566
+[#1567]: https://github.com/spate-etl/spate/pull/1567
+[#1569]: https://github.com/spate-etl/spate/pull/1569
+[#1594]: https://github.com/spate-etl/spate/pull/1594
+[#1614]: https://github.com/spate-etl/spate/pull/1614
+[#1615]: https://github.com/spate-etl/spate/pull/1615
+[#1625]: https://github.com/spate-etl/spate/pull/1625
+[#1626]: https://github.com/spate-etl/spate/pull/1626
+
 ## [0.3.0] — 2026-10-11
 
 ### Added
@@ -2124,7 +2518,8 @@ boundaries, so rows can land twice. Design target tables to tolerate that.
 - Connector configuration structs are not yet `#[non_exhaustive]`, so adding a
   field is a breaking change until they are.
 
-[Unreleased]: https://github.com/spate-etl/spate/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/spate-etl/spate/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/spate-etl/spate/releases/tag/v0.4.0
 [0.3.0]: https://github.com/spate-etl/spate/releases/tag/v0.3.0
 [0.2.0]: https://github.com/spate-etl/spate/releases/tag/v0.2.0
 [0.1.0]: https://github.com/spate-etl/spate/releases/tag/v0.1.0

@@ -254,9 +254,9 @@ jobs:
       # `--stand-in-post` commits a draft post in the rehearsal's worktree
       # when the version is a minor with no post yet, since a minor release
       # needs its post committed first (website/blog/README.md).
-      # `--stand-in-fragment` commits a stand-in fragment there when
-      # changelog.d/ holds none, as it does after each release, since
-      # `assemble` refuses a release with nothing in it.
+      # `--stand-in-fragment` commits a stand-in fragment there when the
+      # release would have nothing in it, as after each release, since
+      # `assemble` refuses such a release.
       - name: Rehearse the release
         id: dry-run
         if: steps.version.outputs.skip != 'true'

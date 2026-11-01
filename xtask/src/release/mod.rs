@@ -91,15 +91,23 @@ pub(crate) enum ReleaseCommand {
         /// Keep the worktree after a successful run
         #[arg(long)]
         keep: bool,
-        /// When the version is a minor with no post yet, commit a draft
-        /// stand-in post in the worktree first
-        #[arg(long)]
-        stand_in_post: bool,
-        /// When changelog.d/ holds no fragment, commit a stand-in fragment in
-        /// the worktree first
-        #[arg(long)]
-        stand_in_fragment: bool,
+        #[command(flatten)]
+        stand_ins: StandIns,
     },
+}
+
+/// What a rehearsal commits in its worktree before `assemble`, standing in for
+/// what the maintainer commits by hand before a real release.
+#[derive(clap::Args, Clone, Copy, Default)]
+pub(crate) struct StandIns {
+    /// When the version is a minor with no post yet, commit a draft
+    /// stand-in post in the worktree first
+    #[arg(long)]
+    stand_in_post: bool,
+    /// When the release would have nothing in it, commit a stand-in changelog
+    /// fragment in the worktree first
+    #[arg(long)]
+    stand_in_fragment: bool,
 }
 
 pub(crate) fn dispatch(root: &Path, explain: bool, cmd: ReleaseCommand) -> Outcome {
@@ -245,9 +253,8 @@ pub(crate) fn dispatch(root: &Path, explain: bool, cmd: ReleaseCommand) -> Outco
         ReleaseCommand::DryRun {
             version,
             keep,
-            stand_in_post,
-            stand_in_fragment,
-        } => dry_run(root, &version, keep, stand_in_post, stand_in_fragment),
+            stand_ins,
+        } => dry_run(root, &version, keep, stand_ins),
     }
 }
 
@@ -404,17 +411,9 @@ fn preflight_sbom(root: &Path) -> Outcome {
 }
 
 /// Runs `assemble --dry-run` and `prepare --dry-run` in a detached worktree of
-/// `HEAD`. With `stand_in_post`, [`commit_stand_in_post`] runs in the worktree
-/// first, and with `stand_in_fragment`, [`commit_stand_in_fragment`]. The
-/// worktree is removed after a successful run unless `keep` is set, and kept
-/// after a failure.
-fn dry_run(
-    root: &Path,
-    version: &str,
-    keep: bool,
-    stand_in_post: bool,
-    stand_in_fragment: bool,
-) -> Outcome {
+/// `HEAD`, after [`stage_stand_ins`] in the worktree. The worktree is removed
+/// after a successful run unless `keep` is set, and kept after a failure.
+fn dry_run(root: &Path, version: &str, keep: bool, stand_ins: StandIns) -> Outcome {
     preflight(root, true)?;
     // The worktree is made from HEAD, so uncommitted work would be silently
     // left out of the rehearsal.
@@ -438,19 +437,7 @@ fn dry_run(
     // must not land in a target directory the main checkout shares.
     let target = tree.join("target").to_string_lossy().into_owned();
 
-    let staged = if stand_in_post {
-        commit_stand_in_post(&tree, version)
-    } else {
-        Ok(())
-    }
-    .and_then(|()| {
-        if stand_in_fragment {
-            commit_stand_in_fragment(&tree)
-        } else {
-            Ok(())
-        }
-    });
-    let outcome = staged
+    let outcome = stage_stand_ins(&tree, version, stand_ins)
         .and_then(|()| {
             run::run(
                 root,
@@ -556,22 +543,22 @@ pub(crate) const STAND_IN_FRAGMENT: &str = "rehearsal-stand-in.changed.md";
 pub(crate) const STAND_IN_ENTRY: &str =
     "**Release rehearsal stand-in**\n\nA rehearsal commit, never pushed.\n";
 
-/// The fragment a rehearsal needs, or `None` when `changelog.d/` under `root`
-/// already holds one. The question is the one [`changelog::build`] asks before
-/// it refuses an empty release, so the two agree.
+/// The fragment a rehearsal needs, or `None` when the tree at `root` has
+/// something to release. [`changelog::nothing_to_release`] answers, so a
+/// stand-in is written exactly where [`changelog::build`] would refuse.
 ///
 /// # Errors
 ///
-/// When `changelog.d/` cannot be read.
+/// When `changelog.d/` cannot be read or the requirement comparison fails.
 fn stand_in_fragment(root: &Path) -> Result<Option<&'static str>, Error> {
-    if changelog::has_fragments(root)? {
+    if !changelog::nothing_to_release(root)? {
         return Ok(None);
     }
     Ok(Some(STAND_IN_ENTRY))
 }
 
 /// Commits [`stand_in_fragment`]'s fragment in the checkout at `tree`, or
-/// leaves the checkout as it is when it holds a fragment already. The commit
+/// leaves the checkout as it is when it has something to release. The commit
 /// stays in the throwaway worktree and is never pushed.
 fn commit_stand_in_fragment(tree: &Path) -> Outcome {
     let Some(text) = stand_in_fragment(tree)? else {
@@ -587,8 +574,20 @@ fn commit_stand_in_fragment(tree: &Path) -> Outcome {
     };
     git.commit_all(
         "ci: stand in for the release's changelog fragments",
-        "A rehearsal commit, never pushed. A release refuses to assemble with no fragment.",
+        "A rehearsal commit, never pushed. A release with nothing in it refuses to assemble.",
     )
+}
+
+/// Commits the stand-ins `stand_ins` asks for in the checkout at `tree`, the
+/// post before the fragment.
+fn stage_stand_ins(tree: &Path, version: &str, stand_ins: StandIns) -> Outcome {
+    if stand_ins.stand_in_post {
+        commit_stand_in_post(tree, version)?;
+    }
+    if stand_ins.stand_in_fragment {
+        commit_stand_in_fragment(tree)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -766,7 +765,7 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
-        assert!(changelog::has_fragments(root).unwrap());
+        assert!(!changelog::nothing_to_release(root).unwrap());
 
         let stood_in = head(root, "--format=%H");
         commit_stand_in_fragment(root).unwrap();
@@ -778,6 +777,55 @@ mod tests {
         assert!(
             commit_stand_in_fragment(&dir).is_err(),
             "no changelog.d/ under it"
+        );
+    }
+
+    /// Each flag commits its own stand-in and nothing else, the post before the
+    /// fragment.
+    #[test]
+    fn each_stand_in_flag_commits_only_its_own_stand_in() {
+        let scratch = Scratch::new("spate-xtask-stage-stand-ins").unwrap();
+        let root = scratch.dir();
+        let blog = root.join(post::BLOG);
+        std::fs::create_dir_all(&blog).unwrap();
+        post(&blog, "a.md", "releases/0.3");
+        let dir = root.join(changelog::FRAGMENTS);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("README.md"), "# Changelog fragments\n").unwrap();
+        git(root, &["init", "-q"]);
+        git(root, &["add", "."]);
+        git(root, &["commit", "-q", "-m", "base"]);
+        let base = head(root, "--format=%H");
+        let subjects = |root: &Path| {
+            run::capture(
+                root,
+                &Step::new("git", ["log", "--format=%s", &format!("{base}..HEAD")]),
+            )
+            .unwrap()
+        };
+
+        stage_stand_ins(root, "0.4.0", StandIns::default()).unwrap();
+        assert_eq!(head(root, "--format=%H"), base);
+
+        let fragment_only = StandIns {
+            stand_in_fragment: true,
+            ..StandIns::default()
+        };
+        stage_stand_ins(root, "0.4.0", fragment_only).unwrap();
+        assert_eq!(
+            subjects(root),
+            "ci: stand in for the release's changelog fragments\n"
+        );
+
+        let post_only = StandIns {
+            stand_in_post: true,
+            ..StandIns::default()
+        };
+        stage_stand_ins(root, "0.4.0", post_only).unwrap();
+        assert_eq!(
+            subjects(root),
+            "website: stand in for the 0.4.0 release post\n\
+             ci: stand in for the release's changelog fragments\n"
         );
     }
 

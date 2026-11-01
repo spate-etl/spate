@@ -2810,6 +2810,24 @@ fn a_release_of_requirement_changes_alone_assembles() {
     );
 }
 
+/// A tree with no fragment has something to release once a root requirement
+/// moved since the tag, which is when [`build`] assembles it, and nothing once
+/// the requirements match the tag again.
+#[test]
+fn a_moved_requirement_is_something_to_release() {
+    let release = Release::new("a_moved_requirement_is_something_to_release");
+    std::fs::create_dir_all(release.path().join(FRAGMENTS)).unwrap();
+    requirements(&release.0, "0.18.1", "0.2.0");
+    release.0.commit("workspace: the manifests");
+    release.0.git(&["tag", "v0.2.0"]);
+    assert!(nothing_to_release(release.path()).unwrap());
+
+    requirements(&release.0, "0.19.0", "0.2.0");
+    release.0.commit("workspace: bump simd-json");
+    assert!(!nothing_to_release(release.path()).unwrap());
+    build(release.path(), false, "0.3.0").unwrap();
+}
+
 /// Only the margin lines that run on from a breaking entry move with it; a
 /// line after a blank line keeps its place in the group.
 #[test]

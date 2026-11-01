@@ -137,9 +137,10 @@ cargo xtask release dry-run --version X.Y.Z
 from the local `HEAD`, so a minor release's post has to be committed there
 first, as a draft. With `--stand-in-post`, when no post carries the release's
 slug yet, the rehearsal commits a draft stand-in in its worktree instead.
-`assemble` refuses a release with no changelog fragment, and with
-`--stand-in-fragment` the rehearsal commits a stand-in fragment when
-`changelog.d/` holds none, as it does after each release. The
+`assemble` refuses a release with nothing in it: no changelog fragment and no
+root dependency requirement moved since the last tag. With
+`--stand-in-fragment`, the rehearsal commits a stand-in fragment in that case,
+which is the state of `main` after each release. The
 dry run runs the same `assemble` and the publish up to staging in a throwaway
 git worktree. That covers the real release commit,
 every pending crate packaged and verify-built, and the SBOMs and `SHA256SUMS`
@@ -181,8 +182,9 @@ passes. A re-run keeps the run's
 merge commit, so a run made before the release commit landed needs a push, or
 the pull request closed and reopened. The nightly skips the night after a
 release when nothing has merged since the tag. When the derived version is a
-minor with no post yet, the flag commits a stand-in draft post in the
-rehearsal's worktree.
+minor with no post yet, `--stand-in-post` commits a stand-in draft post in
+the rehearsal's worktree, and `--stand-in-fragment` commits a stand-in
+fragment when the release would have nothing in it.
 `nightly.yml` also generates `THIRD-PARTY.md` each night, so a generator
 failure surfaces the same way.
 

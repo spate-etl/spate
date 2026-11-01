@@ -1786,17 +1786,21 @@ fn fragments_of(root: &Path, kind: &str) -> Vec<String> {
         .collect()
 }
 
-/// Whether `changelog.d/` under `root` holds a fragment [`build`] would
-/// assemble.
+/// Whether [`build`] would refuse the tree at `root` for having nothing to
+/// release: no fragment under `changelog.d/`, and no root dependency
+/// requirement moved since the previous tag.
 ///
 /// # Errors
 ///
 /// When `changelog.d/` cannot be read, which [`fragment_names`] would report
-/// as holding none.
-pub(crate) fn has_fragments(root: &Path) -> Result<bool, Error> {
+/// as holding none, or when the requirement comparison fails.
+pub(crate) fn nothing_to_release(root: &Path) -> Result<bool, Error> {
     let dir = root.join(FRAGMENTS);
     std::fs::read_dir(&dir).map_err(|e| Error::msg(format!("{}: {e}", dir.display())))?;
-    Ok(!fragment_names(root).is_empty())
+    if !fragment_names(root).is_empty() {
+        return Ok(false);
+    }
+    Ok(requirements::entry(root, previous_tag(root).as_deref())?.is_none())
 }
 
 /// Whether git has this path in the index.

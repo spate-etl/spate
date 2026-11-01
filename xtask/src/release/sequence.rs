@@ -83,19 +83,23 @@ fn security_milestones(version: Version) -> Vec<String> {
         .collect()
 }
 
-/// Fails naming every open `security` issue on [`security_milestones`].
+/// Fails naming every open `security` issue on [`security_milestones`], and
+/// closes the version's open release pull request, whose merge would publish.
 fn refuse_open_security_issues(host: &Host<'_>, version: Version) -> Outcome {
     let mut open = Vec::new();
     for milestone in security_milestones(version) {
         for issue in host.forge.open_security_issues(&milestone)? {
-            open.push(format!(
-                "#{} on {milestone}: {} ({})",
-                issue.number, issue.title, issue.url
-            ));
+            open.push(issue.describe(&milestone));
         }
     }
     if open.is_empty() {
         return Ok(());
+    }
+    if let Some(number) = host.forge.pull_for_head(&release_branch(version))? {
+        host.forge.close_pull(
+            number,
+            &format!("Closed: v{version} cannot release while a `security` issue is open."),
+        )?;
     }
     Err(Error::msg(format!(
         "v{version} cannot release while these security issues are open:\n  {}",

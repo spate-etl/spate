@@ -12,6 +12,7 @@ use serde::Deserialize;
 use super::version::Version;
 use crate::checks::scratch::Scratch;
 use crate::checks::semver_checks::{UA, fetch_index};
+use crate::checks::subject::printable;
 use crate::checks::{attribution, changelog, semver_checks};
 use crate::run::{self, Error, Outcome, Step};
 
@@ -62,6 +63,19 @@ pub(crate) struct Issue {
     pub(crate) number: u64,
     pub(crate) title: String,
     pub(crate) url: String,
+}
+
+impl Issue {
+    /// The issue as a log line naming `milestone`, with the title and url
+    /// escaped so neither can issue an Actions workflow command.
+    pub(crate) fn describe(&self, milestone: &str) -> String {
+        format!(
+            "#{} on {milestone}: {} ({})",
+            self.number,
+            printable(&self.title),
+            printable(&self.url)
+        )
+    }
 }
 
 pub(crate) trait Forge {
@@ -1050,7 +1064,9 @@ fn smoke_manifest(version: Version) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// The dry run's substitutes: reads pass through, writes are printed instead.
+// The dry run's substitutes: writes are printed instead of made, and reads
+// pass through except the open security issues, which are printed as the
+// refusal a real run makes and read as none.
 // ---------------------------------------------------------------------------
 
 fn would(what: &str) {
@@ -1092,8 +1108,9 @@ impl Git for DryGit<'_> {
     }
 }
 
-/// A forge whose writes are printed instead of made. A refused pull request
-/// listing reads as empty unless `.1` is set.
+/// A forge whose writes are printed instead of made, and whose open security
+/// issues are printed and read as none. A refused pull request or security
+/// issue listing reads as empty unless `.1` is set.
 pub(crate) struct DryForge<'a>(pub(crate) &'a dyn Forge, pub(crate) bool);
 
 impl Forge for DryForge<'_> {
@@ -1118,8 +1135,8 @@ impl Forge for DryForge<'_> {
             Ok(issues) => {
                 for issue in &issues {
                     would(&format!(
-                        "refuse the release for #{} on {milestone}: {} ({})",
-                        issue.number, issue.title, issue.url
+                        "refuse the release for {}",
+                        issue.describe(milestone)
                     ));
                 }
                 Ok(Vec::new())
@@ -1498,6 +1515,21 @@ mod tests {
 
         let refused = |_: &str| Err(Error::msg("refused"));
         assert!(security_issues(refused, "v0.5.0").is_err());
+    }
+
+    /// A milestone listing that does not parse fails the read, and does not
+    /// read as a missing milestone.
+    #[test]
+    fn an_unreadable_milestone_listing_fails_the_security_read() {
+        let get = |path: &str| {
+            Ok(if path.contains("/milestones?") {
+                r#"{"message":"Not Found"}"#.to_owned()
+            } else {
+                "[[]]".to_owned()
+            })
+        };
+        let err = security_issues(get, "v0.5.0").unwrap_err();
+        assert!(err.message.starts_with("milestones: "), "{}", err.message);
     }
 
     /// The issue listing keeps issues from every page and drops the pull

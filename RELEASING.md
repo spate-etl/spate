@@ -80,7 +80,10 @@ The `security` guard reads the open issues carrying that label on the
 milestone `vX.Y.Z`. A patch release ships `main`, so it also reads the next
 minor's milestone, `vX.(Y+1).0`. A milestone that does not exist holds no
 issues. The run fails naming each open issue, and
-[`labels.yml`](.github/labels.yml) says which issues carry the label.
+[`labels.yml`](.github/labels.yml) says which issues carry the label. It
+also closes the version's open release pull request, so re-dispatching the
+version after a `security` issue is filed stops a release still waiting to
+merge.
 
 The pull request it opens is titled `release: vX.Y.Z`, labeled
 `release`, and set to auto-merge. Re-dispatching the same version refreshes
@@ -153,12 +156,12 @@ git worktree. That covers the real release commit,
 every pending crate packaged and verify-built, and the SBOMs and `SHA256SUMS`
 staged. `assemble` runs its pull request step against the real open pull
 requests and prints each push, close, open and auto-merge instead of making
-it. With `GH_REPO` set, a pull request listing that `gh` refuses fails the
-rehearsal. Without it, the listing reads as empty on a clone with no remote on
-a GitHub host, such as one whose only remote is a local path. The run stops
-before attesting and prints what a real run would do next. It needs `gh`
-authenticated, and `curl`, `cargo-about` and `cargo-cyclonedx` on the path;
-the preflight names anything missing. The generator versions in CI come from
+it. With `GH_REPO` set, a pull request or `security` issue listing that `gh`
+refuses fails the rehearsal. Without it, either listing reads as empty on a
+clone with no remote on a GitHub host, such as one whose only remote is a
+local path. The run stops before attesting and prints what a real run would do
+next. It needs `gh` authenticated, and `curl`, `cargo-about` and
+`cargo-cyclonedx` on the path; the preflight names anything missing. The generator versions in CI come from
 the `taiki-e/install-action` pin, so the inventory a local run produces can
 differ from CI's when the installed versions differ. A successful run removes
 its worktree; `--keep` keeps it for inspection, and a failed run always keeps

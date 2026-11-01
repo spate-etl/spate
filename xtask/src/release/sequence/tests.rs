@@ -809,6 +809,77 @@ fn assemble_refuses_a_patch_on_the_next_minors_security_issue() {
     assert!(log.entries().is_empty(), "{:?}", log.entries());
 }
 
+/// A patch release with open `security` issues on its own milestone and on
+/// the next minor's reads both and names every one.
+#[test]
+fn assemble_refuses_a_patch_naming_the_issues_on_both_milestones() {
+    let log = Log::default();
+    let git = FakeGit::new(&log);
+    let mut forge = FakeForge::new(&log);
+    forge.security = vec![("v0.2.1", issue(41)), ("v0.3.0", issue(42))];
+    let registry = FakeRegistry::default();
+    let mut workspace = FakeWorkspace::new(&log, &CRATES);
+    workspace.version = v("0.2.0");
+    workspace.derived = v("0.2.1");
+    let pauses = Pauses::default();
+    let err = assemble(&host!(&git, &forge, &registry, &workspace, pauses), "0.2.1").unwrap_err();
+    assert!(
+        err.message.contains(
+            "#41 on v0.2.1: defect 41 (https://github.com/spate-etl/spate/issues/41)\n  \
+             #42 on v0.3.0: defect 42 (https://github.com/spate-etl/spate/issues/42)"
+        ),
+        "{}",
+        err.message
+    );
+    assert_eq!(*forge.security_queried.borrow(), ["v0.2.1", "v0.3.0"]);
+}
+
+/// A re-dispatch refused for an open `security` issue closes the release pull
+/// request the first dispatch opened, so its auto-merge cannot publish.
+#[test]
+fn a_refused_redispatch_closes_the_open_release_pull_request() {
+    let log = Log::default();
+    let git = FakeGit::new(&log);
+    let mut forge = FakeForge::new(&log);
+    forge.pulls = vec![Pull {
+        number: 7,
+        head: "release/v0.3.0".to_owned(),
+        cross_repository: false,
+    }];
+    forge.security = vec![("v0.3.0", issue(11))];
+    let registry = FakeRegistry::default();
+    let mut workspace = FakeWorkspace::new(&log, &CRATES);
+    workspace.version = v("0.2.0");
+    let pauses = Pauses::default();
+    let err = assemble(&host!(&git, &forge, &registry, &workspace, pauses), "0.3.0").unwrap_err();
+    assert!(err.message.contains("cannot release"), "{}", err.message);
+    assert_eq!(log.entries(), ["close #7"]);
+}
+
+/// The refusal escapes workflow-command text in an issue title, since the
+/// Actions runner reads `##[` anywhere in a line as a command.
+#[test]
+fn the_refusal_prints_no_workflow_command_from_an_issue_title() {
+    let log = Log::default();
+    let git = FakeGit::new(&log);
+    let mut forge = FakeForge::new(&log);
+    forge.security = vec![(
+        "v0.3.0",
+        Issue {
+            number: 41,
+            title: "a defect ##[set-output name=released;]true".into(),
+            url: "https://github.com/spate-etl/spate/issues/41".into(),
+        },
+    )];
+    let registry = FakeRegistry::default();
+    let mut workspace = FakeWorkspace::new(&log, &CRATES);
+    workspace.version = v("0.2.0");
+    let pauses = Pauses::default();
+    let err = assemble(&host!(&git, &forge, &registry, &workspace, pauses), "0.3.0").unwrap_err();
+    assert!(err.message.contains("#41 on v0.3.0"), "{}", err.message);
+    assert!(!err.message.contains("##["), "{}", err.message);
+}
+
 /// A refused security issue listing stops a real `assemble`.
 #[test]
 fn assemble_stops_on_a_refused_security_listing() {

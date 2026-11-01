@@ -30,9 +30,9 @@ Fourteen known defects were still open in the protocol when I deprecated it in
 A queue already does that job. It hands each message to one reader at a time and
 hides it while it is read, and when the reader dies, it delivers the message
 again. Object stores already publish their "object created" notifications to a
-queue: S3 publishes them to SQS, and Ceph to Kafka. So in 0.4, a lister run
-publishes the prefix's objects to a work feed on SQS or Kafka as units of work,
-and every instance reads its units from the feed directly.
+queue: S3 publishes them to SQS, and Ceph to Kafka. So in 0.4, a lister run will
+publish the prefix's objects to a work feed on SQS or Kafka as units of work,
+and every instance will read its units from the feed directly.
 [ADR-0080](/docs/adr/a-work-feed-replaces-leased-fenced-split-coordination)
 records the decision, and the [work feed](/docs/user-guide/concepts/work-feed)
 page describes the model.
@@ -78,6 +78,7 @@ that difference counts neither for nor against coordination.
   ]}
   measure="share of the static split"
   unit="%"
+  decimals={1}
   caption={<>
     Each arm's mean decoded throughput as a share of the static split on its
     own version, over three runs. Split coordination kept 97.6%, 94.1%, 88.6%,
@@ -134,13 +135,14 @@ polls, so the three compound.
 
 ## Small objects widen the gap to 3.5 times
 
-A second corpus cuts the same data into 868,608 objects, each about 2.1 MB, for
-1.84 TB in all, and four hosts read it. Coordination hit the 15-minute cap on
-each of its three runs, and read 13.10 GB/s on average over its window. The SQS
-feed read 45.95 GB/s and the Kafka feed read 45.53 GB/s, so the feeds ran at 3.5
-times coordination's rate. Each feed read every row once, with no unit delivered
-twice. Both versions pack small objects into shared units, so packing does not
-explain the gap, and I have not traced what does.
+A second corpus cuts the same data into 868,608 objects of 16 MiB decoded, each
+about 2.1 MB compressed, for 1.84 TB stored, and four hosts read it.
+Coordination hit the 15-minute cap on each of its three runs, and read 13.10
+GB/s on average over its window. The SQS feed read 45.95 GB/s and the Kafka feed
+read 45.53 GB/s, so the feeds ran at 3.5 times coordination's rate. Each feed
+read every row once, with no unit delivered twice. Both versions pack small
+objects into shared units, so packing does not explain the gap, and I have not
+traced what does.
 
 ## What a dead host costs on each feed
 
@@ -162,29 +164,33 @@ extra rows stayed within it.
 ## The first feed build was slower on small objects
 
 Before any of it shipped, the first build of the feed was slower than
-coordination on small objects. Its lister published one object per unit, so each
-lane finished one small object and then waited for its next unit while the `GET`
-ran. On one host with 96 units in flight, only 35.4 of 48 pipeline threads were
-busy ([#1483](https://github.com/spate-etl/spate/issues/1483)). Coordination had
-packed small objects into splits of about 16 all along.
+coordination on small objects. I had already made an unset `units_held` hold two
+units per pipeline thread, because a lane pinned to a thread leaves that thread
+idle while it waits on its next `GET`
+([#1477](https://github.com/spate-etl/spate/pull/1477),
+[ADR-0086](/docs/adr/an-unset-units-held-holds-twice-the-pipeline-thread-count)).
+That was not enough on small objects. The lister published one object per unit,
+so each lane finished one small object and then waited for its next unit while
+the `GET` ran. On one host with 96 units in flight, only 35.4 of 48 pipeline
+threads were busy ([#1483](https://github.com/spate-etl/spate/issues/1483)).
+Coordination had packed small objects into splits of about 16 all along.
 
 I made the lister pack up to 16 small objects into one unit
 ([#1500](https://github.com/spate-etl/spate/pull/1500),
 [ADR-0085](/docs/adr/the-lister-packs-small-objects-into-shared-work-units)). On
 the same host and corpus, that lifted decoded throughput 1.30 times with 96
-units in flight, from 8.47 to 11.02 GB/s, and 46.5 pipeline threads were then
+units in flight, from 8.46 to 11.02 GB/s, and 46.5 pipeline threads were then
 busy. With 48 units in flight it lifted throughput 1.40 times, from 5.38 to 7.52
 GB/s.
 
 Packing gave each lane a next object to start while it decoded the current one,
 which led to the second fix. A lane reads each object in windows of
-`prefetch_bytes`, and it now reads its next window while it hands on the current
-one ([#877](https://github.com/spate-etl/spate/issues/877),
+`prefetch_bytes`, and in 0.4 it will read its next window while it hands on the
+current one ([#877](https://github.com/spate-etl/spate/issues/877),
+[#1505](https://github.com/spate-etl/spate/pull/1505),
 [ADR-0087](/docs/adr/a-lane-reads-its-next-window-while-it-hands-on-the-current-one)).
 That change lifted throughput on small objects 1.31 times with one unit per
-pipeline thread. With the threads kept busy, I made an unset `units_held` hold
-twice as many units as there are pipeline threads
-([ADR-0086](/docs/adr/an-unset-units-held-holds-twice-the-pipeline-thread-count)).
+pipeline thread.
 
 ## What running a feed job asks of you
 
@@ -198,9 +204,10 @@ Running a job on the feed asks more of you than coordination did.
   refuses a setup it cannot run on, and it creates none of them.
 - A bounded job's listing is a run of its own. The lister publishes every unit
   and writes an end marker, and the workers finish only once they have read it.
-- An SQS job ends a minute after its last unit at the earliest. AWS documents a
-  queue's message counts as taking that long to settle, so the job waits for the
-  feed to read empty for the whole settling window.
+- A bounded job ends only once its feed has read empty for a settling window,
+  five minutes unless you set `settling_window`. The SQS feed refuses a window
+  shorter than a minute, because AWS documents a queue's message counts as
+  taking that long to settle.
 - If the store never delivers a notification, Spate does not list the prefix
   again to recover it
   ([ADR-0072](/docs/adr/missed-storage-notifications-are-not-reconciled-by-re-listing)).
@@ -212,13 +219,10 @@ Running a job on the feed asks more of you than coordination did.
 
 The runs used one host type, two cuts of one corpus, and one decoder. The sink
 discarded every row, so a warehouse that cannot take 90 GB/s would bound every
-arm long before coordination did. Coordination and the 0.3 static split both end
-their window on completed splits. A split counts as completed at a progress
-commit, so either window can run up to one 5-second checkpoint into the drain,
-which I estimate leans them low by 0.1–0.5%. Kafka's 97.6% at eight hosts came
-from four of its hosts keeping 95.7–97.0% of their lanes busy, while the other
-four kept 98.3–100%. I have not traced why those four hosts fell behind, or the
-cause of the small-object gap.
+arm long before coordination did. Kafka's 97.6% at eight hosts came from four or
+five hosts in each run keeping 95.0–97.6% of their lanes busy, while the rest
+kept 98.3–100%. I have not traced why those hosts fell behind, or the cause of
+the small-object gap.
 
 ## Try the work feed
 

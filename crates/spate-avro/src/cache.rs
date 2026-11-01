@@ -234,10 +234,11 @@ impl SchemaCache {
                 Entry::Ready(_) => None,
             })
         };
-        if !map.contains_key(&id) && negative().count() >= MAX_NEGATIVE_ENTRIES {
-            if let Some((oldest, _)) = negative().min_by_key(|(_, at)| *at) {
-                map.remove(&oldest);
-            }
+        if !map.contains_key(&id)
+            && negative().count() >= MAX_NEGATIVE_ENTRIES
+            && let Some((oldest, _)) = negative().min_by_key(|(_, at)| *at)
+        {
+            map.remove(&oldest);
         }
         map.insert(
             id,

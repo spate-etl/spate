@@ -353,7 +353,10 @@ rather than on each release:
   survives an account change, and the workflow narrows each minted token to
   the permissions the step needs. It exists because events raised by
   `GITHUB_TOKEN` trigger no workflows: a release pull request opened with one
-  would never run `CI gate` and could never merge. The App's slug is
+  would never run `CI gate` and could never merge. The installation grants at
+  least what `assemble` asks for: contents and pull requests to write, and
+  issues to read for the `security` guard. A permission the installation lacks
+  fails the token mint before `assemble` starts. The App's slug is
   `spate-release`: its pull requests author as `spate-release[bot]`, the
   identity the container-suite deferral in `xtask/` and the
   release commits key on, so renaming the App silently un-defers those

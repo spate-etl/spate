@@ -187,7 +187,7 @@ impl SchemaCache {
         match map.get(&id) {
             Some(Entry::Ready(schema)) => Some(Lookup::Ready(Arc::clone(schema))),
             Some(Entry::Failed { reason, at }) => {
-                if Self::expired(*at, clock.now(), ttl) {
+                if clock.now().saturating_duration_since(*at) >= ttl {
                     // Expired: treat as absent so the caller re-fetches.
                     None
                 } else {
@@ -198,18 +198,14 @@ impl SchemaCache {
         }
     }
 
-    fn expired(at: Instant, now: Instant, ttl: Duration) -> bool {
-        now.saturating_duration_since(at) >= ttl
-    }
-
     /// A copy of `map` for a writer to mutate, without the negative entries
-    /// that have expired.
+    /// that have expired. Expiry is the rule [`Self::eval`] applies.
     fn live_copy(&self, map: &QualityMap<u32, Entry>) -> QualityMap<u32, Entry> {
         let now = self.clock.now();
         map.iter()
             .filter(|(_, entry)| match entry {
                 Entry::Ready(_) => true,
-                Entry::Failed { at, .. } => !Self::expired(*at, now, self.negative_ttl),
+                Entry::Failed { at, .. } => now.saturating_duration_since(*at) < self.negative_ttl,
             })
             .map(|(id, entry)| (*id, entry.clone()))
             .collect()
@@ -386,7 +382,10 @@ mod tests {
         }
         let held = cache.entries.read().expect("schema cache lock").len();
         assert_eq!(held, MAX_NEGATIVE_ENTRIES + 1);
-        assert!(matches!(cache.get(0), Lookup::Missing), "the oldest is dropped");
+        assert!(
+            matches!(cache.get(0), Lookup::Missing),
+            "the oldest is dropped"
+        );
         assert!(matches!(cache.get(1), Lookup::Failed(_)));
         assert!(matches!(cache.get(cap), Lookup::Failed(_)));
         assert!(matches!(cache.get(u32::MAX), Lookup::Ready(_)));

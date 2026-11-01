@@ -5,7 +5,8 @@ use std::time::Duration;
 
 use super::*;
 use crate::release::io::{
-    DryForge, DryGit, Forge, Git, Index, IndexEntry, Package, Pull, Registry, Resolution, Workspace,
+    DryForge, DryGit, Forge, Git, Index, IndexEntry, Issue, Package, Pull, Registry, Resolution,
+    Workspace,
 };
 
 const SHA: &str = "1111111111111111111111111111111111111111";
@@ -146,6 +147,12 @@ struct FakeForge<'a> {
     create_lands_then_fails: RefCell<bool>,
     /// Whether each attestation check was given a bundle.
     bundled: RefCell<Vec<bool>>,
+    /// Open `security` issues, by milestone title.
+    security: Vec<(&'static str, Issue)>,
+    /// The milestones `open_security_issues` was asked about, in order.
+    security_queried: RefCell<Vec<String>>,
+    /// Security issue listings refused.
+    security_reads_fail: bool,
 }
 
 impl<'a> FakeForge<'a> {
@@ -174,6 +181,20 @@ impl Forge for FakeForge<'_> {
             return Err(fail("list"));
         }
         Ok(self.pulls.clone())
+    }
+    fn open_security_issues(&self, milestone: &str) -> Result<Vec<Issue>, Error> {
+        self.security_queried
+            .borrow_mut()
+            .push(milestone.to_owned());
+        if self.security_reads_fail {
+            return Err(fail("security"));
+        }
+        Ok(self
+            .security
+            .iter()
+            .filter(|(m, _)| *m == milestone)
+            .map(|(_, i)| i.clone())
+            .collect())
     }
     fn pull_for_head(&self, head: &str) -> Result<Option<u64>, Error> {
         if self.reads_fail {
@@ -718,6 +739,136 @@ fn assemble_guards_refuse_before_generating() {
         assert!(err.message.contains(want), "{name}: {}", err.message);
         assert!(log.entries().is_empty(), "{name}: {:?}", log.entries());
     }
+}
+
+fn issue(number: u64) -> Issue {
+    Issue {
+        number,
+        title: format!("defect {number}"),
+        url: format!("https://github.com/spate-etl/spate/issues/{number}"),
+    }
+}
+
+/// A minor release is gated on its own milestone, and a patch release also on
+/// the next minor's.
+#[test]
+fn the_security_gate_reads_the_release_and_next_minor_milestones() {
+    assert_eq!(security_milestones(v("0.5.0")), ["v0.5.0"]);
+    assert_eq!(security_milestones(v("0.4.1")), ["v0.4.1", "v0.5.0"]);
+    assert_eq!(security_milestones(v("1.2.3")), ["v1.2.3", "v1.3.0"]);
+    assert_eq!(security_milestones(v("1.0.0")), ["v1.0.0"]);
+}
+
+/// An open `security` issue on the release's milestone refuses the release
+/// before anything is generated, and the refusal names every one.
+#[test]
+fn assemble_refuses_an_open_security_issue_on_its_milestone() {
+    let log = Log::default();
+    let git = FakeGit::new(&log);
+    let mut forge = FakeForge::new(&log);
+    forge.security = vec![
+        ("v0.3.0", issue(11)),
+        ("v0.3.0", issue(12)),
+        ("v0.4.0", issue(13)),
+    ];
+    let registry = FakeRegistry::default();
+    let mut workspace = FakeWorkspace::new(&log, &CRATES);
+    workspace.version = v("0.2.0");
+    let pauses = Pauses::default();
+    let err = assemble(&host!(&git, &forge, &registry, &workspace, pauses), "0.3.0").unwrap_err();
+    assert!(
+        err.message.contains(
+            "v0.3.0 cannot release while these security issues are open:\n  \
+             #11 on v0.3.0: defect 11 (https://github.com/spate-etl/spate/issues/11)\n  \
+             #12 on v0.3.0: defect 12 (https://github.com/spate-etl/spate/issues/12)"
+        ),
+        "{}",
+        err.message
+    );
+    assert!(!err.message.contains("#13"), "{}", err.message);
+    assert_eq!(*forge.security_queried.borrow(), ["v0.3.0"]);
+    assert!(log.entries().is_empty(), "{:?}", log.entries());
+}
+
+/// A patch release ships `main`, so an open `security` issue on the next
+/// minor's milestone refuses it.
+#[test]
+fn assemble_refuses_a_patch_on_the_next_minors_security_issue() {
+    let log = Log::default();
+    let git = FakeGit::new(&log);
+    let mut forge = FakeForge::new(&log);
+    forge.security = vec![("v0.3.0", issue(21))];
+    let registry = FakeRegistry::default();
+    let mut workspace = FakeWorkspace::new(&log, &CRATES);
+    workspace.version = v("0.2.0");
+    workspace.derived = v("0.2.1");
+    let pauses = Pauses::default();
+    let err = assemble(&host!(&git, &forge, &registry, &workspace, pauses), "0.2.1").unwrap_err();
+    assert!(err.message.contains("#21 on v0.3.0"), "{}", err.message);
+    assert_eq!(*forge.security_queried.borrow(), ["v0.2.1", "v0.3.0"]);
+    assert!(log.entries().is_empty(), "{:?}", log.entries());
+}
+
+/// A refused security issue listing stops a real `assemble`.
+#[test]
+fn assemble_stops_on_a_refused_security_listing() {
+    let log = Log::default();
+    let git = FakeGit::new(&log);
+    let mut forge = FakeForge::new(&log);
+    forge.security_reads_fail = true;
+    let registry = FakeRegistry::default();
+    let mut workspace = FakeWorkspace::new(&log, &CRATES);
+    workspace.version = v("0.2.0");
+    let pauses = Pauses::default();
+    let err = assemble(&host!(&git, &forge, &registry, &workspace, pauses), "0.3.0").unwrap_err();
+    assert!(
+        err.message.contains("injected: security"),
+        "{}",
+        err.message
+    );
+    assert!(log.entries().is_empty(), "{:?}", log.entries());
+}
+
+/// A rehearsal reports an open `security` issue and assembles anyway. A
+/// refused listing fails a strict rehearsal and reads as empty in a lenient
+/// one.
+#[test]
+fn a_dry_assemble_reports_open_security_issues_and_continues() {
+    let log = Log::default();
+    let mut forge = FakeForge::new(&log);
+    forge.security = vec![("v0.3.0", issue(31))];
+    let dry = DryForge(&forge, true);
+    assert!(dry.open_security_issues("v0.3.0").unwrap().is_empty());
+
+    let git = FakeGit::new(&log);
+    let registry = FakeRegistry::default();
+    let mut workspace = FakeWorkspace::new(&log, &CRATES);
+    workspace.version = v("0.2.0");
+    let pauses = Pauses::default();
+    let (dry_git, dry_forge) = (DryGit(&git), DryForge(&forge, true));
+    assemble(
+        &host!(&dry_git, &dry_forge, &registry, &workspace, pauses),
+        "0.3.0",
+    )
+    .unwrap();
+    assert_eq!(log.entries(), ["generate 0.3.0", "commit release: v0.3.0"]);
+
+    let mut refused = FakeForge::new(&log);
+    refused.security_reads_fail = true;
+    let err = DryForge(&refused, true)
+        .open_security_issues("v0.3.0")
+        .unwrap_err();
+    assert!(
+        err.message.contains("injected: security"),
+        "{}",
+        err.message
+    );
+    assert!(
+        DryForge(&refused, false)
+            .open_security_issues("v0.3.0")
+            .unwrap()
+            .is_empty()
+    );
 }
 
 /// A patch release requires no post, and assembles without one.

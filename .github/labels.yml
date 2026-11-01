@@ -186,6 +186,12 @@
 #
 # `release blocker` goes only on an issue with a milestone.
 #
+# `security` goes only on a security defect that is on `main`, in no release
+# yet, and on the milestone about to ship. `cargo xtask release assemble`
+# refuses while one is open; RELEASING.md names the milestones it reads.
+# Hardening and process work carry a `priority:` label instead, and a defect
+# already released goes through a private advisory, never an issue.
+#
 # `affects-performance` is machine-managed: `perf-label.yml` adds it when a
 # pull request's counter deltas cross the advisory thresholds and removes it
 # when they stop. Applying it by hand lasts until the next benched push, and
@@ -214,3 +220,7 @@
 - name: "release blocker"
   color: "b60205"
   description: "The milestone it sits in cannot release until this is fixed"
+
+- name: "security"
+  color: "b60205"
+  description: "A security defect on main and in no release; the release refuses while it is open"

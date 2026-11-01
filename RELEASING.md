@@ -63,9 +63,9 @@ dispatches. The GitHub release body links it there, under the site named by
 ## What the automation does
 
 **Assemble**, on the dispatch: guards first (the tree matches the last tag,
-the tag is free, the derivation agrees, a minor release has its post), then
-every artifact is generated from the version input, in one commit on
-`release/vX.Y.Z`:
+the tag is free, the derivation agrees, no `security` issue is open, a minor
+release has its post), then every artifact is generated from the version
+input, in one commit on `release/vX.Y.Z`:
 
 | Artifact | Produced by |
 |---|---|
@@ -75,6 +75,12 @@ every artifact is generated from the version input, in one commit on
 | `CHANGELOG.md`, fragments consumed, moved dependency requirements listed | `cargo xtask changelog build` |
 | `THIRD-PARTY.md` | `cargo xtask attribution` |
 | The release post, out of draft | `assemble`, for a minor release |
+
+The `security` guard reads the open issues carrying that label on the
+milestone `vX.Y.Z`. A patch release ships `main`, so it also reads the next
+minor's milestone, `vX.(Y+1).0`. A milestone that does not exist holds no
+issues. The run fails naming each open issue, and
+[`labels.yml`](.github/labels.yml) says which issues carry the label.
 
 The pull request it opens is titled `release: vX.Y.Z`, labeled
 `release`, and set to auto-merge. Re-dispatching the same version refreshes
@@ -140,7 +146,8 @@ slug yet, the rehearsal commits a draft stand-in in its worktree instead.
 `assemble` refuses a release with nothing in it: no changelog fragment and no
 root dependency requirement moved since the last tag. With
 `--stand-in-fragment`, the rehearsal commits a stand-in fragment in that case,
-which is the state of `main` after each release. The
+which is the state of `main` after each release. An open `security` issue
+prints the refusal a real run would make, and the rehearsal continues. The
 dry run runs the same `assemble` and the publish up to staging in a throwaway
 git worktree. That covers the real release commit,
 every pending crate packaged and verify-built, and the SBOMs and `SHA256SUMS`

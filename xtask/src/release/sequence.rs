@@ -73,6 +73,36 @@ triggers the publish.";
 
 const PULL_BODY: &str = "Assembled by `release.yml` from the v{version} dispatch. Every file in this diff is generated; the reviewed prose is the fragments it consumes, which landed with their changes, and the dependency requirement entry the build writes from `Cargo.toml`. The squash merge triggers the publish. The controls are the version input and its derivation check, so a review here is reading the assembled changelog, not the mechanics.";
 
+/// The milestones whose open `security` issues block `version`: its own, and
+/// for a patch release the next minor's, since a patch ships `main` and a
+/// defect on `main` sits on the next minor's milestone.
+fn security_milestones(version: Version) -> Vec<String> {
+    std::iter::once(version)
+        .chain(version.next_minor_of_patch())
+        .map(|v| format!("v{v}"))
+        .collect()
+}
+
+/// Fails naming every open `security` issue on [`security_milestones`].
+fn refuse_open_security_issues(host: &Host<'_>, version: Version) -> Outcome {
+    let mut open = Vec::new();
+    for milestone in security_milestones(version) {
+        for issue in host.forge.open_security_issues(&milestone)? {
+            open.push(format!(
+                "#{} on {milestone}: {} ({})",
+                issue.number, issue.title, issue.url
+            ));
+        }
+    }
+    if open.is_empty() {
+        return Ok(());
+    }
+    Err(Error::msg(format!(
+        "v{version} cannot release while these security issues are open:\n  {}",
+        open.join("\n  ")
+    )))
+}
+
 /// Builds the single release commit and opens, or refreshes, the pull request
 /// whose squash merge triggers the publish.
 pub(crate) fn assemble(host: &Host<'_>, input: &str) -> Outcome {
@@ -111,6 +141,7 @@ pub(crate) fn assemble(host: &Host<'_>, input: &str) -> Outcome {
              derives {expected}. One of the two is wrong; nothing proceeds until they agree."
         )));
     }
+    refuse_open_security_issues(host, version)?;
     let post = post::required(&host.workspace.blog(), version)?;
     endgroup();
 

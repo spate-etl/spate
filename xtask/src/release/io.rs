@@ -56,8 +56,19 @@ pub(crate) struct Pull {
     pub(crate) cross_repository: bool,
 }
 
+/// An open issue.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Issue {
+    pub(crate) number: u64,
+    pub(crate) title: String,
+    pub(crate) url: String,
+}
+
 pub(crate) trait Forge {
     fn open_pulls(&self) -> Result<Vec<Pull>, Error>;
+    /// The open issues labeled `security` on the milestone titled `milestone`,
+    /// open or closed. Empty when no milestone has that title.
+    fn open_security_issues(&self, milestone: &str) -> Result<Vec<Issue>, Error>;
     /// Closes a pull request with a comment and deletes its branch.
     fn close_pull(&self, number: u64, comment: &str) -> Outcome;
     /// The open same-repository pull request from `head`, if any.
@@ -319,6 +330,9 @@ fn required_env(key: &str, what: &str) -> Result<String, Error> {
         .ok_or_else(|| Error::msg(format!("{what} needs {key}")))
 }
 
+/// The label on a security defect that a release must not ship with.
+const SECURITY_LABEL: &str = "security";
+
 /// The forge through `gh`, authenticated by `GH_TOKEN`.
 pub(crate) struct Gh<'a> {
     pub(crate) root: &'a Path,
@@ -376,6 +390,22 @@ impl Forge for Gh<'_> {
             "--json",
             "number,headRefName,isCrossRepository",
         ])?)
+    }
+
+    fn open_security_issues(&self, milestone: &str) -> Result<Vec<Issue>, Error> {
+        let milestones = self.capture(&[
+            "api",
+            "--paginate",
+            "--slurp",
+            "repos/{owner}/{repo}/milestones?state=all&per_page=100",
+        ])?;
+        let Some(number) = milestone_number(&milestones, milestone)? else {
+            return Ok(Vec::new());
+        };
+        let path = format!(
+            "repos/{{owner}}/{{repo}}/issues?milestone={number}&labels={SECURITY_LABEL}&state=open&per_page=100"
+        );
+        parse_issues(&self.capture(&["api", "--paginate", "--slurp", &path])?)
     }
 
     fn close_pull(&self, number: u64, comment: &str) -> Outcome {
@@ -626,6 +656,47 @@ pub(crate) fn head_pull(raw: &str, head: &str) -> Result<Option<u64>, Error> {
         .into_iter()
         .find(|p| !p.cross_repository && p.head == head)
         .map(|p| p.number))
+}
+
+/// The number of the milestone titled `title` in a `gh api --paginate --slurp`
+/// listing of milestones, or `None` when none has that title.
+pub(crate) fn milestone_number(raw: &str, title: &str) -> Result<Option<u64>, Error> {
+    #[derive(Deserialize)]
+    struct Milestone {
+        number: u64,
+        title: String,
+    }
+    let pages: Vec<Vec<Milestone>> =
+        serde_json::from_str(raw).map_err(|e| Error::msg(format!("milestones: {e}")))?;
+    Ok(pages
+        .into_iter()
+        .flatten()
+        .find(|m| m.title == title)
+        .map(|m| m.number))
+}
+
+/// The issues in a `gh api --paginate --slurp` listing of a repository's
+/// issues. The endpoint lists pull requests too, and those are dropped.
+pub(crate) fn parse_issues(raw: &str) -> Result<Vec<Issue>, Error> {
+    #[derive(Deserialize)]
+    struct Row {
+        number: u64,
+        title: String,
+        html_url: String,
+        pull_request: Option<serde_json::Value>,
+    }
+    let pages: Vec<Vec<Row>> =
+        serde_json::from_str(raw).map_err(|e| Error::msg(format!("issues: {e}")))?;
+    Ok(pages
+        .into_iter()
+        .flatten()
+        .filter(|r| r.pull_request.is_none())
+        .map(|r| Issue {
+            number: r.number,
+            title: r.title,
+            url: r.html_url,
+        })
+        .collect())
 }
 
 /// The trailing number of the URL `gh pr create` prints.
@@ -1032,6 +1103,30 @@ impl Forge for DryForge<'_> {
             Ok(Vec::new())
         })
     }
+    fn open_security_issues(&self, milestone: &str) -> Result<Vec<Issue>, Error> {
+        // A rehearsal reports what a real run would refuse and carries on, so
+        // an open issue does not fail the scheduled and pull request
+        // rehearsals.
+        match self.0.open_security_issues(milestone) {
+            Ok(issues) => {
+                for issue in &issues {
+                    would(&format!(
+                        "refuse the release for #{} on {milestone}: {} ({})",
+                        issue.number, issue.title, issue.url
+                    ));
+                }
+                Ok(Vec::new())
+            }
+            Err(e) if self.1 => Err(e),
+            Err(e) => {
+                would(&format!(
+                    "list the open security issues on {milestone} ({})",
+                    e.message
+                ));
+                Ok(Vec::new())
+            }
+        }
+    }
     fn pull_for_head(&self, head: &str) -> Result<Option<u64>, Error> {
         self.0.pull_for_head(head).or_else(|e| {
             if self.1 {
@@ -1341,6 +1436,50 @@ mod tests {
                 cross_repository: true
             }]
         );
+    }
+
+    /// A milestone is found by exact title on any page, open or closed, and
+    /// an absent title reads as none.
+    #[test]
+    fn a_milestone_is_found_by_its_exact_title_on_any_page() {
+        let raw = r#"[
+            [{"number":5,"title":"v0.6.0","state":"open"},
+             {"number":12,"title":"v0.5.0","state":"open"}],
+            [{"number":4,"title":"v0.4.0","state":"closed"}]
+        ]"#;
+        assert_eq!(milestone_number(raw, "v0.5.0").unwrap(), Some(12));
+        assert_eq!(milestone_number(raw, "v0.4.0").unwrap(), Some(4));
+        assert_eq!(milestone_number(raw, "v0.5").unwrap(), None);
+        assert_eq!(milestone_number("[[]]", "v0.5.0").unwrap(), None);
+        assert!(milestone_number(r#"[{"number":1}]"#, "v0.5.0").is_err());
+    }
+
+    /// The issue listing keeps issues from every page and drops the pull
+    /// requests the endpoint also returns.
+    #[test]
+    fn the_issue_listing_drops_pull_requests() {
+        let raw = r#"[
+            [{"number":7,"title":"a defect","html_url":"https://x/7"},
+             {"number":8,"title":"its fix","html_url":"https://x/8","pull_request":{"url":"u"}}],
+            [{"number":9,"title":"another","html_url":"https://x/9"}]
+        ]"#;
+        assert_eq!(
+            parse_issues(raw).unwrap(),
+            [
+                Issue {
+                    number: 7,
+                    title: "a defect".into(),
+                    url: "https://x/7".into()
+                },
+                Issue {
+                    number: 9,
+                    title: "another".into(),
+                    url: "https://x/9".into()
+                }
+            ]
+        );
+        assert!(parse_issues("[[]]").unwrap().is_empty());
+        assert!(parse_issues("not json").is_err());
     }
 
     /// A 200 is read as entries and must parse; 404 is a missing crate; any

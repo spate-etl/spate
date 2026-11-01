@@ -57,9 +57,11 @@ jobs:
         with:
           app-id: ${{ vars.RELEASE_APP_ID }}
           private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
-          # It pushes a branch and opens a pull request; that is all it may do.
+          # It pushes a branch and opens a pull request, and reads the
+          # milestone's `security` issues; that is all it may do.
           permission-contents: write
           permission-pull-requests: write
+          permission-issues: read
 
       # Full history: the bump derivation reads every commit since the last
       # tag, and a shallow clone would silently under-report it.

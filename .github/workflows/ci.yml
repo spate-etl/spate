@@ -136,10 +136,11 @@ jobs:
   release-checks:
     name: Release checks
     needs: [changes, checks]
-    # `pull-requests: read` for the release rehearsal.
+    # `pull-requests: read` and `issues: read` for the release rehearsal.
     permissions:
       contents: read
       pull-requests: read
+      issues: read
     uses: ./.github/workflows/release-checks.yml
     with:
       rust: ${{ needs.changes.outputs.rust }}

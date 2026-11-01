@@ -378,15 +378,8 @@ impl S3Lane {
                 if let Some(m) = &self.metrics {
                     m.bytes_read.increment(bytes.len() as u64);
                 }
-                if let Err(e) = self.framer.push_chunk(&bytes) {
-                    let key = self
-                        .current
-                        .as_ref()
-                        .map_or_else(String::new, |c| c.key.clone());
-                    self.poison(
-                        PoisonKind::Undecodable,
-                        format!("decoding \"{key}\": {e} (corrupt or truncated object?)"),
-                    );
+                if let Err(e) = self.framer.push_chunk(bytes) {
+                    self.poison_decode(&e);
                 }
                 Ok(())
             }
@@ -421,6 +414,18 @@ impl S3Lane {
                 Err(self.fail(class, reason))
             }
         }
+    }
+
+    /// Poison the split on a decode error in the current object's chunks.
+    fn poison_decode(&mut self, e: &std::io::Error) {
+        let key = self
+            .current
+            .as_ref()
+            .map_or_else(String::new, |c| c.key.clone());
+        self.poison(
+            PoisonKind::Undecodable,
+            format!("decoding \"{key}\": {e} (corrupt or truncated object?)"),
+        );
     }
 
     /// Report the decoded-bytes delta at a batch boundary.
@@ -476,7 +481,8 @@ impl SourceLane for S3Lane {
         }
         self.held.clear();
         let deadline = self.clock.now() + timeout;
-        // Whether this poll has already tried the channel. The deadline
+        // Whether this poll has already tried the channel or decoded a step
+        // of pending input. The deadline
         // must not short-circuit the *first* receive: with `timeout` zero
         // (the driver's head-of-line rotation) `now >= deadline` is true
         // immediately, and bailing before `try_recv` would report the lane
@@ -520,6 +526,17 @@ impl SourceLane for S3Lane {
                 break;
             }
             recv_attempted = true;
+            // The rest of the last chunk is decoded before the next message
+            // is taken, one bounded step per iteration, so the drain at the
+            // top of the loop keeps the framer's queue short however far the
+            // chunk expands.
+            if self.framer.has_pending_input() {
+                if let Err(e) = self.framer.pump() {
+                    self.poison_decode(&e);
+                    return Ok(None);
+                }
+                continue;
+            }
             let msg = match self.rx.try_recv() {
                 Ok(m) => Some(m),
                 Err(TryRecvError::Empty) => {
@@ -752,6 +769,29 @@ mod tests {
             }
             out
         })
+    }
+
+    /// A small zstd chunk that decodes to a million two-byte records leaves
+    /// at most one decode step's records queued after each poll, and every
+    /// record is still framed.
+    #[test]
+    fn a_compressed_chunk_queues_one_step_of_records_per_poll() {
+        let lines = 1usize << 20;
+        let chunk = zstd::encode_all(&b"a\n".repeat(lines)[..], 19).unwrap();
+        let mut r = rig(None);
+        start(&r, 0, "p/a.ndjson.zst");
+        send(&r, ChunkMsg::Chunk(bytes::Bytes::from(chunk)));
+        send(&r, ChunkMsg::ObjectEnd);
+        let mut framed = 0;
+        while framed < lines {
+            framed += poll_batch(&mut r.lane, 512).expect("records remain").len();
+            let queued_bytes = 2 * r.lane.framer.queued() as u64;
+            assert!(
+                queued_bytes <= crate::framer::PUMP_DECODED_BYTES / 2,
+                "{queued_bytes} decoded bytes queued after {framed} records"
+            );
+        }
+        assert_eq!(framed, lines);
     }
 
     #[test]

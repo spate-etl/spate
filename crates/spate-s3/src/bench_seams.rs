@@ -68,16 +68,22 @@ pub fn frame_objects(
     for (key, chunks) in objects {
         framer.begin_object(Codec::resolve(compression, key))?;
         for chunk in chunks {
-            framer.push_chunk(chunk)?;
-            // Drained per chunk, because the lane drains at the top of every
-            // poll-loop iteration rather than at end of object. The push and
-            // pop counts are the same either way, so instruction counts do
-            // not change. The queue is unbounded, so draining only at the
-            // end would hold a whole object's records live at once and report
-            // a DHAT peak the source never reaches. DHAT is attached to this
-            // bench, so that shape is part of what it publishes.
-            while framer.pop_record().is_some() {
-                records += 1;
+            // Copied as a GET delivers it, into a buffer the framer owns.
+            framer.push_chunk(Bytes::copy_from_slice(chunk))?;
+            // Drained per decode step, because the lane drains at the top of
+            // every poll-loop iteration rather than at end of object. Draining
+            // only at the end would hold a whole object's records live at
+            // once and report a DHAT peak the source never reaches. DHAT is
+            // attached to this bench, so that shape is part of what it
+            // publishes.
+            loop {
+                while framer.pop_record().is_some() {
+                    records += 1;
+                }
+                if !framer.has_pending_input() {
+                    break;
+                }
+                framer.pump()?;
             }
         }
         framer.finish_object()?;
@@ -130,10 +136,11 @@ pub fn frame_range(
         let mut owned = trim.feed(pos, window);
         while !owned.is_empty() {
             let chunk = owned.split_to(owned.len().min(chunk_bytes));
-            framer.push_chunk(&chunk)?;
+            framer.push_chunk(chunk)?;
             while framer.pop_record().is_some() {
                 records += 1;
             }
+            debug_assert!(!framer.has_pending_input(), "a plain chunk decodes in one step");
         }
         pos = window_end;
     }

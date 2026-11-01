@@ -20,8 +20,13 @@
 //! - gzip objects may contain multiple members; zstd objects multiple frames.
 //!   Both are read to the end. A truncated or corrupt stream is an error at
 //!   [`ObjectFramer::finish_object`] (or at the failing chunk).
+//! - A chunk is decoded a step at a time. [`ObjectFramer::pump`] stops once a
+//!   step queues a record or [`PUMP_DECODED_BYTES`] reach the framer, so the
+//!   records one compressed chunk expands to are drained between steps
+//!   instead of all being queued at once.
 
 use crate::config::Compression;
+use bytes::{Buf, Bytes};
 use flate2::write::MultiGzDecoder;
 use spate_core::framing::{FramerWriter, RecordFramer};
 use std::collections::VecDeque;
@@ -33,6 +38,10 @@ use zstd::stream::{raw, zio};
 /// lanes and called once per object: framers are per-object stateful and each
 /// lane frames its own slice, so a single instance cannot be reused.
 pub(crate) type FramerFactory = Arc<dyn Fn() -> Box<dyn RecordFramer> + Send + Sync>;
+
+/// Decoded bytes one [`ObjectFramer::pump`] feeds the framer before it yields
+/// to the lane, which bounds the decoded output a compressed chunk queues.
+pub(crate) const PUMP_DECODED_BYTES: u64 = 256 * 1024;
 
 /// Effective codec of one object.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -83,6 +92,17 @@ impl Sink {
         })
     }
 
+    /// One codec step. A step consumes some of `buf` and writes a bounded
+    /// amount of decoded output, at most the codec's internal buffer, to the
+    /// framer.
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        match self {
+            Sink::Plain(w) => w.write(buf),
+            Sink::Gzip(d) => d.write(buf),
+            Sink::Zstd(w) => w.write(buf),
+        }
+    }
+
     fn framer(&self) -> &dyn RecordFramer {
         match self {
             Sink::Plain(w) => w.framer(),
@@ -123,6 +143,8 @@ pub(crate) struct ObjectFramer {
     sink: Option<Sink>,
     /// Completed records not yet handed to the lane.
     ready: VecDeque<Vec<u8>>,
+    /// The part of the latest chunk the codec has not consumed yet.
+    pending: Bytes,
     /// Decoded bytes of finished objects (the in-progress object's count lives
     /// in its framer).
     finished_decoded_bytes: u64,
@@ -136,6 +158,7 @@ impl std::fmt::Debug for ObjectFramer {
         f.debug_struct("ObjectFramer")
             .field("in_object", &self.sink.is_some())
             .field("ready", &self.ready.len())
+            .field("pending", &self.pending.len())
             .finish()
     }
 }
@@ -145,6 +168,7 @@ impl ObjectFramer {
         ObjectFramer {
             sink: None,
             ready: VecDeque::new(),
+            pending: Bytes::new(),
             finished_decoded_bytes: 0,
             make_framer,
         }
@@ -159,21 +183,57 @@ impl ObjectFramer {
         Ok(())
     }
 
-    /// Feed the next chunk of the in-progress object.
-    pub(crate) fn push_chunk(&mut self, chunk: &[u8]) -> io::Result<()> {
-        let sink = self.sink.as_mut().expect("push_chunk outside an object");
-        let written = match sink {
-            Sink::Plain(w) => w.write_all(chunk),
-            Sink::Gzip(d) => d.write_all(chunk),
-            Sink::Zstd(w) => w.write_all(chunk),
-        };
-        // A framer queues each record as it completes it, so a chunk that
-        // fails part-way through can leave completed records behind. The
-        // drain runs before the write result is propagated. Moving it under a
-        // `?` makes the emitted sequence depend on where the fetcher cut the
-        // object.
-        while let Some(record) = sink.framer_mut().pop() {
-            self.ready.push_back(record);
+    /// Take the next chunk of the in-progress object and [`pump`](Self::pump)
+    /// it once. The previous chunk must be fully consumed.
+    pub(crate) fn push_chunk(&mut self, chunk: Bytes) -> io::Result<()> {
+        debug_assert!(self.pending.is_empty(), "previous chunk not consumed");
+        self.pending = chunk;
+        self.pump()
+    }
+
+    /// Whether part of the latest chunk still waits for [`pump`](Self::pump).
+    pub(crate) fn has_pending_input(&self) -> bool {
+        !self.pending.is_empty()
+    }
+
+    /// Feed the latest chunk to the codec until a step queues a record,
+    /// [`PUMP_DECODED_BYTES`] decoded bytes have reached the framer, or the
+    /// chunk is consumed. Call again while
+    /// [`has_pending_input`](Self::has_pending_input) holds, after draining.
+    ///
+    /// # Errors
+    ///
+    /// A corrupt stream or a record over the framer's cap. The rest of the
+    /// chunk is dropped, since the object cannot be decoded further.
+    pub(crate) fn pump(&mut self) -> io::Result<()> {
+        let sink = self.sink.as_mut().expect("pump outside an object");
+        let queued = self.ready.len();
+        let start = sink.framer().decoded_bytes();
+        let mut written = Ok(());
+        while !self.pending.is_empty() {
+            match sink.write(&self.pending) {
+                Ok(0) => written = Err(io::ErrorKind::WriteZero.into()),
+                Ok(n) => self.pending.advance(n),
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e) => written = Err(e),
+            }
+            // A framer queues each record as it completes it, so a step that
+            // fails part-way through can leave completed records behind. The
+            // drain runs before the write result is propagated. Moving it
+            // under a `?` makes the emitted sequence depend on where the
+            // fetcher cut the object.
+            while let Some(record) = sink.framer_mut().pop() {
+                self.ready.push_back(record);
+            }
+            if written.is_err() {
+                self.pending.clear();
+                break;
+            }
+            if self.ready.len() > queued
+                || sink.framer().decoded_bytes() - start >= PUMP_DECODED_BYTES
+            {
+                break;
+            }
         }
         written
     }
@@ -182,6 +242,7 @@ impl ObjectFramer {
     /// and emits an unterminated final record. Records the flush completes
     /// are emitted whether or not the validation fails.
     pub(crate) fn finish_object(&mut self) -> io::Result<()> {
+        debug_assert!(self.pending.is_empty(), "finish_object with input pending");
         let mut sink = self.sink.take().expect("finish_object outside an object");
         let finished = sink.try_finish().and_then(|()| sink.framer_mut().finish());
         // The codec's tail flush reaches the framer in the two calls above,
@@ -242,11 +303,21 @@ mod tests {
         Arc::new(move || Box::new(TestLineFramer::new(cap)))
     }
 
+    /// Push `chunk` and pump it until the codec has consumed it all. Records
+    /// stay queued, which is safe on the small inputs these tests feed.
+    fn push_all(framer: &mut ObjectFramer, chunk: &[u8]) -> io::Result<()> {
+        framer.push_chunk(Bytes::copy_from_slice(chunk))?;
+        while framer.has_pending_input() {
+            framer.pump()?;
+        }
+        Ok(())
+    }
+
     fn frame_all(codec: Codec, chunks: &[&[u8]]) -> io::Result<Vec<Vec<u8>>> {
         let mut framer = ObjectFramer::new(line_factory(TEST_CAP));
         framer.begin_object(codec)?;
         for chunk in chunks {
-            framer.push_chunk(chunk)?;
+            push_all(&mut framer, chunk)?;
         }
         framer.finish_object()?;
         let mut out = Vec::new();
@@ -267,7 +338,7 @@ mod tests {
             if failed {
                 break;
             }
-            failed = framer.push_chunk(chunk).is_err();
+            failed = push_all(&mut framer, chunk).is_err();
             while let Some(record) = framer.pop_record() {
                 records.push(record);
             }
@@ -386,17 +457,16 @@ mod tests {
         // buffered.
         let mut framer = ObjectFramer::new(line_factory(8));
         framer.begin_object(Codec::Plain).unwrap();
-        framer.push_chunk(b"1234").unwrap();
-        framer.push_chunk(b"5678").unwrap();
-        let err = framer.push_chunk(b"9").unwrap_err();
+        push_all(&mut framer, b"1234").unwrap();
+        push_all(&mut framer, b"5678").unwrap();
+        let err = push_all(&mut framer, b"9").unwrap_err();
         assert!(err.to_string().contains("max_record_bytes"), "{err}");
 
         // Compressed: the cap applies to *decoded* bytes.
         let body = gzip(b"0123456789ABCDEF no newline anywhere");
         let mut framer = ObjectFramer::new(line_factory(8));
         framer.begin_object(Codec::Gzip).unwrap();
-        let result = framer
-            .push_chunk(&body)
+        let result = push_all(&mut framer, &body)
             .and_then(|()| framer.finish_object());
         assert!(
             result.unwrap_err().to_string().contains("max_record_bytes"),
@@ -406,7 +476,7 @@ mod tests {
         // A line exactly at the cap is fine.
         let mut framer = ObjectFramer::new(line_factory(8));
         framer.begin_object(Codec::Plain).unwrap();
-        framer.push_chunk(b"12345678\n").unwrap();
+        push_all(&mut framer, b"12345678\n").unwrap();
         framer.finish_object().unwrap();
         assert_eq!(framer.pop_record().unwrap(), b"12345678");
     }
@@ -439,15 +509,106 @@ mod tests {
     fn records_queue_across_objects_and_bytes_are_counted() {
         let mut framer = ObjectFramer::new(line_factory(TEST_CAP));
         framer.begin_object(Codec::Plain).unwrap();
-        framer.push_chunk(b"one\n").unwrap();
+        push_all(&mut framer, b"one\n").unwrap();
         framer.finish_object().unwrap();
         framer.begin_object(Codec::Plain).unwrap();
-        framer.push_chunk(b"two\n").unwrap();
+        push_all(&mut framer, b"two\n").unwrap();
         framer.finish_object().unwrap();
         assert_eq!(framer.queued(), 2);
         assert_eq!(framer.decoded_bytes(), 8);
         assert_eq!(framer.pop_record().unwrap(), b"one");
         assert_eq!(framer.pop_record().unwrap(), b"two");
+    }
+
+    /// `lines` one-byte records, `a\n` each.
+    fn short_lines(lines: usize) -> Vec<u8> {
+        b"a\n".repeat(lines)
+    }
+
+    fn gzip_best(bytes: &[u8]) -> Vec<u8> {
+        let mut enc = GzEncoder::new(Vec::new(), GzLevel::best());
+        enc.write_all(bytes).unwrap();
+        enc.finish().unwrap()
+    }
+
+    /// The decoded bytes the largest single pump fed the framer, and the
+    /// records the object framed, draining between pumps as the lane does.
+    fn largest_pump(codec: Codec, chunk: &[u8]) -> (u64, usize) {
+        let mut framer = ObjectFramer::new(line_factory(TEST_CAP));
+        framer.begin_object(codec).unwrap();
+        let mut records = 0;
+        let mut before = framer.decoded_bytes();
+        framer.push_chunk(Bytes::copy_from_slice(chunk)).unwrap();
+        let mut largest = framer.decoded_bytes() - before;
+        loop {
+            while framer.pop_record().is_some() {
+                records += 1;
+            }
+            if !framer.has_pending_input() {
+                break;
+            }
+            before = framer.decoded_bytes();
+            framer.pump().unwrap();
+            largest = largest.max(framer.decoded_bytes() - before);
+        }
+        framer.finish_object().unwrap();
+        records += std::iter::from_fn(|| framer.pop_record()).count();
+        (largest, records)
+    }
+
+    /// A compressed chunk that expands to a million records reaches the lane
+    /// in steps that each queue a small fraction of it, and every record is
+    /// still framed.
+    #[test]
+    fn a_compressed_chunk_is_framed_a_bounded_step_at_a_time() {
+        let lines = 1 << 20;
+        let object = short_lines(lines);
+        for (codec, chunk) in [
+            (Codec::Gzip, gzip_best(&object)),
+            (Codec::Zstd, zstd::encode_all(&object[..], 19).unwrap()),
+        ] {
+            let (largest, records) = largest_pump(codec, &chunk);
+            assert_eq!(records, lines, "{codec:?}");
+            assert!(
+                largest <= PUMP_DECODED_BYTES / 2,
+                "{codec:?}: one pump decoded {largest} bytes of a {}-byte chunk",
+                chunk.len()
+            );
+        }
+    }
+
+    /// A chunk that decodes to no records still yields after the pump
+    /// budget, so the lane regains control between steps.
+    #[test]
+    fn a_pump_that_frames_no_record_stops_at_its_budget() {
+        let blank = vec![b'\n'; 64 << 20];
+        for (codec, chunk) in [
+            (Codec::Gzip, gzip_best(&blank)),
+            (Codec::Zstd, zstd::encode_all(&blank[..], 19).unwrap()),
+        ] {
+            let mut framer = ObjectFramer::new(line_factory(TEST_CAP));
+            framer.begin_object(codec).unwrap();
+            framer.push_chunk(Bytes::from(chunk)).unwrap();
+            let decoded = framer.decoded_bytes();
+            assert!(framer.has_pending_input(), "{codec:?}");
+            assert_eq!(framer.queued(), 0, "{codec:?}");
+            assert!(
+                (PUMP_DECODED_BYTES..2 * PUMP_DECODED_BYTES).contains(&decoded),
+                "{codec:?}: one pump decoded {decoded} bytes"
+            );
+        }
+    }
+
+    /// A decode error mid-chunk drops the rest of the chunk, so no later pump
+    /// feeds the codec past the failure.
+    #[test]
+    fn a_decode_error_drops_the_pending_input() {
+        let mut object = gzip(&short_lines(1 << 16));
+        object.extend(vec![0xFF; 64]);
+        let mut framer = ObjectFramer::new(line_factory(TEST_CAP));
+        framer.begin_object(Codec::Gzip).unwrap();
+        assert!(push_all(&mut framer, &object).is_err());
+        assert!(!framer.has_pending_input());
     }
 
     /// Arbitrary line content: no `\n` (the separator), but everything else

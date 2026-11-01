@@ -1,0 +1,227 @@
+---
+title: Split coordination lost a third of S3 throughput
+description: "On eight c8g.16xlarge hosts, the SQS work feed in Spate kept 99.7% of a static split's S3 throughput and the Kafka feed 97.6%. NATS split coordination kept 67%."
+slug: work-feed-scaling
+authors: [marcus]
+tags: [engineering]
+draft: true
+---
+
+import GroupedBars from '@site/src/components/charts/GroupedBars';
+
+When eight hosts read one S3 prefix, Spate 0.3's split coordination kept 67% of
+the throughput the same hosts reached on a static split, and on one host it kept
+97.6%. Spate 0.4 will replace it with a work feed on SQS or Kafka. At eight
+hosts the SQS feed kept 99.7% and the Kafka feed 97.6%, and on small objects the
+feeds read at 3.5 times coordination's rate.
+
+<!-- truncate -->
+
+## Why I replaced split coordination with a queue
+
+I replaced split coordination because of what it cost to keep correct. In 0.3, a
+leader instance listed the prefix, cut it into splits, and leased each split to
+an instance through a shared NATS store. Every assignment, renewal, and
+completion was a fenced write to that store, so that two instances could never
+commit the same split, and more often than not, that was where the bugs were.
+Fourteen known defects were still open in the protocol when I deprecated it in
+0.3, and [#1111](https://github.com/spate-etl/spate/issues/1111) lists them.
+
+A queue already does that job. It hands each message to one reader at a time and
+hides it while it is read, and when the reader dies, it delivers the message
+again. Object stores already publish their "object created" notifications to a
+queue: S3 publishes them to SQS, and Ceph to Kafka. So in 0.4, a lister run
+publishes the prefix's objects to a work feed on SQS or Kafka as units of work,
+and every instance reads its units from the feed directly.
+[ADR-0080](/docs/adr/a-work-feed-replaces-leased-fenced-split-coordination)
+records the decision, and the [work feed](/docs/user-guide/concepts/work-feed)
+page describes the model.
+
+The deprecation went out on maintenance grounds, and I wanted to know what the
+switch did to throughput before it shipped, so I measured both on AWS.
+
+## How the benchmark ran
+
+Each host was a `c8g.16xlarge` (Graviton4, 64 vCPUs) in one availability zone of
+`eu-west-2`, with three `m8g.xlarge` nodes running the NATS cluster and three
+running Kafka. Each host read eight replicas of a corpus of 418 NDJSON objects.
+Each object was 1 GiB when decoded and was compressed with ZSTD at level 6, so a
+host read 3,344 objects and 5.88 billion rows in every arm. The rows were parsed
+with `simd-json` and handed to a sink that discarded them once acknowledged.
+This meant that the runs measured the read side of a pipeline and left the
+warehouse out.
+
+Every arm ran 48 pipeline threads, 12 I/O workers, and 96 units in flight per
+host, with `prefetch_bytes: 32MiB` and `chunk_bytes: 2MiB`, and both versions
+used the same settings. Throughput is the fleet's decoded bytes per second over
+a common window, from 30 seconds after the last host started to the moment no
+work was left to start. Coordination and each feed ran three times at every
+fleet size of one, two, four, and eight hosts, and each static split ran once.
+
+The ceiling is a static split, where each host reads its own eight replicas with
+no coordination at all. I measured it on both versions, because a 0.4 host read
+2.4–2.7% faster than a 0.3 host at every fleet size before any coordination was
+involved. Each arm below is set against the static split of its own version, so
+that difference counts neither for nor against coordination.
+
+## Split coordination fell to 67% at eight hosts
+
+<GroupedBars
+  name="Share of the static split's throughput by fleet size"
+  groups={['1 host', '2 hosts', '4 hosts', '8 hosts']}
+  series={['0.3 split coordination', '0.4 SQS feed', '0.4 Kafka feed']}
+  values={[
+    [97.6, 99.7, 99.5],
+    [94.1, 99.5, 99.6],
+    [88.6, 99.9, 99.8],
+    [67.1, 99.7, 97.6],
+  ]}
+  measure="share of the static split"
+  unit="%"
+  caption={<>
+    Each arm's mean decoded throughput as a share of the static split on its
+    own version, over three runs. Split coordination kept 97.6%, 94.1%, 88.6%,
+    and 67.1% at one, two, four, and eight hosts. The SQS feed kept 99.7%,
+    99.5%, 99.9%, and 99.7%. The Kafka feed kept 99.5%, 99.6%, 99.8%, and 97.6%.
+  </>}
+/>
+
+On one host, coordination cost 2.4% against its own static split, and the two
+feeds cost 0.3% and 0.5%. From two hosts on, the gap between coordination and
+the feeds widened as the fleet grew. At eight hosts, coordination kept 67.1%,
+and its three runs spread across a range of 5.24 GB/s. Its last row landed
+461–506 seconds after the start, against 316 seconds for the static split. The
+SQS feed kept 99.5–99.9% at every fleet size with no unit delivered twice, and
+its runs fell within 0.09 GB/s of each other. The Kafka feed matched it up to
+four hosts and kept 97.6% at eight.
+
+| Hosts | Static split, 0.4 | Static split, 0.3 | Coordination, 0.3 | SQS feed, 0.4 | Kafka feed, 0.4 |
+|---|---|---|---|---|---|
+| 1 | 11.64 | 11.33 | 11.06 | 11.60 | 11.58 |
+| 2 | 23.25 | 22.70 | 21.37 | 23.13 | 23.16 |
+| 4 | 46.41 | 45.34 | 40.17 | 46.35 | 46.32 |
+| 8 | 92.85 | 90.50 | 60.68 | 92.56 | 90.66 |
+
+The table gives decoded GB/s, as the mean of three runs for coordination and the
+feeds.
+
+## Where the time went
+
+Coordination's loss has three links, and the runs measured each of them. The
+first is the store. NATS never ran short of CPU, and its nodes averaged 10–17%
+of one core at eight hosts. Its operations still slowed as the fleet grew. On a
+follower host, the 99th percentile of a write rose from about 25 ms at two hosts
+to about 100 ms at eight, and the 99th percentile of a delete from about 50 ms
+to about 250 ms.
+
+The second is the wait between splits. A host reads one unit or split per lane,
+and each lane is pinned to one pipeline thread. A lane on a follower host that
+finished a split waited for its next assignment, and that wait grew with the
+fleet, from 0.36 seconds per hand-off at two hosts to 1.35–2.40 seconds at
+eight. The leader's own host, by comparison, kept 97–99% of its lanes busy from
+two hosts to eight.
+
+The third is what the pipeline threads did while lanes waited. In 0.3 they kept
+polling the lanes that had nothing to read. At eight hosts, a coordinated host
+polled its source 3.8–7.0 million times a second, against 76,000–91,000 on the
+0.3 static split. Its pipeline threads kept 42–45 cores busy and decoded 5.4–8.9
+GB/s, where the 0.3 static split decoded 11.3 GB/s on 46 cores. On the same
+hosts, the 0.4 SQS feed polled about 30,000 times a second.
+
+The runs measure each link but do not separate their shares of the loss. A
+slower store lengthens the wait, and a longer wait gives the threads more empty
+polls, so the three compound.
+
+## Small objects widen the gap to 3.5 times
+
+A second corpus cuts the same data into 868,608 objects, each about 2.1 MB, for
+1.84 TB in all, and four hosts read it. Coordination hit the 15-minute cap on
+each of its three runs, and read 13.10 GB/s on average over its window. The SQS
+feed read 45.95 GB/s and the Kafka feed read 45.53 GB/s, so the feeds ran at 3.5
+times coordination's rate. Each feed read every row once, with no unit delivered
+twice. Both versions pack small objects into shared units, so packing does not
+explain the gap, and I have not traced what does.
+
+## What a dead host costs on each feed
+
+At four hosts, I killed one host with `SIGKILL` once it had acknowledged half
+its share of the rows, and I repeated this three times on each feed. No row was
+lost on either feed, and each of the 96 units the dead host held was delivered
+again to another host exactly once.
+
+The feeds differ in how they get there. SQS hands a unit back once its
+visibility period ends, which is 60 seconds by default on the SQS feed. The 96
+units therefore waited out that minute, and the fleet's last row landed at
+368–369 seconds, against 315 seconds without a kill. Kafka reassigns the dead
+host's partitions at the next rebalance. That rebalance revokes every partition
+in the group, so the fleet read 543–677 units again, including the dead host's
+96, and the last row landed at 395–430 seconds, against 323 seconds without a
+kill. Every run checked the bound that at-least-once delivery allows, and the
+extra rows stayed within it.
+
+## The first feed build was slower on small objects
+
+Before any of it shipped, the first build of the feed was slower than
+coordination on small objects. Its lister published one object per unit, so each
+lane finished one small object and then waited for its next unit while the `GET`
+ran. On one host with 96 units in flight, only 35.4 of 48 pipeline threads were
+busy ([#1483](https://github.com/spate-etl/spate/issues/1483)). Coordination had
+packed small objects into splits of about 16 all along.
+
+I made the lister pack up to 16 small objects into one unit
+([#1500](https://github.com/spate-etl/spate/pull/1500),
+[ADR-0085](/docs/adr/the-lister-packs-small-objects-into-shared-work-units)). On
+the same host and corpus, that lifted decoded throughput 1.30 times with 96
+units in flight, from 8.47 to 11.02 GB/s, and 46.5 pipeline threads were then
+busy. With 48 units in flight it lifted throughput 1.40 times, from 5.38 to 7.52
+GB/s.
+
+Packing gave each lane a next object to start while it decoded the current one,
+which led to the second fix. A lane reads each object in windows of
+`prefetch_bytes`, and it now reads its next window while it hands on the current
+one ([#877](https://github.com/spate-etl/spate/issues/877),
+[ADR-0087](/docs/adr/a-lane-reads-its-next-window-while-it-hands-on-the-current-one)).
+That change lifted throughput on small objects 1.31 times with one unit per
+pipeline thread. With the threads kept busy, I made an unset `units_held` hold
+twice as many units as there are pipeline threads
+([ADR-0086](/docs/adr/an-unset-units-held-holds-twice-the-pipeline-thread-count)).
+
+## What running a feed job asks of you
+
+Running a job on the feed asks more of you than coordination did.
+
+- You provision the queue or the topics. An [SQS
+  job](/docs/user-guide/connectors/feeds/sqs) needs a standard queue with a
+  dead-letter queue that keeps its messages longer than the work queue does, and
+  a [Kafka job](/docs/user-guide/connectors/feeds/kafka) needs four topics:
+  work, retry, dead-letter, and attempt. Spate checks them at startup and
+  refuses a setup it cannot run on, and it creates none of them.
+- A bounded job's listing is a run of its own. The lister publishes every unit
+  and writes an end marker, and the workers finish only once they have read it.
+- An SQS job ends a minute after its last unit at the earliest. AWS documents a
+  queue's message counts as taking that long to settle, so the job waits for the
+  feed to read empty for the whole settling window.
+- If the store never delivers a notification, Spate does not list the prefix
+  again to recover it
+  ([ADR-0072](/docs/adr/missed-storage-notifications-are-not-reconciled-by-re-listing)).
+- The Kafka feed runs eager assignment, because its offset tracker relies on a
+  rebalance revoking every partition, and that is why a dead host costs Kafka
+  more than SQS.
+
+## What the numbers do not show
+
+The runs used one host type, two cuts of one corpus, and one decoder. The sink
+discarded every row, so a warehouse that cannot take 90 GB/s would bound every
+arm long before coordination did. Coordination and the 0.3 static split both end
+their window on completed splits. A split counts as completed at a progress
+commit, so either window can run up to one 5-second checkpoint into the drain,
+which I estimate leans them low by 0.1–0.5%. Kafka's 97.6% at eight hosts came
+from four of its hosts keeping 95.7–97.0% of their lanes busy, while the other
+four kept 98.3–100%. I have not traced why those four hosts fell behind, or the
+cause of the small-object gap.
+
+## Try the work feed
+
+The work feed will ship in 0.4. The S3 source page's [Reading from a
+feed](/docs/user-guide/connectors/sources/s3#reading-from-a-feed) section sets
+one up.

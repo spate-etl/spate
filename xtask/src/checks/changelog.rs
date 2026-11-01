@@ -24,7 +24,7 @@ use crate::run::{self, Completed, Error, Outcome, Step, Streams};
 const TOOL: &str = "changelog";
 
 /// The directory holding the fragments.
-const FRAGMENTS: &str = "changelog.d";
+pub(crate) const FRAGMENTS: &str = "changelog.d";
 
 /// The Keep a Changelog six, in the order a release renders them. A breaking
 /// change is a `**Breaking:**` marker on one of these.
@@ -1784,6 +1784,23 @@ fn fragments_of(root: &Path, kind: &str) -> Vec<String> {
         .into_iter()
         .filter(|path| fragment_type(path) == Some(kind))
         .collect()
+}
+
+/// Whether [`build`] would refuse the tree at `root` for having nothing to
+/// release: no fragment under `changelog.d/`, and no root dependency
+/// requirement moved since the previous tag.
+///
+/// # Errors
+///
+/// When `changelog.d/` cannot be read, which [`fragment_names`] would report
+/// as holding none, or when the requirement comparison fails.
+pub(crate) fn nothing_to_release(root: &Path) -> Result<bool, Error> {
+    let dir = root.join(FRAGMENTS);
+    std::fs::read_dir(&dir).map_err(|e| Error::msg(format!("{}: {e}", dir.display())))?;
+    if !fragment_names(root).is_empty() {
+        return Ok(false);
+    }
+    Ok(requirements::entry(root, previous_tag(root).as_deref())?.is_none())
 }
 
 /// Whether git has this path in the index.

@@ -136,7 +136,11 @@ cargo xtask release dry-run --version X.Y.Z
 `X.Y.Z` is the version the next release will take. The rehearsal assembles
 from the local `HEAD`, so a minor release's post has to be committed there
 first, as a draft. With `--stand-in-post`, when no post carries the release's
-slug yet, the rehearsal commits a draft stand-in in its worktree instead. The
+slug yet, the rehearsal commits a draft stand-in in its worktree instead.
+`assemble` refuses a release with nothing in it: no changelog fragment and no
+root dependency requirement moved since the last tag. With
+`--stand-in-fragment`, the rehearsal commits a stand-in fragment in that case,
+which is the state of `main` after each release. The
 dry run runs the same `assemble` and the publish up to staging in a throwaway
 git worktree. That covers the real release commit,
 every pending crate packaged and verify-built, and the SBOMs and `SHA256SUMS`
@@ -165,7 +169,8 @@ The same proof also runs continuously. The `publish-dry-run` job in
 `release-checks.yml`, which `ci.yml` calls, runs
 `cargo xtask release package`, the packaging step `prepare` runs, at a
 simulated bump on pushes to `main` that reach a manifest. `nightly.yml` runs
-`cargo xtask release dry-run --stand-in-post` nightly at the derived version,
+`cargo xtask release dry-run --stand-in-post --stand-in-fragment` nightly at
+the derived version,
 with `gh`, `cargo-about` and `cargo-cyclonedx` installed as a release gets
 them, so a packaging problem or a change in those tools surfaces before
 release day. `release-checks.yml` runs the same rehearsal on a pull request
@@ -177,8 +182,9 @@ passes. A re-run keeps the run's
 merge commit, so a run made before the release commit landed needs a push, or
 the pull request closed and reopened. The nightly skips the night after a
 release when nothing has merged since the tag. When the derived version is a
-minor with no post yet, the flag commits a stand-in draft post in the
-rehearsal's worktree.
+minor with no post yet, `--stand-in-post` commits a stand-in draft post in
+the rehearsal's worktree, and `--stand-in-fragment` commits a stand-in
+fragment when the release would have nothing in it.
 `nightly.yml` also generates `THIRD-PARTY.md` each night, so a generator
 failure surfaces the same way.
 

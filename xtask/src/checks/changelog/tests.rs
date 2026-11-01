@@ -2345,6 +2345,22 @@ fn a_tree_with_no_fragments_has_nothing_to_release() {
     );
 }
 
+/// The release rehearsal's stand-in fragment is something to release, on a
+/// tree that holds no other fragment.
+#[test]
+fn the_rehearsal_stand_in_is_something_to_release() {
+    let release = Release::new("the_rehearsal_stand_in_is_something_to_release");
+    release.fragment(
+        crate::release::STAND_IN_FRAGMENT,
+        crate::release::STAND_IN_ENTRY,
+    );
+    let block = assemble(release.path(), "nothing..HEAD", None, None, &unanswered).unwrap();
+    assert_eq!(
+        block,
+        "### Changed\n\n- **Release rehearsal stand-in**\n\n  A rehearsal commit, never pushed.\n"
+    );
+}
+
 /// An entry with no reference of its own takes the derived one on a line of its
 /// own, because a fragment may end in a fenced code block.
 #[test]
@@ -2792,6 +2808,24 @@ fn a_release_of_requirement_changes_alone_assembles() {
             bullet(simd_json_entry("0.18.1", "0.19.0").trim_end_matches('\n'))
         )
     );
+}
+
+/// A tree with no fragment has something to release once a root requirement
+/// moved since the tag, which is when [`build`] assembles it, and nothing once
+/// the requirements match the tag again.
+#[test]
+fn a_moved_requirement_is_something_to_release() {
+    let release = Release::new("a_moved_requirement_is_something_to_release");
+    std::fs::create_dir_all(release.path().join(FRAGMENTS)).unwrap();
+    requirements(&release.0, "0.18.1", "0.2.0");
+    release.0.commit("workspace: the manifests");
+    release.0.git(&["tag", "v0.2.0"]);
+    assert!(nothing_to_release(release.path()).unwrap());
+
+    requirements(&release.0, "0.19.0", "0.2.0");
+    release.0.commit("workspace: bump simd-json");
+    assert!(!nothing_to_release(release.path()).unwrap());
+    build(release.path(), false, "0.3.0").unwrap();
 }
 
 /// Only the margin lines that run on from a breaking entry move with it; a

@@ -515,6 +515,9 @@ jobs:
       # `--stand-in-post` commits a draft post in the rehearsal's worktree
       # when the version is a minor with no post yet, since a minor release
       # needs its post committed first (website/blog/README.md).
+      # `--stand-in-fragment` commits a stand-in fragment there when
+      # changelog.d/ holds none, as it does after each release, since
+      # `assemble` refuses a release with nothing in it.
       - name: Rehearse the release
         id: dry-run
         if: steps.version.outputs.skip != 'true'
@@ -525,7 +528,7 @@ jobs:
         run: |
           set -o pipefail
           rc=0
-          cargo xtask release dry-run --version "$NEXT" --stand-in-post 2>&1 | tee -a "$RUNNER_TEMP/publish.log" || rc=$?
+          cargo xtask release dry-run --version "$NEXT" --stand-in-post --stand-in-fragment 2>&1 | tee -a "$RUNNER_TEMP/publish.log" || rc=$?
           exit "$rc"
 
       - name: Upload the log
@@ -582,12 +585,12 @@ jobs:
           if [ "$VERSION_FAILED" = "true" ]; then
             what="Deriving the next version failed on the [nightly run]($RUN_URL) before the rehearsal started, so this says nothing about whether a release would succeed."
           else
-            what="\`cargo xtask release dry-run --version $NEXT --stand-in-post\` failed on the [nightly run]($RUN_URL). It runs \`assemble\` and \`prepare\` as a release does, and prints the pushes, pull request changes and uploads instead of making them."
+            what="\`cargo xtask release dry-run --version $NEXT --stand-in-post --stand-in-fragment\` failed on the [nightly run]($RUN_URL). It runs \`assemble\` and \`prepare\` as a release does, and prints the pushes, pull request changes and uploads instead of making them."
           fi
           where=$'Build, CI, or the examples\n\nThe `Release dry run` job of the nightly scheduled run.'
           version="\`main\` at $SHA"
           # shellcheck disable=SC2016
-          expected='The release assembles, packages and stages its SBOMs at the version the history derives. A failure here stops the next release in `assemble`, or in `prepare` before anything is published. With nothing changed in this repository, a failure in `gh`, `cargo about` or `cargo cyclonedx` points at the runner image or the `taiki-e/install-action` pin. To reproduce it, follow "Rehearse it first" in RELEASING.md with `GH_REPO` set and `--stand-in-post` passed, as this job runs it. If the output shows a network error, rerun the job first.'
+          expected='The release assembles, packages and stages its SBOMs at the version the history derives. A failure here stops the next release in `assemble`, or in `prepare` before anything is published. With nothing changed in this repository, a failure in `gh`, `cargo about` or `cargo cyclonedx` points at the runner image or the `taiki-e/install-action` pin. To reproduce it, follow "Rehearse it first" in RELEASING.md with `GH_REPO` set and `--stand-in-post` and `--stand-in-fragment` passed, as this job runs it. If the output shows a network error, rerun the job first.'
           cargo xtask bug-report --out "$RUNNER_TEMP/body.md" \
             --answer components="$where" \
             --answer version="$version" \

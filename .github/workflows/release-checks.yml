@@ -254,6 +254,9 @@ jobs:
       # `--stand-in-post` commits a draft post in the rehearsal's worktree
       # when the version is a minor with no post yet, since a minor release
       # needs its post committed first (website/blog/README.md).
+      # `--stand-in-fragment` commits a stand-in fragment there when
+      # changelog.d/ holds none, as it does after each release, since
+      # `assemble` refuses a release with nothing in it.
       - name: Rehearse the release
         id: dry-run
         if: steps.version.outputs.skip != 'true'
@@ -264,7 +267,7 @@ jobs:
         run: |
           set -o pipefail
           rc=0
-          cargo xtask release dry-run --version "$NEXT" --stand-in-post 2>&1 | tee -a "$RUNNER_TEMP/publish.log" || rc=$?
+          cargo xtask release dry-run --version "$NEXT" --stand-in-post --stand-in-fragment 2>&1 | tee -a "$RUNNER_TEMP/publish.log" || rc=$?
           exit "$rc"
 
   # Catches a floor mismatch this diff introduces, before merge.

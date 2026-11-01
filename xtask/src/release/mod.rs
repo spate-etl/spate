@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 
 use clap::Subcommand;
 
+use crate::checks::changelog;
 use crate::checks::scratch::{Scratch, unique_name};
 use crate::run::{self, Error, Outcome, Step, Streams};
 use io::{CratesIo, DryForge, DryGit, Gh, Git, Host, LocalWorkspace, ProcessGit, Workspace};
@@ -94,6 +95,10 @@ pub(crate) enum ReleaseCommand {
         /// stand-in post in the worktree first
         #[arg(long)]
         stand_in_post: bool,
+        /// When changelog.d/ holds no fragment, commit a stand-in fragment in
+        /// the worktree first
+        #[arg(long)]
+        stand_in_fragment: bool,
     },
 }
 
@@ -241,7 +246,8 @@ pub(crate) fn dispatch(root: &Path, explain: bool, cmd: ReleaseCommand) -> Outco
             version,
             keep,
             stand_in_post,
-        } => dry_run(root, &version, keep, stand_in_post),
+            stand_in_fragment,
+        } => dry_run(root, &version, keep, stand_in_post, stand_in_fragment),
     }
 }
 
@@ -399,9 +405,16 @@ fn preflight_sbom(root: &Path) -> Outcome {
 
 /// Runs `assemble --dry-run` and `prepare --dry-run` in a detached worktree of
 /// `HEAD`. With `stand_in_post`, [`commit_stand_in_post`] runs in the worktree
-/// first. The worktree is removed after a successful run unless `keep` is set,
-/// and kept after a failure.
-fn dry_run(root: &Path, version: &str, keep: bool, stand_in_post: bool) -> Outcome {
+/// first, and with `stand_in_fragment`, [`commit_stand_in_fragment`]. The
+/// worktree is removed after a successful run unless `keep` is set, and kept
+/// after a failure.
+fn dry_run(
+    root: &Path,
+    version: &str,
+    keep: bool,
+    stand_in_post: bool,
+    stand_in_fragment: bool,
+) -> Outcome {
     preflight(root, true)?;
     // The worktree is made from HEAD, so uncommitted work would be silently
     // left out of the rehearsal.
@@ -429,7 +442,14 @@ fn dry_run(root: &Path, version: &str, keep: bool, stand_in_post: bool) -> Outco
         commit_stand_in_post(&tree, version)
     } else {
         Ok(())
-    };
+    }
+    .and_then(|()| {
+        if stand_in_fragment {
+            commit_stand_in_fragment(&tree)
+        } else {
+            Ok(())
+        }
+    });
     let outcome = staged
         .and_then(|()| {
             run::run(
@@ -524,6 +544,50 @@ fn commit_stand_in_post(tree: &Path, version: &str) -> Outcome {
     git.commit_all(
         &format!("website: stand in for the {parsed} release post"),
         "A rehearsal commit, never pushed. A minor release needs its post committed first.",
+    )
+}
+
+/// The file a rehearsal's stand-in fragment is written to, under
+/// [`changelog::FRAGMENTS`].
+pub(crate) const STAND_IN_FRAGMENT: &str = "rehearsal-stand-in.changed.md";
+
+/// The entry the stand-in fragment carries. The assembly refuses a fragment
+/// with no prose.
+pub(crate) const STAND_IN_ENTRY: &str =
+    "**Release rehearsal stand-in**\n\nA rehearsal commit, never pushed.\n";
+
+/// The fragment a rehearsal needs, or `None` when `changelog.d/` under `root`
+/// already holds one. The question is the one [`changelog::build`] asks before
+/// it refuses an empty release, so the two agree.
+///
+/// # Errors
+///
+/// When `changelog.d/` cannot be read.
+fn stand_in_fragment(root: &Path) -> Result<Option<&'static str>, Error> {
+    if changelog::has_fragments(root)? {
+        return Ok(None);
+    }
+    Ok(Some(STAND_IN_ENTRY))
+}
+
+/// Commits [`stand_in_fragment`]'s fragment in the checkout at `tree`, or
+/// leaves the checkout as it is when it holds a fragment already. The commit
+/// stays in the throwaway worktree and is never pushed.
+fn commit_stand_in_fragment(tree: &Path) -> Outcome {
+    let Some(text) = stand_in_fragment(tree)? else {
+        return Ok(());
+    };
+    let relative = format!("{}/{STAND_IN_FRAGMENT}", changelog::FRAGMENTS);
+    let path = tree.join(&relative);
+    std::fs::write(&path, text).map_err(|e| Error::msg(format!("{}: {e}", path.display())))?;
+    run::quiet(tree, false, &Step::new("git", ["add", "--", &relative]))?;
+    let git = ProcessGit {
+        root: tree,
+        remote: remote(None),
+    };
+    git.commit_all(
+        "ci: stand in for the release's changelog fragments",
+        "A rehearsal commit, never pushed. A release refuses to assemble with no fragment.",
     )
 }
 
@@ -649,6 +713,73 @@ mod tests {
     }
 
     const BOT: &str = "spate-release[bot] <spate-release[bot]@users.noreply.github.com>";
+
+    /// A stand-in fragment is written only while `changelog.d/` holds no
+    /// fragment, and a README there is not one. Regression for #1640.
+    #[test]
+    fn a_stand_in_fragment_is_written_only_when_none_is_present() {
+        let scratch = Scratch::new("spate-xtask-stand-in-fragment").unwrap();
+        let root = scratch.dir();
+        assert!(stand_in_fragment(root).is_err(), "no changelog.d/");
+
+        let dir = root.join(changelog::FRAGMENTS);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(stand_in_fragment(root).unwrap(), Some(STAND_IN_ENTRY));
+        std::fs::write(dir.join("README.md"), "# Changelog fragments\n").unwrap();
+        assert_eq!(stand_in_fragment(root).unwrap(), Some(STAND_IN_ENTRY));
+
+        std::fs::write(dir.join(STAND_IN_FRAGMENT), STAND_IN_ENTRY).unwrap();
+        assert_eq!(stand_in_fragment(root).unwrap(), None);
+        std::fs::remove_file(dir.join(STAND_IN_FRAGMENT)).unwrap();
+        std::fs::write(dir.join("x.fixed.md"), "A fix.\n").unwrap();
+        assert_eq!(stand_in_fragment(root).unwrap(), None);
+    }
+
+    /// The stand-in fragment is committed as the release identity, leaves a
+    /// clean tree, and is what the assembly then reads; a tree holding a
+    /// fragment commits nothing. Regression for #1640.
+    #[test]
+    fn a_rehearsal_commits_its_stand_in_fragment_as_the_release_identity() {
+        let scratch = Scratch::new("spate-xtask-stand-in-fragment-commit").unwrap();
+        let root = scratch.dir();
+        let dir = root.join(changelog::FRAGMENTS);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("README.md"), "# Changelog fragments\n").unwrap();
+        git(root, &["init", "-q"]);
+        git(root, &["add", "."]);
+        git(root, &["commit", "-q", "-m", "base"]);
+        let base = head(root, "--format=%H");
+
+        commit_stand_in_fragment(root).unwrap();
+        assert_eq!(
+            head(root, "--format=%s"),
+            "ci: stand in for the release's changelog fragments"
+        );
+        assert_eq!(head(root, "--format=%an <%ae>"), BOT);
+        assert_eq!(
+            head(root, "--format=%P"),
+            base,
+            "one commit on top of the base"
+        );
+        assert!(
+            run::capture(root, &Step::new("git", ["status", "--porcelain"]))
+                .unwrap()
+                .is_empty()
+        );
+        assert!(changelog::has_fragments(root).unwrap());
+
+        let stood_in = head(root, "--format=%H");
+        commit_stand_in_fragment(root).unwrap();
+        assert_eq!(
+            head(root, "--format=%H"),
+            stood_in,
+            "nothing to stand in for"
+        );
+        assert!(
+            commit_stand_in_fragment(&dir).is_err(),
+            "no changelog.d/ under it"
+        );
+    }
 
     /// A checked-out branch is an attached head, and `checkout --detach` is not.
     #[test]

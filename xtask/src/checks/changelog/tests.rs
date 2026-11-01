@@ -2345,6 +2345,22 @@ fn a_tree_with_no_fragments_has_nothing_to_release() {
     );
 }
 
+/// The release rehearsal's stand-in fragment is something to release, on a
+/// tree that holds no other fragment. Regression for #1640.
+#[test]
+fn the_rehearsal_stand_in_is_something_to_release() {
+    let release = Release::new("the_rehearsal_stand_in_is_something_to_release");
+    release.fragment(
+        crate::release::STAND_IN_FRAGMENT,
+        crate::release::STAND_IN_ENTRY,
+    );
+    let block = assemble(release.path(), "nothing..HEAD", None, None, &unanswered).unwrap();
+    assert_eq!(
+        block,
+        "### Changed\n\n- **Release rehearsal stand-in**\n\n  A rehearsal commit, never pushed.\n"
+    );
+}
+
 /// An entry with no reference of its own takes the derived one on a line of its
 /// own, because a fragment may end in a fenced code block.
 #[test]

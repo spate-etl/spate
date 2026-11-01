@@ -1,3 +1,0 @@
-**Breaking:** **An unrecognized `store` key fails at load** (`spate-s3`)
-
-For an S3 URL (`s3://`, `s3a://`, or an `https://` URL on an `amazonaws.com` or `r2.cloudflarestorage.com` host), a key under `store` that `object_store` does not recognize as an S3 option fails pipeline load, and the error names the key. In previous versions, the source skipped the key without a message. A misspelled `endpoint` therefore built a client for the default AWS endpoint and sent it requests signed with the configured credentials. Each request carried the access key ID and any session token. A configuration that carries such a key loads on v0.3.0 and fails on this version: correct the key's spelling or remove it. Keys under a `file://` URL are not checked.

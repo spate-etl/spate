@@ -1,3 +1,0 @@
-**Each pipeline thread sends a sink shard its chunks in seal order** (`spate-core`)
-
-Each pipeline thread sends a sink shard's worker its chunks in the order it sealed them. In previous versions, a chunk sealed while an earlier chunk for the same shard waited for queue space could be sent first, when the shard's queue freed a slot before the waiting chunk was retried. Writes for one shard can still complete out of order while several batches are in flight, up to `inflight.max_per_shard`. Chunks from different pipeline threads can reach a shard in any order. No record was lost or duplicated, because each chunk carries its own acknowledgments.

@@ -4053,7 +4053,7 @@ dependencies = [
 
 [[package]]
 name = "spate"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "apache-avro",
  "bytes",
@@ -4086,7 +4086,7 @@ dependencies = [
 
 [[package]]
 name = "spate-avro"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "apache-avro",
  "bytes",
@@ -4116,7 +4116,7 @@ dependencies = [
 
 [[package]]
 name = "spate-bench"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "clap",
  "libc",
@@ -4128,7 +4128,7 @@ dependencies = [
 
 [[package]]
 name = "spate-clickhouse"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "bytes",
  "bytesize",
@@ -4170,7 +4170,7 @@ dependencies = [
 
 [[package]]
 name = "spate-clickhouse-derive"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -4181,7 +4181,7 @@ dependencies = [
 
 [[package]]
 name = "spate-core"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "bytes",
  "bytesize",
@@ -4214,7 +4214,7 @@ dependencies = [
 
 [[package]]
 name = "spate-datagen"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "apache-avro",
  "humantime-serde",
@@ -4227,7 +4227,7 @@ dependencies = [
 
 [[package]]
 name = "spate-fuzz"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "arbitrary",
  "bytes",
@@ -4246,7 +4246,7 @@ dependencies = [
 
 [[package]]
 name = "spate-json"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "gungraun",
  "metrics",
@@ -4266,7 +4266,7 @@ dependencies = [
 
 [[package]]
 name = "spate-kafka"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "bytes",
  "bytesize",
@@ -4299,7 +4299,7 @@ dependencies = [
 
 [[package]]
 name = "spate-s3"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -4333,7 +4333,7 @@ dependencies = [
 
 [[package]]
 name = "spate-sqs"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "aws-config",
  "aws-credential-types",
@@ -4363,7 +4363,7 @@ dependencies = [
 
 [[package]]
 name = "spate-test"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "bytes",
  "crossbeam-channel",
@@ -4380,7 +4380,7 @@ dependencies = [
 
 [[package]]
 name = "spate-test-support"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "base64 0.23.1",
  "futures-util",
@@ -4397,7 +4397,7 @@ dependencies = [
 
 [[package]]
 name = "spate-xtask"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "clap",
  "pulldown-cmark",

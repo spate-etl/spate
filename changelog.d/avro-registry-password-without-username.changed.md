@@ -1,3 +1,0 @@
-**Breaking:** **A registry password without a username fails at load** (`spate-avro`)
-
-The Avro deserializer rejects a `registry` section that sets `password` without `username` when the configuration loads, and the error names both fields. In previous versions the section loaded and the password was never sent. A registry that requires authentication then rejected the requests, and the pipeline stopped the first time it needed a schema from the registry. A registry that needs no authentication accepted the requests, so such a pipeline ran and now fails to start. Set `registry.username`, or remove `registry.password` if the registry needs no authentication. A username without a password is still accepted.

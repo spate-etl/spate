@@ -77,7 +77,12 @@ pub trait RecordFramer: Send {
     /// Pop the next completed record, in stream order.
     fn pop(&mut self) -> Option<Vec<u8>>;
 
-    /// Total decoded bytes fed so far (for metrics).
+    /// Total decoded bytes fed so far: the sum of the lengths passed to
+    /// [`push`](Self::push).
+    ///
+    /// A source reports it as a metric and may also bound how much it decodes
+    /// per step by it, so a framer that under-counts lets that step run
+    /// longer.
     fn decoded_bytes(&self) -> u64;
 
     /// The byte after which a reader can start framing mid-stream, or `None`

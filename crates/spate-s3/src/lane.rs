@@ -326,6 +326,7 @@ impl S3Lane {
                 m.objects_remaining.decrement(1.0);
             }
         }
+        self.report_decoded();
     }
 
     /// Apply one fetcher message to the framing state.
@@ -378,15 +379,8 @@ impl S3Lane {
                 if let Some(m) = &self.metrics {
                     m.bytes_read.increment(bytes.len() as u64);
                 }
-                if let Err(e) = self.framer.push_chunk(&bytes) {
-                    let key = self
-                        .current
-                        .as_ref()
-                        .map_or_else(String::new, |c| c.key.clone());
-                    self.poison(
-                        PoisonKind::Undecodable,
-                        format!("decoding \"{key}\": {e} (corrupt or truncated object?)"),
-                    );
+                if let Err(e) = self.framer.push_chunk(bytes) {
+                    self.poison_decode(&e);
                 }
                 Ok(())
             }
@@ -421,6 +415,18 @@ impl S3Lane {
                 Err(self.fail(class, reason))
             }
         }
+    }
+
+    /// Poison the split on a decode error in the current object's chunks.
+    fn poison_decode(&mut self, e: &std::io::Error) {
+        let key = self
+            .current
+            .as_ref()
+            .map_or_else(String::new, |c| c.key.clone());
+        self.poison(
+            PoisonKind::Undecodable,
+            format!("decoding \"{key}\": {e} (corrupt or truncated object?)"),
+        );
     }
 
     /// Report the decoded-bytes delta at a batch boundary.
@@ -476,7 +482,8 @@ impl SourceLane for S3Lane {
         }
         self.held.clear();
         let deadline = self.clock.now() + timeout;
-        // Whether this poll has already tried the channel. The deadline
+        // Whether this poll has already tried the channel or decoded a step
+        // of pending input. The deadline
         // must not short-circuit the *first* receive: with `timeout` zero
         // (the driver's head-of-line rotation) `now >= deadline` is true
         // immediately, and bailing before `try_recv` would report the lane
@@ -509,10 +516,11 @@ impl SourceLane for S3Lane {
             // stream of chunks that frames no records (one enormous line,
             // whitespace floods) must still return control to the driver —
             // heartbeats and shutdown are processed between polls. Checked
-            // only once a receive has been attempted, so a zero-timeout
-            // poll still consumes one ready chunk (and the framing pass at
-            // the top of the next iteration turns it into records) before
-            // this bails.
+            // only once a receive or a decode step has been attempted, so a
+            // zero-timeout poll still decodes one step of a pending chunk, or
+            // with none pending consumes one ready message (and the framing
+            // pass at the top of the next iteration turns it into records),
+            // before this bails.
             if recv_attempted && self.clock.now() >= deadline {
                 if self.held.is_empty() {
                     return Ok(None);
@@ -520,6 +528,17 @@ impl SourceLane for S3Lane {
                 break;
             }
             recv_attempted = true;
+            // The rest of the last chunk is decoded before the next message
+            // is taken, one bounded step per iteration, so the drain at the
+            // top of the loop keeps the framer's queue short however far the
+            // chunk expands.
+            if self.framer.has_pending_input() {
+                if let Err(e) = self.framer.pump() {
+                    self.poison_decode(&e);
+                    return Ok(None);
+                }
+                continue;
+            }
             let msg = match self.rx.try_recv() {
                 Ok(m) => Some(m),
                 Err(TryRecvError::Empty) => {
@@ -754,6 +773,29 @@ mod tests {
         })
     }
 
+    /// A small zstd chunk that decodes to a million two-byte records leaves
+    /// at most one decode step's records queued after each poll, and every
+    /// record is still framed.
+    #[test]
+    fn a_compressed_chunk_queues_one_step_of_records_per_poll() {
+        let lines = 1usize << 20;
+        let chunk = zstd::encode_all(&b"a\n".repeat(lines)[..], 19).unwrap();
+        let mut r = rig(None);
+        start(&r, 0, "p/a.ndjson.zst");
+        send(&r, ChunkMsg::Chunk(bytes::Bytes::from(chunk)));
+        send(&r, ChunkMsg::ObjectEnd);
+        let mut framed = 0;
+        while framed < lines {
+            framed += poll_batch(&mut r.lane, 512).expect("records remain").len();
+            let queued_bytes = 2 * r.lane.framer.queued() as u64;
+            assert!(
+                queued_bytes <= crate::framer::PUMP_DECODED_BYTES / 2,
+                "{queued_bytes} decoded bytes queued after {framed} records"
+            );
+        }
+        assert_eq!(framed, lines);
+    }
+
     #[test]
     fn frames_records_with_composite_offsets_across_objects() {
         let mut r = rig(None);
@@ -883,6 +925,35 @@ mod tests {
                 b"next".to_vec()
             )]
         );
+    }
+
+    /// A compressed object that fails to decode poisons the split, whether
+    /// the failure comes in the chunk's first decode step or in a later one.
+    #[test]
+    fn an_undecodable_compressed_object_poisons_the_split() {
+        let mut late = Vec::new();
+        let mut enc = flate2::write::GzEncoder::new(&mut late, flate2::Compression::best());
+        std::io::Write::write_all(&mut enc, &b"a\n".repeat(1 << 16)).unwrap();
+        enc.finish().unwrap();
+        late.extend([0xFF; 64]);
+        for chunk in [vec![0xFF; 64], late] {
+            let mut r = rig(None);
+            start(&r, 0, "p/a.ndjson.gz");
+            send(&r, ChunkMsg::Chunk(bytes::Bytes::from(chunk)));
+            send(&r, ChunkMsg::ObjectEnd);
+            while poll_batch(&mut r.lane, 512).is_some() {}
+            let report = r.poison_rx.try_recv().expect("a poison report");
+            assert!(
+                matches!(report.kind, PoisonKind::Undecodable),
+                "{:?}",
+                report.kind
+            );
+            assert!(
+                report.reason.contains("decoding \"p/a.ndjson.gz\""),
+                "{}",
+                report.reason
+            );
+        }
     }
 
     #[test]
@@ -1144,6 +1215,34 @@ mod tests {
             batch.next_payload().map(|p| p.bytes),
             Some(b"abc".as_slice())
         );
+    }
+
+    /// Pins that the deadline caps a poll that decodes a compressed chunk
+    /// framing no record: a zero-timeout poll decodes one bounded step and
+    /// returns with the rest of the chunk pending.
+    #[test]
+    fn a_zero_timeout_poll_decodes_one_step_of_a_blank_compressed_chunk() {
+        let (mut r, _clock) = frozen_rig();
+        let blank = zstd::encode_all(&vec![b'\n'; 16 << 20][..], 19).unwrap();
+        start(&r, 0, "p/a.ndjson.zst");
+        send(&r, ChunkMsg::Chunk(bytes::Bytes::from(blank)));
+        send(&r, ChunkMsg::ObjectEnd);
+        // One poll takes the object start, the next takes the chunk.
+        assert!(r.lane.poll(512, Duration::ZERO).unwrap().is_none());
+        assert!(r.lane.poll(512, Duration::ZERO).unwrap().is_none());
+        for _ in 0..3 {
+            let before = r.lane.framer.decoded_bytes();
+            assert!(r.lane.poll(512, Duration::ZERO).unwrap().is_none());
+            let decoded = r.lane.framer.decoded_bytes() - before;
+            assert!(
+                r.lane.framer.has_pending_input(),
+                "a zero-timeout poll decoded the rest of the chunk"
+            );
+            assert!(
+                decoded < 2 * crate::framer::PUMP_DECODED_BYTES,
+                "one zero-timeout poll decoded {decoded} bytes"
+            );
+        }
     }
 
     /// Pins that the channel closing while a poll waits on the clock ends the

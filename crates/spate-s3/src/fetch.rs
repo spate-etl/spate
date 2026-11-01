@@ -2836,7 +2836,7 @@ mod tests {
             Box::new(crate::testutil::TestLineFramer::new(1 << 20))
         }));
         framer.begin_object(crate::framer::Codec::Plain).unwrap();
-        framer.push_chunk(object).unwrap();
+        framer.push_chunk(Bytes::copy_from_slice(object)).unwrap();
         framer.finish_object().unwrap();
         std::iter::from_fn(|| framer.pop_record()).collect()
     }

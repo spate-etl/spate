@@ -73,9 +73,15 @@ where
         if outcome.is_err() {
             break;
         }
-        outcome = framer.push_chunk(chunk);
-        while framer.pop_record().is_some() {
-            records += 1;
+        outcome = framer.push_chunk(Bytes::copy_from_slice(chunk));
+        loop {
+            while framer.pop_record().is_some() {
+                records += 1;
+            }
+            if outcome.is_err() || !framer.has_pending_input() {
+                break;
+            }
+            outcome = framer.pump();
         }
     }
     if outcome.is_ok() {

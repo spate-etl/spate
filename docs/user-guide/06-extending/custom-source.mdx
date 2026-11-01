@@ -137,7 +137,7 @@ pub trait RecordFramer: Send {
     fn push(&mut self, bytes: &[u8]) -> io::Result<()>;   // fed decoded bytes
     fn finish(&mut self) -> io::Result<()>;               // end of stream/object
     fn pop(&mut self) -> Option<Vec<u8>>;                 // next completed record
-    fn decoded_bytes(&self) -> u64;                       // metrics
+    fn decoded_bytes(&self) -> u64;                       // every byte pushed
     fn resync_delimiter(&self) -> Option<u8> { None }     // byte a reader may start after
 }
 ```

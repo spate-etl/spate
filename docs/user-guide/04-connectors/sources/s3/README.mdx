@@ -306,8 +306,18 @@ across fully active lanes. This is an overlap estimate: short windows can leave
 several distinct backing buffers queued, and byte-range boundary reads can
 add `chunk_bytes` to a GET window, as specified in
 [`spate-s3/src/trim.rs`](repo:crates/spate-s3/src/trim.rs). Framing,
-decompression, decoded records and client overhead require additional memory.
-The estimate gives no total-process memory ceiling.
+decoded records and client overhead require additional memory. The estimate
+gives no total-process memory ceiling.
+
+A lane decodes a compressed chunk in steps of about 256 KiB of output and
+moves each step's records into the batch it is building before decoding the
+next, so a chunk that expands far beyond its compressed size holds at most
+one step of records on top of that batch. Each lane's decoder holds its own
+state: a fixed 32 KiB window plus buffers for gzip, and for zstd the window
+the object's frame header declares, up to 128 MiB. A zstd frame that declares
+a larger window fails its unit as undecodable. Across fully active lanes, zstd
+objects written with large windows, such as `zstd --long` or `--ultra`, can
+hold up to `units_held × 128 MiB`.
 
 The unit count still sets how evenly the lanes divide over threads; see
 [Sizing units against `pipeline.threads`](#sizing-units-against-pipelinethreads).

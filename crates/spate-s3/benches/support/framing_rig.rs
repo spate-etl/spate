@@ -17,7 +17,7 @@ use crate::ndjson;
 /// themselves as `(key, chunks)`.
 pub(crate) struct Rig {
     pub(crate) compression: Compression,
-    pub(crate) objects: Vec<(String, Vec<Vec<u8>>)>,
+    pub(crate) objects: Vec<(String, Vec<bytes::Bytes>)>,
     /// What the framer must emit. Asserted rather than returned so a fixture
     /// that silently stops producing records cannot pass as a fast one.
     pub(crate) expect_records: usize,

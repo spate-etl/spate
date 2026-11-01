@@ -202,13 +202,12 @@ impl SchemaCache {
     /// that have expired. Expiry is the rule [`Self::eval`] applies.
     fn live_copy(&self, map: &QualityMap<u32, Entry>) -> QualityMap<u32, Entry> {
         let now = self.clock.now();
-        map.iter()
-            .filter(|(_, entry)| match entry {
-                Entry::Ready(_) => true,
-                Entry::Failed { at, .. } => now.saturating_duration_since(*at) < self.negative_ttl,
-            })
-            .map(|(id, entry)| (*id, entry.clone()))
-            .collect()
+        let mut copy = map.clone();
+        copy.retain(|_, entry| match entry {
+            Entry::Ready(_) => true,
+            Entry::Failed { at, .. } => now.saturating_duration_since(*at) < self.negative_ttl,
+        });
+        copy
     }
 
     pub(crate) fn insert_ready(&self, schema: CompiledSchema) {

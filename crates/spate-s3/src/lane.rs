@@ -925,6 +925,35 @@ mod tests {
         );
     }
 
+    /// A compressed object that fails to decode poisons the split, whether
+    /// the failure comes in the chunk's first decode step or in a later one.
+    #[test]
+    fn an_undecodable_compressed_object_poisons_the_split() {
+        let mut late = Vec::new();
+        let mut enc = flate2::write::GzEncoder::new(&mut late, flate2::Compression::best());
+        std::io::Write::write_all(&mut enc, &b"a\n".repeat(1 << 16)).unwrap();
+        enc.finish().unwrap();
+        late.extend([0xFF; 64]);
+        for chunk in [vec![0xFF; 64], late] {
+            let mut r = rig(None);
+            start(&r, 0, "p/a.ndjson.gz");
+            send(&r, ChunkMsg::Chunk(bytes::Bytes::from(chunk)));
+            send(&r, ChunkMsg::ObjectEnd);
+            while poll_batch(&mut r.lane, 512).is_some() {}
+            let report = r.poison_rx.try_recv().expect("a poison report");
+            assert!(
+                matches!(report.kind, PoisonKind::Undecodable),
+                "{:?}",
+                report.kind
+            );
+            assert!(
+                report.reason.contains("decoding \"p/a.ndjson.gz\""),
+                "{}",
+                report.reason
+            );
+        }
+    }
+
     #[test]
     fn resume_object_shorter_than_committed_poisons_the_split() {
         // Watermark says 3 records are committed; the object now has 1 —

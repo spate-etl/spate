@@ -213,7 +213,6 @@ impl ObjectFramer {
             match sink.write(&self.pending) {
                 Ok(0) => written = Err(io::ErrorKind::WriteZero.into()),
                 Ok(n) => self.pending.advance(n),
-                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
                 Err(e) => written = Err(e),
             }
             // A framer queues each record as it completes it, so a step that
@@ -575,7 +574,7 @@ mod tests {
         }
     }
 
-    /// A chunk that decodes to no records still yields after the pump
+    /// A chunk that decodes to no records still yields after each pump's
     /// budget, so the lane regains control between steps.
     #[test]
     fn a_pump_that_frames_no_record_stops_at_its_budget() {
@@ -587,13 +586,17 @@ mod tests {
             let mut framer = ObjectFramer::new(line_factory(TEST_CAP));
             framer.begin_object(codec).unwrap();
             framer.push_chunk(Bytes::from(chunk)).unwrap();
-            let decoded = framer.decoded_bytes();
+            let first = framer.decoded_bytes();
+            framer.pump().unwrap();
+            let second = framer.decoded_bytes() - first;
             assert!(framer.has_pending_input(), "{codec:?}");
             assert_eq!(framer.queued(), 0, "{codec:?}");
-            assert!(
-                (PUMP_DECODED_BYTES..2 * PUMP_DECODED_BYTES).contains(&decoded),
-                "{codec:?}: one pump decoded {decoded} bytes"
-            );
+            for decoded in [first, second] {
+                assert!(
+                    (PUMP_DECODED_BYTES..2 * PUMP_DECODED_BYTES).contains(&decoded),
+                    "{codec:?}: one pump decoded {decoded} bytes"
+                );
+            }
         }
     }
 

@@ -43,6 +43,12 @@ pub(crate) type FramerFactory = Arc<dyn Fn() -> Box<dyn RecordFramer> + Send + S
 /// to the lane, which bounds the decoded output a compressed chunk queues.
 pub(crate) const PUMP_DECODED_BYTES: u64 = 256 * 1024;
 
+/// Largest zstd window a lane decodes, as a power of two: 128 MiB. The
+/// decoder allocates the window a frame header declares, so this bounds the
+/// decoder state one object can make a lane hold. It is libzstd's default
+/// limit, set here so the bound does not move with the library.
+const ZSTD_WINDOW_LOG_MAX: u32 = 27;
+
 /// Effective codec of one object.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Codec {
@@ -88,7 +94,11 @@ impl Sink {
         Ok(match codec {
             Codec::Plain => Sink::Plain(writer),
             Codec::Gzip => Sink::Gzip(MultiGzDecoder::new(writer)),
-            Codec::Zstd => Sink::Zstd(zio::Writer::new(writer, raw::Decoder::new()?)),
+            Codec::Zstd => {
+                let mut decoder = raw::Decoder::new()?;
+                decoder.set_parameter(raw::DParameter::WindowLogMax(ZSTD_WINDOW_LOG_MAX))?;
+                Sink::Zstd(zio::Writer::new(writer, decoder))
+            }
         })
     }
 
@@ -598,6 +608,35 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A zstd frame of two 128 KiB RLE blocks of `\n` whose header declares a
+    /// window of `2^window_log` bytes and no content size.
+    fn rle_zstd_frame(window_log: u32) -> Vec<u8> {
+        let mut frame = vec![0x28, 0xB5, 0x2F, 0xFD, 0x00];
+        frame.push(u8::try_from((window_log - 10) << 3).unwrap());
+        for last in [0u32, 1] {
+            let header = last | (1 << 1) | ((128 * 1024) << 3);
+            frame.extend(&header.to_le_bytes()[..3]);
+            frame.push(b'\n');
+        }
+        frame
+    }
+
+    /// A zstd frame may declare a window up to 128 MiB, and one that declares
+    /// 256 MiB is undecodable.
+    #[test]
+    fn a_zstd_window_past_the_limit_is_undecodable() {
+        let mut framer = ObjectFramer::new(line_factory(TEST_CAP));
+        framer.begin_object(Codec::Zstd).unwrap();
+        push_all(&mut framer, &rle_zstd_frame(27)).unwrap();
+        framer.finish_object().unwrap();
+        assert_eq!(framer.decoded_bytes(), 256 * 1024);
+
+        let mut framer = ObjectFramer::new(line_factory(TEST_CAP));
+        framer.begin_object(Codec::Zstd).unwrap();
+        let err = push_all(&mut framer, &rle_zstd_frame(28)).unwrap_err();
+        assert!(err.to_string().contains("too much memory"), "{err}");
     }
 
     /// A decode error mid-chunk drops the rest of the chunk, so no later pump

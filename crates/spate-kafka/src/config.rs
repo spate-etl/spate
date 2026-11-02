@@ -270,9 +270,10 @@ impl KafkaSourceConfig {
         // Consumers of one process share the passthrough, so they would all
         // claim one static member id and fence each other.
         if self.consumers > 1
-            && let Some((key, _)) = self.rdkafka.iter().find(|(k, v)| {
-                crate::client::canonical(k) == "group.instance.id" && !v.is_empty()
-            })
+            && let Some((key, _)) = self
+                .rdkafka
+                .iter()
+                .find(|(k, v)| crate::client::canonical(k) == "group.instance.id" && !v.is_empty())
         {
             return Err(ConfigError::Validation(format!(
                 "source.kafka.consumers above 1 cannot be combined with \

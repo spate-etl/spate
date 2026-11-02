@@ -362,7 +362,10 @@ fn real_broker_revocation_commits_every_consumers_offsets() {
             .expect("poll_events")
         {
             SourceEvent::LanesAssigned(new) => lanes = new,
-            SourceEvent::LanesRevoked { lanes: ids, barrier } => {
+            SourceEvent::LanesRevoked {
+                lanes: ids,
+                barrier,
+            } => {
                 lanes.clear();
                 for _ in &ids {
                     barrier.arrive();
@@ -400,7 +403,10 @@ fn real_broker_revocation_commits_every_consumers_offsets() {
         })
     };
     spate_test::wait_until(Duration::from_secs(60), "the revocation", || {
-        let SourceEvent::LanesRevoked { lanes: ids, barrier } = source
+        let SourceEvent::LanesRevoked {
+            lanes: ids,
+            barrier,
+        } = source
             .poll_events(Duration::from_millis(200))
             .expect("poll_events")
         else {

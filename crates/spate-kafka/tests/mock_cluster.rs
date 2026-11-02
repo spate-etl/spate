@@ -14,8 +14,8 @@ use spate_core::source::{PayloadBatch, Source, SourceCtx, SourceEvent, SourceLan
 use spate_kafka::{KafkaSource, KafkaSourceConfig};
 use spate_test::wait_until;
 use std::collections::BTreeMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 use support::{
     await_assignment, corrupt_batch, drain_lane, produce, produce_batch, serve_events, v1_message,
@@ -1423,10 +1423,7 @@ impl Driver {
         Driver::open_with(KafkaSource::new(cfg), |ctx| ctx)
     }
 
-    fn open_with(
-        mut source: KafkaSource,
-        ctx: impl FnOnce(SourceCtx) -> SourceCtx,
-    ) -> Driver {
+    fn open_with(mut source: KafkaSource, ctx: impl FnOnce(SourceCtx) -> SourceCtx) -> Driver {
         let cp = Checkpointer::new();
         source.open(ctx(SourceCtx::new(cp.handle()))).expect("open");
         Driver {
@@ -1524,11 +1521,16 @@ impl Driver {
                 .all(|p| got.get(p).is_some_and(|o| o.len() as i64 >= n))
         };
         while !done(&got, &self.partitions()) {
-            assert!(Instant::now() < deadline, "read only {got:?} within {timeout:?}");
+            assert!(
+                Instant::now() < deadline,
+                "read only {got:?} within {timeout:?}"
+            );
             self.step(Duration::from_millis(20));
             for lane in &mut self.lanes {
                 let partition = lane.partition().0;
-                if let Some(mut batch) = lane.poll(64, Duration::from_millis(50)).expect("lane poll") {
+                if let Some(mut batch) =
+                    lane.poll(64, Duration::from_millis(50)).expect("lane poll")
+                {
                     while let Some(raw) = batch.next_payload() {
                         got.entry(partition).or_default().insert(raw.offset);
                     }
@@ -1630,7 +1632,9 @@ fn pause_reaches_the_owning_consumer() {
         driver.step(Duration::from_millis(50));
         for lane in &mut driver.lanes {
             assert!(
-                lane.poll(64, Duration::from_millis(50)).expect("poll").is_none(),
+                lane.poll(64, Duration::from_millis(50))
+                    .expect("poll")
+                    .is_none(),
                 "paused lane on partition {} delivered",
                 lane.partition().0
             );
@@ -1645,6 +1649,10 @@ fn pause_reaches_the_owning_consumer() {
 /// one drain, and once it leaves the source holds every partition again
 /// under fresh lane ids.
 #[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the test joins the joiner thread"
+)]
 fn an_outside_member_rebalances_every_in_process_consumer() {
     let cluster = MockCluster::new(1).expect("mock cluster");
     cluster.create_topic(TOPIC, 4, 1).expect("create topic");
@@ -1671,10 +1679,14 @@ fn an_outside_member_rebalances_every_in_process_consumer() {
             }
         })
     };
-    wait_until(Duration::from_secs(60), "the joiner takes partitions", || {
-        driver.step(Duration::from_millis(100));
-        driver.revocations > before && !driver.lanes.is_empty() && driver.lanes.len() < 4
-    });
+    wait_until(
+        Duration::from_secs(60),
+        "the joiner takes partitions",
+        || {
+            driver.step(Duration::from_millis(100));
+            driver.revocations > before && !driver.lanes.is_empty() && driver.lanes.len() < 4
+        },
+    );
 
     stop.store(true, Ordering::Relaxed);
     joiner.join().expect("joiner thread");
@@ -1753,7 +1765,10 @@ fn two_consumers_publish_lag_before_committing() {
         let needle = format!(
             r#"spate_source_lag_records{{pipeline="lag-each",component="source",component_type="kafka",partition="{p}"}} 7"#
         );
-        assert!(rendered.lines().any(|l| l == needle), "{needle}:\n{rendered}");
+        assert!(
+            rendered.lines().any(|l| l == needle),
+            "{needle}:\n{rendered}"
+        );
     }
 }
 
@@ -1786,7 +1801,8 @@ fn two_consumers_publish_their_own_statistics() {
         let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
         let handle = recorder.handle();
         metrics::with_local_recorder(&recorder, || {
-            let meter = spate_core::metrics::Meter::with_namespace("kafka", group, "source", "kafka");
+            let meter =
+                spate_core::metrics::Meter::with_namespace("kafka", group, "source", "kafka");
             let mut driver = Driver::open_with(KafkaSource::new(cfg), |ctx| {
                 ctx.with_meter(Some(meter)).with_partition_detail(true)
             });
@@ -1795,16 +1811,22 @@ fn two_consumers_publish_their_own_statistics() {
             if interval.is_zero() {
                 return;
             }
-            wait_until(Duration::from_secs(30), "both consumers' statistics", || {
-                driver.step(Duration::from_millis(100));
-                let rendered = handle.render();
-                let sizes = client_values(&rendered, "spate_kafka_group_assignment_size");
-                let rx: f64 = client_values(&rendered, "spate_kafka_rx_messages_total")
-                    .iter()
-                    .map(|(_, v)| v)
-                    .sum();
-                sizes.len() == 2 && sizes.iter().map(|(_, v)| v).sum::<f64>() == 2.0 && rx >= 10.0
-            });
+            wait_until(
+                Duration::from_secs(30),
+                "both consumers' statistics",
+                || {
+                    driver.step(Duration::from_millis(100));
+                    let rendered = handle.render();
+                    let sizes = client_values(&rendered, "spate_kafka_group_assignment_size");
+                    let rx: f64 = client_values(&rendered, "spate_kafka_rx_messages_total")
+                        .iter()
+                        .map(|(_, v)| v)
+                        .sum();
+                    sizes.len() == 2
+                        && sizes.iter().map(|(_, v)| v).sum::<f64>() == 2.0
+                        && rx >= 10.0
+                },
+            );
         });
         handle.render()
     };
@@ -1867,8 +1889,12 @@ fn consumer_series_carry_no_passthrough_value() {
 
 /// Run `f` on a helper thread and fail if it does not return in time: a
 /// drop that waits on an unacknowledged rebalance never returns.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "a thread that never returns is the failure; the test fails instead of joining it"
+)]
 fn returns_within(what: &str, f: impl FnOnce() + Send + 'static) {
-    let (done, finished) = std::sync::mpsc::channel();
+    let (done, finished) = mpsc::channel();
     std::thread::spawn(move || {
         f();
         let _ = done.send(());
@@ -1881,6 +1907,10 @@ fn returns_within(what: &str, f: impl FnOnce() + Send + 'static) {
 /// Dropping the source between a surfaced revocation and its completion
 /// releases every consumer, so consumer close completes.
 #[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the test joins the joiner thread"
+)]
 fn dropping_mid_revoke_releases_every_consumer() {
     let cluster = MockCluster::new(1).expect("mock cluster");
     cluster.create_topic(TOPIC, 4, 1).expect("create topic");

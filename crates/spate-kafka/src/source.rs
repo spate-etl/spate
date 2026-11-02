@@ -139,7 +139,10 @@ struct Member {
 
 impl Member {
     fn owns(&self, partition: i32) -> bool {
-        self.assignment.values().chain(self.revoking.values()).any(|p| *p == partition)
+        self.assignment
+            .values()
+            .chain(self.revoking.values())
+            .any(|p| *p == partition)
     }
 
     /// Partitions this consumer holds live lanes for.
@@ -208,7 +211,11 @@ impl std::fmt::Debug for KafkaSource {
             .field("consumers", &self.members.len())
             .field(
                 "lanes",
-                &self.members.iter().map(|m| m.assignment.len()).sum::<usize>(),
+                &self
+                    .members
+                    .iter()
+                    .map(|m| m.assignment.len())
+                    .sum::<usize>(),
             )
             .finish_non_exhaustive()
     }
@@ -226,7 +233,11 @@ fn partition_ids<'a>(partitions: impl IntoIterator<Item = &'a i32>) -> Vec<Parti
 /// `start`, with the wait each poll may spend: zero for every consumer but
 /// the last, which takes `timeout`. A call therefore waits at most `timeout`
 /// whatever the count, and serves every consumer's callbacks.
-fn poll_order(start: usize, n: usize, timeout: Duration) -> impl Iterator<Item = (usize, Duration)> {
+fn poll_order(
+    start: usize,
+    n: usize,
+    timeout: Duration,
+) -> impl Iterator<Item = (usize, Duration)> {
     (0..n).map(move |i| {
         let wait = if i + 1 == n { timeout } else { Duration::ZERO };
         ((start + i) % n, wait)
@@ -572,7 +583,13 @@ impl KafkaSource {
     fn publish_stats(&mut self) {
         let reads_committed = self.config.reads_committed();
         for member in &mut self.members {
-            let Some(mut stats) = member.consumer.context().stats.lock().expect("stats lock").take()
+            let Some(mut stats) = member
+                .consumer
+                .context()
+                .stats
+                .lock()
+                .expect("stats lock")
+                .take()
             else {
                 continue;
             };
@@ -724,7 +741,11 @@ impl KafkaSource {
     }
 
     /// Act on consumer `k`'s rebalance intent.
-    fn on_intent(&mut self, k: usize, intent: Intent) -> Result<SourceEvent<KafkaLane>, SourceError> {
+    fn on_intent(
+        &mut self,
+        k: usize,
+        intent: Intent,
+    ) -> Result<SourceEvent<KafkaLane>, SourceError> {
         match intent {
             Intent::Assign(tpl) => {
                 // Eager assignment replaces whatever the consumer held.
@@ -753,9 +774,7 @@ impl KafkaSource {
                     // Nothing live: this consumer's partitions were drained
                     // with an earlier consumer's revocation, or it held none.
                     self.release(k);
-                    if self.holds_no_lanes()
-                        && self.members.iter().all(|m| m.revoking.is_empty())
-                    {
+                    if self.holds_no_lanes() && self.members.iter().all(|m| m.revoking.is_empty()) {
                         self.note_assignment_loss("a revocation".to_owned());
                     }
                     return Ok(SourceEvent::Idle);
@@ -806,7 +825,11 @@ impl KafkaSource {
     /// drained every consumer's partitions are accepted again together, since
     /// the runtime admits a lane set only as a whole.
     fn settle_held(&mut self) -> Result<SourceEvent<KafkaLane>, SourceError> {
-        if !self.members.iter().any(|m| matches!(m.phase, Phase::Held(_))) {
+        if !self
+            .members
+            .iter()
+            .any(|m| matches!(m.phase, Phase::Held(_)))
+        {
             return Ok(SourceEvent::Idle);
         }
         if !self.holds_no_lanes() {
@@ -820,10 +843,13 @@ impl KafkaSource {
             let barrier = DrainBarrier::new(lanes.len());
             return Ok(SourceEvent::LanesRevoked { lanes, barrier });
         }
-        let joining = self.members.iter().any(|m| matches!(m.phase, Phase::Joining));
-        let held_for = self
-            .hold_since
-            .map_or(Duration::ZERO, |since| self.clock.now().saturating_duration_since(since));
+        let joining = self
+            .members
+            .iter()
+            .any(|m| matches!(m.phase, Phase::Joining));
+        let held_for = self.hold_since.map_or(Duration::ZERO, |since| {
+            self.clock.now().saturating_duration_since(since)
+        });
         if joining && held_for < ASSIGN_HOLD {
             return Ok(SourceEvent::Idle);
         }
@@ -1151,8 +1177,9 @@ impl Source for KafkaSource {
         // work after the move. librdkafka refuses a store for a partition the
         // consumer does not hold without failing the call, so a watermark
         // sent to the wrong consumer would be lost the same way.
-        let mut lists: Vec<TopicPartitionList> =
-            (0..self.members.len()).map(|_| TopicPartitionList::new()).collect();
+        let mut lists: Vec<TopicPartitionList> = (0..self.members.len())
+            .map(|_| TopicPartitionList::new())
+            .collect();
         let mut refused = 0;
         for (p, offset) in watermarks {
             let partition = i32::try_from(p.0).unwrap_or(-1);
@@ -1206,7 +1233,9 @@ impl Source for KafkaSource {
                     reason: format!(
                         "store offset for partition {}: {}",
                         elem.partition(),
-                        elem.error().err().map_or_else(String::new, |e| e.to_string())
+                        elem.error()
+                            .err()
+                            .map_or_else(String::new, |e| e.to_string())
                     ),
                 });
             }
@@ -1261,8 +1290,11 @@ impl KafkaSource {
         op: impl Fn(&BaseConsumer<SourceContext>, &TopicPartitionList) -> KafkaResult<()>,
     ) -> Result<(), SourceError> {
         for member in &self.members {
-            let tpl =
-                self.tpl_for(lanes.iter().filter_map(|l| member.assignment.get(l).copied()));
+            let tpl = self.tpl_for(
+                lanes
+                    .iter()
+                    .filter_map(|l| member.assignment.get(l).copied()),
+            );
             if tpl.count() == 0 {
                 continue;
             }
@@ -1284,7 +1316,11 @@ impl KafkaSource {
 impl Drop for KafkaSource {
     fn drop(&mut self) {
         for member in &self.members {
-            member.consumer.context().closing.store(true, Ordering::Release);
+            member
+                .consumer
+                .context()
+                .closing
+                .store(true, Ordering::Release);
         }
         for (k, member) in self.members.iter().enumerate() {
             let deferred = member.revoke_arrived
@@ -1295,7 +1331,10 @@ impl Drop for KafkaSource {
                     .context()
                     .intents
                     .lock()
-                    .map(|q| q.iter().any(|i| matches!(i, Intent::Revoke(_) | Intent::Assign(_))))
+                    .map(|q| {
+                        q.iter()
+                            .any(|i| matches!(i, Intent::Revoke(_) | Intent::Assign(_)))
+                    })
                     .unwrap_or(false);
             if deferred && let Err(e) = member.consumer.unassign() {
                 tracing::warn!(consumer = k, error = %e, "unassign during source teardown failed");
@@ -1572,7 +1611,11 @@ mod tests {
         #[test]
         fn a_rebalance_error_on_one_consumer_revokes_its_scope() {
             let mut source = opened_consumers(test_config(), &[&[(0, 0)], &[(1, 1)]]);
-            push_intent_to(&source, 1, Intent::Error(RDKafkaErrorCode::RebalanceInProgress));
+            push_intent_to(
+                &source,
+                1,
+                Intent::Error(RDKafkaErrorCode::RebalanceInProgress),
+            );
 
             match next_outcome(&mut source) {
                 Ok(SourceEvent::LanesRevoked { lanes, .. }) => {
@@ -1633,7 +1676,9 @@ mod tests {
                 member.phase = Phase::Joining;
             }
             push_intent_to(&source, 0, Intent::Assign(TopicPartitionList::new()));
-            let _ = poll_until(&mut source, |s| matches!(s.members[0].phase, Phase::Held(_)));
+            let _ = poll_until(&mut source, |s| {
+                matches!(s.members[0].phase, Phase::Held(_))
+            });
             assert!(matches!(source.members[1].phase, Phase::Joining));
 
             push_intent_to(&source, 1, Intent::Assign(TopicPartitionList::new()));
@@ -1647,12 +1692,19 @@ mod tests {
                 member.phase = Phase::Joining;
             }
             push_intent_to(&source, 0, Intent::Assign(TopicPartitionList::new()));
-            let _ = poll_until(&mut source, |s| matches!(s.members[0].phase, Phase::Held(_)));
+            let _ = poll_until(&mut source, |s| {
+                matches!(s.members[0].phase, Phase::Held(_))
+            });
             clock.advance(ASSIGN_HOLD - Duration::from_millis(1));
             let _ = source.poll_events(Duration::ZERO);
-            assert!(matches!(source.members[0].phase, Phase::Held(_)), "inside the hold");
+            assert!(
+                matches!(source.members[0].phase, Phase::Held(_)),
+                "inside the hold"
+            );
             clock.advance(Duration::from_millis(1));
-            let _ = poll_until(&mut source, |s| matches!(s.members[0].phase, Phase::Assigned));
+            let _ = poll_until(&mut source, |s| {
+                matches!(s.members[0].phase, Phase::Assigned)
+            });
             assert!(matches!(source.members[1].phase, Phase::Joining));
         }
 
@@ -1668,7 +1720,11 @@ mod tests {
                 Ok(SourceEvent::LanesRevoked { lanes, .. }) => assert_eq!(lane_ids(&lanes), [0]),
                 other => panic!("expected the live lanes drained, got {other:?}"),
             }
-            assert_eq!(source.committable_partitions(0), [0], "still owned while draining");
+            assert_eq!(
+                source.committable_partitions(0),
+                [0],
+                "still owned while draining"
+            );
             match source.poll_events(Duration::ZERO) {
                 Ok(SourceEvent::LanesAssigned(lanes)) => {
                     let assigned: Vec<(u32, u32)> =
@@ -1677,7 +1733,12 @@ mod tests {
                 }
                 other => panic!("expected one new lane set, got {other:?}"),
             }
-            assert!(source.members.iter().all(|m| matches!(m.phase, Phase::Assigned)));
+            assert!(
+                source
+                    .members
+                    .iter()
+                    .all(|m| matches!(m.phase, Phase::Assigned))
+            );
         }
 
         /// Two consumers offered one partition is a broken assignment.
@@ -1736,7 +1797,12 @@ mod tests {
                     for (k, member) in source.members.iter().enumerate() {
                         let lag = if k == owner { 5 } else { 100 };
                         let mut snapshot = parked(&[0]);
-                        for p in snapshot.topics.get_mut("orders").unwrap().partitions.values_mut()
+                        for p in snapshot
+                            .topics
+                            .get_mut("orders")
+                            .unwrap()
+                            .partitions
+                            .values_mut()
                         {
                             p.consumer_lag = lag;
                         }
@@ -1763,9 +1829,12 @@ mod tests {
                     let meter = spate_core::metrics::Meter::with_namespace(
                         "kafka", "moved", "source", "kafka",
                     );
-                    source.members[k].stats = Some(
-                        crate::metrics::KafkaStatsMetrics::for_source_consumer(meter, true, Some(k)),
-                    );
+                    source.members[k].stats =
+                        Some(crate::metrics::KafkaStatsMetrics::for_source_consumer(
+                            meter,
+                            true,
+                            Some(k),
+                        ));
                 }
                 let owned = source.members[0].live_partition_ids();
                 source.members[0]

@@ -803,7 +803,11 @@ mod tests {
         let three = configs(3, &tls);
         assert_eq!(
             ids(&three),
-            ["spate-source-consumer-0", "spate-source-consumer-1", "spate-source-consumer-2"]
+            [
+                "spate-source-consumer-0",
+                "spate-source-consumer-1",
+                "spate-source-consumer-2"
+            ]
         );
         let mut rest: Vec<_> = three
             .iter()

@@ -205,10 +205,11 @@ caps how much a single round trip can return.
 | `fetch.wait.max.ms` | `500` | almost never — see [below](#fetchminbytes-and-fetchwaitmaxms-are-not-catch-up-knobs) |
 
 Bigger is not always faster. On a 32-partition topic read from one broker by a
-source that was already fetch-bound, averaged over two runs, raising `fetch.max.bytes` to 100 MiB,
-`fetch.message.max.bytes` to 8 MiB and `queued.min.messages` to 1000000 cost 22%
-of throughput: the round trip rose from 8 ms to 32 ms and the poll share from
-31% to 51%. Change one value at a time and measure each.
+source that was already fetch-bound, averaged over two runs, raising
+`fetch.max.bytes` to 100 MiB, `fetch.message.max.bytes` to 8 MiB and
+`queued.min.messages` to 1000000 cost 22% of throughput: the round trip rose
+from 8 ms to 32 ms and the poll share from 31% to 51%. Change one value at a
+time and measure each.
 
 Do **not** also set `receive.message.max.bytes`. It auto-adjusts to stay above
 `fetch.max.bytes`, but only while you leave it unset; pinning it is a

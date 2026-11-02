@@ -100,10 +100,10 @@ instead cost 21.6%. Lifting the sink's part limits pinned its CPU on merges
 rather than lifting it, so this rig cannot show scaling past two consumers.
 
 Measured on the benchmark repository's tuning branch
-`bootstrap/spate-1651-consumers` (not for merge), arm pinned to spate `4e161d49`,
-an earlier head of the pull request that landed this decision, launch
-41423442032 of 2026-11-02. Later commits on that pull request changed commit
-routing, drop and revocation, none of them on the per-record path.
+`bootstrap/spate-1651-consumers` (not for merge), arm pinned to spate
+`4e161d49`, an earlier head of the pull request that landed this decision,
+launch 41423442032 of 2026-11-02. Later commits on that pull request changed
+commit routing, drop and revocation, none of them on the per-record path.
 
 ## More information
 

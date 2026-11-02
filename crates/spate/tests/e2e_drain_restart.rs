@@ -73,12 +73,17 @@ fn drain_then_resume(
     );
     println!("drain report: {:?}", report.sink_drain);
 
-    // Every committed offset is backed by durable rows: for partition p
+    // Every partition committed progress, and every committed offset is
+    // backed by durable rows: for partition p
     // committed at C_p, ids [p*1e6, p*1e6 + C_p) must all be present
     // (produced seq == offset on a fresh topic with one ordered producer).
     let committed = h.committed(&params.topic, &params.group, partitions);
     for (p, c) in committed.iter().enumerate() {
         let lo = event_id(i32::try_from(p).expect("partition"), 0);
+        assert!(
+            *c > 0,
+            "partition {p}: nothing committed after a drain that wrote rows: {committed:?}"
+        );
         let hi = lo + c;
         let present = h.scalar(&format!(
             "SELECT uniqExact(id) FROM {} WHERE id >= {lo} AND id < {hi}",

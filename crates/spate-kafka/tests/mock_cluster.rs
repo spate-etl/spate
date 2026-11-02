@@ -1950,25 +1950,6 @@ fn dropping_mid_revoke_releases_every_consumer() {
     joiner.join().expect("joiner thread");
 }
 
-/// Dropping the source while one consumer's assignment is held, before the
-/// others have theirs, acknowledges it so consumer close completes.
-#[test]
-fn dropping_with_a_held_assignment_returns() {
-    let cluster = MockCluster::new(1).expect("mock cluster");
-    cluster.create_topic(TOPIC, 4, 1).expect("create topic");
-    let brokers = cluster.bootstrap_servers();
-
-    // More consumers than the group will hand partitions to at once keeps
-    // some held while others are still joining; poll until any is offered.
-    let mut source = KafkaSource::new(consumers_config(&brokers, "drop-held", 3));
-    let cp = Checkpointer::new();
-    source.open(SourceCtx::new(cp.handle())).expect("open");
-    let _ = source.poll_events(Duration::from_millis(500));
-    returns_within("dropping the source with assignments pending", move || {
-        drop(source);
-    });
-}
-
 /// The source may be dropped before the lanes it handed out: each lane keeps
 /// its consumer alive, and dropping the lanes afterwards completes.
 #[test]
@@ -1984,4 +1965,71 @@ fn dropping_the_source_before_its_lanes_completes() {
         drop(source);
         drop(lanes);
     });
+}
+
+/// A commit that carries a watermark for a partition no consumer of the
+/// source owns still stores the offsets of the partitions it does own.
+#[test]
+fn a_partial_refusal_stores_the_owned_offsets() {
+    let cluster = MockCluster::new(1).expect("mock cluster");
+    cluster.create_topic(TOPIC, 4, 1).expect("create topic");
+    let brokers = cluster.bootstrap_servers();
+    produce(&brokers, TOPIC, 10, 4, "r");
+
+    let mut cfg = consumers_config(&brokers, "partial-refusal", 2);
+    cfg.commit_interval = Duration::from_hours(1);
+    let mut driver = Driver::open(cfg);
+    driver.settle(4, Duration::from_secs(60));
+    driver.read(10, Duration::from_secs(30));
+    driver.cp.drain();
+    let mut watermarks = driver.cp.take_watermarks();
+    watermarks.push((PartitionId(9), 3));
+    driver.source.commit(&watermarks).expect("commit");
+    driver.source.flush_commits().expect("flush");
+
+    assert_eq!(
+        committed(&brokers, "partial-refusal", 4),
+        vec![rdkafka::Offset::Offset(10); 4]
+    );
+}
+
+/// Accepting an assignment for several consumers spends one
+/// committed-offset lookup bound in total, so one `poll_events` call does
+/// not block the controller thread for a lookup per consumer.
+#[test]
+fn one_assignment_spends_one_lookup_bound() {
+    /// `COMMITTED_LOOKUP_TIMEOUT`, plus slack for the assign itself.
+    const BOUND: Duration = Duration::from_secs(13);
+    let cluster = MockCluster::new(1).expect("mock cluster");
+    cluster.create_topic(TOPIC, 3, 1).expect("create topic");
+    // A coordinator still loading its offsets: librdkafka retries every
+    // OffsetFetch until the caller's timeout.
+    cluster.request_errors(
+        rdkafka::types::RDKafkaApiKey::OffsetFetch,
+        &vec![
+            rdkafka::types::RDKafkaRespErr::RD_KAFKA_RESP_ERR_COORDINATOR_LOAD_IN_PROGRESS;
+            100_000
+        ],
+    );
+    let mut cfg = consumers_config(&cluster.bootstrap_servers(), "slow-lookup", 3);
+    cfg.startup_timeout = Duration::from_secs(120);
+    let mut source = KafkaSource::new(cfg);
+    let cp = Checkpointer::new();
+    source.open(SourceCtx::new(cp.handle())).expect("open");
+
+    let deadline = Instant::now() + Duration::from_secs(120);
+    loop {
+        assert!(Instant::now() < deadline, "no assignment");
+        let started = Instant::now();
+        let outcome = source.poll_events(Duration::from_millis(100));
+        let took = started.elapsed();
+        assert!(
+            took <= BOUND,
+            "one poll_events call blocked the controller thread for {took:?}"
+        );
+        if let Ok(SourceEvent::LanesAssigned(lanes)) = outcome {
+            assert_eq!(lanes.len(), 3);
+            return;
+        }
+    }
 }

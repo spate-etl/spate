@@ -39,7 +39,11 @@ fn rebalance_under_load_preserves_every_record() {
 
     h.create_topic(&params.topic, partitions);
     h.create_table(&params.table);
-    h.produce(&params.topic, &events(partitions, total));
+    // The second half is produced only after the intruder has left, so it
+    // reaches the sink only through the assignment that follows both
+    // rebalances.
+    let all = events(partitions, 2 * total);
+    h.produce(&params.topic, &all[..total]);
 
     let pipeline = h.spawn_pipeline(&params);
     wait_until(Duration::from_secs(60), "pipeline mid-stream", || {
@@ -102,10 +106,11 @@ fn rebalance_under_load_preserves_every_record() {
     println!("rebalance scenario: invariant held across {samples} samples");
 
     // ── Conservation after the storm ───────────────────────────────────
+    h.produce(&params.topic, &all[total..]);
     wait_until(
         Duration::from_secs(120),
         "every distinct id present",
-        || h.uniq(&params.table) == total as u64,
+        || h.uniq(&params.table) == 2 * total as u64,
     );
     let report = pipeline.stop();
     assert!(
@@ -114,7 +119,7 @@ fn rebalance_under_load_preserves_every_record() {
     );
     let rows = h.count(&params.table);
     let uniq = h.uniq(&params.table);
-    assert_eq!(uniq, total as u64, "no record lost across rebalances");
+    assert_eq!(uniq, 2 * total as u64, "no record lost across rebalances");
     println!(
         "rebalance scenario: {rows} rows, {uniq} distinct, {} duplicates",
         rows - uniq

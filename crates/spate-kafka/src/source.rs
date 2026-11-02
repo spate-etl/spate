@@ -96,7 +96,8 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
-/// Bound on the committed-offset read made before each assignment.
+/// Bound on the committed-offset reads made before one assignment, shared by
+/// every consumer it accepts.
 const COMMITTED_LOOKUP_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// How long the source holds one consumer's assignment for the others of the
@@ -386,6 +387,7 @@ impl KafkaSource {
         &mut self,
         k: usize,
         tpl: &TopicPartitionList,
+        lookup_until: Instant,
     ) -> Result<Vec<KafkaLane>, SourceError> {
         let consumer = Arc::clone(&self.members[k].consumer);
         self.members[k].revoking.clear();
@@ -395,7 +397,7 @@ impl KafkaSource {
             consumer.assign(tpl).map_err(fatal("assign empty"))?;
             return Ok(Vec::new());
         }
-        let start = self.start_positions(k, tpl);
+        let start = self.start_positions(k, tpl, lookup_until);
         let issuer = self.issuer.as_ref().ok_or_else(|| SourceError::Client {
             class: ErrorClass::Fatal,
             reason: "assignment before open()".into(),
@@ -472,9 +474,12 @@ impl KafkaSource {
             }
         }
         self.hold_since = None;
+        // One budget for every consumer's lookup: they run in series on the
+        // controller thread, which polls no consumer meanwhile.
+        let lookup_until = Instant::now() + COMMITTED_LOOKUP_TIMEOUT;
         let mut lanes = Vec::new();
         for (k, tpl) in &offers {
-            lanes.extend(self.accept_assignment(*k, tpl)?);
+            lanes.extend(self.accept_assignment(*k, tpl, lookup_until)?);
         }
         let joining: Vec<usize> = self
             .members
@@ -503,13 +508,24 @@ impl KafkaSource {
     /// starts the fetchers before it returns. A partition whose committed
     /// offset could not be read, or whose reset policy is `error`, keeps
     /// `Offset::Stored` and is started by librdkafka after the call.
-    fn start_positions(&mut self, k: usize, tpl: &TopicPartitionList) -> TopicPartitionList {
+    fn start_positions(
+        &mut self,
+        k: usize,
+        tpl: &TopicPartitionList,
+        lookup_until: Instant,
+    ) -> TopicPartitionList {
         let member = &mut self.members[k];
         member.committed_at_assign.clear();
-        let committed = match member
-            .consumer
-            .committed_offsets(tpl.clone(), COMMITTED_LOOKUP_TIMEOUT)
-        {
+        let budget = lookup_until.saturating_duration_since(Instant::now());
+        if budget.is_zero() {
+            tracing::warn!(
+                consumer = k,
+                topic = %self.config.topic,
+                "no time left for the committed offset lookup; librdkafka resolves the start offsets"
+            );
+            return tpl.clone();
+        }
+        let committed = match member.consumer.committed_offsets(tpl.clone(), budget) {
             Ok(committed) => committed,
             Err(e) => {
                 tracing::warn!(
@@ -632,9 +648,10 @@ impl KafkaSource {
     }
 
     /// Poll every consumer once, rewinding any message that reached a main
-    /// queue. The first poll error is returned after every consumer has been
-    /// served, so a failing one does not starve the others of their
-    /// rebalance callbacks and `max.poll.interval.ms`.
+    /// queue. The first fatal poll error, else the first poll error, is
+    /// returned after every consumer has been served, so a failing one does
+    /// not starve the others of their rebalance callbacks and
+    /// `max.poll.interval.ms`.
     fn poll_consumers(&mut self, timeout: Duration) -> Result<(), SourceError> {
         let n = self.members.len();
         let start = self.poll_start;
@@ -675,7 +692,23 @@ impl KafkaSource {
                 }
                 Some(Err(e)) => {
                     let error = self.poll_error(k, &consumer, &e);
-                    first_error.get_or_insert(error);
+                    // A polled error is gone from its queue, so a fatal one
+                    // replaces a retryable one an earlier consumer returned.
+                    let fatal = |e: &SourceError| {
+                        matches!(
+                            e,
+                            SourceError::Client {
+                                class: ErrorClass::Fatal,
+                                ..
+                            }
+                        )
+                    };
+                    if first_error
+                        .as_ref()
+                        .is_none_or(|first| fatal(&error) && !fatal(first))
+                    {
+                        first_error = Some(error);
+                    }
                 }
             }
         }
@@ -1067,7 +1100,16 @@ impl Source for KafkaSource {
                  and the spate_kafka_source_* families will not be published"
             );
         }
-        let mut members = Vec::with_capacity(self.config.consumers);
+        let mut members = Vec::new();
+        members
+            .try_reserve_exact(self.config.consumers)
+            .map_err(|_| SourceError::Client {
+                class: ErrorClass::Fatal,
+                reason: format!(
+                    "source.kafka.consumers: {} consumers cannot be allocated",
+                    self.config.consumers
+                ),
+            })?;
         for k in 0..self.config.consumers {
             let role = crate::config::Consumer::member(&self.config, k);
             // Resolve the connector-owned metric handles once, before the
@@ -1214,18 +1256,19 @@ impl Source for KafkaSource {
                 }
             }
         }
-        if refused == watermarks.len() {
-            // Every offered watermark was refused: nothing this call was
-            // asked to persist will be. Normal in one situation: a drain
-            // after ownership was already released (a rebalance-error
-            // revocation), where the drained work replays. The commit
-            // itself succeeds (there is nothing storable), so without this
-            // line the refusal is invisible outside per-partition DEBUG.
+        if refused > 0 {
+            // Normal in one situation: a drain after a consumer's ownership
+            // was already released (a rebalance-error revocation), where the
+            // drained work replays. The other consumers' watermarks ride in
+            // the same call and are stored, so the call succeeds, and without
+            // this line the refusal is invisible outside per-partition DEBUG.
             tracing::warn!(
                 refused,
                 "refusing to store watermarks for partitions no longer owned; \
                  their work will replay"
             );
+        }
+        if refused == watermarks.len() {
             return Ok(());
         }
         for (member, tpl) in self.members.iter().zip(&lists) {
@@ -1911,6 +1954,144 @@ mod tests {
             assert!(matches!(source.members[1].phase, Phase::Held(_)));
         }
 
+        /// `open` refuses a consumer count it cannot allocate with an error
+        /// naming the key.
+        #[test]
+        fn open_refuses_a_count_it_cannot_allocate() {
+            let mut config = test_config();
+            config.consumers = usize::MAX;
+            let mut source = KafkaSource::new(config);
+            let cp = Checkpointer::new();
+            match source.open(SourceCtx::new(cp.handle())) {
+                Err(SourceError::Client { class, reason }) => {
+                    assert_eq!(class, ErrorClass::Fatal);
+                    assert!(reason.contains("source.kafka.consumers"), "{reason}");
+                }
+                other => panic!("expected a fatal error naming the key, got {other:?}"),
+            }
+        }
+
+        /// `topic.client.id` is no librdkafka property, so `open` refuses it
+        /// at every consumer count.
+        #[test]
+        fn topic_client_id_is_refused_at_every_count() {
+            for consumers in [1, 2] {
+                let mut config = test_config();
+                config.consumers = consumers;
+                config
+                    .rdkafka
+                    .insert("topic.client.id".into(), "app".into());
+                let mut source = KafkaSource::new(config);
+                let cp = Checkpointer::new();
+                match source.open(SourceCtx::new(cp.handle())) {
+                    Err(SourceError::Client { reason, .. }) => {
+                        assert!(reason.contains("topic.client.id"), "{reason}");
+                    }
+                    other => panic!("consumers: {consumers} opened: {other:?}"),
+                }
+            }
+        }
+
+        /// After a rebalance error on one consumer, the drain's commit carries
+        /// that consumer's drained watermarks beside another consumer's live
+        /// ones. The refused watermarks replay, and the refusal is warned.
+        #[test]
+        fn a_refusal_beside_owned_watermarks_is_warned() {
+            let mut source = opened_consumers(test_config(), &[&[(0, 0)], &[(1, 1)]]);
+            push_intent_to(
+                &source,
+                1,
+                Intent::Error(RDKafkaErrorCode::RebalanceInProgress),
+            );
+            match next_outcome(&mut source) {
+                Ok(SourceEvent::LanesRevoked { lanes, .. }) => {
+                    assert_eq!(lane_ids(&lanes), [1]);
+                }
+                other => panic!("expected the erroring consumer's lanes revoked, got {other:?}"),
+            }
+            let lines = spate_test::capture_logs(tracing::Level::WARN, || {
+                let _ = source.commit(&[(PartitionId(0), 10), (PartitionId(1), 7)]);
+            });
+            assert!(
+                lines
+                    .iter()
+                    .any(|l| l.contains("refusing to store") && l.contains("refused=1")),
+                "partition 1's refusal was not warned: {lines:#?}"
+            );
+        }
+
+        /// A store that librdkafka refuses for one partition of the list,
+        /// while it accepts the others, fails the commit as retryable and
+        /// names the partition.
+        #[test]
+        fn a_refused_element_fails_the_commit() {
+            let mut cfg = test_config();
+            // Bounds the close, which tries to commit the stored offset.
+            cfg.rdkafka
+                .insert("session.timeout.ms".into(), "6000".into());
+            let mut source = opened_consumers(cfg, &[&[(0, 0), (1, 1)]]);
+            // librdkafka holds partition 0 only; the source believes it owns both.
+            source.members[0]
+                .consumer
+                .assign(&tpl_of(&[0]))
+                .expect("local assign");
+            match source.commit(&[(PartitionId(0), 5), (PartitionId(1), 5)]) {
+                Err(SourceError::Client { class, reason }) => {
+                    assert_eq!(class, ErrorClass::Retryable);
+                    assert!(reason.contains("partition 1"), "{reason}");
+                }
+                other => panic!("expected the refused element to fail the commit, got {other:?}"),
+            }
+        }
+
+        /// A rebalance error on one consumer while another keeps its lanes
+        /// opens no assignment deadline, since the source still holds
+        /// partitions.
+        #[test]
+        fn an_error_beside_live_lanes_opens_no_deadline() {
+            let mut source = opened_consumers(test_config(), &[&[(0, 0)], &[(1, 1)]]);
+            push_intent_to(
+                &source,
+                1,
+                Intent::Error(RDKafkaErrorCode::RebalanceInProgress),
+            );
+            assert!(matches!(
+                next_outcome(&mut source),
+                Ok(SourceEvent::LanesRevoked { .. })
+            ));
+            assert!(
+                source.assignment_wait.is_none(),
+                "consumer 0 still holds partition 0"
+            );
+        }
+
+        /// The hold runs from the first held assignment of a rebalance, and a
+        /// later consumer's assignment does not extend it.
+        #[test]
+        fn a_later_assignment_does_not_extend_the_hold() {
+            let mut source = opened_consumers(test_config(), &[&[], &[], &[]]);
+            let clock = freeze(&mut source);
+            for member in &mut source.members {
+                member.phase = Phase::Joining;
+            }
+            push_intent_to(&source, 0, Intent::Assign(TopicPartitionList::new()));
+            let _ = poll_until(&mut source, |s| {
+                matches!(s.members[0].phase, Phase::Held(_))
+            });
+            clock.advance(ASSIGN_HOLD - Duration::from_millis(1));
+            push_intent_to(&source, 1, Intent::Assign(TopicPartitionList::new()));
+            let _ = poll_until(&mut source, |s| {
+                matches!(s.members[1].phase, Phase::Held(_))
+            });
+            clock.advance(Duration::from_millis(1));
+            // The frozen clock stays at the end of the first hold, so an
+            // extended hold never ends and `poll_until` fails at its deadline.
+            let _ = poll_until(&mut source, |s| {
+                matches!(s.members[0].phase, Phase::Assigned)
+            });
+            assert!(matches!(source.members[2].phase, Phase::Joining));
+        }
+
         /// The source's `Debug` names its consumer count and live lanes.
         #[test]
         fn debug_names_the_consumers_and_lanes() {
@@ -2010,6 +2191,46 @@ mod tests {
                 assert!(rendered.contains(&series), "{series}:\n{rendered}");
             }
         }
+    }
+
+    /// Dropping the source while one consumer's assignment is held, before
+    /// the others have theirs, returns.
+    #[test]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "a thread that never returns is the failure; the test fails instead of joining it"
+    )]
+    fn dropping_with_a_held_assignment_returns() {
+        use rdkafka::mocking::MockCluster;
+        use std::sync::mpsc;
+        let cluster = MockCluster::new(1).expect("mock cluster");
+        cluster.create_topic("orders", 4, 1).expect("create topic");
+        let mut cfg = test_config();
+        cfg.brokers = cluster.bootstrap_servers();
+        cfg.group_id = "drop-held".into();
+        cfg.consumers = 3;
+        cfg.rdkafka = std::collections::BTreeMap::from([(
+            "session.timeout.ms".to_string(),
+            "6000".to_string(),
+        )]);
+        let mut source = KafkaSource::new(cfg);
+        let cp = Checkpointer::new();
+        source.open(SourceCtx::new(cp.handle())).expect("open");
+        spate_test::wait_until(Duration::from_secs(60), "an assignment held", || {
+            let _ = source.poll_events(Duration::from_millis(50));
+            source
+                .members
+                .iter()
+                .any(|m| matches!(m.phase, Phase::Held(_)))
+        });
+        let (done, finished) = mpsc::channel();
+        std::thread::spawn(move || {
+            drop(source);
+            let _ = done.send(());
+        });
+        finished
+            .recv_timeout(Duration::from_secs(30))
+            .expect("dropping the source with an assignment held did not return");
     }
 
     /// Queue a rebalance intent for `poll_events` on consumer 0, as the
@@ -2149,6 +2370,87 @@ mod tests {
             assert!(
                 reason.contains(r#"group.instance.id "worker-a""#),
                 "{reason}"
+            );
+        }
+
+        /// Events waiting on consumer `k`'s queue.
+        fn queued(source: &KafkaSource, k: usize) -> usize {
+            let rk = source.members[k].consumer.client().native_ptr();
+            // SAFETY: `rk` is a live client owned by `source`, and the queue
+            // handle is released before return.
+            unsafe {
+                let q = rdkafka::bindings::rd_kafka_queue_get_consumer(rk);
+                let n = rdkafka::bindings::rd_kafka_queue_length(q);
+                rdkafka::bindings::rd_kafka_queue_destroy(q);
+                n
+            }
+        }
+
+        /// A fatal error one consumer returns is reported even when an
+        /// earlier consumer in the same poll returned a retryable one.
+        #[test]
+        fn a_fatal_error_behind_a_retryable_one_is_reported() {
+            let mut cfg = test_config();
+            cfg.rdkafka
+                .insert("reconnect.backoff.ms".into(), "60000".into());
+            cfg.rdkafka
+                .insert("reconnect.backoff.max.ms".into(), "60000".into());
+            // Leaked: closing a consumer after a fatal error waits on a
+            // broker this test never brings up.
+            let mut source = std::mem::ManuallyDrop::new(opened_consumers(cfg, &[&[], &[]]));
+
+            // Serve consumer 1's refused connection and AllBrokersDown first,
+            // so the fatal error is the next event on its queue.
+            let c1 = Arc::clone(&source.members[1].consumer);
+            let mut c1_errors = Vec::new();
+            spate_test::wait_until(Duration::from_secs(20), "consumer 1's errors", || {
+                if let Some(Err(e)) = c1.poll(Duration::from_millis(50)) {
+                    c1_errors.push(e.to_string());
+                }
+                c1_errors.iter().any(|e| e.contains("AllBrokersDown"))
+            });
+            // Leave exactly consumer 0's two retryable errors queued, so it
+            // returns one in the call that also polls consumer 1.
+            spate_test::wait_until(Duration::from_secs(20), "consumer 0's errors", || {
+                queued(&source, 0) >= 2
+            });
+            let c0 = Arc::clone(&source.members[0].consumer);
+            while queued(&source, 0) > 2 {
+                assert!(
+                    c0.poll(Duration::ZERO).is_none(),
+                    "only non-error events precede"
+                );
+            }
+            // SAFETY: the pointer is a live client owned by `source`, and the
+            // reason is a NUL-terminated literal.
+            let raised = unsafe {
+                rdkafka::bindings::rd_kafka_test_fatal_error(
+                    c1.client().native_ptr(),
+                    RespErr::RD_KAFKA_RESP_ERR_GROUP_AUTHORIZATION_FAILED,
+                    c"raised by test".as_ptr(),
+                )
+            };
+            assert_eq!(raised, RespErr::RD_KAFKA_RESP_ERR_NO_ERROR);
+
+            source.poll_start = 0;
+            let mut returned = Vec::new();
+            let mut fatal = None;
+            for _ in 0..20 {
+                match source.poll_events(Duration::from_millis(50)) {
+                    Err(SourceError::Client {
+                        class: ErrorClass::Fatal,
+                        reason,
+                    }) => {
+                        fatal = Some(reason);
+                        break;
+                    }
+                    Err(e) => returned.push(e.to_string()),
+                    Ok(_) => {}
+                }
+            }
+            assert!(
+                fatal.is_some(),
+                "consumer 1's fatal error was never reported; poll_events returned: {returned:#?}"
             );
         }
     }

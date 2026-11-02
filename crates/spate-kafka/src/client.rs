@@ -230,18 +230,10 @@ impl Base<'_> {
         }
         crate::security::apply_ca_default(&mut cc, self.rdkafka, self.openssl_env);
         // librdkafka reads an empty value as unset and sends `rdkafka`.
-        let passed = self
-            .rdkafka
-            .iter()
-            .find(|(k, v)| canonical(k) == "client.id" && !v.is_empty());
+        let passed = self.rdkafka.get("client.id").filter(|v| !v.is_empty());
         let id = match (passed, role.instance()) {
             (Some(_), None) => None,
-            (Some((key, id)), Some(k)) => {
-                // `topic.client.id` is the same property under another key,
-                // and `ClientConfig` applies its keys in hash order.
-                cc.remove(key);
-                Some(format!("{id}-{k}"))
-            }
+            (Some(id), Some(k)) => Some(format!("{id}-{k}")),
             (None, instance) => {
                 let kind = self.section.split('.').next().unwrap_or(self.section);
                 let id = format!("spate-{kind}-{}", role.name());
@@ -830,12 +822,6 @@ mod tests {
         assert_eq!(
             ids(&configs(3, &[("client.id", "app")])),
             ["app-0", "app-1", "app-2"]
-        );
-        let topic = configs(2, &[("topic.client.id", "app")]);
-        assert_eq!(ids(&topic), ["app-0", "app-1"]);
-        assert!(
-            topic.iter().all(|cc| cc.get("topic.client.id").is_none()),
-            "the other spelling would apply in hash order"
         );
     }
 

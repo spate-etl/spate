@@ -642,16 +642,26 @@ mod tests {
     }
 
     /// Pins that a non-zero statistics interval under 1ms or above 24h is
-    /// refused, since librdkafka would read it as off or reject it, and that
-    /// 0s, 1ms and 24h are accepted.
+    /// refused, since librdkafka would read it as off or reject it, ahead of
+    /// a denied `statistics.interval.ms` passthrough, and that 0s, 1ms and
+    /// 24h are accepted.
     #[test]
     fn a_statistics_interval_outside_1ms_to_24h_is_refused() {
         for interval in ["500us", "999us", "24h 1ms"] {
             let err = parse(&format!("{MINIMAL}  statistics_interval: {interval}\n"))
                 .unwrap_err()
                 .to_string();
-            assert!(err.contains("statistics_interval"), "{interval}: {err}");
+            assert!(
+                err.contains("`statistics_interval` must be"),
+                "{interval}: {err}"
+            );
         }
+        let err = parse(&format!(
+            "{MINIMAL}  statistics_interval: 500us\n  rdkafka:\n    \"statistics.interval.ms\": \"x\"\n"
+        ))
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("`statistics_interval` must be"), "{err}");
         for interval in ["0s", "1ms", "24h"] {
             parse(&format!("{MINIMAL}  statistics_interval: {interval}\n"))
                 .unwrap_or_else(|err| panic!("{interval}: {err}"));

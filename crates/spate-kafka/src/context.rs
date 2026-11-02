@@ -174,7 +174,7 @@ mod tests {
     fn consumer() -> BaseConsumer<SourceContext> {
         let cfg = KafkaSourceConfig::new("127.0.0.1:1", "orders", "ctx-test");
         cfg.base(false)
-            .create(&Role(&cfg), SourceHooks::default())
+            .create(&Role(&cfg, None), SourceHooks::default())
             .expect("consumer")
     }
 

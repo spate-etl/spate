@@ -81,6 +81,12 @@ pub(crate) trait Role {
     /// `statistics_interval`.
     fn statistics(&self) -> bool;
 
+    /// The client's index among identical clients of one section, appended to
+    /// its `client.id` as `-<k>`. `None` for a role built once.
+    fn instance(&self) -> Option<usize> {
+        None
+    }
+
     /// Declare the properties this role owns beyond the base.
     fn declare(&self, keys: &mut Keys<'_>);
 }
@@ -224,13 +230,29 @@ impl Base<'_> {
         }
         crate::security::apply_ca_default(&mut cc, self.rdkafka, self.openssl_env);
         // librdkafka reads an empty value as unset and sends `rdkafka`.
-        if !self
+        let passed = self
             .rdkafka
             .iter()
-            .any(|(k, v)| canonical(k) == "client.id" && !v.is_empty())
-        {
-            let kind = self.section.split('.').next().unwrap_or(self.section);
-            cc.set("client.id", format!("spate-{kind}-{}", role.name()));
+            .find(|(k, v)| canonical(k) == "client.id" && !v.is_empty());
+        let id = match (passed, role.instance()) {
+            (Some(_), None) => None,
+            (Some((key, id)), Some(k)) => {
+                // `topic.client.id` is the same property under another key,
+                // and `ClientConfig` applies its keys in hash order.
+                cc.remove(key);
+                Some(format!("{id}-{k}"))
+            }
+            (None, instance) => {
+                let kind = self.section.split('.').next().unwrap_or(self.section);
+                let id = format!("spate-{kind}-{}", role.name());
+                Some(match instance {
+                    Some(k) => format!("{id}-{k}"),
+                    None => id,
+                })
+            }
+        };
+        if let Some(id) = id {
+            cc.set("client.id", id);
         }
         self.declare(
             &mut Keys {
@@ -519,7 +541,7 @@ mod tests {
                 (
                     Section::Source,
                     self.source.base(openssl_env),
-                    Box::new(Consumer(&self.source)),
+                    Box::new(Consumer(&self.source, None)),
                 ),
                 (
                     Section::Sink,

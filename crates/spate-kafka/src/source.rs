@@ -234,6 +234,28 @@ fn partition_ids<'a>(partitions: impl IntoIterator<Item = &'a i32>) -> Vec<Parti
         .collect()
 }
 
+/// Record `error` as the one a poll reports when it takes precedence: the
+/// first fatal error, else the first error. A polled error is gone from its
+/// queue, so a fatal one replaces a retryable one an earlier consumer
+/// returned.
+fn keep_reported(reported: &mut Option<SourceError>, error: SourceError) {
+    let fatal = |e: &SourceError| {
+        matches!(
+            e,
+            SourceError::Client {
+                class: ErrorClass::Fatal,
+                ..
+            }
+        )
+    };
+    if reported
+        .as_ref()
+        .is_none_or(|first| fatal(&error) && !fatal(first))
+    {
+        *reported = Some(error);
+    }
+}
+
 /// The order one `poll_events` call polls `n` consumers in, starting at
 /// `start`, with the wait each poll may spend: zero for every consumer but
 /// the last, which takes `timeout`. A call therefore waits at most `timeout`
@@ -692,23 +714,7 @@ impl KafkaSource {
                 }
                 Some(Err(e)) => {
                     let error = self.poll_error(k, &consumer, &e);
-                    // A polled error is gone from its queue, so a fatal one
-                    // replaces a retryable one an earlier consumer returned.
-                    let fatal = |e: &SourceError| {
-                        matches!(
-                            e,
-                            SourceError::Client {
-                                class: ErrorClass::Fatal,
-                                ..
-                            }
-                        )
-                    };
-                    if first_error
-                        .as_ref()
-                        .is_none_or(|first| fatal(&error) && !fatal(first))
-                    {
-                        first_error = Some(error);
-                    }
+                    keep_reported(&mut first_error, error);
                 }
             }
         }
@@ -1603,6 +1609,30 @@ mod tests {
             }
         }
 
+        /// A poll reports its first fatal error, else its first error.
+        #[test]
+        fn a_poll_reports_its_first_fatal_error_else_its_first() {
+            let err = |class, reason: &str| SourceError::Client {
+                class,
+                reason: reason.into(),
+            };
+            let reported = |errors: Vec<SourceError>| {
+                let mut kept = None;
+                for e in errors {
+                    keep_reported(&mut kept, e);
+                }
+                match kept {
+                    Some(SourceError::Client { reason, .. }) => reason,
+                    other => panic!("unexpected: {other:?}"),
+                }
+            };
+            let (r, f) = (ErrorClass::Retryable, ErrorClass::Fatal);
+            assert_eq!(reported(vec![err(r, "r0"), err(r, "r1")]), "r0");
+            assert_eq!(reported(vec![err(r, "r0"), err(f, "f1")]), "f1");
+            assert_eq!(reported(vec![err(f, "f0"), err(r, "r1")]), "f0");
+            assert_eq!(reported(vec![err(f, "f0"), err(f, "f1")]), "f0");
+        }
+
         /// One `poll_events` call polls every consumer once and spends the
         /// caller's timeout once, on the last of them, starting where the
         /// caller says.
@@ -2009,6 +2039,13 @@ mod tests {
                 }
                 other => panic!("expected the erroring consumer's lanes revoked, got {other:?}"),
             }
+            let quiet = spate_test::capture_logs(tracing::Level::WARN, || {
+                let _ = source.commit(&[(PartitionId(0), 9)]);
+            });
+            assert!(
+                !quiet.iter().any(|l| l.contains("refusing to store")),
+                "nothing was refused: {quiet:#?}"
+            );
             let lines = spate_test::capture_logs(tracing::Level::WARN, || {
                 let _ = source.commit(&[(PartitionId(0), 10), (PartitionId(1), 7)]);
             });

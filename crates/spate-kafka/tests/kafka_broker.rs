@@ -312,3 +312,125 @@ fn real_broker_backlog_reports_summable_lag() {
          (produced {produced} - committed {committed_total}):\n{rendered}"
     );
 }
+
+/// Revocation on a real broker with two consumers in the source: the
+/// watermarks drained for each consumer's partition are stored through the
+/// consumer that owns it, while it still owns it, and both are committed.
+/// The in-process MockCluster rejects offset commits while the group is
+/// joining, so only a real broker shows the commit at the revoking
+/// generation.
+#[test]
+#[ignore = "requires Docker"]
+#[expect(clippy::disallowed_methods, reason = "the test joins the thread")]
+fn real_broker_revocation_commits_every_consumers_offsets() {
+    use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
+
+    let container = broker().start().expect("start kafka container");
+    let port = container.get_host_port_ipv4(KAFKA_PORT).expect("port");
+    let brokers = format!("127.0.0.1:{port}");
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let admin: AdminClient<_> = support::raw_config()
+        .set("bootstrap.servers", &brokers)
+        .build()
+        .expect("admin client");
+    rt.block_on(admin.create_topics(
+        &[NewTopic::new(TOPIC, 2, TopicReplication::Fixed(1))],
+        &AdminOptions::new(),
+    ))
+    .expect("create topics")
+    .into_iter()
+    .for_each(|r| {
+        r.expect("topic created");
+    });
+    produce(&brokers, TOPIC, 25, 2, "both");
+
+    let mut cfg = config(&brokers, "rev-each");
+    cfg.consumers = 2;
+    let mut cp = Checkpointer::new();
+    let mut source = KafkaSource::new(cfg);
+    source.open(SourceCtx::new(cp.handle())).expect("open");
+
+    // Settle with both partitions held, completing any revocation a late
+    // consumer's join causes.
+    let mut lanes = Vec::new();
+    spate_test::wait_until(Duration::from_secs(90), "both partitions held", || {
+        match source
+            .poll_events(Duration::from_millis(200))
+            .expect("poll_events")
+        {
+            SourceEvent::LanesAssigned(new) => lanes = new,
+            SourceEvent::LanesRevoked { lanes: ids, barrier } => {
+                lanes.clear();
+                for _ in &ids {
+                    barrier.arrive();
+                }
+                source.flush_commits().expect("flush");
+            }
+            _ => {}
+        }
+        lanes.len() == 2
+    });
+    let partitions: Vec<_> = lanes.iter().map(SourceLane::partition).collect();
+    cp.begin_epoch(&partitions, 1);
+    for lane in &mut lanes {
+        drain_lane(&mut source, lane, 25, Duration::from_secs(60));
+    }
+    drop(lanes);
+    cp.drain();
+    let watermarks = cp.take_watermarks();
+    assert_eq!(watermarks.len(), 2, "{watermarks:?}");
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let joiner = {
+        let brokers = brokers.clone();
+        let stop = Arc::clone(&stop);
+        std::thread::spawn(move || {
+            let c: BaseConsumer = support::raw_config()
+                .set("bootstrap.servers", &brokers)
+                .set("group.id", "rev-each")
+                .build()
+                .expect("joiner");
+            c.subscribe(&[TOPIC]).expect("subscribe");
+            while !stop.load(Ordering::Relaxed) {
+                let _ = c.poll(Duration::from_millis(100));
+            }
+        })
+    };
+    spate_test::wait_until(Duration::from_secs(60), "the revocation", || {
+        let SourceEvent::LanesRevoked { lanes: ids, barrier } = source
+            .poll_events(Duration::from_millis(200))
+            .expect("poll_events")
+        else {
+            return false;
+        };
+        for _ in &ids {
+            barrier.arrive();
+        }
+        source.commit(&watermarks).expect("store revoked offsets");
+        source.flush_commits().expect("flush");
+        true
+    });
+
+    let probe: BaseConsumer = support::raw_config()
+        .set("bootstrap.servers", &brokers)
+        .set("group.id", "rev-each")
+        .build()
+        .expect("probe");
+    let mut tpl = rdkafka::TopicPartitionList::new();
+    tpl.add_partition(TOPIC, 0);
+    tpl.add_partition(TOPIC, 1);
+    let committed: Vec<_> = probe
+        .committed_offsets(tpl, Duration::from_secs(10))
+        .expect("committed")
+        .elements()
+        .iter()
+        .map(|e| e.offset())
+        .collect();
+    assert_eq!(committed, [rdkafka::Offset::Offset(25); 2]);
+
+    stop.store(true, Ordering::Relaxed);
+    joiner.join().expect("joiner thread");
+}

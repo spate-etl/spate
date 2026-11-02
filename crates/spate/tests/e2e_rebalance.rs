@@ -1,7 +1,8 @@
-//! E2E scenario: rebalance under load. A second consumer joins the group
-//! mid-stream and leaves again; the pipeline survives both rebalances with
-//! zero loss, and at no sampled instant do committed offsets exceed rows
-//! durably written, which is the at-least-once invariant observed live.
+//! E2E scenario: rebalance under load. An outside consumer joins the group
+//! of a pipeline running two consumers mid-stream and leaves again; the
+//! pipeline survives both rebalances with zero loss, and at no sampled
+//! instant do committed offsets exceed rows durably written, which is the
+//! at-least-once invariant observed live.
 //!
 //! Selecting it:
 //!
@@ -29,7 +30,10 @@ use support::*;
 )]
 fn rebalance_under_load_preserves_every_record() {
     let h = Harness::up();
-    let params = PipelineParams::defaults("e2e-rebalance", 19183);
+    let mut params = PipelineParams::defaults("e2e-rebalance", 19183);
+    // Two consumers in the pipeline, so the intruder's join and leave each
+    // revoke both of them at once.
+    params.kafka_consumers = 2;
     let partitions = 6;
     let total = 30_000;
 

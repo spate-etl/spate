@@ -81,6 +81,17 @@ pub(crate) trait Role {
     /// `statistics_interval`.
     fn statistics(&self) -> bool;
 
+    /// The client's index among identical clients of one section, appended to
+    /// its `client.id` as `-<k>`. `None` for a role built once.
+    fn instance(&self) -> Option<usize> {
+        None
+    }
+
+    /// librdkafka properties this role sets unless the passthrough sets them.
+    fn defaults(&self) -> &'static [(&'static str, &'static str)] {
+        &[]
+    }
+
     /// Declare the properties this role owns beyond the base.
     fn declare(&self, keys: &mut Keys<'_>);
 }
@@ -219,18 +230,30 @@ impl Base<'_> {
         let mut cc = new_config();
         // rdkafka reads the log facade by default; tracing filters these events.
         cc.set_log_level(RDKafkaLogLevel::Debug);
+        // Before the passthrough, which replaces any of them it sets.
+        for (key, value) in role.defaults() {
+            cc.set(*key, *value);
+        }
         for (k, v) in self.rdkafka {
             cc.set(k, v);
         }
         crate::security::apply_ca_default(&mut cc, self.rdkafka, self.openssl_env);
         // librdkafka reads an empty value as unset and sends `rdkafka`.
-        if !self
-            .rdkafka
-            .iter()
-            .any(|(k, v)| canonical(k) == "client.id" && !v.is_empty())
-        {
-            let kind = self.section.split('.').next().unwrap_or(self.section);
-            cc.set("client.id", format!("spate-{kind}-{}", role.name()));
+        let passed = self.rdkafka.get("client.id").filter(|v| !v.is_empty());
+        let id = match (passed, role.instance()) {
+            (Some(_), None) => None,
+            (Some(id), Some(k)) => Some(format!("{id}-{k}")),
+            (None, instance) => {
+                let kind = self.section.split('.').next().unwrap_or(self.section);
+                let id = format!("spate-{kind}-{}", role.name());
+                Some(match instance {
+                    Some(k) => format!("{id}-{k}"),
+                    None => id,
+                })
+            }
+        };
+        if let Some(id) = id {
+            cc.set("client.id", id);
         }
         self.declare(
             &mut Keys {
@@ -519,7 +542,7 @@ mod tests {
                 (
                     Section::Source,
                     self.source.base(openssl_env),
-                    Box::new(Consumer(&self.source)),
+                    Box::new(Consumer(&self.source, None)),
                 ),
                 (
                     Section::Sink,
@@ -569,9 +592,14 @@ mod tests {
     }
 
     /// Keys a role carries that the passthrough may still set: the CA
-    /// default, the `client.id` default, and the sink's typed compression,
-    /// which is a conflict rule of its own.
-    const NOT_OWNED: [&str; 3] = ["ssl.ca.location", "client.id", "compression.codec"];
+    /// default, the `client.id` default, each role's [`Role::defaults`], and
+    /// the sink's typed compression, which is a conflict rule of its own.
+    const NOT_OWNED: [&str; 4] = [
+        "ssl.ca.location",
+        "client.id",
+        "fetch.queue.backoff.ms",
+        "compression.codec",
+    ];
 
     /// Every spelling librdkafka accepts for `key`: itself, its
     /// `topic.`-prefixed form, and each alias of the same property.
@@ -751,6 +779,95 @@ mod tests {
         assert!(lines[0].contains("WARN"), "{}", lines[0]);
         assert!(lines[0].contains("librdkafka"), "{}", lines[0]);
         assert!(lines[0].contains("1/1 brokers are down"), "{}", lines[0]);
+    }
+
+    /// A source running several consumers suffixes each one's `client.id`
+    /// with its index, its own id or the passthrough's, and changes nothing
+    /// else. One consumer keeps the unsuffixed id.
+    #[test]
+    fn consumer_client_ids_are_suffixed_above_one() {
+        let configs = |count: usize, pairs: &[(&str, &str)]| -> Vec<ClientConfig> {
+            let mut source = KafkaSourceConfig::new("localhost:9092", "orders", "spate");
+            source.consumers = count;
+            source.rdkafka = map(pairs);
+            (0..count)
+                .map(|k| source.base(false).config(&Consumer::member(&source, k)))
+                .collect()
+        };
+        let ids = |configs: &[ClientConfig]| -> Vec<String> {
+            configs
+                .iter()
+                .map(|cc| cc.get("client.id").unwrap_or_default().to_owned())
+                .collect()
+        };
+        let tls = [
+            ("security.protocol", "SASL_SSL"),
+            ("ssl.ca.location", "/etc/ca.pem"),
+        ];
+
+        assert_eq!(ids(&configs(1, &tls)), ["spate-source-consumer"]);
+        let three = configs(3, &tls);
+        assert_eq!(
+            ids(&three),
+            [
+                "spate-source-consumer-0",
+                "spate-source-consumer-1",
+                "spate-source-consumer-2"
+            ]
+        );
+        let mut rest: Vec<_> = three
+            .iter()
+            .map(|cc| {
+                let mut keys = cc.config_map();
+                keys.remove("client.id");
+                keys.into_iter()
+                    .map(|(k, v)| (k.to_owned(), v.to_owned()))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        rest.dedup();
+        assert_eq!(rest.len(), 1, "only client.id differs: {rest:#?}");
+        assert!(
+            rest[0].contains(&("ssl.ca.location".to_owned(), "/etc/ca.pem".to_owned())),
+            "{rest:#?}"
+        );
+
+        assert_eq!(ids(&configs(1, &[("client.id", "app")])), ["app"]);
+        assert_eq!(
+            ids(&configs(3, &[("client.id", "app")])),
+            ["app-0", "app-1", "app-2"]
+        );
+    }
+
+    /// The source's consumers back a full partition queue off for 10 ms
+    /// unless the passthrough sets `fetch.queue.backoff.ms`, and no other
+    /// client sets it.
+    #[test]
+    fn only_the_source_shortens_the_fetch_queue_backoff() {
+        let defaults = Sections::over(&BTreeMap::new());
+        for (section, base, role) in defaults.roles(false) {
+            let expected = matches!(section, Section::Source).then_some("10");
+            assert_eq!(
+                base.config(&*role).get("fetch.queue.backoff.ms"),
+                expected,
+                "{} {}",
+                base.section,
+                role.name()
+            );
+        }
+        let passed = Sections::over(&map(&[("fetch.queue.backoff.ms", "1000")]));
+        passed
+            .validate(Section::Source)
+            .expect("the backoff is not owned");
+        for (_, base, role) in passed.roles(false) {
+            assert_eq!(
+                base.config(&*role).get("fetch.queue.backoff.ms"),
+                Some("1000"),
+                "{} {}",
+                base.section,
+                role.name()
+            );
+        }
     }
 
     /// Each role sends its own `client.id` unless the passthrough names one,

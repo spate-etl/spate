@@ -14,8 +14,8 @@ use spate_core::source::{PayloadBatch, Source, SourceCtx, SourceEvent, SourceLan
 use spate_kafka::{KafkaSource, KafkaSourceConfig};
 use spate_test::wait_until;
 use std::collections::BTreeMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 use support::{
     await_assignment, corrupt_batch, drain_lane, produce, produce_batch, serve_events, v1_message,
@@ -1401,4 +1401,635 @@ fn a_mid_batch_authorization_failure_fails_the_lane() {
             "{error}"
         );
     });
+}
+
+type Lane = <KafkaSource as Source>::Lane;
+
+/// Plays the runtime's part for one source: begins an epoch on each
+/// assignment, admits each added lane to it, and drains, commits and flushes
+/// on each revocation. Asserts the runtime's contract on every event: an
+/// assignment arrives with no lane live, and no lane id is reused.
+struct Driver {
+    source: KafkaSource,
+    cp: Checkpointer,
+    lanes: Vec<Lane>,
+    epoch: u32,
+    seen: Vec<spate_core::source::LaneId>,
+    revocations: usize,
+}
+
+impl Driver {
+    fn open(cfg: KafkaSourceConfig) -> Driver {
+        Driver::open_with(KafkaSource::new(cfg), |ctx| ctx)
+    }
+
+    fn open_with(mut source: KafkaSource, ctx: impl FnOnce(SourceCtx) -> SourceCtx) -> Driver {
+        let cp = Checkpointer::new();
+        source.open(ctx(SourceCtx::new(cp.handle()))).expect("open");
+        Driver {
+            source,
+            cp,
+            lanes: Vec::new(),
+            epoch: 0,
+            seen: Vec::new(),
+            revocations: 0,
+        }
+    }
+
+    /// Serve one `poll_events` call.
+    fn step(&mut self, timeout: Duration) {
+        match self.source.poll_events(timeout) {
+            Ok(SourceEvent::LanesAssigned(new)) => {
+                assert!(
+                    self.lanes.is_empty(),
+                    "an assignment arrived with {} lanes live",
+                    self.lanes.len()
+                );
+                self.admit(&new);
+                self.epoch += 1;
+                let parts: Vec<PartitionId> = new.iter().map(SourceLane::partition).collect();
+                self.cp.begin_epoch(&parts, self.epoch);
+                self.lanes = new;
+            }
+            Ok(SourceEvent::LanesAdded(new)) => {
+                self.admit(&new);
+                let parts: Vec<PartitionId> = new.iter().map(SourceLane::partition).collect();
+                self.cp.extend_epoch(&parts).expect("admit added lanes");
+                self.lanes.extend(new);
+            }
+            Ok(SourceEvent::LanesRevoked { lanes, barrier }) => {
+                self.lanes.retain(|l| !lanes.contains(&l.id()));
+                for _ in &lanes {
+                    barrier.arrive();
+                }
+                self.cp.drain();
+                let watermarks = self.cp.take_watermarks();
+                self.source.commit(&watermarks).expect("commit");
+                self.source.flush_commits().expect("flush");
+                self.revocations += 1;
+            }
+            Ok(_) => {}
+            Err(SourceError::Client {
+                class: ErrorClass::Retryable,
+                ..
+            }) => {}
+            Err(e) => panic!("poll_events: {e}"),
+        }
+    }
+
+    fn admit(&mut self, new: &[Lane]) {
+        for lane in new {
+            assert!(
+                !self.seen.contains(&lane.id()),
+                "lane id {:?} reused",
+                lane.id()
+            );
+            self.seen.push(lane.id());
+        }
+    }
+
+    /// The partitions of the live lanes, sorted.
+    fn partitions(&self) -> Vec<u32> {
+        let mut parts: Vec<u32> = self.lanes.iter().map(|l| l.partition().0).collect();
+        parts.sort_unstable();
+        parts
+    }
+
+    /// Step until the live lanes cover partitions `0..n`.
+    fn settle(&mut self, n: u32, timeout: Duration) {
+        let want: Vec<u32> = (0..n).collect();
+        let deadline = Instant::now() + timeout;
+        while self.partitions() != want {
+            assert!(
+                Instant::now() < deadline,
+                "holds {:?} after {timeout:?}, want {want:?}",
+                self.partitions()
+            );
+            self.step(Duration::from_millis(100));
+        }
+    }
+
+    /// Read every live lane, stepping between polls, until each partition has
+    /// delivered offsets `0..n`. Each batch is dropped once read, which acks
+    /// it.
+    fn read(&mut self, n: i64, timeout: Duration) {
+        let mut got: BTreeMap<u32, std::collections::BTreeSet<i64>> = BTreeMap::new();
+        let deadline = Instant::now() + timeout;
+        let done = |got: &BTreeMap<u32, std::collections::BTreeSet<i64>>, parts: &[u32]| {
+            parts
+                .iter()
+                .all(|p| got.get(p).is_some_and(|o| o.len() as i64 >= n))
+        };
+        while !done(&got, &self.partitions()) {
+            assert!(
+                Instant::now() < deadline,
+                "read only {got:?} within {timeout:?}"
+            );
+            self.step(Duration::from_millis(20));
+            for lane in &mut self.lanes {
+                let partition = lane.partition().0;
+                if let Some(mut batch) =
+                    lane.poll(64, Duration::from_millis(50)).expect("lane poll")
+                {
+                    while let Some(raw) = batch.next_payload() {
+                        got.entry(partition).or_default().insert(raw.offset);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Commit and flush what the read batches made committable.
+    fn commit(&mut self) {
+        self.cp.drain();
+        let watermarks = self.cp.take_watermarks();
+        self.source.commit(&watermarks).expect("commit");
+        self.source.flush_commits().expect("flush");
+    }
+}
+
+fn consumers_config(brokers: &str, group: &str, consumers: usize) -> KafkaSourceConfig {
+    let mut cfg = config(brokers, group);
+    cfg.consumers = consumers;
+    cfg
+}
+
+/// Committed offsets of `group` on partitions `0..partitions`.
+fn committed(brokers: &str, group: &str, partitions: i32) -> Vec<rdkafka::Offset> {
+    let probe: BaseConsumer = support::raw_config()
+        .set("bootstrap.servers", brokers)
+        .set("group.id", group)
+        .build()
+        .expect("probe");
+    let mut tpl = rdkafka::TopicPartitionList::new();
+    for p in 0..partitions {
+        tpl.add_partition(TOPIC, p);
+    }
+    probe
+        .committed_offsets(tpl, Duration::from_secs(10))
+        .expect("committed")
+        .elements()
+        .iter()
+        .map(|e| e.offset())
+        .collect()
+}
+
+/// Two consumers' assignments reach the runtime as one lane set: every
+/// assignment arrives with no lane live and fresh lane ids, and the source
+/// ends up holding every partition between them.
+#[test]
+fn consumers_share_one_epoch() {
+    let cluster = MockCluster::new(1).expect("mock cluster");
+    cluster.create_topic(TOPIC, 4, 1).expect("create topic");
+    let brokers = cluster.bootstrap_servers();
+    produce(&brokers, TOPIC, 5, 4, "s");
+
+    let mut driver = Driver::open(consumers_config(&brokers, "share", 2));
+    driver.settle(4, Duration::from_secs(60));
+    driver.read(5, Duration::from_secs(30));
+}
+
+/// Each partition's offsets are stored and committed through the consumer
+/// that owns it. With the interval commit out of the way, only
+/// `flush_commits` commits, and every partition reads back committed.
+#[test]
+fn two_consumers_poll_ack_and_commit_every_partition() {
+    let cluster = MockCluster::new(1).expect("mock cluster");
+    cluster.create_topic(TOPIC, 4, 1).expect("create topic");
+    let brokers = cluster.bootstrap_servers();
+    produce(&brokers, TOPIC, 10, 4, "c");
+
+    let mut cfg = consumers_config(&brokers, "commit-each", 2);
+    cfg.commit_interval = Duration::from_hours(1);
+    let mut driver = Driver::open(cfg);
+    driver.settle(4, Duration::from_secs(60));
+    driver.read(10, Duration::from_secs(30));
+    driver.commit();
+
+    assert_eq!(
+        committed(&brokers, "commit-each", 4),
+        vec![rdkafka::Offset::Offset(10); 4]
+    );
+}
+
+/// A pause reaches the consumer that owns each lane's partition: while both
+/// lanes are paused neither delivers, and on resume both deliver gap-free.
+#[test]
+fn pause_reaches_the_owning_consumer() {
+    let cluster = MockCluster::new(1).expect("mock cluster");
+    cluster.create_topic(TOPIC, 2, 1).expect("create topic");
+    let brokers = cluster.bootstrap_servers();
+
+    let mut driver = Driver::open(consumers_config(&brokers, "pause-owner", 2));
+    driver.settle(2, Duration::from_secs(60));
+    let ids: Vec<_> = driver.lanes.iter().map(SourceLane::id).collect();
+    driver.source.pause(&ids).expect("pause");
+    produce(&brokers, TOPIC, 5, 2, "p");
+
+    // While paused nothing is delivered (pause also purges prefetch).
+    let idle_until = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < idle_until {
+        driver.step(Duration::from_millis(50));
+        for lane in &mut driver.lanes {
+            assert!(
+                lane.poll(64, Duration::from_millis(50))
+                    .expect("poll")
+                    .is_none(),
+                "paused lane on partition {} delivered",
+                lane.partition().0
+            );
+        }
+    }
+
+    driver.source.resume(&ids).expect("resume");
+    driver.read(5, Duration::from_secs(30));
+}
+
+/// A member joining from outside revokes every consumer of the source in
+/// one drain, and once it leaves the source holds every partition again
+/// under fresh lane ids.
+#[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the test joins the joiner thread"
+)]
+fn an_outside_member_rebalances_every_in_process_consumer() {
+    let cluster = MockCluster::new(1).expect("mock cluster");
+    cluster.create_topic(TOPIC, 4, 1).expect("create topic");
+    let brokers = cluster.bootstrap_servers();
+
+    let mut driver = Driver::open(consumers_config(&brokers, "outside", 2));
+    driver.settle(4, Duration::from_secs(60));
+    let before = driver.revocations;
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let joiner = {
+        let brokers = brokers.clone();
+        let stop = Arc::clone(&stop);
+        std::thread::spawn(move || {
+            let c: BaseConsumer = support::raw_config()
+                .set("bootstrap.servers", &brokers)
+                .set("group.id", "outside")
+                .set("session.timeout.ms", "6000")
+                .build()
+                .expect("joiner");
+            c.subscribe(&[TOPIC]).expect("subscribe");
+            while !stop.load(Ordering::Relaxed) {
+                let _ = c.poll(Duration::from_millis(100));
+            }
+        })
+    };
+    wait_until(
+        Duration::from_secs(60),
+        "the joiner takes partitions",
+        || {
+            driver.step(Duration::from_millis(100));
+            driver.revocations > before && !driver.lanes.is_empty() && driver.lanes.len() < 4
+        },
+    );
+
+    stop.store(true, Ordering::Relaxed);
+    joiner.join().expect("joiner thread");
+    driver.settle(4, Duration::from_secs(60));
+}
+
+/// A consumer the group assigns nothing stays in the group past both
+/// deadlines, while the other consumer's lane keeps delivering and
+/// committing.
+#[test]
+fn more_consumers_than_partitions_keeps_running() {
+    let cluster = MockCluster::new(1).expect("mock cluster");
+    cluster.create_topic(TOPIC, 1, 1).expect("create topic");
+    let brokers = cluster.bootstrap_servers();
+
+    let clock = TestClock::frozen();
+    let cfg = consumers_config(&brokers, "idle-consumer", 2);
+    let deadlines = cfg.startup_timeout + cfg.assignment_timeout;
+    let source = KafkaSource::new(cfg).with_clock(Arc::clone(&clock) as _);
+    let mut driver = Driver::open_with(source, |ctx| ctx);
+    driver.settle(1, Duration::from_secs(60));
+
+    clock.advance(deadlines + Duration::from_secs(1));
+    produce(&brokers, TOPIC, 5, 1, "i");
+    driver.read(5, Duration::from_secs(30));
+    driver.commit();
+    assert_eq!(
+        committed(&brokers, "idle-consumer", 1),
+        [rdkafka::Offset::Offset(5)]
+    );
+}
+
+/// Each consumer publishes the lag of the partitions it holds as soon as its
+/// statistics arrive, measured from the committed offsets read at assignment.
+#[test]
+fn two_consumers_publish_lag_before_committing() {
+    let cluster = MockCluster::new(1).expect("mock cluster");
+    cluster.create_topic(TOPIC, 2, 1).expect("create topic");
+    let brokers = cluster.bootstrap_servers();
+    produce(&brokers, TOPIC, 10, 2, "l");
+    let probe: BaseConsumer = support::raw_config()
+        .set("bootstrap.servers", &brokers)
+        .set("group.id", "lag-each")
+        .build()
+        .expect("probe");
+    let mut tpl = rdkafka::TopicPartitionList::new();
+    for p in 0..2 {
+        tpl.add_partition_offset(TOPIC, p, rdkafka::Offset::Offset(3))
+            .expect("offset");
+    }
+    probe
+        .commit(&tpl, rdkafka::consumer::CommitMode::Sync)
+        .expect("commit");
+    drop(probe);
+
+    let mut cfg = consumers_config(&brokers, "lag-each", 2);
+    cfg.statistics_interval = Duration::from_millis(100);
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    metrics::with_local_recorder(&recorder, || {
+        let metrics = Arc::new(spate_core::metrics::SourceMetrics::new(
+            &spate_core::metrics::ComponentLabels::new("lag-each", "source", "kafka"),
+        ));
+        let mut driver = Driver::open_with(KafkaSource::new(cfg), |ctx| {
+            ctx.with_stage_metrics(Some(metrics))
+        });
+        driver.settle(2, Duration::from_secs(60));
+        wait_until(Duration::from_secs(30), "lag published", || {
+            driver.step(Duration::from_millis(100));
+            lag_series_count(&handle.render()) == 2
+        });
+    });
+
+    let rendered = handle.render();
+    for p in 0..2 {
+        let needle = format!(
+            r#"spate_source_lag_records{{pipeline="lag-each",component="source",component_type="kafka",partition="{p}"}} 7"#
+        );
+        assert!(
+            rendered.lines().any(|l| l == needle),
+            "{needle}:\n{rendered}"
+        );
+    }
+}
+
+/// The values of every series of `family` labelled with a `client`.
+fn client_values(rendered: &str, family: &str) -> Vec<(String, f64)> {
+    rendered
+        .lines()
+        .filter(|l| l.starts_with(&format!("{family}{{")))
+        .filter_map(|l| {
+            let client = l.split("client=\"").nth(1)?.split('"').next()?.to_owned();
+            let value = l.rsplit(' ').next()?.parse().ok()?;
+            Some((client, value))
+        })
+        .collect()
+}
+
+/// Above one consumer, each consumer's statistics land on series of their
+/// own, labelled `client="consumer-<k>"`, which sum to the source's totals.
+/// With statistics off no family is registered.
+#[test]
+fn two_consumers_publish_their_own_statistics() {
+    let cluster = MockCluster::new(1).expect("mock cluster");
+    cluster.create_topic(TOPIC, 2, 1).expect("create topic");
+    let brokers = cluster.bootstrap_servers();
+    produce(&brokers, TOPIC, 5, 2, "st");
+
+    let run = |interval: Duration, group: &'static str| -> String {
+        let mut cfg = consumers_config(&brokers, group, 2);
+        cfg.statistics_interval = interval;
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || {
+            let meter =
+                spate_core::metrics::Meter::with_namespace("kafka", group, "source", "kafka");
+            let mut driver = Driver::open_with(KafkaSource::new(cfg), |ctx| {
+                ctx.with_meter(Some(meter)).with_partition_detail(true)
+            });
+            driver.settle(2, Duration::from_secs(60));
+            driver.read(5, Duration::from_secs(30));
+            if interval.is_zero() {
+                return;
+            }
+            wait_until(
+                Duration::from_secs(30),
+                "both consumers' statistics",
+                || {
+                    driver.step(Duration::from_millis(100));
+                    let rendered = handle.render();
+                    let sizes = client_values(&rendered, "spate_kafka_group_assignment_size");
+                    let rx: f64 = client_values(&rendered, "spate_kafka_rx_messages_total")
+                        .iter()
+                        .map(|(_, v)| v)
+                        .sum();
+                    sizes.len() == 2
+                        && sizes.iter().map(|(_, v)| v).sum::<f64>() == 2.0
+                        && rx >= 10.0
+                },
+            );
+        });
+        handle.render()
+    };
+
+    let rendered = run(Duration::from_millis(100), "stats-each");
+    let mut clients: Vec<String> = client_values(&rendered, "spate_kafka_group_assignment_size")
+        .into_iter()
+        .map(|(c, _)| c)
+        .collect();
+    clients.sort();
+    assert_eq!(clients, ["consumer-0", "consumer-1"], "{rendered}");
+    assert!(
+        !rendered
+            .lines()
+            .any(|l| l.starts_with("spate_kafka_group_assignment_size{") && !l.contains("client=")),
+        "no unlabelled series above one consumer:\n{rendered}"
+    );
+
+    let rendered = run(Duration::ZERO, "stats-off");
+    assert!(
+        !rendered.lines().any(|l| l.starts_with("spate_kafka_")),
+        "statistics off registers no family:\n{rendered}"
+    );
+}
+
+/// The `client` label is the consumer's index: a `client.id` set in the
+/// passthrough reaches neither the series nor the source's own logs.
+#[test]
+fn consumer_series_carry_no_passthrough_value() {
+    let cluster = MockCluster::new(1).expect("mock cluster");
+    cluster.create_topic(TOPIC, 2, 1).expect("create topic");
+    let brokers = cluster.bootstrap_servers();
+
+    let mut cfg = consumers_config(&brokers, "no-secret", 2);
+    cfg.statistics_interval = Duration::from_millis(100);
+    cfg.rdkafka.insert("client.id".into(), "hunter2".into());
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    let lines = spate_test::capture_logs(tracing::Level::DEBUG, || {
+        metrics::with_local_recorder(&recorder, || {
+            let meter =
+                spate_core::metrics::Meter::with_namespace("kafka", "no-secret", "source", "kafka");
+            let mut driver =
+                Driver::open_with(KafkaSource::new(cfg), |ctx| ctx.with_meter(Some(meter)));
+            driver.settle(2, Duration::from_secs(60));
+            wait_until(Duration::from_secs(30), "statistics", || {
+                driver.step(Duration::from_millis(100));
+                client_values(&handle.render(), "spate_kafka_group_assignment_size").len() == 2
+            });
+        });
+    });
+    let rendered = handle.render();
+    assert!(!rendered.contains("hunter2"), "{rendered}");
+    let leaked: Vec<_> = lines
+        .iter()
+        .filter(|l| !l.contains("librdkafka") && l.contains("hunter2"))
+        .collect();
+    assert!(leaked.is_empty(), "{leaked:#?}");
+}
+
+/// Run `f` on a helper thread and fail if it does not return in time: a
+/// drop that waits on an unacknowledged rebalance never returns.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "a thread that never returns is the failure; the test fails instead of joining it"
+)]
+fn returns_within(what: &str, f: impl FnOnce() + Send + 'static) {
+    let (done, finished) = mpsc::channel();
+    std::thread::spawn(move || {
+        f();
+        let _ = done.send(());
+    });
+    finished
+        .recv_timeout(Duration::from_secs(30))
+        .unwrap_or_else(|_| panic!("{what} did not return"));
+}
+
+/// Dropping the source between a surfaced revocation and its completion
+/// releases every consumer, so consumer close completes.
+#[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the test joins the joiner thread"
+)]
+fn dropping_mid_revoke_releases_every_consumer() {
+    let cluster = MockCluster::new(1).expect("mock cluster");
+    cluster.create_topic(TOPIC, 4, 1).expect("create topic");
+    let brokers = cluster.bootstrap_servers();
+
+    let mut driver = Driver::open(consumers_config(&brokers, "drop-revoke", 2));
+    driver.settle(4, Duration::from_secs(60));
+    let stop = Arc::new(AtomicBool::new(false));
+    let joiner = {
+        let brokers = brokers.clone();
+        let stop = Arc::clone(&stop);
+        std::thread::spawn(move || {
+            let c: BaseConsumer = support::raw_config()
+                .set("bootstrap.servers", &brokers)
+                .set("group.id", "drop-revoke")
+                .build()
+                .expect("joiner");
+            c.subscribe(&[TOPIC]).expect("subscribe");
+            while !stop.load(Ordering::Relaxed) {
+                let _ = c.poll(Duration::from_millis(100));
+            }
+        })
+    };
+    let mut source = driver.source;
+    let lanes = driver.lanes;
+    wait_until(Duration::from_secs(60), "a revocation", || {
+        matches!(
+            source.poll_events(Duration::from_millis(100)),
+            Ok(SourceEvent::LanesRevoked { .. })
+        )
+    });
+    returns_within("dropping the source mid-revoke", move || {
+        drop(lanes);
+        drop(source);
+    });
+    stop.store(true, Ordering::Relaxed);
+    joiner.join().expect("joiner thread");
+}
+
+/// The source may be dropped before the lanes it handed out: each lane keeps
+/// its consumer alive, and dropping the lanes afterwards completes.
+#[test]
+fn dropping_the_source_before_its_lanes_completes() {
+    let cluster = MockCluster::new(1).expect("mock cluster");
+    cluster.create_topic(TOPIC, 2, 1).expect("create topic");
+    let brokers = cluster.bootstrap_servers();
+
+    let mut driver = Driver::open(consumers_config(&brokers, "drop-order", 2));
+    driver.settle(2, Duration::from_secs(60));
+    let Driver { source, lanes, .. } = driver;
+    returns_within("dropping the source, then its lanes", move || {
+        drop(source);
+        drop(lanes);
+    });
+}
+
+/// A commit that carries a watermark for a partition no consumer of the
+/// source owns still stores the offsets of the partitions it does own.
+#[test]
+fn a_partial_refusal_stores_the_owned_offsets() {
+    let cluster = MockCluster::new(1).expect("mock cluster");
+    cluster.create_topic(TOPIC, 4, 1).expect("create topic");
+    let brokers = cluster.bootstrap_servers();
+    produce(&brokers, TOPIC, 10, 4, "r");
+
+    let mut cfg = consumers_config(&brokers, "partial-refusal", 2);
+    cfg.commit_interval = Duration::from_hours(1);
+    let mut driver = Driver::open(cfg);
+    driver.settle(4, Duration::from_secs(60));
+    driver.read(10, Duration::from_secs(30));
+    driver.cp.drain();
+    let mut watermarks = driver.cp.take_watermarks();
+    watermarks.push((PartitionId(9), 3));
+    driver.source.commit(&watermarks).expect("commit");
+    driver.source.flush_commits().expect("flush");
+
+    assert_eq!(
+        committed(&brokers, "partial-refusal", 4),
+        vec![rdkafka::Offset::Offset(10); 4]
+    );
+}
+
+/// Accepting an assignment for several consumers spends one
+/// committed-offset lookup bound in total, so one `poll_events` call does
+/// not block the controller thread for a lookup per consumer.
+#[test]
+fn one_assignment_spends_one_lookup_bound() {
+    /// `COMMITTED_LOOKUP_TIMEOUT`, plus slack for the assign itself.
+    const BOUND: Duration = Duration::from_secs(13);
+    let cluster = MockCluster::new(1).expect("mock cluster");
+    cluster.create_topic(TOPIC, 3, 1).expect("create topic");
+    // A coordinator still loading its offsets: librdkafka retries every
+    // OffsetFetch until the caller's timeout.
+    cluster.request_errors(
+        rdkafka::types::RDKafkaApiKey::OffsetFetch,
+        &vec![
+            rdkafka::types::RDKafkaRespErr::RD_KAFKA_RESP_ERR_COORDINATOR_LOAD_IN_PROGRESS;
+            100_000
+        ],
+    );
+    let mut cfg = consumers_config(&cluster.bootstrap_servers(), "slow-lookup", 3);
+    cfg.startup_timeout = Duration::from_secs(120);
+    let mut source = KafkaSource::new(cfg);
+    let cp = Checkpointer::new();
+    source.open(SourceCtx::new(cp.handle())).expect("open");
+
+    let deadline = Instant::now() + Duration::from_secs(120);
+    loop {
+        assert!(Instant::now() < deadline, "no assignment");
+        let started = Instant::now();
+        let outcome = source.poll_events(Duration::from_millis(100));
+        let took = started.elapsed();
+        assert!(
+            took <= BOUND,
+            "one poll_events call blocked the controller thread for {took:?}"
+        );
+        if let Ok(SourceEvent::LanesAssigned(lanes)) = outcome {
+            assert_eq!(lanes.len(), 3);
+            return;
+        }
+    }
 }

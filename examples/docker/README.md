@@ -57,7 +57,7 @@ livenessProbe:  { httpGet: { path: /healthz, port: 9090 }, periodSeconds: 10 }
   CPU limit** (or `pipeline.threads` explicitly) — a limitless pod sees
   the node's cores.
 - Kafka consumption parallelism is bounded by partition count; scale
-  horizontally by replicas (one consumer-group member per pod) and give
+  horizontally by replicas (one consumer-group member per pod by default) and give
   the topic enough partitions.
 - `pipeline.pinning: compact` pins pipeline threads to cores. That only
   yields exclusive cores under the kubelet **static CPU manager** with
@@ -87,7 +87,8 @@ worked example live in the Backpressure concept page.
 
 ## Scaling and rebalances
 
-One pod = one consumer-group member. Scaling a Deployment up or down
+One pod = one consumer-group member, or `consumers` members when the source
+runs more than one. Scaling a Deployment up or down
 triggers a rebalance: revoked partitions drain and commit before handover
 (the framework's drain choreography), so scale events cost redelivery of
 only the uncommitted tail.

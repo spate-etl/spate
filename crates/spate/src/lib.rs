@@ -9,7 +9,7 @@
 //!
 //! | Feature | Enables |
 //! |---|---|
-//! | `kafka` | [`kafka`] — Kafka source built on `rdkafka` (single consumer, partition-queue lanes), producer sink, and the Kafka feed backend, built from a `feed: { kafka: … }` section and passed to `Pipeline::feed` |
+//! | `kafka` | [`kafka`] — Kafka source built on `rdkafka` (one consumer per process by default, partition-queue lanes), producer sink, and the Kafka feed backend, built from a `feed: { kafka: … }` section and passed to `Pipeline::feed` |
 //! | `kafka-tls` | TLS, mTLS and SASL for [`kafka`]; librdkafka is built with a vendored OpenSSL. The [Kafka security section] lists the SASL mechanisms the feature supports. Without it a security property in the `rdkafka` passthrough fails config validation |
 //! | `s3` | [`s3`] — object-storage (S3) source that reads work units and storage notifications from the feed a `feed:` section names; a pipeline with no `feed:` section fails to start. A bounded job ends on its own only when the section names a `location` or the run lists into the in-process feed; `S3Source::list_once` is the lister run that publishes a bounded job's units to a durable feed |
 //! | `sqs` | [`sqs`] — the Amazon SQS feed backend, built from a `feed: { sqs: … }` section and passed to `Pipeline::feed` |

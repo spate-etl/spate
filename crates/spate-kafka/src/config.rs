@@ -7,11 +7,22 @@ use spate_core::config::{ComponentConfig, ConfigError, redact};
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-/// The source's consumer, and the properties it owns beyond the base in
-/// [`crate::client`]. Setting one through the passthrough is rejected at load
-/// time with the reason given here, because overriding it silently breaks the
-/// framework's delivery guarantees or its threading model.
-pub(crate) struct Consumer<'a>(pub(crate) &'a KafkaSourceConfig);
+/// One of the source's consumers, and the properties it owns beyond the base
+/// in [`crate::client`]. Setting one through the passthrough is rejected at
+/// load time with the reason given here, because overriding it silently
+/// breaks the framework's delivery guarantees or its threading model.
+///
+/// The second field is the consumer's index when the source runs more than
+/// one, and suffixes its `client.id`.
+pub(crate) struct Consumer<'a>(pub(crate) &'a KafkaSourceConfig, pub(crate) Option<usize>);
+
+impl<'a> Consumer<'a> {
+    /// Consumer `k` of `config`'s [`KafkaSourceConfig::consumers`], indexed
+    /// only when there is more than one.
+    pub(crate) fn member(config: &'a KafkaSourceConfig, k: usize) -> Consumer<'a> {
+        Consumer(config, (config.consumers > 1).then_some(k))
+    }
+}
 
 impl Role for Consumer<'_> {
     fn name(&self) -> &'static str {
@@ -20,6 +31,19 @@ impl Role for Consumer<'_> {
 
     fn statistics(&self) -> bool {
         true
+    }
+
+    fn instance(&self) -> Option<usize> {
+        self.1
+    }
+
+    fn defaults(&self) -> &'static [(&'static str, &'static str)] {
+        // Each partition queue is split, so librdkafka's queue thresholds apply
+        // per partition, and a partition that reaches one is not fetched again
+        // for `fetch.queue.backoff.ms`. A lane drains a full queue well inside
+        // librdkafka's 1000 ms, and its pipeline thread then waits on an empty
+        // queue for the rest of the backoff.
+        &[("fetch.queue.backoff.ms", "10")]
     }
 
     fn declare(&self, keys: &mut Keys<'_>) {
@@ -67,6 +91,10 @@ impl Role for Consumer<'_> {
     }
 }
 
+fn default_consumers() -> usize {
+    1
+}
+
 fn default_commit_interval() -> Duration {
     Duration::from_secs(5)
 }
@@ -101,6 +129,19 @@ pub struct KafkaSourceConfig {
     pub topic: String,
     /// Consumer group id.
     pub group_id: String,
+    /// How many consumers this process runs, at least 1. Each is a separate
+    /// member of `group_id` that owns its own share of the topic's
+    /// partitions, and puts one more Fetch in flight on each broker that
+    /// leads one of them. Each also adds its own librdkafka threads, a
+    /// connection per broker, a group coordinator connection and, under SASL,
+    /// its own session. Consumers beyond the partition count hold nothing.
+    ///
+    /// Above 1, consumer `k` sends `client.id` with a `-<k>` suffix, so a
+    /// broker quota on the unsuffixed id does not apply to it, and its
+    /// statistics carry a `client="consumer-<k>"` label. Static membership
+    /// (`group.instance.id`) requires 1.
+    #[serde(default = "default_consumers")]
+    pub consumers: usize,
     /// How often stored offsets are auto-committed
     /// (librdkafka `auto.commit.interval.ms`).
     #[serde(with = "humantime_serde", default = "default_commit_interval")]
@@ -150,6 +191,10 @@ pub struct KafkaSourceConfig {
     /// to `queued.max.messages.kbytes * 1024` unless `fetch.max.bytes` is set
     /// explicitly, so capping the queue silently shrinks the fetch size too.
     /// See the Kafka source tuning guide.
+    ///
+    /// A partition whose queue reaches either threshold is not fetched again
+    /// for `fetch.queue.backoff.ms`, which the source sets to 10 ms unless
+    /// this map sets it.
     #[serde(default)]
     pub rdkafka: BTreeMap<String, String>,
 }
@@ -162,6 +207,7 @@ impl std::fmt::Debug for KafkaSourceConfig {
             brokers,
             topic,
             group_id,
+            consumers,
             commit_interval,
             startup_timeout,
             assignment_timeout,
@@ -172,6 +218,7 @@ impl std::fmt::Debug for KafkaSourceConfig {
             .field("brokers", brokers)
             .field("topic", topic)
             .field("group_id", group_id)
+            .field("consumers", consumers)
             .field("commit_interval", commit_interval)
             .field("startup_timeout", startup_timeout)
             .field("assignment_timeout", assignment_timeout)
@@ -194,6 +241,7 @@ impl KafkaSourceConfig {
             brokers: brokers.into(),
             topic: topic.into(),
             group_id: group_id.into(),
+            consumers: default_consumers(),
             commit_interval: default_commit_interval(),
             startup_timeout: default_startup_timeout(),
             assignment_timeout: default_assignment_timeout(),
@@ -227,7 +275,27 @@ impl KafkaSourceConfig {
                 "source.kafka.group_id must not be empty".into(),
             ));
         }
-        if let Err(refusal) = self.base(false).denied(&[&Consumer(self)]) {
+        if self.consumers == 0 {
+            return Err(ConfigError::Validation(
+                "source.kafka.consumers must be at least 1".into(),
+            ));
+        }
+        // Consumers of one process share the passthrough, so they would all
+        // claim one static member id and fence each other.
+        if self.consumers > 1
+            && let Some((key, _)) = self
+                .rdkafka
+                .iter()
+                .find(|(k, v)| crate::client::canonical(k) == "group.instance.id" && !v.is_empty())
+        {
+            return Err(ConfigError::Validation(format!(
+                "source.kafka.consumers above 1 cannot be combined with \
+                 source.kafka.rdkafka.\"{key}\": every consumer would join as \
+                 the same static member and fence the others; set consumers: 1 \
+                 or remove the static member id"
+            )));
+        }
+        if let Err(refusal) = self.base(false).denied(&[&Consumer(self, None)]) {
             return Err(ConfigError::Validation(format!("source.kafka.{refusal}")));
         }
         if self.rdkafka.contains_key("auto.offset.reset")
@@ -306,7 +374,7 @@ impl KafkaSourceConfig {
 
     #[cfg(test)]
     pub(crate) fn client_config_with(&self, openssl_env: bool) -> rdkafka::ClientConfig {
-        self.base(openssl_env).config(&Consumer(self))
+        self.base(openssl_env).config(&Consumer(self, None))
     }
 }
 
@@ -413,6 +481,7 @@ mod tests {
         assert_eq!(cfg.startup_timeout, Duration::from_secs(30));
         assert_eq!(cfg.assignment_timeout, Duration::from_mins(5));
         assert_eq!(cfg.statistics_interval, Duration::from_secs(5));
+        assert_eq!(cfg.consumers, 1);
         assert!(cfg.rdkafka.is_empty());
     }
 
@@ -684,5 +753,60 @@ mod tests {
         ] {
             assert!(KafkaSourceConfig::from_component_config(&section(body)).is_err());
         }
+    }
+
+    fn with_consumers(count: &str, rdkafka: &str) -> Result<KafkaSourceConfig, ConfigError> {
+        let body = format!("{}  consumers: {count}\n{rdkafka}", minimal());
+        KafkaSourceConfig::from_component_config(&section(&body))
+    }
+
+    /// A consumer count of zero is refused, naming the key and the bound.
+    #[test]
+    fn zero_consumers_are_rejected() {
+        let err = with_consumers("0", "").unwrap_err().to_string();
+        assert!(
+            err.contains("source.kafka.consumers must be at least 1"),
+            "{err}"
+        );
+    }
+
+    /// Any count from one up is accepted.
+    #[test]
+    fn two_consumers_are_accepted() {
+        assert_eq!(with_consumers("2", "").unwrap().consumers, 2);
+        assert_eq!(with_consumers("1", "").unwrap().consumers, 1);
+    }
+
+    /// A count that is not a non-negative integer is refused as a type error
+    /// naming the key.
+    #[test]
+    fn a_non_integer_consumer_count_names_the_key() {
+        for count in ["many", "-1"] {
+            let err = with_consumers(count, "").unwrap_err().to_string();
+            assert!(err.contains("consumers"), "{count}: {err}");
+            assert!(err.contains("expected usize"), "{count}: {err}");
+        }
+    }
+
+    /// The consumer count reaches `Debug`.
+    #[test]
+    fn debug_prints_the_consumer_count() {
+        let cfg = with_consumers("2", "").unwrap();
+        assert!(format!("{cfg:?}").contains("consumers: 2"), "{cfg:?}");
+    }
+
+    /// Several consumers would all join as one static member and fence each
+    /// other, so a static member id requires one consumer. The refusal names
+    /// both keys and never the id.
+    #[test]
+    fn static_membership_with_several_consumers_is_refused() {
+        let id = "  rdkafka:\n    group.instance.id: w-secret\n";
+        let err = with_consumers("2", id).unwrap_err().to_string();
+        assert!(err.contains("source.kafka.consumers"), "{err}");
+        assert!(err.contains("group.instance.id"), "{err}");
+        assert!(!err.contains("w-secret"), "{err}");
+        with_consumers("1", id).expect("one consumer may be a static member");
+        with_consumers("2", "  rdkafka:\n    group.instance.id: \"\"\n")
+            .expect("an empty id is no static membership");
     }
 }

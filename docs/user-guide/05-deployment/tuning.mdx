@@ -21,8 +21,8 @@ The loop is:
 
 1. **Find which side binds.** A pipeline is either source-bound, chain-bound, or
    sink-bound at any moment, and the metrics say which. See
-   [Monitoring](./monitoring.mdx). Guessing here is the most common way tuning
-   time gets wasted.
+   [Which side binds](./monitoring.mdx#which-side-binds). Guessing here is the
+   most common way tuning time gets wasted.
 2. **Raise the binding side** using that component's knobs.
 3. **Re-measure.** The bottleneck usually moves rather than disappearing: a
    source that was starving the chain will, once fixed, start saturating the

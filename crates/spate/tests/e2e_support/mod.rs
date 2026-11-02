@@ -437,6 +437,8 @@ pub struct PipelineParams {
     /// outage saturate the in-flight window immediately, which is what the
     /// drain-during-outage scenario needs to set up deterministically.
     pub inflight_max_per_shard: usize,
+    /// `source.kafka.consumers`: the Kafka consumers the instance runs.
+    pub kafka_consumers: usize,
 }
 
 impl PipelineParams {
@@ -456,6 +458,7 @@ impl PipelineParams {
             commit_interval: "500ms",
             drain_timeout: "20s",
             inflight_max_per_shard: 2,
+            kafka_consumers: 1,
         }
     }
 
@@ -484,6 +487,7 @@ source:
     brokers: {brokers}
     topic: {topic}
     group_id: {group}
+    consumers: {consumers}
     commit_interval: {commit}
     rdkafka:
       auto.offset.reset: earliest
@@ -513,6 +517,7 @@ sink:
             brokers = h.brokers,
             topic = self.topic,
             group = self.group,
+            consumers = self.kafka_consumers,
             registry = h.registry_url,
             table = self.table,
             shards_yaml = shard_lines,

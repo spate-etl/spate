@@ -45,7 +45,7 @@ record appears in the table below.
 | [0009](0009-yaml-configuration-with-opaque-passthrough.md) | YAML configuration with opaque per-component sections | accepted | 2026-07-05 |
 | [0010](0010-skip-or-fail-record-error-policies.md) | Record error policies are Skip or Fail, with no dead-letter queue | accepted | 2026-07-05 |
 | [0011](0011-msrv-and-dependency-policy.md) | A rolling N-2 MSRV, and no 0.x types in the public API | accepted | 2026-07-05 |
-| [0012](0012-single-kafka-consumer-with-split-partition-queues.md) | One Kafka consumer per process, with split partition queues | accepted | 2026-07-05 |
+| [0012](0012-single-kafka-consumer-with-split-partition-queues.md) | One Kafka consumer per process, with split partition queues | superseded | 2026-07-05 |
 | [0013](0013-zero-copy-seam.md) | Untyped payload batches cross the erasure boundary, with a lifetime-to-type family | accepted | 2026-07-05 |
 | [0014](0014-pipeline-builder-as-primary-assembly.md) | A non-generic `Pipeline` builder that owns initialization | accepted | 2026-07-07 |
 | [0015](0015-multi-sink-split-terminal.md) | Additive `add_sink` and a typed split terminal | accepted | 2026-07-11 |
@@ -123,6 +123,7 @@ record appears in the table below.
 | [0087](0087-a-lane-reads-its-next-window-while-it-hands-on-the-current-one.md) | A lane reads its next window while it hands on the current one | accepted | 2026-10-28 |
 | [0088](0088-a-connector-builds-its-vendor-client-in-one-place.md) | A connector builds its vendor client in one place, and refuses the settings it owns in the passthrough | accepted | 2026-10-29 |
 | [0089](0089-std-maps-take-seeded-fast-or-quality-aliases.md) | Hash maps use seeded fast or quality aliases, and std's maps are banned | accepted | 2026-10-30 |
+| [0090](0090-a-kafka-source-runs-a-configured-number-of-consumers.md) | A configured number of Kafka consumers per process, to lift a fetch-bound source | accepted | 2026-11-02 |
 
 ## Related
 

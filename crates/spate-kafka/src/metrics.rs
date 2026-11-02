@@ -17,9 +17,10 @@
 //! mirrored through [`Counter::absolute`], whose fetch-max contract makes
 //! duplicate delivery idempotent and lets PromQL `rate()`/`increase()` work
 //! natively. That mapping is sound only while the totals are monotonic, i.e.
-//! scoped to a single consumer handle: `KafkaSource::open` creates the
-//! consumer exactly once per source lifetime (a second `open` is a hard
-//! error), and a `KafkaFeed` builds one consumer for its life. If in-process consumer recreation is ever introduced, these
+//! scoped to a single consumer handle: `KafkaSource::open` creates each of its
+//! consumers exactly once per source lifetime, each with a translator of its
+//! own (a second `open` is a hard error), and a `KafkaFeed` builds one
+//! consumer for its life. If in-process consumer recreation is ever introduced, these
 //! series would restart at zero and the fetch-max guard would silently
 //! flat-line them at the old high-water mark (see Vector issue #20697);
 //! switch to delta accumulation against the previous snapshot instead.
@@ -68,7 +69,8 @@ const PARTITION_NOT_FETCHING: &str = "partition_not_fetching";
 const L_BROKER: &str = "broker";
 const L_PARTITION: &str = "partition";
 const L_TOPIC: &str = "topic";
-/// Which of a feed's two clients a statistics series describes.
+/// Which client a statistics series describes: one of a feed's two clients,
+/// or one of a source's consumers when it runs more than one.
 pub(crate) const L_CLIENT: &str = "client";
 
 /// Labels every family a translator registers carries before its own.
@@ -233,9 +235,24 @@ struct NotFetching {
 }
 
 impl KafkaStatsMetrics {
-    /// Resolve all fixed handles. Build-time only (called from `open`).
+    /// Resolve all fixed handles with no `client` label.
+    #[cfg(test)]
     pub(crate) fn new(meter: Meter, per_partition_detail: bool) -> Self {
-        Self::with_labels(meter, per_partition_detail, Vec::new(), false, true)
+        Self::for_source_consumer(meter, per_partition_detail, None)
+    }
+
+    /// Resolve all fixed handles for one of a source's consumers. `instance`
+    /// is its index when the source runs more than one, and labels every
+    /// series `client="consumer-<k>"` so each series has one writer.
+    pub(crate) fn for_source_consumer(
+        meter: Meter,
+        per_partition_detail: bool,
+        instance: Option<usize>,
+    ) -> Self {
+        let extra = instance
+            .map(|k| vec![(L_CLIENT, SharedString::from(format!("consumer-{k}")))])
+            .unwrap_or_default();
+        Self::with_labels(meter, per_partition_detail, extra, false, true)
     }
 
     /// Resolve all fixed handles for a feed's consumer, which reads a work and

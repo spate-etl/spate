@@ -1,13 +1,14 @@
 ---
-description: "One Kafka consumer per process, using split_partition_queue, maps partitions onto pipeline threads, keeping consumer-group size independent of thread count."
+description: "One Kafka consumer per process, using split_partition_queue, maps partitions onto pipeline threads, keeping consumer-group size independent of thread count. Superseded by ADR-0090."
 ---
 
 # ADR-0012 — One Kafka consumer per process, with split partition queues
 
-- **Status:** accepted
+- **Status:** superseded
 - **Date:** 2026-07-05 (recorded 2026-08-06 from the decision log)
 - **Supersedes:** —
-- **Superseded by:** —
+- **Superseded by:**
+  [ADR-0090](0090-a-kafka-source-runs-a-configured-number-of-consumers.md)
 
 ## Context and problem statement
 

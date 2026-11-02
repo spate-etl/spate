@@ -14,7 +14,7 @@ export const CONNECTORS: Connector[] = [
     role: 'source · sink · feed',
     crate: 'spate-kafka',
     feature: 'kafka',
-    summary: 'One consumer per process; partitions fan across pipeline threads as zero-copy lanes. The feed commits a unit once every record is written.',
+    summary: 'One consumer per process by default; partitions fan across pipeline threads as zero-copy lanes. The feed commits a unit once every record is written.',
     docs: '/docs/user-guide/connectors/sources/kafka',
   },
   {

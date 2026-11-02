@@ -1,7 +1,8 @@
-//! E2E scenario: rebalance under load. A second consumer joins the group
-//! mid-stream and leaves again; the pipeline survives both rebalances with
-//! zero loss, and at no sampled instant do committed offsets exceed rows
-//! durably written, which is the at-least-once invariant observed live.
+//! E2E scenario: rebalance under load. An outside consumer joins the group
+//! of a pipeline running two consumers mid-stream and leaves again; the
+//! pipeline survives both rebalances with zero loss, and at no sampled
+//! instant do committed offsets exceed rows durably written, which is the
+//! at-least-once invariant observed live.
 //!
 //! Selecting it:
 //!
@@ -29,13 +30,20 @@ use support::*;
 )]
 fn rebalance_under_load_preserves_every_record() {
     let h = Harness::up();
-    let params = PipelineParams::defaults("e2e-rebalance", 19183);
+    let mut params = PipelineParams::defaults("e2e-rebalance", 19183);
+    // Two consumers in the pipeline, so the intruder's join and leave each
+    // revoke both of them at once.
+    params.kafka_consumers = 2;
     let partitions = 6;
     let total = 30_000;
 
     h.create_topic(&params.topic, partitions);
     h.create_table(&params.table);
-    h.produce(&params.topic, &events(partitions, total));
+    // The second half is produced only after the intruder has left, so it
+    // reaches the sink only through the assignment that follows both
+    // rebalances.
+    let all = events(partitions, 2 * total);
+    h.produce(&params.topic, &all[..total]);
 
     let pipeline = h.spawn_pipeline(&params);
     wait_until(Duration::from_secs(60), "pipeline mid-stream", || {
@@ -98,10 +106,11 @@ fn rebalance_under_load_preserves_every_record() {
     println!("rebalance scenario: invariant held across {samples} samples");
 
     // ── Conservation after the storm ───────────────────────────────────
+    h.produce(&params.topic, &all[total..]);
     wait_until(
         Duration::from_secs(120),
         "every distinct id present",
-        || h.uniq(&params.table) == total as u64,
+        || h.uniq(&params.table) == 2 * total as u64,
     );
     let report = pipeline.stop();
     assert!(
@@ -110,7 +119,7 @@ fn rebalance_under_load_preserves_every_record() {
     );
     let rows = h.count(&params.table);
     let uniq = h.uniq(&params.table);
-    assert_eq!(uniq, total as u64, "no record lost across rebalances");
+    assert_eq!(uniq, 2 * total as u64, "no record lost across rebalances");
     println!(
         "rebalance scenario: {rows} rows, {uniq} distinct, {} duplicates",
         rows - uniq

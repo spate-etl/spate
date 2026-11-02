@@ -2,7 +2,7 @@
 //!
 //! # Source
 //!
-//! Built on `rdkafka` with a **single consumer per process**: partitions
+//! Built on `rdkafka` with **one consumer per process** by default: partitions
 //! are split into per-partition queues (`split_partition_queue`) and fanned
 //! across pipeline threads as [`SourceLane`](spate_core::source::SourceLane)s,
 //! keeping payload borrows local to the polling thread with zero copies.

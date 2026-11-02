@@ -28,7 +28,7 @@
 //! source offsets past it. Weaker settings would silently turn
 //! at-least-once into at-most-once.
 
-use crate::client::{Base, Keys, Role, canonical};
+use crate::client::{Base, Keys, Role, canonical, check_message_timeout};
 use crate::sink::context::{SinkContext, SinkHooks};
 use crate::sink::encoder::{
     DEFAULT_MAX_MESSAGE_BYTES, KafkaBytesEncoder, KafkaEncoder, KafkaJsonEncoder, MessageEncoder,
@@ -201,7 +201,8 @@ pub struct KafkaSinkConfig {
     /// write awaits its delivery reports before failing. The failure is
     /// retryable unless a broker rejected the connection with a SASL or TLS
     /// failure at most `delivery_timeout` + 35s + `reconnect.backoff.max.ms`
-    /// earlier.
+    /// earlier. Whole milliseconds, from `1ms` to `i32::MAX` milliseconds
+    /// (about 24.8 days), and above `linger.ms` when `rdkafka` sets it.
     #[serde(with = "humantime_serde", default = "default_delivery_timeout")]
     pub delivery_timeout: Duration,
     /// Per-message size limit (key + payload + headers), enforced at encode
@@ -301,6 +302,10 @@ impl KafkaSinkConfig {
     }
 
     /// Cross-field validation, including the passthrough denylist.
+    ///
+    /// # Errors
+    ///
+    /// [`ConfigError::Validation`] for the first setting it refuses.
     pub fn validate(&self) -> Result<(), ConfigError> {
         let fail = |msg: String| Err(ConfigError::Validation(format!("sink.kafka: {msg}")));
 
@@ -313,19 +318,8 @@ impl KafkaSinkConfig {
         if self.shards == 0 {
             return fail("shards must be at least 1".into());
         }
-        if self.delivery_timeout.is_zero() {
-            return fail(
-                "delivery_timeout must be positive (librdkafka treats 0 as \
-                 infinite, which would let a batch write hang past every \
-                 framework deadline)"
-                    .into(),
-            );
-        }
-        if self.delivery_timeout.as_millis() > i32::MAX as u128 {
-            return fail(format!(
-                "delivery_timeout {:?} exceeds librdkafka's maximum (~24.8 days)",
-                self.delivery_timeout
-            ));
+        if let Err(why) = check_message_timeout(self.delivery_timeout) {
+            return fail(format!("delivery_timeout {why}"));
         }
         // librdkafka's accepted range for `message.max.bytes`.
         let mmb = self.max_message_bytes.as_u64();
@@ -728,6 +722,41 @@ mod tests {
             panic!("build accepted an owned key");
         };
         assert!(msg.contains("allow.auto.create.topics"), "{msg}");
+    }
+
+    /// `build` refuses a programmatic `delivery_timeout` under 1 ms before
+    /// creating a producer. Regression for #1208.
+    #[test]
+    fn build_refuses_a_sub_millisecond_delivery_timeout_in_a_programmatic_config() {
+        let mut cfg = KafkaSinkConfig::new("localhost:9092", "orders");
+        cfg.delivery_timeout = Duration::from_micros(999);
+        let Err(ConfigError::Validation(msg)) = build(cfg) else {
+            panic!("build accepted a sub-millisecond delivery_timeout");
+        };
+        assert!(msg.contains("delivery_timeout"), "{msg}");
+    }
+
+    /// A `delivery_timeout` under 1 ms, which librdkafka would receive as 0
+    /// and read as no timeout, is refused, and 1 ms reaches it as 1.
+    /// Regression for #1208.
+    #[test]
+    fn sub_millisecond_delivery_timeout_rejected() {
+        for timeout in ["500us", "999us"] {
+            let err = parse(&format!("{}  delivery_timeout: {timeout}\n", minimal()))
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("delivery_timeout must be"), "{timeout}: {err}");
+            assert!(err.contains("1ms"), "{timeout}: {err}");
+        }
+        for timeout in ["1ms", "1000us"] {
+            let cfg = parse(&format!("{}  delivery_timeout: {timeout}\n", minimal()))
+                .unwrap_or_else(|err| panic!("{timeout}: {err}"));
+            assert_eq!(
+                cfg.client_config().get("message.timeout.ms"),
+                Some("1"),
+                "{timeout}"
+            );
+        }
     }
 
     /// Without the typed `compression` field, the passthrough may set the

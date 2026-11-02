@@ -1469,6 +1469,28 @@ mod tests {
         assert!(!msg.contains("hunter2"), "{msg}");
     }
 
+    /// `open()` refuses a sub-millisecond `statistics_interval` on a source
+    /// made with `new()`, as a fatal error, before it creates a consumer.
+    /// Regression for #1528.
+    #[test]
+    fn open_refuses_a_sub_millisecond_statistics_interval() {
+        let mut config = test_config();
+        config.statistics_interval = Duration::from_micros(500);
+        let mut source = KafkaSource::new(config);
+        let cp = Checkpointer::new();
+        let Err(SourceError::Client {
+            class: ErrorClass::Fatal,
+            reason,
+        }) = source.open(SourceCtx::new(cp.handle()))
+        else {
+            panic!("open accepted a 500us statistics_interval");
+        };
+        assert!(
+            reason.contains("source.kafka.statistics_interval"),
+            "{reason}"
+        );
+    }
+
     /// Reproduces the assignment bookkeeping of a partial revocation on
     /// consumer `k`: lanes for the revoked partitions move from `assignment`
     /// into `revoking`.

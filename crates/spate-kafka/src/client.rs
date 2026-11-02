@@ -167,6 +167,9 @@ impl fmt::Display for Refusal<'_> {
     }
 }
 
+/// The largest `statistics.interval.ms` librdkafka accepts.
+const MAX_STATISTICS_INTERVAL: Duration = Duration::from_hours(24);
+
 /// What every client of one connector section shares: its brokers, its
 /// passthrough and its statistics interval.
 pub(crate) struct Base<'a> {
@@ -292,6 +295,26 @@ impl Base<'_> {
                     why,
                 });
             }
+        }
+        Ok(())
+    }
+
+    /// Whether `statistics_interval` is `0s` or in librdkafka's range of 1ms
+    /// to 24h.
+    ///
+    /// librdkafka reads the interval in whole milliseconds and reads `0` as
+    /// off, so a positive value under a millisecond would silently disable
+    /// statistics.
+    ///
+    /// # Errors
+    ///
+    /// The reason, without the key, for the section to prefix in its own
+    /// style.
+    pub(crate) fn check_statistics_interval(&self) -> Result<(), &'static str> {
+        let interval = self.statistics_interval;
+        if !interval.is_zero() && (interval.as_millis() == 0 || interval > MAX_STATISTICS_INTERVAL)
+        {
+            return Err("must be 0s, which disables statistics, or from 1ms to 24h");
         }
         Ok(())
     }
@@ -996,5 +1019,16 @@ mod tests {
         assert!(!printed.contains("PRIVATE-KEY"), "{printed}");
         assert!(!printed.contains("hunter2"), "{printed}");
         assert!(printed.contains("\"ssl.key.pem\": <redacted>"), "{printed}");
+    }
+
+    /// Pins that librdkafka narrows a `statistics.interval.ms` of 2^32 to
+    /// `0`, which it reads as off, so the 24h bound in
+    /// `Base::check_statistics_interval` also keeps such a value out.
+    #[test]
+    fn librdkafka_wraps_a_statistics_interval_at_2_pow_32() {
+        let mut cc = new_config();
+        cc.set("statistics.interval.ms", "4294967296");
+        let native = cc.create_native_config().expect("native config");
+        assert_eq!(native.get("statistics.interval.ms"), Ok("0".to_owned()));
     }
 }

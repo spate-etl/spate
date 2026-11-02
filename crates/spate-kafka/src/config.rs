@@ -162,8 +162,10 @@ pub struct KafkaSourceConfig {
     /// librdkafka statistics emission interval, feeding the lag metrics and
     /// the connector's `spate_kafka_source_*` families (broker health,
     /// latency, queue saturation, group stability). Zero disables statistics
-    /// and those families with it. [The metrics reference] tabulates them
-    /// under Kafka source.
+    /// and those families with it. librdkafka reads the value in whole
+    /// milliseconds up to 24h, so [`validate`](Self::validate) refuses a
+    /// non-zero value under 1ms or above 24h. [The metrics reference]
+    /// tabulates them under Kafka source.
     ///
     /// [the metrics reference]: https://spate.kainth.dev/docs/METRICS
     #[serde(with = "humantime_serde", default = "default_statistics_interval")]
@@ -293,6 +295,11 @@ impl KafkaSourceConfig {
                  source.kafka.rdkafka.\"{key}\": every consumer would join as \
                  the same static member and fence the others; set consumers: 1 \
                  or remove the static member id"
+            )));
+        }
+        if let Err(why) = self.base(false).check_statistics_interval() {
+            return Err(ConfigError::Validation(format!(
+                "source.kafka.statistics_interval {why}"
             )));
         }
         if let Err(refusal) = self.base(false).denied(&[&Consumer(self, None)]) {
@@ -808,5 +815,58 @@ mod tests {
         with_consumers("1", id).expect("one consumer may be a static member");
         with_consumers("2", "  rdkafka:\n    group.instance.id: \"\"\n")
             .expect("an empty id is no static membership");
+    }
+
+    /// Pins that a non-zero `statistics_interval` under 1ms or above 24h is
+    /// refused at load, since librdkafka would read it as off or reject it,
+    /// that the refusal names the key and no passthrough value, and that
+    /// `0s`, `1ms` and `24h` load with the value written in milliseconds.
+    /// Regression for #1528.
+    #[test]
+    fn a_statistics_interval_outside_1ms_to_24h_is_refused() {
+        for interval in [
+            "1ns",
+            "500us",
+            "999us",
+            "999999ns",
+            "24h 1ms",
+            "4294967296ms",
+        ] {
+            let body = format!(
+                "{}  statistics_interval: {interval}\n  rdkafka:\n    client.id: hunter2\n",
+                minimal()
+            );
+            let msg = KafkaSourceConfig::from_component_config(&section(&body))
+                .expect_err(interval)
+                .to_string();
+            assert!(
+                msg.contains("source.kafka.statistics_interval"),
+                "{interval}: {msg}"
+            );
+            assert!(!msg.contains("hunter2"), "{interval}: {msg}");
+        }
+        let body = format!(
+            "{}  statistics_interval: 500us\n  rdkafka:\n    \"statistics.interval.ms\": \"x\"\n",
+            minimal()
+        );
+        let msg = KafkaSourceConfig::from_component_config(&section(&body))
+            .unwrap_err()
+            .to_string();
+        assert!(msg.contains("source.kafka.statistics_interval"), "{msg}");
+        for (interval, written) in [
+            ("0s", None),
+            ("1ms", Some("1")),
+            ("1ms 500us", Some("1")),
+            ("24h", Some("86400000")),
+        ] {
+            let body = format!("{}  statistics_interval: {interval}\n", minimal());
+            let cfg = KafkaSourceConfig::from_component_config(&section(&body))
+                .unwrap_or_else(|err| panic!("{interval}: {err}"));
+            assert_eq!(
+                cfg.client_config().get("statistics.interval.ms"),
+                written,
+                "{interval}"
+            );
+        }
     }
 }

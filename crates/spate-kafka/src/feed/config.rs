@@ -1,6 +1,6 @@
 //! The `kafka:` body of a `feed:` section, decoded and checked.
 
-use crate::client::{Base, Keys, Role};
+use crate::client::{Base, Keys, Role, check_message_timeout};
 use serde::Deserialize;
 use spate_core::config::{ConfigError, FeedSection, redact};
 use std::collections::BTreeMap;
@@ -342,18 +342,8 @@ impl KafkaFeedConfig {
                 return Err(error(format!("`attempt_topic` must differ from `{key}`")));
             }
         }
-        if self.delivery_timeout.as_millis() == 0 {
-            return Err(error(
-                "`delivery_timeout` must be at least 1ms: librdkafka reads 0 as no timeout, and \
-                 a write could then wait for ever"
-                    .to_owned(),
-            ));
-        }
-        if self.delivery_timeout.as_millis() > i32::MAX as u128 {
-            return Err(error(format!(
-                "`delivery_timeout` {:?} exceeds librdkafka's maximum (about 24.8 days)",
-                self.delivery_timeout
-            )));
+        if let Err(why) = check_message_timeout(self.delivery_timeout) {
+            return Err(error(format!("`delivery_timeout` {why}")));
         }
         if let Err(why) = self.base(false).check_statistics_interval() {
             return Err(error(format!("`statistics_interval` {why}")));

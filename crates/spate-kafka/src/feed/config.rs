@@ -355,13 +355,8 @@ impl KafkaFeedConfig {
                 self.delivery_timeout
             )));
         }
-        // librdkafka reads 0 as off, so a positive interval under a
-        // millisecond would silently disable statistics.
-        if !self.statistics_interval.is_zero() && self.statistics_interval.as_millis() == 0 {
-            return Err(error(
-                "`statistics_interval` must be 0s, which disables statistics, or at least 1ms"
-                    .to_owned(),
-            ));
+        if let Err(why) = self.base(false).check_statistics_interval() {
+            return Err(error(format!("`statistics_interval` {why}")));
         }
         let clients = FeedRole::ALL.map(|role| Client { config: self, role });
         let roles: Vec<&dyn Role> = clients.iter().map(|c| c as &dyn Role).collect();
@@ -646,17 +641,28 @@ mod tests {
         }
     }
 
-    /// Pins that a statistics interval under a millisecond is refused, since
-    /// librdkafka would read it as off, and that 0s and 1ms are accepted.
+    /// Pins that a non-zero statistics interval under 1ms or above 24h is
+    /// refused, since librdkafka would read it as off or reject it, ahead of
+    /// a denied `statistics.interval.ms` passthrough, and that 0s, 1ms and
+    /// 24h are accepted.
     #[test]
-    fn a_sub_millisecond_statistics_interval_is_refused() {
-        for interval in ["500us", "999us"] {
+    fn a_statistics_interval_outside_1ms_to_24h_is_refused() {
+        for interval in ["500us", "999us", "24h 1ms"] {
             let err = parse(&format!("{MINIMAL}  statistics_interval: {interval}\n"))
                 .unwrap_err()
                 .to_string();
-            assert!(err.contains("statistics_interval"), "{interval}: {err}");
+            assert!(
+                err.contains("`statistics_interval` must be"),
+                "{interval}: {err}"
+            );
         }
-        for interval in ["0s", "1ms"] {
+        let err = parse(&format!(
+            "{MINIMAL}  statistics_interval: 500us\n  rdkafka:\n    \"statistics.interval.ms\": \"x\"\n"
+        ))
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("`statistics_interval` must be"), "{err}");
+        for interval in ["0s", "1ms", "24h"] {
             parse(&format!("{MINIMAL}  statistics_interval: {interval}\n"))
                 .unwrap_or_else(|err| panic!("{interval}: {err}"));
         }

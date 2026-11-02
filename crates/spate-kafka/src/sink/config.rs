@@ -212,7 +212,9 @@ pub struct KafkaSinkConfig {
     pub max_message_bytes: ByteSize,
     /// librdkafka statistics emission interval, feeding the connector's
     /// `spate_kafka_sink_*` families. Zero disables statistics and those
-    /// families with it.
+    /// families with it. librdkafka reads the value in whole milliseconds up
+    /// to 24h, so [`validate`](Self::validate) refuses a non-zero value under
+    /// 1ms or above 24h.
     #[serde(with = "humantime_serde", default = "default_statistics_interval")]
     pub statistics_interval: Duration,
     /// Producer compression codec (librdkafka `compression.codec`).
@@ -353,6 +355,9 @@ impl KafkaSinkConfig {
         }
         if let Err(why) = self.breaker.validate() {
             return fail(why.to_string());
+        }
+        if let Err(why) = self.base(false).check_statistics_interval() {
+            return fail(format!("statistics_interval {why}"));
         }
 
         let roles = [
@@ -1174,5 +1179,66 @@ mod tests {
         ] {
             assert!(parse(body).is_err());
         }
+    }
+
+    /// Pins that a non-zero `statistics_interval` under 1ms or above 24h is
+    /// refused at load, since librdkafka would read it as off or reject it,
+    /// that the refusal names the key and no passthrough value, and that
+    /// `0s`, `1ms` and `24h` load with the value written in milliseconds.
+    /// Regression for #1528.
+    #[test]
+    fn a_statistics_interval_outside_1ms_to_24h_is_refused() {
+        for interval in [
+            "1ns",
+            "500us",
+            "999us",
+            "999999ns",
+            "24h 1ms",
+            "4294967296ms",
+        ] {
+            let body = format!(
+                "{}  statistics_interval: {interval}\n  rdkafka:\n    client.id: hunter2\n",
+                minimal()
+            );
+            let msg = parse(&body).expect_err(interval).to_string();
+            assert!(
+                msg.contains("sink.kafka: statistics_interval"),
+                "{interval}: {msg}"
+            );
+            assert!(!msg.contains("hunter2"), "{interval}: {msg}");
+        }
+        let body = format!(
+            "{}  statistics_interval: 500us\n  rdkafka:\n    \"statistics.interval.ms\": \"x\"\n",
+            minimal()
+        );
+        let msg = parse(&body).unwrap_err().to_string();
+        assert!(msg.contains("sink.kafka: statistics_interval"), "{msg}");
+        for (interval, written) in [
+            ("0s", None),
+            ("1ms", Some("1")),
+            ("1ms 500us", Some("1")),
+            ("24h", Some("86400000")),
+        ] {
+            let cfg = parse(&format!("{}  statistics_interval: {interval}\n", minimal()))
+                .unwrap_or_else(|err| panic!("{interval}: {err}"));
+            assert_eq!(
+                cfg.client_config().get("statistics.interval.ms"),
+                written,
+                "{interval}"
+            );
+        }
+    }
+
+    /// Pins that `build` refuses a programmatic config with a sub-millisecond
+    /// `statistics_interval` before it creates a producer.
+    /// Regression for #1528.
+    #[test]
+    fn build_refuses_a_sub_millisecond_statistics_interval() {
+        let mut cfg = KafkaSinkConfig::new("localhost:9092", "orders-out");
+        cfg.statistics_interval = Duration::from_micros(500);
+        let Err(ConfigError::Validation(msg)) = build(cfg) else {
+            panic!("build accepted a 500us statistics_interval");
+        };
+        assert!(msg.contains("sink.kafka: statistics_interval"), "{msg}");
     }
 }

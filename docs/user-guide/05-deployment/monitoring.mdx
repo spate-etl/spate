@@ -110,6 +110,28 @@ Its raw-facade handles are the smallest form of the pattern:
 ```rust file=crates/spate/examples/custom_metrics.rs region=facade
 ```
 
+## Which side binds
+
+A pipeline is bound by its source, its sink or its CPU at any moment, and the
+framework's own series say which. Read them over the same window, with the
+pipeline under load:
+
+| Signal | Source-bound | Sink-bound | CPU-bound |
+|---|---|---|---|
+| `spate_source_poll_duration_seconds` sum ÷ (pipeline threads × window) | high | low | low |
+| `spate_sink_permit_wait_duration_seconds` | about 0 | rising | |
+| `spate_sink_inflight_batches` against `shards × inflight.max_per_shard` | well below | at the cap | |
+| `spate_backpressure_paused_seconds_total`, `spate_queue_depth` | low, near empty | high, near full | |
+| Pipeline-thread CPU | below a core, with headroom | | at a core |
+
+The poll share is the time pipeline threads spend waiting on the source, as a
+fraction of all their time. A third or more, with idle sink permits and spare
+CPU, is a pipeline waiting for records. The remedies follow the column: the
+source connector's own tuning page for a source-bound pipeline, more shards or
+`inflight.max_per_shard` for a sink-bound one, more threads or partitions for a
+CPU-bound one. Raising the binding side usually moves the bound rather than
+removing it, so read the table again after each change.
+
 ## Starting alerts
 
 These catch the failure modes that matter most; verify thresholds

@@ -125,7 +125,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let pipeline = Pipeline::from_path(Path::new(&config_path))?;
 
     // ── Source: Kafka ───────────────────────────────────────────────────
-    // One consumer per process; partitions become lanes fanned across
+    // One consumer per process by default; partitions become lanes fanned across
     // pipeline threads. The `source: { kafka: ... }` section is the
     // connector's own schema.
     // ANCHOR: source

@@ -52,7 +52,7 @@ tested.
 One process runs one pipeline, in four stages. The property each stage holds
 to is stated and numbered in [docs/INVARIANTS.md](docs/INVARIANTS.md).
 
-**Extract** — one consumer per process. Partitions fan out across pipeline
+**Extract** — one consumer per process by default. Partitions fan out across pipeline
 threads as zero-copy lanes, so a record is read from the source buffer and
 never copied on the way in. A thread that cannot keep up has its lanes paused
 while the controller keeps polling the source; it never blocks on a channel
@@ -159,7 +159,7 @@ ClickHouse pattern).
 
 | Crate | Feature | Role |
 |---|---|---|
-| [`spate-kafka`](https://crates.io/crates/spate-kafka) | `kafka` | Kafka source, sink and work feed on `rdkafka`: one consumer per process, partitions fanned across pipeline threads as zero-copy lanes; the feed commits a unit's offset once every record is written. |
+| [`spate-kafka`](https://crates.io/crates/spate-kafka) | `kafka` | Kafka source, sink and work feed on `rdkafka`: one consumer per process by default, partitions fanned across pipeline threads as zero-copy lanes; the feed commits a unit's offset once every record is written. |
 | [`spate-clickhouse`](https://crates.io/crates/spate-clickhouse) | `clickhouse` | ClickHouse sink: Native or RowBinary encoded on pipeline threads, one deduplication-tokened `INSERT` per batch, replica rotation. |
 | [`spate-s3`](https://crates.io/crates/spate-s3) | `s3` | Object-storage source: workers read objects and byte ranges as units from a work feed. |
 | [`spate-sqs`](https://crates.io/crates/spate-sqs) | `sqs` | Amazon SQS work feed: units in a standard queue, renewed while a worker reads them and deleted once every record is written. |

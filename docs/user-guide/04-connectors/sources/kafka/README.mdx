@@ -1,5 +1,5 @@
 ---
-description: "The Kafka source: one consumer per process, its partitions split into per-partition queues and fanned across pipeline threads as zero-copy lanes."
+description: "The Kafka source: one consumer per process by default, its partitions split into per-partition queues and fanned across pipeline threads as zero-copy lanes."
 ---
 
 # Kafka source
@@ -9,13 +9,15 @@ import LoggingKafka from '../../_logging-kafka.mdx';
 import ClientIdKafka from '../../_client-id-kafka.mdx';
 
 The Kafka source (`spate-kafka`, feature `kafka` on the `spate` facade) is built
-on `rdkafka` with a **single consumer per process**: one consumer-group member
-per pod, whose assigned partitions are split into per-partition queues
+on `rdkafka` with **one consumer per process by default**: one consumer-group
+member per pod, whose assigned partitions are split into per-partition queues
 (`split_partition_queue`) and fanned across pipeline threads as lanes. Payload
 borrows stay local to the polling thread, with zero copies out of librdkafka's
-buffers. Rationale and the validated trade-offs (group scale, unified drain
-choreography, ~3% vs per-thread consumers) are in
-[ADR-0012](../../../../adr/0012-single-kafka-consumer-with-split-partition-queues.md).
+buffers. `consumers` runs several members in the process, each with its own
+share of the partitions, for a source bound by one client's fetch path; see
+[More consumers in one process](./performance-tuning.mdx#more-consumers-in-one-process).
+The rationale is in
+[ADR-0090](../../../../adr/0090-a-kafka-source-runs-a-configured-number-of-consumers.md).
 
 Construct it from the pipeline's opaque section:
 
@@ -50,9 +52,10 @@ source:
 | `brokers` | string | `required` | Comma-separated bootstrap servers. |
 | `topic` | string | `required` | The topic to consume. **One topic per pipeline**: the framework's `PartitionId` is the Kafka partition number, unique only within a topic. |
 | `group_id` | string | `required` | Consumer group id. |
+| `consumers` | int | `1` | Consumers this process runs, at least 1. Each is a separate member of `group_id` that owns its own share of the partitions. Raise it when one client's fetch path bounds the source; see [More consumers in one process](./performance-tuning.mdx#more-consumers-in-one-process). Static membership (`group.instance.id`) requires `1`. |
 | `commit_interval` | duration | `5s` | How often stored offsets are auto-committed (maps to librdkafka `auto.commit.interval.ms`). |
 | `startup_timeout` | duration | `30s` | How long to wait for the first partition assignment before the source reports a fatal startup error (fail fast on unreachable brokers or a wrong topic). The error names the last consumer error, such as a refused connection, and how long ago it arrived. `0s` disables it, and the source waits for as long as the group takes. |
-| `assignment_timeout` | duration | `5m` | How long the member may hold no partitions, after having held some, before the source reports a fatal error. The deadline counts from the moment ownership is released, and any accepted assignment clears it, an empty one included, so a member the group assigns nothing keeps running. The error names the last consumer error and how long ago it arrived. `0s` disables it. |
+| `assignment_timeout` | duration | `5m` | How long the source may hold no partitions, after having held some, before it reports a fatal error. The window covers all of the source's consumers together, so a consumer the group assigns nothing keeps running while another holds partitions. The deadline counts from the moment ownership is released, and any accepted assignment clears it, an empty one included, so a member the group assigns nothing keeps running. The error names the last consumer error and how long ago it arrived. `0s` disables it. |
 | `statistics_interval` | duration | `5s` | librdkafka statistics emission interval, feeding the lag metrics and the `spate_kafka_source_*` families (broker health, latency, queue saturation, group stability). `0s` disables statistics and those families with it — **including `spate_source_lag_records`**, which has no other source: the series then does not exist at all (the source logs a warning at startup). Consumer lag is a golden signal, and disabling statistics gives it up. |
 | `rdkafka` | string map | `{}` | Raw librdkafka properties, applied verbatim after validation — see below. |
 
@@ -92,9 +95,10 @@ the source when it starts a partition with no committed offset. A configuration
 that sets both fails at load, because the two keys reach librdkafka in no set
 order.
 
-Static membership is allowed through `group.instance.id`. A member fenced by
-another member with the same `group.instance.id` stops the pipeline, and the
-error names the id.
+Static membership is allowed through `group.instance.id` when `consumers` is
+`1`. Several consumers would all join under the one id and fence each other, so
+the combination is refused at load. A member fenced by another member with the
+same `group.instance.id` stops the pipeline, and the error names the id.
 
 ## Security (TLS, mTLS, SASL)
 
@@ -103,6 +107,11 @@ error names the id.
 <LoggingKafka />
 
 <ClientIdKafka />
+
+With `consumers` above 1, each consumer appends its index to the `client.id` it
+would otherwise send, so consumer `k` sends `spate-source-consumer-k`, or the
+passthrough's `client.id` with `-k` appended. A broker quota keyed on the
+unsuffixed id does not apply to these consumers.
 
 ## Compression codecs
 
@@ -154,6 +163,19 @@ and never reads the corrupt message or the unwritten records before it.
 This is the mechanical heart of at-least-once; see
 [Delivery guarantees](../../../02-concepts/02-delivery-guarantees.mdx).
 
+## Changing the consumer count
+
+The count is read at startup, so changing it is a restart, and each restart is a
+group rebalance like any member joining or leaving. A process stopping drains
+its lanes and commits each partition through the consumer that owns it before
+the consumers leave the group, and the members that remain or replace them
+start from those commits. Lowering or raising `consumers` across a restart
+therefore replays nothing that was durably written. A process that dies without
+draining replays from the last commit, as with one consumer.
+
+A release of `spate-kafka` without the `consumers` key refuses a configuration
+that sets it.
+
 ## Lanes: partitions on pipeline threads
 
 Each assigned partition becomes one lane, mapped m:n onto pipeline threads
@@ -198,16 +220,19 @@ disables the whole family) and drained on the controller thread, never on the
 record path.
 
 Counters are **absolute-mapped librdkafka totals** scoped to one consumer
-lifetime. The handles mirror the client's cumulative values (idempotent under
-duplicate delivery; `rate()`/`increase()` work natively), and after a process
-restart the series restart from the new consumer's totals, an ordinary
-counter reset to PromQL. The `broker` label is the librdkafka broker name
-(`host:port/id`), bounded by cluster topology and always on. The `rtt`/
-`throttle` gauges are librdkafka's HDR-histogram rolling-window estimates,
-converted to seconds; they are per-broker sampled quantiles and **cannot be
-aggregated** across brokers or processes (`max()` is the only defensible
-cross-series operator). Series backed by data librdkafka has not produced yet
-(an empty latency window, an unknown lag) are absent rather than `0`.
+lifetime. With `consumers` above 1, every family carries a `client` label,
+`consumer-0`, `consumer-1` and so on, one series per consumer, so a total across
+the source is a `sum without (client)` in the query. The handles mirror the
+client's cumulative values (idempotent under duplicate delivery;
+`rate()`/`increase()` work natively), and after a process restart the series
+restart from the new consumer's totals, an ordinary counter reset to PromQL. The
+`broker` label is the librdkafka broker name (`host:port/id`), bounded by
+cluster topology and always on. The `rtt`/ `throttle` gauges are librdkafka's
+HDR-histogram rolling-window estimates, converted to seconds; they are
+per-broker sampled quantiles and **cannot be aggregated** across brokers or
+processes (`max()` is the only defensible cross-series operator). Series backed
+by data librdkafka has not produced yet (an empty latency window, an unknown
+lag) are absent rather than `0`.
 
 Standard labels (`pipeline`, `component`, `component_type`) are on all of
 them; extras, `broker` among them, are noted per family.

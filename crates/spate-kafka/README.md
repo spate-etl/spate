@@ -2,7 +2,7 @@
 
 Kafka source, producer sink and work feed for the
 [Spate](https://github.com/spate-etl/spate) framework, built on `rdkafka`.
-The source runs **one consumer per process**, with partitions split into
+The source runs **one consumer per process** by default, with partitions split into
 per-partition queues and fanned across pipeline threads as zero-copy lanes.
 Offsets are stored when checkpoint watermarks advance and committed on an
 interval; rebalances and shutdown share the framework's

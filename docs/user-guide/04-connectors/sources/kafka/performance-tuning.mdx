@@ -34,8 +34,8 @@ These facts from librdkafka determine almost everything on this page
 Together these say: consumption throughput is
 `(bytes per Fetch response) x (Fetch requests in flight) / round-trip time`.
 You raise it by making each fetch **bigger** (prefetch and fetch sizing) or by
-having **more of them in flight** (more brokers, then more instances). Adding
-pipeline threads raises neither.
+having **more of them in flight** (more brokers, more consumers in the process,
+or more replicas). Adding pipeline threads raises neither.
 
 :::note The byte cap is per-partition here, by design
 `queued.min.messages` is documented as "per topic+partition" on any consumer,
@@ -122,6 +122,13 @@ entirely, because the budget governs what the pipeline holds, not what the
 client prefetches. If your pod has a memory limit, set
 `queued.max.messages.kbytes` explicitly.
 
+The formula holds whatever the [consumer count](#more-consumers-in-one-process):
+the caps apply per partition, and each partition belongs to one consumer. What
+each extra consumer adds is its own librdkafka threads (one per broker it talks
+to, plus a main thread, an internal broker thread and the group coordinator's),
+its own connections, and up to one more `fetch.max.bytes` response in flight per
+leader broker.
+
 :::warning Capping the queue also shrinks the fetch
 Unless you set `fetch.max.bytes` yourself, librdkafka clamps it to
 `queued.max.messages.kbytes x 1024` at client construction
@@ -141,6 +148,22 @@ limit forces you to cap prefetch, drop this to a few tens of milliseconds so the
 partition is re-offered promptly.
 
 ### Diagnosing it
+
+Whether the fetch path is the bound at all shows in three series together:
+
+| Signal | Fetch-bound source |
+|---|---|
+| `spate_source_poll_duration_seconds` sum, divided by pipeline threads × window | a large share of thread time, such as a third |
+| `spate_kafka_source_fetch_queue_messages`, per `client` | at or near zero |
+| `spate_kafka_source_broker_rtt_avg_seconds` | steady, with throughput near `bytes per fetch × fetches in flight ÷ RTT` |
+
+When all three hold and the sink side is idle (see
+[Which side binds](../../../05-deployment/monitoring.mdx#which-side-binds)), the
+pipeline is waiting on fetches. Prefetch depth comes first; after it, more
+[consumers in one process](#more-consumers-in-one-process) or more replicas. A
+throttle (`spate_kafka_source_broker_throttle_avg_seconds` above zero) is the
+broker enforcing a quota, which more consumers under the same `client.id` quota
+cannot lift.
 
 **No gauge tells you prefetch is mis-set; only a sweep does.** Raise
 `queued.min.messages`, re-measure, and see whether throughput moves. These
@@ -179,6 +202,12 @@ caps how much a single round trip can return.
 | `fetch.max.bytes` | `50 MB` | many partitions on one broker — this caps the *whole* response, so it is divided across them |
 | `fetch.min.bytes` | `1` | almost never — see [below](#fetchminbytes-and-fetchwaitmaxms-are-not-catch-up-knobs) |
 | `fetch.wait.max.ms` | `500` | almost never — see [below](#fetchminbytes-and-fetchwaitmaxms-are-not-catch-up-knobs) |
+
+Bigger is not always faster. On a 32-partition topic read from one broker by a
+source that was already fetch-bound, raising `fetch.max.bytes` to 100 MiB,
+`fetch.message.max.bytes` to 8 MiB and `queued.min.messages` to 1000000 cost 22%
+of throughput: the round trip rose from 8 ms to 32 ms and the poll share from
+31% to 51%. Change one value at a time and measure each.
 
 Do **not** also set `receive.message.max.bytes`. It auto-adjusts to stay above
 `fetch.max.bytes`, but only while you leave it unset; pinning it is a
@@ -263,14 +292,6 @@ So size `pipeline.threads` for what your **chain and sink** need, since
 deserialization, transforms and encoding are what parallelize. Expect
 diminishing returns from the fetch path, not a cliff.
 
-:::note More clients in one process is not the answer
-`MODE=perthread` (several `BaseConsumer`s in one process instead of one client
-with several drain threads) wins only while fetch-bound (+108% at four threads
-with no work) and loses heavily once work is present (−56% at 5 µs). This says
-nothing about **replicas**, since separate pods do not share a NIC, a page cache
-or a CPU, and a single-box rig cannot measure that. See
-[More replicas](#when-you-have-run-out-of-vertical-headroom).
-:::
 
 ## When you have run out of vertical headroom
 
@@ -282,9 +303,15 @@ In roughly this order:
 2. **More partitions, but only if they spread across more brokers.** Extra
    partitions on brokers you already consume from add queue depth, not fetch
    concurrency, since they multiplex into the same request.
-3. **More replicas.** Each pod is an independent client with its own thread and
+3. **More consumers in one process.** `consumers` runs several group members in
+   the process, each with its own share of the partitions and its own
+   connection to each broker, so each adds one Fetch in flight per leader
+   broker it holds partitions on. See
+   [More consumers in one process](#more-consumers-in-one-process).
+4. **More replicas.** Each pod is an independent client with its own thread and
    connection per broker, so this multiplies fetch concurrency. The ceiling is
-   one consuming member per partition; beyond that, members sit idle.
+   one consuming member per partition, counting every consumer of every
+   replica; beyond that, members sit idle.
 
 :::warning Scaling events are stop-the-world here
 This connector uses eager assignment; cooperative-sticky is rejected at load
@@ -292,6 +319,45 @@ time. Every replica added or removed triggers a full group rebalance during
 which no member consumes. Scaling out is not free, so extract vertical
 throughput first.
 :::
+
+### More consumers in one process
+
+`consumers` sets how many group members the source runs, default `1`. Each one
+owns a share of the assignment, fetches it over connections of its own, and
+hands its partitions to the pipeline as lanes that any pipeline thread drains,
+just as a single consumer's are. A partition still has one consumer, so ordering
+and offsets per partition are unchanged.
+
+Raise it when the source is fetch-bound by the [signals above](#diagnosing-it)
+and prefetch is already deep. One measurement, on a 32-partition topic read from
+one broker with 32 pipeline threads, where one consumer was fetch-bound at about
+a third of thread time in the poll:
+
+| Consumers | Throughput vs 1 | Poll share | Fetch queue | Round trip |
+|---|---|---|---|---|
+| 1 | — | 31–32% | about 0 | 8 ms |
+| 2 | +22% | 8–9% | 11k–31k messages | 6 ms |
+| 4 | +11% | 22–23% | 40k–58k messages | 2 ms |
+
+Two consumers took the poll off the critical path and moved the bound to the
+sink. Four were slower than two, with the sink less loaded and the poll share
+back up, so more is not monotonically better. CPU per record did not change with
+the count. Raise it one step at a time, confirm that the poll share falls and
+the fetch queue fills, and stop when the sink becomes the bound or throughput
+stops rising. More consumers than partitions leave the extra ones idle.
+
+What each one costs is fixed per consumer, not per record: librdkafka threads, a
+connection per broker plus one to the group coordinator, a session under SASL,
+and up to `fetch.max.bytes` in flight per leader broker. With the default
+`client.id`, consumer `k` of `consumers` above 1 sends
+`spate-source-consumer-k`, so a broker quota keyed on the unsuffixed id does not
+apply to it.
+
+Changing the count is a restart. Every consumer is a group member, so the group
+has `replicas × consumers` members, and under eager assignment a rebalance
+revokes every member's partitions in every process. The source drains all of
+its consumers' lanes on the first revocation, so a rebalance costs one drain
+whatever the count.
 
 ### Compression
 

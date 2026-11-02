@@ -1,4 +1,15 @@
-//! The control plane: a single consumer whose partitions fan out to lanes.
+//! The control plane: one or more consumers whose partitions fan out to lanes.
+//!
+//! Each consumer is a group member with its own client, rebalance intents and
+//! ownership, and every lane carries its own consumer's partition queue. The
+//! choreography below runs per consumer, with two rules joining them into the
+//! runtime's one lane set. Assignments are held until every consumer of the
+//! rebalance has one, or for `ASSIGN_HOLD`, then accepted together as one
+//! [`SourceEvent::LanesAssigned`]; one that arrives while lanes are live drains
+//! them and accepts every consumer's partitions again as a fresh epoch. Eager
+//! assignment revokes every member in every rebalance, so the first revocation
+//! on any consumer drains every consumer's lanes, and each consumer is released
+//! with `unassign` once its own revocation has arrived.
 //!
 //! # Rebalance choreography (deferred completion)
 //!

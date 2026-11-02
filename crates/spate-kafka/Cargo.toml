@@ -1,6 +1,6 @@
 [package]
 name = "spate-kafka"
-description = "Kafka source, producer sink and work feed for the Spate framework, built on rdkafka: a single consumer per process with partition queues fanned across pipeline threads, a delivery-report-acknowledged producer sink, and a feed backend over work, retry and dead-letter topics. Applications should depend on the `spate` facade crate with the `kafka` feature."
+description = "Kafka source, producer sink and work feed for the Spate framework, built on rdkafka: one consumer per process by default, with partition queues fanned across pipeline threads, a delivery-report-acknowledged producer sink, and a feed backend over work, retry and dead-letter topics. Applications should depend on the `spate` facade crate with the `kafka` feature."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

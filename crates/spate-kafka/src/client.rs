@@ -71,6 +71,23 @@ pub(crate) fn canonical(key: &str) -> &str {
         .map_or(name, |(_, target)| target)
 }
 
+/// Whether `timeout` is in librdkafka's `message.timeout.ms` range of 1ms to
+/// `i32::MAX` milliseconds.
+///
+/// librdkafka reads the timeout in whole milliseconds and reads `0` as no
+/// timeout, so a positive value under a millisecond would remove the bound.
+///
+/// # Errors
+///
+/// The reason, without the key, for the section to prefix in its own style.
+pub(crate) fn check_message_timeout(timeout: Duration) -> Result<(), &'static str> {
+    let millis = timeout.as_millis();
+    if millis == 0 || millis > i32::MAX as u128 {
+        return Err("must be from 1ms to about 24.8 days (librdkafka reads 0 as no timeout)");
+    }
+    Ok(())
+}
+
 /// One client's place in a connector: its `client.id` suffix, whether it
 /// reports statistics, and the properties it owns.
 pub(crate) trait Role {
@@ -526,6 +543,28 @@ mod tests {
             .iter()
             .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
             .collect()
+    }
+
+    /// `message.timeout.ms` takes whole milliseconds from 1 to `i32::MAX`.
+    #[test]
+    fn check_message_timeout_takes_1ms_to_i32_max_milliseconds() {
+        const DAY: u64 = 24 * 60 * 60;
+        for timeout in [
+            Duration::ZERO,
+            Duration::from_micros(999),
+            Duration::from_millis(i32::MAX as u64 + 1),
+            Duration::from_secs(25 * DAY),
+        ] {
+            assert!(check_message_timeout(timeout).is_err(), "{timeout:?}");
+        }
+        for timeout in [
+            Duration::from_millis(1),
+            Duration::from_micros(1000),
+            Duration::from_secs(24 * DAY),
+            Duration::from_millis(i32::MAX as u64),
+        ] {
+            check_message_timeout(timeout).unwrap_or_else(|why| panic!("{timeout:?}: {why}"));
+        }
     }
 
     /// One config per section, each over `rdkafka`, unvalidated.

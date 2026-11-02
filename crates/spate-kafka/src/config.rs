@@ -747,11 +747,14 @@ mod tests {
         KafkaSourceConfig::from_component_config(&section(&body))
     }
 
-    /// A consumer count of zero is refused, naming the key.
+    /// A consumer count of zero is refused, naming the key and the bound.
     #[test]
     fn zero_consumers_are_rejected() {
         let err = with_consumers("0", "").unwrap_err().to_string();
-        assert!(err.contains("source.kafka.consumers"), "{err}");
+        assert!(
+            err.contains("source.kafka.consumers must be at least 1"),
+            "{err}"
+        );
     }
 
     /// Any count from one up is accepted.
@@ -761,12 +764,14 @@ mod tests {
         assert_eq!(with_consumers("1", "").unwrap().consumers, 1);
     }
 
-    /// A count that is not a non-negative integer is refused, naming the key.
+    /// A count that is not a non-negative integer is refused as a type error
+    /// naming the key.
     #[test]
     fn a_non_integer_consumer_count_names_the_key() {
         for count in ["many", "-1"] {
             let err = with_consumers(count, "").unwrap_err().to_string();
             assert!(err.contains("consumers"), "{count}: {err}");
+            assert!(err.contains("expected usize"), "{count}: {err}");
         }
     }
 

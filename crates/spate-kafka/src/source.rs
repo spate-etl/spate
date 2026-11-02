@@ -2069,24 +2069,41 @@ mod tests {
         /// later consumer's assignment does not extend it.
         #[test]
         fn a_later_assignment_does_not_extend_the_hold() {
+            /// Poll until `done` holds. Transport errors from the refused
+            /// broker are retried; any other outcome fails the test, so the
+            /// clock never moves before the step it follows has happened.
+            fn step(source: &mut KafkaSource, done: impl Fn(&KafkaSource) -> bool) {
+                let deadline = Instant::now() + Duration::from_secs(20);
+                while !done(source) {
+                    assert!(Instant::now() < deadline, "no outcome within deadline");
+                    match source.poll_events(Duration::from_millis(50)) {
+                        Ok(SourceEvent::Idle)
+                        | Err(SourceError::Client {
+                            class: ErrorClass::Retryable,
+                            ..
+                        }) => {}
+                        other => panic!("unexpected outcome: {other:?}"),
+                    }
+                }
+            }
             let mut source = opened_consumers(test_config(), &[&[], &[], &[]]);
             let clock = freeze(&mut source);
             for member in &mut source.members {
                 member.phase = Phase::Joining;
             }
             push_intent_to(&source, 0, Intent::Assign(TopicPartitionList::new()));
-            let _ = poll_until(&mut source, |s| {
+            step(&mut source, |s| {
                 matches!(s.members[0].phase, Phase::Held(_))
             });
             clock.advance(ASSIGN_HOLD - Duration::from_millis(1));
             push_intent_to(&source, 1, Intent::Assign(TopicPartitionList::new()));
-            let _ = poll_until(&mut source, |s| {
+            step(&mut source, |s| {
                 matches!(s.members[1].phase, Phase::Held(_))
             });
             clock.advance(Duration::from_millis(1));
             // The frozen clock stays at the end of the first hold, so an
-            // extended hold never ends and `poll_until` fails at its deadline.
-            let _ = poll_until(&mut source, |s| {
+            // extended hold never ends and the step fails at its deadline.
+            step(&mut source, |s| {
                 matches!(s.members[0].phase, Phase::Assigned)
             });
             assert!(matches!(source.members[2].phase, Phase::Joining));

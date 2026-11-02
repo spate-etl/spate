@@ -149,13 +149,6 @@ struct Member {
 }
 
 impl Member {
-    fn owns(&self, partition: i32) -> bool {
-        self.assignment
-            .values()
-            .chain(self.revoking.values())
-            .any(|p| *p == partition)
-    }
-
     /// Partitions this consumer holds live lanes for.
     fn live_partition_ids(&self) -> Vec<PartitionId> {
         partition_ids(self.assignment.values())
@@ -321,6 +314,22 @@ impl KafkaSource {
     /// standing.
     fn retained_partition_ids(&self) -> Vec<PartitionId> {
         partition_ids(self.members.iter().flat_map(|m| m.assignment.values()))
+    }
+
+    /// The consumer that owns `partition` and its Kafka partition number:
+    /// the one holding it live, else the one still revoking it. `None` when
+    /// no consumer of this source owns it.
+    fn owner(&self, partition: PartitionId) -> Option<(usize, i32)> {
+        let p = i32::try_from(partition.0).ok()?;
+        self.members
+            .iter()
+            .position(|m| m.assignment.values().any(|q| *q == p))
+            .or_else(|| {
+                self.members
+                    .iter()
+                    .position(|m| m.revoking.values().any(|q| *q == p))
+            })
+            .map(|k| (k, p))
     }
 
     fn holds_no_lanes(&self) -> bool {
@@ -785,9 +794,7 @@ impl KafkaSource {
                     // Nothing live: this consumer's partitions were drained
                     // with an earlier consumer's revocation, or it held none.
                     self.release(k);
-                    if self.holds_no_lanes() && self.members.iter().all(|m| m.revoking.is_empty()) {
-                        self.note_assignment_loss("a revocation".to_owned());
-                    }
+                    self.note_assignment_loss("a revocation".to_owned());
                     return Ok(SourceEvent::Idle);
                 }
                 // The lag series are deliberately NOT pruned here. These
@@ -1193,14 +1200,8 @@ impl Source for KafkaSource {
             .collect();
         let mut refused = 0;
         for (p, offset) in watermarks {
-            let partition = i32::try_from(p.0).unwrap_or(-1);
-            let owner = self
-                .members
-                .iter()
-                .position(|m| m.assignment.values().any(|q| *q == partition))
-                .or_else(|| self.members.iter().position(|m| m.owns(partition)));
-            match owner {
-                Some(k) => lists[k]
+            match self.owner(*p) {
+                Some((k, partition)) => lists[k]
                     .add_partition_offset(&self.config.topic, partition, Offset::Offset(*offset))
                     .map_err(fatal("build offset list"))?,
                 None => {
@@ -1322,8 +1323,10 @@ impl KafkaSource {
 /// revoke and then polls until the rebalance protocol completes. Under the
 /// deferred-intent design nothing would complete it and the drop would hang
 /// forever. Flip every consumer's context to inline-completion mode first,
-/// then settle any revocation or assignment that was surfaced or held but not
-/// yet acknowledged.
+/// then release every consumer, which settles any revocation or assignment
+/// surfaced or held but not yet acknowledged. Under eager assignment
+/// `unassign` is valid in any group state, so releasing a consumer with
+/// nothing pending costs nothing.
 impl Drop for KafkaSource {
     fn drop(&mut self) {
         for member in &self.members {
@@ -1334,20 +1337,7 @@ impl Drop for KafkaSource {
                 .store(true, Ordering::Release);
         }
         for (k, member) in self.members.iter().enumerate() {
-            let deferred = member.revoke_arrived
-                || !member.revoking.is_empty()
-                || matches!(member.phase, Phase::Held(_))
-                || member
-                    .consumer
-                    .context()
-                    .intents
-                    .lock()
-                    .map(|q| {
-                        q.iter()
-                            .any(|i| matches!(i, Intent::Revoke(_) | Intent::Assign(_)))
-                    })
-                    .unwrap_or(false);
-            if deferred && let Err(e) = member.consumer.unassign() {
+            if let Err(e) = member.consumer.unassign() {
                 tracing::warn!(consumer = k, error = %e, "unassign during source teardown failed");
             }
         }
@@ -1782,6 +1772,152 @@ mod tests {
             };
             assert_eq!(class(&source, 0), ErrorClass::Fatal);
             assert_eq!(class(&source, 1), ErrorClass::Retryable);
+        }
+
+        /// A watermark goes to the consumer holding its partition live, else
+        /// to the one still revoking it, and to none when no consumer owns it.
+        #[test]
+        fn a_watermark_goes_to_the_owning_consumer() {
+            let mut source = opened_consumers(test_config(), &[&[(0, 0)], &[(1, 1), (2, 2)]]);
+            revoke_lanes(&mut source, 1, &[2]);
+            // Consumer 0 is still revoking partition 1, which consumer 1 holds
+            // live: the live holder takes it.
+            source.members[0].revoking.insert(LaneId(9), 1);
+            assert_eq!(source.owner(PartitionId(0)), Some((0, 0)));
+            assert_eq!(source.owner(PartitionId(1)), Some((1, 1)));
+            assert_eq!(source.owner(PartitionId(2)), Some((1, 2)));
+            assert_eq!(source.owner(PartitionId(3)), None);
+            assert_eq!(source.owner(PartitionId(u32::MAX)), None);
+        }
+
+        /// A commit whose every watermark is for a partition no consumer owns
+        /// stores nothing, succeeds, and says how many it refused.
+        #[test]
+        fn a_commit_of_only_unowned_partitions_is_refused_with_a_warning() {
+            let mut source = opened_consumers(test_config(), &[&[(0, 0)]]);
+            let lines = spate_test::capture_logs(tracing::Level::WARN, || {
+                source
+                    .commit(&[(PartitionId(5), 10), (PartitionId(6), 3)])
+                    .expect("a refusal is not an error");
+            });
+            assert!(
+                lines
+                    .iter()
+                    .any(|l| l.contains("refusing to store") && l.contains("refused=2")),
+                "{lines:#?}"
+            );
+        }
+
+        /// A source used before `open` reports a fatal error from each call
+        /// that needs its consumers.
+        #[test]
+        fn a_source_used_before_open_is_fatal() {
+            let mut source = KafkaSource::new(test_config());
+            let polled = source.poll_events(Duration::ZERO).map(|_| ());
+            let committed = source.commit(&[(PartitionId(0), 1)]);
+            let flushed = source.flush_commits();
+            for result in [polled, committed, flushed] {
+                match result {
+                    Err(SourceError::Client {
+                        class: ErrorClass::Fatal,
+                        reason,
+                    }) => assert!(reason.contains("before open()"), "{reason}"),
+                    other => panic!("expected a fatal error, got {other:?}"),
+                }
+            }
+        }
+
+        /// Accepting the held assignments leaves alone a consumer whose
+        /// revocation has not arrived: it keeps its partitions until it is
+        /// released.
+        #[test]
+        fn accepting_held_assignments_leaves_an_unreleased_consumer_alone() {
+            let mut source = opened_consumers(test_config(), &[&[(0, 0)], &[]]);
+            revoke_lanes(&mut source, 0, &[0]);
+            source.members[1].phase = Phase::Held(TopicPartitionList::new());
+            match source.accept_held(false) {
+                Ok(SourceEvent::Idle) => {}
+                other => panic!("expected no lanes, got {other:?}"),
+            }
+            assert_eq!(source.committable_partitions(0), [0]);
+            assert!(matches!(source.members[1].phase, Phase::Assigned));
+        }
+
+        /// Accepting held assignments while a consumer is still joining names
+        /// it, and accepting with every consumer held names none.
+        #[test]
+        fn accepting_without_every_consumer_names_the_ones_joining() {
+            let mut source = opened_consumers(test_config(), &[&[], &[]]);
+            source.members[0].phase = Phase::Held(TopicPartitionList::new());
+            source.members[1].phase = Phase::Joining;
+            let partial = spate_test::capture_logs(tracing::Level::WARN, || {
+                source.accept_held(false).expect("accept");
+            });
+            assert!(
+                partial
+                    .iter()
+                    .any(|l| l.contains("these consumers have none yet")),
+                "{partial:#?}"
+            );
+
+            for member in &mut source.members {
+                member.phase = Phase::Held(TopicPartitionList::new());
+            }
+            let whole = spate_test::capture_logs(tracing::Level::WARN, || {
+                source.accept_held(false).expect("accept");
+            });
+            assert!(
+                !whole
+                    .iter()
+                    .any(|l| l.contains("these consumers have none yet")),
+                "{whole:#?}"
+            );
+        }
+
+        /// More than one intent queued on a consumer is logged as a pileup;
+        /// a single one is not.
+        #[test]
+        fn piled_up_intents_are_logged() {
+            let source = opened_consumers(test_config(), &[&[], &[]]);
+            push_intent_to(&source, 1, Intent::Assign(TopicPartitionList::new()));
+            let single = spate_test::capture_logs(tracing::Level::WARN, || {
+                assert!(source.next_intent().is_some());
+            });
+            assert!(
+                !single.iter().any(|l| l.contains("piled up")),
+                "{single:#?}"
+            );
+
+            push_intent_to(&source, 1, Intent::Revoke(TopicPartitionList::new()));
+            push_intent_to(&source, 1, Intent::Assign(TopicPartitionList::new()));
+            let piled = spate_test::capture_logs(tracing::Level::WARN, || {
+                assert!(source.next_intent().is_some());
+            });
+            assert!(piled.iter().any(|l| l.contains("piled up")), "{piled:#?}");
+        }
+
+        /// A revocation sets every consumer back to joining except one whose
+        /// assignment is held, which librdkafka keeps in its rebalance until
+        /// `assign` is called.
+        #[test]
+        fn a_revocation_leaves_a_held_assignment_held() {
+            let mut source = opened_consumers(test_config(), &[&[(0, 0)], &[]]);
+            source.members[1].phase = Phase::Held(TopicPartitionList::new());
+            match source.on_intent(0, Intent::Revoke(tpl_of(&[0]))) {
+                Ok(SourceEvent::LanesRevoked { .. }) => {}
+                other => panic!("expected a revocation, got {other:?}"),
+            }
+            assert!(matches!(source.members[0].phase, Phase::Joining));
+            assert!(matches!(source.members[1].phase, Phase::Held(_)));
+        }
+
+        /// The source's `Debug` names its consumer count and live lanes.
+        #[test]
+        fn debug_names_the_consumers_and_lanes() {
+            let source = opened_consumers(test_config(), &[&[(0, 0), (1, 1)], &[(2, 2)]]);
+            let shown = format!("{source:?}");
+            assert!(shown.contains("consumers: 2"), "{shown}");
+            assert!(shown.contains("lanes: 3"), "{shown}");
         }
 
         /// Each consumer publishes lag only for its own partitions: the other

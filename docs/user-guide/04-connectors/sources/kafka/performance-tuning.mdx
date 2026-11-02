@@ -139,14 +139,26 @@ drops `fetch.max.bytes` from 50 MB to 4 MiB, a second throughput cut you did
 not ask for. Set `fetch.max.bytes` explicitly whenever you lower the byte cap.
 :::
 
-### If you must cap prefetch, lower the refill backoff too
+### The refill backoff {#refill-backoff}
 
-When a partition's queue crosses a threshold, librdkafka stops fetching it and
-waits `fetch.queue.backoff.ms` (default **1000**) before reconsidering. With a
-shallow queue and a fast consumer, the backoff becomes the limiter instead of
-the queue size: the queue drains in milliseconds and then idles. If a memory
-limit forces you to cap prefetch, drop this to a few tens of milliseconds so the
-partition is re-offered promptly.
+When a partition's queue crosses a threshold, librdkafka stops fetching it for
+`fetch.queue.backoff.ms` before reconsidering it, and draining the queue does
+not end the wait early. librdkafka's default is 1000 ms. **The source sets 10
+ms** unless the `rdkafka` map sets the property.
+
+The default matters here because every partition has its own queue and, with as
+many pipeline threads as partitions, usually its own thread. That thread drains
+a full queue well inside a second and then waits on an empty one for the rest of
+the backoff. On a 32-partition topic read by four consumers, averaged over two
+runs, the 1000 ms backoff left a quarter to a half of the partition queues empty
+at any moment, each poll took about 4 ms, and the pipeline threads spent about a
+quarter of their time waiting. At 10 ms each poll took 0.3 ms and throughput
+rose 17%. At one consumer, where the queues never filled, 10 ms changed neither
+throughput nor CPU.
+
+librdkafka notes that low values may raise CPU use; set the property in the
+`rdkafka` map to change it. If a memory limit forces you to cap prefetch, keep
+the backoff low: a shallow queue drains in milliseconds.
 
 ### Diagnosing it
 
@@ -165,6 +177,11 @@ pipeline is waiting on fetches. Prefetch depth comes first; after it, more
 throttle (`spate_kafka_source_broker_throttle_avg_seconds` above zero) is the
 broker enforcing a quota. More consumers do not lift a quota on the user
 principal, which covers all of them.
+
+A large poll share with a *deep* fetch queue is a different case: partitions are
+waiting out the [refill backoff](#refill-backoff) with data queued on other
+partitions. Check that the `rdkafka` map does not raise
+`fetch.queue.backoff.ms`.
 
 **No gauge tells you prefetch is mis-set; only a sweep does.** Raise
 `queued.min.messages`, re-measure, and see whether throughput moves. These
@@ -207,9 +224,9 @@ caps how much a single round trip can return.
 Bigger is not always faster. On a 32-partition topic read from one broker by a
 source that was already fetch-bound, averaged over two runs, raising
 `fetch.max.bytes` to 100 MiB, `fetch.message.max.bytes` to 8 MiB and
-`queued.min.messages` to 1000000 cost 22% of throughput: the round trip rose
-from 8 ms to 32 ms and the poll share from 31% to 51%. Change one value at a
-time and measure each.
+`queued.min.messages` to 1000000 cost 22% of throughput with
+`fetch.queue.backoff.ms` at 1000 ms: the round trip rose from 8 ms to 32 ms and
+the poll share from 31% to 51%. Change one value at a time and measure each.
 
 Do **not** also set `receive.message.max.bytes`. It auto-adjusts to stay above
 `fetch.max.bytes`, but only while you leave it unset; pinning it is a
@@ -332,21 +349,25 @@ and offsets per partition are unchanged.
 
 Raise it when the source is fetch-bound by the [signals above](#diagnosing-it)
 and prefetch is already deep. One measurement, averaged over two runs on a
-32-partition topic read from one broker with 32 pipeline threads, where one
-consumer was fetch-bound at about a third of thread time in the poll:
+32-partition topic read from one broker with 32 pipeline threads, with the
+source's 10 ms [refill backoff](#refill-backoff) and the sink's storage removed
+(the ClickHouse table on the `Null` engine), so the source and the pipeline are
+the bound:
 
-| Consumers | Throughput vs 1 | Poll share | Fetch queue | Round trip |
-|---|---|---|---|---|
-| 1 | — | 31–32% | about 0 | 8 ms |
-| 2 | +22% | 8–9% | 11k–31k messages | 6 ms |
-| 4 | +11% | 22–23% | 40k–58k messages | 2 ms |
+| Consumers | Steady-state throughput vs 1 | Poll share | Fetch queue per consumer | Round trip | CPU of 32 |
+|---|---|---|---|---|---|
+| 1 | — | 31–32% | about 0 | 8 ms | 23 cores |
+| 2 | +38% | 2–3% | 46k–68k messages | 6 ms | 31 cores, throttled |
+| 4 | +27% | 1% | 124k–128k messages | 2 ms | 31–32 cores, throttled |
+| 8 | +28% | 1% | 60k–71k messages | 2 ms | 31–32 cores, throttled |
 
-Two consumers took the poll off the critical path and moved the bound to the
-sink. Four were slower than two, with the sink less loaded and the poll share
-back up, so more is not monotonically better. CPU per record did not change with
-the count. Raise it one step at a time, confirm that the poll share falls and
-the fetch queue fills, and stop when the sink becomes the bound or throughput
-stops rising. More consumers than partitions leave the extra ones idle.
+Two consumers took the poll off the critical path, and from there the pipeline
+threads were the bound: the process used its whole CPU quota, so four and eight
+added nothing over two. With the same rig's ClickHouse storing the rows, two
+consumers gained 22% before ClickHouse became the bound. Raise the count one
+step at a time, confirm that the poll share falls and the fetch queue fills, and
+stop when CPU, the sink or the broker becomes the bound or throughput stops
+rising. More consumers than partitions leave the extra ones idle.
 
 What each one costs is fixed per consumer, not per record: librdkafka threads, a
 connection per broker plus one to the group coordinator, a session under SASL,

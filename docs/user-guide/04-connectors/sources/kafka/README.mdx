@@ -86,6 +86,15 @@ denied, because passthrough and framework values apply in unspecified order.
 | `statistics.interval.ms` | Owned by the typed `statistics_interval` field. |
 | `group.protocol` | Only the classic consumer protocol is supported; eager assignment is a framework invariant. |
 
+The source also sets a few properties to values other than librdkafka's
+defaults. The passthrough may still set each of them, and its value wins.
+
+| Property | Source default | librdkafka default | Why |
+|---|---|---|---|
+| `fetch.queue.backoff.ms` | `10` | `1000` | Each partition has its own queue, so a partition that fills it is fetched again promptly once a pipeline thread drains it. See [the refill backoff](./performance-tuning.mdx#refill-backoff). |
+| `client.id` | `spate-source-consumer`, with `-k` appended above one consumer | `rdkafka` | Broker logs and quotas name the client. See [Client identity](#client-identity). |
+| `ssl.ca.location` | `probe`, on builds with vendored OpenSSL when neither `ssl.ca.location` nor `ssl.ca.pem` is set and neither `SSL_CERT_FILE` nor `SSL_CERT_DIR` is in the environment | unset | See [Security](#security-tls-mtls-sasl). |
+
 `partition.assignment.strategy` is additionally validated, and any
 `cooperative` strategy is rejected, because the framework relies on eager
 (full) rebalances.

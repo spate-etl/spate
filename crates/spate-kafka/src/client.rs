@@ -87,6 +87,11 @@ pub(crate) trait Role {
         None
     }
 
+    /// librdkafka properties this role sets unless the passthrough sets them.
+    fn defaults(&self) -> &'static [(&'static str, &'static str)] {
+        &[]
+    }
+
     /// Declare the properties this role owns beyond the base.
     fn declare(&self, keys: &mut Keys<'_>);
 }
@@ -225,6 +230,10 @@ impl Base<'_> {
         let mut cc = new_config();
         // rdkafka reads the log facade by default; tracing filters these events.
         cc.set_log_level(RDKafkaLogLevel::Debug);
+        // Before the passthrough, which replaces any of them it sets.
+        for (key, value) in role.defaults() {
+            cc.set(*key, *value);
+        }
         for (k, v) in self.rdkafka {
             cc.set(k, v);
         }
@@ -583,9 +592,14 @@ mod tests {
     }
 
     /// Keys a role carries that the passthrough may still set: the CA
-    /// default, the `client.id` default, and the sink's typed compression,
-    /// which is a conflict rule of its own.
-    const NOT_OWNED: [&str; 3] = ["ssl.ca.location", "client.id", "compression.codec"];
+    /// default, the `client.id` default, each role's [`Role::defaults`], and
+    /// the sink's typed compression, which is a conflict rule of its own.
+    const NOT_OWNED: [&str; 4] = [
+        "ssl.ca.location",
+        "client.id",
+        "fetch.queue.backoff.ms",
+        "compression.codec",
+    ];
 
     /// Every spelling librdkafka accepts for `key`: itself, its
     /// `topic.`-prefixed form, and each alias of the same property.
@@ -823,6 +837,37 @@ mod tests {
             ids(&configs(3, &[("client.id", "app")])),
             ["app-0", "app-1", "app-2"]
         );
+    }
+
+    /// The source's consumers back a full partition queue off for 10 ms
+    /// unless the passthrough sets `fetch.queue.backoff.ms`, and no other
+    /// client sets it.
+    #[test]
+    fn only_the_source_shortens_the_fetch_queue_backoff() {
+        let defaults = Sections::over(&BTreeMap::new());
+        for (section, base, role) in defaults.roles(false) {
+            let expected = matches!(section, Section::Source).then_some("10");
+            assert_eq!(
+                base.config(&*role).get("fetch.queue.backoff.ms"),
+                expected,
+                "{} {}",
+                base.section,
+                role.name()
+            );
+        }
+        let passed = Sections::over(&map(&[("fetch.queue.backoff.ms", "1000")]));
+        passed
+            .validate(Section::Source)
+            .expect("the backoff is not owned");
+        for (_, base, role) in passed.roles(false) {
+            assert_eq!(
+                base.config(&*role).get("fetch.queue.backoff.ms"),
+                Some("1000"),
+                "{} {}",
+                base.section,
+                role.name()
+            );
+        }
     }
 
     /// Each role sends its own `client.id` unless the passthrough names one,

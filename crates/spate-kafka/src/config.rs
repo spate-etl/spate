@@ -37,6 +37,15 @@ impl Role for Consumer<'_> {
         self.1
     }
 
+    fn defaults(&self) -> &'static [(&'static str, &'static str)] {
+        // Each partition queue is split, so librdkafka's queue thresholds apply
+        // per partition, and a partition that reaches one is not fetched again
+        // for `fetch.queue.backoff.ms`. A lane drains a full queue well inside
+        // librdkafka's 1000 ms, and its pipeline thread then waits on an empty
+        // queue for the rest of the backoff.
+        &[("fetch.queue.backoff.ms", "10")]
+    }
+
     fn declare(&self, keys: &mut Keys<'_>) {
         keys.own(
             "group.id",
@@ -182,6 +191,10 @@ pub struct KafkaSourceConfig {
     /// to `queued.max.messages.kbytes * 1024` unless `fetch.max.bytes` is set
     /// explicitly, so capping the queue silently shrinks the fetch size too.
     /// See the Kafka source tuning guide.
+    ///
+    /// A partition whose queue reaches either threshold is not fetched again
+    /// for `fetch.queue.backoff.ms`, which the source sets to 10 ms unless
+    /// this map sets it.
     #[serde(default)]
     pub rdkafka: BTreeMap<String, String>,
 }

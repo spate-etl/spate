@@ -47,6 +47,15 @@ pipeline thread was rejected because it couples group size to thread count,
 which ADR-0012 set out to avoid, and a per-thread rig measured it 56% slower
 than one client once records carried work.
 
+The source also sets librdkafka's `fetch.queue.backoff.ms` to 10 ms unless the
+passthrough sets it. librdkafka stops fetching a partition whose queue reaches
+`queued.min.messages` or `queued.max.messages.kbytes` for that long, 1000 ms by
+default, and draining the queue does not end the wait early. With split queues
+the thresholds apply per partition, and a pipeline thread usually drains one
+partition, so a full queue empties well inside a second and the thread then
+waits on an empty one. With more consumers the queues fill, and this wait is
+what made four consumers slower than two on the measured rig.
+
 ADR-0012 said a per-thread-consumer fallback stayed available behind the same
 traits. None existed in the tree. This key is the per-deployment reversal that
 record anticipated, in a different shape.
@@ -63,8 +72,12 @@ record anticipated, in a different shape.
 - Bad, because the source now merges several members' rebalance events into the
   runtime's one, with a hold of up to 3 seconds for consumers still joining and
   a fresh epoch for an assignment that arrives while lanes are live.
-- Bad, because the benefit is not monotonic: on the measured rig four consumers
-  gained less than two.
+- Bad, because more consumers stop helping once the pipeline threads are busy:
+  on the measured rig two, four and eight consumers all reached the arm's
+  32-CPU quota.
+- Bad, because the source departs from librdkafka's `fetch.queue.backoff.ms`
+  default, and librdkafka notes that low values may raise CPU use. At one
+  consumer 10 ms changed neither throughput nor CPU on the measured rig.
 
 ### Confirmation
 
@@ -76,7 +89,8 @@ restarts `fewer_consumers_after_a_restart_lose_nothing` and
 `more_consumers_after_a_restart_lose_nothing`. One lane set per rebalance is
 pinned by `consumers_share_one_epoch`, whose driver refuses an assignment that
 arrives with lanes live. Static membership with more than one consumer is
-refused at load.
+refused at load. The 10 ms backoff, and the passthrough's precedence over it,
+are pinned by `only_the_source_shortens_the_fetch_queue_backoff`.
 
 ## Evidence
 
@@ -94,16 +108,34 @@ and not published:
 The A/A control agreed within 0.6% per core. CPU per row was 0.60–0.61 µs in
 every cell. At two consumers the sink became the bound, delaying 54–67% of
 inserts on its part count. Four consumers loaded the sink less than two and
-spent more of their time in the poll with full fetch queues, a cost on the
-source side this run does not explain. Raising one consumer's fetch sizes
-instead cost 21.6%. Lifting the sink's part limits pinned its CPU on merges
-rather than lifting it, so this rig cannot show scaling past two consumers.
+spent more of their time in the poll with full fetch queues. Raising one
+consumer's fetch sizes instead cost 21.6%. Lifting the sink's part limits pinned
+its CPU on merges.
+
+Three further runs on the same rig replaced the sink's table with a `Null`
+engine copy, so the sink stored nothing. Four consumers kept the same shortfall
+with the sink near idle. A per-partition record and an off-CPU profile showed
+partition queues alternating between empty and their byte cap, and pipeline
+threads off-CPU for 23% of their time, 98% of it waiting on an empty partition
+queue in librdkafka. Setting `fetch.queue.backoff.ms` to 10 ms removed the wait:
+
+| Consumers | `fetch.queue.backoff.ms` | Steady-state rows/s | Poll share | Arm CPU of 32 |
+|---|---|---|---|---|
+| 1 | 1000 | 37.5–38.6M | 29–31% | 23 cores |
+| 1 | 10 | 37.8–38.0M | 31–32% | 23 cores |
+| 2 | 10 | 52.3–52.4M | 2–3% | 31 cores, throttled |
+| 4 | 1000 | 41.7–42.2M | 23–24% | 25 cores |
+| 4 | 10 | 47.8–48.2M | 1% | 31–32 cores, throttled |
+| 8 | 10 | 48.2–48.7M | 1% | 31–32 cores, throttled |
 
 Measured on the benchmark repository's tuning branch
 `bootstrap/spate-1651-consumers` (not for merge), arm pinned to spate
-`4e161d49`, an earlier head of the pull request that landed this decision,
-launch 41423442032 of 2026-11-02. Later commits on that pull request changed
-commit routing, drop and revocation, none of them on the per-record path.
+`4e161d49`, an earlier head of the pull request that landed this decision:
+launch 41423442032 for the first table, and launches 41490863726, 41500572891
+and 41503724873 of 2026-11-02 for the `Null`-engine runs, the last two with the
+arm built with frame pointers and setting the backoff through the passthrough.
+Later commits on that pull request changed commit routing, drop, revocation and
+the backoff default, none of them on the per-record path.
 
 ## More information
 

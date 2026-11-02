@@ -249,7 +249,7 @@ them; extras, `broker` among them, are noted per family.
 | `spate_kafka_source_broker_req_timeouts_total` | counter | | Requests timed out, summed across brokers. |
 | `spate_kafka_source_broker_connects_total` | counter | | Connection attempts (including failed), summed across brokers. |
 | `spate_kafka_source_broker_disconnects_total` | counter | | Disconnections (broker, network, or otherwise), summed across brokers. |
-| `spate_kafka_source_broker_up` | gauge | `broker` | 1 while any connection to the broker (regular or a logical coordinator link) is up; `sum()` gives the brokers-up count. |
+| `spate_kafka_source_broker_up` | gauge | `broker` | 1 while any connection to the broker (regular or a logical coordinator link) is up. Each consumer reports every broker it connects to, so with `consumers` above 1, `sum()` counts a broker once per consumer; `count(max without (client) (spate_kafka_source_broker_up) == 1)` gives the brokers-up count. |
 | `spate_kafka_source_broker_tx_errors_total` | counter | `broker` | Transmission errors, attributed per broker. |
 | `spate_kafka_source_broker_rtt_avg_seconds` | gauge | `broker` | Mean broker round-trip time over the last statistics window. |
 | `spate_kafka_source_broker_rtt_p99_seconds` | gauge | `broker` | p99 broker round-trip time over the last window (non-aggregatable). |

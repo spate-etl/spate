@@ -467,6 +467,7 @@ mod tests {
         assert_eq!(cfg.startup_timeout, Duration::from_secs(30));
         assert_eq!(cfg.assignment_timeout, Duration::from_mins(5));
         assert_eq!(cfg.statistics_interval, Duration::from_secs(5));
+        assert_eq!(cfg.consumers, 1);
         assert!(cfg.rdkafka.is_empty());
     }
 
@@ -738,5 +739,55 @@ mod tests {
         ] {
             assert!(KafkaSourceConfig::from_component_config(&section(body)).is_err());
         }
+    }
+
+    fn with_consumers(count: &str, rdkafka: &str) -> Result<KafkaSourceConfig, ConfigError> {
+        let body = format!("{}  consumers: {count}\n{rdkafka}", minimal());
+        KafkaSourceConfig::from_component_config(&section(&body))
+    }
+
+    /// A consumer count of zero is refused, naming the key.
+    #[test]
+    fn zero_consumers_are_rejected() {
+        let err = with_consumers("0", "").unwrap_err().to_string();
+        assert!(err.contains("source.kafka.consumers"), "{err}");
+    }
+
+    /// Any count from one up is accepted.
+    #[test]
+    fn two_consumers_are_accepted() {
+        assert_eq!(with_consumers("2", "").unwrap().consumers, 2);
+        assert_eq!(with_consumers("1", "").unwrap().consumers, 1);
+    }
+
+    /// A count that is not a non-negative integer is refused, naming the key.
+    #[test]
+    fn a_non_integer_consumer_count_names_the_key() {
+        for count in ["many", "-1"] {
+            let err = with_consumers(count, "").unwrap_err().to_string();
+            assert!(err.contains("consumers"), "{count}: {err}");
+        }
+    }
+
+    /// The consumer count reaches `Debug`.
+    #[test]
+    fn debug_prints_the_consumer_count() {
+        let cfg = with_consumers("2", "").unwrap();
+        assert!(format!("{cfg:?}").contains("consumers: 2"), "{cfg:?}");
+    }
+
+    /// Several consumers would all join as one static member and fence each
+    /// other, so a static member id requires one consumer. The refusal names
+    /// both keys and never the id.
+    #[test]
+    fn static_membership_with_several_consumers_is_refused() {
+        let id = "  rdkafka:\n    group.instance.id: w-secret\n";
+        let err = with_consumers("2", id).unwrap_err().to_string();
+        assert!(err.contains("source.kafka.consumers"), "{err}");
+        assert!(err.contains("group.instance.id"), "{err}");
+        assert!(!err.contains("w-secret"), "{err}");
+        with_consumers("1", id).expect("one consumer may be a static member");
+        with_consumers("2", "  rdkafka:\n    group.instance.id: \"\"\n")
+            .expect("an empty id is no static membership");
     }
 }

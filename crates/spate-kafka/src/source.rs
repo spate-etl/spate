@@ -1454,9 +1454,346 @@ mod tests {
             member.phase = Phase::Assigned;
             for &(lane, part) in *lanes {
                 member.assignment.insert(LaneId(lane), part);
+                source.next_lane = source.next_lane.max(lane + 1);
             }
         }
         source
+    }
+
+    /// Call `poll_events` until it yields something other than `Idle` or a
+    /// `consumer poll` error from the unreachable broker, or until `done`
+    /// holds, and return what it yielded.
+    fn poll_until(
+        source: &mut KafkaSource,
+        done: impl Fn(&KafkaSource) -> bool,
+    ) -> Option<Result<SourceEvent<KafkaLane>, SourceError>> {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !done(source) {
+            assert!(Instant::now() < deadline, "no outcome within deadline");
+            match source.poll_events(Duration::from_millis(50)) {
+                Ok(SourceEvent::Idle) => {}
+                Err(SourceError::Client { reason, .. }) if reason.starts_with("consumer poll") => {}
+                other => return Some(other),
+            }
+        }
+        None
+    }
+
+    fn lane_ids(lanes: &[LaneId]) -> Vec<u32> {
+        let mut ids: Vec<u32> = lanes.iter().map(|l| l.0).collect();
+        ids.sort_unstable();
+        ids
+    }
+
+    fn sorted(mut partitions: Vec<i32>) -> Vec<i32> {
+        partitions.sort_unstable();
+        partitions
+    }
+
+    fn tpl_of(partitions: &[i32]) -> TopicPartitionList {
+        let mut tpl = TopicPartitionList::new();
+        for p in partitions {
+            tpl.add_partition("orders", *p);
+        }
+        tpl
+    }
+
+    mod consumers {
+        use super::*;
+        use spate_core::source::SourceLane;
+
+        /// `open` refuses a consumer count of zero on a source built without
+        /// `from_component_config`.
+        #[test]
+        fn open_rejects_zero_consumers_on_programmatic_source() {
+            let mut config = test_config();
+            config.consumers = 0;
+            let mut source = KafkaSource::new(config);
+            let cp = Checkpointer::new();
+            let err = source.open(SourceCtx::new(cp.handle())).unwrap_err();
+            match err {
+                SourceError::Client { class, reason } => {
+                    assert_eq!(class, ErrorClass::Fatal);
+                    assert!(reason.contains("source.kafka.consumers"), "{reason}");
+                }
+                other => panic!("unexpected error: {other:?}"),
+            }
+        }
+
+        /// One `poll_events` call polls every consumer once and spends the
+        /// caller's timeout once, on the last of them, starting where the
+        /// caller says.
+        #[test]
+        fn poll_order_spends_one_timeout() {
+            let t = Duration::from_millis(50);
+            assert_eq!(poll_order(0, 1, t).collect::<Vec<_>>(), [(0, t)]);
+            assert_eq!(
+                poll_order(2, 4, t).collect::<Vec<_>>(),
+                [
+                    (2, Duration::ZERO),
+                    (3, Duration::ZERO),
+                    (0, Duration::ZERO),
+                    (1, t)
+                ]
+            );
+        }
+
+        /// The poll order rotates its start from one call to the next.
+        #[test]
+        fn the_first_consumer_polled_rotates() {
+            let mut source = opened_consumers(test_config(), &[&[], &[], &[]]);
+            let mut starts = Vec::new();
+            for _ in 0..4 {
+                starts.push(source.poll_start);
+                let _ = source.poll_events(Duration::ZERO);
+            }
+            assert_eq!(starts, [0, 1, 2, 0]);
+        }
+
+        /// Each consumer may store offsets for its own partitions only,
+        /// including those it is revoking but has not released.
+        #[test]
+        fn committable_partitions_are_per_consumer() {
+            let mut source =
+                opened_consumers(test_config(), &[&[(0, 0), (1, 1)], &[(2, 2), (3, 3)]]);
+            assert_eq!(sorted(source.committable_partitions(0)), [0, 1]);
+            assert_eq!(sorted(source.committable_partitions(1)), [2, 3]);
+
+            revoke_lanes(&mut source, 1, &[3]);
+            assert_eq!(sorted(source.committable_partitions(1)), [2, 3]);
+            source.members[1].revoking.clear();
+            assert_eq!(sorted(source.committable_partitions(1)), [2]);
+            assert_eq!(sorted(source.committable_partitions(0)), [0, 1]);
+        }
+
+        /// A rebalance error on one consumer revokes that consumer's lanes
+        /// only, then reports the error. The other consumer keeps its lanes
+        /// and may still commit.
+        #[test]
+        fn a_rebalance_error_on_one_consumer_revokes_its_scope() {
+            let mut source = opened_consumers(test_config(), &[&[(0, 0)], &[(1, 1)]]);
+            push_intent_to(&source, 1, Intent::Error(RDKafkaErrorCode::RebalanceInProgress));
+
+            match next_outcome(&mut source) {
+                Ok(SourceEvent::LanesRevoked { lanes, .. }) => {
+                    assert_eq!(lane_ids(&lanes), [1]);
+                }
+                other => panic!("expected the erroring consumer's lanes revoked, got {other:?}"),
+            }
+            assert_eq!(source.committable_partitions(0), [0]);
+            assert!(source.committable_partitions(1).is_empty());
+            match next_outcome(&mut source) {
+                Err(SourceError::Client { reason, .. }) => {
+                    assert!(reason.contains("rebalance error"), "{reason}");
+                }
+                other => panic!("expected the error, got {other:?}"),
+            }
+            assert_eq!(source.committable_partitions(0), [0]);
+        }
+
+        /// Eager rebalancing revokes every consumer, so the first revocation
+        /// drains every consumer's lanes at once, and each consumer may still
+        /// commit until its own revocation arrives and releases it. A
+        /// revocation arriving after the drain releases its consumer with no
+        /// second drain.
+        #[test]
+        fn a_revoke_on_one_consumer_revokes_every_consumers_lanes() {
+            let mut source = opened_consumers(test_config(), &[&[(0, 0)], &[(1, 1)]]);
+            push_intent_to(&source, 0, Intent::Revoke(tpl_of(&[0])));
+
+            match next_outcome(&mut source) {
+                Ok(SourceEvent::LanesRevoked { lanes, barrier }) => {
+                    assert_eq!(lane_ids(&lanes), [0, 1]);
+                    assert_eq!(barrier.remaining(), 2);
+                }
+                other => panic!("expected every lane revoked, got {other:?}"),
+            }
+            assert_eq!(source.committable_partitions(0), [0]);
+            assert_eq!(source.committable_partitions(1), [1]);
+
+            // The runtime has drained: consumer 0 is released, consumer 1
+            // still owns its partition until its own revocation arrives.
+            let _ = poll_until(&mut source, |s| s.members[0].revoking.is_empty());
+            assert!(source.committable_partitions(0).is_empty());
+            assert_eq!(source.committable_partitions(1), [1]);
+
+            push_intent_to(&source, 1, Intent::Revoke(tpl_of(&[1])));
+            let outcome = poll_until(&mut source, |s| s.members[1].revoking.is_empty());
+            assert!(outcome.is_none(), "no second drain: {outcome:?}");
+            assert!(source.committable_partitions(1).is_empty());
+        }
+
+        /// Each consumer's assignment is held until every consumer of the
+        /// rebalance has one, then accepted together. Past `ASSIGN_HOLD` the
+        /// held ones are accepted without the consumers still joining.
+        #[test]
+        fn assignments_are_held_until_every_consumer_has_one() {
+            let mut source = opened_consumers(test_config(), &[&[], &[]]);
+            for member in &mut source.members {
+                member.phase = Phase::Joining;
+            }
+            push_intent_to(&source, 0, Intent::Assign(TopicPartitionList::new()));
+            let _ = poll_until(&mut source, |s| matches!(s.members[0].phase, Phase::Held(_)));
+            assert!(matches!(source.members[1].phase, Phase::Joining));
+
+            push_intent_to(&source, 1, Intent::Assign(TopicPartitionList::new()));
+            let _ = poll_until(&mut source, |s| {
+                s.members.iter().all(|m| matches!(m.phase, Phase::Assigned))
+            });
+
+            let mut source = opened_consumers(test_config(), &[&[], &[]]);
+            let clock = freeze(&mut source);
+            for member in &mut source.members {
+                member.phase = Phase::Joining;
+            }
+            push_intent_to(&source, 0, Intent::Assign(TopicPartitionList::new()));
+            let _ = poll_until(&mut source, |s| matches!(s.members[0].phase, Phase::Held(_)));
+            clock.advance(ASSIGN_HOLD - Duration::from_millis(1));
+            let _ = source.poll_events(Duration::ZERO);
+            assert!(matches!(source.members[0].phase, Phase::Held(_)), "inside the hold");
+            clock.advance(Duration::from_millis(1));
+            let _ = poll_until(&mut source, |s| matches!(s.members[0].phase, Phase::Assigned));
+            assert!(matches!(source.members[1].phase, Phase::Joining));
+        }
+
+        /// An assignment that arrives while another consumer has live lanes
+        /// drains them, then accepts every consumer's partitions together as
+        /// one new lane set with fresh lane ids.
+        #[test]
+        fn an_assignment_while_lanes_are_live_starts_a_new_epoch() {
+            let mut source = opened_consumers(test_config(), &[&[(0, 0)], &[]]);
+            push_intent_to(&source, 1, Intent::Assign(TopicPartitionList::new()));
+
+            match next_outcome(&mut source) {
+                Ok(SourceEvent::LanesRevoked { lanes, .. }) => assert_eq!(lane_ids(&lanes), [0]),
+                other => panic!("expected the live lanes drained, got {other:?}"),
+            }
+            assert_eq!(source.committable_partitions(0), [0], "still owned while draining");
+            match source.poll_events(Duration::ZERO) {
+                Ok(SourceEvent::LanesAssigned(lanes)) => {
+                    let assigned: Vec<(u32, u32)> =
+                        lanes.iter().map(|l| (l.id().0, l.partition().0)).collect();
+                    assert_eq!(assigned, [(1, 0)]);
+                }
+                other => panic!("expected one new lane set, got {other:?}"),
+            }
+            assert!(source.members.iter().all(|m| matches!(m.phase, Phase::Assigned)));
+        }
+
+        /// Two consumers offered one partition is a broken assignment.
+        #[test]
+        fn a_partition_in_two_held_assignments_is_fatal() {
+            let mut source = opened_consumers(test_config(), &[&[], &[]]);
+            source.members[0].phase = Phase::Held(tpl_of(&[3]));
+            source.members[1].phase = Phase::Held(tpl_of(&[1, 3]));
+            match source.settle_held() {
+                Err(SourceError::Client { class, reason }) => {
+                    assert_eq!(class, ErrorClass::Fatal);
+                    assert!(reason.contains("partition 3"), "{reason}");
+                }
+                other => panic!("expected a fatal error, got {other:?}"),
+            }
+        }
+
+        /// A rebalance error is classified by its own consumer's start: an
+        /// unknown topic is metadata catching up for a consumer never
+        /// assigned, and a deleted topic for one that was.
+        #[test]
+        fn startup_errors_classify_per_consumer() {
+            let mut source = opened_consumers(test_config(), &[&[], &[]]);
+            source.members[1].saw_first_assignment = false;
+            let class = |source: &KafkaSource, k| match source
+                .rebalance_error(k, RDKafkaErrorCode::UnknownTopicOrPartition)
+            {
+                SourceError::Client { class, .. } => class,
+                other => panic!("{other:?}"),
+            };
+            assert_eq!(class(&source, 0), ErrorClass::Fatal);
+            assert_eq!(class(&source, 1), ErrorClass::Retryable);
+        }
+
+        /// Each consumer publishes lag only for its own partitions: the other
+        /// consumer's snapshot carries the partition too, with the stale
+        /// figure it last saw, and must not overwrite the owner's.
+        #[test]
+        fn lag_comes_from_the_owning_consumer_only() {
+            for owner in [0, 1] {
+                let component = spate_test::unique_name("source");
+                let rendered = spate_test::render_metrics(|| {
+                    let lanes: [&[(u32, i32)]; 2] = if owner == 0 {
+                        [&[(0, 0)], &[]]
+                    } else {
+                        [&[], &[(0, 0)]]
+                    };
+                    let mut source = opened_consumers(test_config(), &lanes);
+                    source.metrics = Some(Arc::new(SourceMetrics::new(
+                        &spate_core::metrics::ComponentLabels::new(
+                            "orders",
+                            component.clone(),
+                            "kafka",
+                        ),
+                    )));
+                    for (k, member) in source.members.iter().enumerate() {
+                        let lag = if k == owner { 5 } else { 100 };
+                        let mut snapshot = parked(&[0]);
+                        for p in snapshot.topics.get_mut("orders").unwrap().partitions.values_mut()
+                        {
+                            p.consumer_lag = lag;
+                        }
+                        *member.consumer.context().stats.lock().unwrap() = Some(Box::new(snapshot));
+                    }
+                    source.publish_stats();
+                });
+                let series = format!(
+                    r#"spate_source_lag_records{{pipeline="orders",component="{component}",component_type="kafka",partition="0"}} 5"#
+                );
+                assert!(rendered.contains(&series), "owner {owner}:\n{rendered}");
+            }
+        }
+
+        /// A partition that moved from one consumer to another is released
+        /// from the first consumer's series and kept in the second's.
+        #[test]
+        fn the_prune_releases_a_partition_that_moved_between_consumers() {
+            let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+            let handle = recorder.handle();
+            metrics::with_local_recorder(&recorder, || {
+                let mut source = opened_consumers(test_config(), &[&[(0, 0)], &[]]);
+                for k in 0..2 {
+                    let meter = spate_core::metrics::Meter::with_namespace(
+                        "kafka", "moved", "source", "kafka",
+                    );
+                    source.members[k].stats = Some(
+                        crate::metrics::KafkaStatsMetrics::for_source_consumer(meter, true, Some(k)),
+                    );
+                }
+                let owned = source.members[0].live_partition_ids();
+                source.members[0]
+                    .stats
+                    .as_mut()
+                    .unwrap()
+                    .update(&parked(&[0]), "orders", &owned);
+
+                // Partition 0 moves to consumer 1.
+                source.members[0].assignment.clear();
+                source.members[1].assignment.insert(LaneId(5), 0);
+                let owned = source.members[1].live_partition_ids();
+                source.members[1]
+                    .stats
+                    .as_mut()
+                    .unwrap()
+                    .update(&parked(&[0]), "orders", &owned);
+                source.prune_partition_series();
+            });
+            let rendered = handle.render();
+            let std = r#"pipeline="moved",component="source",component_type="kafka""#;
+            for (client, value) in [("consumer-0", 0), ("consumer-1", 1)] {
+                let series = format!(
+                    r#"spate_kafka_partition_not_fetching{{{std},client="{client}",partition="0"}} {value}"#
+                );
+                assert!(rendered.contains(&series), "{series}:\n{rendered}");
+            }
+        }
     }
 
     /// Queue a rebalance intent for `poll_events` on consumer 0, as the

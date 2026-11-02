@@ -775,6 +775,66 @@ mod tests {
         assert!(lines[0].contains("1/1 brokers are down"), "{}", lines[0]);
     }
 
+    /// A source running several consumers suffixes each one's `client.id`
+    /// with its index, its own id or the passthrough's, and changes nothing
+    /// else. One consumer keeps the unsuffixed id.
+    #[test]
+    fn consumer_client_ids_are_suffixed_above_one() {
+        let configs = |count: usize, pairs: &[(&str, &str)]| -> Vec<ClientConfig> {
+            let mut source = KafkaSourceConfig::new("localhost:9092", "orders", "spate");
+            source.consumers = count;
+            source.rdkafka = map(pairs);
+            (0..count)
+                .map(|k| source.base(false).config(&Consumer::member(&source, k)))
+                .collect()
+        };
+        let ids = |configs: &[ClientConfig]| -> Vec<String> {
+            configs
+                .iter()
+                .map(|cc| cc.get("client.id").unwrap_or_default().to_owned())
+                .collect()
+        };
+        let tls = [
+            ("security.protocol", "SASL_SSL"),
+            ("ssl.ca.location", "/etc/ca.pem"),
+        ];
+
+        assert_eq!(ids(&configs(1, &tls)), ["spate-source-consumer"]);
+        let three = configs(3, &tls);
+        assert_eq!(
+            ids(&three),
+            ["spate-source-consumer-0", "spate-source-consumer-1", "spate-source-consumer-2"]
+        );
+        let mut rest: Vec<_> = three
+            .iter()
+            .map(|cc| {
+                let mut keys = cc.config_map();
+                keys.remove("client.id");
+                keys.into_iter()
+                    .map(|(k, v)| (k.to_owned(), v.to_owned()))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        rest.dedup();
+        assert_eq!(rest.len(), 1, "only client.id differs: {rest:#?}");
+        assert!(
+            rest[0].contains(&("ssl.ca.location".to_owned(), "/etc/ca.pem".to_owned())),
+            "{rest:#?}"
+        );
+
+        assert_eq!(ids(&configs(1, &[("client.id", "app")])), ["app"]);
+        assert_eq!(
+            ids(&configs(3, &[("client.id", "app")])),
+            ["app-0", "app-1", "app-2"]
+        );
+        let topic = configs(2, &[("topic.client.id", "app")]);
+        assert_eq!(ids(&topic), ["app-0", "app-1"]);
+        assert!(
+            topic.iter().all(|cc| cc.get("topic.client.id").is_none()),
+            "the other spelling would apply in hash order"
+        );
+    }
+
     /// Each role sends its own `client.id` unless the passthrough names one,
     /// which then reaches every client unchanged.
     #[test]

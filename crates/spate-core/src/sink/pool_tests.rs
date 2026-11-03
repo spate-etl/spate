@@ -2807,6 +2807,43 @@ async fn two_batches_of_one_shard_retry_at_different_instants() {
     f.pool.drain(Duration::ZERO).await;
 }
 
+/// A batch's second retry sleeps `retry.initial * retry.multiplier`, so the
+/// worker forwards the configured growth factor to its backoff.
+#[tokio::test(start_paused = true)]
+async fn a_retry_ladder_grows_by_the_configured_multiplier() {
+    let mut cfg = small_batches();
+    cfg.breaker.failure_threshold = u32::MAX;
+    cfg.retry.initial = Duration::from_secs(1);
+    cfg.retry.max = Duration::from_secs(60);
+    cfg.retry.multiplier = 3.0;
+    cfg.retry.jitter = 0.0;
+
+    let clock = TestClock::frozen();
+    let t0 = clock.now();
+    let f = fixture_on(&clock, 1, 1, cfg, 16);
+    f.writer
+        .set_default(Outcome::Fail(ErrorClass::Retryable, Duration::ZERO));
+    let (ack, _ack_rx) = AckRef::test_pair();
+    f.queues.try_send(0, chunk(1, 8, &ack)).unwrap();
+    drop(ack);
+
+    paused_hour().await;
+    assert!(
+        clock.has_slept_until(t0 + Duration::from_secs(1)),
+        "first step"
+    );
+    clock.advance(Duration::from_secs(1));
+    paused_hour().await;
+    assert_eq!(f.writer.calls().len(), 2, "the batch retried once");
+    assert!(
+        clock.has_slept_until(t0 + Duration::from_secs(4)),
+        "second step is initial * multiplier"
+    );
+
+    drop(f.queues);
+    f.pool.drain(Duration::ZERO).await;
+}
+
 /// The worker's durations, write, permit wait and seal to settle, are
 /// measured on the pool clock.
 #[test]

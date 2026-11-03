@@ -53,10 +53,11 @@ These sit outside `ci`, by cost or by dependency:
 | `cargo xtask fuzz build`, `cargo xtask fuzz run` | Needs a nightly toolchain; the nightly tier fuzzes |
 | `cargo xtask mutants` | Runs a package's suite once per mutant; CI runs it on each pull request, advisory |
 
-These commands omit `--locked`, which everything else passes because CI does.
+Some commands omit `--locked`, which everything else passes because CI does.
 `cargo hack --no-dev-deps` rewrites each `Cargo.toml` as it runs and a locked
-build refuses; `cargo fmt` resolves nothing, reading only `.rs` files; and
-`cargo fuzz` accepts no `--locked` passthrough.
+build refuses; `cargo fmt` resolves nothing, reading only `.rs` files;
+`cargo fuzz`, `cargo semver-checks` and `cargo cyclonedx` accept no `--locked`;
+and `cargo update` and `cargo generate-lockfile` write the lockfile on purpose.
 
 `cargo xtask docs` sets `CI=true`. The client-redirects plugin only registers
 under it, so a plain `npm run build` skips redirect validation, and a redirect

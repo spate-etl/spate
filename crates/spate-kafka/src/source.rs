@@ -2469,81 +2469,66 @@ mod tests {
             assert_eq!(raised, RespErr::RD_KAFKA_RESP_ERR_NO_ERROR);
         }
 
-        /// `consumers` sources on the refused broker that wait a minute
-        /// before reconnecting, so each consumer queues one refused
-        /// connection and one `AllBrokersDown` and then nothing more.
-        fn refused(consumers: usize) -> KafkaSource {
-            let mut cfg = test_config();
-            cfg.rdkafka
-                .insert("reconnect.backoff.ms".into(), "60000".into());
-            cfg.rdkafka
-                .insert("reconnect.backoff.max.ms".into(), "60000".into());
-            opened_consumers(cfg, &vec![&[][..]; consumers])
-        }
-
-        /// Wait until consumer `k` has `n` events queued, then poll away the
-        /// non-error events ahead of its last `n`.
-        fn leave_queued(source: &KafkaSource, k: usize, n: usize) {
-            spate_test::wait_until(Duration::from_secs(20), "the consumer's events", || {
-                queued(source, k) >= n
-            });
-            let consumer = Arc::clone(&source.members[k].consumer);
-            while queued(source, k) > n {
-                assert!(
-                    consumer.poll(Duration::ZERO).is_none(),
-                    "only non-error events precede"
-                );
-            }
-        }
-
-        /// Poll consumer `k` directly until it has returned `AllBrokersDown`,
-        /// so an error raised next is the next error on its queue.
-        fn serve_until_brokers_down(source: &KafkaSource, k: usize) {
-            let consumer = Arc::clone(&source.members[k].consumer);
-            let mut errors = Vec::new();
-            spate_test::wait_until(Duration::from_secs(20), "the consumer's errors", || {
-                if let Some(Err(e)) = consumer.poll(Duration::from_millis(50)) {
-                    errors.push(e.to_string());
-                }
-                errors.iter().any(|e| e.contains("AllBrokersDown"))
-            });
-        }
-
-        /// One `poll_events` call starting at consumer `start`, with the
-        /// lines it logged at WARN and above.
-        fn poll_once(
+        /// Call `poll_events` until `done` holds for the lines logged at
+        /// WARN and above so far, and return them.
+        ///
+        /// Which events one call meets depends on librdkafka's queue order,
+        /// so a test asserts on what every call together logged.
+        fn lines_until(
             source: &mut KafkaSource,
-            start: usize,
-        ) -> (Result<SourceEvent<KafkaLane>, SourceError>, Vec<String>) {
-            source.poll_start = start;
-            let mut returned = None;
-            let lines = spate_test::capture_logs(tracing::Level::WARN, || {
-                returned = Some(source.poll_events(Duration::ZERO));
+            what: &str,
+            done: impl Fn(&[String]) -> bool,
+        ) -> Vec<String> {
+            let mut lines = Vec::new();
+            spate_test::wait_until(Duration::from_secs(20), what, || {
+                lines.extend(spate_test::capture_logs(tracing::Level::WARN, || {
+                    let _ = source.poll_events(Duration::from_millis(50));
+                }));
+                done(&lines)
             });
-            (returned.expect("poll_events ran"), lines)
+            lines
         }
 
-        /// The lines that name consumer `k` and contain `text`.
-        fn lines_for(lines: &[String], k: usize, text: &str) -> usize {
-            let field = format!("consumer={k}");
-            lines
-                .iter()
-                .filter(|l| l.contains(&field) && l.contains(text))
-                .count()
+        /// Whether a line names consumer `k` and contains `text`.
+        fn names(line: &str, k: usize, text: &str) -> bool {
+            line.contains(&format!("consumer={k}")) && line.contains(text)
         }
 
         /// A fatal error one consumer returns is reported even when an
         /// earlier consumer in the same poll returned a retryable one.
         #[test]
         fn a_fatal_error_behind_a_retryable_one_is_reported() {
+            let mut cfg = test_config();
+            cfg.rdkafka
+                .insert("reconnect.backoff.ms".into(), "60000".into());
+            cfg.rdkafka
+                .insert("reconnect.backoff.max.ms".into(), "60000".into());
             // Leaked: closing a consumer after a fatal error waits on a
             // broker this test never brings up.
-            let mut source = std::mem::ManuallyDrop::new(refused(2));
+            let mut source = std::mem::ManuallyDrop::new(opened_consumers(cfg, &[&[], &[]]));
 
-            serve_until_brokers_down(&source, 1);
-            // Consumer 0 keeps two retryable errors, so it returns one in the
-            // call that also polls consumer 1.
-            leave_queued(&source, 0, 2);
+            // Serve consumer 1's refused connection and AllBrokersDown first,
+            // so the fatal error is the next event on its queue.
+            let c1 = Arc::clone(&source.members[1].consumer);
+            let mut c1_errors = Vec::new();
+            spate_test::wait_until(Duration::from_secs(20), "consumer 1's errors", || {
+                if let Some(Err(e)) = c1.poll(Duration::from_millis(50)) {
+                    c1_errors.push(e.to_string());
+                }
+                c1_errors.iter().any(|e| e.contains("AllBrokersDown"))
+            });
+            // Leave exactly consumer 0's two retryable errors queued, so it
+            // returns one in the call that also polls consumer 1.
+            spate_test::wait_until(Duration::from_secs(20), "consumer 0's errors", || {
+                queued(&source, 0) >= 2
+            });
+            let c0 = Arc::clone(&source.members[0].consumer);
+            while queued(&source, 0) > 2 {
+                assert!(
+                    c0.poll(Duration::ZERO).is_none(),
+                    "only non-error events precede"
+                );
+            }
             raise_fatal(
                 &source,
                 1,
@@ -2573,130 +2558,85 @@ mod tests {
             );
         }
 
-        /// Each consumer's poll error in one call is logged once with its
-        /// index, whether or not it is the error the call returns.
-        /// Regression for #1663.
+        /// Above one consumer, each poll error's line names the consumer that
+        /// returned it, `AllBrokersDown` included, whichever error a call
+        /// reports. Regression for #1663.
         #[test]
-        fn each_consumer_poll_error_is_logged() {
-            let mut source = refused(2);
-            leave_queued(&source, 0, 2);
-            leave_queued(&source, 1, 2);
-
-            let (returned, lines) = poll_once(&mut source, 0);
+        fn each_consumer_poll_error_names_its_consumer() {
+            let mut source = opened_consumers(test_config(), &[&[], &[]]);
+            let lines = lines_until(&mut source, "both consumers' errors", |lines| {
+                (0..2).all(|k| {
+                    ["BrokerTransportFailure", "AllBrokersDown"]
+                        .iter()
+                        .all(|text| lines.iter().any(|l| names(l, k, text)))
+                })
+            });
+            let errors: Vec<&String> = lines.iter().filter(|l| l.contains("error=")).collect();
             assert!(
-                matches!(returned, Err(SourceError::Client { .. })),
-                "{returned:?}"
+                errors
+                    .iter()
+                    .all(|l| l.contains("consumer=0") || l.contains("consumer=1")),
+                "{errors:#?}"
             );
-            for k in 0..2 {
-                assert_eq!(
-                    lines_for(&lines, k, "BrokerTransportFailure"),
-                    1,
-                    "consumer {k}: {lines:#?}"
-                );
-            }
         }
 
-        /// When both consumers return a fatal error in one call, the one the
-        /// call does not return is logged with its own index.
+        /// A fatal error on each consumer is logged under its own index, the
+        /// one the source reports and the one it does not.
         #[test]
-        fn every_error_behind_a_fatal_one_is_logged() {
+        fn each_consumer_fatal_error_names_its_consumer() {
             // Leaked, as in `a_fatal_error_behind_a_retryable_one_is_reported`.
-            let mut source = std::mem::ManuallyDrop::new(refused(2));
-            let raised = [
-                (
-                    RespErr::RD_KAFKA_RESP_ERR_GROUP_AUTHORIZATION_FAILED,
-                    c"raised on 0",
-                ),
-                (
-                    RespErr::RD_KAFKA_RESP_ERR_TOPIC_AUTHORIZATION_FAILED,
-                    c"raised on 1",
-                ),
-            ];
-            for (k, (code, reason)) in raised.into_iter().enumerate() {
-                serve_until_brokers_down(&source, k);
-                raise_fatal(&source, k, code, reason);
-                leave_queued(&source, k, 1);
-            }
-
-            let (returned, lines) = poll_once(&mut source, 1);
-            match returned {
-                Err(SourceError::Client { class, reason }) => {
-                    assert_eq!(class, ErrorClass::Fatal, "{reason}");
-                    assert!(reason.contains("raised on 1"), "{reason}");
-                }
-                other => panic!("expected consumer 1's fatal error, got {other:?}"),
-            }
-            assert_eq!(lines_for(&lines, 0, "raised on 0"), 1, "{lines:#?}");
-            assert_eq!(lines_for(&lines, 1, "raised on 1"), 1, "{lines:#?}");
-        }
-
-        /// A retryable error the call drops for a later consumer's fatal one
-        /// is logged with its index. `AllBrokersDown` has no librdkafka log
-        /// line of its own, so this line is the only one that reports it.
-        #[test]
-        fn an_error_ahead_of_a_fatal_one_names_its_consumer() {
-            // Leaked, as in `a_fatal_error_behind_a_retryable_one_is_reported`.
-            let mut source = std::mem::ManuallyDrop::new(refused(2));
-            leave_queued(&source, 0, 2);
-            let c0 = Arc::clone(&source.members[0].consumer);
-            assert!(
-                matches!(c0.poll(Duration::ZERO), Some(Err(_))),
-                "consumer 0's refused connection"
+            let mut source =
+                std::mem::ManuallyDrop::new(opened_consumers(test_config(), &[&[], &[]]));
+            raise_fatal(
+                &source,
+                0,
+                RespErr::RD_KAFKA_RESP_ERR_GROUP_AUTHORIZATION_FAILED,
+                c"raised on 0",
             );
-            serve_until_brokers_down(&source, 1);
             raise_fatal(
                 &source,
                 1,
-                RespErr::RD_KAFKA_RESP_ERR_GROUP_AUTHORIZATION_FAILED,
-                c"raised by test",
+                RespErr::RD_KAFKA_RESP_ERR_TOPIC_AUTHORIZATION_FAILED,
+                c"raised on 1",
             );
-            leave_queued(&source, 1, 1);
 
-            let (returned, lines) = poll_once(&mut source, 0);
-            match returned {
-                Err(SourceError::Client { class, reason }) => {
-                    assert_eq!(class, ErrorClass::Fatal, "{reason}");
-                    assert!(reason.contains("raised by test"), "{reason}");
+            let texts = ["raised on 0", "raised on 1"];
+            let lines = lines_until(&mut source, "both fatal errors", |lines| {
+                texts
+                    .iter()
+                    .enumerate()
+                    .all(|(k, text)| lines.iter().any(|l| names(l, k, text)))
+            });
+            for (k, text) in texts.iter().enumerate() {
+                for line in lines.iter().filter(|l| l.contains(text)) {
+                    assert!(names(line, k, text), "{line}");
                 }
-                other => panic!("expected consumer 1's fatal error, got {other:?}"),
             }
-            assert_eq!(lines_for(&lines, 0, "AllBrokersDown"), 1, "{lines:#?}");
-            assert_eq!(lines_for(&lines, 1, "raised by test"), 1, "{lines:#?}");
         }
 
-        /// One consumer's poll error writes one line with no `consumer`
-        /// field.
+        /// One consumer's librdkafka lines carry no `consumer` field.
         #[test]
         fn one_consumer_error_lines_are_unchanged() {
-            let mut source = refused(1);
-            leave_queued(&source, 0, 2);
-
-            let (returned, lines) = poll_once(&mut source, 0);
+            let mut source = opened_consumers(test_config(), &[&[]]);
+            let lines = lines_until(&mut source, "a poll error", |lines| {
+                lines.iter().any(|l| l.contains("BrokerTransportFailure"))
+            });
+            let librdkafka: Vec<&String> =
+                lines.iter().filter(|l| l.contains("librdkafka")).collect();
             assert!(
-                matches!(returned, Err(SourceError::Client { .. })),
-                "{returned:?}"
+                librdkafka.iter().all(|l| !l.contains("consumer=")),
+                "{librdkafka:#?}"
             );
-            assert_eq!(lines.len(), 1, "{lines:#?}");
-            assert!(lines[0].contains("BrokerTransportFailure"), "{}", lines[0]);
-            assert!(!lines[0].contains("consumer="), "{}", lines[0]);
         }
 
         /// Above one consumer, every librdkafka line a consumer forwards
         /// through `poll_events` names that consumer. Regression for #1658.
         #[test]
         fn forwarded_lines_name_their_consumer() {
-            let mut source = refused(2);
-            let mut lines = Vec::new();
-            spate_test::wait_until(
-                Duration::from_secs(20),
-                "a forwarded line per consumer",
-                || {
-                    lines.extend(spate_test::capture_logs(tracing::Level::WARN, || {
-                        let _ = source.poll_events(Duration::from_millis(50));
-                    }));
-                    (0..2).all(|k| lines_for(&lines, k, "fac=") > 0)
-                },
-            );
+            let mut source = opened_consumers(test_config(), &[&[], &[]]);
+            let lines = lines_until(&mut source, "a forwarded line per consumer", |lines| {
+                (0..2).all(|k| lines.iter().any(|l| names(l, k, "fac=")))
+            });
             let forwarded: Vec<&String> = lines.iter().filter(|l| l.contains("fac=")).collect();
             assert!(
                 forwarded

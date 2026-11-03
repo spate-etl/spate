@@ -53,14 +53,16 @@ deserializer:
 | `registry.username` / `registry.password` | string | `none` | Basic auth (interpolate secrets via `${VAR}`). A password requires a username. The password and any userinfo in `registry.url` render `<redacted>` in `Debug` output. |
 | `registry.tls.root_ca` | path | `none` | PEM bundle of root CAs trusted in addition to the system trust store. Requires an `https://` URL. |
 | `prewarm_subjects` | string list | `[]` | Subjects whose latest schemas are fetched at startup (`confluent` mode only). |
-| `negative_cache_ttl` | duration | `30s` | The longest a schema id the registry could not serve stays negatively cached before a refetch is allowed. The cache holds at most 1,024 such ids and drops the oldest for a new one, so a dropped id is refetched on its next record. |
+| `negative_cache_ttl` | duration | `30s` | The longest a schema id the registry could not serve stays negatively cached before a refetch is allowed. The cache holds at most 1,024 such ids and drops the oldest for a new one, so a dropped id is refetched on its next record. At least `100ms`, so a negative entry outlives the replay of the record it holds; a shorter value fails at startup in every mode. |
 | `reader_schema` | `{ inline }` or `{ path }` | `none` | Reader schema pinning the resolved record shape (`confluent` and `raw` modes; not `single_object`). |
 | `schema` | `{ inline }` or `{ path }` | `required` | The writer schema. Required in `raw` and `single_object` modes; rejected in `confluent` mode (writer schemas come from the registry there). |
 
 Mode requirements are validated at construction with explicit messages:
 `confluent` without a `registry`, a `registry.url` that is not an `http://` or
 `https://` URL, `raw` without a `schema`, `prewarm_subjects` outside
-`confluent`, and so on all fail fast at startup. Registry URLs with a parsed
+`confluent`, and so on all fail fast at startup. A `negative_cache_ttl` under
+`100ms` fails at the same point in every mode, `raw` and `single_object`
+included. Registry URLs with a parsed
 nonempty username or a password fail at configuration load, before schema
 loading, TLS client construction or prewarm. Credentials belong in
 `registry.username` and `registry.password`, including when no separate
@@ -183,16 +185,17 @@ edge cases:
   startup, so the first batch does not pay the miss.
 - Ids the registry *cannot* serve are negatively cached for up to
   `negative_cache_ttl`, and their records are handled by the deserializer's
-  `ErrorPolicy` (Skip or Fail) like any other poison payload, so a permanent
-  bad id cannot wedge the pipeline into an infinite retry.
+  `ErrorPolicy` (Skip or Fail) like any other poison payload. With the
+  engine's default settings a held batch is replayed inside the `100ms` floor,
+  so a permanent bad id cannot wedge the pipeline into an infinite retry.
 
 ## Error handling
 
 Undecodable payloads follow the deserializer's `ErrorPolicy`, Skip or Fail,
 like any other poison payload: Fail stops the pipeline on the first bad datum;
 Skip drops it and continues. A record naming a schema id the registry cannot
-serve reaches the same policy as soon as the registry's answer is negatively
-cached, so a permanently bad id is an error rather than an infinite retry. A
+serve reaches the same policy when it is replayed within `negative_cache_ttl`
+of the registry's answer, so a permanently bad id ends in an error. A
 registry that rejects the client is not a payload error and stops the pipeline
 under either policy.
 

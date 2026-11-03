@@ -341,9 +341,18 @@ async fn unknown_id_negative_caches_until_ttl_expiry() {
     assert!(matches!(err, DeserError::SchemaUnavailable { .. }), "{err}");
     assert_eq!(stub.hits.load(Ordering::Relaxed), hits_after_first);
 
+    // A nanosecond short of the configured TTL: still answered from the
+    // negative cache.
+    clock.advance(Duration::from_millis(300) - Duration::from_nanos(1));
+    let err = deser
+        .deserialize(&raw_payload(&payload), &ack, &mut out)
+        .unwrap_err();
+    assert!(matches!(err, DeserError::SchemaUnavailable { .. }), "{err}");
+    assert_eq!(stub.hits.load(Ordering::Relaxed), hits_after_first);
+
     // After expiry the schema exists now: refetch succeeds.
     stub.script("/schemas/ids/5", 200, &schema_body(SCHEMA_V1), 0);
-    clock.advance(Duration::from_millis(300));
+    clock.advance(Duration::from_nanos(1));
     let rows = tokio::task::spawn_blocking(move || {
         let mut out = Collected(Vec::new());
         drive_until_ready(&mut deser, &payload, &mut out).map(|()| out.0)

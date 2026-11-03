@@ -62,12 +62,16 @@ milestone or a priority is in
 
 ## Building and testing
 
-The default suites need a recent stable Rust toolchain and nothing else.
+The default suites need a recent stable Rust toolchain. `rust-version` in
+`Cargo.toml` declares the MSRV, and CI holds the crates to that floor.
 
 ```sh
 cargo xtask ci       # everything a pull request must pass
 cargo xtask --help   # the commands, each with its own --help
 ```
+
+`cargo xtask ci` also runs tools that are not part of the toolchain, such as
+`cargo nextest` and `cargo deny`, and fails naming any it cannot find.
 
 A new condition, match arm or bound comes with the test that kills its mutant.
 [`DEVELOPING.md`](DEVELOPING.md) has the rest of the build, test and benchmark
@@ -169,7 +173,8 @@ The area is a crate's directory name without the `spate-` prefix (`core`,
 whose behavior the change is about; the docs and tests that come with it do not
 add a second one, and a change across crates is `workspace`. The description
 starts lowercase unless it opens with a `code` reference, and has no trailing
-period.
+period. `release: vX.Y.Z` is reserved for the release pull request. GitHub's
+Revert button titles a pull request `Revert "…"`, which needs a retitle.
 
 The pull request title is the subject that lands. `main` is squash-merged with
 the title as the subject and an empty body, and the merge appends ` (#N)`, so a

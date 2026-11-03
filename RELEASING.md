@@ -1,9 +1,9 @@
 # Releasing
 
-How a Spate release works and how to run one. This is a maintainer reference;
-contributors need [`CONTRIBUTING.md`](CONTRIBUTING.md) and the changelog
-conventions in [`changelog.d/README.md`](changelog.d/README.md), not this
-page.
+How a Spate release works and how to run one. This is a maintainer reference.
+Contributors need [`CONTRIBUTING.md`](CONTRIBUTING.md), the changelog
+conventions in [`changelog.d/README.md`](changelog.d/README.md), and from this
+page only [Milestones and priorities](#milestones-and-priorities).
 
 The process itself lives in [`xtask/src/release/`](xtask/src/release/), behind
 `cargo xtask release`, and [`release.yml`](.github/workflows/release.yml) runs

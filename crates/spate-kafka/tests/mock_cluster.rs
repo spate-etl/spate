@@ -1904,6 +1904,17 @@ fn returns_within(what: &str, f: impl FnOnce() + Send + 'static) {
         .unwrap_or_else(|_| panic!("{what} did not return"));
 }
 
+/// Poll `source` until it surfaces a revocation, which it leaves
+/// unacknowledged.
+fn await_revocation(source: &mut KafkaSource, what: &str) {
+    wait_until(Duration::from_secs(60), what, || {
+        matches!(
+            source.poll_events(Duration::from_millis(100)),
+            Ok(SourceEvent::LanesRevoked { .. })
+        )
+    });
+}
+
 /// Dropping the source between a surfaced revocation and its completion
 /// returns. Consumer close completes a revocation that was not lost.
 #[test]
@@ -1936,12 +1947,7 @@ fn dropping_mid_revoke_returns() {
     };
     let mut source = driver.source;
     let lanes = driver.lanes;
-    wait_until(Duration::from_secs(60), "a revocation", || {
-        matches!(
-            source.poll_events(Duration::from_millis(100)),
-            Ok(SourceEvent::LanesRevoked { .. })
-        )
-    });
+    await_revocation(&mut source, "a revocation");
     returns_within("dropping the source mid-revoke", move || {
         drop(lanes);
         drop(source);
@@ -1952,7 +1958,7 @@ fn dropping_mid_revoke_returns() {
 
 /// Dropping the source between a surfaced revocation of a lost assignment
 /// and its completion returns. Consumer close does not complete a lost
-/// revocation on its own, so the source's `unassign` is what lets it finish.
+/// revocation on its own. It finishes once the source calls `unassign`.
 #[test]
 fn dropping_mid_lost_revoke_returns() {
     use rdkafka::types::{RDKafkaApiKey, RDKafkaRespErr};
@@ -1970,12 +1976,7 @@ fn dropping_mid_lost_revoke_returns() {
             RDKafkaApiKey::Heartbeat,
             &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_UNKNOWN_MEMBER_ID],
         );
-        wait_until(Duration::from_secs(60), "a lost revocation", || {
-            matches!(
-                source.poll_events(Duration::from_millis(100)),
-                Ok(SourceEvent::LanesRevoked { .. })
-            )
-        });
+        await_revocation(&mut source, "a lost revocation");
     });
     assert!(
         lines

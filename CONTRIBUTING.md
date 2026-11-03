@@ -206,7 +206,9 @@ number: "this touches INV-5" is the reviewable form.
 
 `docs/` is the published site, rendered in place.
 [`docs/STYLE.md`](docs/STYLE.md) is normative for it, including the rule that
-framework pages are vendor-neutral prose, and `cargo xtask docs` is the gate.
+framework pages are vendor-neutral prose, and `cargo xtask docs` is the gate. A
+pull request that adds a connector adds its page, built from the template in
+`docs/STYLE.md` § 3.
 
 ## Security and legal
 

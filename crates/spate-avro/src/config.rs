@@ -29,7 +29,7 @@ use apache_avro::Schema;
 use apache_avro::rabin::Rabin;
 use serde::Deserialize;
 use spate_core::clock::SyncClock;
-use spate_core::config::{ComponentConfig, redact};
+use spate_core::config::{ComponentConfig, DurationBounds, check_duration, redact};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -194,7 +194,9 @@ pub struct AvroSettings {
     /// The longest a failed schema id stays negatively cached before a
     /// refetch is allowed. The cache holds at most 1,024 failed ids and drops
     /// the oldest for a new one, so a dropped id is refetched on its next
-    /// record.
+    /// record. Must be at least `100ms`;
+    /// [`AvroDeserializerBuilder::from_settings`] refuses a shorter value in
+    /// every mode.
     #[serde(with = "humantime_serde")]
     pub negative_cache_ttl: Duration,
     /// Optional reader schema pinning the resolved record shape
@@ -272,8 +274,8 @@ impl AvroDeserializerBuilder {
     /// # Errors
     ///
     /// [`AvroConfigError::SchemaLoad`] for a schema that cannot be loaded,
-    /// [`AvroConfigError::Invalid`] for settings the mode rejects, registry URL credentials, or a
-    /// registry password without a username, and
+    /// [`AvroConfigError::Invalid`] for settings the mode rejects, registry URL credentials, a
+    /// registry password without a username, or a `negative_cache_ttl` under `100ms`, and
     /// [`AvroConfigError::Registry`] for a registry client that cannot be built.
     pub fn from_settings(
         settings: &AvroSettings,
@@ -326,6 +328,18 @@ impl AvroDeserializerBuilder {
                 detail: "registry.password is set, but registry.username is not".into(),
             });
         }
+        // A negative entry has to outlive the replay of the record it blocks, or
+        // each replay refetches the id and the record never reaches its policy.
+        const NEGATIVE_CACHE_TTL: DurationBounds =
+            DurationBounds::at_least(Duration::from_millis(100));
+        check_duration(settings.negative_cache_ttl, NEGATIVE_CACHE_TTL).map_err(|e| {
+            AvroConfigError::Invalid {
+                detail: format!(
+                    "`negative_cache_ttl` {e}: a shorter entry can expire before the blocked \
+                     record is replayed, and each replay then fetches the schema id again"
+                ),
+            }
+        })?;
         let reader_schema = settings
             .reader_schema
             .as_ref()
@@ -936,6 +950,71 @@ mod tests {
                 "must reject: {yaml}"
             );
         }
+    }
+
+    fn ttl_refusal(found: &str) -> String {
+        format!(
+            "avro configuration: `negative_cache_ttl` must be at least 100ms; found {found}: \
+             a shorter entry can expire before the blocked record is replayed, and each \
+             replay then fetches the schema id again"
+        )
+    }
+
+    /// Pins the negative cache TTL's floor at 100ms, inclusive and on the
+    /// whole duration, in every mode, and the refusal's whole text.
+    /// Regression for #1555.
+    #[test]
+    fn negative_cache_ttl_loads_at_its_floor_and_is_refused_a_nanosecond_under() {
+        let rt = runtime();
+        let modes = [
+            "registry: {url: http://sr}".to_owned(),
+            format!("mode: raw\nschema: {{inline: '{SCHEMA}'}}"),
+            format!("mode: single_object\nschema: {{inline: '{SCHEMA}'}}"),
+        ];
+        for mode in &modes {
+            let build = |ttl: &str| {
+                let cfg = component(&format!("{mode}\nnegative_cache_ttl: {ttl}"));
+                AvroDeserializerBuilder::from_component(&cfg, rt.handle())
+            };
+            build("100ms").unwrap_or_else(|err| panic!("{mode}: the floor builds: {err}"));
+            for (ttl, found) in [("0s", "0s"), ("99ms 999us 999ns", "99ms 999us 999ns")] {
+                let err = build(ttl).map(|_| ()).unwrap_err();
+                assert!(
+                    matches!(err, AvroConfigError::Invalid { .. }),
+                    "{mode}: {err}"
+                );
+                assert_eq!(err.to_string(), ttl_refusal(found), "{mode}");
+            }
+        }
+        let raw = |ttl: Duration| AvroSettings {
+            mode: AvroMode::Raw,
+            schema: Some(SchemaSource::inline(SCHEMA)),
+            negative_cache_ttl: ttl,
+            ..AvroSettings::default()
+        };
+        let err = AvroDeserializerBuilder::from_settings(
+            &raw(Duration::from_millis(100) - Duration::from_nanos(1)),
+            rt.handle(),
+        )
+        .map(|_| ())
+        .unwrap_err();
+        assert_eq!(err.to_string(), ttl_refusal("99ms 999us 999ns"));
+        AvroDeserializerBuilder::from_settings(&raw(Duration::MAX), rt.handle())
+            .expect("no ceiling");
+    }
+
+    /// Pins that the TTL floor is checked ahead of the mode arms' own
+    /// refusals, where the registry tasks are spawned.
+    #[test]
+    fn negative_cache_ttl_is_refused_before_the_mode_checks() {
+        let rt = runtime();
+        let cfg = component(&format!(
+            "registry: {{url: http://sr}}\nschema: {{inline: '{SCHEMA}'}}\nnegative_cache_ttl: 0s"
+        ));
+        let err = AvroDeserializerBuilder::from_component(&cfg, rt.handle())
+            .map(|_| ())
+            .unwrap_err();
+        assert_eq!(err.to_string(), ttl_refusal("0s"));
     }
 
     #[test]

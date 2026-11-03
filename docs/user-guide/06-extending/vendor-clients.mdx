@@ -58,8 +58,8 @@ verifies through the platform's own verifier, keep that verifier.
 
 A config key that names a private CA adds its certificates to the system
 roots. When the file holds no usable certificate, fail at load with an error
-naming the key and the path. Refuse the key when no endpoint the connector
-reaches is `https://`. Worked reference:
+naming the key and the path. When no endpoint the connector reaches is
+`https://`, refuse the key. Worked reference:
 [`spate-clickhouse/src/http.rs`](repo:crates/spate-clickhouse/src/http.rs).
 
 An operator may turn certificate verification off only through the library's
@@ -86,9 +86,11 @@ replace.
 ## Logs
 
 Route the library's log callback to `tracing`. The subscriber that
-`Pipeline::from_config` installs through `spate::telemetry::init` does not
-bridge the `log` facade, so a line the library writes only through `log` is
-dropped. Use the library's own logging hook where it has one. Worked reference:
+`Pipeline::from_config` installs through `spate::telemetry::init` reads the
+`log` facade only in a build that enables `tracing-subscriber`'s `tracing-log`
+feature. Spate does not enable it, so unless the application does, a line the
+library writes only through `log` is dropped. Where the library has its own
+logging hook, use it. Worked reference:
 `SpateContext` in
 [`spate-kafka/src/client.rs`](repo:crates/spate-kafka/src/client.rs).
 

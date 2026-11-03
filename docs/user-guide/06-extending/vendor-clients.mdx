@@ -1,0 +1,124 @@
+---
+description: "Building the client a connector talks to its service through: one constructor, layered settings, trust roots, timeouts, logs and redaction."
+---
+
+# Building a vendor client
+
+A connector that talks to a service wraps that service's client library, and
+how it builds the client decides what an operator can tune, what a guarantee
+rests on, and what reaches the logs.
+[ADR-0088](../../adr/0088-a-connector-builds-its-vendor-client-in-one-place.md)
+records why the rules below take this shape. Worked reference:
+[`spate-kafka/src/client.rs`](repo:crates/spate-kafka/src/client.rs).
+
+## Build each client in one constructor
+
+Build each client that sends requests in one private function, so every
+setting it sends is written once and a reviewer reads one place to see them
+all. Ban the library's own constructors under `disallowed-methods` in
+[`clippy.toml`](repo:clippy.toml), with a reason that names your constructor.
+A test, an example, or a build that sends no request calls the library's
+constructor under an `#[expect(clippy::disallowed_methods)]` whose reason says
+why.
+
+## Layer the settings
+
+Settings come in three layers, each taking precedence over the one before:
+
+1. **Defaults.** Values you choose because the library's are worse for a
+   pipeline, such as a timeout, a CA location or a client identity. The
+   passthrough may replace any of them. Apply them before the passthrough, or
+   apply each only where the passthrough leaves its key unset.
+2. **The passthrough.** The operator's map of raw library settings
+   ([ADR-0009](../../adr/0009-yaml-configuration-with-opaque-passthrough.md)).
+3. **Owned settings.** Values a delivery or correctness guarantee depends on.
+   Apply them after the passthrough, and refuse a passthrough key that names
+   one at load, under every spelling the library accepts for it.
+
+The refusal is what holds the guarantee. A library may apply two spellings of
+one setting in an unspecified order, so applying an owned setting last wins
+only over the same spelling. An override that loads produces a pipeline that
+appears to work
+([ADR-0018](../../adr/0018-kafka-sink-forced-durability.md)).
+
+## Keep the client out of public signatures
+
+Keep the client and its config types out of `spate-core`'s public API, and
+keep 0.x dependency types out of any public trait bound
+([INV-6](../../INVARIANTS.md#inv-6)). If your crate re-exports its client
+library for advanced use, document the re-export as exempt from the stability
+promise ([ADR-0011](../../adr/0011-msrv-and-dependency-policy.md)).
+
+## Trust roots
+
+If the TLS stack verifies against a root store you build, fill it from the
+system trust store. When the system store yields no usable certificate, fall
+back to the Mozilla root bundle and log a warning saying so. If the library
+verifies through the platform's own verifier, keep that verifier.
+
+A config key that names a private CA adds its certificates to the system
+roots. When the file holds no usable certificate, fail at load with an error
+naming the key and the path. Refuse the key when no endpoint the connector
+reaches is `https://`. Worked reference:
+[`spate-clickhouse/src/http.rs`](repo:crates/spate-clickhouse/src/http.rs).
+
+An operator may turn certificate verification off only through the library's
+own setting in the passthrough. Never default it off.
+
+## Timeouts
+
+Bound connecting, reading and the whole request, either explicitly or through
+a library default the code names. Document what the library retries inside one
+call, since the engine's retry policy runs on top of it. If the user sets a
+typed bound for a request, make it cover the whole request.
+[Graceful shutdown](../03-guides/graceful-shutdown.mdx) explains why a sink's
+client needs a request timeout.
+
+If a duration key has a valid range, refuse a value outside it at load with
+`spate::config::check_duration`, and put the key and the reason for the bound
+around its error.
+
+## Client identity
+
+Send a client identity that names Spate, as a default the passthrough can
+replace.
+
+## Logs
+
+Route the library's log callback to `tracing`. The subscriber that
+`Pipeline::from_config` installs through `spate::telemetry::init` does not
+bridge the `log` facade, so a line the library writes only through `log` is
+dropped. Use the library's own logging hook where it has one. Worked reference:
+`SpateContext` in
+[`spate-kafka/src/client.rs`](repo:crates/spate-kafka/src/client.rs).
+
+## Redaction
+
+Write the config type's `Debug` by hand, destructuring every field so that a
+new field fails to compile until it is placed. Print every passthrough map
+through `spate::config::redact::map` and every URL through
+`spate::config::redact::url`:
+
+```rust
+.field("settings", &redact::map(settings.keys()))
+```
+
+[Securing connections](../03-guides/securing-connections.mdx) describes what
+an operator then sees.
+
+## Errors
+
+Choose a TLS stack whose rejections `spate::tls_rejection!` can read, which is
+rustls. Classify the client's errors as
+[Custom sinks](custom-sink.mdx) and [Custom sources](custom-source.mdx)
+describe: a rejected credential or TLS handshake is fatal, and a failure to
+obtain credentials or reach the server is retryable.
+
+## Related
+
+- [ADR-0088](../../adr/0088-a-connector-builds-its-vendor-client-in-one-place.md)
+  — why each client is built in one place and its settings layered this way.
+- [ADR-0081](../../adr/0081-a-rejected-credential-or-tls-handshake-is-fatal-unless-throttled.md)
+  — how a built client's errors are classified.
+- [Securing connections](../03-guides/securing-connections.mdx) — the
+  operator's view of TLS, credentials and redaction.

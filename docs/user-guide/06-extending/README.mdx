@@ -55,6 +55,12 @@ standard labels via `with_component_type` / `with_replica_labels`, and
 registering your own metric on the same `metrics` facade when the taxonomy
 doesn't cover it.
 
+## [Building a vendor client](vendor-clients.mdx)
+
+How a connector builds the client library it talks to its service through:
+one constructor per client, defaults and owned settings layered around the
+operator's passthrough, trust roots, timeouts, log routing and redaction.
+
 ## Prerequisites
 
 You'll want the [Concepts](../02-concepts/README.mdx) section first,

@@ -31,7 +31,6 @@ mod pool;
 #[cfg(test)]
 mod pool_tests;
 mod queue;
-mod retry;
 mod worker;
 
 pub use bundle::{SinkBundle, SinkParts};

@@ -853,11 +853,11 @@ fn validate(cfg: &ClickHouseSinkConfig) -> Result<(), ConfigError> {
         return fail("inflight.max_per_shard must be at least 1".into());
     }
 
-    // Retry policy: a sub-1.0 multiplier shrinks the delay instead of backing
-    // off, and a zero delay is not a backoff at all. The backoff saturates
-    // rather than trusting these bounds, so this catches the operator's
-    // intent at load, not a runtime hazard. The rules live in the framework
-    // so every sink enforces the same ones.
+    // Retry policy: a sub-1.0 multiplier asks for a shrinking delay, which the
+    // backoff holds at `max`, and a zero delay is not a backoff at all. The
+    // backoff saturates rather than trusting these bounds, so this catches the
+    // operator's intent at load, not a runtime hazard. The rules live in the
+    // framework so every sink enforces the same ones.
     if let Err(why) = cfg.retry.validate() {
         return fail(why.to_string());
     }

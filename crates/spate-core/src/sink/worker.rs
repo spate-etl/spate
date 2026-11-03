@@ -12,8 +12,8 @@
 
 use super::breaker::BreakerSet;
 use super::config::SinkPoolConfig;
-use super::retry::Backoff;
 use super::{EncodedChunk, SealedBatch, ShardWriter, SinkFailures};
+use crate::backoff::Backoff;
 use crate::backpressure::InflightBudget;
 use crate::checkpoint::AckSet;
 use crate::clock::Clock as _;
@@ -601,7 +601,10 @@ impl<W: ShardWriter> ShardWorker<W> {
         )]
         let handle = tasks.spawn(async move {
             let _permit = permit;
-            let mut backoff = Backoff::new(retry, this_seq);
+            let mut backoff = Backoff::new(retry.initial, retry.max)
+                .with_multiplier(retry.multiplier)
+                .with_jitter(retry.jitter)
+                .with_seed(this_seq);
             let mut attempts: u32 = 0;
             loop {
                 // Pick a replica. "Nothing usable" is two conditions that end

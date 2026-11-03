@@ -63,12 +63,12 @@ impl Hooks for FeedProducerHooks {
     /// librdkafka makes fatal for an idempotent producer are named here,
     /// `Fenced` among them, the code librdkafka gives a producer id refused
     /// for an old epoch.
-    fn error(&self, error: rdkafka::error::KafkaError, reason: &str) {
+    fn error(&self, error: rdkafka::error::KafkaError, reason: &str, instance: Option<usize>) {
         let code = error.rdkafka_error_code();
         if self.repeats_previous(code, reason) {
             return;
         }
-        log_error(&error, reason);
+        log_error(&error, reason, instance);
         match code {
             Some(
                 RDKafkaErrorCode::Fatal

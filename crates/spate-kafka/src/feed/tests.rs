@@ -584,7 +584,7 @@ fn a_producer_error_event_is_logged_once() {
     let context = FeedProducerHooks::new(Arc::new(core(10)));
     let lines = spate_test::capture_logs(tracing::Level::WARN, || {
         for _ in 0..4 {
-            context.error(KafkaError::Global(C::AllBrokersDown), DOWN);
+            context.error(KafkaError::Global(C::AllBrokersDown), DOWN, None);
         }
     });
     let logged = lines.iter().filter(|line| line.contains(DOWN)).count();

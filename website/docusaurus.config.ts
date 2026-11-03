@@ -188,8 +188,8 @@ const config: Config = {
       {
         docs: {
           // Read the repo docs/ tree in place, keeping docs/INVARIANTS.md,
-          // docs/METRICS.md and the rest at the paths AGENTS.md and the README
-          // rely on.
+          // docs/METRICS.md and the rest at the paths the root documents link
+          // to.
           path: '../docs',
           routeBasePath: 'docs',
           sidebarPath: './sidebars.ts',

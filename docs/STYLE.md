@@ -302,8 +302,8 @@ Everywhere:
   (`outcome="cancelled"`), and the prose matches the exposition.
 - **No first-person plural on a rendered page.** No "we recommend", no "our
   design". The framework has no voice of its own, so state the thing. This
-  file, `CLAUDE.md` and `CONTRIBUTING.md` are contributor files and exempt,
-  which is why this one opens "How we structure `docs/`".
+  file and the contributor files at the repository root are exempt, which is
+  why this one opens "How we structure `docs/`".
 - **Sentence case for headings**, except product nouns and identifiers
   (`ClickHouse Native format`, `` `SinkBundle` and the readiness probe ``).
 - **Conditions before the instruction they govern.** "If the sink is remote,

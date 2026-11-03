@@ -11,9 +11,9 @@
 //! on any consumer drains every consumer's lanes, and each consumer is released
 //! with `unassign` once its own revocation has arrived. A consumer's retryable
 //! poll error does not hold back the source's next rebalance intent. The call
-//! still acts on it and returns its event, and returns the error only when
-//! nothing else happened. A fatal poll error returns before any intent is
-//! acted on.
+//! still acts on it, and returns the error when neither the intent nor the
+//! held assignments yield an event. A fatal poll error returns before any
+//! intent is acted on.
 //!
 //! # Rebalance choreography (deferred completion)
 //!
@@ -1784,7 +1784,7 @@ mod tests {
 
             // The runtime has drained: consumer 0 is released, consumer 1
             // still owns its partition until its own revocation arrives.
-            let _ = source.poll_events(Duration::ZERO);
+            poll_quiet(&mut source);
             assert!(source.members[0].revoking.is_empty());
             assert!(source.committable_partitions(0).is_empty());
             assert_eq!(source.committable_partitions(1), [1]);
@@ -2165,7 +2165,7 @@ mod tests {
 
         /// A call whose consumer poll returns a retryable error still acts on
         /// another consumer's queued assignment, and reports the poll error
-        /// when nothing else happened. Regression for #1673.
+        /// when holding that assignment yields no event. Regression for #1673.
         #[test]
         fn a_poll_error_does_not_leave_the_intent_queued() {
             let mut source = opened_consumers(test_config(), &[&[], &[], &[]]);
@@ -2224,6 +2224,24 @@ mod tests {
                 source.injected_poll_error.is_none(),
                 "the call polled the error"
             );
+        }
+
+        /// An error from settling the held assignments is reported in place
+        /// of a retryable poll error in the same call.
+        #[test]
+        fn a_settle_error_beside_a_poll_error_is_reported() {
+            let mut source = opened_consumers(test_config(), &[&[], &[]]);
+            source.members[0].phase = Phase::Held(tpl_of(&[3]));
+            source.members[1].phase = Phase::Held(tpl_of(&[1, 3]));
+            source.injected_poll_error = Some((1, transport_failure()));
+
+            match source.poll_events(Duration::ZERO) {
+                Err(SourceError::Client { class, reason }) => {
+                    assert_eq!(class, ErrorClass::Fatal, "{reason}");
+                    assert!(reason.contains("partition 3"), "{reason}");
+                }
+                other => panic!("expected the settle error, got {other:?}"),
+            }
         }
 
         /// A fatal consumer poll error is reported by the call that polled

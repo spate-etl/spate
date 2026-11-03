@@ -347,7 +347,8 @@ impl Base<'_> {
         H: Hooks,
         T: FromClientConfigAndContext<SpateContext<H>>,
     {
-        construct(&self.config(role), SpateContext(hooks)).map_err(|e| redacted_client_error(&e))
+        construct(&self.config(role), SpateContext(hooks, role.instance()))
+            .map_err(|e| redacted_client_error(&e))
     }
 }
 
@@ -376,17 +377,19 @@ pub(crate) trait Hooks: Send + Sync + 'static {
     /// A statistics snapshot, on the client's polling thread.
     fn stats(&self, _statistics: Statistics) {}
 
-    /// An error event, on the client's polling thread.
-    fn error(&self, error: KafkaError, reason: &str) {
-        log_error(&error, reason);
+    /// An error event from the client numbered `instance` among its role's
+    /// clients, on the client's polling thread.
+    fn error(&self, error: KafkaError, reason: &str, instance: Option<usize>) {
+        log_error(&error, reason, instance);
     }
 }
 
 impl Hooks for () {}
 
-/// Log a librdkafka error event under the `librdkafka` target.
-pub(crate) fn log_error(error: &KafkaError, reason: &str) {
-    tracing::warn!(target: "librdkafka", %error, "{reason}");
+/// Log a librdkafka error event under the `librdkafka` target, with the
+/// client's `instance` as the `consumer` field when it has one.
+pub(crate) fn log_error(error: &KafkaError, reason: &str, instance: Option<usize>) {
+    tracing::warn!(target: "librdkafka", consumer = instance, %error, "{reason}");
 }
 
 /// A consumer role's rebalance callback.
@@ -416,8 +419,9 @@ impl ProducerHooks for () {
 
 /// The context every client runs under: librdkafka's log lines go to
 /// `tracing` under the `librdkafka` target, and everything else goes to the
-/// role's hooks.
-pub(crate) struct SpateContext<H>(H);
+/// role's hooks. It carries the role's instance, which names the consumer on
+/// each line it forwards.
+pub(crate) struct SpateContext<H>(H, Option<usize>);
 
 impl<H> Deref for SpateContext<H> {
     type Target = H;
@@ -432,11 +436,17 @@ impl<H: Hooks> ClientContext for SpateContext<H> {
         use RDKafkaLogLevel as L;
         match level {
             L::Emerg | L::Alert | L::Critical | L::Error => {
-                tracing::error!(target: "librdkafka", fac, "{log_message}");
+                tracing::error!(target: "librdkafka", consumer = self.1, fac, "{log_message}");
             }
-            L::Warning => tracing::warn!(target: "librdkafka", fac, "{log_message}"),
-            L::Notice | L::Info => tracing::info!(target: "librdkafka", fac, "{log_message}"),
-            L::Debug => tracing::debug!(target: "librdkafka", fac, "{log_message}"),
+            L::Warning => {
+                tracing::warn!(target: "librdkafka", consumer = self.1, fac, "{log_message}");
+            }
+            L::Notice | L::Info => {
+                tracing::info!(target: "librdkafka", consumer = self.1, fac, "{log_message}");
+            }
+            L::Debug => {
+                tracing::debug!(target: "librdkafka", consumer = self.1, fac, "{log_message}");
+            }
         }
     }
 
@@ -445,7 +455,7 @@ impl<H: Hooks> ClientContext for SpateContext<H> {
     }
 
     fn error(&self, error: KafkaError, reason: &str) {
-        self.0.error(error, reason);
+        self.0.error(error, reason, self.1);
     }
 }
 
@@ -483,7 +493,7 @@ pub(crate) mod testing {
         for (key, value) in properties {
             cc.set(*key, *value);
         }
-        construct(&cc, SpateContext(hooks)).expect("client")
+        construct(&cc, SpateContext(hooks, None)).expect("client")
     }
 
     /// A configuration a test builds itself, outside every role.
@@ -808,30 +818,38 @@ mod tests {
     }
 
     /// The wrapper logs each librdkafka level under the `librdkafka` target
-    /// with the facility, at the mapped level.
+    /// with the facility, at the mapped level, and with the `consumer` field
+    /// only when the client has an instance.
     #[test]
     fn the_wrapper_logs_every_level_to_the_librdkafka_target() {
         use RDKafkaLogLevel as L;
-        let context = SpateContext(());
-        for (level, expected) in [
-            (L::Emerg, "ERROR"),
-            (L::Alert, "ERROR"),
-            (L::Critical, "ERROR"),
-            (L::Error, "ERROR"),
-            (L::Warning, "WARN"),
-            (L::Notice, "INFO"),
-            (L::Info, "INFO"),
-            (L::Debug, "DEBUG"),
-        ] {
-            let lines = spate_test::capture_logs(tracing::Level::DEBUG, || {
-                context.log(level, "FACIL", "the message");
-            });
-            assert_eq!(lines.len(), 1, "{level:?}: {lines:#?}");
-            let line = &lines[0];
-            assert!(line.contains(expected), "{level:?}: {line}");
-            assert!(line.contains("librdkafka"), "{level:?}: {line}");
-            assert!(line.contains("fac=\"FACIL\""), "{level:?}: {line}");
-            assert!(line.contains("the message"), "{level:?}: {line}");
+        for instance in [None, Some(1)] {
+            let context = SpateContext((), instance);
+            for (level, expected) in [
+                (L::Emerg, "ERROR"),
+                (L::Alert, "ERROR"),
+                (L::Critical, "ERROR"),
+                (L::Error, "ERROR"),
+                (L::Warning, "WARN"),
+                (L::Notice, "INFO"),
+                (L::Info, "INFO"),
+                (L::Debug, "DEBUG"),
+            ] {
+                let lines = spate_test::capture_logs(tracing::Level::DEBUG, || {
+                    context.log(level, "FACIL", "the message");
+                });
+                assert_eq!(lines.len(), 1, "{level:?}: {lines:#?}");
+                let line = &lines[0];
+                assert!(line.contains(expected), "{level:?}: {line}");
+                assert!(line.contains("librdkafka"), "{level:?}: {line}");
+                assert!(line.contains("fac=\"FACIL\""), "{level:?}: {line}");
+                assert!(line.contains("the message"), "{level:?}: {line}");
+                assert_eq!(
+                    line.contains("consumer=1"),
+                    instance.is_some(),
+                    "{instance:?} {level:?}: {line}"
+                );
+            }
         }
     }
 
@@ -839,7 +857,7 @@ mod tests {
     /// each error event as a warning under the `librdkafka` target.
     #[test]
     fn the_default_error_hook_logs_a_warning() {
-        let context = SpateContext(());
+        let context = SpateContext((), None);
         let lines = spate_test::capture_logs(tracing::Level::WARN, || {
             context.error(
                 KafkaError::Global(rdkafka::error::RDKafkaErrorCode::AllBrokersDown),

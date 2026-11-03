@@ -1,7 +1,10 @@
 //! Shared test fixtures: librdkafka statistics values, a refused broker
-//! address and a broker that refuses a SASL login.
+//! address, a broker that refuses a SASL login and a raised fatal error.
 
+use rdkafka::bindings::rd_kafka_resp_err_t as RespErr;
+use rdkafka::client::{Client, ClientContext};
 use rdkafka::statistics::{Broker, Window};
+use std::ffi::CStr;
 
 /// An `UP` broker entry keyed `name`, with its node name taken from `name`
 /// without the `/<nodeid>` suffix.
@@ -25,6 +28,15 @@ pub(crate) fn window(avg: i64, p99: i64, cnt: i64) -> Window {
         cnt,
         ..Default::default()
     }
+}
+
+/// Raise `code` as `client`'s fatal error, with `reason` as its text.
+pub(crate) fn raise_fatal<C: ClientContext>(client: &Client<C>, code: RespErr, reason: &CStr) {
+    // SAFETY: `client` is live for the call, and `reason` is NUL-terminated.
+    let raised = unsafe {
+        rdkafka::bindings::rd_kafka_test_fatal_error(client.native_ptr(), code, reason.as_ptr())
+    };
+    assert_eq!(raised, RespErr::RD_KAFKA_RESP_ERR_NO_ERROR);
 }
 
 /// A loopback `host:port` that refuses connections at once.

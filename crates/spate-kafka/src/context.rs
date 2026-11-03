@@ -102,8 +102,8 @@ impl Hooks for SourceHooks {
         *self.stats.lock().expect("stats lock") = Some(Box::new(statistics));
     }
 
-    fn error(&self, error: rdkafka::error::KafkaError, reason: &str) {
-        log_error(&error, reason);
+    fn error(&self, error: rdkafka::error::KafkaError, reason: &str, instance: Option<usize>) {
+        log_error(&error, reason, instance);
         if let Some(code) = error.rdkafka_error_code() {
             self.last_error
                 .lock()
@@ -172,9 +172,14 @@ mod tests {
     /// A lazily-connecting consumer built by the factory; no broker is
     /// contacted (assign/unassign/assignment are local operations).
     fn consumer() -> BaseConsumer<SourceContext> {
+        consumer_numbered(None)
+    }
+
+    /// [`consumer`] as the source's consumer `instance`.
+    fn consumer_numbered(instance: Option<usize>) -> BaseConsumer<SourceContext> {
         let cfg = KafkaSourceConfig::new("127.0.0.1:1", "orders", "ctx-test");
         cfg.base(false)
-            .create(&Role(&cfg, None), SourceHooks::default())
+            .create(&Role(&cfg, instance), SourceHooks::default())
             .expect("consumer")
     }
 
@@ -304,5 +309,37 @@ mod tests {
             None,
             "a mismatched take removes the entry"
         );
+    }
+
+    /// A numbered consumer's context writes its index as the `consumer`
+    /// field on each error and forwarded line, and an unnumbered one writes
+    /// no such field. The hook still records the text `poll_error` takes.
+    /// Regression for #1658.
+    #[test]
+    fn the_source_context_names_its_consumer() {
+        use rdkafka::config::RDKafkaLogLevel;
+        let error = |code| rdkafka::error::KafkaError::Global(code);
+        for (instance, field) in [(Some(2), Some("consumer=2")), (None, None)] {
+            let consumer = consumer_numbered(instance);
+            let ctx = consumer.context();
+            let lines = spate_test::capture_logs(tracing::Level::WARN, || {
+                ctx.error(error(RDKafkaErrorCode::SSL), "handshake refused");
+                ctx.error(error(RDKafkaErrorCode::AllBrokersDown), "brokers down");
+                ctx.log(RDKafkaLogLevel::Warning, "FAIL", "connect refused");
+            });
+            let texts = ["handshake refused", "brokers down", "connect refused"];
+            assert_eq!(lines.len(), texts.len(), "{instance:?}: {lines:#?}");
+            for (line, text) in lines.iter().zip(texts) {
+                assert!(line.contains(text), "{instance:?}: {line}");
+                match field {
+                    Some(field) => assert!(line.contains(field), "{instance:?}: {line}"),
+                    None => assert!(!line.contains("consumer="), "{instance:?}: {line}"),
+                }
+            }
+            assert_eq!(
+                ctx.take_error(RDKafkaErrorCode::AllBrokersDown).as_deref(),
+                Some("brokers down")
+            );
+        }
     }
 }

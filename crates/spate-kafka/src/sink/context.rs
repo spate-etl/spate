@@ -207,11 +207,11 @@ impl Hooks for SinkHooks {
         }
     }
 
-    fn error(&self, error: rdkafka::error::KafkaError, reason: &str) {
+    fn error(&self, error: rdkafka::error::KafkaError, reason: &str, instance: Option<usize>) {
         if self.repeats_previous(error.rdkafka_error_code(), reason) {
             return;
         }
-        log_error(&error, reason);
+        log_error(&error, reason, instance);
         if let Some(code) = error.rdkafka_error_code() {
             self.note_error(code, reason);
         }
@@ -423,6 +423,7 @@ pub(crate) mod tests {
         ctx.error(
             KafkaError::Global(RDKafkaErrorCode::Authentication),
             SASL_REFUSED,
+            None,
         );
         clock.advance(window);
         assert_eq!(
@@ -500,12 +501,16 @@ pub(crate) mod tests {
             .chain([(C::Authentication, SASL_REFUSED); 2]);
         let lines = spate_test::capture_logs(tracing::Level::WARN, || {
             for (code, text) in calls {
-                ctx.error(KafkaError::Global(code), text);
+                ctx.error(KafkaError::Global(code), text, None);
             }
         });
         let count = |text: &str| lines.iter().filter(|line| line.contains(text)).count();
         assert_eq!(count(DOWN), 2, "two events, one line each: {lines:#?}");
         assert_eq!(count(SASL_REFUSED), 1, "one event, one line: {lines:#?}");
+        assert!(
+            lines.iter().all(|line| !line.contains("consumer=")),
+            "a producer's lines name no consumer: {lines:#?}"
+        );
         assert!(ctx.latest_rejection().is_some());
     }
 

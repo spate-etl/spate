@@ -2429,6 +2429,7 @@ mod tests {
     mod fatal_consumer_error {
         use super::*;
         use rdkafka::bindings::rd_kafka_resp_err_t as RespErr;
+        use std::ffi::CStr;
 
         /// A static member librdkafka fences fails the source, and the error
         /// carries librdkafka's text and the member's `group.instance.id`.
@@ -2439,17 +2440,12 @@ mod tests {
             cfg.rdkafka
                 .insert("group.instance.id".into(), "worker-a".into());
             let mut source = opened_source_with(cfg, &[]);
-            let client = source.members[0].consumer.client();
-            // SAFETY: the pointer is a live client owned by `source`, and the
-            // reason is a NUL-terminated literal.
-            let raised = unsafe {
-                rdkafka::bindings::rd_kafka_test_fatal_error(
-                    client.native_ptr(),
-                    RespErr::RD_KAFKA_RESP_ERR_FENCED_INSTANCE_ID,
-                    c"fenced by test".as_ptr(),
-                )
-            };
-            assert_eq!(raised, RespErr::RD_KAFKA_RESP_ERR_NO_ERROR);
+            raise_fatal(
+                &source,
+                0,
+                RespErr::RD_KAFKA_RESP_ERR_FENCED_INSTANCE_ID,
+                c"fenced by test",
+            );
 
             let mut seen = None;
             spate_test::wait_until(Duration::from_secs(20), "the fatal error", || match source
@@ -2488,6 +2484,37 @@ mod tests {
             }
         }
 
+        /// Raise `code` as consumer `k`'s fatal error, with `reason` as its
+        /// text.
+        fn raise_fatal(source: &KafkaSource, k: usize, code: RespErr, reason: &CStr) {
+            crate::testutil::raise_fatal(source.members[k].consumer.client(), code, reason);
+        }
+
+        /// Call `poll_events` until `done` holds for the lines logged at
+        /// WARN and above so far, and return them.
+        ///
+        /// Which events one call meets depends on librdkafka's queue order,
+        /// so a test asserts on what every call together logged.
+        fn lines_until(
+            source: &mut KafkaSource,
+            what: &str,
+            done: impl Fn(&[String]) -> bool,
+        ) -> Vec<String> {
+            let mut lines = Vec::new();
+            spate_test::wait_until(Duration::from_secs(20), what, || {
+                lines.extend(spate_test::capture_logs(tracing::Level::WARN, || {
+                    let _ = source.poll_events(Duration::from_millis(50));
+                }));
+                done(&lines)
+            });
+            lines
+        }
+
+        /// Whether a line names consumer `k` and contains `text`.
+        fn names(line: &str, k: usize, text: &str) -> bool {
+            line.contains(&format!("consumer={k}")) && line.contains(text)
+        }
+
         /// A fatal error one consumer returns is reported even when an
         /// earlier consumer in the same poll returned a retryable one.
         #[test]
@@ -2523,16 +2550,12 @@ mod tests {
                     "only non-error events precede"
                 );
             }
-            // SAFETY: the pointer is a live client owned by `source`, and the
-            // reason is a NUL-terminated literal.
-            let raised = unsafe {
-                rdkafka::bindings::rd_kafka_test_fatal_error(
-                    c1.client().native_ptr(),
-                    RespErr::RD_KAFKA_RESP_ERR_GROUP_AUTHORIZATION_FAILED,
-                    c"raised by test".as_ptr(),
-                )
-            };
-            assert_eq!(raised, RespErr::RD_KAFKA_RESP_ERR_NO_ERROR);
+            raise_fatal(
+                &source,
+                1,
+                RespErr::RD_KAFKA_RESP_ERR_GROUP_AUTHORIZATION_FAILED,
+                c"raised by test",
+            );
 
             source.poll_start = 0;
             let mut returned = Vec::new();
@@ -2555,8 +2578,94 @@ mod tests {
                 "consumer 1's fatal error was never reported; poll_events returned: {returned:#?}"
             );
         }
-    }
 
+        /// Above one consumer, each poll error's line names the consumer that
+        /// returned it, `AllBrokersDown` included, whichever error a call
+        /// reports. Regression for #1663.
+        #[test]
+        fn each_consumer_poll_error_names_its_consumer() {
+            let mut source = opened_consumers(test_config(), &[&[], &[]]);
+            let lines = lines_until(&mut source, "both consumers' errors", |lines| {
+                (0..2).all(|k| {
+                    ["BrokerTransportFailure", "AllBrokersDown"]
+                        .iter()
+                        .all(|text| lines.iter().any(|l| names(l, k, text)))
+                })
+            });
+            let errors: Vec<&String> = lines.iter().filter(|l| l.contains("error=")).collect();
+            assert!(
+                errors
+                    .iter()
+                    .all(|l| l.contains("consumer=0") || l.contains("consumer=1")),
+                "{errors:#?}"
+            );
+        }
+
+        /// A fatal error on each consumer is logged under its own index.
+        #[test]
+        fn each_consumer_fatal_error_names_its_consumer() {
+            // Leaked, as in `a_fatal_error_behind_a_retryable_one_is_reported`.
+            let mut source =
+                std::mem::ManuallyDrop::new(opened_consumers(test_config(), &[&[], &[]]));
+            raise_fatal(
+                &source,
+                0,
+                RespErr::RD_KAFKA_RESP_ERR_GROUP_AUTHORIZATION_FAILED,
+                c"raised on 0",
+            );
+            raise_fatal(
+                &source,
+                1,
+                RespErr::RD_KAFKA_RESP_ERR_TOPIC_AUTHORIZATION_FAILED,
+                c"raised on 1",
+            );
+
+            let texts = ["raised on 0", "raised on 1"];
+            let lines = lines_until(&mut source, "both fatal errors", |lines| {
+                texts
+                    .iter()
+                    .enumerate()
+                    .all(|(k, text)| lines.iter().any(|l| names(l, k, text)))
+            });
+            for (k, text) in texts.iter().enumerate() {
+                for line in lines.iter().filter(|l| l.contains(text)) {
+                    assert!(names(line, k, text), "{line}");
+                }
+            }
+        }
+
+        /// One consumer's librdkafka lines carry no `consumer` field.
+        #[test]
+        fn one_consumer_error_lines_are_unchanged() {
+            let mut source = opened_consumers(test_config(), &[&[]]);
+            let lines = lines_until(&mut source, "a poll error", |lines| {
+                lines.iter().any(|l| l.contains("BrokerTransportFailure"))
+            });
+            let librdkafka: Vec<&String> =
+                lines.iter().filter(|l| l.contains("librdkafka")).collect();
+            assert!(
+                librdkafka.iter().all(|l| !l.contains("consumer=")),
+                "{librdkafka:#?}"
+            );
+        }
+
+        /// Above one consumer, every librdkafka line a consumer forwards
+        /// through `poll_events` names that consumer. Regression for #1658.
+        #[test]
+        fn forwarded_lines_name_their_consumer() {
+            let mut source = opened_consumers(test_config(), &[&[], &[]]);
+            let lines = lines_until(&mut source, "a forwarded line per consumer", |lines| {
+                (0..2).all(|k| lines.iter().any(|l| names(l, k, "fac=")))
+            });
+            let forwarded: Vec<&String> = lines.iter().filter(|l| l.contains("fac=")).collect();
+            assert!(
+                forwarded
+                    .iter()
+                    .all(|l| l.contains("consumer=0") || l.contains("consumer=1")),
+                "{forwarded:#?}"
+            );
+        }
+    }
     #[cfg(feature = "tls")]
     mod tls_rejection {
         use super::*;

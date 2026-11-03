@@ -809,30 +809,38 @@ mod tests {
     }
 
     /// The wrapper logs each librdkafka level under the `librdkafka` target
-    /// with the facility, at the mapped level.
+    /// with the facility, at the mapped level, and with the `consumer` field
+    /// only when the client has an instance.
     #[test]
     fn the_wrapper_logs_every_level_to_the_librdkafka_target() {
         use RDKafkaLogLevel as L;
-        let context = SpateContext((), None);
-        for (level, expected) in [
-            (L::Emerg, "ERROR"),
-            (L::Alert, "ERROR"),
-            (L::Critical, "ERROR"),
-            (L::Error, "ERROR"),
-            (L::Warning, "WARN"),
-            (L::Notice, "INFO"),
-            (L::Info, "INFO"),
-            (L::Debug, "DEBUG"),
-        ] {
-            let lines = spate_test::capture_logs(tracing::Level::DEBUG, || {
-                context.log(level, "FACIL", "the message");
-            });
-            assert_eq!(lines.len(), 1, "{level:?}: {lines:#?}");
-            let line = &lines[0];
-            assert!(line.contains(expected), "{level:?}: {line}");
-            assert!(line.contains("librdkafka"), "{level:?}: {line}");
-            assert!(line.contains("fac=\"FACIL\""), "{level:?}: {line}");
-            assert!(line.contains("the message"), "{level:?}: {line}");
+        for instance in [None, Some(1)] {
+            let context = SpateContext((), instance);
+            for (level, expected) in [
+                (L::Emerg, "ERROR"),
+                (L::Alert, "ERROR"),
+                (L::Critical, "ERROR"),
+                (L::Error, "ERROR"),
+                (L::Warning, "WARN"),
+                (L::Notice, "INFO"),
+                (L::Info, "INFO"),
+                (L::Debug, "DEBUG"),
+            ] {
+                let lines = spate_test::capture_logs(tracing::Level::DEBUG, || {
+                    context.log(level, "FACIL", "the message");
+                });
+                assert_eq!(lines.len(), 1, "{level:?}: {lines:#?}");
+                let line = &lines[0];
+                assert!(line.contains(expected), "{level:?}: {line}");
+                assert!(line.contains("librdkafka"), "{level:?}: {line}");
+                assert!(line.contains("fac=\"FACIL\""), "{level:?}: {line}");
+                assert!(line.contains("the message"), "{level:?}: {line}");
+                assert_eq!(
+                    line.contains("consumer=1"),
+                    instance.is_some(),
+                    "{instance:?} {level:?}: {line}"
+                );
+            }
         }
     }
 

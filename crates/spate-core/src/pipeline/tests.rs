@@ -2538,6 +2538,22 @@ fn a_zero_settling_window_passed_in_is_refused() {
     assert!(err.contains("`feed.settling_window`"), "{err}");
 }
 
+/// Pins that `run` refuses a settling window above a day set on a section
+/// built in code, which skips the load-time check.
+#[test]
+fn a_settling_window_above_a_day_passed_in_is_refused() {
+    let mut cfg = test_config(1);
+    let mut section = feed_section("sqs: {}\nlocation: s3://ops/jobs/backfill-1/").unwrap();
+    section.settling_window = Some(Duration::MAX);
+    cfg.feed = Some(section);
+    let h = start_with_config(cfg, ok_chain);
+    let err = config_error_before_open(h);
+    assert!(
+        err.contains("`feed.settling_window`") && err.contains("1day"),
+        "{err}"
+    );
+}
+
 /// Pins that `Source::configure_feed`'s default refuses the section, naming
 /// the source, so a source that reads no feed fails at startup.
 #[test]

@@ -176,6 +176,9 @@ settled.
 - **Redaction.** Print every passthrough map through
   `spate_core::config::redact::map` and every URL through `redact::url`, in a
   hand-written `Debug` that destructures every field.
+- **Duration bounds.** Refuse a duration outside its range at load through
+  `spate_core::config::check_duration`, and put the key and the reason for the
+  bound around its error.
 - **Errors.** Build on a TLS stack whose rejection `tls_rejection!` can read,
   and classify the client's errors under
   [ADR-0081](docs/adr/0081-a-rejected-credential-or-tls-handshake-is-fatal-unless-throttled.md).

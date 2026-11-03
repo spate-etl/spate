@@ -320,8 +320,8 @@ mod tests {
         assert!(err.contains("`feed.settling_window`"), "{err}");
     }
 
-    /// Pins the window's floor at one read interval: 20 s loads, 19 s is
-    /// refused.
+    /// Pins the window's floor at one read interval, 20 s loading and 19 s
+    /// refused, and the refusal's whole text.
     #[test]
     fn a_settling_window_below_the_floor_is_refused() {
         let cfg = load("{ sqs: {}, settling_window: 20s }").expect("the floor loads");
@@ -330,9 +330,9 @@ mod tests {
             Some(Duration::from_secs(20))
         );
         let err = load("{ sqs: {}, settling_window: 19s 999ms }").unwrap_err();
-        assert!(
-            err.contains("`feed.settling_window`") && err.contains("20s"),
-            "{err}"
+        assert_eq!(
+            err,
+            "invalid configuration: `feed.settling_window` must be from 20s to 1day; found 19s 999ms"
         );
     }
 
@@ -357,6 +357,17 @@ mod tests {
         let err = load("{ memory: {}, settling_window: 1m }").unwrap_err();
         assert!(
             err.contains("`feed.settling_window`") && err.contains("`memory`"),
+            "{err}"
+        );
+    }
+
+    /// Pins that the in-process feed's refusal comes before the window's
+    /// bounds, so a zero window beside it names `memory` and no range.
+    #[test]
+    fn a_memory_feed_with_a_zero_settling_window_names_memory() {
+        let err = load("{ memory: {}, settling_window: 0s }").unwrap_err();
+        assert!(
+            err.contains("`memory`") && !err.contains("must be from"),
             "{err}"
         );
     }

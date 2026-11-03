@@ -62,12 +62,14 @@
 
 mod chunk;
 mod component;
+mod duration;
 mod error;
 mod feed;
 mod interpolate;
 pub mod redact;
 
 pub use component::ComponentConfig;
+pub use duration::{DurationBounds, DurationBoundsError, check_duration};
 pub use error::ConfigError;
 pub use feed::FeedSection;
 
@@ -83,7 +85,6 @@ pub use feed::FeedSection;
 pub use serde_yaml::Value as YamlValue;
 
 use bytesize::ByteSize;
-use humantime_serde::re::humantime::format_duration;
 use serde::Deserialize;
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -737,7 +738,9 @@ impl PipelineConfig {
     /// which a programmatic config reaches without validation, enforces it
     /// too.
     pub(crate) fn reject_bad_settling_window(&self) -> Result<(), ConfigError> {
-        const CEILING: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+        const SETTLING_WINDOW: DurationBounds =
+            DurationBounds::at_least(crate::feed::END_CHECK_INTERVAL)
+                .at_most(Duration::from_secs(24 * 60 * 60));
         let Some(feed) = &self.feed else {
             return Ok(());
         };
@@ -751,16 +754,8 @@ impl PipelineConfig {
                     .into(),
             ));
         }
-        let floor = crate::feed::END_CHECK_INTERVAL;
-        if window < floor || window > CEILING {
-            return Err(ConfigError::Validation(format!(
-                "`feed.settling_window` must be from {} to {}; found {}",
-                format_duration(floor),
-                format_duration(CEILING),
-                format_duration(window)
-            )));
-        }
-        Ok(())
+        check_duration(window, SETTLING_WINDOW)
+            .map_err(|e| ConfigError::Validation(format!("`feed.settling_window` {e}")))
     }
 
     /// The component config for the sink named `name`. The single-sink `sink:`

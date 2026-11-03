@@ -553,7 +553,7 @@ mod tests {
         assert!(err.contains("feed.kafka"), "{err}");
 
         // librdkafka takes whole milliseconds from 1 to `i32::MAX`.
-        for timeout in ["0s", "500us", "2147483648ms", "25d"] {
+        for timeout in ["0s", "500us", "2147483648ms", "2147483647ms 1ns", "25d"] {
             let err = parse(&format!("{MINIMAL}  delivery_timeout: {timeout}\n"))
                 .unwrap_err()
                 .to_string();

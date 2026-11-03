@@ -6,6 +6,7 @@ use support::Raw as _;
 
 use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::mocking::MockCluster;
+use rdkafka::types::{RDKafkaApiKey, RDKafkaRespErr};
 use spate_core::checkpoint::Checkpointer;
 use spate_core::clock::TestClock;
 use spate_core::error::{ErrorClass, SourceError};
@@ -423,7 +424,12 @@ fn second_member_triggers_revoke_then_fresh_assignment() {
                 expected.sort();
                 assert_eq!(sorted, expected, "all lanes revoked eagerly");
                 assert_eq!(barrier.remaining(), ids.len());
-                support::complete_revocation(&mut source, &ids, &barrier, &[]).expect("flush");
+                let _ = flush_refusal(support::complete_revocation(
+                    &mut source,
+                    &ids,
+                    &barrier,
+                    &[],
+                ));
             }
             SourceEvent::LanesAssigned(new_lanes) => {
                 if revoked {
@@ -504,7 +510,7 @@ fn drive_step(
             barrier,
         } => {
             lanes.clear();
-            support::complete_revocation(source, &ids, &barrier, &[]).expect("flush");
+            let _ = flush_refusal(support::complete_revocation(source, &ids, &barrier, &[]));
             Some(0)
         }
         _ => None,
@@ -1396,6 +1402,19 @@ fn a_mid_batch_authorization_failure_fails_the_lane() {
 
 type Lane = <KafkaSource as Source>::Lane;
 
+/// The reason a flush failed retryably, which the runtime logs and carries on
+/// from during a revocation. Any other failure panics.
+fn flush_refusal(flushed: Result<(), SourceError>) -> Option<String> {
+    match flushed {
+        Ok(()) => None,
+        Err(SourceError::Client {
+            class: ErrorClass::Retryable,
+            reason,
+        }) => Some(reason),
+        Err(e) => panic!("flush: {e}"),
+    }
+}
+
 /// Plays the runtime's part for one source: begins an epoch on each
 /// assignment, admits each added lane to it, and drains, commits and flushes
 /// on each revocation. Asserts the runtime's contract on every event: an
@@ -1407,6 +1426,8 @@ struct Driver {
     epoch: u32,
     seen: Vec<spate_core::source::LaneId>,
     revocations: usize,
+    /// The reasons of the flushes that failed during a revocation.
+    flush_failures: Vec<String>,
 }
 
 impl Driver {
@@ -1424,6 +1445,7 @@ impl Driver {
             epoch: 0,
             seen: Vec::new(),
             revocations: 0,
+            flush_failures: Vec::new(),
         }
     }
 
@@ -1452,8 +1474,13 @@ impl Driver {
                 self.lanes.retain(|l| !lanes.contains(&l.id()));
                 self.cp.drain();
                 let watermarks = self.cp.take_watermarks();
-                support::complete_revocation(&mut self.source, &lanes, &barrier, &watermarks)
-                    .expect("flush");
+                self.flush_failures
+                    .extend(flush_refusal(support::complete_revocation(
+                        &mut self.source,
+                        &lanes,
+                        &barrier,
+                        &watermarks,
+                    )));
                 self.revocations += 1;
             }
             Ok(_) => {}
@@ -1498,9 +1525,13 @@ impl Driver {
     }
 
     /// Read every live lane, stepping between polls, until each partition has
-    /// delivered offsets `0..n`. Each batch is dropped once read, which acks
-    /// it.
-    fn read(&mut self, n: i64, timeout: Duration) {
+    /// delivered `n` offsets, and return the offsets read per partition. Each
+    /// batch is dropped once read, which acks it.
+    fn read(
+        &mut self,
+        n: i64,
+        timeout: Duration,
+    ) -> BTreeMap<u32, std::collections::BTreeSet<i64>> {
         let mut got: BTreeMap<u32, std::collections::BTreeSet<i64>> = BTreeMap::new();
         let deadline = Instant::now() + timeout;
         let done = |got: &BTreeMap<u32, std::collections::BTreeSet<i64>>, parts: &[u32]| {
@@ -1525,6 +1556,7 @@ impl Driver {
                 }
             }
         }
+        got
     }
 
     /// Commit and flush what the read batches made committable.
@@ -1705,6 +1737,47 @@ fn more_consumers_than_partitions_keeps_running() {
         committed(&brokers, "idle-consumer", 1),
         [rdkafka::Offset::Offset(5)]
     );
+}
+
+/// A member told its generation is gone fails the flush that follows the
+/// drained revocation, and the source then holds and reads every partition
+/// again.
+#[test]
+fn a_lost_assignment_fails_the_flush_and_the_source_recovers() {
+    for consumers in [1, 2] {
+        let cluster = MockCluster::new(1).expect("mock cluster");
+        cluster.create_topic(TOPIC, 4, 1).expect("create topic");
+        let brokers = cluster.bootstrap_servers();
+        produce(&brokers, TOPIC, 5, 4, "l");
+
+        let group = format!("lost-{consumers}");
+        let mut driver = Driver::open(consumers_config(&brokers, &group, consumers));
+        driver.settle(4, Duration::from_secs(60));
+        let before = driver.revocations;
+
+        cluster.request_errors(
+            RDKafkaApiKey::Heartbeat,
+            &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_ILLEGAL_GENERATION],
+        );
+        wait_until(Duration::from_secs(30), "the revocation", || {
+            driver.step(Duration::from_millis(100));
+            driver.revocations > before
+        });
+        assert_eq!(
+            driver.flush_failures.len(),
+            1,
+            "{:?}",
+            driver.flush_failures
+        );
+        assert!(
+            driver.flush_failures[0].contains("AssignmentLost"),
+            "{:?}",
+            driver.flush_failures
+        );
+
+        driver.settle(4, Duration::from_secs(60));
+        driver.read(5, Duration::from_secs(30));
+    }
 }
 
 /// Each consumer publishes the lag of the partitions it holds as soon as its

@@ -56,9 +56,9 @@
 //!    by lane count (the runtime's drivers arrive once per stopped lane);
 //! 2. the runtime stops the lanes, waits for the barrier, drains the
 //!    checkpointer, calls [`Source::commit`] + [`Source::flush_commits`].
-//!    The sync commit happens while this member still owns the partitions
-//!    (the rebalance is not yet acknowledged, so the group generation is
-//!    still valid);
+//!    The sync commit runs before the rebalance is acknowledged, so the
+//!    generation is valid for a member the group has kept. For a member it
+//!    removed, the client refuses the commit and the drained work replays;
 //! 3. the controller loops back into `poll_events`, which sees the pending
 //!    completion and calls `unassign()`, letting the rebalance finish.
 //!
@@ -73,6 +73,10 @@
 //! empty) and the drained work replays. The next call reports the error,
 //! classified like every other consumer error; librdkafka rejoins on its
 //! own and a fresh assignment follows.
+//!
+//! **Lost revocation**: a member the client was told is out of its generation
+//! gets the same revocation event. The steps above run, the flush fails with
+//! `AssignmentLost`, the failure is logged per consumer, and `unassign` follows.
 //!
 //! **Stale held assignment**: no event reaches the source when the group
 //! removes a member holding an offer, so the offer stays held until another
@@ -1463,7 +1467,7 @@ impl Source for KafkaSource {
         // Every consumer commits, even after one fails, so one consumer's
         // failure does not hold back the others' stored offsets.
         let mut first_error = None;
-        for member in &self.members {
+        for (k, member) in self.members.iter().enumerate() {
             match member
                 .consumer
                 .commit_consumer_state(rdkafka::consumer::CommitMode::Sync)
@@ -1474,6 +1478,11 @@ impl Source for KafkaSource {
                     rdkafka::error::RDKafkaErrorCode::NoOffset,
                 )) => {}
                 Err(e) => {
+                    tracing::warn!(
+                        consumer = k,
+                        error = %e,
+                        "sync commit failed; this consumer's stored offsets replay"
+                    );
                     first_error.get_or_insert(SourceError::Client {
                         class: ErrorClass::Retryable,
                         reason: format!("sync commit: {e}"),
@@ -3227,6 +3236,131 @@ mod tests {
                 drop(joiner);
             });
         }
+    }
+
+    /// A source of two consumers on `brokers` holding two partitions each,
+    /// with an offset stored for every partition.
+    fn settled_with_stored_offsets(brokers: &str, group: &str) -> KafkaSource {
+        let mut cfg = test_config();
+        cfg.brokers = brokers.to_owned();
+        cfg.group_id = group.into();
+        cfg.consumers = 2;
+        cfg.commit_interval = Duration::from_hours(1);
+        cfg.rdkafka = std::collections::BTreeMap::from([
+            ("session.timeout.ms".to_string(), "6000".to_string()),
+            ("heartbeat.interval.ms".to_string(), "500".to_string()),
+            ("auto.offset.reset".to_string(), "earliest".to_string()),
+        ]);
+        let mut source = KafkaSource::new(cfg);
+        let cp = Checkpointer::new();
+        source.open(SourceCtx::new(cp.handle())).expect("open");
+        spate_test::wait_until(Duration::from_secs(60), "every partition held", || {
+            if let Ok(SourceEvent::LanesRevoked { lanes, barrier }) =
+                source.poll_events(Duration::from_millis(50))
+            {
+                for _ in &lanes {
+                    barrier.arrive();
+                }
+            }
+            source.members.iter().all(|m| m.assignment.len() == 2)
+        });
+        let watermarks: Vec<(PartitionId, i64)> = (0..4).map(|p| (PartitionId(p), 1)).collect();
+        source.commit(&watermarks).expect("store");
+        source
+    }
+
+    /// The offset `group` has committed for each partition of `orders`.
+    fn committed_of(brokers: &str, group: &str) -> Vec<Offset> {
+        let probe = crate::testutil::raw_consumer(brokers, group);
+        let mut tpl = TopicPartitionList::new();
+        for p in 0..4 {
+            tpl.add_partition("orders", p);
+        }
+        probe
+            .committed_offsets(tpl, Duration::from_secs(10))
+            .expect("committed")
+            .elements()
+            .iter()
+            .map(|e| e.offset())
+            .collect()
+    }
+
+    /// A consumer whose flush fails does not hold back its peer's commit, in
+    /// either order, and the call still reports the failure.
+    #[test]
+    fn a_lost_member_does_not_hold_back_its_peers_commit() {
+        use rdkafka::mocking::MockCluster;
+        use rdkafka::types::{RDKafkaApiKey, RDKafkaRespErr};
+        let cluster = MockCluster::new(1).expect("mock cluster");
+        cluster.create_topic("orders", 4, 1).expect("create topic");
+        let brokers = cluster.bootstrap_servers();
+        let mut source = settled_with_stored_offsets(&brokers, "lost-first");
+
+        cluster.request_errors(
+            RDKafkaApiKey::Heartbeat,
+            &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_ILLEGAL_GENERATION],
+        );
+        spate_test::wait_until(Duration::from_secs(30), "a member marked lost", || {
+            source.members.iter().any(|m| m.consumer.assignment_lost())
+        });
+        let lost = source
+            .members
+            .iter()
+            .position(|m| m.consumer.assignment_lost())
+            .expect("lost");
+        // The lost member flushes first, so an early return skips its peer.
+        source.members.swap(0, lost);
+        let owned: Vec<i32> = source.members[1].assignment.values().copied().collect();
+
+        match source.flush_commits() {
+            Err(SourceError::Client { class, reason }) => {
+                assert_eq!(class, ErrorClass::Retryable, "{reason}");
+                assert!(reason.contains("AssignmentLost"), "{reason}");
+            }
+            other => panic!("expected the lost member's failure, got {other:?}"),
+        }
+        let read_back = committed_of(&brokers, "lost-first");
+        for p in owned {
+            assert_eq!(
+                read_back[usize::try_from(p).expect("partition")],
+                Offset::Offset(1),
+                "peer's partition {p}: {read_back:?}"
+            );
+        }
+        // Closing with a rebalance queued can hang, and this test is not
+        // about close.
+        std::mem::forget(source);
+    }
+
+    /// Each consumer whose commit the broker refuses logs its own line.
+    #[test]
+    fn a_failed_commit_names_each_consumer() {
+        use rdkafka::mocking::MockCluster;
+        use rdkafka::types::{RDKafkaApiKey, RDKafkaRespErr};
+        let cluster = MockCluster::new(1).expect("mock cluster");
+        cluster.create_topic("orders", 4, 1).expect("create topic");
+        let brokers = cluster.bootstrap_servers();
+        let mut source = settled_with_stored_offsets(&brokers, "refused-commits");
+
+        cluster.request_errors(
+            RDKafkaApiKey::OffsetCommit,
+            &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_ILLEGAL_GENERATION; 2],
+        );
+        let mut flushed = None;
+        let warned = spate_test::capture_logs(tracing::Level::WARN, || {
+            flushed = Some(source.flush_commits());
+        });
+        assert!(matches!(flushed, Some(Err(_))), "{flushed:?}");
+        for k in 0..2 {
+            let field = format!("consumer={k}");
+            assert!(
+                warned
+                    .iter()
+                    .any(|l| l.contains("sync commit failed") && l.contains(&field)),
+                "{field}: {warned:#?}"
+            );
+        }
+        std::mem::forget(source);
     }
 
     /// A held consumer the group has removed reads a generation older than

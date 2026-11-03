@@ -206,6 +206,10 @@ pub struct KafkaSource {
     main_queue_rewinds: u64,
     /// The clock the assignment windows, the hold and the error's age read.
     clock: SyncClock,
+    /// An error the next poll of this consumer returns in place of
+    /// `BaseConsumer::poll`, for a test that needs a poll error in one call.
+    #[cfg(test)]
+    injected_poll_error: Option<(usize, rdkafka::error::KafkaError)>,
 }
 
 impl std::fmt::Debug for KafkaSource {
@@ -239,21 +243,23 @@ fn partition_ids<'a>(partitions: impl IntoIterator<Item = &'a i32>) -> Vec<Parti
 /// queue, so a fatal one replaces a retryable one an earlier consumer
 /// returned.
 fn keep_reported(reported: &mut Option<SourceError>, error: SourceError) {
-    let fatal = |e: &SourceError| {
-        matches!(
-            e,
-            SourceError::Client {
-                class: ErrorClass::Fatal,
-                ..
-            }
-        )
-    };
     if reported
         .as_ref()
-        .is_none_or(|first| fatal(&error) && !fatal(first))
+        .is_none_or(|first| is_fatal(&error) && !is_fatal(first))
     {
         *reported = Some(error);
     }
+}
+
+/// Whether `error` is a client error classified fatal.
+fn is_fatal(error: &SourceError) -> bool {
+    matches!(
+        error,
+        SourceError::Client {
+            class: ErrorClass::Fatal,
+            ..
+        }
+    )
 }
 
 /// The order one `poll_events` call polls `n` consumers in, starting at
@@ -290,6 +296,8 @@ impl KafkaSource {
             last_consumer_error: None,
             main_queue_rewinds: 0,
             clock: SyncClock::system(),
+            #[cfg(test)]
+            injected_poll_error: None,
         }
     }
 
@@ -685,7 +693,14 @@ impl KafkaSource {
             // message should ever surface here. If one does, rewind so it is
             // refetched through its split queue; dropping it would let the
             // watermark commit past an unprocessed record.
-            match consumer.poll(wait) {
+            #[cfg(test)]
+            let polled = match self.take_injected_poll_error(k) {
+                Some(e) => Some(Err(e)),
+                None => consumer.poll(wait),
+            };
+            #[cfg(not(test))]
+            let polled = consumer.poll(wait);
+            match polled {
                 None => {}
                 Some(Ok(msg)) => {
                     self.main_queue_rewinds += 1;
@@ -911,6 +926,15 @@ impl KafkaSource {
             return Ok(SourceEvent::Idle);
         }
         self.accept_held(false)
+    }
+
+    /// The injected error for consumer `k`'s poll, removed so it is returned
+    /// once.
+    #[cfg(test)]
+    fn take_injected_poll_error(&mut self, k: usize) -> Option<rdkafka::error::KafkaError> {
+        self.injected_poll_error
+            .take_if(|(consumer, _)| *consumer == k)
+            .map(|(_, e)| e)
     }
 
     /// Partitions consumer `k` may still store offsets for: its live

@@ -1935,6 +1935,25 @@ fn a_consumer_joining_after_the_hold_ended_starts_a_new_epoch() {
     });
 }
 
+/// The client and group sequence around a member that never answers its offer,
+/// on the mock broker. Fails on a librdkafka that changes the sequence.
+#[test]
+fn a_member_that_never_answers_its_offer_is_replaced() {
+    for (answer, group) in [
+        (support::Answer::Empty, "never-answers-empty"),
+        (support::Answer::Offer, "never-answers-offer"),
+    ] {
+        let cluster = MockCluster::new(1).expect("mock cluster");
+        cluster.create_topic(TOPIC, 1, 1).expect("create topic");
+        support::a_member_that_never_answers_its_offer(
+            &cluster.bootstrap_servers(),
+            TOPIC,
+            group,
+            answer,
+        );
+    }
+}
+
 /// A lost member's failed flush leaves its peer's commit in place, and no
 /// offset past what was read is committed. The partitions read again from at
 /// or before the committed offset, so a record the lost member read and could

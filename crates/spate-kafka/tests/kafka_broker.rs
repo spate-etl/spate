@@ -309,6 +309,24 @@ fn real_broker_backlog_reports_summable_lag() {
     );
 }
 
+/// The client and group sequence around a member that never answers its offer,
+/// on a real broker: the group removes the member at its rebalance timeout and
+/// offers its partition to the other member.
+#[test]
+#[ignore = "requires Docker"]
+fn real_broker_a_member_that_never_answers_its_offer_is_replaced() {
+    let container = broker().start().expect("start kafka container");
+    let port = container.get_host_port_ipv4(KAFKA_PORT).expect("port");
+    let brokers = format!("127.0.0.1:{port}");
+    produce(&brokers, TOPIC, 1, 1, "never");
+    for (answer, group) in [
+        (support::Answer::Empty, "never-answers-empty"),
+        (support::Answer::Offer, "never-answers-offer"),
+    ] {
+        support::a_member_that_never_answers_its_offer(&brokers, TOPIC, group, answer);
+    }
+}
+
 /// Revocation on a real broker with two consumers in the source: the
 /// watermarks drained for each consumer's partition are stored through the
 /// consumer that owns it, while it still owns it, and both are committed.

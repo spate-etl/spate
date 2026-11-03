@@ -1,0 +1,5 @@
+**`spate_core::config::check_duration` refuses a duration outside a range** (`spate-core`)
+
+`check_duration` takes a `Duration` and a `DurationBounds`, which hold a floor, an optional ceiling, and whether `0s` is allowed. Both ends are inclusive. It returns a `DurationBoundsError` whose message states the bounds and the value found, without the key, such as `must be from 20s to 1day; found 5s`. A connector puts its key and the reason for the bound around that message. The items are also available as `spate::config::check_duration`.
+
+The `checkpoint.interval` refusal uses it. Its message reads `checkpoint.interval must be at least 100ms; found 50ms: …`, and the value is written in configuration form, such as `99ms 500us`. In previous versions it read `checkpoint.interval must be at least 100ms (got 50ms): …`, and a value such as 99.5 milliseconds was written as `99.5ms` in place of `99ms 500us`. The bounds of `checkpoint.interval` and `feed.settling_window` are unchanged, and so is the `feed.settling_window` message.

@@ -62,12 +62,14 @@
 
 mod chunk;
 mod component;
+mod duration;
 mod error;
 mod feed;
 mod interpolate;
 pub mod redact;
 
 pub use component::ComponentConfig;
+pub use duration::{DurationBounds, DurationBoundsError, check_duration};
 pub use error::ConfigError;
 pub use feed::FeedSection;
 
@@ -83,7 +85,6 @@ pub use feed::FeedSection;
 pub use serde_yaml::Value as YamlValue;
 
 use bytesize::ByteSize;
-use humantime_serde::re::humantime::format_duration;
 use serde::Deserialize;
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -609,13 +610,13 @@ impl PipelineConfig {
         // A floor keeps sub-100ms intervals from hammering the source's
         // offset store for no durability gain. The sink write is the
         // durability boundary, not the checkpoint.
-        const MIN_COMMIT_INTERVAL: Duration = Duration::from_millis(100);
-        if self.checkpoint.interval < MIN_COMMIT_INTERVAL {
+        const COMMIT_INTERVAL: DurationBounds =
+            DurationBounds::at_least(Duration::from_millis(100));
+        if let Err(e) = check_duration(self.checkpoint.interval, COMMIT_INTERVAL) {
             return fail(format!(
-                "checkpoint.interval must be at least 100ms (got {:?}): the commit \
-                 loop fires every interval, so sub-100ms intervals hammer the \
-                 source's offset store without improving durability",
-                self.checkpoint.interval
+                "checkpoint.interval {e}: the commit loop fires every interval, so \
+                 sub-100ms intervals hammer the source's offset store without \
+                 improving durability"
             ));
         }
         if self.checkpoint.max_pending_batches == 0 {
@@ -737,7 +738,9 @@ impl PipelineConfig {
     /// which a programmatic config reaches without validation, enforces it
     /// too.
     pub(crate) fn reject_bad_settling_window(&self) -> Result<(), ConfigError> {
-        const CEILING: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+        const SETTLING_WINDOW: DurationBounds =
+            DurationBounds::at_least(crate::feed::END_CHECK_INTERVAL)
+                .at_most(Duration::from_secs(24 * 60 * 60));
         let Some(feed) = &self.feed else {
             return Ok(());
         };
@@ -751,16 +754,8 @@ impl PipelineConfig {
                     .into(),
             ));
         }
-        let floor = crate::feed::END_CHECK_INTERVAL;
-        if window < floor || window > CEILING {
-            return Err(ConfigError::Validation(format!(
-                "`feed.settling_window` must be from {} to {}; found {}",
-                format_duration(floor),
-                format_duration(CEILING),
-                format_duration(window)
-            )));
-        }
-        Ok(())
+        check_duration(window, SETTLING_WINDOW)
+            .map_err(|e| ConfigError::Validation(format!("`feed.settling_window` {e}")))
     }
 
     /// The component config for the sink named `name`. The single-sink `sink:`
@@ -1411,6 +1406,30 @@ sinks:
             let err = PipelineConfig::from_str(yaml).unwrap_err().to_string();
             assert!(err.contains(needle), "expected `{needle}` in: {err}");
         }
+    }
+
+    /// Pins the commit interval's floor at 100ms, inclusive and on the whole
+    /// duration, and the refusal's whole text.
+    #[test]
+    fn checkpoint_interval_loads_at_its_floor_and_is_refused_a_nanosecond_under() {
+        let yaml = |interval: &str| {
+            format!(
+                "pipeline: {{ name: x }}\ncheckpoint: {{ interval: {interval} }}\n\
+                 source: {{ m: {{}} }}\nsink: {{ m: {{}} }}"
+            )
+        };
+        let cfg = PipelineConfig::from_str(&yaml("100ms")).expect("the floor loads");
+        assert_eq!(cfg.checkpoint.interval, Duration::from_millis(100));
+        let err = PipelineConfig::from_str(&yaml("99ms 999us 999ns"))
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            err,
+            "invalid configuration: checkpoint.interval must be at least 100ms; \
+             found 99ms 999us 999ns: the commit loop fires every interval, so \
+             sub-100ms intervals hammer the source's offset store without \
+             improving durability"
+        );
     }
 
     #[test]

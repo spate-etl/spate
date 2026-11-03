@@ -6,14 +6,12 @@ description: "Numbered properties the engine holds to, such as at-least-once del
 
 The properties the engine is arranged around, and the only place they are stated
 in full. Everywhere else cites them by number, so a disagreement is a mismatched
-identifier rather than a difference in phrasing somebody has to notice. The one
-file that restates the list is the pull request template, which turns it into a
-checklist a reviewer ticks against.
+identifier rather than a difference in phrasing somebody has to notice. The
+pull request template asks which numbers a change touches.
 
-The template cites exactly the set defined here, and nothing anywhere cites a
-number this file does not define. A citation carries the identifier and none of
-the wording, so any exception to a property belongs in its statement below
-rather than only where it is cited.
+Nothing anywhere cites a number this file does not define. A citation carries
+the identifier and none of the wording, so any exception to a property belongs
+in its statement below rather than only where it is cited.
 
 Most changes touch none of these. A change that touches one is not thereby
 wrong; it needs to say how the property still holds, and that is the review.

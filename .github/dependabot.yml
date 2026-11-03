@@ -233,7 +233,7 @@ updates:
   # server change reaches first, and weekly so it reaches it within a week.
   #
   # When a release breaks the suite, this pull request goes red and stays open.
-  # DEVELOPING.md carries what to do next.
+  # ci/README.md carries what to do next.
   - package-ecosystem: docker
     directory: "/ci/clickhouse/stable"
     schedule:

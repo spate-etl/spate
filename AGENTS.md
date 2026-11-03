@@ -56,9 +56,9 @@ Traps here:
   Piped `grep`/`tail` chains report the exit status of the last command in the
   pipeline and have masked failures in this repo. No command in `xtask` pipes.
 - **Pass `--locked` on any ad-hoc cargo call**, as CI does. Without it a command
-  can resolve a different graph and hide a failure CI will then find. The one
-  exception is `cargo hack --no-dev-deps`, which rewrites each `Cargo.toml` as
-  it runs and fails outright with the flag.
+  can resolve a different graph and hide a failure CI will then find. The
+  commands that cannot take it are listed in
+  [`DEVELOPING.md`](DEVELOPING.md#commands).
 - **`actionlint` runs locally only.** After touching a workflow, run
   `actionlint .github/workflows/*.yml`; that is the only time it runs at all.
 - **A local `zizmor` run is offline.** CI runs it through `cargo xtask tidy`
@@ -178,8 +178,8 @@ Scope discipline:
 
 Before opening a pull request, read
 [`.github/pull_request_template.md`](.github/pull_request_template.md) and use it
-as the body structure. It carries the INV checklist and the gate checklist. Tick
-those by exit code, not by memory.
+as the body structure. It asks which invariants the change touches and carries
+the gate checklist; tick that by exit code, not by memory.
 
 ## Filing an issue
 

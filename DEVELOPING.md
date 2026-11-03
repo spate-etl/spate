@@ -53,7 +53,7 @@ These sit outside `ci`, by cost or by dependency:
 | `cargo xtask fuzz build`, `cargo xtask fuzz run` | Needs a nightly toolchain; the nightly tier fuzzes |
 | `cargo xtask mutants` | Runs a package's suite once per mutant; CI runs it on each pull request, advisory |
 
-Three commands omit `--locked`, which everything else passes because CI does.
+These commands omit `--locked`, which everything else passes because CI does.
 `cargo hack --no-dev-deps` rewrites each `Cargo.toml` as it runs and a locked
 build refuses; `cargo fmt` resolves nothing, reading only `.rs` files; and
 `cargo fuzz` accepts no `--locked` passthrough.

@@ -92,8 +92,9 @@ Each control below is recorded where it is enforced, in `deny.toml`, in the
 workflow that runs it, or in the script it calls:
 
 - `Cargo.lock` and `package-lock.json` are committed, and CI builds `--locked` /
-  `npm ci`, so a build cannot resolve a different graph. Two invocations are
-  outside that and are documented where they appear.
+  `npm ci`, so a build cannot resolve a different graph.
+  [`DEVELOPING.md`](DEVELOPING.md#commands) lists the commands that cannot
+  take `--locked`.
 - Every GitHub Action is pinned to a full commit SHA, and `zizmor` fails CI if
   a pin, a token scope, or a checkout credential setting regresses.
 - `cargo deny check advisories` runs on every pull request **and** nightly. It

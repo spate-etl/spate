@@ -1406,6 +1406,22 @@ impl KafkaSource {
     }
 }
 
+/// The events waiting on `consumer`'s queue, of every kind.
+#[cfg(test)]
+fn queued_events(consumer: &BaseConsumer<SourceContext>) -> usize {
+    let rk = consumer.client().native_ptr();
+    // SAFETY: `consumer` keeps `rk` live for the call. `BaseConsumer::new`
+    // refuses a client with no consumer queue when `group.id` is set, and
+    // `KafkaSourceConfig` always sets it, so the handle is not null. The
+    // handle is released before return.
+    unsafe {
+        let q = rdkafka::bindings::rd_kafka_queue_get_consumer(rk);
+        let n = rdkafka::bindings::rd_kafka_queue_length(q);
+        rdkafka::bindings::rd_kafka_queue_destroy(q);
+        n
+    }
+}
+
 /// Sets every consumer's context to complete rebalances inline, then
 /// releases every consumer with `unassign`.
 ///
@@ -2602,19 +2618,6 @@ mod tests {
             );
         }
 
-        /// Events waiting on consumer `k`'s queue.
-        fn queued(source: &KafkaSource, k: usize) -> usize {
-            let rk = source.members[k].consumer.client().native_ptr();
-            // SAFETY: `rk` is a live client owned by `source`, and the queue
-            // handle is released before return.
-            unsafe {
-                let q = rdkafka::bindings::rd_kafka_queue_get_consumer(rk);
-                let n = rdkafka::bindings::rd_kafka_queue_length(q);
-                rdkafka::bindings::rd_kafka_queue_destroy(q);
-                n
-            }
-        }
-
         /// Raise `code` as consumer `k`'s fatal error, with `reason` as its
         /// text.
         fn raise_fatal(source: &KafkaSource, k: usize, code: RespErr, reason: &CStr) {
@@ -2672,10 +2675,10 @@ mod tests {
             // Leave exactly consumer 0's two retryable errors queued, so it
             // returns one in the call that also polls consumer 1.
             spate_test::wait_until(Duration::from_secs(20), "consumer 0's errors", || {
-                queued(&source, 0) >= 2
+                queued_events(&source.members[0].consumer) >= 2
             });
             let c0 = Arc::clone(&source.members[0].consumer);
-            while queued(&source, 0) > 2 {
+            while queued_events(&source.members[0].consumer) > 2 {
                 assert!(
                     c0.poll(Duration::ZERO).is_none(),
                     "only non-error events precede"

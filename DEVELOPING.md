@@ -58,10 +58,6 @@ Three commands omit `--locked`, which everything else passes because CI does.
 build refuses; `cargo fmt` resolves nothing, reading only `.rs` files; and
 `cargo fuzz` accepts no `--locked` passthrough.
 
-`cargo xtask docs` sets `CI=true`. The client-redirects plugin only registers
-under it, so a plain `npm run build` skips redirect validation, and a redirect
-pointing at a page you deleted is a hard failure.
-
 ## Git hooks
 
 ```sh
@@ -103,7 +99,7 @@ Container-backed tests use testcontainers and are `#[ignore]`d, so a normal run
 skips them. `cargo xtask integration-test` is what selects them.
 
 A suite that boots a real server runs it at a pinned version, one lane per
-release line the vendor still supports, or per store for the S3 source,
+release line the vendor still supports,
 selected by a `SPATE_<SERVICE>_LANE`
 variable and pinned by tag and digest under `ci/<service>/`. CI runs the primary
 lane for the whole tier and gives every other lane a job of its own.
@@ -151,11 +147,6 @@ gate follows a third closure over the same paths, this one over the non-dev
 dependency edges: a connector change checks that connector and the facade, and
 a `spate-core` change checks every published crate. `cargo xtask tidy self-test`
 checks each classifier against the crate graph.
-
-The macOS lane runs the workspace suite on each merge-queue entry that changes
-Rust and on each push to `main`. On a pull request it runs when the diff touches
-a workspace manifest, `Cargo.lock`, a `build.rs`, the cargo or nextest
-configuration, or the workflow, action or classifier that runs it.
 
 ## Testing conventions
 
@@ -264,18 +255,12 @@ error. Collection is bounded by a callgrind toggle on the module the
 collection rather than forcing it on. Work written inline in that function can
 therefore be reshaped by the optimizer until it falls outside the collected
 region, and whatever runs while collection happens to be on is counted instead.
-Here that was glibc tearing down the corpus the fixture built: one bench reported
-858,925 instructions, every one of them in `malloc_consolidate` and
-`unlink_chunk`, with no application frame at all and the same total whether its
-corpus held 400 documents or 6,400. Moving the loop behind a named callee took it
-to 30,086,540.
 
 `cargo xtask bench region` enforces it from the callgrind profile
 rather than from the source: a case must attribute at least 10% of its collected
 instructions to the binary under measurement, and must collect at least 1,000 of
 them, since a region can also be lost by leaving almost nothing rather than by
-leaving the allocator. Observed cases bottom out at 33.35% on x86_64 and
-28.67% on arm64. `cargo xtask bench counted`
+leaving the allocator. `cargo xtask bench counted`
 runs it after the benches, and CI runs it per shard as a *gate*: the counts are
 advisory, a bench measuring the allocator is not. `cargo xtask tidy self-test`
 holds the guard itself to captured profiles of both shapes, and needs no
@@ -298,12 +283,9 @@ once per feature arm. It compares what each prints with
 rewrites the files for the host's architecture. It runs on Linux x86_64 and
 aarch64 only, and refuses any other host.
 
-`spate_test_support::alloc::Counting` counts three figures per case. `allocs`
-is each successful `alloc` and `alloc_zeroed`. `reallocs` is each successful
-`realloc`, growing or not. `bytes` is the requested size of each allocation,
-plus the growth of each growing `realloc`. Only the Rust global allocator is
-seen, so what libzstd allocates through `malloc` is absent; the counted tier's
-DHAT heap rows include it. Each case is counted once, after one uncounted pass.
+[`spate_test_support::alloc`](test-support/src/alloc.rs) says what each figure
+counts. Allocations C code makes through `malloc`, as libzstd does, are not in
+them; the counted tier's DHAT heap rows include them.
 
 A failing run uploads the files it would have written as the
 `alloc-snapshots-<arch>` artifact. A change that moves a count, including a
@@ -315,8 +297,7 @@ hand from then on.
 Adding one means naming the file `benches/<name>_alloc.rs`, declaring it as a
 `[[bench]]` with `harness = false`, and calling
 `spate_test_support::alloc::main_with` from its `main`. The command discovers it
-by that name. A case whose pass reads the clock, as the skip-path warning's rate
-limiter does, is left out.
+by that name. A case whose pass reads the clock is left out.
 
 ### The wall-clock tier
 

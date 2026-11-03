@@ -589,6 +589,10 @@ fn a_producer_error_event_is_logged_once() {
     });
     let logged = lines.iter().filter(|line| line.contains(DOWN)).count();
     assert_eq!(logged, 2, "two events, one line each: {lines:#?}");
+    assert!(
+        lines.iter().all(|line| !line.contains("consumer=")),
+        "a producer's lines name no consumer: {lines:#?}"
+    );
 }
 
 /// The section of a feed whose clients reach no broker.
@@ -819,16 +823,11 @@ fn an_inline_fatal_enqueue_settles_without_deadlock() {
             )
             .unwrap(),
     );
-    // SAFETY: the pointer is a live client owned by `producer`, and the
-    // reason is a NUL-terminated literal.
-    let raised = unsafe {
-        rdkafka::bindings::rd_kafka_test_fatal_error(
-            producer.client().native_ptr(),
-            RDKafkaRespErr::RD_KAFKA_RESP_ERR_CLUSTER_AUTHORIZATION_FAILED,
-            c"by test".as_ptr(),
-        )
-    };
-    assert_eq!(raised, RDKafkaRespErr::RD_KAFKA_RESP_ERR_NO_ERROR);
+    crate::testutil::raise_fatal(
+        producer.client(),
+        RDKafkaRespErr::RD_KAFKA_RESP_ERR_CLUSTER_AUTHORIZATION_FAILED,
+        c"by test",
+    );
     // A core no callback has latched yet, as between librdkafka raising the
     // fatal error and the poll thread reporting it.
     let fresh = Arc::new(Core::new(&config, TWO, SyncClock::system()));

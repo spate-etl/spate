@@ -2461,12 +2461,7 @@ mod tests {
         /// Raise `code` as consumer `k`'s fatal error, with `reason` as its
         /// text.
         fn raise_fatal(source: &KafkaSource, k: usize, code: RespErr, reason: &CStr) {
-            let rk = source.members[k].consumer.client().native_ptr();
-            // SAFETY: `rk` is a live client owned by `source`, and `reason`
-            // is NUL-terminated.
-            let raised =
-                unsafe { rdkafka::bindings::rd_kafka_test_fatal_error(rk, code, reason.as_ptr()) };
-            assert_eq!(raised, RespErr::RD_KAFKA_RESP_ERR_NO_ERROR);
+            crate::testutil::raise_fatal(source.members[k].consumer.client(), code, reason);
         }
 
         /// Call `poll_events` until `done` holds for the lines logged at
@@ -2580,8 +2575,7 @@ mod tests {
             );
         }
 
-        /// A fatal error on each consumer is logged under its own index, the
-        /// one the source reports and the one it does not.
+        /// A fatal error on each consumer is logged under its own index.
         #[test]
         fn each_consumer_fatal_error_names_its_consumer() {
             // Leaked, as in `a_fatal_error_behind_a_retryable_one_is_reported`.

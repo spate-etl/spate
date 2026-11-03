@@ -507,6 +507,10 @@ pub(crate) mod tests {
         let count = |text: &str| lines.iter().filter(|line| line.contains(text)).count();
         assert_eq!(count(DOWN), 2, "two events, one line each: {lines:#?}");
         assert_eq!(count(SASL_REFUSED), 1, "one event, one line: {lines:#?}");
+        assert!(
+            lines.iter().all(|line| !line.contains("consumer=")),
+            "a producer's lines name no consumer: {lines:#?}"
+        );
         assert!(ctx.latest_rejection().is_some());
     }
 

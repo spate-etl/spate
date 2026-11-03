@@ -1428,6 +1428,8 @@ struct Driver {
     revocations: usize,
     /// The reasons of the flushes that failed during a revocation.
     flush_failures: Vec<String>,
+    /// The statistics of a driver from [`Driver::open_watched`].
+    statistics: Option<metrics_exporter_prometheus::PrometheusHandle>,
 }
 
 impl Driver {
@@ -1446,7 +1448,22 @@ impl Driver {
             seen: Vec::new(),
             revocations: 0,
             flush_failures: Vec::new(),
+            statistics: None,
         }
+    }
+
+    /// Open `source` with its statistics on, publishing to a recorder of its
+    /// own so [`Driver::settle_group`] can read them. `group` labels the
+    /// series.
+    fn open_watched(source: KafkaSource, group: &'static str) -> Driver {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let meter = spate_core::metrics::Meter::with_namespace("kafka", group, "source", "kafka");
+        let mut driver = metrics::with_local_recorder(&recorder, || {
+            Driver::open_with(source, |ctx| ctx.with_meter(Some(meter)))
+        });
+        driver.statistics = Some(handle);
+        driver
     }
 
     /// Serve one `poll_events` call.
@@ -1524,6 +1541,25 @@ impl Driver {
         }
     }
 
+    /// Step until the live lanes cover partitions `0..partitions` and each of
+    /// `consumers` consumers reports itself in a stable group, so the group
+    /// has finished forming. Takes a driver from [`Driver::open_watched`].
+    fn settle_group(&mut self, consumers: usize, partitions: u32, timeout: Duration) {
+        let want: Vec<u32> = (0..partitions).collect();
+        wait_until(timeout, "every consumer in a stable group", || {
+            self.step(Duration::from_millis(100));
+            let rendered = self
+                .statistics
+                .as_ref()
+                .expect("a driver from open_watched")
+                .render();
+            let healthy = client_values(&rendered, "spate_kafka_group_healthy");
+            self.partitions() == want
+                && healthy.len() == consumers
+                && healthy.iter().all(|(_, v)| *v == 1.0)
+        });
+    }
+
     /// Read every live lane, stepping between polls, until each partition has
     /// delivered `n` offsets, and return the offsets read per partition. Each
     /// batch is dropped once read, which acks it.
@@ -1574,6 +1610,14 @@ fn consumers_config(brokers: &str, group: &str, consumers: usize) -> KafkaSource
     cfg
 }
 
+/// [`consumers_config`] publishing statistics fast enough for
+/// [`Driver::settle_group`] to wait on.
+fn watched_config(brokers: &str, group: &str, consumers: usize) -> KafkaSourceConfig {
+    let mut cfg = consumers_config(brokers, group, consumers);
+    cfg.statistics_interval = Duration::from_millis(100);
+    cfg
+}
+
 /// Committed offsets of `group` on partitions `0..partitions`.
 fn committed(brokers: &str, group: &str, partitions: i32) -> Vec<rdkafka::Offset> {
     let probe: BaseConsumer = support::raw_config()
@@ -1619,10 +1663,10 @@ fn two_consumers_poll_ack_and_commit_every_partition() {
     let brokers = cluster.bootstrap_servers();
     produce(&brokers, TOPIC, 10, 4, "c");
 
-    let mut cfg = consumers_config(&brokers, "commit-each", 2);
+    let mut cfg = watched_config(&brokers, "commit-each", 2);
     cfg.commit_interval = Duration::from_hours(1);
-    let mut driver = Driver::open(cfg);
-    driver.settle(4, Duration::from_secs(60));
+    let mut driver = Driver::open_watched(KafkaSource::new(cfg), "commit-each");
+    driver.settle_group(2, 4, Duration::from_secs(60));
     driver.read(10, Duration::from_secs(30));
     driver.commit();
 
@@ -1665,9 +1709,8 @@ fn pause_reaches_the_owning_consumer() {
     driver.read(5, Duration::from_secs(30));
 }
 
-/// A member joining from outside revokes every consumer of the source in
-/// one drain, and once it leaves the source holds every partition again
-/// under fresh lane ids.
+/// A member joining from outside revokes every consumer of the source, and
+/// once it leaves the source holds every partition again under fresh lane ids.
 #[test]
 #[expect(
     clippy::disallowed_methods,
@@ -1678,8 +1721,11 @@ fn an_outside_member_rebalances_every_in_process_consumer() {
     cluster.create_topic(TOPIC, 4, 1).expect("create topic");
     let brokers = cluster.bootstrap_servers();
 
-    let mut driver = Driver::open(consumers_config(&brokers, "outside", 2));
-    driver.settle(4, Duration::from_secs(60));
+    let mut driver = Driver::open_watched(
+        KafkaSource::new(watched_config(&brokers, "outside", 2)),
+        "outside",
+    );
+    driver.settle_group(2, 4, Duration::from_secs(60));
     let before = driver.revocations;
 
     let stop = Arc::new(AtomicBool::new(false));
@@ -1710,7 +1756,7 @@ fn an_outside_member_rebalances_every_in_process_consumer() {
 
     stop.store(true, Ordering::Relaxed);
     joiner.join().expect("joiner thread");
-    driver.settle(4, Duration::from_secs(60));
+    driver.settle_group(2, 4, Duration::from_secs(60));
 }
 
 /// A consumer the group assigns nothing stays in the group past both
@@ -1723,11 +1769,11 @@ fn more_consumers_than_partitions_keeps_running() {
     let brokers = cluster.bootstrap_servers();
 
     let clock = TestClock::frozen();
-    let cfg = consumers_config(&brokers, "idle-consumer", 2);
+    let cfg = watched_config(&brokers, "idle-consumer", 2);
     let deadlines = cfg.startup_timeout + cfg.assignment_timeout;
     let source = KafkaSource::new(cfg).with_clock(Arc::clone(&clock) as _);
-    let mut driver = Driver::open_with(source, |ctx| ctx);
-    driver.settle(1, Duration::from_secs(60));
+    let mut driver = Driver::open_watched(source, "idle-consumer");
+    driver.settle_group(2, 1, Duration::from_secs(60));
 
     clock.advance(deadlines + Duration::from_secs(1));
     produce(&brokers, TOPIC, 5, 1, "i");
@@ -1777,6 +1823,68 @@ fn a_lost_assignment_fails_the_flush_and_the_source_recovers() {
 
         driver.settle(4, Duration::from_secs(60));
         driver.read(5, Duration::from_secs(30));
+    }
+}
+
+/// A lost member's failed flush leaves its peer's commit in place, and no
+/// offset past what was read is committed. The partitions read again from at
+/// or before the committed offset, so a record the lost member read and could
+/// not commit is delivered again rather than skipped.
+#[test]
+fn a_lost_member_keeps_its_peers_commit_and_loses_no_record() {
+    let cluster = MockCluster::new(1).expect("mock cluster");
+    cluster.create_topic(TOPIC, 4, 1).expect("create topic");
+    let brokers = cluster.bootstrap_servers();
+    produce(&brokers, TOPIC, 10, 4, "k");
+
+    let mut cfg = watched_config(&brokers, "lost-peer", 2);
+    cfg.commit_interval = Duration::from_hours(1);
+    let mut driver = Driver::open_watched(KafkaSource::new(cfg), "lost-peer");
+    driver.settle_group(2, 4, Duration::from_secs(60));
+    driver.read(10, Duration::from_secs(30));
+    let before = driver.revocations;
+
+    cluster.request_errors(
+        RDKafkaApiKey::Heartbeat,
+        &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_ILLEGAL_GENERATION],
+    );
+    wait_until(Duration::from_secs(30), "the revocation", || {
+        driver.step(Duration::from_millis(100));
+        driver.revocations > before
+    });
+    assert_eq!(
+        driver.flush_failures.len(),
+        1,
+        "{:?}",
+        driver.flush_failures
+    );
+    let at_ten = rdkafka::Offset::Offset(10);
+    let read_back = committed(&brokers, "lost-peer", 4);
+    assert!(
+        read_back.iter().filter(|o| **o == at_ten).count() >= 2,
+        "the peer's two partitions: {read_back:?}"
+    );
+    assert!(
+        read_back
+            .iter()
+            .all(|o| matches!(o, rdkafka::Offset::Invalid) || *o == at_ten),
+        "nothing past what was read: {read_back:?}"
+    );
+
+    produce(&brokers, TOPIC, 5, 4, "m");
+    driver.settle_group(2, 4, Duration::from_secs(60));
+    let second = driver.read(5, Duration::from_secs(30));
+    for (partition, offsets) in &second {
+        let (first, last) = (
+            *offsets.first().expect("read"),
+            *offsets.last().expect("read"),
+        );
+        assert!(first <= 10, "partition {partition} skipped: {offsets:?}");
+        assert_eq!(
+            usize::try_from(last - first + 1).expect("ordered"),
+            offsets.len(),
+            "partition {partition} has a gap: {offsets:?}"
+        );
     }
 }
 

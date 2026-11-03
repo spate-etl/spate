@@ -380,7 +380,8 @@ Changing the count is a restart. Every consumer is a group member, so the group
 has `replicas × consumers` members, and under eager assignment a rebalance
 revokes every member's partitions in every process. The source drains all of
 its consumers' lanes on the first revocation, so a rebalance costs one drain
-whatever the count.
+whatever the count. A member the group removed before it answered its assignment
+costs one more.
 
 ### Compression
 

@@ -1826,6 +1826,115 @@ fn a_lost_assignment_fails_the_flush_and_the_source_recovers() {
     }
 }
 
+/// Runs `body` on a mock cluster whose group forms at the first join, with one
+/// `JoinGroup` refused, so one consumer of a source holds an offer before the
+/// other has joined.
+fn on_a_cluster_electing_at_once(partitions: i32, body: impl FnOnce(&str)) {
+    use rdkafka::producer::Producer as _;
+    let producer: rdkafka::producer::BaseProducer = support::raw_config()
+        .set("test.mock.num.brokers", "1")
+        .build()
+        .expect("mock producer");
+    let client = producer.client();
+    let cluster = client.mock_cluster().expect("mock cluster");
+    // SAFETY: the pointer is valid while `producer` lives, and the client's
+    // mock cluster, which the call only writes a default into, lives with it.
+    unsafe {
+        rdkafka::bindings::rd_kafka_mock_group_initial_rebalance_delay_ms(
+            rdkafka::bindings::rd_kafka_handle_mock_cluster(client.native_ptr()),
+            0,
+        );
+    }
+    cluster
+        .create_topic(TOPIC, partitions, 1)
+        .expect("create topic");
+    cluster.request_errors(
+        RDKafkaApiKey::JoinGroup,
+        &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_COORDINATOR_LOAD_IN_PROGRESS],
+    );
+    body(&cluster.bootstrap_servers());
+}
+
+/// A consumer removed from the group while it holds an offer is not a double
+/// assignment: the source keeps running and every record is delivered and
+/// committed. The frozen clock keeps the hold from ending before the group
+/// moves on. Regression for #1685.
+#[test]
+fn a_held_offer_the_group_has_left_is_not_fatal() {
+    on_a_cluster_electing_at_once(1, |brokers| {
+        let clock = TestClock::frozen();
+        let cfg = watched_config(brokers, "stale-held", 2);
+        let source = KafkaSource::new(cfg).with_clock(Arc::clone(&clock) as _);
+        let mut driver = Driver::open_watched(source, "stale-held");
+        driver.settle_group(2, 1, Duration::from_secs(60));
+        produce(brokers, TOPIC, 5, 1, "s");
+        driver.read(5, Duration::from_secs(30));
+        driver.commit();
+        assert_eq!(
+            committed(brokers, "stale-held", 1),
+            [rdkafka::Offset::Offset(5)]
+        );
+    });
+}
+
+/// A consumer removed while it holds an offer rejoins, and the group ends up
+/// shared between both consumers with every partition read. Regression for
+/// #1685.
+#[test]
+fn a_late_consumer_ends_up_sharing_every_partition() {
+    on_a_cluster_electing_at_once(4, |brokers| {
+        produce(brokers, TOPIC, 5, 4, "l");
+        let clock = TestClock::frozen();
+        let cfg = watched_config(brokers, "late-share", 2);
+        let source = KafkaSource::new(cfg).with_clock(Arc::clone(&clock) as _);
+        let mut driver = Driver::open_watched(source, "late-share");
+        driver.settle_group(2, 4, Duration::from_secs(60));
+        wait_until(Duration::from_secs(30), "the assignment sizes", || {
+            driver.step(Duration::from_millis(100));
+            let rendered = driver.statistics.as_ref().expect("watched").render();
+            client_values(&rendered, "spate_kafka_group_assignment_size")
+                .iter()
+                .map(|(_, v)| v)
+                .sum::<f64>()
+                == 4.0
+        });
+        driver.read(5, Duration::from_secs(30));
+    });
+}
+
+/// Dropping a source after it discarded an offer returns.
+#[test]
+fn dropping_after_a_discard_returns() {
+    on_a_cluster_electing_at_once(1, |brokers| {
+        let clock = TestClock::frozen();
+        let cfg = watched_config(brokers, "drop-discard", 2);
+        let source = KafkaSource::new(cfg).with_clock(Arc::clone(&clock) as _);
+        let mut driver = Driver::open_watched(source, "drop-discard");
+        driver.settle_group(2, 1, Duration::from_secs(60));
+        returns_within("dropping after a discard", move || drop(driver));
+    });
+}
+
+/// A consumer joining after the hold ended starts a new epoch: the driver's
+/// assertion that an assignment arrives with no lane live holds throughout,
+/// and both consumers end up in a stable group.
+#[test]
+fn a_consumer_joining_after_the_hold_ended_starts_a_new_epoch() {
+    on_a_cluster_electing_at_once(4, |brokers| {
+        let clock = TestClock::frozen();
+        let cfg = watched_config(brokers, "hold-ended", 2);
+        let source = KafkaSource::new(cfg).with_clock(Arc::clone(&clock) as _);
+        let mut driver = Driver::open_watched(source, "hold-ended");
+        // Past the hold and well inside the startup window, in wall time short
+        // of the refused `JoinGroup`'s retry.
+        for _ in 0..10 {
+            clock.advance(Duration::from_millis(500));
+            driver.step(Duration::from_millis(20));
+        }
+        driver.settle_group(2, 4, Duration::from_secs(60));
+    });
+}
+
 /// A lost member's failed flush leaves its peer's commit in place, and no
 /// offset past what was read is committed. The partitions read again from at
 /// or before the committed offset, so a record the lost member read and could

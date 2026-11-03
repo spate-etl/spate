@@ -19,7 +19,7 @@ use rdkafka::ClientConfig;
 use rdkafka::TopicPartitionList;
 use rdkafka::client::ClientContext;
 use rdkafka::config::{FromClientConfigAndContext, RDKafkaLogLevel};
-use rdkafka::consumer::{BaseConsumer, ConsumerContext};
+use rdkafka::consumer::{BaseConsumer, Consumer as _, ConsumerContext};
 use rdkafka::error::KafkaError;
 use rdkafka::producer::{DeliveryResult, ProducerContext};
 use rdkafka::statistics::Statistics;
@@ -385,6 +385,26 @@ pub(crate) trait Hooks: Send + Sync + 'static {
 }
 
 impl Hooks for () {}
+
+/// The generation id `consumer` last joined its group with, or `-1` when it
+/// holds no group metadata. The call blocks on the client's main thread, as
+/// `assign` does.
+pub(crate) fn group_generation<C: ConsumerContext>(consumer: &BaseConsumer<C>) -> i32 {
+    // SAFETY: the client pointer is valid while `consumer` is borrowed. The
+    // metadata is owned here, is checked for NULL before it is read, and is
+    // destroyed before the block ends.
+    unsafe {
+        let metadata =
+            rdkafka::bindings::rd_kafka_consumer_group_metadata(consumer.client().native_ptr());
+        if metadata.is_null() {
+            return -1;
+        }
+        let generation =
+            rdkafka::bindings::rd_kafka_consumer_group_metadata_generation_id(metadata);
+        rdkafka::bindings::rd_kafka_consumer_group_metadata_destroy(metadata);
+        generation
+    }
+}
 
 /// Log a librdkafka error event under the `librdkafka` target, with the
 /// client's `instance` as the `consumer` field when it has one.

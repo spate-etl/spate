@@ -62,6 +62,21 @@ pub(crate) fn stop_at(consumer: &BaseConsumer<SourceContext>, line: &str) {
     consumer.assignment().expect("assignment");
 }
 
+/// A consumer of `group` on `brokers`, configured outside the client factory's
+/// roles, for a test that needs another member in a group.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "a test's own group member is configured outside the factory's roles"
+)]
+pub(crate) fn raw_consumer(brokers: &str, group: &str) -> rdkafka::consumer::BaseConsumer {
+    rdkafka::ClientConfig::new()
+        .set("bootstrap.servers", brokers)
+        .set("group.id", group)
+        .set("session.timeout.ms", "6000")
+        .create()
+        .expect("raw consumer")
+}
+
 /// An `UP` broker entry keyed `name`, with its node name taken from `name`
 /// without the `/<nodeid>` suffix.
 pub(crate) fn broker(name: &str, source: &str, nodeid: i32) -> Broker {

@@ -2449,13 +2449,8 @@ mod tests {
     /// the others have theirs, returns. Consumer close completes a held
     /// assignment on its own.
     #[test]
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "a thread that never returns is the failure; the test fails instead of joining it"
-    )]
     fn dropping_with_a_held_assignment_returns() {
         use rdkafka::mocking::MockCluster;
-        use std::sync::mpsc;
         let cluster = MockCluster::new(1).expect("mock cluster");
         cluster.create_topic("orders", 4, 1).expect("create topic");
         let mut cfg = test_config();
@@ -2476,14 +2471,16 @@ mod tests {
                 .iter()
                 .any(|m| matches!(m.phase, Phase::Held(_)))
         });
-        let (done, finished) = mpsc::channel();
-        std::thread::spawn(move || {
-            drop(source);
-            let _ = done.send(());
-        });
-        finished
-            .recv_timeout(Duration::from_secs(30))
-            .expect("dropping the source with an assignment held did not return");
+        let dropped =
+            crate::testutil::returns_within(Duration::from_secs(30), move || drop(source));
+        if !dropped {
+            // Its clients are still connected; dropping it would wait on them.
+            std::mem::forget(cluster);
+        }
+        assert!(
+            dropped,
+            "dropping the source with an assignment held did not return"
+        );
     }
 
     /// Queue a rebalance intent for `poll_events` on consumer 0, as the

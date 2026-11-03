@@ -24,6 +24,7 @@ use super::write::{
 };
 use super::{Core, Gating, KafkaFeed, KafkaFeedError, KafkaFeedPublisher, Ready};
 use crate::client::testing::raw_config;
+use crate::testutil::returns_within;
 use rdkafka::error::{KafkaError, RDKafkaErrorCode as C};
 use spate_core::clock::SyncClock;
 use spate_core::clock::TestClock;
@@ -1327,17 +1328,6 @@ impl Drop for StopOnDrop {
     fn drop(&mut self) {
         super::stop(&self.0);
     }
-}
-
-/// Run `f` on a thread of its own and report whether it returned within
-/// `limit`.
-fn returns_within(limit: Duration, f: impl FnOnce() + Send + 'static) -> bool {
-    let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        f();
-        let _ = tx.send(());
-    });
-    rx.recv_timeout(limit).is_ok()
 }
 
 /// Pins that a gate pass whose every watermark read fails puts back each

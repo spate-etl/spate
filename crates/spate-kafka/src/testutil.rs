@@ -1,10 +1,28 @@
 //! Shared test fixtures: librdkafka statistics values, a refused broker
-//! address, a broker that refuses a SASL login and a raised fatal error.
+//! address, a broker that refuses a SASL login, a raised fatal error and a
+//! bounded wait on a call that may never return.
 
 use rdkafka::bindings::rd_kafka_resp_err_t as RespErr;
 use rdkafka::client::{Client, ClientContext};
 use rdkafka::statistics::{Broker, Window};
 use std::ffi::CStr;
+use std::sync::mpsc;
+use std::time::Duration;
+
+/// Run `f` on a thread of its own and report whether it returned within
+/// `limit`. A call that does not return leaves its thread running.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "a thread that never returns is the failure; the caller fails instead of joining it"
+)]
+pub(crate) fn returns_within(limit: Duration, f: impl FnOnce() + Send + 'static) -> bool {
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        f();
+        let _ = tx.send(());
+    });
+    rx.recv_timeout(limit).is_ok()
+}
 
 /// An `UP` broker entry keyed `name`, with its node name taken from `name`
 /// without the `/<nodeid>` suffix.

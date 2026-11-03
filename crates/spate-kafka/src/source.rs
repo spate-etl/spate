@@ -9,7 +9,11 @@
 //! them and accepts every consumer's partitions again as a fresh epoch. Eager
 //! assignment revokes every member in every rebalance, so the first revocation
 //! on any consumer drains every consumer's lanes, and each consumer is released
-//! with `unassign` once its own revocation has arrived.
+//! with `unassign` once its own revocation has arrived. A consumer's retryable
+//! poll error does not hold back the source's next rebalance intent. The call
+//! still acts on it, and returns the error when neither the intent nor the
+//! held assignments yield an event. A fatal poll error returns before any
+//! intent is acted on.
 //!
 //! # Rebalance choreography (deferred completion)
 //!
@@ -206,6 +210,10 @@ pub struct KafkaSource {
     main_queue_rewinds: u64,
     /// The clock the assignment windows, the hold and the error's age read.
     clock: SyncClock,
+    /// An error the next poll of this consumer returns in place of
+    /// `BaseConsumer::poll`, for a test that needs a poll error in one call.
+    #[cfg(test)]
+    injected_poll_error: Option<(usize, rdkafka::error::KafkaError)>,
 }
 
 impl std::fmt::Debug for KafkaSource {
@@ -239,21 +247,23 @@ fn partition_ids<'a>(partitions: impl IntoIterator<Item = &'a i32>) -> Vec<Parti
 /// queue, so a fatal one replaces a retryable one an earlier consumer
 /// returned.
 fn keep_reported(reported: &mut Option<SourceError>, error: SourceError) {
-    let fatal = |e: &SourceError| {
-        matches!(
-            e,
-            SourceError::Client {
-                class: ErrorClass::Fatal,
-                ..
-            }
-        )
-    };
     if reported
         .as_ref()
-        .is_none_or(|first| fatal(&error) && !fatal(first))
+        .is_none_or(|first| is_fatal(&error) && !is_fatal(first))
     {
         *reported = Some(error);
     }
+}
+
+/// Whether `error` is a client error classified fatal.
+fn is_fatal(error: &SourceError) -> bool {
+    matches!(
+        error,
+        SourceError::Client {
+            class: ErrorClass::Fatal,
+            ..
+        }
+    )
 }
 
 /// The order one `poll_events` call polls `n` consumers in, starting at
@@ -290,6 +300,8 @@ impl KafkaSource {
             last_consumer_error: None,
             main_queue_rewinds: 0,
             clock: SyncClock::system(),
+            #[cfg(test)]
+            injected_poll_error: None,
         }
     }
 
@@ -685,7 +697,14 @@ impl KafkaSource {
             // message should ever surface here. If one does, rewind so it is
             // refetched through its split queue; dropping it would let the
             // watermark commit past an unprocessed record.
-            match consumer.poll(wait) {
+            #[cfg(test)]
+            let polled = match self.take_injected_poll_error(k) {
+                Some(e) => Some(Err(e)),
+                None => consumer.poll(wait),
+            };
+            #[cfg(not(test))]
+            let polled = consumer.poll(wait);
+            match polled {
                 None => {}
                 Some(Ok(msg)) => {
                     self.main_queue_rewinds += 1;
@@ -911,6 +930,15 @@ impl KafkaSource {
             return Ok(SourceEvent::Idle);
         }
         self.accept_held(false)
+    }
+
+    /// The injected error for consumer `k`'s poll, removed so it is returned
+    /// once.
+    #[cfg(test)]
+    fn take_injected_poll_error(&mut self, k: usize) -> Option<rdkafka::error::KafkaError> {
+        self.injected_poll_error
+            .take_if(|(consumer, _)| *consumer == k)
+            .map(|(_, e)| e)
     }
 
     /// Partitions consumer `k` may still store offsets for: its live
@@ -1172,9 +1200,9 @@ impl Source for KafkaSource {
 
     fn poll_events(&mut self, timeout: Duration) -> Result<SourceEvent<KafkaLane>, SourceError> {
         self.opened()?;
-        // The assignment deadline first: with unreachable brokers every poll
-        // below surfaces a Retryable transport error and returns early.
-        // Checked last, this deadline would never fire and a misconfigured
+        // The assignment deadline first, so its error is reported in place of
+        // anything the polls below return. With unreachable brokers each of
+        // them reports a Retryable transport error, and a misconfigured
         // pipeline would retry forever instead of failing fast.
         if let Some(wait) = &self.assignment_wait
             && let Some(e) = assignment_deadline_error(
@@ -1215,7 +1243,14 @@ impl Source for KafkaSource {
             return Err(self.rebalance_error(k, code));
         }
 
-        self.poll_consumers(timeout)?;
+        // A fatal poll error returns before any intent is acted on. A
+        // retryable one is already recorded and logged, so an intent's event
+        // or error takes its place, and one consumer's transport errors do
+        // not hold back another consumer's rebalance.
+        let polled = match self.poll_consumers(timeout) {
+            Err(e) if is_fatal(&e) => return Err(e),
+            polled => polled,
+        };
         self.publish_stats();
 
         // Rebalance intents recorded by the callbacks during the polls above
@@ -1227,7 +1262,10 @@ impl Source for KafkaSource {
                 return Ok(event);
             }
         }
-        self.settle_held()
+        match self.settle_held()? {
+            SourceEvent::Idle => polled.map(|()| SourceEvent::Idle),
+            event => Ok(event),
+        }
     }
 
     fn commit(&mut self, watermarks: &[(PartitionId, i64)]) -> Result<(), SourceError> {
@@ -1596,23 +1634,17 @@ mod tests {
         source
     }
 
-    /// Call `poll_events` until it yields something other than `Idle` or a
-    /// `consumer poll` error from the unreachable broker, or until `done`
-    /// holds, and return what it yielded.
-    fn poll_until(
-        source: &mut KafkaSource,
-        done: impl Fn(&KafkaSource) -> bool,
-    ) -> Option<Result<SourceEvent<KafkaLane>, SourceError>> {
-        let deadline = Instant::now() + Duration::from_secs(20);
-        while !done(source) {
-            assert!(Instant::now() < deadline, "no outcome within deadline");
-            match source.poll_events(Duration::from_millis(50)) {
-                Ok(SourceEvent::Idle) => {}
-                Err(SourceError::Client { reason, .. }) if reason.starts_with("consumer poll") => {}
-                other => return Some(other),
-            }
+    /// Call `poll_events` once and assert that it yielded nothing: `Idle`,
+    /// or the retryable `consumer poll` error of the refused broker.
+    fn poll_quiet(source: &mut KafkaSource) {
+        match source.poll_events(Duration::ZERO) {
+            Ok(SourceEvent::Idle) => {}
+            Err(SourceError::Client {
+                class: ErrorClass::Retryable,
+                reason,
+            }) if reason.starts_with("consumer poll") => {}
+            other => panic!("expected nothing to happen, got {other:?}"),
         }
-        None
     }
 
     fn lane_ids(lanes: &[LaneId]) -> Vec<u32> {
@@ -1738,7 +1770,7 @@ mod tests {
                 Intent::Error(RDKafkaErrorCode::RebalanceInProgress),
             );
 
-            match next_outcome(&mut source) {
+            match source.poll_events(Duration::ZERO) {
                 Ok(SourceEvent::LanesRevoked { lanes, .. }) => {
                     assert_eq!(lane_ids(&lanes), [1]);
                 }
@@ -1746,7 +1778,7 @@ mod tests {
             }
             assert_eq!(source.committable_partitions(0), [0]);
             assert!(source.committable_partitions(1).is_empty());
-            match next_outcome(&mut source) {
+            match source.poll_events(Duration::ZERO) {
                 Err(SourceError::Client { reason, .. }) => {
                     assert!(reason.contains("rebalance error"), "{reason}");
                 }
@@ -1765,7 +1797,7 @@ mod tests {
             let mut source = opened_consumers(test_config(), &[&[(0, 0)], &[(1, 1)]]);
             push_intent_to(&source, 0, Intent::Revoke(tpl_of(&[0])));
 
-            match next_outcome(&mut source) {
+            match source.poll_events(Duration::ZERO) {
                 Ok(SourceEvent::LanesRevoked { lanes, barrier }) => {
                     assert_eq!(lane_ids(&lanes), [0, 1]);
                     assert_eq!(barrier.remaining(), 2);
@@ -1777,13 +1809,14 @@ mod tests {
 
             // The runtime has drained: consumer 0 is released, consumer 1
             // still owns its partition until its own revocation arrives.
-            let _ = poll_until(&mut source, |s| s.members[0].revoking.is_empty());
+            poll_quiet(&mut source);
+            assert!(source.members[0].revoking.is_empty());
             assert!(source.committable_partitions(0).is_empty());
             assert_eq!(source.committable_partitions(1), [1]);
 
             push_intent_to(&source, 1, Intent::Revoke(tpl_of(&[1])));
-            let outcome = poll_until(&mut source, |s| s.members[1].revoking.is_empty());
-            assert!(outcome.is_none(), "no second drain: {outcome:?}");
+            poll_quiet(&mut source);
+            assert!(source.members[1].revoking.is_empty(), "no second drain");
             assert!(source.committable_partitions(1).is_empty());
         }
 
@@ -1797,15 +1830,18 @@ mod tests {
                 member.phase = Phase::Joining;
             }
             push_intent_to(&source, 0, Intent::Assign(TopicPartitionList::new()));
-            let _ = poll_until(&mut source, |s| {
-                matches!(s.members[0].phase, Phase::Held(_))
-            });
+            poll_quiet(&mut source);
+            assert!(matches!(source.members[0].phase, Phase::Held(_)));
             assert!(matches!(source.members[1].phase, Phase::Joining));
 
             push_intent_to(&source, 1, Intent::Assign(TopicPartitionList::new()));
-            let _ = poll_until(&mut source, |s| {
-                s.members.iter().all(|m| matches!(m.phase, Phase::Assigned))
-            });
+            poll_quiet(&mut source);
+            assert!(
+                source
+                    .members
+                    .iter()
+                    .all(|m| matches!(m.phase, Phase::Assigned))
+            );
 
             let mut source = opened_consumers(test_config(), &[&[], &[]]);
             let clock = freeze(&mut source);
@@ -1813,19 +1849,17 @@ mod tests {
                 member.phase = Phase::Joining;
             }
             push_intent_to(&source, 0, Intent::Assign(TopicPartitionList::new()));
-            let _ = poll_until(&mut source, |s| {
-                matches!(s.members[0].phase, Phase::Held(_))
-            });
+            poll_quiet(&mut source);
+            assert!(matches!(source.members[0].phase, Phase::Held(_)));
             clock.advance(ASSIGN_HOLD - Duration::from_millis(1));
-            let _ = source.poll_events(Duration::ZERO);
+            poll_quiet(&mut source);
             assert!(
                 matches!(source.members[0].phase, Phase::Held(_)),
                 "inside the hold"
             );
             clock.advance(Duration::from_millis(1));
-            let _ = poll_until(&mut source, |s| {
-                matches!(s.members[0].phase, Phase::Assigned)
-            });
+            poll_quiet(&mut source);
+            assert!(matches!(source.members[0].phase, Phase::Assigned));
             assert!(matches!(source.members[1].phase, Phase::Joining));
         }
 
@@ -1837,7 +1871,7 @@ mod tests {
             let mut source = opened_consumers(test_config(), &[&[(0, 0)], &[]]);
             push_intent_to(&source, 1, Intent::Assign(TopicPartitionList::new()));
 
-            match next_outcome(&mut source) {
+            match source.poll_events(Duration::ZERO) {
                 Ok(SourceEvent::LanesRevoked { lanes, .. }) => assert_eq!(lane_ids(&lanes), [0]),
                 other => panic!("expected the live lanes drained, got {other:?}"),
             }
@@ -2080,7 +2114,7 @@ mod tests {
                 1,
                 Intent::Error(RDKafkaErrorCode::RebalanceInProgress),
             );
-            match next_outcome(&mut source) {
+            match source.poll_events(Duration::ZERO) {
                 Ok(SourceEvent::LanesRevoked { lanes, .. }) => {
                     assert_eq!(lane_ids(&lanes), [1]);
                 }
@@ -2140,7 +2174,7 @@ mod tests {
                 Intent::Error(RDKafkaErrorCode::RebalanceInProgress),
             );
             assert!(matches!(
-                next_outcome(&mut source),
+                source.poll_events(Duration::ZERO),
                 Ok(SourceEvent::LanesRevoked { .. })
             ));
             assert!(
@@ -2149,47 +2183,164 @@ mod tests {
             );
         }
 
+        /// A transport failure as a consumer poll returns it.
+        fn transport_failure() -> rdkafka::error::KafkaError {
+            rdkafka::error::KafkaError::MessageConsumption(RDKafkaErrorCode::BrokerTransportFailure)
+        }
+
+        /// A call whose consumer poll returns a retryable error still acts on
+        /// another consumer's queued assignment, and reports the poll error
+        /// when holding that assignment yields no event. Regression for #1673.
+        #[test]
+        fn a_poll_error_does_not_leave_the_intent_queued() {
+            let mut source = opened_consumers(test_config(), &[&[], &[], &[]]);
+            for member in &mut source.members {
+                member.phase = Phase::Joining;
+            }
+            push_intent_to(&source, 0, Intent::Assign(TopicPartitionList::new()));
+            source.injected_poll_error = Some((1, transport_failure()));
+
+            match source.poll_events(Duration::ZERO) {
+                Err(SourceError::Client { class, reason }) => {
+                    assert_eq!(class, ErrorClass::Retryable, "{reason}");
+                    assert!(reason.starts_with("consumer poll"), "{reason}");
+                }
+                other => panic!("expected the poll error, got {other:?}"),
+            }
+            assert!(matches!(source.members[0].phase, Phase::Held(_)));
+        }
+
+        /// A revocation acted on in a call whose consumer poll returns a
+        /// retryable error is returned in place of that error, so the runtime
+        /// drains the lanes before they are released. Regression for #1673.
+        #[test]
+        fn a_revocation_beside_a_poll_error_is_surfaced() {
+            let mut source = opened_consumers(test_config(), &[&[(0, 0)], &[]]);
+            push_intent_to(&source, 0, Intent::Revoke(tpl_of(&[0])));
+            source.injected_poll_error = Some((1, transport_failure()));
+
+            match source.poll_events(Duration::ZERO) {
+                Ok(SourceEvent::LanesRevoked { lanes, .. }) => {
+                    assert_eq!(lane_ids(&lanes), [0]);
+                }
+                other => panic!("expected lane 0 revoked, got {other:?}"),
+            }
+            assert!(
+                source.injected_poll_error.is_none() && source.last_consumer_error.is_some(),
+                "the call polled the injected error"
+            );
+        }
+
+        /// The drain that settling held assignments starts is returned in
+        /// place of a retryable poll error in the same call.
+        #[test]
+        fn an_epoch_drain_beside_a_poll_error_is_surfaced() {
+            let mut source = opened_consumers(test_config(), &[&[(0, 0)], &[]]);
+            push_intent_to(&source, 1, Intent::Assign(TopicPartitionList::new()));
+            source.injected_poll_error = Some((0, transport_failure()));
+
+            match source.poll_events(Duration::ZERO) {
+                Ok(SourceEvent::LanesRevoked { lanes, .. }) => {
+                    assert_eq!(lane_ids(&lanes), [0]);
+                }
+                other => panic!("expected the live lanes drained, got {other:?}"),
+            }
+            assert!(
+                source.injected_poll_error.is_none(),
+                "the call polled the error"
+            );
+        }
+
+        /// An error from settling the held assignments is reported in place
+        /// of a retryable poll error in the same call.
+        #[test]
+        fn a_settle_error_beside_a_poll_error_is_reported() {
+            let mut source = opened_consumers(test_config(), &[&[], &[]]);
+            source.members[0].phase = Phase::Held(tpl_of(&[3]));
+            source.members[1].phase = Phase::Held(tpl_of(&[1, 3]));
+            source.injected_poll_error = Some((1, transport_failure()));
+
+            match source.poll_events(Duration::ZERO) {
+                Err(SourceError::Client { class, reason }) => {
+                    assert_eq!(class, ErrorClass::Fatal, "{reason}");
+                    assert!(reason.contains("partition 3"), "{reason}");
+                }
+                other => panic!("expected the settle error, got {other:?}"),
+            }
+        }
+
+        /// A fatal consumer poll error is reported by the call that polled
+        /// it, before that call acts on a queued assignment.
+        #[test]
+        fn a_fatal_poll_error_beside_a_queued_intent_is_reported() {
+            let mut source = opened_consumers(test_config(), &[&[], &[]]);
+            source.members[0].phase = Phase::Joining;
+            push_intent_to(&source, 0, Intent::Assign(TopicPartitionList::new()));
+            source.injected_poll_error = Some((
+                1,
+                rdkafka::error::KafkaError::MessageConsumptionFatal(
+                    RDKafkaErrorCode::FencedInstanceId,
+                ),
+            ));
+
+            match source.poll_events(Duration::ZERO) {
+                Err(SourceError::Client { class, reason }) => {
+                    assert_eq!(class, ErrorClass::Fatal, "{reason}");
+                }
+                other => panic!("expected the fatal poll error, got {other:?}"),
+            }
+            assert!(
+                matches!(source.members[0].phase, Phase::Joining),
+                "the assignment was acted on"
+            );
+        }
+
+        /// A rebalance error acted on in a call whose consumer poll returns a
+        /// retryable error is reported in place of that error.
+        #[test]
+        fn a_rebalance_error_beside_a_poll_error_is_reported() {
+            let mut source = opened_consumers(test_config(), &[&[], &[]]);
+            push_intent_to(
+                &source,
+                0,
+                Intent::Error(RDKafkaErrorCode::GroupAuthorizationFailed),
+            );
+            source.injected_poll_error = Some((1, transport_failure()));
+
+            match source.poll_events(Duration::ZERO) {
+                Err(SourceError::Client { class, reason }) => {
+                    assert_eq!(class, ErrorClass::Fatal, "{reason}");
+                    assert!(reason.contains("rebalance error"), "{reason}");
+                }
+                other => panic!("expected the rebalance error, got {other:?}"),
+            }
+        }
+
         /// The hold runs from the first held assignment of a rebalance, and a
         /// later consumer's assignment does not extend it.
         #[test]
         fn a_later_assignment_does_not_extend_the_hold() {
-            /// Poll until `done` holds. Transport errors from the refused
-            /// broker are retried; any other outcome fails the test, so the
-            /// clock never moves before the step it follows has happened.
-            fn step(source: &mut KafkaSource, done: impl Fn(&KafkaSource) -> bool) {
-                let deadline = Instant::now() + Duration::from_secs(20);
-                while !done(source) {
-                    assert!(Instant::now() < deadline, "no outcome within deadline");
-                    match source.poll_events(Duration::from_millis(50)) {
-                        Ok(SourceEvent::Idle)
-                        | Err(SourceError::Client {
-                            class: ErrorClass::Retryable,
-                            ..
-                        }) => {}
-                        other => panic!("unexpected outcome: {other:?}"),
-                    }
-                }
-            }
             let mut source = opened_consumers(test_config(), &[&[], &[], &[]]);
             let clock = freeze(&mut source);
             for member in &mut source.members {
                 member.phase = Phase::Joining;
             }
             push_intent_to(&source, 0, Intent::Assign(TopicPartitionList::new()));
-            step(&mut source, |s| {
-                matches!(s.members[0].phase, Phase::Held(_))
-            });
+            poll_quiet(&mut source);
+            assert!(matches!(source.members[0].phase, Phase::Held(_)));
+
             clock.advance(ASSIGN_HOLD - Duration::from_millis(1));
             push_intent_to(&source, 1, Intent::Assign(TopicPartitionList::new()));
-            step(&mut source, |s| {
-                matches!(s.members[1].phase, Phase::Held(_))
-            });
+            poll_quiet(&mut source);
+            assert!(matches!(source.members[0].phase, Phase::Held(_)));
+            assert!(matches!(source.members[1].phase, Phase::Held(_)));
+
+            // The clock is at the end of the first hold. A hold measured from
+            // consumer 1's assignment would still be running.
             clock.advance(Duration::from_millis(1));
-            // The frozen clock stays at the end of the first hold, so an
-            // extended hold never ends and the step fails at its deadline.
-            step(&mut source, |s| {
-                matches!(s.members[0].phase, Phase::Assigned)
-            });
+            poll_quiet(&mut source);
+            assert!(matches!(source.members[0].phase, Phase::Assigned));
+            assert!(matches!(source.members[1].phase, Phase::Assigned));
             assert!(matches!(source.members[2].phase, Phase::Joining));
         }
 
@@ -2356,23 +2507,6 @@ mod tests {
         push_intent(source, Intent::Error(code));
     }
 
-    /// Drive `poll_events` past transient transport noise (the broker is
-    /// unreachable) until it yields something other than `Idle` or a
-    /// `consumer poll` error.
-    fn next_outcome(source: &mut KafkaSource) -> Result<SourceEvent<KafkaLane>, SourceError> {
-        let deadline = Instant::now() + Duration::from_secs(20);
-        loop {
-            assert!(Instant::now() < deadline, "no outcome within deadline");
-            match source.poll_events(Duration::from_millis(50)) {
-                Ok(SourceEvent::Idle) => continue,
-                Err(SourceError::Client { reason, .. }) if reason.starts_with("consumer poll") => {
-                    continue;
-                }
-                other => return other,
-            }
-        }
-    }
-
     mod rebalance_error {
         use super::*;
 
@@ -2386,7 +2520,7 @@ mod tests {
             let mut source = opened_source(&[(0, 0), (1, 1)]);
             push_error(&source, RDKafkaErrorCode::RebalanceInProgress);
 
-            match next_outcome(&mut source) {
+            match source.poll_events(Duration::ZERO) {
                 Ok(SourceEvent::LanesRevoked { mut lanes, barrier }) => {
                     lanes.sort();
                     assert_eq!(lanes, vec![LaneId(0), LaneId(1)]);
@@ -2399,7 +2533,7 @@ mod tests {
             assert!(source.members[0].assignment.is_empty(), "ownership cleared");
             assert!(source.committable_partitions(0).is_empty());
 
-            match next_outcome(&mut source) {
+            match source.poll_events(Duration::ZERO) {
                 Err(SourceError::Client { class, reason }) => {
                     assert_eq!(class, ErrorClass::Retryable, "transient code: {reason}");
                     assert!(reason.contains("rebalance error"), "{reason}");
@@ -2416,7 +2550,7 @@ mod tests {
             let mut source = opened_source(&[]);
             push_error(&source, RDKafkaErrorCode::GroupAuthorizationFailed);
 
-            match next_outcome(&mut source) {
+            match source.poll_events(Duration::ZERO) {
                 Err(SourceError::Client { class, reason }) => {
                     assert_eq!(class, ErrorClass::Fatal, "{reason}");
                     assert!(reason.contains("rebalance error"), "{reason}");
@@ -2722,34 +2856,6 @@ mod tests {
     mod assignment_deadline {
         use super::*;
 
-        /// Drive `poll_events` until the deadline is armed; returns the
-        /// cause it names. Every caller runs with the default
-        /// `assignment_timeout`, so no discarded result here can be the
-        /// deadline error.
-        fn poll_until_armed(source: &mut KafkaSource) -> String {
-            let deadline = Instant::now() + Duration::from_secs(20);
-            loop {
-                if let Some(wait) = &source.assignment_wait {
-                    return wait.cause.clone().expect("a loss names its cause");
-                }
-                assert!(Instant::now() < deadline, "the deadline was never armed");
-                let _ = source.poll_events(Duration::from_millis(50));
-            }
-        }
-
-        /// Drive `poll_events` until the deadline is cleared. Same
-        /// `assignment_timeout` note as [`poll_until_armed`].
-        fn poll_until_cleared(source: &mut KafkaSource) {
-            let deadline = Instant::now() + Duration::from_secs(20);
-            while source.assignment_wait.is_some() {
-                assert!(
-                    Instant::now() < deadline,
-                    "the assignment never cleared the deadline"
-                );
-                let _ = source.poll_events(Duration::from_millis(50));
-            }
-        }
-
         /// Past the deadline the member reports a fatal error, naming the
         /// group, the last rebalance event, how long it has held nothing and
         /// the last consumer error.
@@ -2904,10 +3010,9 @@ mod tests {
             assert_eq!(wait.since, opened_at, "the wait still runs from open");
         }
 
-        /// `poll_events` reports the deadline error itself, ahead of the
-        /// consumer poll: with brokers it cannot reach, every poll below
-        /// returns a transport error and returns early, so a deadline
-        /// checked after it would never fire on the member that needs it.
+        /// `poll_events` reports the deadline error ahead of the consumer
+        /// poll, so the transport errors of brokers it cannot reach do not
+        /// hide it.
         #[test]
         fn poll_events_reports_an_expired_deadline() {
             let mut cfg = test_config();
@@ -2917,7 +3022,7 @@ mod tests {
             source.note_assignment_loss("a revocation".to_owned());
             clock.advance(Duration::from_millis(2));
 
-            match next_outcome(&mut source) {
+            match source.poll_events(Duration::ZERO) {
                 Err(SourceError::Client { class, reason }) => {
                     assert_eq!(class, ErrorClass::Fatal, "{reason}");
                     assert!(reason.contains("no partition assignment for"), "{reason}");
@@ -3127,7 +3232,7 @@ mod tests {
             let mut source = opened_source(&[(0, 0)]);
             push_intent(&source, Intent::Revoke(source.tpl_for([0])));
 
-            match next_outcome(&mut source) {
+            match source.poll_events(Duration::ZERO) {
                 Ok(SourceEvent::LanesRevoked { lanes, barrier }) => {
                     assert_eq!(lanes, vec![LaneId(0)]);
                     barrier.arrive(); // the driver drained
@@ -3135,7 +3240,12 @@ mod tests {
                 other => panic!("expected LanesRevoked, got {other:?}"),
             }
 
-            assert_eq!(poll_until_armed(&mut source), "a revocation");
+            poll_quiet(&mut source);
+            let wait = source
+                .assignment_wait
+                .as_ref()
+                .expect("the release arms it");
+            assert_eq!(wait.cause.as_deref(), Some("a revocation"));
         }
 
         /// An assignment clears the deadline and the recorded consumer error
@@ -3147,13 +3257,17 @@ mod tests {
             let mut source = opened_source(&[]);
             push_error(&source, RDKafkaErrorCode::RebalanceInProgress);
 
-            match next_outcome(&mut source) {
+            match source.poll_events(Duration::ZERO) {
                 Err(SourceError::Client { reason, .. }) => {
                     assert!(reason.contains("rebalance error"), "{reason}");
                 }
                 other => panic!("expected the classified error, got {other:?}"),
             }
-            let cause = poll_until_armed(&mut source);
+            let cause = source
+                .assignment_wait
+                .as_ref()
+                .and_then(|wait| wait.cause.clone())
+                .expect("the error arms the deadline");
             assert!(
                 cause.starts_with("rebalance error:"),
                 "the error arms the deadline and names itself: {cause}"
@@ -3164,7 +3278,8 @@ mod tests {
                 "consumer poll: SSL".to_owned(),
             ));
             push_intent(&source, Intent::Assign(TopicPartitionList::new()));
-            poll_until_cleared(&mut source);
+            poll_quiet(&mut source);
+            assert!(source.assignment_wait.is_none());
             assert!(source.last_consumer_error.is_none());
         }
     }

@@ -136,6 +136,6 @@ of their own. The other connectors' construction points rest on nothing yet;
 - #1537 — one `spate-core` check for refusing reserved passthrough keys.
 - #1542 — where the shared TLS trust-store code lives, decided in its own
   record.
-- [Contributing](https://github.com/spate-etl/spate/blob/main/CONTRIBUTING.md#building-the-vendor-client)
+- [Building a vendor client](../user-guide/06-extending/vendor-clients.mdx)
   — the conventions for building a vendor client that follow from this and
   earlier records.

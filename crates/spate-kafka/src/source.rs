@@ -2206,6 +2206,26 @@ mod tests {
             );
         }
 
+        /// The drain that settling held assignments starts is returned in
+        /// place of a retryable poll error in the same call.
+        #[test]
+        fn an_epoch_drain_beside_a_poll_error_is_surfaced() {
+            let mut source = opened_consumers(test_config(), &[&[(0, 0)], &[]]);
+            push_intent_to(&source, 1, Intent::Assign(TopicPartitionList::new()));
+            source.injected_poll_error = Some((0, transport_failure()));
+
+            match source.poll_events(Duration::ZERO) {
+                Ok(SourceEvent::LanesRevoked { lanes, .. }) => {
+                    assert_eq!(lane_ids(&lanes), [0]);
+                }
+                other => panic!("expected the live lanes drained, got {other:?}"),
+            }
+            assert!(
+                source.injected_poll_error.is_none(),
+                "the call polled the error"
+            );
+        }
+
         /// A fatal consumer poll error is reported by the call that polled
         /// it, before that call acts on a queued assignment.
         #[test]

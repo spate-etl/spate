@@ -185,7 +185,8 @@ own connector is a supported path, not a fork: see
 Single-node throughput is measured, and the
 [benchmarks](https://spate.kainth.dev/benchmarks) page publishes the results
 with the method behind them. A change that reaches Rust runs allocation and
-request-shape assertions, which compare counts and not elapsed time.
+request-shape assertions, which count what a run does and give the same result
+on any machine.
 [`DEVELOPING.md`](DEVELOPING.md#benchmarks) describes the benches, and
 [What CI selects](DEVELOPING.md#what-ci-selects) says which of them a change
 runs.

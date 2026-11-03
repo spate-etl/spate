@@ -147,9 +147,8 @@ record only if it affects structure, a key quality attribute, or is hard to
 reverse. `docs/adr/_template.md` states both rules in full and is normative;
 `cargo xtask tidy adr` holds the mechanical half.
 
-Agents alone read this file. Nothing else in the repository names or links it,
-so a rule a person needs lives in a document they read, and this file links
-there.
+Agents alone read this file. No other file should name or link it, and a rule
+a person needs lives in a document they read, which this file links to.
 
 ## Commits and pull requests
 

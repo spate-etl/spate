@@ -1,9 +1,9 @@
 # Releasing
 
-How a Spate release works and how to run one. This is a maintainer reference;
-contributors need [`CONTRIBUTING.md`](CONTRIBUTING.md) and the changelog
-conventions in [`changelog.d/README.md`](changelog.d/README.md), not this
-page.
+How a Spate release works and how to run one. This is a maintainer reference.
+Contributors need [`CONTRIBUTING.md`](CONTRIBUTING.md), the changelog
+conventions in [`changelog.d/README.md`](changelog.d/README.md), and from this
+page only [Milestones and priorities](#milestones-and-priorities).
 
 The process itself lives in [`xtask/src/release/`](xtask/src/release/), behind
 `cargo xtask release`, and [`release.yml`](.github/workflows/release.yml) runs
@@ -23,6 +23,31 @@ minors as incompatible, so `0.2 -> 0.3` is the breaking step and `0.2.0 ->
 0.2.1` must not be. An MSRV move is a minor bump for the same reason: the
 Cargo book calls raising `rust-version` a minor incompatibility. Only the
 newest `0.x` minor is supported.
+
+## Milestones and priorities
+
+A minor release aims to ship every two to four weeks and carries one feature
+theme. Each release has a milestone named by its version. Its description says
+what the release delivers, and the issues under it are the work committed to it.
+The current and next milestones carry a target date. Later ones show the
+direction without a date, and say so where a design is still open.
+
+An issue gets a milestone once it is committed to a release: it is part of the
+release's feature, it breaks that feature, it is a delivery-correctness bug, or
+it is a fix the release takes for a crate it already changes. `release blocker`
+marks an issue the release cannot ship without. `security` marks a security
+defect on `main` that no release carries yet, and the release refuses to start
+while one is open on its milestone. A maintainer files these issues; anyone
+else reports a security defect privately, as [`SECURITY.md`](SECURITY.md)
+says. Work on CI, benchmarks and tooling carries no milestone unless a release
+depends on it.
+
+Everything else carries a priority instead: `priority: high`, `priority: medium`
+or `priority: low`. A maintainer sets the milestone or the priority when the
+issue is opened, so every open issue carries one of the two. Each release takes
+its fixes from `priority: high` first. An issue that misses its release moves to
+the next milestone once; if it misses that one too, it returns to the backlog
+with a priority label.
 
 ## The one decision
 

@@ -202,7 +202,7 @@ gh issue create --body-file <rendered.md> --title '[bug] …' \
 ```
 
 Every issue carries a milestone or a `priority:` label. Read
-[`CONTRIBUTING.md`](CONTRIBUTING.md#milestones-and-priorities) to choose
+[`RELEASING.md`](RELEASING.md#milestones-and-priorities) to choose
 between them, and pass `--milestone` or the priority `--label` with the rest.
 
 Nothing infers `--type` or `--label`, and **`--label` is silently dropped without

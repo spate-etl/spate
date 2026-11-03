@@ -2757,6 +2757,51 @@ async fn an_unaddable_backoff_waits_instead_of_abandoning() {
     assert_eq!(ack_rx.try_recv().unwrap().status, AckStatus::Failed);
 }
 
+/// Each batch's retry backoff is seeded by its sequence number, so two
+/// batches of one shard failing together draw different jitter.
+#[tokio::test(start_paused = true)]
+async fn two_batches_of_one_shard_retry_at_different_instants() {
+    let mut cfg = small_batches();
+    cfg.inflight.max_per_shard = 2;
+    cfg.breaker.failure_threshold = u32::MAX;
+    cfg.retry.initial = Duration::from_secs(1);
+    cfg.retry.max = Duration::from_secs(1);
+    cfg.retry.jitter = 1.0;
+    let first_delay = |seed| super::retry::Backoff::new(cfg.retry, seed).next_delay();
+    let (d0, d1) = (first_delay(0), first_delay(1));
+    assert_ne!(d0, d1, "seeds 0 and 1 draw different jitter");
+
+    let clock = TestClock::frozen();
+    let t0 = clock.now();
+    let f = fixture_on(&clock, 1, 1, cfg, 16);
+    f.writer.script(
+        0,
+        0,
+        [
+            Outcome::Fail(ErrorClass::Retryable, Duration::ZERO),
+            Outcome::Fail(ErrorClass::Retryable, Duration::ZERO),
+        ],
+    );
+    let (ack, _ack_rx) = AckRef::test_pair();
+    f.queues.try_send(0, chunk(1, 8, &ack)).unwrap();
+    f.queues.try_send(0, chunk(1, 8, &ack)).unwrap();
+    drop(ack);
+
+    paused_hour().await;
+    assert_eq!(f.writer.calls().len(), 2, "both batches failed once");
+    assert!(
+        clock.has_slept_until(t0 + d0),
+        "batch 0 sleeps its own draw"
+    );
+    assert!(
+        clock.has_slept_until(t0 + d1),
+        "batch 1 sleeps its own draw"
+    );
+
+    drop(f.queues);
+    f.pool.drain(Duration::ZERO).await;
+}
+
 /// The worker's durations, write, permit wait and seal to settle, are
 /// measured on the pool clock.
 #[test]

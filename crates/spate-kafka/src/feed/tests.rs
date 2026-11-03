@@ -2045,6 +2045,33 @@ mod cluster {
         }
     }
 
+    /// Pins that dropping the feed's consumer thread returns with an assignment
+    /// on its queue. The closing branch it shares with the source decides this.
+    #[test]
+    fn dropping_a_driver_with_a_queued_assignment_returns() {
+        let cluster = cluster_with(0);
+        let brokers = cluster.bootstrap_servers();
+        let group = spate_test::unique_name("drop-queued-assign");
+        let config =
+            KafkaFeedConfig::from_section(&section_with(&brokers, &group, "    debug: cgrp\n"))
+                .unwrap();
+        let (_, _producer, d) = super::super::parts(&config, TWO, SyncClock::system()).unwrap();
+        wait_until(DEADLINE, "an assignment queued", || {
+            spate_test::capture_logs(tracing::Level::DEBUG, || {
+                let _ = d.consumer.poll(Duration::ZERO);
+            })
+            .iter()
+            .any(|l| l.contains("-> wait-assign-call"))
+        });
+        d.consumer.assignment().unwrap();
+        let dropped = returns_within(Duration::from_secs(30), move || drop(d));
+        if !dropped {
+            // Its clients are still connected; dropping it would wait on them.
+            std::mem::forget(cluster);
+        }
+        assert!(dropped, "dropping the consumer thread did not return");
+    }
+
     /// Pins that a panic on the feed's thread while it holds partitions
     /// stops the feed with a Fatal error naming the consumer thread, that
     /// dropping the feed then returns, the unwind closing the consumer as a

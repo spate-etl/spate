@@ -119,7 +119,8 @@ struct AssignmentWait {
 
 /// Where one consumer stands in the group's rebalance protocol.
 enum Phase {
-    /// Rejoining the group: an assignment is expected and not yet offered.
+    /// Rejoining the group: an assignment is expected, or librdkafka has
+    /// queued one the source has not taken.
     Joining,
     /// Offered this assignment, not yet accepted with `assign`. librdkafka
     /// keeps the member's session alive and starts no later rebalance for it
@@ -1407,7 +1408,6 @@ impl KafkaSource {
 }
 
 /// The events waiting on `consumer`'s queue, of every kind.
-#[cfg(test)]
 fn queued_events(consumer: &BaseConsumer<SourceContext>) -> usize {
     let rk = consumer.client().native_ptr();
     // SAFETY: `consumer` keeps `rk` live for the call. `BaseConsumer::new`
@@ -1422,8 +1422,23 @@ fn queued_events(consumer: &BaseConsumer<SourceContext>) -> usize {
     }
 }
 
-/// Sets every consumer's context to complete rebalances inline, then
-/// releases every consumer with `unassign`.
+/// Serves the events on `consumer`'s queue at the time of the call, and leaves
+/// any that arrive later.
+///
+/// One poll serves one event of any kind and cannot report an empty queue, so
+/// the count comes from one read of the queue's length. The queue is first in,
+/// first out, so a rebalance present at the read is reached past the events
+/// ahead of it, and the serve cannot follow a growing queue.
+fn serve_queued(consumer: &BaseConsumer<SourceContext>) {
+    for _ in 0..queued_events(consumer) {
+        // No commit follows, so a message is dropped with no rewind. The error
+        // hook has logged an error.
+        let _ = consumer.poll(Duration::ZERO);
+    }
+}
+
+/// Sets every consumer's context to finish rebalances in the callback, then
+/// serves the events queued on each consumer and releases it with `unassign`.
 ///
 /// Consumer close, inside `BaseConsumer::drop`, polls until the group
 /// protocol completes and serves any rebalance still queued through the
@@ -1434,6 +1449,20 @@ fn queued_events(consumer: &BaseConsumer<SourceContext>) -> usize {
 /// application's `unassign`, and close would poll forever without it.
 /// Under eager assignment `unassign` is valid in any group state, so
 /// releasing a consumer with nothing pending costs nothing.
+///
+/// A queued assignment is served with no `assign`, and close completes it as
+/// it does a held one. `unassign` answers a queued revocation without serving
+/// its event, which would leave close to serve it after the group may have
+/// terminated, where the callback can wait forever on a reply. Each consumer's
+/// queue is served first, and a rebalance queued later stays close's to serve.
+///
+/// Tests pin each case: a held assignment
+/// (`dropping_with_a_held_assignment_returns`), a revocation the source took
+/// (`dropping_mid_revoke_returns`) and a lost one
+/// (`dropping_mid_lost_revoke_returns`), a queued assignment
+/// (`dropping_with_a_queued_assignment_returns`), and a queued revocation
+/// (`dropping_with_a_queued_revocation_returns`,
+/// `dropping_with_a_queued_lost_revocation_returns`).
 impl Drop for KafkaSource {
     fn drop(&mut self) {
         for member in &self.members {
@@ -1444,6 +1473,8 @@ impl Drop for KafkaSource {
                 .store(true, Ordering::Release);
         }
         for (k, member) in self.members.iter().enumerate() {
+            // After `unassign`, a queued revocation is a stale event for close.
+            serve_queued(&member.consumer);
             if let Err(e) = member.consumer.unassign() {
                 tracing::warn!(consumer = k, error = %e, "unassign during source teardown failed");
             }
@@ -2497,6 +2528,295 @@ mod tests {
             dropped,
             "dropping the source with an assignment held did not return"
         );
+    }
+
+    /// Dropping the source with a rebalance on a consumer's queue, as after
+    /// the controller's last `poll_events`. The tests stop on librdkafka's
+    /// group lines, and each asserts what the drop did, since a drop that
+    /// hangs depends on a race these lines do not reproduce.
+    mod queued_rebalance {
+        use super::*;
+        use crate::client::testing::{Raw as _, raw_config};
+        use crate::testutil::returns_within;
+        use rdkafka::mocking::MockCluster;
+        use rdkafka::producer::DefaultProducerContext;
+        use rdkafka::types::{RDKafkaApiKey, RDKafkaRespErr};
+        use spate_test::{capture_logs, wait_until};
+        use tracing::Level;
+
+        const DEADLINE: Duration = Duration::from_secs(60);
+        const CLOSE: Duration = Duration::from_secs(30);
+        /// A consumer enters the wait for an assign call. Its `delegating
+        /// assign` line and the rebalance event follow.
+        const ASSIGN_STOP: &str = "-> wait-assign-call";
+        const REVOKE_STOP: &str = "delegating revoke";
+        const LOST_STOP: &str = r#"fac="LOST""#;
+        /// `unassign` ran. A serve that follows it would reach this line.
+        const UNASSIGNED: &str = r#"fac="CLEARASSIGN""#;
+
+        type Mock = MockCluster<'static, DefaultProducerContext>;
+        type Member = Arc<BaseConsumer<SourceContext>>;
+
+        fn mock() -> Mock {
+            let cluster = MockCluster::new(1).expect("mock cluster");
+            cluster.create_topic("orders", 2, 1).expect("create topic");
+            cluster
+        }
+
+        /// A source of `consumers` logging librdkafka's group protocol.
+        fn config(cluster: &Mock, group: &str, consumers: usize) -> KafkaSourceConfig {
+            let mut cfg = test_config();
+            cfg.brokers = cluster.bootstrap_servers();
+            cfg.group_id = group.into();
+            cfg.consumers = consumers;
+            cfg.rdkafka = std::collections::BTreeMap::from([
+                ("debug".to_string(), "cgrp".to_string()),
+                ("session.timeout.ms".to_string(), "6000".to_string()),
+            ]);
+            cfg
+        }
+
+        /// An opened source, and its consumers, which outlive a drop of the
+        /// source so a test can read them before they close.
+        fn open(cfg: KafkaSourceConfig) -> (KafkaSource, Vec<Member>) {
+            let mut source = KafkaSource::new(cfg);
+            let cp = Checkpointer::new();
+            source.open(SourceCtx::new(cp.handle())).expect("open");
+            let members = source
+                .members
+                .iter()
+                .map(|m| Arc::clone(&m.consumer))
+                .collect();
+            (source, members)
+        }
+
+        /// Serve `consumer` up to librdkafka's `line`, and return with every
+        /// event logged before it on the queue.
+        fn stop_at(consumer: &BaseConsumer<SourceContext>, line: &str) {
+            wait_until(DEADLINE, line, || {
+                capture_logs(Level::DEBUG, || {
+                    let _ = consumer.poll(Duration::ZERO);
+                })
+                .iter()
+                .any(|l| l.contains(line))
+            });
+            // A round trip on librdkafka's thread, which has queued what it
+            // logged by the time it answers.
+            consumer.assignment().expect("assignment");
+        }
+
+        /// `poll_events` until an assignment is live, and return its lanes.
+        fn live_lanes(source: &mut KafkaSource) -> Vec<KafkaLane> {
+            let mut lanes = Vec::new();
+            wait_until(DEADLINE, "a live assignment", || {
+                match source.poll_events(Duration::from_millis(50)) {
+                    Ok(SourceEvent::LanesAssigned(new)) => {
+                        lanes = new;
+                        true
+                    }
+                    _ => false,
+                }
+            });
+            lanes
+        }
+
+        /// A member of `group` that takes a partition from the source. Its
+        /// join needs no poll.
+        fn joiner(cluster: &Mock, group: &str) -> BaseConsumer {
+            let c: BaseConsumer = raw_config()
+                .set("bootstrap.servers", cluster.bootstrap_servers())
+                .set("group.id", group)
+                .build()
+                .expect("joiner");
+            c.subscribe(&["orders"]).expect("subscribe");
+            c
+        }
+
+        /// Serve `consumer` until its queue reads empty, so a failed assert
+        /// unwinds into a close with nothing queued.
+        fn empty_queue(consumer: &BaseConsumer<SourceContext>) {
+            wait_until(DEADLINE, "an empty queue", || {
+                let _ = consumer.poll(Duration::ZERO);
+                queued_events(consumer) == 0
+            });
+        }
+
+        fn assert_no_intents(members: &[Member]) {
+            for consumer in members {
+                let intents = consumer.context().intents.lock().expect("intent lock");
+                assert!(intents.is_empty(), "{intents:?}");
+            }
+        }
+
+        /// Run `close`, and fail if it does not return.
+        fn assert_returns(cluster: Mock, close: impl FnOnce() + Send + 'static) {
+            let returned = returns_within(CLOSE, close);
+            if !returned {
+                // Its clients are still connected; dropping it would wait on them.
+                std::mem::forget(cluster);
+            }
+            assert!(returned, "a consumer's close did not return");
+        }
+
+        /// The drop serves each consumer's queued assignment with no `assign`
+        /// and ahead of its `unassign`, whether or not a leave is pending. A
+        /// static member has none. Regression for #1683.
+        #[test]
+        fn dropping_with_a_queued_assignment_returns() {
+            for (group, consumers, static_id) in [
+                ("drop-queued-assign", 2, None),
+                ("drop-queued-assign-static", 1, Some("worker-a")),
+            ] {
+                let cluster = mock();
+                let mut cfg = config(&cluster, group, consumers);
+                if let Some(id) = static_id {
+                    cfg.rdkafka.insert("group.instance.id".into(), id.into());
+                }
+                let (source, members) = open(cfg);
+                for consumer in &members {
+                    stop_at(consumer, ASSIGN_STOP);
+                }
+                let lines = capture_logs(Level::DEBUG, move || drop(source));
+                members.iter().for_each(|c| empty_queue(c));
+
+                for k in 0..consumers {
+                    let named = format!("consumer={k}");
+                    assert!(
+                        lines.iter().any(|l| l.contains("delegating assign")
+                            && (consumers == 1 || l.contains(&named))),
+                        "{group}: consumer {k}'s assignment was not served: {lines:#?}"
+                    );
+                }
+                assert!(
+                    !lines.iter().any(|l| l.contains(UNASSIGNED)),
+                    "{group}: a serve ran after unassign: {lines:#?}"
+                );
+                for consumer in &members {
+                    assert_eq!(consumer.assignment().expect("assignment").count(), 0);
+                }
+                assert_no_intents(&members);
+                assert_returns(cluster, move || drop(members));
+            }
+        }
+
+        /// The serve reaches a rebalance behind the log lines ahead of it,
+        /// which one poll does not. Regression for #1683.
+        #[test]
+        fn serving_a_consumer_reaches_a_rebalance_behind_its_log_lines() {
+            let cluster = mock();
+            let (source, members) = open(config(&cluster, "drop-queued-serve", 1));
+            stop_at(&members[0], ASSIGN_STOP);
+            serve_queued(&members[0]);
+            {
+                let intents = members[0].context().intents.lock().expect("intent lock");
+                assert!(
+                    matches!(intents.front(), Some(Intent::Assign(_))),
+                    "{intents:?}"
+                );
+            }
+            drop(source);
+            empty_queue(&members[0]);
+            assert_returns(cluster, move || drop(members));
+        }
+
+        /// The serve keeps going past an error event and leaves it logged by
+        /// the error hook. Regression for #1683.
+        #[test]
+        fn dropping_with_an_error_event_queued_returns() {
+            let mut cfg = test_config();
+            cfg.rdkafka
+                .insert("reconnect.backoff.ms".into(), "60000".into());
+            cfg.rdkafka
+                .insert("reconnect.backoff.max.ms".into(), "60000".into());
+            let source = opened_consumers(cfg, &[&[]]);
+            let consumer = Arc::clone(&source.members[0].consumer);
+            wait_until(DEADLINE, "error events queued", || {
+                queued_events(&consumer) >= 2
+            });
+            let lines = capture_logs(Level::WARN, move || drop(source));
+            assert!(
+                lines
+                    .iter()
+                    .any(|l| l.contains("librdkafka") && l.contains("error=")),
+                "no error event was served: {lines:#?}"
+            );
+            assert!(
+                returns_within(CLOSE, move || drop(consumer)),
+                "a consumer's close did not return"
+            );
+        }
+
+        /// Pins that a queued revocation is completed in the drop's serve and
+        /// that close then returns.
+        #[test]
+        fn dropping_with_a_queued_revocation_returns() {
+            let cluster = mock();
+            let group = "drop-queued-revoke";
+            let (mut source, members) = open(config(&cluster, group, 1));
+            let lanes = live_lanes(&mut source);
+            let joiner = joiner(&cluster, group);
+            stop_at(&members[0], REVOKE_STOP);
+            capture_logs(Level::DEBUG, move || {
+                drop(lanes);
+                drop(source);
+            });
+            empty_queue(&members[0]);
+            assert_no_intents(&members);
+            assert_returns(cluster, move || {
+                drop(members);
+                drop(joiner);
+            });
+        }
+
+        /// The drop serves a queued revocation of a lost assignment ahead of
+        /// the `unassign` that would otherwise answer it and leave its event
+        /// stale. An assignment can queue behind a revocation only once the
+        /// revocation is answered, so this also holds that order. Regression
+        /// for #1683.
+        #[test]
+        fn dropping_with_a_queued_lost_revocation_returns() {
+            let cluster = mock();
+            let (mut source, members) = open(config(&cluster, "drop-queued-lost", 1));
+            let lanes = live_lanes(&mut source);
+            cluster.request_errors(
+                RDKafkaApiKey::Heartbeat,
+                &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_UNKNOWN_MEMBER_ID],
+            );
+            stop_at(&members[0], LOST_STOP);
+            let lines = capture_logs(Level::DEBUG, move || {
+                drop(lanes);
+                drop(source);
+            });
+            empty_queue(&members[0]);
+            assert!(
+                lines.iter().any(|l| l.contains(REVOKE_STOP)),
+                "the revocation was not served: {lines:#?}"
+            );
+            assert!(
+                !lines.iter().any(|l| l.contains(UNASSIGNED)),
+                "a serve ran after unassign: {lines:#?}"
+            );
+            assert_returns(cluster, move || drop(members));
+        }
+
+        /// Pins that a lane outliving the source keeps its consumer open, and
+        /// that the last lane's drop closes it with the revocation completed.
+        #[test]
+        fn dropping_the_source_before_its_lanes_with_a_queued_revocation_completes() {
+            let cluster = mock();
+            let group = "drop-queued-lanes";
+            let (mut source, mut members) = open(config(&cluster, group, 1));
+            let lanes = live_lanes(&mut source);
+            let joiner = joiner(&cluster, group);
+            let consumer = members.pop().expect("one consumer");
+            stop_at(&consumer, REVOKE_STOP);
+            drop(consumer);
+            assert_returns(cluster, move || {
+                drop(source);
+                drop(lanes);
+                drop(joiner);
+            });
+        }
     }
 
     /// Queue a rebalance intent for `poll_events` on consumer 0, as the

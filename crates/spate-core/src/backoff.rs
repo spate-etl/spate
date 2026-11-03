@@ -1,43 +1,124 @@
-//! Capped exponential backoff with deterministic pseudo-jitter.
+//! Capped exponential backoff with deterministic pseudo-jitter, for retry
+//! loops in the engine and in connectors.
 
-use super::config::RetryConfig;
 use std::time::Duration;
 
-/// Backoff sequence for one batch's retry loop.
+/// A capped exponential sequence of retry delays.
 ///
-/// Jitter is pseudo-random from a xorshift state seeded per batch (no
-/// dependency on a random-number crate; batches seed differently, so
-/// replicas of a struggling shard don't retry in lockstep).
-#[derive(Debug)]
-pub(crate) struct Backoff {
-    cfg: RetryConfig,
+/// [`new`](Backoff::new) starts at `initial` and doubles each step up to
+/// `max`. [`with_multiplier`](Backoff::with_multiplier) sets another growth
+/// factor. [`with_jitter`](Backoff::with_jitter) shortens each delay by a
+/// random part of up to `fraction`, so a delay lies in
+/// `[(1 - fraction) × step, step]` and is never shortened to zero.
+///
+/// Jitter draws from a xorshift state set by
+/// [`with_seed`](Backoff::with_seed), with no dependency on a random-number
+/// crate. Instances seeded alike retry together, and instances seeded apart
+/// spread out.
+///
+/// The constructor and the setters are `const`, so a schedule can be declared
+/// once as a `const` item. Each use of the item starts a fresh sequence.
+///
+/// # Examples
+///
+/// ```
+/// use spate_core::backoff::Backoff;
+/// use std::time::Duration;
+///
+/// const SCHEDULE: Backoff = Backoff::new(Duration::from_millis(200), Duration::from_secs(5));
+///
+/// let mut backoff = SCHEDULE;
+/// assert_eq!(backoff.next_delay(), Duration::from_millis(200));
+/// assert_eq!(backoff.next_delay(), Duration::from_millis(400));
+/// backoff.reset();
+/// assert_eq!(backoff.next_delay(), Duration::from_millis(200));
+///
+/// let mut jittered = SCHEDULE.with_jitter(0.2).with_seed(7);
+/// let delay = jittered.next_delay();
+/// assert!(Duration::from_millis(160) <= delay && delay <= Duration::from_millis(200));
+/// ```
+// No `Copy`: an implicit copy would fork the sequence's state.
+#[derive(Clone, Debug)]
+pub struct Backoff {
+    start: Duration,
+    max: Duration,
+    multiplier: f64,
+    jitter: f64,
     current: Duration,
     rng: u64,
 }
 
-/// SplitMix64 finalizer. Avalanches adjacent inputs, so batch `n` and batch
+/// SplitMix64 finalizer. Avalanches adjacent inputs, so seed `n` and seed
 /// `n + 1` start from unrelated states.
-fn splitmix64(seed: u64) -> u64 {
+const fn splitmix64(seed: u64) -> u64 {
     let mut z = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
     z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
     z ^ (z >> 31)
 }
 
+/// The xorshift state for `seed`.
+const fn rng_state(seed: u64) -> u64 {
+    // Seeds are often consecutive sequence numbers. XOR-ing the seed into the
+    // state instead of mixing it leaves every seed's first draw inside the
+    // same thousandth of the jitter window, and relocates xorshift's
+    // absorbing zero state rather than removing it.
+    match splitmix64(seed) {
+        0 => 0x9E37_79B9_7F4A_7C15,
+        mixed => mixed,
+    }
+}
+
 impl Backoff {
-    pub(crate) fn new(cfg: RetryConfig, seed: u64) -> Self {
+    /// A backoff starting at `initial` and doubling up to `max`, without
+    /// jitter.
+    ///
+    /// An `initial` above `max` starts at `max`.
+    #[must_use]
+    pub const fn new(initial: Duration, max: Duration) -> Self {
+        // `Duration`'s ordering is not usable in a `const fn`.
+        let start = if initial.as_nanos() <= max.as_nanos() {
+            initial
+        } else {
+            max
+        };
         Backoff {
-            cfg,
-            // Keeps the ceiling unconditional for an `initial` above `max`.
-            current: cfg.initial.min(cfg.max),
-            // Seeds are consecutive batch sequence numbers. XOR-ing the seed
-            // into the state instead of mixing it leaves every batch's first
-            // retry inside the same thousandth of the jitter window, and
-            // relocates xorshift's absorbing zero state rather than removing it.
-            rng: match splitmix64(seed) {
-                0 => 0x9E37_79B9_7F4A_7C15,
-                mixed => mixed,
-            },
+            start,
+            max,
+            multiplier: 2.0,
+            jitter: 0.0,
+            current: start,
+            rng: rng_state(0),
+        }
+    }
+
+    /// This backoff, growing each step by `multiplier`.
+    ///
+    /// A multiplier below `1.0`, or NaN, reaches `max` on the second delay.
+    #[must_use]
+    pub const fn with_multiplier(self, multiplier: f64) -> Self {
+        Backoff { multiplier, ..self }
+    }
+
+    /// This backoff, shortening each delay by a random part of up to
+    /// `fraction` of it.
+    ///
+    /// `1.0` is full jitter. A fraction above `1.0` acts as `1.0`, and a
+    /// negative or non-finite one as no jitter.
+    #[must_use]
+    pub const fn with_jitter(self, fraction: f64) -> Self {
+        Backoff {
+            jitter: fraction,
+            ..self
+        }
+    }
+
+    /// This backoff, drawing its jitter from `seed`.
+    #[must_use]
+    pub const fn with_seed(self, seed: u64) -> Self {
+        Backoff {
+            rng: rng_state(seed),
+            ..self
         }
     }
 
@@ -50,27 +131,28 @@ impl Backoff {
         x
     }
 
-    /// The delay to sleep before the next attempt.
+    /// The delay to wait before the next attempt.
     ///
-    /// Total for *any* [`RetryConfig`]. The connector validators reject
-    /// nonsensical policies, but the framework struct is public and a
-    /// programmatic caller can still build one. These properties hold
-    /// unconditionally, and the proptests below enforce them:
+    /// Total for any input to the constructor and the setters, with
+    /// [`reset`](Backoff::reset) called at any point:
     ///
     /// * the delay never exceeds `max`;
     /// * it is never zero unless `min(initial, max)` is itself zero, so it
     ///   cannot degenerate into a zero-delay hot-retry loop against a failing
-    ///   replica;
+    ///   backend;
     /// * it never panics.
-    pub(crate) fn next_delay(&mut self) -> Duration {
+    ///
+    /// `max` may lie past the range of an `Instant`, so a caller that adds
+    /// the delay to one uses `checked_add`.
+    pub fn next_delay(&mut self) -> Duration {
         let base = self.current;
-        let cap = self.cfg.max;
+        let cap = self.max;
         // Grow in `f64` seconds and clamp *before* rebuilding the `Duration`:
         // `Duration::mul_f64` panics on an overflowing, non-finite or negative
         // result. A multiplier outside the growing range jumps straight to the
         // ceiling, NaN included, for which the comparison is false.
-        let grown = if self.cfg.multiplier >= 1.0 {
-            (base.as_secs_f64() * self.cfg.multiplier).min(cap.as_secs_f64())
+        let grown = if self.multiplier >= 1.0 {
+            (base.as_secs_f64() * self.multiplier).min(cap.as_secs_f64())
         } else {
             cap.as_secs_f64()
         };
@@ -82,8 +164,8 @@ impl Backoff {
         // factor lets an out-of-range `jitter` land on exactly `0.0` and erase
         // the delay outright. `f64::clamp` propagates NaN instead of clamping
         // it, hence the explicit finite check.
-        let jitter = if self.cfg.jitter.is_finite() {
-            self.cfg.jitter.clamp(0.0, 1.0)
+        let jitter = if self.jitter.is_finite() {
+            self.jitter.clamp(0.0, 1.0)
         } else {
             0.0
         };
@@ -95,33 +177,48 @@ impl Backoff {
         // Round-tripping a near-`Duration::MAX` base through `f64` rounds *up*
         // past `Duration::MAX`, even at a factor of exactly 1.0, so `base` is
         // both the fallback and the ceiling. The floor keeps a sub-nanosecond
-        // product, which `validate` admits, from rounding down to a zero delay.
+        // product from rounding down to a zero delay.
         let floor = base.min(Duration::from_nanos(1));
         Duration::try_from_secs_f64(jittered)
             .unwrap_or(base)
             .clamp(floor, base)
+    }
+
+    /// Starts the schedule again from `initial`, or from `max` when `initial`
+    /// is above it.
+    ///
+    /// The jitter draw continues from its current state.
+    pub fn reset(&mut self) {
+        self.current = self.start;
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sink::RetryConfig;
     use proptest::num;
     use proptest::prelude::*;
 
-    fn cfg(jitter: f64) -> RetryConfig {
-        RetryConfig {
-            initial: Duration::from_millis(100),
-            max: Duration::from_millis(400),
-            multiplier: 2.0,
-            jitter,
-            max_attempts: 0,
-        }
+    fn backoff(jitter: f64, seed: u64) -> Backoff {
+        Backoff::new(Duration::from_millis(100), Duration::from_millis(400))
+            .with_jitter(jitter)
+            .with_seed(seed)
+    }
+
+    fn policy(initial: Duration, max: Duration, multiplier: f64, jitter: f64) -> Backoff {
+        Backoff::new(initial, max)
+            .with_multiplier(multiplier)
+            .with_jitter(jitter)
+    }
+
+    fn millis(b: &mut Backoff, steps: usize) -> Vec<u128> {
+        (0..steps).map(|_| b.next_delay().as_millis()).collect()
     }
 
     #[test]
     fn grows_exponentially_and_caps_without_jitter() {
-        let mut b = Backoff::new(cfg(0.0), 7);
+        let mut b = backoff(0.0, 7);
         assert_eq!(b.next_delay(), Duration::from_millis(100));
         assert_eq!(b.next_delay(), Duration::from_millis(200));
         assert_eq!(b.next_delay(), Duration::from_millis(400));
@@ -129,8 +226,48 @@ mod tests {
     }
 
     #[test]
+    fn doubling_from_200ms_holds_at_the_5s_cap() {
+        let mut b = Backoff::new(Duration::from_millis(200), Duration::from_secs(5));
+        assert_eq!(millis(&mut b, 7), [200, 400, 800, 1600, 3200, 5000, 5000]);
+        let mut b = Backoff::new(Duration::from_millis(10), Duration::from_millis(250));
+        assert_eq!(millis(&mut b, 7), [10, 20, 40, 80, 160, 250, 250]);
+    }
+
+    #[test]
+    fn reset_restarts_the_schedule_below_the_ceiling() {
+        let mut b = backoff(0.0, 7);
+        assert_eq!(millis(&mut b, 3), [100, 200, 400]);
+        b.reset();
+        assert_eq!(b.next_delay(), Duration::from_millis(100));
+
+        let mut b = Backoff::new(Duration::from_secs(10), Duration::from_secs(1));
+        b.next_delay();
+        b.reset();
+        assert_eq!(b.next_delay(), Duration::from_secs(1), "clamped to max");
+
+        let mut b = backoff(0.2, 7);
+        millis(&mut b, 3);
+        b.reset();
+        let d = b.next_delay();
+        assert!(
+            Duration::from_millis(80) <= d && d <= Duration::from_millis(100),
+            "{d:?}"
+        );
+    }
+
+    #[test]
+    fn a_zero_initial_returns_zero_without_panicking() {
+        for jitter in [0.0, 0.5] {
+            let mut b = Backoff::new(Duration::ZERO, Duration::from_secs(5)).with_jitter(jitter);
+            assert_eq!(b.next_delay(), Duration::ZERO, "{jitter}");
+            b.reset();
+            assert_eq!(b.next_delay(), Duration::ZERO, "{jitter}");
+        }
+    }
+
+    #[test]
     fn jitter_stays_within_the_configured_fraction() {
-        let mut b = Backoff::new(cfg(0.2), 42);
+        let mut b = backoff(0.2, 42);
         for expected_ms in [100u64, 200, 400, 400] {
             let d = b.next_delay();
             let full = Duration::from_millis(expected_ms);
@@ -144,8 +281,8 @@ mod tests {
 
     #[test]
     fn different_seeds_diverge() {
-        let mut a = Backoff::new(cfg(0.5), 1);
-        let mut b = Backoff::new(cfg(0.5), 2);
+        let mut a = backoff(0.5, 1);
+        let mut b = backoff(0.5, 2);
         let same = (0..8).filter(|_| a.next_delay() == b.next_delay()).count();
         assert!(same < 8, "two seeds should not produce identical jitter");
     }
@@ -154,16 +291,10 @@ mod tests {
     fn extreme_max_and_multiplier_do_not_overflow() {
         // A policy both sink validators accept; without the clamp, growth past
         // `max` overflows `Duration` and panics the write task.
-        let cfg = RetryConfig {
-            initial: Duration::from_secs(1),
-            max: Duration::from_secs(315_576_000_000),
-            multiplier: 1e9,
-            jitter: 0.0,
-            max_attempts: 0,
-        };
-        let mut b = Backoff::new(cfg, 3);
+        let max = Duration::from_secs(315_576_000_000);
+        let mut b = policy(Duration::from_secs(1), max, 1e9, 0.0).with_seed(3);
         for _ in 0..8 {
-            assert!(b.next_delay() <= cfg.max);
+            assert!(b.next_delay() <= max);
         }
     }
 
@@ -171,16 +302,9 @@ mod tests {
     fn a_near_max_duration_ceiling_saturates() {
         // `Duration::MAX.as_secs_f64()` rounds *up* past `Duration::MAX`, so
         // the clamped f64 is not necessarily a representable ceiling.
-        let cfg = RetryConfig {
-            initial: Duration::from_secs(1),
-            max: Duration::MAX,
-            multiplier: 1e9,
-            jitter: 0.5,
-            max_attempts: 0,
-        };
-        let mut b = Backoff::new(cfg, 11);
+        let mut b = policy(Duration::from_secs(1), Duration::MAX, 1e9, 0.5).with_seed(11);
         for _ in 0..8 {
-            assert!(b.next_delay() <= cfg.max);
+            assert!(b.next_delay() <= Duration::MAX);
         }
     }
 
@@ -189,6 +313,7 @@ mod tests {
         // `0.0`, `-0.0` and subnormals are the collapsing cases, pinning the
         // delay at 0ns forever; `-0.0` reaches that through
         // `try_from_secs_f64(-0.0) == Ok(0ns)`, not a failed conversion.
+        let (initial, max) = (Duration::from_millis(100), Duration::from_secs(10));
         for multiplier in [
             f64::NAN,
             f64::INFINITY,
@@ -199,31 +324,23 @@ mod tests {
             f64::MIN_POSITIVE,
             0.5,
         ] {
-            let cfg = RetryConfig {
-                initial: Duration::from_millis(100),
-                max: Duration::from_secs(10),
-                multiplier,
-                jitter: 0.0,
-                max_attempts: 0,
-            };
-            let mut b = Backoff::new(cfg, 5);
-            assert_eq!(b.next_delay(), cfg.initial, "{multiplier}");
-            assert_eq!(b.next_delay(), cfg.max, "{multiplier}");
-            assert_eq!(b.next_delay(), cfg.max, "{multiplier}");
+            let mut b = policy(initial, max, multiplier, 0.0).with_seed(5);
+            assert_eq!(b.next_delay(), initial, "{multiplier}");
+            assert_eq!(b.next_delay(), max, "{multiplier}");
+            assert_eq!(b.next_delay(), max, "{multiplier}");
         }
     }
 
     #[test]
     fn an_out_of_range_jitter_never_lengthens_the_delay() {
         for jitter in [1.5, -0.5, f64::NAN, f64::INFINITY] {
-            let cfg = RetryConfig {
-                initial: Duration::from_millis(100),
-                max: Duration::from_secs(10),
-                multiplier: 2.0,
+            let mut b = policy(
+                Duration::from_millis(100),
+                Duration::from_secs(10),
+                2.0,
                 jitter,
-                max_attempts: 0,
-            };
-            let mut b = Backoff::new(cfg, 5);
+            )
+            .with_seed(5);
             for expected in [Duration::from_millis(100), Duration::from_millis(200)] {
                 assert!(b.next_delay() <= expected, "{jitter}");
             }
@@ -246,15 +363,8 @@ mod tests {
             ),
             (Duration::from_nanos(1), Duration::from_nanos(1), 1.0),
         ] {
-            let cfg = RetryConfig {
-                initial,
-                max,
-                multiplier: 2.0,
-                jitter,
-                max_attempts: 0,
-            };
             for seed in 0..256 {
-                let mut b = Backoff::new(cfg, seed);
+                let mut b = policy(initial, max, 2.0, jitter).with_seed(seed);
                 for _ in 0..8 {
                     let d = b.next_delay();
                     assert!(!d.is_zero(), "zero delay: jitter {jitter}, seed {seed}");
@@ -267,16 +377,10 @@ mod tests {
     #[test]
     fn an_initial_above_the_ceiling_starts_at_the_ceiling() {
         // Without the clamp the first delay is `initial`, ten times the ceiling.
-        let cfg = RetryConfig {
-            initial: Duration::from_secs(10),
-            max: Duration::from_secs(1),
-            multiplier: 2.0,
-            jitter: 0.0,
-            max_attempts: 0,
-        };
-        let mut b = Backoff::new(cfg, 5);
+        let max = Duration::from_secs(1);
+        let mut b = Backoff::new(Duration::from_secs(10), max).with_seed(5);
         for _ in 0..4 {
-            assert_eq!(b.next_delay(), cfg.max);
+            assert_eq!(b.next_delay(), max);
         }
     }
 
@@ -286,11 +390,10 @@ mod tests {
         // sequential seeds falls inside [0.8597, 0.8598]: every batch's first
         // retry lands on the same 82.804118ms, in lockstep. Spread across the
         // window is the property; "not exactly equal" does not catch it.
-        let cfg = cfg(0.2);
         let (full, window) = (0.1_f64, 0.02_f64); // 100ms delay, 20% jittered away
         let mut deciles = [0usize; 10];
         for seq in 0..512 {
-            let d = Backoff::new(cfg, seq).next_delay();
+            let d = backoff(0.2, seq).next_delay();
             let frac = (d.as_secs_f64() - (full - window)) / window;
             deciles[((frac * 10.0) as usize).min(9)] += 1;
         }
@@ -319,27 +422,29 @@ mod tests {
     }
 
     proptest! {
-        /// `Backoff` is total for every `RetryConfig`, including the ones the
-        /// sink validators reject; a programmatic caller can still build one.
-        /// It never panics, never exceeds `max`, and never returns a zero
-        /// delay unless the policy leaves it no non-zero delay to return. An
-        /// upper bound alone does not catch this, because an implementation
-        /// returning `Duration::ZERO` unconditionally satisfies it.
+        /// `Backoff` is total for every input to its constructor and setters,
+        /// with `reset` interleaved. It never panics, never exceeds `max`, and
+        /// never returns a zero delay unless `min(initial, max)` leaves it no
+        /// non-zero delay to return. An upper bound alone does not catch
+        /// this, because an implementation returning `Duration::ZERO`
+        /// unconditionally satisfies it.
         #[test]
-        fn any_config_saturates_without_collapsing(
+        fn any_policy_saturates_without_collapsing(
             initial in any_duration(),
             max in any_duration(),
             multiplier in num::f64::ANY,
             jitter in num::f64::ANY,
             seed in num::u64::ANY,
+            reset_at in 0usize..16,
         ) {
-            let cfg = RetryConfig { initial, max, multiplier, jitter, max_attempts: 0 };
-            // The only policy with no non-zero delay available to it.
-            let must_be_zero = cfg.initial.min(cfg.max).is_zero();
-            let mut b = Backoff::new(cfg, seed);
-            for _ in 0..16 {
+            let must_be_zero = initial.min(max).is_zero();
+            let mut b = policy(initial, max, multiplier, jitter).with_seed(seed);
+            for step in 0..16 {
+                if step == reset_at {
+                    b.reset();
+                }
                 let d = b.next_delay();
-                prop_assert!(d <= cfg.max, "{d:?} exceeds the {:?} ceiling", cfg.max);
+                prop_assert!(d <= max, "{d:?} exceeds the {max:?} ceiling");
                 prop_assert!(
                     must_be_zero || !d.is_zero(),
                     "zero delay from a policy with a non-zero floor"
@@ -347,7 +452,7 @@ mod tests {
             }
         }
 
-        /// Over the space the validators admit, the sequence grows
+        /// Over the space the sink validators admit, the sequence grows
         /// monotonically towards `max` and every delay is a real sleep.
         /// Bounded to two days so the assertions stay exact: above 2^23
         /// seconds a `Duration` no longer round-trips through `f64`, and
@@ -369,7 +474,7 @@ mod tests {
                 max_attempts: 0,
             };
             prop_assert_eq!(cfg.validate(), Ok(()), "{:?}", cfg);
-            let mut b = Backoff::new(cfg, seed);
+            let mut b = policy(cfg.initial, cfg.max, cfg.multiplier, cfg.jitter).with_seed(seed);
             let mut previous = Duration::ZERO;
             for _ in 0..24 {
                 let d = b.next_delay();

@@ -141,8 +141,9 @@ impl RetryConfig {
     /// the message, so the rules stay in one place instead of being mirrored
     /// per connector.
     ///
-    /// This is about intent, not safety. `Backoff` never
-    /// panics for *any* `RetryConfig` and always saturates at `max`. It
+    /// This is about intent, not safety.
+    /// [`Backoff`](crate::backoff::Backoff) never panics for *any*
+    /// `RetryConfig` and always saturates at `max`. It
     /// returns a zero delay only for a policy this rejects (`initial` or
     /// `max` of zero), so "never zero" is a property of a **validated**
     /// policy, not of the type. What it catches is a policy no operator

@@ -27,6 +27,9 @@ pub mod admin;
 /// one is also fine; versions are compatible per the workspace pin).
 pub use bytes;
 
+// Kept out of loom model builds: nothing loom-modelled backs off.
+#[cfg(not(loom))]
+pub mod backoff;
 pub mod backpressure;
 pub mod checkpoint;
 pub mod clock;

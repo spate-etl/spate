@@ -2767,7 +2767,12 @@ async fn two_batches_of_one_shard_retry_at_different_instants() {
     cfg.retry.initial = Duration::from_secs(1);
     cfg.retry.max = Duration::from_secs(1);
     cfg.retry.jitter = 1.0;
-    let first_delay = |seed| super::retry::Backoff::new(cfg.retry, seed).next_delay();
+    let first_delay = |seed| {
+        crate::backoff::Backoff::new(cfg.retry.initial, cfg.retry.max)
+            .with_jitter(cfg.retry.jitter)
+            .with_seed(seed)
+            .next_delay()
+    };
     let (d0, d1) = (first_delay(0), first_delay(1));
     assert_ne!(d0, d1, "seeds 0 and 1 draw different jitter");
 

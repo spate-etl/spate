@@ -1,0 +1,3 @@
+**`spate_core::backoff::Backoff` computes a capped exponential retry delay** (`spate-core`)
+
+`Backoff::new(initial, max)` doubles from `initial` up to `max`. `with_multiplier` sets the growth factor, `with_jitter` the fraction of each delay randomized away, and `with_seed` the seed of that draw. `next_delay` returns the next wait, and `reset` starts the schedule again from `initial`. A delay never exceeds `max`, jitter only shortens it, and it is zero only when `initial` or `max` is. Every method accepts any input without panicking. The constructor and the `with_*` methods are `const`, so a schedule can be declared as a `const` item. The type is also available as `spate::backoff::Backoff`. A sink's `retry` settings behave as before.

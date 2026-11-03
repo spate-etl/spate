@@ -25,7 +25,7 @@ use rdkafka::producer::{DeliveryResult, ProducerContext};
 use rdkafka::statistics::Statistics;
 use rdkafka::types::RDKafkaRespErr;
 use rdkafka::util::IntoOpaque;
-use spate_core::config::redact;
+use spate_core::config::{DurationBounds, check_duration, redact};
 use std::collections::BTreeMap;
 use std::fmt;
 use std::ops::Deref;
@@ -80,12 +80,12 @@ pub(crate) fn canonical(key: &str) -> &str {
 /// # Errors
 ///
 /// The reason, without the key, for the section to prefix in its own style.
-pub(crate) fn check_message_timeout(timeout: Duration) -> Result<(), &'static str> {
-    let millis = timeout.as_millis();
-    if millis == 0 || millis > i32::MAX as u128 {
-        return Err("must be from 1ms to about 24.8 days (librdkafka reads 0 as no timeout)");
-    }
-    Ok(())
+pub(crate) fn check_message_timeout(timeout: Duration) -> Result<(), String> {
+    const MESSAGE_TIMEOUT: DurationBounds = DurationBounds::at_least(Duration::from_millis(1))
+        .at_most(Duration::from_millis(i32::MAX as u64));
+    check_duration(timeout, MESSAGE_TIMEOUT).map_err(|e| {
+        format!("{e}: librdkafka reads whole milliseconds up to i32::MAX and reads 0 as no timeout")
+    })
 }
 
 /// One client's place in a connector: its `client.id` suffix, whether it
@@ -184,8 +184,10 @@ impl fmt::Display for Refusal<'_> {
     }
 }
 
-/// The largest `statistics.interval.ms` librdkafka accepts.
-const MAX_STATISTICS_INTERVAL: Duration = Duration::from_hours(24);
+/// librdkafka's `statistics.interval.ms` range, with `0s` for off.
+const STATISTICS_INTERVAL: DurationBounds = DurationBounds::at_least(Duration::from_millis(1))
+    .at_most(Duration::from_hours(24))
+    .or_zero();
 
 /// What every client of one connector section shares: its brokers, its
 /// passthrough and its statistics interval.
@@ -327,13 +329,12 @@ impl Base<'_> {
     ///
     /// The reason, without the key, for the section to prefix in its own
     /// style.
-    pub(crate) fn check_statistics_interval(&self) -> Result<(), &'static str> {
-        let interval = self.statistics_interval;
-        if !interval.is_zero() && (interval.as_millis() == 0 || interval > MAX_STATISTICS_INTERVAL)
-        {
-            return Err("must be 0s, which disables statistics, or from 1ms to 24h");
-        }
-        Ok(())
+    pub(crate) fn check_statistics_interval(&self) -> Result<(), String> {
+        check_duration(self.statistics_interval, STATISTICS_INTERVAL).map_err(|e| {
+            format!(
+                "{e}: 0s disables statistics, and librdkafka reads whole milliseconds up to 24h"
+            )
+        })
     }
 
     /// Build `role`'s client under `hooks`.
@@ -552,7 +553,9 @@ mod tests {
         for timeout in [
             Duration::ZERO,
             Duration::from_micros(999),
+            Duration::from_nanos(999_999),
             Duration::from_millis(i32::MAX as u64 + 1),
+            Duration::from_millis(i32::MAX as u64) + Duration::from_nanos(1),
             Duration::from_secs(25 * DAY),
         ] {
             assert!(check_message_timeout(timeout).is_err(), "{timeout:?}");
@@ -1061,8 +1064,8 @@ mod tests {
     }
 
     /// Pins that librdkafka narrows a `statistics.interval.ms` of 2^32 to
-    /// `0`, which it reads as off, so the 24h bound in
-    /// `Base::check_statistics_interval` also keeps such a value out.
+    /// `0`, which it reads as off, so the 24h ceiling of
+    /// `STATISTICS_INTERVAL` also keeps such a value out.
     #[test]
     fn librdkafka_wraps_a_statistics_interval_at_2_pow_32() {
         let mut cc = new_config();

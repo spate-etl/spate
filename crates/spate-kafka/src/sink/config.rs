@@ -1103,6 +1103,10 @@ mod tests {
                 "delivery_timeout",
             ),
             (
+                format!("{}  delivery_timeout: 2147483647ms 1ns\n", minimal()),
+                "delivery_timeout",
+            ),
+            (
                 format!("{}  max_message_bytes: 10\n", minimal()),
                 "max_message_bytes",
             ),

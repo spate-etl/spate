@@ -182,26 +182,18 @@ own connector is a supported path, not a fork: see
 
 ## Performance
 
-Single-node throughput is measured. A change that reaches Rust runs allocation
-assertions and request-shape assertions, and one whose blast radius reaches a
-benched crate runs instruction-count benches too. Those compare counts rather
-than elapsed time, so a regression they report is a property of the change and
-not of how busy the runner was.
-
-Wall-clock benches sit beside them as `cargo bench` targets, and nothing
-gates on one. Each week CI compares `main` against `main` a week earlier on one
-runner, with the two builds' runs interleaved, and reports the result without
-gating on it.
+Single-node throughput is measured, and the
+[benchmarks](https://spate.kainth.dev/benchmarks) page publishes the results
+with the method behind them. The benches a change runs are in
+[`DEVELOPING.md`](DEVELOPING.md#benchmarks).
 
 ## Testing
 
-proptest covers the checkpoint tracker and the codecs across seven crates. loom models the tracker's concurrency
-directly; that module stays synchronous and free of async
+proptest covers the checkpoint tracker and the codecs. loom models the
+tracker's concurrency directly; that module stays synchronous and free of async
 runtime types. Kafka runs against librdkafka's `MockCluster` on every pull
 request; brokers, ClickHouse and object stores run against real containers
 whenever a change reaches them, and on a schedule regardless.
-
-The most useful contribution is one that proves a delivery guarantee wrong.
 
 ## Documentation
 

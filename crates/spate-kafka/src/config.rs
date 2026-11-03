@@ -3,7 +3,7 @@
 
 use crate::client::{Base, Keys, Role};
 use serde::Deserialize;
-use spate_core::config::{ComponentConfig, ConfigError, redact};
+use spate_core::config::{ComponentConfig, ConfigError, DurationBounds, check_duration, redact};
 use std::collections::BTreeMap;
 use std::time::Duration;
 
@@ -143,7 +143,9 @@ pub struct KafkaSourceConfig {
     #[serde(default = "default_consumers")]
     pub consumers: usize,
     /// How often stored offsets are auto-committed
-    /// (librdkafka `auto.commit.interval.ms`).
+    /// (librdkafka `auto.commit.interval.ms`). librdkafka reads the value in
+    /// whole milliseconds up to 24h and turns interval commits off at 0, so
+    /// [`validate`](Self::validate) refuses a value under 1ms or above 24h.
     #[serde(with = "humantime_serde", default = "default_commit_interval")]
     pub commit_interval: Duration,
     /// How long to wait for the first partition assignment before the
@@ -300,6 +302,16 @@ impl KafkaSourceConfig {
         if let Err(why) = self.base(false).check_statistics_interval() {
             return Err(ConfigError::Validation(format!(
                 "source.kafka.statistics_interval {why}"
+            )));
+        }
+        // librdkafka's `auto.commit.interval.ms` range is 0 to 24h, and 0
+        // turns the commit timer off.
+        const COMMIT_INTERVAL: DurationBounds =
+            DurationBounds::at_least(Duration::from_millis(1)).at_most(Duration::from_hours(24));
+        if let Err(e) = check_duration(self.commit_interval, COMMIT_INTERVAL) {
+            return Err(ConfigError::Validation(format!(
+                "source.kafka.commit_interval {e}: librdkafka reads the interval in whole \
+                 milliseconds up to 24h and turns interval commits off at 0"
             )));
         }
         if let Err(refusal) = self.base(false).denied(&[&Consumer(self, None)]) {
@@ -869,5 +881,66 @@ mod tests {
                 "{interval}"
             );
         }
+    }
+
+    /// The refusal `validate` gives for a `commit_interval` of `found`.
+    fn commit_refusal(found: &str) -> String {
+        format!(
+            "invalid configuration: source.kafka.commit_interval must be from 1ms to 1day; \
+             found {found}: librdkafka reads the interval in whole milliseconds up to 24h and \
+             turns interval commits off at 0"
+        )
+    }
+
+    /// Pins that a `commit_interval` under 1ms, `0s` included, or above 24h
+    /// is refused at load ahead of the passthrough denylist, since librdkafka
+    /// would turn interval commits off or reject it, that the refusal names
+    /// the key and no passthrough value, and that `1ms` and `24h` load with
+    /// the value written in milliseconds. Regression for #1661.
+    #[test]
+    fn a_commit_interval_outside_1ms_to_24h_is_refused() {
+        for (interval, found) in [
+            ("0s", "0s"),
+            ("1ns", "1ns"),
+            ("500us", "500us"),
+            ("999us", "999us"),
+            ("999999ns", "999us 999ns"),
+            ("24h 1ns", "1day 1ns"),
+            ("24h 500us", "1day 500us"),
+            ("24h 1ms", "1day 1ms"),
+            ("4294967296ms", "1month 19days 6h 29m 11s 296ms"),
+        ] {
+            let body = format!(
+                "{}  commit_interval: {interval}\n  rdkafka:\n    client.id: hunter2\n",
+                minimal()
+            );
+            let msg = KafkaSourceConfig::from_component_config(&section(&body))
+                .expect_err(interval)
+                .to_string();
+            assert_eq!(msg, commit_refusal(found), "{interval}");
+        }
+        let body = format!(
+            "{}  commit_interval: 500us\n  rdkafka:\n    \"auto.commit.interval.ms\": \"x\"\n",
+            minimal()
+        );
+        let msg = KafkaSourceConfig::from_component_config(&section(&body))
+            .unwrap_err()
+            .to_string();
+        assert_eq!(msg, commit_refusal("500us"));
+        for (interval, written) in [("1ms", "1"), ("1ms 500us", "1"), ("24h", "86400000")] {
+            let body = format!("{}  commit_interval: {interval}\n", minimal());
+            let cfg = KafkaSourceConfig::from_component_config(&section(&body))
+                .unwrap_or_else(|err| panic!("{interval}: {err}"));
+            assert_eq!(
+                cfg.client_config().get("auto.commit.interval.ms"),
+                Some(written),
+                "{interval}"
+            );
+        }
+        let cfg = KafkaSourceConfig::from_component_config(&section(&minimal())).unwrap();
+        assert_eq!(
+            cfg.client_config().get("auto.commit.interval.ms"),
+            Some("5000")
+        );
     }
 }

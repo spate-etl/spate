@@ -1491,6 +1491,27 @@ mod tests {
         );
     }
 
+    /// `open()` refuses a sub-millisecond `commit_interval` on a source made
+    /// with `new()`, as a fatal error that names the key and no passthrough
+    /// value, before it creates a consumer. Regression for #1661.
+    #[test]
+    fn open_refuses_a_sub_millisecond_commit_interval() {
+        let mut config = test_config();
+        config.commit_interval = Duration::from_micros(500);
+        config.rdkafka.insert("client.id".into(), "hunter2".into());
+        let mut source = KafkaSource::new(config);
+        let cp = Checkpointer::new();
+        let Err(SourceError::Client {
+            class: ErrorClass::Fatal,
+            reason,
+        }) = source.open(SourceCtx::new(cp.handle()))
+        else {
+            panic!("open accepted a 500us commit_interval");
+        };
+        assert!(reason.contains("source.kafka.commit_interval"), "{reason}");
+        assert!(!reason.contains("hunter2"), "{reason}");
+    }
+
     /// Reproduces the assignment bookkeeping of a partial revocation on
     /// consumer `k`: lanes for the revoked partitions move from `assignment`
     /// into `revoking`.

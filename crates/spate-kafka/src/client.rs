@@ -569,6 +569,17 @@ mod tests {
     use rdkafka::producer::BaseProducer;
     use spate_core::config::ConfigError;
 
+    /// A consumer with no group holds no group metadata, and reads no
+    /// generation.
+    #[test]
+    fn a_consumer_with_no_group_reads_no_generation() {
+        let consumer: BaseConsumer<crate::context::SourceContext> = testing::raw(
+            &[("bootstrap.servers", "127.0.0.1:1")],
+            SourceHooks::default(),
+        );
+        assert_eq!(group_generation(&consumer), -1);
+    }
+
     fn map(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
         pairs
             .iter()

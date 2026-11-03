@@ -310,12 +310,17 @@ fn first_repeat(offers: &[(usize, TopicPartitionList)]) -> Option<(i32, usize, u
     None
 }
 
+/// The newest generation among `(consumer, generation)` offers.
+fn newest_generation(offers: &[(usize, i32)]) -> i32 {
+    offers.iter().map(|(_, g)| *g).fold(i32::MIN, i32::max)
+}
+
 /// The consumers whose offer is stale, from each offer's `(consumer,
 /// generation)`: a generation below the newest among them, or none at all. So
 /// offers that all read no generation are all stale, offers of one valid
 /// generation are not, and the outcome does not depend on a consumer's index.
 fn stale_offers(offers: &[(usize, i32)]) -> Vec<usize> {
-    let newest = offers.iter().map(|(_, g)| *g).max().unwrap_or(-1);
+    let newest = newest_generation(offers);
     offers
         .iter()
         .filter(|(_, g)| *g < newest || *g < 0)
@@ -611,7 +616,7 @@ impl KafkaSource {
             .iter()
             .map(|(k, _)| (*k, self.members[*k].group_generation()))
             .collect();
-        let newest = generations.iter().map(|(_, g)| *g).max().unwrap_or(-1);
+        let newest = newest_generation(&generations);
         let stale = stale_offers(&generations);
         let mut kept = Vec::with_capacity(offers.len());
         for ((k, tpl), (_, generation)) in offers.into_iter().zip(generations) {
@@ -2332,7 +2337,7 @@ mod tests {
             assert!(matches!(source.members[0].phase, Phase::Assigned));
         }
 
-        /// A consumer that never joined a group reads no generation.
+        /// A consumer that has not joined a group reads no generation.
         #[test]
         fn a_member_not_in_a_group_reads_no_generation() {
             let source = opened_consumers(test_config(), &[&[]]);
@@ -3238,6 +3243,22 @@ mod tests {
         }
     }
 
+    /// A consumer of `group` on `brokers`, outside the source, that answers
+    /// its own rebalances.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "another group member is configured outside the factory's roles"
+    )]
+    fn raw_group_member(brokers: &str, group: &str) -> rdkafka::consumer::BaseConsumer {
+        use crate::client::testing::raw_config;
+        raw_config()
+            .set("bootstrap.servers", brokers)
+            .set("group.id", group)
+            .set("session.timeout.ms", "6000")
+            .create()
+            .expect("raw consumer")
+    }
+
     /// A source of two consumers on `brokers` holding two partitions each,
     /// with an offset stored for every partition.
     fn settled_with_stored_offsets(brokers: &str, group: &str) -> KafkaSource {
@@ -3271,7 +3292,7 @@ mod tests {
 
     /// The offset `group` has committed for each partition of `orders`.
     fn committed_of(brokers: &str, group: &str) -> Vec<Offset> {
-        let probe = crate::testutil::raw_consumer(brokers, group);
+        let probe = raw_group_member(brokers, group);
         let mut tpl = TopicPartitionList::new();
         for p in 0..4 {
             tpl.add_partition("orders", p);
@@ -3390,7 +3411,7 @@ mod tests {
                 .position(|m| matches!(m.phase, Phase::Held(_)));
             held.is_some()
         });
-        let raw = crate::testutil::raw_consumer(&cluster.bootstrap_servers(), "stale-generation");
+        let raw = raw_group_member(&cluster.bootstrap_servers(), "stale-generation");
         raw.subscribe(&["orders"]).expect("subscribe");
         spate_test::wait_until(
             Duration::from_secs(60),

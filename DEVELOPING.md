@@ -99,7 +99,7 @@ Container-backed tests use testcontainers and are `#[ignore]`d, so a normal run
 skips them. `cargo xtask integration-test` is what selects them.
 
 A suite that boots a real server runs it at a pinned version, one lane per
-release line the vendor still supports,
+release line the vendor still supports, or per store for the S3 source,
 selected by a `SPATE_<SERVICE>_LANE`
 variable and pinned by tag and digest under `ci/<service>/`. CI runs the primary
 lane for the whole tier and gives every other lane a job of its own.
@@ -260,7 +260,8 @@ region, and whatever runs while collection happens to be on is counted instead.
 rather than from the source: a case must attribute at least 10% of its collected
 instructions to the binary under measurement, and must collect at least 1,000 of
 them, since a region can also be lost by leaving almost nothing rather than by
-leaving the allocator. `cargo xtask bench counted`
+leaving the allocator. Observed cases bottom out at 33.35% on x86_64 and
+28.67% on arm64. `cargo xtask bench counted`
 runs it after the benches, and CI runs it per shard as a *gate*: the counts are
 advisory, a bench measuring the allocator is not. `cargo xtask tidy self-test`
 holds the guard itself to captured profiles of both shapes, and needs no

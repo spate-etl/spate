@@ -1368,14 +1368,18 @@ impl KafkaSource {
     }
 }
 
-/// Teardown: consumer close (inside `BaseConsumer::drop`) triggers a final
-/// revoke and then polls until the rebalance protocol completes. Under the
-/// deferred-intent design nothing would complete it and the drop would hang
-/// forever. Flip every consumer's context to inline-completion mode first,
-/// then release every consumer, which settles any revocation or assignment
-/// surfaced or held but not yet acknowledged. Under eager assignment
-/// `unassign` is valid in any group state, so releasing a consumer with
-/// nothing pending costs nothing.
+/// Sets every consumer's context to complete rebalances inline, then
+/// releases every consumer with `unassign`.
+///
+/// Consumer close, inside `BaseConsumer::drop`, polls until the group
+/// protocol completes and serves any rebalance still queued through the
+/// callback. A deferred intent there would never be completed, so
+/// `closing` is set first. Close also completes an assignment or a
+/// revocation the source took and has not acknowledged, unless librdkafka
+/// has marked that assignment lost. A lost revocation waits for the
+/// application's `unassign`, and close would poll forever without it.
+/// Under eager assignment `unassign` is valid in any group state, so
+/// releasing a consumer with nothing pending costs nothing.
 impl Drop for KafkaSource {
     fn drop(&mut self) {
         for member in &self.members {
@@ -2270,7 +2274,8 @@ mod tests {
     }
 
     /// Dropping the source while one consumer's assignment is held, before
-    /// the others have theirs, returns.
+    /// the others have theirs, returns. Consumer close completes a held
+    /// assignment on its own.
     #[test]
     #[expect(
         clippy::disallowed_methods,

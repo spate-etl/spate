@@ -1905,13 +1905,13 @@ fn returns_within(what: &str, f: impl FnOnce() + Send + 'static) {
 }
 
 /// Dropping the source between a surfaced revocation and its completion
-/// releases every consumer, so consumer close completes.
+/// returns. Consumer close completes a revocation that was not lost.
 #[test]
 #[expect(
     clippy::disallowed_methods,
     reason = "the test joins the joiner thread"
 )]
-fn dropping_mid_revoke_releases_every_consumer() {
+fn dropping_mid_revoke_returns() {
     let cluster = MockCluster::new(1).expect("mock cluster");
     cluster.create_topic(TOPIC, 4, 1).expect("create topic");
     let brokers = cluster.bootstrap_servers();
@@ -1948,6 +1948,45 @@ fn dropping_mid_revoke_releases_every_consumer() {
     });
     stop.store(true, Ordering::Relaxed);
     joiner.join().expect("joiner thread");
+}
+
+/// Dropping the source between a surfaced revocation of a lost assignment
+/// and its completion returns. Consumer close does not complete a lost
+/// revocation on its own, so the source's `unassign` is what lets it finish.
+#[test]
+fn dropping_mid_lost_revoke_returns() {
+    use rdkafka::types::{RDKafkaApiKey, RDKafkaRespErr};
+    let cluster = MockCluster::new(1).expect("mock cluster");
+    cluster.create_topic(TOPIC, 2, 1).expect("create topic");
+    let mut cfg = consumers_config(&cluster.bootstrap_servers(), "drop-lost-revoke", 2);
+    cfg.rdkafka.insert("debug".into(), "cgrp".into());
+    let mut driver = Driver::open(cfg);
+    driver.settle(2, Duration::from_secs(60));
+    let Driver {
+        mut source, lanes, ..
+    } = driver;
+    let lines = spate_test::capture_logs(tracing::Level::DEBUG, || {
+        cluster.request_errors(
+            RDKafkaApiKey::Heartbeat,
+            &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_UNKNOWN_MEMBER_ID],
+        );
+        wait_until(Duration::from_secs(60), "a lost revocation", || {
+            matches!(
+                source.poll_events(Duration::from_millis(100)),
+                Ok(SourceEvent::LanesRevoked { .. })
+            )
+        });
+    });
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("librdkafka") && l.contains("fac=\"LOST\"")),
+        "no assignment was marked lost: {lines:#?}"
+    );
+    returns_within("dropping the source mid lost revoke", move || {
+        drop(lanes);
+        drop(source);
+    });
 }
 
 /// The source may be dropped before the lanes it handed out: each lane keeps

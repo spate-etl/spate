@@ -423,12 +423,7 @@ fn second_member_triggers_revoke_then_fresh_assignment() {
                 expected.sort();
                 assert_eq!(sorted, expected, "all lanes revoked eagerly");
                 assert_eq!(barrier.remaining(), ids.len());
-                for _ in &ids {
-                    barrier.arrive(); // drivers drained
-                }
-                // What the runtime does after the barrier: commit + flush.
-                source.commit(&[]).expect("commit");
-                source.flush_commits().expect("flush");
+                support::complete_revocation(&mut source, &ids, &barrier, &[]).expect("flush");
             }
             SourceEvent::LanesAssigned(new_lanes) => {
                 if revoked {
@@ -509,11 +504,7 @@ fn drive_step(
             barrier,
         } => {
             lanes.clear();
-            for _ in &ids {
-                barrier.arrive();
-            }
-            source.commit(&[]).expect("commit");
-            source.flush_commits().expect("flush");
+            support::complete_revocation(source, &ids, &barrier, &[]).expect("flush");
             Some(0)
         }
         _ => None,
@@ -1459,13 +1450,10 @@ impl Driver {
             }
             Ok(SourceEvent::LanesRevoked { lanes, barrier }) => {
                 self.lanes.retain(|l| !lanes.contains(&l.id()));
-                for _ in &lanes {
-                    barrier.arrive();
-                }
                 self.cp.drain();
                 let watermarks = self.cp.take_watermarks();
-                self.source.commit(&watermarks).expect("commit");
-                self.source.flush_commits().expect("flush");
+                support::complete_revocation(&mut self.source, &lanes, &barrier, &watermarks)
+                    .expect("flush");
                 self.revocations += 1;
             }
             Ok(_) => {}

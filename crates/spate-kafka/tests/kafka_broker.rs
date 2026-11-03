@@ -151,11 +151,7 @@ fn real_broker_revocation_commit_persists_revoked_offsets() {
             .poll_events(Duration::from_millis(200))
             .expect("poll_events")
         {
-            for _ in &ids {
-                barrier.arrive();
-            }
-            source.commit(&watermarks).expect("store revoked offsets");
-            let _ = source.flush_commits();
+            let _ = support::complete_revocation(&mut source, &ids, &barrier, &watermarks);
             stored = true;
         }
         if stored {
@@ -367,10 +363,7 @@ fn real_broker_revocation_commits_every_consumers_offsets() {
                 barrier,
             } => {
                 lanes.clear();
-                for _ in &ids {
-                    barrier.arrive();
-                }
-                source.flush_commits().expect("flush");
+                support::complete_revocation(&mut source, &ids, &barrier, &[]).expect("flush");
             }
             _ => {}
         }
@@ -412,11 +405,7 @@ fn real_broker_revocation_commits_every_consumers_offsets() {
         else {
             return false;
         };
-        for _ in &ids {
-            barrier.arrive();
-        }
-        source.commit(&watermarks).expect("store revoked offsets");
-        source.flush_commits().expect("flush");
+        support::complete_revocation(&mut source, &ids, &barrier, &watermarks).expect("flush");
         true
     });
 

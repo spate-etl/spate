@@ -10,7 +10,8 @@ use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::message::BorrowedMessage;
 use rdkafka::producer::{BaseProducer, BaseRecord, Producer};
 use spate_core::error::{ErrorClass, SourceError};
-use spate_core::source::{PayloadBatch, Source, SourceEvent, SourceLane};
+use spate_core::record::PartitionId;
+use spate_core::source::{DrainBarrier, LaneId, PayloadBatch, Source, SourceEvent, SourceLane};
 use spate_kafka::KafkaSource;
 use spate_test_support::container_image;
 use std::io::{Read as _, Write as _};
@@ -169,6 +170,21 @@ pub(crate) fn serve_events(source: &mut KafkaSource, errors: &mut Vec<String>) {
         ) => errors.push(e.to_string()),
         Err(e) => panic!("poll_events: {e}"),
     }
+}
+
+/// Plays the runtime's part after a revocation: arrives once per lane, stores
+/// `watermarks` and returns the flush's result.
+pub(crate) fn complete_revocation(
+    source: &mut KafkaSource,
+    lanes: &[LaneId],
+    barrier: &DrainBarrier,
+    watermarks: &[(PartitionId, i64)],
+) -> Result<(), SourceError> {
+    for _ in lanes {
+        barrier.arrive();
+    }
+    source.commit(watermarks).expect("commit");
+    source.flush_commits()
 }
 
 /// Poll a lane until `want` payloads arrive, serving the source between

@@ -115,8 +115,9 @@ impl Default for RetryConfig {
 #[derive(Clone, Debug, PartialEq, thiserror::Error)]
 #[non_exhaustive]
 pub enum RetryConfigError {
-    /// `multiplier` is not a finite number in `[1.0, 1e9]`. Below `1.0` the
-    /// delay shrinks instead of backing off.
+    /// `multiplier` is not a finite number in `[1.0, 1e9]`. Below `1.0` it
+    /// asks for a shrinking delay, which the backoff holds at `max` from the
+    /// second delay on.
     #[error("retry.multiplier must be a finite number in [1.0, 1e9] (got {0})")]
     Multiplier(f64),
     /// `jitter` is not a finite fraction in `[0.0, 1.0]`.
@@ -147,9 +148,9 @@ impl RetryConfig {
     /// returns a zero delay only for a policy this rejects (`initial` or
     /// `max` of zero), so "never zero" is a property of a **validated**
     /// policy, not of the type. What it catches is a policy no operator
-    /// means: a sub-`1.0` multiplier shrinks the delay instead of backing
-    /// off, a zero delay is not a backoff at all, and both are worth failing
-    /// at load rather than at 3am.
+    /// means: a sub-`1.0` multiplier asks for a shrinking delay, which the
+    /// backoff holds at `max` from the second delay on, a zero delay is not a
+    /// backoff at all, and both are worth failing at load rather than at 3am.
     ///
     /// The bounds are generous and do **not** guarantee a *sensible* policy.
     /// `initial: 1ns, max: 1ns` passes. They rule out the nonsensical, not

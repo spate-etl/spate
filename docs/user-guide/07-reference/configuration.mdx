@@ -136,7 +136,7 @@ them.
 | `inflight.max_per_shard` | integer | `2` | In-flight batches allowed per shard worker before backpressure. |
 | `retry.initial` | duration | `100ms` | First retry backoff after a retryable batch failure. Must be non-zero and no larger than `retry.max`. |
 | `retry.max` | duration | `10s` | Backoff ceiling. Must be non-zero. Once the delay reaches it, it stays there for the rest of that batch's retries. |
-| `retry.multiplier` | float | `2.0` | Exponential backoff growth factor. Must be finite and within `[1.0, 1e9]` — below `1.0` the delay would shrink each attempt instead of backing off. |
+| `retry.multiplier` | float | `2.0` | Exponential backoff growth factor. Must be finite and within `[1.0, 1e9]`. Below `1.0` it would ask for a shrinking delay, which the backoff holds at `retry.max` from the second retry on. |
 | `retry.jitter` | float | `0.2` | Fraction of each delay randomized away. Must be finite and within `[0.0, 1.0]`, both ends allowed. Jitter only ever **shortens**: the sleep lands in `[(1 - jitter) × delay, delay]`, never above it and never at zero. |
 | `retry.max_attempts` | integer | `0` | Attempt cap; `0` = unbounded (retry until the drain deadline — the at-least-once default). |
 | `breaker.failure_threshold` | integer | `3` | Consecutive failures before a shard/replica endpoint is quarantined. |

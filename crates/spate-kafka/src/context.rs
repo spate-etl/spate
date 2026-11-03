@@ -237,6 +237,12 @@ mod tests {
         );
         assert_eq!(consumer.assignment().expect("assignment").count(), 0);
         consumer.assign(&tpl).expect("local assign");
+        // An assign event calls nothing, so it does not release this either.
+        consumer.context().rebalance(
+            &consumer,
+            RDKafkaRespErr::RD_KAFKA_RESP_ERR__ASSIGN_PARTITIONS,
+            &mut tpl,
+        );
         assert_eq!(consumer.assignment().expect("assignment").count(), 1);
         consumer.context().rebalance(
             &consumer,

@@ -147,6 +147,10 @@ record only if it affects structure, a key quality attribute, or is hard to
 reverse. `docs/adr/_template.md` states both rules in full and is normative;
 `cargo xtask tidy adr` holds the mechanical half.
 
+Agents alone read this file. Nothing else in the repository names or links it,
+so a rule a person needs lives in a document they read, and this file links
+there.
+
 ## Commits and pull requests
 
 Subjects are `area: description` in at most 72 characters. The area is a
@@ -175,6 +179,9 @@ Scope discipline:
   problem and defer polish to a follow-up.
 - Flag a diff growing past ~400 lines.
 - No drive-by dependency, formatting, or cleanup churn unless the task needs it.
+- Edit a root document only when the change is about what that document is
+  for. A change elsewhere that makes a sentence there wrong corrects that
+  sentence and adds nothing.
 
 Before opening a pull request, read
 [`.github/pull_request_template.md`](.github/pull_request_template.md) and use it

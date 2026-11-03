@@ -610,13 +610,13 @@ impl PipelineConfig {
         // A floor keeps sub-100ms intervals from hammering the source's
         // offset store for no durability gain. The sink write is the
         // durability boundary, not the checkpoint.
-        const MIN_COMMIT_INTERVAL: Duration = Duration::from_millis(100);
-        if self.checkpoint.interval < MIN_COMMIT_INTERVAL {
+        const COMMIT_INTERVAL: DurationBounds =
+            DurationBounds::at_least(Duration::from_millis(100));
+        if let Err(e) = check_duration(self.checkpoint.interval, COMMIT_INTERVAL) {
             return fail(format!(
-                "checkpoint.interval must be at least 100ms (got {:?}): the commit \
-                 loop fires every interval, so sub-100ms intervals hammer the \
-                 source's offset store without improving durability",
-                self.checkpoint.interval
+                "checkpoint.interval {e}: the commit loop fires every interval, so \
+                 sub-100ms intervals hammer the source's offset store without \
+                 improving durability"
             ));
         }
         if self.checkpoint.max_pending_batches == 0 {
@@ -1406,6 +1406,30 @@ sinks:
             let err = PipelineConfig::from_str(yaml).unwrap_err().to_string();
             assert!(err.contains(needle), "expected `{needle}` in: {err}");
         }
+    }
+
+    /// Pins the commit interval's floor at 100ms, inclusive and on the whole
+    /// duration, and the refusal's whole text.
+    #[test]
+    fn checkpoint_interval_loads_at_its_floor_and_is_refused_a_nanosecond_under() {
+        let yaml = |interval: &str| {
+            format!(
+                "pipeline: {{ name: x }}\ncheckpoint: {{ interval: {interval} }}\n\
+                 source: {{ m: {{}} }}\nsink: {{ m: {{}} }}"
+            )
+        };
+        let cfg = PipelineConfig::from_str(&yaml("100ms")).expect("the floor loads");
+        assert_eq!(cfg.checkpoint.interval, Duration::from_millis(100));
+        let err = PipelineConfig::from_str(&yaml("99ms 999us 999ns"))
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            err,
+            "invalid configuration: checkpoint.interval must be at least 100ms; \
+             found 99ms 999us 999ns: the commit loop fires every interval, so \
+             sub-100ms intervals hammer the source's offset store without \
+             improving durability"
+        );
     }
 
     #[test]

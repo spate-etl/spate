@@ -80,34 +80,31 @@ impl DurationBounds {
 /// `must be from 20s to 1day; found 5s`. The caller composes
 /// `` "`feed.settling_window` {error}" ``, and adds the reason for the bound
 /// or the meaning of `0s` after it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("must be {}; found {}", Range(.bounds), format_duration(*.value))]
 pub struct DurationBoundsError {
     value: Duration,
     bounds: DurationBounds,
 }
 
-impl fmt::Display for DurationBoundsError {
+/// The accepted range of a [`DurationBounds`], as its error states it.
+struct Range<'a>(&'a DurationBounds);
+
+impl fmt::Display for Range<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let DurationBounds {
             floor,
             ceiling,
             or_zero,
-        } = self.bounds;
+        } = *self.0;
         let zero = if or_zero { "0s or " } else { "" };
         let floor = format_duration(floor);
         match ceiling {
-            Some(ceiling) => write!(
-                f,
-                "must be {zero}from {floor} to {}",
-                format_duration(ceiling)
-            )?,
-            None => write!(f, "must be {zero}at least {floor}")?,
+            Some(ceiling) => write!(f, "{zero}from {floor} to {}", format_duration(ceiling)),
+            None => write!(f, "{zero}at least {floor}"),
         }
-        write!(f, "; found {}", format_duration(self.value))
     }
 }
-
-impl std::error::Error for DurationBoundsError {}
 
 /// Checks that `value` lies within `bounds`.
 ///

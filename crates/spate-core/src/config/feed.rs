@@ -320,8 +320,8 @@ mod tests {
         assert!(err.contains("`feed.settling_window`"), "{err}");
     }
 
-    /// Pins the window's floor at one read interval, 20 s loading and 19 s
-    /// refused, and the refusal's whole text.
+    /// Pins the window's floor at one read interval, `20s` loading and
+    /// `19s 999ms` refused, and the refusal's whole text.
     #[test]
     fn a_settling_window_below_the_floor_is_refused() {
         let cfg = load("{ sqs: {}, settling_window: 20s }").expect("the floor loads");

@@ -104,7 +104,8 @@ impl Backoff {
     /// `fraction` of it.
     ///
     /// `1.0` is full jitter. A fraction above `1.0` acts as `1.0`, and a
-    /// negative or non-finite one as no jitter.
+    /// negative or non-finite one as no jitter. Instances draw alike unless
+    /// each takes its own [`with_seed`](Backoff::with_seed).
     #[must_use]
     pub const fn with_jitter(self, fraction: f64) -> Self {
         Backoff {
@@ -114,6 +115,8 @@ impl Backoff {
     }
 
     /// This backoff, drawing its jitter from `seed`.
+    ///
+    /// An instance given no seed draws as seed `0`.
     #[must_use]
     pub const fn with_seed(self, seed: u64) -> Self {
         Backoff {
@@ -263,6 +266,44 @@ mod tests {
             b.reset();
             assert_eq!(b.next_delay(), Duration::ZERO, "{jitter}");
         }
+    }
+
+    #[test]
+    fn an_unseeded_backoff_draws_as_seed_zero() {
+        let full = Duration::from_millis(100);
+        let mut unseeded = Backoff::new(full, full).with_jitter(1.0);
+        let mut zero = Backoff::new(full, full).with_jitter(1.0).with_seed(0);
+        let drawn = millis(&mut unseeded, 8);
+        assert_eq!(drawn, millis(&mut zero, 8));
+        assert!(drawn.iter().any(|&d| d < 100), "no draw shortened");
+    }
+
+    #[test]
+    fn the_seed_splitmix64_maps_to_zero_still_jitters() {
+        // `splitmix64(0x61C8_8646_80B5_83EB) == 0`, xorshift's absorbing state.
+        let full = Duration::from_millis(100);
+        let mut b = Backoff::new(full, full)
+            .with_jitter(1.0)
+            .with_seed(0x61C8_8646_80B5_83EB);
+        assert!((0..8).any(|_| b.next_delay() < full), "no draw shortened");
+    }
+
+    /// The constructor and every setter evaluate in a `const` item.
+    const FULLY_CONFIGURED: Backoff =
+        Backoff::new(Duration::from_millis(200), Duration::from_secs(5))
+            .with_multiplier(3.0)
+            .with_jitter(0.2)
+            .with_seed(7);
+
+    #[test]
+    fn a_fully_configured_schedule_is_a_const_item() {
+        let mut b = FULLY_CONFIGURED;
+        let d = b.next_delay();
+        assert!(Duration::from_millis(160) <= d && d <= Duration::from_millis(200));
+        b.reset();
+        b.next_delay();
+        let d = b.next_delay();
+        assert!(Duration::from_millis(480) <= d && d <= Duration::from_millis(600));
     }
 
     #[test]

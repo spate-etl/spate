@@ -546,7 +546,8 @@ mod tests {
             .collect()
     }
 
-    /// `message.timeout.ms` takes whole milliseconds from 1 to `i32::MAX`.
+    /// `message.timeout.ms` takes whole milliseconds from 1 to `i32::MAX`,
+    /// and a refusal gives librdkafka's reason for the bound.
     #[test]
     fn check_message_timeout_takes_1ms_to_i32_max_milliseconds() {
         const DAY: u64 = 24 * 60 * 60;
@@ -560,6 +561,11 @@ mod tests {
         ] {
             assert!(check_message_timeout(timeout).is_err(), "{timeout:?}");
         }
+        assert_eq!(
+            check_message_timeout(Duration::ZERO).unwrap_err(),
+            "must be from 1ms to 24days 20h 31m 23s 647ms; found 0s: librdkafka reads whole \
+             milliseconds up to i32::MAX and reads 0 as no timeout"
+        );
         for timeout in [
             Duration::from_millis(1),
             Duration::from_micros(1000),

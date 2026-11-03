@@ -830,9 +830,9 @@ mod tests {
     }
 
     /// Pins that a non-zero `statistics_interval` under 1ms or above 24h is
-    /// refused at load, since librdkafka would read it as off or reject it,
-    /// that the refusal names the key and no passthrough value, and that
-    /// `0s`, `1ms` and `24h` load with the value written in milliseconds.
+    /// refused at load ahead of the passthrough denylist, that the refusal
+    /// names the key and its reason and no passthrough value, and that `0s`,
+    /// `1ms` and `24h` load with the value written in milliseconds.
     /// Regression for #1528.
     #[test]
     fn a_statistics_interval_outside_1ms_to_24h_is_refused() {
@@ -865,7 +865,12 @@ mod tests {
         let msg = KafkaSourceConfig::from_component_config(&section(&body))
             .unwrap_err()
             .to_string();
-        assert!(msg.contains("source.kafka.statistics_interval"), "{msg}");
+        assert_eq!(
+            msg,
+            "invalid configuration: source.kafka.statistics_interval must be 0s or from 1ms \
+             to 1day; found 500us: 0s disables statistics, and librdkafka reads whole \
+             milliseconds up to 24h"
+        );
         for (interval, written) in [
             ("0s", None),
             ("1ms", Some("1")),
@@ -893,10 +898,9 @@ mod tests {
     }
 
     /// Pins that a `commit_interval` under 1ms, `0s` included, or above 24h
-    /// is refused at load ahead of the passthrough denylist, since librdkafka
-    /// would turn interval commits off or reject it, that the refusal names
-    /// the key and no passthrough value, and that `1ms` and `24h` load with
-    /// the value written in milliseconds. Regression for #1661.
+    /// is refused at load ahead of the passthrough denylist, that the refusal
+    /// names the key and no passthrough value, and that `1ms` and `24h` load
+    /// with the value written in milliseconds. Regression for #1661.
     #[test]
     fn a_commit_interval_outside_1ms_to_24h_is_refused() {
         for (interval, found) in [

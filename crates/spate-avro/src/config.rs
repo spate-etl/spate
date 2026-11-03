@@ -206,6 +206,9 @@ pub struct AvroSettings {
     pub schema: Option<SchemaSource>,
 }
 
+/// The shortest `negative_cache_ttl` a build accepts.
+const MIN_NEGATIVE_CACHE_TTL: Duration = Duration::from_millis(100);
+
 impl Default for AvroSettings {
     fn default() -> Self {
         AvroSettings {
@@ -330,8 +333,7 @@ impl AvroDeserializerBuilder {
         }
         // A negative entry has to outlive the replay of the record it blocks, or
         // each replay refetches the id and the record never reaches its policy.
-        const NEGATIVE_CACHE_TTL: DurationBounds =
-            DurationBounds::at_least(Duration::from_millis(100));
+        const NEGATIVE_CACHE_TTL: DurationBounds = DurationBounds::at_least(MIN_NEGATIVE_CACHE_TTL);
         check_duration(settings.negative_cache_ttl, NEGATIVE_CACHE_TTL).map_err(|e| {
             AvroConfigError::Invalid {
                 detail: format!(
@@ -1015,6 +1017,48 @@ mod tests {
             .map(|_| ())
             .unwrap_err();
         assert_eq!(err.to_string(), ttl_refusal("0s"));
+    }
+
+    /// Pins that ten of the engine's default blocked-batch replays fit inside
+    /// the TTL floor, so a held record reads its 404 verdict before the
+    /// verdict expires and reaches its policy.
+    #[test]
+    fn the_default_blocked_batch_replay_fits_inside_the_ttl_floor() {
+        let replay = spate_core::pipeline::RuntimeOptions::default().blocked_retry;
+        assert!(
+            replay.saturating_mul(10) <= MIN_NEGATIVE_CACHE_TTL,
+            "a {replay:?} replay against a {MIN_NEGATIVE_CACHE_TTL:?} floor"
+        );
+    }
+
+    /// Pins that the two credential refusals come before the TTL floor, so a
+    /// section wrong in both ways names its credentials first.
+    #[test]
+    fn credential_refusals_precede_the_ttl_floor() {
+        let rt = runtime();
+        let with_registry = |registry: RegistrySection| AvroSettings {
+            registry: Some(registry),
+            negative_cache_ttl: Duration::ZERO,
+            ..AvroSettings::default()
+        };
+        let mut password_only = RegistrySection::new("http://sr");
+        password_only.password = Some("s3cret".into());
+        for (settings, expected) in [
+            (
+                with_registry(RegistrySection::new("http://urluser:urlsecret@sr")),
+                "avro configuration: registry.url contains credentials; set them in \
+                 registry.username and registry.password",
+            ),
+            (
+                with_registry(password_only),
+                "avro configuration: registry.password is set, but registry.username is not",
+            ),
+        ] {
+            let err = AvroDeserializerBuilder::from_settings(&settings, rt.handle())
+                .map(|_| ())
+                .unwrap_err();
+            assert_eq!(err.to_string(), expected);
+        }
     }
 
     #[test]

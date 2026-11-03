@@ -5,7 +5,8 @@ delivery guarantee wrong: a report, or better a failing test, showing a source
 watermark advancing past unacknowledged data. At-least-once is the promise
 everything else is arranged around, so that goes ahead of any feature. After it
 come connectors, and anything measurably faster that does not weaken what the
-engine promises.
+engine promises. The [extending guide](docs/user-guide/06-extending/README.mdx)
+covers writing a connector.
 
 ## Before you start
 
@@ -110,25 +111,6 @@ job summary.
 
 Containers, benchmarks, nextest profiles, fuzzing and the opt-in suites are in
 [`DEVELOPING.md`](DEVELOPING.md).
-
-## Adding a connector
-
-The source and sink traits are public for third parties to implement, and a new
-connector is a first-class contribution.
-[`docs/user-guide/06-extending/`](docs/user-guide/06-extending/) is
-the guide, `crates/spate-json` is the smallest complete crate to read as a shape,
-and `crates/spate-test` is how you exercise one without standing up
-infrastructure.
-
-What belongs in the change rather than in a follow-up: the connector page built
-from the template in [`docs/STYLE.md`](docs/STYLE.md) § 3, and keeping your own
-types out of `spate-core`'s public API (INV-6).
-
-### Building the vendor client
-
-A connector that talks to a service builds that service's client as
-[Building a vendor client](docs/user-guide/06-extending/vendor-clients.mdx)
-describes.
 
 ## Opening a pull request
 

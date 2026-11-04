@@ -615,6 +615,7 @@ fn real_broker_alternating_writes_settle_at_zero() {
 
 /// A commit past a tail marker is a position the broker restarts from, under
 /// `latest` too: no reset, and the next record is the first delivered.
+/// Regression for #1709.
 #[test]
 #[ignore = "requires Docker"]
 fn real_broker_a_commit_past_a_marker_restarts_at_the_next_record() {

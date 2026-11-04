@@ -2574,6 +2574,39 @@ fn a_marker_advances_once() {
     assert_eq!(watched.cp.pending(PartitionId(0)), 0);
 }
 
+/// A zero-timeout empty return leaves the position unread until its turn comes:
+/// the first such poll serves the marker and retires nothing, and a later one
+/// retires it. Regression for #1709.
+#[test]
+fn a_zero_timeout_poll_reads_the_position_in_turn() {
+    let cluster = marker_cluster(1);
+    let brokers = cluster.bootstrap_servers();
+    produce(&brokers, TOPIC, 1, 1, "before");
+    write_marker(&brokers, 0, Marker::Commit);
+    let mut watched = Watched::open(config(&brokers, &spate_test::unique_name("turn")));
+    let pipeline = watched.pipeline.clone();
+    // One version barrier, the record and the marker.
+    wait_until(ASSIGNMENT, "the fetcher runs ahead", || {
+        watched.serve();
+        spate_test::metric_value(
+            &watched.rendered(),
+            "spate_kafka_partition_fetch_queue_messages",
+            &[("pipeline", &pipeline), ("partition", "0")],
+        )
+        .is_some_and(|queued| queued >= 3.0)
+    });
+    assert_eq!(watched.read(0, 1), [0]);
+
+    let poll = |lane: &mut <KafkaSource as Source>::Lane| {
+        lane.poll(64, Duration::ZERO).expect("lane poll").is_some()
+    };
+    assert!(!poll(&mut watched.lanes[0]), "read out of turn");
+    wait_until(ASSIGNMENT, "the read's turn comes", || {
+        poll(&mut watched.lanes[0])
+    });
+    assert_eq!(watched.commit(), [(PartitionId(0), 2)]);
+}
+
 /// An idle lane on a plain topic has nothing to retire, so it issues no ack.
 #[test]
 fn an_idle_plain_lane_issues_no_ack() {
@@ -2633,7 +2666,7 @@ fn an_acknowledgement_held_past_its_batch_holds_the_marker_back() {
 }
 
 /// A failed batch ahead of a marker holds the committed offset where it is, and
-/// the partition keeps reading its lag.
+/// the partition keeps reading its lag. Regression for #1709.
 #[test]
 fn a_failed_batch_before_a_marker_holds_the_commit() {
     let cluster = marker_cluster(1);
@@ -2896,7 +2929,7 @@ fn an_idle_partition_beside_a_busy_one_reaches_zero_lag() {
 
 /// Offsets a lane retires count against the pending ceiling: behind a head batch
 /// that has not resolved, the lane stops polling at the ceiling and later markers
-/// stay in its fetch queue, until the head resolves.
+/// stay in its fetch queue, until the head resolves. Regression for #1709.
 #[test]
 fn aborted_transactions_behind_a_stalled_head_stay_under_the_pending_ceiling() {
     const CEILING: f64 = 2.0;

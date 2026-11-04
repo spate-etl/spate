@@ -2824,6 +2824,41 @@ mod tests {
             drop(lanes);
         }
 
+        /// A rewound client's lanes retire nothing, where the same lane on an
+        /// unrewound client does: the position may hold a record no lane issued.
+        #[test]
+        fn a_rewound_client_retires_no_offsets() {
+            let (_cluster, mut source, mut lanes) = assigned_on_mock(1);
+            spate_test::wait_until(Duration::from_secs(30), "the record", || {
+                source
+                    .poll_events(Duration::from_millis(10))
+                    .expect("poll_events");
+                lanes[0]
+                    .poll(1, Duration::from_millis(100))
+                    .expect("lane poll")
+                    .is_some()
+            });
+
+            lanes[0].forget_issued();
+            assert!(
+                lanes[0]
+                    .poll(1, Duration::from_millis(10))
+                    .expect("lane poll")
+                    .is_some(),
+                "an unrewound client retires"
+            );
+
+            lanes[0].forget_issued();
+            source.members[0].consumer.context().mark_rewound();
+            assert!(
+                lanes[0]
+                    .poll(1, Duration::from_millis(10))
+                    .expect("lane poll")
+                    .is_none(),
+                "a rewound client retired"
+            );
+        }
+
         /// A store that librdkafka refuses for one partition of the list,
         /// while it accepts the others, fails the commit as retryable and
         /// names the partition.

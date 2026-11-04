@@ -257,7 +257,7 @@ fn an_unknown_codec_first_in_a_poll_names_the_codec() {
 
 /// A marker behind a batch the lane cannot read stays unpassed: the lane delivers
 /// the record before it and fails, and the watermark stops at that record. The
-/// same holds for a batch that fails its CRC. Regression for #1709.
+/// same holds for a batch that fails its CRC.
 #[test]
 fn a_marker_behind_an_unreadable_batch_leaves_the_commit_alone() {
     let mut unknown_format = batch(2, 0, -1, 1, b"carrier");
@@ -314,81 +314,86 @@ fn a_marker_behind_an_unreadable_batch_leaves_the_commit_alone() {
 /// An error bars the marker behind it, since the marker moves the position past
 /// the offset that failed, and the next record lifts the bar. librdkafka queues
 /// this error once and fetches past the batch, so with every op queued ahead of
-/// the polls, the poll after the error serves the marker. Regression for #1709.
+/// the polls, the poll after the error serves the marker. A lane asking for one
+/// record meets the error first in its next poll, and one asking for more holds
+/// it behind the record's batch.
 #[test]
 fn an_error_bars_the_marker_advance() {
-    let cluster = MockCluster::new(1).expect("mock cluster");
-    cluster.create_topic(TOPIC, 1, 1).expect("create topic");
-    let brokers = cluster.bootstrap_servers();
-    assert_eq!(
-        produce_batch(&brokers, TOPIC, 0, &batch(2, 0, 0, 1, b"good-0")),
-        0
-    );
-    let mut unreadable = batch(2, 0, -1, 1, b"carrier");
-    unreadable.extend_from_slice(&batch(3, 1, 0, 1, b"unreadable"));
-    assert_eq!(produce_batch(&brokers, TOPIC, 0, &unreadable), 0);
-    assert_eq!(
-        produce_batch(&brokers, TOPIC, 0, &control_batch(Marker::Commit)),
-        0
-    );
-
-    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
-    let handle = recorder.handle();
-    metrics::with_local_recorder(&recorder, || {
-        let mut cp = Checkpointer::new();
-        let mut source = KafkaSource::new(source_cfg(&brokers, "barred"));
-        let meter =
-            spate_core::metrics::Meter::with_namespace("kafka", "barred", "source", "kafka");
-        source
-            .open(
-                SourceCtx::new(cp.handle())
-                    .with_meter(Some(meter))
-                    .with_partition_detail(true),
-            )
-            .expect("open");
-        let mut lanes = await_assignment(&mut source, Duration::from_secs(30));
-        cp.begin_epoch(&[lanes[0].partition()], 1);
-
-        // One version barrier, record 0, the error and the marker.
-        wait_for_fetch_queue(&mut source, &handle, "barred", 4.0);
-
-        let first = lanes[0]
-            .poll(64, Duration::from_secs(10))
-            .expect("record 0");
-        assert_eq!(offsets_of(first), Some(vec![0]));
-        assert!(lanes[0].poll(64, Duration::from_secs(10)).is_err());
-        let after = lanes[0]
-            .poll(64, Duration::from_millis(100))
-            .expect("the marker is served");
-        assert_eq!(offsets_of(after), None, "the marker was passed");
-        cp.drain();
+    for max_records in [1, 64] {
+        let cluster = MockCluster::new(1).expect("mock cluster");
+        cluster.create_topic(TOPIC, 1, 1).expect("create topic");
+        let brokers = cluster.bootstrap_servers();
+        let marker = || {
+            assert_eq!(
+                produce_batch(&brokers, TOPIC, 0, &control_batch(Marker::Commit)),
+                0
+            );
+        };
         assert_eq!(
-            cp.take_watermarks(),
-            [(spate_core::record::PartitionId(0), 1)],
-            "only the record before the error"
-        );
-
-        assert_eq!(
-            produce_batch(&brokers, TOPIC, 0, &batch(2, 0, 0, 1, b"later")),
+            produce_batch(&brokers, TOPIC, 0, &batch(2, 0, 0, 1, b"good-0")),
             0
         );
-        let mut delivered = Vec::new();
-        spate_test::wait_until(Duration::from_secs(30), "the later record", || {
+        let mut unreadable = batch(2, 0, -1, 1, b"carrier");
+        unreadable.extend_from_slice(&batch(3, 1, 0, 1, b"unreadable"));
+        assert_eq!(produce_batch(&brokers, TOPIC, 0, &unreadable), 0);
+        marker();
+
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || {
+            let mut cp = Checkpointer::new();
+            let mut source = KafkaSource::new(source_cfg(&brokers, "barred"));
+            let meter =
+                spate_core::metrics::Meter::with_namespace("kafka", "barred", "source", "kafka");
             source
-                .poll_events(Duration::from_millis(10))
-                .expect("poll_events");
-            delivered.extend(
-                offsets_of(lanes[0].poll(64, Duration::from_millis(100)).expect("poll"))
-                    .unwrap_or_default(),
+                .open(
+                    SourceCtx::new(cp.handle())
+                        .with_meter(Some(meter))
+                        .with_partition_detail(true),
+                )
+                .expect("open");
+            let mut lanes = await_assignment(&mut source, Duration::from_secs(30));
+            cp.begin_epoch(&[lanes[0].partition()], 1);
+            let partition = lanes[0].partition();
+
+            // One version barrier, record 0, the error and the marker.
+            wait_for_fetch_queue(&mut source, &handle, "barred", 4.0);
+
+            let first = lanes[0]
+                .poll(max_records, Duration::from_secs(10))
+                .expect("record 0");
+            assert_eq!(offsets_of(first), Some(vec![0]));
+            assert!(lanes[0].poll(max_records, Duration::from_secs(10)).is_err());
+            let after = lanes[0]
+                .poll(max_records, Duration::from_millis(100))
+                .expect("the marker is served");
+            assert_eq!(offsets_of(after), None, "the marker was passed");
+            cp.drain();
+            assert_eq!(
+                cp.take_watermarks(),
+                [(partition, 1)],
+                "only the record before the error"
             );
-            !delivered.is_empty()
+
+            assert_eq!(
+                produce_batch(&brokers, TOPIC, 0, &batch(2, 0, 0, 1, b"later")),
+                0
+            );
+            marker();
+            let mut watermarks = Vec::new();
+            spate_test::wait_until(Duration::from_secs(30), "the marker behind it", || {
+                source
+                    .poll_events(Duration::from_millis(10))
+                    .expect("poll_events");
+                let _ = offsets_of(
+                    lanes[0]
+                        .poll(max_records, Duration::from_millis(100))
+                        .expect("poll"),
+                );
+                cp.drain();
+                watermarks.extend(cp.take_watermarks());
+                watermarks.last() == Some(&(partition, 5))
+            });
         });
-        assert_eq!(delivered, [3]);
-        drop(lanes);
-        cp.drain();
-        assert_eq!(
-            cp.take_watermarks(),
-            [(spate_core::record::PartitionId(0), 4)]
-        );
-    });
+    }
 }

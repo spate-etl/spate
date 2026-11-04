@@ -191,6 +191,15 @@ fn read_is_due(timeout: Duration, empty_returns: &mut u32) -> bool {
     true
 }
 
+#[cfg(test)]
+impl KafkaLane {
+    /// Treat the offsets this lane issued as not issued, so the next empty return
+    /// finds them past what it covers, as it finds a marker.
+    pub(crate) fn forget_issued(&mut self) {
+        self.covered_to = None;
+    }
+}
+
 /// Erase a borrowed message's phantom lifetime so the lane can own it.
 ///
 /// # Safety

@@ -171,13 +171,18 @@ fn start_prepared(
 }
 
 fn assign_one_lane(h: &Harness, ranges: &[std::ops::Range<i64>]) {
+    assign_one_lane_scripted(h, batches(ranges));
+}
+
+/// [`assign_one_lane`] with its batches written out.
+fn assign_one_lane_scripted(h: &Harness, scripted: Vec<Vec<(i64, Vec<u8>)>>) {
     h.script
         .lock()
         .unwrap()
         .push_back(Script::Assign(vec![LaneSpec {
             id: LaneId(0),
             partition: PartitionId(0),
-            batches: batches(ranges),
+            batches: scripted,
         }]));
 }
 
@@ -632,71 +637,93 @@ fn a_batch_with_no_payload_counts_against_the_ceiling() {
 
 /// A batch with no payloads retires through the pending gate and moves the
 /// watermark past the offset it covers, and only the one real record is
-/// counted. The ceiling of one lets each batch leave the lane only once the
-/// one before it has retired.
+/// counted. Under a ceiling of one the lane stays gated unless these batches
+/// retire, so the watermark reaching 20 shows the gate reopening behind them.
 #[test]
 fn a_batch_with_no_payload_retires_through_the_gate() {
     let mut cfg = test_config(1);
     cfg.metrics.exporter = crate::config::MetricsExporter::Prometheus;
     cfg.checkpoint.max_pending_batches = 1;
     let pipeline_name = cfg.pipeline.name.clone();
-    let handle = crate::metrics::install(&crate::metrics::MetricsSettings {
-        exporter: crate::metrics::Exporter::Prometheus,
-        per_partition_detail: cfg.metrics.per_partition_detail,
-        e2e_basis: crate::metrics::E2eBasis::Ingest,
-    })
-    .expect("install the exporter");
+    let handle = install_prometheus(&cfg);
 
-    let h = start_with_config(cfg, |shared, log| FakeChain {
-        shared,
-        log,
-        mode: ChainMode::Ok,
-        batches_seen: 0,
-    });
-    h.script
-        .lock()
-        .unwrap()
-        .push_back(Script::Assign(vec![LaneSpec {
-            id: LaneId(0),
-            partition: PartitionId(0),
-            batches: vec![
-                vec![(0, vec![0u8; 8])],
-                no_payload_batch(9),
-                no_payload_batch(19),
-            ],
-        }]));
-    wait_for("the watermark passes both", Duration::from_secs(5), || {
-        h.shared
-            .lock()
-            .unwrap()
-            .committed
-            .get(&PartitionId(0))
-            .is_some_and(|&w| w == 20)
-    });
+    let h = start_with_config(cfg, ok_chain);
+    assign_one_lane_scripted(
+        &h,
+        vec![
+            vec![(0, vec![0u8; 8])],
+            no_payload_batch(9),
+            no_payload_batch(19),
+        ],
+    );
+    wait_committed(&h, 0, 20);
     h.script.lock().unwrap().push_back(Script::Drained);
     let report = h.join.join().unwrap().unwrap();
     assert_eq!(report.state, ExitState::Completed);
     assert_eq!(h.chain.consumed.load(Ordering::Relaxed), 1);
 
-    let rendered = handle.render();
-    let labels = checkpoint_labels(&pipeline_name);
-    assert_eq!(
-        pending_series(&rendered, &pipeline_name),
-        vec![format!(
-            "{}{{{labels}}} 0",
-            names::CHECKPOINT_PENDING_BATCHES
-        )],
-        "{rendered}"
+    let counted = family_series(
+        &handle.render(),
+        names::SOURCE_RECORDS_TOTAL,
+        &pipeline_name,
     );
-    let counted: Vec<&str> = rendered
-        .lines()
-        .filter(|l| l.starts_with(&format!("{}{{", names::SOURCE_RECORDS_TOTAL)))
-        .filter(|l| l.contains(&format!(r#"pipeline="{pipeline_name}""#)))
-        .collect();
     assert!(
         counted.len() == 1 && counted[0].ends_with(" 1"),
         "records counted: {counted:?}"
     );
+}
+
+/// The poll after a batch with no payloads keeps the zero timeout, since the lane
+/// may have more to return.
+#[test]
+fn a_batch_with_no_payload_keeps_the_next_poll_at_zero_timeout() {
+    let h = start_with_config(test_config(1), ok_chain);
+    assign_one_lane_scripted(&h, vec![no_payload_batch(9), no_payload_batch(19)]);
+    wait_for("the empty poll", Duration::from_secs(5), || {
+        polls_of(&h, 0) >= 3
+    });
+    let timeouts: Vec<Duration> = h.shared.lock().unwrap().lane_polls[..3]
+        .iter()
+        .map(|(_, timeout)| *timeout)
+        .collect();
+    h.shutdown.trigger();
+    h.join.join().unwrap().unwrap();
+    assert_eq!(timeouts, vec![Duration::ZERO; 3]);
+}
+
+/// Batches with no payloads behind a failed head count against the ceiling once
+/// they have resolved, with nothing holding their acks, so the lane stops at the
+/// ceiling and the watermark never passes the head.
+#[test]
+fn no_payload_batches_stop_at_the_ceiling_behind_a_failed_head() {
+    let clock = crate::clock::TestClock::frozen();
+    let mut cfg = test_config(1);
+    cfg.checkpoint.max_pending_batches = 3;
+    let interval = cfg.checkpoint.interval;
+    let h = start_on_clock(
+        cfg,
+        &clock,
+        |runtime| runtime,
+        |shared, log| FakeChain {
+            shared,
+            log,
+            mode: ChainMode::FailAckAtBatch(1),
+            batches_seen: 0,
+        },
+    );
+    let mut scripted = vec![vec![(0, vec![0u8; 8])]];
+    scripted.extend((1..=5).map(|i| no_payload_batch(i * 10 - 1)));
+    assign_one_lane_scripted(&h, scripted);
+    wait_for("the ceiling fills", Duration::from_secs(5), || {
+        polls_of(&h, 0) >= 3
+    });
+    for _ in 0..10 {
+        tick(&h, &clock, interval);
+    }
+    assert_eq!(polls_of(&h, 0), 3, "the lane outran the failed head");
+    assert!(h.shared.lock().unwrap().committed.is_empty());
+    h.shutdown.trigger();
+    let _ = h.join.join().unwrap();
 }
 
 /// Runs `scripted`, six batches with a last offset of 59, under a ceiling of
@@ -727,14 +754,7 @@ fn the_ceiling_holds_three_of(scripted: Vec<Vec<(i64, Vec<u8>)>>) -> i64 {
     );
     // Six batches whose acks are all withheld. The gate closes after the
     // third and the remaining three never leave the lane.
-    h.script
-        .lock()
-        .unwrap()
-        .push_back(Script::Assign(vec![LaneSpec {
-            id: LaneId(0),
-            partition: PartitionId(0),
-            batches: scripted,
-        }]));
+    assign_one_lane_scripted(&h, scripted);
     wait_for("the ceiling fills", Duration::from_secs(5), || {
         held.lock().unwrap().len() == 3
     });
@@ -772,6 +792,90 @@ fn the_ceiling_holds_three_of(scripted: Vec<Vec<(i64, Vec<u8>)>>) -> i64 {
     let report = h.join.join().unwrap().unwrap();
     assert_eq!(report.state, ExitState::Completed);
     h.shared.lock().unwrap().committed[&PartitionId(0)]
+}
+
+/// Whether a record parked in the chain on partition 0 reaches the idle flush
+/// within five `idle_flush` lulls while lane 1 runs `sibling` on partition 1.
+/// The commit tick sits an hour off, so no `FlushNow` can flush it. Past the
+/// check the clock crosses the tick, and the record must then flush.
+fn parked_record_idle_flushes(sibling: Vec<Vec<(i64, Vec<u8>)>>) -> bool {
+    let held: Arc<Mutex<Vec<crate::checkpoint::AckRef>>> = Arc::new(Mutex::new(Vec::new()));
+    let held_c = Arc::clone(&held);
+    let clock = crate::clock::TestClock::frozen();
+    let mut cfg = test_config(1);
+    cfg.checkpoint.interval = Duration::from_secs(3600);
+    let h = start_on_clock(
+        cfg,
+        &clock,
+        |runtime| runtime,
+        move |shared, log| FakeChain {
+            shared,
+            log,
+            mode: ChainMode::HoldRecordAcksUntilFlush {
+                held: Arc::clone(&held_c),
+            },
+            batches_seen: 0,
+        },
+    );
+    h.script.lock().unwrap().push_back(Script::Assign(vec![
+        LaneSpec {
+            id: LaneId(0),
+            partition: PartitionId(0),
+            batches: vec![vec![(0, vec![0u8; 8])]],
+        },
+        LaneSpec {
+            id: LaneId(1),
+            partition: PartitionId(1),
+            batches: sibling,
+        },
+    ]));
+    wait_for("the record parks", Duration::from_secs(5), || {
+        held.lock().unwrap().len() == 1
+    });
+    let sibling_polls = || {
+        h.shared
+            .lock()
+            .unwrap()
+            .lane_polls
+            .iter()
+            .filter(|(l, _)| *l == LaneId(1))
+            .count()
+    };
+    // Steps of 5ms against the 20ms `idle_flush`. The second poll counted after
+    // each step shows the sibling's first batch since the step was pushed.
+    for _ in 0..20 {
+        clock.advance(Duration::from_millis(5));
+        let seen = sibling_polls();
+        wait_for("sibling polls", Duration::from_secs(5), || {
+            sibling_polls() >= seen + 2
+        });
+    }
+    let flushed = held.lock().unwrap().is_empty();
+    clock.advance(Duration::from_secs(3600));
+    wait_for(
+        "the tick flushes the record",
+        Duration::from_secs(5),
+        || held.lock().unwrap().is_empty(),
+    );
+    h.shutdown.trigger();
+    let _ = h.join.join().unwrap();
+    flushed
+}
+
+/// A record parked in the chain reaches the idle flush when the rest of the
+/// thread's lanes return only no-payload batches, as it does when they return
+/// nothing.
+#[test]
+fn a_parked_record_idle_flushes_beside_no_payload_batches() {
+    assert!(
+        parked_record_idle_flushes(Vec::new()),
+        "control: an idle sibling lets the record flush"
+    );
+    assert!(
+        parked_record_idle_flushes(vec![no_payload_stream(0)]),
+        "no idle flush in five idle_flush lulls while a sibling lane returned \
+         no-payload batches; the record stayed parked until the commit tick"
+    );
 }
 
 /// A permanently failed batch stalls its partition's watermark, so the
@@ -3710,9 +3814,14 @@ fn a_saturated_io_runtime_logs_one_warning() {
 /// pipeline label keeps the assertion independent of any other pipeline a
 /// sibling test registered in this process.
 fn pending_series(rendered: &str, pipeline_name: &str) -> Vec<String> {
+    family_series(rendered, names::CHECKPOINT_PENDING_BATCHES, pipeline_name)
+}
+
+/// One pipeline's lines of the family `name`, sorted.
+fn family_series(rendered: &str, name: &str, pipeline_name: &str) -> Vec<String> {
     let mut out: Vec<String> = rendered
         .lines()
-        .filter(|l| l.starts_with(&format!("{}{{", names::CHECKPOINT_PENDING_BATCHES)))
+        .filter(|l| l.starts_with(&format!("{name}{{")))
         .filter(|l| l.contains(&format!(r#"pipeline="{pipeline_name}""#)))
         .map(str::to_owned)
         .collect();

@@ -44,11 +44,19 @@ What the framework holds you to:
   the same lane; records derived from it are consumed or encoded within
   that window (the operator chain guarantees this by construction).
 - **One `AckRef` per batch.** Issue it through the `AckIssuer` you received
-  at `open` (`issuer.issue(partition, last_offset)`, the offset of the
-  **last** record in the batch). Every record deserialized from the batch
-  clones this handle; the checkpointer advances the partition's watermark
-  past the batch only when every clone resolves as delivered. You never
-  track individual records.
+  at `open` (`issuer.issue(partition, last_offset)`, the **highest offset the
+  batch covers**). Every record deserialized from the batch clones this
+  handle; the checkpointer advances the partition's watermark past the batch
+  only when every clone resolves as delivered. You never track individual
+  records.
+- **A batch may carry no payloads.** When a range of offsets holds no record
+  your consumer will ever read, return a batch with no payloads whose
+  `last_offset` ends the range, so the watermark can pass it. Return one only
+  for offsets past every batch the lane has issued: the next poll runs with no
+  wait, so one over the same offsets spins, and one below them moves the
+  committed position back. It counts against the
+  [pending ceiling](../02-concepts/03-backpressure.mdx#the-checkpoint-ceiling)
+  like any other batch. `Ok(None)` leaves those offsets uncommitted.
 - **Idle lanes block, never spin.** `Ok(None)` means nothing arrived, but
   reach it by waiting up to `timeout` (a blocking queue read, a condvar,
   worst case a sleep). A zero-timeout poll loop busy-spins a pipeline

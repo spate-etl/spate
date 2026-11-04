@@ -429,6 +429,10 @@ impl SourceLane for FakeLane {
                 let ack = self.issuer.issue(self.partition, last);
                 let payloads: &[(i64, Vec<u8>)] = match self.current.as_slice() {
                     [(_, bytes)] if bytes == NO_PAYLOAD => &[],
+                    [(offset, bytes)] if bytes == NO_PAYLOAD_STREAM => {
+                        self.batches.push_front(no_payload_stream(offset + 1));
+                        &[]
+                    }
                     all => all,
                 };
                 Ok(Some(FakeBatch {
@@ -634,6 +638,11 @@ pub(crate) enum ChainMode {
     HoldAcksUntilFlush {
         held: Arc<Mutex<Vec<crate::checkpoint::AckRef>>>,
     },
+    /// Park the ack of every batch that yielded a payload until the next
+    /// `flush`, as a real terminal does. A batch with no payload parks nothing.
+    HoldRecordAcksUntilFlush {
+        held: Arc<Mutex<Vec<crate::checkpoint::AckRef>>>,
+    },
     /// Take every batch, and report every flush blocked, as a terminal whose
     /// sink queue stays full does. A drain's flush then runs to its deadline.
     FlushBlocked,
@@ -681,7 +690,9 @@ impl RunnableChain for FakeChain {
             }
             _ => {}
         }
+        let mut took = 0usize;
         while let Some(_p) = batch.next_payload() {
+            took += 1;
             self.shared.consumed.fetch_add(1, Ordering::Relaxed);
         }
         match &self.mode {
@@ -690,6 +701,9 @@ impl RunnableChain for FakeChain {
                 held.lock().unwrap().push(batch.ack().clone());
             }
             ChainMode::HoldAcksUntilFlush { held } => {
+                held.lock().unwrap().push(batch.ack().clone());
+            }
+            ChainMode::HoldRecordAcksUntilFlush { held } if took > 0 => {
                 held.lock().unwrap().push(batch.ack().clone());
             }
             _ => {}
@@ -706,7 +720,9 @@ impl RunnableChain for FakeChain {
                 reason: BlockReason::Capacity,
             };
         }
-        if let ChainMode::HoldAcksUntilFlush { held } = &self.mode {
+        if let ChainMode::HoldAcksUntilFlush { held }
+        | ChainMode::HoldRecordAcksUntilFlush { held } = &self.mode
+        {
             // Dropping the stashed clones resolves the batches Delivered, the
             // fake equivalent of sealing a partial chunk and having the sink
             // write it.
@@ -787,6 +803,14 @@ const NO_PAYLOAD: &[u8] = b"no-payload";
 /// A scripted batch that covers `offset` and hands out no payloads.
 pub(crate) fn no_payload_batch(offset: i64) -> Vec<(i64, Vec<u8>)> {
     vec![(offset, NO_PAYLOAD.to_vec())]
+}
+
+const NO_PAYLOAD_STREAM: &[u8] = b"no-payload-stream";
+
+/// A scripted lane tail that returns a no-payload batch on every poll, each
+/// covering the next offset, as a partition holding only aborted records does.
+pub(crate) fn no_payload_stream(offset: i64) -> Vec<(i64, Vec<u8>)> {
+    vec![(offset, NO_PAYLOAD_STREAM.to_vec())]
 }
 
 /// Spin until `cond` holds or the timeout elapses; panic on timeout.

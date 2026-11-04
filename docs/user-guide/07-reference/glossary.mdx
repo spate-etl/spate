@@ -254,8 +254,9 @@ hash (or by source partition when keyless).
 ### Watermark
 
 The per-partition committable position: the offset **one past the last**
-contiguously acknowledged record. Stored on advance, committed to the
-source on `checkpoint.interval`, and committed synchronously on drain. The
+offset a contiguously acknowledged batch covers, which may hold no record.
+Stored on advance, committed to the source on `checkpoint.interval`, and
+committed synchronously on drain. The
 at-least-once invariant is that it never passes unacknowledged data; a
 failed batch stalls it (alert on `spate_checkpoint_watermark_age_seconds`)
 rather than being skipped. Distinct from the

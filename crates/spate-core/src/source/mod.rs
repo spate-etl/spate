@@ -39,8 +39,8 @@ pub struct LaneId(pub u32);
 /// [`AckIssuer`]; records derived from these payloads clone it.
 ///
 /// A batch may carry no payloads. Its ack then covers offsets that hold no
-/// record this consumer can read, and resolves in order behind every batch
-/// the lane issued before it.
+/// record this consumer will ever read, and the watermark passes them only
+/// once every batch issued before it on the partition has been delivered.
 pub trait PayloadBatch<'buf> {
     /// The next payload, or `None` when the batch is exhausted.
     fn next_payload(&mut self) -> Option<RawPayload<'buf>>;
@@ -70,9 +70,11 @@ pub trait SourceLane: Send {
 
     /// Poll up to `max_records` payloads, waiting at most `timeout`.
     /// `Ok(None)` means nothing arrived; the driver treats it as idle.
-    /// A batch with no payloads is not idle: it counts against the pending
-    /// ceiling like any other batch, so a lane cannot outrun a stalled head
-    /// by returning them.
+    /// A batch with no payloads counts against the pending ceiling like any
+    /// other batch, and gives the idle flush no data. The driver polls again
+    /// with no wait, so a lane returns one only for offsets past every batch it
+    /// has issued: one over the same offsets spins, and one below them moves
+    /// the committed position back.
     /// Implementations must not busy-spin when idle; block up to `timeout`.
     /// A lane that reports [`finished`](Self::finished) may return its
     /// end-of-input `Ok(None)` without waiting out `timeout`, because the

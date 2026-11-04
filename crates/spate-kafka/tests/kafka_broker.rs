@@ -71,19 +71,9 @@ fn real_broker_full_lifecycle() {
     source.flush_commits().expect("sync commit");
 
     // The group's committed offset is visible to a probe member.
-    let probe: BaseConsumer = support::raw_config()
-        .set("bootstrap.servers", &brokers)
-        .set("group.id", "real-life")
-        .build()
-        .expect("probe");
-    let mut tpl = rdkafka::TopicPartitionList::new();
-    tpl.add_partition(TOPIC, 0);
-    let committed = probe
-        .committed_offsets(tpl, Duration::from_secs(10))
-        .expect("committed");
     assert_eq!(
-        committed.elements()[0].offset(),
-        rdkafka::Offset::Offset(100)
+        support::committed(&brokers, "real-life", TOPIC, 1),
+        [rdkafka::Offset::Offset(100)]
     );
 }
 
@@ -163,14 +153,9 @@ fn real_broker_revocation_commit_persists_revoked_offsets() {
             support::complete_revocation(&mut source, &ids, &barrier, &watermarks).expect("flush");
             // The next poll calls `unassign`, which commits what is stored, so
             // the flush's own commit is only visible here.
-            let mut tpl = rdkafka::TopicPartitionList::new();
-            tpl.add_partition(TOPIC, 0);
-            let committed = probe
-                .committed_offsets(tpl, Duration::from_secs(10))
-                .expect("committed");
             assert_eq!(
-                committed.elements()[0].offset(),
-                rdkafka::Offset::Offset(50)
+                support::committed_by(&probe, TOPIC, 1),
+                [rdkafka::Offset::Offset(50)]
             );
             stored = true;
         }
@@ -187,14 +172,7 @@ fn real_broker_revocation_commit_persists_revoked_offsets() {
     spate_test::wait_until(
         Duration::from_secs(30),
         "revoked partition committed offset 50",
-        || {
-            let mut tpl = rdkafka::TopicPartitionList::new();
-            tpl.add_partition(TOPIC, 0);
-            let committed = probe
-                .committed_offsets(tpl, Duration::from_secs(10))
-                .expect("committed");
-            committed.elements()[0].offset() == rdkafka::Offset::Offset(50)
-        },
+        || support::committed_by(&probe, TOPIC, 1) == [rdkafka::Offset::Offset(50)],
     );
 
     stop.store(true, Ordering::Relaxed);
@@ -451,22 +429,11 @@ fn real_broker_revocation_commits_every_consumers_offsets() {
         true
     });
 
-    let probe: BaseConsumer = support::raw_config()
-        .set("bootstrap.servers", &brokers)
-        .set("group.id", "rev-each")
-        .build()
-        .expect("probe");
-    let mut tpl = rdkafka::TopicPartitionList::new();
-    tpl.add_partition(TOPIC, 0);
-    tpl.add_partition(TOPIC, 1);
-    let committed: Vec<_> = probe
-        .committed_offsets(tpl, Duration::from_secs(10))
-        .expect("committed")
-        .elements()
-        .iter()
-        .map(|e| e.offset())
-        .collect();
-    assert_eq!(committed, [rdkafka::Offset::Offset(25); 2]);
+    let probe = support::probe(&brokers, "rev-each");
+    assert_eq!(
+        support::committed_by(&probe, TOPIC, 2),
+        [rdkafka::Offset::Offset(25); 2]
+    );
 
     stop.store(true, Ordering::Relaxed);
     joiner.join().expect("joiner thread");

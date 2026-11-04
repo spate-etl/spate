@@ -10,7 +10,6 @@ mod support;
 
 use support::Raw as _;
 
-use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::message::Message;
 use rdkafka::producer::{BaseProducer, BaseRecord, Producer};
 use spate_core::config::PipelineConfig;
@@ -160,22 +159,11 @@ fn kafka_to_kafka_split_round_trip() {
 
     // The source group commits the full input once both destinations have
     // durably written (worst-status ack merge across the split).
-    let probe: BaseConsumer = support::raw_config()
-        .set("bootstrap.servers", &brokers)
-        .set("group.id", GROUP)
-        .build()
-        .expect("probe");
+    let probe = support::probe(&brokers, GROUP);
     wait_until(
         Duration::from_secs(30),
         "source group committed all",
-        || {
-            let mut tpl = rdkafka::TopicPartitionList::new();
-            tpl.add_partition(IN_TOPIC, 0);
-            let committed = probe
-                .committed_offsets(tpl, Duration::from_secs(10))
-                .expect("committed");
-            committed.elements()[0].offset() == rdkafka::Offset::Offset(TOTAL as i64)
-        },
+        || support::committed_by(&probe, IN_TOPIC, 1) == [rdkafka::Offset::Offset(TOTAL as i64)],
     );
 
     shutdown.trigger();

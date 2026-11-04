@@ -525,17 +525,7 @@ pub(crate) fn sorted(mut rows: Vec<String>) -> Vec<String> {
 
 /// The offset `group` has committed for partition 0 of `topic`, if any.
 pub(crate) fn committed(brokers: &str, group: &str, topic: &str) -> Option<i64> {
-    let probe: BaseConsumer = super::raw_config()
-        .set("bootstrap.servers", brokers)
-        .set("group.id", group)
-        .build()
-        .expect("probe consumer");
-    let mut tpl = TopicPartitionList::new();
-    tpl.add_partition(topic, 0);
-    let committed = probe
-        .committed_offsets(tpl, Duration::from_secs(10))
-        .expect("committed offsets");
-    match committed.elements()[0].offset() {
+    match super::committed(brokers, group, topic, 1)[0] {
         Offset::Offset(offset) => Some(offset),
         _ => None,
     }

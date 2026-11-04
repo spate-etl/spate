@@ -19,8 +19,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 use support::{
-    await_assignment, corrupt_batch, drain_lane, produce, produce_batch, serve_events, v1_message,
-    v2_batch,
+    Marker, await_assignment, control_batch, corrupt_batch, drain_lane, produce, produce_batch,
+    serve_events, v1_message, v2_batch,
 };
 
 const TOPIC: &str = "orders";
@@ -119,26 +119,10 @@ fn full_lifecycle_polls_acks_and_commits() {
     source.flush_commits().expect("sync commit");
 
     // A probe consumer in the same group sees the committed positions.
-    let probe: BaseConsumer = support::raw_config()
-        .set("bootstrap.servers", &brokers)
-        .set("group.id", "life")
-        .build()
-        .expect("probe");
-    let mut tpl = rdkafka::TopicPartitionList::new();
-    for p in 0..3 {
-        tpl.add_partition(TOPIC, p);
-    }
-    let committed = probe
-        .committed_offsets(tpl, Duration::from_secs(10))
-        .expect("committed");
-    for elem in committed.elements() {
-        assert_eq!(
-            elem.offset(),
-            rdkafka::Offset::Offset(10),
-            "partition {} committed",
-            elem.partition()
-        );
-    }
+    assert_eq!(
+        support::committed(&brokers, "life", TOPIC, 3),
+        [rdkafka::Offset::Offset(10); 3]
+    );
 }
 
 #[test]
@@ -1190,7 +1174,7 @@ fn a_corrupt_batch_fails_the_lane() {
     let brokers = cluster.bootstrap_servers();
     produce(&brokers, TOPIC, 1, 1, "before");
     assert_eq!(
-        produce_batch(&brokers, TOPIC, &corrupt_batch(b"lost", b"body")),
+        produce_batch(&brokers, TOPIC, 0, &corrupt_batch(b"lost", b"body")),
         0,
         "the corrupt batch is stored at offset 1"
     );
@@ -1275,7 +1259,7 @@ fn a_skipped_v1_message_fails_the_lane() {
     let mut payload = v2_batch(b"before", b"body", 3);
     payload.extend(v1_message(1, b"lost", b"body", true));
     payload.extend(v1_message(2, b"after", b"body", false));
-    assert_eq!(produce_batch(&brokers, TOPIC, &payload), 0);
+    assert_eq!(produce_batch(&brokers, TOPIC, 0, &payload), 0);
 
     let mut cfg = config(&brokers, "skipped-v1");
     cfg.rdkafka.insert("check.crcs".into(), "true".into());
@@ -1617,26 +1601,6 @@ fn watched_config(brokers: &str, group: &str, consumers: usize) -> KafkaSourceCo
     cfg
 }
 
-/// Committed offsets of `group` on partitions `0..partitions`.
-fn committed(brokers: &str, group: &str, partitions: i32) -> Vec<rdkafka::Offset> {
-    let probe: BaseConsumer = support::raw_config()
-        .set("bootstrap.servers", brokers)
-        .set("group.id", group)
-        .build()
-        .expect("probe");
-    let mut tpl = rdkafka::TopicPartitionList::new();
-    for p in 0..partitions {
-        tpl.add_partition(TOPIC, p);
-    }
-    probe
-        .committed_offsets(tpl, Duration::from_secs(10))
-        .expect("committed")
-        .elements()
-        .iter()
-        .map(|e| e.offset())
-        .collect()
-}
-
 /// Two consumers' assignments reach the runtime as one lane set: every
 /// assignment arrives with no lane live and fresh lane ids, and the source
 /// ends up holding every partition between them.
@@ -1670,7 +1634,7 @@ fn two_consumers_poll_ack_and_commit_every_partition() {
     driver.commit();
 
     assert_eq!(
-        committed(&brokers, "commit-each", 4),
+        support::committed(&brokers, "commit-each", TOPIC, 4),
         vec![rdkafka::Offset::Offset(10); 4]
     );
 }
@@ -1779,7 +1743,7 @@ fn more_consumers_than_partitions_keeps_running() {
     driver.read(5, Duration::from_secs(30));
     driver.commit();
     assert_eq!(
-        committed(&brokers, "idle-consumer", 1),
+        support::committed(&brokers, "idle-consumer", TOPIC, 1),
         [rdkafka::Offset::Offset(5)]
     );
 }
@@ -1870,7 +1834,7 @@ fn a_held_offer_the_group_has_left_is_not_fatal() {
         driver.read(5, Duration::from_secs(30));
         driver.commit();
         assert_eq!(
-            committed(brokers, "stale-held", 1),
+            support::committed(brokers, "stale-held", TOPIC, 1),
             [rdkafka::Offset::Offset(5)]
         );
     });
@@ -2021,7 +1985,7 @@ fn a_lost_member_keeps_its_peers_commit_and_loses_no_record() {
         driver.flush_failures
     );
     let at_ten = rdkafka::Offset::Offset(10);
-    let read_back = committed(&brokers, "lost-peer", 4);
+    let read_back = support::committed(&brokers, "lost-peer", TOPIC, 4);
     assert!(
         read_back.iter().filter(|o| **o == at_ten).count() >= 2,
         "the peer's two partitions: {read_back:?}"
@@ -2360,7 +2324,7 @@ fn a_partial_refusal_stores_the_owned_offsets() {
     driver.source.flush_commits().expect("flush");
 
     assert_eq!(
-        committed(&brokers, "partial-refusal", 4),
+        support::committed(&brokers, "partial-refusal", TOPIC, 4),
         vec![rdkafka::Offset::Offset(10); 4]
     );
 }
@@ -2406,5 +2370,56 @@ fn one_assignment_spends_one_lookup_bound() {
         {
             return;
         }
+    }
+}
+
+/// A control batch written by hand reaches a split queue as a transaction
+/// marker: it takes an offset, nothing is delivered for it, and polling the
+/// queue moves the position past it. The mock marker tests rest on this.
+#[test]
+fn the_mock_serves_a_control_batch_as_a_marker() {
+    const RECORDS: usize = 3;
+    for marker in [Marker::Commit, Marker::Abort] {
+        let cluster = MockCluster::new(1).expect("mock cluster");
+        cluster.create_topic(TOPIC, 1, 1).expect("create topic");
+        let brokers = cluster.bootstrap_servers();
+        produce(&brokers, TOPIC, RECORDS, 1, "before");
+        assert_eq!(
+            produce_batch(&brokers, TOPIC, 0, &control_batch(marker)),
+            0,
+            "{marker:?}"
+        );
+
+        let consumer: Arc<BaseConsumer> = Arc::new(
+            support::raw_config()
+                .set("bootstrap.servers", &brokers)
+                .set("group.id", "marker")
+                .set("enable.auto.commit", "false")
+                .set("auto.offset.reset", "earliest")
+                .build()
+                .expect("consumer"),
+        );
+        let mut tpl = rdkafka::TopicPartitionList::new();
+        tpl.add_partition(TOPIC, 0);
+        consumer.assign(&tpl).expect("assign");
+        consumer.pause(&tpl).expect("pause");
+        let queue = consumer
+            .split_partition_queue(TOPIC, 0)
+            .expect("split queue");
+        consumer.resume(&tpl).expect("resume");
+
+        let mut delivered = 0;
+        wait_until(
+            Duration::from_secs(30),
+            "the position passes the marker",
+            || {
+                if queue.poll(Duration::from_millis(100)).is_some() {
+                    delivered += 1;
+                }
+                consumer.position().expect("position").elements()[0].offset()
+                    == rdkafka::Offset::Offset(RECORDS as i64 + 1)
+            },
+        );
+        assert_eq!(delivered, RECORDS, "{marker:?}");
     }
 }

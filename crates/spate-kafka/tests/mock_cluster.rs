@@ -3038,6 +3038,22 @@ mod latest_start {
         );
     }
 
+    /// A broker that does not yet know a partition just added to the topic holds
+    /// the offer, and the run goes on once it does.
+    #[test]
+    fn a_partition_the_broker_does_not_know_yet_is_retried() {
+        let (cluster, brokers) = cluster_with_records(1);
+        cluster.request_errors(
+            RDKafkaApiKey::ListOffsets,
+            &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_UNKNOWN_TOPIC_OR_PART],
+        );
+        let _accepted = accepted(quiet_latest(&brokers, "not-known-yet"));
+        assert_eq!(
+            committed(&brokers, "not-known-yet", 1),
+            [rdkafka::Offset::Offset(3)]
+        );
+    }
+
     /// Every spelling of the policy, and leaving it unset, takes the start rule.
     /// Regression for #1704.
     #[test]

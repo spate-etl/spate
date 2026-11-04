@@ -43,12 +43,16 @@ pub(crate) enum StartFailure {
 }
 
 /// Classify an error from reading, listing or committing a start position.
+///
+/// Reads as before startup: a broker can answer `UnknownTopicOrPartition` for a
+/// partition just added to the topic, and a deleted topic fails the source at
+/// its next poll or at the assignment deadline.
 pub(crate) fn classify_start_error(code: RDKafkaErrorCode) -> StartFailure {
     match code {
         RDKafkaErrorCode::IllegalGeneration | RDKafkaErrorCode::UnknownMemberId => {
             StartFailure::Discard
         }
-        code => match classify_consumer_error(code, true) {
+        code => match classify_consumer_error(code, false) {
             ErrorClass::Fatal => StartFailure::Fatal,
             _ => StartFailure::Retry,
         },
@@ -209,7 +213,7 @@ mod tests {
             (C::GroupAuthorizationFailed, StartFailure::Fatal),
             (C::TopicAuthorizationFailed, StartFailure::Fatal),
             (C::UnsupportedVersion, StartFailure::Fatal),
-            (C::UnknownTopicOrPartition, StartFailure::Fatal),
+            (C::UnknownTopicOrPartition, StartFailure::Retry),
         ] {
             assert_eq!(classify_start_error(code), class, "{code:?}");
         }

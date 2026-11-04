@@ -47,6 +47,7 @@ use futures_util::StreamExt as _;
 use futures_util::future::{Either, select};
 use object_store::path::Path;
 use object_store::{GetOptions, GetRange, ObjectStore, ObjectStoreExt as _};
+use spate_core::backoff::Backoff;
 use spate_core::error::{ErrorClass, SourceError};
 use std::future::Future;
 use std::pin::{Pin, pin};
@@ -173,7 +174,7 @@ pub(crate) struct FetcherParams {
     pub(crate) tx: mpsc::Sender<ChunkMsg>,
     /// Backpressure pause (set by `Source::pause`): checked between sends.
     pub(crate) pause: Arc<AtomicBool>,
-    /// First backoff step (doubles per attempt, capped; tests shrink it).
+    /// First wait of the read schedule, [`retry_backoff`]; tests shrink it.
     pub(crate) retry_base: Duration,
     /// `spate_s3_source_get_retries_total`, when metrics are attached.
     pub(crate) retries: Option<spate_core::metrics::Counter>,
@@ -190,6 +191,9 @@ pub(crate) struct FetcherParams {
 /// How many attempts one object GET gets before escalating. Failing fast (a
 /// poisoned unit) beats a backfill wedged invisibly in an endless retry loop.
 pub(crate) const MAX_ATTEMPTS: u32 = 8;
+/// The first wait of the crate's retry schedule.
+pub(crate) const RETRY_BASE: Duration = Duration::from_millis(200);
+/// The longest wait of the crate's retry schedule.
 pub(crate) const BACKOFF_CAP: Duration = Duration::from_secs(5);
 const PAUSE_POLL: Duration = Duration::from_millis(25);
 
@@ -336,7 +340,7 @@ impl WindowRead {
     /// Read the window into memory, retrying a transient failure on a budget
     /// of its own.
     async fn fetch(self) -> Window {
-        let mut attempt: u32 = 0;
+        let mut budget = ReadBudget::new(self.retry_base);
         loop {
             let options = GetOptions {
                 if_match: Some(self.etag.clone()),
@@ -384,8 +388,7 @@ impl WindowRead {
                         &self.entry,
                         &e,
                         self.start,
-                        &mut attempt,
-                        self.retry_base,
+                        &mut budget,
                         self.retries.as_ref(),
                     )
                     .await?;
@@ -670,7 +673,7 @@ async fn stream_object_streaming(
 ) -> Result<bool, SplitFailure> {
     let path = object_path(split, entry)?;
     let mut delivered: u64 = 0;
-    let mut attempt: u32 = 0;
+    let mut budget = ReadBudget::new(retry_base);
 
     'attempts: loop {
         // In this fallback `delivered` is always 0: a mid-object stream error
@@ -683,16 +686,7 @@ async fn stream_object_streaming(
         let result = match store.get_opts(&path, options).await {
             Ok(r) => r,
             Err(e) => {
-                retry_or_fail(
-                    split,
-                    entry,
-                    &e,
-                    delivered,
-                    &mut attempt,
-                    retry_base,
-                    retries,
-                )
-                .await?;
+                retry_or_fail(split, entry, &e, delivered, &mut budget, retries).await?;
                 continue 'attempts;
             }
         };
@@ -711,9 +705,10 @@ async fn stream_object_streaming(
                             return Ok(false);
                         }
                     }
-                    // Progress resets the attempt budget: an object larger
-                    // than one failure-free window still completes.
-                    attempt = 0;
+                    // A chunk restarts the budget and its schedule. Only an
+                    // empty one can precede a retry, since an error after any
+                    // bytes ends the read below.
+                    budget.reset();
                 }
                 Some(Err(e)) => {
                     if delivered > 0 {
@@ -746,16 +741,7 @@ async fn stream_object_streaming(
                             ),
                         ));
                     }
-                    retry_or_fail(
-                        split,
-                        entry,
-                        &e,
-                        delivered,
-                        &mut attempt,
-                        retry_base,
-                        retries,
-                    )
-                    .await?;
+                    retry_or_fail(split, entry, &e, delivered, &mut budget, retries).await?;
                     continue 'attempts;
                 }
                 None => return Ok(true),
@@ -780,8 +766,8 @@ fn version_of(origin: &Origin) -> Option<String> {
 /// re-enqueueing at the same content would fail the same way. Any other
 /// answer, an absent ETag included, is [`SplitFailure::Overwritten`]. A HEAD
 /// that fails is classified as a read is: 404 poisons, 401 and 403 are
-/// fatal, and a transient failure is retried on the read's budget. Its
-/// reason says the HEAD failed.
+/// fatal, and a transient failure is retried on a budget and schedule of its
+/// own, the same as a read's. Its reason says the HEAD failed.
 #[expect(
     clippy::too_many_arguments,
     reason = "internal seam beside the read loops, which carry the same context"
@@ -796,7 +782,7 @@ async fn head_after_overwrite(
     retry_base: Duration,
     retries: Option<&spate_core::metrics::Counter>,
 ) -> SplitFailure {
-    let mut attempt = 0;
+    let mut budget = ReadBudget::new(retry_base);
     loop {
         match store.head(path).await {
             Ok(meta) => {
@@ -820,16 +806,8 @@ async fn head_after_overwrite(
                 }));
             }
             Err(e) => {
-                if let Err(failure) = retry_or_fail(
-                    split,
-                    entry,
-                    &e,
-                    delivered,
-                    &mut attempt,
-                    retry_base,
-                    retries,
-                )
-                .await
+                if let Err(failure) =
+                    retry_or_fail(split, entry, &e, delivered, &mut budget, retries).await
                 {
                     let headed = |reason: String| {
                         format!("{reason} (the HEAD after the store refused the pinned read)")
@@ -877,8 +855,37 @@ fn object_path(split: &LaneLabel, entry: &ObjectEntry) -> Result<Path, SplitFail
     }
 }
 
-/// Back off and bump the attempt counter for a retryable error; escalate
-/// non-retryable classes and exhausted budgets.
+/// The crate's retry schedule: from `base`, doubling to [`BACKOFF_CAP`],
+/// without jitter. The caller bounds its attempts: [`MAX_ATTEMPTS`] for a
+/// read, [`LISTER_PUBLISH_ATTEMPTS`](crate::lister::LISTER_PUBLISH_ATTEMPTS)
+/// for a publish.
+pub(crate) const fn retry_backoff(base: Duration) -> Backoff {
+    Backoff::new(base, BACKOFF_CAP)
+}
+
+/// One read's attempt count and the schedule it paces, started and reset
+/// together.
+struct ReadBudget {
+    attempt: u32,
+    backoff: Backoff,
+}
+
+impl ReadBudget {
+    const fn new(retry_base: Duration) -> Self {
+        Self {
+            attempt: 0,
+            backoff: retry_backoff(retry_base),
+        }
+    }
+
+    fn reset(&mut self) {
+        self.attempt = 0;
+        self.backoff.reset();
+    }
+}
+
+/// Count an attempt on `budget` and wait its next delay for a retryable
+/// error; escalate non-retryable classes and exhausted budgets.
 ///
 /// Escalation splits by scope: credentials/config failures are pipeline
 /// [`Fatal`](SplitFailure::Fatal). Everything else is object-level
@@ -890,8 +897,7 @@ async fn retry_or_fail(
     entry: &ObjectEntry,
     e: &object_store::Error,
     delivered: u64,
-    attempt: &mut u32,
-    retry_base: Duration,
+    budget: &mut ReadBudget,
     retries: Option<&spate_core::metrics::Counter>,
 ) -> Result<(), SplitFailure> {
     if classify(e) != ErrorClass::Retryable {
@@ -909,8 +915,8 @@ async fn retry_or_fail(
             SplitFailure::Poison(crate::error::poison_kind(e), reason)
         });
     }
-    *attempt += 1;
-    if *attempt >= MAX_ATTEMPTS {
+    budget.attempt += 1;
+    if budget.attempt >= MAX_ATTEMPTS {
         return Err(SplitFailure::Poison(
             PoisonKind::RetriesExhausted,
             format!(
@@ -921,20 +927,18 @@ async fn retry_or_fail(
             ),
         ));
     }
-    let backoff = retry_base
-        .saturating_mul(1 << (*attempt - 1).min(16))
-        .min(BACKOFF_CAP);
+    let delay = budget.backoff.next_delay();
     tracing::warn!(
         split = %split,
         key = %entry.key,
-        attempt = *attempt,
+        attempt = budget.attempt,
         delivered,
         error = %crate::error::bounded_reason(e),
         "transient object read failure; backing off and resuming with a ranged get"
     );
     // Tokio's own timer, so a frozen test clock cannot hold a retrying
     // read.
-    tokio::time::sleep(backoff).await;
+    tokio::time::sleep(delay).await;
     // Counted once the backoff ends, so a fetcher aborted while it waits
     // counts no attempt it never made.
     if let Some(c) = retries {
@@ -987,6 +991,14 @@ mod tests {
         }
     }
 
+    /// The time between consecutive instants, in whole milliseconds.
+    fn gaps(instants: &[tokio::time::Instant]) -> Vec<u128> {
+        instants
+            .windows(2)
+            .map(|pair| (pair[1] - pair[0]).as_millis())
+            .collect()
+    }
+
     /// Wraps a store, failing the first `fail_gets` `get_opts` calls with a
     /// retryable error, failing the first `fail_past_gets` bounded GETs that
     /// end past byte `fail_past` the same way, and cutting the first
@@ -1006,6 +1018,10 @@ mod tests {
         error_text: Option<String>,
         gets: AtomicU32,
         ranges: std::sync::Mutex<Vec<RangeKind>>,
+        /// The tokio instant of each GET, in request order.
+        get_instants: std::sync::Mutex<Vec<tokio::time::Instant>>,
+        /// A cut stream yields one empty chunk ahead of its error.
+        empty_before_cut: bool,
         /// Payload streams drained to completion (a cut or abandoned body
         /// never counts). This is the observable that separates "window
         /// fully buffered before hand-off" from "connection held open".
@@ -1070,6 +1086,8 @@ mod tests {
                 error_text: None,
                 gets: AtomicU32::new(0),
                 ranges: std::sync::Mutex::new(Vec::new()),
+                get_instants: std::sync::Mutex::new(Vec::new()),
+                empty_before_cut: false,
                 bodies_drained: Arc::new(AtomicU32::new(0)),
                 requests: std::sync::Mutex::new(Vec::new()),
                 hold_on: 0,
@@ -1143,6 +1161,24 @@ mod tests {
             self.ranges.lock().unwrap().clone()
         }
 
+        /// The wait before each GET after the first, in whole milliseconds.
+        fn get_gaps(&self) -> Vec<u128> {
+            gaps(&self.get_instants.lock().unwrap())
+        }
+
+        /// [`get_gaps`](Self::get_gaps) over the GETs of one range.
+        fn get_gaps_of(&self, range: RangeKind) -> Vec<u128> {
+            let ranges = self.ranges.lock().unwrap();
+            let instants = self.get_instants.lock().unwrap();
+            let of: Vec<_> = ranges
+                .iter()
+                .zip(instants.iter())
+                .filter(|(r, _)| **r == range)
+                .map(|(_, at)| *at)
+                .collect();
+            gaps(&of)
+        }
+
         fn generic(what: &str) -> object_store::Error {
             object_store::Error::Generic {
                 store: "flaky",
@@ -1194,6 +1230,10 @@ mod tests {
         ) -> object_store::Result<GetResult> {
             let nth = self.gets.fetch_add(1, Ordering::Relaxed) + 1;
             self.ranges.lock().unwrap().push(range_kind(&options.range));
+            self.get_instants
+                .lock()
+                .unwrap()
+                .push(tokio::time::Instant::now());
             self.requests
                 .lock()
                 .unwrap()
@@ -1239,6 +1279,7 @@ mod tests {
             {
                 let cut_after = self.cut_after;
                 let cut_fatal = self.cut_fatal;
+                let empty_before_cut = self.empty_before_cut;
                 let error_text = self.error_text.clone();
                 let GetResult {
                     payload,
@@ -1257,7 +1298,12 @@ mod tests {
                     let out: Vec<object_store::Result<Bytes>> = match item {
                         Ok(bytes) => {
                             if sent >= cut_after {
-                                vec![Err(Self::cut_error(cut_fatal, error_text.as_deref()))]
+                                let cut = Err(Self::cut_error(cut_fatal, error_text.as_deref()));
+                                if empty_before_cut {
+                                    vec![Ok(Bytes::new()), cut]
+                                } else {
+                                    vec![cut]
+                                }
                             } else {
                                 let take = bytes.len().min(cut_after - sent);
                                 sent += take;
@@ -2080,6 +2126,14 @@ mod tests {
                     vec![("p/a".to_string(), b"0123456789abcdef".to_vec())]
                 );
                 assert_eq!(flaky.gets.load(Ordering::Relaxed), 2 * MAX_ATTEMPTS);
+                // Each window waits from the base.
+                for window in [RangeKind::Bounded(0, 8), RangeKind::Bounded(8, 16)] {
+                    assert_eq!(
+                        flaky.get_gaps_of(window),
+                        [1, 2, 4, 8, 16, 32, 64],
+                        "{window:?}"
+                    );
+                }
             } else {
                 assert!(matches!(
                     msgs.last(),
@@ -2092,6 +2146,94 @@ mod tests {
                 assert_eq!(flaky.gets.load(Ordering::Relaxed), 2 * MAX_ATTEMPTS);
             }
         }
+    }
+
+    /// Pins the read schedule at the production base: a failing read waits
+    /// 200 ms, doubling to the 5 s cap, and its eighth failure poisons the
+    /// unit with no further wait.
+    #[tokio::test(start_paused = true)]
+    async fn a_failing_read_backs_off_from_200ms_to_5s_then_poisons() {
+        for (failures, completes) in [(MAX_ATTEMPTS - 1, true), (MAX_ATTEMPTS, false)] {
+            let flaky = Arc::new(FlakyStore::new(seeded(&[("p/a", b"0123456789")]).await));
+            flaky.fail_gets.store(failures, Ordering::Relaxed);
+            let store: Arc<dyn ObjectStore> = flaky.clone();
+            let slice = listed(&store).await;
+            let (tx, mut rx) = mpsc::channel(DEPTH);
+            let started = tokio::time::Instant::now();
+            let task = tokio::spawn(run_fetcher(FetcherParams {
+                retry_base: RETRY_BASE,
+                ..fetcher(store, slice, 64, 64, tx)
+            }));
+            let msgs = drain(&mut rx).await;
+            task.await.unwrap();
+            assert_eq!(
+                flaky.get_gaps(),
+                [200, 400, 800, 1600, 3200, 5000, 5000],
+                "{failures} failures"
+            );
+            assert_eq!(started.elapsed(), Duration::from_millis(16_200));
+            if completes {
+                assert_eq!(
+                    assembled(&msgs),
+                    vec![("p/a".to_string(), b"0123456789".to_vec())]
+                );
+            } else {
+                assert!(matches!(
+                    msgs.last(),
+                    Some(ChunkMsg::LaneFailed(SplitFailure::Poison(
+                        PoisonKind::RetriesExhausted,
+                        _
+                    )))
+                ));
+                assert_eq!(flaky.gets.load(Ordering::Relaxed), MAX_ATTEMPTS);
+            }
+        }
+    }
+
+    /// Pins that a streaming read's schedule runs on across its failures,
+    /// whether the GET fails or its body breaks before the first byte.
+    #[tokio::test(start_paused = true)]
+    async fn a_streaming_read_backs_off_from_the_base_across_its_failures() {
+        let flaky = Arc::new(FlakyStore {
+            cut_after: 0,
+            ..FlakyStore::new(seeded(&[("p/a", b"0123456789")]).await)
+        });
+        flaky.fail_gets.store(2, Ordering::Relaxed);
+        flaky.cut_streams.store(1, Ordering::Relaxed);
+        let store: Arc<dyn ObjectStore> = flaky.clone();
+        let mut slice = listed(&store).await;
+        slice[0].etag = None;
+        let msgs = collect_fetch(store, slice, 0, 64, 64).await;
+        assert_eq!(
+            assembled(&msgs),
+            vec![("p/a".to_string(), b"0123456789".to_vec())]
+        );
+        assert_eq!(flaky.recorded_ranges(), [RangeKind::Full; 4]);
+        assert_eq!(flaky.get_gaps(), [1, 2, 4]);
+    }
+
+    /// Pins that a chunk restarts a streaming read's budget and its
+    /// schedule: a body that yields an empty chunk and then breaks, on more
+    /// GETs than the budget allows, waits the base before each GET and
+    /// completes.
+    #[tokio::test(start_paused = true)]
+    async fn an_empty_chunk_restarts_the_streaming_reads_budget() {
+        let flaky = Arc::new(FlakyStore {
+            cut_after: 0,
+            empty_before_cut: true,
+            ..FlakyStore::new(seeded(&[("p/a", b"0123456789")]).await)
+        });
+        flaky.cut_streams.store(MAX_ATTEMPTS, Ordering::Relaxed);
+        let store: Arc<dyn ObjectStore> = flaky.clone();
+        let mut slice = listed(&store).await;
+        slice[0].etag = None;
+        let msgs = collect_fetch(store, slice, 0, 64, 64).await;
+        assert_eq!(
+            assembled(&msgs),
+            vec![("p/a".to_string(), b"0123456789".to_vec())]
+        );
+        assert_eq!(flaky.gets.load(Ordering::Relaxed), MAX_ATTEMPTS + 1);
+        assert_eq!(flaky.get_gaps(), vec![1; MAX_ATTEMPTS as usize]);
     }
 
     /// Pins that a lane dropped while a window is read ahead ends the
@@ -2687,6 +2829,12 @@ mod tests {
             .filter(|l| l.contains("transient object read failure"))
             .collect();
         assert_eq!(retried.len(), 2, "{lines:?}");
+        for (line, attempt) in retried.iter().zip(1..) {
+            assert!(
+                line.contains(&format!("attempt={attempt} delivered=")),
+                "{line}"
+            );
+        }
         for line in retried {
             assert!(line.contains("xxxx…"), "{line}");
             assert!(line.len() < 2048, "{} bytes", line.len());
@@ -3027,7 +3175,11 @@ mod tests {
         /// or 416 when `range_refused` is set.
         precondition_on: u32,
         range_refused: bool,
+        /// GETs, counted from 1, up to this one fail with a retryable error.
+        transient_gets: u32,
         gets: AtomicU32,
+        /// The tokio instant of each HEAD, in request order.
+        head_instants: std::sync::Mutex<Vec<tokio::time::Instant>>,
         /// Answers for the HEADs, in order; the inner store answers once
         /// the script is spent.
         heads: std::sync::Mutex<std::collections::VecDeque<object_store::Result<ObjectMeta>>>,
@@ -3042,7 +3194,9 @@ mod tests {
                 inner,
                 precondition_on,
                 range_refused: false,
+                transient_gets: 0,
                 gets: AtomicU32::new(0),
+                head_instants: std::sync::Mutex::new(Vec::new()),
                 heads: std::sync::Mutex::new(std::collections::VecDeque::new()),
                 seen: std::sync::Mutex::new(Vec::new()),
             }
@@ -3103,6 +3257,10 @@ mod tests {
                 options.head,
             ));
             if options.head {
+                self.head_instants
+                    .lock()
+                    .unwrap()
+                    .push(tokio::time::Instant::now());
                 let scripted = self.heads.lock().unwrap().pop_front();
                 if let Some(answer) = scripted {
                     let meta = answer?;
@@ -3116,7 +3274,14 @@ mod tests {
                 }
                 return self.inner.get_opts(location, options).await;
             }
-            if self.gets.fetch_add(1, Ordering::Relaxed) + 1 == self.precondition_on {
+            let nth = self.gets.fetch_add(1, Ordering::Relaxed) + 1;
+            if nth <= self.transient_gets {
+                return Err(object_store::Error::Generic {
+                    store: "head",
+                    source: "503".into(),
+                });
+            }
+            if nth == self.precondition_on {
                 if self.range_refused {
                     return Err(object_store::Error::Generic {
                         store: "head",
@@ -3536,5 +3701,33 @@ mod tests {
             SplitFailure::Poison(PoisonKind::RetriesExhausted, _)
         ));
         assert_eq!(store.heads(), MAX_ATTEMPTS as usize);
+    }
+
+    /// Pins that the HEAD after a refused read retries on a budget and
+    /// schedule of its own: the read's retries before the 412 neither
+    /// shorten the HEAD's budget nor lengthen its waits.
+    #[tokio::test(start_paused = true)]
+    async fn a_head_after_a_retried_read_gets_a_budget_and_schedule_of_its_own() {
+        let transient = || object_store::Error::Generic {
+            store: "head",
+            source: "503".into(),
+        };
+        let (inner, entry) = thirty_bytes().await;
+        let mut heads: Vec<_> = (1..MAX_ATTEMPTS).map(|_| Err(transient())).collect();
+        heads.push(Ok(meta(Some("new"), 30)));
+        let store = Arc::new(
+            HeadStore {
+                transient_gets: MAX_ATTEMPTS - 2,
+                ..HeadStore::new(inner, MAX_ATTEMPTS - 1)
+            }
+            .head_answers(heads),
+        );
+        let msgs = fetch_from(Arc::clone(&store), entry, notified(None), None).await;
+        assert!(matches!(last_failure(msgs), SplitFailure::Overwritten(_)));
+        assert_eq!(store.heads(), MAX_ATTEMPTS as usize);
+        assert_eq!(
+            gaps(&store.head_instants.lock().unwrap()),
+            [1, 2, 4, 8, 16, 32, 64]
+        );
     }
 }

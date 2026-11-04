@@ -37,9 +37,6 @@ use std::sync::Arc;
 use std::time::Duration;
 use url::Url;
 
-/// First backoff step for fetcher-internal GET retries.
-const RETRY_BASE: Duration = Duration::from_millis(200);
-
 /// Re-enqueues of an overwritten key a notification unit carries before the
 /// unit is acknowledged without one, when the `feed:` section sets no
 /// `attempt_cap`. The SQS feed refuses that key, so it always uses this.
@@ -695,7 +692,7 @@ impl Source for S3Source {
             },
             chunk_bytes: self.config.chunk_bytes.as_u64() as usize,
             range_bytes: self.config.prefetch_bytes.as_u64() as usize,
-            retry_base: RETRY_BASE,
+            retry_base: crate::fetch::RETRY_BASE,
             metrics,
             re_enqueue_cap: self.re_enqueue_cap,
         };

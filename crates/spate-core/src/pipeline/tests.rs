@@ -771,8 +771,7 @@ fn the_ceiling_holds_three_of(scripted: Vec<Vec<(i64, Vec<u8>)>>) -> i64 {
     h.shutdown.trigger();
     let report = h.join.join().unwrap().unwrap();
     assert_eq!(report.state, ExitState::Completed);
-    let committed = h.shared.lock().unwrap().committed[&PartitionId(0)];
-    committed
+    h.shared.lock().unwrap().committed[&PartitionId(0)]
 }
 
 /// A permanently failed batch stalls its partition's watermark, so the

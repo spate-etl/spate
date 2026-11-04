@@ -511,7 +511,12 @@ impl Pipeline {
     /// [`BuildError::DuplicateSinkName`] when `name` is already installed;
     /// [`BuildError::Sink`] for an empty or reserved name (`"sink"` is the
     /// default sink's metric label), an empty or ragged topology, label
-    /// shapes that do not match it, or a zero queue capacity.
+    /// shapes that do not match it, or a zero queue capacity;
+    /// [`BuildError::Config`] naming the sink when its chunk config does not
+    /// resolve, `chunk.target_bytes` is zero, or the bundle's pool fails
+    /// [`SinkPoolConfig::validate`](crate::sink::SinkPoolConfig::validate);
+    /// [`BuildError::DuplicateSeries`] when its metric series are already
+    /// claimed.
     pub fn add_sink_with<B: SinkBundle>(
         mut self,
         name: impl Into<String>,
@@ -603,6 +608,13 @@ impl Pipeline {
                 "replica_labels shape {label_shape:?} does not match the \
                  endpoint topology {endpoint_shape:?}"
             )));
+        }
+        // A bundle built in code has not been through a loader. Checking here,
+        // before `shard_queues`, returns before any metric series is claimed.
+        if let Err(e) = parts.pool.validate() {
+            return Err(BuildError::Config(ConfigError::Validation(format!(
+                "sink {sink_name:?}: {e}"
+            ))));
         }
 
         let pipeline_name = self.config.pipeline.name.clone();
@@ -1251,6 +1263,47 @@ mod tests {
             matches!(&err, Some(BuildError::Config(ConfigError::Validation(m))) if m.contains("chunk.target_bytes")),
             "{err:?}"
         );
+    }
+
+    /// Pins that a pool built in code is held to `SinkPoolConfig::validate`
+    /// when the builder installs it, naming the sink and the key.
+    #[test]
+    fn programmatic_invalid_pool_is_rejected_at_install() {
+        let pool = |mutate: fn(&mut SinkPoolConfig)| {
+            let mut pool = SinkPoolConfig::default();
+            mutate(&mut pool);
+            pool
+        };
+        let cases = [
+            (
+                pool(|c| c.batch.max_rows = 0),
+                "batch.max_rows must be at least 1",
+            ),
+            (
+                pool(|c| c.inflight.max_per_shard = 0),
+                "inflight.max_per_shard must be at least 1",
+            ),
+            (
+                pool(|c| c.retry.initial = Duration::ZERO),
+                "retry.initial and retry.max must be non-zero",
+            ),
+            (
+                pool(|c| c.breaker.failure_threshold = 0),
+                "breaker.failure_threshold must be at least 1",
+            ),
+        ];
+        for (pool, key) in cases {
+            let sink = SinkParts::new(NullWriter, vec![vec![()]], pool).with_component_type("null");
+            let err = Pipeline::from_config(test_config(1))
+                .expect("builder")
+                .sink(sink)
+                .err();
+            let want = format!("sink \"default\": {key}");
+            assert!(
+                matches!(&err, Some(BuildError::Config(ConfigError::Validation(m))) if *m == want),
+                "{err:?}"
+            );
+        }
     }
 
     #[test]

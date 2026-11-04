@@ -157,7 +157,9 @@ workers, their queues and their metric labels from the topology it carries.
   anything spawns. `SinkPoolConfig` carries the batching, in-flight, retry,
   and breaker tuning ([Tuning](../05-deployment/tuning.mdx)). It is
   `#[non_exhaustive]`, so build it from `new` or `default()`, as the example
-  above does.
+  above does. The builder runs `SinkPoolConfig::validate` on it before
+  anything spawns and rejects a pool that fails, naming the key
+  ([Sink pool](../07-reference/configuration.mdx#sink-pool)).
 - `.with_component_type("...")` — sets the `component_type` metric label
   (default `"custom"`) on every sink series
   ([Monitoring](../05-deployment/monitoring.mdx)).

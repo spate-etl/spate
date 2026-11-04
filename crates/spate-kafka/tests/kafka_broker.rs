@@ -76,14 +76,9 @@ fn real_broker_full_lifecycle() {
         .set("group.id", "real-life")
         .build()
         .expect("probe");
-    let mut tpl = rdkafka::TopicPartitionList::new();
-    tpl.add_partition(TOPIC, 0);
-    let committed = probe
-        .committed_offsets(tpl, Duration::from_secs(10))
-        .expect("committed");
     assert_eq!(
-        committed.elements()[0].offset(),
-        rdkafka::Offset::Offset(100)
+        support::committed(&probe, TOPIC, 1),
+        [rdkafka::Offset::Offset(100)]
     );
 }
 
@@ -163,14 +158,9 @@ fn real_broker_revocation_commit_persists_revoked_offsets() {
             support::complete_revocation(&mut source, &ids, &barrier, &watermarks).expect("flush");
             // The next poll calls `unassign`, which commits what is stored, so
             // the flush's own commit is only visible here.
-            let mut tpl = rdkafka::TopicPartitionList::new();
-            tpl.add_partition(TOPIC, 0);
-            let committed = probe
-                .committed_offsets(tpl, Duration::from_secs(10))
-                .expect("committed");
             assert_eq!(
-                committed.elements()[0].offset(),
-                rdkafka::Offset::Offset(50)
+                support::committed(&probe, TOPIC, 1),
+                [rdkafka::Offset::Offset(50)]
             );
             stored = true;
         }
@@ -187,14 +177,7 @@ fn real_broker_revocation_commit_persists_revoked_offsets() {
     spate_test::wait_until(
         Duration::from_secs(30),
         "revoked partition committed offset 50",
-        || {
-            let mut tpl = rdkafka::TopicPartitionList::new();
-            tpl.add_partition(TOPIC, 0);
-            let committed = probe
-                .committed_offsets(tpl, Duration::from_secs(10))
-                .expect("committed");
-            committed.elements()[0].offset() == rdkafka::Offset::Offset(50)
-        },
+        || support::committed(&probe, TOPIC, 1) == [rdkafka::Offset::Offset(50)],
     );
 
     stop.store(true, Ordering::Relaxed);
@@ -212,8 +195,6 @@ fn real_broker_revocation_commit_persists_revoked_offsets() {
 #[test]
 #[ignore = "requires Docker"]
 fn real_broker_backlog_reports_summable_lag() {
-    use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
-
     const PARTITIONS: i32 = 4;
     const PER_PARTITION: usize = 5_000;
     const CONSUME_PER_LANE: usize = 100;
@@ -224,23 +205,7 @@ fn real_broker_backlog_reports_summable_lag() {
 
     // Explicit multi-partition topic: auto-creation yields a single partition,
     // which would not exercise the aggregate at all.
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("runtime");
-    let admin: AdminClient<_> = support::raw_config()
-        .set("bootstrap.servers", &brokers)
-        .build()
-        .expect("admin client");
-    rt.block_on(admin.create_topics(
-        &[NewTopic::new(TOPIC, PARTITIONS, TopicReplication::Fixed(1))],
-        &AdminOptions::new(),
-    ))
-    .expect("create topics")
-    .into_iter()
-    .for_each(|r| {
-        r.expect("topic created");
-    });
+    support::create_topic(&brokers, TOPIC, PARTITIONS);
 
     produce(&brokers, TOPIC, PER_PARTITION, PARTITIONS, "backlog");
     let produced = PER_PARTITION * PARTITIONS as usize;
@@ -352,28 +317,10 @@ fn real_broker_a_member_that_never_answers_its_offer_is_replaced() {
 #[ignore = "requires Docker"]
 #[expect(clippy::disallowed_methods, reason = "the test joins the thread")]
 fn real_broker_revocation_commits_every_consumers_offsets() {
-    use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
-
     let container = broker().start().expect("start kafka container");
     let port = container.get_host_port_ipv4(KAFKA_PORT).expect("port");
     let brokers = format!("127.0.0.1:{port}");
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("runtime");
-    let admin: AdminClient<_> = support::raw_config()
-        .set("bootstrap.servers", &brokers)
-        .build()
-        .expect("admin client");
-    rt.block_on(admin.create_topics(
-        &[NewTopic::new(TOPIC, 2, TopicReplication::Fixed(1))],
-        &AdminOptions::new(),
-    ))
-    .expect("create topics")
-    .into_iter()
-    .for_each(|r| {
-        r.expect("topic created");
-    });
+    support::create_topic(&brokers, TOPIC, 2);
     produce(&brokers, TOPIC, 25, 2, "both");
 
     let mut cfg = config(&brokers, "rev-each");
@@ -456,17 +403,10 @@ fn real_broker_revocation_commits_every_consumers_offsets() {
         .set("group.id", "rev-each")
         .build()
         .expect("probe");
-    let mut tpl = rdkafka::TopicPartitionList::new();
-    tpl.add_partition(TOPIC, 0);
-    tpl.add_partition(TOPIC, 1);
-    let committed: Vec<_> = probe
-        .committed_offsets(tpl, Duration::from_secs(10))
-        .expect("committed")
-        .elements()
-        .iter()
-        .map(|e| e.offset())
-        .collect();
-    assert_eq!(committed, [rdkafka::Offset::Offset(25); 2]);
+    assert_eq!(
+        support::committed(&probe, TOPIC, 2),
+        [rdkafka::Offset::Offset(25); 2]
+    );
 
     stop.store(true, Ordering::Relaxed);
     joiner.join().expect("joiner thread");

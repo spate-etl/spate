@@ -124,20 +124,8 @@ fn full_lifecycle_polls_acks_and_commits() {
         .set("group.id", "life")
         .build()
         .expect("probe");
-    let mut tpl = rdkafka::TopicPartitionList::new();
-    for p in 0..3 {
-        tpl.add_partition(TOPIC, p);
-    }
-    let committed = probe
-        .committed_offsets(tpl, Duration::from_secs(10))
-        .expect("committed");
-    for elem in committed.elements() {
-        assert_eq!(
-            elem.offset(),
-            rdkafka::Offset::Offset(10),
-            "partition {} committed",
-            elem.partition()
-        );
+    for offset in support::committed(&probe, TOPIC, 3) {
+        assert_eq!(offset, rdkafka::Offset::Offset(10));
     }
 }
 
@@ -1619,22 +1607,7 @@ fn watched_config(brokers: &str, group: &str, consumers: usize) -> KafkaSourceCo
 
 /// Committed offsets of `group` on partitions `0..partitions`.
 fn committed(brokers: &str, group: &str, partitions: i32) -> Vec<rdkafka::Offset> {
-    let probe: BaseConsumer = support::raw_config()
-        .set("bootstrap.servers", brokers)
-        .set("group.id", group)
-        .build()
-        .expect("probe");
-    let mut tpl = rdkafka::TopicPartitionList::new();
-    for p in 0..partitions {
-        tpl.add_partition(TOPIC, p);
-    }
-    probe
-        .committed_offsets(tpl, Duration::from_secs(10))
-        .expect("committed")
-        .elements()
-        .iter()
-        .map(|e| e.offset())
-        .collect()
+    support::committed_by(brokers, group, TOPIC, partitions)
 }
 
 /// Two consumers' assignments reach the runtime as one lane set: every

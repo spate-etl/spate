@@ -4,7 +4,8 @@
 // A per-item `expect` goes unfulfilled in whichever target uses the item.
 #![allow(dead_code, reason = "each target uses a different subset")]
 
-use rdkafka::client::ClientContext;
+use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
+use rdkafka::client::{ClientContext, DefaultClientContext};
 use rdkafka::config::RDKafkaLogLevel;
 use rdkafka::consumer::{BaseConsumer, CommitMode, Consumer, ConsumerContext};
 use rdkafka::message::BorrowedMessage;
@@ -235,6 +236,102 @@ pub(crate) fn produce(
         }
     }
     producer.flush(Duration::from_secs(60)).expect("flush");
+}
+
+/// Produce one record per offset of `offsets` to `partition`, each carrying its
+/// own offset as its payload, and flush. The caller keeps `offsets` to the
+/// partition's next offsets, so a test can name what a sink should have.
+pub(crate) fn produce_to(
+    brokers: &str,
+    topic: &str,
+    partition: i32,
+    offsets: std::ops::Range<i64>,
+) {
+    let producer: BaseProducer = raw_config()
+        .set("bootstrap.servers", brokers)
+        .set("message.timeout.ms", "30000")
+        .build()
+        .expect("producer");
+    for offset in offsets {
+        let payload = format!("{partition}:{offset}");
+        producer
+            .send(
+                BaseRecord::to(topic)
+                    .partition(partition)
+                    .payload(payload.as_bytes())
+                    .key(payload.as_bytes()),
+            )
+            .expect("enqueue");
+    }
+    producer.flush(Duration::from_secs(60)).expect("flush");
+}
+
+/// Create `topic` with `partitions` partitions and one replica.
+pub(crate) fn create_topic(brokers: &str, topic: &str, partitions: i32) {
+    let admin: AdminClient<DefaultClientContext> = raw_config()
+        .set("bootstrap.servers", brokers)
+        .build()
+        .expect("admin client");
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime")
+        .block_on(admin.create_topics(
+            &[NewTopic::new(topic, partitions, TopicReplication::Fixed(1))],
+            &AdminOptions::new(),
+        ))
+        .expect("create topics")
+        .into_iter()
+        .for_each(|r| {
+            r.expect("topic created");
+        });
+}
+
+/// What `probe`'s group has committed on `topic`'s partitions `0..partitions`.
+/// No commit reads as `Offset::Invalid`, apart from a commit of 0.
+pub(crate) fn committed(probe: &BaseConsumer, topic: &str, partitions: i32) -> Vec<Offset> {
+    let mut tpl = TopicPartitionList::new();
+    for p in 0..partitions {
+        tpl.add_partition(topic, p);
+    }
+    probe
+        .committed_offsets(tpl, Duration::from_secs(10))
+        .expect("committed")
+        .elements()
+        .iter()
+        .map(|e| e.offset())
+        .collect()
+}
+
+/// [`committed`] through a probe of its own in `group`.
+pub(crate) fn committed_by(
+    brokers: &str,
+    group: &str,
+    topic: &str,
+    partitions: i32,
+) -> Vec<Offset> {
+    let probe: BaseConsumer = raw_config()
+        .set("bootstrap.servers", brokers)
+        .set("group.id", group)
+        .build()
+        .expect("probe");
+    committed(&probe, topic, partitions)
+}
+
+/// Every offset of `from..upto` is in `written`.
+pub(crate) fn assert_no_gap(
+    partition: i32,
+    from: i64,
+    upto: i64,
+    written: &std::collections::BTreeSet<i64>,
+) {
+    let missing: Vec<i64> = (from..upto).filter(|o| !written.contains(o)).collect();
+    assert!(
+        missing.is_empty(),
+        "partition {partition}: committed {upto} past {} unwritten records, first {:?}",
+        missing.len(),
+        missing.first()
+    );
 }
 
 /// Drive `poll_events` until an assignment arrives. Panics if none does

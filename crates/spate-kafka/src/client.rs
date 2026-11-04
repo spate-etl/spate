@@ -386,9 +386,9 @@ pub(crate) trait Hooks: Send + Sync + 'static {
 
 impl Hooks for () {}
 
-/// The generation id `consumer` last joined its group with, or `-1` when it
-/// holds no group metadata. The call blocks on the client's main thread, as
-/// `assign` does.
+/// The generation id `consumer` holds, or `-1` when it holds none: it has not
+/// joined, the group has told it its generation is gone, or it has no group. The
+/// call blocks on the client's main thread, as `assign` does.
 pub(crate) fn group_generation<C: ConsumerContext>(consumer: &BaseConsumer<C>) -> i32 {
     // SAFETY: the client pointer is valid while `consumer` is borrowed. The
     // metadata is owned here, is checked for NULL before it is read, and is

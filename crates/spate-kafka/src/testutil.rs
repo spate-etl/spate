@@ -95,6 +95,34 @@ pub(crate) fn raise_fatal<C: ClientContext>(client: &Client<C>, code: RespErr, r
     assert_eq!(raised, RespErr::RD_KAFKA_RESP_ERR_NO_ERROR);
 }
 
+/// The offset `group` has committed for each of `partitions` of `topic`, read
+/// by a consumer outside the group's membership.
+pub(crate) fn committed_offsets(
+    brokers: &str,
+    group: &str,
+    topic: &str,
+    partitions: std::ops::Range<i32>,
+) -> Vec<rdkafka::Offset> {
+    use crate::client::testing::{Raw as _, raw_config};
+    use rdkafka::consumer::{BaseConsumer, Consumer as _};
+    let probe: BaseConsumer = raw_config()
+        .set("bootstrap.servers", brokers)
+        .set("group.id", group)
+        .build()
+        .expect("probe");
+    let mut tpl = rdkafka::TopicPartitionList::new();
+    for p in partitions {
+        tpl.add_partition(topic, p);
+    }
+    probe
+        .committed_offsets(tpl, std::time::Duration::from_secs(10))
+        .expect("committed")
+        .elements()
+        .iter()
+        .map(|e| e.offset())
+        .collect()
+}
+
 /// A loopback `host:port` that refuses connections at once.
 ///
 /// The port is bound and released, so the refusal is real. A port nothing has

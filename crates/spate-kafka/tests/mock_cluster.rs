@@ -424,12 +424,10 @@ fn second_member_triggers_revoke_then_fresh_assignment() {
                 expected.sort();
                 assert_eq!(sorted, expected, "all lanes revoked eagerly");
                 assert_eq!(barrier.remaining(), ids.len());
-                let _ = flush_refusal(support::complete_revocation(
-                    &mut source,
-                    &ids,
-                    &barrier,
-                    &[],
-                ));
+                let _ = support::retryable(
+                    "flush",
+                    support::complete_revocation(&mut source, &ids, &barrier, &[]),
+                );
             }
             SourceEvent::LanesAssigned(new_lanes) => {
                 if revoked {
@@ -510,7 +508,10 @@ fn drive_step(
             barrier,
         } => {
             lanes.clear();
-            let _ = flush_refusal(support::complete_revocation(source, &ids, &barrier, &[]));
+            let _ = support::retryable(
+                "flush",
+                support::complete_revocation(source, &ids, &barrier, &[]),
+            );
             Some(0)
         }
         _ => None,
@@ -1402,17 +1403,19 @@ fn a_mid_batch_authorization_failure_fails_the_lane() {
 
 type Lane = <KafkaSource as Source>::Lane;
 
-/// The reason a flush failed retryably, which the runtime logs and carries on
-/// from during a revocation. Any other failure panics.
-fn flush_refusal(flushed: Result<(), SourceError>) -> Option<String> {
-    match flushed {
-        Ok(()) => None,
-        Err(SourceError::Client {
-            class: ErrorClass::Retryable,
-            reason,
-        }) => Some(reason),
-        Err(e) => panic!("flush: {e}"),
-    }
+/// A recorder of the test's own, its handle, and a meter labelling series with
+/// `group`.
+fn recorded_meter(
+    group: &'static str,
+) -> (
+    metrics_exporter_prometheus::PrometheusRecorder,
+    metrics_exporter_prometheus::PrometheusHandle,
+    spate_core::metrics::Meter,
+) {
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    let meter = spate_core::metrics::Meter::with_namespace("kafka", group, "source", "kafka");
+    (recorder, handle, meter)
 }
 
 /// Plays the runtime's part for one source: begins an epoch on each
@@ -1456,9 +1459,7 @@ impl Driver {
     /// own so [`Driver::settle_group`] can read them. `group` labels the
     /// series.
     fn open_watched(source: KafkaSource, group: &'static str) -> Driver {
-        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
-        let handle = recorder.handle();
-        let meter = spate_core::metrics::Meter::with_namespace("kafka", group, "source", "kafka");
+        let (recorder, handle, meter) = recorded_meter(group);
         let mut driver = metrics::with_local_recorder(&recorder, || {
             Driver::open_with(source, |ctx| ctx.with_meter(Some(meter)))
         });
@@ -1468,7 +1469,7 @@ impl Driver {
 
     /// Serve one `poll_events` call.
     fn step(&mut self, timeout: Duration) {
-        match self.source.poll_events(timeout) {
+        match support::retryable("poll_events", self.source.poll_events(timeout)) {
             Ok(SourceEvent::LanesAssigned(new)) => {
                 assert!(
                     self.lanes.is_empty(),
@@ -1491,21 +1492,21 @@ impl Driver {
                 self.lanes.retain(|l| !lanes.contains(&l.id()));
                 self.cp.drain();
                 let watermarks = self.cp.take_watermarks();
-                self.flush_failures
-                    .extend(flush_refusal(support::complete_revocation(
-                        &mut self.source,
-                        &lanes,
-                        &barrier,
-                        &watermarks,
-                    )));
+                self.flush_failures.extend(
+                    support::retryable(
+                        "flush",
+                        support::complete_revocation(
+                            &mut self.source,
+                            &lanes,
+                            &barrier,
+                            &watermarks,
+                        ),
+                    )
+                    .err(),
+                );
                 self.revocations += 1;
             }
-            Ok(_) => {}
-            Err(SourceError::Client {
-                class: ErrorClass::Retryable,
-                ..
-            }) => {}
-            Err(e) => panic!("poll_events: {e}"),
+            Ok(_) | Err(_) => {}
         }
     }
 
@@ -1530,15 +1531,13 @@ impl Driver {
     /// Step until the live lanes cover partitions `0..n`.
     fn settle(&mut self, n: u32, timeout: Duration) {
         let want: Vec<u32> = (0..n).collect();
-        let deadline = Instant::now() + timeout;
-        while self.partitions() != want {
-            assert!(
-                Instant::now() < deadline,
-                "holds {:?} after {timeout:?}, want {want:?}",
-                self.partitions()
-            );
+        wait_until(timeout, "the live lanes to cover every partition", || {
+            if self.partitions() == want {
+                return true;
+            }
             self.step(Duration::from_millis(100));
-        }
+            false
+        });
     }
 
     /// Step until the live lanes cover partitions `0..partitions` and each of
@@ -1569,17 +1568,16 @@ impl Driver {
         timeout: Duration,
     ) -> BTreeMap<u32, std::collections::BTreeSet<i64>> {
         let mut got: BTreeMap<u32, std::collections::BTreeSet<i64>> = BTreeMap::new();
-        let deadline = Instant::now() + timeout;
         let done = |got: &BTreeMap<u32, std::collections::BTreeSet<i64>>, parts: &[u32]| {
-            parts
-                .iter()
-                .all(|p| got.get(p).is_some_and(|o| o.len() as i64 >= n))
+            !parts.is_empty()
+                && parts
+                    .iter()
+                    .all(|p| got.get(p).is_some_and(|o| o.len() as i64 >= n))
         };
-        while !done(&got, &self.partitions()) {
-            assert!(
-                Instant::now() < deadline,
-                "read only {got:?} within {timeout:?}"
-            );
+        wait_until(timeout, "each live lane's offsets", || {
+            if done(&got, &self.partitions()) {
+                return true;
+            }
             self.step(Duration::from_millis(20));
             for lane in &mut self.lanes {
                 let partition = lane.partition().0;
@@ -1591,7 +1589,8 @@ impl Driver {
                     }
                 }
             }
-        }
+            false
+        });
         got
     }
 
@@ -1889,16 +1888,18 @@ fn a_late_consumer_ends_up_sharing_every_partition() {
         let source = KafkaSource::new(cfg).with_clock(Arc::clone(&clock) as _);
         let mut driver = Driver::open_watched(source, "late-share");
         driver.settle_group(2, 4, Duration::from_secs(60));
-        wait_until(Duration::from_secs(30), "the assignment sizes", || {
+        // Both consumers at two partitions and every lane live: a sum of four
+        // also holds while the discarded consumer has not rejoined.
+        wait_until(Duration::from_secs(60), "two partitions each", || {
             driver.step(Duration::from_millis(100));
             let rendered = driver.statistics.as_ref().expect("watched").render();
-            client_values(&rendered, "spate_kafka_group_assignment_size")
-                .iter()
-                .map(|(_, v)| v)
-                .sum::<f64>()
-                == 4.0
+            let sizes = client_values(&rendered, "spate_kafka_group_assignment_size");
+            driver.partitions() == [0, 1, 2, 3]
+                && sizes.len() == 2
+                && sizes.iter().all(|(_, size)| *size == 2.0)
         });
-        driver.read(5, Duration::from_secs(30));
+        let read = driver.read(5, Duration::from_secs(30));
+        assert_eq!(read.len(), 4, "{read:?}");
     });
 }
 
@@ -1925,13 +1926,21 @@ fn a_consumer_joining_after_the_hold_ended_starts_a_new_epoch() {
         let cfg = watched_config(brokers, "hold-ended", 2);
         let source = KafkaSource::new(cfg).with_clock(Arc::clone(&clock) as _);
         let mut driver = Driver::open_watched(source, "hold-ended");
-        // Past the hold and well inside the startup window, in wall time short
-        // of the refused `JoinGroup`'s retry.
-        for _ in 0..10 {
-            clock.advance(Duration::from_millis(500));
-            driver.step(Duration::from_millis(20));
-        }
+        // Past the hold as soon as the first offer arrives, whenever that is.
+        wait_until(
+            Duration::from_secs(30),
+            "the first consumer's lanes",
+            || {
+                clock.advance(Duration::from_millis(500));
+                driver.step(Duration::from_millis(20));
+                !driver.lanes.is_empty()
+            },
+        );
         driver.settle_group(2, 4, Duration::from_secs(60));
+        assert_eq!(
+            driver.revocations, 1,
+            "the second consumer's join drains the first epoch"
+        );
     });
 }
 
@@ -1956,8 +1965,8 @@ fn a_member_that_never_answers_its_offer_is_replaced() {
 
 /// A lost member's failed flush leaves its peer's commit in place, and no
 /// offset past what was read is committed. The partitions read again from at
-/// or before the committed offset, so a record the lost member read and could
-/// not commit is delivered again rather than skipped.
+/// or before the committed offset, so under `earliest` a record the lost member
+/// read and could not commit is not skipped.
 #[test]
 fn a_lost_member_keeps_its_peers_commit_and_loses_no_record() {
     let cluster = MockCluster::new(1).expect("mock cluster");
@@ -2071,14 +2080,9 @@ fn two_consumers_publish_lag_before_committing() {
 
 /// The values of every series of `family` labelled with a `client`.
 fn client_values(rendered: &str, family: &str) -> Vec<(String, f64)> {
-    rendered
-        .lines()
-        .filter(|l| l.starts_with(&format!("{family}{{")))
-        .filter_map(|l| {
-            let client = l.split("client=\"").nth(1)?.split('"').next()?.to_owned();
-            let value = l.rsplit(' ').next()?.parse().ok()?;
-            Some((client, value))
-        })
+    spate_test::metric_series(rendered, family, &[])
+        .into_iter()
+        .filter_map(|s| Some((s.label("client")?.to_owned(), s.value)))
         .collect()
 }
 
@@ -2095,11 +2099,8 @@ fn two_consumers_publish_their_own_statistics() {
     let run = |interval: Duration, group: &'static str| -> String {
         let mut cfg = consumers_config(&brokers, group, 2);
         cfg.statistics_interval = interval;
-        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
-        let handle = recorder.handle();
+        let (recorder, handle, meter) = recorded_meter(group);
         metrics::with_local_recorder(&recorder, || {
-            let meter =
-                spate_core::metrics::Meter::with_namespace("kafka", group, "source", "kafka");
             let mut driver = Driver::open_with(KafkaSource::new(cfg), |ctx| {
                 ctx.with_meter(Some(meter)).with_partition_detail(true)
             });
@@ -2157,15 +2158,11 @@ fn consumer_series_carry_no_passthrough_value() {
     cluster.create_topic(TOPIC, 2, 1).expect("create topic");
     let brokers = cluster.bootstrap_servers();
 
-    let mut cfg = consumers_config(&brokers, "no-secret", 2);
-    cfg.statistics_interval = Duration::from_millis(100);
+    let mut cfg = watched_config(&brokers, "no-secret", 2);
     cfg.rdkafka.insert("client.id".into(), "hunter2".into());
-    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
-    let handle = recorder.handle();
+    let (recorder, handle, meter) = recorded_meter("no-secret");
     let lines = spate_test::capture_logs(tracing::Level::DEBUG, || {
         metrics::with_local_recorder(&recorder, || {
-            let meter =
-                spate_core::metrics::Meter::with_namespace("kafka", "no-secret", "source", "kafka");
             let mut driver =
                 Driver::open_with(KafkaSource::new(cfg), |ctx| ctx.with_meter(Some(meter)));
             driver.settle(2, Duration::from_secs(60));
@@ -2326,10 +2323,10 @@ fn a_partial_refusal_stores_the_owned_offsets() {
     let brokers = cluster.bootstrap_servers();
     produce(&brokers, TOPIC, 10, 4, "r");
 
-    let mut cfg = consumers_config(&brokers, "partial-refusal", 2);
+    let mut cfg = watched_config(&brokers, "partial-refusal", 2);
     cfg.commit_interval = Duration::from_hours(1);
-    let mut driver = Driver::open(cfg);
-    driver.settle(4, Duration::from_secs(60));
+    let mut driver = Driver::open_watched(KafkaSource::new(cfg), "partial-refusal");
+    driver.settle_group(2, 4, Duration::from_secs(60));
     driver.read(10, Duration::from_secs(30));
     driver.cp.drain();
     let mut watermarks = driver.cp.take_watermarks();

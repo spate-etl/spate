@@ -17,6 +17,7 @@ use spate_core::source::{DrainBarrier, LaneId, PayloadBatch, Source, SourceEvent
 use spate_kafka::KafkaSource;
 use spate_test_support::container_image;
 use std::io::{Read as _, Write as _};
+use std::mem::ManuallyDrop;
 use std::net::TcpStream;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -68,15 +69,19 @@ impl ConsumerContext for Recording {
 /// Pins the client and group sequence around a member that holds an offer past
 /// the group's patience. A joins alone and leaves its offer unanswered. B joins
 /// and is offered A's partition, while A's client reports nothing lost. Once A
-/// answers with `answer`, a commit of the partition is refused and its next
-/// heartbeat brings a revocation marked lost, and `unassign` brings a new offer.
+/// answers with `answer`, a revocation marked lost follows, and `unassign` brings
+/// a new offer. [`Answer::Empty`] sends no commit, as a discard does, so A's next
+/// heartbeat brings the revocation. [`Answer::Offer`] commits the partition, the
+/// group refuses that commit, and its refusal brings the revocation.
 pub(crate) fn a_member_that_never_answers_its_offer(
     brokers: &str,
     topic: &str,
     group: &str,
     answer: Answer,
 ) {
-    let member = |answers| -> BaseConsumer<Recording> {
+    // Neither consumer closes, on success or on a panic: closing A while it
+    // holds an unanswered offer waits on an answer that never comes.
+    let member = |answers| -> ManuallyDrop<BaseConsumer<Recording>> {
         let consumer: BaseConsumer<Recording> = raw_config()
             .set("bootstrap.servers", brokers)
             .set("group.id", group)
@@ -91,7 +96,7 @@ pub(crate) fn a_member_that_never_answers_its_offer(
             })
             .expect("consumer");
         consumer.subscribe(&[topic]).expect("subscribe");
-        consumer
+        ManuallyDrop::new(consumer)
     };
     let offers = |c: &BaseConsumer<Recording>| c.context().offers.lock().expect("offers").len();
     let revocations =
@@ -127,12 +132,14 @@ pub(crate) fn a_member_that_never_answers_its_offer(
         Answer::Empty => a.assign(&TopicPartitionList::new()).expect("assign empty"),
         Answer::Offer => a.assign(&offer).expect("assign the offer"),
     }
-    let mut commit = TopicPartitionList::new();
-    commit
-        .add_partition_offset(topic, partition, Offset::Offset(1))
-        .expect("offset");
-    a.commit(&commit, CommitMode::Sync)
-        .expect_err("the group refuses a commit from the member it left");
+    if matches!(answer, Answer::Offer) {
+        let mut commit = TopicPartitionList::new();
+        commit
+            .add_partition_offset(topic, partition, Offset::Offset(1))
+            .expect("offset");
+        a.commit(&commit, CommitMode::Sync)
+            .expect_err("the group refuses a commit from the member it left");
+    }
 
     spate_test::wait_until(
         Duration::from_secs(60),
@@ -149,10 +156,6 @@ pub(crate) fn a_member_that_never_answers_its_offer(
         let _ = b.poll(Duration::from_millis(50));
         offers(&a) >= 2
     });
-    // A last offer is left unanswered, so closing A here would wait on it, and
-    // this pins the protocol up to that offer.
-    std::mem::forget(a);
-    std::mem::forget(b);
 }
 
 /// A client configuration a test builds itself, outside the crate's client
@@ -289,19 +292,26 @@ pub(crate) fn consume<T>(
     out
 }
 
+/// The reason `outcome` failed retryably, which the runtime logs and carries
+/// on from. Panics with `call` on any other failure.
+pub(crate) fn retryable<T>(call: &str, outcome: Result<T, SourceError>) -> Result<T, String> {
+    match outcome {
+        Ok(value) => Ok(value),
+        Err(SourceError::Client {
+            class: ErrorClass::Retryable,
+            reason,
+        }) => Err(reason),
+        Err(e) => panic!("{call}: {e}"),
+    }
+}
+
 /// Serve the source's control plane once. Panics on any event but `Idle` and
 /// on a non-retryable error; retryable errors are appended to `errors`.
 pub(crate) fn serve_events(source: &mut KafkaSource, errors: &mut Vec<String>) {
-    match source.poll_events(Duration::from_millis(50)) {
+    match retryable("poll_events", source.poll_events(Duration::from_millis(50))) {
         Ok(SourceEvent::Idle) => {}
         Ok(other) => panic!("unexpected source event: {other:?}"),
-        Err(
-            e @ SourceError::Client {
-                class: ErrorClass::Retryable,
-                ..
-            },
-        ) => errors.push(e.to_string()),
-        Err(e) => panic!("poll_events: {e}"),
+        Err(reason) => errors.push(reason),
     }
 }
 

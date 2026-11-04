@@ -69,10 +69,33 @@ where
                 )
                 .build()
         })
-        .runtime_options(RuntimeOptions {
-            handle_signals: false,
-            ..options
-        })
+        .runtime_options(without_signals(options))
         .into_runtime(source)
         .expect("build the runtime")
+}
+
+/// `options` with signal handling off, so a signal stays the test process's.
+fn without_signals(options: RuntimeOptions) -> RuntimeOptions {
+    RuntimeOptions {
+        handle_signals: false,
+        ..options
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A test stops its run through the shutdown handle, whatever the options
+    /// it started from say about signals, and the rest of them still apply.
+    #[test]
+    fn only_signal_handling_is_overridden() {
+        let options = without_signals(RuntimeOptions {
+            handle_signals: true,
+            max_records: 7,
+            ..RuntimeOptions::default()
+        });
+        assert!(!options.handle_signals);
+        assert_eq!(options.max_records, 7);
+    }
 }

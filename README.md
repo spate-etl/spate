@@ -148,7 +148,8 @@ probes, drain timeouts, sizing.
 At-least-once. A batch's offsets commit only after every record derived
 from it is durably written (or intentionally dropped by `filter`/`Skip`
 policies). That holds across rebalances, shutdown, and failure, where the
-watermark stalls rather than ever committing past unacknowledged data.
+watermark stalls rather than ever committing past unacknowledged data, apart
+from the exceptions [INV-1](docs/INVARIANTS.md#inv-1) records.
 Duplicates remain possible: in-session retries are idempotent where sinks
 support it (ClickHouse deduplication tokens), but **crash replay re-batches
 with new boundaries and will land rows twice**. Design target tables to

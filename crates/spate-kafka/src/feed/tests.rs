@@ -24,6 +24,7 @@ use super::write::{
 };
 use super::{Core, Gating, KafkaFeed, KafkaFeedError, KafkaFeedPublisher, Ready};
 use crate::client::testing::raw_config;
+use crate::testutil::{assert_returns, returns_within};
 use rdkafka::error::{KafkaError, RDKafkaErrorCode as C};
 use spate_core::clock::SyncClock;
 use spate_core::clock::TestClock;
@@ -1329,17 +1330,6 @@ impl Drop for StopOnDrop {
     }
 }
 
-/// Run `f` on a thread of its own and report whether it returned within
-/// `limit`.
-fn returns_within(limit: Duration, f: impl FnOnce() + Send + 'static) -> bool {
-    let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        f();
-        let _ = tx.send(());
-    });
-    rx.recv_timeout(limit).is_ok()
-}
-
 /// Pins that a gate pass whose every watermark read fails puts back each
 /// delivery in its order, with `admitting` lowered and the feed still
 /// running: a pass over four attempt partitions on an unreachable broker
@@ -1744,7 +1734,7 @@ mod cluster {
     use super::super::startup::{CONNECT_BOUND, Scope};
     use super::super::write::Producer;
     use super::super::{Core, Gating, KafkaFeed, READY_CAPACITY};
-    use super::{TWO, returns_within};
+    use super::{TWO, assert_returns, returns_within};
     use crate::client::testing::{Raw as _, raw_config};
     use crate::context::Intent;
     use crate::feed::FeedRole;
@@ -2053,6 +2043,29 @@ mod cluster {
             Offset::Offset(offset) => Some(offset),
             _ => None,
         }
+    }
+
+    /// Pins that dropping the feed's consumer thread returns with an assignment
+    /// on its queue, and that the callback defers nothing during the close.
+    #[test]
+    fn dropping_a_driver_with_a_queued_assignment_returns() {
+        let cluster = cluster_with(0);
+        let brokers = cluster.bootstrap_servers();
+        let group = spate_test::unique_name("drop-queued-assign");
+        let config =
+            KafkaFeedConfig::from_section(&section_with(&brokers, &group, "    debug: cgrp\n"))
+                .unwrap();
+        let (_, _producer, d) = super::super::parts(&config, TWO, SyncClock::system()).unwrap();
+        crate::testutil::stop_at(&d.consumer, crate::testutil::ASSIGN_STOP);
+        let context = Arc::clone(d.consumer.context());
+        assert_returns(
+            cluster,
+            Duration::from_secs(30),
+            "dropping the consumer thread",
+            move || drop(d),
+        );
+        let intents = context.intents.lock().unwrap();
+        assert!(intents.is_empty(), "the close deferred: {intents:?}");
     }
 
     /// Pins that a panic on the feed's thread while it holds partitions
@@ -2609,11 +2622,12 @@ mod cluster {
             .unwrap();
         units.flush(Duration::from_secs(30)).unwrap();
         wait_until(DEADLINE, "the unit is buffered", || buffered(&feed) == 1);
-        let dropped = returns_within(Duration::from_secs(10), move || drop(feed));
-        if !dropped {
-            std::mem::forget(cluster);
-        }
-        assert!(dropped, "dropping the feed did not return");
+        assert_returns(
+            cluster,
+            Duration::from_secs(10),
+            "dropping the feed",
+            move || drop(feed),
+        );
     }
 
     /// Pins that a gate pass whose follower does not catch up ends once the
@@ -3377,11 +3391,12 @@ mod cluster {
         };
         wait_until(DEADLINE, "the unit is buffered", || buffered(&feed) == 1);
         assert_eq!(core.lock().ready[0].deliveries, 1);
-        let dropped = returns_within(Duration::from_secs(10), move || drop(feed));
-        if !dropped {
-            std::mem::forget(cluster);
-        }
-        assert!(dropped, "dropping the feed did not return");
+        assert_returns(
+            cluster,
+            Duration::from_secs(10),
+            "dropping the feed",
+            move || drop(feed),
+        );
     }
 
     /// Pins that dropping a feed returns while its gate waits for the
@@ -3453,11 +3468,12 @@ mod cluster {
             follower: None,
             depth: None,
         };
-        let dropped = returns_within(Duration::from_secs(10), move || drop(feed));
-        if !dropped {
-            std::mem::forget(cluster);
-        }
-        assert!(dropped, "dropping the feed did not return");
+        assert_returns(
+            cluster,
+            Duration::from_secs(10),
+            "dropping the feed",
+            move || drop(feed),
+        );
     }
 
     /// Pins that dropping a feed returns once its follower thread has
@@ -3485,11 +3501,12 @@ mod cluster {
             follower: Some(follower),
             depth: None,
         };
-        let dropped = returns_within(Duration::from_secs(10), move || drop(feed));
-        if !dropped {
-            std::mem::forget(cluster);
-        }
-        assert!(dropped, "dropping the feed did not return");
+        assert_returns(
+            cluster,
+            Duration::from_secs(10),
+            "dropping the feed",
+            move || drop(feed),
+        );
         assert_eq!(
             Arc::strong_count(&core.ledger),
             1,

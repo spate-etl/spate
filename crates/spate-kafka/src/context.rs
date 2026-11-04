@@ -70,10 +70,10 @@ pub(crate) struct SourceHooks {
     pub(crate) intents: Mutex<VecDeque<Intent>>,
     pub(crate) stats: Mutex<Option<Box<Statistics>>>,
     /// Set when the source is shutting down. From then on the rebalance
-    /// callback completes the protocol inline (`assign`/`unassign`) instead
-    /// of deferring: consumer close triggers a final revoke *inside*
-    /// `BaseConsumer::drop`'s close-poll loop, where no `poll_events` call
-    /// will ever run to complete a deferred intent; deferring there
+    /// callback does not defer: it completes a revocation with `unassign` and
+    /// leaves an assignment to close. Consumer close triggers a final revoke
+    /// *inside* `BaseConsumer::drop`'s close-poll loop, where no `poll_events`
+    /// call will ever run to complete a deferred intent; deferring there
     /// deadlocks the drop forever.
     pub(crate) closing: AtomicBool,
     /// The latest error callback's code and text, per polling thread.
@@ -127,14 +127,15 @@ impl ConsumerHooks for SourceHooks {
         tpl: &mut TopicPartitionList,
     ) {
         if self.closing.load(Ordering::Acquire) {
-            // Teardown: complete the protocol inline so consumer close can
-            // finish. Nothing is consuming any more; the drain/commit
-            // choreography has already run (or been abandoned by policy).
-            let result = match err {
-                RDKafkaRespErr::RD_KAFKA_RESP_ERR__ASSIGN_PARTITIONS => base_consumer.assign(tpl),
-                _ => base_consumer.unassign(),
-            };
-            if let Err(e) = result {
+            // Close leaves the group from an unanswered assignment, and a
+            // blocking `assign` posted as the group terminates can wait forever
+            // on a reply librdkafka never sends.
+            if err == RDKafkaRespErr::RD_KAFKA_RESP_ERR__ASSIGN_PARTITIONS {
+                return;
+            }
+            // Nothing is consuming any more; the drain/commit choreography
+            // has already run (or been abandoned by policy).
+            if let Err(e) = base_consumer.unassign() {
                 tracing::warn!(error = %e, "rebalance completion during close failed");
             }
             return;
@@ -220,15 +221,23 @@ mod tests {
         );
     }
 
-    /// A closing consumer completes an assign and a revoke inside the
-    /// callback and queues no intent, so the close inside
-    /// `BaseConsumer::drop` can finish.
+    /// A closing consumer completes a revoke inside the callback, leaves an
+    /// assign to close, and queues no intent, so the close inside
+    /// `BaseConsumer::drop` can finish. Regression for #1683.
     #[test]
-    fn a_closing_context_completes_rebalances_inline() {
+    fn a_closing_context_completes_a_revocation_and_leaves_an_assignment() {
         let consumer = consumer();
         consumer.context().closing.store(true, Ordering::Release);
         let mut tpl = TopicPartitionList::new();
         tpl.add_partition("orders", 0);
+        consumer.context().rebalance(
+            &consumer,
+            RDKafkaRespErr::RD_KAFKA_RESP_ERR__ASSIGN_PARTITIONS,
+            &mut tpl,
+        );
+        assert_eq!(consumer.assignment().expect("assignment").count(), 0);
+        consumer.assign(&tpl).expect("local assign");
+        // An assign event calls nothing, so it does not release this either.
         consumer.context().rebalance(
             &consumer,
             RDKafkaRespErr::RD_KAFKA_RESP_ERR__ASSIGN_PARTITIONS,

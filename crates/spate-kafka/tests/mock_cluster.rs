@@ -2007,6 +2007,19 @@ fn dropping_the_source_before_its_lanes_completes() {
     });
 }
 
+/// Pins that dropping a source that was never polled returns with a backlog on
+/// its topic, in whatever state its consumers have reached.
+#[test]
+fn dropping_an_unpolled_source_with_a_backlog_returns() {
+    let cluster = MockCluster::new(1).expect("mock cluster");
+    cluster.create_topic(TOPIC, 2, 1).expect("create topic");
+    let brokers = cluster.bootstrap_servers();
+    produce(&brokers, TOPIC, 100, 2, "b");
+
+    let Driver { source, .. } = Driver::open(consumers_config(&brokers, "drop-unpolled", 2));
+    returns_within("dropping an unpolled source", move || drop(source));
+}
+
 /// A commit that carries a watermark for a partition no consumer of the
 /// source owns still stores the offsets of the partitions it does own.
 #[test]

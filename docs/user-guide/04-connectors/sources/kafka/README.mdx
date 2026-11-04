@@ -162,12 +162,16 @@ The framework never uses librdkafka's position-based auto-commit. Instead:
   replay instead of a clean release.
 - The client refuses a commit from a member the group has removed, since another
   member may already own its partitions. The refusal is logged and the
-  revocation continues. A partition with a commit is redelivered from it. A
-  partition the group has never committed starts under `auto.offset.reset`:
-  under `earliest` its records are redelivered, and under `latest`, the default,
-  it starts at its end, so the records the removed member read and could not
-  commit are never written. Set `auto.offset.reset: earliest` where that loss
-  matters.
+  revocation continues. A partition with a commit is redelivered from it.
+- A partition the group has never committed starts under `auto.offset.reset` at
+  every assignment. Under `earliest` its records are redelivered. Under
+  `latest`, the default, it starts at its end each time, and the next commit
+  moves past every record written before that assignment. Those records are
+  never written if an earlier member read them and could not commit, or if they
+  arrived while no member held the partition: during a restart, during a
+  rebalance, or on a partition added to the topic. The exposure lasts until the
+  partition's first commit, which needs a first record and a sink that
+  acknowledges it. Set `auto.offset.reset: earliest` where that loss matters.
 
 A message librdkafka reports as corrupt, as `check.crcs` detects, fails the
 source with a fatal error, because librdkafka can read on past it

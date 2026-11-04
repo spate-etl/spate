@@ -39,6 +39,7 @@ use rustls::pki_types::pem::PemObject;
 use rustls::{AlertDescription, CertificateError, ClientConfig, RootCertStore};
 use rustls_native_certs::CertificateResult;
 use serde::Deserialize;
+use spate_core::backoff::Backoff;
 use spate_core::clock::SyncClock;
 use spate_core::config::redact;
 use spate_core::hash::{QualityMap, QualitySet};
@@ -50,10 +51,9 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 
-/// Per-id backoff bounds applied after a transient registry failure, so
+/// Delay between fetches of an id after a transient registry failure, so
 /// repeated NotReady replays cannot hot-loop the registry.
-const FETCH_BACKOFF_INITIAL: Duration = Duration::from_millis(200);
-const FETCH_BACKOFF_MAX: Duration = Duration::from_secs(5);
+const FETCH_BACKOFF: Backoff = Backoff::new(Duration::from_millis(200), Duration::from_secs(5));
 /// Maximum number of schema ids fetched concurrently. Bounds head-of-line
 /// blocking (a slow id no longer stalls the rest) while keeping registry
 /// load and open-socket count modest.
@@ -444,31 +444,54 @@ enum FetchOutcome {
     Transient,
 }
 
-/// Per-id backoff state kept in the fetcher.
-struct Backoff {
-    delay: Duration,
+/// An id's fetch schedule and the instant its next fetch may start.
+struct IdBackoff {
+    schedule: Backoff,
     next_allowed: Instant,
 }
 
-impl Backoff {
+impl IdBackoff {
     /// The backoff after an id's first transient failure at `now`.
-    fn first(now: Instant) -> Backoff {
-        Backoff {
-            delay: FETCH_BACKOFF_INITIAL,
-            next_allowed: now + FETCH_BACKOFF_INITIAL,
-        }
+    fn first(now: Instant) -> IdBackoff {
+        let mut backoff = IdBackoff {
+            schedule: FETCH_BACKOFF,
+            next_allowed: now,
+        };
+        backoff.grow(now);
+        backoff
     }
 
-    /// Double the delay, up to [`FETCH_BACKOFF_MAX`], after another
-    /// transient failure at `now`.
+    /// Step the schedule after another transient failure at `now`.
     fn grow(&mut self, now: Instant) {
-        self.delay = (self.delay * 2).min(FETCH_BACKOFF_MAX);
-        self.next_allowed = now + self.delay;
+        // A deadline past the `Instant` range admits at once: the overflow
+        // panic would end the fetcher and leave every uncached id NotReady.
+        self.next_allowed = now.checked_add(self.schedule.next_delay()).unwrap_or(now);
     }
 
     /// Whether a fetch requested at `now` may start.
     fn admits(&self, now: Instant) -> bool {
         now >= self.next_allowed
+    }
+}
+
+/// Clear `id`'s backoff on a resolved fetch, or start or step it on a
+/// transient failure stamped with one read of `clock`.
+fn settle(
+    backoff: &mut QualityMap<u32, IdBackoff>,
+    id: u32,
+    outcome: FetchOutcome,
+    clock: &SyncClock,
+) {
+    match outcome {
+        FetchOutcome::Resolved => {
+            backoff.remove(&id);
+        }
+        FetchOutcome::Transient => match backoff.get_mut(&id) {
+            Some(b) => b.grow(clock.now()),
+            None => {
+                backoff.insert(id, IdBackoff::first(clock.now()));
+            }
+        },
     }
 }
 
@@ -489,7 +512,7 @@ pub(crate) fn spawn_fetcher(
         // Ids with a fetch currently running: dedup across the concurrency.
         let mut in_flight: QualitySet<u32> = QualitySet::default();
         // Per-id backoff after transient failures.
-        let mut backoff: QualityMap<u32, Backoff> = QualityMap::default();
+        let mut backoff: QualityMap<u32, IdBackoff> = QualityMap::default();
         let mut tasks: JoinSet<(u32, FetchOutcome)> = JoinSet::new();
         loop {
             tokio::select! {
@@ -513,17 +536,7 @@ pub(crate) fn spawn_fetcher(
                         }
                     };
                     in_flight.remove(&id);
-                    match outcome {
-                        FetchOutcome::Resolved => {
-                            backoff.remove(&id);
-                        }
-                        FetchOutcome::Transient => match backoff.get_mut(&id) {
-                            Some(b) => b.grow(clock.now()),
-                            None => {
-                                backoff.insert(id, Backoff::first(clock.now()));
-                            }
-                        },
-                    }
+                    settle(&mut backoff, id, outcome, &clock);
                 }
                 maybe_id = rx.recv(), if tasks.len() < MAX_CONCURRENT_FETCHES => {
                     let Some(id) = maybe_id else {
@@ -725,6 +738,7 @@ mod tests {
     use http_body_util::Full;
     use hyper::body::Bytes;
     use hyper::server::conn::http1;
+    use spate_core::clock::{Clock, TestClock};
     use spate_test_support::{TestCa, native_certs, pem};
 
     const SCHEMA: &str = r#"{"type":"record","name":"E","fields":[{"name":"id","type":"long"}]}"#;
@@ -741,16 +755,16 @@ mod tests {
     /// failure until it holds at the 5 s cap, each measured from the
     /// failure.
     #[test]
-    fn backoff_doubles_from_200ms_to_the_5s_cap() {
-        let start = Instant::now();
-        let mut backoff = Backoff::first(start);
-        let mut delays = vec![backoff.delay];
-        assert_eq!(backoff.next_allowed, start + FETCH_BACKOFF_INITIAL);
-        for step in 1..=6 {
-            let now = start + Duration::from_secs(step);
+    fn id_backoff_doubles_from_200ms_to_the_5s_cap() {
+        let clock = TestClock::frozen();
+        let start = clock.now();
+        let mut backoff = IdBackoff::first(start);
+        let mut delays = vec![backoff.next_allowed - start];
+        for _ in 1..=6 {
+            clock.advance(Duration::from_secs(1));
+            let now = clock.now();
             backoff.grow(now);
-            assert_eq!(backoff.next_allowed, now + backoff.delay);
-            delays.push(backoff.delay);
+            delays.push(backoff.next_allowed - now);
         }
         assert_eq!(
             delays,
@@ -758,13 +772,51 @@ mod tests {
         );
     }
 
-    /// A backoff refuses a fetch until its clock reaches `next_allowed`,
-    /// and admits one from that instant.
+    /// An id's backoff refuses a fetch until its clock reaches
+    /// `next_allowed`, and admits one from that instant on.
     #[test]
-    fn backoff_admits_exactly_at_next_allowed() {
-        let backoff = Backoff::first(Instant::now());
-        assert!(!backoff.admits(backoff.next_allowed - Duration::from_nanos(1)));
-        assert!(backoff.admits(backoff.next_allowed));
+    fn id_backoff_admits_from_next_allowed() {
+        let backoff = IdBackoff::first(TestClock::frozen().now());
+        let at = backoff.next_allowed;
+        assert!(!backoff.admits(at - Duration::from_nanos(1)));
+        assert!(backoff.admits(at));
+        assert!(backoff.admits(at + Duration::from_secs(1)));
+    }
+
+    /// A resolved fetch clears the id's backoff, so a later transient
+    /// failure waits 200 ms again, not the cap the id had reached.
+    #[test]
+    fn a_resolved_id_backs_off_from_200ms_again() {
+        let clock = TestClock::frozen();
+        let sync = SyncClock::new(clock.clone());
+        let mut backoff = QualityMap::default();
+        for _ in 0..7 {
+            settle(&mut backoff, 15, FetchOutcome::Transient, &sync);
+            clock.advance(Duration::from_secs(1));
+        }
+        settle(&mut backoff, 15, FetchOutcome::Resolved, &sync);
+        clock.advance(Duration::from_secs(1));
+        settle(&mut backoff, 15, FetchOutcome::Transient, &sync);
+        assert_eq!(
+            backoff[&15].next_allowed,
+            clock.now() + Duration::from_millis(200)
+        );
+    }
+
+    /// A transient failure stamped where the delay would pass the end of the
+    /// `Instant` range admits the next fetch at once instead of panicking.
+    #[test]
+    fn a_deadline_past_the_instant_range_admits_at_once() {
+        let mut far = TestClock::frozen().now();
+        let mut step = Duration::MAX;
+        while !step.is_zero() {
+            if let Some(later) = far.checked_add(step) {
+                far = later;
+            } else {
+                step /= 2;
+            }
+        }
+        assert!(IdBackoff::first(far).admits(far));
     }
 
     /// Serves `SCHEMA` as every registry response on `127.0.0.1`, over a

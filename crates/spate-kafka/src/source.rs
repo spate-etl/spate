@@ -2200,7 +2200,9 @@ mod tests {
         #[test]
         fn a_failed_answer_to_a_stale_offer_is_fatal() {
             use crate::client::testing::raw;
-            let mut source = opened_consumers(test_config(), &[&[], &[]]);
+            // `Drop` reads a consumer queue, which the client below does not have.
+            let mut source =
+                std::mem::ManuallyDrop::new(opened_consumers(test_config(), &[&[], &[]]));
             let offers = hold_offers(&mut source, &[(0, &[0], 5), (1, &[0], 6)]);
             // A client with no group refuses `assign`.
             source.members[0].consumer = Arc::new(raw(
@@ -3369,13 +3371,13 @@ mod tests {
             .expect("raw consumer")
     }
 
-    /// A source of two consumers on `brokers` holding two partitions each,
+    /// A source of `consumers` consumers on `brokers` sharing four partitions,
     /// with an offset stored for every partition.
-    fn settled_with_stored_offsets(brokers: &str, group: &str) -> KafkaSource {
+    fn settled_with_stored_offsets(brokers: &str, group: &str, consumers: usize) -> KafkaSource {
         let mut cfg = test_config();
         cfg.brokers = brokers.to_owned();
         cfg.group_id = group.into();
-        cfg.consumers = 2;
+        cfg.consumers = consumers;
         cfg.commit_interval = Duration::from_hours(1);
         cfg.rdkafka = std::collections::BTreeMap::from([
             ("session.timeout.ms".to_string(), "6000".to_string()),
@@ -3393,7 +3395,8 @@ mod tests {
                     barrier.arrive();
                 }
             }
-            source.members.iter().all(|m| m.assignment.len() == 2)
+            let held: usize = source.members.iter().map(|m| m.assignment.len()).sum();
+            held == 4 && source.members.iter().all(|m| !m.assignment.is_empty())
         });
         let watermarks: Vec<(PartitionId, i64)> = (0..4).map(|p| (PartitionId(p), 1)).collect();
         source.commit(&watermarks).expect("store");
@@ -3409,7 +3412,7 @@ mod tests {
         let cluster = MockCluster::new(1).expect("mock cluster");
         cluster.create_topic("orders", 4, 1).expect("create topic");
         let brokers = cluster.bootstrap_servers();
-        let mut source = settled_with_stored_offsets(&brokers, "lost-first");
+        let mut source = settled_with_stored_offsets(&brokers, "lost-first", 2);
 
         cluster.request_errors(
             RDKafkaApiKey::Heartbeat,
@@ -3442,9 +3445,6 @@ mod tests {
                 "peer's partition {p}: {read_back:?}"
             );
         }
-        // Closing with a rebalance queued can hang, and this test is not
-        // about close.
-        std::mem::forget(source);
     }
 
     /// Two consumers failing for different reasons: the call reports the
@@ -3456,7 +3456,7 @@ mod tests {
         let cluster = MockCluster::new(1).expect("mock cluster");
         cluster.create_topic("orders", 4, 1).expect("create topic");
         let brokers = cluster.bootstrap_servers();
-        let mut source = settled_with_stored_offsets(&brokers, "first-failure");
+        let mut source = settled_with_stored_offsets(&brokers, "first-failure", 2);
 
         cluster.request_errors(
             RDKafkaApiKey::Heartbeat,
@@ -3481,7 +3481,32 @@ mod tests {
             }
             other => panic!("expected the lost member's failure, got {other:?}"),
         }
-        std::mem::forget(source);
+    }
+
+    /// With one consumer the failed commit logs no line of its own, since the
+    /// controller's line on the returned error says the same.
+    #[test]
+    fn a_failed_commit_on_one_consumer_logs_no_line_of_its_own() {
+        use rdkafka::mocking::MockCluster;
+        use rdkafka::types::{RDKafkaApiKey, RDKafkaRespErr};
+        let cluster = MockCluster::new(1).expect("mock cluster");
+        cluster.create_topic("orders", 4, 1).expect("create topic");
+        let brokers = cluster.bootstrap_servers();
+        let mut source = settled_with_stored_offsets(&brokers, "refused-one", 1);
+
+        cluster.request_errors(
+            RDKafkaApiKey::OffsetCommit,
+            &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_ILLEGAL_GENERATION],
+        );
+        let mut flushed = None;
+        let warned = spate_test::capture_logs(tracing::Level::WARN, || {
+            flushed = Some(source.flush_commits());
+        });
+        assert!(matches!(flushed, Some(Err(_))), "{flushed:?}");
+        assert!(
+            !warned.iter().any(|l| l.contains("sync commit failed")),
+            "{warned:#?}"
+        );
     }
 
     /// Each consumer whose commit the broker refuses logs its own line.
@@ -3492,7 +3517,7 @@ mod tests {
         let cluster = MockCluster::new(1).expect("mock cluster");
         cluster.create_topic("orders", 4, 1).expect("create topic");
         let brokers = cluster.bootstrap_servers();
-        let mut source = settled_with_stored_offsets(&brokers, "refused-commits");
+        let mut source = settled_with_stored_offsets(&brokers, "refused-commits", 2);
 
         cluster.request_errors(
             RDKafkaApiKey::OffsetCommit,
@@ -3512,19 +3537,18 @@ mod tests {
                 "{field}: {warned:#?}"
             );
         }
-        std::mem::forget(source);
     }
 
-    /// A held consumer the group has removed reads a generation older than
-    /// the group's, and its client does not report the assignment lost.
-    #[test]
-    fn a_member_the_group_left_reads_an_older_generation() {
-        use rdkafka::mocking::MockCluster;
-        let cluster = MockCluster::new(1).expect("mock cluster");
-        cluster.create_topic("orders", 4, 1).expect("create topic");
+    /// A source polled until a consumer holds an offer, that consumer's index,
+    /// and a raw consumer of the same group polled until the group has handed it
+    /// every partition, so the group has left the held member.
+    fn held_while_the_group_moves_on(
+        brokers: &str,
+        group: &str,
+    ) -> (KafkaSource, usize, rdkafka::consumer::BaseConsumer) {
         let mut cfg = test_config();
-        cfg.brokers = cluster.bootstrap_servers();
-        cfg.group_id = "stale-generation".into();
+        cfg.brokers = brokers.to_owned();
+        cfg.group_id = group.into();
         cfg.consumers = 2;
         cfg.rdkafka = std::collections::BTreeMap::from([(
             "session.timeout.ms".to_string(),
@@ -3542,7 +3566,7 @@ mod tests {
                 .position(|m| matches!(m.phase, Phase::Held(_)));
             held.is_some()
         });
-        let raw = raw_group_member(&cluster.bootstrap_servers(), "stale-generation");
+        let raw = raw_group_member(brokers, group);
         raw.subscribe(&["orders"]).expect("subscribe");
         spate_test::wait_until(
             Duration::from_secs(60),
@@ -3552,15 +3576,40 @@ mod tests {
                 raw.assignment().is_ok_and(|a| a.count() == 4)
             },
         );
+        (source, held.expect("held"), raw)
+    }
 
-        let member = &source.members[held.expect("held")];
+    /// Dropping a source whose held consumer the group has removed returns.
+    #[test]
+    fn dropping_with_a_stale_held_offer_returns() {
+        use rdkafka::mocking::MockCluster;
+        let cluster = MockCluster::new(1).expect("mock cluster");
+        cluster.create_topic("orders", 4, 1).expect("create topic");
+        let (source, _, raw) =
+            held_while_the_group_moves_on(&cluster.bootstrap_servers(), "drop-stale");
+        crate::testutil::assert_returns(
+            (cluster, raw),
+            Duration::from_secs(30),
+            "dropping the source with a stale offer held",
+            move || drop(source),
+        );
+    }
+
+    /// A held consumer the group has removed reads a generation older than
+    /// the group's, and its client does not report the assignment lost.
+    #[test]
+    fn a_member_the_group_left_reads_an_older_generation() {
+        use rdkafka::mocking::MockCluster;
+        let cluster = MockCluster::new(1).expect("mock cluster");
+        cluster.create_topic("orders", 4, 1).expect("create topic");
+        let (source, held, raw) =
+            held_while_the_group_moves_on(&cluster.bootstrap_servers(), "stale-generation");
+
+        let member = &source.members[held];
         let generation = member.group_generation();
         assert!(generation >= 0, "a member that joined reads {generation}");
         assert!(generation < crate::client::group_generation(&raw));
         assert!(!member.consumer.assignment_lost());
-        // Closing a source whose peer has a rebalance queued can hang, and
-        // this test is not about close.
-        std::mem::forget(source);
     }
 
     /// Queue a rebalance intent for `poll_events` on consumer 0, as the

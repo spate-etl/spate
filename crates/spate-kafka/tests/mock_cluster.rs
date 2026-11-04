@@ -1916,6 +1916,30 @@ fn dropping_after_a_discard_returns() {
     });
 }
 
+/// Dropping a source in the pass after it discarded an offer returns, with the
+/// discarded consumer's lost revocation still to come. A run whose offers share
+/// one generation accepts them and goes on to a plain drop.
+#[test]
+fn dropping_in_the_pass_after_a_discard_returns() {
+    on_a_cluster_electing_at_once(4, |brokers| {
+        let clock = TestClock::frozen();
+        let cfg = consumers_config(brokers, "drop-pass", 2);
+        let mut source = KafkaSource::new(cfg).with_clock(Arc::clone(&clock) as _);
+        let cp = Checkpointer::new();
+        source.open(SourceCtx::new(cp.handle())).expect("open");
+        wait_until(Duration::from_secs(60), "a discard or an accept", || {
+            let mut event = None;
+            let warned = spate_test::capture_logs(tracing::Level::WARN, || {
+                event = Some(source.poll_events(Duration::from_millis(50)));
+            });
+            warned.iter().any(|l| l.contains("discarded an assignment"))
+                || matches!(event, Some(Ok(SourceEvent::LanesAssigned(_))))
+        });
+        let _ = source.flush_commits();
+        returns_within("dropping in the pass after a discard", move || drop(source));
+    });
+}
+
 /// A consumer joining after the hold ended starts a new epoch: the driver's
 /// assertion that an assignment arrives with no lane live holds throughout,
 /// and both consumers end up in a stable group.

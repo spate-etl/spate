@@ -5224,6 +5224,12 @@ fn first_retry() -> Duration {
     backoff.next_delay()
 }
 
+/// Lets `d` of paused tokio time pass, firing each timer at its own instant.
+async fn pass(d: Duration) {
+    tokio::time::sleep(d).await;
+    settle_tasks().await;
+}
+
 /// The time between consecutive instants, in whole milliseconds.
 fn gaps(at: &Mutex<Vec<Instant>>) -> Vec<u128> {
     at.lock()
@@ -5242,7 +5248,7 @@ async fn a_failing_receive_backs_off_from_200ms_to_5s_and_restarts_after_a_reply
     queue.receive_down.store(true, Ordering::SeqCst);
     assert!(feed.receive(1).unwrap().is_empty());
     settle_tasks().await;
-    step(Duration::from_millis(16_200)).await;
+    pass(Duration::from_millis(16_200)).await;
     assert_eq!(
         gaps(&queue.receives_at),
         [200, 400, 800, 1600, 3200, 5000, 5000]
@@ -5251,14 +5257,14 @@ async fn a_failing_receive_backs_off_from_200ms_to_5s_and_restarts_after_a_reply
     // The next receive long-polls 20 s and answers empty; the receive after
     // it fails, and its retry follows 200 ms later.
     queue.receive_down.store(false, Ordering::SeqCst);
-    step(Duration::from_millis(5_000)).await;
+    pass(Duration::from_millis(5_000)).await;
     queue.receive_down.store(true, Ordering::SeqCst);
-    step(Duration::from_millis(20_200)).await;
+    pass(Duration::from_millis(20_200)).await;
 
     // A reply with a message starts the schedule again too.
     queue.receive_down.store(false, Ordering::SeqCst);
     queue.inner.ready(Message::new("u"));
-    step(Duration::from_millis(400)).await;
+    pass(Duration::from_millis(400)).await;
     until("the message is buffered", || feed.buffered() == 1).await;
     queue.receive_down.store(true, Ordering::SeqCst);
     let taken = loop {
@@ -5270,7 +5276,7 @@ async fn a_failing_receive_backs_off_from_200ms_to_5s_and_restarts_after_a_reply
     assert_eq!(taken.len(), 1);
     assert!(feed.receive(1).unwrap().is_empty());
     settle_tasks().await;
-    step(Duration::from_millis(200)).await;
+    pass(Duration::from_millis(200)).await;
     assert_eq!(
         gaps(&queue.receives_at),
         [
@@ -5287,13 +5293,13 @@ async fn a_failing_publish_backs_off_from_200ms_to_5s_for_each_batch() {
     queue.send_down.store(true, Ordering::SeqCst);
     let mut first = feed.publish(Unit::new("a", "x"));
     settle_tasks().await;
-    step(Duration::from_millis(16_200)).await;
+    pass(Duration::from_millis(16_200)).await;
     assert_eq!(
         gaps(&queue.sends_at),
         [200, 400, 800, 1600, 3200, 5000, 5000]
     );
     queue.send_down.store(false, Ordering::SeqCst);
-    step(Duration::from_millis(5_000)).await;
+    pass(Duration::from_millis(5_000)).await;
     until("the first publish is confirmed", || {
         first.try_outcome().is_some()
     })
@@ -5303,7 +5309,7 @@ async fn a_failing_publish_backs_off_from_200ms_to_5s_for_each_batch() {
     queue.send_down.store(true, Ordering::SeqCst);
     let _second = feed.publish(Unit::new("b", "y"));
     settle_tasks().await;
-    step(Duration::from_millis(200)).await;
+    pass(Duration::from_millis(200)).await;
     assert_eq!(
         gaps(&queue.sends_at),
         [200, 400, 800, 1600, 3200, 5000, 5000, 5000, 0, 200]

@@ -46,6 +46,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # Runs before setup-rust: the cache restore, the image pulls and the nested
+      # build in `tls_system_ca` all write to this disk.
+      - uses: ./.github/actions/free-disk
       - uses: ./.github/actions/setup-rust
         with:
           tools: nextest
@@ -57,6 +60,12 @@ jobs:
       - name: Pull the pinned ClickHouse image
         if: contains(inputs.container-args, 'spate-clickhouse')
         run: cargo xtask container-image --pull clickhouse
+      # The workspace and Docker's data root may share the root device, so the
+      # figures are read together.
+      - name: Disk before the suites (${{ matrix.arch }})
+        run: |
+          df -h / "$GITHUB_WORKSPACE" "$(docker info --format '{{.DockerRootDir}}')"
+          docker system df
       # Serial: RustFS, ElasticMQ, Kafka and ClickHouse in parallel OOM a
       # hosted runner.
       - name: Container suites

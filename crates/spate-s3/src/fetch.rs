@@ -2225,6 +2225,65 @@ mod tests {
         assert_eq!(flaky.get_gaps(), [1, 2, 4, 8, 16, 32, 64]);
     }
 
+    /// Pins that `get_retries_total` counts each GET retried, on a ranged
+    /// read's window and at both retry sites of a streaming read.
+    #[tokio::test(start_paused = true)]
+    async fn each_retried_get_is_counted() {
+        for etag in [true, false] {
+            let flaky = Arc::new(FlakyStore {
+                cut_after: 0,
+                ..FlakyStore::new(seeded(&[("p/a", b"0123456789")]).await)
+            });
+            flaky.fail_gets.store(2, Ordering::Relaxed);
+            flaky.cut_streams.store(1, Ordering::Relaxed);
+            let store: Arc<dyn ObjectStore> = flaky.clone();
+            let mut slice = listed(&store).await;
+            if !etag {
+                slice[0].etag = None;
+            }
+            let retried = Arc::new(AtomicU64::new(0));
+            let (tx, mut rx) = mpsc::channel(DEPTH);
+            let task = tokio::spawn(run_fetcher(FetcherParams {
+                retries: Some(spate_core::metrics::Counter::from_arc(Arc::clone(&retried))),
+                ..fetcher(store, slice, 64, 64, tx)
+            }));
+            let msgs = drain(&mut rx).await;
+            task.await.unwrap();
+            assert_eq!(
+                assembled(&msgs),
+                vec![("p/a".to_string(), b"0123456789".to_vec())],
+                "etag {etag}"
+            );
+            let gets = flaky.gets.load(Ordering::Relaxed);
+            assert_eq!(
+                retried.load(Ordering::Relaxed),
+                u64::from(gets - 1),
+                "etag {etag}"
+            );
+        }
+    }
+
+    /// Pins that a window failing past its budget names its own start in
+    /// the poison reason.
+    #[tokio::test(start_paused = true)]
+    async fn a_window_past_its_budget_names_its_start() {
+        let mut flaky = FlakyStore::new(seeded(&[("p/a", b"0123456789abcdef")]).await);
+        flaky.fail_past = 8;
+        flaky.fail_past_gets = AtomicU32::new(MAX_ATTEMPTS);
+        let store: Arc<dyn ObjectStore> = Arc::new(flaky);
+        let slice = listed(&store).await;
+        let (tx, mut rx) = mpsc::channel(DEPTH);
+        let task = tokio::spawn(run_fetcher(fetcher(store, slice, 2, 8, tx)));
+        let msgs = drain(&mut rx).await;
+        task.await.unwrap();
+        let Some(ChunkMsg::LaneFailed(SplitFailure::Poison(PoisonKind::RetriesExhausted, reason))) =
+            msgs.last()
+        else {
+            panic!("the second window must poison: {:?}", debugged(&msgs));
+        };
+        assert!(reason.contains("at byte 8 after"), "{reason}");
+    }
+
     /// Pins that a lane dropped while a window is read ahead ends the
     /// fetcher and cancels that read.
     #[tokio::test(start_paused = true)]

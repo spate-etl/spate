@@ -1,0 +1,3 @@
+**The ClickHouse sink names the batch key it refuses** (`spate-clickhouse`)
+
+A `sink.clickhouse` section with `batch.max_rows: 0` fails at load with `sink.clickhouse: batch.max_rows must be at least 1`, and one with `batch.max_bytes: 0` fails with `sink.clickhouse: batch.max_bytes must be at least 1`. When both are `0`, the error names `batch.max_rows`. In previous versions both read `sink.clickhouse: batch thresholds must be non-zero`. The values the sink refuses are unchanged, and so are its messages for the `inflight`, `retry` and `breaker` sections. A configuration built in code with an out-of-range `Compression::Zstd` level and a refused `breaker` value reports the `breaker` key, where previous versions reported the zstd level.

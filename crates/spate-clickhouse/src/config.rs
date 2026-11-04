@@ -851,42 +851,20 @@ fn validate(cfg: &ClickHouseSinkConfig) -> Result<(), ConfigError> {
     {
         return fail(format!("database `{db}` is not a valid identifier"));
     }
-    if cfg.batch.max_rows == 0 || cfg.batch.max_bytes == 0 {
-        return fail("batch thresholds must be non-zero".into());
-    }
-    if cfg.inflight.max_per_shard == 0 {
-        return fail("inflight.max_per_shard must be at least 1".into());
-    }
-
-    // Retry policy: a sub-1.0 multiplier asks for a shrinking delay, which the
-    // backoff holds at `max`, and a zero delay is not a backoff at all. The
-    // backoff saturates rather than trusting these bounds, so this catches the
-    // operator's intent at load, not a runtime hazard. The rules live in the
-    // framework so every sink enforces the same ones.
-    if let Err(why) = cfg.retry.validate() {
+    if let Err(why) = cfg.pool().validate() {
         return fail(why.to_string());
     }
 
     // Compression: the string parser already bounds the level, but a
     // programmatic `build()` caller can construct `Zstd(level)` directly, and
     // an out-of-range level is rejected by the server mid-stream (a retryable
-    // code, so an infinite loop). Reject at load, mirroring the retry checks.
+    // code, so an infinite loop). Reject at load.
     if let Compression::Zstd(level) = cfg.compression
         && !(1..=22).contains(&level)
     {
         return fail(format!(
             "compression zstd level must be in [1, 22] (got {level})"
         ));
-    }
-
-    // Circuit breaker: a zero failure threshold opens on the first outcome.
-    // The rest of the breaker rules live in the framework alongside the retry
-    // ones, so every sink enforces the same set.
-    if cfg.breaker.failure_threshold == 0 {
-        return fail("breaker.failure_threshold must be at least 1".into());
-    }
-    if let Err(why) = cfg.breaker.validate() {
-        return fail(why.to_string());
     }
 
     for reserved in [
@@ -1042,6 +1020,7 @@ mod tests {
     use serde::Serialize;
     use spate_core::config::ComponentConfig;
     use spate_core::deser::Owned;
+    use spate_core::sink::{BreakerConfigError, RetryConfigError, SinkPoolConfigError};
 
     fn component(yaml: &str) -> ComponentConfig {
         spate_test::component_config("clickhouse", yaml)
@@ -1307,8 +1286,8 @@ settings: { insert_quorum: "auto" }
     fn validation_rejects_bad_retry_and_breaker() {
         // Every one of these reaches the write loop (or a broken breaker) at
         // runtime rather than failing at load if the rules are dropped. The
-        // rules live in `RetryConfig::validate`; this asserts the ClickHouse
-        // sink still applies them and still reports them under its prefix.
+        // rules live in `SinkPoolConfig::validate`; this asserts the
+        // ClickHouse sink still applies them.
         let base = "table: t\nshards: [{replicas: [\"http://a\"]}]\n";
         let cases = [
             ("retry: { multiplier: 0.5 }", "multiplier"),
@@ -1342,6 +1321,73 @@ settings: { insert_quorum: "auto" }
              breaker: { failure_threshold: 1, open_for: 5s, half_open_probes: 1 }",
         ));
         assert!(sink.is_ok(), "boundary-valid config must build: {sink:?}");
+    }
+
+    /// Each pool section is refused by the framework's rule, with the
+    /// framework's message under the sink's prefix.
+    #[test]
+    fn pool_rules_are_core_rules_under_the_sink_prefix() {
+        let cases = [
+            ("batch: { max_rows: 0 }", SinkPoolConfigError::ZeroMaxRows),
+            ("batch: { max_bytes: 0 }", SinkPoolConfigError::ZeroMaxBytes),
+            (
+                "batch: { max_rows: 0, max_bytes: 0 }",
+                SinkPoolConfigError::ZeroMaxRows,
+            ),
+            (
+                "batch: { max_rows: 0 }\ninflight: { max_per_shard: 0 }",
+                SinkPoolConfigError::ZeroMaxRows,
+            ),
+            (
+                "inflight: { max_per_shard: 0 }",
+                SinkPoolConfigError::ZeroMaxPerShard,
+            ),
+            (
+                "retry: { multiplier: 0.5 }",
+                SinkPoolConfigError::Retry(RetryConfigError::Multiplier(0.5)),
+            ),
+            (
+                "breaker: { failure_threshold: 0 }",
+                SinkPoolConfigError::Breaker(BreakerConfigError::ZeroFailureThreshold),
+            ),
+            (
+                "breaker: { half_open_probes: 0 }",
+                SinkPoolConfigError::Breaker(BreakerConfigError::ZeroHalfOpenProbes),
+            ),
+            (
+                "breaker: { failure_threshold: 0, half_open_probes: 0 }",
+                SinkPoolConfigError::Breaker(BreakerConfigError::ZeroFailureThreshold),
+            ),
+        ];
+        for (extra, want) in cases {
+            let yaml = format!("{MINIMAL}{extra}\n");
+            let Err(ConfigError::Validation(msg)) = from_component_config(&component(&yaml)) else {
+                panic!("`{extra}` must fail validation");
+            };
+            assert_eq!(msg, format!("sink.clickhouse: {want}"), "for `{extra}`");
+        }
+    }
+
+    /// The pool check runs after the `database` check and before the
+    /// reserved-settings check, so a config with two faults reports the
+    /// same one whichever way the pool rules are written.
+    #[test]
+    fn a_pool_refusal_keeps_its_place_in_validate() {
+        let earlier = format!("{MINIMAL}database: \"bad-db\"\nbatch: {{ max_rows: 0 }}\n");
+        let Err(ConfigError::Validation(msg)) = from_component_config(&component(&earlier)) else {
+            panic!("a bad database and a zero batch key must fail validation");
+        };
+        assert!(msg.starts_with("sink.clickhouse: database"), "{msg}");
+
+        let later =
+            format!("{MINIMAL}settings: {{ decompress: \"0\" }}\nbatch: {{ max_rows: 0 }}\n");
+        let Err(ConfigError::Validation(msg)) = from_component_config(&component(&later)) else {
+            panic!("a reserved setting and a zero batch key must fail validation");
+        };
+        assert_eq!(
+            msg,
+            format!("sink.clickhouse: {}", SinkPoolConfigError::ZeroMaxRows)
+        );
     }
 
     /// A configuration written against the three-mode `validate_schema` key
@@ -1476,6 +1522,48 @@ settings: { insert_quorum: "auto" }
         cfg.compression = Compression::Zstd(99);
         let err = build(cfg).unwrap_err();
         assert!(err.to_string().contains("[1, 22]"), "{err}");
+    }
+
+    #[test]
+    fn build_refuses_a_zero_batch_threshold_in_a_programmatic_config() {
+        let mut cfg =
+            ClickHouseSinkConfig::new("t", vec![ShardConfig::new(vec!["http://a".into()])]);
+        cfg.batch.max_bytes = 0;
+        let Err(ConfigError::Validation(msg)) = build(cfg) else {
+            panic!("a zero batch.max_bytes must fail validation");
+        };
+        assert_eq!(
+            msg,
+            format!("sink.clickhouse: {}", SinkPoolConfigError::ZeroMaxBytes)
+        );
+    }
+
+    /// The zstd level check runs after the pool rules: a config built in
+    /// code with a bad level and a refused pool value reports the pool key.
+    #[test]
+    fn a_zstd_level_refusal_keeps_its_place_against_the_pool_rules() {
+        let zstd_99 = || {
+            let mut cfg =
+                ClickHouseSinkConfig::new("t", vec![ShardConfig::new(vec!["http://a".into()])]);
+            cfg.compression = Compression::Zstd(99);
+            cfg
+        };
+
+        let mut cfg = zstd_99();
+        cfg.breaker.failure_threshold = 0;
+        let Err(ConfigError::Validation(msg)) = build(cfg) else {
+            panic!("a bad zstd level and a zero failure threshold must fail validation");
+        };
+        let want = SinkPoolConfigError::Breaker(BreakerConfigError::ZeroFailureThreshold);
+        assert_eq!(msg, format!("sink.clickhouse: {want}"));
+
+        let mut cfg = zstd_99();
+        cfg.retry.multiplier = 0.5;
+        let Err(ConfigError::Validation(msg)) = build(cfg) else {
+            panic!("a bad zstd level and a bad multiplier must fail validation");
+        };
+        let want = SinkPoolConfigError::Retry(RetryConfigError::Multiplier(0.5));
+        assert_eq!(msg, format!("sink.clickhouse: {want}"));
     }
 
     /// `new` and the YAML defaults are two spellings of one config, so a

@@ -2046,7 +2046,7 @@ mod cluster {
     }
 
     /// Pins that dropping the feed's consumer thread returns with an assignment
-    /// on its queue. The closing branch it shares with the source decides this.
+    /// on its queue, and that the callback defers nothing during the close.
     #[test]
     fn dropping_a_driver_with_a_queued_assignment_returns() {
         let cluster = cluster_with(0);
@@ -2064,12 +2064,15 @@ mod cluster {
             .any(|l| l.contains("-> wait-assign-call"))
         });
         d.consumer.assignment().unwrap();
+        let context = Arc::clone(d.consumer.context());
         let dropped = returns_within(Duration::from_secs(30), move || drop(d));
         if !dropped {
             // Its clients are still connected; dropping it would wait on them.
             std::mem::forget(cluster);
         }
         assert!(dropped, "dropping the consumer thread did not return");
+        let intents = context.intents.lock().unwrap();
+        assert!(intents.is_empty(), "the close deferred: {intents:?}");
     }
 
     /// Pins that a panic on the feed's thread while it holds partitions

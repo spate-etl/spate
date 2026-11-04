@@ -2551,8 +2551,14 @@ mod tests {
         const ASSIGN_STOP: &str = "-> wait-assign-call";
         const REVOKE_STOP: &str = "delegating revoke";
         const LOST_STOP: &str = r#"fac="LOST""#;
+        /// The member starts rebalancing. Its `delegating revoke` line and the
+        /// rebalance event follow.
+        const REBALANCE_STOP: &str = r#"fac="REBALANCE""#;
         /// `unassign` ran. A serve that follows it would reach this line.
         const UNASSIGNED: &str = r#"fac="CLEARASSIGN""#;
+        /// The first line after the revocation's callback calls `unassign`. The
+        /// serve's count was read before it, so the serve stops short of it.
+        const UNASSIGN_OP: &str = "received op ASSIGN";
 
         type Mock = MockCluster<'static, DefaultProducerContext>;
         type Member = Arc<BaseConsumer<SourceContext>>;
@@ -2700,7 +2706,7 @@ mod tests {
         }
 
         /// The serve reaches a rebalance behind the log lines ahead of it,
-        /// which one poll does not. Regression for #1683.
+        /// which one poll does not.
         #[test]
         fn serving_a_consumer_reaches_a_rebalance_behind_its_log_lines() {
             let cluster = mock();
@@ -2719,8 +2725,8 @@ mod tests {
             assert_returns(cluster, move || drop(members));
         }
 
-        /// The serve keeps going past an error event and leaves it logged by
-        /// the error hook. Regression for #1683.
+        /// The serve keeps going past an error event, which the error hook
+        /// logs.
         #[test]
         fn dropping_with_an_error_event_queued_returns() {
             let mut cfg = test_config();
@@ -2730,24 +2736,24 @@ mod tests {
                 .insert("reconnect.backoff.max.ms".into(), "60000".into());
             let source = opened_consumers(cfg, &[&[]]);
             let consumer = Arc::clone(&source.members[0].consumer);
+            // A refused connection queues a log line, then two error events.
             wait_until(DEADLINE, "error events queued", || {
-                queued_events(&consumer) >= 2
+                queued_events(&consumer) >= 3
             });
             let lines = capture_logs(Level::WARN, move || drop(source));
-            assert!(
-                lines
-                    .iter()
-                    .any(|l| l.contains("librdkafka") && l.contains("error=")),
-                "no error event was served: {lines:#?}"
-            );
+            let errors = lines
+                .iter()
+                .filter(|l| l.contains("librdkafka") && l.contains("error="))
+                .count();
+            assert_eq!(errors, 2, "the serve stopped at an error event: {lines:#?}");
             assert!(
                 returns_within(CLOSE, move || drop(consumer)),
                 "a consumer's close did not return"
             );
         }
 
-        /// Pins that a queued revocation is completed in the drop's serve and
-        /// that close then returns.
+        /// The drop's serve completes a queued revocation, and close then
+        /// returns.
         #[test]
         fn dropping_with_a_queued_revocation_returns() {
             let cluster = mock();
@@ -2755,12 +2761,16 @@ mod tests {
             let (mut source, members) = open(config(&cluster, group, 1));
             let lanes = live_lanes(&mut source);
             let joiner = joiner(&cluster, group);
-            stop_at(&members[0], REVOKE_STOP);
-            capture_logs(Level::DEBUG, move || {
+            stop_at(&members[0], REBALANCE_STOP);
+            let lines = capture_logs(Level::DEBUG, move || {
                 drop(lanes);
                 drop(source);
             });
             empty_queue(&members[0]);
+            assert!(
+                lines.iter().any(|l| l.contains(REVOKE_STOP)),
+                "the revocation was not served: {lines:#?}"
+            );
             assert_no_intents(&members);
             assert_returns(cluster, move || {
                 drop(members);
@@ -2795,6 +2805,10 @@ mod tests {
             assert!(
                 !lines.iter().any(|l| l.contains(UNASSIGNED)),
                 "a serve ran after unassign: {lines:#?}"
+            );
+            assert!(
+                !lines.iter().any(|l| l.contains(UNASSIGN_OP)),
+                "the serve went past its count: {lines:#?}"
             );
             assert_returns(cluster, move || drop(members));
         }

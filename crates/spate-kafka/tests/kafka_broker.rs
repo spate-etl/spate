@@ -11,15 +11,20 @@ use support::Raw as _;
 
 use rdkafka::consumer::{BaseConsumer, Consumer};
 use spate_core::checkpoint::Checkpointer;
+use spate_core::record::PartitionId;
 use spate_core::source::{Source, SourceCtx, SourceEvent, SourceLane};
 use spate_kafka::{KafkaSource, KafkaSourceConfig};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
-use support::{await_assignment, broker, drain_lane, produce};
+use support::{
+    Transaction, Watched, await_assignment, broker, drain_lane, produce, produce_transaction,
+    transactional_broker,
+};
+use testcontainers::Container;
 use testcontainers::runners::SyncRunner;
-use testcontainers_modules::kafka::apache::KAFKA_PORT;
+use testcontainers_modules::kafka::apache::{KAFKA_PORT, Kafka};
 
 const TOPIC: &str = "orders";
 
@@ -437,4 +442,355 @@ fn real_broker_revocation_commits_every_consumers_offsets() {
 
     stop.store(true, Ordering::Relaxed);
     joiner.join().expect("joiner thread");
+}
+
+/// A broker that takes transactions, and its bootstrap address. The container
+/// stops when the handle drops.
+fn transaction_broker() -> (Container<Kafka>, String) {
+    let container = transactional_broker()
+        .start()
+        .expect("start kafka container");
+    let port = container.get_host_port_ipv4(KAFKA_PORT).expect("port");
+    (container, format!("127.0.0.1:{port}"))
+}
+
+/// [`config`] on `topic`.
+fn topic_config(brokers: &str, topic: &str, group: &str) -> KafkaSourceConfig {
+    let mut cfg = config(brokers, group);
+    cfg.topic = topic.to_owned();
+    cfg
+}
+
+/// The end of partition 0's log. A `read_committed` client reads the last stable
+/// offset here instead, which an open transaction holds below the log's end.
+fn log_end(brokers: &str, topic: &str) -> i64 {
+    let probe: BaseConsumer = support::raw_config()
+        .set("bootstrap.servers", brokers)
+        .set("isolation.level", "read_uncommitted")
+        .build()
+        .expect("probe");
+    probe
+        .fetch_watermarks(topic, 0, Duration::from_secs(10))
+        .expect("watermarks")
+        .1
+}
+
+/// Read `records` from `topic` and commit through `committed`, then read it back
+/// from a second source on the group: lag is 0 and the offset holds both times.
+fn lag_reaches_zero_across_a_restart(
+    brokers: &str,
+    cfg: KafkaSourceConfig,
+    records: usize,
+    committed: i64,
+) {
+    let topic = cfg.topic.clone();
+    let group = cfg.group_id.clone();
+    let mut watched = Watched::open(cfg.clone());
+    assert_eq!(watched.read(0, records).len(), records);
+    watched.poll_until_committed(0, 0, committed);
+    watched.wait_lag(0, 0.0);
+    drop(watched);
+    let offset = rdkafka::Offset::Offset(committed);
+    assert_eq!(support::committed(brokers, &group, &topic, 1), [offset]);
+
+    let mut second = Watched::open(cfg);
+    second.serve();
+    assert_eq!(second.poll(0), None, "nothing to deliver or retire");
+    second.wait_lag(0, 0.0);
+    assert_eq!(support::committed(brokers, &group, &topic, 1), [offset]);
+}
+
+/// A committed transaction's marker reaches the committed offset on a real
+/// broker, and a plain topic on the same broker keeps reading as it did.
+/// Regression for #1709.
+#[test]
+#[ignore = "requires Docker"]
+fn real_broker_lag_reaches_zero_after_a_committed_transaction() {
+    let (_container, brokers) = transaction_broker();
+    produce(&brokers, "plain", 100, 1, "plain");
+    lag_reaches_zero_across_a_restart(
+        &brokers,
+        topic_config(&brokers, "plain", "plain-group"),
+        100,
+        100,
+    );
+
+    let _ = produce_transaction(&brokers, "txn", 100, "only", Transaction::Commit);
+    lag_reaches_zero_across_a_restart(
+        &brokers,
+        topic_config(&brokers, "txn", "txn-group"),
+        100,
+        101,
+    );
+}
+
+/// An aborted transaction's records and marker are passed under
+/// `read_committed`, with nothing delivered for them. Regression for #1709.
+#[test]
+#[ignore = "requires Docker"]
+fn real_broker_lag_reaches_zero_after_an_aborted_transaction() {
+    let (_container, brokers) = transaction_broker();
+    let _ = produce_transaction(&brokers, TOPIC, 100, "kept", Transaction::Commit);
+    let _ = produce_transaction(&brokers, TOPIC, 100, "dropped", Transaction::Abort);
+    lag_reaches_zero_across_a_restart(&brokers, config(&brokers, "aborted"), 100, 202);
+}
+
+/// Under `read_uncommitted` aborted records are delivered, and only the markers
+/// are passed. Regression for #1709.
+#[test]
+#[ignore = "requires Docker"]
+fn real_broker_lag_reaches_zero_reading_uncommitted() {
+    let (_container, brokers) = transaction_broker();
+    let _ = produce_transaction(&brokers, TOPIC, 100, "kept", Transaction::Commit);
+    let _ = produce_transaction(&brokers, TOPIC, 100, "dropped", Transaction::Abort);
+    let mut cfg = config(&brokers, "uncommitted");
+    cfg.rdkafka
+        .insert("isolation.level".into(), "read_uncommitted".into());
+    lag_reaches_zero_across_a_restart(&brokers, cfg, 200, 202);
+}
+
+/// An open transaction holds the readable end at the last stable offset: lag
+/// reads 0 and nothing past it is read until it ends, when everything arrives
+/// with no gap and the offset reaches the log's end. Regression for #1709.
+#[test]
+#[ignore = "requires Docker"]
+fn real_broker_an_open_transaction_holds_lag_at_the_last_stable_offset() {
+    let (_container, brokers) = transaction_broker();
+    produce(&brokers, TOPIC, 100, 1, "plain");
+    let open = produce_transaction(&brokers, TOPIC, 50, "open", Transaction::Open);
+    let _ = produce_transaction(&brokers, TOPIC, 10, "behind", Transaction::Commit);
+
+    let mut watched = Watched::open(config(&brokers, "open"));
+    assert_eq!(watched.read(0, 100), (0..100).collect::<Vec<i64>>());
+    assert_eq!(watched.commit(), [(PartitionId(0), 100)]);
+    watched.wait_lag(0, 0.0);
+    assert!(
+        log_end(&brokers, TOPIC) > 100,
+        "the log runs past the stable offset"
+    );
+    assert_eq!(watched.poll(0), None, "read past the open transaction");
+    assert_eq!(
+        support::committed(&brokers, "open", TOPIC, 1),
+        [rdkafka::Offset::Offset(100)]
+    );
+
+    rdkafka::producer::Producer::commit_transaction(&open, Duration::from_secs(60))
+        .expect("commit");
+    let later = watched.read(0, 60);
+    assert_eq!(later.len(), 60);
+    assert!(later.is_sorted() && later[0] == 100, "{later:?}");
+    let end = log_end(&brokers, TOPIC);
+    watched.poll_until_committed(0, 0, end);
+    watched.wait_lag(0, 0.0);
+}
+
+/// Plain, committed and aborted writes in turn settle at the log's end, and the
+/// watermark never falls. Regression for #1709.
+#[test]
+#[ignore = "requires Docker"]
+fn real_broker_alternating_writes_settle_at_zero() {
+    let (_container, brokers) = transaction_broker();
+    produce(&brokers, TOPIC, 1, 1, "first");
+    let mut watched = Watched::open(config(&brokers, "alternating"));
+    watched.read(0, 1);
+    let mut seen = Vec::new();
+    for round in 0..3 {
+        produce(&brokers, TOPIC, 5, 1, &format!("plain-{round}"));
+        watched.read(0, 5);
+        let tag = format!("kept-{round}");
+        let _ = produce_transaction(&brokers, TOPIC, 5, &tag, Transaction::Commit);
+        watched.read(0, 5);
+        let tag = format!("dropped-{round}");
+        let _ = produce_transaction(&brokers, TOPIC, 5, &tag, Transaction::Abort);
+        let end = log_end(&brokers, TOPIC);
+        seen.extend(watched.poll_until_committed(0, 0, end));
+    }
+    assert!(seen.is_sorted(), "the watermark fell: {seen:?}");
+    watched.wait_lag(0, 0.0);
+    assert_eq!(
+        support::committed(&brokers, "alternating", TOPIC, 1),
+        [rdkafka::Offset::Offset(log_end(&brokers, TOPIC))]
+    );
+}
+
+/// A commit past a tail marker is a position the broker restarts from, under
+/// `latest` too: no reset, and the next record is the first delivered.
+#[test]
+#[ignore = "requires Docker"]
+fn real_broker_a_commit_past_a_marker_restarts_at_the_next_record() {
+    let (_container, brokers) = transaction_broker();
+    let _ = produce_transaction(&brokers, TOPIC, 10, "kept", Transaction::Commit);
+    let mut watched = Watched::open(config(&brokers, "restarts"));
+    watched.read(0, 10);
+    watched.poll_until_committed(0, 0, 11);
+    drop(watched);
+
+    produce(&brokers, TOPIC, 5, 1, "next");
+    let mut cfg = config(&brokers, "restarts");
+    cfg.rdkafka
+        .insert("auto.offset.reset".into(), "latest".into());
+    let mut restarted = Watched::open(cfg);
+    assert_eq!(restarted.read(0, 5), [11, 12, 13, 14, 15]);
+}
+
+/// Under `latest` a group that starts past everything has served no op, so its
+/// position is not set and it commits nothing.
+#[test]
+#[ignore = "requires Docker"]
+fn real_broker_latest_on_a_marker_only_partition_commits_nothing() {
+    let (_container, brokers) = transaction_broker();
+    let _ = produce_transaction(&brokers, TOPIC, 5, "kept", Transaction::Commit);
+    let mut cfg = config(&brokers, "latest");
+    cfg.rdkafka
+        .insert("auto.offset.reset".into(), "latest".into());
+    let mut watched = Watched::open(cfg);
+    for _ in 0..5 {
+        watched.serve();
+        assert_eq!(watched.poll(0), None);
+    }
+    assert!(watched.commit().is_empty());
+    assert_eq!(
+        support::committed(&brokers, "latest", TOPIC, 1),
+        [rdkafka::Offset::Invalid]
+    );
+}
+
+/// Under `earliest` a partition holding only an aborted transaction delivers
+/// nothing, and the offset still passes its marker. Regression for #1709.
+#[test]
+#[ignore = "requires Docker"]
+fn real_broker_earliest_on_an_aborted_only_partition_commits_past_its_marker() {
+    let (_container, brokers) = transaction_broker();
+    let _ = produce_transaction(&brokers, TOPIC, 100, "dropped", Transaction::Abort);
+    let mut watched = Watched::open(config(&brokers, "aborted-only"));
+    assert_eq!(watched.poll_until_committed(0, 0, 101), [101]);
+    watched.wait_lag(0, 0.0);
+}
+
+/// A second member joins a group and stays polling until the guard drops, forcing
+/// a revocation.
+struct Joiner {
+    stop: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Joiner {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "dropping the guard joins the thread"
+    )]
+    fn join_group(brokers: &str, topic: &str, group: &str) -> Joiner {
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread = {
+            let (stop, brokers, topic, group) = (
+                Arc::clone(&stop),
+                brokers.to_owned(),
+                topic.to_owned(),
+                group.to_owned(),
+            );
+            std::thread::spawn(move || {
+                // No auto-commit: this member reads past a marker on its own, and
+                // the tests assert what the source committed.
+                let consumer: BaseConsumer = support::raw_config()
+                    .set("bootstrap.servers", &brokers)
+                    .set("group.id", &group)
+                    .set("enable.auto.commit", "false")
+                    .build()
+                    .expect("joiner");
+                consumer.subscribe(&[topic.as_str()]).expect("subscribe");
+                while !stop.load(Ordering::Relaxed) {
+                    let _ = consumer.poll(Duration::from_millis(100));
+                }
+            })
+        };
+        Joiner {
+            stop,
+            thread: Some(thread),
+        }
+    }
+}
+
+impl Drop for Joiner {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            thread.join().expect("joiner thread");
+        }
+    }
+}
+
+/// Serve `watched` until its revocation arrives, and complete it with whatever
+/// the checkpointer holds.
+fn complete_the_revocation(watched: &mut Watched) {
+    let mut done = false;
+    spate_test::wait_until(Duration::from_secs(120), "the revocation", || {
+        if let SourceEvent::LanesRevoked { lanes, barrier } = watched
+            .source
+            .poll_events(Duration::from_millis(200))
+            .expect("poll_events")
+        {
+            watched.lanes.clear();
+            watched.cp.drain();
+            let watermarks = watched.cp.take_watermarks();
+            support::complete_revocation(&mut watched.source, &lanes, &barrier, &watermarks)
+                .expect("flush");
+            done = true;
+        }
+        done
+    });
+}
+
+/// A revocation ahead of a marker the lane has not served loses nothing: the
+/// offset stops at the last record, and the new owner passes the marker. A marker
+/// served before the revocation reaches the drain's commit. Regression for #1709.
+#[test]
+#[ignore = "requires Docker"]
+fn real_broker_revocation_before_a_marker_loses_nothing() {
+    let (_container, brokers) = transaction_broker();
+    let _ = produce_transaction(&brokers, "unserved", 5, "kept", Transaction::Commit);
+    let cfg = topic_config(&brokers, "unserved", "unserved-group");
+    let mut watched = Watched::open(cfg.clone());
+    // Stops at the fifth record, ahead of the marker: the lane fills a batch only
+    // up to what it is asked for, and a poll that returns a record reads nothing.
+    let mut read = 0;
+    spate_test::wait_until(Duration::from_secs(60), "the records", || {
+        watched.serve();
+        if let Some(mut batch) = watched.lanes[0]
+            .poll(5 - read, Duration::from_millis(200))
+            .expect("lane poll")
+        {
+            while spate_core::source::PayloadBatch::next_payload(&mut batch).is_some() {
+                read += 1;
+            }
+        }
+        read == 5
+    });
+    {
+        let _joiner = Joiner::join_group(&brokers, "unserved", "unserved-group");
+        complete_the_revocation(&mut watched);
+    }
+    assert_eq!(
+        support::committed(&brokers, "unserved-group", "unserved", 1),
+        [rdkafka::Offset::Offset(5)]
+    );
+    drop(watched);
+    let mut owner = Watched::open(cfg);
+    assert_eq!(owner.poll_until_committed(0, 0, 6), [6]);
+    owner.wait_lag(0, 0.0);
+
+    let _ = produce_transaction(&brokers, "served", 5, "kept", Transaction::Commit);
+    let mut watched = Watched::open(topic_config(&brokers, "served", "served-group"));
+    watched.read(0, 5);
+    spate_test::wait_until(Duration::from_secs(60), "the marker's batch", || {
+        watched.serve();
+        watched.poll(0) == Some(vec![])
+    });
+    {
+        let _joiner = Joiner::join_group(&brokers, "served", "served-group");
+        complete_the_revocation(&mut watched);
+    }
+    assert_eq!(
+        support::committed(&brokers, "served-group", "served", 1),
+        [rdkafka::Offset::Offset(6)]
+    );
 }

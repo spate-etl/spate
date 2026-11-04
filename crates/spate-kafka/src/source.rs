@@ -43,7 +43,9 @@
 //!    rebalance
 //!    ([librdkafka#5591](https://github.com/confluentinc/librdkafka/issues/5591));
 //! 3. `pause(tpl)` — a fetch that completed before it is discarded as
-//!    outdated and refetched, so no message leaks onto the main queue;
+//!    outdated and refetched, so no message leaks onto the main queue. It also
+//!    waits for the stop of an earlier assignment on this client, which resets
+//!    the position a lane reads;
 //! 4. `split_partition_queue` per partition (must be redone after *every*
 //!    assign, since assign deactivates existing queues) and build lanes;
 //! 5. `resume(tpl)` — messages start flowing into the split queues, which
@@ -527,12 +529,16 @@ impl KafkaSource {
             let lane_id = LaneId(self.next_lane);
             self.next_lane += 1;
             self.members[k].assignment.insert(lane_id, partition);
+            let mut position = TopicPartitionList::with_capacity(1);
+            position.add_partition(&self.config.topic, partition);
             lanes.push(KafkaLane::new(
                 lane_id,
                 PartitionId(u32::try_from(partition).unwrap_or(0)),
                 queue,
+                Arc::clone(&consumer),
                 Arc::clone(consumer.context()),
                 issuer.clone(),
+                position,
             ));
         }
         consumer
@@ -845,6 +851,9 @@ impl KafkaSource {
                         "message on the main queue; rewinding partition"
                     );
                     let tpl = self.tpl_for([msg.partition()]);
+                    // Ahead of the seek, and however it ends: the popped record
+                    // moved the position, and no lane issued it.
+                    consumer.context().mark_rewound();
                     if let Err(e) = consumer.pause(&tpl) {
                         tracing::error!(error = %e, "pause for main-queue rewind failed");
                     }
@@ -2714,6 +2723,105 @@ mod tests {
                     .any(|l| l.contains("refusing to store") && l.contains("refused=1")),
                 "partition 1's refusal was not warned: {lines:#?}"
             );
+        }
+
+        /// An opened source on a mock cluster holding `records` on partition 0,
+        /// with its first assignment accepted, and the cluster that serves it.
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "a test producer is configured outside the factory's roles"
+        )]
+        fn assigned_on_mock(
+            records: usize,
+        ) -> (
+            rdkafka::mocking::MockCluster<'static, rdkafka::producer::DefaultProducerContext>,
+            KafkaSource,
+            Vec<KafkaLane>,
+        ) {
+            let cluster = rdkafka::mocking::MockCluster::new(1).expect("mock cluster");
+            cluster.create_topic("t", 1, 1).expect("create topic");
+            let producer: rdkafka::producer::BaseProducer = rdkafka::ClientConfig::new()
+                .set("bootstrap.servers", cluster.bootstrap_servers())
+                .create()
+                .expect("producer");
+            for i in 0..records {
+                let payload = i.to_string();
+                producer
+                    .send(
+                        rdkafka::producer::BaseRecord::<(), _>::to("t")
+                            .partition(0)
+                            .payload(payload.as_bytes()),
+                    )
+                    .expect("enqueue");
+            }
+            rdkafka::producer::Producer::flush(&producer, Duration::from_secs(30)).expect("flush");
+
+            let mut cfg = KafkaSourceConfig::new(cluster.bootstrap_servers(), "t", "positions");
+            cfg.startup_timeout = Duration::from_secs(30);
+            cfg.rdkafka = std::collections::BTreeMap::from([
+                ("auto.offset.reset".to_string(), "earliest".to_string()),
+                ("session.timeout.ms".to_string(), "6000".to_string()),
+            ]);
+            let cp = spate_core::checkpoint::Checkpointer::new();
+            let mut source = KafkaSource::new(cfg);
+            source
+                .open(SourceCtx::new(cp.handle()))
+                .expect("open the source");
+            let mut lanes = None;
+            spate_test::wait_until(Duration::from_secs(30), "the assignment", || {
+                if let SourceEvent::LanesAssigned(new) = source
+                    .poll_events(Duration::from_millis(100))
+                    .expect("poll_events")
+                {
+                    lanes = Some(new);
+                }
+                lanes.is_some()
+            });
+            (cluster, source, lanes.expect("assigned"))
+        }
+
+        /// The offset a lane would read for partition 0 of member 0.
+        fn position_of(source: &KafkaSource) -> Offset {
+            let mut list = TopicPartitionList::with_capacity(1);
+            list.add_partition("t", 0);
+            crate::client::read_position(&source.members[0].consumer, &mut list)
+        }
+
+        /// A fresh assignment's position reads `Invalid` until an op is served,
+        /// so an empty return ahead of any read retires nothing.
+        #[test]
+        fn the_position_reads_invalid_before_any_op() {
+            let (_cluster, source, _lanes) = assigned_on_mock(1);
+            assert_eq!(position_of(&source), Offset::Invalid);
+        }
+
+        /// Accepting an assignment leaves no position from the one before it on
+        /// the client, so a new lane cannot retire offsets through a stale
+        /// position. The lane dropped while holding messages closes cleanly.
+        #[test]
+        fn a_reassign_leaves_no_earlier_position() {
+            let (_cluster, mut source, mut lanes) = assigned_on_mock(1);
+            spate_test::wait_until(Duration::from_secs(30), "the record", || {
+                source
+                    .poll_events(Duration::from_millis(10))
+                    .expect("poll_events");
+                lanes[0]
+                    .poll(1, Duration::from_millis(100))
+                    .expect("lane poll")
+                    .is_some()
+            });
+            assert_eq!(position_of(&source), Offset::Offset(1));
+            drop(lanes);
+
+            let tpl = {
+                let mut tpl = TopicPartitionList::new();
+                tpl.add_partition("t", 0);
+                tpl
+            };
+            let until = Instant::now() + Duration::from_secs(30);
+            let lanes = source.accept_assignment(0, &tpl, until).expect("accept");
+            assert_eq!(position_of(&source), Offset::Invalid);
+            drop(lanes);
         }
 
         /// A store that librdkafka refuses for one partition of the list,

@@ -78,7 +78,7 @@ framework families below, labeled with its `component_type`.
 | `spate_source_records_total` | counter | | Records emitted by the source (post-poll, pre-deserialization). |
 | `spate_source_bytes_total` | counter | | Payload bytes emitted. |
 | `spate_source_poll_duration_seconds` | histogram | | Time spent inside `poll` per call. |
-| `spate_source_lag_records` | gauge | `partition` | Consumer lag (log-end offset − committed), **always per partition** — there is no aggregate series. Aggregate in the query layer: `sum` for total backlog (comparable with the broker's group lag), `max` for the worst partition. A partition whose lag the client has not measured yet is **absent**; a partition the member no longer owns reads `0`. |
+| `spate_source_lag_records` | gauge | `partition` | Consumer lag (the end of what the source can read − committed), **always per partition** — there is no aggregate series. Aggregate in the query layer: `sum` for total backlog (comparable with the broker's group lag), `max` for the worst partition. A partition whose lag the client has not measured yet is **absent**; a partition the member no longer owns reads `0`. |
 | `spate_source_rebalances_total` | counter | `event` (`assign`\|`revoke`) | Rebalance events observed. |
 | `spate_source_lanes_active` | gauge | | Currently assigned lanes (partitions). |
 
@@ -107,7 +107,9 @@ count by (pipeline) (spate_source_lag_records)
 Alert on the total, on absence, **and** on the partial-measurement check.
 Rate-of-change matters more than level for a backfill: a large lag that is
 shrinking is a catch-up working as intended, while a small lag that is not
-shrinking is a stalled pipeline.
+shrinking is a stalled pipeline, or a reading the
+[connector's page](user-guide/04-connectors/sources/kafka/README.mdx#transaction-markers)
+describes.
 
 Give the absence and partial-measurement alerts a `for:` window of a minute or
 so. Both are legitimately true at startup. A partition's series appears at
@@ -130,7 +132,8 @@ states are therefore distinguished by value, not by presence:
   double-counting a partition that has moved.
 - **stale** — cannot happen for a partition a member lost, which is what the
   zeroing buys. A frozen non-zero value means the member still owns the
-  partition and librdkafka has stopped measuring it (a leader change, say);
+  partition and librdkafka has stopped measuring it (a leader change, say), or
+  it is a [reading that holds still](user-guide/04-connectors/sources/kafka/README.mdx#transaction-markers);
   the last known value is held deliberately, because dropping it to `0` would
   look like a drain that never happened.
 

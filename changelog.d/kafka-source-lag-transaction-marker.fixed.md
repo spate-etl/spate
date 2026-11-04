@@ -1,0 +1,3 @@
+**The Kafka source commits past transaction markers** (`spate-kafka`)
+
+The Kafka source commits past a transaction marker, and past an aborted transaction under `read_committed`, once every record below it is acknowledged. `spate_source_lag_records` and the broker's group lag read 0 on a caught-up partition written by a transactional producer. In previous versions the committed offset stopped at the last delivered record, so lag stayed above zero on an idle partition and an alert on it fired on a healthy pipeline. No delivered record is skipped. A group switched to `read_uncommitted` afterwards does not deliver the aborted records it has already passed.

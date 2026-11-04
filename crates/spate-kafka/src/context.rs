@@ -76,6 +76,10 @@ pub(crate) struct SourceHooks {
     /// call will ever run to complete a deferred intent; deferring there
     /// deadlocks the drop forever.
     pub(crate) closing: AtomicBool,
+    /// Set when a message reached the main queue and its partition is rewound.
+    /// The offsets past the position then include one a lane has not issued,
+    /// so this client's lanes stop committing past markers for its life.
+    rewound: AtomicBool,
     /// The latest error callback's code and text, per polling thread.
     /// librdkafka runs the callback on the thread whose poll then returns
     /// the same event as an error.
@@ -83,6 +87,16 @@ pub(crate) struct SourceHooks {
 }
 
 impl SourceHooks {
+    /// Latch [`rewound`](Self::rewound).
+    pub(crate) fn mark_rewound(&self) {
+        self.rewound.store(true, Ordering::Release);
+    }
+
+    /// Whether a main-queue message has been rewound on this client.
+    pub(crate) fn rewound(&self) -> bool {
+        self.rewound.load(Ordering::Acquire)
+    }
+
     /// The text of this thread's latest error callback, when its code is
     /// `code`. The entry is removed either way.
     pub(crate) fn take_error(&self, code: RDKafkaErrorCode) -> Option<String> {

@@ -191,6 +191,35 @@ and never reads the corrupt message or the unwritten records before it.
 This is the mechanical heart of at-least-once; see
 [Delivery guarantees](../../../02-concepts/02-delivery-guarantees.mdx).
 
+### Transaction markers
+
+A transaction marker takes an offset and is never delivered. Under `read_committed`,
+the default, an aborted transaction's records are skipped the same way. librdkafka
+moves the consumer's position past them when a partition's queue is polled. When a
+poll finds nothing to deliver and the position is past the last offset the source
+handed out, the source issues an acknowledgement covering those offsets. It reaches
+the checkpointer behind every batch before it, so the committed offset passes a
+marker once every record below it is acknowledged. A caught-up partition reads a lag
+of 0, and the broker's group lag agrees.
+
+A few readings differ:
+
+- A marker counts as lag until the partition's next poll serves it. The figure then
+  settles within `checkpoint.interval`, `commit_interval` and `statistics_interval`
+  together. A partition idle beside a busy one on the same pipeline thread reads its
+  position less often, so its figure settles later.
+- While a producer holds a transaction open, the last stable offset stays below it.
+  Under `read_committed` lag reads 0 and later records stay unread until the
+  transaction ends.
+- A gap with no record and no marker, which compaction can leave, stays in the figure
+  until the next record.
+- After a poll error, the source does not pass a marker until it delivers another
+  record.
+
+A group keeps its committed offset when `isolation.level` changes. A group that
+passed an aborted transaction under `read_committed` does not deliver those records
+under `read_uncommitted`.
+
 ## Changing the consumer count
 
 The count is read at startup, so changing it is a restart, and each restart is a

@@ -10,6 +10,7 @@ use rdkafka::types::{RDKafkaApiKey, RDKafkaRespErr};
 use spate_core::checkpoint::Checkpointer;
 use spate_core::clock::TestClock;
 use spate_core::error::{ErrorClass, SourceError};
+use spate_core::metrics::names;
 use spate_core::record::PartitionId;
 use spate_core::source::{PayloadBatch, Source, SourceCtx, SourceEvent, SourceLane};
 use spate_kafka::{KafkaSource, KafkaSourceConfig};
@@ -19,8 +20,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 use support::{
-    Marker, await_assignment, control_batch, corrupt_batch, drain_lane, produce, produce_batch,
-    serve_events, v1_message, v2_batch,
+    Marker, RawBatch, Watched, await_assignment, control_batch, corrupt_batch, drain_lane, produce,
+    produce_batch, serve_events, v1_message, v2_batch,
 };
 
 const TOPIC: &str = "orders";
@@ -2422,4 +2423,541 @@ fn the_mock_serves_a_control_batch_as_a_marker() {
         );
         assert_eq!(delivered, RECORDS, "{marker:?}");
     }
+}
+
+/// One topic of `partitions` partitions on a mock cluster of its own.
+fn marker_cluster(
+    partitions: i32,
+) -> MockCluster<'static, rdkafka::producer::DefaultProducerContext> {
+    let cluster = MockCluster::new(1).expect("mock cluster");
+    cluster
+        .create_topic(TOPIC, partitions, 1)
+        .expect("create topic");
+    cluster
+}
+
+/// Write `marker` to `partition`.
+fn write_marker(brokers: &str, partition: i32, marker: Marker) {
+    assert_eq!(
+        produce_batch(brokers, TOPIC, partition, &control_batch(marker)),
+        0
+    );
+}
+
+/// A marker at the tail reaches the committed offset once the lane polls past
+/// it, so both lag figures read 0. Regression for #1709.
+#[test]
+fn a_marker_at_the_tail_leaves_no_lag() {
+    for marker in [Marker::Commit, Marker::Abort] {
+        let cluster = marker_cluster(1);
+        let brokers = cluster.bootstrap_servers();
+        produce(&brokers, TOPIC, 5, 1, "before");
+        write_marker(&brokers, 0, marker);
+
+        let group = spate_test::unique_name("tail");
+        let mut watched = Watched::open(config(&brokers, &group));
+        assert_eq!(watched.read(0, 5), [0, 1, 2, 3, 4]);
+        watched.poll_until_committed(0, 0, 6);
+        watched.wait_lag(0, 0.0);
+        let pipeline = watched.pipeline.clone();
+        let mut stored = None;
+        wait_until(ASSIGNMENT, "the stored lag reads 0", || {
+            watched.serve();
+            stored = spate_test::metric_value(
+                &watched.rendered(),
+                "spate_kafka_partition_lag_stored_records",
+                &[("pipeline", &pipeline), ("partition", "0")],
+            );
+            stored == Some(0.0)
+        });
+        assert_eq!(
+            support::committed(&brokers, &group, TOPIC, 1),
+            [rdkafka::Offset::Offset(6)],
+            "{marker:?}"
+        );
+    }
+}
+
+/// A marker that arrives after the last record's commit, on a lane already
+/// idle, moves the committed offset on its own. Regression for #1709.
+#[test]
+fn a_marker_read_after_the_last_commit_leaves_no_lag() {
+    let cluster = marker_cluster(1);
+    let brokers = cluster.bootstrap_servers();
+    produce(&brokers, TOPIC, 3, 1, "before");
+    let mut watched = Watched::open(config(&brokers, &spate_test::unique_name("late")));
+    watched.read(0, 3);
+    watched.poll_until_committed(0, 0, 3);
+    watched.wait_lag(0, 0.0);
+
+    write_marker(&brokers, 0, Marker::Commit);
+    watched.wait_lag(0, 1.0);
+    watched.poll_until_committed(0, 0, 4);
+    watched.wait_lag(0, 0.0);
+}
+
+/// A member restarted past the last record passes a marker with no record to
+/// deliver: the position alone moves its offset. Regression for #1709.
+#[test]
+fn a_restarted_member_past_a_marker_leaves_no_lag() {
+    let cluster = marker_cluster(1);
+    let brokers = cluster.bootstrap_servers();
+    produce(&brokers, TOPIC, 3, 1, "before");
+    write_marker(&brokers, 0, Marker::Commit);
+    let group = spate_test::unique_name("restart");
+    commit_as(&brokers, &group, 3);
+
+    let mut watched = Watched::open(config(&brokers, &group));
+    watched.wait_lag(0, 1.0);
+    assert_eq!(watched.poll_until_committed(0, 0, 4), [4]);
+    watched.wait_lag(0, 0.0);
+}
+
+/// Consecutive markers are passed together or in turn, and the offset ends past
+/// them all. Regression for #1709.
+#[test]
+fn consecutive_markers_leave_no_lag() {
+    let cluster = marker_cluster(1);
+    let brokers = cluster.bootstrap_servers();
+    produce(&brokers, TOPIC, 3, 1, "before");
+    write_marker(&brokers, 0, Marker::Commit);
+    write_marker(&brokers, 0, Marker::Abort);
+    let mut watched = Watched::open(config(&brokers, &spate_test::unique_name("two")));
+    watched.read(0, 3);
+    watched.poll_until_committed(0, 0, 5);
+    watched.wait_lag(0, 0.0);
+}
+
+/// A commit past a marker loses nothing and repeats nothing: records behind a
+/// marker are delivered around its offset, watermarks only rise, and a second
+/// source on the group delivers nothing new. Regression for #1709.
+#[test]
+fn records_after_a_marker_are_delivered_and_committed() {
+    let cluster = marker_cluster(1);
+    let brokers = cluster.bootstrap_servers();
+    produce(&brokers, TOPIC, 3, 1, "first");
+    write_marker(&brokers, 0, Marker::Commit);
+    produce(&brokers, TOPIC, 2, 1, "second");
+    write_marker(&brokers, 0, Marker::Commit);
+
+    let group = spate_test::unique_name("around");
+    let mut watched = Watched::open(config(&brokers, &group));
+    assert_eq!(watched.read(0, 5), [0, 1, 2, 4, 5]);
+    let seen = watched.poll_until_committed(0, 0, 7);
+    assert!(seen.is_sorted(), "watermarks fell: {seen:?}");
+    drop(watched);
+
+    let mut second = Watched::open(config(&brokers, &group));
+    second.wait_lag(0, 0.0);
+    for _ in 0..3 {
+        second.serve();
+        assert_eq!(second.poll(0).unwrap_or_default(), Vec::<i64>::new());
+    }
+    assert!(second.commit().is_empty(), "nothing new to commit");
+}
+
+/// A marker is retired once: further empty returns issue nothing. Regression
+/// for #1709.
+#[test]
+fn a_marker_advances_once() {
+    let cluster = marker_cluster(1);
+    let brokers = cluster.bootstrap_servers();
+    produce(&brokers, TOPIC, 2, 1, "before");
+    write_marker(&brokers, 0, Marker::Commit);
+    let mut watched = Watched::open(config(&brokers, &spate_test::unique_name("once")));
+    watched.read(0, 2);
+    watched.poll_until_committed(0, 0, 3);
+    for _ in 0..2 {
+        assert_eq!(watched.poll(0), None);
+        assert!(watched.commit().is_empty());
+    }
+    assert_eq!(watched.cp.pending(PartitionId(0)), 0);
+}
+
+/// An idle lane on a plain topic has nothing to retire, so it issues no ack.
+#[test]
+fn an_idle_plain_lane_issues_no_ack() {
+    let cluster = marker_cluster(1);
+    let brokers = cluster.bootstrap_servers();
+    produce(&brokers, TOPIC, 2, 1, "before");
+    let mut watched = Watched::open(config(&brokers, &spate_test::unique_name("plain")));
+    watched.read(0, 2);
+    assert_eq!(watched.commit(), [(PartitionId(0), 2)]);
+    for _ in 0..3 {
+        assert_eq!(watched.poll(0), None);
+        assert!(watched.commit().is_empty());
+    }
+    assert_eq!(watched.cp.pending(PartitionId(0)), 0);
+}
+
+/// Poll `watched`'s lane past the marker behind one record, holding the
+/// record's ack, and return the clone.
+fn hold_a_record_past_its_marker(watched: &mut Watched) -> spate_core::checkpoint::AckRef {
+    let mut held = None;
+    wait_until(ASSIGNMENT, "the record", || {
+        watched.serve();
+        if let Some(batch) = watched.lanes[0]
+            .poll(1, Duration::from_millis(100))
+            .expect("lane poll")
+        {
+            held = Some(batch.ack().clone());
+        }
+        held.is_some()
+    });
+    wait_until(ASSIGNMENT, "the marker's batch", || {
+        watched.serve();
+        watched.poll(0) == Some(vec![])
+    });
+    held.expect("held")
+}
+
+/// An ack outstanding past its batch holds the marker's offset back, and
+/// resolving it releases both. Regression for #1709.
+#[test]
+fn an_acknowledgement_held_past_its_batch_holds_the_marker_back() {
+    let cluster = marker_cluster(1);
+    let brokers = cluster.bootstrap_servers();
+    produce(&brokers, TOPIC, 1, 1, "before");
+    write_marker(&brokers, 0, Marker::Commit);
+    let group = spate_test::unique_name("held");
+    let mut watched = Watched::open(config(&brokers, &group));
+    let ack = hold_a_record_past_its_marker(&mut watched);
+
+    assert!(watched.commit().is_empty(), "a watermark passed a live ack");
+    assert_eq!(
+        support::committed(&brokers, &group, TOPIC, 1),
+        [rdkafka::Offset::Invalid]
+    );
+    drop(ack);
+    assert_eq!(watched.commit(), [(PartitionId(0), 2)]);
+}
+
+/// A failed batch ahead of a marker holds the committed offset where it is, and
+/// the partition keeps reading its lag.
+#[test]
+fn a_failed_batch_before_a_marker_holds_the_commit() {
+    let cluster = marker_cluster(1);
+    let brokers = cluster.bootstrap_servers();
+    produce(&brokers, TOPIC, 1, 1, "first");
+    let group = spate_test::unique_name("failed");
+    let mut watched = Watched::open(config(&brokers, &group));
+    watched.read(0, 1);
+    assert_eq!(watched.commit(), [(PartitionId(0), 1)]);
+
+    produce(&brokers, TOPIC, 1, 1, "second");
+    write_marker(&brokers, 0, Marker::Commit);
+    hold_a_record_past_its_marker(&mut watched).fail();
+    assert!(watched.commit().is_empty(), "a watermark passed a failure");
+    watched.wait_lag(0, 2.0);
+    assert_eq!(
+        support::committed(&brokers, &group, TOPIC, 1),
+        [rdkafka::Offset::Offset(1)]
+    );
+}
+
+/// Each partition passes its own marker, whatever another partition holds.
+/// Regression for #1709.
+#[test]
+fn each_partition_advances_past_its_own_marker() {
+    let cluster = marker_cluster(2);
+    let brokers = cluster.bootstrap_servers();
+    produce(&brokers, TOPIC, 1, 2, "before");
+    write_marker(&brokers, 0, Marker::Commit);
+    write_marker(&brokers, 1, Marker::Commit);
+    let group = spate_test::unique_name("each");
+    let mut watched = Watched::open(config(&brokers, &group));
+    let index_of = |watched: &Watched, p: u32| {
+        watched
+            .lanes
+            .iter()
+            .position(|l| l.partition() == PartitionId(p))
+            .expect("lane")
+    };
+    let (zero, one) = (index_of(&watched, 0), index_of(&watched, 1));
+
+    let mut held = None;
+    wait_until(ASSIGNMENT, "partition 1's record", || {
+        watched.serve();
+        if let Some(batch) = watched.lanes[one]
+            .poll(1, Duration::from_millis(100))
+            .expect("lane poll")
+        {
+            held = Some(batch.ack().clone());
+        }
+        held.is_some()
+    });
+    watched.read(zero, 1);
+    watched.poll_until_committed(zero, 0, 2);
+    watched.wait_lag(0, 0.0);
+    assert_eq!(
+        support::committed(&brokers, &group, TOPIC, 2),
+        [rdkafka::Offset::Offset(2), rdkafka::Offset::Invalid]
+    );
+}
+
+/// Under two consumers each lane passes its own marker and the watermark reaches
+/// the member that owns the partition. Regression for #1709.
+#[test]
+fn two_consumers_each_advance_past_their_own_marker() {
+    let cluster = marker_cluster(2);
+    let brokers = cluster.bootstrap_servers();
+    produce(&brokers, TOPIC, 1, 2, "before");
+    write_marker(&brokers, 0, Marker::Commit);
+    write_marker(&brokers, 1, Marker::Commit);
+    let group = spate_test::unique_name("two-consumers");
+    let leaked: &'static str = Box::leak(group.clone().into_boxed_str());
+    let mut driver = Driver::open_watched(
+        KafkaSource::new(watched_config(&brokers, &group, 2)),
+        leaked,
+    );
+    driver.settle_group(2, 2, ASSIGNMENT);
+    driver.read(1, ASSIGNMENT);
+
+    wait_until(ASSIGNMENT, "both partitions pass their marker", || {
+        driver.step(Duration::from_millis(50));
+        for lane in &mut driver.lanes {
+            let _ = lane.poll(64, Duration::from_millis(50)).expect("lane poll");
+        }
+        driver.cp.drain();
+        let watermarks = driver.cp.take_watermarks();
+        if !watermarks.is_empty() {
+            driver.source.commit(&watermarks).expect("store");
+            driver.source.flush_commits().expect("flush");
+        }
+        support::committed(&brokers, &group, TOPIC, 2) == [rdkafka::Offset::Offset(2); 2]
+    });
+}
+
+/// A gap with no record and no marker leaves no position change, so it stays in
+/// the figure: the reading the connector page documents.
+#[test]
+fn lag_stays_above_zero_over_a_compacted_gap() {
+    let cluster = marker_cluster(1);
+    let brokers = cluster.bootstrap_servers();
+    let batch = RawBatch {
+        last_offset_delta: 1,
+        record_count: 2,
+        value: b"kept",
+        ..RawBatch::default()
+    };
+    assert_eq!(produce_batch(&brokers, TOPIC, 0, &batch.encode()), 0);
+    let mut watched = Watched::open(config(&brokers, &spate_test::unique_name("gap")));
+    assert_eq!(watched.read(0, 1), [0]);
+    assert_eq!(watched.commit(), [(PartitionId(0), 1)]);
+    watched.wait_lag(0, 1.0);
+    assert_eq!(watched.poll(0), None);
+    assert!(watched.commit().is_empty());
+}
+
+/// A member whose position equals its committed offset has nothing stored, and
+/// its flush still succeeds.
+#[test]
+fn a_flush_with_nothing_stored_succeeds() {
+    let cluster = marker_cluster(1);
+    let brokers = cluster.bootstrap_servers();
+    produce(&brokers, TOPIC, 2, 1, "before");
+    let group = spate_test::unique_name("nothing-stored");
+    commit_as(&brokers, &group, 2);
+    let mut watched = Watched::open(config(&brokers, &group));
+    assert_eq!(watched.poll(0), None);
+    assert!(watched.commit().is_empty());
+    watched.source.flush_commits().expect("flush");
+    assert_eq!(
+        support::committed(&brokers, &group, TOPIC, 1),
+        [rdkafka::Offset::Offset(2)]
+    );
+}
+
+/// A pipeline over the Kafka source on `brokers`, capturing to a sink, publishing
+/// its metrics under a name of its own. Returns the name, the exposition, the
+/// sink's script, the shutdown handle and the running pipeline.
+fn run_marker_pipeline(
+    brokers: &str,
+    group: &str,
+    threads: usize,
+    checkpoint: &str,
+    pre: impl FnOnce(&spate_test::SinkScript),
+) -> (
+    String,
+    spate_core::metrics::MetricsHandle,
+    spate_test::SinkScript,
+    spate_core::pipeline::ShutdownHandle,
+    spate_test::PipelineRun,
+) {
+    let name = spate_test::unique_name("marker-pipeline");
+    let yaml = format!(
+        "pipeline: {{ name: {name}, threads: {threads} }}\nadmin: {{ listen: none }}\n\
+         checkpoint: {checkpoint}\nmetrics: {{ exporter: prometheus, per_partition_detail: true }}\n\
+         source: {{ memory: {{}} }}\nsink: {{ capture: {{ chunk: {{ target_bytes: 64 }} }} }}\n"
+    );
+    let config = spate_core::config::PipelineConfig::from_str(&yaml).expect("config");
+    let handle = spate_core::metrics::install(&spate_core::metrics::MetricsSettings {
+        exporter: spate_core::metrics::Exporter::Prometheus,
+        per_partition_detail: true,
+        e2e_basis: spate_core::metrics::E2eBasis::Ingest,
+    })
+    .expect("install the exporter");
+    let mut cfg = self::config(brokers, group);
+    cfg.statistics_interval = Duration::from_millis(100);
+    let (sink, script) = spate_test::capture_sink(1, 1);
+    pre(&script);
+    let runtime = spate_test::passthrough_runtime(
+        spate_core::pipeline::Pipeline::from_config(config).expect("pipeline"),
+        KafkaSource::new(cfg),
+        sink,
+        spate_test::TestEncoder,
+        spate_core::pipeline::RuntimeOptions::default(),
+    );
+    let shutdown = runtime.shutdown_handle();
+    let run = spate_test::PipelineRun::spawn(move || runtime.run());
+    (name, handle, script, shutdown, run)
+}
+
+/// Through the public pipeline, a topic ending on a marker reaches lag 0, the
+/// broker holds the offset past it, and the run's last watermark agrees.
+/// Regression for #1709.
+#[test]
+fn a_pipeline_reaches_zero_lag_past_a_marker() {
+    let cluster = marker_cluster(1);
+    let brokers = cluster.bootstrap_servers();
+    produce(&brokers, TOPIC, 5, 1, "before");
+    write_marker(&brokers, 0, Marker::Commit);
+    let group = spate_test::unique_name("pipeline");
+    let (name, handle, script, shutdown, run) =
+        run_marker_pipeline(&brokers, &group, 1, "{ interval: 100ms }", |_| {});
+
+    wait_until(Duration::from_secs(60), "the lag reaches 0", || {
+        support::lag_of(&handle.render(), &name, 0) == Some(0.0)
+    });
+    assert_eq!(
+        support::committed(&brokers, &group, TOPIC, 1),
+        [rdkafka::Offset::Offset(6)]
+    );
+    shutdown.trigger();
+    let report = run
+        .wait_exit(Duration::from_secs(30))
+        .expect("the pipeline exits")
+        .expect("run");
+    assert_eq!(report.final_watermarks, [(PartitionId(0), 6)]);
+    let rows: usize = script
+        .writes()
+        .iter()
+        .map(|w| spate_test::decode_rows(&w.payload).len())
+        .sum();
+    assert_eq!(rows, 5, "each record reached the sink once");
+}
+
+/// A partition idle beside a busy one on the same thread sees only zero-timeout
+/// polls, and still passes its marker. Regression for #1709.
+#[test]
+#[expect(clippy::disallowed_methods, reason = "the test joins the thread")]
+fn an_idle_partition_beside_a_busy_one_reaches_zero_lag() {
+    let cluster = marker_cluster(2);
+    let brokers = cluster.bootstrap_servers();
+    produce(&brokers, TOPIC, 2, 2, "before");
+    write_marker(&brokers, 0, Marker::Commit);
+    let stop = Arc::new(AtomicBool::new(false));
+    let feeding = {
+        let stop = Arc::clone(&stop);
+        let brokers = brokers.clone();
+        std::thread::spawn(move || {
+            let producer: rdkafka::producer::BaseProducer = support::raw_config()
+                .set("bootstrap.servers", &brokers)
+                .build()
+                .expect("producer");
+            while !stop.load(Ordering::Relaxed) {
+                producer
+                    .send(
+                        rdkafka::producer::BaseRecord::<(), _>::to(TOPIC)
+                            .partition(1)
+                            .payload(&b"busy"[..]),
+                    )
+                    .expect("enqueue");
+                producer.poll(Duration::from_millis(1));
+            }
+        })
+    };
+    let group = spate_test::unique_name("beside");
+    let (name, handle, _script, shutdown, run) =
+        run_marker_pipeline(&brokers, &group, 1, "{ interval: 100ms }", |_| {});
+
+    wait_until(
+        Duration::from_secs(60),
+        "the idle partition's lag reaches 0",
+        || support::lag_of(&handle.render(), &name, 0) == Some(0.0),
+    );
+    stop.store(true, Ordering::Relaxed);
+    feeding.join().expect("feeding thread");
+    shutdown.trigger();
+    run.wait_exit(Duration::from_secs(30))
+        .expect("the pipeline exits")
+        .expect("run");
+}
+
+/// Offsets a lane retires count against the pending ceiling: behind a head batch
+/// that has not resolved, the lane stops polling at the ceiling and later markers
+/// stay in its fetch queue, until the head resolves.
+#[test]
+fn aborted_transactions_behind_a_stalled_head_stay_under_the_pending_ceiling() {
+    const CEILING: f64 = 2.0;
+    const LATER_MARKERS: f64 = 5.0;
+    let cluster = marker_cluster(1);
+    let brokers = cluster.bootstrap_servers();
+    produce(&brokers, TOPIC, 1, 1, "head");
+    write_marker(&brokers, 0, Marker::Abort);
+    let group = spate_test::unique_name("ceiling");
+    let (name, handle, script, shutdown, run) = run_marker_pipeline(
+        &brokers,
+        &group,
+        1,
+        "{ interval: 100ms, max_pending_batches: 2 }",
+        |script| {
+            let mut held = spate_test::WriteOutcome::ok();
+            held.hold = true;
+            script.enqueue_global(held);
+        },
+    );
+
+    let pending = || {
+        spate_test::metric_value(
+            &handle.render(),
+            names::CHECKPOINT_PENDING_BATCHES,
+            &[("pipeline", name.as_str()), ("partition", "0")],
+        )
+    };
+    wait_until(Duration::from_secs(60), "the gate closes", || {
+        pending() == Some(CEILING)
+    });
+    for _ in 0..LATER_MARKERS as usize {
+        write_marker(&brokers, 0, Marker::Abort);
+    }
+    wait_until(
+        Duration::from_secs(60),
+        "the later markers stay queued",
+        || {
+            spate_test::metric_value(
+                &handle.render(),
+                "spate_kafka_source_partition_fetch_queue_messages",
+                &[("pipeline", name.as_str()), ("partition", "0")],
+            )
+            .is_some_and(|queued| queued >= LATER_MARKERS)
+        },
+    );
+    assert_eq!(pending(), Some(CEILING));
+
+    // Releasing frees only a write already held, and the head's chunk seals on
+    // its own schedule.
+    wait_until(Duration::from_secs(60), "the head's write is held", || {
+        script.held_writes() == 1
+    });
+    script.release_held();
+    wait_until(
+        Duration::from_secs(60),
+        "the head and the markers commit",
+        || support::committed(&brokers, &group, TOPIC, 1) == [rdkafka::Offset::Offset(7)],
+    );
+    shutdown.trigger();
+    run.wait_exit(Duration::from_secs(30))
+        .expect("the pipeline exits")
+        .expect("run");
 }

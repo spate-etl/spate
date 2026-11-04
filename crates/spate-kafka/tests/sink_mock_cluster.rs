@@ -700,3 +700,87 @@ fn missing_reports_fail_the_batch_at_the_wait_deadline() {
     );
     cluster.broker_up(1).expect("broker up");
 }
+
+/// A test clock that records the runtime's own instant at each read and
+/// reads past every deadline once `limit` reads have been taken.
+#[derive(Debug)]
+struct ReadTimes {
+    inner: Arc<IoTestClock>,
+    at: std::sync::Mutex<Vec<tokio::time::Instant>>,
+    limit: usize,
+}
+
+impl ReadTimes {
+    fn count(&self) -> usize {
+        self.at.lock().expect("read times").len()
+    }
+}
+
+impl IoClock for ReadTimes {
+    fn now(&self) -> tokio::time::Instant {
+        let mut at = self.at.lock().expect("read times");
+        at.push(tokio::time::Instant::now());
+        if at.len() > self.limit {
+            return self.inner.now() + Duration::from_secs(86_400);
+        }
+        self.inner.now()
+    }
+
+    fn sleep_until(&self, deadline: tokio::time::Instant) -> Sleep {
+        self.inner.sleep_until(deadline)
+    }
+}
+
+/// Pins the queue-full schedule on the runtime's paused clock: a message the
+/// full queue turns back waits 10 ms, doubling to 250 ms, and the next
+/// message starts again from 10 ms.
+#[test]
+fn a_full_queue_backs_off_from_10ms_to_250ms_for_each_message() {
+    let cluster = MockCluster::new(1).expect("mock cluster");
+    cluster.create_topic(TOPIC, 1, 1).expect("create topic");
+    let brokers = cluster.bootstrap_servers();
+    let io = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .start_paused(true)
+        .build()
+        .expect("runtime");
+    let clock = Arc::new(ReadTimes {
+        inner: io.block_on(async { IoTestClock::frozen() }),
+        at: std::sync::Mutex::new(Vec::new()),
+        limit: 1_000_000,
+    });
+    // A message lingers in the queue, so the one sent after it finds the
+    // queue full until it is delivered.
+    let sink = sink_on(
+        &brokers,
+        "delivery_timeout: 300s\nrdkafka:\n  queue.buffering.max.messages: \"1\"\n  queue.buffering.max.ms: \"100\"\n",
+        Arc::clone(&clock) as _,
+    );
+    let schedule = [10, 20, 40, 80, 160, 250, 250].map(Duration::from_millis);
+
+    cluster.broker_down(1).expect("broker down");
+    let batch = rows_batch(&sink, 3);
+    let (writer, endpoint) = (&sink.writer, &sink.endpoints[0][0]);
+    let (result, ()) = io.block_on(async {
+        tokio::join!(writer.write_batch(endpoint, &batch), async {
+            // The deadline read, then one read per queue-full retry.
+            for _ in 0..100_000 {
+                if clock.count() > schedule.len() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+            cluster.broker_up(1).expect("broker up");
+        })
+    });
+    result.expect("the batch is delivered once the broker is back");
+
+    let at = clock.at.lock().expect("read times").clone();
+    let gaps: Vec<Duration> = at[1..].windows(2).map(|w| w[1] - w[0]).collect();
+    assert_eq!(gaps[..schedule.len()], schedule);
+    assert!(
+        gaps[schedule.len()..].contains(&schedule[0]),
+        "no wait of 10 ms among the {} after the second message's first seven",
+        gaps.len() - schedule.len()
+    );
+}

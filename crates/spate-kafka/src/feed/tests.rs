@@ -366,6 +366,27 @@ fn a_failed_write_is_due_after_its_backoff_on_the_feed_clock() {
     assert_eq!(take_due(&mut st, now + first).len(), 1);
 }
 
+/// Pins that an attempt write failed transiently is due again once the first
+/// step of its backoff has passed on the feed's clock, and not before.
+#[test]
+fn a_failed_attempt_write_is_due_after_its_backoff_on_the_feed_clock() {
+    let core = core(10);
+    core.lock().tracker.assign([tp(0)]);
+    let entry = gated(&core, 0);
+    let write = admission(&core, entry).expect("admitted below the cap");
+    assert!(matches!(write, Write::Attempt(_)), "{write:?}");
+    let now = core.clock().now();
+    core.settle(write, Err(failure(C::MessageTimedOut)));
+    let mut st = core.lock();
+    let first = Duration::from_millis(200);
+    let early = now + first - Duration::from_nanos(1);
+    assert!(
+        take_due(&mut st, early).is_empty(),
+        "not due before its backoff"
+    );
+    assert_eq!(take_due(&mut st, now + first).len(), 1);
+}
+
 /// Pins that a write failed transiently is not queued to be sent again once
 /// the feed has stopped.
 #[test]

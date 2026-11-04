@@ -19,13 +19,14 @@ use super::gate::admission;
 use super::inflight::Tp;
 use super::producer::FeedProducerHooks;
 use super::write::{
-    self, Attempt, BACKOFF_START, DELIVERIES_HEADER, Destination, Failure, Finish, Move, Outgoing,
-    Tombstone, Write, WriteClass, classify, route,
+    self, Attempt, DELIVERIES_HEADER, Destination, Failure, Finish, Move, Outgoing, Tombstone,
+    Write, WriteClass, classify, route,
 };
 use super::{Core, Gating, KafkaFeed, KafkaFeedError, KafkaFeedPublisher, Ready};
 use crate::client::testing::raw_config;
 use crate::testutil::{assert_returns, returns_within};
 use rdkafka::error::{KafkaError, RDKafkaErrorCode as C};
+use spate_core::backoff::Backoff;
 use spate_core::clock::SyncClock;
 use spate_core::clock::TestClock;
 use spate_core::config::FeedSection;
@@ -356,12 +357,13 @@ fn a_failed_write_is_due_after_its_backoff_on_the_feed_clock() {
     let write = moving(&core, receipt);
     core.settle(*write, Err(failure(C::MessageTimedOut)));
     let mut st = core.lock();
-    let early = now + BACKOFF_START - Duration::from_nanos(1);
+    let first = Duration::from_millis(200);
+    let early = now + first - Duration::from_nanos(1);
     assert!(
         take_due(&mut st, early).is_empty(),
         "not due before its backoff"
     );
-    assert_eq!(take_due(&mut st, now + BACKOFF_START).len(), 1);
+    assert_eq!(take_due(&mut st, now + first).len(), 1);
 }
 
 /// Pins that a write failed transiently is not queued to be sent again once
@@ -569,10 +571,6 @@ fn a_unit_is_written_with_its_count() {
             (DELIVERIES_HEADER.to_owned(), Some(b"3".to_vec())),
             ("spate.origin".to_owned(), Some(b"units/0/7".to_vec())),
         ]
-    );
-    assert_eq!(
-        write::next_backoff(std::time::Duration::from_secs(4)).as_secs(),
-        5
     );
 }
 
@@ -1267,9 +1265,10 @@ fn a_refused_attempt_or_tombstone_write_stops_the_feed() {
     assert!(st.resends.is_empty());
 }
 
-/// Pins that a write failing again waits longer each time: a tombstone
-/// failed three times is queued with a next wait of 400 ms, 800 ms, then
-/// 1.6 s.
+/// Pins that a write failing again waits longer each time, holding at the
+/// cap: a tombstone failed seven times is due 200 ms, 400 ms, 800 ms, 1.6 s,
+/// 3.2 s, then 5 s twice after each failure, and its warn line logs each
+/// wait.
 #[test]
 fn a_write_failing_again_backs_off_further_each_time() {
     let core = core(10);
@@ -1285,15 +1284,46 @@ fn a_write_failing_again_backs_off_further_each_time() {
         0,
         position,
     ));
-    for millis in [400, 800, 1600] {
-        core.settle(write, Err(failure(C::MessageTimedOut)));
-        let (_, mut queued) = core.lock().resends.pop().expect("queued to send again");
-        assert_eq!(
-            queued.backoff_mut().copied(),
-            Some(Duration::from_millis(millis))
-        );
-        write = queued;
+    let schedule = [200, 400, 800, 1600, 3200, 5000, 5000].map(Duration::from_millis);
+    let now = core.clock().now();
+    let mut waits = Vec::new();
+    let lines = spate_test::capture_logs(tracing::Level::WARN, || {
+        for _ in schedule {
+            core.settle(write, Err(failure(C::MessageTimedOut)));
+            let (due, queued) = core.lock().resends.pop().expect("queued to send again");
+            waits.push(due - now);
+            write = queued;
+        }
+    });
+    assert_eq!(waits, schedule);
+    let logged: Vec<&String> = lines
+        .iter()
+        .filter(|line| line.contains("sending it again"))
+        .collect();
+    assert_eq!(logged.len(), schedule.len(), "{lines:#?}");
+    for (line, wait) in logged.iter().zip(schedule) {
+        assert!(line.contains(&format!("retry_in={wait:?}")), "{line}");
     }
+}
+
+/// Pins that a resend whose delay would pass the end of the `Instant` range
+/// is queued due at once.
+#[test]
+fn a_resend_due_past_the_instant_range_is_due_at_once() {
+    let core = core(10);
+    let receipt = {
+        let mut st = core.lock();
+        st.tracker.assign([tp(0)]);
+        st.tracker.deliver(&tp(0), 1).unwrap()
+    };
+    let now = core.clock().now();
+    let mut write = moving(&core, receipt);
+    *write.backoff_mut().expect("a move backs off") = Backoff::new(Duration::MAX, Duration::MAX);
+    core.settle(*write, Err(failure(C::MessageTimedOut)));
+    let mut st = core.lock();
+    assert_eq!(st.resends.len(), 1);
+    assert_eq!(st.resends[0].0, now);
+    assert_eq!(take_due(&mut st, now).len(), 1);
 }
 
 /// Pins that a copy at the gate replaced by a redelivery leaves the buffer

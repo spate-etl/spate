@@ -343,6 +343,7 @@ impl KafkaSourceConfig {
 
     /// Where a partition with no committed offset starts under
     /// `auto.offset.reset`. `None` for `error`, which only librdkafka applies.
+    /// `End` is resolved and committed once, by the source.
     /// librdkafka reads `topic.auto.offset.reset` as the same property.
     pub(crate) fn uncommitted_start(&self) -> Option<rdkafka::Offset> {
         let policy = self

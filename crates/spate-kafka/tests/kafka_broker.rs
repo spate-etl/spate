@@ -411,3 +411,222 @@ fn real_broker_revocation_commits_every_consumers_offsets() {
     stop.store(true, Ordering::Relaxed);
     joiner.join().expect("joiner thread");
 }
+
+/// Runs over a partition with no committed offset, on a real broker.
+mod latest_start {
+    use super::*;
+    use rdkafka::admin::{AdminClient, AdminOptions, NewPartitions};
+    use rdkafka::client::DefaultClientContext;
+    use rdkafka::producer::{BaseProducer, BaseRecord, Producer as _};
+    use support::latest;
+    use testcontainers::ImageExt as _;
+
+    fn on_a_broker(partitions: i32, body: impl FnOnce(&str, &str)) {
+        let container = broker().start().expect("start kafka container");
+        let port = container.get_host_port_ipv4(KAFKA_PORT).expect("port");
+        let brokers = format!("127.0.0.1:{port}");
+        support::create_topic(&brokers, TOPIC, partitions);
+        body(&brokers, TOPIC);
+    }
+
+    /// A quiet partition reads what arrived while the pipeline was down.
+    /// Regression for #1704.
+    #[test]
+    #[ignore = "requires Docker"]
+    fn a_quiet_partition_reads_what_arrived_across_a_clean_restart() {
+        on_a_broker(2, |b, t| {
+            latest::a_quiet_partition_across_a_restart(b, t, "latest")
+        });
+    }
+
+    /// The control: `earliest` reads the same records with no start commit.
+    #[test]
+    #[ignore = "requires Docker"]
+    fn a_quiet_partition_reads_what_arrived_under_earliest() {
+        on_a_broker(2, |b, t| {
+            latest::a_quiet_partition_across_a_restart(b, t, "earliest")
+        });
+    }
+
+    /// A new group whose sink is down keeps its start, and a restart reads it.
+    /// Regression for #1704.
+    #[test]
+    #[ignore = "requires Docker"]
+    fn a_new_group_with_its_sink_down_reads_from_its_start_after_a_restart() {
+        on_a_broker(2, |b, t| {
+            latest::a_sink_down_across_a_restart(b, t, "latest")
+        });
+    }
+
+    /// A second process joining a group with no commit loses no record, which
+    /// also decides that a commit during the group's join is accepted.
+    /// Regression for #1704.
+    #[test]
+    #[ignore = "requires Docker"]
+    fn a_second_process_joining_a_group_with_no_commit_loses_no_record() {
+        on_a_broker(2, |b, t| latest::a_second_process_joining(b, t, "latest"));
+    }
+
+    /// The next member reads from where a removed member started.
+    /// Regression for #1704.
+    #[test]
+    #[ignore = "requires Docker"]
+    fn a_removed_single_consumer_loses_no_record() {
+        on_a_broker(1, |b, t| latest::a_removed_single_consumer(b, t, "latest"));
+    }
+
+    /// A record the chain fails on stops the pipeline at every restart, with
+    /// nothing committed past it. Regression for #1704.
+    #[test]
+    #[ignore = "requires Docker"]
+    fn a_failing_record_on_an_uncommitted_partition_replays_after_a_restart() {
+        on_a_broker(2, latest::a_failing_record_across_a_restart);
+    }
+    /// Under `latest` a partition added to the topic starts at its end, and
+    /// records written before the group first assigned it are skipped. Pins the
+    /// exception INV-1 records.
+    #[test]
+    #[ignore = "requires Docker"]
+    fn a_partition_added_to_a_running_group_starts_at_its_end() {
+        on_a_broker(1, |brokers, topic| {
+            let group = spate_test::unique_name("expansion");
+            let mut cfg = latest::config(brokers, topic, &group, "latest");
+            cfg.rdkafka.insert(
+                "topic.metadata.refresh.interval.ms".to_string(),
+                "1000".to_string(),
+            );
+            let run = latest::Run::start(cfg);
+            let admin: AdminClient<DefaultClientContext> = support::raw_config()
+                .set("bootstrap.servers", brokers)
+                .build()
+                .expect("admin client");
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime")
+                .block_on(
+                    admin.create_partitions(&[NewPartitions::new(topic, 2)], &AdminOptions::new()),
+                )
+                .expect("create partitions")
+                .into_iter()
+                .for_each(|r| {
+                    r.expect("partition created");
+                });
+            support::produce_to(brokers, topic, 1, 0..20);
+            let mut next = 20;
+            spate_test::wait_until(Duration::from_secs(120), "the new partition's read", || {
+                support::produce_to(brokers, topic, 1, next..next + 1);
+                next += 1;
+                !run.written(1).is_empty()
+            });
+            let first = *run.written(1).first().expect("a record");
+            run.stop();
+            assert!(
+                first > 0,
+                "records written before the first assignment are skipped"
+            );
+        });
+    }
+
+    /// A member the group has moved past cannot replace a peer's offset, which
+    /// the start commit relies on: the broker checks the generation.
+    #[test]
+    #[ignore = "requires Docker"]
+    fn a_start_commit_never_replaces_a_peers_offset() {
+        on_a_broker(1, |brokers, topic| {
+            let group = spate_test::unique_name("peer");
+            support::a_stale_member_cannot_replace_a_peers_offset(brokers, topic, &group);
+        });
+    }
+
+    /// A start commit made before any read reads back as the group's offset, and
+    /// a restart reads the records written after it. Regression for #1704.
+    #[test]
+    #[ignore = "requires Docker"]
+    fn a_start_recorded_before_any_read_reads_back_as_committed() {
+        on_a_broker(1, |brokers, topic| {
+            let group = spate_test::unique_name("read-back");
+            support::produce_to(brokers, topic, 0, 0..3);
+            let accept = || {
+                let cp = Checkpointer::new();
+                let mut source = KafkaSource::new(latest::config(brokers, topic, &group, "latest"));
+                source.open(SourceCtx::new(cp.handle())).expect("open");
+                let lanes = await_assignment(&mut source, Duration::from_secs(90));
+                (source, cp, lanes)
+            };
+            {
+                let _first = accept();
+                assert_eq!(
+                    support::committed_by(brokers, &group, topic, 1),
+                    [rdkafka::Offset::Offset(3)]
+                );
+            }
+            support::produce_to(brokers, topic, 0, 3..6);
+            let (mut source, _cp, mut lanes) = accept();
+            let rows = drain_lane(&mut source, &mut lanes[0], 3, Duration::from_secs(30));
+            let offsets: Vec<i64> = rows.iter().map(|(_, _, o)| *o).collect();
+            assert_eq!(offsets, [3, 4, 5]);
+        });
+    }
+
+    /// The start is what the isolation level reads as the end: the last stable
+    /// offset under `read_committed`, so an open transaction's records arrive
+    /// once it commits, and the high watermark under `read_uncommitted`.
+    #[test]
+    #[ignore = "requires Docker"]
+    fn an_open_transaction_is_not_skipped_by_a_new_group() {
+        let container = broker()
+            .with_env_var("KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR", "1")
+            .with_env_var("KAFKA_TRANSACTION_STATE_LOG_MIN_ISR", "1")
+            .start()
+            .expect("start kafka container");
+        let port = container.get_host_port_ipv4(KAFKA_PORT).expect("port");
+        let brokers = format!("127.0.0.1:{port}");
+        support::create_topic(&brokers, TOPIC, 1);
+        support::produce_to(&brokers, TOPIC, 0, 0..2);
+
+        let producer: BaseProducer = support::raw_config()
+            .set("bootstrap.servers", &brokers)
+            .set("transactional.id", "open-transaction")
+            .build()
+            .expect("producer");
+        producer
+            .init_transactions(Duration::from_secs(60))
+            .expect("init");
+        producer.begin_transaction().expect("begin");
+        for i in 0..3 {
+            let payload = format!("0:{}", 2 + i);
+            producer
+                .send(
+                    BaseRecord::<(), _>::to(TOPIC)
+                        .partition(0)
+                        .payload(payload.as_bytes()),
+                )
+                .expect("enqueue");
+        }
+        producer.flush(Duration::from_secs(60)).expect("flush");
+
+        let start = |level: &str, group: &str| {
+            let mut cfg = latest::config(&brokers, TOPIC, group, "latest");
+            cfg.rdkafka
+                .insert("isolation.level".to_string(), level.to_string());
+            let cp = Checkpointer::new();
+            let mut source = KafkaSource::new(cfg);
+            source.open(SourceCtx::new(cp.handle())).expect("open");
+            let lanes = await_assignment(&mut source, Duration::from_secs(90));
+            let at = support::committed_by(&brokers, group, TOPIC, 1)[0];
+            (source, cp, lanes, at)
+        };
+        let (_uncommitted, _cp, _lanes, at) = start("read_uncommitted", "uncommitted");
+        assert_eq!(at, rdkafka::Offset::Offset(5), "the high watermark");
+        let (mut source, _cp, mut lanes, at) = start("read_committed", "committed");
+        assert_eq!(at, rdkafka::Offset::Offset(2), "the last stable offset");
+
+        producer
+            .commit_transaction(Duration::from_secs(60))
+            .expect("commit");
+        let rows = drain_lane(&mut source, &mut lanes[0], 3, Duration::from_secs(30));
+        let offsets: Vec<i64> = rows.iter().map(|(_, _, o)| *o).collect();
+        assert_eq!(offsets, [2, 3, 4]);
+    }
+}

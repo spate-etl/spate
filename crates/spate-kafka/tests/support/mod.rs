@@ -26,6 +26,7 @@ use testcontainers::{ContainerRequest, ImageExt};
 use testcontainers_modules::kafka::apache::Kafka;
 
 pub(crate) mod feed;
+pub(crate) mod latest;
 
 /// How the member under test answers the offer it held.
 #[derive(Clone, Copy, Debug)]
@@ -67,6 +68,63 @@ impl ConsumerContext for Recording {
     }
 }
 
+/// A member of `group` on `topic` that records each rebalance, answering it
+/// inline only when `answers`. It never closes, on success or on a panic: closing
+/// a member holding an unanswered offer waits on an answer that never comes.
+fn recording_member(
+    brokers: &str,
+    topic: &str,
+    group: &str,
+    answers: bool,
+) -> ManuallyDrop<BaseConsumer<Recording>> {
+    let consumer: BaseConsumer<Recording> = raw_config()
+        .set("bootstrap.servers", brokers)
+        .set("group.id", group)
+        .set("session.timeout.ms", "6000")
+        .set("max.poll.interval.ms", "6000")
+        .set("heartbeat.interval.ms", "1000")
+        .set("enable.auto.commit", "false")
+        .build_with(Recording {
+            answers,
+            offers: Mutex::new(Vec::new()),
+            revocations: Mutex::new(0),
+        })
+        .expect("consumer");
+    consumer.subscribe(&[topic]).expect("subscribe");
+    ManuallyDrop::new(consumer)
+}
+
+/// A joins alone and holds its offer. B joins, is offered the partition and
+/// commits it. A's commit with its old generation is then refused, and B's offset
+/// stands.
+pub(crate) fn a_stale_member_cannot_replace_a_peers_offset(
+    brokers: &str,
+    topic: &str,
+    group: &str,
+) {
+    let offers = |c: &BaseConsumer<Recording>| c.context().offers.lock().expect("offers").len();
+    let a = recording_member(brokers, topic, group, false);
+    spate_test::wait_until(Duration::from_secs(60), "A's offer", || {
+        let _ = a.poll(Duration::from_millis(100));
+        offers(&a) == 1
+    });
+    let b = recording_member(brokers, topic, group, true);
+    spate_test::wait_until(Duration::from_secs(60), "B's offer", || {
+        let _ = a.poll(Duration::from_millis(50));
+        let _ = b.poll(Duration::from_millis(50));
+        offers(&b) >= 1
+    });
+    let commit = |c: &BaseConsumer<Recording>, offset: i64| {
+        let mut tpl = TopicPartitionList::new();
+        tpl.add_partition_offset(topic, 0, Offset::Offset(offset))
+            .expect("offset");
+        c.commit(&tpl, CommitMode::Sync)
+    };
+    commit(&b, 5).expect("the current member's commit");
+    assert!(commit(&a, 9).is_err(), "the old generation's commit");
+    assert_eq!(committed_by(brokers, group, topic, 1), [Offset::Offset(5)]);
+}
+
 /// Pins the client and group sequence around a member that holds an offer past
 /// the group's patience. A joins alone and leaves its offer unanswered. B joins
 /// and is offered A's partition, while A's client reports nothing lost. Once A
@@ -80,25 +138,7 @@ pub(crate) fn a_member_that_never_answers_its_offer(
     group: &str,
     answer: Answer,
 ) {
-    // Neither consumer closes, on success or on a panic: closing A while it
-    // holds an unanswered offer waits on an answer that never comes.
-    let member = |answers| -> ManuallyDrop<BaseConsumer<Recording>> {
-        let consumer: BaseConsumer<Recording> = raw_config()
-            .set("bootstrap.servers", brokers)
-            .set("group.id", group)
-            .set("session.timeout.ms", "6000")
-            .set("max.poll.interval.ms", "6000")
-            .set("heartbeat.interval.ms", "1000")
-            .set("enable.auto.commit", "false")
-            .build_with(Recording {
-                answers,
-                offers: Mutex::new(Vec::new()),
-                revocations: Mutex::new(0),
-            })
-            .expect("consumer");
-        consumer.subscribe(&[topic]).expect("subscribe");
-        ManuallyDrop::new(consumer)
-    };
+    let member = |answers| recording_member(brokers, topic, group, answers);
     let offers = |c: &BaseConsumer<Recording>| c.context().offers.lock().expect("offers").len();
     let revocations =
         |c: &BaseConsumer<Recording>| *c.context().revocations.lock().expect("revocations");
@@ -263,6 +303,23 @@ pub(crate) fn produce_to(
             )
             .expect("enqueue");
     }
+    producer.flush(Duration::from_secs(60)).expect("flush");
+}
+
+/// Produce one record with `payload` to `partition`, and flush.
+pub(crate) fn produce_payload(brokers: &str, topic: &str, partition: i32, payload: &[u8]) {
+    let producer: BaseProducer = raw_config()
+        .set("bootstrap.servers", brokers)
+        .set("message.timeout.ms", "30000")
+        .build()
+        .expect("producer");
+    producer
+        .send(
+            BaseRecord::<[u8], _>::to(topic)
+                .partition(partition)
+                .payload(payload),
+        )
+        .expect("enqueue");
     producer.flush(Duration::from_secs(60)).expect("flush");
 }
 

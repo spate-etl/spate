@@ -296,9 +296,7 @@ fn a_failed_offset_lookup_starts_from_the_committed_offset() {
     errors.extend([LOAD_IN_PROGRESS; HELD_REPLIES]);
     cluster.request_errors(rdkafka::types::RDKafkaApiKey::OffsetFetch, &errors);
 
-    let mut cfg = config(&brokers, "lookup-error");
-    cfg.rdkafka
-        .insert("auto.offset.reset".into(), "latest".into());
+    let cfg = config(&brokers, "lookup-error");
     let cp = Checkpointer::new();
     let mut source = KafkaSource::new(cfg);
 
@@ -1582,6 +1580,39 @@ impl Driver {
         got
     }
 
+    /// Read every live lane while `produce` runs on each tick, until each
+    /// partition has delivered a record, and return the first offset read per
+    /// partition. Each batch is dropped once read, which acks it.
+    fn read_from_end(
+        &mut self,
+        timeout: Duration,
+        mut produce: impl FnMut(),
+    ) -> BTreeMap<u32, i64> {
+        let mut first: BTreeMap<u32, i64> = BTreeMap::new();
+        let mut tick = 0;
+        wait_until(timeout, "a record from each live lane", || {
+            if tick % 20 == 0 {
+                produce();
+            }
+            tick += 1;
+            self.step(Duration::from_millis(10));
+            for lane in &mut self.lanes {
+                let partition = lane.partition().0;
+                if let Some(mut batch) =
+                    lane.poll(64, Duration::from_millis(10)).expect("lane poll")
+                {
+                    if let Some(raw) = batch.next_payload() {
+                        first.entry(partition).or_insert(raw.offset);
+                    }
+                    while batch.next_payload().is_some() {}
+                }
+            }
+            let parts = self.partitions();
+            !parts.is_empty() && parts.iter().all(|p| first.contains_key(p))
+        });
+        first
+    }
+
     /// Commit and flush what the read batches made committable.
     fn commit(&mut self) {
         self.cp.drain();
@@ -1802,6 +1833,14 @@ fn a_lost_assignment_fails_the_flush_and_the_source_recovers() {
 /// `JoinGroup` refused, so one consumer of a source holds an offer before the
 /// other has joined.
 fn on_a_cluster_electing_at_once(partitions: i32, body: impl FnOnce(&str)) {
+    on_a_mock_electing_at_once(partitions, |cluster| body(&cluster.bootstrap_servers()));
+}
+
+/// [`on_a_cluster_electing_at_once`], handing the body the cluster to script.
+fn on_a_mock_electing_at_once(
+    partitions: i32,
+    body: impl FnOnce(&MockCluster<'_, rdkafka::producer::DefaultProducerContext>),
+) {
     use rdkafka::producer::Producer as _;
     let producer: rdkafka::producer::BaseProducer = support::raw_config()
         .set("test.mock.num.brokers", "1")
@@ -1824,7 +1863,7 @@ fn on_a_cluster_electing_at_once(partitions: i32, body: impl FnOnce(&str)) {
         RDKafkaApiKey::JoinGroup,
         &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_COORDINATOR_LOAD_IN_PROGRESS],
     );
-    body(&cluster.bootstrap_servers());
+    body(&cluster);
 }
 
 /// A consumer removed from the group while it holds an offer is not a double
@@ -1963,8 +2002,8 @@ fn a_member_that_never_answers_its_offer_is_replaced() {
 
 /// A lost member's failed flush leaves its peer's commit in place, and no
 /// offset past what was read is committed. The partitions read again from at
-/// or before the committed offset, so under `earliest` a record the lost member
-/// read and could not commit is not skipped.
+/// or before the committed offset, so a record the lost member read and could
+/// not commit is not skipped.
 #[test]
 fn a_lost_member_keeps_its_peers_commit_and_loses_no_record() {
     let cluster = MockCluster::new(1).expect("mock cluster");
@@ -2378,6 +2417,825 @@ fn one_assignment_spends_one_lookup_bound() {
             && lanes.len() == 3
         {
             return;
+        }
+    }
+}
+
+/// Runs over a partition with no committed offset, on the mock broker. A test
+/// that fails without the start commit ends its doc `Regression for #1704.`
+mod latest_start {
+    use super::*;
+    use support::latest;
+
+    fn on_a_cluster(partitions: i32, body: impl FnOnce(&str, &str)) {
+        let cluster = MockCluster::new(1).expect("mock cluster");
+        cluster
+            .create_topic(TOPIC, partitions, 1)
+            .expect("create topic");
+        body(&cluster.bootstrap_servers(), TOPIC);
+    }
+
+    /// A quiet partition reads what arrived while the pipeline was down.
+    /// Regression for #1704.
+    #[test]
+    fn a_quiet_partition_reads_what_arrived_across_a_clean_restart() {
+        on_a_cluster(2, |b, t| {
+            latest::a_quiet_partition_across_a_restart(b, t, "latest")
+        });
+    }
+
+    /// The control: `earliest` reads the same records with no start commit.
+    #[test]
+    fn a_quiet_partition_reads_what_arrived_under_earliest() {
+        on_a_cluster(2, |b, t| {
+            latest::a_quiet_partition_across_a_restart(b, t, "earliest")
+        });
+    }
+
+    /// A new group whose sink is down keeps its start, and a restart reads it.
+    /// Regression for #1704.
+    #[test]
+    fn a_new_group_with_its_sink_down_reads_from_its_start_after_a_restart() {
+        on_a_cluster(2, |b, t| {
+            latest::a_sink_down_across_a_restart(b, t, "latest")
+        });
+    }
+
+    /// A second process joining a group with no commit loses no record.
+    /// Regression for #1704.
+    #[test]
+    fn a_second_process_joining_a_group_with_no_commit_loses_no_record() {
+        on_a_cluster(2, |b, t| latest::a_second_process_joining(b, t, "latest"));
+    }
+
+    /// The next member reads from where a removed member started.
+    /// Regression for #1704.
+    #[test]
+    fn a_removed_single_consumer_loses_no_record() {
+        on_a_cluster(1, |b, t| latest::a_removed_single_consumer(b, t, "latest"));
+    }
+
+    /// The control: `earliest` reads from the start with no start commit.
+    #[test]
+    fn a_removed_single_consumer_loses_no_record_under_earliest() {
+        on_a_cluster(1, |b, t| {
+            latest::a_removed_single_consumer(b, t, "earliest")
+        });
+    }
+    /// `config` under `latest`, whose interval commit never fires in a test.
+    fn latest_config(brokers: &str, group: &str, consumers: usize) -> KafkaSourceConfig {
+        let mut cfg = watched_config(brokers, group, consumers);
+        cfg.commit_interval = Duration::from_hours(1);
+        cfg.rdkafka
+            .insert("auto.offset.reset".into(), "latest".into());
+        cfg
+    }
+
+    /// [`latest_config`] for one consumer with statistics off.
+    fn quiet_latest(brokers: &str, group: &str) -> KafkaSourceConfig {
+        let mut cfg = latest_config(brokers, group, 1);
+        cfg.statistics_interval = Duration::ZERO;
+        cfg
+    }
+
+    /// A cluster with one topic of `partitions`, each holding three records.
+    fn cluster_with_records(
+        partitions: i32,
+    ) -> (
+        MockCluster<'static, rdkafka::producer::DefaultProducerContext>,
+        String,
+    ) {
+        let cluster = MockCluster::new(1).expect("mock cluster");
+        cluster
+            .create_topic(TOPIC, partitions, 1)
+            .expect("create topic");
+        let brokers = cluster.bootstrap_servers();
+        produce(&brokers, TOPIC, 3, partitions, "before");
+        (cluster, brokers)
+    }
+
+    fn produce_round(brokers: &str, partitions: i32) -> impl FnMut() {
+        let brokers = brokers.to_owned();
+        let mut round = 0;
+        move || {
+            round += 1;
+            produce(&brokers, TOPIC, 2, partitions, &format!("r{round}"));
+        }
+    }
+
+    /// Lanes for a source on `cfg`, opened and assigned.
+    fn accepted(cfg: KafkaSourceConfig) -> (KafkaSource, Checkpointer, Vec<Lane>) {
+        let cp = Checkpointer::new();
+        let mut source = KafkaSource::new(cfg);
+        source.open(SourceCtx::new(cp.handle())).expect("open");
+        let lanes = await_assignment(&mut source, ASSIGNMENT);
+        (source, cp, lanes)
+    }
+
+    /// A partition with no commit has one once its lane is handed out.
+    /// Regression for #1704.
+    #[test]
+    fn a_new_partition_is_committed_before_its_lane_is_handed_out() {
+        let (_cluster, brokers) = cluster_with_records(1);
+        let lines = spate_test::capture_logs(tracing::Level::INFO, || {
+            let _accepted = accepted(quiet_latest(&brokers, "start-commit"));
+            assert_eq!(
+                committed(&brokers, "start-commit", 1),
+                [rdkafka::Offset::Offset(3)]
+            );
+        });
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("accepted assignment") && l.contains("started_at_end=1")),
+            "{lines:#?}"
+        );
+    }
+
+    /// The first record a new partition delivers is at its start commit.
+    /// Regression for #1704.
+    #[test]
+    fn a_record_produced_after_the_start_is_read() {
+        let (_cluster, brokers) = cluster_with_records(1);
+        let mut driver = Driver::open(quiet_latest(&brokers, "start-read"));
+        driver.settle(1, ASSIGNMENT);
+        let start = committed(&brokers, "start-read", 1)[0];
+        let first = driver.read_from_end(Duration::from_secs(30), produce_round(&brokers, 1));
+        assert_eq!(start, rdkafka::Offset::Offset(first[&0]));
+    }
+
+    /// A start commit the broker refuses for a removed member discards the
+    /// offer with no lanes, and the next accept lists the end again. The refused
+    /// commit queues no rejoin while an offer is held, and a broker that refuses
+    /// the commit fails the member's heartbeats too, so the test scripts the
+    /// heartbeat once the discard has happened. Regression for #1704.
+    #[test]
+    fn a_refused_start_commit_discards_the_offer() {
+        for (code, group) in [
+            (
+                RDKafkaRespErr::RD_KAFKA_RESP_ERR_ILLEGAL_GENERATION,
+                "refused-generation",
+            ),
+            (
+                RDKafkaRespErr::RD_KAFKA_RESP_ERR_UNKNOWN_MEMBER_ID,
+                "refused-member",
+            ),
+        ] {
+            let (cluster, brokers) = cluster_with_records(1);
+            cluster.request_errors(RDKafkaApiKey::OffsetCommit, &[code]);
+            let capture = spate_test::LogCapture::new();
+            let discards = || {
+                capture
+                    .lines()
+                    .iter()
+                    .filter(|l| l.contains("discarded an assignment"))
+                    .count()
+            };
+            let subscriber = tracing_subscriber::fmt()
+                .with_max_level(tracing::Level::WARN)
+                .with_ansi(false)
+                .with_writer(capture.clone())
+                .finish();
+            tracing::subscriber::with_default(subscriber, || {
+                let cp = Checkpointer::new();
+                let mut source = KafkaSource::new(quiet_latest(&brokers, group));
+                source.open(SourceCtx::new(cp.handle())).expect("open");
+                let mut scripted = false;
+                let mut lanes = None;
+                wait_until(Duration::from_secs(60), "lanes after the discard", || {
+                    if !scripted && discards() == 1 {
+                        assert_eq!(committed(&brokers, group, 1), [rdkafka::Offset::Invalid]);
+                        cluster.request_errors(RDKafkaApiKey::Heartbeat, &[code]);
+                        scripted = true;
+                    }
+                    match source.poll_events(Duration::from_millis(50)) {
+                        Ok(SourceEvent::LanesAssigned(new)) => {
+                            assert!(scripted, "lanes before the discard");
+                            lanes = Some(new);
+                            true
+                        }
+                        _ => false,
+                    }
+                });
+                assert_eq!(committed(&brokers, group, 1), [rdkafka::Offset::Offset(3)]);
+                drop(lanes);
+            });
+            assert_eq!(discards(), 1, "{code:?}");
+        }
+    }
+
+    /// A start commit that fails with a transient code holds the offer until
+    /// the pace comes due, and then lanes arrive with the commit in place.
+    /// Regression for #1704.
+    #[test]
+    fn a_failed_start_commit_is_retried_and_the_offer_survives() {
+        let (cluster, brokers) = cluster_with_records(1);
+        cluster.request_errors(
+            RDKafkaApiKey::OffsetCommit,
+            &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_UNKNOWN],
+        );
+        let clock = TestClock::frozen();
+        let mut source = KafkaSource::new(quiet_latest(&brokers, "start-retry"))
+            .with_clock(Arc::clone(&clock) as _);
+        let cp = Checkpointer::new();
+        let capture = spate_test::LogCapture::new();
+        let attempts = || {
+            capture
+                .lines()
+                .iter()
+                .filter(|l| l.contains("could not settle a start position"))
+                .count()
+        };
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .with_writer(capture.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            source.open(SourceCtx::new(cp.handle())).expect("open");
+            wait_until(ASSIGNMENT, "the first attempt", || {
+                assert!(
+                    !matches!(
+                        source.poll_events(Duration::from_millis(50)),
+                        Ok(SourceEvent::LanesAssigned(_))
+                    ),
+                    "lanes before the commit"
+                );
+                attempts() == 1
+            });
+            // Held at the pace: the frozen clock keeps the offer from retrying.
+            for _ in 0..5 {
+                assert!(matches!(
+                    source.poll_events(Duration::from_millis(50)),
+                    Ok(SourceEvent::Idle)
+                ));
+            }
+            assert_eq!(attempts(), 1, "one line per attempt");
+            clock.advance(Duration::from_secs(1));
+            let lanes = await_assignment(&mut source, ASSIGNMENT);
+            assert_eq!(lanes.len(), 1);
+            assert_eq!(
+                committed(&brokers, "start-retry", 1),
+                [rdkafka::Offset::Offset(3)]
+            );
+        });
+    }
+
+    /// A reassign whose lookup fails keeps its offers and keeps polling until
+    /// the pace comes due, and then every consumer's lanes arrive together.
+    /// Regression for #1704.
+    #[test]
+    fn a_failed_reassign_lookup_is_retried_at_its_pace() {
+        on_a_mock_electing_at_once(4, |cluster| {
+            let brokers = cluster.bootstrap_servers();
+            let clock = TestClock::frozen();
+            let source = KafkaSource::new(latest_config(&brokers, "retried-epoch", 2))
+                .with_clock(Arc::clone(&clock) as _);
+            let capture = spate_test::LogCapture::new();
+            let attempts = || {
+                capture
+                    .lines()
+                    .iter()
+                    .filter(|l| l.contains("could not settle a start position"))
+                    .count()
+            };
+            let subscriber = tracing_subscriber::fmt()
+                .with_max_level(tracing::Level::WARN)
+                .with_ansi(false)
+                .with_writer(capture.clone())
+                .finish();
+            tracing::subscriber::with_default(subscriber, || {
+                let mut driver = Driver::open_watched(source, "retried-epoch");
+                wait_until(ASSIGNMENT, "the first consumer's lanes", || {
+                    clock.advance(Duration::from_millis(500));
+                    driver.step(Duration::from_millis(20));
+                    !driver.lanes.is_empty()
+                });
+                // The second consumer's offer drains these lanes, and the lookup
+                // of the accept after that drain fails once.
+                cluster.request_errors(
+                    RDKafkaApiKey::OffsetFetch,
+                    &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_UNKNOWN],
+                );
+                wait_until(Duration::from_secs(60), "the failed lookup", || {
+                    driver.step(Duration::from_millis(20));
+                    attempts() == 1
+                });
+                // Held at the pace with the clock frozen, and still polling.
+                for _ in 0..5 {
+                    driver.step(Duration::from_millis(20));
+                    assert!(driver.lanes.is_empty(), "lanes before the pace");
+                }
+                assert_eq!(attempts(), 1, "one line per attempt");
+                clock.advance(Duration::from_secs(1));
+                driver.settle_group(2, 4, Duration::from_secs(60));
+            });
+        });
+    }
+
+    /// A member joining during a retried start takes the partition from the
+    /// start the group holds, and the retrying member goes on to its own offer.
+    /// Regression for #1704.
+    #[test]
+    fn a_revocation_during_a_retried_start_loses_no_record() {
+        let (cluster, brokers) = cluster_with_records(1);
+        // The first attempt fails. The source below is the only committer until
+        // the joining member arrives, and that member's commit needs no retry.
+        cluster.request_errors(
+            RDKafkaApiKey::OffsetCommit,
+            &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_UNKNOWN],
+        );
+        let clock = TestClock::frozen();
+        let capture = spate_test::LogCapture::new();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .with_writer(capture.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            let first = KafkaSource::new(quiet_latest(&brokers, "retry-revoked"))
+                .with_clock(Arc::clone(&clock) as _);
+            let mut first = Driver::open_with(first, |ctx| ctx);
+            wait_until(ASSIGNMENT, "the failed start", || {
+                first.step(Duration::from_millis(50));
+                capture
+                    .lines()
+                    .iter()
+                    .any(|l| l.contains("could not settle a start position"))
+            });
+            let mut second = Driver::open(quiet_latest(&brokers, "retry-revoked"));
+            wait_until(Duration::from_secs(60), "a lane on either member", || {
+                clock.advance(Duration::from_secs(1));
+                first.step(Duration::from_millis(20));
+                second.step(Duration::from_millis(20));
+                !first.lanes.is_empty() || !second.lanes.is_empty()
+            });
+            let start = committed(&brokers, "retry-revoked", 1)[0];
+            let holder = if first.lanes.is_empty() {
+                &mut second
+            } else {
+                &mut first
+            };
+            let read = holder.read_from_end(Duration::from_secs(30), produce_round(&brokers, 1));
+            assert_eq!(start, rdkafka::Offset::Offset(read[&0]));
+        });
+    }
+
+    /// A start commit that keeps failing ends the run at the assignment
+    /// deadline, once the source has held an assignment before.
+    /// Regression for #1704.
+    #[test]
+    fn a_start_commit_that_keeps_failing_ends_at_the_assignment_deadline() {
+        let (cluster, brokers) = cluster_with_records(1);
+        let clock = TestClock::frozen();
+        let mut cfg = quiet_latest(&brokers, "start-deadline");
+        cfg.assignment_timeout = Duration::from_secs(5);
+        let source = KafkaSource::new(cfg).with_clock(Arc::clone(&clock) as _);
+        let mut driver = Driver::open_with(source, |ctx| ctx);
+        driver.settle(1, ASSIGNMENT);
+        // On the rejoin the partition has a commit, so its lookup is what fails.
+        cluster.request_errors(
+            RDKafkaApiKey::OffsetFetch,
+            &vec![RDKafkaRespErr::RD_KAFKA_RESP_ERR_UNKNOWN; 100_000],
+        );
+        cluster.request_errors(
+            RDKafkaApiKey::Heartbeat,
+            &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_ILLEGAL_GENERATION],
+        );
+        // Hold the clock until a failed lookup has named the cause, so the
+        // deadline reads that cause and not the revocation before it.
+        let capture = spate_test::LogCapture::new();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .with_writer(capture.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            wait_until(Duration::from_secs(60), "the failed lookup", || {
+                if let Ok(SourceEvent::LanesRevoked { lanes, barrier }) =
+                    driver.source.poll_events(Duration::from_millis(50))
+                {
+                    let _ = support::complete_revocation(&mut driver.source, &lanes, &barrier, &[]);
+                    driver.lanes.clear();
+                }
+                capture
+                    .lines()
+                    .iter()
+                    .any(|l| l.contains("could not settle a start position"))
+            });
+        });
+        clock.advance(Duration::from_secs(6));
+        match driver.source.poll_events(Duration::from_millis(50)) {
+            Err(
+                e @ SourceError::Client {
+                    class: ErrorClass::Fatal,
+                    ..
+                },
+            ) => assert!(e.to_string().contains("start position"), "{e}"),
+            other => panic!("expected the deadline error, got {other:?}"),
+        }
+    }
+
+    /// A read with no acknowledgment replays from the start commit after a
+    /// crash. Regression for #1704.
+    #[test]
+    fn a_read_with_no_acknowledgment_replays_from_the_start_commit() {
+        let (_cluster, brokers) = cluster_with_records(1);
+        let cfg = quiet_latest(&brokers, "crash");
+        let first_at = {
+            let mut driver = Driver::open(cfg.clone());
+            driver.settle(1, ASSIGNMENT);
+            driver.read_from_end(Duration::from_secs(30), produce_round(&brokers, 1))[&0]
+        };
+        let mut driver = Driver::open(cfg);
+        driver.settle(1, ASSIGNMENT);
+        let second_at =
+            driver.read_from_end(Duration::from_secs(30), produce_round(&brokers, 1))[&0];
+        assert_eq!(second_at, first_at, "the new process reads from the start");
+    }
+
+    /// A consumer the group removes reads from its start when it returns, with
+    /// one consumer and with two, and a partition its peer committed resumes
+    /// from that commit. Regression for #1704.
+    #[test]
+    fn a_removed_member_under_latest_loses_no_record() {
+        for consumers in [1, 2] {
+            let (cluster, brokers) = cluster_with_records(2);
+            let group: &'static str = if consumers == 1 {
+                "removed-one"
+            } else {
+                "removed-two"
+            };
+            let mut driver = Driver::open_watched(
+                KafkaSource::new(latest_config(&brokers, group, consumers)),
+                group,
+            );
+            driver.settle(2, Duration::from_secs(60));
+            let before = driver.read_from_end(Duration::from_secs(30), produce_round(&brokers, 2));
+            let revocations = driver.revocations;
+            cluster.request_errors(
+                RDKafkaApiKey::Heartbeat,
+                &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_ILLEGAL_GENERATION],
+            );
+            wait_until(Duration::from_secs(30), "the revocation", || {
+                driver.step(Duration::from_millis(100));
+                driver.revocations > revocations
+            });
+            assert!(
+                !driver.flush_failures.is_empty(),
+                "the group refuses a removed member's commit"
+            );
+            driver.settle(2, Duration::from_secs(60));
+            let read_back = committed(&brokers, group, 2);
+            let after = driver.read_from_end(Duration::from_secs(30), produce_round(&brokers, 2));
+            for (p, first) in &after {
+                let at = read_back[usize::try_from(*p).expect("partition")];
+                assert!(
+                    *first <= before[p] || at == rdkafka::Offset::Offset(*first),
+                    "partition {p} read from {first}, past {} with commit {at:?}",
+                    before[p],
+                );
+            }
+        }
+    }
+
+    /// The first consumer accepted alone reads, and the second consumer's join
+    /// starts a new epoch over partitions with no acknowledged commit. No offset
+    /// is skipped, and the re-accept writes nothing over the start commit.
+    /// Regression for #1704.
+    #[test]
+    fn a_reassign_with_no_commit_loses_no_record() {
+        on_a_cluster_electing_at_once(4, |brokers| {
+            let clock = TestClock::frozen();
+            let source = KafkaSource::new(latest_config(brokers, "reassign-start", 2))
+                .with_clock(Arc::clone(&clock) as _);
+            let mut driver = Driver::open_watched(source, "reassign-start");
+            wait_until(ASSIGNMENT, "the first consumer's lanes", || {
+                clock.advance(Duration::from_millis(500));
+                driver.step(Duration::from_millis(20));
+                !driver.lanes.is_empty()
+            });
+            let start = committed(brokers, "reassign-start", 4);
+            let before = driver.read_from_end(Duration::from_secs(30), produce_round(brokers, 4));
+            driver.settle_group(2, 4, Duration::from_secs(60));
+            let after = driver.read_from_end(Duration::from_secs(30), produce_round(brokers, 4));
+            for (p, first) in &after {
+                if let Some(earlier) = before.get(p) {
+                    assert!(
+                        first <= earlier,
+                        "partition {p} skipped: {first} after {earlier}"
+                    );
+                }
+            }
+            for (at, was) in committed(brokers, "reassign-start", 4).iter().zip(&start) {
+                if matches!(was, rdkafka::Offset::Offset(_)) {
+                    assert_eq!(at, was, "a re-accept writes no commit over a start");
+                }
+            }
+        });
+    }
+
+    /// A consumer accepted alone and then removed loses no record, with its
+    /// peer taking the next epoch: the two-consumer route. Regression for #1704.
+    #[test]
+    fn a_member_accepted_alone_then_removed_loses_no_record() {
+        on_a_cluster_electing_at_once(4, |brokers| {
+            let clock = TestClock::frozen();
+            let source = KafkaSource::new(latest_config(brokers, "alone-removed", 2))
+                .with_clock(Arc::clone(&clock) as _);
+            let mut driver = Driver::open_watched(source, "alone-removed");
+            wait_until(ASSIGNMENT, "the first consumer's lanes", || {
+                clock.advance(Duration::from_millis(500));
+                driver.step(Duration::from_millis(20));
+                !driver.lanes.is_empty()
+            });
+            let before = driver.read_from_end(Duration::from_secs(30), produce_round(brokers, 4));
+            driver.settle_group(2, 4, Duration::from_secs(60));
+            let after = driver.read_from_end(Duration::from_secs(30), produce_round(brokers, 4));
+            for (p, first) in &before {
+                assert!(after[p] <= *first, "partition {p} skipped");
+            }
+        });
+    }
+
+    /// A discard under `latest` writes no commit past the group's start and
+    /// loses nothing.
+    #[test]
+    fn a_discarded_offer_under_latest_loses_no_record() {
+        on_a_cluster_electing_at_once(4, |brokers| {
+            let clock = TestClock::frozen();
+            let source = KafkaSource::new(latest_config(brokers, "discard-latest", 2))
+                .with_clock(Arc::clone(&clock) as _);
+            let mut driver = Driver::open_watched(source, "discard-latest");
+            driver.settle_group(2, 4, Duration::from_secs(60));
+            let first = driver.read_from_end(Duration::from_secs(30), produce_round(brokers, 4));
+            assert_eq!(first.len(), 4, "{first:?}");
+        });
+    }
+
+    /// A failed lookup holds the offer under `latest`, and the commit follows.
+    /// Regression for #1704.
+    #[test]
+    fn a_failed_lookup_on_an_uncommitted_partition_loses_no_record() {
+        let (cluster, brokers) = cluster_with_records(1);
+        cluster.request_errors(
+            RDKafkaApiKey::OffsetFetch,
+            &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_UNKNOWN],
+        );
+        let mut driver = Driver::open(quiet_latest(&brokers, "lookup-latest"));
+        driver.settle(1, ASSIGNMENT);
+        assert_eq!(
+            committed(&brokers, "lookup-latest", 1),
+            [rdkafka::Offset::Offset(3)]
+        );
+        let first = driver.read_from_end(Duration::from_secs(30), produce_round(&brokers, 1))[&0];
+        assert_eq!(first, 3);
+    }
+
+    /// A failed lookup under `latest` keeps a partition's commit: no lane until
+    /// it answers, and then the partition reads from the commit.
+    /// Regression for #1704.
+    #[test]
+    fn a_failed_lookup_under_latest_keeps_the_commit() {
+        let (cluster, brokers) = cluster_with_records(1);
+        produce(&brokers, TOPIC, 3, 1, "more");
+        commit_as(&brokers, "keeps-commit", 3);
+        cluster.request_errors(
+            RDKafkaApiKey::OffsetFetch,
+            &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_UNKNOWN; 3],
+        );
+        let (mut source, _cp, mut lanes) = accepted(quiet_latest(&brokers, "keeps-commit"));
+        let rows = drain_lane(&mut source, &mut lanes[0], 3, Duration::from_secs(30));
+        let offsets: Vec<i64> = rows.iter().map(|(_, _, o)| *o).collect();
+        assert_eq!(offsets, vec![3, 4, 5]);
+        assert_eq!(
+            committed(&brokers, "keeps-commit", 1),
+            [rdkafka::Offset::Offset(3)]
+        );
+    }
+
+    /// A failing ListOffsets writes no commit and hands out no lane until it
+    /// answers. Regression for #1704.
+    #[test]
+    fn a_failed_list_writes_no_commit() {
+        let (cluster, brokers) = cluster_with_records(1);
+        cluster.request_errors(
+            RDKafkaApiKey::ListOffsets,
+            &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_UNKNOWN],
+        );
+        let lines = spate_test::capture_logs(tracing::Level::WARN, || {
+            let _accepted = accepted(quiet_latest(&brokers, "failed-list"));
+            assert_eq!(
+                committed(&brokers, "failed-list", 1),
+                [rdkafka::Offset::Offset(3)]
+            );
+        });
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("could not settle a start position")),
+            "{lines:#?}"
+        );
+    }
+
+    /// Every spelling of the policy, and leaving it unset, takes the start rule.
+    /// Regression for #1704.
+    #[test]
+    fn a_new_partition_takes_the_start_rule_on_every_spelling() {
+        for (key, policy) in [
+            (Some("auto.offset.reset"), "latest"),
+            (Some("auto.offset.reset"), "LATEST"),
+            (Some("auto.offset.reset"), "largest"),
+            (Some("auto.offset.reset"), "end"),
+            (Some("topic.auto.offset.reset"), "latest"),
+            (None, ""),
+        ] {
+            let (_cluster, brokers) = cluster_with_records(1);
+            let mut cfg = quiet_latest(&brokers, "spelling");
+            cfg.rdkafka.remove("auto.offset.reset");
+            if let Some(key) = key {
+                cfg.rdkafka.insert(key.into(), policy.into());
+            }
+            let _accepted = accepted(cfg);
+            assert_eq!(
+                committed(&brokers, "spelling", 1),
+                [rdkafka::Offset::Offset(3)],
+                "{key:?} {policy}"
+            );
+        }
+    }
+
+    /// `error` is left to librdkafka and commits nothing.
+    #[test]
+    fn an_error_policy_partition_is_left_to_librdkafka() {
+        let (_cluster, brokers) = cluster_with_records(1);
+        let mut cfg = quiet_latest(&brokers, "error-policy");
+        cfg.rdkafka
+            .insert("auto.offset.reset".into(), "error".into());
+        let _accepted = accepted(cfg);
+        assert_eq!(
+            committed(&brokers, "error-policy", 1),
+            [rdkafka::Offset::Invalid]
+        );
+    }
+
+    /// A new group's first start under `latest` skips what came before it, with
+    /// the key set and unset.
+    #[test]
+    fn a_new_group_under_latest_skips_what_was_produced_before_it_joined() {
+        for unset in [false, true] {
+            let (_cluster, brokers) = cluster_with_records(1);
+            let mut cfg = quiet_latest(&brokers, "first-start");
+            if unset {
+                cfg.rdkafka.remove("auto.offset.reset");
+            }
+            let mut driver = Driver::open(cfg);
+            driver.settle(1, ASSIGNMENT);
+            let first =
+                driver.read_from_end(Duration::from_secs(30), produce_round(&brokers, 1))[&0];
+            assert!(first >= 3, "read {first}");
+        }
+    }
+
+    /// A partition with a commit keeps it, and the one beside it with none gains
+    /// its end: a group upgrading with one quiet partition.
+    /// Regression for #1704.
+    #[test]
+    fn a_partition_with_no_commit_beside_a_committed_one() {
+        let (_cluster, brokers) = cluster_with_records(2);
+        commit_as(&brokers, "upgrade", 1);
+        let _accepted = accepted(quiet_latest(&brokers, "upgrade"));
+        assert_eq!(
+            committed(&brokers, "upgrade", 2),
+            [rdkafka::Offset::Offset(1), rdkafka::Offset::Offset(3)]
+        );
+    }
+
+    /// The interval commit stores nothing over a start with no acknowledgment:
+    /// partition 0 reads its start once partition 1 has committed.
+    /// Regression for #1704.
+    #[test]
+    fn an_unacknowledged_batch_is_not_committed_by_the_interval() {
+        let (_cluster, brokers) = cluster_with_records(2);
+        let mut cfg = quiet_latest(&brokers, "interval");
+        cfg.commit_interval = Duration::from_millis(200);
+        let mut driver = Driver::open(cfg);
+        driver.settle(2, ASSIGNMENT);
+        let at = driver
+            .lanes
+            .iter()
+            .position(|l| l.partition().0 == 1)
+            .expect("partition 1's lane");
+        let mut lane = driver.lanes.remove(at);
+        // Partition 0 receives these and its lane goes unread.
+        produce(&brokers, TOPIC, 2, 2, "held");
+        let mut read = 0;
+        wait_until(Duration::from_secs(30), "partition 1's read", || {
+            let _ = driver.source.poll_events(Duration::from_millis(10));
+            if let Some(mut batch) = lane.poll(64, Duration::from_millis(10)).expect("poll") {
+                while batch.next_payload().is_some() {
+                    read += 1;
+                }
+            }
+            read >= 2
+        });
+        driver.cp.drain();
+        let watermarks = driver.cp.take_watermarks();
+        driver.source.commit(&watermarks).expect("store");
+        wait_until(Duration::from_secs(30), "partition 1's commit", || {
+            let _ = driver.source.poll_events(Duration::from_millis(10));
+            committed(&brokers, "interval", 2)[1] == rdkafka::Offset::Offset(5)
+        });
+        assert_eq!(
+            committed(&brokers, "interval", 2)[0],
+            rdkafka::Offset::Offset(3),
+            "partition 0 keeps its start until a batch of it is acknowledged"
+        );
+    }
+
+    /// A new partition's lag series appears before any watermark moves.
+    /// Regression for #1704.
+    #[test]
+    fn a_new_partition_publishes_lag_before_its_first_commit() {
+        let (_cluster, brokers) = cluster_with_records(1);
+        let mut cfg = quiet_latest(&brokers, "lag-start");
+        cfg.statistics_interval = Duration::from_millis(100);
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || {
+            let metrics = Arc::new(spate_core::metrics::SourceMetrics::new(
+                &spate_core::metrics::ComponentLabels::new("lag-start", "source", "kafka"),
+            ));
+            let cp = Checkpointer::new();
+            let mut source = KafkaSource::new(cfg);
+            source
+                .open(SourceCtx::new(cp.handle()).with_stage_metrics(Some(metrics)))
+                .expect("open");
+            let _lanes = await_assignment(&mut source, ASSIGNMENT);
+            wait_until(Duration::from_secs(30), "lag published", || {
+                source
+                    .poll_events(Duration::from_millis(100))
+                    .expect("poll_events");
+                lag_series_count(&handle.render()) == 1
+            });
+        });
+    }
+
+    /// One accept under `latest` spends one lookup bound across the list too.
+    #[test]
+    fn one_assignment_under_latest_spends_one_lookup_bound() {
+        /// `COMMITTED_LOOKUP_TIMEOUT`, plus slack for the assign itself.
+        const BOUND: Duration = Duration::from_secs(13);
+        let (cluster, brokers) = cluster_with_records(3);
+        cluster.request_errors(
+            RDKafkaApiKey::ListOffsets,
+            &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_NOT_LEADER_FOR_PARTITION; 3],
+        );
+        let mut cfg = latest_config(&brokers, "slow-list", 3);
+        cfg.statistics_interval = Duration::ZERO;
+        let mut source = KafkaSource::new(cfg);
+        let cp = Checkpointer::new();
+        source.open(SourceCtx::new(cp.handle())).expect("open");
+        let deadline = Instant::now() + Duration::from_secs(120);
+        loop {
+            assert!(Instant::now() < deadline, "no assignment");
+            let started = Instant::now();
+            let outcome = source.poll_events(Duration::from_millis(100));
+            let took = started.elapsed();
+            assert!(took <= BOUND, "one poll blocked for {took:?}");
+            if let Ok(SourceEvent::LanesAssigned(lanes)) = outcome
+                && lanes.len() == 3
+            {
+                break;
+            }
+        }
+    }
+
+    /// A start commit's wait stays inside the broker's own bound, one
+    /// `socket.timeout.ms` here, with slack.
+    #[test]
+    fn a_start_commit_waits_outside_the_lookup_bound() {
+        const BOUND: Duration = Duration::from_secs(25);
+        let (_cluster, brokers) = cluster_with_records(1);
+        let mut cfg = quiet_latest(&brokers, "commit-bound");
+        cfg.rdkafka
+            .insert("socket.timeout.ms".into(), "2000".into());
+        let mut source = KafkaSource::new(cfg);
+        let cp = Checkpointer::new();
+        source.open(SourceCtx::new(cp.handle())).expect("open");
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            assert!(Instant::now() < deadline, "no assignment");
+            let started = Instant::now();
+            let outcome = source.poll_events(Duration::from_millis(100));
+            assert!(
+                started.elapsed() <= BOUND,
+                "blocked {:?}",
+                started.elapsed()
+            );
+            if matches!(outcome, Ok(SourceEvent::LanesAssigned(_))) {
+                break;
+            }
         }
     }
 }

@@ -22,7 +22,7 @@ need `spate` and `spate-test`, the latter as a dev-dependency.
 |---|---|---|
 | `memory_source()` → `MemorySource` | `SourceHandle` | Scripts lane assignments/revocations, pushes payloads, observes commits and pauses. |
 | `capture_sink(shards, replicas)` → `CaptureSink` | `SinkScript` | A full `SinkBundle` over a `CaptureWriter`; records every write, scripts failures and probe health. |
-| `passthrough_runtime(pipeline, source, sink, encoder, options)` → `PipelineRuntime` | — | Assembles the usual test pipeline: one chain passes payloads unchanged to one sink, with signal handling off. |
+| [`passthrough_runtime`](https://docs.rs/spate-test/latest/spate_test/fn.passthrough_runtime.html) | — | Assembles the usual test pipeline: one chain from a source through an encoder to one sink, with signal handling off. |
 | `TestDeserializer` | — | Payload → records: `passthrough()`, `split_on(b',')`, `fail_on_prefix(...)` for poison payloads. |
 | `TestEncoder` / `decode_rows` | — | Length-prefixed row encoder whose frames tests can decode back into rows. |
 

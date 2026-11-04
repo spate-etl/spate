@@ -1,5 +1,5 @@
-//! The whole-pipeline assembly most tests share: payloads pass through
-//! unchanged from a source to one sink.
+//! A whole-pipeline assembly for tests: one chain from a source through an
+//! encoder to one sink.
 
 use spate_core::deser::{BytesPassthrough, Owned};
 use spate_core::ops::chain_owned;
@@ -7,8 +7,8 @@ use spate_core::pipeline::{Pipeline, PipelineRuntime, RuntimeOptions};
 use spate_core::sink::{KeyHashRouter, RowEncoder, SinkBundle};
 use spate_core::source::Source;
 
-/// Assembles `pipeline` into a runtime that passes `source`'s payloads through
-/// `encoder` to `sink`, with one chain named `main`.
+/// Assembles `pipeline`, which holds no sink yet, into a runtime that passes
+/// `source`'s payloads through `encoder` to `sink`, with one chain named `main`.
 ///
 /// Signal handling is off whatever `options` says, since a test stops the run
 /// through [`PipelineRuntime::shutdown_handle`]. Everything else in `options`
@@ -20,16 +20,23 @@ use spate_core::source::Source;
 ///
 /// # Examples
 ///
-/// ```no_run
+/// ```
 /// use spate_core::config::PipelineConfig;
 /// use spate_core::pipeline::{Pipeline, RuntimeOptions};
-/// use spate_test::{PipelineRun, TestEncoder, capture_sink, memory_source, passthrough_runtime};
+/// use spate_test::{
+///     PipelineRun, TestEncoder, capture_sink, memory_source, passthrough_runtime, unique_name,
+/// };
 ///
-/// let config = PipelineConfig::from_str(
-///     "pipeline: { name: docs, threads: 1, io_threads: 1 }\n\
-///      source: { memory: {} }\n\
-///      sink: { capture: {} }\n",
-/// )
+/// let config = PipelineConfig::from_str(&format!(
+///     r#"
+/// pipeline: {{ name: {name}, threads: 1, io_threads: 1 }}
+/// admin: {{ listen: none }}
+/// metrics: {{ exporter: none }}
+/// source: {{ memory: {{}} }}
+/// sink: {{ capture: {{}} }}
+/// "#,
+///     name = unique_name("docs"),
+/// ))
 /// .expect("config");
 /// let (source, _handle) = memory_source();
 /// let (sink, _script) = capture_sink(1, 1);
@@ -41,6 +48,7 @@ use spate_core::source::Source;
 /// shutdown.trigger();
 /// run.join().expect("clean exit");
 /// ```
+#[must_use]
 pub fn passthrough_runtime<S, B, E>(
     pipeline: Pipeline,
     source: S,

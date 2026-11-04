@@ -2399,8 +2399,11 @@ fn one_assignment_spends_one_lookup_bound() {
             took <= BOUND,
             "one poll_events call blocked the controller thread for {took:?}"
         );
-        if let Ok(SourceEvent::LanesAssigned(lanes)) = outcome {
-            assert_eq!(lanes.len(), 3);
+        // A consumer that joins after the hold ended starts a later epoch, so
+        // this waits for the accept that carries every lane.
+        if let Ok(SourceEvent::LanesAssigned(lanes)) = outcome
+            && lanes.len() == 3
+        {
             return;
         }
     }

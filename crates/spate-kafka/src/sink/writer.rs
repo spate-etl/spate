@@ -26,6 +26,7 @@ use crate::sink::metrics::KafkaSinkStatsMetrics;
 use rdkafka::error::RDKafkaErrorCode;
 use rdkafka::message::{Header, OwnedHeaders};
 use rdkafka::producer::{BaseRecord, Producer, ThreadedProducer};
+use spate_core::backoff::Backoff;
 use spate_core::clock::tokio::Clock as IoClock;
 use spate_core::error::{ErrorClass, SinkError};
 use spate_core::sink::{SealedBatch, ShardWriter, SinkMetricsCtx};
@@ -39,11 +40,11 @@ use std::time::Duration;
 /// backoff.
 pub(crate) const DELIVERY_GRACE: Duration = Duration::from_secs(5);
 
-/// Queue-full backoff bounds: librdkafka signals queue-full synchronously
+/// Queue-full backoff schedule: librdkafka signals queue-full synchronously
 /// from `send`; the writer sleeps and retries that message while the
 /// producer's poll thread drains the queue.
-const QUEUE_FULL_BACKOFF_INITIAL: Duration = Duration::from_millis(10);
-const QUEUE_FULL_BACKOFF_MAX: Duration = Duration::from_millis(250);
+const QUEUE_FULL_BACKOFF: Backoff =
+    Backoff::new(Duration::from_millis(10), Duration::from_millis(250));
 
 /// How long a readiness probe waits for topic metadata.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -208,7 +209,7 @@ impl ShardWriter for KafkaWriter {
                 record = record.headers(headers);
             }
 
-            let mut backoff = QUEUE_FULL_BACKOFF_INITIAL;
+            let mut backoff = QUEUE_FULL_BACKOFF;
             loop {
                 match endpoint.producer.send(record) {
                     Ok(()) => break,
@@ -228,8 +229,7 @@ impl ShardWriter for KafkaWriter {
                         }
                         // Real time: it paces librdkafka's queue drain, which
                         // runs on the poll thread's own clock.
-                        tokio::time::sleep(backoff).await;
-                        backoff = (backoff * 2).min(QUEUE_FULL_BACKOFF_MAX);
+                        tokio::time::sleep(backoff.next_delay()).await;
                         record = returned;
                     }
                     Err((error, _returned)) => {

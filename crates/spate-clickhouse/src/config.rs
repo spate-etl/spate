@@ -279,6 +279,11 @@ impl ClickHouseSinkConfig {
             distributed_check: None,
         }
     }
+
+    /// The worker-pool tuning the four pool sections describe.
+    fn pool(&self) -> SinkPoolConfig {
+        SinkPoolConfig::new(self.batch, self.inflight, self.retry, self.breaker)
+    }
 }
 
 /// One shard's replica endpoints.
@@ -756,7 +761,7 @@ fn build_with(
         }
     });
 
-    let pool = SinkPoolConfig::new(cfg.batch, cfg.inflight, cfg.retry, cfg.breaker);
+    let pool = cfg.pool();
 
     Ok(ClickHouseSinkBuilder {
         cfg,

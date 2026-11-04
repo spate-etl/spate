@@ -308,6 +308,7 @@ fn passed(client: &Container<GenericImage>, arm: &str) -> String {
 /// from the host's cargo registry, and returns its path under `out`.
 ///
 /// The build runs as the owner of `out`, so the test can remove what it writes.
+#[allow(clippy::print_stderr)]
 fn build_system_linked(image: &str, tag: &str, out: &Path) -> PathBuf {
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
@@ -327,6 +328,8 @@ fn build_system_linked(image: &str, tag: &str, out: &Path) -> PathBuf {
         mkdir -p \"$CARGO_HOME/registry\"
         cp -R /registry/index /registry/cache \"$CARGO_HOME/registry/\"
         cargo test -p spate-kafka --features tls --test tls_system_ca --no-run --offline --locked
+        du -sh /registry/cache \"$CARGO_HOME\" {BUILDER_TARGET_DIR}
+        df -h /
         cp \"$(find {BUILDER_TARGET_DIR}/debug/deps -maxdepth 1 -type f -name 'tls_system_ca-*' ! -name '*.d')\" /out/tls_system_ca"
     );
     let mut builder: ContainerRequest<GenericImage> = GenericImage::new(image, tag)
@@ -363,6 +366,12 @@ fn build_system_linked(image: &str, tag: &str, out: &Path) -> PathBuf {
         Some(0),
         "system OpenSSL build failed: {}",
         String::from_utf8_lossy(&builder.stderr_to_vec().expect("stderr"))
+    );
+    // A passing test's output is captured, so the figures reach the job log
+    // only through this line and the docker profile's `success-output`.
+    eprintln!(
+        "nested build disk figures:\n{}",
+        String::from_utf8_lossy(&builder.stdout_to_vec().expect("stdout"))
     );
     out.join("tls_system_ca")
 }

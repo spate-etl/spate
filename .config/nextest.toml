@@ -32,6 +32,9 @@ slow-timeout = { period = "120s" }
 # annotation through the JUnit report below, so a repeat is visible rather than
 # silently green. Delete this line once a retry arrives with a cause attached.
 retries = 1
+# A passing container test's captured output, such as the nested build's disk
+# figures, reaches the job log only when passing output is kept.
+success-output = "final"
 
 # What cargo-mutants runs, through `.cargo/mutants.toml`. A mutant is decided
 # by its first failing test, so the rest of the suite is not run.

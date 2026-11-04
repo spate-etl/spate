@@ -49,9 +49,9 @@ pub(crate) const CHECKPOINT_EVERY: usize = 1000;
 /// retryable before the run fails.
 pub(crate) const LISTER_PUBLISH_ATTEMPTS: u32 = 5;
 
-/// The wait before the lister publishes a rejected unit again, doubled on
-/// each later attempt.
-pub(crate) const LISTER_RETRY_BASE: Duration = Duration::from_millis(200);
+/// The lister's first wait before it publishes a rejected unit again: the
+/// crate's [`RETRY_BASE`](crate::fetch::RETRY_BASE).
+pub(crate) const LISTER_RETRY_BASE: Duration = crate::fetch::RETRY_BASE;
 
 /// One lister run over a listing prefix.
 pub(crate) struct Lister {
@@ -295,6 +295,7 @@ impl Lister {
             mut confirmation,
         } = pending;
         let mut attempt = 1;
+        let mut backoff = crate::fetch::retry_backoff(self.retry_base);
         loop {
             match confirmation.await {
                 Ok(()) => return Ok(()),
@@ -312,7 +313,7 @@ impl Lister {
                     );
                     // Tokio's own timer, so a frozen test clock cannot hold
                     // a retrying publish.
-                    tokio::time::sleep(self.retry_base * 2u32.pow(attempt - 1)).await;
+                    tokio::time::sleep(backoff.next_delay()).await;
                     confirmation = self.feed.publish(unit.clone());
                     attempt += 1;
                 }
@@ -2247,8 +2248,28 @@ mod tests {
         assert!(is_marker(&job.end().await.unwrap()));
     }
 
+    /// Pins that each unit the feed rejects waits from the retry base: two
+    /// units each rejected once wait 200 ms apiece, on paused tokio time.
+    #[tokio::test(start_paused = true)]
+    async fn each_rejected_unit_waits_from_the_retry_base() {
+        let job = Job::new();
+        job.put_rows(&["data/a", "data/b"]).await;
+        let (feed, script) = spate_test::scripted_feed();
+        for _ in 0..2 {
+            script.refuse_next_publish(FeedErrorKind::Retryable);
+        }
+        let mut lister = job.lister(Arc::new(feed), CHECKPOINT_EVERY);
+        // The objects' size, so each is a unit of its own.
+        lister.packing.target_bytes = 4;
+        lister.retry_base = LISTER_RETRY_BASE;
+        let started = tokio::time::Instant::now();
+        lister.run().await.unwrap();
+        assert_eq!(started.elapsed(), Duration::from_millis(200 + 200));
+        assert_eq!(script.published().len(), 4);
+    }
+
     /// Pins that a retryable rejection logs its retry at DEBUG and at no
-    /// higher level.
+    /// higher level, numbered from its first attempt.
     #[test]
     fn a_retry_logs_at_debug() {
         let rt = runtime();
@@ -2266,6 +2287,7 @@ mod tests {
             .collect();
         assert_eq!(retries.len(), 1, "{lines:#?}");
         assert!(retries[0].contains("DEBUG"), "{lines:#?}");
+        assert!(retries[0].contains("attempt=1 "), "{lines:#?}");
     }
 
     /// Pins that a unit the feed rejects as retryable on every attempt fails

@@ -784,7 +784,7 @@ mod tests {
     }
 
     /// A resolved fetch clears the id's backoff, so a later transient
-    /// failure waits 200 ms again, not the cap the id had reached.
+    /// failure waits 200 ms again.
     #[test]
     fn a_resolved_id_backs_off_from_200ms_again() {
         let clock = TestClock::frozen();
@@ -803,8 +803,24 @@ mod tests {
         );
     }
 
+    /// A second transient failure steps the id's backoff, so the next fetch
+    /// waits 400 ms from that failure.
+    #[test]
+    fn a_second_transient_failure_waits_400ms() {
+        let clock = TestClock::frozen();
+        let sync = SyncClock::new(clock.clone());
+        let mut backoff = QualityMap::default();
+        settle(&mut backoff, 15, FetchOutcome::Transient, &sync);
+        clock.advance(Duration::from_millis(200));
+        settle(&mut backoff, 15, FetchOutcome::Transient, &sync);
+        assert_eq!(
+            backoff[&15].next_allowed,
+            clock.now() + Duration::from_millis(400)
+        );
+    }
+
     /// A transient failure stamped where the delay would pass the end of the
-    /// `Instant` range admits the next fetch at once instead of panicking.
+    /// `Instant` range admits the next fetch at once.
     #[test]
     fn a_deadline_past_the_instant_range_admits_at_once() {
         let mut far = TestClock::frozen().now();

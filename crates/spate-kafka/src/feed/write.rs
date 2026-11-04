@@ -9,6 +9,7 @@ use super::producer::FeedProducerContext;
 use rdkafka::error::{KafkaError, RDKafkaErrorCode};
 use rdkafka::message::{Header, OwnedHeaders};
 use rdkafka::producer::{BaseRecord, ThreadedProducer};
+use spate_core::backoff::Backoff;
 use spate_core::clock::{Clock, Stopwatch};
 use spate_core::error::ErrorClass;
 use spate_core::feed::{Confirmer, Receipt, Unit};
@@ -21,8 +22,9 @@ use std::time::Duration;
 /// writes it for an operator and never reads it.
 pub(crate) const DELIVERIES_HEADER: &str = "spate.deliveries";
 
-pub(crate) const BACKOFF_START: Duration = Duration::from_millis(200);
-const BACKOFF_MAX: Duration = Duration::from_secs(5);
+/// The resend schedule of a write that fails transiently: 200 ms doubling
+/// to 5 s.
+const RESEND_BACKOFF: Backoff = Backoff::new(Duration::from_millis(200), Duration::from_secs(5));
 
 /// The feed's producer.
 pub(crate) type Producer = ThreadedProducer<FeedProducerContext>;
@@ -119,8 +121,9 @@ pub(crate) struct Move {
     pub(crate) finish: Finish,
     /// When the first attempt was enqueued.
     pub(crate) started: Stopwatch,
-    /// The wait before the next attempt, should this one fail.
-    pub(crate) backoff: Duration,
+    /// The write's resend schedule, whose next step is the wait should this
+    /// attempt fail.
+    pub(crate) backoff: Backoff,
 }
 
 impl Move {
@@ -141,7 +144,7 @@ impl Move {
             deliveries,
             finish,
             started: Stopwatch::start(clock),
-            backoff: BACKOFF_START,
+            backoff: RESEND_BACKOFF,
         }
     }
 }
@@ -159,7 +162,7 @@ pub(crate) struct Attempt {
     pub(crate) identity: PublishId,
     pub(crate) attempt_partition: i32,
     pub(crate) started: Stopwatch,
-    pub(crate) backoff: Duration,
+    pub(crate) backoff: Backoff,
 }
 
 impl Attempt {
@@ -182,7 +185,7 @@ impl Attempt {
             identity,
             attempt_partition: partition,
             started: Stopwatch::start(clock),
-            backoff: BACKOFF_START,
+            backoff: RESEND_BACKOFF,
         }
     }
 }
@@ -193,7 +196,7 @@ impl Attempt {
 pub(crate) struct Tombstone {
     pub(crate) message: Outgoing,
     pub(crate) position: Position,
-    pub(crate) backoff: Duration,
+    pub(crate) backoff: Backoff,
 }
 
 impl Tombstone {
@@ -208,7 +211,7 @@ impl Tombstone {
         Tombstone {
             message: Outgoing::attempt_record(topic, identity, partition, None),
             position,
-            backoff: BACKOFF_START,
+            backoff: RESEND_BACKOFF,
         }
     }
 }
@@ -237,9 +240,9 @@ impl Write {
         }
     }
 
-    /// The wait before the next attempt of a write the feed sends again;
-    /// `None` for a publish, whose failure goes to its publisher.
-    pub(crate) fn backoff_mut(&mut self) -> Option<&mut Duration> {
+    /// The resend schedule of a write the feed sends again; `None` for a
+    /// publish, whose failure goes to its publisher.
+    pub(crate) fn backoff_mut(&mut self) -> Option<&mut Backoff> {
         match self {
             Write::Publish { .. } => None,
             Write::Move(Move { backoff, .. })
@@ -300,11 +303,6 @@ pub(crate) fn classify(code: Option<RDKafkaErrorCode>) -> WriteClass {
             _ => WriteClass::Retryable,
         },
     }
-}
-
-/// The wait after `backoff` for a write that failed again.
-pub(crate) fn next_backoff(backoff: Duration) -> Duration {
-    (backoff * 2).min(BACKOFF_MAX)
 }
 
 /// Where a unit failed on delivery `deliveries` goes under `cap`.

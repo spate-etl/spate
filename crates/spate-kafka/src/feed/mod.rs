@@ -478,8 +478,7 @@ impl Core {
                 let Some(backoff) = write.backoff_mut() else {
                     return;
                 };
-                let retry_in = *backoff;
-                *backoff = write::next_backoff(retry_in);
+                let retry_in = backoff.next_delay();
                 tracing::warn!(
                     %topic,
                     error = %failure.reason,
@@ -487,7 +486,10 @@ impl Core {
                     "writing {} failed; sending it again",
                     write.what()
                 );
-                let due = self.clock.now() + retry_in;
+                let now = self.clock.now();
+                // A deadline past the `Instant` range is due at once. The
+                // overflow panic would end the thread that settled the write.
+                let due = now.checked_add(retry_in).unwrap_or(now);
                 let mut st = self.lock();
                 // A resent attempt write keeps its share of `admitting`
                 // until it settles or `take_due` drops it.

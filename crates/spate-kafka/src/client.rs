@@ -19,7 +19,7 @@ use rdkafka::ClientConfig;
 use rdkafka::TopicPartitionList;
 use rdkafka::client::ClientContext;
 use rdkafka::config::{FromClientConfigAndContext, RDKafkaLogLevel};
-use rdkafka::consumer::{BaseConsumer, ConsumerContext};
+use rdkafka::consumer::{BaseConsumer, Consumer as _, ConsumerContext};
 use rdkafka::error::KafkaError;
 use rdkafka::producer::{DeliveryResult, ProducerContext};
 use rdkafka::statistics::Statistics;
@@ -386,6 +386,26 @@ pub(crate) trait Hooks: Send + Sync + 'static {
 
 impl Hooks for () {}
 
+/// The generation id `consumer` holds, or `-1` when it holds none: it has not
+/// joined, the group has told it its generation is gone, or it has no group. The
+/// call blocks on the client's main thread, as `assign` does.
+pub(crate) fn group_generation<C: ConsumerContext>(consumer: &BaseConsumer<C>) -> i32 {
+    // SAFETY: the client pointer is valid while `consumer` is borrowed. The
+    // metadata is owned here, is checked for NULL before it is read, and is
+    // destroyed before the block ends.
+    unsafe {
+        let metadata =
+            rdkafka::bindings::rd_kafka_consumer_group_metadata(consumer.client().native_ptr());
+        if metadata.is_null() {
+            return -1;
+        }
+        let generation =
+            rdkafka::bindings::rd_kafka_consumer_group_metadata_generation_id(metadata);
+        rdkafka::bindings::rd_kafka_consumer_group_metadata_destroy(metadata);
+        generation
+    }
+}
+
 /// Log a librdkafka error event under the `librdkafka` target, with the
 /// client's `instance` as the `consumer` field when it has one.
 pub(crate) fn log_error(error: &KafkaError, reason: &str, instance: Option<usize>) {
@@ -548,6 +568,17 @@ mod tests {
     use rdkafka::consumer::BaseConsumer;
     use rdkafka::producer::BaseProducer;
     use spate_core::config::ConfigError;
+
+    /// A consumer with no group holds no group metadata, and reads no
+    /// generation.
+    #[test]
+    fn a_consumer_with_no_group_reads_no_generation() {
+        let consumer: BaseConsumer<crate::context::SourceContext> = testing::raw(
+            &[("bootstrap.servers", "127.0.0.1:1")],
+            SourceHooks::default(),
+        );
+        assert_eq!(group_generation(&consumer), -1);
+    }
 
     fn map(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
         pairs

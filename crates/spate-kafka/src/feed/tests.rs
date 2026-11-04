@@ -2080,17 +2080,7 @@ mod cluster {
 
     /// The offset `group` has committed for the work topic's partition.
     pub(super) fn committed(brokers: &str, group: &str) -> Option<i64> {
-        let probe: BaseConsumer = raw_config()
-            .set("bootstrap.servers", brokers)
-            .set("group.id", group)
-            .build()
-            .unwrap();
-        let mut tpl = TopicPartitionList::new();
-        tpl.add_partition("units", 0);
-        let committed = probe
-            .committed_offsets(tpl, Duration::from_secs(10))
-            .unwrap();
-        match committed.elements()[0].offset() {
+        match crate::testutil::committed_offsets(brokers, group, "units", 0..1)[0] {
             Offset::Offset(offset) => Some(offset),
             _ => None,
         }

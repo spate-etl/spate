@@ -4,22 +4,159 @@
 // A per-item `expect` goes unfulfilled in whichever target uses the item.
 #![allow(dead_code, reason = "each target uses a different subset")]
 
-use rdkafka::ClientConfig;
+use rdkafka::client::ClientContext;
 use rdkafka::config::RDKafkaLogLevel;
-use rdkafka::consumer::{BaseConsumer, Consumer};
+use rdkafka::consumer::{BaseConsumer, CommitMode, Consumer, ConsumerContext};
 use rdkafka::message::BorrowedMessage;
 use rdkafka::producer::{BaseProducer, BaseRecord, Producer};
+use rdkafka::types::RDKafkaRespErr;
+use rdkafka::{ClientConfig, Offset, TopicPartitionList};
 use spate_core::error::{ErrorClass, SourceError};
-use spate_core::source::{PayloadBatch, Source, SourceEvent, SourceLane};
+use spate_core::record::PartitionId;
+use spate_core::source::{DrainBarrier, LaneId, PayloadBatch, Source, SourceEvent, SourceLane};
 use spate_kafka::KafkaSource;
 use spate_test_support::container_image;
 use std::io::{Read as _, Write as _};
+use std::mem::ManuallyDrop;
 use std::net::TcpStream;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use testcontainers::{ContainerRequest, ImageExt};
 use testcontainers_modules::kafka::apache::Kafka;
 
 pub(crate) mod feed;
+
+/// How the member under test answers the offer it held.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Answer {
+    /// `assign` of an empty list.
+    Empty,
+    /// `assign` of the offer.
+    Offer,
+}
+
+/// A consumer context that records each rebalance, answering it inline only
+/// when told to.
+struct Recording {
+    answers: bool,
+    offers: Mutex<Vec<TopicPartitionList>>,
+    revocations: Mutex<usize>,
+}
+
+impl ClientContext for Recording {}
+
+impl ConsumerContext for Recording {
+    fn rebalance(
+        &self,
+        base_consumer: &BaseConsumer<Self>,
+        err: RDKafkaRespErr,
+        tpl: &mut TopicPartitionList,
+    ) {
+        if err == RDKafkaRespErr::RD_KAFKA_RESP_ERR__ASSIGN_PARTITIONS {
+            self.offers.lock().expect("offers").push(tpl.clone());
+            if self.answers {
+                base_consumer.assign(tpl).expect("assign");
+            }
+        } else {
+            *self.revocations.lock().expect("revocations") += 1;
+            if self.answers {
+                base_consumer.unassign().expect("unassign");
+            }
+        }
+    }
+}
+
+/// Pins the client and group sequence around a member that holds an offer past
+/// the group's patience. A joins alone and leaves its offer unanswered. B joins
+/// and is offered A's partition, while A's client reports nothing lost. Once A
+/// answers with `answer`, a revocation marked lost follows, and `unassign` brings
+/// a new offer. [`Answer::Empty`] sends no commit, as a discard does, so A's next
+/// heartbeat brings the revocation. [`Answer::Offer`] commits the partition, the
+/// group refuses that commit, and its refusal brings the revocation.
+pub(crate) fn a_member_that_never_answers_its_offer(
+    brokers: &str,
+    topic: &str,
+    group: &str,
+    answer: Answer,
+) {
+    // Neither consumer closes, on success or on a panic: closing A while it
+    // holds an unanswered offer waits on an answer that never comes.
+    let member = |answers| -> ManuallyDrop<BaseConsumer<Recording>> {
+        let consumer: BaseConsumer<Recording> = raw_config()
+            .set("bootstrap.servers", brokers)
+            .set("group.id", group)
+            .set("session.timeout.ms", "6000")
+            .set("max.poll.interval.ms", "6000")
+            .set("heartbeat.interval.ms", "1000")
+            .set("enable.auto.commit", "false")
+            .build_with(Recording {
+                answers,
+                offers: Mutex::new(Vec::new()),
+                revocations: Mutex::new(0),
+            })
+            .expect("consumer");
+        consumer.subscribe(&[topic]).expect("subscribe");
+        ManuallyDrop::new(consumer)
+    };
+    let offers = |c: &BaseConsumer<Recording>| c.context().offers.lock().expect("offers").len();
+    let revocations =
+        |c: &BaseConsumer<Recording>| *c.context().revocations.lock().expect("revocations");
+
+    let a = member(false);
+    spate_test::wait_until(Duration::from_secs(60), "A's offer", || {
+        let _ = a.poll(Duration::from_millis(100));
+        offers(&a) == 1
+    });
+    let offer = a.context().offers.lock().expect("offers")[0].clone();
+    assert!(offer.count() > 0, "A was offered the topic");
+    let partition = offer.elements()[0].partition();
+
+    let b = member(true);
+    spate_test::wait_until(
+        Duration::from_secs(60),
+        "B's offer of A's partition",
+        || {
+            let _ = a.poll(Duration::from_millis(50));
+            let _ = b.poll(Duration::from_millis(50));
+            b.context()
+                .offers
+                .lock()
+                .expect("offers")
+                .iter()
+                .any(|o| o.elements().iter().any(|e| e.partition() == partition))
+        },
+    );
+    assert!(!a.assignment_lost(), "a held member is not marked lost");
+
+    match answer {
+        Answer::Empty => a.assign(&TopicPartitionList::new()).expect("assign empty"),
+        Answer::Offer => a.assign(&offer).expect("assign the offer"),
+    }
+    if matches!(answer, Answer::Offer) {
+        let mut commit = TopicPartitionList::new();
+        commit
+            .add_partition_offset(topic, partition, Offset::Offset(1))
+            .expect("offset");
+        a.commit(&commit, CommitMode::Sync)
+            .expect_err("the group refuses a commit from the member it left");
+    }
+
+    spate_test::wait_until(
+        Duration::from_secs(60),
+        "A's revocation marked lost",
+        || {
+            let _ = a.poll(Duration::from_millis(50));
+            let _ = b.poll(Duration::from_millis(50));
+            revocations(&a) > 0 && a.assignment_lost()
+        },
+    );
+    a.unassign().expect("unassign");
+    spate_test::wait_until(Duration::from_secs(60), "a new offer for A", || {
+        let _ = a.poll(Duration::from_millis(50));
+        let _ = b.poll(Duration::from_millis(50));
+        offers(&a) >= 2
+    });
+}
 
 /// A client configuration a test builds itself, outside the crate's client
 /// factory: a seeding producer, a reading consumer, an admin client.
@@ -155,20 +292,42 @@ pub(crate) fn consume<T>(
     out
 }
 
+/// The reason `outcome` failed retryably, which the runtime logs and carries
+/// on from. Panics with `call` on any other failure.
+pub(crate) fn retryable<T>(call: &str, outcome: Result<T, SourceError>) -> Result<T, String> {
+    match outcome {
+        Ok(value) => Ok(value),
+        Err(SourceError::Client {
+            class: ErrorClass::Retryable,
+            reason,
+        }) => Err(reason),
+        Err(e) => panic!("{call}: {e}"),
+    }
+}
+
 /// Serve the source's control plane once. Panics on any event but `Idle` and
 /// on a non-retryable error; retryable errors are appended to `errors`.
 pub(crate) fn serve_events(source: &mut KafkaSource, errors: &mut Vec<String>) {
-    match source.poll_events(Duration::from_millis(50)) {
+    match retryable("poll_events", source.poll_events(Duration::from_millis(50))) {
         Ok(SourceEvent::Idle) => {}
         Ok(other) => panic!("unexpected source event: {other:?}"),
-        Err(
-            e @ SourceError::Client {
-                class: ErrorClass::Retryable,
-                ..
-            },
-        ) => errors.push(e.to_string()),
-        Err(e) => panic!("poll_events: {e}"),
+        Err(reason) => errors.push(reason),
     }
+}
+
+/// Plays the runtime's part after a revocation: arrives once per lane, stores
+/// `watermarks` and returns the flush's result.
+pub(crate) fn complete_revocation(
+    source: &mut KafkaSource,
+    lanes: &[LaneId],
+    barrier: &DrainBarrier,
+    watermarks: &[(PartitionId, i64)],
+) -> Result<(), SourceError> {
+    for _ in lanes {
+        barrier.arrive();
+    }
+    source.commit(watermarks).expect("commit");
+    source.flush_commits()
 }
 
 /// Poll a lane until `want` payloads arrive, serving the source between

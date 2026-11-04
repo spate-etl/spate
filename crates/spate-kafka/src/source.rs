@@ -6,8 +6,10 @@
 //! runtime's one lane set. Assignments are held until every consumer of the
 //! rebalance has one, or for `ASSIGN_HOLD`, then accepted together as one
 //! [`SourceEvent::LanesAssigned`]; one that arrives while lanes are live drains
-//! them and accepts every consumer's partitions again as a fresh epoch. Eager
-//! assignment revokes every member in every rebalance, so the first revocation
+//! them and accepts every consumer's partitions again as a fresh epoch. Once
+//! two offers overlap, each offer below the newest generation is answered with
+//! an empty `assign`, and its consumer rejoins. Eager assignment revokes every member
+//! that has answered its last assignment, so the first revocation
 //! on any consumer drains every consumer's lanes, and each consumer is released
 //! with `unassign` once its own revocation has arrived. A consumer's retryable
 //! poll error does not hold back the source's next rebalance intent. The call
@@ -48,18 +50,20 @@
 //!    buffer until pipeline threads take the lanes over;
 //! 6. return [`SourceEvent::LanesAssigned`].
 //!
-//! **Revocation** (spans two `poll_events` calls):
+//! **Revocation** (spans two `poll_events` calls, or one with nothing live,
+//! where the consumer is released inline):
 //! 1. surface [`SourceEvent::LanesRevoked`] with a [`DrainBarrier`] sized
 //!    by lane count (the runtime's drivers arrive once per stopped lane);
 //! 2. the runtime stops the lanes, waits for the barrier, drains the
 //!    checkpointer, calls [`Source::commit`] + [`Source::flush_commits`].
-//!    The sync commit happens while this member still owns the partitions
-//!    (the rebalance is not yet acknowledged, so the group generation is
-//!    still valid);
+//!    The sync commit runs before the rebalance is acknowledged, so the
+//!    generation is valid for a member the group has kept. For a member it
+//!    removed, the client refuses the commit and the drained work replays;
 //! 3. the controller loops back into `poll_events`, which sees the pending
 //!    completion and calls `unassign()`, letting the rebalance finish.
 //!
-//! **Rebalance error** (the arbitrary-error event; spans two calls): the
+//! **Rebalance error** (the arbitrary-error event; spans two calls, or one
+//! with no live lanes): the
 //! callback completes it inline with `unassign`, because the event has no
 //! deferred form and an unacknowledged one wedges the member for the
 //! process lifetime, so ownership is gone before `poll_events` consumes
@@ -69,6 +73,20 @@
 //! empty) and the drained work replays. The next call reports the error,
 //! classified like every other consumer error; librdkafka rejoins on its
 //! own and a fresh assignment follows.
+//!
+//! **Lost revocation**: a member the client was told is out of its generation
+//! gets the same revocation event, and the steps above run. With partitions
+//! assigned, the flush fails with `AssignmentLost`, and with more than one
+//! consumer that failure is logged per consumer. A discarded consumer holds
+//! nothing, so its flush has nothing to refuse. `unassign` follows either way.
+//!
+//! **Stale held assignment**: no event reaches the source when the group
+//! removes a member holding an offer, so the offer is held like any other. If
+//! no offers overlap it is accepted, and the consumer's next heartbeat finds it
+//! out of the group. If any overlap, [`KafkaSource::accept_held`] discards each
+//! offer below the newest generation. That consumer's lost revocation drains
+//! its peers' lanes, and it rejoins after `unassign`, so a discard costs one
+//! more drain. A partition still in two offers after that is fatal.
 //!
 //! Revoked lanes' queues go silent immediately (fetching stops), and a
 //! partition split with `split_partition_queue` stays split. The split
@@ -106,7 +124,7 @@ const COMMITTED_LOOKUP_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// How long the source holds one consumer's assignment for the others of the
 /// same rebalance. librdkafka's default `heartbeat.interval.ms`, the longest a
-/// member of a rebalancing group goes before it learns of the rebalance.
+/// steady member goes before it learns of a rebalance.
 const ASSIGN_HOLD: Duration = Duration::from_secs(3);
 
 /// Since when the source has been without an assignment, and what took the
@@ -123,8 +141,9 @@ enum Phase {
     /// queued one the source has not taken.
     Joining,
     /// Offered this assignment, not yet accepted with `assign`. librdkafka
-    /// keeps the member's session alive and starts no later rebalance for it
-    /// until `assign` is called.
+    /// keeps heartbeating and answers no later rebalance for this member until
+    /// `assign` is called, so the group can elect a generation without it and
+    /// remove it.
     Held(TopicPartitionList),
     /// Its assignment is accepted.
     Assigned,
@@ -152,12 +171,33 @@ struct Member {
     /// Stands in for librdkafka's committed position in the lag statistic,
     /// which the lookup does not update.
     committed_at_assign: FastMap<i32, i64>,
+    /// The generation [`Member::group_generation`] reads in place of the
+    /// client's, since a unit test's consumer never joins a group.
+    #[cfg(test)]
+    generation: Option<i32>,
 }
 
 impl Member {
     /// Partitions this consumer holds live lanes for.
     fn live_partition_ids(&self) -> Vec<PartitionId> {
         partition_ids(self.assignment.values())
+    }
+
+    /// Give up what this consumer owns and expect it to rejoin: a late commit
+    /// for its partitions is refused again.
+    fn rejoin(&mut self) {
+        self.revoking.clear();
+        self.revoke_arrived = false;
+        self.phase = Phase::Joining;
+    }
+
+    /// The generation this consumer last joined with, or `-1` for none.
+    fn group_generation(&self) -> i32 {
+        #[cfg(test)]
+        if let Some(generation) = self.generation {
+            return generation;
+        }
+        crate::client::group_generation(&self.consumer)
     }
 }
 
@@ -265,6 +305,38 @@ fn is_fatal(error: &SourceError) -> bool {
             ..
         }
     )
+}
+
+/// The first partition two of `offers` carry, with the consumers carrying it.
+fn first_repeat(offers: &[(usize, TopicPartitionList)]) -> Option<(i32, usize, usize)> {
+    let mut seen: FastMap<i32, usize> = FastMap::default();
+    for (k, tpl) in offers {
+        for elem in tpl.elements() {
+            let partition = elem.partition();
+            if let Some(first) = seen.insert(partition, *k) {
+                return Some((partition, first, *k));
+            }
+        }
+    }
+    None
+}
+
+/// The newest generation among `(consumer, generation)` offers.
+fn newest_generation(offers: &[(usize, i32)]) -> i32 {
+    offers.iter().map(|(_, g)| *g).fold(i32::MIN, i32::max)
+}
+
+/// The consumers whose offer is stale, from each offer's `(consumer,
+/// generation)`: a generation below the newest among them, or none at all. So
+/// offers that all read no generation are all stale, offers of one valid
+/// generation are not, and the outcome does not depend on a consumer's index.
+fn stale_offers(offers: &[(usize, i32)]) -> Vec<usize> {
+    let newest = newest_generation(offers);
+    offers
+        .iter()
+        .filter(|(_, g)| *g < newest || *g < 0)
+        .map(|(k, _)| *k)
+        .collect()
 }
 
 /// The order one `poll_events` call polls `n` consumers in, starting at
@@ -477,7 +549,9 @@ impl KafkaSource {
 
     /// Accept every held assignment, and with `reassign` every assigned
     /// consumer's partitions again, as one epoch: one `LanesAssigned` with
-    /// every consumer's lanes, or `Idle` when they hold none.
+    /// every consumer's lanes, or `Idle` when they hold none. When any two
+    /// offers overlap, each offer below the newest generation is discarded
+    /// first, overlapping or not, and a partition still in two offers is fatal.
     fn accept_held(&mut self, reassign: bool) -> Result<SourceEvent<KafkaLane>, SourceError> {
         let mut offers: Vec<(usize, TopicPartitionList)> = Vec::new();
         for (k, member) in self.members.iter_mut().enumerate() {
@@ -493,19 +567,25 @@ impl KafkaSource {
                 phase => member.phase = phase,
             }
         }
-        let mut seen = Vec::new();
-        for (_, tpl) in &offers {
-            for elem in tpl.elements() {
-                if seen.contains(&elem.partition()) {
-                    return Err(SourceError::Client {
-                        class: ErrorClass::Fatal,
-                        reason: format!(
-                            "partition {} was assigned to two consumers of this source",
-                            elem.partition()
-                        ),
-                    });
-                }
-                seen.push(elem.partition());
+        if first_repeat(&offers).is_some() {
+            offers = self.discard_stale_offers(offers)?;
+            if let Some((partition, a, b)) = first_repeat(&offers) {
+                return Err(SourceError::Client {
+                    class: ErrorClass::Fatal,
+                    reason: format!(
+                        "partition {partition} was assigned to consumers {a} and {b} of this \
+                         source in generation {}",
+                        self.members[a].group_generation()
+                    ),
+                });
+            }
+            if offers.is_empty() {
+                // Nothing was accepted and no lane is left, so the assignment
+                // window is open and its deadline ends a run that never accepts
+                // one.
+                self.hold_since = None;
+                self.note_assignment_loss("every held assignment was discarded".to_owned());
+                return Ok(SourceEvent::Idle);
             }
         }
         self.hold_since = None;
@@ -537,6 +617,58 @@ impl KafkaSource {
             return Ok(SourceEvent::Idle);
         }
         Ok(SourceEvent::LanesAssigned(lanes))
+    }
+
+    /// The offers that remain once each stale one is answered and dropped, by
+    /// [`stale_offers`] over every offer's generation.
+    fn discard_stale_offers(
+        &mut self,
+        offers: Vec<(usize, TopicPartitionList)>,
+    ) -> Result<Vec<(usize, TopicPartitionList)>, SourceError> {
+        let generations: Vec<(usize, i32)> = offers
+            .iter()
+            .map(|(k, _)| (*k, self.members[*k].group_generation()))
+            .collect();
+        let newest = newest_generation(&generations);
+        let stale = stale_offers(&generations);
+        let mut kept = Vec::with_capacity(offers.len());
+        for ((k, tpl), (_, generation)) in offers.into_iter().zip(generations) {
+            if stale.contains(&k) {
+                self.discard_offer(k, &tpl, generation, newest)?;
+            } else {
+                kept.push((k, tpl));
+            }
+        }
+        Ok(kept)
+    }
+
+    /// Answer consumer `k`'s stale offer with an empty `assign`, the call that
+    /// moves it out of librdkafka's wait for an answer: `unassign` leaves it
+    /// waiting, and then no later rebalance reaches it. Its next heartbeat
+    /// finds it out of the group, which queues a revocation and a rejoin. After
+    /// a stall past `max.poll.interval.ms` it sends no heartbeat, and the
+    /// client's session timeout brings the revocation.
+    fn discard_offer(
+        &mut self,
+        k: usize,
+        tpl: &TopicPartitionList,
+        generation: i32,
+        newest: i32,
+    ) -> Result<(), SourceError> {
+        let member = &mut self.members[k];
+        member
+            .consumer
+            .assign(&TopicPartitionList::new())
+            .map_err(fatal("assign empty"))?;
+        member.rejoin();
+        tracing::warn!(
+            consumer = k,
+            partitions = tpl.count(),
+            generation,
+            newest,
+            "discarded an assignment from a generation the group has left; this consumer rejoins"
+        );
+        Ok(())
     }
 
     /// `tpl` with a concrete start offset for each partition, so `assign`
@@ -627,11 +759,7 @@ impl KafkaSource {
         if let Err(e) = member.consumer.unassign() {
             tracing::warn!(consumer = k, error = %e, "unassign after drained revocation");
         }
-        // The revoked partitions are now released; any late commit for
-        // them must be refused again.
-        member.revoking.clear();
-        member.revoke_arrived = false;
-        member.phase = Phase::Joining;
+        member.rejoin();
     }
 
     /// Move every consumer's live lanes to its `revoking` set and return
@@ -777,9 +905,9 @@ impl KafkaSource {
     }
 
     /// The next rebalance intent to act on and its consumer: a revocation or
-    /// an error on any consumer before any assignment, since every assignment
-    /// of the next generation follows every consumer's revocation of the
-    /// last. Each consumer's own intents are taken in order.
+    /// an error on any consumer before any assignment. Each consumer's own
+    /// intents are taken in order, and order across consumers follows the
+    /// index.
     fn next_intent(&self) -> Option<(usize, Intent)> {
         let mut assign = None;
         for (k, member) in self.members.iter().enumerate() {
@@ -837,10 +965,11 @@ impl KafkaSource {
                 Ok(SourceEvent::Idle)
             }
             Intent::Revoke(_) => {
-                // Eager rebalancing revokes every member's whole assignment,
-                // so every consumer of this source is revoked in this
-                // rebalance. Draining them all on the first revocation keeps
-                // a rebalance to one drain: draining each on its own event
+                // Eager rebalancing revokes every member that has answered its
+                // last assignment, so every such consumer of this source is
+                // revoked in this rebalance. Draining them all on the first
+                // revocation keeps a rebalance to one drain: draining each on
+                // its own event
                 // would leave the later consumers unrevoked, and the group
                 // waiting for them, through every earlier drain.
                 let lanes = self.revoke_all_live();
@@ -879,9 +1008,7 @@ impl KafkaSource {
                 let member = &mut self.members[k];
                 let lanes: Vec<LaneId> = member.assignment.keys().copied().collect();
                 member.assignment.clear();
-                member.revoking.clear();
-                member.revoke_arrived = false;
-                member.phase = Phase::Joining;
+                member.rejoin();
                 if self.holds_no_lanes() {
                     self.note_assignment_loss(format!("rebalance error: {code}"));
                 }
@@ -900,7 +1027,8 @@ impl KafkaSource {
     /// one, or once `ASSIGN_HOLD` has passed. One that arrives while lanes are
     /// live starts a new epoch instead: every live lane is revoked, and once
     /// drained every consumer's partitions are accepted again together, since
-    /// the runtime admits a lane set only as a whole.
+    /// the runtime admits a lane set only as a whole. [`Self::accept_held`]
+    /// states what happens to offers that overlap.
     fn settle_held(&mut self) -> Result<SourceEvent<KafkaLane>, SourceError> {
         if !self
             .members
@@ -1186,6 +1314,8 @@ impl Source for KafkaSource {
                 saw_first_assignment: false,
                 phase: Phase::Joining,
                 committed_at_assign: FastMap::default(),
+                #[cfg(test)]
+                generation: None,
             });
         }
         self.members = members;
@@ -1348,7 +1478,7 @@ impl Source for KafkaSource {
         // Every consumer commits, even after one fails, so one consumer's
         // failure does not hold back the others' stored offsets.
         let mut first_error = None;
-        for member in &self.members {
+        for (k, member) in self.members.iter().enumerate() {
             match member
                 .consumer
                 .commit_consumer_state(rdkafka::consumer::CommitMode::Sync)
@@ -1359,6 +1489,15 @@ impl Source for KafkaSource {
                     rdkafka::error::RDKafkaErrorCode::NoOffset,
                 )) => {}
                 Err(e) => {
+                    // With one consumer the controller's line on the returned
+                    // error says the same.
+                    if self.members.len() > 1 {
+                        tracing::warn!(
+                            consumer = k,
+                            error = %e,
+                            "sync commit failed; this consumer's stored offsets may replay"
+                        );
+                    }
                     first_error.get_or_insert(SourceError::Client {
                         class: ErrorClass::Retryable,
                         reason: format!("sync commit: {e}"),
@@ -1651,15 +1790,25 @@ mod tests {
         opened_consumers(cfg, &[lanes])
     }
 
-    /// An opened source with one consumer per entry of `lanes`, each with
-    /// its entry's lanes pre-seeded and its assignment accepted.
-    fn opened_consumers(mut cfg: KafkaSourceConfig, lanes: &[&[(u32, i32)]]) -> KafkaSource {
+    /// A source of `consumers` from `open`, against a broker that refuses
+    /// connections, on a frozen clock, with no assignment yet.
+    fn opened_unassigned(
+        mut cfg: KafkaSourceConfig,
+        consumers: usize,
+    ) -> (KafkaSource, Arc<TestClock>) {
         cfg.brokers = crate::testutil::refused_broker();
-        cfg.consumers = lanes.len();
+        cfg.consumers = consumers;
         let mut source = KafkaSource::new(cfg);
-        freeze(&mut source);
+        let clock = freeze(&mut source);
         let cp = Checkpointer::new();
         source.open(SourceCtx::new(cp.handle())).expect("open");
+        (source, clock)
+    }
+
+    /// An opened source with one consumer per entry of `lanes`, each with
+    /// its entry's lanes pre-seeded and its assignment accepted.
+    fn opened_consumers(cfg: KafkaSourceConfig, lanes: &[&[(u32, i32)]]) -> KafkaSource {
+        let (mut source, _) = opened_unassigned(cfg, lanes.len());
         // A source that has had an assignment: past the startup window, so
         // `assignment_timeout` governs what follows.
         source.saw_first_assignment = true;
@@ -1937,19 +2086,407 @@ mod tests {
             );
         }
 
-        /// Two consumers offered one partition is a broken assignment.
+        /// Two consumers offered one partition in one generation is a broken
+        /// assignment.
         #[test]
         fn a_partition_in_two_held_assignments_is_fatal() {
             let mut source = opened_consumers(test_config(), &[&[], &[]]);
             source.members[0].phase = Phase::Held(tpl_of(&[3]));
             source.members[1].phase = Phase::Held(tpl_of(&[1, 3]));
+            source.members[0].generation = Some(7);
+            source.members[1].generation = Some(7);
             match source.settle_held() {
                 Err(SourceError::Client { class, reason }) => {
                     assert_eq!(class, ErrorClass::Fatal);
-                    assert!(reason.contains("partition 3"), "{reason}");
+                    assert!(
+                        reason.contains("partition 3")
+                            && reason.contains("consumers 0 and 1")
+                            && reason.contains("generation 7"),
+                        "{reason}"
+                    );
                 }
                 other => panic!("expected a fatal error, got {other:?}"),
             }
+        }
+
+        /// Offers of `partitions` per consumer, each held at `generation`.
+        fn hold_offers(
+            source: &mut KafkaSource,
+            offers: &[(usize, &[i32], i32)],
+        ) -> Vec<(usize, TopicPartitionList)> {
+            offers
+                .iter()
+                .map(|&(k, partitions, generation)| {
+                    source.members[k].generation = Some(generation);
+                    (k, tpl_of(partitions))
+                })
+                .collect()
+        }
+
+        /// An offer is stale below the newest generation among the offers, or
+        /// with no generation at all, whatever its consumer's index.
+        #[test]
+        fn stale_offers_compare_generations() {
+            assert_eq!(stale_offers(&[(0, 5), (1, 6)]), [0]);
+            assert_eq!(stale_offers(&[(0, 6), (1, 5)]), [1]);
+            assert_eq!(stale_offers(&[(0, 7), (1, 7)]), [] as [usize; 0]);
+            assert_eq!(stale_offers(&[(0, 0), (1, 0)]), [] as [usize; 0]);
+            assert_eq!(stale_offers(&[(0, -1), (1, -1)]), [0, 1]);
+            assert_eq!(stale_offers(&[(0, -1), (1, 3)]), [0]);
+        }
+
+        /// Of two offers carrying a partition, the one below the newer
+        /// generation is the one discarded, on either consumer, with one warn
+        /// naming the consumer and both generations. Regression for #1685.
+        #[test]
+        fn a_stale_offer_is_recognised_on_either_consumer() {
+            for (stale, fresh) in [(0, 1), (1, 0)] {
+                let mut source = opened_consumers(test_config(), &[&[], &[]]);
+                let offers = hold_offers(&mut source, &[(0, &[0], 0), (1, &[0], 0)]);
+                source.members[stale].generation = Some(5);
+                source.members[fresh].generation = Some(6);
+                assert_eq!(first_repeat(&offers), Some((0, 0, 1)));
+
+                let mut kept = None;
+                let warned = spate_test::capture_logs(tracing::Level::WARN, || {
+                    kept = Some(source.discard_stale_offers(offers).expect("discard"));
+                });
+                let kept: Vec<usize> = kept.expect("ran").into_iter().map(|(k, _)| k).collect();
+                assert_eq!(kept, [fresh]);
+                assert!(matches!(source.members[stale].phase, Phase::Joining));
+                assert!(source.committable_partitions(stale).is_empty());
+                assert_eq!(
+                    source.members[stale]
+                        .consumer
+                        .assignment()
+                        .expect("assignment")
+                        .count(),
+                    0,
+                    "the answer assigns nothing"
+                );
+                let discards: Vec<&String> = warned
+                    .iter()
+                    .filter(|l| l.contains("discarded an assignment"))
+                    .collect();
+                assert_eq!(discards.len(), 1, "{warned:#?}");
+                for field in [
+                    format!("consumer={stale}"),
+                    "partitions=1".to_owned(),
+                    "generation=5".to_owned(),
+                    "newest=6".to_owned(),
+                ] {
+                    assert!(discards[0].contains(&field), "{field}: {warned:#?}");
+                }
+            }
+        }
+
+        /// A stale offer goes whole: the partitions no newer offer carries
+        /// belong to no consumer of this source until the group offers them.
+        #[test]
+        fn a_stale_offer_covering_more_partitions_loses_none() {
+            let mut source = opened_consumers(test_config(), &[&[], &[]]);
+            let offers = hold_offers(&mut source, &[(0, &[0, 1, 2, 3], 5), (1, &[0, 1], 6)]);
+            let kept = source.discard_stale_offers(offers).expect("discard");
+            assert_eq!(kept.len(), 1);
+            assert_eq!(kept[0].0, 1);
+            assert!(matches!(source.members[0].phase, Phase::Joining));
+            for p in [2, 3] {
+                assert_eq!(source.owner(PartitionId(p)), None, "partition {p}");
+            }
+        }
+
+        /// A stale offer whose empty `assign` fails ends the run, since that
+        /// consumer stays in librdkafka's wait for an answer.
+        #[test]
+        fn a_failed_answer_to_a_stale_offer_is_fatal() {
+            use crate::client::testing::raw;
+            // `Drop` reads a consumer queue, which the client below does not have.
+            let mut source =
+                std::mem::ManuallyDrop::new(opened_consumers(test_config(), &[&[], &[]]));
+            let offers = hold_offers(&mut source, &[(0, &[0], 5), (1, &[0], 6)]);
+            // A client with no group refuses `assign`.
+            source.members[0].consumer = Arc::new(raw(
+                &[("bootstrap.servers", "127.0.0.1:1")],
+                SourceHooks::default(),
+            ));
+            match source.discard_stale_offers(offers) {
+                Err(SourceError::Client { class, reason }) => {
+                    assert_eq!(class, ErrorClass::Fatal, "{reason}");
+                    assert!(reason.contains("assign empty"), "{reason}");
+                }
+                other => panic!("expected a fatal error, got {other:?}"),
+            }
+        }
+
+        /// A new offer carrying a partition another consumer is revoking is
+        /// not fatal: the older consumer's partitions are not offered again,
+        /// and the newer offer takes them. Regression for #1685.
+        #[test]
+        fn an_offer_overlapping_a_revoking_set_is_not_fatal() {
+            let mut source = opened_consumers(test_config(), &[&[], &[(0, 1)]]);
+            source.members[0].generation = Some(6);
+            source.members[1].generation = Some(5);
+            push_intent_to(&source, 0, Intent::Assign(tpl_of(&[0, 1])));
+            match source.poll_events(Duration::ZERO) {
+                Ok(SourceEvent::LanesRevoked { lanes, .. }) => assert_eq!(lane_ids(&lanes), [0]),
+                other => panic!("expected the live lane drained, got {other:?}"),
+            }
+            match source.poll_events(Duration::ZERO) {
+                Ok(SourceEvent::LanesAssigned(lanes)) => {
+                    let mut partitions: Vec<u32> = lanes.iter().map(|l| l.partition().0).collect();
+                    partitions.sort_unstable();
+                    assert_eq!(partitions, [0, 1]);
+                }
+                other => panic!("expected the newer offer's lanes, got {other:?}"),
+            }
+            assert_eq!(sorted(source.committable_partitions(0)), [0, 1]);
+            assert!(source.committable_partitions(1).is_empty());
+            assert!(matches!(source.members[1].phase, Phase::Joining));
+        }
+
+        /// An offer overlapping two newer ones is the one discarded, and those
+        /// two stay.
+        #[test]
+        fn an_offer_overlapping_two_others_is_the_one_discarded() {
+            let mut source = opened_consumers(test_config(), &[&[], &[], &[]]);
+            let offers = hold_offers(&mut source, &[(0, &[0, 1], 5), (1, &[0], 6), (2, &[1], 6)]);
+            let kept: Vec<usize> = source
+                .discard_stale_offers(offers)
+                .expect("discard")
+                .into_iter()
+                .map(|(k, _)| k)
+                .collect();
+            assert_eq!(kept, [1, 2]);
+
+            let mut source = opened_consumers(test_config(), &[&[], &[], &[]]);
+            let clock = freeze(&mut source);
+            source.members[0].phase = Phase::Held(tpl_of(&[0, 1]));
+            source.members[1].phase = Phase::Held(tpl_of(&[0]));
+            source.members[2].phase = Phase::Joining;
+            source.members[0].generation = Some(5);
+            source.members[1].generation = Some(6);
+            source.hold_since = Some(source.clock.now());
+            assert!(matches!(source.settle_held(), Ok(SourceEvent::Idle)));
+            assert!(matches!(source.members[0].phase, Phase::Held(_)));
+            clock.advance(ASSIGN_HOLD);
+            match source.settle_held() {
+                Ok(SourceEvent::LanesAssigned(lanes)) => {
+                    assert_eq!(lanes.len(), 1);
+                    assert_eq!(lanes[0].partition(), PartitionId(0));
+                }
+                other => panic!("expected the newer offer's lane, got {other:?}"),
+            }
+            assert!(matches!(source.members[0].phase, Phase::Joining));
+        }
+
+        /// A third consumer's offer of an accepted partition replaces the
+        /// accepted consumers of the older generation.
+        #[test]
+        fn a_third_consumers_offer_replaces_a_stale_accepted_one() {
+            let mut source = opened_consumers(test_config(), &[&[(0, 0)], &[(1, 1)], &[]]);
+            source.members[0].generation = Some(5);
+            source.members[1].generation = Some(5);
+            source.members[2].generation = Some(6);
+            push_intent_to(&source, 2, Intent::Assign(tpl_of(&[0])));
+            match source.poll_events(Duration::ZERO) {
+                Ok(SourceEvent::LanesRevoked { lanes, .. }) => assert_eq!(lane_ids(&lanes), [0, 1]),
+                other => panic!("expected the live lanes drained, got {other:?}"),
+            }
+            match source.poll_events(Duration::ZERO) {
+                Ok(SourceEvent::LanesAssigned(lanes)) => {
+                    assert_eq!(lanes.len(), 1);
+                    assert_eq!(lanes[0].partition(), PartitionId(0));
+                }
+                other => panic!("expected one lane, got {other:?}"),
+            }
+            assert_eq!(source.committable_partitions(2), [0]);
+            assert!(source.committable_partitions(0).is_empty());
+        }
+
+        /// An offer held across a peer's revocation does not collide with the
+        /// peer's next offer.
+        #[test]
+        fn a_held_offer_outlasting_its_peers_revocation_does_not_collide() {
+            let mut source = opened_consumers(test_config(), &[&[], &[(0, 1)]]);
+            source.members[0].phase = Phase::Held(tpl_of(&[0, 1]));
+            source.members[0].generation = Some(5);
+            source.members[1].generation = Some(6);
+            freeze(&mut source);
+            push_intent_to(&source, 1, Intent::Revoke(tpl_of(&[1])));
+            match source.poll_events(Duration::ZERO) {
+                Ok(SourceEvent::LanesRevoked { lanes, .. }) => assert_eq!(lane_ids(&lanes), [0]),
+                other => panic!("expected the live lane drained, got {other:?}"),
+            }
+            poll_quiet(&mut source);
+            assert!(matches!(source.members[0].phase, Phase::Held(_)));
+
+            push_intent_to(&source, 1, Intent::Assign(tpl_of(&[1])));
+            match source.poll_events(Duration::ZERO) {
+                Ok(SourceEvent::LanesAssigned(lanes)) => {
+                    assert_eq!(lanes.len(), 1);
+                    assert_eq!(lanes[0].partition(), PartitionId(1));
+                }
+                other => panic!("expected the peer's lane, got {other:?}"),
+            }
+            assert!(matches!(source.members[0].phase, Phase::Joining));
+            assert_eq!(source.committable_partitions(1), [1]);
+        }
+
+        /// Discarding every offer accepts nothing, so the startup window stays
+        /// open and its deadline ends a run that repeats such offers.
+        #[test]
+        fn a_discarded_offer_keeps_the_startup_window() {
+            let (mut source, clock) = opened_unassigned(test_config(), 2);
+            for _ in 0..2 {
+                source.members[0].phase = Phase::Held(tpl_of(&[0]));
+                source.members[1].phase = Phase::Held(tpl_of(&[0]));
+                assert!(matches!(source.settle_held(), Ok(SourceEvent::Idle)));
+            }
+            assert!(!source.saw_first_assignment);
+            assert!(source.members.iter().all(|m| !m.saw_first_assignment));
+            assert!(source.assignment_wait.is_some());
+
+            clock.advance(source.config.startup_timeout + Duration::from_millis(1));
+            match source.poll_events(Duration::ZERO) {
+                Err(SourceError::Client { class, reason }) => {
+                    assert_eq!(class, ErrorClass::Fatal, "{reason}");
+                    assert!(reason.contains("no partition assignment"), "{reason}");
+                }
+                other => panic!("expected the deadline error, got {other:?}"),
+            }
+        }
+
+        /// Discarding every offer ends the hold, so the next offer's hold runs
+        /// from its own arrival.
+        #[test]
+        fn a_discarded_offer_restarts_the_hold() {
+            let (mut source, clock) = opened_unassigned(test_config(), 2);
+            source.members[0].phase = Phase::Held(tpl_of(&[0]));
+            source.members[1].phase = Phase::Held(tpl_of(&[0]));
+            source.hold_since = Some(source.clock.now());
+            clock.advance(ASSIGN_HOLD);
+            assert!(matches!(source.settle_held(), Ok(SourceEvent::Idle)));
+            assert_eq!(source.hold_since, None);
+
+            push_intent_to(&source, 0, Intent::Assign(TopicPartitionList::new()));
+            poll_quiet(&mut source);
+            clock.advance(ASSIGN_HOLD - Duration::from_millis(1));
+            poll_quiet(&mut source);
+            assert!(matches!(source.members[0].phase, Phase::Held(_)));
+            clock.advance(Duration::from_millis(1));
+            poll_quiet(&mut source);
+            assert!(matches!(source.members[0].phase, Phase::Assigned));
+        }
+
+        /// A stale offer overlapping nothing is accepted beside the newer one.
+        #[test]
+        fn a_stale_offer_overlapping_nothing_is_accepted() {
+            let mut source = opened_consumers(test_config(), &[&[], &[]]);
+            source.members[0].phase = Phase::Held(tpl_of(&[0]));
+            source.members[1].phase = Phase::Held(tpl_of(&[1]));
+            source.members[0].generation = Some(5);
+            source.members[1].generation = Some(6);
+            match source.settle_held() {
+                Ok(SourceEvent::LanesAssigned(lanes)) => assert_eq!(lanes.len(), 2),
+                other => panic!("expected both offers' lanes, got {other:?}"),
+            }
+            assert!(matches!(source.members[0].phase, Phase::Assigned));
+        }
+
+        /// Accepting offers ends the hold, also when an offer was discarded
+        /// beside them, so the next rebalance's hold runs from its own offer.
+        #[test]
+        fn an_accepted_offer_ends_the_hold() {
+            let mut source = opened_consumers(test_config(), &[&[], &[]]);
+            source.members[0].phase = Phase::Held(tpl_of(&[0]));
+            source.members[1].phase = Phase::Held(tpl_of(&[0]));
+            source.members[0].generation = Some(5);
+            source.members[1].generation = Some(6);
+            source.hold_since = Some(source.clock.now());
+            assert!(matches!(
+                source.settle_held(),
+                Ok(SourceEvent::LanesAssigned(_))
+            ));
+            assert_eq!(source.hold_since, None);
+        }
+
+        /// A drained revocation is complete once released, so a peer's later
+        /// revocation does not release this consumer again.
+        #[test]
+        fn a_release_clears_the_arrived_revocation() {
+            let mut source = opened_consumers(test_config(), &[&[(0, 0)], &[(1, 1)]]);
+            push_intent_to(&source, 0, Intent::Revoke(tpl_of(&[0])));
+            match source.poll_events(Duration::ZERO) {
+                Ok(SourceEvent::LanesRevoked { .. }) => {}
+                other => panic!("expected the live lanes drained, got {other:?}"),
+            }
+            poll_quiet(&mut source);
+            assert!(!source.members[0].revoke_arrived);
+        }
+
+        /// A reassign that discards every offer leaves a source with no lanes
+        /// inside the window `assignment_timeout` governs.
+        #[test]
+        fn a_reassign_discarding_every_offer_opens_the_window() {
+            let mut source = opened_consumers(test_config(), &[&[], &[(0, 1)]]);
+            let clock = freeze(&mut source);
+            source.members[0].generation = Some(-1);
+            source.members[1].generation = Some(-1);
+            push_intent_to(&source, 0, Intent::Assign(tpl_of(&[0, 1])));
+            match source.poll_events(Duration::ZERO) {
+                Ok(SourceEvent::LanesRevoked { lanes, .. }) => assert_eq!(lane_ids(&lanes), [0]),
+                other => panic!("expected the live lane drained, got {other:?}"),
+            }
+            assert!(matches!(
+                source.poll_events(Duration::ZERO),
+                Ok(SourceEvent::Idle)
+            ));
+            assert!(source.holds_no_lanes());
+
+            clock.advance(source.config.assignment_timeout + Duration::from_millis(1));
+            match source.poll_events(Duration::ZERO) {
+                Err(SourceError::Client { class, reason }) => {
+                    assert_eq!(class, ErrorClass::Fatal, "{reason}");
+                    assert!(reason.contains("no partition assignment"), "{reason}");
+                }
+                other => panic!("expected the deadline error, got {other:?}"),
+            }
+        }
+
+        /// A consumer that has not joined a group reads no generation.
+        #[test]
+        fn a_member_not_in_a_group_reads_no_generation() {
+            let source = opened_consumers(test_config(), &[&[]]);
+            assert_eq!(source.members[0].group_generation(), -1);
+        }
+
+        /// A consumer's second offer replaces its first, so it holds one list.
+        #[test]
+        fn a_second_offer_to_one_consumer_replaces_its_first() {
+            let mut source = opened_consumers(test_config(), &[&[]]);
+            source
+                .on_intent(0, Intent::Assign(tpl_of(&[0])))
+                .expect("first offer");
+            source
+                .on_intent(0, Intent::Assign(tpl_of(&[1])))
+                .expect("second offer");
+            match &source.members[0].phase {
+                Phase::Held(tpl) => {
+                    let partitions: Vec<i32> =
+                        tpl.elements().iter().map(|e| e.partition()).collect();
+                    assert_eq!(partitions, [1]);
+                }
+                _ => panic!("expected the second offer held"),
+            }
+        }
+
+        /// A rebalance error on a consumer drops the offer it held.
+        #[test]
+        fn a_rebalance_error_discards_a_held_offer() {
+            let mut source = opened_consumers(test_config(), &[&[]]);
+            source.members[0].phase = Phase::Held(tpl_of(&[0]));
+            let _ = source.on_intent(0, Intent::Error(RDKafkaErrorCode::RebalanceInProgress));
+            assert!(matches!(source.members[0].phase, Phase::Joining));
         }
 
         /// A rebalance error is classified by its own consumer's start: an
@@ -2092,8 +2629,8 @@ mod tests {
         }
 
         /// A revocation sets every consumer back to joining except one whose
-        /// assignment is held, which librdkafka keeps in its rebalance until
-        /// `assign` is called.
+        /// assignment is held. librdkafka queues a held member no revocation,
+        /// and its offer still waits for `assign`.
         #[test]
         fn a_revocation_leaves_a_held_assignment_held() {
             let mut source = opened_consumers(test_config(), &[&[(0, 0)], &[]]);
@@ -2299,6 +2836,8 @@ mod tests {
             let mut source = opened_consumers(test_config(), &[&[], &[]]);
             source.members[0].phase = Phase::Held(tpl_of(&[3]));
             source.members[1].phase = Phase::Held(tpl_of(&[1, 3]));
+            source.members[0].generation = Some(7);
+            source.members[1].generation = Some(7);
             source.injected_poll_error = Some((1, transport_failure()));
 
             match source.poll_events(Duration::ZERO) {
@@ -2818,6 +3357,259 @@ mod tests {
                 drop(joiner);
             });
         }
+    }
+
+    /// A consumer of `group` on `brokers`, outside the source, that answers
+    /// its own rebalances.
+    fn raw_group_member(brokers: &str, group: &str) -> rdkafka::consumer::BaseConsumer {
+        use crate::client::testing::{Raw as _, raw_config};
+        raw_config()
+            .set("bootstrap.servers", brokers)
+            .set("group.id", group)
+            .set("session.timeout.ms", "6000")
+            .build()
+            .expect("raw consumer")
+    }
+
+    /// A source of `consumers` consumers on `brokers` sharing four partitions,
+    /// with an offset stored for every partition.
+    fn settled_with_stored_offsets(brokers: &str, group: &str, consumers: usize) -> KafkaSource {
+        let mut cfg = test_config();
+        cfg.brokers = brokers.to_owned();
+        cfg.group_id = group.into();
+        cfg.consumers = consumers;
+        cfg.commit_interval = Duration::from_hours(1);
+        cfg.rdkafka = std::collections::BTreeMap::from([
+            ("session.timeout.ms".to_string(), "6000".to_string()),
+            ("heartbeat.interval.ms".to_string(), "500".to_string()),
+            ("auto.offset.reset".to_string(), "earliest".to_string()),
+        ]);
+        let mut source = KafkaSource::new(cfg);
+        let cp = Checkpointer::new();
+        source.open(SourceCtx::new(cp.handle())).expect("open");
+        spate_test::wait_until(Duration::from_secs(60), "every partition held", || {
+            if let Ok(SourceEvent::LanesRevoked { lanes, barrier }) =
+                source.poll_events(Duration::from_millis(50))
+            {
+                for _ in &lanes {
+                    barrier.arrive();
+                }
+            }
+            let held: usize = source.members.iter().map(|m| m.assignment.len()).sum();
+            held == 4 && source.members.iter().all(|m| !m.assignment.is_empty())
+        });
+        let watermarks: Vec<(PartitionId, i64)> = (0..4).map(|p| (PartitionId(p), 1)).collect();
+        source.commit(&watermarks).expect("store");
+        source
+    }
+
+    /// A consumer whose flush fails does not hold back its peer's commit, in
+    /// either order, and the call still reports the failure.
+    #[test]
+    fn a_lost_member_does_not_hold_back_its_peers_commit() {
+        use rdkafka::mocking::MockCluster;
+        use rdkafka::types::{RDKafkaApiKey, RDKafkaRespErr};
+        let cluster = MockCluster::new(1).expect("mock cluster");
+        cluster.create_topic("orders", 4, 1).expect("create topic");
+        let brokers = cluster.bootstrap_servers();
+        let mut source = settled_with_stored_offsets(&brokers, "lost-first", 2);
+
+        cluster.request_errors(
+            RDKafkaApiKey::Heartbeat,
+            &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_ILLEGAL_GENERATION],
+        );
+        spate_test::wait_until(Duration::from_secs(30), "a member marked lost", || {
+            source.members.iter().any(|m| m.consumer.assignment_lost())
+        });
+        let lost = source
+            .members
+            .iter()
+            .position(|m| m.consumer.assignment_lost())
+            .expect("lost");
+        // The lost member flushes first, so an early return skips its peer.
+        source.members.swap(0, lost);
+        let owned: Vec<i32> = source.members[1].assignment.values().copied().collect();
+
+        match source.flush_commits() {
+            Err(SourceError::Client { class, reason }) => {
+                assert_eq!(class, ErrorClass::Retryable, "{reason}");
+                assert!(reason.contains("AssignmentLost"), "{reason}");
+            }
+            other => panic!("expected the lost member's failure, got {other:?}"),
+        }
+        let read_back = crate::testutil::committed_offsets(&brokers, "lost-first", "orders", 0..4);
+        for p in owned {
+            assert_eq!(
+                read_back[usize::try_from(p).expect("partition")],
+                Offset::Offset(1),
+                "peer's partition {p}: {read_back:?}"
+            );
+        }
+    }
+
+    /// Two consumers failing for different reasons: the call reports the
+    /// first consumer's.
+    #[test]
+    fn a_flush_reports_the_first_failure() {
+        use rdkafka::mocking::MockCluster;
+        use rdkafka::types::{RDKafkaApiKey, RDKafkaRespErr};
+        let cluster = MockCluster::new(1).expect("mock cluster");
+        cluster.create_topic("orders", 4, 1).expect("create topic");
+        let brokers = cluster.bootstrap_servers();
+        let mut source = settled_with_stored_offsets(&brokers, "first-failure", 2);
+
+        cluster.request_errors(
+            RDKafkaApiKey::Heartbeat,
+            &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_ILLEGAL_GENERATION],
+        );
+        spate_test::wait_until(Duration::from_secs(30), "a member marked lost", || {
+            source.members.iter().any(|m| m.consumer.assignment_lost())
+        });
+        let lost = source
+            .members
+            .iter()
+            .position(|m| m.consumer.assignment_lost())
+            .expect("lost");
+        source.members.swap(0, lost);
+        cluster.request_errors(
+            RDKafkaApiKey::OffsetCommit,
+            &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_ILLEGAL_GENERATION],
+        );
+        match source.flush_commits() {
+            Err(SourceError::Client { reason, .. }) => {
+                assert!(reason.contains("AssignmentLost"), "{reason}");
+            }
+            other => panic!("expected the lost member's failure, got {other:?}"),
+        }
+    }
+
+    /// With one consumer the failed commit logs no line of its own, since the
+    /// controller's line on the returned error says the same.
+    #[test]
+    fn a_failed_commit_on_one_consumer_logs_no_line_of_its_own() {
+        use rdkafka::mocking::MockCluster;
+        use rdkafka::types::{RDKafkaApiKey, RDKafkaRespErr};
+        let cluster = MockCluster::new(1).expect("mock cluster");
+        cluster.create_topic("orders", 4, 1).expect("create topic");
+        let brokers = cluster.bootstrap_servers();
+        let mut source = settled_with_stored_offsets(&brokers, "refused-one", 1);
+
+        cluster.request_errors(
+            RDKafkaApiKey::OffsetCommit,
+            &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_ILLEGAL_GENERATION],
+        );
+        let mut flushed = None;
+        let warned = spate_test::capture_logs(tracing::Level::WARN, || {
+            flushed = Some(source.flush_commits());
+        });
+        assert!(matches!(flushed, Some(Err(_))), "{flushed:?}");
+        assert!(
+            !warned.iter().any(|l| l.contains("sync commit failed")),
+            "{warned:#?}"
+        );
+    }
+
+    /// Each consumer whose commit the broker refuses logs its own line.
+    #[test]
+    fn a_failed_commit_names_each_consumer() {
+        use rdkafka::mocking::MockCluster;
+        use rdkafka::types::{RDKafkaApiKey, RDKafkaRespErr};
+        let cluster = MockCluster::new(1).expect("mock cluster");
+        cluster.create_topic("orders", 4, 1).expect("create topic");
+        let brokers = cluster.bootstrap_servers();
+        let mut source = settled_with_stored_offsets(&brokers, "refused-commits", 2);
+
+        cluster.request_errors(
+            RDKafkaApiKey::OffsetCommit,
+            &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_ILLEGAL_GENERATION; 2],
+        );
+        let mut flushed = None;
+        let warned = spate_test::capture_logs(tracing::Level::WARN, || {
+            flushed = Some(source.flush_commits());
+        });
+        assert!(matches!(flushed, Some(Err(_))), "{flushed:?}");
+        for k in 0..2 {
+            let field = format!("consumer={k}");
+            assert!(
+                warned.iter().any(|l| l.contains("sync commit failed")
+                    && l.contains(&field)
+                    && l.contains("error=")),
+                "{field}: {warned:#?}"
+            );
+        }
+    }
+
+    /// A source polled until a consumer holds an offer, that consumer's index,
+    /// and a raw consumer of the same group polled until the group has handed it
+    /// every partition, so the group has left the held member.
+    fn held_while_the_group_moves_on(
+        brokers: &str,
+        group: &str,
+    ) -> (KafkaSource, usize, rdkafka::consumer::BaseConsumer) {
+        let mut cfg = test_config();
+        cfg.brokers = brokers.to_owned();
+        cfg.group_id = group.into();
+        cfg.consumers = 2;
+        cfg.rdkafka = std::collections::BTreeMap::from([(
+            "session.timeout.ms".to_string(),
+            "6000".to_string(),
+        )]);
+        let mut source = KafkaSource::new(cfg);
+        let cp = Checkpointer::new();
+        source.open(SourceCtx::new(cp.handle())).expect("open");
+        let mut held = None;
+        spate_test::wait_until(Duration::from_secs(60), "an assignment held", || {
+            let _ = source.poll_events(Duration::from_millis(50));
+            held = source
+                .members
+                .iter()
+                .position(|m| matches!(m.phase, Phase::Held(_)));
+            held.is_some()
+        });
+        let raw = raw_group_member(brokers, group);
+        raw.subscribe(&["orders"]).expect("subscribe");
+        spate_test::wait_until(
+            Duration::from_secs(60),
+            "the raw consumer holds all",
+            || {
+                let _ = raw.poll(Duration::from_millis(100));
+                raw.assignment().is_ok_and(|a| a.count() == 4)
+            },
+        );
+        (source, held.expect("held"), raw)
+    }
+
+    /// Dropping a source whose held consumer the group has removed returns.
+    #[test]
+    fn dropping_with_a_stale_held_offer_returns() {
+        use rdkafka::mocking::MockCluster;
+        let cluster = MockCluster::new(1).expect("mock cluster");
+        cluster.create_topic("orders", 4, 1).expect("create topic");
+        let (source, _, raw) =
+            held_while_the_group_moves_on(&cluster.bootstrap_servers(), "drop-stale");
+        crate::testutil::assert_returns(
+            (cluster, raw),
+            Duration::from_secs(30),
+            "dropping the source with a stale offer held",
+            move || drop(source),
+        );
+    }
+
+    /// A held consumer the group has removed reads a generation older than
+    /// the group's, and its client does not report the assignment lost.
+    #[test]
+    fn a_member_the_group_left_reads_an_older_generation() {
+        use rdkafka::mocking::MockCluster;
+        let cluster = MockCluster::new(1).expect("mock cluster");
+        cluster.create_topic("orders", 4, 1).expect("create topic");
+        let (source, held, raw) =
+            held_while_the_group_moves_on(&cluster.bootstrap_servers(), "stale-generation");
+
+        let member = &source.members[held];
+        let generation = member.group_generation();
+        assert!(generation >= 0, "a member that joined reads {generation}");
+        assert!(generation < crate::client::group_generation(&raw));
+        assert!(!member.consumer.assignment_lost());
     }
 
     /// Queue a rebalance intent for `poll_events` on consumer 0, as the
@@ -3391,12 +4183,7 @@ mod tests {
         /// after the deadline passed.
         #[test]
         fn an_error_after_the_deadline_is_reported_by_its_age() {
-            let mut cfg = test_config();
-            cfg.brokers = crate::testutil::refused_broker();
-            let mut source = KafkaSource::new(cfg);
-            let clock = freeze(&mut source);
-            let cp = Checkpointer::new();
-            source.open(SourceCtx::new(cp.handle())).expect("open");
+            let (mut source, clock) = opened_unassigned(test_config(), 1);
             clock.advance(Duration::from_secs(10));
             spate_test::wait_until(Duration::from_secs(20), "a consumer error", || {
                 let _ = source.poll_events(Duration::from_millis(50));
@@ -3424,12 +4211,7 @@ mod tests {
         /// error. Regression for #711.
         #[test]
         fn the_startup_deadline_names_the_last_consumer_error() {
-            let mut cfg = test_config();
-            cfg.brokers = crate::testutil::refused_broker();
-            let mut source = KafkaSource::new(cfg);
-            let clock = freeze(&mut source);
-            let cp = Checkpointer::new();
-            source.open(SourceCtx::new(cp.handle())).expect("open");
+            let (mut source, clock) = opened_unassigned(test_config(), 1);
 
             poll_until_brokers_down(&mut source);
             source.config.startup_timeout = Duration::from_nanos(1);
@@ -3520,12 +4302,7 @@ mod tests {
         /// source's clock.
         #[test]
         fn the_deadline_error_gives_the_last_errors_age() {
-            let mut cfg = test_config();
-            cfg.brokers = crate::testutil::refused_broker();
-            let mut source = KafkaSource::new(cfg);
-            let clock = freeze(&mut source);
-            let cp = Checkpointer::new();
-            source.open(SourceCtx::new(cp.handle())).expect("open");
+            let (mut source, clock) = opened_unassigned(test_config(), 1);
             spate_test::wait_until(Duration::from_secs(20), "a consumer error", || {
                 let _ = source.poll_events(Duration::from_millis(50));
                 source.last_consumer_error.is_some()

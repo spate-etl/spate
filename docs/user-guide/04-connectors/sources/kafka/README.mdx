@@ -151,14 +151,23 @@ The framework never uses librdkafka's position-based auto-commit. Instead:
 - `enable.auto.commit` is forced to `true`, so librdkafka commits the *stored*
   offsets every `commit_interval`.
 - Rebalance revocations and shutdown drain first, then store and commit
-  **synchronously** while the member still owns the partitions, so another
-  member never starts from an offset covering unwritten data.
+  **synchronously** while the member still owns the partitions (the removed
+  member below is the exception), so another member never starts from an offset
+  covering unwritten data.
 - A rebalance *error* (an event that is neither an assignment nor a
   revocation) releases ownership immediately, as the client library's
   contract requires. The lanes still drain, but their offsets can no longer
   be stored; that work is redelivered after the member rejoins, and the
   refusal is logged. At-least-once holds either way; the difference is
   replay instead of a clean release.
+- The client refuses a commit from a member the group has removed, since another
+  member may already own its partitions. The refusal is logged and the
+  revocation continues. A partition with a commit is redelivered from it. A
+  partition the group has never committed starts under `auto.offset.reset`:
+  under `earliest` its records are redelivered, and under `latest`, the default,
+  it starts at its end, so the records the removed member read and could not
+  commit are never written. Set `auto.offset.reset: earliest` where that loss
+  matters.
 
 A message librdkafka reports as corrupt, as `check.crcs` detects, fails the
 source with a fatal error, because librdkafka can read on past it
@@ -181,7 +190,8 @@ group rebalance like any member joining or leaving. A process stopping drains
 its lanes and commits each partition through the consumer that owns it before
 the consumers leave the group, and the members that remain or replace them
 start from those commits. Lowering or raising `consumers` across a restart
-therefore replays nothing that was durably written. A process that dies without
+therefore replays nothing that was durably written, unless the group had already
+removed the consumer before its commit. A process that dies without
 draining replays from the last commit, as with one consumer.
 
 A release of `spate-kafka` without the `consumers` key refuses a configuration

@@ -107,7 +107,10 @@ fn real_broker_revocation_commit_persists_revoked_offsets() {
     produce(&brokers, TOPIC, 50, 1, "rev");
 
     let mut cp = Checkpointer::new();
-    let mut source = KafkaSource::new(config(&brokers, "rev-commit"));
+    let mut cfg = config(&brokers, "rev-commit");
+    // No interval commit, so only the flush can commit before `unassign` does.
+    cfg.commit_interval = Duration::from_hours(1);
+    let mut source = KafkaSource::new(cfg);
     source.open(SourceCtx::new(cp.handle())).expect("open");
 
     // Await assignment and drain all 50 records, producing a watermark at
@@ -138,6 +141,12 @@ fn real_broker_revocation_commit_persists_revoked_offsets() {
         }
     });
 
+    let probe: BaseConsumer = support::raw_config()
+        .set("bootstrap.servers", &brokers)
+        .set("group.id", "rev-commit")
+        .build()
+        .expect("probe");
+
     // Run the revocation choreography: store the drained watermark for the
     // partition being revoked, then keep polling so `unassign` completes.
     let deadline = Instant::now() + Duration::from_secs(60);
@@ -151,11 +160,18 @@ fn real_broker_revocation_commit_persists_revoked_offsets() {
             .poll_events(Duration::from_millis(200))
             .expect("poll_events")
         {
-            for _ in &ids {
-                barrier.arrive();
-            }
-            source.commit(&watermarks).expect("store revoked offsets");
-            let _ = source.flush_commits();
+            support::complete_revocation(&mut source, &ids, &barrier, &watermarks).expect("flush");
+            // The next poll calls `unassign`, which commits what is stored, so
+            // the flush's own commit is only visible here.
+            let mut tpl = rdkafka::TopicPartitionList::new();
+            tpl.add_partition(TOPIC, 0);
+            let committed = probe
+                .committed_offsets(tpl, Duration::from_secs(10))
+                .expect("committed");
+            assert_eq!(
+                committed.elements()[0].offset(),
+                rdkafka::Offset::Offset(50)
+            );
             stored = true;
         }
         if stored {
@@ -168,11 +184,6 @@ fn real_broker_revocation_commit_persists_revoked_offsets() {
     assert!(stored, "revoke observed and drained offset stored");
 
     // The drained watermark is committed for the revoked partition.
-    let probe: BaseConsumer = support::raw_config()
-        .set("bootstrap.servers", &brokers)
-        .set("group.id", "rev-commit")
-        .build()
-        .expect("probe");
     spate_test::wait_until(
         Duration::from_secs(30),
         "revoked partition committed offset 50",
@@ -313,6 +324,24 @@ fn real_broker_backlog_reports_summable_lag() {
     );
 }
 
+/// The client and group sequence around a member that never answers its offer,
+/// on a real broker: the group removes the member at its rebalance timeout and
+/// offers its partition to the other member.
+#[test]
+#[ignore = "requires Docker"]
+fn real_broker_a_member_that_never_answers_its_offer_is_replaced() {
+    let container = broker().start().expect("start kafka container");
+    let port = container.get_host_port_ipv4(KAFKA_PORT).expect("port");
+    let brokers = format!("127.0.0.1:{port}");
+    produce(&brokers, TOPIC, 1, 1, "never");
+    for (answer, group) in [
+        (support::Answer::Empty, "never-answers-empty"),
+        (support::Answer::Offer, "never-answers-offer"),
+    ] {
+        support::a_member_that_never_answers_its_offer(&brokers, TOPIC, group, answer);
+    }
+}
+
 /// Revocation on a real broker with two consumers in the source: the
 /// watermarks drained for each consumer's partition are stored through the
 /// consumer that owns it, while it still owns it, and both are committed.
@@ -351,10 +380,17 @@ fn real_broker_revocation_commits_every_consumers_offsets() {
     cfg.consumers = 2;
     let mut cp = Checkpointer::new();
     let mut source = KafkaSource::new(cfg);
-    source.open(SourceCtx::new(cp.handle())).expect("open");
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let statistics = recorder.handle();
+    let meter = spate_core::metrics::Meter::with_namespace("kafka", "rev-each", "source", "kafka");
+    metrics::with_local_recorder(&recorder, || {
+        source
+            .open(SourceCtx::new(cp.handle()).with_meter(Some(meter)))
+            .expect("open");
+    });
 
-    // Settle with both partitions held, completing any revocation a late
-    // consumer's join causes.
+    // Settle with both partitions held and each consumer in a stable group,
+    // completing any revocation a late consumer's join causes.
     let mut lanes = Vec::new();
     spate_test::wait_until(Duration::from_secs(90), "both partitions held", || {
         match source
@@ -367,14 +403,13 @@ fn real_broker_revocation_commits_every_consumers_offsets() {
                 barrier,
             } => {
                 lanes.clear();
-                for _ in &ids {
-                    barrier.arrive();
-                }
-                source.flush_commits().expect("flush");
+                support::complete_revocation(&mut source, &ids, &barrier, &[]).expect("flush");
             }
             _ => {}
         }
-        lanes.len() == 2
+        let healthy =
+            spate_test::metric_series(&statistics.render(), "spate_kafka_group_healthy", &[]);
+        lanes.len() == 2 && healthy.len() == 2 && healthy.iter().all(|s| s.value == 1.0)
     });
     let partitions: Vec<_> = lanes.iter().map(SourceLane::partition).collect();
     cp.begin_epoch(&partitions, 1);
@@ -412,11 +447,7 @@ fn real_broker_revocation_commits_every_consumers_offsets() {
         else {
             return false;
         };
-        for _ in &ids {
-            barrier.arrive();
-        }
-        source.commit(&watermarks).expect("store revoked offsets");
-        source.flush_commits().expect("flush");
+        support::complete_revocation(&mut source, &ids, &barrier, &watermarks).expect("flush");
         true
     });
 

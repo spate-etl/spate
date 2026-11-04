@@ -32,7 +32,8 @@ pub trait SinkBundle {
 ///
 /// `shard_endpoints` is indexed `[shard][replica]` and must be non-empty
 /// with every shard holding at least one replica. The builder rejects
-/// ragged or empty topologies before anything spawns.
+/// ragged or empty topologies, and a `pool` that fails
+/// [`SinkPoolConfig::validate`], before anything spawns.
 #[non_exhaustive]
 pub struct SinkParts<W: ShardWriter> {
     /// The connector's writer, shared by every shard worker.

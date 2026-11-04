@@ -39,11 +39,10 @@ pub(crate) const ABORT_GRACE: Duration = Duration::from_millis(500);
 /// Bounds on the quarantine re-check heartbeat, which is otherwise
 /// `breaker.open_for`.
 ///
-/// The floor covers `open_for: 0s`, which is expressible through the public
-/// `Copy` [`BreakerConfig`](super::config::BreakerConfig) that `SinkParts`
-/// and `spate-test` build without going through a loader.
-/// [`BreakerConfig::validate`](super::config::BreakerConfig::validate) rejects
-/// it on the YAML path; this covers the other one. The wait is driven from
+/// The floor covers `open_for: 0s` on a pool spawned directly with
+/// [`SinkPool::spawn`](super::SinkPool::spawn), which skips
+/// [`SinkPoolConfig::validate`](super::config::SinkPoolConfig::validate).
+/// The wait is driven from
 /// `open_for`, and `sleep_until(now)` returns instantly, so a zero would spin
 /// on the breaker mutex.
 ///

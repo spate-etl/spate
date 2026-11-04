@@ -95,10 +95,9 @@ impl BreakerSet {
         metrics: Arc<SinkShardMetrics>,
     ) -> Self {
         assert!(replicas > 0, "a shard needs at least one replica");
-        // `BreakerConfig::validate` rejects both of these at load, and every
-        // sink calls it. `BreakerConfig` is a public `Copy` struct, so
-        // `SinkParts` and `spate-test` can build one that never went through a
-        // loader; these clamps cover that path.
+        // `BreakerConfig::validate` rejects both of these, and the builder
+        // runs it when it installs a sink. A pool spawned directly with
+        // `SinkPool::spawn` skips it; these clamps cover that path.
         //
         // `half_open_probes: 0` wedges the replica shut. The open→half-open
         // promotion admits its first probe unconditionally, and once that slot
@@ -651,8 +650,21 @@ mod tests {
         assert_eq!(pick(&mut b, t2), None, "still exactly one probe");
     }
 
-    /// `half_open_probes: 0` is expressible (`BreakerConfig` has no validator)
-    /// and taken literally it means "never recover". The promotion admits its
+    /// Pins that a `failure_threshold` of `0`, which reaches the breaker on a
+    /// pool spawned without validation, opens on the first failure as `1`
+    /// does.
+    #[tokio::test(start_paused = true)]
+    async fn a_zero_failure_threshold_opens_on_the_first_failure() {
+        let mut b = set(1, 0);
+        let now = Instant::now();
+        assert_eq!(pick(&mut b, now), Some(0), "closed before any failure");
+        b.on_failure(0, now);
+        assert!(matches!(b.states[0], State::Open { .. }));
+        assert_eq!(pick(&mut b, now), None);
+    }
+
+    /// `half_open_probes: 0` reaches the breaker on a pool spawned without
+    /// validation, and taken literally it means "never recover". The promotion admits its
     /// first probe regardless, and once that slot is handed back the replica
     /// rests in half-open with a budget nothing can satisfy and no deadline to
     /// wait on, so the shard is unwritable for good.
@@ -687,9 +699,10 @@ mod tests {
         );
     }
 
-    /// `open_for` is unvalidated, and `Instant + Duration` panics on overflow
-    /// rather than saturating, so an absurd value takes the shard worker down
-    /// at the first failure.
+    /// An unbounded `open_for` reaches the breaker on a pool spawned without
+    /// validation, and `Instant + Duration` panics on overflow rather than
+    /// saturating, so an absurd value would take the shard worker down at the
+    /// first failure.
     #[tokio::test(start_paused = true)]
     async fn an_absurd_open_for_does_not_panic_the_state_machine() {
         let labels = ComponentLabels::new("p", breaker_component(), "test");

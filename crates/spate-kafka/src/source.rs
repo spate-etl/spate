@@ -3412,18 +3412,42 @@ mod tests {
 
         /// A member with no generation commits nothing, since the broker takes
         /// a generation of -1 as a simple consumer's and it could replace a
-        /// peer's offset.
+        /// peer's offset. A listing that fails shows how far each one got: only
+        /// a member with a generation reaches it.
         #[test]
         fn a_member_with_no_generation_is_discarded_with_no_commit() {
             let cluster = mock();
+            cluster.request_errors(
+                RDKafkaApiKey::ListOffsets,
+                &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_UNKNOWN],
+            );
             let mut cfg = config(&cluster, "no-generation", 1);
             cfg.rdkafka
                 .insert("auto.offset.reset".to_string(), "latest".to_string());
             let (mut source, _members) = open(cfg);
-            source.members[0].generation = Some(-1);
-            let starts =
-                source.start_positions(0, &tpl_of(&[0]), Instant::now() + COMMITTED_LOOKUP_TIMEOUT);
-            assert!(matches!(starts, Ok(Starts::Stale)));
+            let starts = |source: &mut KafkaSource, generation| {
+                source.members[0].generation = Some(generation);
+                source.start_positions(0, &tpl_of(&[0]), Instant::now() + COMMITTED_LOOKUP_TIMEOUT)
+            };
+            assert!(matches!(starts(&mut source, -1), Ok(Starts::Stale)));
+            assert!(matches!(starts(&mut source, 0), Ok(Starts::Retry(_))));
+        }
+
+        /// A reassign waiting on its pace stays pending while the source keeps
+        /// polling, and runs once the pace comes due.
+        #[test]
+        fn a_pending_reassign_waits_for_its_pace() {
+            let (mut source, clock) = opened_unassigned(latest_config(), 1);
+            source.after_drain = Some(AfterDrain::Reassign);
+            source.start_retry_at = Some(source.clock.now() + START_RETRY_PACE);
+            assert!(matches!(
+                source.poll_events(Duration::ZERO),
+                Ok(SourceEvent::Idle)
+            ));
+            assert_eq!(source.after_drain, Some(AfterDrain::Reassign));
+            clock.advance(START_RETRY_PACE);
+            let _ = source.poll_events(Duration::ZERO);
+            assert_eq!(source.after_drain, None);
         }
 
         /// A rebalance error on a partition with only its start commit restarts

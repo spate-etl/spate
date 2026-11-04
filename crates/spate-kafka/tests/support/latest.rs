@@ -104,8 +104,8 @@ impl Run {
         Run::spawn(runtime, script)
     }
 
-    /// A run whose chain stops the pipeline on a record whose payload begins
-    /// with `poison`, under the operator's own default policy.
+    /// A run whose operator stops the pipeline on a record whose payload begins
+    /// with `poison`.
     pub(crate) fn start_stopping_on_poison(cfg: KafkaSourceConfig) -> Run {
         let (pipeline, sink, script) = pipeline();
         let runtime = pipeline

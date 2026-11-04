@@ -12,12 +12,13 @@ description: "Under auto.offset.reset latest, the Kafka source commits a partiti
 ## Context and problem statement
 
 The Kafka source commits only offsets a sink has acknowledged, and it reads
-`auto.offset.reset` at every assignment for a partition with no committed offset.
-Under `latest`, the default, that rule starts the partition at its end each time.
-The next commit then moves past everything written before that assignment. A
-restart of a quiet partition, a restart with the sink down, a process joining the
-group, a member the group removes and a crash before a first commit all reach it,
-so INV-1 did not hold for any partition before its first commit.
+`auto.offset.reset` at every assignment for a partition with no committed
+offset. Under `latest`, the default, that rule starts the partition at its end
+each time. The next commit then moves past everything written before that
+assignment. A restart of a quiet partition, a restart with the sink down, a
+process joining the group, a member the group removes and a crash before a first
+commit all reach it, so INV-1 did not hold for any partition before its first
+commit.
 
 ## Considered options
 
@@ -34,13 +35,14 @@ every later start a position the group holds, in any process. The commit
 acknowledges nothing, and it passes only records no member was given.
 
 The commit is a blocking one on the controller thread, sent before `assign`, for
-the partitions with no commit alone. A failed read or commit holds the assignment
-and retries it at a pace, until `startup_timeout` or `assignment_timeout` ends the
-run. A refusal because the group has moved past the member discards its offer.
+the partitions with no commit alone. A failed read or commit holds the
+assignment and retries it at a pace, until `startup_timeout` or
+`assignment_timeout` ends the run. A refusal because the group has moved past
+the member discards its offer.
 
 Defaulting to `earliest` was rejected because a new group would read its topic's
-history, and an explicit `latest` would stay exposed for good. Process memory was
-rejected because it closes only the routes that stay in one process, and the
+history, and an explicit `latest` would stay exposed for good. Process memory
+was rejected because it closes only the routes that stay in one process, and the
 position has to reach another process.
 
 ### Consequences
@@ -54,11 +56,11 @@ position has to reach another process.
   again.
 - Bad, because a group's first start still skips what came before it, which is
   what `latest` asks for.
-- Bad, because an assignment waits on a commit outside the committed-offset lookup
-  bound, and a commit that keeps failing can stop a pipeline at the assignment
-  deadline.
-- Bad, because a record a chain fails on stops the source at every restart, as on
-  a partition with a commit.
+- Bad, because an assignment waits on a commit outside the committed-offset
+  lookup bound, and a commit that keeps failing can stop a pipeline at the
+  assignment deadline.
+- Bad, because a record a chain fails on stops the source at every restart, as
+  on a partition with a commit.
 
 ### Confirmation
 

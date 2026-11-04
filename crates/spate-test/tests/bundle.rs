@@ -4,13 +4,12 @@
 
 use spate_core::config::PipelineConfig;
 use spate_core::error::SinkError;
-use spate_core::ops::chain_owned;
 use spate_core::pipeline::{Pipeline, RuntimeOptions};
 use spate_core::record::PartitionId;
-use spate_core::sink::{FrameCodec, FrameCodecFactory, KeyHashRouter};
+use spate_core::sink::{FrameCodec, FrameCodecFactory};
 use spate_core::source::LaneId;
 use spate_test::{
-    BytesPassthrough, CaptureSink, TestEncoder, capture_sink, decode_rows, memory_source,
+    CaptureSink, TestEncoder, capture_sink, decode_rows, memory_source, passthrough_runtime,
     unique_name,
 };
 use std::time::Duration;
@@ -119,29 +118,14 @@ fn a_capture_sinks_codec_codes_every_captured_frame() {
 fn run_three_records(sink: CaptureSink) {
     let (source, handle) = memory_source();
 
-    let runtime = Pipeline::from_config(config())
-        .expect("builder")
-        .sink(sink)
-        .expect("sink")
-        .chains(|ctx| {
-            let chunk_cfg = ctx.chunk();
-            chain_owned::<Vec<u8>, _>(BytesPassthrough)
-                .with_metrics(ctx.pipeline, "main")
-                .sink(
-                    TestEncoder,
-                    KeyHashRouter,
-                    chunk_cfg,
-                    ctx.queues,
-                    ctx.budget,
-                )
-                .build()
-        })
-        .runtime_options(RuntimeOptions {
-            handle_signals: false,
-            ..RuntimeOptions::default()
-        })
-        .into_runtime(source)
-        .expect("into_runtime");
+    let pipeline = Pipeline::from_config(config()).expect("builder");
+    let runtime = passthrough_runtime(
+        pipeline,
+        source,
+        sink,
+        TestEncoder,
+        RuntimeOptions::default(),
+    );
 
     let shutdown = runtime.shutdown_handle();
     let join = std::thread::spawn(move || runtime.run());

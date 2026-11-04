@@ -8,12 +8,10 @@
 
 use spate_core::config::PipelineConfig;
 use spate_core::metrics::{Exporter, MetricsSettings, install};
-use spate_core::ops::chain_owned;
 use spate_core::pipeline::{Pipeline, RuntimeOptions};
 use spate_core::record::PartitionId;
-use spate_core::sink::KeyHashRouter;
 use spate_core::source::LaneId;
-use spate_test::{BytesPassthrough, TestEncoder, capture_sink, decode_rows, memory_source};
+use spate_test::{TestEncoder, capture_sink, decode_rows, memory_source, passthrough_runtime};
 use std::time::Duration;
 
 // Prometheus exporter so the mocks' families are recorded; port 0 lets the OS
@@ -35,29 +33,15 @@ fn source_and_sink_receive_role_scoped_meters() {
     let (source, handle) = memory_source();
     let (sink, script) = capture_sink(1, 1);
 
-    let runtime = Pipeline::from_config(PipelineConfig::from_str(CONFIG).expect("config"))
-        .expect("builder")
-        .sink(sink)
-        .expect("sink")
-        .chains(|ctx| {
-            let chunk_cfg = ctx.chunk();
-            chain_owned::<Vec<u8>, _>(BytesPassthrough)
-                .with_metrics(ctx.pipeline, "main")
-                .sink(
-                    TestEncoder,
-                    KeyHashRouter,
-                    chunk_cfg,
-                    ctx.queues,
-                    ctx.budget,
-                )
-                .build()
-        })
-        .runtime_options(RuntimeOptions {
-            handle_signals: false,
-            ..RuntimeOptions::default()
-        })
-        .into_runtime(source)
-        .expect("into_runtime");
+    let pipeline =
+        Pipeline::from_config(PipelineConfig::from_str(CONFIG).expect("config")).expect("builder");
+    let runtime = passthrough_runtime(
+        pipeline,
+        source,
+        sink,
+        TestEncoder,
+        RuntimeOptions::default(),
+    );
 
     let shutdown = runtime.shutdown_handle();
     let join = std::thread::spawn(move || runtime.run());

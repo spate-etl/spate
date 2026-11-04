@@ -11,6 +11,8 @@ zero infrastructure.
 - `capture_writer()` → `CaptureWriter` + `SinkScript`: script per-replica
   write outcomes (success, retryable failure, fatal, delays on tokio test
   time) and inspect every captured batch down to decoded rows.
+- `passthrough_runtime()` → `PipelineRuntime`: assemble the usual test
+  pipeline, one chain passing payloads unchanged to one sink.
 - `scripted_feed()` → `ScriptedFeed` + `FeedScript`: script deliveries,
   redeliveries, duplicates, dead letters, publish outcomes, refused feed
   calls and depth reads for a source that reads a work feed, and observe every acknowledgement,

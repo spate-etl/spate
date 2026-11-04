@@ -82,6 +82,7 @@ mod exposition;
 mod feed;
 mod fixtures;
 mod logs;
+mod pipeline;
 mod run;
 mod sink;
 mod source;
@@ -95,6 +96,7 @@ pub use exposition::{MetricSample, metric_series, metric_sum, metric_value, rend
 pub use feed::{FeedScript, ScriptedFeed, scripted_feed};
 pub use fixtures::{component_config, raw_payload, record, test_ack, unique_name};
 pub use logs::{LogCapture, capture_logs, show_logs};
+pub use pipeline::passthrough_runtime;
 pub use run::{PipelineRun, wait_until};
 pub use sink::{
     CaptureSink, CaptureWriter, CapturedWrite, ReplicaTag, ScriptedResult, SinkScript, TestEncoder,

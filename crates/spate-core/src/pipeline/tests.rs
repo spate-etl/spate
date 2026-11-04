@@ -794,90 +794,6 @@ fn the_ceiling_holds_three_of(scripted: Vec<Vec<(i64, Vec<u8>)>>) -> i64 {
     h.shared.lock().unwrap().committed[&PartitionId(0)]
 }
 
-/// Whether a record parked in the chain on partition 0 reaches the idle flush
-/// within five `idle_flush` lulls while lane 1 runs `sibling` on partition 1.
-/// The commit tick sits an hour off, so no `FlushNow` can flush it. Past the
-/// check the clock crosses the tick, and the record must then flush.
-fn parked_record_idle_flushes(sibling: Vec<Vec<(i64, Vec<u8>)>>) -> bool {
-    let held: Arc<Mutex<Vec<crate::checkpoint::AckRef>>> = Arc::new(Mutex::new(Vec::new()));
-    let held_c = Arc::clone(&held);
-    let clock = crate::clock::TestClock::frozen();
-    let mut cfg = test_config(1);
-    cfg.checkpoint.interval = Duration::from_secs(3600);
-    let h = start_on_clock(
-        cfg,
-        &clock,
-        |runtime| runtime,
-        move |shared, log| FakeChain {
-            shared,
-            log,
-            mode: ChainMode::HoldRecordAcksUntilFlush {
-                held: Arc::clone(&held_c),
-            },
-            batches_seen: 0,
-        },
-    );
-    h.script.lock().unwrap().push_back(Script::Assign(vec![
-        LaneSpec {
-            id: LaneId(0),
-            partition: PartitionId(0),
-            batches: vec![vec![(0, vec![0u8; 8])]],
-        },
-        LaneSpec {
-            id: LaneId(1),
-            partition: PartitionId(1),
-            batches: sibling,
-        },
-    ]));
-    wait_for("the record parks", Duration::from_secs(5), || {
-        held.lock().unwrap().len() == 1
-    });
-    let sibling_polls = || {
-        h.shared
-            .lock()
-            .unwrap()
-            .lane_polls
-            .iter()
-            .filter(|(l, _)| *l == LaneId(1))
-            .count()
-    };
-    // Steps of 5ms against the 20ms `idle_flush`. The second poll counted after
-    // each step shows the sibling's first batch since the step was pushed.
-    for _ in 0..20 {
-        clock.advance(Duration::from_millis(5));
-        let seen = sibling_polls();
-        wait_for("sibling polls", Duration::from_secs(5), || {
-            sibling_polls() >= seen + 2
-        });
-    }
-    let flushed = held.lock().unwrap().is_empty();
-    clock.advance(Duration::from_secs(3600));
-    wait_for(
-        "the tick flushes the record",
-        Duration::from_secs(5),
-        || held.lock().unwrap().is_empty(),
-    );
-    h.shutdown.trigger();
-    let _ = h.join.join().unwrap();
-    flushed
-}
-
-/// A record parked in the chain reaches the idle flush when the rest of the
-/// thread's lanes return only no-payload batches, as it does when they return
-/// nothing.
-#[test]
-fn a_parked_record_idle_flushes_beside_no_payload_batches() {
-    assert!(
-        parked_record_idle_flushes(Vec::new()),
-        "control: an idle sibling lets the record flush"
-    );
-    assert!(
-        parked_record_idle_flushes(vec![no_payload_stream(0)]),
-        "no idle flush in five idle_flush lulls while a sibling lane returned \
-         no-payload batches; the record stayed parked until the commit tick"
-    );
-}
-
 /// A permanently failed batch stalls its partition's watermark, so the
 /// gate pins that partition at the ceiling. The replay a restart faces is
 /// bounded by `max_pending_batches`, not by fetch rate x
@@ -6059,6 +5975,55 @@ fn start_idle_on_clock(
         move |runtime, _| runtime.with_clock(clock),
         ok_chain,
     )
+}
+
+/// Whether a thread flushes when the lull from a record on lane 0 reaches
+/// `idle_flush`, with `sibling` reaching the thread from a new lane a millisecond
+/// before that.
+fn the_lull_ends_on_time_beside(sibling: Vec<(i64, Vec<u8>)>) -> bool {
+    let clock = crate::clock::TestClock::frozen();
+    let lull = Duration::from_secs(600);
+    let h = start_idle_on_clock(&clock, lull, &[]);
+    assign(&h, &[(0, 1)]);
+    wait_for("the record", Duration::from_secs(5), || {
+        h.chain.consumed.load(Ordering::Relaxed) > 0
+    });
+    let before = flushes(&h);
+    clock.advance(lull - Duration::from_millis(1));
+    h.script
+        .lock()
+        .unwrap()
+        .push_back(Script::Add(vec![LaneSpec {
+            id: LaneId(1),
+            partition: PartitionId(1),
+            batches: vec![sibling],
+        }]));
+    // The poll after the batch shows the driver has been through it.
+    wait_for("the sibling's batch", Duration::from_secs(5), || {
+        polls_of(&h, 1) >= 2
+    });
+    clock.advance(Duration::from_millis(1));
+    let seen = polls_of(&h, 1);
+    wait_for("the next pass", Duration::from_secs(5), || {
+        polls_of(&h, 1) >= seen + 2
+    });
+    let flushed = flushes(&h) > before;
+    h.shutdown.trigger();
+    h.join.join().unwrap().unwrap();
+    flushed
+}
+
+/// A batch with no payloads gives the chain nothing to hold, so it leaves the lull
+/// running, and what an earlier batch parked still flushes on time.
+#[test]
+fn a_batch_with_no_payload_leaves_the_lull_running() {
+    assert!(the_lull_ends_on_time_beside(no_payload_batch(9)));
+}
+
+/// A record restarts the lull, so the flush waits for a lull after it.
+#[test]
+fn a_record_restarts_the_lull() {
+    assert!(!the_lull_ends_on_time_beside(vec![(0, vec![0u8; 8])]));
 }
 
 /// A thread whose every lane is finished flushes once its lull reaches

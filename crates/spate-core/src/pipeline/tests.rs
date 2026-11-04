@@ -616,19 +616,24 @@ fn a_stall_fails_only_past_its_limit_on_the_injected_clock() {
 /// being re-measured by them.
 #[test]
 fn pending_batch_ceiling_is_a_hard_bound() {
-    the_ceiling_holds_three_of(batches(&[0..10, 10..20, 20..30, 30..40, 40..50, 50..60]));
+    let committed =
+        the_ceiling_holds_three_of(batches(&[0..10, 10..20, 20..30, 30..40, 40..50, 50..60]));
+    assert_eq!(committed, 60);
 }
 
 /// A batch with no payloads counts against `max_pending_batches` as any other
 /// does, so a lane returning them cannot outrun a stalled head.
 #[test]
 fn a_batch_with_no_payload_counts_against_the_ceiling() {
-    the_ceiling_holds_three_of((1..=6).map(|i| no_payload_batch(i * 10 - 1)).collect());
+    let committed =
+        the_ceiling_holds_three_of((1..=6).map(|i| no_payload_batch(i * 10 - 1)).collect());
+    assert_eq!(committed, 60);
 }
 
 /// A batch with no payloads retires through the pending gate and moves the
-/// watermark past the offset it covers, with no record counted. The ceiling of
-/// one lets the second batch leave the lane only once the first has retired.
+/// watermark past the offset it covers, and only the one real record is
+/// counted. The ceiling of one lets each batch leave the lane only once the
+/// one before it has retired.
 #[test]
 fn a_batch_with_no_payload_retires_through_the_gate() {
     let mut cfg = test_config(1);
@@ -654,7 +659,11 @@ fn a_batch_with_no_payload_retires_through_the_gate() {
         .push_back(Script::Assign(vec![LaneSpec {
             id: LaneId(0),
             partition: PartitionId(0),
-            batches: vec![no_payload_batch(9), no_payload_batch(19)],
+            batches: vec![
+                vec![(0, vec![0u8; 8])],
+                no_payload_batch(9),
+                no_payload_batch(19),
+            ],
         }]));
     wait_for("the watermark passes both", Duration::from_secs(5), || {
         h.shared
@@ -667,27 +676,33 @@ fn a_batch_with_no_payload_retires_through_the_gate() {
     h.script.lock().unwrap().push_back(Script::Drained);
     let report = h.join.join().unwrap().unwrap();
     assert_eq!(report.state, ExitState::Completed);
-    assert_eq!(h.chain.consumed.load(Ordering::Relaxed), 0);
+    assert_eq!(h.chain.consumed.load(Ordering::Relaxed), 1);
 
     let rendered = handle.render();
     let labels = checkpoint_labels(&pipeline_name);
     assert_eq!(
         pending_series(&rendered, &pipeline_name),
-        vec![format!("{}{{{labels}}} 0", names::CHECKPOINT_PENDING_BATCHES)],
+        vec![format!(
+            "{}{{{labels}}} 0",
+            names::CHECKPOINT_PENDING_BATCHES
+        )],
         "{rendered}"
     );
     let counted: Vec<&str> = rendered
         .lines()
         .filter(|l| l.starts_with(&format!("{}{{", names::SOURCE_RECORDS_TOTAL)))
         .filter(|l| l.contains(&format!(r#"pipeline="{pipeline_name}""#)))
-        .filter(|l| !l.ends_with(" 0"))
         .collect();
-    assert!(counted.is_empty(), "records counted: {counted:?}");
+    assert!(
+        counted.len() == 1 && counted[0].ends_with(" 1"),
+        "records counted: {counted:?}"
+    );
 }
 
 /// Runs `scripted`, six batches with a last offset of 59, under a ceiling of
-/// three with every ack withheld, then releases them.
-fn the_ceiling_holds_three_of(scripted: Vec<Vec<(i64, Vec<u8>)>>) {
+/// three with every ack withheld, releases them, and returns the watermark
+/// committed.
+fn the_ceiling_holds_three_of(scripted: Vec<Vec<(i64, Vec<u8>)>>) -> i64 {
     let held: Arc<Mutex<Vec<crate::checkpoint::AckRef>>> = Arc::new(Mutex::new(Vec::new()));
     let release = Arc::new(AtomicBool::new(false));
     let held_c = Arc::clone(&held);
@@ -756,6 +771,8 @@ fn the_ceiling_holds_three_of(scripted: Vec<Vec<(i64, Vec<u8>)>>) {
     h.shutdown.trigger();
     let report = h.join.join().unwrap().unwrap();
     assert_eq!(report.state, ExitState::Completed);
+    let committed = h.shared.lock().unwrap().committed[&PartitionId(0)];
+    committed
 }
 
 /// A permanently failed batch stalls its partition's watermark, so the

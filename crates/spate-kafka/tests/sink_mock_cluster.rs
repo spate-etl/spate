@@ -25,15 +25,16 @@ use rdkafka::types::RDKafkaRespErr;
 use spate_core::clock::SystemClock;
 use spate_core::clock::tokio::{Clock as IoClock, Sleep, TestClock as IoTestClock};
 use spate_core::config::PipelineConfig;
-use spate_core::deser::{BytesPassthrough, Owned};
+use spate_core::deser::Owned;
 use spate_core::error::{ErrorClass, SinkError};
-use spate_core::ops::chain_owned;
 use spate_core::pipeline::{Pipeline, RuntimeOptions};
 use spate_core::record::{PartitionId, Record};
-use spate_core::sink::{KeyHashRouter, RowEncoder, SealedBatch, ShardWriter, SinkMetricsCtx};
+use spate_core::sink::{RowEncoder, SealedBatch, ShardWriter, SinkMetricsCtx};
 use spate_core::source::LaneId;
 use spate_kafka::sink::{KafkaEncoder, KafkaMessage, KafkaSink, KafkaSinkConfig, MessageEncoder};
-use spate_test::{PipelineRun, memory_source, record, unique_name, wait_until};
+use spate_test::{
+    PipelineRun, memory_source, passthrough_runtime, record, unique_name, wait_until,
+};
 use std::panic::RefUnwindSafe;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -198,30 +199,10 @@ fn spawn_pipeline(
 ) {
     let (source, handle) = memory_source();
     let encoder = sink.encoder_bytes();
-    let runtime =
+    let pipeline =
         Pipeline::from_config(PipelineConfig::from_str(&pipeline_config()).expect("config"))
-            .expect("builder")
-            .sink(sink)
-            .expect("sink")
-            .chains(move |ctx| {
-                let chunk_cfg = ctx.chunk();
-                chain_owned::<Vec<u8>, _>(BytesPassthrough)
-                    .with_metrics(ctx.pipeline, "main")
-                    .sink(
-                        encoder.clone(),
-                        KeyHashRouter,
-                        chunk_cfg,
-                        ctx.queues,
-                        ctx.budget,
-                    )
-                    .build()
-            })
-            .runtime_options(RuntimeOptions {
-                handle_signals: false,
-                ..RuntimeOptions::default()
-            })
-            .into_runtime(source)
-            .expect("into_runtime");
+            .expect("builder");
+    let runtime = passthrough_runtime(pipeline, source, sink, encoder, RuntimeOptions::default());
     let shutdown = runtime.shutdown_handle();
     let run = PipelineRun::spawn(move || runtime.run());
     (handle, shutdown, run)

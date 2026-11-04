@@ -5,12 +5,11 @@ use bytes::BytesMut;
 use spate_core::config::PipelineConfig;
 use spate_core::deser::Owned;
 use spate_core::error::{ErrorClass, SinkError};
-use spate_core::ops::chain_owned;
 use spate_core::pipeline::{ExitState, Pipeline, RuntimeOptions};
 use spate_core::record::{PartitionId, Record};
-use spate_core::sink::{KeyHashRouter, RowEncoder};
+use spate_core::sink::RowEncoder;
 use spate_core::source::LaneId;
-use spate_test::{BytesPassthrough, PipelineRun, capture_sink, memory_source, wait_until};
+use spate_test::{PipelineRun, capture_sink, memory_source, passthrough_runtime, wait_until};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -62,30 +61,18 @@ fn a_finalize_failure_on_the_shutdown_drain_fails_the_run() {
     let encoder = BrokenFinishEncoder::default();
     let encoded = Arc::clone(&encoder.encoded);
 
-    let runtime = Pipeline::from_config(PipelineConfig::from_str(CONFIG).expect("config"))
-        .expect("builder")
-        .sink(sink_a)
-        .expect("sink")
-        .chains(move |ctx| {
-            let chunk_cfg = ctx.chunk();
-            chain_owned::<Vec<u8>, _>(BytesPassthrough)
-                .with_metrics(ctx.pipeline, "main")
-                .sink(
-                    encoder.clone(),
-                    KeyHashRouter,
-                    chunk_cfg,
-                    ctx.queues,
-                    ctx.budget,
-                )
-                .build()
-        })
-        .runtime_options(RuntimeOptions {
-            handle_signals: false,
+    let pipeline =
+        Pipeline::from_config(PipelineConfig::from_str(CONFIG).expect("config")).expect("builder");
+    let runtime = passthrough_runtime(
+        pipeline,
+        source,
+        sink_a,
+        encoder,
+        RuntimeOptions {
             idle_flush: Duration::from_secs(3600),
             ..RuntimeOptions::default()
-        })
-        .into_runtime(source)
-        .expect("into_runtime");
+        },
+    );
 
     let shutdown = runtime.shutdown_handle();
     let run = PipelineRun::spawn(move || runtime.run());

@@ -15,16 +15,16 @@
 //! without refusing it in the passthrough.
 
 use crate::error::redacted_client_error;
-use rdkafka::ClientConfig;
-use rdkafka::TopicPartitionList;
-use rdkafka::client::ClientContext;
+use rdkafka::client::{Client, ClientContext};
 use rdkafka::config::{FromClientConfigAndContext, RDKafkaLogLevel};
 use rdkafka::consumer::{BaseConsumer, Consumer as _, ConsumerContext};
-use rdkafka::error::KafkaError;
+use rdkafka::error::{IsError as _, KafkaError, KafkaResult, RDKafkaErrorCode};
 use rdkafka::producer::{DeliveryResult, ProducerContext};
 use rdkafka::statistics::Statistics;
+use rdkafka::topic_partition_list::TopicPartitionListElem;
 use rdkafka::types::RDKafkaRespErr;
 use rdkafka::util::IntoOpaque;
+use rdkafka::{ClientConfig, Offset, TopicPartitionList};
 use spate_core::config::{DurationBounds, check_duration, redact};
 use std::collections::BTreeMap;
 use std::fmt;
@@ -385,6 +385,49 @@ pub(crate) trait Hooks: Send + Sync + 'static {
 }
 
 impl Hooks for () {}
+
+/// Writes the offset each element of `tpl` names into that element, with one
+/// ListOffsets request per leader: the log start for `Offset::Beginning`, the
+/// end for `Offset::End`, as `isolation.level` reads it. Blocks for up to
+/// `timeout`. A refusal is reported, where a client's own lookup retries it.
+///
+/// # Errors
+///
+/// When the request fails as a whole. An element's own failure is on that
+/// element, for [`listed_offset`] to read.
+pub(crate) fn list_offsets<C: ClientContext>(
+    client: &Client<C>,
+    tpl: &mut TopicPartitionList,
+    timeout: Duration,
+) -> KafkaResult<()> {
+    let timeout = i32::try_from(timeout.as_millis()).unwrap_or(i32::MAX);
+    // SAFETY: the client pointer is valid while `client` is borrowed, and `tpl`
+    // owns its list across the call. `rd_kafka_offsets_for_times` writes each
+    // result into the list and keeps neither pointer past the call.
+    let code = unsafe {
+        rdkafka::bindings::rd_kafka_offsets_for_times(client.native_ptr(), tpl.ptr(), timeout)
+    };
+    if code.is_error() {
+        return Err(KafkaError::MetadataFetch(code.into()));
+    }
+    Ok(())
+}
+
+/// The offset [`list_offsets`] wrote into `elem`.
+///
+/// # Errors
+///
+/// The element's own failure, or `OffsetNotAvailable` for anything that is not
+/// a concrete offset.
+pub(crate) fn listed_offset(elem: &TopicPartitionListElem<'_>) -> KafkaResult<i64> {
+    elem.error()?;
+    match elem.offset() {
+        Offset::Offset(offset) => Ok(offset),
+        _ => Err(KafkaError::MetadataFetch(
+            RDKafkaErrorCode::OffsetNotAvailable,
+        )),
+    }
+}
 
 /// The generation id `consumer` holds, or `-1` when it holds none: it has not
 /// joined, the group has told it its generation is gone, or it has no group. The

@@ -855,10 +855,9 @@ fn validate(cfg: &ClickHouseSinkConfig) -> Result<(), ConfigError> {
         return fail(why.to_string());
     }
 
-    // Compression: the string parser already bounds the level, but a
-    // programmatic `build()` caller can construct `Zstd(level)` directly, and
-    // an out-of-range level is rejected by the server mid-stream (a retryable
-    // code, so an infinite loop). Reject at load.
+    // Compression: the string parser bounds the level, and a programmatic
+    // `build()` caller can construct `Zstd(level)` directly. The same bound
+    // here makes a config built in code accept the levels YAML accepts.
     if let Compression::Zstd(level) = cfg.compression
         && !(1..=22).contains(&level)
     {
@@ -1469,6 +1468,7 @@ settings: { insert_quorum: "auto" }
         for (value, input, needle) in [
             ("gzip", "gzip", "unknown compression"),
             ("\"zstd:0\"", "zstd:0", "[1, 22]"),
+            ("\"zstd:23\"", "zstd:23", "[1, 22]"),
             ("\"zstd:99\"", "99", "[1, 22]"),
             ("\"zstd:hunter2\"", "hunter2", "invalid zstd level"),
         ] {
@@ -1522,6 +1522,32 @@ settings: { insert_quorum: "auto" }
         cfg.compression = Compression::Zstd(99);
         let err = build(cfg).unwrap_err();
         assert!(err.to_string().contains("[1, 22]"), "{err}");
+    }
+
+    /// A config built in code accepts the zstd levels the YAML parser
+    /// accepts, and no others.
+    #[test]
+    fn build_accepts_zstd_levels_one_through_twenty_two_only() {
+        let zstd = |level| {
+            let mut cfg =
+                ClickHouseSinkConfig::new("t", vec![ShardConfig::new(vec!["http://a".into()])]);
+            cfg.compression = Compression::Zstd(level);
+            cfg
+        };
+        for level in [1, 22] {
+            if let Err(e) = build(zstd(level)) {
+                panic!("zstd level {level} must build: {e}");
+            }
+        }
+        for level in [0, 23] {
+            let Err(ConfigError::Validation(msg)) = build(zstd(level)) else {
+                panic!("zstd level {level} must fail validation");
+            };
+            assert_eq!(
+                msg,
+                format!("sink.clickhouse: compression zstd level must be in [1, 22] (got {level})")
+            );
+        }
     }
 
     #[test]

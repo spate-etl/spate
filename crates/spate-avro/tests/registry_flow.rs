@@ -363,6 +363,43 @@ async fn unknown_id_negative_caches_until_ttl_expiry() {
     assert_eq!(rows.len(), 1, "expired negative entry allows a refetch");
 }
 
+/// A resolved fetch clears the id's fetch backoff, so a negative entry at
+/// the 100 ms TTL floor is refetched as soon as it expires.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_negative_entry_at_the_ttl_floor_refetches_on_expiry() {
+    let stub = StubRegistry::default();
+    // No script for id 6 yet: the stub answers 404.
+    let addr = stub.clone().serve().await;
+
+    let clock = TestClock::frozen();
+    let builder = builder_on(addr, Duration::from_millis(100), &clock);
+    let mut deser = builder.build_value().expect("apache builder");
+    let payload = confluent_payload(6, 1);
+
+    let (mut deser, first) = tokio::task::spawn_blocking(move || {
+        let mut out = Collected(Vec::new());
+        let r = drive_until_ready(&mut deser, &payload, &mut out);
+        (deser, r)
+    })
+    .await
+    .unwrap();
+    let err = first.unwrap_err();
+    assert!(matches!(err, DeserError::SchemaUnavailable { .. }), "{err}");
+
+    stub.script("/schemas/ids/6", 200, &schema_body(SCHEMA_V1), 0);
+    clock.advance(Duration::from_millis(100));
+    let payload = confluent_payload(6, 1);
+    let rows = tokio::task::spawn_blocking(move || {
+        let mut out = Collected(Vec::new());
+        drive_until_ready(&mut deser, &payload, &mut out).map(|()| out.0)
+    })
+    .await
+    .unwrap()
+    .expect("the expired negative entry refetches with the clock unmoved");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(stub.path_hits("/schemas/ids/6"), 2);
+}
+
 /// Records naming many distinct ids the registry does not know log the 404
 /// warning a bounded number of times, while every id is still fetched.
 #[test]

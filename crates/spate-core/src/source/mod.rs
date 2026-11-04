@@ -37,6 +37,10 @@ pub struct LaneId(pub u32);
 /// time, and every payload shares the batch lifetime `'buf`.
 /// The batch carries exactly one [`AckRef`], issued by the lane through its
 /// [`AckIssuer`]; records derived from these payloads clone it.
+///
+/// A batch may carry no payloads. Its ack then covers offsets that hold no
+/// record this consumer can read, and resolves in order behind every batch
+/// the lane issued before it.
 pub trait PayloadBatch<'buf> {
     /// The next payload, or `None` when the batch is exhausted.
     fn next_payload(&mut self) -> Option<RawPayload<'buf>>;
@@ -66,6 +70,9 @@ pub trait SourceLane: Send {
 
     /// Poll up to `max_records` payloads, waiting at most `timeout`.
     /// `Ok(None)` means nothing arrived; the driver treats it as idle.
+    /// A batch with no payloads is not idle: it counts against the pending
+    /// ceiling like any other batch, so a lane cannot outrun a stalled head
+    /// by returning them.
     /// Implementations must not busy-spin when idle; block up to `timeout`.
     /// A lane that reports [`finished`](Self::finished) may return its
     /// end-of-input `Ok(None)` without waiting out `timeout`, because the
@@ -375,8 +382,9 @@ pub trait Source: Send {
     fn poll_events(&mut self, timeout: Duration) -> Result<SourceEvent<Self::Lane>, SourceError>;
 
     /// Store per-partition committable positions (each is the offset one
-    /// past the last acknowledged record). Positions are durable per the
-    /// source's own policy (e.g. interval auto-commit of stored offsets).
+    /// past the last offset an acknowledged batch covers, which may hold no
+    /// record). Positions are durable per the source's own policy (e.g.
+    /// interval auto-commit of stored offsets).
     ///
     /// The last commit of a stop is this call too. It runs on the controller
     /// thread, so a source that commits to a remote store bounds the call

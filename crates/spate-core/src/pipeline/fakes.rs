@@ -427,8 +427,12 @@ impl SourceLane for FakeLane {
                 self.current = batch;
                 let last = self.current.last().expect("non-empty batch").0;
                 let ack = self.issuer.issue(self.partition, last);
+                let payloads: &[(i64, Vec<u8>)] = match self.current.as_slice() {
+                    [(_, bytes)] if bytes == NO_PAYLOAD => &[],
+                    all => all,
+                };
                 Ok(Some(FakeBatch {
-                    payloads: &self.current,
+                    payloads,
                     idx: 0,
                     partition: self.partition,
                     ack,
@@ -776,6 +780,13 @@ pub(crate) fn batches(ranges: &[std::ops::Range<i64>]) -> Vec<Vec<(i64, Vec<u8>)
         .iter()
         .map(|r| r.clone().map(|o| (o, vec![0u8; 8])).collect())
         .collect()
+}
+
+const NO_PAYLOAD: &[u8] = b"no-payload";
+
+/// A scripted batch that covers `offset` and hands out no payloads.
+pub(crate) fn no_payload_batch(offset: i64) -> Vec<(i64, Vec<u8>)> {
+    vec![(offset, NO_PAYLOAD.to_vec())]
 }
 
 /// Spin until `cond` holds or the timeout elapses; panic on timeout.

@@ -616,6 +616,78 @@ fn a_stall_fails_only_past_its_limit_on_the_injected_clock() {
 /// being re-measured by them.
 #[test]
 fn pending_batch_ceiling_is_a_hard_bound() {
+    the_ceiling_holds_three_of(batches(&[0..10, 10..20, 20..30, 30..40, 40..50, 50..60]));
+}
+
+/// A batch with no payloads counts against `max_pending_batches` as any other
+/// does, so a lane returning them cannot outrun a stalled head.
+#[test]
+fn a_batch_with_no_payload_counts_against_the_ceiling() {
+    the_ceiling_holds_three_of((1..=6).map(|i| no_payload_batch(i * 10 - 1)).collect());
+}
+
+/// A batch with no payloads retires through the pending gate and moves the
+/// watermark past the offset it covers, with no record counted. The ceiling of
+/// one lets the second batch leave the lane only once the first has retired.
+#[test]
+fn a_batch_with_no_payload_retires_through_the_gate() {
+    let mut cfg = test_config(1);
+    cfg.metrics.exporter = crate::config::MetricsExporter::Prometheus;
+    cfg.checkpoint.max_pending_batches = 1;
+    let pipeline_name = cfg.pipeline.name.clone();
+    let handle = crate::metrics::install(&crate::metrics::MetricsSettings {
+        exporter: crate::metrics::Exporter::Prometheus,
+        per_partition_detail: cfg.metrics.per_partition_detail,
+        e2e_basis: crate::metrics::E2eBasis::Ingest,
+    })
+    .expect("install the exporter");
+
+    let h = start_with_config(cfg, |shared, log| FakeChain {
+        shared,
+        log,
+        mode: ChainMode::Ok,
+        batches_seen: 0,
+    });
+    h.script
+        .lock()
+        .unwrap()
+        .push_back(Script::Assign(vec![LaneSpec {
+            id: LaneId(0),
+            partition: PartitionId(0),
+            batches: vec![no_payload_batch(9), no_payload_batch(19)],
+        }]));
+    wait_for("the watermark passes both", Duration::from_secs(5), || {
+        h.shared
+            .lock()
+            .unwrap()
+            .committed
+            .get(&PartitionId(0))
+            .is_some_and(|&w| w == 20)
+    });
+    h.script.lock().unwrap().push_back(Script::Drained);
+    let report = h.join.join().unwrap().unwrap();
+    assert_eq!(report.state, ExitState::Completed);
+    assert_eq!(h.chain.consumed.load(Ordering::Relaxed), 0);
+
+    let rendered = handle.render();
+    let labels = checkpoint_labels(&pipeline_name);
+    assert_eq!(
+        pending_series(&rendered, &pipeline_name),
+        vec![format!("{}{{{labels}}} 0", names::CHECKPOINT_PENDING_BATCHES)],
+        "{rendered}"
+    );
+    let counted: Vec<&str> = rendered
+        .lines()
+        .filter(|l| l.starts_with(&format!("{}{{", names::SOURCE_RECORDS_TOTAL)))
+        .filter(|l| l.contains(&format!(r#"pipeline="{pipeline_name}""#)))
+        .filter(|l| !l.ends_with(" 0"))
+        .collect();
+    assert!(counted.is_empty(), "records counted: {counted:?}");
+}
+
+/// Runs `scripted`, six batches with a last offset of 59, under a ceiling of
+/// three with every ack withheld, then releases them.
+fn the_ceiling_holds_three_of(scripted: Vec<Vec<(i64, Vec<u8>)>>) {
     let held: Arc<Mutex<Vec<crate::checkpoint::AckRef>>> = Arc::new(Mutex::new(Vec::new()));
     let release = Arc::new(AtomicBool::new(false));
     let held_c = Arc::clone(&held);
@@ -640,7 +712,14 @@ fn pending_batch_ceiling_is_a_hard_bound() {
     );
     // Six batches whose acks are all withheld. The gate closes after the
     // third and the remaining three never leave the lane.
-    assign_one_lane(&h, &[0..10, 10..20, 20..30, 30..40, 40..50, 50..60]);
+    h.script
+        .lock()
+        .unwrap()
+        .push_back(Script::Assign(vec![LaneSpec {
+            id: LaneId(0),
+            partition: PartitionId(0),
+            batches: scripted,
+        }]));
     wait_for("the ceiling fills", Duration::from_secs(5), || {
         held.lock().unwrap().len() == 3
     });

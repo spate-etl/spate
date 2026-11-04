@@ -190,7 +190,7 @@ Consequences worth stating outright:
 | `spate_deser_records_total` | counter | `outcome` (`ok`\|`error`) | Deserialization attempts by outcome. One input payload may yield 0..N records; this counts outputs, plus one `error` per failed payload. |
 | `spate_deser_records_dropped_total` | counter | `reason` (`skip_policy`) | Payloads dropped by the Skip error policy. |
 | `spate_deser_not_ready_total` | counter | | Payload replays waiting on an upstream dependency (e.g. a schema-registry fetch). Neither an error nor backpressure — the batch retries and completes once the dependency arrives. |
-| `spate_deser_batch_duration_seconds` | histogram | | Deserialization time per source batch. |
+| `spate_deser_batch_duration_seconds` | histogram | | Deserialization time per source batch, including a batch with no payloads, which a source returns to retire offsets that hold no record. |
 
 ## Operators (`spate_operator_*`)
 
@@ -200,7 +200,7 @@ Consequences worth stating outright:
 | `spate_operator_records_out_total` | counter | | Records emitted downstream (filter drops and flat_map fan-out make this differ from in). |
 | `spate_operator_records_dropped_total` | counter | `reason` (`filtered`\|`skip_policy`\|`unrouted`) | Records intentionally removed (`unrouted`: matched no split-sink branch under an `unmatched: Skip` policy). |
 | `spate_operator_errors_total` | counter | `error_type` (`record_level`\|`fatal`) | Errors by what the stage did with them: `record_level` for a record a Skip policy dropped, `fatal` for a failure that stopped the pipeline. No error here is retryable: an operator stage carries no error class to retry on, and `spate_sink_errors_total` is where that class is reported. A `fatal` counts once per stage instance that tripped, so one cause reads as one per pipeline thread. |
-| `spate_operator_batch_duration_seconds` | histogram | | Processing time per batch through this operator. |
+| `spate_operator_batch_duration_seconds` | histogram | | Processing time per batch through this operator, including a batch with no payloads. |
 
 ## Queues (pipeline → sink handoff) (`spate_queue_*`)
 

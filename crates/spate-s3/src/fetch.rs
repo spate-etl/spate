@@ -705,10 +705,6 @@ async fn stream_object_streaming(
                             return Ok(false);
                         }
                     }
-                    // A chunk restarts the budget and its schedule. Only an
-                    // empty one can precede a retry, since an error after any
-                    // bytes ends the read below.
-                    budget.reset();
                 }
                 Some(Err(e)) => {
                     if delivered > 0 {
@@ -863,8 +859,7 @@ pub(crate) const fn retry_backoff(base: Duration) -> Backoff {
     Backoff::new(base, BACKOFF_CAP)
 }
 
-/// One read's attempt count and the schedule it paces, started and reset
-/// together.
+/// One read's attempt count and the schedule it paces, started together.
 struct ReadBudget {
     attempt: u32,
     backoff: Backoff,
@@ -876,11 +871,6 @@ impl ReadBudget {
             attempt: 0,
             backoff: retry_backoff(retry_base),
         }
-    }
-
-    fn reset(&mut self) {
-        self.attempt = 0;
-        self.backoff.reset();
     }
 }
 
@@ -2212,12 +2202,11 @@ mod tests {
         assert_eq!(flaky.get_gaps(), [1, 2, 4]);
     }
 
-    /// Pins that a chunk restarts a streaming read's budget and its
-    /// schedule: a body that yields an empty chunk and then breaks, on more
-    /// GETs than the budget allows, waits the base before each GET and
-    /// completes.
+    /// Pins that an empty chunk does not restart a streaming read's budget:
+    /// a body that yields an empty chunk and then breaks, on more GETs than
+    /// the budget allows, poisons the unit at the budget.
     #[tokio::test(start_paused = true)]
-    async fn an_empty_chunk_restarts_the_streaming_reads_budget() {
+    async fn an_empty_chunk_does_not_restart_the_streaming_reads_budget() {
         let flaky = Arc::new(FlakyStore {
             cut_after: 0,
             empty_before_cut: true,
@@ -2228,12 +2217,12 @@ mod tests {
         let mut slice = listed(&store).await;
         slice[0].etag = None;
         let msgs = collect_fetch(store, slice, 0, 64, 64).await;
-        assert_eq!(
-            assembled(&msgs),
-            vec![("p/a".to_string(), b"0123456789".to_vec())]
-        );
-        assert_eq!(flaky.gets.load(Ordering::Relaxed), MAX_ATTEMPTS + 1);
-        assert_eq!(flaky.get_gaps(), vec![1; MAX_ATTEMPTS as usize]);
+        assert!(matches!(
+            last_failure(msgs),
+            SplitFailure::Poison(PoisonKind::RetriesExhausted, _)
+        ));
+        assert_eq!(flaky.gets.load(Ordering::Relaxed), MAX_ATTEMPTS);
+        assert_eq!(flaky.get_gaps(), [1, 2, 4, 8, 16, 32, 64]);
     }
 
     /// Pins that a lane dropped while a window is read ahead ends the

@@ -17,8 +17,9 @@
 //! - `Pipeline::from_path` — `telemetry::init` → `metrics::install`
 //!   (the exporter is installed before any handle exists) →
 //!   the `spate-io` tokio runtime → `InflightBudget::new`.
-//! - `.sink(sink)` — `SinkBundle::into_parts` → `shard_queues` →
-//!   `ShardQueues::with_frame_codec` when the parts carry a codec →
+//! - `.sink(sink)` — `SinkBundle::into_parts` → `SinkPoolConfig::validate`
+//!   → `shard_queues` → `ShardQueues::with_frame_codec` when the parts carry
+//!   a codec →
 //!   per-shard `SinkShardMetrics` → `SinkPool::spawn` → drain + probe
 //!   wiring (the probe uses its own client set).
 //! - `.chains(..)` — the per-thread chain factory, with queues/budget/name

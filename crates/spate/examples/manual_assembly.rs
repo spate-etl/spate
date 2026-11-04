@@ -130,8 +130,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // with no replicas out of `SinkPool::spawn`), and the third is caught
     // nowhere: a surplus replica label publishes `spate_sink_replica_healthy`
     // for a replica that does not exist, and a missing one drops a live
-    // replica's health updates.
+    // replica's health updates. The builder also checks the pool tuning with
+    // `SinkPoolConfig::validate` and returns `BuildError::Config`;
+    // `SinkPool::spawn` does not, so the manual path calls it here.
     let parts = sink.into_parts();
+    parts.pool.validate()?;
     let shards = parts.shard_endpoints.len();
     let component_type = parts.component_type.clone();
     let replica_labels = parts.effective_replica_labels();

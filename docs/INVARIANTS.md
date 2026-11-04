@@ -27,7 +27,10 @@ year ago still means what it said.
   read, by retention or by an overwrite, is outside the property. A
   notification unit acknowledged at its
   [re-enqueue cap](user-guide/04-connectors/sources/s3/README.mdx#reading-a-notifications-object)
-  is an exception, counted in `spate_s3_source_overwrites_dropped_total`.
+  is an exception, counted in `spate_s3_source_overwrites_dropped_total`. A
+  [Kafka source partition the group has never committed](user-guide/04-connectors/sources/kafka/README.mdx#how-offsets-are-committed)
+  under `auto.offset.reset: latest` is an exception, and so is a committed
+  offset below the log start under that policy. No metric counts either.
   Everything else exists to make this one affordable.
 - <Anchor id="inv-2" />**INV-2 — source threads never block on a channel send.**
   Backpressure is `try_send` plus `Source::pause` plus continuing to poll. A

@@ -36,7 +36,7 @@ mod worker;
 pub use bundle::{SinkBundle, SinkParts};
 pub use config::{
     BatchConfig, BreakerConfig, BreakerConfigError, InflightConfig, RetryConfig, RetryConfigError,
-    SinkPoolConfig,
+    SinkPoolConfig, SinkPoolConfigError,
 };
 pub use failures::SinkFailures;
 pub use pool::{DrainReport, SinkPool};

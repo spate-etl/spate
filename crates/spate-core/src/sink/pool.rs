@@ -68,8 +68,9 @@ impl<W: ShardWriter> SinkPool<W> {
     ///
     /// # Panics
     ///
-    /// Panics when the lengths disagree or a shard has no replicas
-    /// (construction-time configuration errors).
+    /// Panics when the lengths disagree, a shard has no replicas, or
+    /// `inflight.max_per_shard` is zero (construction-time configuration
+    /// errors).
     #[must_use]
     #[expect(
         clippy::too_many_arguments,
@@ -134,14 +135,12 @@ impl<W: ShardWriter> SinkPool<W> {
             shard_endpoints.iter().all(|r| !r.is_empty()),
             "every shard needs at least one replica"
         );
-        // Connectors validate this in their own config parsing, but a
-        // programmatically built `SinkPoolConfig` reaches here unchecked. A
-        // zero-permit semaphore means every sealed batch parks forever
-        // instead of failing at construction.
-        assert!(
-            config.inflight.max_per_shard > 0,
-            "inflight.max_per_shard must be greater than zero"
-        );
+        // The builder rejects this at install through
+        // `SinkPoolConfig::validate`; a pool spawned directly skips that, and
+        // a zero-permit semaphore would park every sealed batch forever.
+        if let Err(e) = config.inflight.check() {
+            panic!("{e}");
+        }
 
         // Warn once per pool, from the seam every sink passes through, so no
         // connector has to mirror the check.

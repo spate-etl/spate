@@ -3054,3 +3054,13 @@ async fn a_sweep_whose_aborts_land_logs_no_missed_grace() {
     assert_eq!(ack_rx.try_recv().unwrap().status, AckStatus::Failed);
     assert_eq!(misses.0.load(Ordering::SeqCst), 0, "logged a missed grace");
 }
+
+/// Pins that `SinkPool::spawn` refuses a zero in-flight limit with the
+/// message `SinkPoolConfig::validate` gives for it.
+#[tokio::test]
+#[should_panic(expected = "inflight.max_per_shard must be at least 1")]
+async fn a_zero_inflight_limit_panics_at_spawn() {
+    let mut cfg = SinkPoolConfig::default();
+    cfg.inflight.max_per_shard = 0;
+    let _f = fixture(1, 1, cfg, 16);
+}

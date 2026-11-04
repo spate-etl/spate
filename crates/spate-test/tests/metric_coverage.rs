@@ -10,12 +10,10 @@ use metric_witness::{Witness, WitnessRecorder};
 use metrics_exporter_prometheus::PrometheusBuilder;
 use spate_core::config::PipelineConfig;
 use spate_core::metrics::names;
-use spate_core::ops::chain_owned;
 use spate_core::pipeline::{Pipeline, RuntimeOptions};
 use spate_core::record::PartitionId;
-use spate_core::sink::KeyHashRouter;
 use spate_core::source::LaneId;
-use spate_test::{BytesPassthrough, TestEncoder, capture_sink, decode_rows, memory_source};
+use spate_test::{TestEncoder, capture_sink, decode_rows, memory_source, passthrough_runtime};
 use std::collections::BTreeSet;
 use std::time::Duration;
 
@@ -67,29 +65,15 @@ fn run_scenario(config: &str) -> Coverage {
     let (source, handle) = memory_source();
     let (sink, script) = capture_sink(1, 1);
 
-    let runtime = Pipeline::from_config(PipelineConfig::from_str(config).expect("config"))
-        .expect("builder")
-        .sink(sink)
-        .expect("sink")
-        .chains(|ctx| {
-            let chunk_cfg = ctx.chunk();
-            chain_owned::<Vec<u8>, _>(BytesPassthrough)
-                .with_metrics(ctx.pipeline, "main")
-                .sink(
-                    TestEncoder,
-                    KeyHashRouter,
-                    chunk_cfg,
-                    ctx.queues,
-                    ctx.budget,
-                )
-                .build()
-        })
-        .runtime_options(RuntimeOptions {
-            handle_signals: false,
-            ..RuntimeOptions::default()
-        })
-        .into_runtime(source)
-        .expect("into_runtime");
+    let pipeline =
+        Pipeline::from_config(PipelineConfig::from_str(config).expect("config")).expect("builder");
+    let runtime = passthrough_runtime(
+        pipeline,
+        source,
+        sink,
+        TestEncoder,
+        RuntimeOptions::default(),
+    );
 
     // Assembly is over, so the next reading covers the run alone.
     let at_build = witness.written();

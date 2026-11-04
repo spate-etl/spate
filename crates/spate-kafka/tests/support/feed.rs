@@ -18,15 +18,14 @@ use spate_core::feed::{
     Confirmation, Delivery, DepthOf, DepthReading, Feed, FeedError, FeedErrorKind, FeedMetricsCtx,
     FeedWaker, Receipt, Unit, wake_channel,
 };
-use spate_core::ops::chain_owned;
 use spate_core::pipeline::{ExitState, Pipeline, RuntimeOptions, ShutdownHandle};
-use spate_core::sink::{KeyHashRouter, SinkPoolConfig};
+use spate_core::sink::SinkPoolConfig;
 use spate_json::NdjsonFramer;
 use spate_kafka::feed::{KafkaFeed, KafkaFeedError, KafkaFeedPublisher};
 use spate_s3::{DescriptorObject, S3Source, SplitDescriptor};
 use spate_test::{
-    BytesPassthrough, PipelineRun, ScriptedResult, SinkScript, TestEncoder, capture_sink,
-    decode_rows, wait_until,
+    PipelineRun, ScriptedResult, SinkScript, TestEncoder, capture_sink, decode_rows,
+    passthrough_runtime, wait_until,
 };
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -420,29 +419,16 @@ pub(crate) fn launch_customized(
     pool.batch.linger = Duration::from_millis(10);
     let (sink, script) = capture_sink(1, 1);
     pre(&script);
-    let runtime = pipeline
-        .feed(Arc::new(recording.clone()))
-        .sink(sink.with_pool_config(pool))
-        .unwrap()
-        .chains(|ctx| {
-            let chunk_cfg = ctx.chunk();
-            chain_owned::<Vec<u8>, _>(BytesPassthrough)
-                .sink(
-                    TestEncoder,
-                    KeyHashRouter,
-                    chunk_cfg,
-                    ctx.queues,
-                    ctx.budget,
-                )
-                .build()
-        })
-        .runtime_options(RuntimeOptions {
-            handle_signals: false,
+    let runtime = passthrough_runtime(
+        pipeline.feed(Arc::new(recording.clone())),
+        source,
+        sink.with_pool_config(pool),
+        TestEncoder,
+        RuntimeOptions {
             max_records: 1,
             ..RuntimeOptions::default()
-        })
-        .into_runtime(source)
-        .unwrap();
+        },
+    );
     let runtime = match stop_clock {
         Some(clock) => runtime.with_stop_clock(clock),
         None => runtime,

@@ -147,15 +147,17 @@ These bounds are enforced by `SinkPoolConfig::validate`, which checks the
 `batch` and `inflight` keys and runs `RetryConfig::validate` and
 `BreakerConfig::validate`. A sink connector checks them when its configuration
 loads, and the pipeline builder checks them again when it installs any sink, so
-a bad value fails startup with the offending key before the write loop runs. A
-sink built in code fails `Pipeline::sink` with the sink's name and the key.
+a bad value fails startup before the write loop runs. A sink built in code
+fails `Pipeline::sink` with the sink's name and the key.
 They rule out the nonsensical, not the aggressive; `initial: 1ns` passes.
 
 A pool spawned directly with `SinkPool::spawn` skips the check. On that path
 the breaker still floors `half_open_probes` at 1 and caps `open_for` at a year,
-a `breaker.failure_threshold` of `0` opens on the first failure, a zero
+a zero `batch.max_rows` or `batch.max_bytes` seals every chunk as its own
+batch, a `breaker.failure_threshold` of `0` opens on the first failure, a zero
 `inflight.max_per_shard` panics at spawn, and a zero retry delay retries
-without sleeping.
+without sleeping. A zero `breaker.open_for` ends a failed replica's quarantine
+at once, and the replica takes a probe write on its next turn.
 
 There is **no upper bound on `retry.max`**, because a sink fronting an
 expensive or rate-limited destination may want a very patient

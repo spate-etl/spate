@@ -414,9 +414,9 @@ impl InflightConfig {
 
 /// Why a [`SinkPoolConfig`] was rejected.
 ///
-/// Each message names the offending key relative to the sink's section;
-/// connectors prepend their own config path when converting it into their
-/// `ConfigError`.
+/// Each message names the offending key relative to the sink's section. The
+/// pipeline builder prefixes the sink's name when it returns one as
+/// [`BuildError::Config`](crate::pipeline::BuildError::Config).
 #[derive(Clone, Debug, PartialEq, thiserror::Error)]
 #[non_exhaustive]
 pub enum SinkPoolConfigError {

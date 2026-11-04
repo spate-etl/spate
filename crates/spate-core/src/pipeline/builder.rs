@@ -39,7 +39,7 @@
 //! | Builder | Primitives |
 //! |---|---|
 //! | `from_config(config)` | [`telemetry::init`](crate::telemetry::init) → [`metrics::install`](crate::metrics::install)`(&`[`metrics_settings`](crate::pipeline::metrics_settings)`(&config))` → `tokio::runtime::Builder` (`io_threads` workers) → [`InflightBudget::new`](crate::backpressure::InflightBudget::new) |
-//! | `.sink(bundle)` | [`SinkBundle::into_parts`](crate::sink::SinkBundle::into_parts) → [`shard_queues`](crate::sink::shard_queues) → [`ShardQueues::with_frame_codec`](crate::sink::ShardQueues::with_frame_codec) when the parts carry a [`frame_codec`](crate::sink::SinkParts::frame_codec) → [`SinkShardMetrics::try_new`](crate::metrics::SinkShardMetrics::try_new) per shard → [`SinkPool::spawn`](crate::sink::SinkPool::spawn) → a boxed drain closure. It also resolves this sink's [`ChunkConfig`] from the YAML `chunk:` block / [`SinkOptions::with_chunk`]. This is the one builder step without a manual-assembly equivalent, since the config layer is what carries `chunk:`. |
+//! | `.sink(bundle)` | [`SinkBundle::into_parts`](crate::sink::SinkBundle::into_parts) → [`SinkPoolConfig::validate`](crate::sink::SinkPoolConfig::validate) → [`shard_queues`](crate::sink::shard_queues) → [`ShardQueues::with_frame_codec`](crate::sink::ShardQueues::with_frame_codec) when the parts carry a [`frame_codec`](crate::sink::SinkParts::frame_codec) → [`SinkShardMetrics::try_new`](crate::metrics::SinkShardMetrics::try_new) per shard → [`SinkPool::spawn`](crate::sink::SinkPool::spawn) → a boxed drain closure. It also resolves this sink's [`ChunkConfig`] from the YAML `chunk:` block / [`SinkOptions::with_chunk`]. This is the one builder step without a manual-assembly equivalent, since the config layer is what carries `chunk:`. |
 //! | `.chains(f)` | the factory handed to [`PipelineRuntime::new`], with queue/budget/name plumbing pre-threaded per call |
 //! | `.feed(feed)` | [`PipelineRuntime::with_feed`] |
 //! | `.into_runtime(source)` / `.run(source)` | [`PipelineRuntime::new`]`(config, source, factory, `[`SinkRuntime`]`{..}, budget)` + [`PipelineRuntime::with_io_runtime`] |
@@ -1304,6 +1304,37 @@ mod tests {
                 "{err:?}"
             );
         }
+    }
+
+    /// Pins that an invalid pool fails before the builder claims any metric
+    /// series. A live pipeline already owns the sink's series, and the
+    /// rejected install still reports the pool error.
+    #[test]
+    fn an_invalid_pool_is_rejected_before_its_series_are_claimed() {
+        let named = || {
+            let mut cfg = test_config(1);
+            cfg.pipeline.name = "pool-check-order".into();
+            cfg
+        };
+        let _live = Pipeline::from_config(named())
+            .expect("builder")
+            .sink(null_sink(1))
+            .expect("the live pipeline claims the sink series");
+        let mut pool = SinkPoolConfig::default();
+        pool.batch.max_rows = 0;
+        let sink = SinkParts::new(NullWriter, vec![vec![()]], pool).with_component_type("null");
+        let err = Pipeline::from_config(named())
+            .expect("builder")
+            .sink(sink)
+            .err();
+        assert!(
+            matches!(
+                &err,
+                Some(BuildError::Config(ConfigError::Validation(m)))
+                    if m == "sink \"default\": batch.max_rows must be at least 1"
+            ),
+            "{err:?}"
+        );
     }
 
     #[test]

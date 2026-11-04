@@ -172,6 +172,10 @@ The framework never uses librdkafka's position-based auto-commit. Instead:
   rebalance, or on a partition added to the topic. The exposure lasts until the
   partition's first commit, which needs a first record and a sink that
   acknowledges it. Set `auto.offset.reset: earliest` where that loss matters.
+- A committed offset below the log start, which retention causes when a group
+  stops or lags, also falls under `auto.offset.reset`. Under `latest` the source
+  moves to the end, past records the log still holds, and the next commit moves
+  past them. Under `earliest` it moves to the log start.
 
 A message librdkafka reports as corrupt, as `check.crcs` detects, fails the
 source with a fatal error, because librdkafka can read on past it

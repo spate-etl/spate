@@ -127,9 +127,9 @@ impl ConsumerHooks for SourceHooks {
         tpl: &mut TopicPartitionList,
     ) {
         if self.closing.load(Ordering::Acquire) {
-            // Close rejoins from an unanswered assignment, and a blocking
-            // `assign` posted as the group terminates can wait forever on a
-            // reply librdkafka never sends.
+            // Close leaves the group from an unanswered assignment, and a
+            // blocking `assign` posted as the group terminates can wait forever
+            // on a reply librdkafka never sends.
             if err == RDKafkaRespErr::RD_KAFKA_RESP_ERR__ASSIGN_PARTITIONS {
                 return;
             }

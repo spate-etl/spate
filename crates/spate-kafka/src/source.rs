@@ -1422,23 +1422,25 @@ fn queued_events(consumer: &BaseConsumer<SourceContext>) -> usize {
     }
 }
 
-/// Serves the events on `consumer`'s queue at the time of the call, and leaves
-/// any that arrive later.
+/// Serves as many events as `consumer`'s queue holds at the time of the call.
 ///
 /// One poll serves one event of any kind and cannot report an empty queue, so
-/// the count comes from one read of the queue's length. The queue is first in,
-/// first out, so a rebalance present at the read is reached past the events
-/// ahead of it, and the serve cannot follow a growing queue.
+/// the count comes from one read of the queue's length, and the serve cannot
+/// follow a growing queue. librdkafka sorts log and statistics events ahead of
+/// a rebalance, so one arriving during the serve takes a poll of the count and
+/// can leave a rebalance for close.
 fn serve_queued(consumer: &BaseConsumer<SourceContext>) {
     for _ in 0..queued_events(consumer) {
-        // No commit follows, so a message is dropped with no rewind. The error
+        // A served message stores no offset, since the source owns
+        // `enable.auto.offset.store`, so it is dropped with no rewind. The error
         // hook has logged an error.
         let _ = consumer.poll(Duration::ZERO);
     }
 }
 
-/// Sets every consumer's context to finish rebalances in the callback, then
-/// serves the events queued on each consumer and releases it with `unassign`.
+/// Sets every consumer's context to complete revocations in the callback and
+/// leave assignments to close, then serves the events queued on each consumer
+/// and releases it with `unassign`.
 ///
 /// Consumer close, inside `BaseConsumer::drop`, polls until the group
 /// protocol completes and serves any rebalance still queued through the
@@ -1452,17 +1454,9 @@ fn serve_queued(consumer: &BaseConsumer<SourceContext>) {
 ///
 /// A queued assignment is served with no `assign`, and close completes it as
 /// it does a held one. `unassign` answers a queued revocation without serving
-/// its event, which would leave close to serve it after the group may have
-/// terminated, where the callback can wait forever on a reply. Each consumer's
-/// queue is served first, and a rebalance queued later stays close's to serve.
-///
-/// Tests pin each case: a held assignment
-/// (`dropping_with_a_held_assignment_returns`), a revocation the source took
-/// (`dropping_mid_revoke_returns`) and a lost one
-/// (`dropping_mid_lost_revoke_returns`), a queued assignment
-/// (`dropping_with_a_queued_assignment_returns`), and a queued revocation
-/// (`dropping_with_a_queued_revocation_returns`,
-/// `dropping_with_a_queued_lost_revocation_returns`).
+/// its event, which would leave close to serve it as the group terminates,
+/// where the callback can wait forever on a reply. Each consumer's queue is
+/// served first, and a rebalance queued later stays close's to serve.
 impl Drop for KafkaSource {
     fn drop(&mut self) {
         for member in &self.members {
@@ -2518,15 +2512,11 @@ mod tests {
                 .iter()
                 .any(|m| matches!(m.phase, Phase::Held(_)))
         });
-        let dropped =
-            crate::testutil::returns_within(Duration::from_secs(30), move || drop(source));
-        if !dropped {
-            // Its clients are still connected; dropping it would wait on them.
-            std::mem::forget(cluster);
-        }
-        assert!(
-            dropped,
-            "dropping the source with an assignment held did not return"
+        crate::testutil::assert_returns(
+            cluster,
+            Duration::from_secs(30),
+            "dropping the source with an assignment held",
+            move || drop(source),
         );
     }
 
@@ -2537,18 +2527,16 @@ mod tests {
     mod queued_rebalance {
         use super::*;
         use crate::client::testing::{Raw as _, raw_config};
-        use crate::testutil::returns_within;
+        use crate::testutil::{ASSIGN_STOP, returns_within, stop_at};
         use rdkafka::mocking::MockCluster;
         use rdkafka::producer::DefaultProducerContext;
         use rdkafka::types::{RDKafkaApiKey, RDKafkaRespErr};
         use spate_test::{capture_logs, wait_until};
+        use std::sync::mpsc;
         use tracing::Level;
 
         const DEADLINE: Duration = Duration::from_secs(60);
         const CLOSE: Duration = Duration::from_secs(30);
-        /// A consumer enters the wait for an assign call. Its `delegating
-        /// assign` line and the rebalance event follow.
-        const ASSIGN_STOP: &str = "-> wait-assign-call";
         const REVOKE_STOP: &str = "delegating revoke";
         const LOST_STOP: &str = r#"fac="LOST""#;
         /// The member starts rebalancing. Its `delegating revoke` line and the
@@ -2596,21 +2584,6 @@ mod tests {
             (source, members)
         }
 
-        /// Serve `consumer` up to librdkafka's `line`, and return with every
-        /// event logged before it on the queue.
-        fn stop_at(consumer: &BaseConsumer<SourceContext>, line: &str) {
-            wait_until(DEADLINE, line, || {
-                capture_logs(Level::DEBUG, || {
-                    let _ = consumer.poll(Duration::ZERO);
-                })
-                .iter()
-                .any(|l| l.contains(line))
-            });
-            // A round trip on librdkafka's thread, which has queued what it
-            // logged by the time it answers.
-            consumer.assignment().expect("assignment");
-        }
-
         /// `poll_events` until an assignment is live, and return its lanes.
         fn live_lanes(source: &mut KafkaSource) -> Vec<KafkaLane> {
             let mut lanes = Vec::new();
@@ -2655,13 +2628,27 @@ mod tests {
         }
 
         /// Run `close`, and fail if it does not return.
-        fn assert_returns(cluster: Mock, close: impl FnOnce() + Send + 'static) {
-            let returned = returns_within(CLOSE, close);
+        fn assert_closes(cluster: Mock, close: impl FnOnce() + Send + 'static) {
+            crate::testutil::assert_returns(cluster, CLOSE, "a consumer's close", close);
+        }
+
+        /// Run `drop_source` under a capture on a thread of its own, so a drop
+        /// that never returns fails under `CLOSE`, and return `cluster` and the
+        /// lines. The capture is scoped to the thread that runs the drop.
+        fn lines_of_drop<C>(
+            cluster: C,
+            level: Level,
+            drop_source: impl FnOnce() + Send + 'static,
+        ) -> (C, Vec<String>) {
+            let (lines, captured) = mpsc::channel();
+            let returned = returns_within(CLOSE, move || {
+                let _ = lines.send(capture_logs(level, drop_source));
+            });
             if !returned {
-                // Its clients are still connected; dropping it would wait on them.
                 std::mem::forget(cluster);
+                panic!("dropping the source did not return");
             }
-            assert!(returned, "a consumer's close did not return");
+            (cluster, captured.recv().expect("the captured lines"))
         }
 
         /// The drop serves each consumer's queued assignment with no `assign`
@@ -2682,7 +2669,7 @@ mod tests {
                 for consumer in &members {
                     stop_at(consumer, ASSIGN_STOP);
                 }
-                let lines = capture_logs(Level::DEBUG, move || drop(source));
+                let (cluster, lines) = lines_of_drop(cluster, Level::DEBUG, move || drop(source));
                 members.iter().for_each(|c| empty_queue(c));
 
                 for k in 0..consumers {
@@ -2701,7 +2688,7 @@ mod tests {
                     assert_eq!(consumer.assignment().expect("assignment").count(), 0);
                 }
                 assert_no_intents(&members);
-                assert_returns(cluster, move || drop(members));
+                assert_closes(cluster, move || drop(members));
             }
         }
 
@@ -2722,7 +2709,7 @@ mod tests {
             }
             drop(source);
             empty_queue(&members[0]);
-            assert_returns(cluster, move || drop(members));
+            assert_closes(cluster, move || drop(members));
         }
 
         /// The serve keeps going past an error event, which the error hook
@@ -2740,7 +2727,7 @@ mod tests {
             wait_until(DEADLINE, "error events queued", || {
                 queued_events(&consumer) >= 3
             });
-            let lines = capture_logs(Level::WARN, move || drop(source));
+            let ((), lines) = lines_of_drop((), Level::WARN, move || drop(source));
             let errors = lines
                 .iter()
                 .filter(|l| l.contains("librdkafka") && l.contains("error="))
@@ -2762,7 +2749,7 @@ mod tests {
             let lanes = live_lanes(&mut source);
             let joiner = joiner(&cluster, group);
             stop_at(&members[0], REBALANCE_STOP);
-            let lines = capture_logs(Level::DEBUG, move || {
+            let (cluster, lines) = lines_of_drop(cluster, Level::DEBUG, move || {
                 drop(lanes);
                 drop(source);
             });
@@ -2772,7 +2759,7 @@ mod tests {
                 "the revocation was not served: {lines:#?}"
             );
             assert_no_intents(&members);
-            assert_returns(cluster, move || {
+            assert_closes(cluster, move || {
                 drop(members);
                 drop(joiner);
             });
@@ -2793,7 +2780,7 @@ mod tests {
                 &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_UNKNOWN_MEMBER_ID],
             );
             stop_at(&members[0], LOST_STOP);
-            let lines = capture_logs(Level::DEBUG, move || {
+            let (cluster, lines) = lines_of_drop(cluster, Level::DEBUG, move || {
                 drop(lanes);
                 drop(source);
             });
@@ -2810,7 +2797,7 @@ mod tests {
                 !lines.iter().any(|l| l.contains(UNASSIGN_OP)),
                 "the serve went past its count: {lines:#?}"
             );
-            assert_returns(cluster, move || drop(members));
+            assert_closes(cluster, move || drop(members));
         }
 
         /// Pins that a lane outliving the source keeps its consumer open, and
@@ -2825,7 +2812,7 @@ mod tests {
             let consumer = members.pop().expect("one consumer");
             stop_at(&consumer, REVOKE_STOP);
             drop(consumer);
-            assert_returns(cluster, move || {
+            assert_closes(cluster, move || {
                 drop(source);
                 drop(lanes);
                 drop(joiner);

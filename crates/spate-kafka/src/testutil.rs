@@ -1,9 +1,12 @@
 //! Shared test fixtures: librdkafka statistics values, a refused broker
-//! address, a broker that refuses a SASL login, a raised fatal error and a
-//! bounded wait on a call that may never return.
+//! address, a broker that refuses a SASL login, a raised fatal error, a
+//! bounded wait on a call that may never return and a stop on a librdkafka log
+//! line.
 
+use crate::context::SourceContext;
 use rdkafka::bindings::rd_kafka_resp_err_t as RespErr;
 use rdkafka::client::{Client, ClientContext};
+use rdkafka::consumer::{BaseConsumer, Consumer as _};
 use rdkafka::statistics::{Broker, Window};
 use std::ffi::CStr;
 use std::sync::mpsc;
@@ -22,6 +25,41 @@ pub(crate) fn returns_within(limit: Duration, f: impl FnOnce() + Send + 'static)
         let _ = tx.send(());
     });
     rx.recv_timeout(limit).is_ok()
+}
+
+/// Run `close` within `limit` and fail naming `what` if it does not return.
+/// A call that does not return leaves `cluster` undropped: its clients are
+/// still connected, and dropping it would wait on them.
+pub(crate) fn assert_returns<C>(
+    cluster: C,
+    limit: Duration,
+    what: &str,
+    close: impl FnOnce() + Send + 'static,
+) {
+    let returned = returns_within(limit, close);
+    if !returned {
+        std::mem::forget(cluster);
+    }
+    assert!(returned, "{what} did not return");
+}
+
+/// A consumer enters the wait for an assign call. Its `delegating assign` line
+/// and the rebalance event follow.
+pub(crate) const ASSIGN_STOP: &str = "-> wait-assign-call";
+
+/// Serve `consumer` up to librdkafka's `line`, and return with every event
+/// logged before it on the queue.
+pub(crate) fn stop_at(consumer: &BaseConsumer<SourceContext>, line: &str) {
+    spate_test::wait_until(Duration::from_secs(60), line, || {
+        spate_test::capture_logs(tracing::Level::DEBUG, || {
+            let _ = consumer.poll(Duration::ZERO);
+        })
+        .iter()
+        .any(|l| l.contains(line))
+    });
+    // A round trip on librdkafka's thread, which has queued what it logged by
+    // the time it answers.
+    consumer.assignment().expect("assignment");
 }
 
 /// An `UP` broker entry keyed `name`, with its node name taken from `name`

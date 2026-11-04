@@ -24,7 +24,7 @@ use super::write::{
 };
 use super::{Core, Gating, KafkaFeed, KafkaFeedError, KafkaFeedPublisher, Ready};
 use crate::client::testing::raw_config;
-use crate::testutil::returns_within;
+use crate::testutil::{assert_returns, returns_within};
 use rdkafka::error::{KafkaError, RDKafkaErrorCode as C};
 use spate_core::clock::SyncClock;
 use spate_core::clock::TestClock;
@@ -1734,7 +1734,7 @@ mod cluster {
     use super::super::startup::{CONNECT_BOUND, Scope};
     use super::super::write::Producer;
     use super::super::{Core, Gating, KafkaFeed, READY_CAPACITY};
-    use super::{TWO, returns_within};
+    use super::{TWO, assert_returns, returns_within};
     use crate::client::testing::{Raw as _, raw_config};
     use crate::context::Intent;
     use crate::feed::FeedRole;
@@ -2056,21 +2056,14 @@ mod cluster {
             KafkaFeedConfig::from_section(&section_with(&brokers, &group, "    debug: cgrp\n"))
                 .unwrap();
         let (_, _producer, d) = super::super::parts(&config, TWO, SyncClock::system()).unwrap();
-        wait_until(DEADLINE, "an assignment queued", || {
-            spate_test::capture_logs(tracing::Level::DEBUG, || {
-                let _ = d.consumer.poll(Duration::ZERO);
-            })
-            .iter()
-            .any(|l| l.contains("-> wait-assign-call"))
-        });
-        d.consumer.assignment().unwrap();
+        crate::testutil::stop_at(&d.consumer, crate::testutil::ASSIGN_STOP);
         let context = Arc::clone(d.consumer.context());
-        let dropped = returns_within(Duration::from_secs(30), move || drop(d));
-        if !dropped {
-            // Its clients are still connected; dropping it would wait on them.
-            std::mem::forget(cluster);
-        }
-        assert!(dropped, "dropping the consumer thread did not return");
+        assert_returns(
+            cluster,
+            Duration::from_secs(30),
+            "dropping the consumer thread",
+            move || drop(d),
+        );
         let intents = context.intents.lock().unwrap();
         assert!(intents.is_empty(), "the close deferred: {intents:?}");
     }
@@ -2629,11 +2622,12 @@ mod cluster {
             .unwrap();
         units.flush(Duration::from_secs(30)).unwrap();
         wait_until(DEADLINE, "the unit is buffered", || buffered(&feed) == 1);
-        let dropped = returns_within(Duration::from_secs(10), move || drop(feed));
-        if !dropped {
-            std::mem::forget(cluster);
-        }
-        assert!(dropped, "dropping the feed did not return");
+        assert_returns(
+            cluster,
+            Duration::from_secs(10),
+            "dropping the feed",
+            move || drop(feed),
+        );
     }
 
     /// Pins that a gate pass whose follower does not catch up ends once the
@@ -3397,11 +3391,12 @@ mod cluster {
         };
         wait_until(DEADLINE, "the unit is buffered", || buffered(&feed) == 1);
         assert_eq!(core.lock().ready[0].deliveries, 1);
-        let dropped = returns_within(Duration::from_secs(10), move || drop(feed));
-        if !dropped {
-            std::mem::forget(cluster);
-        }
-        assert!(dropped, "dropping the feed did not return");
+        assert_returns(
+            cluster,
+            Duration::from_secs(10),
+            "dropping the feed",
+            move || drop(feed),
+        );
     }
 
     /// Pins that dropping a feed returns while its gate waits for the
@@ -3473,11 +3468,12 @@ mod cluster {
             follower: None,
             depth: None,
         };
-        let dropped = returns_within(Duration::from_secs(10), move || drop(feed));
-        if !dropped {
-            std::mem::forget(cluster);
-        }
-        assert!(dropped, "dropping the feed did not return");
+        assert_returns(
+            cluster,
+            Duration::from_secs(10),
+            "dropping the feed",
+            move || drop(feed),
+        );
     }
 
     /// Pins that dropping a feed returns once its follower thread has
@@ -3505,11 +3501,12 @@ mod cluster {
             follower: Some(follower),
             depth: None,
         };
-        let dropped = returns_within(Duration::from_secs(10), move || drop(feed));
-        if !dropped {
-            std::mem::forget(cluster);
-        }
-        assert!(dropped, "dropping the feed did not return");
+        assert_returns(
+            cluster,
+            Duration::from_secs(10),
+            "dropping the feed",
+            move || drop(feed),
+        );
         assert_eq!(
             Arc::strong_count(&core.ledger),
             1,

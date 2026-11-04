@@ -42,10 +42,10 @@ which needs a broker on `KAFKA_BROKERS`:
 
 The `sink: { kafka: ... }` section deserializes into `KafkaSinkConfig`
 ([`spate-kafka/src/sink/config.rs`](repo:crates/spate-kafka/src/sink/config.rs));
-unknown fields are rejected with the offending key, and the retry/breaker values
-are validated at load against the framework's
-[sink-pool rules](../../../07-reference/configuration.mdx#sink-pool) (a bad
-multiplier or zero threshold fails startup, naming the key).
+unknown fields are rejected with the offending key, and the `batch`, `inflight`,
+`retry` and `breaker` sections are validated at load against the framework's
+[sink-pool rules](../../../07-reference/configuration.mdx#sink-pool), so a
+refused value fails startup with an error naming the key.
 
 ```yaml
 sink:

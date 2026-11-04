@@ -31,6 +31,7 @@ use crate::queue::{
     VisibilityEntry,
 };
 use crate::startup::{self, COUNT_ATTRIBUTES, QueueAttributes, counts};
+use spate_core::backoff::Backoff;
 use spate_core::clock::tokio::{Clock, SystemClock};
 use spate_core::config::{FeedSection, redact};
 use spate_core::feed::{
@@ -76,8 +77,9 @@ const STOP_EXTENSION_BOUND: Duration = Duration::from_secs(1);
 /// hands that unit back again.
 const RECEIVE_GRACE: Duration = Duration::from_secs(1);
 
-const BACKOFF_START: Duration = Duration::from_millis(200);
-const BACKOFF_MAX: Duration = Duration::from_secs(5);
+/// The retry schedule of a receive, settle or publish call that fails
+/// transiently: 200 ms doubling to 5 s.
+const CALL_BACKOFF: Backoff = Backoff::new(Duration::from_millis(200), Duration::from_secs(5));
 
 /// A renewal tick seen later than this past its due time schedules the next
 /// a period after it was seen, so a long pass does not leave a burst of
@@ -1098,7 +1100,7 @@ async fn receive_task(shared: Arc<Shared>) {
     let settings = shared.settings;
     // At most 12 h, so the cast cannot truncate.
     let visibility = settings.visibility.as_secs() as i32;
-    let mut backoff = BACKOFF_START;
+    let mut backoff = CALL_BACKOFF;
     let mut retrying = false;
     loop {
         let want = {
@@ -1134,12 +1136,12 @@ async fn receive_task(shared: Arc<Shared>) {
         let ended = |st: &mut State| st.receiving = false;
         match received {
             Ok(messages) if messages.is_empty() => {
-                backoff = BACKOFF_START;
+                backoff.reset();
                 ended(&mut shared.lock());
                 shared.progress.notify_one();
             }
             Ok(messages) => {
-                backoff = BACKOFF_START;
+                backoff.reset();
                 let hold_end = hold_end(shared.now());
                 let (waker, handed_back) = {
                     let mut st = shared.lock();
@@ -1190,8 +1192,7 @@ async fn receive_task(shared: Arc<Shared>) {
                 }
                 shared.progress.notify_one();
                 // Real time: it paces retries and no deadline reads it.
-                tokio::time::sleep(backoff).await;
-                backoff = (backoff * 2).min(BACKOFF_MAX);
+                tokio::time::sleep(backoff.next_delay()).await;
                 retrying = true;
             }
         }
@@ -1565,6 +1566,12 @@ fn until(deadline: Instant, bound: Option<Instant>) -> Instant {
     bound.map_or(deadline, |bound| bound.min(deadline))
 }
 
+/// The instant `delay` after `now`, or `None` when that reaches `limit`.
+/// An instant past the `Instant` range is past `limit`, so it gives up too.
+fn retry_at(now: Instant, delay: Duration, limit: Instant) -> Option<Instant> {
+    now.checked_add(delay).filter(|&at| at < limit)
+}
+
 /// `fut`, or `None` once `clock` reaches `at`. `fut` is polled first, so an
 /// answer ready as the deadline passes counts.
 async fn before<F: Future>(clock: &dyn Clock, at: Instant, fut: F) -> Option<F::Output> {
@@ -1731,7 +1738,7 @@ where
 {
     let doing = settling.doing();
     let oldest = chunk.iter().map(|s| s.deadline).min().expect("a chunk");
-    let mut backoff = BACKOFF_START;
+    let mut backoff = CALL_BACKOFF;
     loop {
         let bound = shared.lock().close_bound(&*shared.clock);
         match call(bound).await {
@@ -1753,16 +1760,15 @@ where
                 let bound = shared.lock().close_bound(&*shared.clock);
                 let now = shared.now();
                 let limit = until(oldest, bound);
-                if now + backoff >= limit {
+                let Some(at) = retry_at(now, backoff.next_delay(), limit) else {
                     tracing::debug!(error = %e.message, "dropping a batch {doing} units past its deadline");
                     // A close's bound reports its own drops.
                     if settling == Settling::Fail && limit == oldest {
                         shared.count(|m| m.fails_dropped.increment(chunk.len() as u64));
                     }
                     return Ok(chunk.len());
-                }
-                shared.clock.sleep_until(now + backoff).await;
-                backoff = (backoff * 2).min(BACKOFF_MAX);
+                };
+                shared.clock.sleep_until(at).await;
                 shared.count(|m| m.retried(settling.op()).increment(1));
             }
         }
@@ -1827,7 +1833,7 @@ fn next_batch(queued: &mut Vec<Publish>) -> Vec<Publish> {
 ///
 /// `Err` when the feed has stopped.
 async fn publish_batch(shared: &Shared, entries: Vec<SendEntry>) -> Result<(), ()> {
-    let mut backoff = BACKOFF_START;
+    let mut backoff = CALL_BACKOFF;
     let mut retried = false;
     loop {
         if shared.stopped() {
@@ -1885,8 +1891,7 @@ async fn publish_batch(shared: &Shared, entries: Vec<SendEntry>) -> Result<(), (
                 tracing::warn!(error = %e.message, "publishing to SQS failed; retrying");
                 retried = true;
                 // Real time: it paces retries and no deadline reads it.
-                tokio::time::sleep(backoff).await;
-                backoff = (backoff * 2).min(BACKOFF_MAX);
+                tokio::time::sleep(backoff.next_delay()).await;
             }
         }
     }

@@ -2466,7 +2466,7 @@ async fn close_settles_after_the_batch_in_flight() {
     settle_tasks().await;
     assert!(closed.try_outcome().is_none());
     queue.delete_down.store(false, Ordering::SeqCst);
-    tokio::time::advance(BACKOFF_START).await;
+    tokio::time::advance(first_retry()).await;
     settle_tasks().await;
     assert_eq!(queue.inner.deletes().len(), 1);
     assert_eq!(queue.inner.deletes()[0].len(), 2);
@@ -2688,7 +2688,7 @@ async fn a_fatal_during_close_rejects_it() {
     let mut closed = feed.close(within).unwrap();
     settle_tasks().await;
     assert!(closed.try_outcome().is_none());
-    tokio::time::advance(BACKOFF_START).await;
+    tokio::time::advance(first_retry()).await;
     settle_tasks().await;
     assert!(Instant::now() < bound);
     assert_eq!(
@@ -4243,14 +4243,14 @@ async fn a_settle_retry_is_given_up_by_the_injected_clock() {
     settle_tasks().await;
     assert_eq!(queue.visibility().len(), 1, "tokio time ended the backoff");
     until("the backoff waits on the clock", || {
-        clock.has_slept_until(t0 + BACKOFF_START)
+        clock.has_slept_until(t0 + first_retry())
     })
     .await;
-    clock.advance(BACKOFF_START);
+    clock.advance(first_retry());
     until("the fail is retried", || queue.visibility().len() == 2).await;
     assert_eq!(
         queue.visibility_within(),
-        [Some(deadline - t0), Some(deadline - t0 - BACKOFF_START)]
+        [Some(deadline - t0), Some(deadline - t0 - first_retry())]
     );
 
     for (left, retried) in [(ms(200), false), (ms(201), true)] {
@@ -4266,12 +4266,12 @@ async fn a_settle_retry_is_given_up_by_the_injected_clock() {
         feed.fail(d.receipt, "unreadable").unwrap();
         until("the fail is sent", || queue.visibility().len() == 1).await;
         settle_tasks().await;
-        clock.advance(BACKOFF_START);
+        clock.advance(first_retry());
         settle_tasks().await;
         if retried {
             assert_eq!(
                 queue.visibility_within(),
-                [Some(left), Some(left - BACKOFF_START)],
+                [Some(left), Some(left - first_retry())],
                 "{left:?} left"
             );
         } else {
@@ -4761,7 +4761,7 @@ fn a_fail_batch_given_up_at_its_deadline_is_counted() {
                 feed.fail(d.receipt, "unreadable").unwrap();
                 until("the fail is sent", || queue.visibility().len() == 1).await;
                 settle_tasks().await;
-                clock.advance(BACKOFF_START);
+                clock.advance(first_retry());
                 settle_tasks().await;
                 let calls = if given_up { 1 } else { 2 };
                 assert_eq!(queue.visibility().len(), calls, "{left:?} left");
@@ -4794,7 +4794,7 @@ fn a_given_up_delete_or_hand_back_is_not_a_dropped_fail() {
                 queue.ready(Message::new("u"));
                 let d = receive_n(&feed, &park, 1).await.remove(0);
                 let deadline = feed.deadline_of(d.receipt).unwrap();
-                clock.advance(deadline - BACKOFF_START - clock.now());
+                clock.advance(deadline - first_retry() - clock.now());
                 let calls = || {
                     if acknowledge {
                         queue.deletes().len()
@@ -4811,7 +4811,7 @@ fn a_given_up_delete_or_hand_back_is_not_a_dropped_fail() {
                 }
                 until("the call is sent", || calls() == 1).await;
                 settle_tasks().await;
-                clock.advance(BACKOFF_START);
+                clock.advance(first_retry());
                 settle_tasks().await;
                 assert_eq!(calls(), 1, "acknowledge {acknowledge}: retried");
             });
@@ -4872,10 +4872,10 @@ fn a_fail_given_up_by_a_close_or_answered_gone_is_not_a_deadline_drop() {
         // unit's deadline.
         let mut closed = feed.close(Duration::from_millis(300)).unwrap();
         settle_tasks().await;
-        clock.advance(BACKOFF_START);
+        clock.advance(first_retry());
         until("the fail is retried", || queue.visibility().len() == 2).await;
         settle_tasks().await;
-        clock.advance(BACKOFF_START);
+        clock.advance(first_retry());
         until("the close settles", || closed.try_outcome().is_some()).await;
         assert_eq!(queue.visibility().len(), 2, "sent past the close's bound");
         let e = closed.try_outcome().unwrap().unwrap_err();
@@ -5218,6 +5218,12 @@ fn no_meter_stops_the_counting() {
     assert_eq!(retries(&rendered), [0.0; 6]);
 }
 
+/// The first wait of [`CALL_BACKOFF`].
+fn first_retry() -> Duration {
+    let mut backoff = CALL_BACKOFF;
+    backoff.next_delay()
+}
+
 /// The time between consecutive instants, in whole milliseconds.
 fn gaps(at: &Mutex<Vec<Instant>>) -> Vec<u128> {
     at.lock()
@@ -5372,4 +5378,15 @@ async fn a_second_settle_retry_is_given_up_by_its_doubled_step() {
         settle_tasks().await;
         assert_eq!(queue.visibility().len(), sent, "{left:?} left");
     }
+}
+
+/// Pins when a settle retry is given up: at or past its limit, and when the
+/// delay would pass the end of the `Instant` range.
+#[test]
+fn a_settle_retry_past_the_instant_range_is_given_up() {
+    let ms = Duration::from_millis;
+    let now = TestClock::frozen().now();
+    assert_eq!(retry_at(now, Duration::MAX, now + ms(1000)), None);
+    assert_eq!(retry_at(now, ms(200), now + ms(200)), None);
+    assert_eq!(retry_at(now, ms(200), now + ms(201)), Some(now + ms(200)));
 }

@@ -487,14 +487,14 @@ impl KafkaSource {
         }
     }
 
-    /// Accept one consumer's assignment: look up start offsets → assign →
-    /// pause → split → resume → lanes. An empty `tpl` acknowledges an empty
-    /// assignment, which the rebalance protocol still requires.
+    /// Accept one consumer's assignment from its settled `start` offsets:
+    /// assign → pause → split → resume → lanes. An empty `tpl` acknowledges an
+    /// empty assignment, which the rebalance protocol still requires.
     fn accept_assignment(
         &mut self,
         k: usize,
         tpl: &TopicPartitionList,
-        lookup_until: Instant,
+        start: &TopicPartitionList,
     ) -> Result<Vec<KafkaLane>, SourceError> {
         let consumer = Arc::clone(&self.members[k].consumer);
         self.members[k].revoking.clear();
@@ -504,13 +504,12 @@ impl KafkaSource {
             consumer.assign(tpl).map_err(fatal("assign empty"))?;
             return Ok(Vec::new());
         }
-        let start = self.start_positions(k, tpl, lookup_until);
         let issuer = self.issuer.as_ref().ok_or_else(|| SourceError::Client {
             class: ErrorClass::Fatal,
             reason: "assignment before open()".into(),
         })?;
 
-        consumer.assign(&start).map_err(fatal("assign"))?;
+        consumer.assign(start).map_err(fatal("assign"))?;
         // A fetch that completes before this pause is discarded as outdated
         // and refetched, so no pre-split message reaches the main queue.
         consumer.pause(tpl).map_err(fatal("pause new assignment"))?;
@@ -588,13 +587,23 @@ impl KafkaSource {
                 return Ok(SourceEvent::Idle);
             }
         }
-        self.hold_since = None;
         // One budget for every consumer's lookup: they run in series on the
         // controller thread, which polls no consumer meanwhile.
         let lookup_until = Instant::now() + COMMITTED_LOOKUP_TIMEOUT;
-        let mut lanes = Vec::new();
+        // Every start settles ahead of the first `assign`, so a start that
+        // fails leaves no consumer accepted.
+        let mut starts = Vec::with_capacity(offers.len());
         for (k, tpl) in &offers {
-            lanes.extend(self.accept_assignment(*k, tpl, lookup_until)?);
+            starts.push(if tpl.count() == 0 {
+                TopicPartitionList::new()
+            } else {
+                self.start_positions(*k, tpl, lookup_until)
+            });
+        }
+        self.hold_since = None;
+        let mut lanes = Vec::new();
+        for ((k, tpl), start) in offers.iter().zip(&starts) {
+            lanes.extend(self.accept_assignment(*k, tpl, start)?);
         }
         let joining: Vec<usize> = self
             .members

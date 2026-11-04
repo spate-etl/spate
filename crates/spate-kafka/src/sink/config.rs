@@ -398,6 +398,11 @@ impl KafkaSinkConfig {
         self.delivery_timeout + DELIVERY_GRACE + REPEATED_ERROR_INTERVAL + reconnect_backoff_max
     }
 
+    /// The worker-pool tuning the four pool sections describe.
+    fn pool(&self) -> SinkPoolConfig {
+        SinkPoolConfig::new(self.batch, self.inflight, self.retry, self.breaker)
+    }
+
     /// What the sink's producers share with every Kafka client.
     pub(crate) fn base(&self, openssl_env: bool) -> Base<'_> {
         Base {
@@ -579,7 +584,7 @@ fn build_on(
     let probe_endpoints = Arc::new(vec![vec![KafkaEndpoint::new(probe_producer, label)]]);
 
     let rejection_window = cfg.rejection_window();
-    let pool = SinkPoolConfig::new(cfg.batch, cfg.inflight, cfg.retry, cfg.breaker);
+    let pool = cfg.pool();
 
     Ok(KafkaSink {
         writer: KafkaWriter::new(

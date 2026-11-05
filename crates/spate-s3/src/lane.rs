@@ -1045,10 +1045,7 @@ mod tests {
         let mut r = rig(None);
         send(
             &r,
-            ChunkMsg::LaneFailed(SplitFailure::Fatal(SourceError::Client {
-                class: ErrorClass::Fatal,
-                reason: "access denied".into(),
-            })),
+            ChunkMsg::LaneFailed(SplitFailure::Fatal(SourceError::fatal("access denied"))),
         );
         let err = r.lane.poll(512, Duration::from_millis(50)).unwrap_err();
         assert_eq!(err.class(), ErrorClass::Fatal, "{err}");

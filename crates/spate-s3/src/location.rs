@@ -1069,13 +1069,10 @@ mod tests {
         let err = read_object(&store, &location, &location.fingerprint())
             .await
             .unwrap_err();
-        let SourceError::Client { class, reason } = &err else {
-            panic!("not a client error: {err}");
-        };
-        assert_eq!(*class, ErrorClass::Fatal, "{err}");
+        assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
         assert!(
-            reason.contains("s3://ops/jobs/a/") && reason.contains("403"),
-            "{reason}"
+            err.reason().contains("s3://ops/jobs/a/") && err.reason().contains("403"),
+            "{err}"
         );
     }
 

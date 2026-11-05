@@ -1005,13 +1005,6 @@ mod tests {
         }
     }
 
-    fn class(err: &SourceError) -> ErrorClass {
-        match err {
-            SourceError::Client { class, .. } => *class,
-            other => panic!("expected a client error, got {other:?}"),
-        }
-    }
-
     /// Pins the commit rule: with a checkpoint written before every key and
     /// the feed confirming later units first, each write names a key whose
     /// units, its four ranges included, and every earlier key's units were
@@ -1085,7 +1078,7 @@ mod tests {
             _ => Reply::Confirm,
         });
         let err = rt.block_on(job.lister(feed, 2).run()).unwrap_err();
-        assert_eq!(class(&err), ErrorClass::Fatal, "{err}");
+        assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
         assert_eq!(rt.block_on(job.checkpoint()).as_deref(), Some("data/b"));
     }
 
@@ -1124,7 +1117,7 @@ mod tests {
         }
         assert_eq!(rejected, LISTER_PUBLISH_ATTEMPTS);
         let err = rt.block_on(run).unwrap().unwrap_err();
-        assert_eq!(class(&err), ErrorClass::Retryable, "{err}");
+        assert_eq!(err.class(), ErrorClass::Retryable, "{err}");
         assert_eq!(rt.block_on(job.checkpoint()).as_deref(), Some("data/b"));
         assert_eq!(job.checkpoint_writes(), ["data/b"]);
     }
@@ -1300,7 +1293,7 @@ mod tests {
                         .run(),
                 )
                 .unwrap_err();
-            assert_eq!(class(&err), ErrorClass::Fatal, "{err}");
+            assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
             let text = err.to_string();
             assert!(text.contains("checkpoint"), "{text}");
             assert!(!text.contains('\n'), "{text}");
@@ -1359,7 +1352,7 @@ mod tests {
         let err = rt
             .block_on(job.lister(feed, CHECKPOINT_EVERY).run())
             .unwrap_err();
-        assert_eq!(class(&err), ErrorClass::Fatal, "{err}");
+        assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
         assert!(
             err.to_string().contains("checkpoint at the job location"),
             "{err}"
@@ -1385,7 +1378,7 @@ mod tests {
         rt.block_on(job.put_rows(&["data/a", "data/b", "data/c"]));
         let feed = KeyedFeed::confirming(&job.events);
         let err = rt.block_on(job.lister(feed, 2).run()).unwrap_err();
-        assert_eq!(class(&err), ErrorClass::Retryable, "{err}");
+        assert_eq!(err.class(), ErrorClass::Retryable, "{err}");
 
         let again = job.rerun();
         assert_eq!(rt.block_on(again.checkpoint()).as_deref(), Some("data/b"));
@@ -1790,7 +1783,7 @@ mod tests {
         let err = rt
             .block_on(job.lister(feed, CHECKPOINT_EVERY).run())
             .unwrap_err();
-        assert_eq!(class(&err), ErrorClass::Retryable, "{err}");
+        assert_eq!(err.class(), ErrorClass::Retryable, "{err}");
 
         let again = job.rerun();
         let feed = KeyedFeed::confirming(&again.events);
@@ -1892,7 +1885,7 @@ mod tests {
                     .run(),
             )
             .unwrap_err();
-        assert_eq!(class(&err), ErrorClass::Fatal, "{err}");
+        assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
         assert!(feed.keys().is_empty());
         assert!(
             rt.block_on(job.ops.inner.head(&Path::from("jobs/a/fingerprint")))
@@ -1929,7 +1922,7 @@ mod tests {
                     .run(),
             )
             .unwrap_err();
-        assert_eq!(class(&err), ErrorClass::Fatal, "{err}");
+        assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
         assert!(feed.keys().is_empty());
         assert!(
             rt.block_on(job.ops.inner.head(&Path::from("jobs/a/end")))
@@ -2148,7 +2141,7 @@ mod tests {
                     .run(),
             )
             .unwrap_err();
-        assert_eq!(class(&err), ErrorClass::Fatal, "{err}");
+        assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
         let text = err.to_string();
         assert!(
             text.contains("end at the job location") && text.contains(LOCATION),
@@ -2181,7 +2174,7 @@ mod tests {
                     .run(),
             )
             .unwrap_err();
-        assert_eq!(class(&err), ErrorClass::Retryable, "{err}");
+        assert_eq!(err.class(), ErrorClass::Retryable, "{err}");
         let first = rt
             .block_on(job.end())
             .expect("the marker reached the store");
@@ -2298,7 +2291,7 @@ mod tests {
         let err = rt
             .block_on(job.lister(Arc::new(feed), CHECKPOINT_EVERY).run())
             .unwrap_err();
-        assert_eq!(class(&err), ErrorClass::Retryable, "{err}");
+        assert_eq!(err.class(), ErrorClass::Retryable, "{err}");
         assert!(err.to_string().contains("\"data/a\""), "{err}");
         assert_eq!(script.published().len(), LISTER_PUBLISH_ATTEMPTS as usize);
         assert_eq!(rt.block_on(job.end()), None);
@@ -2445,7 +2438,7 @@ mod tests {
             .with_location_store(Arc::clone(&job.ops) as Arc<dyn ObjectStore>)
             .list_once(&scripted_section(), Arc::new(feed))
             .unwrap_err();
-        assert_eq!(class(&err), ErrorClass::Fatal, "{err}");
+        assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
         assert!(err.to_string().contains("listing"), "{err}");
         assert!(script.published().is_empty());
         assert_eq!(rt.block_on(job.end()), None);
@@ -2467,7 +2460,7 @@ mod tests {
             .with_location_store(Arc::clone(&job.ops) as Arc<dyn ObjectStore>)
             .list_once(&scripted_section(), Arc::new(feed))
             .unwrap_err();
-        assert_eq!(class(&err), ErrorClass::Fatal, "{err}");
+        assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
         let shown = err.to_string();
         assert!(shown.contains("listing"), "{shown}");
         assert!(shown.contains("403 Forbidden"), "{shown}");
@@ -2567,7 +2560,7 @@ mod tests {
                     .run(),
             )
             .unwrap_err();
-        assert_eq!(class(&err), ErrorClass::Fatal, "{err}");
+        assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
         assert!(feed.keys().is_empty());
         assert!(
             rt.block_on(job.ops.inner.head(&Path::from("jobs/a/fingerprint")))

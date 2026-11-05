@@ -1566,13 +1566,6 @@ fn is_marker(body: &str) -> bool {
         })
 }
 
-fn client_error(err: &spate_core::error::SourceError) -> (spate_core::error::ErrorClass, &str) {
-    match err {
-        spate_core::error::SourceError::Client { class, reason } => (*class, reason),
-        other => panic!("expected a client error, got {other:?}"),
-    }
-}
-
 /// Pins a lister run end to end through `list_once`: it publishes two small
 /// listed objects as one unit, receives nothing, writes an end marker of at
 /// most the location's object cap, and logs the marker with the location
@@ -1639,7 +1632,7 @@ fn a_refused_unit_withholds_the_end_marker() {
     let err = lister_source(&data, &rt, "")
         .list_once(&section("scripted", Some(&location)), feed)
         .unwrap_err();
-    let (class, reason) = client_error(&err);
+    let (class, reason) = (err.class(), err.reason());
     assert_eq!(class, spate_core::error::ErrorClass::Fatal, "{err}");
     // The first run published one unit.
     let refused = unit_keys(&script.published()[1]).remove(0);
@@ -1661,7 +1654,7 @@ fn a_lister_run_refuses_the_in_process_feed() {
         .with_location_store(store)
         .list_once(&section("memory", None), Arc::new(feed.clone()))
         .unwrap_err();
-    let (class, reason) = client_error(&err);
+    let (class, reason) = (err.class(), err.reason());
     assert_eq!(class, spate_core::error::ErrorClass::Fatal, "{err}");
     assert!(reason.contains("durable feed"), "{reason}");
     assert_eq!(feed.counts().visible, 0, "nothing is published");
@@ -1682,7 +1675,7 @@ fn a_lister_run_refuses_a_feed_the_section_does_not_name() {
         .with_location_store(store)
         .list_once(&section("scripted", Some(LOCATION)), Arc::new(feed.clone()))
         .unwrap_err();
-    let (class, reason) = client_error(&err);
+    let (class, reason) = (err.class(), err.reason());
     assert_eq!(class, spate_core::error::ErrorClass::Fatal, "{err}");
     assert!(
         reason.contains("`scripted`") && reason.contains("`memory`"),
@@ -1750,7 +1743,7 @@ fn a_lister_run_called_from_async_code_refuses() {
     let refused = |outcome: Result<(), spate_core::error::SourceError>,
                    script: &spate_test::FeedScript| {
         let err = outcome.unwrap_err();
-        let (class, reason) = client_error(&err);
+        let (class, reason) = (err.class(), err.reason());
         assert_eq!(class, spate_core::error::ErrorClass::Fatal, "{err}");
         assert!(reason.contains("Tokio runtime context"), "{reason}");
         assert!(script.published().is_empty());
@@ -2168,7 +2161,7 @@ fn a_retryable_listing_error_fails_the_lister_run_as_retryable() {
         .with_location_store(store)
         .list_once(&section("scripted", Some(LOCATION)), Arc::new(feed))
         .unwrap_err();
-    let (class, reason) = client_error(&err);
+    let (class, reason) = (err.class(), err.reason());
     assert_eq!(class, spate_core::error::ErrorClass::Retryable, "{err}");
     assert!(reason.contains("listing"), "{reason}");
     assert!(script.published().is_empty());
@@ -2188,7 +2181,7 @@ fn a_lister_run_refuses_a_location_that_does_not_parse() {
         .with_location_store(store)
         .list_once(&section("scripted", Some("no scheme here")), Arc::new(feed))
         .unwrap_err();
-    let (class, reason) = client_error(&err);
+    let (class, reason) = (err.class(), err.reason());
     assert_eq!(class, spate_core::error::ErrorClass::Fatal, "{err}");
     assert!(reason.contains("is not a URL"), "{reason}");
     assert!(script.published().is_empty());

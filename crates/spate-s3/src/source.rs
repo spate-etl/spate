@@ -1440,6 +1440,7 @@ mod tests {
 
     /// A source over `body` with a framer and a feed, on its own runtime.
     fn fed_source(body: &str) -> (S3Source, tokio::runtime::Runtime) {
+        use spate_core::feed::memory::MemoryFeed;
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(1)
             .enable_all()
@@ -1451,7 +1452,7 @@ mod tests {
         )
         .unwrap()
         .with_framer(|| Box::new(crate::testutil::TestLineFramer::new(1 << 20)))
-        .with_feed(Arc::new(spate_core::feed::memory::MemoryFeed::new()));
+        .with_feed(Arc::new(MemoryFeed::new()));
         (source, rt)
     }
 

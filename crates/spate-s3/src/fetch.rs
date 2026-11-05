@@ -3597,10 +3597,7 @@ mod tests {
             last_modified_ms: 0,
         }));
         assert_eq!(overwrite.to_string(), "\"data/k\" was overwritten");
-        let fatal = SplitFailure::Fatal(SourceError::Client {
-            class: ErrorClass::Fatal,
-            reason: "denied".into(),
-        });
+        let fatal = SplitFailure::Fatal(SourceError::fatal("denied"));
         assert_eq!(fatal.to_string(), "source error (Fatal): denied");
     }
 

@@ -11,7 +11,7 @@ use crate::admin::HealthState;
 use crate::backpressure::{InflightBudget, Transition, WatermarkController};
 use crate::checkpoint::{AckRef, AdvanceCounter};
 use crate::clock::{Clock, Stopwatch, SystemClock};
-use crate::error::{ErrorClass, FatalError, SourceError};
+use crate::error::{ErrorClass, FatalError};
 use crate::hash::FastMap;
 use crate::metrics::{BackpressureMetrics, SourceMetrics};
 use crate::ops::{BlockReason, PushOutcome, RunnableChain};
@@ -379,7 +379,7 @@ pub(crate) fn run_driver<L: SourceLane>(ctx: DriverContext<L>) -> DriverExit {
                         params.thread,
                     );
                 }
-                Err(e) if is_fatal(&e) => {
+                Err(e) if e.class() == ErrorClass::Fatal => {
                     let _ = events.send(DriverEvent::Fatal {
                         thread: params.thread,
                         error: FatalError {
@@ -452,11 +452,6 @@ fn park_on_control<L>(
 /// Drop gates for partitions that no longer have a lane on this thread.
 fn prune_gates<L: SourceLane>(gates: &mut FastMap<PartitionId, GateState>, lanes: &[L]) {
     gates.retain(|p, _| lanes.iter().any(|l| l.partition() == *p));
-}
-
-fn is_fatal(e: &SourceError) -> bool {
-    let SourceError::Client { class, .. } = e;
-    *class == ErrorClass::Fatal
 }
 
 /// A fatal thread must not vanish before the drain choreography. The

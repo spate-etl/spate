@@ -11,7 +11,7 @@ use crate::admin::HealthState;
 use crate::backpressure::InflightBudget;
 use crate::checkpoint::Checkpointer;
 use crate::clock::{Clock, Stopwatch, SystemClock};
-use crate::error::{ErrorClass, FatalError, SourceError};
+use crate::error::{ErrorClass, FatalError};
 use crate::feed::STOP_RESERVE;
 use crate::hash::{FastMap, FastSet};
 use crate::metrics::{
@@ -381,7 +381,7 @@ pub(crate) fn run_controller<S: Source>(ctx: ControllerContext<S>) {
                 drained_exit = true;
                 break;
             }
-            Err(e) if is_fatal(&e) => {
+            Err(e) if e.class() == ErrorClass::Fatal => {
                 state.failure = Some(FatalError {
                     component: "source".into(),
                     reason: format!("poll_events failed: {e}"),
@@ -722,11 +722,6 @@ fn with_sink_failures(reason: String, sink_failures: &SinkFailures) -> String {
     }
 }
 
-fn is_fatal(e: &SourceError) -> bool {
-    let SourceError::Client { class, .. } = e;
-    *class == ErrorClass::Fatal
-}
-
 /// The pending-ceiling gate for one partition's lanes. `None` (with a
 /// warning) if the checkpointer does not track the partition, a controller
 /// bug. The lane then runs ungated rather than not at all.
@@ -881,7 +876,7 @@ fn commit_cycle<S: Source>(
                 }
             }
         }
-        Err(e) if is_fatal(&e) => {
+        Err(e) if e.class() == ErrorClass::Fatal => {
             metrics.commit(false, started.elapsed(&SystemClock));
             state.failure.get_or_insert(FatalError {
                 component: "source".into(),

@@ -668,6 +668,34 @@ async fn fatal_errors_abandon_without_retry() {
     assert_eq!(ack_rx.try_recv().unwrap().status, AckStatus::Failed);
 }
 
+/// A record-level write error abandons the batch on its first attempt, as a
+/// fatal one does: only a retryable error is retried.
+#[tokio::test(start_paused = true)]
+async fn record_level_errors_abandon_without_retry() {
+    let f = fixture(1, 2, small_batches(), 16);
+    f.writer.script(
+        0,
+        0,
+        [Outcome::Fail(ErrorClass::RecordLevel, Duration::ZERO)],
+    );
+
+    let (ack, ack_rx) = AckRef::test_pair();
+    f.queues.try_send(0, chunk(1, 1, &ack)).unwrap();
+    drop(ack);
+    drop(f.queues);
+    let report = f.pool.drain(Duration::from_secs(5)).await;
+
+    assert_eq!(
+        report,
+        DrainReport {
+            flushed: 0,
+            abandoned: 1
+        }
+    );
+    assert_eq!(f.writer.calls().len(), 1, "no retry on record-level errors");
+    assert_eq!(ack_rx.try_recv().unwrap().status, AckStatus::Failed);
+}
+
 #[tokio::test(start_paused = true)]
 async fn drain_flushes_partials_and_abandons_hung_writes() {
     let cfg = SinkPoolConfig {

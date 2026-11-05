@@ -63,6 +63,8 @@ pub(crate) struct SourceLog {
     pub(crate) fail_commits: bool,
     /// When set, `commit` fails with a fatal error.
     pub(crate) fatal_commits: bool,
+    /// Errors the next lane polls return, one per poll, before any batch.
+    pub(crate) lane_poll_errors: VecDeque<SourceError>,
     /// Interleaved ordering log shared with the chain fake.
     pub(crate) log: Vec<String>,
     /// Taken and triggered by the next `commit` with a position, modeling a
@@ -128,6 +130,8 @@ pub(crate) enum Script {
     /// Drop the stashed acks inside `poll_events`, so they resolve while the
     /// controller waits on the source, then report `Idle`.
     ReleaseHeld(Arc<Mutex<Vec<crate::checkpoint::AckRef>>>),
+    /// Return this error from `poll_events`.
+    PollError(SourceError),
 }
 
 pub(crate) struct LaneSpec {
@@ -276,6 +280,7 @@ impl Source for FakeSource {
                 held.lock().unwrap().clear();
                 Ok(SourceEvent::Idle)
             }
+            Some(Script::PollError(e)) => Err(e),
             None => {
                 std::thread::sleep(timeout.min(Duration::from_millis(5)));
                 Ok(SourceEvent::Idle)
@@ -420,6 +425,9 @@ impl SourceLane for FakeLane {
         let finishing = {
             let mut log = self.log.lock().unwrap();
             log.lane_polls.push((self.id, timeout));
+            if let Some(e) = log.lane_poll_errors.pop_front() {
+                return Err(e);
+            }
             log.finishing.contains(&self.id)
         };
         match self.batches.pop_front() {

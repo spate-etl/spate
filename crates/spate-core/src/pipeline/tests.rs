@@ -2033,6 +2033,119 @@ fn commits_counter(rendered: &str, pipeline_name: &str, outcome: &str) -> Option
         .map(|v| v.parse().expect("a numeric sample"))
 }
 
+/// A fatal lane poll error fails the run from the driver that saw it.
+#[test]
+fn a_fatal_lane_poll_error_fails_the_run() {
+    let h = start(|shared, log| FakeChain {
+        shared,
+        log,
+        mode: ChainMode::Ok,
+        batches_seen: 0,
+    });
+    h.shared
+        .lock()
+        .unwrap()
+        .lane_poll_errors
+        .push_back(SourceError::fatal("scripted poll failure"));
+    assign_one_lane(&h, &[0..5, 5..10]);
+    let report = h.join.join().unwrap().unwrap();
+    let ExitState::Failed(failure) = report.state else {
+        panic!("a fatal lane poll error must fail the run");
+    };
+    assert_eq!(failure.component, "driver-0");
+    assert_eq!(
+        failure.reason,
+        "source poll failed: source error (Fatal): scripted poll failure"
+    );
+}
+
+/// A retryable or record-level lane poll error leaves the lane polling, and
+/// the run completes with every payload consumed.
+#[test]
+fn a_non_fatal_lane_poll_error_does_not_fail_the_run() {
+    for error in [
+        SourceError::retryable("scripted poll failure"),
+        SourceError::record_level("scripted poll failure"),
+    ] {
+        let class = error.class();
+        let h = start(|shared, log| FakeChain {
+            shared,
+            log,
+            mode: ChainMode::Ok,
+            batches_seen: 0,
+        });
+        h.shared.lock().unwrap().lane_poll_errors.push_back(error);
+        assign_one_lane(&h, &[0..5, 5..10]);
+        wait_for("all payloads consumed", Duration::from_secs(5), || {
+            h.chain.consumed.load(Ordering::Relaxed) == 10
+        });
+        assert!(h.shared.lock().unwrap().lane_poll_errors.is_empty());
+        h.script.lock().unwrap().push_back(Script::Drained);
+        let report = h.join.join().unwrap().unwrap();
+        assert!(
+            matches!(report.state, ExitState::Completed),
+            "{class:?}: {:?}",
+            report.state
+        );
+    }
+}
+
+/// A fatal `poll_events` error fails the run from the source.
+#[test]
+fn a_fatal_poll_events_error_fails_the_run() {
+    let h = start(|shared, log| FakeChain {
+        shared,
+        log,
+        mode: ChainMode::Ok,
+        batches_seen: 0,
+    });
+    h.script
+        .lock()
+        .unwrap()
+        .push_back(Script::PollError(SourceError::fatal(
+            "scripted control failure",
+        )));
+    let report = h.join.join().unwrap().unwrap();
+    let ExitState::Failed(failure) = report.state else {
+        panic!("a fatal poll_events error must fail the run");
+    };
+    assert_eq!(failure.component, "source");
+    assert_eq!(
+        failure.reason,
+        "poll_events failed: source error (Fatal): scripted control failure"
+    );
+}
+
+/// A retryable or record-level `poll_events` error keeps the run going: a
+/// lane assigned after it delivers, and the run completes.
+#[test]
+fn a_non_fatal_poll_events_error_keeps_the_run_going() {
+    for error in [
+        SourceError::retryable("scripted control failure"),
+        SourceError::record_level("scripted control failure"),
+    ] {
+        let class = error.class();
+        let h = start(|shared, log| FakeChain {
+            shared,
+            log,
+            mode: ChainMode::Ok,
+            batches_seen: 0,
+        });
+        h.script.lock().unwrap().push_back(Script::PollError(error));
+        assign_one_lane(&h, &[0..5, 5..10]);
+        wait_for("all payloads consumed", Duration::from_secs(5), || {
+            h.chain.consumed.load(Ordering::Relaxed) == 10
+        });
+        h.script.lock().unwrap().push_back(Script::Drained);
+        let report = h.join.join().unwrap().unwrap();
+        assert!(
+            matches!(report.state, ExitState::Completed),
+            "{class:?}: {:?}",
+            report.state
+        );
+    }
+}
+
 #[test]
 fn source_error_classification() {
     let retryable = SourceError::Client {

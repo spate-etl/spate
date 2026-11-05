@@ -114,7 +114,7 @@ impl Deserializer<SubF> for EmitThenFailDeser {
 }
 
 /// Length-prefixed encoder for `SubEvent`; fails record-level on `BADROW`
-/// chunks and fatally on `FATALROW` chunks.
+/// chunks, retryably on `RETRYROW` chunks and fatally on `FATALROW` chunks.
 #[derive(Clone, Default)]
 struct SubEncoder;
 
@@ -131,6 +131,9 @@ impl RowEncoder<SubF> for SubEncoder {
                 class: crate::error::ErrorClass::RecordLevel,
                 reason: "unencodable row".into(),
             });
+        }
+        if rec.payload.chunk == b"RETRYROW" {
+            return Err(SinkError::retryable("transient encoder error"));
         }
         if rec.payload.chunk == b"FATALROW" {
             return Err(SinkError::Client {
@@ -635,6 +638,30 @@ fn encoder_skip_policy_rolls_back_partial_rows() {
         drain_rows(&mut rxs[0]),
         vec![b"ok".to_vec(), b"also".to_vec()]
     );
+}
+
+/// An encoder error of the retryable class follows the stage's policy as a
+/// record-level one does: under `Skip` the record is dropped and the chain
+/// goes on.
+#[test]
+fn a_retryable_class_encoder_error_is_skipped_under_skip() {
+    let (queues, mut rxs) = shard_queues(1, 64);
+    let mut c = chain(LogDeser)
+        .flat_map::<SubF, _>(split_body)
+        .sink(
+            SubEncoder,
+            ToZero,
+            ChunkConfig::default(),
+            queues,
+            Arc::new(InflightBudget::new()),
+        )
+        .build();
+
+    let bufs = payloads(&["a:ok|RETRYROW"]);
+    let (mut batch, _rx) = TestBatch::new(&bufs);
+    assert!(matches!(c.push_batch(&mut batch, 0), PushOutcome::Done));
+    let _ = c.flush();
+    assert_eq!(drain_rows(&mut rxs[0]), vec![b"ok".to_vec()]);
 }
 
 #[test]

@@ -839,7 +839,8 @@ impl KafkaSource {
     /// Answer consumer `k`'s stale offer with an empty `assign`, the call that
     /// moves it out of librdkafka's wait for an answer: `unassign` leaves it
     /// waiting, and then no later rebalance reaches it. Its next heartbeat
-    /// finds it out of the group, which queues a revocation and a rejoin. After
+    /// finds it out of the group or in a rebalance, which queues a revocation
+    /// and a rejoin. After
     /// a stall past `max.poll.interval.ms` it sends no heartbeat, and the
     /// client's session timeout brings the revocation.
     fn discard_offer(
@@ -860,7 +861,7 @@ impl KafkaSource {
             partitions = tpl.count(),
             generation,
             newest,
-            "discarded an assignment from a generation the group has left; this consumer rejoins"
+            "discarded an assignment the group has moved past; this consumer rejoins"
         );
         Ok(())
     }

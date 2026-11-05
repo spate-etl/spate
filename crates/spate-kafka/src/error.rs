@@ -34,7 +34,8 @@ pub(crate) fn redacted_client_error(e: &KafkaError) -> String {
 /// belongs to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum StartFailure {
-    /// The group has moved past this member, so the offer is discarded.
+    /// The group has moved past this member or waits for it to rejoin, so the
+    /// offer is discarded.
     Discard,
     /// The offer is kept and tried again.
     Retry,
@@ -49,9 +50,11 @@ pub(crate) enum StartFailure {
 /// its next poll or at the assignment deadline.
 pub(crate) fn classify_start_error(code: RDKafkaErrorCode) -> StartFailure {
     match code {
-        RDKafkaErrorCode::IllegalGeneration | RDKafkaErrorCode::UnknownMemberId => {
-            StartFailure::Discard
-        }
+        // A rebalance can wait on this member, which rejoins only once its offer
+        // is answered, so retrying while holding the offer can never clear it.
+        RDKafkaErrorCode::IllegalGeneration
+        | RDKafkaErrorCode::UnknownMemberId
+        | RDKafkaErrorCode::RebalanceInProgress => StartFailure::Discard,
         code => match classify_consumer_error(code, false) {
             ErrorClass::Fatal => StartFailure::Fatal,
             _ => StartFailure::Retry,
@@ -198,7 +201,7 @@ mod tests {
         for (code, class) in [
             (C::IllegalGeneration, StartFailure::Discard),
             (C::UnknownMemberId, StartFailure::Discard),
-            (C::RebalanceInProgress, StartFailure::Retry),
+            (C::RebalanceInProgress, StartFailure::Discard),
             (C::NotCoordinator, StartFailure::Retry),
             (C::CoordinatorNotAvailable, StartFailure::Retry),
             (C::CoordinatorLoadInProgress, StartFailure::Retry),

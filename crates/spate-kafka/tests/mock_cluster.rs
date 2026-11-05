@@ -2630,6 +2630,10 @@ mod latest_start {
                 RDKafkaRespErr::RD_KAFKA_RESP_ERR_UNKNOWN_MEMBER_ID,
                 "refused-member",
             ),
+            (
+                RDKafkaRespErr::RD_KAFKA_RESP_ERR_REBALANCE_IN_PROGRESS,
+                "refused-rebalance",
+            ),
         ] {
             let (cluster, brokers) = cluster_with_records(1);
             cluster.request_errors(RDKafkaApiKey::OffsetCommit, &[code]);
@@ -2804,6 +2808,92 @@ mod latest_start {
             };
             let read = holder.read_from_end(Duration::from_secs(30), produce_round(&brokers, 1));
             assert_eq!(start, rdkafka::Offset::Offset(read[&0]));
+        });
+    }
+
+    /// A member holding a start gives it up when another member's join starts a
+    /// rebalance, which refuses its commit and waits for it to rejoin. The mock's
+    /// rebalance runs for most of a session timeout, past this test's wait, so the
+    /// member has to act on the refusal.
+    /// Regression for #1704.
+    #[test]
+    fn a_held_start_gives_way_to_a_rebalance() {
+        use rdkafka::bindings as sys;
+        use rdkafka::producer::{BaseProducer, Producer as _};
+        use support::Raw as _;
+
+        let producer: BaseProducer = support::raw_config()
+            .set("test.mock.num.brokers", "1")
+            .build()
+            .expect("mock producer");
+        let client = producer.client();
+        let cluster = client.mock_cluster().expect("mock cluster");
+        cluster.create_topic(TOPIC, 1, 1).expect("create topic");
+        let brokers = cluster.bootstrap_servers();
+        produce(&brokers, TOPIC, 3, 1, "before");
+        // SAFETY: the pointer is valid while `producer` lives, across this test.
+        let mock = unsafe { sys::rd_kafka_handle_mock_cluster(client.native_ptr()) };
+        // SAFETY: as above.
+        unsafe { sys::rd_kafka_mock_start_request_tracking(mock) };
+        let joins = || {
+            let mut count = 0;
+            // SAFETY: as above. The array holds `count` requests until it is destroyed.
+            unsafe {
+                let requests = sys::rd_kafka_mock_get_requests(mock, &raw mut count);
+                let seen = (0..count)
+                    .filter(|i| {
+                        sys::rd_kafka_mock_request_api_key(*requests.add(*i))
+                            == RDKafkaApiKey::JoinGroup as i16
+                    })
+                    .count();
+                sys::rd_kafka_mock_request_destroy_array(requests, count);
+                seen
+            }
+        };
+        let config = || {
+            let mut cfg = quiet_latest(&brokers, "held-rebalance");
+            cfg.rdkafka
+                .insert("session.timeout.ms".into(), "120000".into());
+            cfg
+        };
+        cluster.request_errors(
+            RDKafkaApiKey::OffsetCommit,
+            &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_UNKNOWN],
+        );
+        let clock = TestClock::frozen();
+        let capture = spate_test::LogCapture::new();
+        with_warnings(&capture, || {
+            let first = KafkaSource::new(config()).with_clock(Arc::clone(&clock) as _);
+            let mut first = Driver::open_with(first, |ctx| ctx);
+            wait_until(ASSIGNMENT, "the failed start", || {
+                first.step(Duration::from_millis(50));
+                capture
+                    .lines()
+                    .iter()
+                    .any(|l| l.contains("could not settle a start position"))
+            });
+            // The frozen clock keeps the retry back until the join has started the
+            // rebalance.
+            let before = joins();
+            let mut second = Driver::open(config());
+            wait_until(ASSIGNMENT, "the second member's join", || {
+                second.step(Duration::from_millis(20));
+                joins() > before
+            });
+            wait_until(Duration::from_secs(30), "the offer given up", || {
+                clock.advance(Duration::from_secs(1));
+                first.step(Duration::from_millis(20));
+                second.step(Duration::from_millis(20));
+                capture
+                    .lines()
+                    .iter()
+                    .any(|l| l.contains("discarded an assignment"))
+            });
+            assert!(first.lanes.is_empty(), "lanes from a refused start");
+            assert_eq!(
+                committed(&brokers, "held-rebalance", 1),
+                [rdkafka::Offset::Invalid]
+            );
         });
     }
 

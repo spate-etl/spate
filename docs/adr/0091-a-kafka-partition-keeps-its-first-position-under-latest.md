@@ -41,7 +41,8 @@ ahead of `assign`. The commits are in flight together under one 10 s bound, so
 an accept waits for the slowest answer. A failed read or commit holds the
 assignment and retries it at a pace, until `startup_timeout` or
 `assignment_timeout` ends the run. A permanent refusal stops the run. A refusal
-because the group has moved past the member discards its offer.
+because the group has moved past the member or is rebalancing discards its
+offer, since a rebalance can wait on the member that holds it.
 
 Defaulting to `earliest` was rejected because a new group would read its topic's
 history, and an explicit `latest` would stay exposed for good. Process memory

@@ -533,11 +533,13 @@ mod slow_commits {
     use support::Raw as _;
 
     const TOPIC: &str = "orders";
+    /// How long the mock's first rebalance waits for members.
+    const INITIAL_JOIN_MS: i32 = 10_000;
 
     /// `consumers` consumers, one partition each, on the default timeouts, with only
     /// `OffsetCommit` replies slowed to `reply_ms`. Drives the source until lanes
     /// arrive or it reports a fatal error.
-    fn settle(policy: &str, consumers: usize, reply_ms: i32) -> Result<usize, String> {
+    fn settle(policy: &str, consumers: usize, reply_ms: i32) -> Result<(), String> {
         let _ = tracing_subscriber::fmt()
             .with_max_level(tracing::Level::WARN)
             .with_ansi(false)
@@ -552,6 +554,15 @@ mod slow_commits {
         cluster
             .create_topic(TOPIC, i32::try_from(consumers).expect("partitions"), 1)
             .expect("create topic");
+        // A late joiner holds the mock's group in a rebalance for most of a session
+        // timeout, past the startup deadline, so every consumer joins one window.
+        // SAFETY: the pointer is valid while `producer` lives.
+        unsafe {
+            rdkafka::bindings::rd_kafka_mock_group_initial_rebalance_delay_ms(
+                rdkafka::bindings::rd_kafka_handle_mock_cluster(client.native_ptr()),
+                INITIAL_JOIN_MS,
+            );
+        }
         for _ in 0..consumers {
             // SAFETY: the pointer is valid while `producer` lives, and the arguments
             // match the (error, rtt in ms) pair the variadic reads.
@@ -575,15 +586,9 @@ mod slow_commits {
         let cp = Checkpointer::new();
         source.open(SourceCtx::new(cp.handle())).expect("open");
         let began = Instant::now();
-        let mut longest = Duration::ZERO;
         while began.elapsed() < Duration::from_secs(100) {
-            let polled = Instant::now();
-            let outcome = source.poll_events(Duration::from_millis(100));
-            longest = longest.max(polled.elapsed());
-            match outcome {
-                Ok(SourceEvent::LanesAssigned(lanes)) => {
-                    return Ok(lanes.len());
-                }
+            match source.poll_events(Duration::from_millis(100)) {
+                Ok(SourceEvent::LanesAssigned(_)) => return Ok(()),
                 Err(
                     e @ SourceError::Client {
                         class: ErrorClass::Fatal,
@@ -601,25 +606,25 @@ mod slow_commits {
     /// The control: `earliest` sends no start commit and starts on the same broker.
     #[test]
     fn slow_commit_replies_start_under_earliest() {
-        assert_eq!(settle("earliest", 16, 3_000), Ok(16));
+        assert_eq!(settle("earliest", 16, 3_000), Ok(()));
     }
 
     /// The control: `latest` starts when commit replies come at once.
     #[test]
     fn fast_commit_replies_start_under_latest() {
-        assert_eq!(settle("latest", 16, 0), Ok(16));
+        assert_eq!(settle("latest", 16, 0), Ok(()));
     }
 
     /// `latest` starts on the same broker, inside the default `startup_timeout`.
     #[test]
     fn slow_commit_replies_start_under_latest() {
-        assert_eq!(settle("latest", 16, 3_000), Ok(16));
+        assert_eq!(settle("latest", 16, 3_000), Ok(()));
     }
 
     /// The same, eight consumers and five seconds per reply.
     #[test]
     fn five_second_replies_start_under_latest() {
-        assert_eq!(settle("latest", 8, 5_000), Ok(8));
+        assert_eq!(settle("latest", 8, 5_000), Ok(()));
     }
 }
 

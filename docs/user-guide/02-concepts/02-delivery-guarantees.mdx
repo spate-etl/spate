@@ -105,9 +105,8 @@ are *not* committed, so they replay on restart. See
 **Crash (SIGKILL, OOM, panic-and-exit):** nothing was committed past the
 last durable write, so on restart the source resumes from the committed
 watermark and replays everything after it. At-least-once holds; duplicates
-happen. A partition with no committed watermark starts where its source's start
-policy says, and a policy that starts at the end skips what came before.
-[INV-1](../../INVARIANTS.md#inv-1) records that exception.
+happen. A source with no committed position starts where its connector is
+configured to start. Records before that position are not read.
 
 ## The honest part: duplicates and deduplication
 

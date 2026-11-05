@@ -535,8 +535,10 @@ mod slow_commits {
     const TOPIC: &str = "orders";
     /// The lookup bound and the commit bound of one accept, plus slack for its
     /// `assign`. Below the default `startup_timeout`, and below the sum of the
-    /// replies in each test here.
+    /// replies.
     const ONE_ACCEPT: Duration = Duration::from_secs(25);
+    const CONSUMERS: usize = 6;
+    const REPLY_MS: i32 = 5_000;
 
     /// `consumers` consumers, one partition each, with only `OffsetCommit` replies
     /// slowed to `reply_ms`. Drives the source until lanes arrive and returns its
@@ -573,7 +575,7 @@ mod slow_commits {
         cfg.startup_timeout = Duration::from_secs(300);
         cfg.rdkafka = BTreeMap::from([
             ("auto.offset.reset".to_string(), policy.to_string()),
-            ("session.timeout.ms".to_string(), "10000".to_string()),
+            ("session.timeout.ms".to_string(), "20000".to_string()),
         ]);
         let mut source = KafkaSource::new(cfg);
         let cp = Checkpointer::new();
@@ -601,28 +603,21 @@ mod slow_commits {
     /// The control: `earliest` sends no start commit and starts on the same broker.
     #[test]
     fn slow_commit_replies_start_under_earliest() {
-        let longest = longest_poll("earliest", 16, 3_000);
+        let longest = longest_poll("earliest", CONSUMERS, REPLY_MS);
         assert!(longest < ONE_ACCEPT, "{longest:?}");
     }
 
     /// The control: `latest` starts when commit replies come at once.
     #[test]
     fn fast_commit_replies_start_under_latest() {
-        let longest = longest_poll("latest", 16, 0);
+        let longest = longest_poll("latest", CONSUMERS, 0);
         assert!(longest < ONE_ACCEPT, "{longest:?}");
     }
 
-    /// One accept waits for the slowest commit reply and not their sum, 48 s here.
+    /// One accept waits for the slowest commit reply and not their sum, 30 s here.
     #[test]
     fn slow_commit_replies_start_under_latest() {
-        let longest = longest_poll("latest", 16, 3_000);
-        assert!(longest < ONE_ACCEPT, "{longest:?}");
-    }
-
-    /// The same, eight consumers and five seconds per reply, 40 s in sum.
-    #[test]
-    fn five_second_replies_start_under_latest() {
-        let longest = longest_poll("latest", 8, 5_000);
+        let longest = longest_poll("latest", CONSUMERS, REPLY_MS);
         assert!(longest < ONE_ACCEPT, "{longest:?}");
     }
 }

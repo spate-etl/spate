@@ -72,7 +72,7 @@ impl Clone for AckIssuer {
 
 impl AckIssuer {
     /// Issue the acknowledgment handle for a new source poll batch whose
-    /// highest contained offset is `last_offset`.
+    /// highest covered offset is `last_offset`.
     ///
     /// Wait-free: one atomic load, one unbounded send, one allocation for
     /// the batch's shared state.

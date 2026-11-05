@@ -36,8 +36,8 @@ pub enum AckStatus {
 pub struct AckMsg {
     /// Which batch resolved.
     pub id: BatchId,
-    /// Highest source offset contained in the batch (inclusive). The
-    /// committable position after this batch is `last_offset + 1`.
+    /// Highest source offset the batch covers (inclusive), which may hold no
+    /// record. The committable position after this batch is `last_offset + 1`.
     pub last_offset: i64,
     /// Worst status observed across the batch's records.
     pub status: AckStatus,

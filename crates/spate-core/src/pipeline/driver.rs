@@ -332,8 +332,6 @@ pub(crate) fn run_driver<L: SourceLane>(ctx: DriverContext<L>) -> DriverExit {
             match polled {
                 Ok(Some(mut batch)) => {
                     empty_polls = 0;
-                    last_data = clock.now();
-                    flushed_since_data = false;
                     if let Some(g) = gates.get_mut(&partition) {
                         let id = batch.ack().batch_id();
                         // A batch stamped with another epoch has its
@@ -359,6 +357,13 @@ pub(crate) fn run_driver<L: SourceLane>(ctx: DriverContext<L>) -> DriverExit {
                         &shutdown,
                     );
                     source_metrics.batch(counting.records, counting.bytes);
+                    // A batch with no payloads gives the chain nothing to hold,
+                    // so it leaves the lull running that flushes what an
+                    // earlier batch parked.
+                    if counting.records > 0 {
+                        last_data = clock.now();
+                        flushed_since_data = false;
+                    }
                     if let Err(error) = outcome {
                         let _ = events.send(DriverEvent::Fatal {
                             thread: params.thread,

@@ -510,6 +510,32 @@ fn owned_chain_with_closures_end_to_end() {
     );
 }
 
+/// A batch with no payloads passes the compiled chain, and its ack resolves
+/// delivered once the batch drops.
+#[test]
+fn a_batch_with_no_payload_resolves_delivered_through_the_compiled_chain() {
+    let (queues, mut rxs) = shard_queues(1, 64);
+    let budget = Arc::new(InflightBudget::new());
+    let mut c = chain_owned(BytesPassthrough)
+        .sink(
+            VecEncoder,
+            KeyHashRouter,
+            ChunkConfig::default(),
+            queues,
+            budget,
+        )
+        .build();
+
+    let (mut batch, ack_rx) = TestBatch::new(&[]);
+    assert!(matches!(c.push_batch(&mut batch, 0), PushOutcome::Done));
+    assert!(matches!(c.flush(), PushOutcome::Done));
+    assert!(drain_rows(&mut rxs[0]).is_empty());
+
+    drop(batch);
+    let msg = ack_rx.try_recv().expect("batch resolved");
+    assert_eq!(msg.status, AckStatus::Delivered);
+}
+
 // ---- error policies --------------------------------------------------------
 
 #[test]

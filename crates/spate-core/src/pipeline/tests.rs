@@ -171,13 +171,18 @@ fn start_prepared(
 }
 
 fn assign_one_lane(h: &Harness, ranges: &[std::ops::Range<i64>]) {
+    assign_one_lane_scripted(h, batches(ranges));
+}
+
+/// [`assign_one_lane`] with its batches written out.
+fn assign_one_lane_scripted(h: &Harness, scripted: Vec<Vec<(i64, Vec<u8>)>>) {
     h.script
         .lock()
         .unwrap()
         .push_back(Script::Assign(vec![LaneSpec {
             id: LaneId(0),
             partition: PartitionId(0),
-            batches: batches(ranges),
+            batches: scripted,
         }]));
 }
 
@@ -616,6 +621,115 @@ fn a_stall_fails_only_past_its_limit_on_the_injected_clock() {
 /// being re-measured by them.
 #[test]
 fn pending_batch_ceiling_is_a_hard_bound() {
+    let committed =
+        the_ceiling_holds_three_of(batches(&[0..10, 10..20, 20..30, 30..40, 40..50, 50..60]));
+    assert_eq!(committed, 60);
+}
+
+/// A batch with no payloads counts against `max_pending_batches` as any other
+/// does, so a lane returning them cannot outrun a stalled head.
+#[test]
+fn a_batch_with_no_payload_counts_against_the_ceiling() {
+    let committed =
+        the_ceiling_holds_three_of((1..=6).map(|i| no_payload_batch(i * 10 - 1)).collect());
+    assert_eq!(committed, 60);
+}
+
+/// A batch with no payloads retires through the pending gate and moves the
+/// watermark past the offset it covers, and only the one real record is
+/// counted. Under a ceiling of one the lane stays gated unless these batches
+/// retire, so the watermark reaching 20 shows the gate reopening behind them.
+#[test]
+fn a_batch_with_no_payload_retires_through_the_gate() {
+    let mut cfg = test_config(1);
+    cfg.metrics.exporter = crate::config::MetricsExporter::Prometheus;
+    cfg.checkpoint.max_pending_batches = 1;
+    let pipeline_name = cfg.pipeline.name.clone();
+    let handle = install_prometheus(&cfg);
+
+    let h = start_with_config(cfg, ok_chain);
+    assign_one_lane_scripted(
+        &h,
+        vec![
+            vec![(0, vec![0u8; 8])],
+            no_payload_batch(9),
+            no_payload_batch(19),
+        ],
+    );
+    wait_committed(&h, 0, 20);
+    h.script.lock().unwrap().push_back(Script::Drained);
+    let report = h.join.join().unwrap().unwrap();
+    assert_eq!(report.state, ExitState::Completed);
+    assert_eq!(h.chain.consumed.load(Ordering::Relaxed), 1);
+
+    let counted = family_series(
+        &handle.render(),
+        names::SOURCE_RECORDS_TOTAL,
+        &pipeline_name,
+    );
+    assert!(
+        counted.len() == 1 && counted[0].ends_with(" 1"),
+        "records counted: {counted:?}"
+    );
+}
+
+/// The poll after a batch with no payloads keeps the zero timeout, since the lane
+/// may have more to return.
+#[test]
+fn a_batch_with_no_payload_keeps_the_next_poll_at_zero_timeout() {
+    let h = start_with_config(test_config(1), ok_chain);
+    assign_one_lane_scripted(&h, vec![no_payload_batch(9), no_payload_batch(19)]);
+    wait_for("the empty poll", Duration::from_secs(5), || {
+        polls_of(&h, 0) >= 3
+    });
+    let timeouts: Vec<Duration> = h.shared.lock().unwrap().lane_polls[..3]
+        .iter()
+        .map(|(_, timeout)| *timeout)
+        .collect();
+    h.shutdown.trigger();
+    h.join.join().unwrap().unwrap();
+    assert_eq!(timeouts, vec![Duration::ZERO; 3]);
+}
+
+/// Batches with no payloads behind a failed head count against the ceiling once
+/// they have resolved, with nothing holding their acks, so the lane stops at the
+/// ceiling and the watermark never passes the head.
+#[test]
+fn no_payload_batches_stop_at_the_ceiling_behind_a_failed_head() {
+    let clock = crate::clock::TestClock::frozen();
+    let mut cfg = test_config(1);
+    cfg.checkpoint.max_pending_batches = 3;
+    let interval = cfg.checkpoint.interval;
+    let h = start_on_clock(
+        cfg,
+        &clock,
+        |runtime| runtime,
+        |shared, log| FakeChain {
+            shared,
+            log,
+            mode: ChainMode::FailAckAtBatch(1),
+            batches_seen: 0,
+        },
+    );
+    let mut scripted = vec![vec![(0, vec![0u8; 8])]];
+    scripted.extend((1..=5).map(|i| no_payload_batch(i * 10 - 1)));
+    assign_one_lane_scripted(&h, scripted);
+    wait_for("the ceiling fills", Duration::from_secs(5), || {
+        polls_of(&h, 0) >= 3
+    });
+    for _ in 0..10 {
+        tick(&h, &clock, interval);
+    }
+    assert_eq!(polls_of(&h, 0), 3, "the lane outran the failed head");
+    assert!(h.shared.lock().unwrap().committed.is_empty());
+    h.shutdown.trigger();
+    let _ = h.join.join().unwrap();
+}
+
+/// Runs `scripted`, six batches with a last offset of 59, under a ceiling of
+/// three with every ack withheld, releases them, and returns the watermark
+/// committed.
+fn the_ceiling_holds_three_of(scripted: Vec<Vec<(i64, Vec<u8>)>>) -> i64 {
     let held: Arc<Mutex<Vec<crate::checkpoint::AckRef>>> = Arc::new(Mutex::new(Vec::new()));
     let release = Arc::new(AtomicBool::new(false));
     let held_c = Arc::clone(&held);
@@ -640,7 +754,7 @@ fn pending_batch_ceiling_is_a_hard_bound() {
     );
     // Six batches whose acks are all withheld. The gate closes after the
     // third and the remaining three never leave the lane.
-    assign_one_lane(&h, &[0..10, 10..20, 20..30, 30..40, 40..50, 50..60]);
+    assign_one_lane_scripted(&h, scripted);
     wait_for("the ceiling fills", Duration::from_secs(5), || {
         held.lock().unwrap().len() == 3
     });
@@ -677,6 +791,7 @@ fn pending_batch_ceiling_is_a_hard_bound() {
     h.shutdown.trigger();
     let report = h.join.join().unwrap().unwrap();
     assert_eq!(report.state, ExitState::Completed);
+    h.shared.lock().unwrap().committed[&PartitionId(0)]
 }
 
 /// A permanently failed batch stalls its partition's watermark, so the
@@ -3738,9 +3853,14 @@ fn a_saturated_io_runtime_logs_one_warning() {
 /// pipeline label keeps the assertion independent of any other pipeline a
 /// sibling test registered in this process.
 fn pending_series(rendered: &str, pipeline_name: &str) -> Vec<String> {
+    family_series(rendered, names::CHECKPOINT_PENDING_BATCHES, pipeline_name)
+}
+
+/// One pipeline's lines of the family `name`, sorted.
+fn family_series(rendered: &str, name: &str, pipeline_name: &str) -> Vec<String> {
     let mut out: Vec<String> = rendered
         .lines()
-        .filter(|l| l.starts_with(&format!("{}{{", names::CHECKPOINT_PENDING_BATCHES)))
+        .filter(|l| l.starts_with(&format!("{name}{{")))
         .filter(|l| l.contains(&format!(r#"pipeline="{pipeline_name}""#)))
         .map(str::to_owned)
         .collect();
@@ -5978,6 +6098,55 @@ fn start_idle_on_clock(
         move |runtime, _| runtime.with_clock(clock),
         ok_chain,
     )
+}
+
+/// Whether a thread flushes when the lull from a record on lane 0 reaches
+/// `idle_flush`, with `sibling` reaching the thread from a new lane a millisecond
+/// before that.
+fn the_lull_ends_on_time_beside(sibling: Vec<(i64, Vec<u8>)>) -> bool {
+    let clock = crate::clock::TestClock::frozen();
+    let lull = Duration::from_secs(600);
+    let h = start_idle_on_clock(&clock, lull, &[]);
+    assign(&h, &[(0, 1)]);
+    wait_for("the record", Duration::from_secs(5), || {
+        h.chain.consumed.load(Ordering::Relaxed) > 0
+    });
+    let before = flushes(&h);
+    clock.advance(lull - Duration::from_millis(1));
+    h.script
+        .lock()
+        .unwrap()
+        .push_back(Script::Add(vec![LaneSpec {
+            id: LaneId(1),
+            partition: PartitionId(1),
+            batches: vec![sibling],
+        }]));
+    // The poll after the batch shows the driver has been through it.
+    wait_for("the sibling's batch", Duration::from_secs(5), || {
+        polls_of(&h, 1) >= 2
+    });
+    clock.advance(Duration::from_millis(1));
+    let seen = polls_of(&h, 1);
+    wait_for("the next pass", Duration::from_secs(5), || {
+        polls_of(&h, 1) >= seen + 2
+    });
+    let flushed = flushes(&h) > before;
+    h.shutdown.trigger();
+    h.join.join().unwrap().unwrap();
+    flushed
+}
+
+/// A batch with no payloads gives the chain nothing to hold, so it leaves the lull
+/// running, and what an earlier batch parked still flushes on time.
+#[test]
+fn a_batch_with_no_payload_leaves_the_lull_running() {
+    assert!(the_lull_ends_on_time_beside(no_payload_batch(9)));
+}
+
+/// A record restarts the lull, so the flush waits for a lull after it.
+#[test]
+fn a_record_restarts_the_lull() {
+    assert!(!the_lull_ends_on_time_beside(vec![(0, vec![0u8; 8])]));
 }
 
 /// A thread whose every lane is finished flushes once its lull reaches

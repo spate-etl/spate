@@ -220,6 +220,9 @@ pub enum Compression {
 /// Default ZSTD level, matching the `clickhouse`/`zstd` crate default.
 const ZSTD_DEFAULT_LEVEL: i32 = 3;
 
+/// The ZSTD levels the sink accepts, from YAML and from a config built in code.
+const ZSTD_LEVELS: std::ops::RangeInclusive<i32> = 1..=22;
+
 impl FromStr for Compression {
     type Err = String;
 
@@ -229,14 +232,15 @@ impl FromStr for Compression {
             "lz4" => Ok(Compression::Lz4),
             "zstd" => Ok(Compression::Zstd(ZSTD_DEFAULT_LEVEL)),
             other => {
+                let (lo, hi) = (ZSTD_LEVELS.start(), ZSTD_LEVELS.end());
                 let raw = other.strip_prefix("zstd:").ok_or_else(|| {
-                    "unknown compression: expected off, lz4, zstd, or zstd:<1-22>".to_owned()
+                    format!("unknown compression: expected off, lz4, zstd, or zstd:<{lo}-{hi}>")
                 })?;
-                let level: i32 = raw
-                    .parse()
-                    .map_err(|_| "invalid zstd level: expected an integer in [1, 22]".to_owned())?;
-                if !(1..=22).contains(&level) {
-                    return Err("zstd level must be in [1, 22]".to_owned());
+                let level: i32 = raw.parse().map_err(|_| {
+                    format!("invalid zstd level: expected an integer in [{lo}, {hi}]")
+                })?;
+                if !ZSTD_LEVELS.contains(&level) {
+                    return Err(format!("zstd level must be in [{lo}, {hi}]"));
                 }
                 Ok(Compression::Zstd(level))
             }
@@ -859,10 +863,12 @@ fn validate(cfg: &ClickHouseSinkConfig) -> Result<(), ConfigError> {
     // `build()` caller can construct `Zstd(level)` directly. The same bound
     // here makes a config built in code accept the levels YAML accepts.
     if let Compression::Zstd(level) = cfg.compression
-        && !(1..=22).contains(&level)
+        && !ZSTD_LEVELS.contains(&level)
     {
         return fail(format!(
-            "compression zstd level must be in [1, 22] (got {level})"
+            "compression zstd level must be in [{}, {}] (got {level})",
+            ZSTD_LEVELS.start(),
+            ZSTD_LEVELS.end()
         ));
     }
 

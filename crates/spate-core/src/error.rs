@@ -96,7 +96,7 @@ pub enum DeserError {
 /// type has one variant today, and every method matches it exhaustively, so a
 /// new variant states its class and reason here.
 macro_rules! client_error_methods {
-    ($ty:ident, $what:literal) => {
+    ($ty:ident, $what:literal, $fatal:literal) => {
         impl $ty {
             #[doc = concat!("A ", $what, " error of `class` with a human-readable `reason`.")]
             ///
@@ -117,7 +117,7 @@ macro_rules! client_error_methods {
                 }
             }
 
-            /// An error that stops the pipeline.
+            #[doc = $fatal]
             ///
             /// # Examples
             ///
@@ -210,7 +210,16 @@ pub enum SourceError {
     },
 }
 
-client_error_methods!(SourceError, "source");
+client_error_methods!(
+    SourceError,
+    "source",
+    "An error that stops the pipeline when [`Source::open`](crate::source::Source::open), \
+     [`Source::poll_events`](crate::source::Source::poll_events), \
+     [`Source::commit`](crate::source::Source::commit) or \
+     [`SourceLane::poll`](crate::source::SourceLane::poll) returns it. An error \
+     of any class from `pause`, `resume`, `stop_reading` or a revocation's \
+     `flush_commits` is logged and the run goes on."
+);
 
 /// A sink failed to write a batch.
 #[derive(Debug, thiserror::Error)]
@@ -221,15 +230,25 @@ pub enum SinkError {
     Client {
         /// How the framework reacts; see [`ErrorClass`]. From a write,
         /// `Retryable` is retried, rotating across healthy replicas, and any
-        /// other class abandons the batch. From an encoder, `Fatal` stops the
-        /// pipeline and any other class follows the stage's [`ErrorPolicy`].
+        /// other class abandons the batch. From
+        /// [`RowEncoder::encode`](crate::sink::RowEncoder::encode), `Fatal`
+        /// stops the pipeline and any other class follows the stage's
+        /// [`ErrorPolicy`]. An error of any class from
+        /// [`RowEncoder::finish_chunk`](crate::sink::RowEncoder::finish_chunk)
+        /// or a [`FrameCodec`](crate::sink::FrameCodec) stops the pipeline.
         class: ErrorClass,
         /// Human-readable cause.
         reason: String,
     },
 }
 
-client_error_methods!(SinkError, "sink");
+client_error_methods!(
+    SinkError,
+    "sink",
+    "An error the framework does not retry. A write that returns it abandons \
+     its batch, and an encoder or frame codec that returns it stops the \
+     pipeline."
+);
 
 /// The TLS alert descriptions (RFC 8446 numbering) with which a server
 /// rejects the client's certificate, credential or negotiated parameters.

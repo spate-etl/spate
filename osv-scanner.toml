@@ -4,6 +4,11 @@
 # advisory again from that day. The date is the review point.
 
 [[IgnoredVulns]]
+id = "RUSTSEC-2026-0440"
+ignoreUntil = 2027-04-27
+reason = "astral-tokio-tar 0.6.3 is unmaintained, and no version is patched. It reaches this tree only through testcontainers, a dev-dependency of the test suites, so no published crate ships it. Remove this entry in the change that moves testcontainers to a release without the crate."
+
+[[IgnoredVulns]]
 id = "RUSTSEC-2026-0391"
 ignoreUntil = 2027-04-27
 reason = "zstd 0.13.3 reaches this tree only through the codec features of spate-clickhouse's clickhouse dev-dependency, so no published crate builds it. clickhouse creates each decoder with `Decoder::new()` and compresses with the one-shot `zstd_safe::compress`, and never calls a `with_context` constructor."

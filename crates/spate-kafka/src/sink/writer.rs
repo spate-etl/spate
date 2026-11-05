@@ -135,22 +135,18 @@ impl KafkaWriter {
         let mut messages = Vec::with_capacity(batch.rows as usize);
         for frame in &batch.frames {
             for message in FrameParser::new(frame) {
-                messages.push(message.map_err(|e| SinkError::Client {
-                    class: ErrorClass::Fatal,
-                    reason: format!("corrupted sink frame (framework bug): {e}"),
+                messages.push(message.map_err(|e| {
+                    SinkError::fatal(format!("corrupted sink frame (framework bug): {e}"))
                 })?);
             }
         }
         if messages.len() as u64 != batch.rows {
-            return Err(SinkError::Client {
-                class: ErrorClass::Fatal,
-                reason: format!(
-                    "corrupted sink frame (framework bug): batch claims {} rows \
+            return Err(SinkError::fatal(format!(
+                "corrupted sink frame (framework bug): batch claims {} rows \
                      but frames parse to {} messages",
-                    batch.rows,
-                    messages.len()
-                ),
-            });
+                batch.rows,
+                messages.len()
+            )));
         }
         Ok(messages)
     }
@@ -217,15 +213,12 @@ impl ShardWriter for KafkaWriter {
                         if error.rdkafka_error_code() == Some(RDKafkaErrorCode::QueueFull) =>
                     {
                         if self.io_clock.now() >= send_deadline {
-                            return Err(SinkError::Client {
-                                class: ErrorClass::Retryable,
-                                reason: format!(
-                                    "producer queue stayed full past the delivery \
+                            return Err(SinkError::retryable(format!(
+                                "producer queue stayed full past the delivery \
                                      deadline ({:?} + {:?} grace); the batch will be \
                                      retried",
-                                    self.delivery_timeout, DELIVERY_GRACE
-                                ),
-                            });
+                                self.delivery_timeout, DELIVERY_GRACE
+                            )));
                         }
                         // Real time: it paces librdkafka's queue drain, which
                         // runs on the poll thread's own clock.
@@ -290,10 +283,9 @@ impl ShardWriter for KafkaWriter {
                 .fetch_metadata(Some(&topic), PROBE_TIMEOUT)
                 .map_err(|e| classify(e.rdkafka_error_code(), &format!("metadata fetch: {e}")))?;
             let Some(meta) = metadata.topics().iter().find(|t| t.name() == topic) else {
-                return Err(SinkError::Client {
-                    class: ErrorClass::Retryable,
-                    reason: format!("metadata response omitted topic \"{topic}\""),
-                });
+                return Err(SinkError::retryable(format!(
+                    "metadata response omitted topic \"{topic}\""
+                )));
             };
             if let Some(err) = meta.error() {
                 let code: RDKafkaErrorCode = err.into();
@@ -303,26 +295,23 @@ impl ShardWriter for KafkaWriter {
                 ));
             }
             if meta.partitions().is_empty() {
-                return Err(SinkError::Client {
-                    class: ErrorClass::Retryable,
-                    reason: format!("topic \"{topic}\" reports no partitions yet"),
-                });
+                return Err(SinkError::retryable(format!(
+                    "topic \"{topic}\" reports no partitions yet"
+                )));
             }
             Ok(())
         })
         .await;
         let outcome = outcome.unwrap_or_else(|join_error| {
-            Err(SinkError::Client {
-                class: ErrorClass::Retryable,
-                reason: format!("probe task failed: {join_error}"),
-            })
+            Err(SinkError::retryable(format!(
+                "probe task failed: {join_error}"
+            )))
         });
-        match (outcome, self.rejection(endpoint)) {
-            (Err(SinkError::Client { class, reason }), Some(rejection)) => Err(SinkError::Client {
-                class,
-                reason: with_rejection(&reason, &rejection),
-            }),
-            (outcome, _) => outcome,
+        match self.rejection(endpoint) {
+            Some(rejection) => {
+                outcome.map_err(|e| e.map_reason(|reason| with_rejection(&reason, &rejection)))
+            }
+            None => outcome,
         }
     }
 }
@@ -338,10 +327,9 @@ fn report_error(
     rejection: Option<(Duration, String)>,
 ) -> SinkError {
     match rejection {
-        Some(rejection) if code == Some(RDKafkaErrorCode::MessageTimedOut) => SinkError::Client {
-            class: ErrorClass::Fatal,
-            reason: with_rejection(reason, &rejection),
-        },
+        Some(rejection) if code == Some(RDKafkaErrorCode::MessageTimedOut) => {
+            SinkError::fatal(with_rejection(reason, &rejection))
+        }
         _ => classify(code, reason),
     }
 }
@@ -375,7 +363,7 @@ fn classify(code: Option<RDKafkaErrorCode>, reason: &str) -> SinkError {
         ),
         _ => reason.to_string(),
     };
-    SinkError::Client { class, reason }
+    SinkError::new(class, reason)
 }
 
 /// The class of a failed produce or delivery report, by [`classify`]'s

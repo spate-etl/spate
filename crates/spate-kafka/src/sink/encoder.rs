@@ -13,7 +13,7 @@ use crate::sink::frame;
 use bytes::BytesMut;
 use serde::Serialize;
 use spate_core::deser::{Owned, RecFamily};
-use spate_core::error::{ErrorClass, SinkError};
+use spate_core::error::SinkError;
 use spate_core::record::Record;
 use spate_core::sink::RowEncoder;
 use std::marker::PhantomData;
@@ -140,6 +140,9 @@ impl KafkaMessage {
 ///
 /// Implementations must be `Clone` (the terminal stage clones one encoder
 /// per shard) and cheap to clone.
+///
+/// [`ErrorClass::RecordLevel`]: spate_core::error::ErrorClass::RecordLevel
+/// [`ErrorClass::Fatal`]: spate_core::error::ErrorClass::Fatal
 pub trait MessageEncoder<F: RecFamily>: Send + Clone + 'static {
     /// Fill `msg` (already cleared) from `rec`.
     fn encode<'buf>(
@@ -163,6 +166,8 @@ pub trait MessageEncoder<F: RecFamily>: Send + Clone + 'static {
 /// Construct via [`KafkaSink`](crate::KafkaSink)'s `encoder_*` helpers
 /// (which bake the configured limit in) or directly with [`new`](Self::new)
 /// / [`with_max_message_bytes`](Self::with_max_message_bytes).
+///
+/// [`ErrorClass::RecordLevel`]: spate_core::error::ErrorClass::RecordLevel
 #[derive(Debug)]
 pub struct KafkaEncoder<F, M> {
     inner: M,
@@ -215,16 +220,13 @@ impl<F: RecFamily, M: MessageEncoder<F>> RowEncoder<F> for KafkaEncoder<F, M> {
         self.inner.encode(rec, &mut self.scratch)?;
         let size = self.scratch.guarded_size();
         if size > self.max_message_bytes {
-            return Err(SinkError::Client {
-                class: ErrorClass::RecordLevel,
-                reason: format!(
-                    "message of {size} bytes (key + payload + headers) exceeds \
+            return Err(SinkError::record_level(format!(
+                "message of {size} bytes (key + payload + headers) exceeds \
                      max_message_bytes ({}); raise the sink's limit together \
                      with the topic/broker `message.max.bytes`, or shrink the \
                      record",
-                    self.max_message_bytes
-                ),
-            });
+                self.max_message_bytes
+            )));
         }
         frame::write_message(
             buf,
@@ -232,10 +234,7 @@ impl<F: RecFamily, M: MessageEncoder<F>> RowEncoder<F> for KafkaEncoder<F, M> {
             self.scratch.headers_iter(),
             self.scratch.payload(),
         )
-        .map_err(|e| SinkError::Client {
-            class: ErrorClass::RecordLevel,
-            reason: format!("message cannot be framed: {e}"),
-        })
+        .map_err(|e| SinkError::record_level(format!("message cannot be framed: {e}")))
     }
 }
 
@@ -361,10 +360,8 @@ where
         {
             msg.set_key(key);
         }
-        serde_json::to_writer(msg.payload_mut(), &rec.payload).map_err(|e| SinkError::Client {
-            class: ErrorClass::RecordLevel,
-            reason: format!("JSON encoding failed: {e}"),
-        })
+        serde_json::to_writer(msg.payload_mut(), &rec.payload)
+            .map_err(|e| SinkError::record_level(format!("JSON encoding failed: {e}")))
     }
 }
 
@@ -372,6 +369,7 @@ where
 mod tests {
     use super::*;
     use crate::sink::frame::FrameParser;
+    use spate_core::error::ErrorClass;
     use spate_test::record;
 
     fn single_message(buf: &[u8]) -> (Option<Vec<u8>>, Option<Vec<u8>>) {

@@ -339,23 +339,11 @@ fn partition_ids<'a>(partitions: impl IntoIterator<Item = &'a i32>) -> Vec<Parti
 /// queue, so a fatal one replaces a retryable one an earlier consumer
 /// returned.
 fn keep_reported(reported: &mut Option<SourceError>, error: SourceError) {
-    if reported
-        .as_ref()
-        .is_none_or(|first| is_fatal(&error) && !is_fatal(first))
-    {
+    if reported.as_ref().is_none_or(|first| {
+        error.class() == ErrorClass::Fatal && first.class() != ErrorClass::Fatal
+    }) {
         *reported = Some(error);
     }
-}
-
-/// Whether `error` is a client error classified fatal.
-fn is_fatal(error: &SourceError) -> bool {
-    matches!(
-        error,
-        SourceError::Client {
-            class: ErrorClass::Fatal,
-            ..
-        }
-    )
 }
 
 /// The first partition two of `offers` carry, with the consumers carrying it.
@@ -453,10 +441,7 @@ impl KafkaSource {
 
     fn opened(&self) -> Result<(), SourceError> {
         if self.members.is_empty() {
-            return Err(SourceError::Client {
-                class: ErrorClass::Fatal,
-                reason: "source used before open()".into(),
-            });
+            return Err(SourceError::fatal("source used before open()"));
         }
         Ok(())
     }
@@ -535,10 +520,10 @@ impl KafkaSource {
     /// classified through the same table as every other consumer error.
     fn rebalance_error(&self, k: usize, code: rdkafka::error::RDKafkaErrorCode) -> SourceError {
         let started = self.members.get(k).is_some_and(|m| m.saw_first_assignment);
-        SourceError::Client {
-            class: crate::error::classify_consumer_error(code, started),
-            reason: format!("rebalance error: {code}"),
-        }
+        SourceError::new(
+            crate::error::classify_consumer_error(code, started),
+            format!("rebalance error: {code}"),
+        )
     }
 
     /// Accept one consumer's assignment from its settled `start` offsets:
@@ -559,10 +544,10 @@ impl KafkaSource {
             consumer.assign(tpl).map_err(fatal("assign empty"))?;
             return Ok(Vec::new());
         }
-        let issuer = self.issuer.as_ref().ok_or_else(|| SourceError::Client {
-            class: ErrorClass::Fatal,
-            reason: "assignment before open()".into(),
-        })?;
+        let issuer = self
+            .issuer
+            .as_ref()
+            .ok_or_else(|| SourceError::fatal("assignment before open()"))?;
 
         consumer.assign(start).map_err(fatal("assign"))?;
         // A fetch that completes before this pause is discarded as outdated
@@ -574,9 +559,8 @@ impl KafkaSource {
             let partition = elem.partition();
             let queue = consumer
                 .split_partition_queue(&self.config.topic, partition)
-                .ok_or_else(|| SourceError::Client {
-                    class: ErrorClass::Fatal,
-                    reason: format!("no queue for assigned partition {partition}"),
+                .ok_or_else(|| {
+                    SourceError::fatal(format!("no queue for assigned partition {partition}"))
                 })?;
             let lane_id = LaneId(self.next_lane);
             self.next_lane += 1;
@@ -637,14 +621,11 @@ impl KafkaSource {
         if first_repeat(&offers).is_some() {
             offers = self.discard_stale_offers(offers)?;
             if let Some((partition, a, b)) = first_repeat(&offers) {
-                return Err(SourceError::Client {
-                    class: ErrorClass::Fatal,
-                    reason: format!(
-                        "partition {partition} was assigned to consumers {a} and {b} of this \
+                return Err(SourceError::fatal(format!(
+                    "partition {partition} was assigned to consumers {a} and {b} of this \
                          source in generation {}",
-                        self.members[a].group_generation()
-                    ),
-                });
+                    self.members[a].group_generation()
+                )));
             }
         }
         // One budget for every lookup and listing of the accept: the controller
@@ -1634,17 +1615,11 @@ fn assignment_deadline_error(
     if let Some((age, error)) = last_error {
         reason.push_str(&format!("; last consumer error {age:?} ago: {error}"));
     }
-    Some(SourceError::Client {
-        class: ErrorClass::Fatal,
-        reason,
-    })
+    Some(SourceError::fatal(reason))
 }
 
 fn fatal(what: &'static str) -> impl Fn(rdkafka::error::KafkaError) -> SourceError {
-    move |e| SourceError::Client {
-        class: ErrorClass::Fatal,
-        reason: format!("{what}: {e}"),
-    }
+    move |e| SourceError::fatal(format!("{what}: {e}"))
 }
 
 impl Source for KafkaSource {
@@ -1656,19 +1631,15 @@ impl Source for KafkaSource {
 
     fn open(&mut self, ctx: SourceCtx) -> Result<(), SourceError> {
         if !self.members.is_empty() {
-            return Err(SourceError::Client {
-                class: ErrorClass::Fatal,
-                reason: "open() called twice".into(),
-            });
+            return Err(SourceError::fatal("open() called twice"));
         }
         // Enforce the passthrough guard (and the whole denylist) before any
         // client is created. The sink's choke point is `build()`; `open()` is
         // the source's, catching programmatic construction via
         // `KafkaSource::new` that bypasses `from_component_config`'s validation.
-        self.config.validate().map_err(|e| SourceError::Client {
-            class: ErrorClass::Fatal,
-            reason: e.to_string(),
-        })?;
+        self.config
+            .validate()
+            .map_err(|e| SourceError::fatal(e.to_string()))?;
         self.metrics = ctx.stage_metrics.clone();
         if self.config.statistics_interval.is_zero() {
             // Consumer lag is derived from the statistics snapshot and has no
@@ -1685,12 +1656,11 @@ impl Source for KafkaSource {
         let mut members = Vec::new();
         members
             .try_reserve_exact(self.config.consumers)
-            .map_err(|_| SourceError::Client {
-                class: ErrorClass::Fatal,
-                reason: format!(
+            .map_err(|_| {
+                SourceError::fatal(format!(
                     "source.kafka.consumers: {} consumers cannot be allocated",
                     self.config.consumers
-                ),
+                ))
             })?;
         for k in 0..self.config.consumers {
             let role = crate::config::Consumer::member(&self.config, k);
@@ -1717,10 +1687,7 @@ impl Source for KafkaSource {
                 .config
                 .base(crate::security::openssl_env_overrides())
                 .create(&role, SourceHooks::default())
-                .map_err(|reason| SourceError::Client {
-                    class: ErrorClass::Fatal,
-                    reason: format!("create consumer: {reason}"),
-                })?;
+                .map_err(|reason| SourceError::fatal(format!("create consumer: {reason}")))?;
             consumer
                 .subscribe(&[&self.config.topic])
                 .map_err(fatal("subscribe"))?;
@@ -1804,7 +1771,7 @@ impl Source for KafkaSource {
         // or error takes its place, and one consumer's transport errors do
         // not hold back another consumer's rebalance.
         let polled = match self.poll_consumers(timeout) {
-            Err(e) if is_fatal(&e) => return Err(e),
+            Err(e) if e.class() == ErrorClass::Fatal => return Err(e),
             polled => polled,
         };
         self.publish_stats();
@@ -1887,21 +1854,15 @@ impl Source for KafkaSource {
             member
                 .consumer
                 .store_offsets(tpl)
-                .map_err(|e| SourceError::Client {
-                    class: ErrorClass::Retryable,
-                    reason: format!("store offsets: {e}"),
-                })?;
+                .map_err(|e| SourceError::retryable(format!("store offsets: {e}")))?;
             if let Some(elem) = tpl.elements().into_iter().find(|e| e.error().is_err()) {
-                return Err(SourceError::Client {
-                    class: ErrorClass::Retryable,
-                    reason: format!(
-                        "store offset for partition {}: {}",
-                        elem.partition(),
-                        elem.error()
-                            .err()
-                            .map_or_else(String::new, |e| e.to_string())
-                    ),
-                });
+                return Err(SourceError::retryable(format!(
+                    "store offset for partition {}: {}",
+                    elem.partition(),
+                    elem.error()
+                        .err()
+                        .map_or_else(String::new, |e| e.to_string())
+                )));
             }
         }
         Ok(())
@@ -1932,10 +1893,7 @@ impl Source for KafkaSource {
                             "sync commit failed; this consumer's stored offsets may replay"
                         );
                     }
-                    first_error.get_or_insert(SourceError::Client {
-                        class: ErrorClass::Retryable,
-                        reason: format!("sync commit: {e}"),
-                    });
+                    first_error.get_or_insert(SourceError::retryable(format!("sync commit: {e}")));
                 }
             }
         }
@@ -1971,10 +1929,8 @@ impl KafkaSource {
             if tpl.count() == 0 {
                 continue;
             }
-            op(&member.consumer, &tpl).map_err(|e| SourceError::Client {
-                class: ErrorClass::Retryable,
-                reason: format!("{what}: {e}"),
-            })?;
+            op(&member.consumer, &tpl)
+                .map_err(|e| SourceError::retryable(format!("{what}: {e}")))?;
         }
         Ok(())
     }

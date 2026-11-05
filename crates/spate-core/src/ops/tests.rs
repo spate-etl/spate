@@ -114,7 +114,7 @@ impl Deserializer<SubF> for EmitThenFailDeser {
 }
 
 /// Length-prefixed encoder for `SubEvent`; fails record-level on `BADROW`
-/// chunks and fatally on `FATALROW` chunks.
+/// chunks, retryably on `RETRYROW` chunks and fatally on `FATALROW` chunks.
 #[derive(Clone, Default)]
 struct SubEncoder;
 
@@ -127,16 +127,13 @@ impl RowEncoder<SubF> for SubEncoder {
         // Write the prefix first so partial-write rollback is exercised.
         buf.extend_from_slice(&(u32::try_from(rec.payload.chunk.len()).unwrap()).to_le_bytes());
         if rec.payload.chunk == b"BADROW" {
-            return Err(SinkError::Client {
-                class: crate::error::ErrorClass::RecordLevel,
-                reason: "unencodable row".into(),
-            });
+            return Err(SinkError::record_level("unencodable row"));
+        }
+        if rec.payload.chunk == b"RETRYROW" {
+            return Err(SinkError::retryable("transient encoder error"));
         }
         if rec.payload.chunk == b"FATALROW" {
-            return Err(SinkError::Client {
-                class: crate::error::ErrorClass::Fatal,
-                reason: "encoder broken".into(),
-            });
+            return Err(SinkError::fatal("encoder broken"));
         }
         buf.extend_from_slice(rec.payload.chunk);
         Ok(())
@@ -192,10 +189,7 @@ struct FatalVecEncoder;
 impl RowEncoder<Owned<Vec<u8>>> for FatalVecEncoder {
     fn encode<'buf>(&mut self, rec: &Record<Vec<u8>>, buf: &mut BytesMut) -> Result<(), SinkError> {
         if rec.payload == b"FATALROW" {
-            return Err(SinkError::Client {
-                class: crate::error::ErrorClass::Fatal,
-                reason: "encoder broken".into(),
-            });
+            return Err(SinkError::fatal("encoder broken"));
         }
         buf.extend_from_slice(&(u32::try_from(rec.payload.len()).unwrap()).to_le_bytes());
         buf.extend_from_slice(&rec.payload);
@@ -254,10 +248,7 @@ impl RowEncoder<Owned<Vec<u8>>> for BrokenFinishEncoder {
         1
     }
     fn finish_chunk(&mut self, _buf: &mut BytesMut) -> Result<(), SinkError> {
-        Err(SinkError::Client {
-            class: crate::error::ErrorClass::Fatal,
-            reason: "cannot finalize the block".into(),
-        })
+        Err(SinkError::fatal("cannot finalize the block"))
     }
 }
 
@@ -282,10 +273,9 @@ impl RowEncoder<Owned<Vec<u8>>> for SelectiveFinishEncoder {
     }
     fn finish_chunk(&mut self, _buf: &mut BytesMut) -> Result<(), SinkError> {
         if let Some(row) = &self.doomed {
-            return Err(SinkError::Client {
-                class: crate::error::ErrorClass::Fatal,
-                reason: format!("cannot finalize the block after {row}"),
-            });
+            return Err(SinkError::fatal(format!(
+                "cannot finalize the block after {row}"
+            )));
         }
         Ok(())
     }
@@ -312,10 +302,7 @@ impl RowEncoder<Owned<Vec<u8>>> for RecoveringFinishEncoder {
         }
         self.failed_once = true;
         buf.extend_from_slice(b"PARTIAL");
-        Err(SinkError::Client {
-            class: crate::error::ErrorClass::Fatal,
-            reason: "cannot finalize the block".into(),
-        })
+        Err(SinkError::fatal("cannot finalize the block"))
     }
 }
 
@@ -635,6 +622,30 @@ fn encoder_skip_policy_rolls_back_partial_rows() {
         drain_rows(&mut rxs[0]),
         vec![b"ok".to_vec(), b"also".to_vec()]
     );
+}
+
+/// An encoder error of the retryable class follows the stage's policy as a
+/// record-level one does: under `Skip` the record is dropped and the chain
+/// goes on.
+#[test]
+fn a_retryable_class_encoder_error_is_skipped_under_skip() {
+    let (queues, mut rxs) = shard_queues(1, 64);
+    let mut c = chain(LogDeser)
+        .flat_map::<SubF, _>(split_body)
+        .sink(
+            SubEncoder,
+            ToZero,
+            ChunkConfig::default(),
+            queues,
+            Arc::new(InflightBudget::new()),
+        )
+        .build();
+
+    let bufs = payloads(&["a:ok|RETRYROW"]);
+    let (mut batch, _rx) = TestBatch::new(&bufs);
+    assert!(matches!(c.push_batch(&mut batch, 0), PushOutcome::Done));
+    let _ = c.flush();
+    assert_eq!(drain_rows(&mut rxs[0]), vec![b"ok".to_vec()]);
 }
 
 #[test]
@@ -2979,10 +2990,7 @@ impl FrameCodec for FailOnceCodec {
     fn encode_frame(&mut self, chunk: &[u8]) -> Result<&[u8], SinkError> {
         if !self.failed {
             self.failed = true;
-            return Err(SinkError::Client {
-                class: crate::error::ErrorClass::Fatal,
-                reason: "cannot code the chunk".into(),
-            });
+            return Err(SinkError::fatal("cannot code the chunk"));
         }
         self.out.clear();
         self.out.extend_from_slice(b"C:");
@@ -3158,10 +3166,7 @@ fn a_codec_failure_counts_a_fatal_on_the_sink_stage() {
     struct AlwaysFails;
     impl FrameCodec for AlwaysFails {
         fn encode_frame(&mut self, _chunk: &[u8]) -> Result<&[u8], SinkError> {
-            Err(SinkError::Client {
-                class: crate::error::ErrorClass::Fatal,
-                reason: "cannot code the chunk".into(),
-            })
+            Err(SinkError::fatal("cannot code the chunk"))
         }
     }
     let rendered = crate::metrics::render_local(|| {

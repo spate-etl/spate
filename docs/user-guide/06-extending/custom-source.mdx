@@ -116,7 +116,8 @@ library's error behind the client's wrappers, including inside an `io::Error`.
 With a rustls client, `spate::tls_rejection!(rustls, &err)` applies the whole
 TLS part of the rule.
 [ADR-0081](../../adr/0081-a-rejected-credential-or-tls-handshake-is-fatal-unless-throttled.md)
-states the rule.
+states the rule. Build the error with `SourceError::fatal` or
+`SourceError::retryable`.
 
 ## Framing: turning bytes into records
 

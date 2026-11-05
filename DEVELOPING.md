@@ -94,7 +94,8 @@ The profiles in `.config/nextest.toml`:
   60 seconds, terminating after four, with no retry and a JUnit report.
 - **`docker`** — warns at 120 seconds and **never terminates**: a cold image pull
   can exceed any figure worth setting, and a SIGKILL reports as a timeout
-  indistinguishable from a hang. One retry, JUnit report.
+  indistinguishable from a hang. A JUnit report, and no retry except on the S3
+  job's RGW lane.
 
 Container-backed tests use testcontainers and are `#[ignore]`d, so a normal run
 skips them. `cargo xtask integration-test` is what selects them.

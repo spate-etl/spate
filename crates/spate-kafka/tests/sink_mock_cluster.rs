@@ -394,6 +394,21 @@ async fn probe_verifies_topic_and_fails_fast_on_unknown_topic() {
     assert!(err.reason().contains("topic"), "actionable: {err}");
 }
 
+/// A topic that reports no partitions yet fails the probe as retryable.
+#[tokio::test]
+async fn a_topic_with_no_partitions_yet_fails_the_probe_retryably() {
+    let cluster = MockCluster::new(1).expect("mock cluster");
+    cluster.create_topic(TOPIC, 0, 1).expect("create topic");
+    let brokers = cluster.bootstrap_servers();
+    let sink = sink(&brokers, "");
+
+    let err = sink.probe_fn()()
+        .await
+        .expect_err("a topic with no partitions fails the probe");
+    assert_eq!(err.class(), ErrorClass::Retryable, "{err}");
+    assert!(err.reason().contains("reports no partitions yet"), "{err}");
+}
+
 /// Pins that a probe whose metadata read panics on its blocking thread
 /// returns a retryable error instead of unwinding into the caller:
 /// librdkafka refuses a topic name over 512 bytes, and rdkafka panics on

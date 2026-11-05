@@ -3398,16 +3398,33 @@ mod tests {
             }
         }
 
+        /// A consumer poll's `UnknownTopicOrPartition` is retryable before the
+        /// consumer's first assignment and fatal after it.
+        #[test]
+        fn unknown_topic_is_fatal_only_after_the_first_assignment() {
+            for (started, class) in [(false, ErrorClass::Retryable), (true, ErrorClass::Fatal)] {
+                let mut source = opened_consumers(test_config(), &[&[]]);
+                source.members[0].saw_first_assignment = started;
+                source.injected_poll_error = Some((
+                    0,
+                    rdkafka::error::KafkaError::MessageConsumption(
+                        RDKafkaErrorCode::UnknownTopicOrPartition,
+                    ),
+                ));
+                let err = source
+                    .poll_events(Duration::ZERO)
+                    .expect_err("the poll error");
+                assert_eq!(err.class(), class, "started {started}: {err}");
+                assert!(err.reason().starts_with("consumer poll"), "{err}");
+            }
+        }
+
         /// A store that librdkafka refuses for every partition of the list
         /// fails the commit as retryable.
         #[test]
         fn a_store_refused_for_every_partition_fails_the_commit() {
-            let mut cfg = test_config();
-            // Bounds the close, which tries to commit the stored offset.
-            cfg.rdkafka
-                .insert("session.timeout.ms".into(), "6000".into());
             // librdkafka holds no partition; the source believes it owns 0.
-            let mut source = opened_consumers(cfg, &[&[(0, 0)]]);
+            let mut source = opened_consumers(test_config(), &[&[(0, 0)]]);
             let err = source
                 .commit(&[(PartitionId(0), 5)])
                 .expect_err("a store of an unassigned partition fails");

@@ -55,11 +55,7 @@ fn sink_config(brokers: &str, topic: &str) -> KafkaSinkConfig {
 /// image auto-creates topics) so the pipeline's sinks and probes never see
 /// a not-yet-created topic.
 fn produce(brokers: &str, topic: &str, payloads: &[Vec<u8>]) {
-    let producer: BaseProducer = support::raw_config()
-        .set("bootstrap.servers", brokers)
-        .set("message.timeout.ms", "30000")
-        .build()
-        .expect("producer");
+    let producer: BaseProducer = support::producer_config(brokers).build().expect("producer");
     for payload in payloads {
         producer
             .send(

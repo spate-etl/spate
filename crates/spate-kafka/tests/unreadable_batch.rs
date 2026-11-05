@@ -275,11 +275,10 @@ fn a_marker_behind_an_unreadable_batch_leaves_the_commit_alone() {
                 .expect("poll_events");
             match lanes[0].poll(64, Duration::from_millis(100)) {
                 Ok(b) => delivered.extend(offsets_of(b).unwrap_or_default()),
-                Err(SourceError::Client { class, reason }) => {
-                    assert_eq!(class, ErrorClass::Fatal, "{name}: {reason}");
+                Err(e) => {
+                    assert_eq!(e.class(), ErrorClass::Fatal, "{name}: {e}");
                     failed = true;
                 }
-                Err(other) => panic!("{name}: {other}"),
             }
             failed
         });

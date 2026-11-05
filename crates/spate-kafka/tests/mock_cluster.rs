@@ -9,7 +9,7 @@ use rdkafka::mocking::MockCluster;
 use rdkafka::types::{RDKafkaApiKey, RDKafkaRespErr};
 use spate_core::checkpoint::Checkpointer;
 use spate_core::clock::TestClock;
-use spate_core::error::{ErrorClass, SourceError};
+use spate_core::error::ErrorClass;
 use spate_core::metrics::names;
 use spate_core::record::PartitionId;
 use spate_core::source::{PayloadBatch, Source, SourceCtx, SourceEvent, SourceLane};

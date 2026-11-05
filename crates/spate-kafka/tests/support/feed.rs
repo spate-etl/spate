@@ -525,7 +525,7 @@ pub(crate) fn sorted(mut rows: Vec<String>) -> Vec<String> {
 
 /// The offset `group` has committed for partition 0 of `topic`, if any.
 pub(crate) fn committed(brokers: &str, group: &str, topic: &str) -> Option<i64> {
-    match super::committed(brokers, group, topic, 1)[0] {
+    match super::committed_by(brokers, group, topic, 1)[0] {
         Offset::Offset(offset) => Some(offset),
         _ => None,
     }

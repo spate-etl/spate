@@ -47,18 +47,14 @@ jobs:
     if: github.event_name == 'pull_request' && inputs.semver == 'true'
     timeout-minutes: 45
     steps:
-      # The tool builds a rustdoc tree per crate per side and shares nothing
-      # between them; the runner's stock disk has drowned under less.
-      - name: Free disk space
-        run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
-                      /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
-          df -h /
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # The tags: the newest names the baseline and the crates it published.
           fetch-depth: 0
           persist-credentials: false
+      # The tool builds a rustdoc tree per crate per side and shares nothing
+      # between them; the runner's stock disk has drowned under less.
+      - uses: ./.github/actions/free-disk
       - uses: ./.github/actions/setup-rust
         with:
           tools: cargo-semver-checks
@@ -100,15 +96,11 @@ jobs:
     if: github.event_name == 'push' && inputs.rust == 'true'
     timeout-minutes: 45
     steps:
-      - name: Free disk space
-        run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
-                      /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
-          df -h /
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
+      - uses: ./.github/actions/free-disk
       - uses: ./.github/actions/setup-rust
         with:
           tools: cargo-semver-checks

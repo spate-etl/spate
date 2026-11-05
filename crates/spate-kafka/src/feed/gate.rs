@@ -21,7 +21,8 @@ use super::attempt::{self, partition_of};
 use super::events::Cause;
 use super::write::{self, Attempt, Destination, Finish, Move, Outgoing, Producer, Write};
 use super::{Core, Gating, LatchOnPanic};
-use rdkafka::error::{IsError as _, KafkaError, KafkaResult, RDKafkaErrorCode};
+use crate::client::{list_offsets, listed_offset};
+use rdkafka::error::{KafkaError, KafkaResult, RDKafkaErrorCode};
 use rdkafka::producer::Producer as _;
 use rdkafka::{Offset, TopicPartitionList};
 use spate_core::clock::Stopwatch;
@@ -328,31 +329,11 @@ impl Gate {
         let topic = &*self.core.topics.attempt;
         let mut tpl = TopicPartitionList::new();
         tpl.add_partition_offset(topic, partition, at)?;
-        let timeout = i32::try_from(self.step.as_millis()).unwrap_or(i32::MAX);
-        // SAFETY: the client pointer is valid while `self.producer` lives,
-        // and `tpl` owns its list until the end of this function.
-        // `rd_kafka_offsets_for_times` writes each result into the list and
-        // keeps neither pointer past the call.
-        let code = unsafe {
-            rdkafka::bindings::rd_kafka_offsets_for_times(
-                self.producer.client().native_ptr(),
-                tpl.ptr(),
-                timeout,
-            )
-        };
-        if code.is_error() {
-            return Err(KafkaError::MetadataFetch(code.into()));
-        }
+        list_offsets(self.producer.client(), &mut tpl, self.step)?;
         let read = tpl
             .find_partition(topic, partition)
             .ok_or(KafkaError::MetadataFetch(RDKafkaErrorCode::BadMessage))?;
-        read.error()?;
-        match read.offset() {
-            Offset::Offset(offset) => Ok(offset),
-            _ => Err(KafkaError::MetadataFetch(
-                RDKafkaErrorCode::OffsetNotAvailable,
-            )),
-        }
+        listed_offset(&read)
     }
 
     /// `Err` when the feed stopped or latched, or the pass begun at

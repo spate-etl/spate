@@ -49,8 +49,8 @@ Contracts:
   the writer).
 - **Errors are record-level by default**, subject to the sink stage's
   `ErrorPolicy` (`ChunkConfig::encode_policy`, default `Skip`, counted in
-  metrics). Return an error classed **`Fatal`** to stop the pipeline
-  regardless of policy: fatal means the *encoder* is broken (e.g. the row
+  metrics). Return `SinkError::fatal` to stop the pipeline regardless of
+  policy: fatal means the *encoder* is broken (e.g. the row
   type can never match the target schema) and every subsequent record would
   fail identically. See
   [Error handling](../02-concepts/04-error-handling.mdx).
@@ -105,7 +105,8 @@ the frames) happens when the worker calls it, not when the future is polled:
   deduplication so same-boundary retries are idempotent (see
   [Delivery guarantees](../02-concepts/02-delivery-guarantees.mdx) for what
   dedup tokens do and do not cover).
-- **Classify errors honestly.** Retryable errors get retried; a `Fatal` error
+- **Classify errors honestly.** Build the error with `SinkError::retryable` or
+  `SinkError::fatal`. A retryable error is retried; an error of any other class
   abandons the batch (its acks fail, the partition watermark stalls, and
   `checkpoint.stalled_fail_after` eventually fails the pipeline so the data
   replays after restart). The error's message is the reason that failure

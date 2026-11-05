@@ -396,3 +396,51 @@ fn an_error_bars_the_marker_advance() {
         });
     }
 }
+
+/// A partition with no committed offset under `latest` keeps its start across a
+/// restart, so a record the lane could not read stops the source again.
+/// Regression for #1704.
+#[test]
+fn a_corrupt_message_before_the_first_commit_stops_again_after_a_restart() {
+    let cluster = MockCluster::new(1).expect("mock cluster");
+    cluster.create_topic(TOPIC, 1, 1).expect("create topic");
+    let brokers = cluster.bootstrap_servers();
+    assert_eq!(
+        produce_batch(&brokers, TOPIC, 0, &batch(2, 0, 0, 1, b"good-0")),
+        0
+    );
+    let mut cfg = source_cfg(&brokers, "corrupt-start");
+    cfg.statistics_interval = Duration::ZERO;
+    cfg.rdkafka
+        .insert("auto.offset.reset".into(), "latest".into());
+
+    let stops = |cfg: KafkaSourceConfig, produce_after: bool| -> String {
+        let cp = Checkpointer::new();
+        let mut source = KafkaSource::new(cfg);
+        source.open(SourceCtx::new(cp.handle())).expect("open");
+        let mut lanes = await_assignment(&mut source, Duration::from_secs(30));
+        if produce_after {
+            let mut unreadable = batch(2, 0, -1, 1, b"carrier");
+            unreadable.extend_from_slice(&batch(3, 1, 0, 1, b"unreadable"));
+            assert_eq!(produce_batch(&brokers, TOPIC, 0, &unreadable), 0);
+        }
+        let mut reason = None;
+        spate_test::wait_until(Duration::from_secs(30), "the lane to fail", || {
+            let _ = source.poll_events(Duration::from_millis(10));
+            match lanes[0].poll(64, Duration::from_millis(50)) {
+                Err(SourceError::Client {
+                    class: ErrorClass::Fatal,
+                    reason: r,
+                }) => {
+                    reason = Some(r);
+                    true
+                }
+                Err(other) => panic!("{other}"),
+                Ok(_) => false,
+            }
+        });
+        reason.expect("a reason")
+    };
+    assert!(stops(cfg.clone(), true).contains("MagicByte 3"));
+    assert!(stops(cfg, false).contains("MagicByte 3"));
+}

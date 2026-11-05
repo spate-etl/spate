@@ -27,11 +27,6 @@ slow-timeout = { period = "30s", terminate-after = 4 }
 # explicit `-E 'binary(e2e_examples)' --ignore-default-filter`.
 default-filter = 'not binary(e2e_examples)'
 slow-timeout = { period = "120s" }
-# One retry, for container-start latency that belongs to the docker daemon
-# rather than to the code under test. A retried test surfaces as a flaky
-# annotation through the JUnit report below, so a repeat is visible rather than
-# silently green. Delete this line once a retry arrives with a cause attached.
-retries = 1
 # A passing container test's captured output, such as the nested build's disk
 # figures, reaches the job log only when passing output is kept.
 success-output = "final"

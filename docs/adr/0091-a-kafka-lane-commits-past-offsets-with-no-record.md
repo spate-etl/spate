@@ -38,6 +38,10 @@ the ack takes its place in the tracker behind every batch the lane issued, so a
 pending or failed batch holds the commit back with no new check, and the empty
 return is the one point where nothing popped is unissued.
 
+A lane learns the watermark from `KafkaSource::commit`, which stores it where
+the lane reads it. A marker's offsets therefore commit one checkpoint tick after
+the batches below them.
+
 A record moves librdkafka's position when it is popped, before its batch is
 issued, so a read from the controller thread can pass a record the tracker has
 not heard of. That rules out the second option, and with it the statistics
@@ -51,9 +55,9 @@ high until the lane is polled. Documenting the reading leaves the alert firing.
 - Good, because the framework's lag, the broker's group lag and the
   stored-offset lag agree on a caught-up partition, and a restart starts past
   the marker.
-- Good, because a batch with no payloads counts against the pending ceiling, so
-  a stream of aborted transactions behind a stalled head cannot grow the
-  tracker.
+- Good, because a lane issues such a batch only once every batch it issued has
+  reached a watermark, so markers behind a stalled head take no room under the
+  pending ceiling, the lane keeps polling, and one batch covers them all.
 - Bad, because an empty return now takes the client, topic and partition locks.
   A counter bounds the rate on a thread polling with no timeout, with no
   measurement behind its value.

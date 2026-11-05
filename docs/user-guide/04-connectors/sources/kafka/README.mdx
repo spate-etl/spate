@@ -197,20 +197,22 @@ This is the mechanical heart of at-least-once; see
 A transaction marker takes an offset and is never delivered. Under
 `read_committed`, the default, an aborted transaction's records are skipped the
 same way. librdkafka moves the consumer's position past them when a partition's
-queue is polled. When a poll finds nothing to deliver and the position is past
-the last offset the source handed out, the source issues an acknowledgement
-covering those offsets. It reaches the checkpointer behind every batch before
-it, so the committed offset passes a marker once every record below it is
-acknowledged. A caught-up partition reads a lag of 0, and the broker's group lag
+queue is polled. When a poll finds nothing to deliver, every batch the source
+handed out on the partition has reached a watermark, and the position is past
+the last offset it handed out, the source issues an acknowledgement covering
+those offsets. So the committed offset passes a marker once every record below
+it is acknowledged, and markers behind a batch the sink has not acknowledged
+wait for it. A caught-up partition reads a lag of 0, and the broker's group lag
 agrees.
 
 A few readings differ:
 
 - A marker counts as lag until the partition's next poll serves it and the sink
   acknowledges the records below it, which can take the sink's `batch.linger`.
-  The figure then settles within `checkpoint.interval`, `commit_interval` and
-  `statistics_interval` together. A partition idle beside a busy one on the same
-  pipeline thread reads its position less often, so its figure settles later.
+  The figure then settles within two `checkpoint.interval`, plus
+  `commit_interval` and `statistics_interval`. A partition idle beside a busy
+  one on the same pipeline thread reads its position less often, so its figure
+  settles later.
 - While a producer holds a transaction open, the last stable offset stays below
   it, and later records stay unread until the transaction ends. Under
   `read_committed` lag reads 0 for a group committed at that offset. A group

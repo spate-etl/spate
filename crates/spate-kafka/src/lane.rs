@@ -30,9 +30,14 @@
 //! The read sits on this thread because a record moves the position when it is
 //! popped, before its batch is issued. At an empty return this thread has issued
 //! everything it popped, so the offsets below the position hold nothing
-//! unissued. The ack then resolves in order behind every earlier batch, so the
-//! committed offset passes a marker only once every record below it is
-//! acknowledged.
+//! unissued. The watermark passes the ack's offsets only once every earlier batch
+//! on the partition is delivered, so the committed offset passes a marker only
+//! once every record below it is acknowledged.
+//!
+//! The lane returns such a batch only once every batch it issued has reached a
+//! watermark. Until then it keeps polling and serving markers, and one batch then
+//! covers them all, so markers behind a batch the sink has not acknowledged take
+//! no room under the pending ceiling and leave the lane polling.
 
 use crate::client::read_position;
 use crate::context::SourceContext;
@@ -46,6 +51,7 @@ use spate_core::error::SourceError;
 use spate_core::record::{PartitionId, RawPayload};
 use spate_core::source::{LaneId, PayloadBatch, SourceLane};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Duration;
 
 /// How many zero-timeout empty returns pass between position reads. A thread
@@ -71,6 +77,8 @@ pub struct KafkaLane {
     position: TopicPartitionList,
     /// One past the last offset this lane issued.
     covered_to: Option<i64>,
+    /// The latest watermark the source was asked to store for this partition.
+    watermark: Arc<AtomicI64>,
     /// A poll failed since the last record. An error does not move the
     /// position, so a later marker moves it past the offsets that failed.
     saw_error: bool,
@@ -96,6 +104,7 @@ impl KafkaLane {
         consumer: Arc<BaseConsumer<SourceContext>>,
         issuer: AckIssuer,
         position: TopicPartitionList,
+        watermark: Arc<AtomicI64>,
     ) -> Self {
         KafkaLane {
             id,
@@ -107,6 +116,7 @@ impl KafkaLane {
             pending: None,
             position,
             covered_to: None,
+            watermark,
             saw_error: false,
             empty_returns: 0,
         }
@@ -129,6 +139,7 @@ impl KafkaLane {
     fn retire_offsets(&mut self, timeout: Duration) -> Option<KafkaBatch<'_>> {
         if self.saw_error
             || self.consumer.context().rewound()
+            || !issued_batches_settled(self.covered_to, self.watermark.load(Ordering::Acquire))
             || !read_is_due(timeout, &mut self.empty_returns)
         {
             return None;
@@ -171,6 +182,12 @@ fn offset_to_retire(position: Offset, covered_to: Option<i64>) -> Option<i64> {
         return None;
     };
     (position > covered_to.unwrap_or(0)).then(|| position - 1)
+}
+
+/// Whether every batch a lane issued, through `covered_to`, has reached
+/// `watermark`. A lane that has issued nothing has nothing to wait for.
+fn issued_batches_settled(covered_to: Option<i64>, watermark: i64) -> bool {
+    covered_to.is_none_or(|covered| watermark >= covered)
 }
 
 /// Whether an empty return from a poll of `timeout` reads the position. Every
@@ -328,6 +345,16 @@ mod tests {
         assert_eq!(offset_to_retire(Offset::Offset(6), Some(5)), Some(5));
         assert_eq!(offset_to_retire(Offset::Offset(0), None), None);
         assert_eq!(offset_to_retire(Offset::Offset(1), None), Some(0));
+    }
+
+    /// A lane waits for every batch it issued to reach a watermark, and one that
+    /// has issued nothing waits for nothing. Regression for #1709.
+    #[test]
+    fn a_lane_waits_for_what_it_issued_to_reach_a_watermark() {
+        assert!(issued_batches_settled(None, i64::MIN));
+        assert!(!issued_batches_settled(Some(5), 4));
+        assert!(issued_batches_settled(Some(5), 5));
+        assert!(issued_batches_settled(Some(5), 6));
     }
 
     /// A return that may have blocked always reads. A zero-timeout one reads

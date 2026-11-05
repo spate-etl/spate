@@ -117,7 +117,7 @@ use spate_core::metrics::SourceMetrics;
 use spate_core::record::PartitionId;
 use spate_core::source::{DrainBarrier, LaneId, Source, SourceCtx, SourceEvent};
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::{Duration, Instant};
 
 /// Bound on the committed-offset reads made before one assignment, shared by
@@ -173,6 +173,8 @@ struct Member {
     /// Stands in for librdkafka's committed position in the lag statistic,
     /// which the lookup does not update.
     committed_at_assign: FastMap<i32, i64>,
+    /// The latest watermark stored for each partition, shared with its lane.
+    watermarks: FastMap<i32, Arc<AtomicI64>>,
     /// The generation [`Member::group_generation`] reads in place of the
     /// client's, since a unit test's consumer never joins a group.
     #[cfg(test)]
@@ -531,6 +533,10 @@ impl KafkaSource {
             self.members[k].assignment.insert(lane_id, partition);
             let mut position = TopicPartitionList::with_capacity(1);
             position.add_partition(&self.config.topic, partition);
+            let watermark = Arc::new(AtomicI64::new(i64::MIN));
+            self.members[k]
+                .watermarks
+                .insert(partition, Arc::clone(&watermark));
             lanes.push(KafkaLane::new(
                 lane_id,
                 PartitionId(u32::try_from(partition).unwrap_or(0)),
@@ -538,6 +544,7 @@ impl KafkaSource {
                 Arc::clone(&consumer),
                 issuer.clone(),
                 position,
+                watermark,
             ));
         }
         consumer
@@ -1322,6 +1329,7 @@ impl Source for KafkaSource {
                 saw_first_assignment: false,
                 phase: Phase::Joining,
                 committed_at_assign: FastMap::default(),
+                watermarks: FastMap::default(),
                 #[cfg(test)]
                 generation: None,
             });
@@ -1426,9 +1434,18 @@ impl Source for KafkaSource {
         let mut refused = 0;
         for (p, offset) in watermarks {
             match self.owner(*p) {
-                Some((k, partition)) => lists[k]
-                    .add_partition_offset(&self.config.topic, partition, Offset::Offset(*offset))
-                    .map_err(fatal("build offset list"))?,
+                Some((k, partition)) => {
+                    if let Some(watermark) = self.members[k].watermarks.get(&partition) {
+                        watermark.store(*offset, Ordering::Release);
+                    }
+                    lists[k]
+                        .add_partition_offset(
+                            &self.config.topic,
+                            partition,
+                            Offset::Offset(*offset),
+                        )
+                        .map_err(fatal("build offset list"))?;
+                }
                 None => {
                     refused += 1;
                     tracing::debug!(

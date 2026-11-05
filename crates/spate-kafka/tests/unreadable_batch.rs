@@ -361,16 +361,16 @@ fn an_error_bars_the_marker_advance() {
                 .expect("record 0");
             assert_eq!(offsets_of(first), Some(vec![0]));
             assert!(lanes[0].poll(max_records, Duration::from_secs(10)).is_err());
+            cp.drain();
+            let settled = cp.take_watermarks();
+            assert_eq!(settled, [(partition, 1)], "the record before the error");
+            source.commit(&settled).expect("store");
             let after = lanes[0]
                 .poll(max_records, Duration::from_millis(100))
                 .expect("the marker is served");
             assert_eq!(offsets_of(after), None, "the marker was passed");
             cp.drain();
-            assert_eq!(
-                cp.take_watermarks(),
-                [(partition, 1)],
-                "only the record before the error"
-            );
+            assert_eq!(cp.take_watermarks(), [], "the marker was passed");
 
             assert_eq!(
                 produce_batch(&brokers, TOPIC, 0, &batch(2, 0, 0, 1, b"later")),
@@ -388,7 +388,9 @@ fn an_error_bars_the_marker_advance() {
                         .expect("poll"),
                 );
                 cp.drain();
-                watermarks.extend(cp.take_watermarks());
+                let moved = cp.take_watermarks();
+                source.commit(&moved).expect("store");
+                watermarks.extend(moved);
                 watermarks.last() == Some(&(partition, 5))
             });
         });

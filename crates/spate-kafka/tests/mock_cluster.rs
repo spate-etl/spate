@@ -2579,6 +2579,7 @@ fn a_zero_timeout_poll_reads_the_position_in_turn() {
         support::fetch_queue_entries(&watched.rendered(), &pipeline) >= 3.0
     });
     assert_eq!(watched.read(0, 1), [0]);
+    assert_eq!(watched.commit(), [(PartitionId(0), 1)]);
 
     let poll = |lane: &mut <KafkaSource as Source>::Lane| {
         lane.poll(64, Duration::ZERO).expect("lane poll").is_some()
@@ -2623,13 +2624,20 @@ fn hold_a_record(watched: &mut Watched, lane: usize) -> spate_core::checkpoint::
     held.expect("held")
 }
 
-/// Poll `watched`'s lane past the marker behind one record, holding the
-/// record's ack, and return the clone.
+/// Hold the ack of the record ahead of a marker on `watched`'s lane, once both are
+/// in its fetch queue, and poll until the marker is served, with no batch issued
+/// for it. Returns the clone.
 fn hold_a_record_past_its_marker(watched: &mut Watched) -> spate_core::checkpoint::AckRef {
-    let held = hold_a_record(watched, 0);
-    wait_until(ASSIGNMENT, "the marker's batch", || {
+    let pipeline = watched.pipeline.clone();
+    wait_until(ASSIGNMENT, "the record and the marker are queued", || {
         watched.serve();
-        watched.poll(0) == Some(vec![])
+        support::fetch_queue_entries(&watched.rendered(), &pipeline) >= 2.0
+    });
+    let held = hold_a_record(watched, 0);
+    wait_until(ASSIGNMENT, "the marker is served", || {
+        watched.serve();
+        assert_eq!(watched.poll(0), None, "a batch behind a live ack");
+        support::fetch_queue_entries(&watched.rendered(), &pipeline) == 0.0
     });
     held
 }
@@ -2652,7 +2660,8 @@ fn an_acknowledgement_held_past_its_batch_holds_the_marker_back() {
         [rdkafka::Offset::Invalid]
     );
     drop(ack);
-    assert_eq!(watched.commit(), [(PartitionId(0), 2)]);
+    assert_eq!(watched.commit(), [(PartitionId(0), 1)]);
+    assert_eq!(watched.poll_until_committed(0, 0, 2), [2]);
 }
 
 /// A failed batch ahead of a marker holds the committed offset where it is, and
@@ -2901,67 +2910,62 @@ fn an_idle_partition_beside_a_busy_one_reaches_zero_lag() {
         .expect("run");
 }
 
-/// Offsets a lane retires count against the pending ceiling: behind a head batch
-/// that has not resolved, the lane stops polling at the ceiling and later markers
-/// stay in its fetch queue, until the head resolves. Regression for #1709.
+/// Markers behind a head batch the sink has not acknowledged take no room under
+/// the pending ceiling: the lane keeps polling and serving them, and one batch
+/// covers them all once the head resolves. Regression for #1709.
 #[test]
-fn aborted_transactions_behind_a_stalled_head_stay_under_the_pending_ceiling() {
-    const CEILING: f64 = 2.0;
-    const LATER_MARKERS: f64 = 5.0;
+fn markers_behind_a_stalled_head_leave_the_lane_polling() {
+    const LATER_MARKERS: usize = 5;
     let cluster = marker_cluster(1);
     let brokers = cluster.bootstrap_servers();
-    produce(&brokers, TOPIC, 1, 1, "head");
-    write_marker(&brokers, 0, Marker::Abort);
-    let group = spate_test::unique_name("ceiling");
+    produce(&brokers, TOPIC, 1, 1, "first");
+    let group = spate_test::unique_name("stalled");
     let (name, handle, script, shutdown, run) = run_marker_pipeline(
         &brokers,
         &group,
         1,
         "{ interval: 100ms, max_pending_batches: 2 }",
         |script| {
+            script.enqueue_global(spate_test::WriteOutcome::ok());
             let mut held = spate_test::WriteOutcome::ok();
             held.hold = true;
             script.enqueue_global(held);
         },
     );
+    wait_until(Duration::from_secs(60), "the first record commits", || {
+        support::committed(&brokers, &group, TOPIC, 1) == [rdkafka::Offset::Offset(1)]
+    });
 
-    let pending = || {
+    produce(&brokers, TOPIC, 1, 1, "head");
+    for _ in 0..LATER_MARKERS {
+        write_marker(&brokers, 0, Marker::Abort);
+    }
+    let end = 2 + LATER_MARKERS as i64;
+    let figure = |metric: &str| {
         spate_test::metric_value(
             &handle.render(),
-            names::CHECKPOINT_PENDING_BATCHES,
+            metric,
             &[("pipeline", name.as_str()), ("partition", "0")],
         )
     };
-    wait_until(Duration::from_secs(60), "the gate closes", || {
-        pending() == Some(CEILING)
-    });
-    for _ in 0..LATER_MARKERS as usize {
-        write_marker(&brokers, 0, Marker::Abort);
-    }
+    // The lag shows the fetcher reached the end, and the empty queue beside it shows
+    // the lane served what it fetched.
     wait_until(
         Duration::from_secs(60),
-        "the later markers stay queued",
+        "the lane serves the markers",
         || {
-            spate_test::metric_value(
-                &handle.render(),
-                "spate_kafka_source_partition_fetch_queue_messages",
-                &[("pipeline", name.as_str()), ("partition", "0")],
-            )
-            .is_some_and(|queued| queued >= LATER_MARKERS)
+            figure("spate_source_lag_records") == Some((end - 1) as f64)
+                && figure("spate_kafka_source_partition_fetch_queue_messages") == Some(0.0)
+                && figure(names::CHECKPOINT_PENDING_BATCHES) == Some(1.0)
+                && script.held_writes() == 1
         },
     );
-    assert_eq!(pending(), Some(CEILING));
 
-    // Releasing frees only a write already held, and the head's chunk seals on
-    // its own schedule.
-    wait_until(Duration::from_secs(60), "the head's write is held", || {
-        script.held_writes() == 1
-    });
     script.release_held();
     wait_until(
         Duration::from_secs(60),
         "the head and the markers commit",
-        || support::committed(&brokers, &group, TOPIC, 1) == [rdkafka::Offset::Offset(7)],
+        || support::committed(&brokers, &group, TOPIC, 1) == [rdkafka::Offset::Offset(end)],
     );
     shutdown.trigger();
     run.wait_exit(Duration::from_secs(30))

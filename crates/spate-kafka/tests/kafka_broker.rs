@@ -711,6 +711,7 @@ fn real_broker_revocation_before_a_marker_loses_nothing() {
     let _ = produce_transaction(&brokers, "served", 5, "kept", Transaction::Commit);
     let mut watched = Watched::open(topic_config(&brokers, "served", "served-group"));
     watched.read(0, 5);
+    assert_eq!(watched.commit(), [(PartitionId(0), 5)]);
     spate_test::wait_until(Duration::from_secs(60), "the marker's batch", || {
         watched.serve();
         watched.poll(0) == Some(vec![])

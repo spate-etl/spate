@@ -588,14 +588,19 @@ impl crate::feed::Feed for HandingBack {
     }
 
     fn close(&self, within: Duration) -> Option<crate::feed::Confirmation> {
+        let (confirmer, confirmation) = crate::feed::confirmation();
+        // A test acts on `closes` as its signal, so what it acts on goes first.
+        let confirmer = if self.hold_close {
+            self.held.lock().unwrap().push(confirmer);
+            None
+        } else {
+            Some(confirmer)
+        };
         self.closes.lock().unwrap().push(within);
         if let Some(log) = &self.log {
             log.lock().unwrap().log.push("close".into());
         }
-        let (confirmer, confirmation) = crate::feed::confirmation();
-        if self.hold_close {
-            self.held.lock().unwrap().push(confirmer);
-        } else {
+        if let Some(confirmer) = confirmer {
             confirmer.confirm();
         }
         Some(confirmation)

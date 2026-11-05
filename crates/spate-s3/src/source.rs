@@ -26,7 +26,7 @@ use object_store::aws::{AmazonS3, AmazonS3Builder, AmazonS3ConfigKey};
 use object_store::{ClientConfigKey, ObjectStore, ObjectStoreScheme};
 use spate_core::clock::tokio::{Clock, SystemClock};
 use spate_core::config::{ComponentConfig, ConfigError, FeedSection};
-use spate_core::error::{ErrorClass, SourceError};
+use spate_core::error::SourceError;
 use spate_core::feed::{DepthOf, Feed, FeedOrigin};
 use spate_core::framing::{FramingContract, RecordFramer};
 use spate_core::record::PartitionId;
@@ -330,54 +330,50 @@ impl S3Source {
         section: &FeedSection,
         feed: Arc<dyn Feed>,
     ) -> Result<(), SourceError> {
-        let fatal = |reason: String| SourceError::Client {
-            class: ErrorClass::Fatal,
-            reason,
-        };
         let backend = section.backend().type_tag();
         let location = section
             .location
             .as_deref()
             .map(|location| self.parse_location(location))
             .transpose()
-            .map_err(|e| fatal(e.to_string()))?;
+            .map_err(|e| SourceError::fatal(e.to_string()))?;
         if location.is_some() && backend == "memory" {
-            return Err(fatal(
-                "the in-process feed keeps no job location; remove `feed.location`".into(),
+            return Err(SourceError::fatal(
+                "the in-process feed keeps no job location; remove `feed.location`",
             ));
         }
         if backend == "memory" {
-            return Err(fatal(
+            return Err(SourceError::fatal(
                 "a lister run publishes to a durable feed; the in-process feed lives in one \
-                 process, whose own source lists for it"
-                    .into(),
+                 process, whose own source lists for it",
             ));
         }
         if location.is_none() {
-            return Err(fatal(format!(
+            return Err(SourceError::fatal(format!(
                 "a lister on the `{backend}` feed runs a bounded job, which keeps its \
                  fingerprint at a job location; set `feed.location`"
             )));
         }
         if feed.backend() != backend {
-            return Err(fatal(format!(
+            return Err(SourceError::fatal(format!(
                 "the `feed:` section names the `{backend}` feed, and the lister run was given \
                  the `{}` feed; build the feed the section names",
                 feed.backend()
             )));
         }
         if tokio::runtime::Handle::try_current().is_ok() {
-            return Err(fatal(
+            return Err(SourceError::fatal(
                 "a lister run blocks its thread until it ends, so it is called from a plain \
                  thread such as `main`'s, outside any Tokio runtime context: no async code, \
-                 `spawn_blocking` closure or `Handle::enter` guard"
-                    .into(),
+                 `spawn_blocking` closure or `Handle::enter` guard",
             ));
         }
         let make_framer = self.framer.clone().ok_or_else(|| {
-            fatal("S3Source has no record framer; supply one with `with_framer(...)`".into())
+            SourceError::fatal("S3Source has no record framer; supply one with `with_framer(...)`")
         })?;
-        self.config.validate().map_err(|e| fatal(e.to_string()))?;
+        self.config
+            .validate()
+            .map_err(|e| SourceError::fatal(e.to_string()))?;
         let (store, prefix, unaddressable, _, resume) = self.data_store()?;
         let delimiter = make_framer().resync_delimiter();
         let location = match location {
@@ -420,11 +416,8 @@ impl S3Source {
             // Injected store: the URL still names the listing prefix, and the
             // bucket for notifications is its host under `s3` or `s3a`.
             Some(store) => {
-                let (_, path) =
-                    ObjectStoreScheme::parse(&url).map_err(|e| SourceError::Client {
-                        class: ErrorClass::Fatal,
-                        reason: format!("parsing {}: {e}", self.config.url),
-                    })?;
+                let (_, path) = ObjectStoreScheme::parse(&url)
+                    .map_err(|e| SourceError::fatal(format!("parsing {}: {e}", self.config.url)))?;
                 let bucket = matches!(url.scheme(), "s3" | "s3a")
                     .then(|| url.host_str().map(str::to_owned))
                     .flatten();
@@ -434,11 +427,12 @@ impl S3Source {
                 (store, path, None, bucket, resumable)
             }
             None => {
-                let built =
-                    build_store(&url, &self.config.store).map_err(|e| SourceError::Client {
-                        class: ErrorClass::Fatal,
-                        reason: format!("building the object store for {}: {e}", self.config.url),
-                    })?;
+                let built = build_store(&url, &self.config.store).map_err(|e| {
+                    SourceError::fatal(format!(
+                        "building the object store for {}: {e}",
+                        self.config.url
+                    ))
+                })?;
                 (
                     Arc::from(built.store),
                     built.prefix,
@@ -517,12 +511,11 @@ impl S3Source {
         }
         build_store(location.url(), &self.config.store)
             .map(|built| Arc::from(built.store))
-            .map_err(|e| SourceError::Client {
-                class: ErrorClass::Fatal,
-                reason: format!(
+            .map_err(|e| {
+                SourceError::fatal(format!(
                     "building the object store for the job location {}: {e}",
                     location.shown()
-                ),
+                ))
             })
     }
 }
@@ -582,35 +575,27 @@ impl Source for S3Source {
 
     fn open(&mut self, ctx: SourceCtx) -> Result<(), SourceError> {
         if !matches!(self.state, State::Created) {
-            return Err(SourceError::Client {
-                class: ErrorClass::Fatal,
-                reason: "source opened twice".into(),
-            });
+            return Err(SourceError::fatal("source opened twice"));
         }
         let Some(make_framer) = self.framer.clone() else {
-            return Err(SourceError::Client {
-                class: ErrorClass::Fatal,
-                reason: "S3Source has no record framer; supply one with `with_framer(...)` \
-                         (e.g. spate-json's NdjsonFramer) before running the pipeline"
-                    .into(),
-            });
+            return Err(SourceError::fatal(
+                "S3Source has no record framer; supply one with `with_framer(...)` \
+                         (e.g. spate-json's NdjsonFramer) before running the pipeline",
+            ));
         };
         // Defense in depth for hand-constructed configs; cheap.
-        self.config.validate().map_err(|e| SourceError::Client {
-            class: ErrorClass::Fatal,
-            reason: e.to_string(),
-        })?;
+        self.config
+            .validate()
+            .map_err(|e| SourceError::fatal(e.to_string()))?;
 
         // Checked before the store is built, so a run with no feed touches no
         // store.
         let Some(feed) = self.feed.take() else {
-            return Err(SourceError::Client {
-                class: ErrorClass::Fatal,
-                reason: "the S3 source reads work units from a feed, and the pipeline names \
+            return Err(SourceError::fatal(
+                "the S3 source reads work units from a feed, and the pipeline names \
                          none; add a `feed:` section, such as `feed: { memory: {} }` for a run \
-                         in one process"
-                    .into(),
-            });
+                         in one process",
+            ));
         };
         let (store, prefix, unaddressable, bucket, resume) = self.data_store()?;
         let (units, origin) = units_held(self.units_held, ctx.threads);
@@ -759,18 +744,12 @@ impl Source for S3Source {
                 Err(e) => Some(format!("the solo run's lister ended: {e}")),
             };
             if let Some(reason) = reason {
-                return Err(SourceError::Client {
-                    class: ErrorClass::Fatal,
-                    reason,
-                });
+                return Err(SourceError::fatal(reason));
             }
         }
         match &mut self.state {
             State::Feed(reader) => reader.poll_events(timeout),
-            State::Created => Err(SourceError::Client {
-                class: ErrorClass::Fatal,
-                reason: "poll_events before open".into(),
-            }),
+            State::Created => Err(SourceError::fatal("poll_events before open")),
         }
     }
 
@@ -860,10 +839,7 @@ fn units_held(
 }
 
 fn parse(url: &str) -> Result<Url, SourceError> {
-    Url::parse(url).map_err(|e| SourceError::Client {
-        class: ErrorClass::Fatal,
-        reason: format!("invalid URL {url}: {e}"),
-    })
+    Url::parse(url).map_err(|e| SourceError::fatal(format!("invalid URL {url}: {e}")))
 }
 
 fn opts(map: &std::collections::BTreeMap<String, String>) -> Vec<(String, String)> {

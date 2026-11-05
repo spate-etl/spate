@@ -163,14 +163,11 @@ impl Location {
 
     /// A fatal error about `object` at this location.
     pub(crate) fn fatal(&self, object: &Path, why: impl fmt::Display) -> SourceError {
-        SourceError::Client {
-            class: ErrorClass::Fatal,
-            reason: format!(
-                "{} at the job location {}: {why}",
-                object_name(object),
-                self.shown()
-            ),
-        }
+        SourceError::fatal(format!(
+            "{} at the job location {}: {why}",
+            object_name(object),
+            self.shown()
+        ))
     }
 }
 
@@ -469,7 +466,7 @@ pub(crate) async fn await_fingerprint(
         match outcome {
             Ok(Some(stored)) => return compare(location, mine, &stored),
             Ok(None) => last_error = None,
-            Err(e) if is_retryable(&e) => {
+            Err(e) if e.class() == ErrorClass::Retryable => {
                 tracing::warn!(error = %e, "reading the job fingerprint failed; retrying");
                 last_error = Some(e);
             }
@@ -481,16 +478,6 @@ pub(crate) async fn await_fingerprint(
             return Err(timed_out(&last_error));
         }
     }
-}
-
-fn is_retryable(e: &SourceError) -> bool {
-    matches!(
-        e,
-        SourceError::Client {
-            class: ErrorClass::Retryable,
-            ..
-        }
-    )
 }
 
 #[cfg(test)]
@@ -834,7 +821,7 @@ mod tests {
         let err = read_object(&store, &location, &location.fingerprint())
             .await
             .unwrap_err();
-        assert!(is_retryable(&err), "{err}");
+        assert_eq!(err.class(), ErrorClass::Retryable, "{err}");
     }
 
     /// Pins that the `s3:ListBucket` hint rides on a read's 403 only: never
@@ -974,7 +961,7 @@ mod tests {
                 .await
                 .unwrap();
             let err = read_end(&store, &location).await.unwrap_err();
-            assert!(!is_retryable(&err), "{body:?}: {err}");
+            assert_eq!(err.class(), ErrorClass::Fatal, "{body:?}: {err}");
             let shown = err.to_string();
             assert!(
                 shown.contains("end") && shown.contains("s3://ops/jobs/a/"),
@@ -1029,7 +1016,7 @@ mod tests {
         .now_or_never()
         .expect("a fatal error ends the wait without waiting on the clock");
         let err = settled.unwrap_err();
-        assert!(!is_retryable(&err), "{err}");
+        assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
         assert!(err.to_string().contains("s3://ops/jobs/a/"), "{err}");
     }
 

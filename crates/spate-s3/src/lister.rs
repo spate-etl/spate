@@ -28,7 +28,7 @@ use crate::unit::{Minted, Packer, alone_units};
 use futures_util::StreamExt as _;
 use object_store::path::Path;
 use object_store::{ObjectStore, ObjectStoreExt as _, PutMode, PutPayload};
-use spate_core::error::{ErrorClass, SourceError};
+use spate_core::error::SourceError;
 use spate_core::feed::{Confirmation, Feed, FeedErrorKind, Unit};
 use spate_core::hash::{QualityMap, QualitySet};
 use std::collections::VecDeque;
@@ -261,10 +261,7 @@ impl Lister {
             first_key,
             objects,
             listed,
-        } = minted.map_err(|e| SourceError::Client {
-            class: ErrorClass::Fatal,
-            reason: format!("minting a unit: {e}"),
-        })?;
+        } = minted.map_err(|e| SourceError::fatal(format!("minting a unit: {e}")))?;
         if pending.len() == LISTER_IN_FLIGHT
             && let Some(oldest) = pending.pop_front()
         {
@@ -324,10 +321,7 @@ impl Lister {
                             unit.id
                         )
                     };
-                    return Err(SourceError::Client {
-                        class: e.class(),
-                        reason,
-                    });
+                    return Err(SourceError::new(e.class(), reason));
                 }
             }
         }
@@ -557,6 +551,7 @@ mod tests {
     use crate::config::Compression;
     use crate::split::{PACK_MEMBERS, PACKED_BODY_MAX_BYTES, SplitDescriptor};
     use crate::testutil::HookStore;
+    use spate_core::error::ErrorClass;
     use spate_core::feed::memory::MemoryFeed;
     use spate_core::feed::{
         Confirmer, Delivery, FeedError, FeedWaker, Receipt, Unit, confirmation,

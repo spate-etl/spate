@@ -203,7 +203,7 @@ impl S3Lane {
     /// Record a terminal failure and return it. Later polls re-report it.
     fn fail(&mut self, class: ErrorClass, reason: String) -> SourceError {
         self.failed = Some((class, reason.clone()));
-        SourceError::Client { class, reason }
+        SourceError::new(class, reason)
     }
 
     /// Report object-level poison and go quiescent. Everything undelivered
@@ -408,11 +408,7 @@ impl S3Lane {
                 Ok(())
             }
             ChunkMsg::LaneFailed(SplitFailure::Fatal(e)) => {
-                let (class, reason) = match e {
-                    SourceError::Client { class, reason } => (class, reason),
-                    other => (ErrorClass::Fatal, other.to_string()),
-                };
-                Err(self.fail(class, reason))
+                Err(self.fail(e.class(), e.reason().to_owned()))
             }
         }
     }
@@ -467,10 +463,7 @@ impl SourceLane for S3Lane {
         timeout: Duration,
     ) -> Result<Option<S3Batch<'_>>, SourceError> {
         if let Some((class, reason)) = &self.failed {
-            return Err(SourceError::Client {
-                class: *class,
-                reason: reason.clone(),
-            });
+            return Err(SourceError::new(*class, reason.clone()));
         }
         if self.poisoned {
             // Quiescent until the control plane retires the lane; bounded

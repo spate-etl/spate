@@ -168,7 +168,7 @@ impl JobEnd {
             let read = match outcome {
                 Some(Ok(Some(run))) => MarkerRead::Present(run),
                 Some(Ok(None)) => MarkerRead::Absent,
-                Some(Err(e)) if is_retryable(&e) => {
+                Some(Err(e)) if e.class() == ErrorClass::Retryable => {
                     tracing::warn!(error = %e, "reading the end marker failed; reading it again");
                     MarkerRead::Failed
                 }
@@ -246,23 +246,19 @@ impl JobEnd {
                         Finish::Marker { .. } => "copy them into a re-run's feed",
                         Finish::Solo { .. } => "run the job again",
                     };
-                    return Err(SourceError::Client {
-                        class: ErrorClass::Fatal,
-                        reason: format!(
-                            "bounded feed job stalled: the dead-letter destination holds units \
+                    return Err(SourceError::fatal(format!(
+                        "bounded feed job stalled: the dead-letter destination holds units \
                              ({depth}); fix their cause, then {next}"
-                        ),
-                    });
+                    )));
                 }
                 EndAction::Ended(EndOutcome::Failed(e)) => {
-                    return Err(SourceError::Client {
-                        class: ErrorClass::Fatal,
-                        reason: if self.depth_of == Some(DepthOf::DeadLetters) {
+                    return Err(SourceError::fatal(
+                        if self.depth_of == Some(DepthOf::DeadLetters) {
                             format!("reading the depth of the feed's dead-letter destination: {e}")
                         } else {
                             format!("reading the feed's depth: {e}")
                         },
-                    });
+                    ));
                 }
                 EndAction::Wait(due) => {
                     self.due = due;
@@ -277,24 +273,11 @@ impl JobEnd {
 
 /// The error a feed that cannot count gives a bounded job.
 pub(crate) fn no_depth(feed: &dyn Feed) -> SourceError {
-    SourceError::Client {
-        class: ErrorClass::Fatal,
-        reason: format!(
-            "the `{}` feed reports no depth, so a bounded job on it cannot tell when its work \
+    SourceError::fatal(format!(
+        "the `{}` feed reports no depth, so a bounded job on it cannot tell when its work \
              is done; use a feed that counts its units, or run the job without `location`",
-            feed.backend()
-        ),
-    }
-}
-
-fn is_retryable(e: &SourceError) -> bool {
-    matches!(
-        e,
-        SourceError::Client {
-            class: ErrorClass::Retryable,
-            ..
-        }
-    )
+        feed.backend()
+    ))
 }
 
 #[cfg(test)]

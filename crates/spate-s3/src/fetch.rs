@@ -507,13 +507,10 @@ async fn stream_object(
             )
             .await
         }
-        None if range.is_some() => Err(SplitFailure::Fatal(SourceError::Client {
-            class: ErrorClass::Fatal,
-            reason: format!(
-                "split {split}: ranged read of \"{}\" has no ETag pin — internal wiring bug",
-                entry.key
-            ),
-        })),
+        None if range.is_some() => Err(SplitFailure::Fatal(SourceError::fatal(format!(
+            "split {split}: ranged read of \"{}\" has no ETag pin — internal wiring bug",
+            entry.key
+        )))),
         None => {
             stream_object_streaming(
                 split,
@@ -716,15 +713,12 @@ async fn stream_object_streaming(
                         // could splice two object versions, so a mid-object
                         // break cannot be retried by this owner. Poison.
                         if crate::error::is_pipeline_fatal(&e) {
-                            return Err(SplitFailure::Fatal(SourceError::Client {
-                                class: ErrorClass::Fatal,
-                                reason: format!(
-                                    "split {split}: reading \"{}\" failed mid-object at byte \
+                            return Err(SplitFailure::Fatal(SourceError::fatal(format!(
+                                "split {split}: reading \"{}\" failed mid-object at byte \
                                      {delivered}: {}",
-                                    entry.key,
-                                    crate::error::bounded_reason(&e)
-                                ),
-                            }));
+                                entry.key,
+                                crate::error::bounded_reason(&e)
+                            ))));
                         }
                         return Err(SplitFailure::Poison(
                             PoisonKind::Undecodable,
@@ -812,12 +806,7 @@ async fn head_after_overwrite(
                         SplitFailure::Poison(kind, reason) => {
                             SplitFailure::Poison(kind, headed(reason))
                         }
-                        SplitFailure::Fatal(SourceError::Client { class, reason }) => {
-                            SplitFailure::Fatal(SourceError::Client {
-                                class,
-                                reason: headed(reason),
-                            })
-                        }
+                        SplitFailure::Fatal(e) => SplitFailure::Fatal(e.map_reason(headed)),
                         other => other,
                     };
                 }
@@ -897,10 +886,7 @@ async fn retry_or_fail(
             crate::error::bounded_reason(e)
         );
         return Err(if crate::error::is_pipeline_fatal(e) {
-            SplitFailure::Fatal(SourceError::Client {
-                class: ErrorClass::Fatal,
-                reason,
-            })
+            SplitFailure::Fatal(SourceError::fatal(reason))
         } else {
             SplitFailure::Poison(crate::error::poison_kind(e), reason)
         });

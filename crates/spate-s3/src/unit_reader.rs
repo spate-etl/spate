@@ -1012,10 +1012,7 @@ fn settled(outcome: Result<(), FeedError>) -> Result<Settled, SourceError> {
 }
 
 fn feed_error(doing: &str, e: &FeedError) -> SourceError {
-    SourceError::Client {
-        class: e.class(),
-        reason: format!("{doing}: {e}"),
-    }
+    SourceError::new(e.class(), format!("{doing}: {e}"))
 }
 
 #[cfg(test)]

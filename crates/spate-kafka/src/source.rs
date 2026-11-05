@@ -936,7 +936,8 @@ impl KafkaSource {
                 Offset::Invalid => ends
                     .add_partition_offset(&self.config.topic, elem.partition(), Offset::End)
                     .map_err(fatal("build offset list"))?,
-                Offset::Offset(offset) => {
+                // rdkafka reads -3 to -999 as `Offset::Offset` too.
+                Offset::Offset(offset) if offset >= 0 => {
                     starts.insert(elem.partition(), offset);
                 }
                 // A commit that names no position: taking it as no commit would

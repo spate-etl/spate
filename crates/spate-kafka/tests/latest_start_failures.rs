@@ -533,18 +533,16 @@ mod slow_commits {
     use support::Raw as _;
 
     const TOPIC: &str = "orders";
-    /// How long the mock's first rebalance waits for members.
-    const INITIAL_JOIN_MS: i32 = 10_000;
+    /// The lookup bound and the commit bound of one accept, plus slack for its
+    /// `assign`. Below the default `startup_timeout`, and below the sum of the
+    /// replies in each test here.
+    const ONE_ACCEPT: Duration = Duration::from_secs(25);
 
-    /// `consumers` consumers, one partition each, on the default timeouts, with only
-    /// `OffsetCommit` replies slowed to `reply_ms`. Drives the source until lanes
-    /// arrive or it reports a fatal error.
-    fn settle(policy: &str, consumers: usize, reply_ms: i32) -> Result<(), String> {
-        let _ = tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::WARN)
-            .with_ansi(false)
-            .with_writer(std::io::stderr)
-            .try_init();
+    /// `consumers` consumers, one partition each, with only `OffsetCommit` replies
+    /// slowed to `reply_ms`. Drives the source until lanes arrive and returns its
+    /// longest poll. The mock keeps a group in a rebalance for most of a session
+    /// timeout after a late joiner, so the session is short and the deadline far.
+    fn longest_poll(policy: &str, consumers: usize, reply_ms: i32) -> Duration {
         let producer: BaseProducer = support::raw_config()
             .set("test.mock.num.brokers", "1")
             .build()
@@ -554,15 +552,6 @@ mod slow_commits {
         cluster
             .create_topic(TOPIC, i32::try_from(consumers).expect("partitions"), 1)
             .expect("create topic");
-        // A late joiner holds the mock's group in a rebalance for most of a session
-        // timeout, past the startup deadline, so every consumer joins one window.
-        // SAFETY: the pointer is valid while `producer` lives.
-        unsafe {
-            rdkafka::bindings::rd_kafka_mock_group_initial_rebalance_delay_ms(
-                rdkafka::bindings::rd_kafka_handle_mock_cluster(client.native_ptr()),
-                INITIAL_JOIN_MS,
-            );
-        }
         for _ in 0..consumers {
             // SAFETY: the pointer is valid while `producer` lives, and the arguments
             // match the (error, rtt in ms) pair the variadic reads.
@@ -581,50 +570,60 @@ mod slow_commits {
         let mut cfg = KafkaSourceConfig::new(cluster.bootstrap_servers(), TOPIC, "series");
         cfg.consumers = consumers;
         cfg.statistics_interval = Duration::ZERO;
-        cfg.rdkafka = BTreeMap::from([("auto.offset.reset".to_string(), policy.to_string())]);
+        cfg.startup_timeout = Duration::from_secs(300);
+        cfg.rdkafka = BTreeMap::from([
+            ("auto.offset.reset".to_string(), policy.to_string()),
+            ("session.timeout.ms".to_string(), "10000".to_string()),
+        ]);
         let mut source = KafkaSource::new(cfg);
         let cp = Checkpointer::new();
         source.open(SourceCtx::new(cp.handle())).expect("open");
         let began = Instant::now();
-        while began.elapsed() < Duration::from_secs(100) {
-            match source.poll_events(Duration::from_millis(100)) {
-                Ok(SourceEvent::LanesAssigned(_)) => return Ok(()),
+        let mut longest = Duration::ZERO;
+        loop {
+            assert!(began.elapsed() < Duration::from_secs(100), "no lanes");
+            let polled = Instant::now();
+            let outcome = source.poll_events(Duration::from_millis(100));
+            longest = longest.max(polled.elapsed());
+            match outcome {
+                Ok(SourceEvent::LanesAssigned(_)) => return longest,
                 Err(
                     e @ SourceError::Client {
                         class: ErrorClass::Fatal,
                         ..
                     },
-                ) => {
-                    return Err(format!("{e} at {:?}", began.elapsed()));
-                }
+                ) => panic!("{e}"),
                 _ => {}
             }
         }
-        Err("no lanes within 100 s".to_owned())
     }
 
     /// The control: `earliest` sends no start commit and starts on the same broker.
     #[test]
     fn slow_commit_replies_start_under_earliest() {
-        assert_eq!(settle("earliest", 16, 3_000), Ok(()));
+        let longest = longest_poll("earliest", 16, 3_000);
+        assert!(longest < ONE_ACCEPT, "{longest:?}");
     }
 
     /// The control: `latest` starts when commit replies come at once.
     #[test]
     fn fast_commit_replies_start_under_latest() {
-        assert_eq!(settle("latest", 16, 0), Ok(()));
+        let longest = longest_poll("latest", 16, 0);
+        assert!(longest < ONE_ACCEPT, "{longest:?}");
     }
 
-    /// `latest` starts on the same broker, inside the default `startup_timeout`.
+    /// One accept waits for the slowest commit reply and not their sum, 48 s here.
     #[test]
     fn slow_commit_replies_start_under_latest() {
-        assert_eq!(settle("latest", 16, 3_000), Ok(()));
+        let longest = longest_poll("latest", 16, 3_000);
+        assert!(longest < ONE_ACCEPT, "{longest:?}");
     }
 
-    /// The same, eight consumers and five seconds per reply.
+    /// The same, eight consumers and five seconds per reply, 40 s in sum.
     #[test]
     fn five_second_replies_start_under_latest() {
-        assert_eq!(settle("latest", 8, 5_000), Ok(()));
+        let longest = longest_poll("latest", 8, 5_000);
+        assert!(longest < ONE_ACCEPT, "{longest:?}");
     }
 }
 
@@ -1237,7 +1236,7 @@ mod logical_committed_offset {
     use rdkafka::{ClientConfig, Offset, TopicPartitionList};
     use spate_core::config::PipelineConfig;
     use spate_core::ops::chain_owned;
-    use spate_core::pipeline::{Pipeline, RuntimeOptions};
+    use spate_core::pipeline::{ExitState, Pipeline, RuntimeOptions};
     use spate_core::sink::KeyHashRouter;
     use spate_kafka::{KafkaSource, KafkaSourceConfig};
     use spate_test::{BytesPassthrough, PipelineRun, TestEncoder, capture_sink, unique_name};
@@ -1297,6 +1296,19 @@ mod logical_committed_offset {
     /// records it has not read.
     #[test]
     fn a_logical_committed_offset_does_not_move_the_commit_past_unread_records() {
+        holds_the_commit(-2, Offset::Beginning);
+    }
+
+    /// A committed offset of -3, which rdkafka reads as `Offset::Offset(-3)`, is no
+    /// position to start from, so the run holds it and does not stop.
+    #[test]
+    fn a_negative_committed_offset_is_not_a_start() {
+        holds_the_commit(-3, Offset::Offset(-3));
+    }
+
+    /// Runs a pipeline over a group whose committed offset is `raw`, read back as
+    /// `read`, and asserts the commit stays and the run survives to its shutdown.
+    fn holds_the_commit(raw: i64, read: Offset) {
         let cluster = MockCluster::new(1).unwrap();
         cluster.create_topic(TOPIC, 1, 1).unwrap();
         let brokers = cluster.bootstrap_servers();
@@ -1317,13 +1329,13 @@ mod logical_committed_offset {
         }
         producer.flush(Duration::from_secs(30)).unwrap();
 
-        raw_commit(&brokers, -2);
+        raw_commit(&brokers, raw);
         let probe: BaseConsumer = ClientConfig::new()
             .set("bootstrap.servers", &brokers)
             .set("group.id", GROUP)
             .create()
             .unwrap();
-        assert_eq!(committed(&probe), Offset::Beginning, "the reply carries -2");
+        assert_eq!(committed(&probe), read, "the reply carries {raw}");
 
         let name = unique_name("logicalcommit");
         let yaml = format!(
@@ -1363,7 +1375,7 @@ mod logical_committed_offset {
         // forming, the assign hold, a start commit and a read of all ten records.
         let until = Instant::now() + Duration::from_secs(15);
         let mut seen = committed(&probe);
-        while seen == Offset::Beginning && Instant::now() < until {
+        while seen == read && Instant::now() < until {
             std::thread::sleep(Duration::from_millis(200));
             seen = committed(&probe);
         }
@@ -1375,11 +1387,17 @@ mod logical_committed_offset {
             .wait_exit(Duration::from_secs(60))
             .expect("the run stops");
         assert!(
-            seen == Offset::Beginning || wrote,
+            seen == read || wrote,
             "the commit moved to {seen:?} with nothing written; run: {:?}",
             exit.as_ref()
                 .map(|r| format!("{:?}", r.state))
                 .map_err(|e| e.to_string())
+        );
+        let report = exit.expect("the run starts");
+        assert!(
+            !matches!(report.state, ExitState::Failed(_)),
+            "{:?}",
+            report.state
         );
     }
 }

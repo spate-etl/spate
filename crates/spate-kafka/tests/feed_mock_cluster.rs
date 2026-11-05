@@ -764,7 +764,7 @@ fn a_corrupt_batch_stops_the_feed() {
     let brokers = cluster.bootstrap_servers();
     let first = brokers.split(',').next().unwrap().to_owned();
     assert_eq!(
-        produce_batch(&first, WORK, &corrupt_batch(b"lost", b"body")),
+        produce_batch(&first, WORK, 0, &corrupt_batch(b"lost", b"body")),
         0
     );
     produce_raw(&brokers, WORK, &[(Some(&b"after"[..]), &b"body"[..])]);
@@ -796,7 +796,7 @@ fn an_unknown_codec_stops_the_feed_and_names_it() {
     let mut batch = corrupt_batch(b"k", b"body");
     // The attributes field: codec id 5, which no librdkafka build knows.
     batch[21..23].copy_from_slice(&5i16.to_be_bytes());
-    assert_eq!(produce_batch(&first, WORK, &batch), 0);
+    assert_eq!(produce_batch(&first, WORK, 0, &batch), 0);
     let group = spate_test::unique_name("codec");
     let worker = direct(&feed_yaml(&brokers, &group, "", ""));
     let mut error = None;

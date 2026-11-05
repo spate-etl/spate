@@ -71,13 +71,8 @@ fn real_broker_full_lifecycle() {
     source.flush_commits().expect("sync commit");
 
     // The group's committed offset is visible to a probe member.
-    let probe: BaseConsumer = support::raw_config()
-        .set("bootstrap.servers", &brokers)
-        .set("group.id", "real-life")
-        .build()
-        .expect("probe");
     assert_eq!(
-        support::committed(&probe, TOPIC, 1),
+        support::committed_by(&brokers, "real-life", TOPIC, 1),
         [rdkafka::Offset::Offset(100)]
     );
 }
@@ -136,11 +131,7 @@ fn real_broker_revocation_commit_persists_revoked_offsets() {
         }
     });
 
-    let probe: BaseConsumer = support::raw_config()
-        .set("bootstrap.servers", &brokers)
-        .set("group.id", "rev-commit")
-        .build()
-        .expect("probe");
+    let probe = support::probe(&brokers, "rev-commit");
 
     // Run the revocation choreography: store the drained watermark for the
     // partition being revoked, then keep polling so `unassign` completes.
@@ -398,11 +389,7 @@ fn real_broker_revocation_commits_every_consumers_offsets() {
         true
     });
 
-    let probe: BaseConsumer = support::raw_config()
-        .set("bootstrap.servers", &brokers)
-        .set("group.id", "rev-each")
-        .build()
-        .expect("probe");
+    let probe = support::probe(&brokers, "rev-each");
     assert_eq!(
         support::committed(&probe, TOPIC, 2),
         [rdkafka::Offset::Offset(25); 2]

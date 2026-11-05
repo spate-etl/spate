@@ -664,10 +664,7 @@ pub(crate) fn publisher_on_mock(
 
 /// Produce `messages` to partition 0 of `topic` as given, key included.
 pub(crate) fn produce_raw(brokers: &str, topic: &str, messages: &[(Option<&[u8]>, &[u8])]) {
-    let producer: BaseProducer = super::raw_config()
-        .set("bootstrap.servers", brokers)
-        .build()
-        .expect("producer");
+    let producer: BaseProducer = super::producer_config(brokers).build().expect("producer");
     for (key, payload) in messages {
         let mut record = BaseRecord::<[u8], [u8]>::to(topic)
             .partition(0)
@@ -683,10 +680,7 @@ pub(crate) fn produce_raw(brokers: &str, topic: &str, messages: &[(Option<&[u8]>
 /// Produce `message` to partition 0 of `topic` with its key, value and
 /// headers as read.
 pub(crate) fn produce_copy(brokers: &str, topic: &str, message: &Read) {
-    let producer: BaseProducer = super::raw_config()
-        .set("bootstrap.servers", brokers)
-        .build()
-        .expect("producer");
+    let producer: BaseProducer = super::producer_config(brokers).build().expect("producer");
     let headers = message
         .headers
         .iter()

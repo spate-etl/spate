@@ -19,8 +19,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 use support::{
-    await_assignment, corrupt_batch, drain_lane, produce, produce_batch, serve_events, v1_message,
-    v2_batch,
+    Marker, await_assignment, control_batch, corrupt_batch, drain_lane, produce, produce_batch,
+    serve_events, v1_message, v2_batch,
 };
 
 const TOPIC: &str = "orders";
@@ -119,14 +119,10 @@ fn full_lifecycle_polls_acks_and_commits() {
     source.flush_commits().expect("sync commit");
 
     // A probe consumer in the same group sees the committed positions.
-    let probe: BaseConsumer = support::raw_config()
-        .set("bootstrap.servers", &brokers)
-        .set("group.id", "life")
-        .build()
-        .expect("probe");
-    for offset in support::committed(&probe, TOPIC, 3) {
-        assert_eq!(offset, rdkafka::Offset::Offset(10));
-    }
+    assert_eq!(
+        support::committed_by(&brokers, "life", TOPIC, 3),
+        [rdkafka::Offset::Offset(10); 3]
+    );
 }
 
 #[test]
@@ -235,11 +231,7 @@ fn the_fetcher_starts_before_the_lane_is_handed_out() {
 
 /// Commit `offset` on partition 0 for `group`, as a previous member would.
 fn commit_as(brokers: &str, group: &str, offset: i64) {
-    let probe: BaseConsumer = support::raw_config()
-        .set("bootstrap.servers", brokers)
-        .set("group.id", group)
-        .build()
-        .expect("probe");
+    let probe = support::probe(brokers, group);
     let mut tpl = rdkafka::TopicPartitionList::new();
     tpl.add_partition_offset(TOPIC, 0, rdkafka::Offset::Offset(offset))
         .expect("offset");
@@ -349,9 +341,9 @@ fn a_restarted_member_publishes_lag_before_committing() {
     });
 
     let rendered = handle.render();
-    let needle = r#"spate_source_lag_records{pipeline="restart",component="source",component_type="kafka",partition="0"} 7"#;
-    assert!(
-        rendered.lines().any(|l| l == needle),
+    assert_eq!(
+        support::lag_of(&rendered, "restart", 0),
+        Some(7.0),
         "lag must equal produced - committed:\n{rendered}"
     );
 }
@@ -974,27 +966,10 @@ fn a_backlogged_consumer_publishes_its_lag() {
     for (partition, offset) in &committed {
         let expected = PRODUCED as f64 - *offset as f64;
         assert!(expected > 0.0, "the test must leave a backlog");
-        let needle = format!(
-            r#"spate_source_lag_records{{pipeline="lag",component="source",component_type="kafka",partition="{}"}} "#,
-            partition.0
-        );
-        let line = rendered
-            .lines()
-            .find(|l| l.starts_with(&needle))
-            .unwrap_or_else(|| panic!("no lag series for partition {partition:?}:\n{rendered}"));
-        let value: f64 = line
-            .rsplit(' ')
-            .next()
-            .expect("value")
-            .parse()
-            .expect("numeric lag");
-        assert!(
-            value > 0.0,
-            "a backlogged partition must not report zero lag: {line}"
-        );
         assert_eq!(
-            value, expected,
-            "partition {partition:?} lag must equal produced - committed: {line}"
+            support::lag_of(&rendered, "lag", i32::try_from(partition.0).unwrap()),
+            Some(expected),
+            "partition {partition:?} lag must equal produced - committed:\n{rendered}"
         );
     }
 
@@ -1176,7 +1151,7 @@ fn a_corrupt_batch_fails_the_lane() {
     let brokers = cluster.bootstrap_servers();
     produce(&brokers, TOPIC, 1, 1, "before");
     assert_eq!(
-        produce_batch(&brokers, TOPIC, &corrupt_batch(b"lost", b"body")),
+        produce_batch(&brokers, TOPIC, 0, &corrupt_batch(b"lost", b"body")),
         0,
         "the corrupt batch is stored at offset 1"
     );
@@ -1261,7 +1236,7 @@ fn a_skipped_v1_message_fails_the_lane() {
     let mut payload = v2_batch(b"before", b"body", 3);
     payload.extend(v1_message(1, b"lost", b"body", true));
     payload.extend(v1_message(2, b"after", b"body", false));
-    assert_eq!(produce_batch(&brokers, TOPIC, &payload), 0);
+    assert_eq!(produce_batch(&brokers, TOPIC, 0, &payload), 0);
 
     let mut cfg = config(&brokers, "skipped-v1");
     cfg.rdkafka.insert("check.crcs".into(), "true".into());
@@ -1672,7 +1647,7 @@ fn two_consumers_poll_ack_and_commit_every_partition() {
     driver.commit();
 
     assert_eq!(
-        committed(&brokers, "commit-each", 4),
+        support::committed_by(&brokers, "commit-each", TOPIC, 4),
         vec![rdkafka::Offset::Offset(10); 4]
     );
 }
@@ -1781,7 +1756,7 @@ fn more_consumers_than_partitions_keeps_running() {
     driver.read(5, Duration::from_secs(30));
     driver.commit();
     assert_eq!(
-        committed(&brokers, "idle-consumer", 1),
+        support::committed_by(&brokers, "idle-consumer", TOPIC, 1),
         [rdkafka::Offset::Offset(5)]
     );
 }
@@ -1901,7 +1876,7 @@ fn a_held_offer_the_group_has_left_is_not_fatal() {
         driver.read(5, Duration::from_secs(30));
         driver.commit();
         assert_eq!(
-            committed(brokers, "stale-held", 1),
+            support::committed_by(brokers, "stale-held", TOPIC, 1),
             [rdkafka::Offset::Offset(5)]
         );
     });
@@ -2056,7 +2031,7 @@ fn a_lost_member_keeps_its_peers_commit_and_loses_no_record() {
         driver.flush_failures
     );
     let at_ten = rdkafka::Offset::Offset(10);
-    let read_back = committed(&brokers, "lost-peer", 4);
+    let read_back = support::committed_by(&brokers, "lost-peer", TOPIC, 4);
     assert!(
         read_back.iter().filter(|o| **o == at_ten).count() >= 2,
         "the peer's two partitions: {read_back:?}"
@@ -2093,11 +2068,7 @@ fn two_consumers_publish_lag_before_committing() {
     cluster.create_topic(TOPIC, 2, 1).expect("create topic");
     let brokers = cluster.bootstrap_servers();
     produce(&brokers, TOPIC, 10, 2, "l");
-    let probe: BaseConsumer = support::raw_config()
-        .set("bootstrap.servers", &brokers)
-        .set("group.id", "lag-each")
-        .build()
-        .expect("probe");
+    let probe = support::probe(&brokers, "lag-each");
     let mut tpl = rdkafka::TopicPartitionList::new();
     for p in 0..2 {
         tpl.add_partition_offset(TOPIC, p, rdkafka::Offset::Offset(3))
@@ -2128,12 +2099,10 @@ fn two_consumers_publish_lag_before_committing() {
 
     let rendered = handle.render();
     for p in 0..2 {
-        let needle = format!(
-            r#"spate_source_lag_records{{pipeline="lag-each",component="source",component_type="kafka",partition="{p}"}} 7"#
-        );
-        assert!(
-            rendered.lines().any(|l| l == needle),
-            "{needle}:\n{rendered}"
+        assert_eq!(
+            support::lag_of(&rendered, "lag-each", p),
+            Some(7.0),
+            "partition {p}:\n{rendered}"
         );
     }
 }
@@ -2395,7 +2364,7 @@ fn a_partial_refusal_stores_the_owned_offsets() {
     driver.source.flush_commits().expect("flush");
 
     assert_eq!(
-        committed(&brokers, "partial-refusal", 4),
+        support::committed_by(&brokers, "partial-refusal", TOPIC, 4),
         vec![rdkafka::Offset::Offset(10); 4]
     );
 }
@@ -2441,6 +2410,59 @@ fn one_assignment_spends_one_lookup_bound() {
         {
             return;
         }
+    }
+}
+
+/// A control batch written by hand reaches a split queue as a transaction
+/// marker: it takes an offset, nothing is delivered for it, and polling the
+/// queue moves the position past it.
+#[test]
+fn the_mock_serves_a_control_batch_as_a_marker() {
+    const RECORDS: usize = 3;
+    for marker in [Marker::Commit, Marker::Abort] {
+        let cluster = MockCluster::new(1).expect("mock cluster");
+        cluster.create_topic(TOPIC, 1, 1).expect("create topic");
+        let brokers = cluster.bootstrap_servers();
+        produce(&brokers, TOPIC, RECORDS, 1, "before");
+        assert_eq!(
+            produce_batch(&brokers, TOPIC, 0, &control_batch(marker)),
+            0,
+            "{marker:?}"
+        );
+
+        let consumer = assigned_consumer(&brokers, "marker", 1);
+        let queue = consumer
+            .split_partition_queue(TOPIC, 0)
+            .expect("split queue");
+
+        let mut delivered = 0;
+        wait_until(
+            Duration::from_secs(30),
+            "the position passes the marker",
+            || {
+                if queue.poll(Duration::from_millis(100)).is_some() {
+                    delivered += 1;
+                }
+                consumer.position().expect("position").elements()[0].offset()
+                    == rdkafka::Offset::Offset(RECORDS as i64 + 1)
+            },
+        );
+        assert_eq!(delivered, RECORDS, "{marker:?}");
+    }
+}
+
+/// A control batch sets both attribute bits, carries a CRC, and states its
+/// marker's type in its key: 0 for abort and 1 for commit. The consumer acts on
+/// none of them, so the marker test above cannot tell them apart. The key follows
+/// the 61-byte batch header and the record's five one-byte varints.
+#[test]
+fn a_control_batch_states_its_marker() {
+    for (marker, control_type) in [(Marker::Abort, 0i16), (Marker::Commit, 1)] {
+        let batch = control_batch(marker);
+        assert_ne!(batch[17..21], [0u8; 4], "{marker:?}");
+        assert_eq!(batch[21..23], 0x30i16.to_be_bytes(), "{marker:?}");
+        assert_eq!(batch[66..68], 0i16.to_be_bytes(), "{marker:?}");
+        assert_eq!(batch[68..70], control_type.to_be_bytes(), "{marker:?}");
     }
 }
 

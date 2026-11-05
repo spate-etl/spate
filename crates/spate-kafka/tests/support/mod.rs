@@ -12,16 +12,20 @@ use rdkafka::message::BorrowedMessage;
 use rdkafka::producer::{BaseProducer, BaseRecord, Producer};
 use rdkafka::types::RDKafkaRespErr;
 use rdkafka::{ClientConfig, Offset, TopicPartitionList};
+use spate_core::checkpoint::Checkpointer;
 use spate_core::error::{ErrorClass, SourceError};
 use spate_core::metrics::names;
 use spate_core::record::PartitionId;
-use spate_core::source::{DrainBarrier, LaneId, PayloadBatch, Source, SourceEvent, SourceLane};
-use spate_kafka::KafkaSource;
+use spate_core::source::{
+    DrainBarrier, LaneId, PayloadBatch, Source, SourceCtx, SourceEvent, SourceLane,
+};
+use spate_kafka::{KafkaSource, KafkaSourceConfig};
 use spate_test_support::container_image;
 use std::io::{Read as _, Write as _};
 use std::mem::ManuallyDrop;
 use std::net::TcpStream;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use testcontainers::{ContainerRequest, ImageExt};
 use testcontainers_modules::kafka::apache::Kafka;
@@ -453,6 +457,183 @@ pub(crate) fn lag_of(rendered: &str, pipeline: &str, partition: i32) -> Option<f
     )
 }
 
+/// The ops partition 0's fetch queue holds, as `rendered` under `pipeline` shows
+/// it. A poll finds them without waiting on the fetcher. 0 before it is published.
+pub(crate) fn fetch_queue_entries(rendered: &str, pipeline: &str) -> f64 {
+    spate_test::metric_value(
+        rendered,
+        "spate_kafka_partition_fetch_queue_messages",
+        &[("pipeline", pipeline), ("partition", "0")],
+    )
+    .unwrap_or(0.0)
+}
+
+/// A recorder of the test's own, its handle, and a meter labelling series with
+/// `pipeline`.
+pub(crate) fn recorded_meter(
+    pipeline: impl Into<metrics::SharedString>,
+) -> (
+    metrics_exporter_prometheus::PrometheusRecorder,
+    metrics_exporter_prometheus::PrometheusHandle,
+    spate_core::metrics::Meter,
+) {
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    let meter = spate_core::metrics::Meter::with_namespace("kafka", pipeline, "source", "kafka");
+    (recorder, handle, meter)
+}
+
+/// The offsets of `batch`, none for one that retires offsets, and acknowledges
+/// it by dropping it.
+pub(crate) fn offsets_of(
+    batch: Option<<<KafkaSource as Source>::Lane as SourceLane>::Batch<'_>>,
+) -> Option<Vec<i64>> {
+    batch.map(|mut b| {
+        let mut offsets = Vec::new();
+        while let Some(raw) = b.next_payload() {
+            offsets.push(raw.offset);
+        }
+        offsets
+    })
+}
+
+/// How long [`Watched`] waits on a broker.
+pub(crate) const WATCHED_DEADLINE: Duration = Duration::from_secs(60);
+
+/// A source driven by hand as the controller and a pipeline thread drive it,
+/// publishing to a recorder of its own under a pipeline name of its own.
+pub(crate) struct Watched {
+    // Declared before `source`: a lane holds the consumer the source closes.
+    pub(crate) lanes: Vec<<KafkaSource as Source>::Lane>,
+    pub(crate) source: KafkaSource,
+    pub(crate) cp: Checkpointer,
+    pub(crate) pipeline: String,
+    recorder: metrics_exporter_prometheus::PrometheusRecorder,
+    handle: metrics_exporter_prometheus::PrometheusHandle,
+}
+
+impl Watched {
+    /// Open `cfg` with its statistics on and begin an epoch on its first
+    /// assignment.
+    pub(crate) fn open(mut cfg: KafkaSourceConfig) -> Watched {
+        cfg.statistics_interval = Duration::from_millis(100);
+        let pipeline = spate_test::unique_name("markers");
+        let (recorder, handle, meter) = recorded_meter(pipeline.clone());
+        let mut cp = Checkpointer::new();
+        let mut source = KafkaSource::new(cfg);
+        let lanes = metrics::with_local_recorder(&recorder, || {
+            let labels =
+                spate_core::metrics::ComponentLabels::new(pipeline.clone(), "source", "kafka");
+            source
+                .open(
+                    SourceCtx::new(cp.handle())
+                        .with_stage_metrics(Some(Arc::new(
+                            spate_core::metrics::SourceMetrics::new(&labels),
+                        )))
+                        .with_meter(Some(meter))
+                        .with_partition_detail(true),
+                )
+                .expect("open");
+            await_assignment(&mut source, WATCHED_DEADLINE)
+        });
+        let partitions: Vec<PartitionId> = lanes.iter().map(SourceLane::partition).collect();
+        cp.begin_epoch(&partitions, 1);
+        Watched {
+            lanes,
+            source,
+            cp,
+            pipeline,
+            recorder,
+            handle,
+        }
+    }
+
+    /// Serve the control plane once.
+    pub(crate) fn serve(&mut self) {
+        let source = &mut self.source;
+        metrics::with_local_recorder(&self.recorder, || {
+            serve_events(source, &mut Vec::new());
+        });
+    }
+
+    /// Poll lane `lane` once with a timeout, so an empty return reads the
+    /// position, and drop the batch, which acknowledges it. `None` when nothing
+    /// came back, and otherwise the batch's offsets, none for one that retires
+    /// offsets.
+    pub(crate) fn poll(&mut self, lane: usize) -> Option<Vec<i64>> {
+        offsets_of(
+            self.lanes[lane]
+                .poll(64, Duration::from_millis(100))
+                .expect("lane poll"),
+        )
+    }
+
+    /// Poll lane `lane` until it has delivered `want` records, acknowledging
+    /// each batch, and return their offsets.
+    pub(crate) fn read(&mut self, lane: usize, want: usize) -> Vec<i64> {
+        let (source, lane) = (&mut self.source, &mut self.lanes[lane]);
+        metrics::with_local_recorder(&self.recorder, || {
+            drain_lane(source, lane, want, WATCHED_DEADLINE)
+        })
+        .into_iter()
+        .map(|(_, _, offset)| offset)
+        .collect()
+    }
+
+    /// Commit what the checkpointer holds, as `commit_cycle` does: nothing
+    /// when no watermark moved. Returns the watermarks committed.
+    pub(crate) fn commit(&mut self) -> Vec<(PartitionId, i64)> {
+        self.cp.drain();
+        let watermarks = self.cp.take_watermarks();
+        if !watermarks.is_empty() {
+            self.source.commit(&watermarks).expect("store");
+            self.source.flush_commits().expect("flush");
+        }
+        watermarks
+    }
+
+    /// Poll lane `lane` and commit until partition `partition`'s watermark
+    /// reads `want`, and return every watermark committed on the way.
+    pub(crate) fn poll_until_committed(
+        &mut self,
+        lane: usize,
+        partition: u32,
+        want: i64,
+    ) -> Vec<i64> {
+        let mut seen = Vec::new();
+        spate_test::wait_until(WATCHED_DEADLINE, "the watermark reaches its offset", || {
+            self.serve();
+            let _ = self.poll(lane);
+            seen.extend(
+                self.commit()
+                    .into_iter()
+                    .filter(|(p, _)| p.0 == partition)
+                    .map(|(_, w)| w),
+            );
+            seen.last() == Some(&want)
+        });
+        seen
+    }
+
+    /// The exposition this source has published.
+    pub(crate) fn rendered(&self) -> String {
+        self.handle.render()
+    }
+
+    /// The framework lag of `partition`, or `None` before it is published.
+    pub(crate) fn lag(&self, partition: i32) -> Option<f64> {
+        lag_of(&self.rendered(), &self.pipeline, partition)
+    }
+
+    /// Serve the control plane until `partition`'s framework lag reads `want`.
+    pub(crate) fn wait_lag(&mut self, partition: i32, want: f64) {
+        spate_test::wait_until(WATCHED_DEADLINE, "the lag reads its value", || {
+            self.serve();
+            self.lag(partition) == Some(want)
+        });
+    }
+}
+
 /// Every offset of `from..upto` is in `written`.
 pub(crate) fn assert_no_gap(
     partition: i32,
@@ -545,6 +726,77 @@ pub(crate) fn serve_events(source: &mut KafkaSource, errors: &mut Vec<String>) {
         Ok(other) => panic!("unexpected source event: {other:?}"),
         Err(reason) => errors.push(reason),
     }
+}
+
+/// A second member joins a group and stays polling until the guard drops, forcing
+/// a revocation.
+pub(crate) struct Joiner {
+    stop: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Joiner {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "dropping the guard joins the thread"
+    )]
+    pub(crate) fn join_group(brokers: &str, topic: &str, group: &str) -> Joiner {
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread = {
+            let (stop, brokers, topic, group) = (
+                Arc::clone(&stop),
+                brokers.to_owned(),
+                topic.to_owned(),
+                group.to_owned(),
+            );
+            std::thread::spawn(move || {
+                // No auto-commit: this member reads past a marker on its own, and
+                // the tests assert what the source committed.
+                let consumer: BaseConsumer = raw_config()
+                    .set("bootstrap.servers", &brokers)
+                    .set("group.id", &group)
+                    .set("enable.auto.commit", "false")
+                    .build()
+                    .expect("joiner");
+                consumer.subscribe(&[topic.as_str()]).expect("subscribe");
+                while !stop.load(Ordering::Relaxed) {
+                    let _ = consumer.poll(Duration::from_millis(100));
+                }
+            })
+        };
+        Joiner {
+            stop,
+            thread: Some(thread),
+        }
+    }
+}
+
+impl Drop for Joiner {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            thread.join().expect("joiner thread");
+        }
+    }
+}
+
+/// Serve `source` until a revocation arrives, and complete it with the
+/// watermarks `drain` returns.
+pub(crate) fn complete_next_revocation(
+    source: &mut KafkaSource,
+    mut drain: impl FnMut() -> Vec<(PartitionId, i64)>,
+) {
+    spate_test::wait_until(Duration::from_secs(120), "the revocation", || {
+        let SourceEvent::LanesRevoked { lanes, barrier } = source
+            .poll_events(Duration::from_millis(200))
+            .expect("poll_events")
+        else {
+            return false;
+        };
+        let watermarks = drain();
+        complete_revocation(source, &lanes, &barrier, &watermarks).expect("flush");
+        true
+    });
 }
 
 /// Plays the runtime's part after a revocation: arrives once per lane, stores

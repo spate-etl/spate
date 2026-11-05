@@ -78,7 +78,7 @@ framework families below, labeled with its `component_type`.
 | `spate_source_records_total` | counter | | Records emitted by the source (post-poll, pre-deserialization). |
 | `spate_source_bytes_total` | counter | | Payload bytes emitted. |
 | `spate_source_poll_duration_seconds` | histogram | | Time spent inside `poll` per call. |
-| `spate_source_lag_records` | gauge | `partition` | Consumer lag (log-end offset − committed), **always per partition** — there is no aggregate series. Aggregate in the query layer: `sum` for total backlog (comparable with the broker's group lag), `max` for the worst partition. A partition whose lag the client has not measured yet is **absent**; a partition the member no longer owns reads `0`. |
+| `spate_source_lag_records` | gauge | `partition` | Consumer lag (the end of what the source can read − committed), **always per partition** — there is no aggregate series. Aggregate in the query layer: `sum` for total backlog (comparable with the broker's group lag), `max` for the worst partition. A partition whose lag the client has not measured yet is **absent**; a partition the member no longer owns reads `0`. |
 | `spate_source_rebalances_total` | counter | `event` (`assign`\|`revoke`) | Rebalance events observed. |
 | `spate_source_lanes_active` | gauge | | Currently assigned lanes (partitions). |
 
@@ -107,7 +107,9 @@ count by (pipeline) (spate_source_lag_records)
 Alert on the total, on absence, **and** on the partial-measurement check.
 Rate-of-change matters more than level for a backfill: a large lag that is
 shrinking is a catch-up working as intended, while a small lag that is not
-shrinking is a stalled pipeline.
+shrinking is a stalled pipeline, or a reading the
+[connector's page](user-guide/04-connectors/sources/kafka/README.mdx#transaction-markers)
+describes.
 
 Give the absence and partial-measurement alerts a `for:` window of a minute or
 so. Both are legitimately true at startup. A partition's series appears at the
@@ -130,7 +132,9 @@ states are therefore distinguished by value, not by presence:
   double-counting a partition that has moved.
 - **stale** — cannot happen for a partition a member lost, which is what the
   zeroing buys. A frozen non-zero value means the member still owns the
-  partition and librdkafka has stopped measuring it (a leader change, say);
+  partition and librdkafka has stopped measuring it (a leader change, say), or
+  it is a
+  [reading that holds still](user-guide/04-connectors/sources/kafka/README.mdx#transaction-markers);
   the last known value is held deliberately, because dropping it to `0` would
   look like a drain that never happened.
 
@@ -187,7 +191,7 @@ Consequences worth stating outright:
 | `spate_deser_records_total` | counter | `outcome` (`ok`\|`error`) | Deserialization attempts by outcome. One input payload may yield 0..N records; this counts outputs, plus one `error` per failed payload. |
 | `spate_deser_records_dropped_total` | counter | `reason` (`skip_policy`) | Payloads dropped by the Skip error policy. |
 | `spate_deser_not_ready_total` | counter | | Payload replays waiting on an upstream dependency (e.g. a schema-registry fetch). Neither an error nor backpressure — the batch retries and completes once the dependency arrives. |
-| `spate_deser_batch_duration_seconds` | histogram | | Deserialization time per source batch. |
+| `spate_deser_batch_duration_seconds` | histogram | | Deserialization time per source batch, including a batch with no payloads, which a source returns to retire offsets that hold no record. |
 
 ## Operators (`spate_operator_*`)
 
@@ -197,7 +201,7 @@ Consequences worth stating outright:
 | `spate_operator_records_out_total` | counter | | Records emitted downstream (filter drops and flat_map fan-out make this differ from in). |
 | `spate_operator_records_dropped_total` | counter | `reason` (`filtered`\|`skip_policy`\|`unrouted`) | Records intentionally removed (`unrouted`: matched no split-sink branch under an `unmatched: Skip` policy). |
 | `spate_operator_errors_total` | counter | `error_type` (`record_level`\|`fatal`) | Errors by what the stage did with them: `record_level` for a record a Skip policy dropped, `fatal` for a failure that stopped the pipeline. No error here is retryable: an operator stage carries no error class to retry on, and `spate_sink_errors_total` is where that class is reported. A `fatal` counts once per stage instance that tripped, so one cause reads as one per pipeline thread. |
-| `spate_operator_batch_duration_seconds` | histogram | | Processing time per batch through this operator. |
+| `spate_operator_batch_duration_seconds` | histogram | | Processing time per batch through this operator, including a batch with no payloads. |
 
 ## Queues (pipeline → sink handoff) (`spate_queue_*`)
 

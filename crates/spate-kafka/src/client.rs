@@ -387,6 +387,25 @@ pub(crate) trait Hooks: Send + Sync + 'static {
 
 impl Hooks for () {}
 
+/// The next offset the application reads on the one partition in `list`, or
+/// [`Offset::Invalid`] until a served op sets it.
+///
+/// Takes the client, topic and partition locks and makes no broker call. It
+/// reads through the list's `elems` pointer because `elements()` allocates.
+pub(crate) fn read_position<C: ConsumerContext>(
+    consumer: &BaseConsumer<C>,
+    list: &mut TopicPartitionList,
+) -> Offset {
+    debug_assert_eq!(list.count(), 1, "one partition per position read");
+    // SAFETY: the client pointer is valid while `consumer` is borrowed, and
+    // `list` holds the one element the read below dereferences, written only
+    // under this exclusive borrow.
+    unsafe {
+        rdkafka::bindings::rd_kafka_position(consumer.client().native_ptr(), list.ptr());
+        Offset::from_raw((*(*list.ptr()).elems).offset)
+    }
+}
+
 /// Writes the offset each element of `tpl` names into that element, with one
 /// ListOffsets request per leader: the log start for `Offset::Beginning`, the
 /// end for `Offset::End`, as `isolation.level` reads it. Blocks for up to

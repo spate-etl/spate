@@ -51,7 +51,9 @@
 //!    rebalance
 //!    ([librdkafka#5591](https://github.com/confluentinc/librdkafka/issues/5591));
 //! 3. `pause(tpl)` — a fetch that completed before it is discarded as
-//!    outdated and refetched, so no message leaks onto the main queue;
+//!    outdated and refetched, so no message leaks onto the main queue. It also
+//!    waits for the stop of an earlier assignment on this client, which resets
+//!    the position a lane reads;
 //! 4. `split_partition_queue` per partition (must be redone after *every*
 //!    assign, since assign deactivates existing queues) and build lanes;
 //! 5. `resume(tpl)` — messages start flowing into the split queues, which
@@ -126,7 +128,7 @@ use spate_core::hash::{FastMap, FastSet};
 use spate_core::metrics::SourceMetrics;
 use spate_core::record::PartitionId;
 use spate_core::source::{DrainBarrier, LaneId, Source, SourceCtx, SourceEvent};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
@@ -192,6 +194,8 @@ struct Member {
     /// Stands in for librdkafka's committed position in the lag statistic,
     /// which the lookup does not update.
     committed_at_assign: FastMap<i32, i64>,
+    /// The latest watermark stored for each partition, shared with its lane.
+    watermarks: FastMap<i32, Arc<AtomicI64>>,
     /// The generation [`Member::group_generation`] reads in place of the
     /// client's, since a unit test's consumer never joins a group.
     #[cfg(test)]
@@ -517,6 +521,7 @@ impl KafkaSource {
         for member in &mut self.members {
             let owned: Vec<i32> = member.assignment.values().copied().collect();
             member.committed_at_assign.retain(|p, _| owned.contains(p));
+            member.watermarks.retain(|p, _| owned.contains(p));
             if let Some(stats) = member.stats.as_mut() {
                 stats.retain_partitions(&partition_ids(&owned));
             }
@@ -576,12 +581,20 @@ impl KafkaSource {
             let lane_id = LaneId(self.next_lane);
             self.next_lane += 1;
             self.members[k].assignment.insert(lane_id, partition);
+            let mut position = TopicPartitionList::with_capacity(1);
+            position.add_partition(&self.config.topic, partition);
+            let watermark = Arc::new(AtomicI64::new(i64::MIN));
+            self.members[k]
+                .watermarks
+                .insert(partition, Arc::clone(&watermark));
             lanes.push(KafkaLane::new(
                 lane_id,
                 PartitionId(u32::try_from(partition).unwrap_or(0)),
                 queue,
-                Arc::clone(consumer.context()),
+                Arc::clone(&consumer),
                 issuer.clone(),
+                position,
+                watermark,
             ));
         }
         consumer
@@ -1180,9 +1193,12 @@ impl KafkaSource {
                         partition = msg.partition(),
                         offset = msg.offset(),
                         total = self.main_queue_rewinds,
-                        "message on the main queue; rewinding partition"
+                        "message on the main queue; rewinding partition; this client passes no more transaction markers until it restarts"
                     );
                     let tpl = self.tpl_for([msg.partition()]);
+                    // Ahead of the seek, and however it ends: the popped record
+                    // moved the position, and no lane issued it.
+                    consumer.context().mark_rewound();
                     if let Err(e) = consumer.pause(&tpl) {
                         tracing::error!(error = %e, "pause for main-queue rewind failed");
                     }
@@ -1713,6 +1729,7 @@ impl Source for KafkaSource {
                 saw_first_assignment: false,
                 phase: Phase::Joining,
                 committed_at_assign: FastMap::default(),
+                watermarks: FastMap::default(),
                 #[cfg(test)]
                 generation: None,
             });
@@ -1822,9 +1839,18 @@ impl Source for KafkaSource {
         let mut refused = 0;
         for (p, offset) in watermarks {
             match self.owner(*p) {
-                Some((k, partition)) => lists[k]
-                    .add_partition_offset(&self.config.topic, partition, Offset::Offset(*offset))
-                    .map_err(fatal("build offset list"))?,
+                Some((k, partition)) => {
+                    if let Some(watermark) = self.members[k].watermarks.get(&partition) {
+                        watermark.store(*offset, Ordering::Release);
+                    }
+                    lists[k]
+                        .add_partition_offset(
+                            &self.config.topic,
+                            partition,
+                            Offset::Offset(*offset),
+                        )
+                        .map_err(fatal("build offset list"))?;
+                }
                 None => {
                     refused += 1;
                     tracing::debug!(
@@ -3236,6 +3262,175 @@ mod tests {
             );
         }
 
+        /// An opened source on a mock cluster holding `records` on partition 0,
+        /// with its first assignment accepted, and the cluster that serves it.
+        fn assigned_on_mock(
+            records: usize,
+        ) -> (
+            rdkafka::mocking::MockCluster<'static, rdkafka::producer::DefaultProducerContext>,
+            KafkaSource,
+            Vec<KafkaLane>,
+        ) {
+            let cluster = rdkafka::mocking::MockCluster::new(1).expect("mock cluster");
+            cluster.create_topic("t", 1, 1).expect("create topic");
+            use crate::client::testing::{Raw as _, raw_config};
+            let producer: rdkafka::producer::BaseProducer = raw_config()
+                .set("bootstrap.servers", cluster.bootstrap_servers())
+                .build()
+                .expect("producer");
+            for i in 0..records {
+                let payload = i.to_string();
+                producer
+                    .send(
+                        rdkafka::producer::BaseRecord::<(), _>::to("t")
+                            .partition(0)
+                            .payload(payload.as_bytes()),
+                    )
+                    .expect("enqueue");
+            }
+            rdkafka::producer::Producer::flush(&producer, Duration::from_secs(30)).expect("flush");
+
+            let mut cfg = KafkaSourceConfig::new(cluster.bootstrap_servers(), "t", "positions");
+            cfg.startup_timeout = Duration::from_secs(30);
+            cfg.rdkafka = std::collections::BTreeMap::from([
+                ("auto.offset.reset".to_string(), "earliest".to_string()),
+                ("session.timeout.ms".to_string(), "6000".to_string()),
+            ]);
+            let cp = spate_core::checkpoint::Checkpointer::new();
+            let mut source = KafkaSource::new(cfg);
+            source
+                .open(SourceCtx::new(cp.handle()))
+                .expect("open the source");
+            let lanes = super::queued_rebalance::live_lanes(&mut source);
+            (cluster, source, lanes)
+        }
+
+        /// Serve `source` and poll `lane` until the lane issues a batch.
+        fn read_the_record(source: &mut KafkaSource, lane: &mut KafkaLane) {
+            spate_test::wait_until(Duration::from_secs(30), "the record", || {
+                source
+                    .poll_events(Duration::from_millis(10))
+                    .expect("poll_events");
+                lane.poll(1, Duration::from_millis(100))
+                    .expect("lane poll")
+                    .is_some()
+            });
+        }
+
+        /// The offset a lane would read for partition 0 of member 0.
+        fn position_of(source: &KafkaSource) -> Offset {
+            let mut list = TopicPartitionList::with_capacity(1);
+            list.add_partition("t", 0);
+            crate::client::read_position(&source.members[0].consumer, &mut list)
+        }
+
+        /// A fresh assignment's position reads `Invalid` until an op is served,
+        /// so an empty return ahead of any read retires nothing.
+        #[test]
+        fn the_position_reads_invalid_before_any_op() {
+            let (_cluster, source, _lanes) = assigned_on_mock(1);
+            assert_eq!(position_of(&source), Offset::Invalid);
+        }
+
+        /// Accepting an assignment leaves no position from the one before it on
+        /// the client, so a new lane cannot retire offsets through a stale
+        /// position. The lane dropped while holding messages closes cleanly.
+        #[test]
+        fn a_reassign_leaves_no_earlier_position() {
+            let (_cluster, mut source, mut lanes) = assigned_on_mock(1);
+            read_the_record(&mut source, &mut lanes[0]);
+            assert_eq!(position_of(&source), Offset::Offset(1));
+            drop(lanes);
+
+            let tpl = {
+                let mut tpl = TopicPartitionList::new();
+                tpl.add_partition("t", 0);
+                tpl
+            };
+            let lanes = source.accept_assignment(0, &tpl, &tpl, 0).expect("accept");
+            assert_eq!(position_of(&source), Offset::Invalid);
+            drop(lanes);
+        }
+
+        /// A partition the member no longer holds gives up its watermark, and one
+        /// it holds keeps it.
+        #[test]
+        fn a_partition_no_longer_held_gives_up_its_watermark() {
+            let (_cluster, mut source, _lanes) = assigned_on_mock(0);
+            source.members[0]
+                .watermarks
+                .insert(7, Arc::new(AtomicI64::new(i64::MIN)));
+
+            source.prune_partition_series();
+
+            let held: Vec<i32> = source.members[0].watermarks.keys().copied().collect();
+            assert_eq!(held, [0]);
+        }
+
+        /// A message polled off the main queue latches the client against
+        /// retiring offsets, since it moved the position with no lane issuing it.
+        /// A partition that was never split delivers there.
+        #[test]
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "a test producer is configured outside the factory's roles"
+        )]
+        fn a_main_queue_message_latches_the_rewind() {
+            let (cluster, mut source, _lanes) = assigned_on_mock(0);
+            cluster.create_topic("unsplit", 1, 1).expect("create topic");
+            let producer: rdkafka::producer::BaseProducer = rdkafka::ClientConfig::new()
+                .set("bootstrap.servers", cluster.bootstrap_servers())
+                .create()
+                .expect("producer");
+            producer
+                .send(
+                    rdkafka::producer::BaseRecord::<(), _>::to("unsplit")
+                        .partition(0)
+                        .payload(&b"leak"[..]),
+                )
+                .expect("enqueue");
+            rdkafka::producer::Producer::flush(&producer, Duration::from_secs(30)).expect("flush");
+            assert!(!source.members[0].consumer.context().rewound());
+
+            let mut unsplit = TopicPartitionList::new();
+            unsplit
+                .add_partition_offset("unsplit", 0, Offset::Beginning)
+                .expect("list entry");
+            source.members[0].consumer.assign(&unsplit).expect("assign");
+            spate_test::wait_until(Duration::from_secs(30), "the rewind", || {
+                let _ = source.poll_events(Duration::from_millis(100));
+                source.main_queue_rewinds > 0
+            });
+            assert!(source.members[0].consumer.context().rewound());
+        }
+
+        /// A rewound client's lanes retire nothing, where the same lane on an
+        /// unrewound client does: the position may hold a record no lane issued.
+        #[test]
+        fn a_rewound_client_retires_no_offsets() {
+            let (_cluster, mut source, mut lanes) = assigned_on_mock(1);
+            read_the_record(&mut source, &mut lanes[0]);
+
+            lanes[0].forget_issued();
+            assert!(
+                lanes[0]
+                    .poll(1, Duration::from_millis(10))
+                    .expect("lane poll")
+                    .is_some(),
+                "an unrewound client retires"
+            );
+
+            lanes[0].forget_issued();
+            source.members[0].consumer.context().mark_rewound();
+            assert!(
+                lanes[0]
+                    .poll(1, Duration::from_millis(10))
+                    .expect("lane poll")
+                    .is_none(),
+                "a rewound client retired"
+            );
+        }
+
         /// A store that librdkafka refuses for one partition of the list,
         /// while it accepts the others, fails the commit as retryable and
         /// names the partition.
@@ -3644,7 +3839,7 @@ mod tests {
         }
 
         /// `poll_events` until an assignment is live, and return its lanes.
-        fn live_lanes(source: &mut KafkaSource) -> Vec<KafkaLane> {
+        pub(super) fn live_lanes(source: &mut KafkaSource) -> Vec<KafkaLane> {
             let mut lanes = Vec::new();
             wait_until(DEADLINE, "a live assignment", || {
                 match source.poll_events(Duration::from_millis(50)) {

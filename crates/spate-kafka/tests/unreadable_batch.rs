@@ -423,11 +423,8 @@ fn a_corrupt_message_before_the_first_commit_stops_again_after_a_restart() {
         spate_test::wait_until(Duration::from_secs(30), "the lane to fail", || {
             let _ = source.poll_events(Duration::from_millis(10));
             match lanes[0].poll(64, Duration::from_millis(50)) {
-                Err(SourceError::Client {
-                    class: ErrorClass::Fatal,
-                    reason: r,
-                }) => {
-                    reason = Some(r);
+                Err(e) if e.class() == ErrorClass::Fatal => {
+                    reason = Some(e.reason().to_owned());
                     true
                 }
                 Err(other) => panic!("{other}"),

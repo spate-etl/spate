@@ -3576,12 +3576,9 @@ mod latest_start {
         });
         clock.advance(Duration::from_secs(6));
         match driver.source.poll_events(Duration::from_millis(50)) {
-            Err(
-                e @ SourceError::Client {
-                    class: ErrorClass::Fatal,
-                    ..
-                },
-            ) => assert!(e.to_string().contains("start position"), "{e}"),
+            Err(e) if e.class() == ErrorClass::Fatal => {
+                assert!(e.to_string().contains("start position"), "{e}")
+            }
             other => panic!("expected the deadline error, got {other:?}"),
         }
     }

@@ -893,13 +893,10 @@ impl KafkaSource {
             .iter()
             .all(|(_, tpl)| only_on_topic(tpl, &self.config.topic))
         {
-            return Err(SourceError::Client {
-                class: ErrorClass::Fatal,
-                reason: format!(
-                    "the group offered a partition of a topic other than `{}`",
-                    self.config.topic
-                ),
-            });
+            return Err(SourceError::fatal(format!(
+                "the group offered a partition of a topic other than `{}`",
+                self.config.topic
+            )));
         }
         for (k, _) in offers {
             self.members[*k].committed_at_assign.clear();
@@ -1483,10 +1480,7 @@ fn start_from(offset: i64) -> KafkaResult<i64> {
 /// A code [`classify_start_error`] classes as fatal, naming `doing`.
 fn start_failure(doing: &str, e: &KafkaError) -> Result<StartFailure, SourceError> {
     match e.rdkafka_error_code().map(classify_start_error) {
-        Some(StartFailure::Fatal) => Err(SourceError::Client {
-            class: ErrorClass::Fatal,
-            reason: format!("{doing}: {e}"),
-        }),
+        Some(StartFailure::Fatal) => Err(SourceError::fatal(format!("{doing}: {e}"))),
         Some(failure) => Ok(failure),
         None => Ok(StartFailure::Retry),
     }
@@ -2310,10 +2304,7 @@ mod tests {
         other.add_partition("other", 0);
         assert!(matches!(
             source.read_latest_starts(&[(0, other)], Instant::now()),
-            Err(SourceError::Client {
-                class: ErrorClass::Fatal,
-                ..
-            })
+            Err(e) if e.class() == ErrorClass::Fatal
         ));
     }
 

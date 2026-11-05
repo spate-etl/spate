@@ -8,7 +8,7 @@ use crate::config::{
     AdminSection, BackpressureSection, CheckpointSection, ComponentConfig, MetricsExporter,
     MetricsSection, PinningMode, PipelineConfig, PipelineSection,
 };
-use crate::error::{ErrorClass, FatalError, SourceError};
+use crate::error::{FatalError, SourceError};
 use crate::feed::memory::MemoryFeed;
 use crate::ops::{BlockReason, PushOutcome, RunnableChain};
 use crate::pipeline::runtime::{RuntimeOptions, ShutdownHandle};
@@ -63,6 +63,11 @@ pub(crate) struct SourceLog {
     pub(crate) fail_commits: bool,
     /// When set, `commit` fails with a fatal error.
     pub(crate) fatal_commits: bool,
+    /// Errors the next lane polls return, one per poll, before any batch.
+    pub(crate) lane_poll_errors: VecDeque<SourceError>,
+    /// Errors the next commits return, one per commit, before recording any
+    /// position.
+    pub(crate) commit_errors: VecDeque<SourceError>,
     /// Interleaved ordering log shared with the chain fake.
     pub(crate) log: Vec<String>,
     /// Taken and triggered by the next `commit` with a position, modeling a
@@ -128,6 +133,8 @@ pub(crate) enum Script {
     /// Drop the stashed acks inside `poll_events`, so they resolve while the
     /// controller waits on the source, then report `Idle`.
     ReleaseHeld(Arc<Mutex<Vec<crate::checkpoint::AckRef>>>),
+    /// Return this error from `poll_events`.
+    PollError(SourceError),
 }
 
 pub(crate) struct LaneSpec {
@@ -180,10 +187,7 @@ impl Source for FakeSource {
         {
             let mut log = self.shared.lock().unwrap();
             if log.fail_open {
-                return Err(SourceError::Client {
-                    class: ErrorClass::Fatal,
-                    reason: "scripted open failure".into(),
-                });
+                return Err(SourceError::fatal("scripted open failure"));
             }
             log.opened = true;
             log.stage_metrics_attached = ctx.stage_metrics.is_some();
@@ -276,6 +280,7 @@ impl Source for FakeSource {
                 held.lock().unwrap().clear();
                 Ok(SourceEvent::Idle)
             }
+            Some(Script::PollError(e)) => Err(e),
             None => {
                 std::thread::sleep(timeout.min(Duration::from_millis(5)));
                 Ok(SourceEvent::Idle)
@@ -290,23 +295,17 @@ impl Source for FakeSource {
         }
         if self.stop.is_set() {
             log.stopped_commits.push(watermarks.to_vec());
-            return Err(SourceError::Client {
-                class: ErrorClass::Retryable,
-                reason: "the stop began during this commit".into(),
-            });
+            return Err(SourceError::retryable("the stop began during this commit"));
         }
         if log.fatal_commits {
-            return Err(SourceError::Client {
-                class: ErrorClass::Fatal,
-                reason: "scripted fatal commit failure".into(),
-            });
+            return Err(SourceError::fatal("scripted fatal commit failure"));
+        }
+        if let Some(e) = log.commit_errors.pop_front() {
+            return Err(e);
         }
         if log.fail_commits {
             log.log.push("commit-failed".into());
-            return Err(SourceError::Client {
-                class: ErrorClass::Retryable,
-                reason: "scripted commit failure".into(),
-            });
+            return Err(SourceError::retryable("scripted commit failure"));
         }
         for &(p, o) in watermarks {
             let slot = log.committed.entry(p).or_insert(o);
@@ -323,10 +322,7 @@ impl Source for FakeSource {
         log.flush_commits += 1;
         log.log.push("flush_commits".into());
         if log.fail_commits {
-            return Err(SourceError::Client {
-                class: ErrorClass::Retryable,
-                reason: "scripted flush failure".into(),
-            });
+            return Err(SourceError::retryable("scripted flush failure"));
         }
         Ok(())
     }
@@ -420,6 +416,9 @@ impl SourceLane for FakeLane {
         let finishing = {
             let mut log = self.log.lock().unwrap();
             log.lane_polls.push((self.id, timeout));
+            if let Some(e) = log.lane_poll_errors.pop_front() {
+                return Err(e);
+            }
             log.finishing.contains(&self.id)
         };
         match self.batches.pop_front() {

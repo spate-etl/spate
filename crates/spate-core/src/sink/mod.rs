@@ -238,10 +238,8 @@ pub trait RowEncoder<F: RecFamily>: Send {
 /// impl FrameCodec for LengthPrefix {
 ///     fn encode_frame(&mut self, chunk: &[u8]) -> Result<&[u8], SinkError> {
 ///         self.out.clear();
-///         let len = u32::try_from(chunk.len()).map_err(|_| SinkError::Client {
-///             class: spate_core::ErrorClass::Fatal,
-///             reason: "chunk longer than u32::MAX".into(),
-///         })?;
+///         let len = u32::try_from(chunk.len())
+///             .map_err(|_| SinkError::fatal("chunk longer than u32::MAX"))?;
 ///         self.out.extend_from_slice(&len.to_le_bytes());
 ///         self.out.extend_from_slice(chunk);
 ///         Ok(&self.out)

@@ -687,6 +687,61 @@ fn setup_rust_exports_the_profile_env_before_the_cache() {
     }
 }
 
+/// The `containers` job frees the disk after its checkout and before anything
+/// writes to it: the cache restore, the image pulls and the nested build in
+/// `tls_system_ca` all share the runner's disk.
+#[test]
+fn containers_job_frees_disk_before_its_suites() {
+    let parsed = yaml(&read_workflow("containers.yml"));
+    let steps = parsed["jobs"]["containers"]["steps"]
+        .as_sequence()
+        .expect("containers has no steps");
+    let checkout = step_at(steps, "checkout", |s| {
+        s["uses"]
+            .as_str()
+            .is_some_and(|u| u.starts_with("actions/checkout@"))
+    });
+    let free = step_at(steps, "free-disk", |s| {
+        s["uses"].as_str() == Some("./.github/actions/free-disk")
+    });
+    let setup = step_at(steps, "setup-rust", |s| {
+        s["uses"].as_str() == Some("./.github/actions/setup-rust")
+    });
+    let suites = step_at(steps, "Container suites", |s| {
+        s["name"].as_str() == Some("Container suites")
+    });
+    assert!(
+        checkout < free && free < setup && setup < suites,
+        "containers runs checkout, free-disk, setup-rust and the suites at {checkout}, {free}, {setup}, {suites}"
+    );
+
+    let action = yaml(
+        &std::fs::read_to_string(workflows().join("../actions/free-disk/action.yml")).unwrap(),
+    );
+    let removes = action["runs"]["steps"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .any(|s| s["run"].as_str().is_some_and(|r| r.contains("sudo rm -rf")));
+    assert!(
+        removes,
+        "free-disk does not remove the preinstalled toolchains"
+    );
+}
+
+/// The position of the first step matching `wanted` in a job, panicking with
+/// `what` when none does.
+fn step_at(
+    steps: &[serde_yaml::Value],
+    what: &str,
+    wanted: impl Fn(&serde_yaml::Value) -> bool,
+) -> usize {
+    steps
+        .iter()
+        .position(wanted)
+        .unwrap_or_else(|| panic!("containers has no {what} step"))
+}
+
 /// The workflows that run on a cron.
 const SCHEDULED: [&str; 2] = ["nightly.yml", "weekly.yml"];
 

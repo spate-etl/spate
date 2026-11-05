@@ -15,7 +15,7 @@ use super::chain::{FatalSlot, OpMeterSlot, StageLifecycle};
 use crate::backpressure::InflightBudget;
 use crate::checkpoint::{AckSet, BatchId};
 use crate::deser::RecFamily;
-use crate::error::{ErrorClass, ErrorPolicy, FatalError, SinkError};
+use crate::error::{ErrorClass, ErrorPolicy, FatalError};
 use crate::record::{Flow, Record};
 use crate::sink::{
     ChunkSendError, EncodedChunk, FrameCodec, RecordRouter, RowEncoder, ShardQueues,
@@ -352,13 +352,7 @@ where
                 // the record ("processing must stop"), so it overrides the
                 // record-level policy. Skipping it once per record would
                 // silently drop everything.
-                let fatal_class = matches!(
-                    e,
-                    SinkError::Client {
-                        class: ErrorClass::Fatal,
-                        ..
-                    }
-                );
+                let fatal_class = e.class() == ErrorClass::Fatal;
                 match self.cfg.encode_policy {
                     ErrorPolicy::Skip if !fatal_class => {
                         self.meter.0.skipped();

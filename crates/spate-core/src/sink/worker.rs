@@ -18,7 +18,7 @@ use crate::backpressure::InflightBudget;
 use crate::checkpoint::AckSet;
 use crate::clock::Clock as _;
 use crate::clock::tokio::{Clock, Sleep, Stopwatch};
-use crate::error::{ErrorClass, SinkError};
+use crate::error::ErrorClass;
 use crate::hash::FastMap;
 use crate::metrics::{AttemptOutcome, FlushReason, SinkShardMetrics};
 use std::collections::VecDeque;
@@ -706,7 +706,7 @@ impl<W: ShardWriter> ShardWorker<W> {
                         if let Some(t) = transition {
                             t.log(shard);
                         }
-                        let class = class_of(&err);
+                        let class = err.class();
                         metrics.errors(class, 1);
                         metrics.replica_error(replica);
                         tracing::warn!(replica, attempts, error = %err, "sink write failed");
@@ -875,15 +875,6 @@ impl Drop for ProbeGuard {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .release_probe(self.replica, self.episode);
-    }
-}
-
-fn class_of(err: &SinkError) -> ErrorClass {
-    match err {
-        SinkError::Client { class, .. } => *class,
-        // Non-exhaustive enum: unknown variants are conservatively fatal.
-        #[allow(unreachable_patterns)]
-        _ => ErrorClass::Fatal,
     }
 }
 

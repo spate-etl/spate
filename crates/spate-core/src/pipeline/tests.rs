@@ -1469,6 +1469,7 @@ fn a_fatal_final_commit_fails_the_run_with_its_reason() {
     });
     h.shared.lock().unwrap().fatal_commits = true;
     h.script.lock().unwrap().push_back(Script::Drained);
+    wait_for("the run ends", FINISH_DEADLINE, || h.join.is_finished());
     let report = h.join.join().unwrap().unwrap();
     let ExitState::Failed(failure) = report.state else {
         panic!("a fatal final commit must fail the run");
@@ -2011,6 +2012,7 @@ fn a_fatal_commit_fails_the_run() {
     });
     h.shared.lock().unwrap().fatal_commits = true;
     assign_one_lane(&h, std::slice::from_ref(&(0..10)));
+    wait_for("the run ends", FINISH_DEADLINE, || h.join.is_finished());
     let report = h.join.join().unwrap().unwrap();
     let ExitState::Failed(failure) = report.state else {
         panic!("a fatal commit must fail the run");
@@ -2048,6 +2050,7 @@ fn a_fatal_lane_poll_error_fails_the_run() {
         .lane_poll_errors
         .push_back(SourceError::fatal("scripted poll failure"));
     assign_one_lane(&h, &[0..5, 5..10]);
+    wait_for("the run ends", FINISH_DEADLINE, || h.join.is_finished());
     let report = h.join.join().unwrap().unwrap();
     let ExitState::Failed(failure) = report.state else {
         panic!("a fatal lane poll error must fail the run");
@@ -2105,6 +2108,7 @@ fn a_fatal_poll_events_error_fails_the_run() {
         .push_back(Script::PollError(SourceError::fatal(
             "scripted control failure",
         )));
+    wait_for("the run ends", FINISH_DEADLINE, || h.join.is_finished());
     let report = h.join.join().unwrap().unwrap();
     let ExitState::Failed(failure) = report.state else {
         panic!("a fatal poll_events error must fail the run");

@@ -931,15 +931,21 @@ impl KafkaSource {
             if let Err(e) = elem.error() {
                 return read_failure("reading a committed offset", &e);
             }
-            match start_offset(elem.error(), elem.offset(), Offset::End) {
-                None => {
-                    if let Offset::Offset(offset) = elem.offset() {
-                        starts.insert(elem.partition(), offset);
-                    }
-                }
-                Some(_) => ends
+            match elem.offset() {
+                Offset::Invalid => ends
                     .add_partition_offset(&self.config.topic, elem.partition(), Offset::End)
                     .map_err(fatal("build offset list"))?,
+                Offset::Offset(offset) if offset >= 0 => {
+                    starts.insert(elem.partition(), offset);
+                }
+                // A commit that names no position: taking it as no commit would
+                // commit the end over records nothing read.
+                _ => {
+                    return read_failure(
+                        "reading a committed offset",
+                        &KafkaError::MetadataFetch(RDKafkaErrorCode::OffsetNotAvailable),
+                    );
+                }
             }
         }
         let mut listed: FastMap<i32, i64> = FastMap::default();

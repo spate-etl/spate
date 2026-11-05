@@ -1221,3 +1221,160 @@ mod silent_coordinator {
         driver.join().expect("driver");
     }
 }
+
+/// A committed offset naming a logical position must not read as no commit. A raw
+/// OffsetCommit stores the value, and the group's OffsetFetch reply then carries
+/// it, the same bytes a hostile coordinator would answer with.
+mod logical_committed_offset {
+    use rdkafka::consumer::{BaseConsumer, Consumer};
+    use rdkafka::mocking::MockCluster;
+    use rdkafka::producer::{BaseProducer, BaseRecord, Producer};
+    use rdkafka::{ClientConfig, Offset, TopicPartitionList};
+    use spate_core::config::PipelineConfig;
+    use spate_core::ops::chain_owned;
+    use spate_core::pipeline::{Pipeline, RuntimeOptions};
+    use spate_core::sink::KeyHashRouter;
+    use spate_kafka::{KafkaSource, KafkaSourceConfig};
+    use spate_test::{BytesPassthrough, PipelineRun, TestEncoder, capture_sink, unique_name};
+    use std::collections::BTreeMap;
+    use std::io::{Read as _, Write as _};
+    use std::net::TcpStream;
+    use std::time::{Duration, Instant};
+
+    const TOPIC: &str = "orders";
+    const GROUP: &str = "logical-commit";
+    const END: i64 = 10;
+
+    fn str16(buf: &mut Vec<u8>, s: &str) {
+        buf.extend_from_slice(&i16::try_from(s.len()).unwrap().to_be_bytes());
+        buf.extend_from_slice(s.as_bytes());
+    }
+
+    /// OffsetCommit v2 of `offset` on `orders` partition 0, as a simple consumer.
+    fn raw_commit(brokers: &str, offset: i64) {
+        let mut s = TcpStream::connect(brokers).unwrap();
+        let mut b = Vec::new();
+        b.extend_from_slice(&8i16.to_be_bytes());
+        b.extend_from_slice(&2i16.to_be_bytes());
+        b.extend_from_slice(&7i32.to_be_bytes());
+        str16(&mut b, "rogue");
+        str16(&mut b, GROUP);
+        b.extend_from_slice(&(-1i32).to_be_bytes());
+        str16(&mut b, "");
+        b.extend_from_slice(&(-1i64).to_be_bytes());
+        b.extend_from_slice(&1i32.to_be_bytes());
+        str16(&mut b, TOPIC);
+        b.extend_from_slice(&1i32.to_be_bytes());
+        b.extend_from_slice(&0i32.to_be_bytes());
+        b.extend_from_slice(&offset.to_be_bytes());
+        b.extend_from_slice(&(-1i16).to_be_bytes());
+        s.write_all(&i32::try_from(b.len()).unwrap().to_be_bytes())
+            .unwrap();
+        s.write_all(&b).unwrap();
+        let mut len = [0u8; 4];
+        s.read_exact(&mut len).unwrap();
+        let mut resp = vec![0u8; usize::try_from(i32::from_be_bytes(len)).unwrap()];
+        s.read_exact(&mut resp).unwrap();
+    }
+
+    fn committed(probe: &BaseConsumer) -> Offset {
+        let mut tpl = TopicPartitionList::new();
+        tpl.add_partition(TOPIC, 0);
+        probe
+            .committed_offsets(tpl, Duration::from_secs(5))
+            .unwrap()
+            .elements()[0]
+            .offset()
+    }
+
+    /// Under `latest`, a committed offset of -2 (`Beginning`) is a commit, so the
+    /// source does not take the partition as uncommitted and commit its end over
+    /// records it has not read.
+    #[test]
+    fn a_logical_committed_offset_does_not_move_the_commit_past_unread_records() {
+        let cluster = MockCluster::new(1).unwrap();
+        cluster.create_topic(TOPIC, 1, 1).unwrap();
+        let brokers = cluster.bootstrap_servers();
+
+        let producer: BaseProducer = ClientConfig::new()
+            .set("bootstrap.servers", &brokers)
+            .create()
+            .unwrap();
+        for i in 0..END {
+            let payload = i.to_string();
+            producer
+                .send(
+                    BaseRecord::<str, str>::to(TOPIC)
+                        .partition(0)
+                        .payload(&payload),
+                )
+                .unwrap();
+        }
+        producer.flush(Duration::from_secs(30)).unwrap();
+
+        raw_commit(&brokers, -2);
+        let probe: BaseConsumer = ClientConfig::new()
+            .set("bootstrap.servers", &brokers)
+            .set("group.id", GROUP)
+            .create()
+            .unwrap();
+        assert_eq!(committed(&probe), Offset::Beginning, "the reply carries -2");
+
+        let name = unique_name("logicalcommit");
+        let yaml = format!(
+            "pipeline: {{ name: {name}, threads: 2, io_threads: 1 }}\n\
+             admin: {{ listen: none }}\n\
+             checkpoint: {{ drain_timeout: 200ms }}\n\
+             metrics: {{ exporter: none }}\n\
+             source: {{ memory: {{}} }}\n\
+             sink: {{ capture: {{ chunk: {{ target_bytes: 64 }} }} }}\n"
+        );
+        let pipeline = Pipeline::from_config(PipelineConfig::from_str(&yaml).expect("config"))
+            .expect("builder");
+        let (sink, script) = capture_sink(1, 1);
+        let mut cfg = KafkaSourceConfig::new(&brokers, TOPIC, GROUP);
+        cfg.startup_timeout = Duration::from_secs(60);
+        cfg.statistics_interval = Duration::ZERO;
+        cfg.rdkafka = BTreeMap::from([("auto.offset.reset".to_string(), "latest".to_string())]);
+        let runtime = pipeline
+            .sink(sink)
+            .expect("sink")
+            .chains(|ctx| {
+                let chunk = ctx.chunk();
+                chain_owned::<Vec<u8>, _>(BytesPassthrough)
+                    .sink(TestEncoder, KeyHashRouter, chunk, ctx.queues, ctx.budget)
+                    .build()
+            })
+            .runtime_options(RuntimeOptions {
+                handle_signals: false,
+                ..RuntimeOptions::default()
+            })
+            .into_runtime(KafkaSource::new(cfg))
+            .expect("runtime");
+        let shutdown = runtime.shutdown_handle();
+        let run = PipelineRun::spawn(move || runtime.run());
+
+        // The negative result has nothing to wait on: the bound outlasts the group
+        // forming, the assign hold, a start commit and a read of all ten records.
+        let until = Instant::now() + Duration::from_secs(15);
+        let mut seen = committed(&probe);
+        while seen == Offset::Beginning && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(200));
+            seen = committed(&probe);
+        }
+        // Writes settle ahead of the commit that covers them, so this read is final
+        // for a commit that came from reading.
+        let wrote = !script.writes().is_empty();
+        shutdown.trigger();
+        let exit = run
+            .wait_exit(Duration::from_secs(60))
+            .expect("the run stops");
+        assert!(
+            seen == Offset::Beginning || wrote,
+            "the commit moved to {seen:?} with nothing written; run: {:?}",
+            exit.as_ref()
+                .map(|r| format!("{:?}", r.state))
+                .map_err(|e| e.to_string())
+        );
+    }
+}

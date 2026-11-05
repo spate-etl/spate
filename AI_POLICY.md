@@ -47,7 +47,8 @@ In practice:
 - Tie it to an issue. `CONTRIBUTING.md` says when that issue has to be assigned
   to you.
 - Run `cargo xtask ci` and check it by exit code.
-- A diff past roughly 400 lines is worth splitting, or at least flagging.
+- Keep the diff small enough to read in one sitting. Where a change has a natural
+  split, such as a helper that can land first, split it.
 - Skip the drive-by cleanup. A formatting sweep bundled with a fix makes the fix
   harder to review and harder to revert.
 

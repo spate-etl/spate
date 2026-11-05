@@ -507,13 +507,10 @@ async fn stream_object(
             )
             .await
         }
-        None if range.is_some() => Err(SplitFailure::Fatal(SourceError::Client {
-            class: ErrorClass::Fatal,
-            reason: format!(
-                "split {split}: ranged read of \"{}\" has no ETag pin — internal wiring bug",
-                entry.key
-            ),
-        })),
+        None if range.is_some() => Err(SplitFailure::Fatal(SourceError::fatal(format!(
+            "split {split}: ranged read of \"{}\" has no ETag pin — internal wiring bug",
+            entry.key
+        )))),
         None => {
             stream_object_streaming(
                 split,
@@ -715,18 +712,14 @@ async fn stream_object_streaming(
                         // stays object-level: without an ETag a resumed read
                         // could splice two object versions, so a mid-object
                         // break cannot be retried by this owner. Poison.
-                        if crate::error::is_pipeline_fatal(&e) {
-                            return Err(SplitFailure::Fatal(SourceError::Client {
-                                class: ErrorClass::Fatal,
-                                reason: format!(
-                                    "split {split}: reading \"{}\" failed mid-object at byte \
+                        return Err(fatal_or_poison(
+                            &e,
+                            format!(
+                                "split {split}: reading \"{}\" failed mid-object at byte \
                                      {delivered}: {}",
-                                    entry.key,
-                                    crate::error::bounded_reason(&e)
-                                ),
-                            }));
-                        }
-                        return Err(SplitFailure::Poison(
+                                entry.key,
+                                crate::error::bounded_reason(&e)
+                            ),
                             PoisonKind::Undecodable,
                             format!(
                                 "split {split}: read of \"{}\" failed mid-object at byte \
@@ -812,12 +805,7 @@ async fn head_after_overwrite(
                         SplitFailure::Poison(kind, reason) => {
                             SplitFailure::Poison(kind, headed(reason))
                         }
-                        SplitFailure::Fatal(SourceError::Client { class, reason }) => {
-                            SplitFailure::Fatal(SourceError::Client {
-                                class,
-                                reason: headed(reason),
-                            })
-                        }
+                        SplitFailure::Fatal(e) => SplitFailure::Fatal(e.map_reason(headed)),
                         other => other,
                     };
                 }
@@ -874,6 +862,22 @@ impl ReadBudget {
     }
 }
 
+/// The failure of a read that cannot go on. A credentials or config failure
+/// holds for every object, so it fails the pipeline with `fatal`; any other
+/// poisons this object with `kind` and `poison`.
+fn fatal_or_poison(
+    e: &object_store::Error,
+    fatal: String,
+    kind: PoisonKind,
+    poison: String,
+) -> SplitFailure {
+    if crate::error::is_pipeline_fatal(e) {
+        SplitFailure::Fatal(SourceError::fatal(fatal))
+    } else {
+        SplitFailure::Poison(kind, poison)
+    }
+}
+
 /// Count an attempt on `budget` and wait its next delay for a retryable
 /// error; escalate non-retryable classes and exhausted budgets.
 ///
@@ -896,14 +900,12 @@ async fn retry_or_fail(
             entry.key,
             crate::error::bounded_reason(e)
         );
-        return Err(if crate::error::is_pipeline_fatal(e) {
-            SplitFailure::Fatal(SourceError::Client {
-                class: ErrorClass::Fatal,
-                reason,
-            })
-        } else {
-            SplitFailure::Poison(crate::error::poison_kind(e), reason)
-        });
+        return Err(fatal_or_poison(
+            e,
+            reason.clone(),
+            crate::error::poison_kind(e),
+            reason,
+        ));
     }
     budget.attempt += 1;
     if budget.attempt >= MAX_ATTEMPTS {
@@ -2552,7 +2554,12 @@ mod tests {
         let SplitFailure::Fatal(e) = failure else {
             panic!("PermissionDenied mid-stream must be pipeline-fatal, got: {failure}");
         };
-        assert!(e.to_string().contains("p/a"), "{e}");
+        assert_eq!(e.class(), ErrorClass::Fatal, "{e}");
+        assert!(
+            e.reason()
+                .starts_with("split s3-test: reading \"p/a\" failed mid-object at byte 4: "),
+            "{e}"
+        );
     }
 
     #[tokio::test]
@@ -3610,11 +3617,8 @@ mod tests {
             last_modified_ms: 0,
         }));
         assert_eq!(overwrite.to_string(), "\"data/k\" was overwritten");
-        let fatal = SplitFailure::Fatal(SourceError::Client {
-            class: ErrorClass::Fatal,
-            reason: "denied".into(),
-        });
-        assert!(fatal.to_string().contains("denied"), "{fatal}");
+        let fatal = SplitFailure::Fatal(SourceError::fatal("denied"));
+        assert_eq!(fatal.to_string(), "source error (Fatal): denied");
     }
 
     /// Pins that a HEAD answering no ETag reports an overwrite that reads
@@ -3658,6 +3662,7 @@ mod tests {
         let SplitFailure::Fatal(e) = last_failure(msgs) else {
             panic!("a 403 on the HEAD must be fatal");
         };
+        assert_eq!(e.class(), ErrorClass::Fatal, "{e}");
         assert!(e.to_string().contains("the HEAD after"), "{e}");
     }
 
@@ -3776,6 +3781,29 @@ mod tests {
         assert_eq!(
             gaps(&store.head_instants.lock().unwrap()),
             [1, 2, 4, 8, 16, 32, 64]
+        );
+    }
+
+    /// Pins that a ranged read handed no ETag fails the lane as fatal. Direct,
+    /// as the reason itself calls the arm an internal wiring bug and no unit
+    /// reaches it.
+    #[tokio::test]
+    async fn a_ranged_read_with_no_etag_is_fatal() {
+        let store: Arc<dyn ObjectStore> = Arc::new(seeded(&[("p/a", b"0123456789")]).await);
+        let (tx, mut rx) = mpsc::channel(64);
+        let task = tokio::spawn(run_fetcher(FetcherParams {
+            range: Some(SplitRange::new(0, 4, b'\n')),
+            ..fetcher(store, vec![entry("p/a", 10, None)], 64, 10, tx)
+        }));
+        let msgs = drain(&mut rx).await;
+        task.await.unwrap();
+        let SplitFailure::Fatal(e) = last_failure(msgs) else {
+            panic!("a ranged read with no ETag must be fatal");
+        };
+        assert_eq!(e.class(), ErrorClass::Fatal, "{e}");
+        assert_eq!(
+            e.reason(),
+            "split s3-test: ranged read of \"p/a\" has no ETag pin — internal wiring bug"
         );
     }
 }

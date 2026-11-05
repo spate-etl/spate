@@ -1012,10 +1012,7 @@ fn settled(outcome: Result<(), FeedError>) -> Result<Settled, SourceError> {
 }
 
 fn feed_error(doing: &str, e: &FeedError) -> SourceError {
-    SourceError::Client {
-        class: e.class(),
-        reason: format!("{doing}: {e}"),
-    }
+    SourceError::new(e.class(), format!("{doing}: {e}"))
 }
 
 #[cfg(test)]
@@ -1605,10 +1602,10 @@ mod tests {
 
         reader.renew_held();
         reader.renew_held();
-        let Err(SourceError::Client { reason, .. }) = reader.poll_events(Duration::ZERO) else {
+        let Err(e) = reader.poll_events(Duration::ZERO) else {
             panic!("a fatal renewal did not fail the poll");
         };
-        assert!(reason.contains("renewing a held unit"), "{reason}");
+        assert!(e.reason().contains("renewing a held unit"), "{e}");
         assert_eq!(script.acknowledged(), vec![], "settled before failing");
     }
 
@@ -1624,10 +1621,10 @@ mod tests {
         script.refuse_next_renew(FeedErrorKind::Fatal);
 
         reader.renew_held();
-        let Err(SourceError::Client { reason, .. }) = reader.stop_reading() else {
+        let Err(e) = reader.stop_reading() else {
             panic!("a fatal renewal did not fail the stop");
         };
-        assert!(reason.contains("renewing a held unit"), "{reason}");
+        assert!(e.reason().contains("renewing a held unit"), "{e}");
         assert_eq!(script.acknowledged(), vec![], "settled before failing");
     }
 
@@ -1641,10 +1638,10 @@ mod tests {
         script.refuse_next_renew(FeedErrorKind::Fatal);
 
         reader.renew_held();
-        let Err(SourceError::Client { reason, .. }) = reader.stop_reading() else {
+        let Err(e) = reader.stop_reading() else {
             panic!("a fatal renewal did not fail the stop");
         };
-        assert!(reason.contains("renewing a held unit"), "{reason}");
+        assert!(e.reason().contains("renewing a held unit"), "{e}");
     }
 
     /// Pins that a held unit answered `Gone` on renewal logs one warning
@@ -2369,11 +2366,11 @@ mod tests {
     /// from `commit` or from the sweep, stops the reader.
     #[test]
     fn a_fatal_answer_from_the_feed_stops_the_reader() {
-        let fatal = |result: Result<(), SourceError>| match result {
-            Err(SourceError::Client { class, .. }) => {
-                assert_eq!(class, spate_core::error::ErrorClass::Fatal);
-            }
-            other => panic!("expected a fatal error, got {other:?}"),
+        let fatal = |result: Result<(), SourceError>| {
+            assert_eq!(
+                result.unwrap_err().class(),
+                spate_core::error::ErrorClass::Fatal
+            );
         };
         let (inner, script) = scripted_feed();
         let feed = Arc::new(Refusing::new(inner));
@@ -2703,10 +2700,10 @@ mod tests {
         let (_, first, _) = hold_one(&mut reader, &script);
         let (_, second, _) = hold_one(&mut reader, &script);
         *feed.hand_back.lock().unwrap() = Some((first, FeedErrorKind::Fatal));
-        let Err(SourceError::Client { reason, .. }) = reader.stop_reading() else {
+        let Err(e) = reader.stop_reading() else {
             panic!("a fatal hand-back did not fail the call");
         };
-        assert!(reason.contains("handing back"), "{reason}");
+        assert!(e.reason().contains("handing back"), "{e}");
         assert!(script.handed_back().is_empty());
         assert!(script.held().contains(&second), "left held for the close");
     }
@@ -3185,10 +3182,10 @@ mod tests {
         let outcome = reader.stop_reading();
         assert_eq!(script.published().len(), 1, "the re-enqueue was published");
         assert_eq!(script.handed_back(), vec![r]);
-        let Err(SourceError::Client { reason, .. }) = outcome else {
+        let Err(e) = outcome else {
             panic!("a fatal re-enqueue at the stop did not fail the call: {outcome:?}");
         };
-        assert!(reason.contains("re-enqueueing"), "{reason}");
+        assert!(e.reason().contains("re-enqueueing"), "{e}");
     }
 
     /// Pins that a unit whose hand-back the feed answers `Gone` is let go in
@@ -3822,5 +3819,63 @@ mod tests {
             reader.poll_events(Duration::ZERO).unwrap();
         }
         assert_eq!(script.acknowledged(), vec![overwritten]);
+    }
+
+    /// Pins that `feed_error` takes its class from the feed's error, for each
+    /// kind.
+    #[test]
+    fn feed_error_takes_the_class_of_the_feed_error() {
+        use spate_core::error::ErrorClass;
+        for (kind, class) in [
+            (FeedErrorKind::Retryable, ErrorClass::Retryable),
+            (FeedErrorKind::Fatal, ErrorClass::Fatal),
+            (FeedErrorKind::Refused, ErrorClass::Fatal),
+            (FeedErrorKind::Gone, ErrorClass::Fatal),
+        ] {
+            let e = FeedError::new(kind, "no");
+            let err = feed_error("doing", &e);
+            assert_eq!(err.class(), class, "{err}");
+            assert_eq!(err.reason(), format!("doing: {e}"));
+        }
+    }
+
+    /// Pins that a `Gone` or `Refused` answer to `receive`, and a `Refused`
+    /// answer to an `acknowledge` sent from `commit`, stops the reader.
+    #[test]
+    fn a_refused_or_gone_answer_from_the_feed_stops_the_reader() {
+        use spate_core::error::ErrorClass;
+        let (inner, script) = scripted_feed();
+        let feed = Arc::new(Refusing::new(inner));
+        let (mut reader, _rt) = reader_over(feed.clone(), None, None);
+        script.deliver(descriptor_unit(0));
+        start(&mut reader);
+        for (kind, reason) in [
+            (
+                FeedErrorKind::Gone,
+                "receiving from the feed: feed error (Gone): refused by the test",
+            ),
+            (
+                FeedErrorKind::Refused,
+                "receiving from the feed: feed error (Refused): refused by the test",
+            ),
+        ] {
+            *feed.receive.lock().unwrap() = Some(kind);
+            let Err(err) = reader.poll_events(Duration::ZERO) else {
+                panic!("a {kind:?} answer to a receive did not stop the reader");
+            };
+            assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
+            assert_eq!(err.reason(), reason);
+        }
+
+        *feed.receive.lock().unwrap() = None;
+        let lane = partitions(&lanes_added(poll(&mut reader)));
+        *feed.acknowledge.lock().unwrap() = Some(FeedErrorKind::Refused);
+        reader.lanes[&lane[0]].tracker.set_terminal(5);
+        let err = reader.commit(&[(lane[0], 5)]).unwrap_err();
+        assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
+        assert_eq!(
+            err.reason(),
+            "settling a unit: feed error (Refused): refused by the test"
+        );
     }
 }

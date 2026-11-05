@@ -382,9 +382,9 @@ fn a_missing_feed_is_reported_before_the_store_is_built() {
     );
     let err = source
         .open(SourceCtx::new(Checkpointer::new().handle()))
-        .expect_err("a source with no feed fails to open")
-        .to_string();
-    assert!(err.contains("feed:"), "{err}");
+        .expect_err("a source with no feed fails to open");
+    assert_eq!(err.class(), spate_core::error::ErrorClass::Fatal, "{err}");
+    assert!(err.reason().contains("feed:"), "{err}");
 }
 
 /// Pins that the source over a feed reads a whole-object unit in the byte

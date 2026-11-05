@@ -17,7 +17,7 @@
 //! for a lister run, and a solo run on the in-process feed runs it with no
 //! location.
 
-use crate::error::{bounded_reason, classify};
+use crate::error::store_error;
 use crate::fetch::ObjectEntry;
 use crate::listing::{UnaddressableKeys, addressable};
 use crate::location::{
@@ -28,7 +28,7 @@ use crate::unit::{Minted, Packer, alone_units};
 use futures_util::StreamExt as _;
 use object_store::path::Path;
 use object_store::{ObjectStore, ObjectStoreExt as _, PutMode, PutPayload};
-use spate_core::error::{ErrorClass, SourceError};
+use spate_core::error::SourceError;
 use spate_core::feed::{Confirmation, Feed, FeedErrorKind, Unit};
 use spate_core::hash::{QualityMap, QualitySet};
 use std::collections::VecDeque;
@@ -196,10 +196,8 @@ impl Lister {
         // Object keys are chosen by whoever writes the bucket.
         let mut unaddressable_seen = QualitySet::default();
         while let Some(meta) = listing.next().await {
-            let meta = meta.map_err(|e| SourceError::Client {
-                class: classify(&e),
-                reason: format!("listing {}: {}", self.prefix, bounded_reason(&e)),
-            })?;
+            let meta =
+                meta.map_err(|e| store_error(format_args!("listing {}", self.prefix), &e))?;
             // `object_store` fetches a page before it yields the page's first
             // key, so every unaddressable object up to this page is recorded.
             self.publish_unaddressable(&mut pending, &mut unaddressable_seen, &mut published)
@@ -263,10 +261,7 @@ impl Lister {
             first_key,
             objects,
             listed,
-        } = minted.map_err(|e| SourceError::Client {
-            class: ErrorClass::Fatal,
-            reason: format!("minting a unit: {e}"),
-        })?;
+        } = minted.map_err(|e| SourceError::fatal(format!("minting a unit: {e}")))?;
         if pending.len() == LISTER_IN_FLIGHT
             && let Some(oldest) = pending.pop_front()
         {
@@ -326,10 +321,7 @@ impl Lister {
                             unit.id
                         )
                     };
-                    return Err(SourceError::Client {
-                        class: e.class(),
-                        reason,
-                    });
+                    return Err(SourceError::new(e.class(), reason));
                 }
             }
         }
@@ -559,6 +551,7 @@ mod tests {
     use crate::config::Compression;
     use crate::split::{PACK_MEMBERS, PACKED_BODY_MAX_BYTES, SplitDescriptor};
     use crate::testutil::HookStore;
+    use spate_core::error::ErrorClass;
     use spate_core::feed::memory::MemoryFeed;
     use spate_core::feed::{
         Confirmer, Delivery, FeedError, FeedWaker, Receipt, Unit, confirmation,
@@ -1012,13 +1005,6 @@ mod tests {
         }
     }
 
-    fn class(err: &SourceError) -> ErrorClass {
-        match err {
-            SourceError::Client { class, .. } => *class,
-            other => panic!("expected a client error, got {other:?}"),
-        }
-    }
-
     /// Pins the commit rule: with a checkpoint written before every key and
     /// the feed confirming later units first, each write names a key whose
     /// units, its four ranges included, and every earlier key's units were
@@ -1092,7 +1078,7 @@ mod tests {
             _ => Reply::Confirm,
         });
         let err = rt.block_on(job.lister(feed, 2).run()).unwrap_err();
-        assert_eq!(class(&err), ErrorClass::Fatal, "{err}");
+        assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
         assert_eq!(rt.block_on(job.checkpoint()).as_deref(), Some("data/b"));
     }
 
@@ -1131,7 +1117,7 @@ mod tests {
         }
         assert_eq!(rejected, LISTER_PUBLISH_ATTEMPTS);
         let err = rt.block_on(run).unwrap().unwrap_err();
-        assert_eq!(class(&err), ErrorClass::Retryable, "{err}");
+        assert_eq!(err.class(), ErrorClass::Retryable, "{err}");
         assert_eq!(rt.block_on(job.checkpoint()).as_deref(), Some("data/b"));
         assert_eq!(job.checkpoint_writes(), ["data/b"]);
     }
@@ -1307,7 +1293,7 @@ mod tests {
                         .run(),
                 )
                 .unwrap_err();
-            assert_eq!(class(&err), ErrorClass::Fatal, "{err}");
+            assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
             let text = err.to_string();
             assert!(text.contains("checkpoint"), "{text}");
             assert!(!text.contains('\n'), "{text}");
@@ -1366,7 +1352,7 @@ mod tests {
         let err = rt
             .block_on(job.lister(feed, CHECKPOINT_EVERY).run())
             .unwrap_err();
-        assert_eq!(class(&err), ErrorClass::Fatal, "{err}");
+        assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
         assert!(
             err.to_string().contains("checkpoint at the job location"),
             "{err}"
@@ -1392,7 +1378,7 @@ mod tests {
         rt.block_on(job.put_rows(&["data/a", "data/b", "data/c"]));
         let feed = KeyedFeed::confirming(&job.events);
         let err = rt.block_on(job.lister(feed, 2).run()).unwrap_err();
-        assert_eq!(class(&err), ErrorClass::Retryable, "{err}");
+        assert_eq!(err.class(), ErrorClass::Retryable, "{err}");
 
         let again = job.rerun();
         assert_eq!(rt.block_on(again.checkpoint()).as_deref(), Some("data/b"));
@@ -1797,7 +1783,7 @@ mod tests {
         let err = rt
             .block_on(job.lister(feed, CHECKPOINT_EVERY).run())
             .unwrap_err();
-        assert_eq!(class(&err), ErrorClass::Retryable, "{err}");
+        assert_eq!(err.class(), ErrorClass::Retryable, "{err}");
 
         let again = job.rerun();
         let feed = KeyedFeed::confirming(&again.events);
@@ -1899,7 +1885,7 @@ mod tests {
                     .run(),
             )
             .unwrap_err();
-        assert_eq!(class(&err), ErrorClass::Fatal, "{err}");
+        assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
         assert!(feed.keys().is_empty());
         assert!(
             rt.block_on(job.ops.inner.head(&Path::from("jobs/a/fingerprint")))
@@ -1936,7 +1922,7 @@ mod tests {
                     .run(),
             )
             .unwrap_err();
-        assert_eq!(class(&err), ErrorClass::Fatal, "{err}");
+        assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
         assert!(feed.keys().is_empty());
         assert!(
             rt.block_on(job.ops.inner.head(&Path::from("jobs/a/end")))
@@ -2155,7 +2141,7 @@ mod tests {
                     .run(),
             )
             .unwrap_err();
-        assert_eq!(class(&err), ErrorClass::Fatal, "{err}");
+        assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
         let text = err.to_string();
         assert!(
             text.contains("end at the job location") && text.contains(LOCATION),
@@ -2188,7 +2174,7 @@ mod tests {
                     .run(),
             )
             .unwrap_err();
-        assert_eq!(class(&err), ErrorClass::Retryable, "{err}");
+        assert_eq!(err.class(), ErrorClass::Retryable, "{err}");
         let first = rt
             .block_on(job.end())
             .expect("the marker reached the store");
@@ -2305,7 +2291,7 @@ mod tests {
         let err = rt
             .block_on(job.lister(Arc::new(feed), CHECKPOINT_EVERY).run())
             .unwrap_err();
-        assert_eq!(class(&err), ErrorClass::Retryable, "{err}");
+        assert_eq!(err.class(), ErrorClass::Retryable, "{err}");
         assert!(err.to_string().contains("\"data/a\""), "{err}");
         assert_eq!(script.published().len(), LISTER_PUBLISH_ATTEMPTS as usize);
         assert_eq!(rt.block_on(job.end()), None);
@@ -2452,8 +2438,8 @@ mod tests {
             .with_location_store(Arc::clone(&job.ops) as Arc<dyn ObjectStore>)
             .list_once(&scripted_section(), Arc::new(feed))
             .unwrap_err();
-        assert_eq!(class(&err), ErrorClass::Fatal, "{err}");
-        assert!(err.to_string().contains("listing"), "{err}");
+        assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
+        assert!(err.reason().starts_with("listing data: "), "{err}");
         assert!(script.published().is_empty());
         assert_eq!(rt.block_on(job.end()), None);
     }
@@ -2474,7 +2460,7 @@ mod tests {
             .with_location_store(Arc::clone(&job.ops) as Arc<dyn ObjectStore>)
             .list_once(&scripted_section(), Arc::new(feed))
             .unwrap_err();
-        assert_eq!(class(&err), ErrorClass::Fatal, "{err}");
+        assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
         let shown = err.to_string();
         assert!(shown.contains("listing"), "{shown}");
         assert!(shown.contains("403 Forbidden"), "{shown}");
@@ -2574,7 +2560,7 @@ mod tests {
                     .run(),
             )
             .unwrap_err();
-        assert_eq!(class(&err), ErrorClass::Fatal, "{err}");
+        assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
         assert!(feed.keys().is_empty());
         assert!(
             rt.block_on(job.ops.inner.head(&Path::from("jobs/a/fingerprint")))
@@ -3116,5 +3102,23 @@ mod tests {
                 vec![keys[3].clone(), keys[4].clone()],
             ]
         );
+    }
+
+    /// Pins that a unit that cannot be minted fails the run as fatal. Direct,
+    /// since no listing can reach it.
+    #[test]
+    fn a_unit_that_cannot_be_minted_fails_the_run() {
+        let rt = runtime();
+        let store: Arc<dyn ObjectStore> = Arc::new(object_store::memory::InMemory::new());
+        let lister = lister(store, Arc::new(MemoryFeed::new()));
+        let err = rt
+            .block_on(lister.publish_unit(
+                Err(crate::split::split_id_for(std::iter::empty()).unwrap_err()),
+                &mut VecDeque::new(),
+                &mut Published::default(),
+            ))
+            .unwrap_err();
+        assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
+        assert!(err.reason().starts_with("minting a unit: cannot"), "{err}");
     }
 }

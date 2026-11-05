@@ -203,7 +203,7 @@ impl S3Lane {
     /// Record a terminal failure and return it. Later polls re-report it.
     fn fail(&mut self, class: ErrorClass, reason: String) -> SourceError {
         self.failed = Some((class, reason.clone()));
-        SourceError::Client { class, reason }
+        SourceError::new(class, reason)
     }
 
     /// Report object-level poison and go quiescent. Everything undelivered
@@ -408,11 +408,7 @@ impl S3Lane {
                 Ok(())
             }
             ChunkMsg::LaneFailed(SplitFailure::Fatal(e)) => {
-                let (class, reason) = match e {
-                    SourceError::Client { class, reason } => (class, reason),
-                    other => (ErrorClass::Fatal, other.to_string()),
-                };
-                Err(self.fail(class, reason))
+                Err(self.fail(e.class(), e.reason().to_owned()))
             }
         }
     }
@@ -467,10 +463,7 @@ impl SourceLane for S3Lane {
         timeout: Duration,
     ) -> Result<Option<S3Batch<'_>>, SourceError> {
         if let Some((class, reason)) = &self.failed {
-            return Err(SourceError::Client {
-                class: *class,
-                reason: reason.clone(),
-            });
+            return Err(SourceError::new(*class, reason.clone()));
         }
         if self.poisoned {
             // Quiescent until the control plane retires the lane; bounded
@@ -1052,15 +1045,14 @@ mod tests {
         let mut r = rig(None);
         send(
             &r,
-            ChunkMsg::LaneFailed(SplitFailure::Fatal(SourceError::Client {
-                class: ErrorClass::Fatal,
-                reason: "access denied".into(),
-            })),
+            ChunkMsg::LaneFailed(SplitFailure::Fatal(SourceError::fatal("access denied"))),
         );
         let err = r.lane.poll(512, Duration::from_millis(50)).unwrap_err();
-        assert!(err.to_string().contains("access denied"), "{err}");
+        assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
+        assert_eq!(err.reason(), "access denied");
         let again = r.lane.poll(512, Duration::from_millis(50)).unwrap_err();
-        assert!(again.to_string().contains("access denied"), "sticky");
+        assert_eq!(again.class(), ErrorClass::Fatal, "sticky: {again}");
+        assert_eq!(again.reason(), "access denied", "sticky");
         assert!(r.poison_rx.try_recv().is_err(), "fatal is not poison");
         assert!(!r.lane.finished(), "a failed lane is not finished");
     }
@@ -1074,6 +1066,7 @@ mod tests {
         // First poll returns no framed data: "partial" has no newline and
         // the object never ends, so nothing is emittable.
         let err = r.lane.poll(512, Duration::from_millis(50)).unwrap_err();
+        assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
         assert!(err.to_string().contains("mid-object"), "{err}");
         assert!(
             r.tracker.terminal().is_none(),
@@ -1377,5 +1370,21 @@ mod tests {
         let mut r = rig(None);
         assert!(r.lane.poll(512, Duration::ZERO).unwrap().is_none());
         assert!(!r.lane.finished());
+    }
+
+    /// Pins that the lane reports a fetcher's failure with the class and the
+    /// reason it was sent, on every poll.
+    #[test]
+    fn a_fetcher_failure_keeps_its_class_and_reason_on_every_poll() {
+        let mut r = rig(None);
+        send(
+            &r,
+            ChunkMsg::LaneFailed(SplitFailure::Fatal(SourceError::retryable("throttled"))),
+        );
+        for _ in 0..2 {
+            let err = r.lane.poll(512, Duration::from_millis(50)).unwrap_err();
+            assert_eq!(err.class(), ErrorClass::Retryable, "{err}");
+            assert_eq!(err.reason(), "throttled");
+        }
     }
 }

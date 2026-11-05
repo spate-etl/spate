@@ -10,7 +10,7 @@
 //! compares at the start and the end of a settling window.
 
 use crate::config::Compression;
-use crate::error::{bounded_reason, classify};
+use crate::error::store_error;
 use bytes::Bytes;
 use futures_util::StreamExt as _;
 use futures_util::future::{Either, select};
@@ -163,14 +163,11 @@ impl Location {
 
     /// A fatal error about `object` at this location.
     pub(crate) fn fatal(&self, object: &Path, why: impl fmt::Display) -> SourceError {
-        SourceError::Client {
-            class: ErrorClass::Fatal,
-            reason: format!(
-                "{} at the job location {}: {why}",
-                object_name(object),
-                self.shown()
-            ),
-        }
+        SourceError::fatal(format!(
+            "{} at the job location {}: {why}",
+            object_name(object),
+            self.shown()
+        ))
     }
 }
 
@@ -263,7 +260,8 @@ pub(crate) fn compare(location: &Location, mine: &str, stored: &[u8]) -> Result<
 ///
 /// Fatal for an object above [`LOCATION_OBJECT_MAX_BYTES`]: refused from its
 /// stated size before its body is read, or once its body runs past the cap
-/// when the stated size understates it. Otherwise classed by [`classify`].
+/// when the stated size understates it. Otherwise classed by
+/// [`classify`](crate::error::classify).
 pub(crate) async fn read_object(
     store: &dyn ObjectStore,
     location: &Location,
@@ -351,7 +349,8 @@ pub(crate) async fn read_end(
     }
 }
 
-/// An `object_store` failure on `object`, classed by [`classify`].
+/// An `object_store` failure on `object`, classed by
+/// [`classify`](crate::error::classify).
 pub(crate) fn io_error(location: &Location, object: &Path, e: &object_store::Error) -> SourceError {
     error_with(location, object, e, "")
 }
@@ -378,15 +377,15 @@ fn error_with(
     e: &object_store::Error,
     hint: &str,
 ) -> SourceError {
-    let text = bounded_reason(e);
-    SourceError::Client {
-        class: classify(e),
-        reason: format!(
-            "{} at the job location {}: {text}{hint}",
+    store_error(
+        format_args!(
+            "{} at the job location {}",
             object_name(object),
             location.shown(),
         ),
-    }
+        e,
+    )
+    .map_reason(|reason| reason + hint)
 }
 
 /// Wait for the lister's fingerprint at `location` and compare it with
@@ -467,7 +466,7 @@ pub(crate) async fn await_fingerprint(
         match outcome {
             Ok(Some(stored)) => return compare(location, mine, &stored),
             Ok(None) => last_error = None,
-            Err(e) if is_retryable(&e) => {
+            Err(e) if e.class() == ErrorClass::Retryable => {
                 tracing::warn!(error = %e, "reading the job fingerprint failed; retrying");
                 last_error = Some(e);
             }
@@ -479,16 +478,6 @@ pub(crate) async fn await_fingerprint(
             return Err(timed_out(&last_error));
         }
     }
-}
-
-fn is_retryable(e: &SourceError) -> bool {
-    matches!(
-        e,
-        SourceError::Client {
-            class: ErrorClass::Retryable,
-            ..
-        }
-    )
 }
 
 #[cfg(test)]
@@ -832,7 +821,7 @@ mod tests {
         let err = read_object(&store, &location, &location.fingerprint())
             .await
             .unwrap_err();
-        assert!(is_retryable(&err), "{err}");
+        assert_eq!(err.class(), ErrorClass::Retryable, "{err}");
     }
 
     /// Pins that the `s3:ListBucket` hint rides on a read's 403 only: never
@@ -849,10 +838,12 @@ mod tests {
             store: "S3",
             source: "connection reset".into(),
         };
+        let refused = read_error(&location, &object, &denied());
         assert!(
-            read_error(&location, &object, &denied())
-                .to_string()
-                .contains("s3:ListBucket")
+            refused.reason().ends_with(
+                "; on AWS S3 an absent object reads as 403 without `s3:ListBucket` on its bucket"
+            ),
+            "{refused}"
         );
         assert!(
             !read_error(&location, &object, &reset)
@@ -972,7 +963,7 @@ mod tests {
                 .await
                 .unwrap();
             let err = read_end(&store, &location).await.unwrap_err();
-            assert!(!is_retryable(&err), "{body:?}: {err}");
+            assert_eq!(err.class(), ErrorClass::Fatal, "{body:?}: {err}");
             let shown = err.to_string();
             assert!(
                 shown.contains("end") && shown.contains("s3://ops/jobs/a/"),
@@ -1027,7 +1018,7 @@ mod tests {
         .now_or_never()
         .expect("a fatal error ends the wait without waiting on the clock");
         let err = settled.unwrap_err();
-        assert!(!is_retryable(&err), "{err}");
+        assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
         assert!(err.to_string().contains("s3://ops/jobs/a/"), "{err}");
     }
 
@@ -1080,13 +1071,10 @@ mod tests {
         let err = read_object(&store, &location, &location.fingerprint())
             .await
             .unwrap_err();
-        let SourceError::Client { class, reason } = &err else {
-            panic!("not a client error: {err}");
-        };
-        assert_eq!(*class, ErrorClass::Fatal, "{err}");
+        assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
         assert!(
-            reason.contains("s3://ops/jobs/a/") && reason.contains("403"),
-            "{reason}"
+            err.reason().contains("s3://ops/jobs/a/") && err.reason().contains("403"),
+            "{err}"
         );
     }
 

@@ -45,6 +45,8 @@ const BROKERS: &str = "SPATE_TEST_PROBE_BROKERS";
 const TOPIC: &str = "tls-system-ca";
 const RECORDS: usize = 10;
 const CLIENT_BINARY: &str = "/spate/tls_system_ca";
+/// The nested build's target directory inside the builder container.
+const BUILDER_TARGET_DIR: &str = "/tmp/target";
 const HASHED_CA: &str = "/etc/ssl/certs/spate-test-ca.pem";
 
 /// A source, a sink and its readiness probe with the connector's CA default
@@ -306,6 +308,7 @@ fn passed(client: &Container<GenericImage>, arm: &str) -> String {
 /// from the host's cargo registry, and returns its path under `out`.
 ///
 /// The build runs as the owner of `out`, so the test can remove what it writes.
+#[allow(clippy::print_stderr)]
 fn build_system_linked(image: &str, tag: &str, out: &Path) -> PathBuf {
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
@@ -320,15 +323,19 @@ fn build_system_linked(image: &str, tag: &str, out: &Path) -> PathBuf {
             .with_access_mode(AccessMode::ReadOnly)
     };
     let owner = fs::metadata(out).expect("output directory");
-    let script = "set -eu
+    let script = format!(
+        "set -eu
         mkdir -p \"$CARGO_HOME/registry\"
         cp -R /registry/index /registry/cache \"$CARGO_HOME/registry/\"
         cargo test -p spate-kafka --features tls --test tls_system_ca --no-run --offline --locked
-        cp \"$(find /tmp/target/debug/deps -maxdepth 1 -type f -name 'tls_system_ca-*' ! -name '*.d')\" /out/tls_system_ca";
-    let builder = GenericImage::new(image, tag)
+        du -sh /registry/cache \"$CARGO_HOME\" {BUILDER_TARGET_DIR}
+        df -h /
+        cp \"$(find {BUILDER_TARGET_DIR}/debug/deps -maxdepth 1 -type f -name 'tls_system_ca-*' ! -name '*.d')\" /out/tls_system_ca"
+    );
+    let mut builder: ContainerRequest<GenericImage> = GenericImage::new(image, tag)
         .with_wait_for(WaitFor::exit(ExitWaitStrategy::new()))
         .with_entrypoint("sh")
-        .with_cmd(["-c", script])
+        .with_cmd(["-c", &script])
         // A cold build of librdkafka and every dev-dependency.
         .with_startup_timeout(Duration::from_secs(1800))
         .with_network("none")
@@ -347,10 +354,12 @@ fn build_system_linked(image: &str, tag: &str, out: &Path) -> PathBuf {
         .with_env_var("OPENSSL_NO_VENDOR", "1")
         .with_env_var("CARGO_HOME", "/tmp/cargo")
         .with_env_var("HOME", "/tmp")
-        .with_env_var("CARGO_TARGET_DIR", "/tmp/target")
-        .with_env_var("CARGO_TERM_COLOR", "never")
-        .start()
-        .expect("run the builder container");
+        .with_env_var("CARGO_TARGET_DIR", BUILDER_TARGET_DIR)
+        .with_env_var("CARGO_TERM_COLOR", "never");
+    for (key, value) in builder_profile_env(|key| std::env::var(key).ok()) {
+        builder = builder.with_env_var(key, value);
+    }
+    let builder = builder.start().expect("run the builder container");
     let code = builder.exit_code().expect("exit code");
     assert_eq!(
         code,
@@ -358,7 +367,51 @@ fn build_system_linked(image: &str, tag: &str, out: &Path) -> PathBuf {
         "system OpenSSL build failed: {}",
         String::from_utf8_lossy(&builder.stderr_to_vec().expect("stderr"))
     );
+    // A passing test's output is captured, so the figures reach the job log
+    // only through this line and the docker profile's `success-output`.
+    eprintln!(
+        "nested build disk figures:\n{}",
+        String::from_utf8_lossy(&builder.stdout_to_vec().expect("stdout"))
+    );
     out.join("tls_system_ca")
+}
+
+/// The debuginfo profile keys the process sets, with their values, for the
+/// builder to inherit: the builder container gets none of the host's
+/// environment, and cargo's default debuginfo fills the runner's disk.
+fn builder_profile_env(lookup: impl Fn(&str) -> Option<String>) -> Vec<(&'static str, String)> {
+    ["CARGO_PROFILE_DEV_DEBUG", "CARGO_PROFILE_TEST_DEBUG"]
+        .into_iter()
+        .filter_map(|key| lookup(key).map(|value| (key, value)))
+        .collect()
+}
+
+/// The builder inherits exactly the two profile keys the process sets, with
+/// their values, and nothing when it sets neither.
+#[test]
+fn builder_profile_env_forwards_the_host_level() {
+    fn host(set: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> Option<String> {
+        move |key| {
+            set.iter()
+                .find(|(k, _)| *k == key)
+                .map(|(_, v)| (*v).to_owned())
+        }
+    }
+    assert_eq!(
+        builder_profile_env(host(&[("CARGO_PROFILE_DEV_DEBUG", "line-tables-only")])),
+        vec![("CARGO_PROFILE_DEV_DEBUG", "line-tables-only".to_owned())],
+    );
+    assert_eq!(
+        builder_profile_env(host(&[
+            ("CARGO_PROFILE_DEV_DEBUG", "line-tables-only"),
+            ("CARGO_PROFILE_TEST_DEBUG", "full"),
+        ])),
+        vec![
+            ("CARGO_PROFILE_DEV_DEBUG", "line-tables-only".to_owned()),
+            ("CARGO_PROFILE_TEST_DEBUG", "full".to_owned()),
+        ],
+    );
+    assert!(builder_profile_env(host(&[])).is_empty());
 }
 
 /// A directory, emptied on creation and removed on drop.

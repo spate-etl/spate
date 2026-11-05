@@ -1,0 +1,16 @@
+name: Free disk space
+description: >
+  Removes the hosted runner's preinstalled toolchains and prints the free space
+  on `/` before and after. Run after checkout and before anything that writes
+  to the disk: the cache restore, the image pulls and the nested builds all
+  share it.
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: |
+        df -h /
+        sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                    /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
+        df -h /

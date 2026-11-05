@@ -447,10 +447,7 @@ fn startup_without_brokers_times_out_fatally() {
             // Transient transport errors are expected with no broker; the
             // runtime logs and keeps polling on Retryable, and so does this
             // loop. Only the fatal startup timeout ends it.
-            Err(SourceError::Client {
-                class: ErrorClass::Retryable,
-                ..
-            }) => false,
+            Err(e) if e.class() == ErrorClass::Retryable => false,
             Err(e) => {
                 assert!(
                     e.to_string().contains("no partition assignment"),

@@ -6,7 +6,7 @@ mod support;
 
 use rdkafka::mocking::MockCluster;
 use spate_core::checkpoint::Checkpointer;
-use spate_core::error::{ErrorClass, SourceError};
+use spate_core::error::ErrorClass;
 use spate_core::source::{PayloadBatch, Source, SourceCtx, SourceLane};
 use spate_kafka::{KafkaSource, KafkaSourceConfig};
 use std::collections::BTreeMap;
@@ -121,12 +121,9 @@ fn an_unreadable_batch_behind_the_fetcher_fails_the_lane() {
         drop(first);
 
         match lanes[0].poll(64, Duration::from_secs(5)) {
-            Err(SourceError::Client {
-                class: ErrorClass::Fatal,
-                reason,
-            }) => {
-                assert!(reason.contains("MagicByte 3"), "{reason}");
-                assert!(reason.contains("cannot read"), "{reason}");
+            Err(e) if e.class() == ErrorClass::Fatal => {
+                assert!(e.reason().contains("MagicByte 3"), "{e}");
+                assert!(e.reason().contains("cannot read"), "{e}");
             }
             Err(other) => panic!("{other}"),
             Ok(batch) => panic!(
@@ -181,10 +178,9 @@ fn an_unreadable_batch_at_the_tail_fails_the_next_poll() {
         let first = lanes[0].poll(2, Duration::from_secs(10)).expect("record 0");
         assert_eq!(offsets_of(first), Some(vec![0]));
         match lanes[0].poll(2, Duration::from_secs(10)) {
-            Err(SourceError::Client {
-                class: ErrorClass::Fatal,
-                reason,
-            }) => assert!(reason.contains("MagicByte 3"), "{reason}"),
+            Err(e) if e.class() == ErrorClass::Fatal => {
+                assert!(e.reason().contains("MagicByte 3"), "{e}");
+            }
             Err(other) => panic!("{other}"),
             Ok(b) => panic!("no error after the unreadable batch: {:?}", offsets_of(b)),
         }
@@ -217,12 +213,11 @@ fn an_unknown_codec_first_in_a_poll_names_the_codec() {
         match lanes[0].poll(64, Duration::from_millis(200)) {
             Ok(None) => false,
             Ok(b) => panic!("delivered an unreadable batch: {:?}", offsets_of(b)),
-            Err(SourceError::Client { class, reason: r }) => {
-                assert_eq!(class, ErrorClass::Fatal, "{r}");
-                reason = Some(r);
+            Err(e) => {
+                assert_eq!(e.class(), ErrorClass::Fatal, "{e}");
+                reason = Some(e.reason().to_owned());
                 true
             }
-            Err(other) => panic!("{other}"),
         }
     });
     let reason = reason.expect("reason");

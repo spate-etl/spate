@@ -408,13 +408,6 @@ mod tests {
         )
     }
 
-    fn class_of(err: &SinkError) -> ErrorClass {
-        match err {
-            SinkError::Client { class, .. } => *class,
-            other => panic!("unexpected error shape: {other:?}"),
-        }
-    }
-
     #[test]
     fn classify_table() {
         use RDKafkaErrorCode as C;
@@ -434,7 +427,7 @@ mod tests {
         ];
         for code in fatal {
             assert_eq!(
-                class_of(&classify(Some(code), "x")),
+                classify(Some(code), "x").class(),
                 ErrorClass::Fatal,
                 "{code:?} must be fatal"
             );
@@ -453,30 +446,30 @@ mod tests {
         ];
         for code in retryable {
             assert_eq!(
-                class_of(&classify(Some(code), "x")),
+                classify(Some(code), "x").class(),
                 ErrorClass::Retryable,
                 "{code:?} must be retryable"
             );
         }
         // Unknown / uncoded errors stay retryable (conservative: replays
         // duplicate, never lose).
-        assert_eq!(class_of(&classify(None, "x")), ErrorClass::Retryable);
+        assert_eq!(classify(None, "x").class(), ErrorClass::Retryable);
     }
 
     #[test]
     fn classify_actionable_messages() {
         let err = classify(Some(RDKafkaErrorCode::UnknownTopicOrPartition), "ctx");
-        let SinkError::Client { reason, .. } = err else {
-            unreachable!()
-        };
-        assert!(reason.contains("topic"), "actionable: {reason}");
+        assert!(err.reason().contains("topic"), "actionable: {err}");
 
         let err = classify(Some(RDKafkaErrorCode::MessageSizeTooLarge), "ctx");
-        let SinkError::Client { reason, .. } = err else {
-            unreachable!()
-        };
-        assert!(reason.contains("max_message_bytes"), "actionable: {reason}");
-        assert!(reason.contains("message.max.bytes"), "actionable: {reason}");
+        assert!(
+            err.reason().contains("max_message_bytes"),
+            "actionable: {err}"
+        );
+        assert!(
+            err.reason().contains("message.max.bytes"),
+            "actionable: {err}"
+        );
     }
 
     /// `report_error` makes a timed-out report fatal while a rejection is
@@ -496,18 +489,14 @@ mod tests {
             "delivery reports missing past the deadline (1s + 5s grace)",
         ] {
             let timed_out = Some(RDKafkaErrorCode::MessageTimedOut);
-            let SinkError::Client { class, reason: got } =
-                report_error(timed_out, reason, rejection.clone())
-            else {
-                unreachable!()
-            };
-            assert_eq!(class, ErrorClass::Fatal, "{got}");
+            let err = report_error(timed_out, reason, rejection.clone());
+            assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
             assert_eq!(
-                got,
+                err.reason(),
                 format!("{reason}; a broker rejected the connection 2s ago: {SASL_REFUSED}")
             );
             assert_eq!(
-                class_of(&report_error(timed_out, reason, None)),
+                report_error(timed_out, reason, None).class(),
                 ErrorClass::Retryable
             );
         }
@@ -526,13 +515,13 @@ mod tests {
             (RDKafkaErrorCode::MessageSizeTooLarge, ErrorClass::Fatal),
         ] {
             assert_eq!(
-                class_of(&report_error(Some(code), "x", rejection.clone())),
+                report_error(Some(code), "x", rejection.clone()).class(),
                 class,
                 "{code:?}"
             );
         }
         assert_eq!(
-            class_of(&report_error(None, "x", rejection)),
+            report_error(None, "x", rejection).class(),
             ErrorClass::Retryable
         );
     }
@@ -550,10 +539,32 @@ mod tests {
         };
         let writer = test_writer(false);
         let err = writer.parse_messages(&batch).unwrap_err();
-        assert_eq!(class_of(&err), ErrorClass::Fatal);
+        assert_eq!(err.class(), ErrorClass::Fatal);
 
         let ok_batch = SealedBatch { rows: 1, ..batch };
         assert_eq!(writer.parse_messages(&ok_batch).unwrap().len(), 1);
+    }
+
+    /// A frame that ends inside a message is a fatal framework bug.
+    #[test]
+    fn parse_messages_rejects_a_corrupt_frame() {
+        use bytes::BytesMut;
+        let mut frame = BytesMut::new();
+        write_message(&mut frame, None, std::iter::empty(), Some(b"p")).unwrap();
+        frame.truncate(frame.len() - 1);
+        let batch = SealedBatch {
+            frames: vec![frame.freeze()],
+            rows: 1,
+            bytes: 0,
+            dedup_token: "t".to_string(),
+        };
+        let err = test_writer(false).parse_messages(&batch).unwrap_err();
+        assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
+        assert!(
+            err.reason()
+                .starts_with("corrupted sink frame (framework bug): "),
+            "{err}"
+        );
     }
 
     /// Disabled statistics must register no families, and a missing Meter
@@ -613,14 +624,11 @@ mod tests {
                     .write_batch(&sink.endpoints[0][0], &one_row())
                     .await
                     .expect_err("no broker accepts the batch");
-                let SinkError::Client { class, reason } = err else {
-                    panic!("alert {alert}: unexpected error shape: {err:?}");
-                };
                 assert!(
-                    reason.contains(&format!("SSL alert number {alert} ")),
-                    "alert {alert}: {reason}"
+                    err.reason().contains(&format!("SSL alert number {alert} ")),
+                    "alert {alert}: {err}"
                 );
-                assert_eq!(class, ErrorClass::Fatal, "alert {alert}: {reason}");
+                assert_eq!(err.class(), ErrorClass::Fatal, "alert {alert}: {err}");
 
                 let err = sink
                     .writer
@@ -628,6 +636,11 @@ mod tests {
                     .await
                     .expect_err("no broker answers the probe");
                 let reason = err.to_string();
+                assert_eq!(
+                    err.class(),
+                    ErrorClass::Retryable,
+                    "alert {alert}: probe: {reason}"
+                );
                 assert!(
                     reason.contains("a broker rejected the connection")
                         && reason.contains(&format!("SSL alert number {alert} ")),

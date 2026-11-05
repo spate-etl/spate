@@ -431,20 +431,38 @@ mod tests {
         assert_eq!(payload, Some(br#"{"user":"ada","n":7}"#.to_vec()));
     }
 
+    /// A payload that fails to serialize is a record-level error.
+    #[test]
+    fn a_json_encoding_failure_is_record_level() {
+        struct Refused;
+        impl serde::Serialize for Refused {
+            fn serialize<S: serde::Serializer>(&self, _: S) -> Result<S::Ok, S::Error> {
+                Err(serde::ser::Error::custom("refused"))
+            }
+        }
+        let mut enc = KafkaEncoder::new(KafkaJsonEncoder::<Owned<Refused>>::new());
+        let err = enc
+            .encode(&record(Refused), &mut BytesMut::new())
+            .unwrap_err();
+        assert_eq!(err.class(), ErrorClass::RecordLevel, "{err}");
+        assert!(err.reason().starts_with("JSON encoding failed: "), "{err}");
+    }
+
     #[test]
     fn oversized_record_is_record_level() {
         let mut enc = KafkaEncoder::with_max_message_bytes(KafkaBytesEncoder::new(), 8);
         let err = enc
             .encode(&record(vec![0u8; 9]), &mut BytesMut::new())
             .unwrap_err();
-        match err {
-            SinkError::Client { class, reason } => {
-                assert_eq!(class, ErrorClass::RecordLevel);
-                assert!(reason.contains("max_message_bytes"), "actionable: {reason}");
-                assert!(reason.contains("message.max.bytes"), "actionable: {reason}");
-            }
-            other => panic!("unexpected error shape: {other:?}"),
-        }
+        assert_eq!(err.class(), ErrorClass::RecordLevel, "{err}");
+        assert!(
+            err.reason().contains("max_message_bytes"),
+            "actionable: {err}"
+        );
+        assert!(
+            err.reason().contains("message.max.bytes"),
+            "actionable: {err}"
+        );
     }
 
     #[test]
@@ -463,10 +481,7 @@ mod tests {
         let err = keyed
             .encode(&record(vec![0u8; 5]), &mut BytesMut::new())
             .unwrap_err();
-        match err {
-            SinkError::Client { class, .. } => assert_eq!(class, ErrorClass::RecordLevel),
-            other => panic!("unexpected error shape: {other:?}"),
-        }
+        assert_eq!(err.class(), ErrorClass::RecordLevel, "{err}");
     }
 
     #[test]
@@ -494,13 +509,8 @@ mod tests {
         let err = enc
             .encode(&record(vec![0u8; 5]), &mut BytesMut::new())
             .unwrap_err();
-        match err {
-            SinkError::Client { class, reason } => {
-                assert_eq!(class, ErrorClass::RecordLevel);
-                assert!(reason.contains("headers"), "actionable: {reason}");
-            }
-            other => panic!("unexpected error shape: {other:?}"),
-        }
+        assert_eq!(err.class(), ErrorClass::RecordLevel, "{err}");
+        assert!(err.reason().contains("headers"), "actionable: {err}");
     }
 
     #[test]

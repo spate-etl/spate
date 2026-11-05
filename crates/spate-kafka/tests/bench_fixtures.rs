@@ -183,13 +183,16 @@ fn the_guard_trips_on_the_header_bytes_not_the_payload() {
     );
     assert_eq!(run.accepted, 0, "the size guard accepted a stamped record");
     assert_eq!(run.framed, 0, "a rejected record was still framed");
-    match run.first_err.expect("a rejected record reports an error") {
-        SinkError::Client { class, reason } => {
-            assert_eq!(class, ErrorClass::RecordLevel, "the guard is not fatal");
-            assert!(reason.contains("max_message_bytes"), "actionable: {reason}");
-        }
-        other => panic!("unexpected error shape: {other:?}"),
-    }
+    let err = run.first_err.expect("a rejected record reports an error");
+    assert_eq!(
+        err.class(),
+        ErrorClass::RecordLevel,
+        "the guard is not fatal"
+    );
+    assert!(
+        err.reason().contains("max_message_bytes"),
+        "actionable: {err}"
+    );
 
     assert!(
         framed(

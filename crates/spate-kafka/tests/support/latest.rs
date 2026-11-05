@@ -169,6 +169,14 @@ impl Run {
         self.run.wait_exit(DEADLINE).expect("the run stops").ok();
     }
 
+    /// Wait up to `timeout` for a run that ends on its own.
+    pub(crate) fn wait_exit(
+        &self,
+        timeout: Duration,
+    ) -> Option<Result<spate_core::pipeline::ExitReport, spate_core::pipeline::StartError>> {
+        self.run.wait_exit(timeout)
+    }
+
     /// Wait for a run that stops on its own.
     fn stopped(&self) -> bool {
         self.run.wait_exit(Duration::from_millis(50)).is_some()

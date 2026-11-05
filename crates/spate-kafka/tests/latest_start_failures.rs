@@ -922,8 +922,8 @@ mod slow_listing {
     }
 }
 
-/// A coordinator that stops answering at the start commit, on a real broker
-/// behind a proxy that goes silent on the first OffsetCommit.
+/// A start commit left unanswered by a silent coordinator, against the run
+/// ending, on a real broker behind a proxy that holds every byte once told to.
 mod silent_coordinator {
     use crate::support;
 
@@ -935,15 +935,16 @@ mod silent_coordinator {
     use std::io::{Read as _, Write as _};
     use std::net::{TcpListener, TcpStream};
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicI16, Ordering};
     use std::sync::mpsc;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
     use support::latest;
     use testcontainers::core::{ContainerPort, WaitFor};
     use testcontainers::runners::SyncRunner;
     use testcontainers::{Container, GenericImage, ImageExt as _};
 
     const OFFSET_COMMIT: i16 = 8;
+    const OFFSET_FETCH: i16 = 9;
     const TOPIC: &str = "silent";
     /// Far past the startup deadline and every client timeout set below.
     const PATIENCE: Duration = Duration::from_secs(45);
@@ -952,6 +953,7 @@ mod silent_coordinator {
     /// byte in both directions, on old and new connections, until released.
     struct Proxy {
         addr: String,
+        trigger: Arc<AtomicI16>,
         armed: Arc<AtomicBool>,
         silent: Arc<AtomicBool>,
     }
@@ -966,6 +968,8 @@ mod silent_coordinator {
         fn on(listener: TcpListener, upstream: String) -> Proxy {
             let addr = listener.local_addr().expect("addr").to_string();
             let armed = Arc::new(AtomicBool::new(false));
+            let trigger = Arc::new(AtomicI16::new(OFFSET_COMMIT));
+            let t = Arc::clone(&trigger);
             let silent = Arc::new(AtomicBool::new(false));
             let (a, s) = (Arc::clone(&armed), Arc::clone(&silent));
             std::thread::spawn(move || {
@@ -979,6 +983,7 @@ mod silent_coordinator {
                     );
                     let (mut b_in, mut c_out) = (broker, client);
                     let (a1, s1, s2) = (Arc::clone(&a), Arc::clone(&s), Arc::clone(&s));
+                    let t1 = Arc::clone(&t);
                     std::thread::spawn(move || {
                         loop {
                             let mut len = [0u8; 4];
@@ -990,7 +995,7 @@ mod silent_coordinator {
                             if c_in.read_exact(&mut frame).is_err() {
                                 return;
                             }
-                            if i16::from_be_bytes([frame[0], frame[1]]) == OFFSET_COMMIT
+                            if i16::from_be_bytes([frame[0], frame[1]]) == t1.load(Ordering::SeqCst)
                                 && a1.swap(false, Ordering::SeqCst)
                             {
                                 s1.store(true, Ordering::SeqCst);
@@ -1018,6 +1023,7 @@ mod silent_coordinator {
             });
             Proxy {
                 addr,
+                trigger,
                 armed,
                 silent,
             }
@@ -1072,14 +1078,13 @@ mod silent_coordinator {
         cfg
     }
 
-    /// `startup_timeout` ends a start whose commit gets no answer, as the changelog
-    /// and the connector page say of a commit that keeps failing.
-    #[test]
-    #[ignore = "requires Docker"]
-    fn a_silent_coordinator_ends_at_the_startup_deadline() {
+    /// The source's deadline error, and then its drop, with the coordinator still
+    /// silent. Returns what the driver thread reported, in order.
+    fn deadline_then_drop(trigger: i16) -> (Vec<String>, Duration) {
         let (_container, proxy, brokers) = broker_behind_a_proxy();
         support::create_topic(&brokers, TOPIC, 1);
         let cfg = short_timeouts(&brokers, "deadline");
+        proxy.trigger.store(trigger, Ordering::SeqCst);
         proxy.armed.store(true, Ordering::SeqCst);
         let (tx, rx) = mpsc::channel();
         let driver = std::thread::spawn(move || {
@@ -1090,24 +1095,129 @@ mod silent_coordinator {
                 match source.poll_events(Duration::from_millis(200)) {
                     Ok(SourceEvent::LanesAssigned(_)) => {
                         tx.send("assigned".to_string()).expect("send");
-                        return;
+                        break;
                     }
                     Err(spate_core::error::SourceError::Client {
                         class: ErrorClass::Fatal,
                         reason,
                     }) => {
-                        tx.send(reason).expect("send");
-                        return;
+                        tx.send(format!("fatal: {reason}")).expect("send");
+                        break;
                     }
                     _ => {}
                 }
             }
+            drop(source);
+            tx.send("dropped".to_string()).expect("send");
         });
-        let outcome = rx.recv_timeout(PATIENCE);
+        let started = Instant::now();
+        let mut seen = Vec::new();
+        while seen.last().map(String::as_str) != Some("dropped") {
+            match rx.recv_timeout(PATIENCE.saturating_sub(started.elapsed())) {
+                Ok(line) => seen.push(line),
+                Err(_) => break,
+            }
+        }
+        let waited = started.elapsed();
         proxy.release();
         driver.join().expect("driver");
-        outcome.unwrap_or_else(|_| {
-            panic!("poll_events was still inside the start commit after {PATIENCE:?}, past a 15 s startup_timeout and a 5 s socket.timeout.ms")
+        (seen, waited)
+    }
+
+    /// A source whose start commit got no answer drops once the startup deadline has
+    /// ended it, with the coordinator still silent.
+    #[test]
+    #[ignore = "requires Docker"]
+    fn a_source_with_an_unanswered_start_commit_drops_at_the_startup_deadline() {
+        let (seen, waited) = deadline_then_drop(OFFSET_COMMIT);
+        assert_eq!(
+            seen.last().map(String::as_str),
+            Some("dropped"),
+            "after {waited:?}: {seen:?}"
+        );
+    }
+
+    /// Control: silent from the committed-offset lookup, so no commit is in flight.
+    #[test]
+    #[ignore = "requires Docker"]
+    fn a_source_silent_from_its_lookup_drops_at_the_startup_deadline() {
+        let (seen, waited) = deadline_then_drop(OFFSET_FETCH);
+        assert_eq!(
+            seen.last().map(String::as_str),
+            Some("dropped"),
+            "after {waited:?}: {seen:?}"
+        );
+    }
+
+    /// A pipeline whose start commit got no answer ends once `startup_timeout` has
+    /// failed it, with the coordinator still silent.
+    #[test]
+    #[ignore = "requires Docker"]
+    fn a_pipeline_with_an_unanswered_start_commit_ends_at_the_startup_deadline() {
+        let (_container, proxy, brokers) = broker_behind_a_proxy();
+        support::create_topic(&brokers, TOPIC, 1);
+        let cfg = short_timeouts(&brokers, "pipeline");
+        proxy.armed.store(true, Ordering::SeqCst);
+        let run = latest::Run::start(cfg);
+        let exit = run.wait_exit(PATIENCE);
+        let silent = proxy.silent.load(Ordering::SeqCst);
+        proxy.release();
+        assert!(
+            exit.is_some(),
+            "silent={silent}: the run had not ended {PATIENCE:?} after its start, past a 15 s startup_timeout"
+        );
+    }
+
+    /// A source drops once the startup deadline has ended it, with its broker killed
+    /// at the start commit.
+    #[test]
+    #[ignore = "requires Docker"]
+    fn a_source_whose_broker_dies_at_the_start_commit_drops_at_the_startup_deadline() {
+        let (container, proxy, brokers) = broker_behind_a_proxy();
+        support::create_topic(&brokers, TOPIC, 1);
+        let cfg = short_timeouts(&brokers, "killed");
+        proxy.armed.store(true, Ordering::SeqCst);
+        let (tx, rx) = mpsc::channel();
+        let driver = std::thread::spawn(move || {
+            let cp = Checkpointer::new();
+            let mut source = KafkaSource::new(cfg);
+            source.open(SourceCtx::new(cp.handle())).expect("open");
+            loop {
+                match source.poll_events(Duration::from_millis(200)) {
+                    Ok(SourceEvent::LanesAssigned(_)) => {
+                        tx.send("assigned".to_string()).expect("send");
+                        break;
+                    }
+                    Err(spate_core::error::SourceError::Client {
+                        class: ErrorClass::Fatal,
+                        reason,
+                    }) => {
+                        tx.send(format!("fatal: {reason}")).expect("send");
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            drop(source);
+            tx.send("dropped".to_string()).expect("send");
         });
+        spate_test::wait_until(Duration::from_secs(60), "the start commit", || {
+            proxy.silent.load(Ordering::SeqCst)
+        });
+        container.stop_with_timeout(Some(0)).expect("kill");
+        proxy.release();
+        let started = Instant::now();
+        let mut seen = Vec::new();
+        while seen.last().map(String::as_str) != Some("dropped") {
+            match rx.recv_timeout(PATIENCE.saturating_sub(started.elapsed())) {
+                Ok(line) => seen.push(line),
+                Err(_) => break,
+            }
+        }
+        let waited = started.elapsed();
+        let ended = seen.last().map(String::as_str) == Some("dropped");
+        // The driver is left behind on failure: its drop has no end with the broker gone.
+        assert!(ended, "after {waited:?}: {seen:?}");
+        driver.join().expect("driver");
     }
 }

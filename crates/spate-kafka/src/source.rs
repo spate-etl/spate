@@ -126,8 +126,8 @@ use spate_core::hash::{FastMap, FastSet};
 use spate_core::metrics::SourceMetrics;
 use spate_core::record::PartitionId;
 use spate_core::source::{DrainBarrier, LaneId, Source, SourceCtx, SourceEvent};
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 /// Bound on the committed-offset reads made before one assignment, shared by
@@ -276,6 +276,10 @@ pub struct KafkaSource {
     pending_error: Option<(usize, rdkafka::error::RDKafkaErrorCode)>,
     /// When the first held assignment of the current rebalance arrived.
     hold_since: Option<Instant>,
+    /// A start commit went unanswered inside its bound. Consumer close waits for
+    /// every outstanding commit, and one to a silent coordinator stays outstanding
+    /// for as long as the coordinator is silent.
+    commit_unanswered: bool,
     /// When an accept that could not settle a start may run again. `None`
     /// outside such a wait, and cleared when an accept gets past the starts.
     start_retry_at: Option<Instant>,
@@ -411,6 +415,7 @@ impl KafkaSource {
             after_drain: None,
             pending_error: None,
             hold_since: None,
+            commit_unanswered: false,
             start_retry_at: None,
             poll_start: 0,
             assignment_wait: None,
@@ -747,6 +752,9 @@ impl KafkaSource {
             if let Some(commit) = commit
                 && let Err(e) = commit.wait(until.saturating_duration_since(Instant::now()))
             {
+                if e.rdkafka_error_code() == Some(RDKafkaErrorCode::OperationTimedOut) {
+                    self.commit_unanswered = true;
+                }
                 match start_failure("committing a start offset", &e)? {
                     StartFailure::Discard => {
                         self.discard_refused(k, &tpl)?;
@@ -1991,6 +1999,34 @@ impl Drop for KafkaSource {
             if let Err(e) = member.consumer.unassign() {
                 tracing::warn!(consumer = k, error = %e, "unassign during source teardown failed");
             }
+        }
+        if !self.commit_unanswered {
+            return;
+        }
+        // Close waits for an unanswered commit with no bound, so it runs off this
+        // thread and the pipeline still ends when its deadline says so.
+        let members = std::mem::take(&mut self.members);
+        let (closed, wait) = mpsc::channel();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "joining would wait out the silence; the thread ends when close does"
+        )]
+        let spawned = std::thread::Builder::new()
+            .name("spate-kafka-close".to_owned())
+            .spawn(move || {
+                drop(members);
+                let _ = closed.send(());
+            });
+        match spawned {
+            Ok(_) => {
+                if wait.recv_timeout(START_COMMIT_TIMEOUT).is_err() {
+                    tracing::warn!(
+                        topic = %self.config.topic,
+                        "a start commit has no answer; its consumer closes in the background"
+                    );
+                }
+            }
+            Err(e) => tracing::warn!(error = %e, "could not start the consumers' close"),
         }
     }
 }

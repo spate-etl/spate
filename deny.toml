@@ -11,6 +11,10 @@ yanked = "deny"
 # an id, so a new advisory against either copy still fails the check, and an
 # ignore that stops matching when #562 lands is reported as unused.
 ignore = [
+    # astral-tokio-tar has no patched release, and testcontainers, a dev-dependency,
+    # is its only path. Remove this entry in the change that moves testcontainers to
+    # a release without the crate, so the id stops hiding a crate outside the graph.
+    { id = "RUSTSEC-2026-0440", reason = "astral-tokio-tar is unmaintained with no patched release, and reaches this tree only through testcontainers, a dev-dependency of the test suites" },
     { id = "RUSTSEC-2026-0391", reason = "clickhouse's zstd 0.13.3 calls no `with_context` constructor" },
     { id = "RUSTSEC-2026-0398", reason = "the `seekable` feature is off" },
     { id = "RUSTSEC-2026-0403", reason = "clickhouse's response decoder writes into an initialized slice and returns the error" },

@@ -236,6 +236,10 @@ A few readings differ:
   figure until the next record or marker.
 - After a poll error, the source does not pass a marker until it delivers
   another record.
+- A fetch answered out of range can take a partition back. If that happens
+  within one `checkpoint.interval` of passing a marker, or while a commit is
+  being retried, the source does not pass a later marker until it delivers
+  another record, and lag reads above 0 until then.
 - After a message reaches the main queue, which the source logs at `WARN` as a
   rewind, that consumer does not pass a marker again until the process restarts.
 

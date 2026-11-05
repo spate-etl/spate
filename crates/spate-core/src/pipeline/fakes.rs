@@ -8,7 +8,7 @@ use crate::config::{
     AdminSection, BackpressureSection, CheckpointSection, ComponentConfig, MetricsExporter,
     MetricsSection, PinningMode, PipelineConfig, PipelineSection,
 };
-use crate::error::{ErrorClass, FatalError, SourceError};
+use crate::error::{FatalError, SourceError};
 use crate::feed::memory::MemoryFeed;
 use crate::ops::{BlockReason, PushOutcome, RunnableChain};
 use crate::pipeline::runtime::{RuntimeOptions, ShutdownHandle};
@@ -184,10 +184,7 @@ impl Source for FakeSource {
         {
             let mut log = self.shared.lock().unwrap();
             if log.fail_open {
-                return Err(SourceError::Client {
-                    class: ErrorClass::Fatal,
-                    reason: "scripted open failure".into(),
-                });
+                return Err(SourceError::fatal("scripted open failure"));
             }
             log.opened = true;
             log.stage_metrics_attached = ctx.stage_metrics.is_some();
@@ -295,23 +292,14 @@ impl Source for FakeSource {
         }
         if self.stop.is_set() {
             log.stopped_commits.push(watermarks.to_vec());
-            return Err(SourceError::Client {
-                class: ErrorClass::Retryable,
-                reason: "the stop began during this commit".into(),
-            });
+            return Err(SourceError::retryable("the stop began during this commit"));
         }
         if log.fatal_commits {
-            return Err(SourceError::Client {
-                class: ErrorClass::Fatal,
-                reason: "scripted fatal commit failure".into(),
-            });
+            return Err(SourceError::fatal("scripted fatal commit failure"));
         }
         if log.fail_commits {
             log.log.push("commit-failed".into());
-            return Err(SourceError::Client {
-                class: ErrorClass::Retryable,
-                reason: "scripted commit failure".into(),
-            });
+            return Err(SourceError::retryable("scripted commit failure"));
         }
         for &(p, o) in watermarks {
             let slot = log.committed.entry(p).or_insert(o);
@@ -328,10 +316,7 @@ impl Source for FakeSource {
         log.flush_commits += 1;
         log.log.push("flush_commits".into());
         if log.fail_commits {
-            return Err(SourceError::Client {
-                class: ErrorClass::Retryable,
-                reason: "scripted flush failure".into(),
-            });
+            return Err(SourceError::retryable("scripted flush failure"));
         }
         Ok(())
     }

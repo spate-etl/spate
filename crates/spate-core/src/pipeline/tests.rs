@@ -11,7 +11,7 @@
 use super::fakes::*;
 use super::*;
 use crate::config::PipelineConfig;
-use crate::error::{ErrorClass, SourceError};
+use crate::error::SourceError;
 use crate::feed::memory::MemoryFeed;
 use crate::metrics::names;
 use crate::ops::RunnableChain;
@@ -2144,33 +2144,6 @@ fn a_non_fatal_poll_events_error_keeps_the_run_going() {
             report.state
         );
     }
-}
-
-#[test]
-fn source_error_classification() {
-    let retryable = SourceError::Client {
-        class: ErrorClass::Retryable,
-        reason: "hiccup".into(),
-    };
-    let fatal = SourceError::Client {
-        class: ErrorClass::Fatal,
-        reason: "broken".into(),
-    };
-    // Compile-time association test of the taxonomy used by the driver.
-    assert!(matches!(
-        retryable,
-        SourceError::Client {
-            class: ErrorClass::Retryable,
-            ..
-        }
-    ));
-    assert!(matches!(
-        fatal,
-        SourceError::Client {
-            class: ErrorClass::Fatal,
-            ..
-        }
-    ));
 }
 
 /// If the controller thread panics (here, a source whose `poll_events`

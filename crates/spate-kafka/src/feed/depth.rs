@@ -8,6 +8,7 @@
 //! interval (INV-2). [`Offsets`] is the seam the unit tests script.
 
 use super::{Core, Topics};
+use crate::client::list_offsets;
 use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::error::{KafkaError, RDKafkaErrorCode};
 use rdkafka::{Offset, TopicPartitionList};
@@ -282,14 +283,12 @@ impl Offsets for Brokers {
     }
 
     fn listed(&self, partitions: &[Partition], at: Offset) -> Result<Vec<i64>, FeedError> {
-        let tpl = self.list(partitions, at)?;
+        let mut read = self.list(partitions, at)?;
         let doing = match at {
             Offset::Beginning => "reading log start offsets",
             _ => "reading end offsets",
         };
-        let read = self
-            .consumer
-            .offsets_for_times(tpl, REQUEST_BOUND)
+        list_offsets(self.consumer.client(), &mut read, REQUEST_BOUND)
             .map_err(|e| error(&format!("{doing} of {}", named(partitions)), &e))?;
         elements(&read, partitions, doing)?
             .into_iter()

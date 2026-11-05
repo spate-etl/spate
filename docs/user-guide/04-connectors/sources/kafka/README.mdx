@@ -55,7 +55,7 @@ source:
 | `consumers` | int | `1` | Consumers this process runs, at least 1. Each is a separate member of `group_id` that owns its own share of the partitions. Raise it when one client's fetch path bounds the source; see [More consumers in one process](./performance-tuning.mdx#more-consumers-in-one-process). Static membership (`group.instance.id`) requires `1`. |
 | `commit_interval` | duration | `5s` | How often stored offsets are auto-committed (maps to librdkafka `auto.commit.interval.ms`). A value under `1ms` or above `24h` is refused. |
 | `startup_timeout` | duration | `30s` | How long to wait for the first partition assignment before the source reports a fatal startup error (fail fast on unreachable brokers or a wrong topic). The error names the last consumer error, such as a refused connection, and how long ago it arrived. `0s` disables it, and the source waits for as long as the group takes. |
-| `assignment_timeout` | duration | `5m` | How long the source may hold no partitions, after having held some, before it reports a fatal error. The window covers all of the source's consumers together, so a consumer the group assigns nothing keeps running while another holds partitions. The deadline counts from the moment ownership is released, and any accepted assignment clears it, an empty one included, so a member the group assigns nothing keeps running. The error names the last consumer error and how long ago it arrived. `0s` disables it. |
+| `assignment_timeout` | duration | `5m` | How long the source may hold no partitions, after having held some, before it reports a fatal error. The window covers all of the source's consumers together, so a consumer the group assigns nothing keeps running while another holds partitions. The deadline counts from the moment ownership is released, and any accepted assignment clears it, an empty one included, so a member the group assigns nothing keeps running. An empty assignment accepted beside an offer the source discarded clears neither deadline. The error names the last consumer error and how long ago it arrived. `0s` disables it. |
 | `statistics_interval` | duration | `5s` | librdkafka statistics emission interval, feeding the lag metrics and the `spate_kafka_source_*` families (broker health, latency, queue saturation, group stability). `0s` disables statistics and those families with it — **including `spate_source_lag_records`**, which has no other source: the series then does not exist at all (the source logs a warning at startup). Consumer lag is a golden signal, and disabling statistics gives it up. A non-zero value under `1ms` or above `24h` is refused. |
 | `rdkafka` | string map | `{}` | Raw librdkafka properties, applied verbatim after validation — see below. |
 
@@ -100,7 +100,7 @@ defaults. The passthrough may still set each of them, and its value wins.
 (full) rebalances.
 
 librdkafka reads `topic.auto.offset.reset` as `auto.offset.reset`, and so does
-the source when it starts a partition with no committed offset. A configuration
+the source. A configuration
 that sets both fails at load, because the two keys reach librdkafka in no set
 order.
 
@@ -162,20 +162,34 @@ The framework never uses librdkafka's position-based auto-commit. Instead:
   replay instead of a clean release.
 - The client refuses a commit from a member the group has removed, since another
   member may already own its partitions. The refusal is logged and the
-  revocation continues. A partition with a commit is redelivered from it.
-- A partition the group has never committed starts under `auto.offset.reset` at
-  every assignment. Under `earliest` its records are redelivered. Under
-  `latest`, the default, it starts at its end each time, and the next commit
-  moves past every record written before that assignment. Those records are
-  never written if an earlier member read them and could not commit, or if they
-  arrived while no member held the partition: during a restart, during a
-  rebalance, or on a partition added to the topic. The exposure lasts until the
-  partition's first commit, which needs a first record and a sink that
-  acknowledges it. Set `auto.offset.reset: earliest` where that loss matters.
-- A committed offset below the log start, which retention causes when a group
-  stops or lags, also falls under `auto.offset.reset`. Under `latest` the source
-  moves to the end, past records the log still holds, and the next commit moves
-  past them. Under `earliest` it moves to the log start.
+  revocation continues, and the partition is redelivered from its committed
+  offset.
+- A partition with no committed offset starts under `auto.offset.reset`. Under
+  `latest`, the default, the source reads the partition's end and commits it
+  synchronously before any lane reads it. That commit acknowledges nothing.
+  Every later start resumes from a committed offset, so a restart, a process
+  joining and a member the group removes all read from that position. A failed
+  read or commit holds the assignment and retries it, until `startup_timeout` or
+  `assignment_timeout` ends the run, and a permanent refusal such as a failed
+  group authorization stops the run at once. A member the group has removed, or
+  whose commit it refuses during a rebalance, gets no lanes and rejoins. Under
+  `earliest` the partition starts at its beginning.
+  Under `error` librdkafka applies the policy.
+- A failed read of the committed offsets under `earliest` or `error` leaves the
+  start to librdkafka.
+- A held assignment from a generation the group has left is answered empty, and
+  the consumer rejoins after one more drain.
+
+:::danger
+Under `latest` a partition added to the topic starts at its end, and records
+written before the group first assigned it are skipped.
+`topic.metadata.refresh.interval.ms` defaults to five minutes. A group left
+empty past its offset retention, `offsets.retention.minutes` on Apache Kafka and
+`group_offset_retention_sec` on Redpanda, seven days by default on each, starts
+at the end again. A committed offset below the log start moves to the end, past
+records the log still holds. Set `auto.offset.reset: earliest` where that loss
+matters.
+:::
 
 A message librdkafka reports as corrupt, as `check.crcs` detects, fails the
 source with a fatal error, because librdkafka can read on past it
@@ -183,10 +197,9 @@ source with a fatal error, because librdkafka can read on past it
 says when). Records read before it that the sink has not yet written are not
 acknowledged. After a restart, a partition with a committed offset is read from
 it, and the source stops again at the same message until the group's committed
-offset is moved past it. A partition with no committed offset starts where
-`auto.offset.reset` says: under `earliest` the source stops again at the same
-message, and under `latest`, the default, it starts at the end of the partition
-and never reads the corrupt message or the unwritten records before it.
+offset is moved past it. Under `latest` a partition the group has been assigned
+has one. A partition with no committed offset under `earliest` stops at the same
+message too.
 
 This is the mechanical heart of at-least-once; see
 [Delivery guarantees](../../../02-concepts/02-delivery-guarantees.mdx).

@@ -30,6 +30,38 @@ pub(crate) fn redacted_client_error(e: &KafkaError) -> String {
     }
 }
 
+/// What a failure to settle a partition's start position does to the offer it
+/// belongs to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StartFailure {
+    /// The group has moved past this member or waits for it to rejoin, so the
+    /// offer is discarded.
+    Discard,
+    /// The offer is kept and tried again.
+    Retry,
+    /// The run stops.
+    Fatal,
+}
+
+/// Classify an error from reading, listing or committing a start position.
+///
+/// Reads as before startup: a broker can answer `UnknownTopicOrPartition` for a
+/// partition just added to the topic, and a deleted topic fails the source at
+/// its next poll or at the assignment deadline.
+pub(crate) fn classify_start_error(code: RDKafkaErrorCode) -> StartFailure {
+    match code {
+        // A rebalance can wait on this member, which rejoins only once its offer
+        // is answered, so retrying while holding the offer can never clear it.
+        RDKafkaErrorCode::IllegalGeneration
+        | RDKafkaErrorCode::UnknownMemberId
+        | RDKafkaErrorCode::RebalanceInProgress => StartFailure::Discard,
+        code => match classify_consumer_error(code, false) {
+            ErrorClass::Fatal => StartFailure::Fatal,
+            _ => StartFailure::Retry,
+        },
+    }
+}
+
 /// Classify a single librdkafka consumer/queue error code.
 ///
 /// `after_startup` gates [`RDKafkaErrorCode::UnknownTopicOrPartition`]:
@@ -161,6 +193,34 @@ mod tests {
     use super::*;
     use crate::client::testing::{Raw as _, raw_config};
     use rdkafka::error::RDKafkaErrorCode as C;
+
+    /// A start the group has moved past is discarded, a permanent code stops
+    /// the run, and anything else is kept and retried.
+    #[test]
+    fn classify_start_error_sorts_each_code() {
+        for (code, class) in [
+            (C::IllegalGeneration, StartFailure::Discard),
+            (C::UnknownMemberId, StartFailure::Discard),
+            (C::RebalanceInProgress, StartFailure::Discard),
+            (C::NotCoordinator, StartFailure::Retry),
+            (C::CoordinatorNotAvailable, StartFailure::Retry),
+            (C::CoordinatorLoadInProgress, StartFailure::Retry),
+            (C::RequestTimedOut, StartFailure::Retry),
+            (C::OperationTimedOut, StartFailure::Retry),
+            (C::BrokerTransportFailure, StartFailure::Retry),
+            (C::WaitingForCoordinator, StartFailure::Retry),
+            (C::LeaderNotAvailable, StartFailure::Retry),
+            (C::NotLeaderForPartition, StartFailure::Retry),
+            (C::OffsetNotAvailable, StartFailure::Retry),
+            (C::NoOffset, StartFailure::Retry),
+            (C::GroupAuthorizationFailed, StartFailure::Fatal),
+            (C::TopicAuthorizationFailed, StartFailure::Fatal),
+            (C::UnsupportedVersion, StartFailure::Fatal),
+            (C::UnknownTopicOrPartition, StartFailure::Retry),
+        ] {
+            assert_eq!(classify_start_error(code), class, "{code:?}");
+        }
+    }
 
     /// Rejected values never reach the rendered error, whatever shape
     /// librdkafka quotes them in, and the property key stays.

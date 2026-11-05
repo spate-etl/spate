@@ -159,7 +159,7 @@ fn kafka_to_kafka_split_round_trip() {
     wait_until(
         Duration::from_secs(30),
         "source group committed all",
-        || support::committed_by(&probe, IN_TOPIC, 1) == [rdkafka::Offset::Offset(TOTAL as i64)],
+        || support::committed(&probe, IN_TOPIC, 1) == [rdkafka::Offset::Offset(TOTAL as i64)],
     );
 
     shutdown.trigger();

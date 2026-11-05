@@ -2024,6 +2024,39 @@ fn a_fatal_commit_fails_the_run() {
     );
 }
 
+/// A retryable or record-level commit error is retried on a later tick:
+/// the position reaches the source and the run completes.
+#[test]
+fn a_non_fatal_commit_error_is_retried() {
+    for error in [
+        SourceError::retryable("scripted commit failure"),
+        SourceError::record_level("scripted commit failure"),
+    ] {
+        let class = error.class();
+        let h = start(|shared, log| FakeChain {
+            shared,
+            log,
+            mode: ChainMode::Ok,
+            batches_seen: 0,
+        });
+        h.shared.lock().unwrap().commit_errors.push_back(error);
+        assign_one_lane(&h, std::slice::from_ref(&(0..10)));
+        wait_for("the retried commit lands", FINISH_DEADLINE, || {
+            h.join.is_finished()
+                || h.shared.lock().unwrap().committed.get(&PartitionId(0)) == Some(&10)
+        });
+        assert!(h.shared.lock().unwrap().commit_errors.is_empty());
+        h.script.lock().unwrap().push_back(Script::Drained);
+        wait_for("the run ends", FINISH_DEADLINE, || h.join.is_finished());
+        let report = h.join.join().unwrap().unwrap();
+        assert!(
+            matches!(report.state, ExitState::Completed),
+            "{class:?}: {:?}",
+            report.state
+        );
+    }
+}
+
 /// The `spate_checkpoint_commits_total` value for one pipeline and outcome.
 fn commits_counter(rendered: &str, pipeline_name: &str, outcome: &str) -> Option<f64> {
     rendered

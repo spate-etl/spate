@@ -3089,3 +3089,48 @@ async fn a_zero_inflight_limit_panics_at_spawn() {
     cfg.inflight.max_per_shard = 0;
     let _f = fixture(1, 1, cfg, 16);
 }
+
+/// `spate_sink_errors_total` counts each failed write under the class its
+/// error carries: a retryable attempt and then a record-level one land one
+/// each on `retryable` and `record_level`, and none on `fatal`.
+#[test]
+fn sink_errors_metric_counts_each_write_error_under_its_class() {
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    metrics::with_local_recorder(&recorder, || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        rt.block_on(async {
+            let fx = fixture(1, 1, small_batches(), 16);
+            fx.writer.script(
+                0,
+                0,
+                [
+                    Outcome::Fail(ErrorClass::Retryable, Duration::ZERO),
+                    Outcome::Fail(ErrorClass::RecordLevel, Duration::ZERO),
+                ],
+            );
+            let (ack, ack_rx) = AckRef::test_pair();
+            fx.queues.try_send(0, chunk(1, 1, &ack)).expect("send");
+            drop(ack);
+            drop(fx.queues);
+            let report = fx.pool.drain(Duration::from_secs(5)).await;
+            assert_eq!(report.abandoned, 1);
+            assert_eq!(fx.writer.calls().len(), 2, "one retry, then abandon");
+            assert_eq!(ack_rx.try_recv().unwrap().status, AckStatus::Failed);
+        });
+    });
+    let rendered = handle.render();
+    let errors = |class: &str| {
+        metric_value(
+            &rendered,
+            "spate_sink_errors_total",
+            &format!("error_type=\"{class}\""),
+        )
+    };
+    assert_eq!(errors("retryable"), 1.0, "{rendered}");
+    assert_eq!(errors("record_level"), 1.0, "{rendered}");
+    assert_eq!(errors("fatal"), 0.0, "{rendered}");
+}

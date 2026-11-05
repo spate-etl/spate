@@ -65,6 +65,9 @@ pub(crate) struct SourceLog {
     pub(crate) fatal_commits: bool,
     /// Errors the next lane polls return, one per poll, before any batch.
     pub(crate) lane_poll_errors: VecDeque<SourceError>,
+    /// Errors the next commits return, one per commit, before recording any
+    /// position.
+    pub(crate) commit_errors: VecDeque<SourceError>,
     /// Interleaved ordering log shared with the chain fake.
     pub(crate) log: Vec<String>,
     /// Taken and triggered by the next `commit` with a position, modeling a
@@ -296,6 +299,9 @@ impl Source for FakeSource {
         }
         if log.fatal_commits {
             return Err(SourceError::fatal("scripted fatal commit failure"));
+        }
+        if let Some(e) = log.commit_errors.pop_front() {
+            return Err(e);
         }
         if log.fail_commits {
             log.log.push("commit-failed".into());

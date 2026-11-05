@@ -564,10 +564,11 @@ fn real_broker_a_commit_past_a_marker_restarts_at_the_next_record() {
 }
 
 /// Under `latest` a group that starts past everything has served no op, so its
-/// position is not set and it commits nothing.
+/// position is not set and its lane retires nothing. The committed offset is the
+/// start the source committed on assignment.
 #[test]
 #[ignore = "requires Docker"]
-fn real_broker_latest_on_a_marker_only_partition_commits_nothing() {
+fn real_broker_latest_on_a_marker_only_partition_retires_nothing() {
     let (_container, brokers) = transaction_broker();
     let _ = produce_transaction(&brokers, TOPIC, 5, "kept", Transaction::Commit);
     let mut cfg = config(&brokers, "latest");
@@ -581,7 +582,7 @@ fn real_broker_latest_on_a_marker_only_partition_commits_nothing() {
     assert!(watched.commit().is_empty());
     assert_eq!(
         support::committed_by(&brokers, "latest", TOPIC, 1),
-        [rdkafka::Offset::Invalid]
+        [rdkafka::Offset::Offset(6)]
     );
 }
 

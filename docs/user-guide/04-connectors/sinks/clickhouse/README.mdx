@@ -37,9 +37,12 @@ To write to **several tables** from one pipeline (one per record kind), see
 The `sink: { clickhouse: ... }` section deserializes into
 `ClickHouseSinkConfig`
 ([`spate-clickhouse/src/config.rs`](repo:crates/spate-clickhouse/src/config.rs));
-unknown fields are rejected with the offending key, and the retry/breaker
-values are validated at load (a bad multiplier or zero threshold fails startup
-instead of the write loop). The insert column list is not one of its keys:
+unknown fields are rejected with the offending key, and the `batch`,
+`inflight`, `retry` and `breaker` sections are validated at load against the
+framework's
+[sink-pool rules](../../../07-reference/configuration.mdx#sink-pool), so a
+refused value fails startup with an error naming the key. The insert column
+list is not one of its keys:
 `#[derive(ClickHouseRow)]` on the row struct generates it from field
 declaration order, honoring `#[serde(rename = "...")]` for a flattened
 `Nested` column's dotted `outer.inner` name, and rejects a duplicate or

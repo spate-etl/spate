@@ -427,12 +427,7 @@ impl S3Source {
                 (store, path, None, bucket, resumable)
             }
             None => {
-                let built = build_store(&url, &self.config.store).map_err(|e| {
-                    SourceError::fatal(format!(
-                        "building the object store for {}: {e}",
-                        self.config.url
-                    ))
-                })?;
+                let built = store_named(&url, &self.config.store, &self.config.url)?;
                 (
                     Arc::from(built.store),
                     built.prefix,
@@ -509,14 +504,12 @@ impl S3Source {
         if let Some(store) = &self.location_store {
             return Ok(Arc::clone(store));
         }
-        build_store(location.url(), &self.config.store)
-            .map(|built| Arc::from(built.store))
-            .map_err(|e| {
-                SourceError::fatal(format!(
-                    "building the object store for the job location {}: {e}",
-                    location.shown()
-                ))
-            })
+        store_named(
+            location.url(),
+            &self.config.store,
+            format_args!("the job location {}", location.shown()),
+        )
+        .map(|built| Arc::from(built.store))
     }
 }
 
@@ -844,6 +837,16 @@ fn parse(url: &str) -> Result<Url, SourceError> {
 
 fn opts(map: &std::collections::BTreeMap<String, String>) -> Vec<(String, String)> {
     map.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+}
+
+/// [`build_store`], with a failure saying which store it was building.
+fn store_named(
+    url: &Url,
+    options: &std::collections::BTreeMap<String, String>,
+    named: impl std::fmt::Display,
+) -> Result<BuiltStore, SourceError> {
+    build_store(url, options)
+        .map_err(|e| SourceError::fatal(format!("building the object store for {named}: {e}")))
 }
 
 /// Build the object store for `url`, applying the raw `store` passthrough

@@ -712,15 +712,14 @@ async fn stream_object_streaming(
                         // stays object-level: without an ETag a resumed read
                         // could splice two object versions, so a mid-object
                         // break cannot be retried by this owner. Poison.
-                        if crate::error::is_pipeline_fatal(&e) {
-                            return Err(SplitFailure::Fatal(SourceError::fatal(format!(
+                        return Err(fatal_or_poison(
+                            &e,
+                            format!(
                                 "split {split}: reading \"{}\" failed mid-object at byte \
                                      {delivered}: {}",
                                 entry.key,
                                 crate::error::bounded_reason(&e)
-                            ))));
-                        }
-                        return Err(SplitFailure::Poison(
+                            ),
                             PoisonKind::Undecodable,
                             format!(
                                 "split {split}: read of \"{}\" failed mid-object at byte \
@@ -863,6 +862,22 @@ impl ReadBudget {
     }
 }
 
+/// The failure of a read that cannot go on. A credentials or config failure
+/// holds for every object, so it fails the pipeline with `fatal`; any other
+/// poisons this object with `kind` and `poison`.
+fn fatal_or_poison(
+    e: &object_store::Error,
+    fatal: String,
+    kind: PoisonKind,
+    poison: String,
+) -> SplitFailure {
+    if crate::error::is_pipeline_fatal(e) {
+        SplitFailure::Fatal(SourceError::fatal(fatal))
+    } else {
+        SplitFailure::Poison(kind, poison)
+    }
+}
+
 /// Count an attempt on `budget` and wait its next delay for a retryable
 /// error; escalate non-retryable classes and exhausted budgets.
 ///
@@ -885,11 +900,12 @@ async fn retry_or_fail(
             entry.key,
             crate::error::bounded_reason(e)
         );
-        return Err(if crate::error::is_pipeline_fatal(e) {
-            SplitFailure::Fatal(SourceError::fatal(reason))
-        } else {
-            SplitFailure::Poison(crate::error::poison_kind(e), reason)
-        });
+        return Err(fatal_or_poison(
+            e,
+            reason.clone(),
+            crate::error::poison_kind(e),
+            reason,
+        ));
     }
     budget.attempt += 1;
     if budget.attempt >= MAX_ATTEMPTS {

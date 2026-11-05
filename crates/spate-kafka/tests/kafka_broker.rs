@@ -136,11 +136,7 @@ fn real_broker_revocation_commit_persists_revoked_offsets() {
         }
     });
 
-    let probe: BaseConsumer = support::raw_config()
-        .set("bootstrap.servers", &brokers)
-        .set("group.id", "rev-commit")
-        .build()
-        .expect("probe");
+    let probe = support::probe(&brokers, "rev-commit");
 
     // Run the revocation choreography: store the drained watermark for the
     // partition being revoked, then keep polling so `unassign` completes.

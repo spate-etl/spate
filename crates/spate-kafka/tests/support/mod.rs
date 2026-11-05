@@ -219,6 +219,16 @@ pub(crate) fn transactional_broker() -> ContainerRequest<Kafka> {
         .with_env_var("KAFKA_TRANSACTION_STATE_LOG_MIN_ISR", "1")
 }
 
+/// The config of a producer on `brokers` that gives up on a record after 30
+/// seconds.
+pub(crate) fn producer_config(brokers: &str) -> ClientConfig {
+    let mut config = raw_config();
+    config
+        .set("bootstrap.servers", brokers)
+        .set("message.timeout.ms", "30000");
+    config
+}
+
 /// Enqueue `count` records to partition `p`, with payload `{tag}-p{p}-{i}` and
 /// key `k{p}-{i}`.
 fn send_records(producer: &BaseProducer, topic: &str, p: i32, count: usize, tag: &str) {
@@ -245,11 +255,7 @@ pub(crate) fn produce(
     partitions: i32,
     tag: &str,
 ) {
-    let producer: BaseProducer = raw_config()
-        .set("bootstrap.servers", brokers)
-        .set("message.timeout.ms", "30000")
-        .build()
-        .expect("producer");
+    let producer: BaseProducer = producer_config(brokers).build().expect("producer");
     for p in 0..partitions {
         send_records(&producer, topic, p, per_partition, tag);
     }
@@ -261,14 +267,15 @@ pub(crate) fn produce(
 pub(crate) enum Transaction {
     Commit,
     Abort,
-    /// Still open. It stays open while the returned producer lives.
+    /// Still open, for the returned producer to end. The broker aborts it once
+    /// the transaction timeout passes, whether or not the producer lives.
     Open,
 }
 
 /// Produce `count` records to partition 0 of `topic` in one transaction under
 /// a transactional id derived from `tag`, flush them, and end the transaction
 /// as `ending` says. Returns the producer, which an open transaction needs.
-#[must_use = "dropping the producer ends an open transaction"]
+#[must_use = "an open transaction ends through this producer"]
 pub(crate) fn produce_transaction(
     brokers: &str,
     topic: &str,
@@ -277,10 +284,10 @@ pub(crate) fn produce_transaction(
     ending: Transaction,
 ) -> BaseProducer {
     const TIMEOUT: Duration = Duration::from_secs(60);
-    let producer: BaseProducer = raw_config()
-        .set("bootstrap.servers", brokers)
-        .set("message.timeout.ms", "30000")
+    let producer: BaseProducer = producer_config(brokers)
         .set("transactional.id", format!("{topic}-{tag}"))
+        // Kafka's 60 s default can abort an open transaction under a slow suite.
+        .set("transaction.timeout.ms", "600000")
         .build()
         .expect("producer");
     producer.init_transactions(TIMEOUT).expect("init");
@@ -295,8 +302,8 @@ pub(crate) fn produce_transaction(
     producer
 }
 
-/// A consumer in `group` that reads the group's committed offsets and joins
-/// nothing.
+/// A consumer in `group` that reads or writes the group's committed offsets
+/// and joins nothing.
 pub(crate) fn probe(brokers: &str, group: &str) -> BaseConsumer {
     raw_config()
         .set("bootstrap.servers", brokers)
@@ -821,16 +828,8 @@ impl RawBatch<'_> {
 /// One magic-2 record batch holding one keyed record, with a CRC that does
 /// not match its contents.
 pub(crate) fn corrupt_batch(key: &[u8], value: &[u8]) -> Vec<u8> {
-    let now = i64::try_from(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis(),
-    )
-    .unwrap();
     RawBatch {
         crc: BatchCrc::Literal(0xdead_beef),
-        timestamp: now,
         key: Some(key),
         value,
         ..RawBatch::default()

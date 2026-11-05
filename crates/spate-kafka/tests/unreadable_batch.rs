@@ -304,8 +304,8 @@ fn an_unknown_codec_first_in_a_poll_names_the_codec() {
 }
 
 /// A partition with no committed offset under `latest` keeps its start across a
-/// restart, so a record the lane could not read stops the source again. Under
-/// `earliest` this always held. Regression for #1704.
+/// restart, so a record the lane could not read stops the source again.
+/// Regression for #1704.
 #[test]
 fn a_corrupt_message_before_the_first_commit_stops_again_after_a_restart() {
     let cluster = MockCluster::new(1).expect("mock cluster");

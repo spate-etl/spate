@@ -345,7 +345,7 @@ pub(crate) fn create_topic(brokers: &str, topic: &str, partitions: i32) {
 }
 
 /// What `probe`'s group has committed on `topic`'s partitions `0..partitions`.
-/// No commit reads as `Offset::Invalid`, apart from a commit of 0.
+/// No commit reads as `Offset::Invalid`.
 pub(crate) fn committed(probe: &BaseConsumer, topic: &str, partitions: i32) -> Vec<Offset> {
     let mut tpl = TopicPartitionList::new();
     for p in 0..partitions {

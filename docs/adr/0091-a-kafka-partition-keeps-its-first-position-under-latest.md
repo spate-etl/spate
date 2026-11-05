@@ -34,11 +34,14 @@ read", because it keeps what `latest` means on a group's first start and gives
 every later start a position the group holds, in any process. The commit
 acknowledges nothing, and it passes only records no member was given.
 
-The commit is a blocking one on the controller thread, sent before `assign`, for
-the partitions with no commit alone. A failed read or commit holds the
+One consumer reads every offer's committed offsets and end offsets with one
+lookup and one listing, since committed offsets belong to the group. Each
+consumer then sends its own commit, for the partitions with no commit alone,
+ahead of `assign`. The commits are in flight together under one 10 s bound, so
+an accept waits for the slowest answer. A failed read or commit holds the
 assignment and retries it at a pace, until `startup_timeout` or
-`assignment_timeout` ends the run. A refusal because the group has moved past
-the member discards its offer.
+`assignment_timeout` ends the run. A permanent refusal stops the run. A refusal
+because the group has moved past the member discards its offer.
 
 Defaulting to `earliest` was rejected because a new group would read its topic's
 history, and an explicit `latest` would stay exposed for good. Process memory
@@ -76,13 +79,17 @@ offset. Each route is pinned under `latest` in the `latest_start` modules of
 
 ## Evidence
 
-Before this change, those routes failed with one consumer on a real broker at
-`v0.1.0` and `v0.4.0`, with the committed offset past records no sink received,
-and passed under `earliest`
+Before this change, a quiet restart, a restart with the sink down, a removed
+member and an added partition lost records with one consumer on a real broker at
+`v0.1.0` and `v0.4.0`, and a process joining the group did at `v0.4.0`. Each
+passed under `earliest`
 ([#1704](https://github.com/spate-etl/spate/issues/1704)).
 
 ## More information
 
+- Landed in [#1723](https://github.com/spate-etl/spate/pull/1723). The Kafka
+  source page states the rule, under
+  [How offsets are committed](../user-guide/04-connectors/sources/kafka/README.mdx#how-offsets-are-committed).
 - [ADR-0002](0002-at-least-once-delivery.md) — the guarantee this restores.
 - [ADR-0090](0090-a-kafka-source-runs-a-configured-number-of-consumers.md) — the
   consumers whose starts settle together.

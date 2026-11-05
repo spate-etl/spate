@@ -1,0 +1,1113 @@
+//! Starts under `latest` on a slow, silent or refusing group, one module per
+//! behaviour, against rdkafka's in-process MockCluster and, for a silent
+//! coordinator, a real broker.
+
+#![expect(
+    clippy::disallowed_methods,
+    reason = "test scaffolding builds its own clients and threads"
+)]
+
+mod support;
+
+/// A rebalance offer that names another topic must not move the group's commit
+/// on the source's own topic. The offer arrives in a SyncGroup reply. A raw
+/// group leader on a MockCluster writes that reply's assignment, so the client
+/// receives the bytes a hostile coordinator would send.
+mod another_topic {
+    use rdkafka::consumer::{BaseConsumer, CommitMode, Consumer};
+    use rdkafka::mocking::MockCluster;
+    use rdkafka::producer::{BaseProducer, BaseRecord, Producer};
+    use rdkafka::{ClientConfig, Offset, TopicPartitionList};
+    use spate_core::config::PipelineConfig;
+    use spate_core::ops::chain_owned;
+    use spate_core::pipeline::{Pipeline, RuntimeOptions};
+    use spate_core::sink::KeyHashRouter;
+    use spate_kafka::{KafkaSource, KafkaSourceConfig};
+    use spate_test::{BytesPassthrough, PipelineRun, TestEncoder, capture_sink, unique_name};
+    use std::collections::BTreeMap;
+    use std::io::{Read as _, Write as _};
+    use std::net::TcpStream;
+    use std::time::{Duration, Instant};
+
+    const TOPIC: &str = "orders";
+    const OTHER: &str = "other";
+    const GROUP: &str = "offer-names-another-topic";
+    /// The group's position on `orders` partition 0. Records from here on are unread.
+    const RESUME_AT: i64 = 3;
+    const END: i64 = 10;
+
+    fn str16(buf: &mut Vec<u8>, s: &str) {
+        buf.extend_from_slice(&i16::try_from(s.len()).unwrap().to_be_bytes());
+        buf.extend_from_slice(s.as_bytes());
+    }
+
+    fn bytes32(buf: &mut Vec<u8>, b: &[u8]) {
+        buf.extend_from_slice(&i32::try_from(b.len()).unwrap().to_be_bytes());
+        buf.extend_from_slice(b);
+    }
+
+    fn request(s: &mut TcpStream, api: i16, version: i16, body: &[u8]) -> Vec<u8> {
+        let mut b = Vec::new();
+        b.extend_from_slice(&api.to_be_bytes());
+        b.extend_from_slice(&version.to_be_bytes());
+        b.extend_from_slice(&7i32.to_be_bytes());
+        str16(&mut b, "rogue");
+        b.extend_from_slice(body);
+        s.write_all(&i32::try_from(b.len()).unwrap().to_be_bytes())
+            .unwrap();
+        s.write_all(&b).unwrap();
+        let mut len = [0u8; 4];
+        s.read_exact(&mut len).unwrap();
+        let mut resp = vec![0u8; usize::try_from(i32::from_be_bytes(len)).unwrap()];
+        s.read_exact(&mut resp).unwrap();
+        resp
+    }
+
+    struct Reader<'a>(&'a [u8]);
+
+    impl Reader<'_> {
+        fn i16(&mut self) -> i16 {
+            let v = i16::from_be_bytes(self.0[..2].try_into().unwrap());
+            self.0 = &self.0[2..];
+            v
+        }
+        fn i32(&mut self) -> i32 {
+            let v = i32::from_be_bytes(self.0[..4].try_into().unwrap());
+            self.0 = &self.0[4..];
+            v
+        }
+        fn string(&mut self) -> String {
+            let n = usize::try_from(self.i16()).unwrap();
+            let v = String::from_utf8(self.0[..n].to_vec()).unwrap();
+            self.0 = &self.0[n..];
+            v
+        }
+        fn skip_bytes(&mut self) {
+            let n = usize::try_from(self.i32()).unwrap();
+            self.0 = &self.0[n..];
+        }
+    }
+
+    /// Join `GROUP` first, so this connection leads it, then assign every other
+    /// member `other` partition 0.
+    fn lead_the_group(brokers: &str) {
+        let mut s = TcpStream::connect(brokers).unwrap();
+        let mut subscription = Vec::new();
+        subscription.extend_from_slice(&0i16.to_be_bytes());
+        subscription.extend_from_slice(&1i32.to_be_bytes());
+        str16(&mut subscription, TOPIC);
+        subscription.extend_from_slice(&(-1i32).to_be_bytes());
+
+        let mut join = Vec::new();
+        str16(&mut join, GROUP);
+        join.extend_from_slice(&30_000i32.to_be_bytes());
+        join.extend_from_slice(&30_000i32.to_be_bytes());
+        str16(&mut join, "");
+        str16(&mut join, "consumer");
+        join.extend_from_slice(&1i32.to_be_bytes());
+        str16(&mut join, "range");
+        bytes32(&mut join, &subscription);
+        let resp = request(&mut s, 11, 1, &join);
+
+        let mut r = Reader(&resp[4..]);
+        assert_eq!(r.i16(), 0, "JoinGroup error");
+        let generation = r.i32();
+        let _protocol = r.string();
+        let leader = r.string();
+        let me = r.string();
+        assert_eq!(leader, me, "the raw member leads the group");
+        let mut others = Vec::new();
+        for _ in 0..r.i32() {
+            let id = r.string();
+            r.skip_bytes();
+            if id != me {
+                others.push(id);
+            }
+        }
+        assert!(
+            !others.is_empty(),
+            "the source joined before the group formed"
+        );
+
+        let mut assignment = Vec::new();
+        assignment.extend_from_slice(&0i16.to_be_bytes());
+        assignment.extend_from_slice(&1i32.to_be_bytes());
+        str16(&mut assignment, OTHER);
+        assignment.extend_from_slice(&1i32.to_be_bytes());
+        assignment.extend_from_slice(&0i32.to_be_bytes());
+        assignment.extend_from_slice(&(-1i32).to_be_bytes());
+
+        let mut sync = Vec::new();
+        str16(&mut sync, GROUP);
+        sync.extend_from_slice(&generation.to_be_bytes());
+        str16(&mut sync, &me);
+        sync.extend_from_slice(&i32::try_from(others.len() + 1).unwrap().to_be_bytes());
+        str16(&mut sync, &me);
+        bytes32(&mut sync, &[]);
+        for id in &others {
+            str16(&mut sync, id);
+            bytes32(&mut sync, &assignment);
+        }
+        // The mock answers every waiting member when the leader syncs, and refuses a
+        // SyncGroup that arrives after that, so the source's goes first.
+        std::thread::sleep(Duration::from_secs(1));
+        let resp = request(&mut s, 14, 1, &sync);
+        let mut r = Reader(&resp[4..]);
+        let _throttle = r.i32();
+        assert_eq!(r.i16(), 0, "SyncGroup error");
+        // The connection stays open past the test's reads of the commit.
+        std::thread::sleep(Duration::from_secs(20));
+        drop(s);
+    }
+
+    fn probe(brokers: &str) -> BaseConsumer {
+        ClientConfig::new()
+            .set("bootstrap.servers", brokers)
+            .set("group.id", GROUP)
+            .create()
+            .unwrap()
+    }
+
+    fn committed(probe: &BaseConsumer) -> Offset {
+        let mut tpl = TopicPartitionList::new();
+        tpl.add_partition(TOPIC, 0);
+        probe
+            .committed_offsets(tpl, Duration::from_secs(5))
+            .unwrap()
+            .elements()[0]
+            .offset()
+    }
+
+    /// An offer for `other` partition 0 leaves the group's commit on `orders`
+    /// partition 0 where it was: the source read no record of `orders`.
+    #[test]
+    fn an_offer_naming_another_topic_leaves_the_commit_on_the_configured_topic() {
+        let cluster = MockCluster::new(1).unwrap();
+        cluster.create_topic(TOPIC, 1, 1).unwrap();
+        cluster.create_topic(OTHER, 1, 1).unwrap();
+        let brokers = cluster.bootstrap_servers();
+
+        let producer: BaseProducer = ClientConfig::new()
+            .set("bootstrap.servers", &brokers)
+            .create()
+            .unwrap();
+        for i in 0..END {
+            let payload = i.to_string();
+            producer
+                .send(
+                    BaseRecord::<str, str>::to(TOPIC)
+                        .partition(0)
+                        .payload(&payload),
+                )
+                .unwrap();
+        }
+        producer.flush(Duration::from_secs(30)).unwrap();
+
+        let probe = probe(&brokers);
+        let mut position = TopicPartitionList::new();
+        position
+            .add_partition_offset(TOPIC, 0, Offset::Offset(RESUME_AT))
+            .unwrap();
+        probe.commit(&position, CommitMode::Sync).unwrap();
+        assert_eq!(committed(&probe), Offset::Offset(RESUME_AT));
+
+        let leader = {
+            let brokers = brokers.clone();
+            std::thread::spawn(move || lead_the_group(&brokers))
+        };
+
+        let name = unique_name("offer");
+        let yaml = format!(
+            "pipeline: {{ name: {name}, threads: 2, io_threads: 1 }}\n\
+             admin: {{ listen: none }}\n\
+             checkpoint: {{ drain_timeout: 200ms }}\n\
+             metrics: {{ exporter: none }}\n\
+             source: {{ memory: {{}} }}\n\
+             sink: {{ capture: {{ chunk: {{ target_bytes: 64 }} }} }}\n"
+        );
+        let pipeline = Pipeline::from_config(PipelineConfig::from_str(&yaml).expect("config"))
+            .expect("builder");
+        let (sink, script) = capture_sink(1, 1);
+        let mut cfg = KafkaSourceConfig::new(&brokers, TOPIC, GROUP);
+        cfg.startup_timeout = Duration::from_secs(60);
+        cfg.statistics_interval = Duration::ZERO;
+        cfg.rdkafka = BTreeMap::from([
+            ("auto.offset.reset".to_string(), "latest".to_string()),
+            ("session.timeout.ms".to_string(), "30000".to_string()),
+            ("heartbeat.interval.ms".to_string(), "2000".to_string()),
+        ]);
+        let runtime = pipeline
+            .sink(sink)
+            .expect("sink")
+            .chains(|ctx| {
+                let chunk = ctx.chunk();
+                chain_owned::<Vec<u8>, _>(BytesPassthrough)
+                    .sink(TestEncoder, KeyHashRouter, chunk, ctx.queues, ctx.budget)
+                    .build()
+            })
+            .runtime_options(RuntimeOptions {
+                handle_signals: false,
+                ..RuntimeOptions::default()
+            })
+            .into_runtime(KafkaSource::new(cfg))
+            .expect("runtime");
+        let shutdown = runtime.shutdown_handle();
+        let run = PipelineRun::spawn(move || runtime.run());
+
+        // The negative result has nothing to wait on: the bound outlasts the group
+        // forming, the source's assign hold and a start commit.
+        let until = Instant::now() + Duration::from_secs(12);
+        let mut seen = committed(&probe);
+        while seen == Offset::Offset(RESUME_AT) && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(200));
+            seen = committed(&probe);
+        }
+        shutdown.trigger();
+        let exit = run
+            .wait_exit(Duration::from_secs(60))
+            .expect("the run stops");
+        leader
+            .join()
+            .expect("the raw leader completed the rebalance");
+
+        assert!(script.writes().is_empty(), "the sink wrote nothing");
+        assert_eq!(
+            seen,
+            Offset::Offset(RESUME_AT),
+            "the commit on `{TOPIC}` moved with nothing read, past records {RESUME_AT}..{END}; run: {:?}",
+            exit.as_ref().map(|_| ()).map_err(|e| e.to_string())
+        );
+    }
+}
+
+/// A start that fails during a reassign must not split the reassign.
+mod retried_reassign {
+    use crate::support;
+    use rdkafka::Offset;
+    use rdkafka::mocking::MockCluster;
+    use rdkafka::types::{RDKafkaApiKey, RDKafkaRespErr};
+    use spate_test::{unique_name, wait_until};
+    use std::time::{Duration, Instant};
+    use support::Raw as _;
+    use support::latest::{Run, config};
+    use support::{committed_by, produce_to};
+
+    const TOPIC: &str = "orders";
+    const PARTITIONS: i32 = 4;
+
+    /// One consumer of a two-consumer source gets its offer past the hold, so the
+    /// other is accepted alone and then drained for a reassign whose first lookup
+    /// fails. Every partition is read once the retry has run.
+    #[test]
+    fn a_retried_reassign_reads_every_partition() {
+        use rdkafka::producer::Producer as _;
+        let producer: rdkafka::producer::BaseProducer = support::raw_config()
+            .set("test.mock.num.brokers", "1")
+            .build()
+            .expect("mock producer");
+        let client = producer.client();
+        let cluster: MockCluster<'_, _> = client.mock_cluster().expect("mock cluster");
+        cluster
+            .create_topic(TOPIC, PARTITIONS, 1)
+            .expect("create topic");
+        // SAFETY: the pointer is valid while `producer` lives. The list holds one
+        // error and one round trip in the C types the variadic reads.
+        unsafe {
+            rdkafka::bindings::rd_kafka_mock_broker_push_request_error_rtts(
+                rdkafka::bindings::rd_kafka_handle_mock_cluster(client.native_ptr()),
+                1,
+                RDKafkaApiKey::SyncGroup as i16,
+                1,
+                RDKafkaRespErr::RD_KAFKA_RESP_ERR_NO_ERROR,
+                5000 as std::ffi::c_int,
+            );
+        }
+        let brokers = cluster.bootstrap_servers();
+        let group = unique_name("split");
+        let mut cfg = config(&brokers, TOPIC, &group, "latest");
+        cfg.consumers = 2;
+        let run = Run::start(cfg);
+
+        // The first consumer's start commit shows it was accepted alone. The next
+        // lookup is the reassign's, once the second consumer's offer arrives.
+        wait_until(Duration::from_secs(30), "the first accept", || {
+            committed_by(&brokers, &group, TOPIC, PARTITIONS)
+                .iter()
+                .any(|o| matches!(o, Offset::Offset(_)))
+        });
+        cluster.request_errors(
+            RDKafkaApiKey::OffsetFetch,
+            &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_UNKNOWN],
+        );
+
+        // Each round is one record per partition: the first run's start moved past
+        // nothing here, so any partition with a reader writes its round.
+        let mut next = 0;
+        let mut unread: Vec<i32> = (0..PARTITIONS).collect();
+        let deadline = Instant::now() + Duration::from_secs(45);
+        while !unread.is_empty() && Instant::now() < deadline {
+            for p in 0..PARTITIONS {
+                produce_to(&brokers, TOPIC, p, next..next + 1);
+            }
+            next += 1;
+            std::thread::sleep(Duration::from_secs(1));
+            unread = (0..PARTITIONS)
+                .filter(|p| run.written(*p).is_empty())
+                .collect();
+        }
+        run.stop();
+        assert!(unread.is_empty(), "partitions never read: {unread:?}");
+    }
+}
+
+/// A retried re-accept that comes due while a poll waits accepts the held offer
+/// alone, and the runtime then drops those lanes for the next assignment.
+mod late_offers {
+    use crate::support;
+    use rdkafka::producer::{BaseProducer, Producer as _};
+    use rdkafka::types::{RDKafkaApiKey, RDKafkaRespErr};
+    use spate_test::wait_until;
+    use std::time::Duration;
+    use support::latest::{self, Run};
+    use support::{Raw as _, produce_to};
+
+    const TOPIC: &str = "orders";
+
+    /// Run two consumers on four partitions, one consumer's `SyncGroup` answered
+    /// past the hold, and fail the lookups named by `offset_fetch`. Every partition
+    /// must then reach the sink.
+    fn every_partition_reads(group: &str, offset_fetch: &[RDKafkaRespErr]) {
+        let _ = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .with_writer(std::io::stderr)
+            .try_init();
+        let producer: BaseProducer = support::raw_config()
+            .set("test.mock.num.brokers", "1")
+            .build()
+            .expect("mock producer");
+        let client = producer.client();
+        let cluster = client.mock_cluster().expect("mock cluster");
+        cluster.create_topic(TOPIC, 4, 1).expect("create topic");
+        // SAFETY: the pointer is valid while `producer` lives, and the arguments
+        // match the (error, rtt in ms) pairs the variadic reads.
+        unsafe {
+            let err = rdkafka::bindings::rd_kafka_mock_broker_push_request_error_rtts(
+                rdkafka::bindings::rd_kafka_handle_mock_cluster(client.native_ptr()),
+                1,
+                RDKafkaApiKey::SyncGroup as i16,
+                1,
+                RDKafkaRespErr::RD_KAFKA_RESP_ERR_NO_ERROR,
+                4_500i32,
+            );
+            assert_eq!(err, RDKafkaRespErr::RD_KAFKA_RESP_ERR_NO_ERROR);
+        }
+        if !offset_fetch.is_empty() {
+            cluster.request_errors(RDKafkaApiKey::OffsetFetch, offset_fetch);
+        }
+        let brokers = cluster.bootstrap_servers();
+        let mut cfg = latest::config(&brokers, TOPIC, group, "latest");
+        cfg.consumers = 2;
+        let run = Run::start(cfg);
+        let mut next = 1_000;
+        let mut tick = 0;
+        wait_until(
+            Duration::from_secs(60),
+            "every partition to reach the sink",
+            || {
+                if tick % 20 == 0 {
+                    for p in 0..4 {
+                        produce_to(&brokers, TOPIC, p, next..next + 1);
+                    }
+                    next += 1;
+                }
+                tick += 1;
+                let unread: Vec<i32> = (0..4).filter(|p| run.written(*p).is_empty()).collect();
+                unread.is_empty()
+            },
+        );
+        run.stop();
+    }
+
+    /// The control: with no failed lookup the late offer's re-accept covers every
+    /// partition.
+    #[test]
+    fn a_late_offer_reads_every_partition() {
+        every_partition_reads("late-offer", &[]);
+    }
+
+    /// The re-accept's first lookup fails once. Its retry must still accept every
+    /// consumer's partitions together.
+    #[test]
+    fn a_retried_reaccept_reads_every_partition() {
+        every_partition_reads(
+            "late-offer-retried",
+            &[
+                RDKafkaRespErr::RD_KAFKA_RESP_ERR_NO_ERROR,
+                RDKafkaRespErr::RD_KAFKA_RESP_ERR_UNKNOWN,
+            ],
+        );
+    }
+}
+
+/// A broker slow enough that one accept's lookups outlast their shared budget.
+mod slow_broker {
+    use rdkafka::mocking::MockCluster;
+    use spate_core::checkpoint::Checkpointer;
+    use spate_core::error::{ErrorClass, SourceError};
+    use spate_core::source::{Source, SourceCtx, SourceEvent};
+    use spate_kafka::{KafkaSource, KafkaSourceConfig};
+    use std::collections::BTreeMap;
+    use std::time::{Duration, Instant};
+
+    const TOPIC: &str = "orders";
+
+    /// Sixteen consumers on sixteen partitions of a broker answering every request
+    /// in 700 ms, on the default timeouts, driven until lanes arrive or the source
+    /// reports a fatal error.
+    fn settle(policy: &str, group: &str) -> Result<usize, String> {
+        let _ = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .with_writer(std::io::stderr)
+            .try_init();
+        let cluster = MockCluster::new(1).expect("mock cluster");
+        cluster.create_topic(TOPIC, 16, 1).expect("create topic");
+        cluster
+            .broker_round_trip_time(1, Duration::from_millis(700))
+            .expect("round trip");
+        let mut cfg = KafkaSourceConfig::new(cluster.bootstrap_servers(), TOPIC, group);
+        cfg.consumers = 16;
+        cfg.statistics_interval = Duration::ZERO;
+        cfg.rdkafka = BTreeMap::from([("auto.offset.reset".to_string(), policy.to_string())]);
+        let mut source = KafkaSource::new(cfg);
+        let cp = Checkpointer::new();
+        source.open(SourceCtx::new(cp.handle())).expect("open");
+        let began = Instant::now();
+        let mut seen = 0;
+        while began.elapsed() < Duration::from_secs(100) {
+            match source.poll_events(Duration::from_millis(100)) {
+                Ok(SourceEvent::LanesAssigned(lanes)) => {
+                    seen = lanes.len();
+                    if seen == 16 {
+                        return Ok(seen);
+                    }
+                }
+                Err(
+                    e @ SourceError::Client {
+                        class: ErrorClass::Fatal,
+                        ..
+                    },
+                ) => return Err(format!("{e} at {:?}", began.elapsed())),
+                _ => {}
+            }
+        }
+        Ok(seen)
+    }
+
+    /// The control: `earliest` starts on the same broker.
+    #[test]
+    fn a_slow_broker_starts_under_earliest() {
+        assert_eq!(settle("earliest", "slow-earliest"), Ok(16));
+    }
+
+    /// `latest` starts on the same broker.
+    #[test]
+    fn a_slow_broker_starts_under_latest() {
+        assert_eq!(settle("latest", "slow-latest"), Ok(16));
+    }
+}
+
+/// Start commits in series: one accept's commits run one consumer at a time, so
+/// a first start takes the sum of their replies.
+mod slow_commits {
+    use crate::support;
+    use rdkafka::producer::{BaseProducer, Producer as _};
+    use rdkafka::types::{RDKafkaApiKey, RDKafkaRespErr};
+    use spate_core::checkpoint::Checkpointer;
+    use spate_core::error::{ErrorClass, SourceError};
+    use spate_core::source::{Source, SourceCtx, SourceEvent};
+    use spate_kafka::{KafkaSource, KafkaSourceConfig};
+    use std::collections::BTreeMap;
+    use std::time::{Duration, Instant};
+    use support::Raw as _;
+
+    const TOPIC: &str = "orders";
+
+    /// `consumers` consumers, one partition each, on the default timeouts, with only
+    /// `OffsetCommit` replies slowed to `reply_ms`. Drives the source until lanes
+    /// arrive or it reports a fatal error.
+    fn settle(policy: &str, consumers: usize, reply_ms: i32) -> Result<usize, String> {
+        let _ = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .with_writer(std::io::stderr)
+            .try_init();
+        let producer: BaseProducer = support::raw_config()
+            .set("test.mock.num.brokers", "1")
+            .build()
+            .expect("mock producer");
+        let client = producer.client();
+        let cluster = client.mock_cluster().expect("mock cluster");
+        cluster
+            .create_topic(TOPIC, i32::try_from(consumers).expect("partitions"), 1)
+            .expect("create topic");
+        for _ in 0..consumers {
+            // SAFETY: the pointer is valid while `producer` lives, and the arguments
+            // match the (error, rtt in ms) pair the variadic reads.
+            let err = unsafe {
+                rdkafka::bindings::rd_kafka_mock_broker_push_request_error_rtts(
+                    rdkafka::bindings::rd_kafka_handle_mock_cluster(client.native_ptr()),
+                    1,
+                    RDKafkaApiKey::OffsetCommit as i16,
+                    1,
+                    RDKafkaRespErr::RD_KAFKA_RESP_ERR_NO_ERROR,
+                    reply_ms,
+                )
+            };
+            assert_eq!(err, RDKafkaRespErr::RD_KAFKA_RESP_ERR_NO_ERROR);
+        }
+        let mut cfg = KafkaSourceConfig::new(cluster.bootstrap_servers(), TOPIC, "series");
+        cfg.consumers = consumers;
+        cfg.statistics_interval = Duration::ZERO;
+        cfg.rdkafka = BTreeMap::from([("auto.offset.reset".to_string(), policy.to_string())]);
+        let mut source = KafkaSource::new(cfg);
+        let cp = Checkpointer::new();
+        source.open(SourceCtx::new(cp.handle())).expect("open");
+        let began = Instant::now();
+        let mut longest = Duration::ZERO;
+        while began.elapsed() < Duration::from_secs(100) {
+            let polled = Instant::now();
+            let outcome = source.poll_events(Duration::from_millis(100));
+            longest = longest.max(polled.elapsed());
+            match outcome {
+                Ok(SourceEvent::LanesAssigned(lanes)) => {
+                    return Ok(lanes.len());
+                }
+                Err(
+                    e @ SourceError::Client {
+                        class: ErrorClass::Fatal,
+                        ..
+                    },
+                ) => {
+                    return Err(format!("{e} at {:?}", began.elapsed()));
+                }
+                _ => {}
+            }
+        }
+        Err("no lanes within 100 s".to_owned())
+    }
+
+    /// The control: `earliest` sends no start commit and starts on the same broker.
+    #[test]
+    fn slow_commit_replies_start_under_earliest() {
+        assert_eq!(settle("earliest", 16, 3_000), Ok(16));
+    }
+
+    /// The control: `latest` starts when commit replies come at once.
+    #[test]
+    fn fast_commit_replies_start_under_latest() {
+        assert_eq!(settle("latest", 16, 0), Ok(16));
+    }
+
+    /// `latest` starts on the same broker, inside the default `startup_timeout`.
+    #[test]
+    fn slow_commit_replies_start_under_latest() {
+        assert_eq!(settle("latest", 16, 3_000), Ok(16));
+    }
+
+    /// The same, eight consumers and five seconds per reply.
+    #[test]
+    fn five_second_replies_start_under_latest() {
+        assert_eq!(settle("latest", 8, 5_000), Ok(8));
+    }
+}
+
+/// `auto.offset.reset` with leading whitespace, which librdkafka reads as the
+/// policy it names.
+mod policy_spelling {
+    use crate::support;
+    use rdkafka::Offset;
+    use rdkafka::mocking::MockCluster;
+    use spate_core::checkpoint::Checkpointer;
+    use spate_core::source::{Source, SourceCtx};
+    use spate_kafka::{KafkaSource, KafkaSourceConfig};
+    use std::time::Duration;
+
+    const TOPIC: &str = "orders";
+
+    /// A policy spelled with leading whitespace takes the start rule of the policy
+    /// librdkafka reads it as, so the partition's end is on the group.
+    #[test]
+    fn a_latest_policy_with_leading_whitespace_commits_its_start() {
+        let cluster = MockCluster::new(1).expect("mock cluster");
+        cluster.create_topic(TOPIC, 1, 1).expect("create topic");
+        let brokers = cluster.bootstrap_servers();
+        support::produce(&brokers, TOPIC, 3, 1, "before");
+        let mut cfg = KafkaSourceConfig::new(brokers.clone(), TOPIC, "spaced");
+        cfg.statistics_interval = Duration::ZERO;
+        cfg.rdkafka
+            .insert("auto.offset.reset".into(), " latest".into());
+        cfg.validate().expect("the value loads");
+        let checkpointer = Checkpointer::new();
+        let mut source = KafkaSource::new(cfg);
+        source
+            .open(SourceCtx::new(checkpointer.handle()))
+            .expect("librdkafka accepts the value");
+        let _lanes = support::await_assignment(&mut source, Duration::from_secs(30));
+        assert_eq!(
+            support::committed_by(&brokers, "spaced", TOPIC, 1),
+            [Offset::Offset(3)]
+        );
+    }
+}
+
+/// The startup deadline's error for a start that keeps failing.
+mod named_failure {
+    use rdkafka::mocking::MockCluster;
+    use rdkafka::types::{RDKafkaApiKey, RDKafkaRespErr};
+    use spate_core::checkpoint::Checkpointer;
+    use spate_core::clock::TestClock;
+    use spate_core::error::{ErrorClass, SourceError};
+    use spate_core::source::{Source, SourceCtx};
+    use spate_kafka::{KafkaSource, KafkaSourceConfig};
+    use spate_test::wait_until;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    const TOPIC: &str = "orders";
+
+    /// A start commit that keeps failing ahead of the first assignment ends at
+    /// `startup_timeout` with an error that names the failure.
+    #[test]
+    fn the_startup_deadline_names_the_start_that_kept_failing() {
+        let cluster = MockCluster::new(1).expect("mock cluster");
+        cluster.create_topic(TOPIC, 1, 1).expect("create topic");
+        cluster.request_errors(
+            RDKafkaApiKey::OffsetCommit,
+            &vec![RDKafkaRespErr::RD_KAFKA_RESP_ERR_UNKNOWN; 100_000],
+        );
+        let mut cfg =
+            KafkaSourceConfig::new(cluster.bootstrap_servers(), TOPIC, "startup-deadline");
+        cfg.startup_timeout = Duration::from_secs(5);
+        cfg.statistics_interval = Duration::ZERO;
+        let clock = TestClock::frozen();
+        let checkpointer = Checkpointer::new();
+        let mut source = KafkaSource::new(cfg).with_clock(Arc::clone(&clock) as _);
+        source
+            .open(SourceCtx::new(checkpointer.handle()))
+            .expect("open");
+
+        let capture = spate_test::LogCapture::new();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .with_writer(capture.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            wait_until(Duration::from_secs(60), "the failed start commit", || {
+                source.poll_events(Duration::from_millis(50)).expect("poll");
+                capture
+                    .lines()
+                    .iter()
+                    .any(|l| l.contains("could not settle a start position"))
+            });
+        });
+
+        clock.advance(Duration::from_secs(6));
+        match source.poll_events(Duration::from_millis(50)) {
+            Err(
+                e @ SourceError::Client {
+                    class: ErrorClass::Fatal,
+                    ..
+                },
+            ) => assert!(
+                e.to_string().contains("committing a start offset"),
+                "the deadline error names no start failure: {e}"
+            ),
+            other => panic!("expected the deadline error, got {other:?}"),
+        }
+    }
+}
+
+/// A permanent code while settling a start stops the run.
+mod permanent_codes {
+    use rdkafka::mocking::MockCluster;
+    use rdkafka::types::RDKafkaApiKey as Api;
+    use rdkafka::types::RDKafkaRespErr::{
+        RD_KAFKA_RESP_ERR_GROUP_AUTHORIZATION_FAILED as GROUP_DENIED,
+        RD_KAFKA_RESP_ERR_TOPIC_AUTHORIZATION_FAILED as TOPIC_DENIED,
+    };
+    use spate_core::checkpoint::Checkpointer;
+    use spate_core::error::{ErrorClass, SourceError};
+    use spate_core::source::{Source, SourceCtx, SourceEvent};
+    use spate_kafka::{KafkaSource, KafkaSourceConfig};
+    use spate_test::wait_until;
+    use std::time::Duration;
+
+    /// A code `classify_start_error` classes as fatal ends the run on each request
+    /// a start needs, with no lane handed out.
+    #[test]
+    fn a_permanent_code_while_settling_a_start_stops_the_run() {
+        for (api, code, doing) in [
+            (Api::OffsetFetch, GROUP_DENIED, "committed offset"),
+            (Api::ListOffsets, TOPIC_DENIED, "end offset"),
+            (Api::OffsetCommit, GROUP_DENIED, "committing a start offset"),
+        ] {
+            let cluster = MockCluster::new(1).expect("mock cluster");
+            cluster.create_topic("orders", 1, 1).expect("create topic");
+            cluster.request_errors(api, &[code; 1000]);
+            let mut cfg = KafkaSourceConfig::new(cluster.bootstrap_servers(), "orders", "denied");
+            cfg.statistics_interval = Duration::ZERO;
+            let cp = Checkpointer::new();
+            let mut source = KafkaSource::new(cfg);
+            source.open(SourceCtx::new(cp.handle())).expect("open");
+            let mut stopped = None;
+            wait_until(Duration::from_secs(20), "the run to stop", || match source
+                .poll_events(Duration::from_millis(50))
+            {
+                Err(SourceError::Client {
+                    class: ErrorClass::Fatal,
+                    reason,
+                }) => {
+                    stopped = Some(reason);
+                    true
+                }
+                Ok(SourceEvent::LanesAssigned(_)) => panic!("lanes on {api:?}"),
+                _ => false,
+            });
+            let reason = stopped.expect("a reason");
+            assert!(reason.contains(doing), "{api:?}: {reason}");
+        }
+    }
+}
+
+/// A start that keeps failing before the source's first assignment ends at
+/// `startup_timeout`.
+mod startup_deadline {
+    use rdkafka::mocking::MockCluster;
+    use rdkafka::types::RDKafkaApiKey as Api;
+    use rdkafka::types::RDKafkaRespErr::RD_KAFKA_RESP_ERR_UNKNOWN as UNKNOWN;
+    use spate_core::checkpoint::Checkpointer;
+    use spate_core::clock::TestClock;
+    use spate_core::error::{ErrorClass, SourceError};
+    use spate_core::source::{Source, SourceCtx};
+    use spate_kafka::{KafkaSource, KafkaSourceConfig};
+    use spate_test::wait_until;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    /// The first assignment's lookup fails on every attempt, and the startup
+    /// deadline ends the run.
+    #[test]
+    fn a_start_that_keeps_failing_ends_at_the_startup_deadline() {
+        let cluster = MockCluster::new(1).expect("mock cluster");
+        cluster.create_topic("orders", 1, 1).expect("create topic");
+        cluster.request_errors(Api::OffsetFetch, &vec![UNKNOWN; 100_000]);
+        let mut cfg = KafkaSourceConfig::new(cluster.bootstrap_servers(), "orders", "start-hold");
+        cfg.statistics_interval = Duration::ZERO;
+        cfg.startup_timeout = Duration::from_secs(5);
+        let clock = TestClock::frozen();
+        let mut source = KafkaSource::new(cfg).with_clock(Arc::clone(&clock) as _);
+        let cp = Checkpointer::new();
+        let capture = spate_test::LogCapture::new();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .with_writer(capture.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            source.open(SourceCtx::new(cp.handle())).expect("open");
+            wait_until(Duration::from_secs(30), "a failed lookup", || {
+                let _ = source.poll_events(Duration::from_millis(50));
+                capture
+                    .lines()
+                    .iter()
+                    .any(|l| l.contains("could not settle a start position"))
+            });
+        });
+        clock.advance(Duration::from_secs(6));
+        match source.poll_events(Duration::from_millis(50)) {
+            Err(
+                e @ SourceError::Client {
+                    class: ErrorClass::Fatal,
+                    ..
+                },
+            ) => assert!(e.to_string().contains("no partition assignment"), "{e}"),
+            other => panic!("expected the startup deadline, got {other:?}"),
+        }
+    }
+}
+
+/// One accept under `latest` spends one lookup bound on a listing that is slow.
+mod slow_listing {
+    use crate::support;
+    use rdkafka::producer::Producer as _;
+    use rdkafka::types::RDKafkaApiKey as Api;
+    use rdkafka::types::RDKafkaRespErr::RD_KAFKA_RESP_ERR_NO_ERROR as NO_ERROR;
+    use spate_core::checkpoint::Checkpointer;
+    use spate_core::source::{Source, SourceCtx, SourceEvent};
+    use spate_kafka::{KafkaSource, KafkaSourceConfig};
+    use spate_test::wait_until;
+    use std::time::{Duration, Instant};
+    use support::Raw as _;
+
+    /// `COMMITTED_LOOKUP_TIMEOUT`, plus slack for the assign itself.
+    const BOUND: Duration = Duration::from_secs(13);
+    /// Longer than the bound, and shorter than the socket timeout.
+    const SLOW_MS: i32 = 20_000;
+    /// A lookup that leaves part of the bound to the listing.
+    const LOOKUP_MS: i32 = 5_000;
+
+    /// A slow lookup, then three consumers' listings that each answer past the
+    /// bound, and no poll blocks longer than one bound.
+    #[test]
+    fn a_slow_listing_spends_one_lookup_bound() {
+        let producer: rdkafka::producer::BaseProducer = support::raw_config()
+            .set("test.mock.num.brokers", "1")
+            .build()
+            .expect("mock producer");
+        let client = producer.client();
+        let cluster = client.mock_cluster().expect("mock cluster");
+        cluster.create_topic("orders", 3, 1).expect("create topic");
+        // SAFETY: the pointer is valid while `producer` lives. The call reads one
+        // code and one round-trip time per counted entry.
+        unsafe {
+            let code = rdkafka::bindings::rd_kafka_mock_broker_push_request_error_rtts(
+                rdkafka::bindings::rd_kafka_handle_mock_cluster(client.native_ptr()),
+                1,
+                Api::ListOffsets as i16,
+                3,
+                NO_ERROR,
+                SLOW_MS,
+                NO_ERROR,
+                SLOW_MS,
+                NO_ERROR,
+                SLOW_MS,
+            );
+            assert_eq!(code, NO_ERROR);
+            let code = rdkafka::bindings::rd_kafka_mock_broker_push_request_error_rtts(
+                rdkafka::bindings::rd_kafka_handle_mock_cluster(client.native_ptr()),
+                1,
+                Api::OffsetFetch as i16,
+                1,
+                NO_ERROR,
+                LOOKUP_MS,
+            );
+            assert_eq!(code, NO_ERROR);
+        }
+        let mut cfg = KafkaSourceConfig::new(cluster.bootstrap_servers(), "orders", "slow-list");
+        cfg.consumers = 3;
+        cfg.statistics_interval = Duration::ZERO;
+        cfg.startup_timeout = Duration::from_secs(120);
+        let cp = Checkpointer::new();
+        let mut source = KafkaSource::new(cfg);
+        source.open(SourceCtx::new(cp.handle())).expect("open");
+        let mut slowest = Duration::ZERO;
+        wait_until(Duration::from_secs(90), "every lane", || {
+            let started = Instant::now();
+            let outcome = source.poll_events(Duration::from_millis(100));
+            slowest = slowest.max(started.elapsed());
+            assert!(
+                started.elapsed() <= BOUND,
+                "one poll blocked for {:?}",
+                started.elapsed()
+            );
+            matches!(outcome, Ok(SourceEvent::LanesAssigned(lanes)) if lanes.len() == 3)
+        });
+        assert!(
+            slowest >= Duration::from_secs(5),
+            "the listing was slow: {slowest:?}"
+        );
+    }
+}
+
+/// A coordinator that stops answering at the start commit, on a real broker
+/// behind a proxy that goes silent on the first OffsetCommit.
+mod silent_coordinator {
+    use crate::support;
+
+    use spate_core::checkpoint::Checkpointer;
+    use spate_core::error::ErrorClass;
+    use spate_core::source::{Source, SourceCtx, SourceEvent};
+    use spate_kafka::{KafkaSource, KafkaSourceConfig};
+    use spate_test_support::container_image;
+    use std::io::{Read as _, Write as _};
+    use std::net::{TcpListener, TcpStream};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::mpsc;
+    use std::time::Duration;
+    use support::latest;
+    use testcontainers::core::{ContainerPort, WaitFor};
+    use testcontainers::runners::SyncRunner;
+    use testcontainers::{Container, GenericImage, ImageExt as _};
+
+    const OFFSET_COMMIT: i16 = 8;
+    const TOPIC: &str = "silent";
+    /// Far past the startup deadline and every client timeout set below.
+    const PATIENCE: Duration = Duration::from_secs(45);
+
+    /// Forwards every connection to `upstream` until `silent`, then holds every
+    /// byte in both directions, on old and new connections, until released.
+    struct Proxy {
+        addr: String,
+        armed: Arc<AtomicBool>,
+        silent: Arc<AtomicBool>,
+    }
+
+    fn hold(silent: &AtomicBool) {
+        while silent.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    impl Proxy {
+        fn on(listener: TcpListener, upstream: String) -> Proxy {
+            let addr = listener.local_addr().expect("addr").to_string();
+            let armed = Arc::new(AtomicBool::new(false));
+            let silent = Arc::new(AtomicBool::new(false));
+            let (a, s) = (Arc::clone(&armed), Arc::clone(&silent));
+            std::thread::spawn(move || {
+                for client in listener.incoming().flatten() {
+                    let Ok(broker) = TcpStream::connect(&upstream) else {
+                        continue;
+                    };
+                    let (mut c_in, mut b_out) = (
+                        client.try_clone().expect("clone"),
+                        broker.try_clone().expect("clone"),
+                    );
+                    let (mut b_in, mut c_out) = (broker, client);
+                    let (a1, s1, s2) = (Arc::clone(&a), Arc::clone(&s), Arc::clone(&s));
+                    std::thread::spawn(move || {
+                        loop {
+                            let mut len = [0u8; 4];
+                            if c_in.read_exact(&mut len).is_err() {
+                                return;
+                            }
+                            let mut frame =
+                                vec![0u8; usize::try_from(i32::from_be_bytes(len)).expect("len")];
+                            if c_in.read_exact(&mut frame).is_err() {
+                                return;
+                            }
+                            if i16::from_be_bytes([frame[0], frame[1]]) == OFFSET_COMMIT
+                                && a1.swap(false, Ordering::SeqCst)
+                            {
+                                s1.store(true, Ordering::SeqCst);
+                            }
+                            hold(&s1);
+                            if b_out.write_all(&len).is_err() || b_out.write_all(&frame).is_err() {
+                                return;
+                            }
+                        }
+                    });
+                    std::thread::spawn(move || {
+                        let mut buf = [0u8; 65536];
+                        loop {
+                            let Ok(n) = b_in.read(&mut buf) else { return };
+                            if n == 0 {
+                                return;
+                            }
+                            hold(&s2);
+                            if c_out.write_all(&buf[..n]).is_err() {
+                                return;
+                            }
+                        }
+                    });
+                }
+            });
+            Proxy {
+                addr,
+                armed,
+                silent,
+            }
+        }
+
+        fn release(&self) {
+            self.armed.store(false, Ordering::SeqCst);
+            self.silent.store(false, Ordering::SeqCst);
+        }
+    }
+
+    /// A broker on the pinned image that advertises `proxy`'s address.
+    fn broker_behind_a_proxy() -> (Container<GenericImage>, Proxy, String) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let advertised = listener.local_addr().expect("addr");
+        let (name, tag) = container_image(&["--pull", "kafka"]);
+        let container = GenericImage::new(name, tag)
+            .with_exposed_port(ContainerPort::Tcp(9092))
+            .with_wait_for(WaitFor::message_on_stdout("Kafka Server started"))
+            .with_env_var("KAFKA_NODE_ID", "1")
+            .with_env_var("KAFKA_PROCESS_ROLES", "broker,controller")
+            .with_env_var(
+                "KAFKA_LISTENERS",
+                "PLAINTEXT://0.0.0.0:9092,CONTROLLER://:9093",
+            )
+            .with_env_var(
+                "KAFKA_ADVERTISED_LISTENERS",
+                format!("PLAINTEXT://{advertised}"),
+            )
+            .with_env_var("KAFKA_CONTROLLER_LISTENER_NAMES", "CONTROLLER")
+            .with_env_var(
+                "KAFKA_LISTENER_SECURITY_PROTOCOL_MAP",
+                "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT",
+            )
+            .with_env_var("KAFKA_CONTROLLER_QUORUM_VOTERS", "1@localhost:9093")
+            .with_env_var("KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR", "1")
+            .with_env_var("KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS", "0")
+            .start()
+            .expect("start kafka");
+        let port = container.get_host_port_ipv4(9092).expect("port");
+        let proxy = Proxy::on(listener, format!("127.0.0.1:{port}"));
+        let brokers = proxy.addr.clone();
+        (container, proxy, brokers)
+    }
+
+    /// A source whose client gives up on a silent broker in seconds.
+    fn short_timeouts(brokers: &str, group: &str) -> KafkaSourceConfig {
+        let mut cfg = latest::config(brokers, TOPIC, group, "latest");
+        cfg.startup_timeout = Duration::from_secs(15);
+        cfg.rdkafka
+            .insert("socket.timeout.ms".to_string(), "5000".to_string());
+        cfg
+    }
+
+    /// `startup_timeout` ends a start whose commit gets no answer, as the changelog
+    /// and the connector page say of a commit that keeps failing.
+    #[test]
+    #[ignore = "requires Docker"]
+    fn a_silent_coordinator_ends_at_the_startup_deadline() {
+        let (_container, proxy, brokers) = broker_behind_a_proxy();
+        support::create_topic(&brokers, TOPIC, 1);
+        let cfg = short_timeouts(&brokers, "deadline");
+        proxy.armed.store(true, Ordering::SeqCst);
+        let (tx, rx) = mpsc::channel();
+        let driver = std::thread::spawn(move || {
+            let cp = Checkpointer::new();
+            let mut source = KafkaSource::new(cfg);
+            source.open(SourceCtx::new(cp.handle())).expect("open");
+            loop {
+                match source.poll_events(Duration::from_millis(200)) {
+                    Ok(SourceEvent::LanesAssigned(_)) => {
+                        tx.send("assigned".to_string()).expect("send");
+                        return;
+                    }
+                    Err(spate_core::error::SourceError::Client {
+                        class: ErrorClass::Fatal,
+                        reason,
+                    }) => {
+                        tx.send(reason).expect("send");
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+        });
+        let outcome = rx.recv_timeout(PATIENCE);
+        proxy.release();
+        driver.join().expect("driver");
+        outcome.unwrap_or_else(|_| {
+            panic!("poll_events was still inside the start commit after {PATIENCE:?}, past a 15 s startup_timeout and a 5 s socket.timeout.ms")
+        });
+    }
+}

@@ -110,10 +110,11 @@ shrinking is a catch-up working as intended, while a small lag that is not
 shrinking is a stalled pipeline.
 
 Give the absence and partial-measurement alerts a `for:` window of a minute or
-so. Both are legitimately true at startup. Under `latest` a partition's series
-appears at the first statistics tick after it is assigned; under `earliest`,
-after the first commit (with the defaults, `5s + 5s`, longer if the first
-assignment is slow), so a bare `absent()` pages on every deploy.
+so. Both are legitimately true at startup. A partition's series appears at the
+first statistics tick once it has a committed offset, which under `latest` is
+when it is assigned. Under `earliest` or `error`, a partition never committed
+before has one after the first commit (with the defaults, `5s + 5s`, longer if
+the first assignment is slow), so a bare `absent()` pages on every deploy.
 
 ### Absent, zero, and stale
 

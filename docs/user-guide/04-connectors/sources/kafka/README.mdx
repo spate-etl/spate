@@ -170,8 +170,9 @@ The framework never uses librdkafka's position-based auto-commit. Instead:
   Every later start resumes from a committed offset, so a restart, a process
   joining and a member the group removes all read from that position. A failed
   read or commit holds the assignment and retries it, until `startup_timeout` or
-  `assignment_timeout` ends the run. A member the group has removed gets no
-  lanes and rejoins. Under `earliest` the partition starts at its beginning.
+  `assignment_timeout` ends the run, and a permanent refusal such as a failed
+  group authorization stops the run at once. A member the group has removed gets
+  no lanes and rejoins. Under `earliest` the partition starts at its beginning.
   Under `error` librdkafka applies the policy.
 - A failed read of the committed offsets under `earliest` or `error` leaves the
   start to librdkafka.

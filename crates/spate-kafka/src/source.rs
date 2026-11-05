@@ -2285,6 +2285,30 @@ mod tests {
         ));
     }
 
+    /// An empty offer is answered with no lookup, so a consumer with no
+    /// partitions never holds an accept under `latest`, whatever the broker
+    /// answers. The broker here refuses connections.
+    #[test]
+    fn an_empty_offer_needs_no_lookup_under_latest() {
+        let (mut source, _clock) = opened_unassigned(latest_config(), 1);
+        source.members[0].phase = Phase::Held(TopicPartitionList::new());
+        assert!(matches!(source.accept_held(false), Ok(SourceEvent::Idle)));
+        assert!(source.start_retry_at.is_none());
+        assert!(matches!(source.members[0].phase, Phase::Assigned));
+    }
+
+    /// A negative offset in a listing's reply is no start, for the partition
+    /// to be retried with no error from building the next list.
+    #[test]
+    fn a_negative_listing_is_no_start() {
+        let mut tpl = TopicPartitionList::new();
+        tpl.add_partition("orders", 0);
+        // SAFETY: the list owns one element. A reply writes the offset straight
+        // into it, past the check `set_offset` makes.
+        unsafe { (*(*tpl.ptr()).elems).offset = -3 };
+        assert!(listed_start(&tpl.elements()[0]).is_err());
+    }
+
     /// Only a concrete offset that is not negative is a start.
     #[test]
     fn the_listing_is_read_as_a_start() {
@@ -3620,6 +3644,106 @@ mod tests {
                 .expect("no fatal");
             assert_eq!(kept.len(), 1);
             assert!(retry.is_some());
+        }
+
+        /// A reassign whose lookup fails keeps the offer of the consumer that
+        /// held one and the partitions of the consumer that was only drained,
+        /// and once the pace comes due every consumer's lanes arrive as one set.
+        #[test]
+        fn a_reassign_whose_lookup_fails_is_retried_as_one_lane_set() {
+            let cluster = mock();
+            let mut cfg = config(&cluster, "retried-reassign", 2);
+            cfg.rdkafka
+                .insert("auto.offset.reset".to_string(), "latest".to_string());
+            let mut source = KafkaSource::new(cfg);
+            let clock = freeze(&mut source);
+            let cp = Checkpointer::new();
+            source.open(SourceCtx::new(cp.handle())).expect("open");
+            // The first accept can go to one consumer alone, so wait for the group
+            // to give each consumer a lane.
+            let mut lanes = Vec::new();
+            wait_until(DEADLINE, "a lane on each consumer", || {
+                if let Ok(SourceEvent::LanesAssigned(new)) =
+                    source.poll_events(Duration::from_millis(50))
+                {
+                    lanes = new;
+                }
+                source.members.iter().all(|m| !m.assignment.is_empty())
+            });
+            let held = 0;
+            let partition = source.members[held]
+                .assignment
+                .values()
+                .copied()
+                .next()
+                .expect("a partition");
+            // An offer for one consumer while lanes are live: the source drains
+            // every lane, and the other consumer's come back from its revoking set.
+            push_intent_to(&source, held, Intent::Assign(tpl_of(&[partition])));
+            wait_until(DEADLINE, "the drain", || {
+                matches!(
+                    source.poll_events(Duration::from_millis(10)),
+                    Ok(SourceEvent::LanesRevoked { .. })
+                )
+            });
+            drop(lanes);
+            cluster.request_errors(
+                RDKafkaApiKey::OffsetFetch,
+                &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_UNKNOWN],
+            );
+            assert!(matches!(
+                source.poll_events(Duration::ZERO),
+                Ok(SourceEvent::Idle)
+            ));
+            assert!(source.start_retry_at.is_some(), "the lookup failed");
+            assert!(matches!(source.members[held].phase, Phase::Held(_)));
+            assert!(matches!(source.members[1 - held].phase, Phase::Assigned));
+            clock.advance(START_RETRY_PACE);
+            let mut assigned = None;
+            wait_until(DEADLINE, "the next lane set", || {
+                match source.poll_events(Duration::from_millis(10)) {
+                    Ok(SourceEvent::LanesAssigned(new)) => {
+                        assigned = Some(new.len());
+                        drop(new);
+                        true
+                    }
+                    _ => false,
+                }
+            });
+            assert_eq!(assigned, Some(2), "every consumer's lanes arrive together");
+        }
+
+        /// A retry outside a reassign leaves no reassign behind, so the next
+        /// attempt still waits for a consumer that has not joined.
+        #[test]
+        fn a_retried_accept_arms_no_reassign() {
+            let (mut source, _clock) = opened_unassigned(latest_config(), 1);
+            let offers = vec![(0, tpl_of(&[0]))];
+            let _ = source.retry_starts(offers, &[0], false, "a reason");
+            assert_eq!(source.after_drain, None);
+        }
+
+        /// A committed-offset lookup that fails for one partition holds the offer
+        /// under `latest`, since leaving it to librdkafka would start the
+        /// partition at its end. `earliest` leaves it to librdkafka.
+        #[test]
+        fn a_partition_whose_lookup_fails_holds_the_offer_under_latest() {
+            let cluster = mock();
+            let open_on = |policy: &str| {
+                let mut cfg = config(&cluster, &format!("element-{policy}"), 1);
+                cfg.rdkafka
+                    .insert("auto.offset.reset".to_string(), policy.to_string());
+                open(cfg).0
+            };
+            let until = || Instant::now() + COMMITTED_LOOKUP_TIMEOUT;
+            let mut latest = open_on("latest");
+            assert!(matches!(
+                latest.read_latest_starts(&[(0, tpl_of(&[99]))], until()),
+                Ok(Err(_))
+            ));
+            let mut earliest = open_on("earliest");
+            let list = earliest.start_positions(0, &tpl_of(&[99]), until());
+            assert_eq!(list.elements()[0].offset(), Offset::Stored);
         }
 
         /// A reassign waiting on its pace stays pending while the source keeps

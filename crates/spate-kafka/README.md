@@ -25,7 +25,7 @@ have reached the cap moves to the dead-letter topic without being read.
 
 - **`auto.offset.reset` defaults to `latest`**: a group's first start of a
   partition reads nothing until new data arrives, and every later start resumes
-  from where that first start was. Set it to `earliest` in the `rdkafka:`
+  from the group's committed offset. Set it to `earliest` in the `rdkafka:`
   passthrough when backfilling or testing against pre-produced topics.
 - The `rdkafka:` passthrough validates a denylist: properties the
   framework owns for correctness — `enable.auto.offset.store`,

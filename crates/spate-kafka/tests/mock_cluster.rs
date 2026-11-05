@@ -1565,19 +1565,25 @@ impl Driver {
                 return true;
             }
             self.step(Duration::from_millis(20));
-            for lane in &mut self.lanes {
-                let partition = lane.partition().0;
-                if let Some(mut batch) =
-                    lane.poll(64, Duration::from_millis(50)).expect("lane poll")
-                {
-                    while let Some(raw) = batch.next_payload() {
-                        got.entry(partition).or_default().insert(raw.offset);
-                    }
-                }
-            }
+            self.poll_lanes(Duration::from_millis(50), |partition, offset| {
+                got.entry(partition).or_default().insert(offset);
+            });
             false
         });
         got
+    }
+
+    /// Poll each live lane once for up to `wait`, handing every offset it delivers
+    /// to `read`. Each batch is dropped once read, which acks it.
+    fn poll_lanes(&mut self, wait: Duration, mut read: impl FnMut(u32, i64)) {
+        for lane in &mut self.lanes {
+            let partition = lane.partition().0;
+            if let Some(mut batch) = lane.poll(64, wait).expect("lane poll") {
+                while let Some(raw) = batch.next_payload() {
+                    read(partition, raw.offset);
+                }
+            }
+        }
     }
 
     /// Read every live lane while `produce` runs on each tick, until each
@@ -1596,17 +1602,9 @@ impl Driver {
             }
             tick += 1;
             self.step(Duration::from_millis(10));
-            for lane in &mut self.lanes {
-                let partition = lane.partition().0;
-                if let Some(mut batch) =
-                    lane.poll(64, Duration::from_millis(10)).expect("lane poll")
-                {
-                    if let Some(raw) = batch.next_payload() {
-                        first.entry(partition).or_insert(raw.offset);
-                    }
-                    while batch.next_payload().is_some() {}
-                }
-            }
+            self.poll_lanes(Duration::from_millis(10), |partition, offset| {
+                first.entry(partition).or_insert(offset);
+            });
             let parts = self.partitions();
             !parts.is_empty() && parts.iter().all(|p| first.contains_key(p))
         });
@@ -1863,6 +1861,10 @@ fn on_a_mock_electing_at_once(
         RDKafkaApiKey::JoinGroup,
         &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_COORDINATOR_LOAD_IN_PROGRESS],
     );
+    // A slower host than the one this test was written on.
+    cluster
+        .broker_round_trip_time(1, Duration::from_millis(250))
+        .expect("round trip time");
     body(&cluster);
 }
 
@@ -1959,7 +1961,9 @@ fn dropping_in_the_pass_after_a_discard_returns() {
 fn a_consumer_joining_after_the_hold_ended_starts_a_new_epoch() {
     on_a_cluster_electing_at_once(4, |brokers| {
         let clock = TestClock::frozen();
-        let cfg = watched_config(brokers, "hold-ended", 2);
+        let mut cfg = watched_config(brokers, "hold-ended", 2);
+        // This test advances the frozen clock while the group forms.
+        cfg.startup_timeout = Duration::from_hours(1);
         let source = KafkaSource::new(cfg).with_clock(Arc::clone(&clock) as _);
         let mut driver = Driver::open_watched(source, "hold-ended");
         // Past the hold as soon as the first offer arrives, whenever that is.
@@ -2482,10 +2486,32 @@ mod latest_start {
             latest::a_removed_single_consumer(b, t, "earliest")
         });
     }
-    /// `config` under `latest`, whose interval commit never fires in a test.
+    /// Run `body` with this thread's warnings going to `capture`, which a test
+    /// reads during the run.
+    fn with_warnings(capture: &spate_test::LogCapture, body: impl FnOnce()) {
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .with_writer(capture.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, body);
+    }
+
+    /// Advance `clock` past the hold until `driver`'s first consumer has lanes.
+    fn past_the_hold(driver: &mut Driver, clock: &TestClock) {
+        wait_until(ASSIGNMENT, "the first consumer's lanes", || {
+            clock.advance(Duration::from_millis(500));
+            driver.step(Duration::from_millis(20));
+            !driver.lanes.is_empty()
+        });
+    }
+
+    /// `config` under `latest`, whose interval commit never fires in a test, and
+    /// whose startup deadline is out of reach of a test advancing a frozen clock.
     fn latest_config(brokers: &str, group: &str, consumers: usize) -> KafkaSourceConfig {
         let mut cfg = watched_config(brokers, group, consumers);
         cfg.commit_interval = Duration::from_hours(1);
+        cfg.startup_timeout = Duration::from_hours(1);
         cfg.rdkafka
             .insert("auto.offset.reset".into(), "latest".into());
         cfg
@@ -2530,6 +2556,30 @@ mod latest_start {
         source.open(SourceCtx::new(cp.handle())).expect("open");
         let lanes = await_assignment(&mut source, ASSIGNMENT);
         (source, cp, lanes)
+    }
+
+    /// Read across one epoch and the next: what each partition delivered has no
+    /// gap, so the second epoch skipped nothing the first did not deliver.
+    fn assert_no_gap_across_epochs(driver: &mut Driver, brokers: &str) {
+        let mut produce = produce_round(brokers, 4);
+        produce();
+        let mut read = driver.read(2, Duration::from_secs(30));
+        driver.settle_group(2, 4, Duration::from_secs(60));
+        produce();
+        for (p, offsets) in driver.read(2, Duration::from_secs(30)) {
+            read.entry(p).or_default().extend(offsets);
+        }
+        for (p, offsets) in &read {
+            let (first, last) = (
+                *offsets.first().expect("read"),
+                *offsets.last().expect("read"),
+            );
+            assert_eq!(
+                usize::try_from(last - first + 1).expect("ordered"),
+                offsets.len(),
+                "partition {p} has a gap: {offsets:?}"
+            );
+        }
     }
 
     /// A partition with no commit has one once its lane is handed out.
@@ -2591,12 +2641,7 @@ mod latest_start {
                     .filter(|l| l.contains("discarded an assignment"))
                     .count()
             };
-            let subscriber = tracing_subscriber::fmt()
-                .with_max_level(tracing::Level::WARN)
-                .with_ansi(false)
-                .with_writer(capture.clone())
-                .finish();
-            tracing::subscriber::with_default(subscriber, || {
+            with_warnings(&capture, || {
                 let cp = Checkpointer::new();
                 let mut source = KafkaSource::new(quiet_latest(&brokers, group));
                 source.open(SourceCtx::new(cp.handle())).expect("open");
@@ -2646,12 +2691,7 @@ mod latest_start {
                 .filter(|l| l.contains("could not settle a start position"))
                 .count()
         };
-        let subscriber = tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::WARN)
-            .with_ansi(false)
-            .with_writer(capture.clone())
-            .finish();
-        tracing::subscriber::with_default(subscriber, || {
+        with_warnings(&capture, || {
             source.open(SourceCtx::new(cp.handle())).expect("open");
             wait_until(ASSIGNMENT, "the first attempt", || {
                 assert!(
@@ -2699,18 +2739,9 @@ mod latest_start {
                     .filter(|l| l.contains("could not settle a start position"))
                     .count()
             };
-            let subscriber = tracing_subscriber::fmt()
-                .with_max_level(tracing::Level::WARN)
-                .with_ansi(false)
-                .with_writer(capture.clone())
-                .finish();
-            tracing::subscriber::with_default(subscriber, || {
+            with_warnings(&capture, || {
                 let mut driver = Driver::open_watched(source, "retried-epoch");
-                wait_until(ASSIGNMENT, "the first consumer's lanes", || {
-                    clock.advance(Duration::from_millis(500));
-                    driver.step(Duration::from_millis(20));
-                    !driver.lanes.is_empty()
-                });
+                past_the_hold(&mut driver, &clock);
                 // The second consumer's offer drains these lanes, and the lookup
                 // of the accept after that drain fails once.
                 cluster.request_errors(
@@ -2747,12 +2778,7 @@ mod latest_start {
         );
         let clock = TestClock::frozen();
         let capture = spate_test::LogCapture::new();
-        let subscriber = tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::WARN)
-            .with_ansi(false)
-            .with_writer(capture.clone())
-            .finish();
-        tracing::subscriber::with_default(subscriber, || {
+        with_warnings(&capture, || {
             let first = KafkaSource::new(quiet_latest(&brokers, "retry-revoked"))
                 .with_clock(Arc::clone(&clock) as _);
             let mut first = Driver::open_with(first, |ctx| ctx);
@@ -2805,12 +2831,7 @@ mod latest_start {
         // Hold the clock until a failed lookup has named the cause, so the
         // deadline reads that cause and not the revocation before it.
         let capture = spate_test::LogCapture::new();
-        let subscriber = tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::WARN)
-            .with_ansi(false)
-            .with_writer(capture.clone())
-            .finish();
-        tracing::subscriber::with_default(subscriber, || {
+        with_warnings(&capture, || {
             wait_until(Duration::from_secs(60), "the failed lookup", || {
                 if let Ok(SourceEvent::LanesRevoked { lanes, barrier }) =
                     driver.source.poll_events(Duration::from_millis(50))
@@ -2910,28 +2931,8 @@ mod latest_start {
             let source = KafkaSource::new(latest_config(brokers, "reassign-start", 2))
                 .with_clock(Arc::clone(&clock) as _);
             let mut driver = Driver::open_watched(source, "reassign-start");
-            wait_until(ASSIGNMENT, "the first consumer's lanes", || {
-                clock.advance(Duration::from_millis(500));
-                driver.step(Duration::from_millis(20));
-                !driver.lanes.is_empty()
-            });
-            let start = committed(brokers, "reassign-start", 4);
-            let before = driver.read_from_end(Duration::from_secs(30), produce_round(brokers, 4));
-            driver.settle_group(2, 4, Duration::from_secs(60));
-            let after = driver.read_from_end(Duration::from_secs(30), produce_round(brokers, 4));
-            for (p, first) in &after {
-                if let Some(earlier) = before.get(p) {
-                    assert!(
-                        first <= earlier,
-                        "partition {p} skipped: {first} after {earlier}"
-                    );
-                }
-            }
-            for (at, was) in committed(brokers, "reassign-start", 4).iter().zip(&start) {
-                if matches!(was, rdkafka::Offset::Offset(_)) {
-                    assert_eq!(at, was, "a re-accept writes no commit over a start");
-                }
-            }
+            past_the_hold(&mut driver, &clock);
+            assert_no_gap_across_epochs(&mut driver, brokers);
         });
     }
 
@@ -2944,17 +2945,8 @@ mod latest_start {
             let source = KafkaSource::new(latest_config(brokers, "alone-removed", 2))
                 .with_clock(Arc::clone(&clock) as _);
             let mut driver = Driver::open_watched(source, "alone-removed");
-            wait_until(ASSIGNMENT, "the first consumer's lanes", || {
-                clock.advance(Duration::from_millis(500));
-                driver.step(Duration::from_millis(20));
-                !driver.lanes.is_empty()
-            });
-            let before = driver.read_from_end(Duration::from_secs(30), produce_round(brokers, 4));
-            driver.settle_group(2, 4, Duration::from_secs(60));
-            let after = driver.read_from_end(Duration::from_secs(30), produce_round(brokers, 4));
-            for (p, first) in &before {
-                assert!(after[p] <= *first, "partition {p} skipped");
-            }
+            past_the_hold(&mut driver, &clock);
+            assert_no_gap_across_epochs(&mut driver, brokers);
         });
     }
 
@@ -2971,6 +2963,38 @@ mod latest_start {
             let first = driver.read_from_end(Duration::from_secs(30), produce_round(brokers, 4));
             assert_eq!(first.len(), 4, "{first:?}");
         });
+    }
+
+    /// A commit refused for one consumer discards that consumer's offer alone:
+    /// the consumer settled before it in the same accept gets its lanes.
+    #[test]
+    fn a_stale_offer_leaves_a_settled_one_accepted() {
+        let (cluster, brokers) = cluster_with_records(4);
+        cluster.request_errors(
+            RDKafkaApiKey::OffsetCommit,
+            &[
+                RDKafkaRespErr::RD_KAFKA_RESP_ERR_NO_ERROR,
+                RDKafkaRespErr::RD_KAFKA_RESP_ERR_ILLEGAL_GENERATION,
+            ],
+        );
+        let mut cfg = latest_config(&brokers, "stale-beside-settled", 2);
+        cfg.statistics_interval = Duration::ZERO;
+        let lines = spate_test::capture_logs(tracing::Level::WARN, || {
+            let mut driver = Driver::open(cfg);
+            wait_until(
+                Duration::from_secs(30),
+                "the settled consumer's lanes",
+                || {
+                    driver.step(Duration::from_millis(50));
+                    !driver.lanes.is_empty()
+                },
+            );
+            assert_eq!(driver.lanes.len(), 2, "{:?}", driver.partitions());
+        });
+        assert!(
+            lines.iter().any(|l| l.contains("discarded an assignment")),
+            "{lines:#?}"
+        );
     }
 
     /// A failed lookup holds the offer under `latest`, and the commit follows.
@@ -3014,6 +3038,48 @@ mod latest_start {
         );
     }
 
+    /// A lookup that fails for one consumer of an accept keeps the offer of the
+    /// consumer settled before it and of the consumer after it, and each one's
+    /// partitions get a lane.
+    #[test]
+    fn a_failed_lookup_keeps_every_consumers_offer() {
+        for (api, errors, group) in [
+            (
+                RDKafkaApiKey::OffsetFetch,
+                &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_UNKNOWN][..],
+                "kept-on-lookup",
+            ),
+            (
+                RDKafkaApiKey::OffsetCommit,
+                &[
+                    RDKafkaRespErr::RD_KAFKA_RESP_ERR_NO_ERROR,
+                    RDKafkaRespErr::RD_KAFKA_RESP_ERR_UNKNOWN,
+                ][..],
+                "kept-on-commit",
+            ),
+        ] {
+            let (cluster, brokers) = cluster_with_records(4);
+            cluster.request_errors(api, errors);
+            let mut cfg = latest_config(&brokers, group, 2);
+            cfg.statistics_interval = Duration::ZERO;
+            let lines = spate_test::capture_logs(tracing::Level::WARN, || {
+                let mut driver = Driver::open(cfg);
+                driver.settle(4, Duration::from_secs(60));
+            });
+            assert!(
+                lines
+                    .iter()
+                    .any(|l| l.contains("could not settle a start position")),
+                "{group}: {lines:#?}"
+            );
+            assert_eq!(
+                committed(&brokers, group, 4),
+                [rdkafka::Offset::Offset(3); 4],
+                "{group}"
+            );
+        }
+    }
+
     /// A failing ListOffsets writes no commit and hands out no lane until it
     /// answers. Regression for #1704.
     #[test]
@@ -3039,7 +3105,7 @@ mod latest_start {
     }
 
     /// A broker that does not yet know a partition just added to the topic holds
-    /// the offer, and the run goes on once it does.
+    /// the offer, and the run goes on once it does. Regression for #1704.
     #[test]
     fn a_partition_the_broker_does_not_know_yet_is_retried() {
         let (cluster, brokers) = cluster_with_records(1);

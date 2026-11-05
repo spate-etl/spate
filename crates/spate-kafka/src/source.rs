@@ -105,13 +105,13 @@
 //! [`Source::poll_events`] stands against a librdkafka that stops holding
 //! the contract.
 
-use crate::client::{list_offsets, listed_offset};
+use crate::client::{PendingCommit, list_offsets, listed_offset, send_commit};
 use crate::config::KafkaSourceConfig;
 use crate::context::{Intent, SourceContext, SourceHooks};
 use crate::error::{StartFailure, classify_start_error};
 use crate::lane::KafkaLane;
 use crate::metrics::KafkaStatsMetrics;
-use rdkafka::consumer::{BaseConsumer, CommitMode, Consumer};
+use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::error::{KafkaError, KafkaResult, RDKafkaErrorCode};
 use rdkafka::message::Message;
 use rdkafka::statistics::Statistics;
@@ -121,7 +121,7 @@ use spate_core::checkpoint::AckIssuer;
 use spate_core::clock::Stopwatch;
 use spate_core::clock::SyncClock;
 use spate_core::error::{ErrorClass, SourceError};
-use spate_core::hash::FastMap;
+use spate_core::hash::{FastMap, FastSet};
 use spate_core::metrics::SourceMetrics;
 use spate_core::record::PartitionId;
 use spate_core::source::{DrainBarrier, LaneId, Source, SourceCtx, SourceEvent};
@@ -137,6 +137,11 @@ const COMMITTED_LOOKUP_TIMEOUT: Duration = Duration::from_secs(10);
 /// same rebalance. librdkafka's default `heartbeat.interval.ms`, the longest a
 /// steady member goes before it learns of a rebalance.
 const ASSIGN_HOLD: Duration = Duration::from_secs(3);
+
+/// Bound on waiting for the start commits of one accept, which are in flight
+/// together. An answer that takes longer leaves the offers held for the next
+/// attempt, which sends the same offsets again.
+const START_COMMIT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// How long an offer whose start could not be settled waits for its next
 /// attempt. Without a pace every poll repeats a blocking broker round trip.
@@ -186,6 +191,10 @@ struct Member {
     /// Stands in for librdkafka's committed position in the lag statistic,
     /// which the lookup does not update.
     committed_at_assign: FastMap<i32, i64>,
+    /// The start positions an attempt already read for the offer this consumer
+    /// still holds, so the next attempt does not spend its budget reading them
+    /// again. Cleared by a new offer and when the consumer rejoins.
+    prepared: Option<Prepared>,
     /// The generation [`Member::group_generation`] reads in place of the
     /// client's, since a unit test's consumer never joins a group.
     #[cfg(test)]
@@ -204,6 +213,7 @@ impl Member {
         self.revoking.clear();
         self.revoke_arrived = false;
         self.phase = Phase::Joining;
+        self.prepared = None;
     }
 
     /// The generation this consumer last joined with, or `-1` for none.
@@ -216,13 +226,20 @@ impl Member {
     }
 }
 
+/// One consumer's start positions, read and not yet assigned.
+struct Prepared {
+    /// The list to assign.
+    list: TopicPartitionList,
+    /// What to commit before assigning: each partition with no commit, at its
+    /// listed end. Emptied once the group has answered.
+    to_commit: TopicPartitionList,
+    /// How many partitions start at their listed end.
+    at_end: usize,
+}
+
 /// What settling one consumer's start positions came to.
 enum Starts {
-    /// Assign this list. `at_end` partitions were committed at their end here.
-    Ready {
-        list: TopicPartitionList,
-        at_end: usize,
-    },
+    Ready(Prepared),
     /// The group has moved past this consumer, so its offer is discarded.
     Stale,
     /// The offer is kept and tried again, for this reason.
@@ -626,28 +643,43 @@ impl KafkaSource {
         let mut offers = offers.into_iter();
         while let Some((k, tpl)) = offers.next() {
             let starts = if tpl.count() == 0 {
-                Starts::Ready {
+                Starts::Ready(Prepared {
                     list: TopicPartitionList::new(),
+                    to_commit: TopicPartitionList::new(),
                     at_end: 0,
-                }
+                })
+            } else if let Some(prepared) = self.members[k].prepared.take() {
+                Starts::Ready(prepared)
             } else {
                 self.start_positions(k, &tpl, lookup_until)?
             };
             match starts {
-                Starts::Ready { list, at_end } => settled.push((k, tpl, list, at_end)),
-                Starts::Stale => {
-                    let generation = self.members[k].group_generation();
-                    self.discard_offer(k, &tpl, generation, None)?;
-                }
+                Starts::Ready(prepared) => settled.push((k, tpl, prepared)),
+                Starts::Stale => self.discard_refused(k, &tpl)?,
                 Starts::Retry(reason) => {
-                    let kept = settled
+                    let kept: Vec<(usize, TopicPartitionList)> = settled
                         .into_iter()
-                        .map(|(k, tpl, _, _)| (k, tpl))
+                        .map(|(k, tpl, prepared)| {
+                            self.members[k].prepared = Some(prepared);
+                            (k, tpl)
+                        })
                         .chain(std::iter::once((k, tpl)))
-                        .chain(offers);
-                    return Ok(self.retry_starts(kept, &held, reassign, &reason));
+                        .chain(offers)
+                        .collect();
+                    return Ok(self.retry_starts(kept.into_iter(), &held, reassign, &reason));
                 }
             }
+        }
+        let (settled, retry) = self.commit_starts(settled)?;
+        if let Some(reason) = retry {
+            let kept: Vec<(usize, TopicPartitionList)> = settled
+                .into_iter()
+                .map(|(k, tpl, prepared)| {
+                    self.members[k].prepared = Some(prepared);
+                    (k, tpl)
+                })
+                .collect();
+            return Ok(self.retry_starts(kept.into_iter(), &held, reassign, &reason));
         }
         if settled.is_empty() {
             // Nothing was accepted and no lane is left, so the assignment
@@ -661,8 +693,8 @@ impl KafkaSource {
         self.hold_since = None;
         self.start_retry_at = None;
         let mut lanes = Vec::new();
-        for (k, tpl, start, at_end) in &settled {
-            lanes.extend(self.accept_assignment(*k, tpl, start, *at_end)?);
+        for (k, tpl, prepared) in &settled {
+            lanes.extend(self.accept_assignment(*k, tpl, &prepared.list, prepared.at_end)?);
         }
         let joining: Vec<usize> = self
             .members
@@ -687,9 +719,79 @@ impl KafkaSource {
         Ok(SourceEvent::LanesAssigned(lanes))
     }
 
+    /// Commit what each settled consumer has to commit, all in flight together
+    /// under one bound, so an accept waits for the slowest answer and not their
+    /// sum. Returns the offers left, each stale one discarded, with the reason to
+    /// retry when any answer asks for it.
+    ///
+    /// # Errors
+    ///
+    /// A failure [`classify_start_error`] classes as fatal.
+    #[allow(clippy::type_complexity)]
+    fn commit_starts(
+        &mut self,
+        settled: Vec<(usize, TopicPartitionList, Prepared)>,
+    ) -> Result<(Vec<(usize, TopicPartitionList, Prepared)>, Option<String>), SourceError> {
+        let mut retry = None;
+        let mut pending: Vec<Option<PendingCommit<SourceContext>>> =
+            Vec::with_capacity(settled.len());
+        let mut kept = Vec::with_capacity(settled.len());
+        for (k, tpl, prepared) in settled {
+            let mut sent = None;
+            if prepared.to_commit.count() > 0 {
+                // Read here and not at the lookup: a heartbeat reply can move the
+                // generation while the list waits.
+                if self.members[k].group_generation() < 0 {
+                    self.discard_refused(k, &tpl)?;
+                    continue;
+                }
+                match send_commit(&self.members[k].consumer, &prepared.to_commit) {
+                    Ok(commit) => sent = Some(commit),
+                    Err(e) => match start_failure("committing a start offset", &e)? {
+                        Starts::Stale => {
+                            self.discard_refused(k, &tpl)?;
+                            continue;
+                        }
+                        Starts::Retry(reason) => retry = Some(reason),
+                        Starts::Ready(_) => {}
+                    },
+                }
+            }
+            pending.push(sent);
+            kept.push((k, tpl, prepared));
+        }
+        let until = Instant::now() + START_COMMIT_TIMEOUT;
+        let mut settled = Vec::with_capacity(kept.len());
+        for ((k, tpl, mut prepared), commit) in kept.into_iter().zip(pending) {
+            if let Some(commit) = commit {
+                let left = until.saturating_duration_since(Instant::now());
+                match commit.wait(left) {
+                    Ok(()) => prepared.to_commit = TopicPartitionList::new(),
+                    Err(e) => match start_failure("committing a start offset", &e)? {
+                        Starts::Stale => {
+                            self.discard_refused(k, &tpl)?;
+                            continue;
+                        }
+                        Starts::Retry(reason) => retry = Some(reason),
+                        Starts::Ready(_) => {}
+                    },
+                }
+            }
+            settled.push((k, tpl, prepared));
+        }
+        Ok((settled, retry))
+    }
+
+    /// Discard consumer `k`'s offer for a start the group has refused.
+    fn discard_refused(&mut self, k: usize, tpl: &TopicPartitionList) -> Result<(), SourceError> {
+        let generation = self.members[k].group_generation();
+        self.discard_offer(k, tpl, generation, None)
+    }
+
     /// Give back every offer of an accept whose start could not be settled, and
-    /// pace the next attempt. Nothing was assigned, so the next attempt starts
-    /// over from the lookup, which finds any start this one committed.
+    /// pace the next attempt. Nothing was assigned, and what an attempt settled
+    /// stays on its member, so the next attempt goes on from where this one
+    /// stopped.
     fn retry_starts(
         &mut self,
         offers: impl Iterator<Item = (usize, TopicPartitionList)>,
@@ -712,6 +814,11 @@ impl KafkaSource {
             "could not settle a start position; holding the assignment to retry"
         );
         self.note_assignment_loss(format!("a start position: {reason}"));
+        // `note_assignment_loss` keeps no cause before the first assignment, so
+        // the startup deadline names this as the last error.
+        if !self.saw_first_assignment {
+            self.last_consumer_error = Some((Stopwatch::start(&*self.clock), reason.to_owned()));
+        }
         SourceEvent::Idle
     }
 
@@ -766,7 +873,7 @@ impl KafkaSource {
             consumer = k,
             partitions = tpl.count(),
             generation,
-            newest = newest.unwrap_or(-1),
+            newest,
             "discarded an assignment from a generation the group has left; this consumer rejoins"
         );
         Ok(())
@@ -778,11 +885,11 @@ impl KafkaSource {
     /// is `error`, keeps `Offset::Stored` and is started by librdkafka after the
     /// call.
     ///
-    /// Under `latest`, a partition with no committed offset commits its listed
-    /// end here, ahead of any read, so every later start resumes from it and the
-    /// reset policy never applies to it again. This blocks on the broker for the
-    /// commit, outside `lookup_until`. A lookup that fails is retried here, since
-    /// leaving it to librdkafka would start the partition at its end.
+    /// Under `latest`, a partition with no committed offset takes its listed end,
+    /// which [`Self::commit_starts`] commits ahead of any read, so every later
+    /// start resumes from it and the reset policy never applies to it again. A
+    /// lookup that fails is retried, since leaving it to librdkafka would start
+    /// the partition at its end.
     ///
     /// # Errors
     ///
@@ -795,6 +902,17 @@ impl KafkaSource {
     ) -> Result<Starts, SourceError> {
         let policy = self.config.uncommitted_start();
         let keeps_its_start = policy == Some(Offset::End);
+        // The lists below name the configured topic whatever the offer named, so
+        // a partition of another topic would commit a position on this one.
+        if keeps_its_start && !only_on_topic(tpl, &self.config.topic) {
+            return Err(SourceError::Client {
+                class: ErrorClass::Fatal,
+                reason: format!(
+                    "the group offered a partition of a topic other than `{}`",
+                    self.config.topic
+                ),
+            });
+        }
         let member = &mut self.members[k];
         member.committed_at_assign.clear();
         let budget = lookup_until.saturating_duration_since(Instant::now());
@@ -809,10 +927,11 @@ impl KafkaSource {
                 topic = %self.config.topic,
                 "no time left for the committed offset lookup; librdkafka resolves the start offsets"
             );
-            return Ok(Starts::Ready {
+            return Ok(Starts::Ready(Prepared {
                 list: tpl.clone(),
+                to_commit: TopicPartitionList::new(),
                 at_end: 0,
-            });
+            }));
         }
         let committed = match member.consumer.committed_offsets(tpl.clone(), budget) {
             Ok(committed) => committed,
@@ -824,10 +943,11 @@ impl KafkaSource {
                     topic = %self.config.topic,
                     "committed offset lookup failed; librdkafka resolves the start offsets"
                 );
-                return Ok(Starts::Ready {
+                return Ok(Starts::Ready(Prepared {
                     list: tpl.clone(),
+                    to_commit: TopicPartitionList::new(),
                     at_end: 0,
-                });
+                }));
             }
         };
         let uncommitted = policy.unwrap_or(Offset::Stored);
@@ -859,10 +979,11 @@ impl KafkaSource {
             }
         }
         if ends.count() == 0 {
-            return Ok(Starts::Ready {
+            return Ok(Starts::Ready(Prepared {
                 list: committed,
+                to_commit: TopicPartitionList::new(),
                 at_end: 0,
-            });
+            }));
         }
         // A member the group told its generation is gone would have its commit
         // accepted as a simple consumer's, over a peer's offset.
@@ -889,10 +1010,6 @@ impl KafkaSource {
                 Err(e) => return start_failure("listing an end offset", &e),
             }
         }
-        // Only this list is sent: a partition with a commit keeps it.
-        if let Err(e) = member.consumer.commit(&starts, CommitMode::Sync) {
-            return start_failure("committing a start offset", &e);
-        }
         let mut list = committed;
         for elem in starts.elements() {
             list.set_partition_offset(&self.config.topic, elem.partition(), elem.offset())
@@ -901,10 +1018,13 @@ impl KafkaSource {
                 member.committed_at_assign.insert(elem.partition(), offset);
             }
         }
-        Ok(Starts::Ready {
+        let at_end = starts.count();
+        Ok(Starts::Ready(Prepared {
             list,
-            at_end: starts.count(),
-        })
+            // Only this list is sent: a partition with a commit keeps it.
+            to_commit: starts,
+            at_end,
+        }))
     }
 
     /// Record the loss of the source's last partitions, opening the window
@@ -1137,6 +1257,7 @@ impl KafkaSource {
                 // Eager assignment replaces whatever the consumer held.
                 self.members[k].revoking.clear();
                 self.members[k].revoke_arrived = false;
+                self.members[k].prepared = None;
                 self.members[k].phase = Phase::Held(tpl);
                 if self.hold_since.is_none() {
                     self.hold_since = Some(self.clock.now());
@@ -1209,9 +1330,10 @@ impl KafkaSource {
     /// the runtime admits a lane set only as a whole. [`Self::accept_held`]
     /// states what happens to offers that overlap.
     fn settle_held(&mut self) -> Result<SourceEvent<KafkaLane>, SourceError> {
-        // Waiting on the pace, and during a reassign that wait is the only way
-        // here: accepting these offers alone would drop the other consumers'.
-        if self.start_retry_pending() {
+        // Waiting on the pace. A reassign still armed here came due during this
+        // call's poll, and runs at the top of the next: accepting these offers
+        // alone would drop the other consumers'.
+        if self.start_retry_pending() || self.after_drain.is_some() {
             return Ok(SourceEvent::Idle);
         }
         if !self
@@ -1281,6 +1403,16 @@ pub(crate) fn start_offset(
         (Ok(()), Offset::Invalid) => Some(uncommitted),
         _ => Some(Offset::Stored),
     }
+}
+
+/// Whether every element of `tpl` is a distinct partition of `topic`. It looks
+/// each one up through the list, since `elem.topic()` panics on a name that is
+/// not UTF-8, and a group's reply can carry one.
+fn only_on_topic(tpl: &TopicPartitionList, topic: &str) -> bool {
+    let mut seen = FastSet::default();
+    tpl.elements().iter().all(|elem| {
+        seen.insert(elem.partition()) && tpl.find_partition(topic, elem.partition()).is_some()
+    })
 }
 
 /// The start offset a listing names for one partition: only a concrete offset,
@@ -1532,6 +1664,7 @@ impl Source for KafkaSource {
                 saw_first_assignment: false,
                 phase: Phase::Joining,
                 committed_at_assign: FastMap::default(),
+                prepared: None,
                 #[cfg(test)]
                 generation: None,
             });
@@ -2104,7 +2237,9 @@ mod tests {
         }
         let (mut source, _clock) = opened_unassigned(test_config(), 1);
         match source.start_positions(0, &tpl, Instant::now()) {
-            Ok(Starts::Ready { at_end: 0, list }) => {
+            Ok(Starts::Ready(Prepared {
+                at_end: 0, list, ..
+            })) => {
                 assert_eq!(list.elements()[0].offset(), tpl.elements()[0].offset());
             }
             _ => panic!("expected the offer as it came under earliest"),

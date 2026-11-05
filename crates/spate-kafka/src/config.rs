@@ -351,7 +351,8 @@ impl KafkaSourceConfig {
             .get("auto.offset.reset")
             .or_else(|| self.rdkafka.get("topic.auto.offset.reset"))
             .map_or("latest", String::as_str);
-        match policy.to_ascii_lowercase().as_str() {
+        // librdkafka skips leading whitespace in the value.
+        match policy.trim_start().to_ascii_lowercase().as_str() {
             "smallest" | "earliest" | "beginning" => Some(rdkafka::Offset::Beginning),
             "largest" | "latest" | "end" => Some(rdkafka::Offset::End),
             _ => None,

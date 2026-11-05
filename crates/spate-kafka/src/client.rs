@@ -29,6 +29,7 @@ use spate_core::config::{DurationBounds, check_duration, redact};
 use std::collections::BTreeMap;
 use std::fmt;
 use std::ops::Deref;
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Global librdkafka properties whose names start with `topic.`. librdkafka
@@ -393,8 +394,7 @@ impl Hooks for () {}
 ///
 /// # Errors
 ///
-/// When the request fails as a whole. An element's own failure is on that
-/// element, for [`listed_offset`] to read.
+/// When any partition's answer is a refusal, with nothing written to the list.
 pub(crate) fn list_offsets<C: ClientContext>(
     client: &Client<C>,
     tpl: &mut TopicPartitionList,
@@ -411,6 +411,87 @@ pub(crate) fn list_offsets<C: ClientContext>(
         return Err(KafkaError::MetadataFetch(code.into()));
     }
     Ok(())
+}
+
+/// A commit sent by [`send_commit`], waiting for the group's answer on a queue of
+/// its own. Dropping it abandons the wait, and a commit left unanswered may still
+/// reach the broker, which checks its generation.
+pub(crate) struct PendingCommit<C: ConsumerContext + 'static> {
+    /// Keeps the client alive for the queue's whole life.
+    _consumer: Arc<BaseConsumer<C>>,
+    queue: *mut rdkafka::bindings::rd_kafka_queue_t,
+}
+
+impl<C: ConsumerContext + 'static> PendingCommit<C> {
+    /// Waits up to `timeout` for the group's answer.
+    ///
+    /// # Errors
+    ///
+    /// The commit's failure, or `OperationTimedOut` when no answer came in time.
+    pub(crate) fn wait(&self, timeout: Duration) -> KafkaResult<()> {
+        let timeout = i32::try_from(timeout.as_millis()).unwrap_or(i32::MAX);
+        // SAFETY: `queue` is valid until `drop`. The event is owned here and
+        // destroyed before the block ends.
+        let code = unsafe {
+            let event = rdkafka::bindings::rd_kafka_queue_poll(self.queue, timeout);
+            if event.is_null() {
+                RDKafkaRespErr::RD_KAFKA_RESP_ERR__TIMED_OUT
+            } else {
+                let code = rdkafka::bindings::rd_kafka_event_error(event);
+                rdkafka::bindings::rd_kafka_event_destroy(event);
+                code
+            }
+        };
+        if code.is_error() {
+            return Err(KafkaError::ConsumerCommit(code.into()));
+        }
+        Ok(())
+    }
+}
+
+impl<C: ConsumerContext + 'static> Drop for PendingCommit<C> {
+    fn drop(&mut self) {
+        // SAFETY: `queue` came from `rd_kafka_queue_new` on `consumer`, which is
+        // still alive, and nothing uses it after this. librdkafka drops a reply
+        // that arrives once the queue is gone.
+        unsafe { rdkafka::bindings::rd_kafka_queue_destroy(self.queue) };
+    }
+}
+
+/// Sends a commit of exactly `tpl` without waiting for its answer, so several
+/// clients' commits can be in flight together. `rd_kafka_commit` in its sync form
+/// has no bound: a request queued to a broker that has stopped answering is
+/// requeued for as long as the broker stays silent.
+///
+/// # Errors
+///
+/// When the commit cannot be queued.
+pub(crate) fn send_commit<C: ConsumerContext + 'static>(
+    consumer: &Arc<BaseConsumer<C>>,
+    tpl: &TopicPartitionList,
+) -> KafkaResult<PendingCommit<C>> {
+    // SAFETY: the client pointer is valid while `consumer` is borrowed, and
+    // `rd_kafka_commit_queue` copies `tpl`. The queue is owned by the returned
+    // value, or destroyed here when nothing was queued.
+    unsafe {
+        let rk = consumer.client().native_ptr();
+        let queue = rdkafka::bindings::rd_kafka_queue_new(rk);
+        let code = rdkafka::bindings::rd_kafka_commit_queue(
+            rk,
+            tpl.ptr(),
+            queue,
+            None,
+            std::ptr::null_mut(),
+        );
+        if code.is_error() {
+            rdkafka::bindings::rd_kafka_queue_destroy(queue);
+            return Err(KafkaError::ConsumerCommit(code.into()));
+        }
+        Ok(PendingCommit {
+            _consumer: Arc::clone(consumer),
+            queue,
+        })
+    }
 }
 
 /// The offset [`list_offsets`] wrote into `elem`.

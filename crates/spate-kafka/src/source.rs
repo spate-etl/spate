@@ -521,6 +521,7 @@ impl KafkaSource {
         for member in &mut self.members {
             let owned: Vec<i32> = member.assignment.values().copied().collect();
             member.committed_at_assign.retain(|p, _| owned.contains(p));
+            member.watermarks.retain(|p, _| owned.contains(p));
             if let Some(stats) = member.stats.as_mut() {
                 stats.retain_partitions(&partition_ids(&owned));
             }
@@ -3349,6 +3350,21 @@ mod tests {
             let lanes = source.accept_assignment(0, &tpl, &tpl, 0).expect("accept");
             assert_eq!(position_of(&source), Offset::Invalid);
             drop(lanes);
+        }
+
+        /// A partition the member no longer holds gives up its watermark, and one
+        /// it holds keeps it.
+        #[test]
+        fn a_partition_no_longer_held_gives_up_its_watermark() {
+            let (_cluster, mut source, _lanes) = assigned_on_mock(0);
+            source.members[0]
+                .watermarks
+                .insert(7, Arc::new(AtomicI64::new(i64::MIN)));
+
+            source.prune_partition_series();
+
+            let held: Vec<i32> = source.members[0].watermarks.keys().copied().collect();
+            assert_eq!(held, [0]);
         }
 
         /// A message polled off the main queue latches the client against

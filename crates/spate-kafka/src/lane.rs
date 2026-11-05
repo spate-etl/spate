@@ -185,9 +185,11 @@ fn offset_to_retire(position: Offset, covered_to: Option<i64>) -> Option<i64> {
 }
 
 /// Whether every batch a lane issued, through `covered_to`, has reached
-/// `watermark`. A lane that has issued nothing has nothing to wait for.
+/// `watermark`. A lane that has issued nothing has nothing to wait for, and a
+/// watermark past `covered_to` predates a rewind and says nothing of what the lane
+/// issued since.
 fn issued_batches_settled(covered_to: Option<i64>, watermark: i64) -> bool {
-    covered_to.is_none_or(|covered| watermark >= covered)
+    covered_to.is_none_or(|covered| watermark == covered)
 }
 
 /// Whether an empty return from a poll of `timeout` reads the position. Every
@@ -354,7 +356,7 @@ mod tests {
         assert!(issued_batches_settled(None, i64::MIN));
         assert!(!issued_batches_settled(Some(5), 4));
         assert!(issued_batches_settled(Some(5), 5));
-        assert!(issued_batches_settled(Some(5), 6));
+        assert!(!issued_batches_settled(Some(5), 6));
     }
 
     /// A return that may have blocked always reads. A zero-timeout one reads

@@ -2706,6 +2706,57 @@ fn an_acknowledgement_held_past_its_batch_holds_the_marker_back() {
     assert_eq!(watched.poll_until_committed(0, 0, 2), [2]);
 }
 
+/// A fetch answered out of range takes the lane back below its watermark. The
+/// head it reads again holds the markers behind it back, whatever that watermark
+/// says. Regression for #1709.
+#[test]
+fn a_rewind_below_the_watermark_holds_markers_back() {
+    let cluster = marker_cluster(1);
+    let brokers = cluster.bootstrap_servers();
+    produce(&brokers, TOPIC, 1, 1, "head");
+    write_marker(&brokers, 0, Marker::Commit);
+    write_marker(&brokers, 0, Marker::Abort);
+    let group = spate_test::unique_name("rewind");
+    let mut watched = Watched::open(config(&brokers, &group));
+    assert_eq!(watched.read(0, 1), [0]);
+    watched.poll_until_committed(0, 0, 3);
+
+    cluster.request_errors(
+        RDKafkaApiKey::Fetch,
+        &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_OFFSET_OUT_OF_RANGE],
+    );
+    write_marker(&brokers, 0, Marker::Commit);
+    let ack = hold_a_record_past_its_marker(&mut watched);
+
+    assert!(watched.commit().is_empty(), "a watermark passed a live ack");
+    drop(ack);
+    assert_eq!(watched.commit(), [(PartitionId(0), 1)]);
+    assert_eq!(watched.poll_until_committed(0, 0, 4), [4]);
+}
+
+/// A watermark past what the lane issued, as a retried commit of an earlier epoch
+/// stores, holds the marker back until the next store. Regression for #1709.
+#[test]
+fn a_watermark_past_what_the_lane_issued_waits_for_the_next_store() {
+    let cluster = marker_cluster(1);
+    let brokers = cluster.bootstrap_servers();
+    produce(&brokers, TOPIC, 1, 1, "before");
+    write_marker(&brokers, 0, Marker::Commit);
+    let group = spate_test::unique_name("past");
+    let mut watched = Watched::open(config(&brokers, &group));
+    let ack = hold_a_record_past_its_marker(&mut watched);
+
+    watched
+        .source
+        .commit(&[(PartitionId(0), 100)])
+        .expect("store");
+    assert_eq!(watched.poll(0), None, "a batch behind a live ack");
+
+    drop(ack);
+    assert_eq!(watched.commit(), [(PartitionId(0), 1)]);
+    assert_eq!(watched.poll_until_committed(0, 0, 2), [2]);
+}
+
 /// A failed batch ahead of a marker holds the committed offset where it is, and
 /// the partition keeps reading its lag. Regression for #1709.
 #[test]

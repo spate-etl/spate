@@ -2539,7 +2539,11 @@ mod tests {
             panic!("PermissionDenied mid-stream must be pipeline-fatal, got: {failure}");
         };
         assert_eq!(e.class(), ErrorClass::Fatal, "{e}");
-        assert!(e.to_string().contains("p/a"), "{e}");
+        assert!(
+            e.reason()
+                .starts_with("split s3-test: reading \"p/a\" failed mid-object at byte 4: "),
+            "{e}"
+        );
     }
 
     #[tokio::test]
@@ -3796,6 +3800,9 @@ mod tests {
             panic!("a ranged read with no ETag must be fatal");
         };
         assert_eq!(e.class(), ErrorClass::Fatal, "{e}");
-        assert!(e.reason().contains("has no ETag pin"), "{e}");
+        assert_eq!(
+            e.reason(),
+            "split s3-test: ranged read of \"p/a\" has no ETag pin — internal wiring bug"
+        );
     }
 }

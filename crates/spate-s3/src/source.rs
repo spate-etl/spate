@@ -1525,6 +1525,7 @@ mod tests {
                 .starts_with("building the object store for s3://bucket/p/"),
             "{err}"
         );
+        assert!(err.reason().contains("nope"), "{err}");
 
         let (source, _rt) = source_with_store("  aws_checksum_algorithm: \"nope\"\n");
         let location = source.parse_location("s3://ops/jobs/a/").unwrap();
@@ -1535,6 +1536,7 @@ mod tests {
                 .starts_with("building the object store for the job location s3://ops/jobs/a/"),
             "{err}"
         );
+        assert!(err.reason().contains("nope"), "{err}");
     }
 
     /// Pins that a URL whose scheme names no store is fatal beside an injected
@@ -1545,7 +1547,10 @@ mod tests {
         source.store = Some(Arc::new(object_store::memory::InMemory::new()));
         let err = source.open(ctx()).unwrap_err();
         assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
-        assert!(err.reason().starts_with("parsing foo://bucket/p/"), "{err}");
+        assert!(
+            err.reason().starts_with("parsing foo://bucket/p/: Unable"),
+            "{err}"
+        );
     }
 
     /// Pins that a value that does not parse as a URL is fatal. Called
@@ -1554,6 +1559,10 @@ mod tests {
     fn an_unparsable_url_is_fatal() {
         let err = parse("no scheme").unwrap_err();
         assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
-        assert!(err.reason().starts_with("invalid URL no scheme"), "{err}");
+        assert!(
+            err.reason()
+                .starts_with("invalid URL no scheme: relative URL"),
+            "{err}"
+        );
     }
 }

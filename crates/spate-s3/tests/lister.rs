@@ -1019,6 +1019,7 @@ fn a_lister_on_a_durable_feed_without_a_location_refuses() {
         .unwrap_err();
     assert_eq!(err.class(), spate_core::error::ErrorClass::Fatal, "{err}");
     assert!(err.reason().contains("`feed.location`"), "{err}");
+    assert!(err.reason().contains("`scripted`"), "{err}");
     assert!(script.published().is_empty());
     assert_eq!(spy.lists(), 0);
     assert!(spy.gets().is_empty());
@@ -2140,6 +2141,7 @@ fn a_panicked_solo_lister_fails_the_run() {
     );
     let reason = failure_reason(&exit(&l));
     assert!(reason.contains("lister ended"), "{reason}");
+    assert!(reason.contains("the feed panics on publish"), "{reason}");
 }
 
 /// Pins that a listing failed by a retryable store error fails a lister

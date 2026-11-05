@@ -2439,7 +2439,7 @@ mod tests {
             .list_once(&scripted_section(), Arc::new(feed))
             .unwrap_err();
         assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
-        assert!(err.to_string().contains("listing"), "{err}");
+        assert!(err.reason().starts_with("listing data: "), "{err}");
         assert!(script.published().is_empty());
         assert_eq!(rt.block_on(job.end()), None);
     }
@@ -3119,6 +3119,6 @@ mod tests {
             ))
             .unwrap_err();
         assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
-        assert!(err.reason().starts_with("minting a unit: "), "{err}");
+        assert!(err.reason().starts_with("minting a unit: cannot"), "{err}");
     }
 }

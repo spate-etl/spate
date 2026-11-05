@@ -838,10 +838,12 @@ mod tests {
             store: "S3",
             source: "connection reset".into(),
         };
+        let refused = read_error(&location, &object, &denied());
         assert!(
-            read_error(&location, &object, &denied())
-                .to_string()
-                .contains("s3:ListBucket")
+            refused.reason().ends_with(
+                "; on AWS S3 an absent object reads as 403 without `s3:ListBucket` on its bucket"
+            ),
+            "{refused}"
         );
         assert!(
             !read_error(&location, &object, &reset)

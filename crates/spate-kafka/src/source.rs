@@ -339,23 +339,11 @@ fn partition_ids<'a>(partitions: impl IntoIterator<Item = &'a i32>) -> Vec<Parti
 /// queue, so a fatal one replaces a retryable one an earlier consumer
 /// returned.
 fn keep_reported(reported: &mut Option<SourceError>, error: SourceError) {
-    if reported
-        .as_ref()
-        .is_none_or(|first| is_fatal(&error) && !is_fatal(first))
-    {
+    if reported.as_ref().is_none_or(|first| {
+        error.class() == ErrorClass::Fatal && first.class() != ErrorClass::Fatal
+    }) {
         *reported = Some(error);
     }
-}
-
-/// Whether `error` is a client error classified fatal.
-fn is_fatal(error: &SourceError) -> bool {
-    matches!(
-        error,
-        SourceError::Client {
-            class: ErrorClass::Fatal,
-            ..
-        }
-    )
 }
 
 /// The first partition two of `offers` carry, with the consumers carrying it.
@@ -453,10 +441,7 @@ impl KafkaSource {
 
     fn opened(&self) -> Result<(), SourceError> {
         if self.members.is_empty() {
-            return Err(SourceError::Client {
-                class: ErrorClass::Fatal,
-                reason: "source used before open()".into(),
-            });
+            return Err(SourceError::fatal("source used before open()"));
         }
         Ok(())
     }
@@ -535,10 +520,10 @@ impl KafkaSource {
     /// classified through the same table as every other consumer error.
     fn rebalance_error(&self, k: usize, code: rdkafka::error::RDKafkaErrorCode) -> SourceError {
         let started = self.members.get(k).is_some_and(|m| m.saw_first_assignment);
-        SourceError::Client {
-            class: crate::error::classify_consumer_error(code, started),
-            reason: format!("rebalance error: {code}"),
-        }
+        SourceError::new(
+            crate::error::classify_consumer_error(code, started),
+            format!("rebalance error: {code}"),
+        )
     }
 
     /// Accept one consumer's assignment from its settled `start` offsets:
@@ -559,10 +544,10 @@ impl KafkaSource {
             consumer.assign(tpl).map_err(fatal("assign empty"))?;
             return Ok(Vec::new());
         }
-        let issuer = self.issuer.as_ref().ok_or_else(|| SourceError::Client {
-            class: ErrorClass::Fatal,
-            reason: "assignment before open()".into(),
-        })?;
+        let issuer = self
+            .issuer
+            .as_ref()
+            .ok_or_else(|| SourceError::fatal("assignment before open()"))?;
 
         consumer.assign(start).map_err(fatal("assign"))?;
         // A fetch that completes before this pause is discarded as outdated
@@ -574,9 +559,8 @@ impl KafkaSource {
             let partition = elem.partition();
             let queue = consumer
                 .split_partition_queue(&self.config.topic, partition)
-                .ok_or_else(|| SourceError::Client {
-                    class: ErrorClass::Fatal,
-                    reason: format!("no queue for assigned partition {partition}"),
+                .ok_or_else(|| {
+                    SourceError::fatal(format!("no queue for assigned partition {partition}"))
                 })?;
             let lane_id = LaneId(self.next_lane);
             self.next_lane += 1;
@@ -637,14 +621,11 @@ impl KafkaSource {
         if first_repeat(&offers).is_some() {
             offers = self.discard_stale_offers(offers)?;
             if let Some((partition, a, b)) = first_repeat(&offers) {
-                return Err(SourceError::Client {
-                    class: ErrorClass::Fatal,
-                    reason: format!(
-                        "partition {partition} was assigned to consumers {a} and {b} of this \
+                return Err(SourceError::fatal(format!(
+                    "partition {partition} was assigned to consumers {a} and {b} of this \
                          source in generation {}",
-                        self.members[a].group_generation()
-                    ),
-                });
+                    self.members[a].group_generation()
+                )));
             }
         }
         // One budget for every lookup and listing of the accept: the controller
@@ -912,13 +893,10 @@ impl KafkaSource {
             .iter()
             .all(|(_, tpl)| only_on_topic(tpl, &self.config.topic))
         {
-            return Err(SourceError::Client {
-                class: ErrorClass::Fatal,
-                reason: format!(
-                    "the group offered a partition of a topic other than `{}`",
-                    self.config.topic
-                ),
-            });
+            return Err(SourceError::fatal(format!(
+                "the group offered a partition of a topic other than `{}`",
+                self.config.topic
+            )));
         }
         for (k, _) in offers {
             self.members[*k].committed_at_assign.clear();
@@ -1236,26 +1214,30 @@ impl KafkaSource {
     ) -> SourceError {
         let code = e.rdkafka_error_code();
         let text = code.and_then(|code| consumer.context().take_error(code));
-        let class = crate::error::classify_poll_error(
+        let mut error = crate::error::poll_error(
+            "consumer poll",
             e,
             self.members[k].saw_first_assignment,
             text.as_deref(),
         );
-        let mut reason = crate::error::poll_reason("consumer poll", e, text.as_deref());
         // librdkafka's fencing text does not name the instance.
         if let rdkafka::error::KafkaError::MessageConsumptionFatal(
             rdkafka::error::RDKafkaErrorCode::FencedInstanceId,
         ) = e
             && let Some(id) = self.config.rdkafka.get("group.instance.id")
         {
-            reason.push_str(&format!(" (group.instance.id {id:?})"));
+            error = error.map_reason(|mut reason| {
+                reason.push_str(&format!(" (group.instance.id {id:?})"));
+                reason
+            });
         }
         // Every broker's failure is followed by `AllBrokersDown`, which would
         // otherwise hide it from the deadline error.
         if code != Some(rdkafka::error::RDKafkaErrorCode::AllBrokersDown) {
-            self.last_consumer_error = Some((Stopwatch::start(&*self.clock), reason.clone()));
+            self.last_consumer_error =
+                Some((Stopwatch::start(&*self.clock), error.reason().to_owned()));
         }
-        SourceError::Client { class, reason }
+        error
     }
 
     /// The next rebalance intent to act on and its consumer: a revocation or
@@ -1498,10 +1480,7 @@ fn start_from(offset: i64) -> KafkaResult<i64> {
 /// A code [`classify_start_error`] classes as fatal, naming `doing`.
 fn start_failure(doing: &str, e: &KafkaError) -> Result<StartFailure, SourceError> {
     match e.rdkafka_error_code().map(classify_start_error) {
-        Some(StartFailure::Fatal) => Err(SourceError::Client {
-            class: ErrorClass::Fatal,
-            reason: format!("{doing}: {e}"),
-        }),
+        Some(StartFailure::Fatal) => Err(SourceError::fatal(format!("{doing}: {e}"))),
         Some(failure) => Ok(failure),
         None => Ok(StartFailure::Retry),
     }
@@ -1630,17 +1609,11 @@ fn assignment_deadline_error(
     if let Some((age, error)) = last_error {
         reason.push_str(&format!("; last consumer error {age:?} ago: {error}"));
     }
-    Some(SourceError::Client {
-        class: ErrorClass::Fatal,
-        reason,
-    })
+    Some(SourceError::fatal(reason))
 }
 
 fn fatal(what: &'static str) -> impl Fn(rdkafka::error::KafkaError) -> SourceError {
-    move |e| SourceError::Client {
-        class: ErrorClass::Fatal,
-        reason: format!("{what}: {e}"),
-    }
+    move |e| SourceError::fatal(format!("{what}: {e}"))
 }
 
 impl Source for KafkaSource {
@@ -1652,19 +1625,15 @@ impl Source for KafkaSource {
 
     fn open(&mut self, ctx: SourceCtx) -> Result<(), SourceError> {
         if !self.members.is_empty() {
-            return Err(SourceError::Client {
-                class: ErrorClass::Fatal,
-                reason: "open() called twice".into(),
-            });
+            return Err(SourceError::fatal("open() called twice"));
         }
         // Enforce the passthrough guard (and the whole denylist) before any
         // client is created. The sink's choke point is `build()`; `open()` is
         // the source's, catching programmatic construction via
         // `KafkaSource::new` that bypasses `from_component_config`'s validation.
-        self.config.validate().map_err(|e| SourceError::Client {
-            class: ErrorClass::Fatal,
-            reason: e.to_string(),
-        })?;
+        self.config
+            .validate()
+            .map_err(|e| SourceError::fatal(e.to_string()))?;
         self.metrics = ctx.stage_metrics.clone();
         if self.config.statistics_interval.is_zero() {
             // Consumer lag is derived from the statistics snapshot and has no
@@ -1681,12 +1650,11 @@ impl Source for KafkaSource {
         let mut members = Vec::new();
         members
             .try_reserve_exact(self.config.consumers)
-            .map_err(|_| SourceError::Client {
-                class: ErrorClass::Fatal,
-                reason: format!(
+            .map_err(|_| {
+                SourceError::fatal(format!(
                     "source.kafka.consumers: {} consumers cannot be allocated",
                     self.config.consumers
-                ),
+                ))
             })?;
         for k in 0..self.config.consumers {
             let role = crate::config::Consumer::member(&self.config, k);
@@ -1713,10 +1681,7 @@ impl Source for KafkaSource {
                 .config
                 .base(crate::security::openssl_env_overrides())
                 .create(&role, SourceHooks::default())
-                .map_err(|reason| SourceError::Client {
-                    class: ErrorClass::Fatal,
-                    reason: format!("create consumer: {reason}"),
-                })?;
+                .map_err(|reason| SourceError::fatal(format!("create consumer: {reason}")))?;
             consumer
                 .subscribe(&[&self.config.topic])
                 .map_err(fatal("subscribe"))?;
@@ -1800,7 +1765,7 @@ impl Source for KafkaSource {
         // or error takes its place, and one consumer's transport errors do
         // not hold back another consumer's rebalance.
         let polled = match self.poll_consumers(timeout) {
-            Err(e) if is_fatal(&e) => return Err(e),
+            Err(e) if e.class() == ErrorClass::Fatal => return Err(e),
             polled => polled,
         };
         self.publish_stats();
@@ -1883,21 +1848,15 @@ impl Source for KafkaSource {
             member
                 .consumer
                 .store_offsets(tpl)
-                .map_err(|e| SourceError::Client {
-                    class: ErrorClass::Retryable,
-                    reason: format!("store offsets: {e}"),
-                })?;
+                .map_err(|e| SourceError::retryable(format!("store offsets: {e}")))?;
             if let Some(elem) = tpl.elements().into_iter().find(|e| e.error().is_err()) {
-                return Err(SourceError::Client {
-                    class: ErrorClass::Retryable,
-                    reason: format!(
-                        "store offset for partition {}: {}",
-                        elem.partition(),
-                        elem.error()
-                            .err()
-                            .map_or_else(String::new, |e| e.to_string())
-                    ),
-                });
+                return Err(SourceError::retryable(format!(
+                    "store offset for partition {}: {}",
+                    elem.partition(),
+                    elem.error()
+                        .err()
+                        .map_or_else(String::new, |e| e.to_string())
+                )));
             }
         }
         Ok(())
@@ -1928,10 +1887,7 @@ impl Source for KafkaSource {
                             "sync commit failed; this consumer's stored offsets may replay"
                         );
                     }
-                    first_error.get_or_insert(SourceError::Client {
-                        class: ErrorClass::Retryable,
-                        reason: format!("sync commit: {e}"),
-                    });
+                    first_error.get_or_insert(SourceError::retryable(format!("sync commit: {e}")));
                 }
             }
         }
@@ -1967,10 +1923,8 @@ impl KafkaSource {
             if tpl.count() == 0 {
                 continue;
             }
-            op(&member.consumer, &tpl).map_err(|e| SourceError::Client {
-                class: ErrorClass::Retryable,
-                reason: format!("{what}: {e}"),
-            })?;
+            op(&member.consumer, &tpl)
+                .map_err(|e| SourceError::retryable(format!("{what}: {e}")))?;
         }
         Ok(())
     }
@@ -2146,10 +2100,11 @@ mod tests {
             .insert("partition.assignment.strategy".into(), "hunter2".into());
         let mut source = KafkaSource::new(config);
         let cp = Checkpointer::new();
-        let msg = source
+        let err = source
             .open(SourceCtx::new(cp.handle()))
-            .expect_err("librdkafka rejects the strategy")
-            .to_string();
+            .expect_err("librdkafka rejects the strategy");
+        assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
+        let msg = err.to_string();
         assert!(msg.contains("create consumer"), "{msg}");
         assert!(!msg.contains("hunter2"), "{msg}");
     }
@@ -2163,13 +2118,11 @@ mod tests {
         config.statistics_interval = Duration::from_micros(500);
         let mut source = KafkaSource::new(config);
         let cp = Checkpointer::new();
-        let Err(SourceError::Client {
-            class: ErrorClass::Fatal,
-            reason,
-        }) = source.open(SourceCtx::new(cp.handle()))
-        else {
-            panic!("open accepted a 500us statistics_interval");
-        };
+        let err = source
+            .open(SourceCtx::new(cp.handle()))
+            .expect_err("open accepted a 500us statistics_interval");
+        assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
+        let reason = err.reason();
         assert!(
             reason.contains("source.kafka.statistics_interval"),
             "{reason}"
@@ -2186,13 +2139,11 @@ mod tests {
         config.rdkafka.insert("client.id".into(), "hunter2".into());
         let mut source = KafkaSource::new(config);
         let cp = Checkpointer::new();
-        let Err(SourceError::Client {
-            class: ErrorClass::Fatal,
-            reason,
-        }) = source.open(SourceCtx::new(cp.handle()))
-        else {
-            panic!("open accepted a 500us commit_interval");
-        };
+        let err = source
+            .open(SourceCtx::new(cp.handle()))
+            .expect_err("open accepted a 500us commit_interval");
+        assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
+        let reason = err.reason();
         assert!(reason.contains("source.kafka.commit_interval"), "{reason}");
         assert!(!reason.contains("hunter2"), "{reason}");
     }
@@ -2292,10 +2243,9 @@ mod tests {
     fn poll_quiet(source: &mut KafkaSource) {
         match source.poll_events(Duration::ZERO) {
             Ok(SourceEvent::Idle) => {}
-            Err(SourceError::Client {
-                class: ErrorClass::Retryable,
-                reason,
-            }) if reason.starts_with("consumer poll") => {}
+            Err(e)
+                if e.class() == ErrorClass::Retryable
+                    && e.reason().starts_with("consumer poll") => {}
             other => panic!("expected nothing to happen, got {other:?}"),
         }
     }
@@ -2354,10 +2304,7 @@ mod tests {
         other.add_partition("other", 0);
         assert!(matches!(
             source.read_latest_starts(&[(0, other)], Instant::now()),
-            Err(SourceError::Client {
-                class: ErrorClass::Fatal,
-                ..
-            })
+            Err(e) if e.class() == ErrorClass::Fatal
         ));
     }
 
@@ -2415,31 +2362,20 @@ mod tests {
             let mut source = KafkaSource::new(config);
             let cp = Checkpointer::new();
             let err = source.open(SourceCtx::new(cp.handle())).unwrap_err();
-            match err {
-                SourceError::Client { class, reason } => {
-                    assert_eq!(class, ErrorClass::Fatal);
-                    assert!(reason.contains("source.kafka.consumers"), "{reason}");
-                }
-                other => panic!("unexpected error: {other:?}"),
-            }
+            assert_eq!(err.class(), ErrorClass::Fatal);
+            assert!(err.reason().contains("source.kafka.consumers"), "{err}");
         }
 
         /// A poll reports its first fatal error, else its first error.
         #[test]
         fn a_poll_reports_its_first_fatal_error_else_its_first() {
-            let err = |class, reason: &str| SourceError::Client {
-                class,
-                reason: reason.into(),
-            };
+            let err = SourceError::new;
             let reported = |errors: Vec<SourceError>| {
                 let mut kept = None;
                 for e in errors {
                     keep_reported(&mut kept, e);
                 }
-                match kept {
-                    Some(SourceError::Client { reason, .. }) => reason,
-                    other => panic!("unexpected: {other:?}"),
-                }
+                kept.expect("a poll keeps an error").reason().to_owned()
             };
             let (r, f) = (ErrorClass::Retryable, ErrorClass::Fatal);
             assert_eq!(reported(vec![err(r, "r0"), err(r, "r1")]), "r0");
@@ -2515,8 +2451,8 @@ mod tests {
             assert_eq!(source.committable_partitions(0), [0]);
             assert!(source.committable_partitions(1).is_empty());
             match source.poll_events(Duration::ZERO) {
-                Err(SourceError::Client { reason, .. }) => {
-                    assert!(reason.contains("rebalance error"), "{reason}");
+                Err(e) => {
+                    assert!(e.reason().contains("rebalance error"), "{e}");
                 }
                 other => panic!("expected the error, got {other:?}"),
             }
@@ -2642,13 +2578,13 @@ mod tests {
             source.members[0].generation = Some(7);
             source.members[1].generation = Some(7);
             match source.settle_held() {
-                Err(SourceError::Client { class, reason }) => {
-                    assert_eq!(class, ErrorClass::Fatal);
+                Err(e) => {
+                    assert_eq!(e.class(), ErrorClass::Fatal);
                     assert!(
-                        reason.contains("partition 3")
-                            && reason.contains("consumers 0 and 1")
-                            && reason.contains("generation 7"),
-                        "{reason}"
+                        e.reason().contains("partition 3")
+                            && e.reason().contains("consumers 0 and 1")
+                            && e.reason().contains("generation 7"),
+                        "{e}"
                     );
                 }
                 other => panic!("expected a fatal error, got {other:?}"),
@@ -2756,9 +2692,9 @@ mod tests {
                 SourceHooks::default(),
             ));
             match source.discard_stale_offers(offers) {
-                Err(SourceError::Client { class, reason }) => {
-                    assert_eq!(class, ErrorClass::Fatal, "{reason}");
-                    assert!(reason.contains("assign empty"), "{reason}");
+                Err(e) => {
+                    assert_eq!(e.class(), ErrorClass::Fatal, "{e}");
+                    assert!(e.reason().contains("assign empty"), "{e}");
                 }
                 other => panic!("expected a fatal error, got {other:?}"),
             }
@@ -2894,9 +2830,9 @@ mod tests {
 
             clock.advance(source.config.startup_timeout + Duration::from_millis(1));
             match source.poll_events(Duration::ZERO) {
-                Err(SourceError::Client { class, reason }) => {
-                    assert_eq!(class, ErrorClass::Fatal, "{reason}");
-                    assert!(reason.contains("no partition assignment"), "{reason}");
+                Err(e) => {
+                    assert_eq!(e.class(), ErrorClass::Fatal, "{e}");
+                    assert!(e.reason().contains("no partition assignment"), "{e}");
                 }
                 other => panic!("expected the deadline error, got {other:?}"),
             }
@@ -2991,9 +2927,9 @@ mod tests {
 
             clock.advance(source.config.assignment_timeout + Duration::from_millis(1));
             match source.poll_events(Duration::ZERO) {
-                Err(SourceError::Client { class, reason }) => {
-                    assert_eq!(class, ErrorClass::Fatal, "{reason}");
-                    assert!(reason.contains("no partition assignment"), "{reason}");
+                Err(e) => {
+                    assert_eq!(e.class(), ErrorClass::Fatal, "{e}");
+                    assert!(e.reason().contains("no partition assignment"), "{e}");
                 }
                 other => panic!("expected the deadline error, got {other:?}"),
             }
@@ -3042,11 +2978,10 @@ mod tests {
         fn startup_errors_classify_per_consumer() {
             let mut source = opened_consumers(test_config(), &[&[], &[]]);
             source.members[1].saw_first_assignment = false;
-            let class = |source: &KafkaSource, k| match source
-                .rebalance_error(k, RDKafkaErrorCode::UnknownTopicOrPartition)
-            {
-                SourceError::Client { class, .. } => class,
-                other => panic!("{other:?}"),
+            let class = |source: &KafkaSource, k| {
+                source
+                    .rebalance_error(k, RDKafkaErrorCode::UnknownTopicOrPartition)
+                    .class()
             };
             assert_eq!(class(&source, 0), ErrorClass::Fatal);
             assert_eq!(class(&source, 1), ErrorClass::Retryable);
@@ -3086,6 +3021,18 @@ mod tests {
             );
         }
 
+        /// A second `open` is a fatal error.
+        #[test]
+        fn open_twice_is_fatal() {
+            let mut source = opened_source(&[]);
+            let cp = Checkpointer::new();
+            let err = source
+                .open(SourceCtx::new(cp.handle()))
+                .expect_err("a second open fails");
+            assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
+            assert_eq!(err.reason(), "open() called twice");
+        }
+
         /// A source used before `open` reports a fatal error from each call
         /// that needs its consumers.
         #[test]
@@ -3095,13 +3042,9 @@ mod tests {
             let committed = source.commit(&[(PartitionId(0), 1)]);
             let flushed = source.flush_commits();
             for result in [polled, committed, flushed] {
-                match result {
-                    Err(SourceError::Client {
-                        class: ErrorClass::Fatal,
-                        reason,
-                    }) => assert!(reason.contains("before open()"), "{reason}"),
-                    other => panic!("expected a fatal error, got {other:?}"),
-                }
+                let err = result.expect_err("a source used before open fails");
+                assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
+                assert!(err.reason().contains("before open()"), "{err}");
             }
         }
 
@@ -3198,9 +3141,9 @@ mod tests {
             let mut source = KafkaSource::new(config);
             let cp = Checkpointer::new();
             match source.open(SourceCtx::new(cp.handle())) {
-                Err(SourceError::Client { class, reason }) => {
-                    assert_eq!(class, ErrorClass::Fatal);
-                    assert!(reason.contains("source.kafka.consumers"), "{reason}");
+                Err(e) => {
+                    assert_eq!(e.class(), ErrorClass::Fatal);
+                    assert!(e.reason().contains("source.kafka.consumers"), "{e}");
                 }
                 other => panic!("expected a fatal error naming the key, got {other:?}"),
             }
@@ -3219,8 +3162,8 @@ mod tests {
                 let mut source = KafkaSource::new(config);
                 let cp = Checkpointer::new();
                 match source.open(SourceCtx::new(cp.handle())) {
-                    Err(SourceError::Client { reason, .. }) => {
-                        assert!(reason.contains("topic.client.id"), "{reason}");
+                    Err(e) => {
+                        assert!(e.reason().contains("topic.client.id"), "{e}");
                     }
                     other => panic!("consumers: {consumers} opened: {other:?}"),
                 }
@@ -3447,12 +3390,46 @@ mod tests {
                 .assign(&tpl_of(&[0]))
                 .expect("local assign");
             match source.commit(&[(PartitionId(0), 5), (PartitionId(1), 5)]) {
-                Err(SourceError::Client { class, reason }) => {
-                    assert_eq!(class, ErrorClass::Retryable);
-                    assert!(reason.contains("partition 1"), "{reason}");
+                Err(e) => {
+                    assert_eq!(e.class(), ErrorClass::Retryable);
+                    assert!(e.reason().contains("partition 1"), "{e}");
                 }
                 other => panic!("expected the refused element to fail the commit, got {other:?}"),
             }
+        }
+
+        /// A consumer poll's `UnknownTopicOrPartition` is retryable before the
+        /// consumer's first assignment and fatal after it.
+        #[test]
+        fn unknown_topic_is_fatal_only_after_the_first_assignment() {
+            for (started, class) in [(false, ErrorClass::Retryable), (true, ErrorClass::Fatal)] {
+                let mut source = opened_consumers(test_config(), &[&[]]);
+                source.members[0].saw_first_assignment = started;
+                source.injected_poll_error = Some((
+                    0,
+                    rdkafka::error::KafkaError::MessageConsumption(
+                        RDKafkaErrorCode::UnknownTopicOrPartition,
+                    ),
+                ));
+                let err = source
+                    .poll_events(Duration::ZERO)
+                    .expect_err("the poll error");
+                assert_eq!(err.class(), class, "started {started}: {err}");
+                assert!(err.reason().starts_with("consumer poll"), "{err}");
+            }
+        }
+
+        /// A store that librdkafka refuses for every partition of the list
+        /// fails the commit as retryable.
+        #[test]
+        fn a_store_refused_for_every_partition_fails_the_commit() {
+            // librdkafka holds no partition; the source believes it owns 0.
+            let mut source = opened_consumers(test_config(), &[&[(0, 0)]]);
+            let err = source
+                .commit(&[(PartitionId(0), 5)])
+                .expect_err("a store of an unassigned partition fails");
+            assert_eq!(err.class(), ErrorClass::Retryable, "{err}");
+            assert!(err.reason().starts_with("store offsets: "), "{err}");
         }
 
         /// A rebalance error on one consumer while another keeps its lanes
@@ -3494,9 +3471,9 @@ mod tests {
             source.injected_poll_error = Some((1, transport_failure()));
 
             match source.poll_events(Duration::ZERO) {
-                Err(SourceError::Client { class, reason }) => {
-                    assert_eq!(class, ErrorClass::Retryable, "{reason}");
-                    assert!(reason.starts_with("consumer poll"), "{reason}");
+                Err(e) => {
+                    assert_eq!(e.class(), ErrorClass::Retryable, "{e}");
+                    assert!(e.reason().starts_with("consumer poll"), "{e}");
                 }
                 other => panic!("expected the poll error, got {other:?}"),
             }
@@ -3556,9 +3533,9 @@ mod tests {
             source.injected_poll_error = Some((1, transport_failure()));
 
             match source.poll_events(Duration::ZERO) {
-                Err(SourceError::Client { class, reason }) => {
-                    assert_eq!(class, ErrorClass::Fatal, "{reason}");
-                    assert!(reason.contains("partition 3"), "{reason}");
+                Err(e) => {
+                    assert_eq!(e.class(), ErrorClass::Fatal, "{e}");
+                    assert!(e.reason().contains("partition 3"), "{e}");
                 }
                 other => panic!("expected the settle error, got {other:?}"),
             }
@@ -3579,8 +3556,8 @@ mod tests {
             ));
 
             match source.poll_events(Duration::ZERO) {
-                Err(SourceError::Client { class, reason }) => {
-                    assert_eq!(class, ErrorClass::Fatal, "{reason}");
+                Err(e) => {
+                    assert_eq!(e.class(), ErrorClass::Fatal, "{e}");
                 }
                 other => panic!("expected the fatal poll error, got {other:?}"),
             }
@@ -3603,9 +3580,9 @@ mod tests {
             source.injected_poll_error = Some((1, transport_failure()));
 
             match source.poll_events(Duration::ZERO) {
-                Err(SourceError::Client { class, reason }) => {
-                    assert_eq!(class, ErrorClass::Fatal, "{reason}");
-                    assert!(reason.contains("rebalance error"), "{reason}");
+                Err(e) => {
+                    assert_eq!(e.class(), ErrorClass::Fatal, "{e}");
+                    assert!(e.reason().contains("rebalance error"), "{e}");
                 }
                 other => panic!("expected the rebalance error, got {other:?}"),
             }
@@ -4335,9 +4312,9 @@ mod tests {
         let owned: Vec<i32> = source.members[1].assignment.values().copied().collect();
 
         match source.flush_commits() {
-            Err(SourceError::Client { class, reason }) => {
-                assert_eq!(class, ErrorClass::Retryable, "{reason}");
-                assert!(reason.contains("AssignmentLost"), "{reason}");
+            Err(e) => {
+                assert_eq!(e.class(), ErrorClass::Retryable, "{e}");
+                assert!(e.reason().contains("AssignmentLost"), "{e}");
             }
             other => panic!("expected the lost member's failure, got {other:?}"),
         }
@@ -4380,8 +4357,8 @@ mod tests {
             &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_ILLEGAL_GENERATION],
         );
         match source.flush_commits() {
-            Err(SourceError::Client { reason, .. }) => {
-                assert!(reason.contains("AssignmentLost"), "{reason}");
+            Err(e) => {
+                assert!(e.reason().contains("AssignmentLost"), "{e}");
             }
             other => panic!("expected the lost member's failure, got {other:?}"),
         }
@@ -4406,7 +4383,11 @@ mod tests {
         let warned = spate_test::capture_logs(tracing::Level::WARN, || {
             flushed = Some(source.flush_commits());
         });
-        assert!(matches!(flushed, Some(Err(_))), "{flushed:?}");
+        let err = flushed
+            .expect("flush ran")
+            .expect_err("the broker refuses the commit");
+        assert_eq!(err.class(), ErrorClass::Retryable, "{err}");
+        assert!(err.reason().starts_with("sync commit: "), "{err}");
         assert!(
             !warned.iter().any(|l| l.contains("sync commit failed")),
             "{warned:#?}"
@@ -4431,7 +4412,11 @@ mod tests {
         let warned = spate_test::capture_logs(tracing::Level::WARN, || {
             flushed = Some(source.flush_commits());
         });
-        assert!(matches!(flushed, Some(Err(_))), "{flushed:?}");
+        let err = flushed
+            .expect("flush ran")
+            .expect_err("the broker refuses the commit");
+        assert_eq!(err.class(), ErrorClass::Retryable, "{err}");
+        assert!(err.reason().starts_with("sync commit: "), "{err}");
         for k in 0..2 {
             let field = format!("consumer={k}");
             assert!(
@@ -4564,9 +4549,9 @@ mod tests {
             assert!(source.committable_partitions(0).is_empty());
 
             match source.poll_events(Duration::ZERO) {
-                Err(SourceError::Client { class, reason }) => {
-                    assert_eq!(class, ErrorClass::Retryable, "transient code: {reason}");
-                    assert!(reason.contains("rebalance error"), "{reason}");
+                Err(e) => {
+                    assert_eq!(e.class(), ErrorClass::Retryable, "transient code: {e}");
+                    assert!(e.reason().contains("rebalance error"), "{e}");
                 }
                 other => panic!("expected the classified error, got {other:?}"),
             }
@@ -4581,9 +4566,9 @@ mod tests {
             push_error(&source, RDKafkaErrorCode::GroupAuthorizationFailed);
 
             match source.poll_events(Duration::ZERO) {
-                Err(SourceError::Client { class, reason }) => {
-                    assert_eq!(class, ErrorClass::Fatal, "{reason}");
-                    assert!(reason.contains("rebalance error"), "{reason}");
+                Err(e) => {
+                    assert_eq!(e.class(), ErrorClass::Fatal, "{e}");
+                    assert!(e.reason().contains("rebalance error"), "{e}");
                 }
                 other => panic!("expected a fatal error, got {other:?}"),
             }
@@ -4615,10 +4600,8 @@ mod tests {
             spate_test::wait_until(Duration::from_secs(20), "the fatal error", || match source
                 .poll_events(Duration::from_millis(50))
             {
-                Err(SourceError::Client { class, reason })
-                    if reason.contains("Static consumer fenced") =>
-                {
-                    seen = Some((class, reason));
+                Err(e) if e.reason().contains("Static consumer fenced") => {
+                    seen = Some((e.class(), e.reason().to_owned()));
                     true
                 }
                 _ => false,
@@ -4713,11 +4696,8 @@ mod tests {
             let mut fatal = None;
             for _ in 0..20 {
                 match source.poll_events(Duration::from_millis(50)) {
-                    Err(SourceError::Client {
-                        class: ErrorClass::Fatal,
-                        reason,
-                    }) => {
-                        fatal = Some(reason);
+                    Err(e) if e.class() == ErrorClass::Fatal => {
+                        fatal = Some(e.reason().to_owned());
                         break;
                     }
                     Err(e) => returned.push(e.to_string()),
@@ -4835,10 +4815,8 @@ mod tests {
                 Duration::from_secs(20),
                 "a handshake error",
                 || match source.poll_events(Duration::from_millis(50)) {
-                    Err(SourceError::Client { class, reason })
-                        if !reason.contains("AllBrokersDown") =>
-                    {
-                        seen = Some((class, reason));
+                    Err(e) if !e.reason().contains("AllBrokersDown") => {
+                        seen = Some((e.class(), e.reason().to_owned()));
                         true
                     }
                     _ => false,
@@ -4889,28 +4867,27 @@ mod tests {
             )
             .expect("the deadline has passed");
 
-            match error {
-                SourceError::Client { class, reason } => {
-                    assert_eq!(class, ErrorClass::Fatal, "{reason}");
-                    assert!(
-                        reason.contains("no partition assignment for 301s"),
-                        "{reason}"
-                    );
-                    assert!(
-                        reason.contains("rebalance error: Broker: Not coordinator"),
-                        "names the last rebalance event: {reason}"
-                    );
-                    assert!(
-                        reason.contains(r#"group "test""#),
-                        "names the group: {reason}"
-                    );
-                    assert!(
-                        reason.ends_with("; last consumer error 12s ago: consumer poll: SSL"),
-                        "names the last consumer error: {reason}"
-                    );
-                }
-                other => panic!("expected a client error, got {other:?}"),
-            }
+            assert_eq!(error.class(), ErrorClass::Fatal, "{error}");
+            assert!(
+                error.reason().contains("no partition assignment for 301s"),
+                "{error}"
+            );
+            assert!(
+                error
+                    .reason()
+                    .contains("rebalance error: Broker: Not coordinator"),
+                "names the last rebalance event: {error}"
+            );
+            assert!(
+                error.reason().contains(r#"group "test""#),
+                "names the group: {error}"
+            );
+            assert!(
+                error
+                    .reason()
+                    .ends_with("; last consumer error 12s ago: consumer poll: SSL"),
+                "names the last consumer error: {error}"
+            );
         }
 
         /// A member inside the deadline keeps running, and the deadline
@@ -4980,28 +4957,27 @@ mod tests {
             )
             .expect("the startup deadline has passed");
 
-            match error {
-                SourceError::Client { class, reason } => {
-                    assert_eq!(class, ErrorClass::Fatal, "{reason}");
-                    assert!(
-                        reason.contains("no partition assignment within 31s"),
-                        "{reason}"
-                    );
-                    assert!(
-                        reason.contains(r#"topic "orders""#),
-                        "names the topic: {reason}"
-                    );
-                    assert!(
-                        reason.contains(r#"brokers "localhost:9092""#),
-                        "names the brokers: {reason}"
-                    );
-                    assert!(
-                        reason.ends_with("; last consumer error 2s ago: consumer poll: SSL"),
-                        "names the last consumer error: {reason}"
-                    );
-                }
-                other => panic!("expected a client error, got {other:?}"),
-            }
+            assert_eq!(error.class(), ErrorClass::Fatal, "{error}");
+            assert!(
+                error
+                    .reason()
+                    .contains("no partition assignment within 31s"),
+                "{error}"
+            );
+            assert!(
+                error.reason().contains(r#"topic "orders""#),
+                "names the topic: {error}"
+            );
+            assert!(
+                error.reason().contains(r#"brokers "localhost:9092""#),
+                "names the brokers: {error}"
+            );
+            assert!(
+                error
+                    .reason()
+                    .ends_with("; last consumer error 2s ago: consumer poll: SSL"),
+                "names the last consumer error: {error}"
+            );
         }
 
         /// `open` opens the startup window, and a loss before the first
@@ -5040,9 +5016,9 @@ mod tests {
             clock.advance(Duration::from_millis(2));
 
             match source.poll_events(Duration::ZERO) {
-                Err(SourceError::Client { class, reason }) => {
-                    assert_eq!(class, ErrorClass::Fatal, "{reason}");
-                    assert!(reason.contains("no partition assignment for"), "{reason}");
+                Err(e) => {
+                    assert_eq!(e.class(), ErrorClass::Fatal, "{e}");
+                    assert!(e.reason().contains("no partition assignment for"), "{e}");
                 }
                 other => panic!("expected the deadline error, got {other:?}"),
             }
@@ -5070,13 +5046,13 @@ mod tests {
         /// text, and `AllBrokersDown` is never that error.
         fn assert_names_the_transport_failure(source: &mut KafkaSource, window: &str) {
             match source.poll_events(Duration::from_millis(50)) {
-                Err(SourceError::Client { class, reason }) => {
-                    assert_eq!(class, ErrorClass::Fatal, "{reason}");
-                    assert!(reason.contains(window), "{reason}");
-                    assert!(reason.contains("last consumer error"), "{reason}");
-                    assert!(reason.contains("BrokerTransportFailure"), "{reason}");
-                    assert!(reason.contains("Connection refused"), "{reason}");
-                    assert!(!reason.contains("AllBrokersDown"), "{reason}");
+                Err(e) => {
+                    assert_eq!(e.class(), ErrorClass::Fatal, "{e}");
+                    assert!(e.reason().contains(window), "{e}");
+                    assert!(e.reason().contains("last consumer error"), "{e}");
+                    assert!(e.reason().contains("BrokerTransportFailure"), "{e}");
+                    assert!(e.reason().contains("Connection refused"), "{e}");
+                    assert!(!e.reason().contains("AllBrokersDown"), "{e}");
                 }
                 other => panic!("expected the deadline error, got {other:?}"),
             }
@@ -5098,12 +5074,13 @@ mod tests {
             source.config.startup_timeout = Duration::from_nanos(1);
             clock.advance(Duration::from_secs(2));
             match source.poll_events(Duration::from_millis(50)) {
-                Err(SourceError::Client { class, reason }) => {
-                    assert_eq!(class, ErrorClass::Fatal, "{reason}");
-                    assert!(!reason.contains("before the deadline"), "{reason}");
+                Err(e) => {
+                    assert_eq!(e.class(), ErrorClass::Fatal, "{e}");
+                    assert!(!e.reason().contains("before the deadline"), "{e}");
                     assert!(
-                        reason.contains("; last consumer error 2s ago: consumer poll: "),
-                        "{reason}"
+                        e.reason()
+                            .contains("; last consumer error 2s ago: consumer poll: "),
+                        "{e}"
                     );
                 }
                 other => panic!("expected the deadline error, got {other:?}"),
@@ -5140,8 +5117,7 @@ mod tests {
 
         /// Whether `outcome` is the assignment deadline's error.
         fn is_deadline_error(outcome: &Result<SourceEvent<KafkaLane>, SourceError>) -> bool {
-            matches!(outcome, Err(SourceError::Client { reason, .. })
-                if reason.starts_with("no partition assignment"))
+            matches!(outcome, Err(e) if e.reason().starts_with("no partition assignment"))
         }
 
         /// The startup window runs on the source's clock from `open` and
@@ -5161,11 +5137,12 @@ mod tests {
             assert!(!is_deadline_error(&outcome), "{outcome:?}");
             clock.advance(Duration::from_nanos(1));
             match source.poll_events(Duration::from_millis(50)) {
-                Err(SourceError::Client { class, reason }) => {
-                    assert_eq!(class, ErrorClass::Fatal, "{reason}");
+                Err(e) => {
+                    assert_eq!(e.class(), ErrorClass::Fatal, "{e}");
                     assert!(
-                        reason.starts_with("no partition assignment within 30.000000001s"),
-                        "{reason}"
+                        e.reason()
+                            .starts_with("no partition assignment within 30.000000001s"),
+                        "{e}"
                     );
                 }
                 other => panic!("expected the deadline error, got {other:?}"),
@@ -5189,13 +5166,13 @@ mod tests {
             assert!(!is_deadline_error(&outcome), "{outcome:?}");
             clock.advance(Duration::from_nanos(1));
             match source.poll_events(Duration::from_millis(50)) {
-                Err(SourceError::Client { class, reason }) => {
-                    assert_eq!(class, ErrorClass::Fatal, "{reason}");
+                Err(e) => {
+                    assert_eq!(e.class(), ErrorClass::Fatal, "{e}");
                     assert!(
-                        reason.starts_with(
+                        e.reason().starts_with(
                             "no partition assignment for 300.000000001s after a revocation"
                         ),
-                        "{reason}"
+                        "{e}"
                     );
                 }
                 other => panic!("expected the deadline error, got {other:?}"),
@@ -5215,11 +5192,12 @@ mod tests {
             source.config.startup_timeout = Duration::from_secs(10);
             clock.advance(Duration::from_secs(12));
             match source.poll_events(Duration::from_millis(50)) {
-                Err(SourceError::Client { class, reason }) => {
-                    assert_eq!(class, ErrorClass::Fatal, "{reason}");
+                Err(e) => {
+                    assert_eq!(e.class(), ErrorClass::Fatal, "{e}");
                     assert!(
-                        reason.contains("; last consumer error 12s ago: consumer poll: "),
-                        "{reason}"
+                        e.reason()
+                            .contains("; last consumer error 12s ago: consumer poll: "),
+                        "{e}"
                     );
                 }
                 other => panic!("expected the deadline error, got {other:?}"),
@@ -5260,8 +5238,8 @@ mod tests {
             push_error(&source, RDKafkaErrorCode::RebalanceInProgress);
 
             match source.poll_events(Duration::ZERO) {
-                Err(SourceError::Client { reason, .. }) => {
-                    assert!(reason.contains("rebalance error"), "{reason}");
+                Err(e) => {
+                    assert!(e.reason().contains("rebalance error"), "{e}");
                 }
                 other => panic!("expected the classified error, got {other:?}"),
             }

@@ -454,7 +454,7 @@ mod late_offers {
 mod slow_broker {
     use rdkafka::mocking::MockCluster;
     use spate_core::checkpoint::Checkpointer;
-    use spate_core::error::{ErrorClass, SourceError};
+    use spate_core::error::ErrorClass;
     use spate_core::source::{Source, SourceCtx, SourceEvent};
     use spate_kafka::{KafkaSource, KafkaSourceConfig};
     use std::collections::BTreeMap;
@@ -493,12 +493,9 @@ mod slow_broker {
                         return Ok(seen);
                     }
                 }
-                Err(
-                    e @ SourceError::Client {
-                        class: ErrorClass::Fatal,
-                        ..
-                    },
-                ) => return Err(format!("{e} at {:?}", began.elapsed())),
+                Err(e) if e.class() == ErrorClass::Fatal => {
+                    return Err(format!("{e} at {:?}", began.elapsed()));
+                }
                 _ => {}
             }
         }
@@ -525,7 +522,7 @@ mod slow_commits {
     use rdkafka::producer::{BaseProducer, Producer as _};
     use rdkafka::types::{RDKafkaApiKey, RDKafkaRespErr};
     use spate_core::checkpoint::Checkpointer;
-    use spate_core::error::{ErrorClass, SourceError};
+    use spate_core::error::ErrorClass;
     use spate_core::source::{Source, SourceCtx, SourceEvent};
     use spate_kafka::{KafkaSource, KafkaSourceConfig};
     use std::collections::BTreeMap;
@@ -589,12 +586,7 @@ mod slow_commits {
             longest = longest.max(polled.elapsed());
             match outcome {
                 Ok(SourceEvent::LanesAssigned(_)) => return longest,
-                Err(
-                    e @ SourceError::Client {
-                        class: ErrorClass::Fatal,
-                        ..
-                    },
-                ) => panic!("{e}"),
+                Err(e) if e.class() == ErrorClass::Fatal => panic!("{e}"),
                 _ => {}
             }
         }
@@ -667,7 +659,7 @@ mod named_failure {
     use rdkafka::types::{RDKafkaApiKey, RDKafkaRespErr};
     use spate_core::checkpoint::Checkpointer;
     use spate_core::clock::TestClock;
-    use spate_core::error::{ErrorClass, SourceError};
+    use spate_core::error::ErrorClass;
     use spate_core::source::{Source, SourceCtx};
     use spate_kafka::{KafkaSource, KafkaSourceConfig};
     use spate_test::wait_until;
@@ -715,12 +707,7 @@ mod named_failure {
 
         clock.advance(Duration::from_secs(6));
         match source.poll_events(Duration::from_millis(50)) {
-            Err(
-                e @ SourceError::Client {
-                    class: ErrorClass::Fatal,
-                    ..
-                },
-            ) => assert!(
+            Err(e) if e.class() == ErrorClass::Fatal => assert!(
                 e.to_string().contains("committing a start offset"),
                 "the deadline error names no start failure: {e}"
             ),
@@ -738,7 +725,7 @@ mod permanent_codes {
         RD_KAFKA_RESP_ERR_TOPIC_AUTHORIZATION_FAILED as TOPIC_DENIED,
     };
     use spate_core::checkpoint::Checkpointer;
-    use spate_core::error::{ErrorClass, SourceError};
+    use spate_core::error::ErrorClass;
     use spate_core::source::{Source, SourceCtx, SourceEvent};
     use spate_kafka::{KafkaSource, KafkaSourceConfig};
     use spate_test::wait_until;
@@ -765,11 +752,8 @@ mod permanent_codes {
             wait_until(Duration::from_secs(20), "the run to stop", || match source
                 .poll_events(Duration::from_millis(50))
             {
-                Err(SourceError::Client {
-                    class: ErrorClass::Fatal,
-                    reason,
-                }) => {
-                    stopped = Some(reason);
+                Err(e) if e.class() == ErrorClass::Fatal => {
+                    stopped = Some(e.reason().to_owned());
                     true
                 }
                 Ok(SourceEvent::LanesAssigned(_)) => panic!("lanes on {api:?}"),
@@ -789,7 +773,7 @@ mod startup_deadline {
     use rdkafka::types::RDKafkaRespErr::RD_KAFKA_RESP_ERR_UNKNOWN as UNKNOWN;
     use spate_core::checkpoint::Checkpointer;
     use spate_core::clock::TestClock;
-    use spate_core::error::{ErrorClass, SourceError};
+    use spate_core::error::ErrorClass;
     use spate_core::source::{Source, SourceCtx};
     use spate_kafka::{KafkaSource, KafkaSourceConfig};
     use spate_test::wait_until;
@@ -827,12 +811,9 @@ mod startup_deadline {
         });
         clock.advance(Duration::from_secs(6));
         match source.poll_events(Duration::from_millis(50)) {
-            Err(
-                e @ SourceError::Client {
-                    class: ErrorClass::Fatal,
-                    ..
-                },
-            ) => assert!(e.to_string().contains("no partition assignment"), "{e}"),
+            Err(e) if e.class() == ErrorClass::Fatal => {
+                assert!(e.to_string().contains("no partition assignment"), "{e}")
+            }
             other => panic!("expected the startup deadline, got {other:?}"),
         }
     }
@@ -1096,11 +1077,8 @@ mod silent_coordinator {
                         tx.send("assigned".to_string()).expect("send");
                         break;
                     }
-                    Err(spate_core::error::SourceError::Client {
-                        class: ErrorClass::Fatal,
-                        reason,
-                    }) => {
-                        tx.send(format!("fatal: {reason}")).expect("send");
+                    Err(e) if e.class() == ErrorClass::Fatal => {
+                        tx.send(format!("fatal: {}", e.reason())).expect("send");
                         break;
                     }
                     _ => {}
@@ -1187,11 +1165,8 @@ mod silent_coordinator {
                         tx.send("assigned".to_string()).expect("send");
                         break;
                     }
-                    Err(spate_core::error::SourceError::Client {
-                        class: ErrorClass::Fatal,
-                        reason,
-                    }) => {
-                        tx.send(format!("fatal: {reason}")).expect("send");
+                    Err(e) if e.class() == ErrorClass::Fatal => {
+                        tx.send(format!("fatal: {}", e.reason())).expect("send");
                         break;
                     }
                     _ => {}
@@ -1435,7 +1410,7 @@ mod refused_starts {
     use rdkafka::mocking::MockCluster;
     use rdkafka::types::{RDKafkaApiKey, RDKafkaRespErr};
     use spate_core::checkpoint::Checkpointer;
-    use spate_core::error::{ErrorClass, SourceError};
+    use spate_core::error::ErrorClass;
     use spate_core::source::{Source, SourceCtx};
     use spate_kafka::{KafkaSource, KafkaSourceConfig};
     use std::collections::BTreeMap;
@@ -1469,10 +1444,8 @@ mod refused_starts {
             .expect("open");
         let until = Instant::now() + Duration::from_secs(45);
         while Instant::now() < until {
-            if let Err(SourceError::Client {
-                class: ErrorClass::Fatal,
-                ..
-            }) = source.poll_events(Duration::from_millis(100))
+            if let Err(e) = source.poll_events(Duration::from_millis(100))
+                && e.class() == ErrorClass::Fatal
             {
                 return true;
             }

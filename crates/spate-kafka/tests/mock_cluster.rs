@@ -9,7 +9,7 @@ use rdkafka::mocking::MockCluster;
 use rdkafka::types::{RDKafkaApiKey, RDKafkaRespErr};
 use spate_core::checkpoint::Checkpointer;
 use spate_core::clock::TestClock;
-use spate_core::error::{ErrorClass, SourceError};
+use spate_core::error::ErrorClass;
 use spate_core::metrics::names;
 use spate_core::record::PartitionId;
 use spate_core::source::{PayloadBatch, Source, SourceCtx, SourceEvent, SourceLane};
@@ -447,10 +447,7 @@ fn startup_without_brokers_times_out_fatally() {
             // Transient transport errors are expected with no broker; the
             // runtime logs and keeps polling on Retryable, and so does this
             // loop. Only the fatal startup timeout ends it.
-            Err(SourceError::Client {
-                class: ErrorClass::Retryable,
-                ..
-            }) => false,
+            Err(e) if e.class() == ErrorClass::Retryable => false,
             Err(e) => {
                 assert!(
                     e.to_string().contains("no partition assignment"),
@@ -3579,12 +3576,9 @@ mod latest_start {
         });
         clock.advance(Duration::from_secs(6));
         match driver.source.poll_events(Duration::from_millis(50)) {
-            Err(
-                e @ SourceError::Client {
-                    class: ErrorClass::Fatal,
-                    ..
-                },
-            ) => assert!(e.to_string().contains("start position"), "{e}"),
+            Err(e) if e.class() == ErrorClass::Fatal => {
+                assert!(e.to_string().contains("start position"), "{e}")
+            }
             other => panic!("expected the deadline error, got {other:?}"),
         }
     }

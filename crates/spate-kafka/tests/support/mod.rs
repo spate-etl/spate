@@ -710,10 +710,7 @@ pub(crate) fn consume<T>(
 pub(crate) fn retryable<T>(call: &str, outcome: Result<T, SourceError>) -> Result<T, String> {
     match outcome {
         Ok(value) => Ok(value),
-        Err(SourceError::Client {
-            class: ErrorClass::Retryable,
-            reason,
-        }) => Err(reason),
+        Err(e) if e.class() == ErrorClass::Retryable => Err(e.reason().to_owned()),
         Err(e) => panic!("{call}: {e}"),
     }
 }

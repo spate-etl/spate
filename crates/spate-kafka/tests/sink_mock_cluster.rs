@@ -333,13 +333,8 @@ async fn a_write_to_a_missing_topic_fails() {
         .await
         .expect("the write settles")
         .expect_err("a missing topic fails the write");
-        match err {
-            SinkError::Client { class, reason } => {
-                assert_eq!(class, expected, "{attempt}: {reason}");
-                assert!(reason.contains(hint), "{attempt}: {reason}");
-            }
-            other => panic!("{attempt}: unexpected error shape: {other:?}"),
-        }
+        assert_eq!(err.class(), expected, "{attempt}: {err}");
+        assert!(err.reason().contains(hint), "{attempt}: {err}");
     }
 }
 
@@ -369,17 +364,11 @@ async fn delivery_failure_maps_to_retryable() {
         .write_batch(&sink.endpoints[0][0], &batch)
         .await
         .expect_err("no broker → delivery must fail");
-    match err {
-        SinkError::Client { class, reason } => {
-            assert_eq!(
-                class,
-                ErrorClass::Retryable,
-                "a downed broker is transient; the framework retries the \
-                 batch (reason: {reason})"
-            );
-        }
-        other => panic!("unexpected error shape: {other:?}"),
-    }
+    assert_eq!(
+        err.class(),
+        ErrorClass::Retryable,
+        "a downed broker is transient; the framework retries the batch ({err})"
+    );
 }
 
 #[tokio::test]
@@ -401,13 +390,23 @@ async fn probe_verifies_topic_and_fails_fast_on_unknown_topic() {
     let err = probe()
         .await
         .expect_err("unknown topic must fail the probe");
-    match err {
-        SinkError::Client { class, reason } => {
-            assert_eq!(class, ErrorClass::Fatal, "unknown topic is fatal");
-            assert!(reason.contains("topic"), "actionable: {reason}");
-        }
-        other => panic!("unexpected error shape: {other:?}"),
-    }
+    assert_eq!(err.class(), ErrorClass::Fatal, "unknown topic is fatal");
+    assert!(err.reason().contains("topic"), "actionable: {err}");
+}
+
+/// A topic that reports no partitions yet fails the probe as retryable.
+#[tokio::test]
+async fn a_topic_with_no_partitions_yet_fails_the_probe_retryably() {
+    let cluster = MockCluster::new(1).expect("mock cluster");
+    cluster.create_topic(TOPIC, 0, 1).expect("create topic");
+    let brokers = cluster.bootstrap_servers();
+    let sink = sink(&brokers, "");
+
+    let err = sink.probe_fn()()
+        .await
+        .expect_err("a topic with no partitions fails the probe");
+    assert_eq!(err.class(), ErrorClass::Retryable, "{err}");
+    assert!(err.reason().contains("reports no partitions yet"), "{err}");
 }
 
 /// Pins that a probe whose metadata read panics on its blocking thread
@@ -426,13 +425,8 @@ async fn a_probe_with_an_overlong_topic_fails_without_panicking() {
     let err = sink.probe_fn()()
         .await
         .expect_err("an overlong topic must fail the probe");
-    match err {
-        SinkError::Client { class, reason } => {
-            assert_eq!(class, ErrorClass::Retryable, "{reason}");
-            assert!(reason.starts_with("probe task failed"), "{reason}");
-        }
-        other => panic!("unexpected error shape: {other:?}"),
-    }
+    assert_eq!(err.class(), ErrorClass::Retryable, "{err}");
+    assert!(err.reason().starts_with("probe task failed"), "{err}");
 }
 
 /// The readiness probe reports a missing topic as fatal and leaves it
@@ -446,17 +440,12 @@ async fn the_probe_does_not_create_a_missing_topic() {
     let err = sink.probe_fn()()
         .await
         .expect_err("a missing topic must fail the probe");
-    match err {
-        SinkError::Client { class, reason } => {
-            assert_eq!(
-                class,
-                ErrorClass::Fatal,
-                "a missing topic is fatal: {reason}"
-            );
-            assert!(reason.contains("does not exist"), "actionable: {reason}");
-        }
-        other => panic!("unexpected error shape: {other:?}"),
-    }
+    assert_eq!(
+        err.class(),
+        ErrorClass::Fatal,
+        "a missing topic is fatal: {err}"
+    );
+    assert!(err.reason().contains("does not exist"), "actionable: {err}");
 
     let consumer: rdkafka::consumer::BaseConsumer = support::raw_config()
         .set("bootstrap.servers", &brokers)
@@ -563,10 +552,7 @@ fn spawn_write(
 /// The retryable reason `result` carries.
 fn retryable_reason(result: Result<(), SinkError>) -> String {
     match result {
-        Err(SinkError::Client {
-            class: ErrorClass::Retryable,
-            reason,
-        }) => reason,
+        Err(e) if e.class() == ErrorClass::Retryable => e.reason().to_owned(),
         other => panic!("expected a retryable error, got {other:?}"),
     }
 }

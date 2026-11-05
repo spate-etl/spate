@@ -161,15 +161,13 @@ impl KafkaLane {
         let text = e
             .rdkafka_error_code()
             .and_then(|code| self.consumer.context().take_error(code));
-        SourceError::Client {
+        crate::error::poll_error(
+            &format!("partition {} poll", self.partition.0),
+            e,
             // Post-startup: a lane exists only once its partition is assigned.
-            class: crate::error::classify_poll_error(e, true, text.as_deref()),
-            reason: crate::error::poll_reason(
-                &format!("partition {} poll", self.partition.0),
-                e,
-                text.as_deref(),
-            ),
-        }
+            true,
+            text.as_deref(),
+        )
     }
 }
 
@@ -324,8 +322,13 @@ impl<'a> PayloadBatch<'a> for KafkaBatch<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::KafkaSourceConfig;
+    use crate::context::SourceHooks;
     use proptest::prelude::*;
+    use rdkafka::error::RDKafkaErrorCode;
     use spate_core::checkpoint::Checkpointer;
+    use spate_core::error::ErrorClass;
+    use spate_core::source::SourceCtx;
 
     /// The position rule: only a concrete position past what the lane issued
     /// retires offsets, and it retires through the offset below the position.
@@ -420,5 +423,39 @@ mod tests {
                 None => prop_assert_eq!(watermark, next + trailing),
             }
         }
+    }
+
+    /// A lane's `UnknownTopicOrPartition` is fatal, and its reason names the
+    /// partition the lane polls.
+    #[test]
+    fn a_lane_poll_error_is_fatal_and_names_its_partition() {
+        let cfg = KafkaSourceConfig::new(crate::testutil::refused_broker(), "orders", "g");
+        let role = crate::config::Consumer::member(&cfg, 0);
+        let consumer: BaseConsumer<SourceContext> = cfg
+            .base(false)
+            .create(&role, SourceHooks::default())
+            .expect("consumer");
+        let consumer = Arc::new(consumer);
+        let mut position = TopicPartitionList::new();
+        position.add_partition("orders", 3);
+        consumer.assign(&position).expect("local assign");
+        let queue = consumer
+            .split_partition_queue("orders", 3)
+            .expect("partition queue");
+        let cp = Checkpointer::new();
+        let lane = KafkaLane::new(
+            LaneId(0),
+            PartitionId(3),
+            queue,
+            Arc::clone(&consumer),
+            SourceCtx::new(cp.handle()).issuer,
+            position,
+            Arc::new(AtomicI64::new(i64::MIN)),
+        );
+        let err = lane.poll_error(&KafkaError::MessageConsumption(
+            RDKafkaErrorCode::UnknownTopicOrPartition,
+        ));
+        assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
+        assert!(err.reason().starts_with("partition 3 poll: "), "{err}");
     }
 }

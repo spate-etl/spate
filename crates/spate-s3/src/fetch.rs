@@ -2552,6 +2552,7 @@ mod tests {
         let SplitFailure::Fatal(e) = failure else {
             panic!("PermissionDenied mid-stream must be pipeline-fatal, got: {failure}");
         };
+        assert_eq!(e.class(), ErrorClass::Fatal, "{e}");
         assert!(e.to_string().contains("p/a"), "{e}");
     }
 
@@ -3614,7 +3615,7 @@ mod tests {
             class: ErrorClass::Fatal,
             reason: "denied".into(),
         });
-        assert!(fatal.to_string().contains("denied"), "{fatal}");
+        assert_eq!(fatal.to_string(), "source error (Fatal): denied");
     }
 
     /// Pins that a HEAD answering no ETag reports an overwrite that reads
@@ -3658,6 +3659,7 @@ mod tests {
         let SplitFailure::Fatal(e) = last_failure(msgs) else {
             panic!("a 403 on the HEAD must be fatal");
         };
+        assert_eq!(e.class(), ErrorClass::Fatal, "{e}");
         assert!(e.to_string().contains("the HEAD after"), "{e}");
     }
 
@@ -3777,5 +3779,40 @@ mod tests {
             gaps(&store.head_instants.lock().unwrap()),
             [1, 2, 4, 8, 16, 32, 64]
         );
+    }
+
+    /// Pins that a ranged read handed no ETag fails the lane as fatal. Direct,
+    /// as the reason itself calls the arm an internal wiring bug and no unit
+    /// reaches it.
+    #[tokio::test]
+    async fn a_ranged_read_with_no_etag_is_fatal() {
+        let store: Arc<dyn ObjectStore> = Arc::new(seeded(&[("p/a", b"0123456789")]).await);
+        let (tx, mut rx) = mpsc::channel(64);
+        let task = tokio::spawn(run_fetcher(FetcherParams {
+            split: "s3-test".into(),
+            store,
+            slice: Arc::new(vec![entry("p/a", 10, None)]),
+            start_ordinal: 0,
+            resume_etag: None,
+            chunk_bytes: 64,
+            range_bytes: 10,
+            tx,
+            pause: Arc::new(AtomicBool::new(false)),
+            retry_base: Duration::from_millis(1),
+            retries: None,
+            range: Some(SplitRange::new(0, 4, b'\n')),
+            bytes_read: None,
+            origin: Origin::Lister,
+        }));
+        let mut msgs = Vec::new();
+        while let Some(m) = rx.recv().await {
+            msgs.push(m);
+        }
+        task.await.unwrap();
+        let SplitFailure::Fatal(e) = last_failure(msgs) else {
+            panic!("a ranged read with no ETag must be fatal");
+        };
+        assert_eq!(e.class(), ErrorClass::Fatal, "{e}");
+        assert!(e.reason().contains("has no ETag pin"), "{e}");
     }
 }

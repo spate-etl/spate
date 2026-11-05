@@ -3823,4 +3823,62 @@ mod tests {
         }
         assert_eq!(script.acknowledged(), vec![overwritten]);
     }
+
+    /// Pins that `feed_error` takes its class from the feed's error. Direct,
+    /// since every caller filters `Retryable` first.
+    #[test]
+    fn feed_error_takes_the_class_of_the_feed_error() {
+        use spate_core::error::ErrorClass;
+        for (kind, class) in [
+            (FeedErrorKind::Retryable, ErrorClass::Retryable),
+            (FeedErrorKind::Fatal, ErrorClass::Fatal),
+            (FeedErrorKind::Refused, ErrorClass::Fatal),
+            (FeedErrorKind::Gone, ErrorClass::Fatal),
+        ] {
+            let e = FeedError::new(kind, "no");
+            let err = feed_error("doing", &e);
+            assert_eq!(err.class(), class, "{err}");
+            assert_eq!(err.reason(), format!("doing: {e}"));
+        }
+    }
+
+    /// Pins that a `Gone` or `Refused` answer to `receive`, and a `Refused`
+    /// answer to an `acknowledge` sent from `commit`, stops the reader.
+    #[test]
+    fn a_refused_or_gone_answer_from_the_feed_stops_the_reader() {
+        use spate_core::error::ErrorClass;
+        let (inner, script) = scripted_feed();
+        let feed = Arc::new(Refusing::new(inner));
+        let (mut reader, _rt) = reader_over(feed.clone(), None, None);
+        script.deliver(descriptor_unit(0));
+        start(&mut reader);
+        for (kind, reason) in [
+            (
+                FeedErrorKind::Gone,
+                "receiving from the feed: feed error (Gone): refused by the test",
+            ),
+            (
+                FeedErrorKind::Refused,
+                "receiving from the feed: feed error (Refused): refused by the test",
+            ),
+        ] {
+            *feed.receive.lock().unwrap() = Some(kind);
+            let Err(err) = reader.poll_events(Duration::ZERO) else {
+                panic!("a {kind:?} answer to a receive did not stop the reader");
+            };
+            assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
+            assert_eq!(err.reason(), reason);
+        }
+
+        *feed.receive.lock().unwrap() = None;
+        let lane = partitions(&lanes_added(poll(&mut reader)));
+        *feed.acknowledge.lock().unwrap() = Some(FeedErrorKind::Refused);
+        reader.lanes[&lane[0]].tracker.set_terminal(5);
+        let err = reader.commit(&[(lane[0], 5)]).unwrap_err();
+        assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
+        assert_eq!(
+            err.reason(),
+            "settling a unit: feed error (Refused): refused by the test"
+        );
+    }
 }

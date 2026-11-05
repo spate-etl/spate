@@ -526,4 +526,17 @@ mod tests {
             || DROPPED.load(Ordering::SeqCst),
         );
     }
+
+    /// Pins that a feed that reports no depth is fatal and is named. Direct,
+    /// since a run with no depth ends at `open`, which drops the class.
+    #[test]
+    fn no_depth_is_fatal_and_names_the_backend() {
+        let (feed, _script) = spate_test::scripted_feed();
+        let err = no_depth(&feed);
+        assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
+        assert!(
+            err.reason().contains("`scripted` feed reports no depth"),
+            "{err}"
+        );
+    }
 }

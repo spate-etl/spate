@@ -1058,9 +1058,11 @@ mod tests {
             })),
         );
         let err = r.lane.poll(512, Duration::from_millis(50)).unwrap_err();
-        assert!(err.to_string().contains("access denied"), "{err}");
+        assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
+        assert_eq!(err.reason(), "access denied");
         let again = r.lane.poll(512, Duration::from_millis(50)).unwrap_err();
-        assert!(again.to_string().contains("access denied"), "sticky");
+        assert_eq!(again.class(), ErrorClass::Fatal, "sticky: {again}");
+        assert_eq!(again.reason(), "access denied", "sticky");
         assert!(r.poison_rx.try_recv().is_err(), "fatal is not poison");
         assert!(!r.lane.finished(), "a failed lane is not finished");
     }
@@ -1074,6 +1076,7 @@ mod tests {
         // First poll returns no framed data: "partial" has no newline and
         // the object never ends, so nothing is emittable.
         let err = r.lane.poll(512, Duration::from_millis(50)).unwrap_err();
+        assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
         assert!(err.to_string().contains("mid-object"), "{err}");
         assert!(
             r.tracker.terminal().is_none(),
@@ -1377,5 +1380,22 @@ mod tests {
         let mut r = rig(None);
         assert!(r.lane.poll(512, Duration::ZERO).unwrap().is_none());
         assert!(!r.lane.finished());
+    }
+
+    /// Pins that the lane reports a fetcher's failure with the class and the
+    /// reason it was sent, on every poll. No fetch site builds this fixture's
+    /// class, and only a lane test can send it.
+    #[test]
+    fn a_fetcher_failure_keeps_its_class_and_reason_on_every_poll() {
+        let mut r = rig(None);
+        send(
+            &r,
+            ChunkMsg::LaneFailed(SplitFailure::Fatal(SourceError::retryable("throttled"))),
+        );
+        for _ in 0..2 {
+            let err = r.lane.poll(512, Duration::from_millis(50)).unwrap_err();
+            assert_eq!(err.class(), ErrorClass::Retryable, "{err}");
+            assert_eq!(err.reason(), "throttled");
+        }
     }
 }

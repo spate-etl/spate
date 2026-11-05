@@ -3117,4 +3117,22 @@ mod tests {
             ]
         );
     }
+
+    /// Pins that a unit that cannot be minted fails the run as fatal. Direct,
+    /// since no listing can reach it.
+    #[test]
+    fn a_unit_that_cannot_be_minted_fails_the_run() {
+        let rt = runtime();
+        let store: Arc<dyn ObjectStore> = Arc::new(object_store::memory::InMemory::new());
+        let lister = lister(store, Arc::new(MemoryFeed::new()));
+        let err = rt
+            .block_on(lister.publish_unit(
+                Err(crate::split::split_id_for(std::iter::empty()).unwrap_err()),
+                &mut VecDeque::new(),
+                &mut Published::default(),
+            ))
+            .unwrap_err();
+        assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
+        assert!(err.reason().starts_with("minting a unit: "), "{err}");
+    }
 }

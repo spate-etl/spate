@@ -531,6 +531,10 @@ fn a_location_failing_every_read_reports_the_last_error_at_the_window() {
         err.contains("no read succeeded") && err.contains("connection reset"),
         "{err}"
     );
+    assert!(
+        err.contains("the last failed: source error (Retryable): "),
+        "{err}"
+    );
     let warned = lines
         .iter()
         .filter(|l| l.contains("reading the job fingerprint failed"))
@@ -1012,9 +1016,9 @@ fn a_lister_on_a_durable_feed_without_a_location_refuses() {
         .with_store(data_store)
         .with_location_store(store)
         .list_once(&section("scripted", None), Arc::new(feed))
-        .unwrap_err()
-        .to_string();
-    assert!(err.contains("`feed.location`"), "{err}");
+        .unwrap_err();
+    assert_eq!(err.class(), spate_core::error::ErrorClass::Fatal, "{err}");
+    assert!(err.reason().contains("`feed.location`"), "{err}");
     assert!(script.published().is_empty());
     assert_eq!(spy.lists(), 0);
     assert!(spy.gets().is_empty());
@@ -1144,9 +1148,9 @@ fn a_lister_on_the_memory_feed_with_a_location_refuses() {
     let err = lister_source(&data, &rt, "")
         .with_location_store(store)
         .list_once(&section("memory", Some(LOCATION)), Arc::new(feed))
-        .unwrap_err()
-        .to_string();
-    assert!(err.contains("`feed.location`"), "{err}");
+        .unwrap_err();
+    assert_eq!(err.class(), spate_core::error::ErrorClass::Fatal, "{err}");
+    assert!(err.reason().contains("`feed.location`"), "{err}");
     assert!(script.published().is_empty());
     assert_eq!(hooks.requests(), 0);
 }
@@ -1688,6 +1692,46 @@ fn a_lister_run_refuses_a_feed_the_section_does_not_name() {
     assert_eq!(hooks.requests(), 0);
 }
 
+/// Pins that a lister run refuses a source with no framer as fatal, before
+/// it publishes.
+#[test]
+fn a_lister_run_refuses_a_source_with_no_framer() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    let (location, _) = file_location(&dir);
+    let rt = runtime();
+    let (feed, script) = scripted_feed();
+    let config =
+        spate_test::component_config("s3", &format!("url: \"file://{}/\"\n", data.display()));
+    let err = S3Source::from_component_config(&config, rt.handle().clone())
+        .unwrap()
+        .list_once(&section("scripted", Some(&location)), Arc::new(feed))
+        .unwrap_err();
+    assert_eq!(err.class(), spate_core::error::ErrorClass::Fatal, "{err}");
+    assert!(err.reason().contains("with_framer"), "{err}");
+    assert!(script.published().is_empty());
+}
+
+/// Pins that a lister run refuses a config that fails validation as fatal,
+/// before it publishes. Built with `S3Source::new`, since
+/// `from_component_config` would refuse it early.
+#[test]
+fn a_lister_run_refuses_an_invalid_config() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    let (location, _) = file_location(&dir);
+    let rt = runtime();
+    let (feed, script) = scripted_feed();
+    let mut config = spate_s3::S3SourceConfig::new(format!("file://{}/", data.display()));
+    config.chunk_bytes = bytesize::ByteSize::b(0);
+    let err = line_framer(S3Source::new(config, rt.handle().clone()))
+        .list_once(&section("scripted", Some(&location)), Arc::new(feed))
+        .unwrap_err();
+    assert_eq!(err.class(), spate_core::error::ErrorClass::Fatal, "{err}");
+    assert!(err.reason().contains("chunk_bytes"), "{err}");
+    assert!(script.published().is_empty());
+}
+
 /// Pins that a lister run called from a thread in a Tokio runtime context
 /// refuses: from async code, where blocking on the I/O handle would panic,
 /// from a `spawn_blocking` closure and under a `Handle::enter` guard.
@@ -2044,7 +2088,12 @@ fn a_failed_solo_listing_fails_the_run() {
     });
     let l = launch_solo(&data, store);
     let reason = failure_reason(&exit(&l));
-    assert!(reason.contains("listing"), "{reason}");
+    assert!(
+        reason.contains(
+            "source error (Fatal): the solo run's lister failed: source error (Retryable): listing"
+        ),
+        "{reason}"
+    );
 }
 
 /// The in-process feed, except that a publish panics.

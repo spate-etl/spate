@@ -1034,6 +1034,7 @@ fn apply_options(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use spate_core::error::ErrorClass;
     use std::collections::BTreeMap;
 
     fn map(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
@@ -1459,5 +1460,123 @@ mod tests {
                 "explicit {explicit:?}, threads {threads:?}"
             );
         }
+    }
+
+    /// A source over `body` with a framer and a feed, on its own runtime.
+    fn fed_source(body: &str) -> (S3Source, tokio::runtime::Runtime) {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let source = S3Source::from_component_config(
+            &spate_test::component_config("s3", body),
+            rt.handle().clone(),
+        )
+        .unwrap()
+        .with_framer(|| Box::new(crate::testutil::TestLineFramer::new(1 << 20)))
+        .with_feed(Arc::new(spate_core::feed::memory::MemoryFeed::new()));
+        (source, rt)
+    }
+
+    fn ctx() -> spate_core::source::SourceCtx {
+        spate_core::source::SourceCtx::new(spate_core::checkpoint::Checkpointer::new().handle())
+    }
+
+    /// Pins that a second `open` is fatal and says why.
+    #[test]
+    fn open_twice_is_fatal() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut source, _rt) = fed_source(&format!("url: \"file://{}/\"\n", dir.path().display()));
+        source.open(ctx()).unwrap();
+        let err = source.open(ctx()).unwrap_err();
+        assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
+        assert_eq!(err.reason(), "source opened twice");
+    }
+
+    /// Pins that polling a source that was never opened is fatal and says why.
+    #[test]
+    fn a_source_used_before_open_is_fatal() {
+        let (mut source, _rt) = fed_source("url: \"s3://b/data/\"\n");
+        let Err(err) = source.poll_events(Duration::ZERO) else {
+            panic!("a poll before open did not fail");
+        };
+        assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
+        assert_eq!(err.reason(), "poll_events before open");
+    }
+
+    /// Pins that `open` refuses a source with no framer as fatal.
+    #[test]
+    fn open_refuses_a_source_with_no_framer_as_fatal() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let mut source = S3Source::from_component_config(
+            &spate_test::component_config("s3", "url: \"s3://b/data/\"\n"),
+            rt.handle().clone(),
+        )
+        .unwrap();
+        let err = source.open(ctx()).unwrap_err();
+        assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
+        assert!(
+            err.reason().starts_with("S3Source has no record framer"),
+            "{err}"
+        );
+    }
+
+    /// Pins that `open` refuses a config changed after it was validated, as
+    /// fatal.
+    #[test]
+    fn open_refuses_an_invalid_config_as_fatal() {
+        let (mut source, _rt) = fed_source("url: \"s3://b/data/\"\n");
+        source.config.chunk_bytes = bytesize::ByteSize::b(0);
+        let err = source.open(ctx()).unwrap_err();
+        assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
+        assert!(err.reason().contains("chunk_bytes"), "{err}");
+    }
+
+    /// Pins that a data store or a location store that cannot be built is
+    /// fatal, each naming what it was building.
+    #[test]
+    fn a_store_that_cannot_be_built_is_fatal() {
+        let (mut source, _rt) =
+            fed_source("url: \"s3://bucket/p/\"\nstore:\n  aws_checksum_algorithm: \"nope\"\n");
+        let err = source.open(ctx()).unwrap_err();
+        assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
+        assert!(
+            err.reason()
+                .starts_with("building the object store for s3://bucket/p/"),
+            "{err}"
+        );
+
+        let (source, _rt) = source_with_store("  aws_checksum_algorithm: \"nope\"\n");
+        let location = source.parse_location("s3://ops/jobs/a/").unwrap();
+        let err = source.location_store(&location).unwrap_err();
+        assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
+        assert!(
+            err.reason()
+                .starts_with("building the object store for the job location s3://ops/jobs/a/"),
+            "{err}"
+        );
+    }
+
+    /// Pins that a URL whose scheme names no store is fatal beside an injected
+    /// store, which still takes its listing prefix from the URL.
+    #[test]
+    fn a_url_with_no_store_scheme_is_fatal_beside_a_given_store() {
+        let (mut source, _rt) = fed_source("url: \"foo://bucket/p/\"\n");
+        source.store = Some(Arc::new(object_store::memory::InMemory::new()));
+        let err = source.open(ctx()).unwrap_err();
+        assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
+        assert!(err.reason().starts_with("parsing foo://bucket/p/"), "{err}");
+    }
+
+    /// Pins that a value that does not parse as a URL is fatal. Called
+    /// directly, as `validate` runs the same parse first on both public paths.
+    #[test]
+    fn an_unparsable_url_is_fatal() {
+        let err = parse("no scheme").unwrap_err();
+        assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
+        assert!(err.reason().starts_with("invalid URL no scheme"), "{err}");
     }
 }

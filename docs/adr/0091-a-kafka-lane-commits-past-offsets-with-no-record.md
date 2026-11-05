@@ -72,6 +72,7 @@ is a property test of the rule.
 
 ## More information
 
+Landed with the pull request that closes #1709.
 [#1709](https://github.com/spate-etl/spate/issues/1709) reports the defect.
 [ADR-0090](0090-a-kafka-source-runs-a-configured-number-of-consumers.md) holds
 the consumer model the lanes run under.

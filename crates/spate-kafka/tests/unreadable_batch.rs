@@ -11,7 +11,9 @@ use spate_core::source::{PayloadBatch, Source, SourceCtx, SourceLane};
 use spate_kafka::{KafkaSource, KafkaSourceConfig};
 use std::collections::BTreeMap;
 use std::time::Duration;
-use support::{Marker, RawBatch, await_assignment, control_batch, corrupt_batch, produce_batch};
+use support::{
+    Marker, RawBatch, await_assignment, control_batch, corrupt_batch, offsets_of, produce_batch,
+};
 
 const TOPIC: &str = "orders";
 
@@ -55,25 +57,8 @@ fn wait_for_fetch_queue(
         source
             .poll_events(Duration::from_millis(50))
             .expect("poll_events");
-        spate_test::metric_value(
-            &handle.render(),
-            "spate_kafka_partition_fetch_queue_messages",
-            &[("pipeline", pipeline), ("partition", "0")],
-        )
-        .is_some_and(|queued| queued >= at_least)
+        support::fetch_queue_entries(&handle.render(), pipeline) >= at_least
     });
-}
-
-fn offsets_of(
-    batch: Option<<<KafkaSource as Source>::Lane as SourceLane>::Batch<'_>>,
-) -> Option<Vec<i64>> {
-    batch.map(|mut b| {
-        let mut o = Vec::new();
-        while let Some(raw) = b.next_payload() {
-            o.push(raw.offset);
-        }
-        o
-    })
 }
 
 /// A batch with an unknown message format that starts its own fetch, read
@@ -122,17 +107,7 @@ fn an_unreadable_batch_behind_the_fetcher_fails_the_lane() {
 
         // The fetcher has queued record 0, the error for offset 1 and the
         // records after it, so the error arrives inside the lane's first batch.
-        let queued = r#"spate_kafka_partition_fetch_queue_messages{pipeline="unreadable",component="source",component_type="kafka",partition="0"} "#;
-        spate_test::wait_until(Duration::from_secs(30), "the fetcher runs ahead", || {
-            source
-                .poll_events(Duration::from_millis(50))
-                .expect("poll_events");
-            handle.render().lines().any(|line| {
-                line.strip_prefix(queued)
-                    .and_then(|n| n.parse::<f64>().ok())
-                    .is_some_and(|n| n >= 4.0)
-            })
-        });
+        wait_for_fetch_queue(&mut source, &handle, "unreadable", 4.0);
 
         let mut first = lanes[0]
             .poll(64, Duration::from_secs(5))
@@ -256,8 +231,8 @@ fn an_unknown_codec_first_in_a_poll_names_the_codec() {
 }
 
 /// A marker behind a batch the lane cannot read stays unpassed: the lane delivers
-/// the record before it and fails, and the watermark stops at that record. The
-/// same holds for a batch that fails its CRC.
+/// the record before it and fails, the poll after that serves the marker, and the
+/// watermark stops at that record. The same holds for a batch that fails its CRC.
 #[test]
 fn a_marker_behind_an_unreadable_batch_leaves_the_commit_alone() {
     let mut unknown_format = batch(2, 0, -1, 1, b"carrier");
@@ -278,11 +253,24 @@ fn a_marker_behind_an_unreadable_batch_leaves_the_commit_alone() {
         if check_crcs {
             cfg.rdkafka.insert("check.crcs".into(), "true".into());
         }
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let _recorder = metrics::set_default_local_recorder(&recorder);
         let mut cp = Checkpointer::new();
         let mut source = KafkaSource::new(cfg);
-        source.open(SourceCtx::new(cp.handle())).expect("open");
+        source
+            .open(
+                SourceCtx::new(cp.handle())
+                    .with_meter(Some(spate_core::metrics::Meter::with_namespace(
+                        "kafka", name, "source", "kafka",
+                    )))
+                    .with_partition_detail(true),
+            )
+            .expect("open");
         let mut lanes = await_assignment(&mut source, Duration::from_secs(30));
         cp.begin_epoch(&[lanes[0].partition()], 1);
+        // One version barrier, record 0, the error and the marker.
+        wait_for_fetch_queue(&mut source, &handle, name, 4.0);
 
         let mut delivered = Vec::new();
         let mut failed = false;
@@ -301,6 +289,15 @@ fn a_marker_behind_an_unreadable_batch_leaves_the_commit_alone() {
             failed
         });
         assert_eq!(delivered, [0], "{name}");
+        // An unknown format is reported once, so this poll serves the marker. A
+        // bad CRC is reported again, so this poll fails.
+        assert!(
+            matches!(
+                lanes[0].poll(64, Duration::from_millis(100)),
+                Ok(None) | Err(_)
+            ),
+            "{name}: the marker was passed"
+        );
         drop(lanes);
         cp.drain();
         assert_eq!(

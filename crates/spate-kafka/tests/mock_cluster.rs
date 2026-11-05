@@ -1206,16 +1206,10 @@ fn a_corrupt_batch_fails_the_lane() {
         // one entry before any data, so three entries are the record at
         // offset 0 and the corrupt batch's error, and the lane's first poll
         // meets the error after its first message.
-        let queued = r#"spate_kafka_partition_fetch_queue_messages{pipeline="corrupt-batch",component="source",component_type="kafka",partition="0"} "#;
         let mut errors = Vec::new();
         wait_until(ASSIGNMENT, "the record and the error queued", || {
             serve_events(&mut source, &mut errors);
-            handle
-                .render()
-                .lines()
-                .find_map(|line| line.strip_prefix(queued))
-                .and_then(|n| n.parse::<f64>().ok())
-                .is_some_and(|n| n >= 3.0)
+            support::fetch_queue_entries(&handle.render(), "corrupt-batch") >= 3.0
         });
 
         let mut batch = lane
@@ -1339,15 +1333,7 @@ fn a_mid_batch_authorization_failure_fails_the_lane() {
         cp.begin_epoch(&[PartitionId(0)], 1);
         let lane = &mut lanes[0];
 
-        let queued = r#"spate_kafka_partition_fetch_queue_messages{pipeline="mid-batch-auth",component="source",component_type="kafka",partition="0"} "#;
-        let entries = || {
-            handle
-                .render()
-                .lines()
-                .find_map(|line| line.strip_prefix(queued))
-                .and_then(|n| n.parse::<f64>().ok())
-                .unwrap_or(0.0)
-        };
+        let entries = || support::fetch_queue_entries(&handle.render(), "mid-batch-auth");
         let mut errors = Vec::new();
         // One entry before any data, then the two records.
         wait_until(ASSIGNMENT, "both records queued", || {
@@ -1387,21 +1373,6 @@ fn a_mid_batch_authorization_failure_fails_the_lane() {
 }
 
 type Lane = <KafkaSource as Source>::Lane;
-
-/// A recorder of the test's own, its handle, and a meter labelling series with
-/// `group`.
-fn recorded_meter(
-    group: &'static str,
-) -> (
-    metrics_exporter_prometheus::PrometheusRecorder,
-    metrics_exporter_prometheus::PrometheusHandle,
-    spate_core::metrics::Meter,
-) {
-    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
-    let handle = recorder.handle();
-    let meter = spate_core::metrics::Meter::with_namespace("kafka", group, "source", "kafka");
-    (recorder, handle, meter)
-}
 
 /// Plays the runtime's part for one source: begins an epoch on each
 /// assignment, admits each added lane to it, and drains, commits and flushes
@@ -1443,8 +1414,8 @@ impl Driver {
     /// Open `source` with its statistics on, publishing to a recorder of its
     /// own so [`Driver::settle_group`] can read them. `group` labels the
     /// series.
-    fn open_watched(source: KafkaSource, group: &'static str) -> Driver {
-        let (recorder, handle, meter) = recorded_meter(group);
+    fn open_watched(source: KafkaSource, group: &str) -> Driver {
+        let (recorder, handle, meter) = support::recorded_meter(group.to_owned());
         let mut driver = metrics::with_local_recorder(&recorder, || {
             Driver::open_with(source, |ctx| ctx.with_meter(Some(meter)))
         });
@@ -2089,7 +2060,7 @@ fn two_consumers_publish_their_own_statistics() {
     let run = |interval: Duration, group: &'static str| -> String {
         let mut cfg = consumers_config(&brokers, group, 2);
         cfg.statistics_interval = interval;
-        let (recorder, handle, meter) = recorded_meter(group);
+        let (recorder, handle, meter) = support::recorded_meter(group);
         metrics::with_local_recorder(&recorder, || {
             let mut driver = Driver::open_with(KafkaSource::new(cfg), |ctx| {
                 ctx.with_meter(Some(meter)).with_partition_detail(true)
@@ -2150,7 +2121,7 @@ fn consumer_series_carry_no_passthrough_value() {
 
     let mut cfg = watched_config(&brokers, "no-secret", 2);
     cfg.rdkafka.insert("client.id".into(), "hunter2".into());
-    let (recorder, handle, meter) = recorded_meter("no-secret");
+    let (recorder, handle, meter) = support::recorded_meter("no-secret");
     let lines = spate_test::capture_logs(tracing::Level::DEBUG, || {
         metrics::with_local_recorder(&recorder, || {
             let mut driver =
@@ -2513,6 +2484,23 @@ fn a_restarted_member_past_a_marker_leaves_no_lag() {
     watched.wait_lag(0, 0.0);
 }
 
+/// A marker that lands right behind one the lane already retired takes one offset
+/// past it, and moves the committed offset by that one.
+#[test]
+fn a_marker_right_behind_a_retired_one_leaves_no_lag() {
+    let cluster = marker_cluster(1);
+    let brokers = cluster.bootstrap_servers();
+    produce(&brokers, TOPIC, 1, 1, "before");
+    write_marker(&brokers, 0, Marker::Commit);
+    let mut watched = Watched::open(config(&brokers, &spate_test::unique_name("behind")));
+    watched.read(0, 1);
+    watched.poll_until_committed(0, 0, 2);
+
+    write_marker(&brokers, 0, Marker::Commit);
+    watched.poll_until_committed(0, 0, 3);
+    watched.wait_lag(0, 0.0);
+}
+
 /// Consecutive markers are passed together or in turn, and the offset ends past
 /// them all. Regression for #1709.
 #[test]
@@ -2588,12 +2576,7 @@ fn a_zero_timeout_poll_reads_the_position_in_turn() {
     // One version barrier, the record and the marker.
     wait_until(ASSIGNMENT, "the fetcher runs ahead", || {
         watched.serve();
-        spate_test::metric_value(
-            &watched.rendered(),
-            "spate_kafka_partition_fetch_queue_messages",
-            &[("pipeline", &pipeline), ("partition", "0")],
-        )
-        .is_some_and(|queued| queued >= 3.0)
+        support::fetch_queue_entries(&watched.rendered(), &pipeline) >= 3.0
     });
     assert_eq!(watched.read(0, 1), [0]);
 
@@ -2623,13 +2606,13 @@ fn an_idle_plain_lane_issues_no_ack() {
     assert_eq!(watched.cp.pending(PartitionId(0)), 0);
 }
 
-/// Poll `watched`'s lane past the marker behind one record, holding the
-/// record's ack, and return the clone.
-fn hold_a_record_past_its_marker(watched: &mut Watched) -> spate_core::checkpoint::AckRef {
+/// Poll lane `lane` of `watched` for one record, and return a clone of the
+/// record's ack, which holds the commit there after the batch drops.
+fn hold_a_record(watched: &mut Watched, lane: usize) -> spate_core::checkpoint::AckRef {
     let mut held = None;
     wait_until(ASSIGNMENT, "the record", || {
         watched.serve();
-        if let Some(batch) = watched.lanes[0]
+        if let Some(batch) = watched.lanes[lane]
             .poll(1, Duration::from_millis(100))
             .expect("lane poll")
         {
@@ -2637,11 +2620,18 @@ fn hold_a_record_past_its_marker(watched: &mut Watched) -> spate_core::checkpoin
         }
         held.is_some()
     });
+    held.expect("held")
+}
+
+/// Poll `watched`'s lane past the marker behind one record, holding the
+/// record's ack, and return the clone.
+fn hold_a_record_past_its_marker(watched: &mut Watched) -> spate_core::checkpoint::AckRef {
+    let held = hold_a_record(watched, 0);
     wait_until(ASSIGNMENT, "the marker's batch", || {
         watched.serve();
         watched.poll(0) == Some(vec![])
     });
-    held.expect("held")
+    held
 }
 
 /// An ack outstanding past its batch holds the marker's offset back, and
@@ -2708,17 +2698,7 @@ fn each_partition_advances_past_its_own_marker() {
     };
     let (zero, one) = (index_of(&watched, 0), index_of(&watched, 1));
 
-    let mut held = None;
-    wait_until(ASSIGNMENT, "partition 1's record", || {
-        watched.serve();
-        if let Some(batch) = watched.lanes[one]
-            .poll(1, Duration::from_millis(100))
-            .expect("lane poll")
-        {
-            held = Some(batch.ack().clone());
-        }
-        held.is_some()
-    });
+    let _held = hold_a_record(&mut watched, one);
     watched.read(zero, 1);
     watched.poll_until_committed(zero, 0, 2);
     watched.wait_lag(0, 0.0);
@@ -2738,10 +2718,9 @@ fn two_consumers_each_advance_past_their_own_marker() {
     write_marker(&brokers, 0, Marker::Commit);
     write_marker(&brokers, 1, Marker::Commit);
     let group = spate_test::unique_name("two-consumers");
-    let leaked: &'static str = Box::leak(group.clone().into_boxed_str());
     let mut driver = Driver::open_watched(
         KafkaSource::new(watched_config(&brokers, &group, 2)),
-        leaked,
+        &group,
     );
     driver.settle_group(2, 2, ASSIGNMENT);
     driver.read(1, ASSIGNMENT);
@@ -2751,12 +2730,7 @@ fn two_consumers_each_advance_past_their_own_marker() {
         for lane in &mut driver.lanes {
             let _ = lane.poll(64, Duration::from_millis(50)).expect("lane poll");
         }
-        driver.cp.drain();
-        let watermarks = driver.cp.take_watermarks();
-        if !watermarks.is_empty() {
-            driver.source.commit(&watermarks).expect("store");
-            driver.source.flush_commits().expect("flush");
-        }
+        driver.commit();
         support::committed(&brokers, &group, TOPIC, 2) == [rdkafka::Offset::Offset(2); 2]
     });
 }
@@ -2880,8 +2854,8 @@ fn a_pipeline_reaches_zero_lag_past_a_marker() {
     assert_eq!(rows, 5, "each record reached the sink once");
 }
 
-/// A partition idle beside a busy one on the same thread sees only zero-timeout
-/// polls, and still passes its marker. Regression for #1709.
+/// A partition idle beside a busy one on the same thread still passes its marker.
+/// Regression for #1709.
 #[test]
 #[expect(clippy::disallowed_methods, reason = "the test joins the thread")]
 fn an_idle_partition_beside_a_busy_one_reaches_zero_lag() {

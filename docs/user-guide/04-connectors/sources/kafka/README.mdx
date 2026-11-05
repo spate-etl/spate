@@ -171,7 +171,8 @@ The framework never uses librdkafka's position-based auto-commit. Instead:
   arrived while no member held the partition: during a restart, during a
   rebalance, or on a partition added to the topic. The exposure lasts until the
   partition's first commit, which needs a first record and a sink that
-  acknowledges it. Set `auto.offset.reset: earliest` where that loss matters.
+  acknowledges it, or a transaction marker the source passes. Set
+  `auto.offset.reset: earliest` where that loss matters.
 - A committed offset below the log start, which retention causes when a group
   stops or lags, also falls under `auto.offset.reset`. Under `latest` the source
   moves to the end, past records the log still holds, and the next commit moves
@@ -205,17 +206,24 @@ agrees.
 
 A few readings differ:
 
-- A marker counts as lag until the partition's next poll serves it. The figure
-  then settles within `checkpoint.interval`, `commit_interval` and
+- A marker counts as lag until the partition's next poll serves it and the sink
+  acknowledges the records below it, which can take the sink's `batch.linger`.
+  The figure then settles within `checkpoint.interval`, `commit_interval` and
   `statistics_interval` together. A partition idle beside a busy one on the same
   pipeline thread reads its position less often, so its figure settles later.
 - While a producer holds a transaction open, the last stable offset stays below
-  it. Under `read_committed` lag reads 0 and later records stay unread until the
-  transaction ends.
+  it, and later records stay unread until the transaction ends. Under
+  `read_committed` lag reads 0 for a group committed at that offset. A group
+  with no committed offset, or with one past it after reading under
+  `read_uncommitted`, has no lag series until the transaction ends. The broker's
+  group lag counts to the log's end, so it reads above the source's figure until
+  then.
 - A gap with no record and no marker, which compaction can leave, stays in the
-  figure until the next record.
+  figure until the next record or marker.
 - After a poll error, the source does not pass a marker until it delivers
   another record.
+- After a message reaches the main queue, which the source logs at `WARN` as a
+  rewind, that consumer does not pass a marker again until the process restarts.
 
 A group keeps its committed offset when `isolation.level` changes. A group that
 passed an aborted transaction under `read_committed` does not deliver those

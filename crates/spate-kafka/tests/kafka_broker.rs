@@ -333,7 +333,6 @@ fn real_broker_a_member_that_never_answers_its_offer_is_replaced() {
 /// generation.
 #[test]
 #[ignore = "requires Docker"]
-#[expect(clippy::disallowed_methods, reason = "the test joins the thread")]
 fn real_broker_revocation_commits_every_consumers_offsets() {
     use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
 
@@ -404,44 +403,14 @@ fn real_broker_revocation_commits_every_consumers_offsets() {
     let watermarks = cp.take_watermarks();
     assert_eq!(watermarks.len(), 2, "{watermarks:?}");
 
-    let stop = Arc::new(AtomicBool::new(false));
-    let joiner = {
-        let brokers = brokers.clone();
-        let stop = Arc::clone(&stop);
-        std::thread::spawn(move || {
-            let c: BaseConsumer = support::raw_config()
-                .set("bootstrap.servers", &brokers)
-                .set("group.id", "rev-each")
-                .build()
-                .expect("joiner");
-            c.subscribe(&[TOPIC]).expect("subscribe");
-            while !stop.load(Ordering::Relaxed) {
-                let _ = c.poll(Duration::from_millis(100));
-            }
-        })
-    };
-    spate_test::wait_until(Duration::from_secs(60), "the revocation", || {
-        let SourceEvent::LanesRevoked {
-            lanes: ids,
-            barrier,
-        } = source
-            .poll_events(Duration::from_millis(200))
-            .expect("poll_events")
-        else {
-            return false;
-        };
-        support::complete_revocation(&mut source, &ids, &barrier, &watermarks).expect("flush");
-        true
-    });
+    let _joiner = support::Joiner::join_group(&brokers, TOPIC, "rev-each");
+    support::complete_next_revocation(&mut source, || watermarks.clone());
 
     let probe = support::probe(&brokers, "rev-each");
     assert_eq!(
         support::committed_by(&probe, TOPIC, 2),
         [rdkafka::Offset::Offset(25); 2]
     );
-
-    stop.store(true, Ordering::Relaxed);
-    joiner.join().expect("joiner thread");
 }
 
 /// A broker that takes transactions, and its bootstrap address. The container
@@ -668,76 +637,36 @@ fn real_broker_earliest_on_an_aborted_only_partition_commits_past_its_marker() {
     watched.wait_lag(0, 0.0);
 }
 
-/// A second member joins a group and stays polling until the guard drops, forcing
-/// a revocation.
-struct Joiner {
-    stop: Arc<AtomicBool>,
-    thread: Option<std::thread::JoinHandle<()>>,
-}
+/// A group that passed an aborted transaction under `read_committed` delivers
+/// none of it under `read_uncommitted`: its first record is the one after the
+/// marker.
+#[test]
+#[ignore = "requires Docker"]
+fn real_broker_a_switch_to_read_uncommitted_delivers_nothing_it_passed() {
+    let (_container, brokers) = transaction_broker();
+    let _ = produce_transaction(&brokers, TOPIC, 5, "dropped", Transaction::Abort);
+    let mut watched = Watched::open(config(&brokers, "switch"));
+    assert_eq!(watched.poll_until_committed(0, 0, 6), [6]);
+    drop(watched);
 
-impl Joiner {
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "dropping the guard joins the thread"
-    )]
-    fn join_group(brokers: &str, topic: &str, group: &str) -> Joiner {
-        let stop = Arc::new(AtomicBool::new(false));
-        let thread = {
-            let (stop, brokers, topic, group) = (
-                Arc::clone(&stop),
-                brokers.to_owned(),
-                topic.to_owned(),
-                group.to_owned(),
-            );
-            std::thread::spawn(move || {
-                // No auto-commit: this member reads past a marker on its own, and
-                // the tests assert what the source committed.
-                let consumer: BaseConsumer = support::raw_config()
-                    .set("bootstrap.servers", &brokers)
-                    .set("group.id", &group)
-                    .set("enable.auto.commit", "false")
-                    .build()
-                    .expect("joiner");
-                consumer.subscribe(&[topic.as_str()]).expect("subscribe");
-                while !stop.load(Ordering::Relaxed) {
-                    let _ = consumer.poll(Duration::from_millis(100));
-                }
-            })
-        };
-        Joiner {
-            stop,
-            thread: Some(thread),
-        }
-    }
-}
-
-impl Drop for Joiner {
-    fn drop(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
-        if let Some(thread) = self.thread.take() {
-            thread.join().expect("joiner thread");
-        }
-    }
+    produce(&brokers, TOPIC, 1, 1, "next");
+    let mut cfg = config(&brokers, "switch");
+    cfg.rdkafka
+        .insert("isolation.level".into(), "read_uncommitted".into());
+    let mut switched = Watched::open(cfg);
+    assert_eq!(switched.read(0, 1), [6]);
 }
 
 /// Serve `watched` until its revocation arrives, and complete it with whatever
 /// the checkpointer holds.
 fn complete_the_revocation(watched: &mut Watched) {
-    let mut done = false;
-    spate_test::wait_until(Duration::from_secs(120), "the revocation", || {
-        if let SourceEvent::LanesRevoked { lanes, barrier } = watched
-            .source
-            .poll_events(Duration::from_millis(200))
-            .expect("poll_events")
-        {
-            watched.lanes.clear();
-            watched.cp.drain();
-            let watermarks = watched.cp.take_watermarks();
-            support::complete_revocation(&mut watched.source, &lanes, &barrier, &watermarks)
-                .expect("flush");
-            done = true;
-        }
-        done
+    let Watched {
+        source, lanes, cp, ..
+    } = watched;
+    support::complete_next_revocation(source, || {
+        lanes.clear();
+        cp.drain();
+        cp.take_watermarks()
     });
 }
 
@@ -767,7 +696,7 @@ fn real_broker_revocation_before_a_marker_loses_nothing() {
         read == 5
     });
     {
-        let _joiner = Joiner::join_group(&brokers, "unserved", "unserved-group");
+        let _joiner = support::Joiner::join_group(&brokers, "unserved", "unserved-group");
         complete_the_revocation(&mut watched);
     }
     assert_eq!(
@@ -787,7 +716,7 @@ fn real_broker_revocation_before_a_marker_loses_nothing() {
         watched.poll(0) == Some(vec![])
     });
     {
-        let _joiner = Joiner::join_group(&brokers, "served", "served-group");
+        let _joiner = support::Joiner::join_group(&brokers, "served", "served-group");
         complete_the_revocation(&mut watched);
     }
     assert_eq!(

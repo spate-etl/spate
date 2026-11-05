@@ -36,8 +36,8 @@
 
 use crate::client::read_position;
 use crate::context::SourceContext;
-use rdkafka::consumer::BaseConsumer;
 use rdkafka::consumer::base_consumer::PartitionQueue;
+use rdkafka::consumer::{BaseConsumer, Consumer as _};
 use rdkafka::error::KafkaError;
 use rdkafka::message::BorrowedMessage;
 use rdkafka::{Message, Offset, TopicPartitionList};
@@ -63,7 +63,6 @@ pub struct KafkaLane {
     held: Vec<BorrowedMessage<'static>>,
     queue: PartitionQueue<SourceContext>,
     consumer: Arc<BaseConsumer<SourceContext>>,
-    context: Arc<SourceContext>,
     issuer: AckIssuer,
     /// An error the queue returned after the batch's first message. librdkafka
     /// may queue it once and fetch past it, so the next poll returns it.
@@ -95,7 +94,6 @@ impl KafkaLane {
         partition: PartitionId,
         queue: PartitionQueue<SourceContext>,
         consumer: Arc<BaseConsumer<SourceContext>>,
-        context: Arc<SourceContext>,
         issuer: AckIssuer,
         position: TopicPartitionList,
     ) -> Self {
@@ -105,7 +103,6 @@ impl KafkaLane {
             held: Vec::new(),
             queue,
             consumer,
-            context,
             issuer,
             pending: None,
             position,
@@ -131,7 +128,7 @@ impl KafkaLane {
     /// when an empty return finds any. `held` is empty here.
     fn retire_offsets(&mut self, timeout: Duration) -> Option<KafkaBatch<'_>> {
         if self.saw_error
-            || self.context.rewound()
+            || self.consumer.context().rewound()
             || !read_is_due(timeout, &mut self.empty_returns)
         {
             return None;
@@ -152,7 +149,7 @@ impl KafkaLane {
     fn poll_error(&self, e: &KafkaError) -> SourceError {
         let text = e
             .rdkafka_error_code()
-            .and_then(|code| self.context.take_error(code));
+            .and_then(|code| self.consumer.context().take_error(code));
         SourceError::Client {
             // Post-startup: a lane exists only once its partition is assigned.
             class: crate::error::classify_poll_error(e, true, text.as_deref()),
@@ -277,7 +274,8 @@ impl SourceLane for KafkaLane {
     }
 }
 
-/// One poll's worth of messages, borrowed from the lane.
+/// One poll's worth of messages, borrowed from the lane. A batch retiring
+/// offsets that hold no record has no messages.
 #[derive(Debug)]
 pub struct KafkaBatch<'a> {
     msgs: &'a [BorrowedMessage<'static>],

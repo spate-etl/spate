@@ -536,7 +536,6 @@ impl KafkaSource {
                 PartitionId(u32::try_from(partition).unwrap_or(0)),
                 queue,
                 Arc::clone(&consumer),
-                Arc::clone(consumer.context()),
                 issuer.clone(),
                 position,
             ));
@@ -848,7 +847,7 @@ impl KafkaSource {
                         partition = msg.partition(),
                         offset = msg.offset(),
                         total = self.main_queue_rewinds,
-                        "message on the main queue; rewinding partition"
+                        "message on the main queue; rewinding partition; this client passes no more transaction markers until it restarts"
                     );
                     let tpl = self.tpl_for([msg.partition()]);
                     // Ahead of the seek, and however it ends: the popped record
@@ -2727,10 +2726,6 @@ mod tests {
 
         /// An opened source on a mock cluster holding `records` on partition 0,
         /// with its first assignment accepted, and the cluster that serves it.
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "a test producer is configured outside the factory's roles"
-        )]
         fn assigned_on_mock(
             records: usize,
         ) -> (
@@ -2740,9 +2735,10 @@ mod tests {
         ) {
             let cluster = rdkafka::mocking::MockCluster::new(1).expect("mock cluster");
             cluster.create_topic("t", 1, 1).expect("create topic");
-            let producer: rdkafka::producer::BaseProducer = rdkafka::ClientConfig::new()
+            use crate::client::testing::{Raw as _, raw_config};
+            let producer: rdkafka::producer::BaseProducer = raw_config()
                 .set("bootstrap.servers", cluster.bootstrap_servers())
-                .create()
+                .build()
                 .expect("producer");
             for i in 0..records {
                 let payload = i.to_string();
@@ -2767,17 +2763,20 @@ mod tests {
             source
                 .open(SourceCtx::new(cp.handle()))
                 .expect("open the source");
-            let mut lanes = None;
-            spate_test::wait_until(Duration::from_secs(30), "the assignment", || {
-                if let SourceEvent::LanesAssigned(new) = source
-                    .poll_events(Duration::from_millis(100))
-                    .expect("poll_events")
-                {
-                    lanes = Some(new);
-                }
-                lanes.is_some()
+            let lanes = super::queued_rebalance::live_lanes(&mut source);
+            (cluster, source, lanes)
+        }
+
+        /// Serve `source` and poll `lane` until the lane issues a batch.
+        fn read_the_record(source: &mut KafkaSource, lane: &mut KafkaLane) {
+            spate_test::wait_until(Duration::from_secs(30), "the record", || {
+                source
+                    .poll_events(Duration::from_millis(10))
+                    .expect("poll_events");
+                lane.poll(1, Duration::from_millis(100))
+                    .expect("lane poll")
+                    .is_some()
             });
-            (cluster, source, lanes.expect("assigned"))
         }
 
         /// The offset a lane would read for partition 0 of member 0.
@@ -2801,15 +2800,7 @@ mod tests {
         #[test]
         fn a_reassign_leaves_no_earlier_position() {
             let (_cluster, mut source, mut lanes) = assigned_on_mock(1);
-            spate_test::wait_until(Duration::from_secs(30), "the record", || {
-                source
-                    .poll_events(Duration::from_millis(10))
-                    .expect("poll_events");
-                lanes[0]
-                    .poll(1, Duration::from_millis(100))
-                    .expect("lane poll")
-                    .is_some()
-            });
+            read_the_record(&mut source, &mut lanes[0]);
             assert_eq!(position_of(&source), Offset::Offset(1));
             drop(lanes);
 
@@ -2824,20 +2815,49 @@ mod tests {
             drop(lanes);
         }
 
+        /// A message polled off the main queue latches the client against
+        /// retiring offsets, since it moved the position with no lane issuing it.
+        /// A partition that was never split delivers there.
+        #[test]
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "a test producer is configured outside the factory's roles"
+        )]
+        fn a_main_queue_message_latches_the_rewind() {
+            let (cluster, mut source, _lanes) = assigned_on_mock(0);
+            cluster.create_topic("unsplit", 1, 1).expect("create topic");
+            let producer: rdkafka::producer::BaseProducer = rdkafka::ClientConfig::new()
+                .set("bootstrap.servers", cluster.bootstrap_servers())
+                .create()
+                .expect("producer");
+            producer
+                .send(
+                    rdkafka::producer::BaseRecord::<(), _>::to("unsplit")
+                        .partition(0)
+                        .payload(&b"leak"[..]),
+                )
+                .expect("enqueue");
+            rdkafka::producer::Producer::flush(&producer, Duration::from_secs(30)).expect("flush");
+            assert!(!source.members[0].consumer.context().rewound());
+
+            let mut unsplit = TopicPartitionList::new();
+            unsplit
+                .add_partition_offset("unsplit", 0, Offset::Beginning)
+                .expect("list entry");
+            source.members[0].consumer.assign(&unsplit).expect("assign");
+            spate_test::wait_until(Duration::from_secs(30), "the rewind", || {
+                let _ = source.poll_events(Duration::from_millis(100));
+                source.main_queue_rewinds > 0
+            });
+            assert!(source.members[0].consumer.context().rewound());
+        }
+
         /// A rewound client's lanes retire nothing, where the same lane on an
         /// unrewound client does: the position may hold a record no lane issued.
         #[test]
         fn a_rewound_client_retires_no_offsets() {
             let (_cluster, mut source, mut lanes) = assigned_on_mock(1);
-            spate_test::wait_until(Duration::from_secs(30), "the record", || {
-                source
-                    .poll_events(Duration::from_millis(10))
-                    .expect("poll_events");
-                lanes[0]
-                    .poll(1, Duration::from_millis(100))
-                    .expect("lane poll")
-                    .is_some()
-            });
+            read_the_record(&mut source, &mut lanes[0]);
 
             lanes[0].forget_issued();
             assert!(
@@ -3267,7 +3287,7 @@ mod tests {
         }
 
         /// `poll_events` until an assignment is live, and return its lanes.
-        fn live_lanes(source: &mut KafkaSource) -> Vec<KafkaLane> {
+        pub(super) fn live_lanes(source: &mut KafkaSource) -> Vec<KafkaLane> {
             let mut lanes = Vec::new();
             wait_until(DEADLINE, "a live assignment", || {
                 match source.poll_events(Duration::from_millis(50)) {

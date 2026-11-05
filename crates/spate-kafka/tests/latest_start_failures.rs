@@ -1234,12 +1234,16 @@ mod logical_committed_offset {
     use rdkafka::mocking::MockCluster;
     use rdkafka::producer::{BaseProducer, BaseRecord, Producer};
     use rdkafka::{ClientConfig, Offset, TopicPartitionList};
+    use spate_core::checkpoint::Checkpointer;
     use spate_core::config::PipelineConfig;
     use spate_core::ops::chain_owned;
     use spate_core::pipeline::{ExitState, Pipeline, RuntimeOptions};
     use spate_core::sink::KeyHashRouter;
+    use spate_core::source::{Source, SourceCtx};
     use spate_kafka::{KafkaSource, KafkaSourceConfig};
-    use spate_test::{BytesPassthrough, PipelineRun, TestEncoder, capture_sink, unique_name};
+    use spate_test::{
+        BytesPassthrough, PipelineRun, TestEncoder, capture_sink, unique_name, wait_until,
+    };
     use std::collections::BTreeMap;
     use std::io::{Read as _, Write as _};
     use std::net::TcpStream;
@@ -1304,6 +1308,35 @@ mod logical_committed_offset {
     #[test]
     fn a_negative_committed_offset_is_not_a_start() {
         holds_the_commit(-3, Offset::Offset(-3));
+    }
+
+    /// The reason a run stops on such an offset names the partition and the value,
+    /// and claims no broker condition.
+    #[test]
+    fn the_deadline_error_names_the_committed_offset() {
+        let cluster = MockCluster::new(1).unwrap();
+        cluster.create_topic(TOPIC, 1, 1).unwrap();
+        let brokers = cluster.bootstrap_servers();
+        raw_commit(&brokers, -2);
+        let mut cfg = KafkaSourceConfig::new(&brokers, TOPIC, GROUP);
+        cfg.startup_timeout = Duration::from_secs(8);
+        cfg.statistics_interval = Duration::ZERO;
+        cfg.rdkafka = BTreeMap::from([("auto.offset.reset".to_string(), "latest".to_string())]);
+        let checkpointer = Checkpointer::new();
+        let mut source = KafkaSource::new(cfg);
+        source.open(SourceCtx::new(checkpointer.handle())).unwrap();
+        let mut error = String::new();
+        wait_until(Duration::from_secs(40), "the startup deadline", || {
+            if let Err(e) = source.poll_events(Duration::from_millis(50)) {
+                error = e.to_string();
+            }
+            error.contains("no partition assignment")
+        });
+        assert!(
+            error.contains("partition 0 holds Beginning, which names no position"),
+            "{error}"
+        );
+        assert!(!error.contains("high watermark"), "{error}");
     }
 
     /// Runs a pipeline over a group whose committed offset is `raw`, read back as
@@ -1399,5 +1432,69 @@ mod logical_committed_offset {
             "{:?}",
             report.state
         );
+    }
+}
+
+/// A group that refuses every start commit, against a source's deadlines.
+mod refused_starts {
+    use rdkafka::mocking::MockCluster;
+    use rdkafka::types::{RDKafkaApiKey, RDKafkaRespErr};
+    use spate_core::checkpoint::Checkpointer;
+    use spate_core::error::{ErrorClass, SourceError};
+    use spate_core::source::{Source, SourceCtx};
+    use spate_kafka::{KafkaSource, KafkaSourceConfig};
+    use std::collections::BTreeMap;
+    use std::time::{Duration, Instant};
+
+    const TOPIC: &str = "orders";
+    const REFUSED: RDKafkaRespErr = RDKafkaRespErr::RD_KAFKA_RESP_ERR_REBALANCE_IN_PROGRESS;
+
+    /// Whether `consumers` consumers on one partition reach a fatal error within
+    /// 45 s when every start commit and heartbeat is refused.
+    fn ends(consumers: usize) -> bool {
+        let cluster = MockCluster::new(1).expect("mock cluster");
+        cluster.create_topic(TOPIC, 1, 1).expect("create topic");
+        let brokers = cluster.bootstrap_servers();
+        cluster.request_errors(RDKafkaApiKey::OffsetCommit, &[REFUSED; 1000]);
+        cluster.request_errors(RDKafkaApiKey::Heartbeat, &[REFUSED; 1000]);
+        let mut cfg = KafkaSourceConfig::new(&brokers, TOPIC, "refused");
+        cfg.consumers = consumers;
+        cfg.startup_timeout = Duration::from_secs(8);
+        cfg.assignment_timeout = Duration::from_secs(8);
+        cfg.statistics_interval = Duration::ZERO;
+        cfg.rdkafka = BTreeMap::from([
+            ("auto.offset.reset".to_string(), "latest".to_string()),
+            ("session.timeout.ms".to_string(), "6000".to_string()),
+            ("heartbeat.interval.ms".to_string(), "500".to_string()),
+        ]);
+        let checkpointer = Checkpointer::new();
+        let mut source = KafkaSource::new(cfg);
+        source
+            .open(SourceCtx::new(checkpointer.handle()))
+            .expect("open");
+        let until = Instant::now() + Duration::from_secs(45);
+        while Instant::now() < until {
+            if let Err(SourceError::Client {
+                class: ErrorClass::Fatal,
+                ..
+            }) = source.poll_events(Duration::from_millis(100))
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// The control: one consumer ends at the deadline.
+    #[test]
+    fn one_consumer_ends_at_the_deadline() {
+        assert!(ends(1));
+    }
+
+    /// A consumer the group assigns nothing does not keep a run alive whose every
+    /// offered partition was discarded.
+    #[test]
+    fn an_empty_peer_does_not_hold_off_the_deadline() {
+        assert!(ends(2));
     }
 }

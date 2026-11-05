@@ -655,6 +655,7 @@ impl KafkaSource {
             }
             starts
         };
+        let offered = offers.len();
         let (offers, starts, retry) = self.commit_starts(offers, starts)?;
         if let Some(reason) = retry {
             return Ok(self.retry_starts(offers, &held, reassign, &reason));
@@ -674,6 +675,12 @@ impl KafkaSource {
         for ((k, tpl), start) in offers.iter().zip(&starts) {
             let at_end = start.to_commit.count();
             lanes.extend(self.accept_assignment(*k, tpl, &start.list, at_end)?);
+        }
+        // An empty peer accepted beside a discarded offer holds nothing the group
+        // meant to give, so the deadline keeps running for the discarded partitions.
+        if offers.len() < offered && lanes.is_empty() {
+            self.note_assignment_loss("every offered partition was discarded".to_owned());
+            return Ok(SourceEvent::Idle);
         }
         let joining: Vec<usize> = self
             .members
@@ -942,11 +949,12 @@ impl KafkaSource {
                 }
                 // A commit that names no position: taking it as no commit would
                 // commit the end over records nothing read.
-                _ => {
-                    return read_failure(
-                        "reading a committed offset",
-                        &KafkaError::MetadataFetch(RDKafkaErrorCode::OffsetNotAvailable),
-                    );
+                offset => {
+                    return Ok(Err(format!(
+                        "reading a committed offset: partition {} holds {offset:?}, which names \
+                         no position",
+                        elem.partition()
+                    )));
                 }
             }
         }

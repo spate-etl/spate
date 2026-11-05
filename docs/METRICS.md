@@ -133,7 +133,8 @@ states are therefore distinguished by value, not by presence:
 - **stale** — cannot happen for a partition a member lost, which is what the
   zeroing buys. A frozen non-zero value means the member still owns the
   partition and librdkafka has stopped measuring it (a leader change, say), or
-  it is a [reading that holds still](user-guide/04-connectors/sources/kafka/README.mdx#transaction-markers);
+  it is a
+  [reading that holds still](user-guide/04-connectors/sources/kafka/README.mdx#transaction-markers);
   the last known value is held deliberately, because dropping it to `0` would
   look like a drain that never happened.
 

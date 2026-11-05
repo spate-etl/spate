@@ -1373,8 +1373,7 @@ mod tests {
     }
 
     /// Pins that the lane reports a fetcher's failure with the class and the
-    /// reason it was sent, on every poll. No fetch site builds this fixture's
-    /// class, and only a lane test can send it.
+    /// reason it was sent, on every poll.
     #[test]
     fn a_fetcher_failure_keeps_its_class_and_reason_on_every_poll() {
         let mut r = rig(None);

@@ -3792,25 +3792,10 @@ mod tests {
         let store: Arc<dyn ObjectStore> = Arc::new(seeded(&[("p/a", b"0123456789")]).await);
         let (tx, mut rx) = mpsc::channel(64);
         let task = tokio::spawn(run_fetcher(FetcherParams {
-            split: "s3-test".into(),
-            store,
-            slice: Arc::new(vec![entry("p/a", 10, None)]),
-            start_ordinal: 0,
-            resume_etag: None,
-            chunk_bytes: 64,
-            range_bytes: 10,
-            tx,
-            pause: Arc::new(AtomicBool::new(false)),
-            retry_base: Duration::from_millis(1),
-            retries: None,
             range: Some(SplitRange::new(0, 4, b'\n')),
-            bytes_read: None,
-            origin: Origin::Lister,
+            ..fetcher(store, vec![entry("p/a", 10, None)], 64, 10, tx)
         }));
-        let mut msgs = Vec::new();
-        while let Some(m) = rx.recv().await {
-            msgs.push(m);
-        }
+        let msgs = drain(&mut rx).await;
         task.await.unwrap();
         let SplitFailure::Fatal(e) = last_failure(msgs) else {
             panic!("a ranged read with no ETag must be fatal");

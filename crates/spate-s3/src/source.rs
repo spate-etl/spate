@@ -1104,10 +1104,9 @@ mod tests {
     #[test]
     fn pause_and_resume_reach_the_held_lanes() {
         use crate::split::{DescriptorObject, SplitDescriptor};
-        use spate_core::checkpoint::Checkpointer;
         use spate_core::feed::Unit;
         use spate_core::feed::memory::MemoryFeed;
-        use spate_core::source::{SourceCtx, SourceLane as _};
+        use spate_core::source::SourceLane as _;
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.ndjson"), b"{\"k\":1}\n").unwrap();
         let rt = tokio::runtime::Builder::new_multi_thread()
@@ -1141,9 +1140,7 @@ mod tests {
         .unwrap()
         .with_framer(|| Box::new(crate::testutil::TestLineFramer::new(1 << 20)))
         .with_feed(Arc::new(feed));
-        source
-            .open(SourceCtx::new(Checkpointer::new().handle()))
-            .unwrap();
+        source.open(ctx()).unwrap();
         let mut added = None;
         spate_test::wait_until(
             Duration::from_secs(30),
@@ -1273,19 +1270,25 @@ mod tests {
         assert_eq!(got, want, "file:// delegates to parse_url_opts unchanged");
     }
 
-    fn source_with_store(store: &str) -> (S3Source, tokio::runtime::Runtime) {
+    /// A source over `body`, on its own runtime.
+    fn source_over(body: &str) -> (S3Source, tokio::runtime::Runtime) {
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(1)
             .enable_all()
             .build()
             .unwrap();
-        let body = format!("url: \"file:///tmp/spate-location/data/\"\nstore:\n{store}");
         let source = S3Source::from_component_config(
-            &spate_test::component_config("s3", &body),
+            &spate_test::component_config("s3", body),
             rt.handle().clone(),
         )
         .unwrap();
         (source, rt)
+    }
+
+    fn source_with_store(store: &str) -> (S3Source, tokio::runtime::Runtime) {
+        source_over(&format!(
+            "url: \"file:///tmp/spate-location/data/\"\nstore:\n{store}"
+        ))
     }
 
     /// Pins that the location's store is built with the source's `store`
@@ -1444,18 +1447,10 @@ mod tests {
     /// A source over `body` with a framer and a feed, on its own runtime.
     fn fed_source(body: &str) -> (S3Source, tokio::runtime::Runtime) {
         use spate_core::feed::memory::MemoryFeed;
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(1)
-            .enable_all()
-            .build()
-            .unwrap();
-        let source = S3Source::from_component_config(
-            &spate_test::component_config("s3", body),
-            rt.handle().clone(),
-        )
-        .unwrap()
-        .with_framer(|| Box::new(crate::testutil::TestLineFramer::new(1 << 20)))
-        .with_feed(Arc::new(MemoryFeed::new()));
+        let (source, rt) = source_over(body);
+        let source = source
+            .with_framer(|| Box::new(crate::testutil::TestLineFramer::new(1 << 20)))
+            .with_feed(Arc::new(MemoryFeed::new()));
         (source, rt)
     }
 
@@ -1488,14 +1483,7 @@ mod tests {
     /// Pins that `open` refuses a source with no framer as fatal.
     #[test]
     fn open_refuses_a_source_with_no_framer_as_fatal() {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .build()
-            .unwrap();
-        let mut source = S3Source::from_component_config(
-            &spate_test::component_config("s3", "url: \"s3://b/data/\"\n"),
-            rt.handle().clone(),
-        )
-        .unwrap();
+        let (mut source, _rt) = source_over("url: \"s3://b/data/\"\n");
         let err = source.open(ctx()).unwrap_err();
         assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
         assert!(
@@ -1556,8 +1544,7 @@ mod tests {
         );
     }
 
-    /// Pins that a value that does not parse as a URL is fatal. Called
-    /// directly, as `validate` runs the same parse first on both public paths.
+    /// Pins that a value that does not parse as a URL is fatal.
     #[test]
     fn an_unparsable_url_is_fatal() {
         let err = parse("no scheme").unwrap_err();

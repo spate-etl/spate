@@ -3821,8 +3821,8 @@ mod tests {
         assert_eq!(script.acknowledged(), vec![overwritten]);
     }
 
-    /// Pins that `feed_error` takes its class from the feed's error. Direct,
-    /// since every caller filters `Retryable` first.
+    /// Pins that `feed_error` takes its class from the feed's error, for each
+    /// kind.
     #[test]
     fn feed_error_takes_the_class_of_the_feed_error() {
         use spate_core::error::ErrorClass;

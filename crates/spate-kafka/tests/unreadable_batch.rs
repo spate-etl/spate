@@ -316,7 +316,7 @@ fn a_marker_behind_an_unreadable_batch_leaves_the_commit_alone() {
 /// this error once and fetches past the batch, so with every op queued ahead of
 /// the polls, the poll after the error serves the marker. A lane asking for one
 /// record meets the error first in its next poll, and one asking for more holds
-/// it behind the record's batch.
+/// it behind the record's batch. Regression for #1709.
 #[test]
 fn an_error_bars_the_marker_advance() {
     for max_records in [1, 64] {

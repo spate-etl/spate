@@ -730,13 +730,11 @@ impl KafkaSource {
                 }
                 match send_commit(&self.members[k].consumer, &start.to_commit) {
                     Ok(pending) => commit = Some(pending),
-                    Err(e) => match start_failure("committing a start offset", &e)? {
-                        StartFailure::Discard => {
-                            self.discard_refused(k, &tpl)?;
-                            continue;
-                        }
-                        _ => retry = Some(format!("committing a start offset: {e}")),
-                    },
+                    // Nothing reached the group, so nothing here says it moved on.
+                    Err(e) => {
+                        start_failure("committing a start offset", &e)?;
+                        retry = Some(format!("committing a start offset: {e}"));
+                    }
                 }
             }
             sent.push(commit);

@@ -17,7 +17,7 @@
 //! for a lister run, and a solo run on the in-process feed runs it with no
 //! location.
 
-use crate::error::{bounded_reason, classify};
+use crate::error::store_error;
 use crate::fetch::ObjectEntry;
 use crate::listing::{UnaddressableKeys, addressable};
 use crate::location::{
@@ -196,10 +196,8 @@ impl Lister {
         // Object keys are chosen by whoever writes the bucket.
         let mut unaddressable_seen = QualitySet::default();
         while let Some(meta) = listing.next().await {
-            let meta = meta.map_err(|e| SourceError::Client {
-                class: classify(&e),
-                reason: format!("listing {}: {}", self.prefix, bounded_reason(&e)),
-            })?;
+            let meta =
+                meta.map_err(|e| store_error(format_args!("listing {}", self.prefix), &e))?;
             // `object_store` fetches a page before it yields the page's first
             // key, so every unaddressable object up to this page is recorded.
             self.publish_unaddressable(&mut pending, &mut unaddressable_seen, &mut published)

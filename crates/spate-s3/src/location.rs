@@ -10,7 +10,7 @@
 //! compares at the start and the end of a settling window.
 
 use crate::config::Compression;
-use crate::error::{bounded_reason, classify};
+use crate::error::store_error;
 use bytes::Bytes;
 use futures_util::StreamExt as _;
 use futures_util::future::{Either, select};
@@ -263,7 +263,8 @@ pub(crate) fn compare(location: &Location, mine: &str, stored: &[u8]) -> Result<
 ///
 /// Fatal for an object above [`LOCATION_OBJECT_MAX_BYTES`]: refused from its
 /// stated size before its body is read, or once its body runs past the cap
-/// when the stated size understates it. Otherwise classed by [`classify`].
+/// when the stated size understates it. Otherwise classed by
+/// [`classify`](crate::error::classify).
 pub(crate) async fn read_object(
     store: &dyn ObjectStore,
     location: &Location,
@@ -351,7 +352,8 @@ pub(crate) async fn read_end(
     }
 }
 
-/// An `object_store` failure on `object`, classed by [`classify`].
+/// An `object_store` failure on `object`, classed by
+/// [`classify`](crate::error::classify).
 pub(crate) fn io_error(location: &Location, object: &Path, e: &object_store::Error) -> SourceError {
     error_with(location, object, e, "")
 }
@@ -378,15 +380,15 @@ fn error_with(
     e: &object_store::Error,
     hint: &str,
 ) -> SourceError {
-    let text = bounded_reason(e);
-    SourceError::Client {
-        class: classify(e),
-        reason: format!(
-            "{} at the job location {}: {text}{hint}",
+    store_error(
+        format_args!(
+            "{} at the job location {}",
             object_name(object),
             location.shown(),
         ),
-    }
+        e,
+    )
+    .map_reason(|reason| reason + hint)
 }
 
 /// Wait for the lister's fingerprint at `location` and compare it with

@@ -1834,6 +1834,23 @@ fn on_a_cluster_electing_at_once(partitions: i32, body: impl FnOnce(&str)) {
     on_a_mock_electing_at_once(partitions, |cluster| body(&cluster.bootstrap_servers()));
 }
 
+/// Past [`on_a_mock_electing_at_once`]'s refusal, let one JoinGroup through and
+/// refuse the next few, so one consumer of a source is accepted alone and the
+/// other's join starts a new epoch. Without it a slow runner can put both in the
+/// first generation, and no epoch follows.
+fn hold_back_the_second_join(cluster: &MockCluster<'_, rdkafka::producer::DefaultProducerContext>) {
+    let refused = RDKafkaRespErr::RD_KAFKA_RESP_ERR_COORDINATOR_LOAD_IN_PROGRESS;
+    cluster.request_errors(
+        RDKafkaApiKey::JoinGroup,
+        &[
+            RDKafkaRespErr::RD_KAFKA_RESP_ERR_NO_ERROR,
+            refused,
+            refused,
+            refused,
+        ],
+    );
+}
+
 /// [`on_a_cluster_electing_at_once`], handing the body the cluster to script.
 fn on_a_mock_electing_at_once(
     partitions: i32,
@@ -1959,9 +1976,11 @@ fn dropping_in_the_pass_after_a_discard_returns() {
 /// and both consumers end up in a stable group.
 #[test]
 fn a_consumer_joining_after_the_hold_ended_starts_a_new_epoch() {
-    on_a_cluster_electing_at_once(4, |brokers| {
+    on_a_mock_electing_at_once(4, |cluster| {
+        hold_back_the_second_join(cluster);
+        let brokers = cluster.bootstrap_servers();
         let clock = TestClock::frozen();
-        let mut cfg = watched_config(brokers, "hold-ended", 2);
+        let mut cfg = watched_config(&brokers, "hold-ended", 2);
         // This test advances the frozen clock while the group forms.
         cfg.startup_timeout = Duration::from_hours(1);
         let source = KafkaSource::new(cfg).with_clock(Arc::clone(&clock) as _);
@@ -2731,6 +2750,7 @@ mod latest_start {
     #[test]
     fn a_failed_reassign_lookup_is_retried_at_its_pace() {
         on_a_mock_electing_at_once(4, |cluster| {
+            hold_back_the_second_join(cluster);
             let brokers = cluster.bootstrap_servers();
             let clock = TestClock::frozen();
             let source = KafkaSource::new(latest_config(&brokers, "retried-epoch", 2))

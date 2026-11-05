@@ -176,7 +176,6 @@ Scope discipline:
 
 - One logical change per commit. Implement the smallest change that solves the
   problem and defer polish to a follow-up.
-- Flag a diff growing past ~400 lines.
 - No drive-by dependency, formatting, or cleanup churn unless the task needs it.
 - Edit a root document only when the change is about what that document is
   for. A change elsewhere that makes a sentence there wrong corrects that

@@ -1236,26 +1236,30 @@ impl KafkaSource {
     ) -> SourceError {
         let code = e.rdkafka_error_code();
         let text = code.and_then(|code| consumer.context().take_error(code));
-        let class = crate::error::classify_poll_error(
+        let mut error = crate::error::poll_error(
+            "consumer poll",
             e,
             self.members[k].saw_first_assignment,
             text.as_deref(),
         );
-        let mut reason = crate::error::poll_reason("consumer poll", e, text.as_deref());
         // librdkafka's fencing text does not name the instance.
         if let rdkafka::error::KafkaError::MessageConsumptionFatal(
             rdkafka::error::RDKafkaErrorCode::FencedInstanceId,
         ) = e
             && let Some(id) = self.config.rdkafka.get("group.instance.id")
         {
-            reason.push_str(&format!(" (group.instance.id {id:?})"));
+            error = error.map_reason(|mut reason| {
+                reason.push_str(&format!(" (group.instance.id {id:?})"));
+                reason
+            });
         }
         // Every broker's failure is followed by `AllBrokersDown`, which would
         // otherwise hide it from the deadline error.
         if code != Some(rdkafka::error::RDKafkaErrorCode::AllBrokersDown) {
-            self.last_consumer_error = Some((Stopwatch::start(&*self.clock), reason.clone()));
+            self.last_consumer_error =
+                Some((Stopwatch::start(&*self.clock), error.reason().to_owned()));
         }
-        SourceError::Client { class, reason }
+        error
     }
 
     /// The next rebalance intent to act on and its consumer: a revocation or

@@ -12,7 +12,7 @@
 //! codes (transport hiccups, leader elections, coordinator churn) retryable.
 
 use rdkafka::error::{KafkaError, RDKafkaErrorCode};
-use spate_core::error::{ErrorClass, TLS_REJECTION_ALERTS};
+use spate_core::error::{ErrorClass, SourceError, TLS_REJECTION_ALERTS};
 
 /// Render a client-creation error without any rejected property value.
 ///
@@ -154,6 +154,20 @@ pub(crate) fn poll_reason(prefix: &str, err: &KafkaError, text: Option<&str>) ->
         Some(text) => format!("{prefix}: {err}: {text}{note}"),
         None => format!("{prefix}: {err}{note}"),
     }
+}
+
+/// The source error for a consumer/queue poll error: the class
+/// [`classify_poll_error`] gives it and the reason [`poll_reason`] writes.
+pub(crate) fn poll_error(
+    prefix: &str,
+    err: &KafkaError,
+    after_startup: bool,
+    text: Option<&str>,
+) -> SourceError {
+    SourceError::new(
+        classify_poll_error(err, after_startup, text),
+        poll_reason(prefix, err, text),
+    )
 }
 
 /// Classify a [`KafkaError`] returned by a consumer/queue poll, defaulting to

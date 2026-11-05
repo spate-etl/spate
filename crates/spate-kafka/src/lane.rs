@@ -161,15 +161,13 @@ impl KafkaLane {
         let text = e
             .rdkafka_error_code()
             .and_then(|code| self.consumer.context().take_error(code));
-        SourceError::Client {
+        crate::error::poll_error(
+            &format!("partition {} poll", self.partition.0),
+            e,
             // Post-startup: a lane exists only once its partition is assigned.
-            class: crate::error::classify_poll_error(e, true, text.as_deref()),
-            reason: crate::error::poll_reason(
-                &format!("partition {} poll", self.partition.0),
-                e,
-                text.as_deref(),
-            ),
-        }
+            true,
+            text.as_deref(),
+        )
     }
 }
 

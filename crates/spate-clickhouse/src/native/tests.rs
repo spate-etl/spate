@@ -467,6 +467,35 @@ mod first_record_check {
         }
     }
 
+    /// A row that fails part-way through leaves its columns unequal, so the
+    /// block is refused at `finish_chunk`. A tuple row reaches the column
+    /// writers, as the first-record check cannot probe one.
+    #[test]
+    fn a_failed_row_poisons_the_block() {
+        let mut enc = NativeEncoder::<Owned<(String,)>>::new(schema(&[("id", "UInt32")]));
+        let mut buf = BytesMut::new();
+
+        let err = enc
+            .encode(&record(("not a number".to_owned(),)), &mut buf)
+            .expect_err("a string for a UInt32 column");
+        assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
+        assert!(
+            err.reason().starts_with("native encoding failed: "),
+            "{err}"
+        );
+
+        let err = enc
+            .finish_chunk(&mut buf)
+            .expect_err("the block has unequal columns");
+        assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
+        assert_eq!(
+            err.reason(),
+            "native block abandoned after a failed row",
+            "{err}"
+        );
+        assert!(buf.is_empty());
+    }
+
     #[test]
     fn a_wrapper_scale_mismatch_is_rejected() {
         // The struct declares milli scale via the wire wrapper; the table

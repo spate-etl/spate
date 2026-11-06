@@ -194,10 +194,11 @@ mod tests {
         let err = ClickHouseEncoder::<Owned<Bad>>::unchecked()
             .encode(&rec, &mut BytesMut::new())
             .unwrap_err();
-        match err {
-            SinkError::Client { class, .. } => assert_eq!(class, ErrorClass::RecordLevel),
-            other => panic!("unexpected error shape: {other:?}"),
-        }
+        assert_eq!(err.class(), ErrorClass::RecordLevel, "{err}");
+        assert!(
+            err.reason().starts_with("rowbinary encoding failed: "),
+            "{err}"
+        );
     }
 
     /// A field type the probe cannot describe stops the pipeline at the first

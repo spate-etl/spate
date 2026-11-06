@@ -115,7 +115,7 @@ fn sink_outage_backpressures_and_loses_nothing() {
 
 /// Pins that `checkpoint.max_pending_batches` holds a real backlog at the limit.
 /// The limit sits below what the outage's queues let build up, so without it the
-/// reading passes the limit and the sampler fails the run. It stops the source
+/// reading passes the limit and the sampler fails the run. It can stop the source
 /// before the queues fill, so this runs apart from the backpressure scenario.
 #[test]
 #[ignore = "requires Docker"]

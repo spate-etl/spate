@@ -6,4 +6,4 @@ The group commits past transaction markers and aborted records, so a bounded job
 
 `isolation.level` under `feed.kafka.rdkafka` fails at load for workers and the lister, so remove it. `spate_feed_dead_letter_units` counts offsets, so another writer's transaction on the dead-letter topic shows on it and fails a bounded job as stalled.
 
-The feed puts no bound on the wait. An operator ends a job held by a hung transaction with the broker's tools or a stop, and a later worker on the group reads the units.
+The feed puts no bound on the wait. An operator ends a job held by a hung transaction with the broker's tools or a stop. A stop exits `Completed`, exit 0, with the units unread, and a later worker on the group reads them.

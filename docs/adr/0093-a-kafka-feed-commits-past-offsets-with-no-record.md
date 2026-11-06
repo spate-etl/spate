@@ -58,8 +58,8 @@ delivery: a delivery below it takes the commit point back down as it does today.
 
 - Good, because a bounded job ends after a marker or an aborted transaction, and
   a partition no unit was read from commits past its markers too.
-- Good, because a restart starts past the marker, and markers add no commit: the
-  raised points join the one commit each pass already sends.
+- Good, because a restart starts past the marker, and a pass still sends at most
+  one commit: a raised point joins it, or sends one when no unit finished.
 - Bad, because each commit pass takes the client, topic and partition locks once
   per owned partition on the consumer thread.
 - Bad, because a group that passes an aborted transaction under `read_committed`

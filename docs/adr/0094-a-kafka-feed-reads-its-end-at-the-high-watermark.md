@@ -35,7 +35,8 @@ units no later run, since each job has fresh topics.
 
 Chosen option: "The depth client owns `isolation.level` at `read_uncommitted`",
 because a high watermark covers a confirmed write behind an open transaction,
-and `Keys::own` is the mechanism a client's owned property already goes through.
+and `Keys::own_if` is the mechanism a client's owned property already goes
+through.
 
 The one passthrough map feeds all six clients, so owning the key refuses it for
 every role. That also keeps the group member at `read_committed`, where its
@@ -64,6 +65,8 @@ line after 20 depth reads with the group's commits unchanged.
 - Bad, because `isolation.level` leaves the passthrough: a config that set it
   fails at load, and an operator loses `read_uncommitted` as a way past a hung
   transaction.
+- Bad, because a stop during a hold exits `Completed`, exit 0, with units
+  unread, and only a later worker on the group reads them.
 - Neutral, because the figure 20 has no measured basis.
 
 ### Confirmation

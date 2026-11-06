@@ -341,8 +341,13 @@ one commit interval of that, the partition commits past those offsets, once
 every unit below them has finished. A marker behind an unfinished unit waits
 for it, and a partition no unit was read from commits past its markers too.
 
-A marker not yet served when a partition is revoked or a worker stops falls to
-the partition's next owner.
+A revocation's commit reads no position, so a marker served since the last
+commit falls to the partition's next owner, as does a marker not yet served when
+a worker stops.
+
+An unclean leader election can truncate a partition below the group's commit.
+A worker that starts at that commit never reads the units written to the reused
+offsets, and the depth reads the partition as drained.
 
 ## Copying dead-lettered units back
 
@@ -420,9 +425,14 @@ Apache Kafka and a live writer on Redpanda can outlast it.
 When the group's commits have not moved over 20 depth reads, about five minutes,
 with offsets above them, the worker logs one `info` line naming the first
 partition behind, its end and committed offsets, and how many others are behind.
-Find the transaction with `kafka-transactions.sh` on Apache Kafka or
-`rpk cluster txn describe-producers` on Redpanda. A stop during the wait exits
-as any requested shutdown does, and a later worker on the group reads the units.
+Find the transaction with `kafka-transactions.sh describe-producers` on Apache
+Kafka or `rpk cluster txn describe-producers --topics <topic>` on Redpanda. Both
+print the producer and the transaction's first offset. `kafka-transactions.sh
+abort` ends it on Apache Kafka. `rpk` has no abort, so on Redpanda the Admin
+API's `mark_transaction_expired`, given that producer's id and epoch, ends it.
+The records of a transaction ended this way are never read. A stop during the
+wait exits as any requested shutdown does, and a later worker on the group reads
+the units.
 
 ### The dead-letter topic
 

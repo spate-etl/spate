@@ -549,7 +549,8 @@ pub(crate) const STAND_IN_ENTRY: &str =
 ///
 /// # Errors
 ///
-/// When `changelog.d/` cannot be read or the requirement comparison fails.
+/// When `changelog.d/` cannot be read, or the tag lookup or the requirement
+/// comparison fails.
 fn stand_in_fragment(root: &Path) -> Result<Option<&'static str>, Error> {
     if !changelog::nothing_to_release(root)? {
         return Ok(None);
@@ -719,6 +720,7 @@ mod tests {
     fn a_stand_in_fragment_is_written_only_when_none_is_present() {
         let scratch = Scratch::new("spate-xtask-stand-in-fragment").unwrap();
         let root = scratch.dir();
+        git(root, &["init", "-q"]);
         assert!(stand_in_fragment(root).is_err(), "no changelog.d/");
 
         let dir = root.join(changelog::FRAGMENTS);

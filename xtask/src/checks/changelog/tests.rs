@@ -998,7 +998,10 @@ fn a_non_release_tag_is_not_a_release() {
     repo.commit("workspace: the manifest");
     repo.git(&["tag", "v0.2.0"]);
     repo.git(&["tag", "vnext"]);
-    assert_eq!(previous_tag(repo.path()), Some("v0.2.0".to_owned()));
+    assert_eq!(
+        previous_tag(repo.path()).unwrap(),
+        Some("v0.2.0".to_owned())
+    );
     assert!(!breaking_announced(repo.path()).unwrap());
 }
 
@@ -1029,6 +1032,15 @@ fn a_release_awaiting_its_tag_announces_through_its_section() {
 
     repo.git(&["tag", "v0.3.0"]);
     assert!(!breaking_announced(repo.path()).unwrap());
+}
+
+/// A failed tag lookup is an error, which a repository with no tag is not.
+/// Regression for #1527.
+#[test]
+fn a_failed_tag_lookup_is_not_a_missing_tag() {
+    let outside = scratch("a_failed_tag_lookup_is_not_a_missing_tag");
+    std::fs::create_dir(outside.dir().join(FRAGMENTS)).unwrap();
+    assert!(refused(nothing_to_release(outside.dir())).contains("git tag"));
 }
 
 /// A fragment on disk with nothing in it is not prose, and a path that is not
@@ -2181,11 +2193,14 @@ fn a_staged_fragment_is_tracked() {
 #[test]
 fn the_newest_version_tag_bounds_the_range() {
     let release = Release::new("the_newest_version_tag_bounds_the_range");
-    assert_eq!(previous_tag(release.path()), None);
+    assert_eq!(previous_tag(release.path()).unwrap(), None);
     release.0.git(&["tag", "v0.2.0"]);
     release.0.git(&["tag", "v0.10.0"]);
     release.0.git(&["tag", "nightly"]);
-    assert_eq!(previous_tag(release.path()), Some("v0.10.0".to_owned()));
+    assert_eq!(
+        previous_tag(release.path()).unwrap(),
+        Some("v0.10.0".to_owned())
+    );
 }
 
 /// The contributors over a range are the authors, most commits first, with the

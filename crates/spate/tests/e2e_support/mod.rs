@@ -50,10 +50,12 @@ use spate_test_support::{container_image, http};
 use std::net::SocketAddr;
 use std::ops::Range;
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
+use testcontainers::core::ContainerPort;
 use testcontainers::runners::SyncRunner;
 use testcontainers::{Container, GenericImage, ImageExt};
 use testcontainers_modules::kafka::apache::{KAFKA_PORT, Kafka};
@@ -74,17 +76,34 @@ pub const CH_PASSWORD: &str = "e2e";
 /// scenario whose row shape is not [`Event`] can publish its own.
 type Schemas = Arc<Mutex<FastMap<u32, String>>>;
 
-/// Globally-unique record id: partition-millions + sequence. With a fresh
-/// topic and a single ordered producer per partition, `seq` equals the
-/// Kafka offset, which the drain/restart scenario relies on.
+/// Globally-unique record id: partition-billions + sequence, room for the long
+/// run's volume on one partition. With a fresh topic and a single ordered producer
+/// per partition, `seq` equals the Kafka offset, which the sampler relies on.
 pub fn event_id(partition: i32, seq: i64) -> i64 {
-    i64::from(partition) * 1_000_000 + seq
+    i64::from(partition) * 1_000_000_000 + seq
+}
+
+/// The Kafka containers a harness runs.
+enum Brokers {
+    One(Box<Container<Kafka>>),
+    /// Node ids are the index plus one.
+    Cluster(Vec<Container<GenericImage>>),
+}
+
+/// One partition as the cluster's metadata reports it.
+#[derive(Debug)]
+pub struct PartitionState {
+    pub id: i32,
+    /// The node id, negative while the partition has no leader.
+    pub leader: i32,
+    pub in_sync: usize,
 }
 
 pub struct Harness {
     /// Runtime for the stub registry, ClickHouse queries, and Kafka admin.
     pub rt: tokio::runtime::Runtime,
-    kafka: Container<Kafka>,
+    kafka: Brokers,
+    replication: i32,
     ch: Container<GenericImage>,
     pub brokers: String,
     pub ch_url: String,
@@ -97,22 +116,95 @@ impl Harness {
     /// Start Kafka + ClickHouse + the stub schema registry. Slow on first
     /// use (image pulls); panics with context on any failure.
     pub fn up() -> Self {
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .enable_all()
-            .build()
-            .expect("harness runtime");
-
         // The broker `ci/kafka/` pins, fetched by digest and re-tagged so this
         // starts the pinned bytes.
         let (kafka_image, kafka_tag) = container_image(&["--pull", "kafka"]);
         let kafka = Kafka::default()
             .with_name(&kafka_image)
             .with_tag(&kafka_tag)
+            // The image's defaults ask for three replicas, which one broker
+            // cannot satisfy.
+            .with_env_var("KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR", "1")
+            .with_env_var("KAFKA_TRANSACTION_STATE_LOG_MIN_ISR", "1")
             .start()
             .unwrap_or_else(|e| panic!("start Kafka container {kafka_image}:{kafka_tag}: {e}"));
         let kafka_port = kafka.get_host_port_ipv4(KAFKA_PORT).expect("kafka port");
         let brokers = format!("127.0.0.1:{kafka_port}");
+        Self::around(Brokers::One(Box::new(kafka)), brokers, 1)
+    }
+
+    /// [`Self::up`] with three brokers in one KRaft quorum, on the same pinned
+    /// image, publishing Kafka on `host_ports`.
+    ///
+    /// A client reaches a broker on the address it advertises, which has to be
+    /// known before the broker starts and has to survive its restart, so the
+    /// caller names the ports. The containers start with no ready condition, since
+    /// a node cannot finish starting before it has a quorum.
+    pub fn up_cluster(host_ports: [u16; 3]) -> Self {
+        let (image, tag) = container_image(&["--pull", "kafka"]);
+        let network = spate_test::unique_name("e2e-kafka");
+        let host = |node: usize| format!("{network}-k{node}");
+        let voters = (1..=host_ports.len())
+            .map(|node| format!("{node}@{}:9093", host(node)))
+            .collect::<Vec<_>>()
+            .join(",");
+        let containers: Vec<_> = host_ports
+            .iter()
+            .zip(1..)
+            .map(|(port, node)| {
+                GenericImage::new(&image, &tag)
+                    .with_exposed_port(ContainerPort::Tcp(9092))
+                    .with_network(&network)
+                    .with_container_name(host(node))
+                    .with_mapped_port(*port, ContainerPort::Tcp(9092))
+                    .with_env_var("KAFKA_NODE_ID", node.to_string())
+                    .with_env_var("CLUSTER_ID", "5L6g3nShT-eMCtK--X86sw")
+                    .with_env_var("KAFKA_PROCESS_ROLES", "broker,controller")
+                    .with_env_var("KAFKA_CONTROLLER_QUORUM_VOTERS", voters.as_str())
+                    .with_env_var("KAFKA_CONTROLLER_LISTENER_NAMES", "CONTROLLER")
+                    .with_env_var("KAFKA_INTER_BROKER_LISTENER_NAME", "BROKER")
+                    .with_env_var(
+                        "KAFKA_LISTENERS",
+                        "PLAINTEXT://0.0.0.0:9092,BROKER://0.0.0.0:9094,CONTROLLER://0.0.0.0:9093",
+                    )
+                    .with_env_var(
+                        "KAFKA_ADVERTISED_LISTENERS",
+                        format!("PLAINTEXT://127.0.0.1:{port},BROKER://{}:9094", host(node)),
+                    )
+                    .with_env_var(
+                        "KAFKA_LISTENER_SECURITY_PROTOCOL_MAP",
+                        "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,BROKER:PLAINTEXT",
+                    )
+                    .with_env_var("KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR", "3")
+                    .with_env_var("KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR", "3")
+                    .with_env_var("KAFKA_TRANSACTION_STATE_LOG_MIN_ISR", "2")
+                    .with_env_var("KAFKA_MIN_INSYNC_REPLICAS", "2")
+                    .with_env_var("KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS", "0")
+                    .start()
+                    .unwrap_or_else(|e| panic!("start Kafka node {node}: {e}"))
+            })
+            .collect();
+        let brokers = host_ports
+            .iter()
+            .map(|port| format!("127.0.0.1:{port}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let probe = probe_consumer(&brokers, "e2e-metadata");
+        wait_until(Duration::from_secs(120), "all three brokers", || {
+            probe
+                .fetch_metadata(None, PROBE_TIMEOUT)
+                .is_ok_and(|metadata| metadata.brokers().len() == host_ports.len())
+        });
+        Self::around(Brokers::Cluster(containers), brokers, 3)
+    }
+
+    /// Start ClickHouse and the stub registry around running brokers.
+    fn around(kafka: Brokers, brokers: String, replication: i32) -> Self {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("harness runtime");
 
         // The same pinned server the ClickHouse suite runs, fetched by digest
         // and re-tagged so this starts the pinned bytes.
@@ -144,6 +236,7 @@ impl Harness {
         Harness {
             rt,
             kafka,
+            replication,
             ch,
             brokers,
             ch_url,
@@ -211,6 +304,123 @@ impl Harness {
 
     // ── Kafka ──────────────────────────────────────────────────────────
 
+    /// Pause/unpause the single broker: its sockets stay open and answer nothing,
+    /// so it reads as a silent coordinator.
+    pub fn pause_broker(&self) {
+        docker(&["pause", self.single_broker().id()]);
+    }
+
+    pub fn unpause_broker(&self) {
+        docker(&["unpause", self.single_broker().id()]);
+    }
+
+    fn single_broker(&self) -> &Container<Kafka> {
+        match &self.kafka {
+            Brokers::One(kafka) => kafka,
+            Brokers::Cluster(_) => panic!("the scenario runs a cluster"),
+        }
+    }
+
+    /// Stop cluster node `node` as a rolling restart does, and return its exit code.
+    ///
+    /// The generous timeout lets a broker under load finish its controlled
+    /// shutdown, where the runtime's default could end in a kill.
+    pub fn stop_broker(&self, node: i32) -> i64 {
+        let broker = self.cluster_node(node);
+        broker
+            .stop_with_timeout(Some(120))
+            .unwrap_or_else(|e| panic!("stop node {node}: {e}"));
+        broker
+            .exit_code()
+            .unwrap_or_else(|e| panic!("exit code of node {node}: {e}"))
+            .expect("a stopped container has an exit code")
+    }
+
+    pub fn start_broker(&self, node: i32) {
+        self.cluster_node(node)
+            .start()
+            .unwrap_or_else(|e| panic!("start node {node}: {e}"));
+    }
+
+    fn cluster_node(&self, node: i32) -> &Container<GenericImage> {
+        match &self.kafka {
+            Brokers::Cluster(nodes) => {
+                &nodes[usize::try_from(node - 1).expect("node ids start at 1")]
+            }
+            Brokers::One(_) => panic!("the scenario runs one broker"),
+        }
+    }
+
+    /// Each partition of `topic` as metadata reports it, or `None` while no
+    /// broker answers for all of them.
+    pub fn partition_states(&self, topic: &str) -> Option<Vec<PartitionState>> {
+        let probe = probe_consumer(&self.brokers, "e2e-metadata");
+        let metadata = probe.fetch_metadata(Some(topic), PROBE_TIMEOUT).ok()?;
+        let states: Vec<PartitionState> = metadata
+            .topics()
+            .first()?
+            .partitions()
+            .iter()
+            .map(|p| PartitionState {
+                id: p.id(),
+                leader: p.leader(),
+                in_sync: p.isr().len(),
+            })
+            .collect();
+        (!states.is_empty()).then_some(states)
+    }
+
+    /// Produce `events` to `topic` in one transaction, and commit or abort it.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the harness seeds the topic outside the connector's client factory"
+    )]
+    pub fn produce_transaction(&self, topic: &str, events: &[(i32, Event)], commit: bool) {
+        const TIMEOUT: Duration = Duration::from_secs(60);
+        let first = events.first().expect("a transaction has records");
+        let producer: BaseProducer = ClientConfig::new()
+            .set("bootstrap.servers", &self.brokers)
+            .set("transactional.id", format!("{topic}-{}", first.1.id))
+            .create()
+            .expect("transactional producer");
+        producer.init_transactions(TIMEOUT).expect("init");
+        producer.begin_transaction().expect("begin");
+        for (partition, event) in events {
+            let payload = self.confluent_frame(event);
+            let key = event.id.to_string();
+            loop {
+                match producer.send(
+                    BaseRecord::to(topic)
+                        .partition(*partition)
+                        .payload(&payload)
+                        .key(key.as_bytes()),
+                ) {
+                    Ok(()) => break,
+                    // Local queue full: give librdkafka a beat to flush.
+                    Err(_) => {
+                        producer.poll(Duration::from_millis(50));
+                    }
+                }
+            }
+            producer.poll(Duration::ZERO);
+        }
+        if commit {
+            producer.commit_transaction(TIMEOUT).expect("commit");
+        } else {
+            producer.flush(TIMEOUT).expect("flush");
+            producer.abort_transaction(TIMEOUT).expect("abort");
+        }
+    }
+
+    /// The offset after each partition's last record.
+    pub fn end_offsets(&self, topic: &str, partitions: i32) -> Vec<i64> {
+        read_ends(
+            &probe_consumer(&self.brokers, "e2e-metadata"),
+            topic,
+            partitions,
+        )
+    }
+
     #[expect(
         clippy::disallowed_methods,
         reason = "the harness administers the broker outside the connector's client factory"
@@ -222,7 +432,11 @@ impl Harness {
             .expect("admin client");
         self.rt
             .block_on(admin.create_topics(
-                &[NewTopic::new(topic, partitions, TopicReplication::Fixed(1))],
+                &[NewTopic::new(
+                    topic,
+                    partitions,
+                    TopicReplication::Fixed(self.replication),
+                )],
                 &AdminOptions::new(),
             ))
             .expect("create topic")
@@ -410,6 +624,7 @@ impl Harness {
             partitions,
             holes: params.holes.clone(),
             max_pending_batches: params.max_pending_batches,
+            peak_pending: Arc::new(AtomicU64::new(0)),
         });
 
         RunningPipeline {
@@ -453,6 +668,8 @@ pub struct PipelineParams {
     /// `(partition, offsets)` that write no row, such as a skipped record. A
     /// record's id otherwise equals [`event_id`] of its offset.
     pub holes: Vec<(i32, Range<i64>)>,
+    /// Client settings beyond the defaults, as `source.kafka.rdkafka` entries.
+    pub rdkafka: Vec<(&'static str, &'static str)>,
 }
 
 impl PipelineParams {
@@ -475,12 +692,18 @@ impl PipelineParams {
             kafka_consumers: 1,
             max_pending_batches: 1024,
             holes: Vec::new(),
+            rdkafka: Vec::new(),
         }
     }
 
     fn yaml(&self, h: &Harness) -> String {
         let shard_lines: String = (0..self.shards)
             .map(|_| format!("      - replicas: [\"{}\"]\n", h.ch_url))
+            .collect();
+        let rdkafka: String = self
+            .rdkafka
+            .iter()
+            .map(|(key, value)| format!("      {key}: \"{value}\"\n"))
             .collect();
         format!(
             r#"
@@ -507,7 +730,7 @@ source:
     commit_interval: {commit}
     rdkafka:
       auto.offset.reset: earliest
-deserializer:
+{rdkafka}deserializer:
   avro:
     mode: confluent
     registry:
@@ -532,6 +755,7 @@ sink:
             drain = self.drain_timeout,
             port = self.admin_port,
             brokers = h.brokers,
+            rdkafka = rdkafka,
             topic = self.topic,
             group = self.group,
             consumers = self.kafka_consumers,
@@ -631,6 +855,16 @@ impl RunningPipeline {
         });
     }
 
+    /// The pending-batch reading, `None` before it is published.
+    pub fn pending(&self) -> Option<f64> {
+        let (_, body) = http_get(self.admin, "/metrics");
+        metric_value(
+            &body,
+            "spate_checkpoint_pending_batches",
+            &[("pipeline", self.name)],
+        )
+    }
+
     /// The lag gauge per partition, `None` where it has no series.
     fn lags(&self) -> Vec<Option<f64>> {
         let (_, body) = http_get(self.admin, "/metrics");
@@ -671,6 +905,7 @@ struct SampleTarget {
     partitions: i32,
     holes: Vec<(i32, Range<i64>)>,
     max_pending_batches: usize,
+    peak_pending: Arc<AtomicU64>,
 }
 
 /// What a [`Sampler`] saw over a run with no violation.
@@ -693,6 +928,7 @@ pub struct SampleReport {
 pub struct Sampler {
     stop: mpsc::Sender<()>,
     thread: Option<JoinHandle<Sampled>>,
+    peak_pending: Arc<AtomicU64>,
 }
 
 #[derive(Default)]
@@ -709,6 +945,7 @@ impl Sampler {
     )]
     fn start(target: SampleTarget) -> Self {
         let (stop, stopped) = mpsc::channel();
+        let peak_pending = Arc::clone(&target.peak_pending);
         let thread = std::thread::Builder::new()
             .name("e2e-sampler".into())
             .spawn(move || target.run(&stopped))
@@ -716,7 +953,13 @@ impl Sampler {
         Sampler {
             stop,
             thread: Some(thread),
+            peak_pending,
         }
+    }
+
+    /// The highest pending-batch reading so far.
+    pub fn peak_pending(&self) -> u64 {
+        self.peak_pending.load(Ordering::Relaxed)
     }
 
     /// Stop sampling, take a final sample, and return what the run showed.
@@ -805,6 +1048,8 @@ impl SampleTarget {
             for reading in readings {
                 sampled.pending_readings += 1;
                 report.peak_pending = report.peak_pending.max(reading.value);
+                self.peak_pending
+                    .fetch_max(reading.value as u64, Ordering::Relaxed);
                 if reading.value > self.max_pending_batches as f64 {
                     sampled.violations.push(format!(
                         "pending reading {} over the limit {}",

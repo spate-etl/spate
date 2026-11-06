@@ -76,7 +76,7 @@ fn drain_then_resume(
 
     // Every partition committed progress, and every committed offset is
     // backed by durable rows: for partition p
-    // committed at C_p, ids [p*1e6, p*1e6 + C_p) must all be present
+    // committed at C_p, ids from `event_id(p, 0)` up to C_p past it must all be present
     // (produced seq == offset on a fresh topic with one ordered producer).
     let committed = h.committed(&params.topic, &params.group, partitions);
     for (p, c) in committed.iter().enumerate() {

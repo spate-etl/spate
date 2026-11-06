@@ -321,7 +321,6 @@ impl Harness {
         .expect("committed offsets")
     }
 
-
     // ── Pipeline assembly (mirrors the flagship example) ───────────────
 
     pub fn spawn_pipeline(&self, params: &PipelineParams) -> RunningPipeline {
@@ -891,11 +890,7 @@ impl SampleTarget {
     /// paused server leaves a query waiting.
     fn scalar(&self, rt: &tokio::runtime::Runtime, sql: &str) -> Result<u64, String> {
         rt.block_on(async {
-            tokio::time::timeout(
-                PROBE_TIMEOUT,
-                self.ch_client.query(sql).fetch_one::<u64>(),
-            )
-            .await
+            tokio::time::timeout(PROBE_TIMEOUT, self.ch_client.query(sql).fetch_one::<u64>()).await
         })
         .map_err(|_| format!("timed out: {sql}"))?
         .map_err(|e| format!("{sql}: {e}"))

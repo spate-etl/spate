@@ -29,6 +29,9 @@ fn sink_outage_backpressures_and_loses_nothing() {
     params.queue_capacity = 2;
     params.chunk_bytes = 2 * 1024;
     params.batch_max_rows = 1_000;
+    // Low enough that the backlog an outage builds reaches the limit, with the
+    // acknowledgments frozen long enough for the sampler to read it there.
+    params.max_pending_batches = 8;
     let partitions = 3;
     let total = 40_000;
 
@@ -72,15 +75,15 @@ fn sink_outage_backpressures_and_loses_nothing() {
     );
 
     // ── Recovery: zero loss, duplicates bounded and reported ───────────
-    wait_until(
-        Duration::from_secs(120),
-        "every distinct id present",
-        || h.uniq(&params.table) == total as u64,
-    );
-    let report = pipeline.stop();
+    pipeline.assert_drained(&h, total as u64);
+    let (report, sampled) = pipeline.stop_sampled();
     assert!(
         matches!(report.state, spate::pipeline::ExitState::Completed),
         "clean exit: {report:?}"
+    );
+    assert_eq!(
+        sampled.peak_pending, params.max_pending_batches as f64,
+        "the outage's backlog reached the pending limit and stayed within it: {sampled:?}"
     );
 
     let rows = h.count(&params.table);

@@ -20,10 +20,11 @@ use support::*;
 #[ignore = "requires Docker"]
 fn poison_payloads_are_skipped_counted_and_do_not_stall() {
     let h = Harness::up();
-    let params = PipelineParams::defaults("e2e-poison", 19186);
+    let mut params = PipelineParams::defaults("e2e-poison", 19186);
     let valid_before = 1_000;
     let poison = 50;
     let valid_after = 10;
+    params.holes = vec![(0, valid_before as i64..(valid_before + poison) as i64)];
 
     h.create_topic(&params.topic, 1);
     h.create_table(&params.table);
@@ -61,6 +62,7 @@ fn poison_payloads_are_skipped_counted_and_do_not_stall() {
     let (status, _) = http_get(pipeline.admin, "/healthz");
     assert_eq!(status, 200, "healthy after skipping poison");
 
+    pipeline.assert_drained(&h, (valid_before + valid_after) as u64);
     let report = pipeline.stop();
     assert!(
         matches!(report.state, spate::pipeline::ExitState::Completed),

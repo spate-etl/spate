@@ -887,6 +887,49 @@ jobs:
           name: junit-nextest-examples
           path: target/nextest/docker/junit.xml
 
+  long-run-containers:
+    name: Long-run scenario
+    runs-on: ubuntu-latest
+    # Sustained traffic against real servers, sampled for growth in pending work
+    # and memory. The suite's usual command runs a few rounds of it.
+    if: inputs.tier != 'docs'
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      checks: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          tools: nextest
+          # Same key as containers.yml's container job: both build the plain
+          # dev-profile test binaries for the `#[ignore]`d suites.
+          shared-key: docker
+      - name: Long-run scenario
+        env:
+          SPATE_E2E_LONG_RUN_ROUNDS: "1000"
+        run: >
+          cargo nextest run --profile docker -p spate --all-features --locked
+          --run-ignored ignored-only -E 'binary(e2e_long_run)' --test-threads 1
+
+      - name: Publish long-run test report
+        uses: mikepenz/action-junit-report@6ef3fdcfcd5f0b5d14df3e659ef19b8c6820f93d # v6.6.1
+        if: always()
+        with:
+          report_paths: target/nextest/docker/junit.xml
+          check_name: Long-run test results
+          detailed_summary: true
+          include_passed: true
+          flaky_summary: true
+          fail_on_failure: false
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: junit-nextest-long-run
+          path: target/nextest/docker/junit.xml
+
   # ===========================================================================
   # Catch-all failure reporting. `attribution`, `advisories`, `osv`, `fuzz`,
   # `minimal-versions`, `publish-dry-run` (through `publish-dry-run-report`) and
@@ -901,6 +944,7 @@ jobs:
       - docs-deploy
       - loom
       - examples-containers
+      - long-run-containers
     # A `docs` dispatch skips the nightly jobs, and a skipped job is not a failure.
     if: always() && contains(needs.*.result, 'failure')
     timeout-minutes: 10

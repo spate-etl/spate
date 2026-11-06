@@ -76,6 +76,22 @@ name = "e2e_poison"
 required-features = ["kafka", "clickhouse", "avro"]
 
 [[test]]
+name = "e2e_broker_pause"
+required-features = ["kafka", "clickhouse", "avro"]
+
+[[test]]
+name = "e2e_leader_move"
+required-features = ["kafka", "clickhouse", "avro"]
+
+[[test]]
+name = "e2e_transactions"
+required-features = ["kafka", "clickhouse", "avro"]
+
+[[test]]
+name = "e2e_long_run"
+required-features = ["kafka", "clickhouse", "avro"]
+
+[[test]]
 name = "e2e_examples"
 required-features = ["kafka", "clickhouse", "avro", "datagen-avro", "s3", "json", "sqs"]
 

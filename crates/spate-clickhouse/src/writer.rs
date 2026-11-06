@@ -187,14 +187,13 @@ impl ShardWriter for ClickHouseWriter {
 /// send the same bytes again.
 fn check_frames(method: BlockMethod, batch: &SealedBatch) -> Result<(), SinkError> {
     for (i, frame) in batch.frames.iter().enumerate() {
-        method.check(frame).map_err(|why| SinkError::Client {
-            class: ErrorClass::Fatal,
-            reason: format!(
+        method.check(frame).map_err(|why| {
+            SinkError::fatal(format!(
                 "frame {i} of the batch is not a compressed block ({why}); a compressing \
                  sink's frames must be coded by its frame codec: attach it with \
                  `ShardQueues::with_frame_codec`, or code frames with \
                  `ClickHouseSink::frame_codec` before calling `write_batch` directly"
-            ),
+            ))
         })?;
     }
     Ok(())
@@ -242,12 +241,11 @@ fn classify_insert(err: clickhouse::error::Error, coded: bool) -> SinkError {
             clickhouse::error::Error::BadResponse(reason)
                 if exception_code(reason) == Some(CANNOT_DECOMPRESS)
         );
-    match classify(err) {
-        SinkError::Client { reason, .. } if stored_block => SinkError::Client {
-            class: ErrorClass::Retryable,
-            reason,
-        },
-        classified => classified,
+    let classified = classify(err);
+    if stored_block {
+        classified.with_class(ErrorClass::Retryable)
+    } else {
+        classified
     }
 }
 
@@ -284,10 +282,7 @@ fn classify(err: clickhouse::error::Error) -> SinkError {
         // tokens and visible through breaker metrics if persistent.
         _ => ErrorClass::Retryable,
     };
-    SinkError::Client {
-        class,
-        reason: crate::http::error_reason(&err),
-    }
+    SinkError::new(class, crate::http::error_reason(&err))
 }
 
 /// Extract the exception code from a ClickHouse error reason. Servers send

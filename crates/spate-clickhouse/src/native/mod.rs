@@ -34,7 +34,7 @@ use dispatch::RowDispatchSer;
 use leaf::{leb128_len, put_leb128, put_string, string_len};
 use serde::Serialize;
 use spate_core::deser::RecFamily;
-use spate_core::error::{ErrorClass, SinkError};
+use spate_core::error::SinkError;
 use spate_core::record::Record;
 use spate_core::sink::RowEncoder;
 use std::fmt;
@@ -121,10 +121,7 @@ impl NativeError {
     /// not possible without a mid-block rollback, which the happy path does
     /// not pay for.
     fn into_sink_error(self) -> SinkError {
-        SinkError::Client {
-            class: ErrorClass::Fatal,
-            reason: format!("native encoding failed: {self}"),
-        }
+        SinkError::fatal(format!("native encoding failed: {self}"))
     }
 }
 
@@ -389,10 +386,9 @@ where
             // A prior row failed mid-encode; the columns are unequal length.
             // Refuse rather than emit a corrupt block; the stage treats this
             // as fatal and the buffered rows fail (replay).
-            return Err(SinkError::Client {
-                class: ErrorClass::Fatal,
-                reason: "native block abandoned after a failed row".into(),
-            });
+            return Err(SinkError::fatal(
+                "native block abandoned after a failed row",
+            ));
         }
         if self.rows > 0 {
             self.finalize_block(buf);

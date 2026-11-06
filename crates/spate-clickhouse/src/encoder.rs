@@ -6,7 +6,7 @@ use crate::schema::{self, RowSchema};
 use bytes::BytesMut;
 use serde::Serialize;
 use spate_core::deser::{Owned, RecFamily};
-use spate_core::error::{ErrorClass, SinkError};
+use spate_core::error::SinkError;
 use spate_core::record::Record;
 use spate_core::sink::RowEncoder;
 use std::marker::PhantomData;
@@ -37,9 +37,9 @@ impl<F> ClickHouseEncoder<F> {
     /// An encoder that validates the row struct against `expected` (the
     /// schema from [`ClickHouseSink::schema`](crate::ClickHouseSink::schema))
     /// on the first record it encodes: field names, order and type classes.
-    /// A mismatch is an [`ErrorClass::Fatal`] error, which stops the pipeline
-    /// before any misaligned batch is sent. Steady-state cost after the first
-    /// record is one predictable branch.
+    /// A mismatch is an [`ErrorClass::Fatal`](spate_core::error::ErrorClass::Fatal)
+    /// error, which stops the pipeline before any misaligned batch is sent.
+    /// Steady-state cost after the first record is one predictable branch.
     #[must_use]
     pub fn with_schema(expected: Arc<RowSchema>) -> Self {
         ClickHouseEncoder {
@@ -86,22 +86,16 @@ where
         buf: &mut BytesMut,
     ) -> Result<(), SinkError> {
         if !self.checked {
-            let fields = schema::probe::probe_row(&rec.payload).map_err(|e| SinkError::Client {
-                class: ErrorClass::Fatal,
-                reason: format!("schema validation could not probe the row struct: {e}"),
+            let fields = schema::probe::probe_row(&rec.payload).map_err(|e| {
+                SinkError::fatal(format!(
+                    "schema validation could not probe the row struct: {e}"
+                ))
             })?;
-            schema::check_first_record(&self.expected, &fields).map_err(|diff| {
-                SinkError::Client {
-                    class: ErrorClass::Fatal,
-                    reason: diff,
-                }
-            })?;
+            schema::check_first_record(&self.expected, &fields).map_err(SinkError::fatal)?;
             self.checked = true;
         }
-        rowbinary::serialize_row(&rec.payload, buf).map_err(|e| SinkError::Client {
-            class: ErrorClass::RecordLevel,
-            reason: format!("rowbinary encoding failed: {e}"),
-        })
+        rowbinary::serialize_row(&rec.payload, buf)
+            .map_err(|e| SinkError::record_level(format!("rowbinary encoding failed: {e}")))
     }
 }
 
@@ -124,6 +118,7 @@ mod tests {
     use super::*;
     use crate::schema::typeparse;
     use serde::Serialize;
+    use spate_core::error::ErrorClass;
     use spate_test::record;
 
     /// A schema as `with_row` would fetch it from a live table.

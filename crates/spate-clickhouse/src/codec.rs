@@ -16,7 +16,7 @@
 //! the same chunk, which the tests pin against the client's own codec.
 
 use crate::Compression;
-use spate_core::error::{ErrorClass, SinkError};
+use spate_core::error::SinkError;
 use spate_core::sink::{FrameCodec, FrameCodecFactory};
 use zstd::zstd_safe::{self, CCtx};
 
@@ -163,13 +163,14 @@ impl FrameCodec for BlockCodec {
         let out = &mut self.scratch[META_LEN..];
         let (magic, written) = match &mut self.method {
             Method::Lz4 => {
-                let n = lz4_flex::block::compress_into(chunk, out)
-                    .map_err(|e| fatal(format!("lz4 could not compress a chunk: {e}")))?;
+                let n = lz4_flex::block::compress_into(chunk, out).map_err(|e| {
+                    SinkError::fatal(format!("lz4 could not compress a chunk: {e}"))
+                })?;
                 (LZ4_MAGIC, n)
             }
             Method::Zstd { ctx, level } => {
                 let n = ctx.compress(out, chunk, *level).map_err(|code| {
-                    fatal(format!(
+                    SinkError::fatal(format!(
                         "zstd could not compress a chunk: {}",
                         zstd_safe::get_error_name(code)
                     ))
@@ -189,17 +190,10 @@ impl FrameCodec for BlockCodec {
     }
 }
 
-fn fatal(reason: String) -> SinkError {
-    SinkError::Client {
-        class: ErrorClass::Fatal,
-        reason,
-    }
-}
-
 /// The framing records both sizes as u32, so a block cannot describe a
 /// longer chunk.
 fn too_long(len: usize) -> SinkError {
-    fatal(format!(
+    SinkError::fatal(format!(
         "a {len}-byte chunk is too long for a compressed block, whose sizes are 32-bit"
     ))
 }

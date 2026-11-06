@@ -10,6 +10,10 @@ Please do not open a public issue, a pull request, or a discussion for something
 you believe is exploitable. A public report starts a clock on every deployment
 running the affected version, and there is no way to take it back.
 
+That holds for a defect in a released version. A defect that exists only on
+`main` and has not shipped carries no such clock, so the project handles it as a
+public `[bug]` issue.
+
 ### What to include
 
 A report is easier to act on with:
@@ -37,20 +41,50 @@ bounty.
 
 ## What counts as a vulnerability here
 
-This framework is a library that runs inside your own pipelines.
+This framework is a library that runs inside your own pipelines. A report is
+judged by one question: does the party behind it gain a power it did not already
+have? Every report meets the same bar, however it was found.
+
+**Trusted**
+
+- The pipeline's code and configuration.
+- The backends the configuration names: brokers, object stores, schema
+  registries and ClickHouse servers. A backend already holds the data and the
+  progress. It can drop or change a record, answer any offset or stop answering,
+  so a wrong reply gives it nothing new.
+- The members of the pipeline's consumer group.
+
+**Not trusted**
+
+- Anyone who can write to a topic, bucket, prefix or queue the pipeline reads.
+  Record bytes, object bytes, keys, headers and sizes are theirs, and so is
+  schema content.
+- Anyone who can publish to a feed the pipeline reads work from.
+- Anyone on the network path while TLS is on, and where a default turns
+  verification off. Someone rewriting a plaintext connection can forge what a
+  backend can, so a reply bug only they reach is a bug.
+- Anyone who can reach the admin port.
 
 **In scope**
 
-- A way to make the pipeline **lose or duplicate data** in a manner the
-  at-least-once contract forbids, most importantly committing a source
-  watermark past unacknowledged data.
-- Memory unsafety, or a panic reachable from record data rather than from
-  configuration.
+- A way for an untrusted party to make the pipeline lose or duplicate data in a
+  manner the at-least-once contract forbids, most importantly committing a
+  source watermark past unacknowledged data.
+- Memory unsafety, from an untrusted party or a backend's reply.
+- A panic reachable from record data rather than from configuration.
+- A parser, queue or cache that an untrusted party can drive to unbounded memory
+  or CPU, and connection exhaustion on the admin port.
+- A request outside the configured scope, made with the pipeline's credentials
+  on an untrusted party's input.
 - Credentials or record contents leaking into logs, metric labels, or error
   messages.
-- A parser that can be driven to unbounded memory or CPU by input from the
-  source; record payloads and object-store responses are the interesting ones.
 - Anything that lets configuration under an attacker's control execute code.
+
+**Bugs rather than vulnerabilities**
+
+A panic, hang or unbounded resource use that only a configured backend's reply
+can cause, and data loss from a routine backend event, are still worth fixing.
+Please open a public issue.
 
 **Not in scope**
 

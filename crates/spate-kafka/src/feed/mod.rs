@@ -541,8 +541,9 @@ impl Drop for LatchOnPanic {
 /// more, so every unit since its last commit is delivered again.
 ///
 /// [`read_depth`](Feed::read_depth) reports the group's lag on the work and
-/// retry topics, or the sum of the dead-letter topic's end offsets, read on
-/// a thread of the feed's own through a consumer that never joins the group.
+/// retry topics, or the sum of the dead-letter topic's end offsets, read at the
+/// high watermark on a thread of the feed's own through a consumer that never
+/// joins the group.
 ///
 /// A process that only publishes, such as a lister run, builds a
 /// [`KafkaFeedPublisher`], which joins no group and reports no depth.

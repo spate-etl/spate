@@ -6,6 +6,13 @@
 //! carries the feed's `group.id` and never subscribes, so no read runs on
 //! the group member's poll thread and none counts against its poll
 //! interval (INV-2). [`Offsets`] is the seam the unit tests script.
+//!
+//! That consumer reads at `read_uncommitted`, so an end offset is the high
+//! watermark and counts a confirmed write behind another writer's open
+//! transaction. At `read_committed` it would read the last stable offset, and
+//! an open transaction would hide every offset from its first record on. An
+//! end offset counts offsets: a transaction marker, an aborted record and a
+//! record behind an open transaction each read as one.
 
 use super::{Core, Topics};
 use crate::client::list_offsets;
@@ -19,6 +26,11 @@ use std::time::Duration;
 
 /// The bound on each metadata and offset request.
 const REQUEST_BOUND: Duration = Duration::from_secs(5);
+
+/// How many depth reads with the group behind and its commits unchanged pass
+/// before [`Hold`] says why. About five minutes at one read per 15 s. The
+/// figure has no measured basis.
+const HOLD_READS: u32 = 20;
 
 /// How long the depth thread waits for a request before it serves its
 /// client's queued events.
@@ -37,16 +49,65 @@ pub(crate) trait Offsets: Send {
     fn committed(&self, partitions: &[Partition]) -> Result<Vec<Offset>, FeedError>;
 
     /// The log start offset of each of `partitions` for
-    /// [`Offset::Beginning`], or the end offset for [`Offset::End`], in their
-    /// order, read in one request.
+    /// [`Offset::Beginning`], or the high watermark for [`Offset::End`], in
+    /// their order, read in one request.
     fn listed(&self, partitions: &[Partition], at: Offset) -> Result<Vec<i64>, FeedError>;
 
     /// Serve the client's queued statistics, log lines and errors.
     fn serve(&self) {}
 }
 
-/// The depth of the work and retry topics: each partition's end offset less
-/// the group's committed offset, as visible units.
+/// How long the group's commits have stood still with offsets above them, so
+/// a job waiting on an open transaction says so. It counts commits and leaves
+/// the lag out, because a live writer behind an open transaction raises the end
+/// on every read.
+#[derive(Debug, Default)]
+pub(crate) struct Hold {
+    committed: Vec<Offset>,
+    reads: u32,
+}
+
+/// The first partition a depth read found behind.
+#[derive(Debug)]
+struct Behind<'a> {
+    topic: &'a str,
+    partition: i32,
+    end: i64,
+    committed: i64,
+}
+
+impl Hold {
+    /// Count one depth read of `committed`, with `behind` the partitions it
+    /// found behind, the first of them named. Logs once per stretch of
+    /// [`HOLD_READS`] reads with the same commits.
+    fn read(&mut self, committed: &[Offset], first: Option<Behind<'_>>, behind: usize) {
+        let Some(first) = first else {
+            self.reads = 0;
+            return;
+        };
+        if self.committed == committed {
+            self.reads += 1;
+        } else {
+            self.committed = committed.to_vec();
+            self.reads = 1;
+        }
+        if self.reads == HOLD_READS {
+            tracing::info!(
+                topic = first.topic,
+                partition = first.partition,
+                end = first.end,
+                committed = first.committed,
+                others = behind - 1,
+                "the feed's group is behind and its commits have not moved: an open \
+                 transaction or a unit a peer holds keeps the job open"
+            );
+        }
+    }
+}
+
+/// The depth of the work and retry topics: each partition's high watermark less
+/// the group's committed offset, as visible units. It counts offsets above the
+/// commit, whether or not a record is there to read.
 ///
 /// The committed offsets are read before any end offset. A unit failed
 /// between the two reads has its retry write confirmed before its work
@@ -54,7 +115,11 @@ pub(crate) trait Offsets: Send {
 /// A partition with no commit, or a commit below its log start, reads from
 /// its log start: units retention deleted before they were read leave no
 /// trace (INV-1's statement places them outside the property).
-pub(crate) fn feed_depth(offsets: &dyn Offsets, topics: &Topics) -> Result<Depth, FeedError> {
+pub(crate) fn feed_depth(
+    offsets: &dyn Offsets,
+    topics: &Topics,
+    hold: &mut Hold,
+) -> Result<Depth, FeedError> {
     let mut partitions = Vec::new();
     for topic in [&topics.work, &topics.retry] {
         for p in offsets.partitions(topic)? {
@@ -65,6 +130,8 @@ pub(crate) fn feed_depth(offsets: &dyn Offsets, topics: &Topics) -> Result<Depth
     let starts = offsets.listed(&partitions, Offset::Beginning)?;
     let ends = offsets.listed(&partitions, Offset::End)?;
     let mut lag: u64 = 0;
+    let mut first = None;
+    let mut behind_count = 0;
     for (i, (topic, p)) in partitions.iter().enumerate() {
         let start = starts[i];
         let read_from = match committed[i] {
@@ -79,7 +146,17 @@ pub(crate) fn feed_depth(offsets: &dyn Offsets, topics: &Topics) -> Result<Depth
         };
         let behind = u64::try_from(ends[i].saturating_sub(read_from)).unwrap_or(0);
         lag = lag.saturating_add(behind);
+        if behind > 0 {
+            behind_count += 1;
+            first.get_or_insert(Behind {
+                topic,
+                partition: *p,
+                end: ends[i],
+                committed: read_from,
+            });
+        }
     }
+    hold.read(&committed, first, behind_count);
     let mut depth = Depth::new(
         format!(
             "the group's lag on `{}` and `{}`",
@@ -93,7 +170,9 @@ pub(crate) fn feed_depth(offsets: &dyn Offsets, topics: &Topics) -> Result<Depth
 
 /// The depth of the dead-letter topic: the sum of its partitions' end
 /// offsets. Each job writes a dead-letter topic of its own, so any record
-/// ever written to it counts, whether or not retention has deleted it since.
+/// ever written to it counts, whether or not retention has deleted it since,
+/// and so does every other offset: a marker, an aborted record or a record
+/// behind an open transaction.
 pub(crate) fn dead_letter_depth(
     offsets: &dyn Offsets,
     topics: &Topics,
@@ -109,7 +188,10 @@ pub(crate) fn dead_letter_depth(
         .map(|e| u64::try_from(*e).unwrap_or(0))
         .fold(0u64, u64::saturating_add);
     let mut depth = Depth::new(
-        format!("the dead-letter topic `{}`", topics.dead_letter),
+        format!(
+            "the dead-letter topic `{}`, counted by end offset",
+            topics.dead_letter
+        ),
         false,
     );
     depth.visible = written;
@@ -123,6 +205,7 @@ pub(crate) fn run(
     offsets: &dyn Offsets,
     requests: &Receiver<(DepthOf, DepthReporter)>,
 ) {
+    let mut hold = Hold::default();
     loop {
         let (of, reporter) = match requests.recv_timeout(SERVE_EVERY) {
             Ok(request) => request,
@@ -137,7 +220,7 @@ pub(crate) fn run(
         }
         let read = match of {
             DepthOf::DeadLetters => dead_letter_depth(offsets, core.topics()),
-            _ => feed_depth(offsets, core.topics()),
+            _ => feed_depth(offsets, core.topics(), &mut hold),
         };
         // A credential or TLS rejection latches the feed, and the depth read
         // then reports it, whatever the read itself returned.
@@ -384,6 +467,18 @@ mod tests {
         }
     }
 
+    /// A feed's core on the topics `units`, `units-retry` and `units-dead`.
+    fn core() -> Core {
+        let section: spate_core::config::FeedSection = serde_yaml::from_str(
+            "attempt_cap: 3\nkafka:\n  brokers: localhost:9092\n  group_id: workers\n  \
+             topic: units\n  retry_topic: units-retry\n  dead_letter_topic: units-dead\n  \
+             attempt_topic: units-attempts\n",
+        )
+        .unwrap();
+        let config = crate::feed::KafkaFeedConfig::from_section(&section).unwrap();
+        Core::new(&config, std::num::NonZeroU32::MIN, SyncClock::system())
+    }
+
     fn topics() -> Topics {
         Topics {
             work: Arc::from("work"),
@@ -417,14 +512,7 @@ mod tests {
     /// over a job.
     #[test]
     fn the_depth_thread_serves_its_client_between_requests() {
-        let section: spate_core::config::FeedSection = serde_yaml::from_str(
-            "attempt_cap: 3\nkafka:\n  brokers: localhost:9092\n  group_id: workers\n  \
-             topic: units\n  retry_topic: units-retry\n  dead_letter_topic: units-dead\n  \
-             attempt_topic: units-attempts\n",
-        )
-        .unwrap();
-        let config = crate::feed::KafkaFeedConfig::from_section(&section).unwrap();
-        let core = Core::new(&config, std::num::NonZeroU32::MIN, SyncClock::system());
+        let core = core();
         let serving = Serving::default();
         let (requests, received) = mpsc::channel::<(DepthOf, DepthReporter)>();
         std::thread::scope(|s| {
@@ -443,14 +531,7 @@ mod tests {
     /// so the reader's park ends on the answer.
     #[test]
     fn an_answered_depth_read_wakes_the_reader() {
-        let section: spate_core::config::FeedSection = serde_yaml::from_str(
-            "attempt_cap: 3\nkafka:\n  brokers: localhost:9092\n  group_id: workers\n  \
-             topic: units\n  retry_topic: units-retry\n  dead_letter_topic: units-dead\n  \
-             attempt_topic: units-attempts\n",
-        )
-        .unwrap();
-        let config = crate::feed::KafkaFeedConfig::from_section(&section).unwrap();
-        let core = Core::new(&config, std::num::NonZeroU32::MIN, SyncClock::system());
+        let core = core();
         let (waker, park) = spate_core::feed::wake_channel();
         core.lock().waker = Some(waker);
         let offsets = Scripted::default().topic("units-dead", &[(0, Offset::Invalid, 0, 0)]);
@@ -466,6 +547,121 @@ mod tests {
         );
     }
 
+    /// Pins when a held job says why: on the twentieth read with the group
+    /// behind and its commits unchanged, once, and again only after a commit
+    /// moves. A rising end does not restart the count, and a read with the
+    /// group caught up does, whether or not its commits moved.
+    #[test]
+    fn a_job_held_still_logs_once_per_twenty_reads() {
+        let read = |committed: i64, start: i64, end: i64, hold: &mut Hold| {
+            let offsets = Scripted::default()
+                .topic("work", &[(0, Offset::Offset(committed), start, end)])
+                .topic("retry", &[(0, Offset::Invalid, 0, 0)]);
+            feed_depth(&offsets, &topics(), hold).unwrap();
+        };
+        let held = |reads: &mut dyn FnMut()| {
+            spate_test::capture_logs(tracing::Level::INFO, reads)
+                .into_iter()
+                .filter(|line| line.contains("keeps the job open"))
+                .collect::<Vec<_>>()
+        };
+        let mut hold = Hold::default();
+        let mut before = || {
+            for reads in 1..=19 {
+                read(3, 0, 3 + reads, &mut hold);
+            }
+        };
+        assert_eq!(held(&mut before).len(), 0, "before the twentieth");
+        let twentieth = held(&mut || read(3, 0, 30, &mut hold));
+        assert_eq!(twentieth.len(), 1, "on the twentieth");
+        for field in [
+            "topic=\"work\"",
+            "partition=0",
+            "end=30",
+            "committed=3",
+            "others=0",
+        ] {
+            assert!(twentieth[0].contains(field), "{field} in {}", twentieth[0]);
+        }
+        assert_eq!(
+            held(&mut || read(3, 0, 31, &mut hold)).len(),
+            0,
+            "only once"
+        );
+        let mut moved = || {
+            for _ in 0..20 {
+                read(4, 0, 31, &mut hold);
+            }
+        };
+        assert_eq!(held(&mut moved).len(), 1, "after a moved commit");
+        let mut caught_up = || {
+            for _ in 0..40 {
+                read(31, 0, 31, &mut hold);
+            }
+        };
+        assert_eq!(held(&mut caught_up).len(), 0, "with the group caught up");
+
+        // The log start reaches the end with the commit unmoved, so only the
+        // caught-up read restarts the count.
+        let mut hold = Hold::default();
+        let mut restarted = || {
+            for _ in 0..10 {
+                read(3, 0, 9, &mut hold);
+            }
+            read(3, 9, 9, &mut hold);
+            for _ in 0..19 {
+                read(3, 0, 9, &mut hold);
+            }
+        };
+        assert_eq!(
+            held(&mut restarted).len(),
+            0,
+            "restarted by a caught-up read"
+        );
+    }
+
+    /// Pins that the depth thread keeps its count across requests, so a held
+    /// job's line reaches the log.
+    #[test]
+    fn the_depth_thread_counts_a_hold_across_requests() {
+        let core = core();
+        let offsets = Scripted::default()
+            .topic("units", &[(0, Offset::Offset(3), 0, 9)])
+            .topic("units-retry", &[(0, Offset::Invalid, 0, 0)]);
+        let (requests, received) = mpsc::channel();
+        let mut readings = Vec::new();
+        for _ in 0..HOLD_READS {
+            let (reporter, reading) = spate_core::feed::depth_reading();
+            requests.send((DepthOf::Feed, reporter)).unwrap();
+            readings.push(reading);
+        }
+        drop(requests);
+        let lines = spate_test::capture_logs(tracing::Level::INFO, || {
+            run(&core, &offsets, &received);
+        });
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains("keeps the job open"), "{}", lines[0]);
+    }
+
+    /// Pins that a held job's line counts the other partitions behind.
+    #[test]
+    fn a_held_job_names_how_many_others_are_behind() {
+        let offsets = Scripted::default()
+            .topic(
+                "work",
+                &[(0, Offset::Offset(3), 0, 9), (1, Offset::Offset(1), 0, 2)],
+            )
+            .topic("retry", &[(0, Offset::Invalid, 0, 0)]);
+        let lines = spate_test::capture_logs(tracing::Level::INFO, || {
+            let mut hold = Hold::default();
+            for _ in 0..HOLD_READS {
+                feed_depth(&offsets, &topics(), &mut hold).unwrap();
+            }
+        });
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains("others=1"), "{}", lines[0]);
+    }
+
     /// Pins the read order: the partitions of the work and retry topics,
     /// then every committed offset in one request, before any log start or
     /// end offset. Reading ends first would let a unit move from the work
@@ -478,7 +674,7 @@ mod tests {
                 &[(0, Offset::Offset(3), 0, 3), (1, Offset::Offset(2), 0, 2)],
             )
             .topic("retry", &[(0, Offset::Invalid, 0, 0)]);
-        let depth = feed_depth(&offsets, &topics()).unwrap();
+        let depth = feed_depth(&offsets, &topics(), &mut Hold::default()).unwrap();
         assert!(depth.is_empty(), "{depth}");
         assert_eq!(
             offsets.calls(),
@@ -506,7 +702,9 @@ mod tests {
                     ],
                 )
                 .topic("retry", &[(0, Offset::Offset(1), 0, 1 + retry)]);
-            feed_depth(&offsets, &topics()).unwrap().visible
+            feed_depth(&offsets, &topics(), &mut Hold::default())
+                .unwrap()
+                .visible
         };
         assert_eq!(lag(0, 0), 0);
         assert_eq!(lag(1, 0), 1);
@@ -524,7 +722,7 @@ mod tests {
             let offsets = Scripted::default()
                 .topic("work", &[(0, committed, start, end)])
                 .topic("retry", &[(0, Offset::Invalid, 0, 0)]);
-            feed_depth(&offsets, &topics())
+            feed_depth(&offsets, &topics(), &mut Hold::default())
         };
         assert_eq!(read(Offset::Invalid, 0, 0).unwrap().visible, 0);
         assert_eq!(read(Offset::Invalid, 3, 5).unwrap().visible, 2);
@@ -544,7 +742,11 @@ mod tests {
         let offsets = Scripted::default()
             .topic("work", &[(0, Offset::Invalid, 7, 7)])
             .topic("retry", &[(0, Offset::Invalid, 0, 0)]);
-        assert!(feed_depth(&offsets, &topics()).unwrap().is_empty());
+        assert!(
+            feed_depth(&offsets, &topics(), &mut Hold::default())
+                .unwrap()
+                .is_empty()
+        );
     }
 
     /// Pins that a failed committed or end read fails the depth read with
@@ -559,13 +761,17 @@ mod tests {
         let mut offsets = base();
         offsets.fail_committed = Some(FeedError::new(FeedErrorKind::Fatal, "denied"));
         assert_eq!(
-            feed_depth(&offsets, &topics()).unwrap_err().kind,
+            feed_depth(&offsets, &topics(), &mut Hold::default())
+                .unwrap_err()
+                .kind,
             FeedErrorKind::Fatal
         );
         let mut offsets = base();
         offsets.fail_listed = Some(FeedError::new(FeedErrorKind::Retryable, "timed out"));
         assert_eq!(
-            feed_depth(&offsets, &topics()).unwrap_err().kind,
+            feed_depth(&offsets, &topics(), &mut Hold::default())
+                .unwrap_err()
+                .kind,
             FeedErrorKind::Retryable
         );
         assert_eq!(
@@ -574,8 +780,8 @@ mod tests {
         );
     }
 
-    /// Pins the dead-letter depth: the sum of the topic's end offsets, so a
-    /// record ever written there counts whatever its log start.
+    /// Pins the dead-letter depth: the sum of the topic's end offsets, so any
+    /// offset ever written there counts whatever its log start.
     #[test]
     fn a_dead_letter_end_offset_above_zero_reads_as_not_empty() {
         let read = |ends: &[(i32, i64, i64)]| {
@@ -587,6 +793,10 @@ mod tests {
         };
         assert!(read(&[(0, 0, 0), (1, 0, 0)]).is_empty());
         assert_eq!(read(&[(0, 0, 0), (1, 0, 1)]).visible, 1);
+        assert!(
+            read(&[(0, 0, 1)]).what.contains("counted by end offset"),
+            "the stalled error names what it counted"
+        );
         assert_eq!(
             read(&[(0, 1, 1), (1, 2, 3)]).visible,
             4,
@@ -686,14 +896,7 @@ mod tests {
     /// and the reading it drops settles Retryable.
     #[test]
     fn a_stopped_feed_reads_no_depth() {
-        let section: spate_core::config::FeedSection = serde_yaml::from_str(
-            "attempt_cap: 3\nkafka:\n  brokers: localhost:9092\n  group_id: workers\n  \
-             topic: units\n  retry_topic: units-retry\n  dead_letter_topic: units-dead\n  \
-             attempt_topic: units-attempts\n",
-        )
-        .unwrap();
-        let config = crate::feed::KafkaFeedConfig::from_section(&section).unwrap();
-        let core = Core::new(&config, std::num::NonZeroU32::MIN, SyncClock::system());
+        let core = core();
         core.stop.store(true, Ordering::Release);
         let offsets = Scripted::default().topic("units-dead", &[(0, Offset::Invalid, 0, 0)]);
         let (requests, received) = mpsc::channel();
@@ -710,14 +913,7 @@ mod tests {
     /// with that error, whatever the offsets read.
     #[test]
     fn a_latched_feed_answers_a_depth_read_with_its_error() {
-        let section: spate_core::config::FeedSection = serde_yaml::from_str(
-            "attempt_cap: 3\nkafka:\n  brokers: localhost:9092\n  group_id: workers\n  \
-             topic: units\n  retry_topic: units-retry\n  dead_letter_topic: units-dead\n  \
-             attempt_topic: units-attempts\n",
-        )
-        .unwrap();
-        let config = crate::feed::KafkaFeedConfig::from_section(&section).unwrap();
-        let core = Core::new(&config, std::num::NonZeroU32::MIN, SyncClock::system());
+        let core = core();
         core.latch("the broker rejected the credential");
         let offsets = Scripted::default().topic("units-dead", &[(0, Offset::Invalid, 0, 0)]);
         let (requests, received) = mpsc::channel();

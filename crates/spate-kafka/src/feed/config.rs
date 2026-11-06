@@ -21,7 +21,8 @@ pub(crate) enum FeedRole {
     Consumer,
     /// The producer for attempt, retry, dead-letter and tombstone writes.
     Producer,
-    /// The depth reader: the group's committed offsets, never subscribed.
+    /// The depth reader: the group's committed offsets and each topic's high
+    /// watermark, never subscribed.
     Depth,
     /// The startup checks' admin client.
     Admin,
@@ -72,6 +73,15 @@ impl Role for Client<'_> {
         match self.role {
             FeedRole::Consumer | FeedRole::Depth => {
                 group(keys, cfg);
+                keys.own_if(
+                    self.role == FeedRole::Depth,
+                    "isolation.level",
+                    || "read_uncommitted".to_owned(),
+                    "the feed sets it: the depth reader lists ends at the high \
+                     watermark so a confirmed write behind an open transaction \
+                     counts, and the group member reads committed records so a \
+                     commit cannot pass that transaction",
+                );
                 keys.own(
                     "group.protocol",
                     "classic",
@@ -438,6 +448,19 @@ mod tests {
         assert_eq!(config.rdkafka["max.poll.interval.ms"], "60000");
     }
 
+    /// Pins that only the depth client reads at `read_uncommitted`: every
+    /// other client keeps librdkafka's default, so the group member cannot read
+    /// past an open transaction. Regression for #1763.
+    #[test]
+    fn only_the_depth_client_lists_ends_at_the_high_watermark() {
+        let config = parse(MINIMAL).unwrap();
+        for role in FeedRole::ALL {
+            let client = config.config(role, true);
+            let expected = (role == FeedRole::Depth).then_some("read_uncommitted");
+            assert_eq!(client.get("isolation.level"), expected, "{role:?}");
+        }
+    }
+
     /// Pins that every owned property and every alias is refused by name,
     /// bare and with the `topic.` prefix librdkafka strips.
     #[test]
@@ -454,6 +477,7 @@ mod tests {
             "auto.commit.enable",
             "enable.auto.offset.store",
             "enable.partition.eof",
+            "isolation.level",
             "acks",
             "request.required.acks",
             "enable.idempotence",

@@ -21,11 +21,11 @@ use spate_kafka::feed::KafkaFeedError;
 use spate_test::{WriteOutcome, wait_until};
 use std::time::{Duration, Instant};
 use support::feed::{
-    ATTEMPT, ATTEMPT_PARTITIONS, DEAD, DEADLINE, FeedClock, ON_MOCK, RETRY, WORK, bounded_section,
-    committed, data_dir, direct, direct_on, exists, feed_yaml, high_watermark, high_watermarks,
-    launch, launch_bounded, launch_customized, launch_on, launch_stopping, list_once, produce_copy,
-    produce_raw, publish, publish_to, publisher_on_mock, read_attempts, read_depth, read_topic,
-    recs, run_to_exit, sorted, stage, written,
+    ATTEMPT, ATTEMPT_PARTITIONS, BoundedJob, DEAD, DEADLINE, FeedClock, ON_MOCK, RETRY, WORK,
+    assert_stalled, bounded_section, committed, data_dir, direct, direct_on, exists, feed_yaml,
+    high_watermark, high_watermarks, launch, launch_bounded, launch_customized, launch_on,
+    launch_stopping, list_once, produce_copy, produce_raw, publish, publish_to, publisher_on_mock,
+    read_attempts, read_depth, read_topic, recs, run_to_exit, sorted, stage, written,
 };
 use support::{Marker, control_batch, corrupt_batch, produce_batch};
 
@@ -1150,57 +1150,12 @@ fn a_message_with_no_unit_ends_a_bounded_job_stalled() {
         "the message is dead-lettered and committed",
         || high_watermark(&brokers, DEAD) == 1 && committed(&brokers, &group, WORK) == Some(1),
     );
-    let report = run_to_exit(&worker, &clock);
-    assert_eq!(report.exit_code(), 1);
-    let ExitState::Failed(failure) = &report.state else {
-        panic!("expected a failed run, got {:?}", report.state);
-    };
-    assert!(
-        failure.reason.contains("bounded feed job stalled") && failure.reason.contains(DEAD),
-        "{}",
-        failure.reason
-    );
+    assert_stalled(&run_to_exit(&worker, &clock));
 }
 
-/// A bounded job whose lister has run, and the group and paths it runs under.
-struct BoundedJob {
-    brokers: String,
-    group: String,
-    dir: tempfile::TempDir,
-    data: std::path::PathBuf,
-    section: String,
-}
-
-impl BoundedJob {
-    /// The lister's run on `brokers` for a group named from `tag`.
-    fn listed(brokers: &str, tag: &str) -> BoundedJob {
-        let group = spate_test::unique_name(tag);
-        let dir = tempfile::tempdir().unwrap();
-        let data = data_dir(&dir);
-        let section = bounded_section(brokers, &group, &dir);
-        list_once(publisher_on_mock(&section), &data, &section);
-        BoundedJob {
-            brokers: brokers.to_owned(),
-            group,
-            dir,
-            data,
-            section,
-        }
-    }
-
-    /// Stage `rows` as an object and publish its unit.
-    fn publish(&self, name: &str, rows: &[String]) {
-        let unit = stage(&self.data, name, rows);
-        produce_raw(
-            &self.brokers,
-            WORK,
-            &[(Some(unit.id.as_bytes()), &unit.body)],
-        );
-    }
-
-    fn committed(&self, topic: &str) -> Option<i64> {
-        committed(&self.brokers, &self.group, topic)
-    }
+/// A bounded job on the mock, its lister run.
+fn listed(brokers: &str, tag: &str) -> BoundedJob {
+    BoundedJob::listed(brokers, tag, "", publisher_on_mock)
 }
 
 /// Write a marker to the end of partition `partition` of `topic`.
@@ -1217,7 +1172,7 @@ fn a_marker_on_the_work_topic_ends_a_bounded_job() {
     for marker in [Marker::Commit, Marker::Abort] {
         let cluster = cluster(1);
         let brokers = cluster.bootstrap_servers();
-        let job = BoundedJob::listed(&brokers, "marker");
+        let job = listed(&brokers, "marker");
         let rows = recs("b", 2);
         job.publish("b.ndjson", &rows);
         write_marker(&brokers, WORK, 0, marker);
@@ -1239,7 +1194,7 @@ fn a_marker_on_the_work_topic_ends_a_bounded_job() {
 fn a_marker_on_the_retry_topic_ends_a_bounded_job() {
     let cluster = cluster(1);
     let brokers = cluster.bootstrap_servers();
-    let job = BoundedJob::listed(&brokers, "retry-marker");
+    let job = listed(&brokers, "retry-marker");
     write_marker(&brokers, RETRY, 0, Marker::Commit);
 
     let clock = TestClock::frozen();
@@ -1269,7 +1224,7 @@ fn two_partition_cluster() -> MockCluster<'static, rdkafka::producer::DefaultPro
 fn a_partition_holding_only_a_marker_ends_a_bounded_job() {
     let cluster = two_partition_cluster();
     let brokers = cluster.bootstrap_servers();
-    let job = BoundedJob::listed(&brokers, "partition-marker");
+    let job = listed(&brokers, "partition-marker");
     job.publish("b.ndjson", &recs("b", 2));
     write_marker(&brokers, WORK, 0, Marker::Commit);
     write_marker(&brokers, WORK, 1, Marker::Commit);
@@ -1290,7 +1245,7 @@ fn a_partition_holding_only_a_marker_ends_a_bounded_job() {
 fn each_partition_passes_its_own_marker() {
     let cluster = two_partition_cluster();
     let brokers = cluster.bootstrap_servers();
-    let job = BoundedJob::listed(&brokers, "own-marker");
+    let job = listed(&brokers, "own-marker");
     job.publish("b.ndjson", &recs("b", 1));
     write_marker(&brokers, WORK, 1, Marker::Commit);
 
@@ -1320,7 +1275,7 @@ fn each_partition_passes_its_own_marker() {
 fn a_marker_written_after_the_last_commit_ends_the_job() {
     let cluster = cluster(1);
     let brokers = cluster.bootstrap_servers();
-    let job = BoundedJob::listed(&brokers, "late-marker");
+    let job = listed(&brokers, "late-marker");
     job.publish("b.ndjson", &recs("b", 2));
 
     let clock = TestClock::frozen();
@@ -1341,7 +1296,7 @@ fn a_marker_written_after_the_last_commit_ends_the_job() {
 fn a_broker_outage_before_a_marker_still_ends_a_bounded_job() {
     let cluster = cluster(1);
     let brokers = cluster.bootstrap_servers();
-    let job = BoundedJob::listed(&brokers, "outage-marker");
+    let job = listed(&brokers, "outage-marker");
     job.publish("b.ndjson", &recs("b", 2));
 
     let clock = TestClock::frozen();
@@ -1364,7 +1319,7 @@ fn a_broker_outage_before_a_marker_still_ends_a_bounded_job() {
 fn a_failed_commit_past_a_marker_lands_on_a_later_pass() {
     let cluster = cluster(1);
     let brokers = cluster.bootstrap_servers();
-    let job = BoundedJob::listed(&brokers, "refused-marker");
+    let job = listed(&brokers, "refused-marker");
     write_marker(&brokers, WORK, 0, Marker::Commit);
     // A code librdkafka does not retry on its own.
     cluster.request_errors(
@@ -1386,21 +1341,12 @@ fn a_failed_commit_past_a_marker_lands_on_a_later_pass() {
 fn a_marker_on_the_dead_letter_topic_stalls_a_bounded_job() {
     let cluster = cluster(1);
     let brokers = cluster.bootstrap_servers();
-    let job = BoundedJob::listed(&brokers, "dead-marker");
+    let job = listed(&brokers, "dead-marker");
     write_marker(&brokers, DEAD, 0, Marker::Commit);
 
     let clock = TestClock::frozen();
     let worker = launch_bounded(ON_MOCK, &job.data, &job.section, &clock);
-    let report = run_to_exit(&worker, &clock);
-    assert_eq!(report.exit_code(), 1);
-    let ExitState::Failed(failure) = &report.state else {
-        panic!("expected a failed run, got {:?}", report.state);
-    };
-    assert!(
-        failure.reason.contains("bounded feed job stalled") && failure.reason.contains(DEAD),
-        "{}",
-        failure.reason
-    );
+    assert_stalled(&run_to_exit(&worker, &clock));
 }
 
 /// Pins that a marker behind a corrupt batch stays unpassed: the feed latches
@@ -1409,7 +1355,7 @@ fn a_marker_on_the_dead_letter_topic_stalls_a_bounded_job() {
 fn a_marker_behind_a_corrupt_batch_commits_nothing_past_it() {
     let cluster = cluster(1);
     let brokers = cluster.bootstrap_servers();
-    let job = BoundedJob::listed(&brokers, "corrupt-marker");
+    let job = listed(&brokers, "corrupt-marker");
     job.publish("b.ndjson", &recs("b", 1));
     assert_eq!(
         produce_batch(&brokers, WORK, 0, &corrupt_batch(b"lost", b"body")),

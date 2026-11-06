@@ -64,17 +64,17 @@ delivery: a delivery below it takes the commit point back down as it does today.
   per owned partition on the consumer thread.
 - Bad, because a group that passes an aborted transaction under `read_committed`
   does not deliver those records after a later switch of level.
-- Neutral, because a marker not yet served at a revocation or a stop falls to the
-  partition's next owner, and a revocation's commit reads no position.
+- Neutral, because a marker not yet served at a revocation or a stop falls to
+  the partition's next owner, and a revocation's commit reads no position.
 
 ### Confirmation
 
-INV-1. `the_commit_point_never_passes_an_unfinished_offset` is a property test of
-the rule, with position moves in its operations.
+INV-1. `the_commit_point_never_passes_an_unfinished_offset` is a property test
+of the rule, with position moves in its operations.
 `a_marker_on_the_work_topic_ends_a_bounded_job` and
 `a_position_from_before_a_rebalance_commits_nothing` pin it on the mock, and
-`an_aborted_transaction_at_the_end_of_the_work_topic_ends_a_bounded_job` pins the
-aborted range and a restart past it on a real broker.
+`an_aborted_transaction_at_the_end_of_the_work_topic_ends_a_bounded_job` pins
+the aborted range and a restart past it on a real broker.
 
 ## More information
 

@@ -825,11 +825,75 @@ pub(crate) const STEP: Duration = Duration::from_secs(15);
 /// The `feed:` section of a bounded job for `group` on `brokers`, at a
 /// `file://` location under `dir`.
 pub(crate) fn bounded_section(brokers: &str, group: &str, dir: &tempfile::TempDir) -> String {
+    bounded_section_with(brokers, group, dir, "")
+}
+
+/// [`bounded_section`] with `extra` appended to the section.
+fn bounded_section_with(
+    brokers: &str,
+    group: &str,
+    dir: &tempfile::TempDir,
+    extra: &str,
+) -> String {
     let location = format!(
-        "  location: \"file://{}/\"\n",
+        "  location: \"file://{}/\"\n{extra}",
         dir.path().join("jobs").display()
     );
     feed_yaml(brokers, group, &location, "")
+}
+
+/// A publish-only handle and the runtime it runs on.
+pub(crate) type Publisher = (
+    Result<KafkaFeedPublisher, KafkaFeedError>,
+    tokio::runtime::Runtime,
+);
+
+/// A bounded job whose lister has run, and the group and paths it runs under.
+pub(crate) struct BoundedJob {
+    pub(crate) brokers: String,
+    pub(crate) group: String,
+    pub(crate) dir: tempfile::TempDir,
+    pub(crate) data: PathBuf,
+    pub(crate) section: String,
+}
+
+impl BoundedJob {
+    /// The lister's run on `brokers`, through `publisher`, for a group named
+    /// from `tag`, with `extra` appended to the feed section.
+    pub(crate) fn listed(
+        brokers: &str,
+        tag: &str,
+        extra: &str,
+        publisher: impl FnOnce(&str) -> Publisher,
+    ) -> BoundedJob {
+        let group = spate_test::unique_name(tag);
+        let dir = tempfile::tempdir().unwrap();
+        let data = data_dir(&dir);
+        let section = bounded_section_with(brokers, &group, &dir, extra);
+        list_once(publisher(&section), &data, &section);
+        BoundedJob {
+            brokers: brokers.to_owned(),
+            group,
+            dir,
+            data,
+            section,
+        }
+    }
+
+    /// Stage `rows` as an object and publish its unit.
+    pub(crate) fn publish(&self, name: &str, rows: &[String]) {
+        let unit = stage(&self.data, name, rows);
+        produce_raw(
+            &self.brokers,
+            WORK,
+            &[(Some(unit.id.as_bytes()), &unit.body)],
+        );
+    }
+
+    /// The group's committed offset on partition 0 of `topic`.
+    pub(crate) fn committed(&self, topic: &str) -> Option<i64> {
+        committed(&self.brokers, &self.group, topic)
+    }
 }
 
 /// Run the job's lister once through `publisher`, a publish-only handle and
@@ -979,10 +1043,31 @@ pub(crate) fn run_to_exit(worker: &Worker, clock: &TestClock) -> spate_core::pip
 ///
 /// When the worker exits, naming the state it reported.
 pub(crate) fn hold_open(worker: &Worker, clock: &TestClock) {
-    let steps = 2 * DEFAULT_SETTLING_WINDOW.as_secs() / STEP.as_secs();
-    for _ in 0..steps {
+    hold_for(worker, clock, 2 * DEFAULT_SETTLING_WINDOW);
+}
+
+/// Step `clock` through `span`, with the worker reading depth at each step.
+///
+/// # Panics
+///
+/// When the worker exits, naming the state it reported.
+pub(crate) fn hold_for(worker: &Worker, clock: &TestClock, span: Duration) {
+    for _ in 0..span.as_secs() / STEP.as_secs() {
         if let Some(report) = step_to_read(worker, clock) {
             panic!("the job ended while held open: {:?}", report.state);
         }
     }
+}
+
+/// Assert that `report` is a job stalled on the dead-letter topic.
+pub(crate) fn assert_stalled(report: &spate_core::pipeline::ExitReport) {
+    assert_eq!(report.exit_code(), 1);
+    let ExitState::Failed(failure) = &report.state else {
+        panic!("expected a failed run, got {:?}", report.state);
+    };
+    assert!(
+        failure.reason.contains("bounded feed job stalled") && failure.reason.contains(DEAD),
+        "{}",
+        failure.reason
+    );
 }

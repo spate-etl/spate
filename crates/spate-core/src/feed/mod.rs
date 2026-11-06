@@ -258,9 +258,9 @@ impl FeedError {
     /// Map to the framework error taxonomy.
     ///
     /// [`Gone`](FeedErrorKind::Gone) and [`Refused`](FeedErrorKind::Refused)
-    /// map to [`Fatal`](ErrorClass::Fatal) only as a backstop. A caller
-    /// handles both before classifying, by letting go of the delivery or the
-    /// unit.
+    /// map to [`Fatal`](ErrorClass::Fatal). A caller may let go of the
+    /// delivery or the unit on either, and where it has nothing to let go of,
+    /// it can stop on this class.
     #[must_use]
     pub fn class(&self) -> ErrorClass {
         match self.kind {

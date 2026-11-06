@@ -723,7 +723,7 @@ mod tests {
     use rdkafka::producer::BaseProducer;
     use spate_core::config::ConfigError;
 
-    /// The position rule: only a concrete position past what the lane issued
+    /// The position rule: only a concrete position past what is covered
     /// retires offsets, and it retires through the offset below the position.
     /// Regression for #1709.
     #[test]

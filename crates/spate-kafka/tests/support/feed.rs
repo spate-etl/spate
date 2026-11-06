@@ -696,7 +696,7 @@ pub(crate) fn open_transaction_with(
             .payload(&unit.body[..]);
         producer.send(record).map_err(|(e, _)| e).expect("enqueue");
     }
-    producer.flush(Duration::from_secs(60)).expect("flush");
+    producer.flush(super::TRANSACTION_TIMEOUT).expect("flush");
     producer
 }
 
@@ -1022,18 +1022,19 @@ fn step_to_read(worker: &Worker, clock: &TestClock) -> Option<spate_core::pipeli
 }
 
 /// Step `clock` until the worker exits, waiting after each step for its
-/// next depth read.
+/// next depth read. Bounded by [`DEADLINE`] and no count of steps, since a
+/// worker reads depth long before its group forms.
 ///
 /// # Panics
 ///
-/// When the worker has not exited after 80 steps.
+/// When the worker has not exited within [`DEADLINE`].
 pub(crate) fn run_to_exit(worker: &Worker, clock: &TestClock) -> spate_core::pipeline::ExitReport {
-    for _ in 0..80 {
-        if let Some(report) = step_to_read(worker, clock) {
-            return report;
-        }
-    }
-    panic!("the job never ended");
+    let mut report = None;
+    wait_until(DEADLINE, "the job ends", || {
+        report = step_to_read(worker, clock);
+        report.is_some()
+    });
+    report.expect("the job ended")
 }
 
 /// Step `clock` through two settling windows, the most a job ending on an

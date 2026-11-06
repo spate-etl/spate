@@ -678,7 +678,7 @@ mod latest_start {
     use super::*;
     use rdkafka::admin::{AdminClient, AdminOptions, NewPartitions};
     use rdkafka::client::DefaultClientContext;
-    use rdkafka::producer::{BaseProducer, BaseRecord, Producer as _};
+    use rdkafka::producer::{BaseRecord, Producer as _};
     use support::latest;
     use testcontainers::ImageExt as _;
 
@@ -911,14 +911,7 @@ mod latest_start {
         support::create_topic(&brokers, TOPIC, 1);
         support::produce_to(&brokers, TOPIC, 0, 0..2);
 
-        let producer: BaseProducer = support::raw_config()
-            .set("bootstrap.servers", &brokers)
-            .set("transactional.id", "open-transaction")
-            .build()
-            .expect("producer");
-        producer
-            .init_transactions(Duration::from_secs(60))
-            .expect("init");
+        let producer = support::transactional_producer(&brokers, TOPIC, "open-transaction");
         producer.begin_transaction().expect("begin");
         for i in 0..3 {
             let payload = format!("0:{}", 2 + i);

@@ -99,7 +99,8 @@ impl Hold {
                 committed = first.committed,
                 others = behind - 1,
                 "the feed's group is behind and its commits have not moved: an open \
-                 transaction or a unit a peer holds keeps the job open"
+                 transaction, a unit a peer holds or a unit at this worker's gate keeps the \
+                 job open"
             );
         }
     }
@@ -393,7 +394,7 @@ mod tests {
     use crate::client::SpateContext;
     use crate::client::testing::raw;
     use crate::context::SourceHooks;
-    use spate_core::clock::SyncClock;
+    use crate::feed::tests::core;
     use spate_core::hash::FastMap;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -467,18 +468,6 @@ mod tests {
         }
     }
 
-    /// A feed's core on the topics `units`, `units-retry` and `units-dead`.
-    fn core() -> Core {
-        let section: spate_core::config::FeedSection = serde_yaml::from_str(
-            "attempt_cap: 3\nkafka:\n  brokers: localhost:9092\n  group_id: workers\n  \
-             topic: units\n  retry_topic: units-retry\n  dead_letter_topic: units-dead\n  \
-             attempt_topic: units-attempts\n",
-        )
-        .unwrap();
-        let config = crate::feed::KafkaFeedConfig::from_section(&section).unwrap();
-        Core::new(&config, std::num::NonZeroU32::MIN, SyncClock::system())
-    }
-
     fn topics() -> Topics {
         Topics {
             work: Arc::from("work"),
@@ -512,7 +501,7 @@ mod tests {
     /// over a job.
     #[test]
     fn the_depth_thread_serves_its_client_between_requests() {
-        let core = core();
+        let core = core(3);
         let serving = Serving::default();
         let (requests, received) = mpsc::channel::<(DepthOf, DepthReporter)>();
         std::thread::scope(|s| {
@@ -531,7 +520,7 @@ mod tests {
     /// so the reader's park ends on the answer.
     #[test]
     fn an_answered_depth_read_wakes_the_reader() {
-        let core = core();
+        let core = core(3);
         let (waker, park) = spate_core::feed::wake_channel();
         core.lock().waker = Some(waker);
         let offsets = Scripted::default().topic("units-dead", &[(0, Offset::Invalid, 0, 0)]);
@@ -624,7 +613,7 @@ mod tests {
     /// job's line reaches the log.
     #[test]
     fn the_depth_thread_counts_a_hold_across_requests() {
-        let core = core();
+        let core = core(3);
         let offsets = Scripted::default()
             .topic("units", &[(0, Offset::Offset(3), 0, 9)])
             .topic("units-retry", &[(0, Offset::Invalid, 0, 0)]);
@@ -660,6 +649,32 @@ mod tests {
         });
         assert_eq!(lines.len(), 1, "{lines:?}");
         assert!(lines[0].contains("others=1"), "{}", lines[0]);
+    }
+
+    /// Pins which partition a held job's line names: the first one behind,
+    /// past a caught-up partition, with its own end and commit.
+    #[test]
+    fn a_held_job_names_the_first_partition_behind() {
+        let offsets = Scripted::default()
+            .topic(
+                "work",
+                &[
+                    (0, Offset::Offset(9), 0, 9),
+                    (1, Offset::Offset(3), 0, 7),
+                    (2, Offset::Offset(1), 0, 2),
+                ],
+            )
+            .topic("retry", &[(0, Offset::Invalid, 0, 0)]);
+        let lines = spate_test::capture_logs(tracing::Level::INFO, || {
+            let mut hold = Hold::default();
+            for _ in 0..HOLD_READS {
+                feed_depth(&offsets, &topics(), &mut hold).unwrap();
+            }
+        });
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        for field in ["partition=1", "end=7", "committed=3", "others=1"] {
+            assert!(lines[0].contains(field), "{field} in {}", lines[0]);
+        }
     }
 
     /// Pins the read order: the partitions of the work and retry topics,
@@ -896,7 +911,7 @@ mod tests {
     /// and the reading it drops settles Retryable.
     #[test]
     fn a_stopped_feed_reads_no_depth() {
-        let core = core();
+        let core = core(3);
         core.stop.store(true, Ordering::Release);
         let offsets = Scripted::default().topic("units-dead", &[(0, Offset::Invalid, 0, 0)]);
         let (requests, received) = mpsc::channel();
@@ -913,7 +928,7 @@ mod tests {
     /// with that error, whatever the offsets read.
     #[test]
     fn a_latched_feed_answers_a_depth_read_with_its_error() {
-        let core = core();
+        let core = core(3);
         core.latch("the broker rejected the credential");
         let offsets = Scripted::default().topic("units-dead", &[(0, Offset::Invalid, 0, 0)]);
         let (requests, received) = mpsc::channel();

@@ -1,7 +1,7 @@
 //! Kafka wire bytes written by hand: record batches no client would write and
 //! the Produce request that carries them to a MockCluster broker.
 
-use std::io::{Read as _, Write as _};
+use std::io::{self, Read as _, Write as _};
 use std::net::TcpStream;
 
 fn zigzag(buf: &mut Vec<u8>, v: i64) {
@@ -150,10 +150,33 @@ pub(crate) fn control_batch(marker: Marker) -> Vec<u8> {
 const ATTR_TRANSACTIONAL: i16 = 0x10;
 const ATTR_CONTROL: i16 = 0x20;
 
+/// Write `marker` to `partition` of `topic`.
+pub(crate) fn write_marker(broker: &str, topic: &str, partition: i32, marker: Marker) {
+    assert_eq!(
+        produce_batch(broker, topic, partition, &control_batch(marker)),
+        0
+    );
+}
+
+/// [`try_produce_batch`] on a broker the test knows is up.
+pub(crate) fn produce_batch(broker: &str, topic: &str, partition: i32, batch: &[u8]) -> i16 {
+    try_produce_batch(broker, topic, partition, batch).unwrap()
+}
+
 /// Send `batch` to `partition` of `topic` as a version 3 Produce request
 /// and return the partition's error code. A client library would compute
 /// the batch's CRC itself; the mock stores the batch as sent.
-pub(crate) fn produce_batch(broker: &str, topic: &str, partition: i32, batch: &[u8]) -> i16 {
+///
+/// # Errors
+///
+/// Any failure of the connection, which a mock broker back from an outage gives
+/// until its listener has room.
+pub(crate) fn try_produce_batch(
+    broker: &str,
+    topic: &str,
+    partition: i32,
+    batch: &[u8],
+) -> io::Result<i16> {
     let mut b = Vec::new();
     b.extend_from_slice(&0i16.to_be_bytes());
     b.extend_from_slice(&3i16.to_be_bytes());
@@ -170,15 +193,15 @@ pub(crate) fn produce_batch(broker: &str, topic: &str, partition: i32, batch: &[
     b.extend_from_slice(&partition.to_be_bytes());
     b.extend_from_slice(&(batch.len() as i32).to_be_bytes());
     b.extend_from_slice(batch);
-    let mut s = TcpStream::connect(broker).unwrap();
-    s.write_all(&(b.len() as i32).to_be_bytes()).unwrap();
-    s.write_all(&b).unwrap();
+    let mut s = TcpStream::connect(broker)?;
+    s.write_all(&(b.len() as i32).to_be_bytes())?;
+    s.write_all(&b)?;
     let mut len = [0u8; 4];
-    s.read_exact(&mut len).unwrap();
+    s.read_exact(&mut len)?;
     let mut resp = vec![0u8; usize::try_from(i32::from_be_bytes(len)).unwrap()];
-    s.read_exact(&mut resp).unwrap();
+    s.read_exact(&mut resp)?;
     let at = 4 + 4 + 2 + topic.len() + 4 + 4;
-    i16::from_be_bytes([resp[at], resp[at + 1]])
+    Ok(i16::from_be_bytes([resp[at], resp[at + 1]]))
 }
 
 /// CRC-32 (IEEE), the checksum of a magic-0/1 message.

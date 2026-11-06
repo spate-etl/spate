@@ -36,7 +36,9 @@ use support::feed::{
     launch_stopping, launch_with, list_once, open_transaction_with, produce_raw, publish,
     read_attempts, read_depth, recs, run_to_exit, sorted, stage, two_range_unit, written,
 };
-use support::{Transaction, broker, log_end, produce_transaction, transactional_broker};
+use support::{
+    TRANSACTION_TIMEOUT, Transaction, broker, log_end, produce_transaction, transactional_broker,
+};
 use testcontainers::runners::SyncRunner;
 use testcontainers_modules::kafka::apache::KAFKA_PORT;
 
@@ -889,9 +891,6 @@ fn a_stopping_worker_commits_finished_units_before_leaving_the_group() {
 /// Half the settling window a job ends on.
 const HALF_WINDOW: Duration = DEFAULT_SETTLING_WINDOW.checked_div(2).expect("non-zero");
 
-/// How long a transactional call in these tests waits on the broker.
-const TRANSACTION: Duration = Duration::from_secs(60);
-
 /// Run `body` on a broker that takes transactions, with the feed's topics made.
 fn on_transactional_broker(body: impl FnOnce(&str)) {
     let container = transactional_broker()
@@ -977,7 +976,8 @@ fn a_unit_behind_an_open_transaction_on(brokers: &str) {
     let ends = log_end(brokers, WORK, 0) + log_end(brokers, RETRY, 0);
     assert_eq!(depth.visible, u64::try_from(ends).unwrap());
 
-    open.commit_transaction(TRANSACTION).expect("commit");
+    open.commit_transaction(TRANSACTION_TIMEOUT)
+        .expect("commit");
     wait_for_end(&job, &worker, &rows, WORK);
     let report = run_to_exit(&worker, &clock);
     assert_eq!(report.state, ExitState::Completed);
@@ -1001,7 +1001,7 @@ fn a_retry_write_behind_an_open_transaction_on(brokers: &str) {
     hold_open(&worker, &clock);
     assert_eq!(job.committed(RETRY), None);
 
-    open.abort_transaction(TRANSACTION).expect("abort");
+    open.abort_transaction(TRANSACTION_TIMEOUT).expect("abort");
     wait_for_end(&job, &worker, &rows, RETRY);
     assert_eq!(run_to_exit(&worker, &clock).state, ExitState::Completed);
 }
@@ -1075,12 +1075,15 @@ fn an_aborted_transaction_at_the_end_on(brokers: &str) {
     wait_for_end(&job, &worker, &rows, WORK);
     assert_eq!(run_to_exit(&worker, &clock).state, ExitState::Completed);
 
-    let end = job.committed(WORK);
+    // A later unit holds the job open until the group forms, and shows where
+    // the group started.
+    let later_rows = recs("later", 2);
+    job.publish("later.ndjson", &later_rows);
     let clock = TestClock::frozen();
     let later = launch_bounded(KafkaFeed::connect, &job.data, &job.section, &clock);
+    wait_for_end(&job, &later, &later_rows, WORK);
     assert_eq!(run_to_exit(&later, &clock).state, ExitState::Completed);
-    assert!(written(&later.script).is_empty());
-    assert_eq!(job.committed(WORK), end);
+    assert_eq!(written(&later.script), sorted(later_rows));
 }
 
 /// Pins that a later record passes an aborted range through its delivery.
@@ -1116,7 +1119,10 @@ fn a_transaction_committed_during_the_window_on(brokers: &str) {
     let clock = TestClock::frozen();
     let worker = launch_bounded(KafkaFeed::connect, &job.data, &job.section, &clock);
     hold_for(&worker, &clock, HALF_WINDOW);
-    open.commit_transaction(TRANSACTION).expect("commit");
+    let depth = read_depth(&*worker.feed, DepthOf::Feed).unwrap();
+    assert!(depth.visible > 0, "the depth counts the open transaction");
+    open.commit_transaction(TRANSACTION_TIMEOUT)
+        .expect("commit");
     wait_for_end(&job, &worker, &rows, WORK);
     assert_eq!(run_to_exit(&worker, &clock).state, ExitState::Completed);
 }
@@ -1137,7 +1143,9 @@ fn a_transaction_aborted_during_the_window_on(brokers: &str) {
     let clock = TestClock::frozen();
     let worker = launch_bounded(KafkaFeed::connect, &job.data, &job.section, &clock);
     hold_for(&worker, &clock, HALF_WINDOW);
-    open.abort_transaction(TRANSACTION).expect("abort");
+    let depth = read_depth(&*worker.feed, DepthOf::Feed).unwrap();
+    assert!(depth.visible > 0, "the depth counts the open transaction");
+    open.abort_transaction(TRANSACTION_TIMEOUT).expect("abort");
     wait_for_end(&job, &worker, &[], RETRY);
     assert_eq!(run_to_exit(&worker, &clock).state, ExitState::Completed);
 }
@@ -1160,11 +1168,19 @@ fn a_transaction_opened_during_a_window_on(brokers: &str) {
     let worker = launch_bounded(KafkaFeed::connect, &job.data, &job.section, &clock);
     wait_for_end(&job, &worker, &rows, WORK);
     hold_for(&worker, &clock, HALF_WINDOW);
+    let (read, end) = (rows.clone(), job.committed(WORK));
     let (held, more) = staged(&job, "held");
     rows.extend(more);
     let open = open_transaction_with(brokers, WORK, "held", &[held]);
     hold_open(&worker, &clock);
-    open.commit_transaction(TRANSACTION).expect("commit");
+    assert_eq!(
+        written(&worker.script),
+        sorted(read),
+        "read past the transaction"
+    );
+    assert_eq!(job.committed(WORK), end, "committed past the transaction");
+    open.commit_transaction(TRANSACTION_TIMEOUT)
+        .expect("commit");
     wait_for_end(&job, &worker, &rows, WORK);
     assert_eq!(run_to_exit(&worker, &clock).state, ExitState::Completed);
 }
@@ -1189,7 +1205,8 @@ fn a_stop_during_a_hold_on(brokers: &str) {
     assert_eq!(worker.stop(), ExitState::Completed);
     assert_eq!(job.committed(WORK), None);
 
-    open.commit_transaction(TRANSACTION).expect("commit");
+    open.commit_transaction(TRANSACTION_TIMEOUT)
+        .expect("commit");
     let clock = TestClock::frozen();
     let next = launch_bounded(KafkaFeed::connect, &job.data, &job.section, &clock);
     wait_for_end(&job, &next, &rows, WORK);

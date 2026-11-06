@@ -34,7 +34,8 @@ pub(crate) mod wire;
 
 #[allow(unused_imports, reason = "each target uses a different subset")]
 pub(crate) use wire::{
-    BatchCrc, Marker, RawBatch, control_batch, corrupt_batch, produce_batch, v1_message, v2_batch,
+    BatchCrc, Marker, RawBatch, control_batch, corrupt_batch, produce_batch, try_produce_batch,
+    v1_message, v2_batch, write_marker,
 };
 
 /// How the member under test answers the offer it held.
@@ -318,7 +319,7 @@ pub(crate) enum Transaction {
 }
 
 /// How long a transactional call waits on the broker.
-const TRANSACTION_TIMEOUT: Duration = Duration::from_secs(60);
+pub(crate) const TRANSACTION_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// A producer on `brokers` initialised for transactions under an id derived
 /// from `topic` and `tag`.
@@ -468,14 +469,35 @@ pub(crate) fn committed(probe: &BaseConsumer, topic: &str, partitions: i32) -> V
         .collect()
 }
 
-/// [`committed`] through a new [`probe`] in `group`.
+/// [`committed`] through a new [`probe`] in `group`, read again while the broker
+/// refuses: it answers `NotCoordinator` while the group's coordinator moves.
 pub(crate) fn committed_by(
     brokers: &str,
     group: &str,
     topic: &str,
     partitions: i32,
 ) -> Vec<Offset> {
-    committed(&probe(brokers, group), topic, partitions)
+    let probe = probe(brokers, group);
+    let mut tpl = TopicPartitionList::new();
+    for p in 0..partitions {
+        tpl.add_partition(topic, p);
+    }
+    let mut read = None;
+    spate_test::wait_until(
+        Duration::from_secs(30),
+        "the committed offsets read",
+        || {
+            read = probe
+                .committed_offsets(tpl.clone(), Duration::from_secs(10))
+                .ok();
+            read.is_some()
+        },
+    );
+    read.expect("read before the wait ended")
+        .elements()
+        .iter()
+        .map(|e| e.offset())
+        .collect()
 }
 
 /// The lag `pipeline` publishes for `partition`, or `None` before it does.

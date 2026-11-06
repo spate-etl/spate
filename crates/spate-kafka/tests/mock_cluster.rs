@@ -2448,10 +2448,7 @@ fn marker_cluster(
 
 /// Write `marker` to `partition`.
 fn write_marker(brokers: &str, partition: i32, marker: Marker) {
-    assert_eq!(
-        produce_batch(brokers, TOPIC, partition, &control_batch(marker)),
-        0
-    );
+    support::write_marker(brokers, TOPIC, partition, marker);
 }
 
 /// A marker at the tail reaches the committed offset once the lane polls past

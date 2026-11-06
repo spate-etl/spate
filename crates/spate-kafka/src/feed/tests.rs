@@ -41,7 +41,7 @@ use std::time::Duration;
 /// The attempt topic's partition count in these tests.
 const TWO: NonZeroU32 = NonZeroU32::new(2).expect("non-zero");
 
-fn core(cap: u32) -> Core {
+pub(super) fn core(cap: u32) -> Core {
     core_on(cap, TestClock::frozen())
 }
 
@@ -1818,8 +1818,8 @@ mod cluster {
     use crate::client::testing::{Raw as _, raw_config};
     use crate::context::Intent;
     use crate::feed::FeedRole;
-    use crate::testutil::wire::{Marker, control_batch, produce_batch};
-    use rdkafka::consumer::{BaseConsumer, Consumer, ConsumerContext};
+    use crate::testutil::wire::{self, Marker};
+    use rdkafka::consumer::{BaseConsumer, CommitMode, Consumer, ConsumerContext};
     use rdkafka::mocking::MockCluster;
     use rdkafka::producer::{BaseProducer, BaseRecord, Producer as _};
     use rdkafka::types::{RDKafkaApiKey, RDKafkaRespErr};
@@ -3955,8 +3955,7 @@ mod cluster {
 
     /// Write a commit marker to the end of the work topic's partition.
     fn write_marker(brokers: &str) {
-        let batch = control_batch(Marker::Commit);
-        assert_eq!(produce_batch(brokers, "units", 0, &batch), 0);
+        wire::write_marker(brokers, "units", 0, Marker::Commit);
     }
 
     /// The work topic's partition.
@@ -4148,13 +4147,26 @@ mod cluster {
             &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_INVALID_MSG],
         );
         let group = spate_test::unique_name("fetch-error-marker");
+        // The empty retry partition starts through a ListOffsets round trip.
+        // With a committed start the work partition is in the first Fetch,
+        // which takes the error; on the retry partition alone the error is
+        // lost to its first end-of-partition.
+        let start: BaseConsumer = raw_config()
+            .set("bootstrap.servers", &brokers)
+            .set("group.id", &group)
+            .build()
+            .unwrap();
+        let mut tpl = TopicPartitionList::new();
+        tpl.add_partition_offset("units", 0, Offset::Offset(0))
+            .unwrap();
+        start.commit(&tpl, CommitMode::Sync).unwrap();
         let (config, core, producer, mut d) = parts_for(&brokers, &group);
         let feed = feed_over(&core, &producer, None);
         drive(&mut d, "the fetch error reaches the poll", |d| {
             d.core.lock().retryable.is_some()
         });
         d.commit_finished("periodic");
-        assert_eq!(committed(&brokers, &group), None);
+        assert_eq!(committed(&brokers, &group), Some(0));
         // A reader passes over a retryable error.
         core.lock().retryable = None;
         let admission = admission(&config, &core, &producer, STEP);
@@ -4170,6 +4182,29 @@ mod cluster {
         consumer::run(d);
         assert_eq!(closing.try_outcome(), Some(Ok(())));
         assert_eq!(committed(&brokers, &group), Some(2));
+    }
+
+    /// Pins that a message naming no unit holds a marker behind it until its
+    /// dead-letter write is confirmed: the position passes both, and the
+    /// commit stays at the message.
+    #[test]
+    fn a_message_with_no_unit_holds_a_marker_behind_it() {
+        let cluster = cluster_holding([Some(&[0xff, 0xfe][..])]);
+        let brokers = cluster.bootstrap_servers();
+        write_marker(&brokers);
+        // Retriable, so the dead-letter write stays in flight.
+        cluster.request_errors(
+            RDKafkaApiKey::Produce,
+            &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_NOT_ENOUGH_REPLICAS; 1000],
+        );
+        let group = spate_test::unique_name("no-unit-marker");
+        let (_, _, _, mut d) = parts_for(&brokers, &group);
+        served_to(&mut d, 2);
+        d.commit_finished("periodic");
+        assert!(
+            committed(&brokers, &group).is_none_or(|at| at <= 0),
+            "the commit passed a write not confirmed"
+        );
     }
 
     /// Finish every unit waiting at the gate.
@@ -4196,9 +4231,11 @@ mod cluster {
         d.commit_finished("periodic");
         assert_eq!(committed(&brokers, &group), Some(2));
 
+        // A first Fetch at the partition's end reports the end in place of an
+        // error, so the second error lands on the Fetch after it.
         cluster.request_errors(
             RDKafkaApiKey::Fetch,
-            &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_OFFSET_OUT_OF_RANGE],
+            &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_OFFSET_OUT_OF_RANGE; 2],
         );
         write_marker(&brokers);
         drive(&mut d, "the units come again", |d| {

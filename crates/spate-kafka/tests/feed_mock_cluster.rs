@@ -27,7 +27,7 @@ use support::feed::{
     launch_stopping, list_once, produce_copy, produce_raw, publish, publish_to, publisher_on_mock,
     read_attempts, read_depth, read_topic, recs, run_to_exit, sorted, stage, written,
 };
-use support::{Marker, control_batch, corrupt_batch, produce_batch};
+use support::{Marker, corrupt_batch, produce_batch, try_produce_batch, write_marker};
 
 /// A cluster of `brokers` with the work, retry and dead-letter topics, one
 /// partition each, and the attempt topic with two.
@@ -1158,12 +1158,6 @@ fn listed(brokers: &str, tag: &str) -> BoundedJob {
     BoundedJob::listed(brokers, tag, "", publisher_on_mock)
 }
 
-/// Write a marker to the end of partition `partition` of `topic`.
-fn write_marker(brokers: &str, topic: &str, partition: i32, marker: Marker) {
-    let batch = control_batch(marker);
-    assert_eq!(produce_batch(brokers, topic, partition, &batch), 0);
-}
-
 /// Pins that a bounded job ends `Completed` once its unit is read and the
 /// group has committed past the marker behind it, for either marker.
 /// Regression for #1728.
@@ -1306,9 +1300,13 @@ fn a_broker_outage_before_a_marker_still_ends_a_bounded_job() {
     });
     cluster.broker_down(1).unwrap();
     cluster.broker_up(1).unwrap();
-    write_marker(&brokers, WORK, 0, Marker::Commit);
+    let marker = support::control_batch(Marker::Commit);
+    wait_until(DEADLINE, "the broker takes the marker", || {
+        try_produce_batch(&brokers, WORK, 0, &marker).is_ok_and(|code| code == 0)
+    });
+    // Read back: a write whose reply was lost is sent again, and takes an offset.
     wait_until(DEADLINE, "the marker is committed", || {
-        job.committed(WORK) == Some(2)
+        job.committed(WORK) == Some(high_watermark(&brokers, WORK))
     });
     assert_eq!(run_to_exit(&worker, &clock).state, ExitState::Completed);
 }

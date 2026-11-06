@@ -58,10 +58,7 @@ fn happy_path_delivers_exactly_and_commits() {
     );
 
     // Let a commit tick pass so watermarks reach Kafka, then drain.
-    wait_until(Duration::from_secs(30), "watermarks committed", || {
-        let committed = h.committed(&params.topic, &params.group, partitions);
-        committed.iter().sum::<i64>() == total as i64
-    });
+    pipeline.assert_drained(&h, total as u64);
     let report = pipeline.stop();
     assert!(
         matches!(report.state, spate::pipeline::ExitState::Completed),

@@ -66,6 +66,7 @@ fn drain_then_resume(
     wait_until(Duration::from_secs(60), "mid-stream", || {
         h.count(&params.table) >= 10_000
     });
+    // No `assert_drained`: this instance stops with records left to read.
     let report = first.stop();
     assert!(
         matches!(report.state, spate::pipeline::ExitState::Completed),
@@ -105,11 +106,7 @@ fn drain_then_resume(
     resumed_params.group = params.group.clone();
     resumed_params.table = params.table.clone();
     let second = h.spawn_pipeline(&resumed_params);
-    wait_until(
-        Duration::from_secs(120),
-        "every distinct id present",
-        || h.uniq(&params.table) == total as u64,
-    );
+    second.assert_drained(&h, total as u64);
     let report = second.stop();
     assert!(
         matches!(report.state, spate::pipeline::ExitState::Completed),

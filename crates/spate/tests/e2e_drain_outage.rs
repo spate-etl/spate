@@ -89,7 +89,13 @@ fn shutdown_during_a_sink_outage_still_exits_at_its_deadline() {
     );
 
     // ── SIGTERM with the sink still down ───────────────────────────────
-    let RunningPipeline { shutdown, join, .. } = pipeline;
+    // No `assert_drained`: an abandoned drain leaves records to replay.
+    let RunningPipeline {
+        shutdown,
+        join,
+        sampler,
+        ..
+    } = pipeline;
     let started = Instant::now();
     shutdown.trigger();
     while !join.is_finished() && started.elapsed() < EXIT_BOUND {
@@ -106,6 +112,7 @@ fn shutdown_during_a_sink_outage_still_exits_at_its_deadline() {
         .join()
         .expect("pipeline thread panicked")
         .expect("pipeline start failed");
+    sampler.finish();
 
     assert!(
         finished,

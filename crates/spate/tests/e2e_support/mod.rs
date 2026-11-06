@@ -6,8 +6,8 @@
 //! pipeline after the first with a no-op exporter. Containers are started
 //! per binary and shared across that binary's tests.
 //!
-//! [`Harness::spawn_pipeline`] starts a [`Sampler`] with each pipeline, so every
-//! scenario checks INV-1 and the pending-batch limit for its whole run.
+//! [`Harness::spawn_pipeline`] starts a [`Sampler`] with each pipeline, so a
+//! scenario using it checks INV-1 and the pending-batch limit for its whole run.
 //!
 //! Run the whole suite (Docker required):
 //!

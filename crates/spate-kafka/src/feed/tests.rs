@@ -12,7 +12,7 @@ use super::FeedRole;
 use super::attempt::{self, Entry, PublishId, decode, partition_of};
 use super::config::KafkaFeedConfig;
 use super::consumer::{
-    Read, commit_moved, commit_revoked, committed_lookup_timeout, read, take_due,
+    Read, commit_moved, commit_revoked, committed_lookup_timeout, read, retire_offsets, take_due,
 };
 use super::events::Cause;
 use super::gate::admission;
@@ -25,6 +25,7 @@ use super::write::{
 use super::{Core, Gating, KafkaFeed, KafkaFeedError, KafkaFeedPublisher, Ready};
 use crate::client::testing::raw_config;
 use crate::testutil::{assert_returns, returns_within};
+use rdkafka::Offset;
 use rdkafka::error::{KafkaError, RDKafkaErrorCode as C};
 use spate_core::backoff::Backoff;
 use spate_core::clock::SyncClock;
@@ -40,7 +41,7 @@ use std::time::Duration;
 /// The attempt topic's partition count in these tests.
 const TWO: NonZeroU32 = NonZeroU32::new(2).expect("non-zero");
 
-fn core(cap: u32) -> Core {
+pub(super) fn core(cap: u32) -> Core {
     core_on(cap, TestClock::frozen())
 }
 
@@ -544,6 +545,33 @@ fn a_revocation_commits_with_the_lock_released() {
     let st = core.lock();
     assert_eq!(st.ready.len(), 1);
     assert_eq!(st.ready[0].receipt, Receipt(2));
+}
+
+/// Pins that a position is read with the state lock released, once for each
+/// owned partition and for no revoked one, and that what it reads reaches the
+/// tracker.
+#[test]
+fn a_position_is_read_with_the_lock_released() {
+    let core = core(10);
+    {
+        let mut st = core.lock();
+        st.tracker.assign([tp(0), tp(1), tp(2)]);
+        st.tracker.revoke(&[tp(2)]);
+    }
+    let mut read = Vec::new();
+    retire_offsets(&core, |tp| {
+        assert!(
+            core.state.try_lock().is_ok(),
+            "the lock is held across the read"
+        );
+        read.push(tp.clone());
+        Offset::Offset(4)
+    });
+    read.sort();
+    assert_eq!(read, [tp(0), tp(1)]);
+    let st = core.lock();
+    assert_eq!(st.tracker.commit_point(&tp(0)), Some(4));
+    assert_eq!(st.tracker.commit_point(&tp(2)), None);
 }
 
 /// Pins that the periodic commit runs with the state lock released, and
@@ -1778,7 +1806,7 @@ mod cluster {
 
     use super::super::attempt::{self, Follower};
     use super::super::config::KafkaFeedConfig;
-    use super::super::consumer::{self, COMMIT_INTERVAL, Driver, POLL_BATCH};
+    use super::super::consumer::{self, COMMIT_INTERVAL, Driver, POLL_BATCH, tpl_of};
     use super::super::gate::Gate;
     use super::super::inflight::Tp;
     use super::super::producer::FeedProducerHooks;
@@ -1786,10 +1814,12 @@ mod cluster {
     use super::super::write::Producer;
     use super::super::{Core, Gating, KafkaFeed, READY_CAPACITY};
     use super::{TWO, assert_returns, returns_within};
+    use crate::client::read_position;
     use crate::client::testing::{Raw as _, raw_config};
     use crate::context::Intent;
     use crate::feed::FeedRole;
-    use rdkafka::consumer::{BaseConsumer, Consumer, ConsumerContext};
+    use crate::testutil::wire::{self, Marker};
+    use rdkafka::consumer::{BaseConsumer, CommitMode, Consumer, ConsumerContext};
     use rdkafka::mocking::MockCluster;
     use rdkafka::producer::{BaseProducer, BaseRecord, Producer as _};
     use rdkafka::types::{RDKafkaApiKey, RDKafkaRespErr};
@@ -3921,6 +3951,307 @@ mod cluster {
         consumer::run(d);
         assert_eq!(closing.try_outcome(), Some(Ok(())));
         assert_eq!(committed(&brokers, &group), Some(1));
+    }
+
+    /// Write a commit marker to the end of the work topic's partition.
+    fn write_marker(brokers: &str) {
+        wire::write_marker(brokers, "units", 0, Marker::Commit);
+    }
+
+    /// The work topic's partition.
+    fn work() -> Tp {
+        Tp::new(&Arc::from("units"), 0)
+    }
+
+    /// The consumer's position on the work topic's partition.
+    fn position(d: &Driver) -> Offset {
+        read_position(&d.consumer, &mut tpl_of(&[work()]))
+    }
+
+    /// Drive `d` until its position on the work topic's partition reads
+    /// `offset`.
+    fn served_to(d: &mut Driver, offset: i64) {
+        drive(d, "the position reaches the offset", |d| {
+            position(d) == Offset::Offset(offset)
+        });
+    }
+
+    /// Pins that a close commits past a marker the thread served.
+    /// Regression for #1728.
+    #[test]
+    fn a_close_commits_past_a_marker_it_served() {
+        let cluster = cluster_with(1);
+        let brokers = cluster.bootstrap_servers();
+        write_marker(&brokers);
+        let group = spate_test::unique_name("close-marker");
+        let (config, core, producer, mut d) = parts_for(&brokers, &group);
+        let feed = feed_over(&core, &producer, None);
+        let admission = admission(&config, &core, &producer, STEP);
+        let deliveries = received(&mut d, &feed, admission, 1);
+        feed.acknowledge(deliveries[0].receipt).unwrap();
+        served_to(&mut d, 2);
+        let mut closing = feed.close(Duration::from_secs(10)).expect("a close");
+        consumer::run(d);
+        assert_eq!(closing.try_outcome(), Some(Ok(())));
+        assert_eq!(committed(&brokers, &group), Some(2));
+    }
+
+    /// Pins that a stop with no close commits past a marker the thread
+    /// served. Regression for #1728.
+    #[test]
+    fn a_drop_commits_past_a_marker_it_served() {
+        let cluster = cluster_with(1);
+        let brokers = cluster.bootstrap_servers();
+        write_marker(&brokers);
+        let group = spate_test::unique_name("drop-marker");
+        let (config, core, producer, mut d) = parts_for(&brokers, &group);
+        let feed = feed_over(&core, &producer, None);
+        let admission = admission(&config, &core, &producer, STEP);
+        let deliveries = received(&mut d, &feed, admission, 1);
+        feed.acknowledge(deliveries[0].receipt).unwrap();
+        served_to(&mut d, 2);
+        drop(feed);
+        consumer::run(d);
+        assert_eq!(committed(&brokers, &group), Some(2));
+    }
+
+    /// Pins that a handed-back unit holds a marker behind it: the close
+    /// commits below the unit though the position is past both.
+    #[test]
+    fn a_handed_back_unit_holds_a_marker_behind_it() {
+        let cluster = cluster_with(3);
+        let brokers = cluster.bootstrap_servers();
+        write_marker(&brokers);
+        let group = spate_test::unique_name("handed-back-marker");
+        let (config, core, producer, mut d) = parts_for(&brokers, &group);
+        let feed = feed_over(&core, &producer, None);
+        let admission = admission(&config, &core, &producer, STEP);
+        let deliveries = received(&mut d, &feed, admission, 3);
+        feed.acknowledge(deliveries[0].receipt).unwrap();
+        feed.hand_back(deliveries[1].receipt).unwrap();
+        feed.acknowledge(deliveries[2].receipt).unwrap();
+        served_to(&mut d, 4);
+        let mut closing = feed.close(Duration::from_secs(10)).expect("a close");
+        consumer::run(d);
+        assert_eq!(closing.try_outcome(), Some(Ok(())));
+        assert_eq!(committed(&brokers, &group), Some(1));
+    }
+
+    /// Pins that a latched feed reads no position into a commit: librdkafka
+    /// may have skipped an offset, and a position could pass the unit there.
+    #[test]
+    fn a_latched_feed_retires_nothing() {
+        let cluster = cluster_with(1);
+        let brokers = cluster.bootstrap_servers();
+        write_marker(&brokers);
+        let group = spate_test::unique_name("latched-marker");
+        let (config, core, producer, mut d) = parts_for(&brokers, &group);
+        let admission = admission(&config, &core, &producer, STEP);
+        drive(&mut d, "the unit is buffered", |d| {
+            !d.core.lock().ready.is_empty()
+        });
+        acknowledge_first(&d);
+        served_to(&mut d, 2);
+        d.core.latch("a test latch");
+        d.commit_finished("periodic");
+        assert_eq!(committed(&brokers, &group), None);
+        assert_eq!(core.lock().tracker.commit_point(&work()), Some(1));
+        admission.stop();
+    }
+
+    /// Pins that a position does not cross a rebalance: with the first unit
+    /// unfinished and the position past a marker, a revocation and a new
+    /// assignment leave a position that commits nothing, and the units come
+    /// again from the commit.
+    #[test]
+    fn a_position_from_before_a_rebalance_commits_nothing() {
+        let cluster = cluster_with(2);
+        let brokers = cluster.bootstrap_servers();
+        write_marker(&brokers);
+        let group = spate_test::unique_name("rebalance-marker");
+        let (_, _, _, mut d) = parts_for(&brokers, &group);
+        served_to(&mut d, 3);
+        let assigned = d.consumer.assignment().unwrap();
+        for intent in [Intent::Revoke(assigned.clone()), Intent::Assign(assigned)] {
+            d.consumer
+                .context()
+                .intents
+                .lock()
+                .unwrap()
+                .push_back(intent);
+        }
+        d.serve_intents();
+        assert_eq!(position(&d), Offset::Invalid, "before the first poll");
+        d.commit_finished("periodic");
+        assert!(
+            committed(&brokers, &group).is_none_or(|at| at <= 0),
+            "a position from before the rebalance reached a commit"
+        );
+        drive(&mut d, "the units come again", |d| {
+            d.core.lock().gating.len() == 2
+        });
+    }
+
+    /// Pins that a marker behind a partition paused by a full buffer passes
+    /// once the partition resumes and its units finish.
+    #[test]
+    fn a_marker_behind_a_paused_partition_passes_once_it_resumes() {
+        let units = 2 * READY_CAPACITY;
+        let cluster = cluster_with(units);
+        let brokers = cluster.bootstrap_servers();
+        write_marker(&brokers);
+        let group = spate_test::unique_name("paused-marker");
+        let (config, core, producer, mut d) = parts_for(&brokers, &group);
+        let feed = feed_over(&core, &producer, None);
+        let admission = admission(&config, &core, &producer, STEP);
+        wait_until(DEADLINE, "the thread pauses", || {
+            d.poll();
+            d.serve_intents();
+            d.backpressure();
+            !d.paused.is_empty()
+        });
+        let end = i64::try_from(units).unwrap() + 1;
+        let mut finished = 0;
+        wait_until(
+            DEADLINE,
+            "every unit finishes and the marker is served",
+            || {
+                for delivery in feed.receive(READY_CAPACITY).unwrap() {
+                    feed.acknowledge(delivery.receipt).unwrap();
+                    finished += 1;
+                }
+                d.poll();
+                d.serve_intents();
+                d.backpressure();
+                finished == units && position(&d) == Offset::Offset(end)
+            },
+        );
+        admission.stop();
+        let mut closing = feed.close(Duration::from_secs(10)).expect("a close");
+        consumer::run(d);
+        assert_eq!(closing.try_outcome(), Some(Ok(())));
+        assert_eq!(committed(&brokers, &group), Some(end));
+    }
+
+    /// Pins that a fetch error does not move the position past the offsets it
+    /// failed on: the commit holds until the unit is delivered, and passes the
+    /// marker behind it once the unit finishes.
+    #[test]
+    fn a_fetch_error_before_a_marker_passes_it_only_after_the_unit() {
+        let cluster = cluster_with(1);
+        let brokers = cluster.bootstrap_servers();
+        write_marker(&brokers);
+        // A code the fetch reply's named arms do not take.
+        cluster.request_errors(
+            RDKafkaApiKey::Fetch,
+            &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_INVALID_MSG],
+        );
+        let group = spate_test::unique_name("fetch-error-marker");
+        // The empty retry partition starts through a ListOffsets round trip.
+        // With a committed start the work partition is in the first Fetch,
+        // which takes the error; on the retry partition alone the error is
+        // lost to its first end-of-partition.
+        let start: BaseConsumer = raw_config()
+            .set("bootstrap.servers", &brokers)
+            .set("group.id", &group)
+            .build()
+            .unwrap();
+        let mut tpl = TopicPartitionList::new();
+        tpl.add_partition_offset("units", 0, Offset::Offset(0))
+            .unwrap();
+        start.commit(&tpl, CommitMode::Sync).unwrap();
+        let (config, core, producer, mut d) = parts_for(&brokers, &group);
+        let feed = feed_over(&core, &producer, None);
+        drive(&mut d, "the fetch error reaches the poll", |d| {
+            d.core.lock().retryable.is_some()
+        });
+        d.commit_finished("periodic");
+        assert_eq!(committed(&brokers, &group), Some(0));
+        // A reader passes over a retryable error.
+        core.lock().retryable = None;
+        let admission = admission(&config, &core, &producer, STEP);
+        let deliveries = received(&mut d, &feed, admission, 1);
+        d.commit_finished("periodic");
+        assert!(
+            committed(&brokers, &group).is_none_or(|at| at <= 0),
+            "the commit passed a unit not finished"
+        );
+        feed.acknowledge(deliveries[0].receipt).unwrap();
+        served_to(&mut d, 2);
+        let mut closing = feed.close(Duration::from_secs(10)).expect("a close");
+        consumer::run(d);
+        assert_eq!(closing.try_outcome(), Some(Ok(())));
+        assert_eq!(committed(&brokers, &group), Some(2));
+    }
+
+    /// Pins that a message naming no unit holds a marker behind it until its
+    /// dead-letter write is confirmed: the position passes both, and the
+    /// commit stays at the message.
+    #[test]
+    fn a_message_with_no_unit_holds_a_marker_behind_it() {
+        let cluster = cluster_holding([Some(&[0xff, 0xfe][..])]);
+        let brokers = cluster.bootstrap_servers();
+        write_marker(&brokers);
+        // Retriable, so the dead-letter write stays in flight.
+        cluster.request_errors(
+            RDKafkaApiKey::Produce,
+            &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_NOT_ENOUGH_REPLICAS; 1000],
+        );
+        let group = spate_test::unique_name("no-unit-marker");
+        let (_, _, _, mut d) = parts_for(&brokers, &group);
+        served_to(&mut d, 2);
+        d.commit_finished("periodic");
+        assert!(
+            committed(&brokers, &group).is_none_or(|at| at <= 0),
+            "the commit passed a write not confirmed"
+        );
+    }
+
+    /// Finish every unit waiting at the gate.
+    fn finish_gated(d: &Driver) {
+        let mut st = d.core.lock();
+        while let Some(entry) = st.gating.pop_front() {
+            assert!(st.tracker.acknowledge(entry.receipt));
+        }
+    }
+
+    /// Pins that a fetch reset holds a marker behind the units it reads
+    /// again: no commit passes a unit read again until it finishes, and the
+    /// commit then reaches the end.
+    #[test]
+    fn a_fetch_reset_holds_markers_behind_the_units_read_again() {
+        let cluster = cluster_with(2);
+        let brokers = cluster.bootstrap_servers();
+        let group = spate_test::unique_name("reset-marker");
+        let (_, _, _, mut d) = parts_for(&brokers, &group);
+        drive(&mut d, "the units are read", |d| {
+            d.core.lock().gating.len() == 2
+        });
+        finish_gated(&d);
+        d.commit_finished("periodic");
+        assert_eq!(committed(&brokers, &group), Some(2));
+
+        // A first Fetch at the partition's end reports the end in place of an
+        // error, so the second error lands on the Fetch after it.
+        cluster.request_errors(
+            RDKafkaApiKey::Fetch,
+            &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_OFFSET_OUT_OF_RANGE; 2],
+        );
+        write_marker(&brokers);
+        drive(&mut d, "the units come again", |d| {
+            d.core.lock().gating.len() == 2
+        });
+        served_to(&mut d, 3);
+        d.commit_finished("periodic");
+        assert_eq!(
+            committed(&brokers, &group),
+            Some(0),
+            "the commit passed a unit read again"
+        );
+
+        finish_gated(&d);
+        d.commit_finished("periodic");
+        assert_eq!(committed(&brokers, &group), Some(3));
     }
 
     /// Pins that closing a latched feed settles at once with the latched

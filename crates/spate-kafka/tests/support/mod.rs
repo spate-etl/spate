@@ -21,9 +21,7 @@ use spate_core::source::{
 };
 use spate_kafka::{KafkaSource, KafkaSourceConfig};
 use spate_test_support::container_image;
-use std::io::{Read as _, Write as _};
 use std::mem::ManuallyDrop;
-use std::net::TcpStream;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -32,6 +30,13 @@ use testcontainers_modules::kafka::apache::Kafka;
 
 pub(crate) mod feed;
 pub(crate) mod latest;
+pub(crate) mod wire;
+
+#[allow(unused_imports, reason = "each target uses a different subset")]
+pub(crate) use wire::{
+    BatchCrc, Marker, RawBatch, control_batch, corrupt_batch, produce_batch, try_produce_batch,
+    v1_message, v2_batch, write_marker,
+};
 
 /// How the member under test answers the offer it held.
 #[derive(Clone, Copy, Debug)]
@@ -313,6 +318,24 @@ pub(crate) enum Transaction {
     Open,
 }
 
+/// How long a transactional call waits on the broker.
+pub(crate) const TRANSACTION_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// A producer on `brokers` initialised for transactions under an id derived
+/// from `topic` and `tag`.
+pub(crate) fn transactional_producer(brokers: &str, topic: &str, tag: &str) -> BaseProducer {
+    let producer: BaseProducer = producer_config(brokers)
+        .set("transactional.id", format!("{topic}-{tag}"))
+        // Kafka's 60 s default can abort an open transaction under a slow suite.
+        .set("transaction.timeout.ms", "600000")
+        .build()
+        .expect("producer");
+    producer
+        .init_transactions(TRANSACTION_TIMEOUT)
+        .expect("init");
+    producer
+}
+
 /// Produce `count` records to partition 0 of `topic` in one transaction under
 /// a transactional id derived from `tag`, flush them, and end the transaction
 /// as `ending` says. Returns the producer, which an open transaction needs.
@@ -324,23 +347,34 @@ pub(crate) fn produce_transaction(
     tag: &str,
     ending: Transaction,
 ) -> BaseProducer {
-    const TIMEOUT: Duration = Duration::from_secs(60);
-    let producer: BaseProducer = producer_config(brokers)
-        .set("transactional.id", format!("{topic}-{tag}"))
-        // Kafka's 60 s default can abort an open transaction under a slow suite.
-        .set("transaction.timeout.ms", "600000")
-        .build()
-        .expect("producer");
-    producer.init_transactions(TIMEOUT).expect("init");
+    let producer = transactional_producer(brokers, topic, tag);
     producer.begin_transaction().expect("begin");
     send_records(&producer, topic, 0, count, tag);
-    producer.flush(TIMEOUT).expect("flush");
+    producer.flush(TRANSACTION_TIMEOUT).expect("flush");
     match ending {
-        Transaction::Commit => producer.commit_transaction(TIMEOUT).expect("commit"),
-        Transaction::Abort => producer.abort_transaction(TIMEOUT).expect("abort"),
+        Transaction::Commit => producer
+            .commit_transaction(TRANSACTION_TIMEOUT)
+            .expect("commit"),
+        Transaction::Abort => producer
+            .abort_transaction(TRANSACTION_TIMEOUT)
+            .expect("abort"),
         Transaction::Open => {}
     }
     producer
+}
+
+/// The end of `partition`'s log. A `read_committed` client reads the last stable
+/// offset here instead, which an open transaction holds below the log's end.
+pub(crate) fn log_end(brokers: &str, topic: &str, partition: i32) -> i64 {
+    let probe: BaseConsumer = raw_config()
+        .set("bootstrap.servers", brokers)
+        .set("isolation.level", "read_uncommitted")
+        .build()
+        .expect("probe");
+    probe
+        .fetch_watermarks(topic, partition, Duration::from_secs(10))
+        .expect("watermarks")
+        .1
 }
 
 /// A consumer in `group` that reads or writes the group's committed offsets
@@ -435,14 +469,35 @@ pub(crate) fn committed(probe: &BaseConsumer, topic: &str, partitions: i32) -> V
         .collect()
 }
 
-/// [`committed`] through a new [`probe`] in `group`.
+/// [`committed`] through a new [`probe`] in `group`, read again while the broker
+/// refuses: it answers `NotCoordinator` while the group's coordinator moves.
 pub(crate) fn committed_by(
     brokers: &str,
     group: &str,
     topic: &str,
     partitions: i32,
 ) -> Vec<Offset> {
-    committed(&probe(brokers, group), topic, partitions)
+    let probe = probe(brokers, group);
+    let mut tpl = TopicPartitionList::new();
+    for p in 0..partitions {
+        tpl.add_partition(topic, p);
+    }
+    let mut read = None;
+    spate_test::wait_until(
+        Duration::from_secs(30),
+        "the committed offsets read",
+        || {
+            read = probe
+                .committed_offsets(tpl.clone(), Duration::from_secs(10))
+                .ok();
+            read.is_some()
+        },
+    );
+    read.expect("read before the wait ended")
+        .elements()
+        .iter()
+        .map(|e| e.offset())
+        .collect()
 }
 
 /// The lag `pipeline` publishes for `partition`, or `None` before it does.
@@ -845,238 +900,4 @@ pub(crate) fn drain_lane(
         }
     }
     got
-}
-
-fn zigzag(buf: &mut Vec<u8>, v: i64) {
-    let mut z = ((v << 1) ^ (v >> 63)) as u64;
-    loop {
-        let b = (z & 0x7f) as u8;
-        z >>= 7;
-        if z == 0 {
-            buf.push(b);
-            break;
-        }
-        buf.push(b | 0x80);
-    }
-}
-
-/// The CRC a [`RawBatch`] carries.
-#[derive(Clone, Copy)]
-pub(crate) enum BatchCrc {
-    /// The bytes as given, which the mock stores unread.
-    Literal(u32),
-    /// The CRC-32C of the batch's contents.
-    Computed,
-}
-
-/// A record batch holding one record, written by hand because no client writes
-/// the headers these suites need.
-#[derive(Clone, Copy)]
-pub(crate) struct RawBatch<'a> {
-    pub(crate) magic: u8,
-    pub(crate) base_offset: i64,
-    pub(crate) partition_leader_epoch: i32,
-    pub(crate) crc: BatchCrc,
-    pub(crate) attributes: i16,
-    pub(crate) last_offset_delta: i32,
-    pub(crate) timestamp: i64,
-    /// The count the mock reserves offsets by, which need not match the one
-    /// record the batch holds.
-    pub(crate) record_count: i32,
-    pub(crate) key: Option<&'a [u8]>,
-    pub(crate) value: &'a [u8],
-}
-
-impl Default for RawBatch<'_> {
-    fn default() -> Self {
-        RawBatch {
-            magic: 2,
-            base_offset: 0,
-            partition_leader_epoch: -1,
-            crc: BatchCrc::Literal(0),
-            attributes: 0,
-            last_offset_delta: 0,
-            timestamp: 0,
-            record_count: 1,
-            key: None,
-            value: b"",
-        }
-    }
-}
-
-impl RawBatch<'_> {
-    /// The batch as the wire carries it.
-    pub(crate) fn encode(&self) -> Vec<u8> {
-        let mut rec = vec![0u8];
-        zigzag(&mut rec, 0);
-        zigzag(&mut rec, 0);
-        match self.key {
-            Some(key) => {
-                zigzag(&mut rec, key.len() as i64);
-                rec.extend_from_slice(key);
-            }
-            None => zigzag(&mut rec, -1),
-        }
-        zigzag(&mut rec, self.value.len() as i64);
-        rec.extend_from_slice(self.value);
-        zigzag(&mut rec, 0);
-        let mut records = Vec::new();
-        zigzag(&mut records, rec.len() as i64);
-        records.extend_from_slice(&rec);
-
-        let mut tail = Vec::new();
-        tail.extend_from_slice(&self.attributes.to_be_bytes());
-        tail.extend_from_slice(&self.last_offset_delta.to_be_bytes());
-        tail.extend_from_slice(&self.timestamp.to_be_bytes());
-        tail.extend_from_slice(&self.timestamp.to_be_bytes());
-        tail.extend_from_slice(&(-1i64).to_be_bytes()); // producer id
-        tail.extend_from_slice(&(-1i16).to_be_bytes()); // producer epoch
-        tail.extend_from_slice(&(-1i32).to_be_bytes()); // base sequence
-        tail.extend_from_slice(&self.record_count.to_be_bytes());
-        tail.extend_from_slice(&records);
-
-        let crc = match self.crc {
-            BatchCrc::Literal(crc) => crc,
-            BatchCrc::Computed => crc32c(&tail),
-        };
-        let mut batch = Vec::new();
-        batch.extend_from_slice(&self.base_offset.to_be_bytes());
-        batch.extend_from_slice(&((4 + 1 + 4 + tail.len()) as i32).to_be_bytes());
-        batch.extend_from_slice(&self.partition_leader_epoch.to_be_bytes());
-        batch.push(self.magic);
-        batch.extend_from_slice(&crc.to_be_bytes());
-        batch.extend_from_slice(&tail);
-        batch
-    }
-}
-
-/// One magic-2 record batch holding one keyed record, with a CRC that does
-/// not match its contents.
-pub(crate) fn corrupt_batch(key: &[u8], value: &[u8]) -> Vec<u8> {
-    RawBatch {
-        crc: BatchCrc::Literal(0xdead_beef),
-        key: Some(key),
-        value,
-        ..RawBatch::default()
-    }
-    .encode()
-}
-
-/// How a transaction ended, as its marker records it.
-#[derive(Clone, Copy, Debug)]
-pub(crate) enum Marker {
-    Abort,
-    Commit,
-}
-
-/// The control batch a broker writes to end a transaction. It takes one offset
-/// and a consumer never delivers it.
-pub(crate) fn control_batch(marker: Marker) -> Vec<u8> {
-    let control_type: i16 = match marker {
-        Marker::Abort => 0,
-        Marker::Commit => 1,
-    };
-    let mut key = 0i16.to_be_bytes().to_vec(); // version
-    key.extend_from_slice(&control_type.to_be_bytes());
-    // Version and coordinator epoch, which a consumer skips.
-    let value = [0u8; 6];
-    RawBatch {
-        attributes: ATTR_TRANSACTIONAL | ATTR_CONTROL,
-        crc: BatchCrc::Computed,
-        key: Some(&key),
-        value: &value,
-        ..RawBatch::default()
-    }
-    .encode()
-}
-
-const ATTR_TRANSACTIONAL: i16 = 0x10;
-const ATTR_CONTROL: i16 = 0x20;
-
-/// Send `batch` to `partition` of `topic` as a version 3 Produce request
-/// and return the partition's error code. A client library would compute
-/// the batch's CRC itself; the mock stores the batch as sent.
-pub(crate) fn produce_batch(broker: &str, topic: &str, partition: i32, batch: &[u8]) -> i16 {
-    let mut b = Vec::new();
-    b.extend_from_slice(&0i16.to_be_bytes());
-    b.extend_from_slice(&3i16.to_be_bytes());
-    b.extend_from_slice(&7i32.to_be_bytes());
-    b.extend_from_slice(&5i16.to_be_bytes());
-    b.extend_from_slice(b"spate");
-    b.extend_from_slice(&(-1i16).to_be_bytes());
-    b.extend_from_slice(&1i16.to_be_bytes());
-    b.extend_from_slice(&10_000i32.to_be_bytes());
-    b.extend_from_slice(&1i32.to_be_bytes());
-    b.extend_from_slice(&(topic.len() as i16).to_be_bytes());
-    b.extend_from_slice(topic.as_bytes());
-    b.extend_from_slice(&1i32.to_be_bytes());
-    b.extend_from_slice(&partition.to_be_bytes());
-    b.extend_from_slice(&(batch.len() as i32).to_be_bytes());
-    b.extend_from_slice(batch);
-    let mut s = TcpStream::connect(broker).unwrap();
-    s.write_all(&(b.len() as i32).to_be_bytes()).unwrap();
-    s.write_all(&b).unwrap();
-    let mut len = [0u8; 4];
-    s.read_exact(&mut len).unwrap();
-    let mut resp = vec![0u8; usize::try_from(i32::from_be_bytes(len)).unwrap()];
-    s.read_exact(&mut resp).unwrap();
-    let at = 4 + 4 + 2 + topic.len() + 4 + 4;
-    i16::from_be_bytes([resp[at], resp[at + 1]])
-}
-
-/// CRC-32 (IEEE), the checksum of a magic-0/1 message.
-fn crc32_ieee(data: &[u8]) -> u32 {
-    let mut crc = !0u32;
-    for &b in data {
-        crc ^= u32::from(b);
-        for _ in 0..8 {
-            crc = (crc >> 1) ^ (0xedb8_8320 & 0u32.wrapping_sub(crc & 1));
-        }
-    }
-    !crc
-}
-
-/// CRC-32C, the checksum of a magic-2 batch.
-fn crc32c(data: &[u8]) -> u32 {
-    let mut crc = !0u32;
-    for &b in data {
-        crc ^= u32::from(b);
-        for _ in 0..8 {
-            crc = (crc >> 1) ^ (0x82f6_3b78 & 0u32.wrapping_sub(crc & 1));
-        }
-    }
-    !crc
-}
-
-/// A valid magic-2 batch holding one record, whose header reserves
-/// `reserve` offsets in the mock's log.
-pub(crate) fn v2_batch(key: &[u8], value: &[u8], reserve: i32) -> Vec<u8> {
-    RawBatch {
-        partition_leader_epoch: 0,
-        crc: BatchCrc::Computed,
-        timestamp: 1,
-        record_count: reserve,
-        key: Some(key),
-        value,
-        ..RawBatch::default()
-    }
-    .encode()
-}
-
-/// One magic-1 message at `offset`; `corrupt` gives it a CRC that does
-/// not match its contents.
-pub(crate) fn v1_message(offset: i64, key: &[u8], value: &[u8], corrupt: bool) -> Vec<u8> {
-    let mut body = vec![1u8, 0u8];
-    body.extend_from_slice(&1i64.to_be_bytes());
-    body.extend_from_slice(&(key.len() as i32).to_be_bytes());
-    body.extend_from_slice(key);
-    body.extend_from_slice(&(value.len() as i32).to_be_bytes());
-    body.extend_from_slice(value);
-    let crc = crc32_ieee(&body) ^ u32::from(corrupt);
-    let mut msg = Vec::new();
-    msg.extend_from_slice(&offset.to_be_bytes());
-    msg.extend_from_slice(&((4 + body.len()) as i32).to_be_bytes());
-    msg.extend_from_slice(&crc.to_be_bytes());
-    msg.extend_from_slice(&body);
-    msg
 }

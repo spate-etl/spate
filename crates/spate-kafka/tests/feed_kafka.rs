@@ -1,8 +1,9 @@
 //! The Kafka feed against a real broker, for what the MockCluster does not
 //! model: a member that dies is evicted at the session timeout, where the
 //! mock evicts an unpolled member on a timer of its own, a topic's
-//! configuration, which the mock does not describe, and a confirmed write's
-//! place below the high watermark.
+//! configuration, which the mock does not describe, a confirmed write's
+//! place below the high watermark, and another writer's transaction, whose
+//! last stable offset and aborted ranges the mock does not model.
 //!
 //! Every test needs Docker and is `#[ignore]`d. Run them with:
 //!
@@ -18,21 +19,25 @@ use support::Raw as _;
 use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
 use rdkafka::client::DefaultClientContext;
 use rdkafka::consumer::{BaseConsumer, Consumer};
+use rdkafka::producer::Producer as _;
 use spate_core::clock::TestClock as StopClock;
 use spate_core::clock::tokio::TestClock;
-use spate_core::feed::{Feed, STOP_RESERVE, Unit};
+use spate_core::feed::{DEFAULT_SETTLING_WINDOW, DepthOf, Feed, STOP_RESERVE, Unit};
 use spate_core::pipeline::ExitState;
 use spate_kafka::feed::{KafkaFeed, KafkaFeedError, KafkaFeedPublisher};
 use spate_test::{WriteOutcome, wait_until};
 use spate_test_support::ChildTest;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
-use support::broker;
 use support::feed::{
-    ATTEMPT, ATTEMPT_PARTITIONS, DEAD, DEADLINE, DRAIN_TIMEOUT, TWO_RANGES, WORK, bounded_section,
-    committed, create_topics, data_dir, direct_with, exists, feed_yaml, high_watermark,
-    launch_bounded, launch_source, launch_stopping, launch_with, list_once, produce_raw, publish,
-    read_attempts, recs, run_to_exit, sorted, stage, two_range_unit, written,
+    ATTEMPT, ATTEMPT_PARTITIONS, BoundedJob, DEAD, DEADLINE, DRAIN_TIMEOUT, RETRY, TWO_RANGES,
+    WORK, Worker, assert_stalled, bounded_section, committed, create_topics, data_dir, direct_with,
+    exists, feed_yaml, high_watermark, hold_for, hold_open, launch_bounded, launch_source,
+    launch_stopping, launch_with, list_once, open_transaction_with, produce_raw, publish,
+    read_attempts, read_depth, recs, run_to_exit, sorted, stage, two_range_unit, written,
+};
+use support::{
+    TRANSACTION_TIMEOUT, Transaction, broker, log_end, produce_transaction, transactional_broker,
 };
 use testcontainers::runners::SyncRunner;
 use testcontainers_modules::kafka::apache::KAFKA_PORT;
@@ -714,16 +719,7 @@ fn a_dead_letter_topic_entry_ends_the_job_stalled() {
         .unwrap();
     io.block_on(admin.delete_records(&before, &AdminOptions::new()))
         .expect("delete records");
-    let report = run_to_exit(&worker, &clock);
-    assert_eq!(report.exit_code(), 1);
-    let ExitState::Failed(failure) = &report.state else {
-        panic!("expected a failed run, got {:?}", report.state);
-    };
-    assert!(
-        failure.reason.contains("bounded feed job stalled") && failure.reason.contains(DEAD),
-        "{}",
-        failure.reason
-    );
+    assert_stalled(&run_to_exit(&worker, &clock));
 }
 
 /// Pins that the committed offsets a worker reads through its consumer
@@ -755,7 +751,7 @@ fn a_bounded_job_ends_once_every_workers_partitions_are_committed() {
         rows.extend(r);
     }
     assert!(
-        (0..2).all(|p| high_watermark_of(&brokers, WORK, p) > 0),
+        (0..2).all(|p| support::log_end(&brokers, WORK, p) > 0),
         "the units span both partitions"
     );
 
@@ -801,19 +797,6 @@ fn create_two_partition_work(brokers: &str) {
     {
         created.expect("topic created");
     }
-}
-
-/// The high watermark of `topic` partition `partition`.
-fn high_watermark_of(brokers: &str, topic: &str, partition: i32) -> i64 {
-    use rdkafka::consumer::{BaseConsumer, Consumer};
-    let consumer: BaseConsumer = support::raw_config()
-        .set("bootstrap.servers", brokers)
-        .build()
-        .expect("consumer");
-    consumer
-        .fetch_watermarks(topic, partition, Duration::from_secs(10))
-        .expect("watermarks")
-        .1
 }
 
 /// Pins the Kafka feed's half of a graceful stop against a real broker:
@@ -903,4 +886,329 @@ fn a_stopping_worker_commits_finished_units_before_leaving_the_group() {
         "the finished unit's row was written again"
     );
     assert_eq!(b.stop(), ExitState::Completed);
+}
+
+/// Half the settling window a job ends on.
+const HALF_WINDOW: Duration = DEFAULT_SETTLING_WINDOW.checked_div(2).expect("non-zero");
+
+/// Run `body` on a broker that takes transactions, with the feed's topics made.
+fn on_transactional_broker(body: impl FnOnce(&str)) {
+    let container = transactional_broker()
+        .start()
+        .expect("start kafka container");
+    let port = container.get_host_port_ipv4(KAFKA_PORT).expect("port");
+    let brokers = format!("127.0.0.1:{port}");
+    create_topics(&brokers);
+    body(&brokers);
+}
+
+/// A bounded job on `brokers`, its lister run.
+fn listed(brokers: &str, tag: &str, extra: &str) -> BoundedJob {
+    BoundedJob::listed(brokers, tag, extra, publisher_on)
+}
+
+/// Stage a unit under `tag` without publishing it, for a transaction to hold.
+fn staged(job: &BoundedJob, tag: &str) -> (Unit, Vec<String>) {
+    let rows = recs(tag, 2);
+    (stage(&job.data, &format!("{tag}.ndjson"), &rows), rows)
+}
+
+/// Wait until `job` has read `rows` and committed to the end of `topic`'s log,
+/// then until no open transaction holds that end back.
+fn wait_for_end(job: &BoundedJob, worker: &Worker, rows: &[String], topic: &str) {
+    wait_until(DEADLINE, "the rows and the commit at the log's end", || {
+        written(&worker.script) == sorted(rows.to_vec())
+            && job.committed(topic) == Some(log_end(&job.brokers, topic, 0))
+    });
+    wait_until(DEADLINE, "the stable offset reaches the log's end", || {
+        high_watermark(&job.brokers, topic) == log_end(&job.brokers, topic, 0)
+    });
+}
+
+/// Publish a unit whose object has gone, so the feed's read fails and it moves
+/// the unit to `topic`. Returns the worker once that write is on `topic` and
+/// the work offset is committed, with the object back and the unit's rows.
+fn moved_to(
+    job: &BoundedJob,
+    clock: &std::sync::Arc<TestClock>,
+    topic: &str,
+) -> (Worker, Vec<String>) {
+    let rows = recs("moved", 2);
+    let object = job.data.join("moved.ndjson");
+    let away = job.dir.path().join("moved.away");
+    job.publish("moved.ndjson", &rows);
+    std::fs::rename(&object, &away).unwrap();
+    let before = log_end(&job.brokers, topic, 0);
+    let worker = launch_bounded(KafkaFeed::connect, &job.data, &job.section, clock);
+    wait_until(
+        DEADLINE,
+        "the unit is moved and its offset committed",
+        || log_end(&job.brokers, topic, 0) > before && job.committed(WORK) == Some(1),
+    );
+    std::fs::rename(&away, &object).unwrap();
+    (worker, rows)
+}
+
+/// Pins that a unit behind an open transaction holds a bounded job open: the
+/// group stops at the transaction's first offset and the depth counts the
+/// units, and once the transaction commits the job reads both and ends.
+/// Regression for #1763.
+#[test]
+#[ignore = "requires Docker"]
+fn a_unit_behind_an_open_transaction_holds_a_bounded_job_open() {
+    on_transactional_broker(a_unit_behind_an_open_transaction_on);
+}
+
+fn a_unit_behind_an_open_transaction_on(brokers: &str) {
+    let job = listed(brokers, "open-tx", "");
+    let (held, mut rows) = staged(&job, "held");
+    let open = open_transaction_with(brokers, WORK, "held", &[held]);
+    let later = recs("later", 2);
+    job.publish("later.ndjson", &later);
+    rows.extend(later);
+
+    let clock = TestClock::frozen();
+    let worker = launch_bounded(KafkaFeed::connect, &job.data, &job.section, &clock);
+    hold_open(&worker, &clock);
+    assert!(written(&worker.script).is_empty());
+    assert_eq!(job.committed(WORK), None);
+    let depth = read_depth(&*worker.feed, DepthOf::Feed).unwrap();
+    let ends = log_end(brokers, WORK, 0) + log_end(brokers, RETRY, 0);
+    assert_eq!(depth.visible, u64::try_from(ends).unwrap());
+
+    open.commit_transaction(TRANSACTION_TIMEOUT)
+        .expect("commit");
+    wait_for_end(&job, &worker, &rows, WORK);
+    let report = run_to_exit(&worker, &clock);
+    assert_eq!(report.state, ExitState::Completed);
+    assert_eq!(report.exit_code(), 0);
+}
+
+/// Pins that a unit the feed moved to the retry topic behind an open
+/// transaction holds a bounded job open, and is read once the transaction
+/// aborts. Regression for #1763.
+#[test]
+#[ignore = "requires Docker"]
+fn a_retry_write_behind_an_open_transaction_holds_a_bounded_job_open() {
+    on_transactional_broker(a_retry_write_behind_an_open_transaction_on);
+}
+
+fn a_retry_write_behind_an_open_transaction_on(brokers: &str) {
+    let job = listed(brokers, "open-retry", "");
+    let open = produce_transaction(brokers, RETRY, 1, "held", Transaction::Open);
+    let clock = TestClock::frozen();
+    let (worker, rows) = moved_to(&job, &clock, RETRY);
+    hold_open(&worker, &clock);
+    assert_eq!(job.committed(RETRY), None);
+
+    open.abort_transaction(TRANSACTION_TIMEOUT).expect("abort");
+    wait_for_end(&job, &worker, &rows, RETRY);
+    assert_eq!(run_to_exit(&worker, &clock).state, ExitState::Completed);
+}
+
+/// Pins that a unit the feed dead-lettered behind an open transaction stalls a
+/// bounded job. Regression for #1763.
+#[test]
+#[ignore = "requires Docker"]
+fn a_dead_letter_write_behind_an_open_transaction_stalls_a_bounded_job() {
+    on_transactional_broker(a_dead_letter_write_behind_an_open_transaction_on);
+}
+
+fn a_dead_letter_write_behind_an_open_transaction_on(brokers: &str) {
+    let job = listed(brokers, "open-dead", "  attempt_cap: 1\n");
+    let _open = produce_transaction(brokers, DEAD, 1, "held", Transaction::Open);
+    let clock = TestClock::frozen();
+    let (worker, _) = moved_to(&job, &clock, DEAD);
+    let depth = read_depth(&*worker.feed, DepthOf::DeadLetters).unwrap();
+    assert_eq!(
+        depth.visible,
+        u64::try_from(log_end(brokers, DEAD, 0)).unwrap()
+    );
+    assert_stalled(&run_to_exit(&worker, &clock));
+}
+
+/// Pins the limit the feed's page states: the dead-letter read counts offsets,
+/// so an open transaction alone on that topic stalls a bounded job.
+#[test]
+#[ignore = "requires Docker"]
+fn an_open_transaction_alone_on_the_dead_letter_topic_stalls_a_bounded_job() {
+    on_transactional_broker(|brokers| {
+        let job = listed(brokers, "alone-dead", "");
+        let _open = produce_transaction(brokers, DEAD, 1, "held", Transaction::Open);
+        let clock = TestClock::frozen();
+        let worker = launch_bounded(KafkaFeed::connect, &job.data, &job.section, &clock);
+        assert_stalled(&run_to_exit(&worker, &clock));
+    });
+}
+
+/// Pins the same limit once the transaction has aborted: the topic holds no
+/// record a reader would see, and its offsets still stall the job.
+#[test]
+#[ignore = "requires Docker"]
+fn an_aborted_transaction_alone_on_the_dead_letter_topic_stalls_a_bounded_job() {
+    on_transactional_broker(|brokers| {
+        let job = listed(brokers, "aborted-dead", "");
+        let _ended = produce_transaction(brokers, DEAD, 1, "gone", Transaction::Abort);
+        let clock = TestClock::frozen();
+        let worker = launch_bounded(KafkaFeed::connect, &job.data, &job.section, &clock);
+        assert_stalled(&run_to_exit(&worker, &clock));
+    });
+}
+
+/// Pins that the group commits past an aborted transaction at the end of the
+/// work topic, on a real broker's aborted range, and that a later worker on the
+/// group starts past it. Regression for #1728.
+#[test]
+#[ignore = "requires Docker"]
+fn an_aborted_transaction_at_the_end_of_the_work_topic_ends_a_bounded_job() {
+    on_transactional_broker(an_aborted_transaction_at_the_end_on);
+}
+
+fn an_aborted_transaction_at_the_end_on(brokers: &str) {
+    let job = listed(brokers, "aborted-end", "");
+    let rows = recs("kept", 2);
+    job.publish("kept.ndjson", &rows);
+    let _ended = produce_transaction(brokers, WORK, 1, "gone", Transaction::Abort);
+
+    let clock = TestClock::frozen();
+    let worker = launch_bounded(KafkaFeed::connect, &job.data, &job.section, &clock);
+    wait_for_end(&job, &worker, &rows, WORK);
+    assert_eq!(run_to_exit(&worker, &clock).state, ExitState::Completed);
+
+    // A later unit holds the job open until the group forms, and shows where
+    // the group started.
+    let later_rows = recs("later", 2);
+    job.publish("later.ndjson", &later_rows);
+    let clock = TestClock::frozen();
+    let later = launch_bounded(KafkaFeed::connect, &job.data, &job.section, &clock);
+    wait_for_end(&job, &later, &later_rows, WORK);
+    assert_eq!(run_to_exit(&later, &clock).state, ExitState::Completed);
+    assert_eq!(written(&later.script), sorted(later_rows));
+}
+
+/// Pins that a later record passes an aborted range through its delivery.
+#[test]
+#[ignore = "requires Docker"]
+fn an_aborted_transaction_on_the_work_topic_ends_a_bounded_job() {
+    on_transactional_broker(|brokers| {
+        let job = listed(brokers, "aborted-first", "");
+        let _ended = produce_transaction(brokers, WORK, 1, "gone", Transaction::Abort);
+        let rows = recs("kept", 2);
+        job.publish("kept.ndjson", &rows);
+
+        let clock = TestClock::frozen();
+        let worker = launch_bounded(KafkaFeed::connect, &job.data, &job.section, &clock);
+        wait_for_end(&job, &worker, &rows, WORK);
+        assert_eq!(run_to_exit(&worker, &clock).state, ExitState::Completed);
+    });
+}
+
+/// Pins that a transaction committed inside the settling window is read, each
+/// row once. Regression for #1763.
+#[test]
+#[ignore = "requires Docker"]
+fn a_transaction_committed_during_the_window_is_read() {
+    on_transactional_broker(a_transaction_committed_during_the_window_on);
+}
+
+fn a_transaction_committed_during_the_window_on(brokers: &str) {
+    let job = listed(brokers, "window-commit", "");
+    let (held, rows) = staged(&job, "held");
+    let open = open_transaction_with(brokers, WORK, "held", &[held]);
+
+    let clock = TestClock::frozen();
+    let worker = launch_bounded(KafkaFeed::connect, &job.data, &job.section, &clock);
+    hold_for(&worker, &clock, HALF_WINDOW);
+    let depth = read_depth(&*worker.feed, DepthOf::Feed).unwrap();
+    assert!(depth.visible > 0, "the depth counts the open transaction");
+    open.commit_transaction(TRANSACTION_TIMEOUT)
+        .expect("commit");
+    wait_for_end(&job, &worker, &rows, WORK);
+    assert_eq!(run_to_exit(&worker, &clock).state, ExitState::Completed);
+}
+
+/// Pins that a transaction aborted inside the settling window on a topic no
+/// unit was read from ends the job, with the group's commit at the log's end.
+/// Regression for #1763.
+#[test]
+#[ignore = "requires Docker"]
+fn a_transaction_aborted_during_the_window_ends_completed() {
+    on_transactional_broker(a_transaction_aborted_during_the_window_on);
+}
+
+fn a_transaction_aborted_during_the_window_on(brokers: &str) {
+    let job = listed(brokers, "window-abort", "");
+    let open = produce_transaction(brokers, RETRY, 1, "held", Transaction::Open);
+
+    let clock = TestClock::frozen();
+    let worker = launch_bounded(KafkaFeed::connect, &job.data, &job.section, &clock);
+    hold_for(&worker, &clock, HALF_WINDOW);
+    let depth = read_depth(&*worker.feed, DepthOf::Feed).unwrap();
+    assert!(depth.visible > 0, "the depth counts the open transaction");
+    open.abort_transaction(TRANSACTION_TIMEOUT).expect("abort");
+    wait_for_end(&job, &worker, &[], RETRY);
+    assert_eq!(run_to_exit(&worker, &clock).state, ExitState::Completed);
+}
+
+/// Pins that a transaction opened inside a settling window restarts it: the job
+/// holds until the transaction resolves and reads its unit. Regression for
+/// #1763.
+#[test]
+#[ignore = "requires Docker"]
+fn a_transaction_opened_during_a_window_restarts_it() {
+    on_transactional_broker(a_transaction_opened_during_a_window_on);
+}
+
+fn a_transaction_opened_during_a_window_on(brokers: &str) {
+    let job = listed(brokers, "window-open", "");
+    let mut rows = recs("first", 2);
+    job.publish("first.ndjson", &rows);
+
+    let clock = TestClock::frozen();
+    let worker = launch_bounded(KafkaFeed::connect, &job.data, &job.section, &clock);
+    wait_for_end(&job, &worker, &rows, WORK);
+    hold_for(&worker, &clock, HALF_WINDOW);
+    let (read, end) = (rows.clone(), job.committed(WORK));
+    let (held, more) = staged(&job, "held");
+    rows.extend(more);
+    let open = open_transaction_with(brokers, WORK, "held", &[held]);
+    hold_open(&worker, &clock);
+    assert_eq!(
+        written(&worker.script),
+        sorted(read),
+        "read past the transaction"
+    );
+    assert_eq!(job.committed(WORK), end, "committed past the transaction");
+    open.commit_transaction(TRANSACTION_TIMEOUT)
+        .expect("commit");
+    wait_for_end(&job, &worker, &rows, WORK);
+    assert_eq!(run_to_exit(&worker, &clock).state, ExitState::Completed);
+}
+
+/// Pins that a stop during a hold exits as a requested shutdown and leaves the
+/// units for a later worker on the group, which reads them once the transaction
+/// resolves. Regression for #1763.
+#[test]
+#[ignore = "requires Docker"]
+fn a_stop_during_a_hold_leaves_the_units_for_the_next_worker() {
+    on_transactional_broker(a_stop_during_a_hold_on);
+}
+
+fn a_stop_during_a_hold_on(brokers: &str) {
+    let job = listed(brokers, "stop-hold", "");
+    let (held, rows) = staged(&job, "held");
+    let open = open_transaction_with(brokers, WORK, "held", &[held]);
+
+    let clock = TestClock::frozen();
+    let worker = launch_bounded(KafkaFeed::connect, &job.data, &job.section, &clock);
+    hold_open(&worker, &clock);
+    assert_eq!(worker.stop(), ExitState::Completed);
+    assert_eq!(job.committed(WORK), None);
+
+    open.commit_transaction(TRANSACTION_TIMEOUT)
+        .expect("commit");
+    let clock = TestClock::frozen();
+    let next = launch_bounded(KafkaFeed::connect, &job.data, &job.section, &clock);
+    wait_for_end(&job, &next, &rows, WORK);
+    assert_eq!(run_to_exit(&next, &clock).state, ExitState::Completed);
 }

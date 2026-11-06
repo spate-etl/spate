@@ -14,22 +14,20 @@ use rdkafka::mocking::{MockCluster, MockCoordinator};
 use rdkafka::types::RDKafkaRespErr;
 use spate_core::clock::TestClock as StopClock;
 use spate_core::clock::tokio::TestClock;
-use spate_core::feed::{
-    Depth, DepthOf, Feed, FeedError, FeedErrorKind, FeedMetricsCtx, Receipt, Unit,
-};
+use spate_core::feed::{DepthOf, Feed, FeedErrorKind, FeedMetricsCtx, Receipt, Unit};
 use spate_core::metrics::Meter;
 use spate_core::pipeline::ExitState;
 use spate_kafka::feed::KafkaFeedError;
 use spate_test::{WriteOutcome, wait_until};
 use std::time::{Duration, Instant};
 use support::feed::{
-    ATTEMPT, ATTEMPT_PARTITIONS, DEAD, DEADLINE, FeedClock, ON_MOCK, RETRY, WORK, bounded_section,
-    committed, data_dir, direct, direct_on, exists, feed_yaml, high_watermark, high_watermarks,
-    launch, launch_bounded, launch_customized, launch_on, launch_stopping, list_once, produce_copy,
-    produce_raw, publish, publish_to, publisher_on_mock, read_attempts, read_topic, recs,
-    run_to_exit, sorted, stage, written,
+    ATTEMPT, ATTEMPT_PARTITIONS, BoundedJob, DEAD, DEADLINE, FeedClock, ON_MOCK, RETRY, WORK,
+    assert_stalled, bounded_section, committed, data_dir, direct, direct_on, exists, feed_yaml,
+    high_watermark, high_watermarks, launch, launch_bounded, launch_customized, launch_on,
+    launch_stopping, list_once, produce_copy, produce_raw, publish, publish_to, publisher_on_mock,
+    read_attempts, read_depth, read_topic, recs, run_to_exit, sorted, stage, written,
 };
-use support::{corrupt_batch, produce_batch};
+use support::{Marker, corrupt_batch, produce_batch, try_produce_batch, write_marker};
 
 /// A cluster of `brokers` with the work, retry and dead-letter topics, one
 /// partition each, and the attempt topic with two.
@@ -1152,27 +1150,238 @@ fn a_message_with_no_unit_ends_a_bounded_job_stalled() {
         "the message is dead-lettered and committed",
         || high_watermark(&brokers, DEAD) == 1 && committed(&brokers, &group, WORK) == Some(1),
     );
-    let report = run_to_exit(&worker, &clock);
-    assert_eq!(report.exit_code(), 1);
-    let ExitState::Failed(failure) = &report.state else {
-        panic!("expected a failed run, got {:?}", report.state);
-    };
-    assert!(
-        failure.reason.contains("bounded feed job stalled") && failure.reason.contains(DEAD),
-        "{}",
-        failure.reason
-    );
+    assert_stalled(&run_to_exit(&worker, &clock));
 }
 
-/// Read `of` from `feed` and wait for the answer.
-fn read_depth(feed: &dyn Feed, of: DepthOf) -> Result<Depth, FeedError> {
-    let mut reading = feed.read_depth(of).expect("the Kafka feed counts");
-    let mut outcome = None;
-    wait_until(DEADLINE, "the depth read is answered", || {
-        outcome = reading.try_outcome();
-        outcome.is_some()
+/// A bounded job on the mock, its lister run.
+fn listed(brokers: &str, tag: &str) -> BoundedJob {
+    BoundedJob::listed(brokers, tag, "", publisher_on_mock)
+}
+
+/// Pins that a bounded job ends `Completed` once its unit is read and the
+/// group has committed past the marker behind it, for either marker.
+/// Regression for #1728.
+#[test]
+fn a_marker_on_the_work_topic_ends_a_bounded_job() {
+    for marker in [Marker::Commit, Marker::Abort] {
+        let cluster = cluster(1);
+        let brokers = cluster.bootstrap_servers();
+        let job = listed(&brokers, "marker");
+        let rows = recs("b", 2);
+        job.publish("b.ndjson", &rows);
+        write_marker(&brokers, WORK, 0, marker);
+
+        let clock = TestClock::frozen();
+        let worker = launch_bounded(ON_MOCK, &job.data, &job.section, &clock);
+        wait_until(DEADLINE, "the unit and marker are committed", || {
+            written(&worker.script) == sorted(rows.clone()) && job.committed(WORK) == Some(2)
+        });
+        let report = run_to_exit(&worker, &clock);
+        assert_eq!(report.state, ExitState::Completed, "{marker:?}");
+        assert_eq!(report.exit_code(), 0, "{marker:?}");
+    }
+}
+
+/// Pins that a partition with no delivery commits past a marker, so a marker
+/// alone on the retry topic ends a bounded job. Regression for #1728.
+#[test]
+fn a_marker_on_the_retry_topic_ends_a_bounded_job() {
+    let cluster = cluster(1);
+    let brokers = cluster.bootstrap_servers();
+    let job = listed(&brokers, "retry-marker");
+    write_marker(&brokers, RETRY, 0, Marker::Commit);
+
+    let clock = TestClock::frozen();
+    let worker = launch_bounded(ON_MOCK, &job.data, &job.section, &clock);
+    wait_until(DEADLINE, "the retry topic's marker is committed", || {
+        job.committed(RETRY) == Some(1)
     });
-    outcome.expect("answered")
+    assert_eq!(run_to_exit(&worker, &clock).state, ExitState::Completed);
+}
+
+/// [`cluster`] with a work topic of two partitions.
+fn two_partition_cluster() -> MockCluster<'static, rdkafka::producer::DefaultProducerContext> {
+    let cluster = MockCluster::new(1).expect("mock cluster");
+    cluster.create_topic(WORK, 2, 1).expect("create topic");
+    for topic in [RETRY, DEAD] {
+        cluster.create_topic(topic, 1, 1).expect("create topic");
+    }
+    cluster
+        .create_topic(ATTEMPT, ATTEMPT_PARTITIONS, 1)
+        .expect("create topic");
+    cluster
+}
+
+/// Pins that each partition commits past its own marker: a unit and a marker
+/// on one and a marker alone on the other. Regression for #1728.
+#[test]
+fn a_partition_holding_only_a_marker_ends_a_bounded_job() {
+    let cluster = two_partition_cluster();
+    let brokers = cluster.bootstrap_servers();
+    let job = listed(&brokers, "partition-marker");
+    job.publish("b.ndjson", &recs("b", 2));
+    write_marker(&brokers, WORK, 0, Marker::Commit);
+    write_marker(&brokers, WORK, 1, Marker::Commit);
+
+    let clock = TestClock::frozen();
+    let worker = launch_bounded(ON_MOCK, &job.data, &job.section, &clock);
+    wait_until(DEADLINE, "both partitions are committed", || {
+        support::committed_by(&brokers, &job.group, WORK, 2)
+            == [rdkafka::Offset::Offset(2), rdkafka::Offset::Offset(1)]
+    });
+    assert_eq!(run_to_exit(&worker, &clock).state, ExitState::Completed);
+}
+
+/// Pins that a position is read per partition: a marker on one partition
+/// moves that partition's commit while a held unit holds the other's.
+/// Regression for #1728.
+#[test]
+fn each_partition_passes_its_own_marker() {
+    let cluster = two_partition_cluster();
+    let brokers = cluster.bootstrap_servers();
+    let job = listed(&brokers, "own-marker");
+    job.publish("b.ndjson", &recs("b", 1));
+    write_marker(&brokers, WORK, 1, Marker::Commit);
+
+    let worker = launch(&job.data, &job.section, |sink| {
+        sink.enqueue_global(WriteOutcome::ok().held());
+    });
+    wait_until(DEADLINE, "the unit's write is held", || {
+        worker.script.held_writes() == 1
+    });
+    wait_until(DEADLINE, "the marker alone is committed", || {
+        support::committed_by(&brokers, &job.group, WORK, 2)[1] == rdkafka::Offset::Offset(1)
+    });
+    assert!(
+        matches!(
+            support::committed_by(&brokers, &job.group, WORK, 2)[0],
+            rdkafka::Offset::Invalid | rdkafka::Offset::Offset(0)
+        ),
+        "the held unit's partition moved"
+    );
+    worker.script.release_held();
+    assert_eq!(worker.stop(), ExitState::Completed);
+}
+
+/// Pins that a marker written after the last commit still moves the group's
+/// commit, on a later pass. Regression for #1728.
+#[test]
+fn a_marker_written_after_the_last_commit_ends_the_job() {
+    let cluster = cluster(1);
+    let brokers = cluster.bootstrap_servers();
+    let job = listed(&brokers, "late-marker");
+    job.publish("b.ndjson", &recs("b", 2));
+
+    let clock = TestClock::frozen();
+    let worker = launch_bounded(ON_MOCK, &job.data, &job.section, &clock);
+    wait_until(DEADLINE, "the unit is committed", || {
+        job.committed(WORK) == Some(1)
+    });
+    write_marker(&brokers, WORK, 0, Marker::Commit);
+    wait_until(DEADLINE, "the marker is committed", || {
+        job.committed(WORK) == Some(2)
+    });
+    assert_eq!(run_to_exit(&worker, &clock).state, ExitState::Completed);
+}
+
+/// Pins that a broker outage before a marker bars nothing: once the broker is
+/// back the commit passes the marker and the job ends.
+#[test]
+fn a_broker_outage_before_a_marker_still_ends_a_bounded_job() {
+    let cluster = cluster(1);
+    let brokers = cluster.bootstrap_servers();
+    let job = listed(&brokers, "outage-marker");
+    job.publish("b.ndjson", &recs("b", 2));
+
+    let clock = TestClock::frozen();
+    let worker = launch_bounded(ON_MOCK, &job.data, &job.section, &clock);
+    wait_until(DEADLINE, "the unit is committed", || {
+        job.committed(WORK) == Some(1)
+    });
+    cluster.broker_down(1).unwrap();
+    cluster.broker_up(1).unwrap();
+    let marker = support::control_batch(Marker::Commit);
+    wait_until(DEADLINE, "the broker takes the marker", || {
+        try_produce_batch(&brokers, WORK, 0, &marker).is_ok_and(|code| code == 0)
+    });
+    // Read back: a write whose reply was lost is sent again, and takes an offset.
+    wait_until(DEADLINE, "the marker is committed", || {
+        job.committed(WORK) == Some(high_watermark(&brokers, WORK))
+    });
+    assert_eq!(run_to_exit(&worker, &clock).state, ExitState::Completed);
+}
+
+/// Pins that a commit refused on a partition with no delivery is sent again
+/// on a later pass. Regression for #1728.
+#[test]
+fn a_failed_commit_past_a_marker_lands_on_a_later_pass() {
+    let cluster = cluster(1);
+    let brokers = cluster.bootstrap_servers();
+    let job = listed(&brokers, "refused-marker");
+    write_marker(&brokers, WORK, 0, Marker::Commit);
+    // A code librdkafka does not retry on its own.
+    cluster.request_errors(
+        rdkafka::types::RDKafkaApiKey::OffsetCommit,
+        &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_OFFSET_METADATA_TOO_LARGE],
+    );
+
+    let clock = TestClock::frozen();
+    let worker = launch_bounded(ON_MOCK, &job.data, &job.section, &clock);
+    wait_until(DEADLINE, "the marker is committed", || {
+        job.committed(WORK) == Some(1)
+    });
+    assert_eq!(run_to_exit(&worker, &clock).state, ExitState::Completed);
+}
+
+/// Pins the limit the feed's page states: the dead-letter read counts end
+/// offsets, so a marker alone on that topic stalls a bounded job.
+#[test]
+fn a_marker_on_the_dead_letter_topic_stalls_a_bounded_job() {
+    let cluster = cluster(1);
+    let brokers = cluster.bootstrap_servers();
+    let job = listed(&brokers, "dead-marker");
+    write_marker(&brokers, DEAD, 0, Marker::Commit);
+
+    let clock = TestClock::frozen();
+    let worker = launch_bounded(ON_MOCK, &job.data, &job.section, &clock);
+    assert_stalled(&run_to_exit(&worker, &clock));
+}
+
+/// Pins that a marker behind a corrupt batch stays unpassed: the feed latches
+/// on the batch and commits nothing past it.
+#[test]
+fn a_marker_behind_a_corrupt_batch_commits_nothing_past_it() {
+    let cluster = cluster(1);
+    let brokers = cluster.bootstrap_servers();
+    let job = listed(&brokers, "corrupt-marker");
+    job.publish("b.ndjson", &recs("b", 1));
+    assert_eq!(
+        produce_batch(&brokers, WORK, 0, &corrupt_batch(b"lost", b"body")),
+        0
+    );
+    write_marker(&brokers, WORK, 0, Marker::Commit);
+
+    let section = feed_yaml(
+        &brokers,
+        &job.group,
+        &format!(
+            "  location: \"file://{}/\"\n",
+            job.dir.path().join("jobs").display()
+        ),
+        "      check.crcs: \"true\"\n",
+    );
+    let clock = TestClock::frozen();
+    let worker = launch_bounded(ON_MOCK, &job.data, &section, &clock);
+    let report = run_to_exit(&worker, &clock);
+    assert!(
+        matches!(report.state, ExitState::Failed(_)),
+        "{:?}",
+        report.state
+    );
+    assert!(
+        job.committed(WORK).is_none_or(|at| at <= 1),
+        "the group committed past the corrupt batch"
+    );
 }
 
 /// Pins that a broker refusing to describe the dead-letter topic, which it

@@ -19,8 +19,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use support::{
-    Transaction, Watched, await_assignment, broker, drain_lane, produce, produce_transaction,
-    transactional_broker,
+    Transaction, Watched, await_assignment, broker, drain_lane, log_end, produce,
+    produce_transaction, transactional_broker,
 };
 use testcontainers::Container;
 use testcontainers::runners::SyncRunner;
@@ -390,20 +390,6 @@ fn topic_config(brokers: &str, topic: &str, group: &str) -> KafkaSourceConfig {
     cfg
 }
 
-/// The end of partition 0's log. A `read_committed` client reads the last stable
-/// offset here instead, which an open transaction holds below the log's end.
-fn log_end(brokers: &str, topic: &str) -> i64 {
-    let probe: BaseConsumer = support::raw_config()
-        .set("bootstrap.servers", brokers)
-        .set("isolation.level", "read_uncommitted")
-        .build()
-        .expect("probe");
-    probe
-        .fetch_watermarks(topic, 0, Duration::from_secs(10))
-        .expect("watermarks")
-        .1
-}
-
 /// Read `records` from `topic` and commit through `committed`, then read it back
 /// from a second source on the group: lag is 0 and the offset holds both times.
 fn lag_reaches_zero_across_a_restart(
@@ -494,7 +480,7 @@ fn real_broker_an_open_transaction_holds_lag_at_the_last_stable_offset() {
     assert_eq!(watched.commit(), [(PartitionId(0), 100)]);
     watched.wait_lag(0, 0.0);
     assert!(
-        log_end(&brokers, TOPIC) > 100,
+        log_end(&brokers, TOPIC, 0) > 100,
         "the log runs past the stable offset"
     );
     assert_eq!(watched.poll(0), None, "read past the open transaction");
@@ -508,7 +494,7 @@ fn real_broker_an_open_transaction_holds_lag_at_the_last_stable_offset() {
     let later = watched.read(0, 60);
     assert_eq!(later.len(), 60);
     assert!(later.is_sorted() && later[0] == 100, "{later:?}");
-    let end = log_end(&brokers, TOPIC);
+    let end = log_end(&brokers, TOPIC, 0);
     watched.poll_until_committed(0, 0, end);
     watched.wait_lag(0, 0.0);
 }
@@ -531,14 +517,14 @@ fn real_broker_alternating_writes_settle_at_zero() {
         watched.read(0, 5);
         let tag = format!("dropped-{round}");
         let _ = produce_transaction(&brokers, TOPIC, 5, &tag, Transaction::Abort);
-        let end = log_end(&brokers, TOPIC);
+        let end = log_end(&brokers, TOPIC, 0);
         seen.extend(watched.poll_until_committed(0, 0, end));
     }
     assert!(seen.is_sorted(), "the watermark fell: {seen:?}");
     watched.wait_lag(0, 0.0);
     assert_eq!(
         support::committed_by(&brokers, "alternating", TOPIC, 1),
-        [rdkafka::Offset::Offset(log_end(&brokers, TOPIC))]
+        [rdkafka::Offset::Offset(log_end(&brokers, TOPIC, 0))]
     );
 }
 
@@ -692,7 +678,7 @@ mod latest_start {
     use super::*;
     use rdkafka::admin::{AdminClient, AdminOptions, NewPartitions};
     use rdkafka::client::DefaultClientContext;
-    use rdkafka::producer::{BaseProducer, BaseRecord, Producer as _};
+    use rdkafka::producer::{BaseRecord, Producer as _};
     use support::latest;
     use testcontainers::ImageExt as _;
 
@@ -925,14 +911,7 @@ mod latest_start {
         support::create_topic(&brokers, TOPIC, 1);
         support::produce_to(&brokers, TOPIC, 0, 0..2);
 
-        let producer: BaseProducer = support::raw_config()
-            .set("bootstrap.servers", &brokers)
-            .set("transactional.id", "open-transaction")
-            .build()
-            .expect("producer");
-        producer
-            .init_transactions(Duration::from_secs(60))
-            .expect("init");
+        let producer = support::transactional_producer(&brokers, TOPIC, "open-transaction");
         producer.begin_transaction().expect("begin");
         for i in 0..3 {
             let payload = format!("0:{}", 2 + i);

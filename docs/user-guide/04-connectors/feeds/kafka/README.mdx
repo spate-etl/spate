@@ -103,6 +103,7 @@ is denied, because passthrough and feed values apply in unspecified order.
 | `auto.commit.enable` | librdkafka's legacy topic-level auto-commit property; the feed commits each partition up to its first unfinished unit itself. |
 | `enable.auto.offset.store` | The feed decides which offsets may be committed. |
 | `enable.partition.eof` | The feed reads only messages from the consumer. |
+| `isolation.level` | The feed sets it: the depth reader lists ends at the high watermark so a confirmed write behind an open transaction counts, and the group member reads committed records so a commit cannot pass that transaction. |
 | `acks`, `request.required.acks` | Forced to `all`: a unit is read once the delivery report confirms its attempt write, and its offset completes once the report confirms its tombstone or retry write. |
 | `enable.idempotence` | Forced on, so librdkafka's own retries neither reorder nor duplicate a write. |
 | `transactional.id` | The feed does not use transactions; a write is confirmed by its delivery report. |
@@ -323,12 +324,30 @@ retry topic is confirmed, or, for a write to the dead-letter topic, once the
 tombstone sent after that write is. A unit waiting at the gate, or with its
 attempt write in flight, holds its offset unfinished. Each partition commits
 up to its first unfinished offset, every second and when the partition is
-revoked. A unit still unfinished blocks the commits of its partition, so the
-next owner of the partition reads that unit again and every unit read after
-it.
+revoked, and past offsets that hold no record
+([Transaction markers](#transaction-markers)). A unit still unfinished blocks
+the commits of its partition, so the next owner of the partition reads that
+unit again and every unit read after it.
 
 A rebalance that fails gives up every partition with nothing committed. The
 units read since the last commit are delivered again.
+
+### Transaction markers
+
+A transaction marker takes an offset and is never delivered, and the group's
+consumer skips an aborted transaction's records the same way. librdkafka moves
+the consumer's position past them when a partition's queue is polled. Within
+one commit interval of that, the partition commits past those offsets, once
+every unit below them has finished. A marker behind an unfinished unit waits
+for it, and a partition no unit was read from commits past its markers too.
+
+A revocation's commit reads no position, so a marker served since the last
+commit falls to the partition's next owner, as does a marker not yet served when
+a worker stops.
+
+An unclean leader election can truncate a partition below the group's commit.
+A worker that starts at that commit never reads the units written to the reused
+offsets, and the depth reads the partition as drained.
 
 ## Copying dead-lettered units back
 
@@ -381,16 +400,52 @@ or with a commit below its log start, counts from its log start, so a
 partition that never held a unit, or whose records retention deleted unread,
 reads as drained. The committed offsets are read first: a unit failed between
 the two reads has its retry write confirmed before its work offset is
-committed, so it shows on the retry topic's end offset either way. Kafka's
-offsets are exact, so the window guards only against a peer still holding a
-unit.
+committed, so it shows on the retry topic's end offset either way. The window
+guards against a peer still holding a unit.
+
+The depth reader lists each end at the high watermark, and the group's consumer
+reads committed records. An end counts offsets, so a marker, an aborted record
+and a record behind an open transaction each read as one, and the commit passes
+those with no record ([Transaction markers](#transaction-markers)), so the depth
+still reaches zero. The
+[Kafka source](../../sources/kafka/README.mdx#transaction-markers) lists its
+ends at its own `isolation.level`, so under `read_committed` its lag stops at
+the last stable offset.
+
+### While a transaction is open
+
+Another writer's open transaction on the work or retry topic holds the job open.
+The group stops at the transaction's first offset, and every unit from there on
+is read once the transaction resolves, except the units in a transaction that
+aborts, which are never read. The feed puts no bound on the wait. A broker
+aborts a transaction past its timeout, which Apache Kafka and Redpanda each cap
+at 15 minutes by default, but neither promises that bound: a hung transaction on
+Apache Kafka and a live writer on Redpanda can outlast it.
+
+When the group's commits have not moved over 20 depth reads, about five minutes,
+with offsets above them, the worker logs one `info` line naming the first
+partition behind, its end and committed offsets, and how many others are behind.
+Find the transaction with `kafka-transactions.sh describe-producers` on Apache
+Kafka or `rpk cluster txn describe-producers --topics <topic>` on Redpanda. Both
+print the producer and the transaction's first offset. `kafka-transactions.sh
+abort` ends it on Apache Kafka. `rpk` has no abort, so on Redpanda the Admin
+API's `mark_transaction_expired`, given that producer's id and epoch, ends it.
+The records of a transaction ended this way are never read. A stop during the
+wait exits as any requested shutdown does, and a later worker on the group reads
+the units.
+
+### The dead-letter topic
 
 Once the window passes, the worker reads the dead-letter topic's end offsets,
-and any partition above zero fails the job as stalled, naming the topic. The
-end offset stays where it is when retention deletes the record, so a unit
-dead-lettered at any point in the job counts. Give each bounded job fresh work,
-retry, dead-letter and attempt topics: a dead-letter topic an earlier job
+and any partition above zero fails the job as stalled, naming the topic. The end
+offset stays where it is when retention deletes the record, so a unit
+dead-lettered at any point in the job counts. It counts every offset, so a
+marker, an aborted record or a record behind an open transaction fails the job
+too, whether or not that transaction has resolved. Give each bounded job fresh
+work, retry, dead-letter and attempt topics: a dead-letter topic an earlier job
 wrote fails a later job as stalled.
+
+### What a read needs
 
 The reads need `Describe` on the work, retry and dead-letter topics, which the
 [startup checks](#startup-checks) already need, and `Describe` on the feed's
@@ -681,10 +736,12 @@ The producer's statistics are aggregate only, as the sink's are
 | `spate_kafka_feed_broker_outbuf_latency_p99_seconds` | gauge | `client="producer"`, `broker` | [`spate_kafka_sink_broker_outbuf_latency_p99_seconds`](../../sinks/kafka/README.mdx#metrics) |
 
 `spate_feed_dead_letter_units` reads the dead-letter topic as the sum of its
-partitions' end offsets, so it counts every record ever written there, copied
-back or deleted by retention included, and never falls. Alert on a rise, such as
+partitions' end offsets, so it counts every offset ever written there, a record
+copied back or deleted by retention included, and a marker, an aborted record or
+a record behind another writer's open transaction too. It never falls. Alert on
+a rise, such as
 `max by (pipeline) (delta(spate_feed_dead_letter_units[10m])) > 0`, rather than
-on a non-zero value.
+on a non-zero value. Another writer's transaction on the topic fires that alert.
 
 ## Related
 

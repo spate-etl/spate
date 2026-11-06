@@ -18,7 +18,7 @@
 //! `<topic>/<partition>/<offset>` when it has no key, is the unit's id, and
 //! its value the unit's body. The feed's offset tracker holds every delivered
 //! offset until it finishes, and each partition commits up to its first
-//! unfinished offset.
+//! unfinished offset, past any offsets that hold no record.
 //! An acknowledged unit's offset finishes once the tombstone of its attempt
 //! record is confirmed by its delivery report. A failed unit's offset
 //! finishes once its write to the retry topic is confirmed, or, for a write
@@ -541,8 +541,9 @@ impl Drop for LatchOnPanic {
 /// more, so every unit since its last commit is delivered again.
 ///
 /// [`read_depth`](Feed::read_depth) reports the group's lag on the work and
-/// retry topics, or the sum of the dead-letter topic's end offsets, read on
-/// a thread of the feed's own through a consumer that never joins the group.
+/// retry topics, or the sum of the dead-letter topic's end offsets, read at the
+/// high watermark on a thread of the feed's own through a consumer that never
+/// joins the group.
 ///
 /// A process that only publishes, such as a lister run, builds a
 /// [`KafkaFeedPublisher`], which joins no group and reports no depth.

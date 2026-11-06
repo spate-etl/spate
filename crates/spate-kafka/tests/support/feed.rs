@@ -15,8 +15,8 @@ use spate_core::clock::TestClock as StopClock;
 use spate_core::clock::tokio::TestClock;
 use spate_core::config::{FeedSection, PipelineConfig};
 use spate_core::feed::{
-    Confirmation, Delivery, DepthOf, DepthReading, Feed, FeedError, FeedErrorKind, FeedMetricsCtx,
-    FeedWaker, Receipt, Unit, wake_channel,
+    Confirmation, DEFAULT_SETTLING_WINDOW, Delivery, Depth, DepthOf, DepthReading, Feed, FeedError,
+    FeedErrorKind, FeedMetricsCtx, FeedWaker, Receipt, Unit, wake_channel,
 };
 use spate_core::pipeline::{ExitState, Pipeline, RuntimeOptions, ShutdownHandle};
 use spate_core::sink::SinkPoolConfig;
@@ -616,7 +616,8 @@ pub(crate) fn read_attempts(brokers: &str, partitions: i32, n: usize) -> Vec<Att
     got
 }
 
-/// How many messages partition 0 of `topic` holds.
+/// How many messages partition 0 of `topic` holds, read at the default
+/// `read_committed`: the last stable offset.
 pub(crate) fn high_watermark(brokers: &str, topic: &str) -> i64 {
     let consumer: BaseConsumer = super::raw_config()
         .set("bootstrap.servers", brokers)
@@ -675,6 +676,28 @@ pub(crate) fn produce_raw(brokers: &str, topic: &str, messages: &[(Option<&[u8]>
         producer.send(record).map_err(|(e, _)| e).expect("enqueue");
     }
     producer.flush(Duration::from_secs(30)).expect("flush");
+}
+
+/// Open a transaction on partition 0 of `topic` that holds `units`, each keyed
+/// by its id, and flush them. Returns the producer that ends it.
+#[must_use = "an open transaction ends through this producer"]
+pub(crate) fn open_transaction_with(
+    brokers: &str,
+    topic: &str,
+    tag: &str,
+    units: &[Unit],
+) -> BaseProducer {
+    let producer = super::transactional_producer(brokers, topic, tag);
+    producer.begin_transaction().expect("begin");
+    for unit in units {
+        let record = BaseRecord::<[u8], [u8]>::to(topic)
+            .partition(0)
+            .key(unit.id.as_bytes())
+            .payload(&unit.body[..]);
+        producer.send(record).map_err(|(e, _)| e).expect("enqueue");
+    }
+    producer.flush(super::TRANSACTION_TIMEOUT).expect("flush");
+    producer
 }
 
 /// Produce `message` to partition 0 of `topic` with its key, value and
@@ -802,11 +825,75 @@ pub(crate) const STEP: Duration = Duration::from_secs(15);
 /// The `feed:` section of a bounded job for `group` on `brokers`, at a
 /// `file://` location under `dir`.
 pub(crate) fn bounded_section(brokers: &str, group: &str, dir: &tempfile::TempDir) -> String {
+    bounded_section_with(brokers, group, dir, "")
+}
+
+/// [`bounded_section`] with `extra` appended to the section.
+fn bounded_section_with(
+    brokers: &str,
+    group: &str,
+    dir: &tempfile::TempDir,
+    extra: &str,
+) -> String {
     let location = format!(
-        "  location: \"file://{}/\"\n",
+        "  location: \"file://{}/\"\n{extra}",
         dir.path().join("jobs").display()
     );
     feed_yaml(brokers, group, &location, "")
+}
+
+/// A publish-only handle and the runtime it runs on.
+pub(crate) type Publisher = (
+    Result<KafkaFeedPublisher, KafkaFeedError>,
+    tokio::runtime::Runtime,
+);
+
+/// A bounded job whose lister has run, and the group and paths it runs under.
+pub(crate) struct BoundedJob {
+    pub(crate) brokers: String,
+    pub(crate) group: String,
+    pub(crate) dir: tempfile::TempDir,
+    pub(crate) data: PathBuf,
+    pub(crate) section: String,
+}
+
+impl BoundedJob {
+    /// The lister's run on `brokers`, through `publisher`, for a group named
+    /// from `tag`, with `extra` appended to the feed section.
+    pub(crate) fn listed(
+        brokers: &str,
+        tag: &str,
+        extra: &str,
+        publisher: impl FnOnce(&str) -> Publisher,
+    ) -> BoundedJob {
+        let group = spate_test::unique_name(tag);
+        let dir = tempfile::tempdir().unwrap();
+        let data = data_dir(&dir);
+        let section = bounded_section_with(brokers, &group, &dir, extra);
+        list_once(publisher(&section), &data, &section);
+        BoundedJob {
+            brokers: brokers.to_owned(),
+            group,
+            dir,
+            data,
+            section,
+        }
+    }
+
+    /// Stage `rows` as an object and publish its unit.
+    pub(crate) fn publish(&self, name: &str, rows: &[String]) {
+        let unit = stage(&self.data, name, rows);
+        produce_raw(
+            &self.brokers,
+            WORK,
+            &[(Some(unit.id.as_bytes()), &unit.body)],
+        );
+    }
+
+    /// The group's committed offset on partition 0 of `topic`.
+    pub(crate) fn committed(&self, topic: &str) -> Option<i64> {
+        committed(&self.brokers, &self.group, topic)
+    }
 }
 
 /// Run the job's lister once through `publisher`, a publish-only handle and
@@ -908,26 +995,80 @@ fn stage_with_etag(data: &Path, name: &str, rows: &[String]) -> Unit {
     Unit::new(name, descriptor.encode().unwrap())
 }
 
+/// Read `of` from `feed` and wait for the answer.
+pub(crate) fn read_depth(feed: &dyn Feed, of: DepthOf) -> Result<Depth, FeedError> {
+    let mut reading = feed.read_depth(of).expect("the Kafka feed counts");
+    let mut outcome = None;
+    wait_until(DEADLINE, "the depth read is answered", || {
+        outcome = reading.try_outcome();
+        outcome.is_some()
+    });
+    outcome.expect("answered")
+}
+
+/// Step `clock` once and wait for the worker's next depth read. The run hands
+/// its report out once, so this returns it when the worker exits instead.
+fn step_to_read(worker: &Worker, clock: &TestClock) -> Option<spate_core::pipeline::ExitReport> {
+    let reads = worker.recording.depth_reads();
+    clock.advance(STEP);
+    let mut exit = None;
+    wait_until(DEADLINE, "the next depth read or the end", || {
+        if exit.is_none() {
+            exit = worker.run.wait_exit(Duration::ZERO);
+        }
+        exit.is_some() || worker.recording.depth_reads() > reads
+    });
+    exit.map(|report| report.unwrap())
+}
+
 /// Step `clock` until the worker exits, waiting after each step for its
-/// next depth read. The run hands its report out once, so this keeps it.
+/// next depth read. Bounded by [`DEADLINE`] and no count of steps, since a
+/// worker reads depth long before its group forms.
 ///
 /// # Panics
 ///
-/// When the worker has not exited after 80 steps.
+/// When the worker has not exited within [`DEADLINE`].
 pub(crate) fn run_to_exit(worker: &Worker, clock: &TestClock) -> spate_core::pipeline::ExitReport {
-    for _ in 0..80 {
-        let reads = worker.recording.depth_reads();
-        clock.advance(STEP);
-        let mut exit = None;
-        wait_until(DEADLINE, "the next depth read or the end", || {
-            if exit.is_none() {
-                exit = worker.run.wait_exit(Duration::ZERO);
-            }
-            exit.is_some() || worker.recording.depth_reads() > reads
-        });
-        if let Some(report) = exit {
-            return report.unwrap();
+    let mut report = None;
+    wait_until(DEADLINE, "the job ends", || {
+        report = step_to_read(worker, clock);
+        report.is_some()
+    });
+    report.expect("the job ended")
+}
+
+/// Step `clock` through two settling windows, the most a job ending on an
+/// unchanged depth could take, with the worker reading depth at each step.
+///
+/// # Panics
+///
+/// When the worker exits, naming the state it reported.
+pub(crate) fn hold_open(worker: &Worker, clock: &TestClock) {
+    hold_for(worker, clock, 2 * DEFAULT_SETTLING_WINDOW);
+}
+
+/// Step `clock` through `span`, with the worker reading depth at each step.
+///
+/// # Panics
+///
+/// When the worker exits, naming the state it reported.
+pub(crate) fn hold_for(worker: &Worker, clock: &TestClock, span: Duration) {
+    for _ in 0..span.as_secs() / STEP.as_secs() {
+        if let Some(report) = step_to_read(worker, clock) {
+            panic!("the job ended while held open: {:?}", report.state);
         }
     }
-    panic!("the job never ended");
+}
+
+/// Assert that `report` is a job stalled on the dead-letter topic.
+pub(crate) fn assert_stalled(report: &spate_core::pipeline::ExitReport) {
+    assert_eq!(report.exit_code(), 1);
+    let ExitState::Failed(failure) = &report.state else {
+        panic!("expected a failed run, got {:?}", report.state);
+    };
+    assert!(
+        failure.reason.contains("bounded feed job stalled") && failure.reason.contains(DEAD),
+        "{}",
+        failure.reason
+    );
 }

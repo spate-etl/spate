@@ -12,6 +12,10 @@ use std::ffi::CStr;
 use std::sync::mpsc;
 use std::time::Duration;
 
+#[path = "../tests/support/wire.rs"]
+#[allow(dead_code, reason = "the integration suites use the rest")]
+pub(crate) mod wire;
+
 /// Run `f` on a thread of its own and report whether it returned within
 /// `limit`. A call that does not return leaves its thread running.
 #[expect(

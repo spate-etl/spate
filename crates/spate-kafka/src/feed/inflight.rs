@@ -1,7 +1,8 @@
 //! The in-flight tracker: the delivered offsets each owned partition has not
 //! finished, and how far each partition may commit.
 //!
-//! A partition's commit point is one past the offset delivered last, or its
+//! A partition's commit point is one past the offset delivered last, or past
+//! the offsets with no record the consumer's position has moved over, or its
 //! first unfinished offset where that is lower. An offset is finished when
 //! the write that settles it is confirmed: the tombstone of an acknowledged
 //! unit's attempt record, or the write that moves it to another topic. An
@@ -15,6 +16,8 @@
 //! write completes nothing. A held receipt is dropped when the reader next
 //! uses it.
 
+use crate::client::offset_to_retire;
+use rdkafka::Offset;
 use spate_core::feed::Receipt;
 use spate_core::hash::FastMap;
 use std::collections::BTreeMap;
@@ -52,7 +55,8 @@ struct Partition {
     /// Offsets delivered under this assignment and not yet finished, with
     /// the number of copies of each still unfinished.
     unfinished: BTreeMap<i64, u32>,
-    /// One past the offset delivered last under this assignment.
+    /// One past the offset delivered last under this assignment, or past
+    /// the offsets with no record retired after it.
     next: Option<i64>,
     /// The commit point [`Tracker::take_commits`] last returned.
     taken: Option<i64>,
@@ -207,12 +211,26 @@ impl Tracker {
         }
     }
 
-    /// The offset `tp` may commit: one past the offset delivered last, or its
-    /// first unfinished offset where that is lower. `None` before its first
-    /// delivery.
+    /// The offset `tp` may commit: one past the offset delivered or retired
+    /// last, or its first unfinished offset where that is lower. `None` before
+    /// its first delivery or retired offset.
     #[cfg(test)]
     pub(crate) fn commit_point(&self, tp: &Tp) -> Option<i64> {
         self.partitions.get(tp)?.commit_point()
+    }
+
+    /// Raise `tp`'s next offset to the consumer's position `read_to`, past
+    /// offsets no delivery names. Returns the next offset it replaced and the
+    /// one it set, or `None` when `tp` is not owned or nothing lies between
+    /// them.
+    ///
+    /// The commit point stays capped at the first unfinished offset, and a
+    /// later delivery below the raised offset still takes it back down.
+    pub(crate) fn retire_to(&mut self, tp: &Tp, read_to: Offset) -> Option<(Option<i64>, i64)> {
+        let partition = self.partitions.get_mut(tp)?;
+        let last = offset_to_retire(read_to, partition.next)?;
+        let from = partition.next.replace(last + 1);
+        Some((from, last + 1))
     }
 
     /// The commit point of every owned partition whose point moved since the
@@ -313,6 +331,135 @@ mod tests {
         assert_eq!(t.commit_point(&tp(0)), Some(10));
         assert_eq!(t.take_commits(), vec![(tp(0), 10)]);
         assert_eq!(t.take_commits(), vec![], "unchanged since the last take");
+    }
+
+    /// Pins that a position past the last delivery moves the commit point,
+    /// and that the moved point is taken once.
+    #[test]
+    fn a_position_past_the_last_delivery_moves_the_commit_point() {
+        let mut t = Tracker::new();
+        t.assign([tp(0)]);
+        let unit = t.deliver(&tp(0), 5).unwrap();
+        assert!(t.acknowledge(unit));
+        assert_eq!(t.retire_to(&tp(0), Offset::Offset(8)), Some((Some(6), 8)));
+        assert_eq!(t.take_commits(), vec![(tp(0), 8)]);
+        assert_eq!(t.take_commits(), vec![], "unchanged since the last take");
+    }
+
+    /// Pins that a position does not pass an unfinished offset: the point
+    /// waits at it and moves to the position once it finishes.
+    #[test]
+    fn a_position_stops_at_the_first_unfinished_offset() {
+        let mut t = Tracker::new();
+        t.assign([tp(0)]);
+        let unit = t.deliver(&tp(0), 5).unwrap();
+        t.retire_to(&tp(0), Offset::Offset(9));
+        assert_eq!(t.commit_point(&tp(0)), Some(5));
+        assert!(t.acknowledge(unit));
+        assert_eq!(t.commit_point(&tp(0)), Some(9));
+    }
+
+    /// Pins that a partition with no delivery commits its position, and that
+    /// a failed commit of it is taken again.
+    #[test]
+    fn a_partition_with_no_delivery_commits_its_position() {
+        let mut t = Tracker::new();
+        t.assign([tp(0)]);
+        t.retire_to(&tp(0), Offset::Offset(3));
+        assert_eq!(t.commit_point(&tp(0)), Some(3));
+        let taken = t.take_commits();
+        assert_eq!(taken, vec![(tp(0), 3)]);
+        t.untake(&taken);
+        assert_eq!(t.take_commits(), taken);
+    }
+
+    /// Pins what a position must be to move anything: above the next offset,
+    /// or above zero with none, and that the largest offset does not wrap.
+    #[test]
+    fn a_retired_position_rejects_what_is_not_above_next() {
+        let mut t = Tracker::new();
+        t.assign([tp(0)]);
+        assert_eq!(t.retire_to(&tp(0), Offset::Offset(0)), None);
+        assert_eq!(t.commit_point(&tp(0)), None);
+        assert_eq!(t.retire_to(&tp(0), Offset::Offset(1)), Some((None, 1)));
+        assert_eq!(t.commit_point(&tp(0)), Some(1));
+        let unit = t.deliver(&tp(0), 9).unwrap();
+        assert!(t.acknowledge(unit));
+        for position in [9, 10, -5] {
+            assert_eq!(t.retire_to(&tp(0), Offset::Offset(position)), None);
+        }
+        assert_eq!(t.commit_point(&tp(0)), Some(10));
+        assert!(t.retire_to(&tp(0), Offset::Offset(11)).is_some());
+        assert_eq!(t.commit_point(&tp(0)), Some(11));
+        assert!(t.retire_to(&tp(0), Offset::Offset(i64::MAX)).is_some());
+        assert_eq!(t.commit_point(&tp(0)), Some(i64::MAX));
+    }
+
+    /// Pins that a position no served op has set moves nothing, and that a
+    /// partition the feed does not own stays unowned.
+    #[test]
+    fn a_logical_position_changes_nothing() {
+        let mut t = Tracker::new();
+        t.assign([tp(0)]);
+        for logical in [
+            Offset::Invalid,
+            Offset::Stored,
+            Offset::End,
+            Offset::Beginning,
+            Offset::OffsetTail(1),
+        ] {
+            assert_eq!(t.retire_to(&tp(0), logical), None, "{logical:?}");
+        }
+        assert_eq!(t.commit_point(&tp(0)), None);
+        assert_eq!(t.retire_to(&tp(1), Offset::Offset(4)), None);
+        assert!(!t.owns(&tp(1)));
+    }
+
+    /// Pins that a delivery below a retired position takes the commit point
+    /// back, as a delivery below finished offsets does.
+    #[test]
+    fn a_delivery_below_a_retired_position_takes_the_point_back() {
+        let mut t = Tracker::new();
+        t.assign([tp(0)]);
+        t.retire_to(&tp(0), Offset::Offset(8));
+        let unit = t.deliver(&tp(0), 5).unwrap();
+        assert_eq!(t.commit_point(&tp(0)), Some(5));
+        assert!(t.acknowledge(unit));
+        assert_eq!(t.commit_point(&tp(0)), Some(6));
+    }
+
+    /// Pins that a revocation's commit point covers what the partition
+    /// retired.
+    #[test]
+    fn a_revocation_commits_past_what_it_retired() {
+        let mut t = Tracker::new();
+        t.assign([tp(0)]);
+        t.retire_to(&tp(0), Offset::Offset(4));
+        assert_eq!(t.revoke(&[tp(0)]), vec![(tp(0), 4)]);
+    }
+
+    /// Pins that a retired position does not outlive its assignment.
+    #[test]
+    fn a_reassignment_forgets_a_retired_position() {
+        let mut t = Tracker::new();
+        t.assign([tp(0)]);
+        t.retire_to(&tp(0), Offset::Offset(4));
+        t.assign([tp(0)]);
+        assert_eq!(t.commit_point(&tp(0)), None);
+    }
+
+    /// Pins that an offset released for a write holds a position above it
+    /// until the write is confirmed.
+    #[test]
+    fn a_released_offset_holds_a_retired_position() {
+        let mut t = Tracker::new();
+        t.assign([tp(0)]);
+        let unit = t.deliver(&tp(0), 5).unwrap();
+        let moving = t.release(unit).unwrap();
+        t.retire_to(&tp(0), Offset::Offset(8));
+        assert_eq!(t.commit_point(&tp(0)), Some(5));
+        assert!(t.complete(&moving));
+        assert_eq!(t.commit_point(&tp(0)), Some(8));
     }
 
     /// Pins that a receipt from before a reassignment is gone, and that
@@ -533,6 +680,11 @@ mod proptests {
         Assign { mask: u8 },
         /// Take the periodic commits.
         Take,
+        /// The position moves `gap` offsets past partition `p`'s next offset,
+        /// over offsets with no record.
+        Marker { p: usize, gap: i64 },
+        /// A position read `back` offsets below partition `p`'s next offset.
+        Stale { p: usize, back: i64 },
     }
 
     fn ops() -> impl Strategy<Value = Vec<Op>> {
@@ -549,6 +701,8 @@ mod proptests {
                 1 => Just(Op::Unassign),
                 2 => (1..8u8).prop_map(|mask| Op::Assign { mask }),
                 2 => Just(Op::Take),
+                2 => (0..PARTITIONS, 1..4i64).prop_map(|(p, gap)| Op::Marker { p, gap }),
+                1 => (0..PARTITIONS, 0..4i64).prop_map(|(p, back)| Op::Stale { p, back }),
             ],
             0..300,
         )
@@ -562,15 +716,19 @@ mod proptests {
         unfinished: BTreeMap<i64, u32>,
         /// The offset delivered last, if any.
         last: Option<i64>,
+        /// Whether a position has moved past the last delivery.
+        moved: bool,
         taken: Option<i64>,
     }
 
     impl Owned {
         /// The highest offset at or below `cursor`, where the reader reads
         /// next, with no unfinished copy below it. `None` before the first
-        /// delivery under this assignment.
+        /// delivery or moved position under this assignment.
         fn point(&self, cursor: i64) -> Option<i64> {
-            self.last?;
+            if self.last.is_none() && !self.moved {
+                return None;
+            }
             (0..=cursor)
                 .rev()
                 .find(|c| self.unfinished.range(..*c).next().is_none())
@@ -706,6 +864,27 @@ mod proptests {
                         if expected {
                             o.owned.get_mut(&p).unwrap().finish(position.offset);
                         }
+                    }
+                    Op::Marker { p, gap } => {
+                        let Some(owned) = o.owned.get_mut(&p) else {
+                            prop_assert!(t.retire_to(&tp_of(p), Offset::Offset(gap)).is_none());
+                            continue;
+                        };
+                        let read_to = o.cursor[&p] + gap;
+                        prop_assert!(t.retire_to(&tp_of(p), Offset::Offset(read_to)).is_some());
+                        owned.moved = true;
+                        o.cursor.insert(p, read_to);
+                    }
+                    Op::Stale { p, back } => {
+                        let Some(owned) = o.owned.get(&p) else {
+                            continue;
+                        };
+                        // Only what the tracker has seen sets its next offset.
+                        if owned.last.is_none() && !owned.moved {
+                            continue;
+                        }
+                        let read_to = o.cursor[&p] - back;
+                        prop_assert_eq!(t.retire_to(&tp_of(p), Offset::Offset(read_to)), None);
                     }
                     Op::Revoke => {
                         let tps: Vec<Tp> = o.owned.keys().map(|p| tp_of(*p)).collect();

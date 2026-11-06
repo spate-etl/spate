@@ -157,6 +157,12 @@ impl Default for DatagenSourceConfig {
 
 impl DatagenSourceConfig {
     /// Deserialize and validate from the pipeline's opaque component section.
+    ///
+    /// # Errors
+    ///
+    /// [`ConfigError::Component`] when the section does not deserialize into
+    /// this type, and [`ConfigError::Validation`] when
+    /// [`validate`](Self::validate) refuses it.
     pub fn from_component_config(section: &ComponentConfig) -> Result<Self, ConfigError> {
         let cfg: DatagenSourceConfig = section.deserialize_into()?;
         cfg.validate()?;

@@ -705,6 +705,11 @@ impl SinkBundle for ClickHouseSink {
 
 /// Build a [`ClickHouseSinkBuilder`] from the opaque `sink: { clickhouse: ... }`
 /// component section.
+///
+/// # Errors
+///
+/// [`ConfigError::Component`] when the section does not deserialize into
+/// [`ClickHouseSinkConfig`], and otherwise as [`build`].
 pub fn from_component_config(
     section: &ComponentConfig,
 ) -> Result<ClickHouseSinkBuilder, ConfigError> {
@@ -716,6 +721,11 @@ pub fn from_component_config(
 ///
 /// Reads the system trust store and `tls.root_ca` when any replica or
 /// `distributed_check.endpoint` is `https://`.
+///
+/// # Errors
+///
+/// [`ConfigError::Validation`] when `cfg` breaks a configuration rule, or when
+/// `tls.root_ca` cannot be loaded.
 pub fn build(cfg: ClickHouseSinkConfig) -> Result<ClickHouseSinkBuilder, ConfigError> {
     build_with(cfg, rustls_native_certs::load_native_certs)
 }

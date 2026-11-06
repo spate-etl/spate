@@ -14,9 +14,7 @@ use rdkafka::mocking::{MockCluster, MockCoordinator};
 use rdkafka::types::RDKafkaRespErr;
 use spate_core::clock::TestClock as StopClock;
 use spate_core::clock::tokio::TestClock;
-use spate_core::feed::{
-    Depth, DepthOf, Feed, FeedError, FeedErrorKind, FeedMetricsCtx, Receipt, Unit,
-};
+use spate_core::feed::{DepthOf, Feed, FeedErrorKind, FeedMetricsCtx, Receipt, Unit};
 use spate_core::metrics::Meter;
 use spate_core::pipeline::ExitState;
 use spate_kafka::feed::KafkaFeedError;
@@ -26,8 +24,8 @@ use support::feed::{
     ATTEMPT, ATTEMPT_PARTITIONS, DEAD, DEADLINE, FeedClock, ON_MOCK, RETRY, WORK, bounded_section,
     committed, data_dir, direct, direct_on, exists, feed_yaml, high_watermark, high_watermarks,
     launch, launch_bounded, launch_customized, launch_on, launch_stopping, list_once, produce_copy,
-    produce_raw, publish, publish_to, publisher_on_mock, read_attempts, read_topic, recs,
-    run_to_exit, sorted, stage, written,
+    produce_raw, publish, publish_to, publisher_on_mock, read_attempts, read_depth, read_topic,
+    recs, run_to_exit, sorted, stage, written,
 };
 use support::{corrupt_batch, produce_batch};
 
@@ -1162,17 +1160,6 @@ fn a_message_with_no_unit_ends_a_bounded_job_stalled() {
         "{}",
         failure.reason
     );
-}
-
-/// Read `of` from `feed` and wait for the answer.
-fn read_depth(feed: &dyn Feed, of: DepthOf) -> Result<Depth, FeedError> {
-    let mut reading = feed.read_depth(of).expect("the Kafka feed counts");
-    let mut outcome = None;
-    wait_until(DEADLINE, "the depth read is answered", || {
-        outcome = reading.try_outcome();
-        outcome.is_some()
-    });
-    outcome.expect("answered")
 }
 
 /// Pins that a broker refusing to describe the dead-letter topic, which it

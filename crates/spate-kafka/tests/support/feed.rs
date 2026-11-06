@@ -15,8 +15,8 @@ use spate_core::clock::TestClock as StopClock;
 use spate_core::clock::tokio::TestClock;
 use spate_core::config::{FeedSection, PipelineConfig};
 use spate_core::feed::{
-    Confirmation, Delivery, DepthOf, DepthReading, Feed, FeedError, FeedErrorKind, FeedMetricsCtx,
-    FeedWaker, Receipt, Unit, wake_channel,
+    Confirmation, DEFAULT_SETTLING_WINDOW, Delivery, Depth, DepthOf, DepthReading, Feed, FeedError,
+    FeedErrorKind, FeedMetricsCtx, FeedWaker, Receipt, Unit, wake_channel,
 };
 use spate_core::pipeline::{ExitState, Pipeline, RuntimeOptions, ShutdownHandle};
 use spate_core::sink::SinkPoolConfig;
@@ -616,7 +616,8 @@ pub(crate) fn read_attempts(brokers: &str, partitions: i32, n: usize) -> Vec<Att
     got
 }
 
-/// How many messages partition 0 of `topic` holds.
+/// How many messages partition 0 of `topic` holds, read at the default
+/// `read_committed`: the last stable offset.
 pub(crate) fn high_watermark(brokers: &str, topic: &str) -> i64 {
     let consumer: BaseConsumer = super::raw_config()
         .set("bootstrap.servers", brokers)
@@ -675,6 +676,28 @@ pub(crate) fn produce_raw(brokers: &str, topic: &str, messages: &[(Option<&[u8]>
         producer.send(record).map_err(|(e, _)| e).expect("enqueue");
     }
     producer.flush(Duration::from_secs(30)).expect("flush");
+}
+
+/// Open a transaction on partition 0 of `topic` that holds `units`, each keyed
+/// by its id, and flush them. Returns the producer that ends it.
+#[must_use = "an open transaction ends through this producer"]
+pub(crate) fn open_transaction_with(
+    brokers: &str,
+    topic: &str,
+    tag: &str,
+    units: &[Unit],
+) -> BaseProducer {
+    let producer = super::transactional_producer(brokers, topic, tag);
+    producer.begin_transaction().expect("begin");
+    for unit in units {
+        let record = BaseRecord::<[u8], [u8]>::to(topic)
+            .partition(0)
+            .key(unit.id.as_bytes())
+            .payload(&unit.body[..]);
+        producer.send(record).map_err(|(e, _)| e).expect("enqueue");
+    }
+    producer.flush(Duration::from_secs(60)).expect("flush");
+    producer
 }
 
 /// Produce `message` to partition 0 of `topic` with its key, value and
@@ -908,26 +931,58 @@ fn stage_with_etag(data: &Path, name: &str, rows: &[String]) -> Unit {
     Unit::new(name, descriptor.encode().unwrap())
 }
 
+/// Read `of` from `feed` and wait for the answer.
+pub(crate) fn read_depth(feed: &dyn Feed, of: DepthOf) -> Result<Depth, FeedError> {
+    let mut reading = feed.read_depth(of).expect("the Kafka feed counts");
+    let mut outcome = None;
+    wait_until(DEADLINE, "the depth read is answered", || {
+        outcome = reading.try_outcome();
+        outcome.is_some()
+    });
+    outcome.expect("answered")
+}
+
+/// Step `clock` once and wait for the worker's next depth read. The run hands
+/// its report out once, so this returns it when the worker exits instead.
+fn step_to_read(worker: &Worker, clock: &TestClock) -> Option<spate_core::pipeline::ExitReport> {
+    let reads = worker.recording.depth_reads();
+    clock.advance(STEP);
+    let mut exit = None;
+    wait_until(DEADLINE, "the next depth read or the end", || {
+        if exit.is_none() {
+            exit = worker.run.wait_exit(Duration::ZERO);
+        }
+        exit.is_some() || worker.recording.depth_reads() > reads
+    });
+    exit.map(|report| report.unwrap())
+}
+
 /// Step `clock` until the worker exits, waiting after each step for its
-/// next depth read. The run hands its report out once, so this keeps it.
+/// next depth read.
 ///
 /// # Panics
 ///
 /// When the worker has not exited after 80 steps.
 pub(crate) fn run_to_exit(worker: &Worker, clock: &TestClock) -> spate_core::pipeline::ExitReport {
     for _ in 0..80 {
-        let reads = worker.recording.depth_reads();
-        clock.advance(STEP);
-        let mut exit = None;
-        wait_until(DEADLINE, "the next depth read or the end", || {
-            if exit.is_none() {
-                exit = worker.run.wait_exit(Duration::ZERO);
-            }
-            exit.is_some() || worker.recording.depth_reads() > reads
-        });
-        if let Some(report) = exit {
-            return report.unwrap();
+        if let Some(report) = step_to_read(worker, clock) {
+            return report;
         }
     }
     panic!("the job never ended");
+}
+
+/// Step `clock` through two settling windows, the most a job ending on an
+/// unchanged depth could take, with the worker reading depth at each step.
+///
+/// # Panics
+///
+/// When the worker exits, naming the state it reported.
+pub(crate) fn hold_open(worker: &Worker, clock: &TestClock) {
+    let steps = 2 * DEFAULT_SETTLING_WINDOW.as_secs() / STEP.as_secs();
+    for _ in 0..steps {
+        if let Some(report) = step_to_read(worker, clock) {
+            panic!("the job ended while held open: {:?}", report.state);
+        }
+    }
 }

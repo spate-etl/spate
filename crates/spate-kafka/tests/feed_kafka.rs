@@ -755,7 +755,7 @@ fn a_bounded_job_ends_once_every_workers_partitions_are_committed() {
         rows.extend(r);
     }
     assert!(
-        (0..2).all(|p| high_watermark_of(&brokers, WORK, p) > 0),
+        (0..2).all(|p| support::log_end(&brokers, WORK, p) > 0),
         "the units span both partitions"
     );
 
@@ -801,19 +801,6 @@ fn create_two_partition_work(brokers: &str) {
     {
         created.expect("topic created");
     }
-}
-
-/// The high watermark of `topic` partition `partition`.
-fn high_watermark_of(brokers: &str, topic: &str, partition: i32) -> i64 {
-    use rdkafka::consumer::{BaseConsumer, Consumer};
-    let consumer: BaseConsumer = support::raw_config()
-        .set("bootstrap.servers", brokers)
-        .build()
-        .expect("consumer");
-    consumer
-        .fetch_watermarks(topic, partition, Duration::from_secs(10))
-        .expect("watermarks")
-        .1
 }
 
 /// Pins the Kafka feed's half of a graceful stop against a real broker:

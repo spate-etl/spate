@@ -864,6 +864,7 @@ fn each_scheduled_job_runs_in_one_file() {
             "docs-deploy",
             "examples-containers",
             "fuzz",
+            "long-run-containers",
             "loom",
             "minimal-versions",
             "osv",

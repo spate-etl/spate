@@ -18,7 +18,7 @@
 //! `<topic>/<partition>/<offset>` when it has no key, is the unit's id, and
 //! its value the unit's body. The feed's offset tracker holds every delivered
 //! offset until it finishes, and each partition commits up to its first
-//! unfinished offset.
+//! unfinished offset, past any offsets that hold no record.
 //! An acknowledged unit's offset finishes once the tombstone of its attempt
 //! record is confirmed by its delivery report. A failed unit's offset
 //! finishes once its write to the retry topic is confirmed, or, for a write

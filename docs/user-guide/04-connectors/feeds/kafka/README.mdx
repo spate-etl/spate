@@ -323,12 +323,25 @@ retry topic is confirmed, or, for a write to the dead-letter topic, once the
 tombstone sent after that write is. A unit waiting at the gate, or with its
 attempt write in flight, holds its offset unfinished. Each partition commits
 up to its first unfinished offset, every second and when the partition is
-revoked. A unit still unfinished blocks the commits of its partition, so the
-next owner of the partition reads that unit again and every unit read after
-it.
+revoked, and past offsets that hold no record
+([Transaction markers](#transaction-markers)). A unit still unfinished blocks
+the commits of its partition, so the next owner of the partition reads that
+unit again and every unit read after it.
 
 A rebalance that fails gives up every partition with nothing committed. The
 units read since the last commit are delivered again.
+
+### Transaction markers
+
+A transaction marker takes an offset and is never delivered, and the group's
+consumer skips an aborted transaction's records the same way. librdkafka moves
+the consumer's position past them when a partition's queue is polled. Within
+one commit interval of that, the partition commits past those offsets, once
+every unit below them has finished. A marker behind an unfinished unit waits
+for it, and a partition no unit was read from commits past its markers too.
+
+A marker not yet served when a partition is revoked or a worker stops falls to
+the partition's next owner.
 
 ## Copying dead-lettered units back
 

@@ -34,6 +34,17 @@
 //! request's attempts once sent. The tracker lock is never held across a
 //! commit or any other broker call.
 //!
+//! A transaction marker takes an offset and is never delivered, and under
+//! `read_committed` the consumer skips an aborted transaction's records the
+//! same way. librdkafka moves the position past them while this thread polls.
+//! Before each commit but a revocation's, the thread reads every owned
+//! partition's position, which makes no broker call, and raises the partition's
+//! next offset to it. A record moves the position when it is popped, and this
+//! thread records the delivery before it reads a position, so the offsets from
+//! the last delivery up to the position hold no record. The commit point stays
+//! capped at the first unfinished offset. The consumer stays at
+//! `read_committed`, so a position cannot pass an open transaction.
+//!
 //! Once the feed stops receiving, the thread keeps every owned partition
 //! paused, and pauses each partition an assignment gives it, while it goes
 //! on polling and committing. When the feed closes, or drops without a
@@ -50,6 +61,7 @@ use super::events::Cause;
 use super::inflight::{Position, Tp};
 use super::write::{self, Destination, Finish, Move, Outgoing, Producer, Tombstone, Write};
 use super::{Closing, Core, Gating, LatchOnPanic, READY_CAPACITY, State, Topics};
+use crate::client::read_position;
 use crate::context::{Intent, SourceContext};
 use rdkafka::consumer::{BaseConsumer, CommitMode, Consumer};
 use rdkafka::error::{KafkaError, RDKafkaErrorCode};
@@ -507,6 +519,9 @@ impl Driver {
             return false;
         }
         self.last_commit = self.core.clock().now();
+        retire_offsets(&self.core, |tp| {
+            read_position(&self.consumer, &mut tpl_of(std::slice::from_ref(tp)))
+        });
         commit_moved(&self.core, |points| commit(&self.consumer, points, what))
     }
 }
@@ -594,6 +609,35 @@ pub(crate) fn commit_revoked(core: &Core, tps: &[Tp], commit: impl FnOnce(&[(Tp,
     }
 }
 
+/// Raise each owned partition's next offset to the position `read` gives for
+/// it, read with the lock released, so a commit can pass offsets no delivery
+/// names.
+///
+/// Only the consumer thread delivers or assigns, so nothing the thread has
+/// popped is missing from the tracker while `read` runs.
+pub(crate) fn retire_offsets(core: &Core, mut read: impl FnMut(&Tp) -> Offset) {
+    let owned: Vec<Tp> = core.lock().tracker.owned().cloned().collect();
+    let positions: Vec<(Tp, Offset)> = owned
+        .into_iter()
+        .map(|tp| {
+            let position = read(&tp);
+            (tp, position)
+        })
+        .collect();
+    let mut st = core.lock();
+    for (tp, position) in positions {
+        if let Some((from, to)) = st.tracker.retire_to(&tp, position) {
+            tracing::debug!(
+                topic = &*tp.topic,
+                partition = tp.partition,
+                from,
+                to,
+                "retiring offsets that hold no record"
+            );
+        }
+    }
+}
+
 /// Hand the commit points that moved to `commit` with the lock released. A
 /// commit that fails leaves them to be taken again. `false` when the commit
 /// failed.
@@ -628,7 +672,7 @@ fn commit(consumer: &BaseConsumer<SourceContext>, points: &[(Tp, i64)], what: &s
     }
 }
 
-fn tpl_of(tps: &[Tp]) -> TopicPartitionList {
+pub(super) fn tpl_of(tps: &[Tp]) -> TopicPartitionList {
     let mut tpl = TopicPartitionList::new();
     for tp in tps {
         tpl.add_partition(&tp.topic, tp.partition);

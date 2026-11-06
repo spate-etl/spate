@@ -588,15 +588,17 @@ impl crate::feed::Feed for HandingBack {
     }
 
     fn close(&self, within: Duration) -> Option<crate::feed::Confirmation> {
-        self.closes.lock().unwrap().push(within);
-        if let Some(log) = &self.log {
-            log.lock().unwrap().log.push("close".into());
-        }
         let (confirmer, confirmation) = crate::feed::confirmation();
+        // A test takes a non-empty `closes` as its signal to use `held`, so `held`
+        // fills first.
         if self.hold_close {
             self.held.lock().unwrap().push(confirmer);
         } else {
             confirmer.confirm();
+        }
+        self.closes.lock().unwrap().push(within);
+        if let Some(log) = &self.log {
+            log.lock().unwrap().log.push("close".into());
         }
         Some(confirmation)
     }

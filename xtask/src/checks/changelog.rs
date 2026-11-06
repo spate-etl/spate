@@ -17,7 +17,7 @@ use crate::checks::adr::is_slug;
 use crate::checks::scratch::Scratch;
 use crate::checks::semver_checks;
 use crate::release::post;
-use crate::release::version::Version;
+use crate::release::version::{Version, workspace_version};
 use crate::run::{self, Completed, Error, Outcome, Step, Streams};
 
 /// The prefix on every line this check writes for itself.
@@ -120,11 +120,12 @@ enum Mode {
     Require { base: String, head: Option<String> },
 }
 
-/// The gate: demands a fragment when the change touches what a crate ships, and
-/// refuses a pending fragment with a paragraph written over several lines.
+/// The gate: demands a fragment when the change touches what a crate ships,
+/// refuses a pending fragment with a paragraph written over several lines, and
+/// refuses a release section the release body cannot be built from.
 pub(crate) fn check(root: &Path, explain: bool) -> Outcome {
     if explain {
-        println!("(reads the paths this branch changes and {FRAGMENTS}/)");
+        println!("(reads the paths this branch changes, {FRAGMENTS}/ and {CHANGELOG})");
         return Ok(());
     }
     gate(
@@ -133,6 +134,20 @@ pub(crate) fn check(root: &Path, explain: bool) -> Outcome {
         std::env::var_os("GITHUB_ACTIONS").is_some(),
         &var("GITHUB_EVENT_NAME"),
     )
+}
+
+/// Refuses a workspace version whose section the release body cannot be built
+/// from. The release reads the notes only once the release commit is on `main`,
+/// where the fix takes another commit, so a hand edit is caught on its pull
+/// request.
+fn release_notes_build(root: &Path) -> Outcome {
+    if !root.join(CHANGELOG).is_file() {
+        return Ok(());
+    }
+    let manifest = std::fs::read_to_string(root.join("Cargo.toml"))
+        .map_err(|e| Error::msg(format!("Cargo.toml: {e}")))?;
+    let version = workspace_version(&manifest)?;
+    notes_text(root, &version.to_string()).map(drop)
 }
 
 /// The gate's verdict over one set of fields and one runner state.
@@ -178,6 +193,8 @@ fn gate(root: &Path, fields: &Fields, in_actions: bool, github_event: &str) -> O
                 .collect::<String>()
         )));
     }
+
+    release_notes_build(root)?;
 
     let mode = select(root, fields)?;
 

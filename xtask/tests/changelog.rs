@@ -412,7 +412,7 @@ fn explain_names_the_path_it_would_write() {
         &["--explain", "tidy", "changelog"],
         &[],
         0,
-        "(reads the paths this branch changes and changelog.d/)\n",
+        "(reads the paths this branch changes, changelog.d/ and CHANGELOG.md)\n",
         "",
     );
 }

@@ -1031,6 +1031,37 @@ fn a_release_awaiting_its_tag_announces_through_its_section() {
     assert!(!breaking_announced(repo.path()).unwrap());
 }
 
+/// A release section the notes refuse fails the gate, so a hand edit stops on
+/// its pull request. Regression for #1151.
+#[test]
+fn a_release_section_the_notes_refuse_fails_the_gate() {
+    let repo = Repo::new("a_release_section_the_notes_refuse_fails_the_gate");
+    repo.write(
+        "Cargo.toml",
+        "[workspace.package]\nversion = \"0.3.0\"\nhomepage = \"https://x.example\"\n",
+    );
+    let section =
+        "## [0.3.0] - 2026-09-30\n\n### Fixed\n\n- A fix ([#1]).\n\n[#1]: https://x.example/1\n";
+    repo.write("CHANGELOG.md", &format!("# Changelog\n\n{section}"));
+    let push = Fields {
+        event: "push".to_owned(),
+        ..Fields::default()
+    };
+    assert!(gate(repo.path(), &push, false, "").is_ok());
+
+    repo.write(
+        "CHANGELOG.md",
+        &format!("# Changelog\n\n{section}\nAlso see [#9999].\n"),
+    );
+    assert_eq!(
+        refused(gate(repo.path(), &push, false, "")),
+        "the '## [0.3.0]' section uses [#9999] with no definition in the section"
+    );
+
+    repo.write("CHANGELOG.md", "# Changelog\n");
+    assert!(refused(gate(repo.path(), &push, false, "")).starts_with("no '## [0.3.0]' section"),);
+}
+
 /// A fragment on disk with nothing in it is not prose, and a path that is not
 /// there is not either.
 #[test]

@@ -175,7 +175,8 @@ request body.
 Scope discipline:
 
 - One logical change per commit. Implement the smallest change that solves the
-  problem and defer polish to a follow-up.
+  problem and defer polish to a follow-up. Reuse is part of the change: when new
+  code would repeat existing logic or a similar type, share the original.
 - No drive-by dependency, formatting, or cleanup churn unless the task needs it.
 - Edit a root document only when the change is about what that document is
   for. A change elsewhere that makes a sentence there wrong corrects that

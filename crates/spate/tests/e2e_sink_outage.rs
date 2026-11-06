@@ -29,8 +29,8 @@ fn sink_outage_backpressures_and_loses_nothing() {
     params.queue_capacity = 2;
     params.chunk_bytes = 2 * 1024;
     params.batch_max_rows = 1_000;
-    // Below the 8 to 13 batches this outage's queues let build up, so the limit is
-    // what holds the peak, with acknowledgments frozen long enough to read it there.
+    // Below what this outage's queues let build up, so the limit is what holds the
+    // peak, with acknowledgments frozen long enough to read it there.
     params.max_pending_batches = 4;
     let partitions = 3;
     let total = 40_000;

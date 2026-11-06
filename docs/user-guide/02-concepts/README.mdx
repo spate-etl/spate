@@ -43,6 +43,12 @@ router tiers (meta-only `KeyHashRouter` and record-aware `RecordRouter`), why
 one saturated shard pauses the whole pipeline, and the limit that hot shards
 are your data's shape, not the router's choice.
 
+## [6. Multi-sink split](06-multi-sink.mdx)
+
+How one stream fans out across several typed sinks: routing each record to
+exactly one destination, each with its own schema, encoder, router, and batch
+tuning.
+
 ## [9. Work feed](09-work-feed.mdx)
 
 How a source reads work units from a queue: the ack rule that ties a unit's

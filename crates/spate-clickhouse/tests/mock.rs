@@ -130,10 +130,7 @@ async fn transport_failures_are_retryable() {
         .write_batch(&sink.endpoints[0][0], &sealed(&rows(3), "tok-2", 2))
         .await
         .expect_err("must fail");
-    match err {
-        SinkError::Client { class, .. } => assert_eq!(class, ErrorClass::Retryable),
-        other => panic!("unexpected error shape: {other:?}"),
-    }
+    assert_eq!(err.class(), ErrorClass::Retryable, "{err}");
 }
 
 #[tokio::test]
@@ -149,12 +146,8 @@ async fn schema_class_exceptions_are_fatal() {
         .write_batch(&sink.endpoints[0][0], &sealed(&rows(3), "tok-3", 2))
         .await
         .expect_err("must fail");
-    match err {
-        SinkError::Client { class, reason } => {
-            assert_eq!(class, ErrorClass::Fatal, "reason: {reason}");
-        }
-        other => panic!("unexpected error shape: {other:?}"),
-    }
+    let reason = err.reason();
+    assert_eq!(err.class(), ErrorClass::Fatal, "reason: {reason}");
 }
 
 #[tokio::test]
@@ -170,12 +163,8 @@ async fn capacity_class_exceptions_stay_retryable() {
         .write_batch(&sink.endpoints[0][0], &sealed(&rows(3), "tok-4", 2))
         .await
         .expect_err("must fail");
-    match err {
-        SinkError::Client { class, reason } => {
-            assert_eq!(class, ErrorClass::Retryable, "reason: {reason}");
-        }
-        other => panic!("unexpected error shape: {other:?}"),
-    }
+    let reason = err.reason();
+    assert_eq!(err.class(), ErrorClass::Retryable, "reason: {reason}");
 }
 
 // ---- startup schema validation ----------------------------------------------
@@ -255,16 +244,12 @@ async fn struct_order_mismatch_is_fatal_at_the_first_record() {
             &mut BytesMut::new(),
         )
         .expect_err("order mismatch must fail");
-    match err {
-        SinkError::Client { class, reason } => {
-            assert_eq!(class, ErrorClass::Fatal, "{reason}");
-            assert!(
-                reason.contains("position 0: struct field `name` vs declared column `id`"),
-                "{reason}"
-            );
-        }
-        other => panic!("unexpected error shape: {other:?}"),
-    }
+    let reason = err.reason();
+    assert_eq!(err.class(), ErrorClass::Fatal, "{reason}");
+    assert!(
+        reason.contains("position 0: struct field `name` vs declared column `id`"),
+        "{reason}"
+    );
 }
 
 #[tokio::test]
@@ -290,16 +275,12 @@ async fn a_type_mismatch_is_fatal_at_the_first_record() {
     let err = spate_clickhouse::ClickHouseEncoder::<Owned<WrongType>>::with_schema(schema)
         .encode(&record(wrong), &mut BytesMut::new())
         .expect_err("the type check runs on every sink");
-    match err {
-        SinkError::Client { class, reason } => {
-            assert_eq!(class, ErrorClass::Fatal, "{reason}");
-            assert!(
-                reason.contains("not compatible with `score` Nullable(Float64)"),
-                "{reason}"
-            );
-        }
-        other => panic!("unexpected error shape: {other:?}"),
-    }
+    let reason = err.reason();
+    assert_eq!(err.class(), ErrorClass::Fatal, "{reason}");
+    assert!(
+        reason.contains("not compatible with `score` Nullable(Float64)"),
+        "{reason}"
+    );
 }
 
 #[tokio::test]
@@ -349,16 +330,12 @@ shards:
     let err = NativeEncoder::<Owned<EventRow>>::new(schema)
         .encode(&record(row.clone()), &mut BytesMut::new())
         .expect_err("the scale mismatch is rejected");
-    match err {
-        SinkError::Client { class, reason } => {
-            assert_eq!(class, ErrorClass::Fatal, "{reason}");
-            assert!(
-                reason.contains("DateTime64Millis") && reason.contains("DateTime64(6)"),
-                "{reason}"
-            );
-        }
-        other => panic!("unexpected error shape: {other:?}"),
-    }
+    let reason = err.reason();
+    assert_eq!(err.class(), ErrorClass::Fatal, "{reason}");
+    assert!(
+        reason.contains("DateTime64Millis") && reason.contains("DateTime64(6)"),
+        "{reason}"
+    );
 
     // The precision the wrapper declares encodes.
     let mock = Mock::new();
@@ -409,16 +386,12 @@ shards:
     }
 
     fn assert_fatal_scale_mismatch(err: SinkError) {
-        match err {
-            SinkError::Client { class, reason } => {
-                assert_eq!(class, ErrorClass::Fatal, "{reason}");
-                assert!(
-                    reason.contains("Decimal64<4>") && reason.contains("Decimal(18, 2)"),
-                    "{reason}"
-                );
-            }
-            other => panic!("unexpected error shape: {other:?}"),
-        }
+        let reason = err.reason();
+        assert_eq!(err.class(), ErrorClass::Fatal, "{reason}");
+        assert!(
+            reason.contains("Decimal64<4>") && reason.contains("Decimal(18, 2)"),
+            "{reason}"
+        );
     }
 
     fn mismatched_columns() -> Vec<ColumnRow> {

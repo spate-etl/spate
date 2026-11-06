@@ -328,42 +328,18 @@ mod tests {
         let fatal = classify(clickhouse::error::Error::BadResponse(
             "Code: 60. DB::Exception: Table default.orders does not exist".into(),
         ));
-        assert!(matches!(
-            fatal,
-            SinkError::Client {
-                class: ErrorClass::Fatal,
-                ..
-            }
-        ));
+        assert_eq!(fatal.class(), ErrorClass::Fatal, "{fatal}");
 
         let retryable = classify(clickhouse::error::Error::BadResponse(
             "Code: 252. DB::Exception: Too many parts".into(),
         ));
-        assert!(matches!(
-            retryable,
-            SinkError::Client {
-                class: ErrorClass::Retryable,
-                ..
-            }
-        ));
+        assert_eq!(retryable.class(), ErrorClass::Retryable, "{retryable}");
 
         let timeout = classify(clickhouse::error::Error::TimedOut);
-        assert!(matches!(
-            timeout,
-            SinkError::Client {
-                class: ErrorClass::Retryable,
-                ..
-            }
-        ));
+        assert_eq!(timeout.class(), ErrorClass::Retryable, "{timeout}");
 
         let schema = classify(clickhouse::error::Error::SchemaMismatch("boom".into()));
-        assert!(matches!(
-            schema,
-            SinkError::Client {
-                class: ErrorClass::Fatal,
-                ..
-            }
-        ));
+        assert_eq!(schema.class(), ErrorClass::Fatal, "{schema}");
     }
 
     /// Both codec directions classify `Fatal`.
@@ -374,24 +350,12 @@ mod tests {
         let compression = classify(clickhouse::error::Error::Compression(
             "zstd: out of memory".into(),
         ));
-        assert!(matches!(
-            compression,
-            SinkError::Client {
-                class: ErrorClass::Fatal,
-                ..
-            }
-        ));
+        assert_eq!(compression.class(), ErrorClass::Fatal, "{compression}");
 
         let decompression = classify(clickhouse::error::Error::Decompression(
             "incorrect magic number".into(),
         ));
-        assert!(matches!(
-            decompression,
-            SinkError::Client {
-                class: ErrorClass::Fatal,
-                ..
-            }
-        ));
+        assert_eq!(decompression.class(), ErrorClass::Fatal, "{decompression}");
     }
 
     /// A server that cannot decode a coded insert's blocks answers 271, which
@@ -403,16 +367,7 @@ mod tests {
             "Code: 271. DB::Exception: Cannot decompress: LZ4 decompression failed.",
         ] {
             let err = classify_insert(clickhouse::error::Error::BadResponse(reason.into()), true);
-            assert!(
-                matches!(
-                    err,
-                    SinkError::Client {
-                        class: ErrorClass::Fatal,
-                        ..
-                    }
-                ),
-                "{reason}: {err:?}"
-            );
+            assert_eq!(err.class(), ErrorClass::Fatal, "{reason}: {err:?}");
         }
     }
 
@@ -424,16 +379,7 @@ mod tests {
     fn a_server_side_checksum_failure_is_retryable() {
         let reason = "Code: 40. DB::Exception: Checksum doesn't match: corrupted data. Reference: 2338a6e26c614fec6feb62deae67c37e. Actual: 71bfc9638d4ed97f67949d6eba179620. Size of compressed block: 32780: While reading or decompressing /var/lib/clickhouse/store/c50/c5066d20-e7a6-4ee3-83d5-a200e66893db/all_1_1_0/data.bin (position: 32796, typename: DB::AsynchronousReadBufferFromFileWithDescriptorsCache, compressed data header: <uninitialized>): (while reading column k): (while reading from part /var/lib/clickhouse/store/c50/c5066d20-e7a6-4ee3-83d5-a200e66893db/all_1_1_0/ in table default.dim (c5066d20-e7a6-4ee3-83d5-a200e66893db) located on disk default of type local, from mark 0 with max_rows_to_read = 65536): While reading part all_1_1_0: While executing MergeTreeSelect(pool: ReadPoolInOrder, algorithm: InOrder): while pushing to view default.mv: While executing WaitForAsyncInsert. (CHECKSUM_DOESNT_MATCH) (version 26.8.17.4 (official build))";
         let err = classify(clickhouse::error::Error::BadResponse(reason.into()));
-        assert!(
-            matches!(
-                err,
-                SinkError::Client {
-                    class: ErrorClass::Retryable,
-                    ..
-                }
-            ),
-            "{err:?}"
-        );
+        assert_eq!(err.class(), ErrorClass::Retryable, "{err:?}");
     }
 
     /// A stored block that passes its checksum and fails to decode, here read
@@ -444,10 +390,7 @@ mod tests {
         let reason = "Code: 271. DB::Exception: Cannot decompress LZ4-encoded data: While reading or decompressing /var/lib/clickhouse/store/a16/a1609cef-2585-4c66-be6e-1707b7b286c6/all_1_1_0/k.bin (position: 32796, typename: DB::AsynchronousReadBufferFromFileWithDescriptorsCache, compressed data header: <uninitialized>): (while reading column k): (while reading from part /var/lib/clickhouse/store/a16/a1609cef-2585-4c66-be6e-1707b7b286c6/all_1_1_0/ in table default.dim (a1609cef-2585-4c66-be6e-1707b7b286c6) located on disk default of type local, from mark 0 with max_rows_to_read = 49152): While reading part all_1_1_0: While executing MergeTreeSelect(pool: ReadPoolInOrder, algorithm: InOrder): while pushing to view default.mv: While executing WaitForAsyncInsert. (CANNOT_DECOMPRESS) (version 26.8.17.4 (official build))";
         for (coded, expected) in [(false, ErrorClass::Retryable), (true, ErrorClass::Fatal)] {
             let err = classify_insert(clickhouse::error::Error::BadResponse(reason.into()), coded);
-            let SinkError::Client { class, .. } = &err else {
-                panic!("{err:?}");
-            };
-            assert_eq!(*class, expected, "coded: {coded}, {err:?}");
+            assert_eq!(err.class(), expected, "coded: {coded}, {err:?}");
         }
     }
 
@@ -478,10 +421,8 @@ mod tests {
         let write = writer.write_batch(&endpoint, &batch).await.unwrap_err();
         let probe = writer.probe(&endpoint).await.unwrap_err();
         for err in [write, probe] {
-            let SinkError::Client { class, reason } = &err else {
-                panic!("{err:?}");
-            };
-            assert_eq!(*class, ErrorClass::Fatal, "{reason}");
+            let reason = err.reason();
+            assert_eq!(err.class(), ErrorClass::Fatal, "{reason}");
             assert!(reason.contains("UnknownIssuer"), "{reason}");
             assert!(reason.contains("`tls.root_ca`"), "{reason}");
         }
@@ -504,10 +445,9 @@ mod tests {
         });
         let err = failed_query(&TestCa::new("any"), &url).await;
         assert!(format!("{err:?}").contains("InvalidMessage"), "{err:?}");
-        let SinkError::Client { class, reason } = classify(err) else {
-            unreachable!()
-        };
-        assert_eq!(class, ErrorClass::Retryable, "{reason}");
+        let err = classify(err);
+        let reason = err.reason();
+        assert_eq!(err.class(), ErrorClass::Retryable, "{reason}");
     }
 
     /// A handshake alert that rejects the client classifies `Fatal` and names
@@ -526,10 +466,9 @@ mod tests {
             let addr = spate_test::tls_alert_server(b"", u8::from(alert));
             let err = failed_query(&ca, &format!("https://{addr}")).await;
             assert!(format!("{err:?}").contains(&name), "{err:?}");
-            let SinkError::Client { class, reason } = classify(err) else {
-                unreachable!()
-            };
-            assert_eq!(class, expected, "{reason}");
+            let err = classify(err);
+            let reason = err.reason();
+            assert_eq!(err.class(), expected, "{reason}");
             if expected == ErrorClass::Fatal {
                 assert!(reason.contains(&name), "{reason}");
             }
@@ -543,10 +482,9 @@ mod tests {
         let server = TestCa::new("server");
         let url = serve(&server, Some(&TestCa::new("clients"))).await;
         let err = failed_query(&server, &url).await;
-        let SinkError::Client { class, reason } = classify(err) else {
-            unreachable!()
-        };
-        assert_eq!(class, ErrorClass::Fatal, "{reason}");
+        let err = classify(err);
+        let reason = err.reason();
+        assert_eq!(err.class(), ErrorClass::Fatal, "{reason}");
         assert!(reason.contains("CertificateRequired"), "{reason}");
     }
 }

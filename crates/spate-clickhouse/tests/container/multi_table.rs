@@ -85,7 +85,7 @@ async fn sinks_write_to_independent_tables() {
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn a_failed_table_write_is_isolated_from_the_others() {
-    use spate_core::error::{ErrorClass, SinkError};
+    use spate_core::error::ErrorClass;
 
     let srv = server().await;
     make_table(&srv.admin, "orders_a").await;
@@ -126,28 +126,24 @@ async fn a_failed_table_write_is_isolated_from_the_others() {
         )
         .await
         .expect_err("a write to a shard that is down must fail");
-    match err {
-        SinkError::Client { class, reason } => assert_eq!(
-            class,
-            ErrorClass::Retryable,
-            "a shard being down is retried, which is what stalls the watermark: {reason}"
-        ),
-        other => panic!("unexpected error shape: {other:?}"),
-    }
+    let reason = err.reason();
+    assert_eq!(
+        err.class(),
+        ErrorClass::Retryable,
+        "a shard being down is retried, which is what stalls the watermark: {reason}"
+    );
 
     let err = dropped
         .writer
         .write_batch(&dropped.endpoints[0][0], &sealed(&orders(0..50), "c-1", 1))
         .await
         .expect_err("a write to a dropped table must fail");
-    match err {
-        SinkError::Client { class, reason } => assert_eq!(
-            class,
-            ErrorClass::Fatal,
-            "UNKNOWN_TABLE cannot succeed on retry: {reason}"
-        ),
-        other => panic!("unexpected error shape: {other:?}"),
-    }
+    let reason = err.reason();
+    assert_eq!(
+        err.class(),
+        ErrorClass::Fatal,
+        "UNKNOWN_TABLE cannot succeed on retry: {reason}"
+    );
 
     assert_eq!(
         count_table(&srv.admin, "orders_a").await,

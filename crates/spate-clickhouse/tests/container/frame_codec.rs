@@ -14,7 +14,7 @@ use hyper_util::client::legacy::Client as HyperClient;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use spate_clickhouse::{Compression, NativeEncoder, serialize_row};
-use spate_core::error::{ErrorClass, SinkError};
+use spate_core::error::ErrorClass;
 use std::sync::{Arc, Mutex};
 
 /// The sink settings for `format` and `compression`, with the fixture's
@@ -134,9 +134,7 @@ async fn a_block_the_server_rejects_is_fatal() {
             .write_batch(&sink.endpoints[0][0], &batch)
             .await
             .expect_err("the server rejects the block");
-        let SinkError::Client { class, reason } = &err else {
-            panic!("{compression}: {err:?}");
-        };
+        let reason = err.reason();
         let code = reason.find("Code: ").and_then(|at| {
             reason[at + 6..]
                 .split(|c: char| !c.is_ascii_digit())
@@ -149,7 +147,7 @@ async fn a_block_the_server_rejects_is_fatal() {
             Some(271),
             "{compression}: the decode failure code: {reason}"
         );
-        assert_eq!(*class, ErrorClass::Fatal, "{compression}: {reason}");
+        assert_eq!(err.class(), ErrorClass::Fatal, "{compression}: {reason}");
         assert_eq!(
             count(&srv.admin).await,
             0,
@@ -321,10 +319,8 @@ async fn a_retry_resends_identical_bytes_and_inserts_once() {
         .write_batch(&sink.endpoints[0][0], &batch)
         .await
         .expect_err("the response is lost");
-    let SinkError::Client { class, reason } = &err else {
-        panic!("{err:?}");
-    };
-    assert_eq!(*class, ErrorClass::Retryable, "{reason}");
+    let reason = err.reason();
+    assert_eq!(err.class(), ErrorClass::Retryable, "{reason}");
     sink.writer
         .write_batch(&sink.endpoints[0][0], &batch)
         .await

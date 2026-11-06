@@ -97,12 +97,9 @@ async fn schema_validation_first_record_scenarios() {
         srv.admin.query(ddl).execute().await.expect("ddl");
     }
 
-    let fatal = |err: SinkError| match err {
-        SinkError::Client { class, reason } => {
-            assert_eq!(class, ErrorClass::Fatal, "{reason}");
-            reason
-        }
-        other => panic!("unexpected error shape: {other:?}"),
+    let fatal = |err: SinkError| {
+        assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
+        err.reason().to_owned()
     };
 
     // Declaration order differing from TABLE order is fine, since the

@@ -208,16 +208,12 @@ mod tests {
         let err = ClickHouseEncoder::<Owned<Bad>>::with_schema(schema(&[("c", "String")]))
             .encode(&rec, &mut BytesMut::new())
             .unwrap_err();
-        match err {
-            SinkError::Client { class, reason } => {
-                assert_eq!(class, ErrorClass::Fatal);
-                assert!(
-                    reason.contains("could not probe the row struct"),
-                    "{reason}"
-                );
-            }
-            other => panic!("unexpected error shape: {other:?}"),
-        }
+        let reason = err.reason();
+        assert_eq!(err.class(), ErrorClass::Fatal);
+        assert!(
+            reason.contains("could not probe the row struct"),
+            "{reason}"
+        );
     }
 
     /// The struct check runs once per encoder, and a clone re-runs it, so a
@@ -234,10 +230,7 @@ mod tests {
         let mut wrong =
             ClickHouseEncoder::<Owned<Row>>::with_schema(schema(&[("id", "UInt64")])).clone();
         let err = wrong.encode(&rec, &mut BytesMut::new()).unwrap_err();
-        match err {
-            SinkError::Client { class, .. } => assert_eq!(class, ErrorClass::Fatal),
-            other => panic!("unexpected error shape: {other:?}"),
-        }
+        assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
     }
 
     #[test]

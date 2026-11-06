@@ -39,13 +39,13 @@
 //! covers them all, so markers behind a batch the sink has not acknowledged take
 //! no room under the pending ceiling and leave the lane polling.
 
-use crate::client::read_position;
+use crate::client::{offset_to_retire, read_position};
 use crate::context::SourceContext;
 use rdkafka::consumer::base_consumer::PartitionQueue;
 use rdkafka::consumer::{BaseConsumer, Consumer as _};
 use rdkafka::error::KafkaError;
 use rdkafka::message::BorrowedMessage;
-use rdkafka::{Message, Offset, TopicPartitionList};
+use rdkafka::{Message, TopicPartitionList};
 use spate_core::checkpoint::{AckIssuer, AckRef};
 use spate_core::error::SourceError;
 use spate_core::record::{PartitionId, RawPayload};
@@ -169,17 +169,6 @@ impl KafkaLane {
             text.as_deref(),
         )
     }
-}
-
-/// The last offset to retire when the position reads `position` and the lane has
-/// issued up to `covered_to`, or `None` when nothing lies between them. A logical
-/// position means no served op has set it, and with no issue yet an offset of 0
-/// has nothing below it.
-fn offset_to_retire(position: Offset, covered_to: Option<i64>) -> Option<i64> {
-    let Offset::Offset(position) = position else {
-        return None;
-    };
-    (position > covered_to.unwrap_or(0)).then(|| position - 1)
 }
 
 /// Whether every batch a lane issued, through `covered_to`, has reached
@@ -325,32 +314,11 @@ mod tests {
     use crate::KafkaSourceConfig;
     use crate::context::SourceHooks;
     use proptest::prelude::*;
+    use rdkafka::Offset;
     use rdkafka::error::RDKafkaErrorCode;
     use spate_core::checkpoint::Checkpointer;
     use spate_core::error::ErrorClass;
     use spate_core::source::SourceCtx;
-
-    /// The position rule: only a concrete position past what the lane issued
-    /// retires offsets, and it retires through the offset below the position.
-    /// Regression for #1709.
-    #[test]
-    fn the_position_rule_advances_only_past_what_is_covered() {
-        for logical in [
-            Offset::Invalid,
-            Offset::Stored,
-            Offset::End,
-            Offset::Beginning,
-            Offset::OffsetTail(1),
-        ] {
-            assert_eq!(offset_to_retire(logical, None), None, "{logical:?}");
-            assert_eq!(offset_to_retire(logical, Some(5)), None, "{logical:?}");
-        }
-        assert_eq!(offset_to_retire(Offset::Offset(4), Some(5)), None);
-        assert_eq!(offset_to_retire(Offset::Offset(5), Some(5)), None);
-        assert_eq!(offset_to_retire(Offset::Offset(6), Some(5)), Some(5));
-        assert_eq!(offset_to_retire(Offset::Offset(0), None), None);
-        assert_eq!(offset_to_retire(Offset::Offset(1), None), Some(0));
-    }
 
     /// A lane waits for every batch it issued to reach a watermark, and one that
     /// has issued nothing waits for nothing. Regression for #1709.

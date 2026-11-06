@@ -406,6 +406,17 @@ pub(crate) fn read_position<C: ConsumerContext>(
     }
 }
 
+/// The last offset no record holds when the position reads `position` and
+/// everything below `covered_to` is accounted for, or `None` when nothing lies
+/// between them. A logical position means no served op has set it, and with
+/// nothing accounted for an offset of 0 has nothing below it.
+pub(crate) fn offset_to_retire(position: Offset, covered_to: Option<i64>) -> Option<i64> {
+    let Offset::Offset(position) = position else {
+        return None;
+    };
+    (position > covered_to.unwrap_or(0)).then(|| position - 1)
+}
+
 /// Writes the offset each element of `tpl` names into that element, with one
 /// ListOffsets request per leader: the log start for `Offset::Beginning`, the
 /// end for `Offset::End`, as `isolation.level` reads it. Blocks for up to
@@ -711,6 +722,28 @@ mod tests {
     use rdkafka::consumer::BaseConsumer;
     use rdkafka::producer::BaseProducer;
     use spate_core::config::ConfigError;
+
+    /// The position rule: only a concrete position past what the lane issued
+    /// retires offsets, and it retires through the offset below the position.
+    /// Regression for #1709.
+    #[test]
+    fn the_position_rule_advances_only_past_what_is_covered() {
+        for logical in [
+            Offset::Invalid,
+            Offset::Stored,
+            Offset::End,
+            Offset::Beginning,
+            Offset::OffsetTail(1),
+        ] {
+            assert_eq!(offset_to_retire(logical, None), None, "{logical:?}");
+            assert_eq!(offset_to_retire(logical, Some(5)), None, "{logical:?}");
+        }
+        assert_eq!(offset_to_retire(Offset::Offset(4), Some(5)), None);
+        assert_eq!(offset_to_retire(Offset::Offset(5), Some(5)), None);
+        assert_eq!(offset_to_retire(Offset::Offset(6), Some(5)), Some(5));
+        assert_eq!(offset_to_retire(Offset::Offset(0), None), None);
+        assert_eq!(offset_to_retire(Offset::Offset(1), None), Some(0));
+    }
 
     /// A consumer with no group holds no group metadata, and reads no
     /// generation.

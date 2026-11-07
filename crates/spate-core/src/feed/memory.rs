@@ -11,7 +11,7 @@
 
 use super::{
     Confirmation, Delivery, Depth, DepthOf, DepthReading, Feed, FeedError, FeedErrorKind,
-    FeedWaker, Receipt, Unit, confirmation, depth_reading,
+    FeedWaker, ReaderSignal, Receipt, Unit, confirmation, depth_reading,
 };
 use crate::config::{ConfigError, FeedSection};
 use crate::hash::FastMap;
@@ -64,17 +64,9 @@ struct State {
     dead: Vec<Unit>,
     acknowledged: u64,
     next_receipt: u64,
-    waker: Option<FeedWaker>,
+    signal: ReaderSignal,
     /// The delivery on which a failed unit is dead-lettered.
     attempt_cap: u32,
-}
-
-impl State {
-    fn wake(&self) {
-        if let Some(waker) = &self.waker {
-            waker.wake();
-        }
-    }
 }
 
 impl MemoryFeed {
@@ -94,7 +86,7 @@ impl MemoryFeed {
                 dead: Vec::new(),
                 acknowledged: 0,
                 next_receipt: 0,
-                waker: None,
+                signal: ReaderSignal::default(),
                 attempt_cap: cap.get(),
             })),
         }
@@ -203,11 +195,8 @@ impl Feed for MemoryFeed {
 
     fn set_waker(&self, waker: FeedWaker) {
         let mut state = self.lock();
-        // A unit published before the waker arrived still needs a wakeup.
-        if !state.visible.is_empty() {
-            waker.wake();
-        }
-        state.waker = Some(waker);
+        let ready = !state.visible.is_empty();
+        state.signal.set_waker(waker, ready);
     }
 
     fn receive(&self, max: usize) -> Result<Vec<Delivery>, FeedError> {
@@ -227,7 +216,7 @@ impl Feed for MemoryFeed {
         // A receive that took nothing sends no signal, or a reader at
         // capacity calling `receive(0)` would never park.
         if take > 0 && !state.visible.is_empty() {
-            state.wake();
+            state.signal.wake();
         }
         Ok(out)
     }
@@ -268,7 +257,7 @@ impl Feed for MemoryFeed {
             );
         } else {
             state.visible.push_back((unit, deliveries));
-            state.wake();
+            state.signal.wake();
         }
         Ok(())
     }
@@ -276,7 +265,7 @@ impl Feed for MemoryFeed {
     fn publish(&self, unit: Unit) -> Confirmation {
         let mut state = self.lock();
         state.visible.push_back((unit, 0));
-        state.wake();
+        state.signal.wake();
         let (confirmer, confirmation) = confirmation();
         confirmer.confirm();
         confirmation

@@ -1,0 +1,3 @@
+**`spate_core::feed::ReaderSignal` holds a feed's reader-side state** (`spate-core`)
+
+A feed implementation keeps `ReaderSignal` inside the state its own lock guards. `set_waker(waker, ready)` holds the reader's waker and wakes it at once when units are ready. `latch(reason)` latches a fatal error, keeps the first one, wakes the reader and reports whether this call latched it. `fail_soon(reason)` holds a retryable error for the next `receive`. `check` is the guard at the top of `receive`: it returns the latched error on every call, otherwise the retryable error once. The holder takes no lock of its own, and each wake never blocks, so all of these are safe to call under the feed's lock.

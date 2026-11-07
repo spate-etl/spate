@@ -32,6 +32,7 @@ use crate::queue::{
 };
 use crate::startup::{self, COUNT_ATTRIBUTES, QueueAttributes, counts};
 use spate_core::backoff::Backoff;
+use spate_core::clock::SyncClock;
 use spate_core::clock::tokio::{Clock, SystemClock};
 use spate_core::config::{FeedSection, redact};
 use spate_core::feed::{
@@ -40,7 +41,7 @@ use spate_core::feed::{
 };
 use spate_core::hash::FastMap;
 use spate_core::metrics::FeedOp;
-use spate_core::task::{self, TaskHandle};
+use spate_core::task::{self, BoundError, TaskHandle, ThreadBound};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::task::Poll;
@@ -89,23 +90,30 @@ const LATE_TICK: Duration = Duration::from_millis(5);
 /// How long [`SqsFeed::connect`] may take, every step included.
 const CONNECT_BOUND: Duration = Duration::from_secs(30);
 
-/// `connect` under [`CONNECT_BOUND`]. Past the bound, an
+/// `connect` under [`CONNECT_BOUND`] on `clock`. Past the bound, an
 /// [`SqsError::Unavailable`] naming the step `step` holds.
+///
+/// The bound is timed by a [`ThreadBound`], so it fires on a runtime whose
+/// timer nothing drives, as under `Handle::block_on` on a current-thread
+/// runtime.
 async fn bounded<T>(
     step: &Mutex<&'static str>,
+    clock: SyncClock,
     connect: impl Future<Output = Result<T, SqsError>>,
 ) -> Result<T, SqsError> {
-    // Real time: no feed or clock exists yet, and the SDK times these calls
-    // on its own tokio sleep.
-    match tokio::time::timeout(CONNECT_BOUND, connect).await {
-        Ok(result) => result,
-        Err(_) => {
-            let step = *step.lock().unwrap_or_else(PoisonError::into_inner);
-            Err(SqsError::Unavailable(format!(
-                "connecting took longer than {CONNECT_BOUND:?}, while {step}"
-            )))
-        }
-    }
+    ThreadBound::new("spate-sqs-connect-bound", CONNECT_BOUND)
+        .with_clock(clock)
+        .run(connect)
+        .await
+        .unwrap_or_else(|stopped| {
+            Err(SqsError::Unavailable(match stopped {
+                BoundError::Elapsed => {
+                    let step = *step.lock().unwrap_or_else(PoisonError::into_inner);
+                    format!("connecting took longer than {CONNECT_BOUND:?}, while {step}")
+                }
+                other => other.to_string(),
+            }))
+        })
 }
 
 /// The long-poll wait for `visibility`: at most a third of it, so a message
@@ -441,7 +449,10 @@ impl SqsFeed {
     /// Credentials come from the AWS provider chain. Connecting reads the
     /// queue's attributes and its dead-letter queue's once, so a missing
     /// queue or a refused credential fails here. The whole call takes at
-    /// most 30 seconds.
+    /// most 30 seconds on any runtime. On a current-thread runtime, `io`
+    /// moves its I/O only while another thread runs
+    /// [`Runtime::block_on`](tokio::runtime::Runtime::block_on), so with no
+    /// such thread the call ends [`SqsError::Unavailable`] at that bound.
     ///
     /// # Errors
     ///
@@ -460,7 +471,9 @@ impl SqsFeed {
     /// # Panics
     ///
     /// When called from inside an async context, as
-    /// [`Handle::block_on`](tokio::runtime::Handle::block_on) does.
+    /// [`Handle::block_on`](tokio::runtime::Handle::block_on) does. When
+    /// `io`'s runtime was built without its timer or without its I/O driver,
+    /// as the AWS SDK's calls need both.
     ///
     /// # Examples
     ///
@@ -521,9 +534,7 @@ impl SqsFeed {
             let checked = startup::check(&queue, &config.queue_url, &step).await?;
             Ok::<_, SqsError>((queue, checked))
         };
-        // `bounded` builds its timeout inside `block_on`: the timer needs the
-        // runtime's context.
-        let (queue, checked) = io.block_on(bounded(&step, connect))?;
+        let (queue, checked) = io.block_on(bounded(&step, SyncClock::system(), connect))?;
         tracing::info!(
             queue = %checked.arn,
             visibility = ?config.visibility,

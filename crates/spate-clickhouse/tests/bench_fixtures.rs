@@ -19,6 +19,7 @@ use spate_clickhouse::{
 use spate_core::deser::Owned;
 use spate_core::sink::{RowEncoder, ShardWriter};
 use spate_test::record;
+use spate_test_support::pin;
 
 #[path = "../benches/support/frames.rs"]
 mod frames;
@@ -29,7 +30,7 @@ mod keys;
 #[path = "../benches/support/rows.rs"]
 mod rows;
 
-fn drive<E, T>(mut enc: E, payloads: Vec<T>) -> usize
+fn encoded<E, T>(mut enc: E, payloads: Vec<T>) -> BytesMut
 where
     E: RowEncoder<Owned<T>>,
     T: Send + 'static,
@@ -39,7 +40,15 @@ where
         enc.encode(&record(p), &mut buf).expect("row encodes");
     }
     enc.finish_chunk(&mut buf).expect("chunk finishes");
-    buf.len()
+    buf
+}
+
+fn drive<E, T>(enc: E, payloads: Vec<T>) -> usize
+where
+    E: RowEncoder<Owned<T>>,
+    T: Send + 'static,
+{
+    encoded(enc, payloads).len()
 }
 
 #[test]
@@ -91,14 +100,15 @@ fn rowbinary_encodes_every_schema() {
     );
 }
 
-/// The encoded sizes, pinned.
+/// The encoded sizes and bytes, pinned.
 ///
 /// An instruction count only compares across two legs that encoded identical
 /// bytes, and the corpus is generated rather than stored, so a one-character
 /// edit to a value formula in `rows.rs` re-baselines every comparison with
 /// nothing to say it happened. These numbers make that edit fail here
-/// instead. They are the sizes the pull request that added each bench
-/// published; changing one means re-recording it and treating every count
+/// instead, and the digest catches a formula whose column keeps its encoded
+/// size. The sizes are the ones the pull request that added each bench
+/// published; changing a pin means re-recording it and treating every count
 /// from before the change as measuring a different corpus.
 #[test]
 fn the_corpora_are_pinned_across_revisions() {
@@ -108,51 +118,51 @@ fn the_corpora_are_pinned_across_revisions() {
     let exotic = NativeSchema::from_columns(&rows::exotic_columns()).expect("exotic schema builds");
 
     assert_eq!(
-        drive(
+        pin(&encoded(
             NativeEncoder::<Owned<_>>::new(events),
             rows::events(rows::ROWS)
-        ),
-        116_573,
+        )),
+        (116_573, 0xb930_6600_3332_22dc),
         "native/events"
     );
     assert_eq!(
-        drive(
+        pin(&encoded(
             ClickHouseEncoder::<Owned<_>>::unchecked(),
             rows::events(rows::ROWS)
-        ),
-        125_738,
+        )),
+        (125_738, 0x90da_ab4d_e84c_9ce2),
         "rowbinary/events"
     );
     assert_eq!(
-        drive(
+        pin(&encoded(
             NativeEncoder::<Owned<_>>::new(metrics),
             rows::metrics(rows::ROWS)
-        ),
-        92_204,
+        )),
+        (92_204, 0xda21_51a2_dc51_84fd),
         "native/metrics"
     );
     assert_eq!(
-        drive(
+        pin(&encoded(
             ClickHouseEncoder::<Owned<_>>::unchecked(),
             rows::metrics(rows::ROWS)
-        ),
-        92_000,
+        )),
+        (92_000, 0x2d64_63ee_8d8c_ef84),
         "rowbinary/metrics"
     );
     assert_eq!(
-        drive(
+        pin(&encoded(
             NativeEncoder::<Owned<_>>::new(exotic),
             rows::exotic(rows::ROWS)
-        ),
-        174_724,
+        )),
+        (174_724, 0xdb49_5aea_6386_ce53),
         "native/exotic"
     );
     assert_eq!(
-        drive(
+        pin(&encoded(
             ClickHouseEncoder::<Owned<_>>::unchecked(),
             rows::exotic(rows::ROWS)
-        ),
-        170_463,
+        )),
+        (170_463, 0x2a87_b850_18c1_31ea),
         "rowbinary/exotic"
     );
 }

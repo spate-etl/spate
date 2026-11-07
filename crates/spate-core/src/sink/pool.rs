@@ -1,6 +1,6 @@
 //! The sink pool: one worker task per shard on the I/O runtime.
 
-use super::config::SinkPoolConfig;
+use super::config::{LONGEST_DEADLINE, SinkPoolConfig};
 use super::worker::{ShardWorker, WorkerReport};
 use super::{EncodedChunk, ShardWriter, SinkFailures};
 use crate::backpressure::InflightBudget;
@@ -56,10 +56,6 @@ pub struct SinkPool<W: ShardWriter> {
 /// the controller's 2s. The ordering holds on real time, where the stop clock
 /// and the pool's `SystemClock` agree.
 const BACKSTOP_GRACE: Duration = Duration::from_secs(1);
-
-/// The longest deadline `drain` takes, which keeps a clock reading plus the
-/// deadline and `BACKSTOP_GRACE` inside `Instant`'s range.
-const LONGEST_DRAIN: Duration = Duration::from_secs(365 * 24 * 60 * 60);
 
 impl<W: ShardWriter> SinkPool<W> {
     /// Spawn one worker per shard onto `runtime`.
@@ -250,7 +246,7 @@ impl<W: ShardWriter> SinkPool<W> {
     /// [`ShardQueues`](super::ShardQueues) clone first. Workers only enter
     /// their drain phase once their queue closes.
     pub async fn drain(self, deadline: Duration) -> DrainReport {
-        let deadline_at = self.clock.now() + deadline.min(LONGEST_DRAIN);
+        let deadline_at = self.clock.now() + deadline.min(LONGEST_DEADLINE);
         let _ = self.drain_tx.send(Some(deadline_at));
         // Absolute, so joining the shards in sequence still bounds the whole
         // drain. One wedged shard spends the budget once, and the shards

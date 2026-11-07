@@ -252,13 +252,18 @@ impl Default for BreakerConfig {
     }
 }
 
+/// The longest span the sink stamps into a deadline. `Instant + Duration`
+/// panics rather than saturating, and a clock reading plus a year and a few
+/// seconds of grace stays inside `Instant`'s range.
+pub(crate) const LONGEST_DEADLINE: Duration = Duration::from_secs(365 * 24 * 60 * 60);
+
 impl BreakerConfig {
     /// Ceiling on [`open_for`](Self::open_for).
     ///
     /// It is stamped into a deadline, and `Instant + Duration` panics rather
     /// than saturating. A year already means "never probe again", so anything
     /// beyond it is a typo rather than a policy.
-    pub const MAX_OPEN_FOR: Duration = Duration::from_secs(365 * 24 * 60 * 60);
+    pub const MAX_OPEN_FOR: Duration = LONGEST_DEADLINE;
 
     /// Reject breaker thresholds that would misbehave at runtime.
     ///

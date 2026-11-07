@@ -354,10 +354,11 @@ impl Shared {
         }
     }
 
-    /// Make `e` the answer to every later call, reject with it every publish
-    /// still queued and a close under way, and wake the reader. The batch
-    /// being sent is rejected as Retryable: SQS may have stored it. The
-    /// first Fatal wins, and is the one logged and rejected with.
+    /// Latch `e` as the answer to every later call unless a Fatal is already
+    /// latched, reject with the latched error every publish still queued and
+    /// a close under way, and wake the reader. The batch being sent is
+    /// rejected as Retryable: SQS may have stored it. Only the call that
+    /// latches logs.
     fn set_fatal(&self, e: &CallError) {
         let (error, first, sending, queued, close, waker) = {
             let mut st = self.lock();

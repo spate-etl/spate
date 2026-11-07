@@ -356,8 +356,8 @@ fn executables_in(stdout: &str, wanted: &BTreeSet<&str>) -> BTreeMap<String, Pat
 /// Three inputs, each read from the leg's own tree or environment:
 ///
 /// - every `[profile...]` table in the root manifest,
-/// - every `.cargo/config.toml` from the leg's directory upward, whole, since
-///   all of it is build configuration and cargo reads all of them, except
+/// - every distinct `.cargo/config.toml` from the leg's directory upward, whole,
+///   since all of it is build configuration and cargo reads all of them, except
 ///   `$CARGO_HOME`'s, which cargo reads for every invocation whatever the
 ///   directory, so it applies to both legs and cannot separate them,
 /// - `RUSTFLAGS` and `CARGO_ENCODED_RUSTFLAGS`, read from the driver's own
@@ -365,7 +365,7 @@ fn executables_in(stdout: &str, wanted: &BTreeSet<&str>) -> BTreeMap<String, Pat
 ///   them. They are here so a leg written under one setting and compared later
 ///   against a leg written under another is refused.
 ///
-/// Absent inputs contribute their absence, so a leg that gains a
+/// Absent inputs contribute their absence, so a leg that gains a distinct
 /// `.cargo/config.toml` differs from one without.
 #[must_use]
 pub fn codegen_digest(dir: &Path) -> String {
@@ -382,14 +382,14 @@ pub fn codegen_digest(dir: &Path) -> String {
         "profiles",
         &profile_tables(&std::fs::read_to_string(dir.join("Cargo.toml")).unwrap_or_default()),
     );
-    // Every ancestor's config, nearest first, contents only. Cargo reads them
-    // from the invocation's directory upward, and the two legs have different
+    // Every distinct ancestor config, nearest first, contents only. Cargo reads
+    // them from the invocation's directory upward, and the two legs have different
     // ancestors by construction (the head is the repository, the base a
     // worktree under the cache root). Hashing the *contents* rather than the
     // paths is what makes that difference visible: a `.cargo/config.toml` above
-    // the repository applies to the head build and not the base one, so the two
-    // digests differ and the guard fires. Hashing the paths as well would make
-    // them differ always.
+    // the repository that differs from the leg's own applies to the head build
+    // and not the base one, so the two digests differ and the guard fires.
+    // Hashing the paths as well would make them differ always.
     for text in ancestor_cargo_configs(dir) {
         absorb("cargo-config", &text);
     }
@@ -400,8 +400,12 @@ pub fn codegen_digest(dir: &Path) -> String {
     format!("{:016x}", hasher.finish())
 }
 
-/// The contents of every `.cargo/config.toml` (or `.cargo/config`) from `dir`
-/// upward, nearest first.
+/// The distinct contents of every `.cargo/config.toml` (or `.cargo/config`) from
+/// `dir` upward, nearest first.
+///
+/// A file identical to a nearer one sets no new key and only repeats its array
+/// entries, and a worktree nested in the repository has the same config above
+/// it.
 fn ancestor_cargo_configs(dir: &Path) -> Vec<String> {
     let home = cargo_home();
     let mut out = Vec::new();
@@ -417,7 +421,9 @@ fn ancestor_cargo_configs(dir: &Path) -> Vec<String> {
             continue;
         }
         for name in ["config.toml", "config"] {
-            if let Ok(text) = std::fs::read_to_string(candidate.join(name)) {
+            if let Ok(text) = std::fs::read_to_string(candidate.join(name))
+                && !out.contains(&text)
+            {
                 out.push(text);
             }
         }
@@ -752,5 +758,28 @@ mod tests {
             super::profile_tables(&indented).contains("debug = true"),
             "indented header"
         );
+    }
+
+    /// A nested worktree's digest matches a leg with the same config once, and
+    /// a config that differs above it still separates them. Regression for
+    /// #1132.
+    #[test]
+    fn a_config_repeated_above_a_leg_counts_once() {
+        fn config(dir: &std::path::Path, text: &str) {
+            std::fs::create_dir_all(dir.join(".cargo")).expect("a config directory");
+            std::fs::write(dir.join(".cargo/config.toml"), text).expect("a config");
+        }
+
+        let root = tempfile::tempdir().expect("scratch directory");
+        let base = root.path().join("cache/base");
+        let repo = root.path().join("repo");
+        let nested = repo.join("wt/aa");
+        config(&base, "[build]\njobs = 4\n");
+        config(&repo, "[build]\njobs = 4\n");
+        config(&nested, "[build]\njobs = 4\n");
+        assert_eq!(super::codegen_digest(&nested), super::codegen_digest(&base));
+
+        config(&repo, "[build]\nrustflags = [\"-Ctarget-cpu=native\"]\n");
+        assert_ne!(super::codegen_digest(&nested), super::codegen_digest(&base));
     }
 }

@@ -7,6 +7,7 @@
 //! revoking an unknown lane, or a duplicate lane id panics with a clear
 //! message.
 
+use crate::run::{deadline, left};
 use spate_core::checkpoint::AckIssuer;
 use spate_core::error::SourceError;
 use spate_core::hash::FastMap;
@@ -16,7 +17,7 @@ use spate_core::source::{
 };
 use std::collections::{BTreeSet, VecDeque};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// One queued payload with its pre-assigned offset.
 #[derive(Debug)]
@@ -221,7 +222,7 @@ impl SourceHandle {
     /// pushed record to be durably committed.
     #[must_use]
     pub fn wait_committed(&self, partition: PartitionId, offset: i64, timeout: Duration) -> bool {
-        let deadline = Instant::now() + timeout;
+        let deadline = deadline(timeout);
         let mut st = self.shared.lock();
         loop {
             let reached = st
@@ -233,14 +234,13 @@ impl SourceHandle {
             if reached {
                 return true;
             }
-            let now = Instant::now();
-            if now >= deadline {
+            let Some(left) = left(deadline) else {
                 return false;
-            }
+            };
             let (guard, _) = self
                 .shared
                 .commit_cv
-                .wait_timeout(st, deadline - now)
+                .wait_timeout(st, left)
                 .expect("spate-test source state poisoned");
             st = guard;
         }
@@ -324,20 +324,19 @@ impl Source for MemorySource {
             .as_ref()
             .ok_or_else(|| SourceError::fatal("poll_events called before open()"))?;
 
-        let deadline = Instant::now() + timeout;
+        let deadline = deadline(timeout);
         let mut st = self.shared.lock();
         let event = loop {
             if let Some(event) = st.events.pop_front() {
                 break event;
             }
-            let now = Instant::now();
-            if now >= deadline {
+            let Some(left) = left(deadline) else {
                 return Ok(SourceEvent::Idle);
-            }
+            };
             let (guard, _) = self
                 .shared
                 .event_cv
-                .wait_timeout(st, deadline - now)
+                .wait_timeout(st, left)
                 .expect("spate-test source state poisoned");
             st = guard;
         };
@@ -429,7 +428,7 @@ impl SourceLane for MemoryLane {
         if max_records == 0 {
             return Ok(None);
         }
-        let deadline = Instant::now() + timeout;
+        let deadline = deadline(timeout);
         {
             let mut st = self.shared.lock();
             self.buf = loop {
@@ -446,10 +445,9 @@ impl SourceLane for MemoryLane {
                     let n = q.queue.len().min(max_records);
                     break q.queue.drain(..n).collect();
                 }
-                let now = Instant::now();
-                if now >= deadline {
+                let Some(left) = left(deadline) else {
                     return Ok(None);
-                }
+                };
                 #[cfg(test)]
                 {
                     st.parked_polls += 1;
@@ -457,7 +455,7 @@ impl SourceLane for MemoryLane {
                 let (guard, _) = self
                     .shared
                     .data_cv
-                    .wait_timeout(st, deadline - now)
+                    .wait_timeout(st, left)
                     .expect("spate-test source state poisoned");
                 st = guard;
                 #[cfg(test)]
@@ -508,6 +506,48 @@ impl<'a> PayloadBatch<'a> for MemoryBatch<'a> {
 mod tests {
     use super::*;
     use spate_core::checkpoint::Checkpointer;
+    use std::time::Instant;
+
+    /// Each blocking call of the source and its handle takes a timeout past
+    /// what `Instant` can represent, and returns what is already there.
+    /// Regression for #1844.
+    #[test]
+    fn a_timeout_past_the_clock_range_returns_what_is_there() {
+        let mut cp = Checkpointer::new();
+        let (mut source, handle) = memory_source();
+        source.open(SourceCtx::new(cp.handle())).unwrap();
+        cp.begin_epoch(&[PartitionId(0)], 1);
+        handle.assign_lanes(&[(LaneId(0), PartitionId(0))]);
+        let SourceEvent::LanesAssigned(mut lanes) = source.poll_events(Duration::MAX).unwrap()
+        else {
+            panic!("expected an assignment");
+        };
+        handle.push(PartitionId(0), None, b"ready");
+        assert!(lanes[0].poll(16, Duration::MAX).unwrap().is_some());
+        source.commit(&[(PartitionId(0), 1)]).unwrap();
+        assert!(handle.wait_committed(PartitionId(0), 1, Duration::MAX));
+    }
+
+    /// Each blocking call of the source and its handle returns at once on a
+    /// zero timeout with nothing there.
+    #[test]
+    fn a_zero_timeout_returns_at_once_with_nothing_there() {
+        let mut cp = Checkpointer::new();
+        let (mut source, handle) = memory_source();
+        source.open(SourceCtx::new(cp.handle())).unwrap();
+        cp.begin_epoch(&[PartitionId(0)], 1);
+        assert!(matches!(
+            source.poll_events(Duration::ZERO).unwrap(),
+            SourceEvent::Idle
+        ));
+        handle.assign_lanes(&[(LaneId(0), PartitionId(0))]);
+        let SourceEvent::LanesAssigned(mut lanes) = source.poll_events(Duration::ZERO).unwrap()
+        else {
+            panic!("expected an assignment");
+        };
+        assert!(lanes[0].poll(16, Duration::ZERO).unwrap().is_none());
+        assert!(!handle.wait_committed(PartitionId(0), 1, Duration::ZERO));
+    }
 
     #[test]
     #[expect(clippy::disallowed_methods, reason = "the test joins the thread")]
@@ -525,7 +565,7 @@ mod tests {
         let pusher = handle.clone();
         let t = std::thread::spawn(move || {
             // Pushed only once the poll is parked, so it must wake on the notify.
-            crate::wait_until(Duration::from_secs(5), "the poll parks", || {
+            crate::wait_until(crate::HANG, "the poll parks", || {
                 pusher.shared.lock().parked_polls == 1
             });
             pusher.push(PartitionId(0), None, b"late");

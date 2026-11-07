@@ -479,23 +479,25 @@ impl Core {
                     return;
                 };
                 let retry_in = backoff.next_delay();
-                tracing::warn!(
-                    %topic,
-                    error = %failure.reason,
-                    ?retry_in,
-                    "writing {} failed; sending it again",
-                    write.what()
-                );
+                let what = write.what();
                 let now = self.clock.now();
                 // A deadline past the `Instant` range is due at once. The
                 // overflow panic would end the thread that settled the write.
                 let due = now.checked_add(retry_in).unwrap_or(now);
                 let mut st = self.lock();
+                if st.fatal.is_some() || self.stopped() {
+                    return;
+                }
                 // A resent attempt write keeps its share of `admitting`
                 // until it settles or `take_due` drops it.
-                if st.fatal.is_none() && !self.stopped() {
-                    st.resends.push((due, write));
-                }
+                st.resends.push((due, write));
+                drop(st);
+                tracing::warn!(
+                    %topic,
+                    error = %failure.reason,
+                    ?retry_in,
+                    "writing {what} failed; sending it again",
+                );
             }
         }
     }

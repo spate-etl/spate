@@ -53,6 +53,22 @@ const ALIASES: [(&str, &str); 4] = [
     ("compression.type", "compression.codec"),
 ];
 
+/// The longest topic name librdkafka takes. It refuses a longer one with a NULL
+/// handle, which rdkafka's `fetch_metadata` unwraps, panicking the thread.
+const MAX_TOPIC_NAME_BYTES: usize = 512;
+
+/// Checks `topic` against librdkafka's length limit.
+///
+/// # Errors
+///
+/// The reason, without the key, for the section to prefix in its own style.
+pub(crate) fn check_topic_name(topic: &str) -> Result<(), String> {
+    if topic.len() > MAX_TOPIC_NAME_BYTES {
+        return Err(format!("is longer than {MAX_TOPIC_NAME_BYTES} bytes"));
+    }
+    Ok(())
+}
+
 /// The librdkafka property `key` writes, under one spelling per property:
 /// `topic.` stripped from a topic property and an alias replaced by its
 /// target. Names match case-sensitively, as librdkafka's do.

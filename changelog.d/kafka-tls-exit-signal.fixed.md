@@ -1,0 +1,3 @@
+**A process using `kafka-tls` keeps its exit status when it exits beside a connecting client** (`spate-kafka`)
+
+A process that exits while a Kafka client is in a TLS handshake ends with its own exit status. In previous versions, it could end with SIGSEGV or SIGABRT instead, because OpenSSL's exit handler freed state the client's threads were using. A refused `connect` on a feed or publisher reached this when the process exited straight after it, since the metadata client stays alive after the call returns. A job runner reads such a signal as a failed job, though records and commits were not affected. Spate now leaves OpenSSL's exit handler unregistered, so an application whose own code initializes OpenSSL first keeps that handler.

@@ -27,7 +27,7 @@ use support::feed::{
     launch_stopping, list_once, produce_copy, produce_raw, publish, publish_to, publisher_on_mock,
     read_attempts, read_depth, read_topic, recs, run_to_exit, sorted, stage, written,
 };
-use support::{Marker, corrupt_batch, produce_batch, try_produce_batch, write_marker};
+use support::{Marker, RawBatch, corrupt_batch, produce_batch, try_produce_batch, write_marker};
 
 /// A cluster of `brokers` with the work, retry and dead-letter topics, one
 /// partition each, and the attempt topic with two.
@@ -807,6 +807,34 @@ fn an_unknown_codec_stops_the_feed_and_names_it() {
     let error = error.unwrap();
     assert!(error.reason.contains("codec 0x5"), "{error}");
     assert!(error.reason.contains("cannot read"), "{error}");
+}
+
+/// Pins that a gzip batch whose bytes do not decompress stops the feed:
+/// librdkafka refetches it and fails the same way on every fetch.
+/// Regression for #1770.
+#[test]
+fn a_batch_that_does_not_decompress_stops_the_feed() {
+    let cluster = cluster(1);
+    let brokers = cluster.bootstrap_servers();
+    let first = brokers.split(',').next().unwrap().to_owned();
+    let gzip = RawBatch {
+        attributes: 1,
+        key: Some(b"lost"),
+        value: b"body",
+        ..RawBatch::default()
+    };
+    assert_eq!(produce_batch(&first, WORK, 0, &gzip.encode()), 0);
+    let group = spate_test::unique_name("gzip");
+    let worker = direct(&feed_yaml(&brokers, &group, "", ""));
+    let mut error = None;
+    wait_until(DEADLINE, "the feed stops on the batch", || {
+        error = worker.feed.receive(1).err();
+        error
+            .as_ref()
+            .is_some_and(|e| e.kind == FeedErrorKind::Fatal)
+    });
+    let error = error.unwrap();
+    assert!(error.reason.contains("ompress"), "{error}");
 }
 
 /// Pins that connecting refuses a missing retry topic and leaves it

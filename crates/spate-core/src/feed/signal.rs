@@ -1,5 +1,5 @@
 //! [`ReaderSignal`]: the reader-side state a [`Feed`](super::Feed) keeps for
-//! its reader, shared by the feeds in this workspace.
+//! its reader.
 
 use super::{FeedError, FeedErrorKind, FeedWaker};
 

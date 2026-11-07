@@ -100,7 +100,7 @@
 //! handle.assign_lanes(&[(spate::source::LaneId(0), PartitionId(0))]);
 //! let last = handle.push(PartitionId(0), None, b"hello");
 //! assert!(
-//!     handle.wait_committed(PartitionId(0), last + 1, std::time::Duration::from_secs(10)),
+//!     handle.wait_committed(PartitionId(0), last + 1, spate_test::HANG),
 //!     "the offset never committed"
 //! );
 //! shutdown.trigger();

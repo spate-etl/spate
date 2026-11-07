@@ -146,6 +146,12 @@ mod tests {
         assert!(left(deadline(HANG)).is_some_and(|left| left <= HANG));
     }
 
+    /// A condition that already holds passes on a zero bound.
+    #[test]
+    fn a_condition_that_holds_passes_on_a_zero_bound() {
+        wait_until(Duration::ZERO, "a condition that holds", || true);
+    }
+
     /// A wait that reaches its bound says the test hung, naming the condition.
     #[test]
     #[should_panic(expected = "hung after 0ns waiting for: the flag")]

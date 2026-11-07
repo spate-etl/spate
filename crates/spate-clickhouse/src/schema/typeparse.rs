@@ -278,6 +278,17 @@ mod tests {
         ChType::Named(s.to_string())
     }
 
+    /// Pins `split_top_level` on its edges: one part with no comma is kept,
+    /// empty input has no parts, and an unclosed parenthesis or quote is
+    /// refused.
+    #[test]
+    fn split_top_level_keeps_a_lone_part_and_refuses_unbalanced_input() {
+        assert_eq!(split_top_level("UInt8"), Some(vec!["UInt8"]));
+        assert_eq!(split_top_level(""), Some(vec![]));
+        assert_eq!(split_top_level("Array(UInt8"), None);
+        assert_eq!(split_top_level("'a, b"), None);
+    }
+
     /// Pins the bounds `out_of_bounds` holds a server's type to: nesting up
     /// to `MAX_DEPTH` and a `FixedString` up to `MAX_FIXED_STRING` pass, one
     /// past either fails, and a parenthesis inside a quoted literal does not

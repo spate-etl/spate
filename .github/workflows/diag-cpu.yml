@@ -1,0 +1,96 @@
+name: Diagnostic CPU measurement
+
+# Scratch measurement on the diag/1847-cpu branch only; never merged. Runs the
+# workspace suite as the CI test jobs do, then spate-kafka alone, recording
+# CPU-seconds against wall time and a 5 s sample of run queue, CPU split and
+# steal, beside the JUnit report whose timestamps place each test in time.
+on:
+  push:
+    branches: [diag/1847-cpu]
+
+permissions:
+  contents: read
+
+jobs:
+  measure:
+    name: Measure (${{ matrix.os }}, rep ${{ matrix.rep }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-26.04-arm, macos-26]
+        rep: [1, 2]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          components: clippy
+          tools: nextest
+          shared-key: dev-allfeatures
+          cache-save: never
+
+      - name: Machine
+        run: |
+          mkdir -p diag
+          {
+            uname -a
+            if [ "$RUNNER_OS" = Linux ]; then nproc; lscpu; else sysctl hw.ncpu hw.physicalcpu hw.logicalcpu machdep.cpu.brand_string; fi
+            cargo nextest --version
+          } > diag/machine.txt 2>&1
+          cat diag/machine.txt
+
+      - name: Install GNU time
+        if: runner.os == 'Linux'
+        run: command -v /usr/bin/time || (sudo apt-get update -q && sudo apt-get install -y -q time)
+
+      - name: Build test binaries
+        run: cargo nextest run --profile ci --workspace --all-features --locked --no-run
+
+      - name: Workspace suite
+        run: |
+          set +e
+          if [ "$RUNNER_OS" = Linux ]; then
+            vmstat -n -t 5 > diag/sample-workspace.txt &
+            sampler=$!
+            /usr/bin/time -v -o diag/time-workspace.txt cargo nextest run --profile ci --workspace --all-features --locked
+            code=$?
+          else
+            iostat -w 5 > diag/sample-workspace.txt &
+            sampler=$!
+            /usr/bin/time -l -o diag/time-workspace.txt cargo nextest run --profile ci --workspace --all-features --locked
+            code=$?
+          fi
+          kill "$sampler"
+          date -u +%Y-%m-%dT%H:%M:%SZ >> diag/sample-workspace.txt
+          echo "workspace exit=$code" >> diag/exit.txt
+          cp target/nextest/ci/junit.xml diag/junit-workspace.xml
+          cat diag/time-workspace.txt
+
+      - name: spate-kafka alone
+        run: |
+          set +e
+          if [ "$RUNNER_OS" = Linux ]; then
+            vmstat -n -t 5 > diag/sample-kafka.txt &
+            sampler=$!
+            /usr/bin/time -v -o diag/time-kafka.txt cargo nextest run --profile ci -p spate-kafka --all-features --locked
+            code=$?
+          else
+            iostat -w 5 > diag/sample-kafka.txt &
+            sampler=$!
+            /usr/bin/time -l -o diag/time-kafka.txt cargo nextest run --profile ci -p spate-kafka --all-features --locked
+            code=$?
+          fi
+          kill "$sampler"
+          date -u +%Y-%m-%dT%H:%M:%SZ >> diag/sample-kafka.txt
+          echo "kafka exit=$code" >> diag/exit.txt
+          cp target/nextest/ci/junit.xml diag/junit-kafka.xml
+          cat diag/time-kafka.txt
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: diag-${{ matrix.os }}-${{ matrix.rep }}
+          path: diag/

@@ -491,6 +491,11 @@ impl SinkBundle for KafkaSink {
 
 /// Build a [`KafkaSink`] from the opaque `sink: { kafka: ... }` component
 /// section.
+///
+/// # Errors
+///
+/// [`ConfigError::Component`] when the section does not deserialize into
+/// [`KafkaSinkConfig`], and otherwise as [`build`].
 pub fn from_component_config(section: &ComponentConfig) -> Result<KafkaSink, ConfigError> {
     let cfg: KafkaSinkConfig = section.deserialize_into()?;
     build(cfg)
@@ -502,6 +507,11 @@ pub fn from_component_config(section: &ComponentConfig) -> Result<KafkaSink, Con
 /// idempotence compatibility (`max.in.flight` ≤ 5, `retries` > 0) at
 /// creation, so a passthrough that conflicts with the forced durability
 /// settings fails at startup here rather than on the first batch.
+///
+/// # Errors
+///
+/// [`ConfigError::Validation`] when `cfg` breaks a configuration rule, or when
+/// librdkafka refuses to create the producer or the probe producer.
 pub fn build(cfg: KafkaSinkConfig) -> Result<KafkaSink, ConfigError> {
     build_on(cfg, SyncClock::system(), Arc::new(IoSystemClock))
 }

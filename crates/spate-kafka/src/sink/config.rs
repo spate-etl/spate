@@ -28,9 +28,7 @@
 //! source offsets past it. Weaker settings would silently turn
 //! at-least-once into at-most-once.
 
-use crate::client::{
-    Base, Keys, MAX_TOPIC_NAME_BYTES, Role, canonical, check_message_timeout, topic_name_fits,
-};
+use crate::client::{Base, Keys, Role, canonical, check_message_timeout, check_topic_name};
 use crate::sink::context::{SinkContext, SinkHooks};
 use crate::sink::encoder::{
     DEFAULT_MAX_MESSAGE_BYTES, KafkaBytesEncoder, KafkaEncoder, KafkaJsonEncoder, MessageEncoder,
@@ -189,8 +187,10 @@ impl Compression {
 pub struct KafkaSinkConfig {
     /// Comma-separated bootstrap servers.
     pub brokers: String,
-    /// The topic to produce to. One topic per sink instance: multi-topic
-    /// fan-out is the chain's `split` terminal with one sink per topic.
+    /// The topic to produce to. [`validate`](Self::validate) refuses a name
+    /// over the client's limit of 512 bytes, and brokers set a lower limit of
+    /// their own. One topic per sink instance: multi-topic fan-out is the
+    /// chain's `split` terminal with one sink per topic.
     pub topic: String,
     /// Framework shards (worker parallelism). All shards share the single
     /// underlying producer, so raising this adds concurrent writers contending
@@ -318,11 +318,8 @@ impl KafkaSinkConfig {
         if self.topic.trim().is_empty() {
             return fail("topic must not be empty".into());
         }
-        if !topic_name_fits(&self.topic) {
-            return fail(format!(
-                "topic is {} bytes, past the client's limit of {MAX_TOPIC_NAME_BYTES} bytes",
-                self.topic.len()
-            ));
+        if let Err(why) = check_topic_name(&self.topic) {
+            return fail(format!("topic {why}"));
         }
         if self.shards == 0 {
             return fail("shards must be at least 1".into());

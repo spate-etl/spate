@@ -64,7 +64,7 @@ sink:
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `brokers` | string | `required` | Comma-separated bootstrap servers. |
-| `topic` | string | `required` | The topic to produce to, at most 512 bytes. One topic per sink instance; multi-topic is the `split` terminal. |
+| `topic` | string | `required` | The topic to produce to. A name over 512 bytes, the client's limit, fails at load. Brokers set a lower limit: Apache Kafka and Redpanda refuse a name over 249 characters when the sink first writes. One topic per sink instance; multi-topic is the `split` terminal. |
 | `shards` | int | `1` | Framework worker parallelism. All shards share the single producer, so raising this adds contention on that one client, not parallelism — keep `shards = 1` and use batch size as the throughput lever. |
 | `delivery_timeout` | duration | `30s` | librdkafka `delivery.timeout.ms`, and the bound on how long a batch write awaits its delivery reports before failing. The failure is retryable unless a broker rejected the connection, as described under [Security](#security-tls-mtls-sasl). From `1ms` to about 24.8 days, and above `linger.ms` when `rdkafka` sets it. |
 | `max_message_bytes` | bytes | `1MB` | Per-message limit (key + payload + headers), enforced at **encode time** as a record-level error (Skip/Fail policy) and applied to the producer as `message.max.bytes`. `1MB` decodes to 1,000,000 bytes. Keep aligned with the topic/broker limit — a message passing this guard but rejected by the broker fails the batch fatally instead. |

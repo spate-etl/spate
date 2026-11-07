@@ -17,7 +17,7 @@
 //! connecting with the rejection's text, as soon as the client reports it.
 
 use super::{KafkaFeedError, Topics};
-use crate::client::{MAX_TOPIC_NAME_BYTES, SpateContext, topic_name_fits};
+use crate::client::{SpateContext, check_topic_name};
 use crate::sink::SinkContext;
 use rdkafka::admin::{AdminClient, AdminOptions, ResourceSpecifier};
 use rdkafka::error::{KafkaError, RDKafkaErrorCode};
@@ -124,10 +124,10 @@ fn admin_error(e: &KafkaError) -> AdminError {
 
 impl TopicAdmin for Brokers {
     fn metadata<'a>(&'a self, topic: &'a str) -> BoxFuture<'a, Result<usize, AdminError>> {
-        if !topic_name_fits(topic) {
+        if let Err(why) = check_topic_name(topic) {
             return Box::pin(std::future::ready(Err(AdminError::new(
                 RDKafkaErrorCode::InvalidTopic,
-                format!("the topic name is longer than {MAX_TOPIC_NAME_BYTES} bytes"),
+                format!("the topic name {why}"),
             ))));
         }
         let reader = Arc::clone(&self.reader);

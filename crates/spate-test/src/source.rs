@@ -528,6 +528,27 @@ mod tests {
         assert!(handle.wait_committed(PartitionId(0), 1, Duration::MAX));
     }
 
+    /// Each blocking call of the source and its handle returns at once on a
+    /// zero timeout with nothing there.
+    #[test]
+    fn a_zero_timeout_returns_at_once_with_nothing_there() {
+        let mut cp = Checkpointer::new();
+        let (mut source, handle) = memory_source();
+        source.open(SourceCtx::new(cp.handle())).unwrap();
+        cp.begin_epoch(&[PartitionId(0)], 1);
+        assert!(matches!(
+            source.poll_events(Duration::ZERO).unwrap(),
+            SourceEvent::Idle
+        ));
+        handle.assign_lanes(&[(LaneId(0), PartitionId(0))]);
+        let SourceEvent::LanesAssigned(mut lanes) = source.poll_events(Duration::ZERO).unwrap()
+        else {
+            panic!("expected an assignment");
+        };
+        assert!(lanes[0].poll(16, Duration::ZERO).unwrap().is_none());
+        assert!(!handle.wait_committed(PartitionId(0), 1, Duration::ZERO));
+    }
+
     #[test]
     #[expect(clippy::disallowed_methods, reason = "the test joins the thread")]
     fn poll_blocks_until_a_push_from_another_thread() {

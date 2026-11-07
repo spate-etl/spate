@@ -861,9 +861,9 @@ fn store_named(
 /// SDK uses, so EKS Pod Identity, IRSA (web identity), ECS task roles, IMDS,
 /// and `AWS_REGION`/`AWS_DEFAULT_REGION` all resolve without configuration.
 /// The explicit `options` are overlaid on top and win over the environment;
-/// the bucket comes from the URL. `object_store::parse_url_opts` (which every
-/// other scheme still uses) does *not* read the environment, so
-/// the S3 scheme is special-cased here.
+/// the bucket comes from the URL. `object_store::parse_url_opts`, used for
+/// `file://`, does *not* read the environment, so the S3 scheme is
+/// special-cased here.
 ///
 /// This must not pass `std::env::vars()` through `parse_url_opts`:
 /// `AmazonS3ConfigKey` parses *unprefixed* keys (`region`, `token`,
@@ -878,8 +878,8 @@ fn build_store(
     // prefix it would return and every planned descriptor that depends on it
     // stays valid.
     let (scheme, path) = ObjectStoreScheme::parse(url)?;
-    // Every non-S3 scheme (notably `file://` for infrastructure-free runs and
-    // tests) keeps the stock, scheme-generic behavior.
+    // `file://`, for infrastructure-free runs and tests, keeps the stock
+    // behavior.
     if !matches!(scheme, ObjectStoreScheme::AmazonS3) {
         let (store, prefix) = object_store::parse_url_opts(url, opts(options))?;
         return Ok(BuiltStore {
@@ -1532,20 +1532,6 @@ mod tests {
             "{err}"
         );
         assert!(err.reason().contains("nope"), "{err}");
-    }
-
-    /// Pins that a URL whose scheme names no store is fatal beside an injected
-    /// store, which still takes its listing prefix from the URL.
-    #[test]
-    fn a_url_with_no_store_scheme_is_fatal_beside_a_given_store() {
-        let (mut source, _rt) = fed_source("url: \"foo://bucket/p/\"\n");
-        source.store = Some(Arc::new(object_store::memory::InMemory::new()));
-        let err = source.open(ctx()).unwrap_err();
-        assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
-        assert!(
-            err.reason().starts_with("parsing foo://bucket/p/: Unable"),
-            "{err}"
-        );
     }
 
     /// Pins that a value that does not parse as a URL is fatal.

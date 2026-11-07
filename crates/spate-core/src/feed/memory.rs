@@ -10,8 +10,8 @@
 //! reports through [`read_depth`](Feed::read_depth).
 
 use super::{
-    Confirmation, Delivery, Depth, DepthOf, DepthReading, Feed, FeedError, FeedErrorKind,
-    FeedWaker, ReaderSignal, Receipt, Unit, confirmation, depth_reading,
+    Confirmation, Delivery, Depth, DepthOf, DepthReading, Feed, FeedError, FeedWaker, ReaderSignal,
+    Receipt, Unit, confirmation, depth_reading,
 };
 use crate::config::{ConfigError, FeedSection};
 use crate::hash::FastMap;
@@ -20,11 +20,8 @@ use std::collections::VecDeque;
 use std::num::NonZeroU32;
 use std::sync::{Arc, Mutex, MutexGuard};
 
-/// Deliveries after which a failed unit is dead-lettered, unless set.
-const ATTEMPT_CAP: NonZeroU32 = NonZeroU32::new(10).expect("non-zero");
-
 /// The key that names this backend in a `feed:` section.
-const BACKEND: &str = "memory";
+pub const BACKEND: &str = "memory";
 
 /// What a [`MemoryFeed`] holds at one moment.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -52,7 +49,7 @@ pub struct MemoryFeed {
 
 impl Default for MemoryFeed {
     fn default() -> MemoryFeed {
-        MemoryFeed::with_attempt_cap(ATTEMPT_CAP)
+        MemoryFeed::with_attempt_cap(super::DEFAULT_ATTEMPT_CAP)
     }
 }
 
@@ -97,9 +94,9 @@ impl MemoryFeed {
     ///
     /// # Errors
     ///
-    /// [`ConfigError::Component`] when the section names another backend,
-    /// when the `memory` body holds a key, or when the section sets
-    /// `location` or `settling_window`.
+    /// [`ConfigError::Component`] when the section names another backend or
+    /// the `memory` body holds a key, and [`ConfigError::Validation`] when the
+    /// section sets `location` or `settling_window`.
     ///
     /// # Examples
     ///
@@ -121,36 +118,10 @@ impl MemoryFeed {
         #[serde(deny_unknown_fields)]
         struct Body {}
 
-        let backend = section.backend();
-        if backend.type_tag() != BACKEND {
-            return Err(ConfigError::Component {
-                context: "feed".into(),
-                message: format!(
-                    "the in-process feed is built from `feed: {{ {BACKEND}: {{}} }}`, but the \
-                     section names `{}`",
-                    backend.type_tag()
-                ),
-            });
-        }
-        let _: Option<Body> = backend.deserialize_into()?;
-        if section.location.is_some() {
-            return Err(ConfigError::Component {
-                context: "feed".into(),
-                message: "the in-process feed keeps no state outside the process, so it takes \
-                          no `location`"
-                    .into(),
-            });
-        }
-        if section.settling_window.is_some() {
-            return Err(ConfigError::Component {
-                context: "feed".into(),
-                message: "the in-process feed counts its units exactly, so it takes no \
-                          `settling_window`"
-                    .into(),
-            });
-        }
+        let _: Option<Body> = section.backend_body(BACKEND, "in-process")?;
+        refuse_section_keys(section)?;
         Ok(MemoryFeed::with_attempt_cap(
-            section.attempt_cap.unwrap_or(ATTEMPT_CAP),
+            section.attempt_cap_or_default(),
         ))
     }
 
@@ -181,11 +152,27 @@ impl MemoryFeed {
     }
 }
 
+/// Refuse the common keys an in-process `section` cannot honor: a
+/// `location`, since the feed keeps no state outside the process, and a
+/// `settling_window`, since its counts are exact.
+pub(crate) fn refuse_section_keys(section: &FeedSection) -> Result<(), ConfigError> {
+    if section.location.is_some() {
+        return Err(ConfigError::Validation(
+            "the in-process `memory` feed takes no `feed.location`; remove it".into(),
+        ));
+    }
+    if section.settling_window.is_some() {
+        return Err(ConfigError::Validation(
+            "the in-process `memory` feed counts its units exactly and takes no settling \
+             window; remove `feed.settling_window`"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
 fn gone(receipt: Receipt) -> FeedError {
-    FeedError::new(
-        FeedErrorKind::Gone,
-        format!("{receipt} is not held by the in-process feed"),
-    )
+    FeedError::gone(receipt, "in-process feed")
 }
 
 impl Feed for MemoryFeed {
@@ -296,7 +283,7 @@ impl Feed for MemoryFeed {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::feed::wake_channel;
+    use crate::feed::{FeedErrorKind, wake_channel};
     use std::time::Duration;
 
     fn unit(id: &str) -> Unit {
@@ -373,16 +360,16 @@ mod tests {
     }
 
     /// Pins that `from_section` refuses a `location`, which a caller can set
-    /// on a section built in code, as the `feed` component error its
-    /// `# Errors` names, without printing the value.
+    /// on a section built in code, as the validation error its `# Errors`
+    /// names, without printing the value.
     #[test]
     fn from_section_refuses_a_location() {
         let mut section: FeedSection = serde_yaml::from_str("memory: {}\n").expect("section");
         section.location = Some("s3://u:hunter2@ops/jobs/a/?X-Amz-Signature=hunter3".to_owned());
         let err = MemoryFeed::from_section(&section).unwrap_err();
         assert!(
-            matches!(&err, ConfigError::Component { context, message }
-                if context == "feed" && message.contains("`location`")),
+            matches!(&err, ConfigError::Validation(message)
+                if message.contains("`feed.location`")),
             "{err:?}"
         );
         for shown in [err.to_string(), format!("{err:?}")] {
@@ -394,7 +381,7 @@ mod tests {
     }
 
     /// Pins that `from_section` refuses a `settling_window`, which a caller
-    /// can set on a section built in code, as the `feed` component error its
+    /// can set on a section built in code, as the validation error its
     /// `# Errors` names.
     #[test]
     fn from_section_refuses_a_settling_window() {
@@ -402,8 +389,8 @@ mod tests {
         section.settling_window = Some(Duration::from_secs(60));
         let err = MemoryFeed::from_section(&section).unwrap_err();
         assert!(
-            matches!(&err, ConfigError::Component { context, message }
-                if context == "feed" && message.contains("`settling_window`")),
+            matches!(&err, ConfigError::Validation(message)
+                if message.contains("`feed.settling_window`")),
             "{err:?}"
         );
     }

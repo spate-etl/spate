@@ -1,8 +1,9 @@
 //! The `feed:` section: the work feed a feed-reading source reads from, and
 //! the keys every backend shares.
 
-use super::{ComponentConfig, redact};
+use super::{ComponentConfig, ConfigError, redact};
 use serde::Deserialize;
+use serde::de::DeserializeOwned;
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::time::Duration;
 
@@ -36,7 +37,8 @@ pub struct FeedSection {
     /// The delivery on which a failed unit moves to its feed's dead-letter
     /// destination, on the in-process and Kafka feeds. The Kafka feed also
     /// moves a unit whose recorded deliveries have reached it, without
-    /// delivering it again. `None` leaves the backend's default. A backend
+    /// delivering it again. `None` leaves
+    /// [`DEFAULT_ATTEMPT_CAP`](crate::feed::DEFAULT_ATTEMPT_CAP). A backend
     /// that cannot honor the key refuses it. A source that re-enqueues units
     /// caps their re-enqueues at it.
     pub attempt_cap: Option<NonZeroU32>,
@@ -119,6 +121,77 @@ impl FeedSection {
     pub fn settling_window_or_default(&self) -> Duration {
         self.settling_window
             .unwrap_or(crate::feed::DEFAULT_SETTLING_WINDOW)
+    }
+
+    /// The section's `attempt_cap`, or
+    /// [`DEFAULT_ATTEMPT_CAP`](crate::feed::DEFAULT_ATTEMPT_CAP) when it sets
+    /// none.
+    ///
+    /// ```
+    /// use spate_core::config::{ComponentConfig, FeedSection, YamlValue};
+    /// use spate_core::feed::DEFAULT_ATTEMPT_CAP;
+    /// use std::num::NonZeroU32;
+    ///
+    /// let body = YamlValue::Mapping(Default::default());
+    /// let mut section = FeedSection::new(ComponentConfig::new("memory", body));
+    /// assert_eq!(section.attempt_cap_or_default(), DEFAULT_ATTEMPT_CAP);
+    ///
+    /// section.attempt_cap = NonZeroU32::new(3);
+    /// assert_eq!(section.attempt_cap_or_default().get(), 3);
+    /// ```
+    #[must_use]
+    pub fn attempt_cap_or_default(&self) -> NonZeroU32 {
+        self.attempt_cap.unwrap_or(crate::feed::DEFAULT_ATTEMPT_CAP)
+    }
+
+    /// Decode the backend's body for the backend keyed `tag`, which the
+    /// errors call the `name` feed.
+    ///
+    /// # Errors
+    ///
+    /// [`ConfigError::Component`] with context `feed` when the section names
+    /// a backend other than `tag`, and the body's own decoding error when it
+    /// does not decode as `T`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use spate_core::config::{ComponentConfig, FeedSection, YamlValue};
+    ///
+    /// let body = YamlValue::Mapping(Default::default());
+    /// let section = FeedSection::new(ComponentConfig::new("queue", body));
+    ///
+    /// let body: Option<YamlValue> = section.backend_body("queue", "queue").unwrap();
+    /// assert!(body.is_some());
+    /// let err = section.backend_body::<YamlValue>("log", "log").unwrap_err();
+    /// assert!(err.to_string().contains("names `queue`"));
+    /// ```
+    pub fn backend_body<T: DeserializeOwned>(
+        &self,
+        tag: &str,
+        name: &str,
+    ) -> Result<T, ConfigError> {
+        let named = self.backend.type_tag();
+        if named != tag {
+            return Err(ConfigError::Component {
+                context: "feed".into(),
+                message: format!(
+                    "the {name} feed is built from `feed: {{ {tag}: … }}`, but the section \
+                     names `{named}`"
+                ),
+            });
+        }
+        self.backend.deserialize_into()
+    }
+
+    /// An error in the body of the backend keyed `tag`, with context
+    /// `feed.<tag>`.
+    #[must_use]
+    pub fn backend_error(tag: &str, message: impl Into<String>) -> ConfigError {
+        ConfigError::Component {
+            context: format!("feed.{tag}"),
+            message: message.into(),
+        }
     }
 }
 
@@ -303,6 +376,51 @@ mod tests {
         assert_eq!(s.settling_window_or_default(), Duration::from_secs(300));
         let s = parse("sqs: {}\nsettling_window: 90s\n").unwrap();
         assert_eq!(s.settling_window_or_default(), Duration::from_secs(90));
+    }
+
+    /// Pins that a section with no `attempt_cap` reads as the tenth delivery,
+    /// and one that sets it reads as its value.
+    #[test]
+    fn an_absent_attempt_cap_reads_as_ten() {
+        let s = parse("sqs: {}\n").unwrap();
+        assert_eq!(s.attempt_cap_or_default().get(), 10);
+        let s = parse("sqs: {}\nattempt_cap: 3\n").unwrap();
+        assert_eq!(s.attempt_cap_or_default().get(), 3);
+    }
+
+    /// Pins that a backend body decodes only under its own tag, that another
+    /// tag is refused at the section naming both tags, and that a body error
+    /// keeps its own path.
+    #[test]
+    fn a_backend_body_decodes_only_under_its_tag() {
+        #[derive(Debug, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Body {
+            x: u32,
+        }
+        let s = parse("queue: { x: 7 }\n").unwrap();
+        let body: Body = s.backend_body("queue", "test queue").unwrap();
+        assert_eq!(body.x, 7);
+
+        let err = s.backend_body::<Body>("log", "test log").unwrap_err();
+        assert!(
+            matches!(&err, ConfigError::Component { context, message }
+                if context == "feed"
+                    && message == "the test log feed is built from `feed: { log: … }`, but the \
+                                   section names `queue`"),
+            "{err}"
+        );
+
+        let s = parse("queue: { x: 7, y: 1 }\n").unwrap();
+        let err = s.backend_body::<Body>("queue", "test queue").unwrap_err();
+        assert!(err.to_string().starts_with("feed.queue"), "{err}");
+    }
+
+    /// Pins that a backend error carries the backend's path.
+    #[test]
+    fn a_backend_error_names_its_backend() {
+        let err = FeedSection::backend_error("queue", "`x` must not be empty");
+        assert_eq!(err.to_string(), "feed.queue: `x` must not be empty");
     }
 
     fn load(feed: &str) -> Result<crate::config::PipelineConfig, String> {

@@ -1182,38 +1182,8 @@ async fn drain_returns_under_any_permit_pressure() {
 /// the write task holds one; the injected clock stands in for paused time.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_unabortable_write_does_not_hold_the_worker_past_its_grace() {
-    let mut cfg = SinkPoolConfig {
-        batch: BatchConfig {
-            max_rows: 1,
-            max_bytes: u64::MAX,
-            linger: Duration::from_secs(3600),
-        },
-        ..SinkPoolConfig::default()
-    };
-    cfg.inflight.max_per_shard = 1;
     let clock = TestClock::frozen();
-    let f = fixture_on(&clock, 1, 1, cfg, 16);
-    f.writer.set_default(Outcome::BlockThread);
-    // Releases the blocked runtime thread if the test panics, so the
-    // runtime's teardown does not wait on it forever.
-    struct ReleaseOnDrop(Arc<MockWriter>);
-    impl Drop for ReleaseOnDrop {
-        fn drop(&mut self) {
-            self.0.release_blocked();
-        }
-    }
-    let _release = ReleaseOnDrop(Arc::clone(&f.writer));
-
-    let (ack, ack_rx) = AckRef::test_pair();
-    f.queues.try_send(0, chunk(1, 8, &ack)).unwrap();
-    f.budget.add(8);
-    // Blocking is safe here: the test body runs on its own thread, apart from
-    // the runtime's workers.
-    wait_for("the write starts", Duration::from_secs(5), || {
-        !f.writer.calls().is_empty()
-    });
-    drop(ack);
-    drop(f.queues);
+    let f = one_blocked_write(&clock);
 
     let t0 = clock.now();
     let deadline = Duration::from_millis(100);
@@ -1244,8 +1214,61 @@ async fn an_unabortable_write_does_not_hold_the_worker_past_its_grace() {
         },
         "the unabortable batch is abandoned by the worker itself"
     );
-    assert_eq!(ack_rx.try_recv().unwrap().status, AckStatus::Failed);
+    assert_eq!(f.ack_rx.try_recv().unwrap().status, AckStatus::Failed);
     assert_eq!(f.budget.usage(), 0);
+}
+
+/// Releases the writer's blocked runtime thread on drop, so a failed test's
+/// runtime teardown does not wait on it forever.
+struct ReleaseOnDrop(Arc<MockWriter>);
+
+impl Drop for ReleaseOnDrop {
+    fn drop(&mut self) {
+        self.0.release_blocked();
+    }
+}
+
+/// A one-shard pool whose one write blocks a runtime thread, with its
+/// queues closed, so a drain waits on that write alone.
+struct BlockedWrite {
+    writer: Arc<MockWriter>,
+    pool: SinkPool<MockWriter>,
+    budget: Arc<InflightBudget>,
+    ack_rx: crossbeam_channel::Receiver<AckMsg>,
+    _release: ReleaseOnDrop,
+}
+
+/// Start a [`BlockedWrite`] on `clock`, returning once the write has
+/// started.
+///
+/// It blocks on the write starting, so the test body must run on a thread
+/// apart from the runtime's workers.
+fn one_blocked_write(clock: &Arc<TestClock>) -> BlockedWrite {
+    let mut cfg = SinkPoolConfig {
+        batch: BatchConfig {
+            max_rows: 1,
+            max_bytes: u64::MAX,
+            linger: Duration::from_secs(3600),
+        },
+        ..SinkPoolConfig::default()
+    };
+    cfg.inflight.max_per_shard = 1;
+    let f = fixture_on(clock, 1, 1, cfg, 16);
+    f.writer.set_default(Outcome::BlockThread);
+    let release = ReleaseOnDrop(Arc::clone(&f.writer));
+    let (ack, ack_rx) = AckRef::test_pair();
+    f.queues.try_send(0, chunk(1, 8, &ack)).unwrap();
+    f.budget.add(8);
+    wait_for("the write starts", Duration::from_secs(5), || {
+        !f.writer.calls().is_empty()
+    });
+    BlockedWrite {
+        writer: f.writer,
+        pool: f.pool,
+        budget: f.budget,
+        ack_rx,
+        _release: release,
+    }
 }
 
 /// The pool's backstop under the cooperative deadline. The restructured intake
@@ -3135,11 +3158,29 @@ fn sink_errors_metric_counts_each_write_error_under_its_class() {
     assert_eq!(errors("fatal"), 0.0, "{rendered}");
 }
 
-/// Pins that `drain` returns for the largest deadline, which would carry a
-/// clock reading past `Instant`'s range. Regression for #1510.
-#[tokio::test]
-async fn drain_returns_for_the_largest_deadline() {
-    let f = fixture(1, 1, SinkPoolConfig::default(), 4);
-    drop(f.queues);
-    f.pool.drain(Duration::MAX).await;
+/// Pins that `drain` counts the largest deadline as a year, which keeps the
+/// clock reading it arms inside `Instant`'s range, and returns once the year
+/// and the worker's grace pass. Regression for #1510.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn drain_counts_the_largest_deadline_as_a_year() {
+    let clock = TestClock::frozen();
+    let f = one_blocked_write(&clock);
+    let year = Duration::from_secs(365 * 24 * 60 * 60);
+
+    let t0 = clock.now();
+    let drain = tokio::spawn(f.pool.drain(Duration::MAX));
+    wait_for("the worker arms a year", Duration::from_secs(5), || {
+        clock.has_slept_until(t0 + year)
+    });
+    clock.advance(year);
+    wait_for("the sweep arms its grace", Duration::from_secs(5), || {
+        clock.has_slept_until(t0 + year + worker::ABORT_GRACE)
+    });
+    clock.advance(worker::ABORT_GRACE);
+    wait_for("the drain returns", Duration::from_secs(5), || {
+        drain.is_finished()
+    });
+    let report = drain.await.unwrap();
+    f.writer.release_blocked();
+    assert_eq!(report.abandoned, 1);
 }

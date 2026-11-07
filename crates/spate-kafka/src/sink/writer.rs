@@ -167,7 +167,7 @@ pub(crate) fn message_headers(message: &MessageRef<'_>) -> Option<OwnedHeaders> 
         message
             .headers
             .iter()
-            .map(|&(name, value)| (name, Some(value))),
+            .map(|(name, value)| (name, Some(value))),
     ))
 }
 

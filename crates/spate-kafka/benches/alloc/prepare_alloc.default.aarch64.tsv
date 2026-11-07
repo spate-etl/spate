@@ -5,4 +5,4 @@
 case	allocs	reallocs	bytes
 keyed	1	0	560000
 keyless	1	0	560000
-stamped_headers	10001	0	1840000
+stamped_headers	1	0	560000

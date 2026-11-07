@@ -36,9 +36,14 @@
 //! rate_limited_warn!(DESER_WARN, reason = "malformed", "payload skipped");
 //! ```
 
+use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
+
+use tracing_subscriber::field::RecordFields;
+use tracing_subscriber::fmt::SubscriberBuilder;
+use tracing_subscriber::fmt::format::{DefaultFields, FormatFields, Writer};
 
 use crate::clock::{Clock, SystemClock};
 
@@ -65,7 +70,7 @@ pub enum LogFormat {
     /// Kubernetes log pipelines expect. Default.
     #[default]
     Json,
-    /// Human-readable output for local development.
+    /// Human-readable output for local development, one line per event.
     Pretty,
 }
 
@@ -86,11 +91,43 @@ pub fn init(format: LogFormat, default_filter: &str) -> bool {
             .with_env_filter(filter)
             .try_init()
             .is_ok(),
-        LogFormat::Pretty => tracing_subscriber::fmt()
-            .with_target(true)
-            .with_env_filter(filter)
-            .try_init()
-            .is_ok(),
+        LogFormat::Pretty => pretty().with_env_filter(filter).try_init().is_ok(),
+    }
+}
+
+/// The subscriber behind [`LogFormat::Pretty`], writing to stdout.
+fn pretty() -> SubscriberBuilder<OneLineFields> {
+    tracing_subscriber::fmt()
+        .with_target(true)
+        .fmt_fields(OneLineFields::default())
+}
+
+/// [`DefaultFields`] with `\n` and `\r` written as those two-character escapes,
+/// so a field's text cannot start a log line of its own. `DefaultFields` escapes
+/// other control characters and passes those two.
+#[derive(Default)]
+struct OneLineFields(DefaultFields);
+
+impl<'writer> FormatFields<'writer> for OneLineFields {
+    fn format_fields<R: RecordFields>(&self, writer: Writer<'writer>, fields: R) -> fmt::Result {
+        let mut escaping = EscapeLineBreaks(writer);
+        self.0.format_fields(Writer::new(&mut escaping), fields)
+    }
+}
+
+struct EscapeLineBreaks<'writer>(Writer<'writer>);
+
+impl fmt::Write for EscapeLineBreaks<'_> {
+    fn write_str(&mut self, text: &str) -> fmt::Result {
+        let mut rest = text;
+        while let Some(at) = rest.find(['\n', '\r']) {
+            let (line, tail) = rest.split_at(at);
+            self.0.write_str(line)?;
+            self.0
+                .write_str(if tail.starts_with('\n') { "\\n" } else { "\\r" })?;
+            rest = &tail[1..];
+        }
+        self.0.write_str(rest)
     }
 }
 
@@ -241,9 +278,63 @@ macro_rules! rate_limited_warn {
     };
 }
 
+/// An in-memory writer for a test's subscriber. Clones share the buffer.
+#[cfg(test)]
+#[derive(Clone, Default)]
+pub(crate) struct LogBuf(std::sync::Arc<Mutex<Vec<u8>>>);
+
+#[cfg(test)]
+impl LogBuf {
+    pub(crate) fn text(&self) -> String {
+        String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
+    }
+}
+
+#[cfg(test)]
+impl std::io::Write for LogBuf {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn pretty_lines(f: impl FnOnce()) -> Vec<String> {
+        let buf = LogBuf::default();
+        let writer = buf.clone();
+        let subscriber = pretty()
+            .with_writer(move || writer.clone())
+            .with_ansi(false)
+            .without_time()
+            .finish();
+        tracing::subscriber::with_default(subscriber, f);
+        buf.text().lines().map(str::to_owned).collect()
+    }
+
+    /// Pins that a line feed or carriage return in an event's message, its
+    /// fields or a span's fields stays on the event's log line. Regression
+    /// for #1699.
+    #[test]
+    fn pretty_keeps_an_event_on_one_line() {
+        let text = "first\nsecond\rthird";
+        let lines = pretty_lines(|| {
+            let span = tracing::info_span!("work", unit = %text);
+            let _in_span = span.enter();
+            tracing::info!(reason = %text, quoted = ?text, "refused: {text}");
+        });
+        assert_eq!(lines.len(), 1, "{lines:#?}");
+        assert_eq!(
+            lines[0].matches("first\\nsecond\\rthird").count(),
+            4,
+            "{lines:#?}"
+        );
+    }
 
     #[test]
     fn allows_up_to_capacity_then_suppresses() {

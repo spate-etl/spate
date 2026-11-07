@@ -750,26 +750,14 @@ mod tests {
 
     /// Everything the check logs while `f` runs, as text.
     fn logs(f: impl FnOnce()) -> String {
-        #[derive(Clone, Default)]
-        struct Buf(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
-        impl std::io::Write for Buf {
-            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-                self.0.lock().unwrap().extend_from_slice(bytes);
-                Ok(bytes.len())
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
-        }
-        let buf = Buf::default();
+        let buf = crate::telemetry::LogBuf::default();
         let writer = buf.clone();
         let subscriber = tracing_subscriber::fmt()
             .with_writer(move || writer.clone())
             .with_ansi(false)
             .finish();
         tracing::subscriber::with_default(subscriber, f);
-        let bytes = buf.0.lock().unwrap().clone();
-        String::from_utf8(bytes).unwrap()
+        buf.text()
     }
 
     /// Pins the transitions an operator sees at INFO: a window opening with

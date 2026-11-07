@@ -92,6 +92,10 @@ use std::net::SocketAddr;
 use std::path::Path;
 use std::time::Duration;
 
+/// The ceiling on a duration the runtime adds to a clock reading. A day is far
+/// above any working value, and keeps the sum inside `Instant`'s range.
+const ONE_DAY: Duration = Duration::from_secs(24 * 60 * 60);
+
 /// Root of a pipeline's configuration file.
 ///
 /// One process runs one pipeline; one file configures one process.
@@ -610,9 +614,14 @@ impl PipelineConfig {
         // A floor keeps sub-100ms intervals from hammering the source's
         // offset store for no durability gain. The sink write is the
         // durability boundary, not the checkpoint.
+        // The ceiling keeps the interval, which is added to a clock reading,
+        // inside the clock's range.
         const COMMIT_INTERVAL: DurationBounds =
-            DurationBounds::at_least(Duration::from_millis(100));
+            DurationBounds::at_least(Duration::from_millis(100)).at_most(ONE_DAY);
         if let Err(e) = check_duration(self.checkpoint.interval, COMMIT_INTERVAL) {
+            if self.checkpoint.interval > ONE_DAY {
+                return fail(format!("checkpoint.interval {e}"));
+            }
             return fail(format!(
                 "checkpoint.interval {e}: the commit loop fires every interval, so \
                  sub-100ms intervals hammer the source's offset store without \
@@ -622,8 +631,11 @@ impl PipelineConfig {
         if self.checkpoint.max_pending_batches == 0 {
             return fail("checkpoint.max_pending_batches must be at least 1".into());
         }
-        if self.checkpoint.drain_timeout.is_zero() {
-            return fail("checkpoint.drain_timeout must be greater than zero".into());
+        // The timeout is added to a clock reading as well.
+        const DRAIN_TIMEOUT: DurationBounds =
+            DurationBounds::at_least(Duration::from_nanos(1)).at_most(ONE_DAY);
+        if let Err(e) = check_duration(self.checkpoint.drain_timeout, DRAIN_TIMEOUT) {
+            return fail(format!("checkpoint.drain_timeout {e}"));
         }
         if self.checkpoint.stalled_fail_after.is_zero() {
             return fail("checkpoint.stalled_fail_after must be greater than zero".into());
@@ -739,8 +751,7 @@ impl PipelineConfig {
     /// too.
     pub(crate) fn reject_bad_settling_window(&self) -> Result<(), ConfigError> {
         const SETTLING_WINDOW: DurationBounds =
-            DurationBounds::at_least(crate::feed::END_CHECK_INTERVAL)
-                .at_most(Duration::from_secs(24 * 60 * 60));
+            DurationBounds::at_least(crate::feed::END_CHECK_INTERVAL).at_most(ONE_DAY);
         let Some(feed) = &self.feed else {
             return Ok(());
         };
@@ -1375,7 +1386,7 @@ sinks:
             ),
             (
                 "pipeline: { name: x }\ncheckpoint: { interval: 50ms }\nsource: { m: {} }\nsink: { m: {} }",
-                "at least 100ms",
+                "from 100ms to 1day",
             ),
             (
                 "pipeline: { name: x }\ncheckpoint: { max_pending_batches: 0 }\nsource: { m: {} }\nsink: { m: {} }",
@@ -1411,6 +1422,30 @@ sinks:
     /// Pins the commit interval's floor at 100ms, inclusive and on the whole
     /// duration, and the refusal's whole text.
     #[test]
+    /// Pins that `checkpoint.interval` and `checkpoint.drain_timeout` load at
+    /// one day and are refused a nanosecond past it, naming the key.
+    /// Regression for #1669.
+    fn checkpoint_durations_are_refused_past_a_day() {
+        let yaml = |key: &str, value: &str| {
+            format!(
+                "pipeline: {{ name: x }}\ncheckpoint: {{ {key}: {value} }}\n\
+                 source: {{ m: {{}} }}\nsink: {{ m: {{}} }}"
+            )
+        };
+        for key in ["interval", "drain_timeout"] {
+            PipelineConfig::from_str(&yaml(key, "1day")).expect("a day loads");
+            let err = PipelineConfig::from_str(&yaml(key, "1day 1ns"))
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains(&format!("checkpoint.{key} must be from")),
+                "{err}"
+            );
+            assert!(err.contains("to 1day; found 1day 1ns"), "{err}");
+        }
+    }
+
+    #[test]
     fn checkpoint_interval_loads_at_its_floor_and_is_refused_a_nanosecond_under() {
         let yaml = |interval: &str| {
             format!(
@@ -1425,7 +1460,7 @@ sinks:
             .to_string();
         assert_eq!(
             err,
-            "invalid configuration: checkpoint.interval must be at least 100ms; \
+            "invalid configuration: checkpoint.interval must be from 100ms to 1day; \
              found 99ms 999us 999ns: the commit loop fires every interval, so \
              sub-100ms intervals hammer the source's offset store without \
              improving durability"

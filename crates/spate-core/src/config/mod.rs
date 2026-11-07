@@ -92,6 +92,10 @@ use std::net::SocketAddr;
 use std::path::Path;
 use std::time::Duration;
 
+/// The ceiling on a duration the runtime adds to a clock reading. A day is far
+/// above any working value, and keeps the sum inside `Instant`'s range.
+const ONE_DAY: Duration = Duration::from_secs(24 * 60 * 60);
+
 /// Root of a pipeline's configuration file.
 ///
 /// One process runs one pipeline; one file configures one process.
@@ -212,7 +216,8 @@ pub enum PinningMode {
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]
 pub struct CheckpointSection {
-    /// How often committable watermarks are flushed to the source.
+    /// How often committable watermarks are flushed to the source. From
+    /// 100ms to one day, as [`PipelineConfig::validate`] checks.
     #[serde(with = "humantime_serde")]
     pub interval: Duration,
     /// Hard per-partition ceiling on unacknowledged batches. A partition at
@@ -224,7 +229,8 @@ pub struct CheckpointSection {
     /// Shutdown/rebalance drain budget. Must be comfortably below the pod's
     /// `terminationGracePeriodSeconds`, and more than
     /// [`STOP_RESERVE`](crate::feed::STOP_RESERVE) with a feed that
-    /// [hands back](crate::feed::Feed::hands_back).
+    /// [hands back](crate::feed::Feed::hands_back). Above zero and at most
+    /// one day, as [`PipelineConfig::validate`] checks.
     #[serde(with = "humantime_serde")]
     pub drain_timeout: Duration,
     /// A partition watermark stalled behind a failed batch for longer than
@@ -610,20 +616,31 @@ impl PipelineConfig {
         // A floor keeps sub-100ms intervals from hammering the source's
         // offset store for no durability gain. The sink write is the
         // durability boundary, not the checkpoint.
-        const COMMIT_INTERVAL: DurationBounds =
+        // The ceiling keeps the interval, which is added to a clock reading,
+        // inside the clock's range.
+        const COMMIT_INTERVAL_FLOOR: DurationBounds =
             DurationBounds::at_least(Duration::from_millis(100));
-        if let Err(e) = check_duration(self.checkpoint.interval, COMMIT_INTERVAL) {
+        if let Err(e) = check_duration(self.checkpoint.interval, COMMIT_INTERVAL_FLOOR) {
             return fail(format!(
                 "checkpoint.interval {e}: the commit loop fires every interval, so \
                  sub-100ms intervals hammer the source's offset store without \
                  improving durability"
             ));
         }
+        if let Err(e) = check_duration(
+            self.checkpoint.interval,
+            COMMIT_INTERVAL_FLOOR.at_most(ONE_DAY),
+        ) {
+            return fail(format!("checkpoint.interval {e}"));
+        }
         if self.checkpoint.max_pending_batches == 0 {
             return fail("checkpoint.max_pending_batches must be at least 1".into());
         }
-        if self.checkpoint.drain_timeout.is_zero() {
-            return fail("checkpoint.drain_timeout must be greater than zero".into());
+        // The timeout is added to a clock reading as well.
+        const DRAIN_TIMEOUT: DurationBounds =
+            DurationBounds::at_least(Duration::from_nanos(1)).at_most(ONE_DAY);
+        if let Err(e) = check_duration(self.checkpoint.drain_timeout, DRAIN_TIMEOUT) {
+            return fail(format!("checkpoint.drain_timeout {e}"));
         }
         if self.checkpoint.stalled_fail_after.is_zero() {
             return fail("checkpoint.stalled_fail_after must be greater than zero".into());
@@ -739,8 +756,7 @@ impl PipelineConfig {
     /// too.
     pub(crate) fn reject_bad_settling_window(&self) -> Result<(), ConfigError> {
         const SETTLING_WINDOW: DurationBounds =
-            DurationBounds::at_least(crate::feed::END_CHECK_INTERVAL)
-                .at_most(Duration::from_secs(24 * 60 * 60));
+            DurationBounds::at_least(crate::feed::END_CHECK_INTERVAL).at_most(ONE_DAY);
         let Some(feed) = &self.feed else {
             return Ok(());
         };
@@ -1405,6 +1421,32 @@ sinks:
         for (yaml, needle) in cases {
             let err = PipelineConfig::from_str(yaml).unwrap_err().to_string();
             assert!(err.contains(needle), "expected `{needle}` in: {err}");
+        }
+    }
+
+    /// Pins that `checkpoint.interval` and `checkpoint.drain_timeout` load at
+    /// one day and are refused a nanosecond past it, naming the key.
+    /// Regression for #1669.
+    #[test]
+    fn checkpoint_durations_are_refused_past_a_day() {
+        let yaml = |key: &str, value: &str| {
+            format!(
+                "pipeline: {{ name: x }}\ncheckpoint: {{ {key}: {value} }}\n\
+                 source: {{ m: {{}} }}\nsink: {{ m: {{}} }}"
+            )
+        };
+        for key in ["interval", "drain_timeout"] {
+            PipelineConfig::from_str(&yaml(key, "1day")).expect("a day loads");
+            let err = PipelineConfig::from_str(&yaml(key, "1day 1ns"))
+                .unwrap_err()
+                .to_string();
+            let from = if key == "interval" { "100ms" } else { "1ns" };
+            assert!(
+                err.ends_with(&format!(
+                    "checkpoint.{key} must be from {from} to 1day; found 1day 1ns"
+                )),
+                "{err}"
+            );
         }
     }
 

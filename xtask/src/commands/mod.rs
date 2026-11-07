@@ -82,6 +82,10 @@ pub(crate) enum Command {
         /// Mutate the checkout itself, for a disposable CI runner
         #[arg(long)]
         in_place: bool,
+        /// Stop cargo-mutants after this many minutes and summarise the
+        /// mutants it tested by then
+        #[arg(long, value_name = "MINUTES")]
+        budget: Option<u64>,
     },
 
     /// Loom concurrency models for the checkpoint and backpressure primitives
@@ -317,7 +321,17 @@ pub(crate) fn dispatch(root: &Path, explain: bool, cmd: Command) -> Outcome {
         },
         Command::BugReport(args) => issue_form::bug_report(root, explain, &args),
         Command::Fuzz { cmd } => fuzz::dispatch(root, explain, cmd),
-        Command::Mutants { since, in_place } => mutants::run(root, explain, &since, in_place),
+        Command::Mutants {
+            since,
+            in_place,
+            budget,
+        } => mutants::run(
+            root,
+            explain,
+            &since,
+            in_place,
+            budget.map(|m| std::time::Duration::from_secs(m * 60)),
+        ),
         Command::SiteCheck => site_check::check(root, explain),
         Command::Docs { serve } => docs::dispatch(root, explain, serve),
         Command::Release { cmd } => crate::release::dispatch(root, explain, cmd),

@@ -191,14 +191,22 @@ jobs:
           shared-key: dev-allfeatures
           cache-save: never
       - name: Mutants
-        # Advisory: survivors are listed in the job summary. The step's own
-        # timeout sits below the job's, so a long run ends the step and not
-        # the job, which `ci-gate` would count as cancelled.
+        # Advisory: survivors are listed in the job summary. `--budget` stops
+        # cargo-mutants first, leaving a minute for it to exit and the summary
+        # to list what it reached. The step's timeout below it and the job's
+        # above it are backstops: one ends the step with no summary, and the
+        # other ends the job, which `ci-gate` counts as cancelled.
         continue-on-error: true
         timeout-minutes: 40
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
-        run: cargo xtask mutants --since "$BASE_SHA" --in-place
+          # Caps each test process's writable memory. A mutant that loops
+          # while allocating then fails its test, where uncapped it fills the
+          # runner's 16 GiB and the runner shuts down. 4 tests at a time at
+          # 3 GiB each leave room for the rest. Only test binaries run through
+          # the target runner, so the build is not capped.
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: prlimit --data=3221225472 --
+        run: cargo xtask mutants --since "$BASE_SHA" --in-place --budget 37
 
   doctests:
     name: Doc tests and rustdoc

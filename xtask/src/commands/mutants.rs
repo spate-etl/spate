@@ -2,6 +2,7 @@
 //! survivors written to the job summary on a CI runner.
 
 use std::path::Path;
+use std::time::Duration;
 
 use super::step_summary::Summary;
 use crate::run::{self, Error, Outcome, Step, Streams};
@@ -28,13 +29,21 @@ const HEADING: &str = "## Mutants over the diff\n\n";
 
 /// Writes the diff against the merge base of `base` and `HEAD`, runs
 /// cargo-mutants over it, and writes the survivors to `$GITHUB_STEP_SUMMARY`
-/// when the runner sets it.
+/// when the runner sets it. With a `budget`, a run still going when it runs
+/// out is stopped, and the summary covers the mutants tested by then.
 ///
 /// # Errors
 ///
-/// When `base` shares no history with `HEAD`, and with cargo-mutants' own exit
-/// code when it finds a survivor, a timeout or cannot run.
-pub(super) fn run(root: &Path, explain: bool, base: &str, in_place: bool) -> Outcome {
+/// When `base` shares no history with `HEAD`, when the budget stops the run,
+/// and with cargo-mutants' own exit code when it finds a survivor, a timeout
+/// or cannot run.
+pub(super) fn run(
+    root: &Path,
+    explain: bool,
+    base: &str,
+    in_place: bool,
+    budget: Option<Duration>,
+) -> Outcome {
     let out = root.join(OUT);
     let diff = out.join("pr.diff");
     let step = Step::new("cargo", mutants_args(&diff.to_string_lossy(), in_place));
@@ -55,9 +64,33 @@ pub(super) fn run(root: &Path, explain: bool, base: &str, in_place: bool) -> Out
                 "the step stopped before cargo-mutants returned",
             ));
         }
-        Ok(run::complete(root, &step, Streams::Inherit)?.code)
+        ended(root, &step, budget)
     });
     finish(ran, &out.join("mutants.out"), summary.as_ref())
+}
+
+/// How cargo-mutants ended.
+#[derive(Debug, PartialEq, Eq)]
+enum Ended {
+    /// It exited with this code.
+    Exited(i32),
+    /// It was still running when this budget ran out, and was stopped.
+    Stopped(Duration),
+}
+
+/// Runs cargo-mutants, stopping it when `budget` runs out.
+fn ended(root: &Path, step: &Step<'_>, budget: Option<Duration>) -> Result<Ended, Error> {
+    let Some(budget) = budget else {
+        return Ok(Ended::Exited(
+            run::complete(root, step, Streams::Inherit)?.code,
+        ));
+    };
+    let done = run::complete_within(root, step, Streams::Inherit, budget)?;
+    Ok(if done.stopped {
+        Ended::Stopped(budget)
+    } else {
+        Ended::Exited(done.completed.code)
+    })
 }
 
 /// Writes the patch to `diff` and removes the previous run's report under
@@ -81,14 +114,19 @@ fn clear_report(dir: &Path) -> Outcome {
 
 /// Writes the summary to the summary file, or to stdout when there is none,
 /// and turns the run into the outcome: cargo-mutants' exit code from the
-/// report in `dir`, or the error that stopped the run before cargo-mutants
-/// finished.
-fn finish(ran: Result<i32, Error>, dir: &Path, summary: Option<&Summary>) -> Outcome {
+/// report in `dir`, an error for a run its budget stopped, or the error that
+/// stopped the run before cargo-mutants finished.
+fn finish(ran: Result<Ended, Error>, dir: &Path, summary: Option<&Summary>) -> Outcome {
+    let read = |name: &str| std::fs::read_to_string(dir.join(name)).unwrap_or_default();
     let text = match &ran {
-        Ok(code) => {
-            let read = |name: &str| std::fs::read_to_string(dir.join(name)).unwrap_or_default();
-            self::summary(*code, &read("missed.txt"), &read("timeout.txt"))
-        }
+        Ok(Ended::Exited(code)) => self::summary(*code, &read("missed.txt"), &read("timeout.txt")),
+        Ok(Ended::Stopped(budget)) => stopped(
+            *budget,
+            &read("mutants.json"),
+            &read("outcomes.json"),
+            &read("missed.txt"),
+            &read("timeout.txt"),
+        ),
         Err(e) => unfinished(&e.message),
     };
     match summary {
@@ -96,8 +134,12 @@ fn finish(ran: Result<i32, Error>, dir: &Path, summary: Option<&Summary>) -> Out
         None => print!("{text}"),
     }
     match ran? {
-        0 => Ok(()),
-        code => Err(Error::status(code)),
+        Ended::Exited(0) => Ok(()),
+        Ended::Exited(code) => Err(Error::status(code)),
+        Ended::Stopped(budget) => Err(Error::msg(format!(
+            "cargo-mutants stopped at its {}-minute budget",
+            budget.as_secs() / 60
+        ))),
     }
 }
 
@@ -137,26 +179,91 @@ fn summary(code: i32, missed: &str, timeout: &str) -> String {
         return unfinished(&format!("cargo-mutants exited {code}"));
     }
     let mut text = String::from(HEADING);
+    let listed = survivors(missed, timeout);
+    if listed.is_empty() {
+        text.push_str("No surviving mutants.\n");
+    } else {
+        text.push_str(&listed);
+    }
+    text.push_str(FORMS);
+    text
+}
+
+/// The job summary for a run its budget stopped, given the contents of
+/// `mutants.json`, `outcomes.json`, `missed.txt` and `timeout.txt`.
+/// cargo-mutants rewrites each of them after every mutant, so they hold the
+/// mutants tested before the stop.
+fn stopped(budget: Duration, mutants: &str, outcomes: &str, missed: &str, timeout: &str) -> String {
+    let minutes = budget.as_secs() / 60;
+    let Ok(mutants) = serde_json::from_str::<serde_json::Value>(mutants) else {
+        return format!(
+            "{HEADING}The run stopped at its {minutes}-minute budget before cargo-mutants \
+             listed its mutants.\n"
+        );
+    };
+    let all = names(&mutants);
+    let outcomes: Option<serde_json::Value> = serde_json::from_str(outcomes).ok();
+    let tested = outcomes
+        .as_ref()
+        .and_then(|o| o["outcomes"].as_array())
+        .map(|list| {
+            list.iter()
+                .filter_map(|o| o["scenario"]["Mutant"]["name"].as_str())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let not_reached: Vec<&str> = all
+        .iter()
+        .copied()
+        .filter(|name| !tested.contains(name))
+        .collect();
+    let mut text = format!(
+        "{HEADING}The run stopped at its {minutes}-minute budget after testing {} of {} \
+         mutants.\n\n",
+        all.len() - not_reached.len(),
+        all.len()
+    );
+    let listed = survivors(missed, timeout);
+    if listed.is_empty() {
+        text.push_str("No surviving mutants among those tested.\n");
+    } else {
+        text.push_str(&listed);
+    }
+    if !not_reached.is_empty() {
+        text.push_str("\nNot reached:\n\n");
+        for name in not_reached {
+            text.push_str(&format!("- `{name}`\n"));
+        }
+    }
+    text.push_str(FORMS);
+    text
+}
+
+/// The `name` of each mutant in a `mutants.json` array, in its order.
+fn names(mutants: &serde_json::Value) -> Vec<&str> {
+    mutants
+        .as_array()
+        .map(|list| list.iter().filter_map(|m| m["name"].as_str()).collect())
+        .unwrap_or_default()
+}
+
+/// One list item per survivor in `missed` and per timeout in `timeout`.
+fn survivors(missed: &str, timeout: &str) -> String {
     let lines = |s: &'static str, body: &str| {
         body.lines()
             .filter(|l| !l.trim().is_empty())
             .map(|l| format!("- {s}`{l}`\n"))
             .collect::<String>()
     };
-    let listed = lines("", missed) + &lines("timeout: ", timeout);
-    if listed.is_empty() {
-        text.push_str("No surviving mutants.\n");
-    } else {
-        text.push_str(&listed);
-    }
-    text.push_str(
-        "\ncargo-mutants replaces function bodies, operators and match guards, and deletes \
-         match arms and struct-literal fields. It does not swap a `match` arm, delete an \
-         early `return`, `break` or `continue`, or move a constant across its bound; those \
-         stay a review step.\n",
-    );
-    text
+    lines("", missed) + &lines("timeout: ", timeout)
 }
+
+/// The mutant forms cargo-mutants does not generate, closing every summary
+/// that lists results.
+const FORMS: &str = "\ncargo-mutants replaces function bodies, operators and match guards, and \
+     deletes match arms and struct-literal fields. It does not swap a `match` arm, delete an \
+     early `return`, `break` or `continue`, or move a constant across its bound; those stay a \
+     review step.\n";
 
 /// The job summary for a run that stopped before testing every mutant.
 fn unfinished(cause: &str) -> String {
@@ -341,7 +448,7 @@ mod tests {
                 .contains("did not finish")
         );
 
-        let err = finish(Ok(2), &dir, Some(&summary)).expect_err("survivors exit 2");
+        let err = finish(Ok(Ended::Exited(2)), &dir, Some(&summary)).expect_err("survivors exit 2");
         assert_eq!(err.code, Some(2));
         let text = std::fs::read_to_string(&path).expect("summary");
         assert!(
@@ -352,7 +459,7 @@ mod tests {
         assert!(text.contains("- timeout: `c.rs:3:3: replace h`"), "{text}");
         assert!(!text.contains("did not finish"), "{text}");
 
-        assert!(finish(Ok(0), &dir, None).is_ok());
+        assert!(finish(Ok(Ended::Exited(0)), &dir, None).is_ok());
         std::fs::remove_dir_all(&dir).expect("remove temp dir");
     }
 
@@ -379,13 +486,102 @@ mod tests {
         std::fs::remove_dir_all(&dir).expect("remove temp dir");
     }
 
+    /// A run its budget stopped lists the survivors and timeouts found by
+    /// then, counts the mutants tested, names each one not reached, and fails.
+    /// Regression for #1288.
+    #[test]
+    fn a_run_stopped_at_its_budget_lists_what_it_found_and_what_it_did_not_reach() {
+        let dir = scratch("stopped");
+        let [a, b, c, d] = [
+            "a.rs:1:1: replace f",
+            "b.rs:2:2: replace g",
+            "c.rs:3:3: replace h",
+            "d.rs:4:4: replace i",
+        ];
+        let mutants = [a, b, c, d].map(|n| format!(r#"{{"name":"{n}","package":"p"}}"#));
+        std::fs::write(dir.join("mutants.json"), format!("[{}]", mutants.join(",")))
+            .expect("write");
+        let outcome = |n: &str, summary: &str| {
+            format!(r#"{{"scenario":{{"Mutant":{{"name":"{n}"}}}},"summary":"{summary}"}}"#)
+        };
+        let outcomes = format!(
+            r#"{{"outcomes":[{{"scenario":"Baseline","summary":"Success"}},{},{},{}],"total_mutants":4}}"#,
+            outcome(a, "MissedMutant"),
+            outcome(b, "CaughtMutant"),
+            outcome(c, "Timeout"),
+        );
+        std::fs::write(dir.join("outcomes.json"), outcomes).expect("write");
+        std::fs::write(dir.join("missed.txt"), format!("{a}\n")).expect("write");
+        std::fs::write(dir.join("caught.txt"), format!("{b}\n")).expect("write");
+        std::fs::write(dir.join("timeout.txt"), format!("{c}\n")).expect("write");
+        let path = dir.join("summary.md");
+        let summary = Summary::at(path.clone());
+
+        let budget = Duration::from_secs(37 * 60);
+        let err = finish(Ok(Ended::Stopped(budget)), &dir, Some(&summary))
+            .expect_err("a stopped run fails");
+        assert_eq!(err.message, "cargo-mutants stopped at its 37-minute budget");
+        let text = std::fs::read_to_string(&path).expect("summary");
+        assert!(
+            text.contains("stopped at its 37-minute budget after testing 3 of 4 mutants.\n"),
+            "{text}"
+        );
+        assert!(text.contains(&format!("- `{a}`\n")), "{text}");
+        assert!(text.contains(&format!("- timeout: `{c}`\n")), "{text}");
+        assert!(
+            text.contains(&format!("Not reached:\n\n- `{d}`\n")),
+            "{text}"
+        );
+        assert!(!text.contains(b), "a caught mutant is not listed: {text}");
+        assert!(!text.contains("No surviving mutants"), "{text}");
+        assert!(text.contains("stay a review step"), "{text}");
+        std::fs::remove_dir_all(&dir).expect("remove temp dir");
+    }
+
+    /// A stopped run with no survivor among the mutants tested says so, and
+    /// one stopped before cargo-mutants listed its mutants claims no count.
+    #[test]
+    fn a_stopped_run_claims_no_clean_result_it_did_not_reach() {
+        let budget = Duration::from_secs(5 * 60);
+        let text = stopped(budget, r#"[{"name":"a"},{"name":"b"}]"#, "", "", "");
+        assert!(text.contains("after testing 0 of 2 mutants"), "{text}");
+        assert!(
+            text.contains("No surviving mutants among those tested.\n"),
+            "{text}"
+        );
+        assert!(text.contains("Not reached:\n\n- `a`\n- `b`\n"), "{text}");
+
+        let text = stopped(budget, "", "", "", "");
+        assert!(
+            text.contains("stopped at its 5-minute budget before cargo-mutants listed its mutants"),
+            "{text}"
+        );
+        assert!(!text.contains("No surviving mutants"), "{text}");
+    }
+
+    /// cargo-mutants runs under a deadline only when the run has a budget.
+    #[cfg(unix)]
+    #[test]
+    fn only_a_budget_stops_the_run() {
+        let root = crate::repo_root().unwrap();
+        let hang = Step::new("sleep", ["1000"]);
+        assert_eq!(
+            ended(&root, &hang, Some(Duration::ZERO)).unwrap(),
+            Ended::Stopped(Duration::ZERO)
+        );
+        let quick = Step::new("sh", ["-c", "exit 3"]);
+        assert_eq!(ended(&root, &quick, None).unwrap(), Ended::Exited(3));
+        let budget = Some(Duration::from_secs(3600));
+        assert_eq!(ended(&root, &quick, budget).unwrap(), Ended::Exited(3));
+    }
+
     /// A summary that cannot be written leaves the run's own outcome intact.
     #[test]
     fn a_failed_summary_write_keeps_the_outcome() {
         let dir = scratch("unwritable");
         // A directory cannot be opened for writing.
         let summary = Summary::at(dir.clone());
-        let err = finish(Ok(2), &dir, Some(&summary)).expect_err("survivors exit 2");
+        let err = finish(Ok(Ended::Exited(2)), &dir, Some(&summary)).expect_err("survivors exit 2");
         assert_eq!(err.code, Some(2));
         let err = finish(
             Err(Error::msg("main does not resolve")),

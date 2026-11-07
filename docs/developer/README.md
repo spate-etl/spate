@@ -25,6 +25,8 @@ change is proposed and lands. This guide says how the work is done.
   and the reuse rule.
 - [Reading a review](06-reading-a-review.md) — what a review checks, so you
   can run it first.
+- [The per-record path](07-per-record-path.md) — keeping per-record work from
+  allocating, and measuring a change to it.
 
 ## Where the rest lives
 

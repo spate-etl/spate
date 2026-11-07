@@ -5,7 +5,8 @@
 //! thread and returns a [`ThreadHandle`], which joins the thread when dropped.
 //! Each spawn takes a name, and a panic in the task or thread is logged at
 //! `ERROR` with that name. The panic still reaches a caller that awaits or
-//! joins the handle.
+//! joins the handle. [`ThreadBound`] holds a future to a limit timed on such a
+//! thread.
 
 use std::any::Any;
 use std::future::{Future, poll_fn};
@@ -14,6 +15,12 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use tokio::task::{JoinError, JoinHandle};
+
+#[cfg(not(loom))]
+mod bound;
+
+#[cfg(not(loom))]
+pub use bound::{BoundError, ThreadBound};
 
 /// An owned tokio task, aborted when the handle drops.
 ///
@@ -298,18 +305,7 @@ mod tests {
 
     /// The `ERROR` lines logged while `f` runs, without time or target.
     fn error_lines<R>(f: impl FnOnce() -> R) -> (R, Vec<String>) {
-        #[derive(Clone, Default)]
-        struct Buf(Arc<Mutex<Vec<u8>>>);
-        impl std::io::Write for Buf {
-            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-                self.0.lock().unwrap().extend_from_slice(bytes);
-                Ok(bytes.len())
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
-        }
-        let buf = Buf::default();
+        let buf = crate::telemetry::LogBuf::default();
         let writer = buf.clone();
         let subscriber = tracing_subscriber::fmt()
             .with_writer(move || writer.clone())
@@ -318,7 +314,7 @@ mod tests {
             .with_target(false)
             .finish();
         let out = tracing::subscriber::with_default(subscriber, f);
-        let text = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+        let text = buf.text();
         let lines = text
             .lines()
             .filter(|l| l.trim_start().starts_with("ERROR"))

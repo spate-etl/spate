@@ -107,7 +107,7 @@ fn shutdown_terminates_while_every_permit_is_held_by_a_failing_sink() {
     // Wait for the sink to be retrying, so the in-flight window is provably
     // saturated before shutdown rather than by assumption.
     spate_test::wait_until(
-        Duration::from_secs(10),
+        spate_test::HANG,
         "the failing sink to start writing",
         || !script.writes().is_empty(),
     );

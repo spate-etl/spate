@@ -127,6 +127,14 @@ impl JobEnd {
         }
     }
 
+    /// Whether the check ended the job stalled.
+    pub(crate) fn stalled(&self) -> bool {
+        matches!(
+            self.check.as_ref().and_then(EndCheck::outcome),
+            Some(EndOutcome::Stalled(_))
+        )
+    }
+
     /// Advance the check on an idle poll, the reader holding no work.
     /// `receive` receives once and returns how many units it took, or `None`
     /// when the receive failed and may succeed later. Returns `true` once the

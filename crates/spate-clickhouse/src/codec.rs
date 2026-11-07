@@ -16,6 +16,7 @@
 //! the same chunk, which the tests pin against the client's own codec.
 
 use crate::Compression;
+use lz4_flex::block::{CompressTable, compress_into_with_table};
 use spate_core::error::SinkError;
 use spate_core::sink::{FrameCodec, FrameCodecFactory};
 use zstd::zstd_safe::{self, CCtx};
@@ -105,13 +106,17 @@ pub(crate) struct BlockCodec {
 }
 
 enum Method {
-    Lz4,
+    /// One table of each size, chosen per chunk as `compress_into` chooses.
+    /// A single table moves to the large size on a long chunk and stays there,
+    /// and the sizes hash differently, so a later short chunk would stop
+    /// matching the client's bytes.
+    Lz4 {
+        small: CompressTable,
+        large: CompressTable,
+    },
     /// One context for every chunk. `CCtx::compress` resets it per call, so
     /// no chunk's output depends on an earlier one.
-    Zstd {
-        ctx: CCtx<'static>,
-        level: i32,
-    },
+    Zstd { ctx: CCtx<'static>, level: i32 },
 }
 
 impl BlockCodec {
@@ -131,7 +136,10 @@ impl BlockCodec {
     /// An lz4 codec, or a zstd codec at `zstd_level`.
     fn new(zstd_level: Option<i32>) -> Self {
         let method = match zstd_level {
-            None => Method::Lz4,
+            None => Method::Lz4 {
+                small: CompressTable::small(),
+                large: CompressTable::large(),
+            },
             Some(level) => Method::Zstd {
                 ctx: CCtx::create(),
                 level,
@@ -148,7 +156,7 @@ impl FrameCodec for BlockCodec {
     fn encode_frame(&mut self, chunk: &[u8]) -> Result<&[u8], SinkError> {
         let uncompressed = u32::try_from(chunk.len()).map_err(|_| too_long(chunk.len()))?;
         let bound = match self.method {
-            Method::Lz4 => lz4_flex::block::get_maximum_output_size(chunk.len()),
+            Method::Lz4 { .. } => lz4_flex::block::get_maximum_output_size(chunk.len()),
             Method::Zstd { .. } => zstd_safe::compress_bound(chunk.len()),
         };
         let needed = META_LEN + bound;
@@ -162,8 +170,13 @@ impl FrameCodec for BlockCodec {
 
         let out = &mut self.scratch[META_LEN..];
         let (magic, written) = match &mut self.method {
-            Method::Lz4 => {
-                let n = lz4_flex::block::compress_into(chunk, out).map_err(|e| {
+            Method::Lz4 { small, large } => {
+                let table = if chunk.len() < usize::from(u16::MAX) {
+                    small
+                } else {
+                    large
+                };
+                let n = compress_into_with_table(chunk, out, table).map_err(|e| {
                     SinkError::fatal(format!("lz4 could not compress a chunk: {e}"))
                 })?;
                 (LZ4_MAGIC, n)

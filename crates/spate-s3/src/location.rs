@@ -25,6 +25,15 @@ use std::fmt;
 use std::time::Duration;
 use url::Url;
 
+/// The refusal of a URL whose path `object_store` cannot take as a prefix.
+pub(crate) const BAD_PREFIX: &str =
+    "has a prefix with an empty segment, a control character or bytes that are not UTF-8";
+
+/// Whether `url` names a user or a password.
+pub(crate) fn has_userinfo(url: &Url) -> bool {
+    !url.username().is_empty() || url.password().is_some()
+}
+
 /// The step between a waiting worker's reads of the fingerprint.
 pub(crate) const FINGERPRINT_POLL: Duration = Duration::from_secs(5);
 
@@ -73,11 +82,7 @@ impl Location {
         // The location's store reads none of these, `object_store` quotes the
         // whole URL in its errors, and a fragment would silently name a
         // shorter prefix.
-        if !url.username().is_empty()
-            || url.password().is_some()
-            || url.query().is_some()
-            || url.fragment().is_some()
-        {
+        if has_userinfo(&url) || url.query().is_some() || url.fragment().is_some() {
             return Err(refuse(
                 "carries userinfo, a query or a fragment, which name nothing in the location's \
                  store; set credentials under the source's `store`"
@@ -111,13 +116,7 @@ impl Location {
         }
         // With the scheme and host checked, only the path fails here.
         // `object_store`'s own error quotes the URL, so it stays out.
-        let (_, prefix) = ObjectStoreScheme::parse(&url).map_err(|_| {
-            refuse(
-                "has a prefix with an empty segment, a control character or bytes that are not \
-                 UTF-8"
-                    .into(),
-            )
-        })?;
+        let (_, prefix) = ObjectStoreScheme::parse(&url).map_err(|_| refuse(BAD_PREFIX.into()))?;
         if let Some((source_root, source_prefix)) = Url::parse(source_url)
             .ok()
             .and_then(|u| Some((root(&u)?, ObjectStoreScheme::parse(&u).ok()?.1)))

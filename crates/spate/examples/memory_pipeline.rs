@@ -139,7 +139,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     assert!(
-        handle.wait_committed(p0, last + 1, Duration::from_secs(10)),
+        handle.wait_committed(p0, last + 1, spate_test::HANG),
         "the offset never committed (last committed: {:?})",
         handle.last_committed(p0),
     );

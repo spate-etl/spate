@@ -125,7 +125,8 @@ pub struct KafkaSourceConfig {
     pub brokers: String,
     /// The topic to consume. One topic per pipeline: the framework's
     /// `PartitionId` is the Kafka partition number, which is only unique
-    /// within a single topic.
+    /// within a single topic. [`validate`](Self::validate) refuses a name with
+    /// a leading `^`, which the client reads as a subscription pattern.
     pub topic: String,
     /// Consumer group id.
     pub group_id: String,
@@ -269,6 +270,10 @@ impl KafkaSourceConfig {
     }
 
     /// Cross-field validation, including the passthrough denylist.
+    ///
+    /// # Errors
+    ///
+    /// [`ConfigError::Validation`] for the first setting it refuses.
     pub fn validate(&self) -> Result<(), ConfigError> {
         if self.brokers.trim().is_empty() {
             return Err(ConfigError::Validation(
@@ -279,6 +284,14 @@ impl KafkaSourceConfig {
             return Err(ConfigError::Validation(
                 "source.kafka.topic must not be empty".into(),
             ));
+        }
+        // librdkafka subscribes to a leading `^` as a pattern, and the source
+        // reads partitions of the literal name, so no record reaches the chain.
+        if self.topic.starts_with('^') {
+            return Err(ConfigError::Validation(format!(
+                "source.kafka.topic {:?} is a subscription pattern; name one topic",
+                self.topic
+            )));
         }
         if self.group_id.trim().is_empty() {
             return Err(ConfigError::Validation(
@@ -591,6 +604,20 @@ mod tests {
             msg.contains("bootstrap.servers"),
             "error explains the alias: {msg}"
         );
+    }
+
+    /// librdkafka subscribes to a leading `^` as a pattern, and the source reads
+    /// only the literal name, so the pipeline would read nothing. Regression
+    /// for #1729.
+    #[test]
+    fn a_subscription_pattern_topic_is_rejected() {
+        let body = minimal().replace("topic: orders", "topic: \"^orders$\"");
+        assert_ne!(body, minimal());
+        let err = KafkaSourceConfig::from_component_config(&section(&body)).unwrap_err();
+        let err = err.to_string();
+        assert!(err.contains("source.kafka.topic"), "{err}");
+        assert!(err.contains("^orders$"), "{err}");
+        assert!(err.contains("subscription pattern"), "{err}");
     }
 
     #[test]

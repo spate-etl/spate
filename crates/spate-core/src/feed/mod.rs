@@ -81,9 +81,11 @@ use tokio::sync::oneshot;
 mod end_check;
 pub mod memory;
 mod metered;
+mod signal;
 
 pub use end_check::{END_CHECK_INTERVAL, EndAction, EndCheck, EndOutcome, MarkerRead};
 pub(crate) use metered::{DEAD_LETTER_READ_INTERVAL, DeadLetterSampler, MeteredFeed};
+pub use signal::ReaderSignal;
 
 /// The settling window a bounded job waits out when its `feed:` section sets
 /// none: five minutes.

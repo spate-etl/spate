@@ -1498,8 +1498,9 @@ fn read_failure<T>(doing: &str, e: &KafkaError) -> Result<Result<T, String>, Sou
 }
 
 /// Fill `consumer_lag` for a partition librdkafka reports as unknown, from
-/// the committed offset read before its assignment. librdkafka's own figure
-/// takes over once it has one, after this member's first commit.
+/// the committed offset read before its assignment, when that offset lies in
+/// `0..=end`. librdkafka's own figure takes over once it has one, after this
+/// member's first commit.
 fn fill_unknown_lag(
     stats: &mut Statistics,
     topic: &str,
@@ -1517,7 +1518,7 @@ fn fill_unknown_lag(
         };
         if p.consumer_lag < 0
             && let Some(&committed) = committed.get(pid)
-            && committed <= end
+            && (0..=end).contains(&committed)
         {
             p.consumer_lag = end - committed;
         }
@@ -3209,15 +3210,19 @@ mod tests {
             );
         }
 
+        type Mock =
+            rdkafka::mocking::MockCluster<'static, rdkafka::producer::DefaultProducerContext>;
+
         /// An opened source on a mock cluster holding `records` on partition 0,
         /// with its first assignment accepted, and the cluster that serves it.
-        fn assigned_on_mock(
-            records: usize,
-        ) -> (
-            rdkafka::mocking::MockCluster<'static, rdkafka::producer::DefaultProducerContext>,
-            KafkaSource,
-            Vec<KafkaLane>,
-        ) {
+        fn assigned_on_mock(records: usize) -> (Mock, KafkaSource, Vec<KafkaLane>) {
+            let cluster = mock_holding(records);
+            let (source, lanes) = assigned_on(&cluster, "earliest");
+            (cluster, source, lanes)
+        }
+
+        /// A mock cluster whose topic `t` holds `records` on its one partition.
+        fn mock_holding(records: usize) -> Mock {
             let cluster = rdkafka::mocking::MockCluster::new(1).expect("mock cluster");
             cluster.create_topic("t", 1, 1).expect("create topic");
             use crate::client::testing::{Raw as _, raw_config};
@@ -3236,11 +3241,16 @@ mod tests {
                     .expect("enqueue");
             }
             rdkafka::producer::Producer::flush(&producer, Duration::from_secs(30)).expect("flush");
+            cluster
+        }
 
+        /// A source of group `positions` on `cluster`'s topic `t` under the
+        /// `reset` policy, opened, with its first assignment accepted.
+        fn assigned_on(cluster: &Mock, reset: &str) -> (KafkaSource, Vec<KafkaLane>) {
             let mut cfg = KafkaSourceConfig::new(cluster.bootstrap_servers(), "t", "positions");
             cfg.startup_timeout = Duration::from_secs(30);
             cfg.rdkafka = std::collections::BTreeMap::from([
-                ("auto.offset.reset".to_string(), "earliest".to_string()),
+                ("auto.offset.reset".to_string(), reset.to_string()),
                 ("session.timeout.ms".to_string(), "6000".to_string()),
             ]);
             let cp = spate_core::checkpoint::Checkpointer::new();
@@ -3249,7 +3259,47 @@ mod tests {
                 .open(SourceCtx::new(cp.handle()))
                 .expect("open the source");
             let lanes = super::queued_rebalance::live_lanes(&mut source);
-            (cluster, source, lanes)
+            (source, lanes)
+        }
+
+        /// Under `auto.offset.reset: error`, a fetch past the log end fails the
+        /// lane with a fatal error naming the partition: librdkafka stops
+        /// fetching the partition after it reports the reset.
+        /// Regression for #1268.
+        #[test]
+        fn a_reset_under_the_error_policy_is_fatal() {
+            use crate::client::testing::{Raw as _, raw_config};
+            use rdkafka::consumer::Consumer as _;
+            let cluster = mock_holding(3);
+            let committer: rdkafka::consumer::BaseConsumer = raw_config()
+                .set("bootstrap.servers", cluster.bootstrap_servers())
+                .set("group.id", "positions")
+                .build()
+                .expect("committer");
+            let mut past_the_end = TopicPartitionList::new();
+            past_the_end
+                .add_partition_offset("t", 0, Offset::Offset(100))
+                .expect("offset");
+            committer
+                .commit(&past_the_end, rdkafka::consumer::CommitMode::Sync)
+                .expect("commit past the end");
+            drop(committer);
+
+            let (mut source, mut lanes) = assigned_on(&cluster, "error");
+            let mut failed = None;
+            spate_test::wait_until(Duration::from_secs(30), "the lane's error", || {
+                source
+                    .poll_events(Duration::from_millis(10))
+                    .expect("poll_events");
+                match lanes[0].poll(1, Duration::from_millis(100)) {
+                    Err(e) => failed = Some(e),
+                    Ok(batch) => assert!(batch.is_none(), "no record lies past the end"),
+                }
+                failed.is_some()
+            });
+            let e = failed.expect("wait_until returned");
+            assert_eq!(e.class(), ErrorClass::Fatal, "{e}");
+            assert!(e.reason().contains("partition 0"), "{e}");
         }
 
         /// Serve `source` and poll `lane` until the lane issues a batch.
@@ -5646,11 +5696,23 @@ mod tests {
         fn unknown_lag_is_measured_from_the_committed_offset() {
             assert_eq!(filled(snapshot(-1, 10, 8), &[(0, 3)], true), 5);
             assert_eq!(filled(snapshot(-1, 10, 8), &[(0, 3)], false), 7);
+            assert_eq!(filled(snapshot(-1, 10, 10), &[(0, 0)], true), 10);
+            assert_eq!(filled(snapshot(-1, 10, 10), &[(0, 10)], true), 0);
         }
 
         #[test]
         fn a_known_lag_is_left_alone() {
             assert_eq!(filled(snapshot(2, 10, 10), &[(0, 3)], true), 2);
+        }
+
+        /// Pins that a negative committed offset leaves the lag unknown, and
+        /// that the end minus it does not overflow. Regression for #1690.
+        #[test]
+        fn a_negative_committed_offset_leaves_the_lag_unknown() {
+            assert_eq!(
+                filled(snapshot(-1, i64::MAX, i64::MAX), &[(0, -500)], false),
+                -1
+            );
         }
 
         /// No committed offset, or no end offset yet, leaves the lag unknown.

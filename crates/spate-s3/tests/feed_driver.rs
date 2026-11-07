@@ -375,7 +375,10 @@ fn a_missing_feed_is_reported_before_the_store_is_built() {
         .unwrap();
     let mut source = line_framer(
         S3Source::from_component_config(
-            &spate_test::component_config("s3", "url: \"gs://bucket/p/\"\n"),
+            &spate_test::component_config(
+                "s3",
+                "url: \"s3://bucket/p/\"\nstore:\n  aws_checksum_algorithm: \"nope\"\n",
+            ),
             rt.handle().clone(),
         )
         .unwrap(),

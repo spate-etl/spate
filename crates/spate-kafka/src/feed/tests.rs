@@ -31,7 +31,7 @@ use spate_core::backoff::Backoff;
 use spate_core::clock::SyncClock;
 use spate_core::clock::TestClock;
 use spate_core::config::FeedSection;
-use spate_core::feed::{Feed, FeedError, FeedErrorKind, Receipt, Unit, confirmation, wake_channel};
+use spate_core::feed::{Feed, FeedErrorKind, Receipt, Unit, confirmation, wake_channel};
 use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -60,7 +60,7 @@ fn core_on(cap: u32, clock: Arc<TestClock>) -> Core {
     )
 }
 
-fn tp(partition: i32) -> Tp {
+pub(super) fn tp(partition: i32) -> Tp {
     Tp::new(&Arc::from("units"), partition)
 }
 
@@ -79,7 +79,7 @@ fn attempt_partition(core: &Core, identity: &PublishId) -> i32 {
 
 /// Deliver `offset` of `tp(0)` and return it as the gate takes it, with
 /// `admitting` raised as the gate's take raises it.
-fn gated(core: &Core, offset: i64) -> Gating {
+pub(super) fn gated(core: &Core, offset: i64) -> Gating {
     let mut st = core.lock();
     let receipt = st.tracker.deliver(&tp(0), offset).unwrap();
     st.admitting += 1;
@@ -303,7 +303,7 @@ fn a_move_finishes_its_offset_only_when_confirmed() {
     };
     core.settle(*resend, Ok(()));
     assert_eq!(core.lock().tracker.take_commits(), vec![(tp(0), 8)]);
-    assert!(core.lock().fatal.is_none());
+    assert!(core.lock().signal.latched().is_none());
 }
 
 /// Pins that a resend is taken once due, and that a move or a tombstone
@@ -475,7 +475,7 @@ fn a_fatal_write_report_stops_the_feed() {
     let fatal = moving(&core, second);
     core.settle(*fatal, Err(failure(C::UnknownTopicOrPartition)));
     let mut st = core.lock();
-    assert_eq!(st.fatal.as_ref().unwrap().kind, FeedErrorKind::Fatal);
+    assert_eq!(st.signal.latched().unwrap().kind, FeedErrorKind::Fatal);
     assert!(st.resends.is_empty());
     assert_eq!(st.tracker.take_commits(), vec![(tp(0), 1)]);
 }
@@ -499,12 +499,12 @@ fn a_publish_settles_by_its_report() {
     assert!(settle(Ok(())).is_ok());
     let refused = settle(Err(failure(C::MessageSizeTooLarge))).unwrap_err();
     assert_eq!(refused.kind, FeedErrorKind::Refused);
-    assert!(core.lock().fatal.is_none());
+    assert!(core.lock().signal.latched().is_none());
     let retry = settle(Err(failure(C::MessageTimedOut))).unwrap_err();
     assert_eq!(retry.kind, FeedErrorKind::Retryable);
     let fatal = settle(Err(failure(C::TopicAuthorizationFailed))).unwrap_err();
     assert_eq!(fatal.kind, FeedErrorKind::Fatal);
-    assert!(core.lock().fatal.is_some());
+    assert!(core.lock().signal.latched().is_some());
 }
 
 /// A unit of `tp(0)` at `offset`, buffered for the reader with `receipt`.
@@ -934,20 +934,91 @@ fn buffer_one(feed: &KafkaFeed) {
 fn a_transient_consumer_error_is_returned_once() {
     let feed = idle_feed();
     buffer_one(&feed);
-    feed.core.lock().retryable = Some(FeedError::new(FeedErrorKind::Retryable, "broker down"));
+    feed.core.lock().signal.fail_soon("broker down".to_owned());
     let error = feed.receive(8).unwrap_err();
     assert_eq!(error.kind, FeedErrorKind::Retryable);
     assert_eq!(feed.receive(8).unwrap().len(), 1);
 }
 
-/// Pins that a waker set while units are buffered is woken at once.
+/// Pins that a waker set while units are buffered is woken at once, and one
+/// set with none buffered is not.
 #[test]
 fn a_waker_set_with_units_buffered_wakes_at_once() {
     let feed = idle_feed();
+    let (idle, idle_park) = wake_channel();
+    feed.set_waker(idle);
+    assert!(
+        !idle_park.park(Duration::ZERO),
+        "woken with nothing buffered"
+    );
     buffer_one(&feed);
     let (waker, park) = wake_channel();
     feed.set_waker(waker);
-    assert!(park.park(std::time::Duration::ZERO), "not woken");
+    assert!(park.park(Duration::ZERO), "not woken");
+}
+
+/// Pins that the feed logs its stop once, at the first latch, and that a
+/// later latch keeps the first error.
+#[test]
+fn a_feed_logs_its_stop_once() {
+    let core = core(10);
+    let mut errors = Vec::new();
+    let lines = spate_test::capture_logs(tracing::Level::ERROR, || {
+        errors.push(core.latch("first"));
+        errors.push(core.latch("second"));
+    });
+    let logged = lines
+        .iter()
+        .filter(|line| line.contains("the Kafka feed stopped"))
+        .count();
+    assert_eq!(logged, 1, "one stop, one line: {lines:#?}");
+    assert_eq!(errors[1], errors[0]);
+}
+
+/// Pins that a `receive` leaving units buffered wakes the reader again, and
+/// one that empties the buffer does not.
+#[test]
+fn a_receive_leaving_units_buffered_wakes_the_reader_again() {
+    let feed = idle_feed();
+    {
+        let mut st = feed.core.lock();
+        st.tracker.assign([tp(0)]);
+        for offset in 0..2 {
+            let receipt = st.tracker.deliver(&tp(0), offset).unwrap();
+            let ready = ready(&feed.core, receipt, offset);
+            st.ready.push_back(ready);
+        }
+    }
+    let (waker, park) = wake_channel();
+    feed.set_waker(waker);
+    assert!(park.park(Duration::ZERO), "not woken at the waker's set");
+
+    assert_eq!(feed.receive(1).unwrap().len(), 1);
+    assert!(
+        park.park(Duration::ZERO),
+        "a unit left buffered woke nothing"
+    );
+    assert_eq!(feed.receive(1).unwrap().len(), 1);
+    assert!(
+        !park.park(Duration::ZERO),
+        "an emptied buffer woke the reader"
+    );
+}
+
+/// Pins that `renew` keeps a handed receipt, answers a receipt the feed no
+/// longer holds as gone, and answers every receipt with the latched error
+/// once the feed latches.
+#[test]
+fn renew_keeps_a_held_receipt_until_the_feed_latches() {
+    let feed = idle_feed();
+    buffer_one(&feed);
+    let receipt = feed.receive(1).unwrap().pop().unwrap().receipt;
+    assert_eq!(feed.renew(receipt), Ok(()));
+    let unknown = feed.renew(Receipt(u64::MAX)).unwrap_err();
+    assert_eq!(unknown.kind, FeedErrorKind::Gone);
+
+    let latched = feed.core.latch("probe");
+    assert_eq!(feed.renew(receipt), Err(latched));
 }
 
 /// Pins the gate's two answers: a unit recorded below the cap is admitted
@@ -1222,7 +1293,13 @@ fn a_failed_attempt_write_is_sent_again_and_delivers_the_unit() {
     let entry = gated(&core, 8);
     let write = admission(&core, entry).expect("admitted below the cap");
     core.settle(write, Err(failure(C::TopicAuthorizationFailed)));
-    let reason = core.lock().fatal.clone().expect("the feed stopped").reason;
+    let reason = core
+        .lock()
+        .signal
+        .latched()
+        .cloned()
+        .expect("the feed stopped")
+        .reason;
     assert!(
         reason.contains("writing an attempt record to `units-attempts`"),
         "{reason}"
@@ -1262,13 +1339,13 @@ fn a_fatal_tombstone_report_stops_the_feed() {
         Err(failure(C::MessageTimedOut)),
     );
     assert_eq!(core.lock().resends.len(), 1);
-    assert!(core.lock().fatal.is_none());
+    assert!(core.lock().signal.latched().is_none());
     core.settle(
         tombstone(position),
         Err(failure(C::TopicAuthorizationFailed)),
     );
     let mut st = core.lock();
-    let reason = &st.fatal.as_ref().expect("the feed stopped").reason;
+    let reason = &st.signal.latched().expect("the feed stopped").reason;
     assert!(reason.contains("tombstone"), "{reason}");
     assert!(st.resends.is_empty());
     assert_eq!(st.tracker.take_commits(), vec![(tp(0), 0)]);
@@ -1285,7 +1362,7 @@ fn a_refused_attempt_or_tombstone_write_stops_the_feed() {
     let write = admission(&core_a, entry).expect("admitted below the cap");
     core_a.settle(write, Err(failure(C::MessageSizeTooLarge)));
     let st = core_a.lock();
-    let reason = &st.fatal.as_ref().expect("the feed stopped").reason;
+    let reason = &st.signal.latched().expect("the feed stopped").reason;
     assert!(
         reason.contains("writing an attempt record to `units-attempts`"),
         "{reason}"
@@ -1306,7 +1383,7 @@ fn a_refused_attempt_or_tombstone_write_stops_the_feed() {
         Err(failure(C::MessageSizeTooLarge)),
     );
     let st = core_t.lock();
-    let reason = &st.fatal.as_ref().expect("the feed stopped").reason;
+    let reason = &st.signal.latched().expect("the feed stopped").reason;
     assert!(
         reason.contains("writing an attempt record's tombstone to `units-attempts`"),
         "{reason}"
@@ -1352,6 +1429,35 @@ fn a_write_failing_again_backs_off_further_each_time() {
     assert_eq!(logged.len(), schedule.len(), "{lines:#?}");
     for (line, wait) in logged.iter().zip(schedule) {
         assert!(line.contains(&format!("retry_in={wait:?}")), "{line}");
+    }
+}
+
+/// Pins that a write failed transiently on a feed that drops it, stopped or
+/// latched, logs no line saying it is sent again. Regression for #1706.
+#[test]
+fn a_dropped_resend_logs_no_send_again_line() {
+    for latched in [false, true] {
+        let core = core(10);
+        let receipt = {
+            let mut st = core.lock();
+            st.tracker.assign([tp(0)]);
+            st.tracker.deliver(&tp(0), 1).unwrap()
+        };
+        let write = moving(&core, receipt);
+        if latched {
+            core.latch("a fatal write");
+        } else {
+            core.stop.store(true, Ordering::Release);
+        }
+        let lines = spate_test::capture_logs(tracing::Level::WARN, || {
+            core.settle(*write, Err(failure(C::MessageTimedOut)));
+        });
+        assert!(core.lock().resends.is_empty(), "the feed drops it");
+        let resent: Vec<&String> = lines
+            .iter()
+            .filter(|line| line.contains("sending it again"))
+            .collect();
+        assert!(resent.is_empty(), "{resent:#?}");
     }
 }
 
@@ -1459,7 +1565,10 @@ fn a_gate_pass_puts_back_the_deliveries_of_each_failed_watermark_read() {
         "the pass did not return"
     );
     let st = core.lock();
-    assert!(st.fatal.is_none(), "a timed-out read stopped the feed");
+    assert!(
+        st.signal.latched().is_none(),
+        "a timed-out read stopped the feed"
+    );
     let back: Vec<String> = st.gating.iter().map(|g| g.identity.to_string()).collect();
     let expected: Vec<String> = offsets
         .iter()
@@ -2139,6 +2248,44 @@ mod cluster {
         assert!(intents.is_empty(), "the close deferred: {intents:?}");
     }
 
+    /// Pins that dropping the driver returns with a lost assignment's
+    /// revocation queued and the intent lock poisoned, as after a panic on
+    /// the feed thread. Regression for #1684.
+    #[test]
+    fn a_poisoned_drop_with_a_lost_revocation_queued_returns() {
+        let cluster = cluster_with(0);
+        let brokers = cluster.bootstrap_servers();
+        let group = spate_test::unique_name("poisoned-lost-revoke");
+        let (_, _core, _producer, mut d) = parts_for(&brokers, &group);
+        drive(&mut d, "the driver owns its partitions", |d| owns(d) == 2);
+        cluster.request_errors(
+            RDKafkaApiKey::Heartbeat,
+            &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_UNKNOWN_MEMBER_ID],
+        );
+        wait_until(DEADLINE, "a revocation queued", || {
+            d.poll();
+            d.consumer
+                .context()
+                .intents
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|i| matches!(i, Intent::Revoke(_)))
+        });
+        let context = Arc::clone(d.consumer.context());
+        let _ = std::thread::spawn(move || {
+            let _held = context.intents.lock().unwrap();
+            panic!("poisoning the intent lock");
+        })
+        .join();
+        let dropped = returns_within(Duration::from_secs(30), move || drop(d));
+        if !dropped {
+            // Its consumer is still connected; dropping it would wait on it.
+            std::mem::forget(cluster);
+        }
+        assert!(dropped, "dropping the driver did not return");
+    }
+
     /// Pins that a panic on the feed's thread while it holds partitions
     /// stops the feed with a Fatal error naming the consumer thread, that
     /// dropping the feed then returns, the unwind closing the consumer as a
@@ -2783,7 +2930,7 @@ mod cluster {
         let st = core.lock();
         assert_eq!(st.gating.len(), 1);
         assert_eq!(st.admitting, 0);
-        assert!(st.fatal.is_none());
+        assert!(st.signal.latched().is_none());
     }
 
     /// Pins that a gate pass whose watermark read the broker refuses for
@@ -2825,7 +2972,13 @@ mod cluster {
         let gate =
             Gate::new(Arc::clone(&core), producer, Duration::from_secs(3600)).with_step(STEP * 100);
         gate.pass();
-        let reason = core.lock().fatal.clone().expect("the feed stopped").reason;
+        let reason = core
+            .lock()
+            .signal
+            .latched()
+            .cloned()
+            .expect("the feed stopped")
+            .reason;
         assert!(
             reason.contains("reading the watermarks of `units-attempts`"),
             "{reason}"
@@ -2895,7 +3048,7 @@ mod cluster {
             Gate::new(Arc::clone(&core), producer, Duration::from_secs(3600)).with_step(STEP * 100);
         gate.pass();
         let st = core.lock();
-        let reason = &st.fatal.as_ref().expect("the feed stopped").reason;
+        let reason = &st.signal.latched().expect("the feed stopped").reason;
         assert!(reason.contains("partition 1"), "{reason}");
         assert_eq!(st.gating.len(), 2, "a unit was admitted");
         assert_eq!(st.admitting, 0);
@@ -2961,7 +3114,7 @@ mod cluster {
         let waiting: Vec<_> = st.gating.iter().map(|g| g.unit.id.clone()).collect();
         assert_eq!(waiting, [format!("u{on1}")]);
         assert_eq!(st.admitting, 0);
-        assert!(st.fatal.is_none());
+        assert!(st.signal.latched().is_none());
     }
 
     /// Pins that a pass which reads every watermark it needs admits its
@@ -3128,7 +3281,7 @@ mod cluster {
             Gate::new(Arc::clone(&core), producer, Duration::from_secs(3600)).with_step(STEP * 100);
         gate.pass();
         let st = core.lock();
-        let reason = &st.fatal.as_ref().expect("the feed stopped").reason;
+        let reason = &st.signal.latched().expect("the feed stopped").reason;
         assert!(
             reason.contains("reading the watermarks of `units-attempts`"),
             "{reason}"
@@ -3325,7 +3478,7 @@ mod cluster {
         assert_eq!(core.gate_reads.load(Ordering::SeqCst), 1, "read again");
         let st = core.lock();
         assert_eq!(st.gating.len(), 1, "the unit was admitted");
-        assert!(st.fatal.is_none());
+        assert!(st.signal.latched().is_none());
         let warning = capture.lines().join("\n");
         assert!(warning.contains("partitions [0]"), "{warning}");
     }
@@ -4162,13 +4315,15 @@ mod cluster {
         start.commit(&tpl, CommitMode::Sync).unwrap();
         let (config, core, producer, mut d) = parts_for(&brokers, &group);
         let feed = feed_over(&core, &producer, None);
-        drive(&mut d, "the fetch error reaches the poll", |d| {
-            d.core.lock().retryable.is_some()
-        });
+        // The reader takes the retryable error, as `receive` would, and
+        // passes over it.
+        drive(
+            &mut d,
+            "the fetch error reaches the poll",
+            |d| matches!(d.core.lock().signal.check(), Err(e) if e.kind == FeedErrorKind::Retryable),
+        );
         d.commit_finished("periodic");
         assert_eq!(committed(&brokers, &group), Some(0));
-        // A reader passes over a retryable error.
-        core.lock().retryable = None;
         let admission = admission(&config, &core, &producer, STEP);
         let deliveries = received(&mut d, &feed, admission, 1);
         d.commit_finished("periodic");
@@ -4904,9 +5059,9 @@ mod docker {
         Gate::new(Arc::clone(core), producer, Duration::from_secs(10)).pass();
         let st = core.lock();
         assert!(
-            st.fatal.is_none(),
+            st.signal.latched().is_none(),
             "{:?}",
-            st.fatal.as_ref().map(|f| &f.reason)
+            st.signal.latched().map(|f| &f.reason)
         );
         assert!(st.gating.is_empty(), "the gate held back a unit");
     }

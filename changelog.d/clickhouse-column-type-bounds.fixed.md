@@ -1,0 +1,3 @@
+**The ClickHouse sink refuses a column type past what ClickHouse accepts** (`spate-clickhouse`)
+
+Building the sink fails with a schema error naming the column when a declared column's type, as `system.columns` reports it, nests more than 256 levels deep or holds a `FixedString` wider than 16777215 bytes, ClickHouse's own `FixedString` limit. In previous versions a type nested deep enough overflowed the stack and aborted the process while the sink was built, and under `format: native` a very wide `FixedString` padded every value to its width and could exhaust memory. No real table nests a type that deep, and ClickHouse never creates a wider `FixedString`. The schema error shows each table column's type cut after 256 characters.

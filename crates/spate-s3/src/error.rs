@@ -165,16 +165,19 @@ pub(crate) fn is_overwrite(e: &object_store::Error, origin: &Origin) -> bool {
 /// Whether `e` is a request the store answered with 416.
 ///
 /// object_store reports it as `Generic` and keeps the error type that holds
-/// the status private, so this matches a link in the chain by its message.
-/// The tests against a local server fail if that text changes.
+/// the status private, so this reads the status after the first
+/// [`STATUS_MARKER`] in the chain. The tests against a local server fail if
+/// that text changes.
 fn range_not_satisfiable(e: &object_store::Error) -> bool {
+    // The other variants show the key, which can hold the marker's text.
+    if !matches!(e, object_store::Error::Generic { .. }) {
+        return false;
+    }
     let mut link: Option<&(dyn std::error::Error + 'static)> = Some(e);
     while let Some(error) = link {
-        if error
-            .to_string()
-            .contains("Server returned non-2xx status code: 416 ")
-        {
-            return true;
+        // The store's response body follows the first marker.
+        if let Some((_, status)) = error.to_string().split_once(STATUS_MARKER) {
+            return status.starts_with("416 ");
         }
         link = error.source();
     }
@@ -653,6 +656,42 @@ mod tests {
             .get_opts(&"k".into(), object_store::GetOptions::default())
             .await
             .unwrap_err();
+        assert!(!is_overwrite(&e, &notification(None)), "{e}");
+    }
+
+    /// Pins that only the status a store answered makes a read an overwrite:
+    /// a 403 or 404 whose key holds the text of a 416, and a 503 whose key
+    /// and body hold it, are no overwrite. Regression for #1741.
+    #[tokio::test]
+    async fn the_text_of_a_416_in_a_key_or_body_is_no_overwrite() {
+        use object_store::ObjectStore as _;
+        let text = format!("{STATUS_MARKER}416 x");
+        let refused = [
+            object_store::Error::PermissionDenied {
+                path: format!("data/{text}"),
+                source: "denied".into(),
+            },
+            object_store::Error::NotFound {
+                path: format!("data/{text}"),
+                source: "missing".into(),
+            },
+        ];
+        for e in refused {
+            assert!(e.to_string().contains(&text), "{e}");
+            assert!(!is_overwrite(&e, &notification(None)), "{e}");
+        }
+        let url = crate::test_servers::sequence_server(vec![(
+            "503 Service Unavailable",
+            format!("<Error><Code>SlowDown</Code><Message>{text}</Message></Error>"),
+        )]);
+        let e = crate::test_servers::store_at(&url)
+            .get_opts(
+                &format!("data/{text}").as_str().into(),
+                object_store::GetOptions::default(),
+            )
+            .await
+            .unwrap_err();
+        assert!(e.to_string().contains(&text), "{e}");
         assert!(!is_overwrite(&e, &notification(None)), "{e}");
     }
 }

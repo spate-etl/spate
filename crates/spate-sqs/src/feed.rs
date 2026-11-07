@@ -37,7 +37,8 @@ use spate_core::clock::tokio::{Clock, SystemClock};
 use spate_core::config::{FeedSection, redact};
 use spate_core::feed::{
     Confirmation, Confirmer, Delivery, Depth, DepthOf, DepthReading, Feed, FeedError,
-    FeedErrorKind, FeedMetricsCtx, FeedWaker, Receipt, Unit, confirmation, depth_reading,
+    FeedErrorKind, FeedMetricsCtx, FeedWaker, ReaderSignal, Receipt, Unit, confirmation,
+    depth_reading,
 };
 use spate_core::hash::FastMap;
 use spate_core::metrics::FeedOp;
@@ -234,9 +235,9 @@ struct Publish {
 
 #[derive(Debug, Default)]
 struct State {
-    fatal: Option<FeedError>,
-    /// A transient receive failure, returned by the next `receive` only.
-    retryable: Option<FeedError>,
+    /// The reader's waker, the fatal latch, and a transient receive failure
+    /// returned by the next `receive` only.
+    signal: ReaderSignal,
     abandoned: bool,
     /// Units the reader asked for and did not get at its last `receive`.
     demand: usize,
@@ -264,7 +265,6 @@ struct State {
     publishes: Vec<Publish>,
     /// The batch the publish task is sending, in entry order.
     sending: Vec<Publish>,
-    waker: Option<FeedWaker>,
 }
 
 impl State {
@@ -363,22 +363,26 @@ impl Shared {
         }
     }
 
-    /// Make `e` the answer to every later call, reject with it every publish
-    /// still queued and a close under way, and wake the reader. The batch
-    /// being sent is rejected as Retryable: SQS may have stored it.
+    /// Latch a Fatal error built from `e` as the answer to every later call,
+    /// reject with the latched error every publish still queued and a close
+    /// under way, and wake the reader. The first latch wins and alone logs
+    /// the stop. The batch being sent is rejected as Retryable: SQS may have
+    /// stored it.
     fn set_fatal(&self, e: &CallError) {
-        let error = FeedError::new(FeedErrorKind::Fatal, e.message.clone());
-        tracing::error!(error = %e.message, "the SQS feed stopped");
-        let (sending, queued, close, waker) = {
+        let (error, first, sending, queued, close) = {
             let mut st = self.lock();
-            st.fatal.get_or_insert(error.clone());
+            let (error, first) = st.signal.latch(&e.message);
             (
+                error,
+                first,
                 std::mem::take(&mut st.sending),
                 std::mem::take(&mut st.publishes),
                 st.close.as_mut().and_then(|c| c.confirmer.take()),
-                st.waker.clone(),
             )
         };
+        if first {
+            tracing::error!(error = %error.reason, "the SQS feed stopped");
+        }
         if let Some(close) = close {
             close.reject(error.clone());
         }
@@ -387,7 +391,7 @@ impl Shared {
             format!(
                 "the feed stopped while the unit was being sent, so SQS may or may not \
                  have stored it: {}",
-                e.message
+                error.reason
             ),
         );
         for p in sending {
@@ -396,14 +400,11 @@ impl Shared {
         for p in queued {
             p.confirmer.reject(error.clone());
         }
-        if let Some(waker) = waker {
-            waker.wake();
-        }
     }
 
     fn stopped(&self) -> bool {
         let st = self.lock();
-        st.fatal.is_some() || st.abandoned
+        st.signal.latched().is_some() || st.abandoned
     }
 }
 
@@ -685,10 +686,8 @@ impl Feed for SqsFeed {
 
     fn set_waker(&self, waker: FeedWaker) {
         let mut st = self.lock();
-        if !st.buffered.is_empty() {
-            waker.wake();
-        }
-        st.waker = Some(waker);
+        let ready = !st.buffered.is_empty();
+        st.signal.set_waker(waker, ready);
     }
 
     /// Resolve the feed's `spate_sqs_feed_*` handles under `cx.meter`. A
@@ -706,15 +705,10 @@ impl Feed for SqsFeed {
 
     fn receive(&self, max: usize) -> Result<Vec<Delivery>, FeedError> {
         let period = self.shared.settings.period;
-        let (out, more, waker) = {
+        let (out, more) = {
             let mut st = self.lock();
             st.reader_active = true;
-            if let Some(fatal) = &st.fatal {
-                return Err(fatal.clone());
-            }
-            if let Some(e) = st.retryable.take() {
-                return Err(e);
-            }
+            st.signal.check()?;
             if st.abandoned {
                 return Ok(Vec::new());
             }
@@ -751,16 +745,13 @@ impl Feed for SqsFeed {
             }
             st.demand = max - out.len();
             let more = st.demand > st.buffered.len();
-            let wake = (!out.is_empty() && !st.buffered.is_empty())
-                .then(|| st.waker.clone())
-                .flatten();
-            (out, more, wake)
+            if !out.is_empty() && !st.buffered.is_empty() {
+                st.signal.wake();
+            }
+            (out, more)
         };
         if more {
             self.shared.receive.notify_one();
-        }
-        if let Some(waker) = waker {
-            waker.wake();
         }
         Ok(out)
     }
@@ -768,7 +759,7 @@ impl Feed for SqsFeed {
     fn renew(&self, receipt: Receipt) -> Result<(), FeedError> {
         let mut st = self.lock();
         st.reader_active = true;
-        if let Some(fatal) = &st.fatal {
+        if let Some(fatal) = st.signal.latched() {
             return Err(fatal.clone());
         }
         let now = self.shared.now();
@@ -788,7 +779,7 @@ impl Feed for SqsFeed {
     fn acknowledge(&self, receipt: Receipt) -> Result<(), FeedError> {
         {
             let mut st = self.lock();
-            if let Some(fatal) = &st.fatal {
+            if let Some(fatal) = st.signal.latched() {
                 return Err(fatal.clone());
             }
             // A lapsed receipt is acknowledged too: the reader acknowledges
@@ -814,7 +805,7 @@ impl Feed for SqsFeed {
     fn fail(&self, receipt: Receipt, reason: &str) -> Result<(), FeedError> {
         {
             let mut st = self.lock();
-            if let Some(fatal) = &st.fatal {
+            if let Some(fatal) = st.signal.latched() {
                 return Err(fatal.clone());
             }
             let now = self.shared.now();
@@ -852,7 +843,7 @@ impl Feed for SqsFeed {
         };
         {
             let mut st = self.lock();
-            if let Some(fatal) = &st.fatal {
+            if let Some(fatal) = st.signal.latched() {
                 confirmer.reject(fatal.clone());
                 return confirmation;
             }
@@ -918,10 +909,7 @@ impl Feed for SqsFeed {
             reporter.report(outcome);
             // The source checks a reading only when it polls, so the answer
             // ends its park.
-            let waker = shared.lock().waker.clone();
-            if let Some(waker) = waker {
-                waker.wake();
-            }
+            shared.lock().signal.wake();
         };
         task::spawn_on("sqs-depth", read, &self.io).detach();
         Some(reading)
@@ -937,7 +925,7 @@ impl Feed for SqsFeed {
     fn stop_receiving(&self) {
         {
             let mut st = self.lock();
-            if st.fatal.is_some() || st.stopping {
+            if st.signal.latched().is_some() || st.stopping {
                 return;
             }
             let buffered = st.begin_stop();
@@ -960,7 +948,7 @@ impl Feed for SqsFeed {
     fn hand_back(&self, receipt: Receipt) -> Result<(), FeedError> {
         {
             let mut st = self.lock();
-            if let Some(fatal) = &st.fatal {
+            if let Some(fatal) = st.signal.latched() {
                 return Err(fatal.clone());
             }
             let now = self.shared.now();
@@ -1002,7 +990,7 @@ impl Feed for SqsFeed {
             if st.abandoned {
                 return None;
             }
-            if let Some(fatal) = &st.fatal {
+            if let Some(fatal) = st.signal.latched() {
                 confirmer.reject(fatal.clone());
                 return Some(confirmation);
             }
@@ -1122,7 +1110,7 @@ async fn receive_task(shared: Arc<Shared>) {
     loop {
         let want = {
             let mut st = shared.lock();
-            if st.fatal.is_some() || st.abandoned {
+            if st.signal.latched().is_some() || st.abandoned {
                 return;
             }
             let want = if st.stopping {
@@ -1160,7 +1148,7 @@ async fn receive_task(shared: Arc<Shared>) {
             Ok(messages) => {
                 backoff.reset();
                 let hold_end = hold_end(shared.now());
-                let (waker, handed_back) = {
+                let handed_back = {
                     let mut st = shared.lock();
                     ended(&mut st);
                     // A receive cannot be withdrawn, and a reply dropped
@@ -1182,15 +1170,15 @@ async fn receive_task(shared: Arc<Shared>) {
                         st.held.insert(receipt, held);
                         st.buffered.push_back(receipt);
                     }
-                    (st.waker.clone().filter(|_| !stopping), stopping)
+                    if !stopping {
+                        st.signal.wake();
+                    }
+                    stopping
                 };
                 if handed_back {
                     shared.hand_back.notify_one();
                 }
                 shared.progress.notify_one();
-                if let Some(waker) = waker {
-                    waker.wake();
-                }
             }
             Err(e) if e.class == Class::Fatal => {
                 shared.set_fatal(&e);
@@ -1198,14 +1186,10 @@ async fn receive_task(shared: Arc<Shared>) {
             }
             Err(e) => {
                 tracing::warn!(error = %e.message, "receiving from SQS failed; retrying");
-                let waker = {
+                {
                     let mut st = shared.lock();
                     ended(&mut st);
-                    st.retryable = Some(FeedError::new(FeedErrorKind::Retryable, e.message));
-                    st.waker.clone()
-                };
-                if let Some(waker) = waker {
-                    waker.wake();
+                    st.signal.fail_soon(e.message);
                 }
                 shared.progress.notify_one();
                 // Real time: it paces retries and no deadline reads it.
@@ -1282,7 +1266,7 @@ async fn renewal_task(shared: Arc<Shared>) {
         let now = shared.now();
         let mut due: Vec<(u64, String, Duration)> = {
             let mut st = shared.lock();
-            if st.fatal.is_some() || st.abandoned {
+            if st.signal.latched().is_some() || st.abandoned {
                 return;
             }
             // A buffered unit is extended only for a reader still polling, or
@@ -1486,7 +1470,7 @@ async fn send_hand_backs(shared: &Shared) -> Result<(), ()> {
     loop {
         let chunk: Vec<Settle> = {
             let mut st = shared.lock();
-            if st.fatal.is_some() || st.abandoned {
+            if st.signal.latched().is_some() || st.abandoned {
                 return Err(());
             }
             let now = shared.now();
@@ -1622,7 +1606,7 @@ async fn settle_task(shared: Arc<Shared>) {
     loop {
         let (deletes, mut fails) = {
             let mut st = shared.lock();
-            if st.fatal.is_some() || st.abandoned {
+            if st.signal.latched().is_some() || st.abandoned {
                 return;
             }
             st.settling = st.deletes.len() + st.fails.len();
@@ -1798,7 +1782,7 @@ async fn publish_task(shared: Arc<Shared>) {
     loop {
         let entries = {
             let mut st = shared.lock();
-            if st.fatal.is_some() || st.abandoned {
+            if st.signal.latched().is_some() || st.abandoned {
                 return;
             }
             let batch = next_batch(&mut st.publishes);

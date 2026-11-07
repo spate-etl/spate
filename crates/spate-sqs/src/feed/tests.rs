@@ -5544,3 +5544,34 @@ fn a_settle_retry_past_the_instant_range_is_given_up() {
     assert_eq!(retry_at(now, ms(200), now + ms(200)), None);
     assert_eq!(retry_at(now, ms(200), now + ms(201)), Some(now + ms(200)));
 }
+
+/// Pins that the feed logs its stop once, at the first fatal error, and that
+/// a close pending at the latch is rejected with the latched error.
+/// Regression for #1526.
+#[tokio::test(start_paused = true)]
+async fn a_second_fatal_error_logs_nothing_and_keeps_the_first() {
+    let (feed, queue) = start_gated(MINUTE);
+    let (waker, park) = wake_channel();
+    feed.set_waker(waker);
+    queue.inner.ready(Message::new("a"));
+    let got = receive_n(&feed, &park, 1).await;
+    queue.delete_down.store(true, Ordering::SeqCst);
+    feed.acknowledge(got[0].receipt).unwrap();
+    settle_tasks().await;
+    let mut closed = feed.close(Duration::from_secs(10)).unwrap();
+    settle_tasks().await;
+    assert!(closed.try_outcome().is_none(), "the close settled early");
+
+    let lines = spate_test::capture_logs(tracing::Level::ERROR, || {
+        feed.shared.set_fatal(&CallError::fatal("first"));
+        feed.shared.set_fatal(&CallError::fatal("second"));
+    });
+    let logged = lines
+        .iter()
+        .filter(|line| line.contains("the SQS feed stopped"))
+        .count();
+    assert_eq!(logged, 1, "one stop, one line: {lines:#?}");
+    let rejected = closed.try_outcome().unwrap().unwrap_err();
+    assert_eq!(rejected.reason, "first");
+    assert_eq!(feed.receive(1).unwrap_err().reason, "first");
+}

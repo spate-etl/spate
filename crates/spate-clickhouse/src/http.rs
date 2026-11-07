@@ -20,7 +20,7 @@ const TCP_KEEPALIVE: Duration = Duration::from_secs(60);
 const POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// The roots `https://` replicas are verified against. These are the
-/// certificates `system` yields, or the Mozilla bundle when it yields none,
+/// certificates `system` yields, or the Mozilla bundle when none of them parse,
 /// plus every certificate in `tls.root_ca`.
 ///
 /// Returns an empty store without calling `system` when `needs_tls` is false.
@@ -147,13 +147,15 @@ mod tests {
     }
 
     /// A store that yielded only certificates rustls refuses says so, and an
-    /// empty one keeps its own line. Regression for #1444.
+    /// empty one keeps its own line, and both take the Mozilla bundle.
+    /// Regression for #1444.
     #[test]
     fn an_unparsable_store_is_not_called_empty() {
         let unparsable = rustls::pki_types::CertificateDer::from(vec![0u8; 8]);
         let lines = spate_test::capture_logs(tracing::Level::WARN, || {
             let certs = vec![unparsable.clone(), unparsable];
-            root_store(&TlsSection::default(), true, || native_certs(certs)).unwrap();
+            let roots = root_store(&TlsSection::default(), true, || native_certs(certs)).unwrap();
+            assert_eq!(roots.len(), webpki_roots::TLS_SERVER_ROOTS.len());
         });
         assert_eq!(lines.len(), 1, "{lines:?}");
         assert!(

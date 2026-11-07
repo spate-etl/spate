@@ -75,9 +75,9 @@ An `https://` registry is verified against the system trust store. On macOS
 and Windows the operating system verifies the certificate. On Linux and other
 Unix systems the client reads the system store, and when `SSL_CERT_FILE` or
 `SSL_CERT_DIR` is set, the certificates they name replace it. If the store
-yields no certificates, as on a container image without a CA package, the
-client logs a warning and uses the Mozilla root bundle compiled into the
-binary.
+yields no certificate the client can parse, as on a container image without a
+CA package, the client logs a warning and uses the Mozilla root bundle compiled
+into the binary.
 
 For a private CA, set `registry.tls.root_ca` to a PEM file. Its certificates are
 trusted in addition to the system store, and on Linux and other Unix systems

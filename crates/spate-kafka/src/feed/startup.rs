@@ -25,21 +25,16 @@ use rdkafka::producer::{Producer, ThreadedProducer};
 use spate_core::clock::SyncClock;
 use spate_core::error::ErrorClass;
 use spate_core::hash::FastMap;
+use spate_core::task::{BoundError, ThreadBound};
 use std::future::Future;
 use std::num::NonZeroU32;
 use std::pin::Pin;
-use std::sync::mpsc;
-use std::sync::mpsc::RecvTimeoutError;
 use std::sync::{Arc, Mutex, PoisonError};
-use std::task::Poll;
 use std::time::Duration;
 use tokio::sync::oneshot;
 
 /// How long the checks may take, every step included.
 pub(crate) const CONNECT_BOUND: Duration = Duration::from_secs(30);
-
-/// How often [`bounded`] asks whether the client recorded a rejection.
-const REJECTION_TICK: Duration = Duration::from_millis(50);
 
 /// The configuration entry naming a topic's cleanup policies.
 const CLEANUP_POLICY: &str = "cleanup.policy";
@@ -427,11 +422,8 @@ pub(crate) async fn check(
 /// `rejection` returns. Past the bound, an [`KafkaFeedError::Unavailable`]
 /// naming the step `step` holds.
 ///
-/// The bound is timed on a thread of its own, so it fires on any runtime:
-/// one whose timer nothing drives, as under `Handle::block_on` on a
-/// current-thread runtime, one with timers disabled, and one that has shut
-/// down. The thread calls `rejection` every [`REJECTION_TICK`] of real time,
-/// reading `clock` each time, and ends when `checks` does.
+/// [`ThreadBound`] times the bound on a thread of its own, so it fires on any
+/// runtime, and calls `rejection` there once a tick.
 ///
 /// # Errors
 ///
@@ -445,52 +437,22 @@ pub(crate) async fn bounded<T>(
     rejection: impl Fn() -> Option<String> + Send + 'static,
     checks: impl Future<Output = Result<T, KafkaFeedError>>,
 ) -> Result<T, KafkaFeedError> {
-    // `Some` carries a rejection's text, `None` the bound passing.
-    let (fire, mut fired) = oneshot::channel::<Option<String>>();
-    // Held until `checks` ends: dropping it ends the timing thread.
-    let (_finished, done) = mpsc::channel::<()>();
-    let deadline = clock.now() + limit;
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "the timing thread ends when the bound fires or when `_finished` drops after `checks`"
-    )]
-    std::thread::Builder::new()
-        .name("spate-kafka-feed-bound".to_owned())
-        .spawn(move || {
-            loop {
-                let left = deadline.saturating_duration_since(clock.now());
-                if done.recv_timeout(left.min(REJECTION_TICK)) != Err(RecvTimeoutError::Timeout) {
-                    return;
-                }
-                // Asked for first, so a rejection recorded by the bound
-                // refuses.
-                if let Some(text) = rejection() {
-                    let _ = fire.send(Some(text));
-                    return;
-                }
-                if clock.now() >= deadline {
-                    let _ = fire.send(None);
-                    return;
-                }
-            }
+    let current = || step.lock().unwrap_or_else(PoisonError::into_inner).clone();
+    ThreadBound::new("spate-kafka-feed-bound", limit)
+        .with_clock(clock)
+        .with_rejection(rejection)
+        .run(checks)
+        .await
+        .unwrap_or_else(|stopped| {
+            Err(match stopped {
+                BoundError::Rejected(text) => rejected(&current(), &text),
+                BoundError::Elapsed => KafkaFeedError::Unavailable(format!(
+                    "the startup checks took longer than {limit:?}, while {}",
+                    current()
+                )),
+                other => KafkaFeedError::Unavailable(other.to_string()),
+            })
         })
-        .map_err(|e| KafkaFeedError::Unavailable(format!("starting a thread: {e}")))?;
-    let mut checks = std::pin::pin!(checks);
-    std::future::poll_fn(|cx| {
-        if let Poll::Ready(result) = checks.as_mut().poll(cx) {
-            return Poll::Ready(result);
-        }
-        Pin::new(&mut fired).poll(cx).map(|fired| {
-            let step = step.lock().unwrap_or_else(PoisonError::into_inner).clone();
-            match fired.ok().flatten() {
-                Some(text) => Err(rejected(&step, &text)),
-                None => Err(KafkaFeedError::Unavailable(format!(
-                    "the startup checks took longer than {limit:?}, while {step}"
-                ))),
-            }
-        })
-    })
-    .await
 }
 
 #[expect(
@@ -504,6 +466,7 @@ mod tests {
     use RDKafkaErrorCode as C;
     use spate_core::clock::TestClock;
     use spate_test::wait_until;
+    use std::sync::mpsc;
 
     const WORK: &str = "units";
     const RETRY: &str = "units-retry";

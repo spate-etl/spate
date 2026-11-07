@@ -31,12 +31,24 @@ import type { SidebarsConfig } from '@docusaurus/plugin-content-docs';
  * number-prefix parser strips it from the route — `0001-foo.md` is served at
  * `adr/foo`. A stale id here fails the build rather than degrading quietly.
  */
-const adrDir = path.resolve(__dirname, '../docs/adr');
-const adrRecords: string[] = fs
-  .readdirSync(adrDir)
-  .filter((name) => /^\d{4}-[a-z0-9][a-z0-9-]*\.md$/.test(name))
-  .sort()
-  .map((name) => `adr/${name.replace(/^\d{4}-/, '').replace(/\.md$/, '')}`);
+function numberedPages(dir: string, digits: number): string[] {
+  const page = new RegExp(`^\\d{${digits}}-[a-z0-9][a-z0-9-]*\\.md$`);
+  const prefix = new RegExp(`^\\d{${digits}}-`);
+  return fs
+    .readdirSync(path.resolve(__dirname, '../docs', dir))
+    .filter((name) => page.test(name))
+    .sort()
+    .map((name) => `${dir}/${name.replace(prefix, '').replace(/\.md$/, '')}`);
+}
+
+const adrRecords = numberedPages('adr', 4);
+
+/**
+ * The developer guide, in page order, read from its directory for the same
+ * reason as the records: its `README.md` is the category link, and
+ * autogeneration over a top-level folder would list it a second time.
+ */
+const developerPages = numberedPages('developer', 2);
 
 const sidebars: SidebarsConfig = {
   docsSidebar: [
@@ -56,6 +68,13 @@ const sidebars: SidebarsConfig = {
       label: 'Design & Internals',
       collapsed: false,
       items: ['INVARIANTS', 'METRICS'],
+    },
+    {
+      type: 'category',
+      label: 'Developer guide',
+      collapsed: true,
+      link: { type: 'doc', id: 'developer/README' },
+      items: developerPages,
     },
   ],
 };

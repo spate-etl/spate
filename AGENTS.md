@@ -6,8 +6,9 @@ wall-clock benchmark harness in `bench/` and the shared test helpers in
 `test-support/`.
 
 [`CONTRIBUTING.md`](CONTRIBUTING.md) is the contributor-facing entry point.
-[`DEVELOPING.md`](DEVELOPING.md) carries the build, test and benchmark mechanics
-in full: read it for a command, a profile or a bench convention.
+The [developer guide](docs/developer/README.md) carries the build, test and
+benchmark mechanics in full: read it for a command, a profile or a bench
+convention.
 [`AI_POLICY.md`](AI_POLICY.md) covers what any contribution has to withstand. The
 part that most often applies here is that a delivery-correctness change is judged
 on a failing test, not on reasoning that reads well.
@@ -58,7 +59,7 @@ Traps here:
 - **Pass `--locked` on any ad-hoc cargo call**, as CI does. Without it a command
   can resolve a different graph and hide a failure CI will then find. The
   commands that cannot take it are listed in
-  [`DEVELOPING.md`](DEVELOPING.md#commands).
+  [Commands and gates](docs/developer/01-commands.md#commands).
 - **`actionlint` runs locally only.** After touching a workflow, run
   `actionlint .github/workflows/*.yml`; that is the only time it runs at all.
 - **A local `zizmor` run is offline.** CI runs it through `cargo xtask tidy`

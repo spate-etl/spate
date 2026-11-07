@@ -216,7 +216,8 @@ pub enum PinningMode {
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]
 pub struct CheckpointSection {
-    /// How often committable watermarks are flushed to the source.
+    /// How often committable watermarks are flushed to the source. From
+    /// 100ms to one day, as [`PipelineConfig::validate`] checks.
     #[serde(with = "humantime_serde")]
     pub interval: Duration,
     /// Hard per-partition ceiling on unacknowledged batches. A partition at
@@ -228,7 +229,8 @@ pub struct CheckpointSection {
     /// Shutdown/rebalance drain budget. Must be comfortably below the pod's
     /// `terminationGracePeriodSeconds`, and more than
     /// [`STOP_RESERVE`](crate::feed::STOP_RESERVE) with a feed that
-    /// [hands back](crate::feed::Feed::hands_back).
+    /// [hands back](crate::feed::Feed::hands_back). Above zero and at most
+    /// one day, as [`PipelineConfig::validate`] checks.
     #[serde(with = "humantime_serde")]
     pub drain_timeout: Duration,
     /// A partition watermark stalled behind a failed batch for longer than
@@ -1422,12 +1424,10 @@ sinks:
         }
     }
 
-    /// Pins the commit interval's floor at 100ms, inclusive and on the whole
-    /// duration, and the refusal's whole text.
-    #[test]
     /// Pins that `checkpoint.interval` and `checkpoint.drain_timeout` load at
     /// one day and are refused a nanosecond past it, naming the key.
     /// Regression for #1669.
+    #[test]
     fn checkpoint_durations_are_refused_past_a_day() {
         let yaml = |key: &str, value: &str| {
             format!(
@@ -1450,6 +1450,8 @@ sinks:
         }
     }
 
+    /// Pins the commit interval's floor at 100ms, inclusive and on the whole
+    /// duration, and the refusal's whole text.
     #[test]
     fn checkpoint_interval_loads_at_its_floor_and_is_refused_a_nanosecond_under() {
         let yaml = |interval: &str| {

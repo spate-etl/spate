@@ -79,7 +79,6 @@ use spate_core::feed::{
 };
 use spate_core::hash::FastMap;
 use spate_core::task::{ThreadHandle, spawn_thread};
-use startup::TopicAdmin as _;
 use std::collections::VecDeque;
 use std::num::NonZeroU32;
 #[cfg(test)]
@@ -591,8 +590,10 @@ impl KafkaFeed {
     /// configuration, as for a property value it does not accept; when a
     /// broker rejects the client's credential or either side rejects the
     /// TLS handshake, naming the rejection, as soon as the client reports
-    /// it; when the cluster refuses a read of a topic as unauthorized or for
-    /// an invalid topic name, or describes no configuration entry for one;
+    /// it, or within the 30-second bound once a read waiting on a request it
+    /// sent finishes that wait; when the cluster refuses a read of a topic as
+    /// unauthorized or for an invalid topic name, or describes no
+    /// configuration entry for one;
     /// and for topics the feed cannot run on: a missing work, retry,
     /// dead-letter or attempt topic, a work, retry or dead-letter topic whose
     /// `cleanup.policy` includes `compact`, an attempt topic whose
@@ -787,7 +788,7 @@ fn log_started(config: &KafkaFeedConfig, checked: &startup::Checked) {
 
 /// Run the startup checks over the topics `config` names, on the runtime
 /// `io`, under `bound` on `clock`, with the rejection watch over the checking
-/// clients, which are dropped when it returns.
+/// clients, which are closed when it returns.
 fn check_topics(
     config: &KafkaFeedConfig,
     io: &tokio::runtime::Handle,
@@ -810,17 +811,13 @@ fn check_topics(
         .map_err(|reason| {
             KafkaFeedError::Refused(format!("creating the metadata client: {reason}"))
         })?;
-    let topics = Topics::new(config);
-    let step = Mutex::new("starting".to_owned());
-    let admin = Arc::new(startup::Brokers::new(admin, reader));
-    let watched = Arc::clone(&admin);
-    io.block_on(startup::bounded(
-        &step,
-        bound,
+    startup::run_checks(
+        startup::Brokers::new(admin, reader, bound),
+        &Topics::new(config),
+        io,
+        scope,
         clock,
-        move || watched.rejection(),
-        startup::check(&*admin, &topics, scope, &step),
-    ))
+    )
 }
 
 /// The feed's shared state and its producer, built with the settings the

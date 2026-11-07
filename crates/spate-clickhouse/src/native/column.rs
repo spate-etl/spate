@@ -223,7 +223,7 @@ impl ColumnWriter {
     }
 
     fn unsupported(ty: &ChType) -> String {
-        format!("{ty:?}")
+        crate::schema::shown_type(&format!("{ty:?}")).into_owned()
     }
 
     /// Fold one record's value into this column's buffers.

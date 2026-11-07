@@ -474,7 +474,7 @@ async fn a_column_type_past_what_clickhouse_accepts_fails_startup() {
     for (ty, says) in [
         (
             deep.as_str(),
-            "declared column `name` has a type nested more than 1000 levels deep",
+            "declared column `name` has a type nested more than 256 levels deep",
         ),
         (
             "Nullable(FixedString(4294967295))",
@@ -492,6 +492,46 @@ async fn a_column_type_past_what_clickhouse_accepts_fails_startup() {
         let msg = err.to_string();
         assert!(msg.contains(says), "{msg}");
         assert!(msg.len() < 2048, "the error shows {} bytes", msg.len());
+    }
+}
+
+/// Pins that a declared column's type at the deepest nesting the schema
+/// check accepts builds the sink and its native schema on a test thread's
+/// 2 MiB stack, for each type that recurses per level.
+#[tokio::test]
+async fn the_deepest_accepted_column_type_builds_the_sink() {
+    let nest = |open: &str, close: &str, n: usize, leaf: &str| {
+        format!("{}{leaf}{}", open.repeat(n), close.repeat(n))
+    };
+    for ty in [
+        nest("Array(", ")", 256, "String"),
+        nest("Tuple(a ", ")", 256, "String"),
+        nest("Map(String, Tuple(a ", "))", 128, "String"),
+        nest("Array(Nullable(", "))", 127, "LowCardinality(String)"),
+    ] {
+        for format in ["rowbinary", "native"] {
+            let mock = Mock::new();
+            mock.add(handlers::provide(system_columns(&[
+                ("id", "UInt64", ""),
+                ("name", ty.as_str(), ""),
+                ("score", "Nullable(Float64)", ""),
+            ])));
+            let cfg: ClickHouseSinkConfig = serde_yaml::from_str(&format!(
+                "table: orders\nformat: {format}\ncompression: off\nshards:\n  - replicas: [\"{}\"]\n",
+                mock.url()
+            ))
+            .expect("config yaml");
+            let sink = config::build(cfg)
+                .expect("valid sink config")
+                .with_row::<Owned<TestRow>>()
+                .await
+                .unwrap_or_else(|e| panic!("{format}: {e}"));
+            if format == "native" {
+                // The native writer may refuse a shape it cannot encode; it
+                // must answer without exhausting the stack.
+                let _ = sink.native_schema();
+            }
+        }
     }
 }
 

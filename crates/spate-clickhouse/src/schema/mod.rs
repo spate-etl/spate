@@ -204,7 +204,7 @@ const SHOWN_TYPE: usize = 256;
 
 /// A column type as an error shows it, cut after [`SHOWN_TYPE`] characters,
 /// since a type the server sent has no length limit of its own.
-fn shown_type(ty: &str) -> std::borrow::Cow<'_, str> {
+pub(crate) fn shown_type(ty: &str) -> std::borrow::Cow<'_, str> {
     match ty.char_indices().nth(SHOWN_TYPE) {
         Some((at, _)) => format!("{}…", &ty[..at]).into(),
         None => ty.into(),
@@ -305,7 +305,7 @@ pub(crate) async fn validate(
             tracing::warn!(
                 table = %check.display_table(),
                 column = %c.name,
-                r#type = %c.type_,
+                r#type = %shown_type(&c.type_),
                 "table column is not in the declared insert columns and has no DEFAULT; \
                  the server will fill type-default values"
             );
@@ -380,9 +380,10 @@ pub(crate) fn check_first_record(schema: &RowSchema, fields: &[FieldShape]) -> R
             ));
         } else if !compatible(&field.shape, ty, schema.wire) {
             findings.push(format!(
-                "position {i}: struct field `{}` ({}) is not compatible with `{col}` {ty_str}",
+                "position {i}: struct field `{}` ({}) is not compatible with `{col}` {}",
                 field.name,
                 shape_desc(&field.shape),
+                shown_type(ty_str),
             ));
         }
     }

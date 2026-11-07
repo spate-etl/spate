@@ -61,9 +61,10 @@ pub(crate) enum ChType {
     Other(String),
 }
 
-/// The deepest parenthesis nesting [`parse`] is given. ClickHouse's own
-/// parser stops at its `max_parser_depth`, 1000 by default.
-pub(crate) const MAX_DEPTH: u32 = 1000;
+/// The deepest parenthesis nesting [`parse`] is given. [`parse`] and the
+/// native column writer recurse once per level, and this depth fits a 2 MiB
+/// thread stack in a debug build with room to spare.
+pub(crate) const MAX_DEPTH: u32 = 256;
 
 /// The widest `FixedString` ClickHouse creates, in bytes.
 pub(crate) const MAX_FIXED_STRING: u32 = 0xFF_FFFF;
@@ -195,25 +196,16 @@ fn parse_tuple_element(e: &str) -> ChType {
     }
 }
 
+/// The byte offset of the first space outside parentheses and quotes.
 fn top_level_space(s: &str) -> Option<usize> {
-    let mut depth = 0u32;
-    let mut in_quote = false;
-    let mut escape = false;
-    for (i, c) in s.char_indices() {
-        if escape {
-            escape = false;
-            continue;
+    let mut at = None;
+    // Balance is checked by the parse of the type after the space.
+    let _ = walk(s, |i, c, depth| {
+        if at.is_none() && c == ' ' && depth == 0 {
+            at = Some(i);
         }
-        match c {
-            '\\' if in_quote => escape = true,
-            '\'' => in_quote = !in_quote,
-            '(' if !in_quote => depth += 1,
-            ')' if !in_quote => depth = depth.checked_sub(1)?,
-            ' ' if !in_quote && depth == 0 => return Some(i),
-            _ => {}
-        }
-    }
-    None
+    });
+    at
 }
 
 /// Split a parameter list at top-level commas, respecting nesting and
@@ -300,7 +292,7 @@ mod tests {
         assert_eq!(out_of_bounds(&nested(depth)), None);
         assert_eq!(
             out_of_bounds(&nested(depth + 1)).as_deref(),
-            Some("has a type nested more than 1000 levels deep")
+            Some("has a type nested more than 256 levels deep")
         );
         let quoted = format!("Enum8('{}' = 1)", "(".repeat(depth + 1));
         assert_eq!(out_of_bounds(&quoted), None);

@@ -148,7 +148,7 @@ impl Gate {
     fn rest(&self) {
         let st = self.core.lock();
         // Checked under the state lock, as in `take`.
-        if st.fatal.is_none() && !self.core.stopped() {
+        if st.signal.latched().is_none() && !self.core.stopped() {
             drop(
                 self.core
                     .gate_wake
@@ -168,7 +168,10 @@ impl Gate {
         // `stop` stores the stop flag under, so neither wake is missed. A
         // stopping feed waits too, so the loop does not spin over
         // deliveries it will not take.
-        if (st.gating.is_empty() || st.stopping) && st.fatal.is_none() && !self.core.stopped() {
+        if (st.gating.is_empty() || st.stopping)
+            && st.signal.latched().is_none()
+            && !self.core.stopped()
+        {
             st = self
                 .core
                 .gate_wake
@@ -176,7 +179,7 @@ impl Gate {
                 .unwrap_or_else(PoisonError::into_inner)
                 .0;
         }
-        if st.stopping || self.core.stopped() || st.fatal.is_some() {
+        if st.stopping || self.core.stopped() || st.signal.latched().is_some() {
             return Vec::new();
         }
         let entries: Vec<Gating> = st.gating.drain(..).collect();
@@ -465,6 +468,7 @@ mod tests {
     use crate::feed::FeedRole;
     use crate::feed::config::KafkaFeedConfig;
     use crate::feed::producer::FeedProducerHooks;
+    use crate::feed::tests::{gated, tp};
     use rdkafka::error::RDKafkaErrorCode as C;
     use spate_core::clock::SyncClock;
     use std::num::NonZeroU32;
@@ -514,6 +518,38 @@ mod tests {
         }
     }
 
+    /// Pins that a latched feed's gate takes none of the deliveries waiting
+    /// for it, so none gets an attempt record.
+    #[test]
+    fn a_latched_feeds_gate_takes_nothing() {
+        let section: spate_core::config::FeedSection = serde_yaml::from_str(
+            "kafka:\n  brokers: 127.0.0.1:1\n  group_id: workers\n  topic: units\n  \
+             retry_topic: units-retry\n  dead_letter_topic: units-dead\n  \
+             attempt_topic: units-attempts\n  statistics_interval: 0s\n",
+        )
+        .unwrap();
+        let config = KafkaFeedConfig::from_section(&section).unwrap();
+        let core = Arc::new(Core::new(&config, NonZeroU32::MIN, SyncClock::system()));
+        let producer = config
+            .base(false)
+            .create::<Producer, _>(
+                &config.client(FeedRole::Producer),
+                FeedProducerHooks::new(Arc::clone(&core)),
+            )
+            .unwrap();
+        let gate = Gate::new(Arc::clone(&core), producer, config.delivery_timeout);
+        core.lock().tracker.assign([tp(0)]);
+        let entry = gated(&core, 0);
+        core.lock().gating.push_back(entry);
+        drop(core.latch("probe"));
+
+        assert!(
+            gate.take().is_empty(),
+            "a latched feed's gate took a delivery"
+        );
+        assert_eq!(core.lock().gating.len(), 1);
+    }
+
     /// Pins how a failed watermark read ends a pass: a refusal retrying
     /// cannot fix stops the feed, naming the read, and a timeout leaves the
     /// feed running for the next pass.
@@ -542,7 +578,13 @@ mod tests {
 
         let halt = gate.watermark_error(1, &KafkaError::MetadataFetch(C::TopicAuthorizationFailed));
         assert!(matches!(halt, Halt::Ended));
-        let reason = core.lock().fatal.clone().expect("the feed stopped").reason;
+        let reason = core
+            .lock()
+            .signal
+            .latched()
+            .cloned()
+            .expect("the feed stopped")
+            .reason;
         assert!(
             reason.contains("reading the watermarks of `units-attempts` partition 1"),
             "{reason}"

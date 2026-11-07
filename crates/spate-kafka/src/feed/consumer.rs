@@ -203,7 +203,7 @@ pub(crate) fn close_flush(within: Duration) -> Duration {
 /// error if the feed latched, `Retryable` if writes were still in flight
 /// at the flush's end or the last commit failed, and confirmed otherwise.
 fn settle_close(core: &Core, close: Closing, flushed: bool, committed: bool) {
-    if let Some(fatal) = core.lock().fatal.clone() {
+    if let Some(fatal) = core.lock().signal.latched().cloned() {
         close.confirmer.reject(fatal);
     } else if !flushed {
         close.confirmer.reject(FeedError::new(
@@ -312,8 +312,7 @@ impl Driver {
             }
             _ => {
                 let mut st = self.core.lock();
-                st.retryable = Some(FeedError::new(FeedErrorKind::Retryable, reason));
-                st.wake();
+                st.signal.fail_soon(reason);
             }
         }
     }

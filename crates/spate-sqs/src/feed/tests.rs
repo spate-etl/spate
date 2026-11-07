@@ -490,6 +490,21 @@ async fn a_fatal_receive_is_sticky_and_a_retryable_one_is_returned_once() {
     );
 }
 
+/// Pins that the first Fatal is logged once and is the error every later
+/// call reads, whatever a later Fatal says. Regression for #1526.
+#[tokio::test(start_paused = true)]
+async fn a_second_fatal_keeps_the_first_and_logs_nothing() {
+    let (feed, _queue) = start(MINUTE);
+    let lines = spate_test::capture_logs(tracing::Level::ERROR, || {
+        feed.shared.set_fatal(&CallError::fatal("queue missing"));
+        feed.shared.set_fatal(&CallError::fatal("access denied"));
+    });
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(lines[0].contains("the SQS feed stopped"), "{lines:?}");
+    assert!(lines[0].contains("queue missing"), "{lines:?}");
+    assert_eq!(feed.receive(1).unwrap_err().reason, "queue missing");
+}
+
 /// A [`ScriptedQueue`] whose whole calls can be failed until a flag is
 /// cleared, whose visibility calls can be held unanswered, and which records
 /// when each receive, send, fail and delete was sent.

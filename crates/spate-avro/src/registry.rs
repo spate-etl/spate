@@ -413,11 +413,15 @@ fn root_store(system: impl FnOnce() -> CertificateResult) -> RootCertStore {
         tracing::warn!(errors = ?loaded.errors, "deserializer.avro: errors reading the system trust store");
     }
     let mut roots = RootCertStore::empty();
-    let (added, _unparsable) = roots.add_parsable_certificates(loaded.certs);
+    let (added, unparsable) = roots.add_parsable_certificates(loaded.certs);
     if added == 0 {
+        let problem = if unparsable == 0 {
+            "the system trust store has no certificates".to_owned()
+        } else {
+            format!("none of the {unparsable} certificates in the system trust store parsed")
+        };
         tracing::warn!(
-            "deserializer.avro: the system trust store has no certificates; \
-             verifying the registry against the Mozilla root bundle"
+            "deserializer.avro: {problem}; verifying the registry against the Mozilla root bundle"
         );
         roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     }
@@ -1175,6 +1179,27 @@ mod tests {
             assert!(err.contains("registry.url"), "{err}");
             assert!(!err.contains("secret"), "{err}");
         }
+    }
+
+    /// A store that yielded only certificates rustls refuses says so, and an
+    /// empty one keeps its own line. Regression for #1445.
+    #[test]
+    fn an_unparsable_store_is_not_called_empty() {
+        let unparsable = rustls::pki_types::CertificateDer::from(vec![0u8; 8]);
+        let lines = spate_test::capture_logs(tracing::Level::WARN, || {
+            let certs = vec![unparsable.clone(), unparsable];
+            root_store(|| native_certs(certs));
+        });
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(
+            lines[0].contains("none of the 2 certificates in the system trust store parsed"),
+            "{lines:?}"
+        );
+        let lines = spate_test::capture_logs(tracing::Level::WARN, || {
+            root_store(|| native_certs(Vec::new()));
+        });
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains("has no certificates"), "{lines:?}");
     }
 
     /// An empty system store falls back to the Mozilla bundle, and a

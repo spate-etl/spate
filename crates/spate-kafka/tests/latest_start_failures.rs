@@ -440,74 +440,9 @@ mod late_offers {
     }
 }
 
-/// A broker slow enough that one accept's lookups outlast their shared budget.
-mod slow_broker {
-    use crate::support::MockKafka;
-    use spate_core::checkpoint::Checkpointer;
-    use spate_core::error::ErrorClass;
-    use spate_core::source::{Source, SourceCtx, SourceEvent};
-    use spate_kafka::{KafkaSource, KafkaSourceConfig};
-    use std::collections::BTreeMap;
-    use std::time::{Duration, Instant};
-
-    const TOPIC: &str = "orders";
-
-    /// Sixteen consumers on sixteen partitions of a broker answering every request
-    /// in 700 ms, on the default timeouts, driven until lanes arrive or the source
-    /// reports a fatal error.
-    fn settle(policy: &str, group: &str) -> Result<usize, String> {
-        let _ = tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::WARN)
-            .with_ansi(false)
-            .with_writer(std::io::stderr)
-            .try_init();
-        let cluster = MockKafka::new();
-        cluster.hold_first_rebalance();
-        cluster.create_topic(TOPIC, 16, 1).expect("create topic");
-        cluster
-            .broker_round_trip_time(1, Duration::from_millis(700))
-            .expect("round trip");
-        let mut cfg = KafkaSourceConfig::new(cluster.bootstrap_servers(), TOPIC, group);
-        cfg.consumers = 16;
-        cfg.statistics_interval = Duration::ZERO;
-        cfg.rdkafka = BTreeMap::from([("auto.offset.reset".to_string(), policy.to_string())]);
-        let mut source = KafkaSource::new(cfg);
-        let cp = Checkpointer::new();
-        source.open(SourceCtx::new(cp.handle())).expect("open");
-        let began = Instant::now();
-        let mut seen = 0;
-        while began.elapsed() < Duration::from_secs(100) {
-            match source.poll_events(Duration::from_millis(100)) {
-                Ok(SourceEvent::LanesAssigned(lanes)) => {
-                    seen = lanes.len();
-                    if seen == 16 {
-                        return Ok(seen);
-                    }
-                }
-                Err(e) if e.class() == ErrorClass::Fatal => {
-                    return Err(format!("{e} at {:?}", began.elapsed()));
-                }
-                _ => {}
-            }
-        }
-        Ok(seen)
-    }
-
-    /// The control: `earliest` starts on the same broker.
-    #[test]
-    fn a_slow_broker_starts_under_earliest() {
-        assert_eq!(settle("earliest", "slow-earliest"), Ok(16));
-    }
-
-    /// `latest` starts on the same broker.
-    #[test]
-    fn a_slow_broker_starts_under_latest() {
-        assert_eq!(settle("latest", "slow-latest"), Ok(16));
-    }
-}
-
-/// Start commits in series: one accept's commits run one consumer at a time, so
-/// a first start takes the sum of their replies.
+/// Start commits whose replies are slow: one accept sends every consumer's commit
+/// before it waits, so the source starts while each reply takes 5 s. The source's
+/// unit tests pin the bound the waits share.
 mod slow_commits {
     use crate::support;
     use rdkafka::types::{RDKafkaApiKey, RDKafkaRespErr};
@@ -515,23 +450,20 @@ mod slow_commits {
     use spate_core::error::ErrorClass;
     use spate_core::source::{Source, SourceCtx, SourceEvent};
     use spate_kafka::{KafkaSource, KafkaSourceConfig};
+    use spate_test::wait_until;
     use std::collections::BTreeMap;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
     use support::MockKafka;
 
     const TOPIC: &str = "orders";
-    /// The lookup bound and the commit bound of one accept, plus slack for its
-    /// `assign`. Below the default `startup_timeout`, and below the sum of the
-    /// replies.
-    const ONE_ACCEPT: Duration = Duration::from_secs(25);
     const CONSUMERS: usize = 6;
     const REPLY_MS: i32 = 5_000;
 
     /// `consumers` consumers, one partition each, with only `OffsetCommit` replies
-    /// slowed to `reply_ms`. Drives the source until lanes arrive and returns its
-    /// longest poll. The mock keeps a group in a rebalance for most of a session
-    /// timeout after a late joiner, so the session is short and the deadline far.
-    fn longest_poll(policy: &str, consumers: usize, reply_ms: i32) -> Duration {
+    /// slowed to `reply_ms`, driven until lanes arrive. The mock keeps a group in a
+    /// rebalance for most of a session timeout after a late joiner, so the session
+    /// is short and the deadline far.
+    fn starts(policy: &str, consumers: usize, reply_ms: i32) {
         let cluster = MockKafka::new();
         cluster.hold_first_rebalance();
         cluster
@@ -563,40 +495,31 @@ mod slow_commits {
         let mut source = KafkaSource::new(cfg);
         let cp = Checkpointer::new();
         source.open(SourceCtx::new(cp.handle())).expect("open");
-        let began = Instant::now();
-        let mut longest = Duration::ZERO;
-        loop {
-            assert!(began.elapsed() < Duration::from_secs(100), "no lanes");
-            let polled = Instant::now();
-            let outcome = source.poll_events(Duration::from_millis(100));
-            longest = longest.max(polled.elapsed());
-            match outcome {
-                Ok(SourceEvent::LanesAssigned(_)) => return longest,
+        wait_until(Duration::from_secs(100), "lanes", || {
+            match source.poll_events(Duration::from_millis(100)) {
+                Ok(SourceEvent::LanesAssigned(_)) => true,
                 Err(e) if e.class() == ErrorClass::Fatal => panic!("{e}"),
-                _ => {}
+                _ => false,
             }
-        }
+        });
     }
 
     /// The control: `earliest` sends no start commit and starts on the same broker.
     #[test]
     fn slow_commit_replies_start_under_earliest() {
-        let longest = longest_poll("earliest", CONSUMERS, REPLY_MS);
-        assert!(longest < ONE_ACCEPT, "{longest:?}");
+        starts("earliest", CONSUMERS, REPLY_MS);
     }
 
     /// The control: `latest` starts when commit replies come at once.
     #[test]
     fn fast_commit_replies_start_under_latest() {
-        let longest = longest_poll("latest", CONSUMERS, 0);
-        assert!(longest < ONE_ACCEPT, "{longest:?}");
+        starts("latest", CONSUMERS, 0);
     }
 
-    /// One accept waits for the slowest commit reply and not their sum, 30 s here.
+    /// `latest` starts while every commit reply takes 5 s.
     #[test]
     fn slow_commit_replies_start_under_latest() {
-        let longest = longest_poll("latest", CONSUMERS, REPLY_MS);
-        assert!(longest < ONE_ACCEPT, "{longest:?}");
+        starts("latest", CONSUMERS, REPLY_MS);
     }
 }
 
@@ -805,7 +728,8 @@ mod startup_deadline {
     }
 }
 
-/// One accept under `latest` spends one lookup bound on a listing that is slow.
+/// A listing slower than the accept's lookup bound, against a source that still
+/// starts. The source's unit tests pin the bound the listing gets.
 mod slow_listing {
     use crate::support;
     use rdkafka::types::RDKafkaApiKey as Api;
@@ -814,23 +738,22 @@ mod slow_listing {
     use spate_core::source::{Source, SourceCtx, SourceEvent};
     use spate_kafka::{KafkaSource, KafkaSourceConfig};
     use spate_test::wait_until;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
     use support::MockKafka;
 
-    /// `COMMITTED_LOOKUP_TIMEOUT`, plus slack for the assign itself.
-    const BOUND: Duration = Duration::from_secs(13);
-    /// Longer than the bound, and shorter than the socket timeout.
+    /// Longer than the lookup bound, and shorter than the socket timeout.
     const SLOW_MS: i32 = 20_000;
     /// A lookup that leaves part of the bound to the listing.
     const LOOKUP_MS: i32 = 5_000;
 
     /// A slow lookup, then three consumers' listings that each answer past the
-    /// bound, and no poll blocks longer than one bound.
+    /// bound, and the source starts.
     #[test]
-    fn a_slow_listing_spends_one_lookup_bound() {
+    fn a_slow_listing_is_retried_until_the_source_starts() {
         let cluster = MockKafka::new();
         cluster.hold_first_rebalance();
         cluster.create_topic("orders", 3, 1).expect("create topic");
+        cluster.track_requests();
         // SAFETY: the pointer is valid while `cluster` lives. The call reads one
         // code and one round-trip time per counted entry.
         unsafe {
@@ -864,21 +787,13 @@ mod slow_listing {
         let cp = Checkpointer::new();
         let mut source = KafkaSource::new(cfg);
         source.open(SourceCtx::new(cp.handle())).expect("open");
-        let mut slowest = Duration::ZERO;
         wait_until(Duration::from_secs(90), "every lane", || {
-            let started = Instant::now();
             let outcome = source.poll_events(Duration::from_millis(100));
-            slowest = slowest.max(started.elapsed());
-            assert!(
-                started.elapsed() <= BOUND,
-                "one poll blocked for {:?}",
-                started.elapsed()
-            );
             matches!(outcome, Ok(SourceEvent::LanesAssigned(lanes)) if lanes.len() == 3)
         });
         assert!(
-            slowest >= Duration::from_secs(5),
-            "the listing was slow: {slowest:?}"
+            cluster.received(Api::ListOffsets) >= 3,
+            "the slow listings were made"
         );
     }
 }

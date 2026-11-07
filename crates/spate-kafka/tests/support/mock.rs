@@ -164,6 +164,33 @@ impl MockKafka {
         }
     }
 
+    /// Record each request the cluster receives from here on, as it arrives and
+    /// before any reply delay, for [`MockKafka::received`] to count.
+    pub(crate) fn track_requests(&self) {
+        // SAFETY: the pointer is valid while `self` lives.
+        unsafe { rdkafka::bindings::rd_kafka_mock_start_request_tracking(self.native()) };
+    }
+
+    /// How many `api` requests the cluster has received since
+    /// [`MockKafka::track_requests`].
+    pub(crate) fn received(&self, api: RDKafkaApiKey) -> usize {
+        let mut count = 0;
+        // SAFETY: the pointer is valid while `self` lives, and the array holds
+        // `count` requests until it is destroyed.
+        unsafe {
+            let requests =
+                rdkafka::bindings::rd_kafka_mock_get_requests(self.native(), &raw mut count);
+            let seen = (0..count)
+                .filter(|i| {
+                    rdkafka::bindings::rd_kafka_mock_request_api_key(*requests.add(*i))
+                        == api as i16
+                })
+                .count();
+            rdkafka::bindings::rd_kafka_mock_request_destroy_array(requests, count);
+            seen
+        }
+    }
+
     fn set_initial_rebalance_delay(&self, delay_ms: i32) {
         // SAFETY: `native` is valid while `self` lives, and the call writes the
         // cluster default under the cluster's own lock.

@@ -150,6 +150,21 @@ const START_COMMIT_TIMEOUT: Duration = Duration::from_secs(10);
 /// attempt. Without a pace every poll repeats a blocking broker round trip.
 const START_RETRY_PACE: Duration = Duration::from_secs(1);
 
+/// A broker call an accept is about to make, with the time it may take, for a
+/// test that moves the source's clock between calls.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BrokerCall {
+    /// A committed-offset lookup for consumer `k`.
+    Lookup { k: usize, budget: Duration },
+    /// A listing of end offsets on consumer `k`.
+    Listing { k: usize, budget: Duration },
+    /// Consumer `k` sends its start commit.
+    CommitSent { k: usize },
+    /// The accept waits for consumer `k`'s start commit.
+    CommitWait { k: usize, budget: Duration },
+}
+
 /// Since when the source has been without an assignment, and what took the
 /// last one. `cause` is `None` before the first assignment, the window
 /// `startup_timeout` governs; after it, `assignment_timeout` does.
@@ -300,8 +315,12 @@ pub struct KafkaSource {
     last_consumer_error: Option<(Stopwatch, String)>,
     /// Messages that leaked onto a main queue and were rewound.
     main_queue_rewinds: u64,
-    /// The clock the assignment windows, the hold and the error's age read.
+    /// The clock the assignment windows, the hold, the accept's lookup and
+    /// commit bounds and the error's age read.
     clock: SyncClock,
+    /// Called before each broker call an accept makes.
+    #[cfg(test)]
+    on_broker_call: Option<Box<dyn FnMut(BrokerCall) + Send + Sync>>,
     /// An error the next poll of this consumer returns in place of
     /// `BaseConsumer::poll`, for a test that needs a poll error in one call.
     #[cfg(test)]
@@ -415,12 +434,14 @@ impl KafkaSource {
             main_queue_rewinds: 0,
             clock: SyncClock::system(),
             #[cfg(test)]
+            on_broker_call: None,
+            #[cfg(test)]
             injected_poll_error: None,
         }
     }
 
-    /// Read the assignment windows from `clock` in place of the system
-    /// clock.
+    /// Read the assignment windows and the accept's lookup and commit bounds
+    /// from `clock` in place of the system clock.
     #[cfg(feature = "testing")]
     #[doc(hidden)]
     #[must_use]
@@ -632,26 +653,11 @@ impl KafkaSource {
                 )));
             }
         }
-        // One budget for every lookup and listing of the accept: the controller
-        // thread polls no consumer meanwhile.
-        let lookup_until = Instant::now() + COMMITTED_LOOKUP_TIMEOUT;
         // Every start settles ahead of the first `assign`, so a start that
         // fails leaves no consumer accepted.
-        let starts = if self.config.uncommitted_start() == Some(Offset::End) {
-            match self.read_latest_starts(&offers, lookup_until)? {
-                Ok(starts) => starts,
-                Err(reason) => return Ok(self.retry_starts(offers, &held, reassign, &reason)),
-            }
-        } else {
-            let mut starts = Vec::with_capacity(offers.len());
-            for (k, tpl) in &offers {
-                starts.push(Prepared::assigning(if tpl.count() == 0 {
-                    TopicPartitionList::new()
-                } else {
-                    self.start_positions(*k, tpl, lookup_until)
-                }));
-            }
-            starts
+        let starts = match self.prepare_starts(&offers)? {
+            Ok(starts) => starts,
+            Err(reason) => return Ok(self.retry_starts(offers, &held, reassign, &reason)),
         };
         let offered = offers.len();
         let (offers, starts, retry) = self.commit_starts(offers, starts)?;
@@ -703,6 +709,41 @@ impl KafkaSource {
         Ok(SourceEvent::LanesAssigned(lanes))
     }
 
+    /// The start of each offer, read under one budget for every lookup and
+    /// listing of the accept, since the controller thread polls no consumer
+    /// meanwhile. Under `latest` a start that cannot be read returns the reason
+    /// to retry; otherwise librdkafka resolves it.
+    ///
+    /// # Errors
+    ///
+    /// As [`KafkaSource::read_latest_starts`].
+    fn prepare_starts(
+        &mut self,
+        offers: &[(usize, TopicPartitionList)],
+    ) -> Result<Result<Vec<Prepared>, String>, SourceError> {
+        let lookup_until = self.clock.now() + COMMITTED_LOOKUP_TIMEOUT;
+        if self.config.uncommitted_start() == Some(Offset::End) {
+            return self.read_latest_starts(offers, lookup_until);
+        }
+        let mut starts = Vec::with_capacity(offers.len());
+        for (k, tpl) in offers {
+            starts.push(Prepared::assigning(if tpl.count() == 0 {
+                TopicPartitionList::new()
+            } else {
+                self.start_positions(*k, tpl, lookup_until)
+            }));
+        }
+        Ok(Ok(starts))
+    }
+
+    /// Report `call` to a test's hook before the accept makes it.
+    #[cfg(test)]
+    fn before_call(&mut self, call: BrokerCall) {
+        if let Some(hook) = self.on_broker_call.as_mut() {
+            hook(call);
+        }
+    }
+
     /// Commit what each consumer has to commit, all in flight together under one
     /// bound, so an accept waits for the slowest answer and not their sum. Returns
     /// the offers and starts left, each stale offer discarded, with the reason to
@@ -738,6 +779,8 @@ impl KafkaSource {
                     self.discard_refused(k, &tpl)?;
                     continue;
                 }
+                #[cfg(test)]
+                self.before_call(BrokerCall::CommitSent { k });
                 match send_commit(&self.members[k].consumer, &start.to_commit) {
                     Ok(pending) => commit = Some(pending),
                     // Nothing reached the group, so nothing here says it moved on.
@@ -750,13 +793,17 @@ impl KafkaSource {
             sent.push(commit);
             kept.push((k, tpl, start));
         }
-        let until = Instant::now() + START_COMMIT_TIMEOUT;
+        let until = self.clock.now() + START_COMMIT_TIMEOUT;
         let mut offers = Vec::with_capacity(kept.len());
         let mut starts = Vec::with_capacity(kept.len());
         for ((k, tpl, start), commit) in kept.into_iter().zip(sent) {
-            if let Some(commit) = commit
-                && let Err(e) = commit.wait(until.saturating_duration_since(Instant::now()))
-            {
+            let waited = commit.map(|commit| {
+                let budget = until.saturating_duration_since(self.clock.now());
+                #[cfg(test)]
+                self.before_call(BrokerCall::CommitWait { k, budget });
+                commit.wait(budget)
+            });
+            if let Some(Err(e)) = waited {
                 if e.rdkafka_error_code() == Some(RDKafkaErrorCode::OperationTimedOut) {
                     self.commit_unanswered = true;
                 }
@@ -918,12 +965,14 @@ impl KafkaSource {
                 .collect()));
         };
         let consumer = Arc::clone(&self.members[*reader].consumer);
-        let budget = lookup_until.saturating_duration_since(Instant::now());
+        let budget = lookup_until.saturating_duration_since(self.clock.now());
         if budget.is_zero() {
             return Ok(Err(
                 "no time left for the committed offset lookup".to_owned()
             ));
         }
+        #[cfg(test)]
+        self.before_call(BrokerCall::Lookup { k: *reader, budget });
         let committed = match consumer.committed_offsets(wanted, budget) {
             Ok(committed) => committed,
             Err(e) => return read_failure("reading committed offsets", &e),
@@ -955,10 +1004,12 @@ impl KafkaSource {
         }
         let mut listed: FastMap<i32, i64> = FastMap::default();
         if ends.count() > 0 {
-            let budget = lookup_until.saturating_duration_since(Instant::now());
+            let budget = lookup_until.saturating_duration_since(self.clock.now());
             if budget.is_zero() {
                 return Ok(Err("no time left to list end offsets".to_owned()));
             }
+            #[cfg(test)]
+            self.before_call(BrokerCall::Listing { k: *reader, budget });
             if let Err(e) = list_offsets(consumer.client(), &mut ends, budget) {
                 return read_failure("listing end offsets", &e);
             }
@@ -1014,9 +1065,8 @@ impl KafkaSource {
         tpl: &TopicPartitionList,
         lookup_until: Instant,
     ) -> TopicPartitionList {
-        let member = &mut self.members[k];
-        member.committed_at_assign.clear();
-        let budget = lookup_until.saturating_duration_since(Instant::now());
+        self.members[k].committed_at_assign.clear();
+        let budget = lookup_until.saturating_duration_since(self.clock.now());
         if budget.is_zero() {
             tracing::warn!(
                 consumer = k,
@@ -1025,6 +1075,9 @@ impl KafkaSource {
             );
             return tpl.clone();
         }
+        #[cfg(test)]
+        self.before_call(BrokerCall::Lookup { k, budget });
+        let member = &mut self.members[k];
         let committed = match member.consumer.committed_offsets(tpl.clone(), budget) {
             Ok(committed) => committed,
             Err(e) => {
@@ -2289,12 +2342,14 @@ mod tests {
     fn no_budget_leaves_the_offer_held() {
         let (mut source, _clock) = opened_unassigned(latest_config(), 1);
         let offers = [(0, tpl_of(&[0]))];
+        let now = source.clock.now();
         assert!(matches!(
-            source.read_latest_starts(&offers, Instant::now()),
+            source.read_latest_starts(&offers, now),
             Ok(Err(_))
         ));
         let (mut source, _clock) = opened_unassigned(test_config(), 1);
-        let list = source.start_positions(0, &offers[0].1, Instant::now());
+        let now = source.clock.now();
+        let list = source.start_positions(0, &offers[0].1, now);
         assert_eq!(
             list.elements()[0].offset(),
             offers[0].1.elements()[0].offset()
@@ -2309,7 +2364,7 @@ mod tests {
         let mut other = TopicPartitionList::new();
         other.add_partition("other", 0);
         assert!(matches!(
-            source.read_latest_starts(&[(0, other)], Instant::now()),
+            source.read_latest_starts(&[(0, other)], source.clock.now()),
             Err(e) if e.class() == ErrorClass::Fatal
         ));
     }
@@ -3804,6 +3859,186 @@ mod tests {
             "dropping the source with an assignment held",
             move || drop(source),
         );
+    }
+
+    /// The bounds one accept spends at sixteen consumers, read on a frozen clock
+    /// that the hook moves by what each broker call costs.
+    mod accept_bounds {
+        use super::*;
+        use crate::testutil::mock::MockKafka;
+        use rdkafka::types::{RDKafkaApiKey, RDKafkaRespErr};
+        use std::sync::Mutex;
+
+        const CONSUMERS: usize = 16;
+
+        type Calls = Arc<Mutex<Vec<BrokerCall>>>;
+
+        /// A mock cluster with one `orders` partition per consumer.
+        fn mock() -> MockKafka {
+            let cluster = MockKafka::new();
+            let partitions = i32::try_from(CONSUMERS).expect("partitions");
+            cluster
+                .create_topic("orders", partitions, 1)
+                .expect("create topic");
+            cluster
+        }
+
+        /// An opened source of `consumers` under `policy` on a frozen clock, whose
+        /// hook records each broker call and then advances the clock by `cost`.
+        fn recording(
+            cluster: &MockKafka,
+            policy: &str,
+            consumers: usize,
+            cost: impl Fn(&BrokerCall) -> Duration + Send + Sync + 'static,
+        ) -> (KafkaSource, Arc<TestClock>, Calls) {
+            let mut cfg = test_config();
+            cfg.brokers = cluster.bootstrap_servers();
+            cfg.group_id = spate_test::unique_name("bounds");
+            cfg.consumers = consumers;
+            cfg.rdkafka
+                .insert("auto.offset.reset".to_string(), policy.to_string());
+            let mut source = KafkaSource::new(cfg);
+            let clock = freeze(&mut source);
+            let calls: Calls = Arc::default();
+            let (moved, seen) = (Arc::clone(&clock), Arc::clone(&calls));
+            source.on_broker_call = Some(Box::new(move |call| {
+                seen.lock().expect("calls").push(call);
+                moved.advance(cost(&call));
+            }));
+            let cp = Checkpointer::new();
+            source.open(SourceCtx::new(cp.handle())).expect("open");
+            (source, clock, calls)
+        }
+
+        /// One offer per consumer, of the partition with its index.
+        fn offers() -> Vec<(usize, TopicPartitionList)> {
+            (0..CONSUMERS)
+                .map(|k| (k, tpl_of(&[i32::try_from(k).expect("partition")])))
+                .collect()
+        }
+
+        fn calls(recorded: &Calls) -> Vec<BrokerCall> {
+            recorded.lock().expect("calls").clone()
+        }
+
+        /// The lookups of one accept under `earliest` share one
+        /// `COMMITTED_LOOKUP_TIMEOUT`: once it is spent, the consumers left make
+        /// none, so a slow coordinator holds the controller thread for one bound
+        /// whatever the consumer count.
+        #[test]
+        fn the_lookups_of_one_accept_share_one_bound() {
+            let cluster = mock();
+            let (mut source, _clock, recorded) =
+                recording(&cluster, "earliest", CONSUMERS, |_| Duration::from_secs(4));
+            let starts = source
+                .prepare_starts(&offers())
+                .expect("no fatal")
+                .expect("earliest leaves a start it cannot read to librdkafka");
+            assert_eq!(starts.len(), CONSUMERS);
+            let secs = Duration::from_secs;
+            assert_eq!(
+                calls(&recorded),
+                [
+                    BrokerCall::Lookup {
+                        k: 0,
+                        budget: secs(10)
+                    },
+                    BrokerCall::Lookup {
+                        k: 1,
+                        budget: secs(6)
+                    },
+                    BrokerCall::Lookup {
+                        k: 2,
+                        budget: secs(2)
+                    },
+                ]
+            );
+        }
+
+        /// Under `latest` the listing gets what the lookup left of the accept's one
+        /// bound, and none runs once the lookup has spent it all. One consumer
+        /// reads every offered partition, so one is enough.
+        #[test]
+        fn the_listing_gets_what_the_lookup_left() {
+            let secs = Duration::from_secs;
+            for (spent, listing) in [(7, Some(3)), (10, None)] {
+                let cluster = mock();
+                let (mut source, _clock, recorded) =
+                    recording(&cluster, "latest", 1, move |call| match call {
+                        BrokerCall::Lookup { .. } => secs(spent),
+                        _ => Duration::ZERO,
+                    });
+                let every = (0..CONSUMERS)
+                    .map(|p| i32::try_from(p).expect("partition"))
+                    .collect::<Vec<_>>();
+                let read = source
+                    .prepare_starts(&[(0, tpl_of(&every))])
+                    .expect("no fatal");
+                let mut want = vec![BrokerCall::Lookup {
+                    k: 0,
+                    budget: secs(10),
+                }];
+                want.extend(listing.map(|left| BrokerCall::Listing {
+                    k: 0,
+                    budget: secs(left),
+                }));
+                assert_eq!(calls(&recorded), want, "a lookup that took {spent} s");
+                if listing.is_none() {
+                    assert_eq!(
+                        read.err().as_deref(),
+                        Some("no time left to list end offsets"),
+                        "the offers are retried"
+                    );
+                }
+            }
+        }
+
+        /// The start commits of one accept are all sent before the first wait, and
+        /// the waits share one `START_COMMIT_TIMEOUT` of their own, from after the
+        /// lookups: an accept waits for the slowest answer and not their sum.
+        #[test]
+        fn the_start_commits_of_one_accept_wait_together_on_their_own_bound() {
+            // Sixteen of these leave every wait a budget, so none goes unanswered
+            // and holds the consumers' close.
+            const WAIT: Duration = Duration::from_millis(500);
+            let cluster = mock();
+            cluster.request_errors(
+                RDKafkaApiKey::OffsetCommit,
+                &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_UNKNOWN; CONSUMERS],
+            );
+            let (mut source, clock, recorded) =
+                recording(&cluster, "latest", CONSUMERS, |call| match call {
+                    BrokerCall::CommitWait { .. } => WAIT,
+                    _ => Duration::ZERO,
+                });
+            for member in &mut source.members {
+                member.generation = Some(0);
+            }
+            let starts = (0..CONSUMERS)
+                .map(|k| {
+                    let partition = i32::try_from(k).expect("partition");
+                    let mut to_commit = TopicPartitionList::new();
+                    to_commit
+                        .add_partition_offset("orders", partition, Offset::Offset(0))
+                        .expect("offset");
+                    Prepared {
+                        list: tpl_of(&[partition]),
+                        to_commit,
+                    }
+                })
+                .collect();
+            // The lookups have spent their whole bound.
+            clock.advance(COMMITTED_LOOKUP_TIMEOUT);
+            source
+                .commit_starts(offers(), starts)
+                .expect("an unknown error is retried");
+            let sent = (0..CONSUMERS).map(|k| BrokerCall::CommitSent { k });
+            let waits = (0..CONSUMERS).map(|k| BrokerCall::CommitWait {
+                k,
+                budget: START_COMMIT_TIMEOUT - WAIT * u32::try_from(k).expect("index"),
+            });
+            assert_eq!(calls(&recorded), sent.chain(waits).collect::<Vec<_>>());
+        }
     }
 
     /// Dropping the source with a rebalance on a consumer's queue, as after

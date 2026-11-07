@@ -68,7 +68,9 @@ Everything after the input runs unattended. The release pull request
 auto-merges when `CI gate` passes, and nobody approves the diff. The controls
 are the version input, the derivation check, and the gates every pull request
 already passes. What is worth reading on that pull request is the assembled
-`CHANGELOG.md` section, which holds the full release notes.
+`CHANGELOG.md` section, which holds the full release notes. `cargo xtask tidy
+changelog` builds the release body from it, so a hand edit the body refuses
+fails that pull request.
 
 ## The release post
 

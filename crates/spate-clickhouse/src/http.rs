@@ -20,7 +20,7 @@ const TCP_KEEPALIVE: Duration = Duration::from_secs(60);
 const POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// The roots `https://` replicas are verified against. These are the
-/// certificates `system` yields, or the Mozilla bundle when it yields none,
+/// certificates `system` yields, or the Mozilla bundle when none of them parse,
 /// plus every certificate in `tls.root_ca`.
 ///
 /// Returns an empty store without calling `system` when `needs_tls` is false.
@@ -37,11 +37,15 @@ pub(crate) fn root_store(
     if !loaded.errors.is_empty() {
         tracing::warn!(errors = ?loaded.errors, "sink.clickhouse: errors reading the system trust store");
     }
-    let (added, _unparsable) = roots.add_parsable_certificates(loaded.certs);
+    let (added, unparsable) = roots.add_parsable_certificates(loaded.certs);
     if added == 0 {
+        let problem = if unparsable == 0 {
+            "the system trust store has no certificates".to_owned()
+        } else {
+            format!("none of the {unparsable} certificates in the system trust store parsed")
+        };
         tracing::warn!(
-            "sink.clickhouse: the system trust store has no certificates; \
-             verifying https replicas against the Mozilla root bundle"
+            "sink.clickhouse: {problem}; verifying https replicas against the Mozilla root bundle"
         );
         roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     }
@@ -140,6 +144,29 @@ mod tests {
         })
         .unwrap();
         assert_eq!(roots.len(), 2);
+    }
+
+    /// A store that yielded only certificates rustls refuses says so, and an
+    /// empty one keeps its own line, and both take the Mozilla bundle.
+    /// Regression for #1444.
+    #[test]
+    fn an_unparsable_store_is_not_called_empty() {
+        let unparsable = rustls::pki_types::CertificateDer::from(vec![0u8; 8]);
+        let lines = spate_test::capture_logs(tracing::Level::WARN, || {
+            let certs = vec![unparsable.clone(), unparsable];
+            let roots = root_store(&TlsSection::default(), true, || native_certs(certs)).unwrap();
+            assert_eq!(roots.len(), webpki_roots::TLS_SERVER_ROOTS.len());
+        });
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(
+            lines[0].contains("none of the 2 certificates in the system trust store parsed"),
+            "{lines:?}"
+        );
+        let lines = spate_test::capture_logs(tracing::Level::WARN, || {
+            root_store(&TlsSection::default(), true, || native_certs(Vec::new())).unwrap();
+        });
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains("has no certificates"), "{lines:?}");
     }
 
     /// An empty system store falls back to the Mozilla bundle, and

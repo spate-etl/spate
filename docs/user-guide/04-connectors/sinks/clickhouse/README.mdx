@@ -123,10 +123,10 @@ sink:
 The sink verifies an `https://` replica against the system trust store, which
 on macOS includes the Keychain. When `SSL_CERT_FILE` or `SSL_CERT_DIR` is set,
 the certificates they name replace the system store. If the store yields no
-certificates, as on a container image without a CA package, the sink logs a
-warning and uses the Mozilla root bundle compiled into the binary. When the
-store has certificates, the Mozilla bundle is not added, so the store or
-`tls.root_ca` must hold the CA of every replica.
+certificate the client can parse, as on a container image without a CA package,
+the sink logs a warning and uses the Mozilla root bundle compiled into the
+binary. When a certificate parses, the Mozilla bundle is not added, so the store
+or `tls.root_ca` must hold the CA of every replica.
 
 For a private CA, set `tls.root_ca` to a PEM file. Its certificates are trusted
 in addition to the store. A relative path resolves against the working

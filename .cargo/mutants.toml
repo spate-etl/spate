@@ -5,6 +5,10 @@ test_tool = "nextest"
 all_features = true
 additional_cargo_args = ["--locked"]
 additional_cargo_test_args = ["--profile", "mutants"]
+# A mutant's whole test run is stopped at 1.5 times the unmutated one. The
+# default of 5 lets one mutant that slows many tests, none past nextest's
+# per-test limit, hold a slow suite's run for most of an hour.
+timeout_multiplier = 1.5
 # xtask's tests read this repository's history, so the scratch copy needs it.
 copy_vcs = true
 # The scratch copy leaves out what git ignores: build output, node_modules and

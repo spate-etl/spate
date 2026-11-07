@@ -1,0 +1,54 @@
+name: Mutants
+
+# cargo-mutants over a pull request's diff. Advisory, and in a workflow of its
+# own so that `CI gate` never waits for it: a diff touching a slow suite takes
+# longer than any merge should. The default `pull_request` types leave out
+# `edited`, so a body edit neither starts nor cancels a run. No `merge_group`:
+# the queue carries the diff the pull request already ran. No `push`: it has
+# no diff to scope a run to.
+on:
+  pull_request:
+
+concurrency:
+  group: mutants-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  mutants:
+    name: Mutants over the diff
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      # Full history: the merge base has to be resolvable.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: ./.github/actions/setup-rust
+        with:
+          components: clippy
+          tools: nextest,cargo-mutants
+          # `--in-place` builds into this checkout's `target/`, so the
+          # dependencies restored from this entry are reused.
+          shared-key: dev-allfeatures
+          cache-save: never
+      - name: Mutants
+        # Survivors are listed in the job summary. `--budget` stops
+        # cargo-mutants first, leaving a minute for it to exit and the summary
+        # to list what it reached. The step's timeout below it and the job's
+        # above it are backstops, and either ends the run with no summary.
+        continue-on-error: true
+        timeout-minutes: 85
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          # Caps each test process's writable memory. A mutant that loops
+          # while allocating then fails its test, where uncapped it fills the
+          # runner's 16 GB and the runner shuts down. 4 tests at a time at
+          # 3 GiB each stay about 3 GB below that. `cargo xtask` runs through
+          # the same runner, so cargo-mutants and the build inherit the cap:
+          # each rustc and linker process gets 3 GiB of its own.
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: prlimit --data=3221225472 --
+        run: cargo xtask mutants --since "$BASE_SHA" --in-place --budget 82

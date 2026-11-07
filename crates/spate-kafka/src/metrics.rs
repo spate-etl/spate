@@ -41,20 +41,20 @@ use spate_core::hash::{FastMap, FastSet};
 use spate_core::metrics::{Counter, Gauge, Meter, SharedString};
 use spate_core::record::PartitionId;
 
-const TX_REQUESTS_TOTAL: &str = "tx_requests_total";
-const TX_BYTES_TOTAL: &str = "tx_bytes_total";
-const RX_RESPONSES_TOTAL: &str = "rx_responses_total";
-const RX_BYTES_TOTAL: &str = "rx_bytes_total";
+pub(crate) const TX_REQUESTS_TOTAL: &str = "tx_requests_total";
+pub(crate) const TX_BYTES_TOTAL: &str = "tx_bytes_total";
+pub(crate) const RX_RESPONSES_TOTAL: &str = "rx_responses_total";
+pub(crate) const RX_BYTES_TOTAL: &str = "rx_bytes_total";
 const RX_MESSAGES_TOTAL: &str = "rx_messages_total";
 const RX_MESSAGE_BYTES_TOTAL: &str = "rx_message_bytes_total";
-const BROKER_TX_RETRIES_TOTAL: &str = "broker_tx_retries_total";
-const BROKER_REQ_TIMEOUTS_TOTAL: &str = "broker_req_timeouts_total";
+pub(crate) const BROKER_TX_RETRIES_TOTAL: &str = "broker_tx_retries_total";
+pub(crate) const BROKER_REQ_TIMEOUTS_TOTAL: &str = "broker_req_timeouts_total";
 const BROKER_CONNECTS_TOTAL: &str = "broker_connects_total";
 const BROKER_DISCONNECTS_TOTAL: &str = "broker_disconnects_total";
-const BROKER_UP: &str = "broker_up";
-const BROKER_TX_ERRORS_TOTAL: &str = "broker_tx_errors_total";
-const BROKER_RTT_AVG_SECONDS: &str = "broker_rtt_avg_seconds";
-const BROKER_RTT_P99_SECONDS: &str = "broker_rtt_p99_seconds";
+pub(crate) const BROKER_UP: &str = "broker_up";
+pub(crate) const BROKER_TX_ERRORS_TOTAL: &str = "broker_tx_errors_total";
+pub(crate) const BROKER_RTT_AVG_SECONDS: &str = "broker_rtt_avg_seconds";
+pub(crate) const BROKER_RTT_P99_SECONDS: &str = "broker_rtt_p99_seconds";
 const BROKER_THROTTLE_AVG_SECONDS: &str = "broker_throttle_avg_seconds";
 const BROKER_THROTTLE_P99_SECONDS: &str = "broker_throttle_p99_seconds";
 const FETCH_QUEUE_MESSAGES: &str = "fetch_queue_messages";
@@ -151,8 +151,7 @@ struct BrokerHandles {
     throttle: Option<WindowGauges>,
 }
 
-/// One broker's average and p99 gauges for a librdkafka latency window,
-/// shared by the source and sink statistics.
+/// One broker's average and p99 gauges for a librdkafka latency window.
 #[derive(Debug)]
 pub(crate) struct WindowGauges {
     avg: Gauge,
@@ -464,8 +463,9 @@ impl KafkaStatsMetrics {
                     .set(ms_to_secs(throttle.avg), ms_to_secs(throttle.p99));
             }
         }
-        // Summed across brokers (no label): monotonic within a consumer
-        // lifetime because broker entries are never removed.
+        // Summed across brokers (no label). A broker that leaves the snapshot
+        // takes its totals out of the sum, and `absolute` holds each counter
+        // at its peak until the sum passes it.
         self.broker_tx_retries.absolute(retries);
         self.broker_req_timeouts.absolute(timeouts);
         self.broker_connects.absolute(connects);
@@ -704,11 +704,11 @@ fn track_fetch_state(
     );
 }
 
-fn to_u64(v: i64) -> u64 {
+pub(crate) fn to_u64(v: i64) -> u64 {
     u64::try_from(v).unwrap_or(0)
 }
 
-fn us_to_secs(v: i64) -> f64 {
+pub(crate) fn us_to_secs(v: i64) -> f64 {
     v as f64 / 1e6
 }
 

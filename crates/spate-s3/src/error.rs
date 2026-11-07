@@ -185,8 +185,9 @@ fn range_not_satisfiable(e: &object_store::Error) -> bool {
 }
 
 /// The byte offset of the status after the first [`STATUS_MARKER`] in
-/// `text`. In a `Generic` error's text the key sits ahead of it
-/// percent-encoded, and the store's response body after it.
+/// `text`. Only in a chain with no typed variant does the key sit ahead of it
+/// percent-encoded, with the store's response body after it; a typed variant
+/// shows the raw key, so the first marker may be the key's own text.
 fn status_at(text: &str) -> Option<usize> {
     text.find(STATUS_MARKER).map(|at| at + STATUS_MARKER.len())
 }

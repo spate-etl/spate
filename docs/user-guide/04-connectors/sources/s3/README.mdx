@@ -217,7 +217,9 @@ from the environment):
 A listing, an object read, the HEAD after an overwrite, or a read or write at
 the [job location](#bounded-jobs-and-the-job-location) the store answers with
 `401` or `403`, and a client-configuration error, fail the pipeline
-immediately, because no peer would fare better. The error names the status.
+immediately, because no peer would fare better. So does a listing answered
+`404`, which a store sends for a bucket that does not exist. The error names
+the status.
 
 A worker that reads [storage notifications](#storage-notifications) needs
 these permissions besides `s3:GetObject`:

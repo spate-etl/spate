@@ -45,7 +45,7 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/setup-rust
         with:
-          tools: cargo-about
+          tools: cargo-about@0.9.2
       # `tee` streams the output to the run log, so a step killed at its
       # timeout still shows what it printed, and keeps the copy the issue body
       # carries.
@@ -486,7 +486,7 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/setup-rust
         with:
-          tools: cargo-about,cargo-cyclonedx
+          tools: cargo-about@0.9.2,cargo-cyclonedx
           shared-key: publish
 
       # The night after a release, before anything merges, `derive` refuses

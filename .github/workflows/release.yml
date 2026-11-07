@@ -74,7 +74,7 @@ jobs:
       # cannot seed this cache. Reading is safe, and this job never writes it.
       - uses: ./.github/actions/setup-rust
         with:
-          tools: cargo-about
+          tools: cargo-about@0.9.2
           shared-key: release
           cache-save: never
 

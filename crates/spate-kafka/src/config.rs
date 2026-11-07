@@ -83,6 +83,17 @@ impl Role for Consumer<'_> {
              read; the framework commits through `enable.auto.commit`, which \
              it owns",
         );
+        // The source settles every start under `latest` itself, so librdkafka's
+        // policy only answers a fetch out of range, and the end would skip what
+        // the log still holds.
+        if self.0.uncommitted_start() == Some(rdkafka::Offset::End) {
+            let key = if self.0.rdkafka.contains_key("topic.auto.offset.reset") {
+                "topic.auto.offset.reset"
+            } else {
+                "auto.offset.reset"
+            };
+            keys.set(key, "earliest");
+        }
         keys.forbid(
             "group.protocol",
             "only the classic consumer group protocol is supported today \
@@ -490,6 +501,46 @@ mod tests {
         ] {
             let cfg = with_rdkafka(&[("topic.auto.offset.reset", policy)]);
             assert_eq!(cfg.uncommitted_start(), start, "{policy}");
+        }
+    }
+
+    /// Under `latest` the consumer hands librdkafka `earliest` on the key the
+    /// passthrough used, and leaves the other key unset. Every other policy
+    /// reaches librdkafka as written.
+    #[test]
+    fn latest_reaches_librdkafka_as_earliest() {
+        let reset = |cfg: &KafkaSourceConfig| {
+            let cc = cfg.client_config();
+            (
+                cc.get("auto.offset.reset").map(str::to_owned),
+                cc.get("topic.auto.offset.reset").map(str::to_owned),
+            )
+        };
+        let earliest = Some("earliest".to_owned());
+        assert_eq!(reset(&with_rdkafka(&[])), (earliest.clone(), None));
+        for policy in ["latest", "LATEST", "largest", "end", " latest"] {
+            assert_eq!(
+                reset(&with_rdkafka(&[("auto.offset.reset", policy)])),
+                (earliest.clone(), None),
+                "{policy}"
+            );
+            assert_eq!(
+                reset(&with_rdkafka(&[("topic.auto.offset.reset", policy)])),
+                (None, earliest.clone()),
+                "topic. {policy}"
+            );
+        }
+        for policy in ["earliest", "smallest", "error"] {
+            assert_eq!(
+                reset(&with_rdkafka(&[("auto.offset.reset", policy)])),
+                (Some(policy.to_owned()), None),
+                "{policy}"
+            );
+            assert_eq!(
+                reset(&with_rdkafka(&[("topic.auto.offset.reset", policy)])),
+                (None, Some(policy.to_owned())),
+                "topic. {policy}"
+            );
         }
     }
 

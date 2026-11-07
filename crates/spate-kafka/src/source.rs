@@ -3300,6 +3300,81 @@ mod tests {
             assert!(e.reason().contains("partition 0"), "{e}");
         }
 
+        /// Under `latest`, a commit below the log start resumes at the log start,
+        /// so the records the log still holds are read. The mock keeps 5 MiB of a
+        /// partition and drops its oldest message sets past that.
+        #[test]
+        fn a_commit_below_the_log_start_resumes_at_the_log_start() {
+            use crate::client::testing::{Raw as _, raw_config};
+            use rdkafka::consumer::Consumer as _;
+            use spate_core::source::PayloadBatch as _;
+            let cluster = mock_holding(3);
+            let committer: rdkafka::consumer::BaseConsumer = raw_config()
+                .set("bootstrap.servers", cluster.bootstrap_servers())
+                .set("group.id", "positions")
+                .build()
+                .expect("committer");
+            let mut inside = TopicPartitionList::new();
+            inside
+                .add_partition_offset("t", 0, Offset::Offset(1))
+                .expect("offset");
+            committer
+                .commit(&inside, rdkafka::consumer::CommitMode::Sync)
+                .expect("commit");
+            let producer: rdkafka::producer::BaseProducer = raw_config()
+                .set("bootstrap.servers", cluster.bootstrap_servers())
+                .set("linger.ms", "0")
+                .build()
+                .expect("producer");
+            let pad = vec![b'x'; 256 * 1024];
+            for _ in 0..24 {
+                producer
+                    .send(
+                        rdkafka::producer::BaseRecord::<(), _>::to("t")
+                            .partition(0)
+                            .payload(&pad),
+                    )
+                    .expect("enqueue");
+                rdkafka::producer::Producer::flush(&producer, Duration::from_secs(30))
+                    .expect("flush");
+            }
+            let (low, high) = committer
+                .fetch_watermarks("t", 0, Duration::from_secs(10))
+                .expect("watermarks");
+            drop(committer);
+            assert!(low > 1, "the log start {low} has not passed the commit");
+
+            let (mut source, mut lanes) = assigned_on(&cluster, "latest");
+            let mut first = None;
+            spate_test::wait_until(spate_test::HANG, "a record", || {
+                producer
+                    .send(
+                        rdkafka::producer::BaseRecord::<(), _>::to("t")
+                            .partition(0)
+                            .payload("later"),
+                    )
+                    .expect("enqueue");
+                rdkafka::producer::Producer::flush(&producer, Duration::from_secs(30))
+                    .expect("flush");
+                source
+                    .poll_events(Duration::from_millis(10))
+                    .expect("poll_events");
+                if let Some(mut batch) = lanes[0]
+                    .poll(64, Duration::from_millis(100))
+                    .expect("lane poll")
+                    && let Some(raw) = batch.next_payload()
+                {
+                    first = Some(raw.offset);
+                }
+                first.is_some()
+            });
+            assert_eq!(
+                first,
+                Some(low),
+                "log {low}..{high}: the lane did not resume at the log start"
+            );
+        }
+
         /// Serve `source` and poll `lane` until the lane issues a batch.
         fn read_the_record(source: &mut KafkaSource, lane: &mut KafkaLane) {
             spate_test::wait_until(Duration::from_secs(30), "the record", || {

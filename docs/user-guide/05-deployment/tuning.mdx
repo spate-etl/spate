@@ -86,9 +86,10 @@ explicitly.
 
 When the tasks on the I/O runtime run short of CPU, raise `io_threads`.
 That work is request building, TLS, compression a sink does on the I/O
-runtime, and response handling. A write waiting on a slow sink is parked
+runtime, and response handling. A write awaiting a slow sink is parked
 on the network and holds no I/O worker, so slow writes need no more
-`io_threads`, however many are in flight. The hot path never runs on the
+`io_threads`, however many are in flight. A writer that blocks its thread
+holds a worker for the length of the call. The hot path never runs on the
 I/O runtime, so extra workers do nothing for a pipeline whose pipeline
 threads are the limit. Each odd-numbered worker (the first, the third, and
 so on) takes one core from the derived pipeline-thread count, down to its

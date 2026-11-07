@@ -7,6 +7,7 @@
 //! revoking an unknown lane, or a duplicate lane id panics with a clear
 //! message.
 
+use crate::run::{deadline, left};
 use spate_core::checkpoint::AckIssuer;
 use spate_core::error::SourceError;
 use spate_core::hash::FastMap;
@@ -16,7 +17,6 @@ use spate_core::source::{
 };
 use std::collections::{BTreeSet, VecDeque};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
-use crate::run::{deadline, left};
 use std::time::Duration;
 
 /// One queued payload with its pre-assigned offset.

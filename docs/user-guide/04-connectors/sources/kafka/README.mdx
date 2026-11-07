@@ -50,7 +50,7 @@ source:
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `brokers` | string | `required` | Comma-separated bootstrap servers. |
-| `topic` | string | `required` | The topic to consume. **One topic per pipeline**: the framework's `PartitionId` is the Kafka partition number, unique only within a topic. |
+| `topic` | string | `required` | The topic to consume. **One topic per pipeline**: the framework's `PartitionId` is the Kafka partition number, unique only within a topic. A name with a leading `^` is a subscription pattern, and is refused. |
 | `group_id` | string | `required` | Consumer group id. |
 | `consumers` | int | `1` | Consumers this process runs, at least 1. Each is a separate member of `group_id` that owns its own share of the partitions. Raise it when one client's fetch path bounds the source; see [More consumers in one process](./performance-tuning.mdx#more-consumers-in-one-process). Static membership (`group.instance.id`) requires `1`. |
 | `commit_interval` | duration | `5s` | How often stored offsets are auto-committed (maps to librdkafka `auto.commit.interval.ms`). A value under `1ms` or above `24h` is refused. |

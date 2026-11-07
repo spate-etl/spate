@@ -280,6 +280,14 @@ impl KafkaSourceConfig {
                 "source.kafka.topic must not be empty".into(),
             ));
         }
+        // librdkafka subscribes to a leading `^` as a pattern, and the source
+        // splits and seeks the literal name, so every record would be dropped.
+        if self.topic.starts_with('^') {
+            return Err(ConfigError::Validation(format!(
+                "source.kafka.topic {:?} is a subscription pattern; name one topic",
+                self.topic
+            )));
+        }
         if self.group_id.trim().is_empty() {
             return Err(ConfigError::Validation(
                 "source.kafka.group_id must not be empty".into(),
@@ -591,6 +599,20 @@ mod tests {
             msg.contains("bootstrap.servers"),
             "error explains the alias: {msg}"
         );
+    }
+
+    /// librdkafka subscribes to a leading `^` as a pattern, and the source reads
+    /// only the literal name, so the pipeline would read nothing. Regression
+    /// for #1729.
+    #[test]
+    fn a_subscription_pattern_topic_is_rejected() {
+        let body = minimal().replace("topic: orders", "topic: \"^orders$\"");
+        assert_ne!(body, minimal());
+        let err = KafkaSourceConfig::from_component_config(&section(&body)).unwrap_err();
+        let err = err.to_string();
+        assert!(err.contains("source.kafka.topic"), "{err}");
+        assert!(err.contains("^orders$"), "{err}");
+        assert!(err.contains("subscription pattern"), "{err}");
     }
 
     #[test]

@@ -5575,3 +5575,70 @@ async fn a_second_fatal_error_logs_nothing_and_keeps_the_first() {
     assert_eq!(rejected.reason, "first");
     assert_eq!(feed.receive(1).unwrap_err().reason, "first");
 }
+
+/// Pins that a latched feed's tasks send nothing more: no queued delete, no
+/// further receive for the reader's demand, and no extension at the next
+/// renewal tick.
+#[tokio::test(start_paused = true)]
+async fn a_latched_feeds_tasks_send_nothing_more() {
+    let (feed, queue) = start(MINUTE);
+    let (waker, park) = wake_channel();
+    feed.set_waker(waker);
+    queue.ready(Message::new("a"));
+    queue.ready(Message::new("b"));
+    let got = receive_n(&feed, &park, 2).await;
+    feed.acknowledge(got[0].receipt).unwrap();
+    assert!(feed.receive(8).unwrap().is_empty());
+    let receives = queue.receives().len();
+    let extensions = queue.visibility().len();
+
+    feed.shared.set_fatal(&CallError::fatal("stopped"));
+    settle_tasks().await;
+    // One renewal period: the next tick, with the held unit's deadline ahead.
+    tokio::time::advance(MINUTE / 3).await;
+    settle_tasks().await;
+
+    assert!(queue.deletes().is_empty(), "a latched feed sent a delete");
+    assert_eq!(queue.receives().len(), receives, "a latched feed received");
+    assert_eq!(
+        queue.visibility().len(),
+        extensions,
+        "a latched feed extended"
+    );
+}
+
+/// Pins that a `receive` which empties the buffer does not wake the reader.
+#[tokio::test(start_paused = true)]
+async fn a_receive_emptying_the_buffer_does_not_wake_the_reader() {
+    let (feed, queue) = start(MINUTE);
+    let (waker, park) = wake_channel();
+    feed.set_waker(waker);
+    queue.ready(Message::new("a"));
+    queue.ready(Message::new("b"));
+    assert!(feed.receive(2).unwrap().is_empty(), "nothing buffered yet");
+    until("the units are buffered", || feed.buffered() == 2).await;
+    assert!(park.park(Duration::ZERO), "buffering woke the reader");
+
+    assert_eq!(feed.receive(1).unwrap().len(), 1);
+    assert!(
+        park.park(Duration::ZERO),
+        "a unit left buffered woke nothing"
+    );
+    assert_eq!(feed.receive(1).unwrap().len(), 1);
+    assert!(
+        !park.park(Duration::ZERO),
+        "an emptied buffer woke the reader"
+    );
+}
+
+/// Pins that a feed abandoned after it latched still answers `receive` with
+/// the latched error.
+#[tokio::test(start_paused = true)]
+async fn a_latched_feed_abandoned_still_returns_its_error() {
+    let (feed, _queue) = start(MINUTE);
+    feed.shared.set_fatal(&CallError::fatal("stopped"));
+    feed.abandon();
+    let error = feed.receive(1).unwrap_err();
+    assert_eq!(error.kind, FeedErrorKind::Fatal);
+    assert_eq!(error.reason, "stopped");
+}

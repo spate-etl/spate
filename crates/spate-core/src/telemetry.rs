@@ -102,30 +102,39 @@ fn pretty() -> SubscriberBuilder<OneLineFields> {
         .fmt_fields(OneLineFields::default())
 }
 
-/// [`DefaultFields`] with `\n` and `\r` written as those two-character escapes,
-/// so a field's text cannot start a log line of its own. `DefaultFields` escapes
-/// other control characters and passes those two.
+/// [`DefaultFields`] with every control character and line separator written
+/// as an escape, so a field's text cannot start a log line of its own or move
+/// a terminal's cursor to fake one. `DefaultFields` leaves these raw in a named
+/// field.
 #[derive(Default)]
 struct OneLineFields(DefaultFields);
 
 impl<'writer> FormatFields<'writer> for OneLineFields {
     fn format_fields<R: RecordFields>(&self, writer: Writer<'writer>, fields: R) -> fmt::Result {
-        let mut escaping = EscapeLineBreaks(writer);
+        let mut escaping = EscapeControl(writer);
         self.0.format_fields(Writer::new(&mut escaping), fields)
     }
 }
 
-struct EscapeLineBreaks<'writer>(Writer<'writer>);
+struct EscapeControl<'writer>(Writer<'writer>);
 
-impl fmt::Write for EscapeLineBreaks<'_> {
+impl EscapeControl<'_> {
+    fn is_escaped(c: char) -> bool {
+        c.is_control() || matches!(c, '\u{2028}' | '\u{2029}')
+    }
+}
+
+impl fmt::Write for EscapeControl<'_> {
     fn write_str(&mut self, text: &str) -> fmt::Result {
         let mut rest = text;
-        while let Some(at) = rest.find(['\n', '\r']) {
-            let (line, tail) = rest.split_at(at);
-            self.0.write_str(line)?;
-            self.0
-                .write_str(if tail.starts_with('\n') { "\\n" } else { "\\r" })?;
-            rest = &tail[1..];
+        while let Some(at) = rest.find(Self::is_escaped) {
+            let (clean, tail) = rest.split_at(at);
+            self.0.write_str(clean)?;
+            let mut chars = tail.chars();
+            if let Some(c) = chars.next() {
+                write!(self.0, "{}", c.escape_default())?;
+            }
+            rest = chars.as_str();
         }
         self.0.write_str(rest)
     }
@@ -332,6 +341,19 @@ mod tests {
         assert_eq!(
             lines[0].matches("first\\nsecond\\rthird").count(),
             4,
+            "{lines:#?}"
+        );
+    }
+
+    /// Pins that a named field carries no raw control character or line
+    /// separator, which a terminal could act on to fake a log line.
+    #[test]
+    fn pretty_escapes_every_control_character() {
+        let text = "a\u{1b}[1Eb\u{b}c\u{85}d\u{2028}e\tf";
+        let lines = pretty_lines(|| tracing::info!(reason = %text, "refused"));
+        assert_eq!(lines.len(), 1, "{lines:#?}");
+        assert!(
+            lines[0].contains(r"a\u{1b}[1Eb\u{b}c\u{85}d\u{2028}e\tf"),
             "{lines:#?}"
         );
     }

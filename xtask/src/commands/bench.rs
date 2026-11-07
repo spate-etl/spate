@@ -93,6 +93,9 @@ pub(crate) enum Bench {
         /// Write the legs to DIR/base and DIR/head
         #[arg(long, value_name = "DIR")]
         out: Option<String>,
+        /// Waive a comparability guard, by name
+        #[arg(long, value_name = "FIELD")]
+        allow: Vec<String>,
     },
 
     /// Compare two feature arms of this tree
@@ -173,6 +176,7 @@ pub(crate) fn dispatch(root: &Path, explain: bool, cmd: Bench) -> Outcome {
             reps,
             select,
             out,
+            allow,
         } => {
             let mut s = driver(["ab"])
                 .arg(&r#ref)
@@ -180,6 +184,9 @@ pub(crate) fn dispatch(root: &Path, explain: bool, cmd: Bench) -> Outcome {
                 .args(select.flags());
             if let Some(out) = &out {
                 s = s.arg("--out").arg(out);
+            }
+            for field in &allow {
+                s = s.arg("--allow").arg(field);
             }
             run::run(root, explain, &s)
         }

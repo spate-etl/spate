@@ -25,7 +25,8 @@ cargo xtask bench compare <base-dir> <head-dir> --format markdown
 `--filter` narrows the case list within whatever was built.
 Narrowing never narrows the resolved features the two legs are guarded on, so a
 narrowed run can be refused over a feature neither leg built; `--allow features`
-waives that, and the report's header says it was waived.
+waives that, and the report's header says it was waived. `--allow` takes any
+guard's name and repeats.
 
 `bench ab` builds the reference in a detached worktree, builds this tree, and
 interleaves the two — expect two full bench-profile builds before the first

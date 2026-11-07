@@ -39,13 +39,17 @@ fn bench_ab_forwards_every_flag() {
         "x",
         "--out",
         "/tmp/x",
+        "--allow",
+        "codegen",
+        "--allow",
+        "features",
     ]);
     assert_eq!(out.status.code(), Some(0));
     assert_eq!(
         String::from_utf8(out.stdout).unwrap(),
         format!(
             "{DRIVER} {SHA} --replicates 20 --format markdown --package spate-avro \
-             --package spate-json --filter x --out /tmp/x\n"
+             --package spate-json --filter x --out /tmp/x --allow codegen --allow features\n"
         )
     );
     assert_eq!(String::from_utf8(out.stderr).unwrap(), "");

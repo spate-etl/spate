@@ -35,30 +35,24 @@
 //!
 //! [the metrics reference]: https://spate.kainth.dev/docs/METRICS
 
-use crate::metrics::{ExtraLabels, L_CLIENT, with_extra};
+use crate::metrics::{
+    BROKER_REQ_TIMEOUTS_TOTAL, BROKER_RTT_AVG_SECONDS, BROKER_RTT_P99_SECONDS,
+    BROKER_TX_ERRORS_TOTAL, BROKER_TX_RETRIES_TOTAL, BROKER_UP, ExtraLabels, L_BROKER, L_CLIENT,
+    RX_BYTES_TOTAL, RX_RESPONSES_TOTAL, TX_BYTES_TOTAL, TX_REQUESTS_TOTAL, WindowGauges, to_u64,
+    us_to_secs, with_extra,
+};
 use rdkafka::statistics::Statistics;
 use spate_core::hash::{FastMap, FastSet};
 use spate_core::metrics::{Counter, Gauge, Meter, SharedString};
 
-const TX_REQUESTS_TOTAL: &str = "tx_requests_total";
-const TX_BYTES_TOTAL: &str = "tx_bytes_total";
-const RX_RESPONSES_TOTAL: &str = "rx_responses_total";
-const RX_BYTES_TOTAL: &str = "rx_bytes_total";
 const TX_MESSAGES_TOTAL: &str = "tx_messages_total";
 const TX_MESSAGE_BYTES_TOTAL: &str = "tx_message_bytes_total";
 const PRODUCE_QUEUE_MESSAGES: &str = "produce_queue_messages";
 const PRODUCE_QUEUE_BYTES: &str = "produce_queue_bytes";
-const BROKER_TX_RETRIES_TOTAL: &str = "broker_tx_retries_total";
-const BROKER_REQ_TIMEOUTS_TOTAL: &str = "broker_req_timeouts_total";
-const BROKER_UP: &str = "broker_up";
-const BROKER_TX_ERRORS_TOTAL: &str = "broker_tx_errors_total";
-const BROKER_RTT_AVG_SECONDS: &str = "broker_rtt_avg_seconds";
-const BROKER_RTT_P99_SECONDS: &str = "broker_rtt_p99_seconds";
 const BROKER_INT_LATENCY_AVG_SECONDS: &str = "broker_int_latency_avg_seconds";
 const BROKER_INT_LATENCY_P99_SECONDS: &str = "broker_int_latency_p99_seconds";
 const BROKER_OUTBUF_LATENCY_AVG_SECONDS: &str = "broker_outbuf_latency_avg_seconds";
 const BROKER_OUTBUF_LATENCY_P99_SECONDS: &str = "broker_outbuf_latency_p99_seconds";
-const L_BROKER: &str = "broker";
 
 /// Handles for the producer statistics families. Owned behind a mutex by
 /// the sink's producer context or the feed's `Core`; the poll thread updates
@@ -93,33 +87,6 @@ struct BrokerHandles {
     outbuf_latency: Option<WindowGauges>,
 }
 
-#[derive(Debug)]
-struct WindowGauges {
-    avg: Gauge,
-    p99: Gauge,
-}
-
-impl WindowGauges {
-    fn new(
-        meter: &Meter,
-        extra: &[(&'static str, SharedString)],
-        broker: &str,
-        avg_name: &str,
-        p99_name: &str,
-    ) -> Self {
-        let labels = with_extra(extra, &[(L_BROKER, broker.to_owned().into())]);
-        WindowGauges {
-            avg: meter.gauge(avg_name, &labels),
-            p99: meter.gauge(p99_name, &labels),
-        }
-    }
-
-    fn set(&self, avg_secs: f64, p99_secs: f64) {
-        self.avg.set(avg_secs);
-        self.p99.set(p99_secs);
-    }
-}
-
 impl BrokerHandles {
     fn new(meter: &Meter, extra: &[(&'static str, SharedString)], broker: &str) -> Self {
         let labels = with_extra(extra, &[(L_BROKER, broker.to_owned().into())]);
@@ -129,6 +96,17 @@ impl BrokerHandles {
             rtt: None,
             int_latency: None,
             outbuf_latency: None,
+        }
+    }
+
+    /// Read the broker as down, with its window gauges at zero.
+    fn zero(&self) {
+        self.up.set(0.0);
+        for window in [&self.rtt, &self.int_latency, &self.outbuf_latency]
+            .into_iter()
+            .flatten()
+        {
+            window.zero();
         }
     }
 }
@@ -245,18 +223,16 @@ impl KafkaSinkStatsMetrics {
         }
         self.broker_tx_retries.absolute(retries);
         self.broker_req_timeouts.absolute(timeouts);
-        // Stop updating series for brokers that left the snapshot; the
-        // exporter keeps rendering the last value until its idle timeout.
-        self.brokers.retain(|name, _| seen.contains(name.as_str()));
+        // The exporter renders a series for the life of the process, so a
+        // broker that left the snapshot is zeroed before its handles go.
+        self.brokers.retain(|name, handles| {
+            let present = seen.contains(name.as_str());
+            if !present {
+                handles.zero();
+            }
+            present
+        });
     }
-}
-
-fn to_u64(v: i64) -> u64 {
-    u64::try_from(v).unwrap_or(0)
-}
-
-fn us_to_secs(v: i64) -> f64 {
-    v as f64 / 1e6
 }
 
 #[cfg(test)]
@@ -463,6 +439,52 @@ mod tests {
             !m.brokers.contains_key("k2:9092/2"),
             "retain must drop the departed broker"
         );
+    }
+
+    /// A broker that leaves the snapshot reads down, with its window gauges
+    /// at zero, since the exporter renders a series for the life of the
+    /// process. Regression for #1523.
+    #[test]
+    fn a_departed_broker_reads_down() {
+        let rendered = render_metrics(|| {
+            let mut m = KafkaSinkStatsMetrics::new(meter());
+            let stay = broker("k1:9092/1", "learned", 1);
+            let mut gone = broker("k2:9092/2", "learned", 2);
+            gone.rtt = Some(window(1_500, 3_000, 10));
+            gone.int_latency = Some(window(1_500, 3_000, 10));
+            gone.outbuf_latency = Some(window(1_500, 3_000, 10));
+            let both = Statistics {
+                brokers: HashMap::from([
+                    (stay.name.clone(), stay.clone()),
+                    (gone.name.clone(), gone),
+                ]),
+                ..Default::default()
+            };
+            m.update(&both);
+            let one = Statistics {
+                brokers: HashMap::from([(stay.name.clone(), stay)]),
+                ..Default::default()
+            };
+            m.update(&one);
+        });
+        let label = format!(r#"{STD},broker="k2:9092/2""#);
+        let mut needles = vec![
+            format!("spate_kafka_broker_up{{{STD},broker=\"k1:9092/1\"}} 1"),
+            format!("spate_kafka_broker_up{{{label}}} 0"),
+        ];
+        for window in ["rtt", "int_latency", "outbuf_latency"] {
+            for stat in ["avg", "p99"] {
+                needles.push(format!(
+                    "spate_kafka_broker_{window}_{stat}_seconds{{{label}}} 0\n"
+                ));
+            }
+        }
+        for needle in needles {
+            assert!(
+                rendered.contains(&needle),
+                "missing `{needle}`:\n{rendered}"
+            );
+        }
     }
 
     #[test]

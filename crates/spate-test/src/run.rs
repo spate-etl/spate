@@ -54,22 +54,108 @@ impl PipelineRun {
 /// a core.
 const POLL_INTERVAL: Duration = Duration::from_millis(5);
 
-/// Poll `check` until it returns `true` or `timeout` elapses; panics with `what`
-/// on timeout.
+/// The bound to pass a wait for a condition a working test always reaches:
+/// one minute, far above the time any such condition takes on a loaded
+/// machine, so a wait that reaches it means the test hung.
+// Under the 120 s kill in this repository's `.config/nextest.toml`, so a hung
+// wait fails with its own message, naming the condition.
+pub const HANG: Duration = Duration::from_secs(60);
+
+/// Poll `check` until it returns `true`; panics naming `what` if `timeout`
+/// passes first.
+///
+/// `timeout` catches a hang and never decides a result: pass [`HANG`], or a
+/// bound as far above the latency a loaded machine shows. A test of how long
+/// something takes runs on a test clock or paused tokio time instead. A
+/// `timeout` past what [`Instant`] can represent waits as long as `check`
+/// takes.
+///
+/// # Panics
+///
+/// When `timeout` passes before `check` returns `true`, saying the test hung
+/// waiting for `what`.
+///
+/// # Examples
+///
+/// ```
+/// let mut polls = 0;
+/// spate_test::wait_until(spate_test::HANG, "the third poll", || {
+///     polls += 1;
+///     polls == 3
+/// });
+/// ```
 pub fn wait_until(timeout: Duration, what: &str, mut check: impl FnMut() -> bool) {
     if poll_until(timeout, || check().then_some(())).is_none() {
-        panic!("timed out after {timeout:?} waiting for: {what}");
+        panic!("{}", hung(timeout, what));
     }
 }
 
+/// The panic message of a wait that reached its bound.
+pub(crate) fn hung(timeout: Duration, what: &str) -> String {
+    format!("hung after {timeout:?} waiting for: {what}")
+}
+
 /// Poll `check` until it returns a value, or `None` once `timeout` elapses.
+/// `check` runs at least once.
 pub(crate) fn poll_until<T>(timeout: Duration, mut check: impl FnMut() -> Option<T>) -> Option<T> {
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
+    let deadline = deadline(timeout);
+    loop {
         if let Some(value) = check() {
             return Some(value);
         }
+        left(deadline)?;
         std::thread::sleep(POLL_INTERVAL);
     }
-    None
+}
+
+/// The instant `timeout` from now, or `None` for no deadline when it lies past
+/// what [`Instant`] can represent.
+pub(crate) fn deadline(timeout: Duration) -> Option<Instant> {
+    Instant::now().checked_add(timeout)
+}
+
+/// What is left of `deadline`: `None` once it has passed, and
+/// [`Duration::MAX`] when there is none.
+pub(crate) fn left(deadline: Option<Instant>) -> Option<Duration> {
+    match deadline {
+        None => Some(Duration::MAX),
+        Some(at) => at
+            .checked_duration_since(Instant::now())
+            .filter(|left| !left.is_zero()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A bound past what `Instant` can represent waits for the condition.
+    /// Regression for #1844.
+    #[test]
+    fn wait_until_takes_a_bound_past_the_clock_range() {
+        wait_until(Duration::MAX, "a condition that holds", || true);
+    }
+
+    /// A bound past the clock's range is no deadline, and has no end; a
+    /// deadline that has passed has nothing left.
+    #[test]
+    fn no_deadline_never_ends_and_a_passed_one_has_nothing_left() {
+        assert_eq!(deadline(Duration::MAX), None);
+        assert_eq!(left(None), Some(Duration::MAX));
+        assert_eq!(left(deadline(Duration::ZERO)), None);
+        assert!(left(deadline(HANG)).is_some_and(|left| left <= HANG));
+    }
+
+    /// A condition that already holds passes on a zero bound.
+    #[test]
+    fn a_condition_that_holds_passes_on_a_zero_bound() {
+        wait_until(Duration::ZERO, "a condition that holds", || true);
+    }
+
+    /// A wait that reaches its bound says the test hung, naming the condition.
+    #[test]
+    #[should_panic(expected = "hung after 0ns waiting for: the flag")]
+    fn a_wait_that_reaches_its_bound_says_the_test_hung() {
+        wait_until(Duration::ZERO, "the flag", || false);
+    }
 }

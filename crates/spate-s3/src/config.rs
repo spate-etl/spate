@@ -9,10 +9,13 @@
 use bytesize::ByteSize;
 use object_store::ObjectStoreScheme;
 use object_store::aws::AmazonS3ConfigKey;
+use object_store::path::Path;
 use serde::{Deserialize, Serialize};
 use spate_core::config::{ComponentConfig, ConfigError, redact};
 use std::collections::BTreeMap;
 use url::Url;
+
+use crate::location::{BAD_PREFIX, has_userinfo};
 
 /// `object_store` option keys the framework owns. Setting them through the
 /// passthrough is rejected at load time with an explanation.
@@ -200,9 +203,19 @@ impl S3SourceConfig {
                 )));
             }
         }
-        // Only the S3 client's keys are checked. `file://` reads no options,
-        // and with this crate's object_store features any other scheme fails
-        // when the source starts.
+        // The request URIs `object_store` quotes in its errors start with the
+        // endpoint.
+        for (key, value) in &self.store {
+            if s3_store_key(key) == Some(AmazonS3ConfigKey::Endpoint)
+                && Url::parse(value).is_ok_and(|u| has_userinfo(&u))
+            {
+                return Err(ConfigError::Validation(format!(
+                    "source.s3.store.\"{key}\" carries userinfo, which the store does not \
+                     read; set credentials under the source's `store` or the environment"
+                )));
+            }
+        }
+        // Only the S3 client's keys are checked: `file://` reads no options.
         if matches!(
             ObjectStoreScheme::parse(&url),
             Ok((ObjectStoreScheme::AmazonS3, _))
@@ -231,12 +244,42 @@ fn parse_url(field: &str, value: &str) -> Result<Url, ConfigError> {
     }
     let url = Url::parse(value)
         .map_err(|e| ConfigError::Validation(format!("{field} is not a valid URL: {e}")))?;
+    // The store reads no userinfo or query, and its errors quote the URL whole.
+    if has_userinfo(&url) || url.query().is_some() {
+        return Err(ConfigError::Validation(format!(
+            "{field}: {} carries userinfo or a query, which the store does not read; set \
+             credentials under the source's `store` or the environment",
+            redact::url(value)
+        )));
+    }
     // `memory://` builds a fresh empty store on every parse, so the source
     // and any test setup would each see a different store.
     if url.scheme() == "memory" {
         return Err(ConfigError::Validation(format!(
             "{field}: memory:// creates a new empty store per component and cannot be \
              shared; use file:// for infrastructure-free runs"
+        )));
+    }
+    // `ObjectStoreScheme::parse` also fails on the path, which the scheme check
+    // below would misreport.
+    if Path::from_url_path(url.path()).is_err() {
+        return Err(ConfigError::Validation(format!(
+            "{field}: {} {BAD_PREFIX}",
+            redact::url(value)
+        )));
+    }
+    // The crate enables object_store's `aws` and `fs` features alone, so any
+    // other scheme builds no client.
+    if !matches!(
+        ObjectStoreScheme::parse(&url),
+        Ok((ObjectStoreScheme::AmazonS3 | ObjectStoreScheme::Local, _))
+    ) {
+        return Err(ConfigError::Validation(format!(
+            "{field}: the source reads s3://, s3a://, file://, and https:// on an S3 \
+             or R2 endpoint host; for another S3-compatible \
+             store, write s3://<bucket>/<prefix> with the endpoint under the source's \
+             `store`, got {}",
+            redact::url(value)
         )));
     }
     Ok(url)
@@ -252,6 +295,95 @@ mod tests {
 
     fn minimal() -> String {
         "  url: s3://bucket/exports/\n".to_string()
+    }
+
+    /// A scheme the crate builds no client for fails at load and names the
+    /// field, and every scheme it reads passes. Regression for #1239.
+    #[test]
+    fn a_scheme_the_source_cannot_read_is_refused_at_load() {
+        for url in [
+            "gs://bucket/data/",
+            "az://container/data/",
+            "https://storage.example.com/bucket/data/",
+            "ftp://bucket/data/",
+        ] {
+            let body = format!("  url: {url}\n");
+            let err = S3SourceConfig::from_component_config(&section(&body)).unwrap_err();
+            let err = err.to_string();
+            assert!(err.contains("source.s3.url"), "{url}: {err}");
+            assert!(err.contains("file://"), "{url}: {err}");
+            assert!(err.contains("`store`"), "{url}: {err}");
+        }
+        for url in [
+            "s3://bucket/data/",
+            "s3a://bucket/data/",
+            "https://s3.us-east-1.amazonaws.com/bucket/data/",
+            "file:///tmp/data/",
+        ] {
+            let body = format!("  url: {url}\n");
+            S3SourceConfig::from_component_config(&section(&body)).expect(url);
+        }
+    }
+
+    /// Pins that a refused URL's userinfo and signed query stay out of the
+    /// load error.
+    #[test]
+    fn a_refused_url_keeps_its_credentials_out_of_the_error() {
+        for url in [
+            "https://urluser:urlsecret@storage.example.com/bucket/data/",
+            "https://acct.blob.core.windows.net/container/data/?sig=urlsecret",
+            "s3://urluser:urlsecret@bucket/a//b/",
+        ] {
+            let body = format!("  url: {url}\n");
+            let err = S3SourceConfig::from_component_config(&section(&body)).unwrap_err();
+            let err = err.to_string();
+            assert!(err.contains("source.s3.url"), "{err}");
+            assert!(!err.contains("urlsecret"), "{err}");
+        }
+    }
+
+    /// Userinfo or a query in the URL, and userinfo in the store endpoint
+    /// under any spelling of its key, fail at load without the password in
+    /// the error. Regression for #1739.
+    #[test]
+    fn credentials_in_the_url_or_endpoint_are_refused_at_load() {
+        for url in [
+            "s3://u:urlsecret@bucket/data/",
+            "s3://urlsecret@bucket/data/",
+            "s3://bucket/data/?token=urlsecret",
+        ] {
+            let body = format!("  url: \"{url}\"\n");
+            let err = S3SourceConfig::from_component_config(&section(&body)).unwrap_err();
+            let err = err.to_string();
+            assert!(err.contains("source.s3.url"), "{url}: {err}");
+            assert!(err.contains("`store`"), "{url}: {err}");
+            assert!(!err.contains("urlsecret"), "{url}: {err}");
+        }
+        for key in ["endpoint", "aws_endpoint", "AWS_ENDPOINT_URL"] {
+            let body = format!(
+                "  url: s3://bucket/data/\n  store:\n    {key}: \"http://u:urlsecret@127.0.0.1:9000\"\n"
+            );
+            let err = S3SourceConfig::from_component_config(&section(&body)).unwrap_err();
+            let err = err.to_string();
+            assert!(
+                err.contains(&format!("source.s3.store.\"{key}\"")),
+                "{key}: {err}"
+            );
+            assert!(!err.contains("urlsecret"), "{key}: {err}");
+        }
+        let body = "  url: s3://bucket/data/\n  store:\n    endpoint: \"http://127.0.0.1:9000\"\n";
+        S3SourceConfig::from_component_config(&section(body)).unwrap();
+    }
+
+    /// Pins that an S3 URL with a bad prefix is told about the prefix, as
+    /// `ObjectStoreScheme::parse` fails on it as it does on a scheme.
+    #[test]
+    fn a_bad_prefix_is_not_reported_as_a_wrong_scheme() {
+        let body = "  url: s3://bucket/exports//2026/\n";
+        let err = S3SourceConfig::from_component_config(&section(body)).unwrap_err();
+        let err = err.to_string();
+        assert!(err.contains(BAD_PREFIX), "{err}");
+        assert!(err.contains("source.s3.url"), "{err}");
     }
 
     #[test]

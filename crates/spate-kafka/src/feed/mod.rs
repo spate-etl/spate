@@ -75,7 +75,8 @@ use spate_core::clock::SyncClock;
 use spate_core::config::FeedSection;
 use spate_core::feed::{
     Confirmation, Confirmer, Delivery, DepthOf, DepthReading, DepthReporter, Feed, FeedError,
-    FeedErrorKind, FeedMetricsCtx, FeedWaker, Receipt, Unit, confirmation, depth_reading,
+    FeedErrorKind, FeedMetricsCtx, FeedWaker, ReaderSignal, Receipt, Unit, confirmation,
+    depth_reading,
 };
 use spate_core::hash::FastMap;
 use spate_core::task::{ThreadHandle, spawn_thread};
@@ -155,12 +156,11 @@ pub(crate) struct State {
     pub(crate) ready: VecDeque<Ready>,
     /// Deliveries handed to the reader, by receipt.
     pub(crate) handed: FastMap<Receipt, Ready>,
-    pub(crate) fatal: Option<FeedError>,
-    /// A transient consumer failure, returned by the next `receive` only.
-    pub(crate) retryable: Option<FeedError>,
+    /// The reader's waker, the Fatal latch and a transient consumer failure
+    /// the next `receive` returns.
+    pub(crate) signal: ReaderSignal,
     /// Writes to send again, each with the instant it is due.
     pub(crate) resends: Vec<(Instant, Write)>,
-    pub(crate) waker: Option<FeedWaker>,
     /// Set by `stop_receiving` or `close`: the consumer keeps every owned
     /// partition paused and the gate admits nothing.
     pub(crate) stopping: bool,
@@ -211,12 +211,6 @@ impl State {
     /// and buffered.
     pub(crate) fn held_for_reader(&self) -> usize {
         self.ready.len() + self.gating.len() + self.admitting
-    }
-
-    pub(crate) fn wake(&self) {
-        if let Some(waker) = &self.waker {
-            waker.wake();
-        }
     }
 }
 
@@ -353,7 +347,7 @@ impl Core {
 
     /// Whether the feed has latched a Fatal error.
     pub(crate) fn latched(&self) -> bool {
-        self.lock().fatal.is_some()
+        self.lock().signal.latched().is_some()
     }
 
     /// Make the feed answer every later call with a Fatal error built from
@@ -362,24 +356,17 @@ impl Core {
     /// thread then commits nothing more and ends. The first latch wins.
     /// Returns the latched error.
     pub(crate) fn latch(&self, reason: &str) -> FeedError {
-        let (error, first, waker, close) = {
+        let (error, first, close) = {
             let mut st = self.lock();
-            let first = st.fatal.is_none();
-            let error = st
-                .fatal
-                .get_or_insert_with(|| FeedError::new(FeedErrorKind::Fatal, reason))
-                .clone();
+            let (error, first) = st.signal.latch(reason);
             st.resends.clear();
-            (error, first, st.waker.clone(), st.close.take())
+            (error, first, st.close.take())
         };
         if first {
             tracing::error!(error = %error.reason, "the Kafka feed stopped");
         }
         if let Some(close) = close {
             close.confirmer.reject(error.clone());
-        }
-        if let Some(waker) = waker {
-            waker.wake();
         }
         error
     }
@@ -414,11 +401,7 @@ impl Core {
                         // Queued for the consumer thread to send: `Core`
                         // holds no producer, since the producer's context
                         // holds `Core`.
-                        let due = self.clock.now();
-                        let mut st = self.lock();
-                        if st.fatal.is_none() && !self.stopped() {
-                            st.resends.push((due, Write::Tombstone(tombstone)));
-                        }
+                        self.queue_resend(self.clock.now(), Write::Tombstone(tombstone));
                     }
                 }
                 events::moved(self.event_metrics().as_deref(), &moving, &*self.clock);
@@ -440,7 +423,7 @@ impl Core {
                         identity: attempt.identity,
                         attempt_partition: attempt.attempt_partition,
                     });
-                    st.wake();
+                    st.signal.wake();
                 }
             }
             Write::Tombstone(tombstone) => {
@@ -450,18 +433,31 @@ impl Core {
         }
     }
 
+    /// Queues `write` for the consumer thread to send at `due`, unless the
+    /// feed has stopped or latched. Returns whether it queued the write.
+    fn queue_resend(&self, due: Instant, write: Write) -> bool {
+        let mut st = self.lock();
+        let queued = st.signal.latched().is_none() && !self.stopped();
+        if queued {
+            st.resends.push((due, write));
+        }
+        queued
+    }
+
     fn failed(&self, mut write: Write, failure: Failure) {
         if let Write::Publish { confirmer, .. } = write {
-            let error =
-                match write::classify(failure.code) {
-                    WriteClass::Refused => FeedError::new(FeedErrorKind::Refused, failure.reason),
-                    WriteClass::Fatal => self.latch(&failure.reason),
-                    // A fatal producer error latches before librdkafka purges
-                    // the queue, so a publish purged by it reports the cause.
-                    WriteClass::Retryable => self.lock().fatal.clone().unwrap_or_else(|| {
-                        FeedError::new(FeedErrorKind::Retryable, failure.reason)
-                    }),
-                };
+            let error = match write::classify(failure.code) {
+                WriteClass::Refused => FeedError::new(FeedErrorKind::Refused, failure.reason),
+                WriteClass::Fatal => self.latch(&failure.reason),
+                // A fatal producer error latches before librdkafka purges
+                // the queue, so a publish purged by it reports the cause.
+                WriteClass::Retryable => self
+                    .lock()
+                    .signal
+                    .latched()
+                    .cloned()
+                    .unwrap_or_else(|| FeedError::new(FeedErrorKind::Retryable, failure.reason)),
+            };
             confirmer.reject(error);
             return;
         }
@@ -479,23 +475,22 @@ impl Core {
                     return;
                 };
                 let retry_in = backoff.next_delay();
-                tracing::warn!(
-                    %topic,
-                    error = %failure.reason,
-                    ?retry_in,
-                    "writing {} failed; sending it again",
-                    write.what()
-                );
+                let what = write.what();
                 let now = self.clock.now();
                 // A deadline past the `Instant` range is due at once. The
                 // overflow panic would end the thread that settled the write.
                 let due = now.checked_add(retry_in).unwrap_or(now);
-                let mut st = self.lock();
                 // A resent attempt write keeps its share of `admitting`
                 // until it settles or `take_due` drops it.
-                if st.fatal.is_none() && !self.stopped() {
-                    st.resends.push((due, write));
+                if !self.queue_resend(due, write) {
+                    return;
                 }
+                tracing::warn!(
+                    %topic,
+                    error = %failure.reason,
+                    ?retry_in,
+                    "writing {what} failed; sending it again",
+                );
             }
         }
     }
@@ -922,20 +917,13 @@ impl Feed for KafkaFeed {
 
     fn set_waker(&self, waker: FeedWaker) {
         let mut st = self.lock();
-        if !st.ready.is_empty() {
-            waker.wake();
-        }
-        st.waker = Some(waker);
+        let ready = !st.ready.is_empty();
+        st.signal.set_waker(waker, ready);
     }
 
     fn receive(&self, max: usize) -> Result<Vec<Delivery>, FeedError> {
         let mut st = self.lock();
-        if let Some(fatal) = &st.fatal {
-            return Err(fatal.clone());
-        }
-        if let Some(e) = st.retryable.take() {
-            return Err(e);
-        }
+        st.signal.check()?;
         let mut out = Vec::new();
         while out.len() < max {
             let Some(ready) = st.ready.pop_front() else {
@@ -949,14 +937,14 @@ impl Feed for KafkaFeed {
             st.handed.insert(ready.receipt, ready);
         }
         if !out.is_empty() && !st.ready.is_empty() {
-            st.wake();
+            st.signal.wake();
         }
         Ok(out)
     }
 
     fn renew(&self, receipt: Receipt) -> Result<(), FeedError> {
         let mut st = self.lock();
-        if let Some(fatal) = &st.fatal {
+        if let Some(fatal) = st.signal.latched() {
             return Err(fatal.clone());
         }
         if st.handed.contains_key(&receipt) && st.tracker.held(receipt).is_some() {
@@ -969,7 +957,7 @@ impl Feed for KafkaFeed {
     fn acknowledge(&self, receipt: Receipt) -> Result<(), FeedError> {
         let tombstone = {
             let mut st = self.lock();
-            if let Some(fatal) = &st.fatal {
+            if let Some(fatal) = st.signal.latched() {
                 return Err(fatal.clone());
             }
             let Some(handed) = st.handed.remove(&receipt) else {
@@ -998,7 +986,7 @@ impl Feed for KafkaFeed {
     fn fail(&self, receipt: Receipt, reason: &str) -> Result<(), FeedError> {
         let moving = {
             let mut st = self.lock();
-            if let Some(fatal) = &st.fatal {
+            if let Some(fatal) = st.signal.latched() {
                 return Err(fatal.clone());
             }
             let Some(handed) = st.handed.remove(&receipt) else {
@@ -1079,7 +1067,7 @@ impl Feed for KafkaFeed {
     fn stop_receiving(&self) {
         let buffered = {
             let mut st = self.lock();
-            if st.fatal.is_some() || st.stopping {
+            if st.signal.latched().is_some() || st.stopping {
                 return;
             }
             st.stopping = true;
@@ -1108,7 +1096,7 @@ impl Feed for KafkaFeed {
         let (confirmer, confirmation) = confirmation();
         {
             let mut st = self.lock();
-            if let Some(fatal) = &st.fatal {
+            if let Some(fatal) = st.signal.latched() {
                 confirmer.reject(fatal.clone());
                 return Some(confirmation);
             }
@@ -1127,7 +1115,7 @@ impl Feed for KafkaFeed {
 /// enqueue settles inline and settling takes it.
 fn publish_unit(core: &Core, producer: &Producer, unit: &Unit) -> Confirmation {
     let (confirmer, confirmation) = confirmation();
-    if let Some(fatal) = &core.lock().fatal {
+    if let Some(fatal) = core.lock().signal.latched() {
         confirmer.reject(fatal.clone());
         return confirmation;
     }

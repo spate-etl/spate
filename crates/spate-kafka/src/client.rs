@@ -53,6 +53,22 @@ const ALIASES: [(&str, &str); 4] = [
     ("compression.type", "compression.codec"),
 ];
 
+/// The longest topic name librdkafka takes. It refuses a longer one with a NULL
+/// handle, which rdkafka's `fetch_metadata` unwraps, panicking the thread.
+const MAX_TOPIC_NAME_BYTES: usize = 512;
+
+/// Checks `topic` against librdkafka's length limit.
+///
+/// # Errors
+///
+/// The reason, without the key, for the section to prefix in its own style.
+pub(crate) fn check_topic_name(topic: &str) -> Result<(), String> {
+    if topic.len() > MAX_TOPIC_NAME_BYTES {
+        return Err(format!("is longer than {MAX_TOPIC_NAME_BYTES} bytes"));
+    }
+    Ok(())
+}
+
 /// The librdkafka property `key` writes, under one spelling per property:
 /// `topic.` stripped from a topic property and an alias replaced by its
 /// target. Names match case-sensitively, as librdkafka's do.
@@ -370,6 +386,11 @@ where
     C: ClientContext,
     T: FromClientConfigAndContext<C>,
 {
+    // Ahead of the first OpenSSL call, this leaves OpenSSL's exit handler
+    // unregistered: it frees state a broker thread uses in a handshake, which
+    // kills a process that exits with a client alive.
+    #[cfg(feature = "tls")]
+    openssl_sys::init();
     T::from_config_and_context(config, context)
 }
 
@@ -1292,6 +1313,48 @@ mod tests {
         assert!(!printed.contains("PRIVATE-KEY"), "{printed}");
         assert!(!printed.contains("hunter2"), "{printed}");
         assert!(printed.contains("\"ssl.key.pem\": <redacted>"), "{printed}");
+    }
+
+    /// Pins that building a TLS client leaves OpenSSL's exit handler
+    /// unregistered. A child process registers its own handler before any
+    /// OpenSSL call, so that handler runs after OpenSSL's, and aborts if
+    /// OpenSSL refuses to initialise because its cleanup has run. Regression
+    /// for #1752.
+    #[cfg(feature = "tls")]
+    #[test]
+    fn a_tls_client_leaves_openssl_running_through_process_exit() {
+        use rdkafka::producer::{BaseProducer, DefaultProducerContext};
+        use std::ffi::c_int;
+
+        const NAME: &str =
+            "client::tests::a_tls_client_leaves_openssl_running_through_process_exit";
+        const CHILD: &str = "SPATE_TEST_OPENSSL_EXIT";
+
+        unsafe extern "C" {
+            fn atexit(handler: extern "C" fn()) -> c_int;
+        }
+
+        extern "C" fn abort_after_openssl_cleanup() {
+            // SAFETY: a null settings pointer selects OpenSSL's defaults.
+            if unsafe { openssl_sys::OPENSSL_init_ssl(0, std::ptr::null()) } != 1 {
+                std::process::abort();
+            }
+        }
+
+        if std::env::var_os(CHILD).is_none() {
+            spate_test_support::run_in_child(NAME, |child| child.env(CHILD, "1"));
+            return;
+        }
+        // SAFETY: the handler is a function item, valid for the whole process.
+        assert_eq!(unsafe { atexit(abort_after_openssl_cleanup) }, 0);
+        let mut config = new_config();
+        config
+            .set("bootstrap.servers", "127.0.0.1:1")
+            .set("security.protocol", "ssl")
+            .set("ssl.ca.location", "probe");
+        let client: BaseProducer<DefaultProducerContext> =
+            construct(&config, DefaultProducerContext).unwrap();
+        drop(client);
     }
 
     /// Pins that librdkafka narrows a `statistics.interval.ms` of 2^32 to

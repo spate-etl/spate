@@ -97,7 +97,7 @@ pub use feed::{FeedScript, ScriptedFeed, scripted_feed};
 pub use fixtures::{component_config, raw_payload, record, test_ack, unique_name};
 pub use logs::{LogCapture, capture_logs, show_logs};
 pub use pipeline::passthrough_runtime;
-pub use run::{PipelineRun, wait_until};
+pub use run::{HANG, PipelineRun, wait_until};
 pub use sink::{
     CaptureSink, CaptureWriter, CapturedWrite, ReplicaTag, ScriptedResult, SinkScript, TestEncoder,
     WriteOutcome, capture_sink, capture_writer, decode_rows,

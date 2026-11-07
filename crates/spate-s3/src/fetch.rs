@@ -46,7 +46,9 @@ use bytes::Bytes;
 use futures_util::StreamExt as _;
 use futures_util::future::{Either, select};
 use object_store::path::Path;
-use object_store::{GetOptions, GetRange, ObjectStore, ObjectStoreExt as _};
+use object_store::{
+    GetOptions, GetRange, GetResult, GetResultPayload, ObjectStore, ObjectStoreExt as _,
+};
 use spate_core::backoff::Backoff;
 use spate_core::error::{ErrorClass, SourceError};
 use std::future::Future;
@@ -352,14 +354,26 @@ impl WindowRead {
             // connection is released and a back-pressured lane never leaves
             // an idle S3 body open.
             let fetched = match self.store.get_opts(&self.path, options).await {
-                Ok(result) => result.bytes().await,
+                Ok(result) => bytes_within(result, self.end - self.start).await,
                 Err(e) => Err(e),
             };
             match fetched {
+                Ok(None) => {
+                    return Err(SplitFailure::Poison(
+                        PoisonKind::Undecodable,
+                        format!(
+                            "split {}: ranged read of \"{}\" at byte {} returned more than the {} bytes requested",
+                            self.split,
+                            self.entry.key,
+                            self.start,
+                            self.end - self.start
+                        ),
+                    ));
+                }
                 // A conforming store never returns an empty bounded range;
                 // guard anyway so a misbehaving one poisons the object rather
                 // than spinning.
-                Ok(bytes) if bytes.is_empty() => {
+                Ok(Some(bytes)) if bytes.is_empty() => {
                     return Err(SplitFailure::Poison(
                         PoisonKind::Undecodable,
                         format!(
@@ -368,7 +382,7 @@ impl WindowRead {
                         ),
                     ));
                 }
-                Ok(bytes) => return Ok(bytes),
+                Ok(Some(bytes)) => return Ok(bytes),
                 Err(e) if crate::error::is_overwrite(&e, &self.origin) => {
                     return Err(head_after_overwrite(
                         &self.split,
@@ -394,6 +408,42 @@ impl WindowRead {
                     .await?;
                 }
             }
+        }
+    }
+}
+
+/// Drain a bounded GET's body, or `None` once it passes `len` bytes.
+///
+/// A store that sends more than the range it reports would otherwise be
+/// buffered whole, since the HTTP client frames a body by its own length
+/// and never by `Content-Range`.
+async fn bytes_within(result: GetResult, len: u64) -> object_store::Result<Option<Bytes>> {
+    if !matches!(result.payload, GetResultPayload::Stream(_)) {
+        // A local file is read for exactly its range.
+        return result.bytes().await.map(Some);
+    }
+    let within = |n: usize| n as u64 <= len;
+    let mut frames = result.into_stream();
+    let Some(first) = frames.next().await.transpose()? else {
+        return Ok(Some(Bytes::new()));
+    };
+    if !within(first.len()) {
+        return Ok(None);
+    }
+    // A single frame is handed on without a copy.
+    let Some(mut next) = frames.next().await.transpose()? else {
+        return Ok(Some(first));
+    };
+    let mut buf = Vec::with_capacity(usize::try_from(len).unwrap_or(0));
+    buf.extend_from_slice(&first);
+    loop {
+        if !within(buf.len() + next.len()) {
+            return Ok(None);
+        }
+        buf.extend_from_slice(&next);
+        match frames.next().await.transpose()? {
+            Some(frame) => next = frame,
+            None => return Ok(Some(buf.into())),
         }
     }
 }
@@ -1027,6 +1077,12 @@ mod tests {
         /// The GET, counted from 1, answered with an empty body; 0 answers
         /// none.
         empty_on: u32,
+        /// The bounded GET, counted from 1, whose body carries `overlong`
+        /// bytes past the range it reports; 0 extends none.
+        overlong_on: u32,
+        overlong: usize,
+        /// Whether that body arrives as one frame with the range's bytes.
+        overlong_joined: bool,
         /// Held GETs started, and held GET futures dropped, finished or not.
         held: AtomicU32,
         held_dropped: Arc<AtomicU32>,
@@ -1084,6 +1140,9 @@ mod tests {
                 requests: std::sync::Mutex::new(Vec::new()),
                 hold_on: 0,
                 empty_on: 0,
+                overlong_on: 0,
+                overlong: 0,
+                overlong_joined: false,
                 release: Arc::new(tokio::sync::Semaphore::new(0)),
                 held: AtomicU32::new(0),
                 held_dropped: Arc::new(AtomicU32::new(0)),
@@ -1257,7 +1316,39 @@ mod tests {
                         .unwrap_or("injected get failure past the range end"),
                 ));
             }
+            let bounded = matches!(options.range, Some(GetRange::Bounded(_)));
             let result = self.inner.get_opts(location, options).await?;
+            if bounded && nth == self.overlong_on {
+                let extra = Bytes::from(vec![b'z'; self.overlong]);
+                let GetResult {
+                    payload,
+                    meta,
+                    range,
+                    attributes,
+                    extensions,
+                } = result;
+                let GetResultPayload::Stream(body) = payload else {
+                    unreachable!("InMemory yields streams")
+                };
+                let body: futures_util::stream::BoxStream<'static, object_store::Result<Bytes>> =
+                    if self.overlong_joined {
+                        let mut joined: Vec<u8> = futures_util::TryStreamExt::try_concat(
+                            futures_util::TryStreamExt::map_ok(body, |b| b.to_vec()),
+                        )
+                        .await?;
+                        joined.extend_from_slice(&extra);
+                        Box::pin(futures_util::stream::iter([Ok(Bytes::from(joined))]))
+                    } else {
+                        Box::pin(body.chain(futures_util::stream::iter([Ok(extra)])))
+                    };
+                return Ok(GetResult {
+                    payload: GetResultPayload::Stream(body),
+                    meta,
+                    range,
+                    attributes,
+                    extensions,
+                });
+            }
             if nth == self.empty_on {
                 return Ok(GetResult {
                     payload: GetResultPayload::Stream(Box::pin(futures_util::stream::empty())),
@@ -2009,6 +2100,132 @@ mod tests {
                 RangeKind::Bounded(15, 19),
                 RangeKind::Bounded(19, 23),
             ]
+        );
+    }
+
+    /// Pins that a bounded GET whose body runs past its range fails the
+    /// unit once the body passes the range, and hands on none of it.
+    /// Regression for #1506.
+    #[tokio::test(start_paused = true)]
+    async fn a_body_longer_than_its_range_is_not_buffered() {
+        let mut flaky = FlakyStore::new(seeded(&[("p/a", &[b'x'; 32][..])]).await);
+        flaky.overlong_on = 1;
+        flaky.overlong = 8 << 20;
+        let store: Arc<dyn ObjectStore> = Arc::new(flaky);
+        let slice = listed(&store).await;
+        let (tx, mut rx) = mpsc::channel(DEPTH);
+        let task = tokio::spawn(run_fetcher(fetcher(store, slice, 16, 16, tx)));
+        let msgs = drain(&mut rx).await;
+        task.await.unwrap();
+        let handed_on: usize = msgs
+            .iter()
+            .map(|m| match m {
+                ChunkMsg::Chunk(b) => b.len(),
+                _ => 0,
+            })
+            .sum();
+        assert_eq!(
+            handed_on, 0,
+            "the window was handed on as {handed_on} bytes"
+        );
+        let Some(ChunkMsg::LaneFailed(SplitFailure::Poison(PoisonKind::Undecodable, reason))) =
+            msgs.last()
+        else {
+            panic!("{:?}", debugged(&msgs));
+        };
+        assert!(
+            reason.contains("\"p/a\"") && reason.contains("byte 0") && reason.contains("16 bytes"),
+            "{reason}"
+        );
+    }
+
+    /// Pins that a single frame one byte longer than its range fails the
+    /// window with nothing handed on.
+    #[tokio::test(start_paused = true)]
+    async fn a_single_frame_past_its_range_is_not_handed_on() {
+        let mut flaky = FlakyStore::new(seeded(&[("p/a", &[b'x'; 16][..])]).await);
+        flaky.overlong_on = 1;
+        flaky.overlong = 1;
+        flaky.overlong_joined = true;
+        let store: Arc<dyn ObjectStore> = Arc::new(flaky);
+        let slice = listed(&store).await;
+        let (tx, mut rx) = mpsc::channel(DEPTH);
+        let task = tokio::spawn(run_fetcher(fetcher(store, slice, 16, 16, tx)));
+        let msgs = drain(&mut rx).await;
+        task.await.unwrap();
+        assert!(
+            !msgs.iter().any(|m| matches!(m, ChunkMsg::Chunk(_))),
+            "{:?}",
+            debugged(&msgs)
+        );
+        let Some(ChunkMsg::LaneFailed(SplitFailure::Poison(PoisonKind::Undecodable, reason))) =
+            msgs.last()
+        else {
+            panic!("{:?}", debugged(&msgs));
+        };
+        assert!(
+            reason.contains("byte 0") && reason.contains("the 16 bytes requested"),
+            "{reason}"
+        );
+    }
+
+    /// Pins that a body of exactly its range, split across frames as an HTTP
+    /// body is, is handed on whole.
+    #[tokio::test]
+    async fn an_exact_range_in_several_frames_is_accepted() {
+        let frames =
+            [&[b'x'; 6][..], &[b'y'; 6], &[b'z'; 4]].map(|f| Ok(Bytes::copy_from_slice(f)));
+        let result = GetResult {
+            payload: GetResultPayload::Stream(Box::pin(futures_util::stream::iter(frames))),
+            meta: object_store::ObjectMeta {
+                location: Path::from("p/a"),
+                last_modified: chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
+                size: 32,
+                e_tag: Some("e".into()),
+                version: None,
+            },
+            range: 0..16,
+            attributes: Default::default(),
+            extensions: Default::default(),
+        };
+        let got = bytes_within(result, 16).await.unwrap();
+        assert_eq!(got.as_deref(), Some(&b"xxxxxxyyyyyyzzzz"[..]));
+    }
+
+    /// Pins that a body one byte past a later window's range fails that
+    /// window at its own offset, after the window before it is handed on.
+    #[tokio::test(start_paused = true)]
+    async fn a_body_one_byte_past_a_later_range_fails_at_its_offset() {
+        let mut flaky = FlakyStore::new(seeded(&[("p/a", &[b'x'; 32][..])]).await);
+        flaky.overlong_on = 2;
+        flaky.overlong = 1;
+        let store: Arc<dyn ObjectStore> = Arc::new(flaky);
+        let slice = listed(&store).await;
+        let (tx, mut rx) = mpsc::channel(DEPTH);
+        let task = tokio::spawn(run_fetcher(fetcher(store, slice, 16, 16, tx)));
+        let msgs = drain(&mut rx).await;
+        task.await.unwrap();
+        let chunks: Vec<&Bytes> = msgs
+            .iter()
+            .filter_map(|m| match m {
+                ChunkMsg::Chunk(b) => Some(b),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            chunks,
+            [&Bytes::from(vec![b'x'; 16])],
+            "{:?}",
+            debugged(&msgs)
+        );
+        let Some(ChunkMsg::LaneFailed(SplitFailure::Poison(PoisonKind::Undecodable, reason))) =
+            msgs.last()
+        else {
+            panic!("{:?}", debugged(&msgs));
+        };
+        assert!(
+            reason.contains("byte 16") && reason.contains("the 16 bytes requested"),
+            "{reason}"
         );
     }
 

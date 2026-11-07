@@ -95,12 +95,16 @@ pub(crate) fn classify_consumer_error(code: RDKafkaErrorCode, after_startup: boo
         | C::NotImplemented
         // A fetched batch whose codec is known but whose payload does not
         // decompress. A retry refetches the same bytes.
-        | C::BadCompression => ErrorClass::Fatal,
+        | C::BadCompression
+        // A partition with no committed offset, or a fetch out of range, under
+        // `auto.offset.reset: error`. librdkafka stops fetching the partition
+        // once it reports this.
+        | C::AutoOffsetReset => ErrorClass::Fatal,
         // A partition that vanished after we already owned it: the topic was
         // deleted. Before startup this is just metadata catching up.
         C::UnknownTopicOrPartition if after_startup => ErrorClass::Fatal,
-        // Everything else (transport, leader elections, coordinator churn,
-        // offset-reset conditions handled elsewhere) is transient.
+        // Everything else (transport, leader elections, coordinator churn)
+        // is transient.
         _ => ErrorClass::Retryable,
     }
 }
@@ -308,6 +312,7 @@ mod tests {
             C::UnsupportedForMessageFormat,
             C::NotImplemented,
             C::BadCompression,
+            C::AutoOffsetReset,
         ] {
             assert_eq!(
                 classify_consumer_error(code, true),

@@ -583,8 +583,8 @@ mod tests {
         KafkaSourceConfig::from_component_config(&section(&body)).expect("not owned");
     }
 
-    /// Regression: the librdkafka alias `metadata.broker.list` writes the same
-    /// underlying broker list as `bootstrap.servers`. Left un-denied, a
+    /// Regression: the librdkafka alias `bootstrap.servers` writes the same
+    /// underlying broker list as `metadata.broker.list`. Left un-denied, a
     /// passthrough value would race the framework-owned broker list at client
     /// creation (`ClientConfig` applies its map in unspecified order), so some
     /// process restarts would silently consume from the wrong cluster.

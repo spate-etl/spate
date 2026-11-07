@@ -18,7 +18,9 @@ use std::fmt;
 ///   version is an overwrite instead, which [`is_overwrite`] decides.
 /// - Authentication, permission, and configuration errors hold for every
 ///   object on every instance: non-retryable *and* pipeline-fatal. A listing
-///   the store answers 401 or 403 is non-retryable, and the lister run fails on it.
+///   the store answers 401, 403 or 404 is non-retryable, and the lister run
+///   fails on it. A store answers a listing 404 for a bucket that does not
+///   exist.
 /// - A TLS rejection ([`tls_rejection!`](spate_core::tls_rejection)) by the
 ///   store or the credential endpoint is non-retryable and pipeline-fatal.
 /// - Everything else (other `Generic` failures, timeouts, 5xx) is retryable.
@@ -70,7 +72,7 @@ pub(crate) fn is_pipeline_fatal(e: &object_store::Error) -> bool {
         )
 }
 
-/// Whether `e` is a listing the store answered with 401 or 403.
+/// Whether `e` is a listing the store answered with 401, 403 or 404.
 ///
 /// object_store reports a failed listing as `Generic` and keeps the error types
 /// in its chain private, so this matches each link by its message prefix. The
@@ -89,7 +91,11 @@ fn list_rejected(e: &object_store::Error) -> bool {
                 status
                     .to_string()
                     .strip_prefix("Server returned non-2xx status code: ")
-                    .is_some_and(|code| code.starts_with("401 ") || code.starts_with("403 "))
+                    .is_some_and(|code| {
+                        ["401 ", "403 ", "404 "]
+                            .iter()
+                            .any(|status| code.starts_with(status))
+                    })
             })
 }
 
@@ -299,9 +305,9 @@ mod tests {
         }
     }
 
-    /// A listing the store answers 401 or 403 is `Fatal`; a listing answered
-    /// 500 stays `Retryable`. A rejected listing that arrives typed fails the
-    /// test, since `list_rejected` then matches nothing.
+    /// A listing the store answers 401, 403 or 404 is `Fatal`; a listing
+    /// answered 500 stays `Retryable`. A rejected listing that arrives typed
+    /// fails the test, since `list_rejected` then matches nothing.
     #[tokio::test]
     async fn a_rejected_listing_is_fatal() {
         use futures_util::StreamExt as _;
@@ -309,6 +315,7 @@ mod tests {
         for (status, expected) in [
             ("403 Forbidden", ErrorClass::Fatal),
             ("401 Unauthorized", ErrorClass::Fatal),
+            ("404 Not Found", ErrorClass::Fatal),
             ("500 Internal Server Error", ErrorClass::Retryable),
         ] {
             let store = crate::test_servers::store_at(&crate::test_servers::status_server(status));

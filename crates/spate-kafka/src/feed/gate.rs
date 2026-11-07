@@ -148,7 +148,7 @@ impl Gate {
     fn rest(&self) {
         let st = self.core.lock();
         // Checked under the state lock, as in `take`.
-        if st.fatal.is_none() && !self.core.stopped() {
+        if st.signal.latched().is_none() && !self.core.stopped() {
             drop(
                 self.core
                     .gate_wake
@@ -168,7 +168,10 @@ impl Gate {
         // `stop` stores the stop flag under, so neither wake is missed. A
         // stopping feed waits too, so the loop does not spin over
         // deliveries it will not take.
-        if (st.gating.is_empty() || st.stopping) && st.fatal.is_none() && !self.core.stopped() {
+        if (st.gating.is_empty() || st.stopping)
+            && st.signal.latched().is_none()
+            && !self.core.stopped()
+        {
             st = self
                 .core
                 .gate_wake
@@ -176,7 +179,7 @@ impl Gate {
                 .unwrap_or_else(PoisonError::into_inner)
                 .0;
         }
-        if st.stopping || self.core.stopped() || st.fatal.is_some() {
+        if st.stopping || self.core.stopped() || st.signal.latched().is_some() {
             return Vec::new();
         }
         let entries: Vec<Gating> = st.gating.drain(..).collect();
@@ -542,7 +545,13 @@ mod tests {
 
         let halt = gate.watermark_error(1, &KafkaError::MetadataFetch(C::TopicAuthorizationFailed));
         assert!(matches!(halt, Halt::Ended));
-        let reason = core.lock().fatal.clone().expect("the feed stopped").reason;
+        let reason = core
+            .lock()
+            .signal
+            .latched()
+            .cloned()
+            .expect("the feed stopped")
+            .reason;
         assert!(
             reason.contains("reading the watermarks of `units-attempts` partition 1"),
             "{reason}"

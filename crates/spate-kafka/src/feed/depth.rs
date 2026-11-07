@@ -225,17 +225,14 @@ pub(crate) fn run(
         };
         // A credential or TLS rejection latches the feed, and the depth read
         // then reports it, whatever the read itself returned.
-        let read = match core.lock().fatal.clone() {
+        let read = match core.lock().signal.latched().cloned() {
             Some(fatal) => Err(fatal),
             None => read,
         };
         reporter.report(read);
         // The source checks a reading only when it polls, so the answer
         // ends its park.
-        let waker = core.lock().waker.clone();
-        if let Some(waker) = waker {
-            waker.wake();
-        }
+        core.lock().signal.wake();
     }
 }
 
@@ -522,7 +519,7 @@ mod tests {
     fn an_answered_depth_read_wakes_the_reader() {
         let core = core(3);
         let (waker, park) = spate_core::feed::wake_channel();
-        core.lock().waker = Some(waker);
+        core.lock().signal.set_waker(waker, false);
         let offsets = Scripted::default().topic("units-dead", &[(0, Offset::Invalid, 0, 0)]);
         let (requests, received) = mpsc::channel();
         let (reporter, mut reading) = spate_core::feed::depth_reading();

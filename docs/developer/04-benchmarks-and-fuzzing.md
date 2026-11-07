@@ -1,3 +1,7 @@
+---
+description: "The instruments outside cargo xtask ci: the fuzz harness and the counted, allocation and wall-clock benchmark tiers, and how to add a target to each."
+---
+
 # Benchmarks and fuzzing
 
 ## Fuzzing
@@ -44,12 +48,13 @@ single component. A claim no tier here can measure is stated as unmeasured.
 
 ### The counted tier
 
-`cargo xtask bench counted` counts instructions under valgrind rather than measuring
-wall time, so its numbers are comparable across machines of one architecture.
-In CI, each architecture's rows compare its own merge base and head. It needs
-Linux, valgrind 3.24 or later, and a `gungraun-runner` at the version
-`Cargo.lock` pins for `gungraun`; a mismatch is a hard error. On macOS the most you can
-check is that the benches build, with `cargo xtask bench gungraun --check`.
+`cargo xtask bench counted` counts instructions under valgrind rather than
+measuring wall time, so its numbers are comparable across machines of one
+architecture. In CI, each architecture's rows compare its own merge base and
+head. It needs Linux, valgrind 3.24 or later, and a `gungraun-runner` at the
+version `Cargo.lock` pins for `gungraun`; a mismatch is a hard error. On macOS
+the most you can check is that the benches build, with
+`cargo xtask bench gungraun --check`.
 
 Adding one means naming the file `benches/<something>_gungraun.rs` and declaring
 it in the crate's `Cargo.toml` as a `[[bench]]` with `harness = false`.
@@ -62,8 +67,8 @@ cleanly and fails at run time complaining about arguments.
 `cargo xtask tidy gungraun-benches` catches it.
 
 **Put the measured work in a named `#[inline(never)]` function and have the
-benchmark function call it.** Getting this wrong produces a number rather than an
-error. Collection is bounded by a callgrind toggle on the module the
+benchmark function call it.** Getting this wrong produces a number rather than
+an error. Collection is bounded by a callgrind toggle on the module the
 `#[library_benchmark]` macro wraps the function in, and a toggle *flips*
 collection rather than forcing it on. Work written inline in that function can
 therefore be reshaped by the optimizer until it falls outside the collected
@@ -93,13 +98,13 @@ package declares.
 `cargo xtask bench alloc` runs each `benches/<name>_alloc.rs` target in the
 release profile, on the stable release pinned in `.github/toolchains/stable/`,
 once per feature arm. It compares what each prints with
-`benches/alloc/<name>_alloc.<arm>.<arch>.tsv`, and any difference fails CI. `--bless`
-rewrites the files for the host's architecture. It runs on Linux x86_64 and
-aarch64 only, and refuses any other host.
+`benches/alloc/<name>_alloc.<arm>.<arch>.tsv`, and any difference fails CI.
+`--bless` rewrites the files for the host's architecture. It runs on Linux
+x86_64 and aarch64 only, and refuses any other host.
 
-[`spate_test_support::alloc`](test-support/src/alloc.rs) says what each figure
-counts. Allocations C code makes through `malloc`, as libzstd does, are not in
-them; the counted tier's DHAT heap rows include them.
+[`spate_test_support::alloc`](repo:test-support/src/alloc.rs) says what each
+figure counts. Allocations C code makes through `malloc`, as libzstd does, are
+not in them; the counted tier's DHAT heap rows include them.
 
 A failing run uploads the files it would have written as the
 `alloc-snapshots-<arch>` artifact. A change that moves a count, including a
@@ -115,12 +120,12 @@ by that name. A case whose pass reads the clock is left out.
 
 ### The wall-clock tier
 
-`spate-bench`, in [`bench/`](bench/README.md), plus `*_wall.rs` targets in the
-crates themselves. Nothing it produces is stored and nothing here is a gate. A
-wall-clock number answers "did this change move it" for a specific change on a
-machine you control. CI runs the same comparison weekly on one hosted runner,
-`main` against `main` a week earlier, advisory, with its report in the job
-summary.
+`spate-bench`, in [`bench/README.md`](repo:bench/README.md), plus `*_wall.rs`
+targets in the crates themselves. Nothing it produces is stored and nothing here
+is a gate. A wall-clock number answers "did this change move it" for a specific
+change on a machine you control. CI runs the same comparison weekly on one
+hosted runner, `main` against `main` a week earlier, advisory, with its report
+in the job summary.
 
 ```sh
 cargo xtask bench list                 # every case, with its flags
@@ -135,17 +140,18 @@ on.
 
 Targets follow the same rule as the counted tier: `benches/<name>_wall.rs` plus
 a `[[bench]]` with `harness = false`. Without the stanza cargo builds the target
-under libtest, which rejects the runner protocol's arguments, and the driver says
-so with the stanza to add. Expect that minutes in rather than at the start, since
-it builds both legs before it starts either.
+under libtest, which rejects the runner protocol's arguments, and the driver
+says so with the stanza to add. Expect that minutes in rather than at the start,
+since it builds both legs before it starts either.
 
 When you measure two arms by hand, **interleave them**: every arm once per
 repetition, rather than one arm finished before the next starts. Throw the first
 pass away. Anything that drifts over a run otherwise lands entirely on whichever
 arm goes last, and the first repetition hands one arm the cold-start cost, which
 has been large enough here to decide which arm looked faster. Report an interval
-and the repetition count beside the value, so a reader can tell a difference from
-a spread. `cargo xtask bench ab` and `cargo xtask bench arms` do all of that.
+and the repetition count beside the value, so a reader can tell a difference
+from a spread. `cargo xtask bench ab` and `cargo xtask bench arms` do all of
+that.
 
 Which of the two you want depends on what the arms are. `bench ab` varies the
 tree; `bench arms` varies the Cargo features and holds the tree still, building

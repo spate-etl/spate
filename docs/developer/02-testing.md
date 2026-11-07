@@ -1,10 +1,14 @@
+---
+description: "Where a test lives in this repository, which double to reach for, and the conventions a test here follows."
+---
+
 # Writing a test
 
 ## Where a test lives
 
 Unit tests inline in a `#[cfg(test)]` module, integration tests in each crate's
 `tests/`, doc tests on public APIs. proptest for tracker and codec invariants,
-loom for the synchronisation primitives, rdkafka's `MockCluster` and the
+loom for the synchronization primitives, rdkafka's `MockCluster` and the
 ClickHouse mocks for connector behavior that does not need a container.
 
 Helpers that only this repository's tests need, such as reading a pinned image,
@@ -20,8 +24,8 @@ written against them needs no infrastructure and runs in milliseconds.
 
 One trap worth knowing: `cargo test` runs a binary's tests in one process, and
 metric series ownership is process-wide (INV-10). Fixtures therefore need
-per-test `pipeline` and `component` labels; a local recorder does not isolate the
-claim.
+per-test `pipeline` and `component` labels; a local recorder does not isolate
+the claim.
 
 ## A test's doc
 

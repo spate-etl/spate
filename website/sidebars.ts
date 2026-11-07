@@ -38,6 +38,18 @@ const adrRecords: string[] = fs
   .sort()
   .map((name) => `adr/${name.replace(/^\d{4}-/, '').replace(/\.md$/, '')}`);
 
+/**
+ * The developer guide, in page order, derived from the directory for the same
+ * reason as the decision records above: `README.md` is the category link, and
+ * autogeneration over a top-level folder would list it a second time.
+ */
+const developerDir = path.resolve(__dirname, '../docs/developer');
+const developerPages: string[] = fs
+  .readdirSync(developerDir)
+  .filter((name) => /^\d{2}-[a-z0-9][a-z0-9-]*\.md$/.test(name))
+  .sort()
+  .map((name) => `developer/${name.replace(/^\d{2}-/, '').replace(/\.md$/, '')}`);
+
 const sidebars: SidebarsConfig = {
   docsSidebar: [
     {
@@ -56,6 +68,13 @@ const sidebars: SidebarsConfig = {
       label: 'Design & Internals',
       collapsed: false,
       items: ['INVARIANTS', 'METRICS'],
+    },
+    {
+      type: 'category',
+      label: 'Developer guide',
+      collapsed: true,
+      link: { type: 'doc', id: 'developer/README' },
+      items: developerPages,
     },
   ],
 };

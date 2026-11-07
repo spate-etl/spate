@@ -1,8 +1,11 @@
+---
+description: "The task runner and its gates: what cargo xtask ci covers, what CI adds, the test runner and its profiles, the container suites, and which checks a change selects."
+---
+
 # Commands and gates
 
 ## Commands
 
-`cargo xtask --help` lists the commands, each with its own `--help`, and
 `cargo xtask tidy --list` names the checks. `cargo xtask ci` is the pull request
 bar and covers formatting, clippy, the type check, the loom models, the test
 suite, doctests, rustdoc, the feature matrix, licenses and advisories, and
@@ -63,14 +66,14 @@ cargo xtask hooks install   # once per clone; every worktree shares it
 ```
 
 This points `core.hooksPath` at `.githooks/`, whose commit-msg hook checks each
-subject against the rule in [`CONTRIBUTING.md`](CONTRIBUTING.md). The hook
+subject against the rule in [`CONTRIBUTING.md`](repo:CONTRIBUTING.md). The hook
 builds xtask first. When cargo is missing or xtask does not build, it prints a
 warning and lets the commit through, so a broken tree can still be committed;
 the title gate in CI applies the rule regardless. The command refuses to
 replace a `core.hooksPath` that points elsewhere, and names any hook in the
 default directory that stops running.
 
-## The test suite
+## The test runner and its profiles
 
 Tests run under [cargo-nextest](https://nexte.st), one process per test
 concurrently, where `cargo test` runs one binary at a time. Plain
@@ -85,25 +88,30 @@ builds.
 The profiles in `.config/nextest.toml`:
 
 - **`default`** — `fail-fast = false`, and a 30-second slow warning that
-  terminates after four periods, so a hard kill at 120s. The container suites are
-  excluded here and nothing left should take that long.
+  terminates after four periods, so a hard kill at 120s. The container suites
+  are excluded here and nothing left should take that long.
 - **`ci`** — what `Test and coverage`, `Test (arm64)` and `Test (macOS)` run.
   60 seconds, terminating after four, with no retry and a JUnit report.
-- **`docker`** — warns at 120 seconds and **never terminates**: a cold image pull
-  can exceed any figure worth setting, and a SIGKILL reports as a timeout
+- **`docker`** — warns at 120 seconds and **never terminates**: a cold image
+  pull can exceed any figure worth setting, and a SIGKILL reports as a timeout
   indistinguishable from a hang. A JUnit report, and no retry except on the S3
   job's RGW lane.
+
+:::warning
+On macOS every freshly linked binary stalls for tens of seconds at 0% CPU on
+its first exec while Gatekeeper scans it. Across this workspace that alone
+costs about half an hour per edit-test cycle. Add your terminal to *System
+Settings → Privacy & Security → Developer Tools* to exempt it.
+:::
+
+## Container suites
 
 Container-backed tests use testcontainers and are `#[ignore]`d, so a normal run
 skips them. `cargo xtask integration-test` is what selects them.
 
-A suite that boots a real server runs it at a pinned version, one lane per
-release line the vendor still supports, or per store for the S3 source,
-selected by a `SPATE_<SERVICE>_LANE`
-variable and pinned by tag and digest under `ci/<service>/`. CI runs the primary
-lane for the whole tier and gives every other lane a job of its own.
-[`ci/`](ci/README.md) is the account, and the services it covers are listed
-there rather than here.
+A suite that boots a real server runs it at a pinned version, in a lane selected
+by a `SPATE_<SERVICE>_LANE` variable. [`ci/README.md`](repo:ci/README.md) is the
+account of the services, their lanes and what CI runs of them.
 
 One suite sits outside even that. `spate`'s `e2e_examples` drives the shipped
 example binaries, those whose stanza carries no `test = true`, against real
@@ -121,10 +129,7 @@ cargo nextest run --profile docker -p spate --all-features --locked \
 When you are not touching the TLS surface, replace it with the features the
 `e2e_examples` stanza in `crates/spate/Cargo.toml` requires.
 
-**On macOS every freshly linked binary stalls for tens of seconds at 0% CPU on
-its first exec** while Gatekeeper scans it. Across this workspace that alone
-costs about half an hour per edit-test cycle. Add your terminal to *System
-Settings → Privacy & Security → Developer Tools* to exempt it.
+## Mutants
 
 `cargo xtask mutants [--since REF]` runs cargo-mutants over the diff from the
 merge base of REF (default `origin/main`) and `HEAD` to the working tree, with
@@ -135,7 +140,7 @@ it, so a mutant only they would catch reports as missed. Its summary, printed
 at the end of a local run and written to the job summary in CI, names the
 mutant forms the tool does not generate, which stay a review step.
 
-### What CI selects
+## What CI selects
 
 CI picks the container suites from the paths a pull request changed. Which
 counted benches run is derived the same way, from the benches themselves: a

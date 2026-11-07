@@ -7,17 +7,28 @@
 //! is a shell script, so this binary is empty off unix.
 #![cfg(unix)]
 
+use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
+use std::sync::mpsc;
+use std::time::Duration;
 
 const DROPPED: &str = "[WARN] failed to validate all files specified in clarification for crate \
                        miniz_oxide 0.9.1: checksum mismatch, expected '00'";
 
-/// A directory holding a `cargo` whose `about` logs `log` and exits `code`.
+/// A directory holding a `cargo` that runs a script for `about`.
 struct Shim(PathBuf);
 
 impl Shim {
+    /// `about` prints to stdout, logs `log` and exits `code`.
     fn new(name: &str, log: &str, code: i32) -> Self {
+        Self::running(
+            name,
+            &format!("echo on-stdout; echo \"{log}\" >&2; exit {code}"),
+        )
+    }
+
+    fn running(name: &str, about: &str) -> Self {
         let dir = std::env::temp_dir().join(format!(
             "spate-xtask-attribution-{}-{name}",
             std::process::id()
@@ -29,7 +40,7 @@ impl Shim {
             dir.join("cargo"),
             format!(
                 "#!/bin/sh\n\
-                 if [ \"$1\" = about ]; then echo \"{log}\" >&2; exit {code}; fi\n\
+                 if [ \"$1\" = about ]; then {about}; fi\n\
                  exec '{cargo}' \"$@\"\n"
             ),
         )
@@ -41,13 +52,17 @@ impl Shim {
     }
 
     fn attribution(&self) -> Output {
+        self.command().output().unwrap()
+    }
+
+    fn command(&self) -> Command {
         let mut dirs = vec![self.0.clone()];
         dirs.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
-        Command::new(env!("CARGO_BIN_EXE_spate-xtask"))
+        let mut command = Command::new(env!("CARGO_BIN_EXE_spate-xtask"));
+        command
             .arg("attribution")
-            .env("PATH", std::env::join_paths(dirs).unwrap())
-            .output()
-            .unwrap()
+            .env("PATH", std::env::join_paths(dirs).unwrap());
+        command
     }
 }
 
@@ -84,4 +99,69 @@ fn a_failed_generator_keeps_its_status() {
     assert!(stderr.contains("cargo about generate"), "{stderr}");
     assert!(stderr.contains("exited 3"), "{stderr}");
     assert!(stderr.contains("[ERROR] no license\n"), "{stderr}");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "on-stdout\n");
+}
+
+/// A generator's log line reaches stderr while it runs, so a step killed at its
+/// timeout still shows what it printed.
+#[test]
+fn a_log_line_arrives_while_the_generator_runs() {
+    let dir = std::env::temp_dir().join(format!(
+        "spate-xtask-attribution-{}-held",
+        std::process::id()
+    ));
+    let release = dir.join("release");
+    let shim = Shim::running(
+        "held",
+        &format!(
+            "echo holding >&2; read -r _ < '{}'; exit 7",
+            release.display()
+        ),
+    );
+    assert!(
+        Command::new("mkfifo")
+            .arg(&release)
+            .status()
+            .unwrap()
+            .success()
+    );
+
+    let mut child = shim
+        .command()
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let stream = child.stderr.take().unwrap();
+    let (lines, arrived) = mpsc::channel();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "ends when the child closes stderr"
+    )]
+    std::thread::spawn(move || {
+        for line in BufReader::new(stream).lines() {
+            if lines.send(line.unwrap()).is_err() {
+                break;
+            }
+        }
+    });
+    let held = loop {
+        match arrived.recv_timeout(Duration::from_secs(60)) {
+            Ok(line) if line == "holding" => break true,
+            Ok(_) => {}
+            Err(_) => break false,
+        }
+    };
+
+    // Read and write, so opening the pipe does not wait for a reader that a
+    // failed run never reaches.
+    std::fs::File::options()
+        .read(true)
+        .write(true)
+        .open(&release)
+        .unwrap()
+        .write_all(b"\n")
+        .unwrap();
+    assert_eq!(child.wait().unwrap().code(), Some(7));
+    assert!(held, "the line arrived only once the generator ended");
 }

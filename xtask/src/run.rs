@@ -132,10 +132,7 @@ pub(crate) fn run(root: &Path, explain: bool, step: &Step<'_>) -> Outcome {
     if status.success() {
         return Ok(());
     }
-    Err(Error {
-        message: format!("`{line}` exited {}", describe(&status)),
-        code: status.code(),
-    })
+    Err(exited(&line, describe(&status), status.code()))
 }
 
 /// Resolves a repository-relative script against the root, leaving a bare name
@@ -182,10 +179,11 @@ pub(crate) fn capture(root: &Path, step: &Step<'_>) -> Result<String, Error> {
         .wait_with_output()
         .map_err(|e| Error::msg(format!("{}: {e}", step.program)))?;
     if !out.status.success() {
-        return Err(Error {
-            message: format!("`{}` exited {}", step.display(), describe(&out.status)),
-            code: out.status.code(),
-        });
+        return Err(exited(
+            &step.display(),
+            describe(&out.status),
+            out.status.code(),
+        ));
     }
     String::from_utf8(out.stdout)
         .map_err(|e| Error::msg(format!("{}: stdout is not UTF-8: {e}", step.program)))
@@ -327,10 +325,15 @@ pub(crate) fn quiet(root: &Path, explain: bool, step: &Step<'_>) -> Outcome {
     if status.success() {
         return Ok(());
     }
-    Err(Error {
-        message: format!("`{line}` exited {}", describe(&status)),
-        code: status.code(),
-    })
+    Err(exited(&line, describe(&status), status.code()))
+}
+
+/// The error for a step that finished with a failing status.
+pub(crate) fn exited(line: &str, status: String, code: Option<i32>) -> Error {
+    Error {
+        message: format!("`{line}` exited {status}"),
+        code,
+    }
 }
 
 fn describe(status: &std::process::ExitStatus) -> String {
@@ -415,7 +418,7 @@ mod tests {
         assert_eq!(done.stdout, "");
     }
 
-    /// `Capture` carries both streams, and only `Capture` carries stderr.
+    /// `Capture` carries both streams, and `Relay` carries stderr alone.
     #[cfg(unix)]
     #[test]
     fn capture_carries_both_streams() {

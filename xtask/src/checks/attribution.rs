@@ -28,10 +28,10 @@ const INVENTORY: &str = "THIRD-PARTY.md";
 const SUMMARY_RULE: &str = "|---|---|";
 const CRATE_HEADER: &str = "| Crate | Version | License |";
 
-/// What `cargo about` logs when a file `about.toml` names no longer matches its
-/// checksum. It then drops the crate's clarification, falls back to the scan
-/// and still exits 0, so this line is the only sign. The check depends on this
-/// wording.
+/// What `cargo about` logs when a file `about.toml` names is missing, empty or
+/// past its checksum. It then drops the crate's clarification, falls back to the
+/// scan and still exits 0, so this line is the only sign. The check depends on
+/// this wording, and the workflows name a version for it.
 const DROPPED: &str = "failed to validate all files specified in clarification for crate ";
 
 pub(crate) fn generate(root: &Path, explain: bool) -> Outcome {
@@ -51,17 +51,19 @@ pub(crate) fn generate(root: &Path, explain: bool) -> Outcome {
     let about = about_step(&file);
     let done = run::complete(root, &about, Streams::Relay)?;
     if done.code != 0 {
-        return Err(Error {
-            message: format!("`{}` exited {}", about.display(), done.code),
-            code: Some(done.code),
-        });
+        return Err(run::exited(
+            &about.display(),
+            done.code.to_string(),
+            Some(done.code),
+        ));
     }
     let dropped = dropped_clarifications(&done.stderr);
     if !dropped.is_empty() {
         return Err(Error::msg(format!(
             "cargo about dropped the clarification of:\n\n{}\n  \
-             A license file no longer matches its checksum in about.toml, so the scan\n  \
-             chose the license texts. Re-check the file, then update the checksum.",
+             A license file about.toml names is missing or no longer matches its\n  \
+             checksum, so the scan chose the license texts. Re-check the file, then\n  \
+             update its entry.",
             dropped
                 .iter()
                 .map(|krate| format!("    {krate}\n"))

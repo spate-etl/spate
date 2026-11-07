@@ -10,10 +10,11 @@
 //! counts. A bounded job's end check reads both, and the runtime reads the
 //! dead-letter queue's on every job. The checks run once, at connect.
 
+use crate::config::BACKEND;
 use crate::error::{CallError, Class, SqsError};
 use crate::queue::BoxFuture;
 use serde::Deserialize;
-use spate_core::config::ConfigError;
+use spate_core::config::FeedSection;
 use spate_core::hash::FastMap;
 use url::Url;
 
@@ -186,10 +187,10 @@ pub(crate) async fn check(
     })?;
     let dead_letter_arn = policy.dead_letter_target_arn;
     let source_url = Url::parse(queue_url).map_err(|e| {
-        SqsError::Config(ConfigError::Component {
-            context: "feed.sqs".into(),
-            message: format!("`queue_url` is not a URL: {e}"),
-        })
+        SqsError::Config(FeedSection::backend_error(
+            BACKEND,
+            format!("`queue_url` is not a URL: {e}"),
+        ))
     })?;
     let dead_letter = dead_letter_url(&source_url, &dead_letter_arn).ok_or_else(|| {
         SqsError::Refused(format!(

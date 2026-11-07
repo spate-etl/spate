@@ -673,10 +673,7 @@ impl SqsFeed {
 }
 
 fn gone(receipt: Receipt) -> FeedError {
-    FeedError::new(
-        FeedErrorKind::Gone,
-        format!("{receipt} no longer holds its message"),
-    )
+    FeedError::gone(receipt, "SQS feed")
 }
 
 impl Feed for SqsFeed {

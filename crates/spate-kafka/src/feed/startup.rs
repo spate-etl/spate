@@ -22,7 +22,6 @@ use crate::sink::SinkContext;
 use rdkafka::admin::{AdminClient, AdminOptions, ResourceSpecifier};
 use rdkafka::error::{KafkaError, RDKafkaErrorCode};
 use rdkafka::producer::{Producer, ThreadedProducer};
-use spate_core::backoff::Backoff;
 use spate_core::clock::SyncClock;
 use spate_core::error::ErrorClass;
 use spate_core::hash::FastMap;
@@ -37,9 +36,9 @@ use tokio::sync::oneshot;
 /// How long the checks may take, every step included.
 pub(crate) const CONNECT_BOUND: Duration = Duration::from_secs(30);
 
-/// How long a metadata read's calls wait: 100 ms at first, doubling after
-/// each call whose request went unanswered; see [`next_slice`].
-const SLICES: Backoff = Backoff::new(Duration::from_millis(100), CONNECT_BOUND);
+/// How long a metadata read's calls wait while no broker is usable; see
+/// [`next_slice`].
+const SLICE: Duration = Duration::from_millis(100);
 
 /// The configuration entry naming a topic's cleanup policies.
 const CLEANUP_POLICY: &str = "cleanup.policy";
@@ -100,9 +99,11 @@ pub(crate) trait TopicAdmin: Send + Sync {
 /// rejection. Every topic's metadata is read before any configuration, so a
 /// rejection is met first on `reader`.
 ///
-/// Each metadata read runs on a thread of its own, which stops within one
-/// call of [`next_slice`] once nothing awaits its answer. Dropping `Brokers`
-/// joins those threads, so both clients are closed when the drop returns.
+/// Each metadata read runs on a thread of its own and ends at most one
+/// [`SLICE`] past `limit` from when `Brokers` is built. While no broker is
+/// usable, it stops within one [`SLICE`] once nothing awaits its answer.
+/// Dropping `Brokers` joins those threads, so both clients are closed when
+/// the drop returns.
 pub(crate) struct Brokers {
     // Declared first, so the reads are joined before the fields below drop
     // and the last reference to `reader` drops on the thread dropping
@@ -110,44 +111,47 @@ pub(crate) struct Brokers {
     reads: Mutex<Vec<ThreadHandle<()>>>,
     admin: Arc<AdminClient<SpateContext<()>>>,
     reader: Arc<ThreadedProducer<SinkContext>>,
+    limit: Duration,
+    deadline: Instant,
 }
 
 impl Brokers {
-    /// Wraps `admin` and `reader`.
+    /// Wraps `admin` and `reader`, for checks that end `limit` from now.
     pub(crate) fn new(
         admin: AdminClient<SpateContext<()>>,
         reader: ThreadedProducer<SinkContext>,
+        limit: Duration,
     ) -> Brokers {
         Brokers {
             reads: Mutex::new(Vec::new()),
             admin: Arc::new(admin),
             reader: Arc::new(reader),
+            limit,
+            // One slice past the limit, so the bound, which names the read
+            // under way, ends the checks before the read gives up.
+            deadline: Instant::now() + limit + SLICE,
         }
     }
 }
 
-/// How long the next call of a metadata read waits, after a call of
-/// `slice` that failed with `code` and with `left` before the read's
-/// deadline. `None` ends the read with the call's error.
+/// How long the next call of a metadata read waits, after a call that
+/// failed with `code` and with `left` before the read's deadline. `None`
+/// ends the read with the call's error.
 ///
-/// librdkafka answers `BrokerTransportFailure` when no broker became
-/// usable within the call, having sent nothing, so the slice stays short
-/// and a read that nothing awaits stops soon. `OperationTimedOut` means a
-/// request went out and its answer did not come in time; the slice takes
-/// the next step of `slices`, so that a slow broker's answer can still
-/// arrive within the bound.
-fn next_slice(
-    slice: Duration,
-    code: RDKafkaErrorCode,
-    left: Duration,
-    slices: &mut Backoff,
-) -> Option<Duration> {
-    let next = match code {
-        RDKafkaErrorCode::BrokerTransportFailure => slice,
-        RDKafkaErrorCode::OperationTimedOut => slices.next_delay(),
-        _ => return None,
-    };
-    (!left.is_zero()).then(|| next.min(left))
+/// librdkafka answers `BrokerTransportFailure` when no broker became usable
+/// within the call, having sent nothing, so the next call is short and a
+/// read that nothing awaits stops soon. `OperationTimedOut` means a request
+/// went out and its answer did not come in time. That answer is lost, so the
+/// next call waits for the rest of the time and sends one more request.
+fn next_slice(code: RDKafkaErrorCode, left: Duration) -> Option<Duration> {
+    if left.is_zero() {
+        return None;
+    }
+    match code {
+        RDKafkaErrorCode::BrokerTransportFailure => Some(SLICE.min(left)),
+        RDKafkaErrorCode::OperationTimedOut => Some(left),
+        _ => None,
+    }
 }
 
 fn admin_error(e: &KafkaError) -> AdminError {
@@ -168,20 +172,19 @@ impl TopicAdmin for Brokers {
         }
         let reader = Arc::clone(&self.reader);
         let name = topic.to_owned();
+        let deadline = self.deadline;
         let (tx, rx) = oneshot::channel();
         // `fetch_metadata` blocks and cannot be cancelled, so the read runs
-        // on a thread of its own in short calls, and stops between calls
-        // once the future below, and with it `rx`, has been dropped.
+        // on a thread of its own, and stops between calls once the future
+        // below, and with it `rx`, has been dropped.
         let spawned = spawn_thread("spate-kafka-feed-check", move || {
-            let deadline = Instant::now() + CONNECT_BOUND;
-            let mut slices = SLICES;
-            let mut slice = slices.next_delay();
+            let mut slice = SLICE.min(deadline.saturating_duration_since(Instant::now()));
             let read = loop {
                 match reader.client().fetch_metadata(Some(&name), slice) {
                     Err(e) => {
                         let code = e.rdkafka_error_code().unwrap_or(RDKafkaErrorCode::Fail);
                         let left = deadline.saturating_duration_since(Instant::now());
-                        match next_slice(slice, code, left, &mut slices) {
+                        match next_slice(code, left) {
                             Some(next) if !tx.is_closed() => slice = next,
                             _ => break Err(admin_error(&e)),
                         }
@@ -470,8 +473,8 @@ pub(crate) async fn check(
 }
 
 /// Run [`check`] on `topics` through `brokers`, on the runtime `io`, under
-/// [`bounded`] with `limit` on `clock` and `brokers`' rejection watch. Both
-/// clients in `brokers` are closed when it returns.
+/// [`bounded`] with `brokers`' limit on `clock` and its rejection watch.
+/// Both clients in `brokers` are closed when it returns.
 ///
 /// # Errors
 ///
@@ -486,10 +489,10 @@ pub(crate) fn run_checks(
     topics: &Topics,
     io: &tokio::runtime::Handle,
     scope: Scope,
-    limit: Duration,
     clock: SyncClock,
 ) -> Result<Checked, KafkaFeedError> {
     let step = Mutex::new("starting".to_owned());
+    let limit = brokers.limit;
     let brokers = Arc::new(brokers);
     let watched = Arc::clone(&brokers);
     io.block_on(bounded(
@@ -1177,7 +1180,7 @@ mod tests {
         let hooks = crate::sink::SinkHooks::detached(SyncClock::new(Arc::clone(&clock) as _));
         let broker = crate::testutil::refused_broker();
         let properties = [("bootstrap.servers", broker.as_str())];
-        let brokers = Brokers::new(raw(&properties, ()), raw(&properties, hooks));
+        let brokers = Brokers::new(raw(&properties, ()), raw(&properties, hooks), CONNECT_BOUND);
         brokers.reader.context().note_error(C::SSL, ALERT_40);
         clock.advance(Duration::from_secs(3600));
         assert_eq!(brokers.rejection().as_deref(), Some(ALERT_40));
@@ -1379,7 +1382,7 @@ mod tests {
         use crate::client::testing::raw;
         let clock = SyncClock::new(TestClock::frozen() as _);
         let hooks = crate::sink::SinkHooks::detached(clock.clone());
-        let brokers = Brokers::new(raw(properties, ()), raw(properties, hooks));
+        let brokers = Brokers::new(raw(properties, ()), raw(properties, hooks), limit);
         let reader = Arc::downgrade(&brokers.reader);
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
@@ -1389,7 +1392,6 @@ mod tests {
                 &topics(),
                 io.handle(),
                 Scope::All,
-                limit,
                 clock,
             ));
         });
@@ -1420,42 +1422,79 @@ mod tests {
         }
     }
 
-    /// Pins how a metadata read's next call waits after each error: as
-    /// long again while no broker is usable, twice as long after each
-    /// request that went unanswered, never past the read's deadline, and
-    /// not at all after any other error or once the deadline has passed.
+    /// Pins how a metadata read's next call waits after each error: one
+    /// [`SLICE`] while no broker is usable, the rest of the time after a
+    /// request went unanswered, never past the deadline, and not at all
+    /// after any other error or once the deadline has passed.
     #[test]
     fn a_metadata_read_paces_its_calls_by_the_error() {
         let ms = Duration::from_millis;
         let left = Duration::from_secs(30);
-        let mut slices = SLICES;
-        let first = slices.next_delay();
-        assert_eq!(first, ms(100));
         let unusable = C::BrokerTransportFailure;
-        assert_eq!(next_slice(first, unusable, left, &mut slices), Some(first));
         let unanswered = C::OperationTimedOut;
-        assert_eq!(
-            next_slice(first, unanswered, left, &mut slices),
-            Some(ms(200))
-        );
-        assert_eq!(
-            next_slice(ms(200), unanswered, left, &mut slices),
-            Some(ms(400))
-        );
-        assert_eq!(
-            next_slice(ms(400), unusable, ms(30), &mut slices),
-            Some(ms(30))
-        );
-        assert_eq!(
-            next_slice(ms(400), unanswered, ms(150), &mut slices),
-            Some(ms(150))
-        );
+        assert_eq!(next_slice(unusable, left), Some(SLICE));
+        assert_eq!(next_slice(unusable, ms(30)), Some(ms(30)));
+        assert_eq!(next_slice(unanswered, left), Some(left));
         for code in [unusable, unanswered] {
-            let got = next_slice(first, code, Duration::ZERO, &mut slices);
-            assert_eq!(got, None, "{code:?}");
+            assert_eq!(next_slice(code, Duration::ZERO), None, "{code:?}");
         }
         for code in [C::Fail, C::TopicAuthorizationFailed, C::LeaderNotAvailable] {
-            assert_eq!(next_slice(first, code, left, &mut slices), None, "{code:?}");
+            assert_eq!(next_slice(code, left), None, "{code:?}");
+        }
+    }
+
+    /// Pins that a metadata read ends by the deadline its [`Brokers`] was
+    /// built with, while its answer is still awaited, so no read outlasts
+    /// the checks' bound. Regression for #1809.
+    #[test]
+    fn a_metadata_read_ends_by_the_deadline_of_its_brokers() {
+        use crate::client::testing::raw;
+        let broker = crate::testutil::refused_broker();
+        let properties = [("bootstrap.servers", broker.as_str())];
+        let hooks = crate::sink::SinkHooks::detached(SyncClock::new(TestClock::frozen() as _));
+        let brokers = Brokers::new(
+            raw(&properties, ()),
+            raw(&properties, hooks),
+            Duration::ZERO,
+        );
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let io = multi_thread();
+            let _ = tx.send(io.block_on(brokers.metadata(WORK)).map_err(|e| e.code));
+        });
+        match rx.recv_timeout(DEADLINE) {
+            Ok(Err(C::BrokerTransportFailure)) => {}
+            other => panic!("expected a transport failure within {DEADLINE:?}, got {other:?}"),
+        }
+    }
+
+    /// Pins that checks ending on their own, before any rejection or the
+    /// bound, return at once on a clock that never moves, with the
+    /// rejection watch and what it holds already dropped.
+    #[test]
+    fn checks_that_end_first_return_with_the_watch_dropped() {
+        let clock = SyncClock::new(TestClock::frozen() as _);
+        let held = Arc::new(());
+        let watched = Arc::downgrade(&held);
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let io = multi_thread();
+            let step = Mutex::new("starting".to_owned());
+            let got = io.block_on(bounded(
+                &step,
+                Duration::from_secs(600),
+                clock,
+                move || {
+                    let _ = &held;
+                    None
+                },
+                async { Ok::<_, KafkaFeedError>(()) },
+            ));
+            let _ = tx.send((got, watched.upgrade().is_none()));
+        });
+        match rx.recv_timeout(DEADLINE) {
+            Ok((Ok(()), true)) => {}
+            other => panic!("expected the checks' result within {DEADLINE:?}, got {other:?}"),
         }
     }
 

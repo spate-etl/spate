@@ -810,11 +810,10 @@ fn check_topics(
             KafkaFeedError::Refused(format!("creating the metadata client: {reason}"))
         })?;
     startup::run_checks(
-        startup::Brokers::new(admin, reader),
+        startup::Brokers::new(admin, reader, bound),
         &Topics::new(config),
         io,
         scope,
-        bound,
         clock,
     )
 }

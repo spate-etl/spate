@@ -66,7 +66,7 @@ const GROUP_HEALTHY: &str = "group_healthy";
 const PARTITION_FETCH_QUEUE_MESSAGES: &str = "partition_fetch_queue_messages";
 const PARTITION_LAG_STORED_RECORDS: &str = "partition_lag_stored_records";
 const PARTITION_NOT_FETCHING: &str = "partition_not_fetching";
-const L_BROKER: &str = "broker";
+pub(crate) const L_BROKER: &str = "broker";
 const L_PARTITION: &str = "partition";
 const L_TOPIC: &str = "topic";
 /// Which client a statistics series describes: one of a feed's two clients,
@@ -151,14 +151,16 @@ struct BrokerHandles {
     throttle: Option<WindowGauges>,
 }
 
+/// One broker's average and p99 gauges for a librdkafka latency window,
+/// shared by the source and sink statistics.
 #[derive(Debug)]
-struct WindowGauges {
+pub(crate) struct WindowGauges {
     avg: Gauge,
     p99: Gauge,
 }
 
 impl WindowGauges {
-    fn new(
+    pub(crate) fn new(
         meter: &Meter,
         extra: &[(&'static str, SharedString)],
         broker: &str,
@@ -172,9 +174,14 @@ impl WindowGauges {
         }
     }
 
-    fn set(&self, avg_secs: f64, p99_secs: f64) {
+    pub(crate) fn set(&self, avg_secs: f64, p99_secs: f64) {
         self.avg.set(avg_secs);
         self.p99.set(p99_secs);
+    }
+
+    /// Set both gauges to zero, for a broker that left the snapshot.
+    pub(crate) fn zero(&self) {
+        self.set(0.0, 0.0);
     }
 }
 
@@ -186,6 +193,14 @@ impl BrokerHandles {
             tx_errors: meter.counter(BROKER_TX_ERRORS_TOTAL, &labels),
             rtt: None,
             throttle: None,
+        }
+    }
+
+    /// Read the broker as down, with its window gauges at zero.
+    fn zero(&self) {
+        self.up.set(0.0);
+        for window in [&self.rtt, &self.throttle].into_iter().flatten() {
+            window.zero();
         }
     }
 }
@@ -455,9 +470,15 @@ impl KafkaStatsMetrics {
         self.broker_req_timeouts.absolute(timeouts);
         self.broker_connects.absolute(connects);
         self.broker_disconnects.absolute(disconnects);
-        // Stop updating series for brokers that left the snapshot; the
-        // exporter keeps rendering the last value until its idle timeout.
-        self.brokers.retain(|name, _| seen.contains(name.as_str()));
+        // The exporter renders a series for the life of the process, so a
+        // broker that left the snapshot is zeroed before its handles go.
+        self.brokers.retain(|name, handles| {
+            let present = seen.contains(name.as_str());
+            if !present {
+                handles.zero();
+            }
+            present
+        });
     }
 
     /// Translate the per-partition half of one snapshot.
@@ -822,6 +843,44 @@ mod tests {
             &format!("spate_kafka_broker_rtt_p99_seconds{{{label}}} 0.003"),
             &format!("spate_kafka_broker_throttle_avg_seconds{{{label}}} 0.25"),
             &format!("spate_kafka_broker_throttle_p99_seconds{{{label}}} 0.5"),
+        ] {
+            assert!(rendered.contains(needle), "missing `{needle}`:\n{rendered}");
+        }
+    }
+
+    /// A broker that leaves the snapshot reads down, with its window gauges
+    /// at zero, since the exporter renders a series for the life of the
+    /// process. Regression for #1523.
+    #[test]
+    fn a_departed_broker_reads_down() {
+        let rendered = render_metrics(|| {
+            let mut m = KafkaStatsMetrics::new(meter(), false);
+            let stay = broker("k1:9092/1", "learned", 1);
+            let mut gone = broker("k2:9092/2", "learned", 2);
+            gone.rtt = Some(window(1_500, 3_000, 10));
+            gone.throttle = Some(window(250, 500, 10));
+            let both = Statistics {
+                brokers: HashMap::from([
+                    (stay.name.clone(), stay.clone()),
+                    (gone.name.clone(), gone),
+                ]),
+                ..Default::default()
+            };
+            m.update(&both, "orders", &owned(&[0, 1]));
+            let one = Statistics {
+                brokers: HashMap::from([(stay.name.clone(), stay)]),
+                ..Default::default()
+            };
+            m.update(&one, "orders", &owned(&[0, 1]));
+        });
+        let label = format!(r#"{STD},broker="k2:9092/2""#);
+        for needle in [
+            &format!("spate_kafka_broker_up{{{STD},broker=\"k1:9092/1\"}} 1") as &str,
+            &format!("spate_kafka_broker_up{{{label}}} 0"),
+            &format!("spate_kafka_broker_rtt_avg_seconds{{{label}}} 0\n"),
+            &format!("spate_kafka_broker_rtt_p99_seconds{{{label}}} 0\n"),
+            &format!("spate_kafka_broker_throttle_avg_seconds{{{label}}} 0\n"),
+            &format!("spate_kafka_broker_throttle_p99_seconds{{{label}}} 0\n"),
         ] {
             assert!(rendered.contains(needle), "missing `{needle}`:\n{rendered}");
         }

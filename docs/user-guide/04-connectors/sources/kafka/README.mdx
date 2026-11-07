@@ -317,7 +317,8 @@ HDR-histogram rolling-window estimates, converted to seconds; they are
 per-broker sampled quantiles and **cannot be aggregated** across brokers or
 processes (`max()` is the only defensible cross-series operator). Series backed
 by data librdkafka has not produced yet (an empty latency window, an unknown
-lag) are absent rather than `0`.
+lag) are absent rather than `0`. A broker that leaves librdkafka's statistics
+keeps its series, with `broker_up` and its latency gauges at `0`.
 
 Standard labels (`pipeline`, `component`, `component_type`) are on all of
 them; extras, `broker` among them, are noted per family.

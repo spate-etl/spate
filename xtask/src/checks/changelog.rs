@@ -867,7 +867,7 @@ pub(crate) fn build(root: &Path, explain: bool, version: &str) -> Outcome {
     }
 
     let today = today(root)?;
-    let previous = previous_tag(root);
+    let previous = previous_tag(root)?;
     let range = previous
         .as_ref()
         .map_or_else(|| "HEAD".to_owned(), |tag| format!("{tag}..HEAD"));
@@ -1807,14 +1807,15 @@ fn fragments_of(root: &Path, kind: &str) -> Vec<String> {
 /// # Errors
 ///
 /// When `changelog.d/` cannot be read, which [`fragment_names`] would report
-/// as holding none, or when the requirement comparison fails.
+/// as holding none, or when the tag lookup or the requirement comparison
+/// fails.
 pub(crate) fn nothing_to_release(root: &Path) -> Result<bool, Error> {
     let dir = root.join(FRAGMENTS);
     std::fs::read_dir(&dir).map_err(|e| Error::msg(format!("{}: {e}", dir.display())))?;
     if !fragment_names(root).is_empty() {
         return Ok(false);
     }
-    Ok(requirements::entry(root, previous_tag(root).as_deref())?.is_none())
+    Ok(requirements::entry(root, previous_tag(root)?.as_deref())?.is_none())
 }
 
 /// Whether git has this path in the index.
@@ -1826,10 +1827,10 @@ fn tracked(root: &Path, file: &str) -> bool {
     )
 }
 
-/// The newest release tag. `v[0-9]*` keeps a non-release tag such as `vnext`
-/// from standing in for one.
-fn previous_tag(root: &Path) -> Option<String> {
-    capture(root, &["tag", "--list", "v[0-9]*", "--sort=-v:refname"])
+/// The newest release tag, or `None` in a repository with no release yet.
+fn previous_tag(root: &Path) -> Result<Option<String>, Error> {
+    let tag = semver_checks::last_tag(root)?;
+    Ok((!tag.is_empty()).then_some(tag))
 }
 
 /// The names on the commits in `range`, bots left out.
@@ -1887,7 +1888,7 @@ pub(crate) fn breaking_announced(root: &Path) -> Result<bool, Error> {
 
     let manifest = run::capture(root, &Step::new("git", ["show", "HEAD:Cargo.toml"]))?;
     let version = semver_checks::workspace_version(&manifest);
-    let Some(tag) = previous_tag(root) else {
+    let Some(tag) = previous_tag(root)? else {
         return Ok(false);
     };
     if version.is_empty() || tag == format!("v{version}") {

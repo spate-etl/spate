@@ -1,0 +1,8 @@
+# rustc: rustc 1.99.1 (58cf8f9c3 2026-10-13)
+# features: none
+# arch: x86_64
+# counts: Rust global allocator only; allocations C code makes through malloc (libzstd) are not counted; steady state after one warm pass
+case	allocs	reallocs	bytes
+keyed	1	0	560000
+keyless	1	0	560000
+stamped_headers	10001	0	1840000

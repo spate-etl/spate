@@ -255,8 +255,8 @@ fn parse_url(field: &str, value: &str) -> Result<Url, ConfigError> {
         Ok((ObjectStoreScheme::AmazonS3 | ObjectStoreScheme::Local, _))
     ) {
         return Err(ConfigError::Validation(format!(
-            "{field}: the source reads s3://, s3a://, file://, and https:// on an \
-             amazonaws.com or r2.cloudflarestorage.com host; for another S3-compatible \
+            "{field}: the source reads s3://, s3a://, file://, and https:// on an S3 \
+             or R2 endpoint host; for another S3-compatible \
              store, write s3://<bucket>/<prefix> with the endpoint under the source's \
              `store`, got {}",
             redact::url(value)

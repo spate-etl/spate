@@ -84,6 +84,7 @@ pub use feed::FeedSection;
 /// [`bytes`]: crate::bytes
 pub use serde_yaml::Value as YamlValue;
 
+use crate::feed::memory;
 use bytesize::ByteSize;
 use serde::Deserialize;
 use std::borrow::Cow;
@@ -685,7 +686,7 @@ impl PipelineConfig {
             }
         }
         self.reject_stray_chunk()?;
-        self.reject_location_on_memory()?;
+        self.reject_keys_on_memory()?;
         self.reject_bad_settling_window()?;
         // Resolve every declared sink's `chunk:` block now, so a malformed
         // block is rejected at load, including for a `sinks:` entry this
@@ -732,28 +733,24 @@ impl PipelineConfig {
         Ok(())
     }
 
-    /// Reject a `location` on the in-process feed, which keeps no state
-    /// outside the process. Split out of
+    /// Reject the `feed:` keys the in-process feed cannot honor. Split out of
     /// [`validate`](Self::validate) so the runtime, which a programmatic
     /// config reaches without validation, enforces it too.
-    pub(crate) fn reject_location_on_memory(&self) -> Result<(), ConfigError> {
-        if let Some(feed) = &self.feed
-            && feed.location.is_some()
-            && feed.backend().type_tag() == "memory"
-        {
-            return Err(ConfigError::Validation(
-                "the in-process `memory` feed takes no `feed.location`; remove it".into(),
-            ));
+    pub(crate) fn reject_keys_on_memory(&self) -> Result<(), ConfigError> {
+        match &self.feed {
+            Some(feed) if feed.backend().type_tag() == memory::BACKEND => {
+                memory::refuse_section_keys(feed)
+            }
+            _ => Ok(()),
         }
-        Ok(())
     }
 
-    /// Reject a `feed.settling_window` on the in-process feed, whose exact
-    /// counts need no window, and one outside 20 s to 24 h: shorter than the
+    /// Reject a `feed.settling_window` outside 20 s to 24 h: shorter than the
     /// longest gap between the end check's reads, or long enough to overflow
     /// a deadline. Split out of [`validate`](Self::validate) so the runtime,
     /// which a programmatic config reaches without validation, enforces it
-    /// too.
+    /// too. It passes an in-range window on the in-process feed, which
+    /// [`reject_keys_on_memory`](Self::reject_keys_on_memory) refuses.
     pub(crate) fn reject_bad_settling_window(&self) -> Result<(), ConfigError> {
         const SETTLING_WINDOW: DurationBounds =
             DurationBounds::at_least(crate::feed::END_CHECK_INTERVAL).at_most(ONE_DAY);
@@ -763,13 +760,6 @@ impl PipelineConfig {
         let Some(window) = feed.settling_window else {
             return Ok(());
         };
-        if feed.backend().type_tag() == "memory" {
-            return Err(ConfigError::Validation(
-                "the in-process `memory` feed counts its units exactly and takes no settling \
-                 window; remove `feed.settling_window`"
-                    .into(),
-            ));
-        }
         check_duration(window, SETTLING_WINDOW)
             .map_err(|e| ConfigError::Validation(format!("`feed.settling_window` {e}")))
     }

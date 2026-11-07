@@ -8,7 +8,7 @@ use crate::backpressure::{BackpressureParams, InflightBudget, WatermarkControlle
 use crate::checkpoint::Checkpointer;
 use crate::clock::{Clock, SystemClock};
 use crate::config::{MetricsExporter, PinningMode, PipelineConfig};
-use crate::feed::memory::MemoryFeed;
+use crate::feed::memory::{self, MemoryFeed};
 use crate::feed::{
     DEAD_LETTER_READ_INTERVAL, DeadLetterSampler, Feed, FeedMetricsCtx, FeedOrigin, MeteredFeed,
     STOP_RESERVE,
@@ -351,7 +351,7 @@ impl<S: Source + 'static> PipelineRuntime<S> {
             ));
         }
         self.config
-            .reject_location_on_memory()
+            .reject_keys_on_memory()
             .map_err(|e| StartError::Config(e.to_string()))?;
         self.config
             .reject_bad_settling_window()
@@ -370,7 +370,7 @@ impl<S: Source + 'static> PipelineRuntime<S> {
             (Some(section), given) => {
                 let (feed, origin) = match given {
                     Some(feed) => (feed, FeedOrigin::Given),
-                    None if section.backend().type_tag() == "memory" => {
+                    None if section.backend().type_tag() == memory::BACKEND => {
                         let feed = MemoryFeed::from_section(section)
                             .map_err(|e| StartError::Config(e.to_string()))?;
                         (Arc::new(feed) as Arc<dyn Feed>, FeedOrigin::Section)

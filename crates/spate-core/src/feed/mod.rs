@@ -73,6 +73,7 @@ use crate::error::ErrorClass;
 use crate::metrics::Meter;
 use std::fmt;
 use std::future::Future;
+use std::num::NonZeroU32;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -90,6 +91,10 @@ pub use signal::ReaderSignal;
 /// The settling window a bounded job waits out when its `feed:` section sets
 /// none: five minutes.
 pub const DEFAULT_SETTLING_WINDOW: Duration = Duration::from_secs(5 * 60);
+
+/// The delivery on which a failed unit is dead-lettered when its `feed:`
+/// section sets no `attempt_cap`: the tenth.
+pub const DEFAULT_ATTEMPT_CAP: NonZeroU32 = NonZeroU32::new(10).expect("non-zero");
 
 /// How long before the drain deadline a stopping worker stops reading the
 /// units of a feed that [`hands_back`](Feed::hands_back): five seconds. The
@@ -255,6 +260,16 @@ impl FeedError {
             kind,
             reason: reason.into(),
         }
+    }
+
+    /// A [`Gone`](FeedErrorKind::Gone) error for `receipt`, which the feed
+    /// named by `held_by` (such as `"in-process feed"`) no longer holds.
+    #[must_use]
+    pub fn gone(receipt: Receipt, held_by: &str) -> FeedError {
+        FeedError::new(
+            FeedErrorKind::Gone,
+            format!("{receipt} is not held by the {held_by}"),
+        )
     }
 
     /// Map to the framework error taxonomy.
@@ -963,5 +978,15 @@ mod tests {
             .unwrap();
         assert!(rt.block_on(&mut confirmation).is_ok());
         assert!(matches!(confirmation.try_outcome(), Some(Ok(()))));
+    }
+
+    /// Pins that a Gone error names the receipt and the feed that no longer
+    /// holds it, and classes as fatal.
+    #[test]
+    fn a_gone_error_names_the_receipt_and_its_feed() {
+        let err = FeedError::gone(Receipt(7), "scripted feed");
+        assert_eq!(err.kind, FeedErrorKind::Gone);
+        assert_eq!(err.reason, "receipt 7 is not held by the scripted feed");
+        assert_eq!(err.class(), ErrorClass::Fatal);
     }
 }

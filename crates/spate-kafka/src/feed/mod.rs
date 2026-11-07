@@ -414,11 +414,7 @@ impl Core {
                         // Queued for the consumer thread to send: `Core`
                         // holds no producer, since the producer's context
                         // holds `Core`.
-                        let due = self.clock.now();
-                        let mut st = self.lock();
-                        if st.fatal.is_none() && !self.stopped() {
-                            st.resends.push((due, Write::Tombstone(tombstone)));
-                        }
+                        self.queue_resend(self.clock.now(), Write::Tombstone(tombstone));
                     }
                 }
                 events::moved(self.event_metrics().as_deref(), &moving, &*self.clock);
@@ -448,6 +444,17 @@ impl Core {
                 events::tombstoned();
             }
         }
+    }
+
+    /// Queues `write` for the consumer thread to send at `due`, unless the
+    /// feed has stopped or latched. Returns whether it queued the write.
+    fn queue_resend(&self, due: Instant, write: Write) -> bool {
+        let mut st = self.lock();
+        let queued = st.fatal.is_none() && !self.stopped();
+        if queued {
+            st.resends.push((due, write));
+        }
+        queued
     }
 
     fn failed(&self, mut write: Write, failure: Failure) {
@@ -484,14 +491,11 @@ impl Core {
                 // A deadline past the `Instant` range is due at once. The
                 // overflow panic would end the thread that settled the write.
                 let due = now.checked_add(retry_in).unwrap_or(now);
-                let mut st = self.lock();
-                if st.fatal.is_some() || self.stopped() {
-                    return;
-                }
                 // A resent attempt write keeps its share of `admitting`
                 // until it settles or `take_due` drops it.
-                st.resends.push((due, write));
-                drop(st);
+                if !self.queue_resend(due, write) {
+                    return;
+                }
                 tracing::warn!(
                     %topic,
                     error = %failure.reason,

@@ -85,7 +85,7 @@ fn ended(root: &Path, step: &Step<'_>, budget: Option<Duration>) -> Result<Ended
             run::complete(root, step, Streams::Inherit)?.code,
         ));
     };
-    let done = run::complete_within(root, step, Streams::Inherit, budget)?;
+    let done = run::complete_within(root, step, budget)?;
     Ok(if done.stopped {
         Ended::Stopped(budget)
     } else {

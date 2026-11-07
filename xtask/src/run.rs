@@ -252,19 +252,33 @@ pub(crate) struct Bounded {
 /// SIGKILL.
 const GRACE: Duration = Duration::from_secs(60);
 
-/// Runs one step as [`complete`] does, and sends the child SIGINT when
+/// Runs one step with both streams inherited, and sends the child SIGINT when
 /// `budget` runs out, then SIGKILL if it is still running [`GRACE`] later.
 /// Blocks until the child has exited either way.
-#[expect(
-    clippy::disallowed_methods,
-    reason = "the waiter thread ends when the child exits, which SIGKILL bounds"
-)]
 pub(crate) fn complete_within(
     root: &Path,
     step: &Step<'_>,
-    streams: Streams,
     budget: Duration,
 ) -> Result<Bounded, Error> {
+    stop_within(root, step, budget, "INT", GRACE)
+}
+
+/// [`complete_within`] with the first signal and the grace before SIGKILL as
+/// arguments.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "inherited streams leave the waiter only the child's exit to wait on, which SIGKILL bounds"
+)]
+fn stop_within(
+    root: &Path,
+    step: &Step<'_>,
+    budget: Duration,
+    first: &str,
+    grace: Duration,
+) -> Result<Bounded, Error> {
+    // Collected or relayed streams would make the waiter read to EOF, which a
+    // grandchild holding the pipes delays past the SIGKILL.
+    let streams = Streams::Inherit;
     let child = spawn(root, step, streams)?;
     let pid = child.id().to_string();
     let program = step.program.to_owned();
@@ -291,8 +305,8 @@ pub(crate) fn complete_within(
         Err(RecvTimeoutError::Disconnected) => return Err(lost()),
         Err(RecvTimeoutError::Timeout) => {}
     }
-    signal("INT");
-    let done = match rx.recv_timeout(GRACE) {
+    signal(first);
+    let done = match rx.recv_timeout(grace) {
         Ok(done) => done,
         Err(RecvTimeoutError::Disconnected) => return Err(lost()),
         Err(RecvTimeoutError::Timeout) => {
@@ -517,9 +531,21 @@ mod tests {
     fn a_child_running_past_its_budget_is_stopped() {
         let root = crate::repo_root().unwrap();
         let step = Step::new("sleep", ["1000"]);
-        let got = complete_within(&root, &step, Streams::Discard, Duration::ZERO).unwrap();
+        let got = complete_within(&root, &step, Duration::ZERO).unwrap();
         assert!(got.stopped);
         assert_eq!(got.completed.code, 128 + 2);
+    }
+
+    /// A child that outlives the first signal by its grace is sent SIGKILL, so
+    /// the wait ends. SIGCONT stands in for a SIGINT the child ignores.
+    #[cfg(unix)]
+    #[test]
+    fn a_child_that_survives_the_first_signal_is_killed() {
+        let root = crate::repo_root().unwrap();
+        let step = Step::new("sleep", ["1000"]);
+        let got = stop_within(&root, &step, Duration::ZERO, "CONT", Duration::ZERO).unwrap();
+        assert!(got.stopped);
+        assert_eq!(got.completed.code, 128 + 9);
     }
 
     /// A child that exits within its budget is reported as finished, with its
@@ -528,12 +554,10 @@ mod tests {
     #[test]
     fn a_child_within_its_budget_finishes_with_its_own_code() {
         let root = crate::repo_root().unwrap();
-        let step = Step::new("sh", ["-c", "printf 'out'; exit 7"]);
-        let budget = Duration::from_secs(3600);
-        let got = complete_within(&root, &step, Streams::Collect, budget).unwrap();
+        let step = Step::new("sh", ["-c", "exit 7"]);
+        let got = complete_within(&root, &step, Duration::from_secs(3600)).unwrap();
         assert!(!got.stopped);
         assert_eq!(got.completed.code, 7);
-        assert_eq!(got.completed.stdout, "out");
     }
 
     /// A child killed by a signal reports the status a shell would, so nothing

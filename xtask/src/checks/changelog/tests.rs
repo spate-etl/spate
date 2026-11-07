@@ -2878,15 +2878,15 @@ fn a_shorter_backtick_run_inside_a_code_span_does_not_close_it() {
 fn a_block_opened_after_a_paragraph_is_named() {
     assert_eq!(
         wrapped_blocks("A para\n# h\n"),
-        vec![(1, 2, Some("heading"))]
+        vec![(1, 2, Some("a heading"))]
     );
-    assert_eq!(wrapped_blocks("A para\n> q\n"), vec![(1, 2, Some("quote"))]);
+    assert_eq!(wrapped_blocks("A para\n> q\n"), vec![(1, 2, Some("a quote"))]);
     assert_eq!(
         wrapped_blocks("A para\n```\nx\n```\n"),
-        vec![(1, 2, Some("code block"))]
+        vec![(1, 2, Some("a code block"))]
     );
     assert_eq!(
         wrapped_blocks("A para\n<div>x</div>\n"),
-        vec![(1, 2, Some("HTML block"))]
+        vec![(1, 2, Some("an HTML block"))]
     );
 }

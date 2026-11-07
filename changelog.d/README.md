@@ -116,9 +116,9 @@ implementation, including readers whose first language is not English.
   mid-sentence. `cargo xtask tidy changelog` parses each fragment as GitHub
   Flavored Markdown. It refuses a paragraph, list item, blockquote or heading
   whose text spans lines, including a hard break from two trailing spaces or a
-  trailing `\`. It also refuses any of those blocks that starts on the line
-  after a paragraph. Lines inside code blocks, tables and HTML blocks are not
-  affected. Write each list item on one line too.
+  trailing `\`. It also refuses a list, heading, quote, code block or HTML block
+  that starts on the line after a paragraph. Lines inside code blocks, tables
+  and HTML blocks are not affected. Write each list item on one line too.
 - **Usually write three to five sentences.** A simple change can take fewer;
   a breaking change may need additional paragraphs for migration details.
 - No pull request number and no author. The number is derived at release time

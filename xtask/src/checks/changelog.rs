@@ -675,7 +675,7 @@ fn wrapped_fragments(root: &Path) -> Vec<(String, bool)> {
             out.push(match opened {
                 Some(block) => (
                     format!(
-                        "{file}:{first}: a {block} opens on line {last}, the line after this paragraph."
+                        "{file}:{first}: {block} opens on line {last}, the line after this paragraph."
                     ),
                     true,
                 ),
@@ -774,11 +774,11 @@ fn wrapped_blocks(text: &str) -> Vec<(usize, usize, Option<&'static str>)> {
         if let Some(((first, last), broken)) = ended.take() {
             let opened = line(range.start);
             let block = match event {
-                Event::Start(Tag::List(_)) => Some("list"),
-                Event::Start(Tag::Heading { .. }) => Some("heading"),
-                Event::Start(Tag::BlockQuote(_)) => Some("quote"),
-                Event::Start(Tag::CodeBlock(_)) => Some("code block"),
-                Event::Start(Tag::HtmlBlock) => Some("HTML block"),
+                Event::Start(Tag::List(_)) => Some("a list"),
+                Event::Start(Tag::Heading { .. }) => Some("a heading"),
+                Event::Start(Tag::BlockQuote(_)) => Some("a quote"),
+                Event::Start(Tag::CodeBlock(_)) => Some("a code block"),
+                Event::Start(Tag::HtmlBlock) => Some("an HTML block"),
                 _ => None,
             };
             if opened == last + 1 && block.is_some() {

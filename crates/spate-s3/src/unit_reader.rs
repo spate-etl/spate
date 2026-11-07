@@ -398,6 +398,11 @@ impl UnitReader {
     /// A fatal answer from the feed. A fatal hand-back leaves the units not
     /// yet handed back held, for the feed's close.
     pub(crate) fn stop_reading(&mut self) -> Result<(), SourceError> {
+        // A stop exits `Completed` with units unread, and a run the job's end
+        // drained does not come here, so this line tells the two apart.
+        if self.end.as_ref().is_some_and(|end| !end.stalled()) {
+            tracing::info!("the source stopped before this worker saw the bounded job end");
+        }
         if !self.hands_back {
             return self.renew_error.take().map_or(Ok(()), Err);
         }
@@ -2507,6 +2512,52 @@ mod tests {
                 overwrite: None,
             })
             .unwrap();
+    }
+
+    /// Pins that a stop logs one line naming the bounded job on a feed that
+    /// hands back and on one that does not, and that a run with no end check
+    /// logs none. Regression for #1773.
+    #[test]
+    fn a_stop_before_a_bounded_job_ends_says_so() {
+        let unfinished = |logs: Vec<String>| {
+            logs.iter()
+                .filter(|l| l.contains("before this worker saw the bounded job end"))
+                .count()
+        };
+        for (mut reader, _script, rt) in [reader(), stopping_reader()] {
+            end_solo(&mut reader, &rt);
+            let logs = spate_test::capture_logs(tracing::Level::INFO, || {
+                reader.stop_reading().unwrap();
+            });
+            assert_eq!(unfinished(logs), 1);
+        }
+        for (mut reader, _script, _rt) in [reader(), stopping_reader()] {
+            let logs = spate_test::capture_logs(tracing::Level::INFO, || {
+                reader.stop_reading().unwrap();
+            });
+            assert_eq!(unfinished(logs), 0);
+        }
+    }
+
+    /// Pins that a job the end check ended stalled logs no stop line: the
+    /// worker saw that end.
+    #[test]
+    fn a_stalled_job_logs_no_stop_line() {
+        let (mut reader, script, rt) = reader();
+        end_solo(&mut reader, &rt);
+        let receipt = script.deliver(descriptor_unit(0));
+        script.dead_letter(receipt);
+        let reason = (0..1000)
+            .find_map(|_| reader.poll_events(Duration::from_millis(1)).err())
+            .expect("the job ends stalled");
+        assert!(reason.to_string().contains("stalled"), "{reason}");
+        let logs = spate_test::capture_logs(tracing::Level::INFO, || {
+            reader.stop_reading().unwrap();
+        });
+        assert!(
+            !logs.iter().any(|l| l.contains("bounded job end")),
+            "{logs:?}"
+        );
     }
 
     /// Pins that `stop_reading` hands back each unit with a lane short of

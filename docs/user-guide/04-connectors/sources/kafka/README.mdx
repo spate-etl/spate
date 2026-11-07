@@ -129,6 +129,10 @@ consumer's index.
 The source reads batches compressed with gzip, snappy, lz4 and zstd. A batch
 in a codec librdkafka cannot read fails the pipeline with a fatal error, before
 any record after it is delivered. A retry would fetch the same batch again.
+A batch in a codec librdkafka reads whose payload does not decompress fails the
+same way. So does a zstd batch that decompresses to more than
+`receive.message.max.bytes`, which librdkafka reports as invalid compressed
+data.
 
 A batch in a message format librdkafka does not know fails the same way when
 the source reads it from its first record. When the committed offset falls

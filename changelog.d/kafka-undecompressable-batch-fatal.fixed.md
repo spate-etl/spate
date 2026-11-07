@@ -1,3 +1,3 @@
 **A Kafka batch that does not decompress stops the source or feed** (`spate-kafka`)
 
-librdkafka reports such a batch on every fetch that reads it, so the error is fatal. In previous versions it was retried without end, and a bounded job on the feed over it never ended.
+A fetched batch whose payload does not decompress fails the source, or stops the feed, with a fatal error before any record after it is delivered. librdkafka reports the batch on every fetch that reads it, and in previous versions the error was retried without end, so the partition delivered nothing and a bounded job on the feed over it never ended. The committed offset stays before the batch, so a restart on the same group stops on it again until the group's offset is moved past it. A zstd batch that decompresses to more than `receive.message.max.bytes` is reported the same way, and the error names that setting as a possible cause.

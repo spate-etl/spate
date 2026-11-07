@@ -507,7 +507,8 @@ pub(crate) struct HandingBack {
     hold_close: bool,
     log: Option<SharedLog>,
     pub(crate) closes: Mutex<Vec<Duration>>,
-    // A held close's confirmer, kept so the close never settles.
+    // A held close's confirmer, kept so the close stays pending until a test
+    // rejects or settles it.
     held: Mutex<Vec<crate::feed::Confirmer>>,
 }
 
@@ -523,7 +524,7 @@ impl HandingBack {
         }
     }
 
-    /// Never settle a close.
+    /// Hold each close until a test rejects or settles it.
     pub(crate) fn holding_its_close(mut self) -> HandingBack {
         self.hold_close = true;
         self

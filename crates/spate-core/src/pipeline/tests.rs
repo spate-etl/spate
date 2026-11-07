@@ -4869,10 +4869,10 @@ fn a_rejected_close_warns_with_its_reason() {
     );
 }
 
-/// Pins that the runtime waits for a close that settles after the wait
-/// begins, with no warning.
+/// Pins that a close settled after the feed records it ends the run
+/// completed, with no warning.
 #[test]
-fn a_close_that_settles_later_is_waited_for() {
+fn a_close_settled_after_it_is_recorded_ends_the_run_completed() {
     let clock = crate::clock::TestClock::frozen();
     let mut cfg = stop_config(Duration::from_secs(600));
     cfg.feed = feed_section("sqs: {}");

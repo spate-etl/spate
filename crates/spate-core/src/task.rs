@@ -5,7 +5,8 @@
 //! thread and returns a [`ThreadHandle`], which joins the thread when dropped.
 //! Each spawn takes a name, and a panic in the task or thread is logged at
 //! `ERROR` with that name. The panic still reaches a caller that awaits or
-//! joins the handle.
+//! joins the handle. [`ThreadBound`] holds a future to a limit timed on such a
+//! thread.
 
 use std::any::Any;
 use std::future::{Future, poll_fn};
@@ -14,6 +15,12 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use tokio::task::{JoinError, JoinHandle};
+
+#[cfg(not(loom))]
+mod bound;
+
+#[cfg(not(loom))]
+pub use bound::{BoundError, ThreadBound};
 
 /// An owned tokio task, aborted when the handle drops.
 ///

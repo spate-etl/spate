@@ -125,7 +125,8 @@ pub struct KafkaSourceConfig {
     pub brokers: String,
     /// The topic to consume. One topic per pipeline: the framework's
     /// `PartitionId` is the Kafka partition number, which is only unique
-    /// within a single topic.
+    /// within a single topic. [`validate`](Self::validate) refuses a name with
+    /// a leading `^`, which the client reads as a subscription pattern.
     pub topic: String,
     /// Consumer group id.
     pub group_id: String,
@@ -269,6 +270,10 @@ impl KafkaSourceConfig {
     }
 
     /// Cross-field validation, including the passthrough denylist.
+    ///
+    /// # Errors
+    ///
+    /// [`ConfigError::Validation`] for the first setting it refuses.
     pub fn validate(&self) -> Result<(), ConfigError> {
         if self.brokers.trim().is_empty() {
             return Err(ConfigError::Validation(
@@ -281,7 +286,7 @@ impl KafkaSourceConfig {
             ));
         }
         // librdkafka subscribes to a leading `^` as a pattern, and the source
-        // splits and seeks the literal name, so every record would be dropped.
+        // reads partitions of the literal name, so no record reaches the chain.
         if self.topic.starts_with('^') {
             return Err(ConfigError::Validation(format!(
                 "source.kafka.topic {:?} is a subscription pattern; name one topic",

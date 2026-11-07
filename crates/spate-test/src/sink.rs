@@ -3,7 +3,7 @@
 
 use bytes::{BufMut, Bytes, BytesMut};
 use spate_core::deser::Owned;
-use spate_core::error::{ErrorClass, SinkError};
+use spate_core::error::SinkError;
 use spate_core::hash::FastMap;
 use spate_core::record::Record;
 use spate_core::sink::{
@@ -31,9 +31,11 @@ pub struct ReplicaTag {
 pub enum ScriptedResult {
     /// The write succeeds (the durable-ack point).
     Ok,
-    /// The write fails with [`ErrorClass::Retryable`].
+    /// The write fails with
+    /// [`ErrorClass::Retryable`](spate_core::error::ErrorClass::Retryable).
     Retryable(String),
-    /// The write fails with [`ErrorClass::Fatal`].
+    /// The write fails with
+    /// [`ErrorClass::Fatal`](spate_core::error::ErrorClass::Fatal).
     Fatal(String),
     /// The write has not resolved: it is held, in its delay, or its future
     /// was dropped before it resolved. Never a scripted outcome.
@@ -335,14 +337,8 @@ impl ShardWriter for CaptureWriter {
             }
             let resolved = match &outcome.result {
                 ScriptedResult::Ok => Ok(()),
-                ScriptedResult::Retryable(reason) => Err(SinkError::Client {
-                    class: ErrorClass::Retryable,
-                    reason: reason.clone(),
-                }),
-                ScriptedResult::Fatal(reason) => Err(SinkError::Client {
-                    class: ErrorClass::Fatal,
-                    reason: reason.clone(),
-                }),
+                ScriptedResult::Retryable(reason) => Err(SinkError::retryable(reason.clone())),
+                ScriptedResult::Fatal(reason) => Err(SinkError::fatal(reason.clone())),
                 ScriptedResult::Pending => {
                     unreachable!("the enqueue methods refuse a Pending outcome")
                 }
@@ -368,10 +364,7 @@ impl ShardWriter for CaptureWriter {
                 .cloned();
             match failure {
                 None => Ok(()),
-                Some(reason) => Err(SinkError::Client {
-                    class: ErrorClass::Retryable,
-                    reason,
-                }),
+                Some(reason) => Err(SinkError::retryable(reason)),
             }
         }
     }
@@ -462,10 +455,8 @@ pub struct TestEncoder;
 
 impl RowEncoder<Owned<Vec<u8>>> for TestEncoder {
     fn encode<'buf>(&mut self, rec: &Record<Vec<u8>>, buf: &mut BytesMut) -> Result<(), SinkError> {
-        let len = u32::try_from(rec.payload.len()).map_err(|_| SinkError::Client {
-            class: ErrorClass::RecordLevel,
-            reason: "row longer than u32::MAX".to_owned(),
-        })?;
+        let len = u32::try_from(rec.payload.len())
+            .map_err(|_| SinkError::record_level("row longer than u32::MAX"))?;
         buf.put_u32_le(len);
         buf.extend_from_slice(&rec.payload);
         Ok(())

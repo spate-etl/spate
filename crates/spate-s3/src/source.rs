@@ -861,9 +861,9 @@ fn store_named(
 /// SDK uses, so EKS Pod Identity, IRSA (web identity), ECS task roles, IMDS,
 /// and `AWS_REGION`/`AWS_DEFAULT_REGION` all resolve without configuration.
 /// The explicit `options` are overlaid on top and win over the environment;
-/// the bucket comes from the URL. `object_store::parse_url_opts` (which every
-/// other scheme still uses) does *not* read the environment, so
-/// the S3 scheme is special-cased here.
+/// the bucket comes from the URL. `object_store::parse_url_opts`, used for
+/// `file://`, does *not* read the environment, so the S3 scheme is
+/// special-cased here.
 ///
 /// This must not pass `std::env::vars()` through `parse_url_opts`:
 /// `AmazonS3ConfigKey` parses *unprefixed* keys (`region`, `token`,
@@ -878,8 +878,8 @@ fn build_store(
     // prefix it would return and every planned descriptor that depends on it
     // stays valid.
     let (scheme, path) = ObjectStoreScheme::parse(url)?;
-    // Every non-S3 scheme (notably `file://` for infrastructure-free runs and
-    // tests) keeps the stock, scheme-generic behavior.
+    // `file://`, for infrastructure-free runs and tests, keeps the stock
+    // behavior.
     if !matches!(scheme, ObjectStoreScheme::AmazonS3) {
         let (store, prefix) = object_store::parse_url_opts(url, opts(options))?;
         return Ok(BuiltStore {

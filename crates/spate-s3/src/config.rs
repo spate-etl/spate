@@ -9,10 +9,13 @@
 use bytesize::ByteSize;
 use object_store::ObjectStoreScheme;
 use object_store::aws::AmazonS3ConfigKey;
+use object_store::path::Path;
 use serde::{Deserialize, Serialize};
 use spate_core::config::{ComponentConfig, ConfigError, redact};
 use std::collections::BTreeMap;
 use url::Url;
+
+use crate::location::BAD_PREFIX;
 
 /// `object_store` option keys the framework owns. Setting them through the
 /// passthrough is rejected at load time with an explanation.
@@ -237,6 +240,14 @@ fn parse_url(field: &str, value: &str) -> Result<Url, ConfigError> {
              shared; use file:// for infrastructure-free runs"
         )));
     }
+    // `ObjectStoreScheme::parse` also fails on the path, which the scheme check
+    // below would misreport.
+    if Path::from_url_path(url.path()).is_err() {
+        return Err(ConfigError::Validation(format!(
+            "{field}: {} {BAD_PREFIX}",
+            redact::url(value)
+        )));
+    }
     // The crate enables object_store's `aws` and `fs` features alone, so any
     // other scheme builds no client.
     if !matches!(
@@ -244,8 +255,11 @@ fn parse_url(field: &str, value: &str) -> Result<Url, ConfigError> {
         Ok((ObjectStoreScheme::AmazonS3 | ObjectStoreScheme::Local, _))
     ) {
         return Err(ConfigError::Validation(format!(
-            "{field}: the source reads S3 URLs (s3://, s3a://, https:// on an S3 host) \
-             and file://, got {value}"
+            "{field}: the source reads s3://, s3a://, file://, and https:// on an \
+             amazonaws.com or r2.cloudflarestorage.com host; for another S3-compatible \
+             store, write s3://<bucket>/<prefix> with the endpoint under the source's \
+             `store`, got {}",
+            redact::url(value)
         )));
     }
     Ok(url)
@@ -278,6 +292,7 @@ mod tests {
             let err = err.to_string();
             assert!(err.contains("source.s3.url"), "{url}: {err}");
             assert!(err.contains("file://"), "{url}: {err}");
+            assert!(err.contains("`store`"), "{url}: {err}");
         }
         for url in [
             "s3://bucket/data/",
@@ -288,6 +303,34 @@ mod tests {
             let body = format!("  url: {url}\n");
             S3SourceConfig::from_component_config(&section(&body)).expect(url);
         }
+    }
+
+    /// Pins that a refused URL's userinfo and signed query stay out of the
+    /// load error.
+    #[test]
+    fn a_refused_url_keeps_its_credentials_out_of_the_error() {
+        for url in [
+            "https://urluser:urlsecret@storage.example.com/bucket/data/",
+            "https://acct.blob.core.windows.net/container/data/?sig=urlsecret",
+            "s3://urluser:urlsecret@bucket/a//b/",
+        ] {
+            let body = format!("  url: {url}\n");
+            let err = S3SourceConfig::from_component_config(&section(&body)).unwrap_err();
+            let err = err.to_string();
+            assert!(err.contains("source.s3.url"), "{err}");
+            assert!(!err.contains("urlsecret"), "{err}");
+        }
+    }
+
+    /// Pins that an S3 URL with a bad prefix is told about the prefix, as
+    /// `ObjectStoreScheme::parse` fails on it as it does on a scheme.
+    #[test]
+    fn a_bad_prefix_is_not_reported_as_a_wrong_scheme() {
+        let body = "  url: s3://bucket/exports//2026/\n";
+        let err = S3SourceConfig::from_component_config(&section(body)).unwrap_err();
+        let err = err.to_string();
+        assert!(err.contains(BAD_PREFIX), "{err}");
+        assert!(err.contains("source.s3.url"), "{err}");
     }
 
     #[test]

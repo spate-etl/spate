@@ -29,7 +29,7 @@ mod keys;
 #[path = "../benches/support/rows.rs"]
 mod rows;
 
-fn drive<E, T>(mut enc: E, payloads: Vec<T>) -> usize
+fn encoded<E, T>(mut enc: E, payloads: Vec<T>) -> BytesMut
 where
     E: RowEncoder<Owned<T>>,
     T: Send + 'static,
@@ -39,7 +39,26 @@ where
         enc.encode(&record(p), &mut buf).expect("row encodes");
     }
     enc.finish_chunk(&mut buf).expect("chunk finishes");
-    buf.len()
+    buf
+}
+
+fn drive<E, T>(enc: E, payloads: Vec<T>) -> usize
+where
+    E: RowEncoder<Owned<T>>,
+    T: Send + 'static,
+{
+    encoded(enc, payloads).len()
+}
+
+/// The encoded size of a corpus and the XXH64 of its bytes.
+fn pin<E, T>(enc: E, payloads: Vec<T>) -> (usize, u64)
+where
+    E: RowEncoder<Owned<T>>,
+    T: Send + 'static,
+{
+    let buf = encoded(enc, payloads);
+    let digest = DistributedRouter::<Owned<String>>::hash_key(ShardKey::Bytes(&buf));
+    (buf.len(), digest)
 }
 
 #[test]
@@ -91,14 +110,15 @@ fn rowbinary_encodes_every_schema() {
     );
 }
 
-/// The encoded sizes, pinned.
+/// The encoded sizes and bytes, pinned.
 ///
 /// An instruction count only compares across two legs that encoded identical
 /// bytes, and the corpus is generated rather than stored, so a one-character
 /// edit to a value formula in `rows.rs` re-baselines every comparison with
 /// nothing to say it happened. These numbers make that edit fail here
-/// instead. They are the sizes the pull request that added each bench
-/// published; changing one means re-recording it and treating every count
+/// instead, and the digest catches a formula whose column keeps its encoded
+/// size. The sizes are the ones the pull request that added each bench
+/// published; changing a pin means re-recording it and treating every count
 /// from before the change as measuring a different corpus.
 #[test]
 fn the_corpora_are_pinned_across_revisions() {
@@ -108,51 +128,51 @@ fn the_corpora_are_pinned_across_revisions() {
     let exotic = NativeSchema::from_columns(&rows::exotic_columns()).expect("exotic schema builds");
 
     assert_eq!(
-        drive(
+        pin(
             NativeEncoder::<Owned<_>>::new(events),
             rows::events(rows::ROWS)
         ),
-        116_573,
+        (116_573, 0xeead_ec8c_27b6_394c),
         "native/events"
     );
     assert_eq!(
-        drive(
+        pin(
             ClickHouseEncoder::<Owned<_>>::unchecked(),
             rows::events(rows::ROWS)
         ),
-        125_738,
+        (125_738, 0x8bca_0339_825e_bd89),
         "rowbinary/events"
     );
     assert_eq!(
-        drive(
+        pin(
             NativeEncoder::<Owned<_>>::new(metrics),
             rows::metrics(rows::ROWS)
         ),
-        92_204,
+        (92_204, 0xb157_b4fb_8658_ff98),
         "native/metrics"
     );
     assert_eq!(
-        drive(
+        pin(
             ClickHouseEncoder::<Owned<_>>::unchecked(),
             rows::metrics(rows::ROWS)
         ),
-        92_000,
+        (92_000, 0xccc6_8446_051c_cc08),
         "rowbinary/metrics"
     );
     assert_eq!(
-        drive(
+        pin(
             NativeEncoder::<Owned<_>>::new(exotic),
             rows::exotic(rows::ROWS)
         ),
-        174_724,
+        (174_724, 0x9508_3afb_8f63_05dd),
         "native/exotic"
     );
     assert_eq!(
-        drive(
+        pin(
             ClickHouseEncoder::<Owned<_>>::unchecked(),
             rows::exotic(rows::ROWS)
         ),
-        170_463,
+        (170_463, 0x5f20_6cf9_4812_1bfc),
         "rowbinary/exotic"
     );
 }

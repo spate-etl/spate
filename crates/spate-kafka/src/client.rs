@@ -53,6 +53,10 @@ const ALIASES: [(&str, &str); 4] = [
     ("compression.type", "compression.codec"),
 ];
 
+/// The longest topic name librdkafka takes. It refuses a longer one with a NULL
+/// handle, which rdkafka's `fetch_metadata` unwraps, panicking the thread.
+pub(crate) const MAX_TOPIC_NAME_BYTES: usize = 512;
+
 /// The librdkafka property `key` writes, under one spelling per property:
 /// `topic.` stripped from a topic property and an alias replaced by its
 /// target. Names match case-sensitively, as librdkafka's do.

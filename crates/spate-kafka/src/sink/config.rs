@@ -28,7 +28,7 @@
 //! source offsets past it. Weaker settings would silently turn
 //! at-least-once into at-most-once.
 
-use crate::client::{Base, Keys, Role, canonical, check_message_timeout};
+use crate::client::{Base, Keys, MAX_TOPIC_NAME_BYTES, Role, canonical, check_message_timeout};
 use crate::sink::context::{SinkContext, SinkHooks};
 use crate::sink::encoder::{
     DEFAULT_MAX_MESSAGE_BYTES, KafkaBytesEncoder, KafkaEncoder, KafkaJsonEncoder, MessageEncoder,
@@ -315,6 +315,12 @@ impl KafkaSinkConfig {
         }
         if self.topic.trim().is_empty() {
             return fail("topic must not be empty".into());
+        }
+        if self.topic.len() > MAX_TOPIC_NAME_BYTES {
+            return fail(format!(
+                "topic is {} bytes, past the client's limit of {MAX_TOPIC_NAME_BYTES} bytes",
+                self.topic.len()
+            ));
         }
         if self.shards == 0 {
             return fail("shards must be at least 1".into());
@@ -648,6 +654,21 @@ mod tests {
         let mut short = KafkaSinkConfig::new("localhost:9092", "orders");
         short.delivery_timeout = Duration::from_secs(1);
         assert_eq!(short.rejection_window(), Duration::from_secs(46));
+    }
+
+    /// A name past librdkafka's limit is refused at build, where the probe
+    /// would panic on it for ever, and the limit itself passes. Regression for
+    /// #1225.
+    #[test]
+    fn a_topic_name_past_the_client_limit_is_refused() {
+        let with_topic = |len: usize| {
+            let topic = "u".repeat(len);
+            parse(&format!("  brokers: localhost:9092\n  topic: {topic}\n"))
+        };
+        with_topic(512).expect("the limit passes");
+        let err = with_topic(513).expect_err("one byte past the limit");
+        assert!(err.to_string().contains("sink.kafka: topic"), "{err}");
+        assert!(err.to_string().contains("512 bytes"), "{err}");
     }
 
     #[test]

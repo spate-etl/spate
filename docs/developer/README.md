@@ -1,10 +1,10 @@
 ---
-description: "How this repository is built and tested, for a Rust engineer opening a first pull request here, with the documents that own the rest."
+description: "How this repository is built, tested and reviewed, for a Rust engineer opening a first pull request here, with the documents that own the rest."
 ---
 
 # Developer guide
 
-How this repository is built and tested. It is written for a Rust
+How this repository is built, tested and reviewed. It is written for a Rust
 engineer about to open a first pull request here: comfortable with async Rust,
 cargo and git, and new to this repository's tooling and test harnesses.
 [`CONTRIBUTING.md`](repo:CONTRIBUTING.md) is the entry point and says how a
@@ -21,6 +21,10 @@ change is proposed and lands. This guide says how the work is done.
   `crates/` carries beyond its source.
 - [Benchmarks and fuzzing](04-benchmarks-and-fuzzing.md) — the instruments
   outside `ci`: the benchmark tiers and the fuzz harness.
+- [Code and comments](05-code-style.md) — the comment and rustdoc contract,
+  and the reuse rule.
+- [Reading a review](06-reading-a-review.md) — what a review checks, so you
+  can run it first.
 
 ## Where the rest lives
 

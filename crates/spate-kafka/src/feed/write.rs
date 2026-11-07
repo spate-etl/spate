@@ -6,8 +6,8 @@ use super::attempt::{ORIGIN_HEADER, PublishId, encode};
 use super::events::Cause;
 use super::inflight::Position;
 use super::producer::FeedProducerContext;
+use crate::sink::owned_headers;
 use rdkafka::error::{KafkaError, RDKafkaErrorCode};
-use rdkafka::message::{Header, OwnedHeaders};
 use rdkafka::producer::{BaseRecord, ThreadedProducer};
 use spate_core::backoff::Backoff;
 use spate_core::clock::{Clock, Stopwatch};
@@ -321,13 +321,11 @@ pub(crate) fn send(core: &Core, producer: &Producer, write: Box<Write>) {
     // write itself travels as the opaque, so the record borrows copies.
     let (topic, partition, key, payload, headers) = {
         let m = write.message();
-        let mut headers = OwnedHeaders::new_with_capacity(m.headers.len());
-        for (key, value) in &m.headers {
-            headers = headers.insert(Header {
-                key,
-                value: value.as_deref(),
-            });
-        }
+        let headers = owned_headers(
+            m.headers
+                .iter()
+                .map(|(key, value)| (key.as_str(), value.as_deref())),
+        );
         (
             Arc::clone(&m.topic),
             m.partition,

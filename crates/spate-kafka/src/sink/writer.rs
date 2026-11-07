@@ -23,6 +23,7 @@
 use crate::sink::context::{BatchInflight, SinkContext};
 use crate::sink::frame::{FrameParser, MessageRef};
 use crate::sink::metrics::KafkaSinkStatsMetrics;
+use bytes::Bytes;
 use rdkafka::error::RDKafkaErrorCode;
 use rdkafka::message::{Header, OwnedHeaders};
 use rdkafka::producer::{BaseRecord, Producer, ThreadedProducer};
@@ -130,26 +131,57 @@ impl KafkaWriter {
             .context()
             .rejection_within(self.rejection_window)
     }
+}
 
-    fn parse_messages<'a>(&self, batch: &'a SealedBatch) -> Result<Vec<MessageRef<'a>>, SinkError> {
-        let mut messages = Vec::with_capacity(batch.rows as usize);
-        for frame in &batch.frames {
-            for message in FrameParser::new(frame) {
-                messages.push(message.map_err(|e| {
-                    SinkError::fatal(format!("corrupted sink frame (framework bug): {e}"))
-                })?);
-            }
+/// Parse every frame of a batch into its messages, failing on any corrupt
+/// frame or when the message count differs from `rows`.
+pub(crate) fn parse_messages(
+    frames: &[Bytes],
+    rows: u64,
+) -> Result<Vec<MessageRef<'_>>, SinkError> {
+    let mut messages = Vec::with_capacity(rows as usize);
+    for frame in frames {
+        for message in FrameParser::new(frame) {
+            messages.push(message.map_err(|e| {
+                SinkError::fatal(format!("corrupted sink frame (framework bug): {e}"))
+            })?);
         }
-        if messages.len() as u64 != batch.rows {
-            return Err(SinkError::fatal(format!(
-                "corrupted sink frame (framework bug): batch claims {} rows \
-                     but frames parse to {} messages",
-                batch.rows,
-                messages.len()
-            )));
-        }
-        Ok(messages)
     }
+    if messages.len() as u64 != rows {
+        return Err(SinkError::fatal(format!(
+            "corrupted sink frame (framework bug): batch claims {rows} rows \
+                 but frames parse to {} messages",
+            messages.len()
+        )));
+    }
+    Ok(messages)
+}
+
+/// The librdkafka header list for `message`, or `None` when it has no
+/// headers.
+pub(crate) fn message_headers(message: &MessageRef<'_>) -> Option<OwnedHeaders> {
+    if message.headers.is_empty() {
+        return None;
+    }
+    Some(owned_headers(
+        message
+            .headers
+            .iter()
+            .map(|&(name, value)| (name, Some(value))),
+    ))
+}
+
+/// Copy `headers` into a librdkafka header list, in order. A `None` value is
+/// a null header value.
+pub(crate) fn owned_headers<'a, I>(headers: I) -> OwnedHeaders
+where
+    I: ExactSizeIterator<Item = (&'a str, Option<&'a [u8]>)>,
+{
+    let mut owned = OwnedHeaders::new_with_capacity(headers.len());
+    for (key, value) in headers {
+        owned = owned.insert(Header { key, value });
+    }
+    owned
 }
 
 impl ShardWriter for KafkaWriter {
@@ -175,7 +207,7 @@ impl ShardWriter for KafkaWriter {
     ) -> Result<(), SinkError> {
         // Phase 1: validate framing and fix the countdown total before any
         // message is enqueued.
-        let messages = self.parse_messages(batch)?;
+        let messages = parse_messages(&batch.frames, batch.rows)?;
         let total = messages.len();
         let inflight = Arc::new(BatchInflight::new(total));
         let send_deadline = self.io_clock.now() + self.delivery_timeout + DELIVERY_GRACE;
@@ -194,14 +226,7 @@ impl ShardWriter for KafkaWriter {
             if let Some(payload) = message.payload {
                 record = record.payload(payload);
             }
-            if !message.headers.is_empty() {
-                let mut headers = OwnedHeaders::new_with_capacity(message.headers.len());
-                for (name, value) in &message.headers {
-                    headers = headers.insert(Header {
-                        key: name,
-                        value: Some(*value),
-                    });
-                }
+            if let Some(headers) = message_headers(message) {
                 record = record.headers(headers);
             }
 
@@ -537,12 +562,45 @@ mod tests {
             bytes: 0,
             dedup_token: "t".to_string(),
         };
-        let writer = test_writer(false);
-        let err = writer.parse_messages(&batch).unwrap_err();
+        let err = parse_messages(&batch.frames, batch.rows).unwrap_err();
         assert_eq!(err.class(), ErrorClass::Fatal);
 
         let ok_batch = SealedBatch { rows: 1, ..batch };
-        assert_eq!(writer.parse_messages(&ok_batch).unwrap().len(), 1);
+        assert_eq!(
+            parse_messages(&ok_batch.frames, ok_batch.rows)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    /// The header list keeps every pair in order, a null value included.
+    #[test]
+    fn owned_headers_keeps_order_and_null_values() {
+        use rdkafka::message::Headers as _;
+        let pairs = [("a", Some(&b"1"[..])), ("b", None), ("c", Some(&b""[..]))];
+        let owned = owned_headers(pairs.iter().copied());
+        let built: Vec<_> = (0..owned.count())
+            .map(|i| {
+                let header = owned.get(i);
+                (header.key, header.value)
+            })
+            .collect();
+        assert_eq!(built, pairs);
+    }
+
+    /// A message without headers carries no header list.
+    #[test]
+    fn message_headers_is_none_without_headers() {
+        use bytes::BytesMut;
+        let mut frame = BytesMut::new();
+        write_message(&mut frame, None, std::iter::empty(), Some(b"p")).unwrap();
+        write_message(&mut frame, None, [("h", &b"v"[..])].into_iter(), Some(b"p")).unwrap();
+        let frames = [frame.freeze()];
+        let messages = parse_messages(&frames, 2).unwrap();
+        assert!(message_headers(&messages[0]).is_none());
+        let headers = message_headers(&messages[1]).expect("one header");
+        assert_eq!(rdkafka::message::Headers::count(&headers), 1);
     }
 
     /// A frame that ends inside a message is a fatal framework bug.
@@ -558,7 +616,7 @@ mod tests {
             bytes: 0,
             dedup_token: "t".to_string(),
         };
-        let err = test_writer(false).parse_messages(&batch).unwrap_err();
+        let err = parse_messages(&batch.frames, batch.rows).unwrap_err();
         assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
         assert!(
             err.reason()

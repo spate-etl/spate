@@ -1081,6 +1081,8 @@ mod tests {
         /// bytes past the range it reports; 0 extends none.
         overlong_on: u32,
         overlong: usize,
+        /// Whether that body arrives as one frame with the range's bytes.
+        overlong_joined: bool,
         /// Held GETs started, and held GET futures dropped, finished or not.
         held: AtomicU32,
         held_dropped: Arc<AtomicU32>,
@@ -1140,6 +1142,7 @@ mod tests {
                 empty_on: 0,
                 overlong_on: 0,
                 overlong: 0,
+                overlong_joined: false,
                 release: Arc::new(tokio::sync::Semaphore::new(0)),
                 held: AtomicU32::new(0),
                 held_dropped: Arc::new(AtomicU32::new(0)),
@@ -1327,9 +1330,19 @@ mod tests {
                 let GetResultPayload::Stream(body) = payload else {
                     unreachable!("InMemory yields streams")
                 };
-                let body = body.chain(futures_util::stream::iter([Ok(extra)]));
+                let body: futures_util::stream::BoxStream<'static, object_store::Result<Bytes>> =
+                    if self.overlong_joined {
+                        let mut joined: Vec<u8> = futures_util::TryStreamExt::try_concat(
+                            futures_util::TryStreamExt::map_ok(body, |b| b.to_vec()),
+                        )
+                        .await?;
+                        joined.extend_from_slice(&extra);
+                        Box::pin(futures_util::stream::iter([Ok(Bytes::from(joined))]))
+                    } else {
+                        Box::pin(body.chain(futures_util::stream::iter([Ok(extra)])))
+                    };
                 return Ok(GetResult {
-                    payload: GetResultPayload::Stream(Box::pin(body)),
+                    payload: GetResultPayload::Stream(body),
                     meta,
                     range,
                     attributes,
@@ -2122,6 +2135,36 @@ mod tests {
         };
         assert!(
             reason.contains("\"p/a\"") && reason.contains("byte 0") && reason.contains("16 bytes"),
+            "{reason}"
+        );
+    }
+
+    /// Pins that a single frame one byte longer than its range fails the
+    /// window with nothing handed on.
+    #[tokio::test(start_paused = true)]
+    async fn a_single_frame_past_its_range_is_not_handed_on() {
+        let mut flaky = FlakyStore::new(seeded(&[("p/a", &[b'x'; 16][..])]).await);
+        flaky.overlong_on = 1;
+        flaky.overlong = 1;
+        flaky.overlong_joined = true;
+        let store: Arc<dyn ObjectStore> = Arc::new(flaky);
+        let slice = listed(&store).await;
+        let (tx, mut rx) = mpsc::channel(DEPTH);
+        let task = tokio::spawn(run_fetcher(fetcher(store, slice, 16, 16, tx)));
+        let msgs = drain(&mut rx).await;
+        task.await.unwrap();
+        assert!(
+            !msgs.iter().any(|m| matches!(m, ChunkMsg::Chunk(_))),
+            "{:?}",
+            debugged(&msgs)
+        );
+        let Some(ChunkMsg::LaneFailed(SplitFailure::Poison(PoisonKind::Undecodable, reason))) =
+            msgs.last()
+        else {
+            panic!("{:?}", debugged(&msgs));
+        };
+        assert!(
+            reason.contains("byte 0") && reason.contains("the 16 bytes requested"),
             "{reason}"
         );
     }

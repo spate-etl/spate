@@ -12,39 +12,46 @@ for.
 ## The invariants, by number
 
 A change that touches one of the properties in
-[Spate invariants](../INVARIANTS.md) says how the property still holds, and
-cites it by number: "this touches INV-5" is the reviewable form. The pull
-request template asks per number, and a review reads the invariant's text
-against every path the diff reaches. "None" is the right answer for most
-changes and is read as a claim like any other.
+[Spate invariants](../INVARIANTS.md) cites it by number and says how it
+still holds; [`CONTRIBUTING.md`](repo:CONTRIBUTING.md) states the rule and
+the pull request template asks per number. The review reads the invariant's
+text against every path the diff reaches, so "None", the right answer for
+most changes, is read as a claim like any other.
 
 ## A test that fails at base
 
 A change to delivery semantics is judged on a failing test that passes
-afterwards, and so is any fix: the test pins the defect, so with the fix
-reverted it fails. Check it before you open the pull request:
+afterwards ([`AI_POLICY.md`](repo:AI_POLICY.md)), and a test written to pin
+any fix shows the same way: with the fix reverted, it fails. Check it on a
+clean tree before you open the pull request:
 
 ```sh
 base=$(git merge-base origin/main HEAD)
-git checkout "$base" -- crates/spate-core/src/pipeline/controller.rs   # the source hunk, with the test left in place
+git checkout "$base" -- crates/spate-core/src/pipeline/controller.rs   # the source the fix changed; the test stays
 cargo nextest run -p spate-core --locked -E 'test(a_chase_window_closes_at_its_end)'
-echo "exit: $?"                                                       # non-zero, or the test pins nothing
+echo "exit: $?"
 git checkout HEAD -- crates/spate-core/src/pipeline/controller.rs
 ```
 
-A test that passes with the fix reverted is a finding, shown by exactly that
-run. A test that waits, sleeps or reads the clock is read against
+The run that counts exits 100 with the summary line naming the test as failed.
+Exit 4 means the filter matched no test, and 101 that the build failed; neither
+shows anything. A source file new on the branch has no copy at the base, so
+delete it for the run instead. A test that passes with the fix reverted is a
+finding, shown by exactly that run. A test that waits, sleeps or reads the clock
+is read against
 [Writing a test](02-testing.md).
 
 ## Mutants killed, or named
 
-A new condition, match arm or bound comes with the test that kills its mutant.
-`cargo xtask mutants --since origin/main` runs them over the diff
-([Mutants](01-commands.md#mutants)); a survivor on a delivery or liveness
-guard needs a killing test, and any other survivor is named in the body with
-why it stands. The forms the tool does not generate, such as a swapped match
-arm or a deleted early `return`, are applied by hand to a new delivery or
-liveness guard, and so is any guard only the container suites reach.
+`cargo xtask mutants --since origin/main` runs the mutants over the diff
+([Mutants](01-commands.md#mutants)), under the rule
+[`CONTRIBUTING.md`](repo:CONTRIBUTING.md) states for a new condition, arm or
+bound. A survivor is named in the body with why it stands, except on a guard
+the engine's delivery or liveness rests on, such as a commit, ack, drain,
+retry or deadline path, which needs a killing test. The forms the tool does
+not generate, such as a swapped match arm or a deleted early `return`, are
+applied by hand to such a guard, and so is any guard only the container
+suites reach.
 
 ## Reuse
 
@@ -71,12 +78,10 @@ sentence and adds nothing.
 
 ## The changelog fragment
 
-A change to what a crate ships carries a fragment under `changelog.d/`, and
-one nobody upgrading would notice carries `Changelog: none` in the body.
-[`changelog.d/README.md`](repo:changelog.d/README.md) says which is which. The
-review reads the fragment's scope claims against the diff, and a breaking
-change's fragment opens with `**Breaking:**`, which is what the semver box
-answers to.
+[`changelog.d/README.md`](repo:changelog.d/README.md) says when a change
+carries a fragment and when a `Changelog: none` line. The review reads the
+fragment's scope claims against the diff, and a breaking change's fragment
+opens with `**Breaking:**`, which is what the semver box answers to.
 
 ## The body
 
@@ -85,7 +90,7 @@ reads every claim in it against the diff: what changed, what was verified,
 each number, each "only" and each "no behavior change". It opens on the
 problem a user hits, gives the argument for the shape over the alternative,
 and says where it delivers less, more or something other than the issue asked
-for. The checks under its own heading are ticked by exit code.
+for.
 
 [`AI_POLICY.md`](repo:AI_POLICY.md) sets the rest: the answers to review
 questions are yours in your own words, the model is named in the body when an

@@ -103,11 +103,11 @@ a person needs lives in a document they read, which this file links to.
 
 ## Commits and pull requests
 
-Subjects, titles, bodies and scope follow
+Subjects, titles and bodies follow
 [`CONTRIBUTING.md`](CONTRIBUTING.md#opening-a-pull-request) and
-[`AI_POLICY.md`](AI_POLICY.md#agentic-contributions). Messages must make sense
-to outsiders: no plan or phase references, no issue shorthand that only
-resolves in this session.
+[`AI_POLICY.md`](AI_POLICY.md#agentic-contributions); scope follows
+[Code and comments](docs/developer/05-code-style.md#scope). No issue shorthand
+that only resolves in this session.
 
 ## Filing an issue
 

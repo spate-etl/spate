@@ -390,14 +390,16 @@ mod tests {
         }
     }
 
-    /// Advancing before the first poll leaves the whole limit to run.
+    /// Advancing between the call to `run` and its first poll leaves the
+    /// whole limit to run.
     #[test]
     fn the_limit_counts_from_the_first_poll() {
         let clock = TestClock::frozen();
         let (bound, asked) = paced(on(&clock, LONG));
-        clock.advance(LONG);
         let (release, released) = oneshot::channel::<()>();
-        let done = on_thread(move || current_thread().block_on(bound.run(released)));
+        let run = bound.run(released);
+        clock.advance(LONG);
+        let done = on_thread(move || current_thread().block_on(run));
         for _ in 0..2 {
             asked.recv_timeout(DEADLINE).unwrap();
         }

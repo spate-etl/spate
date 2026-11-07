@@ -1482,25 +1482,15 @@ mod tests {
     #[expect(unsafe_code, reason = "moves a mock broker's advertised listener")]
     fn a_metadata_read_ends_by_its_deadline_when_its_broker_is_replaced() {
         use crate::client::testing::raw;
-        use rdkafka::ClientConfig;
-        use rdkafka::bindings as rd;
-        use rdkafka::producer::BaseProducer;
-        use std::ffi::{CStr, CString};
+        use crate::testutil::mock::MockKafka;
+        use std::ffi::CString;
         let limit = Duration::from_secs(3);
-        let holder: BaseProducer = ClientConfig::new()
-            .set("test.mock.num.brokers", "1")
-            .create()
-            .expect("a mock cluster");
-        // SAFETY: `holder` owns the mock cluster and outlives every use of
-        // `cluster` below.
-        let cluster = unsafe { rd::rd_kafka_handle_mock_cluster(holder.client().native_ptr()) };
-        assert!(!cluster.is_null());
-        // SAFETY: as above; the cluster owns the string.
-        let servers = unsafe { CStr::from_ptr(rd::rd_kafka_mock_cluster_bootstraps(cluster)) }
-            .to_str()
-            .expect("bootstrap servers")
-            .to_owned();
-        let work = CString::new(WORK).expect("topic name");
+        let cluster = MockKafka::new();
+        cluster.create_topic(WORK, 1, 1).expect("create topic");
+        cluster
+            .broker_round_trip_time(1, Duration::from_secs(1))
+            .expect("round trip time");
+        let servers = cluster.bootstrap_servers();
         let unreachable = crate::testutil::refused_broker();
         let port = unreachable
             .rsplit(':')
@@ -1508,12 +1498,16 @@ mod tests {
             .and_then(|p| p.parse().ok())
             .expect("a port");
         let host = CString::new("127.0.0.1").expect("host");
-        // SAFETY: as above. The bootstrap address still reaches the broker;
-        // only the listener its metadata advertises moves.
+        // SAFETY: `native` is valid while `cluster` lives. The bootstrap
+        // address still reaches the broker; only the listener its metadata
+        // advertises moves.
         unsafe {
-            rd::rd_kafka_mock_topic_create(cluster, work.as_ptr(), 1, 1);
-            rd::rd_kafka_mock_broker_set_host_port(cluster, 1, host.as_ptr(), port);
-            rd::rd_kafka_mock_broker_set_rtt(cluster, 1, 1000);
+            rdkafka::bindings::rd_kafka_mock_broker_set_host_port(
+                cluster.native(),
+                1,
+                host.as_ptr(),
+                port,
+            );
         }
         let properties = [("bootstrap.servers", servers.as_str())];
         let hooks = crate::sink::SinkHooks::detached(SyncClock::new(TestClock::frozen() as _));

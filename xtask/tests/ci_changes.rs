@@ -1368,3 +1368,46 @@ fn each_report_and_artifact_in_a_ci_run_has_its_own_name() {
         }
     }
 }
+
+/// The mutants run sits outside `CI gate`: no job of `ci.yml` or a unit it
+/// calls runs it, and its own workflow starts on a pull request's pushes alone.
+/// The run's budget stops it inside its step's timeout, and that step ends
+/// inside the job's.
+#[test]
+fn the_mutants_run_is_off_the_gate_and_stops_inside_its_limits() {
+    let mut gated = vec![("ci.yml".to_owned(), ci_yml())];
+    gated.extend(ci_units().into_iter().map(|u| (u.file, u.text)));
+    for (file, text) in &gated {
+        assert!(!text.contains("xtask mutants"), "{file} runs mutants");
+    }
+
+    let parsed = yaml(&read_workflow("mutants.yml"));
+    let on = parsed["on"].as_mapping().unwrap();
+    let triggers: Vec<&str> = on.keys().map(|k| k.as_str().unwrap()).collect();
+    assert_eq!(triggers, ["pull_request"]);
+    let types = parsed["on"]["pull_request"]["types"].as_sequence();
+    assert!(types.is_none(), "a listed type set can admit `edited`");
+
+    let job = &parsed["jobs"]["mutants"];
+    let step = job["steps"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .find(|s| {
+            s["run"]
+                .as_str()
+                .is_some_and(|r| r.contains("xtask mutants"))
+        })
+        .expect("a step runs mutants");
+    let run = step["run"].as_str().unwrap();
+    let budget: u64 = run
+        .split_once("--budget ")
+        .and_then(|(_, rest)| rest.split_whitespace().next())
+        .expect("the run passes a budget")
+        .parse()
+        .unwrap();
+    let step_limit = step["timeout-minutes"].as_u64().unwrap();
+    let job_limit = job["timeout-minutes"].as_u64().unwrap();
+    assert!(budget < step_limit, "{budget} >= {step_limit}");
+    assert!(step_limit < job_limit, "{step_limit} >= {job_limit}");
+}

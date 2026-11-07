@@ -438,9 +438,9 @@ describes the drain around it. Among the built-in feeds,
 [Kafka](../../feeds/kafka/README.mdx#stop) hand back. On a feed that does not,
 the source starts the drain at once.
 
-A run that stops or fails before the worker sees its bounded job end logs one
-`info` line saying so. A graceful stop still exits `Completed`, so that line is
-what tells a stopped run from one whose job ended.
+A run that stops before the worker sees its bounded job end logs one `info` line
+saying so. A graceful stop still exits `Completed`, so that line is what tells a
+stopped run from one whose job ended.
 
 ### A solo run on the in-process feed
 

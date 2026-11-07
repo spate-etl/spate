@@ -11,7 +11,7 @@
 
 use crate::config::Encoding;
 use crate::events::StorefrontEvent;
-use spate_core::error::{ErrorClass, SourceError};
+use spate_core::error::SourceError;
 
 /// A resolved payload encoder. Built once at `open`, never on the record path.
 #[derive(Debug)]
@@ -34,21 +34,14 @@ impl Encoder {
             Encoding::Avro => {
                 let schema =
                     apache_avro::Schema::parse_str(crate::EVENT_SCHEMA_JSON).map_err(|e| {
-                        SourceError::Client {
-                            class: ErrorClass::Fatal,
-                            reason: format!("parsing the built-in datagen Avro schema: {e}"),
-                        }
+                        SourceError::fatal(format!("parsing the built-in datagen Avro schema: {e}"))
                     })?;
                 Ok(Encoder::Avro(Box::new(schema)))
             }
-            // Unreachable through configuration, since `validate` rejects
-            // this combination at load time, but a hand-built config reaches
-            // `open` without passing through it.
+            // Unreachable through `DatagenSource::open`, whose `validate`
+            // refuses this combination first. This arm answers a direct call.
             #[cfg(not(feature = "avro"))]
-            Encoding::Avro => Err(SourceError::Client {
-                class: ErrorClass::Fatal,
-                reason: crate::config::AVRO_FEATURE_OFF.into(),
-            }),
+            Encoding::Avro => Err(SourceError::fatal(crate::config::AVRO_FEATURE_OFF)),
         }
     }
 
@@ -81,10 +74,7 @@ impl Encoder {
         };
         result.map_err(|reason| {
             out.truncate(start);
-            SourceError::Client {
-                class: ErrorClass::Fatal,
-                reason,
-            }
+            SourceError::fatal(reason)
         })
     }
 }
@@ -217,6 +207,7 @@ mod tests {
     use super::*;
     use crate::config::DatagenSourceConfig;
     use crate::plan::EventPlan;
+    use spate_core::error::ErrorClass;
 
     /// Every encoding this build can resolve, so a property asserted of "the
     /// encoder" is asserted of each of them.
@@ -414,8 +405,30 @@ mod tests {
 
     #[cfg(not(feature = "avro"))]
     #[test]
-    fn avro_without_the_feature_fails_at_open_rather_than_silently_emitting_json() {
-        let err = Encoder::new(Encoding::Avro).unwrap_err().to_string();
-        assert!(err.contains("avro"), "{err}");
+    fn avro_without_the_feature_is_refused_rather_than_silently_emitting_json() {
+        let err = Encoder::new(Encoding::Avro).unwrap_err();
+        assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
+        assert_eq!(err.reason(), crate::config::AVRO_FEATURE_OFF);
+    }
+
+    /// The generator stays far below this value, so only a hand-built event
+    /// reaches the failure.
+    #[cfg(feature = "avro")]
+    #[test]
+    fn a_failed_encode_is_fatal_and_leaves_the_buffer_as_it_was_found() {
+        let encoder = Encoder::new(Encoding::Avro).unwrap();
+        let event = StorefrontEvent::PaymentCaptured(crate::events::PaymentCaptured {
+            order_id: 1,
+            amount_cents: u64::MAX,
+        });
+        let mut out = b"prefix".to_vec();
+        let err = encoder.encode(&event, &mut out).unwrap_err();
+        assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
+        assert!(
+            err.reason()
+                .starts_with("encoding a datagen event as an Avro datum: "),
+            "{err}"
+        );
+        assert_eq!(out, b"prefix");
     }
 }

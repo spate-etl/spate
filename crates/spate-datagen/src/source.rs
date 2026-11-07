@@ -14,7 +14,7 @@ use crate::plan::EventPlan;
 use spate_core::checkpoint::AckIssuer;
 use spate_core::clock::SyncClock;
 use spate_core::config::{ComponentConfig, ConfigError};
-use spate_core::error::{ErrorClass, SourceError};
+use spate_core::error::SourceError;
 use spate_core::framing::FramingContract;
 use spate_core::record::PartitionId;
 use spate_core::source::{LaneId, Source, SourceCtx, SourceEvent};
@@ -97,10 +97,9 @@ impl DatagenSource {
     }
 
     fn open_state(&mut self) -> Result<&mut OpenState, SourceError> {
-        self.state.as_mut().ok_or_else(|| SourceError::Client {
-            class: ErrorClass::Fatal,
-            reason: "DatagenSource used before open()".into(),
-        })
+        self.state
+            .as_mut()
+            .ok_or_else(|| SourceError::fatal("DatagenSource used before open()"))
     }
 }
 
@@ -119,17 +118,13 @@ impl Source for DatagenSource {
 
     fn open(&mut self, ctx: SourceCtx) -> Result<(), SourceError> {
         if self.state.is_some() {
-            return Err(SourceError::Client {
-                class: ErrorClass::Fatal,
-                reason: "source opened twice".into(),
-            });
+            return Err(SourceError::fatal("source opened twice"));
         }
         // A hand-constructed config has not been through the deserializer,
         // which is where a loaded one is validated.
-        self.config.validate().map_err(|e| SourceError::Client {
-            class: ErrorClass::Fatal,
-            reason: e.to_string(),
-        })?;
+        self.config
+            .validate()
+            .map_err(|e| SourceError::fatal(e.to_string()))?;
 
         tracing::warn!(
             "spate-datagen keeps no durable progress; every run regenerates its stream from \
@@ -270,6 +265,7 @@ mod tests {
     use crate::events::StorefrontEvent;
     use spate_core::checkpoint::Checkpointer;
     use spate_core::clock::{SharedClock, TestClock};
+    use spate_core::error::ErrorClass;
     use spate_core::metrics::Meter;
     use spate_core::source::{PayloadBatch, SourceLane};
     use spate_test::render_metrics;
@@ -500,7 +496,32 @@ mod tests {
         let cp = Checkpointer::new();
         let mut source = DatagenSource::new(config(1, None));
         source.open(SourceCtx::new(cp.handle())).unwrap();
-        assert!(source.open(SourceCtx::new(cp.handle())).is_err());
+        let err = source.open(SourceCtx::new(cp.handle())).unwrap_err();
+        assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
+        assert_eq!(err.reason(), "source opened twice");
+    }
+
+    /// A class other than `Fatal` would have the controller poll an unopened
+    /// source forever.
+    #[test]
+    fn polling_before_open_is_fatal() {
+        let mut source = DatagenSource::new(config(1, None));
+        let Err(err) = source.poll_events(POLL) else {
+            panic!("an unopened source yielded an event");
+        };
+        assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
+        assert_eq!(err.reason(), "DatagenSource used before open()");
+    }
+
+    #[test]
+    fn open_validates_a_hand_built_config() {
+        let refused = config(0, None);
+        let expected = refused.validate().unwrap_err().to_string();
+        let cp = Checkpointer::new();
+        let mut source = DatagenSource::new(refused);
+        let err = source.open(SourceCtx::new(cp.handle())).unwrap_err();
+        assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
+        assert_eq!(err.reason(), expected);
     }
 
     /// A throttled lane releases `events_per_tick` and then holds until the

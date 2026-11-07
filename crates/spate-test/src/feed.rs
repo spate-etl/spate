@@ -899,6 +899,8 @@ mod tests {
             park.park(Duration::ZERO),
             "confirm_held_publishes did not wake"
         );
+        script.hand_back_on_stop();
+        assert!(park.park(Duration::ZERO), "hand_back_on_stop did not wake");
     }
 
     /// Pins that a receive which leaves deliveries queued leaves a wake

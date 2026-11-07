@@ -590,8 +590,10 @@ impl KafkaFeed {
     /// configuration, as for a property value it does not accept; when a
     /// broker rejects the client's credential or either side rejects the
     /// TLS handshake, naming the rejection, as soon as the client reports
-    /// it; when the cluster refuses a read of a topic as unauthorized or for
-    /// an invalid topic name, or describes no configuration entry for one;
+    /// it, or within the 30-second bound once a read waiting on a request it
+    /// sent finishes that wait; when the cluster refuses a read of a topic as
+    /// unauthorized or for an invalid topic name, or describes no
+    /// configuration entry for one;
     /// and for topics the feed cannot run on: a missing work, retry,
     /// dead-letter or attempt topic, a work, retry or dead-letter topic whose
     /// `cleanup.policy` includes `compact`, an attempt topic whose

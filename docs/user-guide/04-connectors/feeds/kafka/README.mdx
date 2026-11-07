@@ -134,6 +134,9 @@ the read under way and librdkafka's text, such as these:
 … SASL authentication error: Authentication failed: Invalid username or password …
 ```
 
+A read waiting on a request it sent to another broker finishes that wait first,
+within the checks' 30-second bound.
+
 A refused or reset connection stays retryable: the checks wait for a broker the
 client can use, and fail with `KafkaFeedError::Unavailable` once their bound
 passes.

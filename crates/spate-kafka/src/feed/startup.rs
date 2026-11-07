@@ -15,6 +15,8 @@
 //!
 //! A credential or TLS handshake rejected on the way to the cluster refuses
 //! connecting with the rejection's text, as soon as the client reports it.
+//! A read waiting on a request it sent finishes that wait first, within the
+//! checks' bound.
 
 use super::{KafkaFeedError, Topics};
 use crate::client::SpateContext;
@@ -99,9 +101,10 @@ pub(crate) trait TopicAdmin: Send + Sync {
 /// rejection. Every topic's metadata is read before any configuration, so a
 /// rejection is met first on `reader`.
 ///
-/// Each metadata read runs on a thread of its own and ends at most one
-/// [`SLICE`] past `limit` from when `Brokers` is built. While no broker is
-/// usable, it stops within one [`SLICE`] once nothing awaits its answer.
+/// Each metadata read runs on a thread of its own and ends at most two
+/// [`SLICE`]s past `limit` from when `Brokers` is built. Once nothing awaits
+/// its answer, it stops within one [`SLICE`] while no broker is usable, and
+/// when the call under way ends while a request it sent is outstanding.
 /// Dropping `Brokers` joins those threads, so both clients are closed when
 /// the drop returns.
 pub(crate) struct Brokers {
@@ -142,14 +145,17 @@ impl Brokers {
 /// within the call, having sent nothing, so the next call is short and a
 /// read that nothing awaits stops soon. `OperationTimedOut` means a request
 /// went out and its answer did not come in time. That answer is lost, so the
-/// next call waits for the rest of the time and sends one more request.
+/// next call sends one more request and waits for half the time left, and
+/// at least one [`SLICE`]. Half, because librdkafka waits for a usable
+/// broker again, for the call's full length, when the broker a call asked
+/// is decommissioned mid-call.
 fn next_slice(code: RDKafkaErrorCode, left: Duration) -> Option<Duration> {
     if left.is_zero() {
         return None;
     }
     match code {
         RDKafkaErrorCode::BrokerTransportFailure => Some(SLICE.min(left)),
-        RDKafkaErrorCode::OperationTimedOut => Some(left),
+        RDKafkaErrorCode::OperationTimedOut => Some((left / 2).max(SLICE).min(left)),
         _ => None,
     }
 }
@@ -1423,9 +1429,10 @@ mod tests {
     }
 
     /// Pins how a metadata read's next call waits after each error: one
-    /// [`SLICE`] while no broker is usable, the rest of the time after a
-    /// request went unanswered, never past the deadline, and not at all
-    /// after any other error or once the deadline has passed.
+    /// [`SLICE`] while no broker is usable, half the time left and at least
+    /// one [`SLICE`] after a request went unanswered, never past the
+    /// deadline, and not at all after any other error or once the deadline
+    /// has passed.
     #[test]
     fn a_metadata_read_paces_its_calls_by_the_error() {
         let ms = Duration::from_millis;
@@ -1434,7 +1441,9 @@ mod tests {
         let unanswered = C::OperationTimedOut;
         assert_eq!(next_slice(unusable, left), Some(SLICE));
         assert_eq!(next_slice(unusable, ms(30)), Some(ms(30)));
-        assert_eq!(next_slice(unanswered, left), Some(left));
+        assert_eq!(next_slice(unanswered, left), Some(left / 2));
+        assert_eq!(next_slice(unanswered, ms(150)), Some(SLICE));
+        assert_eq!(next_slice(unanswered, ms(30)), Some(ms(30)));
         for code in [unusable, unanswered] {
             assert_eq!(next_slice(code, Duration::ZERO), None, "{code:?}");
         }
@@ -1466,6 +1475,60 @@ mod tests {
             Ok(Err(C::BrokerTransportFailure)) => {}
             other => panic!("expected a transport failure within {DEADLINE:?}, got {other:?}"),
         }
+    }
+
+    /// Pins that a metadata read ends by its deadline when the slow broker it
+    /// asked is replaced, mid-call, by one the client cannot reach.
+    /// librdkafka then waits for a usable broker again for the call's full
+    /// length.
+    #[test]
+    #[expect(unsafe_code, reason = "moves a mock broker's advertised listener")]
+    fn a_metadata_read_ends_by_its_deadline_when_its_broker_is_replaced() {
+        use crate::client::testing::raw;
+        use rdkafka::ClientConfig;
+        use rdkafka::bindings as rd;
+        use rdkafka::producer::BaseProducer;
+        use std::ffi::{CStr, CString};
+        let limit = Duration::from_secs(3);
+        let holder: BaseProducer = ClientConfig::new()
+            .set("test.mock.num.brokers", "1")
+            .create()
+            .expect("a mock cluster");
+        // SAFETY: `holder` owns the mock cluster and outlives every use of
+        // `cluster` below.
+        let cluster = unsafe { rd::rd_kafka_handle_mock_cluster(holder.client().native_ptr()) };
+        assert!(!cluster.is_null());
+        // SAFETY: as above; the cluster owns the string.
+        let servers = unsafe { CStr::from_ptr(rd::rd_kafka_mock_cluster_bootstraps(cluster)) }
+            .to_str()
+            .expect("bootstrap servers")
+            .to_owned();
+        let work = CString::new(WORK).expect("topic name");
+        let unreachable = crate::testutil::refused_broker();
+        let port = unreachable
+            .rsplit(':')
+            .next()
+            .and_then(|p| p.parse().ok())
+            .expect("a port");
+        let host = CString::new("127.0.0.1").expect("host");
+        // SAFETY: as above. The bootstrap address still reaches the broker;
+        // only the listener its metadata advertises moves.
+        unsafe {
+            rd::rd_kafka_mock_topic_create(cluster, work.as_ptr(), 1, 1);
+            rd::rd_kafka_mock_broker_set_host_port(cluster, 1, host.as_ptr(), port);
+            rd::rd_kafka_mock_broker_set_rtt(cluster, 1, 1000);
+        }
+        let properties = [("bootstrap.servers", servers.as_str())];
+        let hooks = crate::sink::SinkHooks::detached(SyncClock::new(TestClock::frozen() as _));
+        let built = Instant::now();
+        let brokers = Brokers::new(raw(&properties, ()), raw(&properties, hooks), limit);
+        let io = multi_thread();
+        let got = io.block_on(brokers.metadata(WORK)).map_err(|e| e.code);
+        let took = built.elapsed();
+        assert!(
+            took <= limit + 2 * SLICE + Duration::from_millis(300),
+            "the read ended {took:?} after its brokers were built, with {got:?}"
+        );
     }
 
     /// Pins that checks ending on their own, before any rejection or the

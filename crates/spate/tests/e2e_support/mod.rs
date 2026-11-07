@@ -287,6 +287,15 @@ impl Harness {
         self.scalar(&format!("SELECT uniqExact(id) FROM {table}"))
     }
 
+    /// How many partitions have a row in `table`, read from the partition each
+    /// id carries (see [`event_id`]).
+    pub fn partitions_written(&self, table: &str) -> u64 {
+        self.scalar(&format!(
+            "SELECT uniqExact(intDiv(id, {})) FROM {table}",
+            event_id(1, 0)
+        ))
+    }
+
     pub fn scalar(&self, sql: &str) -> u64 {
         self.rt
             .block_on(self.ch_client().query(sql).fetch_one::<u64>())

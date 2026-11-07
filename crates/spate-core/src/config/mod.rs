@@ -616,17 +616,20 @@ impl PipelineConfig {
         // durability boundary, not the checkpoint.
         // The ceiling keeps the interval, which is added to a clock reading,
         // inside the clock's range.
-        const COMMIT_INTERVAL: DurationBounds =
-            DurationBounds::at_least(Duration::from_millis(100)).at_most(ONE_DAY);
-        if let Err(e) = check_duration(self.checkpoint.interval, COMMIT_INTERVAL) {
-            if self.checkpoint.interval > ONE_DAY {
-                return fail(format!("checkpoint.interval {e}"));
-            }
+        const COMMIT_INTERVAL_FLOOR: DurationBounds =
+            DurationBounds::at_least(Duration::from_millis(100));
+        if let Err(e) = check_duration(self.checkpoint.interval, COMMIT_INTERVAL_FLOOR) {
             return fail(format!(
                 "checkpoint.interval {e}: the commit loop fires every interval, so \
                  sub-100ms intervals hammer the source's offset store without \
                  improving durability"
             ));
+        }
+        if let Err(e) = check_duration(
+            self.checkpoint.interval,
+            COMMIT_INTERVAL_FLOOR.at_most(ONE_DAY),
+        ) {
+            return fail(format!("checkpoint.interval {e}"));
         }
         if self.checkpoint.max_pending_batches == 0 {
             return fail("checkpoint.max_pending_batches must be at least 1".into());
@@ -1386,7 +1389,7 @@ sinks:
             ),
             (
                 "pipeline: { name: x }\ncheckpoint: { interval: 50ms }\nsource: { m: {} }\nsink: { m: {} }",
-                "from 100ms to 1day",
+                "at least 100ms",
             ),
             (
                 "pipeline: { name: x }\ncheckpoint: { max_pending_batches: 0 }\nsource: { m: {} }\nsink: { m: {} }",
@@ -1437,11 +1440,13 @@ sinks:
             let err = PipelineConfig::from_str(&yaml(key, "1day 1ns"))
                 .unwrap_err()
                 .to_string();
+            let from = if key == "interval" { "100ms" } else { "1ns" };
             assert!(
-                err.contains(&format!("checkpoint.{key} must be from")),
+                err.ends_with(&format!(
+                    "checkpoint.{key} must be from {from} to 1day; found 1day 1ns"
+                )),
                 "{err}"
             );
-            assert!(err.contains("to 1day; found 1day 1ns"), "{err}");
         }
     }
 
@@ -1460,7 +1465,7 @@ sinks:
             .to_string();
         assert_eq!(
             err,
-            "invalid configuration: checkpoint.interval must be from 100ms to 1day; \
+            "invalid configuration: checkpoint.interval must be at least 100ms; \
              found 99ms 999us 999ns: the commit loop fires every interval, so \
              sub-100ms intervals hammer the source's offset store without \
              improving durability"

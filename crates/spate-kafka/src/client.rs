@@ -57,6 +57,11 @@ const ALIASES: [(&str, &str); 4] = [
 /// handle, which rdkafka's `fetch_metadata` unwraps, panicking the thread.
 pub(crate) const MAX_TOPIC_NAME_BYTES: usize = 512;
 
+/// Whether librdkafka takes `topic` by its length.
+pub(crate) fn topic_name_fits(topic: &str) -> bool {
+    topic.len() <= MAX_TOPIC_NAME_BYTES
+}
+
 /// The librdkafka property `key` writes, under one spelling per property:
 /// `topic.` stripped from a topic property and an alias replaced by its
 /// target. Names match case-sensitively, as librdkafka's do.

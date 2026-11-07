@@ -28,7 +28,9 @@
 //! source offsets past it. Weaker settings would silently turn
 //! at-least-once into at-most-once.
 
-use crate::client::{Base, Keys, MAX_TOPIC_NAME_BYTES, Role, canonical, check_message_timeout};
+use crate::client::{
+    Base, Keys, MAX_TOPIC_NAME_BYTES, Role, canonical, check_message_timeout, topic_name_fits,
+};
 use crate::sink::context::{SinkContext, SinkHooks};
 use crate::sink::encoder::{
     DEFAULT_MAX_MESSAGE_BYTES, KafkaBytesEncoder, KafkaEncoder, KafkaJsonEncoder, MessageEncoder,
@@ -316,7 +318,7 @@ impl KafkaSinkConfig {
         if self.topic.trim().is_empty() {
             return fail("topic must not be empty".into());
         }
-        if self.topic.len() > MAX_TOPIC_NAME_BYTES {
+        if !topic_name_fits(&self.topic) {
             return fail(format!(
                 "topic is {} bytes, past the client's limit of {MAX_TOPIC_NAME_BYTES} bytes",
                 self.topic.len()

@@ -136,6 +136,16 @@ mod tests {
         wait_until(Duration::MAX, "a condition that holds", || true);
     }
 
+    /// A bound past the clock's range is no deadline, and has no end; a
+    /// deadline that has passed has nothing left.
+    #[test]
+    fn no_deadline_never_ends_and_a_passed_one_has_nothing_left() {
+        assert_eq!(deadline(Duration::MAX), None);
+        assert_eq!(left(None), Some(Duration::MAX));
+        assert_eq!(left(deadline(Duration::ZERO)), None);
+        assert!(left(deadline(HANG)).is_some_and(|left| left <= HANG));
+    }
+
     /// A wait that reaches its bound says the test hung, naming the condition.
     #[test]
     #[should_panic(expected = "hung after 0ns waiting for: the flag")]

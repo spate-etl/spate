@@ -27,12 +27,12 @@ use object_store::{ClientConfigKey, ObjectStore, ObjectStoreScheme};
 use spate_core::clock::tokio::{Clock, SystemClock};
 use spate_core::config::{ComponentConfig, ConfigError, FeedSection};
 use spate_core::error::SourceError;
-use spate_core::feed::{DepthOf, Feed, FeedOrigin};
+use spate_core::feed::{DEFAULT_ATTEMPT_CAP, DepthOf, Feed, FeedOrigin, memory};
 use spate_core::framing::{FramingContract, RecordFramer};
 use spate_core::record::PartitionId;
 use spate_core::source::{LaneId, Source, SourceCtx, SourceEvent};
 use spate_core::task::{self, TaskHandle};
-use std::num::{NonZeroU32, NonZeroUsize};
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Duration;
 use url::Url;
@@ -40,7 +40,7 @@ use url::Url;
 /// Re-enqueues of an overwritten key a notification unit carries before the
 /// unit is acknowledged without one, when the `feed:` section sets no
 /// `attempt_cap`. The SQS feed refuses that key, so it always uses this.
-pub(crate) const DEFAULT_RE_ENQUEUE_CAP: u32 = 10;
+pub(crate) const DEFAULT_RE_ENQUEUE_CAP: u32 = DEFAULT_ATTEMPT_CAP.get();
 
 /// Where the source is in its lifecycle.
 enum State {
@@ -341,12 +341,12 @@ impl S3Source {
             .map(|location| self.parse_location(location))
             .transpose()
             .map_err(|e| SourceError::fatal(e.to_string()))?;
-        if location.is_some() && backend == "memory" {
+        if location.is_some() && backend == memory::BACKEND {
             return Err(SourceError::fatal(
                 "the in-process feed keeps no job location; remove `feed.location`",
             ));
         }
-        if backend == "memory" {
+        if backend == memory::BACKEND {
             return Err(SourceError::fatal(
                 "a lister run publishes to a durable feed; the in-process feed lives in one \
                  process, whose own source lists for it",
@@ -549,7 +549,7 @@ impl Source for S3Source {
             .as_deref()
             .map(|location| self.parse_location(location))
             .transpose()?;
-        let memory = section.backend().type_tag() == "memory";
+        let memory = section.backend().type_tag() == memory::BACKEND;
         if section.settling_window.is_some() && self.location.is_none() && !memory {
             return Err(ConfigError::Component {
                 context: "feed".into(),
@@ -561,9 +561,7 @@ impl Source for S3Source {
         }
         self.feed = Some(feed);
         self.units_held = section.units_held;
-        self.re_enqueue_cap = section
-            .attempt_cap
-            .map_or(DEFAULT_RE_ENQUEUE_CAP, NonZeroU32::get);
+        self.re_enqueue_cap = section.attempt_cap_or_default().get();
         self.settling_window = section.settling_window_or_default();
         self.solo_lister = memory;
         self.solo_ends = memory && origin == FeedOrigin::Section;
@@ -1078,6 +1076,7 @@ mod tests {
         use spate_core::config::FeedSection;
         use spate_core::feed::{FeedOrigin, memory::MemoryFeed};
         use spate_core::source::Source as _;
+        use std::num::NonZeroU32;
         let rt = tokio::runtime::Builder::new_current_thread()
             .build()
             .unwrap();

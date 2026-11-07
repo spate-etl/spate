@@ -318,8 +318,8 @@ pub struct SealedBatch {
     /// Deterministic-within-a-session batch identity. Retries of the same
     /// sealed batch (including on other replicas) reuse the same token,
     /// so sinks with server-side deduplication windows treat them as
-    /// idempotent. Crash replay produces different tokens (documented
-    /// at-least-once semantics).
+    /// idempotent. Crash replay produces different tokens, barring an
+    /// improbable cross-run collision (documented at-least-once semantics).
     pub dedup_token: String,
 }
 

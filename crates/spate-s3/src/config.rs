@@ -244,9 +244,7 @@ fn parse_url(field: &str, value: &str) -> Result<Url, ConfigError> {
     }
     let url = Url::parse(value)
         .map_err(|e| ConfigError::Validation(format!("{field} is not a valid URL: {e}")))?;
-    // `memory://` builds a fresh empty store on every parse, so the source
-    // and any test setup would each see a different store.
-    // The store reads neither, and its errors quote the URL whole.
+    // The store reads no userinfo or query, and its errors quote the URL whole.
     if has_userinfo(&url) || url.query().is_some() {
         return Err(ConfigError::Validation(format!(
             "{field}: {} carries userinfo or a query, which the store does not read; set \
@@ -254,6 +252,8 @@ fn parse_url(field: &str, value: &str) -> Result<Url, ConfigError> {
             redact::url(value)
         )));
     }
+    // `memory://` builds a fresh empty store on every parse, so the source
+    // and any test setup would each see a different store.
     if url.scheme() == "memory" {
         return Err(ConfigError::Validation(format!(
             "{field}: memory:// creates a new empty store per component and cannot be \

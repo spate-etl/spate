@@ -1355,6 +1355,35 @@ fn a_write_failing_again_backs_off_further_each_time() {
     }
 }
 
+/// Pins that a write failed transiently on a feed that drops it, stopped or
+/// latched, logs no line saying it is sent again. Regression for #1706.
+#[test]
+fn a_dropped_resend_logs_no_send_again_line() {
+    for latched in [false, true] {
+        let core = core(10);
+        let receipt = {
+            let mut st = core.lock();
+            st.tracker.assign([tp(0)]);
+            st.tracker.deliver(&tp(0), 1).unwrap()
+        };
+        let write = moving(&core, receipt);
+        if latched {
+            core.latch("a fatal write");
+        } else {
+            core.stop.store(true, Ordering::Release);
+        }
+        let lines = spate_test::capture_logs(tracing::Level::WARN, || {
+            core.settle(*write, Err(failure(C::MessageTimedOut)));
+        });
+        assert!(core.lock().resends.is_empty(), "the feed drops it");
+        let resent: Vec<&String> = lines
+            .iter()
+            .filter(|line| line.contains("sending it again"))
+            .collect();
+        assert!(resent.is_empty(), "{resent:#?}");
+    }
+}
+
 /// Pins that a resend whose delay would pass the end of the `Instant` range
 /// is queued due at once.
 #[test]

@@ -60,7 +60,7 @@ fn core_on(cap: u32, clock: Arc<TestClock>) -> Core {
     )
 }
 
-fn tp(partition: i32) -> Tp {
+pub(super) fn tp(partition: i32) -> Tp {
     Tp::new(&Arc::from("units"), partition)
 }
 
@@ -79,7 +79,7 @@ fn attempt_partition(core: &Core, identity: &PublishId) -> i32 {
 
 /// Deliver `offset` of `tp(0)` and return it as the gate takes it, with
 /// `admitting` raised as the gate's take raises it.
-fn gated(core: &Core, offset: i64) -> Gating {
+pub(super) fn gated(core: &Core, offset: i64) -> Gating {
     let mut st = core.lock();
     let receipt = st.tracker.deliver(&tp(0), offset).unwrap();
     st.admitting += 1;
@@ -940,14 +940,85 @@ fn a_transient_consumer_error_is_returned_once() {
     assert_eq!(feed.receive(8).unwrap().len(), 1);
 }
 
-/// Pins that a waker set while units are buffered is woken at once.
+/// Pins that a waker set while units are buffered is woken at once, and one
+/// set with none buffered is not.
 #[test]
 fn a_waker_set_with_units_buffered_wakes_at_once() {
     let feed = idle_feed();
+    let (idle, idle_park) = wake_channel();
+    feed.set_waker(idle);
+    assert!(
+        !idle_park.park(Duration::ZERO),
+        "woken with nothing buffered"
+    );
     buffer_one(&feed);
     let (waker, park) = wake_channel();
     feed.set_waker(waker);
-    assert!(park.park(std::time::Duration::ZERO), "not woken");
+    assert!(park.park(Duration::ZERO), "not woken");
+}
+
+/// Pins that the feed logs its stop once, at the first latch, and that a
+/// later latch keeps the first error.
+#[test]
+fn a_feed_logs_its_stop_once() {
+    let core = core(10);
+    let mut errors = Vec::new();
+    let lines = spate_test::capture_logs(tracing::Level::ERROR, || {
+        errors.push(core.latch("first"));
+        errors.push(core.latch("second"));
+    });
+    let logged = lines
+        .iter()
+        .filter(|line| line.contains("the Kafka feed stopped"))
+        .count();
+    assert_eq!(logged, 1, "one stop, one line: {lines:#?}");
+    assert_eq!(errors[1], errors[0]);
+}
+
+/// Pins that a `receive` leaving units buffered wakes the reader again, and
+/// one that empties the buffer does not.
+#[test]
+fn a_receive_leaving_units_buffered_wakes_the_reader_again() {
+    let feed = idle_feed();
+    {
+        let mut st = feed.core.lock();
+        st.tracker.assign([tp(0)]);
+        for offset in 0..2 {
+            let receipt = st.tracker.deliver(&tp(0), offset).unwrap();
+            let ready = ready(&feed.core, receipt, offset);
+            st.ready.push_back(ready);
+        }
+    }
+    let (waker, park) = wake_channel();
+    feed.set_waker(waker);
+    assert!(park.park(Duration::ZERO), "not woken at the waker's set");
+
+    assert_eq!(feed.receive(1).unwrap().len(), 1);
+    assert!(
+        park.park(Duration::ZERO),
+        "a unit left buffered woke nothing"
+    );
+    assert_eq!(feed.receive(1).unwrap().len(), 1);
+    assert!(
+        !park.park(Duration::ZERO),
+        "an emptied buffer woke the reader"
+    );
+}
+
+/// Pins that `renew` keeps a handed receipt, answers a receipt the feed no
+/// longer holds as gone, and answers every receipt with the latched error
+/// once the feed latches.
+#[test]
+fn renew_keeps_a_held_receipt_until_the_feed_latches() {
+    let feed = idle_feed();
+    buffer_one(&feed);
+    let receipt = feed.receive(1).unwrap().pop().unwrap().receipt;
+    assert_eq!(feed.renew(receipt), Ok(()));
+    let unknown = feed.renew(Receipt(u64::MAX)).unwrap_err();
+    assert_eq!(unknown.kind, FeedErrorKind::Gone);
+
+    let latched = feed.core.latch("probe");
+    assert_eq!(feed.renew(receipt), Err(latched));
 }
 
 /// Pins the gate's two answers: a unit recorded below the cap is admitted

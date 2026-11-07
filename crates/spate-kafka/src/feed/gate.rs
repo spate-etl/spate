@@ -468,6 +468,7 @@ mod tests {
     use crate::feed::FeedRole;
     use crate::feed::config::KafkaFeedConfig;
     use crate::feed::producer::FeedProducerHooks;
+    use crate::feed::tests::{gated, tp};
     use rdkafka::error::RDKafkaErrorCode as C;
     use spate_core::clock::SyncClock;
     use std::num::NonZeroU32;
@@ -515,6 +516,38 @@ mod tests {
                 "the gate of a {how} feed waited a step"
             );
         }
+    }
+
+    /// Pins that a latched feed's gate takes none of the deliveries waiting
+    /// for it, so none gets an attempt record.
+    #[test]
+    fn a_latched_feeds_gate_takes_nothing() {
+        let section: spate_core::config::FeedSection = serde_yaml::from_str(
+            "kafka:\n  brokers: 127.0.0.1:1\n  group_id: workers\n  topic: units\n  \
+             retry_topic: units-retry\n  dead_letter_topic: units-dead\n  \
+             attempt_topic: units-attempts\n  statistics_interval: 0s\n",
+        )
+        .unwrap();
+        let config = KafkaFeedConfig::from_section(&section).unwrap();
+        let core = Arc::new(Core::new(&config, NonZeroU32::MIN, SyncClock::system()));
+        let producer = config
+            .base(false)
+            .create::<Producer, _>(
+                &config.client(FeedRole::Producer),
+                FeedProducerHooks::new(Arc::clone(&core)),
+            )
+            .unwrap();
+        let gate = Gate::new(Arc::clone(&core), producer, config.delivery_timeout);
+        core.lock().tracker.assign([tp(0)]);
+        let entry = gated(&core, 0);
+        core.lock().gating.push_back(entry);
+        drop(core.latch("probe"));
+
+        assert!(
+            gate.take().is_empty(),
+            "a latched feed's gate took a delivery"
+        );
+        assert_eq!(core.lock().gating.len(), 1);
     }
 
     /// Pins how a failed watermark read ends a pass: a refusal retrying

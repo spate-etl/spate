@@ -415,7 +415,8 @@ mod tests {
     #[cfg(not(feature = "avro"))]
     #[test]
     fn avro_without_the_feature_fails_at_open_rather_than_silently_emitting_json() {
-        let err = Encoder::new(Encoding::Avro).unwrap_err().to_string();
-        assert!(err.contains("avro"), "{err}");
+        let err = Encoder::new(Encoding::Avro).unwrap_err();
+        assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
+        assert_eq!(err.reason(), crate::config::AVRO_FEATURE_OFF);
     }
 }

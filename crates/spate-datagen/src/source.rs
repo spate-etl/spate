@@ -500,7 +500,32 @@ mod tests {
         let cp = Checkpointer::new();
         let mut source = DatagenSource::new(config(1, None));
         source.open(SourceCtx::new(cp.handle())).unwrap();
-        assert!(source.open(SourceCtx::new(cp.handle())).is_err());
+        let err = source.open(SourceCtx::new(cp.handle())).unwrap_err();
+        assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
+        assert_eq!(err.reason(), "source opened twice");
+    }
+
+    /// A class other than `Fatal` would have the controller poll an unopened
+    /// source forever.
+    #[test]
+    fn polling_before_open_is_fatal() {
+        let mut source = DatagenSource::new(config(1, None));
+        let Err(err) = source.poll_events(POLL) else {
+            panic!("an unopened source yielded an event");
+        };
+        assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
+        assert_eq!(err.reason(), "DatagenSource used before open()");
+    }
+
+    #[test]
+    fn open_validates_a_hand_built_config() {
+        let refused = config(0, None);
+        let expected = refused.validate().unwrap_err().to_string();
+        let cp = Checkpointer::new();
+        let mut source = DatagenSource::new(refused);
+        let err = source.open(SourceCtx::new(cp.handle())).unwrap_err();
+        assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
+        assert_eq!(err.reason(), expected);
     }
 
     /// A throttled lane releases `events_per_tick` and then holds until the

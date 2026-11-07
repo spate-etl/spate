@@ -123,6 +123,8 @@ which, and `cargo xtask changelog new fixed …` scaffolds a fragment.
 
 [`.github/pull_request_template.md`](.github/pull_request_template.md) is the
 body structure. Tick its boxes by exit code, not by memory.
+[Reading a review](docs/developer/06-reading-a-review.md) says what a review
+checks, so you can run the same checks first.
 
 ## The invariants
 

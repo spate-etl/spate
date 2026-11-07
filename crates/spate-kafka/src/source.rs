@@ -1498,8 +1498,9 @@ fn read_failure<T>(doing: &str, e: &KafkaError) -> Result<Result<T, String>, Sou
 }
 
 /// Fill `consumer_lag` for a partition librdkafka reports as unknown, from
-/// the committed offset read before its assignment. librdkafka's own figure
-/// takes over once it has one, after this member's first commit.
+/// the committed offset read before its assignment, when that offset lies in
+/// `0..=end`. librdkafka's own figure takes over once it has one, after this
+/// member's first commit.
 fn fill_unknown_lag(
     stats: &mut Statistics,
     topic: &str,
@@ -1517,7 +1518,7 @@ fn fill_unknown_lag(
         };
         if p.consumer_lag < 0
             && let Some(&committed) = committed.get(pid)
-            && committed <= end
+            && (0..=end).contains(&committed)
         {
             p.consumer_lag = end - committed;
         }
@@ -5646,11 +5647,23 @@ mod tests {
         fn unknown_lag_is_measured_from_the_committed_offset() {
             assert_eq!(filled(snapshot(-1, 10, 8), &[(0, 3)], true), 5);
             assert_eq!(filled(snapshot(-1, 10, 8), &[(0, 3)], false), 7);
+            assert_eq!(filled(snapshot(-1, 10, 10), &[(0, 0)], true), 10);
+            assert_eq!(filled(snapshot(-1, 10, 10), &[(0, 10)], true), 0);
         }
 
         #[test]
         fn a_known_lag_is_left_alone() {
             assert_eq!(filled(snapshot(2, 10, 10), &[(0, 3)], true), 2);
+        }
+
+        /// Pins that a negative committed offset leaves the lag unknown, and
+        /// that the end minus it does not overflow. Regression for #1690.
+        #[test]
+        fn a_negative_committed_offset_leaves_the_lag_unknown() {
+            assert_eq!(
+                filled(snapshot(-1, i64::MAX, i64::MAX), &[(0, -500)], false),
+                -1
+            );
         }
 
         /// No committed offset, or no end offset yet, leaves the lag unknown.

@@ -91,7 +91,8 @@ const LATE_TICK: Duration = Duration::from_millis(5);
 const CONNECT_BOUND: Duration = Duration::from_secs(30);
 
 /// `connect` under [`CONNECT_BOUND`] on `clock`. Past the bound, an
-/// [`SqsError::Unavailable`] naming the step `step` holds.
+/// [`SqsError::Unavailable`] naming the step `step` holds, and an
+/// `Unavailable` also holds when the bound's thread cannot be started.
 ///
 /// The bound is timed by a [`ThreadBound`], so it fires on a runtime whose
 /// timer nothing drives, as under `Handle::block_on` on a current-thread
@@ -466,7 +467,8 @@ impl SqsFeed {
     /// longer than the queue does. Also when the queue or its dead-letter
     /// queue does not report its message counts.
     /// [`SqsError::Unavailable`] when SQS does not answer in time or keeps
-    /// failing transiently.
+    /// failing transiently, and when the thread that times the 30-second
+    /// bound cannot be started.
     ///
     /// # Panics
     ///
@@ -489,7 +491,7 @@ impl SqsFeed {
         section: &FeedSection,
         io: &tokio::runtime::Handle,
     ) -> Result<SqsFeed, SqsError> {
-        Self::connect_with(section, io, None)
+        Self::connect_with(section, io, None, SyncClock::system())
     }
 
     /// [`connect`](Self::connect) with a static access key in place of the
@@ -519,13 +521,17 @@ impl SqsFeed {
             Some(aws_sdk_sqs::config::SharedCredentialsProvider::new(
                 credentials,
             )),
+            SyncClock::system(),
         )
     }
 
+    /// [`connect`](Self::connect) with `credentials` in place of the provider
+    /// chain when given, and the connect bound timed on `clock`.
     fn connect_with(
         section: &FeedSection,
         io: &tokio::runtime::Handle,
         credentials: Option<aws_sdk_sqs::config::SharedCredentialsProvider>,
+        clock: SyncClock,
     ) -> Result<SqsFeed, SqsError> {
         let config = SqsFeedConfig::from_section(section)?;
         let step = Mutex::new("starting");
@@ -534,7 +540,7 @@ impl SqsFeed {
             let checked = startup::check(&queue, &config.queue_url, &step).await?;
             Ok::<_, SqsError>((queue, checked))
         };
-        let (queue, checked) = io.block_on(bounded(&step, SyncClock::system(), connect))?;
+        let (queue, checked) = io.block_on(bounded(&step, clock, connect))?;
         tracing::info!(
             queue = %checked.arn,
             visibility = ?config.visibility,

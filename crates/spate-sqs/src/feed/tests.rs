@@ -1640,6 +1640,62 @@ impl startup::QueueAttributes for Hangs {
     }
 }
 
+/// Pins that `connect` times its bound on the clock it is given: against an
+/// endpoint that accepts connections and never answers, through a
+/// current-thread handle, it ends once that clock passes the bound.
+/// Regression for #1218.
+#[test]
+fn connect_ends_at_the_bound_on_the_clock_it_is_given() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        let held: Vec<_> = listener.incoming().collect();
+        drop(held);
+    });
+    let section: FeedSection = serde_yaml::from_str(&format!(
+        "sqs: {{ queue_url: \"http://{addr}/000000000000/jobs\", \
+         region: eu-west-2, endpoint: \"http://{addr}\" }}"
+    ))
+    .unwrap();
+    let io = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let clock = SyncTestClock::frozen();
+    let given = SyncClock::new(Arc::clone(&clock) as _);
+    let handle = io.handle().clone();
+    let (tx, done) = mpsc::channel();
+    std::thread::spawn(move || {
+        let credentials = aws_sdk_sqs::config::Credentials::new("x", "x", None, None, "test");
+        let _ = tx.send(
+            SqsFeed::connect_with(
+                &section,
+                &handle,
+                Some(aws_sdk_sqs::config::SharedCredentialsProvider::new(
+                    credentials,
+                )),
+                given,
+            )
+            .map(drop),
+        );
+    });
+    // The bound reads its deadline when `connect` starts it, which this
+    // thread cannot see, so each pass moves the clock by a whole bound.
+    let mut got = None;
+    spate_test::wait_until(BOUND_DEADLINE, "connect ends", || {
+        clock.advance(CONNECT_BOUND);
+        got = done.recv_timeout(Duration::from_millis(100)).ok();
+        got.is_some()
+    });
+    match got {
+        Some(Err(SqsError::Unavailable(message))) => assert!(
+            message.starts_with("connecting took longer than 30s, while "),
+            "{message}"
+        ),
+        other => panic!("expected unavailable, got {other:?}"),
+    }
+}
+
 /// Pins that the connect bound names the read it was on, for the queue and
 /// for its dead-letter queue.
 #[test]

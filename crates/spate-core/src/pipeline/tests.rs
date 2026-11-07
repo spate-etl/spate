@@ -5476,6 +5476,7 @@ fn start_holding_acks(
 //
 // `cfg(test)` is redundant for the compiler. cargo-mutants skips an item under
 // exactly `cfg(test)`, and a mutant here only reopens that race.
+// ANCHOR: poll_after_hint
 #[cfg(test)]
 fn hint(h: &Harness, partition: PartitionId) {
     let before = h.shared.lock().unwrap().hinted_at;
@@ -5491,6 +5492,7 @@ fn hint(h: &Harness, partition: PartitionId) {
                 .is_some_and(|at| log.poll_timeouts.len() > at + 1)
     });
 }
+// ANCHOR_END: poll_after_hint
 
 /// The timeout of the controller's latest poll.
 fn last_poll(h: &Harness) -> Duration {

@@ -68,25 +68,9 @@ Traps here:
 
 ## Testing
 
-proptest for tracker and codec invariants, loom for the sync primitives, rdkafka
-MockCluster and clickhouse mocks in default CI, testcontainers behind the Docker
-job. Framework users test with `spate-test` mocks; keep those first-class.
-
-- `cargo xtask test` does not run doctests; `cargo xtask doctest` does.
-- `cargo test` runs a binary's tests in one process, so fixtures must carry
-  per-test `pipeline`/`component` labels. A local recorder does not isolate the
-  process-wide gauge claim in INV-10.
-- A test acts or asserts only on a state the code has signalled, and the
-  signal is published after the state. It awaits the signal, or polls it with
-  `spate_test::wait_until`.
-- A test owns its environment: its names, ports, clusters and metric labels
-  are its own.
-- Real elapsed time decides no result. A wall-clock bound only catches a hang:
-  pass `spate_test::HANG`, and the failure says the test hung. A timing
-  property is tested on `TestClock` or paused tokio time where the code allows
-  it, and a fixed sleep belongs only in such a test.
-- A failure in an interleaving assertion is checked for a product defect
-  before it is called a flake.
+How a test is written here is [Writing a test](docs/developer/02-testing.md):
+the four rules, which harness fits which code, and what a test binary shares
+process-wide.
 
 ## Comments
 

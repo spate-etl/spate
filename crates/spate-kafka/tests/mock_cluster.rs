@@ -1470,6 +1470,7 @@ impl Driver {
         });
     }
 
+    // ANCHOR: settle_group
     /// Step until the live lanes cover partitions `0..partitions` and each of
     /// `consumers` consumers reports itself in a stable group, so the group
     /// has finished forming. Takes a driver from [`Driver::open_watched`].
@@ -1489,6 +1490,7 @@ impl Driver {
                 && healthy.iter().all(|s| s.value == 1.0)
         });
     }
+    // ANCHOR_END: settle_group
 
     /// Read every live lane, stepping between polls, until each partition has
     /// delivered `n` offsets, and return the offsets read per partition. Each

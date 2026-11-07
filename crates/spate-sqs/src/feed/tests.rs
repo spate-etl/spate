@@ -114,6 +114,7 @@ async fn an_extension_is_clamped_to_the_time_left() {
     }
     assert_eq!(hold_end(now), now + HOLD - secs(30));
 
+    // ANCHOR: advance_paused_time
     let (feed, queue) = start(HOLD);
     let (waker, park) = wake_channel();
     feed.set_waker(waker);
@@ -132,6 +133,7 @@ async fn an_extension_is_clamped_to_the_time_left() {
         Some(received + HOLD - secs(30)),
         "the first visibility is clamped to this receive's hold"
     );
+    // ANCHOR_END: advance_paused_time
 
     // A renewal period is 4 h at a 12 h visibility.
     let period = HOLD / 3;

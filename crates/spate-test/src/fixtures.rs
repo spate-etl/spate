@@ -57,6 +57,7 @@ pub fn component_config(type_tag: &str, yaml: &str) -> ComponentConfig {
     ComponentConfig::new(type_tag, raw)
 }
 
+// ANCHOR: unique_name
 /// `prefix` with a suffix no other call in this process returns.
 ///
 /// Gauge ownership is process-wide (INV-10), so tests sharing a binary name
@@ -66,6 +67,7 @@ pub fn unique_name(prefix: &str) -> String {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     format!("{prefix}-{}", NEXT.fetch_add(1, Ordering::Relaxed))
 }
+// ANCHOR_END: unique_name
 
 #[cfg(test)]
 mod tests {

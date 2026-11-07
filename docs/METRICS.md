@@ -114,8 +114,8 @@ describes.
 Give the absence and partial-measurement alerts a `for:` window of a minute or
 so. Both are legitimately true at startup. A partition's series appears at the
 first statistics tick once it has a committed offset, which under `latest` is
-when it is assigned. Under `earliest` or `error`, a partition never committed
-before has one after the first commit (with the defaults, `5s + 5s`, longer if
+when it is assigned. Under `earliest`, a partition never committed before
+has one after the first commit (with the defaults, `5s + 5s`, longer if
 the first assignment is slow), so a bare `absent()` pages on every deploy.
 
 ### Absent, zero, and stale

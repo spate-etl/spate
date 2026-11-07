@@ -93,8 +93,9 @@ pub(crate) fn classify_consumer_error(code: RDKafkaErrorCode, after_startup: boo
         // librdkafka was built without, or an unknown message format. A retry
         // refetches the same batch, or librdkafka skips the message.
         | C::NotImplemented
-        // A fetch out of range under `auto.offset.reset: error`. librdkafka
-        // stops fetching the partition once it reports this.
+        // A partition with no committed offset, or a fetch out of range, under
+        // `auto.offset.reset: error`. librdkafka stops fetching the partition
+        // once it reports this.
         | C::AutoOffsetReset => ErrorClass::Fatal,
         // A partition that vanished after we already owned it: the topic was
         // deleted. Before startup this is just metadata catching up.

@@ -29,6 +29,11 @@ use url::Url;
 pub(crate) const BAD_PREFIX: &str =
     "has a prefix with an empty segment, a control character or bytes that are not UTF-8";
 
+/// Whether `url` names a user or a password.
+pub(crate) fn has_userinfo(url: &Url) -> bool {
+    !url.username().is_empty() || url.password().is_some()
+}
+
 /// The step between a waiting worker's reads of the fingerprint.
 pub(crate) const FINGERPRINT_POLL: Duration = Duration::from_secs(5);
 
@@ -77,11 +82,7 @@ impl Location {
         // The location's store reads none of these, `object_store` quotes the
         // whole URL in its errors, and a fragment would silently name a
         // shorter prefix.
-        if !url.username().is_empty()
-            || url.password().is_some()
-            || url.query().is_some()
-            || url.fragment().is_some()
-        {
+        if has_userinfo(&url) || url.query().is_some() || url.fragment().is_some() {
             return Err(refuse(
                 "carries userinfo, a query or a fragment, which name nothing in the location's \
                  store; set credentials under the source's `store`"

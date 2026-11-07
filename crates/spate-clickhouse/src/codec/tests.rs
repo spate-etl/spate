@@ -53,6 +53,25 @@ fn lz4_block_matches_the_client_crates_block() {
     }
 }
 
+/// A shorter chunk after a long one keeps the client's bytes, with the long
+/// chunk on the table boundary and either side of it.
+#[test]
+fn a_short_lz4_chunk_after_a_long_one_matches_the_client_crates_block() {
+    let short = bytes(42 * 1024, 3, 16);
+    let boundary = usize::from(u16::MAX);
+    for long in [boundary - 1, boundary, boundary + 1] {
+        let mut codec = codec(Compression::Lz4);
+        for (i, raw) in [&short, &bytes(long, 5, 16), &short]
+            .into_iter()
+            .enumerate()
+        {
+            let ours = codec.encode_frame(raw).expect("lz4 codes").to_vec();
+            let theirs = clickhouse::_priv::lz4_compress(raw).expect("the client compresses");
+            assert!(ours[..] == theirs[..], "long {long}, input {i}");
+        }
+    }
+}
+
 /// The codec's zstd level-3 blocks are the `clickhouse` client's, byte for
 /// byte, for every input in one sequence through one instance.
 #[test]

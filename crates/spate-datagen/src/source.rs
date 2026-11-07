@@ -14,7 +14,7 @@ use crate::plan::EventPlan;
 use spate_core::checkpoint::AckIssuer;
 use spate_core::clock::SyncClock;
 use spate_core::config::{ComponentConfig, ConfigError};
-use spate_core::error::{ErrorClass, SourceError};
+use spate_core::error::SourceError;
 use spate_core::framing::FramingContract;
 use spate_core::record::PartitionId;
 use spate_core::source::{LaneId, Source, SourceCtx, SourceEvent};
@@ -97,10 +97,9 @@ impl DatagenSource {
     }
 
     fn open_state(&mut self) -> Result<&mut OpenState, SourceError> {
-        self.state.as_mut().ok_or_else(|| SourceError::Client {
-            class: ErrorClass::Fatal,
-            reason: "DatagenSource used before open()".into(),
-        })
+        self.state
+            .as_mut()
+            .ok_or_else(|| SourceError::fatal("DatagenSource used before open()"))
     }
 }
 
@@ -119,17 +118,13 @@ impl Source for DatagenSource {
 
     fn open(&mut self, ctx: SourceCtx) -> Result<(), SourceError> {
         if self.state.is_some() {
-            return Err(SourceError::Client {
-                class: ErrorClass::Fatal,
-                reason: "source opened twice".into(),
-            });
+            return Err(SourceError::fatal("source opened twice"));
         }
         // A hand-constructed config has not been through the deserializer,
         // which is where a loaded one is validated.
-        self.config.validate().map_err(|e| SourceError::Client {
-            class: ErrorClass::Fatal,
-            reason: e.to_string(),
-        })?;
+        self.config
+            .validate()
+            .map_err(|e| SourceError::fatal(e.to_string()))?;
 
         tracing::warn!(
             "spate-datagen keeps no durable progress; every run regenerates its stream from \
@@ -270,6 +265,7 @@ mod tests {
     use crate::events::StorefrontEvent;
     use spate_core::checkpoint::Checkpointer;
     use spate_core::clock::{SharedClock, TestClock};
+    use spate_core::error::ErrorClass;
     use spate_core::metrics::Meter;
     use spate_core::source::{PayloadBatch, SourceLane};
     use spate_test::render_metrics;

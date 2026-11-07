@@ -11,7 +11,7 @@
 
 use crate::config::Encoding;
 use crate::events::StorefrontEvent;
-use spate_core::error::{ErrorClass, SourceError};
+use spate_core::error::SourceError;
 
 /// A resolved payload encoder. Built once at `open`, never on the record path.
 #[derive(Debug)]
@@ -34,10 +34,7 @@ impl Encoder {
             Encoding::Avro => {
                 let schema =
                     apache_avro::Schema::parse_str(crate::EVENT_SCHEMA_JSON).map_err(|e| {
-                        SourceError::Client {
-                            class: ErrorClass::Fatal,
-                            reason: format!("parsing the built-in datagen Avro schema: {e}"),
-                        }
+                        SourceError::fatal(format!("parsing the built-in datagen Avro schema: {e}"))
                     })?;
                 Ok(Encoder::Avro(Box::new(schema)))
             }
@@ -45,10 +42,7 @@ impl Encoder {
             // this combination at load time, but a hand-built config reaches
             // `open` without passing through it.
             #[cfg(not(feature = "avro"))]
-            Encoding::Avro => Err(SourceError::Client {
-                class: ErrorClass::Fatal,
-                reason: crate::config::AVRO_FEATURE_OFF.into(),
-            }),
+            Encoding::Avro => Err(SourceError::fatal(crate::config::AVRO_FEATURE_OFF)),
         }
     }
 
@@ -81,10 +75,7 @@ impl Encoder {
         };
         result.map_err(|reason| {
             out.truncate(start);
-            SourceError::Client {
-                class: ErrorClass::Fatal,
-                reason,
-            }
+            SourceError::fatal(reason)
         })
     }
 }
@@ -415,6 +406,8 @@ mod tests {
     #[cfg(not(feature = "avro"))]
     #[test]
     fn avro_without_the_feature_fails_at_open_rather_than_silently_emitting_json() {
+        use spate_core::error::ErrorClass;
+
         let err = Encoder::new(Encoding::Avro).unwrap_err();
         assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
         assert_eq!(err.reason(), crate::config::AVRO_FEATURE_OFF);

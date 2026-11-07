@@ -15,9 +15,8 @@
 //! It is not the sink's whole per-record cost, and reading it as one would be
 //! a mistake. On the other side of the queue a shard worker parses every frame
 //! back into messages and rebuilds a header list per message before librdkafka
-//! sees anything, and that half is unmeasured: it lives inside an async
-//! `write_batch`, which is the shape this instrument cannot enter. A
-//! regression there moves sink CPU without moving any number below.
+//! sees anything. `prepare_gungraun.rs` counts that half. A regression there
+//! moves sink CPU without moving any number below.
 //!
 //! The cases cover the axes that decide the cost: which encoder fills the
 //! accumulator, which parts of a message it fills, and whether the size guard

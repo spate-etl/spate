@@ -81,8 +81,10 @@ impl ThreadBound {
 
     /// Run `work` under the bound, which counts from the first poll.
     ///
-    /// Dropping the returned future drops `work` and ends the thread. When the
-    /// bound fires, `work` is dropped with it.
+    /// `work` is polled before the bound is read, so work that finishes on the
+    /// poll the bound woke returns its output. Dropping the returned future
+    /// drops `work` and ends the thread. When the bound fires, `work` is
+    /// dropped with it.
     ///
     /// # Errors
     ///
@@ -97,7 +99,10 @@ impl ThreadBound {
             rejection,
         } = self;
         // `Some` carries a rejection's text, `None` the limit passing.
-        let (fire, mut fired) = oneshot::channel::<Option<String>>();
+        let (fire, fired) = oneshot::channel::<Option<String>>();
+        // Unconstrained: work that keeps a tokio resource ready spends the
+        // coop budget, and a budgeted receive would then never read the verdict.
+        let mut fired = tokio::task::unconstrained(fired);
         let (finished, done) = mpsc::channel::<()>();
         let deadline = clock.now().checked_add(limit);
         let _timing = spawn_thread(name, move || {
@@ -169,7 +174,9 @@ mod tests {
     use super::*;
     use crate::clock::TestClock;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use tokio::runtime::Handle;
+    use tokio::sync::mpsc::unbounded_channel;
 
     /// How long a test waits for a run to end.
     const DEADLINE: Duration = Duration::from_secs(10);
@@ -343,6 +350,85 @@ mod tests {
             format!("{bound:?}"),
             r#"ThreadBound { name: "test-bound", limit: 600s, .. }"#
         );
+    }
+
+    /// A panic drops the channel unsent, the only signal left to end the run.
+    #[test]
+    fn a_panicking_check_ends_the_work_as_elapsed() {
+        let io = current_thread();
+        let clock = TestClock::frozen();
+        let bound = on(&clock, LONG).with_rejection(|| panic!("the check panicked"));
+        let run = hanging(io.handle().clone(), bound);
+        match run.done.recv_timeout(DEADLINE) {
+            Ok(Err(BoundError::Elapsed)) => {}
+            other => panic!("expected the bound to pass, got {other:?}"),
+        }
+    }
+
+    /// The work ends in the check, so the poll the rejection wakes finds both
+    /// ready.
+    #[test]
+    fn work_finished_when_the_bound_fires_returns_its_output() {
+        let clock = TestClock::frozen();
+        let finished = Arc::new(AtomicBool::new(false));
+        let seen = Arc::clone(&finished);
+        let bound = on(&clock, LONG).with_rejection(move || {
+            seen.store(true, Ordering::SeqCst);
+            Some("refused".to_owned())
+        });
+        let work = poll_fn(move |_| {
+            if finished.load(Ordering::SeqCst) {
+                Poll::Ready(7)
+            } else {
+                Poll::Pending
+            }
+        });
+        let done = on_thread(move || current_thread().block_on(bound.run(work)));
+        match done.recv_timeout(DEADLINE) {
+            Ok(Ok(output)) => assert_eq!(output, 7),
+            other => panic!("expected the output, got {other:?}"),
+        }
+    }
+
+    /// Advancing before the first poll leaves the whole limit to run.
+    #[test]
+    fn the_limit_counts_from_the_first_poll() {
+        let clock = TestClock::frozen();
+        let (bound, asked) = paced(on(&clock, LONG));
+        clock.advance(LONG);
+        let (release, released) = oneshot::channel::<()>();
+        let done = on_thread(move || current_thread().block_on(bound.run(released)));
+        for _ in 0..2 {
+            asked.recv_timeout(DEADLINE).unwrap();
+        }
+        // Frees a thread waiting to hand over, so the run's join returns.
+        drop(asked);
+        release.send(()).unwrap();
+        match done.recv_timeout(DEADLINE) {
+            Ok(Ok(Ok(()))) => {}
+            other => panic!("expected the output, got {other:?}"),
+        }
+    }
+
+    /// Each poll of the work finds a ready channel and spends the coop budget
+    /// before the bound is read.
+    #[test]
+    fn the_bound_fires_over_work_that_spends_its_whole_budget() {
+        let clock = TestClock::frozen();
+        let bound = on(&clock, Duration::ZERO);
+        let done = on_thread(move || {
+            current_thread().block_on(bound.run(async {
+                let (tx, mut rx) = unbounded_channel();
+                loop {
+                    tx.send(()).unwrap();
+                    rx.recv().await;
+                }
+            }))
+        });
+        match done.recv_timeout(DEADLINE) {
+            Ok(Err(BoundError::Elapsed)) => {}
+            other => panic!("expected the bound to pass, got {:?}", other.map(|_| ())),
+        }
     }
 
     /// Pins that dropping a run ends its thread: the drop joins it, on a clock

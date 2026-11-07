@@ -767,7 +767,7 @@ mod tests {
 
         use super::super::*;
         use crate::client::testing::{Raw as _, raw_config};
-        use rdkafka::mocking::MockCluster;
+        use crate::testutil::mock::MockKafka;
         use rdkafka::producer::{BaseProducer, BaseRecord, Producer};
         use spate_core::clock::SyncClock;
         use spate_core::config::FeedSection;
@@ -784,11 +784,11 @@ mod tests {
             producer: BaseProducer,
             config: KafkaFeedConfig,
             // Declared last, so dropped after the producer that uses it.
-            cluster: MockCluster<'static, rdkafka::producer::DefaultProducerContext>,
+            cluster: MockKafka,
         }
 
         fn rig() -> Rig {
-            let cluster = MockCluster::new(1).expect("mock cluster");
+            let cluster = MockKafka::new();
             for topic in ["units", "units-retry", "units-dead"] {
                 cluster.create_topic(topic, 1, 1).unwrap();
             }

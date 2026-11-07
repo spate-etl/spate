@@ -4,13 +4,13 @@
 
 mod support;
 
-use rdkafka::mocking::MockCluster;
 use spate_core::checkpoint::Checkpointer;
 use spate_core::error::ErrorClass;
 use spate_core::source::{PayloadBatch, Source, SourceCtx, SourceLane};
 use spate_kafka::{KafkaSource, KafkaSourceConfig};
 use std::collections::BTreeMap;
 use std::time::Duration;
+use support::MockKafka;
 use support::{
     Marker, RawBatch, await_assignment, control_batch, corrupt_batch, offsets_of, produce_batch,
 };
@@ -68,7 +68,7 @@ fn wait_for_fetch_queue(
 /// Regression for #1253.
 #[test]
 fn an_unreadable_batch_behind_the_fetcher_fails_the_lane() {
-    let cluster = MockCluster::new(1).expect("mock cluster");
+    let cluster = MockKafka::new();
     cluster.create_topic(TOPIC, 1, 1).expect("create topic");
     let brokers = cluster.bootstrap_servers();
     assert_eq!(
@@ -145,7 +145,7 @@ fn an_unreadable_batch_behind_the_fetcher_fails_the_lane() {
 /// fails the lane's next poll although nothing follows it.
 #[test]
 fn an_unreadable_batch_at_the_tail_fails_the_next_poll() {
-    let cluster = MockCluster::new(1).expect("mock cluster");
+    let cluster = MockKafka::new();
     cluster.create_topic(TOPIC, 1, 1).expect("create topic");
     let brokers = cluster.bootstrap_servers();
     assert_eq!(
@@ -191,7 +191,7 @@ fn an_unreadable_batch_at_the_tail_fails_the_next_poll() {
 /// fails the lane, and the reason names the codec and says why it failed.
 #[test]
 fn an_unknown_codec_first_in_a_poll_names_the_codec() {
-    let cluster = MockCluster::new(1).expect("mock cluster");
+    let cluster = MockKafka::new();
     cluster.create_topic(TOPIC, 1, 1).expect("create topic");
     let brokers = cluster.bootstrap_servers();
     let mut unknown = batch(2, 0, 0, 1, b"unknown-codec");
@@ -234,7 +234,7 @@ fn a_marker_behind_an_unreadable_batch_leaves_the_commit_alone() {
     unknown_format.extend_from_slice(&batch(3, 1, 0, 1, b"unreadable"));
     let bad_crc = corrupt_batch(b"lost", b"body");
     for (name, bad, check_crcs) in [("format", unknown_format, false), ("crc", bad_crc, true)] {
-        let cluster = MockCluster::new(1).expect("mock cluster");
+        let cluster = MockKafka::new();
         cluster.create_topic(TOPIC, 1, 1).expect("create topic");
         let brokers = cluster.bootstrap_servers();
         support::produce(&brokers, TOPIC, 1, 1, "good");
@@ -311,7 +311,7 @@ fn a_marker_behind_an_unreadable_batch_leaves_the_commit_alone() {
 #[test]
 fn an_error_bars_the_marker_advance() {
     for max_records in [1, 64] {
-        let cluster = MockCluster::new(1).expect("mock cluster");
+        let cluster = MockKafka::new();
         cluster.create_topic(TOPIC, 1, 1).expect("create topic");
         let brokers = cluster.bootstrap_servers();
         let marker = || {
@@ -396,7 +396,7 @@ fn an_error_bars_the_marker_advance() {
 /// Regression for #1704.
 #[test]
 fn a_corrupt_message_before_the_first_commit_stops_again_after_a_restart() {
-    let cluster = MockCluster::new(1).expect("mock cluster");
+    let cluster = MockKafka::new();
     cluster.create_topic(TOPIC, 1, 1).expect("create topic");
     let brokers = cluster.bootstrap_servers();
     assert_eq!(

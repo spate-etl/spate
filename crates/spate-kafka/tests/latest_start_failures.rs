@@ -14,8 +14,8 @@ mod support;
 /// group leader on a MockCluster writes that reply's assignment, so the client
 /// receives the bytes a hostile coordinator would send.
 mod another_topic {
+    use crate::support::MockKafka;
     use rdkafka::consumer::{BaseConsumer, CommitMode, Consumer};
-    use rdkafka::mocking::MockCluster;
     use rdkafka::producer::{BaseProducer, BaseRecord, Producer};
     use rdkafka::{ClientConfig, Offset, TopicPartitionList};
     use spate_core::config::PipelineConfig;
@@ -182,7 +182,8 @@ mod another_topic {
     /// partition 0 where it was: the source read no record of `orders`.
     #[test]
     fn an_offer_naming_another_topic_leaves_the_commit_on_the_configured_topic() {
-        let cluster = MockCluster::new(1).unwrap();
+        let cluster = MockKafka::new();
+        cluster.hold_first_rebalance();
         cluster.create_topic(TOPIC, 1, 1).unwrap();
         cluster.create_topic(OTHER, 1, 1).unwrap();
         let brokers = cluster.bootstrap_servers();
@@ -283,12 +284,11 @@ mod another_topic {
 /// A start that fails during a reassign must not split the reassign.
 mod retried_reassign {
     use crate::support;
+    use crate::support::MockKafka;
     use rdkafka::Offset;
-    use rdkafka::mocking::MockCluster;
     use rdkafka::types::{RDKafkaApiKey, RDKafkaRespErr};
     use spate_test::{unique_name, wait_until};
     use std::time::{Duration, Instant};
-    use support::Raw as _;
     use support::latest::{Run, config};
     use support::{committed_by, produce_to};
 
@@ -300,21 +300,16 @@ mod retried_reassign {
     /// fails. Every partition is read once the retry has run.
     #[test]
     fn a_retried_reassign_reads_every_partition() {
-        use rdkafka::producer::Producer as _;
-        let producer: rdkafka::producer::BaseProducer = support::raw_config()
-            .set("test.mock.num.brokers", "1")
-            .build()
-            .expect("mock producer");
-        let client = producer.client();
-        let cluster: MockCluster<'_, _> = client.mock_cluster().expect("mock cluster");
+        let cluster = MockKafka::new();
+        cluster.hold_first_rebalance();
         cluster
             .create_topic(TOPIC, PARTITIONS, 1)
             .expect("create topic");
-        // SAFETY: the pointer is valid while `producer` lives. The list holds one
+        // SAFETY: the pointer is valid while `cluster` lives. The list holds one
         // error and one round trip in the C types the variadic reads.
         unsafe {
             rdkafka::bindings::rd_kafka_mock_broker_push_request_error_rtts(
-                rdkafka::bindings::rd_kafka_handle_mock_cluster(client.native_ptr()),
+                cluster.native(),
                 1,
                 RDKafkaApiKey::SyncGroup as i16,
                 1,
@@ -364,12 +359,11 @@ mod retried_reassign {
 /// alone, and the runtime then drops those lanes for the next assignment.
 mod late_offers {
     use crate::support;
-    use rdkafka::producer::{BaseProducer, Producer as _};
     use rdkafka::types::{RDKafkaApiKey, RDKafkaRespErr};
     use spate_test::wait_until;
     use std::time::Duration;
     use support::latest::{self, Run};
-    use support::{Raw as _, produce_to};
+    use support::{MockKafka, produce_to};
 
     const TOPIC: &str = "orders";
 
@@ -382,18 +376,13 @@ mod late_offers {
             .with_ansi(false)
             .with_writer(std::io::stderr)
             .try_init();
-        let producer: BaseProducer = support::raw_config()
-            .set("test.mock.num.brokers", "1")
-            .build()
-            .expect("mock producer");
-        let client = producer.client();
-        let cluster = client.mock_cluster().expect("mock cluster");
+        let cluster = MockKafka::new();
         cluster.create_topic(TOPIC, 4, 1).expect("create topic");
-        // SAFETY: the pointer is valid while `producer` lives, and the arguments
+        // SAFETY: the pointer is valid while `cluster` lives, and the arguments
         // match the (error, rtt in ms) pairs the variadic reads.
         unsafe {
             let err = rdkafka::bindings::rd_kafka_mock_broker_push_request_error_rtts(
-                rdkafka::bindings::rd_kafka_handle_mock_cluster(client.native_ptr()),
+                cluster.native(),
                 1,
                 RDKafkaApiKey::SyncGroup as i16,
                 1,
@@ -452,7 +441,7 @@ mod late_offers {
 
 /// A broker slow enough that one accept's lookups outlast their shared budget.
 mod slow_broker {
-    use rdkafka::mocking::MockCluster;
+    use crate::support::MockKafka;
     use spate_core::checkpoint::Checkpointer;
     use spate_core::error::ErrorClass;
     use spate_core::source::{Source, SourceCtx, SourceEvent};
@@ -471,7 +460,8 @@ mod slow_broker {
             .with_ansi(false)
             .with_writer(std::io::stderr)
             .try_init();
-        let cluster = MockCluster::new(1).expect("mock cluster");
+        let cluster = MockKafka::new();
+        cluster.hold_first_rebalance();
         cluster.create_topic(TOPIC, 16, 1).expect("create topic");
         cluster
             .broker_round_trip_time(1, Duration::from_millis(700))
@@ -519,7 +509,6 @@ mod slow_broker {
 /// a first start takes the sum of their replies.
 mod slow_commits {
     use crate::support;
-    use rdkafka::producer::{BaseProducer, Producer as _};
     use rdkafka::types::{RDKafkaApiKey, RDKafkaRespErr};
     use spate_core::checkpoint::Checkpointer;
     use spate_core::error::ErrorClass;
@@ -527,7 +516,7 @@ mod slow_commits {
     use spate_kafka::{KafkaSource, KafkaSourceConfig};
     use std::collections::BTreeMap;
     use std::time::{Duration, Instant};
-    use support::Raw as _;
+    use support::MockKafka;
 
     const TOPIC: &str = "orders";
     /// The lookup bound and the commit bound of one accept, plus slack for its
@@ -542,21 +531,17 @@ mod slow_commits {
     /// longest poll. The mock keeps a group in a rebalance for most of a session
     /// timeout after a late joiner, so the session is short and the deadline far.
     fn longest_poll(policy: &str, consumers: usize, reply_ms: i32) -> Duration {
-        let producer: BaseProducer = support::raw_config()
-            .set("test.mock.num.brokers", "1")
-            .build()
-            .expect("mock producer");
-        let client = producer.client();
-        let cluster = client.mock_cluster().expect("mock cluster");
+        let cluster = MockKafka::new();
+        cluster.hold_first_rebalance();
         cluster
             .create_topic(TOPIC, i32::try_from(consumers).expect("partitions"), 1)
             .expect("create topic");
         for _ in 0..consumers {
-            // SAFETY: the pointer is valid while `producer` lives, and the arguments
+            // SAFETY: the pointer is valid while `cluster` lives, and the arguments
             // match the (error, rtt in ms) pair the variadic reads.
             let err = unsafe {
                 rdkafka::bindings::rd_kafka_mock_broker_push_request_error_rtts(
-                    rdkafka::bindings::rd_kafka_handle_mock_cluster(client.native_ptr()),
+                    cluster.native(),
                     1,
                     RDKafkaApiKey::OffsetCommit as i16,
                     1,
@@ -618,8 +603,8 @@ mod slow_commits {
 /// policy it names.
 mod policy_spelling {
     use crate::support;
+    use crate::support::MockKafka;
     use rdkafka::Offset;
-    use rdkafka::mocking::MockCluster;
     use spate_core::checkpoint::Checkpointer;
     use spate_core::source::{Source, SourceCtx};
     use spate_kafka::{KafkaSource, KafkaSourceConfig};
@@ -631,7 +616,7 @@ mod policy_spelling {
     /// librdkafka reads it as, so the partition's end is on the group.
     #[test]
     fn a_latest_policy_with_leading_whitespace_commits_its_start() {
-        let cluster = MockCluster::new(1).expect("mock cluster");
+        let cluster = MockKafka::new();
         cluster.create_topic(TOPIC, 1, 1).expect("create topic");
         let brokers = cluster.bootstrap_servers();
         support::produce(&brokers, TOPIC, 3, 1, "before");
@@ -655,7 +640,7 @@ mod policy_spelling {
 
 /// The startup deadline's error for a start that keeps failing.
 mod named_failure {
-    use rdkafka::mocking::MockCluster;
+    use crate::support::MockKafka;
     use rdkafka::types::{RDKafkaApiKey, RDKafkaRespErr};
     use spate_core::checkpoint::Checkpointer;
     use spate_core::clock::TestClock;
@@ -672,7 +657,7 @@ mod named_failure {
     /// `startup_timeout` with an error that names the failure.
     #[test]
     fn the_startup_deadline_names_the_start_that_kept_failing() {
-        let cluster = MockCluster::new(1).expect("mock cluster");
+        let cluster = MockKafka::new();
         cluster.create_topic(TOPIC, 1, 1).expect("create topic");
         cluster.request_errors(
             RDKafkaApiKey::OffsetCommit,
@@ -718,7 +703,7 @@ mod named_failure {
 
 /// A permanent code while settling a start stops the run.
 mod permanent_codes {
-    use rdkafka::mocking::MockCluster;
+    use crate::support::MockKafka;
     use rdkafka::types::RDKafkaApiKey as Api;
     use rdkafka::types::RDKafkaRespErr::{
         RD_KAFKA_RESP_ERR_GROUP_AUTHORIZATION_FAILED as GROUP_DENIED,
@@ -740,7 +725,7 @@ mod permanent_codes {
             (Api::ListOffsets, TOPIC_DENIED, "end offset"),
             (Api::OffsetCommit, GROUP_DENIED, "committing a start offset"),
         ] {
-            let cluster = MockCluster::new(1).expect("mock cluster");
+            let cluster = MockKafka::new();
             cluster.create_topic("orders", 1, 1).expect("create topic");
             cluster.request_errors(api, &[code; 1000]);
             let mut cfg = KafkaSourceConfig::new(cluster.bootstrap_servers(), "orders", "denied");
@@ -768,7 +753,7 @@ mod permanent_codes {
 /// A start that keeps failing before the source's first assignment ends at
 /// `startup_timeout`.
 mod startup_deadline {
-    use rdkafka::mocking::MockCluster;
+    use crate::support::MockKafka;
     use rdkafka::types::RDKafkaApiKey as Api;
     use rdkafka::types::RDKafkaRespErr::RD_KAFKA_RESP_ERR_UNKNOWN as UNKNOWN;
     use spate_core::checkpoint::Checkpointer;
@@ -784,7 +769,7 @@ mod startup_deadline {
     /// deadline ends the run.
     #[test]
     fn a_start_that_keeps_failing_ends_at_the_startup_deadline() {
-        let cluster = MockCluster::new(1).expect("mock cluster");
+        let cluster = MockKafka::new();
         cluster.create_topic("orders", 1, 1).expect("create topic");
         cluster.request_errors(Api::OffsetFetch, &vec![UNKNOWN; 100_000]);
         let mut cfg = KafkaSourceConfig::new(cluster.bootstrap_servers(), "orders", "start-hold");
@@ -822,7 +807,6 @@ mod startup_deadline {
 /// One accept under `latest` spends one lookup bound on a listing that is slow.
 mod slow_listing {
     use crate::support;
-    use rdkafka::producer::Producer as _;
     use rdkafka::types::RDKafkaApiKey as Api;
     use rdkafka::types::RDKafkaRespErr::RD_KAFKA_RESP_ERR_NO_ERROR as NO_ERROR;
     use spate_core::checkpoint::Checkpointer;
@@ -830,7 +814,7 @@ mod slow_listing {
     use spate_kafka::{KafkaSource, KafkaSourceConfig};
     use spate_test::wait_until;
     use std::time::{Duration, Instant};
-    use support::Raw as _;
+    use support::MockKafka;
 
     /// `COMMITTED_LOOKUP_TIMEOUT`, plus slack for the assign itself.
     const BOUND: Duration = Duration::from_secs(13);
@@ -843,18 +827,13 @@ mod slow_listing {
     /// bound, and no poll blocks longer than one bound.
     #[test]
     fn a_slow_listing_spends_one_lookup_bound() {
-        let producer: rdkafka::producer::BaseProducer = support::raw_config()
-            .set("test.mock.num.brokers", "1")
-            .build()
-            .expect("mock producer");
-        let client = producer.client();
-        let cluster = client.mock_cluster().expect("mock cluster");
+        let cluster = MockKafka::new();
         cluster.create_topic("orders", 3, 1).expect("create topic");
-        // SAFETY: the pointer is valid while `producer` lives. The call reads one
+        // SAFETY: the pointer is valid while `cluster` lives. The call reads one
         // code and one round-trip time per counted entry.
         unsafe {
             let code = rdkafka::bindings::rd_kafka_mock_broker_push_request_error_rtts(
-                rdkafka::bindings::rd_kafka_handle_mock_cluster(client.native_ptr()),
+                cluster.native(),
                 1,
                 Api::ListOffsets as i16,
                 3,
@@ -867,7 +846,7 @@ mod slow_listing {
             );
             assert_eq!(code, NO_ERROR);
             let code = rdkafka::bindings::rd_kafka_mock_broker_push_request_error_rtts(
-                rdkafka::bindings::rd_kafka_handle_mock_cluster(client.native_ptr()),
+                cluster.native(),
                 1,
                 Api::OffsetFetch as i16,
                 1,
@@ -1200,8 +1179,8 @@ mod silent_coordinator {
 /// OffsetCommit stores the value, and the group's OffsetFetch reply then carries
 /// it, the same bytes a hostile coordinator would answer with.
 mod logical_committed_offset {
+    use crate::support::MockKafka;
     use rdkafka::consumer::{BaseConsumer, Consumer};
-    use rdkafka::mocking::MockCluster;
     use rdkafka::producer::{BaseProducer, BaseRecord, Producer};
     use rdkafka::{ClientConfig, Offset, TopicPartitionList};
     use spate_core::checkpoint::Checkpointer;
@@ -1284,7 +1263,7 @@ mod logical_committed_offset {
     /// and claims no broker condition.
     #[test]
     fn the_deadline_error_names_the_committed_offset() {
-        let cluster = MockCluster::new(1).unwrap();
+        let cluster = MockKafka::new();
         cluster.create_topic(TOPIC, 1, 1).unwrap();
         let brokers = cluster.bootstrap_servers();
         raw_commit(&brokers, -2);
@@ -1312,7 +1291,7 @@ mod logical_committed_offset {
     /// Runs a pipeline over a group whose committed offset is `raw`, read back as
     /// `read`, and asserts the commit stays and the run survives to its shutdown.
     fn holds_the_commit(raw: i64, read: Offset) {
-        let cluster = MockCluster::new(1).unwrap();
+        let cluster = MockKafka::new();
         cluster.create_topic(TOPIC, 1, 1).unwrap();
         let brokers = cluster.bootstrap_servers();
 
@@ -1407,7 +1386,7 @@ mod logical_committed_offset {
 
 /// A group that refuses every start commit, against a source's deadlines.
 mod refused_starts {
-    use rdkafka::mocking::MockCluster;
+    use crate::support::MockKafka;
     use rdkafka::types::{RDKafkaApiKey, RDKafkaRespErr};
     use spate_core::checkpoint::Checkpointer;
     use spate_core::error::ErrorClass;
@@ -1422,7 +1401,10 @@ mod refused_starts {
     /// Whether `consumers` consumers on one partition reach a fatal error within
     /// 45 s when every start commit and heartbeat is refused.
     fn ends(consumers: usize) -> bool {
-        let cluster = MockCluster::new(1).expect("mock cluster");
+        let cluster = MockKafka::new();
+        if consumers > 1 {
+            cluster.hold_first_rebalance();
+        }
         cluster.create_topic(TOPIC, 1, 1).expect("create topic");
         let brokers = cluster.bootstrap_servers();
         cluster.request_errors(RDKafkaApiKey::OffsetCommit, &[REFUSED; 1000]);

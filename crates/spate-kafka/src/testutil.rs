@@ -12,6 +12,9 @@ use std::ffi::CStr;
 use std::sync::mpsc;
 use std::time::Duration;
 
+#[path = "../tests/support/mock.rs"]
+pub(crate) mod mock;
+
 #[path = "../tests/support/wire.rs"]
 #[allow(dead_code, reason = "the integration suites use the rest")]
 pub(crate) mod wire;

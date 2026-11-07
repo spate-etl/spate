@@ -2039,6 +2039,7 @@ impl Drop for KafkaSource {
 )]
 mod tests {
     use super::*;
+    use crate::testutil::mock::MockKafka;
     use rdkafka::error::RDKafkaErrorCode;
     use spate_core::checkpoint::Checkpointer;
     use spate_core::clock::TestClock;
@@ -3210,20 +3211,17 @@ mod tests {
             );
         }
 
-        type Mock =
-            rdkafka::mocking::MockCluster<'static, rdkafka::producer::DefaultProducerContext>;
-
         /// An opened source on a mock cluster holding `records` on partition 0,
         /// with its first assignment accepted, and the cluster that serves it.
-        fn assigned_on_mock(records: usize) -> (Mock, KafkaSource, Vec<KafkaLane>) {
+        fn assigned_on_mock(records: usize) -> (MockKafka, KafkaSource, Vec<KafkaLane>) {
             let cluster = mock_holding(records);
             let (source, lanes) = assigned_on(&cluster, "earliest");
             (cluster, source, lanes)
         }
 
         /// A mock cluster whose topic `t` holds `records` on its one partition.
-        fn mock_holding(records: usize) -> Mock {
-            let cluster = rdkafka::mocking::MockCluster::new(1).expect("mock cluster");
+        fn mock_holding(records: usize) -> MockKafka {
+            let cluster = MockKafka::new();
             cluster.create_topic("t", 1, 1).expect("create topic");
             use crate::client::testing::{Raw as _, raw_config};
             let producer: rdkafka::producer::BaseProducer = raw_config()
@@ -3246,7 +3244,7 @@ mod tests {
 
         /// A source of group `positions` on `cluster`'s topic `t` under the
         /// `reset` policy, opened, with its first assignment accepted.
-        fn assigned_on(cluster: &Mock, reset: &str) -> (KafkaSource, Vec<KafkaLane>) {
+        fn assigned_on(cluster: &MockKafka, reset: &str) -> (KafkaSource, Vec<KafkaLane>) {
             let mut cfg = KafkaSourceConfig::new(cluster.bootstrap_servers(), "t", "positions");
             cfg.startup_timeout = Duration::from_secs(30);
             cfg.rdkafka = std::collections::BTreeMap::from([
@@ -3778,8 +3776,8 @@ mod tests {
     /// assignment on its own.
     #[test]
     fn dropping_with_a_held_assignment_returns() {
-        use rdkafka::mocking::MockCluster;
-        let cluster = MockCluster::new(1).expect("mock cluster");
+        use crate::testutil::mock::MockKafka;
+        let cluster = MockKafka::new();
         cluster.create_topic("orders", 4, 1).expect("create topic");
         let mut cfg = test_config();
         cfg.brokers = cluster.bootstrap_servers();
@@ -3814,9 +3812,8 @@ mod tests {
     mod queued_rebalance {
         use super::*;
         use crate::client::testing::{Raw as _, raw_config};
+        use crate::testutil::mock::MockKafka;
         use crate::testutil::{ASSIGN_STOP, returns_within, stop_at};
-        use rdkafka::mocking::MockCluster;
-        use rdkafka::producer::DefaultProducerContext;
         use rdkafka::types::{RDKafkaApiKey, RDKafkaRespErr};
         use spate_test::{capture_logs, wait_until};
         use std::sync::mpsc;
@@ -3835,17 +3832,16 @@ mod tests {
         /// serve's count was read before it, so the serve stops short of it.
         const UNASSIGN_OP: &str = "received op ASSIGN";
 
-        type Mock = MockCluster<'static, DefaultProducerContext>;
         type Member = Arc<BaseConsumer<SourceContext>>;
 
-        fn mock() -> Mock {
-            let cluster = MockCluster::new(1).expect("mock cluster");
+        fn mock() -> MockKafka {
+            let cluster = MockKafka::new();
             cluster.create_topic("orders", 2, 1).expect("create topic");
             cluster
         }
 
         /// A source of `consumers` logging librdkafka's group protocol.
-        fn config(cluster: &Mock, group: &str, consumers: usize) -> KafkaSourceConfig {
+        fn config(cluster: &MockKafka, group: &str, consumers: usize) -> KafkaSourceConfig {
             let mut cfg = test_config();
             cfg.brokers = cluster.bootstrap_servers();
             cfg.group_id = group.into();
@@ -3930,6 +3926,7 @@ mod tests {
         #[test]
         fn a_reassign_whose_lookup_fails_is_retried_as_one_lane_set() {
             let cluster = mock();
+            cluster.hold_first_rebalance();
             let mut cfg = config(&cluster, "retried-reassign", 2);
             cfg.rdkafka
                 .insert("auto.offset.reset".to_string(), "latest".to_string());
@@ -4077,7 +4074,7 @@ mod tests {
 
         /// A member of `group` that takes a partition from the source. Its
         /// join needs no poll.
-        fn joiner(cluster: &Mock, group: &str) -> BaseConsumer {
+        fn joiner(cluster: &MockKafka, group: &str) -> BaseConsumer {
             let c: BaseConsumer = raw_config()
                 .set("bootstrap.servers", cluster.bootstrap_servers())
                 .set("group.id", group)
@@ -4104,7 +4101,7 @@ mod tests {
         }
 
         /// Run `close`, and fail if it does not return.
-        fn assert_closes(cluster: Mock, close: impl FnOnce() + Send + 'static) {
+        fn assert_closes(cluster: MockKafka, close: impl FnOnce() + Send + 'static) {
             crate::testutil::assert_returns(cluster, CLOSE, "a consumer's close", close);
         }
 
@@ -4344,9 +4341,10 @@ mod tests {
     /// either order, and the call still reports the failure.
     #[test]
     fn a_lost_member_does_not_hold_back_its_peers_commit() {
-        use rdkafka::mocking::MockCluster;
+        use crate::testutil::mock::MockKafka;
         use rdkafka::types::{RDKafkaApiKey, RDKafkaRespErr};
-        let cluster = MockCluster::new(1).expect("mock cluster");
+        let cluster = MockKafka::new();
+        cluster.hold_first_rebalance();
         cluster.create_topic("orders", 4, 1).expect("create topic");
         let brokers = cluster.bootstrap_servers();
         let mut source = settled_with_stored_offsets(&brokers, "lost-first", 2);
@@ -4388,9 +4386,10 @@ mod tests {
     /// first consumer's.
     #[test]
     fn a_flush_reports_the_first_failure() {
-        use rdkafka::mocking::MockCluster;
+        use crate::testutil::mock::MockKafka;
         use rdkafka::types::{RDKafkaApiKey, RDKafkaRespErr};
-        let cluster = MockCluster::new(1).expect("mock cluster");
+        let cluster = MockKafka::new();
+        cluster.hold_first_rebalance();
         cluster.create_topic("orders", 4, 1).expect("create topic");
         let brokers = cluster.bootstrap_servers();
         let mut source = settled_with_stored_offsets(&brokers, "first-failure", 2);
@@ -4424,9 +4423,9 @@ mod tests {
     /// controller's line on the returned error says the same.
     #[test]
     fn a_failed_commit_on_one_consumer_logs_no_line_of_its_own() {
-        use rdkafka::mocking::MockCluster;
+        use crate::testutil::mock::MockKafka;
         use rdkafka::types::{RDKafkaApiKey, RDKafkaRespErr};
-        let cluster = MockCluster::new(1).expect("mock cluster");
+        let cluster = MockKafka::new();
         cluster.create_topic("orders", 4, 1).expect("create topic");
         let brokers = cluster.bootstrap_servers();
         let mut source = settled_with_stored_offsets(&brokers, "refused-one", 1);
@@ -4453,9 +4452,10 @@ mod tests {
     /// Each consumer whose commit the broker refuses logs its own line.
     #[test]
     fn a_failed_commit_names_each_consumer() {
-        use rdkafka::mocking::MockCluster;
+        use crate::testutil::mock::MockKafka;
         use rdkafka::types::{RDKafkaApiKey, RDKafkaRespErr};
-        let cluster = MockCluster::new(1).expect("mock cluster");
+        let cluster = MockKafka::new();
+        cluster.hold_first_rebalance();
         cluster.create_topic("orders", 4, 1).expect("create topic");
         let brokers = cluster.bootstrap_servers();
         let mut source = settled_with_stored_offsets(&brokers, "refused-commits", 2);
@@ -4527,8 +4527,9 @@ mod tests {
     /// Dropping a source whose held consumer the group has removed returns.
     #[test]
     fn dropping_with_a_stale_held_offer_returns() {
-        use rdkafka::mocking::MockCluster;
-        let cluster = MockCluster::new(1).expect("mock cluster");
+        use crate::testutil::mock::MockKafka;
+        let cluster = MockKafka::new();
+        cluster.hold_first_rebalance();
         cluster.create_topic("orders", 4, 1).expect("create topic");
         let (source, _, raw) =
             held_while_the_group_moves_on(&cluster.bootstrap_servers(), "drop-stale");
@@ -4544,8 +4545,9 @@ mod tests {
     /// the group's, and its client does not report the assignment lost.
     #[test]
     fn a_member_the_group_left_reads_an_older_generation() {
-        use rdkafka::mocking::MockCluster;
-        let cluster = MockCluster::new(1).expect("mock cluster");
+        use crate::testutil::mock::MockKafka;
+        let cluster = MockKafka::new();
+        cluster.hold_first_rebalance();
         cluster.create_topic("orders", 4, 1).expect("create topic");
         let (source, held, raw) =
             held_while_the_group_moves_on(&cluster.bootstrap_servers(), "stale-generation");

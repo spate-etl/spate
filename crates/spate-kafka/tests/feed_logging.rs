@@ -1,6 +1,9 @@
 //! Kafka feed logs emitted from the producer poll thread.
 
-use rdkafka::mocking::MockCluster;
+#[path = "support/mock.rs"]
+mod mock;
+
+use mock::MockKafka;
 use spate_core::config::FeedSection;
 use spate_core::feed::{Feed as _, Unit};
 use spate_kafka::feed::KafkaFeedPublisher;
@@ -18,7 +21,7 @@ fn feed_producer_debug_logs_reach_tracing() {
         .without_time()
         .init();
 
-    let cluster = MockCluster::new(1).expect("mock cluster");
+    let cluster = MockKafka::new();
     for topic in [
         "log-units",
         "log-units-retry",

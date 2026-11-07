@@ -820,8 +820,8 @@ mod tests {
     /// committed-offset read fails the read, naming the partition.
     #[test]
     fn a_partition_error_in_a_committed_read_fails_it() {
-        use rdkafka::mocking::MockCluster;
-        let cluster = MockCluster::new(1).expect("mock cluster");
+        use crate::testutil::mock::MockKafka;
+        let cluster = MockKafka::new();
         cluster.create_topic("work", 1, 1).expect("create topic");
         let consumer = raw(
             &[
@@ -840,9 +840,9 @@ mod tests {
     /// through a serve.
     #[test]
     fn serving_the_depth_client_drains_its_events() {
+        use crate::testutil::mock::MockKafka;
         use rdkafka::consumer::Consumer as _;
-        use rdkafka::mocking::MockCluster;
-        let cluster = MockCluster::new(1).expect("mock cluster");
+        let cluster = MockKafka::new();
         let consumer = raw(
             &[
                 ("bootstrap.servers", &cluster.bootstrap_servers()),
@@ -881,9 +881,9 @@ mod tests {
     /// drained.
     #[test]
     fn a_topic_reporting_no_partitions_fails_the_read() {
-        use rdkafka::mocking::MockCluster;
+        use crate::testutil::mock::MockKafka;
         use rdkafka::types::RDKafkaRespErr;
-        let cluster = MockCluster::new(1).expect("mock cluster");
+        let cluster = MockKafka::new();
         cluster.create_topic("dead", 1, 1).expect("create topic");
         cluster
             .topic_error(
@@ -944,9 +944,9 @@ mod tests {
     /// topic lacks failing, naming the kind of read.
     #[test]
     fn the_brokers_read_each_partition_of_a_topic() {
-        use rdkafka::mocking::MockCluster;
+        use crate::testutil::mock::MockKafka;
         use rdkafka::producer::{BaseProducer, BaseRecord, Producer as _};
-        let cluster = MockCluster::new(1).expect("mock cluster");
+        let cluster = MockKafka::new();
         cluster.create_topic("work", 2, 1).expect("create topic");
         let brokers = cluster.bootstrap_servers();
         let producer: BaseProducer<SpateContext<()>> = raw(&[("bootstrap.servers", &brokers)], ());
@@ -1009,9 +1009,9 @@ mod tests {
     /// committed and end offset reads: both are Fatal.
     #[test]
     fn a_broker_refusing_an_offset_read_on_authorization_fails_it_as_fatal() {
-        use rdkafka::mocking::MockCluster;
+        use crate::testutil::mock::MockKafka;
         use rdkafka::types::{RDKafkaApiKey, RDKafkaRespErr};
-        let cluster = MockCluster::new(1).expect("mock cluster");
+        let cluster = MockKafka::new();
         cluster.create_topic("work", 1, 1).expect("create topic");
         let consumer = raw(
             &[

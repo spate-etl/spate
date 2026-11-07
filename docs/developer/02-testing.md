@@ -42,16 +42,16 @@ The shape that holds, from the drain-outage scenario in
 [`crates/spate/tests/e2e_drain_outage.rs`](repo:crates/spate/tests/e2e_drain_outage.rs):
 it waits on a count only the outage can produce.
 
-```rust file=crates/spate/tests/e2e_drain_outage.rs region=outage_signal
+```rust file=crates/spate/tests/e2e_drain_outage.rs region=outage_signal title="e2e_drain_outage.rs"
 ```
 
 The publishing side keeps the same order. The state is complete before the
 signal that announces it, so a fake that exposes its probe before it stores
 what the test will act on hands the test a window in which there is nothing to
-read. The scripted feed in the engine's own tests fills `held` before it
+read. The hand-back feed fake in the engine's own tests fills `held` before it
 publishes `closes`:
 
-```rust file=crates/spate-core/src/pipeline/fakes.rs region=held_before_closes
+```rust file=crates/spate-core/src/pipeline/fakes.rs region=held_before_closes title="fakes.rs"
 ```
 
 ### A test owns its environment
@@ -71,18 +71,18 @@ let series = metric_series(&body, "spate_sink_inflight_batches", &[]); // every 
 The shape that holds. A port the kernel chose, released before use, where a
 refused connection is the point:
 
-```rust file=crates/spate-kafka/src/testutil.rs region=refused_broker
+```rust file=crates/spate-kafka/src/testutil.rs region=refused_broker title="testutil.rs"
 ```
 
 A name no other call in the process returns:
 
-```rust file=crates/spate-test/src/fixtures.rs region=unique_name
+```rust file=crates/spate-test/src/fixtures.rs region=unique_name title="fixtures.rs"
 ```
 
 And a premise kept as an assertion, where the test needs work on every
 partition and hashed ids would not promise it:
 
-```rust file=crates/spate-kafka/tests/feed_kafka.rs region=fixed_ids
+```rust file=crates/spate-kafka/tests/feed_kafka.rs region=fixed_ids title="feed_kafka.rs"
 ```
 
 ### Real elapsed time decides no result
@@ -111,11 +111,12 @@ assert!(fetched()); // an idle machine passes this and a loaded one fails it
 
 The shape that holds, from the Kafka source's tests in
 [`crates/spate-kafka/src/source.rs`](repo:crates/spate-kafka/src/source.rs):
-the hold runs on a frozen clock, moved to one millisecond before its end and
-then past it, so the assertion reads the code's own timer. The seam is
+the hold runs on a frozen clock the test hands the source, moved to one
+millisecond before the hold's end and then to it, so the assertion reads the
+code's own timer. The public seam for the same injection is
 `KafkaSource::with_clock`, behind the crate's `testing` feature.
 
-```rust file=crates/spate-kafka/src/source.rs region=hold_on_frozen_clock
+```rust file=crates/spate-kafka/src/source.rs region=hold_on_frozen_clock title="source.rs"
 ```
 
 Moving a test clock has an order of its own. The code reads the clock when it
@@ -123,24 +124,27 @@ arms a timer, so an advance that lands before that read moves a deadline the
 code has not set yet. On the tokio clock, `has_slept_until` says the timer is
 armed:
 
-```rust file=crates/spate-core/src/sink/pool_tests.rs region=armed_before_advance
+```rust file=crates/spate-core/src/sink/pool_tests.rs region=armed_before_advance title="pool_tests.rs"
 ```
 
 Where the clock has no such probe, the test waits for the pass the code makes
 after reading it. The engine's controller tests wait for one poll after a hint
 before they move time:
 
-```rust file=crates/spate-core/src/pipeline/tests.rs region=poll_after_hint
+```rust file=crates/spate-core/src/pipeline/tests.rs region=poll_after_hint title="tests.rs"
 ```
 
 Under paused tokio time, `tokio::time::advance` moves every timer at once, and
 the test reads what the code did with the time:
 
-```rust file=crates/spate-sqs/src/feed/tests.rs region=advance_paused_time
+```rust file=crates/spate-sqs/src/feed/tests.rs region=advance_paused_time title="tests.rs"
 ```
 
 `spate-core` cannot depend on `spate-test`, so its tests poll with the
-`wait_for` of their own in `pipeline/fakes.rs`, under the same bound.
+`wait_for` of their own in `pipeline/fakes.rs`, whose bound each caller
+passes. The rule applies to that bound as it does to `HANG`; the regions above
+pass five seconds there, and a hang bound is what the rule asks for in its
+place.
 
 ### An interleaving failure is checked for a product defect first
 
@@ -201,7 +205,7 @@ protocol: assignment, rebalance, offsets, fetch errors. Its group timers run on
 real time, so a test with more than one consumer settles the group on the
 signal the source publishes for it before it asserts:
 
-```rust file=crates/spate-kafka/tests/mock_cluster.rs region=settle_group
+```rust file=crates/spate-kafka/tests/mock_cluster.rs region=settle_group title="mock_cluster.rs"
 ```
 
 ### A container
@@ -220,28 +224,21 @@ has a process of its own, which `cargo xtask test`, `cargo xtask
 integration-test` and cargo-mutants all use, while the loom models run under
 `cargo test`. A test holds under both.
 
-One trap worth knowing: `cargo test` runs a binary's tests in one process, and
-metric series ownership is process-wide (INV-10). Fixtures therefore need
-per-test `pipeline` and `component` labels; a local recorder does not isolate
-the claim.
-
-What that means in practice:
-
 - A gauge series has one live owner per process, keyed on the pipeline and
-  component labels ([INV-10](../INVARIANTS.md)). Name each pipeline or
-  component with `spate_test::unique_name`, and filter an exposition on that
-  label before reading a value from it.
-- `render_metrics` runs under a recorder local to the calling thread, and the
-  metric handles it reads are built inside it. The gauge claim stays
-  process-wide, so the labels still have to be the test's own.
-- A listener binds a port the kernel chose. A pipeline that neither scrapes nor
-  answers a probe takes `admin: { listen: none }`; one that does takes
-  `127.0.0.1:0` and reads the bound address from its start log.
-- A `tracing` subscriber is process-wide. A test that installs one to read the
-  log wants a binary of its own.
-- The container suites start one server per suite harness and share it across
-  that binary's tests, so topics, tables, groups and buckets carry a
-  `unique_name` too.
+  component labels ([INV-10](../INVARIANTS.md)). Fixtures therefore carry
+  per-test `pipeline` and `component` labels from `spate_test::unique_name`,
+  and a test filters an exposition on its own label before reading a value
+  from it. A local recorder does not isolate the claim: `render_metrics`
+  renders under a recorder local to the calling thread, with the handles
+  built inside it, and the gauge claim stays process-wide.
+- What a listener binds and what a `tracing` subscriber owns are process-wide
+  too. [Testing pipelines](../user-guide/03-guides/testing-pipelines.mdx) says
+  how a test takes a kernel-chosen port, or no port, and when a subscriber
+  wants a binary of its own.
+- The end-to-end scenarios under `crates/spate/tests` start their servers once
+  per binary and share them across that binary's tests; the connector suites
+  start a server inside each test. Either way, topics, tables, groups and
+  buckets carry a `unique_name`.
 
 ## What each tool proves
 
@@ -249,8 +246,8 @@ What that means in practice:
 
 That a guard is reached by a test. `cargo xtask mutants --since origin/main`
 mutates the diff and runs the suite once per mutant; a survivor is a branch no
-test distinguishes. The `testing` seams are excluded in `.cargo/mutants.toml`,
-and the forms the tool does not generate stay a review step.
+test distinguishes. `.cargo/mutants.toml` excludes the S3 and ClickHouse seam
+modules, and the forms the tool does not generate stay a review step.
 [Mutants](01-commands.md#mutants) has the command.
 
 ### loom
@@ -258,7 +255,7 @@ and the forms the tool does not generate stay a review step.
 Every interleaving of a synchronization primitive. A model runs the threads
 under loom's scheduler and asserts what must hold on all of them:
 
-```rust file=crates/spate-core/src/checkpoint/loom_tests.rs region=every_interleaving
+```rust file=crates/spate-core/src/checkpoint/loom_tests.rs region=every_interleaving title="loom_tests.rs"
 ```
 
 ### proptest
@@ -266,7 +263,7 @@ under loom's scheduler and asserts what must hold on all of them:
 An invariant over generated inputs, checked against a reference model that is
 too simple to be wrong. The checkpoint tracker is held to one:
 
-```rust file=crates/spate-core/src/checkpoint/tracker.rs region=reference_model
+```rust file=crates/spate-core/src/checkpoint/tracker.rs region=reference_model title="tracker.rs"
 ```
 
 ### fuzz

@@ -1470,8 +1470,8 @@ impl Driver {
         });
     }
 
-    /// Step until the live lanes cover partitions `0..partitions` and each of
     // ANCHOR: settle_group
+    /// Step until the live lanes cover partitions `0..partitions` and each of
     /// `consumers` consumers reports itself in a stable group, so the group
     /// has finished forming. Takes a driver from [`Driver::open_watched`].
     fn settle_group(&mut self, consumers: usize, partitions: u32, timeout: Duration) {

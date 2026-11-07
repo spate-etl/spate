@@ -19,6 +19,7 @@ use spate_clickhouse::{
 use spate_core::deser::Owned;
 use spate_core::sink::{RowEncoder, ShardWriter};
 use spate_test::record;
+use spate_test_support::pin;
 
 #[path = "../benches/support/frames.rs"]
 mod frames;
@@ -48,17 +49,6 @@ where
     T: Send + 'static,
 {
     encoded(enc, payloads).len()
-}
-
-/// The encoded size of a corpus and the XXH64 of its bytes.
-fn pin<E, T>(enc: E, payloads: Vec<T>) -> (usize, u64)
-where
-    E: RowEncoder<Owned<T>>,
-    T: Send + 'static,
-{
-    let buf = encoded(enc, payloads);
-    let digest = DistributedRouter::<Owned<String>>::hash_key(ShardKey::Bytes(&buf));
-    (buf.len(), digest)
 }
 
 #[test]
@@ -128,51 +118,51 @@ fn the_corpora_are_pinned_across_revisions() {
     let exotic = NativeSchema::from_columns(&rows::exotic_columns()).expect("exotic schema builds");
 
     assert_eq!(
-        pin(
+        pin(&encoded(
             NativeEncoder::<Owned<_>>::new(events),
             rows::events(rows::ROWS)
-        ),
-        (116_573, 0xeead_ec8c_27b6_394c),
+        )),
+        (116_573, 0xb930_6600_3332_22dc),
         "native/events"
     );
     assert_eq!(
-        pin(
+        pin(&encoded(
             ClickHouseEncoder::<Owned<_>>::unchecked(),
             rows::events(rows::ROWS)
-        ),
-        (125_738, 0x8bca_0339_825e_bd89),
+        )),
+        (125_738, 0x90da_ab4d_e84c_9ce2),
         "rowbinary/events"
     );
     assert_eq!(
-        pin(
+        pin(&encoded(
             NativeEncoder::<Owned<_>>::new(metrics),
             rows::metrics(rows::ROWS)
-        ),
-        (92_204, 0xb157_b4fb_8658_ff98),
+        )),
+        (92_204, 0xda21_51a2_dc51_84fd),
         "native/metrics"
     );
     assert_eq!(
-        pin(
+        pin(&encoded(
             ClickHouseEncoder::<Owned<_>>::unchecked(),
             rows::metrics(rows::ROWS)
-        ),
-        (92_000, 0xccc6_8446_051c_cc08),
+        )),
+        (92_000, 0x2d64_63ee_8d8c_ef84),
         "rowbinary/metrics"
     );
     assert_eq!(
-        pin(
+        pin(&encoded(
             NativeEncoder::<Owned<_>>::new(exotic),
             rows::exotic(rows::ROWS)
-        ),
-        (174_724, 0x9508_3afb_8f63_05dd),
+        )),
+        (174_724, 0xdb49_5aea_6386_ce53),
         "native/exotic"
     );
     assert_eq!(
-        pin(
+        pin(&encoded(
             ClickHouseEncoder::<Owned<_>>::unchecked(),
             rows::exotic(rows::ROWS)
-        ),
-        (170_463, 0x5f20_6cf9_4812_1bfc),
+        )),
+        (170_463, 0x2a87_b850_18c1_31ea),
         "rowbinary/exotic"
     );
 }

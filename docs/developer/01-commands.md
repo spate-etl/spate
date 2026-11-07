@@ -139,6 +139,11 @@ lines. It exits 2 when a mutant survives. The container suites do not run under
 it, so a mutant only they would catch reports as missed. Its summary, printed
 at the end of a local run and written to the job summary in CI, names the
 mutant forms the tool does not generate, which stay a review step.
+`--budget MINUTES` stops cargo-mutants after that many minutes. The summary
+then lists the survivors and timeouts among the mutants tested and names each
+mutant not reached, and the command exits non-zero. CI passes a budget below
+the step's timeout, and caps the writable memory of each process the run
+starts, so that a mutant which loops while allocating fails its test.
 
 ## What CI selects
 

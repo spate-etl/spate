@@ -82,6 +82,10 @@ pub(crate) enum Command {
         /// Mutate the checkout itself, for a disposable CI runner
         #[arg(long)]
         in_place: bool,
+        /// Stop cargo-mutants after this many minutes, from 1 to 1440, and
+        /// summarise the mutants it tested by then
+        #[arg(long, value_name = "MINUTES", value_parser = clap::value_parser!(u64).range(1..=1440))]
+        budget: Option<u64>,
     },
 
     /// Loom concurrency models for the checkpoint and backpressure primitives
@@ -317,7 +321,17 @@ pub(crate) fn dispatch(root: &Path, explain: bool, cmd: Command) -> Outcome {
         },
         Command::BugReport(args) => issue_form::bug_report(root, explain, &args),
         Command::Fuzz { cmd } => fuzz::dispatch(root, explain, cmd),
-        Command::Mutants { since, in_place } => mutants::run(root, explain, &since, in_place),
+        Command::Mutants {
+            since,
+            in_place,
+            budget,
+        } => mutants::run(
+            root,
+            explain,
+            &since,
+            in_place,
+            budget.map(std::time::Duration::from_mins),
+        ),
         Command::SiteCheck => site_check::check(root, explain),
         Command::Docs { serve } => docs::dispatch(root, explain, serve),
         Command::Release { cmd } => crate::release::dispatch(root, explain, cmd),
@@ -1009,6 +1023,21 @@ mod tests {
                 .is_err(),
                 "{bad}"
             );
+        }
+    }
+
+    /// A budget outside 1 to 1440 minutes is refused by the parser, so zero
+    /// cannot stop a run before it starts and a large value cannot overflow
+    /// the conversion to a duration.
+    #[test]
+    fn mutants_refuses_a_budget_outside_a_day() {
+        let parse =
+            |budget: &str| Cli::try_parse_from(["cargo xtask", "mutants", "--budget", budget]);
+        for bad in ["0", "1441", "18446744073709551615"] {
+            assert!(parse(bad).is_err(), "{bad}");
+        }
+        for good in ["1", "1440"] {
+            assert!(parse(good).is_ok(), "{good}");
         }
     }
 

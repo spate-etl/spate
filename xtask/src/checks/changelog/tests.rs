@@ -2880,7 +2880,10 @@ fn a_block_opened_after_a_paragraph_is_named() {
         wrapped_blocks("A para\n# h\n"),
         vec![(1, 2, Some("a heading"))]
     );
-    assert_eq!(wrapped_blocks("A para\n> q\n"), vec![(1, 2, Some("a quote"))]);
+    assert_eq!(
+        wrapped_blocks("A para\n> q\n"),
+        vec![(1, 2, Some("a quote"))]
+    );
     assert_eq!(
         wrapped_blocks("A para\n```\nx\n```\n"),
         vec![(1, 2, Some("a code block"))]

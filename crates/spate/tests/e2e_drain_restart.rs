@@ -63,9 +63,18 @@ fn drain_then_resume(
 
     // ── First instance: drain mid-stream ───────────────────────────────
     let first = h.spawn_pipeline(&params);
-    wait_until(Duration::from_secs(60), "mid-stream", || {
-        h.count(&params.table) >= 10_000
-    });
+    // A partition's first fetch can start 500 ms behind another's, and one
+    // partition can reach the row count in that gap. The commit checks below
+    // need rows from every partition.
+    wait_until(
+        Duration::from_secs(60),
+        "mid-stream rows on every partition",
+        || {
+            h.count(&params.table) >= 10_000
+                && h.partitions_written(&params.table)
+                    == u64::try_from(partitions).expect("partitions")
+        },
+    );
     // No `assert_drained`: this instance stops with records left to read.
     let report = first.stop();
     assert!(

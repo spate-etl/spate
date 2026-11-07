@@ -5647,6 +5647,8 @@ mod tests {
         fn unknown_lag_is_measured_from_the_committed_offset() {
             assert_eq!(filled(snapshot(-1, 10, 8), &[(0, 3)], true), 5);
             assert_eq!(filled(snapshot(-1, 10, 8), &[(0, 3)], false), 7);
+            assert_eq!(filled(snapshot(-1, 10, 10), &[(0, 0)], true), 10);
+            assert_eq!(filled(snapshot(-1, 10, 10), &[(0, 10)], true), 0);
         }
 
         #[test]

@@ -583,13 +583,14 @@ mod tests {
         KafkaSourceConfig::from_component_config(&section(&body)).expect("not owned");
     }
 
-    /// Regression: the librdkafka alias `bootstrap.servers` writes the same
-    /// underlying broker list as `metadata.broker.list`. Left un-denied, a
-    /// passthrough value would race the framework-owned broker list at client
-    /// creation (`ClientConfig` applies its map in unspecified order), so some
-    /// process restarts would silently consume from the wrong cluster.
+    /// Regression: the framework sets its broker list under
+    /// `bootstrap.servers`, librdkafka's alias of `metadata.broker.list`. Left
+    /// un-denied, a passthrough `metadata.broker.list` would race the
+    /// framework-owned broker list at client creation (`ClientConfig` applies
+    /// its map in unspecified order), so some process restarts would silently
+    /// consume from the wrong cluster.
     #[test]
-    fn broker_list_alias_cannot_override_framework_brokers() {
+    fn metadata_broker_list_cannot_override_framework_brokers() {
         let body = format!(
             "{}  rdkafka:\n    metadata.broker.list: \"staging-kafka:9092\"\n",
             minimal()

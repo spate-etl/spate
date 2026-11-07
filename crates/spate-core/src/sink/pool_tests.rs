@@ -3134,3 +3134,12 @@ fn sink_errors_metric_counts_each_write_error_under_its_class() {
     assert_eq!(errors("record_level"), 1.0, "{rendered}");
     assert_eq!(errors("fatal"), 0.0, "{rendered}");
 }
+
+/// Pins that `drain` returns for the largest deadline, which would carry a
+/// clock reading past `Instant`'s range. Regression for #1510.
+#[tokio::test]
+async fn drain_returns_for_the_largest_deadline() {
+    let f = fixture(1, 1, SinkPoolConfig::default(), 4);
+    drop(f.queues);
+    f.pool.drain(Duration::MAX).await;
+}

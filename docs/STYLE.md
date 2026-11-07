@@ -15,8 +15,11 @@ No docs review reads those files, so a stale count there is the one that
 survives longest. Nothing else in this file governs them.
 
 `docs/developer/` is contributor documentation rendered on the site. § 7
-governs it as a how-to, with § 8's hygiene and § 10's code examples. § 1's
-vendor neutrality and § 6's one-purpose rule do not, since its subject is this
+governs it as a how-to, with § 8's frontmatter and link rules and § 10's code
+examples. Its reader has the checkout, so a repository path may stand in prose
+and label a link. Its category is curated in `sidebars.ts` beside the decision
+records, so § 8's category-folder rule does not reach it. § 1's vendor
+neutrality and § 6's one-purpose rule do not either, since its subject is this
 repository and its crates by name.
 
 ## Who this is for

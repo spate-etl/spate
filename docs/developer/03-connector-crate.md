@@ -1,5 +1,5 @@
 ---
-description: "What a crate under crates/ carries beyond its source: the test targets, features and seams a connector crate declares."
+description: "What a crate under crates/ carries beyond its source, starting with the test targets and features it declares."
 ---
 
 # Anatomy of a connector crate

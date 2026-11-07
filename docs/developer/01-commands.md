@@ -1,5 +1,5 @@
 ---
-description: "The task runner and its gates: what cargo xtask ci covers, what CI adds, the test runner and its profiles, the container suites, and which checks a change selects."
+description: "What cargo xtask ci covers and what CI adds, the test runner and its profiles, the container suites, and which checks a change selects."
 ---
 
 # Commands and gates

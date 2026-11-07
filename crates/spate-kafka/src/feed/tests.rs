@@ -2168,6 +2168,44 @@ mod cluster {
         assert!(intents.is_empty(), "the close deferred: {intents:?}");
     }
 
+    /// Pins that dropping the driver returns with a lost assignment's
+    /// revocation queued and the intent lock poisoned, as after a panic on
+    /// the feed thread. Regression for #1684.
+    #[test]
+    fn a_poisoned_drop_with_a_lost_revocation_queued_returns() {
+        let cluster = cluster_with(0);
+        let brokers = cluster.bootstrap_servers();
+        let group = spate_test::unique_name("poisoned-lost-revoke");
+        let (_, _core, _producer, mut d) = parts_for(&brokers, &group);
+        drive(&mut d, "the driver owns its partitions", |d| owns(d) == 2);
+        cluster.request_errors(
+            RDKafkaApiKey::Heartbeat,
+            &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_UNKNOWN_MEMBER_ID],
+        );
+        wait_until(DEADLINE, "a revocation queued", || {
+            d.poll();
+            d.consumer
+                .context()
+                .intents
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|i| matches!(i, Intent::Revoke(_)))
+        });
+        let context = Arc::clone(d.consumer.context());
+        let _ = std::thread::spawn(move || {
+            let _held = context.intents.lock().unwrap();
+            panic!("poisoning the intent lock");
+        })
+        .join();
+        let dropped = returns_within(Duration::from_secs(30), move || drop(d));
+        if !dropped {
+            // Its consumer is still connected; dropping it would wait on it.
+            std::mem::forget(cluster);
+        }
+        assert!(dropped, "dropping the driver did not return");
+    }
+
     /// Pins that a panic on the feed's thread while it holds partitions
     /// stops the feed with a Fatal error naming the consumer thread, that
     /// dropping the feed then returns, the unwind closing the consumer as a

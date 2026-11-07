@@ -74,6 +74,7 @@ fn shutdown_during_a_sink_outage_still_exits_at_its_deadline() {
     h.pause_clickhouse();
     h.produce(&params.topic, second_wave);
 
+    // ANCHOR: outage_signal
     // Over the cap means a sealed batch is queued behind a write the frozen
     // sink never answers. The pause gauge also reads 1 under a healthy sink.
     let cap = params.inflight_max_per_shard as f64;
@@ -87,6 +88,7 @@ fn shutdown_during_a_sink_outage_still_exits_at_its_deadline() {
                 .any(|s| s.value > cap)
         },
     );
+    // ANCHOR_END: outage_signal
 
     // ── SIGTERM with the sink still down ───────────────────────────────
     // No `assert_drained`: an abandoned drain leaves records to replay.

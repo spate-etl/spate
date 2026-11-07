@@ -1471,6 +1471,7 @@ impl Driver {
     }
 
     /// Step until the live lanes cover partitions `0..partitions` and each of
+    // ANCHOR: settle_group
     /// `consumers` consumers reports itself in a stable group, so the group
     /// has finished forming. Takes a driver from [`Driver::open_watched`].
     fn settle_group(&mut self, consumers: usize, partitions: u32, timeout: Duration) {
@@ -1489,6 +1490,7 @@ impl Driver {
                 && healthy.iter().all(|s| s.value == 1.0)
         });
     }
+    // ANCHOR_END: settle_group
 
     /// Read every live lane, stepping between polls, until each partition has
     /// delivered `n` offsets, and return the offsets read per partition. Each

@@ -416,6 +416,7 @@ mod proptests {
         }
     }
 
+    // ANCHOR: reference_model
     proptest! {
         #[test]
         fn tracker_matches_reference_model(ops in ops()) {
@@ -470,4 +471,5 @@ mod proptests {
             prop_assert_eq!(tracker.stalled(), reference.stalled);
         }
     }
+    // ANCHOR_END: reference_model
 }

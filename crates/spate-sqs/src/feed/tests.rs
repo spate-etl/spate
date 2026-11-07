@@ -6,10 +6,12 @@
 use super::*;
 use crate::queue::BoxFuture;
 use crate::scripted::{Failure, Message, ScriptedQueue};
+use spate_core::clock::TestClock as SyncTestClock;
 use spate_core::clock::tokio::TestClock;
 use spate_core::feed::{FeedPark, wake_channel};
 use spate_core::metrics::{FeedOp, Meter};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
 use tokio::sync::oneshot;
 
 const MINUTE: Duration = Duration::from_secs(60);
@@ -112,6 +114,7 @@ async fn an_extension_is_clamped_to_the_time_left() {
     }
     assert_eq!(hold_end(now), now + HOLD - secs(30));
 
+    // ANCHOR: advance_paused_time
     let (feed, queue) = start(HOLD);
     let (waker, park) = wake_channel();
     feed.set_waker(waker);
@@ -130,6 +133,7 @@ async fn an_extension_is_clamped_to_the_time_left() {
         Some(received + HOLD - secs(30)),
         "the first visibility is clamped to this receive's hold"
     );
+    // ANCHOR_END: advance_paused_time
 
     // A renewal period is 4 h at a 12 h visibility.
     let period = HOLD / 3;
@@ -881,20 +885,106 @@ async fn past_the_deadline_a_fail_is_gone_and_an_acknowledge_still_deletes() {
     );
 }
 
-/// Pins the 30 s bound on connecting, and that its error names the step
-/// under way.
-#[tokio::test(start_paused = true)]
-async fn connecting_is_bounded_at_30_seconds_and_names_its_step() {
-    let step = Mutex::new("reading the queue's ARN");
-    let started = Instant::now();
-    let err = bounded::<()>(&step, std::future::pending())
-        .await
-        .unwrap_err();
-    assert_eq!(started.elapsed(), Duration::from_secs(30));
-    let SqsError::Unavailable(message) = err else {
-        panic!("{err:?}");
-    };
-    assert!(message.contains("reading the queue's ARN"), "{message}");
+/// How long a connect bound test waits for a step or a verdict.
+const BOUND_DEADLINE: Duration = Duration::from_secs(10);
+
+/// Work that sets its step to `on` when first polled, then never ends.
+async fn hangs_on(step: Arc<Mutex<&'static str>>, on: &'static str) -> Result<(), SqsError> {
+    *step.lock().unwrap() = on;
+    std::future::pending().await
+}
+
+/// [`bounded`] over the work `work` builds, run through `io`'s `block_on` on
+/// a thread of its own, on a frozen clock.
+struct BoundRun {
+    step: Arc<Mutex<&'static str>>,
+    clock: Arc<SyncTestClock>,
+    done: mpsc::Receiver<Result<(), SqsError>>,
+}
+
+impl BoundRun {
+    fn start<W>(
+        io: tokio::runtime::Handle,
+        work: impl FnOnce(Arc<Mutex<&'static str>>) -> W + Send + 'static,
+    ) -> BoundRun
+    where
+        W: Future<Output = Result<(), SqsError>>,
+    {
+        let step = Arc::new(Mutex::new("starting"));
+        let clock = SyncTestClock::frozen();
+        let (tx, done) = mpsc::channel();
+        let running = Arc::clone(&step);
+        let given = SyncClock::new(Arc::clone(&clock) as _);
+        std::thread::spawn(move || {
+            let work = work(Arc::clone(&running));
+            let _ = tx.send(io.block_on(bounded(&running, given, work)));
+        });
+        BoundRun { step, clock, done }
+    }
+
+    /// Wait until the work is on `step`, move the clock to the bound, and
+    /// return the verdict.
+    fn fire_on(self, step: &str) -> Result<(), SqsError> {
+        spate_test::wait_until(BOUND_DEADLINE, step, || *self.step.lock().unwrap() == step);
+        self.clock.advance(CONNECT_BOUND);
+        self.done
+            .recv_timeout(BOUND_DEADLINE)
+            .expect("the bound did not fire")
+    }
+}
+
+fn bound_runtime() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .unwrap()
+}
+
+/// Pins the 30 s bound on connecting, timed on the clock it is given, and
+/// that its error names the step under way.
+#[test]
+fn connecting_is_bounded_at_30_seconds_and_names_its_step() {
+    let io = bound_runtime();
+    let run = BoundRun::start(io.handle().clone(), |step| {
+        hangs_on(step, "reading the queue's ARN")
+    });
+    match run.fire_on("reading the queue's ARN") {
+        Err(SqsError::Unavailable(message)) => assert_eq!(
+            message,
+            "connecting took longer than 30s, while reading the queue's ARN"
+        ),
+        other => panic!("expected unavailable, got {other:?}"),
+    }
+}
+
+/// Pins that the connect bound fires through `Handle::block_on` on a
+/// current-thread runtime, which drives no timer there, on a runtime with
+/// timers disabled, and on one that has shut down. Regression for #1218.
+#[test]
+fn the_connect_bound_fires_on_any_runtime() {
+    let current = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let untimed = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    let stopped = bound_runtime().handle().clone();
+    for (name, io) in [
+        ("current-thread", current.handle().clone()),
+        ("timers disabled", untimed.handle().clone()),
+        ("shut down", stopped),
+    ] {
+        let run = BoundRun::start(io, |step| hangs_on(step, "reading the queue's ARN"));
+        match run.fire_on("reading the queue's ARN") {
+            Err(SqsError::Unavailable(message)) => assert!(
+                message.ends_with("while reading the queue's ARN"),
+                "{name}: {message}"
+            ),
+            other => panic!("{name}: expected unavailable, got {other:?}"),
+        }
+    }
 }
 
 /// Moves tokio time in 100 ms steps, so each renewal tick runs at its own
@@ -1552,10 +1642,67 @@ impl startup::QueueAttributes for Hangs {
     }
 }
 
+/// Pins that `connect` times its bound on the clock it is given: against an
+/// endpoint that accepts connections and never answers, through a
+/// current-thread handle, it ends once that clock passes the bound.
+/// Regression for #1218.
+#[test]
+fn connect_ends_at_the_bound_on_the_clock_it_is_given() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        let held: Vec<_> = listener.incoming().collect();
+        drop(held);
+    });
+    let section: FeedSection = serde_yaml::from_str(&format!(
+        "sqs: {{ queue_url: \"http://{addr}/000000000000/jobs\", \
+         region: eu-west-2, endpoint: \"http://{addr}\" }}"
+    ))
+    .unwrap();
+    let io = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let clock = SyncTestClock::frozen();
+    let given = SyncClock::new(Arc::clone(&clock) as _);
+    let handle = io.handle().clone();
+    let (tx, done) = mpsc::channel();
+    std::thread::spawn(move || {
+        let credentials = aws_sdk_sqs::config::Credentials::new("x", "x", None, None, "test");
+        let _ = tx.send(
+            SqsFeed::connect_with(
+                &section,
+                &handle,
+                Some(aws_sdk_sqs::config::SharedCredentialsProvider::new(
+                    credentials,
+                )),
+                given,
+            )
+            .map(drop),
+        );
+    });
+    // The bound reads its deadline when `connect` starts it, which this
+    // thread cannot see, so each pass moves the clock by a whole bound.
+    let mut got = None;
+    spate_test::wait_until(BOUND_DEADLINE, "connect ends", || {
+        clock.advance(CONNECT_BOUND);
+        got = done.recv_timeout(Duration::from_millis(100)).ok();
+        got.is_some()
+    });
+    match got {
+        Some(Err(SqsError::Unavailable(message))) => assert!(
+            message.starts_with("connecting took longer than 30s, while "),
+            "{message}"
+        ),
+        other => panic!("expected unavailable, got {other:?}"),
+    }
+}
+
 /// Pins that the connect bound names the read it was on, for the queue and
 /// for its dead-letter queue.
-#[tokio::test(start_paused = true)]
-async fn the_connect_bound_names_the_read_it_was_on() {
+#[test]
+fn the_connect_bound_names_the_read_it_was_on() {
+    let io = bound_runtime();
     for (url, step) in [
         (
             "http://h/000000000000/jobs",
@@ -1566,10 +1713,13 @@ async fn the_connect_bound_names_the_read_it_was_on() {
             "while reading the dead-letter queue's attributes",
         ),
     ] {
-        let current = Mutex::new("starting");
-        let queue = Hangs { url };
-        let checks = startup::check(&queue, "http://h/000000000000/jobs", &current);
-        match bounded(&current, checks).await {
+        let run = BoundRun::start(io.handle().clone(), move |current| async move {
+            let queue = Hangs { url };
+            startup::check(&queue, "http://h/000000000000/jobs", &current)
+                .await
+                .map(drop)
+        });
+        match run.fire_on(step.trim_start_matches("while ")) {
             Err(SqsError::Unavailable(message)) => assert!(message.ends_with(step), "{message}"),
             other => panic!("expected unavailable, got {other:?}"),
         }
@@ -5395,4 +5545,102 @@ fn a_settle_retry_past_the_instant_range_is_given_up() {
     assert_eq!(retry_at(now, Duration::MAX, now + ms(1000)), None);
     assert_eq!(retry_at(now, ms(200), now + ms(200)), None);
     assert_eq!(retry_at(now, ms(200), now + ms(201)), Some(now + ms(200)));
+}
+
+/// Pins that the feed logs its stop once, at the first fatal error, and that
+/// a close pending at the latch is rejected with the latched error.
+/// Regression for #1526.
+#[tokio::test(start_paused = true)]
+async fn a_second_fatal_error_logs_nothing_and_keeps_the_first() {
+    let (feed, queue) = start_gated(MINUTE);
+    let (waker, park) = wake_channel();
+    feed.set_waker(waker);
+    queue.inner.ready(Message::new("a"));
+    let got = receive_n(&feed, &park, 1).await;
+    queue.delete_down.store(true, Ordering::SeqCst);
+    feed.acknowledge(got[0].receipt).unwrap();
+    settle_tasks().await;
+    let mut closed = feed.close(Duration::from_secs(10)).unwrap();
+    settle_tasks().await;
+    assert!(closed.try_outcome().is_none(), "the close settled early");
+
+    let lines = spate_test::capture_logs(tracing::Level::ERROR, || {
+        feed.shared.set_fatal(&CallError::fatal("first"));
+        feed.shared.set_fatal(&CallError::fatal("second"));
+    });
+    let logged = lines
+        .iter()
+        .filter(|line| line.contains("the SQS feed stopped"))
+        .count();
+    assert_eq!(logged, 1, "one stop, one line: {lines:#?}");
+    let rejected = closed.try_outcome().unwrap().unwrap_err();
+    assert_eq!(rejected.reason, "first");
+    assert_eq!(feed.receive(1).unwrap_err().reason, "first");
+}
+
+/// Pins that a latched feed's tasks send nothing more: no queued delete, no
+/// further receive for the reader's demand, and no extension at the next
+/// renewal tick.
+#[tokio::test(start_paused = true)]
+async fn a_latched_feeds_tasks_send_nothing_more() {
+    let (feed, queue) = start(MINUTE);
+    let (waker, park) = wake_channel();
+    feed.set_waker(waker);
+    queue.ready(Message::new("a"));
+    queue.ready(Message::new("b"));
+    let got = receive_n(&feed, &park, 2).await;
+    feed.acknowledge(got[0].receipt).unwrap();
+    assert!(feed.receive(8).unwrap().is_empty());
+    let receives = queue.receives().len();
+    let extensions = queue.visibility().len();
+
+    feed.shared.set_fatal(&CallError::fatal("stopped"));
+    settle_tasks().await;
+    // One renewal period: the next tick, with the held unit's deadline ahead.
+    tokio::time::advance(MINUTE / 3).await;
+    settle_tasks().await;
+
+    assert!(queue.deletes().is_empty(), "a latched feed sent a delete");
+    assert_eq!(queue.receives().len(), receives, "a latched feed received");
+    assert_eq!(
+        queue.visibility().len(),
+        extensions,
+        "a latched feed extended"
+    );
+}
+
+/// Pins that a `receive` which empties the buffer does not wake the reader.
+#[tokio::test(start_paused = true)]
+async fn a_receive_emptying_the_buffer_does_not_wake_the_reader() {
+    let (feed, queue) = start(MINUTE);
+    let (waker, park) = wake_channel();
+    feed.set_waker(waker);
+    queue.ready(Message::new("a"));
+    queue.ready(Message::new("b"));
+    assert!(feed.receive(2).unwrap().is_empty(), "nothing buffered yet");
+    until("the units are buffered", || feed.buffered() == 2).await;
+    assert!(park.park(Duration::ZERO), "buffering woke the reader");
+
+    assert_eq!(feed.receive(1).unwrap().len(), 1);
+    assert!(
+        park.park(Duration::ZERO),
+        "a unit left buffered woke nothing"
+    );
+    assert_eq!(feed.receive(1).unwrap().len(), 1);
+    assert!(
+        !park.park(Duration::ZERO),
+        "an emptied buffer woke the reader"
+    );
+}
+
+/// Pins that a feed abandoned after it latched still answers `receive` with
+/// the latched error.
+#[tokio::test(start_paused = true)]
+async fn a_latched_feed_abandoned_still_returns_its_error() {
+    let (feed, _queue) = start(MINUTE);
+    feed.shared.set_fatal(&CallError::fatal("stopped"));
+    feed.abandon();
+    let error = feed.receive(1).unwrap_err();
+    assert_eq!(error.kind, FeedErrorKind::Fatal);
+    assert_eq!(error.reason, "stopped");
 }

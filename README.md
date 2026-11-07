@@ -188,9 +188,10 @@ Single-node throughput is measured, and the
 with the method behind them. A change that reaches Rust runs allocation and
 request-shape assertions, which count what a run does and give the same result
 on any machine.
-[`DEVELOPING.md`](DEVELOPING.md#benchmarks) describes the benches, and
-[What CI selects](DEVELOPING.md#what-ci-selects) says which of them a change
-runs.
+[Benchmarks and fuzzing](docs/developer/04-benchmarks-and-fuzzing.md)
+describes the benches, and
+[What CI selects](docs/developer/01-commands.md#what-ci-selects) says which of
+them a change runs.
 
 ## Testing
 

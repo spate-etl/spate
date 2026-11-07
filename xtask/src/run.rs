@@ -3,7 +3,9 @@
 use std::ffi::OsStr;
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
-use std::process::{ChildStderr, Command};
+use std::process::{Child, ChildStderr, Command};
+use std::sync::mpsc::{self, RecvTimeoutError};
+use std::time::Duration;
 
 /// A command that did not succeed.
 #[derive(Debug)]
@@ -236,6 +238,90 @@ pub(crate) struct Completed {
 /// Runs one step and answers how it finished, leaving a non-zero status for the
 /// caller to classify.
 pub(crate) fn complete(root: &Path, step: &Step<'_>, streams: Streams) -> Result<Completed, Error> {
+    collect(spawn(root, step, streams)?, streams, step.program)
+}
+
+/// How a step run under a budget ended.
+pub(crate) struct Bounded {
+    pub(crate) completed: Completed,
+    /// The budget ran out and the child was signalled before it exited.
+    pub(crate) stopped: bool,
+}
+
+/// How long a child sent SIGINT at its budget has to exit before it is sent
+/// SIGKILL.
+const GRACE: Duration = Duration::from_secs(60);
+
+/// Runs one step with both streams inherited, and sends the child SIGINT when
+/// `budget` runs out, then SIGKILL if it is still running [`GRACE`] later.
+/// Blocks until the child has exited either way.
+pub(crate) fn complete_within(
+    root: &Path,
+    step: &Step<'_>,
+    budget: Duration,
+) -> Result<Bounded, Error> {
+    stop_within(root, step, budget, "INT", GRACE)
+}
+
+/// [`complete_within`] with the first signal and the grace before SIGKILL as
+/// arguments.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "inherited streams leave the waiter only the child's exit to wait on, which SIGKILL bounds"
+)]
+fn stop_within(
+    root: &Path,
+    step: &Step<'_>,
+    budget: Duration,
+    first: &str,
+    grace: Duration,
+) -> Result<Bounded, Error> {
+    // Collected or relayed streams would make the waiter read to EOF, which a
+    // grandchild holding the pipes delays past the SIGKILL.
+    let streams = Streams::Inherit;
+    let child = spawn(root, step, streams)?;
+    let pid = child.id().to_string();
+    let program = step.program.to_owned();
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || drop(tx.send(collect(child, streams, &program))));
+    let signal = |name: &str| {
+        // A child that exited since the deadline makes `kill` fail, which
+        // changes nothing: the waiter has already sent its result.
+        drop(succeeded(root, &Step::new("kill", ["-s", name, &pid])));
+    };
+    let lost = || {
+        Error::msg(format!(
+            "{}: the thread waiting on it panicked",
+            step.program
+        ))
+    };
+    match rx.recv_timeout(budget) {
+        Ok(done) => {
+            return done.map(|completed| Bounded {
+                completed,
+                stopped: false,
+            });
+        }
+        Err(RecvTimeoutError::Disconnected) => return Err(lost()),
+        Err(RecvTimeoutError::Timeout) => {}
+    }
+    signal(first);
+    let done = match rx.recv_timeout(grace) {
+        Ok(done) => done,
+        Err(RecvTimeoutError::Disconnected) => return Err(lost()),
+        Err(RecvTimeoutError::Timeout) => {
+            signal("KILL");
+            rx.recv().map_err(|_| lost())?
+        }
+    };
+    done.map(|completed| Bounded {
+        completed,
+        stopped: true,
+    })
+}
+
+/// Starts one step with its streams set up as `streams` asks.
+fn spawn(root: &Path, step: &Step<'_>, streams: Streams) -> Result<Child, Error> {
     let dir = step
         .dir
         .map_or_else(|| root.to_path_buf(), |d| root.join(d));
@@ -265,16 +351,21 @@ pub(crate) fn complete(root: &Path, step: &Step<'_>, streams: Streams) -> Result
             command.stderr(std::process::Stdio::piped());
         }
     }
-    let mut child = command
+    command
         .spawn()
-        .map_err(|e| Error::msg(format!("{}: {e}", step.program)))?;
+        .map_err(|e| Error::msg(format!("{}: {e}", step.program)))
+}
+
+/// Waits for a child started by [`spawn`] and gathers what `streams` asked
+/// for.
+fn collect(mut child: Child, streams: Streams, program: &str) -> Result<Completed, Error> {
     let relayed = child
         .stderr
         .take_if(|_| streams == Streams::Relay)
         .map(relay);
     let out = child
         .wait_with_output()
-        .map_err(|e| Error::msg(format!("{}: {e}", step.program)))?;
+        .map_err(|e| Error::msg(format!("{program}: {e}")))?;
     Ok(Completed {
         code: shell_code(&out.status),
         stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
@@ -431,6 +522,42 @@ mod tests {
         let done = complete(&root, &step, Streams::Collect).unwrap();
         assert_eq!(done.stdout, "out");
         assert_eq!(done.stderr, "");
+    }
+
+    /// A child still running when its budget runs out is sent SIGINT and
+    /// reported as stopped, with the status that signal left.
+    #[cfg(unix)]
+    #[test]
+    fn a_child_running_past_its_budget_is_stopped() {
+        let root = crate::repo_root().unwrap();
+        let step = Step::new("sleep", ["1000"]);
+        let got = complete_within(&root, &step, Duration::ZERO).unwrap();
+        assert!(got.stopped);
+        assert_eq!(got.completed.code, 128 + 2);
+    }
+
+    /// A child that outlives the first signal by its grace is sent SIGKILL, so
+    /// the wait ends. SIGCONT stands in for a SIGINT the child ignores.
+    #[cfg(unix)]
+    #[test]
+    fn a_child_that_survives_the_first_signal_is_killed() {
+        let root = crate::repo_root().unwrap();
+        let step = Step::new("sleep", ["1000"]);
+        let got = stop_within(&root, &step, Duration::ZERO, "CONT", Duration::ZERO).unwrap();
+        assert!(got.stopped);
+        assert_eq!(got.completed.code, 128 + 9);
+    }
+
+    /// A child that exits within its budget is reported as finished, with its
+    /// own code.
+    #[cfg(unix)]
+    #[test]
+    fn a_child_within_its_budget_finishes_with_its_own_code() {
+        let root = crate::repo_root().unwrap();
+        let step = Step::new("sh", ["-c", "exit 7"]);
+        let got = complete_within(&root, &step, Duration::from_secs(3600)).unwrap();
+        assert!(!got.stopped);
+        assert_eq!(got.completed.code, 7);
     }
 
     /// A child killed by a signal reports the status a shell would, so nothing

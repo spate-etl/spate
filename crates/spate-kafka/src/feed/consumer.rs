@@ -203,7 +203,7 @@ pub(crate) fn close_flush(within: Duration) -> Duration {
 /// error if the feed latched, `Retryable` if writes were still in flight
 /// at the flush's end or the last commit failed, and confirmed otherwise.
 fn settle_close(core: &Core, close: Closing, flushed: bool, committed: bool) {
-    if let Some(fatal) = core.lock().fatal.clone() {
+    if let Some(fatal) = core.lock().signal.latched().cloned() {
         close.confirmer.reject(fatal);
     } else if !flushed {
         close.confirmer.reject(FeedError::new(
@@ -312,8 +312,7 @@ impl Driver {
             }
             _ => {
                 let mut st = self.core.lock();
-                st.retryable = Some(FeedError::new(FeedErrorKind::Retryable, reason));
-                st.wake();
+                st.signal.fail_soon(reason);
             }
         }
     }
@@ -534,13 +533,15 @@ impl Drop for Driver {
         let context = self.consumer.context();
         // The context completes the final revocation inline from here on.
         context.closing.store(true, Ordering::Release);
-        // A poisoned lock reads as no deferred revocation: this runs during
-        // an unwind, where a second panic aborts.
+        // A panic under the lock leaves the queue's contents unknown, so a
+        // poisoned lock reads as a deferred revocation. Under the feed's eager
+        // assignment an unassign with nothing pending costs nothing, and a
+        // lost assignment's revocation left unanswered holds the close.
         let deferred_revoke = context
             .intents
             .lock()
             .map(|q| q.iter().any(|i| matches!(i, Intent::Revoke(_))))
-            .unwrap_or(false);
+            .unwrap_or(true);
         if deferred_revoke && let Err(e) = self.consumer.unassign() {
             tracing::warn!(error = %e, "unassign while the feed stops failed");
         }

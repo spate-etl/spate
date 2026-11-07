@@ -12,6 +12,9 @@ use std::ffi::CStr;
 use std::sync::mpsc;
 use std::time::Duration;
 
+#[path = "../tests/support/mock.rs"]
+pub(crate) mod mock;
+
 #[path = "../tests/support/wire.rs"]
 #[allow(dead_code, reason = "the integration suites use the rest")]
 pub(crate) mod wire;
@@ -127,6 +130,7 @@ pub(crate) fn committed_offsets(
         .collect()
 }
 
+// ANCHOR: refused_broker
 /// A loopback `host:port` that refuses connections at once.
 ///
 /// The port is bound and released, so the refusal is real. A port nothing has
@@ -138,6 +142,7 @@ pub(crate) fn refused_broker() -> String {
     drop(listener);
     addr.to_string()
 }
+// ANCHOR_END: refused_broker
 
 /// A broker that answers ApiVersions, accepts the SASL `PLAIN`
 /// mechanism, and refuses the login with `SASL_AUTHENTICATION_FAILED`,

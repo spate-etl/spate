@@ -1,7 +1,10 @@
 //! Kafka sink logs emitted from the producer poll thread.
 
 use bytes::BytesMut;
-use rdkafka::mocking::MockCluster;
+#[path = "support/mock.rs"]
+mod mock;
+
+use mock::MockKafka;
 use spate_core::checkpoint::AckRef;
 use spate_core::record::{PartitionId, Record, RecordMeta};
 use spate_core::sink::{RowEncoder, SealedBatch, ShardWriter};
@@ -20,7 +23,7 @@ async fn producer_debug_logs_reach_tracing() {
         .without_time()
         .init();
 
-    let cluster = MockCluster::new(1).expect("mock cluster");
+    let cluster = MockKafka::new();
     cluster
         .create_topic("log-level-sink", 1, 1)
         .expect("create topic");

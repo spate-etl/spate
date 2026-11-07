@@ -1,0 +1,3 @@
+**A Kafka source under `auto.offset.reset: error` fails on a missing or out-of-range offset** (`spate-kafka`)
+
+Under `auto.offset.reset: error`, a partition with no committed offset, such as one added to the topic, fails the source with a fatal error. So does a partition whose fetch offset is out of range, such as a committed offset that retention deleted below or one past the log end. In previous versions the error was retryable. librdkafka stops fetching the partition once it reports the reset, so the pipeline logged one warning and stayed healthy while the partition delivered nothing. A run that met this stall on a new partition stops instead, and stops again on each restart until the group has a valid offset for it.

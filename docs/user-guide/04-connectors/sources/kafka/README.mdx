@@ -129,6 +129,10 @@ consumer's index.
 The source reads batches compressed with gzip, snappy, lz4 and zstd. A batch
 in a codec librdkafka cannot read fails the pipeline with a fatal error, before
 any record after it is delivered. A retry would fetch the same batch again.
+A batch in a codec librdkafka reads whose payload does not decompress fails the
+same way. So does a zstd batch that decompresses to more than
+`receive.message.max.bytes`, which librdkafka reports as invalid compressed
+data.
 
 A batch in a message format librdkafka does not know fails the same way when
 the source reads it from its first record. When the committed offset falls
@@ -174,7 +178,12 @@ The framework never uses librdkafka's position-based auto-commit. Instead:
   group authorization stops the run at once. A member the group has removed, or
   whose commit it refuses during a rebalance, gets no lanes and rejoins. Under
   `earliest` the partition starts at its beginning.
-  Under `error` librdkafka applies the policy.
+  Under `error` librdkafka applies the policy, and the source fails with a fatal
+  error. That covers a partition with no committed offset, such as one added to
+  the topic or one whose group offsets expired, and a partition whose fetch
+  offset is out of range, such as a committed offset below the log start or past
+  the log end. A run stopped this way stops again on each restart until the
+  group has a valid offset for the partition.
 - A failed read of the committed offsets under `earliest` or `error` leaves the
   start to librdkafka.
 - A held assignment from a generation the group has left is answered empty, and
@@ -317,7 +326,8 @@ HDR-histogram rolling-window estimates, converted to seconds; they are
 per-broker sampled quantiles and **cannot be aggregated** across brokers or
 processes (`max()` is the only defensible cross-series operator). Series backed
 by data librdkafka has not produced yet (an empty latency window, an unknown
-lag) are absent rather than `0`.
+lag) are absent rather than `0`. A broker that leaves librdkafka's statistics
+keeps its series, with `broker_up` and its latency gauges at `0`.
 
 Standard labels (`pipeline`, `component`, `component_type`) are on all of
 them; extras, `broker` among them, are noted per family.
@@ -362,8 +372,9 @@ Labels marked ⚠ are cardinality-sensitive and appear only under
 - `rate(spate_kafka_source_broker_tx_errors_total[5m]) > 0` or
   `spate_kafka_source_broker_up == 0` — broker connectivity trouble, attributed
   by the `broker` label. On large clusters a broker the member currently needs
-  no connection to also reads 0 (sparse connections), so alert on brokers the
-  assignment depends on rather than on the cluster-wide sum.
+  no connection to also reads 0 (sparse connections), and so does a broker that
+  left librdkafka's statistics. Alert on brokers the assignment depends on
+  rather than on the cluster-wide sum.
 - `spate_kafka_source_partition_not_fetching == 1` — the member holds the
   partition and is not consuming it. The pipeline then goes quiet with a full
   assignment, a healthy group and no error anywhere. The alert wants a `for:`

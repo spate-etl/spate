@@ -20,7 +20,6 @@ use support::Raw as _;
 
 use bytes::BytesMut;
 use rdkafka::message::{Headers, Message};
-use rdkafka::mocking::MockCluster;
 use rdkafka::types::RDKafkaRespErr;
 use spate_core::clock::SystemClock;
 use spate_core::clock::tokio::{Clock as IoClock, Sleep, TestClock as IoTestClock};
@@ -39,6 +38,7 @@ use std::panic::RefUnwindSafe;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
+use support::MockKafka;
 use support::consume;
 
 const TOPIC: &str = "orders-out";
@@ -121,7 +121,7 @@ impl MessageEncoder<Owned<Vec<u8>>> for StructuredEncoder {
 
 #[tokio::test]
 async fn write_batch_round_trips_keys_headers_payloads() {
-    let cluster = MockCluster::new(1).expect("mock cluster");
+    let cluster = MockKafka::new();
     cluster.create_topic(TOPIC, 1, 1).expect("create topic");
     let brokers = cluster.bootstrap_servers();
     let sink = sink(&brokers, "");
@@ -212,7 +212,7 @@ fn spawn_pipeline(
 /// delivery report of the covering batch confirmed.
 #[test]
 fn pipeline_commits_only_after_delivery_reports() {
-    let cluster = MockCluster::new(1).expect("mock cluster");
+    let cluster = MockKafka::new();
     cluster.create_topic(TOPIC, 1, 1).expect("create topic");
     let brokers = cluster.bootstrap_servers();
     // Short linger so steady-state batches seal quickly.
@@ -258,7 +258,7 @@ fn pipeline_commits_only_after_delivery_reports() {
 /// are never silently committed).
 #[test]
 fn shutdown_with_inflight_data_commits_only_delivered() {
-    let cluster = MockCluster::new(1).expect("mock cluster");
+    let cluster = MockKafka::new();
     cluster.create_topic(TOPIC, 1, 1).expect("create topic");
     let brokers = cluster.bootstrap_servers();
     // Linger far beyond the test: any durable write after the trigger can
@@ -301,7 +301,7 @@ fn shutdown_with_inflight_data_commits_only_delivered() {
 /// the first write times out as retryable instead.
 #[tokio::test]
 async fn a_write_to_a_missing_topic_fails() {
-    let cluster = MockCluster::new(1).expect("mock cluster");
+    let cluster = MockKafka::new();
     let brokers = cluster.bootstrap_servers();
     let sink = sink(
         &brokers,
@@ -340,7 +340,7 @@ async fn a_write_to_a_missing_topic_fails() {
 
 #[tokio::test]
 async fn delivery_failure_maps_to_retryable() {
-    let cluster = MockCluster::new(1).expect("mock cluster");
+    let cluster = MockKafka::new();
     cluster.create_topic(TOPIC, 1, 1).expect("create topic");
     let brokers = cluster.bootstrap_servers();
     // Short delivery timeout so the timed-out reports arrive quickly.
@@ -373,7 +373,7 @@ async fn delivery_failure_maps_to_retryable() {
 
 #[tokio::test]
 async fn probe_verifies_topic_and_fails_fast_on_unknown_topic() {
-    let cluster = MockCluster::new(1).expect("mock cluster");
+    let cluster = MockKafka::new();
     cluster.create_topic(TOPIC, 1, 1).expect("create topic");
     let brokers = cluster.bootstrap_servers();
     let sink = sink(&brokers, "");
@@ -397,7 +397,7 @@ async fn probe_verifies_topic_and_fails_fast_on_unknown_topic() {
 /// A topic that reports no partitions yet fails the probe as retryable.
 #[tokio::test]
 async fn a_topic_with_no_partitions_yet_fails_the_probe_retryably() {
-    let cluster = MockCluster::new(1).expect("mock cluster");
+    let cluster = MockKafka::new();
     cluster.create_topic(TOPIC, 0, 1).expect("create topic");
     let brokers = cluster.bootstrap_servers();
     let sink = sink(&brokers, "");
@@ -409,31 +409,11 @@ async fn a_topic_with_no_partitions_yet_fails_the_probe_retryably() {
     assert!(err.reason().contains("reports no partitions yet"), "{err}");
 }
 
-/// Pins that a probe whose metadata read panics on its blocking thread
-/// returns a retryable error instead of unwinding into the caller:
-/// librdkafka refuses a topic name over 512 bytes, and rdkafka panics on
-/// the refusal.
-#[tokio::test]
-async fn a_probe_with_an_overlong_topic_fails_without_panicking() {
-    let cluster = MockCluster::new(1).expect("mock cluster");
-    let brokers = cluster.bootstrap_servers();
-    let topic = "t".repeat(513);
-    let yaml = format!("brokers: {brokers}\ntopic: {topic}\nstatistics_interval: 0s\n");
-    let config: KafkaSinkConfig = serde_yaml::from_str(&yaml).expect("sink config");
-    let sink = spate_kafka::sink::build(config).expect("sink build");
-
-    let err = sink.probe_fn()()
-        .await
-        .expect_err("an overlong topic must fail the probe");
-    assert_eq!(err.class(), ErrorClass::Retryable, "{err}");
-    assert!(err.reason().starts_with("probe task failed"), "{err}");
-}
-
 /// The readiness probe reports a missing topic as fatal and leaves it
 /// missing: its metadata read never asks the broker to create the topic.
 #[tokio::test]
 async fn the_probe_does_not_create_a_missing_topic() {
-    let cluster = MockCluster::new(1).expect("mock cluster");
+    let cluster = MockKafka::new();
     let brokers = cluster.bootstrap_servers();
     let sink = sink(&brokers, "");
 
@@ -467,7 +447,7 @@ async fn the_probe_does_not_create_a_missing_topic() {
 
 #[test]
 fn statistics_populate_kafka_sink_fixed_families() {
-    let cluster = MockCluster::new(1).expect("mock cluster");
+    let cluster = MockKafka::new();
     cluster.create_topic(TOPIC, 1, 1).expect("create topic");
     let brokers = cluster.bootstrap_servers();
     let mut sink = sink(&brokers, "statistics_interval: 200ms\n");
@@ -562,7 +542,7 @@ fn retryable_reason(result: Result<(), SinkError>) -> String {
 /// it delivers the batch.
 #[test]
 fn a_full_queue_fails_the_batch_at_the_send_deadline() {
-    let cluster = MockCluster::new(1).expect("mock cluster");
+    let cluster = MockKafka::new();
     cluster.create_topic(TOPIC, 1, 1).expect("create topic");
     let brokers = cluster.bootstrap_servers();
     let io = tokio::runtime::Builder::new_multi_thread()
@@ -625,7 +605,7 @@ fn a_full_queue_fails_the_batch_at_the_send_deadline() {
 /// before it delivers the batch.
 #[test]
 fn missing_reports_fail_the_batch_at_the_wait_deadline() {
-    let cluster = MockCluster::new(1).expect("mock cluster");
+    let cluster = MockKafka::new();
     cluster.create_topic(TOPIC, 1, 1).expect("create topic");
     let brokers = cluster.bootstrap_servers();
     let io = tokio::runtime::Builder::new_multi_thread()
@@ -703,7 +683,7 @@ impl IoClock for ReadTimes {
 /// message starts again from 10 ms.
 #[test]
 fn a_full_queue_backs_off_from_10ms_to_250ms_for_each_message() {
-    let cluster = MockCluster::new(1).expect("mock cluster");
+    let cluster = MockKafka::new();
     cluster.create_topic(TOPIC, 1, 1).expect("create topic");
     let brokers = cluster.bootstrap_servers();
     let io = tokio::runtime::Builder::new_current_thread()

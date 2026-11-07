@@ -708,7 +708,14 @@ mod tests {
         follower.on_error(&KafkaError::MessageConsumption(C::BrokerTransportFailure));
         assert!(!follower.core.latched());
         follower.on_error(&KafkaError::MessageConsumption(C::TopicAuthorizationFailed));
-        let reason = follower.core.lock().fatal.clone().unwrap().reason;
+        let reason = follower
+            .core
+            .lock()
+            .signal
+            .latched()
+            .cloned()
+            .unwrap()
+            .reason;
         assert!(reason.contains("the attempt follower's poll"), "{reason}");
     }
 
@@ -760,7 +767,7 @@ mod tests {
 
         use super::super::*;
         use crate::client::testing::{Raw as _, raw_config};
-        use rdkafka::mocking::MockCluster;
+        use crate::testutil::mock::MockKafka;
         use rdkafka::producer::{BaseProducer, BaseRecord, Producer};
         use spate_core::clock::SyncClock;
         use spate_core::config::FeedSection;
@@ -777,11 +784,11 @@ mod tests {
             producer: BaseProducer,
             config: KafkaFeedConfig,
             // Declared last, so dropped after the producer that uses it.
-            cluster: MockCluster<'static, rdkafka::producer::DefaultProducerContext>,
+            cluster: MockKafka,
         }
 
         fn rig() -> Rig {
-            let cluster = MockCluster::new(1).expect("mock cluster");
+            let cluster = MockKafka::new();
             for topic in ["units", "units-retry", "units-dead"] {
                 cluster.create_topic(topic, 1, 1).unwrap();
             }
@@ -893,7 +900,7 @@ mod tests {
             assert_eq!(counts, (3, 0));
             let core = Arc::clone(&running.core);
             drop(running);
-            assert!(!core.latched(), "{:?}", core.lock().fatal);
+            assert!(!core.latched(), "{:?}", core.lock().signal.latched());
         }
 
         /// Pins that a Fatal error the follower's poll returns stops the
@@ -907,7 +914,14 @@ mod tests {
             );
             let (running, _) = Running::start(&rig);
             wait_until(DEADLINE, "the feed latches", || running.core.latched());
-            let reason = running.core.lock().fatal.clone().unwrap().reason;
+            let reason = running
+                .core
+                .lock()
+                .signal
+                .latched()
+                .cloned()
+                .unwrap()
+                .reason;
             assert!(reason.contains("the attempt follower's poll"), "{reason}");
         }
 
@@ -922,7 +936,14 @@ mod tests {
 
             let (running, _) = Running::start(&rig);
             wait_until(DEADLINE, "the feed latches", || running.core.latched());
-            let reason = running.core.lock().fatal.clone().unwrap().reason;
+            let reason = running
+                .core
+                .lock()
+                .signal
+                .latched()
+                .cloned()
+                .unwrap()
+                .reason;
             assert!(
                 reason.contains("offset 1 of `units-attempts` partition 1"),
                 "{reason}"

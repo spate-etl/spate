@@ -10,7 +10,7 @@
 
 use spate_core::feed::{
     Confirmation, Confirmer, Delivery, Depth, DepthOf, DepthReading, Feed, FeedError,
-    FeedErrorKind, FeedWaker, Receipt, Unit, confirmation, depth_reading,
+    FeedErrorKind, FeedWaker, ReaderSignal, Receipt, Unit, confirmation, depth_reading,
 };
 use spate_core::hash::{FastMap, FastSet};
 use std::collections::{BTreeMap, VecDeque};
@@ -73,7 +73,7 @@ struct State {
     stopped_receiving: usize,
     handed_back: Vec<Receipt>,
     closes: Vec<Duration>,
-    waker: Option<FeedWaker>,
+    signal: ReaderSignal,
 }
 
 impl State {
@@ -118,12 +118,6 @@ impl State {
         match self.answers[call as usize].pop_front() {
             Some(kind) => Err(FeedError::new(kind, "refused by the feed script")),
             None => Ok(()),
-        }
-    }
-
-    fn wake(&self) {
-        if let Some(waker) = &self.waker {
-            waker.wake();
         }
     }
 }
@@ -211,7 +205,7 @@ impl FeedScript {
         let deliveries = *count;
         let receipt = state.queue(unit, deliveries);
         state.scripted.insert(receipt);
-        state.wake();
+        state.signal.wake();
         receipt
     }
 
@@ -241,7 +235,7 @@ impl FeedScript {
         if scripted {
             state.scripted.insert(receipt);
         }
-        state.wake();
+        state.signal.wake();
         receipt
     }
 
@@ -257,7 +251,7 @@ impl FeedScript {
             panic!("dead_letter: {receipt} is neither queued nor held");
         };
         state.dead_lettered.push(delivery.unit);
-        state.wake();
+        state.signal.wake();
     }
 
     /// Refuse the next unscripted `publish` with `kind` (repeat to script a
@@ -265,7 +259,7 @@ impl FeedScript {
     pub fn refuse_next_publish(&self, kind: FeedErrorKind) {
         let mut state = self.lock();
         state.publish_outcomes.push_back(kind);
-        state.wake();
+        state.signal.wake();
     }
 
     /// Answer the next `receive` with `kind` (repeat to script a sequence).
@@ -383,7 +377,7 @@ impl FeedScript {
         );
         let mut state = self.lock();
         state.answers[call as usize].push_back(kind);
-        state.wake();
+        state.signal.wake();
     }
 
     /// Leave every later `publish` unsettled until
@@ -391,7 +385,7 @@ impl FeedScript {
     pub fn hold_publishes(&self) {
         let mut state = self.lock();
         state.hold_publishes = true;
-        state.wake();
+        state.signal.wake();
     }
 
     /// Confirm every held publish, queue a delivery of each unit in publish
@@ -403,7 +397,7 @@ impl FeedScript {
             confirmer.confirm();
             state.queue(unit, 1);
         }
-        state.wake();
+        state.signal.wake();
     }
 
     /// Answer the next unscripted depth read of `of` with `answer`, ahead
@@ -450,7 +444,7 @@ impl FeedScript {
             DepthOf::DeadLetters => state.dead_letter_depths.push_back(answer),
             _ => state.feed_depths.push_back(answer),
         }
-        state.wake();
+        state.signal.wake();
     }
 
     /// Make the feed answer [`hands_back`](Feed::hands_back) with `true`, as a
@@ -481,7 +475,7 @@ impl FeedScript {
     pub fn hand_back_on_stop(&self) {
         let mut state = self.lock();
         state.hands_back = true;
-        state.wake();
+        state.signal.wake();
     }
 
     /// How many times the feed was told to [`stop_receiving`](Feed::stop_receiving).
@@ -586,10 +580,8 @@ impl Feed for ScriptedFeed {
 
     fn set_waker(&self, waker: FeedWaker) {
         let mut state = self.lock();
-        if !state.queued.is_empty() {
-            waker.wake();
-        }
-        state.waker = Some(waker);
+        let ready = !state.queued.is_empty();
+        state.signal.set_waker(waker, ready);
     }
 
     fn receive(&self, max: usize) -> Result<Vec<Delivery>, FeedError> {
@@ -604,7 +596,7 @@ impl Feed for ScriptedFeed {
         // A receive that took nothing sends no signal, or a reader at
         // capacity calling `receive(0)` would never park.
         if take > 0 && !state.queued.is_empty() {
-            state.wake();
+            state.signal.wake();
         }
         Ok(out)
     }
@@ -649,7 +641,7 @@ impl Feed for ScriptedFeed {
         } else {
             confirmer.confirm();
             state.queue(unit, 1);
-            state.wake();
+            state.signal.wake();
         }
         confirmation
     }
@@ -907,6 +899,8 @@ mod tests {
             park.park(Duration::ZERO),
             "confirm_held_publishes did not wake"
         );
+        script.hand_back_on_stop();
+        assert!(park.park(Duration::ZERO), "hand_back_on_stop did not wake");
     }
 
     /// Pins that a receive which leaves deliveries queued leaves a wake

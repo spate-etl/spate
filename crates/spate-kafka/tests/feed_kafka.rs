@@ -739,6 +739,7 @@ fn a_bounded_job_ends_once_every_workers_partitions_are_committed() {
     let data = data_dir(&dir);
     let section = bounded_section(&brokers, &group, &dir);
     list_once(publisher_on(&section), &data, &section);
+    // ANCHOR: fixed_ids
     // A listed unit's id hashes the object's temporary path, so four listed
     // units can all land on one partition. These ids are fixed, and their
     // keys reach both partitions under librdkafka's partitioners.
@@ -754,6 +755,7 @@ fn a_bounded_job_ends_once_every_workers_partitions_are_committed() {
         (0..2).all(|p| support::log_end(&brokers, WORK, p) > 0),
         "the units span both partitions"
     );
+    // ANCHOR_END: fixed_ids
 
     let clock_a = TestClock::frozen();
     let clock_b = TestClock::frozen();

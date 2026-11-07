@@ -1,0 +1,5 @@
+**The `spate-test` condition waits and memory source accept a timeout past the clock's range, and `wait_until` takes a hang bound** (`spate-test`)
+
+`wait_until`, `LogCapture::wait_for`, `LogCapture::wait_for_line`, `SourceHandle::wait_committed`, and the `poll_events` and `poll` calls of `MemorySource` and `MemoryLane` treat a timeout too large for `Instant`, such as `Duration::MAX`, as no deadline. In previous versions they panicked with `overflow when adding duration to instant`. `DrainBarrierProbe::wait` still panics on such a timeout.
+
+The new constant `spate_test::HANG`, one minute, is the bound to pass a wait for a condition a working test always reaches. A wait's timeout is meant to catch a hang. A test of how long something takes belongs on a test clock or paused tokio time. When `wait_until` or `LogCapture::wait_for` reaches its bound, the panic message reads `hung after 60s waiting for: …`. In previous versions it read `timed out after 60s waiting for: …`. A test that matches the old text needs updating.

@@ -30,8 +30,11 @@ use testcontainers_modules::kafka::apache::Kafka;
 
 pub(crate) mod feed;
 pub(crate) mod latest;
+pub(crate) mod mock;
 pub(crate) mod wire;
 
+#[allow(unused_imports, reason = "each target uses a different subset")]
+pub(crate) use mock::MockKafka;
 #[allow(unused_imports, reason = "each target uses a different subset")]
 pub(crate) use wire::{
     BatchCrc, Marker, RawBatch, control_batch, corrupt_batch, produce_batch, try_produce_batch,

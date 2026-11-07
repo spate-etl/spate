@@ -75,8 +75,8 @@ cargo xtask --help   # the commands, each with its own --help
 `cargo nextest` and `cargo deny`, and fails naming any it cannot find.
 
 A new condition, match arm or bound comes with the test that kills its mutant.
-[`DEVELOPING.md`](DEVELOPING.md) has the rest of the build, test and benchmark
-mechanics.
+The [developer guide](docs/developer/README.md) has the rest of the build, test
+and benchmark mechanics.
 
 ## Opening a pull request
 
@@ -123,6 +123,8 @@ which, and `cargo xtask changelog new fixed …` scaffolds a fragment.
 
 [`.github/pull_request_template.md`](.github/pull_request_template.md) is the
 body structure. Tick its boxes by exit code, not by memory.
+[Reading a review](docs/developer/06-reading-a-review.md) says what a review
+checks, so you can run the same checks first.
 
 ## The invariants
 

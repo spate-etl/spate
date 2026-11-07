@@ -1,6 +1,6 @@
 //! The sink pool: one worker task per shard on the I/O runtime.
 
-use super::config::SinkPoolConfig;
+use super::config::{LONGEST_DEADLINE, SinkPoolConfig};
 use super::worker::{ShardWorker, WorkerReport};
 use super::{EncodedChunk, ShardWriter, SinkFailures};
 use crate::backpressure::InflightBudget;
@@ -236,16 +236,17 @@ impl<W: ShardWriter> SinkPool<W> {
     /// Drain the pool. Workers force-seal partial batches, then in-flight
     /// writes get until `deadline` before being aborted and abandoned.
     ///
-    /// `deadline` runs on the pool's clock. Always returns. A worker that does not stop by `deadline` is
-    /// force-aborted `BACKSTOP_GRACE` later; its acknowledgments fail with
-    /// it (so at-least-once holds and the data replays), but its counts are
+    /// `deadline` runs on the pool's clock and counts as at most a year.
+    /// Always returns. A worker that does not stop by `deadline` is
+    /// force-aborted `BACKSTOP_GRACE` later; its acknowledgments fail with it
+    /// (so at-least-once holds and the data replays), but its counts are
     /// missing from the returned report.
     ///
     /// Contract: the caller must have dropped every
     /// [`ShardQueues`](super::ShardQueues) clone first. Workers only enter
     /// their drain phase once their queue closes.
     pub async fn drain(self, deadline: Duration) -> DrainReport {
-        let deadline_at = self.clock.now() + deadline;
+        let deadline_at = self.clock.now() + deadline.min(LONGEST_DEADLINE);
         let _ = self.drain_tx.send(Some(deadline_at));
         // Absolute, so joining the shards in sequence still bounds the whole
         // drain. One wedged shard spends the budget once, and the shards

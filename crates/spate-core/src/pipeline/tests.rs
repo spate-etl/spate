@@ -4586,7 +4586,8 @@ fn a_source_that_does_not_read_on_drains_at_once() {
     assert_eq!(join.join().unwrap().unwrap().state, ExitState::Completed);
 }
 
-/// Pins that a source whose `open` failed is not asked to hand back.
+/// Pins that a source whose `open` failed is not asked to hand back or to
+/// flush its commits. Regression for #1674.
 #[test]
 fn a_source_that_failed_to_open_is_not_asked_to_stop_reading() {
     let clock = crate::clock::TestClock::frozen();
@@ -4601,6 +4602,7 @@ fn a_source_that_failed_to_open_is_not_asked_to_stop_reading() {
     let report = h.join.join().unwrap().unwrap();
     assert!(matches!(report.state, ExitState::Failed(_)), "{report:?}");
     assert_eq!(h.shared.lock().unwrap().stop_reading_calls, 0);
+    assert_eq!(h.shared.lock().unwrap().flush_commits, 0);
 }
 
 /// A lane whose batch blocks, assigned and revoked, with the revocation
@@ -5474,6 +5476,7 @@ fn start_holding_acks(
 //
 // `cfg(test)` is redundant for the compiler. cargo-mutants skips an item under
 // exactly `cfg(test)`, and a mutant here only reopens that race.
+// ANCHOR: poll_after_hint
 #[cfg(test)]
 fn hint(h: &Harness, partition: PartitionId) {
     let before = h.shared.lock().unwrap().hinted_at;
@@ -5489,6 +5492,7 @@ fn hint(h: &Harness, partition: PartitionId) {
                 .is_some_and(|at| log.poll_timeouts.len() > at + 1)
     });
 }
+// ANCHOR_END: poll_after_hint
 
 /// The timeout of the controller's latest poll.
 fn last_poll(h: &Harness) -> Duration {

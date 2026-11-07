@@ -536,7 +536,8 @@ pub(crate) fn run_controller<S: Source>(ctx: ControllerContext<S>) {
         None,
         true,
     );
-    let final_flush_failed = if let Err(e) = source.flush_commits() {
+    // A source that did not open read nothing and stored no offset.
+    let final_flush_failed = if opened && let Err(e) = source.flush_commits() {
         tracing::error!(error = %e, "final commit flush failed; offsets will replay");
         true
     } else {

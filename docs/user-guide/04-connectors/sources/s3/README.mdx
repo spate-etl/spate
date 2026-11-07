@@ -58,12 +58,12 @@ source:
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `url` | string | `required` | Bucket and prefix to backfill. Every object under the prefix is read. `s3://`, `s3a://`, `https://` on an S3 endpoint host, and `file://`, which works for local runs, are read. The endpoint hosts are `s3.<region>.amazonaws.com/<bucket>`, `<bucket>.s3.amazonaws.com`, `<bucket>.s3.<region>.amazonaws.com`, their `dualstack` forms, and `<account>.r2.cloudflarestorage.com/<bucket>`. Another `amazonaws.com` host, such as `s3.amazonaws.com` or `s3-<region>.amazonaws.com`, loads and fails when the source starts. Another S3-compatible store takes `s3://` with its endpoint under [`store`](#the-store-passthrough-and-the-denylist). `memory://` fails at load, because it builds a fresh empty store per component and so cannot be shared, and so does any other scheme. Part of the job fingerprint — byte-identical across every worker of a [bounded job](#bounded-jobs-and-the-job-location). |
+| `url` | string | `required` | Bucket and prefix to backfill. Every object under the prefix is read. `s3://`, `s3a://`, `https://` on an S3 endpoint host, and `file://`, which works for local runs, are read. The endpoint hosts are `s3.<region>.amazonaws.com/<bucket>`, `<bucket>.s3.amazonaws.com`, `<bucket>.s3.<region>.amazonaws.com`, their `dualstack` forms, and `<account>.r2.cloudflarestorage.com/<bucket>`. Another `amazonaws.com` host, such as `s3.amazonaws.com` or `s3-<region>.amazonaws.com`, loads and fails when the source starts. Another S3-compatible store takes `s3://` with its endpoint under [`store`](#the-store-passthrough-and-the-denylist). A URL carrying userinfo or a query fails at load, because the store reads neither. Credentials go under `store` or the environment. `memory://` fails at load, because it builds a fresh empty store per component and so cannot be shared, and so does any other scheme. Part of the job fingerprint — byte-identical across every worker of a [bounded job](#bounded-jobs-and-the-job-location). |
 | `compression` | `auto` \| `none` \| `gzip` \| `zstd` | `auto` | Object codec. `auto` decides per object by extension (`.gz`/`.gzip`, `.zst`/`.zstd`, else uncompressed). Multi-member gzip and multi-frame zstd are read fully; truncated or corrupt streams [fail their unit](#object-errors-fail-the-unit). Part of the job fingerprint. |
 | `split_target_bytes` | bytes | `64MiB` | Objects read whole are packed into shared units of at most this many bytes and 16 objects, in listing order, except one whose key is longer than 1,024 bytes or whose ETag is longer than 256. A larger object is [cut into byte ranges](#large-objects-and-byte-ranges) of at most this size when it qualifies, one unit each, and any other is one unit. Floor `1MiB`. Part of the job fingerprint. |
 | `prefetch_bytes` | bytes | `8MiB` | Target window size for ETag-pinned ranged GETs; see [read-ahead memory sizing](#read-parallelism). Must be at least `chunk_bytes`; a smaller value fails at load. |
 | `chunk_bytes` | bytes | `512KiB` | Target size of one buffered chunk. Read-ahead does not depend on it. Zero fails at load. |
-| `store` | string map | `{}` | Raw `object_store` options, applied on top of the environment. Bucket keys fail at load, and so do keys `object_store` does not recognize under an S3 URL — see [the `store` denylist](#the-store-passthrough-and-the-denylist). |
+| `store` | string map | `{}` | Raw `object_store` options, applied on top of the environment. Bucket keys fail at load, and so do an `endpoint` carrying userinfo and keys `object_store` does not recognize under an S3 URL — see [the `store` denylist](#the-store-passthrough-and-the-denylist). |
 
 Mind the units on the fingerprinted keys: `MB` and `MiB` parse to
 different byte counts (`64MB` = 64,000,000; `64MiB` = 67,108,864), and
@@ -139,6 +139,8 @@ records as a whole arrive in no fixed order.
 field: `region`, `endpoint`, static credentials, `allow_http`, timeouts. Its
 values are applied **on top of the environment** when the client is built from
 `url`, so anything set here overrides what the environment resolved.
+An `endpoint` carrying userinfo fails at load, under any spelling of the key,
+because the client never reads it and its errors quote each request URI.
 
 Bucket keys are **rejected at load time with an explanation**. The client is
 built from `url`, so a passthrough bucket could never take effect; rejecting it
@@ -217,7 +219,9 @@ from the environment):
 A listing, an object read, the HEAD after an overwrite, or a read or write at
 the [job location](#bounded-jobs-and-the-job-location) the store answers with
 `401` or `403`, and a client-configuration error, fail the pipeline
-immediately, because no peer would fare better. The error names the status.
+immediately, because no peer would fare better. So does a listing answered
+`404`, which a store sends for a bucket that does not exist. The error names
+the status.
 
 A worker that reads [storage notifications](#storage-notifications) needs
 these permissions besides `s3:GetObject`:
@@ -958,8 +962,9 @@ Object-level read problems are not record errors, and they are not instant
 pipeline failures either. Transient failures are retried inside the source
 (capped backoff, ranged re-reads pinned to the ETag). Anything object-terminal
 **fails the unit**: a key deleted after it was listed or announced, an overwrite
-tripping the `If-Match` pin, corrupt or truncated content, or an exhausted retry
-budget. The unit is failed back to the feed (counted in
+tripping the `If-Match` pin, corrupt or truncated content, a store reply that
+is empty or longer than the range asked for, or an exhausted retry budget. The
+unit is failed back to the feed (counted in
 `spate_s3_source_objects_failed_total{reason}`) and delivered again, until the
 feed dead-letters it at its cap. A unit of several small objects fails back with
 all of them, and the feed dead-letters them together. A bounded job with a
@@ -975,7 +980,8 @@ describe, is read again from its start. One that failed on
 keeps the ETag its listing saw, so once its object has changed it fails as
 `etag_drift` on every delivery.
 A unit that failed on `not_found` or `undecodable` fails the same way while its
-object stays deleted or unchanged. A notification unit that failed on
+object stays deleted or unchanged, or while the store answers its ranges the
+same way. A notification unit that failed on
 `etag_drift`, and a notification the source refuses (see
 [Storage notifications](#storage-notifications)), fail the same way on every
 delivery. Each object failure logs a WARN naming the unit, its `reason` and the
@@ -1039,7 +1045,7 @@ noted per family.
 | `spate_s3_source_bytes_read_total` | counter | | Bytes read from the store, as stored (pre-decompression), including the bytes a byte range reads around its edges and drops. |
 | `spate_s3_source_bytes_decoded_total` | counter | | Bytes after decompression; for a byte range, the bytes of the records it owns. Equals `bytes_read` for uncompressed objects read whole; the ratio is the effective compression. |
 | `spate_s3_source_get_retries_total` | counter | | Object GET and HEAD attempts beyond the first (transient failures, resumed with ranged reads). A rising rate means a flaky store or network; an exhausted attempt budget fails the unit rather than the pipeline. |
-| `spate_s3_source_objects_failed_total` | counter | `reason` | Objects, or byte ranges of one, that failed their unit: `not_found` (a `404` for an object deleted after it was listed or announced, or a listed key that is not a valid object path), `etag_drift` (overwritten under the `If-Match` pin; a notification unit's re-enqueued overwrite is counted in `objects_overwritten_total` instead), `undecodable` (corrupt/truncated content, over the per-object record limit, or unverifiable without an ETag), `retries_exhausted`. Each report fails the unit back to the feed, which dead-letters it at its cap, with every other object the unit names. |
+| `spate_s3_source_objects_failed_total` | counter | `reason` | Objects, or byte ranges of one, that failed their unit: `not_found` (a `404` for an object deleted after it was listed or announced, or a listed key that is not a valid object path), `etag_drift` (overwritten under the `If-Match` pin; a notification unit's re-enqueued overwrite is counted in `objects_overwritten_total` instead), `undecodable` (corrupt/truncated content, over the per-object record limit, unverifiable without an ETag, or a store reply that is empty or longer than its range), `retries_exhausted`. Each report fails the unit back to the feed, which dead-letters it at its cap, with every other object the unit names. |
 | `spate_s3_source_objects_overwritten_total` | counter | | Objects a notification unit's read found overwritten under its ETag pin, once per object and delivery, whether re-enqueued or not. See [Reading a notification's object](#reading-a-notifications-object). |
 | `spate_s3_source_overwrites_dropped_total` | counter | | Of those, the objects whose unit was at the re-enqueue cap and was acknowledged without a re-enqueue. A non-zero value means an overwrite may have been dropped. |
 

@@ -4,6 +4,8 @@ squash merge keeps only the title, so this body is the lasting record of why the
 change is shaped the way it is.
 
 Contributions are accepted under Apache-2.0 §5. There is no CLA to sign.
+
+docs/developer/06-reading-a-review.md says what a review checks.
 -->
 
 ## What this changes, and why

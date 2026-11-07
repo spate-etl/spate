@@ -28,7 +28,7 @@
 //! source offsets past it. Weaker settings would silently turn
 //! at-least-once into at-most-once.
 
-use crate::client::{Base, Keys, Role, canonical, check_message_timeout};
+use crate::client::{Base, Keys, Role, canonical, check_message_timeout, check_topic_name};
 use crate::sink::context::{SinkContext, SinkHooks};
 use crate::sink::encoder::{
     DEFAULT_MAX_MESSAGE_BYTES, KafkaBytesEncoder, KafkaEncoder, KafkaJsonEncoder, MessageEncoder,
@@ -187,8 +187,10 @@ impl Compression {
 pub struct KafkaSinkConfig {
     /// Comma-separated bootstrap servers.
     pub brokers: String,
-    /// The topic to produce to. One topic per sink instance: multi-topic
-    /// fan-out is the chain's `split` terminal with one sink per topic.
+    /// The topic to produce to. [`validate`](Self::validate) refuses a name
+    /// over the client's limit of 512 bytes, and brokers set a lower limit of
+    /// their own. One topic per sink instance: multi-topic fan-out is the
+    /// chain's `split` terminal with one sink per topic.
     pub topic: String,
     /// Framework shards (worker parallelism). All shards share the single
     /// underlying producer, so raising this adds concurrent writers contending
@@ -315,6 +317,9 @@ impl KafkaSinkConfig {
         }
         if self.topic.trim().is_empty() {
             return fail("topic must not be empty".into());
+        }
+        if let Err(why) = check_topic_name(&self.topic) {
+            return fail(format!("topic {why}"));
         }
         if self.shards == 0 {
             return fail("shards must be at least 1".into());
@@ -648,6 +653,21 @@ mod tests {
         let mut short = KafkaSinkConfig::new("localhost:9092", "orders");
         short.delivery_timeout = Duration::from_secs(1);
         assert_eq!(short.rejection_window(), Duration::from_secs(46));
+    }
+
+    /// A name past librdkafka's limit is refused at build, where the probe
+    /// would panic on it for ever, and the limit itself passes. Regression for
+    /// #1225.
+    #[test]
+    fn a_topic_name_past_the_client_limit_is_refused() {
+        let with_topic = |len: usize| {
+            let topic = "u".repeat(len);
+            parse(&format!("  brokers: localhost:9092\n  topic: {topic}\n"))
+        };
+        with_topic(512).expect("the limit passes");
+        let err = with_topic(513).expect_err("one byte past the limit");
+        assert!(err.to_string().contains("sink.kafka: topic"), "{err}");
+        assert!(err.to_string().contains("512 bytes"), "{err}");
     }
 
     #[test]

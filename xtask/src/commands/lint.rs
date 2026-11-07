@@ -18,7 +18,7 @@ pub(crate) enum TidyCheck {
     Markdown,
     /// The checkers themselves still work
     SelfTest,
-    /// A user-visible change carries a changelog fragment
+    /// A user-visible change carries a changelog fragment, and the release section builds
     Changelog,
     /// The pull request title follows the subject rule
     Title,

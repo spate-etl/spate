@@ -3,7 +3,7 @@
 
 use spate_core::checkpoint::Checkpointer;
 use spate_core::deser::Deserializer;
-use spate_core::error::SinkError;
+use spate_core::error::ErrorClass;
 use spate_core::record::{Flow, PartitionId, RawPayload};
 use spate_core::sink::{RowEncoder, SealedBatch, ShardWriter};
 use spate_core::source::{LaneId, PayloadBatch, Source, SourceCtx, SourceEvent, SourceLane};
@@ -66,7 +66,11 @@ fn poll_events_times_out_to_idle() {
 #[test]
 fn poll_events_before_open_is_a_fatal_error() {
     let (mut source, _handle) = memory_source();
-    assert!(source.poll_events(Duration::ZERO).is_err());
+    let Err(err) = source.poll_events(Duration::ZERO) else {
+        panic!("an unopened source yielded an event");
+    };
+    assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
+    assert_eq!(err.reason(), "poll_events called before open()");
 }
 
 #[test]
@@ -287,25 +291,15 @@ async fn endpoint_scripts_take_precedence_over_global_fifo() {
         .write_batch(&ep00, &sealed("a", b""))
         .await
         .unwrap_err();
-    match err {
-        SinkError::Client { class, reason } => {
-            assert_eq!(class, spate_core::error::ErrorClass::Fatal);
-            assert_eq!(reason, "endpoint");
-        }
-        other => panic!("unexpected error {other:?}"),
-    }
+    assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
+    assert_eq!(err.reason(), "endpoint");
 
     let err = writer
         .write_batch(&ep01, &sealed("b", b""))
         .await
         .unwrap_err();
-    match err {
-        SinkError::Client { class, reason } => {
-            assert_eq!(class, spate_core::error::ErrorClass::Retryable);
-            assert_eq!(reason, "global");
-        }
-        other => panic!("unexpected error {other:?}"),
-    }
+    assert_eq!(err.class(), ErrorClass::Retryable, "{err}");
+    assert_eq!(err.reason(), "global");
 
     // Scripts exhausted: back to the default success.
     writer.write_batch(&ep00, &sealed("c", b"")).await.unwrap();
@@ -470,7 +464,9 @@ async fn probes_fail_and_heal() {
     };
     writer.probe(&ep).await.unwrap();
     script.fail_probe(1, 0, "replica down");
-    assert!(writer.probe(&ep).await.is_err());
+    let err = writer.probe(&ep).await.unwrap_err();
+    assert_eq!(err.class(), ErrorClass::Retryable, "{err}");
+    assert_eq!(err.reason(), "replica down");
     script.heal_probe(1, 0);
     writer.probe(&ep).await.unwrap();
 }

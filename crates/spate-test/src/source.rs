@@ -8,7 +8,7 @@
 //! message.
 
 use spate_core::checkpoint::AckIssuer;
-use spate_core::error::{ErrorClass, SourceError};
+use spate_core::error::SourceError;
 use spate_core::hash::FastMap;
 use spate_core::record::{PartitionId, RawPayload};
 use spate_core::source::{
@@ -319,10 +319,10 @@ impl Source for MemorySource {
     }
 
     fn poll_events(&mut self, timeout: Duration) -> Result<SourceEvent<MemoryLane>, SourceError> {
-        let issuer = self.issuer.as_ref().ok_or_else(|| SourceError::Client {
-            class: ErrorClass::Fatal,
-            reason: "poll_events called before open()".to_owned(),
-        })?;
+        let issuer = self
+            .issuer
+            .as_ref()
+            .ok_or_else(|| SourceError::fatal("poll_events called before open()"))?;
 
         let deadline = Instant::now() + timeout;
         let mut st = self.shared.lock();

@@ -4,7 +4,7 @@
 use bytes::BytesMut;
 use spate_core::config::PipelineConfig;
 use spate_core::deser::Owned;
-use spate_core::error::{ErrorClass, SinkError};
+use spate_core::error::SinkError;
 use spate_core::pipeline::{ExitState, Pipeline, RuntimeOptions};
 use spate_core::record::{PartitionId, Record};
 use spate_core::sink::RowEncoder;
@@ -35,10 +35,7 @@ impl RowEncoder<Owned<Vec<u8>>> for BrokenFinishEncoder {
         1
     }
     fn finish_chunk(&mut self, _buf: &mut BytesMut) -> Result<(), SinkError> {
-        Err(SinkError::Client {
-            class: ErrorClass::Fatal,
-            reason: "cannot finalize the block".into(),
-        })
+        Err(SinkError::fatal("cannot finalize the block"))
     }
 }
 

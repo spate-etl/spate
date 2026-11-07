@@ -166,7 +166,13 @@ const GIT: &str = r#"#!/bin/sh
 for a in "$@"; do printf '%s\0' "$a" >>"$SPATE_LOG.git"; done
 printf '\n' >>"$SPATE_LOG.git"
 case "$1" in
-tag) if [ -f "$SPATE_FIX/git.tags" ]; then cat "$SPATE_FIX/git.tags"; fi; exit 0 ;;
+tag)
+  if [ -f "$SPATE_FIX/git.tag.fails" ]; then
+    printf 'fatal: unknown field name\n' >&2
+    exit 128
+  fi
+  if [ -f "$SPATE_FIX/git.tags" ]; then cat "$SPATE_FIX/git.tags"; fi
+  exit 0 ;;
 ls-tree)
   if [ "$3" = HEAD ]; then
     if [ -f "$SPATE_FIX/git.fragments" ]; then cat "$SPATE_FIX/git.fragments"; fi
@@ -702,6 +708,22 @@ fn a_crate_the_tree_lost_is_breaking() {
         })
         .unwrap();
     assert_eq!(ls, ["ls-tree", "--name-only", &format!("{TAG}:crates")]);
+}
+
+/// A failed tag lookup fails the run, since no tag to compare leaves a removed
+/// crate unreported.
+#[test]
+fn a_failed_tag_lookup_fails_the_run() {
+    let shim = Shim::new("no-tag");
+    shim.published("spate-core", &[(TREE, false)]);
+    shim.fixture("git.tag.fails", "");
+    let out = xtask(
+        &shim,
+        &["--against-registry", "--packages", "spate-core"],
+        &[],
+    );
+    assert_ne!(out.status.code(), Some(0), "{}", stdout(&out));
+    assert!(stderr(&out).contains("git tag"), "{}", stderr(&out));
 }
 
 /// A tag that names no tree leaves nothing removed, so a clean run stays clean.

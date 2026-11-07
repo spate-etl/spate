@@ -1043,6 +1043,30 @@ fn a_failed_tag_lookup_is_not_a_missing_tag() {
     assert!(refused(nothing_to_release(outside.dir())).contains("git tag"));
 }
 
+/// `git tag` alone fails under a `tag.sort` it cannot parse, so the lookup is
+/// reached past the `git ls-tree` and `git show` that come before it.
+#[test]
+fn a_failed_tag_lookup_fails_the_breaking_check() {
+    let repo = Repo::new("a_failed_tag_lookup_fails_the_breaking_check");
+    repo.write("Cargo.toml", "[workspace.package]\nversion = \"0.2.0\"\n");
+    repo.write("CHANGELOG.md", "# Changelog\n");
+    repo.commit("workspace: the manifest");
+    repo.git(&["tag", "v0.2.0"]);
+    repo.git(&["config", "tag.sort", "nosuchfield"]);
+    assert!(refused(breaking_announced(repo.path())).contains("git tag"));
+}
+
+/// The assembly stops on a failed lookup, and leaves the changelog alone.
+#[test]
+fn a_failed_tag_lookup_fails_the_assembly() {
+    let release = Release::new("a_failed_tag_lookup_fails_the_assembly");
+    release.fragment("one.fixed.md", "**A fix** (`spate-core`)\n\nProse.\n");
+    release.0.git(&["config", "tag.sort", "nosuchfield"]);
+    let before = release.changelog();
+    assert!(refused(build(release.path(), false, "0.3.0")).contains("git tag"));
+    assert_eq!(release.changelog(), before);
+}
+
 /// A fragment on disk with nothing in it is not prose, and a path that is not
 /// there is not either.
 #[test]

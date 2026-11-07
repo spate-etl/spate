@@ -444,10 +444,7 @@ pub(crate) fn registry(root: &Path, explain: bool, packages: Option<&str>) -> Ou
         ));
     }
 
-    breaking.extend(removed_since(
-        root,
-        last_tag(root).unwrap_or_default().as_str(),
-    ));
+    breaking.extend(removed_since(root, &last_tag(root)?));
 
     if !breaking.is_empty() {
         return verdict(root, &breaking);

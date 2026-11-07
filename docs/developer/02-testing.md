@@ -207,9 +207,11 @@ protocol: assignment, rebalance, offsets, fetch errors. A test builds it with
 refuses rdkafka's `MockCluster::new`. The mock holds a new group's first
 rebalance for 3 s so that members starting together join one generation.
 `MockKafka` removes that hold, and a test whose members start together and must
-join one generation calls `hold_first_rebalance`. The group timers run on real
-time, so a test with more than one consumer settles the group on the signal the
-source publishes for it before it asserts:
+join one generation calls `hold_first_rebalance`. The hold is 3 s of real time,
+and a member that reaches the coordinator after it forms a later generation. A
+test whose result needs every member in one state waits for each member's
+signal. The group timers run on real time, so a test with more than one consumer
+settles the group on the signal the source publishes for it before it asserts:
 
 ```rust file=crates/spate-kafka/tests/mock_cluster.rs region=settle_group title="mock_cluster.rs"
 ```

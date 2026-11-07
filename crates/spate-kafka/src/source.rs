@@ -4489,6 +4489,11 @@ mod tests {
     /// A source polled until a consumer holds an offer, that consumer's index,
     /// and a raw consumer of the same group polled until the group has handed it
     /// every partition, so the group has left the held member.
+    ///
+    /// The raw consumer joins only once every consumer of the source holds an
+    /// offer. librdkafka rejoins no consumer waiting for `assign`, so none of
+    /// them joins a generation with the raw consumer and keeps partitions from
+    /// it.
     fn held_while_the_group_moves_on(
         brokers: &str,
         group: &str,
@@ -4505,7 +4510,7 @@ mod tests {
         let cp = Checkpointer::new();
         source.open(SourceCtx::new(cp.handle())).expect("open");
         let mut held = None;
-        spate_test::wait_until(Duration::from_secs(60), "an assignment held", || {
+        spate_test::wait_until(spate_test::HANG, "an assignment held", || {
             let _ = source.poll_events(Duration::from_millis(50));
             held = source
                 .members
@@ -4513,25 +4518,39 @@ mod tests {
                 .position(|m| matches!(m.phase, Phase::Held(_)));
             held.is_some()
         });
+        // Polling a consumer itself runs the callback, which queues the offer
+        // without the accept that another `poll_events` could make.
+        spate_test::wait_until(spate_test::HANG, "every consumer holds an offer", || {
+            source.members.iter().all(|m| {
+                if matches!(m.phase, Phase::Held(_)) {
+                    return true;
+                }
+                let _ = m.consumer.poll(Duration::from_millis(50));
+                m.consumer
+                    .context()
+                    .intents
+                    .lock()
+                    .expect("intent lock")
+                    .iter()
+                    .any(|i| matches!(i, Intent::Assign(_)))
+            })
+        });
         let raw = raw_group_member(brokers, group);
         raw.subscribe(&["orders"]).expect("subscribe");
-        spate_test::wait_until(
-            Duration::from_secs(60),
-            "the raw consumer holds all",
-            || {
-                let _ = raw.poll(Duration::from_millis(100));
-                raw.assignment().is_ok_and(|a| a.count() == 4)
-            },
-        );
+        spate_test::wait_until(spate_test::HANG, "the raw consumer holds all", || {
+            let _ = raw.poll(Duration::from_millis(100));
+            raw.assignment().is_ok_and(|a| a.count() == 4)
+        });
         (source, held.expect("held"), raw)
     }
 
-    /// Dropping a source whose held consumer the group has removed returns.
+    /// Dropping a source whose held consumer the group has removed returns. The
+    /// other consumer joins after the first has formed the group alone.
     #[test]
     fn dropping_with_a_stale_held_offer_returns() {
         use crate::testutil::mock::MockKafka;
         let cluster = MockKafka::new();
-        cluster.hold_first_rebalance();
+        cluster.hold_back_the_second_join();
         cluster.create_topic("orders", 4, 1).expect("create topic");
         let (source, _, raw) =
             held_while_the_group_moves_on(&cluster.bootstrap_servers(), "drop-stale");
@@ -4544,7 +4563,12 @@ mod tests {
     }
 
     /// A held consumer the group has removed reads a generation older than
-    /// the group's, and its client does not report the assignment lost.
+    /// the group's, or none, and its client does not report the assignment
+    /// lost. The consumers start under the hold on the group's first
+    /// rebalance.
+    ///
+    /// The member reads none when a heartbeat reaches the group after a newer
+    /// election and before the session timeout removes it.
     #[test]
     fn a_member_the_group_left_reads_an_older_generation() {
         use crate::testutil::mock::MockKafka;
@@ -4556,8 +4580,8 @@ mod tests {
 
         let member = &source.members[held];
         let generation = member.group_generation();
-        assert!(generation >= 0, "a member that joined reads {generation}");
-        assert!(generation < crate::client::group_generation(&raw));
+        let group = crate::client::group_generation(&raw);
+        assert!(generation < group, "held member {generation}, group {group}");
         assert!(!member.consumer.assignment_lost());
     }
 

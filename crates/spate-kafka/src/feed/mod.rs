@@ -79,7 +79,6 @@ use spate_core::feed::{
 };
 use spate_core::hash::FastMap;
 use spate_core::task::{ThreadHandle, spawn_thread};
-use startup::TopicAdmin as _;
 use std::collections::VecDeque;
 use std::num::NonZeroU32;
 #[cfg(test)]
@@ -787,7 +786,7 @@ fn log_started(config: &KafkaFeedConfig, checked: &startup::Checked) {
 
 /// Run the startup checks over the topics `config` names, on the runtime
 /// `io`, under `bound` on `clock`, with the rejection watch over the checking
-/// clients, which are dropped when it returns.
+/// clients, which are closed when it returns.
 fn check_topics(
     config: &KafkaFeedConfig,
     io: &tokio::runtime::Handle,
@@ -810,17 +809,14 @@ fn check_topics(
         .map_err(|reason| {
             KafkaFeedError::Refused(format!("creating the metadata client: {reason}"))
         })?;
-    let topics = Topics::new(config);
-    let step = Mutex::new("starting".to_owned());
-    let admin = Arc::new(startup::Brokers::new(admin, reader));
-    let watched = Arc::clone(&admin);
-    io.block_on(startup::bounded(
-        &step,
+    startup::run_checks(
+        startup::Brokers::new(admin, reader),
+        &Topics::new(config),
+        io,
+        scope,
         bound,
         clock,
-        move || watched.rejection(),
-        startup::check(&*admin, &topics, scope, &step),
-    ))
+    )
 }
 
 /// The feed's shared state and its producer, built with the settings the

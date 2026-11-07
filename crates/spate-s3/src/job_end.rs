@@ -60,8 +60,6 @@ pub(crate) struct JobEnd {
     /// The check's closing receive took nothing, so until it ends only the
     /// reader's own receives watch the feed.
     closed: bool,
-    /// The check ended the job stalled, which fails the run with the end seen.
-    stalled: bool,
 }
 
 impl JobEnd {
@@ -83,7 +81,6 @@ impl JobEnd {
             depth_of: None,
             due: None,
             closed: false,
-            stalled: false,
         }
     }
 
@@ -132,7 +129,10 @@ impl JobEnd {
 
     /// Whether the check ended the job stalled.
     pub(crate) fn stalled(&self) -> bool {
-        self.stalled
+        matches!(
+            self.check.as_ref().and_then(EndCheck::outcome),
+            Some(EndOutcome::Stalled(_))
+        )
     }
 
     /// Advance the check on an idle poll, the reader holding no work.
@@ -248,7 +248,6 @@ impl JobEnd {
                     return Ok(true);
                 }
                 EndAction::Ended(EndOutcome::Stalled(depth)) => {
-                    self.stalled = true;
                     // A solo run's dead letters leave with the process, and
                     // its re-run lists the whole prefix again.
                     let next = match self.finish {

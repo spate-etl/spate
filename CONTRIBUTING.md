@@ -75,8 +75,8 @@ cargo xtask --help   # the commands, each with its own --help
 `cargo nextest` and `cargo deny`, and fails naming any it cannot find.
 
 A new condition, match arm or bound comes with the test that kills its mutant.
-[`DEVELOPING.md`](DEVELOPING.md) has the rest of the build, test and benchmark
-mechanics.
+The [developer guide](docs/developer/README.md) has the rest of the build, test
+and benchmark mechanics.
 
 ## Opening a pull request
 

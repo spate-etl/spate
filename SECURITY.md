@@ -126,8 +126,8 @@ workflow that runs it, or in the script it calls:
 
 - `Cargo.lock` and `package-lock.json` are committed, and CI builds `--locked` /
   `npm ci`, so a build cannot resolve a different graph.
-  [`DEVELOPING.md`](DEVELOPING.md#commands) lists the commands that cannot
-  take `--locked`.
+  [Commands and gates](docs/developer/01-commands.md#commands) lists the
+  commands that cannot take `--locked`.
 - Every GitHub Action is pinned to a full commit SHA, and `zizmor` fails CI if
   a pin, a token scope, or a checkout credential setting regresses.
 - `cargo deny check advisories` runs on every pull request **and** nightly. It

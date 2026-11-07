@@ -112,5 +112,5 @@ gate that runs the rest.
   requests through both implementations.
 - [`CONTRIBUTING.md`](https://github.com/spate-etl/spate/blob/main/CONTRIBUTING.md)
   and
-  [`DEVELOPING.md`](https://github.com/spate-etl/spate/blob/main/DEVELOPING.md)
+  [Commands and gates](../developer/01-commands.md)
   name the commands this decision replaces.

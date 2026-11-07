@@ -501,6 +501,19 @@ impl Repo {
         repo
     }
 
+    /// A repository whose manifest version has a section the notes build from.
+    fn released(name: &str) -> Self {
+        let repo = Self::new(name);
+        repo.write("Cargo.toml", "[workspace.package]\nversion = \"0.3.1\"\n");
+        repo.write(
+            "CHANGELOG.md",
+            "# Changelog\n\n## [0.3.1] - 2026-09-30\n\n### Fixed\n\n- A fix ([#1]).\n\n\
+             [#1]: https://x.example/1\n",
+        );
+        repo.commit("workspace: the release");
+        repo
+    }
+
     fn path(&self) -> &std::path::Path {
         self.0.dir()
     }
@@ -669,7 +682,7 @@ fn the_gate_refuses_a_tree_missing_the_fragment_directory() {
 /// event, naming the file and the lines, and passes it once it is unwrapped.
 #[test]
 fn the_gate_refuses_a_wrapped_fragment_by_file_and_line() {
-    let repo = Repo::new("the_gate_refuses_a_wrapped_fragment_by_file_and_line");
+    let repo = Repo::released("the_gate_refuses_a_wrapped_fragment_by_file_and_line");
     repo.write(
         "changelog.d/wrapped.fixed.md",
         "**A title** (`spate-core`)\n\nThe pipeline does a thing. It\nwraps here.\n",
@@ -778,7 +791,7 @@ fn pull_request(base: &str, head: &str, body: &str) -> Fields {
 /// sitting in the worktree satisfies nothing.
 #[test]
 fn the_gate_counts_the_fragments_of_the_head_it_was_given() {
-    let repo = Repo::new("the_gate_counts_the_fragments_of_the_head_it_was_given");
+    let repo = Repo::released("the_gate_counts_the_fragments_of_the_head_it_was_given");
     let base = repo.git(&["rev-parse", "HEAD"]);
     repo.write("crates/spate-core/src/window.rs", "pub struct Window;\n");
     let head = repo.commit("core: a windowed operator");
@@ -793,7 +806,7 @@ fn the_gate_counts_the_fragments_of_the_head_it_was_given() {
 /// needs one unless the pull request or a commit of the branch says otherwise.
 #[test]
 fn the_requirement_follows_what_the_change_ships() {
-    let repo = Repo::new("the_requirement_follows_what_the_change_ships");
+    let repo = Repo::released("the_requirement_follows_what_the_change_ships");
     let base = repo.git(&["rev-parse", "HEAD"]);
     repo.write("crates/spate-core/tests/pipeline.rs", "#[test] fn t() {}\n");
     repo.write("docs/page.md", "prose\n");
@@ -850,7 +863,7 @@ fn an_uncommitted_edit_ships_without_a_head() {
 /// cannot stand in for the release note.
 #[test]
 fn the_gate_names_an_added_fragment_that_is_empty() {
-    let repo = Repo::new("the_gate_names_an_added_fragment_that_is_empty");
+    let repo = Repo::released("the_gate_names_an_added_fragment_that_is_empty");
     let base = repo.git(&["rev-parse", "HEAD"]);
     repo.write("changelog.d/silent.fixed.md", "   \n\n");
     repo.write("crates/spate-core/src/window.rs", "pub struct Window;\n");
@@ -1065,6 +1078,42 @@ fn a_failed_tag_lookup_fails_the_assembly() {
     let before = release.changelog();
     assert!(refused(build(release.path(), false, "0.3.0")).contains("git tag"));
     assert_eq!(release.changelog(), before);
+}
+
+/// A release section the notes refuse fails the gate, so a hand edit stops on
+/// its pull request. Regression for #1151.
+#[test]
+fn a_release_section_the_notes_refuse_fails_the_gate() {
+    let repo = Repo::new("a_release_section_the_notes_refuse_fails_the_gate");
+    repo.write(
+        "Cargo.toml",
+        "[workspace.package]\nversion = \"0.3.0\"\nhomepage = \"https://x.example\"\n",
+    );
+    let section =
+        "## [0.3.0] - 2026-09-30\n\n### Fixed\n\n- A fix ([#1]).\n\n[#1]: https://x.example/1\n";
+    let head = repo.git(&["rev-parse", "HEAD"]);
+    let push = Fields {
+        event: "push".to_owned(),
+        ..Fields::default()
+    };
+    for fields in [push, pull_request(&head, &head, "")] {
+        repo.write("CHANGELOG.md", &format!("# Changelog\n\n{section}"));
+        assert!(gate(repo.path(), &fields, false, "").is_ok());
+
+        repo.write(
+            "CHANGELOG.md",
+            &format!("# Changelog\n\n{section}\nAlso see [#9999].\n"),
+        );
+        assert_eq!(
+            refused(gate(repo.path(), &fields, false, "")),
+            "the '## [0.3.0]' section uses [#9999] with no definition in the section"
+        );
+
+        repo.write("CHANGELOG.md", "# Changelog\n");
+        assert!(
+            refused(gate(repo.path(), &fields, false, "")).starts_with("no '## [0.3.0]' section"),
+        );
+    }
 }
 
 /// A fragment on disk with nothing in it is not prose, and a path that is not

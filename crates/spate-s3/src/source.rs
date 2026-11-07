@@ -133,6 +133,10 @@ impl S3Source {
     }
 
     /// Build from the pipeline's opaque `source: { s3: ... }` section.
+    ///
+    /// # Errors
+    ///
+    /// As [`S3SourceConfig::from_component_config`].
     pub fn from_component_config(
         section: &ComponentConfig,
         io: tokio::runtime::Handle,

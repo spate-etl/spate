@@ -9,7 +9,7 @@ acknowledges them, and only commits a source watermark once the sink confirms
 the data behind it is durable. Configure one with a single-key `sink:` section
 (or a [`sinks:` map](../../07-reference/configuration.mdx#sinks) for multiple
 destinations). All sinks share the framework's
-[`batch` / `inflight` / `retry` pool settings](../../07-reference/configuration.mdx#sink-pool).
+[`batch` / `inflight` / `retry` / `breaker` pool settings](../../07-reference/configuration.mdx#sink-pool).
 
 | Sink | Config tag | Summary |
 |---|---|---|

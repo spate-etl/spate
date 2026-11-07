@@ -118,6 +118,16 @@ the frames) happens when the worker calls it, not when the future is polled:
   wrappers, and `spate::error::TLS_REJECTION_ALERTS` lists the alerts that
   reject a handshake. With a rustls client,
   `spate::tls_rejection!(rustls, &err)` applies the whole TLS part of the rule.
+- **Bound the write.** Give the underlying client a request timeout and let the
+  retry policy handle the failure, and never block the thread inside
+  `write_batch`. At the
+  [drain deadline](../03-guides/graceful-shutdown.mdx#why-the-drain-always-terminates)
+  the framework aborts the write task, which lands only at an await point. A
+  client with no timeout can hold a shutdown for the whole deadline. A writer
+  that blocks its thread between awaits cannot be aborted: its shard abandons
+  the batch for replay, and the call occupies an I/O runtime worker until it
+  returns. Blocked calls on every I/O worker stop the deadline from firing, so
+  the shutdown hangs.
 - One writer instance is shared by every shard worker (`Send + Sync`); the
   per-replica state lives in `Endpoint`.
 

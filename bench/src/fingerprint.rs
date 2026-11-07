@@ -24,8 +24,8 @@
 //! `codegen` is the one that is not obvious. Both legs are built with `cargo
 //! bench`, so the profile *name* agrees by construction; `codegen` is a digest
 //! over the settings behind it: every `[profile...]` table in the root
-//! manifest, every `.cargo/config.toml` from the leg's directory upward, and the
-//! rustflags environment. `$CARGO_HOME`'s own config is deliberately left out:
+//! manifest, every distinct `.cargo/config.toml` from the leg's directory upward,
+//! and the rustflags environment. `$CARGO_HOME`'s own config is deliberately left out:
 //! cargo reads it for every invocation whatever the directory, so it applies to
 //! both legs and cannot separate them. A change that adds `lto = "fat"` is a
 //! plausible thing to want to measure, and it has to be acknowledged rather than

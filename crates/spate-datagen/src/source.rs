@@ -72,6 +72,10 @@ impl DatagenSource {
     }
 
     /// Build from the pipeline's opaque `source: { datagen: ... }` section.
+    ///
+    /// # Errors
+    ///
+    /// As [`DatagenSourceConfig::from_component_config`].
     pub fn from_component_config(section: &ComponentConfig) -> Result<DatagenSource, ConfigError> {
         Ok(DatagenSource::new(
             DatagenSourceConfig::from_component_config(section)?,

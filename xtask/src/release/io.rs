@@ -886,9 +886,7 @@ impl Workspace for LocalWorkspace<'_> {
     }
 
     fn version(&self) -> Result<Version, Error> {
-        let manifest = std::fs::read_to_string(self.root.join("Cargo.toml"))
-            .map_err(|e| Error::msg(format!("Cargo.toml: {e}")))?;
-        super::version::workspace_version(&manifest)
+        super::version::tree_version(self.root)
     }
 
     fn derive(&self) -> Result<Version, Error> {

@@ -93,6 +93,9 @@ pub(crate) enum Bench {
         /// Write the legs to DIR/base and DIR/head
         #[arg(long, value_name = "DIR")]
         out: Option<String>,
+        /// Waive a comparability guard, by name
+        #[arg(long, value_name = "FIELD")]
+        allow: Vec<String>,
     },
 
     /// Compare two feature arms of this tree
@@ -105,6 +108,9 @@ pub(crate) enum Bench {
         reps: Replication,
         #[command(flatten)]
         select: Selection,
+        /// Waive a comparability guard, by name
+        #[arg(long, value_name = "FIELD")]
+        allow: Vec<String>,
     },
 
     /// Re-render two legs that have already been measured
@@ -115,6 +121,9 @@ pub(crate) enum Bench {
         head: String,
         #[arg(long, default_value = "table")]
         format: String,
+        /// Waive a comparability guard, by name
+        #[arg(long, value_name = "FIELD")]
+        allow: Vec<String>,
     },
 }
 
@@ -173,6 +182,7 @@ pub(crate) fn dispatch(root: &Path, explain: bool, cmd: Bench) -> Outcome {
             reps,
             select,
             out,
+            allow,
         } => {
             let mut s = driver(["ab"])
                 .arg(&r#ref)
@@ -181,25 +191,33 @@ pub(crate) fn dispatch(root: &Path, explain: bool, cmd: Bench) -> Outcome {
             if let Some(out) = &out {
                 s = s.arg("--out").arg(out);
             }
-            run::run(root, explain, &s)
+            run::run(root, explain, &s.args(allow_flags(&allow)))
         }
         Bench::Arms {
             base_features,
             head_features,
             reps,
             select,
+            allow,
         } => {
             let s = driver(["arms"])
                 .args(["--base-features", &base_features])
                 .args(["--head-features", &head_features])
                 .args(reps.flags())
-                .args(select.flags());
+                .args(select.flags())
+                .args(allow_flags(&allow));
             run::run(root, explain, &s)
         }
-        Bench::Compare { base, head, format } => {
+        Bench::Compare {
+            base,
+            head,
+            format,
+            allow,
+        } => {
             let s = driver(["compare"])
                 .args([&base, &head])
-                .args(["--format", &format]);
+                .args(["--format", &format])
+                .args(allow_flags(&allow));
             run::run(root, explain, &s)
         }
     }
@@ -222,6 +240,13 @@ fn driver<'a>(sub: impl IntoIterator<Item = &'a str>) -> Step<'a> {
         ],
     )
     .args(sub)
+}
+
+fn allow_flags(allow: &[String]) -> Vec<String> {
+    allow
+        .iter()
+        .flat_map(|field| ["--allow".to_owned(), field.clone()])
+        .collect()
 }
 
 impl Selection {

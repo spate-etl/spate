@@ -20,13 +20,19 @@ use std::path::Path;
 use serde::Deserialize;
 
 use crate::checks::scratch::{Scratch, unique_name};
-use crate::run::{self, Error, Outcome, Step};
+use crate::run::{self, Error, Outcome, Step, Streams};
 
 const MD_TEMPLATE: &str = "about/md.hbs";
 const INVENTORY: &str = "THIRD-PARTY.md";
 
 const SUMMARY_RULE: &str = "|---|---|";
 const CRATE_HEADER: &str = "| Crate | Version | License |";
+
+/// What `cargo about` logs when a file `about.toml` names is missing, empty or
+/// past its checksum. It then drops the crate's clarification, falls back to the
+/// scan and still exits 0, so this line is the only sign. The check depends on
+/// this wording, and the workflows name a version for it.
+const DROPPED: &str = "failed to validate all files specified in clarification for crate ";
 
 pub(crate) fn generate(root: &Path, explain: bool) -> Outcome {
     if explain {
@@ -42,7 +48,28 @@ pub(crate) fn generate(root: &Path, explain: bool) -> Outcome {
 
     let scratch = Scratch::new("attribution")?;
     let file = scratch.join("attribution.md");
-    run::run(root, false, &about_step(&file))?;
+    let about = about_step(&file);
+    let done = run::complete(root, &about, Streams::Relay)?;
+    if done.code != 0 {
+        return Err(run::exited(
+            &about.display(),
+            done.code.to_string(),
+            Some(done.code),
+        ));
+    }
+    let dropped = dropped_clarifications(&done.stderr);
+    if !dropped.is_empty() {
+        return Err(Error::msg(format!(
+            "cargo about dropped the clarification of:\n\n{}\n  \
+             A license file about.toml names is missing or no longer matches its\n  \
+             checksum, so the scan chose the license texts. Re-check the file, then\n  \
+             update its entry.",
+            dropped
+                .iter()
+                .map(|krate| format!("    {krate}\n"))
+                .collect::<String>()
+        )));
+    }
 
     let inventory = rebuild(&read(&file)?, &first_party, &distributed)?;
     install(&root.join(INVENTORY), &inventory.text)?;
@@ -52,6 +79,17 @@ pub(crate) fn generate(root: &Path, explain: bool) -> Outcome {
         inventory.crates, inventory.first_party, inventory.undistributed, inventory.collapsed
     );
     Ok(())
+}
+
+/// The `name version` of each crate whose clarification a generator log says
+/// was dropped.
+fn dropped_clarifications(log: &str) -> Vec<&str> {
+    log.lines()
+        .filter_map(|line| {
+            let (_, rest) = line.split_once(DROPPED)?;
+            Some(rest.split_once(':').map_or(rest, |(krate, _)| krate))
+        })
+        .collect()
 }
 
 /// Reads the whole workspace metadata, so a member anywhere in the tree is
@@ -594,6 +632,22 @@ mod tests {
                 .message
                 .starts_with("the workspace metadata names no publishable packages")
         );
+    }
+
+    /// Each dropped clarification is named with its version, and other log
+    /// lines name nothing.
+    #[test]
+    fn a_dropped_clarification_is_named() {
+        let log = "2026-09-28T19:41:52Z [WARN] failed to validate all files specified in \
+                   clarification for crate miniz_oxide 0.9.1: checksum mismatch, expected '00'\n\
+                   2026-09-28T19:41:52Z [WARN] crate 'x' has no clarification\n\
+                   [WARN] failed to validate all files specified in clarification for crate \
+                   bnum 0.13.0\n";
+        assert_eq!(
+            dropped_clarifications(log),
+            ["miniz_oxide 0.9.1", "bnum 0.13.0"]
+        );
+        assert!(dropped_clarifications("[WARN] nothing else\n").is_empty());
     }
 
     // -- THIRD-PARTY.md ----------------------------------------------------

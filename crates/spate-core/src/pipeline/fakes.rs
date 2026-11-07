@@ -682,11 +682,9 @@ impl RunnableChain for FakeChain {
             }
             _ => {}
         }
-        while let Some(_p) = batch.next_payload() {
-            self.shared.consumed.fetch_add(1, Ordering::Relaxed);
-        }
+        // A test waits on `consumed` and then clears `held`, so the ack is
+        // held before `consumed` moves.
         match &self.mode {
-            ChainMode::FailAckAtBatch(n) if self.batches_seen == *n => batch.ack().fail(),
             ChainMode::HoldAcks { held, release } if !release.load(Ordering::Relaxed) => {
                 held.lock().unwrap().push(batch.ack().clone());
             }
@@ -694,6 +692,12 @@ impl RunnableChain for FakeChain {
                 held.lock().unwrap().push(batch.ack().clone());
             }
             _ => {}
+        }
+        while let Some(_p) = batch.next_payload() {
+            self.shared.consumed.fetch_add(1, Ordering::Relaxed);
+        }
+        if matches!(self.mode, ChainMode::FailAckAtBatch(n) if self.batches_seen == n) {
+            batch.ack().fail();
         }
         PushOutcome::Done
     }

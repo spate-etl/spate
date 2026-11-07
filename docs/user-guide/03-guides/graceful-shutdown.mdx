@@ -146,8 +146,9 @@ drain report rather than an unbounded hang, and it says so on
 bug worth reporting.
 
 A `write_batch` that blocks its thread between await points cannot be
-aborted at all. Give your sink's client a request timeout and let the retry
-policy handle the failure.
+aborted at all, and blocked calls on every I/O worker leave nothing to fire the
+deadline, so neither layer runs and the drain does not return. Give your sink's
+client a request timeout and let the retry policy handle the failure.
 
 The cooperative layer is only sound because **nothing on a worker's intake path
 blocks outside the `select!` that arms the deadline.** Anything a worker waits

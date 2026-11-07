@@ -431,6 +431,10 @@ impl KafkaSource {
 
     /// Create a source from the pipeline's opaque `source: { kafka: ... }`
     /// section.
+    ///
+    /// # Errors
+    ///
+    /// As [`KafkaSourceConfig::from_component_config`].
     pub fn from_component_config(
         section: &spate_core::config::ComponentConfig,
     ) -> Result<Self, spate_core::config::ConfigError> {

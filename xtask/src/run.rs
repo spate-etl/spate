@@ -1,8 +1,9 @@
 //! Child-process execution, and the error every command reports through.
 
 use std::ffi::OsStr;
+use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
-use std::process::Command;
+use std::process::{ChildStderr, Command};
 
 /// A command that did not succeed.
 #[derive(Debug)]
@@ -131,10 +132,7 @@ pub(crate) fn run(root: &Path, explain: bool, step: &Step<'_>) -> Outcome {
     if status.success() {
         return Ok(());
     }
-    Err(Error {
-        message: format!("`{line}` exited {}", describe(&status)),
-        code: status.code(),
-    })
+    Err(exited(&line, describe(&status), status.code()))
 }
 
 /// Resolves a repository-relative script against the root, leaving a bare name
@@ -181,10 +179,11 @@ pub(crate) fn capture(root: &Path, step: &Step<'_>) -> Result<String, Error> {
         .wait_with_output()
         .map_err(|e| Error::msg(format!("{}: {e}", step.program)))?;
     if !out.status.success() {
-        return Err(Error {
-            message: format!("`{}` exited {}", step.display(), describe(&out.status)),
-            code: out.status.code(),
-        });
+        return Err(exited(
+            &step.display(),
+            describe(&out.status),
+            out.status.code(),
+        ));
     }
     String::from_utf8(out.stdout)
         .map_err(|e| Error::msg(format!("{}: stdout is not UTF-8: {e}", step.program)))
@@ -218,6 +217,9 @@ pub(crate) enum Streams {
     Collect,
     /// Both collected.
     Capture,
+    /// stdout inherited, stderr copied to ours line by line and collected, so
+    /// a child killed at a timeout has still shown what it wrote.
+    Relay,
 }
 
 /// A child that ran to completion, whatever status it reported.
@@ -227,7 +229,7 @@ pub(crate) struct Completed {
     pub(crate) code: i32,
     /// Empty unless [`Streams::Collect`] or [`Streams::Capture`] gathered it.
     pub(crate) stdout: String,
-    /// Empty unless [`Streams::Capture`] gathered it.
+    /// Empty unless [`Streams::Capture`] or [`Streams::Relay`] gathered it.
     pub(crate) stderr: String,
 }
 
@@ -259,17 +261,36 @@ pub(crate) fn complete(root: &Path, step: &Step<'_>, streams: Streams) -> Result
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped());
         }
+        Streams::Relay => {
+            command.stderr(std::process::Stdio::piped());
+        }
     }
-    let out = command
+    let mut child = command
         .spawn()
-        .map_err(|e| Error::msg(format!("{}: {e}", step.program)))?
+        .map_err(|e| Error::msg(format!("{}: {e}", step.program)))?;
+    let relayed = child
+        .stderr
+        .take_if(|_| streams == Streams::Relay)
+        .map(relay);
+    let out = child
         .wait_with_output()
         .map_err(|e| Error::msg(format!("{}: {e}", step.program)))?;
     Ok(Completed {
         code: shell_code(&out.status),
         stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        stderr: relayed.unwrap_or_else(|| String::from_utf8_lossy(&out.stderr).into_owned()),
     })
+}
+
+/// Copies a child's stderr to ours as it arrives, and answers what it read.
+fn relay(stream: ChildStderr) -> String {
+    let mut reader = BufReader::new(stream);
+    let (mut seen, mut line) = (Vec::new(), Vec::new());
+    while reader.read_until(b'\n', &mut line).is_ok_and(|n| n > 0) {
+        drop(std::io::stderr().write_all(&line));
+        seen.append(&mut line);
+    }
+    String::from_utf8_lossy(&seen).into_owned()
 }
 
 /// The status `$?` carries for a finished child.
@@ -304,10 +325,15 @@ pub(crate) fn quiet(root: &Path, explain: bool, step: &Step<'_>) -> Outcome {
     if status.success() {
         return Ok(());
     }
-    Err(Error {
-        message: format!("`{line}` exited {}", describe(&status)),
-        code: status.code(),
-    })
+    Err(exited(&line, describe(&status), status.code()))
+}
+
+/// The error for a step that finished with a failing status.
+pub(crate) fn exited(line: &str, status: String, code: Option<i32>) -> Error {
+    Error {
+        message: format!("`{line}` exited {status}"),
+        code,
+    }
 }
 
 fn describe(status: &std::process::ExitStatus) -> String {
@@ -392,7 +418,7 @@ mod tests {
         assert_eq!(done.stdout, "");
     }
 
-    /// `Capture` carries both streams, and only `Capture` carries stderr.
+    /// `Capture` carries both streams, and `Relay` carries stderr alone.
     #[cfg(unix)]
     #[test]
     fn capture_carries_both_streams() {

@@ -304,7 +304,7 @@ impl<W: ShardWriter> SinkPool<W> {
     }
 }
 
-/// A short id unique across process runs (the wall-clock time, pid, and an
+/// A short id separating process runs (the wall-clock time, pid, and an
 /// in-process counter), embedded in every deduplication token.
 ///
 /// Without it, tokens are `{pipeline}-{shard}-{seq}` with `seq` restarting
@@ -312,9 +312,13 @@ impl<W: ShardWriter> SinkPool<W> {
 /// reuses tokens still inside the server's deduplication window, and the
 /// sink silently discards **new** rows while acknowledging them, losing data
 /// wherever server-side dedup is enabled. With the nonce, in-session retries
-/// still share their batch's token (idempotent), while cross-run collisions
-/// are impossible; crash replay lands duplicate rows instead of losing them,
-/// as at-least-once requires.
+/// still share their batch's token (idempotent), and crash replay lands
+/// duplicate rows instead of losing them, as at-least-once requires.
+///
+/// A cross-run collision is improbable. Two runs collide when
+/// `nanos ^ (pid << 48) ^ (n << 40)` gives both the same 64 bits, which needs
+/// their clocks to agree in the low 40 bits, and within the deduplication
+/// window such a collision discards new rows as above.
 fn run_nonce() -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);

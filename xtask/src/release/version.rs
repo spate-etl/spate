@@ -490,6 +490,11 @@ fn read(root: &Path, rel: &str) -> Result<String, Error> {
     std::fs::read_to_string(root.join(rel)).map_err(|e| Error::msg(format!("{rel}: {e}")))
 }
 
+/// The workspace version in the manifest at `root`.
+pub(crate) fn tree_version(root: &Path) -> Result<Version, Error> {
+    workspace_version(&read(root, MANIFEST)?)
+}
+
 /// Whether `check` leaves a tracked file out of its scan. The changelog and the
 /// attribution are generated with the versions they are meant to hold, and an
 /// accepted decision record and a dated blog post keep the version they were
@@ -554,7 +559,7 @@ fn snippet_problems(path: &str, text: &str, xy: &str) -> Vec<String> {
 
 /// Every literal version agrees with the workspace.
 fn check(root: &Path) -> Outcome {
-    let cur = workspace_version(&read(root, MANIFEST)?)?;
+    let cur = tree_version(root)?;
     let xy = cur.minor_of();
     let mut problems = pin_problems(&read(root, MANIFEST)?, cur)?;
 

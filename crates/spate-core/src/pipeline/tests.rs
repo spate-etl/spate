@@ -6230,3 +6230,62 @@ fn a_panicking_probe_does_not_leave_readiness_stale() {
     assert_eq!(calls.load(Ordering::SeqCst), 2);
     assert!(!health.ready(), "readiness kept the last probe's answer");
 }
+
+/// `FakeChain` holds a batch's ack before the batch's first payload can move
+/// `consumed`. Regression for #1754.
+#[test]
+fn the_fake_holds_the_ack_before_consumed_can_move() {
+    struct Watching {
+        held: Arc<Mutex<Vec<crate::checkpoint::AckRef>>>,
+        ack: crate::checkpoint::AckRef,
+        left: usize,
+        held_at_first_payload: Option<usize>,
+    }
+    impl<'a> crate::source::PayloadBatch<'a> for Watching {
+        fn next_payload(&mut self) -> Option<crate::record::RawPayload<'a>> {
+            if self.left == 0 {
+                return None;
+            }
+            self.left -= 1;
+            self.held_at_first_payload
+                .get_or_insert_with(|| self.held.lock().unwrap().len());
+            Some(crate::record::RawPayload {
+                bytes: b"x",
+                key: None,
+                partition: PartitionId(0),
+                offset: 0,
+                timestamp_ms: 0,
+            })
+        }
+        fn ack(&self) -> &crate::checkpoint::AckRef {
+            &self.ack
+        }
+    }
+    let held: Arc<Mutex<Vec<crate::checkpoint::AckRef>>> = Arc::default();
+    for mode in [
+        ChainMode::HoldAcks {
+            held: Arc::clone(&held),
+            release: Arc::new(AtomicBool::new(false)),
+        },
+        ChainMode::HoldAcksUntilFlush {
+            held: Arc::clone(&held),
+        },
+    ] {
+        held.lock().unwrap().clear();
+        let mut chain = FakeChain {
+            shared: Arc::default(),
+            log: Arc::default(),
+            mode,
+            batches_seen: 0,
+        };
+        let (ack, _rx) = crate::checkpoint::AckRef::test_pair();
+        let mut batch = Watching {
+            held: Arc::clone(&held),
+            ack,
+            left: 2,
+            held_at_first_payload: None,
+        };
+        chain.push_batch(&mut batch, 0);
+        assert_eq!(batch.held_at_first_payload, Some(1));
+    }
+}

@@ -60,8 +60,8 @@ accepted = ["NCSA"]
 # Three things to know before editing an entry:
 #
 # - Checksums are of the whole file (`shasum -a 256`). Regenerate them when a
-#   clarified crate is bumped: a stale checksum is only a warning, the
-#   clarification is dropped and the scan silently takes over again.
+#   clarified crate is bumped: `cargo about` drops the clarification of a stale
+#   checksum and only warns, and `cargo xtask attribution` refuses that warning.
 # - `license` here *replaces* the crate's declared expression rather than being
 #   checked against it, and nothing warns if the two drift. Re-check on a
 #   version bump.

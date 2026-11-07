@@ -1,5 +1,6 @@
 use super::*;
 use proptest::prelude::*;
+use spate_core::error::ErrorClass;
 
 #[allow(dead_code, reason = "the codec tests use the events corpus only")]
 #[path = "../../benches/support/rows.rs"]
@@ -269,4 +270,17 @@ fn the_scratch_is_replaced_past_twice_the_next_need() {
             );
         }
     }
+}
+
+/// A chunk past a block's 32-bit sizes is fatal. The call is direct, as a
+/// chunk that reaches it through `encode_frame` is 4 GiB.
+#[test]
+fn a_chunk_too_long_for_a_block_is_fatal() {
+    let err = too_long(5);
+    assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
+    assert_eq!(
+        err.reason(),
+        "a 5-byte chunk is too long for a compressed block, whose sizes are 32-bit",
+        "{err}"
+    );
 }

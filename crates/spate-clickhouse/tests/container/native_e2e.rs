@@ -170,7 +170,7 @@ async fn native_format_round_trips_through_a_real_server() {
 #[ignore = "requires Docker"]
 async fn the_native_encoder_gates_datetime64_scale_against_a_real_table() {
     use spate_clickhouse::DateTime64Micros;
-    use spate_core::error::{ErrorClass, SinkError};
+    use spate_core::error::ErrorClass;
     use std::sync::Arc;
 
     let srv = bare_server("native-secret3").await;
@@ -207,16 +207,12 @@ async fn the_native_encoder_gates_datetime64_scale_against_a_real_table() {
         "dt-1",
     )
     .expect_err("scale mismatch must fail at the first record");
-    match err {
-        SinkError::Client { class, reason } => {
-            assert_eq!(class, ErrorClass::Fatal, "{reason}");
-            assert!(
-                reason.contains("DateTime64Millis") && reason.contains("DateTime64(6"),
-                "{reason}"
-            );
-        }
-        other => panic!("unexpected error shape: {other:?}"),
-    }
+    let reason = err.reason();
+    assert_eq!(err.class(), ErrorClass::Fatal, "{reason}");
+    assert!(
+        reason.contains("DateTime64Millis") && reason.contains("DateTime64(6"),
+        "{reason}"
+    );
 
     // The matching wrapper passes the gate and the server sees the
     // exact micro-scaled instant.

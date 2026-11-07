@@ -23,7 +23,7 @@ mod http_server;
 use bytes::{BufMut, Bytes, BytesMut};
 use http_server::{BenchServer, Recorded};
 use spate_clickhouse::{ClickHouseSink, Compression};
-use spate_core::error::{ErrorClass, SinkError};
+use spate_core::error::ErrorClass;
 use spate_core::sink::{SealedBatch, ShardWriter, SinkBundle};
 
 const TOKEN: &str = "coded-1";
@@ -238,10 +238,8 @@ fn an_uncoded_frame_is_fatal_before_any_request() {
         let err = runtime
             .block_on(sink.writer.write_batch(&sink.endpoints[0][0], &batch))
             .expect_err(what);
-        let SinkError::Client { class, reason } = &err else {
-            panic!("{what}: {err:?}");
-        };
-        assert_eq!(*class, ErrorClass::Fatal, "{what}: {reason}");
+        let reason = err.reason();
+        assert_eq!(err.class(), ErrorClass::Fatal, "{what}: {reason}");
         assert!(
             reason.contains("ShardQueues::with_frame_codec"),
             "{what}: {reason}"
@@ -281,10 +279,8 @@ fn a_wrong_method_or_size_frame_is_fatal_before_any_request() {
         let err = runtime
             .block_on(sink.writer.write_batch(&sink.endpoints[0][0], &batch))
             .expect_err(what);
-        let SinkError::Client { class, reason } = &err else {
-            panic!("{what}: {err:?}");
-        };
-        assert_eq!(*class, ErrorClass::Fatal, "{what}: {reason}");
+        let reason = err.reason();
+        assert_eq!(err.class(), ErrorClass::Fatal, "{what}: {reason}");
     }
     assert_eq!(
         server.requests().len(),
@@ -314,10 +310,8 @@ fn an_uncoded_frame_after_a_coded_one_is_fatal_before_any_request() {
     let err = runtime
         .block_on(sink.writer.write_batch(&sink.endpoints[0][0], &batch))
         .expect_err("the second frame is not a block");
-    let SinkError::Client { class, reason } = &err else {
-        panic!("{err:?}");
-    };
-    assert_eq!(*class, ErrorClass::Fatal, "{reason}");
+    let reason = err.reason();
+    assert_eq!(err.class(), ErrorClass::Fatal, "{reason}");
     assert!(reason.starts_with("frame 1 "), "{reason}");
     assert_eq!(
         server.requests().len(),
@@ -345,10 +339,8 @@ fn a_server_side_decode_failure_fails_fatal_only_from_a_coding_writer() {
         let err = runtime
             .block_on(sink.writer.write_batch(&sink.endpoints[0][0], &batch))
             .expect_err(compression);
-        let SinkError::Client { class, reason } = &err else {
-            panic!("{compression}: {err:?}");
-        };
-        assert_eq!(*class, expected, "{compression}: {reason}");
+        let reason = err.reason();
+        assert_eq!(err.class(), expected, "{compression}: {reason}");
         assert!(reason.contains("Code: 271."), "{compression}: {reason}");
     }
 }

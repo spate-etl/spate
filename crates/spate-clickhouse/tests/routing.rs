@@ -17,7 +17,7 @@ use spate_clickhouse::{ClickHouseRow, DistributedRouter, ShardKey};
 use spate_core::backpressure::InflightBudget;
 use spate_core::checkpoint::AckRef;
 use spate_core::deser::{Deserializer, EmitRecord, Owned};
-use spate_core::error::{DeserError, ErrorClass, SinkError};
+use spate_core::error::{DeserError, SinkError};
 use spate_core::ops::{ChunkConfig, PushOutcome, chain};
 use spate_core::record::{PartitionId, RawPayload, Record};
 use spate_core::sink::{EncodedChunk, RowEncoder, shard_queues};
@@ -69,10 +69,8 @@ struct RowBinaryEncoder;
 
 impl RowEncoder<Owned<SkuRow>> for RowBinaryEncoder {
     fn encode<'buf>(&mut self, rec: &Record<SkuRow>, buf: &mut BytesMut) -> Result<(), SinkError> {
-        spate_clickhouse::serialize_row(&rec.payload, buf).map_err(|e| SinkError::Client {
-            class: ErrorClass::RecordLevel,
-            reason: e.to_string(),
-        })
+        spate_clickhouse::serialize_row(&rec.payload, buf)
+            .map_err(|e| SinkError::record_level(e.to_string()))
     }
 }
 

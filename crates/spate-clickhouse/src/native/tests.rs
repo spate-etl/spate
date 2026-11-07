@@ -458,13 +458,37 @@ mod first_record_check {
     }
 
     fn fatal_reason(err: SinkError) -> String {
-        match err {
-            SinkError::Client { class, reason } => {
-                assert_eq!(class, ErrorClass::Fatal, "{reason}");
-                reason
-            }
-            other => panic!("unexpected error shape: {other:?}"),
-        }
+        assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
+        err.reason().to_owned()
+    }
+
+    /// A row that fails part-way through leaves its columns unequal, so the
+    /// block is refused at `finish_chunk`. A tuple row reaches the column
+    /// writers, as the first-record check cannot probe one.
+    #[test]
+    fn a_failed_row_poisons_the_block() {
+        let mut enc = NativeEncoder::<Owned<(String,)>>::new(schema(&[("id", "UInt32")]));
+        let mut buf = BytesMut::new();
+
+        let err = enc
+            .encode(&record(("not a number".to_owned(),)), &mut buf)
+            .expect_err("a string for a UInt32 column");
+        assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
+        assert!(
+            err.reason().starts_with("native encoding failed: "),
+            "{err}"
+        );
+
+        let err = enc
+            .finish_chunk(&mut buf)
+            .expect_err("the block has unequal columns");
+        assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
+        assert_eq!(
+            err.reason(),
+            "native block abandoned after a failed row",
+            "{err}"
+        );
+        assert!(buf.is_empty());
     }
 
     #[test]
@@ -569,13 +593,9 @@ mod first_record_check {
                 &mut BytesMut::new(),
             )
             .expect_err("millis against a micros column");
-        match err {
-            SinkError::Client { class, reason } => {
-                assert_eq!(class, ErrorClass::Fatal);
-                assert!(reason.contains("DateTime64Millis"), "{reason}");
-            }
-            other => panic!("unexpected error shape: {other:?}"),
-        }
+        let reason = err.reason();
+        assert_eq!(err.class(), ErrorClass::Fatal);
+        assert!(reason.contains("DateTime64Millis"), "{reason}");
 
         let mut ok = NativeEncoder::<Owned<R>>::new(schema(&[("ts", "DateTime64(3)")]));
         ok.encode(
@@ -601,13 +621,9 @@ mod first_record_check {
         let err = enc
             .encode(&record(Swapped { b: 1, a: 2 }), &mut BytesMut::new())
             .expect_err("field-name swap must be rejected");
-        match err {
-            SinkError::Client { class, reason } => {
-                assert_eq!(class, ErrorClass::Fatal);
-                assert!(reason.contains("`b`") && reason.contains("`a`"), "{reason}");
-            }
-            other => panic!("unexpected error: {other:?}"),
-        }
+        let reason = err.reason();
+        assert_eq!(err.class(), ErrorClass::Fatal);
+        assert!(reason.contains("`b`") && reason.contains("`a`"), "{reason}");
     }
 
     #[test]

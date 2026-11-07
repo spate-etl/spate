@@ -7,7 +7,7 @@
 // that class of drift into a fatal error.
 
 use super::*;
-use spate_core::error::{ErrorClass, SinkError};
+use spate_core::error::ErrorClass;
 
 const DDL: &str = "CREATE TABLE drifting (id UInt8, d Decimal(18, 4), ts DateTime64(3, 'UTC')) \
      ENGINE = MergeTree ORDER BY id";
@@ -68,16 +68,12 @@ async fn a_same_width_alter_is_rejected_rather_than_silently_miswritten() {
         .write_batch(&sink.endpoints[0][0], &batch)
         .await
         .expect_err("the header no longer describes the table");
-    match err {
-        SinkError::Client { class, reason } => {
-            assert_eq!(class, ErrorClass::Fatal, "{reason}");
-            assert!(
-                reason.contains("Code: 117"),
-                "the server rejects the header as INCORRECT_DATA: {reason}"
-            );
-        }
-        other => panic!("unexpected error shape: {other:?}"),
-    }
+    let reason = err.reason();
+    assert_eq!(err.class(), ErrorClass::Fatal, "{reason}");
+    assert!(
+        reason.contains("Code: 117"),
+        "the server rejects the header as INCORRECT_DATA: {reason}"
+    );
 
     // The rejected batch stored nothing, and the accepted one still reads as
     // the value it was written as: the `ALTER` converted it, where a

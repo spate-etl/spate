@@ -4581,7 +4581,10 @@ mod tests {
         let member = &source.members[held];
         let generation = member.group_generation();
         let group = crate::client::group_generation(&raw);
-        assert!(generation < group, "held member {generation}, group {group}");
+        assert!(
+            generation < group,
+            "held member {generation}, group {group}"
+        );
         assert!(!member.consumer.assignment_lost());
     }
 

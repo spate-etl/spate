@@ -330,7 +330,7 @@ pub(crate) fn dispatch(root: &Path, explain: bool, cmd: Command) -> Outcome {
             explain,
             &since,
             in_place,
-            budget.map(|m| std::time::Duration::from_secs(m * 60)),
+            budget.map(std::time::Duration::from_mins),
         ),
         Command::SiteCheck => site_check::check(root, explain),
         Command::Docs { serve } => docs::dispatch(root, explain, serve),

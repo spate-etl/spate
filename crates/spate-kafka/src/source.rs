@@ -3778,6 +3778,7 @@ mod tests {
     fn dropping_with_a_held_assignment_returns() {
         use crate::testutil::mock::MockKafka;
         let cluster = MockKafka::new();
+        cluster.hold_first_rebalance();
         cluster.create_topic("orders", 4, 1).expect("create topic");
         let mut cfg = test_config();
         cfg.brokers = cluster.bootstrap_servers();
@@ -4134,6 +4135,7 @@ mod tests {
                 ("drop-queued-assign-static", 1, Some("worker-a")),
             ] {
                 let cluster = mock();
+                cluster.hold_first_rebalance();
                 let mut cfg = config(&cluster, group, consumers);
                 if let Some(id) = static_id {
                     cfg.rdkafka.insert("group.instance.id".into(), id.into());

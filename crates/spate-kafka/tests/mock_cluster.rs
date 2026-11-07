@@ -1613,6 +1613,7 @@ fn committed(brokers: &str, group: &str, partitions: i32) -> Vec<rdkafka::Offset
 #[test]
 fn consumers_share_one_epoch() {
     let cluster = MockKafka::new();
+    cluster.hold_first_rebalance();
     cluster.create_topic(TOPIC, 4, 1).expect("create topic");
     let brokers = cluster.bootstrap_servers();
     produce(&brokers, TOPIC, 5, 4, "s");
@@ -1651,6 +1652,7 @@ fn two_consumers_poll_ack_and_commit_every_partition() {
 #[test]
 fn pause_reaches_the_owning_consumer() {
     let cluster = MockKafka::new();
+    cluster.hold_first_rebalance();
     cluster.create_topic(TOPIC, 2, 1).expect("create topic");
     let brokers = cluster.bootstrap_servers();
 
@@ -1764,6 +1766,7 @@ fn more_consumers_than_partitions_keeps_running() {
 fn a_lost_assignment_fails_the_flush_and_the_source_recovers() {
     for consumers in [1, 2] {
         let cluster = MockKafka::new();
+        cluster.hold_first_rebalance();
         cluster.create_topic(TOPIC, 4, 1).expect("create topic");
         let brokers = cluster.bootstrap_servers();
         produce(&brokers, TOPIC, 5, 4, "l");
@@ -2144,6 +2147,7 @@ fn two_consumers_publish_their_own_statistics() {
 #[test]
 fn consumer_series_carry_no_passthrough_value() {
     let cluster = MockKafka::new();
+    cluster.hold_first_rebalance();
     cluster.create_topic(TOPIC, 2, 1).expect("create topic");
     let brokers = cluster.bootstrap_servers();
 
@@ -2207,6 +2211,7 @@ fn await_revocation(source: &mut KafkaSource, what: &str) {
 )]
 fn dropping_mid_revoke_returns() {
     let cluster = MockKafka::new();
+    cluster.hold_first_rebalance();
     cluster.create_topic(TOPIC, 4, 1).expect("create topic");
     let brokers = cluster.bootstrap_servers();
 
@@ -2246,6 +2251,7 @@ fn dropping_mid_revoke_returns() {
 fn dropping_mid_lost_revoke_returns() {
     use rdkafka::types::{RDKafkaApiKey, RDKafkaRespErr};
     let cluster = MockKafka::new();
+    cluster.hold_first_rebalance();
     cluster.create_topic(TOPIC, 2, 1).expect("create topic");
     let mut cfg = consumers_config(&cluster.bootstrap_servers(), "drop-lost-revoke", 2);
     cfg.rdkafka.insert("debug".into(), "cgrp".into());
@@ -2278,6 +2284,7 @@ fn dropping_mid_lost_revoke_returns() {
 #[test]
 fn dropping_the_source_before_its_lanes_completes() {
     let cluster = MockKafka::new();
+    cluster.hold_first_rebalance();
     cluster.create_topic(TOPIC, 2, 1).expect("create topic");
     let brokers = cluster.bootstrap_servers();
 
@@ -2295,6 +2302,7 @@ fn dropping_the_source_before_its_lanes_completes() {
 #[test]
 fn dropping_an_unpolled_source_with_a_backlog_returns() {
     let cluster = MockKafka::new();
+    cluster.hold_first_rebalance();
     cluster.create_topic(TOPIC, 2, 1).expect("create topic");
     let brokers = cluster.bootstrap_servers();
     produce(&brokers, TOPIC, 100, 2, "b");
@@ -2338,6 +2346,7 @@ fn one_assignment_spends_one_lookup_bound() {
     /// `COMMITTED_LOOKUP_TIMEOUT`, plus slack for the assign itself.
     const BOUND: Duration = Duration::from_secs(13);
     let cluster = MockKafka::new();
+    cluster.hold_first_rebalance();
     cluster.create_topic(TOPIC, 3, 1).expect("create topic");
     // A coordinator still loading its offsets: librdkafka retries every
     // OffsetFetch until the caller's timeout.
@@ -3583,6 +3592,7 @@ mod latest_start {
     fn a_removed_member_under_latest_loses_no_record() {
         for consumers in [1, 2] {
             let (cluster, brokers) = cluster_with_records(2);
+            cluster.hold_first_rebalance();
             let group: &'static str = if consumers == 1 {
                 "removed-one"
             } else {

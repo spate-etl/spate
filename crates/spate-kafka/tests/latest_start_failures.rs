@@ -377,6 +377,7 @@ mod late_offers {
             .with_writer(std::io::stderr)
             .try_init();
         let cluster = MockKafka::new();
+        cluster.hold_first_rebalance();
         cluster.create_topic(TOPIC, 4, 1).expect("create topic");
         // SAFETY: the pointer is valid while `cluster` lives, and the arguments
         // match the (error, rtt in ms) pairs the variadic reads.
@@ -828,6 +829,7 @@ mod slow_listing {
     #[test]
     fn a_slow_listing_spends_one_lookup_bound() {
         let cluster = MockKafka::new();
+        cluster.hold_first_rebalance();
         cluster.create_topic("orders", 3, 1).expect("create topic");
         // SAFETY: the pointer is valid while `cluster` lives. The call reads one
         // code and one round-trip time per counted entry.
@@ -1402,9 +1404,7 @@ mod refused_starts {
     /// 45 s when every start commit and heartbeat is refused.
     fn ends(consumers: usize) -> bool {
         let cluster = MockKafka::new();
-        if consumers > 1 {
-            cluster.hold_first_rebalance();
-        }
+        cluster.hold_first_rebalance();
         cluster.create_topic(TOPIC, 1, 1).expect("create topic");
         let brokers = cluster.bootstrap_servers();
         cluster.request_errors(RDKafkaApiKey::OffsetCommit, &[REFUSED; 1000]);

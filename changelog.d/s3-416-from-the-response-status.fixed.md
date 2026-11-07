@@ -1,0 +1,3 @@
+**A refused S3 read classifies by the store's status whatever the key holds** (`spate-s3`)
+
+A notification unit's read is treated as an overwrite on a `416` only when the store answered with that status. In previous versions a `403` or `404` read of a key holding the text `Server returned non-2xx status code: 416 `, or a `503` whose response body held it, was taken for a `416`. A `403` then went to the HEAD that checks for an overwrite: when the HEAD answered with the pinned ETag the unit was failed back to the feed instead of failing the pipeline, and when it answered another ETag the key was re-enqueued. A `404` could be reported as an overwrite.

@@ -90,7 +90,7 @@ fn list_rejected(e: &object_store::Error) -> bool {
             .is_some_and(|status| {
                 status
                     .to_string()
-                    .strip_prefix("Server returned non-2xx status code: ")
+                    .strip_prefix(STATUS_MARKER)
                     .is_some_and(|code| {
                         ["401 ", "403 ", "404 "]
                             .iter()
@@ -137,14 +137,11 @@ const STATUS_MARKER: &str = "Server returned non-2xx status code: ";
 /// whole at the same bound.
 pub(crate) fn bounded_reason(e: &object_store::Error) -> String {
     let mut text = e.to_string();
-    let body = text
-        .find(STATUS_MARKER)
-        .map(|at| at + STATUS_MARKER.len())
-        .map_or(0, |status| {
-            text[status..]
-                .find(": ")
-                .map_or(text.len(), |end| status + end + 2)
-        });
+    let body = status_at(&text).map_or(0, |status| {
+        text[status..]
+            .find(": ")
+            .map_or(text.len(), |end| status + end + 2)
+    });
     if let Some((cut, _)) = text[body..].char_indices().nth(ERROR_TEXT_MAX_CHARS) {
         text.truncate(body + cut);
         text.push('…');
@@ -171,20 +168,34 @@ pub(crate) fn is_overwrite(e: &object_store::Error, origin: &Origin) -> bool {
 /// Whether `e` is a request the store answered with 416.
 ///
 /// object_store reports it as `Generic` and keeps the error type that holds
-/// the status private, so this matches a link in the chain by its message.
-/// The tests against a local server fail if that text changes.
+/// the status private, so this reads the status after the first
+/// [`STATUS_MARKER`] in the chain. The tests against a local server fail if
+/// that text changes.
 fn range_not_satisfiable(e: &object_store::Error) -> bool {
-    let mut link: Option<&(dyn std::error::Error + 'static)> = Some(e);
-    while let Some(error) = link {
-        if error
-            .to_string()
-            .contains("Server returned non-2xx status code: 416 ")
-        {
-            return true;
-        }
-        link = error.source();
-    }
-    false
+    let chain = || {
+        std::iter::successors(Some(e as &(dyn std::error::Error + 'static)), |l| {
+            l.source()
+        })
+    };
+    // A 416 is only ever `Generic`. Any other variant in the chain shows the
+    // key, which can hold the marker's text ahead of the real status.
+    let typed = chain().any(|link| {
+        link.downcast_ref::<object_store::Error>()
+            .is_some_and(|e| !matches!(e, object_store::Error::Generic { .. }))
+    });
+    !typed
+        && chain().find_map(|link| {
+            let text = link.to_string();
+            status_at(&text).map(|at| text[at..].starts_with("416 "))
+        }) == Some(true)
+}
+
+/// The byte offset of the status after the first [`STATUS_MARKER`] in
+/// `text`. Only in a chain with no typed variant does the key sit ahead of it
+/// percent-encoded, with the store's response body after it; a typed variant
+/// shows the raw key, so the first marker may be the key's own text.
+fn status_at(text: &str) -> Option<usize> {
+    text.find(STATUS_MARKER).map(|at| at + STATUS_MARKER.len())
 }
 
 /// Classify an object-level (non-pipeline-fatal, non-retryable) failure
@@ -660,6 +671,50 @@ mod tests {
             .get_opts(&"k".into(), object_store::GetOptions::default())
             .await
             .unwrap_err();
+        assert!(!is_overwrite(&e, &notification(None)), "{e}");
+    }
+
+    /// Pins that only the status a store answered makes a read an overwrite:
+    /// a 403 or 404 whose key holds the text of a 416, bare or wrapped in
+    /// `Generic` as object_store reports a refused re-read of a dropped body,
+    /// and a 503 whose key and body hold it, are no overwrite. Regression for
+    /// #1741.
+    #[tokio::test]
+    async fn the_text_of_a_416_in_a_key_or_body_is_no_overwrite() {
+        use object_store::ObjectStore as _;
+        let text = format!("{STATUS_MARKER}416 x");
+        let refused = || {
+            [
+                object_store::Error::PermissionDenied {
+                    path: format!("data/{text}"),
+                    source: "denied".into(),
+                },
+                object_store::Error::NotFound {
+                    path: format!("data/{text}"),
+                    source: "missing".into(),
+                },
+            ]
+        };
+        let rereads = refused().map(|e| object_store::Error::Generic {
+            store: "S3",
+            source: Box::new(e),
+        });
+        for e in refused().into_iter().chain(rereads) {
+            assert!(e.to_string().contains(&text), "{e}");
+            assert!(!is_overwrite(&e, &notification(None)), "{e}");
+        }
+        let url = crate::test_servers::sequence_server(vec![(
+            "503 Service Unavailable",
+            format!("<Error><Code>SlowDown</Code><Message>{text}</Message></Error>"),
+        )]);
+        let e = crate::test_servers::store_at(&url)
+            .get_opts(
+                &format!("data/{text}").as_str().into(),
+                object_store::GetOptions::default(),
+            )
+            .await
+            .unwrap_err();
+        assert!(e.to_string().contains(&text), "{e}");
         assert!(!is_overwrite(&e, &notification(None)), "{e}");
     }
 }

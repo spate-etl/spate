@@ -67,3 +67,27 @@ fn bench_ab_without_out_passes_none() {
     );
     assert_eq!(String::from_utf8(out.stderr).unwrap(), "");
 }
+
+/// `arms` and `compare` forward `--allow` too, as the driver takes it on both
+/// and its refusals name it.
+#[test]
+fn bench_arms_and_compare_forward_allow() {
+    let driver = DRIVER.strip_suffix(" ab").unwrap();
+    for (args, plan) in [
+        (
+            &["bench", "arms", "--allow", "build", "--allow", "codegen"][..],
+            format!(
+                "{driver} arms --base-features '' --head-features '' --replicates 20 \
+                 --format table --allow build --allow codegen\n"
+            ),
+        ),
+        (
+            &["bench", "compare", "a", "b", "--allow", "codegen"][..],
+            format!("{driver} compare a b --format table --allow codegen\n"),
+        ),
+    ] {
+        let out = xtask(args);
+        assert_eq!(out.status.code(), Some(0), "{args:?}");
+        assert_eq!(String::from_utf8(out.stdout).unwrap(), plan);
+    }
+}

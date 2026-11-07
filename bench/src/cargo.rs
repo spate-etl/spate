@@ -365,7 +365,7 @@ fn executables_in(stdout: &str, wanted: &BTreeSet<&str>) -> BTreeMap<String, Pat
 ///   them. They are here so a leg written under one setting and compared later
 ///   against a leg written under another is refused.
 ///
-/// Absent inputs contribute their absence, so a leg that gains a
+/// Absent inputs contribute their absence, so a leg that gains a distinct
 /// `.cargo/config.toml` differs from one without.
 #[must_use]
 pub fn codegen_digest(dir: &Path) -> String {
@@ -382,14 +382,14 @@ pub fn codegen_digest(dir: &Path) -> String {
         "profiles",
         &profile_tables(&std::fs::read_to_string(dir.join("Cargo.toml")).unwrap_or_default()),
     );
-    // Every ancestor's config, nearest first, contents only. Cargo reads them
-    // from the invocation's directory upward, and the two legs have different
+    // Every distinct ancestor config, nearest first, contents only. Cargo reads
+    // them from the invocation's directory upward, and the two legs have different
     // ancestors by construction (the head is the repository, the base a
     // worktree under the cache root). Hashing the *contents* rather than the
     // paths is what makes that difference visible: a `.cargo/config.toml` above
-    // the repository applies to the head build and not the base one, so the two
-    // digests differ and the guard fires. Hashing the paths as well would make
-    // them differ always.
+    // the repository that differs from the leg's own applies to the head build
+    // and not the base one, so the two digests differ and the guard fires.
+    // Hashing the paths as well would make them differ always.
     for text in ancestor_cargo_configs(dir) {
         absorb("cargo-config", &text);
     }
@@ -403,8 +403,9 @@ pub fn codegen_digest(dir: &Path) -> String {
 /// The distinct contents of every `.cargo/config.toml` (or `.cargo/config`) from
 /// `dir` upward, nearest first.
 ///
-/// A file identical to a nearer one sets nothing new, and a worktree nested in
-/// the repository has the same config above it.
+/// A file identical to a nearer one sets no new key and only repeats its array
+/// entries, and a worktree nested in the repository has the same config above
+/// it.
 fn ancestor_cargo_configs(dir: &Path) -> Vec<String> {
     let home = cargo_home();
     let mut out = Vec::new();

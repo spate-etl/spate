@@ -280,15 +280,6 @@ fn a_paragraph_ends_where_gfm_ends_it() {
         "A para\n===\nNext.\n",
         "A para\n***\n",
         "A para\n_ _ _\n",
-        "A para\n<details>\n",
-        "A para\n<hr/>\n",
-        "A para\n<div\n",
-        "A para\n</DIV>\n",
-        "A para\n<pre class=\"x\">\n",
-        "A para\n<!-- c -->\n",
-        "A para\n<?php x ?>\n",
-        "A para\n<!DOCTYPE html>\n",
-        "A para\n<![CDATA[x]]>\n",
         "---\nA para\n",
         "<span>\nwrapped\nmore\n",
         "<div>\nraw\nhtml\nlines\n",
@@ -305,8 +296,9 @@ fn a_paragraph_ends_where_gfm_ends_it() {
     assert_eq!(wrapped_paragraphs("a\nb\n---\n"), vec![(1, 2)]);
 }
 
-/// A list, heading or blockquote that opens on the line after a paragraph is
-/// refused with the paragraph, named from its first line to the opening line.
+/// A list, heading, blockquote, fenced code block or HTML block that opens on
+/// the line after a paragraph is refused with the paragraph, named from its
+/// first line to the opening line. Regression for #1150.
 #[test]
 fn a_block_opened_on_the_line_after_a_paragraph_is_refused() {
     for (text, lines) in [
@@ -334,13 +326,31 @@ fn a_block_opened_on_the_line_after_a_paragraph_is_refused() {
         ("A para\n>q\n", (1, 2)),
         ("A para\n1)\tx\n", (1, 2)),
         ("A para\n   - x\n", (1, 2)),
+        ("The source reads every key and\n```skips none.\n", (1, 2)),
+        (
+            "The source reads every key and\n~~~\nskips none.\n~~~\n",
+            (1, 2),
+        ),
+        (
+            "The source reads every key and\n<div>skips none.</div>\n",
+            (1, 2),
+        ),
+        ("A para\n<details>\n", (1, 2)),
+        ("A para\n<hr/>\n", (1, 2)),
+        ("A para\n<div\n", (1, 2)),
+        ("A para\n</DIV>\n", (1, 2)),
+        ("A para\n<pre class=\"x\">\n", (1, 2)),
+        ("A para\n<!-- c -->\n", (1, 2)),
+        ("A para\n<?php x ?>\n", (1, 2)),
+        ("A para\n<!DOCTYPE html>\n", (1, 2)),
+        ("A para\n<![CDATA[x]]>\n", (1, 2)),
     ] {
         assert_eq!(wrapped_paragraphs(text), vec![lines], "{text}");
     }
 }
 
-/// A list, heading or blockquote after a blank line, and the items of a tight
-/// list, open where their author meant them to.
+/// A list, heading, blockquote, code or HTML block after a blank line, and the
+/// items of a tight list, open where their author meant them to.
 #[test]
 fn a_block_opened_after_a_blank_line_passes() {
     for text in [
@@ -348,6 +358,8 @@ fn a_block_opened_after_a_blank_line_passes() {
         "The sink waits up to 5 ms.\n\n1. first\n2. second\n",
         "The sink waits up to 5 ms.\n\n# A heading\n",
         "The sink waits up to 5 ms.\n\n> quoted.\n",
+        "The sink waits up to 5 ms.\n\n```\nlet a = 1;\n```\n",
+        "The sink waits up to 5 ms.\n\n<div>quoted.</div>\n",
         "- one\n- two\n- three\n",
         "**A title** (`spate-core`)\n\nThe body.\n",
     ] {
@@ -2910,12 +2922,23 @@ fn a_shorter_backtick_run_inside_a_code_span_does_not_close_it() {
     );
 }
 
-/// A heading or quote opened on the line after a paragraph is named.
+/// A block opened on the line after a paragraph is named.
 #[test]
-fn a_heading_or_quote_opened_after_a_paragraph_is_named() {
+fn a_block_opened_after_a_paragraph_is_named() {
     assert_eq!(
         wrapped_blocks("A para\n# h\n"),
-        vec![(1, 2, Some("heading"))]
+        vec![(1, 2, Some("a heading"))]
     );
-    assert_eq!(wrapped_blocks("A para\n> q\n"), vec![(1, 2, Some("quote"))]);
+    assert_eq!(
+        wrapped_blocks("A para\n> q\n"),
+        vec![(1, 2, Some("a quote"))]
+    );
+    assert_eq!(
+        wrapped_blocks("A para\n```\nx\n```\n"),
+        vec![(1, 2, Some("a code block"))]
+    );
+    assert_eq!(
+        wrapped_blocks("A para\n<div>x</div>\n"),
+        vec![(1, 2, Some("an HTML block"))]
+    );
 }

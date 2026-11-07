@@ -177,8 +177,9 @@ fn gate(root: &Path, fields: &Fields, in_actions: bool, github_event: &str) -> O
         };
         return Err(Error::msg(format!(
             "{header}:\n\n{}\n  \
-             A line inside a wrapped paragraph that begins with a list, heading or\n  \
-             quote marker opens that block in CHANGELOG.md and splits the sentence.\n  \
+             A line inside a wrapped paragraph that begins with a list, heading, quote,\n  \
+             code fence or HTML block marker opens that block in CHANGELOG.md and splits\n  \
+             the sentence.\n  \
              {fixes}\n  \
              {FRAGMENTS}/README.md has the conventions.",
             wrapped
@@ -685,7 +686,7 @@ fn wrapped_fragments(root: &Path) -> Vec<(String, bool)> {
             out.push(match opened {
                 Some(block) => (
                     format!(
-                        "{file}:{first}: a {block} opens on line {last}, the line after this paragraph."
+                        "{file}:{first}: {block} opens on line {last}, the line after this paragraph."
                     ),
                     true,
                 ),
@@ -703,15 +704,15 @@ fn wrapped_fragments(root: &Path) -> Vec<(String, bool)> {
 /// first and last line it covers and the name of the block opened on the last
 /// line, if one did.
 ///
-/// A line inside a wrapped paragraph that begins with a list, heading or quote
-/// marker opens that block in `CHANGELOG.md` and splits the sentence. The
-/// fragment is parsed as GitHub Flavored Markdown. A soft break (a newline
-/// inside a paragraph, list item, blockquote or heading) and a hard break (two
-/// trailing spaces or a trailing `\`) both count. So does a list, heading or
-/// blockquote that opens on the line after a paragraph's last line, which the
-/// parser has already split from the paragraph; it is named from the
-/// paragraph's first line to the line it opens on. Code, tables and HTML blocks
-/// hold no breaks.
+/// A line inside a wrapped paragraph that begins with a list, heading, quote,
+/// code fence or HTML block marker opens that block in `CHANGELOG.md` and
+/// splits the sentence. The fragment is parsed as GitHub Flavored Markdown. A
+/// soft break (a newline inside a paragraph, list item, blockquote or heading)
+/// and a hard break (two trailing spaces or a trailing `\`) both count. So does
+/// a list, heading, blockquote, code block or HTML block that opens on the line
+/// after a paragraph's last line, which the parser has already split from the
+/// paragraph; it is named from the paragraph's first line to the line it opens
+/// on. Code, tables and HTML blocks hold no breaks.
 fn wrapped_blocks(text: &str) -> Vec<(usize, usize, Option<&'static str>)> {
     use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 
@@ -784,9 +785,11 @@ fn wrapped_blocks(text: &str) -> Vec<(usize, usize, Option<&'static str>)> {
         if let Some(((first, last), broken)) = ended.take() {
             let opened = line(range.start);
             let block = match event {
-                Event::Start(Tag::List(_)) => Some("list"),
-                Event::Start(Tag::Heading { .. }) => Some("heading"),
-                Event::Start(Tag::BlockQuote(_)) => Some("quote"),
+                Event::Start(Tag::List(_)) => Some("a list"),
+                Event::Start(Tag::Heading { .. }) => Some("a heading"),
+                Event::Start(Tag::BlockQuote(_)) => Some("a quote"),
+                Event::Start(Tag::CodeBlock(_)) => Some("a code block"),
+                Event::Start(Tag::HtmlBlock) => Some("an HTML block"),
                 _ => None,
             };
             if opened == last + 1 && block.is_some() {

@@ -14,8 +14,9 @@ for them, and what the process-wide state in a test binary demands.
 
 Unit tests inline in a `#[cfg(test)]` module, integration tests in each crate's
 `tests/`, doc tests on public APIs. proptest for tracker and codec invariants,
-loom for the synchronization primitives, rdkafka's `MockCluster` and the
-ClickHouse mocks for connector behavior that does not need a container.
+loom for the synchronization primitives, the Kafka mock cluster from
+[`MockKafka`](repo:crates/spate-kafka/tests/support/mock.rs) and the ClickHouse
+mocks for connector behavior that does not need a container.
 
 Helpers that only this repository's tests need, such as reading a pinned image,
 belong in the unpublished `spate-test-support` crate under `test-support/`.
@@ -198,12 +199,17 @@ tokio one records each deadline it was asked to sleep until, so a test can
 wait for the timer before it advances. It does not reach a vendor client's own
 timers, so a test of what librdkafka does with time sits on the next rung.
 
-### rdkafka's `MockCluster`
+### The Kafka mock cluster
 
 An in-process broker, with no container, for behavior that lives in the broker
-protocol: assignment, rebalance, offsets, fetch errors. Its group timers run on
-real time, so a test with more than one consumer settles the group on the
-signal the source publishes for it before it asserts:
+protocol: assignment, rebalance, offsets, fetch errors. A test builds it with
+[`MockKafka`](repo:crates/spate-kafka/tests/support/mock.rs), and clippy
+refuses rdkafka's `MockCluster::new`. The mock holds a new group's first
+rebalance for 3 s so that members starting together join one generation.
+`MockKafka` removes that hold, and a test whose members start together and must
+join one generation calls `hold_first_rebalance`. The group timers run on real
+time, so a test with more than one consumer settles the group on the signal the
+source publishes for it before it asserts:
 
 ```rust file=crates/spate-kafka/tests/mock_cluster.rs region=settle_group title="mock_cluster.rs"
 ```

@@ -10,7 +10,7 @@ mod support;
 
 use support::Raw as _;
 
-use rdkafka::mocking::{MockCluster, MockCoordinator};
+use rdkafka::mocking::MockCoordinator;
 use rdkafka::types::RDKafkaRespErr;
 use spate_core::clock::TestClock as StopClock;
 use spate_core::clock::tokio::TestClock;
@@ -27,12 +27,14 @@ use support::feed::{
     launch_stopping, list_once, produce_copy, produce_raw, publish, publish_to, publisher_on_mock,
     read_attempts, read_depth, read_topic, recs, run_to_exit, sorted, stage, written,
 };
-use support::{Marker, RawBatch, corrupt_batch, produce_batch, try_produce_batch, write_marker};
+use support::{
+    Marker, MockKafka, RawBatch, corrupt_batch, produce_batch, try_produce_batch, write_marker,
+};
 
 /// A cluster of `brokers` with the work, retry and dead-letter topics, one
 /// partition each, and the attempt topic with two.
-fn cluster(brokers: i32) -> MockCluster<'static, rdkafka::producer::DefaultProducerContext> {
-    let cluster = MockCluster::new(brokers).expect("mock cluster");
+fn cluster(brokers: i32) -> MockKafka {
+    let cluster = MockKafka::with_brokers(brokers);
     for topic in [WORK, RETRY, DEAD] {
         cluster.create_topic(topic, 1, 1).expect("create topic");
     }
@@ -43,10 +45,7 @@ fn cluster(brokers: i32) -> MockCluster<'static, rdkafka::producer::DefaultProdu
 }
 
 /// Place every partition of the attempt topic on `broker`.
-fn attempts_on(
-    cluster: &MockCluster<'static, rdkafka::producer::DefaultProducerContext>,
-    broker: i32,
-) {
+fn attempts_on(cluster: &MockKafka, broker: i32) {
     for partition in 0..ATTEMPT_PARTITIONS {
         cluster
             .partition_leader(ATTEMPT, partition, Some(broker))
@@ -843,7 +842,7 @@ fn a_batch_that_does_not_decompress_stops_the_feed() {
 /// that way would pass and keep the topic.
 #[test]
 fn the_startup_check_does_not_create_a_missing_topic() {
-    let cluster = MockCluster::new(1).expect("mock cluster");
+    let cluster = MockKafka::new();
     cluster.create_topic(WORK, 1, 1).unwrap();
     cluster.create_topic(DEAD, 1, 1).unwrap();
     let brokers = cluster.bootstrap_servers();
@@ -1039,7 +1038,7 @@ fn a_publish_only_handle_charges_no_attempt() {
 /// missing retry topic, naming it.
 #[test]
 fn a_publisher_refuses_a_missing_retry_topic() {
-    let cluster = MockCluster::new(1).expect("mock cluster");
+    let cluster = MockKafka::new();
     cluster.create_topic(WORK, 1, 1).unwrap();
     cluster.create_topic(DEAD, 1, 1).unwrap();
     let (publisher, _io) = publisher_on_mock(&feed_yaml(
@@ -1228,8 +1227,8 @@ fn a_marker_on_the_retry_topic_ends_a_bounded_job() {
 }
 
 /// [`cluster`] with a work topic of two partitions.
-fn two_partition_cluster() -> MockCluster<'static, rdkafka::producer::DefaultProducerContext> {
-    let cluster = MockCluster::new(1).expect("mock cluster");
+fn two_partition_cluster() -> MockKafka {
+    let cluster = MockKafka::new();
     cluster.create_topic(WORK, 2, 1).expect("create topic");
     for topic in [RETRY, DEAD] {
         cluster.create_topic(topic, 1, 1).expect("create topic");
@@ -1418,7 +1417,7 @@ fn a_marker_behind_a_corrupt_batch_commits_nothing_past_it() {
 /// the topic again every 15 s.
 #[test]
 fn a_dead_letter_topic_authorization_failure_is_fatal() {
-    let cluster = MockCluster::new(1).expect("mock cluster");
+    let cluster = MockKafka::new();
     for topic in [WORK, RETRY, DEAD] {
         cluster.create_topic(topic, 1, 1).expect("create topic");
     }

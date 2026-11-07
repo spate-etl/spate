@@ -5,7 +5,6 @@ mod support;
 use support::Raw as _;
 
 use rdkafka::consumer::{BaseConsumer, Consumer};
-use rdkafka::mocking::MockCluster;
 use rdkafka::types::{RDKafkaApiKey, RDKafkaRespErr};
 use spate_core::checkpoint::Checkpointer;
 use spate_core::clock::TestClock;
@@ -19,6 +18,7 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
+use support::MockKafka;
 use support::{
     Marker, RawBatch, Watched, await_assignment, control_batch, corrupt_batch, drain_lane, produce,
     produce_batch, serve_events, v1_message, v2_batch,
@@ -58,7 +58,7 @@ const ASSIGNMENT: Duration = Duration::from_secs(30);
 /// Regression for #651.
 #[test]
 fn consumer_debug_logs_continue_through_group_join() {
-    let cluster = MockCluster::new(1).expect("mock cluster");
+    let cluster = MockKafka::new();
     cluster.create_topic(TOPIC, 1, 1).expect("create topic");
     let mut cfg = config(&cluster.bootstrap_servers(), "log-level-source");
     cfg.rdkafka.insert("debug".into(), "cgrp".into());
@@ -82,7 +82,7 @@ fn consumer_debug_logs_continue_through_group_join() {
 
 #[test]
 fn full_lifecycle_polls_acks_and_commits() {
-    let cluster = MockCluster::new(1).expect("mock cluster");
+    let cluster = MockKafka::new();
     cluster.create_topic(TOPIC, 3, 1).expect("create topic");
     let brokers = cluster.bootstrap_servers();
     produce(&brokers, TOPIC, 10, 3, "a");
@@ -128,7 +128,7 @@ fn full_lifecycle_polls_acks_and_commits() {
 
 #[test]
 fn pause_stops_delivery_and_resume_recovers_gapless() {
-    let cluster = MockCluster::new(1).expect("mock cluster");
+    let cluster = MockKafka::new();
     cluster.create_topic(TOPIC, 1, 1).expect("create topic");
     let brokers = cluster.bootstrap_servers();
 
@@ -185,7 +185,7 @@ fn op_version(line: &str) -> Option<u32> {
 /// Regression for #638.
 #[test]
 fn the_fetcher_starts_before_the_lane_is_handed_out() {
-    let cluster = MockCluster::new(1).expect("mock cluster");
+    let cluster = MockKafka::new();
     cluster.create_topic(TOPIC, 1, 1).expect("create topic");
     let brokers = cluster.bootstrap_servers();
     produce(&brokers, TOPIC, 5, 1, "c");
@@ -245,7 +245,7 @@ fn commit_as(brokers: &str, group: &str, offset: i64) {
 /// says. Regression for #1255.
 #[test]
 fn a_topic_prefixed_reset_policy_reads_a_new_group_from_the_start() {
-    let cluster = MockCluster::new(1).expect("mock cluster");
+    let cluster = MockKafka::new();
     cluster.create_topic(TOPIC, 1, 1).expect("create topic");
     let brokers = cluster.bootstrap_servers();
     produce(&brokers, TOPIC, 3, 1, "t");
@@ -275,7 +275,7 @@ fn a_failed_offset_lookup_starts_from_the_committed_offset() {
     /// one-second retry backoff cap they outlast every deadline in the test.
     const HELD_REPLIES: usize = 1000;
 
-    let cluster = MockCluster::new(1).expect("mock cluster");
+    let cluster = MockKafka::new();
     cluster.create_topic(TOPIC, 1, 1).expect("create topic");
     let brokers = cluster.bootstrap_servers();
     produce(&brokers, TOPIC, 6, 1, "d");
@@ -313,7 +313,7 @@ fn a_failed_offset_lookup_starts_from_the_committed_offset() {
 /// commits anything itself.
 #[test]
 fn a_restarted_member_publishes_lag_before_committing() {
-    let cluster = MockCluster::new(1).expect("mock cluster");
+    let cluster = MockKafka::new();
     cluster.create_topic(TOPIC, 1, 1).expect("create topic");
     let brokers = cluster.bootstrap_servers();
     produce(&brokers, TOPIC, 10, 1, "e");
@@ -352,7 +352,7 @@ fn a_restarted_member_publishes_lag_before_committing() {
 #[test]
 #[expect(clippy::disallowed_methods, reason = "the test joins the thread")]
 fn second_member_triggers_revoke_then_fresh_assignment() {
-    let cluster = MockCluster::new(1).expect("mock cluster");
+    let cluster = MockKafka::new();
     cluster.create_topic(TOPIC, 4, 1).expect("create topic");
     let brokers = cluster.bootstrap_servers();
 
@@ -504,7 +504,8 @@ fn drive_step(
 /// partition over once the owner departs.
 #[test]
 fn empty_assignment_completes_rebalance_protocol() {
-    let cluster = MockCluster::new(1).expect("mock cluster");
+    let cluster = MockKafka::new();
+    cluster.hold_first_rebalance();
     cluster.create_topic(TOPIC, 1, 1).expect("create topic");
     let brokers = cluster.bootstrap_servers();
     produce(&brokers, TOPIC, 5, 1, "e");
@@ -633,7 +634,8 @@ fn empty_assignment_completes_rebalance_protocol() {
 fn an_empty_member_survives_the_assignment_deadline() {
     const DEADLINE: Duration = Duration::from_secs(8);
 
-    let cluster = MockCluster::new(1).expect("mock cluster");
+    let cluster = MockKafka::new();
+    cluster.hold_first_rebalance();
     cluster.create_topic(TOPIC, 1, 1).expect("create topic");
     let brokers = cluster.bootstrap_servers();
 
@@ -722,7 +724,7 @@ fn an_empty_member_survives_the_assignment_deadline() {
 
 #[test]
 fn statistics_populate_kafka_source_metrics() {
-    let cluster = MockCluster::new(1).expect("mock cluster");
+    let cluster = MockKafka::new();
     cluster.create_topic(TOPIC, 2, 1).expect("create topic");
     let brokers = cluster.bootstrap_servers();
     produce(&brokers, TOPIC, 5, 2, "stats");
@@ -819,7 +821,7 @@ fn statistics_disabled_registers_no_families() {
     // `open` regardless would leave them frozen at their unset default (e.g.
     // `group_healthy 0`, a documented alert signal) even though librdkafka
     // never emits a snapshot.
-    let cluster = MockCluster::new(1).expect("mock cluster");
+    let cluster = MockKafka::new();
     cluster.create_topic(TOPIC, 2, 1).expect("create topic");
     let brokers = cluster.bootstrap_servers();
 
@@ -887,7 +889,7 @@ fn a_backlogged_consumer_publishes_its_lag() {
     const PRODUCED: usize = 500;
     const CONSUMED: usize = 50;
 
-    let cluster = MockCluster::new(1).expect("mock cluster");
+    let cluster = MockKafka::new();
     cluster
         .create_topic(TOPIC, PARTITIONS, 1)
         .expect("create topic");
@@ -1017,7 +1019,7 @@ fn drain_main_queue(consumer: &BaseConsumer, window: Duration) -> usize {
 /// routing.
 #[test]
 fn the_main_queue_delivers_a_partition_that_was_never_split() {
-    let cluster = MockCluster::new(1).expect("mock cluster");
+    let cluster = MockKafka::new();
     cluster.create_topic(TOPIC, 1, 1).expect("create topic");
     let brokers = cluster.bootstrap_servers();
     produce(&brokers, TOPIC, 20, 1, "p");
@@ -1044,7 +1046,7 @@ const WINDOW: Duration = Duration::from_secs(6);
 /// unassign and a re-assign, so the main queue delivers nothing for it.
 #[test]
 fn a_split_partition_never_returns_to_the_main_queue() {
-    let cluster = MockCluster::new(1).expect("mock cluster");
+    let cluster = MockKafka::new();
     cluster.create_topic(TOPIC, 1, 1).expect("create topic");
     let brokers = cluster.bootstrap_servers();
     produce(&brokers, TOPIC, 20, 1, "w");
@@ -1104,7 +1106,7 @@ fn a_split_partition_never_returns_to_the_main_queue() {
 fn zstd_batches_are_read() {
     use rdkafka::producer::{BaseProducer, BaseRecord, Producer};
 
-    let cluster = MockCluster::new(1).expect("mock cluster");
+    let cluster = MockKafka::new();
     cluster.create_topic(TOPIC, 1, 1).expect("create topic");
     let brokers = cluster.bootstrap_servers();
     let producer: BaseProducer = support::raw_config()
@@ -1144,7 +1146,7 @@ fn zstd_batches_are_read() {
 /// Regression for #1257.
 #[test]
 fn a_corrupt_batch_fails_the_lane() {
-    let cluster = MockCluster::new(1).expect("mock cluster");
+    let cluster = MockKafka::new();
     cluster.create_topic(TOPIC, 1, 1).expect("create topic");
     let brokers = cluster.bootstrap_servers();
     produce(&brokers, TOPIC, 1, 1, "before");
@@ -1219,7 +1221,7 @@ fn a_corrupt_batch_fails_the_lane() {
 /// the v1 messages follow one. Regression for #1257.
 #[test]
 fn a_skipped_v1_message_fails_the_lane() {
-    let cluster = MockCluster::new(1).expect("mock cluster");
+    let cluster = MockKafka::new();
     cluster.create_topic(TOPIC, 1, 1).expect("create topic");
     cluster
         .apiversion(rdkafka::types::RDKafkaApiKey::Fetch, Some(0), Some(11))
@@ -1278,7 +1280,7 @@ fn a_skipped_v1_message_fails_the_lane() {
 #[test]
 fn a_mid_batch_authorization_failure_fails_the_lane() {
     use rdkafka::types::{RDKafkaApiKey, RDKafkaRespErr};
-    let cluster = MockCluster::new(1).expect("mock cluster");
+    let cluster = MockKafka::new();
     cluster.create_topic(TOPIC, 1, 1).expect("create topic");
     let brokers = cluster.bootstrap_servers();
     produce(&brokers, TOPIC, 2, 1, "rec");
@@ -1563,10 +1565,7 @@ impl Driver {
     /// Takes a stable group, so the next revocation is this one. `flush_failures`
     /// can hold more: a group can remove a member while it forms, and that lost
     /// revocation records a failure of its own.
-    fn lose_a_member(
-        &mut self,
-        cluster: &MockCluster<'_, rdkafka::producer::DefaultProducerContext>,
-    ) -> Vec<String> {
+    fn lose_a_member(&mut self, cluster: &MockKafka) -> Vec<String> {
         let seen = self.flush_failures.len();
         let revocations = self.revocations;
         cluster.request_errors(
@@ -1613,7 +1612,8 @@ fn committed(brokers: &str, group: &str, partitions: i32) -> Vec<rdkafka::Offset
 /// ends up holding every partition between them.
 #[test]
 fn consumers_share_one_epoch() {
-    let cluster = MockCluster::new(1).expect("mock cluster");
+    let cluster = MockKafka::new();
+    cluster.hold_first_rebalance();
     cluster.create_topic(TOPIC, 4, 1).expect("create topic");
     let brokers = cluster.bootstrap_servers();
     produce(&brokers, TOPIC, 5, 4, "s");
@@ -1628,7 +1628,8 @@ fn consumers_share_one_epoch() {
 /// `flush_commits` commits, and every partition reads back committed.
 #[test]
 fn two_consumers_poll_ack_and_commit_every_partition() {
-    let cluster = MockCluster::new(1).expect("mock cluster");
+    let cluster = MockKafka::new();
+    cluster.hold_first_rebalance();
     cluster.create_topic(TOPIC, 4, 1).expect("create topic");
     let brokers = cluster.bootstrap_servers();
     produce(&brokers, TOPIC, 10, 4, "c");
@@ -1650,7 +1651,8 @@ fn two_consumers_poll_ack_and_commit_every_partition() {
 /// lanes are paused neither delivers, and on resume both deliver gap-free.
 #[test]
 fn pause_reaches_the_owning_consumer() {
-    let cluster = MockCluster::new(1).expect("mock cluster");
+    let cluster = MockKafka::new();
+    cluster.hold_first_rebalance();
     cluster.create_topic(TOPIC, 2, 1).expect("create topic");
     let brokers = cluster.bootstrap_servers();
 
@@ -1687,7 +1689,8 @@ fn pause_reaches_the_owning_consumer() {
     reason = "the test joins the joiner thread"
 )]
 fn an_outside_member_rebalances_every_in_process_consumer() {
-    let cluster = MockCluster::new(1).expect("mock cluster");
+    let cluster = MockKafka::new();
+    cluster.hold_first_rebalance();
     cluster.create_topic(TOPIC, 4, 1).expect("create topic");
     let brokers = cluster.bootstrap_servers();
 
@@ -1734,7 +1737,8 @@ fn an_outside_member_rebalances_every_in_process_consumer() {
 /// committing.
 #[test]
 fn more_consumers_than_partitions_keeps_running() {
-    let cluster = MockCluster::new(1).expect("mock cluster");
+    let cluster = MockKafka::new();
+    cluster.hold_first_rebalance();
     cluster.create_topic(TOPIC, 1, 1).expect("create topic");
     let brokers = cluster.bootstrap_servers();
 
@@ -1761,7 +1765,8 @@ fn more_consumers_than_partitions_keeps_running() {
 #[test]
 fn a_lost_assignment_fails_the_flush_and_the_source_recovers() {
     for consumers in [1, 2] {
-        let cluster = MockCluster::new(1).expect("mock cluster");
+        let cluster = MockKafka::new();
+        cluster.hold_first_rebalance();
         cluster.create_topic(TOPIC, 4, 1).expect("create topic");
         let brokers = cluster.bootstrap_servers();
         produce(&brokers, TOPIC, 5, 4, "l");
@@ -1791,7 +1796,7 @@ fn on_a_cluster_electing_at_once(partitions: i32, body: impl FnOnce(&str)) {
 /// refuse the next few, so one consumer of a source is accepted alone and the
 /// other's join starts a new epoch. Without it a slow runner can put both in the
 /// first generation, and no epoch follows.
-fn hold_back_the_second_join(cluster: &MockCluster<'_, rdkafka::producer::DefaultProducerContext>) {
+fn hold_back_the_second_join(cluster: &MockKafka) {
     let refused = RDKafkaRespErr::RD_KAFKA_RESP_ERR_COORDINATOR_LOAD_IN_PROGRESS;
     cluster.request_errors(
         RDKafkaApiKey::JoinGroup,
@@ -1805,25 +1810,8 @@ fn hold_back_the_second_join(cluster: &MockCluster<'_, rdkafka::producer::Defaul
 }
 
 /// [`on_a_cluster_electing_at_once`], handing the body the cluster to script.
-fn on_a_mock_electing_at_once(
-    partitions: i32,
-    body: impl FnOnce(&MockCluster<'_, rdkafka::producer::DefaultProducerContext>),
-) {
-    use rdkafka::producer::Producer as _;
-    let producer: rdkafka::producer::BaseProducer = support::raw_config()
-        .set("test.mock.num.brokers", "1")
-        .build()
-        .expect("mock producer");
-    let client = producer.client();
-    let cluster = client.mock_cluster().expect("mock cluster");
-    // SAFETY: the pointer is valid while `producer` lives, and the client's
-    // mock cluster, which the call only writes a default into, lives with it.
-    unsafe {
-        rdkafka::bindings::rd_kafka_mock_group_initial_rebalance_delay_ms(
-            rdkafka::bindings::rd_kafka_handle_mock_cluster(client.native_ptr()),
-            0,
-        );
-    }
+fn on_a_mock_electing_at_once(partitions: i32, body: impl FnOnce(&MockKafka)) {
+    let cluster = MockKafka::new();
     cluster
         .create_topic(TOPIC, partitions, 1)
         .expect("create topic");
@@ -1965,7 +1953,7 @@ fn a_member_that_never_answers_its_offer_is_replaced() {
         (support::Answer::Empty, "never-answers-empty"),
         (support::Answer::Offer, "never-answers-offer"),
     ] {
-        let cluster = MockCluster::new(1).expect("mock cluster");
+        let cluster = MockKafka::new();
         cluster.create_topic(TOPIC, 1, 1).expect("create topic");
         support::a_member_that_never_answers_its_offer(
             &cluster.bootstrap_servers(),
@@ -1984,7 +1972,8 @@ fn a_member_that_never_answers_its_offer_is_replaced() {
 #[test]
 fn a_lost_member_keeps_its_peers_commit_and_loses_no_record() {
     for (group, earlier_loss) in [("lost-peer", false), ("lost-peer-again", true)] {
-        let cluster = MockCluster::new(1).expect("mock cluster");
+        let cluster = MockKafka::new();
+        cluster.hold_first_rebalance();
         cluster.create_topic(TOPIC, 4, 1).expect("create topic");
         let brokers = cluster.bootstrap_servers();
         produce(&brokers, TOPIC, 10, 4, "k");
@@ -2036,7 +2025,8 @@ fn a_lost_member_keeps_its_peers_commit_and_loses_no_record() {
 /// statistics arrive, measured from the committed offsets read at assignment.
 #[test]
 fn two_consumers_publish_lag_before_committing() {
-    let cluster = MockCluster::new(1).expect("mock cluster");
+    let cluster = MockKafka::new();
+    cluster.hold_first_rebalance();
     cluster.create_topic(TOPIC, 2, 1).expect("create topic");
     let brokers = cluster.bootstrap_servers();
     produce(&brokers, TOPIC, 10, 2, "l");
@@ -2092,7 +2082,8 @@ fn client_values(rendered: &str, family: &str) -> Vec<(String, f64)> {
 /// With statistics off no family is registered.
 #[test]
 fn two_consumers_publish_their_own_statistics() {
-    let cluster = MockCluster::new(1).expect("mock cluster");
+    let cluster = MockKafka::new();
+    cluster.hold_first_rebalance();
     cluster.create_topic(TOPIC, 2, 1).expect("create topic");
     let brokers = cluster.bootstrap_servers();
     produce(&brokers, TOPIC, 5, 2, "st");
@@ -2155,7 +2146,8 @@ fn two_consumers_publish_their_own_statistics() {
 /// passthrough reaches neither the series nor the source's own logs.
 #[test]
 fn consumer_series_carry_no_passthrough_value() {
-    let cluster = MockCluster::new(1).expect("mock cluster");
+    let cluster = MockKafka::new();
+    cluster.hold_first_rebalance();
     cluster.create_topic(TOPIC, 2, 1).expect("create topic");
     let brokers = cluster.bootstrap_servers();
 
@@ -2218,7 +2210,8 @@ fn await_revocation(source: &mut KafkaSource, what: &str) {
     reason = "the test joins the joiner thread"
 )]
 fn dropping_mid_revoke_returns() {
-    let cluster = MockCluster::new(1).expect("mock cluster");
+    let cluster = MockKafka::new();
+    cluster.hold_first_rebalance();
     cluster.create_topic(TOPIC, 4, 1).expect("create topic");
     let brokers = cluster.bootstrap_servers();
 
@@ -2257,7 +2250,8 @@ fn dropping_mid_revoke_returns() {
 #[test]
 fn dropping_mid_lost_revoke_returns() {
     use rdkafka::types::{RDKafkaApiKey, RDKafkaRespErr};
-    let cluster = MockCluster::new(1).expect("mock cluster");
+    let cluster = MockKafka::new();
+    cluster.hold_first_rebalance();
     cluster.create_topic(TOPIC, 2, 1).expect("create topic");
     let mut cfg = consumers_config(&cluster.bootstrap_servers(), "drop-lost-revoke", 2);
     cfg.rdkafka.insert("debug".into(), "cgrp".into());
@@ -2289,7 +2283,8 @@ fn dropping_mid_lost_revoke_returns() {
 /// its consumer alive, and dropping the lanes afterwards completes.
 #[test]
 fn dropping_the_source_before_its_lanes_completes() {
-    let cluster = MockCluster::new(1).expect("mock cluster");
+    let cluster = MockKafka::new();
+    cluster.hold_first_rebalance();
     cluster.create_topic(TOPIC, 2, 1).expect("create topic");
     let brokers = cluster.bootstrap_servers();
 
@@ -2306,7 +2301,8 @@ fn dropping_the_source_before_its_lanes_completes() {
 /// its topic, in whatever state its consumers have reached.
 #[test]
 fn dropping_an_unpolled_source_with_a_backlog_returns() {
-    let cluster = MockCluster::new(1).expect("mock cluster");
+    let cluster = MockKafka::new();
+    cluster.hold_first_rebalance();
     cluster.create_topic(TOPIC, 2, 1).expect("create topic");
     let brokers = cluster.bootstrap_servers();
     produce(&brokers, TOPIC, 100, 2, "b");
@@ -2319,7 +2315,8 @@ fn dropping_an_unpolled_source_with_a_backlog_returns() {
 /// source owns still stores the offsets of the partitions it does own.
 #[test]
 fn a_partial_refusal_stores_the_owned_offsets() {
-    let cluster = MockCluster::new(1).expect("mock cluster");
+    let cluster = MockKafka::new();
+    cluster.hold_first_rebalance();
     cluster.create_topic(TOPIC, 4, 1).expect("create topic");
     let brokers = cluster.bootstrap_servers();
     produce(&brokers, TOPIC, 10, 4, "r");
@@ -2348,7 +2345,8 @@ fn a_partial_refusal_stores_the_owned_offsets() {
 fn one_assignment_spends_one_lookup_bound() {
     /// `COMMITTED_LOOKUP_TIMEOUT`, plus slack for the assign itself.
     const BOUND: Duration = Duration::from_secs(13);
-    let cluster = MockCluster::new(1).expect("mock cluster");
+    let cluster = MockKafka::new();
+    cluster.hold_first_rebalance();
     cluster.create_topic(TOPIC, 3, 1).expect("create topic");
     // A coordinator still loading its offsets: librdkafka retries every
     // OffsetFetch until the caller's timeout.
@@ -2392,7 +2390,7 @@ fn one_assignment_spends_one_lookup_bound() {
 fn the_mock_serves_a_control_batch_as_a_marker() {
     const RECORDS: usize = 3;
     for marker in [Marker::Commit, Marker::Abort] {
-        let cluster = MockCluster::new(1).expect("mock cluster");
+        let cluster = MockKafka::new();
         cluster.create_topic(TOPIC, 1, 1).expect("create topic");
         let brokers = cluster.bootstrap_servers();
         produce(&brokers, TOPIC, RECORDS, 1, "before");
@@ -2439,10 +2437,8 @@ fn a_control_batch_states_its_marker() {
 }
 
 /// One topic of `partitions` partitions on a mock cluster of its own.
-fn marker_cluster(
-    partitions: i32,
-) -> MockCluster<'static, rdkafka::producer::DefaultProducerContext> {
-    let cluster = MockCluster::new(1).expect("mock cluster");
+fn marker_cluster(partitions: i32) -> MockKafka {
+    let cluster = MockKafka::new();
     cluster
         .create_topic(TOPIC, partitions, 1)
         .expect("create topic");
@@ -2812,6 +2808,7 @@ fn each_partition_advances_past_its_own_marker() {
 #[test]
 fn two_consumers_each_advance_past_their_own_marker() {
     let cluster = marker_cluster(2);
+    cluster.hold_first_rebalance();
     let brokers = cluster.bootstrap_servers();
     produce(&brokers, TOPIC, 1, 2, "before");
     write_marker(&brokers, 0, Marker::Commit);
@@ -3070,7 +3067,7 @@ mod latest_start {
     use support::latest;
 
     fn on_a_cluster(partitions: i32, body: impl FnOnce(&str, &str)) {
-        let cluster = MockCluster::new(1).expect("mock cluster");
+        let cluster = MockKafka::new();
         cluster
             .create_topic(TOPIC, partitions, 1)
             .expect("create topic");
@@ -3163,13 +3160,8 @@ mod latest_start {
     }
 
     /// A cluster with one topic of `partitions`, each holding three records.
-    fn cluster_with_records(
-        partitions: i32,
-    ) -> (
-        MockCluster<'static, rdkafka::producer::DefaultProducerContext>,
-        String,
-    ) {
-        let cluster = MockCluster::new(1).expect("mock cluster");
+    fn cluster_with_records(partitions: i32) -> (MockKafka, String) {
+        let cluster = MockKafka::new();
         cluster
             .create_topic(TOPIC, partitions, 1)
             .expect("create topic");
@@ -3458,21 +3450,13 @@ mod latest_start {
     #[test]
     fn a_held_start_gives_way_to_a_rebalance() {
         use rdkafka::bindings as sys;
-        use rdkafka::producer::{BaseProducer, Producer as _};
-        use support::Raw as _;
 
-        let producer: BaseProducer = support::raw_config()
-            .set("test.mock.num.brokers", "1")
-            .build()
-            .expect("mock producer");
-        let client = producer.client();
-        let cluster = client.mock_cluster().expect("mock cluster");
+        let cluster = MockKafka::new();
         cluster.create_topic(TOPIC, 1, 1).expect("create topic");
         let brokers = cluster.bootstrap_servers();
         produce(&brokers, TOPIC, 3, 1, "before");
-        // SAFETY: the pointer is valid while `producer` lives, across this test.
-        let mock = unsafe { sys::rd_kafka_handle_mock_cluster(client.native_ptr()) };
-        // SAFETY: as above.
+        let mock = cluster.native();
+        // SAFETY: the pointer is valid while `cluster` lives, across this test.
         unsafe { sys::rd_kafka_mock_start_request_tracking(mock) };
         let joins = || {
             let mut count = 0;
@@ -3608,6 +3592,7 @@ mod latest_start {
     fn a_removed_member_under_latest_loses_no_record() {
         for consumers in [1, 2] {
             let (cluster, brokers) = cluster_with_records(2);
+            cluster.hold_first_rebalance();
             let group: &'static str = if consumers == 1 {
                 "removed-one"
             } else {
@@ -3687,6 +3672,7 @@ mod latest_start {
     #[test]
     fn a_stale_offer_leaves_a_settled_one_accepted() {
         let (cluster, brokers) = cluster_with_records(4);
+        cluster.hold_first_rebalance();
         cluster.request_errors(
             RDKafkaApiKey::OffsetCommit,
             &[
@@ -3776,6 +3762,7 @@ mod latest_start {
             ),
         ] {
             let (cluster, brokers) = cluster_with_records(4);
+            cluster.hold_first_rebalance();
             cluster.request_errors(api, errors);
             let mut cfg = latest_config(&brokers, group, 2);
             cfg.statistics_interval = Duration::ZERO;
@@ -3986,6 +3973,7 @@ mod latest_start {
         /// `COMMITTED_LOOKUP_TIMEOUT`, plus slack for the assign itself.
         const BOUND: Duration = Duration::from_secs(13);
         let (cluster, brokers) = cluster_with_records(3);
+        cluster.hold_first_rebalance();
         cluster.request_errors(
             RDKafkaApiKey::ListOffsets,
             &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_NOT_LEADER_FOR_PARTITION; 3],

@@ -1927,9 +1927,9 @@ mod cluster {
     use crate::client::testing::{Raw as _, raw_config};
     use crate::context::Intent;
     use crate::feed::FeedRole;
+    use crate::testutil::mock::MockKafka;
     use crate::testutil::wire::{self, Marker};
     use rdkafka::consumer::{BaseConsumer, CommitMode, Consumer, ConsumerContext};
-    use rdkafka::mocking::MockCluster;
     use rdkafka::producer::{BaseProducer, BaseRecord, Producer as _};
     use rdkafka::types::{RDKafkaApiKey, RDKafkaRespErr};
     use rdkafka::{Offset, TopicPartitionList};
@@ -2003,7 +2003,7 @@ mod cluster {
     /// given; B leaves, and A reads every unit of both partitions.
     #[test]
     fn a_paused_partition_resumes_after_it_is_reassigned() {
-        let cluster = MockCluster::new(1).expect("mock cluster");
+        let cluster = MockKafka::new();
         cluster.create_topic("units", 2, 1).unwrap();
         cluster.create_topic("units-retry", 1, 1).unwrap();
         cluster.create_topic("units-dead", 1, 1).unwrap();
@@ -2065,17 +2065,15 @@ mod cluster {
     /// A cluster with one partition each of the work, retry and
     /// dead-letter topics, two of the attempt topic, and `n` messages keyed
     /// `u0`, `u1`, … on the work topic.
-    fn cluster_with(n: usize) -> MockCluster<'static, rdkafka::producer::DefaultProducerContext> {
+    fn cluster_with(n: usize) -> MockKafka {
         let keys: Vec<Vec<u8>> = (0..n).map(|i| format!("u{i}").into_bytes()).collect();
         cluster_holding(keys.iter().map(|k| Some(&k[..])))
     }
 
     /// The topics of [`cluster_with`], with one message on the work topic
     /// for each of `keys`, in order, `None` producing a message with no key.
-    fn cluster_holding<'k>(
-        keys: impl IntoIterator<Item = Option<&'k [u8]>>,
-    ) -> MockCluster<'static, rdkafka::producer::DefaultProducerContext> {
-        let cluster = MockCluster::new(1).expect("mock cluster");
+    fn cluster_holding<'k>(keys: impl IntoIterator<Item = Option<&'k [u8]>>) -> MockKafka {
+        let cluster = MockKafka::new();
         for topic in ["units", "units-retry", "units-dead"] {
             cluster.create_topic(topic, 1, 1).unwrap();
         }
@@ -3299,7 +3297,7 @@ mod cluster {
     /// keeps it unread.
     #[test]
     fn a_pass_that_reaches_its_bound_while_reading_admits_what_it_read() {
-        let cluster = MockCluster::new(2).expect("mock cluster");
+        let cluster = MockKafka::with_brokers(2);
         for topic in ["units", "units-retry", "units-dead"] {
             cluster.create_topic(topic, 1, 1).unwrap();
             cluster.partition_leader(topic, 0, Some(1)).unwrap();
@@ -3420,7 +3418,7 @@ mod cluster {
     /// names partition 0 as not read.
     #[test]
     fn equal_watermarks_read_past_the_bound_are_not_read_again() {
-        let cluster = MockCluster::new(2).expect("mock cluster");
+        let cluster = MockKafka::with_brokers(2);
         for topic in ["units", "units-retry", "units-dead"] {
             cluster.create_topic(topic, 1, 1).unwrap();
             cluster.partition_leader(topic, 0, Some(1)).unwrap();

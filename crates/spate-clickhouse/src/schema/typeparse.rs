@@ -61,6 +61,50 @@ pub(crate) enum ChType {
     Other(String),
 }
 
+/// The deepest parenthesis nesting [`parse`] is given. ClickHouse's own
+/// parser stops at its `max_parser_depth`, 1000 by default.
+pub(crate) const MAX_DEPTH: u32 = 1000;
+
+/// The widest `FixedString` ClickHouse creates, in bytes.
+pub(crate) const MAX_FIXED_STRING: u32 = 0xFF_FFFF;
+
+/// Why a column type falls outside what ClickHouse itself accepts, or `None`.
+///
+/// Run before [`parse`] on a type the server sent: [`parse`] recurses once per
+/// nesting level, and the native writer pads every `FixedString` value to its
+/// declared width.
+pub(crate) fn out_of_bounds(s: &str) -> Option<String> {
+    let mut deepest = 0;
+    // An unbalanced type still counts the levels before the stray parenthesis,
+    // and `parse` recurses no further than those.
+    walk(s, |_, c, depth| {
+        if c == '(' {
+            deepest = deepest.max(depth + 1);
+        }
+    });
+    if deepest > MAX_DEPTH {
+        return Some(format!(
+            "has a type nested more than {MAX_DEPTH} levels deep"
+        ));
+    }
+    widest_fixed_string(&parse(s))
+        .filter(|&n| n > MAX_FIXED_STRING)
+        .map(|_| format!("has a FixedString wider than {MAX_FIXED_STRING} bytes"))
+}
+
+/// The widest `FixedString` anywhere in `t`.
+fn widest_fixed_string(t: &ChType) -> Option<u32> {
+    match t {
+        ChType::FixedString(n) => Some(*n),
+        ChType::Nullable(t) | ChType::LowCardinality(t) | ChType::Array(t) => {
+            widest_fixed_string(t)
+        }
+        ChType::Map(k, v) => widest_fixed_string(k).max(widest_fixed_string(v)),
+        ChType::Tuple(elems) => elems.iter().filter_map(widest_fixed_string).max(),
+        _ => None,
+    }
+}
+
 /// Parse a ClickHouse type string. Total: never fails, degrading to
 /// [`ChType::Other`] instead.
 pub(crate) fn parse(s: &str) -> ChType {
@@ -176,10 +220,27 @@ fn top_level_space(s: &str) -> Option<usize> {
 /// single-quoted literals (with backslash escapes).
 fn split_top_level(s: &str) -> Option<Vec<&str>> {
     let mut parts = Vec::new();
+    let mut start = 0;
+    walk(s, |i, c, depth| {
+        if c == ',' && depth == 0 {
+            parts.push(s[start..i].trim());
+            start = i + 1;
+        }
+    })?;
+    let last = s[start..].trim();
+    if !last.is_empty() || !parts.is_empty() {
+        parts.push(last);
+    }
+    Some(parts)
+}
+
+/// Call `each` with every character of `s` outside a quoted literal, its byte
+/// offset and the parenthesis depth around it. `None` when a parenthesis or a
+/// quote is unbalanced; a stray `)` stops the walk there.
+fn walk(s: &str, mut each: impl FnMut(usize, char, u32)) -> Option<()> {
     let mut depth = 0u32;
     let mut in_quote = false;
     let mut escape = false;
-    let mut start = 0;
     for (i, c) in s.char_indices() {
         if escape {
             escape = false;
@@ -188,23 +249,19 @@ fn split_top_level(s: &str) -> Option<Vec<&str>> {
         match c {
             '\\' if in_quote => escape = true,
             '\'' => in_quote = !in_quote,
-            '(' if !in_quote => depth += 1,
-            ')' if !in_quote => depth = depth.checked_sub(1)?,
-            ',' if !in_quote && depth == 0 => {
-                parts.push(s[start..i].trim());
-                start = i + 1;
+            _ if in_quote => {}
+            '(' => {
+                each(i, c, depth);
+                depth += 1;
             }
-            _ => {}
+            ')' => {
+                depth = depth.checked_sub(1)?;
+                each(i, c, depth);
+            }
+            _ => each(i, c, depth),
         }
     }
-    if depth != 0 || in_quote {
-        return None;
-    }
-    let last = s[start..].trim();
-    if !last.is_empty() || !parts.is_empty() {
-        parts.push(last);
-    }
-    Some(parts)
+    (depth == 0 && !in_quote).then_some(())
 }
 
 fn unquote(s: &str) -> Option<String> {
@@ -219,6 +276,38 @@ mod tests {
 
     fn named(s: &str) -> ChType {
         ChType::Named(s.to_string())
+    }
+
+    /// Pins the bounds `out_of_bounds` holds a server's type to: nesting up
+    /// to `MAX_DEPTH` and a `FixedString` up to `MAX_FIXED_STRING` pass, one
+    /// past either fails, and a parenthesis inside a quoted literal does not
+    /// count.
+    #[test]
+    fn a_type_past_clickhouse_bounds_is_out_of_bounds() {
+        let nested = |n: usize| format!("{}String{}", "Array(".repeat(n), ")".repeat(n));
+        let depth = MAX_DEPTH as usize;
+        assert_eq!(out_of_bounds(&nested(depth)), None);
+        assert_eq!(
+            out_of_bounds(&nested(depth + 1)).as_deref(),
+            Some("has a type nested more than 1000 levels deep")
+        );
+        let quoted = format!("Enum8('{}' = 1)", "(".repeat(depth + 1));
+        assert_eq!(out_of_bounds(&quoted), None);
+        let wide = "has a FixedString wider than 16777215 bytes";
+        for (ty, want) in [
+            ("FixedString(16777215)", None),
+            ("FixedString(16777216)", Some(wide)),
+            ("Array(FixedString(16777216))", Some(wide)),
+            ("Map(String, FixedString(16777216))", Some(wide)),
+            ("Map(FixedString(16777216), String)", Some(wide)),
+            (
+                "Tuple(a UInt8, b LowCardinality(FixedString(16777216)))",
+                Some(wide),
+            ),
+            ("Tuple(a FixedString(16777215), b UInt8)", None),
+        ] {
+            assert_eq!(out_of_bounds(ty).as_deref(), want, "{ty}");
+        }
     }
 
     #[test]

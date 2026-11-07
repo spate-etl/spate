@@ -465,6 +465,36 @@ async fn missing_and_materialized_columns_fail_startup() {
     assert!(msg.contains("declared columns:   id, name, score"), "{msg}");
 }
 
+/// Pins that a column type nested past ClickHouse's own parser depth, or a
+/// `FixedString` wider than ClickHouse creates, fails startup with an error
+/// naming the column. Regression for #1776.
+#[tokio::test]
+async fn a_column_type_past_what_clickhouse_accepts_fails_startup() {
+    let deep = format!("{}String{}", "Array(".repeat(100_000), ")".repeat(100_000));
+    for (ty, says) in [
+        (
+            deep.as_str(),
+            "declared column `name` has a type nested more than 1000 levels deep",
+        ),
+        (
+            "Nullable(FixedString(4294967295))",
+            "declared column `name` has a FixedString wider than 16777215 bytes",
+        ),
+    ] {
+        let mock = Mock::new();
+        mock.add(handlers::provide(system_columns(&[
+            ("id", "UInt64", ""),
+            ("name", ty, ""),
+            ("score", "Nullable(Float64)", ""),
+        ])));
+        let err = failed_sink(mock.url()).await;
+        assert!(matches!(err, spate_clickhouse::SchemaError::Mismatch(_)));
+        let msg = err.to_string();
+        assert!(msg.contains(says), "{msg}");
+        assert!(msg.len() < 2048, "the error shows {} bytes", msg.len());
+    }
+}
+
 #[tokio::test]
 async fn empty_result_means_table_not_found() {
     let mock = Mock::new();

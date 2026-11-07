@@ -188,14 +188,27 @@ async fn fetch_columns(
 fn table_column_list(cols: &[ColumnRow]) -> String {
     cols.iter()
         .map(|c| {
+            let ty = shown_type(&c.type_);
             if c.default_kind.is_empty() {
-                format!("{} {}", c.name, c.type_)
+                format!("{} {ty}", c.name)
             } else {
-                format!("{} {} {}", c.name, c.type_, c.default_kind)
+                format!("{} {ty} {}", c.name, c.default_kind)
             }
         })
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// The characters of a column type an error shows before it is cut.
+const SHOWN_TYPE: usize = 256;
+
+/// A column type as an error shows it, cut after [`SHOWN_TYPE`] characters,
+/// since a type the server sent has no length limit of its own.
+fn shown_type(ty: &str) -> std::borrow::Cow<'_, str> {
+    match ty.char_indices().nth(SHOWN_TYPE) {
+        Some((at, _)) => format!("{}…", &ty[..at]).into(),
+        None => ty.into(),
+    }
 }
 
 /// If a declared column's type is an `AggregateFunction(...)`, return an
@@ -279,7 +292,9 @@ pub(crate) async fn validate(
                 ));
             }
             Some(c) => {
-                if let Some(msg) = aggregate_function_remedy(col, &c.type_) {
+                if let Some(why) = typeparse::out_of_bounds(&c.type_) {
+                    findings.push(format!("declared column `{col}` {why}"));
+                } else if let Some(msg) = aggregate_function_remedy(col, &c.type_) {
                     findings.push(msg);
                 }
             }

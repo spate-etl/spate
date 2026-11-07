@@ -105,10 +105,7 @@ impl State {
             f(self)
         } else {
             self.gone.push(receipt);
-            Err(FeedError::new(
-                FeedErrorKind::Gone,
-                format!("{receipt} is not held by the scripted feed"),
-            ))
+            Err(FeedError::gone(receipt, "scripted feed"))
         }
     }
 

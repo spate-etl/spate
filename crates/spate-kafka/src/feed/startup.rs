@@ -22,6 +22,7 @@ use crate::sink::SinkContext;
 use rdkafka::admin::{AdminClient, AdminOptions, ResourceSpecifier};
 use rdkafka::error::{KafkaError, RDKafkaErrorCode};
 use rdkafka::producer::{Producer, ThreadedProducer};
+use spate_core::backoff::Backoff;
 use spate_core::clock::SyncClock;
 use spate_core::error::ErrorClass;
 use spate_core::hash::FastMap;
@@ -36,8 +37,9 @@ use tokio::sync::oneshot;
 /// How long the checks may take, every step included.
 pub(crate) const CONNECT_BOUND: Duration = Duration::from_secs(30);
 
-/// How long the first call of a metadata read waits; see [`next_slice`].
-const FIRST_SLICE: Duration = Duration::from_millis(100);
+/// How long a metadata read's calls wait: 100 ms at first, doubling after
+/// each call whose request went unanswered; see [`next_slice`].
+const SLICES: Backoff = Backoff::new(Duration::from_millis(100), CONNECT_BOUND);
 
 /// The configuration entry naming a topic's cleanup policies.
 const CLEANUP_POLICY: &str = "cleanup.policy";
@@ -124,19 +126,25 @@ impl Brokers {
     }
 }
 
-/// How long the next call of a metadata read waits, after a call that
-/// failed with `code` and with `left` before the read's deadline. `None`
-/// ends the read with the call's error.
+/// How long the next call of a metadata read waits, after a call of
+/// `slice` that failed with `code` and with `left` before the read's
+/// deadline. `None` ends the read with the call's error.
 ///
 /// librdkafka answers `BrokerTransportFailure` when no broker became
 /// usable within the call, having sent nothing, so the slice stays short
 /// and a read that nothing awaits stops soon. `OperationTimedOut` means a
-/// request went out and its answer did not come in time; the slice doubles
-/// so that a slow broker's answer can still arrive within the bound.
-fn next_slice(slice: Duration, code: RDKafkaErrorCode, left: Duration) -> Option<Duration> {
+/// request went out and its answer did not come in time; the slice takes
+/// the next step of `slices`, so that a slow broker's answer can still
+/// arrive within the bound.
+fn next_slice(
+    slice: Duration,
+    code: RDKafkaErrorCode,
+    left: Duration,
+    slices: &mut Backoff,
+) -> Option<Duration> {
     let next = match code {
         RDKafkaErrorCode::BrokerTransportFailure => slice,
-        RDKafkaErrorCode::OperationTimedOut => slice.saturating_mul(2),
+        RDKafkaErrorCode::OperationTimedOut => slices.next_delay(),
         _ => return None,
     };
     (!left.is_zero()).then(|| next.min(left))
@@ -166,13 +174,14 @@ impl TopicAdmin for Brokers {
         // once the future below, and with it `rx`, has been dropped.
         let spawned = spawn_thread("spate-kafka-feed-check", move || {
             let deadline = Instant::now() + CONNECT_BOUND;
-            let mut slice = FIRST_SLICE;
+            let mut slices = SLICES;
+            let mut slice = slices.next_delay();
             let read = loop {
                 match reader.client().fetch_metadata(Some(&name), slice) {
                     Err(e) => {
                         let code = e.rdkafka_error_code().unwrap_or(RDKafkaErrorCode::Fail);
                         let left = deadline.saturating_duration_since(Instant::now());
-                        match next_slice(slice, code, left) {
+                        match next_slice(slice, code, left, &mut slices) {
                             Some(next) if !tx.is_closed() => slice = next,
                             _ => break Err(admin_error(&e)),
                         }
@@ -1400,10 +1409,8 @@ mod tests {
     #[test]
     fn checks_ended_by_the_bound_close_their_clients_before_they_return() {
         let broker = crate::testutil::refused_broker();
-        let got = checks_closing_their_clients(
-            &[("bootstrap.servers", broker.as_str())],
-            Duration::ZERO,
-        );
+        let got =
+            checks_closing_their_clients(&[("bootstrap.servers", broker.as_str())], Duration::ZERO);
         match got {
             Err(KafkaFeedError::Unavailable(message)) => assert!(
                 message.starts_with("the startup checks took longer than"),
@@ -1414,32 +1421,41 @@ mod tests {
     }
 
     /// Pins how a metadata read's next call waits after each error: as
-    /// long again while no broker is usable, twice as long after a request
-    /// went unanswered, never past the read's deadline, and not at all
-    /// after any other error or once the deadline has passed.
+    /// long again while no broker is usable, twice as long after each
+    /// request that went unanswered, never past the read's deadline, and
+    /// not at all after any other error or once the deadline has passed.
     #[test]
     fn a_metadata_read_paces_its_calls_by_the_error() {
-        let slice = Duration::from_millis(100);
+        let ms = Duration::from_millis;
         let left = Duration::from_secs(30);
+        let mut slices = SLICES;
+        let first = slices.next_delay();
+        assert_eq!(first, ms(100));
+        let unusable = C::BrokerTransportFailure;
+        assert_eq!(next_slice(first, unusable, left, &mut slices), Some(first));
+        let unanswered = C::OperationTimedOut;
         assert_eq!(
-            next_slice(slice, C::BrokerTransportFailure, left),
-            Some(slice)
+            next_slice(first, unanswered, left, &mut slices),
+            Some(ms(200))
         );
         assert_eq!(
-            next_slice(slice, C::OperationTimedOut, left),
-            Some(Duration::from_millis(200))
+            next_slice(ms(200), unanswered, left, &mut slices),
+            Some(ms(400))
         );
-        let short = Duration::from_millis(150);
-        assert_eq!(next_slice(slice, C::OperationTimedOut, short), Some(short));
         assert_eq!(
-            next_slice(slice, C::BrokerTransportFailure, Duration::from_millis(30)),
-            Some(Duration::from_millis(30))
+            next_slice(ms(400), unusable, ms(30), &mut slices),
+            Some(ms(30))
         );
-        for code in [C::BrokerTransportFailure, C::OperationTimedOut] {
-            assert_eq!(next_slice(slice, code, Duration::ZERO), None, "{code:?}");
+        assert_eq!(
+            next_slice(ms(400), unanswered, ms(150), &mut slices),
+            Some(ms(150))
+        );
+        for code in [unusable, unanswered] {
+            let got = next_slice(first, code, Duration::ZERO, &mut slices);
+            assert_eq!(got, None, "{code:?}");
         }
         for code in [C::Fail, C::TopicAuthorizationFailed, C::LeaderNotAvailable] {
-            assert_eq!(next_slice(slice, code, left), None, "{code:?}");
+            assert_eq!(next_slice(first, code, left, &mut slices), None, "{code:?}");
         }
     }
 

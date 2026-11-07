@@ -317,7 +317,8 @@ HDR-histogram rolling-window estimates, converted to seconds; they are
 per-broker sampled quantiles and **cannot be aggregated** across brokers or
 processes (`max()` is the only defensible cross-series operator). Series backed
 by data librdkafka has not produced yet (an empty latency window, an unknown
-lag) are absent rather than `0`.
+lag) are absent rather than `0`. A broker that leaves librdkafka's statistics
+keeps its series, with `broker_up` and its latency gauges at `0`.
 
 Standard labels (`pipeline`, `component`, `component_type`) are on all of
 them; extras, `broker` among them, are noted per family.
@@ -362,8 +363,9 @@ Labels marked ⚠ are cardinality-sensitive and appear only under
 - `rate(spate_kafka_source_broker_tx_errors_total[5m]) > 0` or
   `spate_kafka_source_broker_up == 0` — broker connectivity trouble, attributed
   by the `broker` label. On large clusters a broker the member currently needs
-  no connection to also reads 0 (sparse connections), so alert on brokers the
-  assignment depends on rather than on the cluster-wide sum.
+  no connection to also reads 0 (sparse connections), and so does a broker that
+  left librdkafka's statistics. Alert on brokers the assignment depends on
+  rather than on the cluster-wide sum.
 - `spate_kafka_source_partition_not_fetching == 1` — the member holds the
   partition and is not consuming it. The pipeline then goes quiet with a full
   assignment, a healthy group and no error anywhere. The alert wants a `for:`

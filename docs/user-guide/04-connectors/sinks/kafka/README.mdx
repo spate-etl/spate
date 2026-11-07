@@ -207,7 +207,9 @@ ordinary counter resets to PromQL), the `broker` label is bounded by
 cluster topology, and the latency gauges are per-broker rolling-window
 estimates over the last statistics interval that **cannot be aggregated**
 across brokers or processes (`max()` is the only defensible cross-series
-operator). Windows that sampled nothing are absent rather than `0`.
+operator). Windows that sampled nothing are absent rather than `0`. A broker
+that leaves librdkafka's statistics keeps its series, with `broker_up` and its
+latency gauges at `0`.
 
 Batch-level write latency is framework-side
 (`spate_sink_write_duration_seconds`, the family comparable with the

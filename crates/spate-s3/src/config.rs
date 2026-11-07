@@ -200,9 +200,7 @@ impl S3SourceConfig {
                 )));
             }
         }
-        // Only the S3 client's keys are checked. `file://` reads no options,
-        // and with this crate's object_store features any other scheme fails
-        // when the source starts.
+        // Only the S3 client's keys are checked: `file://` reads no options.
         if matches!(
             ObjectStoreScheme::parse(&url),
             Ok((ObjectStoreScheme::AmazonS3, _))
@@ -239,6 +237,17 @@ fn parse_url(field: &str, value: &str) -> Result<Url, ConfigError> {
              shared; use file:// for infrastructure-free runs"
         )));
     }
+    // The crate enables object_store's `aws` and `fs` features alone, so any
+    // other scheme builds no client.
+    if !matches!(
+        ObjectStoreScheme::parse(&url),
+        Ok((ObjectStoreScheme::AmazonS3 | ObjectStoreScheme::Local, _))
+    ) {
+        return Err(ConfigError::Validation(format!(
+            "{field}: the source reads S3 URLs (s3://, s3a://, https:// on an S3 host) \
+             and file://, got {value}"
+        )));
+    }
     Ok(url)
 }
 
@@ -252,6 +261,33 @@ mod tests {
 
     fn minimal() -> String {
         "  url: s3://bucket/exports/\n".to_string()
+    }
+
+    /// A scheme the crate builds no client for fails at load and names the
+    /// field, and every scheme it reads passes. Regression for #1239.
+    #[test]
+    fn a_scheme_the_source_cannot_read_is_refused_at_load() {
+        for url in [
+            "gs://bucket/data/",
+            "az://container/data/",
+            "https://storage.example.com/bucket/data/",
+            "ftp://bucket/data/",
+        ] {
+            let body = format!("  url: {url}\n");
+            let err = S3SourceConfig::from_component_config(&section(&body)).unwrap_err();
+            let err = err.to_string();
+            assert!(err.contains("source.s3.url"), "{url}: {err}");
+            assert!(err.contains("file://"), "{url}: {err}");
+        }
+        for url in [
+            "s3://bucket/data/",
+            "s3a://bucket/data/",
+            "https://s3.us-east-1.amazonaws.com/bucket/data/",
+            "file:///tmp/data/",
+        ] {
+            let body = format!("  url: {url}\n");
+            S3SourceConfig::from_component_config(&section(&body)).expect(url);
+        }
     }
 
     #[test]

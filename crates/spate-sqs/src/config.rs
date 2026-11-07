@@ -46,29 +46,25 @@ pub(crate) struct SqsFeedConfig {
 impl SqsFeedConfig {
     /// Decode and check the `sqs:` body of `section`.
     pub(crate) fn from_section(section: &FeedSection) -> Result<SqsFeedConfig, ConfigError> {
-        let backend = section.backend();
-        if backend.type_tag() != BACKEND {
-            return Err(error(format!(
-                "the SQS feed is built from `feed: {{ {BACKEND}: … }}`, but the section names `{}`",
-                backend.type_tag()
-            )));
-        }
+        let config: SqsFeedConfig = section.backend_body(BACKEND, "SQS")?;
         if section.attempt_cap.is_some() {
-            return Err(error(
+            return Err(FeedSection::backend_error(
+                BACKEND,
                 "`attempt_cap` does not apply to `sqs`: SQS counts deliveries through the \
-                 queue's `maxReceiveCount`"
-                    .to_owned(),
+                 queue's `maxReceiveCount`",
             ));
         }
         if let Some(window) = section.settling_window
             && window < MIN_SETTLING_WINDOW
         {
-            return Err(error(format!(
-                "`settling_window` must be at least 1m on `sqs`, whose message counts take at \
-                 least a minute to settle; got {window:?}"
-            )));
+            return Err(FeedSection::backend_error(
+                BACKEND,
+                format!(
+                    "`settling_window` must be at least 1m on `sqs`, whose message counts take \
+                     at least a minute to settle; got {window:?}"
+                ),
+            ));
         }
-        let config: SqsFeedConfig = backend.deserialize_into()?;
         config.validate()?;
         Ok(config)
     }
@@ -76,26 +72,33 @@ impl SqsFeedConfig {
     fn validate(&self) -> Result<(), ConfigError> {
         let v = self.visibility;
         if v.subsec_nanos() != 0 || !(MIN_VISIBILITY..=MAX_VISIBILITY).contains(&v) {
-            return Err(error(format!(
-                "`visibility` must be whole seconds from 3s to 12h; got {v:?}"
-            )));
+            return Err(FeedSection::backend_error(
+                BACKEND,
+                format!("`visibility` must be whole seconds from 3s to 12h; got {v:?}"),
+            ));
         }
-        let url = Url::parse(&self.queue_url)
-            .map_err(|e| error(format!("`queue_url` is not a URL: {e}")))?;
+        let url = Url::parse(&self.queue_url).map_err(|e| {
+            FeedSection::backend_error(BACKEND, format!("`queue_url` is not a URL: {e}"))
+        })?;
         if !matches!(url.scheme(), "http" | "https") {
-            return Err(error(format!(
-                "`queue_url` must be an http or https URL; got scheme `{}`",
-                url.scheme()
-            )));
+            return Err(FeedSection::backend_error(
+                BACKEND,
+                format!(
+                    "`queue_url` must be an http or https URL; got scheme `{}`",
+                    url.scheme()
+                ),
+            ));
         }
         if url.path().trim_end_matches('/').ends_with(".fifo") {
-            return Err(error(
-                "`queue_url` names a FIFO queue; the SQS feed reads standard queues only"
-                    .to_owned(),
+            return Err(FeedSection::backend_error(
+                BACKEND,
+                "`queue_url` names a FIFO queue; the SQS feed reads standard queues only",
             ));
         }
         if let Some(endpoint) = &self.endpoint {
-            Url::parse(endpoint).map_err(|e| error(format!("`endpoint` is not a URL: {e}")))?;
+            Url::parse(endpoint).map_err(|e| {
+                FeedSection::backend_error(BACKEND, format!("`endpoint` is not a URL: {e}"))
+            })?;
         }
         Ok(())
     }
@@ -129,13 +132,6 @@ impl SqsFeedConfig {
             }
         }
         None
-    }
-}
-
-fn error(message: String) -> ConfigError {
-    ConfigError::Component {
-        context: format!("feed.{BACKEND}"),
-        message,
     }
 }
 
@@ -342,12 +338,18 @@ pub(crate) mod tests {
         SqsFeedConfig::from_section(&s).expect("no window loads");
     }
 
-    /// Pins the refusals: another backend's tag, `attempt_cap`, an unknown
+    /// Pins the refusals: another backend's tag, reported at the section,
+    /// `attempt_cap`, an unknown
     /// key, a FIFO queue and a non-HTTP URL.
     #[test]
     fn a_section_the_sqs_feed_cannot_read_is_refused() {
-        let err = SqsFeedConfig::from_section(&section("memory: {}")).unwrap_err();
-        assert!(err.to_string().contains("names `memory`"), "{err}");
+        let err = SqsFeedConfig::from_section(&section("memory: {}"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.starts_with("feed: ") && err.contains("names `memory`"),
+            "{err}"
+        );
 
         let mut with_cap =
             section("sqs: { queue_url: \"https://sqs.eu-west-2.amazonaws.com/1/q\" }");

@@ -2169,6 +2169,29 @@ mod tests {
         );
     }
 
+    /// Pins that a body of exactly its range, split across frames as an HTTP
+    /// body is, is handed on whole.
+    #[tokio::test]
+    async fn an_exact_range_in_several_frames_is_accepted() {
+        let frames =
+            [&[b'x'; 6][..], &[b'y'; 6], &[b'z'; 4]].map(|f| Ok(Bytes::copy_from_slice(f)));
+        let result = GetResult {
+            payload: GetResultPayload::Stream(Box::pin(futures_util::stream::iter(frames))),
+            meta: object_store::ObjectMeta {
+                location: Path::from("p/a"),
+                last_modified: chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
+                size: 32,
+                e_tag: Some("e".into()),
+                version: None,
+            },
+            range: 0..16,
+            attributes: Default::default(),
+            extensions: Default::default(),
+        };
+        let got = bytes_within(result, 16).await.unwrap();
+        assert_eq!(got.as_deref(), Some(&b"xxxxxxyyyyyyzzzz"[..]));
+    }
+
     /// Pins that a body one byte past a later window's range fails that
     /// window at its own offset, after the window before it is handed on.
     #[tokio::test(start_paused = true)]

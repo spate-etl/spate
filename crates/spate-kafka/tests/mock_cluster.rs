@@ -1482,10 +1482,11 @@ impl Driver {
                 .as_ref()
                 .expect("a driver from open_watched")
                 .render();
-            let healthy = client_values(&rendered, "spate_kafka_group_healthy");
+            // Read directly: a lone consumer's series has no `client` label.
+            let healthy = spate_test::metric_series(&rendered, "spate_kafka_group_healthy", &[]);
             self.partitions() == want
                 && healthy.len() == consumers
-                && healthy.iter().all(|(_, v)| *v == 1.0)
+                && healthy.iter().all(|s| s.value == 1.0)
         });
     }
 
@@ -1553,6 +1554,28 @@ impl Driver {
             !parts.is_empty() && parts.iter().all(|p| first.contains_key(p))
         });
         first
+    }
+
+    /// Refuse one heartbeat so a member loses its assignment, step to the
+    /// revocation that follows, and return what that revocation's flush reported.
+    /// Takes a stable group, so the next revocation is this one. `flush_failures`
+    /// can hold more: a group can remove a member while it forms, and that lost
+    /// revocation records a failure of its own.
+    fn lose_a_member(
+        &mut self,
+        cluster: &MockCluster<'_, rdkafka::producer::DefaultProducerContext>,
+    ) -> Vec<String> {
+        let seen = self.flush_failures.len();
+        let revocations = self.revocations;
+        cluster.request_errors(
+            RDKafkaApiKey::Heartbeat,
+            &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_ILLEGAL_GENERATION],
+        );
+        wait_until(Duration::from_secs(30), "the revocation", || {
+            self.step(Duration::from_millis(100));
+            self.revocations > revocations
+        });
+        self.flush_failures[seen..].to_vec()
     }
 
     /// Commit and flush what the read batches made committable.
@@ -1742,29 +1765,13 @@ fn a_lost_assignment_fails_the_flush_and_the_source_recovers() {
         produce(&brokers, TOPIC, 5, 4, "l");
 
         let group = format!("lost-{consumers}");
-        let mut driver = Driver::open(consumers_config(&brokers, &group, consumers));
-        driver.settle(4, Duration::from_secs(60));
-        let before = driver.revocations;
+        let cfg = watched_config(&brokers, &group, consumers);
+        let mut driver = Driver::open_watched(KafkaSource::new(cfg), &group);
+        driver.settle_group(consumers, 4, Duration::from_secs(60));
 
-        cluster.request_errors(
-            RDKafkaApiKey::Heartbeat,
-            &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_ILLEGAL_GENERATION],
-        );
-        wait_until(Duration::from_secs(30), "the revocation", || {
-            driver.step(Duration::from_millis(100));
-            driver.revocations > before
-        });
-        assert_eq!(
-            driver.flush_failures.len(),
-            1,
-            "{:?}",
-            driver.flush_failures
-        );
-        assert!(
-            driver.flush_failures[0].contains("AssignmentLost"),
-            "{:?}",
-            driver.flush_failures
-        );
+        let failures = driver.lose_a_member(&cluster);
+        assert_eq!(failures.len(), 1, "{failures:?}");
+        assert!(failures[0].contains("AssignmentLost"), "{failures:?}");
 
         driver.settle(4, Duration::from_secs(60));
         driver.read(5, Duration::from_secs(30));
@@ -1970,62 +1977,56 @@ fn a_member_that_never_answers_its_offer_is_replaced() {
 /// A lost member's failed flush leaves its peer's commit in place, and no
 /// offset past what was read is committed. The partitions read again from at
 /// or before the committed offset, so a record the lost member read and could
-/// not commit is not skipped.
+/// not commit is not skipped. A lost revocation ahead of the read changes none
+/// of this, and its failure is its own.
 #[test]
 fn a_lost_member_keeps_its_peers_commit_and_loses_no_record() {
-    let cluster = MockCluster::new(1).expect("mock cluster");
-    cluster.create_topic(TOPIC, 4, 1).expect("create topic");
-    let brokers = cluster.bootstrap_servers();
-    produce(&brokers, TOPIC, 10, 4, "k");
+    for (group, earlier_loss) in [("lost-peer", false), ("lost-peer-again", true)] {
+        let cluster = MockCluster::new(1).expect("mock cluster");
+        cluster.create_topic(TOPIC, 4, 1).expect("create topic");
+        let brokers = cluster.bootstrap_servers();
+        produce(&brokers, TOPIC, 10, 4, "k");
 
-    let mut cfg = watched_config(&brokers, "lost-peer", 2);
-    cfg.commit_interval = Duration::from_hours(1);
-    let mut driver = Driver::open_watched(KafkaSource::new(cfg), "lost-peer");
-    driver.settle_group(2, 4, Duration::from_secs(60));
-    driver.read(10, Duration::from_secs(30));
-    let before = driver.revocations;
+        let mut cfg = watched_config(&brokers, group, 2);
+        cfg.commit_interval = Duration::from_hours(1);
+        let mut driver = Driver::open_watched(KafkaSource::new(cfg), group);
+        driver.settle_group(2, 4, Duration::from_secs(60));
+        if earlier_loss {
+            driver.lose_a_member(&cluster);
+            driver.settle_group(2, 4, Duration::from_secs(60));
+        }
+        driver.read(10, Duration::from_secs(30));
 
-    cluster.request_errors(
-        RDKafkaApiKey::Heartbeat,
-        &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_ILLEGAL_GENERATION],
-    );
-    wait_until(Duration::from_secs(30), "the revocation", || {
-        driver.step(Duration::from_millis(100));
-        driver.revocations > before
-    });
-    assert_eq!(
-        driver.flush_failures.len(),
-        1,
-        "{:?}",
-        driver.flush_failures
-    );
-    let at_ten = rdkafka::Offset::Offset(10);
-    let read_back = support::committed_by(&brokers, "lost-peer", TOPIC, 4);
-    assert!(
-        read_back.iter().filter(|o| **o == at_ten).count() >= 2,
-        "the peer's two partitions: {read_back:?}"
-    );
-    assert!(
-        read_back
-            .iter()
-            .all(|o| matches!(o, rdkafka::Offset::Invalid) || *o == at_ten),
-        "nothing past what was read: {read_back:?}"
-    );
-
-    produce(&brokers, TOPIC, 5, 4, "m");
-    driver.settle_group(2, 4, Duration::from_secs(60));
-    let second = driver.read(5, Duration::from_secs(30));
-    for (partition, offsets) in &second {
-        let (first, last) = (
-            *offsets.first().expect("read"),
-            *offsets.last().expect("read"),
+        let failures = driver.lose_a_member(&cluster);
+        assert_eq!(failures.len(), 1, "{failures:?}");
+        let at_ten = rdkafka::Offset::Offset(10);
+        let read_back = support::committed_by(&brokers, group, TOPIC, 4);
+        assert!(
+            read_back.iter().filter(|o| **o == at_ten).count() >= 2,
+            "the peer's two partitions: {read_back:?}"
         );
-        assert!(first <= 10, "partition {partition} skipped: {offsets:?}");
-        assert_eq!(
-            usize::try_from(last - first + 1).expect("ordered"),
-            offsets.len(),
-            "partition {partition} has a gap: {offsets:?}"
+        assert!(
+            read_back
+                .iter()
+                .all(|o| matches!(o, rdkafka::Offset::Invalid) || *o == at_ten),
+            "nothing past what was read: {read_back:?}"
         );
+
+        produce(&brokers, TOPIC, 5, 4, "m");
+        driver.settle_group(2, 4, Duration::from_secs(60));
+        let second = driver.read(5, Duration::from_secs(30));
+        for (partition, offsets) in &second {
+            let (first, last) = (
+                *offsets.first().expect("read"),
+                *offsets.last().expect("read"),
+            );
+            assert!(first <= 10, "partition {partition} skipped: {offsets:?}");
+            assert_eq!(
+                usize::try_from(last - first + 1).expect("ordered"),
+                offsets.len(),
+                "partition {partition} has a gap: {offsets:?}"
+            );
+        }
     }
 }
 
@@ -3614,19 +3615,10 @@ mod latest_start {
                 KafkaSource::new(latest_config(&brokers, group, consumers)),
                 group,
             );
-            driver.settle(2, Duration::from_secs(60));
+            driver.settle_group(consumers, 2, Duration::from_secs(60));
             let before = driver.read_from_end(Duration::from_secs(30), produce_round(&brokers, 2));
-            let revocations = driver.revocations;
-            cluster.request_errors(
-                RDKafkaApiKey::Heartbeat,
-                &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_ILLEGAL_GENERATION],
-            );
-            wait_until(Duration::from_secs(30), "the revocation", || {
-                driver.step(Duration::from_millis(100));
-                driver.revocations > revocations
-            });
             assert!(
-                !driver.flush_failures.is_empty(),
+                !driver.lose_a_member(&cluster).is_empty(),
                 "the group refuses a removed member's commit"
             );
             driver.settle(2, Duration::from_secs(60));

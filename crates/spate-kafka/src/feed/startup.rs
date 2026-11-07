@@ -15,6 +15,8 @@
 //!
 //! A credential or TLS handshake rejected on the way to the cluster refuses
 //! connecting with the rejection's text, as soon as the client reports it.
+//! A read waiting on a request it sent finishes that wait first, within the
+//! checks' bound.
 
 use super::{KafkaFeedError, Topics};
 use crate::client::{SpateContext, check_topic_name};
@@ -25,16 +27,20 @@ use rdkafka::producer::{Producer, ThreadedProducer};
 use spate_core::clock::SyncClock;
 use spate_core::error::ErrorClass;
 use spate_core::hash::FastMap;
-use spate_core::task::{BoundError, ThreadBound};
+use spate_core::task::{BoundError, ThreadBound, ThreadHandle, spawn_thread};
 use std::future::Future;
 use std::num::NonZeroU32;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::oneshot;
 
 /// How long the checks may take, every step included.
 pub(crate) const CONNECT_BOUND: Duration = Duration::from_secs(30);
+
+/// How long a metadata read's calls wait while no broker is usable; see
+/// [`next_slice`].
+const SLICE: Duration = Duration::from_millis(100);
 
 /// The configuration entry naming a topic's cleanup policies.
 const CLEANUP_POLICY: &str = "cleanup.policy";
@@ -94,21 +100,63 @@ pub(crate) trait TopicAdmin: Send + Sync {
 /// polls that queue on a thread of its own, and its context records the
 /// rejection. Every topic's metadata is read before any configuration, so a
 /// rejection is met first on `reader`.
+///
+/// Each metadata read runs on a thread of its own and ends at most two
+/// [`SLICE`]s past `limit` from when `Brokers` is built. Once nothing awaits
+/// its answer, it stops within one [`SLICE`] while no broker is usable, and
+/// when the call under way ends while a request it sent is outstanding.
+/// Dropping `Brokers` joins those threads, so both clients are closed when
+/// the drop returns.
 pub(crate) struct Brokers {
+    // Declared first, so the reads are joined before the fields below drop
+    // and the last reference to `reader` drops on the thread dropping
+    // `Brokers`.
+    reads: Mutex<Vec<ThreadHandle<()>>>,
     admin: Arc<AdminClient<SpateContext<()>>>,
     reader: Arc<ThreadedProducer<SinkContext>>,
+    limit: Duration,
+    deadline: Instant,
 }
 
 impl Brokers {
-    /// Wraps `admin` and `reader`.
+    /// Wraps `admin` and `reader`, for checks that end `limit` from now.
     pub(crate) fn new(
         admin: AdminClient<SpateContext<()>>,
         reader: ThreadedProducer<SinkContext>,
+        limit: Duration,
     ) -> Brokers {
         Brokers {
+            reads: Mutex::new(Vec::new()),
             admin: Arc::new(admin),
             reader: Arc::new(reader),
+            limit,
+            // One slice past the limit, so the bound, which names the read
+            // under way, ends the checks before the read gives up.
+            deadline: Instant::now() + limit + SLICE,
         }
+    }
+}
+
+/// How long the next call of a metadata read waits, after a call that
+/// failed with `code` and with `left` before the read's deadline. `None`
+/// ends the read with the call's error.
+///
+/// librdkafka answers `BrokerTransportFailure` when no broker became usable
+/// within the call, having sent nothing, so the next call is short and a
+/// read that nothing awaits stops soon. `OperationTimedOut` means a request
+/// went out and its answer did not come in time. That answer is lost, so the
+/// next call sends one more request and waits for half the time left, and
+/// at least one [`SLICE`]. Half, because librdkafka waits for a usable
+/// broker again, for the call's full length, when the broker a call asked
+/// is decommissioned mid-call.
+fn next_slice(code: RDKafkaErrorCode, left: Duration) -> Option<Duration> {
+    if left.is_zero() {
+        return None;
+    }
+    match code {
+        RDKafkaErrorCode::BrokerTransportFailure => Some(SLICE.min(left)),
+        RDKafkaErrorCode::OperationTimedOut => Some((left / 2).max(SLICE).min(left)),
+        _ => None,
     }
 }
 
@@ -127,24 +175,26 @@ impl TopicAdmin for Brokers {
         }
         let reader = Arc::clone(&self.reader);
         let name = topic.to_owned();
+        let deadline = self.deadline;
         let (tx, rx) = oneshot::channel();
-        // `fetch_metadata` blocks, so it runs on a thread of its own, which
-        // ends with the read at most `CONNECT_BOUND` later even when the
-        // connect bound has already passed.
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "the check thread ends with its metadata read, at most `CONNECT_BOUND` after it starts"
-        )]
-        let spawned = std::thread::Builder::new()
-            .name("spate-kafka-feed-check".to_owned())
-            .spawn(move || {
-                let read = reader
-                    .client()
-                    .fetch_metadata(Some(&name), CONNECT_BOUND)
-                    .map_err(|e| admin_error(&e))
-                    .and_then(|metadata| {
+        // `fetch_metadata` blocks and cannot be cancelled, so the read runs
+        // on a thread of its own, and stops between calls once the future
+        // below, and with it `rx`, has been dropped.
+        let spawned = spawn_thread("spate-kafka-feed-check", move || {
+            let mut slice = SLICE.min(deadline.saturating_duration_since(Instant::now()));
+            let read = loop {
+                match reader.client().fetch_metadata(Some(&name), slice) {
+                    Err(e) => {
+                        let code = e.rdkafka_error_code().unwrap_or(RDKafkaErrorCode::Fail);
+                        let left = deadline.saturating_duration_since(Instant::now());
+                        match next_slice(code, left) {
+                            Some(next) if !tx.is_closed() => slice = next,
+                            _ => break Err(admin_error(&e)),
+                        }
+                    }
+                    Ok(metadata) => {
                         let found = metadata.topics().iter().find(|t| t.name() == name);
-                        match found.map(|t| (t.error(), t.partitions().len())) {
+                        break match found.map(|t| (t.error(), t.partitions().len())) {
                             None => Err(AdminError::new(
                                 RDKafkaErrorCode::UnknownTopicOrPartition,
                                 "the metadata response does not list the topic",
@@ -154,14 +204,24 @@ impl TopicAdmin for Brokers {
                                 let code = RDKafkaErrorCode::from(err);
                                 Err(AdminError::new(code, code.to_string()))
                             }
-                        }
-                    });
-                let _ = tx.send(read);
+                        };
+                    }
+                }
+            };
+            let _ = tx.send(read);
+        });
+        let spawned = spawned
+            .map(|thread| {
+                self.reads
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .push(thread);
+            })
+            .map_err(|e| {
+                AdminError::new(RDKafkaErrorCode::Fail, format!("starting a thread: {e}"))
             });
         Box::pin(async move {
-            spawned.map_err(|e| {
-                AdminError::new(RDKafkaErrorCode::Fail, format!("starting a thread: {e}"))
-            })?;
+            spawned?;
             rx.await.unwrap_or_else(|_| {
                 Err(AdminError::new(
                     RDKafkaErrorCode::Fail,
@@ -415,12 +475,45 @@ pub(crate) async fn check(
     Ok(checked)
 }
 
+/// Run [`check`] on `topics` through `brokers`, on the runtime `io`, under
+/// [`bounded`] with `brokers`' limit on `clock` and its rejection watch.
+/// Both clients in `brokers` are closed when it returns.
+///
+/// # Errors
+///
+/// As [`check`] and [`bounded`].
+///
+/// # Panics
+///
+/// When called from inside an async context, as
+/// [`Handle::block_on`](tokio::runtime::Handle::block_on) does.
+pub(crate) fn run_checks(
+    brokers: Brokers,
+    topics: &Topics,
+    io: &tokio::runtime::Handle,
+    scope: Scope,
+    clock: SyncClock,
+) -> Result<Checked, KafkaFeedError> {
+    let step = Mutex::new("starting".to_owned());
+    let limit = brokers.limit;
+    let brokers = Arc::new(brokers);
+    let watched = Arc::clone(&brokers);
+    io.block_on(bounded(
+        &step,
+        limit,
+        clock,
+        move || watched.rejection(),
+        check(&*brokers, topics, scope, &step),
+    ))
+}
+
 /// `checks` under a bound of `limit` on `clock`, ended early by a rejection
 /// `rejection` returns. Past the bound, an [`KafkaFeedError::Unavailable`]
 /// naming the step `step` holds.
 ///
 /// [`ThreadBound`] times the bound on a thread of its own, so it fires on any
-/// runtime, and calls `rejection` there once a tick.
+/// runtime, calls `rejection` there once a tick, and joins that thread
+/// before returning, so whatever `rejection` holds has been dropped by then.
 ///
 /// # Errors
 ///
@@ -1090,7 +1183,7 @@ mod tests {
         let hooks = crate::sink::SinkHooks::detached(SyncClock::new(Arc::clone(&clock) as _));
         let broker = crate::testutil::refused_broker();
         let properties = [("bootstrap.servers", broker.as_str())];
-        let brokers = Brokers::new(raw(&properties, ()), raw(&properties, hooks));
+        let brokers = Brokers::new(raw(&properties, ()), raw(&properties, hooks), CONNECT_BOUND);
         brokers.reader.context().note_error(C::SSL, ALERT_40);
         clock.advance(Duration::from_secs(3600));
         assert_eq!(brokers.rejection().as_deref(), Some(ALERT_40));
@@ -1282,6 +1375,183 @@ mod tests {
         }
     }
 
+    /// [`run_checks`] through clients built with `properties`, under
+    /// `limit` on a frozen clock, on a thread of its own. Asserts that the
+    /// metadata client is gone once the result is back within [`DEADLINE`].
+    fn checks_closing_their_clients(
+        properties: &[(&str, &str)],
+        limit: Duration,
+    ) -> Result<Checked, KafkaFeedError> {
+        use crate::client::testing::raw;
+        let clock = SyncClock::new(TestClock::frozen() as _);
+        let hooks = crate::sink::SinkHooks::detached(clock.clone());
+        let brokers = Brokers::new(raw(properties, ()), raw(properties, hooks), limit);
+        let reader = Arc::downgrade(&brokers.reader);
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let io = multi_thread();
+            let _ = tx.send(run_checks(
+                brokers,
+                &topics(),
+                io.handle(),
+                Scope::All,
+                clock,
+            ));
+        });
+        let got = rx
+            .recv_timeout(DEADLINE)
+            .unwrap_or_else(|_| panic!("the checks did not return within {DEADLINE:?}"));
+        assert!(
+            reader.upgrade().is_none(),
+            "the metadata client outlived the checks"
+        );
+        got
+    }
+
+    /// Pins that checks ended by the bound, with a metadata read still
+    /// waiting for a usable broker, have closed the metadata client by the
+    /// time they return. Regression for #1809.
+    #[test]
+    fn checks_ended_by_the_bound_close_their_clients_before_they_return() {
+        let broker = crate::testutil::refused_broker();
+        let got =
+            checks_closing_their_clients(&[("bootstrap.servers", broker.as_str())], Duration::ZERO);
+        match got {
+            Err(KafkaFeedError::Unavailable(message)) => assert!(
+                message.starts_with("the startup checks took longer than"),
+                "{message}"
+            ),
+            other => panic!("expected unavailable, got {other:?}"),
+        }
+    }
+
+    /// Pins how a metadata read's next call waits after each error: one
+    /// [`SLICE`] while no broker is usable, half the time left and at least
+    /// one [`SLICE`] after a request went unanswered, never past the
+    /// deadline, and not at all after any other error or once the deadline
+    /// has passed.
+    #[test]
+    fn a_metadata_read_paces_its_calls_by_the_error() {
+        let ms = Duration::from_millis;
+        let left = Duration::from_secs(30);
+        let unusable = C::BrokerTransportFailure;
+        let unanswered = C::OperationTimedOut;
+        assert_eq!(next_slice(unusable, left), Some(SLICE));
+        assert_eq!(next_slice(unusable, ms(30)), Some(ms(30)));
+        assert_eq!(next_slice(unanswered, left), Some(left / 2));
+        assert_eq!(next_slice(unanswered, ms(150)), Some(SLICE));
+        assert_eq!(next_slice(unanswered, ms(30)), Some(ms(30)));
+        for code in [unusable, unanswered] {
+            assert_eq!(next_slice(code, Duration::ZERO), None, "{code:?}");
+        }
+        for code in [C::Fail, C::TopicAuthorizationFailed, C::LeaderNotAvailable] {
+            assert_eq!(next_slice(code, left), None, "{code:?}");
+        }
+    }
+
+    /// Pins that a metadata read ends by the deadline its [`Brokers`] was
+    /// built with, while its answer is still awaited, so no read outlasts
+    /// the checks' bound. Regression for #1809.
+    #[test]
+    fn a_metadata_read_ends_by_the_deadline_of_its_brokers() {
+        use crate::client::testing::raw;
+        let broker = crate::testutil::refused_broker();
+        let properties = [("bootstrap.servers", broker.as_str())];
+        let hooks = crate::sink::SinkHooks::detached(SyncClock::new(TestClock::frozen() as _));
+        let brokers = Brokers::new(
+            raw(&properties, ()),
+            raw(&properties, hooks),
+            Duration::ZERO,
+        );
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let io = multi_thread();
+            let _ = tx.send(io.block_on(brokers.metadata(WORK)).map_err(|e| e.code));
+        });
+        match rx.recv_timeout(DEADLINE) {
+            Ok(Err(C::BrokerTransportFailure)) => {}
+            other => panic!("expected a transport failure within {DEADLINE:?}, got {other:?}"),
+        }
+    }
+
+    /// Pins that a metadata read ends by its deadline when the slow broker it
+    /// asked is replaced, mid-call, by one the client cannot reach.
+    /// librdkafka then waits for a usable broker again for the call's full
+    /// length.
+    #[test]
+    #[expect(unsafe_code, reason = "moves a mock broker's advertised listener")]
+    fn a_metadata_read_ends_by_its_deadline_when_its_broker_is_replaced() {
+        use crate::client::testing::raw;
+        use crate::testutil::mock::MockKafka;
+        use std::ffi::CString;
+        let limit = Duration::from_secs(3);
+        let cluster = MockKafka::new();
+        cluster.create_topic(WORK, 1, 1).expect("create topic");
+        cluster
+            .broker_round_trip_time(1, Duration::from_secs(1))
+            .expect("round trip time");
+        let servers = cluster.bootstrap_servers();
+        let unreachable = crate::testutil::refused_broker();
+        let port = unreachable
+            .rsplit(':')
+            .next()
+            .and_then(|p| p.parse().ok())
+            .expect("a port");
+        let host = CString::new("127.0.0.1").expect("host");
+        // SAFETY: `native` is valid while `cluster` lives. The bootstrap
+        // address still reaches the broker; only the listener its metadata
+        // advertises moves.
+        unsafe {
+            rdkafka::bindings::rd_kafka_mock_broker_set_host_port(
+                cluster.native(),
+                1,
+                host.as_ptr(),
+                port,
+            );
+        }
+        let properties = [("bootstrap.servers", servers.as_str())];
+        let hooks = crate::sink::SinkHooks::detached(SyncClock::new(TestClock::frozen() as _));
+        let built = Instant::now();
+        let brokers = Brokers::new(raw(&properties, ()), raw(&properties, hooks), limit);
+        let io = multi_thread();
+        let got = io.block_on(brokers.metadata(WORK)).map_err(|e| e.code);
+        let took = built.elapsed();
+        assert!(
+            took <= limit + 2 * SLICE + Duration::from_millis(300),
+            "the read ended {took:?} after its brokers were built, with {got:?}"
+        );
+    }
+
+    /// Pins that checks ending on their own, before any rejection or the
+    /// bound, return at once on a clock that never moves, with the
+    /// rejection watch and what it holds already dropped.
+    #[test]
+    fn checks_that_end_first_return_with_the_watch_dropped() {
+        let clock = SyncClock::new(TestClock::frozen() as _);
+        let held = Arc::new(());
+        let watched = Arc::downgrade(&held);
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let io = multi_thread();
+            let step = Mutex::new("starting".to_owned());
+            let got = io.block_on(bounded(
+                &step,
+                Duration::from_secs(600),
+                clock,
+                move || {
+                    let _ = &held;
+                    None
+                },
+                async { Ok::<_, KafkaFeedError>(()) },
+            ));
+            let _ = tx.send((got, watched.upgrade().is_none()));
+        });
+        match rx.recv_timeout(DEADLINE) {
+            Ok((Ok(()), true)) => {}
+            other => panic!("expected the checks' result within {DEADLINE:?}, got {other:?}"),
+        }
+    }
+
     /// A broker that answers ApiVersions and drops the connection once the
     /// SASL mechanism handshake request arrives, as a broker or a proxy in
     /// front of it does when it restarts mid-handshake. Returns its address.
@@ -1464,6 +1734,26 @@ mod tests {
                 ),
             );
             assert!(message.contains("certificate verify failed"), "{message}");
+        }
+
+        /// Pins that checks refused by a rejected handshake have closed the
+        /// metadata client by the time they return. Regression for #1809.
+        #[test]
+        fn refused_checks_close_their_clients_before_they_return() {
+            let broker = spate_test::tls_alert_server(b"", 40).to_string();
+            let got = checks_closing_their_clients(
+                &[
+                    ("bootstrap.servers", broker.as_str()),
+                    ("security.protocol", "ssl"),
+                ],
+                LONG,
+            );
+            match got {
+                Err(KafkaFeedError::Refused(message)) => {
+                    assert!(message.contains("SSL alert number 40"), "{message}");
+                }
+                other => panic!("expected a refusal, got {other:?}"),
+            }
         }
     }
 }

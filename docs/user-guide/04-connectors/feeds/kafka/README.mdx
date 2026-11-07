@@ -134,6 +134,9 @@ the read under way and librdkafka's text, such as these:
 … SASL authentication error: Authentication failed: Invalid username or password …
 ```
 
+A read waiting on a request it sent to another broker finishes that wait first,
+within the checks' 30-second bound.
+
 A refused or reset connection stays retryable: the checks wait for a broker the
 client can use, and fail with `KafkaFeedError::Unavailable` once their bound
 passes.
@@ -293,9 +296,10 @@ configuration entry for, which is what a client without `DescribeConfigs` on it
 receives, and a rejected credential or TLS handshake (see
 [Security](#security-tls-mtls-sasl)). Any other failed read fails with
 `KafkaFeedError::Unavailable`. The checks take at most 30 seconds, and an error
-past that bound names the read under way. A publish-only handle's identity needs
-these operations on the four topics too, and `Write` on the work topic (see
-[A publish-only handle](#a-publish-only-handle)). A worker whose source
+past that bound names the read under way. Both clients are closed by the time
+the connect call returns, whatever its result. A publish-only handle's identity
+needs these operations on the four topics too, and `Write` on the work topic
+(see [A publish-only handle](#a-publish-only-handle)). A worker whose source
 publishes units, such as the
 [S3 source](../../sources/s3/README.mdx#reading-a-notifications-object)
 re-enqueueing an overwritten object, needs `Write` on the work topic as well.

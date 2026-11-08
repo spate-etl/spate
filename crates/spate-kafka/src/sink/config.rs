@@ -1040,6 +1040,20 @@ mod tests {
         assert!(parse(&body).is_ok());
     }
 
+    /// Pins the whole refusal of an owned property written as another
+    /// spelling: the section, the reason, and the owned key it sets.
+    #[test]
+    fn a_refused_alias_names_the_owned_key() {
+        let body = format!("{}  rdkafka:\n    topic.acks: \"1\"\n", minimal());
+        assert_eq!(
+            parse(&body).unwrap_err().to_string(),
+            "invalid configuration: sink.kafka: rdkafka.\"topic.acks\" cannot be overridden: \
+             forced to `all`: the framework commits source offsets once a delivery report \
+             confirms, so a report under weaker acks would turn at-least-once into \
+             at-most-once (`topic.acks` sets the same librdkafka property as `acks`)"
+        );
+    }
+
     /// Pins that a refused key is found when it is not the first passthrough
     /// key. `linger.ms` sorts before `topic.acks` in the `BTreeMap`.
     #[test]

@@ -322,7 +322,7 @@ CI runs the workspace suite in up to four jobs:
 | `Test (macOS)` | `macos-26` | `cargo nextest run --profile ci --workspace --all-features --locked` |
 | `Feature matrix and default-feature tests` | `ubuntu-latest` | `cargo xtask hack` |
 
-`cargo xtask hack` runs the suite on default features under the `default` nextest profile, so it runs the tests that `--all-features` skips.
+The `cargo xtask hack` command runs the suite on default features under the `default` nextest profile, so it runs the tests that `--all-features` skips.
 
 On a pull request, `Test (macOS)` runs only when the change touches a build input such as `Cargo.lock` or the nextest config.
 In the merge queue it runs on every entry that builds.

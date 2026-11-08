@@ -42,6 +42,8 @@ Neither shows anything about the fix.
 
 A source file that is new on the branch has no copy at the base, so delete it for the run instead.
 
+A review also reads a test that waits, sleeps or reads the clock against [Tests that do not flake](05-flaky-tests.md).
+
 ## Kill or name each mutant
 
 Run `cargo xtask mutants --since origin/main` before you push.
@@ -72,14 +74,14 @@ That includes the pages under `docs/`, a crate's `README.md`, rustdoc, and the c
 A page or a comment the diff made false is a finding, whether or not the diff touches it.
 For each identifier, config key, default, metric name and error message you change, search the tree for the places that describe it.
 
-[`docs/STYLE.md`](repo:docs/STYLE.md) governs the pages under `docs/`, and `cargo xtask docs` builds them.
+The pages under `docs/` follow [`docs/STYLE.md`](repo:docs/STYLE.md), and `cargo xtask docs` builds them.
 
 Edit a root document only when the change is about what that document is for.
 When a change elsewhere makes a sentence there wrong, correct that sentence and add nothing.
 
 ## Add the changelog fragment
 
-[`changelog.d/README.md`](repo:changelog.d/README.md) says when a change carries a fragment, and when a `Changelog: none` line instead.
+See [`changelog.d/README.md`](repo:changelog.d/README.md) for when a change carries a fragment, and when a `Changelog: none` line instead.
 The review reads the fragment's scope against the diff.
 A breaking change's fragment opens with `**Breaking:**`, and the pull request template's semver box has to match it.
 
@@ -94,8 +96,9 @@ Say where the change delivers less than the issue asked for, more, or something 
 
 Answer questions about your change in your own words ([`CONTRIBUTING.md`](repo:CONTRIBUTING.md)).
 
-[`AI_POLICY.md`](repo:AI_POLICY.md) is the bar for a change an agent did most of.
-It adds two rules: the body names the model, and no commit or body carries an AI attribution trailer.
+[`AI_POLICY.md`](repo:AI_POLICY.md) sets the bar for agentic contributions.
+When an agent did most of the work, the body names the model.
+No commit or body carries an AI attribution trailer, and no commit message refers to a plan or an iteration.
 
 ## Related
 

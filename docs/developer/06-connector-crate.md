@@ -10,10 +10,10 @@ Each section below covers one of the other parts.
 
 ## Write the manifest
 
-End the crate's `description` by naming the `spate` feature an application turns on.
+Write the crate's `description` as one paragraph that says what the crate is, and end it by naming the `spate` feature an application turns on.
 **Why:** a reader who finds the crate on docs.rs or crates.io is then sent to `spate`, the only crate an application depends on.
 
-[`crates/spate-kafka/Cargo.toml`](repo:crates/spate-kafka/Cargo.toml) is a filled-in example.
+For a filled-in example, see [`crates/spate-kafka/Cargo.toml`](repo:crates/spate-kafka/Cargo.toml).
 
 ## Put test-only access behind `testing`
 
@@ -44,11 +44,11 @@ Give a test file that needs an optional feature a `[[test]]` stanza in the crate
 **Why:** `autotests` is left at its default, so cargo collects an undeclared test file anyway, with no `required-features`.
 Every build then compiles it, including a build where the items it imports do not exist.
 
-`crates/spate/tests/manifest.rs` checks each of `spate`'s test targets against its stanza.
+The test file `crates/spate/tests/manifest.rs` checks each of `spate`'s test targets against its stanza.
 No connector crate has that check, so review checks a connector's stanzas.
 
-`cargo xtask hack` runs `cargo check --workspace --all-targets`, which builds every test target on the default feature set.
-The `cargo hack --no-dev-deps` step in the same command removes the dev-dependencies, so it builds no test target.
+The `cargo xtask hack` command runs `cargo check --workspace --all-targets`, which type-checks every test target on the default feature set.
+The `cargo hack --no-dev-deps` step in the same command removes the dev-dependencies, so it checks no test target.
 
 A test that branches on `cfg!(feature = …)` runs its feature-on arm under `cargo xtask test`, which passes `--all-features`.
 It runs its feature-off arm under `cargo xtask hack`, which runs the suite on default features.
@@ -61,10 +61,9 @@ Read its image through `spate_test_support::container_image`, which takes the im
 
 Pass `--pull` to `container_image`, so the call fetches the pinned image by its digest.
 **Why:** without `--pull`, the call resolves the tag alone, and the suite runs whatever image the host holds under that tag.
-`cargo xtask integration-test` and CI pull every pinned image first, so a suite that runs only through them gets the pinned image either way.
 
 A service's lanes are directories under `ci/<service>/`.
-[`ci/README.md`](repo:ci/README.md) says how the lanes are laid out and how to add a service.
+See [`ci/README.md`](repo:ci/README.md) for how the lanes are laid out and how to add a service.
 Put the helpers a suite's tests share in its `tests/support/` module.
 
 CI selects a suite by path, through [`xtask/src/ci/classify.rs`](repo:xtask/src/ci/classify.rs).
@@ -88,14 +87,14 @@ Copy it from `docs/user-guide/04-connectors/_template.mdx`, and keep the heading
 Add more pages to the folder when one page is not enough.
 
 When the page has a support table, name the page in `ci/<service>/DOCS`.
-`cargo xtask tidy supported-versions` then holds the table to the lanes that pin a release line.
+Then `cargo xtask tidy supported-versions` holds the table to the lanes that pin a release line.
 
 ## Add its changelog fragment
 
 A change to the crate's `src/`, `build.rs` or `Cargo.toml` changes what the crate ships, so it carries a fragment under `changelog.d/`.
 When nobody upgrading would notice the change, write `Changelog: none` in the pull request body instead.
 A change to the crate's `tests/`, `benches/` or docs page ships nothing.
-[`changelog.d/README.md`](repo:changelog.d/README.md) says how to write a fragment.
+See [`changelog.d/README.md`](repo:changelog.d/README.md) for how to write a fragment.
 
 ## Related
 

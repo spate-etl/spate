@@ -13,7 +13,7 @@ The first holds the connectors, each turned on by a feature of the `spate` crate
 The second holds the framework: `spate`, `spate-core` and `spate-test`.
 
 One more crate is published and appears in neither table.
-`spate-clickhouse-derive` is the proc macro behind `#[derive(ClickHouseRow)]` in `spate-clickhouse`.
+The proc macro behind `#[derive(ClickHouseRow)]` in `spate-clickhouse` is `spate-clickhouse-derive`.
 
 Each published crate lives under `crates/<name>/`.
 An application depends on `spate` alone, and turns a connector on by its feature.
@@ -27,20 +27,19 @@ Four members set `publish = false`:
 | `xtask/` | `spate-xtask` | The repository automation that `cargo xtask` runs: the gates, CI's change detection and the release tooling |
 | `bench/` | `spate-bench` | The wall-clock A/B benchmark harness |
 | `fuzz/` | `spate-fuzz` | The libFuzzer targets, which build on nightly |
-| `test-support/` | `spate-test-support` | Helpers that only this repository's tests use, such as reading a pinned container image |
+| `test-support/` | `spate-test-support` | Helpers that only this repository's tests and benches use, such as reading a pinned container image |
 
 ## Put shared code in `spate-core`, unless its API names a connector type
 
-When two crates need the same mechanism, it lives in `spate-core`.
-Its public API carries no connector type and no type from a 0.x dependency ([INV-6](../INVARIANTS.md)).
-A helper that only this repository's tests need goes in `test-support/`.
+When two crates need the same mechanism, it lives in `spate-core`, within the limits [INV-6](../INVARIANTS.md) sets on its public API.
+A helper that only this repository's tests and benches need goes in `test-support/`.
 
 **Why:** `spate-core`'s public API is part of Spate's semver promise.
-A 0.x dependency can break its own API in a minor release, and a connector type changes with its connector, so neither can appear there.
+A 0.x dependency can break its own API in a minor release, and a connector type changes with its connector, so INV-6 limits where either can appear in that API.
 
 Do not copy code between crates.
 A change that would add a second copy moves the first one to `spate-core` or `test-support/`.
-[Reuse before you add](08-code-and-comments.md#reuse-before-you-add) gives the whole rule.
+[Reuse before you add](08-code-and-comments.md#reuse-before-you-add) says how to find the first copy.
 
 ## Where the engine's properties are written down
 

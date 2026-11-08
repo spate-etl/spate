@@ -48,7 +48,7 @@ Each tier answers a different question:
 | --- | --- | --- | --- | --- |
 | Counted | `cargo xtask bench counted` | How many instructions a case executes | Linux with valgrind | The region guard gates; the counts are advisory |
 | Allocation snapshots | `cargo xtask bench alloc` | How many allocations and bytes a case requests | Linux x86_64 and aarch64 | Yes: any difference fails |
-| Wall clock | `cargo xtask bench ab`, `cargo xtask bench arms` | Whether a change moved the time on a machine you control | Any | No |
+| Wall clock | `cargo xtask bench ab`, `cargo xtask bench arms` | Whether a change moved the time on a machine you control | Unix | No |
 
 Every tier measures inside one component.
 None of them sweeps Spate's own settings against each other end to end.
@@ -57,7 +57,7 @@ State a claim that no tier can measure as unmeasured.
 
 ## Run the counted tier
 
-`cargo xtask bench counted` counts instructions under valgrind instead of measuring time.
+The counted tier, `cargo xtask bench counted`, counts instructions under valgrind instead of measuring time.
 Its numbers are comparable across machines of one architecture.
 In CI, each architecture compares its own merge base and head.
 
@@ -69,12 +69,12 @@ On macOS, `cargo xtask bench gungraun --check` checks only that the benches buil
 
 Name the file `benches/<something>_gungraun.rs`, and declare it in the crate's `Cargo.toml` as a `[[bench]]` with `harness = false`.
 Nothing else registers it.
-`cargo xtask bench gungraun` finds it by that name, and the bench commands, both CI legs and the CI selector all read the same list.
+The bench commands find it by that name, and both CI legs and the CI selector read the same list.
 Run `cargo xtask bench gungraun` with no argument to print what would run.
 
 Without the `harness = false` stanza, cargo builds the file under the default libtest harness.
-The bench compiles, and fails at run time on its arguments.
-`cargo xtask tidy gungraun-benches` catches the missing stanza.
+The bench then runs no case and exits 0.
+The `gungraun-benches` tidy check catches the missing stanza.
 
 ### Put the measured work in a named `#[inline(never)]` function
 
@@ -87,34 +87,35 @@ The result is a wrong number, never an error.
 
 ### Pass the region guard
 
-`cargo xtask bench region` checks each case's callgrind profile.
+The region guard, `cargo xtask bench region`, checks each case's callgrind profile.
 A case must attribute at least 10% of its collected instructions to the binary under measurement, and must collect at least 1,000 instructions.
 A region can be lost by leaving almost nothing, as well as by leaving the allocator, so the guard checks both.
-Observed cases bottom out at 33.35% on x86_64 and 28.67% on arm64.
+When the guard was added, all forty cases were measured.
+The lowest share was 33.35% on x86_64 and 28.67% on aarch64, and a reproduced lost region held 0.47%.
 
-`cargo xtask bench counted` runs the guard after the benches.
+The `bench counted` command runs the guard after the benches.
 CI runs it on each shard as a gate, while the counts themselves stay advisory.
-`cargo xtask tidy self-test` holds the guard to captured profiles of both shapes, and needs no valgrind.
+The guard's tests run under `cargo xtask tidy self-test`, against captured profiles of both shapes, and need no valgrind.
 
 ### Add a feature arm only when a feature swaps an implementation
 
 CI runs one counted job per package, feature arm and architecture, on Linux x86_64 and aarch64.
-The arms are listed in `feature_arms_for` in `xtask/src/ci/classify.rs`.
+The arms are listed in `feature_arms_for` in [`xtask/src/ci/classify.rs`](repo:xtask/src/ci/classify.rs).
 Add an arm when a feature swaps an implementation the benches execute, and not for every feature.
 
 **Why:** each arm adds a pair of builds and valgrind runs on each architecture.
 
-`cargo xtask tidy self-test` checks that every arm names a feature its package declares.
+A test under `cargo xtask tidy self-test` checks that every arm names a feature its package declares.
 
 ## Run the allocation snapshots
 
-`cargo xtask bench alloc` runs each `benches/<name>_alloc.rs` target in the release profile, once per feature arm.
-It builds them on the stable release pinned in `.github/toolchains/stable/`.
+The command `cargo xtask bench alloc` runs each `benches/<name>_alloc.rs` target in the release profile, once per feature arm.
+It builds them on the stable release pinned in [`.github/toolchains/stable/`](repo:.github/toolchains/stable/).
 It compares each target's output with `benches/alloc/<name>_alloc.<arm>.<arch>.tsv`, and any difference fails CI.
-`--bless` rewrites the files for the host's architecture.
+The `--bless` flag rewrites the files for the host's architecture.
 The command runs on Linux x86_64 and aarch64 only, and refuses any other host.
 
-[`spate_test_support::alloc`](repo:test-support/src/alloc.rs) says what each figure counts.
+Each figure is defined in [`spate_test_support::alloc`](repo:test-support/src/alloc.rs).
 The figures leave out allocations that C code makes through `malloc`, as libzstd and librdkafka do.
 The counted tier's DHAT rows include them.
 
@@ -147,7 +148,7 @@ cargo xtask bench ab --ref main --package spate-avro      # only one crate's tar
 cargo xtask bench arms --head-features spate-json/simd    # two feature arms of this tree
 ```
 
-`--package` narrows the build as well as the report.
+The `--package` flag narrows the build as well as the report.
 Use it while you write or debug one crate's cases, and leave it off for the run a change is accepted on.
 
 ### Add a wall-clock bench
@@ -165,12 +166,12 @@ Run every arm once per repetition, and throw the first pass away.
 The first repetition also hands one arm the cold-start cost, which has been large enough here to decide which arm looked faster.
 
 Report an interval and the repetition count beside the value, so a reader can tell a difference from a spread.
-`cargo xtask bench ab` and `cargo xtask bench arms` do all of this.
+Both `cargo xtask bench ab` and `cargo xtask bench arms` do all of this.
 
 ### Use `bench ab` for a tree and `bench arms` for features
 
-`cargo xtask bench ab` varies the tree.
-`cargo xtask bench arms` varies the Cargo features and holds the tree still, building each arm into a directory of its own.
+The `ab` command varies the tree.
+The `arms` command varies the Cargo features and holds the tree still, building each arm into a directory of its own.
 
 Two legs measured apart and joined with `cargo xtask bench compare` are no substitute for either.
 

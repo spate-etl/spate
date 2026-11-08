@@ -20,7 +20,7 @@ The pins under `.github/toolchains/` are for CI jobs that need one particular re
 
 ## Install the tools the gates call
 
-`cargo xtask ci` runs these tools, and fails naming the first one it cannot find:
+The gates in `cargo xtask ci` call these tools, and the command fails naming the first one it cannot find:
 
 | Tool | Called by | Version |
 | --- | --- | --- |
@@ -42,9 +42,9 @@ These commands need more, and `cargo xtask ci` runs none of them:
 | Command | Needs |
 | --- | --- |
 | `cargo xtask integration-test` | Docker |
-| `cargo xtask docs` | Node, at the version in `.node-version` |
-| `cargo xtask fuzz`, `cargo xtask docsrs` | A nightly toolchain; `--nightly <channel>` selects the dated one that `.github/toolchains/nightly/` pins for CI |
-| `cargo xtask bench counted` | Linux and valgrind |
+| `cargo xtask docs` | Node, at the version in `.node-version`, and the `website/benchmark` submodule: run `git submodule update --init website/benchmark` |
+| `cargo xtask fuzz`, `cargo xtask docsrs` | A nightly toolchain; `--nightly <channel>` selects the dated one that `.github/toolchains/nightly/` pins for CI. The fuzz commands also need cargo-fuzz, which `cargo xtask fuzz install` installs |
+| `cargo xtask bench counted` | Linux, valgrind and `gungraun-runner`, at the versions [Run the counted tier](07-performance.md#run-the-counted-tier) gives |
 | `cargo xtask mutants` | [cargo-mutants](https://mutants.rs) |
 
 ## Exempt your terminal from Gatekeeper on macOS

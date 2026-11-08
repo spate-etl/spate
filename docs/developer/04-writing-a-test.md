@@ -44,7 +44,7 @@ The crate also has these helpers:
 
 Use `#[tokio::test(start_paused = true)]` for code on a current-thread runtime that reads `tokio::time`.
 The clock moves only when the test advances it, or when the runtime has no work and jumps to the next timer.
-`tokio::time::advance` completes every timer it moves past at once, in no fixed order.
+Tokio's `time::advance` completes every timer it moves past at once, in no fixed order.
 To have the timers fire in order, call `tokio::time::sleep` in the test, and the paused runtime moves the clock to each timer in turn.
 
 ### A test clock

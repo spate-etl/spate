@@ -33,8 +33,8 @@ A page here links the document that owns a fact, and does not restate it.
 
 | Document | What it owns |
 | --- | --- |
-| [`CONTRIBUTING.md`](repo:CONTRIBUTING.md) | Issue assignment, the pull request title rule, the body template, and the invariants cited by number |
-| [`AI_POLICY.md`](repo:AI_POLICY.md) | The bar for a contribution an agent did most of |
+| [`CONTRIBUTING.md`](repo:CONTRIBUTING.md) | Issue assignment, the pull request title rule, the body template, the prose rule for comments, commits and bodies, and the invariants cited by number |
+| [`AI_POLICY.md`](repo:AI_POLICY.md) | What a contribution has to withstand, however it was produced, and the rules for agentic contributions |
 | [`RELEASING.md`](repo:RELEASING.md) | Milestones, priorities and the release process |
 | [`SECURITY.md`](repo:SECURITY.md) | The threat model and the disclosure route |
 | [`ci/README.md`](repo:ci/README.md) | The pinned service images and their lanes |

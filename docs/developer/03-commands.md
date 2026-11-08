@@ -4,7 +4,7 @@ description: "The working loop, what cargo xtask ci runs and what CI adds, the t
 
 # Commands and CI
 
-`cargo xtask --help` lists every command, and each command has a `--help` of its own.
+Each command has a `--help` of its own, and `cargo xtask --help` lists them all.
 
 ## The working loop
 
@@ -23,18 +23,20 @@ A pull request must pass `cargo xtask ci` with no argument.
 
 ### What `ci --since` covers
 
-`cargo xtask ci --since [REF]` reads the diff from the merge base of REF and `HEAD`, where REF defaults to `origin/main`.
+With `--since [REF]`, the command reads the diff from the merge base of REF and `HEAD`, where REF defaults to `origin/main`.
 The diff holds commits, staged and unstaged edits, and untracked files.
 It selects each crate the diff changes and every package that depends on that crate, over normal and dev edges.
 
-On that set it runs formatting, clippy, the tests, doctests, rustdoc and the feature matrix.
+On that set it runs clippy, the tests, doctests, rustdoc and the feature matrix.
+It checks formatting across the whole workspace.
 It runs the loom models when `spate-core` is in the set.
 It runs every `tidy` member and the changelog check whatever the set holds.
 
 It skips the type check, `cargo deny`, the fuzz harness and the packages outside the set.
 CI still runs all of them.
 
-A diff that touches a manifest, `Cargo.lock`, `xtask/` or code outside `crates/` runs the full `ci`.
+A diff that touches a manifest, `Cargo.lock`, or any file outside `crates/` other than documentation and `website/`, runs the full `ci`.
+That includes workflows, `.config/`, `ci/`, `scripts/`, `test-support/` and `xtask/`.
 So does a diff that git cannot produce.
 A change to the root `README.md` selects `spate`, which compiles it as a doctest.
 
@@ -62,19 +64,19 @@ It runs these in order, and stops at the first failure:
 The test suite runs under nextest and leaves out the container suites.
 Nextest does not run doctests, so `cargo xtask doctest` runs them.
 
-`cargo xtask doc` builds rustdoc with warnings denied, so a broken intra-doc link fails the build.
+The `doc` step builds rustdoc with warnings denied, so a broken intra-doc link fails the build.
 It does not reach bench support modules, because `cargo doc` never builds them.
 
-`cargo xtask hack` checks every feature alone and the feature-off combinations, builds every target, and runs the tests on default features.
+The `hack` step checks every feature alone and the feature-off combinations, type-checks every target, and runs the tests on default features.
 
-`cargo deny` fails on a license, ban or source finding.
+The `cargo deny` step fails on a license, ban or source finding.
 It reports an advisory without failing.
 CI fails on an advisory only when a pull request changes the dependency inputs.
 
-`cargo xtask tidy` runs the repository checks.
-`cargo xtask tidy --list` names them, and `cargo xtask tidy <name>` runs one.
+The repository checks run under `cargo xtask tidy`.
+Its `--list` flag names them, and `cargo xtask tidy <name>` runs one.
 
-`cargo xtask tidy markdown` runs `rumdl check`, so it needs `rumdl` on your `PATH`.
+The `markdown` check runs `rumdl check`, so it needs `rumdl` on your `PATH`.
 It fails a page under `docs/` that runs past the width `rumdl.toml` sets, and `rumdl fmt` rewraps the page.
 Under `docs/developer/` each sentence sits on a line of its own, and `rumdl fmt` splits a line that holds two.
 
@@ -95,6 +97,8 @@ Its other jobs run commands of their own, so a green `cargo xtask ci` on your ma
 | `Semver` | `cargo semver-checks` on the crates whose public API the change can move |
 | `Declared version floors build` | The type check with each direct dependency at its lowest declared version, when a manifest changes |
 | `Fuzz targets build`, `Build site` | The fuzz harness and the website |
+| `Release dry run` | A rehearsal of the release, of up to an hour, when a pull request changes release tooling |
+| `Analyze (<language>)` | CodeQL's analysis, on every pull request |
 
 [How CI differs from your machine](05-flaky-tests.md#how-ci-differs-from-your-machine) says what changes for a test on those runners.
 
@@ -152,6 +156,7 @@ The `docker` profile never kills a test.
 
 **Why:** a cold image pull can take longer than any limit worth setting, and a killed test reports as a timeout, which looks the same as a hang.
 
+The other profiles run every test after one fails.
 The `mutants` profile stops at the first failing test, because one failure decides a mutant.
 The `ci` and `docker` profiles write a JUnit report to `junit.xml`.
 
@@ -159,7 +164,7 @@ The `ci` and `docker` profiles write a JUnit report to `junit.xml`.
 
 The container suites need Docker.
 Their tests are marked `#[ignore]`, so a normal run skips them.
-Run them with `cargo xtask integration-test`, which pulls every pinned image and then runs them under the `docker` profile.
+Run them with `cargo xtask integration-test`, which pulls each service's selected lane and then runs them under the `docker` profile.
 
 A suite that boots a real server runs it at a pinned version.
 A `SPATE_<SERVICE>_LANE` variable selects the lane:
@@ -169,9 +174,10 @@ SPATE_CLICKHOUSE_LANE=stable cargo xtask integration-test
 ```
 
 When the selected S3 store declares no notifications, the command leaves out the notification suite.
-[`ci/README.md`](repo:ci/README.md) lists the services, their lanes and what CI runs of each.
+See [`ci/README.md`](repo:ci/README.md) for the services, their lanes and what CI runs of each.
 
-`spate`'s `e2e_examples` suite drives the shipped example binaries against real servers.
+The `e2e_examples` suite in `spate` runs each example whose stanza carries no `test = true`, as the shipped binary against real servers.
+It stops an example that has no stop condition with `SIGTERM`, and requires it to exit 0 within the drain deadline.
 It takes minutes and reports nightly, so the `docker` profile's `default-filter` leaves it out of every other run.
 Select it by name:
 
@@ -181,12 +187,12 @@ cargo nextest run --profile docker -p spate --all-features --locked \
   --ignore-default-filter --test-threads 1
 ```
 
-`--all-features` turns on `spate-kafka/tls`, which compiles OpenSSL from source.
+The `--all-features` flag turns on `spate-kafka/tls`, which compiles OpenSSL from source.
 When your change does not touch TLS, pass the features that the `e2e_examples` stanza in `crates/spate/Cargo.toml` requires.
 
 ## Run the mutants
 
-`cargo xtask mutants --since REF` runs cargo-mutants over the diff from the merge base of REF and `HEAD` to your working tree.
+The command `cargo xtask mutants --since REF` runs cargo-mutants over the diff from the merge base of REF and `HEAD` to your working tree.
 REF defaults to `origin/main`.
 The command takes its settings from `.cargo/mutants.toml`, and the tests run under the `mutants` profile.
 
@@ -197,7 +203,7 @@ The command exits 2 when a mutant survives.
 The container suites do not run under it, so a mutant that only they would catch reports as missed.
 Mutate that guard by hand and run its container suite.
 
-`--budget MINUTES` stops cargo-mutants after that many minutes, and the command exits non-zero.
+The `--budget MINUTES` flag stops cargo-mutants after that many minutes, and the command exits non-zero.
 The summary then lists the survivors and timeouts among the mutants it tested, and names each mutant it did not reach.
 
 CI runs the command on each pull request with a budget below the job's timeout.
@@ -218,7 +224,7 @@ CI's `Detect changes` job reads the paths a pull request changed, and selects th
 - **macOS tests.**
   A pull request runs them when a build input changes, and every merge-queue entry that builds runs them.
 
-`cargo xtask tidy self-test` runs xtask's own tests, which check each classifier against the crate graph.
+The tests of xtask itself run under `cargo xtask tidy self-test`, and check each classifier against the crate graph.
 
 ## Related
 

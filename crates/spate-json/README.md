@@ -36,9 +36,11 @@ deserializer:
 
 Each value above is the default.
 
-With `reject_duplicate_keys: false`, an object with a repeated key keeps the
-last value. With `true`, a repeated key at any depth makes the document an
-error for `on_error` to handle. The check parses each document a second time.
+With `reject_duplicate_keys: false`, `build_value()` keeps the last value of a
+repeated key. A `#[derive(Deserialize)]` struct rejects a repeated field on its
+own, so under `build_serde` that document is a `malformed` record error even
+with the check off. With `true`, a repeated key at any depth makes the document
+an error for `on_error` to handle. The check parses each document a second time.
 
 `JsonDeserializerBuilder::from_component` reads the section.
 `build_serde::<T>()` decodes each document into your own `T: DeserializeOwned`,
@@ -70,7 +72,8 @@ A source that frames its own byte stream, such as the S3 source, takes this
 crate's `NdjsonFramer`. It is a bounded, chunk-fed framer: the source feeds it
 an object in chunks, and it cuts a record at each `\n`, strips one trailing `\r`
 and skips blank lines. A line longer than the bound it is built with is an
-error. `S3Source::with_framer` takes it, and `s3_backfill.rs` wires one in.
+error. `S3Source::with_framer` takes a factory that builds one per object, and
+`s3_backfill.rs` wires one in.
 
 Exactly one side frames. A source with a framer hands over one record per
 payload, and `for_source_framing` then keeps `single` and returns an error for
@@ -102,14 +105,12 @@ A decode error then meets the chain's deserializer error policy, set with
 A record that `on_error: skip` drops never reaches the sink. The source commits
 past it once the rest of its batch is written.
 
-Drops under `on_error: skip` log a rate-limited `WARN`. Each drop is also
-counted in `spate_json_deser_records_dropped_total`, with `reason` set to
-`malformed` or `duplicate_key`, when the builder was given
-`JsonDeserializerBuilder::with_metrics`. The chain's `with_metrics` does not
-affect that counter. A dropped array counts once. The framework's deserializer
-metrics never see these drops, because the decode call succeeds. On a chain
-built with its own `with_metrics`, those metrics count each payload that the
-chain's `Skip` policy drops.
+Drops under `on_error: skip` log a rate-limited `WARN`. The crate also counts
+each drop, when the builder is given `JsonDeserializerBuilder::with_metrics`,
+and the chain's `with_metrics` does not affect that count. A dropped array
+counts once. The framework's deserializer metrics count each payload that the
+chain's `Skip` policy drops, on a chain built with its own `with_metrics`, and
+never see these drops, because the decode call succeeds.
 
 The
 [Error handling section of the JSON format page](https://spate.kainth.dev/docs/user-guide/connectors/formats/json#error-handling)
@@ -135,11 +136,10 @@ cover both policies.
 
 ## Metrics
 
-The crate registers one family of its own, for records that `on_error: skip`
-drops, and only when the builder is given `with_metrics`. The framework's
-deserializer families wrap the decoder as they wrap any format. The
+The
 [Metrics section of the JSON format page](https://spate.kainth.dev/docs/user-guide/connectors/formats/json#metrics)
-lists the family with its labels.
+lists the crate's drop counter and the framework's deserializer families, with
+their labels.
 
 ## Related
 

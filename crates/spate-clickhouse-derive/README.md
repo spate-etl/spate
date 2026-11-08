@@ -54,12 +54,13 @@ The derive refuses these at compile time:
 
 ## Crate path
 
-The generated code names `ClickHouseRow` by an absolute path. The derive looks
-for `spate-clickhouse` among the calling crate's dependencies first, then for
-`spate`. A crate that reaches the sink through a facade of its own sets the path
-on the struct with `#[clickhouse(crate = "my_facade::clickhouse")]`, naming the
-module that holds `ClickHouseRow`. With neither dependency and no attribute, the
-build fails with an error that names the attribute.
+Without the attribute below, the generated code names `ClickHouseRow` by an
+absolute path. The derive looks for `spate-clickhouse` among the calling crate's
+dependencies first, then for `spate`. A crate that reaches the sink through a
+facade of its own sets the path on the struct with
+`#[clickhouse(crate = "my_facade::clickhouse")]`, naming the module that holds
+`ClickHouseRow`. With neither dependency and no attribute, the build fails with
+an error that names the attribute.
 
 ## Related
 

@@ -125,6 +125,14 @@ fn a_log_line_arrives_while_the_generator_runs() {
             .unwrap()
             .success()
     );
+    // Open until the run ends, so the shell's open always finds a writer and
+    // the release waits in the pipe however late the shell opens it. Read and
+    // write, so neither the open nor the write waits for a reader.
+    let mut release = std::fs::File::options()
+        .read(true)
+        .write(true)
+        .open(&release)
+        .unwrap();
 
     let mut child = shim
         .command()
@@ -153,15 +161,7 @@ fn a_log_line_arrives_while_the_generator_runs() {
         }
     };
 
-    // Read and write, so opening the pipe does not wait for a reader that a
-    // failed run never reaches.
-    std::fs::File::options()
-        .read(true)
-        .write(true)
-        .open(&release)
-        .unwrap()
-        .write_all(b"\n")
-        .unwrap();
+    release.write_all(b"\n").unwrap();
     assert_eq!(child.wait().unwrap().code(), Some(7));
     assert!(held, "the line arrived only once the generator ended");
 }

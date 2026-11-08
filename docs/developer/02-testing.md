@@ -1,5 +1,5 @@
 ---
-description: "How a test is written here: act on signalled state, own the environment, let no elapsed time decide a result, and pick the harness that fits the code."
+description: "How a test is written here: act on signalled state, own the environment, let real elapsed time decide a result only when a librdkafka or broker timer is the property, and pick the harness that fits the code."
 ---
 
 # Writing a test
@@ -94,7 +94,7 @@ partition and hashed ids would not promise it:
 ```rust file=crates/spate-kafka/tests/feed_kafka.rs region=fixed_ids title="feed_kafka.rs"
 ```
 
-### Real elapsed time decides no result
+### Real elapsed time decides no result, with one exception
 
 A wall-clock bound catches a hang. It sits far above any latency a loaded
 machine shows, and reaching it says the test hung: pass `spate_test::HANG` to
@@ -107,7 +107,7 @@ A timing property of the code is tested on a clock the test moves. Code on OS
 threads or a multi-thread runtime holds a `SharedClock`, and a test hands it a
 `TestClock`. Code on a current-thread tokio runtime reading `tokio::time` runs
 under `#[tokio::test(start_paused = true)]`. A fixed sleep belongs only in such
-a test, on that clock.
+a test, on that clock, or in the one case at the end of this section.
 
 The shape that fails, shortened to a sketch:
 
@@ -158,12 +158,13 @@ place.
 
 To check that something did not happen, a test waits for an event that shows
 the code has gone past the point where it would have happened, and then checks
-the result once. The Kafka pause test does this by counting the Fetch requests
-the mock cluster receives. Each broker connection in librdkafka sends one Fetch
-at a time and handles its reply before it sends the next. This means that once
-two more Fetch requests arrive after the produce, at least one fetch has
-completed in full. The test can then check that the paused lane received
-nothing:
+the result once. The Kafka test
+[`pause_stops_delivery_and_resume_recovers_gapless`](repo:crates/spate-kafka/tests/mock_cluster.rs)
+does this by counting the Fetch requests the mock cluster receives. Each broker
+connection in librdkafka sends one Fetch at a time and handles its reply before
+it sends the next. This means that once two more Fetch requests arrive after
+the test produces its records, at least one fetch has completed in full. The
+test can then check that the paused lane received nothing:
 
 ```rust file=crates/spate-kafka/tests/mock_cluster.rs region=absence_after_a_signal title="mock_cluster.rs"
 ```
@@ -173,8 +174,10 @@ running out, such as `session.timeout.ms` or a broker's `segment.ms`. No test
 clock controls those timers, so the test has to let real time pass. It may wait
 past the timer, or assert that at least that much time has passed, and a
 comment starting `Elapsed time is the property` names the timer. A slow machine
-can only make elapsed time longer. This means a minimum like the one below
-fails only when the code is wrong:
+can only make elapsed time longer. This means a minimum on elapsed time fails
+only when the code is wrong. The Kafka feed test
+[`a_unit_whose_worker_is_killed_mid_read_is_delivered_again`](repo:crates/spate-kafka/tests/feed_kafka.rs)
+asserts that worker B read the unit only after worker A's session had lapsed:
 
 ```rust file=crates/spate-kafka/tests/feed_kafka.rs region=lower_bound_on_session title="feed_kafka.rs"
 ```

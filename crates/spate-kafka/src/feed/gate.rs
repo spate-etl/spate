@@ -42,6 +42,8 @@ pub(crate) struct Gate {
     core: Arc<Core>,
     producer: Producer,
     step: Duration,
+    /// The bound on each watermark request.
+    request: Duration,
     /// The bound on a pass, from the moment it takes its deliveries. A pass
     /// can run up to two steps past it.
     delivery_timeout: Duration,
@@ -79,6 +81,7 @@ impl Gate {
             core,
             producer,
             step: GATE_STEP,
+            request: GATE_STEP,
             delivery_timeout,
         }
     }
@@ -87,6 +90,15 @@ impl Gate {
     #[cfg(test)]
     pub(crate) fn with_step(mut self, step: Duration) -> Gate {
         self.step = step;
+        self.request = step;
+        self
+    }
+
+    /// The gate with `bound` on each watermark request, so a test can step its
+    /// waits fast without bounding a broker reply by that step.
+    #[cfg(test)]
+    pub(crate) fn with_request_bound(mut self, bound: Duration) -> Gate {
+        self.request = bound;
         self
     }
 
@@ -261,7 +273,7 @@ impl Gate {
     }
 
     /// Read the low and high watermarks of attempt `partition` for the
-    /// pass begun at `started`, each request bounded by a step and begun
+    /// pass begun at `started`, each request bounded by `request` and begun
     /// only before the pass's bound.
     ///
     /// librdkafka reads the two with one ListOffsets request each, and when
@@ -278,7 +290,7 @@ impl Gate {
         let (lwm, hwm) = match self.producer.client().fetch_watermarks(
             &self.core.topics.attempt,
             partition,
-            self.step,
+            self.request,
         ) {
             Ok(marks) => marks,
             Err(e) => return self.failed(partition, &e),
@@ -332,7 +344,7 @@ impl Gate {
         let topic = &*self.core.topics.attempt;
         let mut tpl = TopicPartitionList::new();
         tpl.add_partition_offset(topic, partition, at)?;
-        list_offsets(self.producer.client(), &mut tpl, self.step)?;
+        list_offsets(self.producer.client(), &mut tpl, self.request)?;
         let read = tpl
             .find_partition(topic, partition)
             .ok_or(KafkaError::MetadataFetch(RDKafkaErrorCode::BadMessage))?;

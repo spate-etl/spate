@@ -2899,7 +2899,9 @@ mod cluster {
             .fetch_metadata(Some(ATTEMPTS), Duration::from_secs(10))
             .unwrap();
         let bound = Duration::from_secs(3600);
-        let gate = Gate::new(Arc::clone(&core), Producer::clone(&producer), bound).with_step(STEP);
+        let gate = Gate::new(Arc::clone(&core), Producer::clone(&producer), bound)
+            .with_step(STEP)
+            .with_request_bound(spate_test::HANG);
         let (ended, end) = mpsc::channel();
         std::thread::spawn(move || {
             gate.pass();
@@ -2967,8 +2969,9 @@ mod cluster {
             .client()
             .fetch_metadata(Some(ATTEMPTS), Duration::from_secs(10))
             .unwrap();
-        let gate =
-            Gate::new(Arc::clone(&core), producer, Duration::from_secs(3600)).with_step(STEP * 100);
+        let gate = Gate::new(Arc::clone(&core), producer, Duration::from_secs(3600))
+            .with_step(STEP * 100)
+            .with_request_bound(spate_test::HANG);
         gate.pass();
         let reason = core
             .lock()
@@ -3042,8 +3045,9 @@ mod cluster {
         let mut errors = vec![RDKafkaRespErr::RD_KAFKA_RESP_ERR_NO_ERROR; 2];
         errors.extend([RDKafkaRespErr::RD_KAFKA_RESP_ERR_TOPIC_AUTHORIZATION_FAILED; 50]);
         cluster.request_errors(RDKafkaApiKey::ListOffsets, &errors);
-        let gate =
-            Gate::new(Arc::clone(&core), producer, Duration::from_secs(3600)).with_step(STEP * 100);
+        let gate = Gate::new(Arc::clone(&core), producer, Duration::from_secs(3600))
+            .with_step(STEP * 100)
+            .with_request_bound(spate_test::HANG);
         gate.pass();
         let st = core.lock();
         let reason = &st.signal.latched().expect("the feed stopped").reason;
@@ -3214,7 +3218,9 @@ mod cluster {
             .fetch_metadata(Some(ATTEMPTS), Duration::from_secs(10))
             .unwrap();
         let bound = Duration::from_secs(3600);
-        let gate = Gate::new(Arc::clone(&core), Producer::clone(&producer), bound).with_step(STEP);
+        let gate = Gate::new(Arc::clone(&core), Producer::clone(&producer), bound)
+            .with_step(STEP)
+            .with_request_bound(spate_test::HANG);
         let capture = spate_test::LogCapture::new();
         let dispatch = warnings_to(&capture);
         // librdkafka serves the refusal as the read's error when its reply
@@ -3275,8 +3281,9 @@ mod cluster {
         let mut errors = vec![RDKafkaRespErr::RD_KAFKA_RESP_ERR_NO_ERROR; 2];
         errors.extend([RDKafkaRespErr::RD_KAFKA_RESP_ERR_TOPIC_AUTHORIZATION_FAILED; 50]);
         cluster.request_errors(RDKafkaApiKey::ListOffsets, &errors);
-        let gate =
-            Gate::new(Arc::clone(&core), producer, Duration::from_secs(3600)).with_step(STEP * 100);
+        let gate = Gate::new(Arc::clone(&core), producer, Duration::from_secs(3600))
+            .with_step(STEP * 100)
+            .with_request_bound(spate_test::HANG);
         gate.pass();
         let st = core.lock();
         let reason = &st.signal.latched().expect("the feed stopped").reason;
@@ -3468,7 +3475,9 @@ mod cluster {
             .unwrap();
         let capture = spate_test::LogCapture::new();
         let bound = Duration::from_secs(3600);
-        let gate = Gate::new(Arc::clone(&core), producer, bound).with_step(Duration::from_secs(1));
+        let gate = Gate::new(Arc::clone(&core), producer, bound)
+            .with_step(Duration::from_secs(1))
+            .with_request_bound(spate_test::HANG);
         // Advanced while the round trip holds the watermark read.
         pass_advancing(&gate, &warnings_to(&capture), &clock, bound, || {
             core.gate_reads.load(Ordering::SeqCst) == 1
@@ -4531,7 +4540,8 @@ mod cluster {
             .broker_round_trip_time(1, Duration::from_millis(500))
             .unwrap();
         let gate = Gate::new(Arc::clone(&core), producer.clone(), config.delivery_timeout)
-            .with_step(Duration::from_secs(5));
+            .with_step(Duration::from_secs(5))
+            .with_request_bound(spate_test::HANG);
         let pass = std::thread::spawn(move || gate.pass());
         wait_until(
             DEADLINE,

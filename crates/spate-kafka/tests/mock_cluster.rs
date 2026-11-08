@@ -13,7 +13,7 @@ use spate_core::metrics::names;
 use spate_core::record::PartitionId;
 use spate_core::source::{PayloadBatch, Source, SourceCtx, SourceEvent, SourceLane};
 use spate_kafka::{KafkaSource, KafkaSourceConfig};
-use spate_test::wait_until;
+use spate_test::{HANG, wait_until};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
@@ -2338,13 +2338,11 @@ fn a_partial_refusal_stores_the_owned_offsets() {
     );
 }
 
-/// Accepting an assignment for several consumers spends one
-/// committed-offset lookup bound in total, so one `poll_events` call does
-/// not block the controller thread for a lookup per consumer.
+/// Several consumers start while the coordinator answers every committed-offset
+/// lookup with "load in progress": the accept's one lookup bound runs out and
+/// librdkafka resolves the starts. The source's unit tests pin that bound.
 #[test]
-fn one_assignment_spends_one_lookup_bound() {
-    /// `COMMITTED_LOOKUP_TIMEOUT`, plus slack for the assign itself.
-    const BOUND: Duration = Duration::from_secs(13);
+fn one_assignment_starts_while_the_coordinator_loads_offsets() {
     let cluster = MockKafka::new();
     cluster.hold_first_rebalance();
     cluster.create_topic(TOPIC, 3, 1).expect("create topic");
@@ -2363,24 +2361,14 @@ fn one_assignment_spends_one_lookup_bound() {
     let cp = Checkpointer::new();
     source.open(SourceCtx::new(cp.handle())).expect("open");
 
-    let deadline = Instant::now() + Duration::from_secs(120);
-    loop {
-        assert!(Instant::now() < deadline, "no assignment");
-        let started = Instant::now();
-        let outcome = source.poll_events(Duration::from_millis(100));
-        let took = started.elapsed();
-        assert!(
-            took <= BOUND,
-            "one poll_events call blocked the controller thread for {took:?}"
-        );
-        // A consumer that joins after the hold ended starts a later epoch, so
-        // this waits for the accept that carries every lane.
-        if let Ok(SourceEvent::LanesAssigned(lanes)) = outcome
-            && lanes.len() == 3
-        {
-            return;
-        }
-    }
+    // A consumer that joins after the hold ended starts a later epoch, so this
+    // waits for the accept that carries every lane.
+    wait_until(HANG, "every lane", || {
+        matches!(
+            source.poll_events(Duration::from_millis(100)),
+            Ok(SourceEvent::LanesAssigned(lanes)) if lanes.len() == 3
+        )
+    });
 }
 
 /// A control batch written by hand reaches a split queue as a transaction
@@ -3449,30 +3437,12 @@ mod latest_start {
     /// Regression for #1704.
     #[test]
     fn a_held_start_gives_way_to_a_rebalance() {
-        use rdkafka::bindings as sys;
-
         let cluster = MockKafka::new();
         cluster.create_topic(TOPIC, 1, 1).expect("create topic");
         let brokers = cluster.bootstrap_servers();
         produce(&brokers, TOPIC, 3, 1, "before");
-        let mock = cluster.native();
-        // SAFETY: the pointer is valid while `cluster` lives, across this test.
-        unsafe { sys::rd_kafka_mock_start_request_tracking(mock) };
-        let joins = || {
-            let mut count = 0;
-            // SAFETY: as above. The array holds `count` requests until it is destroyed.
-            unsafe {
-                let requests = sys::rd_kafka_mock_get_requests(mock, &raw mut count);
-                let seen = (0..count)
-                    .filter(|i| {
-                        sys::rd_kafka_mock_request_api_key(*requests.add(*i))
-                            == RDKafkaApiKey::JoinGroup as i16
-                    })
-                    .count();
-                sys::rd_kafka_mock_request_destroy_array(requests, count);
-                seen
-            }
-        };
+        cluster.track_requests();
+        let joins = || cluster.received(RDKafkaApiKey::JoinGroup);
         let config = || {
             let mut cfg = quiet_latest(&brokers, "held-rebalance");
             cfg.rdkafka
@@ -3967,11 +3937,10 @@ mod latest_start {
         });
     }
 
-    /// One accept under `latest` spends one lookup bound across the list too.
+    /// Several consumers start under `latest` through listings the leader
+    /// refuses at first.
     #[test]
-    fn one_assignment_under_latest_spends_one_lookup_bound() {
-        /// `COMMITTED_LOOKUP_TIMEOUT`, plus slack for the assign itself.
-        const BOUND: Duration = Duration::from_secs(13);
+    fn one_assignment_under_latest_starts_through_refused_listings() {
         let (cluster, brokers) = cluster_with_records(3);
         cluster.hold_first_rebalance();
         cluster.request_errors(
@@ -3983,26 +3952,18 @@ mod latest_start {
         let mut source = KafkaSource::new(cfg);
         let cp = Checkpointer::new();
         source.open(SourceCtx::new(cp.handle())).expect("open");
-        let deadline = Instant::now() + Duration::from_secs(120);
-        loop {
-            assert!(Instant::now() < deadline, "no assignment");
-            let started = Instant::now();
-            let outcome = source.poll_events(Duration::from_millis(100));
-            let took = started.elapsed();
-            assert!(took <= BOUND, "one poll blocked for {took:?}");
-            if let Ok(SourceEvent::LanesAssigned(lanes)) = outcome
-                && lanes.len() == 3
-            {
-                break;
-            }
-        }
+        wait_until(HANG, "every lane", || {
+            matches!(
+                source.poll_events(Duration::from_millis(100)),
+                Ok(SourceEvent::LanesAssigned(lanes)) if lanes.len() == 3
+            )
+        });
     }
 
-    /// A start commit's wait stays inside the broker's own bound, one
-    /// `socket.timeout.ms` here, with slack.
+    /// A source starts under `latest` with `socket.timeout.ms` below the accept's
+    /// start-commit bound. The source's unit tests pin the bound itself.
     #[test]
-    fn a_start_commit_waits_outside_the_lookup_bound() {
-        const BOUND: Duration = Duration::from_secs(25);
+    fn a_start_commit_settles_under_a_short_socket_timeout() {
         let (_cluster, brokers) = cluster_with_records(1);
         let mut cfg = quiet_latest(&brokers, "commit-bound");
         cfg.rdkafka
@@ -4010,19 +3971,11 @@ mod latest_start {
         let mut source = KafkaSource::new(cfg);
         let cp = Checkpointer::new();
         source.open(SourceCtx::new(cp.handle())).expect("open");
-        let deadline = Instant::now() + Duration::from_secs(60);
-        loop {
-            assert!(Instant::now() < deadline, "no assignment");
-            let started = Instant::now();
-            let outcome = source.poll_events(Duration::from_millis(100));
-            assert!(
-                started.elapsed() <= BOUND,
-                "blocked {:?}",
-                started.elapsed()
-            );
-            if matches!(outcome, Ok(SourceEvent::LanesAssigned(_))) {
-                break;
-            }
-        }
+        wait_until(HANG, "an assignment", || {
+            matches!(
+                source.poll_events(Duration::from_millis(100)),
+                Ok(SourceEvent::LanesAssigned(_))
+            )
+        });
     }
 }

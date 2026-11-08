@@ -2363,7 +2363,7 @@ fn one_assignment_starts_while_the_coordinator_loads_offsets() {
 
     // A consumer that joins after the hold ended starts a later epoch, so this
     // waits for the accept that carries every lane.
-    wait_until(Duration::from_secs(120), "every lane", || {
+    wait_until(HANG, "every lane", || {
         matches!(
             source.poll_events(Duration::from_millis(100)),
             Ok(SourceEvent::LanesAssigned(lanes)) if lanes.len() == 3
@@ -3952,7 +3952,7 @@ mod latest_start {
         let mut source = KafkaSource::new(cfg);
         let cp = Checkpointer::new();
         source.open(SourceCtx::new(cp.handle())).expect("open");
-        wait_until(Duration::from_secs(120), "every lane", || {
+        wait_until(HANG, "every lane", || {
             matches!(
                 source.poll_events(Duration::from_millis(100)),
                 Ok(SourceEvent::LanesAssigned(lanes)) if lanes.len() == 3

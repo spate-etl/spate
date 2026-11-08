@@ -450,7 +450,7 @@ mod slow_commits {
     use spate_core::error::ErrorClass;
     use spate_core::source::{Source, SourceCtx, SourceEvent};
     use spate_kafka::{KafkaSource, KafkaSourceConfig};
-    use spate_test::wait_until;
+    use spate_test::{HANG, wait_until};
     use std::collections::BTreeMap;
     use std::time::Duration;
     use support::MockKafka;
@@ -495,7 +495,7 @@ mod slow_commits {
         let mut source = KafkaSource::new(cfg);
         let cp = Checkpointer::new();
         source.open(SourceCtx::new(cp.handle())).expect("open");
-        wait_until(Duration::from_secs(100), "lanes", || {
+        wait_until(HANG, "lanes", || {
             match source.poll_events(Duration::from_millis(100)) {
                 Ok(SourceEvent::LanesAssigned(_)) => true,
                 Err(e) if e.class() == ErrorClass::Fatal => panic!("{e}"),
@@ -787,6 +787,8 @@ mod slow_listing {
         let cp = Checkpointer::new();
         let mut source = KafkaSource::new(cfg);
         source.open(SourceCtx::new(cp.handle())).expect("open");
+        // Three listings wait 20 s each, so this sits above `HANG` and under the
+        // nextest kill.
         wait_until(Duration::from_secs(90), "every lane", || {
             let outcome = source.poll_events(Duration::from_millis(100));
             matches!(outcome, Ok(SourceEvent::LanesAssigned(lanes)) if lanes.len() == 3)

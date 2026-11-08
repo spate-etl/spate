@@ -40,6 +40,11 @@ import {
 //     architecture prose the Concepts section).
 //   - developer/testing -> developer/writing-a-test (the page was rewritten
 //     under a new slug; its flake rules moved to developer/flaky-tests).
+//   - developer/{benchmarks-and-fuzzing,per-record-path} ->
+//     developer/performance, developer/code-style ->
+//     developer/code-and-comments, developer/reading-a-review ->
+//     developer/before-review (the developer guide was rewritten; fuzzing
+//     moved to developer/writing-a-test).
 //
 // A redirect whose `to` names a page that no longer exists FAILS the build, so
 // deleting a page means deleting any redirect aimed at it. This is only caught
@@ -66,6 +71,10 @@ const clientRedirects: PluginConfig = [
       },
       { from: '/docs/DESIGN', to: '/docs/user-guide/concepts' },
       { from: '/docs/developer/testing', to: '/docs/developer/writing-a-test' },
+      { from: '/docs/developer/benchmarks-and-fuzzing', to: '/docs/developer/performance' },
+      { from: '/docs/developer/per-record-path', to: '/docs/developer/performance' },
+      { from: '/docs/developer/code-style', to: '/docs/developer/code-and-comments' },
+      { from: '/docs/developer/reading-a-review', to: '/docs/developer/before-review' },
     ],
   },
 ];

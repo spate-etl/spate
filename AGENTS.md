@@ -59,7 +59,7 @@ Traps here:
 - **Pass `--locked` on any ad-hoc cargo call**, as CI does. Without it a command
   can resolve a different graph and hide a failure CI will then find. The
   commands that cannot take it are listed in
-  [Commands and gates](docs/developer/01-commands.md#commands).
+  [Commands and CI](docs/developer/03-commands.md#pass---locked-except-where-cargo-cannot-take-it).
 - **`actionlint` runs locally only.** After touching a workflow, run
   `actionlint .github/workflows/*.yml`; that is the only time it runs at all.
 - **A local `zizmor` run is offline.** CI runs it through `cargo xtask tidy`
@@ -77,7 +77,7 @@ keep a test passing on every CI runner.
 ## Comments
 
 How a comment and its rustdoc are written, and the reuse rule a change meets
-before it adds code, is [Code and comments](docs/developer/05-code-style.md).
+before it adds code, is [Code and comments](docs/developer/08-code-and-comments.md).
 
 ## Documentation
 
@@ -92,7 +92,7 @@ a person needs lives in a document they read, which this file links to.
 Subjects, titles and bodies follow
 [`CONTRIBUTING.md`](CONTRIBUTING.md#opening-a-pull-request) and
 [`AI_POLICY.md`](AI_POLICY.md#agentic-contributions); scope follows
-[Code and comments](docs/developer/05-code-style.md#scope). No issue shorthand
+[Code and comments](docs/developer/08-code-and-comments.md#keep-a-change-to-one-purpose). No issue shorthand
 that only resolves in this session.
 
 ## Filing an issue
@@ -119,7 +119,7 @@ closed unfixed). Check the issue afterwards.
 
 ## Done means
 
-- [Reading a review](docs/developer/06-reading-a-review.md) is the list a
+- [Before you open a pull request](docs/developer/09-before-review.md) is the list a
   change is read against. Run it before handing over.
 - No unrun or failing tests handed over. If something is blocked, say which part
   and why, rather than narrowing the task to what passed.

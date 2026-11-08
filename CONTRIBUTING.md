@@ -63,16 +63,9 @@ milestone or a priority is in
 
 ## Building and testing
 
-The default suites need a recent stable Rust toolchain. `rust-version` in
-`Cargo.toml` declares the MSRV, and CI holds the crates to that floor.
-
-```sh
-cargo xtask ci       # everything a pull request must pass
-cargo xtask --help   # the commands, each with its own --help
-```
-
-`cargo xtask ci` also runs tools that are not part of the toolchain, such as
-`cargo nextest` and `cargo deny`, and fails naming any it cannot find.
+[Getting started](docs/developer/01-getting-started.md) sets up a clone: the
+toolchain, the tools the gates call, and the commit hook. `cargo xtask ci` runs
+everything a pull request must pass.
 
 A new condition, match arm or bound comes with the test that kills its mutant.
 The [developer guide](docs/developer/README.md) has the rest of the build, test
@@ -116,6 +109,10 @@ for a change goes in the pull request body, and a reason the next editor of the
 code needs goes in a comment beside it. Write both for somebody who was not in
 the conversation.
 
+In comments, commit messages and pull request bodies, avoid the dramatic
+em-dash, the colon reveal, antithesis framing, evaluative tails and empty
+intensifiers. Replacing one of these with another is no fix.
+
 A change to what a crate ships needs a **changelog fragment**, and one nobody
 upgrading would notice carries a line reading `Changelog: none` in the pull
 request body. [`changelog.d/README.md`](changelog.d/README.md) says which is
@@ -123,8 +120,8 @@ which, and `cargo xtask changelog new fixed …` scaffolds a fragment.
 
 [`.github/pull_request_template.md`](.github/pull_request_template.md) is the
 body structure. Tick its boxes by exit code, not by memory.
-[Reading a review](docs/developer/06-reading-a-review.md) says what a review
-checks, so you can run the same checks first.
+[Before you open a pull request](docs/developer/09-before-review.md) says what
+a review checks, so you can run the same checks first.
 
 ## The invariants
 

@@ -81,7 +81,7 @@ Building a sink reads `system.columns`, so answer that query first with the rows
 Use a container for what no double can show: a client's wire behavior, a store's semantics, or a drain against a paused sink.
 Mark the test `#[ignore = "requires Docker"]`, so that a normal run skips it.
 Start its image through `spate_test_support::container_image`, which reads the image pinned under `ci/<service>/`.
-[Container suites](01-commands.md#container-suites) says how to run them.
+[Run the container suites](03-commands.md#run-the-container-suites) says how to run them.
 
 ## Know what a test binary shares
 
@@ -110,7 +110,7 @@ A mutant that survives is a branch no test can tell apart from the original.
 
 The mutants config in `.cargo/mutants.toml` leaves out the `testing`-feature doubles that no shipped path reaches.
 The run's summary names the mutant forms the tool does not generate, and those stay a review step.
-[Mutants](01-commands.md#mutants) has the options.
+[Run the mutants](03-commands.md#run-the-mutants) has the options.
 
 ## Check every interleaving
 
@@ -211,4 +211,4 @@ A change that fixes the test itself, such as a flaky setup, adds no such line.
 
 - [Tests that do not flake](05-flaky-tests.md) — the rules a test follows to pass on every runner.
 - [Testing pipelines](../user-guide/03-guides/testing-pipelines.mdx) — the `spate-test` doubles from a user's side.
-- [Commands and gates](01-commands.md) — the test runner, its profiles and the container suites.
+- [Commands and CI](03-commands.md) — the test runner, its profiles and the container suites.

@@ -103,8 +103,8 @@ once per feature arm. It compares what each prints with
 x86_64 and aarch64 only, and refuses any other host.
 
 [`spate_test_support::alloc`](repo:test-support/src/alloc.rs) says what each
-figure counts. Allocations C code makes through `malloc`, as libzstd does, are
-not in them; the counted tier's DHAT heap rows include them.
+figure counts. Allocations C code makes through `malloc`, as libzstd and
+librdkafka do, are not in them; the counted tier's DHAT heap rows include them.
 
 A failing run uploads the files it would have written as the
 `alloc-snapshots-<arch>` artifact. A change that moves a count, including a

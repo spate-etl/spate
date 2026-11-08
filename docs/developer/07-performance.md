@@ -69,7 +69,7 @@ On macOS, `cargo xtask bench gungraun --check` checks only that the benches buil
 
 Name the file `benches/<something>_gungraun.rs`, and declare it in the crate's `Cargo.toml` as a `[[bench]]` with `harness = false`.
 Nothing else registers it.
-The bench commands find it by that name, and both CI legs and the CI selector read the same list.
+The bench commands, both CI legs and the CI selector all find it by that name.
 Run `cargo xtask bench gungraun` with no argument to print what would run.
 
 Without the `harness = false` stanza, cargo builds the file under the default libtest harness.

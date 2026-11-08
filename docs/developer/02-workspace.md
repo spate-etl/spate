@@ -35,7 +35,8 @@ When two crates need the same mechanism, it lives in `spate-core`, within the li
 A helper that only this repository's tests and benches need goes in `test-support/`.
 
 **Why:** `spate-core`'s public API is part of Spate's semver promise.
-A 0.x dependency can break its own API in a minor release, and a connector type changes with its connector, so INV-6 limits where either can appear in that API.
+A 0.x dependency can break its own API in a minor release, and a connector type changes with its connector.
+INV-6 states where each is kept out of that API.
 
 Do not copy code between crates.
 A change that would add a second copy moves the first one to `spate-core` or `test-support/`.

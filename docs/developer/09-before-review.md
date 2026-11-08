@@ -52,7 +52,7 @@ A new condition, match arm or bound comes with the test that kills its mutant.
 Name any survivor in the pull request body, with the reason it stands.
 A guard that delivery or liveness rests on is the exception: a commit, ack, drain, retry or deadline path needs a test that kills its mutant.
 
-cargo-mutants does not generate every form, such as a swapped match arm or a deleted early `return`.
+The cargo-mutants tool does not generate every form, such as a swapped match arm or a deleted early `return`.
 Apply those forms to such a guard by hand.
 Do the same for a guard that only the container suites reach, because they do not run under the mutants.
 
@@ -96,7 +96,7 @@ Say where the change delivers less than the issue asked for, more, or something 
 
 Answer questions about your change in your own words ([`CONTRIBUTING.md`](repo:CONTRIBUTING.md)).
 
-[`AI_POLICY.md`](repo:AI_POLICY.md) sets the bar for agentic contributions.
+The Agentic contributions section of [`AI_POLICY.md`](repo:AI_POLICY.md) sets the bar for a change an agent wrote.
 When an agent did most of the work, the body names the model.
 No commit or body carries an AI attribution trailer, and no commit message refers to a plan or an iteration.
 

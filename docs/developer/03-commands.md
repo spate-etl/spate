@@ -35,8 +35,8 @@ It runs every `tidy` member and the changelog check whatever the set holds.
 It skips the type check, `cargo deny`, the fuzz harness and the packages outside the set.
 CI still runs all of them.
 
-A diff that touches a manifest, `Cargo.lock`, or any file outside `crates/` other than documentation and `website/`, runs the full `ci`.
-That includes workflows, `.config/`, `ci/`, `scripts/`, `test-support/` and `xtask/`.
+A diff runs the full `ci` when it touches a manifest, `Cargo.lock`, or any file under `xtask/`, `bench/`, `fuzz/` or `scripts/`.
+So does any other file outside `crates/`, apart from Markdown, `docs/`, `website/`, and a few files that reach no Rust job, such as `.gitignore`, `LICENSE`, `.node-version` and the issue templates under `.github/`.
 So does a diff that git cannot produce.
 A change to the root `README.md` selects `spate`, which compiles it as a doctest.
 
@@ -64,10 +64,10 @@ It runs these in order, and stops at the first failure:
 The test suite runs under nextest and leaves out the container suites.
 Nextest does not run doctests, so `cargo xtask doctest` runs them.
 
-The `doc` step builds rustdoc with warnings denied, so a broken intra-doc link fails the build.
+Rustdoc runs as `cargo xtask doc`, with warnings denied, so a broken intra-doc link fails the build.
 It does not reach bench support modules, because `cargo doc` never builds them.
 
-The `hack` step checks every feature alone and the feature-off combinations, type-checks every target, and runs the tests on default features.
+The feature matrix runs as `cargo xtask hack`, which checks every feature alone and the feature-off combinations, type-checks every target, and runs the tests on default features.
 
 The `cargo deny` step fails on a license, ban or source finding.
 It reports an advisory without failing.
@@ -130,10 +130,10 @@ Pass `--locked` on every cargo command you run by hand, as CI does.
 
 These commands cannot take it:
 
-- `cargo hack --no-dev-deps` rewrites each `Cargo.toml` as it runs, and a locked build refuses the rewrite.
-- `cargo fmt` resolves nothing, because it reads only `.rs` files.
-- `cargo fuzz`, `cargo semver-checks` and `cargo cyclonedx` accept no `--locked`.
-- `cargo update` and `cargo generate-lockfile` write the lockfile on purpose.
+- Running `cargo hack --no-dev-deps` rewrites each `Cargo.toml` as it runs, and a locked build refuses the rewrite.
+- The formatter, `cargo fmt`, resolves nothing, because it reads only `.rs` files.
+- The subcommands `cargo fuzz`, `cargo semver-checks` and `cargo cyclonedx` accept no `--locked`.
+- Both `cargo update` and `cargo generate-lockfile` write the lockfile on purpose.
 
 ## The test profiles
 
@@ -156,8 +156,8 @@ The `docker` profile never kills a test.
 
 **Why:** a cold image pull can take longer than any limit worth setting, and a killed test reports as a timeout, which looks the same as a hang.
 
-The other profiles run every test after one fails.
 The `mutants` profile stops at the first failing test, because one failure decides a mutant.
+The other profiles run every test after one fails.
 The `ci` and `docker` profiles write a JUnit report to `junit.xml`.
 
 ## Run the container suites

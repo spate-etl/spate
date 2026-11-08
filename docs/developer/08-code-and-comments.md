@@ -62,8 +62,6 @@ When new code would repeat existing logic or a similar type, share the original:
 - A copy within a crate moves onto one helper in the same change.
 - A copy across crates moves to where [The workspace](02-workspace.md#put-shared-code-in-spate-core-unless-its-api-names-a-connector-type) says shared code lives.
 
-A change that would add the second copy moves the first one there instead.
-
 ## Related
 
 - [Writing a test](04-writing-a-test.md) — where a test lives, and what its doc comment says.

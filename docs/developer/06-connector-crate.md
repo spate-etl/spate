@@ -44,7 +44,7 @@ Give a test file that needs an optional feature a `[[test]]` stanza in the crate
 **Why:** `autotests` is left at its default, so cargo collects an undeclared test file anyway, with no `required-features`.
 Every build then compiles it, including a build where the items it imports do not exist.
 
-The test file `crates/spate/tests/manifest.rs` checks each of `spate`'s test targets against its stanza.
+The test file [`crates/spate/tests/manifest.rs`](repo:crates/spate/tests/manifest.rs) checks each of `spate`'s test targets against its stanza.
 No connector crate has that check, so review checks a connector's stanzas.
 
 The `cargo xtask hack` command runs `cargo check --workspace --all-targets`, which type-checks every test target on the default feature set.

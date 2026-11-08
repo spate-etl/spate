@@ -43,11 +43,10 @@ path reads both. They move independently: one buffer that grows by doubling
 can request more bytes in total than many small allocations of exact size, so
 a change that cuts the calls can still raise the bytes.
 
-The snapshots see the Rust global allocator only. A C library allocating
-through `malloc`, as librdkafka and libzstd do, is invisible there, and the
-DHAT rows of [the counted tier](04-benchmarks-and-fuzzing.md#the-counted-tier)
-include it. The counted tier also shows the instructions a change adds, such
-as a second pass over bytes it no longer copies.
+Read [the counted tier](04-benchmarks-and-fuzzing.md#the-counted-tier) as
+well. It shows the instructions a change adds, such as a second pass over
+bytes it no longer copies, and its DHAT rows see allocations the snapshots
+miss.
 
 Give a case for each shape whose cost scales with a count, such as records
 with and without headers, so a regression in one shape is not averaged away by

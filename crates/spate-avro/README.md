@@ -84,7 +84,8 @@ payload.
   replays the batch from there until the schema is cached. The held payload is
   not dropped and does not count as an error.
 - `prewarm_subjects` fetches the latest schema of each listed subject at
-  startup, so the first payloads find it cached.
+  startup. Payloads that arrive after the fetch finds a schema need no fetch of
+  their own.
 - A `404`, a schema that is not Avro or uses schema references, and a schema the
   parser rejects are permanent answers. The id is negatively cached for
   `negative_cache_ttl`, and its payloads take the error policy. The negative

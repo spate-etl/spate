@@ -62,7 +62,8 @@ lists every refused property.
 - A rebalance error releases the partitions at once. The lanes still drain, but
   their offsets are not stored, and that work replays after the member rejoins.
 - A partition with no committed offset starts under `auto.offset.reset`,
-  `latest` by default. Every later start resumes from a committed offset.
+  `latest` by default. Under `latest`, every later start resumes from a
+  committed offset.
 
 [How offsets are committed](https://spate.kainth.dev/docs/user-guide/connectors/sources/kafka#how-offsets-are-committed)
 covers each case, and
@@ -254,8 +255,8 @@ states when a worker ends the job.
 
 ## Sharp edges
 
-- Under the default `auto.offset.reset` of `latest`, a partition the group has
-  never committed starts at its end, and the source skips the records already
+- Under the default `auto.offset.reset` of `latest`, a partition with no
+  committed offset starts at its end, and the source skips the records already
   on it. Set `auto.offset.reset: earliest` in the source's `rdkafka:` map to
   read them. See
   [How offsets are committed](https://spate.kainth.dev/docs/user-guide/connectors/sources/kafka#how-offsets-are-committed).
@@ -271,8 +272,8 @@ states when a worker ends the job.
   See
   [Startup checks](https://spate.kainth.dev/docs/user-guide/connectors/feeds/kafka#startup-checks).
 - Each partition of the feed's work and retry topics is read by one worker at a
-  time, so the work topic's partition count bounds how many workers read at
-  once. See
+  time, so the larger of the two partition counts bounds how many workers read
+  at once. See
   [Topics](https://spate.kainth.dev/docs/user-guide/connectors/feeds/kafka#topics).
 
 ## Metrics
@@ -314,7 +315,7 @@ release is not a breaking change here.
 - [Kafka feed page](https://spate.kainth.dev/docs/user-guide/connectors/feeds/kafka)
   — topics, startup checks, attempt counting, stopping and the metric families.
 - [API documentation on docs.rs](https://docs.rs/spate-kafka) — the source, the
-  sink, the feed and their configuration types.
+  sink and the feed, and the source and sink configuration types.
 - [`kafka_avro_to_clickhouse.rs`](https://github.com/spate-etl/spate/blob/main/crates/spate/examples/kafka_avro_to_clickhouse.rs)
   — an Avro order stream from Kafka into ClickHouse. Needs Kafka, a schema
   registry and ClickHouse.

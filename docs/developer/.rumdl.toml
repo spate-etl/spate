@@ -17,7 +17,6 @@ headings = false
 
 [per-file-ignores]
 "docs/developer/01-commands.md" = ["MD013"]
-"docs/developer/02-testing.md" = ["MD013"]
 "docs/developer/03-connector-crate.md" = ["MD013"]
 "docs/developer/04-benchmarks-and-fuzzing.md" = ["MD013"]
 "docs/developer/05-code-style.md" = ["MD013"]

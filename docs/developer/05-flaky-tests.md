@@ -7,7 +7,7 @@ description: "Rules that keep a test passing on every CI runner, how CI differs 
 A flaky test passes on one run and fails on another with no change to the code.
 The rules below keep a test deterministic.
 After them come how CI differs from your machine, and what to do when a test fails there.
-[Writing a test](02-testing.md) covers where a test lives and which harness to use.
+[Writing a test](04-writing-a-test.md) covers where a test lives and which harness to use.
 
 ## Rules
 
@@ -387,6 +387,6 @@ The fix goes to whichever side was wrong.
 
 ## Related
 
-- [Writing a test](02-testing.md) — where a test lives, the harnesses, and what each tool proves.
+- [Writing a test](04-writing-a-test.md) — where a test lives, the harnesses, and what each tool proves.
 - [Commands and gates](01-commands.md) — the test profiles and the container suites.
 - [Spate invariants](../INVARIANTS.md) — INV-10, which the metric-label rule answers to.

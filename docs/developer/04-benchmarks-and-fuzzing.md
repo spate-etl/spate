@@ -1,38 +1,8 @@
 ---
-description: "The instruments outside cargo xtask ci: the fuzz harness and the counted, allocation and wall-clock benchmark tiers, and how to add a target to each."
+description: "The benchmark tiers outside cargo xtask ci: counted, allocation and wall-clock, and how to add a target to each."
 ---
 
-# Benchmarks and fuzzing
-
-## Fuzzing
-
-`fuzz/` is a [cargo-fuzz](https://rust-fuzz.github.io/book/cargo-fuzz.html)
-crate with one libFuzzer target per boundary where the pipeline turns bytes
-into records or records into bytes. Each target asserts a property rather
-than only the absence of a panic. It is a workspace member, so `--workspace`
-compiles it and the root lockfile pins what it builds against.
-
-A decoder its crate keeps private is reached through that crate's
-off-by-default `testing` feature, in a `fuzz_seams` module. `fuzz/Cargo.toml`
-enables the feature on the crates whose targets need it.
-
-```sh
-cargo xtask fuzz install
-cargo xtask fuzz build
-cargo xtask fuzz run avro_wire_confluent --secs 60
-```
-
-`cargo +nightly fuzz list` prints the set. libFuzzer's instrumentation is
-nightly-only, which is why every target carries `+nightly`.
-
-A pull request touching `fuzz/`, `ci.yml`, `fuzz.yml`, `.github/actions/`, the
-nightly pin or `xtask/` builds every target with instrumentation and runs none
-of them, and so does one touching a workspace crate the harness depends on
-directly.
-`nightly.yml` fuzzes each for five minutes, set by
-`MAX_TOTAL_TIME`, and carries `fuzz/corpus` between nights in a cache entry.
-A crash uploads the input as the `fuzz-artifacts` artifact and opens an issue
-titled `[bug] A fuzz target found a crashing input`.
+# Benchmarks
 
 ## Benchmarks
 

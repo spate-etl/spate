@@ -92,7 +92,7 @@ and that page says how to add a target.
 
 A parser over outside bytes has a target in `fuzz/`, one `[[bin]]` per
 boundary in [`fuzz/Cargo.toml`](repo:fuzz/Cargo.toml).
-[Fuzzing](04-benchmarks-and-fuzzing.md#fuzzing) says how a target reaches a
+[Fuzz a parser](04-writing-a-test.md#fuzz-a-parser) says how a target reaches a
 decoder the crate keeps private and what CI runs.
 
 ## Its docs page

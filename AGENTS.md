@@ -68,8 +68,9 @@ Traps here:
 
 ## Testing
 
-How a test is written here is [Writing a test](docs/developer/02-testing.md):
-which harness fits which code, and what a test binary shares process-wide.
+How a test is written here is [Writing a test](docs/developer/04-writing-a-test.md):
+which harness fits which code, what a test binary shares process-wide, and the
+tools that check a test reaches the code.
 [Tests that do not flake](docs/developer/05-flaky-tests.md) has the rules that
 keep a test passing on every CI runner.
 

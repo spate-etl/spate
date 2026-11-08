@@ -38,7 +38,7 @@ advisory IDs), callers (which, how many, how often), a tour of visible control
 flow, line numbers.
 
 A test's doc says what the test pins;
-[Writing a test](02-testing.md#a-tests-doc) has the one line it may add.
+[Write the test's doc comment](04-writing-a-test.md#write-the-tests-doc-comment) has the one line it may add.
 
 ## Prose in comments and bodies
 
@@ -66,7 +66,7 @@ would add the second copy moves the first there instead.
 
 ## Related
 
-- [Writing a test](02-testing.md) — where a test lives, and what its doc says.
+- [Writing a test](04-writing-a-test.md) — where a test lives, and what its doc says.
 - [Tests that do not flake](05-flaky-tests.md) — the rules that keep a test
   passing on every CI runner.
 - [Reading a review](06-reading-a-review.md) — where a review checks the

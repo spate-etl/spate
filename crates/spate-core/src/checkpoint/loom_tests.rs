@@ -25,7 +25,6 @@ fn recorded_ack() -> (AckRef, Arc<Mutex<Vec<AckMsg>>>) {
     (ack, recorder)
 }
 
-// ANCHOR: every_interleaving
 /// Across every interleaving of clone/fail/drop on three threads, the batch
 /// resolves exactly once, and as `Failed` iff some thread failed it.
 #[test]
@@ -53,7 +52,6 @@ fn resolves_exactly_once_with_worst_status() {
         assert_eq!(msgs[0].last_offset, 99);
     });
 }
-// ANCHOR_END: every_interleaving
 
 /// With no failure on any thread, every interleaving resolves `Delivered`.
 #[test]

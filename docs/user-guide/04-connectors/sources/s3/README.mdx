@@ -143,24 +143,20 @@ An `endpoint` carrying userinfo fails at load, under any spelling of the key,
 because the client never reads it and its errors quote each request URI.
 
 Bucket keys are **rejected at load time with an explanation**. The client is
-built from `url`, so a passthrough bucket could never take effect; rejecting it
+built from `url`, so a passthrough bucket could never take effect. Rejecting it
 keeps the configuration honest instead of leaving two sources of truth to
-disagree silently. `object_store` accepts several spellings of the same option
-(with and without the `aws_` prefix, plus historic aliases) and lowercases keys
-before parsing, so every spelling is denied and the match is case-insensitive:
+disagree silently.
 
 | Denied property | Why |
 |---|---|
 | `bucket` | Owned by the typed `url` field. |
-| `bucket_name` | Owned by the typed `url` field. |
-| `aws_bucket` | Owned by the typed `url` field. |
-| `aws_bucket_name` | Owned by the typed `url` field. |
 
-The error names the key as written, so the spelling in the message matches the
-spelling in the file:
+Every spelling and case that `object_store` accepts for the bucket option is
+denied, such as `bucket_name`, `aws_bucket` and `Bucket`. The error names the
+key as written. When that is another spelling, the error also names `bucket`:
 
 ```text
-invalid configuration: source.s3.store."Bucket" cannot be overridden: owned by the typed `url` field
+invalid configuration: source.s3.store."Bucket" cannot be overridden: owned by the typed `url` field (`Bucket` sets the same object_store option as `bucket`)
 ```
 
 For an S3 URL (`s3://`, `s3a://`, or an `https://` URL on an `amazonaws.com` or

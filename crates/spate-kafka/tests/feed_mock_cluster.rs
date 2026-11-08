@@ -15,7 +15,7 @@ use rdkafka::types::RDKafkaRespErr;
 use spate_core::clock::TestClock as StopClock;
 use spate_core::clock::tokio::TestClock;
 use spate_core::feed::ConnectError;
-use spate_core::feed::{DepthOf, Feed, FeedErrorKind, FeedMetricsCtx, Receipt, Unit};
+use spate_core::feed::{DepthOf, Feed, FeedError, FeedErrorKind, FeedMetricsCtx, Receipt, Unit};
 use spate_core::metrics::Meter;
 use spate_core::pipeline::ExitState;
 use spate_test::{HANG, WriteOutcome, wait_until};
@@ -1450,6 +1450,26 @@ fn a_dead_letter_topic_authorization_failure_is_fatal() {
     let e = read_depth(&d.feed, DepthOf::DeadLetters).unwrap_err();
     assert_eq!(e.kind, FeedErrorKind::Fatal, "{e}");
     assert!(e.reason.contains(DEAD), "{e}");
+}
+
+/// A depth read in these tests reads again past a transient answer, as a
+/// reader does, and returns the depth or the fatal error after it.
+/// Regression for #1824.
+#[test]
+fn a_depth_read_passes_over_a_transient_answer() {
+    let (feed, script) = spate_test::scripted_feed();
+    let transient = || Err(FeedError::new(FeedErrorKind::Retryable, "not coordinator"));
+    script.answer_depth(DepthOf::Feed, transient());
+    script.answer_depth(DepthOf::DeadLetters, transient());
+    script.answer_depth(
+        DepthOf::DeadLetters,
+        Err(FeedError::new(FeedErrorKind::Fatal, "denied")),
+    );
+    assert!(read_depth(&feed, DepthOf::Feed).unwrap().is_empty());
+    let e = read_depth(&feed, DepthOf::DeadLetters).unwrap_err();
+    assert_eq!(e.kind, FeedErrorKind::Fatal, "{e}");
+    assert_eq!(script.depth_reads(DepthOf::Feed), 2);
+    assert_eq!(script.depth_reads(DepthOf::DeadLetters), 2);
 }
 
 /// Pins that startup refuses a `checkpoint.drain_timeout` within the stop's

@@ -5,7 +5,7 @@
 
 use super::Raw as _;
 use object_store::ObjectStoreExt as _;
-use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
+use rdkafka::admin::{AdminClient, NewTopic, TopicReplication};
 use rdkafka::client::DefaultClientContext;
 use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::message::{Header, Headers, Message, OwnedHeaders};
@@ -271,10 +271,6 @@ pub(crate) struct Worker {
 /// work topic stamped on append, and the compacted attempt topic. The feed
 /// never creates a topic.
 pub(crate) fn create_topics(brokers: &str) {
-    let admin: AdminClient<DefaultClientContext> = super::raw_config()
-        .set("bootstrap.servers", brokers)
-        .build()
-        .expect("admin client");
     let mut topics = vec![
         NewTopic::new(WORK, 1, TopicReplication::Fixed(1))
             .set("message.timestamp.type", "LogAppendTime"),
@@ -285,16 +281,7 @@ pub(crate) fn create_topics(brokers: &str) {
         NewTopic::new(ATTEMPT, ATTEMPT_PARTITIONS, TopicReplication::Fixed(1))
             .set("cleanup.policy", "compact"),
     );
-    let io = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    for created in io
-        .block_on(admin.create_topics(&topics, &AdminOptions::new()))
-        .expect("create topics")
-    {
-        created.expect("topic created");
-    }
+    super::create_visible(brokers, &topics);
 }
 
 /// How a test connects the feed.
@@ -993,12 +980,19 @@ fn stage_with_etag(data: &Path, name: &str, rows: &[String]) -> Unit {
     Unit::new(name, descriptor.encode().unwrap())
 }
 
-/// Read `of` from `feed` and wait for the answer.
+/// Read `of` from `feed` until it answers with a depth or a fatal error. A
+/// transient error is read again, as a reader does.
 pub(crate) fn read_depth(feed: &dyn Feed, of: DepthOf) -> Result<Depth, FeedError> {
     let mut reading = feed.read_depth(of).expect("the Kafka feed counts");
     let mut outcome = None;
-    wait_until(HANG, "the depth read is answered", || {
-        outcome = reading.try_outcome();
+    wait_until(HANG, "a depth or a fatal error", || {
+        outcome = match reading.try_outcome() {
+            Some(Err(e)) if e.kind == FeedErrorKind::Retryable => {
+                reading = feed.read_depth(of).expect("the Kafka feed counts");
+                None
+            }
+            answer => answer,
+        };
         outcome.is_some()
     });
     outcome.expect("answered")

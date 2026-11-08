@@ -66,8 +66,9 @@ would add the second copy moves the first there instead.
 
 ## Related
 
-- [Writing a test](02-testing.md) — the rules a test follows, and what its doc
-  says.
+- [Writing a test](02-testing.md) — where a test lives, and what its doc says.
+- [Tests that do not flake](05-flaky-tests.md) — the rules that keep a test
+  passing on every CI runner.
 - [Reading a review](06-reading-a-review.md) — where a review checks the
   comments and the reuse this page asks for.
 - [`CONTRIBUTING.md`](repo:CONTRIBUTING.md) — commit subjects, pull request

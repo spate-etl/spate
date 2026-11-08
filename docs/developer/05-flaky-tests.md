@@ -30,21 +30,6 @@ wait_until(HANG, "backpressure", || paused_gauge(&pipeline) == 1.0);
 pipeline.stop(); // the gauge also reads 1 under a healthy sink
 ```
 
-A count that only the expected state can produce is such a signal.
-In a sink outage, the in-flight batches rise above the shard's cap only when a batch waits behind a write the frozen sink never answers:
-
-```rust
-// Over the cap means a sealed batch is queued behind a write the frozen
-// sink never answers. The pause gauge also reads 1 under a healthy sink.
-let cap = params.inflight_max_per_shard as f64;
-wait_until(HANG, "a stall caused by the outage", || {
-    let (_, body) = http_get(pipeline.admin, "/metrics");
-    metric_series(&body, "spate_sink_inflight_batches", &[])
-        .iter()
-        .any(|s| s.value > cap)
-});
-```
-
 A total can also be reached early.
 One partition can write 10,000 rows before another has started, so a test that needs rows on every partition waits for both the count and the partitions:
 
@@ -55,7 +40,7 @@ wait_until(HANG, "mid-stream rows on every partition", || {
 ```
 
 When a test needs several consumers in one state, wait for each consumer's signal.
-The Kafka mock's group timers run on real time, so the tests in [`mock_cluster.rs`](repo:crates/spate-kafka/tests/mock_cluster.rs) that start more than one consumer settle the group on the signal the source publishes:
+The Kafka mock's group timers run on real time, so a test in [`mock_cluster.rs`](repo:crates/spate-kafka/tests/mock_cluster.rs) whose result needs every consumer in a stable group waits for the signal the source publishes:
 
 ```rust
 wait_until(HANG, "every consumer in a stable group", || {
@@ -87,7 +72,11 @@ The hand-back feed fake in [`spate-core/src/pipeline/fakes.rs`](repo:crates/spat
 ```rust
 // A test takes a non-empty `closes` as its signal to use `held`, so `held`
 // fills first.
-self.held.lock().unwrap().push(confirmer);
+if self.hold_close {
+    self.held.lock().unwrap().push(confirmer);
+} else {
+    confirmer.confirm();
+}
 self.closes.lock().unwrap().push(within);
 ```
 
@@ -154,6 +143,8 @@ clock.advance(Duration::from_millis(1));
 poll_quiet(&mut source);
 assert!(matches!(source.members[0].phase, Phase::Assigned));
 ```
+
+The public seam for the same injection is `KafkaSource::with_clock`, behind the crate's `testing` feature.
 
 The `spate-core` crate cannot depend on `spate-test`, so its tests poll with their own `wait_for` in `pipeline/fakes.rs`.
 Each caller passes the bound, and the rule applies to it as it does to `HANG`.
@@ -275,26 +266,17 @@ assert!(
 
 ### Keep other work out of the window under test
 
-Before the window a test checks, stop or hold every other actor that could act in it: a periodic timer, a background task, a child process.
+Before the window a test checks, stop or hold every other actor that could act in it, such as a periodic timer or a background task.
 
 **Why:** a timer or task that runs inside the window can do the work the test expects from the code under test.
 The test then fails, or passes for the wrong reason.
 
-The revocation test in [`spate-core/src/pipeline/tests.rs`](repo:crates/spate-core/src/pipeline/tests.rs) sets the commit interval to a minute, so that only the revocation drain can commit:
+A test of the revocation drain sets the commit interval out of reach, so that only the drain can commit:
 
 ```rust
 // No commit tick fires during the test, so only the revocation drain can
 // commit.
-config.checkpoint.interval = Duration::from_secs(60);
-```
-
-A child process can exit before the test writes to it.
-The gungraun harness in [`xtask/tests/gungraun.rs`](repo:xtask/tests/gungraun.rs) accepts a broken pipe on that write, and checks what the child received through another channel:
-
-```rust
-if let Err(e) = child.stdin.take().unwrap().write_all(SENTINEL.as_bytes()) {
-    assert_eq!(e.kind(), std::io::ErrorKind::BrokenPipe, "{e}");
-}
+config.checkpoint.interval = Duration::from_hours(1);
 ```
 
 ### Assert only what the code promises
@@ -304,7 +286,7 @@ When the code allows more than one outcome, accept each one it allows.
 **Why:** an outcome that depends on timing inside a client or a broker can change from run to run.
 A test that asserts one of them fails whenever the other happens.
 
-A write to a missing topic fails as `Fatal` or as `Retryable`, depending on when librdkafka's metadata answer arrives.
+With `topic.metadata.propagation.max.ms` below the sink's delivery timeout, a write to a missing topic fails as `Fatal` or as `Retryable`, depending on when librdkafka's metadata answer arrives.
 The sink test in [`spate-kafka/tests/sink_mock_cluster.rs`](repo:crates/spate-kafka/tests/sink_mock_cluster.rs) accepts both and checks the reason that goes with each:
 
 ```rust
@@ -317,35 +299,45 @@ let hint = match first.class() {
 assert!(first.reason().contains(hint), "first: {first}");
 ```
 
+A child process can exit before the test writes to it.
+The gungraun harness in [`xtask/tests/gungraun.rs`](repo:xtask/tests/gungraun.rs) accepts a broken pipe on that write, and checks what the child received through another channel:
+
+```rust
+if let Err(e) = child.stdin.take().unwrap().write_all(SENTINEL.as_bytes()) {
+    assert_eq!(e.kind(), std::io::ErrorKind::BrokenPipe, "{e}");
+}
+```
+
 Work that runs concurrently, such as partitions or tasks, finishes in no fixed order unless the code promises one.
 Wait for each piece of work you need.
 
 ## How CI differs from your machine
 
-CI runs the workspace suite in up to three jobs, under the `ci` nextest profile:
+CI runs the workspace suite in up to four jobs:
 
 | Job | Runner | Command |
 |---|---|---|
 | `Test and coverage` | `ubuntu-latest` | `cargo llvm-cov nextest --profile ci --workspace --all-features --locked` |
 | `Test (arm64)` | `ubuntu-26.04-arm` | `cargo nextest run --profile ci --workspace --all-features --locked` |
 | `Test (macOS)` | `macos-26` | `cargo nextest run --profile ci --workspace --all-features --locked` |
+| `Feature matrix and default-feature tests` | `ubuntu-latest` | `cargo xtask hack` |
+
+`cargo xtask hack` runs the suite on default features under the `default` nextest profile, so it runs the tests that `--all-features` skips.
 
 On a pull request, `Test (macOS)` runs only when the change touches a build input such as `Cargo.lock` or the nextest config.
 In the merge queue it runs on every entry that builds.
 This means a test can pass on your pull request and fail on macOS in the merge queue.
 
-`Test and coverage` runs a build with coverage instrumentation, so its timing differs from the other two jobs.
-Each test runs in a process of its own under nextest, which by default runs as many tests at once as the runner has hyperthreads.
+`Test and coverage` runs a build with coverage instrumentation, so its timing differs from the other jobs.
+Each test runs in a process of its own under nextest, which by default runs as many tests at once as the runner has logical CPUs.
 
 Each of these changes when a thread gets to run.
 A test that waits on signals passes in every job.
 A test that depends on timing fails in whichever job times it differently.
 
-The `ci` profile warns about a test after 60 seconds and terminates it after four such periods.
-A wait that reaches `HANG` panics before that, with the message `hung after 60s waiting for:` and the wait's description.
-
-The container suites run in their own jobs under the `docker` profile, which never terminates a test.
-A cold image pull can take longer than any timeout worth setting.
+No profile terminates a test before `HANG` runs out, so a wait that reaches `HANG` panics first, with the message `hung after 60s waiting for:` and the wait's description.
+The container suites run in their own jobs under the `docker` profile.
+[The test runner and its profiles](01-commands.md#the-test-runner-and-its-profiles) has each profile's timeouts.
 
 To run a crate's tests the way the coverage job does:
 
@@ -373,7 +365,8 @@ cargo nextest run -p spate-kafka --all-features --locked \
 ```
 
 Use nextest 0.9.148 or later for a stress run.
-Earlier versions report only the last iteration's result when fail-fast is off, so a failed run can exit 0.
+Earlier versions exit with the last iteration's code when fail-fast is off, so a run with a failed iteration can exit 0.
+On those versions, read the summary line for the count that failed.
 
 A stress run reproduces a failure.
 A stress run that passes proves nothing about a fix.

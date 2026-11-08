@@ -38,8 +38,7 @@ Exit 4 means the filter matched no test, and 101 that the build failed; neither
 shows anything. A source file new on the branch has no copy at the base, so
 delete it for the run instead. A test that passes with the fix reverted is a
 finding, shown by exactly that run. A test that waits, sleeps or reads the clock
-is read against
-[Writing a test](02-testing.md).
+is read against [Tests that do not flake](05-flaky-tests.md).
 
 ## Mutants killed, or named
 

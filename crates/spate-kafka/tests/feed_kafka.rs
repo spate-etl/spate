@@ -155,7 +155,6 @@ fn a_unit_whose_worker_is_killed_mid_read_is_delivered_again() {
         !b.recording.seen.lock().unwrap().is_empty()
     });
     assert_eq!(b.recording.seen.lock().unwrap()[0], 2);
-    // ANCHOR: lower_bound_on_session
     // Elapsed time is the property: B is assigned the partition only once A's
     // session lapses on the broker.
     let waited = killed.elapsed();
@@ -163,7 +162,6 @@ fn a_unit_whose_worker_is_killed_mid_read_is_delivered_again() {
         waited >= SESSION - HEARTBEAT,
         "B read the unit {waited:?} after A was killed, inside A's session"
     );
-    // ANCHOR_END: lower_bound_on_session
     wait_until(
         HANG,
         "B writes every row and commits the unit's offset",
@@ -719,7 +717,6 @@ fn a_bounded_job_ends_once_every_workers_partitions_are_committed() {
     let data = data_dir(&dir);
     let section = bounded_section(&brokers, &group, &dir);
     list_once(publisher_on(&section), &data, &section);
-    // ANCHOR: fixed_ids
     // A listed unit's id hashes the object's temporary path, so four listed
     // units can all land on one partition. These ids are fixed, and their
     // keys reach both partitions under librdkafka's partitioners.
@@ -735,7 +732,6 @@ fn a_bounded_job_ends_once_every_workers_partitions_are_committed() {
         (0..2).all(|p| support::log_end(&brokers, WORK, p) > 0),
         "the units span both partitions"
     );
-    // ANCHOR_END: fixed_ids
 
     let clock_a = TestClock::frozen();
     let clock_b = TestClock::frozen();

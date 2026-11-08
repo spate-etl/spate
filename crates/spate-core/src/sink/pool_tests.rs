@@ -1185,7 +1185,6 @@ async fn an_unabortable_write_does_not_hold_the_worker_past_its_grace() {
     let clock = TestClock::frozen();
     let f = one_blocked_write(&clock);
 
-    // ANCHOR: armed_before_advance
     let t0 = clock.now();
     let deadline = Duration::from_millis(100);
     let drain = tokio::spawn(f.pool.drain(deadline));
@@ -1201,7 +1200,6 @@ async fn an_unabortable_write_does_not_hold_the_worker_past_its_grace() {
         clock.has_slept_until(t0 + deadline + worker::ABORT_GRACE)
     });
     clock.advance(worker::ABORT_GRACE);
-    // ANCHOR_END: armed_before_advance
     wait_for("the drain returns", Duration::from_secs(5), || {
         drain.is_finished()
     });

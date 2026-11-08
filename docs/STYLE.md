@@ -566,6 +566,9 @@ Exempt, because transcluding them costs more than it protects:
   which in the surrounding prose: an unannounced elision is indistinguishable
   from a snippet that is wrong, and that is what this exemption most often
   decays into.
+- A snippet in the developer guide that shows a rule. It is written by hand
+  beside the rule it shows, so the two change in the same edit. Its prose links
+  the source it is drawn from only where that source follows the rule.
 
 An exemption is a claim review checks, not a default.
 

@@ -3860,7 +3860,6 @@ mod tests {
             }
         }
 
-        // ANCHOR: hold_on_frozen_clock
         /// The hold runs from the first held assignment of a rebalance, and a
         /// later consumer's assignment does not extend it.
         #[test]
@@ -3888,7 +3887,6 @@ mod tests {
             assert!(matches!(source.members[1].phase, Phase::Assigned));
             assert!(matches!(source.members[2].phase, Phase::Joining));
         }
-        // ANCHOR_END: hold_on_frozen_clock
 
         /// The source's `Debug` names its consumer count and live lanes.
         #[test]

@@ -16,13 +16,15 @@ change is proposed and lands. This guide says how the work is done.
   covers and what CI adds, the test runner and its profiles, the container
   suites, and which checks a change selects.
 - [Writing a test](02-testing.md) — where a test lives, which double to reach
-  for, and the conventions a test here follows.
+  for, and what the process-wide state in a test binary demands.
 - [Anatomy of a connector crate](03-connector-crate.md) — what a crate under
   `crates/` carries beyond its source.
 - [Benchmarks and fuzzing](04-benchmarks-and-fuzzing.md) — the instruments
   outside `ci`: the benchmark tiers and the fuzz harness.
 - [Code and comments](05-code-style.md) — the comment and rustdoc contract,
   and the reuse rule.
+- [Tests that do not flake](05-flaky-tests.md) — the rules that keep a test
+  passing on every CI runner, and what to do when one fails there.
 - [Reading a review](06-reading-a-review.md) — what a review checks, so you
   can run it first.
 - [The per-record path](07-per-record-path.md) — keeping per-record work from

@@ -633,6 +633,22 @@ mod tests {
         assert_eq!(simd.unwrap(), b"[1e300,0.10000000149011612,null]");
     }
 
+    /// A sequence whose length is unknown until it ends is closed under both
+    /// encoders when no element is written.
+    #[test]
+    fn simd_json_closes_an_empty_sequence_of_unknown_length() {
+        #[derive(Clone)]
+        struct Above(Vec<u8>);
+        impl serde::Serialize for Above {
+            fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+                s.collect_seq(self.0.iter().filter(|&&n| n > 10))
+            }
+        }
+        let (serde, simd) = both_payloads(&Above(vec![1, 2]));
+        assert_eq!(serde.unwrap(), b"[]");
+        assert_eq!(simd.unwrap(), b"[]");
+    }
+
     /// simd-json fails a record whose map has a `bool` key, which serde_json
     /// writes as a string.
     #[test]

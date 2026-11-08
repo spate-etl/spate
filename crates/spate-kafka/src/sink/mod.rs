@@ -38,4 +38,6 @@ pub use encoder::{
     MessageEncoder,
 };
 pub use writer::{KafkaEndpoint, KafkaWriter};
-pub(crate) use writer::{message_headers, owned_headers, parse_messages, report_class};
+#[cfg(feature = "testing")]
+pub(crate) use writer::{message_headers, parse_messages};
+pub(crate) use writer::{owned_headers, report_class};

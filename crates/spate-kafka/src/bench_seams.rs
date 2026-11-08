@@ -13,6 +13,7 @@
 
 use crate::sink::{message_headers, parse_messages};
 use bytes::Bytes;
+use rdkafka::message::Headers as _;
 use spate_core::error::SinkError;
 use std::hint::black_box;
 
@@ -30,7 +31,7 @@ pub fn prepare_batch(frames: &[Bytes], rows: u64) -> Result<(usize, usize), Sink
     let mut headers = 0;
     for message in &messages {
         if let Some(list) = message_headers(message) {
-            headers += message.headers.len();
+            headers += list.count();
             black_box(list);
         }
     }

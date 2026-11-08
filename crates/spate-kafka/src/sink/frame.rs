@@ -121,10 +121,64 @@ pub(crate) struct MessageRef<'a> {
     /// Message key, when the record set one.
     pub(crate) key: Option<&'a [u8]>,
     /// Message headers in insertion order.
-    pub(crate) headers: Vec<(&'a str, &'a [u8])>,
+    pub(crate) headers: Headers<'a>,
     /// Message payload; `None` is a tombstone.
     pub(crate) payload: Option<&'a [u8]>,
 }
+
+/// A message's headers: the frame bytes holding them, already validated.
+///
+/// Only the parser builds one, after reading every header in the section, so
+/// [`iter`](Headers::iter) reads them again without allocating and cannot
+/// fail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Headers<'a> {
+    section: &'a [u8],
+    count: usize,
+}
+
+impl<'a> Headers<'a> {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    /// Each header's name and value, in insertion order.
+    pub(crate) fn iter(&self) -> HeaderIter<'a> {
+        HeaderIter {
+            parser: FrameParser::new(self.section),
+            remaining: self.count,
+        }
+    }
+}
+
+/// The iterator [`Headers::iter`] returns.
+#[derive(Debug)]
+pub(crate) struct HeaderIter<'a> {
+    parser: FrameParser<'a>,
+    remaining: usize,
+}
+
+impl<'a> Iterator for HeaderIter<'a> {
+    type Item = (&'a str, &'a [u8]);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.remaining == 0 {
+            return None;
+        }
+        self.remaining -= 1;
+        Some(
+            self.parser
+                .take_header()
+                .expect("the parser read this header before building `Headers`"),
+        )
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.remaining, Some(self.remaining))
+    }
+}
+
+impl ExactSizeIterator for HeaderIter<'_> {}
 
 /// Streaming parser over one frame (or any concatenation of frames).
 /// Yields each message in order; a structural failure yields one `Err` and
@@ -170,6 +224,17 @@ impl<'a> FrameParser<'a> {
         self.take(len, reason)
     }
 
+    fn take_header(&mut self) -> Result<(&'a str, &'a [u8]), FrameError> {
+        let name_offset = self.offset;
+        let name = self.take_section("truncated header name")?;
+        let name = std::str::from_utf8(name).map_err(|_| FrameError::Corrupt {
+            offset: name_offset,
+            reason: "header name is not UTF-8",
+        })?;
+        let value = self.take_section("truncated header value")?;
+        Ok((name, value))
+    }
+
     fn parse_one(&mut self) -> Result<MessageRef<'a>, FrameError> {
         let flag_offset = self.offset;
         let flags = self.take(1, "truncated flags byte")?[0];
@@ -185,25 +250,14 @@ impl<'a> FrameParser<'a> {
             None
         };
         let count = self.take_u32("truncated header count")?;
-        // Each header occupies at least 8 bytes (two `u32` length prefixes,
-        // even when both name and value are empty), so a count claiming more
-        // headers than the remaining bytes could possibly hold is corrupt. Cap
-        // the pre-allocation at that bound: a bogus count near `u32::MAX` then
-        // errors on the read below instead of triggering a multi-gigabyte
-        // speculative allocation (which would abort rather than yield a
-        // `FrameError`).
-        let remaining = self.buf.len() - self.offset;
-        let mut headers = Vec::with_capacity(count.min(remaining / 8));
+        let start = self.offset;
         for _ in 0..count {
-            let name_offset = self.offset;
-            let name = self.take_section("truncated header name")?;
-            let name = std::str::from_utf8(name).map_err(|_| FrameError::Corrupt {
-                offset: name_offset,
-                reason: "header name is not UTF-8",
-            })?;
-            let value = self.take_section("truncated header value")?;
-            headers.push((name, value));
+            self.take_header()?;
         }
+        let headers = Headers {
+            section: &self.buf[start..self.offset],
+            count,
+        };
         let payload = if flags & FLAG_TOMBSTONE != 0 {
             None
         } else {
@@ -256,11 +310,45 @@ mod tests {
         assert_eq!(messages.len(), 1);
         let msg = messages[0].as_ref().unwrap();
         assert_eq!(msg.key, Some(&b"key-1"[..]));
+        assert_eq!(msg.headers.iter().len(), 2);
         assert_eq!(
-            msg.headers,
+            msg.headers.iter().collect::<Vec<_>>(),
             vec![("trace", &b"abc123"[..]), ("origin", &b"spate"[..])]
         );
         assert_eq!(msg.payload, Some(&b"the payload"[..]));
+    }
+
+    /// Each message reads back its own headers, and a message without any
+    /// reads back none.
+    #[test]
+    fn headers_stay_with_their_message() {
+        let mut buf = BytesMut::new();
+        write_message(
+            &mut buf,
+            None,
+            [("a", &b"1"[..]), ("b", &b"22"[..])].into_iter(),
+            Some(b"p1"),
+        )
+        .unwrap();
+        write_message(&mut buf, None, std::iter::empty(), Some(b"p2")).unwrap();
+        write_message(&mut buf, None, [("c", &b""[..])].into_iter(), None).unwrap();
+
+        let messages: Vec<_> = parse_all(&buf).into_iter().map(|m| m.unwrap()).collect();
+        let headers: Vec<Vec<_>> = messages
+            .iter()
+            .map(|m| m.headers.iter().collect())
+            .collect();
+        assert_eq!(
+            headers,
+            vec![
+                vec![("a", &b"1"[..]), ("b", &b"22"[..])],
+                vec![],
+                vec![("c", &b""[..])],
+            ]
+        );
+        assert!(messages[1].headers.is_empty());
+        assert!(!messages[2].headers.is_empty());
+        assert_eq!(messages[0].headers.iter().len(), 2);
     }
 
     #[test]
@@ -359,8 +447,7 @@ mod tests {
     #[test]
     fn absurd_header_count_errors_without_a_huge_allocation() {
         // A corrupt header count near `u32::MAX` with no header bytes behind it
-        // must surface a clean frame error via the bounded read rather than a
-        // multi-gigabyte pre-allocation (which would abort the process).
+        // must surface a clean frame error from the first header read.
         let mut buf = BytesMut::new();
         buf.put_u8(0); // no key, no tombstone
         buf.put_u32_le(u32::MAX); // claims ~4.29e9 headers

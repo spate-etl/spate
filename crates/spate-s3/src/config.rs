@@ -197,8 +197,8 @@ impl S3SourceConfig {
             )));
         }
         DENYLIST
-            .check("source.s3.store", self.store.keys())
-            .map_err(|e| ConfigError::Validation(e.to_string()))?;
+            .check("store", self.store.keys())
+            .map_err(|e| ConfigError::Validation(format!("source.s3.{e}")))?;
         // The request URIs `object_store` quotes in its errors start with the
         // endpoint.
         for (key, value) in &self.store {

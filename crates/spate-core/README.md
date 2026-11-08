@@ -22,16 +22,17 @@ crate at its root.
   partition and hands it to `Source::commit` on an interval. A watermark never
   moves past an unacknowledged or failed batch.
 - **Backpressure.** A global in-flight byte budget and a pause and resume
-  controller with hysteresis. A source thread pauses its lanes and keeps
-  polling, and never blocks on a send.
+  controller with hysteresis. A pipeline thread asks the controller to pause its
+  lanes and never blocks on a send. The controller pauses them and keeps polling
+  the source.
 - **Configuration.** Loads the pipeline's YAML with `${VAR}` environment
   interpolation. The framework's own sections are typed and reject unknown
   keys. Each connector's section reaches the connector as an opaque
   `ComponentConfig`.
 - **Metrics and health.** Installs the exporter and registers each stage's
-  metric handles when the pipeline is built. A `Meter` registers a connector's
-  own families with the standard labels. The admin server answers `/healthz`
-  and `/readyz`, and `/metrics` when the pipeline exports metrics.
+  metric handles before the record loop starts. A `Meter` registers a
+  connector's own families with the standard labels. The admin server answers
+  `/healthz` and `/readyz`, and `/metrics` when the pipeline exports metrics.
 - **Pipeline runtime.** `Pipeline` assembles a process from a configuration, a
   source, chains and sinks. Driver threads run the lanes and chains, and a
   controller thread owns the source and the checkpointer. On shutdown the
@@ -77,8 +78,9 @@ touches one of them cites its number and says how the property still holds.
 - [ADR-0011](https://spate.kainth.dev/docs/adr/msrv-and-dependency-policy) and
   [INV-6](https://spate.kainth.dev/docs/INVARIANTS#inv-6) limit which
   dependency types the public API can carry.
-- The `testing` feature is for tests only. It is off by default and outside the
-  semver surface.
+- The `testing` feature is for tests only, and it is off by default. The semver
+  check does not exempt its items, so a break in them needs a `**Breaking:**`
+  entry too.
 - The minimum supported Rust version is 1.96.
   [Installation](https://spate.kainth.dev/docs/user-guide/getting-started/installation#toolchain-requirements)
   states the policy.

@@ -9,9 +9,9 @@ letter and attempts.
 
 ## Enable
 
-Turn on feature `kafka` on the [`spate`](https://crates.io/crates/spate)
-facade. Feature `kafka-tls` adds TLS, mTLS and SASL, and implies `kafka`. The
-facade README has the Cargo snippet.
+Turn on feature `kafka` on the [`spate`](https://crates.io/crates/spate) facade.
+Feature `kafka-tls` adds TLS, mTLS and SASL without GSSAPI or OIDC, and implies
+`kafka`. The facade README has the Cargo snippet.
 
 ## Source
 

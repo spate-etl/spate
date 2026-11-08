@@ -6,7 +6,7 @@
 # below and stops at the first failure.
 [nextest-version]
 required = "0.9.89"
-recommended = "0.9.140"
+recommended = "0.9.148"
 
 [profile.default]
 fail-fast = false

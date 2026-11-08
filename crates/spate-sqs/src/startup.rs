@@ -10,11 +10,12 @@
 //! counts. A bounded job's end check reads both, and the runtime reads the
 //! dead-letter queue's on every job. The checks run once, at connect.
 
-use crate::config::BACKEND;
-use crate::error::{CallError, Class, SqsError};
+use crate::config::{BACKEND, NAME};
+use crate::error::{CallError, Class};
 use crate::queue::BoxFuture;
 use serde::Deserialize;
 use spate_core::config::FeedSection;
+use spate_core::feed::ConnectError;
 use spate_core::hash::FastMap;
 use url::Url;
 
@@ -133,18 +134,18 @@ enum Count {
 ///
 /// # Errors
 ///
-/// [`SqsError::Refused`] for a read of the queue that SQS refuses, a FIFO
+/// [`ConnectError::Refused`] for a read of the queue that SQS refuses, a FIFO
 /// queue, a missing or unreadable redrive
 /// policy, a dead-letter ARN that is not an SQS queue's, an unreadable
 /// dead-letter queue, one that keeps messages no longer than the queue, or a
 /// queue of the two that does not report its message counts;
-/// [`SqsError::Config`] for a `queue_url` that is not a URL;
-/// [`SqsError::Unavailable`] when a read keeps failing transiently.
+/// [`ConnectError::Config`] for a `queue_url` that is not a URL;
+/// [`ConnectError::Unavailable`] when a read keeps failing transiently.
 pub(crate) async fn check(
     queue: &dyn QueueAttributes,
     queue_url: &str,
     step: &std::sync::Mutex<&'static str>,
-) -> Result<Checked, SqsError> {
+) -> Result<Checked, ConnectError> {
     let set = |s| {
         *step
             .lock()
@@ -154,49 +155,55 @@ pub(crate) async fn check(
     let source = queue
         .attributes(queue_url, SOURCE_ATTRIBUTES)
         .await
-        .map_err(|e| match e.class {
-            Class::Fatal => SqsError::Refused(e.message),
-            Class::Retryable => SqsError::Unavailable(e.message),
-        })?;
+        .map_err(|e| ConnectError::from_class(NAME, e.class.into(), e.message))?;
     let arn = source.get("QueueArn").cloned().unwrap_or_default();
     // SQS requires a FIFO queue's name to end in `.fifo`.
     if arn.ends_with(".fifo") {
-        return Err(SqsError::Refused(format!(
-            "the queue {arn} is a FIFO queue; the SQS feed reads standard queues only"
-        )));
+        return Err(ConnectError::refused(
+            NAME,
+            format!("the queue {arn} is a FIFO queue; the SQS feed reads standard queues only"),
+        ));
     }
     let Some(policy) = source.get("RedrivePolicy").filter(|p| !p.is_empty()) else {
-        return Err(SqsError::Refused(format!(
-            "the queue {arn} has no redrive policy: give it a dead-letter queue, so a unit \
+        return Err(ConnectError::refused(
+            NAME,
+            format!(
+                "the queue {arn} has no redrive policy: give it a dead-letter queue, so a unit \
              that keeps failing moves there after `maxReceiveCount` receives"
-        )));
+            ),
+        ));
     };
     let policy: RedrivePolicy = serde_json::from_str(policy).map_err(|e| {
-        SqsError::Refused(format!(
-            "the queue {arn} has a redrive policy the feed cannot read: {e}: {policy}"
-        ))
+        ConnectError::refused(
+            NAME,
+            format!("the queue {arn} has a redrive policy the feed cannot read: {e}: {policy}"),
+        )
     })?;
     let max_receive_count = match &policy.max_receive_count {
         Count::Number(n) => Some(*n),
         Count::Text(s) => s.parse().ok(),
     }
     .ok_or_else(|| {
-        SqsError::Refused(format!(
-            "the queue {arn} has a redrive policy whose `maxReceiveCount` is not a count"
-        ))
+        ConnectError::refused(
+            NAME,
+            format!("the queue {arn} has a redrive policy whose `maxReceiveCount` is not a count"),
+        )
     })?;
     let dead_letter_arn = policy.dead_letter_target_arn;
     let source_url = Url::parse(queue_url).map_err(|e| {
-        SqsError::Config(FeedSection::backend_error(
+        ConnectError::Config(FeedSection::backend_error(
             BACKEND,
             format!("`queue_url` is not a URL: {e}"),
         ))
     })?;
     let dead_letter = dead_letter_url(&source_url, &dead_letter_arn).ok_or_else(|| {
-        SqsError::Refused(format!(
-            "the queue {arn} has a redrive policy that names `{dead_letter_arn}`, which is \
+        ConnectError::refused(
+            NAME,
+            format!(
+                "the queue {arn} has a redrive policy that names `{dead_letter_arn}`, which is \
              not an SQS queue ARN (arn:<partition>:sqs:<region>:<account>:<queue>)"
-        ))
+            ),
+        )
     })?;
 
     set("reading the dead-letter queue's attributes");
@@ -204,31 +211,41 @@ pub(crate) async fn check(
         .attributes(dead_letter.as_str(), DEAD_LETTER_ATTRIBUTES)
         .await
         .map_err(|e| match e.class {
-            Class::Fatal => SqsError::Refused(format!(
-                "cannot read the dead-letter queue {dead_letter_arn}: {}",
-                e.message
-            )),
-            Class::Retryable => SqsError::Unavailable(format!(
-                "reading the dead-letter queue {dead_letter_arn}: {}",
-                e.message
-            )),
+            Class::Fatal => ConnectError::refused(
+                NAME,
+                format!(
+                    "cannot read the dead-letter queue {dead_letter_arn}: {}",
+                    e.message
+                ),
+            ),
+            Class::Retryable => ConnectError::unavailable(
+                NAME,
+                format!(
+                    "reading the dead-letter queue {dead_letter_arn}: {}",
+                    e.message
+                ),
+            ),
         })?;
 
     let source_counts =
-        counts(&source).map_err(|e| SqsError::Refused(format!("{e}: queue {arn}")))?;
-    let dead_letter_counts = counts(&dead)
-        .map_err(|e| SqsError::Refused(format!("{e}: dead-letter queue {dead_letter_arn}")))?;
+        counts(&source).map_err(|e| ConnectError::refused(NAME, format!("{e}: queue {arn}")))?;
+    let dead_letter_counts = counts(&dead).map_err(|e| {
+        ConnectError::refused(NAME, format!("{e}: dead-letter queue {dead_letter_arn}"))
+    })?;
     let retention = seconds(&source);
     let dead_letter_retention = seconds(&dead);
     let unreported = match (retention, dead_letter_retention) {
         (Some(source), Some(dead)) if dead <= source => {
-            return Err(SqsError::Refused(format!(
-                "the dead-letter queue {dead_letter_arn} keeps messages for {dead} s, no longer \
+            return Err(ConnectError::refused(
+                NAME,
+                format!(
+                    "the dead-letter queue {dead_letter_arn} keeps messages for {dead} s, no longer \
                  than the queue {arn} keeps them ({source} s). SQS counts retention from a \
                  message's first send, so a unit moved there could be deleted at once; give \
                  the dead-letter queue a longer `MessageRetentionPeriod`, or the queue a \
                  shorter one"
-            )));
+                ),
+            ));
         }
         (Some(_), Some(_)) => None,
         (None, Some(_)) => Some("the queue reported no MessageRetentionPeriod"),
@@ -351,7 +368,10 @@ mod tests {
             .build()
             .unwrap()
             .block_on(check(&NoDelayedCount, SOURCE, &step));
-        assert!(matches!(result, Err(SqsError::Refused(_))), "{result:?}");
+        assert!(
+            matches!(result, Err(ConnectError::Refused { .. })),
+            "{result:?}"
+        );
     }
 
     /// The attribute names `GetQueueAttributes` accepts on a standard queue.
@@ -495,7 +515,7 @@ mod tests {
         }
     }
 
-    fn run(queue: &Scripted) -> Result<Checked, SqsError> {
+    fn run(queue: &Scripted) -> Result<Checked, ConnectError> {
         let step = Mutex::new("starting");
         tokio::runtime::Builder::new_current_thread()
             .build()
@@ -503,9 +523,11 @@ mod tests {
             .block_on(check(queue, SOURCE, &step))
     }
 
-    fn refusal(result: Result<Checked, SqsError>) -> String {
+    fn refusal(result: Result<Checked, ConnectError>) -> String {
         match result {
-            Err(SqsError::Refused(message)) => message,
+            Err(ConnectError::Refused {
+                reason: message, ..
+            }) => message,
             other => panic!("expected a refusal, got {other:?}"),
         }
     }
@@ -787,7 +809,9 @@ mod tests {
 
         let slow_source = Scripted::default().failing(SOURCE, CallError::retryable("throttled"));
         match run(&slow_source) {
-            Err(SqsError::Unavailable(message)) => assert!(message.contains("throttled")),
+            Err(ConnectError::Unavailable {
+                reason: message, ..
+            }) => assert!(message.contains("throttled")),
             other => panic!("expected unavailable, got {other:?}"),
         }
 
@@ -801,8 +825,26 @@ mod tests {
 
         let slow = Scripted::pair(None, None).failing(DEAD_URL, CallError::retryable("throttled"));
         match run(&slow) {
-            Err(SqsError::Unavailable(message)) => assert!(message.contains("throttled")),
+            Err(ConnectError::Unavailable {
+                reason: message, ..
+            }) => assert!(message.contains("throttled")),
             other => panic!("expected unavailable, got {other:?}"),
         }
+    }
+
+    /// Pins the text a refused and an unavailable read render, with the
+    /// feed's name in it.
+    #[test]
+    fn a_failed_read_renders_the_sqs_text() {
+        let source = Scripted::default().failing(SOURCE, CallError::fatal("AccessDenied"));
+        assert_eq!(
+            run(&source).unwrap_err().to_string(),
+            "the SQS feed cannot start: AccessDenied"
+        );
+        let slow = Scripted::default().failing(SOURCE, CallError::retryable("throttled"));
+        assert_eq!(
+            run(&slow).unwrap_err().to_string(),
+            "SQS is unavailable: throttled"
+        );
     }
 }

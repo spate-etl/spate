@@ -9,6 +9,9 @@ use url::Url;
 /// The key that names this backend in a `feed:` section.
 pub(crate) const BACKEND: &str = "sqs";
 
+/// The backend's name in the text a person reads.
+pub(crate) const NAME: &str = "SQS";
+
 /// The shortest visibility period: one second per renewal period, and a
 /// long-poll wait of at least one second.
 const MIN_VISIBILITY: Duration = Duration::from_secs(3);
@@ -46,7 +49,7 @@ pub(crate) struct SqsFeedConfig {
 impl SqsFeedConfig {
     /// Decode and check the `sqs:` body of `section`.
     pub(crate) fn from_section(section: &FeedSection) -> Result<SqsFeedConfig, ConfigError> {
-        let config: SqsFeedConfig = section.backend_body(BACKEND, "SQS")?;
+        let config: SqsFeedConfig = section.backend_body(BACKEND, NAME)?;
         if section.attempt_cap.is_some() {
             return Err(FeedSection::backend_error(
                 BACKEND,

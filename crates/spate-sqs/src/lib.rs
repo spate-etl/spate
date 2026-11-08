@@ -68,5 +68,4 @@ mod startup;
 #[cfg(test)]
 mod test_stub;
 
-pub use error::SqsError;
 pub use feed::SqsFeed;

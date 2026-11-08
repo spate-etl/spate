@@ -889,7 +889,7 @@ async fn past_the_deadline_a_fail_is_gone_and_an_acknowledge_still_deletes() {
 const BOUND_DEADLINE: Duration = Duration::from_secs(10);
 
 /// Work that sets its step to `on` when first polled, then never ends.
-async fn hangs_on(step: Arc<Mutex<&'static str>>, on: &'static str) -> Result<(), SqsError> {
+async fn hangs_on(step: Arc<Mutex<&'static str>>, on: &'static str) -> Result<(), ConnectError> {
     *step.lock().unwrap() = on;
     std::future::pending().await
 }
@@ -899,7 +899,7 @@ async fn hangs_on(step: Arc<Mutex<&'static str>>, on: &'static str) -> Result<()
 struct BoundRun {
     step: Arc<Mutex<&'static str>>,
     clock: Arc<SyncTestClock>,
-    done: mpsc::Receiver<Result<(), SqsError>>,
+    done: mpsc::Receiver<Result<(), ConnectError>>,
 }
 
 impl BoundRun {
@@ -908,7 +908,7 @@ impl BoundRun {
         work: impl FnOnce(Arc<Mutex<&'static str>>) -> W + Send + 'static,
     ) -> BoundRun
     where
-        W: Future<Output = Result<(), SqsError>>,
+        W: Future<Output = Result<(), ConnectError>>,
     {
         let step = Arc::new(Mutex::new("starting"));
         let clock = SyncTestClock::frozen();
@@ -924,7 +924,7 @@ impl BoundRun {
 
     /// Wait until the work is on `step`, move the clock to the bound, and
     /// return the verdict.
-    fn fire_on(self, step: &str) -> Result<(), SqsError> {
+    fn fire_on(self, step: &str) -> Result<(), ConnectError> {
         spate_test::wait_until(BOUND_DEADLINE, step, || *self.step.lock().unwrap() == step);
         self.clock.advance(CONNECT_BOUND);
         self.done
@@ -950,7 +950,9 @@ fn connecting_is_bounded_at_30_seconds_and_names_its_step() {
         hangs_on(step, "reading the queue's ARN")
     });
     match run.fire_on("reading the queue's ARN") {
-        Err(SqsError::Unavailable(message)) => assert_eq!(
+        Err(ConnectError::Unavailable {
+            reason: message, ..
+        }) => assert_eq!(
             message,
             "connecting took longer than 30s, while reading the queue's ARN"
         ),
@@ -978,7 +980,9 @@ fn the_connect_bound_fires_on_any_runtime() {
     ] {
         let run = BoundRun::start(io, |step| hangs_on(step, "reading the queue's ARN"));
         match run.fire_on("reading the queue's ARN") {
-            Err(SqsError::Unavailable(message)) => assert!(
+            Err(ConnectError::Unavailable {
+                reason: message, ..
+            }) => assert!(
                 message.ends_with("while reading the queue's ARN"),
                 "{name}: {message}"
             ),
@@ -1690,7 +1694,9 @@ fn connect_ends_at_the_bound_on_the_clock_it_is_given() {
         got.is_some()
     });
     match got {
-        Some(Err(SqsError::Unavailable(message))) => assert!(
+        Some(Err(ConnectError::Unavailable {
+            reason: message, ..
+        })) => assert!(
             message.starts_with("connecting took longer than 30s, while "),
             "{message}"
         ),
@@ -1720,7 +1726,9 @@ fn the_connect_bound_names_the_read_it_was_on() {
                 .map(drop)
         });
         match run.fire_on(step.trim_start_matches("while ")) {
-            Err(SqsError::Unavailable(message)) => assert!(message.ends_with(step), "{message}"),
+            Err(ConnectError::Unavailable {
+                reason: message, ..
+            }) => assert!(message.ends_with(step), "{message}"),
             other => panic!("expected unavailable, got {other:?}"),
         }
     }
@@ -3380,7 +3388,9 @@ fn an_unlisted_sender_error_refuses_connect() {
         ))
         .unwrap();
         match SqsFeed::connect_with_static_credentials(&section, io.handle(), "x", "x") {
-            Err(SqsError::Refused(m)) => assert!(m.contains("InvalidAction"), "{header}: {m}"),
+            Err(ConnectError::Refused { reason: m, .. }) => {
+                assert!(m.contains("InvalidAction"), "{header}: {m}")
+            }
             Err(e) => panic!("{header}: {e}"),
             Ok(_) => panic!("{header}: connected"),
         }

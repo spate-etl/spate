@@ -1,4 +1,4 @@
-//! The crate's public error, and SDK errors classified as Fatal or Retryable.
+//! SDK errors classified as Fatal or Retryable.
 //!
 //! A credential, permission or TLS rejection, a KMS key the queue cannot
 //! use, a missing queue, a malformed batch and any other 400 answer that
@@ -14,29 +14,9 @@ use aws_sdk_sqs::operation::delete_message_batch::DeleteMessageBatchError;
 use aws_sdk_sqs::operation::get_queue_attributes::GetQueueAttributesError;
 use aws_sdk_sqs::operation::receive_message::ReceiveMessageError;
 use aws_sdk_sqs::operation::send_message_batch::SendMessageBatchError;
-use spate_core::config::ConfigError;
+use spate_core::error::ErrorClass;
 use std::error::Error;
 use std::fmt::Write as _;
-
-/// Why [`SqsFeed::connect`](crate::SqsFeed::connect) could not build a feed.
-#[derive(Debug, thiserror::Error)]
-#[non_exhaustive]
-pub enum SqsError {
-    /// The `feed:` section is not one the SQS feed can read.
-    #[error(transparent)]
-    Config(#[from] ConfigError),
-    /// The feed cannot start, and starting again fails the same way: SQS
-    /// refused a request, for a rejected credential, a missing permission or
-    /// queue, a rejected TLS handshake, or a request it rejects as one no
-    /// retry can fix; the TLS context could not be
-    /// built; or the queue failed one of the feed's startup checks.
-    #[error("the SQS feed cannot start: {0}")]
-    Refused(String),
-    /// SQS did not answer in time, or kept failing transiently. Starting
-    /// again later may succeed.
-    #[error("SQS is unavailable: {0}")]
-    Unavailable(String),
-}
 
 /// The prefix SQS puts on its own error codes in the query protocol, which
 /// the JSON protocol reports through its compatibility header.
@@ -117,6 +97,15 @@ fn code_in(code: &str, names: &[&str]) -> bool {
 pub(crate) enum Class {
     Fatal,
     Retryable,
+}
+
+impl From<Class> for ErrorClass {
+    fn from(class: Class) -> ErrorClass {
+        match class {
+            Class::Fatal => ErrorClass::Fatal,
+            Class::Retryable => ErrorClass::Retryable,
+        }
+    }
 }
 
 /// A failed call, classified.

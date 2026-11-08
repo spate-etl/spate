@@ -181,8 +181,8 @@ makes on the feed under the framework's `spate_feed_*` families.
 - [SQS feed page](https://spate.kainth.dev/docs/user-guide/connectors/feeds/sqs)
   — every key, the IAM actions, the startup checks, redriving dead-lettered
   units, cost per request and the metric families.
-- [API documentation on docs.rs](https://docs.rs/spate-sqs) — `SqsFeed`,
-  `SqsFeed::connect` and `SqsError`.
+- [API documentation on docs.rs](https://docs.rs/spate-sqs) — `SqsFeed` and
+  `SqsFeed::connect`.
 - [`s3_sqs_backfill.rs`](https://github.com/spate-etl/spate/blob/main/crates/spate/examples/s3_sqs_backfill.rs)
   — a bounded backfill whose work arrives through an SQS queue, with a job
   location. Needs an SQS queue, a dead-letter queue with a longer retention, and

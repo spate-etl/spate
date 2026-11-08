@@ -8,12 +8,14 @@
 //!
 //! [`Mode::Pull`] fetches by digest and re-tags locally. testcontainers builds
 //! its image reference as `name:tag` and has no digest form, so a run reaches
-//! the pinned bytes through the local tag.
+//! the pinned bytes through the local tag. A pull that fails on a transport
+//! error runs again.
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
-use crate::run::{self, Error, Outcome, Step};
+use crate::run::{self, Completed, Error, Outcome, Step, Streams};
 
 /// The tree holding one directory per service.
 const DIR: &str = "ci";
@@ -26,6 +28,26 @@ const CAPABILITIES: &str = "CAPABILITIES";
 
 /// The digest marker a pinned reference carries.
 const DIGEST: &str = "@sha256:";
+
+/// How many times a pull runs before a transport failure fails it.
+const PULL_ATTEMPTS: u32 = 3;
+
+/// The wait before the second pull. Each later wait doubles it.
+const FIRST_WAIT: Duration = Duration::from_secs(2);
+
+/// Text in docker's error when the pull never got the registry's answer: the
+/// connection failed, timed out or was reset. A missing digest, a denied
+/// repository and a rate limit match none of these.
+const TRANSIENT: &[&str] = &[
+    "dial tcp",
+    "connection refused",
+    "no such host",
+    "i/o timeout",
+    "tls handshake",
+    "client.timeout exceeded",
+    "request canceled",
+    "connection reset",
+];
 
 /// How a resolved lane is reported.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -207,7 +229,8 @@ pub(crate) fn selected_capabilities(root: &Path, service: &str) -> Result<Vec<Ca
 }
 
 /// Fetches a lane by digest, re-tags it locally, and returns the local
-/// `name:tag`.
+/// `name:tag`. A pull failing on a transport error runs again, up to
+/// [`PULL_ATTEMPTS`] times.
 fn pull_lane(root: &Path, explain: bool, service: &str, lane: &str) -> Result<String, Error> {
     let reference = reference_for(root, service, lane)?;
     let local = tagged(&reference).to_owned();
@@ -219,9 +242,54 @@ fn pull_lane(root: &Path, explain: bool, service: &str, lane: &str) -> Result<St
     }
     // docker's own line belongs on stderr, so stdout carries the reference
     // alone and a caller can pull and use the result in one invocation.
-    eprint!("{}", run::capture(root, &pull)?);
+    let pulled = pull_retrying(
+        &pull.display(),
+        &mut || run::complete(root, &pull, Streams::Capture),
+        &|wait| std::thread::sleep(wait),
+    )?;
+    eprint!("{pulled}");
     run::quiet(root, false, &retag)?;
     Ok(local)
+}
+
+/// Runs `pull` until it succeeds, fails on an error [`transient`] does not
+/// match, or has run [`PULL_ATTEMPTS`] times, and returns the stdout of the run
+/// that succeeded. Each run's stderr is copied to ours.
+///
+/// # Errors
+///
+/// When the last run fails, with the error `line` exiting that status gives.
+fn pull_retrying(
+    line: &str,
+    pull: &mut dyn FnMut() -> Result<Completed, Error>,
+    pause: &dyn Fn(Duration),
+) -> Result<String, Error> {
+    let mut attempt = 1;
+    let mut wait = FIRST_WAIT;
+    loop {
+        let done = pull()?;
+        eprint!("{}", done.stderr);
+        if done.code == 0 {
+            return Ok(done.stdout);
+        }
+        if attempt >= PULL_ATTEMPTS || !transient(&done.stderr) {
+            return Err(run::exited(line, done.code.to_string(), Some(done.code)));
+        }
+        attempt += 1;
+        eprintln!(
+            "container-image: the pull failed on a transport error; pull {attempt} of {PULL_ATTEMPTS} in {}s",
+            wait.as_secs()
+        );
+        pause(wait);
+        wait *= 2;
+    }
+}
+
+/// Whether docker's error names a transport failure, one a later pull can get
+/// past.
+fn transient(stderr: &str) -> bool {
+    let stderr = stderr.to_ascii_lowercase();
+    TRANSIENT.iter().any(|pattern| stderr.contains(pattern))
 }
 
 /// The two steps a pull takes: fetching the digest, then pointing the local tag
@@ -866,6 +934,96 @@ mod tests {
             extra_lanes(s.root(), "db").unwrap_err().message,
             "no such lane: ci/db/ghost/Dockerfile"
         );
+    }
+
+    // ── Retrying a pull ────────────────────────────────────────────────
+
+    /// The stderr docker printed when the registry's token endpoint reset the
+    /// connection.
+    const RESET: &str = "Error response from daemon: failed to resolve reference \"docker.io/apache/kafka-native@sha256:11fde816adf384402de9f3e57aeaf2c3722ba0671610247817688d07441714b4\": failed to authorize: failed to fetch oauth token: Post \"https://auth.docker.io/token\": read tcp 10.1.0.201:50708->172.64.144.78:443: read: connection reset by peer\n";
+
+    /// The stderr of a pull the registry refused for a digest it does not hold.
+    const UNKNOWN: &str = "Error response from daemon: manifest unknown\n";
+
+    /// A run of `docker pull` that exited `code` having printed `stderr`.
+    fn ran(code: i32, stderr: &str) -> Completed {
+        Completed {
+            code,
+            stdout: if code == 0 {
+                "sha256:aa\n".to_owned()
+            } else {
+                String::new()
+            },
+            stderr: stderr.to_owned(),
+        }
+    }
+
+    /// Plays `runs` back in order, and returns how many ran, the waits taken
+    /// between them, and the result.
+    fn retry(runs: Vec<Completed>) -> (usize, Vec<Duration>, Result<String, Error>) {
+        let mut runs = runs.into_iter();
+        let mut count = 0;
+        let waits = std::cell::RefCell::new(Vec::new());
+        let got = pull_retrying(
+            "docker pull x",
+            &mut || {
+                count += 1;
+                Ok(runs.next().expect("a run for every pull"))
+            },
+            &|wait| waits.borrow_mut().push(wait),
+        );
+        (count, waits.into_inner(), got)
+    }
+
+    #[test]
+    fn a_pull_reset_once_succeeds_on_the_second_run_after_one_wait() {
+        let (count, waits, got) = retry(vec![ran(1, RESET), ran(0, "")]);
+        assert_eq!(count, 2);
+        assert_eq!(waits, [Duration::from_secs(2)]);
+        assert_eq!(got.unwrap(), "sha256:aa\n");
+    }
+
+    /// The waits double, and the last run's status is the error.
+    #[test]
+    fn a_pull_that_keeps_failing_in_transport_stops_after_the_last_attempt() {
+        let (count, waits, got) = retry(vec![ran(1, RESET), ran(1, RESET), ran(7, RESET)]);
+        assert_eq!(count, 3);
+        assert_eq!(waits, [Duration::from_secs(2), Duration::from_secs(4)]);
+        let error = got.unwrap_err();
+        assert_eq!(error.message, "`docker pull x` exited 7");
+        assert_eq!(error.code, Some(7));
+    }
+
+    #[test]
+    fn a_refused_pull_fails_without_a_second_run() {
+        let (count, waits, got) = retry(vec![ran(1, UNKNOWN)]);
+        assert_eq!(count, 1);
+        assert!(waits.is_empty(), "{waits:?}");
+        assert_eq!(got.unwrap_err().message, "`docker pull x` exited 1");
+    }
+
+    #[test]
+    fn a_transport_failure_is_told_from_a_refusal_by_dockers_text() {
+        for line in [
+            "dial tcp: lookup registry-1.docker.io: server misbehaving",
+            "connect: connection refused",
+            "lookup auth.docker.io on 127.0.0.53:53: no such host",
+            "read tcp 10.0.0.1:1->10.0.0.2:443: i/o timeout",
+            "net/http: TLS handshake timeout",
+            "context deadline exceeded (Client.Timeout exceeded while awaiting headers)",
+            "net/http: request canceled while waiting for connection",
+            RESET,
+        ] {
+            assert!(transient(line), "{line}");
+        }
+        for line in [
+            UNKNOWN,
+            "pull access denied for vendor/db, repository does not exist or may require 'docker login'",
+            "unauthorized: authentication required",
+            "toomanyrequests: You have reached your unauthenticated pull rate limit.",
+        ] {
+            assert!(!transient(line), "{line}");
+        }
     }
 
     // ── Against the lanes this repository ships ────────────────────────

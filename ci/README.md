@@ -74,6 +74,12 @@ digest form, and it creates the container before it pulls, so the local tag is
 what it finds. `cargo xtask integration-test` runs it first, and so does CI for a
 suite that does not pull its own image.
 
+A pull whose error names a transport failure, such as a connection reset or a
+timeout, runs again: three runs at most, 2 s and then 4 s apart. Any other
+error, such as a digest the registry does not hold, a denied repository or a
+rate limit, fails the first run. docker's message is the only signal, so the
+patterns live in `TRANSIENT` in `xtask/src/checks/container_image.rs`.
+
 A bare `cargo nextest run --profile docker` skips that step, and testcontainers
 then pulls the tag unverified. An exact release tag is not re-pushed, so the
 bytes are the same; the digest is simply not checked. A suite that reads its

@@ -24,6 +24,12 @@ struct Shim(PathBuf);
 
 impl Shim {
     fn new(name: &str) -> Self {
+        Self::pulling(name, &format!("echo '{PULLED}'"))
+    }
+
+    /// A shim that runs `pull` as the shell body of each `docker pull`, and
+    /// exits 0 from every invocation that body does not end.
+    fn pulling(name: &str, pull: &str) -> Self {
         let dir =
             std::env::temp_dir().join(format!("spate-xtask-docker-{}-{name}", std::process::id()));
         drop(std::fs::remove_dir_all(&dir));
@@ -36,7 +42,7 @@ impl Shim {
                 "#!/bin/sh\n\
                  for a in \"$@\"; do printf '%s\\0' \"$a\" >>\"$SPATE_DOCKER_LOG\"; done\n\
                  printf '\\n' >>\"$SPATE_DOCKER_LOG\"\n\
-                 if [ \"$1\" = pull ]; then echo '{PULLED}'; fi\n\
+                 if [ \"$1\" = pull ]; then\n{pull}\nfi\n\
                  exit 0\n"
             ),
         )
@@ -301,4 +307,61 @@ fn explain_prints_the_plan_and_runs_nothing() {
         "stdout: {printed:?}"
     );
     assert!(printed.ends_with("/Dockerfile)\n"), "stdout: {printed:?}");
+}
+
+/// The stderr docker printed when the registry's token endpoint reset the
+/// connection.
+const RESET: &str = "Error response from daemon: failed to resolve reference \"docker.io/apache/kafka-native@sha256:11fde816adf384402de9f3e57aeaf2c3722ba0671610247817688d07441714b4\": failed to authorize: failed to fetch oauth token: Post \"https://auth.docker.io/token\": read tcp 10.1.0.201:50708->172.64.144.78:443: read: connection reset by peer";
+
+/// A pull that fails once on a connection reset runs again and succeeds.
+/// stdout still holds the local tag alone.
+#[test]
+fn a_pull_reset_once_is_tried_again() {
+    let shim = Shim::pulling(
+        "reset-once",
+        &format!(
+            "if [ ! -e \"$SPATE_DOCKER_LOG.failed\" ]; then\n\
+               : >\"$SPATE_DOCKER_LOG.failed\"\n\
+               echo '{RESET}' >&2\n\
+               exit 1\n\
+             fi\n\
+             echo '{PULLED}'"
+        ),
+    );
+    let tagged = primary_tag(&shim);
+
+    let out = xtask(&shim, None, &["--pull", SERVICE]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(stdout(&out), format!("{tagged}\n"));
+    assert_eq!(
+        stderr(&out),
+        format!(
+            "{RESET}\n\
+             container-image: the pull failed on a transport error; pull 2 of 3 in 2s\n\
+             {PULLED}\n"
+        )
+    );
+    let calls = shim.calls();
+    assert_eq!(calls.len(), 3, "{calls:?}");
+    assert_eq!(calls[0], calls[1]);
+    assert_eq!(calls[1][0], "pull");
+    assert_eq!(calls[2], ["tag", &calls[0][2], &tagged]);
+}
+
+/// A pull the registry refuses fails on its first run, and nothing is tagged.
+#[test]
+fn a_refused_pull_fails_at_once() {
+    let unknown = "Error response from daemon: manifest unknown";
+    let shim = Shim::pulling("refused", &format!("echo '{unknown}' >&2\nexit 1"));
+
+    let out = xtask(&shim, None, &["--pull", SERVICE]);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert_eq!(stdout(&out), "");
+    let calls = shim.calls();
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    let by_digest = &calls[0][2];
+    assert_eq!(
+        stderr(&out),
+        format!("{unknown}\nxtask: `docker pull --quiet {by_digest}` exited 1\n")
+    );
 }

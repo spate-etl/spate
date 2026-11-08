@@ -29,7 +29,6 @@ rustls = { workspace = true }
 rustls-native-certs = { workspace = true }
 serde = { workspace = true }
 spate-core = { workspace = true }
-thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt", "sync", "time"] }
 tracing = { workspace = true }
 url = { workspace = true }

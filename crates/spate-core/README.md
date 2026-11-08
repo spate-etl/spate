@@ -71,14 +71,12 @@ touches one of them cites its number and says how the property still holds.
   patch release, such as 0.4.0 to 0.4.1, does not break. Raising the minimum
   supported Rust version is a minor release too. Only the newest minor release
   is supported.
-- CI compares the public API with the last published release. A break fails
-  that check until a changelog entry marked **Breaking:** announces a break for
-  the coming release, and that release is then a minor one.
+- CI compares the public API with the last published release. A break fails that
+  check until a changelog entry marked `**Breaking:**` announces a break for the
+  coming release, and that release is then a minor one.
 - [ADR-0011](https://spate.kainth.dev/docs/adr/msrv-and-dependency-policy) and
   [INV-6](https://spate.kainth.dev/docs/INVARIANTS#inv-6) limit which
-  dependency types the public API can carry, so a breaking release of a
-  dependency does not become a breaking release of this crate. The `metrics`
-  facade is the one exception.
+  dependency types the public API can carry.
 - The `testing` feature is for tests only. It is off by default and outside the
   semver surface.
 - The minimum supported Rust version is 1.96.

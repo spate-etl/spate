@@ -280,7 +280,9 @@ The `user-guide/` tree maps to Diátaxis; keep each page in exactly one quadrant
 Voice follows the quadrant, so there is one rule to remember rather than two:
 
 - **Second person** in Tutorial and How-to (`01-getting-started`, `03-guides`,
-  `05-deployment`, `06-extending`) — the reader is doing something.
+  `05-deployment`, `06-extending`) and in the developer guide — the reader is
+  doing something. An instruction is an imperative: "pass `HANG` to
+  `wait_until`".
 - **Impersonal** in Explanation and Reference (`02-concepts`, `04-connectors`,
   `07-reference`) — the text describes the system, not the reader. Write "the
   sink retries", not "you get a retry".
@@ -309,6 +311,18 @@ Everywhere:
     the rule does not take it as absolute.
   - A sentence opens with a capital letter. One that would open on a lowercase
     identifier such as `librdkafka` is reworded.
+- **One point per paragraph.** A paragraph makes one point. A second point, an
+  exception or an aside starts a new paragraph, so a reader who skims the first
+  sentence of each paragraph still meets every point.
+- **A rule opens its section.** On a page of rules, such as the developer
+  guide's testing pages, the first sentence under a rule's heading states the
+  rule. The reason follows in a paragraph that opens with `**Why:**`. A reader
+  who stops after the first sentence has the rule, and a reader who wants the
+  reason knows where to find it.
+- **A heading says what to do.** On a page of rules or tasks, a heading is the
+  instruction in the words a reader would search for: "Wait for a signal the
+  code publishes". A heading such as "Signals" names a topic and gives a reader
+  with a failing test nothing to search for.
 - **The page reads as the present, never as a changelog.** No "now", "recently",
   "as of", "has been changed to". If something moved, the page describes what
   is and the pull request says what moved. (§ 9 suspends this for `docs/adr/`.)

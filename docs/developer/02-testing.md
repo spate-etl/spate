@@ -55,11 +55,13 @@ publishes `closes`:
 ```rust file=crates/spate-core/src/pipeline/fakes.rs region=held_before_closes title="fakes.rs"
 ```
 
-A retryable answer that comes ahead of the state a test waits for is not that
-state. The test reads again past it, as a caller does. A broker can answer a
-topic it has just created as unknown, so a test that creates a topic and then
-calls code that refuses a missing one waits until the broker's metadata lists
-it.
+When the code returns a retryable error, the test reads again, as a real caller
+would, and asserts on the first answer that is not retryable. A test that is
+checking for the retryable error itself asserts on it directly.
+
+A broker can report a topic it has just created as missing for a while. A test
+that creates a topic waits until the broker lists it before starting code that
+refuses a missing topic.
 
 ### A test owns its environment
 

@@ -454,11 +454,9 @@ pub(crate) fn create_visible(brokers: &str, topics: &[NewTopic<'_>]) {
             r.expect("topic created");
         });
     for topic in topics {
-        spate_test::wait_until(
-            spate_test::HANG,
-            &format!("{} in metadata", topic.name),
-            || feed::exists(brokers, topic.name),
-        );
+        spate_test::wait_until(HANG, &format!("{} in metadata", topic.name), || {
+            feed::exists(brokers, topic.name)
+        });
     }
 }
 

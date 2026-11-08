@@ -304,13 +304,10 @@ async fn a_write_to_a_missing_topic_fails() {
     );
     let batch = rows_batch(&sink, 1);
     let write = || async {
-        tokio::time::timeout(
-            spate_test::HANG,
-            sink.writer.write_batch(&sink.endpoints[0][0], &batch),
-        )
-        .await
-        .expect("the write settles")
-        .expect_err("a missing topic fails the write")
+        tokio::time::timeout(HANG, sink.writer.write_batch(&sink.endpoints[0][0], &batch))
+            .await
+            .expect("the write settles")
+            .expect_err("a missing topic fails the write")
     };
     let first = write().await;
     let hint = match first.class() {
@@ -349,7 +346,7 @@ fn a_send_to_a_topic_known_to_be_missing_is_retryable() {
     );
     let write = spawn_write(&io, &sink, rows_batch(&sink, 2));
     let result = io
-        .block_on(async { tokio::time::timeout(spate_test::HANG, write).await })
+        .block_on(async { tokio::time::timeout(HANG, write).await })
         .expect("the write settles")
         .expect("write task");
     let reason = retryable_reason(result);

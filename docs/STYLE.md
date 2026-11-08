@@ -290,8 +290,12 @@ Everywhere:
 - **Present-tense declarative.** "Unknown fields are rejected", not "will be".
 - **Plain sentences.** A reader follows each sentence on the first pass. Check
   every sentence a change adds:
-  - It carries one idea. A sentence that chains clauses with "so", "and" or
-    "which" splits into two.
+  - It carries one idea, or one cause and its effect. Where one fact follows
+    from another, the sentence joins them with "because", "so" or "this means
+    that". A reader left to connect two bare statements can connect them
+    wrongly. A sentence that adds a second cause splits in two.
+  - The phrasing is full. "Then checks the result once" names what is checked,
+    where "then looks once" leaves the reader to fill it in.
   - The concrete case comes first. "To check that something did not happen,
     wait for an event that shows the code has gone past that point" opens on
     the case, and the principle follows.

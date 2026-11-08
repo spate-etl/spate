@@ -155,6 +155,26 @@ passes. The rule applies to that bound as it does to `HANG`; the regions above
 pass five seconds there, and a hang bound is what the rule asks for in its
 place.
 
+A test that rules something out waits for a signal that the code has passed
+the point where it would have done it, then looks once. The Kafka source's
+pause test counts the mock cluster's Fetch requests. librdkafka sends one per
+broker at a time and queues each reply before it sends the next, so a second
+Fetch after the produce means one sent after it has been answered:
+
+```rust file=crates/spate-kafka/tests/mock_cluster.rs region=absence_after_a_signal title="mock_cluster.rs"
+```
+
+A librdkafka or broker timer is the one place real time stands in for a test
+clock. No test clock reaches `session.timeout.ms`, `max.poll.interval.ms` or a
+broker's `segment.ms`, so a test whose property is such a timer elapsing waits
+past it, or asserts that at least that long passed, and a comment opening
+`Elapsed time is the property` names the timer. Load only lengthens elapsed
+time, so such a lower bound fails only on a defect. An upper bound on elapsed
+time, and a wait that assumes something did not happen, get no such pass:
+
+```rust file=crates/spate-kafka/tests/feed_kafka.rs region=lower_bound_on_session title="feed_kafka.rs"
+```
+
 ### An interleaving failure is checked for a product defect first
 
 A test that asserts an order of events and fails once is read before it is

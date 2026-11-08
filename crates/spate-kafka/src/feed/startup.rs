@@ -1556,10 +1556,12 @@ mod tests {
         }
     }
 
-    /// Pins that a metadata read ends by its deadline when the slow broker it
-    /// asked is replaced, mid-call, by one the client cannot reach.
-    /// librdkafka then waits for a usable broker again for the call's full
-    /// length.
+    /// Pins that a metadata read ends at its deadline, with the bound's
+    /// error, when the slow broker it asked is replaced, mid-call, by one the
+    /// client cannot reach. librdkafka then waits for a usable broker again
+    /// for the call's full length.
+    /// [`a_metadata_read_paces_its_calls_by_the_error`] pins the pacing that
+    /// keeps each call inside the deadline.
     #[test]
     #[expect(unsafe_code, reason = "moves a mock broker's advertised listener")]
     fn a_metadata_read_ends_by_its_deadline_when_its_broker_is_replaced() {
@@ -1593,15 +1595,19 @@ mod tests {
         }
         let properties = [("bootstrap.servers", servers.as_str())];
         let hooks = crate::sink::SinkHooks::detached(SyncClock::new(TestClock::frozen() as _));
-        let built = Instant::now();
         let brokers = Brokers::new(raw(&properties, ()), raw(&properties, hooks), limit);
-        let io = multi_thread();
-        let got = io.block_on(brokers.metadata(WORK)).map_err(|e| e.code);
-        let took = built.elapsed();
-        assert!(
-            took <= limit + 2 * SLICE + Duration::from_millis(300),
-            "the read ended {took:?} after its brokers were built, with {got:?}"
-        );
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let io = multi_thread();
+            let read = io.block_on(brokers.metadata(WORK));
+            let _ = tx.send(read.map_err(|e| (e.code, e.bound)));
+        });
+        // Either code is one an expired read asks again on.
+        match rx.recv_timeout(HANG) {
+            Ok(Err((C::BrokerTransportFailure | C::OperationTimedOut, Some(bound))))
+                if bound == limit => {}
+            other => panic!("expected the bound's error within {HANG:?}, got {other:?}"),
+        }
     }
 
     /// Pins that checks ending on their own, before any rejection or the

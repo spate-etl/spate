@@ -161,6 +161,12 @@ impl Gate {
         let st = self.core.lock();
         // Checked under the state lock, as in `take`.
         if st.signal.latched().is_none() && !self.core.stopped() {
+            #[cfg(test)]
+            let st = {
+                let mut st = st;
+                st.step_waits += 1;
+                st
+            };
             drop(
                 self.core
                     .gate_wake
@@ -184,6 +190,10 @@ impl Gate {
             && st.signal.latched().is_none()
             && !self.core.stopped()
         {
+            #[cfg(test)]
+            {
+                st.step_waits += 1;
+            }
             st = self
                 .core
                 .gate_wake

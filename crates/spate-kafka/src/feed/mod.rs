@@ -166,6 +166,10 @@ pub(crate) struct State {
     /// The runtime's close, for the consumer thread to settle once it has
     /// left the group.
     pub(crate) close: Option<Closing>,
+    /// How many step waits on `gate_wake` the gate has begun, counted under
+    /// this lock just before each.
+    #[cfg(test)]
+    pub(crate) step_waits: usize,
 }
 
 /// A close the consumer thread has not settled yet.

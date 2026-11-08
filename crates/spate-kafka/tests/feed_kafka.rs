@@ -154,12 +154,16 @@ fn a_unit_whose_worker_is_killed_mid_read_is_delivered_again() {
     wait_until(HANG, "B reads the unit", || {
         !b.recording.seen.lock().unwrap().is_empty()
     });
-    let waited = killed.elapsed();
     assert_eq!(b.recording.seen.lock().unwrap()[0], 2);
+    // ANCHOR: lower_bound_on_session
+    // Elapsed time is the property: B is assigned the partition only once A's
+    // session lapses on the broker.
+    let waited = killed.elapsed();
     assert!(
         waited >= SESSION - HEARTBEAT,
         "B read the unit {waited:?} after A was killed, inside A's session"
     );
+    // ANCHOR_END: lower_bound_on_session
     wait_until(
         HANG,
         "B writes every row and commits the unit's offset",

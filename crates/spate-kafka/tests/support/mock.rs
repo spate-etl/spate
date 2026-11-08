@@ -191,6 +191,18 @@ impl MockKafka {
     /// How many `api` requests the cluster has received since
     /// [`MockKafka::track_requests`].
     pub(crate) fn received(&self, api: RDKafkaApiKey) -> usize {
+        self.count_requests(|key, _| key == api as i16)
+    }
+
+    /// How many `api` requests broker `broker` has received since
+    /// [`MockKafka::track_requests`].
+    pub(crate) fn received_from(&self, api: RDKafkaApiKey, broker: i32) -> usize {
+        self.count_requests(|key, id| key == api as i16 && id == broker)
+    }
+
+    /// How many tracked requests `keep` accepts, given each one's API key and
+    /// the id of the broker that received it.
+    fn count_requests(&self, keep: impl Fn(i16, i32) -> bool) -> usize {
         let mut count = 0;
         // SAFETY: the pointer is valid while `self` lives, and the array holds
         // `count` requests until it is destroyed.
@@ -199,8 +211,11 @@ impl MockKafka {
                 rdkafka::bindings::rd_kafka_mock_get_requests(self.native(), &raw mut count);
             let seen = (0..count)
                 .filter(|i| {
-                    rdkafka::bindings::rd_kafka_mock_request_api_key(*requests.add(*i))
-                        == api as i16
+                    let request = *requests.add(*i);
+                    keep(
+                        rdkafka::bindings::rd_kafka_mock_request_api_key(request),
+                        rdkafka::bindings::rd_kafka_mock_request_id(request),
+                    )
                 })
                 .count();
             rdkafka::bindings::rd_kafka_mock_request_destroy_array(requests, count);

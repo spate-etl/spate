@@ -1821,8 +1821,8 @@ fn stopping_a_latched_feed_logs_nothing() {
 
 /// Pins that a gate pass with nothing it may take waits a step before it
 /// returns, so the gate thread does not spin: on an idle feed, and on a
-/// stopping feed with a delivery at the gate. A step of an hour that has
-/// not ended after 500 ms is the property.
+/// stopping feed with a delivery at the gate. The pass begins a step wait
+/// and returns only once the feed stops.
 #[test]
 fn a_gate_pass_with_nothing_to_take_waits_a_step() {
     for stopping in [false, true] {
@@ -1846,11 +1846,25 @@ fn a_gate_pass_with_nothing_to_take_waits_a_step() {
             Duration::from_secs(3600),
         )
         .with_step(Duration::from_secs(3600));
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            gate.pass();
+            let _ = tx.send(());
+        });
+        let mut returned = false;
+        spate_test::wait_until(HANG, "the pass begins a step wait or returns", || {
+            returned = rx.try_recv().is_ok();
+            returned || feed.core.lock().step_waits >= 1
+        });
         assert!(
-            !returns_within(Duration::from_millis(500), move || gate.pass()),
+            !returned,
             "a pass with nothing to take returned at once (stopping: {stopping})"
         );
         super::stop(&feed.core);
+        assert!(
+            rx.recv_timeout(HANG).is_ok(),
+            "the stop did not end the wait (stopping: {stopping})"
+        );
     }
 }
 
@@ -3510,15 +3524,15 @@ mod cluster {
             gate.pass();
             let _ = tx.send(());
         });
-        wait_until(HANG, "the unit is back at the gate", || {
+        // The unit was at the gate before the pass began, so the pass's
+        // first step wait is the one after putting it back.
+        let mut returned = false;
+        wait_until(HANG, "the pass waits after putting the unit back", || {
+            returned = rx.try_recv().is_ok();
             let st = core.lock();
-            st.gating.len() == 1 && st.admitting == 0
+            returned || (st.gating.len() == 1 && st.admitting == 0 && st.step_waits >= 1)
         });
-        // Elapsed time is the property: the pass waits after putting back.
-        assert!(
-            rx.recv_timeout(Duration::from_millis(300)).is_err(),
-            "the pass returned without waiting"
-        );
+        assert!(!returned, "the pass returned without waiting");
         super::super::stop(&core);
         assert!(
             rx.recv_timeout(HANG).is_ok(),

@@ -17,17 +17,21 @@ mod another_topic {
     use crate::support::MockKafka;
     use rdkafka::consumer::{BaseConsumer, CommitMode, Consumer};
     use rdkafka::producer::{BaseProducer, BaseRecord, Producer};
+    use rdkafka::types::RDKafkaApiKey;
     use rdkafka::{ClientConfig, Offset, TopicPartitionList};
     use spate_core::config::PipelineConfig;
     use spate_core::ops::chain_owned;
     use spate_core::pipeline::{Pipeline, RuntimeOptions};
     use spate_core::sink::KeyHashRouter;
     use spate_kafka::{KafkaSource, KafkaSourceConfig};
-    use spate_test::{BytesPassthrough, HANG, PipelineRun, TestEncoder, capture_sink, unique_name};
+    use spate_test::{
+        BytesPassthrough, HANG, PipelineRun, TestEncoder, capture_sink, unique_name, wait_until,
+    };
     use std::collections::BTreeMap;
     use std::io::{Read as _, Write as _};
     use std::net::TcpStream;
-    use std::time::{Duration, Instant};
+    use std::sync::mpsc;
+    use std::time::Duration;
 
     const TOPIC: &str = "orders";
     const OTHER: &str = "other";
@@ -89,8 +93,9 @@ mod another_topic {
     }
 
     /// Join `GROUP` first, so this connection leads it, then assign every other
-    /// member `other` partition 0.
-    fn lead_the_group(brokers: &str) {
+    /// member `other` partition 0 once `members_synced` returns. The connection
+    /// stays open until `release` hears from the test or hangs up.
+    fn lead_the_group(brokers: &str, members_synced: impl FnOnce(), release: &mpsc::Receiver<()>) {
         let mut s = TcpStream::connect(brokers).unwrap();
         let mut subscription = Vec::new();
         subscription.extend_from_slice(&0i16.to_be_bytes());
@@ -150,13 +155,13 @@ mod another_topic {
         }
         // The mock answers every waiting member when the leader syncs, and refuses a
         // SyncGroup that arrives after that, so the source's goes first.
-        std::thread::sleep(Duration::from_secs(1));
+        members_synced();
         let resp = request(&mut s, 14, 1, &sync);
         let mut r = Reader(&resp[4..]);
         let _throttle = r.i32();
         assert_eq!(r.i16(), 0, "SyncGroup error");
         // The connection stays open past the test's reads of the commit.
-        std::thread::sleep(Duration::from_secs(20));
+        let _ = release.recv_timeout(HANG);
         drop(s);
     }
 
@@ -178,14 +183,16 @@ mod another_topic {
             .offset()
     }
 
-    /// An offer for `other` partition 0 leaves the group's commit on `orders`
-    /// partition 0 where it was: the source read no record of `orders`.
+    /// An offer for `other` partition 0 stops the run and leaves the group's
+    /// commit on `orders` partition 0 where it was: the source read no record of
+    /// `orders`.
     #[test]
     fn an_offer_naming_another_topic_leaves_the_commit_on_the_configured_topic() {
         let cluster = MockKafka::new();
         cluster.hold_first_rebalance();
         cluster.create_topic(TOPIC, 1, 1).unwrap();
         cluster.create_topic(OTHER, 1, 1).unwrap();
+        cluster.track_requests();
         let brokers = cluster.bootstrap_servers();
 
         let producer: BaseProducer = ClientConfig::new()
@@ -212,11 +219,30 @@ mod another_topic {
         probe.commit(&position, CommitMode::Sync).unwrap();
         assert_eq!(committed(&probe), Offset::Offset(RESUME_AT));
 
-        let leader = {
-            let brokers = brokers.clone();
-            std::thread::spawn(move || lead_the_group(&brokers))
-        };
+        std::thread::scope(|scope| {
+            let (release, released) = mpsc::channel();
+            let (cluster, brokers) = (&cluster, &brokers);
+            let leader = scope.spawn(move || {
+                // No other client joins the group, so the first SyncGroup is the
+                // source's.
+                let source_synced = || {
+                    wait_until(HANG, "the source's SyncGroup", || {
+                        cluster.received(RDKafkaApiKey::SyncGroup) >= 1
+                    });
+                };
+                lead_the_group(brokers, source_synced, &released);
+            });
+            run_against_the_offer(brokers, &probe);
+            drop(release);
+            leader
+                .join()
+                .expect("the raw leader completed the rebalance");
+        });
+    }
 
+    /// Runs a pipeline whose group is offered `other` partition 0, and asserts
+    /// it stops on the offer with the commit on `orders` where it was.
+    fn run_against_the_offer(brokers: &str, probe: &BaseConsumer) {
         let name = unique_name("offer");
         let yaml = format!(
             "pipeline: {{ name: {name}, threads: 2, io_threads: 1 }}\n\
@@ -229,7 +255,7 @@ mod another_topic {
         let pipeline = Pipeline::from_config(PipelineConfig::from_str(&yaml).expect("config"))
             .expect("builder");
         let (sink, script) = capture_sink(1, 1);
-        let mut cfg = KafkaSourceConfig::new(&brokers, TOPIC, GROUP);
+        let mut cfg = KafkaSourceConfig::new(brokers, TOPIC, GROUP);
         cfg.startup_timeout = Duration::from_secs(60);
         cfg.statistics_interval = Duration::ZERO;
         cfg.rdkafka = BTreeMap::from([
@@ -252,29 +278,22 @@ mod another_topic {
             })
             .into_runtime(KafkaSource::new(cfg))
             .expect("runtime");
-        let shutdown = runtime.shutdown_handle();
         let run = PipelineRun::spawn(move || runtime.run());
 
-        // The negative result has nothing to wait on: the bound outlasts the group
-        // forming, the source's assign hold and a start commit.
-        let until = Instant::now() + Duration::from_secs(12);
-        let mut seen = committed(&probe);
-        while seen == Offset::Offset(RESUME_AT) && Instant::now() < until {
-            std::thread::sleep(Duration::from_millis(200));
-            seen = committed(&probe);
-        }
-        shutdown.trigger();
-        let exit = run.wait_exit(HANG).expect("the run stops");
-        leader
-            .join()
-            .expect("the raw leader completed the rebalance");
-
+        let exit = run.wait_exit(HANG).expect("the run stops on the offer");
+        let outcome = match &exit {
+            Ok(report) => format!("{:?}", report.state),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            outcome.contains("a topic other than `orders`"),
+            "the run did not stop on the offer: {outcome}"
+        );
         assert!(script.writes().is_empty(), "the sink wrote nothing");
         assert_eq!(
-            seen,
+            committed(probe),
             Offset::Offset(RESUME_AT),
-            "the commit on `{TOPIC}` moved with nothing read, past records {RESUME_AT}..{END}; run: {:?}",
-            exit.as_ref().map(|_| ()).map_err(|e| e.to_string())
+            "the commit on `{TOPIC}` moved with nothing read, past records {RESUME_AT}..{END}"
         );
     }
 }
@@ -1094,6 +1113,7 @@ mod logical_committed_offset {
     use crate::support::MockKafka;
     use rdkafka::consumer::{BaseConsumer, Consumer};
     use rdkafka::producer::{BaseProducer, BaseRecord, Producer};
+    use rdkafka::types::RDKafkaApiKey;
     use rdkafka::{ClientConfig, Offset, TopicPartitionList};
     use spate_core::checkpoint::Checkpointer;
     use spate_core::clock::TestClock;
@@ -1111,7 +1131,7 @@ mod logical_committed_offset {
     use std::io::{Read as _, Write as _};
     use std::net::TcpStream;
     use std::sync::Arc;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     const TOPIC: &str = "orders";
     const GROUP: &str = "logical-commit";
@@ -1224,6 +1244,7 @@ mod logical_committed_offset {
     fn holds_the_commit(raw: i64, read: Offset) {
         let cluster = MockKafka::new();
         cluster.create_topic(TOPIC, 1, 1).unwrap();
+        cluster.track_requests();
         let brokers = cluster.bootstrap_servers();
 
         let producer: BaseProducer = ClientConfig::new()
@@ -1282,21 +1303,21 @@ mod logical_committed_offset {
             .into_runtime(KafkaSource::new(cfg))
             .expect("runtime");
         let shutdown = runtime.shutdown_handle();
+        let looked_up = cluster.received(RDKafkaApiKey::OffsetFetch);
+        let committed_before = cluster.received(RDKafkaApiKey::OffsetCommit);
         let run = PipelineRun::spawn(move || runtime.run());
 
-        // The negative result has nothing to wait on: the bound outlasts the group
-        // forming, the assign hold, a start commit and a read of all ten records.
-        let until = Instant::now() + Duration::from_secs(15);
-        let mut seen = committed(&probe);
-        while seen == read && Instant::now() < until {
-            std::thread::sleep(Duration::from_millis(200));
-            seen = committed(&probe);
-        }
-        // Writes settle ahead of the commit that covers them, so this read is final
-        // for a commit that came from reading.
-        let wrote = !script.writes().is_empty();
+        // A held start looks the committed offset up again, and a start that
+        // moves the commit sends it, so either means the first decision is made.
+        wait_until(HANG, "a second committed-offset lookup or a commit", || {
+            cluster.received(RDKafkaApiKey::OffsetFetch) >= looked_up + 2
+                || cluster.received(RDKafkaApiKey::OffsetCommit) > committed_before
+        });
         shutdown.trigger();
         let exit = run.wait_exit(HANG).expect("the run stops");
+        // The run has made every commit it will make, and written all it covers.
+        let wrote = !script.writes().is_empty();
+        let seen = committed(&probe);
         assert!(
             seen == read || wrote,
             "the commit moved to {seen:?} with nothing written; run: {:?}",

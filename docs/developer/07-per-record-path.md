@@ -61,7 +61,7 @@ committed baseline.
 
 ## Related
 
-- [Benchmarks and fuzzing](04-benchmarks-and-fuzzing.md) — how to add a
+- [Benchmarks](04-benchmarks-and-fuzzing.md) — how to add a
   snapshot target or a counted bench, and what each tier gates.
 - [Anatomy of a connector crate](03-connector-crate.md) — the `testing`
   feature and the rules a bench seam follows.

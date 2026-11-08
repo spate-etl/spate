@@ -85,7 +85,7 @@ yourself.
 ## Bench targets
 
 A connector's `benches/` follows the naming and the `[[bench]]` stanza that
-[Benchmarks and fuzzing](04-benchmarks-and-fuzzing.md) states for each tier,
+[Benchmarks](04-benchmarks-and-fuzzing.md) states for each tier,
 and that page says how to add a target.
 
 ## Fuzz targets
@@ -120,5 +120,7 @@ notice; [`changelog.d/README.md`](repo:changelog.d/README.md) says which. Its
   repository.
 - [Commands and gates](01-commands.md) — the commands that build, test and
   select the suites named here.
-- [Benchmarks and fuzzing](04-benchmarks-and-fuzzing.md) — the targets a
-  connector adds beyond its tests.
+- [Benchmarks](04-benchmarks-and-fuzzing.md) — the bench targets a connector
+  adds.
+- [Fuzz a parser](04-writing-a-test.md#fuzz-a-parser) — the fuzz targets a
+  connector adds.

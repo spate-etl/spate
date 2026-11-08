@@ -25,7 +25,7 @@ Use the first harness in this list that can run the code under test:
 4. The Kafka mock cluster
 5. A container
 
-**Why:** each step down the list adds scheduling or real I/O, and each one makes a test less deterministic.
+**Why:** the later harnesses bring in parts the test does not control: a multi-thread runtime, a vendor client's real-time timers, and then a real server.
 A test that can run on an earlier harness is written there.
 
 ### The in-memory doubles
@@ -34,7 +34,7 @@ Use `spate-test`'s in-memory source and capture sink for pipeline behavior.
 A test written against them needs no infrastructure and runs in milliseconds.
 [Testing pipelines](../user-guide/03-guides/testing-pipelines.mdx) walks through the source handle, the sink script, and the committed watermark as the assertion.
 
-The crate also has three helpers that page does not cover:
+The crate also has these helpers:
 
 - The `scripted_feed` helper plays a feed backend with no queue and no clock.
 - The `LogCapture` type returns a log line once the code writes it.
@@ -43,13 +43,13 @@ The crate also has three helpers that page does not cover:
 ### Paused tokio time
 
 Use `#[tokio::test(start_paused = true)]` for code on a current-thread runtime that reads `tokio::time`.
-The clock stands still until the test advances it.
+The clock moves only when the test advances it, or when the runtime has no work and jumps to the next timer.
 `tokio::time::advance` completes every timer it moves past at once, in no fixed order.
 To have the timers fire in order, call `tokio::time::sleep` in the test, and the paused runtime moves the clock to each timer in turn.
 
 ### A test clock
 
-Use `TestClock`, from `spate_core::clock` and `spate_core::clock::tokio`, for code that holds a `SharedClock` on OS threads or on a multi-thread runtime.
+Use `spate_core::clock::TestClock` for code that holds a `SharedClock` on OS threads or on a multi-thread runtime, and `spate_core::clock::tokio::TestClock` for code that holds the tokio `Clock` trait, such as a sink worker.
 Tokio time cannot be paused there.
 A `TestClock` moves only when the test moves it.
 The tokio one records each deadline the code sleeps until, so a test can wait for the timer before it advances.
@@ -69,6 +69,11 @@ By default, librdkafka's mock waits 3 s before a new group's first rebalance, so
 The `MockKafka` helper turns that wait off.
 The first consumer then forms the group alone, and each later consumer rebalances it.
 A test whose consumers must join one generation turns the wait back on with `hold_first_rebalance`.
+The wait lasts 3 s of real time, and a consumer that reaches the coordinator after it has ended forms a later generation.
+[Wait for a signal the code publishes](05-flaky-tests.md#wait-for-a-signal-the-code-publishes) says how a test settles a group of several consumers.
+
+The ClickHouse sink's harness at this step is the `clickhouse` crate's mock server, `clickhouse::test::Mock`.
+Building a sink reads `system.columns`, so answer that query first with the rows from `spate_clickhouse::testing::system_columns`, as [`spate-clickhouse/tests/mock.rs`](repo:crates/spate-clickhouse/tests/mock.rs) does.
 
 ### A container
 
@@ -111,7 +116,7 @@ The run's summary names the mutant forms the tool does not generate, and those s
 Use loom for a synchronization primitive.
 A loom model runs the threads under loom's scheduler and asserts what must hold in every interleaving.
 Run the models with `cargo xtask loom`.
-The checkpoint tracker's model in [`spate-core/src/checkpoint/loom_tests.rs`](repo:crates/spate-core/src/checkpoint/loom_tests.rs) is one.
+The acknowledgment handle's model in [`spate-core/src/checkpoint/loom_tests.rs`](repo:crates/spate-core/src/checkpoint/loom_tests.rs) is one.
 In every interleaving of a fail and three drops on three threads, the batch resolves exactly once, as `Failed`:
 
 ```rust
@@ -170,12 +175,13 @@ cargo xtask fuzz build
 cargo xtask fuzz run avro_wire_confluent --secs 60
 ```
 
-The libFuzzer instrumentation needs a nightly toolchain, so `cargo +nightly fuzz list` prints the targets.
+`cargo fuzz list` prints the targets.
+Building and running them needs a nightly toolchain, for the libFuzzer instrumentation.
 
 A decoder that its crate keeps private is reached through the crate's off-by-default `testing` feature, in a `fuzz_seams` module.
 The harness manifest, `fuzz/Cargo.toml`, enables the feature on each crate whose targets need it.
 
-A pull request that touches `fuzz/`, `xtask/`, `ci.yml`, `fuzz.yml`, `.github/actions/`, the toolchain pins, or a crate the harness depends on builds every target and runs none.
+A pull request that touches `fuzz/`, `xtask/`, `ci.yml`, `fuzz.yml`, `.github/actions/`, the toolchain pins, or a workspace crate the harness depends on directly builds every target and runs none.
 The nightly workflow fuzzes each target for five minutes and keeps `fuzz/corpus` between nights.
 A crash uploads its input as the `fuzz-artifacts` artifact and opens an issue titled `[bug] A fuzz target found a crashing input`.
 Keep that input under `fuzz/corpus/<target>/` with the fix, so the case stays covered.
@@ -183,7 +189,9 @@ Keep that input under `fuzz/corpus/<target>/` with the fix, so the case stays co
 ## Read a failing test's output
 
 On CI, read the failure in the job's test report.
-Each test job publishes a check named `Test results`, with a suffix for the arm64 and macOS jobs, and uploads its `junit.xml` as an artifact named `junit-nextest`, `junit-nextest-arm64` or `junit-nextest-macos`.
+Each workspace-suite job publishes a check named `Test results`, with a suffix for the arm64 and macOS jobs, and uploads its `junit.xml` as an artifact named `junit-nextest`, `junit-nextest-arm64` or `junit-nextest-macos`.
+The container jobs publish checks named for their suite, such as `S3 <lane> test results`.
+The `Feature matrix and default-feature tests` job publishes no report, so read its log.
 
 The `ci` profile prints a failing test's output as soon as it fails, and again in the summary at the end.
 A wait that reaches `HANG` panics with `hung after 60s waiting for:` and the description passed to it, so write that description as the state you expected.

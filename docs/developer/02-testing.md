@@ -55,6 +55,14 @@ publishes `closes`:
 ```rust file=crates/spate-core/src/pipeline/fakes.rs region=held_before_closes title="fakes.rs"
 ```
 
+When the code returns a retryable error, the test reads again, as a real caller
+would, and asserts on the first answer that is not retryable. A test that is
+checking for the retryable error itself asserts on it directly.
+
+A broker can report a topic it has just created as missing for a while. A test
+that creates a topic waits until the broker lists it before starting code that
+refuses a missing topic.
+
 ### A test owns its environment
 
 Its names, ports, clusters, topics, tables and metric labels are its own.

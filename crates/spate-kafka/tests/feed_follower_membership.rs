@@ -13,8 +13,7 @@ mod support;
 
 use support::Raw as _;
 
-use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
-use rdkafka::client::DefaultClientContext;
+use rdkafka::admin::{NewTopic, TopicReplication};
 use rdkafka::consumer::{BaseConsumer, Consumer};
 use spate_core::feed::{Feed, Unit, wake_channel};
 use spate_kafka::feed::KafkaFeed;
@@ -60,10 +59,6 @@ fn the_attempt_follower_leaves_the_feed_members_assignment_alone() {
         .enable_all()
         .build()
         .unwrap();
-    let admin: AdminClient<DefaultClientContext> = support::raw_config()
-        .set("bootstrap.servers", &brokers)
-        .build()
-        .expect("admin client");
     let mut topics = vec![
         NewTopic::new(WORK, 1, TopicReplication::Fixed(1))
             .set("message.timestamp.type", "LogAppendTime"),
@@ -73,12 +68,7 @@ fn the_attempt_follower_leaves_the_feed_members_assignment_alone() {
     topics.push(
         NewTopic::new(ATTEMPT, 2, TopicReplication::Fixed(1)).set("cleanup.policy", "compact"),
     );
-    for created in io
-        .block_on(admin.create_topics(&topics, &AdminOptions::new()))
-        .expect("create topics")
-    {
-        created.expect("topic created");
-    }
+    support::create_visible(&brokers, &topics);
 
     let group = spate_test::unique_name("membership");
     let feed = KafkaFeed::connect(&section(&feed_yaml(&brokers, &group, "", "")), io.handle())

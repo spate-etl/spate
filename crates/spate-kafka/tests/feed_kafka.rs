@@ -233,10 +233,6 @@ fn a_unit_that_kills_its_worker_at_each_read_reaches_the_dead_letter_topic() {
 /// Create each topic of `topics`, one partition each, with its
 /// configuration entries.
 fn create_configured(brokers: &str, topics: &[(String, Vec<(&str, &str)>)]) {
-    let admin: AdminClient<DefaultClientContext> = support::raw_config()
-        .set("bootstrap.servers", brokers)
-        .build()
-        .expect("admin client");
     let new: Vec<NewTopic<'_>> = topics
         .iter()
         .map(|(name, entries)| {
@@ -246,16 +242,7 @@ fn create_configured(brokers: &str, topics: &[(String, Vec<(&str, &str)>)]) {
             )
         })
         .collect();
-    let io = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    for created in io
-        .block_on(admin.create_topics(&new, &AdminOptions::new()))
-        .expect("create topics")
-    {
-        created.expect("topic created");
-    }
+    support::create_visible(brokers, &new);
 }
 
 /// The retry, dead-letter and attempt topics' names for the work topic
@@ -559,10 +546,6 @@ fn a_confirmed_write_is_below_the_next_high_watermark() {
 /// Create the work topic `work` with `entries` and its retry, dead-letter
 /// and compacted attempt topics, one partition each.
 fn create_topics_of(brokers: &str, work: &str, entries: &[(&str, &str)]) {
-    let admin: AdminClient<DefaultClientContext> = support::raw_config()
-        .set("bootstrap.servers", brokers)
-        .build()
-        .expect("admin client");
     let retry = format!("{work}-retry");
     let dead = format!("{work}-dead");
     let attempts = format!("{work}-attempts");
@@ -575,16 +558,7 @@ fn create_topics_of(brokers: &str, work: &str, entries: &[(&str, &str)]) {
         NewTopic::new(&dead, 1, TopicReplication::Fixed(1)),
         NewTopic::new(&attempts, 1, TopicReplication::Fixed(1)).set("cleanup.policy", "compact"),
     ];
-    let io = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    for created in io
-        .block_on(admin.create_topics(&topics, &AdminOptions::new()))
-        .expect("create topics")
-    {
-        created.expect("topic created");
-    }
+    support::create_visible(brokers, &topics);
 }
 
 /// Pins that `KafkaFeedPublisher::connect` runs the configuration checks
@@ -775,10 +749,6 @@ fn a_bounded_job_ends_once_every_workers_partitions_are_committed() {
 
 /// Create the topics with a two-partition work topic.
 fn create_two_partition_work(brokers: &str) {
-    let admin: AdminClient<DefaultClientContext> = support::raw_config()
-        .set("bootstrap.servers", brokers)
-        .build()
-        .expect("admin client");
     let topics = [
         NewTopic::new(WORK, 2, TopicReplication::Fixed(1))
             .set("message.timestamp.type", "LogAppendTime"),
@@ -787,16 +757,7 @@ fn create_two_partition_work(brokers: &str) {
         NewTopic::new(ATTEMPT, ATTEMPT_PARTITIONS, TopicReplication::Fixed(1))
             .set("cleanup.policy", "compact"),
     ];
-    let io = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    for created in io
-        .block_on(admin.create_topics(&topics, &AdminOptions::new()))
-        .expect("create topics")
-    {
-        created.expect("topic created");
-    }
+    support::create_visible(brokers, &topics);
 }
 
 /// Pins the Kafka feed's half of a graceful stop against a real broker:

@@ -27,7 +27,7 @@ feed:
     queue_url: "https://sqs.eu-west-2.amazonaws.com/111122223333/jobs"  # required
     visibility: 60s      # hidden this long without a renewal
     # region: eu-west-2  # unset: from the queue URL's host, then the AWS chain
-    # endpoint: "http://127.0.0.1:9324"  # unset: the region's endpoint
+    # endpoint: "http://127.0.0.1:9324"  # unset: AWS_ENDPOINT_URL if set, else the region's endpoint
   units_held: 8          # a key of feed: itself, beside sqs:
   location: "s3://my-bucket/jobs/orders-backfill/"  # makes the job bounded
   settling_window: 1m    # at least 1m on sqs; 5m when unset
@@ -61,7 +61,7 @@ The
 [Configuration section of the SQS feed page](https://spate.kainth.dev/docs/user-guide/connectors/feeds/sqs#configuration)
 has the full key table.
 [Startup checks](https://spate.kainth.dev/docs/user-guide/connectors/feeds/sqs#startup-checks)
-lists every refusal at connect, and
+lists the queue checks connect runs, and
 [Security](https://spate.kainth.dev/docs/user-guide/connectors/feeds/sqs#security-credentials-permissions-and-tls)
 lists the IAM actions a worker needs.
 
@@ -79,8 +79,8 @@ time.
   hands back too, so another worker can read them.
 - After the final commit, the feed sends its queued deletes and sets each unit
   it still holds visible, within the time left before the drain deadline. A
-  delete not sent by then leaves its unit to return after one visibility period
-  and be read again.
+  delete not sent by then leaves its unit to return at its deadline, at most one
+  visibility period after its last extension, and be read again.
 
 [Stop](https://spate.kainth.dev/docs/user-guide/connectors/feeds/sqs#stop) on
 the SQS feed page covers each case. The
@@ -151,10 +151,12 @@ states when a worker ends the job.
 - **The end check reads the dead-letter queue only after the window.** SQS
   counts a message's retention from its first send. A unit moved to the
   dead-letter queue earlier in the job and deleted there at the end of that
-  retention leaves no trace, and the job ends completed. See
+  retention leaves nothing for the end check to find, and the job ends
+  completed. While the unit is there, `spate_feed_dead_letter_units` counts it.
+  See
   [Ending a bounded job](https://spate.kainth.dev/docs/user-guide/connectors/feeds/sqs#ending-a-bounded-job).
-- **`checkpoint.drain_timeout` must be more than `5s`.** Startup refuses a
-  shorter one with this feed, because the source stops reading 5 seconds before
+- **`checkpoint.drain_timeout` must be more than `5s`.** Startup refuses `5s` or
+  less with this feed, because the source stops reading 5 seconds before
   the drain deadline to hand its units back. See
   [Stop](https://spate.kainth.dev/docs/user-guide/connectors/feeds/sqs#stop).
 - **A unit is held for at most 12 hours less 30 seconds from its receive.** Its

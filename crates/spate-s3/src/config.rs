@@ -11,28 +11,31 @@ use object_store::ObjectStoreScheme;
 use object_store::aws::AmazonS3ConfigKey;
 use object_store::path::Path;
 use serde::{Deserialize, Serialize};
-use spate_core::config::{ComponentConfig, ConfigError, redact};
+use spate_core::config::{ComponentConfig, ConfigError, Denylist, redact};
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use url::Url;
 
 use crate::location::{BAD_PREFIX, has_userinfo};
 
-/// `object_store` option keys the framework owns. Setting them through the
-/// passthrough is rejected at load time with an explanation.
+/// `object_store` option keys the framework owns, refused in the `store`
+/// passthrough at load. The store is built from the `url` field, so a
+/// passthrough bucket could never take effect; refusing it keeps the
+/// configuration honest instead of silently ignoring it.
 ///
-/// `object_store` accepts several spellings for the same underlying option
-/// (its config keys parse with and without the `aws_` prefix and with
-/// historic aliases), and lowercases keys before parsing, so the check
-/// here is case-insensitive over every spelling. Because the store is
-/// built from the `url` field, a passthrough bucket key could never take
-/// effect (the URL's bucket wins at build time); rejecting it keeps the
-/// config honest instead of silently ignoring it.
-const DENYLIST: &[(&str, &str)] = &[
-    ("bucket", "owned by the typed `url` field"),
-    ("bucket_name", "owned by the typed `url` field"),
-    ("aws_bucket", "owned by the typed `url` field"),
-    ("aws_bucket_name", "owned by the typed `url` field"),
-];
+/// Keys compare by [`store_key`], so the one entry refuses every spelling and
+/// case `object_store` accepts for the bucket option.
+const DENYLIST: Denylist<'static> = Denylist::new(&[("bucket", "owned by the typed `url` field")])
+    .normalized_by(store_key, "object_store option");
+
+/// The name `object_store` gives the S3 option `key` sets, or `key`
+/// lowercased when it is not one.
+fn store_key(key: &str) -> Cow<'_, str> {
+    match s3_store_key(key) {
+        Some(option) => Cow::Owned(option.as_ref().to_owned()),
+        None => Cow::Owned(key.to_ascii_lowercase()),
+    }
+}
 
 fn default_prefetch_bytes() -> ByteSize {
     ByteSize::mib(8)
@@ -193,16 +196,9 @@ impl S3SourceConfig {
                 self.split_target_bytes
             )));
         }
-        // Case-insensitive: object_store lowercases option keys before
-        // parsing, so `Bucket:` would otherwise slip past the check.
-        for key in self.store.keys() {
-            let lowered = key.to_ascii_lowercase();
-            if let Some((_, why)) = DENYLIST.iter().find(|(denied, _)| *denied == lowered) {
-                return Err(ConfigError::Validation(format!(
-                    "source.s3.store.\"{key}\" cannot be overridden: {why}"
-                )));
-            }
-        }
+        DENYLIST
+            .check("source.s3.store", self.store.keys())
+            .map_err(|e| ConfigError::Validation(e.to_string()))?;
         // The request URIs `object_store` quotes in its errors start with the
         // endpoint.
         for (key, value) in &self.store {
@@ -464,6 +460,23 @@ mod tests {
             let body = format!("{}  store:\n    {key}: other\n", minimal());
             let err = S3SourceConfig::from_component_config(&section(&body)).unwrap_err();
             assert!(err.to_string().contains(key), "error names the key: {err}");
+        }
+    }
+
+    /// A bucket key written another way names `bucket`, the option it sets.
+    #[test]
+    fn a_bucket_alias_names_the_option_it_sets() {
+        for key in ["Bucket", "aws_bucket_name"] {
+            let body = format!("{}  store:\n    {key}: other\n", minimal());
+            let err = S3SourceConfig::from_component_config(&section(&body)).unwrap_err();
+            assert_eq!(
+                err.to_string(),
+                format!(
+                    "invalid configuration: source.s3.store.\"{key}\" cannot be overridden: \
+                     owned by the typed `url` field (`{key}` sets the same object_store \
+                     option as `bucket`)"
+                )
+            );
         }
     }
 

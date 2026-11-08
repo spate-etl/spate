@@ -45,7 +45,6 @@ mod attempt;
 mod config;
 mod consumer;
 mod depth;
-mod error;
 mod events;
 mod gate;
 mod inflight;
@@ -57,14 +56,13 @@ mod tests;
 mod write;
 
 pub(crate) use config::{FeedRole, KafkaFeedConfig};
-pub use error::KafkaFeedError;
 pub use publisher::KafkaFeedPublisher;
 
 use crate::context::SourceHooks;
 use crate::metrics::KafkaStatsMetrics;
 use crate::sink::metrics::KafkaSinkStatsMetrics;
 use attempt::{Follower, Ledger, PublishId, SharedLedger};
-use config::BACKEND;
+use config::{BACKEND, NAME};
 use consumer::Driver;
 use events::KafkaFeedMetrics;
 use inflight::{Tp, Tracker};
@@ -74,8 +72,8 @@ use rdkafka::statistics::Statistics;
 use spate_core::clock::SyncClock;
 use spate_core::config::FeedSection;
 use spate_core::feed::{
-    Confirmation, Confirmer, Delivery, DepthOf, DepthReading, DepthReporter, Feed, FeedError,
-    FeedErrorKind, FeedMetricsCtx, FeedWaker, ReaderSignal, Receipt, Unit, confirmation,
+    Confirmation, Confirmer, ConnectError, Delivery, DepthOf, DepthReading, DepthReporter, Feed,
+    FeedError, FeedErrorKind, FeedMetricsCtx, FeedWaker, ReaderSignal, Receipt, Unit, confirmation,
     depth_reading,
 };
 use spate_core::hash::FastMap;
@@ -574,8 +572,8 @@ impl KafkaFeed {
     ///
     /// # Errors
     ///
-    /// [`KafkaFeedError::Config`] for a section the feed cannot read.
-    /// [`KafkaFeedError::Refused`] when librdkafka refuses the client
+    /// [`ConnectError::Config`] for a section the feed cannot read.
+    /// [`ConnectError::Refused`] when librdkafka refuses the client
     /// configuration, as for a property value it does not accept; when a
     /// broker rejects the client's credential or either side rejects the
     /// TLS handshake, naming the rejection, as soon as the client reports
@@ -589,7 +587,7 @@ impl KafkaFeed {
     /// `cleanup.policy` is anything but `compact`, an attempt topic that
     /// reports no partitions, and a work topic whose `message.timestamp.type`
     /// is anything but `LogAppendTime`.
-    /// [`KafkaFeedError::Unavailable`] when a read of the topics fails
+    /// [`ConnectError::Unavailable`] when a read of the topics fails
     /// otherwise or the checks take longer than 30 seconds, as they do when
     /// no broker accepts a connection, and when one of the feed's consumer,
     /// gate, follower and depth threads cannot be started. A failed gate,
@@ -614,7 +612,7 @@ impl KafkaFeed {
     pub fn connect(
         section: &FeedSection,
         io: &tokio::runtime::Handle,
-    ) -> Result<KafkaFeed, KafkaFeedError> {
+    ) -> Result<KafkaFeed, ConnectError> {
         Self::connect_with(
             section,
             io,
@@ -636,7 +634,7 @@ impl KafkaFeed {
     pub fn connect_without_config_checks(
         section: &FeedSection,
         io: &tokio::runtime::Handle,
-    ) -> Result<KafkaFeed, KafkaFeedError> {
+    ) -> Result<KafkaFeed, ConnectError> {
         Self::connect_with(
             section,
             io,
@@ -663,7 +661,7 @@ impl KafkaFeed {
         section: &FeedSection,
         io: &tokio::runtime::Handle,
         clock: spate_core::clock::SharedClock,
-    ) -> Result<KafkaFeed, KafkaFeedError> {
+    ) -> Result<KafkaFeed, ConnectError> {
         Self::connect_with(
             section,
             io,
@@ -679,14 +677,17 @@ impl KafkaFeed {
         scope: startup::Scope,
         bound: Duration,
         clock: SyncClock,
-    ) -> Result<KafkaFeed, KafkaFeedError> {
+    ) -> Result<KafkaFeed, ConnectError> {
         let config = KafkaFeedConfig::from_section(section)?;
         let checked = check_topics(&config, io, scope, bound, clock.clone())?;
         let (core, producer, driver) = parts(&config, checked.attempt_partitions, clock)?;
         let follower = Follower::new(&config, Arc::clone(&core))?
             .spawn()
             .map_err(|e| {
-                KafkaFeedError::Unavailable(format!("starting the attempt follower's thread: {e}"))
+                ConnectError::unavailable(
+                    NAME,
+                    format!("starting the attempt follower's thread: {e}"),
+                )
             })?;
         // Built before the gate and consumer start, so a failed start
         // returns through `Drop`, which stops and joins what has started.
@@ -704,11 +705,11 @@ impl KafkaFeed {
             config.delivery_timeout,
         );
         feed.gate = Some(gate.spawn().map_err(|e| {
-            KafkaFeedError::Unavailable(format!("starting the feed's gate thread: {e}"))
+            ConnectError::unavailable(NAME, format!("starting the feed's gate thread: {e}"))
         })?);
         feed.thread = Some(
             spawn_thread("spate-kafka-feed", move || consumer::run(driver)).map_err(|e| {
-                KafkaFeedError::Unavailable(format!("starting the feed's consumer thread: {e}"))
+                ConnectError::unavailable(NAME, format!("starting the feed's consumer thread: {e}"))
             })?,
         );
         feed.depth = Some(Mutex::new(start_depth(&config, &feed.core)?));
@@ -726,7 +727,7 @@ impl KafkaFeed {
 fn start_depth(
     config: &KafkaFeedConfig,
     core: &Arc<Core>,
-) -> Result<mpsc::Sender<(DepthOf, DepthReporter)>, KafkaFeedError> {
+) -> Result<mpsc::Sender<(DepthOf, DepthReporter)>, ConnectError> {
     let openssl_env = crate::security::openssl_env_overrides();
     // The feed's group, never subscribed: it reads the group's committed
     // offsets without joining the group.
@@ -734,7 +735,7 @@ fn start_depth(
         .base(openssl_env)
         .create(&config.client(FeedRole::Depth), SourceHooks::default())
         .map_err(|reason| {
-            KafkaFeedError::Refused(format!("creating the depth reader: {reason}"))
+            ConnectError::refused(NAME, format!("creating the depth reader: {reason}"))
         })?;
     let (tx, rx) = mpsc::channel();
     let core = Arc::clone(core);
@@ -749,7 +750,7 @@ fn start_depth(
             depth::run(&core, &brokers, &rx);
         })
         .map_err(|e| {
-            KafkaFeedError::Unavailable(format!("starting the feed's depth thread: {e}"))
+            ConnectError::unavailable(NAME, format!("starting the feed's depth thread: {e}"))
         })?;
     Ok(tx)
 }
@@ -784,13 +785,13 @@ fn check_topics(
     scope: startup::Scope,
     bound: Duration,
     clock: SyncClock,
-) -> Result<startup::Checked, KafkaFeedError> {
+) -> Result<startup::Checked, ConnectError> {
     let openssl_env = crate::security::openssl_env_overrides();
     let base = config.base(openssl_env);
     let admin = base
         .create(&config.client(FeedRole::Admin), ())
         .map_err(|reason| {
-            KafkaFeedError::Refused(format!("creating the admin client: {reason}"))
+            ConnectError::refused(NAME, format!("creating the admin client: {reason}"))
         })?;
     let reader = base
         .create(
@@ -798,7 +799,7 @@ fn check_topics(
             crate::sink::SinkHooks::detached(clock.clone()),
         )
         .map_err(|reason| {
-            KafkaFeedError::Refused(format!("creating the metadata client: {reason}"))
+            ConnectError::refused(NAME, format!("creating the metadata client: {reason}"))
         })?;
     startup::run_checks(
         startup::Brokers::new(admin, reader, bound),
@@ -815,7 +816,7 @@ fn producer_parts(
     config: &KafkaFeedConfig,
     attempt_partitions: NonZeroU32,
     clock: SyncClock,
-) -> Result<(Arc<Core>, Producer), KafkaFeedError> {
+) -> Result<(Arc<Core>, Producer), ConnectError> {
     let openssl_env = crate::security::openssl_env_overrides();
     let core = Arc::new(Core::new(config, attempt_partitions, clock));
     let producer = config
@@ -824,7 +825,9 @@ fn producer_parts(
             &config.client(FeedRole::Producer),
             FeedProducerHooks::new(Arc::clone(&core)),
         )
-        .map_err(|reason| KafkaFeedError::Refused(format!("creating the producer: {reason}")))?;
+        .map_err(|reason| {
+            ConnectError::refused(NAME, format!("creating the producer: {reason}"))
+        })?;
     Ok((core, producer))
 }
 
@@ -835,7 +838,7 @@ fn parts(
     config: &KafkaFeedConfig,
     attempt_partitions: NonZeroU32,
     clock: SyncClock,
-) -> Result<(Arc<Core>, Producer, Driver), KafkaFeedError> {
+) -> Result<(Arc<Core>, Producer, Driver), ConnectError> {
     let openssl_env = crate::security::openssl_env_overrides();
     let (core, producer) = producer_parts(config, attempt_partitions, clock)?;
     let base = config.base(openssl_env);
@@ -843,10 +846,12 @@ fn parts(
     let lookup_timeout = consumer::committed_lookup_timeout(&base.config(&role));
     let consumer: BaseConsumer<crate::context::SourceContext> = base
         .create(&role, SourceHooks::default())
-        .map_err(|reason| KafkaFeedError::Refused(format!("creating the consumer: {reason}")))?;
+        .map_err(|reason| {
+            ConnectError::refused(NAME, format!("creating the consumer: {reason}"))
+        })?;
     consumer
         .subscribe(&[&config.topic, &config.retry_topic])
-        .map_err(|e| KafkaFeedError::Refused(format!("subscribing: {e}")))?;
+        .map_err(|e| ConnectError::refused(NAME, format!("subscribing: {e}")))?;
     let driver = Driver::new(
         Arc::clone(&core),
         consumer,

@@ -23,8 +23,9 @@
 
 use super::FeedRole;
 use super::config::KafkaFeedConfig;
+use super::config::NAME;
 use super::consumer::POLL_TIMEOUT;
-use super::{Core, KafkaFeedError, LatchOnPanic, Topics};
+use super::{Core, LatchOnPanic, Topics};
 use crate::context::{SourceContext, SourceHooks};
 use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::error::KafkaError;
@@ -32,6 +33,7 @@ use rdkafka::message::{BorrowedMessage, Message};
 use rdkafka::{Offset, TopicPartitionList};
 use serde::{Deserialize, Serialize};
 use spate_core::error::ErrorClass;
+use spate_core::feed::ConnectError;
 use spate_core::hash::FastMap;
 use spate_core::task::{ThreadHandle, spawn_thread};
 use std::num::NonZeroU32;
@@ -337,12 +339,9 @@ impl Follower {
     ///
     /// # Errors
     ///
-    /// [`KafkaFeedError::Refused`] when librdkafka refuses the client
+    /// [`ConnectError::Refused`] when librdkafka refuses the client
     /// configuration or the assignment.
-    pub(crate) fn new(
-        config: &KafkaFeedConfig,
-        core: Arc<Core>,
-    ) -> Result<Follower, KafkaFeedError> {
+    pub(crate) fn new(config: &KafkaFeedConfig, core: Arc<Core>) -> Result<Follower, ConnectError> {
         let topic = &*core.topics.attempt;
         let partitions = core.attempt_partitions;
         let openssl_env = crate::security::openssl_env_overrides();
@@ -350,17 +349,17 @@ impl Follower {
             .base(openssl_env)
             .create(&config.client(FeedRole::Follower), SourceHooks::default())
             .map_err(|reason| {
-                KafkaFeedError::Refused(format!("creating the attempt follower: {reason}"))
+                ConnectError::refused(NAME, format!("creating the attempt follower: {reason}"))
             })?;
         let mut tpl = TopicPartitionList::new();
         // Kafka numbers partitions with an i32, so no topic has more.
         for partition in (0..=i32::MAX).take(partitions.get() as usize) {
             tpl.add_partition_offset(topic, partition, Offset::Beginning)
-                .map_err(|e| KafkaFeedError::Refused(format!("assigning `{topic}`: {e}")))?;
+                .map_err(|e| ConnectError::refused(NAME, format!("assigning `{topic}`: {e}")))?;
         }
         consumer
             .assign(&tpl)
-            .map_err(|e| KafkaFeedError::Refused(format!("assigning `{topic}`: {e}")))?;
+            .map_err(|e| ConnectError::refused(NAME, format!("assigning `{topic}`: {e}")))?;
         let ledger = Arc::clone(&core.ledger);
         Ok(Follower {
             core,
@@ -678,7 +677,7 @@ mod tests {
         KafkaFeedConfig::from_section(&section).unwrap()
     }
 
-    fn follower(config: &KafkaFeedConfig) -> Result<Follower, KafkaFeedError> {
+    fn follower(config: &KafkaFeedConfig) -> Result<Follower, ConnectError> {
         let core = Arc::new(Core::new(config, NonZeroU32::MIN, SyncClock::system()));
         Follower::new(config, core)
     }

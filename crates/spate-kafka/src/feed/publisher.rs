@@ -7,11 +7,11 @@
 
 use super::config::{BACKEND, KafkaFeedConfig};
 use super::write::Producer;
-use super::{Core, KafkaFeedError, check_topics, gone, producer_parts, publish_unit, startup};
+use super::{Core, check_topics, gone, producer_parts, publish_unit, startup};
 use spate_core::clock::SyncClock;
 use spate_core::config::FeedSection;
 use spate_core::feed::{
-    Confirmation, Delivery, Feed, FeedError, FeedErrorKind, FeedWaker, Receipt, Unit,
+    Confirmation, ConnectError, Delivery, Feed, FeedError, FeedErrorKind, FeedWaker, Receipt, Unit,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -64,11 +64,11 @@ impl KafkaFeedPublisher {
     /// # Errors
     ///
     /// As [`KafkaFeed::connect`](super::KafkaFeed::connect), less the
-    /// failure to start the feed's own threads: [`KafkaFeedError::Config`] for a section the feed
-    /// cannot read, [`KafkaFeedError::Refused`] for a client configuration
+    /// failure to start the feed's own threads: [`ConnectError::Config`] for a section the feed
+    /// cannot read, [`ConnectError::Refused`] for a client configuration
     /// librdkafka refuses, a rejected credential or TLS handshake, a refused
     /// topic read and topics the feed cannot run on, and
-    /// [`KafkaFeedError::Unavailable`] when a read of the topics fails
+    /// [`ConnectError::Unavailable`] when a read of the topics fails
     /// otherwise or the checks take longer than 30 seconds.
     ///
     /// # Panics
@@ -92,7 +92,7 @@ impl KafkaFeedPublisher {
     pub fn connect(
         section: &FeedSection,
         io: &tokio::runtime::Handle,
-    ) -> Result<KafkaFeedPublisher, KafkaFeedError> {
+    ) -> Result<KafkaFeedPublisher, ConnectError> {
         Self::connect_with(section, io, startup::Scope::All, startup::CONNECT_BOUND)
     }
 
@@ -108,7 +108,7 @@ impl KafkaFeedPublisher {
     pub fn connect_without_config_checks(
         section: &FeedSection,
         io: &tokio::runtime::Handle,
-    ) -> Result<KafkaFeedPublisher, KafkaFeedError> {
+    ) -> Result<KafkaFeedPublisher, ConnectError> {
         Self::connect_with(
             section,
             io,
@@ -122,7 +122,7 @@ impl KafkaFeedPublisher {
         io: &tokio::runtime::Handle,
         scope: startup::Scope,
         bound: Duration,
-    ) -> Result<KafkaFeedPublisher, KafkaFeedError> {
+    ) -> Result<KafkaFeedPublisher, ConnectError> {
         let config = KafkaFeedConfig::from_section(section)?;
         // A publisher's only timed read is the connect bound, which the
         // feed's tests drive on a test clock.

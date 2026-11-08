@@ -22,9 +22,9 @@ use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::producer::Producer as _;
 use spate_core::clock::TestClock as StopClock;
 use spate_core::clock::tokio::TestClock;
-use spate_core::feed::{DEFAULT_SETTLING_WINDOW, DepthOf, Feed, STOP_RESERVE, Unit};
+use spate_core::feed::{ConnectError, DEFAULT_SETTLING_WINDOW, DepthOf, Feed, STOP_RESERVE, Unit};
 use spate_core::pipeline::ExitState;
-use spate_kafka::feed::{KafkaFeed, KafkaFeedError, KafkaFeedPublisher};
+use spate_kafka::feed::{KafkaFeed, KafkaFeedPublisher};
 use spate_test::{HANG, WriteOutcome, wait_until};
 use spate_test_support::ChildTest;
 use std::path::PathBuf;
@@ -266,7 +266,7 @@ fn compacted_attempts(work: &str) -> (String, Vec<(&'static str, &'static str)>)
 
 /// Connect a feed on the work topic `work` and its retry, dead-letter and
 /// attempt topics, on a runtime like the pipeline's.
-fn connect_on(brokers: &str, work: &str) -> Result<KafkaFeed, KafkaFeedError> {
+fn connect_on(brokers: &str, work: &str) -> Result<KafkaFeed, ConnectError> {
     let section: spate_core::config::FeedSection = serde_yaml::from_str(&format!(
         "kafka:\n  brokers: \"{brokers}\"\n  group_id: {group}\n  topic: {work}\n  \
          retry_topic: {retry}\n  dead_letter_topic: {dead}\n  attempt_topic: {attempts}\n  \
@@ -285,9 +285,11 @@ fn connect_on(brokers: &str, work: &str) -> Result<KafkaFeed, KafkaFeedError> {
     KafkaFeed::connect(&section, io.handle())
 }
 
-fn refusal(connected: Result<KafkaFeed, KafkaFeedError>) -> String {
+fn refusal(connected: Result<KafkaFeed, ConnectError>) -> String {
     match connected {
-        Err(KafkaFeedError::Refused(message)) => message,
+        Err(ConnectError::Refused {
+            reason: message, ..
+        }) => message,
         other => panic!("expected a refusal, got {other:?}"),
     }
 }
@@ -588,7 +590,9 @@ fn the_publisher_runs_the_configuration_checks_at_connect() {
 
     create_topics_of(&brokers, "pub-compacted", &[("cleanup.policy", "compact")]);
     match connect("pub-compacted") {
-        Err(KafkaFeedError::Refused(message)) => assert!(
+        Err(ConnectError::Refused {
+            reason: message, ..
+        }) => assert!(
             message.contains("the work topic `pub-compacted` is compacted"),
             "{message}"
         ),
@@ -612,7 +616,7 @@ fn the_publisher_runs_the_configuration_checks_at_connect() {
 fn publisher_on(
     section_yaml: &str,
 ) -> (
-    Result<KafkaFeedPublisher, KafkaFeedError>,
+    Result<KafkaFeedPublisher, ConnectError>,
     tokio::runtime::Runtime,
 ) {
     let io = tokio::runtime::Builder::new_multi_thread()

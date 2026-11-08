@@ -18,14 +18,15 @@
 //! A read waiting on a request it sent finishes that wait first, within the
 //! checks' bound.
 
-use super::{KafkaFeedError, Topics};
+use super::Topics;
+use super::config::NAME;
 use crate::client::{SpateContext, check_topic_name};
 use crate::sink::SinkContext;
 use rdkafka::admin::{AdminClient, AdminOptions, ResourceSpecifier};
 use rdkafka::error::{KafkaError, RDKafkaErrorCode};
 use rdkafka::producer::{Producer, ThreadedProducer};
 use spate_core::clock::SyncClock;
-use spate_core::error::ErrorClass;
+use spate_core::feed::ConnectError;
 use spate_core::hash::FastMap;
 use spate_core::task::{BoundError, ThreadBound, ThreadHandle, spawn_thread};
 use std::future::Future;
@@ -310,49 +311,41 @@ pub(crate) struct Checked {
     pub(crate) attempt_partitions: NonZeroU32,
 }
 
-/// Whether `code` means asking again fails the same way, by the table the
-/// source classifies its consumer errors with: an authorization or
-/// authentication failure, an invalid topic name, or a version the broker
-/// does not support.
+/// The refusal for a rejection recorded while `step` was under way.
+fn rejected(step: &str, text: &str) -> ConnectError {
+    ConnectError::refused(
+        NAME,
+        format!("{step}: the client's credential or TLS handshake was rejected: {text}"),
+    )
+}
+
+/// The error past the checks' bound of `limit`, while on `step`.
+fn elapsed(limit: Duration, step: &str) -> ConnectError {
+    ConnectError::unavailable(
+        NAME,
+        format!("the startup checks took longer than {limit:?}, while {step}"),
+    )
+}
+
+/// `e`, from the step `doing`, as the error `connect` returns: a refusal
+/// when `admin` recorded a rejection, whatever the read's own error, the
+/// bound's error for a read that ended at its deadline, and otherwise the
+/// class of `e`'s code by the table the source classifies its consumer
+/// errors with.
 ///
 /// A read never fails with a bad credential's code or a rejected TLS
 /// handshake: librdkafka keeps a broker that failed either out of use, and
 /// the read waits for a usable one. The client's error callback reports the
 /// rejection instead, which [`TopicAdmin::rejection`] returns.
-fn refused(code: RDKafkaErrorCode) -> bool {
-    crate::error::classify_consumer_error(code, false) == ErrorClass::Fatal
-}
-
-/// The refusal for a rejection recorded while `step` was under way.
-fn rejected(step: &str, text: &str) -> KafkaFeedError {
-    KafkaFeedError::Refused(format!(
-        "{step}: the client's credential or TLS handshake was rejected: {text}"
-    ))
-}
-
-/// The error past the checks' bound of `limit`, while on `step`.
-fn elapsed(limit: Duration, step: &str) -> KafkaFeedError {
-    KafkaFeedError::Unavailable(format!(
-        "the startup checks took longer than {limit:?}, while {step}"
-    ))
-}
-
-/// `e`, from the step `doing`, as the error `connect` returns: a refusal
-/// when `admin` recorded a rejection, whatever the read's own error, and
-/// otherwise the bound's error for a read that ended at its deadline.
-fn classified(admin: &dyn TopicAdmin, doing: &str, e: &AdminError) -> KafkaFeedError {
+fn classified(admin: &dyn TopicAdmin, doing: &str, e: &AdminError) -> ConnectError {
     if let Some(text) = admin.rejection() {
         return rejected(doing, &text);
     }
     if let Some(limit) = e.bound {
         return elapsed(limit, doing);
     }
-    let message = format!("{doing}: {}", e.message);
-    if refused(e.code) {
-        KafkaFeedError::Refused(message)
-    } else {
-        KafkaFeedError::Unavailable(message)
-    }
+    let class = crate::error::classify_consumer_error(e.code, false);
+    ConnectError::from_class(NAME, class, format!("{doing}: {}", e.message))
 }
 
 /// Run the startup checks on `topics`. `step` names the read under way, for
@@ -360,20 +353,20 @@ fn classified(admin: &dyn TopicAdmin, doing: &str, e: &AdminError) -> KafkaFeedE
 ///
 /// # Errors
 ///
-/// [`KafkaFeedError::Refused`] for a missing topic, a compacted work, retry
+/// [`ConnectError::Refused`] for a missing topic, a compacted work, retry
 /// or dead-letter topic, an attempt topic whose `cleanup.policy` is anything
 /// but `compact` or that reports no partitions, a work topic whose
 /// `message.timestamp.type` is anything but `LogAppendTime`, a read that
 /// fails the same way when asked again, a failed read after the client
 /// recorded a rejected credential or TLS handshake, and a topic the cluster
-/// describes no configuration entry for; [`KafkaFeedError::Unavailable`] for
+/// describes no configuration entry for; [`ConnectError::Unavailable`] for
 /// a read that fails otherwise.
 pub(crate) async fn check(
     admin: &dyn TopicAdmin,
     topics: &Topics,
     scope: Scope,
     step: &Mutex<String>,
-) -> Result<Checked, KafkaFeedError> {
+) -> Result<Checked, ConnectError> {
     let set = |s: String| *step.lock().unwrap_or_else(PoisonError::into_inner) = s;
     let named = [
         ("work", &*topics.work),
@@ -392,10 +385,13 @@ pub(crate) async fn check(
                 }
             }
             Err(e) if e.code == RDKafkaErrorCode::UnknownTopicOrPartition => {
-                return Err(KafkaFeedError::Refused(format!(
-                    "the {role} topic `{topic}` does not exist; the feed never creates a \
+                return Err(ConnectError::refused(
+                    NAME,
+                    format!(
+                        "the {role} topic `{topic}` does not exist; the feed never creates a \
                      topic, so create it before the first worker starts"
-                )));
+                    ),
+                ));
             }
             Err(e) => return Err(classified(admin, &doing, &e)),
         }
@@ -405,10 +401,13 @@ pub(crate) async fn check(
         .ok()
         .and_then(NonZeroU32::new)
     else {
-        return Err(KafkaFeedError::Refused(format!(
-            "the attempt topic `{}` reports no partitions",
-            topics.attempt
-        )));
+        return Err(ConnectError::refused(
+            NAME,
+            format!(
+                "the attempt topic `{}` reports no partitions",
+                topics.attempt
+            ),
+        ));
     };
 
     if scope == Scope::Existence {
@@ -433,10 +432,13 @@ pub(crate) async fn check(
         // Every existing topic has configuration entries, so a topic with
         // none is a read the cluster refused.
         if configs.is_empty() {
-            return Err(KafkaFeedError::Refused(format!(
-                "{doing}: the cluster described no configuration entry for the topic, as it \
+            return Err(ConnectError::refused(
+                NAME,
+                format!(
+                    "{doing}: the cluster described no configuration entry for the topic, as it \
                  does for a client without the `DescribeConfigs` operation on it"
-            )));
+                ),
+            ));
         }
         read.push(configs);
     }
@@ -465,12 +467,15 @@ pub(crate) async fn check(
             continue;
         };
         if policy.split(',').any(|p| p.trim() == "compact") {
-            return Err(KafkaFeedError::Refused(format!(
-                "the {role} topic `{topic}` is compacted (`{CLEANUP_POLICY}` is `{policy}`). \
+            return Err(ConnectError::refused(
+                NAME,
+                format!(
+                    "the {role} topic `{topic}` is compacted (`{CLEANUP_POLICY}` is `{policy}`). \
                  Compaction keeps only the latest message for each key, and a unit's id is \
                  its key, so it can delete a unit nobody has read; set `{CLEANUP_POLICY}` \
                  to `delete`"
-            )));
+                ),
+            ));
         }
     }
     match &checked.attempt_cleanup_policy {
@@ -481,12 +486,15 @@ pub(crate) async fn check(
         ),
         Some(policy) if policy.trim() == "compact" => {}
         Some(policy) => {
-            return Err(KafkaFeedError::Refused(format!(
-                "the attempt topic `{}` must be compacted only (`{CLEANUP_POLICY}` is \
+            return Err(ConnectError::refused(
+                NAME,
+                format!(
+                    "the attempt topic `{}` must be compacted only (`{CLEANUP_POLICY}` is \
                  `{policy}`). Time or size retention would delete the attempt counts of units \
                  still in flight; create it with `{CLEANUP_POLICY}=compact`",
-                topics.attempt
-            )));
+                    topics.attempt
+                ),
+            ));
         }
     }
     match &checked.timestamp_type {
@@ -496,13 +504,16 @@ pub(crate) async fn check(
         ),
         Some(kind) if kind == LOG_APPEND_TIME => {}
         Some(kind) => {
-            return Err(KafkaFeedError::Refused(format!(
-                "the work topic `{}` keeps each message's own timestamp (`{TIMESTAMP_TYPE}` is \
+            return Err(ConnectError::refused(
+                NAME,
+                format!(
+                    "the work topic `{}` keeps each message's own timestamp (`{TIMESTAMP_TYPE}` is \
                  `{kind}`). A store can write storage notifications to it with timestamp 0, \
                  as RustFS does, and time retention deletes such messages at its next check, \
                  read or not; create it with `{TIMESTAMP_TYPE}={LOG_APPEND_TIME}`",
-                topics.work
-            )));
+                    topics.work
+                ),
+            ));
         }
     }
     Ok(checked)
@@ -526,7 +537,7 @@ pub(crate) fn run_checks(
     io: &tokio::runtime::Handle,
     scope: Scope,
     clock: SyncClock,
-) -> Result<Checked, KafkaFeedError> {
+) -> Result<Checked, ConnectError> {
     let step = Mutex::new("starting".to_owned());
     let limit = brokers.limit;
     let brokers = Arc::new(brokers);
@@ -541,7 +552,7 @@ pub(crate) fn run_checks(
 }
 
 /// `checks` under a bound of `limit` on `clock`, ended early by a rejection
-/// `rejection` returns. Past the bound, an [`KafkaFeedError::Unavailable`]
+/// `rejection` returns. Past the bound, an [`ConnectError::Unavailable`]
 /// naming the step `step` holds.
 ///
 /// [`ThreadBound`] times the bound on a thread of its own, so it fires on any
@@ -550,16 +561,16 @@ pub(crate) fn run_checks(
 ///
 /// # Errors
 ///
-/// `checks`' own error; [`KafkaFeedError::Refused`] naming the step and the
-/// rejection once `rejection` returns one; [`KafkaFeedError::Unavailable`]
+/// `checks`' own error; [`ConnectError::Refused`] naming the step and the
+/// rejection once `rejection` returns one; [`ConnectError::Unavailable`]
 /// past the bound, or when the system cannot start the thread.
 pub(crate) async fn bounded<T>(
     step: &Mutex<String>,
     limit: Duration,
     clock: SyncClock,
     rejection: impl Fn() -> Option<String> + Send + 'static,
-    checks: impl Future<Output = Result<T, KafkaFeedError>>,
-) -> Result<T, KafkaFeedError> {
+    checks: impl Future<Output = Result<T, ConnectError>>,
+) -> Result<T, ConnectError> {
     let current = || step.lock().unwrap_or_else(PoisonError::into_inner).clone();
     ThreadBound::new("spate-kafka-feed-bound", limit)
         .with_clock(clock)
@@ -570,7 +581,7 @@ pub(crate) async fn bounded<T>(
             Err(match stopped {
                 BoundError::Rejected(text) => rejected(&current(), &text),
                 BoundError::Elapsed => elapsed(limit, &current()),
-                other => KafkaFeedError::Unavailable(other.to_string()),
+                other => ConnectError::unavailable(NAME, other.to_string()),
             })
         })
 }
@@ -725,7 +736,7 @@ mod tests {
         KafkaFeedConfig::from_section(&section).unwrap()
     }
 
-    fn run(admin: &Scripted) -> Result<Checked, KafkaFeedError> {
+    fn run(admin: &Scripted) -> Result<Checked, ConnectError> {
         let step = Mutex::new("starting".to_owned());
         tokio::runtime::Builder::new_current_thread()
             .build()
@@ -733,9 +744,11 @@ mod tests {
             .block_on(check(admin, &topics(), Scope::All, &step))
     }
 
-    fn refusal(result: Result<Checked, KafkaFeedError>) -> String {
+    fn refusal(result: Result<Checked, ConnectError>) -> String {
         match result {
-            Err(KafkaFeedError::Refused(message)) => message,
+            Err(ConnectError::Refused {
+                reason: message, ..
+            }) => message,
             other => panic!("expected a refusal, got {other:?}"),
         }
     }
@@ -1003,13 +1016,39 @@ mod tests {
                 .config_errors
                 .insert(WORK.to_owned(), AdminError::new(code, "slow"));
             match run(&admin) {
-                Err(KafkaFeedError::Unavailable(message)) => assert!(
+                Err(ConnectError::Unavailable {
+                    reason: message, ..
+                }) => assert!(
                     message.contains("reading the configuration of the work topic `units`: slow"),
                     "{message}"
                 ),
                 other => panic!("{code:?}: expected unavailable, got {other:?}"),
             }
         }
+    }
+
+    /// Pins the text a refused and an unavailable read render, with the
+    /// feed's name in it.
+    #[test]
+    fn a_failed_read_renders_the_kafka_text() {
+        let mut admin = Scripted::all();
+        admin.metadata_errors.insert(
+            RETRY.to_owned(),
+            AdminError::new(C::TopicAuthorizationFailed, "denied"),
+        );
+        assert_eq!(
+            run(&admin).unwrap_err().to_string(),
+            "the Kafka feed cannot start: reading the metadata of the retry topic `units-retry`: denied"
+        );
+
+        let mut admin = Scripted::all();
+        admin
+            .config_errors
+            .insert(WORK.to_owned(), AdminError::new(C::RequestTimedOut, "slow"));
+        assert_eq!(
+            run(&admin).unwrap_err().to_string(),
+            "Kafka is unavailable: reading the configuration of the work topic `units`: slow"
+        );
     }
 
     /// The bound the tests advance a frozen clock past.
@@ -1023,7 +1062,7 @@ mod tests {
         io: tokio::runtime::Handle,
         hangs: (&'static str, bool),
         reading: &str,
-    ) -> Option<Result<Checked, KafkaFeedError>> {
+    ) -> Option<Result<Checked, ConnectError>> {
         let clock = TestClock::frozen();
         let run = bounded_with(io, hangs, SHORT, &clock, || None);
         run.wait_for(reading);
@@ -1035,7 +1074,7 @@ mod tests {
     struct Bounded {
         /// The step the checks are on.
         step: Arc<Mutex<String>>,
-        done: mpsc::Receiver<Result<Checked, KafkaFeedError>>,
+        done: mpsc::Receiver<Result<Checked, ConnectError>>,
     }
 
     impl Bounded {
@@ -1096,7 +1135,9 @@ mod tests {
         ] {
             let reading = step.trim_start_matches("while ");
             match bounded_on(io.handle().clone(), hangs, reading) {
-                Some(Err(KafkaFeedError::Unavailable(message))) => {
+                Some(Err(ConnectError::Unavailable {
+                    reason: message, ..
+                })) => {
                     assert!(message.ends_with(step), "{message}");
                 }
                 other => panic!("expected unavailable, got {other:?}"),
@@ -1127,7 +1168,9 @@ mod tests {
                 (WORK, true),
                 "reading the metadata of the work topic `units`",
             ) {
-                Some(Err(KafkaFeedError::Unavailable(message))) => assert!(
+                Some(Err(ConnectError::Unavailable {
+                    reason: message, ..
+                })) => assert!(
                     message.ends_with("while reading the metadata of the work topic `units`"),
                     "{name}: {message}"
                 ),
@@ -1175,7 +1218,9 @@ mod tests {
             .metadata_errors
             .insert(WORK.to_owned(), failure.clone());
         match run(&admin) {
-            Err(KafkaFeedError::Unavailable(message)) => {
+            Err(ConnectError::Unavailable {
+                reason: message, ..
+            }) => {
                 assert!(message.ends_with("`units`: transport"), "{message}");
             }
             other => panic!("expected unavailable, got {other:?}"),
@@ -1213,7 +1258,9 @@ mod tests {
         let mut admin = Scripted::all();
         admin.metadata_errors.insert(RETRY.to_owned(), expired);
         match run(&admin) {
-            Err(KafkaFeedError::Unavailable(message)) => assert_eq!(
+            Err(ConnectError::Unavailable {
+                reason: message, ..
+            }) => assert_eq!(
                 message,
                 "the startup checks took longer than 30s, while reading the metadata of the \
                  retry topic `units-retry`"
@@ -1256,7 +1303,9 @@ mod tests {
             Some(ALERT_40.to_owned())
         });
         match run.done.recv_timeout(HANG).ok() {
-            Some(Err(KafkaFeedError::Refused(message))) => {
+            Some(Err(ConnectError::Refused {
+                reason: message, ..
+            })) => {
                 assert!(
                     message.starts_with("reading the metadata of the retry topic `units-retry`: "),
                     "{message}"
@@ -1300,7 +1349,9 @@ mod tests {
         assert!(run.done.try_recv().is_err(), "fired before its limit");
         clock.advance(Duration::from_nanos(1));
         match run.done.recv_timeout(HANG) {
-            Ok(Err(KafkaFeedError::Unavailable(message))) => assert!(
+            Ok(Err(ConnectError::Unavailable {
+                reason: message, ..
+            })) => assert!(
                 message.starts_with("the startup checks took longer than 600s"),
                 "{message}"
             ),
@@ -1349,7 +1400,9 @@ mod tests {
             fired.is_some()
         });
         match fired.flatten() {
-            Some(KafkaFeedError::Unavailable(message)) => assert!(
+            Some(ConnectError::Unavailable {
+                reason: message, ..
+            }) => assert!(
                 message.starts_with("the startup checks took longer than 600s"),
                 "{message}"
             ),
@@ -1363,7 +1416,7 @@ mod tests {
     ///
     /// On the system clock: the tests that use it pin what librdkafka does
     /// in real time inside the bound.
-    fn connect_to(brokers: &str, rdkafka: &str, limit: Duration) -> Option<KafkaFeedError> {
+    fn connect_to(brokers: &str, rdkafka: &str, limit: Duration) -> Option<ConnectError> {
         connect_with_to(brokers, rdkafka, limit, |section, io, limit| {
             crate::feed::KafkaFeed::connect_with(
                 section,
@@ -1378,11 +1431,7 @@ mod tests {
 
     /// `KafkaFeedPublisher::connect` as [`connect_to`] runs the feed's.
     #[cfg(feature = "tls")]
-    fn connect_publisher_to(
-        brokers: &str,
-        rdkafka: &str,
-        limit: Duration,
-    ) -> Option<KafkaFeedError> {
+    fn connect_publisher_to(brokers: &str, rdkafka: &str, limit: Duration) -> Option<ConnectError> {
         connect_with_to(brokers, rdkafka, limit, |section, io, limit| {
             crate::feed::KafkaFeedPublisher::connect_with(section, io, Scope::All, limit).err()
         })
@@ -1397,8 +1446,8 @@ mod tests {
             &spate_core::config::FeedSection,
             &tokio::runtime::Handle,
             Duration,
-        ) -> Option<KafkaFeedError>,
-    ) -> Option<KafkaFeedError> {
+        ) -> Option<ConnectError>,
+    ) -> Option<ConnectError> {
         let section: spate_core::config::FeedSection = serde_yaml::from_str(&format!(
             "kafka:\n  brokers: \"{brokers}\"\n  group_id: workers\n  topic: {WORK}\n  \
              retry_topic: {RETRY}\n  dead_letter_topic: {DEAD}\n  attempt_topic: {ATTEMPTS}\n  \
@@ -1422,7 +1471,9 @@ mod tests {
         let brokers = closed.local_addr().unwrap().to_string();
         drop(closed);
         match connect_to(&brokers, "", Duration::from_secs(2)) {
-            Some(KafkaFeedError::Unavailable(message)) => assert!(
+            Some(ConnectError::Unavailable {
+                reason: message, ..
+            }) => assert!(
                 message.starts_with("the startup checks took longer than 2s"),
                 "{message}"
             ),
@@ -1436,7 +1487,7 @@ mod tests {
     fn checks_closing_their_clients(
         properties: &[(&str, &str)],
         limit: Duration,
-    ) -> Result<Checked, KafkaFeedError> {
+    ) -> Result<Checked, ConnectError> {
         use crate::client::testing::raw;
         let clock = SyncClock::new(TestClock::frozen() as _);
         let hooks = crate::sink::SinkHooks::detached(clock.clone());
@@ -1472,7 +1523,9 @@ mod tests {
         let got =
             checks_closing_their_clients(&[("bootstrap.servers", broker.as_str())], Duration::ZERO);
         match got {
-            Err(KafkaFeedError::Unavailable(message)) => assert!(
+            Err(ConnectError::Unavailable {
+                reason: message, ..
+            }) => assert!(
                 message.starts_with("the startup checks took longer than"),
                 "{message}"
             ),
@@ -1492,7 +1545,9 @@ mod tests {
             Duration::from_millis(1),
         );
         match got {
-            Err(KafkaFeedError::Unavailable(message)) => assert_eq!(
+            Err(ConnectError::Unavailable {
+                reason: message, ..
+            }) => assert_eq!(
                 message,
                 "the startup checks took longer than 1ms, while reading the metadata of the \
                  work topic `units`"
@@ -1624,7 +1679,7 @@ mod tests {
                     let _ = &held;
                     None
                 },
-                async { Ok::<_, KafkaFeedError>(()) },
+                async { Ok::<_, ConnectError>(()) },
             ));
             let _ = tx.send((got, watched.upgrade().is_none()));
         });
@@ -1706,7 +1761,9 @@ mod tests {
             Duration::from_secs(5),
         );
         match got {
-            Some(KafkaFeedError::Unavailable(message)) => {
+            Some(ConnectError::Unavailable {
+                reason: message, ..
+            }) => {
                 assert!(
                     message.starts_with("the startup checks took longer than"),
                     "{message}"
@@ -1730,7 +1787,9 @@ mod tests {
 
         fn refused_within_deadline(brokers: &str, rdkafka: &str) -> String {
             match connect_to(brokers, rdkafka, LONG) {
-                Some(KafkaFeedError::Refused(message)) => {
+                Some(ConnectError::Refused {
+                    reason: message, ..
+                }) => {
                     assert!(
                         message.starts_with("reading the metadata of the work topic `units`: "),
                         "{message}"
@@ -1741,9 +1800,11 @@ mod tests {
             }
         }
 
-        fn refused_with_text(got: Option<KafkaFeedError>) -> String {
+        fn refused_with_text(got: Option<ConnectError>) -> String {
             match got {
-                Some(KafkaFeedError::Refused(message)) => {
+                Some(ConnectError::Refused {
+                    reason: message, ..
+                }) => {
                     assert!(
                         message.starts_with("reading the metadata of the work topic `units`: "),
                         "{message}"
@@ -1834,7 +1895,9 @@ mod tests {
                 LONG,
             );
             match got {
-                Err(KafkaFeedError::Refused(message)) => {
+                Err(ConnectError::Refused {
+                    reason: message, ..
+                }) => {
                     assert!(message.contains("SSL alert number 40"), "{message}");
                 }
                 other => panic!("expected a refusal, got {other:?}"),

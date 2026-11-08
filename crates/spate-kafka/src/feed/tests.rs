@@ -22,7 +22,7 @@ use super::write::{
     self, Attempt, DELIVERIES_HEADER, Destination, Failure, Finish, Move, Outgoing, Tombstone,
     Write, WriteClass, classify, route,
 };
-use super::{Core, Gating, KafkaFeed, KafkaFeedError, KafkaFeedPublisher, Ready};
+use super::{Core, Gating, KafkaFeed, KafkaFeedPublisher, Ready};
 use crate::client::testing::raw_config;
 use crate::testutil::{assert_returns, returns_within};
 use rdkafka::Offset;
@@ -31,7 +31,9 @@ use spate_core::backoff::Backoff;
 use spate_core::clock::SyncClock;
 use spate_core::clock::TestClock;
 use spate_core::config::FeedSection;
-use spate_core::feed::{Feed, FeedErrorKind, Receipt, Unit, confirmation, wake_channel};
+use spate_core::feed::{
+    ConnectError, Feed, FeedErrorKind, Receipt, Unit, confirmation, wake_channel,
+};
 use spate_test::HANG;
 use std::num::NonZeroU32;
 use std::sync::Arc;
@@ -911,11 +913,8 @@ fn a_publisher_refuses_the_section_a_worker_refuses() {
         .unwrap();
     let worker = KafkaFeed::connect(&section, io.handle()).unwrap_err();
     let publisher = KafkaFeedPublisher::connect(&section, io.handle()).unwrap_err();
-    assert!(matches!(worker, KafkaFeedError::Config(_)), "{worker}");
-    assert!(
-        matches!(publisher, KafkaFeedError::Config(_)),
-        "{publisher}"
-    );
+    assert!(matches!(worker, ConnectError::Config(_)), "{worker}");
+    assert!(matches!(publisher, ConnectError::Config(_)), "{publisher}");
     assert_eq!(worker.to_string(), publisher.to_string());
 }
 

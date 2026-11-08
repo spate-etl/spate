@@ -87,7 +87,11 @@ impl Role for Consumer<'_> {
         // policy then only moves a fetch position the log no longer holds, where
         // the end would skip the records it keeps.
         if self.0.uncommitted_start() == Some(rdkafka::Offset::End) {
-            keys.set(self.0.reset_policy().0, "earliest");
+            let key = self
+                .0
+                .reset_policy()
+                .map_or("auto.offset.reset", |(key, _)| key);
+            keys.set(key, "earliest");
         }
         keys.forbid(
             "group.protocol",
@@ -179,7 +183,9 @@ pub struct KafkaSourceConfig {
     /// [the metrics reference]: https://spate.kainth.dev/docs/METRICS
     #[serde(with = "humantime_serde", default = "default_statistics_interval")]
     pub statistics_interval: Duration,
-    /// Raw librdkafka properties, applied verbatim after validation.
+    /// Raw librdkafka properties, applied verbatim after validation, except
+    /// that the consumer reads an `auto.offset.reset` of `latest` as
+    /// `earliest`, since the source settles each start under `latest` itself.
     /// Framework-owned properties (see crate docs) are rejected. With the
     /// `tls` feature and vendored OpenSSL, a map naming neither
     /// `ssl.ca.location` nor `ssl.ca.pem` gets `ssl.ca.location: probe` unless
@@ -342,8 +348,12 @@ impl KafkaSourceConfig {
         if let Err(refusal) = self.base(false).denied(&[&Consumer(self, None)]) {
             return Err(ConfigError::Validation(format!("source.kafka.{refusal}")));
         }
-        if self.rdkafka.contains_key("auto.offset.reset")
-            && self.rdkafka.contains_key("topic.auto.offset.reset")
+        if self
+            .rdkafka
+            .keys()
+            .filter(|key| crate::client::canonical(key) == "auto.offset.reset")
+            .count()
+            > 1
         {
             return Err(ConfigError::Validation(
                 "source.kafka.rdkafka sets both \"auto.offset.reset\" and \
@@ -371,7 +381,7 @@ impl KafkaSourceConfig {
     /// `End` is resolved and committed once, by the source.
     /// librdkafka reads `topic.auto.offset.reset` as the same property.
     pub(crate) fn uncommitted_start(&self) -> Option<rdkafka::Offset> {
-        let policy = self.reset_policy().1.unwrap_or("latest");
+        let policy = self.reset_policy().map_or("latest", |(_, value)| value);
         // librdkafka skips leading whitespace in the value.
         match policy.trim_start().to_ascii_lowercase().as_str() {
             "smallest" | "earliest" | "beginning" => Some(rdkafka::Offset::Beginning),
@@ -380,14 +390,13 @@ impl KafkaSourceConfig {
         }
     }
 
-    /// The passthrough key that sets `auto.offset.reset`, under either spelling
-    /// librdkafka reads, and its value. The bare key when neither is set.
-    fn reset_policy(&self) -> (&'static str, Option<&str>) {
-        const SPELLINGS: [&str; 2] = ["auto.offset.reset", "topic.auto.offset.reset"];
-        SPELLINGS
-            .into_iter()
-            .find_map(|key| Some((key, Some(self.rdkafka.get(key)?.as_str()))))
-            .unwrap_or((SPELLINGS[0], None))
+    /// The passthrough key that sets `auto.offset.reset`, under whichever
+    /// spelling librdkafka reads as it, and its value.
+    fn reset_policy(&self) -> Option<(&str, &str)> {
+        self.rdkafka
+            .iter()
+            .find(|(key, _)| crate::client::canonical(key) == "auto.offset.reset")
+            .map(|(key, value)| (key.as_str(), value.as_str()))
     }
 
     /// Whether librdkafka measures lag to the last stable offset rather than

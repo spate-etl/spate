@@ -164,9 +164,10 @@ impl Keys<'_> {
         self.owned.push((key, why));
     }
 
-    /// Set `key` from a typed field without owning it. The passthrough may
-    /// still name it, and the section checks that conflict itself.
-    pub(crate) fn set(&mut self, key: &'static str, value: &str) {
+    /// Set `key` without owning it, from a typed field or as a rewrite of a
+    /// passthrough value. The passthrough may still name it, and the section
+    /// checks that conflict itself.
+    pub(crate) fn set(&mut self, key: &str, value: &str) {
         if let Some(cc) = self.config.as_deref_mut() {
             cc.set(key, value);
         }

@@ -8,6 +8,7 @@ use spate_core::checkpoint::Checkpointer;
 use spate_core::error::ErrorClass;
 use spate_core::source::{PayloadBatch, Source, SourceCtx, SourceLane};
 use spate_kafka::{KafkaSource, KafkaSourceConfig};
+use spate_test::HANG;
 use std::collections::BTreeMap;
 use std::time::Duration;
 use support::MockKafka;
@@ -53,7 +54,7 @@ fn wait_for_fetch_queue(
     pipeline: &str,
     at_least: f64,
 ) {
-    spate_test::wait_until(Duration::from_secs(30), "the fetcher runs ahead", || {
+    spate_test::wait_until(HANG, "the fetcher runs ahead", || {
         source
             .poll_events(Duration::from_millis(50))
             .expect("poll_events");
@@ -102,7 +103,7 @@ fn an_unreadable_batch_behind_the_fetcher_fails_the_lane() {
                     .with_partition_detail(true),
             )
             .expect("open");
-        let mut lanes = await_assignment(&mut source, Duration::from_secs(30));
+        let mut lanes = await_assignment(&mut source, HANG);
         cp.begin_epoch(&[lanes[0].partition()], 1);
 
         // The fetcher has queued record 0, the error for offset 1 and the
@@ -169,7 +170,7 @@ fn an_unreadable_batch_at_the_tail_fails_the_next_poll() {
                     .with_partition_detail(true),
             )
             .expect("open");
-        let mut lanes = await_assignment(&mut source, Duration::from_secs(30));
+        let mut lanes = await_assignment(&mut source, HANG);
         cp.begin_epoch(&[lanes[0].partition()], 1);
 
         // One version barrier, record 0 and the error.
@@ -202,11 +203,11 @@ fn an_unknown_codec_first_in_a_poll_names_the_codec() {
     let mut cp = Checkpointer::new();
     let mut source = KafkaSource::new(source_cfg(&brokers, "unknown-codec"));
     source.open(SourceCtx::new(cp.handle())).expect("open");
-    let mut lanes = await_assignment(&mut source, Duration::from_secs(30));
+    let mut lanes = await_assignment(&mut source, HANG);
     cp.begin_epoch(&[lanes[0].partition()], 1);
 
     let mut reason = None;
-    spate_test::wait_until(Duration::from_secs(30), "the lane fails", || {
+    spate_test::wait_until(HANG, "the lane fails", || {
         source
             .poll_events(Duration::from_millis(10))
             .expect("poll_events");
@@ -262,14 +263,14 @@ fn a_marker_behind_an_unreadable_batch_leaves_the_commit_alone() {
                     .with_partition_detail(true),
             )
             .expect("open");
-        let mut lanes = await_assignment(&mut source, Duration::from_secs(30));
+        let mut lanes = await_assignment(&mut source, HANG);
         cp.begin_epoch(&[lanes[0].partition()], 1);
         // One version barrier, record 0, the error and the marker.
         wait_for_fetch_queue(&mut source, &handle, name, 4.0);
 
         let mut delivered = Vec::new();
         let mut failed = false;
-        spate_test::wait_until(Duration::from_secs(30), "the lane fails", || {
+        spate_test::wait_until(HANG, "the lane fails", || {
             source
                 .poll_events(Duration::from_millis(10))
                 .expect("poll_events");
@@ -343,7 +344,7 @@ fn an_error_bars_the_marker_advance() {
                         .with_partition_detail(true),
                 )
                 .expect("open");
-            let mut lanes = await_assignment(&mut source, Duration::from_secs(30));
+            let mut lanes = await_assignment(&mut source, HANG);
             cp.begin_epoch(&[lanes[0].partition()], 1);
             let partition = lanes[0].partition();
 
@@ -372,7 +373,7 @@ fn an_error_bars_the_marker_advance() {
             );
             marker();
             let mut watermarks = Vec::new();
-            spate_test::wait_until(Duration::from_secs(30), "the marker behind it", || {
+            spate_test::wait_until(HANG, "the marker behind it", || {
                 source
                     .poll_events(Duration::from_millis(10))
                     .expect("poll_events");
@@ -412,14 +413,14 @@ fn a_corrupt_message_before_the_first_commit_stops_again_after_a_restart() {
         let cp = Checkpointer::new();
         let mut source = KafkaSource::new(cfg);
         source.open(SourceCtx::new(cp.handle())).expect("open");
-        let mut lanes = await_assignment(&mut source, Duration::from_secs(30));
+        let mut lanes = await_assignment(&mut source, HANG);
         if produce_after {
             let mut unreadable = batch(2, 0, -1, 1, b"carrier");
             unreadable.extend_from_slice(&batch(3, 1, 0, 1, b"unreadable"));
             assert_eq!(produce_batch(&brokers, TOPIC, 0, &unreadable), 0);
         }
         let mut reason = None;
-        spate_test::wait_until(Duration::from_secs(30), "the lane to fail", || {
+        spate_test::wait_until(HANG, "the lane to fail", || {
             let _ = source.poll_events(Duration::from_millis(10));
             match lanes[0].poll(64, Duration::from_millis(50)) {
                 Err(e) if e.class() == ErrorClass::Fatal => {

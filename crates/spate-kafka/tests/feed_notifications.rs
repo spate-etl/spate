@@ -17,12 +17,12 @@ use object_store::{Attribute, ObjectStore as _, ObjectStoreExt as _, PutOptions,
 use serde_json::Value;
 use spate_core::pipeline::ExitState;
 use spate_kafka::feed::KafkaFeed;
-use spate_test::wait_until;
+use spate_test::{HANG, wait_until};
 use spate_test_support::{ACCESS_KEY, REGION, RGW_OPAQUE_DATA, S3Store, SECRET_KEY, Store};
 use support::broker;
 use support::feed::{
-    DEAD, DEADLINE, RETRY, WORK, Worker, committed, create_topics, feed_yaml, high_watermark,
-    launch_source, read_topic, recs, written,
+    DEAD, RETRY, WORK, Worker, committed, create_topics, feed_yaml, high_watermark, launch_source,
+    read_topic, recs, written,
 };
 use testcontainers::core::IntoContainerPort;
 use testcontainers::runners::SyncRunner;
@@ -52,11 +52,11 @@ fn a_key_with_reserved_and_non_ascii_bytes_reads_its_object() {
     let mut want = rows.clone();
     want.sort();
     wait_until(
-        DEADLINE,
+        HANG,
         "every record of the notified object is written",
         || written(&worker.script) == want,
     );
-    wait_until(DEADLINE, "the notification's offset is committed", || {
+    wait_until(HANG, "the notification's offset is committed", || {
         committed(&n.brokers, &worker.group, WORK) == Some(1)
     });
     assert_eq!(worker.stop(), ExitState::Completed);
@@ -78,7 +78,7 @@ fn an_object_overwritten_before_its_read_is_read_at_its_new_etag() {
     let path = Path::parse("dir/over+written c%25.ndjson").unwrap();
     n.put(&path, &first, PutOptions::default());
     n.put(&path, &second, PutOptions::default());
-    wait_until(DEADLINE, "both notifications reach the work topic", || {
+    wait_until(HANG, "both notifications reach the work topic", || {
         high_watermark(&n.brokers, WORK) == 2
     });
 
@@ -86,12 +86,12 @@ fn an_object_overwritten_before_its_read_is_read_at_its_new_etag() {
     let mut want: Vec<String> = second.iter().chain(&second).cloned().collect();
     want.sort();
     wait_until(
-        DEADLINE,
+        HANG,
         "the second version is written once per unit naming it",
         || written(&worker.script) == want,
     );
     wait_until(
-        DEADLINE,
+        HANG,
         "the notifications and the re-enqueue are committed",
         || committed(&n.brokers, &worker.group, WORK) == Some(3),
     );
@@ -177,11 +177,9 @@ fn every_notified_key_reads_its_own_object() {
     assert_eq!(listed, written_keys, "the store holds each key as written");
 
     let total = keys.len();
-    wait_until(
-        DEADLINE,
-        "every notification reaches the work topic",
-        || high_watermark(&n.brokers, WORK) == i64::try_from(total).unwrap(),
-    );
+    wait_until(HANG, "every notification reaches the work topic", || {
+        high_watermark(&n.brokers, WORK) == i64::try_from(total).unwrap()
+    });
     let store = n.s3.store();
     let messages = read_topic(&n.brokers, WORK, total);
     for key in keys {
@@ -209,10 +207,10 @@ fn every_notified_key_reads_its_own_object() {
     }
 
     let worker = n.worker("every-key");
-    wait_until(DEADLINE, "every object's rows are written once", || {
+    wait_until(HANG, "every object's rows are written once", || {
         written(&worker.script) == want
     });
-    wait_until(DEADLINE, "every notification is committed", || {
+    wait_until(HANG, "every notification is committed", || {
         committed(&n.brokers, &worker.group, WORK) == Some(i64::try_from(total).unwrap())
     });
     assert_eq!(
@@ -264,7 +262,7 @@ fn a_multipart_object_is_announced_at_its_stored_size_and_read() {
         .expect("complete the upload");
     let stored = n.io.block_on(n.client.head(&path)).expect("head").size;
 
-    wait_until(DEADLINE, "the notification reaches the work topic", || {
+    wait_until(HANG, "the notification reaches the work topic", || {
         high_watermark(&n.brokers, WORK) >= 1
     });
     let messages = read_topic(&n.brokers, WORK, 1);
@@ -282,10 +280,10 @@ fn a_multipart_object_is_announced_at_its_stored_size_and_read() {
     let worker = n.worker("multipart");
     let mut want = rows.clone();
     want.sort();
-    wait_until(DEADLINE, "every record of the object is written", || {
+    wait_until(HANG, "every record of the object is written", || {
         written(&worker.script) == want
     });
-    wait_until(DEADLINE, "the notification is committed", || {
+    wait_until(HANG, "the notification is committed", || {
         committed(&n.brokers, &worker.group, WORK) == Some(1)
     });
     assert_eq!(

@@ -242,6 +242,7 @@ pub(crate) mod tests {
     use rdkafka::producer::ProducerContext;
     use spate_core::clock::TestClock;
     use spate_core::clock::tokio::{SystemClock as IoSystemClock, TestClock as IoTestClock};
+    use spate_test::HANG;
     use std::time::Duration;
 
     /// A detached context on a frozen clock, and that clock.
@@ -544,7 +545,7 @@ pub(crate) mod tests {
             .build_with(ErrorCalls::default())
             .expect("producer");
         let context = Arc::clone(producer.context());
-        spate_test::wait_until(Duration::from_secs(10), "two error callbacks", || {
+        spate_test::wait_until(HANG, "two error callbacks", || {
             context.0.lock().expect("calls lock").len() >= 2
         });
         // Dropping the producer joins its poll thread, so every pair is complete.

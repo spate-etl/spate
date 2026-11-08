@@ -32,6 +32,7 @@ use spate_core::clock::SyncClock;
 use spate_core::clock::TestClock;
 use spate_core::config::FeedSection;
 use spate_core::feed::{Feed, FeedErrorKind, Receipt, Unit, confirmation, wake_channel};
+use spate_test::HANG;
 use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -887,7 +888,7 @@ fn an_inline_fatal_enqueue_settles_without_deadlock() {
         let _ = tx.send(confirmation.try_outcome());
     });
     let outcome = rx
-        .recv_timeout(Duration::from_secs(10))
+        .recv_timeout(HANG)
         .expect("publish_unit did not return: the state lock is held across the send");
     let err = outcome.expect("settled inline").unwrap_err();
     assert_eq!(err.kind, FeedErrorKind::Fatal, "{}", err.reason);
@@ -1561,7 +1562,7 @@ fn a_gate_pass_puts_back_the_deliveries_of_each_failed_watermark_read() {
     let gate = super::gate::Gate::new(Arc::clone(&core), producer, config.delivery_timeout)
         .with_step(STEP);
     assert!(
-        returns_within(Duration::from_secs(10), move || gate.pass()),
+        returns_within(HANG, move || gate.pass()),
         "the pass did not return"
     );
     let st = core.lock();
@@ -1602,11 +1603,11 @@ fn a_gate_waiting_on_an_unreachable_attempt_partition_lets_the_feed_drop() {
         feed.core.gate_wake.notify_all();
     }
     let core = Arc::clone(&feed.core);
-    spate_test::wait_until(Duration::from_secs(30), "the gate takes the unit", || {
+    spate_test::wait_until(HANG, "the gate takes the unit", || {
         core.lock().admitting == 1
     });
     assert!(
-        returns_within(Duration::from_secs(10), move || drop(feed)),
+        returns_within(HANG, move || drop(feed)),
         "dropping the feed did not return"
     );
     assert_eq!(
@@ -1642,11 +1643,9 @@ fn a_delivery_revoked_during_a_pass_is_not_put_back() {
     let gate = super::gate::Gate::new(Arc::clone(&core), producer, config.delivery_timeout)
         .with_step(Duration::from_secs(1));
     let pass = std::thread::spawn(move || gate.pass());
-    spate_test::wait_until(
-        Duration::from_secs(10),
-        "the pass takes the delivery",
-        || core.lock().admitting == 1,
-    );
+    spate_test::wait_until(HANG, "the pass takes the delivery", || {
+        core.lock().admitting == 1
+    });
     super::consumer::commit_revoked(&core, &[tp(0)], |_| {});
     assert!(
         core.lock().gating.is_empty(),
@@ -1679,7 +1678,7 @@ fn a_latched_feed_ends_its_gate_thread() {
         .spawn()
         .unwrap();
     core.latch("probe");
-    let ended = returns_within(Duration::from_secs(10), move || handle.join().unwrap());
+    let ended = returns_within(HANG, move || handle.join().unwrap());
     super::stop(&core);
     assert!(ended, "the gate thread did not end");
 }
@@ -1736,7 +1735,7 @@ fn a_feed_that_ends_during_a_pass_ends_it_before_the_next_read() {
             gate.pass();
             let _ = tx.send(());
         });
-        spate_test::wait_until(Duration::from_secs(10), "the pass begins a read", || {
+        spate_test::wait_until(HANG, "the pass begins a read", || {
             core.gate_reads.load(Ordering::SeqCst) >= 1
         });
         if how == "stopped" {
@@ -1745,7 +1744,7 @@ fn a_feed_that_ends_during_a_pass_ends_it_before_the_next_read() {
             drop(core.latch("probe"));
         }
         assert!(
-            rx.recv_timeout(Duration::from_secs(30)).is_ok(),
+            rx.recv_timeout(HANG).is_ok(),
             "the pass of a {how} feed did not return"
         );
         assert_eq!(
@@ -1799,7 +1798,7 @@ fn a_unit_at_the_gate_when_the_stop_begins_gets_no_attempt_record() {
     )
     .with_step(Duration::from_millis(10));
     assert!(
-        returns_within(Duration::from_secs(10), move || gate.pass()),
+        returns_within(HANG, move || gate.pass()),
         "the pass did not return"
     );
     let st = feed.core.lock();
@@ -1902,7 +1901,7 @@ fn a_latch_settles_a_close_the_consumer_thread_has_not_taken() {
 fn a_close_returns_while_the_broker_is_down() {
     let feed = idle_feed();
     assert!(
-        returns_within(Duration::from_secs(10), move || {
+        returns_within(HANG, move || {
             drop(feed.close(Duration::from_secs(1)));
         }),
         "the close did not return"
@@ -1938,14 +1937,12 @@ mod cluster {
     use spate_core::config::FeedSection;
     use spate_core::feed::{Feed, FeedErrorKind, Unit};
     use spate_core::task::{ThreadHandle, spawn_thread};
-    use spate_test::wait_until;
+    use spate_test::{HANG, wait_until};
     use std::collections::BTreeSet;
     use std::sync::Arc;
     use std::sync::atomic::Ordering;
     use std::sync::mpsc;
     use std::time::Duration;
-
-    const DEADLINE: Duration = Duration::from_secs(60);
 
     /// The gate's step in the tests that run it beside the consumer.
     const STEP: Duration = Duration::from_millis(10);
@@ -2037,23 +2034,21 @@ mod cluster {
             .unwrap();
 
         let a = connect(&brokers, &group, &io);
-        wait_until(
-            DEADLINE,
-            "A owns both partitions with a full buffer",
-            || owned(&a) == 2 && buffered(&a) >= READY_CAPACITY,
-        );
+        wait_until(HANG, "A owns both partitions with a full buffer", || {
+            owned(&a) == 2 && buffered(&a) >= READY_CAPACITY
+        });
         let b = connect(&brokers, &group, &io);
-        wait_until(DEADLINE, "the members split the partitions", || {
+        wait_until(HANG, "the members split the partitions", || {
             owned(&a) == 1 && owned(&b) == 1
         });
-        wait_until(DEADLINE, "A reads the partition it was given", || {
+        wait_until(HANG, "A reads the partition it was given", || {
             buffered(&a) > 0
         });
         drop(b);
-        wait_until(DEADLINE, "A owns both partitions again", || owned(&a) == 2);
+        wait_until(HANG, "A owns both partitions again", || owned(&a) == 2);
 
         let mut read = BTreeSet::new();
-        wait_until(DEADLINE, "A reads every unit", || {
+        wait_until(HANG, "A reads every unit", || {
             for delivery in a.receive(64).unwrap_or_default() {
                 read.insert(delivery.unit.id);
                 a.acknowledge(delivery.receipt).unwrap();
@@ -2125,7 +2120,7 @@ mod cluster {
     ) {
         std::thread::scope(|scope| {
             let pass = scope.spawn(|| tracing::dispatcher::with_default(dispatch, || gate.pass()));
-            wait_until(DEADLINE, "the pass reaches the advance", || {
+            wait_until(HANG, "the pass reaches the advance", || {
                 at() || pass.is_finished()
             });
             clock.advance(by);
@@ -2197,7 +2192,7 @@ mod cluster {
 
     /// Poll and serve rebalances until `done` holds.
     pub(super) fn drive(d: &mut Driver, what: &str, mut done: impl FnMut(&Driver) -> bool) {
-        wait_until(DEADLINE, what, || {
+        wait_until(HANG, what, || {
             d.poll();
             d.serve_intents();
             done(d)
@@ -2236,12 +2231,9 @@ mod cluster {
         let (_, _producer, d) = super::super::parts(&config, TWO, SyncClock::system()).unwrap();
         crate::testutil::stop_at(&d.consumer, crate::testutil::ASSIGN_STOP);
         let context = Arc::clone(d.consumer.context());
-        assert_returns(
-            cluster,
-            Duration::from_secs(30),
-            "dropping the consumer thread",
-            move || drop(d),
-        );
+        assert_returns(cluster, HANG, "dropping the consumer thread", move || {
+            drop(d)
+        });
         let intents = context.intents.lock().unwrap();
         assert!(intents.is_empty(), "the close deferred: {intents:?}");
     }
@@ -2260,7 +2252,7 @@ mod cluster {
             RDKafkaApiKey::Heartbeat,
             &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_UNKNOWN_MEMBER_ID],
         );
-        wait_until(DEADLINE, "a revocation queued", || {
+        wait_until(HANG, "a revocation queued", || {
             d.poll();
             d.consumer
                 .context()
@@ -2276,7 +2268,7 @@ mod cluster {
             panic!("poisoning the intent lock");
         })
         .join();
-        let dropped = returns_within(Duration::from_secs(30), move || drop(d));
+        let dropped = returns_within(HANG, move || drop(d));
         if !dropped {
             // Its consumer is still connected; dropping it would wait on it.
             std::mem::forget(cluster);
@@ -2314,14 +2306,14 @@ mod cluster {
                 follower: None,
                 depth: None,
             };
-            wait_until(DEADLINE, "the feed stops", || match feed.receive(1) {
+            wait_until(HANG, "the feed stops", || match feed.receive(1) {
                 Err(e) if e.kind == FeedErrorKind::Fatal => {
                     reason = Some(e.reason);
                     true
                 }
                 _ => false,
             });
-            dropped = returns_within(Duration::from_secs(30), move || drop(feed));
+            dropped = returns_within(HANG, move || drop(feed));
         });
         if !dropped {
             // Its clients are still connected; dropping it would wait on them.
@@ -2404,7 +2396,7 @@ mod cluster {
             follower: None,
             depth: None,
         };
-        wait_until(DEADLINE, "the queued write is sent", || {
+        wait_until(HANG, "the queued write is sent", || {
             core.lock().resends.is_empty()
         });
         drop(feed);
@@ -2476,7 +2468,7 @@ mod cluster {
         let group = spate_test::unique_name("lost-paused");
         let (config, core, producer, mut d) = parts_for(&brokers, &group);
         let admission = admission(&config, &core, &producer, STEP);
-        wait_until(DEADLINE, "the buffer fills and the thread pauses", || {
+        wait_until(HANG, "the buffer fills and the thread pauses", || {
             d.poll();
             d.serve_intents();
             d.backpressure();
@@ -2504,7 +2496,7 @@ mod cluster {
         // Attempt writes still in flight count against the buffer until they
         // settle, so the new assignment can start paused, as the consumer
         // thread's own loop resumes it.
-        wait_until(DEADLINE, "the reassigned partitions are fetched", || {
+        wait_until(HANG, "the reassigned partitions are fetched", || {
             d.poll();
             d.serve_intents();
             d.backpressure();
@@ -2529,7 +2521,7 @@ mod cluster {
         d.core.latch("a test latch");
         let thread = std::thread::spawn(move || consumer::run(d));
         let mut at = None;
-        wait_until(DEADLINE, "the thread ends or commits", || {
+        wait_until(HANG, "the thread ends or commits", || {
             at = committed(&brokers, &group);
             at.is_some() || thread.is_finished()
         });
@@ -2660,7 +2652,7 @@ mod cluster {
         let (_, _, _, mut d) = parts_for(&brokers, &group);
         drive(&mut d, "the driver owns its partitions", |d| owns(d) == 2);
         d.core.lock().tracker.unassign_all();
-        wait_until(DEADLINE, "the message is read", || {
+        wait_until(HANG, "the message is read", || {
             d.poll();
             d.consumer
                 .position()
@@ -2705,16 +2697,12 @@ mod cluster {
         let brokers = cluster.bootstrap_servers();
         let group = spate_test::unique_name("gating-full");
         let (_, _, _, mut d) = parts_for(&brokers, &group);
-        wait_until(
-            DEADLINE,
-            "the gate's queue fills and the thread pauses",
-            || {
-                d.poll();
-                d.serve_intents();
-                d.backpressure();
-                !d.paused.is_empty()
-            },
-        );
+        wait_until(HANG, "the gate's queue fills and the thread pauses", || {
+            d.poll();
+            d.serve_intents();
+            d.backpressure();
+            !d.paused.is_empty()
+        });
         assert!(d.core.lock().gating.len() >= READY_CAPACITY);
     }
 
@@ -2727,16 +2715,12 @@ mod cluster {
         let brokers = cluster.bootstrap_servers();
         let group = spate_test::unique_name("gating-full-keyless");
         let (_, _, _, mut d) = parts_for(&brokers, &group);
-        wait_until(
-            DEADLINE,
-            "the gate's queue fills and the thread pauses",
-            || {
-                d.poll();
-                d.serve_intents();
-                d.backpressure();
-                !d.paused.is_empty()
-            },
-        );
+        wait_until(HANG, "the gate's queue fills and the thread pauses", || {
+            d.poll();
+            d.serve_intents();
+            d.backpressure();
+            !d.paused.is_empty()
+        });
         assert!(d.core.lock().gating.len() >= READY_CAPACITY);
     }
 
@@ -2783,7 +2767,7 @@ mod cluster {
         let (config, core, producer, mut d) = parts_for(&brokers, &group);
         let admission = admission(&config, &core, &producer, STEP);
         wait_until(
-            DEADLINE,
+            HANG,
             "the gate takes every unit read and the thread pauses",
             || {
                 d.poll();
@@ -2825,7 +2809,7 @@ mod cluster {
             follower: Some(follower),
             depth: None,
         };
-        wait_until(DEADLINE, "the consumer owns its partitions", || {
+        wait_until(HANG, "the consumer owns its partitions", || {
             owned(&feed) == 1
         });
         let units: BaseProducer = raw_config()
@@ -2837,13 +2821,8 @@ mod cluster {
             .map_err(|(e, _)| e)
             .unwrap();
         units.flush(Duration::from_secs(30)).unwrap();
-        wait_until(DEADLINE, "the unit is buffered", || buffered(&feed) == 1);
-        assert_returns(
-            cluster,
-            Duration::from_secs(10),
-            "dropping the feed",
-            move || drop(feed),
-        );
+        wait_until(HANG, "the unit is buffered", || buffered(&feed) == 1);
+        assert_returns(cluster, HANG, "dropping the feed", move || drop(feed));
     }
 
     /// Pins that a gate pass whose follower does not catch up ends once the
@@ -2901,7 +2880,7 @@ mod cluster {
         let bound = Duration::from_secs(3600);
         let gate = Gate::new(Arc::clone(&core), Producer::clone(&producer), bound)
             .with_step(STEP)
-            .with_request_bound(spate_test::HANG);
+            .with_request_bound(HANG);
         let (ended, end) = mpsc::channel();
         std::thread::spawn(move || {
             gate.pass();
@@ -2910,19 +2889,19 @@ mod cluster {
         let waits = || attempt::lock(&core.ledger).gate_waits;
         // A wait counted after an advance follows a bound check that read
         // the advanced clock only once the next wait is counted too.
-        wait_until(DEADLINE, "the gate waits twice", || waits() >= 2);
+        wait_until(HANG, "the gate waits twice", || waits() >= 2);
         assert!(end.try_recv().is_err(), "the pass ended on a frozen clock");
         let sample = {
             let ledger = attempt::lock(&core.ledger);
             clock.advance(bound - Duration::from_nanos(1));
             ledger.gate_waits
         };
-        wait_until(DEADLINE, "the gate checks the advanced clock", || {
+        wait_until(HANG, "the gate checks the advanced clock", || {
             waits() >= sample + 2
         });
         assert!(end.try_recv().is_err(), "the pass ended before its bound");
         clock.advance(Duration::from_nanos(1));
-        let ended = end.recv_timeout(DEADLINE).is_ok();
+        let ended = end.recv_timeout(HANG).is_ok();
         if !ended {
             std::mem::forget(cluster);
         }
@@ -2971,7 +2950,7 @@ mod cluster {
             .unwrap();
         let gate = Gate::new(Arc::clone(&core), producer, Duration::from_secs(3600))
             .with_step(STEP * 100)
-            .with_request_bound(spate_test::HANG);
+            .with_request_bound(HANG);
         gate.pass();
         let reason = core
             .lock()
@@ -3047,7 +3026,7 @@ mod cluster {
         cluster.request_errors(RDKafkaApiKey::ListOffsets, &errors);
         let gate = Gate::new(Arc::clone(&core), producer, Duration::from_secs(3600))
             .with_step(STEP * 100)
-            .with_request_bound(spate_test::HANG);
+            .with_request_bound(HANG);
         gate.pass();
         let st = core.lock();
         let reason = &st.signal.latched().expect("the feed stopped").reason;
@@ -3086,7 +3065,7 @@ mod cluster {
             .fetch_metadata(Some(ATTEMPTS), Duration::from_secs(10))
             .unwrap();
         cluster.partition_leader(ATTEMPTS, 1, None).unwrap();
-        wait_until(DEADLINE, "partition 1 reports no leader", || {
+        wait_until(HANG, "partition 1 reports no leader", || {
             producer
                 .client()
                 .fetch_watermarks(ATTEMPTS, 1, Duration::from_millis(500))
@@ -3107,7 +3086,7 @@ mod cluster {
         let gate = Gate::new(Arc::clone(&core), producer, Duration::from_secs(3600))
             .with_step(Duration::from_millis(500));
         // Each wait runs a pass, as the gate thread would.
-        wait_until(DEADLINE, "the unit on partition 0 is buffered", || {
+        wait_until(HANG, "the unit on partition 0 is buffered", || {
             gate.pass();
             core.lock().ready.len() == 1
         });
@@ -3140,7 +3119,7 @@ mod cluster {
         let offset = (0..)
             .find(|&o| super::attempt_partition(&core, &super::identity(&core, o)) == 0)
             .unwrap();
-        wait_until(DEADLINE, "partition 0 reports its watermarks", || {
+        wait_until(HANG, "partition 0 reports its watermarks", || {
             producer
                 .client()
                 .fetch_watermarks(ATTEMPTS, 0, Duration::from_millis(500))
@@ -3159,10 +3138,10 @@ mod cluster {
         let gate = Gate::new(Arc::clone(&core), producer, Duration::from_secs(3600))
             .with_step(Duration::from_secs(3600));
         assert!(
-            returns_within(Duration::from_secs(30), move || gate.pass()),
+            returns_within(HANG, move || gate.pass()),
             "a pass that read every watermark waited a step"
         );
-        wait_until(DEADLINE, "the unit is buffered", || {
+        wait_until(HANG, "the unit is buffered", || {
             core.lock().ready.len() == 1
         });
     }
@@ -3220,13 +3199,13 @@ mod cluster {
         let bound = Duration::from_secs(3600);
         let gate = Gate::new(Arc::clone(&core), Producer::clone(&producer), bound)
             .with_step(STEP)
-            .with_request_bound(spate_test::HANG);
+            .with_request_bound(HANG);
         let capture = spate_test::LogCapture::new();
         let dispatch = warnings_to(&capture);
         // librdkafka serves the refusal as the read's error when its reply
         // is served alone; only a pass that waits for the follower took the
         // equal watermarks the test is about.
-        wait_until(DEADLINE, "a pass waits for the follower", || {
+        wait_until(HANG, "a pass waits for the follower", || {
             cluster.request_errors(
                 RDKafkaApiKey::ListOffsets,
                 &[
@@ -3283,7 +3262,7 @@ mod cluster {
         cluster.request_errors(RDKafkaApiKey::ListOffsets, &errors);
         let gate = Gate::new(Arc::clone(&core), producer, Duration::from_secs(3600))
             .with_step(STEP * 100)
-            .with_request_bound(spate_test::HANG);
+            .with_request_bound(HANG);
         gate.pass();
         let st = core.lock();
         let reason = &st.signal.latched().expect("the feed stopped").reason;
@@ -3371,18 +3350,14 @@ mod cluster {
                 });
             }
         }
-        wait_until(
-            DEADLINE,
-            "partitions 0 and 2 report their watermarks",
-            || {
-                [0, 2].into_iter().all(|partition| {
-                    producer
-                        .client()
-                        .fetch_watermarks(ATTEMPTS, partition, Duration::from_millis(500))
-                        .is_ok()
-                })
-            },
-        );
+        wait_until(HANG, "partitions 0 and 2 report their watermarks", || {
+            [0, 2].into_iter().all(|partition| {
+                producer
+                    .client()
+                    .fetch_watermarks(ATTEMPTS, partition, Duration::from_millis(500))
+                    .is_ok()
+            })
+        });
         cluster
             .broker_round_trip_time(2, Duration::from_secs(5))
             .unwrap();
@@ -3405,7 +3380,7 @@ mod cluster {
         let mut got = waiting.clone();
         got.sort_unstable();
         assert_eq!(got, expected, "the units at the gate");
-        wait_until(DEADLINE, "the unit on partition 0 is buffered", || {
+        wait_until(HANG, "the unit on partition 0 is buffered", || {
             core.lock().ready.len() == 1
         });
         assert_eq!(core.lock().ready[0].unit.id, format!("u{}", offsets[0]));
@@ -3464,7 +3439,7 @@ mod cluster {
                 identity: super::identity(&core, 0),
             });
         }
-        wait_until(DEADLINE, "partition 0 reports its watermarks", || {
+        wait_until(HANG, "partition 0 reports its watermarks", || {
             producer
                 .client()
                 .fetch_watermarks(ATTEMPTS, 0, Duration::from_millis(500))
@@ -3477,7 +3452,7 @@ mod cluster {
         let bound = Duration::from_secs(3600);
         let gate = Gate::new(Arc::clone(&core), producer, bound)
             .with_step(Duration::from_secs(1))
-            .with_request_bound(spate_test::HANG);
+            .with_request_bound(HANG);
         // Advanced while the round trip holds the watermark read.
         pass_advancing(&gate, &warnings_to(&capture), &clock, bound, || {
             core.gate_reads.load(Ordering::SeqCst) == 1
@@ -3512,7 +3487,7 @@ mod cluster {
             .find(|&o| super::attempt_partition(&core, &super::identity(&core, o)) == 1)
             .unwrap();
         cluster.partition_leader(ATTEMPTS, 1, None).unwrap();
-        wait_until(DEADLINE, "partition 1 reports no leader", || {
+        wait_until(HANG, "partition 1 reports no leader", || {
             producer
                 .client()
                 .fetch_watermarks(ATTEMPTS, 1, Duration::from_millis(500))
@@ -3535,7 +3510,7 @@ mod cluster {
             gate.pass();
             let _ = tx.send(());
         });
-        wait_until(DEADLINE, "the unit is back at the gate", || {
+        wait_until(HANG, "the unit is back at the gate", || {
             let st = core.lock();
             st.gating.len() == 1 && st.admitting == 0
         });
@@ -3546,7 +3521,7 @@ mod cluster {
         );
         super::super::stop(&core);
         assert!(
-            rx.recv_timeout(Duration::from_secs(10)).is_ok(),
+            rx.recv_timeout(HANG).is_ok(),
             "the stop did not end the wait"
         );
     }
@@ -3605,7 +3580,7 @@ mod cluster {
             });
             core.gate_wake.notify_all();
         }
-        wait_until(DEADLINE, "the gate takes the unit", || {
+        wait_until(HANG, "the gate takes the unit", || {
             core.lock().admitting == 1
         });
         let follower = Follower::new(&config, Arc::clone(&core))
@@ -3620,14 +3595,9 @@ mod cluster {
             follower: Some(follower),
             depth: None,
         };
-        wait_until(DEADLINE, "the unit is buffered", || buffered(&feed) == 1);
+        wait_until(HANG, "the unit is buffered", || buffered(&feed) == 1);
         assert_eq!(core.lock().ready[0].deliveries, 1);
-        assert_returns(
-            cluster,
-            Duration::from_secs(10),
-            "dropping the feed",
-            move || drop(feed),
-        );
+        assert_returns(cluster, HANG, "dropping the feed", move || drop(feed));
     }
 
     /// Pins that dropping a feed returns while its gate waits for the
@@ -3688,7 +3658,7 @@ mod cluster {
         }
         // Counted under the ledger's lock that the wait releases, so the
         // gate is parked on the ledger's condvar once this reads 1.
-        wait_until(DEADLINE, "the gate waits on the ledger", || {
+        wait_until(HANG, "the gate waits on the ledger", || {
             attempt::lock(&core.ledger).gate_waits == 1
         });
         let feed = KafkaFeed {
@@ -3699,12 +3669,7 @@ mod cluster {
             follower: None,
             depth: None,
         };
-        assert_returns(
-            cluster,
-            Duration::from_secs(10),
-            "dropping the feed",
-            move || drop(feed),
-        );
+        assert_returns(cluster, HANG, "dropping the feed", move || drop(feed));
     }
 
     /// Pins that dropping a feed returns once its follower thread has
@@ -3732,12 +3697,7 @@ mod cluster {
             follower: Some(follower),
             depth: None,
         };
-        assert_returns(
-            cluster,
-            Duration::from_secs(10),
-            "dropping the feed",
-            move || drop(feed),
-        );
+        assert_returns(cluster, HANG, "dropping the feed", move || drop(feed));
         assert_eq!(
             Arc::strong_count(&core.ledger),
             1,
@@ -3777,7 +3737,7 @@ mod cluster {
         cluster.broker_down(1).unwrap();
         let _queued = feed.publish(Unit::new("fills-the-queue", Vec::new()));
         let acknowledging = Arc::clone(&feed);
-        let returned = returns_within(Duration::from_secs(10), move || {
+        let returned = returns_within(HANG, move || {
             let _ = acknowledging.acknowledge(delivery.receipt);
         });
         if !returned {
@@ -4090,7 +4050,7 @@ mod cluster {
         consumer::run(d);
         assert_eq!(closing.try_outcome(), Some(Ok(())));
         assert_eq!(committed(&brokers, &group), Some(1));
-        assert!(returns_within(Duration::from_secs(10), move || drop(feed)));
+        assert!(returns_within(HANG, move || drop(feed)));
     }
 
     /// Pins that a handed-back unit holds its partition's commit point: the
@@ -4264,7 +4224,7 @@ mod cluster {
         let (config, core, producer, mut d) = parts_for(&brokers, &group);
         let feed = feed_over(&core, &producer, None);
         let admission = admission(&config, &core, &producer, STEP);
-        wait_until(DEADLINE, "the thread pauses", || {
+        wait_until(HANG, "the thread pauses", || {
             d.poll();
             d.serve_intents();
             d.backpressure();
@@ -4272,20 +4232,16 @@ mod cluster {
         });
         let end = i64::try_from(units).unwrap() + 1;
         let mut finished = 0;
-        wait_until(
-            DEADLINE,
-            "every unit finishes and the marker is served",
-            || {
-                for delivery in feed.receive(READY_CAPACITY).unwrap() {
-                    feed.acknowledge(delivery.receipt).unwrap();
-                    finished += 1;
-                }
-                d.poll();
-                d.serve_intents();
-                d.backpressure();
-                finished == units && position(&d) == Offset::Offset(end)
-            },
-        );
+        wait_until(HANG, "every unit finishes and the marker is served", || {
+            for delivery in feed.receive(READY_CAPACITY).unwrap() {
+                feed.acknowledge(delivery.receipt).unwrap();
+                finished += 1;
+            }
+            d.poll();
+            d.serve_intents();
+            d.backpressure();
+            finished == units && position(&d) == Offset::Offset(end)
+        });
         admission.stop();
         let mut closing = feed.close(Duration::from_secs(10)).expect("a close");
         consumer::run(d);
@@ -4452,13 +4408,13 @@ mod cluster {
         let thread = spawn_thread("spate-kafka-feed", move || consumer::run(d)).unwrap();
         let mut feed = feed_over(&core, &producer, Some(thread));
         let mut closing = feed.close(Duration::from_secs(10)).expect("a close");
-        wait_until(DEADLINE, "the close settles", || {
+        wait_until(HANG, "the close settles", || {
             closing.try_outcome().is_some()
         });
         assert_eq!(closing.try_outcome(), Some(Ok(())));
         let thread = feed.thread.take().expect("the consumer thread");
         assert!(
-            returns_within(DEADLINE, move || drop(thread)),
+            returns_within(HANG, move || drop(thread)),
             "the consumer thread did not end"
         );
     }
@@ -4541,13 +4497,11 @@ mod cluster {
             .unwrap();
         let gate = Gate::new(Arc::clone(&core), producer.clone(), config.delivery_timeout)
             .with_step(Duration::from_secs(5))
-            .with_request_bound(spate_test::HANG);
+            .with_request_bound(HANG);
         let pass = std::thread::spawn(move || gate.pass());
-        wait_until(
-            DEADLINE,
-            "the pass takes the unit and begins a read",
-            || core.gate_reads.load(Ordering::SeqCst) > 0,
-        );
+        wait_until(HANG, "the pass takes the unit and begins a read", || {
+            core.gate_reads.load(Ordering::SeqCst) > 0
+        });
         feed.stop_receiving();
         pass.join().unwrap();
         cluster.broker_round_trip_time(1, Duration::ZERO).unwrap();
@@ -4586,7 +4540,7 @@ mod cluster {
         // gate and the follower first would set the stop flag, which
         // queues no tombstone.
         feed.fail(delivery.receipt, "a test failure").unwrap();
-        wait_until(DEADLINE, "the dead-letter write is confirmed", || {
+        wait_until(HANG, "the dead-letter write is confirmed", || {
             !core.lock().resends.is_empty()
         });
         admission.stop();
@@ -4615,7 +4569,7 @@ mod cluster {
         feed.acknowledge(deliveries[0].receipt).unwrap();
         let mut closing = feed.close(Duration::from_secs(10)).expect("a close");
         let thread = std::thread::spawn(move || consumer::run(d));
-        wait_until(DEADLINE, "the consumer thread takes the close", || {
+        wait_until(HANG, "the consumer thread takes the close", || {
             core.lock().close.is_none()
         });
         core.latch("a test latch");
@@ -4700,7 +4654,7 @@ mod cluster {
         mut confirmation: spate_core::feed::Confirmation,
     ) -> Result<(), spate_core::feed::FeedError> {
         let mut got = None;
-        wait_until(DEADLINE, "the publish settles", || {
+        wait_until(HANG, "the publish settles", || {
             got = confirmation.try_outcome();
             got.is_some()
         });
@@ -4771,7 +4725,7 @@ mod cluster {
             "settled before the drop"
         );
         assert!(
-            returns_within(DEADLINE, move || drop(publisher)),
+            returns_within(HANG, move || drop(publisher)),
             "the drop did not return"
         );
         let err = confirmation.try_outcome().expect("settled").unwrap_err();
@@ -4791,9 +4745,7 @@ mod cluster {
         let publisher = connect_publisher(&cluster.bootstrap_servers(), "", &io);
         let first = settled(publisher.publish(Unit::new("a", b"body".to_vec())));
         assert!(first.is_err(), "{first:?}");
-        wait_until(DEADLINE, "the publisher latches", || {
-            publisher.core().latched()
-        });
+        wait_until(HANG, "the publisher latches", || publisher.core().latched());
         let err = settled(publisher.publish(Unit::new("b", b"body".to_vec()))).unwrap_err();
         assert_eq!(err.kind, FeedErrorKind::Fatal, "{}", err.reason);
         assert!(
@@ -4806,9 +4758,7 @@ mod cluster {
     /// The error a publish gets once `publisher` latched on its producer's
     /// fatal error.
     fn latched_reason(publisher: &KafkaFeedPublisher) -> spate_core::feed::FeedError {
-        wait_until(DEADLINE, "the publisher latches", || {
-            publisher.core().latched()
-        });
+        wait_until(HANG, "the publisher latches", || publisher.core().latched());
         let err = settled(publisher.publish(Unit::new("later", b"body".to_vec()))).unwrap_err();
         assert_eq!(err.kind, FeedErrorKind::Fatal, "{}", err.reason);
         err
@@ -4914,7 +4864,7 @@ mod docker {
     use rdkafka::{Offset, TopicPartitionList};
     use spate_core::clock::SyncClock;
     use spate_core::feed::Unit;
-    use spate_test::wait_until;
+    use spate_test::{HANG, wait_until};
     use std::num::NonZeroU32;
     use std::sync::Arc;
     use std::time::Duration;
@@ -5096,16 +5046,12 @@ mod docker {
             .set("bootstrap.servers", brokers)
             .build()
             .unwrap();
-        wait_until(
-            Duration::from_secs(10),
-            "the follower reaches the high watermark",
-            || {
-                let (lwm, hwm) = reader
-                    .fetch_watermarks(topic, 0, Duration::from_secs(5))
-                    .unwrap();
-                attempt::lock(&core.ledger).caught_up(0, lwm, hwm)
-            },
-        );
+        wait_until(HANG, "the follower reaches the high watermark", || {
+            let (lwm, hwm) = reader
+                .fetch_watermarks(topic, 0, Duration::from_secs(5))
+                .unwrap();
+            attempt::lock(&core.ledger).caught_up(0, lwm, hwm)
+        });
         gate_admits(&config, &core);
         crate::feed::stop(&core);
         thread.join().unwrap();
@@ -5160,18 +5106,14 @@ mod docker {
         {
             deleted.error().unwrap();
         }
-        wait_until(
-            Duration::from_secs(30),
-            "the partitions read as empty",
-            || {
-                [(0, (0, 0)), (1, (3, 3))].into_iter().all(|(p, marks)| {
-                    producer
-                        .client()
-                        .fetch_watermarks("units-attempts", p, Duration::from_secs(5))
-                        .is_ok_and(|read| read == marks)
-                })
-            },
-        );
+        wait_until(HANG, "the partitions read as empty", || {
+            [(0, (0, 0)), (1, (3, 3))].into_iter().all(|(p, marks)| {
+                producer
+                    .client()
+                    .fetch_watermarks("units-attempts", p, Duration::from_secs(5))
+                    .is_ok_and(|read| read == marks)
+            })
+        });
         let config = KafkaFeedConfig::from_section(&section(&brokers, "emptied")).unwrap();
         let core = Arc::new(Core::new(
             &config,

@@ -585,7 +585,7 @@ mod tests {
     use crate::feed::config::KafkaFeedConfig;
     use RDKafkaErrorCode as C;
     use spate_core::clock::TestClock;
-    use spate_test::wait_until;
+    use spate_test::{HANG, wait_until};
     use std::sync::mpsc;
 
     const WORK: &str = "units";
@@ -1015,13 +1015,10 @@ mod tests {
     /// The bound the tests advance a frozen clock past.
     const SHORT: Duration = Duration::from_millis(20);
 
-    /// How long a test waits for the bound to fire.
-    const DEADLINE: Duration = Duration::from_secs(10);
-
     /// The checks under [`SHORT`] on a frozen clock, as `connect` runs them:
     /// through `Handle::block_on` on `io`, with the read of `hangs` never
     /// answering. The clock moves past the bound once the checks are on
-    /// `reading`. `None` when nothing came back within [`DEADLINE`].
+    /// `reading`. `None` when nothing came back within [`HANG`].
     fn bounded_on(
         io: tokio::runtime::Handle,
         hangs: (&'static str, bool),
@@ -1031,7 +1028,7 @@ mod tests {
         let run = bounded_with(io, hangs, SHORT, &clock, || None);
         run.wait_for(reading);
         clock.advance(SHORT);
-        run.done.recv_timeout(DEADLINE).ok()
+        run.done.recv_timeout(HANG).ok()
     }
 
     /// Checks running under [`bounded`] on a thread of their own.
@@ -1044,7 +1041,7 @@ mod tests {
     impl Bounded {
         /// Wait until the checks are on `reading`.
         fn wait_for(&self, reading: &str) {
-            wait_until(DEADLINE, reading, || {
+            wait_until(HANG, reading, || {
                 *self.step.lock().unwrap_or_else(PoisonError::into_inner) == reading
             });
         }
@@ -1258,7 +1255,7 @@ mod tests {
         let run = bounded_with(io.handle().clone(), (RETRY, true), limit, &clock, || {
             Some(ALERT_40.to_owned())
         });
-        match run.done.recv_timeout(DEADLINE).ok() {
+        match run.done.recv_timeout(HANG).ok() {
             Some(Err(KafkaFeedError::Refused(message))) => {
                 assert!(
                     message.starts_with("reading the metadata of the retry topic `units-retry`: "),
@@ -1297,12 +1294,12 @@ mod tests {
             clock.advance(limit - Duration::from_nanos(1));
             *asked
         };
-        wait_until(DEADLINE, "the bound checks the advanced clock", || {
+        wait_until(HANG, "the bound checks the advanced clock", || {
             *asked.lock().unwrap() >= sample + 2
         });
         assert!(run.done.try_recv().is_err(), "fired before its limit");
         clock.advance(Duration::from_nanos(1));
-        match run.done.recv_timeout(DEADLINE) {
+        match run.done.recv_timeout(HANG) {
             Ok(Err(KafkaFeedError::Unavailable(message))) => assert!(
                 message.starts_with("the startup checks took longer than 600s"),
                 "{message}"
@@ -1346,7 +1343,7 @@ mod tests {
         // The bound reads its deadline once the clients are built, which no
         // signal marks, so the clock moves on until the bound fires.
         let mut fired = None;
-        wait_until(DEADLINE, "the connect bound fires", || {
+        wait_until(HANG, "the connect bound fires", || {
             clock.advance(limit);
             fired = done.try_recv().ok();
             fired.is_some()
@@ -1362,7 +1359,7 @@ mod tests {
 
     /// `KafkaFeed::connect` against `brokers` with the passthrough
     /// `rdkafka`, under a bound of `limit`, on a thread of its own. `None`
-    /// when nothing came back within [`DEADLINE`].
+    /// when nothing came back within [`HANG`].
     ///
     /// On the system clock: the tests that use it pin what librdkafka does
     /// in real time inside the bound.
@@ -1413,8 +1410,8 @@ mod tests {
             let io = multi_thread();
             let _ = tx.send(connect(&section, io.handle(), limit));
         });
-        rx.recv_timeout(DEADLINE)
-            .unwrap_or_else(|_| panic!("connect did not return within {DEADLINE:?}"))
+        rx.recv_timeout(HANG)
+            .unwrap_or_else(|_| panic!("connect did not return within {:?}", HANG))
     }
 
     /// Pins that a broker that refuses the connection is unavailable at the
@@ -1435,7 +1432,7 @@ mod tests {
 
     /// [`run_checks`] through clients built with `properties`, under
     /// `limit` on a frozen clock, on a thread of its own. Asserts that the
-    /// metadata client is gone once the result is back within [`DEADLINE`].
+    /// metadata client is gone once the result is back within [`HANG`].
     fn checks_closing_their_clients(
         properties: &[(&str, &str)],
         limit: Duration,
@@ -1457,8 +1454,8 @@ mod tests {
             ));
         });
         let got = rx
-            .recv_timeout(DEADLINE)
-            .unwrap_or_else(|_| panic!("the checks did not return within {DEADLINE:?}"));
+            .recv_timeout(HANG)
+            .unwrap_or_else(|_| panic!("the checks did not return within {:?}", HANG));
         assert!(
             reader.upgrade().is_none(),
             "the metadata client outlived the checks"
@@ -1550,9 +1547,12 @@ mod tests {
             let io = multi_thread();
             let _ = tx.send(io.block_on(brokers.metadata(WORK)).map_err(|e| e.code));
         });
-        match rx.recv_timeout(DEADLINE) {
+        match rx.recv_timeout(HANG) {
             Ok(Err(C::BrokerTransportFailure)) => {}
-            other => panic!("expected a transport failure within {DEADLINE:?}, got {other:?}"),
+            other => panic!(
+                "expected a transport failure within {:?}, got {other:?}",
+                HANG
+            ),
         }
     }
 
@@ -1628,9 +1628,12 @@ mod tests {
             ));
             let _ = tx.send((got, watched.upgrade().is_none()));
         });
-        match rx.recv_timeout(DEADLINE) {
+        match rx.recv_timeout(HANG) {
             Ok((Ok(()), true)) => {}
-            other => panic!("expected the checks' result within {DEADLINE:?}, got {other:?}"),
+            other => panic!(
+                "expected the checks' result within {:?}, got {other:?}",
+                HANG
+            ),
         }
     }
 

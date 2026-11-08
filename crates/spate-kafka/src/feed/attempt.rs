@@ -771,12 +771,11 @@ mod tests {
         use rdkafka::producer::{BaseProducer, BaseRecord, Producer};
         use spate_core::clock::SyncClock;
         use spate_core::config::FeedSection;
-        use spate_test::wait_until;
+        use spate_test::{HANG, wait_until};
         use std::sync::atomic::Ordering;
         use std::sync::mpsc;
         use std::time::Duration;
 
-        const DEADLINE: Duration = Duration::from_secs(30);
         const ATTEMPTS: &str = "units-attempts";
         const TWO: NonZeroU32 = NonZeroU32::new(2).expect("non-zero");
 
@@ -830,7 +829,7 @@ mod tests {
 
             /// Wait until `ledger` holds every record of both partitions.
             fn caught_up(&self, ledger: &SharedLedger) {
-                wait_until(DEADLINE, "the follower reaches the high watermarks", || {
+                wait_until(HANG, "the follower reaches the high watermarks", || {
                     (0..2).all(|p| {
                         let (lwm, hwm) = self
                             .producer
@@ -913,7 +912,7 @@ mod tests {
                 &[rdkafka::types::RDKafkaRespErr::RD_KAFKA_RESP_ERR_TOPIC_AUTHORIZATION_FAILED; 4],
             );
             let (running, _) = Running::start(&rig);
-            wait_until(DEADLINE, "the feed latches", || running.core.latched());
+            wait_until(HANG, "the feed latches", || running.core.latched());
             let reason = running
                 .core
                 .lock()
@@ -935,7 +934,7 @@ mod tests {
             rig.write(a, Some(br#"{"v":9}"#));
 
             let (running, _) = Running::start(&rig);
-            wait_until(DEADLINE, "the feed latches", || running.core.latched());
+            wait_until(HANG, "the feed latches", || running.core.latched());
             let reason = running
                 .core
                 .lock()
@@ -965,7 +964,7 @@ mod tests {
                 let _ = joined.send(());
             });
             ended
-                .recv_timeout(DEADLINE)
+                .recv_timeout(HANG)
                 .expect("the follower exits once the feed latches");
         }
     }

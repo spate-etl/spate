@@ -483,6 +483,7 @@ mod tests {
     use crate::feed::tests::{gated, tp};
     use rdkafka::error::RDKafkaErrorCode as C;
     use spate_core::clock::SyncClock;
+    use spate_test::HANG;
     use std::num::NonZeroU32;
     use std::sync::mpsc;
 
@@ -524,7 +525,7 @@ mod tests {
                 let _ = tx.send(());
             });
             assert!(
-                rx.recv_timeout(Duration::from_secs(10)).is_ok(),
+                rx.recv_timeout(HANG).is_ok(),
                 "the gate of a {how} feed waited a step"
             );
         }

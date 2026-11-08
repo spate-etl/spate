@@ -7,8 +7,7 @@ use mock::MockKafka;
 use spate_core::config::FeedSection;
 use spate_core::feed::{Feed as _, Unit};
 use spate_kafka::feed::KafkaFeedPublisher;
-use spate_test::{LogCapture, wait_until};
-use std::time::Duration;
+use spate_test::{HANG, LogCapture, wait_until};
 
 /// The feed producer's debug lines reach the tracing subscriber, from the
 /// producer's own poll thread.
@@ -48,7 +47,7 @@ fn feed_producer_debug_logs_reach_tracing() {
     io.block_on(publisher.publish(Unit::new("a", b"body".to_vec())))
         .expect("publish");
 
-    wait_until(Duration::from_secs(10), "a produce debug line", || {
+    wait_until(HANG, "a produce debug line", || {
         capture
             .lines()
             .iter()

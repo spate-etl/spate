@@ -20,7 +20,7 @@ use spate_core::pipeline::{Pipeline, RuntimeOptions};
 use spate_core::sink::KeyHashRouter;
 use spate_kafka::sink::KafkaSinkConfig;
 use spate_kafka::{KafkaSource, KafkaSourceConfig};
-use spate_test::{PipelineRun, wait_until};
+use spate_test::{HANG, PipelineRun, wait_until};
 use std::collections::BTreeMap;
 use std::time::Duration;
 use support::{broker, consume};
@@ -71,17 +71,10 @@ fn produce(brokers: &str, topic: &str, payloads: &[Vec<u8>]) {
 /// The first `expect` payloads on `topic`, leaving out the warmup marker.
 fn consume_payloads(brokers: &str, topic: &str, expect: usize) -> Vec<Vec<u8>> {
     let group = format!("verify-{topic}");
-    consume(
-        brokers,
-        topic,
-        &group,
-        expect,
-        Duration::from_secs(60),
-        |message| {
-            let payload = message.payload().unwrap_or_default();
-            (payload != b"warmup").then(|| payload.to_vec())
-        },
-    )
+    consume(brokers, topic, &group, expect, |message| {
+        let payload = message.payload().unwrap_or_default();
+        (payload != b"warmup").then(|| payload.to_vec())
+    })
 }
 
 #[test]
@@ -156,15 +149,13 @@ fn kafka_to_kafka_split_round_trip() {
     // The source group commits the full input once both destinations have
     // durably written (worst-status ack merge across the split).
     let probe = support::probe(&brokers, GROUP);
-    wait_until(
-        Duration::from_secs(30),
-        "source group committed all",
-        || support::committed(&probe, IN_TOPIC, 1) == [rdkafka::Offset::Offset(TOTAL as i64)],
-    );
+    wait_until(HANG, "source group committed all", || {
+        support::committed(&probe, IN_TOPIC, 1) == [rdkafka::Offset::Offset(TOTAL as i64)]
+    });
 
     shutdown.trigger();
     let report = run
-        .wait_exit(Duration::from_secs(60))
+        .wait_exit(HANG)
         .expect("pipeline exits within the drain deadline")
         .expect("run");
     assert_eq!(report.exit_code(), 0, "clean drain: {report:?}");

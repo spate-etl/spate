@@ -23,7 +23,7 @@ mod another_topic {
     use spate_core::pipeline::{Pipeline, RuntimeOptions};
     use spate_core::sink::KeyHashRouter;
     use spate_kafka::{KafkaSource, KafkaSourceConfig};
-    use spate_test::{BytesPassthrough, PipelineRun, TestEncoder, capture_sink, unique_name};
+    use spate_test::{BytesPassthrough, HANG, PipelineRun, TestEncoder, capture_sink, unique_name};
     use std::collections::BTreeMap;
     use std::io::{Read as _, Write as _};
     use std::net::TcpStream;
@@ -264,9 +264,7 @@ mod another_topic {
             seen = committed(&probe);
         }
         shutdown.trigger();
-        let exit = run
-            .wait_exit(Duration::from_secs(60))
-            .expect("the run stops");
+        let exit = run.wait_exit(HANG).expect("the run stops");
         leader
             .join()
             .expect("the raw leader completed the rebalance");
@@ -287,8 +285,7 @@ mod retried_reassign {
     use crate::support::MockKafka;
     use rdkafka::Offset;
     use rdkafka::types::{RDKafkaApiKey, RDKafkaRespErr};
-    use spate_test::{unique_name, wait_until};
-    use std::time::{Duration, Instant};
+    use spate_test::{HANG, unique_name, wait_until};
     use support::latest::{Run, config};
     use support::{committed_by, produce_to};
 
@@ -325,7 +322,7 @@ mod retried_reassign {
 
         // The first consumer's start commit shows it was accepted alone. The next
         // lookup is the reassign's, once the second consumer's offer arrives.
-        wait_until(Duration::from_secs(30), "the first accept", || {
+        wait_until(HANG, "the first accept", || {
             committed_by(&brokers, &group, TOPIC, PARTITIONS)
                 .iter()
                 .any(|o| matches!(o, Offset::Offset(_)))
@@ -338,20 +335,18 @@ mod retried_reassign {
         // Each round is one record per partition: the first run's start moved past
         // nothing here, so any partition with a reader writes its round.
         let mut next = 0;
-        let mut unread: Vec<i32> = (0..PARTITIONS).collect();
-        let deadline = Instant::now() + Duration::from_secs(45);
-        while !unread.is_empty() && Instant::now() < deadline {
-            for p in 0..PARTITIONS {
-                produce_to(&brokers, TOPIC, p, next..next + 1);
+        let mut tick = 0;
+        wait_until(HANG, "a write from every partition", || {
+            if tick % 200 == 0 {
+                for p in 0..PARTITIONS {
+                    produce_to(&brokers, TOPIC, p, next..next + 1);
+                }
+                next += 1;
             }
-            next += 1;
-            std::thread::sleep(Duration::from_secs(1));
-            unread = (0..PARTITIONS)
-                .filter(|p| run.written(*p).is_empty())
-                .collect();
-        }
+            tick += 1;
+            (0..PARTITIONS).all(|p| !run.written(p).is_empty())
+        });
         run.stop();
-        assert!(unread.is_empty(), "partitions never read: {unread:?}");
     }
 }
 
@@ -360,8 +355,7 @@ mod retried_reassign {
 mod late_offers {
     use crate::support;
     use rdkafka::types::{RDKafkaApiKey, RDKafkaRespErr};
-    use spate_test::wait_until;
-    use std::time::Duration;
+    use spate_test::{HANG, wait_until};
     use support::latest::{self, Run};
     use support::{MockKafka, produce_to};
 
@@ -401,21 +395,17 @@ mod late_offers {
         let run = Run::start(cfg);
         let mut next = 1_000;
         let mut tick = 0;
-        wait_until(
-            Duration::from_secs(60),
-            "every partition to reach the sink",
-            || {
-                if tick % 20 == 0 {
-                    for p in 0..4 {
-                        produce_to(&brokers, TOPIC, p, next..next + 1);
-                    }
-                    next += 1;
+        wait_until(HANG, "every partition to reach the sink", || {
+            if tick % 20 == 0 {
+                for p in 0..4 {
+                    produce_to(&brokers, TOPIC, p, next..next + 1);
                 }
-                tick += 1;
-                let unread: Vec<i32> = (0..4).filter(|p| run.written(*p).is_empty()).collect();
-                unread.is_empty()
-            },
-        );
+                next += 1;
+            }
+            tick += 1;
+            let unread: Vec<i32> = (0..4).filter(|p| run.written(*p).is_empty()).collect();
+            unread.is_empty()
+        });
         run.stop();
     }
 
@@ -532,6 +522,7 @@ mod policy_spelling {
     use spate_core::checkpoint::Checkpointer;
     use spate_core::source::{Source, SourceCtx};
     use spate_kafka::{KafkaSource, KafkaSourceConfig};
+    use spate_test::HANG;
     use std::time::Duration;
 
     const TOPIC: &str = "orders";
@@ -554,7 +545,7 @@ mod policy_spelling {
         source
             .open(SourceCtx::new(checkpointer.handle()))
             .expect("librdkafka accepts the value");
-        let _lanes = support::await_assignment(&mut source, Duration::from_secs(30));
+        let _lanes = support::await_assignment(&mut source, HANG);
         assert_eq!(
             support::committed_by(&brokers, "spaced", TOPIC, 1),
             [Offset::Offset(3)]
@@ -571,7 +562,7 @@ mod named_failure {
     use spate_core::error::ErrorClass;
     use spate_core::source::{Source, SourceCtx};
     use spate_kafka::{KafkaSource, KafkaSourceConfig};
-    use spate_test::wait_until;
+    use spate_test::{HANG, wait_until};
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -605,7 +596,7 @@ mod named_failure {
             .with_writer(capture.clone())
             .finish();
         tracing::subscriber::with_default(subscriber, || {
-            wait_until(Duration::from_secs(60), "the failed start commit", || {
+            wait_until(HANG, "the failed start commit", || {
                 source.poll_events(Duration::from_millis(50)).expect("poll");
                 capture
                     .lines()
@@ -637,7 +628,7 @@ mod permanent_codes {
     use spate_core::error::ErrorClass;
     use spate_core::source::{Source, SourceCtx, SourceEvent};
     use spate_kafka::{KafkaSource, KafkaSourceConfig};
-    use spate_test::wait_until;
+    use spate_test::{HANG, wait_until};
     use std::time::Duration;
 
     /// A code `classify_start_error` classes as fatal ends the run on each request
@@ -654,19 +645,22 @@ mod permanent_codes {
             cluster.request_errors(api, &[code; 1000]);
             let mut cfg = KafkaSourceConfig::new(cluster.bootstrap_servers(), "orders", "denied");
             cfg.statistics_interval = Duration::ZERO;
+            // Out of real time's reach: the startup deadline's error names the
+            // failing request too, so only the classification may end the run.
+            cfg.startup_timeout = Duration::from_hours(1);
             let cp = Checkpointer::new();
             let mut source = KafkaSource::new(cfg);
             source.open(SourceCtx::new(cp.handle())).expect("open");
             let mut stopped = None;
-            wait_until(Duration::from_secs(20), "the run to stop", || match source
-                .poll_events(Duration::from_millis(50))
-            {
-                Err(e) if e.class() == ErrorClass::Fatal => {
-                    stopped = Some(e.reason().to_owned());
-                    true
+            wait_until(HANG, "the run to stop", || {
+                match source.poll_events(Duration::from_millis(50)) {
+                    Err(e) if e.class() == ErrorClass::Fatal => {
+                        stopped = Some(e.reason().to_owned());
+                        true
+                    }
+                    Ok(SourceEvent::LanesAssigned(_)) => panic!("lanes on {api:?}"),
+                    _ => false,
                 }
-                Ok(SourceEvent::LanesAssigned(_)) => panic!("lanes on {api:?}"),
-                _ => false,
             });
             let reason = stopped.expect("a reason");
             assert!(reason.contains(doing), "{api:?}: {reason}");
@@ -685,7 +679,7 @@ mod startup_deadline {
     use spate_core::error::ErrorClass;
     use spate_core::source::{Source, SourceCtx};
     use spate_kafka::{KafkaSource, KafkaSourceConfig};
-    use spate_test::wait_until;
+    use spate_test::{HANG, wait_until};
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -710,7 +704,7 @@ mod startup_deadline {
             .finish();
         tracing::subscriber::with_default(subscriber, || {
             source.open(SourceCtx::new(cp.handle())).expect("open");
-            wait_until(Duration::from_secs(30), "a failed lookup", || {
+            wait_until(HANG, "a failed lookup", || {
                 let _ = source.poll_events(Duration::from_millis(50));
                 capture
                     .lines()
@@ -809,6 +803,7 @@ mod silent_coordinator {
     use spate_core::error::ErrorClass;
     use spate_core::source::{Source, SourceCtx, SourceEvent};
     use spate_kafka::{KafkaSource, KafkaSourceConfig};
+    use spate_test::HANG;
     use spate_test_support::container_image;
     use std::io::{Read as _, Write as _};
     use std::net::{TcpListener, TcpStream};
@@ -824,8 +819,6 @@ mod silent_coordinator {
     const OFFSET_COMMIT: i16 = 8;
     const OFFSET_FETCH: i16 = 9;
     const TOPIC: &str = "silent";
-    /// Far past the startup deadline and every client timeout set below.
-    const PATIENCE: Duration = Duration::from_secs(45);
 
     /// Forwards every connection to `upstream` until `silent`, then holds every
     /// byte in both directions, on old and new connections, until released.
@@ -988,7 +981,7 @@ mod silent_coordinator {
         let started = Instant::now();
         let mut seen = Vec::new();
         while seen.last().map(String::as_str) != Some("dropped") {
-            match rx.recv_timeout(PATIENCE.saturating_sub(started.elapsed())) {
+            match rx.recv_timeout(HANG) {
                 Ok(line) => seen.push(line),
                 Err(_) => break,
             }
@@ -1034,12 +1027,12 @@ mod silent_coordinator {
         let cfg = short_timeouts(&brokers, "pipeline");
         proxy.armed.store(true, Ordering::SeqCst);
         let run = latest::Run::start(cfg);
-        let exit = run.wait_exit(PATIENCE);
+        let exit = run.wait_exit(HANG);
         let silent = proxy.silent.load(Ordering::SeqCst);
         proxy.release();
         assert!(
             exit.is_some(),
-            "silent={silent}: the run had not ended {PATIENCE:?} after its start, past a 15 s startup_timeout"
+            "silent={silent}: the run had not ended {HANG:?} after its start, past a 15 s startup_timeout"
         );
     }
 
@@ -1073,7 +1066,7 @@ mod silent_coordinator {
             drop(source);
             tx.send("dropped".to_string()).expect("send");
         });
-        spate_test::wait_until(Duration::from_secs(60), "the start commit", || {
+        spate_test::wait_until(HANG, "the start commit", || {
             proxy.silent.load(Ordering::SeqCst)
         });
         container.stop_with_timeout(Some(0)).expect("kill");
@@ -1081,7 +1074,7 @@ mod silent_coordinator {
         let started = Instant::now();
         let mut seen = Vec::new();
         while seen.last().map(String::as_str) != Some("dropped") {
-            match rx.recv_timeout(PATIENCE.saturating_sub(started.elapsed())) {
+            match rx.recv_timeout(HANG) {
                 Ok(line) => seen.push(line),
                 Err(_) => break,
             }
@@ -1103,18 +1096,21 @@ mod logical_committed_offset {
     use rdkafka::producer::{BaseProducer, BaseRecord, Producer};
     use rdkafka::{ClientConfig, Offset, TopicPartitionList};
     use spate_core::checkpoint::Checkpointer;
+    use spate_core::clock::TestClock;
     use spate_core::config::PipelineConfig;
+    use spate_core::error::ErrorClass;
     use spate_core::ops::chain_owned;
     use spate_core::pipeline::{ExitState, Pipeline, RuntimeOptions};
     use spate_core::sink::KeyHashRouter;
     use spate_core::source::{Source, SourceCtx};
     use spate_kafka::{KafkaSource, KafkaSourceConfig};
     use spate_test::{
-        BytesPassthrough, PipelineRun, TestEncoder, capture_sink, unique_name, wait_until,
+        BytesPassthrough, HANG, PipelineRun, TestEncoder, capture_sink, unique_name, wait_until,
     };
     use std::collections::BTreeMap;
     use std::io::{Read as _, Write as _};
     use std::net::TcpStream;
+    use std::sync::Arc;
     use std::time::{Duration, Instant};
 
     const TOPIC: &str = "orders";
@@ -1190,16 +1186,32 @@ mod logical_committed_offset {
         cfg.startup_timeout = Duration::from_secs(8);
         cfg.statistics_interval = Duration::ZERO;
         cfg.rdkafka = BTreeMap::from([("auto.offset.reset".to_string(), "latest".to_string())]);
+        let clock = TestClock::frozen();
         let checkpointer = Checkpointer::new();
-        let mut source = KafkaSource::new(cfg);
+        let mut source = KafkaSource::new(cfg).with_clock(Arc::clone(&clock) as _);
         source.open(SourceCtx::new(checkpointer.handle())).unwrap();
-        let mut error = String::new();
-        wait_until(Duration::from_secs(40), "the startup deadline", || {
-            if let Err(e) = source.poll_events(Duration::from_millis(50)) {
-                error = e.to_string();
-            }
-            error.contains("no partition assignment")
+        let capture = spate_test::LogCapture::new();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .with_writer(capture.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            wait_until(HANG, "the held start", || {
+                let _ = source.poll_events(Duration::from_millis(50));
+                capture
+                    .lines()
+                    .iter()
+                    .any(|l| l.contains("could not settle a start position"))
+            });
         });
+
+        clock.advance(Duration::from_secs(9));
+        let error = match source.poll_events(Duration::from_millis(50)) {
+            Err(e) if e.class() == ErrorClass::Fatal => e.to_string(),
+            other => panic!("expected the startup deadline, got {other:?}"),
+        };
+        assert!(error.contains("no partition assignment"), "{error}");
         assert!(
             error.contains("partition 0 holds Beginning, which names no position"),
             "{error}"
@@ -1284,9 +1296,7 @@ mod logical_committed_offset {
         // for a commit that came from reading.
         let wrote = !script.writes().is_empty();
         shutdown.trigger();
-        let exit = run
-            .wait_exit(Duration::from_secs(60))
-            .expect("the run stops");
+        let exit = run.wait_exit(HANG).expect("the run stops");
         assert!(
             seen == read || wrote,
             "the commit moved to {seen:?} with nothing written; run: {:?}",
@@ -1311,15 +1321,17 @@ mod refused_starts {
     use spate_core::error::ErrorClass;
     use spate_core::source::{Source, SourceCtx};
     use spate_kafka::{KafkaSource, KafkaSourceConfig};
+    use spate_test::{HANG, wait_until};
     use std::collections::BTreeMap;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     const TOPIC: &str = "orders";
     const REFUSED: RDKafkaRespErr = RDKafkaRespErr::RD_KAFKA_RESP_ERR_REBALANCE_IN_PROGRESS;
 
-    /// Whether `consumers` consumers on one partition reach a fatal error within
-    /// 45 s when every start commit and heartbeat is refused.
-    fn ends(consumers: usize) -> bool {
+    /// Polls `consumers` consumers on one partition, with every start commit
+    /// and heartbeat refused, until the source fails fatally. The startup and
+    /// assignment deadlines together end it within 16 s.
+    fn ends(consumers: usize) {
         let cluster = MockKafka::new();
         cluster.hold_first_rebalance();
         cluster.create_topic(TOPIC, 1, 1).expect("create topic");
@@ -1341,27 +1353,24 @@ mod refused_starts {
         source
             .open(SourceCtx::new(checkpointer.handle()))
             .expect("open");
-        let until = Instant::now() + Duration::from_secs(45);
-        while Instant::now() < until {
-            if let Err(e) = source.poll_events(Duration::from_millis(100))
-                && e.class() == ErrorClass::Fatal
-            {
-                return true;
-            }
-        }
-        false
+        wait_until(HANG, "a fatal error", || {
+            matches!(
+                source.poll_events(Duration::from_millis(100)),
+                Err(e) if e.class() == ErrorClass::Fatal
+            )
+        });
     }
 
     /// The control: one consumer ends at the deadline.
     #[test]
     fn one_consumer_ends_at_the_deadline() {
-        assert!(ends(1));
+        ends(1);
     }
 
     /// A consumer the group assigns nothing does not keep a run alive whose every
     /// offered partition was discarded.
     #[test]
     fn an_empty_peer_does_not_hold_off_the_deadline() {
-        assert!(ends(2));
+        ends(2);
     }
 }

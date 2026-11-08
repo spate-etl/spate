@@ -25,6 +25,7 @@ use spate_core::sink::{RowEncoder, SealedBatch, ShardWriter};
 use spate_core::source::{Source, SourceCtx, SourceEvent};
 use spate_kafka::sink::KafkaSinkConfig;
 use spate_kafka::{KafkaSource, KafkaSourceConfig};
+use spate_test::HANG;
 use spate_test_support::{TestCa, container_image, pem};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
@@ -208,7 +209,7 @@ fn connector_clients(brokers: &str, ca_location: &str) {
     let mut source = KafkaSource::new(source_cfg);
     source.open(SourceCtx::new(cp.handle())).expect("open");
     let mut lanes = None;
-    spate_test::wait_until(Duration::from_secs(60), "partition assignment", || {
+    spate_test::wait_until(HANG, "partition assignment", || {
         if let SourceEvent::LanesAssigned(assigned) = source
             .poll_events(Duration::from_millis(200))
             .expect("poll_events")
@@ -218,7 +219,7 @@ fn connector_clients(brokers: &str, ca_location: &str) {
         lanes.is_some()
     });
     let mut lanes = lanes.expect("assigned");
-    let rows = drain_lane(&mut source, &mut lanes[0], RECORDS, Duration::from_secs(60));
+    let rows = drain_lane(&mut source, &mut lanes[0], RECORDS, HANG);
     assert_eq!(rows.len(), RECORDS);
 }
 
@@ -439,7 +440,7 @@ fn create_topic(brokers: &str, ca_location: &str) {
         .set("ssl.ca.location", ca_location)
         .build()
         .expect("raw producer");
-    spate_test::wait_until(Duration::from_secs(60), "the topic exists", || {
+    spate_test::wait_until(HANG, "the topic exists", || {
         producer
             .client()
             .fetch_metadata(Some(TOPIC), Duration::from_secs(10))
@@ -467,23 +468,19 @@ fn verifies(cc: &ClientConfig) -> bool {
         .build_with(lines.clone())
         .expect("raw consumer");
     let mut verified = None;
-    spate_test::wait_until(
-        Duration::from_secs(60),
-        "a certificate verification outcome",
-        || {
-            let _ = consumer.poll(Duration::from_millis(100));
-            let lines = lines.0.lock().expect("lines");
-            let seen = |text| lines.iter().any(|l| l.contains(text));
-            verified = if seen("Broker SSL certificate verified") {
-                Some(true)
-            } else if seen("certificate verify failed") {
-                Some(false)
-            } else {
-                None
-            };
-            verified.is_some()
-        },
-    );
+    spate_test::wait_until(HANG, "a certificate verification outcome", || {
+        let _ = consumer.poll(Duration::from_millis(100));
+        let lines = lines.0.lock().expect("lines");
+        let seen = |text| lines.iter().any(|l| l.contains(text));
+        verified = if seen("Broker SSL certificate verified") {
+            Some(true)
+        } else if seen("certificate verify failed") {
+            Some(false)
+        } else {
+            None
+        };
+        verified.is_some()
+    });
     verified.expect("outcome")
 }
 

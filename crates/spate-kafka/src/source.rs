@@ -2096,6 +2096,7 @@ mod tests {
     use rdkafka::error::RDKafkaErrorCode;
     use spate_core::checkpoint::Checkpointer;
     use spate_core::clock::TestClock;
+    use spate_test::HANG;
 
     /// Put `source` on a frozen clock, and return the clock.
     fn freeze(source: &mut KafkaSource) -> Arc<TestClock> {
@@ -2413,6 +2414,7 @@ mod tests {
     mod consumers {
         use super::*;
         use spate_core::source::SourceLane;
+        use spate_test::HANG;
 
         /// `open` refuses a consumer count of zero on a source built without
         /// `from_component_config`.
@@ -3338,7 +3340,7 @@ mod tests {
 
             let (mut source, mut lanes) = assigned_on(&cluster, "error");
             let mut failed = None;
-            spate_test::wait_until(Duration::from_secs(30), "the lane's error", || {
+            spate_test::wait_until(HANG, "the lane's error", || {
                 source
                     .poll_events(Duration::from_millis(10))
                     .expect("poll_events");
@@ -3421,7 +3423,7 @@ mod tests {
                 .build()
                 .expect("producer");
             let (mut first, mut seen) = (None, Vec::new());
-            spate_test::wait_until(spate_test::HANG, "a record past the start", || {
+            spate_test::wait_until(HANG, "a record past the start", || {
                 producer
                     .send(
                         rdkafka::producer::BaseRecord::<(), _>::to("t")
@@ -3480,7 +3482,7 @@ mod tests {
             // Offset 0 alone, so 1 and 2 stay queued and the fetch position stays
             // at 3 while the log start moves.
             let mut seen = Vec::new();
-            spate_test::wait_until(spate_test::HANG, "offset 0", || {
+            spate_test::wait_until(HANG, "offset 0", || {
                 source
                     .poll_events(Duration::from_millis(10))
                     .expect("poll_events");
@@ -3520,7 +3522,7 @@ mod tests {
 
         /// Serve `source` and poll `lane` until the lane issues a batch.
         fn read_the_record(source: &mut KafkaSource, lane: &mut KafkaLane) {
-            spate_test::wait_until(Duration::from_secs(30), "the record", || {
+            spate_test::wait_until(HANG, "the record", || {
                 source
                     .poll_events(Duration::from_millis(10))
                     .expect("poll_events");
@@ -3610,7 +3612,7 @@ mod tests {
                 .add_partition_offset("unsplit", 0, Offset::Beginning)
                 .expect("list entry");
             source.members[0].consumer.assign(&unsplit).expect("assign");
-            spate_test::wait_until(Duration::from_secs(30), "the rewind", || {
+            spate_test::wait_until(HANG, "the rewind", || {
                 let _ = source.poll_events(Duration::from_millis(100));
                 source.main_queue_rewinds > 0
             });
@@ -4009,7 +4011,7 @@ mod tests {
         let mut source = KafkaSource::new(cfg);
         let cp = Checkpointer::new();
         source.open(SourceCtx::new(cp.handle())).expect("open");
-        spate_test::wait_until(Duration::from_secs(60), "an assignment held", || {
+        spate_test::wait_until(HANG, "an assignment held", || {
             let _ = source.poll_events(Duration::from_millis(50));
             source
                 .members
@@ -4018,7 +4020,7 @@ mod tests {
         });
         crate::testutil::assert_returns(
             cluster,
-            Duration::from_secs(30),
+            HANG,
             "dropping the source with an assignment held",
             move || drop(source),
         );
@@ -4214,12 +4216,10 @@ mod tests {
         use crate::testutil::mock::MockKafka;
         use crate::testutil::{ASSIGN_STOP, returns_within, stop_at};
         use rdkafka::types::{RDKafkaApiKey, RDKafkaRespErr};
-        use spate_test::{capture_logs, wait_until};
+        use spate_test::{HANG, capture_logs, wait_until};
         use std::sync::mpsc;
         use tracing::Level;
 
-        const DEADLINE: Duration = Duration::from_secs(60);
-        const CLOSE: Duration = Duration::from_secs(30);
         const REVOKE_STOP: &str = "delegating revoke";
         const LOST_STOP: &str = r#"fac="LOST""#;
         /// The member starts rebalancing. Its `delegating revoke` line and the
@@ -4269,7 +4269,7 @@ mod tests {
         /// `poll_events` until an assignment is live, and return its lanes.
         pub(super) fn live_lanes(source: &mut KafkaSource) -> Vec<KafkaLane> {
             let mut lanes = Vec::new();
-            wait_until(DEADLINE, "a live assignment", || {
+            wait_until(HANG, "a live assignment", || {
                 match source.poll_events(Duration::from_millis(50)) {
                     Ok(SourceEvent::LanesAssigned(new)) => {
                         lanes = new;
@@ -4336,7 +4336,7 @@ mod tests {
             // The first accept can go to one consumer alone, so wait for the group
             // to give each consumer a lane.
             let mut lanes = Vec::new();
-            wait_until(DEADLINE, "a lane on each consumer", || {
+            wait_until(HANG, "a lane on each consumer", || {
                 if let Ok(SourceEvent::LanesAssigned(new)) =
                     source.poll_events(Duration::from_millis(50))
                 {
@@ -4354,7 +4354,7 @@ mod tests {
             // An offer for one consumer while lanes are live: the source drains
             // every lane, and the other consumer's come back from its revoking set.
             push_intent_to(&source, held, Intent::Assign(tpl_of(&[partition])));
-            wait_until(DEADLINE, "the drain", || {
+            wait_until(HANG, "the drain", || {
                 matches!(
                     source.poll_events(Duration::from_millis(10)),
                     Ok(SourceEvent::LanesRevoked { .. })
@@ -4374,7 +4374,7 @@ mod tests {
             assert!(matches!(source.members[1 - held].phase, Phase::Assigned));
             clock.advance(START_RETRY_PACE);
             let mut assigned = None;
-            wait_until(DEADLINE, "the next lane set", || {
+            wait_until(HANG, "the next lane set", || {
                 match source.poll_events(Duration::from_millis(10)) {
                     Ok(SourceEvent::LanesAssigned(new)) => {
                         assigned = Some(new.len());
@@ -4453,7 +4453,7 @@ mod tests {
                 0,
                 Intent::Error(RDKafkaErrorCode::RebalanceInProgress),
             );
-            wait_until(DEADLINE, "the error's revocation", || {
+            wait_until(HANG, "the error's revocation", || {
                 matches!(
                     source.poll_events(Duration::from_millis(50)),
                     Ok(SourceEvent::LanesRevoked { .. })
@@ -4486,7 +4486,7 @@ mod tests {
         /// Serve `consumer` until its queue reads empty, so a failed assert
         /// unwinds into a close with nothing queued.
         fn empty_queue(consumer: &BaseConsumer<SourceContext>) {
-            wait_until(DEADLINE, "an empty queue", || {
+            wait_until(HANG, "an empty queue", || {
                 let _ = consumer.poll(Duration::ZERO);
                 queued_events(consumer) == 0
             });
@@ -4501,19 +4501,19 @@ mod tests {
 
         /// Run `close`, and fail if it does not return.
         fn assert_closes(cluster: MockKafka, close: impl FnOnce() + Send + 'static) {
-            crate::testutil::assert_returns(cluster, CLOSE, "a consumer's close", close);
+            crate::testutil::assert_returns(cluster, HANG, "a consumer's close", close);
         }
 
         /// Run `drop_source` under a capture on a thread of its own, so a drop
-        /// that never returns fails under `CLOSE`, and return `cluster` and the
-        /// lines. The capture is scoped to the thread that runs the drop.
+        /// that never returns fails under [`HANG`], and return `cluster` and
+        /// the lines. The capture is scoped to the thread that runs the drop.
         fn lines_of_drop<C>(
             cluster: C,
             level: Level,
             drop_source: impl FnOnce() + Send + 'static,
         ) -> (C, Vec<String>) {
             let (lines, captured) = mpsc::channel();
-            let returned = returns_within(CLOSE, move || {
+            let returned = returns_within(HANG, move || {
                 let _ = lines.send(capture_logs(level, drop_source));
             });
             if !returned {
@@ -4597,7 +4597,7 @@ mod tests {
             let source = opened_consumers(cfg, &[&[]]);
             let consumer = Arc::clone(&source.members[0].consumer);
             // A refused connection queues a log line, then two error events.
-            wait_until(DEADLINE, "error events queued", || {
+            wait_until(HANG, "error events queued", || {
                 queued_events(&consumer) >= 3
             });
             let ((), lines) = lines_of_drop((), Level::WARN, move || drop(source));
@@ -4607,7 +4607,7 @@ mod tests {
                 .count();
             assert_eq!(errors, 2, "the serve stopped at an error event: {lines:#?}");
             assert!(
-                returns_within(CLOSE, move || drop(consumer)),
+                returns_within(HANG, move || drop(consumer)),
                 "a consumer's close did not return"
             );
         }
@@ -4721,7 +4721,7 @@ mod tests {
         let mut source = KafkaSource::new(cfg);
         let cp = Checkpointer::new();
         source.open(SourceCtx::new(cp.handle())).expect("open");
-        spate_test::wait_until(Duration::from_secs(60), "every partition held", || {
+        spate_test::wait_until(HANG, "every partition held", || {
             if let Ok(SourceEvent::LanesRevoked { lanes, barrier }) =
                 source.poll_events(Duration::from_millis(50))
             {
@@ -4753,7 +4753,7 @@ mod tests {
             RDKafkaApiKey::Heartbeat,
             &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_ILLEGAL_GENERATION],
         );
-        spate_test::wait_until(Duration::from_secs(30), "a member marked lost", || {
+        spate_test::wait_until(HANG, "a member marked lost", || {
             source.members.iter().any(|m| m.consumer.assignment_lost())
         });
         let lost = source
@@ -4798,7 +4798,7 @@ mod tests {
             RDKafkaApiKey::Heartbeat,
             &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_ILLEGAL_GENERATION],
         );
-        spate_test::wait_until(Duration::from_secs(30), "a member marked lost", || {
+        spate_test::wait_until(HANG, "a member marked lost", || {
             source.members.iter().any(|m| m.consumer.assignment_lost())
         });
         let lost = source
@@ -4908,7 +4908,7 @@ mod tests {
         let cp = Checkpointer::new();
         source.open(SourceCtx::new(cp.handle())).expect("open");
         let mut held = None;
-        spate_test::wait_until(spate_test::HANG, "an assignment held", || {
+        spate_test::wait_until(HANG, "an assignment held", || {
             let _ = source.poll_events(Duration::from_millis(50));
             held = source
                 .members
@@ -4918,7 +4918,7 @@ mod tests {
         });
         // Polling a consumer itself runs the callback, which queues the offer
         // without the accept that another `poll_events` could make.
-        spate_test::wait_until(spate_test::HANG, "every consumer holds an offer", || {
+        spate_test::wait_until(HANG, "every consumer holds an offer", || {
             source.members.iter().all(|m| {
                 if matches!(m.phase, Phase::Held(_)) {
                     return true;
@@ -4935,7 +4935,7 @@ mod tests {
         });
         let raw = raw_group_member(brokers, group);
         raw.subscribe(&["orders"]).expect("subscribe");
-        spate_test::wait_until(spate_test::HANG, "the raw consumer holds all", || {
+        spate_test::wait_until(HANG, "the raw consumer holds all", || {
             let _ = raw.poll(Duration::from_millis(100));
             raw.assignment().is_ok_and(|a| a.count() == 4)
         });
@@ -4954,7 +4954,7 @@ mod tests {
             held_while_the_group_moves_on(&cluster.bootstrap_servers(), "drop-stale");
         crate::testutil::assert_returns(
             (cluster, raw),
-            Duration::from_secs(30),
+            HANG,
             "dropping the source with a stale offer held",
             move || drop(source),
         );
@@ -5063,6 +5063,7 @@ mod tests {
     mod fatal_consumer_error {
         use super::*;
         use rdkafka::bindings::rd_kafka_resp_err_t as RespErr;
+        use spate_test::HANG;
         use std::ffi::CStr;
 
         /// A static member librdkafka fences fails the source, and the error
@@ -5082,14 +5083,14 @@ mod tests {
             );
 
             let mut seen = None;
-            spate_test::wait_until(Duration::from_secs(20), "the fatal error", || match source
-                .poll_events(Duration::from_millis(50))
-            {
-                Err(e) if e.reason().contains("Static consumer fenced") => {
-                    seen = Some((e.class(), e.reason().to_owned()));
-                    true
+            spate_test::wait_until(HANG, "the fatal error", || {
+                match source.poll_events(Duration::from_millis(50)) {
+                    Err(e) if e.reason().contains("Static consumer fenced") => {
+                        seen = Some((e.class(), e.reason().to_owned()));
+                        true
+                    }
+                    _ => false,
                 }
-                _ => false,
             });
             let (class, reason) = seen.expect("wait_until returned");
             assert_eq!(class, ErrorClass::Fatal, "{reason}");
@@ -5120,7 +5121,7 @@ mod tests {
             done: impl Fn(&[String]) -> bool,
         ) -> Vec<String> {
             let mut lines = Vec::new();
-            spate_test::wait_until(Duration::from_secs(20), what, || {
+            spate_test::wait_until(HANG, what, || {
                 lines.extend(spate_test::capture_logs(tracing::Level::WARN, || {
                     let _ = source.poll_events(Duration::from_millis(50));
                 }));
@@ -5151,7 +5152,7 @@ mod tests {
             // so the fatal error is the next event on its queue.
             let c1 = Arc::clone(&source.members[1].consumer);
             let mut c1_errors = Vec::new();
-            spate_test::wait_until(Duration::from_secs(20), "consumer 1's errors", || {
+            spate_test::wait_until(HANG, "consumer 1's errors", || {
                 if let Some(Err(e)) = c1.poll(Duration::from_millis(50)) {
                     c1_errors.push(e.to_string());
                 }
@@ -5159,7 +5160,7 @@ mod tests {
             });
             // Leave exactly consumer 0's two retryable errors queued, so it
             // returns one in the call that also polls consumer 1.
-            spate_test::wait_until(Duration::from_secs(20), "consumer 0's errors", || {
+            spate_test::wait_until(HANG, "consumer 0's errors", || {
                 queued_events(&source.members[0].consumer) >= 2
             });
             let c0 = Arc::clone(&source.members[0].consumer);
@@ -5285,6 +5286,7 @@ mod tests {
     #[cfg(feature = "tls")]
     mod tls_rejection {
         use super::*;
+        use spate_test::HANG;
 
         /// The first consumer error, other than `AllBrokersDown`, from a
         /// source whose only broker answers the TLS handshake with `alert`.
@@ -5292,21 +5294,22 @@ mod tests {
             let mut cfg = test_config();
             cfg.brokers = spate_test::tls_alert_server(b"", alert).to_string();
             cfg.rdkafka.insert("security.protocol".into(), "ssl".into());
+            // Out of real time's reach: the startup deadline's error carries
+            // the last consumer error, so only the handshake error may end it.
+            cfg.startup_timeout = Duration::from_hours(1);
             let mut source = KafkaSource::new(cfg);
             let cp = Checkpointer::new();
             source.open(SourceCtx::new(cp.handle())).expect("open");
             let mut seen = None;
-            spate_test::wait_until(
-                Duration::from_secs(20),
-                "a handshake error",
-                || match source.poll_events(Duration::from_millis(50)) {
+            spate_test::wait_until(HANG, "a handshake error", || {
+                match source.poll_events(Duration::from_millis(50)) {
                     Err(e) if !e.reason().contains("AllBrokersDown") => {
                         seen = Some((e.class(), e.reason().to_owned()));
                         true
                     }
                     _ => false,
-                },
-            );
+                }
+            });
             seen.expect("wait_until returned")
         }
 
@@ -5335,6 +5338,7 @@ mod tests {
 
     mod assignment_deadline {
         use super::*;
+        use spate_test::HANG;
 
         /// Past the deadline the member reports a fatal error, naming the
         /// group, the last rebalance event, how long it has held nothing and
@@ -5513,18 +5517,14 @@ mod tests {
         /// transport failure and its latest error is `AllBrokersDown`.
         fn poll_until_brokers_down(source: &mut KafkaSource) {
             let (mut transport, mut down) = (false, false);
-            spate_test::wait_until(
-                Duration::from_secs(20),
-                "a transport failure, then AllBrokersDown",
-                || {
-                    if let Err(e) = source.poll_events(Duration::from_millis(50)) {
-                        let e = e.to_string();
-                        transport |= e.contains("BrokerTransportFailure");
-                        down = e.contains("AllBrokersDown");
-                    }
-                    transport && down
-                },
-            );
+            spate_test::wait_until(HANG, "a transport failure, then AllBrokersDown", || {
+                if let Err(e) = source.poll_events(Duration::from_millis(50)) {
+                    let e = e.to_string();
+                    transport |= e.contains("BrokerTransportFailure");
+                    down = e.contains("AllBrokersDown");
+                }
+                transport && down
+            });
         }
 
         /// The deadline error names the last consumer error with librdkafka's
@@ -5550,7 +5550,7 @@ mod tests {
         fn an_error_after_the_deadline_is_reported_by_its_age() {
             let (mut source, clock) = opened_unassigned(test_config(), 1);
             clock.advance(Duration::from_secs(10));
-            spate_test::wait_until(Duration::from_secs(20), "a consumer error", || {
+            spate_test::wait_until(HANG, "a consumer error", || {
                 let _ = source.poll_events(Duration::from_millis(50));
                 source.last_consumer_error.is_some()
             });
@@ -5669,7 +5669,7 @@ mod tests {
         #[test]
         fn the_deadline_error_gives_the_last_errors_age() {
             let (mut source, clock) = opened_unassigned(test_config(), 1);
-            spate_test::wait_until(Duration::from_secs(20), "a consumer error", || {
+            spate_test::wait_until(HANG, "a consumer error", || {
                 let _ = source.poll_events(Duration::from_millis(50));
                 source.last_consumer_error.is_some()
             });

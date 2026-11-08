@@ -39,9 +39,10 @@ Each value after `group_id` is the default.
 Loading refuses a `topic` that starts with `^`, since librdkafka reads it as a
 subscription pattern. It also refuses `consumers: 0`, a `commit_interval`
 outside 1ms to 24h, and a non-zero `statistics_interval` outside the same
-range. A static member id (`group.instance.id`) needs `consumers: 1`. The
-`rdkafka:` map refuses each property the source owns, with the reason, and any
-cooperative assignment strategy.
+range. A static member id (`group.instance.id`) needs `consumers: 1`. A
+passthrough that sets both `auto.offset.reset` and `topic.auto.offset.reset` is
+refused too. The `rdkafka:` map refuses each property the source owns, with the
+reason, and any cooperative assignment strategy.
 
 The
 [Kafka source page](https://spate.kainth.dev/docs/user-guide/connectors/sources/kafka#configuration)
@@ -61,9 +62,7 @@ lists every refused property.
 - A rebalance error releases the partitions at once. The lanes still drain, but
   their offsets are not stored, and that work replays after the member rejoins.
 - A partition with no committed offset starts under `auto.offset.reset`,
-  `latest` by default. Under `latest`, the source reads the partition's end
-  and commits it before any lane reads the partition. Every later start resumes
-  from a committed offset.
+  `latest` by default. Every later start resumes from a committed offset.
 
 [How offsets are committed](https://spate.kainth.dev/docs/user-guide/connectors/sources/kafka#how-offsets-are-committed)
 covers each case, and
@@ -116,7 +115,8 @@ under 1ms or above about 24.8 days, a `max_message_bytes` outside 1000 to
 1,000,000,000 bytes, and a `compression` set beside a passthrough
 `compression.codec`. Every shard writes through the one producer, so raising
 `shards` adds writers that contend on that client. Batch size is the throughput
-lever.
+lever. The `rdkafka:` map refuses each property the sink owns, with the reason,
+and the properties the framework owns for every client.
 
 The
 [Kafka sink page](https://spate.kainth.dev/docs/user-guide/connectors/sinks/kafka#configuration)

@@ -74,10 +74,10 @@ dataset gets it for free.
 ## Referential integrity without coordination
 
 Each lane owns a disjoint slice of the order-id space
-(`order_id = n × partitions + lane_index`) and keeps its own bounded ring of the
-orders it has placed and captured. A payment or refund is drawn from that ring,
-so it always references an order the same lane minted, on the same partition,
-at a strictly greater offset. A payment settles the order's line total exactly.
+(`order_id = n × partitions + lane_index`) and keeps two bounded rings of its own,
+one of the orders it has placed and one of the orders it has captured. A payment
+is drawn from the first and a refund from the second, so each references an
+order the same lane minted, on the same partition, at a strictly greater offset. A payment settles the order's line total exactly.
 A refund is that total or a rounded-down half, third or quarter of it, never
 more. No lane reads another's state, so nothing is shared on the record path.
 The payload key carries the order id, so `KeyHashRouter` sends an order, its
@@ -108,7 +108,7 @@ split one stream between them. Two instances with the same configuration and
 - `commit()` stores watermarks in memory and nowhere else.
 - The source claims no resumability. A restart or a crash begins every lane at
   offset 0, so the same configuration replays the whole stream from the
-  beginning. That is strictly more duplication than a real at-least-once
+  beginning, with the same ids and offsets. That is strictly more duplication than a real at-least-once
   source, which replays only from its last committed position.
 - A `resume_from:` file is deliberately declined. A demo source that appears to
   resume durably is one somebody builds on.
@@ -126,14 +126,14 @@ cover the framework's side.
 The source's own families, all prefixed `spate_datagen_source_`, are listed
 with their labels in the
 [Metrics section of the datagen source page](https://spate.kainth.dev/docs/user-guide/connectors/sources/datagen#metrics),
-which also says why the source has no consumer-lag family.
+which also says that the source has no consumer-lag family, and what covers the bounded case instead.
 
 ## Dependencies
 
 Beside `spate-core`: `serde`, `serde_json`, `humantime-serde` and `tracing`,
 with `apache-avro` behind the optional `avro` feature, which the facade's
 `datagen-avro` turns on. The random generator is a hand-rolled SplitMix64, so
-the crate pulls in no random-number crate.
+the crate takes no direct dependency on a random-number crate.
 
 ## Related
 

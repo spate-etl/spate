@@ -138,11 +138,6 @@ pub(crate) struct Headers<'a> {
 }
 
 impl<'a> Headers<'a> {
-    /// How many headers the message carries.
-    pub(crate) fn len(&self) -> usize {
-        self.count
-    }
-
     pub(crate) fn is_empty(&self) -> bool {
         self.count == 0
     }
@@ -315,7 +310,7 @@ mod tests {
         assert_eq!(messages.len(), 1);
         let msg = messages[0].as_ref().unwrap();
         assert_eq!(msg.key, Some(&b"key-1"[..]));
-        assert_eq!(msg.headers.len(), 2);
+        assert_eq!(msg.headers.iter().len(), 2);
         assert_eq!(
             msg.headers.iter().collect::<Vec<_>>(),
             vec![("trace", &b"abc123"[..]), ("origin", &b"spate"[..])]

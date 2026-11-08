@@ -85,8 +85,8 @@ Records can arrive more than once after a crash. Each sealed batch carries a
 dedup token that stays the same across retries of that batch, so a destination
 with insert deduplication can drop a retried batch. A restart replays records in
 new batches with new tokens, and those rows land twice. Design target tables to
-tolerate duplicates. The [ClickHouse sink
-page](https://spate.kainth.dev/docs/user-guide/connectors/sinks/clickhouse#deduplication-tokens-and-the-window-warning)
+tolerate duplicates. The
+[ClickHouse sink page](https://spate.kainth.dev/docs/user-guide/connectors/sinks/clickhouse#deduplication-tokens-and-the-window-warning)
 covers the deduplication window and `ReplacingMergeTree`.
 
 A record that fails is skipped or stops the pipeline. On a chain built with
@@ -94,11 +94,10 @@ A record that fails is skipped or stops the pipeline. On a chain built with
 handling](https://spate.kainth.dev/docs/user-guide/concepts/error-handling)
 lists the metrics that count each outcome.
 
-[Delivery
-guarantees](https://spate.kainth.dev/docs/user-guide/concepts/delivery-guarantees)
-explains the mechanism, and [Guarantees at a
-glance](https://spate.kainth.dev/docs/user-guide/#guarantees-at-a-glance) lists
-the framework's guarantees in one table.
+[Delivery guarantees](https://spate.kainth.dev/docs/user-guide/concepts/delivery-guarantees)
+explains the mechanism, and
+[Guarantees at a glance](https://spate.kainth.dev/docs/user-guide/#guarantees-at-a-glance)
+lists the framework's guarantees in one table.
 
 ## Minimum supported Rust version
 
@@ -113,8 +112,7 @@ build host.
   guides and a page for each connector.
 - [API reference on docs.rs](https://docs.rs/spate) — every type, built with all
   features on.
-- [Examples
-  index](https://github.com/spate-etl/spate/blob/main/crates/spate/examples/README.md)
+- [Examples index](https://github.com/spate-etl/spate/blob/main/crates/spate/examples/README.md)
   — every example by what it shows, with the features and infrastructure each
   one needs.
 - [`spate-test`](https://crates.io/crates/spate-test) — the in-memory source and

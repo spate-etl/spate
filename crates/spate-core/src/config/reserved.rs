@@ -3,9 +3,9 @@
 //! A [`Denylist`] holds the owned keys, each with the reason it is owned, and
 //! optionally the library's normalisation, so every spelling the library
 //! accepts for an owned key is refused. [`Denylist::check`] returns a
-//! [`ReservedKey`] whose message starts at the passthrough's path. The caller
-//! puts the section in front of it in its own style, so every connector
-//! refuses an owned key in one wording.
+//! [`ReservedKeyError`] whose message starts at the passthrough's path. The
+//! caller puts the section in front of it in its own style, so every
+//! connector refuses an owned key in one wording.
 
 use std::borrow::Cow;
 
@@ -56,8 +56,8 @@ impl<'a> Denylist<'a> {
     ///
     /// # Errors
     ///
-    /// [`ReservedKey`] for the first key that names an owned key, under any
-    /// spelling the normalisation maps to it.
+    /// [`ReservedKeyError`] for the first key that names an owned key, under
+    /// any spelling the normalisation maps to it.
     ///
     /// # Examples
     ///
@@ -82,7 +82,7 @@ impl<'a> Denylist<'a> {
         &self,
         path: &str,
         keys: impl IntoIterator<Item = K>,
-    ) -> Result<(), ReservedKey> {
+    ) -> Result<(), ReservedKeyError> {
         for written in keys {
             let written = written.as_ref();
             let name = (self.normalize)(written);
@@ -91,7 +91,7 @@ impl<'a> Denylist<'a> {
                 .iter()
                 .find(|(owned, _)| (self.normalize)(owned) == name)
             {
-                return Err(ReservedKey {
+                return Err(ReservedKeyError {
                     path: path.to_owned(),
                     written: written.to_owned(),
                     owned: (*owned).to_owned(),
@@ -116,7 +116,7 @@ fn exact(key: &str) -> Cow<'_, str> {
 /// the value.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("{path}.\"{written}\" cannot be overridden: {why}{}", Spelling(self))]
-pub struct ReservedKey {
+pub struct ReservedKeyError {
     path: String,
     written: String,
     owned: String,
@@ -125,11 +125,11 @@ pub struct ReservedKey {
 }
 
 /// The clause naming the owned key, empty when the key was written as owned.
-struct Spelling<'a>(&'a ReservedKey);
+struct Spelling<'a>(&'a ReservedKeyError);
 
 impl std::fmt::Display for Spelling<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let ReservedKey {
+        let ReservedKeyError {
             written,
             owned,
             setting,

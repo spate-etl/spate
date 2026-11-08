@@ -25,6 +25,7 @@ use spate_core::sink::{RowEncoder, SealedBatch, ShardWriter};
 use spate_core::source::{Source, SourceCtx, SourceEvent};
 use spate_kafka::sink::KafkaSinkConfig;
 use spate_kafka::{KafkaSource, KafkaSourceConfig};
+use spate_test::HANG;
 use spate_test_support::{TestCa, container_image, pem};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};

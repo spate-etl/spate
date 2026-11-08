@@ -882,20 +882,8 @@ fn validate(cfg: &ClickHouseSinkConfig) -> Result<(), ConfigError> {
         ));
     }
 
-    for reserved in [
-        "insert_deduplication_token",
-        "insert_deduplicate",
-        "wait_end_of_query",
-        "input_format_with_names_use_header",
-        "input_format_with_types_use_header",
-        // Set on every compressed insert, whose blocks the sink frames.
-        "decompress",
-    ] {
-        if cfg.settings.contains_key(reserved) {
-            return fail(format!(
-                "setting `{reserved}` is managed by the sink and cannot be overridden"
-            ));
-        }
+    if let Err(e) = crate::writer::RESERVED.check("settings", cfg.settings.keys()) {
+        return fail(e.to_string());
     }
 
     if let Some(check) = &cfg.distributed_check {
@@ -1223,9 +1211,11 @@ settings: { insert_quorum: "auto" }
         )))
         .unwrap_err()
         .to_string();
-        assert!(
-            err.contains("setting `decompress` is managed by the sink"),
-            "{err}"
+        assert_eq!(
+            err,
+            "invalid configuration: sink.clickhouse: settings.\"decompress\" cannot be \
+             overridden: set to `1` on every compressed insert: the sink sends blocks it \
+             compressed itself, and the server decodes them only with it on"
         );
     }
 
@@ -1245,7 +1235,7 @@ settings: { insert_quorum: "auto" }
             ),
             (
                 "table: orders\nshards: [{replicas: [\"http://a\"]}]\nsettings: {insert_deduplication_token: \"x\"}",
-                "managed by the sink",
+                "settings.\"insert_deduplication_token\" cannot be overridden",
             ),
         ];
         for (yaml, needle) in cases {

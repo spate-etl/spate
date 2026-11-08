@@ -100,6 +100,17 @@ because the delivery guarantees are defined in terms of them:
 | `input_format_with_types_use_header` | Forced to `1`, for the same reason: it is what compares the header's types against the table's. |
 | `decompress` | Set to `1` on every compressed insert. The sink sends blocks it compressed itself, and the server decodes them only with it on. |
 
+A reserved setting in `settings` fails at load, and the error names the setting
+and the reason:
+
+```text
+invalid configuration: sink.clickhouse: settings."insert_deduplicate" cannot be overridden: forced to `1`, so the server deduplicates a retried batch by its token
+```
+
+Only the exact name is refused. ClickHouse reads setting names
+case-sensitively and has no alias of these settings, so another spelling such
+as `INSERT_DEDUPLICATE` fails at the server as an unknown setting.
+
 ## Security (TLS)
 
 No feature flag is needed for TLS. Point a replica at an `https://` URL and the

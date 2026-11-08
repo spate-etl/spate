@@ -2,7 +2,7 @@
 
 use crate::codec::BlockMethod;
 use bytes::Bytes;
-use spate_core::config::redact;
+use spate_core::config::{Denylist, redact};
 use spate_core::error::{ErrorClass, SinkError};
 use spate_core::sink::{SealedBatch, ShardWriter};
 use std::fmt;
@@ -47,6 +47,46 @@ impl fmt::Debug for ClickHouseEndpoint {
             .finish_non_exhaustive()
     }
 }
+
+const INSERT_DEDUPLICATE: &str = "insert_deduplicate";
+const WAIT_END_OF_QUERY: &str = "wait_end_of_query";
+const INSERT_DEDUPLICATION_TOKEN: &str = "insert_deduplication_token";
+const NAMES_USE_HEADER: &str = "input_format_with_names_use_header";
+const TYPES_USE_HEADER: &str = "input_format_with_types_use_header";
+const DECOMPRESS: &str = "decompress";
+
+/// The settings every insert carries, which the `settings` passthrough may
+/// not name. ClickHouse matches setting names case-sensitively and has no
+/// alias of any of these, so they compare exactly.
+pub(crate) const RESERVED: Denylist<'static> = Denylist::new(&[
+    (
+        INSERT_DEDUPLICATION_TOKEN,
+        "minted per sealed batch, so a retried batch carries the same token and is deduplicated",
+    ),
+    (
+        INSERT_DEDUPLICATE,
+        "forced to `1`, so the server deduplicates a retried batch by its token",
+    ),
+    (
+        WAIT_END_OF_QUERY,
+        "forced to `1`: the server answers once the insert and its materialized views are done, \
+         and the checkpoint commits behind that answer",
+    ),
+    (
+        NAMES_USE_HEADER,
+        "forced to `1`: with it off the server ignores the insert header and maps the rows by \
+         position",
+    ),
+    (
+        TYPES_USE_HEADER,
+        "forced to `1`: it is what compares the header's types against the table's",
+    ),
+    (
+        DECOMPRESS,
+        "set to `1` on every compressed insert: the sink sends blocks it compressed itself, and \
+         the server decodes them only with it on",
+    ),
+]);
 
 /// Writes sealed batches: one `INSERT ... FORMAT <fmt>` per batch (the
 /// format, RowBinaryWithNamesAndTypes or Native, is baked into `insert_sql`),
@@ -139,18 +179,18 @@ impl ShardWriter for ClickHouseWriter {
         let mut insert = endpoint
             .client
             .insert_formatted_with(self.insert_sql.clone())
-            .with_setting("insert_deduplicate", "1")
-            .with_setting("wait_end_of_query", "1")
-            .with_setting("insert_deduplication_token", batch.dedup_token.clone())
+            .with_setting(INSERT_DEDUPLICATE, "1")
+            .with_setting(WAIT_END_OF_QUERY, "1")
+            .with_setting(INSERT_DEDUPLICATION_TOKEN, batch.dedup_token.clone())
             // The server checks the header against the table only while these
             // are on. They default on; setting them per insert keeps a server
             // or profile default from turning the check off silently.
-            .with_setting("input_format_with_names_use_header", "1")
-            .with_setting("input_format_with_types_use_header", "1")
+            .with_setting(NAMES_USE_HEADER, "1")
+            .with_setting(TYPES_USE_HEADER, "1")
             .with_timeouts(self.send_timeout, self.end_timeout);
         if self.coded.is_some() {
             // What a compressing client adds to its own inserts.
-            insert = insert.with_setting("decompress", "1");
+            insert = insert.with_setting(DECOMPRESS, "1");
         }
         for (name, value) in &self.settings {
             insert = insert.with_setting(name.clone(), value.clone());

@@ -246,10 +246,11 @@ impl<'de> Visitor<'de> for DupVisitor {
 
 #[cfg(test)]
 mod tests {
-    use super::{Key, check_no_duplicate_keys};
+    use super::{Key, check_no_duplicate_keys, decode_one};
     use serde::Deserialize;
     use serde::de::{IgnoredAny, MapAccess, Visitor};
     use std::borrow::Cow;
+    use std::collections::BTreeMap;
     use std::fmt;
 
     struct ObjectKeys<'de>(Vec<Cow<'de, str>>);
@@ -328,5 +329,39 @@ mod tests {
     #[test]
     fn same_key_in_sibling_scopes_is_clean() {
         check_no_duplicate_keys(br#"{"a":{"a":1},"b":[{"a":1},{"a":2}]}"#).unwrap();
+    }
+
+    /// A `\u` escape naming half a surrogate pair is malformed, and never
+    /// decodes to another character.
+    #[test]
+    fn a_lone_surrogate_escape_is_malformed() {
+        let decoded = decode_one::<String>(br#""\ud800""#);
+        assert!(decoded.is_err(), "{decoded:?}");
+    }
+
+    /// An array longer than the fixed-length type it decodes into is
+    /// malformed, with no element dropped.
+    #[test]
+    fn an_array_longer_than_its_tuple_is_malformed() {
+        let tuple = decode_one::<(u8, u8)>(b"[1,2,3]");
+        assert!(tuple.is_err(), "{tuple:?}");
+        let array = decode_one::<[u8; 2]>(b"[1,2,3]");
+        assert!(array.is_err(), "{array:?}");
+    }
+
+    /// An integer map key is written in JSON number syntax: no leading `+`
+    /// and no leading zero.
+    #[test]
+    fn an_integer_key_follows_json_number_syntax() {
+        for doc in [&br#"{"+1":2}"#[..], br#"{"01":2}"#] {
+            let decoded = decode_one::<BTreeMap<u32, u8>>(doc);
+            assert!(decoded.is_err(), "{decoded:?}");
+        }
+    }
+
+    #[test]
+    fn a_128_bit_integer_key_decodes() {
+        let decoded: BTreeMap<i128, u8> = decode_one(br#"{"7":1}"#).unwrap();
+        assert_eq!(decoded, BTreeMap::from([(7, 1)]));
     }
 }

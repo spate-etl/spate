@@ -4257,6 +4257,7 @@ dependencies = [
  "rdkafka",
  "serde",
  "serde_json",
+ "simd-json",
  "spate-core",
  "spate-json",
  "spate-kafka",

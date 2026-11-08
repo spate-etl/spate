@@ -13,7 +13,7 @@ use spate_core::sink::RowEncoder;
 use spate_kafka::sink::{KafkaBytesEncoder, KafkaEncoder, KafkaJsonEncoder, MessageEncoder};
 use std::hint::black_box;
 
-use crate::messages::{self, Event, HeaderStamp, RECORDS};
+use crate::messages::{self, Article, Event, HeaderStamp, RECORDS};
 
 /// One encoder with the records it encodes and a buffer sized to hold the
 /// result, so the measurement is the encode path's work rather than the
@@ -128,5 +128,26 @@ pub(crate) fn json_typed() -> Rig<Event, KafkaJsonEncoder<Owned<Event>>> {
     rig(
         KafkaEncoder::new(KafkaJsonEncoder::<Owned<Event>>::new()),
         messages::events(RECORDS),
+    )
+}
+
+pub(crate) fn json_typed_simd() -> Rig<Event, KafkaJsonEncoder<Owned<Event>>> {
+    rig(
+        KafkaEncoder::new(KafkaJsonEncoder::<Owned<Event>>::new().with_simd_json()),
+        messages::events(RECORDS),
+    )
+}
+
+pub(crate) fn json_text() -> Rig<Article, KafkaJsonEncoder<Owned<Article>>> {
+    rig(
+        KafkaEncoder::new(KafkaJsonEncoder::<Owned<Article>>::new()),
+        messages::articles(RECORDS),
+    )
+}
+
+pub(crate) fn json_text_simd() -> Rig<Article, KafkaJsonEncoder<Owned<Article>>> {
+    rig(
+        KafkaEncoder::new(KafkaJsonEncoder::<Owned<Article>>::new().with_simd_json()),
+        messages::articles(RECORDS),
     )
 }

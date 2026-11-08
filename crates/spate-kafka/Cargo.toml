@@ -13,6 +13,9 @@ categories.workspace = true
 
 [features]
 tls = ["rdkafka/ssl-vendored", "dep:openssl-sys"]
+# `KafkaJsonEncoder::with_simd_json`, a per-encoder opt-in. Without the call
+# the encoder keeps serde_json.
+json-simd = ["dep:simd-json"]
 # Test-only. Off by default, not enabled by the `spate` facade, and outside
 # the semver surface.
 testing = []
@@ -26,13 +29,16 @@ openssl-sys = { workspace = true, optional = true }
 rdkafka = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+simd-json = { workspace = true, optional = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt", "sync", "time"] }
 tracing = { workspace = true }
 zstd-sys = { workspace = true }
 
 [dev-dependencies]
-spate-kafka = { path = ".", features = ["testing"] }
+# `json-simd`: the tests and the encode bench measure both JSON encoders in
+# one build.
+spate-kafka = { path = ".", features = ["testing", "json-simd"] }
 gungraun = { workspace = true }
 spate-json = { workspace = true }
 # `testing`: `S3Source::with_clock`, so a bounded job's end check and the
@@ -46,12 +52,17 @@ metrics = { workspace = true }
 object_store = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
 proptest = { workspace = true }
+# `raw_value`: pins how `with_simd_json` writes a `RawValue`.
+serde_json = { workspace = true, features = ["raw_value"] }
 serde_yaml = { workspace = true }
 tempfile = { workspace = true }
 testcontainers = { workspace = true, features = ["blocking"] }
 testcontainers-modules = { workspace = true, features = ["kafka"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
 tracing-subscriber = { workspace = true, features = ["fmt"] }
+
+[package.metadata.docs.rs]
+features = ["json-simd"]
 
 [[bench]]
 name = "encode_gungraun"

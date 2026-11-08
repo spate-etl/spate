@@ -45,6 +45,13 @@
 //!   dominates, which is the point: read against `bytes_keyless` it says what
 //!   fraction of a JSON sink's per-record cost the connector's own accumulator
 //!   and framing are.
+//! - `json_typed_simd` — the same records through
+//!   `KafkaJsonEncoder::with_simd_json`. Short strings and numbers, the shape
+//!   on which simd-json costs more than `serde_json`.
+//! - `json_text` and `json_text_simd` — records whose bytes are mostly one
+//!   504-byte text field with a newline and a quote on every line, through
+//!   each serializer. The shape the simd-json opt-in exists for; the escapes
+//!   keep its string scan from running uninterrupted.
 //!
 //! The matrix is sparse. The key axis is exercised once, on the
 //! passthrough encoder, where it stands out against a small denominator
@@ -72,9 +79,10 @@ mod encode_rig;
 mod messages;
 
 use encode_rig::{
-    Rig, bytes_keyed, bytes_keyless, encode_run, json_typed, stamped_headers, stamped_over_limit,
+    Rig, bytes_keyed, bytes_keyless, encode_run, json_text, json_text_simd, json_typed,
+    json_typed_simd, stamped_headers, stamped_over_limit,
 };
-use messages::{Event, HeaderStamp, RECORDS};
+use messages::{Article, Event, HeaderStamp, RECORDS};
 
 // Each case returns its rig rather than dropping it: a value moved into the
 // benchmark function is dropped inside the collected region, and freeing ten
@@ -112,6 +120,7 @@ fn reject_oversized(mut rig: Rig<Vec<u8>, HeaderStamp>) -> Rig<Vec<u8>, HeaderSt
 
 #[library_benchmark]
 #[bench::json_typed(json_typed())]
+#[bench::json_typed_simd(json_typed_simd())]
 fn encode_json(
     mut rig: Rig<Event, KafkaJsonEncoder<Owned<Event>>>,
 ) -> Rig<Event, KafkaJsonEncoder<Owned<Event>>> {
@@ -120,9 +129,20 @@ fn encode_json(
     rig
 }
 
+#[library_benchmark]
+#[bench::json_text(json_text())]
+#[bench::json_text_simd(json_text_simd())]
+fn encode_text(
+    mut rig: Rig<Article, KafkaJsonEncoder<Owned<Article>>>,
+) -> Rig<Article, KafkaJsonEncoder<Owned<Article>>> {
+    assert_eq!(encode_run(&mut rig), RECORDS, "a record failed to encode");
+    assert!(!rig.buf.is_empty(), "the encoder produced no bytes");
+    rig
+}
+
 library_benchmark_group!(
     name = encode;
-    benchmarks = encode_bytes, encode_stamped, reject_oversized, encode_json
+    benchmarks = encode_bytes, encode_stamped, reject_oversized, encode_json, encode_text
 );
 
 // DHAT is scoped as an extra tool rather than a callgrind argument: the

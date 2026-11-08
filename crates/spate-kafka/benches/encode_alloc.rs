@@ -16,7 +16,8 @@ mod encode_rig;
 mod messages;
 
 use encode_rig::{
-    bytes_keyed, bytes_keyless, encode_run, json_typed, stamped_headers, stamped_over_limit,
+    bytes_keyed, bytes_keyless, encode_run, json_text, json_text_simd, json_typed,
+    json_typed_simd, stamped_headers, stamped_over_limit,
 };
 use messages::RECORDS;
 
@@ -43,6 +44,18 @@ fn main() {
         });
         let mut r = json_typed();
         report.case("json_typed", || {
+            assert_eq!(encode_run(&mut r), RECORDS, "a record failed to encode");
+        });
+        let mut r = json_typed_simd();
+        report.case("json_typed_simd", || {
+            assert_eq!(encode_run(&mut r), RECORDS, "a record failed to encode");
+        });
+        let mut r = json_text();
+        report.case("json_text", || {
+            assert_eq!(encode_run(&mut r), RECORDS, "a record failed to encode");
+        });
+        let mut r = json_text_simd();
+        report.case("json_text_simd", || {
             assert_eq!(encode_run(&mut r), RECORDS, "a record failed to encode");
         });
     });

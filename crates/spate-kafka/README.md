@@ -11,7 +11,8 @@ letter and attempts.
 
 Turn on feature `kafka` on the [`spate`](https://crates.io/crates/spate) facade.
 Feature `kafka-tls` adds TLS, mTLS and SASL without GSSAPI or OIDC, and implies
-`kafka`. The facade README has the Cargo snippet.
+`kafka`. Feature `kafka-json-simd` adds `KafkaJsonEncoder::with_simd_json`, and
+implies `kafka`. The facade README has the Cargo snippet.
 
 ## Source
 
@@ -156,6 +157,10 @@ on the sink page cover each case.
   passes the payload through, `encoder_json` serializes the record with
   `serde_json`, and `encoder_with` wraps any `MessageEncoder`. A custom encoder
   can set a key, headers or a tombstone.
+- `KafkaJsonEncoder::with_simd_json` serializes with `simd-json`, which spends
+  fewer instructions on records that carry long text. The
+  [sink page](https://spate.kainth.dev/docs/user-guide/connectors/sinks/kafka#json-encoding-with-simd-json)
+  lists where its output differs from `serde_json`'s.
 - A record carries only a hash of its source message key. A Kafka-to-Kafka
   pipeline that keeps keys derives them again with `with_key_fn` on
   `KafkaBytesEncoder` or `KafkaJsonEncoder`, or in its own `MessageEncoder`.

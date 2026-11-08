@@ -230,7 +230,7 @@ pub(crate) fn selected_capabilities(root: &Path, service: &str) -> Result<Vec<Ca
 
 /// Fetches a lane by digest, re-tags it locally, and returns the local
 /// `name:tag`. A pull failing on a transport error runs again, up to
-/// [`PULL_ATTEMPTS`] times.
+/// [`PULL_ATTEMPTS`] runs in all.
 fn pull_lane(root: &Path, explain: bool, service: &str, lane: &str) -> Result<String, Error> {
     let reference = reference_for(root, service, lane)?;
     let local = tagged(&reference).to_owned();
@@ -258,7 +258,8 @@ fn pull_lane(root: &Path, explain: bool, service: &str, lane: &str) -> Result<St
 ///
 /// # Errors
 ///
-/// When the last run fails, with the error `line` exiting that status gives.
+/// When the last run fails, with the error `line` exiting that status gives,
+/// and at once when `pull` itself fails, such as when docker cannot be started.
 fn pull_retrying(
     line: &str,
     pull: &mut dyn FnMut() -> Result<Completed, Error>,

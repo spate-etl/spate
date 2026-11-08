@@ -60,6 +60,8 @@ pub(crate) type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 pub(crate) struct AdminError {
     pub(crate) code: RDKafkaErrorCode,
     pub(crate) message: String,
+    /// The checks' bound, when a metadata read ended at its deadline past it.
+    pub(crate) bound: Option<Duration>,
 }
 
 impl AdminError {
@@ -67,6 +69,7 @@ impl AdminError {
         AdminError {
             code,
             message: message.into(),
+            bound: None,
         }
     }
 }
@@ -104,9 +107,10 @@ pub(crate) trait TopicAdmin: Send + Sync {
 /// Each metadata read runs on a thread of its own and ends at most two
 /// [`SLICE`]s past `limit` from when `Brokers` is built. Once nothing awaits
 /// its answer, it stops within one [`SLICE`] while no broker is usable, and
-/// when the call under way ends while a request it sent is outstanding.
-/// Dropping `Brokers` joins those threads, so both clients are closed when
-/// the drop returns.
+/// when the call under way ends while a request it sent is outstanding. A
+/// read that ends at its deadline ends the checks with the bound's error, so
+/// they end the same way whichever passes first. Dropping `Brokers` joins
+/// those threads, so both clients are closed when the drop returns.
 pub(crate) struct Brokers {
     // Declared first, so the reads are joined before the fields below drop
     // and the last reference to `reader` drops on the thread dropping
@@ -130,16 +134,26 @@ impl Brokers {
             admin: Arc::new(admin),
             reader: Arc::new(reader),
             limit,
-            // One slice past the limit, so the bound, which names the read
-            // under way, ends the checks before the read gives up.
+            // One slice past the limit, so the limit has passed on the system
+            // clock by the time a read gives up as the bound would.
             deadline: Instant::now() + limit + SLICE,
         }
     }
 }
 
-/// How long the next call of a metadata read waits, after a call that
-/// failed with `code` and with `left` before the read's deadline. `None`
-/// ends the read with the call's error.
+/// What a metadata read does after a failed call.
+#[derive(Debug, PartialEq, Eq)]
+enum Next {
+    /// Call again, waiting this long.
+    Call(Duration),
+    /// End at the deadline, with an error the read would have asked again.
+    Expired,
+    /// End with the call's error.
+    Fail,
+}
+
+/// What a metadata read does after a call that failed with `code`, with
+/// `left` before the read's deadline.
 ///
 /// librdkafka answers `BrokerTransportFailure` when no broker became usable
 /// within the call, having sent nothing, so the next call is short and a
@@ -149,14 +163,16 @@ impl Brokers {
 /// at least one [`SLICE`]. Half, because librdkafka waits for a usable
 /// broker again, for the call's full length, when the broker a call asked
 /// is decommissioned mid-call.
-fn next_slice(code: RDKafkaErrorCode, left: Duration) -> Option<Duration> {
+fn next_slice(code: RDKafkaErrorCode, left: Duration) -> Next {
+    let slice = match code {
+        RDKafkaErrorCode::BrokerTransportFailure => SLICE.min(left),
+        RDKafkaErrorCode::OperationTimedOut => (left / 2).max(SLICE).min(left),
+        _ => return Next::Fail,
+    };
     if left.is_zero() {
-        return None;
-    }
-    match code {
-        RDKafkaErrorCode::BrokerTransportFailure => Some(SLICE.min(left)),
-        RDKafkaErrorCode::OperationTimedOut => Some((left / 2).max(SLICE).min(left)),
-        _ => None,
+        Next::Expired
+    } else {
+        Next::Call(slice)
     }
 }
 
@@ -175,7 +191,7 @@ impl TopicAdmin for Brokers {
         }
         let reader = Arc::clone(&self.reader);
         let name = topic.to_owned();
-        let deadline = self.deadline;
+        let (limit, deadline) = (self.limit, self.deadline);
         let (tx, rx) = oneshot::channel();
         // `fetch_metadata` blocks and cannot be cancelled, so the read runs
         // on a thread of its own, and stops between calls once the future
@@ -188,7 +204,13 @@ impl TopicAdmin for Brokers {
                         let code = e.rdkafka_error_code().unwrap_or(RDKafkaErrorCode::Fail);
                         let left = deadline.saturating_duration_since(Instant::now());
                         match next_slice(code, left) {
-                            Some(next) if !tx.is_closed() => slice = next,
+                            Next::Call(next) if !tx.is_closed() => slice = next,
+                            Next::Expired => {
+                                break Err(AdminError {
+                                    bound: Some(limit),
+                                    ..admin_error(&e)
+                                });
+                            }
                             _ => break Err(admin_error(&e)),
                         }
                     }
@@ -308,11 +330,22 @@ fn rejected(step: &str, text: &str) -> KafkaFeedError {
     ))
 }
 
+/// The error past the checks' bound of `limit`, while on `step`.
+fn elapsed(limit: Duration, step: &str) -> KafkaFeedError {
+    KafkaFeedError::Unavailable(format!(
+        "the startup checks took longer than {limit:?}, while {step}"
+    ))
+}
+
 /// `e`, from the step `doing`, as the error `connect` returns: a refusal
-/// when `admin` recorded a rejection, whatever the read's own error.
+/// when `admin` recorded a rejection, whatever the read's own error, and
+/// otherwise the bound's error for a read that ended at its deadline.
 fn classified(admin: &dyn TopicAdmin, doing: &str, e: &AdminError) -> KafkaFeedError {
     if let Some(text) = admin.rejection() {
         return rejected(doing, &text);
+    }
+    if let Some(limit) = e.bound {
+        return elapsed(limit, doing);
     }
     let message = format!("{doing}: {}", e.message);
     if refused(e.code) {
@@ -536,10 +569,7 @@ pub(crate) async fn bounded<T>(
         .unwrap_or_else(|stopped| {
             Err(match stopped {
                 BoundError::Rejected(text) => rejected(&current(), &text),
-                BoundError::Elapsed => KafkaFeedError::Unavailable(format!(
-                    "the startup checks took longer than {limit:?}, while {}",
-                    current()
-                )),
+                BoundError::Elapsed => elapsed(limit, &current()),
                 other => KafkaFeedError::Unavailable(other.to_string()),
             })
         })
@@ -1174,6 +1204,34 @@ mod tests {
         assert!(message.ends_with(ALERT_40), "{message}");
     }
 
+    /// Pins that a read that ended at its deadline ends the checks with the
+    /// bound's error, unless the client recorded a rejection, which refuses
+    /// them with its text.
+    #[test]
+    fn a_read_ended_at_its_deadline_gives_the_bounds_error_unless_rejected() {
+        let expired = AdminError {
+            bound: Some(Duration::from_secs(30)),
+            ..AdminError::new(C::BrokerTransportFailure, "transport")
+        };
+        let mut admin = Scripted::all();
+        admin.metadata_errors.insert(RETRY.to_owned(), expired);
+        match run(&admin) {
+            Err(KafkaFeedError::Unavailable(message)) => assert_eq!(
+                message,
+                "the startup checks took longer than 30s, while reading the metadata of the \
+                 retry topic `units-retry`"
+            ),
+            other => panic!("expected unavailable, got {other:?}"),
+        }
+        admin.rejection = Some(ALERT_40.to_owned());
+        let message = refusal(run(&admin));
+        assert!(
+            message.starts_with("reading the metadata of the retry topic `units-retry`: "),
+            "{message}"
+        );
+        assert!(message.ends_with(ALERT_40), "{message}");
+    }
+
     /// The connect check reads the metadata client's latest rejection
     /// however long ago it arrived.
     #[test]
@@ -1425,27 +1483,51 @@ mod tests {
         }
     }
 
+    /// A metadata read that reaches its deadline before the bound fires
+    /// ends the checks as the bound does, naming the read under way.
+    #[test]
+    fn a_read_past_its_deadline_ends_the_checks_as_the_bound_does() {
+        let broker = crate::testutil::refused_broker();
+        // The bound's clock never moves, so only the read's deadline ends the
+        // checks.
+        let got = checks_closing_their_clients(
+            &[("bootstrap.servers", broker.as_str())],
+            Duration::from_millis(1),
+        );
+        match got {
+            Err(KafkaFeedError::Unavailable(message)) => assert_eq!(
+                message,
+                "the startup checks took longer than 1ms, while reading the metadata of the \
+                 work topic `units`"
+            ),
+            other => panic!("expected unavailable, got {other:?}"),
+        }
+    }
+
     /// Pins how a metadata read's next call waits after each error: one
     /// [`SLICE`] while no broker is usable, half the time left and at least
     /// one [`SLICE`] after a request went unanswered, never past the
-    /// deadline, and not at all after any other error or once the deadline
-    /// has passed.
+    /// deadline. Once the deadline has passed, either error ends the read
+    /// as expired, and any other error ends it with that error whatever the
+    /// time left.
     #[test]
     fn a_metadata_read_paces_its_calls_by_the_error() {
         let ms = Duration::from_millis;
         let left = Duration::from_secs(30);
         let unusable = C::BrokerTransportFailure;
         let unanswered = C::OperationTimedOut;
-        assert_eq!(next_slice(unusable, left), Some(SLICE));
-        assert_eq!(next_slice(unusable, ms(30)), Some(ms(30)));
-        assert_eq!(next_slice(unanswered, left), Some(left / 2));
-        assert_eq!(next_slice(unanswered, ms(150)), Some(SLICE));
-        assert_eq!(next_slice(unanswered, ms(30)), Some(ms(30)));
+        assert_eq!(next_slice(unusable, left), Next::Call(SLICE));
+        assert_eq!(next_slice(unusable, ms(30)), Next::Call(ms(30)));
+        assert_eq!(next_slice(unanswered, left), Next::Call(left / 2));
+        assert_eq!(next_slice(unanswered, ms(150)), Next::Call(SLICE));
+        assert_eq!(next_slice(unanswered, ms(30)), Next::Call(ms(30)));
         for code in [unusable, unanswered] {
-            assert_eq!(next_slice(code, Duration::ZERO), None, "{code:?}");
+            assert_eq!(next_slice(code, Duration::ZERO), Next::Expired, "{code:?}");
         }
         for code in [C::Fail, C::TopicAuthorizationFailed, C::LeaderNotAvailable] {
-            assert_eq!(next_slice(code, left), None, "{code:?}");
+            for left in [left, Duration::ZERO] {
+                assert_eq!(next_slice(code, left), Next::Fail, "{code:?} {left:?}");
+            }
         }
     }
 

@@ -156,28 +156,32 @@ passes. The rule applies to that bound as it does to `HANG`; the regions above
 pass five seconds there, and a hang bound is what the rule asks for in its
 place.
 
-To check that something did not happen, wait for an event that shows the code
-has gone past the point where it would have happened, then check once. The
-Kafka pause test uses the mock cluster's Fetch count. librdkafka sends one
-Fetch per broker at a time and handles each reply before it sends the next. So
-once two more Fetches arrive after the produce, one full fetch has finished,
-and the test can check the paused lane:
+To check that something did not happen, a test waits for an event that shows
+the code has gone past the point where it would have happened, and then checks
+the result once. The Kafka pause test does this by counting the Fetch requests
+the mock cluster receives. Each broker connection in librdkafka sends one Fetch
+at a time and handles its reply before it sends the next. This means that once
+two more Fetch requests arrive after the produce, at least one fetch has
+completed in full. The test can then check that the paused lane received
+nothing:
 
 ```rust file=crates/spate-kafka/tests/mock_cluster.rs region=absence_after_a_signal title="mock_cluster.rs"
 ```
 
 Real time is allowed in one case: the property is a librdkafka or broker timer
 running out, such as `session.timeout.ms` or a broker's `segment.ms`. No test
-clock controls those timers. Such a test may wait past the timer, or assert
-that at least that much time passed. A comment starting `Elapsed time is the
-property` names the timer. A slow machine only makes elapsed time longer, so a
-minimum like this fails only on a defect:
+clock controls those timers, so the test has to let real time pass. It may wait
+past the timer, or assert that at least that much time has passed, and a
+comment starting `Elapsed time is the property` names the timer. A slow machine
+can only make elapsed time longer. This means a minimum like the one below
+fails only when the code is wrong:
 
 ```rust file=crates/spate-kafka/tests/feed_kafka.rs region=lower_bound_on_session title="feed_kafka.rs"
 ```
 
 A maximum on elapsed time, or a fixed wait that assumes nothing happened, is
-still not allowed.
+still not allowed. On a slow machine the first fails with nothing wrong, and
+the second can pass without checking anything.
 
 ### An interleaving failure is checked for a product defect first
 

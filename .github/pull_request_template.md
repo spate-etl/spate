@@ -5,7 +5,7 @@ change is shaped the way it is.
 
 Contributions are accepted under Apache-2.0 §5. There is no CLA to sign.
 
-docs/developer/06-reading-a-review.md says what a review checks.
+docs/developer/09-before-review.md says what a review checks.
 -->
 
 ## What this changes, and why

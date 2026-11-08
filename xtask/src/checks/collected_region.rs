@@ -16,7 +16,7 @@
 //! one output per thread, `<base>.t<thread>.p<part>.out`, and a thread that
 //! never entered the collected region declares `summary: 0`.
 //!
-//! `docs/developer/04-benchmarks-and-fuzzing.md` states the bench-authoring
+//! `docs/developer/07-performance.md` states the bench-authoring
 //! rule this enforces and where the thresholds come from.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -29,7 +29,7 @@ const TOOL: &str = "collected-region";
 
 /// The share of a case's collected instructions that must land in the binary
 /// under measurement. The measured spread it sits below is in
-/// `docs/developer/04-benchmarks-and-fuzzing.md`.
+/// `docs/developer/07-performance.md`.
 const MIN_APPLICATION_PCT: i64 = 10;
 
 /// The second signal. A lost region can also leave almost nothing: a handful of
@@ -168,7 +168,7 @@ fn report(shard: &str, case_id: &str, where_: &str, verdict: &Verdict) -> bool {
         println!(
             "  Move the measured work into a named #[inline(never)] function the benchmark calls,"
         );
-        println!("  and see docs/developer/04-benchmarks-and-fuzzing.md.");
+        println!("  and see docs/developer/07-performance.md.");
         return true;
     }
     // Integers only. The decimal beside it is for reading.
@@ -190,7 +190,7 @@ fn report(shard: &str, case_id: &str, where_: &str, verdict: &Verdict) -> bool {
         "  function, where the optimizer may reshape it out of the collected region. Move it into a"
     );
     println!(
-        "  named #[inline(never)] function the benchmark calls. See docs/developer/04-benchmarks-and-fuzzing.md."
+        "  named #[inline(never)] function the benchmark calls. See docs/developer/07-performance.md."
     );
     true
 }

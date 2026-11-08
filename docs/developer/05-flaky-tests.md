@@ -322,7 +322,7 @@ CI runs the workspace suite in up to four jobs:
 | `Test (macOS)` | `macos-26` | `cargo nextest run --profile ci --workspace --all-features --locked` |
 | `Feature matrix and default-feature tests` | `ubuntu-latest` | `cargo xtask hack` |
 
-`cargo xtask hack` runs the suite on default features under the `default` nextest profile, so it runs the tests that `--all-features` skips.
+The `cargo xtask hack` command runs the suite on default features under the `default` nextest profile, so it runs the tests that `--all-features` skips.
 
 On a pull request, `Test (macOS)` runs only when the change touches a build input such as `Cargo.lock` or the nextest config.
 In the merge queue it runs on every entry that builds.
@@ -337,7 +337,7 @@ A test that depends on timing fails in whichever job times it differently.
 
 No profile terminates a test before `HANG` runs out, so a wait that reaches `HANG` panics first, with the message `hung after 60s waiting for:` and the wait's description.
 The container suites run in their own jobs under the `docker` profile.
-[The test runner and its profiles](01-commands.md#the-test-runner-and-its-profiles) has each profile's timeouts.
+[The test profiles](03-commands.md#the-test-profiles) has each profile's timeouts.
 
 To run a crate's tests the way the coverage job does:
 
@@ -388,5 +388,5 @@ The fix goes to whichever side was wrong.
 ## Related
 
 - [Writing a test](04-writing-a-test.md) — where a test lives, the harnesses, and what each tool proves.
-- [Commands and gates](01-commands.md) — the test profiles and the container suites.
+- [Commands and CI](03-commands.md) — the test profiles and the container suites.
 - [Spate invariants](../INVARIANTS.md) — INV-10, which the metric-label rule answers to.

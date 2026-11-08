@@ -216,7 +216,7 @@ fn the_measured_degenerate_profile_is_refused_at_its_measured_share() {
              \x20 Profile: {}\n\
              \x20 The usual cause is the measured work being written inline in the #[library_benchmark]\n\
              \x20 function, where the optimizer may reshape it out of the collected region. Move it into a\n\
-             \x20 named #[inline(never)] function the benchmark calls. See docs/developer/04-benchmarks-and-fuzzing.md.\n",
+             \x20 named #[inline(never)] function the benchmark calls. See docs/developer/07-performance.md.\n",
             tree.at(&format!("{DEG_CASE}/callgrind.decode.full_splits.out"))
         ),
         "",
@@ -291,7 +291,7 @@ fn a_collapsed_region_is_refused_at_the_magnitude_floor() {
              \x20 rather than measured: the same defect as a runtime-dominated region, wearing the other face.\n\
              \x20 Profile: {}\n\
              \x20 Move the measured work into a named #[inline(never)] function the benchmark calls,\n\
-             \x20 and see docs/developer/04-benchmarks-and-fuzzing.md.\n",
+             \x20 and see docs/developer/07-performance.md.\n",
             tree.at(&format!("{case}/callgrind.encode.bytes_keyless.out"))
         ),
         "",
@@ -420,7 +420,7 @@ fn every_case_is_judged_and_one_refusal_fails_the_run() {
              \x20 Profile: {}\n\
              \x20 The usual cause is the measured work being written inline in the #[library_benchmark]\n\
              \x20 function, where the optimizer may reshape it out of the collected region. Move it into a\n\
-             \x20 named #[inline(never)] function the benchmark calls. See docs/developer/04-benchmarks-and-fuzzing.md.\n",
+             \x20 named #[inline(never)] function the benchmark calls. See docs/developer/07-performance.md.\n",
             passed(&name, "40.00", 10_000),
             tree.at("b/callgrind.x.out")
         )
@@ -442,7 +442,7 @@ fn a_trailing_separator_on_the_tree_does_not_reach_the_paths() {
              \x20 Profile: {}\n\
              \x20 The usual cause is the measured work being written inline in the #[library_benchmark]\n\
              \x20 function, where the optimizer may reshape it out of the collected region. Move it into a\n\
-             \x20 named #[inline(never)] function the benchmark calls. See docs/developer/04-benchmarks-and-fuzzing.md.\n",
+             \x20 named #[inline(never)] function the benchmark calls. See docs/developer/07-performance.md.\n",
             tree.at("b/callgrind.x.out")
         ),
         "",

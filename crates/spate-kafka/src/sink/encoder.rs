@@ -690,6 +690,31 @@ mod tests {
         );
     }
 
+    /// A clone, as the `split` terminal makes per branch, keeps the key
+    /// function and the serializer.
+    #[test]
+    fn a_cloned_encoder_keeps_its_key_and_serializer() {
+        #[derive(serde::Serialize)]
+        struct Reading {
+            user: String,
+            value: f64,
+        }
+        fn key_of(reading: &Reading) -> Option<&[u8]> {
+            Some(reading.user.as_bytes())
+        }
+        let original = KafkaJsonEncoder::<Owned<Reading>>::with_key_fn(key_of).with_simd_json();
+        let mut enc = KafkaEncoder::new(original.clone());
+        let mut buf = BytesMut::new();
+        let reading = Reading {
+            user: "ada".into(),
+            value: 1e300,
+        };
+        enc.encode(&record(reading), &mut buf).unwrap();
+        let (key, payload) = single_message(&buf);
+        assert_eq!(key, Some(b"ada".to_vec()));
+        assert_eq!(payload, Some(br#"{"user":"ada","value":1e300}"#.to_vec()));
+    }
+
     #[test]
     fn simd_json_keeps_the_record_key() {
         #[derive(serde::Serialize)]

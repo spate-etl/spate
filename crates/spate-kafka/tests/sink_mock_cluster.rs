@@ -289,9 +289,11 @@ fn shutdown_with_inflight_data_commits_only_delivered() {
 }
 
 /// A write to a missing topic fails. With `topic.metadata.propagation.max.ms`
-/// below `delivery_timeout`, the broker's answer fails the first write as
-/// fatal, and the next fails locally as retryable. At the defaults, 30 s each,
-/// the first write times out as retryable instead.
+/// below `delivery_timeout`, the first write fails as fatal when the broker's
+/// answer reaches its delivery report, or as retryable when librdkafka marks
+/// the topic missing before the send queues it, and every write after that
+/// fails locally as retryable. At the defaults, 30 s each, the first write
+/// times out as retryable instead.
 #[tokio::test]
 async fn a_write_to_a_missing_topic_fails() {
     let cluster = MockKafka::new();
@@ -300,35 +302,62 @@ async fn a_write_to_a_missing_topic_fails() {
         &brokers,
         "delivery_timeout: 10s\nrdkafka:\n  topic.metadata.propagation.max.ms: \"0\"\n",
     );
-    let mut encoder = sink.encoder_bytes();
-    let mut frame = BytesMut::new();
-    encoder
-        .encode(&record(b"nowhere".to_vec()), &mut frame)
-        .expect("encode");
-    let batch = SealedBatch {
-        rows: 1,
-        bytes: frame.len() as u64,
-        frames: vec![frame.freeze()],
-        dedup_token: "unused".to_string(),
-    };
-    // The broker's answer is fatal and names the missing topic. librdkafka
-    // then knows the topic is missing and fails the next write locally,
-    // which stays retryable. The readiness probe reports the missing topic
-    // as fatal whatever the timeouts.
-    for (attempt, expected, hint) in [
-        ("first", ErrorClass::Fatal, "does not exist"),
-        ("second", ErrorClass::Retryable, "Unknown topic"),
-    ] {
-        let err = tokio::time::timeout(
-            Duration::from_secs(60),
+    let batch = rows_batch(&sink, 1);
+    let write = || async {
+        tokio::time::timeout(
+            spate_test::HANG,
             sink.writer.write_batch(&sink.endpoints[0][0], &batch),
         )
         .await
         .expect("the write settles")
-        .expect_err("a missing topic fails the write");
-        assert_eq!(err.class(), expected, "{attempt}: {err}");
-        assert!(err.reason().contains(hint), "{attempt}: {err}");
-    }
+        .expect_err("a missing topic fails the write")
+    };
+    let first = write().await;
+    let hint = match first.class() {
+        ErrorClass::Fatal => "does not exist",
+        ErrorClass::Retryable => "Unknown topic",
+        other => panic!("first: {other:?}: {first}"),
+    };
+    assert!(first.reason().contains(hint), "first: {first}");
+    let second = write().await;
+    assert_eq!(second.class(), ErrorClass::Retryable, "second: {second}");
+    assert!(
+        second.reason().contains("Unknown topic"),
+        "second: {second}"
+    );
+}
+
+/// A send librdkafka refuses because it knows the topic is missing fails the
+/// write as retryable. The first message fills a one-message queue and leaves
+/// it only once librdkafka has marked the topic missing, so the second is
+/// always sent after that. The writer's clock is frozen, so the send deadline
+/// does not end the write first.
+#[test]
+fn a_send_to_a_topic_known_to_be_missing_is_retryable() {
+    let cluster = MockKafka::new();
+    let brokers = cluster.bootstrap_servers();
+    let io = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let clock = io.block_on(async { IoTestClock::frozen() });
+    let sink = sink_on(
+        &brokers,
+        "delivery_timeout: 10s\nrdkafka:\n  topic.metadata.propagation.max.ms: \"0\"\n  \
+         queue.buffering.max.messages: \"1\"\n",
+        clock as _,
+    );
+    let write = spawn_write(&io, &sink, rows_batch(&sink, 2));
+    let result = io
+        .block_on(async { tokio::time::timeout(spate_test::HANG, write).await })
+        .expect("the write settles")
+        .expect("write task");
+    let reason = retryable_reason(result);
+    assert!(
+        reason.starts_with(&format!("produce to \"{TOPIC}\" failed"))
+            && reason.contains("Unknown topic"),
+        "{reason}"
+    );
 }
 
 #[tokio::test]

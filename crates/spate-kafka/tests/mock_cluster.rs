@@ -3271,9 +3271,12 @@ mod latest_start {
         });
     }
 
-    /// A reassign whose lookup fails keeps its offers and keeps polling until
-    /// the pace comes due, and then every consumer's lanes arrive together.
-    /// Regression for #1704.
+    /// An accept whose lookup fails after a drain keeps its offers and keeps
+    /// polling until the pace comes due, and then every consumer's lanes
+    /// arrive together. The mock drains the first consumer's lanes by its own
+    /// revocation, so this is the accept after a revocation; the reassign
+    /// after a held drain waits on the same pace, which
+    /// `a_pending_reassign_waits_for_its_pace` covers. Regression for #1704.
     #[test]
     fn a_failed_reassign_lookup_is_retried_at_its_pace() {
         on_a_mock_electing_at_once(4, |cluster| {
@@ -3293,8 +3296,8 @@ mod latest_start {
             with_warnings(&capture, || {
                 let mut driver = Driver::open_watched(source, "retried-epoch");
                 past_the_hold(&mut driver, &clock);
-                // The second consumer's offer drains these lanes, and the lookup
-                // of the accept after that drain fails once.
+                // The second consumer's join revokes these lanes, and the
+                // lookup of the accept after that drain fails once.
                 cluster.request_errors(
                     RDKafkaApiKey::OffsetFetch,
                     &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_UNKNOWN],

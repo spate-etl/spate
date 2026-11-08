@@ -430,6 +430,15 @@ pub(crate) fn produce_payload(brokers: &str, topic: &str, partition: i32, payloa
 
 /// Create `topic` with `partitions` partitions and one replica.
 pub(crate) fn create_topic(brokers: &str, topic: &str, partitions: i32) {
+    create_visible(
+        brokers,
+        &[NewTopic::new(topic, partitions, TopicReplication::Fixed(1))],
+    );
+}
+
+/// Create `topics` and wait until the broker's metadata lists each one. A
+/// broker can answer a topic it has just created as unknown for a while.
+pub(crate) fn create_visible(brokers: &str, topics: &[NewTopic<'_>]) {
     let admin: AdminClient<DefaultClientContext> = raw_config()
         .set("bootstrap.servers", brokers)
         .build()
@@ -438,15 +447,19 @@ pub(crate) fn create_topic(brokers: &str, topic: &str, partitions: i32) {
         .enable_all()
         .build()
         .expect("runtime")
-        .block_on(admin.create_topics(
-            &[NewTopic::new(topic, partitions, TopicReplication::Fixed(1))],
-            &AdminOptions::new(),
-        ))
+        .block_on(admin.create_topics(topics, &AdminOptions::new()))
         .expect("create topics")
         .into_iter()
         .for_each(|r| {
             r.expect("topic created");
         });
+    for topic in topics {
+        spate_test::wait_until(
+            spate_test::HANG,
+            &format!("{} in metadata", topic.name),
+            || feed::exists(brokers, topic.name),
+        );
+    }
 }
 
 /// What `probe`'s group has committed on `topic`'s partitions `0..partitions`.

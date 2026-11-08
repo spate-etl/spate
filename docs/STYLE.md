@@ -288,6 +288,23 @@ Voice follows the quadrant, so there is one rule to remember rather than two:
 Everywhere:
 
 - **Present-tense declarative.** "Unknown fields are rejected", not "will be".
+- **Plain sentences.** A reader follows each sentence on the first pass. Check
+  every sentence a change adds:
+  - It carries one idea. A sentence that chains clauses with "so", "and" or
+    "which" splits into two.
+  - The concrete case comes first. "To check that something did not happen,
+    wait for an event that shows the code has gone past that point" opens on
+    the case, and the principle follows.
+  - "It" and "this" point at one noun. Where two nouns could match, name the
+    one meant.
+  - Words are literal. A figure of speech such as "stands in for" or "gets no
+    pass" makes the reader translate it first.
+  - The sentence before an example describes that example. An example placed
+    after a sentence about what is not allowed reads as the thing not allowed.
+  - An exception is flagged where the rule is stated, so a reader who stops at
+    the rule does not take it as absolute.
+  - A sentence opens with a capital letter. One that would open on a lowercase
+    identifier such as `librdkafka` is reworded.
 - **The page reads as the present, never as a changelog.** No "now", "recently",
   "as of", "has been changed to". If something moved, the page describes what
   is and the pull request says what moved. (§ 9 suspends this for `docs/adr/`.)

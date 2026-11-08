@@ -25,7 +25,8 @@ use rdkafka::topic_partition_list::TopicPartitionListElem;
 use rdkafka::types::RDKafkaRespErr;
 use rdkafka::util::IntoOpaque;
 use rdkafka::{ClientConfig, Offset, TopicPartitionList};
-use spate_core::config::{DurationBounds, check_duration, redact};
+use spate_core::config::{Denylist, DurationBounds, ReservedKeyError, check_duration, redact};
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::ops::Deref;
@@ -174,34 +175,6 @@ impl Keys<'_> {
     }
 }
 
-/// A passthrough key a role owns, as [`Base::denied`] reports it.
-#[derive(Debug)]
-pub(crate) struct Refusal<'a> {
-    written: &'a str,
-    owned: &'static str,
-    why: &'static str,
-}
-
-impl fmt::Display for Refusal<'_> {
-    /// `rdkafka."<key>" cannot be overridden: <why>`, naming the owned
-    /// property when the key is another spelling of it. Never the value.
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "rdkafka.\"{}\" cannot be overridden: {}",
-            self.written, self.why
-        )?;
-        if self.written != self.owned {
-            write!(
-                f,
-                " (`{}` sets the same librdkafka property as `{}`)",
-                self.written, self.owned
-            )?;
-        }
-        Ok(())
-    }
-}
-
 /// librdkafka's `statistics.interval.ms` range, with `0s` for off.
 const STATISTICS_INTERVAL: DurationBounds = DurationBounds::at_least(Duration::from_millis(1))
     .at_most(Duration::from_hours(24))
@@ -310,8 +283,8 @@ impl Base<'_> {
     ///
     /// # Errors
     ///
-    /// The [`Refusal`] naming that key and why the role owns it.
-    pub(crate) fn denied(&self, roles: &[&dyn Role]) -> Result<(), Refusal<'_>> {
+    /// The [`ReservedKeyError`] naming that key and why the role owns it.
+    pub(crate) fn denied(&self, roles: &[&dyn Role]) -> Result<(), ReservedKeyError> {
         let mut keys = Keys {
             config: None,
             owned: Vec::new(),
@@ -319,21 +292,9 @@ impl Base<'_> {
         for role in roles {
             self.declare(&mut keys, *role);
         }
-        for written in self.rdkafka.keys() {
-            let name = canonical(written);
-            if let Some((owned, why)) = keys
-                .owned
-                .iter()
-                .find(|(owned, _)| canonical(owned) == name)
-            {
-                return Err(Refusal {
-                    written,
-                    owned,
-                    why,
-                });
-            }
-        }
-        Ok(())
+        Denylist::new(&keys.owned)
+            .normalized_by(|key| Cow::Borrowed(canonical(key)), "librdkafka property")
+            .check("rdkafka", self.rdkafka.keys())
     }
 
     /// Whether `statistics_interval` is `0s` or in librdkafka's range of 1ms

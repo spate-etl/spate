@@ -177,11 +177,10 @@ The framework never uses librdkafka's position-based auto-commit. Instead:
   `assignment_timeout` ends the run, and a permanent refusal such as a failed
   group authorization stops the run at once. A member the group has removed, or
   whose commit it refuses during a rebalance, gets no lanes and rejoins. The
-  source passes `earliest` to librdkafka under `latest`, so librdkafka's own
-  policy only answers a fetch out of range. A committed offset below the log
-  start or past the log end resumes at the log start, and librdkafka logs the
-  reset at `WARN` under the `librdkafka` target, naming `BEGINNING`. Under
-  `earliest` the partition starts at its beginning.
+  source passes `earliest` to librdkafka under `latest`, so a committed offset
+  below the log start or past the log end resumes at the log start. librdkafka
+  logs that reset at `WARN` under the `librdkafka` target, naming `BEGINNING`.
+  Under `earliest` the partition starts at its beginning.
   Under `error` librdkafka applies the policy, and the source fails with a fatal
   error. That covers a partition with no committed offset, such as one added to
   the topic or one whose group offsets expired, and a partition whose fetch

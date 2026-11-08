@@ -83,16 +83,11 @@ impl Role for Consumer<'_> {
              read; the framework commits through `enable.auto.commit`, which \
              it owns",
         );
-        // The source settles every start under `latest` itself, so librdkafka's
-        // policy only answers a fetch out of range, and the end would skip what
-        // the log still holds.
+        // The source settles every start under `latest` itself. librdkafka's
+        // policy then only moves a fetch position the log no longer holds, where
+        // the end would skip the records it keeps.
         if self.0.uncommitted_start() == Some(rdkafka::Offset::End) {
-            let key = if self.0.rdkafka.contains_key("topic.auto.offset.reset") {
-                "topic.auto.offset.reset"
-            } else {
-                "auto.offset.reset"
-            };
-            keys.set(key, "earliest");
+            keys.set(self.0.reset_policy().0, "earliest");
         }
         keys.forbid(
             "group.protocol",
@@ -376,17 +371,23 @@ impl KafkaSourceConfig {
     /// `End` is resolved and committed once, by the source.
     /// librdkafka reads `topic.auto.offset.reset` as the same property.
     pub(crate) fn uncommitted_start(&self) -> Option<rdkafka::Offset> {
-        let policy = self
-            .rdkafka
-            .get("auto.offset.reset")
-            .or_else(|| self.rdkafka.get("topic.auto.offset.reset"))
-            .map_or("latest", String::as_str);
+        let policy = self.reset_policy().1.unwrap_or("latest");
         // librdkafka skips leading whitespace in the value.
         match policy.trim_start().to_ascii_lowercase().as_str() {
             "smallest" | "earliest" | "beginning" => Some(rdkafka::Offset::Beginning),
             "largest" | "latest" | "end" => Some(rdkafka::Offset::End),
             _ => None,
         }
+    }
+
+    /// The passthrough key that sets `auto.offset.reset`, under either spelling
+    /// librdkafka reads, and its value. The bare key when neither is set.
+    fn reset_policy(&self) -> (&'static str, Option<&str>) {
+        const SPELLINGS: [&str; 2] = ["auto.offset.reset", "topic.auto.offset.reset"];
+        SPELLINGS
+            .into_iter()
+            .find_map(|key| Some((key, Some(self.rdkafka.get(key)?.as_str()))))
+            .unwrap_or((SPELLINGS[0], None))
     }
 
     /// Whether librdkafka measures lag to the last stable offset rather than

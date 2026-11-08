@@ -18,14 +18,14 @@ use spate_core::feed::{DepthOf, Feed, FeedErrorKind, FeedMetricsCtx, Receipt, Un
 use spate_core::metrics::Meter;
 use spate_core::pipeline::ExitState;
 use spate_kafka::feed::KafkaFeedError;
-use spate_test::{WriteOutcome, wait_until};
+use spate_test::{HANG, WriteOutcome, wait_until};
 use std::time::{Duration, Instant};
 use support::feed::{
-    ATTEMPT, ATTEMPT_PARTITIONS, BoundedJob, DEAD, DEADLINE, FeedClock, ON_MOCK, RETRY, WORK,
-    assert_stalled, bounded_section, committed, data_dir, direct, direct_on, exists, feed_yaml,
-    high_watermark, high_watermarks, launch, launch_bounded, launch_customized, launch_on,
-    launch_stopping, list_once, produce_copy, produce_raw, publish, publish_to, publisher_on_mock,
-    read_attempts, read_depth, read_topic, recs, run_to_exit, sorted, stage, written,
+    ATTEMPT, ATTEMPT_PARTITIONS, BoundedJob, DEAD, FeedClock, ON_MOCK, RETRY, WORK, assert_stalled,
+    bounded_section, committed, data_dir, direct, direct_on, exists, feed_yaml, high_watermark,
+    high_watermarks, launch, launch_bounded, launch_customized, launch_on, launch_stopping,
+    list_once, produce_copy, produce_raw, publish, publish_to, publisher_on_mock, read_attempts,
+    read_depth, read_topic, recs, run_to_exit, sorted, stage, written,
 };
 use support::{
     Marker, MockKafka, RawBatch, corrupt_batch, produce_batch, try_produce_batch, write_marker,
@@ -79,7 +79,7 @@ fn a_unit_is_deleted_only_after_its_last_record_is_acknowledged() {
         },
     );
     publish(&worker.feed, unit);
-    wait_until(DEADLINE, "the last write is held", || {
+    wait_until(HANG, "the last write is held", || {
         worker.script.held_writes() == 1
     });
 
@@ -130,7 +130,7 @@ fn the_offset_completes_only_after_the_retry_write_is_confirmed() {
         &worker.feed,
         Unit::new("unreadable", b"not a descriptor".to_vec()),
     );
-    wait_until(DEADLINE, "the reader takes the unit", || {
+    wait_until(HANG, "the reader takes the unit", || {
         !worker.recording.seen.lock().unwrap().is_empty()
     });
 
@@ -192,7 +192,7 @@ fn a_unit_that_reports_failure_reaches_the_dead_letter_topic_at_the_cap() {
     );
     assert_eq!(worker.recording.seen.lock().unwrap().as_slice(), [1, 2, 3]);
 
-    wait_until(DEADLINE, "every offset is committed", || {
+    wait_until(HANG, "every offset is committed", || {
         committed(&brokers, &group, WORK) == Some(1)
             && committed(&brokers, &group, RETRY) == Some(2)
     });
@@ -241,7 +241,7 @@ fn a_completed_unit_read_again_counts_from_zero() {
     let delivery = a.take("A reads the unit");
     assert_eq!(delivery.deliveries, 1);
     a.feed.acknowledge(delivery.receipt).unwrap();
-    wait_until(DEADLINE, "the unit's offset is committed", || {
+    wait_until(HANG, "the unit's offset is committed", || {
         committed(&brokers, &group, WORK) == Some(1)
     });
 
@@ -395,7 +395,7 @@ fn a_dead_lettered_unit_published_again_is_read() {
     publish(&worker.feed, Unit::new("u", b"first".to_vec()));
     let first = worker.take("the first publish");
     worker.feed.fail(first.receipt, "test").unwrap();
-    wait_until(DEADLINE, "the first publish is dead-lettered", || {
+    wait_until(HANG, "the first publish is dead-lettered", || {
         committed(&brokers, &group, WORK) == Some(1)
     });
     publish(&worker.feed, Unit::new("u", b"second".to_vec()));
@@ -450,7 +450,7 @@ fn a_message_with_no_unit_goes_to_the_dead_letter_topic_at_once() {
     let dead = read_topic(&brokers, DEAD, 1);
     assert_eq!(dead[0].key.as_deref(), Some(&[0xff, 0xfe][..]));
     assert_eq!(dead[0].payload.as_deref(), Some(&b"not utf-8"[..]));
-    wait_until(DEADLINE, "its offset is committed", || {
+    wait_until(HANG, "its offset is committed", || {
         committed(&brokers, &group, WORK) == Some(1)
     });
     assert_eq!(high_watermark(&brokers, RETRY), 0, "nothing was retried");
@@ -492,7 +492,7 @@ fn the_feed_counts_its_writes_and_publishes_its_clients_statistics() {
     let value = |rendered: &str, name: &str, labels: &[(&str, &str)]| {
         spate_test::metric_value(rendered, &format!("spate_kafka_feed_{name}"), labels)
     };
-    wait_until(DEADLINE, "the writes and statistics render", || {
+    wait_until(HANG, "the writes and statistics render", || {
         let r = prom.render();
         value(&r, "attempt_write_duration_seconds_count", &[]) == Some(2.0)
             && value(&r, "retry_writes_total", &[]) == Some(1.0)
@@ -543,7 +543,7 @@ fn a_message_without_a_key_takes_its_position_as_its_id() {
     assert_eq!((empty.deliveries, keyless.deliveries), (1, 1));
     worker.feed.acknowledge(empty.receipt).unwrap();
     worker.feed.acknowledge(keyless.receipt).unwrap();
-    wait_until(DEADLINE, "both offsets are committed", || {
+    wait_until(HANG, "both offsets are committed", || {
         committed(&brokers, &group, WORK) == Some(2)
     });
     assert_eq!(
@@ -592,7 +592,7 @@ fn a_keyless_unit_keeps_its_position_through_retries() {
     assert_eq!(dead[0].key.as_deref(), Some(&b"units/0/1"[..]));
     assert_eq!(dead[0].header("spate.origin"), Some("units/0/1"));
     assert_eq!(dead[0].header("spate.deliveries"), Some("2"));
-    wait_until(DEADLINE, "both topics' offsets are committed", || {
+    wait_until(HANG, "both topics' offsets are committed", || {
         committed(&brokers, &group, WORK) == Some(2)
             && committed(&brokers, &group, RETRY) == Some(1)
     });
@@ -634,7 +634,7 @@ fn a_failed_write_to_a_missing_retry_topic_makes_the_feed_fatal() {
     worker.feed.fail(delivery.receipt, "test").unwrap();
 
     let mut error = None;
-    wait_until(DEADLINE, "the feed stops", || {
+    wait_until(HANG, "the feed stops", || {
         error = worker.feed.receive(1).err();
         error
             .as_ref()
@@ -675,7 +675,7 @@ fn a_topic_reported_missing_once_does_not_stop_the_feed() {
          topic.metadata.refresh.interval.ms: \"100\"\n",
     ));
     produce_raw(&brokers, WORK, &[(Some(&[0xff, 0xfe][..]), &b"first"[..])]);
-    wait_until(DEADLINE, "the first message is dead-lettered", || {
+    wait_until(HANG, "the first message is dead-lettered", || {
         high_watermark(&brokers, DEAD) == 1
     });
     // Elapsed time is the property: librdkafka marks a topic missing on one
@@ -695,7 +695,7 @@ fn a_topic_reported_missing_once_does_not_stop_the_feed() {
     produce_raw(&brokers, WORK, &[(Some(&[0xff, 0xfe][..]), &b"second"[..])]);
     let mut fatal = None;
     wait_until(
-        DEADLINE,
+        HANG,
         "the second message is dead-lettered or the feed stops",
         || {
             if let Err(e) = worker.feed.receive(1)
@@ -736,7 +736,7 @@ fn a_stalled_offset_fetch_does_not_exceed_the_max_poll_interval() {
     let mut errors = Vec::new();
     // Elapsed time is the property: the members must outlast several
     // poll intervals.
-    wait_until(DEADLINE, "20 s pass", || {
+    wait_until(HANG, "20 s pass", || {
         for (who, feed) in [("a", &a.feed), ("b", &b.feed)] {
             if let Err(e) = feed.receive(1) {
                 errors.push(format!("{who} +{:?}: {e}", start.elapsed()));
@@ -773,7 +773,7 @@ fn a_corrupt_batch_stops_the_feed() {
         "      check.crcs: \"true\"\n",
     ));
     let mut error = None;
-    wait_until(DEADLINE, "the feed stops on the corrupt batch", || {
+    wait_until(HANG, "the feed stops on the corrupt batch", || {
         error = worker.feed.receive(1).err();
         error
             .as_ref()
@@ -797,7 +797,7 @@ fn an_unknown_codec_stops_the_feed_and_names_it() {
     let group = spate_test::unique_name("codec");
     let worker = direct(&feed_yaml(&brokers, &group, "", ""));
     let mut error = None;
-    wait_until(DEADLINE, "the feed stops on the unknown codec", || {
+    wait_until(HANG, "the feed stops on the unknown codec", || {
         error = worker.feed.receive(1).err();
         error
             .as_ref()
@@ -826,7 +826,7 @@ fn a_batch_that_does_not_decompress_stops_the_feed() {
     let group = spate_test::unique_name("gzip");
     let worker = direct(&feed_yaml(&brokers, &group, "", ""));
     let mut error = None;
-    wait_until(DEADLINE, "the feed stops on the batch", || {
+    wait_until(HANG, "the feed stops on the batch", || {
         error = worker.feed.receive(1).err();
         error
             .as_ref()
@@ -1025,10 +1025,10 @@ fn a_publish_only_handle_charges_no_attempt() {
         assert_eq!(delivery.deliveries, 1, "{}", delivery.unit.id);
         worker.feed.acknowledge(delivery.receipt).unwrap();
     }
-    wait_until(DEADLINE, "every unit is committed", || {
+    wait_until(HANG, "every unit is committed", || {
         committed(&brokers, &group, WORK) == Some(3)
     });
-    wait_until(DEADLINE, "a count and a tombstone per unit", || {
+    wait_until(HANG, "a count and a tombstone per unit", || {
         high_watermarks(&brokers, ATTEMPT, ATTEMPT_PARTITIONS) == 6
     });
     drop(publisher);
@@ -1126,7 +1126,7 @@ fn a_bounded_job_on_kafka_ends_completed() {
 
     let clock = TestClock::frozen();
     let worker = launch_bounded(ON_MOCK, &data, &section, &clock);
-    wait_until(DEADLINE, "the unit is read and committed", || {
+    wait_until(HANG, "the unit is read and committed", || {
         written(&worker.script) == sorted(rows.clone())
             && committed(&brokers, &group, WORK) == Some(1)
     });
@@ -1172,11 +1172,9 @@ fn a_message_with_no_unit_ends_a_bounded_job_stalled() {
 
     let clock = TestClock::frozen();
     let worker = launch_bounded(ON_MOCK, &data, &section, &clock);
-    wait_until(
-        DEADLINE,
-        "the message is dead-lettered and committed",
-        || high_watermark(&brokers, DEAD) == 1 && committed(&brokers, &group, WORK) == Some(1),
-    );
+    wait_until(HANG, "the message is dead-lettered and committed", || {
+        high_watermark(&brokers, DEAD) == 1 && committed(&brokers, &group, WORK) == Some(1)
+    });
     assert_stalled(&run_to_exit(&worker, &clock));
 }
 
@@ -1200,7 +1198,7 @@ fn a_marker_on_the_work_topic_ends_a_bounded_job() {
 
         let clock = TestClock::frozen();
         let worker = launch_bounded(ON_MOCK, &job.data, &job.section, &clock);
-        wait_until(DEADLINE, "the unit and marker are committed", || {
+        wait_until(HANG, "the unit and marker are committed", || {
             written(&worker.script) == sorted(rows.clone()) && job.committed(WORK) == Some(2)
         });
         let report = run_to_exit(&worker, &clock);
@@ -1220,7 +1218,7 @@ fn a_marker_on_the_retry_topic_ends_a_bounded_job() {
 
     let clock = TestClock::frozen();
     let worker = launch_bounded(ON_MOCK, &job.data, &job.section, &clock);
-    wait_until(DEADLINE, "the retry topic's marker is committed", || {
+    wait_until(HANG, "the retry topic's marker is committed", || {
         job.committed(RETRY) == Some(1)
     });
     assert_eq!(run_to_exit(&worker, &clock).state, ExitState::Completed);
@@ -1252,7 +1250,7 @@ fn a_partition_holding_only_a_marker_ends_a_bounded_job() {
 
     let clock = TestClock::frozen();
     let worker = launch_bounded(ON_MOCK, &job.data, &job.section, &clock);
-    wait_until(DEADLINE, "both partitions are committed", || {
+    wait_until(HANG, "both partitions are committed", || {
         support::committed_by(&brokers, &job.group, WORK, 2)
             == [rdkafka::Offset::Offset(2), rdkafka::Offset::Offset(1)]
     });
@@ -1273,10 +1271,10 @@ fn each_partition_passes_its_own_marker() {
     let worker = launch(&job.data, &job.section, |sink| {
         sink.enqueue_global(WriteOutcome::ok().held());
     });
-    wait_until(DEADLINE, "the unit's write is held", || {
+    wait_until(HANG, "the unit's write is held", || {
         worker.script.held_writes() == 1
     });
-    wait_until(DEADLINE, "the marker alone is committed", || {
+    wait_until(HANG, "the marker alone is committed", || {
         support::committed_by(&brokers, &job.group, WORK, 2)[1] == rdkafka::Offset::Offset(1)
     });
     assert!(
@@ -1301,11 +1299,11 @@ fn a_marker_written_after_the_last_commit_ends_the_job() {
 
     let clock = TestClock::frozen();
     let worker = launch_bounded(ON_MOCK, &job.data, &job.section, &clock);
-    wait_until(DEADLINE, "the unit is committed", || {
+    wait_until(HANG, "the unit is committed", || {
         job.committed(WORK) == Some(1)
     });
     write_marker(&brokers, WORK, 0, Marker::Commit);
-    wait_until(DEADLINE, "the marker is committed", || {
+    wait_until(HANG, "the marker is committed", || {
         job.committed(WORK) == Some(2)
     });
     assert_eq!(run_to_exit(&worker, &clock).state, ExitState::Completed);
@@ -1322,17 +1320,17 @@ fn a_broker_outage_before_a_marker_still_ends_a_bounded_job() {
 
     let clock = TestClock::frozen();
     let worker = launch_bounded(ON_MOCK, &job.data, &job.section, &clock);
-    wait_until(DEADLINE, "the unit is committed", || {
+    wait_until(HANG, "the unit is committed", || {
         job.committed(WORK) == Some(1)
     });
     cluster.broker_down(1).unwrap();
     cluster.broker_up(1).unwrap();
     let marker = support::control_batch(Marker::Commit);
-    wait_until(DEADLINE, "the broker takes the marker", || {
+    wait_until(HANG, "the broker takes the marker", || {
         try_produce_batch(&brokers, WORK, 0, &marker).is_ok_and(|code| code == 0)
     });
     // Read back: a write whose reply was lost is sent again, and takes an offset.
-    wait_until(DEADLINE, "the marker is committed", || {
+    wait_until(HANG, "the marker is committed", || {
         job.committed(WORK) == Some(high_watermark(&brokers, WORK))
     });
     assert_eq!(run_to_exit(&worker, &clock).state, ExitState::Completed);
@@ -1354,7 +1352,7 @@ fn a_failed_commit_past_a_marker_lands_on_a_later_pass() {
 
     let clock = TestClock::frozen();
     let worker = launch_bounded(ON_MOCK, &job.data, &job.section, &clock);
-    wait_until(DEADLINE, "the marker is committed", || {
+    wait_until(HANG, "the marker is committed", || {
         job.committed(WORK) == Some(1)
     });
     assert_eq!(run_to_exit(&worker, &clock).state, ExitState::Completed);
@@ -1463,7 +1461,7 @@ fn startup_refuses_a_drain_timeout_within_the_stop_reserve() {
     );
     let e = worker
         .run
-        .wait_exit(DEADLINE)
+        .wait_exit(HANG)
         .expect("the run exits")
         .unwrap_err();
     let message = e.to_string();
@@ -1493,11 +1491,7 @@ fn a_worker_holding_nothing_stops_without_reading_on() {
         |_| {},
     );
     worker.shutdown.trigger();
-    let report = worker
-        .run
-        .wait_exit(DEADLINE)
-        .expect("the run exits")
-        .unwrap();
+    let report = worker.run.wait_exit(HANG).expect("the run exits").unwrap();
     assert_eq!(report.state, ExitState::Completed);
     assert_eq!(worker.recording.stopped_receiving(), 1);
     assert_eq!(worker.recording.closes().len(), 1);

@@ -18,10 +18,10 @@ use rdkafka::client::DefaultClientContext;
 use rdkafka::consumer::{BaseConsumer, Consumer};
 use spate_core::feed::{Feed, Unit, wake_channel};
 use spate_kafka::feed::KafkaFeed;
-use spate_test::{LogCapture, wait_until};
+use spate_test::{HANG, LogCapture, wait_until};
 use std::time::{Duration, Instant};
 use support::broker;
-use support::feed::{ATTEMPT, DEAD, DEADLINE, RETRY, WORK, committed, feed_yaml, publish, section};
+use support::feed::{ATTEMPT, DEAD, RETRY, WORK, committed, feed_yaml, publish, section};
 use testcontainers::runners::SyncRunner;
 use testcontainers_modules::kafka::apache::KAFKA_PORT;
 
@@ -86,7 +86,7 @@ fn the_attempt_follower_leaves_the_feed_members_assignment_alone() {
     let connected = Instant::now();
     let (waker, park) = wake_channel();
     feed.set_waker(waker);
-    wait_until(DEADLINE, "the member accepted an assignment", || {
+    wait_until(HANG, "the member accepted an assignment", || {
         assignments(&capture) >= 1
     });
 
@@ -98,7 +98,7 @@ fn the_attempt_follower_leaves_the_feed_members_assignment_alone() {
         let n = seen.len();
         publish(&feed, Unit::new(format!("u{n}"), b"body".to_vec()));
         let mut delivery = None;
-        wait_until(DEADLINE, "the unit is delivered", || {
+        wait_until(HANG, "the unit is delivered", || {
             delivery = feed.receive(1).ok().and_then(|mut got| got.pop());
             if delivery.is_none() {
                 park.park(Duration::from_millis(100));
@@ -109,7 +109,7 @@ fn the_attempt_follower_leaves_the_feed_members_assignment_alone() {
         seen.push(delivery.deliveries);
         feed.acknowledge(delivery.receipt).unwrap();
         let next = i64::try_from(n + 1).unwrap();
-        wait_until(DEADLINE, "the unit's offset is committed", || {
+        wait_until(HANG, "the unit's offset is committed", || {
             committed(&brokers, &group, WORK) == Some(next)
         });
     }

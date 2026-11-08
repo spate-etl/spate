@@ -20,6 +20,7 @@ use spate_core::source::{
     DrainBarrier, LaneId, PayloadBatch, Source, SourceCtx, SourceEvent, SourceLane,
 };
 use spate_kafka::{KafkaSource, KafkaSourceConfig};
+use spate_test::HANG;
 use spate_test_support::container_image;
 use std::mem::ManuallyDrop;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -117,12 +118,12 @@ pub(crate) fn a_stale_member_cannot_replace_a_peers_offset(
 ) {
     let offers = |c: &BaseConsumer<Recording>| c.context().offers.lock().expect("offers").len();
     let a = recording_member(brokers, topic, group, false);
-    spate_test::wait_until(Duration::from_secs(60), "A's offer", || {
+    spate_test::wait_until(HANG, "A's offer", || {
         let _ = a.poll(Duration::from_millis(100));
         offers(&a) == 1
     });
     let b = recording_member(brokers, topic, group, true);
-    spate_test::wait_until(Duration::from_secs(60), "B's offer", || {
+    spate_test::wait_until(HANG, "B's offer", || {
         let _ = a.poll(Duration::from_millis(50));
         let _ = b.poll(Duration::from_millis(50));
         offers(&b) >= 1
@@ -157,7 +158,7 @@ pub(crate) fn a_member_that_never_answers_its_offer(
         |c: &BaseConsumer<Recording>| *c.context().revocations.lock().expect("revocations");
 
     let a = member(false);
-    spate_test::wait_until(Duration::from_secs(60), "A's offer", || {
+    spate_test::wait_until(HANG, "A's offer", || {
         let _ = a.poll(Duration::from_millis(100));
         offers(&a) == 1
     });
@@ -166,20 +167,16 @@ pub(crate) fn a_member_that_never_answers_its_offer(
     let partition = offer.elements()[0].partition();
 
     let b = member(true);
-    spate_test::wait_until(
-        Duration::from_secs(60),
-        "B's offer of A's partition",
-        || {
-            let _ = a.poll(Duration::from_millis(50));
-            let _ = b.poll(Duration::from_millis(50));
-            b.context()
-                .offers
-                .lock()
-                .expect("offers")
-                .iter()
-                .any(|o| o.elements().iter().any(|e| e.partition() == partition))
-        },
-    );
+    spate_test::wait_until(HANG, "B's offer of A's partition", || {
+        let _ = a.poll(Duration::from_millis(50));
+        let _ = b.poll(Duration::from_millis(50));
+        b.context()
+            .offers
+            .lock()
+            .expect("offers")
+            .iter()
+            .any(|o| o.elements().iter().any(|e| e.partition() == partition))
+    });
     assert!(!a.assignment_lost(), "a held member is not marked lost");
 
     match answer {
@@ -195,17 +192,13 @@ pub(crate) fn a_member_that_never_answers_its_offer(
             .expect_err("the group refuses a commit from the member it left");
     }
 
-    spate_test::wait_until(
-        Duration::from_secs(60),
-        "A's revocation marked lost",
-        || {
-            let _ = a.poll(Duration::from_millis(50));
-            let _ = b.poll(Duration::from_millis(50));
-            revocations(&a) > 0 && a.assignment_lost()
-        },
-    );
+    spate_test::wait_until(HANG, "A's revocation marked lost", || {
+        let _ = a.poll(Duration::from_millis(50));
+        let _ = b.poll(Duration::from_millis(50));
+        revocations(&a) > 0 && a.assignment_lost()
+    });
     a.unassign().expect("unassign");
-    spate_test::wait_until(Duration::from_secs(60), "a new offer for A", || {
+    spate_test::wait_until(HANG, "a new offer for A", || {
         let _ = a.poll(Duration::from_millis(50));
         let _ = b.poll(Duration::from_millis(50));
         offers(&a) >= 2
@@ -486,16 +479,12 @@ pub(crate) fn committed_by(
         tpl.add_partition(topic, p);
     }
     let mut read = None;
-    spate_test::wait_until(
-        Duration::from_secs(30),
-        "the committed offsets read",
-        || {
-            read = probe
-                .committed_offsets(tpl.clone(), Duration::from_secs(10))
-                .ok();
-            read.is_some()
-        },
-    );
+    spate_test::wait_until(HANG, "the committed offsets read", || {
+        read = probe
+            .committed_offsets(tpl.clone(), Duration::from_secs(10))
+            .ok();
+        read.is_some()
+    });
     read.expect("read before the wait ended")
         .elements()
         .iter()
@@ -555,9 +544,6 @@ pub(crate) fn offsets_of(
     })
 }
 
-/// How long [`Watched`] waits on a broker.
-pub(crate) const WATCHED_DEADLINE: Duration = Duration::from_secs(60);
-
 /// A source driven by hand as the controller and a pipeline thread drive it,
 /// publishing to a recorder of its own under a pipeline name of its own.
 pub(crate) struct Watched {
@@ -592,7 +578,7 @@ impl Watched {
                         .with_partition_detail(true),
                 )
                 .expect("open");
-            await_assignment(&mut source, WATCHED_DEADLINE)
+            await_assignment(&mut source, HANG)
         });
         let partitions: Vec<PartitionId> = lanes.iter().map(SourceLane::partition).collect();
         cp.begin_epoch(&partitions, 1);
@@ -630,12 +616,10 @@ impl Watched {
     /// each batch, and return their offsets.
     pub(crate) fn read(&mut self, lane: usize, want: usize) -> Vec<i64> {
         let (source, lane) = (&mut self.source, &mut self.lanes[lane]);
-        metrics::with_local_recorder(&self.recorder, || {
-            drain_lane(source, lane, want, WATCHED_DEADLINE)
-        })
-        .into_iter()
-        .map(|(_, _, offset)| offset)
-        .collect()
+        metrics::with_local_recorder(&self.recorder, || drain_lane(source, lane, want, HANG))
+            .into_iter()
+            .map(|(_, _, offset)| offset)
+            .collect()
     }
 
     /// Commit what the checkpointer holds, as `commit_cycle` does: nothing
@@ -659,7 +643,7 @@ impl Watched {
         want: i64,
     ) -> Vec<i64> {
         let mut seen = Vec::new();
-        spate_test::wait_until(WATCHED_DEADLINE, "the watermark reaches its offset", || {
+        spate_test::wait_until(HANG, "the watermark reaches its offset", || {
             self.serve();
             let _ = self.poll(lane);
             seen.extend(
@@ -685,7 +669,7 @@ impl Watched {
 
     /// Serve the control plane until `partition`'s framework lag reads `want`.
     pub(crate) fn wait_lag(&mut self, partition: i32, want: f64) {
-        spate_test::wait_until(WATCHED_DEADLINE, "the lag reads its value", || {
+        spate_test::wait_until(HANG, "the lag reads its value", || {
             self.serve();
             self.lag(partition) == Some(want)
         });
@@ -714,30 +698,27 @@ pub(crate) fn await_assignment(
     source: &mut KafkaSource,
     timeout: Duration,
 ) -> Vec<<KafkaSource as Source>::Lane> {
-    let deadline = Instant::now() + timeout;
-    loop {
-        assert!(
-            Instant::now() < deadline,
-            "no assignment within {timeout:?}"
-        );
+    let mut assigned = None;
+    spate_test::wait_until(timeout, "an assignment", || {
         if let SourceEvent::LanesAssigned(lanes) = source
             .poll_events(Duration::from_millis(200))
             .expect("poll_events")
         {
-            return lanes;
+            assigned = Some(lanes);
         }
-    }
+        assigned.is_some()
+    });
+    assigned.expect("an assignment")
 }
 
 /// Read `topic` from the earliest offset as consumer group `group`, keeping
 /// what `keep` returns for each message until `n` are kept. Panics if they
-/// are not kept within `timeout`.
+/// are not kept within [`spate_test::HANG`].
 pub(crate) fn consume<T>(
     brokers: &str,
     topic: &str,
     group: &str,
     n: usize,
-    timeout: Duration,
     mut keep: impl FnMut(&BorrowedMessage<'_>) -> Option<T>,
 ) -> Vec<T> {
     let consumer: BaseConsumer = raw_config()
@@ -748,13 +729,14 @@ pub(crate) fn consume<T>(
         .build()
         .expect("consumer");
     consumer.subscribe(&[topic]).expect("subscribe");
-    let deadline = Instant::now() + timeout;
+    let deadline = Instant::now() + HANG;
     let mut out = Vec::new();
     while out.len() < n {
         assert!(
             Instant::now() < deadline,
-            "{topic}: consumed only {} of {n} within {timeout:?}",
-            out.len()
+            "{topic}: consumed only {} of {n} within {:?}",
+            out.len(),
+            HANG
         );
         if let Some(message) = consumer.poll(Duration::from_millis(250)) {
             out.extend(keep(&message.expect("message")));

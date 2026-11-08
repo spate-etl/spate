@@ -51,9 +51,6 @@ fn config(brokers: &str, group: &str) -> KafkaSourceConfig {
     cfg
 }
 
-/// How long a mock-cluster group takes to hand out an assignment.
-const ASSIGNMENT: Duration = Duration::from_secs(30);
-
 /// Group state changes after startup reach the tracing subscriber.
 /// Regression for #651.
 #[test]
@@ -67,7 +64,7 @@ fn consumer_debug_logs_continue_through_group_join() {
         let cp = Checkpointer::new();
         let mut source = KafkaSource::new(cfg);
         source.open(SourceCtx::new(cp.handle())).expect("open");
-        let _lanes = await_assignment(&mut source, ASSIGNMENT);
+        let _lanes = await_assignment(&mut source, HANG);
     });
 
     let states: Vec<_> = lines
@@ -91,13 +88,13 @@ fn full_lifecycle_polls_acks_and_commits() {
     let mut source = KafkaSource::new(config(&brokers, "life"));
     source.open(SourceCtx::new(cp.handle())).expect("open");
 
-    let mut lanes = await_assignment(&mut source, ASSIGNMENT);
+    let mut lanes = await_assignment(&mut source, HANG);
     assert_eq!(lanes.len(), 3, "one lane per partition");
     let partitions: Vec<PartitionId> = lanes.iter().map(SourceLane::partition).collect();
     cp.begin_epoch(&partitions, 1);
 
     for lane in &mut lanes {
-        let rows = drain_lane(&mut source, lane, 10, Duration::from_secs(30));
+        let rows = drain_lane(&mut source, lane, 10, HANG);
         // Offsets are contiguous from zero within a partition.
         let offsets: Vec<i64> = rows.iter().map(|(_, _, o)| *o).collect();
         assert_eq!(offsets, (0..10).collect::<Vec<_>>());
@@ -141,7 +138,7 @@ fn pause_stops_delivery_and_resume_recovers_gapless() {
     source
         .open(SourceCtx::new(cp.handle()).with_meter(Some(meter)))
         .expect("open");
-    let mut lanes = await_assignment(&mut source, ASSIGNMENT);
+    let mut lanes = await_assignment(&mut source, HANG);
     assert_eq!(lanes.len(), 1);
     cp.begin_epoch(&[lanes[0].partition()], 1);
 
@@ -167,7 +164,7 @@ fn pause_stops_delivery_and_resume_recovers_gapless() {
         }
 
         source.resume(&[lanes[0].id()]).expect("resume");
-        let rows = drain_lane(&mut source, &mut lanes[0], 5, Duration::from_secs(30));
+        let rows = drain_lane(&mut source, &mut lanes[0], 5, HANG);
         let offsets: Vec<i64> = rows.iter().map(|(_, _, o)| *o).collect();
         assert_eq!(offsets, (0..5).collect::<Vec<_>>(), "gap-free redelivery");
     });
@@ -201,10 +198,10 @@ fn the_fetcher_starts_before_the_lane_is_handed_out() {
 
     let lines = spate_test::capture_logs(tracing::Level::DEBUG, || {
         source.open(SourceCtx::new(cp.handle())).expect("open");
-        let mut lanes = await_assignment(&mut source, ASSIGNMENT);
+        let mut lanes = await_assignment(&mut source, HANG);
         source.pause(&[lanes[0].id()]).expect("pause");
         source.resume(&[lanes[0].id()]).expect("resume");
-        let rows = drain_lane(&mut source, &mut lanes[0], 5, Duration::from_secs(30));
+        let rows = drain_lane(&mut source, &mut lanes[0], 5, HANG);
         let offsets: Vec<i64> = rows.iter().map(|(_, _, o)| *o).collect();
         assert_eq!(offsets, (0..5).collect::<Vec<_>>());
     });
@@ -257,8 +254,8 @@ fn a_topic_prefixed_reset_policy_reads_a_new_group_from_the_start() {
     let cp = Checkpointer::new();
     let mut source = KafkaSource::new(cfg);
     source.open(SourceCtx::new(cp.handle())).expect("open");
-    let mut lanes = await_assignment(&mut source, ASSIGNMENT);
-    let rows = drain_lane(&mut source, &mut lanes[0], 3, Duration::from_secs(30));
+    let mut lanes = await_assignment(&mut source, HANG);
+    let rows = drain_lane(&mut source, &mut lanes[0], 3, HANG);
     let offsets: Vec<i64> = rows.iter().map(|(_, _, o)| *o).collect();
     assert_eq!(offsets, vec![0, 1, 2]);
 }
@@ -295,9 +292,9 @@ fn a_failed_offset_lookup_starts_from_the_committed_offset() {
 
     let lines = spate_test::capture_logs(tracing::Level::WARN, || {
         source.open(SourceCtx::new(cp.handle())).expect("open");
-        let mut lanes = await_assignment(&mut source, ASSIGNMENT);
+        let mut lanes = await_assignment(&mut source, HANG);
         cluster.clear_request_errors(rdkafka::types::RDKafkaApiKey::OffsetFetch);
-        let rows = drain_lane(&mut source, &mut lanes[0], 3, Duration::from_secs(30));
+        let rows = drain_lane(&mut source, &mut lanes[0], 3, HANG);
         let offsets: Vec<i64> = rows.iter().map(|(_, _, o)| *o).collect();
         assert_eq!(offsets, vec![3, 4, 5]);
     });
@@ -332,8 +329,8 @@ fn a_restarted_member_publishes_lag_before_committing() {
         source
             .open(SourceCtx::new(cp.handle()).with_stage_metrics(Some(metrics)))
             .expect("open");
-        let _lanes = await_assignment(&mut source, ASSIGNMENT);
-        spate_test::wait_until(Duration::from_secs(30), "lag published", || {
+        let _lanes = await_assignment(&mut source, HANG);
+        spate_test::wait_until(HANG, "lag published", || {
             source
                 .poll_events(Duration::from_millis(100))
                 .expect("poll_events");
@@ -359,7 +356,7 @@ fn second_member_triggers_revoke_then_fresh_assignment() {
     let cp = Checkpointer::new();
     let mut source = KafkaSource::new(config(&brokers, "grp"));
     source.open(SourceCtx::new(cp.handle())).expect("open");
-    let lanes = await_assignment(&mut source, ASSIGNMENT);
+    let lanes = await_assignment(&mut source, HANG);
     assert_eq!(lanes.len(), 4, "sole member owns everything");
     let first_ids: Vec<_> = lanes.iter().map(SourceLane::id).collect();
 
@@ -383,10 +380,9 @@ fn second_member_triggers_revoke_then_fresh_assignment() {
 
     // Expect the eager revoke of all four lanes, with the barrier sized to
     // the lane count; simulate the drivers draining.
-    let deadline = Instant::now() + Duration::from_secs(60);
     let mut revoked = false;
     let mut reassigned = 0usize;
-    while Instant::now() < deadline {
+    wait_until(HANG, "the revocation and the re-assignment", || {
         match source
             .poll_events(Duration::from_millis(200))
             .expect("poll_events")
@@ -407,18 +403,17 @@ fn second_member_triggers_revoke_then_fresh_assignment() {
                     "flush",
                     support::complete_revocation(&mut source, &ids, &barrier, &[]),
                 );
+                false
             }
             SourceEvent::LanesAssigned(new_lanes) => {
-                if revoked {
-                    reassigned = new_lanes.len();
-                    break;
-                }
                 // Pre-join duplicate assignments should not happen.
-                panic!("unexpected assignment before revoke");
+                assert!(revoked, "unexpected assignment before revoke");
+                reassigned = new_lanes.len();
+                true
             }
-            _ => {}
+            _ => false,
         }
-    }
+    });
     stop.store(true, Ordering::Relaxed);
     joiner.join().expect("joiner thread");
 
@@ -441,7 +436,7 @@ fn startup_without_brokers_times_out_fatally() {
     source.open(SourceCtx::new(cp.handle())).expect("open");
     clock.advance(Duration::from_secs(301));
 
-    wait_until(Duration::from_secs(20), "the startup timeout", || {
+    wait_until(HANG, "the startup timeout", || {
         match source.poll_events(Duration::from_millis(100)) {
             Ok(_) => false,
             // Transient transport errors are expected with no broker; the
@@ -530,7 +525,7 @@ fn empty_assignment_completes_rebalance_protocol() {
     // join re-forms an established group, and the mock broker paces that at
     // `session.timeout.ms - 1000`, long enough to look quiet while the
     // reassignment is still in flight.
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let deadline = Instant::now() + HANG;
     let mut quiet = 0;
     while !(quiet >= 25 && a_count + b_count == 1) {
         // Assert rather than fall out of the loop: on the deadline path the
@@ -588,9 +583,10 @@ fn empty_assignment_completes_rebalance_protocol() {
         (a, a_lanes, cp_a, a_ep)
     };
 
-    let deadline = Instant::now() + Duration::from_secs(60);
     let mut acquired = 0usize;
-    while Instant::now() < deadline {
+    // The empty member takes the partition once the owner leaves, so its
+    // rebalance protocol was not wedged.
+    wait_until(HANG, "the empty member to acquire the partition", || {
         if let Some(n) = drive_step(
             &mut src,
             &mut lanes,
@@ -599,19 +595,12 @@ fn empty_assignment_completes_rebalance_protocol() {
             Duration::from_millis(200),
         ) {
             acquired = n;
-            if n == 1 {
-                break;
-            }
         }
-    }
-    assert_eq!(
-        acquired, 1,
-        "previously-empty member acquired the partition after the owner left \
-         (its rebalance protocol was not wedged)"
-    );
+        acquired == 1
+    });
 
     // Sanity: the recovered member can consume the partition.
-    let rows = drain_lane(&mut src, &mut lanes[0], 5, Duration::from_secs(30));
+    let rows = drain_lane(&mut src, &mut lanes[0], 5, HANG);
     assert_eq!(rows.len(), 5, "recovered member drains the partition");
 }
 
@@ -659,7 +648,7 @@ fn an_empty_member_survives_the_assignment_deadline() {
 
     // Settle the group with one owner and one empty member, on the
     // conditions `empty_assignment_completes_rebalance_protocol` documents.
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let deadline = Instant::now() + HANG;
     let mut quiet = 0;
     while !(quiet >= 25 && a_count + b_count == 1) {
         assert!(
@@ -754,7 +743,7 @@ fn statistics_populate_kafka_source_metrics() {
         // A failure carries the source's warnings: a partition that is not
         // fetching, with its fetch state, and any main-queue rewind.
         spate_test::show_logs(tracing::Level::WARN, || {
-            let _lanes = await_assignment(&mut source, ASSIGNMENT);
+            let _lanes = await_assignment(&mut source, HANG);
 
             // Poll past at least one statistics interval; stop as soon as the
             // families appear. The not-fetching series is waited on by value
@@ -767,7 +756,7 @@ fn statistics_populate_kafka_source_metrics() {
                 not_fetching(0),
                 not_fetching(1),
             ];
-            let deadline = Instant::now() + Duration::from_secs(30);
+            let deadline = Instant::now() + HANG;
             loop {
                 source
                     .poll_events(Duration::from_millis(100))
@@ -846,7 +835,7 @@ fn statistics_disabled_registers_no_families() {
             .expect("open");
         // Drive the control plane a few times; with stats off no snapshot
         // ever arrives and nothing should register.
-        let _lanes = await_assignment(&mut source, ASSIGNMENT);
+        let _lanes = await_assignment(&mut source, HANG);
         for _ in 0..5 {
             source
                 .poll_events(Duration::from_millis(100))
@@ -918,7 +907,7 @@ fn a_backlogged_consumer_publishes_its_lag() {
             .open(SourceCtx::new(cp.handle()).with_stage_metrics(Some(metrics)))
             .expect("open");
 
-        let mut lanes = await_assignment(&mut source, ASSIGNMENT);
+        let mut lanes = await_assignment(&mut source, HANG);
         assert_eq!(lanes.len(), PARTITIONS as usize, "one lane per partition");
         let partitions: Vec<PartitionId> = lanes.iter().map(SourceLane::partition).collect();
         cp.begin_epoch(&partitions, 1);
@@ -927,7 +916,7 @@ fn a_backlogged_consumer_publishes_its_lag() {
         // `(hi_offset or ls_offset) - committed_offset`, so it stays `-1`,
         // unknown and correctly unpublished, until a commit lands.
         for lane in &mut lanes {
-            let rows = drain_lane(&mut source, lane, CONSUMED, Duration::from_secs(30));
+            let rows = drain_lane(&mut source, lane, CONSUMED, HANG);
             assert!(rows.len() >= CONSUMED, "drained {} rows", rows.len());
         }
         cp.drain();
@@ -946,7 +935,7 @@ fn a_backlogged_consumer_publishes_its_lag() {
         // *first* series is not enough: `consumer_lag` is per partition, so a
         // snapshot can carry a number for p0 while p1 is still `-1`, and the
         // assertions below require one series each.
-        let deadline = Instant::now() + Duration::from_secs(60);
+        let deadline = Instant::now() + HANG;
         loop {
             source
                 .poll_events(Duration::from_millis(100))
@@ -1025,15 +1014,12 @@ fn the_main_queue_delivers_a_partition_that_was_never_split() {
     produce(&brokers, TOPIC, 20, 1, "p");
 
     let consumer = assigned_consumer(&brokers, "plain", 1);
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let mut delivered = false;
-    while !delivered && Instant::now() < deadline {
-        if let Some(result) = consumer.poll(Duration::from_millis(100)) {
-            result.expect("main queue message");
-            delivered = true;
-        }
-    }
-    assert!(delivered, "an unsplit partition delivered nothing");
+    wait_until(HANG, "a delivery for the unsplit partition", || {
+        consumer
+            .poll(Duration::from_millis(100))
+            .map(|result| result.expect("main queue message"))
+            .is_some()
+    });
 }
 
 /// How long a main-queue drain runs before it reports an absence. A first
@@ -1058,16 +1044,13 @@ fn a_split_partition_never_returns_to_the_main_queue() {
 
     // A partition that never fetched also reports zero on the main queue, so
     // the split queue has to deliver before the drain below means anything.
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let mut split_delivered = false;
-    while !split_delivered && Instant::now() < deadline {
+    wait_until(HANG, "a delivery on the split queue", || {
         let _ = consumer.poll(Duration::from_millis(100));
-        if let Some(result) = queue.poll(Duration::from_millis(100)) {
-            result.expect("split queue message");
-            split_delivered = true;
-        }
-    }
-    assert!(split_delivered, "the split queue delivered nothing");
+        queue
+            .poll(Duration::from_millis(100))
+            .map(|result| result.expect("split queue message"))
+            .is_some()
+    });
 
     drop(queue);
     consumer.unassign().expect("unassign");
@@ -1084,15 +1067,15 @@ fn a_split_partition_never_returns_to_the_main_queue() {
     let requeued = consumer
         .split_partition_queue(TOPIC, 0)
         .expect("re-split partition queue");
-    let deadline = Instant::now() + Duration::from_secs(5);
     let mut resplit_offset = None;
-    while resplit_offset.is_none() && Instant::now() < deadline {
+    wait_until(HANG, "a delivery on the re-split queue", || {
         let _ = consumer.poll(Duration::from_millis(100));
         if let Some(result) = requeued.poll(Duration::from_millis(100)) {
             let msg = result.expect("re-split queue message");
             resplit_offset = Some(rdkafka::Message::offset(&msg));
         }
-    }
+        resplit_offset.is_some()
+    });
     assert_eq!(
         (main_queue, resplit_offset),
         (0, Some(0)),
@@ -1131,10 +1114,10 @@ fn zstd_batches_are_read() {
     let mut cp = Checkpointer::new();
     let mut source = KafkaSource::new(config(&brokers, "zstd"));
     source.open(SourceCtx::new(cp.handle())).expect("open");
-    let mut lanes = await_assignment(&mut source, ASSIGNMENT);
+    let mut lanes = await_assignment(&mut source, HANG);
     cp.begin_epoch(&[lanes[0].partition()], 1);
 
-    let rows = drain_lane(&mut source, &mut lanes[0], 20, Duration::from_secs(30));
+    let rows = drain_lane(&mut source, &mut lanes[0], 20, HANG);
     let offsets: Vec<i64> = rows.iter().map(|(_, _, o)| *o).collect();
     assert_eq!(offsets, (0..20).collect::<Vec<_>>());
     assert_eq!(rows[7].0, b"z-7");
@@ -1174,7 +1157,7 @@ fn a_corrupt_batch_fails_the_lane() {
                     .with_partition_detail(true),
             )
             .expect("open");
-        let mut lanes = await_assignment(&mut source, ASSIGNMENT);
+        let mut lanes = await_assignment(&mut source, HANG);
         cp.begin_epoch(&[PartitionId(0)], 1);
         let lane = &mut lanes[0];
 
@@ -1183,7 +1166,7 @@ fn a_corrupt_batch_fails_the_lane() {
         // offset 0 and the corrupt batch's error, and the lane's first poll
         // meets the error after its first message.
         let mut errors = Vec::new();
-        wait_until(ASSIGNMENT, "the record and the error queued", || {
+        wait_until(HANG, "the record and the error queued", || {
             serve_events(&mut source, &mut errors);
             support::fetch_queue_entries(&handle.render(), "corrupt-batch") >= 3.0
         });
@@ -1237,30 +1220,26 @@ fn a_skipped_v1_message_fails_the_lane() {
     let mut cp = Checkpointer::new();
     let mut source = KafkaSource::new(cfg);
     source.open(SourceCtx::new(cp.handle())).expect("open");
-    let mut lanes = await_assignment(&mut source, ASSIGNMENT);
+    let mut lanes = await_assignment(&mut source, HANG);
     cp.begin_epoch(&[PartitionId(0)], 1);
     let lane = &mut lanes[0];
 
     let mut offsets = Vec::new();
     let mut outcome = None;
     let mut errors = Vec::new();
-    wait_until(
-        ASSIGNMENT,
-        "a lane poll fails or offset 2 is delivered",
-        || {
-            serve_events(&mut source, &mut errors);
-            match lane.poll(64, Duration::from_millis(200)) {
-                Ok(Some(mut batch)) => {
-                    while let Some(raw) = batch.next_payload() {
-                        offsets.push(raw.offset);
-                    }
+    wait_until(HANG, "a lane poll fails or offset 2 is delivered", || {
+        serve_events(&mut source, &mut errors);
+        match lane.poll(64, Duration::from_millis(200)) {
+            Ok(Some(mut batch)) => {
+                while let Some(raw) = batch.next_payload() {
+                    offsets.push(raw.offset);
                 }
-                Ok(None) => {}
-                Err(e) => outcome = Some(e.to_string()),
             }
-            outcome.is_some() || offsets.contains(&2)
-        },
-    );
+            Ok(None) => {}
+            Err(e) => outcome = Some(e.to_string()),
+        }
+        outcome.is_some() || offsets.contains(&2)
+    });
     let error = outcome.expect("a poll fails");
     assert!(
         error.contains("(Fatal)") && error.contains("BadMessage"),
@@ -1305,14 +1284,14 @@ fn a_mid_batch_authorization_failure_fails_the_lane() {
                     .with_partition_detail(true),
             )
             .expect("open");
-        let mut lanes = await_assignment(&mut source, ASSIGNMENT);
+        let mut lanes = await_assignment(&mut source, HANG);
         cp.begin_epoch(&[PartitionId(0)], 1);
         let lane = &mut lanes[0];
 
         let entries = || support::fetch_queue_entries(&handle.render(), "mid-batch-auth");
         let mut errors = Vec::new();
         // One entry before any data, then the two records.
-        wait_until(ASSIGNMENT, "both records queued", || {
+        wait_until(HANG, "both records queued", || {
             serve_events(&mut source, &mut errors);
             entries() >= 3.0
         });
@@ -1321,7 +1300,7 @@ fn a_mid_batch_authorization_failure_fails_the_lane() {
             RDKafkaApiKey::Fetch,
             &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_TOPIC_AUTHORIZATION_FAILED; 1000],
         );
-        wait_until(ASSIGNMENT, "the error queued behind them", || {
+        wait_until(HANG, "the error queued behind them", || {
             serve_events(&mut source, &mut errors);
             entries() >= before + 1.0
         });
@@ -1461,9 +1440,9 @@ impl Driver {
     }
 
     /// Step until the live lanes cover partitions `0..n`.
-    fn settle(&mut self, n: u32, timeout: Duration) {
+    fn settle(&mut self, n: u32) {
         let want: Vec<u32> = (0..n).collect();
-        wait_until(timeout, "the live lanes to cover every partition", || {
+        wait_until(HANG, "the live lanes to cover every partition", || {
             if self.partitions() == want {
                 return true;
             }
@@ -1476,9 +1455,9 @@ impl Driver {
     /// Step until the live lanes cover partitions `0..partitions` and each of
     /// `consumers` consumers reports itself in a stable group, so the group
     /// has finished forming. Takes a driver from [`Driver::open_watched`].
-    fn settle_group(&mut self, consumers: usize, partitions: u32, timeout: Duration) {
+    fn settle_group(&mut self, consumers: usize, partitions: u32) {
         let want: Vec<u32> = (0..partitions).collect();
-        wait_until(timeout, "every consumer in a stable group", || {
+        wait_until(HANG, "every consumer in a stable group", || {
             self.step(Duration::from_millis(100));
             let rendered = self
                 .statistics
@@ -1497,11 +1476,7 @@ impl Driver {
     /// Read every live lane, stepping between polls, until each partition has
     /// delivered `n` offsets, and return the offsets read per partition. Each
     /// batch is dropped once read, which acks it.
-    fn read(
-        &mut self,
-        n: i64,
-        timeout: Duration,
-    ) -> BTreeMap<u32, std::collections::BTreeSet<i64>> {
+    fn read(&mut self, n: i64) -> BTreeMap<u32, std::collections::BTreeSet<i64>> {
         let mut got: BTreeMap<u32, std::collections::BTreeSet<i64>> = BTreeMap::new();
         let done = |got: &BTreeMap<u32, std::collections::BTreeSet<i64>>, parts: &[u32]| {
             !parts.is_empty()
@@ -1509,7 +1484,7 @@ impl Driver {
                     .iter()
                     .all(|p| got.get(p).is_some_and(|o| o.len() as i64 >= n))
         };
-        wait_until(timeout, "each live lane's offsets", || {
+        wait_until(HANG, "each live lane's offsets", || {
             if done(&got, &self.partitions()) {
                 return true;
             }
@@ -1538,14 +1513,10 @@ impl Driver {
     /// Read every live lane while `produce` runs on each tick, until each
     /// partition has delivered a record, and return the first offset read per
     /// partition. Each batch is dropped once read, which acks it.
-    fn read_from_end(
-        &mut self,
-        timeout: Duration,
-        mut produce: impl FnMut(),
-    ) -> BTreeMap<u32, i64> {
+    fn read_from_end(&mut self, mut produce: impl FnMut()) -> BTreeMap<u32, i64> {
         let mut first: BTreeMap<u32, i64> = BTreeMap::new();
         let mut tick = 0;
-        wait_until(timeout, "a record from each live lane", || {
+        wait_until(HANG, "a record from each live lane", || {
             if tick % 20 == 0 {
                 produce();
             }
@@ -1572,7 +1543,7 @@ impl Driver {
             RDKafkaApiKey::Heartbeat,
             &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_ILLEGAL_GENERATION],
         );
-        wait_until(Duration::from_secs(30), "the revocation", || {
+        wait_until(HANG, "the revocation", || {
             self.step(Duration::from_millis(100));
             self.revocations > revocations
         });
@@ -1619,8 +1590,8 @@ fn consumers_share_one_epoch() {
     produce(&brokers, TOPIC, 5, 4, "s");
 
     let mut driver = Driver::open(consumers_config(&brokers, "share", 2));
-    driver.settle(4, Duration::from_secs(60));
-    driver.read(5, Duration::from_secs(30));
+    driver.settle(4);
+    driver.read(5);
 }
 
 /// Each partition's offsets are stored and committed through the consumer
@@ -1637,8 +1608,8 @@ fn two_consumers_poll_ack_and_commit_every_partition() {
     let mut cfg = watched_config(&brokers, "commit-each", 2);
     cfg.commit_interval = Duration::from_hours(1);
     let mut driver = Driver::open_watched(KafkaSource::new(cfg), "commit-each");
-    driver.settle_group(2, 4, Duration::from_secs(60));
-    driver.read(10, Duration::from_secs(30));
+    driver.settle_group(2, 4);
+    driver.read(10);
     driver.commit();
 
     assert_eq!(
@@ -1657,7 +1628,7 @@ fn pause_reaches_the_owning_consumer() {
     let brokers = cluster.bootstrap_servers();
 
     let mut driver = Driver::open(consumers_config(&brokers, "pause-owner", 2));
-    driver.settle(2, Duration::from_secs(60));
+    driver.settle(2);
     let ids: Vec<_> = driver.lanes.iter().map(SourceLane::id).collect();
     driver.source.pause(&ids).expect("pause");
     produce(&brokers, TOPIC, 5, 2, "p");
@@ -1678,7 +1649,7 @@ fn pause_reaches_the_owning_consumer() {
     }
 
     driver.source.resume(&ids).expect("resume");
-    driver.read(5, Duration::from_secs(30));
+    driver.read(5);
 }
 
 /// A member joining from outside revokes every consumer of the source, and
@@ -1698,7 +1669,7 @@ fn an_outside_member_rebalances_every_in_process_consumer() {
         KafkaSource::new(watched_config(&brokers, "outside", 2)),
         "outside",
     );
-    driver.settle_group(2, 4, Duration::from_secs(60));
+    driver.settle_group(2, 4);
     let before = driver.revocations;
 
     let stop = Arc::new(AtomicBool::new(false));
@@ -1718,18 +1689,14 @@ fn an_outside_member_rebalances_every_in_process_consumer() {
             }
         })
     };
-    wait_until(
-        Duration::from_secs(60),
-        "the joiner takes partitions",
-        || {
-            driver.step(Duration::from_millis(100));
-            driver.revocations > before && !driver.lanes.is_empty() && driver.lanes.len() < 4
-        },
-    );
+    wait_until(HANG, "the joiner takes partitions", || {
+        driver.step(Duration::from_millis(100));
+        driver.revocations > before && !driver.lanes.is_empty() && driver.lanes.len() < 4
+    });
 
     stop.store(true, Ordering::Relaxed);
     joiner.join().expect("joiner thread");
-    driver.settle_group(2, 4, Duration::from_secs(60));
+    driver.settle_group(2, 4);
 }
 
 /// A consumer the group assigns nothing stays in the group past both
@@ -1747,11 +1714,11 @@ fn more_consumers_than_partitions_keeps_running() {
     let deadlines = cfg.startup_timeout + cfg.assignment_timeout;
     let source = KafkaSource::new(cfg).with_clock(Arc::clone(&clock) as _);
     let mut driver = Driver::open_watched(source, "idle-consumer");
-    driver.settle_group(2, 1, Duration::from_secs(60));
+    driver.settle_group(2, 1);
 
     clock.advance(deadlines + Duration::from_secs(1));
     produce(&brokers, TOPIC, 5, 1, "i");
-    driver.read(5, Duration::from_secs(30));
+    driver.read(5);
     driver.commit();
     assert_eq!(
         support::committed_by(&brokers, "idle-consumer", TOPIC, 1),
@@ -1774,14 +1741,14 @@ fn a_lost_assignment_fails_the_flush_and_the_source_recovers() {
         let group = format!("lost-{consumers}");
         let cfg = watched_config(&brokers, &group, consumers);
         let mut driver = Driver::open_watched(KafkaSource::new(cfg), &group);
-        driver.settle_group(consumers, 4, Duration::from_secs(60));
+        driver.settle_group(consumers, 4);
 
         let failures = driver.lose_a_member(&cluster);
         assert_eq!(failures.len(), 1, "{failures:?}");
         assert!(failures[0].contains("AssignmentLost"), "{failures:?}");
 
-        driver.settle(4, Duration::from_secs(60));
-        driver.read(5, Duration::from_secs(30));
+        driver.settle(4);
+        driver.read(5);
     }
 }
 
@@ -1820,9 +1787,9 @@ fn a_held_offer_the_group_has_left_is_not_fatal() {
         let cfg = watched_config(brokers, "stale-held", 2);
         let source = KafkaSource::new(cfg).with_clock(Arc::clone(&clock) as _);
         let mut driver = Driver::open_watched(source, "stale-held");
-        driver.settle_group(2, 1, Duration::from_secs(60));
+        driver.settle_group(2, 1);
         produce(brokers, TOPIC, 5, 1, "s");
-        driver.read(5, Duration::from_secs(30));
+        driver.read(5);
         driver.commit();
         assert_eq!(
             support::committed_by(brokers, "stale-held", TOPIC, 1),
@@ -1842,10 +1809,10 @@ fn a_late_consumer_ends_up_sharing_every_partition() {
         let cfg = watched_config(brokers, "late-share", 2);
         let source = KafkaSource::new(cfg).with_clock(Arc::clone(&clock) as _);
         let mut driver = Driver::open_watched(source, "late-share");
-        driver.settle_group(2, 4, Duration::from_secs(60));
+        driver.settle_group(2, 4);
         // Both consumers at two partitions and every lane live: a sum of four
         // also holds while the discarded consumer has not rejoined.
-        wait_until(Duration::from_secs(60), "two partitions each", || {
+        wait_until(HANG, "two partitions each", || {
             driver.step(Duration::from_millis(100));
             let rendered = driver.statistics.as_ref().expect("watched").render();
             let sizes = client_values(&rendered, "spate_kafka_group_assignment_size");
@@ -1853,7 +1820,7 @@ fn a_late_consumer_ends_up_sharing_every_partition() {
                 && sizes.len() == 2
                 && sizes.iter().all(|(_, size)| *size == 2.0)
         });
-        let read = driver.read(5, Duration::from_secs(30));
+        let read = driver.read(5);
         assert_eq!(read.len(), 4, "{read:?}");
     });
 }
@@ -1866,7 +1833,7 @@ fn dropping_after_a_discard_returns() {
         let cfg = watched_config(brokers, "drop-discard", 2);
         let source = KafkaSource::new(cfg).with_clock(Arc::clone(&clock) as _);
         let mut driver = Driver::open_watched(source, "drop-discard");
-        driver.settle_group(2, 1, Duration::from_secs(60));
+        driver.settle_group(2, 1);
         returns_within("dropping after a discard", move || drop(driver));
     });
 }
@@ -1882,7 +1849,7 @@ fn dropping_in_the_pass_after_a_discard_returns() {
         let mut source = KafkaSource::new(cfg).with_clock(Arc::clone(&clock) as _);
         let cp = Checkpointer::new();
         source.open(SourceCtx::new(cp.handle())).expect("open");
-        wait_until(Duration::from_secs(60), "a discard or an accept", || {
+        wait_until(HANG, "a discard or an accept", || {
             let mut event = None;
             let warned = spate_test::capture_logs(tracing::Level::WARN, || {
                 event = Some(source.poll_events(Duration::from_millis(50)));
@@ -1910,16 +1877,12 @@ fn a_consumer_joining_after_the_hold_ended_starts_a_new_epoch() {
         let source = KafkaSource::new(cfg).with_clock(Arc::clone(&clock) as _);
         let mut driver = Driver::open_watched(source, "hold-ended");
         // Past the hold as soon as the first offer arrives, whenever that is.
-        wait_until(
-            Duration::from_secs(30),
-            "the first consumer's lanes",
-            || {
-                clock.advance(Duration::from_millis(500));
-                driver.step(Duration::from_millis(20));
-                !driver.lanes.is_empty()
-            },
-        );
-        driver.settle_group(2, 4, Duration::from_secs(60));
+        wait_until(HANG, "the first consumer's lanes", || {
+            clock.advance(Duration::from_millis(500));
+            driver.step(Duration::from_millis(20));
+            !driver.lanes.is_empty()
+        });
+        driver.settle_group(2, 4);
         // A slow runner can add a rebalance, so this counts at least one.
         assert!(
             driver.revocations >= 1,
@@ -1964,12 +1927,12 @@ fn a_lost_member_keeps_its_peers_commit_and_loses_no_record() {
         let mut cfg = watched_config(&brokers, group, 2);
         cfg.commit_interval = Duration::from_hours(1);
         let mut driver = Driver::open_watched(KafkaSource::new(cfg), group);
-        driver.settle_group(2, 4, Duration::from_secs(60));
+        driver.settle_group(2, 4);
         if earlier_loss {
             driver.lose_a_member(&cluster);
-            driver.settle_group(2, 4, Duration::from_secs(60));
+            driver.settle_group(2, 4);
         }
-        driver.read(10, Duration::from_secs(30));
+        driver.read(10);
 
         let failures = driver.lose_a_member(&cluster);
         assert_eq!(failures.len(), 1, "{failures:?}");
@@ -1987,8 +1950,8 @@ fn a_lost_member_keeps_its_peers_commit_and_loses_no_record() {
         );
 
         produce(&brokers, TOPIC, 5, 4, "m");
-        driver.settle_group(2, 4, Duration::from_secs(60));
-        let second = driver.read(5, Duration::from_secs(30));
+        driver.settle_group(2, 4);
+        let second = driver.read(5);
         for (partition, offsets) in &second {
             let (first, last) = (
                 *offsets.first().expect("read"),
@@ -2035,8 +1998,8 @@ fn two_consumers_publish_lag_before_committing() {
         let mut driver = Driver::open_with(KafkaSource::new(cfg), |ctx| {
             ctx.with_stage_metrics(Some(metrics))
         });
-        driver.settle(2, Duration::from_secs(60));
-        wait_until(Duration::from_secs(30), "lag published", || {
+        driver.settle(2);
+        wait_until(HANG, "lag published", || {
             driver.step(Duration::from_millis(100));
             lag_series_count(&handle.render()) == 2
         });
@@ -2079,27 +2042,21 @@ fn two_consumers_publish_their_own_statistics() {
             let mut driver = Driver::open_with(KafkaSource::new(cfg), |ctx| {
                 ctx.with_meter(Some(meter)).with_partition_detail(true)
             });
-            driver.settle(2, Duration::from_secs(60));
-            driver.read(5, Duration::from_secs(30));
+            driver.settle(2);
+            driver.read(5);
             if interval.is_zero() {
                 return;
             }
-            wait_until(
-                Duration::from_secs(30),
-                "both consumers' statistics",
-                || {
-                    driver.step(Duration::from_millis(100));
-                    let rendered = handle.render();
-                    let sizes = client_values(&rendered, "spate_kafka_group_assignment_size");
-                    let rx: f64 = client_values(&rendered, "spate_kafka_rx_messages_total")
-                        .iter()
-                        .map(|(_, v)| v)
-                        .sum();
-                    sizes.len() == 2
-                        && sizes.iter().map(|(_, v)| v).sum::<f64>() == 2.0
-                        && rx >= 10.0
-                },
-            );
+            wait_until(HANG, "both consumers' statistics", || {
+                driver.step(Duration::from_millis(100));
+                let rendered = handle.render();
+                let sizes = client_values(&rendered, "spate_kafka_group_assignment_size");
+                let rx: f64 = client_values(&rendered, "spate_kafka_rx_messages_total")
+                    .iter()
+                    .map(|(_, v)| v)
+                    .sum();
+                sizes.len() == 2 && sizes.iter().map(|(_, v)| v).sum::<f64>() == 2.0 && rx >= 10.0
+            });
         });
         handle.render()
     };
@@ -2141,8 +2098,8 @@ fn consumer_series_carry_no_passthrough_value() {
         metrics::with_local_recorder(&recorder, || {
             let mut driver =
                 Driver::open_with(KafkaSource::new(cfg), |ctx| ctx.with_meter(Some(meter)));
-            driver.settle(2, Duration::from_secs(60));
-            wait_until(Duration::from_secs(30), "statistics", || {
+            driver.settle(2);
+            wait_until(HANG, "statistics", || {
                 driver.step(Duration::from_millis(100));
                 client_values(&handle.render(), "spate_kafka_group_assignment_size").len() == 2
             });
@@ -2170,14 +2127,14 @@ fn returns_within(what: &str, f: impl FnOnce() + Send + 'static) {
         let _ = done.send(());
     });
     finished
-        .recv_timeout(Duration::from_secs(30))
+        .recv_timeout(HANG)
         .unwrap_or_else(|_| panic!("{what} did not return"));
 }
 
 /// Poll `source` until it surfaces a revocation, which it leaves
 /// unacknowledged.
 fn await_revocation(source: &mut KafkaSource, what: &str) {
-    wait_until(Duration::from_secs(60), what, || {
+    wait_until(HANG, what, || {
         matches!(
             source.poll_events(Duration::from_millis(100)),
             Ok(SourceEvent::LanesRevoked { .. })
@@ -2199,7 +2156,7 @@ fn dropping_mid_revoke_returns() {
     let brokers = cluster.bootstrap_servers();
 
     let mut driver = Driver::open(consumers_config(&brokers, "drop-revoke", 2));
-    driver.settle(4, Duration::from_secs(60));
+    driver.settle(4);
     let stop = Arc::new(AtomicBool::new(false));
     let joiner = {
         let brokers = brokers.clone();
@@ -2239,7 +2196,7 @@ fn dropping_mid_lost_revoke_returns() {
     let mut cfg = consumers_config(&cluster.bootstrap_servers(), "drop-lost-revoke", 2);
     cfg.rdkafka.insert("debug".into(), "cgrp".into());
     let mut driver = Driver::open(cfg);
-    driver.settle(2, Duration::from_secs(60));
+    driver.settle(2);
     let Driver {
         mut source, lanes, ..
     } = driver;
@@ -2272,7 +2229,7 @@ fn dropping_the_source_before_its_lanes_completes() {
     let brokers = cluster.bootstrap_servers();
 
     let mut driver = Driver::open(consumers_config(&brokers, "drop-order", 2));
-    driver.settle(2, Duration::from_secs(60));
+    driver.settle(2);
     let Driver { source, lanes, .. } = driver;
     returns_within("dropping the source, then its lanes", move || {
         drop(source);
@@ -2307,8 +2264,8 @@ fn a_partial_refusal_stores_the_owned_offsets() {
     let mut cfg = watched_config(&brokers, "partial-refusal", 2);
     cfg.commit_interval = Duration::from_hours(1);
     let mut driver = Driver::open_watched(KafkaSource::new(cfg), "partial-refusal");
-    driver.settle_group(2, 4, Duration::from_secs(60));
-    driver.read(10, Duration::from_secs(30));
+    driver.settle_group(2, 4);
+    driver.read(10);
     driver.cp.drain();
     let mut watermarks = driver.cp.take_watermarks();
     watermarks.push((PartitionId(9), 3));
@@ -2377,17 +2334,13 @@ fn the_mock_serves_a_control_batch_as_a_marker() {
             .expect("split queue");
 
         let mut delivered = 0;
-        wait_until(
-            Duration::from_secs(30),
-            "the position passes the marker",
-            || {
-                if queue.poll(Duration::from_millis(100)).is_some() {
-                    delivered += 1;
-                }
-                consumer.position().expect("position").elements()[0].offset()
-                    == rdkafka::Offset::Offset(RECORDS as i64 + 1)
-            },
-        );
+        wait_until(HANG, "the position passes the marker", || {
+            if queue.poll(Duration::from_millis(100)).is_some() {
+                delivered += 1;
+            }
+            consumer.position().expect("position").elements()[0].offset()
+                == rdkafka::Offset::Offset(RECORDS as i64 + 1)
+        });
         assert_eq!(delivered, RECORDS, "{marker:?}");
     }
 }
@@ -2438,7 +2391,7 @@ fn a_marker_at_the_tail_leaves_no_lag() {
         watched.wait_lag(0, 0.0);
         let pipeline = watched.pipeline.clone();
         let mut stored = None;
-        wait_until(ASSIGNMENT, "the stored lag reads 0", || {
+        wait_until(HANG, "the stored lag reads 0", || {
             watched.serve();
             stored = spate_test::metric_value(
                 &watched.rendered(),
@@ -2580,7 +2533,7 @@ fn a_zero_timeout_poll_reads_the_position_in_turn() {
     let mut watched = Watched::open(config(&brokers, &spate_test::unique_name("turn")));
     let pipeline = watched.pipeline.clone();
     // One version barrier, the record and the marker.
-    wait_until(ASSIGNMENT, "the fetcher runs ahead", || {
+    wait_until(HANG, "the fetcher runs ahead", || {
         watched.serve();
         support::fetch_queue_entries(&watched.rendered(), &pipeline) >= 3.0
     });
@@ -2591,7 +2544,7 @@ fn a_zero_timeout_poll_reads_the_position_in_turn() {
         lane.poll(64, Duration::ZERO).expect("lane poll").is_some()
     };
     assert!(!poll(&mut watched.lanes[0]), "read out of turn");
-    wait_until(ASSIGNMENT, "the read's turn comes", || {
+    wait_until(HANG, "the read's turn comes", || {
         poll(&mut watched.lanes[0])
     });
     assert_eq!(watched.commit(), [(PartitionId(0), 2)]);
@@ -2617,7 +2570,7 @@ fn an_idle_plain_lane_issues_no_ack() {
 /// record's ack, which holds the commit there after the batch drops.
 fn hold_a_record(watched: &mut Watched, lane: usize) -> spate_core::checkpoint::AckRef {
     let mut held = None;
-    wait_until(ASSIGNMENT, "the record", || {
+    wait_until(HANG, "the record", || {
         watched.serve();
         if let Some(batch) = watched.lanes[lane]
             .poll(1, Duration::from_millis(100))
@@ -2635,12 +2588,12 @@ fn hold_a_record(watched: &mut Watched, lane: usize) -> spate_core::checkpoint::
 /// for it. Returns the clone.
 fn hold_a_record_past_its_marker(watched: &mut Watched) -> spate_core::checkpoint::AckRef {
     let pipeline = watched.pipeline.clone();
-    wait_until(ASSIGNMENT, "the record and the marker are queued", || {
+    wait_until(HANG, "the record and the marker are queued", || {
         watched.serve();
         support::fetch_queue_entries(&watched.rendered(), &pipeline) >= 2.0
     });
     let held = hold_a_record(watched, 0);
-    wait_until(ASSIGNMENT, "the marker is served", || {
+    wait_until(HANG, "the marker is served", || {
         watched.serve();
         assert_eq!(watched.poll(0), None, "a batch behind a live ack");
         support::fetch_queue_entries(&watched.rendered(), &pipeline) == 0.0
@@ -2789,10 +2742,10 @@ fn two_consumers_each_advance_past_their_own_marker() {
         KafkaSource::new(watched_config(&brokers, &group, 2)),
         &group,
     );
-    driver.settle_group(2, 2, ASSIGNMENT);
-    driver.read(1, ASSIGNMENT);
+    driver.settle_group(2, 2);
+    driver.read(1);
 
-    wait_until(ASSIGNMENT, "both partitions pass their marker", || {
+    wait_until(HANG, "both partitions pass their marker", || {
         driver.step(Duration::from_millis(50));
         for lane in &mut driver.lanes {
             let _ = lane.poll(64, Duration::from_millis(50)).expect("lane poll");
@@ -2900,7 +2853,7 @@ fn a_pipeline_reaches_zero_lag_past_a_marker() {
     let (name, handle, script, shutdown, run) =
         run_marker_pipeline(&brokers, &group, 1, "{ interval: 100ms }", |_| {});
 
-    wait_until(Duration::from_secs(60), "the lag reaches 0", || {
+    wait_until(HANG, "the lag reaches 0", || {
         support::lag_of(&handle.render(), &name, 0) == Some(0.0)
     });
     assert_eq!(
@@ -2909,7 +2862,7 @@ fn a_pipeline_reaches_zero_lag_past_a_marker() {
     );
     shutdown.trigger();
     let report = run
-        .wait_exit(Duration::from_secs(30))
+        .wait_exit(HANG)
         .expect("the pipeline exits")
         .expect("run");
     assert_eq!(report.final_watermarks, [(PartitionId(0), 6)]);
@@ -2955,15 +2908,13 @@ fn an_idle_partition_beside_a_busy_one_reaches_zero_lag() {
     let (name, handle, _script, shutdown, run) =
         run_marker_pipeline(&brokers, &group, 1, "{ interval: 100ms }", |_| {});
 
-    wait_until(
-        Duration::from_secs(60),
-        "the idle partition's lag reaches 0",
-        || support::lag_of(&handle.render(), &name, 0) == Some(0.0),
-    );
+    wait_until(HANG, "the idle partition's lag reaches 0", || {
+        support::lag_of(&handle.render(), &name, 0) == Some(0.0)
+    });
     stop.store(true, Ordering::Relaxed);
     feeding.join().expect("feeding thread");
     shutdown.trigger();
-    run.wait_exit(Duration::from_secs(30))
+    run.wait_exit(HANG)
         .expect("the pipeline exits")
         .expect("run");
 }
@@ -2990,7 +2941,7 @@ fn markers_behind_a_stalled_head_leave_the_lane_polling() {
             script.enqueue_global(held);
         },
     );
-    wait_until(Duration::from_secs(60), "the first record commits", || {
+    wait_until(HANG, "the first record commits", || {
         support::committed_by(&brokers, &group, TOPIC, 1) == [rdkafka::Offset::Offset(1)]
     });
 
@@ -3008,25 +2959,19 @@ fn markers_behind_a_stalled_head_leave_the_lane_polling() {
     };
     // The lag shows the fetcher reached the end, and the empty queue beside it shows
     // the lane served what it fetched.
-    wait_until(
-        Duration::from_secs(60),
-        "the lane serves the markers",
-        || {
-            figure("spate_source_lag_records") == Some((end - 1) as f64)
-                && figure("spate_kafka_source_partition_fetch_queue_messages") == Some(0.0)
-                && figure(names::CHECKPOINT_PENDING_BATCHES) == Some(1.0)
-                && script.held_writes() == 1
-        },
-    );
+    wait_until(HANG, "the lane serves the markers", || {
+        figure("spate_source_lag_records") == Some((end - 1) as f64)
+            && figure("spate_kafka_source_partition_fetch_queue_messages") == Some(0.0)
+            && figure(names::CHECKPOINT_PENDING_BATCHES) == Some(1.0)
+            && script.held_writes() == 1
+    });
 
     script.release_held();
-    wait_until(
-        Duration::from_secs(60),
-        "the head and the markers commit",
-        || support::committed_by(&brokers, &group, TOPIC, 1) == [rdkafka::Offset::Offset(end)],
-    );
+    wait_until(HANG, "the head and the markers commit", || {
+        support::committed_by(&brokers, &group, TOPIC, 1) == [rdkafka::Offset::Offset(end)]
+    });
     shutdown.trigger();
-    run.wait_exit(Duration::from_secs(30))
+    run.wait_exit(HANG)
         .expect("the pipeline exits")
         .expect("run");
 }
@@ -3105,7 +3050,7 @@ mod latest_start {
 
     /// Advance `clock` past the hold until `driver`'s first consumer has lanes.
     fn past_the_hold(driver: &mut Driver, clock: &TestClock) {
-        wait_until(ASSIGNMENT, "the first consumer's lanes", || {
+        wait_until(HANG, "the first consumer's lanes", || {
             clock.advance(Duration::from_millis(500));
             driver.step(Duration::from_millis(20));
             !driver.lanes.is_empty()
@@ -3155,7 +3100,7 @@ mod latest_start {
         let cp = Checkpointer::new();
         let mut source = KafkaSource::new(cfg);
         source.open(SourceCtx::new(cp.handle())).expect("open");
-        let lanes = await_assignment(&mut source, ASSIGNMENT);
+        let lanes = await_assignment(&mut source, HANG);
         (source, cp, lanes)
     }
 
@@ -3164,10 +3109,10 @@ mod latest_start {
     fn assert_no_gap_across_epochs(driver: &mut Driver, brokers: &str) {
         let mut produce = produce_round(brokers, 4);
         produce();
-        let mut read = driver.read(2, Duration::from_secs(30));
-        driver.settle_group(2, 4, Duration::from_secs(60));
+        let mut read = driver.read(2);
+        driver.settle_group(2, 4);
         produce();
-        for (p, offsets) in driver.read(2, Duration::from_secs(30)) {
+        for (p, offsets) in driver.read(2) {
             read.entry(p).or_default().extend(offsets);
         }
         for (p, offsets) in &read {
@@ -3209,9 +3154,9 @@ mod latest_start {
     fn a_record_produced_after_the_start_is_read() {
         let (_cluster, brokers) = cluster_with_records(1);
         let mut driver = Driver::open(quiet_latest(&brokers, "start-read"));
-        driver.settle(1, ASSIGNMENT);
+        driver.settle(1);
         let start = committed(&brokers, "start-read", 1)[0];
-        let first = driver.read_from_end(Duration::from_secs(30), produce_round(&brokers, 1));
+        let first = driver.read_from_end(produce_round(&brokers, 1));
         assert_eq!(start, rdkafka::Offset::Offset(first[&0]));
     }
 
@@ -3252,7 +3197,7 @@ mod latest_start {
                 source.open(SourceCtx::new(cp.handle())).expect("open");
                 let mut scripted = false;
                 let mut lanes = None;
-                wait_until(Duration::from_secs(60), "lanes after the discard", || {
+                wait_until(HANG, "lanes after the discard", || {
                     if !scripted && discards() == 1 {
                         assert_eq!(committed(&brokers, group, 1), [rdkafka::Offset::Invalid]);
                         cluster.request_errors(RDKafkaApiKey::Heartbeat, &[code]);
@@ -3298,7 +3243,7 @@ mod latest_start {
         };
         with_warnings(&capture, || {
             source.open(SourceCtx::new(cp.handle())).expect("open");
-            wait_until(ASSIGNMENT, "the first attempt", || {
+            wait_until(HANG, "the first attempt", || {
                 assert!(
                     !matches!(
                         source.poll_events(Duration::from_millis(50)),
@@ -3317,7 +3262,7 @@ mod latest_start {
             }
             assert_eq!(attempts(), 1, "one line per attempt");
             clock.advance(Duration::from_secs(1));
-            let lanes = await_assignment(&mut source, ASSIGNMENT);
+            let lanes = await_assignment(&mut source, HANG);
             assert_eq!(lanes.len(), 1);
             assert_eq!(
                 committed(&brokers, "start-retry", 1),
@@ -3354,7 +3299,7 @@ mod latest_start {
                     RDKafkaApiKey::OffsetFetch,
                     &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_UNKNOWN],
                 );
-                wait_until(Duration::from_secs(60), "the failed lookup", || {
+                wait_until(HANG, "the failed lookup", || {
                     driver.step(Duration::from_millis(20));
                     attempts() == 1
                 });
@@ -3365,7 +3310,7 @@ mod latest_start {
                 }
                 assert_eq!(attempts(), 1, "one line per attempt");
                 clock.advance(Duration::from_secs(1));
-                driver.settle_group(2, 4, Duration::from_secs(60));
+                driver.settle_group(2, 4);
             });
         });
     }
@@ -3388,7 +3333,7 @@ mod latest_start {
             let first = KafkaSource::new(quiet_latest(&brokers, "retry-revoked"))
                 .with_clock(Arc::clone(&clock) as _);
             let mut first = Driver::open_with(first, |ctx| ctx);
-            wait_until(ASSIGNMENT, "the failed start", || {
+            wait_until(HANG, "the failed start", || {
                 first.step(Duration::from_millis(50));
                 capture
                     .lines()
@@ -3396,7 +3341,7 @@ mod latest_start {
                     .any(|l| l.contains("could not settle a start position"))
             });
             let mut second = Driver::open(quiet_latest(&brokers, "retry-revoked"));
-            wait_until(Duration::from_secs(60), "a lane on either member", || {
+            wait_until(HANG, "a lane on either member", || {
                 clock.advance(Duration::from_secs(1));
                 first.step(Duration::from_millis(20));
                 second.step(Duration::from_millis(20));
@@ -3408,7 +3353,7 @@ mod latest_start {
             } else {
                 &mut first
             };
-            let read = holder.read_from_end(Duration::from_secs(30), produce_round(&brokers, 1));
+            let read = holder.read_from_end(produce_round(&brokers, 1));
             assert_eq!(start, rdkafka::Offset::Offset(read[&0]));
         });
     }
@@ -3441,7 +3386,7 @@ mod latest_start {
         with_warnings(&capture, || {
             let first = KafkaSource::new(config()).with_clock(Arc::clone(&clock) as _);
             let mut first = Driver::open_with(first, |ctx| ctx);
-            wait_until(ASSIGNMENT, "the failed start", || {
+            wait_until(HANG, "the failed start", || {
                 first.step(Duration::from_millis(50));
                 capture
                     .lines()
@@ -3452,11 +3397,11 @@ mod latest_start {
             // rebalance.
             let before = joins();
             let mut second = Driver::open(config());
-            wait_until(ASSIGNMENT, "the second member's join", || {
+            wait_until(HANG, "the second member's join", || {
                 second.step(Duration::from_millis(20));
                 joins() > before
             });
-            wait_until(Duration::from_secs(30), "the offer given up", || {
+            wait_until(HANG, "the offer given up", || {
                 clock.advance(Duration::from_secs(1));
                 first.step(Duration::from_millis(20));
                 second.step(Duration::from_millis(20));
@@ -3484,7 +3429,7 @@ mod latest_start {
         cfg.assignment_timeout = Duration::from_secs(5);
         let source = KafkaSource::new(cfg).with_clock(Arc::clone(&clock) as _);
         let mut driver = Driver::open_with(source, |ctx| ctx);
-        driver.settle(1, ASSIGNMENT);
+        driver.settle(1);
         // On the rejoin the partition has a commit, so its lookup is what fails.
         cluster.request_errors(
             RDKafkaApiKey::OffsetFetch,
@@ -3498,7 +3443,7 @@ mod latest_start {
         // deadline reads that cause and not the revocation before it.
         let capture = spate_test::LogCapture::new();
         with_warnings(&capture, || {
-            wait_until(Duration::from_secs(60), "the failed lookup", || {
+            wait_until(HANG, "the failed lookup", || {
                 if let Ok(SourceEvent::LanesRevoked { lanes, barrier }) =
                     driver.source.poll_events(Duration::from_millis(50))
                 {
@@ -3528,13 +3473,12 @@ mod latest_start {
         let cfg = quiet_latest(&brokers, "crash");
         let first_at = {
             let mut driver = Driver::open(cfg.clone());
-            driver.settle(1, ASSIGNMENT);
-            driver.read_from_end(Duration::from_secs(30), produce_round(&brokers, 1))[&0]
+            driver.settle(1);
+            driver.read_from_end(produce_round(&brokers, 1))[&0]
         };
         let mut driver = Driver::open(cfg);
-        driver.settle(1, ASSIGNMENT);
-        let second_at =
-            driver.read_from_end(Duration::from_secs(30), produce_round(&brokers, 1))[&0];
+        driver.settle(1);
+        let second_at = driver.read_from_end(produce_round(&brokers, 1))[&0];
         assert_eq!(second_at, first_at, "the new process reads from the start");
     }
 
@@ -3555,15 +3499,15 @@ mod latest_start {
                 KafkaSource::new(latest_config(&brokers, group, consumers)),
                 group,
             );
-            driver.settle_group(consumers, 2, Duration::from_secs(60));
-            let before = driver.read_from_end(Duration::from_secs(30), produce_round(&brokers, 2));
+            driver.settle_group(consumers, 2);
+            let before = driver.read_from_end(produce_round(&brokers, 2));
             assert!(
                 !driver.lose_a_member(&cluster).is_empty(),
                 "the group refuses a removed member's commit"
             );
-            driver.settle(2, Duration::from_secs(60));
+            driver.settle(2);
             let read_back = committed(&brokers, group, 2);
-            let after = driver.read_from_end(Duration::from_secs(30), produce_round(&brokers, 2));
+            let after = driver.read_from_end(produce_round(&brokers, 2));
             for (p, first) in &after {
                 let at = read_back[usize::try_from(*p).expect("partition")];
                 assert!(
@@ -3614,8 +3558,8 @@ mod latest_start {
             let source = KafkaSource::new(latest_config(brokers, "discard-latest", 2))
                 .with_clock(Arc::clone(&clock) as _);
             let mut driver = Driver::open_watched(source, "discard-latest");
-            driver.settle_group(2, 4, Duration::from_secs(60));
-            let first = driver.read_from_end(Duration::from_secs(30), produce_round(brokers, 4));
+            driver.settle_group(2, 4);
+            let first = driver.read_from_end(produce_round(brokers, 4));
             assert_eq!(first.len(), 4, "{first:?}");
         });
     }
@@ -3637,14 +3581,10 @@ mod latest_start {
         cfg.statistics_interval = Duration::ZERO;
         let lines = spate_test::capture_logs(tracing::Level::WARN, || {
             let mut driver = Driver::open(cfg);
-            wait_until(
-                Duration::from_secs(30),
-                "the settled consumer's lanes",
-                || {
-                    driver.step(Duration::from_millis(50));
-                    !driver.lanes.is_empty()
-                },
-            );
+            wait_until(HANG, "the settled consumer's lanes", || {
+                driver.step(Duration::from_millis(50));
+                !driver.lanes.is_empty()
+            });
             assert_eq!(driver.lanes.len(), 2, "{:?}", driver.partitions());
         });
         assert!(
@@ -3663,12 +3603,12 @@ mod latest_start {
             &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_UNKNOWN],
         );
         let mut driver = Driver::open(quiet_latest(&brokers, "lookup-latest"));
-        driver.settle(1, ASSIGNMENT);
+        driver.settle(1);
         assert_eq!(
             committed(&brokers, "lookup-latest", 1),
             [rdkafka::Offset::Offset(3)]
         );
-        let first = driver.read_from_end(Duration::from_secs(30), produce_round(&brokers, 1))[&0];
+        let first = driver.read_from_end(produce_round(&brokers, 1))[&0];
         assert_eq!(first, 3);
     }
 
@@ -3685,7 +3625,7 @@ mod latest_start {
             &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_UNKNOWN; 3],
         );
         let (mut source, _cp, mut lanes) = accepted(quiet_latest(&brokers, "keeps-commit"));
-        let rows = drain_lane(&mut source, &mut lanes[0], 3, Duration::from_secs(30));
+        let rows = drain_lane(&mut source, &mut lanes[0], 3, HANG);
         let offsets: Vec<i64> = rows.iter().map(|(_, _, o)| *o).collect();
         assert_eq!(offsets, vec![3, 4, 5]);
         assert_eq!(
@@ -3721,7 +3661,7 @@ mod latest_start {
             cfg.statistics_interval = Duration::ZERO;
             let lines = spate_test::capture_logs(tracing::Level::WARN, || {
                 let mut driver = Driver::open(cfg);
-                driver.settle(4, Duration::from_secs(60));
+                driver.settle(4);
             });
             assert!(
                 lines
@@ -3829,9 +3769,8 @@ mod latest_start {
                 cfg.rdkafka.remove("auto.offset.reset");
             }
             let mut driver = Driver::open(cfg);
-            driver.settle(1, ASSIGNMENT);
-            let first =
-                driver.read_from_end(Duration::from_secs(30), produce_round(&brokers, 1))[&0];
+            driver.settle(1);
+            let first = driver.read_from_end(produce_round(&brokers, 1))[&0];
             assert!(first >= 3, "read {first}");
         }
     }
@@ -3859,7 +3798,7 @@ mod latest_start {
         let mut cfg = quiet_latest(&brokers, "interval");
         cfg.commit_interval = Duration::from_millis(200);
         let mut driver = Driver::open(cfg);
-        driver.settle(2, ASSIGNMENT);
+        driver.settle(2);
         let at = driver
             .lanes
             .iter()
@@ -3869,7 +3808,7 @@ mod latest_start {
         // Partition 0 receives these and its lane goes unread.
         produce(&brokers, TOPIC, 2, 2, "held");
         let mut read = 0;
-        wait_until(Duration::from_secs(30), "partition 1's read", || {
+        wait_until(HANG, "partition 1's read", || {
             let _ = driver.source.poll_events(Duration::from_millis(10));
             if let Some(mut batch) = lane.poll(64, Duration::from_millis(10)).expect("poll") {
                 while batch.next_payload().is_some() {
@@ -3881,7 +3820,7 @@ mod latest_start {
         driver.cp.drain();
         let watermarks = driver.cp.take_watermarks();
         driver.source.commit(&watermarks).expect("store");
-        wait_until(Duration::from_secs(30), "partition 1's commit", || {
+        wait_until(HANG, "partition 1's commit", || {
             let _ = driver.source.poll_events(Duration::from_millis(10));
             committed(&brokers, "interval", 2)[1] == rdkafka::Offset::Offset(5)
         });
@@ -3910,8 +3849,8 @@ mod latest_start {
             source
                 .open(SourceCtx::new(cp.handle()).with_stage_metrics(Some(metrics)))
                 .expect("open");
-            let _lanes = await_assignment(&mut source, ASSIGNMENT);
-            wait_until(Duration::from_secs(30), "lag published", || {
+            let _lanes = await_assignment(&mut source, HANG);
+            wait_until(HANG, "lag published", || {
                 source
                     .poll_events(Duration::from_millis(100))
                     .expect("poll_events");

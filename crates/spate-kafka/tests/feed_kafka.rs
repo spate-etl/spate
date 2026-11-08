@@ -25,16 +25,16 @@ use spate_core::clock::tokio::TestClock;
 use spate_core::feed::{DEFAULT_SETTLING_WINDOW, DepthOf, Feed, STOP_RESERVE, Unit};
 use spate_core::pipeline::ExitState;
 use spate_kafka::feed::{KafkaFeed, KafkaFeedError, KafkaFeedPublisher};
-use spate_test::{WriteOutcome, wait_until};
+use spate_test::{HANG, WriteOutcome, wait_until};
 use spate_test_support::ChildTest;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use support::feed::{
-    ATTEMPT, ATTEMPT_PARTITIONS, BoundedJob, DEAD, DEADLINE, DRAIN_TIMEOUT, RETRY, TWO_RANGES,
-    WORK, Worker, assert_stalled, bounded_section, committed, create_topics, data_dir, direct_with,
-    exists, feed_yaml, high_watermark, hold_for, hold_open, launch_bounded, launch_source,
-    launch_stopping, launch_with, list_once, open_transaction_with, produce_raw, publish,
-    read_attempts, read_depth, recs, run_to_exit, sorted, stage, two_range_unit, written,
+    ATTEMPT, ATTEMPT_PARTITIONS, BoundedJob, DEAD, DRAIN_TIMEOUT, RETRY, TWO_RANGES, WORK, Worker,
+    assert_stalled, bounded_section, committed, create_topics, data_dir, direct_with, exists,
+    feed_yaml, high_watermark, hold_for, hold_open, launch_bounded, launch_source, launch_stopping,
+    launch_with, list_once, open_transaction_with, produce_raw, publish, read_attempts, read_depth,
+    recs, run_to_exit, sorted, stage, two_range_unit, written,
 };
 use support::{
     TRANSACTION_TIMEOUT, Transaction, broker, log_end, produce_transaction, transactional_broker,
@@ -93,7 +93,7 @@ fn worker_a_holds_a_unit_until_it_is_killed() {
             sink.enqueue_global(WriteOutcome::ok().held());
         },
     );
-    wait_until(DEADLINE, "A holds the unit's write", || {
+    wait_until(HANG, "A holds the unit's write", || {
         a.script.held_writes() == 1
     });
     std::fs::write(&marker, b"held").unwrap();
@@ -132,7 +132,7 @@ fn a_unit_whose_worker_is_killed_mid_read_is_delivered_again() {
             .env(CHILD_DATA, &data)
             .env(CHILD_MARKER, &marker)
     });
-    wait_until(DEADLINE, "A holds the unit's write", || {
+    wait_until(HANG, "A holds the unit's write", || {
         marker.try_exists().expect("stat the marker")
     });
     let status = a.kill();
@@ -151,7 +151,7 @@ fn a_unit_whose_worker_is_killed_mid_read_is_delivered_again() {
         &section(&brokers, &group),
         |_| {},
     );
-    wait_until(SESSION * 5, "B reads the unit", || {
+    wait_until(HANG, "B reads the unit", || {
         !b.recording.seen.lock().unwrap().is_empty()
     });
     let waited = killed.elapsed();
@@ -161,7 +161,7 @@ fn a_unit_whose_worker_is_killed_mid_read_is_delivered_again() {
         "B read the unit {waited:?} after A was killed, inside A's session"
     );
     wait_until(
-        DEADLINE,
+        HANG,
         "B writes every row and commits the unit's offset",
         || {
             written(&b.script) == sorted(rows.clone())
@@ -206,7 +206,7 @@ fn a_unit_that_kills_its_worker_at_each_read_reaches_the_dead_letter_topic() {
                 .env(CHILD_MARKER, &marker)
                 .env(CHILD_CAP, "2")
         });
-        wait_until(SESSION * 5, &format!("child {read} holds the unit"), || {
+        wait_until(HANG, &format!("child {read} holds the unit"), || {
             marker.try_exists().expect("stat the marker")
         });
         child.kill();
@@ -219,7 +219,7 @@ fn a_unit_that_kills_its_worker_at_each_read_reaches_the_dead_letter_topic() {
         |_| {},
     );
     wait_until(
-        SESSION * 5,
+        HANG,
         "B dead-letters the unit and commits its offset",
         || high_watermark(&brokers, DEAD) == 1 && committed(&brokers, &group, WORK) == Some(1),
     );
@@ -666,7 +666,7 @@ fn a_keyless_message_is_read_as_a_unit() {
     let delivery = worker.take("the keyless message");
     assert_eq!(delivery.unit, Unit::new("units/0/0", b"keyless".to_vec()));
     worker.feed.acknowledge(delivery.receipt).unwrap();
-    wait_until(DEADLINE, "its offset is committed", || {
+    wait_until(HANG, "its offset is committed", || {
         committed(&brokers, &group, WORK) == Some(1)
     });
     assert_eq!(
@@ -700,11 +700,9 @@ fn a_dead_letter_topic_entry_ends_the_job_stalled() {
 
     let clock = TestClock::frozen();
     let worker = launch_bounded(KafkaFeed::connect, &data, &section, &clock);
-    wait_until(
-        DEADLINE,
-        "the message is dead-lettered and committed",
-        || high_watermark(&brokers, DEAD) == 1 && committed(&brokers, &group, WORK) == Some(1),
-    );
+    wait_until(HANG, "the message is dead-lettered and committed", || {
+        high_watermark(&brokers, DEAD) == 1 && committed(&brokers, &group, WORK) == Some(1)
+    });
     let admin: AdminClient<DefaultClientContext> = support::raw_config()
         .set("bootstrap.servers", &brokers)
         .build()
@@ -761,7 +759,7 @@ fn a_bounded_job_ends_once_every_workers_partitions_are_committed() {
     let clock_b = TestClock::frozen();
     let a = launch_bounded(KafkaFeed::connect, &data, &section, &clock_a);
     let b = launch_bounded(KafkaFeed::connect, &data, &section, &clock_b);
-    wait_until(DEADLINE, "every row is written once between them", || {
+    wait_until(HANG, "every row is written once between them", || {
         let mut both = written(&a.script);
         both.extend(written(&b.script));
         sorted(both) == sorted(rows.clone())
@@ -834,24 +832,24 @@ fn a_stopping_worker_commits_finished_units_before_leaving_the_group() {
         |sink| sink.enqueue_global(WriteOutcome::ok().held()),
     );
     publish(&a.feed, finished);
-    wait_until(DEADLINE, "the finished unit's write is held", || {
+    wait_until(HANG, "the finished unit's write is held", || {
         a.script.held_writes() == 1
     });
     publish(&a.feed, unfinished);
-    wait_until(DEADLINE, "the unfinished unit is received", || {
+    wait_until(HANG, "the unfinished unit is received", || {
         a.recording.receipts().len() == 2
     });
     a.shutdown.trigger();
-    wait_until(DEADLINE, "the stop begins", || {
+    wait_until(HANG, "the stop begins", || {
         a.recording.stopped_receiving() == 1
     });
     clock.advance(DRAIN_TIMEOUT - STOP_RESERVE);
     let receipt = a.recording.receipts()[1];
-    wait_until(DEADLINE, "the unfinished unit is handed back", || {
+    wait_until(HANG, "the unfinished unit is handed back", || {
         a.recording.handed_back() == [receipt]
     });
     a.script.release_held();
-    let report = a.run.wait_exit(DEADLINE).expect("A exits").unwrap();
+    let report = a.run.wait_exit(HANG).expect("A exits").unwrap();
     assert_eq!(report.state, ExitState::Completed);
     assert_eq!(committed(&brokers, &group, WORK), Some(1));
     assert_eq!(a.recording.closes().len(), 1);
@@ -859,7 +857,7 @@ fn a_stopping_worker_commits_finished_units_before_leaving_the_group() {
         .set("bootstrap.servers", &brokers)
         .build()
         .expect("probe");
-    wait_until(Duration::from_secs(15), "A leaves the group", || {
+    wait_until(HANG, "A leaves the group", || {
         let groups = probe
             .fetch_group_list(Some(&group), Duration::from_secs(10))
             .expect("group list");
@@ -871,11 +869,11 @@ fn a_stopping_worker_commits_finished_units_before_leaving_the_group() {
         data.display()
     );
     let b = launch_source(KafkaFeed::connect, &source, &section, |_| {});
-    wait_until(DEADLINE, "B receives the unit", || {
+    wait_until(HANG, "B receives the unit", || {
         !b.recording.receipts().is_empty()
     });
     assert_eq!(b.recording.seen.lock().unwrap().as_slice(), [2]);
-    wait_until(DEADLINE, "B writes every row of the unit", || {
+    wait_until(HANG, "B writes every row of the unit", || {
         written(&b.script) == sorted(rows.clone())
     });
     let finished_rows = [written(&a.script), written(&b.script)]
@@ -918,11 +916,11 @@ fn staged(job: &BoundedJob, tag: &str) -> (Unit, Vec<String>) {
 /// Wait until `job` has read `rows` and committed to the end of `topic`'s log,
 /// then until no open transaction holds that end back.
 fn wait_for_end(job: &BoundedJob, worker: &Worker, rows: &[String], topic: &str) {
-    wait_until(DEADLINE, "the rows and the commit at the log's end", || {
+    wait_until(HANG, "the rows and the commit at the log's end", || {
         written(&worker.script) == sorted(rows.to_vec())
             && job.committed(topic) == Some(log_end(&job.brokers, topic, 0))
     });
-    wait_until(DEADLINE, "the stable offset reaches the log's end", || {
+    wait_until(HANG, "the stable offset reaches the log's end", || {
         high_watermark(&job.brokers, topic) == log_end(&job.brokers, topic, 0)
     });
 }
@@ -942,11 +940,9 @@ fn moved_to(
     std::fs::rename(&object, &away).unwrap();
     let before = log_end(&job.brokers, topic, 0);
     let worker = launch_bounded(KafkaFeed::connect, &job.data, &job.section, clock);
-    wait_until(
-        DEADLINE,
-        "the unit is moved and its offset committed",
-        || log_end(&job.brokers, topic, 0) > before && job.committed(WORK) == Some(1),
-    );
+    wait_until(HANG, "the unit is moved and its offset committed", || {
+        log_end(&job.brokers, topic, 0) > before && job.committed(WORK) == Some(1)
+    });
     std::fs::rename(&away, &object).unwrap();
     (worker, rows)
 }

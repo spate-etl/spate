@@ -393,6 +393,7 @@ mod tests {
     use crate::context::SourceHooks;
     use crate::feed::tests::core;
     use spate_core::hash::FastMap;
+    use spate_test::HANG;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::mpsc;
@@ -504,11 +505,9 @@ mod tests {
         std::thread::scope(|s| {
             let (core, serving) = (&core, &serving);
             s.spawn(move || run(core, serving, &received));
-            spate_test::wait_until(
-                std::time::Duration::from_secs(10),
-                "the client is served",
-                || serving.0.load(Ordering::SeqCst) > 0,
-            );
+            spate_test::wait_until(HANG, "the client is served", || {
+                serving.0.load(Ordering::SeqCst) > 0
+            });
             drop(requests);
         });
     }
@@ -852,14 +851,10 @@ mod tests {
             SourceHooks::default(),
         );
         let reads = Brokers { consumer };
-        spate_test::wait_until(
-            std::time::Duration::from_secs(10),
-            "a statistics event reaches the context",
-            || {
-                reads.serve();
-                reads.consumer.context().stats.lock().unwrap().is_some()
-            },
-        );
+        spate_test::wait_until(HANG, "a statistics event reaches the context", || {
+            reads.serve();
+            reads.consumer.context().stats.lock().unwrap().is_some()
+        });
     }
 
     /// Pins the topics a whole-request failure names: each once, in the

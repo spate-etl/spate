@@ -32,7 +32,7 @@ use spate_core::sink::{RowEncoder, SealedBatch, ShardWriter, SinkMetricsCtx};
 use spate_core::source::LaneId;
 use spate_kafka::sink::{KafkaEncoder, KafkaMessage, KafkaSink, KafkaSinkConfig, MessageEncoder};
 use spate_test::{
-    PipelineRun, memory_source, passthrough_runtime, record, unique_name, wait_until,
+    HANG, PipelineRun, memory_source, passthrough_runtime, record, unique_name, wait_until,
 };
 use std::panic::RefUnwindSafe;
 use std::sync::Arc;
@@ -65,28 +65,21 @@ type Consumed = (Option<Vec<u8>>, Option<Vec<u8>>, Vec<(String, Vec<u8>)>);
 /// Read `n` messages back from the mock cluster (order within the single
 /// partition is the produce order).
 fn consume_all(brokers: &str, n: usize) -> Vec<Consumed> {
-    consume(
-        brokers,
-        TOPIC,
-        "verify",
-        n,
-        Duration::from_secs(30),
-        |message| {
-            let headers = message
-                .headers()
-                .map(|hs| {
-                    hs.iter()
-                        .map(|h| (h.key.to_string(), h.value.unwrap_or(&[]).to_vec()))
-                        .collect()
-                })
-                .unwrap_or_default();
-            Some((
-                message.key().map(<[u8]>::to_vec),
-                message.payload().map(<[u8]>::to_vec),
-                headers,
-            ))
-        },
-    )
+    consume(brokers, TOPIC, "verify", n, |message| {
+        let headers = message
+            .headers()
+            .map(|hs| {
+                hs.iter()
+                    .map(|h| (h.key.to_string(), h.value.unwrap_or(&[]).to_vec()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        Some((
+            message.key().map(<[u8]>::to_vec),
+            message.payload().map(<[u8]>::to_vec),
+            headers,
+        ))
+    })
 }
 
 /// Test encoder over `key|header|payload` structured payloads, exercising
@@ -233,7 +226,7 @@ fn pipeline_commits_only_after_delivery_reports() {
 
     shutdown.trigger();
     let report = run
-        .wait_exit(Duration::from_secs(30))
+        .wait_exit(HANG)
         .expect("pipeline exits within the drain deadline")
         .expect("run");
     assert_eq!(report.exit_code(), 0, "clean drain: {report:?}");
@@ -272,7 +265,7 @@ fn shutdown_with_inflight_data_commits_only_delivered() {
     }
     shutdown.trigger();
     let report = run
-        .wait_exit(Duration::from_secs(30))
+        .wait_exit(HANG)
         .expect(
             "pipeline exits within the drain deadline — a hang here is \
                  the producer-teardown footgun",
@@ -462,7 +455,7 @@ fn statistics_populate_kafka_sink_fixed_families() {
 
     // The poll thread publishes into the handles resolved above once per
     // interval; totals may legitimately be zero, so presence is the assert.
-    wait_until(Duration::from_secs(10), "fixed families rendered", || {
+    wait_until(HANG, "fixed families rendered", || {
         prom.run_upkeep();
         let rendered = prom.render();
         rendered.contains("spate_kafka_tx_requests_total")
@@ -565,7 +558,7 @@ fn a_full_queue_fails_the_batch_at_the_send_deadline() {
     // The first send reads the deadline and fills the queue, so every
     // further read is a queue-full retry.
     let in_backoff = |from: usize| {
-        wait_until(Duration::from_secs(30), "a queue-full retry", || {
+        wait_until(HANG, "a queue-full retry", || {
             clock.reads.load(Ordering::SeqCst) >= from + 2
         });
     };
@@ -575,7 +568,7 @@ fn a_full_queue_fails_the_batch_at_the_send_deadline() {
     in_backoff(0);
     test_clock.advance(send_window - Duration::from_nanos(1));
     let reads = clock.reads.load(Ordering::SeqCst);
-    wait_until(Duration::from_secs(30), "a retry after the advance", || {
+    wait_until(HANG, "a retry after the advance", || {
         clock.reads.load(Ordering::SeqCst) > reads
     });
     cluster.broker_up(1).expect("broker up");
@@ -620,9 +613,7 @@ fn missing_reports_fail_the_batch_at_the_wait_deadline() {
         Arc::clone(&clock) as _,
     );
     let armed = |deadline| {
-        wait_until(Duration::from_secs(30), "the report wait", || {
-            clock.has_slept_until(deadline)
-        });
+        wait_until(HANG, "the report wait", || clock.has_slept_until(deadline));
     };
 
     cluster.broker_down(1).expect("broker down");

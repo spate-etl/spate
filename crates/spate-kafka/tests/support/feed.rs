@@ -24,7 +24,7 @@ use spate_json::NdjsonFramer;
 use spate_kafka::feed::{KafkaFeed, KafkaFeedError, KafkaFeedPublisher};
 use spate_s3::{DescriptorObject, S3Source, SplitDescriptor};
 use spate_test::{
-    PipelineRun, ScriptedResult, SinkScript, TestEncoder, capture_sink, decode_rows,
+    HANG, PipelineRun, ScriptedResult, SinkScript, TestEncoder, capture_sink, decode_rows,
     passthrough_runtime, wait_until,
 };
 use std::path::{Path, PathBuf};
@@ -32,8 +32,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::runtime::Handle;
-
-pub(crate) const DEADLINE: Duration = Duration::from_secs(60);
 
 pub(crate) const WORK: &str = "units";
 pub(crate) const RETRY: &str = "units-retry";
@@ -92,7 +90,7 @@ impl FeedClock {
     /// run it.
     pub(crate) fn commit_window(&self) {
         let sample = self.advance(COMMIT_INTERVAL);
-        wait_until(DEADLINE, "a consumer pass after the advance", || {
+        wait_until(HANG, "a consumer pass after the advance", || {
             self.reads() >= sample + PASS_READS
         });
     }
@@ -102,7 +100,7 @@ impl FeedClock {
     pub(crate) fn advance_until(&self, what: &str, mut done: impl FnMut() -> bool) {
         let mut sample = self.reads();
         let mut advances = 0;
-        wait_until(DEADLINE, what, || {
+        wait_until(HANG, what, || {
             if done() {
                 return true;
             }
@@ -449,7 +447,7 @@ impl Worker {
     pub(crate) fn stop(&self) -> ExitState {
         self.shutdown.trigger();
         self.run
-            .wait_exit(DEADLINE)
+            .wait_exit(HANG)
             .expect("the run exits")
             .unwrap()
             .state
@@ -499,7 +497,7 @@ pub(crate) fn publish(feed: &KafkaFeed, unit: Unit) {
 /// Publish `unit` through any feed and wait for its confirmation.
 pub(crate) fn publish_to(feed: &dyn Feed, unit: Unit) {
     let mut confirmation = feed.publish(unit);
-    wait_until(DEADLINE, "the publish settles", || {
+    wait_until(HANG, "the publish settles", || {
         confirmation.try_outcome().is_some()
     });
     confirmation.try_outcome().unwrap().unwrap();
@@ -560,7 +558,7 @@ pub(crate) fn read_topic(brokers: &str, topic: &str, n: usize) -> Vec<Read> {
         .unwrap();
     consumer.assign(&tpl).unwrap();
     let mut got = Vec::new();
-    wait_until(DEADLINE, &format!("{n} messages on {topic}"), || {
+    wait_until(HANG, &format!("{n} messages on {topic}"), || {
         while let Some(message) = consumer.poll(Duration::from_millis(100)) {
             let message = message.expect("read");
             got.push(Read {
@@ -600,7 +598,7 @@ pub(crate) fn read_attempts(brokers: &str, partitions: i32, n: usize) -> Vec<Att
     }
     consumer.assign(&tpl).unwrap();
     let mut got = Vec::new();
-    wait_until(DEADLINE, &format!("{n} attempt records"), || {
+    wait_until(HANG, &format!("{n} attempt records"), || {
         while let Some(message) = consumer.poll(Duration::from_millis(100)) {
             let message = message.expect("read");
             let key = String::from_utf8(message.key().expect("keyed").to_vec()).unwrap();
@@ -786,7 +784,7 @@ impl Direct {
     /// error is passed over, as a reader does.
     pub(crate) fn take(&self, what: &str) -> Delivery {
         let mut got = None;
-        wait_until(DEADLINE, what, || {
+        wait_until(HANG, what, || {
             got = match self.feed.receive(1) {
                 Ok(mut got) => got.pop(),
                 Err(e) if e.kind == FeedErrorKind::Retryable => None,
@@ -999,7 +997,7 @@ fn stage_with_etag(data: &Path, name: &str, rows: &[String]) -> Unit {
 pub(crate) fn read_depth(feed: &dyn Feed, of: DepthOf) -> Result<Depth, FeedError> {
     let mut reading = feed.read_depth(of).expect("the Kafka feed counts");
     let mut outcome = None;
-    wait_until(DEADLINE, "the depth read is answered", || {
+    wait_until(HANG, "the depth read is answered", || {
         outcome = reading.try_outcome();
         outcome.is_some()
     });
@@ -1012,7 +1010,7 @@ fn step_to_read(worker: &Worker, clock: &TestClock) -> Option<spate_core::pipeli
     let reads = worker.recording.depth_reads();
     clock.advance(STEP);
     let mut exit = None;
-    wait_until(DEADLINE, "the next depth read or the end", || {
+    wait_until(HANG, "the next depth read or the end", || {
         if exit.is_none() {
             exit = worker.run.wait_exit(Duration::ZERO);
         }
@@ -1022,15 +1020,15 @@ fn step_to_read(worker: &Worker, clock: &TestClock) -> Option<spate_core::pipeli
 }
 
 /// Step `clock` until the worker exits, waiting after each step for its
-/// next depth read. Bounded by [`DEADLINE`] and no count of steps, since a
-/// worker reads depth long before its group forms.
+/// next depth read. Bounded by [`spate_test::HANG`] and no count of steps,
+/// since a worker reads depth long before its group forms.
 ///
 /// # Panics
 ///
-/// When the worker has not exited within [`DEADLINE`].
+/// When the worker has not exited within [`spate_test::HANG`].
 pub(crate) fn run_to_exit(worker: &Worker, clock: &TestClock) -> spate_core::pipeline::ExitReport {
     let mut report = None;
-    wait_until(DEADLINE, "the job ends", || {
+    wait_until(HANG, "the job ends", || {
         report = step_to_read(worker, clock);
         report.is_some()
     });

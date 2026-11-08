@@ -8,6 +8,7 @@ use rdkafka::bindings::rd_kafka_resp_err_t as RespErr;
 use rdkafka::client::{Client, ClientContext};
 use rdkafka::consumer::{BaseConsumer, Consumer as _};
 use rdkafka::statistics::{Broker, Window};
+use spate_test::HANG;
 use std::ffi::CStr;
 use std::sync::mpsc;
 use std::time::Duration;
@@ -57,7 +58,7 @@ pub(crate) const ASSIGN_STOP: &str = "-> wait-assign-call";
 /// Serve `consumer` up to librdkafka's `line`, and return with every event
 /// logged before it on the queue.
 pub(crate) fn stop_at(consumer: &BaseConsumer<SourceContext>, line: &str) {
-    spate_test::wait_until(Duration::from_secs(60), line, || {
+    spate_test::wait_until(HANG, line, || {
         spate_test::capture_logs(tracing::Level::DEBUG, || {
             let _ = consumer.poll(Duration::ZERO);
         })

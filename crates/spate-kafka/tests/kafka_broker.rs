@@ -14,6 +14,7 @@ use spate_core::checkpoint::Checkpointer;
 use spate_core::record::PartitionId;
 use spate_core::source::{Source, SourceCtx, SourceEvent, SourceLane};
 use spate_kafka::{KafkaSource, KafkaSourceConfig};
+use spate_test::HANG;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -56,11 +57,11 @@ fn real_broker_full_lifecycle() {
     source.open(SourceCtx::new(cp.handle())).expect("open");
 
     // Await assignment.
-    let mut lanes = await_assignment(&mut source, Duration::from_secs(60));
+    let mut lanes = await_assignment(&mut source, HANG);
     assert_eq!(lanes.len(), 1);
     cp.begin_epoch(&[lanes[0].partition()], 1);
 
-    let rows = drain_lane(&mut source, &mut lanes[0], 100, Duration::from_secs(60));
+    let rows = drain_lane(&mut source, &mut lanes[0], 100, HANG);
     assert!(
         rows.iter()
             .all(|(payload, _, _)| payload.starts_with(b"real-"))
@@ -110,10 +111,10 @@ fn real_broker_revocation_commit_persists_revoked_offsets() {
 
     // Await assignment and drain all 50 records, producing a watermark at
     // offset 50, but do not commit yet (the inter-tick window).
-    let mut lanes = await_assignment(&mut source, Duration::from_secs(60));
+    let mut lanes = await_assignment(&mut source, HANG);
     assert_eq!(lanes.len(), 1);
     cp.begin_epoch(&[lanes[0].partition()], 1);
-    drain_lane(&mut source, &mut lanes[0], 50, Duration::from_secs(60));
+    drain_lane(&mut source, &mut lanes[0], 50, HANG);
     drop(lanes);
     cp.drain();
     let watermarks = cp.take_watermarks();
@@ -140,10 +141,9 @@ fn real_broker_revocation_commit_persists_revoked_offsets() {
 
     // Run the revocation choreography: store the drained watermark for the
     // partition being revoked, then keep polling so `unassign` completes.
-    let deadline = Instant::now() + Duration::from_secs(60);
     let mut stored = false;
     let mut ticks = 0;
-    while Instant::now() < deadline {
+    spate_test::wait_until(HANG, "the revocation, then 15 polls", || {
         if let SourceEvent::LanesRevoked {
             lanes: ids,
             barrier,
@@ -162,19 +162,14 @@ fn real_broker_revocation_commit_persists_revoked_offsets() {
         }
         if stored {
             ticks += 1;
-            if ticks >= 15 {
-                break;
-            }
         }
-    }
-    assert!(stored, "revoke observed and drained offset stored");
+        ticks >= 15
+    });
 
     // The drained watermark is committed for the revoked partition.
-    spate_test::wait_until(
-        Duration::from_secs(30),
-        "revoked partition committed offset 50",
-        || support::committed(&probe, TOPIC, 1) == [rdkafka::Offset::Offset(50)],
-    );
+    spate_test::wait_until(HANG, "revoked partition committed offset 50", || {
+        support::committed(&probe, TOPIC, 1) == [rdkafka::Offset::Offset(50)]
+    });
 
     stop.store(true, Ordering::Relaxed);
     joiner.join().expect("joiner thread");
@@ -356,7 +351,7 @@ fn real_broker_revocation_commits_every_consumers_offsets() {
     let partitions: Vec<_> = lanes.iter().map(SourceLane::partition).collect();
     cp.begin_epoch(&partitions, 1);
     for lane in &mut lanes {
-        drain_lane(&mut source, lane, 25, Duration::from_secs(60));
+        drain_lane(&mut source, lane, 25, HANG);
     }
     drop(lanes);
     cp.drain();
@@ -630,7 +625,7 @@ fn real_broker_revocation_before_a_marker_loses_nothing() {
     // Stops at the fifth record, ahead of the marker: the lane fills a batch only
     // up to what it is asked for, and a poll that returns a record reads nothing.
     let mut read = 0;
-    spate_test::wait_until(Duration::from_secs(60), "the records", || {
+    spate_test::wait_until(HANG, "the records", || {
         watched.serve();
         if let Some(mut batch) = watched.lanes[0]
             .poll(5 - read, Duration::from_millis(200))
@@ -659,7 +654,7 @@ fn real_broker_revocation_before_a_marker_loses_nothing() {
     let mut watched = Watched::open(topic_config(&brokers, "served", "served-group"));
     watched.read(0, 5);
     assert_eq!(watched.commit(), [(PartitionId(0), 5)]);
-    spate_test::wait_until(Duration::from_secs(60), "the marker's batch", || {
+    spate_test::wait_until(HANG, "the marker's batch", || {
         watched.serve();
         watched.poll(0) == Some(vec![])
     });
@@ -679,6 +674,7 @@ mod latest_start {
     use rdkafka::admin::{AdminClient, AdminOptions, NewPartitions};
     use rdkafka::client::DefaultClientContext;
     use rdkafka::producer::{BaseRecord, Producer as _};
+    use spate_test::HANG;
     use support::latest;
     use testcontainers::ImageExt as _;
 
@@ -840,7 +836,7 @@ mod latest_start {
             }
             support::produce_to(brokers, topic, 0, 3..6);
             let (mut source, _cp, mut lanes) = accept();
-            let rows = drain_lane(&mut source, &mut lanes[0], 3, Duration::from_secs(30));
+            let rows = drain_lane(&mut source, &mut lanes[0], 3, HANG);
             let offsets: Vec<i64> = rows.iter().map(|(_, _, o)| *o).collect();
             assert_eq!(offsets, [3, 4, 5]);
         });
@@ -895,7 +891,7 @@ mod latest_start {
         producer
             .commit_transaction(Duration::from_secs(60))
             .expect("commit");
-        let rows = drain_lane(&mut source, &mut lanes[0], 3, Duration::from_secs(30));
+        let rows = drain_lane(&mut source, &mut lanes[0], 3, HANG);
         let offsets: Vec<i64> = rows.iter().map(|(_, _, o)| *o).collect();
         assert_eq!(offsets, [2, 3, 4]);
     }

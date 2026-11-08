@@ -63,7 +63,8 @@ covers the `feed:` section, the lister run and storage notifications.
 Each part of a unit in progress is read by one lane, and each lane is one
 framework partition. A unit names one whole object, one byte range of a large
 object, or several objects that its lane reads in turn. The lister packs objects
-read whole into units of at most 16 objects and `split_target_bytes` bytes.
+read whole into units of at most 16 objects and `split_target_bytes` bytes. An
+object read whole above the target is a unit of its own.
 
 `units_held` in the `feed:` section bounds the units a worker reads at once, and
 the lanes those units take. Unset, it is twice `pipeline.threads`, and 96 for a
@@ -117,10 +118,10 @@ Delivery is at-least-once.
   store, and a client configuration error, fail the pipeline. On AWS S3, a
   worker role without `s3:ListBucket` reads a deleted object as `403`, which
   fails the pipeline.
-- Every read is pinned to the object's ETag with `If-Match`, so an object
-  rewritten during a read fails its unit and never splices two versions. The
-  exception is a notification unit: the source re-enqueues its overwritten
-  object at the new ETag.
+- Every read of an object that has an ETag is pinned to it with `If-Match`, so
+  a rewrite during the read fails the unit and never splices two versions. A
+  notification that names a version reads that version. One that names none
+  re-enqueues its overwritten object at the new ETag.
 
 A job on a durable feed is bounded when its `feed:` section names a `location`.
 It ends once the lister run's end marker holds over a settling window, five
@@ -129,9 +130,10 @@ while it holds no unit. When the feed's dead-letter destination then holds
 units, the run fails with an error that includes `bounded feed job stalled:`.
 
 A solo run on the in-process feed the runtime built ends once its listing is
-read. That feed keeps nothing across a restart, so a restarted solo run lists
-and reads the whole prefix again, and a startup `WARN` says so. Any other job
-runs until it is shut down.
+read. If that feed holds dead letters at the end, the run fails with the
+`bounded feed job stalled:` error. That feed keeps nothing across a restart, so
+a restarted solo run lists and reads the whole prefix again, and a startup
+`WARN` says so. Any other job runs until it is shut down.
 
 [How a bounded job ends](https://spate.kainth.dev/docs/user-guide/connectors/sources/s3#how-a-bounded-job-ends)
 and
@@ -147,9 +149,9 @@ pages cover the framework's side.
   as CSV declares none, so no object is cut into byte ranges, and the source
   logs that at `INFO` when it opens. See
   [Decoding records](https://spate.kainth.dev/docs/user-guide/connectors/sources/s3#decoding-records).
-- **The job fingerprint compares decoded bytes.** `split_target_bytes` enters it
-  as a byte count, so a worker set to `64MB` is refused at startup against a
-  lister on the `64MiB` default. See
+- **The job fingerprint holds `split_target_bytes` as a byte count.** The count
+  enters it as a number of bytes, so a worker set to `64MB` is refused at
+  startup against a lister on the `64MiB` default. See
   [Configuration](https://spate.kainth.dev/docs/user-guide/connectors/sources/s3#configuration).
 - **Credentials come from environment variables.** For `s3://`, the client reads
   the standard AWS variables. They cover EKS Pod Identity, IRSA, ECS task roles
@@ -169,8 +171,9 @@ pages cover the framework's side.
   part of the job. See
   [Unit identity and drift](https://spate.kainth.dev/docs/user-guide/connectors/sources/s3#unit-identity-and-drift).
 - **An object with no ETag is read in one streamed GET.** The response stays
-  open while the sink is slow, and a break mid-object fails the unit. S3 and
-  `file://` always report an ETag.
+  open while the sink is slow, and a break mid-object fails the unit. Stores
+  normally report an ETag. A notification record, a listing from an
+  S3-compatible store, a HEAD response or an external descriptor can omit it.
 
 ## Metrics
 

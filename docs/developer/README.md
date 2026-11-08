@@ -15,12 +15,13 @@ change is proposed and lands. This guide says how the work is done.
 - [Commands and gates](01-commands.md) — the task runner, what `cargo xtask ci`
   covers and what CI adds, the test runner and its profiles, the container
   suites, and which checks a change selects.
-- [Writing a test](02-testing.md) — where a test lives, which double to reach
-  for, and what the process-wide state in a test binary demands.
 - [Anatomy of a connector crate](03-connector-crate.md) — what a crate under
   `crates/` carries beyond its source.
-- [Benchmarks and fuzzing](04-benchmarks-and-fuzzing.md) — the instruments
-  outside `ci`: the benchmark tiers and the fuzz harness.
+- [Benchmarks](04-benchmarks-and-fuzzing.md) — the benchmark tiers outside
+  `ci`, and how to add a target to each.
+- [Writing a test](04-writing-a-test.md) — where a test lives, which harness to
+  choose, what a test binary shares, and the tools that check a test reaches
+  the code.
 - [Code and comments](05-code-style.md) — the comment and rustdoc contract,
   and the reuse rule.
 - [Tests that do not flake](05-flaky-tests.md) — the rules that keep a test

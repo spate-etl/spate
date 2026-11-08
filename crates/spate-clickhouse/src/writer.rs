@@ -55,10 +55,10 @@ const NAMES_USE_HEADER: &str = "input_format_with_names_use_header";
 const TYPES_USE_HEADER: &str = "input_format_with_types_use_header";
 const DECOMPRESS: &str = "decompress";
 
-/// The settings [`owned_settings`] puts on an insert, which the `settings`
-/// passthrough may not name. ClickHouse matches setting names case-sensitively
-/// and has no alias of any of these, so they compare exactly.
-pub(crate) const RESERVED: Denylist<'static> = Denylist::new(&[
+/// The settings the sink puts on an insert, each with the reason the
+/// `settings` passthrough may not name it. [`owned_settings`] sets them and
+/// [`RESERVED`] refuses them.
+const OWNED: [(&str, &str); 6] = [
     (
         INSERT_DEDUPLICATION_TOKEN,
         "minted per sealed batch, so a retried batch carries the same token and is deduplicated",
@@ -72,6 +72,8 @@ pub(crate) const RESERVED: Denylist<'static> = Denylist::new(&[
         "forced to `1`: the server answers once the insert and its materialized views are done, \
          and the checkpoint commits behind that answer",
     ),
+    // The header settings default on. Setting them per insert keeps a server
+    // or profile default from turning the header check off silently.
     (
         NAMES_USE_HEADER,
         "forced to `1`: with it off the server ignores the insert header and maps the rows by \
@@ -86,28 +88,25 @@ pub(crate) const RESERVED: Denylist<'static> = Denylist::new(&[
         "set to `1` on every compressed insert: the sink sends blocks it compressed itself, and \
          the server decodes them only with it on",
     ),
-]);
+];
 
-/// The settings the sink sets on an insert, applied ahead of the user's
-/// `settings`. [`RESERVED`] must name each of them: the user's value for the
-/// same name would replace it.
+/// The settings passthrough's denylist. ClickHouse matches setting names
+/// case-sensitively and has no alias of any of these, so they compare exactly.
+pub(crate) const RESERVED: Denylist<'static> = Denylist::new(&OWNED);
+
+/// The settings the sink sets on an insert, each from [`OWNED`].
+/// `decompress` goes only on a compressed insert. The user's `settings` are
+/// applied after these, so [`RESERVED`] alone keeps a user value from
+/// replacing one.
 pub(crate) fn owned_settings(
     token: &str,
     coded: bool,
 ) -> impl Iterator<Item = (&'static str, String)> {
-    [
-        (INSERT_DEDUPLICATE, "1".to_owned()),
-        (WAIT_END_OF_QUERY, "1".to_owned()),
-        (INSERT_DEDUPLICATION_TOKEN, token.to_owned()),
-        // The server checks the header against the table only while these
-        // are on. They default on; setting them per insert keeps a server or
-        // profile default from turning the check off silently.
-        (NAMES_USE_HEADER, "1".to_owned()),
-        (TYPES_USE_HEADER, "1".to_owned()),
-    ]
-    .into_iter()
-    // What a compressing client adds to its own inserts.
-    .chain(coded.then(|| (DECOMPRESS, "1".to_owned())))
+    OWNED.into_iter().filter_map(move |(name, _)| match name {
+        INSERT_DEDUPLICATION_TOKEN => Some((name, token.to_owned())),
+        DECOMPRESS => coded.then(|| (name, "1".to_owned())),
+        _ => Some((name, "1".to_owned())),
+    })
 }
 
 /// Writes sealed batches: one `INSERT ... FORMAT <fmt>` per batch (the

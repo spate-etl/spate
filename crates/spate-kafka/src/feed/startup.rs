@@ -1027,6 +1027,30 @@ mod tests {
         }
     }
 
+    /// Pins the text a refused and an unavailable read render, with the
+    /// feed's name in it.
+    #[test]
+    fn a_failed_read_renders_the_kafka_text() {
+        let mut admin = Scripted::all();
+        admin.metadata_errors.insert(
+            RETRY.to_owned(),
+            AdminError::new(C::TopicAuthorizationFailed, "denied"),
+        );
+        assert_eq!(
+            run(&admin).unwrap_err().to_string(),
+            "the Kafka feed cannot start: reading the metadata of the retry topic `units-retry`: denied"
+        );
+
+        let mut admin = Scripted::all();
+        admin
+            .config_errors
+            .insert(WORK.to_owned(), AdminError::new(C::RequestTimedOut, "slow"));
+        assert_eq!(
+            run(&admin).unwrap_err().to_string(),
+            "Kafka is unavailable: reading the configuration of the work topic `units`: slow"
+        );
+    }
+
     /// The bound the tests advance a frozen clock past.
     const SHORT: Duration = Duration::from_millis(20);
 

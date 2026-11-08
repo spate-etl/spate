@@ -69,7 +69,8 @@ By default, librdkafka's mock waits 3 s before a new group's first rebalance, so
 The `MockKafka` helper turns that wait off.
 The first consumer then forms the group alone, and each later consumer rebalances it.
 A test whose consumers must join one generation turns the wait back on with `hold_first_rebalance`.
-The wait lasts 3 s of real time, and a consumer that reaches the coordinator after it has ended forms a later generation.
+The wait lasts 3 s of real time.
+A consumer that joins after the wait has ended starts another rebalance and joins a later generation.
 [Wait for a signal the code publishes](05-flaky-tests.md#wait-for-a-signal-the-code-publishes) says how a test settles a group of several consumers.
 
 The ClickHouse sink's harness at this step is the `clickhouse` crate's mock server, `clickhouse::test::Mock`.
@@ -175,7 +176,7 @@ cargo xtask fuzz build
 cargo xtask fuzz run avro_wire_confluent --secs 60
 ```
 
-`cargo fuzz list` prints the targets.
+The `cargo fuzz list` command prints the targets.
 Building and running them needs a nightly toolchain, for the libFuzzer instrumentation.
 
 A decoder that its crate keeps private is reached through the crate's off-by-default `testing` feature, in a `fuzz_seams` module.
@@ -191,7 +192,7 @@ Keep that input under `fuzz/corpus/<target>/` with the fix, so the case stays co
 On CI, read the failure in the job's test report.
 Each workspace-suite job publishes a check named `Test results`, with a suffix for the arm64 and macOS jobs, and uploads its `junit.xml` as an artifact named `junit-nextest`, `junit-nextest-arm64` or `junit-nextest-macos`.
 The container jobs publish checks named for their suite, such as `S3 <lane> test results`.
-The `Feature matrix and default-feature tests` job publishes no report, so read its log.
+Every other CI job, such as `Feature matrix and default-feature tests` or `Loom models (spate-core)`, publishes no report, so read the failure in its log.
 
 The `ci` profile prints a failing test's output as soon as it fails, and again in the summary at the end.
 A wait that reaches `HANG` panics with `hung after 60s waiting for:` and the description passed to it, so write that description as the state you expected.

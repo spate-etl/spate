@@ -51,11 +51,16 @@ fn a_topic_reported_missing_once_does_not_stop_the_feed() {
             RDKafkaRespErr::RD_KAFKA_RESP_ERR_UNKNOWN_TOPIC_OR_PART,
         )
         .unwrap();
-    // librdkafka marks the topic missing once it has existed for longer than
-    // the propagation window, and logs the change at debug `topic`.
-    let missing = format!("Topic {DEAD} changed state exists -> notexists");
-    wait_until(HANG, "the dead-letter topic is marked missing", || {
-        capture.lines().iter().any(|line| line.contains(&missing))
+    // librdkafka marks the topic missing once the propagation window has
+    // passed, and logs the change at debug `topic`. Its topic scan can first
+    // time out the topic's metadata, so the change starts from `exists` or
+    // from `unknown`.
+    let changed = format!("Topic {DEAD} changed state ");
+    capture.wait_for(HANG, "the dead-letter topic is marked missing", || {
+        capture
+            .lines()
+            .into_iter()
+            .find(|line| line.contains(&changed) && line.contains(" -> notexists"))
     });
     cluster
         .topic_error(DEAD, RDKafkaRespErr::RD_KAFKA_RESP_ERR_NO_ERROR)

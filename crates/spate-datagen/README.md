@@ -31,7 +31,7 @@ source:
     epoch_ms: 1767225600000  # base for the fixed clock
 ```
 
-Each value above is the default, except `count`, which is unset by default.
+Each value above is the default. `count` is unset by default.
 
 `partitions × events_per_tick ÷ tick_interval` is the release ceiling, 400
 events/s at the defaults. A lane polled a whole interval late re-anchors to the
@@ -110,8 +110,9 @@ split one stream between them. Two instances with the same configuration and
 - `commit()` stores watermarks in memory and nowhere else.
 - The source claims no resumability. A restart or a crash begins every lane at
   offset 0, so the same configuration replays the whole stream from the
-  beginning, with the same ids and offsets. That is strictly more duplication
-  than a real at-least-once source, which replays only from its last committed
+  beginning, with the same ids and offsets. Under `clock: wall`, only
+  `placed_at` differs between runs. That is strictly more duplication than a
+  real at-least-once source. Such a source replays only from its last committed
   position.
 - A `resume_from:` file is deliberately declined. A demo source that appears to
   resume durably is one somebody builds on.
@@ -136,9 +137,9 @@ bounded case instead.
 ## Dependencies
 
 Beside `spate-core`: `serde`, `serde_json`, `humantime-serde` and `tracing`,
-with `apache-avro` behind the optional `avro` feature, which the facade's
-`datagen-avro` turns on. The random generator is a hand-rolled SplitMix64, so
-the crate takes no direct dependency on a random-number crate.
+with `apache-avro` behind the optional `avro` feature. The facade's
+`datagen-avro` turns that feature on. The random generator is a hand-rolled
+SplitMix64, so the crate takes no direct dependency on a random-number crate.
 
 ## Related
 

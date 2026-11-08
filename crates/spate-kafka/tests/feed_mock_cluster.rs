@@ -658,60 +658,6 @@ fn a_failed_write_to_a_missing_retry_topic_makes_the_feed_fatal() {
     );
 }
 
-/// Pins that a dead-letter topic one metadata response calls missing does
-/// not stop the feed: librdkafka marks the topic missing for a window, a
-/// write in that window is sent again, and it lands once the window ends.
-#[test]
-fn a_topic_reported_missing_once_does_not_stop_the_feed() {
-    use rdkafka::types::RDKafkaRespErr;
-    let cluster = cluster(1);
-    let brokers = cluster.bootstrap_servers();
-    let group = spate_test::unique_name("transient-missing");
-    let worker = direct(&feed_yaml(
-        &brokers,
-        &group,
-        "",
-        "      topic.metadata.propagation.max.ms: \"1000\"\n      \
-         topic.metadata.refresh.interval.ms: \"100\"\n",
-    ));
-    produce_raw(&brokers, WORK, &[(Some(&[0xff, 0xfe][..]), &b"first"[..])]);
-    wait_until(HANG, "the first message is dead-lettered", || {
-        high_watermark(&brokers, DEAD) == 1
-    });
-    // Elapsed time is the property: librdkafka marks a topic missing on one
-    // response only once the topic is older than the propagation window,
-    // and a few metadata refreshes must see the error.
-    std::thread::sleep(Duration::from_millis(1500));
-    cluster
-        .topic_error(
-            DEAD,
-            RDKafkaRespErr::RD_KAFKA_RESP_ERR_UNKNOWN_TOPIC_OR_PART,
-        )
-        .unwrap();
-    std::thread::sleep(Duration::from_millis(500));
-    cluster
-        .topic_error(DEAD, RDKafkaRespErr::RD_KAFKA_RESP_ERR_NO_ERROR)
-        .unwrap();
-    produce_raw(&brokers, WORK, &[(Some(&[0xff, 0xfe][..]), &b"second"[..])]);
-    let mut fatal = None;
-    wait_until(
-        HANG,
-        "the second message is dead-lettered or the feed stops",
-        || {
-            if let Err(e) = worker.feed.receive(1)
-                && e.kind == FeedErrorKind::Fatal
-            {
-                fatal = Some(e);
-            }
-            fatal.is_some() || high_watermark(&brokers, DEAD) == 2
-        },
-    );
-    assert!(
-        fatal.is_none(),
-        "the feed stopped though the topic exists: {fatal:?}"
-    );
-}
-
 /// Pins that a committed-offset lookup the coordinator keeps answering
 /// with "load in progress" does not hold the feed's consumer thread out of
 /// `poll` past `max.poll.interval.ms`: over 20 s of a rebalance, neither

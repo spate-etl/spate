@@ -123,10 +123,15 @@ fn full_lifecycle_polls_acks_and_commits() {
     );
 }
 
+/// A paused lane delivers nothing while its consumer keeps fetching the
+/// lane beside it, and on resume it delivers every record gap-free.
 #[test]
 fn pause_stops_delivery_and_resume_recovers_gapless() {
     let cluster = MockKafka::new();
-    cluster.create_topic(TOPIC, 1, 1).expect("create topic");
+    // Partition 1 stays unpaused, so the consumer keeps sending Fetch requests
+    // the test can count.
+    cluster.create_topic(TOPIC, 2, 1).expect("create topic");
+    cluster.track_requests();
     let brokers = cluster.bootstrap_servers();
 
     let mut cfg = config(&brokers, "pause");
@@ -139,10 +144,14 @@ fn pause_stops_delivery_and_resume_recovers_gapless() {
         .open(SourceCtx::new(cp.handle()).with_meter(Some(meter)))
         .expect("open");
     let mut lanes = await_assignment(&mut source, HANG);
-    assert_eq!(lanes.len(), 1);
-    cp.begin_epoch(&[lanes[0].partition()], 1);
+    assert_eq!(lanes.len(), 2);
+    cp.begin_epoch(&[PartitionId(0), PartitionId(1)], 1);
+    let paused = lanes
+        .iter()
+        .position(|lane| lane.partition() == PartitionId(0))
+        .expect("a lane on partition 0");
 
-    source.pause(&[lanes[0].id()]).expect("pause");
+    source.pause(&[lanes[paused].id()]).expect("pause");
     produce(&brokers, TOPIC, 5, 1, "b");
 
     // A failure from here on carries the source's warnings: a main-queue
@@ -150,21 +159,27 @@ fn pause_stops_delivery_and_resume_recovers_gapless() {
     // with its fetch state.
     spate_test::show_logs(tracing::Level::WARN, || {
         let mut errors = Vec::new();
-        // While paused nothing is delivered (pause also purges prefetch).
-        let idle_until = Instant::now() + Duration::from_secs(2);
-        while Instant::now() < idle_until {
+        // ANCHOR: absence_after_a_signal
+        // One Fetch is in flight per broker, and its reply is queued before
+        // the next is sent, so the second Fetch from here means one sent after
+        // the produce has been answered.
+        let fetched = cluster.received(RDKafkaApiKey::Fetch);
+        wait_until(HANG, "a Fetch sent after the produce is answered", || {
             serve_events(&mut source, &mut errors);
-            assert!(
-                lanes[0]
-                    .poll(64, Duration::from_millis(100))
-                    .expect("poll")
-                    .is_none(),
-                "paused lane must not deliver; retryable errors: {errors:?}"
-            );
-        }
+            cluster.received(RDKafkaApiKey::Fetch) >= fetched + 2
+        });
+        // Pause also purges what was prefetched.
+        assert!(
+            lanes[paused]
+                .poll(64, Duration::ZERO)
+                .expect("poll")
+                .is_none(),
+            "paused lane must not deliver; retryable errors: {errors:?}"
+        );
+        // ANCHOR_END: absence_after_a_signal
 
-        source.resume(&[lanes[0].id()]).expect("resume");
-        let rows = drain_lane(&mut source, &mut lanes[0], 5, HANG);
+        source.resume(&[lanes[paused].id()]).expect("resume");
+        let rows = drain_lane(&mut source, &mut lanes[paused], 5, HANG);
         let offsets: Vec<i64> = rows.iter().map(|(_, _, o)| *o).collect();
         assert_eq!(offsets, (0..5).collect::<Vec<_>>(), "gap-free redelivery");
     });
@@ -489,6 +504,30 @@ fn drive_step(
     }
 }
 
+/// Open `source` with its statistics publishing to a recorder of its own, and
+/// return the handle that renders them. `pipeline` labels the series.
+fn open_watched(
+    source: &mut KafkaSource,
+    cp: &Checkpointer,
+    pipeline: &str,
+) -> metrics_exporter_prometheus::PrometheusHandle {
+    let (recorder, handle, meter) = support::recorded_meter(pipeline.to_owned());
+    metrics::with_local_recorder(&recorder, || {
+        source
+            .open(SourceCtx::new(cp.handle()).with_meter(Some(meter)))
+            .expect("open");
+    });
+    handle
+}
+
+/// Whether the one consumer `statistics` renders last reported itself in a
+/// stable group.
+fn in_stable_group(statistics: &metrics_exporter_prometheus::PrometheusHandle) -> bool {
+    let rendered = statistics.render();
+    let healthy = spate_test::metric_series(&rendered, "spate_kafka_group_healthy", &[]);
+    matches!(healthy.as_slice(), [series] if series.value == 1.0)
+}
+
 /// Regression: a member that is offered an empty assignment (more group
 /// members than partitions) must still acknowledge the rebalance with
 /// `assign()`. Under the deferred-completion protocol, skipping that leaves
@@ -507,10 +546,10 @@ fn empty_assignment_completes_rebalance_protocol() {
 
     let mut cp_a = Checkpointer::new();
     let mut cp_b = Checkpointer::new();
-    let mut a = KafkaSource::new(config(&brokers, "empty"));
-    let mut b = KafkaSource::new(config(&brokers, "empty"));
-    a.open(SourceCtx::new(cp_a.handle())).expect("open a");
-    b.open(SourceCtx::new(cp_b.handle())).expect("open b");
+    let mut a = KafkaSource::new(watched_config(&brokers, "empty", 1));
+    let mut b = KafkaSource::new(watched_config(&brokers, "empty", 1));
+    let a_stats = open_watched(&mut a, &cp_a, "empty-a");
+    let b_stats = open_watched(&mut b, &cp_b, "empty-b");
 
     let mut a_lanes: Vec<<KafkaSource as Source>::Lane> = Vec::new();
     let mut b_lanes: Vec<<KafkaSource as Source>::Lane> = Vec::new();
@@ -518,16 +557,15 @@ fn empty_assignment_completes_rebalance_protocol() {
     let (mut a_count, mut b_count) = (0usize, 0usize);
 
     // Round-robin both members from this thread until the group settles with
-    // one owner and one empty member (stable for several quiet ticks).
+    // one owner and one empty member, each in a stable group.
     //
-    // Both conditions are required. Quiet alone is not settled: if the two
-    // members do not land in the same initial rebalance window, the second
-    // join re-forms an established group, and the mock broker paces that at
-    // `session.timeout.ms - 1000`, long enough to look quiet while the
-    // reassignment is still in flight.
+    // Both conditions are required. The counts alone are not settled: if the
+    // two members do not land in the same initial rebalance window, the
+    // second join re-forms an established group, and the mock broker paces
+    // that at `session.timeout.ms - 1000`. The joining member reports itself
+    // unstable for that whole wait, and the empty assignment emits no event.
     let deadline = Instant::now() + HANG;
-    let mut quiet = 0;
-    while !(quiet >= 25 && a_count + b_count == 1) {
+    while !(a_count + b_count == 1 && in_stable_group(&a_stats) && in_stable_group(&b_stats)) {
         // Assert rather than fall out of the loop: on the deadline path the
         // counts can transiently read 1 mid-flight, which would satisfy the
         // assertion below and let the test continue against a group that
@@ -535,8 +573,9 @@ fn empty_assignment_completes_rebalance_protocol() {
         // deadline a failure with a diagnosis attached.
         assert!(
             Instant::now() < deadline,
-            "the group never settled: quiet={quiet}, a={a_count}, b={b_count} \
-             (want one owner, one empty member, stable for 25 ticks)"
+            "the group never settled: a={a_count}, b={b_count}, stable={:?} \
+             (want one owner, one empty member, both in a stable group)",
+            (in_stable_group(&a_stats), in_stable_group(&b_stats))
         );
         let sa = drive_step(
             &mut a,
@@ -557,11 +596,6 @@ fn empty_assignment_completes_rebalance_protocol() {
         }
         if let Some(n) = sb {
             b_count = n;
-        }
-        if sa.is_none() && sb.is_none() {
-            quiet += 1;
-        } else {
-            quiet = 0;
         }
     }
     assert_eq!(
@@ -630,7 +664,7 @@ fn an_empty_member_survives_the_assignment_deadline() {
 
     let clock = TestClock::frozen();
     let member = |group: &str| {
-        let mut cfg = config(&brokers, group);
+        let mut cfg = watched_config(&brokers, group, 1);
         cfg.assignment_timeout = DEADLINE;
         KafkaSource::new(cfg).with_clock(Arc::clone(&clock) as _)
     };
@@ -638,8 +672,8 @@ fn an_empty_member_survives_the_assignment_deadline() {
     let mut cp_b = Checkpointer::new();
     let mut a = member("empty-deadline");
     let mut b = member("empty-deadline");
-    a.open(SourceCtx::new(cp_a.handle())).expect("open a");
-    b.open(SourceCtx::new(cp_b.handle())).expect("open b");
+    let a_stats = open_watched(&mut a, &cp_a, "empty-deadline-a");
+    let b_stats = open_watched(&mut b, &cp_b, "empty-deadline-b");
 
     let mut a_lanes: Vec<<KafkaSource as Source>::Lane> = Vec::new();
     let mut b_lanes: Vec<<KafkaSource as Source>::Lane> = Vec::new();
@@ -649,12 +683,12 @@ fn an_empty_member_survives_the_assignment_deadline() {
     // Settle the group with one owner and one empty member, on the
     // conditions `empty_assignment_completes_rebalance_protocol` documents.
     let deadline = Instant::now() + HANG;
-    let mut quiet = 0;
-    while !(quiet >= 25 && a_count + b_count == 1) {
+    while !(a_count + b_count == 1 && in_stable_group(&a_stats) && in_stable_group(&b_stats)) {
         assert!(
             Instant::now() < deadline,
-            "the group never settled: quiet={quiet}, a={a_count}, b={b_count} \
-             (want one owner, one empty member, stable for 25 ticks)"
+            "the group never settled: a={a_count}, b={b_count}, stable={:?} \
+             (want one owner, one empty member, both in a stable group)",
+            (in_stable_group(&a_stats), in_stable_group(&b_stats))
         );
         let sa = drive_step(
             &mut a,
@@ -675,11 +709,6 @@ fn an_empty_member_survives_the_assignment_deadline() {
         }
         if let Some(n) = sb {
             b_count = n;
-        }
-        if sa.is_none() && sb.is_none() {
-            quiet += 1;
-        } else {
-            quiet = 0;
         }
     }
 
@@ -990,16 +1019,34 @@ fn assigned_consumer(brokers: &str, group: &str, partitions: i32) -> std::sync::
     std::sync::Arc::new(consumer)
 }
 
-/// Count the messages the consumer's main queue hands back over `window`.
-fn drain_main_queue(consumer: &BaseConsumer, window: Duration) -> usize {
-    let deadline = Instant::now() + window;
+/// Count the messages the consumer's main queue hands back until a Fetch sent
+/// from here on has been answered, then what is left on it. `cluster` tracks
+/// requests.
+///
+/// One Fetch is in flight per broker connection, and its reply is queued before
+/// the next is sent, so a second Fetch from here means one sent after the call
+/// has been answered.
+fn drain_main_queue(consumer: &BaseConsumer, cluster: &MockKafka) -> usize {
+    let fetched = cluster.received(RDKafkaApiKey::Fetch);
     let mut delivered = 0usize;
-    while Instant::now() < deadline {
-        if let Some(result) = consumer.poll(Duration::from_millis(100)) {
+    let mut count = |result: Option<rdkafka::error::KafkaResult<_>>| {
+        if let Some(result) = result {
             result.expect("main queue message");
             delivered += 1;
+            true
+        } else {
+            false
         }
-    }
+    };
+    wait_until(
+        HANG,
+        "a Fetch sent after the drain began is answered",
+        || {
+            count(consumer.poll(Duration::from_millis(100)));
+            cluster.received(RDKafkaApiKey::Fetch) >= fetched + 2
+        },
+    );
+    while count(consumer.poll(Duration::ZERO)) {}
     delivered
 }
 
@@ -1022,11 +1069,6 @@ fn the_main_queue_delivers_a_partition_that_was_never_split() {
     });
 }
 
-/// How long a main-queue drain runs before it reports an absence. A first
-/// main-queue delivery lands about 0.5s after the assign on MockCluster, an
-/// order of magnitude inside this.
-const WINDOW: Duration = Duration::from_secs(6);
-
 /// A partition whose queue has been split stays off the main queue. The
 /// `RD_KAFKA_Q_F_FWD_APP` mark survives dropping the `PartitionQueue`, an
 /// unassign and a re-assign, so the main queue delivers nothing for it.
@@ -1034,6 +1076,7 @@ const WINDOW: Duration = Duration::from_secs(6);
 fn a_split_partition_never_returns_to_the_main_queue() {
     let cluster = MockKafka::new();
     cluster.create_topic(TOPIC, 1, 1).expect("create topic");
+    cluster.track_requests();
     let brokers = cluster.bootstrap_servers();
     produce(&brokers, TOPIC, 20, 1, "w");
 
@@ -1059,7 +1102,7 @@ fn a_split_partition_never_returns_to_the_main_queue() {
         .expect("tpl entry");
     consumer.assign(&tpl).expect("re-assign");
 
-    let main_queue = drain_main_queue(&consumer, WINDOW);
+    let main_queue = drain_main_queue(&consumer, &cluster);
 
     // The re-assign positions the partition at the beginning, so a fetch that
     // restarted hands back offset 0; residue from the first fetch starts at 1
@@ -1618,37 +1661,67 @@ fn two_consumers_poll_ack_and_commit_every_partition() {
     );
 }
 
-/// A pause reaches the consumer that owns each lane's partition: while both
-/// lanes are paused neither delivers, and on resume both deliver gap-free.
+/// A pause reaches the consumer that owns each lane's partition: while one
+/// lane of each consumer is paused it delivers nothing, and on resume every
+/// lane delivers gap-free.
 #[test]
 fn pause_reaches_the_owning_consumer() {
-    let cluster = MockKafka::new();
+    // Partitions 0 and 1 are led by broker 1, and 2 and 3 by broker 2. The
+    // range assignor gives each consumer two adjacent partitions, so each
+    // consumer fetches from one broker and that broker's Fetch count is its
+    // own.
+    let cluster = MockKafka::with_brokers(2);
     cluster.hold_first_rebalance();
-    cluster.create_topic(TOPIC, 2, 1).expect("create topic");
+    cluster.create_topic(TOPIC, 4, 1).expect("create topic");
+    for (partition, broker) in [(0, 1), (1, 1), (2, 2), (3, 2)] {
+        cluster
+            .partition_leader(TOPIC, partition, Some(broker))
+            .expect("partition leader");
+    }
+    cluster.track_requests();
     let brokers = cluster.bootstrap_servers();
 
-    let mut driver = Driver::open(consumers_config(&brokers, "pause-owner", 2));
-    driver.settle(2);
-    let ids: Vec<_> = driver.lanes.iter().map(SourceLane::id).collect();
-    driver.source.pause(&ids).expect("pause");
-    produce(&brokers, TOPIC, 5, 2, "p");
+    let mut cfg = consumers_config(&brokers, "pause-owner", 2);
+    cfg.rdkafka
+        .insert("partition.assignment.strategy".into(), "range".into());
+    let mut driver = Driver::open(cfg);
+    driver.settle(4);
+    let paused: Vec<_> = driver
+        .lanes
+        .iter()
+        .filter(|lane| [PartitionId(0), PartitionId(2)].contains(&lane.partition()))
+        .map(SourceLane::id)
+        .collect();
+    driver.source.pause(&paused).expect("pause");
+    produce(&brokers, TOPIC, 5, 4, "p");
 
-    // While paused nothing is delivered (pause also purges prefetch).
-    let idle_until = Instant::now() + Duration::from_secs(2);
-    while Instant::now() < idle_until {
-        driver.step(Duration::from_millis(50));
-        for lane in &mut driver.lanes {
-            assert!(
-                lane.poll(64, Duration::from_millis(50))
-                    .expect("poll")
-                    .is_none(),
-                "paused lane on partition {} delivered",
-                lane.partition().0
-            );
-        }
+    // One Fetch is in flight per broker connection, and its reply is queued
+    // before the next is sent, so a second Fetch at each broker from here
+    // means each consumer has had a Fetch sent after the produce answered.
+    let fetched = |broker| cluster.received_from(RDKafkaApiKey::Fetch, broker);
+    let base = [fetched(1), fetched(2)];
+    wait_until(
+        HANG,
+        "a Fetch after the produce answered at each broker",
+        || {
+            driver.step(Duration::from_millis(50));
+            fetched(1) >= base[0] + 2 && fetched(2) >= base[1] + 2
+        },
+    );
+    // Pause also purges what was prefetched.
+    for lane in driver
+        .lanes
+        .iter_mut()
+        .filter(|lane| paused.contains(&lane.id()))
+    {
+        assert!(
+            lane.poll(64, Duration::ZERO).expect("poll").is_none(),
+            "paused lane on partition {} delivered",
+            lane.partition().0
+        );
     }
 
-    driver.source.resume(&ids).expect("resume");
+    driver.source.resume(&paused).expect("resume");
     driver.read(5);
 }
 

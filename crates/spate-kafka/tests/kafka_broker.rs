@@ -140,10 +140,9 @@ fn real_broker_revocation_commit_persists_revoked_offsets() {
     let probe = support::probe(&brokers, "rev-commit");
 
     // Run the revocation choreography: store the drained watermark for the
-    // partition being revoked, then keep polling so `unassign` completes.
+    // partition being revoked, then poll so `unassign` runs.
     let mut stored = false;
-    let mut ticks = 0;
-    spate_test::wait_until(HANG, "the revocation, then 15 polls", || {
+    spate_test::wait_until(HANG, "the revocation", || {
         if let SourceEvent::LanesRevoked {
             lanes: ids,
             barrier,
@@ -160,11 +159,10 @@ fn real_broker_revocation_commit_persists_revoked_offsets() {
             );
             stored = true;
         }
-        if stored {
-            ticks += 1;
-        }
-        ticks >= 15
+        stored
     });
+    // One more poll runs that `unassign`.
+    let _ = source.poll_events(Duration::ZERO);
 
     // The drained watermark is committed for the revoked partition.
     spate_test::wait_until(HANG, "revoked partition committed offset 50", || {

@@ -879,8 +879,8 @@ impl KafkaSource {
     /// Committed offsets belong to the group, so one consumer reads every offer's
     /// partitions with one lookup and one listing, and the cost of an accept does
     /// not grow with the consumer count. `Err` gives the reason to hold the offers
-    /// and retry, since leaving a start to librdkafka would put the partition at
-    /// its end.
+    /// and retry, since librdkafka reads `latest` as `earliest` here and would
+    /// start the partition at its beginning.
     ///
     /// # Errors
     ///
@@ -3245,12 +3245,24 @@ mod tests {
         /// A source of group `positions` on `cluster`'s topic `t` under the
         /// `reset` policy, opened, with its first assignment accepted.
         fn assigned_on(cluster: &MockKafka, reset: &str) -> (KafkaSource, Vec<KafkaLane>) {
+            assigned_with(cluster, reset, &[])
+        }
+
+        /// [`assigned_on`] with `extra` librdkafka properties.
+        fn assigned_with(
+            cluster: &MockKafka,
+            reset: &str,
+            extra: &[(&str, &str)],
+        ) -> (KafkaSource, Vec<KafkaLane>) {
             let mut cfg = KafkaSourceConfig::new(cluster.bootstrap_servers(), "t", "positions");
             cfg.startup_timeout = Duration::from_secs(30);
             cfg.rdkafka = std::collections::BTreeMap::from([
                 ("auto.offset.reset".to_string(), reset.to_string()),
                 ("session.timeout.ms".to_string(), "6000".to_string()),
             ]);
+            for (key, value) in extra {
+                cfg.rdkafka.insert((*key).to_string(), (*value).to_string());
+            }
             let cp = spate_core::checkpoint::Checkpointer::new();
             let mut source = KafkaSource::new(cfg);
             source
@@ -3266,22 +3278,8 @@ mod tests {
         /// Regression for #1268.
         #[test]
         fn a_reset_under_the_error_policy_is_fatal() {
-            use crate::client::testing::{Raw as _, raw_config};
-            use rdkafka::consumer::Consumer as _;
             let cluster = mock_holding(3);
-            let committer: rdkafka::consumer::BaseConsumer = raw_config()
-                .set("bootstrap.servers", cluster.bootstrap_servers())
-                .set("group.id", "positions")
-                .build()
-                .expect("committer");
-            let mut past_the_end = TopicPartitionList::new();
-            past_the_end
-                .add_partition_offset("t", 0, Offset::Offset(100))
-                .expect("offset");
-            committer
-                .commit(&past_the_end, rdkafka::consumer::CommitMode::Sync)
-                .expect("commit past the end");
-            drop(committer);
+            commit_positions(&cluster, 100);
 
             let (mut source, mut lanes) = assigned_on(&cluster, "error");
             let mut failed = None;
@@ -3300,27 +3298,30 @@ mod tests {
             assert!(e.reason().contains("partition 0"), "{e}");
         }
 
-        /// Under `latest`, a commit below the log start resumes at the log start,
-        /// so the records the log still holds are read. The mock keeps 5 MiB of a
-        /// partition and drops its oldest message sets past that.
-        #[test]
-        fn a_commit_below_the_log_start_resumes_at_the_log_start() {
+        /// Commit `offset` on partition 0 of `cluster`'s topic `t` for group
+        /// `positions`.
+        fn commit_positions(cluster: &MockKafka, offset: i64) {
             use crate::client::testing::{Raw as _, raw_config};
             use rdkafka::consumer::Consumer as _;
-            use spate_core::source::PayloadBatch as _;
-            let cluster = mock_holding(3);
             let committer: rdkafka::consumer::BaseConsumer = raw_config()
                 .set("bootstrap.servers", cluster.bootstrap_servers())
                 .set("group.id", "positions")
                 .build()
                 .expect("committer");
-            let mut inside = TopicPartitionList::new();
-            inside
-                .add_partition_offset("t", 0, Offset::Offset(1))
+            let mut list = TopicPartitionList::new();
+            list.add_partition_offset("t", 0, Offset::Offset(offset))
                 .expect("offset");
             committer
-                .commit(&inside, rdkafka::consumer::CommitMode::Sync)
+                .commit(&list, rdkafka::consumer::CommitMode::Sync)
                 .expect("commit");
+        }
+
+        /// Write 6 MiB to partition 0 of `cluster`'s topic `t`, past the 5 MiB the
+        /// mock keeps of a partition before it drops its oldest message sets, and
+        /// return the log's start and end.
+        fn write_past_retention(cluster: &MockKafka) -> (i64, i64) {
+            use crate::client::testing::{Raw as _, raw_config};
+            use rdkafka::consumer::Consumer as _;
             let producer: rdkafka::producer::BaseProducer = raw_config()
                 .set("bootstrap.servers", cluster.bootstrap_servers())
                 .set("linger.ms", "0")
@@ -3338,15 +3339,34 @@ mod tests {
                 rdkafka::producer::Producer::flush(&producer, Duration::from_secs(30))
                     .expect("flush");
             }
-            let (low, high) = committer
+            let probe: rdkafka::consumer::BaseConsumer = raw_config()
+                .set("bootstrap.servers", cluster.bootstrap_servers())
+                .build()
+                .expect("probe");
+            probe
                 .fetch_watermarks("t", 0, Duration::from_secs(10))
-                .expect("watermarks");
-            drop(committer);
-            assert!(low > 1, "the log start {low} has not passed the commit");
+                .expect("watermarks")
+        }
 
-            let (mut source, mut lanes) = assigned_on(&cluster, "latest");
-            let mut first = None;
-            spate_test::wait_until(spate_test::HANG, "a record", || {
+        /// Serve `source` and poll `lane`, writing one record to partition 0 on
+        /// each turn, until the lane hands out an offset past `after`. Returns that
+        /// offset and every offset the lane handed out. The writes let a lane that
+        /// jumped to the end read something, so it fails on its offset and not on
+        /// the hang bound.
+        fn first_read_past(
+            cluster: &MockKafka,
+            source: &mut KafkaSource,
+            lane: &mut KafkaLane,
+            after: i64,
+        ) -> (i64, Vec<i64>) {
+            use crate::client::testing::{Raw as _, raw_config};
+            use spate_core::source::PayloadBatch as _;
+            let producer: rdkafka::producer::BaseProducer = raw_config()
+                .set("bootstrap.servers", cluster.bootstrap_servers())
+                .build()
+                .expect("producer");
+            let (mut first, mut seen) = (None, Vec::new());
+            spate_test::wait_until(spate_test::HANG, "a record past the start", || {
                 producer
                     .send(
                         rdkafka::producer::BaseRecord::<(), _>::to("t")
@@ -3359,20 +3379,88 @@ mod tests {
                 source
                     .poll_events(Duration::from_millis(10))
                     .expect("poll_events");
-                if let Some(mut batch) = lanes[0]
+                if let Some(mut batch) = lane
                     .poll(64, Duration::from_millis(100))
                     .expect("lane poll")
-                    && let Some(raw) = batch.next_payload()
                 {
-                    first = Some(raw.offset);
+                    while let Some(raw) = batch.next_payload() {
+                        seen.push(raw.offset);
+                        if raw.offset > after && first.is_none() {
+                            first = Some(raw.offset);
+                        }
+                    }
                 }
                 first.is_some()
             });
+            (first.expect("wait_until returned"), seen)
+        }
+
+        /// Under `latest`, a commit below the log start resumes at the log start,
+        /// so the records the log still holds are read. Regression for #1713.
+        #[test]
+        fn a_commit_below_the_log_start_resumes_at_the_log_start() {
+            let cluster = mock_holding(3);
+            commit_positions(&cluster, 1);
+            let (low, high) = write_past_retention(&cluster);
+            assert!(low > 1, "the log start {low} has not passed the commit");
+
+            let (mut source, mut lanes) = assigned_on(&cluster, "latest");
+            let (first, _) = first_read_past(&cluster, &mut source, &mut lanes[0], -1);
             assert_eq!(
-                first,
-                Some(low),
+                first, low,
                 "log {low}..{high}: the lane did not resume at the log start"
             );
+        }
+
+        /// Under `latest`, a running lane whose fetch position falls below the log
+        /// start while it lags resumes at the log start. Regression for #1713.
+        #[test]
+        fn a_lagging_lane_resumes_at_the_log_start() {
+            use spate_core::source::PayloadBatch as _;
+            let cluster = mock_holding(3);
+            commit_positions(&cluster, 0);
+            // The fetcher stops while one message waits in the partition's queue.
+            let (mut source, mut lanes) =
+                assigned_with(&cluster, "latest", &[("queued.min.messages", "1")]);
+            // Offset 0 alone, so 1 and 2 stay queued and the fetch position stays
+            // at 3 while the log start moves.
+            let mut seen = Vec::new();
+            spate_test::wait_until(spate_test::HANG, "offset 0", || {
+                source
+                    .poll_events(Duration::from_millis(10))
+                    .expect("poll_events");
+                if let Some(mut batch) = lanes[0]
+                    .poll(1, Duration::from_millis(100))
+                    .expect("lane poll")
+                {
+                    while let Some(raw) = batch.next_payload() {
+                        seen.push(raw.offset);
+                    }
+                }
+                !seen.is_empty()
+            });
+            assert_eq!(seen, [0]);
+            let (low, high) = write_past_retention(&cluster);
+            assert!(
+                low > 3,
+                "the log start {low} has not passed the fetch position"
+            );
+
+            let (first, seen) = first_read_past(&cluster, &mut source, &mut lanes[0], 2);
+            assert_eq!(
+                first, low,
+                "log {low}..{high}, read {seen:?}: the lagging lane did not resume at the log start"
+            );
+        }
+
+        /// Under `latest`, a commit past the log end resumes at the log start.
+        #[test]
+        fn a_commit_past_the_log_end_resumes_at_the_log_start() {
+            let cluster = mock_holding(3);
+            commit_positions(&cluster, 100);
+            let (mut source, mut lanes) = assigned_on(&cluster, "latest");
+            let (first, _) = first_read_past(&cluster, &mut source, &mut lanes[0], -1);
+            assert_eq!(first, 0, "the lane did not resume at the log start");
         }
 
         /// Serve `source` and poll `lane` until the lane issues a batch.

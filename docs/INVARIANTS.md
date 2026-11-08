@@ -28,10 +28,9 @@ year ago still means what it said.
   records a Kafka source group skips by starting a partition at its end the
   first time under `auto.offset.reset: latest`. Under
   [that policy](user-guide/04-connectors/sources/kafka/README.mdx#how-offsets-are-committed)
-  a partition added to the topic, a partition whose committed offset the broker
-  expired, and a committed offset below the log start are exceptions: the group
-  starts at the end, past records written before that start, and no metric
-  counts them. A
+  a partition added to the topic and a partition whose committed offset the
+  broker expired are exceptions: the group starts at the end, past records
+  written before that start, and no metric counts them. A
   notification unit acknowledged at its
   [re-enqueue cap](user-guide/04-connectors/sources/s3/README.mdx#reading-a-notifications-object)
   is an exception, counted in `spate_s3_source_overwrites_dropped_total`.

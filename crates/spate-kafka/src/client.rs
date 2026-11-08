@@ -164,9 +164,10 @@ impl Keys<'_> {
         self.owned.push((key, why));
     }
 
-    /// Set `key` from a typed field without owning it. The passthrough may
-    /// still name it, and the section checks that conflict itself.
-    pub(crate) fn set(&mut self, key: &'static str, value: &str) {
+    /// Set `key` without owning it, from a typed field or as a rewrite of a
+    /// passthrough value. The passthrough may still name it, and the section
+    /// checks that conflict itself.
+    pub(crate) fn set(&mut self, key: &str, value: &str) {
         if let Some(cc) = self.config.as_deref_mut() {
             cc.set(key, value);
         }
@@ -910,6 +911,13 @@ mod tests {
         "compression.codec",
     ];
 
+    /// Whether `section`'s roles carry `key` with the passthrough free to set
+    /// it: [`NOT_OWNED`], and the source's reset policy, which its consumer
+    /// rewrites only from `latest`. A feed consumer owns the reset policy.
+    fn not_owned(section: Section, key: &str) -> bool {
+        NOT_OWNED.contains(&key) || (section == Section::Source && key == "auto.offset.reset")
+    }
+
     /// Every spelling librdkafka accepts for `key`: itself, its
     /// `topic.`-prefixed form, and each alias of the same property.
     fn spellings(key: &str) -> Vec<String> {
@@ -989,7 +997,7 @@ mod tests {
         for (section, base, role) in empty.roles(false) {
             let cc = base.config(&*role);
             for key in cc.config_map().keys() {
-                if NOT_OWNED.contains(key) {
+                if not_owned(section, key) {
                     continue;
                 }
                 for spelling in spellings(key) {
@@ -1017,7 +1025,7 @@ mod tests {
             let wrong: BTreeMap<String, String> = expected
                 .config_map()
                 .keys()
-                .filter(|k| !NOT_OWNED.contains(*k))
+                .filter(|k| !not_owned(section, k))
                 .map(|k| ((*k).to_owned(), "wrong".to_owned()))
                 .collect();
             let wronged = Sections::over(&wrong);
@@ -1028,7 +1036,7 @@ mod tests {
                 .unwrap();
             let cc = wronged_base.config(&*wronged_role);
             for (key, value) in expected.config_map() {
-                if !NOT_OWNED.contains(&key) {
+                if !not_owned(section, key) {
                     assert_eq!(
                         cc.get(key),
                         Some(value),

@@ -795,62 +795,13 @@ mod latest_start {
         });
     }
 
-    /// Under `latest` a committed offset below the log start moves to the end,
-    /// past what the log still holds. Pins the exception INV-1 records.
+    /// A commit retention has passed resumes at the log start, so the records
+    /// the log still holds reach the sink. Regression for #1713.
     #[test]
     #[ignore = "requires Docker"]
-    fn a_commit_below_the_log_start_starts_at_the_end() {
-        on_a_broker(1, |brokers, topic| {
-            use spate_core::source::PayloadBatch as _;
-            let group = spate_test::unique_name("below-start");
-            support::produce_to(brokers, topic, 0, 0..3);
-            let accept = || {
-                let cp = Checkpointer::new();
-                let mut source = KafkaSource::new(latest::config(brokers, topic, &group, "latest"));
-                source.open(SourceCtx::new(cp.handle())).expect("open");
-                let lanes = await_assignment(&mut source, Duration::from_secs(90));
-                (source, cp, lanes)
-            };
-            {
-                let _first = accept();
-                assert_eq!(
-                    support::committed_by(brokers, &group, topic, 1),
-                    [rdkafka::Offset::Offset(3)]
-                );
-            }
-            support::produce_to(brokers, topic, 0, 3..12);
-            let admin: AdminClient<DefaultClientContext> = support::raw_config()
-                .set("bootstrap.servers", brokers)
-                .build()
-                .expect("admin client");
-            let mut before = rdkafka::TopicPartitionList::new();
-            before
-                .add_partition_offset(topic, 0, rdkafka::Offset::Offset(6))
-                .expect("offset");
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("runtime")
-                .block_on(admin.delete_records(&before, &AdminOptions::new()))
-                .expect("delete records");
-            let (mut source, _cp, mut lanes) = accept();
-            let mut next = 12;
-            let mut first = None;
-            spate_test::wait_until(Duration::from_secs(60), "a record", || {
-                support::produce_to(brokers, topic, 0, next..next + 1);
-                next += 1;
-                let _ = source.poll_events(Duration::from_millis(5));
-                if let Some(mut batch) = lanes[0]
-                    .poll(64, Duration::from_millis(50))
-                    .expect("lane poll")
-                    && let Some(raw) = batch.next_payload()
-                {
-                    first = Some(raw.offset);
-                }
-                first.is_some()
-            });
-            let first = first.expect("a record");
-            assert!(first >= 12, "read {first}, inside the log");
+    fn a_commit_below_the_log_start_loses_no_retained_record() {
+        on_a_broker(2, |b, t| {
+            latest::a_commit_below_the_log_start_across_a_restart(b, t, "latest")
         });
     }
 

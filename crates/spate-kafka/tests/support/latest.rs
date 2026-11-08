@@ -3,8 +3,10 @@
 //! its control. The caller creates the topic, since the mock broker takes no
 //! admin request: two partitions, or one for a removed consumer.
 
-use super::{assert_no_gap, await_assignment, committed_by, produce_to};
+use super::{Raw as _, assert_no_gap, await_assignment, committed_by, produce_to, raw_config};
 use rdkafka::Offset;
+use rdkafka::admin::{AdminClient, AdminOptions};
+use rdkafka::client::DefaultClientContext;
 use spate_core::checkpoint::Checkpointer;
 use spate_core::config::PipelineConfig;
 use spate_core::error::ErrorPolicy;
@@ -244,6 +246,62 @@ pub(crate) fn a_quiet_partition_across_a_restart(brokers: &str, topic: &str, pol
     let written = second.written(0);
     second.stop();
     assert_no_gap(0, 0, upto, &written);
+}
+
+/// Route: the log start passes a stopped group's commit, and the restart reads
+/// every record the log still holds. `DeleteRecords` moves the log start, which
+/// the mock broker does not take, so only the real broker suite runs it.
+pub(crate) fn a_commit_below_the_log_start_across_a_restart(
+    brokers: &str,
+    topic: &str,
+    policy: &str,
+) {
+    let group = unique_name("below-start");
+    let mut sentinel = 0;
+    produce_to(brokers, topic, 0, 0..ROUND);
+    // `earliest` reads the first round, so the group has a commit to fall behind.
+    let first = Run::start(config(brokers, topic, &group, "earliest"));
+    await_commit(brokers, &group, topic, 2, 0, ROUND);
+    first.stop();
+
+    produce_to(brokers, topic, 0, ROUND..3 * ROUND);
+    delete_records_below(brokers, topic, 0, 2 * ROUND);
+
+    let second = Run::start(config(brokers, topic, &group, policy));
+    await_reading(&second, brokers, topic, 1, &mut sentinel);
+    // Producing until the commit moves lets a start at the end commit too, so
+    // it fails on the gap and not on the deadline.
+    let (mut next, mut tick, mut upto) = (3 * ROUND, 0, 0);
+    wait_until(DEADLINE, "the commit to pass the retained records", || {
+        if tick % 40 == 0 {
+            produce_to(brokers, topic, 0, next..next + 1);
+            next += 1;
+        }
+        tick += 1;
+        upto = offset_of(committed_by(brokers, &group, topic, 2)[0]).unwrap_or(0);
+        upto > 3 * ROUND
+    });
+    let written = second.written(0);
+    second.stop();
+    assert_no_gap(0, 2 * ROUND, upto, &written);
+}
+
+/// Delete `partition`'s records below `before`, which moves its log start there.
+fn delete_records_below(brokers: &str, topic: &str, partition: i32, before: i64) {
+    let admin: AdminClient<DefaultClientContext> = raw_config()
+        .set("bootstrap.servers", brokers)
+        .build()
+        .expect("admin client");
+    let mut below = rdkafka::TopicPartitionList::new();
+    below
+        .add_partition_offset(topic, partition, Offset::Offset(before))
+        .expect("offset");
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime")
+        .block_on(admin.delete_records(&below, &AdminOptions::new()))
+        .expect("delete records");
 }
 
 /// Route: a new group with its sink down commits nothing past its start, and a

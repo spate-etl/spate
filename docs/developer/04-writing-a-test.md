@@ -162,6 +162,7 @@ proptest! {
 Give each parser of outside bytes a fuzz target.
 The [cargo-fuzz](https://rust-fuzz.github.io/book/cargo-fuzz.html) crate in `fuzz/` has one libFuzzer target per boundary where the pipeline turns bytes into records or records into bytes.
 Each target asserts a property, beyond the absence of a panic.
+The harness is a workspace member, so `--workspace` compiles it, and the root `Cargo.lock` pins what it builds against.
 
 ```sh
 cargo xtask fuzz install

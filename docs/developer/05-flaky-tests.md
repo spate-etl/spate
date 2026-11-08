@@ -366,7 +366,7 @@ cargo nextest run -p spate-kafka --all-features --locked \
 
 Use nextest 0.9.148 or later for a stress run.
 Earlier versions exit with the last iteration's code when fail-fast is off, so a run with a failed iteration can exit 0.
-On those versions, read the summary line for the count that failed.
+From 0.9.104, read the summary line for the count that failed.
 
 A stress run reproduces a failure.
 A stress run that passes proves nothing about a fix.

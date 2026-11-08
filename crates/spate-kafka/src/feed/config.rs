@@ -10,10 +10,6 @@ use std::time::Duration;
 /// The key that names this backend in a `feed:` section.
 pub(crate) const BACKEND: &str = "kafka";
 
-/// Attempts at which a unit goes to the dead-letter topic, read or unread,
-/// unless the section sets `attempt_cap`.
-const ATTEMPT_CAP: NonZeroU32 = NonZeroU32::new(10).expect("non-zero");
-
 /// One of the feed's six clients.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum FeedRole {
@@ -282,19 +278,14 @@ impl std::fmt::Debug for KafkaFeedConfig {
 
 impl KafkaFeedConfig {
     /// Decode and check the `kafka:` body of `section`, with the section's
-    /// `attempt_cap`, else 10.
+    /// `attempt_cap`, else
+    /// [`DEFAULT_ATTEMPT_CAP`](spate_core::feed::DEFAULT_ATTEMPT_CAP).
     pub(crate) fn from_section(section: &FeedSection) -> Result<KafkaFeedConfig, ConfigError> {
-        let backend = section.backend();
-        if backend.type_tag() != BACKEND {
-            return Err(error(format!(
-                "the Kafka feed is built from `feed: {{ {BACKEND}: … }}`, but the section names `{}`",
-                backend.type_tag()
-            )));
-        }
-        let body: Body = backend.deserialize_into()?;
+        let body: Body = section.backend_body(BACKEND, "Kafka")?;
         if body.attempt_cap.is_some() {
-            return Err(error(
-                "`attempt_cap` is a key of `feed:` itself, beside `kafka:`".to_owned(),
+            return Err(FeedSection::backend_error(
+                BACKEND,
+                "`attempt_cap` is a key of `feed:` itself, beside `kafka:`",
             ));
         }
         let config = KafkaFeedConfig {
@@ -307,7 +298,7 @@ impl KafkaFeedConfig {
             delivery_timeout: body.delivery_timeout,
             statistics_interval: body.statistics_interval,
             rdkafka: body.rdkafka,
-            attempt_cap: section.attempt_cap.unwrap_or(ATTEMPT_CAP),
+            attempt_cap: section.attempt_cap_or_default(),
         };
         config.validate()?;
         Ok(config)
@@ -323,21 +314,28 @@ impl KafkaFeedConfig {
             ("attempt_topic", &self.attempt_topic),
         ] {
             if value.trim().is_empty() {
-                return Err(error(format!("`{key}` must not be empty")));
+                return Err(FeedSection::backend_error(
+                    BACKEND,
+                    format!("`{key}` must not be empty"),
+                ));
             }
         }
         // A message read from the work topic counts under its own
         // coordinates, so a retry copy written there would start a new count.
         if self.retry_topic == self.topic {
-            return Err(error("`retry_topic` must differ from `topic`".to_owned()));
+            return Err(FeedSection::backend_error(
+                BACKEND,
+                "`retry_topic` must differ from `topic`",
+            ));
         }
         // The group reads the work and retry topics, so a dead-letter write
         // to either is read and written again without end.
         for (key, value) in [("topic", &self.topic), ("retry_topic", &self.retry_topic)] {
             if self.dead_letter_topic == *value {
-                return Err(error(format!(
-                    "`dead_letter_topic` must differ from `{key}`"
-                )));
+                return Err(FeedSection::backend_error(
+                    BACKEND,
+                    format!("`dead_letter_topic` must differ from `{key}`"),
+                ));
             }
         }
         // The attempt topic is compacted and the others must not be. Startup
@@ -349,19 +347,28 @@ impl KafkaFeedConfig {
             ("dead_letter_topic", &self.dead_letter_topic),
         ] {
             if self.attempt_topic == *value {
-                return Err(error(format!("`attempt_topic` must differ from `{key}`")));
+                return Err(FeedSection::backend_error(
+                    BACKEND,
+                    format!("`attempt_topic` must differ from `{key}`"),
+                ));
             }
         }
         if let Err(why) = check_message_timeout(self.delivery_timeout) {
-            return Err(error(format!("`delivery_timeout` {why}")));
+            return Err(FeedSection::backend_error(
+                BACKEND,
+                format!("`delivery_timeout` {why}"),
+            ));
         }
         if let Err(why) = self.base(false).check_statistics_interval() {
-            return Err(error(format!("`statistics_interval` {why}")));
+            return Err(FeedSection::backend_error(
+                BACKEND,
+                format!("`statistics_interval` {why}"),
+            ));
         }
         let clients = FeedRole::ALL.map(|role| Client { config: self, role });
         let roles: Vec<&dyn Role> = clients.iter().map(|c| c as &dyn Role).collect();
         if let Err(refusal) = self.base(false).denied(&roles) {
-            return Err(error(refusal.to_string()));
+            return Err(FeedSection::backend_error(BACKEND, refusal.to_string()));
         }
         crate::security::check_tls_feature(&self.rdkafka, "feed.kafka")
     }
@@ -390,13 +397,6 @@ impl KafkaFeedConfig {
     #[cfg(test)]
     pub(crate) fn config(&self, role: FeedRole, openssl_env: bool) -> rdkafka::ClientConfig {
         self.base(openssl_env).config(&self.client(role))
-    }
-}
-
-fn error(message: String) -> ConfigError {
-    ConfigError::Component {
-        context: format!("feed.{BACKEND}"),
-        message,
     }
 }
 
@@ -543,13 +543,16 @@ mod tests {
         assert!(err.contains("`attempt_cap` is a key of `feed:`"), "{err}");
     }
 
-    /// Pins the refusals: another backend's tag, a missing, empty or blank
-    /// topic, an unknown key and a delivery timeout outside librdkafka's
-    /// range, with the accepted values at each end of it.
+    /// Pins the refusals: another backend's tag, reported at the section, a
+    /// missing, empty or blank topic, an unknown key and a delivery timeout
+    /// outside librdkafka's range, with the accepted values at each end of it.
     #[test]
     fn a_section_the_kafka_feed_cannot_read_is_refused() {
         let err = parse("memory: {}").unwrap_err().to_string();
-        assert!(err.contains("names `memory`"), "{err}");
+        assert!(
+            err.starts_with("feed: ") && err.contains("names `memory`"),
+            "{err}"
+        );
 
         for (line, key) in [
             ("  dead_letter_topic: units-dead\n", "dead_letter_topic"),

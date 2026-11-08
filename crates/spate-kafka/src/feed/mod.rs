@@ -884,10 +884,7 @@ pub(crate) fn stop(core: &Core) {
 }
 
 fn gone(receipt: Receipt) -> FeedError {
-    FeedError::new(
-        FeedErrorKind::Gone,
-        format!("{receipt} no longer names a delivery the feed holds"),
-    )
+    FeedError::gone(receipt, "Kafka feed")
 }
 
 /// Lock a metric slot, taking it over from a thread that panicked holding it.

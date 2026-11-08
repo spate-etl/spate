@@ -68,9 +68,10 @@ impl MockKafka {
         self.set_initial_rebalance_delay(INITIAL_REBALANCE_DELAY_MS);
     }
 
-    /// Lets the next `JoinGroup` through and refuses the three after it, so one
-    /// consumer of a group forms it alone and the next joins about 3 s later,
-    /// one librdkafka join interval per refusal.
+    /// Queues one accepted `JoinGroup` and three refused after it, behind any
+    /// `JoinGroup` errors already queued, so one consumer of a group forms it
+    /// alone and the next joins about 3 s later, one librdkafka join interval
+    /// per refusal.
     pub(crate) fn hold_back_the_second_join(&self) {
         let refused = RDKafkaRespErr::RD_KAFKA_RESP_ERR_COORDINATOR_LOAD_IN_PROGRESS;
         self.request_errors(

@@ -242,8 +242,18 @@ const _: () = assert!(
 );
 
 const WORDS: &[&str] = &[
-    "stream", "partition", "offset", "replica", "commit", "batch", "broker", "topic", "record",
-    "window", "shard", "lag",
+    "stream",
+    "partition",
+    "offset",
+    "replica",
+    "commit",
+    "batch",
+    "broker",
+    "topic",
+    "record",
+    "window",
+    "shard",
+    "lag",
 ];
 
 /// The typed record the text cases serialize: an id and three strings, with

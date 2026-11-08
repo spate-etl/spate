@@ -16,8 +16,8 @@ mod encode_rig;
 mod messages;
 
 use encode_rig::{
-    bytes_keyed, bytes_keyless, encode_run, json_text, json_text_simd, json_typed,
-    json_typed_simd, stamped_headers, stamped_over_limit,
+    bytes_keyed, bytes_keyless, encode_run, json_text, json_text_simd, json_typed, json_typed_simd,
+    stamped_headers, stamped_over_limit,
 };
 use messages::RECORDS;
 

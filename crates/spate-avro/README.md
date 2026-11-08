@@ -156,10 +156,10 @@ A rejected registry stops the pipeline under either policy, as
 [Schema registry](#schema-registry) describes. A payload waiting on a fetch
 takes no policy.
 
-On a chain built with `with_metrics`, a skipped payload counts in
-`spate_deser_records_dropped_total{reason="skip_policy"}`. This crate keeps no
-counter of its own, so on a chain built without `with_metrics` nothing counts a
-skipped payload, and the skip shows in the rate-limited `WARN` log.
+On a chain built with `with_metrics`, the framework's deserializer metrics count
+a skipped payload. This crate keeps no counter of its own, so on a chain built
+without `with_metrics` nothing counts a skipped payload, and the skip shows in
+the rate-limited `WARN` log.
 
 [Error handling](https://spate.kainth.dev/docs/user-guide/connectors/formats/avro#error-handling)
 on the Avro format page covers each case.

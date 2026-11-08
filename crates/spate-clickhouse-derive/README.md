@@ -3,9 +3,8 @@
 The derive macro behind `#[derive(ClickHouseRow)]` for the Spate ClickHouse
 sink. It implements `ClickHouseRow` for a row struct and generates the insert
 column list from the order in which the struct declares its fields. Depend on
-the [`spate`](https://crates.io/crates/spate) facade with feature `clickhouse`,
-or on `spate-clickhouse`. Both re-export the derive as `ClickHouseRow`, at
-`spate::clickhouse::ClickHouseRow` and `spate_clickhouse::ClickHouseRow`.
+the [`spate`](https://crates.io/crates/spate) facade with feature `clickhouse`.
+The facade re-exports the derive as `spate::clickhouse::ClickHouseRow`.
 
 ## Usage
 

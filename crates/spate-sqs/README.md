@@ -2,10 +2,10 @@
 
 The Amazon SQS feed (`spate-sqs`, feature `sqs` on the `spate` facade) carries
 work units in one SQS standard queue that every worker of a pipeline reads. A
-received unit stays hidden from the other workers while its reader renews it,
-and is deleted once every record in it is acknowledged. A failed unit returns to
-the queue at once, and the queue's redrive policy moves a unit that keeps
-failing to its dead-letter queue.
+received unit stays hidden from the other workers while its reader renews it or
+its worker is stopping, and is deleted once every record in it is acknowledged.
+A failed unit returns to the queue at once, and the queue's redrive policy moves
+a unit that keeps failing to its dead-letter queue.
 
 ## Enable
 
@@ -35,8 +35,8 @@ feed:
 
 `visibility` shows its default.
 
-- `visibility` takes whole seconds from `3s` to `12h`. The feed extends held
-  units every third of it.
+- `visibility` takes whole seconds from `3s` to `12h`. The feed extends units
+  every third of it, as Unit lifecycle describes.
 - `queue_url` takes an `http` or `https` URL. A URL whose path ends in `.fifo`
   is refused, because the feed reads standard queues only.
 - Unset, `region` comes from the queue URL's host when the AWS SDK builds that
@@ -92,7 +92,8 @@ pages cover the framework's side.
 
 - **Visibility.** Each receive hides its units from other workers for
   `visibility`. Every third of that period, the feed extends each unit handed
-  out or renewed since the last extension back to the full period. A unit
+  out or renewed since the last extension back to the full period. A stopping
+  worker extends every unit it holds. A unit
   received and not yet handed out is extended while the reader keeps calling the
   feed. SQS keeps a message hidden for at most 12 hours from its receive, and
   the feed clamps every extension to 30 seconds short of that.

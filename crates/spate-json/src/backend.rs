@@ -343,18 +343,39 @@ mod tests {
     /// malformed, with no element dropped.
     #[test]
     fn an_array_longer_than_its_tuple_is_malformed() {
+        #[derive(Debug, Deserialize)]
+        struct Pair(#[allow(dead_code)] u8, #[allow(dead_code)] u8);
+        #[derive(Debug, Deserialize)]
+        struct Named {
+            #[allow(dead_code)]
+            a: u8,
+        }
         let tuple = decode_one::<(u8, u8)>(b"[1,2,3]");
         assert!(tuple.is_err(), "{tuple:?}");
         let array = decode_one::<[u8; 2]>(b"[1,2,3]");
         assert!(array.is_err(), "{array:?}");
+        let pair = decode_one::<Pair>(b"[1,2,3]");
+        assert!(pair.is_err(), "{pair:?}");
+        let named = decode_one::<Named>(b"[1,2]");
+        assert!(named.is_err(), "{named:?}");
+    }
+
+    /// A number whose exponent is past the `f64` range is malformed, and
+    /// never decodes to another number.
+    #[test]
+    fn an_exponent_past_the_f64_range_is_malformed() {
+        for doc in [&b"1e4294967296"[..], b"1e4294967295"] {
+            let decoded = decode_one::<f64>(doc);
+            assert!(decoded.is_err(), "{decoded:?}");
+        }
     }
 
     /// An integer map key is written in JSON number syntax: no leading `+`
     /// and no leading zero.
     #[test]
     fn an_integer_key_follows_json_number_syntax() {
-        for doc in [&br#"{"+1":2}"#[..], br#"{"01":2}"#] {
-            let decoded = decode_one::<BTreeMap<u32, u8>>(doc);
+        for doc in [&br#"{"+1":2}"#[..], br#"{"01":2}"#, br#"{"-01":2}"#] {
+            let decoded = decode_one::<BTreeMap<i32, u8>>(doc);
             assert!(decoded.is_err(), "{decoded:?}");
         }
     }

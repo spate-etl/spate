@@ -41,6 +41,12 @@ only over the same spelling. An override that loads produces a pipeline that
 appears to work
 ([ADR-0018](../../adr/0018-kafka-sink-forced-durability.md)).
 
+Refuse an owned key with `spate::config::Denylist`. It holds each owned key and
+the reason your connector owns it. Give `normalized_by` the library's mapping
+of a key to one spelling per setting, so the check refuses every spelling the
+library accepts. Put your section's path, such as `source.s3`, in front of the
+error that `Denylist::check` returns.
+
 ## Keep the client out of public signatures
 
 Keep the client and its config types out of `spate-core`'s public API, and

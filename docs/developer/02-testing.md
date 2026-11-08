@@ -1,14 +1,13 @@
 ---
-description: "How a test is written here: act on signalled state, own the environment, let real elapsed time decide a result only when a librdkafka or broker timer is the property, and pick the harness that fits the code."
+description: "Where a test lives, which harness fits the code, what the process-wide state in a test binary demands, and what each tool proves."
 ---
 
 # Writing a test
 
 A test here pins one property of the code and passes on every run in which
-that property holds. The four rules below keep it that way. Each one carries
-the shape that fails, as a sketch, and a test in the tree that holds, rendered
-from its source so it stays current. Then the harnesses, in the order to reach
-for them, and what the process-wide state in a test binary demands.
+that property holds. This page covers where a test lives, the harnesses in the
+order to reach for them, and what the process-wide state in a test binary
+demands.
 
 ## Where a test lives
 
@@ -21,190 +20,11 @@ mocks for connector behavior that does not need a container.
 Helpers that only this repository's tests need, such as reading a pinned image,
 belong in the unpublished `spate-test-support` crate under `test-support/`.
 
-## The four rules
+## Tests that do not flake
 
-### Act only on a state the code has signalled
-
-The code under test publishes the state a test needs: a watch, a notify, a
-channel, a metric or a log line. The test awaits that signal, or polls it with
-`spate_test::wait_until`, and acts or asserts on nothing it has not seen. A
-reading that can also hold while the code is still working is no signal.
-
-The shape that fails, shortened to a sketch:
-
-```rust
-h.pause_clickhouse();
-h.produce(&topic, second_wave);
-wait_until(HANG, "backpressure", || paused_gauge(&pipeline) == 1.0);
-pipeline.stop(); // the gauge also reads 1 under a healthy sink
-```
-
-The shape that holds, from the drain-outage scenario in
-[`crates/spate/tests/e2e_drain_outage.rs`](repo:crates/spate/tests/e2e_drain_outage.rs):
-it waits on a count only the outage can produce.
-
-```rust file=crates/spate/tests/e2e_drain_outage.rs region=outage_signal title="e2e_drain_outage.rs"
-```
-
-The publishing side keeps the same order. The state is complete before the
-signal that announces it, so a fake that exposes its probe before it stores
-what the test will act on hands the test a window in which there is nothing to
-read. The hand-back feed fake in the engine's own tests fills `held` before it
-publishes `closes`:
-
-```rust file=crates/spate-core/src/pipeline/fakes.rs region=held_before_closes title="fakes.rs"
-```
-
-When the code returns a retryable error, the test reads again, as a real caller
-would, and asserts on the first answer that is not retryable. A test that is
-checking for the retryable error itself asserts on it directly.
-
-A broker can report a topic it has just created as missing for a while. A test
-that creates a topic waits until the broker lists it before starting code that
-refuses a missing topic.
-
-### A test owns its environment
-
-Its names, ports, clusters, topics, tables and metric labels are its own.
-Nothing a test binds, names or reads is shared with another test in the binary
-or with another binary on the machine, and nothing it relies on comes from the
-host: no fixed port, no kernel behavior, no image pulled last week.
-
-The shape that fails, shortened to a sketch:
-
-```rust
-let listener = TcpListener::bind("127.0.0.1:39184").unwrap(); // another test, or the host, may hold it
-let series = metric_series(&body, "spate_sink_inflight_batches", &[]); // every pipeline in the process
-```
-
-The shape that holds. A port the kernel chose, released before use, where a
-refused connection is the point:
-
-```rust file=crates/spate-kafka/src/testutil.rs region=refused_broker title="testutil.rs"
-```
-
-A name no other call in the process returns:
-
-```rust file=crates/spate-test/src/fixtures.rs region=unique_name title="fixtures.rs"
-```
-
-And a premise kept as an assertion, where the test needs work on every
-partition and hashed ids would not promise it:
-
-```rust file=crates/spate-kafka/tests/feed_kafka.rs region=fixed_ids title="feed_kafka.rs"
-```
-
-### Real elapsed time decides no result, with one exception
-
-A wall-clock bound catches a hang. It sits far above any latency a loaded
-machine shows, and reaching it says the test hung: pass `spate_test::HANG` to
-`wait_until` and to the waits on the `spate-test` handles. Nothing asserts on
-how long something took on the real clock, and nothing sleeps a fixed interval
-and then assumes the code got there, except in the one case at the end of this
-section.
-
-A timing property of the code is tested on a clock the test moves. Code on OS
-threads or a multi-thread runtime holds a `SharedClock`, and a test hands it a
-`TestClock`. Code on a current-thread tokio runtime reading `tokio::time` runs
-under `#[tokio::test(start_paused = true)]`. A fixed sleep belongs only in such
-a test, on that clock, or in the one case at the end of this section.
-
-The shape that fails, shortened to a sketch:
-
-```rust
-let deadline = Instant::now() + Duration::from_secs(10);
-while !fetched() && Instant::now() < deadline {
-    thread::sleep(Duration::from_millis(5));
-}
-assert!(fetched()); // an idle machine passes this and a loaded one fails it
-```
-
-The shape that holds, from the Kafka source's tests in
-[`crates/spate-kafka/src/source.rs`](repo:crates/spate-kafka/src/source.rs):
-the hold runs on a frozen clock the test hands the source, moved to one
-millisecond before the hold's end and then to it, so the assertion reads the
-code's own timer. The public seam for the same injection is
-`KafkaSource::with_clock`, behind the crate's `testing` feature.
-
-```rust file=crates/spate-kafka/src/source.rs region=hold_on_frozen_clock title="source.rs"
-```
-
-Moving a test clock has an order of its own. The code reads the clock when it
-arms a timer, so an advance that lands before that read moves a deadline the
-code has not set yet. On the tokio clock, `has_slept_until` says the timer is
-armed:
-
-```rust file=crates/spate-core/src/sink/pool_tests.rs region=armed_before_advance title="pool_tests.rs"
-```
-
-Where the clock has no such probe, the test waits for the pass the code makes
-after reading it. The engine's controller tests wait for one poll after a hint
-before they move time:
-
-```rust file=crates/spate-core/src/pipeline/tests.rs region=poll_after_hint title="tests.rs"
-```
-
-Under paused tokio time, `tokio::time::advance` moves every timer at once, and
-the test reads what the code did with the time:
-
-```rust file=crates/spate-sqs/src/feed/tests.rs region=advance_paused_time title="tests.rs"
-```
-
-`spate-core` cannot depend on `spate-test`, so its tests poll with the
-`wait_for` of their own in `pipeline/fakes.rs`, whose bound each caller
-passes. The rule applies to that bound as it does to `HANG`; the regions above
-pass five seconds there, and a hang bound is what the rule asks for in its
-place.
-
-To check that something did not happen, a test waits for an event that shows
-the code has gone past the point where it would have happened, and then checks
-the result once. The Kafka test
-[`pause_stops_delivery_and_resume_recovers_gapless`](repo:crates/spate-kafka/tests/mock_cluster.rs)
-does this by counting the Fetch requests the mock cluster receives. Each broker
-connection in librdkafka sends one Fetch at a time and handles its reply before
-it sends the next. This means that once two more Fetch requests arrive after
-the test produces its records, at least one fetch has completed in full. The
-test can then check that the paused lane received nothing:
-
-```rust file=crates/spate-kafka/tests/mock_cluster.rs region=absence_after_a_signal title="mock_cluster.rs"
-```
-
-Real time is allowed in one case: the property is a librdkafka or broker timer
-running out, such as `session.timeout.ms` or a broker's `segment.ms`. No test
-clock controls those timers, so the test has to let real time pass. It may wait
-past the timer, or assert that at least that much time has passed, and a
-comment starting `Elapsed time is the property` names the timer. A slow machine
-can only make elapsed time longer. This means a minimum on elapsed time fails
-only when the code is wrong. The Kafka feed test
-[`a_unit_whose_worker_is_killed_mid_read_is_delivered_again`](repo:crates/spate-kafka/tests/feed_kafka.rs)
-asserts that worker B read the unit only after worker A's session had lapsed:
-
-```rust file=crates/spate-kafka/tests/feed_kafka.rs region=lower_bound_on_session title="feed_kafka.rs"
-```
-
-A maximum on elapsed time, or a fixed wait that assumes nothing happened, is
-still not allowed. On a slow machine the first fails with nothing wrong, and
-the second can pass without checking anything.
-
-### An interleaving failure is checked for a product defect first
-
-A test that asserts an order of events and fails once is read before it is
-called flaky. The first question is which side is wrong: the test assumed an
-order the code never promised, or the code broke one it did. A wider bound, a
-retry or an `#[ignore]` answers neither, and each hides a defect as readily
-as a flake.
-
-Reproduce it before deciding. The stress runner repeats one test:
-
-```sh
-cargo nextest run -p spate-kafka --all-features --locked \
-  -E 'test(a_later_assignment_does_not_extend_the_hold)' --stress-count 200
-```
-
-Read its summary line for the count that failed; with fail-fast off, nextest
-before 0.9.148 exits 0 on a failed stress run. A failure that reproduces gets an
-issue naming the state the test acted on and the signal that should have
-preceded it, and the fix lands on whichever side was wrong.
+[Tests that do not flake](05-flaky-tests.md) has the rules that keep a test
+passing on every CI runner, how CI differs from your machine, and what to do
+when a test fails there.
 
 ## The harnesses
 
@@ -248,13 +68,9 @@ rebalance for 3 s so that members starting together join one generation.
 `MockKafka` removes that hold, and a test whose members start together and must
 join one generation calls `hold_first_rebalance`. The hold lasts 3 s of real
 time, and a member that reaches the coordinator once it has ended forms a later
-generation. A test whose result needs every member in one state waits for each
-member's signal. The group timers run on real time, so a test with more than one
-consumer settles the group on the signal the source publishes for it before it
-asserts:
-
-```rust file=crates/spate-kafka/tests/mock_cluster.rs region=settle_group title="mock_cluster.rs"
-```
+generation. [Wait for a signal the code
+publishes](05-flaky-tests.md#wait-for-a-signal-the-code-publishes) says how a
+test with more than one consumer settles the group.
 
 ### A container
 

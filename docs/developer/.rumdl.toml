@@ -1,0 +1,26 @@
+# The developer guide keeps one sentence per source line, so a diff shows the
+# sentence that changed. rumdl applies this file to the whole directory and has
+# no per-file rule settings, so the pages listed below, not yet rewritten, go
+# unchecked until each is replaced and its entry removed.
+
+[global]
+flavor = "mdx"
+enable = ["MD013"]
+
+[MD013]
+line-length = 0
+reflow = true
+reflow-mode = "sentence-per-line"
+code-blocks = false
+tables = false
+headings = false
+
+[per-file-ignores]
+"docs/developer/01-commands.md" = ["MD013"]
+"docs/developer/02-testing.md" = ["MD013"]
+"docs/developer/03-connector-crate.md" = ["MD013"]
+"docs/developer/04-benchmarks-and-fuzzing.md" = ["MD013"]
+"docs/developer/05-code-style.md" = ["MD013"]
+"docs/developer/06-reading-a-review.md" = ["MD013"]
+"docs/developer/07-per-record-path.md" = ["MD013"]
+"docs/developer/README.md" = ["MD013"]

@@ -159,7 +159,6 @@ fn pause_stops_delivery_and_resume_recovers_gapless() {
     // with its fetch state.
     spate_test::show_logs(tracing::Level::WARN, || {
         let mut errors = Vec::new();
-        // ANCHOR: absence_after_a_signal
         // One Fetch is in flight per broker, and its reply is queued before
         // the next is sent, so the second Fetch from here means one sent after
         // the produce has been answered.
@@ -176,7 +175,6 @@ fn pause_stops_delivery_and_resume_recovers_gapless() {
                 .is_none(),
             "paused lane must not deliver; retryable errors: {errors:?}"
         );
-        // ANCHOR_END: absence_after_a_signal
 
         source.resume(&[lanes[paused].id()]).expect("resume");
         let rows = drain_lane(&mut source, &mut lanes[paused], 5, HANG);
@@ -1494,7 +1492,6 @@ impl Driver {
         });
     }
 
-    // ANCHOR: settle_group
     /// Step until the live lanes cover partitions `0..partitions` and each of
     /// `consumers` consumers reports itself in a stable group, so the group
     /// has finished forming. Takes a driver from [`Driver::open_watched`].
@@ -1514,7 +1511,6 @@ impl Driver {
                 && healthy.iter().all(|s| s.value == 1.0)
         });
     }
-    // ANCHOR_END: settle_group
 
     /// Read every live lane, stepping between polls, until each partition has
     /// delivered `n` offsets, and return the offsets read per partition. Each

@@ -1,9 +1,9 @@
 //! The SDK client the feed talks through: its trust store, proxy, region,
 //! credentials, timeouts and retries.
 
+use crate::config::NAME;
 use crate::config::SqsFeedConfig;
 use crate::credentials::SharedLoad;
-use crate::error::SqsError;
 use crate::queue::SdkQueue;
 use aws_config::environment::region::EnvironmentVariableRegionProvider;
 use aws_config::imds::region::ImdsRegionProvider;
@@ -20,6 +20,7 @@ use aws_smithy_http_client::tls::rustls_provider::CryptoMode;
 use aws_smithy_http_client::tls::{Provider, TlsContext, TrustStore};
 use rustls_native_certs::CertificateResult;
 use spate_core::config::ConfigError;
+use spate_core::feed::ConnectError;
 use std::time::Duration;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -40,7 +41,7 @@ pub(crate) async fn sdk_queue(
     config: &SqsFeedConfig,
     credentials: Option<SharedCredentialsProvider>,
     step: &std::sync::Mutex<&'static str>,
-) -> Result<SdkQueue, SqsError> {
+) -> Result<SdkQueue, ConnectError> {
     let set = |s| {
         *step
             .lock()
@@ -97,7 +98,7 @@ pub(crate) fn timeouts(read: Duration, operation: Duration) -> TimeoutConfig {
 ///
 /// The SDK's default region chain builds its own HTTP client, which reads the
 /// system trust store on the calling thread.
-async fn chain_region(http: &SharedHttpClient) -> Result<Region, SqsError> {
+async fn chain_region(http: &SharedHttpClient) -> Result<Region, ConnectError> {
     let conf = ProviderConfig::default().with_http_client(http.clone());
     let chain = RegionProviderChain::first_try(EnvironmentVariableRegionProvider::new())
         .or_else(
@@ -110,9 +111,9 @@ async fn chain_region(http: &SharedHttpClient) -> Result<Region, SqsError> {
 }
 
 /// The region `chain` names, or the error that lists where to set one.
-async fn first_region(chain: &impl ProvideRegion) -> Result<Region, SqsError> {
+async fn first_region(chain: &impl ProvideRegion) -> Result<Region, ConnectError> {
     chain.region().await.ok_or_else(|| {
-        SqsError::Config(ConfigError::Component {
+        ConnectError::Config(ConfigError::Component {
             context: "feed.sqs.region".into(),
             message: "no AWS region: set `region`, set AWS_REGION in the environment, or set \
                       `region` in the shared config file's profile"
@@ -126,21 +127,23 @@ async fn first_region(chain: &impl ProvideRegion) -> Result<Region, SqsError> {
 /// goes through the proxies the standard environment variables name.
 pub(crate) async fn http_client(
     system: impl FnOnce() -> CertificateResult + Send + 'static,
-) -> Result<SharedHttpClient, SqsError> {
+) -> Result<SharedHttpClient, ConnectError> {
     #[expect(
         clippy::disallowed_methods,
         reason = "awaited here; the trust-store read ends on its own, and a blocking task cannot be aborted"
     )]
     let (roots, fallback) = tokio::task::spawn_blocking(move || trust_roots(system()))
         .await
-        .map_err(|e| SqsError::Unavailable(format!("loading the system trust store: {e}")))?;
+        .map_err(|e| {
+            ConnectError::unavailable(NAME, format!("loading the system trust store: {e}"))
+        })?;
     if let Some(warning) = fallback {
         tracing::warn!("{warning}");
     }
     let tls = TlsContext::builder()
         .with_trust_store(TrustStore::empty().with_pem_certificate(roots))
         .build()
-        .map_err(|e| SqsError::Refused(format!("building the SQS TLS context: {e}")))?;
+        .map_err(|e| ConnectError::refused(NAME, format!("building the SQS TLS context: {e}")))?;
     // The connector the SDK's default client builds, with this trust store.
     Ok(
         aws_smithy_http_client::Builder::new().build_with_connector_fn(
@@ -352,7 +355,7 @@ mod tests {
     /// three places an operator sets a region.
     #[tokio::test]
     async fn a_missing_region_names_each_way_to_give_one() {
-        let Err(SqsError::Config(ConfigError::Component { context, message })) =
+        let Err(ConnectError::Config(ConfigError::Component { context, message })) =
             first_region(&None::<Region>).await
         else {
             panic!("expected a config error");

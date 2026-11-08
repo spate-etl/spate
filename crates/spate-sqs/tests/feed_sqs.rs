@@ -17,6 +17,7 @@ use object_store::ObjectStoreExt as _;
 use spate_core::clock::TestClock as StopClock;
 use spate_core::clock::tokio::TestClock;
 use spate_core::config::{FeedSection, PipelineConfig};
+use spate_core::feed::ConnectError;
 use spate_core::feed::{
     Confirmation, Delivery, DepthOf, DepthReading, Feed, FeedError, FeedMetricsCtx, FeedWaker,
     Receipt, STOP_RESERVE, Unit, wake_channel,
@@ -26,7 +27,7 @@ use spate_core::pipeline::{ExitState, Pipeline, RuntimeOptions, ShutdownHandle};
 use spate_core::sink::{KeyHashRouter, SinkPoolConfig};
 use spate_json::NdjsonFramer;
 use spate_s3::{DescriptorObject, S3Source, SplitDescriptor};
-use spate_sqs::{SqsError, SqsFeed};
+use spate_sqs::SqsFeed;
 use spate_test::{
     BytesPassthrough, PipelineRun, ScriptedResult, SinkScript, TestEncoder, WriteOutcome,
     capture_sink, decode_rows, wait_until,
@@ -918,7 +919,7 @@ fn a_failed_unit_is_set_visible_at_once() {
 
 /// Connect a feed to `queue_url` at the default visibility, on a runtime of
 /// its own, and stop it again.
-fn connect(mq: &ElasticMq, queue_url: &str) -> Result<(), SqsError> {
+fn connect(mq: &ElasticMq, queue_url: &str) -> Result<(), ConnectError> {
     let yaml = feed_yaml(mq, queue_url, Duration::from_secs(60), "");
     let section: FeedSection = serde_yaml::from_str::<PipelineConfigFeed>(&yaml)
         .unwrap()
@@ -943,7 +944,9 @@ fn startup_refuses_a_queue_with_no_redrive_policy() {
     let queue = mq.create_queue("no-redrive").unwrap();
     let url = format!("{}{queue}", mq.endpoint());
     match connect(&mq, &url) {
-        Err(SqsError::Refused(message)) => {
+        Err(ConnectError::Refused {
+            reason: message, ..
+        }) => {
             assert!(message.contains("redrive"), "{message}");
         }
         other => panic!("expected a refusal, got {other:?}"),
@@ -967,7 +970,9 @@ fn startup_refuses_an_unreadable_dead_letter_queue() {
     mq.delete_queue(&dead).unwrap();
     let url = format!("{}{queue}", mq.endpoint());
     match connect(&mq, &url) {
-        Err(SqsError::Refused(message)) => {
+        Err(ConnectError::Refused {
+            reason: message, ..
+        }) => {
             assert!(
                 message.contains("cannot read the dead-letter queue"),
                 "{message}"

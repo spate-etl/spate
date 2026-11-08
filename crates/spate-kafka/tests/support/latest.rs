@@ -269,8 +269,18 @@ pub(crate) fn a_commit_below_the_log_start_across_a_restart(
 
     let second = Run::start(config(brokers, topic, &group, policy));
     await_reading(&second, brokers, topic, 1, &mut sentinel);
-    produce_to(brokers, topic, 0, 3 * ROUND..4 * ROUND);
-    let upto = await_commit(brokers, &group, topic, 2, 0, 4 * ROUND);
+    // Producing until the commit moves lets a start at the end commit too, so
+    // it fails on the gap and not on the deadline.
+    let (mut next, mut tick, mut upto) = (3 * ROUND, 0, 0);
+    wait_until(DEADLINE, "the commit to pass the retained records", || {
+        if tick % 40 == 0 {
+            produce_to(brokers, topic, 0, next..next + 1);
+            next += 1;
+        }
+        tick += 1;
+        upto = offset_of(committed_by(brokers, &group, topic, 2)[0]).unwrap_or(0);
+        upto > 3 * ROUND
+    });
     let written = second.written(0);
     second.stop();
     assert_no_gap(0, 2 * ROUND, upto, &written);

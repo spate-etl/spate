@@ -15,7 +15,7 @@ tuning.
 - **Sources never block.** Backpressure pauses lanes and the source keeps
   polling, so a slow sink does not cost the source its assignment.
 - **Errors are Skip or Fail.** A record that fails is skipped or stops the
-  pipeline, and metrics count both outcomes.
+  pipeline. A chain built with `with_metrics` counts both outcomes.
 - **No hidden costs on the hot path.** Operator chains are monomorphized, and
   metric handles are registered when the pipeline is built.
 
@@ -48,8 +48,8 @@ connector and never resolves `rdkafka` into its lockfile.
 A feed carries work units to a source. The S3 source reads its work from a feed,
 and a pipeline with an S3 source and no `feed:` section fails to start. The
 datagen source generates synthetic storefront events with no infrastructure
-behind it, and keeps no durable progress. `datagen-avro` switches its payloads
-from JSON to Avro, and implies `datagen`.
+behind it, and keeps no durable progress. `datagen-avro` lets the source emit
+Avro payloads, and implies `datagen`.
 
 Other features refine one connector, such as `kafka-tls` for TLS and SASL to
 Kafka. The [API reference on docs.rs](https://docs.rs/spate) lists every feature
@@ -89,8 +89,8 @@ tolerate duplicates. The [ClickHouse sink
 page](https://spate.kainth.dev/docs/user-guide/connectors/sinks/clickhouse#deduplication-tokens-and-the-window-warning)
 covers the deduplication window and `ReplacingMergeTree`.
 
-A record that fails is skipped or stops the pipeline, and no policy drops a
-record without counting it. [Error
+A record that fails is skipped or stops the pipeline. On a chain built with
+`with_metrics`, no policy drops a record without counting it. [Error
 handling](https://spate.kainth.dev/docs/user-guide/concepts/error-handling)
 lists the metrics that count each outcome.
 

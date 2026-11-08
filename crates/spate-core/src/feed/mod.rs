@@ -79,11 +79,13 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 use tokio::sync::oneshot;
 
+mod connect;
 mod end_check;
 pub mod memory;
 mod metered;
 mod signal;
 
+pub use connect::ConnectError;
 pub use end_check::{END_CHECK_INTERVAL, EndAction, EndCheck, EndOutcome, MarkerRead};
 pub(crate) use metered::{DEAD_LETTER_READ_INTERVAL, DeadLetterSampler, MeteredFeed};
 pub use signal::ReaderSignal;

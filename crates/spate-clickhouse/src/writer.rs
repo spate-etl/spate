@@ -55,9 +55,9 @@ const NAMES_USE_HEADER: &str = "input_format_with_names_use_header";
 const TYPES_USE_HEADER: &str = "input_format_with_types_use_header";
 const DECOMPRESS: &str = "decompress";
 
-/// The settings every insert carries, which the `settings` passthrough may
-/// not name. ClickHouse matches setting names case-sensitively and has no
-/// alias of any of these, so they compare exactly.
+/// The settings [`owned_settings`] puts on an insert, which the `settings`
+/// passthrough may not name. ClickHouse matches setting names case-sensitively
+/// and has no alias of any of these, so they compare exactly.
 pub(crate) const RESERVED: Denylist<'static> = Denylist::new(&[
     (
         INSERT_DEDUPLICATION_TOKEN,
@@ -87,6 +87,28 @@ pub(crate) const RESERVED: Denylist<'static> = Denylist::new(&[
          the server decodes them only with it on",
     ),
 ]);
+
+/// The settings the sink sets on an insert, applied ahead of the user's
+/// `settings`. [`RESERVED`] must name each of them: the user's value for the
+/// same name would replace it.
+pub(crate) fn owned_settings(
+    token: &str,
+    coded: bool,
+) -> impl Iterator<Item = (&'static str, String)> {
+    [
+        (INSERT_DEDUPLICATE, "1".to_owned()),
+        (WAIT_END_OF_QUERY, "1".to_owned()),
+        (INSERT_DEDUPLICATION_TOKEN, token.to_owned()),
+        // The server checks the header against the table only while these
+        // are on. They default on; setting them per insert keeps a server or
+        // profile default from turning the check off silently.
+        (NAMES_USE_HEADER, "1".to_owned()),
+        (TYPES_USE_HEADER, "1".to_owned()),
+    ]
+    .into_iter()
+    // What a compressing client adds to its own inserts.
+    .chain(coded.then(|| (DECOMPRESS, "1".to_owned())))
+}
 
 /// Writes sealed batches: one `INSERT ... FORMAT <fmt>` per batch (the
 /// format, RowBinaryWithNamesAndTypes or Native, is baked into `insert_sql`),
@@ -176,29 +198,20 @@ impl ShardWriter for ClickHouseWriter {
         if let Some(method) = self.coded {
             check_frames(method, batch)?;
         }
+        let coded = self.coded.is_some();
         let mut insert = endpoint
             .client
             .insert_formatted_with(self.insert_sql.clone())
-            .with_setting(INSERT_DEDUPLICATE, "1")
-            .with_setting(WAIT_END_OF_QUERY, "1")
-            .with_setting(INSERT_DEDUPLICATION_TOKEN, batch.dedup_token.clone())
-            // The server checks the header against the table only while these
-            // are on. They default on; setting them per insert keeps a server
-            // or profile default from turning the check off silently.
-            .with_setting(NAMES_USE_HEADER, "1")
-            .with_setting(TYPES_USE_HEADER, "1")
             .with_timeouts(self.send_timeout, self.end_timeout);
-        if self.coded.is_some() {
-            // What a compressing client adds to its own inserts.
-            insert = insert.with_setting(DECOMPRESS, "1");
+        for (name, value) in owned_settings(&batch.dedup_token, coded) {
+            insert = insert.with_setting(name, value);
         }
         for (name, value) in &self.settings {
             insert = insert.with_setting(name.clone(), value.clone());
         }
+        let classify = |err| classify_insert(err, coded);
         // Once per request body, ahead of the rows, so a retry re-sends
         // identical bytes under an identical token.
-        let coded = self.coded.is_some();
-        let classify = |err| classify_insert(err, coded);
         if let Some(header) = &self.header {
             insert.send(header.clone()).await.map_err(classify)?;
         }

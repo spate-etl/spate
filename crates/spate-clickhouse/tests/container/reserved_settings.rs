@@ -7,7 +7,7 @@
 
 use super::*;
 
-/// The settings and HTTP parameters every insert carries.
+/// The settings and HTTP parameters the sink sets on an insert.
 const RESERVED: [&str; 6] = [
     "insert_deduplication_token",
     "insert_deduplicate",
@@ -33,24 +33,25 @@ async fn no_setting_is_an_alias_of_a_reserved_one() {
     assert_eq!(aliases, Vec::<String>::new());
 }
 
-/// A reserved name in another case is an unknown setting, so it cannot
-/// override the name the sink sets.
+/// A reserved name in another case, or padded with a space, is an unknown
+/// setting, so it cannot override the name the sink sets.
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn a_reserved_name_in_another_case_is_an_unknown_setting() {
+async fn a_reserved_name_spelled_otherwise_is_an_unknown_setting() {
     let srv = bare_server("case-secret").await;
     for name in RESERVED {
-        let upper = name.to_ascii_uppercase();
-        let err = srv
-            .admin
-            .query("SELECT 1")
-            .with_setting(upper.clone(), "1")
-            .fetch_one::<u8>()
-            .await
-            .expect_err(&format!("{upper} must not be read as {name}"));
-        assert!(
-            err.to_string().contains("UNKNOWN_SETTING"),
-            "{upper}: {err}"
-        );
+        for spelling in [name.to_ascii_uppercase(), format!(" {name}")] {
+            let err = srv
+                .admin
+                .query("SELECT 1")
+                .with_setting(spelling.clone(), "1")
+                .fetch_one::<u8>()
+                .await
+                .expect_err(&format!("{spelling:?} must not be read as {name}"));
+            assert!(
+                err.to_string().contains("UNKNOWN_SETTING"),
+                "{spelling:?}: {err}"
+            );
+        }
     }
 }

@@ -1220,6 +1220,21 @@ settings: { insert_quorum: "auto" }
     }
 
     #[test]
+    fn every_setting_an_insert_carries_is_refused_in_settings() {
+        for (name, _) in crate::writer::owned_settings("token", true) {
+            let err = from_component_config(&component(&format!(
+                "{MINIMAL}settings: {{{name}: \"0\"}}\n"
+            )))
+            .expect_err(name)
+            .to_string();
+            let refused = format!(
+                "invalid configuration: sink.clickhouse: settings.\"{name}\" cannot be overridden: "
+            );
+            assert!(err.starts_with(&refused), "{name}: {err}");
+        }
+    }
+
+    #[test]
     fn validation_rejects_bad_configs() {
         let cases = [
             ("table: orders\nshards: []", "shard"),

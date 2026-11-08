@@ -62,5 +62,13 @@ harness = false
 name = "encode_alloc"
 harness = false
 
+[[bench]]
+name = "prepare_gungraun"
+harness = false
+
+[[bench]]
+name = "prepare_alloc"
+harness = false
+
 [lints]
 workspace = true

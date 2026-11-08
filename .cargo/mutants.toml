@@ -19,6 +19,7 @@ output = "target/mutants"
 # `testing`-feature test doubles that no shipped path reaches.
 exclude_globs = [
     "crates/spate-clickhouse/src/testing.rs",
+    "crates/spate-kafka/src/bench_seams.rs",
     "crates/spate-s3/src/bench_seams.rs",
     "crates/spate-s3/src/fuzz_seams.rs",
 ]

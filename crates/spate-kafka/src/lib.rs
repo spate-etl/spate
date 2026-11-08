@@ -63,6 +63,9 @@
 //!
 //! [the metrics reference]: https://spate.kainth.dev/docs/METRICS
 
+#[cfg(feature = "testing")]
+#[doc(hidden)]
+pub mod bench_seams;
 mod client;
 mod config;
 mod context;

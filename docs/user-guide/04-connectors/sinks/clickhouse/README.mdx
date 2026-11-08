@@ -93,12 +93,23 @@ because the delivery guarantees are defined in terms of them:
 
 | Reserved setting | Why |
 |---|---|
-| `insert_deduplication_token` | Minted deterministically per sealed batch; overriding it breaks same-batch retry idempotence. |
-| `insert_deduplicate` | Must stay on for the token to mean anything. |
-| `wait_end_of_query` | Forced to `1` — the synchronous server acknowledgment *is* the durable-ack point the checkpointer commits behind. |
-| `input_format_with_names_use_header` | Forced to `1`. With it off the server ignores the insert header and maps the rows by position again. |
-| `input_format_with_types_use_header` | Forced to `1`, for the same reason: it is what compares the header's types against the table's. |
-| `decompress` | Set to `1` on every compressed insert. The sink sends blocks it compressed itself, and the server decodes them only with it on. |
+| `insert_deduplication_token` | Minted per sealed batch, so a retried batch carries the same token and is deduplicated. |
+| `insert_deduplicate` | Forced to `1`, so the server deduplicates a retried batch by its token. |
+| `wait_end_of_query` | Forced to `1`: the server answers once the insert and its materialized views are done, and the checkpoint commits behind that answer. |
+| `input_format_with_names_use_header` | Forced to `1`: with it off the server ignores the insert header and maps the rows by position. |
+| `input_format_with_types_use_header` | Forced to `1`: it is what compares the header's types against the table's. |
+| `decompress` | Set to `1` on every compressed insert: the sink sends blocks it compressed itself, and the server decodes them only with it on. |
+
+A reserved setting in `settings` fails at load, and the error names the setting
+and the reason:
+
+```text
+invalid configuration: sink.clickhouse: settings."insert_deduplicate" cannot be overridden: forced to `1`, so the server deduplicates a retried batch by its token
+```
+
+Only the exact name is refused. ClickHouse reads setting names
+case-sensitively and has no alias of these settings, so another spelling such
+as `INSERT_DEDUPLICATE` fails at the server as an unknown setting.
 
 ## Security (TLS)
 

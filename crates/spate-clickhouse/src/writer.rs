@@ -2,7 +2,7 @@
 
 use crate::codec::BlockMethod;
 use bytes::Bytes;
-use spate_core::config::redact;
+use spate_core::config::{Denylist, redact};
 use spate_core::error::{ErrorClass, SinkError};
 use spate_core::sink::{SealedBatch, ShardWriter};
 use std::fmt;
@@ -46,6 +46,67 @@ impl fmt::Debug for ClickHouseEndpoint {
             .field("url", &redact::url(&self.url))
             .finish_non_exhaustive()
     }
+}
+
+const INSERT_DEDUPLICATE: &str = "insert_deduplicate";
+const WAIT_END_OF_QUERY: &str = "wait_end_of_query";
+const INSERT_DEDUPLICATION_TOKEN: &str = "insert_deduplication_token";
+const NAMES_USE_HEADER: &str = "input_format_with_names_use_header";
+const TYPES_USE_HEADER: &str = "input_format_with_types_use_header";
+const DECOMPRESS: &str = "decompress";
+
+/// The settings the sink puts on an insert, each with the reason the
+/// `settings` passthrough may not name it. [`owned_settings`] sets them and
+/// [`RESERVED`] refuses them.
+const OWNED: [(&str, &str); 6] = [
+    (
+        INSERT_DEDUPLICATION_TOKEN,
+        "minted per sealed batch, so a retried batch carries the same token and is deduplicated",
+    ),
+    (
+        INSERT_DEDUPLICATE,
+        "forced to `1`, so the server deduplicates a retried batch by its token",
+    ),
+    (
+        WAIT_END_OF_QUERY,
+        "forced to `1`: the server answers once the insert and its materialized views are done, \
+         and the checkpoint commits behind that answer",
+    ),
+    // The header settings default on. Setting them per insert keeps a server
+    // or profile default from turning the header check off silently.
+    (
+        NAMES_USE_HEADER,
+        "forced to `1`: with it off the server ignores the insert header and maps the rows by \
+         position",
+    ),
+    (
+        TYPES_USE_HEADER,
+        "forced to `1`: it is what compares the header's types against the table's",
+    ),
+    (
+        DECOMPRESS,
+        "set to `1` on every compressed insert: the sink sends blocks it compressed itself, and \
+         the server decodes them only with it on",
+    ),
+];
+
+/// The settings passthrough's denylist. ClickHouse matches setting names
+/// case-sensitively and has no alias of any of these, so they compare exactly.
+pub(crate) const RESERVED: Denylist<'static> = Denylist::new(&OWNED);
+
+/// The settings the sink sets on an insert, each from [`OWNED`].
+/// `decompress` goes only on a compressed insert. The user's `settings` are
+/// applied after these, so [`RESERVED`] alone keeps a user value from
+/// replacing one.
+pub(crate) fn owned_settings(
+    token: &str,
+    coded: bool,
+) -> impl Iterator<Item = (&'static str, String)> {
+    OWNED.into_iter().filter_map(move |(name, _)| match name {
+        INSERT_DEDUPLICATION_TOKEN => Some((name, token.to_owned())),
+        DECOMPRESS => coded.then(|| (name, "1".to_owned())),
+        _ => Some((name, "1".to_owned())),
+    })
 }
 
 /// Writes sealed batches: one `INSERT ... FORMAT <fmt>` per batch (the
@@ -136,29 +197,20 @@ impl ShardWriter for ClickHouseWriter {
         if let Some(method) = self.coded {
             check_frames(method, batch)?;
         }
+        let coded = self.coded.is_some();
         let mut insert = endpoint
             .client
             .insert_formatted_with(self.insert_sql.clone())
-            .with_setting("insert_deduplicate", "1")
-            .with_setting("wait_end_of_query", "1")
-            .with_setting("insert_deduplication_token", batch.dedup_token.clone())
-            // The server checks the header against the table only while these
-            // are on. They default on; setting them per insert keeps a server
-            // or profile default from turning the check off silently.
-            .with_setting("input_format_with_names_use_header", "1")
-            .with_setting("input_format_with_types_use_header", "1")
             .with_timeouts(self.send_timeout, self.end_timeout);
-        if self.coded.is_some() {
-            // What a compressing client adds to its own inserts.
-            insert = insert.with_setting("decompress", "1");
+        for (name, value) in owned_settings(&batch.dedup_token, coded) {
+            insert = insert.with_setting(name, value);
         }
         for (name, value) in &self.settings {
             insert = insert.with_setting(name.clone(), value.clone());
         }
+        let classify = |err| classify_insert(err, coded);
         // Once per request body, ahead of the rows, so a retry re-sends
         // identical bytes under an identical token.
-        let coded = self.coded.is_some();
-        let classify = |err| classify_insert(err, coded);
         if let Some(header) = &self.header {
             insert.send(header.clone()).await.map_err(classify)?;
         }

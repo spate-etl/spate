@@ -370,6 +370,8 @@ mod nested_flat;
 mod partition_dedup;
 #[path = "container/permissions.rs"]
 mod permissions;
+#[path = "container/reserved_settings.rs"]
+mod reserved_settings;
 #[path = "container/rowbinary_header.rs"]
 mod rowbinary_header;
 #[path = "container/schema.rs"]

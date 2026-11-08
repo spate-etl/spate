@@ -60,15 +60,15 @@ covers the `feed:` section, the lister run and storage notifications.
 
 ## Parallelism
 
-Each unit in progress is read by one lane, and each lane is one framework
-partition. A unit names one whole object, one byte range of a large object, or
-several objects that its lane reads in turn. The lister packs objects read whole
-into units of at most 16 objects and `split_target_bytes` bytes.
+Each part of a unit in progress is read by one lane, and each lane is one
+framework partition. A unit names one whole object, one byte range of a large
+object, or several objects that its lane reads in turn. The lister packs objects
+read whole into units of at most 16 objects and `split_target_bytes` bytes.
 
 `units_held` in the `feed:` section bounds the units a worker reads at once, and
-with them its lanes. Unset, it is twice `pipeline.threads`, and 96 for a source
-opened outside a pipeline. The source logs the value and where it came from at
-`INFO` when it opens.
+the lanes those units take. Unset, it is twice `pipeline.threads`, and 96 for a
+source opened outside a pipeline. The source logs the value and where it came
+from at `INFO` when it opens.
 
 A lane is polled only by the pipeline thread that owns it, so decode parallelism
 is `min(lanes, pipeline.threads)`. The
@@ -87,7 +87,10 @@ lists every condition.
 
 Every worker of a pipeline reads the same durable feed, and the feed hands each
 unit to one worker at a time. Runs on the in-process feed share nothing, so each
-one lists and reads the whole prefix.
+one lists and reads the whole prefix. On a durable feed the source lists
+nothing. A bounded job's units come from a separate lister run,
+`S3Source::list_once`, once per job, and a continuous job's units come from
+storage notifications or code.
 
 On the ETag-pinned path, a lane holds at most three GET windows of about
 `prefetch_bytes` each when every window spans at least four chunks, as it does
@@ -111,7 +114,9 @@ Delivery is at-least-once.
 - An object that is deleted, overwritten under its ETag pin, corrupt, or
   unreadable after retries fails its unit back to the feed. The feed delivers
   the unit again and dead-letters it at its cap. A `401` or `403` from the
-  store, and a client configuration error, fail the pipeline.
+  store, and a client configuration error, fail the pipeline. On AWS S3, a
+  worker role without `s3:ListBucket` reads a deleted object as `403`, which
+  fails the pipeline.
 - Every read is pinned to the object's ETag with `If-Match`, so an object
   rewritten during a read fails its unit and never splices two versions. The
   exception is a notification unit: the source re-enqueues its overwritten
@@ -148,7 +153,8 @@ pages cover the framework's side.
   [Configuration](https://spate.kainth.dev/docs/user-guide/connectors/sources/s3#configuration).
 - **Credentials come from environment variables.** For `s3://`, the client reads
   the standard AWS variables. They cover EKS Pod Identity, IRSA, ECS task roles
-  and EC2 instance metadata. It reads no profile file and no SSO cache. See
+  and EC2 instance metadata. It reads no profile file and no SSO cache. The
+  config's `Debug` output does not print `store` values. See
   [Security](https://spate.kainth.dev/docs/user-guide/connectors/sources/s3#security-credentials-and-region).
 - **A listing and a notification for one object read it twice.** Their units
   carry different ids, and the source reads each unit in full. A bounded job's
@@ -159,6 +165,9 @@ pages cover the framework's side.
   unset, is acknowledged on its next overwrite with no re-enqueue, and the
   source logs a `WARN`. See
   [Reading a notification's object](https://spate.kainth.dev/docs/user-guide/connectors/sources/s3#reading-a-notifications-object).
+- **The lister lists the prefix once.** A key written after its listing is not
+  part of the job. See
+  [Unit identity and drift](https://spate.kainth.dev/docs/user-guide/connectors/sources/s3#unit-identity-and-drift).
 - **An object with no ETag is read in one streamed GET.** The response stays
   open while the sink is slow, and a break mid-object fails the unit. S3 and
   `file://` always report an ETag.

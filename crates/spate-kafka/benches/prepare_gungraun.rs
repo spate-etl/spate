@@ -1,10 +1,11 @@
 //! Instruction counts for the sink writer's batch preparation (gungraun).
 //!
 //! One shape: a sealed batch through
-//! [`prepare_batch`](spate_kafka::bench_seams::prepare_batch), which runs what
-//! the writer does on a shard worker before it sends the first message. It
-//! parses every frame back into messages, checks the count against the batch's
-//! rows, and builds each message's librdkafka header list.
+//! [`prepare_batch`](spate_kafka::bench_seams::prepare_batch), which runs the
+//! writer's work on a shard worker short of the send. It parses every frame
+//! back into messages and checks the count against the batch's rows, as the
+//! writer does before its first send, and builds each message's librdkafka
+//! header list, as the writer does just before sending that message.
 //!
 //! The send, the delivery reports and the wait for them are out of reach: they
 //! need a broker, and they run inside the async `write_batch`.

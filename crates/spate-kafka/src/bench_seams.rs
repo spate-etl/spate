@@ -1,7 +1,7 @@
 //! Measurable entry points into work this crate does not otherwise expose.
 //!
-//! The sink's writer prepares every message of a sealed batch inside an async
-//! `write_batch`, before it hands the first one to librdkafka. Under a runtime
+//! The sink's writer parses a sealed batch and builds each message's header
+//! list inside an async `write_batch`. Under a runtime
 //! an instruction count depends on how the scheduler interleaved polls, so the
 //! counted tier cannot enter that function. The preparation itself is
 //! synchronous and needs no broker, so it is exported here.
@@ -17,10 +17,11 @@ use rdkafka::message::Headers as _;
 use spate_core::error::SinkError;
 use std::hint::black_box;
 
-/// Prepare a sealed batch's frames as the sink's writer does before it sends
-/// anything: parse every message, check the count against `rows`, and build
-/// each message's librdkafka header list. Returns the number of messages and
-/// the number of headers built.
+/// Prepare a sealed batch's frames as the sink's writer does: parse every
+/// message and check the count against `rows`, which the writer finishes before
+/// its first send, then build each message's librdkafka header list, which the
+/// writer does as it sends that message. Returns the number of messages and the
+/// number of headers built.
 ///
 /// # Errors
 ///

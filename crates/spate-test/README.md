@@ -9,15 +9,17 @@ dev-dependency beside the [`spate`](https://crates.io/crates/spate) facade.
 ## Sources and sinks
 
 - `memory_source` returns a `MemorySource` and its `SourceHandle`. The handle
-  assigns and revokes lanes, pushes payloads, and records the commits, pauses
-  and flushes the source is asked for. `wait_committed` blocks until a
-  partition's committed offset reaches a target, or a timeout passes. The source
-  panics on misuse, such as pausing a lane that was never assigned.
+  assigns and revokes lanes, pushes payloads, and records every commit and flush
+  the source is asked for, along with the lanes paused now. `wait_committed`
+  blocks until a partition's committed offset reaches a target, or a timeout
+  passes. The source panics on misuse, such as pausing a lane that was never
+  assigned.
 - `capture_sink` returns a `CaptureSink` and its `SinkScript`. The sink is a
   whole sink bundle with a chosen number of shards and replicas, so it goes
   straight into a pipeline. Unscripted writes succeed.
-- `capture_writer` returns the `CaptureWriter` under that sink, with the same
-  `SinkScript`, for a test that needs the shard writer alone.
+- `capture_writer` returns a `CaptureWriter` and its own `SinkScript`, for a
+  test that needs the shard writer alone. It shares nothing with a
+  `capture_sink`.
 
 `SinkScript` queues an outcome for the next write, to any replica or to one
 shard and replica: success, a retryable failure or a fatal one. An outcome can
@@ -82,7 +84,7 @@ call. The feed has no queue and no clock behind it, and its backend key is
   harness. The harness prints them when the test fails. Both subscribers are
   scoped to the calling thread.
 - `LogCapture` is a writer for a `tracing` subscriber the test installs itself.
-  `LogCapture::wait_for` polls the capture until a check passes, and
+  `LogCapture::wait_for` polls a check until it returns a value, and
   `LogCapture::wait_for_line` waits for a line containing a string. On a
   timeout, both panic with every line captured so far.
 

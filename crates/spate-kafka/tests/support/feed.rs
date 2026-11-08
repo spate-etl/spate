@@ -15,13 +15,13 @@ use spate_core::clock::TestClock as StopClock;
 use spate_core::clock::tokio::TestClock;
 use spate_core::config::{FeedSection, PipelineConfig};
 use spate_core::feed::{
-    Confirmation, DEFAULT_SETTLING_WINDOW, Delivery, Depth, DepthOf, DepthReading, Feed, FeedError,
-    FeedErrorKind, FeedMetricsCtx, FeedWaker, Receipt, Unit, wake_channel,
+    Confirmation, ConnectError, DEFAULT_SETTLING_WINDOW, Delivery, Depth, DepthOf, DepthReading,
+    Feed, FeedError, FeedErrorKind, FeedMetricsCtx, FeedWaker, Receipt, Unit, wake_channel,
 };
 use spate_core::pipeline::{ExitState, Pipeline, RuntimeOptions, ShutdownHandle};
 use spate_core::sink::SinkPoolConfig;
 use spate_json::NdjsonFramer;
-use spate_kafka::feed::{KafkaFeed, KafkaFeedError, KafkaFeedPublisher};
+use spate_kafka::feed::{KafkaFeed, KafkaFeedPublisher};
 use spate_s3::{DescriptorObject, S3Source, SplitDescriptor};
 use spate_test::{
     HANG, PipelineRun, ScriptedResult, SinkScript, TestEncoder, capture_sink, decode_rows,
@@ -298,7 +298,7 @@ pub(crate) fn create_topics(brokers: &str) {
 }
 
 /// How a test connects the feed.
-pub(crate) type Connect = fn(&FeedSection, &Handle) -> Result<KafkaFeed, KafkaFeedError>;
+pub(crate) type Connect = fn(&FeedSection, &Handle) -> Result<KafkaFeed, ConnectError>;
 
 /// Connect as on rdkafka's MockCluster, which answers no request for a
 /// topic's configuration: only the topics' existence is checked.
@@ -391,7 +391,7 @@ pub(crate) fn launch_on(
 /// `checkpoint:` section `checkpoint`, and the stop timed on `stop_clock`
 /// when one is given.
 pub(crate) fn launch_customized(
-    connect: impl FnOnce(&FeedSection, &Handle) -> Result<KafkaFeed, KafkaFeedError>,
+    connect: impl FnOnce(&FeedSection, &Handle) -> Result<KafkaFeed, ConnectError>,
     source_yaml: &str,
     feed_section: &str,
     pre: impl FnOnce(&SinkScript),
@@ -649,7 +649,7 @@ pub(crate) fn high_watermarks(brokers: &str, topic: &str, partitions: i32) -> i6
 pub(crate) fn publisher_on_mock(
     yaml: &str,
 ) -> (
-    Result<KafkaFeedPublisher, KafkaFeedError>,
+    Result<KafkaFeedPublisher, ConnectError>,
     tokio::runtime::Runtime,
 ) {
     let io = tokio::runtime::Builder::new_multi_thread()
@@ -760,7 +760,7 @@ pub(crate) fn direct_on(clock: &Arc<FeedClock>, yaml: &str) -> Direct {
 /// A feed from the `feed:` section of `yaml`, built through `connect`, that
 /// the test reads from directly, with no pipeline.
 pub(crate) fn direct_with(
-    connect: impl FnOnce(&FeedSection, &Handle) -> Result<KafkaFeed, KafkaFeedError>,
+    connect: impl FnOnce(&FeedSection, &Handle) -> Result<KafkaFeed, ConnectError>,
     yaml: &str,
 ) -> Direct {
     let section = section(yaml);
@@ -842,7 +842,7 @@ fn bounded_section_with(
 
 /// A publish-only handle and the runtime it runs on.
 pub(crate) type Publisher = (
-    Result<KafkaFeedPublisher, KafkaFeedError>,
+    Result<KafkaFeedPublisher, ConnectError>,
     tokio::runtime::Runtime,
 );
 
@@ -899,7 +899,7 @@ impl BoundedJob {
 /// the fingerprint and end marker.
 pub(crate) fn list_once(
     publisher: (
-        Result<KafkaFeedPublisher, KafkaFeedError>,
+        Result<KafkaFeedPublisher, ConnectError>,
         tokio::runtime::Runtime,
     ),
     data: &Path,

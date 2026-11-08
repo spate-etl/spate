@@ -14,10 +14,10 @@ use rdkafka::mocking::MockCoordinator;
 use rdkafka::types::RDKafkaRespErr;
 use spate_core::clock::TestClock as StopClock;
 use spate_core::clock::tokio::TestClock;
+use spate_core::feed::ConnectError;
 use spate_core::feed::{DepthOf, Feed, FeedErrorKind, FeedMetricsCtx, Receipt, Unit};
 use spate_core::metrics::Meter;
 use spate_core::pipeline::ExitState;
-use spate_kafka::feed::KafkaFeedError;
 use spate_test::{HANG, WriteOutcome, wait_until};
 use std::time::{Duration, Instant};
 use support::feed::{
@@ -858,7 +858,9 @@ fn the_startup_check_does_not_create_a_missing_topic() {
         .build()
         .unwrap();
     match ON_MOCK(&feed, io.handle()) {
-        Err(KafkaFeedError::Refused(message)) => assert!(
+        Err(ConnectError::Refused {
+            reason: message, ..
+        }) => assert!(
             message.contains(&format!("the retry topic `{RETRY}` does not exist")),
             "{message}"
         ),
@@ -872,7 +874,7 @@ fn the_startup_check_does_not_create_a_missing_topic() {
 }
 
 /// One startup attempt on `yaml`, the result's error.
-fn connect_error(yaml: &str) -> KafkaFeedError {
+fn connect_error(yaml: &str) -> ConnectError {
     let io = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(1)
         .enable_all()
@@ -898,7 +900,7 @@ fn a_failed_startup_read_is_not_a_missing_topic() {
     )
     .replace("topic: units\n", "topic: \"units\\0\"\n");
     let message = match connect_error(&yaml) {
-        KafkaFeedError::Refused(m) | KafkaFeedError::Unavailable(m) => m,
+        ConnectError::Refused { reason: m, .. } | ConnectError::Unavailable { reason: m, .. } => m,
         other => panic!("expected a failed read, got {other:?}"),
     };
     assert!(
@@ -920,7 +922,9 @@ fn a_property_librdkafka_rejects_is_refused() {
         "      socket.timeout.ms: \"soon\"\n",
     );
     match connect_error(&yaml) {
-        KafkaFeedError::Refused(message) => assert!(
+        ConnectError::Refused {
+            reason: message, ..
+        } => assert!(
             message.contains("creating the admin client") && message.contains("socket.timeout.ms"),
             "{message}"
         ),
@@ -946,7 +950,9 @@ fn an_unauthorized_topic_is_refused() {
         "",
     );
     match connect_error(&yaml) {
-        KafkaFeedError::Refused(message) => assert!(
+        ConnectError::Refused {
+            reason: message, ..
+        } => assert!(
             message.contains(&format!(
                 "reading the metadata of the retry topic `{RETRY}`"
             )),
@@ -971,7 +977,9 @@ fn an_overlong_topic_name_is_refused() {
     .replace("topic: units\n", &format!("topic: {long}\n"));
     assert!(yaml.contains(&long));
     match connect_error(&yaml) {
-        KafkaFeedError::Refused(message) => assert!(
+        ConnectError::Refused {
+            reason: message, ..
+        } => assert!(
             message.contains("reading the metadata of the work topic")
                 && message.contains("longer than 512 bytes"),
             "{message}"
@@ -1048,7 +1056,9 @@ fn a_publisher_refuses_a_missing_retry_topic() {
         "",
     ));
     match publisher {
-        Err(KafkaFeedError::Refused(message)) => assert!(
+        Err(ConnectError::Refused {
+            reason: message, ..
+        }) => assert!(
             message.contains(&format!("the retry topic `{RETRY}` does not exist")),
             "{message}"
         ),
@@ -1074,7 +1084,9 @@ fn a_publisher_refuses_an_unauthorized_work_topic() {
         "",
     ));
     match publisher {
-        Err(KafkaFeedError::Refused(message)) => assert!(
+        Err(ConnectError::Refused {
+            reason: message, ..
+        }) => assert!(
             message.contains(&format!("reading the metadata of the work topic `{WORK}`")),
             "{message}"
         ),

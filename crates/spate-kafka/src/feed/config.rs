@@ -10,6 +10,9 @@ use std::time::Duration;
 /// The key that names this backend in a `feed:` section.
 pub(crate) const BACKEND: &str = "kafka";
 
+/// The backend's name in the text a person reads.
+pub(crate) const NAME: &str = "Kafka";
+
 /// One of the feed's six clients.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum FeedRole {
@@ -281,7 +284,7 @@ impl KafkaFeedConfig {
     /// `attempt_cap`, else
     /// [`DEFAULT_ATTEMPT_CAP`](spate_core::feed::DEFAULT_ATTEMPT_CAP).
     pub(crate) fn from_section(section: &FeedSection) -> Result<KafkaFeedConfig, ConfigError> {
-        let body: Body = section.backend_body(BACKEND, "Kafka")?;
+        let body: Body = section.backend_body(BACKEND, NAME)?;
         if body.attempt_cap.is_some() {
             return Err(FeedSection::backend_error(
                 BACKEND,

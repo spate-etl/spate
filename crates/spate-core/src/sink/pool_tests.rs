@@ -9,7 +9,7 @@
 use super::*;
 use crate::backpressure::InflightBudget;
 use crate::checkpoint::{AckMsg, AckRef, AckStatus};
-use crate::clock::tokio::{Clock as _, TestClock};
+use crate::clock::tokio::{Clock as _, SystemClock, TestClock};
 use crate::error::ErrorClass;
 use crate::hash::FastMap;
 use crate::metrics::{ComponentLabels, E2eBasis, SinkShardMetrics};
@@ -3183,4 +3183,48 @@ async fn drain_counts_the_largest_deadline_as_a_year() {
     let report = drain.await.unwrap();
     f.writer.release_blocked();
     assert_eq!(report.abandoned, 1);
+}
+
+/// Shards that finished behind one that overran the backstop still report,
+/// more of them than one task poll's coop budget joins.
+#[tokio::test(start_paused = true)]
+async fn finished_shards_behind_an_overrun_still_report() {
+    const SHARDS: u32 = 300;
+    let labels = ComponentLabels::new("test", next_component(), "mock");
+    let metrics = (0..SHARDS)
+        .map(|s| {
+            Arc::new(SinkShardMetrics::new(
+                &labels,
+                s,
+                &["r0".into()],
+                E2eBasis::Ingest,
+            ))
+        })
+        .collect();
+    let (drain_tx, _drain_rx) = watch::channel(None);
+    let mut workers = vec![tokio::spawn(async {
+        std::future::pending::<()>().await;
+        worker::WorkerReport::default()
+    })];
+    for _ in 1..SHARDS {
+        workers.push(tokio::spawn(async {
+            worker::WorkerReport {
+                flushed: 1,
+                abandoned: 0,
+            }
+        }));
+    }
+    let pool = SinkPool::from_workers(
+        MockWriter::new(),
+        workers,
+        drain_tx,
+        metrics,
+        Arc::new(SystemClock) as _,
+    );
+    let report = pool.drain(Duration::from_millis(200)).await;
+    assert_eq!(
+        report.flushed,
+        u64::from(SHARDS - 1),
+        "finished shards were force-aborted for the backstop"
+    );
 }

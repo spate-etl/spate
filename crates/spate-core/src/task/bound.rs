@@ -5,10 +5,8 @@
 
 use super::spawn_thread;
 use crate::clock::SyncClock;
-use std::future::{Future, poll_fn};
-use std::pin::{Pin, pin};
+use std::future::Future;
 use std::sync::mpsc::{self, RecvTimeoutError};
-use std::task::Poll;
 use std::time::Duration;
 use tokio::sync::oneshot;
 
@@ -100,9 +98,6 @@ impl ThreadBound {
         } = self;
         // `Some` carries a rejection's text, `None` the limit passing.
         let (fire, fired) = oneshot::channel::<Option<String>>();
-        // Unconstrained: work that keeps a tokio resource ready spends the
-        // coop budget, and a budgeted receive would then never read the verdict.
-        let mut fired = tokio::task::unconstrained(fired);
         let (finished, done) = mpsc::channel::<()>();
         let deadline = clock.now().checked_add(limit);
         let _timing = spawn_thread(name, move || {
@@ -125,19 +120,12 @@ impl ThreadBound {
         // Declared after `_timing`, so it drops first and ends the thread the
         // handle's drop then joins.
         let _finished = finished;
-        let mut work = pin!(work);
-        poll_fn(|cx| {
-            if let Poll::Ready(output) = work.as_mut().poll(cx) {
-                return Poll::Ready(Ok(output));
-            }
-            Pin::new(&mut fired).poll(cx).map(|fired| {
-                Err(match fired.ok().flatten() {
-                    Some(text) => BoundError::Rejected(text),
-                    None => BoundError::Elapsed,
-                })
+        super::first(work, fired)
+            .await
+            .map_err(|fired| match fired.ok().flatten() {
+                Some(text) => BoundError::Rejected(text),
+                None => BoundError::Elapsed,
             })
-        })
-        .await
     }
 }
 
@@ -173,8 +161,10 @@ pub enum BoundError {
 mod tests {
     use super::*;
     use crate::clock::TestClock;
+    use std::future::poll_fn;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::task::Poll;
     use tokio::runtime::Handle;
     use tokio::sync::mpsc::unbounded_channel;
 

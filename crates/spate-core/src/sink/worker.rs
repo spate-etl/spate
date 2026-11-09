@@ -17,7 +17,7 @@ use crate::backoff::Backoff;
 use crate::backpressure::InflightBudget;
 use crate::checkpoint::AckSet;
 use crate::clock::Clock as _;
-use crate::clock::tokio::{Clock, Sleep, Stopwatch};
+use crate::clock::tokio::{Clock, Sleep, Stopwatch, before};
 use crate::error::ErrorClass;
 use crate::hash::FastMap;
 use crate::metrics::{AttemptOutcome, FlushReason, SinkShardMetrics};
@@ -437,11 +437,9 @@ impl<W: ShardWriter> ShardWorker<W> {
         // holds us here indefinitely and `SinkPool::drain`'s backstop would
         // force-abort this worker and lose its report.
         let grace_at = self.clock.now() + ABORT_GRACE;
-        let shut_down = tokio::select! {
-            biased;
-            () = tasks.shutdown() => true,
-            () = self.clock.sleep_until(grace_at) => false,
-        };
+        let shut_down = before(&*self.clock, grace_at, tasks.shutdown())
+            .await
+            .is_some();
         if !shut_down {
             tracing::error!(
                 shard = self.shard,
@@ -640,19 +638,11 @@ impl<W: ShardWriter> ShardWorker<W> {
                             // window is known but further away.
                             let heartbeat = now + backstop;
                             let until = probe_at.map_or(heartbeat, |t| t.min(heartbeat));
-                            tokio::select! {
-                                biased;
-
-                                // Serving the deadline on `Err` costs a stall
-                                // rather than a spinning core if the sender
-                                // ever stops outliving this receiver.
-                                changed = wake.changed() => {
-                                    if changed.is_err() {
-                                        clock.sleep_until(until).await;
-                                    }
-                                }
-
-                                () = clock.sleep_until(until) => {}
+                            // Serving the deadline on `Err` costs a stall
+                            // rather than a spinning core if the sender ever
+                            // stops outliving this receiver.
+                            if let Some(Err(_)) = before(&*clock, until, wake.changed()).await {
+                                clock.sleep_until(until).await;
                             }
                         }
                     }

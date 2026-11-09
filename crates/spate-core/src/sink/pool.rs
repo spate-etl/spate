@@ -4,7 +4,7 @@ use super::config::{LONGEST_DEADLINE, SinkPoolConfig};
 use super::worker::{ShardWorker, WorkerReport};
 use super::{EncodedChunk, ShardWriter, SinkFailures};
 use crate::backpressure::InflightBudget;
-use crate::clock::tokio::{Clock, SystemClock};
+use crate::clock::tokio::{Clock, SystemClock, before};
 use crate::error::SinkError;
 use crate::metrics::SinkShardMetrics;
 use std::sync::Arc;
@@ -255,13 +255,7 @@ impl<W: ShardWriter> SinkPool<W> {
         let mut report = WorkerReport::default();
         let mut forced = 0usize;
         for (shard, mut handle) in self.workers.into_iter().enumerate() {
-            // Biased with the handle first, so a shard that finished as the
-            // backstop came due still reports.
-            let joined = tokio::select! {
-                biased;
-                joined = &mut handle => Some(joined),
-                () = self.clock.sleep_until(hard_at) => None,
-            };
+            let joined = before(&*self.clock, hard_at, &mut handle).await;
             match joined {
                 Some(Ok(r)) => report.absorb(r),
                 Some(Err(join_err)) => {

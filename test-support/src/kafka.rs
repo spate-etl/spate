@@ -86,8 +86,9 @@ impl fmt::Display for Broker {
 }
 
 /// One broker on the image the selected lane pins, as a testcontainers
-/// [`Image`]. A client on the host reaches it on [`KAFKA_PORT`], and another
-/// container in its network namespace on [`BROKER_FROM_INSIDE`].
+/// [`Image`]. A client on the host reaches it on [`KAFKA_PORT`], which the
+/// image exposes itself, and another container in its network namespace on
+/// [`BROKER_FROM_INSIDE`].
 ///
 /// `ImageExt::with_env_var` on the request sets broker configuration over the
 /// defaults here, as the image's own environment does.
@@ -230,10 +231,6 @@ impl Image for KafkaBroker {
             "-c".to_owned(),
             format!("while [ ! -f {START_SCRIPT} ]; do sleep 0.1; done; exec bash {START_SCRIPT}"),
         ]
-    }
-
-    fn expose_ports(&self) -> &[ContainerPort] {
-        &[KAFKA_PORT]
     }
 
     fn exec_after_start(

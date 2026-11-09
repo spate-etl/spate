@@ -119,7 +119,8 @@ move to another shard.
 The sink sets `insert_deduplicate`, `insert_deduplication_token`,
 `wait_end_of_query`, `input_format_with_names_use_header` and
 `input_format_with_types_use_header` on every insert, and `decompress` on a
-compressed one. `settings` cannot override them.
+compressed one. `settings` cannot override them, and cannot name `database`,
+which the typed `database` field owns.
 
 [Deduplication tokens and the window warning](https://spate.kainth.dev/docs/user-guide/connectors/sinks/clickhouse#deduplication-tokens-and-the-window-warning)
 and

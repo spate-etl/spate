@@ -54,11 +54,12 @@ const INSERT_DEDUPLICATION_TOKEN: &str = "insert_deduplication_token";
 const NAMES_USE_HEADER: &str = "input_format_with_names_use_header";
 const TYPES_USE_HEADER: &str = "input_format_with_types_use_header";
 const DECOMPRESS: &str = "decompress";
+const DATABASE: &str = "database";
 
-/// The settings the sink puts on an insert, each with the reason the
-/// `settings` passthrough may not name it. [`owned_settings`] sets them and
-/// [`RESERVED`] refuses them.
-const OWNED: [(&str, &str); 6] = [
+/// The request parameters the sink puts on an insert, each with the reason
+/// the `settings` passthrough may not name it. [`owned_settings`] sets all but
+/// `database`, and [`RESERVED`] refuses them all.
+const OWNED: [(&str, &str); 7] = [
     (
         INSERT_DEDUPLICATION_TOKEN,
         "minted per sealed batch, so a retried batch carries the same token and is deduplicated",
@@ -88,10 +89,16 @@ const OWNED: [(&str, &str); 6] = [
         "set to `1` on every compressed insert: the sink sends blocks it compressed itself, and \
          the server decodes them only with it on",
     ),
+    (
+        DATABASE,
+        "owned by the typed `database` field: the startup checks read the table in that \
+         database, and inserts go to the table they checked",
+    ),
 ];
 
-/// The settings passthrough's denylist. ClickHouse matches setting names
-/// case-sensitively and has no alias of any of these, so they compare exactly.
+/// The settings passthrough's denylist. ClickHouse has no alias of any of
+/// these names and fails a request that spells one otherwise, so they compare
+/// exactly.
 pub(crate) const RESERVED: Denylist<'static> = Denylist::new(&OWNED);
 
 /// The settings the sink sets on an insert, each from [`OWNED`].
@@ -105,6 +112,8 @@ pub(crate) fn owned_settings(
     OWNED.into_iter().filter_map(move |(name, _)| match name {
         INSERT_DEDUPLICATION_TOKEN => Some((name, token.to_owned())),
         DECOMPRESS => coded.then(|| (name, "1".to_owned())),
+        // The client sends the typed `database` ahead of these.
+        DATABASE => None,
         _ => Some((name, "1".to_owned())),
     })
 }
@@ -358,6 +367,15 @@ mod tests {
     use crate::test_tls::{TestCa, endpoint_trusting, failed_query, serve};
     use tokio::io::AsyncWriteExt as _;
     use tokio::net::TcpListener;
+
+    /// The client already sends the typed `database`, and a second one later
+    /// in the URL would replace it.
+    #[test]
+    fn an_insert_leaves_the_database_to_the_client() {
+        for coded in [false, true] {
+            assert!(owned_settings("token", coded).all(|(name, _)| name != DATABASE));
+        }
+    }
 
     #[test]
     fn exception_codes_are_extracted() {

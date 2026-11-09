@@ -8,13 +8,14 @@
 use super::*;
 
 /// The settings and HTTP parameters the sink sets on an insert.
-const RESERVED: [&str; 6] = [
+const RESERVED: [&str; 7] = [
     "insert_deduplication_token",
     "insert_deduplicate",
     "wait_end_of_query",
     "input_format_with_names_use_header",
     "input_format_with_types_use_header",
     "decompress",
+    "database",
 ];
 
 /// No setting is an alias of a reserved one, so an exact match catches every
@@ -41,10 +42,12 @@ async fn a_reserved_name_spelled_otherwise_is_an_unknown_setting() {
     let srv = bare_server("case-secret").await;
     for name in RESERVED {
         for spelling in [name.to_ascii_uppercase(), format!(" {name}")] {
+            // A database that exists: 26.3 matches `database` in any case and
+            // checks the database before the setting names.
             let err = srv
                 .admin
                 .query("SELECT 1")
-                .with_setting(spelling.clone(), "1")
+                .with_setting(spelling.clone(), "default")
                 .fetch_one::<u8>()
                 .await
                 .expect_err(&format!("{spelling:?} must not be read as {name}"));

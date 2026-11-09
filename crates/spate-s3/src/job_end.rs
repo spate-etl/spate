@@ -133,6 +133,14 @@ impl JobEnd {
         }
     }
 
+    /// What ends here, for a log line: a seeded run is no bounded job.
+    pub(crate) fn subject(&self) -> &'static str {
+        match self.finish {
+            Finish::Marker { .. } | Finish::Solo { .. } => "the bounded job",
+            Finish::Seeded => "the seeded run",
+        }
+    }
+
     /// Whether the check ended the job stalled.
     pub(crate) fn stalled(&self) -> bool {
         matches!(
@@ -248,8 +256,9 @@ impl JobEnd {
                 }
                 EndAction::Ended(EndOutcome::Completed) => {
                     tracing::info!(
-                        "the bounded job has read all of its work and its dead-letter \
-                         destination is empty; ending the run"
+                        "{} has read all of its work and its dead-letter destination is \
+                         empty; ending the run",
+                        self.subject()
                     );
                     return Ok(true);
                 }
@@ -393,6 +402,42 @@ mod tests {
         let mut solo = solo(&rt);
         let err = solo.idle(&feed, || Ok(Some(0))).unwrap_err().to_string();
         assert!(err.contains("bounded feed job stalled"), "{err}");
+    }
+
+    /// Pins that the line logged at a clean end names a seeded run as one,
+    /// and any other job as a bounded job.
+    #[test]
+    fn the_end_line_names_a_seeded_run() {
+        let rt = runtime();
+        let ended = |mut end: JobEnd| {
+            let (feed, _script) = spate_test::scripted_feed();
+            let logs = spate_test::capture_logs(tracing::Level::INFO, || {
+                assert!(end.idle(&feed, || Ok(Some(0))).unwrap());
+            });
+            logs.iter()
+                .filter_map(|l| l.find("the ").map(|at| l[at..].to_owned()))
+                .collect::<Vec<_>>()
+        };
+        let seeded = JobEnd::new(
+            Finish::Seeded,
+            TestClock::frozen(),
+            rt.handle().clone(),
+            StopSignal::default(),
+        );
+        assert_eq!(
+            ended(seeded),
+            vec![
+                "the seeded run has read all of its work and its dead-letter destination is \
+                 empty; ending the run"
+            ]
+        );
+        assert_eq!(
+            ended(solo(&rt)),
+            vec![
+                "the bounded job has read all of its work and its dead-letter destination is \
+                 empty; ending the run"
+            ]
+        );
     }
 
     /// Pins that a marker read signals the reader's waker when it finishes,

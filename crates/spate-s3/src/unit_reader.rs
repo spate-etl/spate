@@ -400,8 +400,11 @@ impl UnitReader {
     pub(crate) fn stop_reading(&mut self) -> Result<(), SourceError> {
         // A stop exits `Completed` with units unread, and a run the job's end
         // drained does not come here, so this line tells the two apart.
-        if self.end.as_ref().is_some_and(|end| !end.stalled()) {
-            tracing::info!("the source stopped before this worker saw the bounded job end");
+        if let Some(end) = self.end.as_ref().filter(|end| !end.stalled()) {
+            tracing::info!(
+                "the source stopped before this worker saw {} end",
+                end.subject()
+            );
         }
         if !self.hands_back {
             return self.renew_error.take().map_or(Ok(()), Err);
@@ -2537,6 +2540,32 @@ mod tests {
             });
             assert_eq!(unfinished(logs), 0);
         }
+    }
+
+    /// Pins that a stop before a seeded run ends names the seeded run, which
+    /// is no bounded job.
+    #[test]
+    fn a_stop_before_a_seeded_run_ends_names_the_seeded_run() {
+        let (mut reader, _script, rt) = reader();
+        let mut end = JobEnd::new(
+            crate::job_end::Finish::Seeded,
+            TestClock::frozen(),
+            rt.handle().clone(),
+            spate_core::source::StopSignal::default(),
+        );
+        end.set_waker(reader.waker.clone());
+        reader.end = Some(end);
+        let logs = spate_test::capture_logs(tracing::Level::INFO, || {
+            reader.stop_reading().unwrap();
+        });
+        let stops: Vec<&str> = logs
+            .iter()
+            .filter_map(|l| l.find("the source stopped").map(|at| &l[at..]))
+            .collect();
+        assert_eq!(
+            stops,
+            vec!["the source stopped before this worker saw the seeded run end"]
+        );
     }
 
     /// Pins that a job the end check ended stalled logs no stop line: the

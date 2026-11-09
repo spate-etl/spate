@@ -2019,3 +2019,43 @@ fn rt_block_on<F: std::future::Future>(f: F) -> F::Output {
         .unwrap()
         .block_on(f)
 }
+
+/// Pins that a seeded run reads the unit it re-enqueues after an overwrite
+/// before it ends: the run ends `Completed` with both units acknowledged and
+/// the object's current rows written.
+#[test]
+fn a_seeded_run_reads_its_re_enqueue_before_it_ends() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    stage(&data, "a.ndjson", &recs("old", 4));
+    let (old_etag, old_size) = (etag_of(&data, "a.ndjson"), size_of(&data, "a.ndjson"));
+    let current = recs("current", 7);
+    stage(&data, "a.ndjson", &current);
+    let feed = MemoryFeed::new();
+    drop(feed.publish(pinned_notification("a.ndjson", old_size, &old_etag, 0)));
+    let store = ScriptedStore::new(dir.path());
+    let yaml = PipelineYaml::endpoint("s3-seeded-overwrite", "http://127.0.0.1:9")
+        .source("chunk_bytes", "64KiB")
+        .source("prefetch_bytes", "64KiB")
+        .build();
+    assert!(yaml.contains("memory"), "{yaml}");
+    let l = support::launch_with_seeded_feed(
+        &yaml,
+        test_options(),
+        |_| {},
+        Arc::new(feed.clone()),
+        move |source, _io| line_framer(source).with_store(store),
+    );
+    let report = l
+        .run
+        .wait_exit(DEADLINE)
+        .expect("the run exits")
+        .expect("the run starts");
+    assert_eq!(report.state, ExitState::Completed);
+    let c = feed.counts();
+    assert_eq!(
+        (c.visible, c.held, c.dead_lettered, c.acknowledged),
+        (0, 0, 0, 2)
+    );
+    assert_eq!(sorted(written_rows(&l.script)), sorted(current));
+}

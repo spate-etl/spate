@@ -1,5 +1,5 @@
 ---
-description: "A bounded feed job ends after the lister's end marker and an empty feed over a settling window, and ends Stalled if a unit was dead-lettered."
+description: "A bounded feed job ends on the lister's end marker and an empty feed over a settling window, and Stalled on a dead letter. ADR-0095 narrows it for seeded runs."
 ---
 
 # ADR-0076 — A bounded job on a feed ends on an empty feed and a checked dead-letter destination

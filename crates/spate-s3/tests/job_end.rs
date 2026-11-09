@@ -1334,3 +1334,20 @@ fn a_section_feed_on_a_durable_backend_opens_without_a_depth() {
         .open(SourceCtx::new(Checkpointer::new().handle()))
         .expect("a continuous job reads no depth");
 }
+
+/// Pins that a seeded run reads a unit failed below its delivery cap again
+/// before it ends: the run ends `Completed` once the feed has dead-lettered
+/// the unit at the cap, with nothing left unsettled.
+#[test]
+fn a_seeded_unit_failed_below_its_cap_is_read_again_before_the_end() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    fs::write(data.join("broken.ndjson.gz"), b"not gzip").unwrap();
+    let feed = MemoryFeed::with_attempt_cap(std::num::NonZeroU32::new(3).unwrap());
+    drop(feed.publish(unit_over(&data, "broken.ndjson.gz")));
+    let l = launch_seeded(&data, &feed);
+    let report = exit(&l);
+    assert_eq!(report.state, ExitState::Completed);
+    assert_eq!(counts(&feed), (0, 0, 1, 0));
+    assert_eq!(feed.unsettled(), Vec::new());
+}

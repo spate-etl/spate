@@ -28,7 +28,7 @@
 //! source offsets past it. Weaker settings would silently turn
 //! at-least-once into at-most-once.
 
-use crate::client::{Base, Keys, Role, canonical, check_message_timeout, check_topic_name};
+use crate::client::{Base, Keys, Role, TAG, canonical, check_message_timeout, check_topic_name};
 use crate::sink::context::{SinkContext, SinkHooks};
 use crate::sink::encoder::{
     DEFAULT_MAX_MESSAGE_BYTES, KafkaBytesEncoder, KafkaEncoder, KafkaJsonEncoder, MessageEncoder,
@@ -39,7 +39,7 @@ use rdkafka::producer::ThreadedProducer;
 use serde::Deserialize;
 use spate_core::clock::SyncClock;
 use spate_core::clock::tokio::{Clock as IoClock, SystemClock as IoSystemClock};
-use spate_core::config::{ComponentConfig, ConfigError, redact};
+use spate_core::config::{ComponentConfig, ConfigError, SectionPath, redact};
 use spate_core::deser::{Owned, RecFamily};
 use spate_core::sink::{
     BatchConfig, BreakerConfig, InflightConfig, RetryConfig, SinkBundle, SinkParts, SinkPoolConfig,
@@ -308,38 +308,45 @@ impl KafkaSinkConfig {
     ///
     /// # Errors
     ///
-    /// [`ConfigError::Validation`] for the first setting it refuses.
+    /// [`ConfigError::Component`] for the first setting it refuses, starting
+    /// at `sink.kafka`.
     pub fn validate(&self) -> Result<(), ConfigError> {
-        let fail = |msg: String| Err(ConfigError::Validation(format!("sink.kafka: {msg}")));
+        self.validate_at(&SectionPath::sink(TAG))
+    }
 
+    /// [`validate`](Self::validate), with each error starting at `at`.
+    fn validate_at(&self, at: &SectionPath) -> Result<(), ConfigError> {
         if self.brokers.trim().is_empty() {
-            return fail("brokers must not be empty".into());
+            return Err(at.invalid("brokers", "must not be empty"));
         }
         if self.topic.trim().is_empty() {
-            return fail("topic must not be empty".into());
+            return Err(at.invalid("topic", "must not be empty"));
         }
         if let Err(why) = check_topic_name(&self.topic) {
-            return fail(format!("topic {why}"));
+            return Err(at.invalid("topic", why));
         }
         if self.shards == 0 {
-            return fail("shards must be at least 1".into());
+            return Err(at.invalid("shards", "must be at least 1"));
         }
         if let Err(why) = check_message_timeout(self.delivery_timeout) {
-            return fail(format!("delivery_timeout {why}"));
+            return Err(at.invalid("delivery_timeout", why));
         }
         // librdkafka's accepted range for `message.max.bytes`.
         let mmb = self.max_message_bytes.as_u64();
         if !(1_000..=1_000_000_000).contains(&mmb) {
-            return fail(format!(
-                "max_message_bytes must be in [1000, 1000000000] \
-                 (librdkafka's `message.max.bytes` range), got {mmb}"
+            return Err(at.invalid(
+                "max_message_bytes",
+                format!(
+                    "must be in [1000, 1000000000] (librdkafka's `message.max.bytes` \
+                     range), got {mmb}"
+                ),
             ));
         }
         if let Err(why) = self.pool().validate() {
-            return fail(why.to_string());
+            return Err(at.error(why.to_string()));
         }
         if let Err(why) = self.base(false).check_statistics_interval() {
-            return fail(format!("statistics_interval {why}"));
+            return Err(at.invalid("statistics_interval", why));
         }
 
         let roles = [
@@ -353,15 +360,15 @@ impl KafkaSinkConfig {
             },
         ];
         if let Err(refusal) = self.base(false).denied(&roles) {
-            return fail(refusal.to_string());
+            return Err(at.error(refusal.to_string()));
         }
-        crate::security::check_tls_feature(&self.rdkafka, "sink.kafka")?;
+        crate::security::check_tls_feature(&self.rdkafka, at)?;
         if self.compression.is_some() {
             for key in self.rdkafka.keys() {
                 if canonical(key) == "compression.codec" {
-                    return fail(format!(
-                        "rdkafka.\"{key}\" conflicts with the typed \
-                         `compression` field; set one, not both"
+                    return Err(at.invalid(
+                        &format!("rdkafka.\"{key}\""),
+                        "conflicts with the typed `compression` field; set one, not both",
                     ));
                 }
             }
@@ -500,10 +507,16 @@ impl SinkBundle for KafkaSink {
 /// # Errors
 ///
 /// [`ConfigError::Component`] when the section does not deserialize into
-/// [`KafkaSinkConfig`], and otherwise as [`build`].
+/// [`KafkaSinkConfig`], and otherwise as [`build`]. Every error starts at the
+/// section's path, such as `sinks.eu.kafka` for a `sinks:` entry named `eu`.
 pub fn from_component_config(section: &ComponentConfig) -> Result<KafkaSink, ConfigError> {
     let cfg: KafkaSinkConfig = section.deserialize_into()?;
-    build(cfg)
+    build_on(
+        cfg,
+        &section.path(),
+        SyncClock::system(),
+        Arc::new(IoSystemClock),
+    )
 }
 
 /// Build from an already-deserialized config (programmatic use).
@@ -515,10 +528,16 @@ pub fn from_component_config(section: &ComponentConfig) -> Result<KafkaSink, Con
 ///
 /// # Errors
 ///
-/// [`ConfigError::Validation`] when `cfg` breaks a configuration rule, or when
-/// librdkafka refuses to create the producer or the probe producer.
+/// [`ConfigError::Component`], starting at `sink.kafka`, when `cfg` breaks a
+/// configuration rule, or when librdkafka refuses to create the producer or
+/// the probe producer.
 pub fn build(cfg: KafkaSinkConfig) -> Result<KafkaSink, ConfigError> {
-    build_on(cfg, SyncClock::system(), Arc::new(IoSystemClock))
+    build_on(
+        cfg,
+        &SectionPath::sink(TAG),
+        SyncClock::system(),
+        Arc::new(IoSystemClock),
+    )
 }
 
 /// [`build`] with the clocks the sink reads: `clock` stamps and ages a
@@ -535,15 +554,21 @@ pub fn build_on_clocks(
     clock: spate_core::clock::SharedClock,
     io_clock: Arc<dyn IoClock + RefUnwindSafe>,
 ) -> Result<KafkaSink, ConfigError> {
-    build_on(cfg, SyncClock::new(clock), io_clock)
+    build_on(
+        cfg,
+        &SectionPath::sink(TAG),
+        SyncClock::new(clock),
+        io_clock,
+    )
 }
 
 fn build_on(
     cfg: KafkaSinkConfig,
+    at: &SectionPath,
     clock: SyncClock,
     io_clock: Arc<dyn IoClock + RefUnwindSafe>,
 ) -> Result<KafkaSink, ConfigError> {
-    cfg.validate()?;
+    cfg.validate_at(at)?;
 
     // The statistics slot connects the writer (whose `attach_metrics`
     // fills it) to the main producer's context (whose `stats` callback
@@ -558,9 +583,7 @@ fn build_on(
             },
             SinkHooks::new(Arc::clone(&stats_slot), clock.clone()),
         )
-        .map_err(|reason| {
-            ConfigError::Validation(format!("sink.kafka: producer creation failed: {reason}"))
-        })?;
+        .map_err(|reason| at.error(format!("producer creation failed: {reason}")))?;
     let label = format!("{}/{}", cfg.brokers, cfg.topic);
     let endpoint = KafkaEndpoint::new(producer, label.clone());
     let endpoints: Vec<Vec<KafkaEndpoint>> =
@@ -574,11 +597,7 @@ fn build_on(
             },
             SinkHooks::detached(clock),
         )
-        .map_err(|reason| {
-            ConfigError::Validation(format!(
-                "sink.kafka: probe producer creation failed: {reason}"
-            ))
-        })?;
+        .map_err(|reason| at.error(format!("probe producer creation failed: {reason}")))?;
     let probe_endpoints = Arc::new(vec![vec![KafkaEndpoint::new(probe_producer, label)]]);
 
     let rejection_window = cfg.rejection_window();
@@ -618,6 +637,62 @@ mod tests {
         let cfg: KafkaSinkConfig = section(body).deserialize_into()?;
         cfg.validate()?;
         Ok(cfg)
+    }
+
+    /// The text of a refusal, which must be a [`ConfigError::Component`].
+    fn refusal(result: Result<(), ConfigError>) -> String {
+        match result {
+            Err(err @ ConfigError::Component { .. }) => err.to_string(),
+            other => panic!("expected a Component refusal, got {other:?}"),
+        }
+    }
+
+    /// The `eu` entry of a `sinks:` map holding `body` under `kafka:`.
+    fn sinks_entry(body: &str) -> spate_core::config::PipelineConfig {
+        spate_core::config::PipelineConfig::from_str(&format!(
+            "pipeline: {{ name: demo }}\nsource: {{ memory: {{}} }}\nsinks:\n  eu:\n    kafka:\n{}",
+            body.lines()
+                .map(|l| format!("    {l}\n"))
+                .collect::<String>()
+        ))
+        .expect("loads")
+    }
+
+    /// An owned passthrough key in a `sinks:` entry is refused at the entry.
+    #[test]
+    fn an_owned_key_in_a_sinks_entry_names_the_entry() {
+        let cfg = sinks_entry(&format!("{}  rdkafka:\n    acks: \"1\"\n", minimal()));
+        let section = cfg.sink_config("eu").expect("declared");
+        let msg = refusal(from_component_config(section).map(drop));
+        assert!(
+            msg.starts_with("sinks.eu.kafka: rdkafka.\"acks\" cannot be overridden: "),
+            "{msg}"
+        );
+    }
+
+    /// A producer librdkafka refuses to create, for a `sinks:` entry, is
+    /// reported at the entry.
+    #[test]
+    fn a_producer_refused_for_a_sinks_entry_names_the_entry() {
+        let cfg = sinks_entry(&format!(
+            "{}  rdkafka:\n    max.in.flight: \"10\"\n",
+            minimal()
+        ));
+        let section = cfg.sink_config("eu").expect("declared");
+        let msg = refusal(from_component_config(section).map(drop));
+        assert!(
+            msg.starts_with("sinks.eu.kafka: producer creation failed: "),
+            "{msg}"
+        );
+    }
+
+    /// A config built in code has no section, so `build` reports at the
+    /// single sink's path.
+    #[test]
+    fn build_reports_at_the_single_sink_path() {
+        let cfg = KafkaSinkConfig::new("localhost:9092", "");
+        let msg = refusal(build(cfg).map(drop));
+        assert_eq!(msg, "sink.kafka.topic: must not be empty");
     }
 
     /// `Debug` shows every `rdkafka` key and none of the values.
@@ -666,7 +741,7 @@ mod tests {
         };
         with_topic(512).expect("the limit passes");
         let err = with_topic(513).expect_err("one byte past the limit");
-        assert!(err.to_string().contains("sink.kafka: topic"), "{err}");
+        assert!(err.to_string().starts_with("sink.kafka.topic: "), "{err}");
         assert!(err.to_string().contains("512 bytes"), "{err}");
     }
 
@@ -737,9 +812,7 @@ mod tests {
         let mut cfg = KafkaSinkConfig::new("localhost:9092", "orders");
         cfg.rdkafka
             .insert("allow.auto.create.topics".to_owned(), "true".to_owned());
-        let Err(ConfigError::Validation(msg)) = build(cfg) else {
-            panic!("build accepted an owned key");
-        };
+        let msg = refusal(build(cfg).map(drop));
         assert!(msg.contains("allow.auto.create.topics"), "{msg}");
     }
 
@@ -749,9 +822,7 @@ mod tests {
     fn build_refuses_a_zero_batch_threshold_in_a_programmatic_config() {
         let mut cfg = KafkaSinkConfig::new("localhost:9092", "orders");
         cfg.batch.max_bytes = 0;
-        let Err(ConfigError::Validation(msg)) = build(cfg) else {
-            panic!("build accepted a zero batch.max_bytes");
-        };
+        let msg = refusal(build(cfg).map(drop));
         assert_eq!(
             msg,
             format!("sink.kafka: {}", SinkPoolConfigError::ZeroMaxBytes)
@@ -764,9 +835,7 @@ mod tests {
     fn build_refuses_a_sub_millisecond_delivery_timeout_in_a_programmatic_config() {
         let mut cfg = KafkaSinkConfig::new("localhost:9092", "orders");
         cfg.delivery_timeout = Duration::from_micros(999);
-        let Err(ConfigError::Validation(msg)) = build(cfg) else {
-            panic!("build accepted a sub-millisecond delivery_timeout");
-        };
+        let msg = refusal(build(cfg).map(drop));
         assert!(msg.contains("delivery_timeout"), "{msg}");
     }
 
@@ -779,7 +848,10 @@ mod tests {
             let err = parse(&format!("{}  delivery_timeout: {timeout}\n", minimal()))
                 .unwrap_err()
                 .to_string();
-            assert!(err.contains("delivery_timeout must be"), "{timeout}: {err}");
+            assert!(
+                err.starts_with("sink.kafka.delivery_timeout: must be"),
+                "{timeout}: {err}"
+            );
             assert!(err.contains("1ms"), "{timeout}: {err}");
         }
         for timeout in ["1ms", "1000us"] {
@@ -1030,7 +1102,7 @@ mod tests {
             );
             let msg = parse(&body).unwrap_err().to_string();
             assert!(
-                msg.contains(&format!("\"{key}\" conflicts")),
+                msg.starts_with(&format!("sink.kafka.rdkafka.\"{key}\": conflicts")),
                 "conflict is explained: {msg}"
             );
         }
@@ -1047,7 +1119,7 @@ mod tests {
         let body = format!("{}  rdkafka:\n    topic.acks: \"1\"\n", minimal());
         assert_eq!(
             parse(&body).unwrap_err().to_string(),
-            "invalid configuration: sink.kafka: rdkafka.\"topic.acks\" cannot be overridden: \
+            "sink.kafka: rdkafka.\"topic.acks\" cannot be overridden: \
              forced to `all`: the framework commits source offsets once a delivery report \
              confirms, so a report under weaker acks would turn at-least-once into \
              at-most-once (`topic.acks` sets the same librdkafka property as `acks`)"
@@ -1077,7 +1149,7 @@ mod tests {
         );
         let msg = parse(&body).unwrap_err().to_string();
         assert!(
-            msg.contains("\"topic.compression.type\" conflicts"),
+            msg.starts_with("sink.kafka.rdkafka.\"topic.compression.type\": conflicts"),
             "{msg}"
         );
     }
@@ -1092,14 +1164,20 @@ mod tests {
             minimal()
         );
         let msg = parse(&body).unwrap_err().to_string();
-        assert!(msg.contains("\"acks\" cannot be overridden"), "{msg}");
+        assert!(
+            msg.starts_with("sink.kafka: rdkafka.\"acks\" cannot be overridden"),
+            "{msg}"
+        );
 
         let body = format!(
             "{}  compression: lz4\n  rdkafka:\n    compression.type: \"gzip\"\n    linger.ms: \"5\"\n",
             minimal()
         );
         let msg = parse(&body).unwrap_err().to_string();
-        assert!(msg.contains("\"compression.type\" conflicts"), "{msg}");
+        assert!(
+            msg.starts_with("sink.kafka.rdkafka.\"compression.type\": conflicts"),
+            "{msg}"
+        );
     }
 
     /// Pins that the owned-key check matches whole names: librdkafka's
@@ -1219,9 +1297,7 @@ mod tests {
             ),
         ] {
             let body = format!("{}{yaml}", minimal());
-            let Err(ConfigError::Validation(msg)) = parse(&body) else {
-                panic!("accepted {yaml:?}");
-            };
+            let msg = refusal(parse(&body).map(drop));
             assert_eq!(msg, format!("sink.kafka: {want}"), "{yaml:?}");
         }
     }
@@ -1234,18 +1310,14 @@ mod tests {
             "{}  max_message_bytes: 10\n  batch:\n    max_rows: 0\n",
             minimal()
         );
-        let Err(ConfigError::Validation(msg)) = parse(&earlier) else {
-            panic!("accepted {earlier:?}");
-        };
-        assert!(msg.starts_with("sink.kafka: max_message_bytes"), "{msg}");
+        let msg = refusal(parse(&earlier).map(drop));
+        assert!(msg.starts_with("sink.kafka.max_message_bytes: "), "{msg}");
 
         let later = format!(
             "{}  statistics_interval: 500us\n  batch:\n    max_rows: 0\n",
             minimal()
         );
-        let Err(ConfigError::Validation(msg)) = parse(&later) else {
-            panic!("accepted {later:?}");
-        };
+        let msg = refusal(parse(&later).map(drop));
         assert_eq!(
             msg,
             format!("sink.kafka: {}", SinkPoolConfigError::ZeroMaxRows)
@@ -1351,7 +1423,7 @@ mod tests {
             );
             let msg = parse(&body).expect_err(interval).to_string();
             assert!(
-                msg.contains("sink.kafka: statistics_interval"),
+                msg.starts_with("sink.kafka.statistics_interval: must be"),
                 "{interval}: {msg}"
             );
             assert!(!msg.contains("hunter2"), "{interval}: {msg}");
@@ -1361,7 +1433,10 @@ mod tests {
             minimal()
         );
         let msg = parse(&body).unwrap_err().to_string();
-        assert!(msg.contains("sink.kafka: statistics_interval"), "{msg}");
+        assert!(
+            msg.starts_with("sink.kafka.statistics_interval: must be"),
+            "{msg}"
+        );
         for (interval, written) in [
             ("0s", None),
             ("1ms", Some("1")),
@@ -1385,9 +1460,10 @@ mod tests {
     fn build_refuses_a_sub_millisecond_statistics_interval() {
         let mut cfg = KafkaSinkConfig::new("localhost:9092", "orders-out");
         cfg.statistics_interval = Duration::from_micros(500);
-        let Err(ConfigError::Validation(msg)) = build(cfg) else {
-            panic!("build accepted a 500us statistics_interval");
-        };
-        assert!(msg.contains("sink.kafka: statistics_interval"), "{msg}");
+        let msg = refusal(build(cfg).map(drop));
+        assert!(
+            msg.starts_with("sink.kafka.statistics_interval: must be"),
+            "{msg}"
+        );
     }
 }

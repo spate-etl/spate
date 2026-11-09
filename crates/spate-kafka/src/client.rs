@@ -62,7 +62,7 @@ const MAX_TOPIC_NAME_BYTES: usize = 512;
 ///
 /// # Errors
 ///
-/// The reason, without the key, for the section to prefix in its own style.
+/// The reason, without the key, for the caller to anchor at its topic key.
 pub(crate) fn check_topic_name(topic: &str) -> Result<(), String> {
     if topic.len() > MAX_TOPIC_NAME_BYTES {
         return Err(format!("is longer than {MAX_TOPIC_NAME_BYTES} bytes"));
@@ -97,7 +97,7 @@ pub(crate) fn canonical(key: &str) -> &str {
 ///
 /// # Errors
 ///
-/// The reason, without the key, for the section to prefix in its own style.
+/// The reason, without the key, for the caller to anchor at its timeout key.
 pub(crate) fn check_message_timeout(timeout: Duration) -> Result<(), String> {
     const MESSAGE_TIMEOUT: DurationBounds = DurationBounds::at_least(Duration::from_millis(1))
         .at_most(Duration::from_millis(i32::MAX as u64));
@@ -179,6 +179,9 @@ impl Keys<'_> {
 const STATISTICS_INTERVAL: DurationBounds = DurationBounds::at_least(Duration::from_millis(1))
     .at_most(Duration::from_hours(24))
     .or_zero();
+
+/// The key that selects Kafka in a `source:`, `sink:` or `feed:` section.
+pub(crate) const TAG: &str = "kafka";
 
 /// What every client of one connector section shares: its brokers, its
 /// passthrough and its statistics interval.
@@ -306,8 +309,8 @@ impl Base<'_> {
     ///
     /// # Errors
     ///
-    /// The reason, without the key, for the section to prefix in its own
-    /// style.
+    /// The reason, without the key, for the caller to anchor at
+    /// `statistics_interval`.
     pub(crate) fn check_statistics_interval(&self) -> Result<(), String> {
         check_duration(self.statistics_interval, STATISTICS_INTERVAL).map_err(|e| {
             format!(

@@ -1,14 +1,14 @@
 //! The `kafka:` body of a `feed:` section, decoded and checked.
 
-use crate::client::{Base, Keys, Role, check_message_timeout};
+use crate::client::{Base, Keys, Role, TAG, check_message_timeout};
 use serde::Deserialize;
-use spate_core::config::{ConfigError, FeedSection, redact};
+use spate_core::config::{ConfigError, FeedSection, SectionPath, redact};
 use std::collections::BTreeMap;
 use std::num::NonZeroU32;
 use std::time::Duration;
 
 /// The key that names this backend in a `feed:` section.
-pub(crate) const BACKEND: &str = "kafka";
+pub(crate) const BACKEND: &str = TAG;
 
 /// The backend's name in the text a person reads.
 pub(crate) const NAME: &str = "Kafka";
@@ -286,10 +286,8 @@ impl KafkaFeedConfig {
     pub(crate) fn from_section(section: &FeedSection) -> Result<KafkaFeedConfig, ConfigError> {
         let body: Body = section.backend_body(BACKEND, NAME)?;
         if body.attempt_cap.is_some() {
-            return Err(FeedSection::backend_error(
-                BACKEND,
-                "`attempt_cap` is a key of `feed:` itself, beside `kafka:`",
-            ));
+            return Err(SectionPath::feed(BACKEND)
+                .invalid("attempt_cap", "is a key of `feed:` itself, beside `kafka:`"));
         }
         let config = KafkaFeedConfig {
             brokers: body.brokers,
@@ -308,6 +306,7 @@ impl KafkaFeedConfig {
     }
 
     pub(crate) fn validate(&self) -> Result<(), ConfigError> {
+        let at = SectionPath::feed(BACKEND);
         for (key, value) in [
             ("brokers", &self.brokers),
             ("group_id", &self.group_id),
@@ -317,28 +316,19 @@ impl KafkaFeedConfig {
             ("attempt_topic", &self.attempt_topic),
         ] {
             if value.trim().is_empty() {
-                return Err(FeedSection::backend_error(
-                    BACKEND,
-                    format!("`{key}` must not be empty"),
-                ));
+                return Err(at.invalid(key, "must not be empty"));
             }
         }
         // A message read from the work topic counts under its own
         // coordinates, so a retry copy written there would start a new count.
         if self.retry_topic == self.topic {
-            return Err(FeedSection::backend_error(
-                BACKEND,
-                "`retry_topic` must differ from `topic`",
-            ));
+            return Err(at.invalid("retry_topic", "must differ from `topic`"));
         }
         // The group reads the work and retry topics, so a dead-letter write
         // to either is read and written again without end.
         for (key, value) in [("topic", &self.topic), ("retry_topic", &self.retry_topic)] {
             if self.dead_letter_topic == *value {
-                return Err(FeedSection::backend_error(
-                    BACKEND,
-                    format!("`dead_letter_topic` must differ from `{key}`"),
-                ));
+                return Err(at.invalid("dead_letter_topic", format!("must differ from `{key}`")));
             }
         }
         // The attempt topic is compacted and the others must not be. Startup
@@ -350,30 +340,21 @@ impl KafkaFeedConfig {
             ("dead_letter_topic", &self.dead_letter_topic),
         ] {
             if self.attempt_topic == *value {
-                return Err(FeedSection::backend_error(
-                    BACKEND,
-                    format!("`attempt_topic` must differ from `{key}`"),
-                ));
+                return Err(at.invalid("attempt_topic", format!("must differ from `{key}`")));
             }
         }
         if let Err(why) = check_message_timeout(self.delivery_timeout) {
-            return Err(FeedSection::backend_error(
-                BACKEND,
-                format!("`delivery_timeout` {why}"),
-            ));
+            return Err(at.invalid("delivery_timeout", why));
         }
         if let Err(why) = self.base(false).check_statistics_interval() {
-            return Err(FeedSection::backend_error(
-                BACKEND,
-                format!("`statistics_interval` {why}"),
-            ));
+            return Err(at.invalid("statistics_interval", why));
         }
         let clients = FeedRole::ALL.map(|role| Client { config: self, role });
         let roles: Vec<&dyn Role> = clients.iter().map(|c| c as &dyn Role).collect();
         if let Err(refusal) = self.base(false).denied(&roles) {
-            return Err(FeedSection::backend_error(BACKEND, refusal.to_string()));
+            return Err(at.error(refusal.to_string()));
         }
-        crate::security::check_tls_feature(&self.rdkafka, "feed.kafka")
+        crate::security::check_tls_feature(&self.rdkafka, &at)
     }
 
     /// What the feed's clients share with every Kafka client.
@@ -502,10 +483,11 @@ mod tests {
                     .unwrap_err()
                     .to_string();
                     assert!(
-                        err.contains(&format!("rdkafka.\"{written}\" cannot be overridden")),
+                        err.starts_with(&format!(
+                            "feed.kafka: rdkafka.\"{written}\" cannot be overridden"
+                        )),
                         "{err}"
                     );
-                    assert!(err.contains("feed.kafka"), "{err}");
                 }
             }
         }
@@ -543,7 +525,10 @@ mod tests {
         let err = parse(&format!("{MINIMAL}  attempt_cap: 3\n"))
             .unwrap_err()
             .to_string();
-        assert!(err.contains("`attempt_cap` is a key of `feed:`"), "{err}");
+        assert_eq!(
+            err,
+            "feed.kafka.attempt_cap: is a key of `feed:` itself, beside `kafka:`"
+        );
     }
 
     /// Pins the refusals: another backend's tag, reported at the section, a
@@ -573,7 +558,7 @@ mod tests {
                 let err = parse(&MINIMAL.replace(value, empty))
                     .unwrap_err()
                     .to_string();
-                assert!(err.contains(&format!("`{key}` must not be empty")), "{err}");
+                assert_eq!(err, format!("feed.kafka.{key}: must not be empty"));
             }
         }
 
@@ -602,10 +587,7 @@ mod tests {
         let err = parse(&MINIMAL.replace("units-retry", "units"))
             .unwrap_err()
             .to_string();
-        assert!(
-            err.contains("`retry_topic` must differ from `topic`"),
-            "{err}"
-        );
+        assert_eq!(err, "feed.kafka.retry_topic: must differ from `topic`");
     }
 
     /// Pins that a dead-letter topic equal to the work topic or the retry
@@ -616,9 +598,9 @@ mod tests {
             parse(&MINIMAL.replace("dead_letter_topic: units-dead", "dead_letter_topic: units"))
                 .unwrap_err()
                 .to_string();
-        assert!(
-            err.contains("`dead_letter_topic` must differ from `topic`"),
-            "{err}"
+        assert_eq!(
+            err,
+            "feed.kafka.dead_letter_topic: must differ from `topic`"
         );
     }
 
@@ -632,9 +614,9 @@ mod tests {
         ))
         .unwrap_err()
         .to_string();
-        assert!(
-            err.contains("`dead_letter_topic` must differ from `retry_topic`"),
-            "{err}"
+        assert_eq!(
+            err,
+            "feed.kafka.dead_letter_topic: must differ from `retry_topic`"
         );
     }
 
@@ -654,9 +636,9 @@ mod tests {
             let err = parse(&yaml)
                 .expect_err(&format!("attempt_topic {other} accepted"))
                 .to_string();
-            assert!(
-                err.contains(&format!("`attempt_topic` must differ from `{key}`")),
-                "{err}"
+            assert_eq!(
+                err,
+                format!("feed.kafka.attempt_topic: must differ from `{key}`")
             );
         }
     }
@@ -672,7 +654,7 @@ mod tests {
                 .unwrap_err()
                 .to_string();
             assert!(
-                err.contains("`statistics_interval` must be"),
+                err.starts_with("feed.kafka.statistics_interval: must be"),
                 "{interval}: {err}"
             );
         }
@@ -681,7 +663,10 @@ mod tests {
         ))
         .unwrap_err()
         .to_string();
-        assert!(err.contains("`statistics_interval` must be"), "{err}");
+        assert!(
+            err.starts_with("feed.kafka.statistics_interval: must be"),
+            "{err}"
+        );
         for interval in ["0s", "1ms", "24h"] {
             parse(&format!("{MINIMAL}  statistics_interval: {interval}\n"))
                 .unwrap_or_else(|err| panic!("{interval}: {err}"));

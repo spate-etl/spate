@@ -106,4 +106,48 @@ mod tests {
         shared::<crate::feed::KafkaFeedPublisher>();
         unwind_safe::<crate::KafkaWriter>();
     }
+
+    /// One empty `topic` is refused at its full path in every Kafka section:
+    /// a `sinks:` entry, the single `sink:`, the source and the feed.
+    #[test]
+    fn an_empty_topic_is_refused_at_its_path_in_every_section() {
+        use spate_core::config::{FeedSection, PipelineConfig};
+
+        let sink = "{ kafka: { brokers: \"localhost:9092\", topic: \"\" } }";
+        for (sinks, name, want) in [
+            (
+                format!("sinks:\n  eu: {sink}\n"),
+                "eu",
+                "sinks.eu.kafka.topic",
+            ),
+            (format!("sink: {sink}\n"), "default", "sink.kafka.topic"),
+        ] {
+            let yaml = format!("pipeline: {{ name: demo }}\nsource: {{ memory: {{}} }}\n{sinks}");
+            let cfg = PipelineConfig::from_str(&yaml).expect("loads");
+            let section = cfg.sink_config(name).expect("declared");
+            let err = crate::sink::from_component_config(section)
+                .map(drop)
+                .expect_err("empty topic");
+            assert_eq!(err.to_string(), format!("{want}: must not be empty"));
+        }
+
+        let source = spate_test::component_config(
+            "kafka",
+            "  brokers: localhost:9092\n  topic: \"\"\n  group_id: g\n",
+        );
+        let err = crate::KafkaSourceConfig::from_component_config(&source)
+            .map(drop)
+            .expect_err("empty topic");
+        assert_eq!(err.to_string(), "source.kafka.topic: must not be empty");
+
+        let feed: FeedSection = serde_yaml::from_str(
+            "kafka:\n  brokers: localhost:9092\n  group_id: g\n  topic: \"\"\n  \
+             retry_topic: r\n  dead_letter_topic: d\n  attempt_topic: a\n",
+        )
+        .expect("yaml");
+        let err = crate::feed::KafkaFeedConfig::from_section(&feed)
+            .map(drop)
+            .expect_err("empty topic");
+        assert_eq!(err.to_string(), "feed.kafka.topic: must not be empty");
+    }
 }

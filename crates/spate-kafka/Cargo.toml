@@ -47,7 +47,7 @@ spate-s3 = { workspace = true, features = ["testing"] }
 # `testing`: `TestClock`.
 spate-core = { workspace = true, features = ["testing"] }
 spate-test = { workspace = true }
-spate-test-support = { workspace = true, features = ["s3", "tls"] }
+spate-test-support = { workspace = true, features = ["kafka", "s3", "tls"] }
 metrics = { workspace = true }
 object_store = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
@@ -57,7 +57,6 @@ serde_json = { workspace = true, features = ["raw_value"] }
 serde_yaml = { workspace = true }
 tempfile = { workspace = true }
 testcontainers = { workspace = true, features = ["blocking"] }
-testcontainers-modules = { workspace = true, features = ["kafka"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
 tracing-subscriber = { workspace = true, features = ["fmt"] }
 

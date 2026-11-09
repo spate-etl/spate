@@ -7,13 +7,20 @@
 //!   --locked --run-ignored ignored-only
 //! ```
 
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use futures_util::TryStreamExt as _;
 use object_store::aws::AmazonS3Builder;
 use object_store::path::Path as StorePath;
 use object_store::{ObjectStore as _, ObjectStoreExt as _, PutPayload};
-use spate_test_support::{ACCESS_KEY, ElasticMq, Message, REGION, S3Store, SECRET_KEY, Store};
+use rdkafka::ClientConfig;
+use rdkafka::Message as _;
+use rdkafka::consumer::{BaseConsumer, Consumer as _};
+use rdkafka::producer::{BaseProducer, BaseRecord, Producer as _};
+use spate_test_support::{
+    ACCESS_KEY, ElasticMq, KAFKA_PORT, KafkaBroker, Message, REGION, S3Store, SECRET_KEY, Store,
+};
+use testcontainers::runners::SyncRunner as _;
 
 /// A bucket created through the helper takes a signed put, get, list and
 /// delete, and the container joins the network it was given. A store that
@@ -102,6 +109,52 @@ fn s3_store_round_trips_an_object() {
         let listed: Vec<_> = store.list(None).try_collect().await.unwrap();
         assert!(listed.is_empty(), "{listed:?}");
     });
+}
+
+/// A record produced to the selected broker on its host listener reads back
+/// from the start of its topic.
+#[test]
+#[ignore = "requires Docker"]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "a smoke test builds its clients outside spate-kafka's factory"
+)]
+fn kafka_broker_round_trips_a_record() {
+    let broker = KafkaBroker::selected();
+    let name = broker.broker();
+    let container = broker
+        .start()
+        .unwrap_or_else(|e| panic!("start {name}: {e}"));
+    let port = container.get_host_port_ipv4(KAFKA_PORT).expect("port");
+    let brokers = format!("127.0.0.1:{port}");
+
+    let producer: BaseProducer = ClientConfig::new()
+        .set("bootstrap.servers", &brokers)
+        .set("message.timeout.ms", "30000")
+        .create()
+        .expect("producer");
+    producer
+        .send(BaseRecord::<(), _>::to("smoke").payload("one"))
+        .expect("enqueue");
+    producer.flush(Duration::from_secs(60)).expect("flush");
+
+    let consumer: BaseConsumer = ClientConfig::new()
+        .set("bootstrap.servers", &brokers)
+        .set("group.id", "smoke")
+        .set("auto.offset.reset", "earliest")
+        .create()
+        .expect("consumer");
+    consumer.subscribe(&["smoke"]).expect("subscribe");
+    let mut payload = None;
+    spate_test::wait_until(spate_test::HANG, "the record", || {
+        match consumer.poll(Duration::from_millis(100)) {
+            Some(Ok(m)) => payload = m.payload().map(<[u8]>::to_vec),
+            Some(Err(e)) => panic!("consume: {e}"),
+            None => {}
+        }
+        payload.is_some()
+    });
+    assert_eq!(payload.as_deref(), Some(&b"one"[..]));
 }
 
 /// A message sent to a queue the helper created is received once and, once

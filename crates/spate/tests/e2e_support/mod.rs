@@ -46,7 +46,7 @@ use spate::pipeline::{
 };
 use spate::sink::KeyHashRouter;
 use spate_test::{metric_series, metric_value};
-use spate_test_support::{container_image, http};
+use spate_test_support::{KAFKA_PORT, KafkaBroker, container_image, http};
 use std::net::SocketAddr;
 use std::ops::Range;
 use std::process::Command;
@@ -58,7 +58,6 @@ use std::time::Duration;
 use testcontainers::core::ContainerPort;
 use testcontainers::runners::SyncRunner;
 use testcontainers::{Container, GenericImage, ImageExt};
-use testcontainers_modules::kafka::apache::{KAFKA_PORT, Kafka};
 
 /// The record that travels end to end: Avro in (field names), RowBinary out
 /// (field order is `#[derive(ClickHouseRow)]`'s generated column list).
@@ -85,7 +84,7 @@ pub fn event_id(partition: i32, seq: i64) -> i64 {
 
 /// The Kafka containers a harness runs.
 enum Brokers {
-    One(Box<Container<Kafka>>),
+    One(Box<Container<KafkaBroker>>),
     /// Node ids are the index plus one.
     Cluster(Vec<Container<GenericImage>>),
 }
@@ -116,18 +115,11 @@ impl Harness {
     /// Start Kafka + ClickHouse + the stub schema registry. Slow on first
     /// use (image pulls); panics with context on any failure.
     pub fn up() -> Self {
-        // The broker `ci/kafka/` pins, fetched by digest and re-tagged so this
-        // starts the pinned bytes.
-        let (kafka_image, kafka_tag) = container_image(&["--pull", "kafka"]);
-        let kafka = Kafka::default()
-            .with_name(&kafka_image)
-            .with_tag(&kafka_tag)
-            // The image's defaults ask for three replicas, which one broker
-            // cannot satisfy.
-            .with_env_var("KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR", "1")
-            .with_env_var("KAFKA_TRANSACTION_STATE_LOG_MIN_ISR", "1")
+        let kafka = KafkaBroker::selected().transactional();
+        let broker = kafka.broker();
+        let kafka = kafka
             .start()
-            .unwrap_or_else(|e| panic!("start Kafka container {kafka_image}:{kafka_tag}: {e}"));
+            .unwrap_or_else(|e| panic!("start {broker} container: {e}"));
         let kafka_port = kafka.get_host_port_ipv4(KAFKA_PORT).expect("kafka port");
         let brokers = format!("127.0.0.1:{kafka_port}");
         Self::around(Brokers::One(Box::new(kafka)), brokers, 1)
@@ -323,7 +315,7 @@ impl Harness {
         docker(&["unpause", self.single_broker().id()]);
     }
 
-    fn single_broker(&self) -> &Container<Kafka> {
+    fn single_broker(&self) -> &Container<KafkaBroker> {
         match &self.kafka {
             Brokers::One(kafka) => kafka,
             Brokers::Cluster(_) => panic!("the scenario runs a cluster"),

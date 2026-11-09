@@ -21,11 +21,11 @@ use spate_core::sink::KeyHashRouter;
 use spate_kafka::sink::KafkaSinkConfig;
 use spate_kafka::{KafkaSource, KafkaSourceConfig};
 use spate_test::{HANG, PipelineRun, wait_until};
+use spate_test_support::KAFKA_PORT;
 use std::collections::BTreeMap;
 use std::time::Duration;
 use support::{broker, consume};
 use testcontainers::runners::SyncRunner;
-use testcontainers_modules::kafka::apache::KAFKA_PORT;
 
 const IN_TOPIC: &str = "orders";
 const A_TOPIC: &str = "orders-a";

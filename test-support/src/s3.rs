@@ -22,6 +22,7 @@ use testcontainers::core::IntoContainerPort;
 use testcontainers::runners::SyncRunner;
 use testcontainers::{Container, GenericImage, ImageExt};
 
+use crate::kafka::BROKER_FROM_INSIDE;
 use crate::{container_image, http, http_with_headers, selected_lane};
 
 /// The access key id every store accepts.
@@ -38,10 +39,6 @@ pub const REGION: &str = "us-east-1";
 pub const RGW_OPAQUE_DATA: &str = rgw::OPAQUE_DATA;
 
 const READY: Duration = Duration::from_secs(60);
-
-/// The broker address a store reaches from inside the broker's network
-/// namespace: the listener the broker advertises to other containers.
-const BROKER_FROM_INSIDE: &str = "localhost:9093";
 
 /// The service whose lanes are stores.
 const SERVICE: &str = "s3";
@@ -580,19 +577,10 @@ mod tests {
     }
 
     /// A lane added under `ci/s3/` without its startup code fails here,
-    /// without Docker. Only directories are listed; the task runner stays the
-    /// one parser of the pins.
+    /// without Docker.
     #[test]
     fn every_s3_lane_names_a_known_store() {
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../ci/s3");
-        let lanes: Vec<String> = std::fs::read_dir(&dir)
-            .unwrap()
-            .filter_map(Result::ok)
-            .filter(|e| e.path().is_dir())
-            .map(|e| e.file_name().to_string_lossy().into_owned())
-            .collect();
-        assert!(!lanes.is_empty(), "no lanes under {}", dir.display());
-        for lane in lanes {
+        for lane in crate::lane_dirs(SERVICE) {
             let store = Store::from_lane(&lane).unwrap();
             assert_eq!(store.lane(), lane);
         }

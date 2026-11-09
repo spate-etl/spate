@@ -20,8 +20,10 @@ test harness.
 
 Services and lanes are discovered from this tree. The task runner and the CI
 classifier name no lane and no service beyond the one they are testing. The test
-harness names none either, except the S3 stores: each `ci/s3/<store>/` lane needs
-that store's startup in `spate_test_support::S3Store`.
+harness names none either, except the Kafka brokers and the S3 stores: each
+`ci/kafka/<broker>/` lane needs that broker's startup in
+`spate_test_support::KafkaBroker`, and each `ci/s3/<store>/` lane that store's
+startup in `spate_test_support::S3Store`.
 
 ## Services
 
@@ -30,7 +32,7 @@ that store's startup in `spate_test_support::S3Store`.
 | [`clickhouse`](clickhouse/README.md) | `lts-previous`, `lts`, `stable` | `spate-clickhouse`, and `spate`'s examples tier |
 | [`debian`](debian/README.md) | `trixie` | `spate-kafka`'s `tls_system_ca`, as its vendored OpenSSL client image |
 | [`elasticmq`](elasticmq/README.md) | `stable` | `spate-sqs`, `spate-test-support`'s smoke tests, and `spate`'s examples tier |
-| [`kafka`](kafka/README.md) | `stable` | `spate-kafka`, and `spate`'s end-to-end suites |
+| [`kafka`](kafka/README.md) | `apache` | `spate-kafka`, `spate`'s end-to-end suites, and `spate-test-support`'s smoke test |
 | [`rust`](rust/README.md) | `stable` | `spate-kafka`'s `tls_system_ca`, as its system OpenSSL builder and client image |
 | [`s3`](s3/README.md) | `rustfs`, `rgw`, `garage` | `spate-s3`, `spate-kafka`'s notification suite on a lane declaring `notifications`, and `spate-test-support`'s smoke test |
 
@@ -42,8 +44,9 @@ has, or for `s3` which stores, its vendor's support window, and why those lanes.
 **Lane names describe a release line.** `lts` and `stable` mean whatever they
 mean for that vendor today, so a lane keeps its name across a bump. A vendor with
 no LTS line has no `lts` lane. The names are per-service and there is no shared
-vocabulary to conform to. Under `ci/s3/` a lane is a store at its newest
-release, and `SPATE_S3_LANE` names a store.
+vocabulary to conform to. Under `ci/kafka/` a lane is a broker at its newest
+release, and `SPATE_KAFKA_LANE` names a broker. Under `ci/s3/` a lane is a store
+at its newest release, and `SPATE_S3_LANE` names a store.
 
 **One environment variable per service**, `SPATE_<SERVICE>_LANE`, falling back
 to the lane in `ci/<service>/PRIMARY`. Lanes are per-service, so a shared
@@ -134,9 +137,10 @@ The bump usually cannot be fixed inside its own pull request, so:
 ## Adding a service
 
 1. `ci/<service>/<lane>/Dockerfile` per release line you want covered, or per
-   store for `s3`, each pinned by tag and digest, and a `ci/<service>/PRIMARY`
-   naming the default. A new S3 store lane also adds its arm to
-   `spate_test_support::Store` and declares its capabilities.
+   broker for `kafka` and per store for `s3`, each pinned by tag and digest, and
+   a `ci/<service>/PRIMARY` naming the default. A new Kafka broker lane also adds
+   its arm to `spate_test_support::Broker`, and a new S3 store lane its arm to
+   `spate_test_support::Store` with its capabilities.
 2. A `ci/<service>/README.md` naming those lines and the reasoning.
 3. A row in the table above.
 4. The suite's harness reads its manifest through the same helper.

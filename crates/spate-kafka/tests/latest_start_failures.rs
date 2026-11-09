@@ -793,7 +793,7 @@ mod silent_coordinator {
     use spate_core::source::{Source, SourceCtx, SourceEvent};
     use spate_kafka::{KafkaSource, KafkaSourceConfig};
     use spate_test::HANG;
-    use spate_test_support::container_image;
+    use spate_test_support::{KAFKA_PORT, KafkaBroker};
     use std::io::{Read as _, Write as _};
     use std::net::{TcpListener, TcpStream};
     use std::sync::Arc;
@@ -801,9 +801,8 @@ mod silent_coordinator {
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
     use support::latest;
-    use testcontainers::core::{ContainerPort, WaitFor};
     use testcontainers::runners::SyncRunner;
-    use testcontainers::{Container, GenericImage, ImageExt as _};
+    use testcontainers::{Container, ImageExt as _};
 
     const OFFSET_COMMIT: i16 = 8;
     const OFFSET_FETCH: i16 = 9;
@@ -895,35 +894,16 @@ mod silent_coordinator {
         }
     }
 
-    /// A broker on the pinned image that advertises `proxy`'s address.
-    fn broker_behind_a_proxy() -> (Container<GenericImage>, Proxy, String) {
+    /// The selected broker, advertising `proxy`'s address.
+    fn broker_behind_a_proxy() -> (Container<KafkaBroker>, Proxy, String) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let advertised = listener.local_addr().expect("addr");
-        let (name, tag) = container_image(&["--pull", "kafka"]);
-        let container = GenericImage::new(name, tag)
-            .with_exposed_port(ContainerPort::Tcp(9092))
-            .with_wait_for(WaitFor::message_on_stdout("Kafka Server started"))
-            .with_env_var("KAFKA_NODE_ID", "1")
-            .with_env_var("KAFKA_PROCESS_ROLES", "broker,controller")
-            .with_env_var(
-                "KAFKA_LISTENERS",
-                "PLAINTEXT://0.0.0.0:9092,CONTROLLER://:9093",
-            )
-            .with_env_var(
-                "KAFKA_ADVERTISED_LISTENERS",
-                format!("PLAINTEXT://{advertised}"),
-            )
-            .with_env_var("KAFKA_CONTROLLER_LISTENER_NAMES", "CONTROLLER")
-            .with_env_var(
-                "KAFKA_LISTENER_SECURITY_PROTOCOL_MAP",
-                "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT",
-            )
-            .with_env_var("KAFKA_CONTROLLER_QUORUM_VOTERS", "1@localhost:9093")
-            .with_env_var("KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR", "1")
+        let container = KafkaBroker::selected()
+            .advertised_at(advertised)
             .with_env_var("KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS", "0")
             .start()
             .expect("start kafka");
-        let port = container.get_host_port_ipv4(9092).expect("port");
+        let port = container.get_host_port_ipv4(KAFKA_PORT).expect("port");
         let proxy = Proxy::on(listener, format!("127.0.0.1:{port}"));
         let brokers = proxy.addr.clone();
         (container, proxy, brokers)

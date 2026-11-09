@@ -18,7 +18,9 @@ use serde_json::Value;
 use spate_core::pipeline::ExitState;
 use spate_kafka::feed::KafkaFeed;
 use spate_test::{HANG, wait_until};
-use spate_test_support::{ACCESS_KEY, REGION, RGW_OPAQUE_DATA, S3Store, SECRET_KEY, Store};
+use spate_test_support::{
+    ACCESS_KEY, KAFKA_PORT, KafkaBroker, REGION, RGW_OPAQUE_DATA, S3Store, SECRET_KEY, Store,
+};
 use support::broker;
 use support::feed::{
     DEAD, RETRY, WORK, Worker, committed, create_topics, feed_yaml, high_watermark, launch_source,
@@ -27,7 +29,6 @@ use support::feed::{
 use testcontainers::core::IntoContainerPort;
 use testcontainers::runners::SyncRunner;
 use testcontainers::{Container, ImageExt};
-use testcontainers_modules::kafka::apache::{KAFKA_PORT, Kafka};
 
 const BUCKET: &str = "notified";
 
@@ -430,7 +431,7 @@ struct Notifying {
     client: object_store::aws::AmazonS3,
     io: tokio::runtime::Runtime,
     brokers: String,
-    _kafka: Container<Kafka>,
+    _kafka: Container<KafkaBroker>,
 }
 
 /// A worker reading the bucket through the Kafka feed, in a group of its own.

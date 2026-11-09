@@ -26,7 +26,7 @@ use spate_core::source::{Source, SourceCtx, SourceEvent};
 use spate_kafka::sink::KafkaSinkConfig;
 use spate_kafka::{KafkaSource, KafkaSourceConfig};
 use spate_test::HANG;
-use spate_test_support::{TestCa, container_image, pem};
+use spate_test_support::{KAFKA_PORT, KafkaBroker, TestCa, container_image, pem};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -37,7 +37,6 @@ use testcontainers::core::wait::ExitWaitStrategy;
 use testcontainers::core::{AccessMode, Mount, WaitFor};
 use testcontainers::runners::SyncRunner;
 use testcontainers::{Container, ContainerRequest, CopyTargetOptions, GenericImage, ImageExt};
-use testcontainers_modules::kafka::apache::{KAFKA_PORT, Kafka};
 
 const BUNDLE: &str = "probe_ca_default_completes_a_tls_handshake";
 const HASHED: &str = "system_openssl_default_preserves_hashed_directory_trust";
@@ -127,7 +126,7 @@ fn system_openssl_default_preserves_hashed_directory_trust() {
 
 /// Boots a TLS broker signed by a fresh CA, and returns the CA as PEM, the
 /// container and its address.
-fn tls_broker() -> (String, Container<Kafka>, String) {
+fn tls_broker() -> (String, Container<KafkaBroker>, String) {
     let ca = TestCa::new("spate-kafka-test CA");
     let (chain, key) = ca.leaf(&["127.0.0.1", "localhost"]);
     // Kafka reads these as properties, where `\n` is a newline.

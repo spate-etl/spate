@@ -994,14 +994,14 @@ mod tests {
     #[test]
     fn a_broker_image_bump_selects_the_suites_that_boot_kafka() {
         assert_eq!(
-            suites(&run(&["ci/kafka/stable/Dockerfile"])),
+            suites(&run(&["ci/kafka/apache/Dockerfile"])),
             ["spate", "spate-kafka"]
         );
 
         let ctx = Context {
             author: "dependabot[bot]".into(),
         };
-        let image = vec!["ci/kafka/stable/Dockerfile".to_string()];
+        let image = vec!["ci/kafka/apache/Dockerfile".to_string()];
         let out = classify(&image, Event::PullRequest, &ctx, &graph(), NONE);
         assert_eq!(suites(&out), ["spate", "spate-kafka"]);
     }

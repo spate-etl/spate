@@ -18,11 +18,11 @@ use rdkafka::consumer::{BaseConsumer, Consumer};
 use spate_core::feed::{Feed, Unit, wake_channel};
 use spate_kafka::feed::KafkaFeed;
 use spate_test::{HANG, LogCapture, wait_until};
+use spate_test_support::KAFKA_PORT;
 use std::time::{Duration, Instant};
 use support::broker;
 use support::feed::{ATTEMPT, DEAD, RETRY, WORK, committed, feed_yaml, publish, section};
 use testcontainers::runners::SyncRunner;
-use testcontainers_modules::kafka::apache::KAFKA_PORT;
 
 /// The member's session timeout, as the harness's section sets it.
 const SESSION: Duration = Duration::from_secs(6);

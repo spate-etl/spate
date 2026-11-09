@@ -247,10 +247,10 @@ updates:
       default-days: 7
 
   # ------------------------------------------ Docker (Kafka test broker) ----
-  # `ci/kafka/stable/Dockerfile` pins the broker the Kafka container suites
-  # boot. No `ignore`, so it follows every Apache Kafka release.
+  # `ci/kafka/apache/Dockerfile` pins the Apache Kafka broker the Kafka
+  # container suites boot. No `ignore`, so it follows every release.
   - package-ecosystem: docker
-    directory: "/ci/kafka/stable"
+    directory: "/ci/kafka/apache"
     schedule:
       interval: weekly
       day: friday

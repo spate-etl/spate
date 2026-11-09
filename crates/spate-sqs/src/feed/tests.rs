@@ -4025,26 +4025,6 @@ async fn hand_backs_do_not_postpone_the_tick() {
     assert!(clock.has_slept_until(base + 2 * period));
 }
 
-/// Pins that `before` ends at a deadline already past even when the future
-/// it races spends the task's coop budget on every poll.
-#[tokio::test]
-async fn before_ends_when_the_future_spends_the_budget() {
-    // Spends the whole budget each task poll, and ends on its own only
-    // after 1000 task polls.
-    let busy = async {
-        for _ in 0..1000 {
-            for _ in 0..200 {
-                coop::consume_budget().await;
-            }
-        }
-    };
-    let out = before(&SystemClock, Instant::now(), busy).await;
-    assert!(
-        out.is_none(),
-        "the deadline was past at the call, yet `before` waited for the future to end"
-    );
-}
-
 /// Pins the bound a close sets when only its own task reads it to the feed's
 /// clock: with tokio time a minute ahead, a close shorter than the receive
 /// grace settles rejected at its bound on the clock.

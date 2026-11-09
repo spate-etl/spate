@@ -355,8 +355,10 @@ pub trait Source: Send {
     /// A feed-reading source keeps `feed` to read its work units from, and
     /// reads the section's common keys, such as
     /// [`units_held`](FeedSection::units_held). The backend's own keys were
-    /// already applied when `feed` was built. `origin` says whether code
-    /// passed `feed` in, and so may publish into it outside the pipeline.
+    /// already applied when `feed` was built. `origin` says whether the
+    /// runtime built `feed`, code passed it in and may publish into it
+    /// outside the pipeline, or code filled it before the run and publishes
+    /// nothing more; see [`FeedOrigin`].
     /// The default rejects the section, so a source that reads no feed fails
     /// at startup when one is set.
     fn configure_feed(

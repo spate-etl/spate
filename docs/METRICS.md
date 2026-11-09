@@ -360,8 +360,8 @@ reads it through the runtime, which records the calls that receive, renew,
 settle, hand back and publish units, on any backend. The series carry
 `component="feed"` and the backend's key in the `feed:` section as
 `component_type`. Calls on a feed handed to the source
-directly, and on a handle kept after passing the feed to `Pipeline::feed`, are
-not recorded.
+directly, and on a handle kept after passing the feed to `Pipeline::feed` or
+`Pipeline::seeded_feed`, are not recorded.
 
 | Metric | Type | Extra labels | Description |
 |---|---|---|---|

@@ -463,8 +463,15 @@ pub enum FeedOrigin {
     /// holds it.
     Section,
     /// Code passed it to `Pipeline::feed`, and may keep a handle that
-    /// publishes into it.
+    /// publishes into it. A feed code fills before the run and never
+    /// publishes into again is [`Seeded`](Self::Seeded).
     Given,
+    /// Code filled it before passing it to `Pipeline::seeded_feed`, and
+    /// publishes nothing into it once the run starts. Only the source's own
+    /// re-enqueues are published after that, so the feed holds the run's
+    /// whole input. A source may then list nothing into it, and may end the
+    /// run once the feed holds no visible or held unit.
+    Seeded,
 }
 
 /// What a [`read_depth`](Feed::read_depth) counts.

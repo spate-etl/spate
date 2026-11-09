@@ -10,7 +10,6 @@ use rustls::pki_types::CertificateDer;
 use rustls::pki_types::pem::PemObject;
 use rustls::{CertificateError, ClientConfig, RootCertStore};
 use rustls_native_certs::CertificateResult;
-use spate_core::config::ConfigError;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -24,11 +23,13 @@ const POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(2);
 /// plus every certificate in `tls.root_ca`.
 ///
 /// Returns an empty store without calling `system` when `needs_tls` is false.
+/// An unusable `tls.root_ca` fails with its path and the reason, which the
+/// caller anchors at that key.
 pub(crate) fn root_store(
     tls: &TlsSection,
     needs_tls: bool,
     system: impl FnOnce() -> CertificateResult,
-) -> Result<RootCertStore, ConfigError> {
+) -> Result<RootCertStore, String> {
     let mut roots = RootCertStore::empty();
     if !needs_tls {
         return Ok(roots);
@@ -55,13 +56,8 @@ pub(crate) fn root_store(
     Ok(roots)
 }
 
-fn add_root_ca(roots: &mut RootCertStore, path: &Path) -> Result<(), ConfigError> {
-    let fail = |why: String| {
-        ConfigError::Validation(format!(
-            "sink.clickhouse: tls.root_ca `{}`: {why}",
-            path.display()
-        ))
-    };
+fn add_root_ca(roots: &mut RootCertStore, path: &Path) -> Result<(), String> {
+    let fail = |why: String| format!("`{}`: {why}", path.display());
     let certs = CertificateDer::pem_file_iter(path)
         .map_err(|e| fail(e.to_string()))?
         .collect::<Result<Vec<_>, _>>()
@@ -194,11 +190,9 @@ mod tests {
         let empty = dir.path().join("empty.pem");
         std::fs::write(&empty, "not a certificate\n").unwrap();
         for path in [dir.path().join("missing.pem"), empty] {
-            let err = root_store(&with_root_ca(&path), true, CertificateResult::default)
-                .unwrap_err()
-                .to_string();
-            assert!(err.contains("tls.root_ca"), "{err}");
-            assert!(err.contains(&path.display().to_string()), "{err}");
+            let err =
+                root_store(&with_root_ca(&path), true, CertificateResult::default).unwrap_err();
+            assert!(err.starts_with(&format!("`{}`: ", path.display())), "{err}");
         }
     }
 

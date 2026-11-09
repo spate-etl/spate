@@ -16,7 +16,7 @@ use bytes::Bytes;
 use rustls::ClientConfig;
 use rustls_native_certs::CertificateResult;
 use serde::{Deserialize, Deserializer, de};
-use spate_core::config::{ComponentConfig, ConfigError, redact};
+use spate_core::config::{ComponentConfig, ConfigError, SectionPath, redact};
 use spate_core::deser::RecFamily;
 use spate_core::sink::{
     BatchConfig, BreakerConfig, FrameCodecFactory, InflightConfig, RetryConfig, SinkBundle,
@@ -27,6 +27,9 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
+
+/// The sink's component type key, under `sink:` or a `sinks:` entry.
+pub(crate) const TAG: &str = "clickhouse";
 
 /// The `clickhouse` sink section.
 ///
@@ -533,7 +536,11 @@ impl ClickHouseSinkBuilder {
                     .make()
                     .encode_frame(&schema.header())
                     .map(Bytes::copy_from_slice)
-                    .map_err(|e| SchemaError::Columns(format!("sink.clickhouse: {e}")))?;
+                    .map_err(|e| {
+                        SchemaError::Columns(
+                            SectionPath::sink(TAG).error(e.to_string()).to_string(),
+                        )
+                    })?;
                 Some(block)
             }
         };
@@ -692,7 +699,7 @@ impl SinkBundle for ClickHouseSink {
             .map(|shard| shard.iter().map(|e| e.display_url().to_string()).collect())
             .collect();
         let parts = SinkParts::new(self.writer, self.endpoints, self.pool)
-            .with_component_type("clickhouse")
+            .with_component_type(TAG)
             .with_replica_labels(replica_labels)
             .with_probe(probe);
         match self.frame_codec {
@@ -706,6 +713,10 @@ impl SinkBundle for ClickHouseSink {
 /// Build a [`ClickHouseSinkBuilder`] from the opaque `sink: { clickhouse: ... }`
 /// component section.
 ///
+/// Errors start at the section's path, such as `sinks.eu.clickhouse.table`
+/// for a `sinks:` entry, or `clickhouse.table` for a section built with
+/// [`ComponentConfig::new`] and never placed in a pipeline config.
+///
 /// # Errors
 ///
 /// [`ConfigError::Component`] when the section does not deserialize into
@@ -714,7 +725,7 @@ pub fn from_component_config(
     section: &ComponentConfig,
 ) -> Result<ClickHouseSinkBuilder, ConfigError> {
     let cfg: ClickHouseSinkConfig = section.deserialize_into()?;
-    build(cfg)
+    build_with(cfg, &section.path(), rustls_native_certs::load_native_certs)
 }
 
 /// Build from an already-deserialized config (programmatic use).
@@ -722,20 +733,28 @@ pub fn from_component_config(
 /// Reads the system trust store and `tls.root_ca` when any replica or
 /// `distributed_check.endpoint` is `https://`.
 ///
+/// Errors start at `sink.clickhouse`, such as `sink.clickhouse.table`.
+///
 /// # Errors
 ///
-/// [`ConfigError::Validation`] when `cfg` breaks a configuration rule, or when
+/// [`ConfigError::Component`] when `cfg` breaks a configuration rule, or when
 /// `tls.root_ca` cannot be loaded.
 pub fn build(cfg: ClickHouseSinkConfig) -> Result<ClickHouseSinkBuilder, ConfigError> {
-    build_with(cfg, rustls_native_certs::load_native_certs)
+    build_with(
+        cfg,
+        &SectionPath::sink(TAG),
+        rustls_native_certs::load_native_certs,
+    )
 }
 
 fn build_with(
     cfg: ClickHouseSinkConfig,
+    at: &SectionPath,
     system_roots: impl FnOnce() -> CertificateResult,
 ) -> Result<ClickHouseSinkBuilder, ConfigError> {
-    validate(&cfg)?;
-    let roots = crate::http::root_store(&cfg.tls, uses_https(&cfg), system_roots)?;
+    validate(&cfg, at)?;
+    let roots = crate::http::root_store(&cfg.tls, uses_https(&cfg), system_roots)
+        .map_err(|why| at.invalid("tls.root_ca", why))?;
     let tls = crate::http::client_config(roots);
 
     // Two independent client sets: inserts and readiness probes must not
@@ -820,26 +839,26 @@ fn make_endpoints(cfg: &ClickHouseSinkConfig, tls: &ClientConfig) -> Vec<Vec<Cli
         .collect()
 }
 
-fn validate(cfg: &ClickHouseSinkConfig) -> Result<(), ConfigError> {
-    let fail = |msg: String| Err(ConfigError::Validation(format!("sink.clickhouse: {msg}")));
-
+fn validate(cfg: &ClickHouseSinkConfig, at: &SectionPath) -> Result<(), ConfigError> {
     if cfg.shards.is_empty() {
-        return fail("at least one shard is required".into());
+        return Err(at.invalid("shards", "at least one shard is required"));
     }
     for (i, shard) in cfg.shards.iter().enumerate() {
         if shard.replicas.is_empty() {
-            return fail(format!("shard {i} has no replicas"));
+            return Err(at.invalid(&format!("shards[{i}].replicas"), "must not be empty"));
         }
         for (j, url) in shard.replicas.iter().enumerate() {
+            let key = format!("shards[{i}].replicas[{j}]");
             if !(url.starts_with("http://") || url.starts_with("https://")) {
-                return fail(format!(
-                    "shard {i} replica {j} (`{}`) is not an http(s) URL",
-                    redact::url(url)
+                return Err(at.invalid(
+                    &key,
+                    format!("`{}` is not an http(s) URL", redact::url(url)),
                 ));
             }
             if has_credentials(url) {
-                return fail(format!(
-                    "shard {i} replica {j} URL contains credentials; set them in user and password"
+                return Err(at.invalid(
+                    &key,
+                    "URL contains credentials; set them in user and password",
                 ));
             }
         }
@@ -847,7 +866,7 @@ fn validate(cfg: &ClickHouseSinkConfig) -> Result<(), ConfigError> {
         // receives nothing under Distributed parity and breaks the
         // prefix-sum selection.
         if shard.weight == 0 {
-            return fail(format!("shard {i} weight must be at least 1"));
+            return Err(at.invalid(&format!("shards[{i}].weight"), "must be at least 1"));
         }
     }
     let table_parts: Vec<&str> = cfg.table.split('.').collect();
@@ -855,18 +874,21 @@ fn validate(cfg: &ClickHouseSinkConfig) -> Result<(), ConfigError> {
         || table_parts.len() > 2
         || !table_parts.iter().all(|p| is_identifier(p))
     {
-        return fail(format!(
-            "table `{}` is not a valid (optionally database-qualified) identifier",
-            cfg.table
+        return Err(at.invalid(
+            "table",
+            format!(
+                "`{}` is not a valid (optionally database-qualified) identifier",
+                cfg.table
+            ),
         ));
     }
     if let Some(db) = &cfg.database
         && !is_identifier(db)
     {
-        return fail(format!("database `{db}` is not a valid identifier"));
+        return Err(at.invalid("database", format!("`{db}` is not a valid identifier")));
     }
     if let Err(why) = cfg.pool().validate() {
-        return fail(why.to_string());
+        return Err(at.error(why.to_string()));
     }
 
     // Compression: the string parser bounds the level, and a programmatic
@@ -875,68 +897,75 @@ fn validate(cfg: &ClickHouseSinkConfig) -> Result<(), ConfigError> {
     if let Compression::Zstd(level) = cfg.compression
         && !ZSTD_LEVELS.contains(&level)
     {
-        return fail(format!(
-            "compression zstd level must be in [{}, {}] (got {level})",
-            ZSTD_LEVELS.start(),
-            ZSTD_LEVELS.end()
+        return Err(at.invalid(
+            "compression",
+            format!(
+                "zstd level must be in [{}, {}] (got {level})",
+                ZSTD_LEVELS.start(),
+                ZSTD_LEVELS.end()
+            ),
         ));
     }
 
     if let Err(e) = crate::writer::RESERVED.check("settings", cfg.settings.keys()) {
-        return fail(e.to_string());
+        return Err(at.error(e.to_string()));
     }
 
     if let Some(check) = &cfg.distributed_check {
         if !is_identifier(&check.cluster) {
-            return fail(format!(
-                "distributed_check: cluster `{}` is not a valid identifier",
-                check.cluster
+            return Err(at.invalid(
+                "distributed_check.cluster",
+                format!("`{}` is not a valid identifier", check.cluster),
             ));
         }
         let parts: Vec<&str> = check.table.split('.').collect();
         if check.table.is_empty() || parts.len() > 2 || !parts.iter().all(|p| is_identifier(p)) {
-            return fail(format!(
-                "distributed_check: table `{}` is not a valid (optionally \
-                 database-qualified) identifier",
-                check.table
+            return Err(at.invalid(
+                "distributed_check.table",
+                format!(
+                    "`{}` is not a valid (optionally database-qualified) identifier",
+                    check.table
+                ),
             ));
         }
         match (&check.sharding_key, &check.sharding_expr) {
             (Some(_), Some(_)) | (None, None) => {
-                return fail(
-                    "distributed_check: set exactly one of sharding_key or sharding_expr".into(),
-                );
+                return Err(at.invalid(
+                    "distributed_check",
+                    "set exactly one of sharding_key or sharding_expr",
+                ));
             }
             (Some(key), None) if !is_identifier(key) => {
-                return fail(format!(
-                    "distributed_check: sharding_key `{key}` is not a valid identifier"
+                return Err(at.invalid(
+                    "distributed_check.sharding_key",
+                    format!("`{key}` is not a valid identifier"),
                 ));
             }
             (None, Some(expr)) if expr.trim().is_empty() => {
-                return fail("distributed_check: sharding_expr must not be empty".into());
+                return Err(at.invalid("distributed_check.sharding_expr", "must not be empty"));
             }
             _ => {}
         }
         if let Some(url) = &check.endpoint {
             if !(url.starts_with("http://") || url.starts_with("https://")) {
-                return fail(format!(
-                    "distributed_check: endpoint `{}` is not an http(s) URL",
-                    redact::url(url)
+                return Err(at.invalid(
+                    "distributed_check.endpoint",
+                    format!("`{}` is not an http(s) URL", redact::url(url)),
                 ));
             }
             if has_credentials(url) {
-                return fail(
-                    "distributed_check: endpoint URL contains credentials; \
-                     set them in user and password"
-                        .into(),
-                );
+                return Err(at.invalid(
+                    "distributed_check.endpoint",
+                    "URL contains credentials; set them in user and password",
+                ));
             }
         }
     }
     if cfg.tls.root_ca.is_some() && !uses_https(cfg) {
-        return fail(
-            "tls.root_ca is set, but no replica or distributed_check.endpoint is https://".into(),
-        );
+        return Err(at.invalid(
+            "tls.root_ca",
+            "is set, but no replica or distributed_check.endpoint is https://",
+        ));
     }
     Ok(())
 }
@@ -980,7 +1009,7 @@ fn is_column_name(s: &str) -> bool {
 /// [`Owned`](spate_core::deser::Owned) does not cover) bypasses the derive
 /// entirely.
 fn validate_columns(columns: &[&str]) -> Result<(), ConfigError> {
-    let fail = |msg: String| Err(ConfigError::Validation(format!("sink.clickhouse: {msg}")));
+    let fail = |msg: String| Err(SectionPath::sink(TAG).error(msg));
     if columns.is_empty() {
         return fail("ClickHouseRow::COLUMNS must list at least one column".into());
     }
@@ -1025,8 +1054,37 @@ mod tests {
     use spate_core::deser::Owned;
     use spate_core::sink::{BreakerConfigError, RetryConfigError, SinkPoolConfigError};
 
-    fn component(yaml: &str) -> ComponentConfig {
-        spate_test::component_config("clickhouse", yaml)
+    /// `body` as the `sink: { clickhouse: ... }` section of a loaded
+    /// pipeline config, so its errors start at `sink.clickhouse`.
+    fn component(body: &str) -> ComponentConfig {
+        loaded("sink:\n  clickhouse:\n", "    ", body)
+            .sink_config("default")
+            .expect("declared")
+            .clone()
+    }
+
+    /// `body` as the `sinks: { eu: { clickhouse: ... } }` entry of a loaded
+    /// pipeline config.
+    fn sinks_entry(body: &str) -> ComponentConfig {
+        loaded("sinks:\n  eu:\n    clickhouse:\n", "      ", body)
+            .sink_config("eu")
+            .expect("declared")
+            .clone()
+    }
+
+    fn loaded(header: &str, indent: &str, body: &str) -> spate_core::config::PipelineConfig {
+        let body: String = body.lines().map(|l| format!("{indent}{l}\n")).collect();
+        spate_core::config::PipelineConfig::from_str(&format!(
+            "pipeline: {{ name: demo }}\nsource: {{ memory: {{}} }}\n{header}{body}"
+        ))
+        .expect("loads")
+    }
+
+    /// The text of a refusal, which must be a [`ConfigError::Component`].
+    fn refusal<T: std::fmt::Debug>(result: Result<T, ConfigError>) -> String {
+        let err = result.expect_err("must be refused");
+        assert!(matches!(err, ConfigError::Component { .. }), "{err:?}");
+        err.to_string()
     }
 
     #[derive(Serialize, ClickHouseRow)]
@@ -1080,15 +1138,12 @@ shards:
         assert!(!printed.contains("hunter2"), "{printed}");
         assert!(printed.contains("http://a:8123/?<redacted>"), "{printed}");
 
-        let err = from_component_config(&component(
+        let err = refusal(from_component_config(&component(
             "table: orders\nshards: [{replicas: ['svc:hunter2@a:8123']}]\n",
-        ))
-        .unwrap_err()
-        .to_string();
-        assert!(!err.contains("hunter2"), "{err}");
-        assert!(
-            err.contains("shard 0 replica 0 (`<redacted>@a:8123`)"),
-            "{err}"
+        )));
+        assert_eq!(
+            err,
+            "sink.clickhouse.shards[0].replicas[0]: `<redacted>@a:8123` is not an http(s) URL"
         );
     }
 
@@ -1101,32 +1156,35 @@ shards:
         let cases = [
             (
                 "shards: [{replicas: ['http://svc:hunter2@a:8123']}]\n".to_owned(),
-                "shard 0 replica 0 URL",
+                "shards[0].replicas[0]",
             ),
             (
                 "shards: [{replicas: ['http://a', 'https://svc@b']}]\n".to_owned(),
-                "shard 0 replica 1 URL",
+                "shards[0].replicas[1]",
             ),
             (
                 "shards: [{replicas: ['http:///svc:hunter2@a:8123']}]\n".to_owned(),
-                "shard 0 replica 0 URL",
+                "shards[0].replicas[0]",
             ),
             (
                 "shards: [{replicas: ['http://:hunter2@a:8123']}]\n".to_owned(),
-                "shard 0 replica 0 URL",
+                "shards[0].replicas[0]",
             ),
             (
                 format!("shards: [{{replicas: ['http://a']}}]\n{check}'http://svc:hunter2@b'}}\n"),
-                "distributed_check: endpoint URL",
+                "distributed_check.endpoint",
             ),
         ];
-        for (yaml, needle) in cases {
-            let err = from_component_config(&component(&format!("table: orders\n{yaml}")))
-                .unwrap_err()
-                .to_string();
-            assert!(err.contains(needle), "{needle}: {err}");
-            assert!(err.contains("user and password"), "{err}");
-            assert!(!err.contains("hunter2"), "{err}");
+        for (yaml, key) in cases {
+            let err = refusal(from_component_config(&component(&format!(
+                "table: orders\n{yaml}"
+            ))));
+            assert_eq!(
+                err,
+                format!(
+                    "sink.clickhouse.{key}: URL contains credentials; set them in user and password"
+                )
+            );
         }
 
         let builder = from_component_config(&component(
@@ -1206,14 +1264,12 @@ settings: { insert_quorum: "auto" }
     /// value for it fails validation.
     #[test]
     fn decompress_is_a_reserved_setting() {
-        let err = from_component_config(&component(&format!(
+        let err = refusal(from_component_config(&component(&format!(
             "{MINIMAL}settings: {{decompress: \"0\"}}\n"
-        )))
-        .unwrap_err()
-        .to_string();
+        ))));
         assert_eq!(
             err,
-            "invalid configuration: sink.clickhouse: settings.\"decompress\" cannot be \
+            "sink.clickhouse: settings.\"decompress\" cannot be \
              overridden: set to `1` on every compressed insert: the sink sends blocks it \
              compressed itself, and the server decodes them only with it on"
         );
@@ -1222,14 +1278,10 @@ settings: { insert_quorum: "auto" }
     #[test]
     fn every_setting_an_insert_carries_is_refused_in_settings() {
         for (name, _) in crate::writer::owned_settings("token", true) {
-            let err = from_component_config(&component(&format!(
+            let err = refusal(from_component_config(&component(&format!(
                 "{MINIMAL}settings: {{{name}: \"0\"}}\n"
-            )))
-            .expect_err(name)
-            .to_string();
-            let refused = format!(
-                "invalid configuration: sink.clickhouse: settings.\"{name}\" cannot be overridden: "
-            );
+            ))));
+            let refused = format!("sink.clickhouse: settings.\"{name}\" cannot be overridden: ");
             assert!(err.starts_with(&refused), "{name}: {err}");
         }
     }
@@ -1296,10 +1348,10 @@ settings: { insert_quorum: "auto" }
         .with_row::<BadColumns>()
         .await
         .unwrap_err();
-        assert!(
-            matches!(err, SchemaError::Columns(ref m) if m.contains("more than once")),
-            "the column check runs before the fetch: {err}"
-        );
+        let SchemaError::Columns(msg) = err else {
+            panic!("the column check runs before the fetch: {err}");
+        };
+        assert_eq!(msg, "sink.clickhouse: column `id` is listed more than once");
     }
 
     #[test]
@@ -1381,9 +1433,7 @@ settings: { insert_quorum: "auto" }
         ];
         for (extra, want) in cases {
             let yaml = format!("{MINIMAL}{extra}\n");
-            let Err(ConfigError::Validation(msg)) = from_component_config(&component(&yaml)) else {
-                panic!("`{extra}` must fail validation");
-            };
+            let msg = refusal(from_component_config(&component(&yaml)));
             assert_eq!(msg, format!("sink.clickhouse: {want}"), "for `{extra}`");
         }
     }
@@ -1394,16 +1444,12 @@ settings: { insert_quorum: "auto" }
     #[test]
     fn a_pool_refusal_keeps_its_place_in_validate() {
         let earlier = format!("{MINIMAL}database: \"bad-db\"\nbatch: {{ max_rows: 0 }}\n");
-        let Err(ConfigError::Validation(msg)) = from_component_config(&component(&earlier)) else {
-            panic!("a bad database and a zero batch key must fail validation");
-        };
-        assert!(msg.starts_with("sink.clickhouse: database"), "{msg}");
+        let msg = refusal(from_component_config(&component(&earlier)));
+        assert!(msg.starts_with("sink.clickhouse.database: "), "{msg}");
 
         let later =
             format!("{MINIMAL}settings: {{ decompress: \"0\" }}\nbatch: {{ max_rows: 0 }}\n");
-        let Err(ConfigError::Validation(msg)) = from_component_config(&component(&later)) else {
-            panic!("a reserved setting and a zero batch key must fail validation");
-        };
+        let msg = refusal(from_component_config(&component(&later)));
         assert_eq!(
             msg,
             format!("sink.clickhouse: {}", SinkPoolConfigError::ZeroMaxRows)
@@ -1561,12 +1607,10 @@ settings: { insert_quorum: "auto" }
             }
         }
         for level in [0, 23] {
-            let Err(ConfigError::Validation(msg)) = build(zstd(level)) else {
-                panic!("zstd level {level} must fail validation");
-            };
+            let msg = refusal(build(zstd(level)));
             assert_eq!(
                 msg,
-                format!("sink.clickhouse: compression zstd level must be in [1, 22] (got {level})")
+                format!("sink.clickhouse.compression: zstd level must be in [1, 22] (got {level})")
             );
         }
     }
@@ -1576,9 +1620,7 @@ settings: { insert_quorum: "auto" }
         let mut cfg =
             ClickHouseSinkConfig::new("t", vec![ShardConfig::new(vec!["http://a".into()])]);
         cfg.batch.max_bytes = 0;
-        let Err(ConfigError::Validation(msg)) = build(cfg) else {
-            panic!("a zero batch.max_bytes must fail validation");
-        };
+        let msg = refusal(build(cfg));
         assert_eq!(
             msg,
             format!("sink.clickhouse: {}", SinkPoolConfigError::ZeroMaxBytes)
@@ -1598,17 +1640,13 @@ settings: { insert_quorum: "auto" }
 
         let mut cfg = zstd_99();
         cfg.breaker.failure_threshold = 0;
-        let Err(ConfigError::Validation(msg)) = build(cfg) else {
-            panic!("a bad zstd level and a zero failure threshold must fail validation");
-        };
+        let msg = refusal(build(cfg));
         let want = SinkPoolConfigError::Breaker(BreakerConfigError::ZeroFailureThreshold);
         assert_eq!(msg, format!("sink.clickhouse: {want}"));
 
         let mut cfg = zstd_99();
         cfg.retry.multiplier = 0.5;
-        let Err(ConfigError::Validation(msg)) = build(cfg) else {
-            panic!("a bad zstd level and a bad multiplier must fail validation");
-        };
+        let msg = refusal(build(cfg));
         let want = SinkPoolConfigError::Retry(RetryConfigError::Multiplier(0.5));
         assert_eq!(msg, format!("sink.clickhouse: {want}"));
     }
@@ -1683,7 +1721,10 @@ settings: { insert_quorum: "auto" }
     #[test]
     fn the_trust_store_is_read_only_for_https() {
         let http = ClickHouseSinkConfig::new("t", vec![ShardConfig::new(vec!["http://a".into()])]);
-        let _ = build_with(http.clone(), || panic!("the trust store was read")).unwrap();
+        let _ = build_with(http.clone(), &SectionPath::sink(TAG), || {
+            panic!("the trust store was read")
+        })
+        .unwrap();
 
         let mut front = http;
         let mut check = DistributedCheckSection::new("prod", "db.t_dist", "id");
@@ -1693,7 +1734,7 @@ settings: { insert_quorum: "auto" }
             ClickHouseSinkConfig::new("t", vec![ShardConfig::new(vec!["https://a".into()])]);
         for cfg in [front, https] {
             let mut read = false;
-            let _ = build_with(cfg, || {
+            let _ = build_with(cfg, &SectionPath::sink(TAG), || {
                 read = true;
                 CertificateResult::default()
             })
@@ -1859,5 +1900,124 @@ settings: { insert_quorum: "auto" }
         let head = server.await.unwrap();
         assert!(head.starts_with("post "), "{head}");
         assert!(!head.contains("accept-encoding"), "{head}");
+    }
+
+    /// A sink built from a `sinks:` entry reports at the entry, as its decode
+    /// errors do.
+    #[test]
+    fn an_error_in_a_sinks_entry_names_the_entry() {
+        let err = refusal(from_component_config(&sinks_entry(
+            "table: t\nshards: []\n",
+        )));
+        assert_eq!(
+            err,
+            "sinks.eu.clickhouse.shards: at least one shard is required"
+        );
+
+        let err = refusal(from_component_config(&sinks_entry(&format!(
+            "{MINIMAL}settings: {{insert_deduplicate: \"0\"}}\n"
+        ))));
+        assert!(
+            err.starts_with(
+                "sinks.eu.clickhouse: settings.\"insert_deduplicate\" cannot be overridden: "
+            ),
+            "{err}"
+        );
+    }
+
+    /// An unusable `tls.root_ca` is refused at that key of the section it
+    /// came from.
+    #[test]
+    fn an_unusable_root_ca_in_a_sinks_entry_names_the_entry() {
+        let section = sinks_entry(
+            "table: t\nshards: [{replicas: [\"https://a\"]}]\ntls: {root_ca: /nonexistent/ca.pem}\n",
+        );
+        let cfg: ClickHouseSinkConfig = section.deserialize_into().unwrap();
+        let err = refusal(build_with(cfg, &section.path(), CertificateResult::default));
+        assert!(
+            err.starts_with("sinks.eu.clickhouse.tls.root_ca: `/nonexistent/ca.pem`: "),
+            "{err}"
+        );
+    }
+
+    /// A section built with `ComponentConfig::new` and never placed reports
+    /// at its tag alone.
+    #[test]
+    fn an_unplaced_section_reports_at_its_tag() {
+        let section = spate_test::component_config(TAG, "table: t\nshards: []\n");
+        assert_eq!(
+            refusal(from_component_config(&section)),
+            "clickhouse.shards: at least one shard is required"
+        );
+    }
+
+    /// Each rule names the key it refuses, with a shard element by its index
+    /// in the form decode errors use.
+    #[test]
+    fn each_rule_names_the_key_it_refuses() {
+        let check = |rest: &str| {
+            format!("shards: [{{replicas: [\"http://a\"]}}]\ndistributed_check: {{{rest}}}\n")
+        };
+        let cases = [
+            (
+                "shards:\n  - replicas: [\"http://a\"]\n  - replicas: []\n".to_owned(),
+                "shards[1].replicas: must not be empty",
+            ),
+            (
+                "shards:\n  - replicas: [\"http://a\"]\n  - replicas: [\"http://b\", \"ftp://c\"]\n"
+                    .to_owned(),
+                "shards[1].replicas[1]: `ftp://c` is not an http(s) URL",
+            ),
+            (
+                "shards:\n  - replicas: [\"http://a\"]\n  - replicas: [\"http://b\"]\n    weight: 0\n"
+                    .to_owned(),
+                "shards[1].weight: must be at least 1",
+            ),
+            (
+                "shards: [{replicas: [\"http://a\"]}]\ndatabase: \"bad-db\"\n".to_owned(),
+                "database: `bad-db` is not a valid identifier",
+            ),
+            (
+                check("cluster: \"bad-c\", table: d, sharding_key: id"),
+                "distributed_check.cluster: `bad-c` is not a valid identifier",
+            ),
+            (
+                check("cluster: c, table: \"a.b.c\", sharding_key: id"),
+                "distributed_check.table: `a.b.c` is not a valid (optionally database-qualified) identifier",
+            ),
+            (
+                check("cluster: c, table: d, sharding_key: id, sharding_expr: id"),
+                "distributed_check: set exactly one of sharding_key or sharding_expr",
+            ),
+            (
+                check("cluster: c, table: d, sharding_key: \"bad-k\""),
+                "distributed_check.sharding_key: `bad-k` is not a valid identifier",
+            ),
+            (
+                check("cluster: c, table: d, sharding_expr: \" \""),
+                "distributed_check.sharding_expr: must not be empty",
+            ),
+            (
+                check("cluster: c, table: d, sharding_key: id, endpoint: \"ftp://e\""),
+                "distributed_check.endpoint: `ftp://e` is not an http(s) URL",
+            ),
+            (
+                "shards: [{replicas: [\"http://a\"]}]\ntls: {root_ca: /etc/ca.pem}\n".to_owned(),
+                "tls.root_ca: is set, but no replica or distributed_check.endpoint is https://",
+            ),
+        ];
+        for (body, want) in cases {
+            let err = refusal(from_component_config(&component(&format!(
+                "table: t\n{body}"
+            ))));
+            assert_eq!(err, format!("sink.clickhouse.{want}"), "{body}");
+        }
+        let err = refusal(from_component_config(&component(
+            "table: \"a.b.c\"\nshards: [{replicas: [\"http://a\"]}]\n",
+        )));
+        assert_eq!(
+            err,
+            "sink.clickhouse.table: `a.b.c` is not a valid (optionally database-qualified) identifier"
+        );
     }
 }

@@ -94,10 +94,10 @@ pub(crate) fn merge_base(root: &Path, base: &str) -> Option<String> {
     event::GitDiff::new(root, classify::Event::PullRequest).merge_base(base, "HEAD")
 }
 
-/// The ClickHouse server lanes and S3 store lanes needing a job beyond the
-/// primary one, each S3 lane with its store's capabilities. The lanes live in
-/// the repository's `ci/clickhouse/` and `ci/s3/`, so adding or repointing one
-/// needs no edit here.
+/// The ClickHouse server lanes, S3 store lanes and Kafka broker lanes needing
+/// a job beyond the primary one, each S3 lane with its store's capabilities.
+/// The lanes live in the repository's `ci/clickhouse/`, `ci/s3/` and
+/// `ci/kafka/`, so adding or repointing one needs no edit here.
 fn extra_lanes(root: &Path) -> Result<classify::ExtraLanes, String> {
     let clickhouse = container_image::extra_lanes(root, "clickhouse").map_err(|e| e.message)?;
     let s3 = container_image::extra_lanes(root, "s3")
@@ -109,16 +109,25 @@ fn extra_lanes(root: &Path) -> Result<classify::ExtraLanes, String> {
                 .map_err(|e| e.message)
         })
         .collect::<Result<_, _>>()?;
-    Ok(classify::ExtraLanes { clickhouse, s3 })
+    let kafka = container_image::extra_lanes(root, "kafka")
+        .map_err(|e| e.message)?
+        .iter()
+        .map(|lane| outputs::BrokerLane::new(lane))
+        .collect();
+    Ok(classify::ExtraLanes {
+        clickhouse,
+        s3,
+        kafka,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     /// Each extra S3 lane carries its own capabilities into its filter, and
-    /// the extra ClickHouse lanes come through beside them.
+    /// the extra ClickHouse and Kafka lanes come through beside them.
     #[test]
     fn extra_lanes_reads_each_s3_lane_with_its_capabilities() {
-        use super::outputs::StoreLane;
+        use super::outputs::{BrokerLane, StoreLane};
         use crate::checks::container_image::Capability;
 
         let root =
@@ -142,11 +151,15 @@ mod tests {
         pin("s3", "plain", "3");
         std::fs::write(root.join("ci/s3/PRIMARY"), "main\n").unwrap();
         std::fs::write(root.join("ci/s3/notifying/CAPABILITIES"), "notifications\n").unwrap();
+        pin("kafka", "first", "1");
+        pin("kafka", "second", "2");
+        std::fs::write(root.join("ci/kafka/PRIMARY"), "first\n").unwrap();
 
         let lanes = super::extra_lanes(&root);
         drop(std::fs::remove_dir_all(&root));
         let lanes = lanes.unwrap();
         assert_eq!(lanes.clickhouse, ["old"]);
+        assert_eq!(lanes.kafka, [BrokerLane::new("second")]);
         assert_eq!(
             lanes.s3,
             [
@@ -173,6 +186,17 @@ mod tests {
             "{:?}",
             lanes.s3
         );
+    }
+
+    /// The `redpanda` lane runs as a Kafka broker lane beside the primary
+    /// `apache` one.
+    #[test]
+    fn the_redpanda_lane_runs_as_a_broker_lane() {
+        use super::outputs::BrokerLane;
+
+        let root = crate::repo_root().unwrap();
+        let lanes = super::extra_lanes(&root).unwrap();
+        assert_eq!(lanes.kafka, [BrokerLane::new("redpanda")]);
     }
 
     /// The `garage` lane declares no capability, so its leg leaves out the

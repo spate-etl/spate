@@ -23,6 +23,7 @@ pub(crate) struct Outputs {
     pub(crate) bench_shards: Vec<Shard>,
     pub(crate) clickhouse_lanes: Vec<Lane>,
     pub(crate) s3_lanes: Vec<StoreLane>,
+    pub(crate) kafka_lanes: Vec<BrokerLane>,
 }
 
 /// One `strategy.matrix.include` entry of the counter tier.
@@ -74,6 +75,55 @@ impl StoreLane {
     }
 }
 
+/// The suites a Kafka broker lane beyond the primary one runs, each package
+/// with the binaries it leaves to the primary lane:
+///
+/// - `feed_notifications` needs the primary S3 store to publish to the broker,
+///   and RustFS's Kafka client does not reach Redpanda.
+/// - `tls_system_ca` configures Apache Kafka's SSL listener through its
+///   `KAFKA_*` variables.
+/// - `e2e_leader_move`'s cluster runs the `apache` lane's image whichever lane
+///   is selected.
+pub(crate) const BROKER_LANE_SUITES: [(&str, &[&str]); 2] = [
+    ("spate-kafka", &["feed_notifications", "tls_system_ca"]),
+    ("spate", &["e2e_leader_move"]),
+];
+
+/// One `strategy.matrix.include` entry of the Kafka broker tier: a lane, and
+/// the nextest filterset selecting [`BROKER_LANE_SUITES`] and the broker
+/// smoke test.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub(crate) struct BrokerLane {
+    pub(crate) lane: String,
+    pub(crate) filter: String,
+}
+
+impl BrokerLane {
+    /// The entry for `lane`.
+    pub(crate) fn new(lane: &str) -> BrokerLane {
+        let mut clauses: Vec<String> = BROKER_LANE_SUITES
+            .iter()
+            .map(|(package, left_out)| {
+                let mut clause = format!("(package({package})");
+                for binary in *left_out {
+                    clause.push_str(&format!(" & !binary({binary})"));
+                }
+                clause.push(')');
+                clause
+            })
+            .collect();
+        clauses.push(
+            "(package(spate-test-support) & binary(containers) \
+             & test(=kafka_broker_round_trips_a_record))"
+                .to_owned(),
+        );
+        BrokerLane {
+            lane: lane.to_owned(),
+            filter: clauses.join(" | "),
+        }
+    }
+}
+
 impl Outputs {
     /// The `-p` arguments naming every selected container suite.
     fn container_args(&self) -> String {
@@ -116,7 +166,8 @@ impl fmt::Display for Outputs {
             "clickhouse-lanes={}",
             compact_json(&self.clickhouse_lanes)
         )?;
-        writeln!(f, "s3-lanes={}", compact_json(&self.s3_lanes))
+        writeln!(f, "s3-lanes={}", compact_json(&self.s3_lanes))?;
+        writeln!(f, "kafka-lanes={}", compact_json(&self.kafka_lanes))
     }
 }
 
@@ -141,6 +192,36 @@ mod tests {
             StoreLane::new("notifying", &[Capability::Notifications]).filter,
             format!("{base} | (package(spate-kafka) & binary(feed_notifications))")
         );
+    }
+
+    #[test]
+    fn a_broker_lane_filter_leaves_three_suites_to_the_primary_lane() {
+        assert_eq!(
+            BrokerLane::new("other").filter,
+            "(package(spate-kafka) & !binary(feed_notifications) & !binary(tls_system_ca)) \
+             | (package(spate) & !binary(e2e_leader_move)) \
+             | (package(spate-test-support) & binary(containers) \
+             & test(=kafka_broker_round_trips_a_record))"
+        );
+    }
+
+    /// Each suite a broker lane leaves out exists, so a renamed suite cannot
+    /// return to the lane unnoticed.
+    #[test]
+    fn a_broker_lane_leaves_out_only_suites_that_exist() {
+        let root = crate::repo_root().unwrap();
+        for (package, left_out) in BROKER_LANE_SUITES {
+            for binary in left_out {
+                let file = root
+                    .join("crates")
+                    .join(package)
+                    .join("tests")
+                    .join(format!("{binary}.rs"));
+                assert!(file.is_file(), "{package}: no {}", file.display());
+            }
+        }
+        let smoke = std::fs::read_to_string(root.join("test-support/tests/containers.rs")).unwrap();
+        assert!(smoke.contains("fn kafka_broker_round_trips_a_record()"));
     }
 
     /// Each binary and test a store lane's filter names exists in its

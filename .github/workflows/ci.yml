@@ -49,6 +49,10 @@ jobs:
       # job beyond the primary one `containers` runs, each with the nextest
       # filterset selecting the tests its store supports.
       s3-lanes: ${{ steps.classify.outputs.s3-lanes }}
+      # A JSON array of `{lane, filter}` objects: the Kafka broker lanes needing
+      # a job beyond the primary one `containers` runs, each with the nextest
+      # filterset selecting the suites a second broker runs.
+      kafka-lanes: ${{ steps.classify.outputs.kafka-lanes }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -124,6 +128,7 @@ jobs:
       container-args: ${{ needs.changes.outputs.container-args }}
       clickhouse-lanes: ${{ needs.changes.outputs.clickhouse-lanes }}
       s3-lanes: ${{ needs.changes.outputs.s3-lanes }}
+      kafka-lanes: ${{ needs.changes.outputs.kafka-lanes }}
 
   perf:
     name: Perf

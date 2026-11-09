@@ -246,11 +246,25 @@ updates:
     cooldown:
       default-days: 7
 
-  # ------------------------------------------ Docker (Kafka test broker) ----
+  # ----------------------------------------- Docker (Kafka test brokers) ----
   # `ci/kafka/apache/Dockerfile` pins the Apache Kafka broker the Kafka
   # container suites boot. No `ignore`, so it follows every release.
   - package-ecosystem: docker
     directory: "/ci/kafka/apache"
+    schedule:
+      interval: weekly
+      day: friday
+    open-pull-requests-limit: 1
+    labels: ["dependencies", "area: ci"]
+    commit-message:
+      prefix: "ci"
+    cooldown:
+      default-days: 7
+
+  # `ci/kafka/redpanda/Dockerfile` pins the Redpanda broker the
+  # `kafka-brokers` job boots. No `ignore`, so it follows every release.
+  - package-ecosystem: docker
+    directory: "/ci/kafka/redpanda"
     schedule:
       interval: weekly
       day: friday

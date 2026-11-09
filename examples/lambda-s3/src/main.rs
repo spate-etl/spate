@@ -70,7 +70,13 @@ fn assemble() -> Result<(Pipeline, S3Source), BoxError> {
                 path: view.path,
                 at: DateTime64Millis(view.at_ms),
             })
-            .sink(encoder.clone(), router.clone(), chunk, ctx.queues, ctx.budget)
+            .sink(
+                encoder.clone(),
+                router.clone(),
+                chunk,
+                ctx.queues,
+                ctx.budget,
+            )
             .build()
     });
     Ok((pipeline, source))
@@ -90,7 +96,12 @@ async fn main() -> Result<(), Error> {
         )
         .init()?;
     handler::run(metrics, |event: LambdaEvent<SqsEvent>| {
-        handle_batch(event.payload, event.context.deadline(), drain_timeout, assemble)
+        handle_batch(
+            event.payload,
+            event.context.deadline(),
+            drain_timeout,
+            assemble,
+        )
     })
     .await
     // ANCHOR_END: metrics

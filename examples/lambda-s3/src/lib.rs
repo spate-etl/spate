@@ -261,7 +261,10 @@ where
     let failed = match exit {
         Ok(Ok(ExitState::Completed)) => not_done(ids, &feed),
         Ok(Ok(state)) => {
-            tracing::error!(?state, "the pipeline failed; every message is reported failed");
+            tracing::error!(
+                ?state,
+                "the pipeline failed; every message is reported failed"
+            );
             ids
         }
         Ok(Err(error)) => {

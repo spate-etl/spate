@@ -7,12 +7,12 @@
 
 use aws_lambda_events::event::sqs::{SqsEvent, SqsMessage};
 use serde::Deserialize;
+use spate::clickhouse::ClickHouseSinkConfig;
+use spate::clock::TestClock;
 use spate::feed::Feed;
 use spate::json::{JsonDeserializerBuilder, NdjsonFramer};
-use spate::clock::TestClock;
 use spate::pipeline::ShutdownHandle;
 use spate::prelude::*;
-use spate::clickhouse::ClickHouseSinkConfig;
 use spate::s3::{DescriptorObject, S3Source, S3SourceConfig, SplitDescriptor};
 use spate_example_lambda_s3::{
     BoxError, CONFIG, MAX_RECORD_BYTES, Message, MissingId, RESPONSE_MARGIN, RUNTIME_SHUTDOWN,
@@ -47,7 +47,10 @@ fn message(id: &str, body: impl Into<String>) -> Message {
 fn stage(dir: &Path, name: &str, ids: &[&str]) -> PathBuf {
     let data = dir.join("data");
     fs::create_dir_all(&data).unwrap();
-    let body: String = ids.iter().map(|id| format!("{{\"id\":\"{id}\"}}\n")).collect();
+    let body: String = ids
+        .iter()
+        .map(|id| format!("{{\"id\":\"{id}\"}}\n"))
+        .collect();
     fs::write(data.join(name), body).unwrap();
     data
 }
@@ -89,7 +92,11 @@ fn assemble(
         let source =
             S3Source::from_component_config(&pipeline.config().source, pipeline.io_handle())?
                 .with_framer(|| Box::new(NdjsonFramer::new(MAX_RECORD_BYTES)));
-        let section = pipeline.config().deserializer.clone().ok_or("deserializer")?;
+        let section = pipeline
+            .config()
+            .deserializer
+            .clone()
+            .ok_or("deserializer")?;
         let pipeline = pipeline.sink(sink)?.chains(move |ctx| {
             let chunk = ctx.chunk();
             let deser = JsonDeserializerBuilder::from_component(&section)
@@ -210,7 +217,12 @@ async fn the_units_a_stop_leaves_are_reported() {
         }
         // The deadline counts from the first trigger, so the clock moves
         // past it only once the stop has begun.
-        handle.lock().unwrap().as_ref().expect("assembled").trigger();
+        handle
+            .lock()
+            .unwrap()
+            .as_ref()
+            .expect("assembled")
+            .trigger();
         clock.advance(DRAIN_TIMEOUT + Duration::from_secs(1));
     };
     let failed = bounded(run_seeded(batch, start, stop)).await;

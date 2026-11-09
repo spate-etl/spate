@@ -361,6 +361,19 @@ mod tests {
         assert_eq!(cc.path(), SectionPath::source("kafka"));
     }
 
+    /// A body that fails as a whole, such as a scalar where a mapping is
+    /// expected, is anchored at the section with nothing appended.
+    #[test]
+    fn a_whole_body_error_is_anchored_at_the_section() {
+        let mut cc = parse("kafka: 7\n").unwrap();
+        cc.set_section("source");
+        let err = cc.deserialize_into::<FakeKafkaConfig>().unwrap_err();
+        assert!(
+            matches!(&err, ConfigError::Component { context, .. } if context == "source.kafka"),
+            "{err:?}"
+        );
+    }
+
     #[test]
     fn error_paths_include_section_tag_and_field() {
         let mut cc = parse("kafka:\n  brokers: k1:9092\n").unwrap();

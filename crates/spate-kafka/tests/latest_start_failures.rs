@@ -799,8 +799,8 @@ mod silent_coordinator {
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
     use support::latest;
+    use testcontainers::Container;
     use testcontainers::runners::SyncRunner;
-    use testcontainers::{Container, ImageExt as _};
 
     const OFFSET_COMMIT: i16 = 8;
     const OFFSET_FETCH: i16 = 9;
@@ -898,7 +898,7 @@ mod silent_coordinator {
         let advertised = listener.local_addr().expect("addr");
         let container = KafkaBroker::selected()
             .advertised_at(advertised)
-            .with_env_var("KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS", "0")
+            .without_rebalance_delay()
             .start()
             .expect("start kafka");
         let port = container.get_host_port_ipv4(KAFKA_PORT).expect("port");

@@ -15,6 +15,8 @@ use object_store::path::Path as StorePath;
 use object_store::{ObjectStore as _, ObjectStoreExt as _, PutPayload};
 use rdkafka::ClientConfig;
 use rdkafka::Message as _;
+use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
+use rdkafka::client::DefaultClientContext;
 use rdkafka::consumer::{BaseConsumer, Consumer as _};
 use rdkafka::producer::{BaseProducer, BaseRecord, Producer as _};
 use spate_test_support::{
@@ -112,7 +114,7 @@ fn s3_store_round_trips_an_object() {
 }
 
 /// A record produced to the selected broker on its host listener reads back
-/// from the start of its topic.
+/// from the start of a topic created for it.
 #[test]
 #[ignore = "requires Docker"]
 #[expect(
@@ -127,6 +129,23 @@ fn kafka_broker_round_trips_a_record() {
         .unwrap_or_else(|e| panic!("start {name}: {e}"));
     let port = container.get_host_port_ipv4(KAFKA_PORT).expect("port");
     let brokers = format!("127.0.0.1:{port}");
+
+    // Created first, as the suites create theirs: a consumer of a topic only
+    // a produce created can read it as unknown, and fail, on Redpanda.
+    let admin: AdminClient<DefaultClientContext> = ClientConfig::new()
+        .set("bootstrap.servers", &brokers)
+        .create()
+        .expect("admin client");
+    let topic = NewTopic::new("smoke", 1, TopicReplication::Fixed(1));
+    tokio::runtime::Builder::new_current_thread()
+        .build()
+        .expect("runtime")
+        .block_on(admin.create_topics(&[topic], &AdminOptions::new()))
+        .expect("create topic")
+        .into_iter()
+        .for_each(|r| {
+            r.expect("topic created");
+        });
 
     let producer: BaseProducer = ClientConfig::new()
         .set("bootstrap.servers", &brokers)

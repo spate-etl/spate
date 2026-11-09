@@ -29,14 +29,19 @@ const SERVICE: &str = "kafka";
 /// after the script is written.
 const START_SCRIPT: &str = "/tmp/spate_broker_start.sh";
 
-/// The line Apache Kafka logs once it serves clients.
+/// The line Apache Kafka logs to stdout once it serves clients.
 const APACHE_READY: &str = "Kafka Server started";
+
+/// The line Redpanda logs to stderr once it serves clients.
+const REDPANDA_READY: &str = "Successfully started Redpanda!";
 
 /// A broker a Kafka lane runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Broker {
     /// Apache Kafka, in KRaft mode as one combined broker and controller.
     Apache,
+    /// Redpanda, one node in dev-container mode.
+    Redpanda,
 }
 
 impl Broker {
@@ -48,6 +53,7 @@ impl Broker {
     pub fn from_lane(lane: &str) -> Result<Broker, String> {
         match lane {
             "apache" => Ok(Broker::Apache),
+            "redpanda" => Ok(Broker::Redpanda),
             other => Err(format!(
                 "no broker runs Kafka lane `{other}`; each ci/kafka/ lane needs its arm in `Broker`"
             )),
@@ -73,6 +79,7 @@ impl Broker {
     pub fn lane(self) -> &'static str {
         match self {
             Broker::Apache => "apache",
+            Broker::Redpanda => "redpanda",
         }
     }
 }
@@ -81,6 +88,7 @@ impl fmt::Display for Broker {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Broker::Apache => "Apache Kafka",
+            Broker::Redpanda => "Redpanda",
         })
     }
 }
@@ -90,8 +98,10 @@ impl fmt::Display for Broker {
 /// image exposes itself, and another container in its network namespace on
 /// [`BROKER_FROM_INSIDE`].
 ///
-/// `ImageExt::with_env_var` on the request sets broker configuration over the
-/// defaults here, as the image's own environment does.
+/// On Apache Kafka, `ImageExt::with_env_var` on the request sets broker
+/// configuration over the defaults here, as the image's own environment does.
+/// Redpanda reads no configuration from its environment, so a setting both
+/// brokers need is a method here.
 #[derive(Clone, Debug)]
 pub struct KafkaBroker {
     broker: Broker,
@@ -118,6 +128,7 @@ impl KafkaBroker {
     fn new(broker: Broker, name: String, tag: String) -> KafkaBroker {
         let env = match broker {
             Broker::Apache => apache_env(),
+            Broker::Redpanda => BTreeMap::new(),
         };
         KafkaBroker {
             broker,
@@ -134,15 +145,31 @@ impl KafkaBroker {
         self.broker
     }
 
-    /// With the transaction state log on one replica. Apache Kafka's default
-    /// asks for three, which one broker cannot satisfy.
+    /// Able to run transactions on its one node. Apache Kafka's transaction
+    /// state log asks for three replicas by default, so this puts it on one.
+    /// Redpanda runs them on one node as it starts.
     #[must_use]
     pub fn transactional(mut self) -> KafkaBroker {
-        for key in [
-            "KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR",
-            "KAFKA_TRANSACTION_STATE_LOG_MIN_ISR",
-        ] {
-            self.env.insert(key.to_owned(), "1".to_owned());
+        if self.broker == Broker::Apache {
+            for key in [
+                "KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR",
+                "KAFKA_TRANSACTION_STATE_LOG_MIN_ISR",
+            ] {
+                self.env.insert(key.to_owned(), "1".to_owned());
+            }
+        }
+        self
+    }
+
+    /// With no delay before a new group's first rebalance. Redpanda's
+    /// dev-container mode starts with none.
+    #[must_use]
+    pub fn without_rebalance_delay(mut self) -> KafkaBroker {
+        if self.broker == Broker::Apache {
+            self.env.insert(
+                "KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS".to_owned(),
+                "0".to_owned(),
+            );
         }
         self
     }
@@ -167,12 +194,23 @@ impl KafkaBroker {
                 "export KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://{client},BROKER://{BROKER_FROM_INSIDE}\n\
                  exec /etc/kafka/docker/run\n"
             ),
+            // Dev-container mode raises a topic's `segment.ms` to at least ten
+            // minutes and runs compaction every ten seconds. The compaction
+            // suites roll a segment within the test and wait for the cleaner.
+            Broker::Redpanda => format!(
+                "echo log_segment_ms_min: 100 > /etc/redpanda/.bootstrap.yaml\n\
+                 echo log_compaction_interval_ms: 500 >> /etc/redpanda/.bootstrap.yaml\n\
+                 exec rpk redpanda start --mode dev-container --smp 1 --memory 1G --overprovisioned \
+                 --kafka-addr PLAINTEXT://0.0.0.0:9092,BROKER://0.0.0.0:9093 \
+                 --advertise-kafka-addr PLAINTEXT://{client},BROKER://{BROKER_FROM_INSIDE}\n"
+            ),
         }
     }
 
-    fn ready_line(&self) -> &'static str {
+    fn ready_condition(&self) -> WaitFor {
         match self.broker {
-            Broker::Apache => APACHE_READY,
+            Broker::Apache => WaitFor::message_on_stdout(APACHE_READY),
+            Broker::Redpanda => WaitFor::message_on_stderr(REDPANDA_READY),
         }
     }
 }
@@ -239,15 +277,14 @@ impl Image for KafkaBroker {
     ) -> Result<Vec<ExecCommand>, TestcontainersError> {
         let script = self.start_script(cs.host_port_ipv4(KAFKA_PORT)?);
         // Written whole and then renamed, so the waiting command never runs a
-        // partial script.
+        // partial script. The script holds no single quote, which would end the
+        // quoting here.
         let write = format!(
             "printf '%s' '{script}' > {START_SCRIPT}.part && mv {START_SCRIPT}.part {START_SCRIPT}"
         );
         Ok(vec![
             ExecCommand::new(["sh".to_owned(), "-c".to_owned(), write])
-                .with_container_ready_conditions(vec![WaitFor::message_on_stdout(
-                    self.ready_line(),
-                )]),
+                .with_container_ready_conditions(vec![self.ready_condition()]),
         ])
     }
 }
@@ -259,6 +296,16 @@ mod tests {
     fn apache() -> KafkaBroker {
         KafkaBroker::new(Broker::Apache, "apache/kafka-native".into(), "1".into())
     }
+
+    fn redpanda() -> KafkaBroker {
+        KafkaBroker::new(Broker::Redpanda, "redpandadata/redpanda".into(), "1".into())
+    }
+
+    const REDPANDA_START: &str = "echo log_segment_ms_min: 100 > /etc/redpanda/.bootstrap.yaml\n\
+         echo log_compaction_interval_ms: 500 >> /etc/redpanda/.bootstrap.yaml\n\
+         exec rpk redpanda start --mode dev-container --smp 1 --memory 1G --overprovisioned \
+         --kafka-addr PLAINTEXT://0.0.0.0:9092,BROKER://0.0.0.0:9093 \
+         --advertise-kafka-addr PLAINTEXT://ADDRESS,BROKER://localhost:9093\n";
 
     /// A client on the host is advertised the port mapped to [`KAFKA_PORT`],
     /// and a container in the namespace the inside listener.
@@ -281,6 +328,45 @@ mod tests {
         );
     }
 
+    /// Redpanda advertises the same two listeners, after lowering the floors
+    /// the compaction suites run under.
+    #[test]
+    fn redpanda_advertises_the_same_listeners_after_its_bootstrap() {
+        assert_eq!(
+            redpanda().start_script(31092),
+            REDPANDA_START.replace("ADDRESS", "127.0.0.1:31092")
+        );
+        let proxy = SocketAddr::from(([127, 0, 0, 1], 40001));
+        assert_eq!(
+            redpanda().advertised_at(proxy).start_script(31092),
+            REDPANDA_START.replace("ADDRESS", "127.0.0.1:40001")
+        );
+    }
+
+    /// `exec_after_start` writes the script inside single quotes.
+    #[test]
+    fn no_start_script_holds_a_single_quote() {
+        for lane in crate::lane_dirs(SERVICE) {
+            let broker = Broker::from_lane(&lane).unwrap();
+            let script = KafkaBroker::new(broker, "image".into(), "1".into()).start_script(31092);
+            assert!(!script.contains('\''), "{lane}: {script}");
+        }
+    }
+
+    /// Each broker is waited on for the stream it logs its ready line to.
+    #[test]
+    fn each_broker_is_ready_on_its_own_stream() {
+        let debug = |w: WaitFor| format!("{w:?}");
+        assert_eq!(
+            debug(apache().ready_condition()),
+            debug(WaitFor::message_on_stdout(APACHE_READY))
+        );
+        assert_eq!(
+            debug(redpanda().ready_condition()),
+            debug(WaitFor::message_on_stderr(REDPANDA_READY))
+        );
+    }
+
     #[test]
     fn a_transactional_broker_keeps_its_transaction_state_on_one_replica() {
         let env = apache().transactional().env;
@@ -290,6 +376,29 @@ mod tests {
             !apache()
                 .env
                 .contains_key("KAFKA_TRANSACTION_STATE_LOG_MIN_ISR")
+        );
+    }
+
+    #[test]
+    fn a_broker_without_a_rebalance_delay_sets_it_to_zero_on_apache() {
+        let env = apache().without_rebalance_delay().env;
+        assert_eq!(env["KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS"], "0");
+        assert!(
+            !apache()
+                .env
+                .contains_key("KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS")
+        );
+    }
+
+    /// Redpanda takes no `KAFKA_*` variable, so neither option sets one.
+    #[test]
+    fn redpanda_takes_no_environment() {
+        assert!(
+            redpanda()
+                .transactional()
+                .without_rebalance_delay()
+                .env
+                .is_empty()
         );
     }
 
@@ -314,5 +423,6 @@ mod tests {
     #[test]
     fn a_broker_displays_its_product_name() {
         assert_eq!(Broker::Apache.to_string(), "Apache Kafka");
+        assert_eq!(Broker::Redpanda.to_string(), "Redpanda");
     }
 }

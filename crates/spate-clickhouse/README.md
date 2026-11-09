@@ -109,8 +109,8 @@ SETTINGS non_replicated_deduplication_window = 100;
 A network error, a timeout and most server exceptions, such as too many parts,
 are retried. A server exception for a schema mismatch, unparseable data, a
 missing table or database, a setting the server does not know, a rejected login
-or grant, or a compressed body the server cannot decode is fatal, and so is a rejected TLS handshake. A fatal
-error abandons the batch without a retry.
+or grant, or a compressed body the server cannot decode is fatal, and so is a
+rejected TLS handshake. A fatal error abandons the batch without a retry.
 
 When no replica of a shard is healthy, writes to that shard wait for the
 circuit breaker's next probe, and backpressure reaches the source. Records never

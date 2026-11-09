@@ -1,0 +1,28 @@
+[package]
+name = "spate-example-lambda-s3"
+description = "An AWS Lambda function that reads one SQS batch of S3 notifications per invocation (not published)."
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+spate = { workspace = true, features = ["s3", "json", "clickhouse"] }
+lambda_runtime = { workspace = true }
+aws_lambda_events = { workspace = true, features = ["sqs"] }
+metrics_cloudwatch_embedded = { workspace = true }
+serde = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
+tracing = { workspace = true }
+
+[dev-dependencies]
+# `testing` adds the stop clock a test moves by hand.
+spate-core = { workspace = true, features = ["testing"] }
+spate-test = { workspace = true }
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

@@ -16,6 +16,7 @@ members = [
     "test-support",
     "fuzz",
     "xtask",
+    "examples/lambda-s3",
 ]
 
 [workspace.package]
@@ -44,6 +45,9 @@ spate-test = { version = "=0.4.0", path = "crates/spate-test" }
 # letting a published crate dev-depend on these unpublished crates.
 spate-bench = { path = "bench" }
 spate-test-support = { path = "test-support" }
+# The facade, for the unpublished Lambda example. Versionless, so the release
+# pin rewrite leaves it alone.
+spate = { path = "crates/spate" }
 
 tokio = { version = "1.52", default-features = false }
 hyper = "1.10"
@@ -147,6 +151,11 @@ proptest = "1.11"
 # license as `MIT/Apache-2.0/NCSA`, which is not an SPDX expression, and both
 # cargo-deny and cargo-about refuse it.
 libfuzzer-sys = "0.4.9"
+# The Lambda example: the runtime client, the SQS event types and the
+# CloudWatch EMF recorder.
+lambda_runtime = "1.5"
+aws_lambda_events = { version = "1.2", default-features = false }
+metrics_cloudwatch_embedded = "0.10"
 # 1.4.2 is the floor: the derive emits calls into `arbitrary::details`, which
 # the crate gained there, and cargo resolves the two independently.
 arbitrary = { version = "1.4.2", features = ["derive"] }

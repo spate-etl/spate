@@ -33,7 +33,7 @@ use crate::queue::{
 use crate::startup::{self, COUNT_ATTRIBUTES, QueueAttributes, counts};
 use spate_core::backoff::Backoff;
 use spate_core::clock::SyncClock;
-use spate_core::clock::tokio::{Clock, SystemClock};
+use spate_core::clock::tokio::{Clock, SystemClock, before};
 use spate_core::config::{FeedSection, redact};
 use spate_core::feed::ConnectError;
 use spate_core::feed::{
@@ -49,7 +49,6 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::task::Poll;
 use std::time::Duration;
 use tokio::sync::Notify;
-use tokio::task::coop;
 use tokio::time::Instant;
 
 /// How long SQS keeps a message hidden, counted from the receive that issued
@@ -1572,22 +1571,6 @@ fn until(deadline: Instant, bound: Option<Instant>) -> Instant {
 /// An instant past the `Instant` range is past `limit`, so it gives up too.
 fn retry_at(now: Instant, delay: Duration, limit: Instant) -> Option<Instant> {
     now.checked_add(delay).filter(|&at| at < limit)
-}
-
-/// `fut`, or `None` once `clock` reaches `at`. `fut` is polled first, so an
-/// answer ready as the deadline passes counts.
-async fn before<F: Future>(clock: &dyn Clock, at: Instant, fut: F) -> Option<F::Output> {
-    let mut fut = std::pin::pin!(fut);
-    // Unconstrained, as `timeout_at` polls its deadline once `fut` has
-    // spent the coop budget, or a future that always spends it never ends.
-    let mut deadline = std::pin::pin!(coop::unconstrained(clock.sleep_until(at)));
-    std::future::poll_fn(|cx| {
-        if let Poll::Ready(output) = fut.as_mut().poll(cx) {
-            return Poll::Ready(Some(output));
-        }
-        deadline.as_mut().poll(cx).map(|()| None)
-    })
-    .await
 }
 
 /// The answer a batch gave entry `i`: applied, failed, or neither.

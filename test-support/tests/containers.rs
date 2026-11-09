@@ -7,7 +7,7 @@
 //!   --locked --run-ignored ignored-only
 //! ```
 
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use futures_util::TryStreamExt as _;
 use object_store::aws::AmazonS3Builder;
@@ -145,15 +145,15 @@ fn kafka_broker_round_trips_a_record() {
         .create()
         .expect("consumer");
     consumer.subscribe(&["smoke"]).expect("subscribe");
-    let mut payload = None;
-    spate_test::wait_until(spate_test::HANG, "the record", || {
+    // Bounds a hang only: the record is read as soon as the group assigns.
+    let until = Instant::now() + Duration::from_secs(60);
+    let payload = loop {
         match consumer.poll(Duration::from_millis(100)) {
-            Some(Ok(m)) => payload = m.payload().map(<[u8]>::to_vec),
+            Some(Ok(m)) => break m.payload().map(<[u8]>::to_vec),
             Some(Err(e)) => panic!("consume: {e}"),
-            None => {}
+            None => assert!(Instant::now() < until, "no record within 60 s"),
         }
-        payload.is_some()
-    });
+    };
     assert_eq!(payload.as_deref(), Some(&b"one"[..]));
 }
 

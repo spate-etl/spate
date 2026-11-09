@@ -4365,7 +4365,6 @@ dependencies = [
  "rdkafka",
  "rustls",
  "rustls-native-certs",
- "spate-test",
  "tempfile",
  "testcontainers",
  "tokio",

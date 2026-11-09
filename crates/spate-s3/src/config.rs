@@ -11,12 +11,15 @@ use object_store::ObjectStoreScheme;
 use object_store::aws::AmazonS3ConfigKey;
 use object_store::path::Path;
 use serde::{Deserialize, Serialize};
-use spate_core::config::{ComponentConfig, ConfigError, Denylist, redact};
+use spate_core::config::{ComponentConfig, ConfigError, Denylist, SectionPath, redact};
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use url::Url;
 
 use crate::location::{BAD_PREFIX, has_userinfo};
+
+/// The source's component type, and the tag its section sits under.
+pub(crate) const TAG: &str = "s3";
 
 /// `object_store` option keys the framework owns, refused in the `store`
 /// passthrough at load. The store is built from the `url` field, so a
@@ -168,8 +171,7 @@ impl S3SourceConfig {
     /// # Errors
     ///
     /// [`ConfigError::Component`] when the section does not deserialize into
-    /// this type, and [`ConfigError::Validation`] when
-    /// [`validate`](Self::validate) refuses it.
+    /// this type, or when [`validate`](Self::validate) refuses it.
     pub fn from_component_config(section: &ComponentConfig) -> Result<Self, ConfigError> {
         let cfg: S3SourceConfig = section.deserialize_into()?;
         cfg.validate()?;
@@ -177,38 +179,46 @@ impl S3SourceConfig {
     }
 
     /// Cross-field validation, including the passthrough denylist.
+    ///
+    /// # Errors
+    ///
+    /// [`ConfigError::Component`] naming the refused key under `source.s3`,
+    /// such as `source.s3.chunk_bytes: must not be zero`.
     pub fn validate(&self) -> Result<(), ConfigError> {
-        let url = parse_url("source.s3.url", &self.url)?;
+        let at = SectionPath::source(TAG);
+        let url = parse_url(&at, "url", &self.url)?;
         if self.chunk_bytes.as_u64() == 0 {
-            return Err(ConfigError::Validation(
-                "source.s3.chunk_bytes must not be zero".into(),
-            ));
+            return Err(at.invalid("chunk_bytes", "must not be zero"));
         }
         if self.prefetch_bytes.as_u64() < self.chunk_bytes.as_u64() {
-            return Err(ConfigError::Validation(format!(
-                "source.s3.prefetch_bytes ({}) must be at least chunk_bytes ({})",
-                self.prefetch_bytes, self.chunk_bytes
-            )));
+            return Err(at.invalid(
+                "prefetch_bytes",
+                format!(
+                    "({}) must be at least chunk_bytes ({})",
+                    self.prefetch_bytes, self.chunk_bytes
+                ),
+            ));
         }
         if self.split_target_bytes.as_u64() < SPLIT_TARGET_FLOOR {
-            return Err(ConfigError::Validation(format!(
-                "source.s3.split_target_bytes ({}) must be at least 1MiB",
-                self.split_target_bytes
-            )));
+            return Err(at.invalid(
+                "split_target_bytes",
+                format!("({}) must be at least 1MiB", self.split_target_bytes),
+            ));
         }
         DENYLIST
             .check("store", self.store.keys())
-            .map_err(|e| ConfigError::Validation(format!("source.s3.{e}")))?;
+            .map_err(|e| at.error(e.to_string()))?;
         // The request URIs `object_store` quotes in its errors start with the
         // endpoint.
         for (key, value) in &self.store {
             if s3_store_key(key) == Some(AmazonS3ConfigKey::Endpoint)
                 && Url::parse(value).is_ok_and(|u| has_userinfo(&u))
             {
-                return Err(ConfigError::Validation(format!(
-                    "source.s3.store.\"{key}\" carries userinfo, which the store does not \
-                     read; set credentials under the source's `store` or the environment"
-                )));
+                return Err(at.invalid(
+                    &format!("store.\"{key}\""),
+                    "carries userinfo, which the store does not read; set credentials \
+                     under the source's `store` or the environment",
+                ));
             }
         }
         // Only the S3 client's keys are checked: `file://` reads no options.
@@ -217,9 +227,10 @@ impl S3SourceConfig {
             Ok((ObjectStoreScheme::AmazonS3, _))
         ) && let Some(key) = self.store.keys().find(|k| s3_store_key(k).is_none())
         {
-            return Err(ConfigError::Validation(format!(
-                "source.s3.store.\"{key}\" is not an object_store S3 option"
-            )));
+            return Err(at.invalid(
+                &format!("store.\"{key}\""),
+                "is not an object_store S3 option",
+            ));
         }
         Ok(())
     }
@@ -232,37 +243,36 @@ pub(crate) fn s3_store_key(key: &str) -> Option<AmazonS3ConfigKey> {
 }
 
 /// Parse and reject URLs the source cannot honor.
-fn parse_url(field: &str, value: &str) -> Result<Url, ConfigError> {
+fn parse_url(at: &SectionPath, field: &str, value: &str) -> Result<Url, ConfigError> {
     if value.trim().is_empty() {
-        return Err(ConfigError::Validation(format!(
-            "{field} must not be empty"
-        )));
+        return Err(at.invalid(field, "must not be empty"));
     }
-    let url = Url::parse(value)
-        .map_err(|e| ConfigError::Validation(format!("{field} is not a valid URL: {e}")))?;
+    let url =
+        Url::parse(value).map_err(|e| at.invalid(field, format!("is not a valid URL: {e}")))?;
     // The store reads no userinfo or query, and its errors quote the URL whole.
     if has_userinfo(&url) || url.query().is_some() {
-        return Err(ConfigError::Validation(format!(
-            "{field}: {} carries userinfo or a query, which the store does not read; set \
-             credentials under the source's `store` or the environment",
-            redact::url(value)
-        )));
+        return Err(at.invalid(
+            field,
+            format!(
+                "{} carries userinfo or a query, which the store does not read; set \
+                 credentials under the source's `store` or the environment",
+                redact::url(value)
+            ),
+        ));
     }
     // `memory://` builds a fresh empty store on every parse, so the source
     // and any test setup would each see a different store.
     if url.scheme() == "memory" {
-        return Err(ConfigError::Validation(format!(
-            "{field}: memory:// creates a new empty store per component and cannot be \
-             shared; use file:// for infrastructure-free runs"
-        )));
+        return Err(at.invalid(
+            field,
+            "memory:// creates a new empty store per component and cannot be shared; use \
+             file:// for infrastructure-free runs",
+        ));
     }
     // `ObjectStoreScheme::parse` also fails on the path, which the scheme check
     // below would misreport.
     if Path::from_url_path(url.path()).is_err() {
-        return Err(ConfigError::Validation(format!(
-            "{field}: {} {BAD_PREFIX}",
-            redact::url(value)
-        )));
+        return Err(at.invalid(field, format!("{} {BAD_PREFIX}", redact::url(value))));
     }
     // The crate enables object_store's `aws` and `fs` features alone, so any
     // other scheme builds no client.
@@ -270,13 +280,15 @@ fn parse_url(field: &str, value: &str) -> Result<Url, ConfigError> {
         ObjectStoreScheme::parse(&url),
         Ok((ObjectStoreScheme::AmazonS3 | ObjectStoreScheme::Local, _))
     ) {
-        return Err(ConfigError::Validation(format!(
-            "{field}: the source reads s3://, s3a://, file://, and https:// on an S3 \
-             or R2 endpoint host; for another S3-compatible \
-             store, write s3://<bucket>/<prefix> with the endpoint under the source's \
-             `store`, got {}",
-            redact::url(value)
-        )));
+        return Err(at.invalid(
+            field,
+            format!(
+                "the source reads s3://, s3a://, file://, and https:// on an S3 or R2 \
+                 endpoint host; for another S3-compatible store, write \
+                 s3://<bucket>/<prefix> with the endpoint under the source's `store`, got {}",
+                redact::url(value)
+            ),
+        ));
     }
     Ok(url)
 }
@@ -382,6 +394,102 @@ mod tests {
         assert!(err.contains("source.s3.url"), "{err}");
     }
 
+    /// The text of a refusal, which must be a [`ConfigError::Component`].
+    fn refusal<T: std::fmt::Debug>(result: Result<T, ConfigError>) -> String {
+        let err = result.expect_err("must be refused");
+        assert!(matches!(err, ConfigError::Component { .. }), "{err:?}");
+        err.to_string()
+    }
+
+    /// Each rule names the key it refuses under `source.s3`.
+    #[test]
+    fn each_rule_names_the_key_it_refuses() {
+        let scheme = "the source reads s3://, s3a://, file://, and https:// on an S3 or R2 \
+                      endpoint host; for another S3-compatible store, write \
+                      s3://<bucket>/<prefix> with the endpoint under the source's `store`, \
+                      got gs://bucket/data/";
+        let cases = [
+            (
+                "  url: \"\"\n".to_owned(),
+                "url: must not be empty".to_owned(),
+            ),
+            (
+                "  url: data\n".to_owned(),
+                "url: is not a valid URL: relative URL without a base".to_owned(),
+            ),
+            (
+                "  url: \"s3://bucket/data/?token=t\"\n".to_owned(),
+                format!(
+                    "url: {} carries userinfo or a query, which the store does not read; \
+                     set credentials under the source's `store` or the environment",
+                    redact::url("s3://bucket/data/?token=t")
+                ),
+            ),
+            (
+                "  url: memory:///data/\n".to_owned(),
+                "url: memory:// creates a new empty store per component and cannot be \
+                 shared; use file:// for infrastructure-free runs"
+                    .to_owned(),
+            ),
+            (
+                "  url: s3://bucket/a//b/\n".to_owned(),
+                format!("url: s3://bucket/a//b/ {BAD_PREFIX}"),
+            ),
+            (
+                "  url: gs://bucket/data/\n".to_owned(),
+                format!("url: {scheme}"),
+            ),
+            (
+                format!("{}  chunk_bytes: 0\n", minimal()),
+                "chunk_bytes: must not be zero".to_owned(),
+            ),
+            (
+                format!("{}  chunk_bytes: 2MiB\n  prefetch_bytes: 1MiB\n", minimal()),
+                "prefetch_bytes: (1.0 MiB) must be at least chunk_bytes (2.0 MiB)".to_owned(),
+            ),
+            (
+                format!("{}  split_target_bytes: 64KiB\n", minimal()),
+                "split_target_bytes: (64.0 KiB) must be at least 1MiB".to_owned(),
+            ),
+            (
+                format!(
+                    "{}  store:\n    endpoint: \"http://u:p@127.0.0.1:9000\"\n",
+                    minimal()
+                ),
+                "store.\"endpoint\": carries userinfo, which the store does not read; set \
+                 credentials under the source's `store` or the environment"
+                    .to_owned(),
+            ),
+            (
+                format!(
+                    "{}  store:\n    endpont: http://127.0.0.1:9000\n",
+                    minimal()
+                ),
+                "store.\"endpont\": is not an object_store S3 option".to_owned(),
+            ),
+        ];
+        for (body, want) in cases {
+            let msg = refusal(S3SourceConfig::from_component_config(&section(&body)));
+            assert_eq!(msg, format!("source.s3.{want}"), "{body}");
+        }
+    }
+
+    /// A section loaded from a pipeline file reports at the path
+    /// [`S3SourceConfig::validate`] gives a config built in code.
+    #[test]
+    fn a_loaded_section_and_a_built_config_name_the_same_path() {
+        let pipeline = spate_core::config::PipelineConfig::from_str(
+            "pipeline: { name: demo }\nsource:\n  s3:\n    url: s3://bucket/exports/\n    \
+             chunk_bytes: 0\nsink: { memory: {} }\n",
+        )
+        .expect("loads");
+        let loaded = refusal(S3SourceConfig::from_component_config(&pipeline.source));
+        let mut built = S3SourceConfig::new("s3://bucket/exports/");
+        built.chunk_bytes = ByteSize::b(0);
+        assert_eq!(loaded, refusal(built.validate()));
+        assert_eq!(loaded, "source.s3.chunk_bytes: must not be zero");
+    }
+
     #[test]
     fn minimal_config_gets_documented_defaults() {
         let cfg = S3SourceConfig::from_component_config(&section(&minimal())).unwrap();
@@ -472,7 +580,7 @@ mod tests {
             assert_eq!(
                 err.to_string(),
                 format!(
-                    "invalid configuration: source.s3.store.\"{key}\" cannot be overridden: \
+                    "source.s3: store.\"{key}\" cannot be overridden: \
                      owned by the typed `url` field (`{key}` sets the same object_store \
                      option as `bucket`)"
                 )

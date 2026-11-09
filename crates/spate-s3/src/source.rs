@@ -521,7 +521,7 @@ impl Source for S3Source {
     type Lane = S3Lane;
 
     fn component_type(&self) -> &str {
-        "s3"
+        crate::config::TAG
     }
 
     fn framing_contract(&self) -> FramingContract {

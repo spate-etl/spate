@@ -11,10 +11,10 @@
 use std::any::Any;
 use std::future::{Future, poll_fn};
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
-use std::pin::Pin;
+use std::pin::{Pin, pin};
 use std::task::{Context, Poll};
 
-use tokio::task::{JoinError, JoinHandle};
+use tokio::task::{JoinError, JoinHandle, coop};
 
 #[cfg(not(loom))]
 mod bound;
@@ -165,6 +165,23 @@ async fn logged<F: Future>(name: &'static str, future: F) -> F::Output {
             }
         },
     )
+    .await
+}
+
+/// Runs `fut` until it ends, or until `stop` ends first with `Err`.
+///
+/// `fut` is polled first, so an output ready as `stop` fires counts. `stop` is
+/// polled outside tokio's coop budget, as `tokio::time::timeout` polls its
+/// deadline, or a `fut` that spends the budget on every poll never ends.
+pub(crate) async fn first<F: Future, S: Future>(fut: F, stop: S) -> Result<F::Output, S::Output> {
+    let mut fut = pin!(fut);
+    let mut stop = pin!(coop::unconstrained(stop));
+    poll_fn(|cx| {
+        if let Poll::Ready(output) = fut.as_mut().poll(cx) {
+            return Poll::Ready(Ok(output));
+        }
+        stop.as_mut().poll(cx).map(Err)
+    })
     .await
 }
 

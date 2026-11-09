@@ -75,6 +75,37 @@ impl Stopwatch {
     }
 }
 
+/// Runs `fut` until it ends, or returns `None` once `clock` reaches `at`.
+///
+/// `fut` is polled first, so an output ready as `at` passes counts. The
+/// deadline is read outside tokio's coop budget, so it fires over a `fut` that
+/// spends the budget on every poll. The sleep is built on the first poll, so
+/// the returned future may be created outside the runtime that awaits it.
+///
+/// # Examples
+///
+/// ```
+/// use spate_core::clock::tokio::{Clock, SystemClock, before};
+/// use std::time::Duration;
+///
+/// # #[tokio::main(flavor = "current_thread")]
+/// # async fn main() {
+/// let later = SystemClock.now() + Duration::from_secs(30);
+/// assert_eq!(before(&SystemClock, later, async { 7 }).await, Some(7));
+///
+/// let now = SystemClock.now();
+/// let never = std::future::pending::<()>();
+/// assert_eq!(before(&SystemClock, now, never).await, None);
+/// # }
+/// ```
+pub async fn before<C: Clock + ?Sized, F: Future>(
+    clock: &C,
+    at: Instant,
+    fut: F,
+) -> Option<F::Output> {
+    crate::task::first(fut, clock.sleep_until(at)).await.ok()
+}
+
 /// A clock that only moves when a test moves it.
 ///
 /// Wired into production code, it stops every timer drawn from it.
@@ -175,6 +206,7 @@ impl Clock for TestClock {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::task::coop;
 
     /// A stopwatch reports exactly how far its clock moved, and nothing before
     /// it moves.
@@ -185,5 +217,64 @@ mod tests {
         assert_eq!(watch.elapsed(&*clock), Duration::ZERO);
         clock.advance(Duration::from_millis(250));
         assert_eq!(watch.elapsed(&*clock), Duration::from_millis(250));
+    }
+
+    /// Polls `fut` once with a waker that does nothing.
+    fn poll_once<F: Future>(fut: Pin<&mut F>) -> std::task::Poll<F::Output> {
+        fut.poll(&mut std::task::Context::from_waker(std::task::Waker::noop()))
+    }
+
+    /// Pins that `before` polls its future first: on a `TestClock`, a sleep to
+    /// the current instant is ready on its first poll, as the future is.
+    #[tokio::test]
+    async fn before_returns_an_output_ready_as_the_deadline_passes() {
+        let clock = TestClock::frozen();
+        assert_eq!(before(&*clock, clock.now(), async { 7 }).await, Some(7));
+    }
+
+    /// Pins that `before` ends at its deadline on the given clock, and not a
+    /// nanosecond earlier.
+    #[tokio::test]
+    async fn before_ends_when_its_clock_reaches_the_deadline() {
+        let clock = TestClock::frozen();
+        let at = clock.now() + Duration::from_secs(5);
+        let mut race = std::pin::pin!(before(&*clock, at, std::future::pending::<()>()));
+        assert!(poll_once(race.as_mut()).is_pending());
+        clock.advance(Duration::from_secs(5) - Duration::from_nanos(1));
+        assert!(poll_once(race.as_mut()).is_pending());
+        clock.advance(Duration::from_nanos(1));
+        assert_eq!(poll_once(race.as_mut()), std::task::Poll::Ready(None));
+    }
+
+    /// Pins that `before` ends at a deadline already past even when the future
+    /// it races spends the task's coop budget on every poll.
+    #[tokio::test]
+    async fn before_ends_when_the_future_spends_the_budget() {
+        // Spends the whole budget each task poll, and ends on its own only
+        // after 1000 task polls.
+        let busy = async {
+            for _ in 0..1000 {
+                for _ in 0..200 {
+                    coop::consume_budget().await;
+                }
+            }
+        };
+        assert!(before(&SystemClock, Instant::now(), busy).await.is_none());
+    }
+
+    /// Pins that `before` builds its sleep on the first poll: the future is
+    /// created where no runtime is entered, and a tokio sleep panics there.
+    #[test]
+    fn before_builds_its_sleep_on_the_first_poll() {
+        let race = before(
+            &SystemClock,
+            Instant::now() + Duration::from_secs(60),
+            async { 3 },
+        );
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        assert_eq!(rt.block_on(race), Some(3));
     }
 }

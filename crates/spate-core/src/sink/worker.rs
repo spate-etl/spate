@@ -17,7 +17,7 @@ use crate::backoff::Backoff;
 use crate::backpressure::InflightBudget;
 use crate::checkpoint::AckSet;
 use crate::clock::Clock as _;
-use crate::clock::tokio::{Clock, Sleep, Stopwatch};
+use crate::clock::tokio::{Clock, Sleep, Stopwatch, before};
 use crate::error::ErrorClass;
 use crate::hash::FastMap;
 use crate::metrics::{AttemptOutcome, FlushReason, SinkShardMetrics};
@@ -437,11 +437,9 @@ impl<W: ShardWriter> ShardWorker<W> {
         // holds us here indefinitely and `SinkPool::drain`'s backstop would
         // force-abort this worker and lose its report.
         let grace_at = self.clock.now() + ABORT_GRACE;
-        let shut_down = tokio::select! {
-            biased;
-            () = tasks.shutdown() => true,
-            () = self.clock.sleep_until(grace_at) => false,
-        };
+        let shut_down = before(&*self.clock, grace_at, tasks.shutdown())
+            .await
+            .is_some();
         if !shut_down {
             tracing::error!(
                 shard = self.shard,

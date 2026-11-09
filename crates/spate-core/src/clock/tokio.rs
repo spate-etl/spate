@@ -203,7 +203,7 @@ impl Clock for TestClock {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(loom)))]
 mod tests {
     use super::*;
     use tokio::task::coop;

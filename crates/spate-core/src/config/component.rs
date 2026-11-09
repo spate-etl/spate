@@ -43,8 +43,8 @@ pub struct ComponentConfig {
 }
 
 /// The dotted path of a component section from the config root, such as
-/// `source.kafka` or `sinks.eu.clickhouse`, that a connector builds its
-/// config errors from.
+/// `source.kafka` or `sinks.eu.clickhouse`, for building a config error that
+/// names where the section sits.
 ///
 /// [`ComponentConfig::path`] gives the path of a loaded section, which names
 /// the entry under `sinks:`. The constructors give the path for a config built

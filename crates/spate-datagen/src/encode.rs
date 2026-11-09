@@ -41,7 +41,9 @@ impl Encoder {
             // Unreachable through `DatagenSource::open`, whose `validate`
             // refuses this combination first. This arm answers a direct call.
             #[cfg(not(feature = "avro"))]
-            Encoding::Avro => Err(SourceError::fatal(crate::config::AVRO_FEATURE_OFF)),
+            Encoding::Avro => Err(SourceError::fatal(
+                crate::config::avro_feature_off().to_string(),
+            )),
         }
     }
 
@@ -408,7 +410,12 @@ mod tests {
     fn avro_without_the_feature_is_refused_rather_than_silently_emitting_json() {
         let err = Encoder::new(Encoding::Avro).unwrap_err();
         assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
-        assert_eq!(err.reason(), crate::config::AVRO_FEATURE_OFF);
+        assert_eq!(
+            err.reason(),
+            "source.datagen.encoding: avro needs spate-datagen's `avro` feature (the \
+             `datagen-avro` feature on the spate facade); it is off in this build"
+        );
+        assert_eq!(err.reason(), crate::config::avro_feature_off().to_string());
     }
 
     /// The generator stays far below this value, so only a hand-built event

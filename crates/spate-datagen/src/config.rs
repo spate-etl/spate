@@ -13,7 +13,7 @@
 //! disagree.
 
 use serde::Deserialize;
-use spate_core::config::{ComponentConfig, ConfigError};
+use spate_core::config::{ComponentConfig, ConfigError, SectionPath};
 use std::time::Duration;
 
 /// 2026-01-01T00:00:00Z, in milliseconds. The base for the `fixed` clock:
@@ -25,11 +25,19 @@ pub(crate) const DEFAULT_EPOCH_MS: i64 = 1_767_225_600_000;
 /// to a typo in a `u32` field.
 const MAX_PARTITIONS: u32 = 1_024;
 
+/// The source's component type, and the tag its section sits under.
+pub(crate) const TAG: &str = "datagen";
+
 /// What `encoding: avro` reports when the feature that implements it is off.
-/// One string for both the load-time rejection below and the `open`-time one
+/// One error for both the load-time rejection below and the `open`-time one
 /// in [`crate::encode`], which answer for the same condition.
-pub(crate) const AVRO_FEATURE_OFF: &str = "source.datagen.encoding: avro needs spate-datagen's `avro` feature \
-     (the `datagen-avro` feature on the spate facade); it is off in this build";
+pub(crate) fn avro_feature_off() -> ConfigError {
+    SectionPath::source(TAG).invalid(
+        "encoding",
+        "avro needs spate-datagen's `avro` feature (the `datagen-avro` feature on the spate \
+         facade); it is off in this build",
+    )
+}
 
 fn default_partitions() -> u32 {
     4
@@ -161,8 +169,7 @@ impl DatagenSourceConfig {
     /// # Errors
     ///
     /// [`ConfigError::Component`] when the section does not deserialize into
-    /// this type, and [`ConfigError::Validation`] when
-    /// [`validate`](Self::validate) refuses it.
+    /// this type, or when [`validate`](Self::validate) refuses it.
     pub fn from_component_config(section: &ComponentConfig) -> Result<Self, ConfigError> {
         let cfg: DatagenSourceConfig = section.deserialize_into()?;
         cfg.validate()?;
@@ -170,49 +177,58 @@ impl DatagenSourceConfig {
     }
 
     /// Cross-field validation.
+    ///
+    /// # Errors
+    ///
+    /// [`ConfigError::Component`] naming the refused key under
+    /// `source.datagen`, such as `source.datagen.partitions: must be at least 1`.
     pub fn validate(&self) -> Result<(), ConfigError> {
+        let at = SectionPath::source(TAG);
         if self.partitions == 0 {
-            return Err(ConfigError::Validation(
-                "source.datagen.partitions must be at least 1".into(),
-            ));
+            return Err(at.invalid("partitions", "must be at least 1"));
         }
         if self.partitions > MAX_PARTITIONS {
-            return Err(ConfigError::Validation(format!(
-                "source.datagen.partitions ({}) is above the {MAX_PARTITIONS} this source \
-                 builds: every lane holds its own generator, its rings and an arena sized \
-                 to one batch, and all of it is committed at open",
-                self.partitions,
-            )));
+            return Err(at.invalid(
+                "partitions",
+                format!(
+                    "({}) is above the {MAX_PARTITIONS} this source builds: every lane holds \
+                     its own generator, its rings and an arena sized to one batch, and all of \
+                     it is committed at open",
+                    self.partitions,
+                ),
+            ));
         }
         if self.events_per_tick == 0 {
-            return Err(ConfigError::Validation(
-                "source.datagen.events_per_tick must be at least 1 (set tick_interval: 0s \
-                 to run unthrottled instead)"
-                    .into(),
+            return Err(at.invalid(
+                "events_per_tick",
+                "must be at least 1 (set tick_interval: 0s to run unthrottled instead)",
             ));
         }
         if let Some(count) = self.count {
             if count == 0 {
-                return Err(ConfigError::Validation(
-                    "source.datagen.count must be at least 1; omit it for an unbounded stream"
-                        .into(),
+                return Err(at.invalid(
+                    "count",
+                    "must be at least 1; omit it for an unbounded stream",
                 ));
             }
             if count < u64::from(self.partitions) {
-                return Err(ConfigError::Validation(format!(
-                    "source.datagen.count ({count}) is below source.datagen.partitions ({}): \
-                     the total splits as count / partitions = {} events per lane with the \
-                     first {} lanes taking one more, so {} lane(s) would be born exhausted \
-                     — lower partitions or raise count",
-                    self.partitions,
-                    count / u64::from(self.partitions),
-                    count % u64::from(self.partitions),
-                    u64::from(self.partitions) - count,
-                )));
+                return Err(at.invalid(
+                    "count",
+                    format!(
+                        "({count}) is below source.datagen.partitions ({}): the total splits \
+                         as count / partitions = {} events per lane with the first {} lanes \
+                         taking one more, so {} lane(s) would be born exhausted — lower \
+                         partitions or raise count",
+                        self.partitions,
+                        count / u64::from(self.partitions),
+                        count % u64::from(self.partitions),
+                        u64::from(self.partitions) - count,
+                    ),
+                ));
             }
         }
         if self.encoding == Encoding::Avro && !cfg!(feature = "avro") {
-            return Err(ConfigError::Validation(AVRO_FEATURE_OFF.into()));
+            return Err(avro_feature_off());
         }
         Ok(())
     }
@@ -297,6 +313,97 @@ mod tests {
                 .expect_err("must reject: {body}");
             assert!(err.to_string().contains(wanted), "{err}");
         }
+    }
+
+    fn refusal<T: std::fmt::Debug>(result: Result<T, ConfigError>) -> String {
+        let err = result.expect_err("must be refused");
+        assert!(matches!(err, ConfigError::Component { .. }), "{err:?}");
+        err.to_string()
+    }
+
+    /// Each rule names the key it refuses under `source.datagen`.
+    #[test]
+    fn each_rule_names_the_key_it_refuses() {
+        let mut cases = vec![
+            (
+                DatagenSourceConfig {
+                    partitions: 0,
+                    ..DatagenSourceConfig::default()
+                },
+                "source.datagen.partitions: must be at least 1".to_owned(),
+            ),
+            (
+                DatagenSourceConfig {
+                    partitions: 1_025,
+                    ..DatagenSourceConfig::default()
+                },
+                "source.datagen.partitions: (1025) is above the 1024 this source builds: every \
+                 lane holds its own generator, its rings and an arena sized to one batch, and \
+                 all of it is committed at open"
+                    .to_owned(),
+            ),
+            (
+                DatagenSourceConfig {
+                    events_per_tick: 0,
+                    ..DatagenSourceConfig::default()
+                },
+                "source.datagen.events_per_tick: must be at least 1 (set tick_interval: 0s to \
+                 run unthrottled instead)"
+                    .to_owned(),
+            ),
+            (
+                DatagenSourceConfig {
+                    count: Some(0),
+                    ..DatagenSourceConfig::default()
+                },
+                "source.datagen.count: must be at least 1; omit it for an unbounded stream"
+                    .to_owned(),
+            ),
+            (
+                DatagenSourceConfig {
+                    partitions: 8,
+                    count: Some(5),
+                    ..DatagenSourceConfig::default()
+                },
+                "source.datagen.count: (5) is below source.datagen.partitions (8): the total \
+                 splits as count / partitions = 0 events per lane with the first 5 lanes taking \
+                 one more, so 3 lane(s) would be born exhausted — lower partitions or raise \
+                 count"
+                    .to_owned(),
+            ),
+        ];
+        if !cfg!(feature = "avro") {
+            cases.push((
+                DatagenSourceConfig {
+                    encoding: Encoding::Avro,
+                    ..DatagenSourceConfig::default()
+                },
+                "source.datagen.encoding: avro needs spate-datagen's `avro` feature (the \
+                 `datagen-avro` feature on the spate facade); it is off in this build"
+                    .to_owned(),
+            ));
+        }
+        for (cfg, wanted) in cases {
+            assert_eq!(refusal(cfg.validate()), wanted);
+        }
+    }
+
+    /// A section loaded from a pipeline file and a config built in code
+    /// report the same path.
+    #[test]
+    fn a_loaded_section_and_a_built_config_name_the_same_path() {
+        let pipeline = spate_core::config::PipelineConfig::from_str(
+            "pipeline: { name: demo }\nsource:\n  datagen:\n    partitions: 0\n\
+             sink: { memory: {} }\n",
+        )
+        .expect("loads");
+        let loaded = refusal(DatagenSourceConfig::from_component_config(&pipeline.source));
+        let built = DatagenSourceConfig {
+            partitions: 0,
+            ..DatagenSourceConfig::default()
+        };
+        assert_eq!(loaded, refusal(built.validate()));
+        assert_eq!(loaded, "source.datagen.partitions: must be at least 1");
     }
 
     /// The message has to say what the arithmetic did, or "count 4 with 8

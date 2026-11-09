@@ -200,10 +200,10 @@ before it ships, and a defect you hit on one is a defect this project fixes.
 The set is the two LTS lines ClickHouse still supports, plus whatever the newest
 stable release is on the day.
 
-Other versions from 26.3 on usually work. The wire formats this sink uses have
+Other versions from 26.2 on usually work. The wire formats this sink uses have
 been stable across releases for years.
 
-A server older than 26.3 fails at startup, because it does not know the
+A server older than 26.2 fails at startup, because it does not know the
 `deduplicate_insert` setting that the sink sets on every insert. The error
 names the replica and carries the server's `UNKNOWN_SETTING` message.
 
@@ -238,7 +238,7 @@ a retry of the same batch (including on another replica after a timeout) is
 idempotent, and the server drops the duplicate insert.
 
 The sink sets `deduplicate_insert = 'enable'` on every insert. This setting
-decides deduplication from ClickHouse 26.3, so a server, user or profile default
+decides deduplication from ClickHouse 26.2, so a server, user or profile default
 of `disable` does not turn deduplication off for the sink.
 
 A replica whose settings constraints pin `deduplicate_insert` to another value

@@ -23,8 +23,8 @@ those are yours to grant and are not enumerated here.
 ## The minimal grant
 
 With no `distributed_check` block the sink issues the per-batch `INSERT` and
-one `system.columns` read per replica at startup. When `settings` is set, it
-also sends one `SELECT 1` carrying them to each replica at startup. One grant
+one `system.columns` read and one `SELECT 1` per replica at startup. The
+`SELECT 1` carries `deduplicate_insert` and any keys from `settings`. One grant
 covers all of these. ClickHouse shows an account the `system.columns` rows for
 the objects it already holds a grant on, and `SELECT 1` needs no grant:
 
@@ -45,8 +45,9 @@ Every insert sets `deduplicate_insert`, `insert_deduplicate`,
 (these are managed by the sink and cannot be overridden), plus any keys from
 your `settings:` map. A `readonly = 1` profile, or a settings **constraint**
 that pins any of these, fails the write. A constraint that pins
-`deduplicate_insert` fails the sink's startup instead, because the `SELECT 1`
-the sink sends each replica when it is built sets it too.
+`deduplicate_insert` to another value fails the sink's startup instead,
+because the `SELECT 1` the sink sends each replica when it is built sets it
+too.
 Keep the writer's profile at `readonly = 0` and leave those settings
 unconstrained. The tokens are what make retries idempotent; see the
 [dedup-window warning](./README.mdx#deduplication-tokens-and-the-window-warning).

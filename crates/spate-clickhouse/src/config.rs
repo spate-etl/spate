@@ -507,7 +507,7 @@ impl ClickHouseSinkBuilder {
     /// the `settings` on a `SELECT 1`, and a setting one refuses fails the
     /// build with [`SchemaError::Settings`] and the server's message. That
     /// covers a constraint pinning `deduplicate_insert` and a server before
-    /// 26.3, which does not know it.
+    /// 26.2, which does not know it.
     ///
     /// Run it on the builder's I/O runtime before the chain exists, via
     /// `pipeline.block_on`. `F` is not inferable from context, so name it:
@@ -1309,7 +1309,7 @@ settings: { insert_quorum: "auto" }
         );
     }
 
-    /// `deduplicate_insert` decides deduplication from ClickHouse 26.3, so a
+    /// `deduplicate_insert` decides deduplication from ClickHouse 26.2, so a
     /// configured `disable` fails validation.
     #[test]
     fn deduplicate_insert_is_a_reserved_setting() {

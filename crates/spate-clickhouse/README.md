@@ -122,7 +122,7 @@ The sink sets `deduplicate_insert`, `insert_deduplicate`,
 on every insert, and `decompress` on a compressed one. `settings` cannot
 override them, and cannot name `database`, which the typed `database` field
 owns. A replica that refuses `deduplicate_insert = 'enable'`, such as a server
-older than ClickHouse 26.3, fails the sink's startup.
+older than ClickHouse 26.2, fails the sink's startup.
 
 [Deduplication tokens and the window warning](https://spate.kainth.dev/docs/user-guide/connectors/sinks/clickhouse#deduplication-tokens-and-the-window-warning)
 and

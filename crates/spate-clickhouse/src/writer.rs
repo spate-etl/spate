@@ -48,7 +48,7 @@ impl fmt::Debug for ClickHouseEndpoint {
     }
 }
 
-/// Decides insert deduplication from ClickHouse 26.3, over
+/// Decides insert deduplication from ClickHouse 26.2, over
 /// `insert_deduplicate`. [`ClickHouseWriter::check_settings`] carries it as
 /// well, so a replica that refuses [`DEDUPLICATE_INSERT_ON`] fails the build.
 const DEDUPLICATE_INSERT: &str = "deduplicate_insert";

@@ -388,6 +388,16 @@ mod tests {
         }
     }
 
+    /// 1024 lanes is the most the source builds, and is accepted.
+    #[test]
+    fn the_partition_bound_is_inclusive() {
+        let cfg = DatagenSourceConfig {
+            partitions: 1_024,
+            ..DatagenSourceConfig::default()
+        };
+        cfg.validate().unwrap();
+    }
+
     /// A section loaded from a pipeline file and a config built in code
     /// report the same path.
     #[test]

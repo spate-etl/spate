@@ -4041,9 +4041,10 @@ mod tests {
         type Calls = Arc<Mutex<Vec<BrokerCall>>>;
 
         /// A mock cluster with one `orders` partition per consumer, on which no
-        /// group forms. The tests set each generation by hand, and the mock
-        /// reads nothing more from a member whose join it holds, which would
-        /// leave that member's calls waiting in real time.
+        /// group forms. No test here needs a group, since the one that commits
+        /// sets its generation by hand. The mock reads nothing more from a
+        /// member whose join it holds, which would leave that member's calls
+        /// waiting in real time.
         fn mock() -> MockKafka {
             let cluster = MockKafka::new();
             let partitions = i32::try_from(CONSUMERS).expect("partitions");

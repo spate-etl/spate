@@ -1133,7 +1133,8 @@ the function reports the unit only once the stop comes.
   explains. Set `MaximumBatchingWindowInSeconds` and a `BatchSize` above 10 on
   the event source mapping, so that one invocation carries many small objects.
   AWS requires a batching window of at least 1 second once `BatchSize` is above
-  10 ([AWS](https://docs.aws.amazon.com/lambda/latest/api/API_CreateEventSourceMapping.html)).
+  10
+  ([AWS](https://docs.aws.amazon.com/lambda/latest/api/API_CreateEventSourceMapping.html)).
 - **The queue outlasts the function.** Set the queue's visibility timeout to at
   least six times the function timeout, plus the batching window, and
   `maxReceiveCount` to at least 5

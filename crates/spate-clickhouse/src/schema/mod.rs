@@ -60,6 +60,15 @@ pub enum SchemaError {
     /// multi-line diff).
     #[error("{0}")]
     Mismatch(String),
+    /// A replica refused the `settings` passthrough: an unknown name, or a
+    /// value it cannot parse.
+    #[error("sink.clickhouse: replica {url} refused the settings: {reason}")]
+    Settings {
+        /// The replica URL, redacted.
+        url: String,
+        /// The server's answer.
+        reason: String,
+    },
     /// The declared column list cannot produce an `INSERT`. Reachable only
     /// from a hand-written [`ClickHouseRowFamily`](crate::ClickHouseRowFamily)
     /// impl; the derive rejects the same problems at compile time.

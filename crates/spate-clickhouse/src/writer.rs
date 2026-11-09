@@ -184,6 +184,22 @@ impl ClickHouseWriter {
     pub fn insert_sql(&self) -> &str {
         &self.insert_sql
     }
+
+    /// Sends `SELECT 1` with the `settings` passthrough, so `endpoint` refuses
+    /// a setting it would refuse on every insert.
+    ///
+    /// The answer is not read, since a setting such as `offset` can leave
+    /// `SELECT 1` with no row.
+    pub(crate) async fn check_settings(
+        &self,
+        endpoint: &ClickHouseEndpoint,
+    ) -> Result<(), clickhouse::error::Error> {
+        let mut query = endpoint.client.query("SELECT 1");
+        for (name, value) in &self.settings {
+            query = query.with_setting(name.clone(), value.clone());
+        }
+        query.execute().await
+    }
 }
 
 impl ShardWriter for ClickHouseWriter {
@@ -252,7 +268,7 @@ fn check_frames(method: BlockMethod, batch: &SealedBatch) -> Result<(), SinkErro
 }
 
 /// Server exception codes that cannot succeed on retry: schema, parse,
-/// authentication and block-decoding classes. Everything else is retried:
+/// settings, authentication and block-decoding classes. Everything else is retried:
 /// with deduplication tokens a spurious retry is idempotent, and the circuit
 /// breaker plus the stalled-watermark alert surface persistent failures.
 ///
@@ -271,6 +287,7 @@ const FATAL_EXCEPTION_CODES: &[u32] = &[
     60,  // UNKNOWN_TABLE
     73,  // UNKNOWN_FORMAT
     81,  // UNKNOWN_DATABASE
+    115, // UNKNOWN_SETTING
     117, // INCORRECT_DATA
     192, // UNKNOWN_USER
     CANNOT_DECOMPRESS,
@@ -308,7 +325,7 @@ fn classify_insert(err: clickhouse::error::Error, coded: bool) -> SinkError {
 /// - other transport (`Network`, `TimedOut`) and uncategorized client errors
 ///   (`Other`) → `Retryable`;
 /// - server exceptions (`BadResponse`) → fatal only for the schema, parse,
-///   auth and block-decoding codes above, `Retryable` otherwise (e.g.
+///   settings, auth and block-decoding codes above, `Retryable` otherwise (e.g.
 ///   `TOO_MANY_PARTS`, memory pressure, shutdown races);
 /// - client-side params and both codec directions (`InvalidParams`,
 ///   `SchemaMismatch`, `Unsupported`, `Compression`, `Decompression`) →
@@ -392,6 +409,15 @@ mod tests {
 
         let schema = classify(clickhouse::error::Error::SchemaMismatch("boom".into()));
         assert_eq!(schema.class(), ErrorClass::Fatal, "{schema}");
+    }
+
+    /// A setting the server does not know classifies `Fatal`: every retry
+    /// carries the same settings.
+    #[test]
+    fn an_unknown_setting_is_fatal() {
+        let reason = "Code: 115. DB::Exception: Setting insert_qourum is neither a builtin setting nor started with the prefix 'SQL_' registered for user-defined settings: Maybe you meant ['insert_quorum']. (UNKNOWN_SETTING) (version 26.8.36.3 (official build))";
+        let err = classify_insert(clickhouse::error::Error::BadResponse(reason.into()), true);
+        assert_eq!(err.class(), ErrorClass::Fatal, "{err:?}");
     }
 
     /// Both codec directions classify `Fatal`.

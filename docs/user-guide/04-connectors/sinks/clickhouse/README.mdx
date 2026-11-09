@@ -111,6 +111,20 @@ Only the exact name is refused. ClickHouse reads setting names
 case-sensitively and has no alias of these settings, so another spelling such
 as `INSERT_DEDUPLICATE` fails at the server as an unknown setting.
 
+When the sink is built, it sends `settings` to every replica on a `SELECT 1`.
+A setting a replica refuses fails startup with that replica's URL and the
+server's message. That covers a name the server does not know and a value it
+cannot parse. A misspelled `insert_quorum` fails like this:
+
+```text
+sink.clickhouse: replica http://ch-1.internal:8123 refused the settings: bad response: Code: 115. DB::Exception: Setting insert_qourum is neither a builtin setting nor started with the prefix 'SQL_' registered for user-defined settings: Maybe you meant ['insert_quorum']. (UNKNOWN_SETTING) …
+```
+
+An insert that a replica answers with `UNKNOWN_SETTING` mid-run is a
+[fatal error](../../../02-concepts/04-error-handling.mdx#fatal-errors-panics-and-stalled-watermarks).
+The batch is not retried on another replica, and the pipeline fails once
+`checkpoint.stalled_fail_after` elapses.
+
 ## Security (TLS)
 
 No feature flag is needed for TLS. Point a replica at an `https://` URL and the

@@ -1,9 +1,11 @@
 //! Kafka source configuration: typed fields plus a validated raw
 //! librdkafka property passthrough.
 
-use crate::client::{Base, Keys, Role};
+use crate::client::{Base, Keys, Role, TAG};
 use serde::Deserialize;
-use spate_core::config::{ComponentConfig, ConfigError, DurationBounds, check_duration, redact};
+use spate_core::config::{
+    ComponentConfig, ConfigError, DurationBounds, SectionPath, check_duration, redact,
+};
 use std::collections::BTreeMap;
 use std::time::Duration;
 
@@ -273,8 +275,7 @@ impl KafkaSourceConfig {
     /// # Errors
     ///
     /// [`ConfigError::Component`] when the section does not deserialize into
-    /// this type, and [`ConfigError::Validation`] when
-    /// [`validate`](Self::validate) refuses it.
+    /// this type, or when [`validate`](Self::validate) refuses it.
     pub fn from_component_config(section: &ComponentConfig) -> Result<Self, ConfigError> {
         let cfg: KafkaSourceConfig = section.deserialize_into()?;
         cfg.validate()?;
@@ -285,35 +286,29 @@ impl KafkaSourceConfig {
     ///
     /// # Errors
     ///
-    /// [`ConfigError::Validation`] for the first setting it refuses.
+    /// [`ConfigError::Component`] for the first setting it refuses, starting
+    /// at `source.kafka`.
     pub fn validate(&self) -> Result<(), ConfigError> {
+        let at = SectionPath::source(TAG);
         if self.brokers.trim().is_empty() {
-            return Err(ConfigError::Validation(
-                "source.kafka.brokers must not be empty".into(),
-            ));
+            return Err(at.invalid("brokers", "must not be empty"));
         }
         if self.topic.trim().is_empty() {
-            return Err(ConfigError::Validation(
-                "source.kafka.topic must not be empty".into(),
-            ));
+            return Err(at.invalid("topic", "must not be empty"));
         }
         // librdkafka subscribes to a leading `^` as a pattern, and the source
         // reads partitions of the literal name, so no record reaches the chain.
         if self.topic.starts_with('^') {
-            return Err(ConfigError::Validation(format!(
-                "source.kafka.topic {:?} is a subscription pattern; name one topic",
-                self.topic
-            )));
+            return Err(at.invalid(
+                "topic",
+                format!("{:?} is a subscription pattern; name one topic", self.topic),
+            ));
         }
         if self.group_id.trim().is_empty() {
-            return Err(ConfigError::Validation(
-                "source.kafka.group_id must not be empty".into(),
-            ));
+            return Err(at.invalid("group_id", "must not be empty"));
         }
         if self.consumers == 0 {
-            return Err(ConfigError::Validation(
-                "source.kafka.consumers must be at least 1".into(),
-            ));
+            return Err(at.invalid("consumers", "must be at least 1"));
         }
         // Consumers of one process share the passthrough, so they would all
         // claim one static member id and fence each other.
@@ -323,30 +318,33 @@ impl KafkaSourceConfig {
                 .iter()
                 .find(|(k, v)| crate::client::canonical(k) == "group.instance.id" && !v.is_empty())
         {
-            return Err(ConfigError::Validation(format!(
-                "source.kafka.consumers above 1 cannot be combined with \
-                 source.kafka.rdkafka.\"{key}\": every consumer would join as \
-                 the same static member and fence the others; set consumers: 1 \
-                 or remove the static member id"
-            )));
+            return Err(at.invalid(
+                "consumers",
+                format!(
+                    "above 1 cannot be combined with rdkafka.\"{key}\": every \
+                     consumer would join as the same static member and fence the \
+                     others; set consumers: 1 or remove the static member id"
+                ),
+            ));
         }
         if let Err(why) = self.base(false).check_statistics_interval() {
-            return Err(ConfigError::Validation(format!(
-                "source.kafka.statistics_interval {why}"
-            )));
+            return Err(at.invalid("statistics_interval", why));
         }
         // librdkafka's `auto.commit.interval.ms` range is 0 to 24h, and 0
         // turns the commit timer off.
         const COMMIT_INTERVAL: DurationBounds =
             DurationBounds::at_least(Duration::from_millis(1)).at_most(Duration::from_hours(24));
         if let Err(e) = check_duration(self.commit_interval, COMMIT_INTERVAL) {
-            return Err(ConfigError::Validation(format!(
-                "source.kafka.commit_interval {e}: librdkafka reads the interval in whole \
-                 milliseconds up to 24h and turns interval commits off at 0"
-            )));
+            return Err(at.invalid(
+                "commit_interval",
+                format!(
+                    "{e}: librdkafka reads the interval in whole milliseconds up to \
+                     24h and turns interval commits off at 0"
+                ),
+            ));
         }
         if let Err(refusal) = self.base(false).denied(&[&Consumer(self, None)]) {
-            return Err(ConfigError::Validation(format!("source.kafka.{refusal}")));
+            return Err(at.error(refusal.to_string()));
         }
         if self
             .rdkafka
@@ -355,22 +353,21 @@ impl KafkaSourceConfig {
             .count()
             > 1
         {
-            return Err(ConfigError::Validation(
-                "source.kafka.rdkafka sets both \"auto.offset.reset\" and \
-                 \"topic.auto.offset.reset\": librdkafka reads them as one \
-                 property and applies them in no set order; set one"
-                    .into(),
+            return Err(at.invalid(
+                "rdkafka",
+                "sets both \"auto.offset.reset\" and \"topic.auto.offset.reset\": \
+                 librdkafka reads them as one property and applies them in no set \
+                 order; set one",
             ));
         }
-        crate::security::check_tls_feature(&self.rdkafka, "source.kafka")?;
+        crate::security::check_tls_feature(&self.rdkafka, &at)?;
         if let Some(strategy) = self.rdkafka.get("partition.assignment.strategy")
             && strategy.contains("cooperative")
         {
-            return Err(ConfigError::Validation(
-                "source.kafka.rdkafka.\"partition.assignment.strategy\": \
-                 cooperative assignment is not supported today; the framework \
-                 relies on eager (full) rebalances"
-                    .into(),
+            return Err(at.invalid(
+                "rdkafka.\"partition.assignment.strategy\"",
+                "cooperative assignment is not supported today; the framework \
+                 relies on eager (full) rebalances",
             ));
         }
         Ok(())
@@ -624,7 +621,7 @@ mod tests {
                         .to_string();
                     assert!(
                         msg.contains(&format!(
-                            "source.kafka.rdkafka.\"{written}\" cannot be overridden"
+                            "source.kafka: rdkafka.\"{written}\" cannot be overridden"
                         )),
                         "{msg}"
                     );
@@ -881,7 +878,7 @@ mod tests {
     fn zero_consumers_are_rejected() {
         let err = with_consumers("0", "").unwrap_err().to_string();
         assert!(
-            err.contains("source.kafka.consumers must be at least 1"),
+            err.contains("source.kafka.consumers: must be at least 1"),
             "{err}"
         );
     }
@@ -964,7 +961,7 @@ mod tests {
             .to_string();
         assert_eq!(
             msg,
-            "invalid configuration: source.kafka.statistics_interval must be 0s or from 1ms \
+            "source.kafka.statistics_interval: must be 0s or from 1ms \
              to 1day; found 500us: 0s disables statistics, and librdkafka reads whole \
              milliseconds up to 24h"
         );
@@ -988,7 +985,7 @@ mod tests {
     /// The refusal `validate` gives for a `commit_interval` of `found`.
     fn commit_refusal(found: &str) -> String {
         format!(
-            "invalid configuration: source.kafka.commit_interval must be from 1ms to 1day; \
+            "source.kafka.commit_interval: must be from 1ms to 1day; \
              found {found}: librdkafka reads the interval in whole milliseconds up to 24h and \
              turns interval commits off at 0"
         )

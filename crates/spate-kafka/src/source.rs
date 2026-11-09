@@ -123,6 +123,7 @@ use rdkafka::{Offset, TopicPartitionList};
 use spate_core::checkpoint::AckIssuer;
 use spate_core::clock::Stopwatch;
 use spate_core::clock::SyncClock;
+use spate_core::config::SectionPath;
 use spate_core::error::{ErrorClass, SourceError};
 use spate_core::hash::{FastMap, FastSet};
 use spate_core::metrics::SourceMetrics;
@@ -1709,10 +1710,9 @@ impl Source for KafkaSource {
         members
             .try_reserve_exact(self.config.consumers)
             .map_err(|_| {
-                SourceError::fatal(format!(
-                    "source.kafka.consumers: {} consumers cannot be allocated",
-                    self.config.consumers
-                ))
+                let at = SectionPath::source(crate::client::TAG);
+                let why = format!("{} consumers cannot be allocated", self.config.consumers);
+                SourceError::fatal(at.invalid("consumers", why).to_string())
             })?;
         for k in 0..self.config.consumers {
             let role = crate::config::Consumer::member(&self.config, k);

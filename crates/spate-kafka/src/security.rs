@@ -13,22 +13,25 @@
 //! at config-load via `from_component_config`), so a misconfiguration fails
 //! identically with an actionable message instead of late and asymmetrically.
 
-use spate_core::config::ConfigError;
+use spate_core::config::{ConfigError, SectionPath};
 use std::collections::BTreeMap;
 
 /// Reject a passthrough that requests TLS/SASL when this build lacks the
 /// transport. A no-op when the `tls` feature is enabled.
 ///
-/// `scope` is the connector's config path prefix (`"source.kafka"` /
-/// `"sink.kafka"`) so the message points at the offending section.
+/// The error starts at `at`, the path of the section that holds `rdkafka`.
 pub(crate) fn check_tls_feature(
     rdkafka: &BTreeMap<String, String>,
-    scope: &str,
+    at: &SectionPath,
 ) -> Result<(), ConfigError> {
-    check(rdkafka, scope, cfg!(feature = "tls"))
+    check(rdkafka, at, cfg!(feature = "tls"))
 }
 
-fn check(rdkafka: &BTreeMap<String, String>, scope: &str, tls: bool) -> Result<(), ConfigError> {
+fn check(
+    rdkafka: &BTreeMap<String, String>,
+    at: &SectionPath,
+    tls: bool,
+) -> Result<(), ConfigError> {
     if tls {
         return Ok(());
     }
@@ -48,11 +51,11 @@ fn check(rdkafka: &BTreeMap<String, String>, scope: &str, tls: bool) -> Result<(
         });
 
     if wants_security {
-        return Err(ConfigError::Validation(format!(
-            "{scope}.rdkafka requests TLS/SASL, but this build was compiled \
-             without it; rebuild with the `kafka-tls` feature \
-             (spate = {{ features = [\"kafka-tls\"] }})"
-        )));
+        return Err(at.invalid(
+            "rdkafka",
+            "requests TLS/SASL, but this build was compiled without it; rebuild \
+             with the `kafka-tls` feature (spate = { features = [\"kafka-tls\"] })",
+        ));
     }
     Ok(())
 }
@@ -232,7 +235,10 @@ pub(crate) mod tests {
             map(&[("builtin.features", "ssl ,gzip")]),
         ];
         for cfg in plain {
-            assert!(check(&cfg, "sink.kafka", false).is_ok(), "{cfg:?}");
+            assert!(
+                check(&cfg, &SectionPath::sink("kafka"), false).is_ok(),
+                "{cfg:?}"
+            );
         }
     }
 
@@ -260,9 +266,15 @@ pub(crate) mod tests {
             map(&[("builtin.features", "-ssl")]),
         ];
         for cfg in secured {
-            let err = check(&cfg, "source.kafka", false).expect_err("tls off must reject");
-            assert!(err.to_string().contains("kafka-tls"), "{cfg:?}: {err}");
-            assert!(check(&cfg, "source.kafka", true).is_ok(), "tls on: {cfg:?}");
+            let at = SectionPath::source("kafka");
+            let err = check(&cfg, &at, false).expect_err("tls off must reject");
+            let msg = err.to_string();
+            assert!(
+                msg.starts_with("source.kafka.rdkafka: requests TLS/SASL"),
+                "{cfg:?}: {msg}"
+            );
+            assert!(msg.contains("kafka-tls"), "{cfg:?}: {msg}");
+            assert!(check(&cfg, &at, true).is_ok(), "tls on: {cfg:?}");
         }
     }
 

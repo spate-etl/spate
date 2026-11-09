@@ -28,6 +28,11 @@ The broker advertises a port that is only known once its container runs, so
 the container waits for a start script that `KafkaBroker` writes once the port
 is mapped.
 
+## What a bump runs
+
+`cargo xtask ci-changes` maps this directory to the `spate-kafka`, `spate` and
+`spate-test-support` container suites.
+
 ## Apache Kafka
 
 The image is `apache/kafka-native`, the GraalVM build of the broker. Its arm

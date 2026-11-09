@@ -46,7 +46,7 @@ use spate::pipeline::{
 };
 use spate::sink::KeyHashRouter;
 use spate_test::{metric_series, metric_value};
-use spate_test_support::{KAFKA_PORT, KafkaBroker, container_image, http};
+use spate_test_support::{Broker, KAFKA_PORT, KafkaBroker, container_image, http};
 use std::net::SocketAddr;
 use std::ops::Range;
 use std::process::Command;
@@ -125,15 +125,16 @@ impl Harness {
         Self::around(Brokers::One(Box::new(kafka)), brokers, 1)
     }
 
-    /// [`Self::up`] with three brokers in one KRaft quorum, on the same pinned
-    /// image, publishing Kafka on `host_ports`.
+    /// [`Self::up`] with three Apache Kafka brokers in one KRaft quorum,
+    /// publishing Kafka on `host_ports`. The cluster runs the `apache` lane's
+    /// image under every lane, since its configuration is Apache's.
     ///
     /// A client reaches a broker on the address it advertises, which has to be
     /// known before the broker starts and has to survive its restart, so the
     /// caller names the ports. The containers start with no ready condition, since
     /// a node cannot finish starting before it has a quorum.
     pub fn up_cluster(host_ports: [u16; 3]) -> Self {
-        let (image, tag) = container_image(&["--pull", "kafka"]);
+        let (image, tag) = container_image(&["--pull", "kafka", Broker::Apache.lane()]);
         let network = spate_test::unique_name("e2e-kafka");
         let host = |node: usize| format!("{network}-k{node}");
         let voters = (1..=host_ports.len())

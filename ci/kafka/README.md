@@ -54,5 +54,6 @@ Dependabot counts the pin itself as a pre-release, so it proposes the next
 release as soon as Apache publishes it. The `-rcN` tags still stay out, because
 a tag with a suffix is never compared against a plain release tag.
 
-The three-node cluster in spate's `e2e_leader_move` starts the same image as a
-`GenericImage` with its own `KAFKA_*` variables.
+The three-node cluster in spate's `e2e_leader_move` starts the `apache` lane's
+image as a `GenericImage` with its own `KAFKA_*` variables, whichever lane is
+selected.

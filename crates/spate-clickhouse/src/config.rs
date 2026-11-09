@@ -511,7 +511,8 @@ impl ClickHouseSinkBuilder {
     pub async fn with_row<F: crate::ClickHouseRowFamily>(
         self,
     ) -> Result<ClickHouseSink, SchemaError> {
-        validate_columns(F::COLUMNS).map_err(|e| SchemaError::Columns(e.to_string()))?;
+        validate_columns(F::COLUMNS)
+            .map_err(|why| SchemaError::Columns(format!("sink.clickhouse: {why}")))?;
 
         let check = schema::SchemaCheck {
             wire: match self.cfg.format {
@@ -536,11 +537,7 @@ impl ClickHouseSinkBuilder {
                     .make()
                     .encode_frame(&schema.header())
                     .map(Bytes::copy_from_slice)
-                    .map_err(|e| {
-                        SchemaError::Columns(
-                            SectionPath::sink(TAG).error(e.to_string()).to_string(),
-                        )
-                    })?;
+                    .map_err(|e| SchemaError::Columns(format!("sink.clickhouse: {e}")))?;
                 Some(block)
             }
         };
@@ -1007,17 +1004,16 @@ fn is_column_name(s: &str) -> bool {
 /// column list at compile time, but a hand-written `ClickHouseRowFamily`
 /// impl (for a borrowed record family, which the blanket impl over
 /// [`Owned`](spate_core::deser::Owned) does not cover) bypasses the derive
-/// entirely.
-fn validate_columns(columns: &[&str]) -> Result<(), ConfigError> {
-    let fail = |msg: String| Err(SectionPath::sink(TAG).error(msg));
+/// entirely. The error is the reason alone.
+fn validate_columns(columns: &[&str]) -> Result<(), String> {
     if columns.is_empty() {
-        return fail("ClickHouseRow::COLUMNS must list at least one column".into());
+        return Err("ClickHouseRow::COLUMNS must list at least one column".into());
     }
     let mut seen =
         spate_core::hash::FastSet::with_capacity_and_hasher(columns.len(), Default::default());
     for &col in columns {
         if !is_column_name(col) {
-            return fail(format!(
+            return Err(format!(
                 "column `{col}` is not a valid identifier (or dotted `outer.inner` name)"
             ));
         }
@@ -1025,7 +1021,7 @@ fn validate_columns(columns: &[&str]) -> Result<(), ConfigError> {
         // ClickHouse rejects with DUPLICATE_COLUMN, a code the writer
         // classifies retryable, so it would loop forever. Reject at load.
         if !seen.insert(col) {
-            return fail(format!("column `{col}` is listed more than once"));
+            return Err(format!("column `{col}` is listed more than once"));
         }
     }
     Ok(())

@@ -43,13 +43,17 @@ fn aborted_records_stay_out_and_markers_do_not_hold_the_group_back() {
     let h = Harness::up();
     let mut params = PipelineParams::defaults("e2e-transactions", 19195);
 
-    // Each transaction's marker takes the one offset after its records.
-    let committed_first = 0..SIZE;
-    let aborted_middle = SIZE + 1..2 * SIZE + 1;
-    let committed_second = 2 * SIZE + 2..3 * SIZE + 2;
-    let aborted_tail = 3 * SIZE + 3..4 * SIZE + 3;
+    // Each transaction's marker takes the one offset after its records, and
+    // the broker may take offsets ahead of them too.
+    let lead = h.offsets_ahead_of_a_transaction();
+    let next = |after: i64| after + lead..after + lead + SIZE;
+    let committed_first = next(0);
+    let aborted_middle = next(committed_first.end + 1);
+    let committed_second = next(aborted_middle.end + 1);
+    let aborted_tail = next(committed_second.end + 1);
     let end = aborted_tail.end + 1;
     params.holes = vec![
+        (TRANSACTIONAL, 0..committed_first.start),
         (TRANSACTIONAL, committed_first.end..committed_second.start),
         (TRANSACTIONAL, committed_second.end..end),
     ];

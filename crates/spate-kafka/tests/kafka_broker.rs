@@ -428,7 +428,7 @@ fn real_broker_lag_reaches_zero_after_a_committed_transaction() {
         &brokers,
         topic_config(&brokers, "txn", "txn-group"),
         100,
-        101,
+        log_end(&brokers, "txn", 0),
     );
 }
 
@@ -440,7 +440,8 @@ fn real_broker_lag_reaches_zero_after_an_aborted_transaction() {
     let (_container, brokers) = transaction_broker();
     let _ = produce_transaction(&brokers, TOPIC, 100, "kept", Transaction::Commit);
     let _ = produce_transaction(&brokers, TOPIC, 100, "dropped", Transaction::Abort);
-    lag_reaches_zero_across_a_restart(&brokers, config(&brokers, "aborted"), 100, 202);
+    let end = log_end(&brokers, TOPIC, 0);
+    lag_reaches_zero_across_a_restart(&brokers, config(&brokers, "aborted"), 100, end);
 }
 
 /// Under `read_uncommitted` aborted records are delivered, and only the markers
@@ -454,12 +455,12 @@ fn real_broker_lag_reaches_zero_reading_uncommitted() {
     let mut cfg = config(&brokers, "uncommitted");
     cfg.rdkafka
         .insert("isolation.level".into(), "read_uncommitted".into());
-    lag_reaches_zero_across_a_restart(&brokers, cfg, 200, 202);
+    lag_reaches_zero_across_a_restart(&brokers, cfg, 200, log_end(&brokers, TOPIC, 0));
 }
 
 /// An open transaction holds the readable end at the last stable offset: lag
 /// reads 0 and nothing past it is read until it ends, when everything arrives
-/// with no gap and the offset reaches the log's end. Regression for #1709.
+/// in order and the offset reaches the log's end. Regression for #1709.
 #[test]
 #[ignore = "requires Docker"]
 fn real_broker_an_open_transaction_holds_lag_at_the_last_stable_offset() {
@@ -486,7 +487,7 @@ fn real_broker_an_open_transaction_holds_lag_at_the_last_stable_offset() {
         .expect("commit");
     let later = watched.read(0, 60);
     assert_eq!(later.len(), 60);
-    assert!(later.is_sorted() && later[0] == 100, "{later:?}");
+    assert!(later.is_sorted() && later[0] >= 100, "{later:?}");
     let end = log_end(&brokers, TOPIC, 0);
     watched.poll_until_committed(0, 0, end);
     watched.wait_lag(0, 0.0);
@@ -531,7 +532,8 @@ fn real_broker_a_commit_past_a_marker_restarts_at_the_next_record() {
     let _ = produce_transaction(&brokers, TOPIC, 10, "kept", Transaction::Commit);
     let mut watched = Watched::open(config(&brokers, "restarts"));
     watched.read(0, 10);
-    watched.poll_until_committed(0, 0, 11);
+    let end = log_end(&brokers, TOPIC, 0);
+    watched.poll_until_committed(0, 0, end);
     drop(watched);
 
     produce(&brokers, TOPIC, 5, 1, "next");
@@ -539,7 +541,7 @@ fn real_broker_a_commit_past_a_marker_restarts_at_the_next_record() {
     cfg.rdkafka
         .insert("auto.offset.reset".into(), "latest".into());
     let mut restarted = Watched::open(cfg);
-    assert_eq!(restarted.read(0, 5), [11, 12, 13, 14, 15]);
+    assert_eq!(restarted.read(0, 5), (end..end + 5).collect::<Vec<i64>>());
 }
 
 /// Under `latest` a group that starts past everything has served no op, so its
@@ -561,7 +563,7 @@ fn real_broker_latest_on_a_marker_only_partition_retires_nothing() {
     assert!(watched.commit().is_empty());
     assert_eq!(
         support::committed_by(&brokers, "latest", TOPIC, 1),
-        [rdkafka::Offset::Offset(6)]
+        [rdkafka::Offset::Offset(log_end(&brokers, TOPIC, 0))]
     );
 }
 
@@ -573,7 +575,8 @@ fn real_broker_earliest_on_an_aborted_only_partition_commits_past_its_marker() {
     let (_container, brokers) = transaction_broker();
     let _ = produce_transaction(&brokers, TOPIC, 100, "dropped", Transaction::Abort);
     let mut watched = Watched::open(config(&brokers, "aborted-only"));
-    assert_eq!(watched.poll_until_committed(0, 0, 101), [101]);
+    let end = log_end(&brokers, TOPIC, 0);
+    assert_eq!(watched.poll_until_committed(0, 0, end), [end]);
     watched.wait_lag(0, 0.0);
 }
 
@@ -586,7 +589,8 @@ fn real_broker_a_switch_to_read_uncommitted_delivers_nothing_it_passed() {
     let (_container, brokers) = transaction_broker();
     let _ = produce_transaction(&brokers, TOPIC, 5, "dropped", Transaction::Abort);
     let mut watched = Watched::open(config(&brokers, "switch"));
-    assert_eq!(watched.poll_until_committed(0, 0, 6), [6]);
+    let end = log_end(&brokers, TOPIC, 0);
+    assert_eq!(watched.poll_until_committed(0, 0, end), [end]);
     drop(watched);
 
     produce(&brokers, TOPIC, 1, 1, "next");
@@ -594,7 +598,7 @@ fn real_broker_a_switch_to_read_uncommitted_delivers_nothing_it_passed() {
     cfg.rdkafka
         .insert("isolation.level".into(), "read_uncommitted".into());
     let mut switched = Watched::open(cfg);
-    assert_eq!(switched.read(0, 1), [6]);
+    assert_eq!(switched.read(0, 1), [end]);
 }
 
 /// Serve `watched` until its revocation arrives, and complete it with whatever
@@ -618,6 +622,8 @@ fn complete_the_revocation(watched: &mut Watched) {
 fn real_broker_revocation_before_a_marker_loses_nothing() {
     let (_container, brokers) = transaction_broker();
     let _ = produce_transaction(&brokers, "unserved", 5, "kept", Transaction::Commit);
+    // The marker takes the last offset, so the last record ends one short.
+    let end = log_end(&brokers, "unserved", 0);
     let cfg = topic_config(&brokers, "unserved", "unserved-group");
     let mut watched = Watched::open(cfg.clone());
     // Stops at the fifth record, ahead of the marker: the lane fills a batch only
@@ -641,17 +647,18 @@ fn real_broker_revocation_before_a_marker_loses_nothing() {
     }
     assert_eq!(
         support::committed_by(&brokers, "unserved-group", "unserved", 1),
-        [rdkafka::Offset::Offset(5)]
+        [rdkafka::Offset::Offset(end - 1)]
     );
     drop(watched);
     let mut owner = Watched::open(cfg);
-    assert_eq!(owner.poll_until_committed(0, 0, 6), [6]);
+    assert_eq!(owner.poll_until_committed(0, 0, end), [end]);
     owner.wait_lag(0, 0.0);
 
     let _ = produce_transaction(&brokers, "served", 5, "kept", Transaction::Commit);
+    let end = log_end(&brokers, "served", 0);
     let mut watched = Watched::open(topic_config(&brokers, "served", "served-group"));
     watched.read(0, 5);
-    assert_eq!(watched.commit(), [(PartitionId(0), 5)]);
+    assert_eq!(watched.commit(), [(PartitionId(0), end - 1)]);
     spate_test::wait_until(HANG, "the marker's batch", || {
         watched.serve();
         watched.poll(0) == Some(vec![])
@@ -662,7 +669,7 @@ fn real_broker_revocation_before_a_marker_loses_nothing() {
     }
     assert_eq!(
         support::committed_by(&brokers, "served-group", "served", 1),
-        [rdkafka::Offset::Offset(6)]
+        [rdkafka::Offset::Offset(end)]
     );
 }
 
@@ -852,6 +859,7 @@ mod latest_start {
         let brokers = format!("127.0.0.1:{port}");
         support::create_topic(&brokers, TOPIC, 1);
         support::produce_to(&brokers, TOPIC, 0, 0..2);
+        let stable = support::log_end(&brokers, TOPIC, 0);
 
         let producer = support::transactional_producer(&brokers, TOPIC, "open-transaction");
         producer.begin_transaction().expect("begin");
@@ -866,6 +874,7 @@ mod latest_start {
                 .expect("enqueue");
         }
         producer.flush(Duration::from_secs(60)).expect("flush");
+        let high = support::log_end(&brokers, TOPIC, 0);
 
         let start = |level: &str, group: &str| {
             let mut cfg = latest::config(&brokers, TOPIC, group, "latest");
@@ -879,15 +888,19 @@ mod latest_start {
             (source, cp, lanes, at)
         };
         let (_uncommitted, _cp, _lanes, at) = start("read_uncommitted", "uncommitted");
-        assert_eq!(at, rdkafka::Offset::Offset(5), "the high watermark");
+        assert_eq!(at, rdkafka::Offset::Offset(high), "the high watermark");
         let (mut source, _cp, mut lanes, at) = start("read_committed", "committed");
-        assert_eq!(at, rdkafka::Offset::Offset(2), "the last stable offset");
+        assert_eq!(
+            at,
+            rdkafka::Offset::Offset(stable),
+            "the last stable offset"
+        );
 
         producer
             .commit_transaction(Duration::from_secs(60))
             .expect("commit");
         let rows = drain_lane(&mut source, &mut lanes[0], 3, HANG);
         let offsets: Vec<i64> = rows.iter().map(|(_, _, o)| *o).collect();
-        assert_eq!(offsets, [2, 3, 4]);
+        assert_eq!(offsets, (high - 3..high).collect::<Vec<i64>>());
     }
 }

@@ -423,6 +423,20 @@ impl Harness {
         )
     }
 
+    /// The offsets a transaction takes on a partition ahead of its records,
+    /// read from one committed record on a topic of its own: the end, less
+    /// that record and its marker.
+    pub fn offsets_ahead_of_a_transaction(&self) -> i64 {
+        const TOPIC: &str = "e2e-transaction-layout";
+        self.create_topic(TOPIC, 1);
+        let event = Event {
+            id: 0,
+            name: "layout".to_owned(),
+        };
+        self.produce_transaction(TOPIC, &[(0, event)], true);
+        self.end_offsets(TOPIC, 1)[0] - 2
+    }
+
     #[expect(
         clippy::disallowed_methods,
         reason = "the harness administers the broker outside the connector's client factory"

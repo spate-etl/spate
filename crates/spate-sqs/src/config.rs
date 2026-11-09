@@ -2,7 +2,7 @@
 
 use aws_sdk_sqs::config::endpoint::{DefaultResolver, Params, ResolveEndpoint as _};
 use serde::Deserialize;
-use spate_core::config::{ConfigError, FeedSection};
+use spate_core::config::{ConfigError, FeedSection, SectionPath};
 use std::time::Duration;
 use url::Url;
 
@@ -25,6 +25,16 @@ const MIN_SETTLING_WINDOW: Duration = Duration::from_secs(60);
 
 fn default_visibility() -> Duration {
     Duration::from_secs(60)
+}
+
+/// `queue_url` parsed as a URL.
+///
+/// # Errors
+///
+/// [`ConfigError::Component`] at `feed.sqs.queue_url` when it does not parse.
+pub(crate) fn queue_url(queue_url: &str) -> Result<Url, ConfigError> {
+    Url::parse(queue_url)
+        .map_err(|e| SectionPath::feed(BACKEND).invalid("queue_url", format!("is not a URL: {e}")))
 }
 
 /// The keys under `feed: { sqs: … }`.
@@ -50,9 +60,11 @@ impl SqsFeedConfig {
     /// Decode and check the `sqs:` body of `section`.
     pub(crate) fn from_section(section: &FeedSection) -> Result<SqsFeedConfig, ConfigError> {
         let config: SqsFeedConfig = section.backend_body(BACKEND, NAME)?;
+        // Both keys sit beside `sqs:`, so the refusal names the backend that
+        // refuses them.
+        let at = SectionPath::feed(BACKEND);
         if section.attempt_cap.is_some() {
-            return Err(FeedSection::backend_error(
-                BACKEND,
+            return Err(at.error(
                 "`attempt_cap` does not apply to `sqs`: SQS counts deliveries through the \
                  queue's `maxReceiveCount`",
             ));
@@ -60,48 +72,43 @@ impl SqsFeedConfig {
         if let Some(window) = section.settling_window
             && window < MIN_SETTLING_WINDOW
         {
-            return Err(FeedSection::backend_error(
-                BACKEND,
-                format!(
-                    "`settling_window` must be at least 1m on `sqs`, whose message counts take \
+            return Err(at.error(format!(
+                "`settling_window` must be at least 1m on `sqs`, whose message counts take \
                      at least a minute to settle; got {window:?}"
-                ),
-            ));
+            )));
         }
         config.validate()?;
         Ok(config)
     }
 
     fn validate(&self) -> Result<(), ConfigError> {
+        let at = SectionPath::feed(BACKEND);
         let v = self.visibility;
         if v.subsec_nanos() != 0 || !(MIN_VISIBILITY..=MAX_VISIBILITY).contains(&v) {
-            return Err(FeedSection::backend_error(
-                BACKEND,
-                format!("`visibility` must be whole seconds from 3s to 12h; got {v:?}"),
+            return Err(at.invalid(
+                "visibility",
+                format!("must be whole seconds from 3s to 12h; got {v:?}"),
             ));
         }
-        let url = Url::parse(&self.queue_url).map_err(|e| {
-            FeedSection::backend_error(BACKEND, format!("`queue_url` is not a URL: {e}"))
-        })?;
+        let url = queue_url(&self.queue_url)?;
         if !matches!(url.scheme(), "http" | "https") {
-            return Err(FeedSection::backend_error(
-                BACKEND,
+            return Err(at.invalid(
+                "queue_url",
                 format!(
-                    "`queue_url` must be an http or https URL; got scheme `{}`",
+                    "must be an http or https URL; got scheme `{}`",
                     url.scheme()
                 ),
             ));
         }
         if url.path().trim_end_matches('/').ends_with(".fifo") {
-            return Err(FeedSection::backend_error(
-                BACKEND,
-                "`queue_url` names a FIFO queue; the SQS feed reads standard queues only",
+            return Err(at.invalid(
+                "queue_url",
+                "names a FIFO queue; the SQS feed reads standard queues only",
             ));
         }
         if let Some(endpoint) = &self.endpoint {
-            Url::parse(endpoint).map_err(|e| {
-                FeedSection::backend_error(BACKEND, format!("`endpoint` is not a URL: {e}"))
-            })?;
+            Url::parse(endpoint)
+                .map_err(|e| at.invalid("endpoint", format!("is not a URL: {e}")))?;
         }
         Ok(())
     }
@@ -339,6 +346,84 @@ pub(crate) mod tests {
         );
         s.settling_window = None;
         SqsFeedConfig::from_section(&s).expect("no window loads");
+    }
+
+    fn refusal(result: Result<SqsFeedConfig, ConfigError>) -> (String, String) {
+        match result {
+            Err(e @ ConfigError::Component { .. }) => {
+                let ConfigError::Component { context, .. } = &e else {
+                    unreachable!()
+                };
+                (context.clone(), e.to_string())
+            }
+            other => panic!("expected a component error, got {other:?}"),
+        }
+    }
+
+    /// Pins each refusal in the `sqs:` body by its full text, starting at
+    /// the key it refuses.
+    #[test]
+    fn each_rule_names_the_key_it_refuses() {
+        let at = |key: &str| format!("feed.sqs.{key}");
+        let cases = [
+            (
+                "sqs: { queue_url: \"https://sqs.eu-west-2.amazonaws.com/1/q\", visibility: 2s }",
+                at("visibility"),
+                "feed.sqs.visibility: must be whole seconds from 3s to 12h; got 2s",
+            ),
+            (
+                "sqs: { queue_url: \"not a url\" }",
+                at("queue_url"),
+                "feed.sqs.queue_url: is not a URL: relative URL without a base",
+            ),
+            (
+                "sqs: { queue_url: \"ftp://x/1/q\" }",
+                at("queue_url"),
+                "feed.sqs.queue_url: must be an http or https URL; got scheme `ftp`",
+            ),
+            (
+                "sqs: { queue_url: \"https://sqs.eu-west-2.amazonaws.com/1/q.fifo\" }",
+                at("queue_url"),
+                "feed.sqs.queue_url: names a FIFO queue; the SQS feed reads standard queues only",
+            ),
+            (
+                "sqs: { queue_url: \"https://sqs.eu-west-2.amazonaws.com/1/q\", endpoint: \"not a url\" }",
+                at("endpoint"),
+                "feed.sqs.endpoint: is not a URL: relative URL without a base",
+            ),
+        ];
+        for (yaml, context, text) in cases {
+            assert_eq!(refusal(parse(yaml)), (context, text.to_owned()), "{yaml}");
+        }
+    }
+
+    /// Pins that the keys beside `sqs:` are refused at the section, since
+    /// neither sits under it.
+    #[test]
+    fn keys_beside_the_body_are_refused_at_the_section() {
+        let body = "sqs: { queue_url: \"https://sqs.eu-west-2.amazonaws.com/1/q\" }";
+        let mut s = section(body);
+        s.attempt_cap = NonZeroU32::new(3);
+        assert_eq!(
+            refusal(SqsFeedConfig::from_section(&s)),
+            (
+                "feed.sqs".to_owned(),
+                "feed.sqs: `attempt_cap` does not apply to `sqs`: SQS counts deliveries through \
+                 the queue's `maxReceiveCount`"
+                    .to_owned()
+            )
+        );
+        let mut s = section(body);
+        s.settling_window = Some(Duration::from_secs(59));
+        assert_eq!(
+            refusal(SqsFeedConfig::from_section(&s)),
+            (
+                "feed.sqs".to_owned(),
+                "feed.sqs: `settling_window` must be at least 1m on `sqs`, whose message counts \
+                 take at least a minute to settle; got 59s"
+                    .to_owned()
+            )
+        );
     }
 
     /// Pins the refusals: another backend's tag, reported at the section,

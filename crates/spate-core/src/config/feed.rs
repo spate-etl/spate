@@ -1,7 +1,7 @@
 //! The `feed:` section: the work feed a feed-reading source reads from, and
 //! the keys every backend shares.
 
-use super::{ComponentConfig, ConfigError, SectionPath, redact};
+use super::{ComponentConfig, ConfigError, redact};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use std::num::{NonZeroU32, NonZeroUsize};
@@ -182,13 +182,6 @@ impl FeedSection {
             });
         }
         self.backend.deserialize_into()
-    }
-
-    /// An error in the body of the backend keyed `tag`, with context
-    /// `feed.<tag>`.
-    #[must_use]
-    pub fn backend_error(tag: &str, message: impl Into<String>) -> ConfigError {
-        SectionPath::feed(tag).error(message)
     }
 }
 
@@ -411,13 +404,6 @@ mod tests {
         let s = parse("queue: { x: 7, y: 1 }\n").unwrap();
         let err = s.backend_body::<Body>("queue", "test queue").unwrap_err();
         assert!(err.to_string().starts_with("feed.queue"), "{err}");
-    }
-
-    /// Pins that a backend error carries the backend's path.
-    #[test]
-    fn a_backend_error_names_its_backend() {
-        let err = FeedSection::backend_error("queue", "`x` must not be empty");
-        assert_eq!(err.to_string(), "feed.queue: `x` must not be empty");
     }
 
     fn load(feed: &str) -> Result<crate::config::PipelineConfig, String> {

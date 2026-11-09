@@ -1,8 +1,8 @@
 //! The SDK client the feed talks through: its trust store, proxy, region,
 //! credentials, timeouts and retries.
 
-use crate::config::NAME;
 use crate::config::SqsFeedConfig;
+use crate::config::{BACKEND, NAME};
 use crate::credentials::SharedLoad;
 use crate::queue::SdkQueue;
 use aws_config::environment::region::EnvironmentVariableRegionProvider;
@@ -19,7 +19,7 @@ use aws_smithy_http_client::proxy::ProxyConfig;
 use aws_smithy_http_client::tls::rustls_provider::CryptoMode;
 use aws_smithy_http_client::tls::{Provider, TlsContext, TrustStore};
 use rustls_native_certs::CertificateResult;
-use spate_core::config::ConfigError;
+use spate_core::config::SectionPath;
 use spate_core::feed::ConnectError;
 use std::time::Duration;
 
@@ -113,12 +113,11 @@ async fn chain_region(http: &SharedHttpClient) -> Result<Region, ConnectError> {
 /// The region `chain` names, or the error that lists where to set one.
 async fn first_region(chain: &impl ProvideRegion) -> Result<Region, ConnectError> {
     chain.region().await.ok_or_else(|| {
-        ConnectError::Config(ConfigError::Component {
-            context: "feed.sqs.region".into(),
-            message: "no AWS region: set `region`, set AWS_REGION in the environment, or set \
-                      `region` in the shared config file's profile"
-                .into(),
-        })
+        ConnectError::Config(SectionPath::feed(BACKEND).invalid(
+            "region",
+            "no AWS region: set `region`, set AWS_REGION in the environment, or set `region` in \
+             the shared config file's profile",
+        ))
     })
 }
 
@@ -222,6 +221,7 @@ fn push_pem(out: &mut String, der: &[u8]) {
 mod tests {
     use super::*;
     use rustls::pki_types::CertificateDer;
+    use spate_core::config::ConfigError;
     use spate_test_support::{TestCa, native_certs, pem};
 
     /// Pins the fallback to the bundled roots when the system store yields

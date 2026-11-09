@@ -415,6 +415,17 @@ mod tests {
         }
     }
 
+    /// The refused names cover every setting an insert carries, and the
+    /// `database` the client sends.
+    #[test]
+    fn reserved_names_cover_the_insert_settings_and_the_database() {
+        let names: Vec<_> = reserved_names().collect();
+        for (name, _) in owned_settings("t", true) {
+            assert!(names.contains(&name), "{name}: {names:?}");
+        }
+        assert!(names.contains(&DATABASE), "{names:?}");
+    }
+
     /// Every insert, coded or not, holds `deduplicate_insert` at `enable`.
     #[test]
     fn every_insert_enables_deduplicate_insert() {

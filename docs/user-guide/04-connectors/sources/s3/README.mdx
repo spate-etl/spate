@@ -156,7 +156,7 @@ denied, such as `bucket_name`, `aws_bucket` and `Bucket`. The error names the
 key as written. When that is another spelling, the error also names `bucket`:
 
 ```text
-invalid configuration: source.s3.store."Bucket" cannot be overridden: owned by the typed `url` field (`Bucket` sets the same object_store option as `bucket`)
+source.s3: store."Bucket" cannot be overridden: owned by the typed `url` field (`Bucket` sets the same object_store option as `bucket`)
 ```
 
 For an S3 URL (`s3://`, `s3a://`, or an `https://` URL on an `amazonaws.com` or
@@ -166,7 +166,7 @@ accepts is recognized. A misspelled `endpoint` would otherwise leave the client
 on the default AWS endpoint with the configured credentials:
 
 ```text
-invalid configuration: source.s3.store."endpont" is not an object_store S3 option
+source.s3.store."endpont": is not an object_store S3 option
 ```
 
 The client for a `file://` URL reads no `store` options, and its keys are not

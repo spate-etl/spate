@@ -42,6 +42,13 @@ fn matching_columns() -> Vec<ColumnRow> {
     ])
 }
 
+/// Answers what building a sink asks one replica: the `system.columns` read,
+/// then the settings check.
+fn answer_build(mock: &Mock, columns: Vec<ColumnRow>) {
+    mock.add(handlers::provide(columns));
+    mock.add(handlers::provide::<u8>([1u8]));
+}
+
 async fn sink_for(url: &str) -> config::ClickHouseSink {
     sink_for_table(url, "orders").await
 }
@@ -108,7 +115,7 @@ async fn our_frames_decode_through_the_crates_deserializer() {
 #[tokio::test]
 async fn write_batch_sends_every_frame() {
     let mock = Mock::new();
-    mock.add(handlers::provide(matching_columns()));
+    answer_build(&mock, matching_columns());
     mock.add(handlers::provide::<u8>([]));
     let sink = sink_for(mock.url()).await;
 
@@ -121,7 +128,7 @@ async fn write_batch_sends_every_frame() {
 #[tokio::test]
 async fn transport_failures_are_retryable() {
     let mock = Mock::new();
-    mock.add(handlers::provide(matching_columns()));
+    answer_build(&mock, matching_columns());
     mock.add(handlers::failure(hyper::StatusCode::INTERNAL_SERVER_ERROR));
     let sink = sink_for(mock.url()).await;
 
@@ -136,7 +143,7 @@ async fn transport_failures_are_retryable() {
 #[tokio::test]
 async fn schema_class_exceptions_are_fatal() {
     let mock = Mock::new();
-    mock.add(handlers::provide(matching_columns()));
+    answer_build(&mock, matching_columns());
     // 60 = UNKNOWN_TABLE.
     mock.add(handlers::exception(60));
     let sink = sink_for(mock.url()).await;
@@ -153,7 +160,7 @@ async fn schema_class_exceptions_are_fatal() {
 #[tokio::test]
 async fn capacity_class_exceptions_stay_retryable() {
     let mock = Mock::new();
-    mock.add(handlers::provide(matching_columns()));
+    answer_build(&mock, matching_columns());
     // 252 = TOO_MANY_PARTS: transient merge pressure, retry is correct.
     mock.add(handlers::exception(252));
     let sink = sink_for(mock.url()).await;
@@ -192,7 +199,7 @@ async fn matching_schema_passes_and_first_record_encodes() {
     use spate_core::sink::RowEncoder;
 
     let mock = Mock::new();
-    mock.add(handlers::provide(matching_columns()));
+    answer_build(&mock, matching_columns());
     let sink = sink_for(mock.url()).await;
     let schema = sink.schema();
 
@@ -230,7 +237,7 @@ async fn struct_order_mismatch_is_fatal_at_the_first_record() {
     }
 
     let mock = Mock::new();
-    mock.add(handlers::provide(matching_columns()));
+    answer_build(&mock, matching_columns());
     let schema = sink_for(mock.url()).await.schema();
 
     let mut encoder = spate_clickhouse::ClickHouseEncoder::<Owned<WrongOrder>>::with_schema(schema);
@@ -270,7 +277,7 @@ async fn a_type_mismatch_is_fatal_at_the_first_record() {
     };
 
     let mock = Mock::new();
-    mock.add(handlers::provide(matching_columns()));
+    answer_build(&mock, matching_columns());
     let schema = sink_for(mock.url()).await.schema();
     let err = spate_clickhouse::ClickHouseEncoder::<Owned<WrongType>>::with_schema(schema)
         .encode(&record(wrong), &mut BytesMut::new())
@@ -319,10 +326,10 @@ shards:
     // The live table is micro precision; the struct declares milli via the
     // wrapper, so the first record is rejected before any block is built.
     let mock = Mock::new();
-    mock.add(handlers::provide(system_columns(&[
-        ("id", "UInt64", ""),
-        ("ts", "DateTime64(6)", ""),
-    ])));
+    answer_build(
+        &mock,
+        system_columns(&[("id", "UInt64", ""), ("ts", "DateTime64(6)", "")]),
+    );
     let schema = native_sink(mock.url())
         .await
         .native_schema()
@@ -339,10 +346,10 @@ shards:
 
     // The precision the wrapper declares encodes.
     let mock = Mock::new();
-    mock.add(handlers::provide(system_columns(&[
-        ("id", "UInt64", ""),
-        ("ts", "DateTime64(3)", ""),
-    ])));
+    answer_build(
+        &mock,
+        system_columns(&[("id", "UInt64", ""), ("ts", "DateTime64(3)", "")]),
+    );
     let schema = native_sink(mock.url())
         .await
         .native_schema()
@@ -402,7 +409,7 @@ shards:
     // raw values are 100x the column's. RowBinary rejects the first
     // record, before any frame is written.
     let mock = Mock::new();
-    mock.add(handlers::provide(mismatched_columns()));
+    answer_build(&mock, mismatched_columns());
     let schema = price_sink(mock.url(), "rowbinary").await.schema();
     let err = ClickHouseEncoder::<Owned<PriceRow>>::with_schema(schema)
         .encode(&record(row.clone()), &mut BytesMut::new())
@@ -411,7 +418,7 @@ shards:
 
     // Native reaches the same check through its own schema.
     let mock = Mock::new();
-    mock.add(handlers::provide(mismatched_columns()));
+    answer_build(&mock, mismatched_columns());
     let schema = price_sink(mock.url(), "native")
         .await
         .native_schema()
@@ -425,14 +432,14 @@ shards:
     let agreeing = || system_columns(&[("id", "UInt64", ""), ("amount", "Decimal(18, 4)", "")]);
 
     let mock = Mock::new();
-    mock.add(handlers::provide(agreeing()));
+    answer_build(&mock, agreeing());
     let schema = price_sink(mock.url(), "rowbinary").await.schema();
     ClickHouseEncoder::<Owned<PriceRow>>::with_schema(schema)
         .encode(&record(row.clone()), &mut BytesMut::new())
         .expect("rowbinary encodes an agreeing scale");
 
     let mock = Mock::new();
-    mock.add(handlers::provide(agreeing()));
+    answer_build(&mock, agreeing());
     let schema = price_sink(mock.url(), "native")
         .await
         .native_schema()
@@ -511,11 +518,14 @@ async fn the_deepest_accepted_column_type_builds_the_sink() {
     ] {
         for format in ["rowbinary", "native"] {
             let mock = Mock::new();
-            mock.add(handlers::provide(system_columns(&[
-                ("id", "UInt64", ""),
-                ("name", ty.as_str(), ""),
-                ("score", "Nullable(Float64)", ""),
-            ])));
+            answer_build(
+                &mock,
+                system_columns(&[
+                    ("id", "UInt64", ""),
+                    ("name", ty.as_str(), ""),
+                    ("score", "Nullable(Float64)", ""),
+                ]),
+            );
             let cfg: ClickHouseSinkConfig = serde_yaml::from_str(&format!(
                 "table: orders\nformat: {format}\ncompression: off\nshards:\n  - replicas: [\"{}\"]\n",
                 mock.url()
@@ -631,7 +641,7 @@ async fn probe_fn_covers_every_replica_with_its_own_clients() {
     // Healthy server: the probe closure succeeds and hits the mock once
     // per replica per call.
     let mock = Mock::new();
-    mock.add(handlers::provide(matching_columns()));
+    answer_build(&mock, matching_columns());
     let sink = sink_for(mock.url()).await;
     mock.add(handlers::provide::<u8>([1u8]));
     let probe = sink.probe_fn();
@@ -648,7 +658,7 @@ async fn probe_fn_covers_every_replica_with_its_own_clients() {
 
     // A server that stops answering after the sink is built: the probe fails.
     let dead = Mock::new();
-    dead.add(handlers::provide(matching_columns()));
+    answer_build(&dead, matching_columns());
     let sink = sink_for(dead.url()).await;
     dead.add(handlers::failure(hyper::StatusCode::SERVICE_UNAVAILABLE));
     assert!(sink.probe_fn()().await.is_err());
@@ -664,7 +674,7 @@ async fn replica_url_credentials_never_reach_debug_labels_or_errors() {
     let redacted = |url: &str| format!("{url}/?<redacted>");
 
     let mock = Mock::new();
-    mock.add(handlers::provide(matching_columns()));
+    answer_build(&mock, matching_columns());
     let sink = sink_for(&with_query(mock.url())).await;
     let printed = format!("{sink:?}");
     assert!(!printed.contains("hunter2"), "{printed}");
@@ -688,7 +698,7 @@ async fn replica_url_credentials_never_reach_debug_labels_or_errors() {
 #[tokio::test]
 async fn probe_maps_select_one() {
     let mock = Mock::new();
-    mock.add(handlers::provide(matching_columns()));
+    answer_build(&mock, matching_columns());
     let sink = sink_for(mock.url()).await;
     mock.add(handlers::provide::<u8>([1u8]));
     sink.writer
@@ -697,7 +707,7 @@ async fn probe_maps_select_one() {
         .expect("probe ok");
 
     let dead = Mock::new();
-    dead.add(handlers::provide(matching_columns()));
+    answer_build(&dead, matching_columns());
     let sink = sink_for(dead.url()).await;
     dead.add(handlers::failure(hyper::StatusCode::SERVICE_UNAVAILABLE));
     assert!(sink.writer.probe(&sink.endpoints[0][0]).await.is_err());
@@ -845,9 +855,13 @@ fn engine_row(engine: &str, engine_full: &str) -> EngineRow {
 /// before the guard's own handlers go on the queue behind it.
 async fn checked_sink(mock: &Mock, weights: &[u32], check: &str) -> config::ClickHouseSink {
     let url = mock.url();
-    // One replica per shard, and the fetch reads every one of them.
+    // One replica per shard. The fetch reads every one of them, then the
+    // settings check asks each of them.
     for _ in weights {
         mock.add(handlers::provide(matching_columns()));
+    }
+    for _ in weights {
+        mock.add(handlers::provide::<u8>([1u8]));
     }
     let shards: String = weights
         .iter()
@@ -884,12 +898,12 @@ async fn distributed_check_passes_when_cluster_and_ddl_match() {
 
 #[tokio::test]
 async fn distributed_check_off_issues_no_queries() {
-    // Only the schema fetch is answered. Nothing is queued behind it, and the
-    // mock panics on drop if a queued handler goes unconsumed, so a clean Ok
-    // proves the guard never talked to the server without a
+    // Only the build's two requests are answered. Nothing is queued behind
+    // them, and the mock panics on drop if a queued handler goes unconsumed,
+    // so a clean Ok proves the guard never talked to the server without a
     // `distributed_check` block.
     let mock = Mock::new();
-    mock.add(handlers::provide(matching_columns()));
+    answer_build(&mock, matching_columns());
     let sink = sink_for(mock.url()).await;
     sink.validate_distributed()
         .await

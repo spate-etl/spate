@@ -7,16 +7,10 @@
 
 use super::*;
 
-/// The settings and HTTP parameters the sink sets on an insert.
-const RESERVED: [&str; 7] = [
-    "insert_deduplication_token",
-    "insert_deduplicate",
-    "wait_end_of_query",
-    "input_format_with_names_use_header",
-    "input_format_with_types_use_header",
-    "decompress",
-    "database",
-];
+/// The settings and HTTP parameters the sink refuses in `settings`.
+fn reserved() -> Vec<&'static str> {
+    spate_clickhouse::testing::reserved_settings()
+}
 
 /// No setting is an alias of a reserved one, so an exact match catches every
 /// name the server reads as it.
@@ -27,7 +21,7 @@ async fn no_setting_is_an_alias_of_a_reserved_one() {
     let aliases: Vec<String> = srv
         .admin
         .query("SELECT name FROM system.settings WHERE has(?, alias_for)")
-        .bind(RESERVED.to_vec())
+        .bind(reserved())
         .fetch_all()
         .await
         .expect("read system.settings");
@@ -40,7 +34,7 @@ async fn no_setting_is_an_alias_of_a_reserved_one() {
 #[ignore = "requires Docker"]
 async fn a_reserved_name_spelled_otherwise_is_an_unknown_setting() {
     let srv = bare_server("case-secret").await;
-    for name in RESERVED {
+    for name in reserved() {
         for spelling in [name.to_ascii_uppercase(), format!(" {name}")] {
             // A database that exists: 26.3 matches `database` in any case and
             // checks the database before the setting names.

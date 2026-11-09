@@ -503,9 +503,11 @@ impl ClickHouseSinkBuilder {
     /// against that list, failing with a readable diff for a missing or
     /// non-insertable column, replica drift, or a missing table. The fetched
     /// types describe the rows on the wire in both formats, so there is no
-    /// sink without them. When `settings` is not empty, every replica is sent
-    /// them on a `SELECT 1`, and a setting one refuses fails the build with
-    /// the server's message.
+    /// sink without them. Every replica is then sent `deduplicate_insert` and
+    /// the `settings` on a `SELECT 1`, and a setting one refuses fails the
+    /// build with [`SchemaError::Settings`] and the server's message. That
+    /// covers a constraint pinning `deduplicate_insert` and a server before
+    /// 26.2, which does not know it.
     ///
     /// Run it on the builder's I/O runtime before the chain exists, via
     /// `pipeline.block_on`. `F` is not inferable from context, so name it:
@@ -560,16 +562,14 @@ impl ClickHouseSinkBuilder {
             self.cfg.timeouts.send,
             self.cfg.timeouts.end,
         );
-        if !self.cfg.settings.is_empty() {
-            for endpoint in self.endpoints.iter().flatten() {
-                writer
-                    .check_settings(endpoint)
-                    .await
-                    .map_err(|e| SchemaError::Settings {
-                        url: endpoint.display_url().to_string(),
-                        reason: crate::http::error_reason(&e),
-                    })?;
-            }
+        for endpoint in self.endpoints.iter().flatten() {
+            writer
+                .check_settings(endpoint)
+                .await
+                .map_err(|e| SchemaError::Settings {
+                    url: endpoint.display_url().to_string(),
+                    reason: crate::http::error_reason(&e),
+                })?;
         }
         tracing::info!(
             table = %self.cfg.table,
@@ -1306,6 +1306,21 @@ settings: { insert_quorum: "auto" }
             "sink.clickhouse: settings.\"database\" cannot be overridden: owned by the typed \
              `database` field: the startup checks read the table in that database, and inserts \
              go to the table they checked"
+        );
+    }
+
+    /// `deduplicate_insert` decides deduplication from ClickHouse 26.2, so a
+    /// configured `disable` fails validation.
+    #[test]
+    fn deduplicate_insert_is_a_reserved_setting() {
+        let err = refusal(from_component_config(&component(&format!(
+            "{MINIMAL}settings: {{deduplicate_insert: disable}}\n"
+        ))));
+        assert_eq!(
+            err,
+            "sink.clickhouse: settings.\"deduplicate_insert\" cannot be overridden: forced to \
+             `enable`, so the server deduplicates a retried batch by its token whatever the \
+             server or profile default"
         );
     }
 

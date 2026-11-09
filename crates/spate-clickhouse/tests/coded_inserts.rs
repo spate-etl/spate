@@ -22,6 +22,7 @@ mod http_server;
 
 use bytes::{BufMut, Bytes, BytesMut};
 use http_server::{BenchServer, Recorded};
+use spate_clickhouse::testing::insert_settings;
 use spate_clickhouse::{ClickHouseSink, Compression};
 use spate_core::error::ErrorClass;
 use spate_core::sink::{SealedBatch, ShardWriter, SinkBundle};
@@ -94,12 +95,11 @@ async fn stock_insert(
     };
     let mut insert = client
         .with_compression(method)
-        .insert_formatted_with(insert_sql.to_owned())
-        .with_setting("insert_deduplicate", "1")
-        .with_setting("wait_end_of_query", "1")
-        .with_setting("insert_deduplication_token", TOKEN)
-        .with_setting("input_format_with_names_use_header", "1")
-        .with_setting("input_format_with_types_use_header", "1");
+        .insert_formatted_with(insert_sql.to_owned());
+    // Uncoded: the stock client adds `decompress` itself when it compresses.
+    for (name, value) in insert_settings(TOKEN, false) {
+        insert = insert.with_setting(name, value);
+    }
     for frame in header.iter().chain(raw) {
         insert.send(frame.clone()).await.expect("the stock send");
     }
@@ -161,10 +161,10 @@ fn a_coded_insert_is_the_request_a_compressing_client_sends() {
             let requests = server.requests();
             assert_eq!(
                 requests.len(),
-                4,
-                "{case}: the schema query, two writes, the stock insert"
+                5,
+                "{case}: the schema query, the settings check, two writes, the stock insert"
             );
-            let (first, second, stock) = (&requests[1], &requests[2], &requests[3]);
+            let (first, second, stock) = (&requests[2], &requests[3], &requests[4]);
             assert!(first.body == second.body, "{case}: two writes, one body");
             assert_eq!(params(first), params(second), "{case}: two writes");
             assert_eq!(params(first), params(stock), "{case}: query pairs");
@@ -247,8 +247,8 @@ fn an_uncoded_frame_is_fatal_before_any_request() {
     }
     assert_eq!(
         server.requests().len(),
-        1,
-        "only the schema query reached the server"
+        2,
+        "only the build's schema query and settings check reached the server"
     );
 }
 
@@ -284,8 +284,8 @@ fn a_wrong_method_or_size_frame_is_fatal_before_any_request() {
     }
     assert_eq!(
         server.requests().len(),
-        1,
-        "only the schema query reached the server"
+        2,
+        "only the build's schema query and settings check reached the server"
     );
 }
 
@@ -315,8 +315,8 @@ fn an_uncoded_frame_after_a_coded_one_is_fatal_before_any_request() {
     assert!(reason.starts_with("frame 1 "), "{reason}");
     assert_eq!(
         server.requests().len(),
-        1,
-        "only the schema query reached the server"
+        2,
+        "only the build's schema query and settings check reached the server"
     );
 }
 

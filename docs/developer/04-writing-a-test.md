@@ -79,7 +79,8 @@ When a test needs several members, write its waits to accept a stable group in a
 [Wait for a signal the code publishes](05-flaky-tests.md#wait-for-a-signal-the-code-publishes) says how a test settles a group of several consumers.
 
 The ClickHouse sink's harness at this step is the `clickhouse` crate's mock server, `clickhouse::test::Mock`.
-Building a sink reads `system.columns`, so answer that query first with the rows from `spate_clickhouse::testing::system_columns`, as [`spate-clickhouse/tests/mock.rs`](repo:crates/spate-clickhouse/tests/mock.rs) does.
+Building a sink sends each replica two requests: it reads `system.columns`, then sends a `SELECT 1` carrying the insert settings.
+Answer the first with the rows from `spate_clickhouse::testing::system_columns` and the second with any row, as `answer_build` in [`spate-clickhouse/tests/mock.rs`](repo:crates/spate-clickhouse/tests/mock.rs) does.
 
 ### A container
 

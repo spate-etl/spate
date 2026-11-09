@@ -219,8 +219,8 @@ jobs:
   # pins each, and Dependabot moves them. The lane's filter leaves out the
   # suites that run only on the primary broker.
   kafka-brokers:
-    name: Kafka ${{ matrix.lane }}
-    runs-on: ubuntu-latest
+    name: Kafka ${{ matrix.lane }} (${{ matrix.arch }})
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-26.04-arm' || 'ubuntu-latest' }}
     # A false `if:` prevents a zero-leg matrix, as in `clickhouse-versions`.
     if: inputs.kafka-lanes != '[]'
     timeout-minutes: 60
@@ -231,6 +231,7 @@ jobs:
       # As in `clickhouse-versions`: a cancelled leg fails `CI gate` too.
       fail-fast: false
       matrix:
+        arch: [x64, arm64]
         include: ${{ fromJSON(inputs.kafka-lanes) }}
     env:
       SPATE_KAFKA_LANE: ${{ matrix.lane }}
@@ -259,7 +260,7 @@ jobs:
         if: always()
         with:
           report_paths: target/nextest/docker/junit.xml
-          check_name: Kafka ${{ matrix.lane }} test results
+          check_name: Kafka ${{ matrix.lane }} (${{ matrix.arch }}) test results
           detailed_summary: true
           include_passed: false
           flaky_summary: true
@@ -267,5 +268,5 @@ jobs:
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
-          name: junit-nextest-kafka-${{ matrix.lane }}
+          name: junit-nextest-kafka-${{ matrix.lane }}-${{ matrix.arch }}
           path: target/nextest/docker/junit.xml

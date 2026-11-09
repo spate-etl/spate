@@ -2012,6 +2012,10 @@ settings: { insert_quorum: "auto" }
             ))));
             assert_eq!(err, format!("sink.clickhouse.{want}"), "{body}");
         }
+        let expr = check("cluster: c, table: d, sharding_expr: \"cityHash64(id)\"");
+        if let Err(e) = from_component_config(&component(&format!("table: t\n{expr}"))) {
+            panic!("a non-empty sharding_expr must build: {e}");
+        }
         let err = refusal(from_component_config(&component(
             "table: \"a.b.c\"\nshards: [{replicas: [\"http://a\"]}]\n",
         )));

@@ -6,7 +6,8 @@ description: "An S3 run on a seeded in-process feed lists nothing, ends once the
 
 - **Status:** accepted
 - **Date:** 2026-11-09
-- **Supersedes:** [ADR-0076](0076-a-bounded-job-on-a-feed-ends-on-an-empty-feed-and-a-checked-dead-letter-destination.md)
+- **Supersedes:**
+  [ADR-0076](0076-a-bounded-job-on-a-feed-ends-on-an-empty-feed-and-a-checked-dead-letter-destination.md)
   (in part: only a solo run on the feed the runtime built ends with no window,
   and a non-empty dead-letter destination always ends a job `Stalled`)
 - **Superseded by:** —

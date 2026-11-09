@@ -68,9 +68,10 @@ process exits non-zero. A stalled job never reports success over a unit it did
 not read. A restart does not help, since the units sit in the dead-letter
 destination; fix what made them fail, then re-run the job with them.
 
-A run on an in-process feed that code [seeded](09-work-feed.mdx#how-a-bounded-job-ends)
-is not a bounded job. Its source can end it without failing over dead
-letters, because the code that seeded the feed reads them from it.
+A run on an in-process feed that code
+[seeded](09-work-feed.mdx#how-a-bounded-job-ends) is not a bounded job. Its
+source can end it without failing over dead letters, because the code that
+seeded the feed reads them from it.
 
 A job that runs until a shutdown, with no job location, does not end over its
 dead-letter destination and keeps reading past it. The runtime publishes the

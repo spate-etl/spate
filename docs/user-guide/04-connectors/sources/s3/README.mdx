@@ -404,20 +404,19 @@ second at the defaults, each unit up to 16 small objects. A batch that reaches
 either threshold seals without waiting for the linger. A lower `batch.linger`
 or more units held raises the ceiling.
 
-On a durable
-feed the source lists nothing. It reads the units and storage notifications
-published to the feed, and publishes only the notification unit it
-re-enqueues after an overwrite; a startup WARN says so. On
-the in-process feed the run lists the prefix into that feed, and code may also
-publish to a `MemoryFeed` it keeps a handle to and passes to `Pipeline::feed`
-with `feed: { memory: {} }` in the file. Units from another process need a
-durable [feed backend](../../feeds/README.mdx). A bounded job ends on its own,
-as [How a bounded job ends](#how-a-bounded-job-ends) describes, and so does a
-solo run on the in-process feed the runtime built, once its listing is read. A
-run on a [seeded feed](#a-run-on-a-seeded-feed) ends once every unit in it is
-settled. A run given a `MemoryFeed` through `Pipeline::feed`, and any job on a
-durable feed with no `location`, ends at a shutdown. A lister run ends once it has published the
-listing.
+On a durable feed the source lists nothing. It reads the units and storage
+notifications published to the feed, and publishes only the notification unit it
+re-enqueues after an overwrite; a startup WARN says so. On the in-process feed
+the run lists the prefix into that feed, and code may also publish to a
+`MemoryFeed` it keeps a handle to and passes to `Pipeline::feed` with
+`feed: { memory: {} }` in the file. Units from another process need a durable
+[feed backend](../../feeds/README.mdx). A bounded job ends on its own, as
+[How a bounded job ends](#how-a-bounded-job-ends) describes, and so does a solo
+run on the in-process feed the runtime built, once its listing is read. A run on
+a [seeded feed](#a-run-on-a-seeded-feed) ends once every unit in it is settled.
+A run given a `MemoryFeed` through `Pipeline::feed`, and any job on a durable
+feed with no `location`, ends at a shutdown. A lister run ends once it has
+published the listing.
 
 ### A graceful stop
 

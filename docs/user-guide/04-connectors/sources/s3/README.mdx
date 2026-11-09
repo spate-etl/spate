@@ -332,7 +332,9 @@ section names. On a durable feed it lists nothing itself: a bounded job's units
 come from a [lister run](#the-lister-run), and a continuous job's from
 [storage notifications](#storage-notifications) or code. On the in-process feed
 the run lists the prefix itself; see
-[A solo run on the in-process feed](#a-solo-run-on-the-in-process-feed). Every
+[A solo run on the in-process feed](#a-solo-run-on-the-in-process-feed). On an
+in-process feed that code seeded the source lists nothing; see
+[A run on a seeded feed](#a-run-on-a-seeded-feed). Every
 delivery is read in full, resuming from no earlier delivery, and the unit is
 acknowledged once the sink has acknowledged every record in it. Two units are
 the exceptions: a notification unit whose object is overwritten while it is
@@ -402,19 +404,19 @@ second at the defaults, each unit up to 16 small objects. A batch that reaches
 either threshold seals without waiting for the linger. A lower `batch.linger`
 or more units held raises the ceiling.
 
-On a durable
-feed the source lists nothing. It reads the units and storage notifications
-published to the feed, and publishes only the notification unit it
-re-enqueues after an overwrite; a startup WARN says so. On
-the in-process feed the run lists the prefix into that feed, and code may also
-publish to a `MemoryFeed` it keeps a handle to and passes to `Pipeline::feed`
-with `feed: { memory: {} }` in the file. Units from another process need a
-durable [feed backend](../../feeds/README.mdx). A bounded job ends on its own,
-as [How a bounded job ends](#how-a-bounded-job-ends) describes, and so does a
-solo run on the in-process feed the runtime built, once its listing is read. A
-run given a `MemoryFeed` in code, and any job on a durable feed with no
-`location`, ends at a shutdown. A lister run ends once it has published the
-listing.
+On a durable feed the source lists nothing. It reads the units and storage
+notifications published to the feed, and publishes only the notification unit it
+re-enqueues after an overwrite; a startup WARN says so. On the in-process feed
+the run lists the prefix into that feed, and code may also publish to a
+`MemoryFeed` it keeps a handle to and passes to `Pipeline::feed` with
+`feed: { memory: {} }` in the file. Units from another process need a durable
+[feed backend](../../feeds/README.mdx). A bounded job ends on its own, as
+[How a bounded job ends](#how-a-bounded-job-ends) describes, and so does a solo
+run on the in-process feed the runtime built, once its listing is read. A run on
+a [seeded feed](#a-run-on-a-seeded-feed) ends once every unit in it is settled.
+A run given a `MemoryFeed` through `Pipeline::feed`, and any job on a durable
+feed with no `location`, ends at a shutdown. A lister run ends once it has
+published the listing.
 
 ### A graceful stop
 
@@ -455,7 +457,8 @@ startup WARN says so. A solo run on the in-process feed the runtime built ends
 by itself once its listing is published and every unit is read, with no
 settling window; when the in-process dead-letter list then holds a unit it
 fails as a [stalled job](#how-a-bounded-job-ends). A run given a `MemoryFeed`
-in code ends at a shutdown, since code may publish to it after the listing.
+through `Pipeline::feed` ends at a shutdown, since code may publish to it after
+the listing.
 Two solo instances, on one host or several, each list
 and read the whole prefix. The listing publishes as fast as the store lists,
 and the in-process feed holds one unit for each listed part not yet read, in
@@ -463,6 +466,43 @@ memory and outside `units_held`. A single instance that must resume reads a
 durable feed with a `location`, filled by a separate
 [lister run](#the-lister-run).
 :::
+
+### A run on a seeded feed
+
+Code can fill a `MemoryFeed` before the run and pass it with
+`Pipeline::seeded_feed`, with `feed: { memory: {} }` in the file. The source
+lists nothing on a seeded feed, and a startup INFO line says so. It reads the
+units and [storage notifications](#storage-notifications) the feed holds.
+
+The run ends by itself once the feed holds no unit waiting or held, with no
+settling window. Every unit is then either acknowledged or on the feed's
+dead-letter list.
+
+A dead-lettered unit does not fail a seeded run. The source logs a WARN with
+the count of dead letters, and the run exits `Completed`, because the code
+that seeded the feed still holds it and reads the units from
+`MemoryFeed::dead_letters`. A run stopped by a shutdown also exits
+`Completed`, and `MemoryFeed::unsettled` then names the units it did not
+finish.
+
+:::danger `Completed` does not mean every unit was read
+On a seeded run the exit state is not a per-unit status. A unit is done only
+when neither `MemoryFeed::dead_letters` nor `MemoryFeed::unsettled` names it.
+Code that reports every unit as done after a `Completed` exit loses the
+dead-lettered ones.
+:::
+
+Nothing publishes into a seeded feed once the run starts, apart from the
+notification unit the source re-enqueues after an overwrite. A unit that code
+publishes later can be left unread.
+
+A feed passed in code keeps the delivery cap it was built with, such as
+`MemoryFeed::with_attempt_cap`. The `feed:` section's
+[`attempt_cap`](../../../07-reference/configuration.mdx#feed) still caps the
+source's re-enqueues.
+
+The source refuses a seeded feed on any other backend when the pipeline
+starts, because only the in-process feed counts its units exactly.
 
 ### Storage notifications
 
@@ -804,6 +844,9 @@ at startup. The
 states the rule, and each [feed's page](../../feeds/README.mdx) how it reads its
 depth.
 
+A run on a [seeded feed](#a-run-on-a-seeded-feed) is no bounded job, and it
+exits `Completed` with dead letters.
+
 When the dead-letter destination holds units, the job ends **stalled**: the
 run fails with an error that includes `bounded feed job stalled:` and names the
 destination and its count, and the process exits non-zero. To re-run a stalled
@@ -966,7 +1009,9 @@ feed dead-letters it at its cap. A unit of several small objects fails back with
 all of them, and the feed dead-letters them together. A bounded job with a
 dead-lettered unit ends **stalled**, which is fatal, so `run()` returns
 `ExitState::Failed` rather than a silently partial `Completed`, as
-[How a bounded job ends](#how-a-bounded-job-ends) describes.
+[How a bounded job ends](#how-a-bounded-job-ends) describes. A run on a
+[seeded feed](#a-run-on-a-seeded-feed) exits `Completed` with the unit on the
+feed's dead-letter list.
 
 A unit moved back from the dead-letter destination, as the
 [SQS feed](../../feeds/sqs/README.mdx#redriving-dead-lettered-units) and the

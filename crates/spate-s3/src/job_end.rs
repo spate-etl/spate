@@ -6,7 +6,10 @@
 //! empty. A solo run on the in-process feed the runtime built ends once its
 //! lister has finished and the feed reads empty, with no window. Either way
 //! the feed's dead-letter destination then decides between a completed and a
-//! stalled job. Every read runs on the I/O runtime or the feed's own task,
+//! stalled job. A run on an in-process feed that code seeded has no lister and
+//! ends once the feed reads empty; its dead letters are logged and do not
+//! stall it, since the code that seeded the feed reads them from it. Every
+//! read runs on the I/O runtime or the feed's own task,
 //! and the reader only checks its outcome, so no poll waits on it.
 
 use crate::location::{Location, read_end};
@@ -32,6 +35,8 @@ pub(crate) enum Finish {
     },
     /// The solo run's own lister, which reports its completion here.
     Solo { finished: bool },
+    /// No lister: code seeded the in-process feed with the run's whole input.
+    Seeded,
 }
 
 /// The answer of one end-marker read.
@@ -41,7 +46,8 @@ type MarkerAnswer = oneshot::Receiver<Result<Option<String>, SourceError>>;
 pub(crate) struct JobEnd {
     finish: Finish,
     /// Built at the first idle poll that may start it: at once on a job
-    /// location, after the lister has finished on a solo run.
+    /// location or a seeded feed, after the lister has finished on a solo
+    /// run.
     check: Option<EndCheck>,
     clock: Arc<dyn Clock>,
     handle: tokio::runtime::Handle,
@@ -127,6 +133,14 @@ impl JobEnd {
         }
     }
 
+    /// What ends here, for a log line: a seeded run is no bounded job.
+    pub(crate) fn subject(&self) -> &'static str {
+        match self.finish {
+            Finish::Marker { .. } | Finish::Solo { .. } => "the bounded job",
+            Finish::Seeded => "the seeded run",
+        }
+    }
+
     /// Whether the check ended the job stalled.
     pub(crate) fn stalled(&self) -> bool {
         matches!(
@@ -143,7 +157,7 @@ impl JobEnd {
     /// # Errors
     ///
     /// Fatal when the dead-letter destination holds units (the job is
-    /// stalled), when the feed reports no depth, on a fatal feed or marker
+    /// stalled) on any feed but a seeded one, when the feed reports no depth, on a fatal feed or marker
     /// read error, and as `receive` returns.
     pub(crate) fn idle(
         &mut self,
@@ -158,7 +172,7 @@ impl JobEnd {
         if self.check.is_none() {
             self.check = Some(match &self.finish {
                 Finish::Marker { window, .. } => EndCheck::windowed(*window, now),
-                Finish::Solo { finished: true } => EndCheck::exact(now),
+                Finish::Solo { finished: true } | Finish::Seeded => EndCheck::exact(now),
                 Finish::Solo { finished: false } => return Ok(false),
             });
         }
@@ -242,8 +256,9 @@ impl JobEnd {
                 }
                 EndAction::Ended(EndOutcome::Completed) => {
                     tracing::info!(
-                        "the bounded job has read all of its work and its dead-letter \
-                         destination is empty; ending the run"
+                        "{} has read all of its work and its dead-letter destination is \
+                         empty; ending the run",
+                        self.subject()
                     );
                     return Ok(true);
                 }
@@ -253,6 +268,15 @@ impl JobEnd {
                     let next = match self.finish {
                         Finish::Marker { .. } => "copy them into a re-run's feed",
                         Finish::Solo { .. } => "run the job again",
+                        // The code that seeded the feed still holds it.
+                        Finish::Seeded => {
+                            tracing::warn!(
+                                "the seeded feed has no unit left to read and its dead-letter \
+                                 destination holds units ({depth}); ending the run, and the \
+                                 code that seeded the feed reads them from it"
+                            );
+                            return Ok(true);
+                        }
                     };
                     return Err(SourceError::fatal(format!(
                         "bounded feed job stalled: the dead-letter destination holds units \
@@ -338,6 +362,82 @@ mod tests {
         });
         assert!(took_none.unwrap(), "an empty receive lets the job complete");
         assert_eq!(receives.get(), 2);
+    }
+
+    /// Pins that a seeded check ends the job over a dead letter and logs the
+    /// dead-letter destination's depth, where every other check fails the
+    /// run as stalled.
+    #[test]
+    fn a_seeded_check_completes_over_dead_letters_and_logs_their_count() {
+        let rt = runtime();
+        let (feed, script) = spate_test::scripted_feed();
+        let receipt = script.deliver(spate_core::feed::Unit::new("a", b"a".to_vec()));
+        script.dead_letter(receipt);
+        let mut end = JobEnd::new(
+            Finish::Seeded,
+            TestClock::frozen(),
+            rt.handle().clone(),
+            StopSignal::default(),
+        );
+        let mut ended = None;
+        let logs = spate_test::capture_logs(tracing::Level::WARN, || {
+            ended = Some(end.idle(&feed, || Ok(Some(0))));
+        });
+        assert!(ended.unwrap().unwrap(), "the seeded job did not end");
+        let lines: Vec<&str> = logs
+            .iter()
+            .filter_map(|l| l.find("the seeded feed").map(|at| &l[at..]))
+            .collect();
+        assert_eq!(
+            lines,
+            vec![
+                "the seeded feed has no unit left to read and its dead-letter destination \
+                 holds units (the scripted dead-letter destination: 1 visible, 0 delayed, 0 in \
+                 flight, 0 unsent); ending the run, and the code that seeded the feed reads \
+                 them from it"
+            ],
+            "{logs:#?}"
+        );
+
+        let mut solo = solo(&rt);
+        let err = solo.idle(&feed, || Ok(Some(0))).unwrap_err().to_string();
+        assert!(err.contains("bounded feed job stalled"), "{err}");
+    }
+
+    /// Pins that the line logged at a clean end names a seeded run as one,
+    /// and any other job as a bounded job.
+    #[test]
+    fn the_end_line_names_a_seeded_run() {
+        let rt = runtime();
+        let ended = |mut end: JobEnd| {
+            let (feed, _script) = spate_test::scripted_feed();
+            let logs = spate_test::capture_logs(tracing::Level::INFO, || {
+                assert!(end.idle(&feed, || Ok(Some(0))).unwrap());
+            });
+            logs.iter()
+                .filter_map(|l| l.find("the ").map(|at| l[at..].to_owned()))
+                .collect::<Vec<_>>()
+        };
+        let seeded = JobEnd::new(
+            Finish::Seeded,
+            TestClock::frozen(),
+            rt.handle().clone(),
+            StopSignal::default(),
+        );
+        assert_eq!(
+            ended(seeded),
+            vec![
+                "the seeded run has read all of its work and its dead-letter destination is \
+                 empty; ending the run"
+            ]
+        );
+        assert_eq!(
+            ended(solo(&rt)),
+            vec![
+                "the bounded job has read all of its work and its dead-letter destination is \
+                 empty; ending the run"
+            ]
+        );
     }
 
     /// Pins that a marker read signals the reader's waker when it finishes,

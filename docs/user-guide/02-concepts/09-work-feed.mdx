@@ -109,8 +109,14 @@ Every worker runs the check and keeps receiving until it passes, idle or not,
 so a unit a stopped peer held still has a reader when the feed delivers it
 again. A solo run on the in-process feed the runtime built has exact counts and
 its own lister, so it ends once its listing is read and the feed is empty, with
-no window. A run given an in-process feed in code runs until a shutdown, since
-code may publish to it after the listing.
+no window. A run given an in-process feed through `Pipeline::feed` runs until a
+shutdown, since code may publish to it after the listing.
+
+Code that fills an in-process feed before the run and publishes nothing into
+it afterwards passes it as seeded. A source can end a seeded run once the feed
+is empty, and can end it without failing when the feed holds dead letters,
+because that code still holds the feed and reads them. The source's page says
+whether it does.
 
 A unit the feed itself deletes before anyone reads it, at the end of the feed's
 retention, leaves no trace, and the job can end over it. A bounded job cannot

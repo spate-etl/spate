@@ -712,6 +712,42 @@ fn the_open_log_states_units_held_and_its_origin() {
     }
 }
 
+/// Pins that `open` on a seeded in-process feed logs at INFO that it lists
+/// nothing, and logs neither the solo lister's WARN nor a durable feed's.
+#[test]
+fn the_open_log_on_a_seeded_feed_is_info() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    let config =
+        PipelineConfig::from_str(&PipelineYaml::file("s3-feed-seeded-log", &data).build()).unwrap();
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    let mut source =
+        line_framer(S3Source::from_component_config(&config.source, rt.handle().clone()).unwrap());
+    let section = FeedSection::new(spate_test::component_config("memory", "{}"));
+    source
+        .configure_feed(&section, Arc::new(MemoryFeed::new()), FeedOrigin::Seeded)
+        .unwrap();
+    let lines = spate_test::capture_logs(tracing::Level::INFO, || {
+        source
+            .open(SourceCtx::new(Checkpointer::new().handle()))
+            .unwrap();
+    });
+    let lists: Vec<&String> = lines.iter().filter(|l| l.contains(" lists ")).collect();
+    assert_eq!(lists.len(), 1, "{lines:#?}");
+    assert!(
+        lists[0].contains("INFO")
+            && lists[0].ends_with(
+                "the S3 source lists nothing on a seeded feed: it reads the units the feed \
+                 holds, and ends the run once each is acknowledged or dead-lettered"
+            ),
+        "{lines:#?}"
+    );
+}
+
 /// Launch over `feed` with one record per source batch and one row per sink
 /// write, so an object's records span many sink writes.
 fn launch_one_row_writes(
@@ -1982,4 +2018,44 @@ fn rt_block_on<F: std::future::Future>(f: F) -> F::Output {
         .build()
         .unwrap()
         .block_on(f)
+}
+
+/// Pins that a seeded run reads the unit it re-enqueues after an overwrite
+/// before it ends: the run ends `Completed` with both units acknowledged and
+/// the object's current rows written.
+#[test]
+fn a_seeded_run_reads_its_re_enqueue_before_it_ends() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    stage(&data, "a.ndjson", &recs("old", 4));
+    let (old_etag, old_size) = (etag_of(&data, "a.ndjson"), size_of(&data, "a.ndjson"));
+    let current = recs("current", 7);
+    stage(&data, "a.ndjson", &current);
+    let feed = MemoryFeed::new();
+    drop(feed.publish(pinned_notification("a.ndjson", old_size, &old_etag, 0)));
+    let store = ScriptedStore::new(dir.path());
+    let yaml = PipelineYaml::endpoint("s3-seeded-overwrite", "http://127.0.0.1:9")
+        .source("chunk_bytes", "64KiB")
+        .source("prefetch_bytes", "64KiB")
+        .build();
+    assert!(yaml.contains("memory"), "{yaml}");
+    let l = support::launch_with_seeded_feed(
+        &yaml,
+        test_options(),
+        |_| {},
+        Arc::new(feed.clone()),
+        move |source, _io| line_framer(source).with_store(store),
+    );
+    let report = l
+        .run
+        .wait_exit(DEADLINE)
+        .expect("the run exits")
+        .expect("the run starts");
+    assert_eq!(report.state, ExitState::Completed);
+    let c = feed.counts();
+    assert_eq!(
+        (c.visible, c.held, c.dead_lettered, c.acknowledged),
+        (0, 0, 0, 2)
+    );
+    assert_eq!(sorted(written_rows(&l.script)), sorted(current));
 }

@@ -22,8 +22,10 @@
 //! its lister writes there, refuses to start when it differs from its own,
 //! and ends once the lister's end marker holds over a settling window in
 //! which the feed reads empty. A solo run on the in-process feed the runtime
-//! built ends once its listing is read. Any other job on a feed ends at a
-//! shutdown.
+//! built ends once its listing is read. A run on an in-process feed code
+//! passed with `Pipeline::seeded_feed` lists nothing and ends once every unit
+//! is acknowledged or dead-lettered, and its dead letters do not fail it. Any
+//! other job on a feed ends at a shutdown.
 //!
 //! # Shape
 //!

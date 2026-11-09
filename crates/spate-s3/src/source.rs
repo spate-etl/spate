@@ -80,13 +80,12 @@ pub struct S3Source {
     clock: Arc<dyn Clock>,
     /// The `feed:` section's settling window, or its default.
     settling_window: Duration,
-    /// Whether `open` runs a lister into the feed: set by a `feed:` section
-    /// naming the in-process feed, which no other process can publish to.
+    /// Whether `open` runs a lister into the feed: on the in-process feed,
+    /// which no other process can publish to, unless code seeded it.
     solo_lister: bool,
-    /// Whether the solo run ends once its lister has finished: only on the
-    /// in-process feed the runtime built, since code holding a `MemoryFeed`
-    /// it passed in may publish into it after the listing.
-    solo_ends: bool,
+    /// How a run on the in-process feed ends by itself. `None` on a feed code
+    /// passed in and may still publish into, and on a durable feed.
+    ends: Option<SoloEnd>,
     /// The solo run's lister, while it runs. Dropping the source aborts it;
     /// its units live in this process's feed, so nothing durable is lost.
     lister_task: Option<TaskHandle<Result<(), SourceError>>>,
@@ -126,7 +125,7 @@ impl S3Source {
             clock: Arc::new(SystemClock),
             settling_window: spate_core::feed::DEFAULT_SETTLING_WINDOW,
             solo_lister: false,
-            solo_ends: false,
+            ends: None,
             lister_task: None,
             state: State::Created,
         }
@@ -559,12 +558,27 @@ impl Source for S3Source {
                     .into(),
             });
         }
+        if origin == FeedOrigin::Seeded && !memory {
+            return Err(ConfigError::Component {
+                context: "feed".into(),
+                message: format!(
+                    "the S3 source ends a seeded run on exact counts, which only the \
+                     in-process `memory` feed gives; pass the `{}` feed with `Pipeline::feed`",
+                    feed.backend()
+                ),
+            });
+        }
         self.feed = Some(feed);
         self.units_held = section.units_held;
         self.re_enqueue_cap = section.attempt_cap_or_default().get();
         self.settling_window = section.settling_window_or_default();
-        self.solo_lister = memory;
-        self.solo_ends = memory && origin == FeedOrigin::Section;
+        self.solo_lister = memory && origin != FeedOrigin::Seeded;
+        self.ends = match origin {
+            FeedOrigin::Section if memory => Some(SoloEnd::AfterListing),
+            // Refused above on any other backend.
+            FeedOrigin::Seeded => Some(SoloEnd::Seeded),
+            _ => None,
+        };
         Ok(())
     }
 
@@ -613,15 +627,14 @@ impl Source for S3Source {
         // Each depth is asked once here, before the fingerprint wait, so a
         // feed that cannot count fails the job at its start, never at its
         // end.
-        if (self.location.is_some() || self.solo_ends)
+        if (self.location.is_some() || self.ends.is_some())
             && [DepthOf::Feed, DepthOf::DeadLetters]
                 .into_iter()
                 .any(|of| feed.read_depth(of).is_none())
         {
             return Err(no_depth(feed.as_ref()));
         }
-        let mut finish = None;
-        if let Some(location) = &self.location {
+        let finish = if let Some(location) = &self.location {
             let location_store = self.location_store(location)?;
             let mine = feed_fingerprint(
                 &self.config.url,
@@ -642,14 +655,17 @@ impl Source for S3Source {
                 &ctx.stop,
                 self.settling_window,
             ))?;
-            finish = Some(Finish::Marker {
+            Some(Finish::Marker {
                 store: location_store,
                 location: location.clone(),
                 window: self.settling_window,
-            });
-        } else if self.solo_ends {
-            finish = Some(Finish::Solo { finished: false });
-        }
+            })
+        } else {
+            self.ends.map(|ends| match ends {
+                SoloEnd::AfterListing => Finish::Solo { finished: false },
+                SoloEnd::Seeded => Finish::Seeded,
+            })
+        };
         let end = finish.map(|finish| {
             JobEnd::new(
                 finish,
@@ -698,6 +714,11 @@ impl Source for S3Source {
             // On the I/O runtime, so the source thread reads units while
             // the listing runs; `poll_events` checks its outcome.
             self.lister_task = Some(task::spawn_on("s3-lister", lister.run(), &self.handle));
+        } else if self.ends == Some(SoloEnd::Seeded) {
+            tracing::info!(
+                "the S3 source lists nothing on a seeded feed: it reads the units the feed \
+                     holds, and ends the run once each is acknowledged or dead-lettered"
+            );
         } else {
             tracing::warn!(
                 feed = feed.backend(),
@@ -794,6 +815,16 @@ impl Source for S3Source {
             State::Created => Ok(()),
         }
     }
+}
+
+/// How a run on the in-process feed ends by itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SoloEnd {
+    /// The runtime built the feed: the run ends once its own lister has
+    /// finished and the feed reads empty.
+    AfterListing,
+    /// Code seeded the feed: the run ends once the feed reads empty.
+    Seeded,
 }
 
 /// Where the units held at once come from.

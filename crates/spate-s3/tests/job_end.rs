@@ -2,7 +2,8 @@
 //! lister run's end marker holds over a settling window of empty feed reads,
 //! and ends `Stalled` when the feed's dead-letter destination then holds
 //! units. A solo run on the in-process feed the runtime built ends once its
-//! lister has finished and the feed reads empty. Every timed rule runs on a
+//! lister has finished and the feed reads empty, and a run on a seeded
+//! in-process feed once that feed reads empty. Every timed rule runs on a
 //! test clock the test advances, 15 s at a time, the end check's read step.
 
 mod support;
@@ -24,8 +25,8 @@ use std::time::Duration;
 use support::location::{LocationHooks, location_store};
 use support::{
     Launched, PipelineYaml, captured_rows, fingerprint, launch_customized, launch_with_feed,
-    launch_with_feed_on_clock, line_framer, lines_bytes, recs, sorted, stop, test_options,
-    two_range_unit, unit_over,
+    launch_with_feed_on_clock, launch_with_seeded_feed, line_framer, lines_bytes, recs, sorted,
+    stop, test_options, two_range_unit, unit_over,
 };
 
 const DEADLINE: Duration = Duration::from_secs(30);
@@ -1179,4 +1180,174 @@ fn a_solo_run_given_a_feed_in_code_keeps_running() {
     });
     assert!(running(&l));
     stop(&l);
+}
+
+/// A run over `data` on `feed`, passed as seeded, with the end check on a
+/// clock that never moves.
+fn launch_seeded(data: &Path, feed: &MemoryFeed) -> Launched {
+    let yaml = PipelineYaml::file("s3-job-end-seeded", data)
+        .section("feed:\n  memory: {}\n")
+        .build();
+    launch_with_seeded_feed(
+        &yaml,
+        options(),
+        |_| {},
+        Arc::new(feed.clone()),
+        |source, _io| line_framer(source).with_clock(TestClock::frozen()),
+    )
+}
+
+fn counts(feed: &MemoryFeed) -> (u64, u64, u64, u64) {
+    let c = feed.counts();
+    (c.visible, c.held, c.dead_lettered, c.acknowledged)
+}
+
+/// Pins that a run on a seeded in-process feed lists nothing and ends by
+/// itself once its units are read: an object under the prefix that no unit
+/// names is not read, and the run exits `Completed` with the clock unmoved.
+#[test]
+fn a_seeded_run_lists_nothing_and_ends_once_its_units_are_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    let a = recs("a", 5);
+    fs::write(data.join("a.ndjson"), lines_bytes(&a)).unwrap();
+    fs::write(data.join("b.ndjson"), lines_bytes(&recs("b", 5))).unwrap();
+    let feed = MemoryFeed::new();
+    drop(feed.publish(unit_over(&data, "a.ndjson")));
+    let l = launch_seeded(&data, &feed);
+    let report = exit(&l);
+    assert_eq!(report.state, ExitState::Completed);
+    assert_eq!(report.exit_code(), 0);
+    assert_eq!(sorted(captured_rows(&l.script)), sorted(a));
+    assert_eq!(counts(&feed), (0, 0, 0, 1));
+}
+
+/// Pins that a dead-lettered unit does not fail a seeded run: it exits
+/// `Completed` with the readable unit's rows, and the feed names the dead
+/// letter and no unsettled unit.
+#[test]
+fn a_seeded_run_with_a_dead_letter_ends_completed() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    let a = recs("a", 5);
+    fs::write(data.join("a.ndjson"), lines_bytes(&a)).unwrap();
+    // Not gzip, though the name says so: every read of it fails.
+    fs::write(data.join("broken.ndjson.gz"), b"not gzip").unwrap();
+    let feed = MemoryFeed::with_attempt_cap(std::num::NonZeroU32::MIN);
+    drop(feed.publish(unit_over(&data, "a.ndjson")));
+    drop(feed.publish(unit_over(&data, "broken.ndjson.gz")));
+    let l = launch_seeded(&data, &feed);
+    let report = exit(&l);
+    assert_eq!(report.state, ExitState::Completed);
+    assert_eq!(report.exit_code(), 0);
+    assert_eq!(sorted(captured_rows(&l.script)), sorted(a));
+    assert_eq!(
+        feed.dead_letters(),
+        vec![unit_over(&data, "broken.ndjson.gz")]
+    );
+    assert_eq!(feed.unsettled(), Vec::new());
+    assert_eq!(counts(&feed), (0, 0, 1, 1));
+}
+
+/// Pins that a seeded run waits for no lister: on an empty feed it ends at
+/// once.
+#[test]
+fn an_empty_seeded_feed_ends_the_run_at_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    fs::write(data.join("a.ndjson"), lines_bytes(&recs("a", 5))).unwrap();
+    let feed = MemoryFeed::new();
+    let l = launch_seeded(&data, &feed);
+    let report = exit(&l);
+    assert_eq!(report.state, ExitState::Completed);
+    assert_eq!(report.exit_code(), 0);
+    assert_eq!(captured_rows(&l.script), Vec::<String>::new());
+}
+
+/// Pins that the S3 source refuses a seeded feed on a backend other than the
+/// in-process one, whose counts alone are exact, and takes the same feed
+/// when code passes it without seeding.
+#[test]
+fn a_seeded_feed_on_a_durable_backend_is_refused() {
+    use spate_core::config::{ConfigError, FeedSection, PipelineConfig};
+    use spate_core::feed::FeedOrigin;
+    use spate_core::source::Source as _;
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    let config =
+        PipelineConfig::from_str(&PipelineYaml::file("s3-seeded-durable", &data).build()).unwrap();
+    let section = FeedSection::new(spate_test::component_config("scripted", "{}"));
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    let source =
+        || spate_s3::S3Source::from_component_config(&config.source, rt.handle().clone()).unwrap();
+    let err = source()
+        .configure_feed(&section, Arc::new(scripted_feed().0), FeedOrigin::Seeded)
+        .unwrap_err();
+    let ConfigError::Component { context, message } = err else {
+        panic!("{err}");
+    };
+    assert_eq!(context, "feed");
+    assert_eq!(
+        message,
+        "the S3 source ends a seeded run on exact counts, which only the in-process `memory` \
+         feed gives; pass the `scripted` feed with `Pipeline::feed`"
+    );
+    source()
+        .configure_feed(&section, Arc::new(scripted_feed().0), FeedOrigin::Given)
+        .expect("a feed passed without seeding is taken");
+}
+
+/// Pins that only the in-process feed makes a run on a feed built from the
+/// section end by itself: on any other backend with no `location` the source
+/// asks for no depth, so a feed that reports none opens.
+#[test]
+fn a_section_feed_on_a_durable_backend_opens_without_a_depth() {
+    use spate_core::checkpoint::Checkpointer;
+    use spate_core::config::{FeedSection, PipelineConfig};
+    use spate_core::feed::FeedOrigin;
+    use spate_core::source::{Source as _, SourceCtx};
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    let config =
+        PipelineConfig::from_str(&PipelineYaml::file("s3-section-durable", &data).build()).unwrap();
+    let section = FeedSection::new(spate_test::component_config("scripted", "{}"));
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    let mut source = line_framer(
+        spate_s3::S3Source::from_component_config(&config.source, rt.handle().clone()).unwrap(),
+    );
+    source
+        .configure_feed(
+            &section,
+            Arc::new(Wrapped::new(scripted_feed().0, &[])),
+            FeedOrigin::Section,
+        )
+        .unwrap();
+    source
+        .open(SourceCtx::new(Checkpointer::new().handle()))
+        .expect("a continuous job reads no depth");
+}
+
+/// Pins that a seeded run reads a unit failed below its delivery cap again
+/// before it ends: the run ends `Completed` once the feed has dead-lettered
+/// the unit at the cap, with nothing left unsettled.
+#[test]
+fn a_seeded_unit_failed_below_its_cap_is_read_again_before_the_end() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    fs::write(data.join("broken.ndjson.gz"), b"not gzip").unwrap();
+    let feed = MemoryFeed::with_attempt_cap(std::num::NonZeroU32::new(3).unwrap());
+    drop(feed.publish(unit_over(&data, "broken.ndjson.gz")));
+    let l = launch_seeded(&data, &feed);
+    let report = exit(&l);
+    assert_eq!(report.state, ExitState::Completed);
+    assert_eq!(counts(&feed), (0, 0, 1, 0));
+    assert_eq!(feed.unsettled(), Vec::new());
 }

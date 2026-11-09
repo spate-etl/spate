@@ -166,7 +166,8 @@ lister. A bounded job ends once its lister's end marker holds over a
 names none is **continuous**, its instances read no job location, and it ends
 at a shutdown. A job on the in-process feed names none; one on the feed the
 runtime built ends once its own lister has finished and the feed reads empty,
-and one given a feed in code ends at a shutdown.
+one given a feed through `Pipeline::feed` ends at a shutdown, and one given a
+feed through `Pipeline::seeded_feed` can end once the feed reads empty.
 
 *Connector mapping:*
 [S3 source](../04-connectors/sources/s3/README.mdx#bounded-jobs-and-the-job-location)

@@ -7,8 +7,8 @@
 //! framework's [`RowEncoder`] contract, enforcing the `max_message_bytes`
 //! guard and writing the connector's internal frame format. Ship-with
 //! implementations: [`KafkaBytesEncoder`] (payload passthrough) and
-//! [`KafkaJsonEncoder`] (serde_json, or simd-json under the `json-simd`
-//! feature).
+//! [`KafkaJsonEncoder`] (serde_json, or simd-json for an encoder built with
+//! `with_simd_json` under the `json-simd` feature).
 
 use crate::sink::frame;
 use bytes::BytesMut;
@@ -351,7 +351,8 @@ impl<F: RecFamily> KafkaJsonEncoder<F> {
     ///
     /// - An `f32` is written as the `f64` it widens to, so `0.1_f32` becomes
     ///   `0.10000000149011612`. An exponent carries no `+`: `1e300`.
-    /// - A map key that is a `bool` fails the record.
+    /// - A map key that is a `bool`, an `f32`, an `f64` or a `Some` fails
+    ///   the record.
     /// - `serde_json::value::RawValue`, and `serde_json::Number` when
     ///   `serde_json`'s `arbitrary_precision` feature is on anywhere in the
     ///   build, are written as an object holding a private marker key, with
@@ -649,15 +650,29 @@ mod tests {
         assert_eq!(simd.unwrap(), b"[]");
     }
 
-    /// simd-json fails a record whose map has a `bool` key, which serde_json
-    /// writes as a string.
+    /// simd-json fails a record whose map has a `bool`, float or `Some` key,
+    /// each of which serde_json writes as a string.
     #[test]
-    fn simd_json_fails_a_bool_map_key() {
-        let (serde, simd) = both_payloads(&BTreeMap::from([(true, 1_u8)]));
-        assert_eq!(serde.unwrap(), br#"{"true":1}"#);
-        let err = simd.unwrap_err();
-        assert_eq!(err.class(), ErrorClass::RecordLevel, "{err}");
-        assert!(err.reason().starts_with("JSON encoding failed: "), "{err}");
+    fn simd_json_fails_bool_float_and_some_map_keys() {
+        #[derive(Clone)]
+        struct FloatKeyed;
+        impl serde::Serialize for FloatKeyed {
+            fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+                s.collect_map([(1.5_f64, 1_u8)])
+            }
+        }
+        let cases = [
+            both_payloads(&BTreeMap::from([(true, 1_u8)])),
+            both_payloads(&FloatKeyed),
+            both_payloads(&BTreeMap::from([(Some("a"), 1_u8)])),
+        ];
+        let written = [&br#"{"true":1}"#[..], br#"{"1.5":1}"#, br#"{"a":1}"#];
+        for ((serde, simd), want) in cases.into_iter().zip(written) {
+            assert_eq!(serde.unwrap(), want);
+            let err = simd.unwrap_err();
+            assert_eq!(err.class(), ErrorClass::RecordLevel, "{err}");
+            assert!(err.reason().starts_with("JSON encoding failed: "), "{err}");
+        }
     }
 
     /// A `Serialize` error under simd-json is record-level and keeps the

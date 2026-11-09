@@ -6,6 +6,7 @@ use super::redact;
 use crate::ops::ChunkConfig;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
+use std::borrow::Cow;
 use std::fmt;
 
 /// An opaque component section: `{ <type_tag>: { ...connector config... } }`.
@@ -36,8 +37,71 @@ pub struct ComponentConfig {
     /// surfaces at assembly/validation instead.
     chunk: Option<serde_yaml::Value>,
     /// Where this section sits in the pipeline config (`source`, `sink`,
-    /// `deserializer`). Set after parsing, used to prefix error paths.
-    section: Option<&'static str>,
+    /// `sinks.<name>`, `deserializer`, `feed`). Set after parsing, used to
+    /// prefix error paths.
+    section: Option<Cow<'static, str>>,
+}
+
+/// The dotted path of a component section from the config root, such as
+/// `source.kafka` or `sinks.eu.clickhouse`, that a connector builds its
+/// config errors from.
+///
+/// [`ComponentConfig::path`] gives the path of a loaded section, which names
+/// the entry under `sinks:`. The constructors give the path for a config built
+/// in code, which has no section.
+///
+/// # Examples
+///
+/// ```
+/// use spate_core::config::SectionPath;
+///
+/// let err = SectionPath::source("kafka").invalid("brokers", "must not be empty");
+/// assert_eq!(err.to_string(), "source.kafka.brokers: must not be empty");
+///
+/// let err = SectionPath::sink("kafka").invalid("topic", "must not be empty");
+/// assert_eq!(err.to_string(), "sink.kafka.topic: must not be empty");
+/// ```
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SectionPath(String);
+
+impl SectionPath {
+    /// The path of the `source:` section selecting `tag`.
+    #[must_use]
+    pub fn source(tag: &str) -> SectionPath {
+        SectionPath(format!("source.{tag}"))
+    }
+
+    /// The path of the single `sink:` section selecting `tag`.
+    #[must_use]
+    pub fn sink(tag: &str) -> SectionPath {
+        SectionPath(format!("sink.{tag}"))
+    }
+
+    /// The path of the backend `tag` in the `feed:` section.
+    #[must_use]
+    pub fn feed(tag: &str) -> SectionPath {
+        SectionPath(format!("feed.{tag}"))
+    }
+
+    /// A [`ConfigError::Component`] for a rule `field` breaks, with context
+    /// `<path>.<field>`. `field` is the key's path inside the section, such as
+    /// `brokers` or `chunk.target_bytes`.
+    #[must_use]
+    pub fn invalid(&self, field: &str, message: impl Into<String>) -> ConfigError {
+        ConfigError::Component {
+            context: format!("{}.{field}", self.0),
+            message: message.into(),
+        }
+    }
+
+    /// A [`ConfigError::Component`] about the whole section, with context
+    /// `<path>`.
+    pub(super) fn error(self, message: impl Into<String>) -> ConfigError {
+        ConfigError::Component {
+            context: self.0,
+            message: message.into(),
+        }
+    }
 }
 
 // Hand-written: `raw` holds interpolated credentials. The destructure lists
@@ -96,7 +160,7 @@ impl ComponentConfig {
         };
         let section: ChunkSection = serde_path_to_error::deserialize(value.clone())
             .map_err(|e| self.component_error(Some("chunk"), e))?;
-        section.resolve().map(Some)
+        section.resolve(&self.path()).map(Some)
     }
 
     /// Whether this section declared a `chunk:` block (without resolving it).
@@ -105,11 +169,15 @@ impl ComponentConfig {
         self.chunk.is_some()
     }
 
-    /// Dotted location of this component in the config, for error messages.
-    fn prefix(&self) -> String {
-        match self.section {
-            Some(section) => format!("{section}.{}", self.type_tag),
-            None => self.type_tag.clone(),
+    /// This section's path from the config root, such as `source.kafka` or
+    /// `sinks.eu.clickhouse`. A section built with [`new`](Self::new) and
+    /// never placed in a [`PipelineConfig`](super::PipelineConfig) has no
+    /// position, and its path is the type tag alone.
+    #[must_use]
+    pub fn path(&self) -> SectionPath {
+        match &self.section {
+            Some(section) => SectionPath(format!("{section}.{}", self.type_tag)),
+            None => SectionPath(self.type_tag.clone()),
         }
     }
 
@@ -121,7 +189,7 @@ impl ComponentConfig {
         suffix: Option<&str>,
         e: serde_path_to_error::Error<serde_yaml::Error>,
     ) -> ConfigError {
-        let mut context = self.prefix();
+        let SectionPath(mut context) = self.path();
         if let Some(suffix) = suffix {
             context.push('.');
             context.push_str(suffix);
@@ -137,8 +205,8 @@ impl ComponentConfig {
         }
     }
 
-    pub(super) fn set_section(&mut self, section: &'static str) {
-        self.section = Some(section);
+    pub(super) fn set_section(&mut self, section: impl Into<Cow<'static, str>>) {
+        self.section = Some(section.into());
     }
 
     /// Build a component config programmatically (primarily for tests and
@@ -249,6 +317,35 @@ mod tests {
         for visible in ["clickhouse", "password", "replicas", "max_bytes"] {
             assert!(printed.contains(visible), "{visible}: {printed}");
         }
+    }
+
+    /// Each role's path renders `<role>.<tag>.<field>: <message>` as a
+    /// `Component` error.
+    #[test]
+    fn a_section_path_names_role_tag_and_field() {
+        for (path, want) in [
+            (SectionPath::source("kafka"), "source.kafka.brokers"),
+            (SectionPath::sink("kafka"), "sink.kafka.brokers"),
+            (SectionPath::feed("kafka"), "feed.kafka.brokers"),
+        ] {
+            let err = path.invalid("brokers", "must not be empty");
+            assert!(
+                matches!(&err, ConfigError::Component { context, message }
+                    if context == want && message == "must not be empty"),
+                "{err:?}"
+            );
+            assert_eq!(err.to_string(), format!("{want}: must not be empty"));
+        }
+    }
+
+    /// A section placed in a config starts at its position; one built in
+    /// code and never placed is its type tag alone.
+    #[test]
+    fn a_component_path_starts_at_its_section() {
+        let mut cc = parse("kafka:\n  brokers: k1:9092\n").unwrap();
+        assert_eq!(cc.path(), SectionPath("kafka".into()));
+        cc.set_section("source");
+        assert_eq!(cc.path(), SectionPath::source("kafka"));
     }
 
     #[test]

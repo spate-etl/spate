@@ -159,6 +159,10 @@ sinks:
     clickhouse: { table: events_b, shards: [...], batch: { linger: 5s }, ... }
 ```
 
+An error in an entry starts at the entry's name. A `chunk:` block under
+`type_a` with `target_bytes: 0` fails with
+`sinks.type_a.clickhouse.chunk.target_bytes: must be greater than zero`.
+
 The name is how the chain's [split terminal](../02-concepts/06-multi-sink.mdx)
 resolves each branch's sink (`ctx.sink("type_a")`) and the `component` label on
 that sink's `spate_sink_*` metrics. A single `sink:` is exactly equivalent to a

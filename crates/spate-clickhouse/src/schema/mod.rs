@@ -60,9 +60,10 @@ pub enum SchemaError {
     /// multi-line diff).
     #[error("{0}")]
     Mismatch(String),
-    /// A replica answered the `SELECT 1` that carries the `settings`
-    /// passthrough with an error. The usual cause is a setting it refuses, by
-    /// name or by value.
+    /// A replica answered the `SELECT 1` that carries `deduplicate_insert` and
+    /// the `settings` passthrough with an error. The usual cause is a setting
+    /// it refuses, by name or by value, or a constraint pinning
+    /// `deduplicate_insert`.
     #[error("sink.clickhouse: replica {url} failed the settings check: {reason}")]
     Settings {
         /// The replica URL, redacted.

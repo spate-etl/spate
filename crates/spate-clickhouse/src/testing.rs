@@ -1,9 +1,11 @@
 //! Fixtures for testing a pipeline's ClickHouse sink against the `clickhouse`
 //! crate's mock server, and the sink's frame codec for benches and tests.
 //!
-//! Building a sink reads `system.columns`, so a mock has to answer that query
-//! before it sees an insert. [`system_columns`] builds the rows to answer it
-//! with, for `clickhouse::test::handlers::provide`.
+//! Building a sink sends each replica two requests: it reads
+//! `system.columns`, then sends a `SELECT 1` carrying the insert settings. A
+//! mock answers both before it sees an insert. [`system_columns`] builds the
+//! rows that answer the first, for `clickhouse::test::handlers::provide`, and
+//! any row answers the second.
 //!
 //! Behind the off-by-default `testing` feature: the rows implement a
 //! `clickhouse` 0.x trait, which this crate's public API otherwise avoids
@@ -45,4 +47,17 @@ pub fn system_columns(specs: &[(&str, &str, &str)]) -> Vec<ColumnRow> {
             default_kind: (*default_kind).to_string(),
         })
         .collect()
+}
+
+/// The names the `settings` passthrough refuses.
+#[must_use]
+pub fn reserved_settings() -> Vec<&'static str> {
+    crate::writer::reserved_names().collect()
+}
+
+/// The settings the sink sets on an insert carrying `token`, with
+/// `decompress` when the body is `coded`.
+#[must_use]
+pub fn insert_settings(token: &str, coded: bool) -> Vec<(&'static str, String)> {
+    crate::writer::owned_settings(token, coded).collect()
 }

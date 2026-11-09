@@ -372,9 +372,9 @@ const BATCH_DIGEST: u64 = 0x605d_4db1_29ec_fb64;
 /// server that answered the schema query in a form the client cannot read
 /// would fail minutes into a bench run. This builds the same sink under each
 /// `compression` value, writes one batch coded by the sink's frame codec, and
-/// checks what the server received: the schema query, then one insert
-/// carrying the frames, raw under `off` and as the client's own blocks
-/// otherwise.
+/// checks what the server received: the schema query, the settings check,
+/// then one insert carrying the frames, raw under `off` and as the client's
+/// own blocks otherwise.
 #[test]
 fn the_bench_server_serves_the_schema_under_every_compression() {
     assert_eq!(
@@ -407,10 +407,10 @@ fn the_bench_server_serves_the_schema_under_every_compression() {
         let requests = server.requests();
         assert_eq!(
             requests.len(),
-            2,
-            "{compression}: the schema query, then the insert"
+            3,
+            "{compression}: the schema query, the settings check, then the insert"
         );
-        let insert = &requests[1];
+        let insert = &requests[2];
         assert!(
             insert.param("query") == Some(writer.insert_sql()),
             "{compression}: the second request is the insert"

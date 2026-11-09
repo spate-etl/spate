@@ -116,11 +116,13 @@ When no replica of a shard is healthy, writes to that shard wait for the
 circuit breaker's next probe, and backpressure reaches the source. Records never
 move to another shard.
 
-The sink sets `insert_deduplicate`, `insert_deduplication_token`,
-`wait_end_of_query`, `input_format_with_names_use_header` and
-`input_format_with_types_use_header` on every insert, and `decompress` on a
-compressed one. `settings` cannot override them, and cannot name `database`,
-which the typed `database` field owns.
+The sink sets `deduplicate_insert`, `insert_deduplicate`,
+`insert_deduplication_token`, `wait_end_of_query`,
+`input_format_with_names_use_header` and `input_format_with_types_use_header`
+on every insert, and `decompress` on a compressed one. `settings` cannot
+override them, and cannot name `database`, which the typed `database` field
+owns. A replica that refuses `deduplicate_insert = 'enable'`, such as a server
+older than ClickHouse 26.3, fails the sink's startup.
 
 [Deduplication tokens and the window warning](https://spate.kainth.dev/docs/user-guide/connectors/sinks/clickhouse#deduplication-tokens-and-the-window-warning)
 and

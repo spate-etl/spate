@@ -55,6 +55,71 @@ async fn same_token_dedupes_different_token_inserts() {
     );
 }
 
+/// A writer whose account turns deduplication off server-side still has a
+/// retried batch deduplicated by its token.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn a_server_default_cannot_turn_deduplication_off() {
+    let srv = server().await;
+    for ddl in [
+        "CREATE USER writer IDENTIFIED BY 'writer-secret' \
+         SETTINGS deduplicate_insert = 'disable'",
+        "GRANT INSERT ON default.orders TO writer",
+    ] {
+        srv.admin.query(ddl).execute().await.expect("ddl");
+    }
+    let sink = sink_with::<Owned<Order>>(
+        &srv.url,
+        "orders",
+        "user: writer\npassword: writer-secret\n",
+    )
+    .await;
+    let batch = sealed(&orders(0..100), "server-default", 2);
+    for _ in 0..2 {
+        sink.writer
+            .write_batch(&sink.endpoints[0][0], &batch)
+            .await
+            .expect("write");
+    }
+    assert_eq!(count(&srv.admin).await, 100);
+}
+
+/// An account that pins deduplication off cannot take an insert the sink
+/// would send, so building the sink fails at that replica.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn a_replica_that_pins_deduplication_off_fails_the_build() {
+    let srv = server().await;
+    for ddl in [
+        "CREATE USER writer IDENTIFIED BY 'writer-secret' \
+         SETTINGS deduplicate_insert = 'disable' CONST",
+        "GRANT INSERT ON default.orders TO writer",
+    ] {
+        srv.admin.query(ddl).execute().await.expect("ddl");
+    }
+    let err = try_sink_with::<Owned<Order>>(
+        &srv.url,
+        "orders",
+        "user: writer\npassword: writer-secret\n",
+    )
+    .await
+    .expect_err("a replica that refuses deduplicate_insert");
+    assert!(
+        matches!(err, spate_clickhouse::SchemaError::Settings { .. }),
+        "{err:?}"
+    );
+    let msg = err.to_string();
+    let prefix = format!(
+        "sink.clickhouse: replica {} failed the settings check: ",
+        srv.url
+    );
+    assert!(msg.starts_with(&prefix), "{msg}");
+    assert!(
+        msg.contains("Setting deduplicate_insert should not be changed"),
+        "{msg}"
+    );
+}
+
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn probe_reflects_connectivity() {

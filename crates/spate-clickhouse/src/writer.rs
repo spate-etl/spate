@@ -48,6 +48,11 @@ impl fmt::Debug for ClickHouseEndpoint {
     }
 }
 
+/// Decides insert deduplication from ClickHouse 26.3, over
+/// `insert_deduplicate`. [`ClickHouseWriter::check_settings`] carries it as
+/// well, so a replica that refuses [`DEDUPLICATE_INSERT_ON`] fails the build.
+const DEDUPLICATE_INSERT: &str = "deduplicate_insert";
+const DEDUPLICATE_INSERT_ON: &str = "enable";
 const INSERT_DEDUPLICATE: &str = "insert_deduplicate";
 const WAIT_END_OF_QUERY: &str = "wait_end_of_query";
 const INSERT_DEDUPLICATION_TOKEN: &str = "insert_deduplication_token";
@@ -59,14 +64,20 @@ const DATABASE: &str = "database";
 /// The request parameters the sink puts on an insert, each with the reason
 /// the `settings` passthrough may not name it. [`owned_settings`] sets all but
 /// `database`, and [`RESERVED`] refuses them all.
-const OWNED: [(&str, &str); 7] = [
+const OWNED: [(&str, &str); 8] = [
     (
         INSERT_DEDUPLICATION_TOKEN,
         "minted per sealed batch, so a retried batch carries the same token and is deduplicated",
     ),
     (
+        DEDUPLICATE_INSERT,
+        "forced to `enable`, so the server deduplicates a retried batch by its token whatever \
+         the server or profile default",
+    ),
+    (
         INSERT_DEDUPLICATE,
-        "forced to `1`, so the server deduplicates a retried batch by its token",
+        "forced to `1`; `deduplicate_insert` decides deduplication and the sink holds it at \
+         `enable`",
     ),
     (
         WAIT_END_OF_QUERY,
@@ -101,6 +112,11 @@ const OWNED: [(&str, &str); 7] = [
 /// exactly.
 pub(crate) const RESERVED: Denylist<'static> = Denylist::new(&OWNED);
 
+/// The names [`RESERVED`] refuses, each from [`OWNED`].
+pub(crate) fn reserved_names() -> impl Iterator<Item = &'static str> {
+    OWNED.into_iter().map(|(name, _)| name)
+}
+
 /// The settings the sink sets on an insert, each from [`OWNED`].
 /// `decompress` goes only on a compressed insert. The user's `settings` are
 /// applied after these, so [`RESERVED`] alone keeps a user value from
@@ -111,6 +127,7 @@ pub(crate) fn owned_settings(
 ) -> impl Iterator<Item = (&'static str, String)> {
     OWNED.into_iter().filter_map(move |(name, _)| match name {
         INSERT_DEDUPLICATION_TOKEN => Some((name, token.to_owned())),
+        DEDUPLICATE_INSERT => Some((name, DEDUPLICATE_INSERT_ON.to_owned())),
         DECOMPRESS => coded.then(|| (name, "1".to_owned())),
         // The client sends the typed `database` ahead of these.
         DATABASE => None,
@@ -194,8 +211,9 @@ impl ClickHouseWriter {
         &self.insert_sql
     }
 
-    /// Sends `SELECT 1` with the `settings` passthrough, so `endpoint` refuses
-    /// a setting it would refuse on every insert.
+    /// Sends `SELECT 1` with `deduplicate_insert` and the `settings`
+    /// passthrough, so `endpoint` refuses a setting it would refuse on every
+    /// insert.
     ///
     /// The answer is not read, since a setting such as `offset` can leave
     /// `SELECT 1` with no row.
@@ -203,7 +221,10 @@ impl ClickHouseWriter {
         &self,
         endpoint: &ClickHouseEndpoint,
     ) -> Result<(), clickhouse::error::Error> {
-        let mut query = endpoint.client.query("SELECT 1");
+        let mut query = endpoint
+            .client
+            .query("SELECT 1")
+            .with_setting(DEDUPLICATE_INSERT, DEDUPLICATE_INSERT_ON);
         for (name, value) in &self.settings {
             query = query.with_setting(name.clone(), value.clone());
         }
@@ -391,6 +412,18 @@ mod tests {
     fn an_insert_leaves_the_database_to_the_client() {
         for coded in [false, true] {
             assert!(owned_settings("token", coded).all(|(name, _)| name != DATABASE));
+        }
+    }
+
+    /// Every insert, coded or not, holds `deduplicate_insert` at `enable`.
+    #[test]
+    fn every_insert_enables_deduplicate_insert() {
+        for coded in [false, true] {
+            let settings: Vec<_> = owned_settings("t", coded).collect();
+            assert!(
+                settings.contains(&("deduplicate_insert", "enable".to_owned())),
+                "coded {coded}: {settings:?}"
+            );
         }
     }
 

@@ -95,7 +95,8 @@ delivery guarantees are defined in terms of the settings, and the typed
 | Reserved key | Why |
 |---|---|
 | `insert_deduplication_token` | Minted per sealed batch, so a retried batch carries the same token and is deduplicated. |
-| `insert_deduplicate` | Forced to `1`, so the server deduplicates a retried batch by its token. |
+| `deduplicate_insert` | Forced to `enable`, so the server deduplicates a retried batch by its token whatever the server or profile default. |
+| `insert_deduplicate` | Forced to `1`; `deduplicate_insert` decides deduplication and the sink holds it at `enable`. |
 | `wait_end_of_query` | Forced to `1`: the server answers once the insert and its materialized views are done, and the checkpoint commits behind that answer. |
 | `input_format_with_names_use_header` | Forced to `1`: with it off the server ignores the insert header and maps the rows by position. |
 | `input_format_with_types_use_header` | Forced to `1`: it is what compares the header's types against the table's. |
@@ -106,14 +107,15 @@ A reserved key in `settings` fails at load, and the error names the key and
 the reason:
 
 ```text
-sink.clickhouse: settings."insert_deduplicate" cannot be overridden: forced to `1`, so the server deduplicates a retried batch by its token
+sink.clickhouse: settings."deduplicate_insert" cannot be overridden: forced to `enable`, so the server deduplicates a retried batch by its token whatever the server or profile default
 ```
 
 Only the exact name is refused. ClickHouse has no alias of these names, and the
 server fails a request that carries another spelling, such as
-`INSERT_DEDUPLICATE` or `DATABASE`.
+`DEDUPLICATE_INSERT` or `DATABASE`.
 
-When the sink is built, it sends `settings` to every replica on a `SELECT 1`.
+When the sink is built, it sends `settings` to every replica on a `SELECT 1`,
+together with `deduplicate_insert`.
 A setting a replica refuses fails startup with that replica's URL and the
 server's message. That covers a name the server does not know and a value it
 cannot parse. A misspelled `insert_quorum` fails like this:
@@ -198,9 +200,12 @@ before it ships, and a defect you hit on one is a defect this project fixes.
 The set is the two LTS lines ClickHouse still supports, plus whatever the newest
 stable release is on the day.
 
-Other versions usually work. The wire formats this sink uses have been stable
-across releases for years, and nothing here refuses to connect to a server
-outside the table.
+Other versions from 26.3 on usually work. The wire formats this sink uses have
+been stable across releases for years.
+
+A server older than 26.3 fails at startup, because it does not know the
+`deduplicate_insert` setting that the sink sets on every insert. The error
+names the replica and carries the server's `UNKNOWN_SETTING` message.
 
 ## RowBinary on pipeline threads
 
@@ -231,6 +236,17 @@ takes is in the crate's `rowbinary` module docs.
 Every sealed batch carries a deterministic `insert_deduplication_token`, so
 a retry of the same batch (including on another replica after a timeout) is
 idempotent, and the server drops the duplicate insert.
+
+The sink sets `deduplicate_insert = 'enable'` on every insert. This setting
+decides deduplication from ClickHouse 26.3, so a server, user or profile default
+of `disable` does not turn deduplication off for the sink.
+
+A replica whose settings constraints pin `deduplicate_insert` to another value
+would refuse every insert. The `SELECT 1` the sink sends each replica when it
+is built carries the same value, so such a replica fails the build, and the
+error names the replica and the setting. The
+[permissions page](./permissions.mdx) lists what the writer's profile must
+allow.
 
 :::warning
 **Deduplication is silently off on plain `MergeTree`.** Token

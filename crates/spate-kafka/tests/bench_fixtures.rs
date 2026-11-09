@@ -25,7 +25,10 @@ use spate_test_support::fnv1a;
 #[path = "../benches/support/messages.rs"]
 mod messages;
 
-use messages::{Event, GUARD_LIMIT, HEADER_BYTES, HeaderStamp, KEY_LEN, PAYLOAD_LEN, RECORDS};
+use messages::{
+    Article, Event, GUARD_LIMIT, HEADER_BYTES, HeaderStamp, KEY_LEN, PAYLOAD_LEN, RECORDS,
+    TEXT_BODY_ESCAPES, TEXT_BODY_LEN,
+};
 
 /// What one corpus through one encoder produced: how many records were
 /// accepted, how many bytes were framed, and the first error if any. The same
@@ -98,6 +101,18 @@ fn json() -> KafkaEncoder<Owned<Event>, KafkaJsonEncoder<Owned<Event>>> {
     KafkaEncoder::new(KafkaJsonEncoder::<Owned<Event>>::new())
 }
 
+fn json_simd() -> KafkaEncoder<Owned<Event>, KafkaJsonEncoder<Owned<Event>>> {
+    KafkaEncoder::new(KafkaJsonEncoder::<Owned<Event>>::new().with_simd_json())
+}
+
+fn text() -> KafkaEncoder<Owned<Article>, KafkaJsonEncoder<Owned<Article>>> {
+    KafkaEncoder::new(KafkaJsonEncoder::<Owned<Article>>::new())
+}
+
+fn text_simd() -> KafkaEncoder<Owned<Article>, KafkaJsonEncoder<Owned<Article>>> {
+    KafkaEncoder::new(KafkaJsonEncoder::<Owned<Article>>::new().with_simd_json())
+}
+
 #[test]
 fn the_corpora_are_reproducible() {
     assert_eq!(messages::payloads(RECORDS), messages::payloads(RECORDS));
@@ -141,6 +156,21 @@ fn the_corpora_are_pinned_across_revisions() {
         framed(json(), messages::events(RECORDS)),
         (5_033_806, 0x83f1_ed04_eac6_1f2d),
         "json_typed"
+    );
+    assert_eq!(
+        framed(json_simd(), messages::events(RECORDS)),
+        (5_033_806, 0x83f1_ed04_eac6_1f2d),
+        "json_typed_simd"
+    );
+    assert_eq!(
+        framed(text(), messages::articles(RECORDS)),
+        (6_240_000, 0x06c3_6460_9394_d41c),
+        "json_text"
+    );
+    assert_eq!(
+        framed(text_simd(), messages::articles(RECORDS)),
+        (6_240_000, 0x06c3_6460_9394_d41c),
+        "json_text_simd"
     );
 }
 
@@ -262,6 +292,25 @@ fn the_payloads_have_the_declared_shape() {
         RECORDS,
         "the corpus repeats a key, so it does not partition the way a real one would"
     );
+}
+
+/// Every article body is the declared length and carries the declared number
+/// of characters JSON escapes, so the text cases measure a scan that stops on
+/// every line.
+#[test]
+fn the_article_bodies_have_the_declared_shape() {
+    let articles = messages::articles(RECORDS);
+    assert_eq!(articles.len(), RECORDS);
+    for article in &articles {
+        assert_eq!(article.body.len(), TEXT_BODY_LEN);
+        assert!(article.body.is_ascii(), "a body is not ASCII");
+        let escapes = article
+            .body
+            .bytes()
+            .filter(|&b| b == b'"' || b == b'\\' || b < 0x20)
+            .count();
+        assert_eq!(escapes, TEXT_BODY_ESCAPES, "{:?}", article.body);
+    }
 }
 
 /// The typed corpus can be keyed, which is the extractor the corpus documents

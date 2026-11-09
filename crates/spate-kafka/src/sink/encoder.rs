@@ -7,7 +7,8 @@
 //! framework's [`RowEncoder`] contract, enforcing the `max_message_bytes`
 //! guard and writing the connector's internal frame format. Ship-with
 //! implementations: [`KafkaBytesEncoder`] (payload passthrough) and
-//! [`KafkaJsonEncoder`] (serde_json).
+//! [`KafkaJsonEncoder`] (serde_json, or simd-json for an encoder built with
+//! `with_simd_json` under the `json-simd` feature).
 
 use crate::sink::frame;
 use bytes::BytesMut;
@@ -307,7 +308,16 @@ pub type KeyFn<F> = for<'r, 'buf> fn(&'r <F as RecFamily>::Rec<'buf>) -> Option<
 #[derive(Debug)]
 pub struct KafkaJsonEncoder<F: RecFamily> {
     key_fn: Option<KeyFn<F>>,
+    backend: Backend,
     _family: PhantomData<fn(F)>,
+}
+
+/// The serializer a [`KafkaJsonEncoder`] writes payloads with.
+#[derive(Debug, Clone, Copy)]
+enum Backend {
+    SerdeJson,
+    #[cfg(feature = "json-simd")]
+    SimdJson,
 }
 
 impl<F: RecFamily> KafkaJsonEncoder<F> {
@@ -316,6 +326,7 @@ impl<F: RecFamily> KafkaJsonEncoder<F> {
     pub fn new() -> Self {
         KafkaJsonEncoder {
             key_fn: None,
+            backend: Backend::SerdeJson,
             _family: PhantomData,
         }
     }
@@ -325,8 +336,34 @@ impl<F: RecFamily> KafkaJsonEncoder<F> {
     pub fn with_key_fn(key_fn: KeyFn<F>) -> Self {
         KafkaJsonEncoder {
             key_fn: Some(key_fn),
+            backend: Backend::SerdeJson,
             _family: PhantomData,
         }
+    }
+
+    /// Serialize with `simd-json`, whose string escaping scans 16 or 32
+    /// bytes per step (NEON on aarch64, AVX2 or SSE2 chosen at run time on
+    /// x86_64). It pays on records carrying long text and costs more than
+    /// `serde_json` on records of short strings and numbers.
+    ///
+    /// The output is valid JSON and decodes to the same Rust value, with
+    /// these differences from `serde_json`:
+    ///
+    /// - An `f32` is written as the `f64` it widens to, so `0.1_f32` becomes
+    ///   `0.10000000149011612`. An exponent carries no `+`: `1e300`.
+    /// - A map key that is a `bool`, an `f32`, an `f64` or a `Some` fails
+    ///   the record.
+    /// - `serde_json::value::RawValue`, and `serde_json::Number` when
+    ///   `serde_json`'s `arbitrary_precision` feature is on anywhere in the
+    ///   build, are written as an object holding a private marker key, with
+    ///   no error. A record type that holds either stays on the default.
+    ///
+    /// A serialization error carries `simd-json`'s message.
+    #[cfg(feature = "json-simd")]
+    #[must_use]
+    pub fn with_simd_json(mut self) -> Self {
+        self.backend = Backend::SimdJson;
+        self
     }
 }
 
@@ -340,6 +377,7 @@ impl<F: RecFamily> Clone for KafkaJsonEncoder<F> {
     fn clone(&self) -> Self {
         KafkaJsonEncoder {
             key_fn: self.key_fn,
+            backend: self.backend,
             _family: PhantomData,
         }
     }
@@ -360,8 +398,17 @@ where
         {
             msg.set_key(key);
         }
-        serde_json::to_writer(msg.payload_mut(), &rec.payload)
-            .map_err(|e| SinkError::record_level(format!("JSON encoding failed: {e}")))
+        let payload = msg.payload_mut();
+        let encoded = match self.backend {
+            Backend::SerdeJson => {
+                serde_json::to_writer(payload, &rec.payload).map_err(|e| e.to_string())
+            }
+            #[cfg(feature = "json-simd")]
+            Backend::SimdJson => {
+                simd_json::serde::to_writer(payload, &rec.payload).map_err(|e| e.to_string())
+            }
+        };
+        encoded.map_err(|e| SinkError::record_level(format!("JSON encoding failed: {e}")))
     }
 }
 
@@ -369,8 +416,10 @@ where
 mod tests {
     use super::*;
     use crate::sink::frame::FrameParser;
+    use proptest::prelude::*;
     use spate_core::error::ErrorClass;
     use spate_test::record;
+    use std::collections::BTreeMap;
 
     fn single_message(buf: &[u8]) -> (Option<Vec<u8>>, Option<Vec<u8>>) {
         let messages: Vec<_> = FrameParser::new(buf).map(|m| m.unwrap()).collect();
@@ -446,6 +495,259 @@ mod tests {
             .unwrap_err();
         assert_eq!(err.class(), ErrorClass::RecordLevel, "{err}");
         assert!(err.reason().starts_with("JSON encoding failed: "), "{err}");
+    }
+
+    /// The payload `inner` writes for `value`, framed and parsed back.
+    fn json_payload<T: Serialize + Send + 'static>(
+        inner: KafkaJsonEncoder<Owned<T>>,
+        value: T,
+    ) -> Result<Vec<u8>, SinkError> {
+        let mut buf = BytesMut::new();
+        KafkaEncoder::new(inner).encode(&record(value), &mut buf)?;
+        Ok(single_message(&buf).1.expect("a JSON record has a payload"))
+    }
+
+    /// Both encoders' payloads, serde_json first.
+    fn both_payloads<T: Serialize + Send + Clone + 'static>(
+        value: &T,
+    ) -> (Result<Vec<u8>, SinkError>, Result<Vec<u8>, SinkError>) {
+        (
+            json_payload(KafkaJsonEncoder::new(), value.clone()),
+            json_payload(KafkaJsonEncoder::new().with_simd_json(), value.clone()),
+        )
+    }
+
+    /// A string drawn from any `char`, weighted toward the characters JSON
+    /// escapes and the multi-byte ones beside them, and long enough to cross
+    /// the 16- and 32-byte steps of the SIMD scan.
+    fn escapable_string() -> impl Strategy<Value = String> {
+        let special = proptest::sample::select(vec![
+            '"', '\\', '\n', '\r', '\t', '\u{0}', '\u{1f}', '\u{7f}', '\u{2028}', 'é', '😀',
+        ]);
+        proptest::collection::vec(prop_oneof![any::<char>(), special], 0..200)
+            .prop_map(String::from_iter)
+    }
+
+    #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+    enum Kind {
+        Unit,
+        New(u8),
+        Pair(i8, i8),
+        Named { x: String },
+    }
+
+    #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+    struct Mixed {
+        i: i64,
+        u: u64,
+        wide: i128,
+        uwide: u128,
+        f: f64,
+        g: f32,
+        ok: bool,
+        maybe: Option<u32>,
+        list: Vec<i16>,
+        by_name: BTreeMap<String, f64>,
+        by_id: BTreeMap<i64, String>,
+        kind: Kind,
+    }
+
+    fn finite_f64() -> impl Strategy<Value = f64> {
+        use proptest::num::f64::{NEGATIVE, NORMAL, POSITIVE, SUBNORMAL, ZERO};
+        POSITIVE | NEGATIVE | NORMAL | SUBNORMAL | ZERO
+    }
+
+    fn finite_f32() -> impl Strategy<Value = f32> {
+        use proptest::num::f32::{NEGATIVE, NORMAL, POSITIVE, SUBNORMAL, ZERO};
+        POSITIVE | NEGATIVE | NORMAL | SUBNORMAL | ZERO
+    }
+
+    fn mixed() -> impl Strategy<Value = Mixed> {
+        let kind = prop_oneof![
+            Just(Kind::Unit),
+            any::<u8>().prop_map(Kind::New),
+            any::<(i8, i8)>().prop_map(|(a, b)| Kind::Pair(a, b)),
+            escapable_string().prop_map(|x| Kind::Named { x }),
+        ];
+        let numbers = (
+            any::<i64>(),
+            any::<u64>(),
+            any::<i128>(),
+            any::<u128>(),
+            finite_f64(),
+            finite_f32(),
+        );
+        let rest = (
+            any::<bool>(),
+            any::<Option<u32>>(),
+            proptest::collection::vec(any::<i16>(), 0..8),
+            proptest::collection::btree_map(escapable_string(), finite_f64(), 0..4),
+            proptest::collection::btree_map(any::<i64>(), escapable_string(), 0..4),
+            kind,
+        );
+        (numbers, rest).prop_map(
+            |((i, u, wide, uwide, f, g), (ok, maybe, list, by_name, by_id, kind))| Mixed {
+                i,
+                u,
+                wide,
+                uwide,
+                f,
+                g,
+                ok,
+                maybe,
+                list,
+                by_name,
+                by_id,
+                kind,
+            },
+        )
+    }
+
+    proptest! {
+        /// simd-json escapes every string byte for byte as serde_json does.
+        #[test]
+        fn simd_json_strings_match_serde_json_bytes(
+            body in escapable_string(),
+            lines in proptest::collection::vec(escapable_string(), 0..4),
+            fields in proptest::collection::btree_map(escapable_string(), escapable_string(), 0..4),
+        ) {
+            let (serde, simd) = both_payloads(&(body, lines, fields));
+            prop_assert_eq!(simd.unwrap(), serde.unwrap());
+        }
+
+        /// simd-json's payload decodes to the same record as serde_json's.
+        #[test]
+        fn simd_json_payload_decodes_to_the_same_record(value in mixed()) {
+            let (serde, simd) = both_payloads(&value);
+            let serde: Mixed = serde_json::from_slice(&serde.unwrap()).unwrap();
+            let simd: Mixed = serde_json::from_slice(&simd.unwrap()).unwrap();
+            prop_assert_eq!(simd, serde);
+        }
+    }
+
+    /// simd-json widens an `f32` to `f64` and writes an exponent with no
+    /// `+`; both encoders write a non-finite float as `null`.
+    #[test]
+    fn simd_json_writes_floats_in_its_own_form() {
+        let (serde, simd) = both_payloads(&(1e300_f64, 0.1_f32, f64::NAN));
+        assert_eq!(serde.unwrap(), b"[1e+300,0.1,null]");
+        assert_eq!(simd.unwrap(), b"[1e300,0.10000000149011612,null]");
+    }
+
+    /// A sequence whose length is unknown until it ends is closed under both
+    /// encoders when no element is written.
+    #[test]
+    fn simd_json_closes_an_empty_sequence_of_unknown_length() {
+        #[derive(Clone)]
+        struct Above(Vec<u8>);
+        impl serde::Serialize for Above {
+            fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+                s.collect_seq(self.0.iter().filter(|&&n| n > 10))
+            }
+        }
+        let (serde, simd) = both_payloads(&Above(vec![1, 2]));
+        assert_eq!(serde.unwrap(), b"[]");
+        assert_eq!(simd.unwrap(), b"[]");
+    }
+
+    /// simd-json fails a record whose map has a `bool`, float or `Some` key,
+    /// each of which serde_json writes as a string.
+    #[test]
+    fn simd_json_fails_bool_float_and_some_map_keys() {
+        #[derive(Clone)]
+        struct FloatKeyed;
+        impl serde::Serialize for FloatKeyed {
+            fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+                s.collect_map([(1.5_f64, 1_u8)])
+            }
+        }
+        let cases = [
+            both_payloads(&BTreeMap::from([(true, 1_u8)])),
+            both_payloads(&FloatKeyed),
+            both_payloads(&BTreeMap::from([(Some("a"), 1_u8)])),
+        ];
+        let written = [&br#"{"true":1}"#[..], br#"{"1.5":1}"#, br#"{"a":1}"#];
+        for ((serde, simd), want) in cases.into_iter().zip(written) {
+            assert_eq!(serde.unwrap(), want);
+            let err = simd.unwrap_err();
+            assert_eq!(err.class(), ErrorClass::RecordLevel, "{err}");
+            assert!(err.reason().starts_with("JSON encoding failed: "), "{err}");
+        }
+    }
+
+    /// A `Serialize` error under simd-json is record-level and keeps the
+    /// value's own message.
+    #[test]
+    fn simd_json_failure_is_record_level() {
+        #[derive(Clone)]
+        struct Refused;
+        impl serde::Serialize for Refused {
+            fn serialize<S: serde::Serializer>(&self, _: S) -> Result<S::Ok, S::Error> {
+                Err(serde::ser::Error::custom("refused"))
+            }
+        }
+        let err = both_payloads(&Refused).1.unwrap_err();
+        assert_eq!(err.class(), ErrorClass::RecordLevel, "{err}");
+        assert!(err.reason().starts_with("JSON encoding failed: "), "{err}");
+        assert!(err.reason().contains("refused"), "{err}");
+    }
+
+    /// simd-json writes a `RawValue` as an object holding serde_json's
+    /// private marker key, and reports no error.
+    #[test]
+    fn simd_json_writes_a_raw_value_as_a_marker_object() {
+        let raw = serde_json::value::RawValue::from_string(r#"{"x": 1}"#.into()).unwrap();
+        let (serde, simd) = both_payloads(&raw);
+        assert_eq!(serde.unwrap(), br#"{"x": 1}"#);
+        assert_eq!(
+            simd.unwrap(),
+            br#"{"$serde_json::private::RawValue":"{\"x\": 1}"}"#
+        );
+    }
+
+    /// A clone, as the `split` terminal makes per branch, keeps the key
+    /// function and the serializer.
+    #[test]
+    fn a_cloned_encoder_keeps_its_key_and_serializer() {
+        #[derive(serde::Serialize)]
+        struct Reading {
+            user: String,
+            value: f64,
+        }
+        fn key_of(reading: &Reading) -> Option<&[u8]> {
+            Some(reading.user.as_bytes())
+        }
+        let original = KafkaJsonEncoder::<Owned<Reading>>::with_key_fn(key_of).with_simd_json();
+        let mut enc = KafkaEncoder::new(original.clone());
+        let mut buf = BytesMut::new();
+        let reading = Reading {
+            user: "ada".into(),
+            value: 1e300,
+        };
+        enc.encode(&record(reading), &mut buf).unwrap();
+        let (key, payload) = single_message(&buf);
+        assert_eq!(key, Some(b"ada".to_vec()));
+        assert_eq!(payload, Some(br#"{"user":"ada","value":1e300}"#.to_vec()));
+    }
+
+    #[test]
+    fn simd_json_keeps_the_record_key() {
+        #[derive(serde::Serialize)]
+        struct Event {
+            user: String,
+        }
+        fn key_of(event: &Event) -> Option<&[u8]> {
+            Some(event.user.as_bytes())
+        }
+        let mut enc = KafkaEncoder::new(
+            KafkaJsonEncoder::<Owned<Event>>::with_key_fn(key_of).with_simd_json(),
+        );
+        let mut buf = BytesMut::new();
+        enc.encode(&record(Event { user: "ada".into() }), &mut buf)
+            .unwrap();
+        let (key, payload) = single_message(&buf);
+        assert_eq!(key, Some(b"ada".to_vec()));
+        assert_eq!(payload, Some(br#"{"user":"ada"}"#.to_vec()));
     }
 
     #[test]

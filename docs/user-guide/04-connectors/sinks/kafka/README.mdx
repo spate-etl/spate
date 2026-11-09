@@ -170,6 +170,42 @@ custom `MessageEncoder`, which can also set headers and mark tombstones
 librdkafka's partitioner on the message key; the framework's `shards` are
 producer-side worker parallelism, not Kafka partitions.
 
+## JSON encoding with simd-json
+
+`KafkaJsonEncoder` serializes with `serde_json`. With feature
+`kafka-json-simd` on the `spate` facade, `KafkaJsonEncoder::with_simd_json`
+switches one encoder to `simd-json`, whose string escaping checks 16 or 32
+bytes per step: NEON on aarch64, and AVX2 or SSE2 chosen at run time on x86_64.
+Only a sink whose encoder calls it changes. Every other sink in the process
+keeps `serde_json`.
+
+`simd-json` spends fewer instructions than `serde_json` on records that carry
+long text, and more on records of short strings and numbers. The
+`json_text_simd` and `json_typed_simd` cases of the sink's encode bench
+([`encode_gungraun.rs`](repo:crates/spate-kafka/benches/encode_gungraun.rs))
+measure each shape against its `serde_json` case. Measure the topic's own
+records before switching.
+
+The payload is valid JSON and decodes to the same Rust value. Its bytes differ
+from `serde_json`'s in two places:
+
+- An `f32` is written as the `f64` it widens to, so `0.1_f32` becomes
+  `0.10000000149011612`.
+- An exponent carries no `+`, so `serde_json`'s `1e+300` is written `1e300`.
+
+A map whose keys are `bool`, `f32`, `f64` or `Option` values fails the record,
+and the sink stage's Skip/Fail policy applies to it. A serialization error
+carries `simd-json`'s message after `JSON encoding failed:`.
+
+:::danger
+A record type that holds `serde_json::value::RawValue` is written wrong under
+`with_simd_json`, with no error: each `RawValue` becomes an object with one
+private marker key. The same happens to every number in a `serde_json::Value`
+while `serde_json`'s `arbitrary_precision` feature is on. Any dependency can
+turn that feature on for the whole build, feature `json-arbitrary-precision` on
+the facade included. Keep such a record type on the default encoder.
+:::
+
 ## Backpressure and shutdown
 
 A slow or unreachable broker slows `write_batch`, which holds the shard's

@@ -7,14 +7,15 @@
 //! source, and every field is a pure function of the record index. That also
 //! means no `rand` dependency, which a bench-only corpus does not justify.
 //!
-//! Two corpora, because the two encoders take different record types.
+//! Three corpora, because the encoders take different record types.
 //! [`payloads`] is the opaque-bytes shape a Kafka-to-Kafka passthrough
 //! carries, at one fixed length: the encode cost is a function of payload
 //! length, and holding it constant is what makes the keyless case a usable
 //! denominator for the keyed and header-stamped ones: the only thing that
 //! differs between the three is work the connector itself does. [`events`] is
 //! the typed shape a JSON encoder serializes, sized so its documents land near
-//! [`PAYLOAD_LEN`].
+//! [`PAYLOAD_LEN`]. [`articles`] is a typed shape whose bytes are mostly one
+//! long text field, the record a JSON encoder's string scan decides.
 //!
 //! [`HeaderStamp`] lives here rather than in the bench because the fixture
 //! test drives it too. The guard-trip case rests on the claim that the
@@ -219,6 +220,79 @@ pub(crate) fn events(n: usize) -> Vec<Event> {
                     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like \
                      Gecko) Chrome/141.0.0.0 Safari/537.36 build-{i:06}"
                 ),
+            }
+        })
+        .collect()
+}
+
+/// Bytes in every [`Article`] body.
+pub(crate) const TEXT_BODY_LEN: usize = 504;
+
+/// Bytes a body line spans, its closing newline included. The body's one quote
+/// sits at the middle of each line.
+const TEXT_LINE_LEN: usize = 72;
+
+/// Characters in every [`Article`] body that JSON escapes: one newline and one
+/// quote per line.
+pub(crate) const TEXT_BODY_ESCAPES: usize = 2 * TEXT_BODY_LEN / TEXT_LINE_LEN;
+
+const _: () = assert!(
+    TEXT_BODY_LEN.is_multiple_of(TEXT_LINE_LEN),
+    "a body that ends mid-line changes the escape count"
+);
+
+const WORDS: &[&str] = &[
+    "stream",
+    "partition",
+    "offset",
+    "replica",
+    "commit",
+    "batch",
+    "broker",
+    "topic",
+    "record",
+    "window",
+    "shard",
+    "lag",
+];
+
+/// The typed record the text cases serialize: an id and three strings, with
+/// almost every byte in `body`.
+///
+/// The body carries a newline and a quote on every line, so a scan that has
+/// to stop at each escape pays for it.
+#[derive(Serialize)]
+pub(crate) struct Article {
+    pub(crate) id: u64,
+    pub(crate) title: String,
+    pub(crate) body: String,
+    pub(crate) author: String,
+}
+
+/// `n` articles, every field a pure function of the index.
+pub(crate) fn articles(n: usize) -> Vec<Article> {
+    let mut lcg = Lcg::new(0x5EED_0013);
+    (0..n)
+        .map(|i| {
+            let mut body = Vec::with_capacity(TEXT_BODY_LEN + 16);
+            while body.len() < TEXT_BODY_LEN {
+                let word = WORDS[(lcg.next() >> 33) as usize % WORDS.len()];
+                body.extend_from_slice(word.as_bytes());
+                body.push(b' ');
+            }
+            body.truncate(TEXT_BODY_LEN);
+            for (at, byte) in body.iter_mut().enumerate() {
+                match at % TEXT_LINE_LEN {
+                    35 => *byte = b'"',
+                    71 => *byte = b'\n',
+                    _ => {}
+                }
+            }
+            Article {
+                id: 700_000_000 + i as u64,
+                title: format!("Release notes, build {i:08}"),
+                body: String::from_utf8(body).expect("the words are ASCII"),
+                author: format!("author-{:012}", lcg.next() % 1_000_000_000_000),
             }
         })
         .collect()

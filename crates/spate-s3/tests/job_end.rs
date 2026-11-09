@@ -1300,3 +1300,37 @@ fn a_seeded_feed_on_a_durable_backend_is_refused() {
         .configure_feed(&section, Arc::new(scripted_feed().0), FeedOrigin::Given)
         .expect("a feed passed without seeding is taken");
 }
+
+/// Pins that only the in-process feed makes a run on a feed built from the
+/// section end by itself: on any other backend with no `location` the source
+/// asks for no depth, so a feed that reports none opens.
+#[test]
+fn a_section_feed_on_a_durable_backend_opens_without_a_depth() {
+    use spate_core::checkpoint::Checkpointer;
+    use spate_core::config::{FeedSection, PipelineConfig};
+    use spate_core::feed::FeedOrigin;
+    use spate_core::source::{Source as _, SourceCtx};
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    let config =
+        PipelineConfig::from_str(&PipelineYaml::file("s3-section-durable", &data).build()).unwrap();
+    let section = FeedSection::new(spate_test::component_config("scripted", "{}"));
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    let mut source = line_framer(
+        spate_s3::S3Source::from_component_config(&config.source, rt.handle().clone()).unwrap(),
+    );
+    source
+        .configure_feed(
+            &section,
+            Arc::new(Wrapped::new(scripted_feed().0, &[])),
+            FeedOrigin::Section,
+        )
+        .unwrap();
+    source
+        .open(SourceCtx::new(Checkpointer::new().handle()))
+        .expect("a continuous job reads no depth");
+}

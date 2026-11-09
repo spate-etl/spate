@@ -575,7 +575,8 @@ impl Source for S3Source {
         self.solo_lister = memory && origin != FeedOrigin::Seeded;
         self.ends = match origin {
             FeedOrigin::Section if memory => Some(SoloEnd::AfterListing),
-            FeedOrigin::Seeded if memory => Some(SoloEnd::Seeded),
+            // Refused above on any other backend.
+            FeedOrigin::Seeded => Some(SoloEnd::Seeded),
             _ => None,
         };
         Ok(())

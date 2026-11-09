@@ -3,6 +3,7 @@
 //! `deadline + thread::sleep` busy-loops.
 
 use spate_core::pipeline::{ExitReport, StartError};
+use std::fmt::Debug;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -70,6 +71,9 @@ pub const HANG: Duration = Duration::from_secs(60);
 /// `timeout` past what [`Instant`] can represent waits as long as `check`
 /// takes.
 ///
+/// When the value the check reads would explain a hang, use
+/// [`wait_for_value`], whose panic carries the last value read.
+///
 /// # Panics
 ///
 /// When `timeout` passes before `check` returns `true`, saying the test hung
@@ -88,6 +92,54 @@ pub fn wait_until(timeout: Duration, what: &str, mut check: impl FnMut() -> bool
     if poll_until(timeout, || check().then_some(())).is_none() {
         panic!("{}", hung(timeout, what));
     }
+}
+
+/// Poll `read` until `done` holds for the value it returns, and return that
+/// value; panics naming `what` and the last value read if `timeout` passes
+/// first.
+///
+/// `timeout` catches a hang and never decides a result, as in
+/// [`wait_until`]: pass [`HANG`].
+///
+/// # Panics
+///
+/// When `timeout` passes before `done` holds, saying the test hung waiting
+/// for `what` and carrying the last value `read` returned, pretty-printed.
+///
+/// # Examples
+///
+/// ```
+/// let mut polls = 0;
+/// let polls = spate_test::wait_for_value(
+///     spate_test::HANG,
+///     "the third poll",
+///     || {
+///         polls += 1;
+///         polls
+///     },
+///     |polls| *polls == 3,
+/// );
+/// assert_eq!(polls, 3);
+/// ```
+pub fn wait_for_value<T: Debug>(
+    timeout: Duration,
+    what: &str,
+    mut read: impl FnMut() -> T,
+    mut done: impl FnMut(&T) -> bool,
+) -> T {
+    let mut last = None;
+    let value = poll_until(timeout, || {
+        let value = read();
+        if done(&value) {
+            return Some(value);
+        }
+        last = Some(value);
+        None
+    });
+    value.unwrap_or_else(|| {
+        let last = last.expect("`poll_until` reads at least once");
+        panic!("{}\n--- last read ---\n{last:#?}", hung(timeout, what))
+    })
 }
 
 /// The panic message of a wait that reached its bound.
@@ -157,5 +209,68 @@ mod tests {
     #[should_panic(expected = "hung after 0ns waiting for: the flag")]
     fn a_wait_that_reaches_its_bound_says_the_test_hung() {
         wait_until(Duration::ZERO, "the flag", || false);
+    }
+
+    /// A value wait returns the first value `done` holds for.
+    #[test]
+    fn wait_for_value_returns_the_value_done_holds_for() {
+        let mut reads = 0;
+        let value = wait_for_value(
+            HANG,
+            "the third read",
+            || {
+                reads += 1;
+                reads
+            },
+            |reads| *reads == 3,
+        );
+        assert_eq!(value, 3);
+    }
+
+    /// A value that already holds passes on a zero bound.
+    #[test]
+    fn a_value_that_holds_passes_on_a_zero_bound() {
+        let value = wait_for_value(Duration::ZERO, "a value that holds", || 7, |v| *v == 7);
+        assert_eq!(value, 7);
+    }
+
+    /// A value wait that reaches its bound says the test hung, naming the
+    /// condition and the last value read.
+    #[test]
+    fn a_value_wait_that_reaches_its_bound_carries_the_last_read() {
+        let panic = std::panic::catch_unwind(|| {
+            wait_for_value(Duration::ZERO, "the offsets", || vec![4, 9], |_| false)
+        })
+        .expect_err("the wait reaches its bound");
+        let message = panic.downcast_ref::<String>().expect("a formatted panic");
+        assert_eq!(
+            message,
+            "hung after 0ns waiting for: the offsets\n--- last read ---\n[\n    4,\n    9,\n]"
+        );
+    }
+
+    /// The panic carries the final read, however many reads the bound
+    /// allowed: each read returns its own count, so the message must end
+    /// with the count after the wait.
+    #[test]
+    fn a_value_wait_that_reaches_its_bound_carries_the_final_read() {
+        let mut reads = 0_u32;
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            wait_for_value(
+                Duration::from_millis(20),
+                "a count",
+                || {
+                    reads += 1;
+                    reads
+                },
+                |_| false,
+            )
+        }))
+        .expect_err("the wait reaches its bound");
+        let message = panic.downcast_ref::<String>().expect("a formatted panic");
+        assert_eq!(
+            message,
+            &format!("hung after 20ms waiting for: a count\n--- last read ---\n{reads}")
+        );
     }
 }

@@ -196,6 +196,7 @@ Every other CI job, such as `Feature matrix and default-feature tests` or `Loom 
 
 The `ci` profile prints a failing test's output as soon as it fails, and again in the summary at the end.
 A wait that reaches `HANG` panics with `hung after 60s waiting for:` and the description passed to it, so write that description as the state you expected.
+When the value a wait polls would explain a hang, wait with `spate_test::wait_for_value`, whose panic also prints the last value it read.
 
 To see a component's logs in a failing test, run the code under `spate_test::show_logs`.
 The harness prints those lines when the test fails.

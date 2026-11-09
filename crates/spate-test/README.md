@@ -36,6 +36,8 @@ attempt with its rows, bytes, dedup token, payload and result.
   to exit within a bound, or joins it for the exit report.
 - `wait_until` polls a condition and panics naming it when the bound passes.
   `HANG` is the bound for a condition a working test always reaches.
+- `wait_for_value` polls a read until a check holds for its value, and returns
+  that value. On a timeout, its panic also prints the last value read.
 
 ## Feeds
 

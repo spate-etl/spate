@@ -580,7 +580,9 @@ mod tests {
     /// without Docker.
     #[test]
     fn every_s3_lane_names_a_known_store() {
-        for lane in crate::lane_dirs(SERVICE) {
+        let lanes = crate::lane_dirs(SERVICE);
+        assert!(!lanes.is_empty(), "no lanes under ci/s3/");
+        for lane in lanes {
             let store = Store::from_lane(&lane).unwrap();
             assert_eq!(store.lane(), lane);
         }

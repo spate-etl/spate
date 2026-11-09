@@ -80,14 +80,12 @@ fn lane_dirs(service: &str) -> Vec<String> {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../ci")
         .join(service);
-    let lanes: Vec<String> = std::fs::read_dir(&dir)
+    std::fs::read_dir(&dir)
         .unwrap()
         .filter_map(Result::ok)
         .filter(|e| e.path().is_dir())
         .map(|e| e.file_name().to_string_lossy().into_owned())
-        .collect();
-    assert!(!lanes.is_empty(), "no lanes under {}", dir.display());
-    lanes
+        .collect()
 }
 
 fn split_reference(reference: &str) -> (String, String) {

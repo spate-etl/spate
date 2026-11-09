@@ -306,8 +306,16 @@ mod tests {
     /// without Docker.
     #[test]
     fn every_kafka_lane_names_a_known_broker() {
-        for lane in crate::lane_dirs(SERVICE) {
+        let lanes = crate::lane_dirs(SERVICE);
+        assert!(!lanes.is_empty(), "no lanes under ci/kafka/");
+        for lane in lanes {
             assert_eq!(Broker::from_lane(&lane).unwrap().lane(), lane);
         }
+    }
+
+    /// A failed start names the broker.
+    #[test]
+    fn a_broker_displays_its_product_name() {
+        assert_eq!(Broker::Apache.to_string(), "Apache Kafka");
     }
 }

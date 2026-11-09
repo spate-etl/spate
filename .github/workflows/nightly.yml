@@ -165,7 +165,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2.87.32
+      - uses: taiki-e/install-action@682ce6c3c696a4cd5168a05f98e51aa02b877941 # v2.89.1
         with:
           tool: osv-scanner
       # Each manifest's findings are filtered by the `osv-scanner.toml` in its
@@ -872,7 +872,7 @@ jobs:
           --ignore-default-filter --test-threads 1
 
       - name: Publish example container test report
-        uses: mikepenz/action-junit-report@6ef3fdcfcd5f0b5d14df3e659ef19b8c6820f93d # v6.6.1
+        uses: mikepenz/action-junit-report@8a133bfa3ecb0ea9024c1e2ae788b4c25f6cdb9d # v6.6.2
         if: always()
         with:
           report_paths: target/nextest/docker/junit.xml
@@ -915,7 +915,7 @@ jobs:
           --run-ignored ignored-only -E 'binary(e2e_long_run)' --test-threads 1
 
       - name: Publish long-run test report
-        uses: mikepenz/action-junit-report@6ef3fdcfcd5f0b5d14df3e659ef19b8c6820f93d # v6.6.1
+        uses: mikepenz/action-junit-report@8a133bfa3ecb0ea9024c1e2ae788b4c25f6cdb9d # v6.6.2
         if: always()
         with:
           report_paths: target/nextest/docker/junit.xml

@@ -939,8 +939,6 @@ pub(super) fn sample_io_busy(
     }
 }
 
-/// Close `feed` and wait for it at most `within`. A close that fails or does
-/// not settle in time leaves the units the feed held to its redelivery.
 /// The setter a feed of `origin` was passed to, for startup errors.
 fn passed_to(origin: FeedOrigin) -> &'static str {
     match origin {
@@ -949,6 +947,8 @@ fn passed_to(origin: FeedOrigin) -> &'static str {
     }
 }
 
+/// Close `feed` and wait for it at most `within`. A close that fails or does
+/// not settle in time leaves the units the feed held to its redelivery.
 fn close_feed(io: &tokio::runtime::Runtime, feed: &dyn Feed, within: Duration) {
     let Some(confirmation) = feed.close(within) else {
         return;

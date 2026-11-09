@@ -274,7 +274,7 @@ common keys and the backend count are checked when the file loads, and so are a
 `location` or a `settling_window` beside `memory` and a `settling_window` out of
 range, which the runtime also refuses when code passes the feed. The `memory`
 body is checked when the pipeline starts, before the source opens, unless code
-passes a feed to `Pipeline::feed`.
+passes a feed to `Pipeline::feed` or `Pipeline::seeded_feed`.
 
 ```yaml file=crates/spate/examples/s3_backfill.rs region=feed
 ```
@@ -295,7 +295,8 @@ is built in code from the section and passed to `Pipeline::feed`, and the
 runtime refuses a feed whose backend differs from the key the section names. The
 section's backend keys, and `attempt_cap` as the feed's delivery cap, apply
 only when a feed is built from the section, so a feed passed to
-`Pipeline::feed` keeps the settings it was built with. `units_held`, `location`
+`Pipeline::feed` or `Pipeline::seeded_feed` keeps the settings it was built
+with. `units_held`, `location`
 and `settling_window` apply to every feed, since the source reads them, and so
 does `attempt_cap` as the re-enqueue cap of a source that re-enqueues units.
 

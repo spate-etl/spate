@@ -12,10 +12,11 @@ use spate::json::{JsonDeserializerBuilder, NdjsonFramer};
 use spate::clock::TestClock;
 use spate::pipeline::ShutdownHandle;
 use spate::prelude::*;
-use spate::s3::{DescriptorObject, S3Source, SplitDescriptor};
+use spate::clickhouse::ClickHouseSinkConfig;
+use spate::s3::{DescriptorObject, S3Source, S3SourceConfig, SplitDescriptor};
 use spate_example_lambda_s3::{
-    AssembleError, Message, MissingId, RESPONSE_MARGIN, RUNTIME_SHUTDOWN, TooShort, messages,
-    run_batch, run_seeded, seeded, stop_at,
+    BoxError, CONFIG, MAX_RECORD_BYTES, Message, MissingId, RESPONSE_MARGIN, RUNTIME_SHUTDOWN,
+    TooShort, handle_batch, messages, run_batch, run_seeded, stop_at,
 };
 use spate_test::{HANG, SinkScript, WriteOutcome, capture_sink, decode_rows};
 use std::fs;
@@ -82,12 +83,12 @@ sink: {{ capture: {{}} }}
 fn assemble(
     yaml: String,
     sink: spate_test::CaptureSink,
-) -> impl FnOnce() -> Result<(Pipeline, S3Source), AssembleError> + Send + 'static {
+) -> impl FnOnce() -> Result<(Pipeline, S3Source), BoxError> + Send + 'static {
     move || {
         let pipeline = Pipeline::from_config(PipelineConfig::from_str(&yaml)?)?;
         let source =
             S3Source::from_component_config(&pipeline.config().source, pipeline.io_handle())?
-                .with_framer(|| Box::new(NdjsonFramer::new(1 << 20)));
+                .with_framer(|| Box::new(NdjsonFramer::new(MAX_RECORD_BYTES)));
         let section = pipeline.config().deserializer.clone().ok_or("deserializer")?;
         let pipeline = pipeline.sink(sink)?.chains(move |ctx| {
             let chunk = ctx.chunk();
@@ -195,11 +196,12 @@ async fn the_units_a_stop_leaves_are_reported() {
     let assembled = assemble(yaml(&data, "{ memory: {}, units_held: 1 }"), sink);
     let start = move |feed: Arc<dyn Feed>| {
         let (pipeline, source) = assembled()?;
-        let runtime = seeded(pipeline, feed)
+        let runtime = pipeline
+            .seeded_feed(feed)
             .into_runtime(source)?
             .with_stop_clock(stop_clock);
         *kept.lock().unwrap() = Some(runtime.shutdown_handle());
-        Ok::<_, AssembleError>(runtime)
+        Ok::<_, BoxError>(runtime)
     };
     let held = script.clone();
     let stop = async move {
@@ -242,7 +244,7 @@ async fn a_batch_whose_pipeline_does_not_build_reports_every_message() {
     let batch = vec![message("t", TEST_EVENT), message("u", TEST_EVENT)];
     let failed = bounded(run_batch(
         batch,
-        || Err::<(Pipeline, S3Source), AssembleError>("no pipeline".into()),
+        || Err::<(Pipeline, S3Source), BoxError>("no pipeline".into()),
         pending(),
     ))
     .await;
@@ -347,5 +349,117 @@ fn an_invocation_past_its_deadline_is_refused() {
             left: Duration::ZERO,
             needed: needed()
         })
+    );
+}
+
+/// Pins that the function's pipeline file parses, with its source and sink
+/// sections, once the environment fills its `${VAR}` forms.
+#[test]
+fn the_function_pipeline_file_parses() {
+    let text = CONFIG
+        .replace("${SPATE_S3_URL}", "s3://events/page-views/")
+        .replace("${CLICKHOUSE_URL}", "http://clickhouse:8123");
+    let config = PipelineConfig::from_str(&text).unwrap();
+    assert_eq!(config.checkpoint.drain_timeout, Duration::from_secs(10));
+    let source: S3SourceConfig = config.source.deserialize_into().unwrap();
+    assert_eq!(source.url, "s3://events/page-views/");
+    let _: ClickHouseSinkConfig = config
+        .sink_config("default")
+        .unwrap()
+        .deserialize_into()
+        .unwrap();
+}
+
+/// Pins the error a message with no id gives, which Lambda logs.
+#[test]
+fn a_missing_id_names_its_position() {
+    assert_eq!(
+        MissingId { position: 3 }.to_string(),
+        "message 3 of the batch has no message id; failing the whole batch"
+    );
+}
+
+/// Pins the error an invocation with too little time gives, which names
+/// both settings that fix it.
+#[test]
+fn too_little_time_names_both_settings() {
+    let short = TooShort {
+        left: Duration::from_secs(5),
+        needed: needed(),
+    };
+    assert_eq!(
+        short.to_string(),
+        "the invocation has 5s left and a stop needs 13s (checkpoint.drain_timeout, 2s to \
+         shut the runtime down and 1s to answer); raise the function timeout or lower \
+         checkpoint.drain_timeout"
+    );
+}
+
+fn event(messages: &[(Option<&str>, &str)]) -> SqsEvent {
+    let mut event = SqsEvent::default();
+    event.records = messages
+        .iter()
+        .map(|(id, body)| sqs(*id, Some(body)))
+        .collect();
+    event
+}
+
+fn far_deadline() -> SystemTime {
+    SystemTime::now() + Duration::from_secs(3_600)
+}
+
+/// Pins the invocation's answer: one batch item failure per message to
+/// deliver again, named by its message id.
+#[tokio::test]
+async fn an_invocation_answers_with_its_failures() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = stage(dir.path(), "a.ndjson", &["a1"]);
+    let (sink, _script) = capture_sink(1, 1);
+    let response = bounded(handle_batch(
+        event(&[(Some("t"), TEST_EVENT), (Some("n"), FOREIGN)]),
+        far_deadline(),
+        DRAIN,
+        assemble(yaml(&data, "{ memory: {} }"), sink),
+    ))
+    .await
+    .unwrap();
+    let ids: Vec<&str> = response
+        .batch_item_failures
+        .iter()
+        .map(|f| f.item_identifier.as_str())
+        .collect();
+    assert_eq!(ids, ["n"]);
+}
+
+/// Pins that an invocation with too little time left fails before it builds
+/// a pipeline.
+#[tokio::test]
+async fn an_invocation_with_too_little_time_builds_nothing() {
+    let error = handle_batch(
+        event(&[(Some("t"), TEST_EVENT)]),
+        SystemTime::now(),
+        DRAIN,
+        || -> Result<(Pipeline, S3Source), BoxError> { panic!("the pipeline was built") },
+    )
+    .await
+    .unwrap_err();
+    assert!(error.downcast_ref::<TooShort>().is_some(), "{error}");
+}
+
+/// Pins that an invocation whose batch has a message with no id fails as a
+/// whole.
+#[tokio::test]
+async fn an_invocation_with_a_nameless_message_fails() {
+    let error = handle_batch(
+        event(&[(Some("t"), TEST_EVENT), (None, TEST_EVENT)]),
+        far_deadline(),
+        DRAIN,
+        || -> Result<(Pipeline, S3Source), BoxError> { panic!("the pipeline was built") },
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        error.downcast_ref::<MissingId>(),
+        Some(&MissingId { position: 1 })
     );
 }

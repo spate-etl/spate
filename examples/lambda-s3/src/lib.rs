@@ -1,16 +1,16 @@
 //! The handler core of an AWS Lambda function that reads one SQS batch of S3
 //! storage notifications per invocation.
 //!
-//! [`run_batch`] publishes each message into an in-process feed, runs the
-//! pipeline over that seeded feed on a thread of its own, and returns the ids
-//! of the messages SQS must deliver again. `main.rs` wires it to the Lambda
-//! runtime with a ClickHouse sink.
+//! [`handle_batch`] answers one invocation. [`run_batch`] publishes each
+//! message into an in-process feed, runs the pipeline over that seeded feed on
+//! a thread of its own, and returns the ids of the messages SQS must deliver
+//! again. `main.rs` wires it to the Lambda runtime with a ClickHouse sink.
 
-use aws_lambda_events::event::sqs::SqsEvent;
+use aws_lambda_events::event::sqs::{SqsBatchResponse, SqsEvent};
 use spate::feed::memory::MemoryFeed;
 use spate::feed::{Feed, Unit};
 use spate::hash::QualitySet;
-use spate::pipeline::{ExitState, Pipeline, PipelineRuntime, RuntimeOptions, ShutdownHandle};
+use spate::pipeline::{ExitState, Pipeline, PipelineRuntime, ShutdownHandle};
 use spate::s3::S3Source;
 use std::fmt;
 use std::future::Future;
@@ -18,6 +18,37 @@ use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use tokio::sync::oneshot;
+
+/// The function's pipeline file. It is read once per invocation, so its
+/// `${VAR}` forms take the function's environment.
+pub const CONFIG: &str = r#"
+# ANCHOR: config
+pipeline: { name: lambda-s3 }
+admin: { listen: none }
+metrics: { exporter: none }
+checkpoint:
+  # The function stops the run this long before its deadline, with time
+  # added for the runtime to shut down and for the answer to Lambda.
+  drain_timeout: 10s
+feed: { memory: {} }
+source:
+  s3:
+    url: "${SPATE_S3_URL}"
+deserializer:
+  json: {}
+sink:
+  clickhouse:
+    table: ${CLICKHOUSE_TABLE:-page_views}
+    format: native
+    shards:
+      - replicas: ["${CLICKHOUSE_URL}"]
+    user: ${CLICKHOUSE_USER:-default}
+    password: ${CLICKHOUSE_PASSWORD:-}
+# ANCHOR_END: config
+"#;
+
+/// The longest NDJSON record the framer reads.
+pub const MAX_RECORD_BYTES: usize = 1 << 20;
 
 /// One SQS message of the batch.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -117,19 +148,41 @@ pub fn stop_at(
     Ok(now + (left - needed))
 }
 
-/// An error assembling the pipeline.
-pub type AssembleError = Box<dyn std::error::Error + Send + Sync>;
+/// An error from building the pipeline or answering an invocation.
+pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
-/// Hand `pipeline` the seeded `feed` and the runtime options a Lambda
-/// function needs: no signal handlers, since Lambda sends no signal to a
-/// function with no extension.
-#[must_use]
-pub fn seeded(pipeline: Pipeline, feed: Arc<dyn Feed>) -> Pipeline {
-    pipeline.seeded_feed(feed).runtime_options(RuntimeOptions {
-        handle_signals: false,
-        ..RuntimeOptions::default()
-    })
+// ANCHOR: handler
+/// Answer one invocation whose batch is `event` and whose deadline is
+/// `deadline`: read the batch through the pipeline `assemble` builds, stop the
+/// run in time for `drain_timeout`, and name each message to deliver again.
+///
+/// # Errors
+///
+/// [`TooShort`] when the invocation has too little time left, and
+/// [`MissingId`] when a message has no id. Lambda then delivers the whole
+/// batch again.
+pub async fn handle_batch<A>(
+    event: SqsEvent,
+    deadline: SystemTime,
+    drain_timeout: Duration,
+    assemble: A,
+) -> Result<SqsBatchResponse, BoxError>
+where
+    A: FnOnce() -> Result<(Pipeline, S3Source), BoxError> + Send + 'static,
+{
+    let stop = stop_at(SystemTime::now(), deadline, drain_timeout)?;
+    let messages = messages(event)?;
+    let wait = stop
+        .duration_since(SystemTime::now())
+        .unwrap_or(Duration::ZERO);
+    let failed = run_batch(messages, assemble, tokio::time::sleep(wait)).await;
+    let mut response = SqsBatchResponse::default();
+    for id in failed {
+        response.add_failure(id);
+    }
+    Ok(response)
 }
+// ANCHOR_END: handler
 
 // ANCHOR: run_batch
 /// Read `messages` through the pipeline and source `assemble` builds, and
@@ -140,22 +193,22 @@ pub fn seeded(pipeline: Pipeline, feed: Arc<dyn Feed>) -> Pipeline {
 /// neither dead-lettered nor unsettled. Any other ending fails every message.
 pub async fn run_batch<A, S>(messages: Vec<Message>, assemble: A, stop: S) -> Vec<String>
 where
-    A: FnOnce() -> Result<(Pipeline, S3Source), AssembleError> + Send + 'static,
+    A: FnOnce() -> Result<(Pipeline, S3Source), BoxError> + Send + 'static,
     S: Future<Output = ()>,
 {
     let start = move |feed: Arc<dyn Feed>| {
         let (pipeline, source) = assemble()?;
-        Ok(seeded(pipeline, feed).into_runtime(source)?)
+        Ok(pipeline.seeded_feed(feed).into_runtime(source)?)
     };
     run_seeded(messages, start, stop).await
 }
 // ANCHOR_END: run_batch
 
 /// [`run_batch`] for code that builds the runtime itself: `start` receives
-/// the seeded feed, and passes it through [`seeded`].
+/// the seeded feed, for `Pipeline::seeded_feed`.
 pub async fn run_seeded<A, S>(messages: Vec<Message>, start: A, stop: S) -> Vec<String>
 where
-    A: FnOnce(Arc<dyn Feed>) -> Result<PipelineRuntime<S3Source>, AssembleError> + Send + 'static,
+    A: FnOnce(Arc<dyn Feed>) -> Result<PipelineRuntime<S3Source>, BoxError> + Send + 'static,
     S: Future<Output = ()>,
 {
     let ids: Vec<String> = messages.iter().map(|m| m.id.clone()).collect();

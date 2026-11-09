@@ -12,7 +12,7 @@
 //! gets no shutdown phase. `examples/lambda-s3/README.md` covers the build
 //! and the event source mapping.
 
-use aws_lambda_events::event::sqs::{SqsBatchResponse, SqsEvent};
+use aws_lambda_events::event::sqs::SqsEvent;
 use lambda_runtime::{Error, LambdaEvent};
 use metrics_cloudwatch_embedded::lambda::handler;
 use serde::{Deserialize, Serialize};
@@ -22,35 +22,7 @@ use spate::clickhouse::{
 use spate::json::{JsonDeserializerBuilder, NdjsonFramer};
 use spate::prelude::*;
 use spate::s3::S3Source;
-use spate_example_lambda_s3::{AssembleError, messages, run_batch, stop_at};
-use std::time::{Duration, SystemTime};
-
-/// The pipeline file. A function reads it once per invocation, so `${VAR}`
-/// forms take the function's environment.
-const CONFIG: &str = r#"
-# ANCHOR: config
-pipeline: { name: lambda-s3 }
-admin: { listen: none }
-metrics: { exporter: none }
-checkpoint:
-  # The function stops the run this long, plus 3s, before its deadline.
-  drain_timeout: 10s
-feed: { memory: {} }
-source:
-  s3:
-    url: "${SPATE_S3_URL}"
-deserializer:
-  json: {}
-sink:
-  clickhouse:
-    table: ${CLICKHOUSE_TABLE:-page_views}
-    format: native
-    shards:
-      - replicas: ["${CLICKHOUSE_URL}"]
-    user: ${CLICKHOUSE_USER:-default}
-    password: ${CLICKHOUSE_PASSWORD:-}
-# ANCHOR_END: config
-"#;
+use spate_example_lambda_s3::{BoxError, CONFIG, MAX_RECORD_BYTES, handle_batch};
 
 /// One NDJSON record.
 #[derive(Debug, Deserialize)]
@@ -69,10 +41,10 @@ struct PageViewRow {
 }
 
 /// The pipeline and source for one batch.
-fn assemble() -> Result<(Pipeline, S3Source), AssembleError> {
+fn assemble() -> Result<(Pipeline, S3Source), BoxError> {
     let pipeline = Pipeline::from_config(PipelineConfig::from_str(CONFIG)?)?;
     let source = S3Source::from_component_config(&pipeline.config().source, pipeline.io_handle())?
-        .with_framer(|| Box::new(NdjsonFramer::new(1 << 20)));
+        .with_framer(|| Box::new(NdjsonFramer::new(MAX_RECORD_BYTES)));
     let deserializer = pipeline
         .config()
         .deserializer
@@ -104,25 +76,6 @@ fn assemble() -> Result<(Pipeline, S3Source), AssembleError> {
     Ok((pipeline, source))
 }
 
-// ANCHOR: handler
-async fn handle(
-    event: LambdaEvent<SqsEvent>,
-    drain_timeout: Duration,
-) -> Result<SqsBatchResponse, Error> {
-    let stop = stop_at(SystemTime::now(), event.context.deadline(), drain_timeout)?;
-    let messages = messages(event.payload)?;
-    let wait = stop
-        .duration_since(SystemTime::now())
-        .unwrap_or(Duration::ZERO);
-    let failed = run_batch(messages, assemble, tokio::time::sleep(wait)).await;
-    let mut response = SqsBatchResponse::default();
-    for id in failed {
-        response.add_failure(id);
-    }
-    Ok(response)
-}
-// ANCHOR_END: handler
-
 #[tokio::main]
 async fn main() -> Result<(), Error> {
     // Before the first pipeline, so the handler's own lines are logged too.
@@ -136,6 +89,9 @@ async fn main() -> Result<(), Error> {
             std::env::var("AWS_LAMBDA_FUNCTION_NAME").unwrap_or_default(),
         )
         .init()?;
-    handler::run(metrics, |event| handle(event, drain_timeout)).await
+    handler::run(metrics, |event: LambdaEvent<SqsEvent>| {
+        handle_batch(event.payload, event.context.deadline(), drain_timeout, assemble)
+    })
+    .await
     // ANCHOR_END: metrics
 }

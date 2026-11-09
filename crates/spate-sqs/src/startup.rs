@@ -10,11 +10,10 @@
 //! counts. A bounded job's end check reads both, and the runtime reads the
 //! dead-letter queue's on every job. The checks run once, at connect.
 
-use crate::config::{BACKEND, NAME};
+use crate::config::NAME;
 use crate::error::{CallError, Class};
 use crate::queue::BoxFuture;
 use serde::Deserialize;
-use spate_core::config::FeedSection;
 use spate_core::feed::ConnectError;
 use spate_core::hash::FastMap;
 use url::Url;
@@ -190,12 +189,7 @@ pub(crate) async fn check(
         )
     })?;
     let dead_letter_arn = policy.dead_letter_target_arn;
-    let source_url = Url::parse(queue_url).map_err(|e| {
-        ConnectError::Config(FeedSection::backend_error(
-            BACKEND,
-            format!("`queue_url` is not a URL: {e}"),
-        ))
-    })?;
+    let source_url = crate::config::queue_url(queue_url).map_err(ConnectError::Config)?;
     let dead_letter = dead_letter_url(&source_url, &dead_letter_arn).ok_or_else(|| {
         ConnectError::refused(
             NAME,
@@ -312,6 +306,7 @@ pub(crate) fn dead_letter_url(source: &Url, arn: &str) -> Option<Url> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use spate_core::config::ConfigError;
     use std::sync::Mutex;
 
     const SOURCE: &str = "http://127.0.0.1:9324/000000000000/jobs";
@@ -530,6 +525,37 @@ mod tests {
             }) => message,
             other => panic!("expected a refusal, got {other:?}"),
         }
+    }
+
+    /// Pins that a `queue_url` that is not a URL is refused at connect with
+    /// the text loading gives it.
+    #[test]
+    fn a_queue_url_that_is_not_a_url_is_a_config_error() {
+        const NOT_A_URL: &str = "not a url";
+        let policy = format!(r#"{{"deadLetterTargetArn":"{DEAD_ARN}","maxReceiveCount":5}}"#);
+        let queue = Scripted::default().queue(
+            NOT_A_URL,
+            &[
+                ("QueueArn", "arn:aws:sqs:elasticmq:000000000000:jobs"),
+                ("RedrivePolicy", policy.as_str()),
+            ],
+        );
+        let step = Mutex::new("starting");
+        let result = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(check(&queue, NOT_A_URL, &step));
+        let Err(ConnectError::Config(err)) = result else {
+            panic!("expected a config error, got {result:?}");
+        };
+        assert!(
+            matches!(&err, ConfigError::Component { context, .. } if context == "feed.sqs.queue_url"),
+            "{err:?}"
+        );
+        assert_eq!(
+            err.to_string(),
+            "feed.sqs.queue_url: is not a URL: relative URL without a base"
+        );
     }
 
     /// Pins that the dead-letter URL is the source queue URL with its last

@@ -117,7 +117,7 @@ server's message. That covers a name the server does not know and a value it
 cannot parse. A misspelled `insert_quorum` fails like this:
 
 ```text
-sink.clickhouse: replica http://ch-1.internal:8123 refused the settings: bad response: Code: 115. DB::Exception: Setting insert_qourum is neither a builtin setting nor started with the prefix 'SQL_' registered for user-defined settings: Maybe you meant ['insert_quorum']. (UNKNOWN_SETTING) …
+sink.clickhouse: replica http://ch-1.internal:8123 failed the settings check: bad response: Code: 115. DB::Exception: Setting insert_qourum is neither a builtin setting nor started with the prefix 'SQL_' registered for user-defined settings: Maybe you meant ['insert_quorum']. (UNKNOWN_SETTING) …
 ```
 
 An insert that a replica answers with `UNKNOWN_SETTING` mid-run is a

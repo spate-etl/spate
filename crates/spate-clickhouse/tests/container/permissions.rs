@@ -183,3 +183,26 @@ distributed_check:
         "the refusal should name the grant the page prescribes, got: {reason}"
     );
 }
+
+/// A user granted only `INSERT` on one table passes the startup settings
+/// check, which sends `SELECT 1` carrying `settings`.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn insert_alone_passes_the_settings_check() {
+    let srv = bare_server("admin-secret").await;
+    for ddl in [
+        "CREATE TABLE orders (id UInt64, name String, amount Nullable(Float64)) \
+         ENGINE = MergeTree ORDER BY id",
+        "CREATE USER writer IDENTIFIED BY 'writer-secret'",
+        "GRANT INSERT ON default.orders TO writer",
+    ] {
+        srv.admin.query(ddl).execute().await.expect("ddl");
+    }
+    try_sink_with::<Owned<Order>>(
+        &srv.url,
+        "orders",
+        "user: writer\npassword: writer-secret\nsettings: { insert_quorum: \"0\" }\n",
+    )
+    .await
+    .expect("INSERT alone passes the settings check");
+}

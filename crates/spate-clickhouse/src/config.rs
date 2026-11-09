@@ -510,6 +510,15 @@ impl ClickHouseSinkBuilder {
     /// Run it on the builder's I/O runtime before the chain exists, via
     /// `pipeline.block_on`. `F` is not inferable from context, so name it:
     /// `builder.with_row::<Owned<OrderRow>>()`.
+    ///
+    /// # Errors
+    ///
+    /// [`SchemaError::Columns`] when `F::COLUMNS` cannot produce an `INSERT`
+    /// or its header cannot be compressed, [`SchemaError::Fetch`] when a
+    /// replica's columns cannot be read, [`SchemaError::Mismatch`] when the
+    /// table is missing, the replicas disagree or a declared column does not
+    /// fit it, and [`SchemaError::Settings`] when a replica answers the
+    /// settings check with an error.
     pub async fn with_row<F: crate::ClickHouseRowFamily>(
         self,
     ) -> Result<ClickHouseSink, SchemaError> {

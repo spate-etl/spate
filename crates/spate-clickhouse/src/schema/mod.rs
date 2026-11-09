@@ -39,7 +39,7 @@ use std::fmt::Write as _;
 use std::sync::Arc;
 use typeparse::ChType;
 
-/// Schema validation failed at sink startup.
+/// A check against the replicas failed at sink startup.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum SchemaError {
@@ -60,9 +60,10 @@ pub enum SchemaError {
     /// multi-line diff).
     #[error("{0}")]
     Mismatch(String),
-    /// A replica refused the `settings` passthrough: an unknown name, or a
-    /// value it cannot parse.
-    #[error("sink.clickhouse: replica {url} refused the settings: {reason}")]
+    /// A replica answered the `SELECT 1` that carries the `settings`
+    /// passthrough with an error. The usual cause is a setting it refuses, by
+    /// name or by value.
+    #[error("sink.clickhouse: replica {url} failed the settings check: {reason}")]
     Settings {
         /// The replica URL, redacted.
         url: String,

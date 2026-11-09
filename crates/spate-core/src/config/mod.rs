@@ -706,11 +706,11 @@ impl PipelineConfig {
         // block is rejected at load, including for a `sinks:` entry this
         // binary never installs (nothing later would resolve it).
         if let Some(sink) = &self.sink {
-            sink.resolved_chunk()?;
+            sink.resolved_sink_chunk(&self.sink_address("default"))?;
         }
         if let Some(sinks) = &self.sinks {
-            for sink in sinks.values() {
-                sink.resolved_chunk()?;
+            for (name, sink) in sinks {
+                sink.resolved_sink_chunk(&self.sink_address(name))?;
             }
         }
         Ok(())

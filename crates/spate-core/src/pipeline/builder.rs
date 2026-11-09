@@ -549,7 +549,7 @@ impl Pipeline {
         // exclusive.
         let address = self.config.sink_address(&sink_name);
         let yaml_chunk = match self.config.sink_config(&sink_name) {
-            Ok(cc) => cc.resolved_chunk()?,
+            Ok(cc) => cc.resolved_sink_chunk(&address)?,
             // No YAML section under this name. The sink is configured purely
             // in code (capture sinks in tests, named programmatic sinks beside
             // a placeholder `sink:`). A declared `chunk:` block that nothing
@@ -1213,6 +1213,38 @@ mod tests {
     /// resolves at install without the connector ever seeing the key.
     fn chunk_body(yaml: &str) -> ComponentConfig {
         ComponentConfig::new("fake", serde_yaml::from_str(yaml).expect("chunk yaml"))
+    }
+
+    /// A sink section assigned to the config in code carries no label, and
+    /// its `chunk:` errors still name the sink, at install and from
+    /// `validate`.
+    #[test]
+    fn a_chunk_mistake_names_a_sink_assigned_in_code() {
+        use crate::config::{PipelineConfig, PipelineSection, YamlValue};
+        let memory = || ComponentConfig::new("memory", YamlValue::Mapping(Default::default()));
+        let zero = || chunk_body("chunk: { target_bytes: 0 }");
+        let base = || PipelineConfig::new(PipelineSection::new("demo"), memory(), memory());
+        let mut multi = base();
+        multi.sink = None;
+        multi.sinks = Some(std::collections::BTreeMap::from([(
+            "eu".to_owned(),
+            zero(),
+        )]));
+        let mut single = base();
+        single.sink = Some(zero());
+        for (config, name, want) in [
+            (multi, "eu", "sinks.eu.fake.chunk.target_bytes"),
+            (single, "default", "sink.fake.chunk.target_bytes"),
+        ] {
+            let want = format!("{want}: must be greater than zero");
+            assert_eq!(config.validate().expect_err("refused").to_string(), want);
+            let err = Pipeline::from_config(config)
+                .expect("builder")
+                .add_sink(name, null_sink(1))
+                .map(drop)
+                .expect_err("refused at install");
+            assert_eq!(err.to_string(), want);
+        }
     }
 
     /// A `chunk:` mistake on a `sinks:` entry reads the same whether config

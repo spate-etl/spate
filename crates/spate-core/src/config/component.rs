@@ -144,7 +144,7 @@ impl ComponentConfig {
     /// expected type without the value.
     pub fn deserialize_into<T: DeserializeOwned>(&self) -> Result<T, ConfigError> {
         serde_path_to_error::deserialize(self.raw.clone())
-            .map_err(|e| self.component_error(None, e))
+            .map_err(|e| component_error(self.path(), None, e))
     }
 
     /// Resolve the framework-reserved `chunk:` block, if present, into a
@@ -155,12 +155,26 @@ impl ComponentConfig {
     /// sink section; [`PipelineConfig::validate`](super::PipelineConfig::validate)
     /// rejects a stray `chunk:` on a `source`/`deserializer` section.
     pub(crate) fn resolved_chunk(&self) -> Result<Option<ChunkConfig>, ConfigError> {
+        self.chunk_at(self.path())
+    }
+
+    /// [`resolved_chunk`](Self::resolved_chunk) for the sink at `address`
+    /// (`sink` or `sinks.<name>`), so its errors name the sink even when the
+    /// section was placed in the config without a label.
+    pub(crate) fn resolved_sink_chunk(
+        &self,
+        address: &str,
+    ) -> Result<Option<ChunkConfig>, ConfigError> {
+        self.chunk_at(SectionPath(format!("{address}.{}", self.type_tag)))
+    }
+
+    fn chunk_at(&self, at: SectionPath) -> Result<Option<ChunkConfig>, ConfigError> {
         let Some(value) = &self.chunk else {
             return Ok(None);
         };
         let section: ChunkSection = serde_path_to_error::deserialize(value.clone())
-            .map_err(|e| self.component_error(Some("chunk"), e))?;
-        section.resolve(&self.path()).map(Some)
+            .map_err(|e| component_error(at.clone(), Some("chunk"), e))?;
+        section.resolve(&at).map(Some)
     }
 
     /// Whether this section declared a `chunk:` block (without resolving it).
@@ -178,30 +192,6 @@ impl ComponentConfig {
         match &self.section {
             Some(section) => SectionPath(format!("{section}.{}", self.type_tag)),
             None => SectionPath(self.type_tag.clone()),
-        }
-    }
-
-    /// A [`ConfigError::Component`] anchored at this section's dotted path,
-    /// with an optional sub-block `suffix` (e.g. `chunk`) and the error's own
-    /// inner path appended.
-    fn component_error(
-        &self,
-        suffix: Option<&str>,
-        e: serde_path_to_error::Error<serde_yaml::Error>,
-    ) -> ConfigError {
-        let SectionPath(mut context) = self.path();
-        if let Some(suffix) = suffix {
-            context.push('.');
-            context.push_str(suffix);
-        }
-        let inner_path = e.path().to_string();
-        if inner_path != "." && !inner_path.is_empty() {
-            context.push('.');
-            context.push_str(&inner_path);
-        }
-        ConfigError::Component {
-            context,
-            message: redact::error_message(&e.into_inner().to_string()).into_owned(),
         }
     }
 
@@ -224,6 +214,29 @@ impl ComponentConfig {
             chunk,
             section: None,
         }
+    }
+}
+
+/// A [`ConfigError::Component`] anchored at `at`, with an optional sub-block
+/// `suffix` (e.g. `chunk`) and the error's own inner path appended.
+fn component_error(
+    at: SectionPath,
+    suffix: Option<&str>,
+    e: serde_path_to_error::Error<serde_yaml::Error>,
+) -> ConfigError {
+    let SectionPath(mut context) = at;
+    if let Some(suffix) = suffix {
+        context.push('.');
+        context.push_str(suffix);
+    }
+    let inner_path = e.path().to_string();
+    if inner_path != "." && !inner_path.is_empty() {
+        context.push('.');
+        context.push_str(&inner_path);
+    }
+    ConfigError::Component {
+        context,
+        message: redact::error_message(&e.into_inner().to_string()).into_owned(),
     }
 }
 

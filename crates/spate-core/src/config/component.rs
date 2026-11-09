@@ -95,10 +95,25 @@ impl SectionPath {
     }
 
     /// A [`ConfigError::Component`] about the whole section, with context
-    /// `<path>`.
-    pub(super) fn error(self, message: impl Into<String>) -> ConfigError {
+    /// `<path>`. It serves an error no single field owns, and an error whose
+    /// text already starts at its field, such as a
+    /// [`ReservedKeyError`](super::ReservedKeyError).
+    ///
+    /// ```
+    /// use spate_core::config::{Denylist, SectionPath};
+    ///
+    /// let owned = Denylist::new(&[("acks", "forced to all")]);
+    /// let refusal = owned.check("rdkafka", ["acks"]).expect_err("owned key");
+    /// let err = SectionPath::sink("kafka").error(refusal.to_string());
+    /// assert_eq!(
+    ///     err.to_string(),
+    ///     "sink.kafka: rdkafka.\"acks\" cannot be overridden: forced to all"
+    /// );
+    /// ```
+    #[must_use]
+    pub fn error(&self, message: impl Into<String>) -> ConfigError {
         ConfigError::Component {
-            context: self.0,
+            context: self.0.clone(),
             message: message.into(),
         }
     }
@@ -349,6 +364,19 @@ mod tests {
             );
             assert_eq!(err.to_string(), format!("{want}: must not be empty"));
         }
+    }
+
+    /// An error about a whole section is anchored at the section's path,
+    /// with no field after it.
+    #[test]
+    fn a_whole_section_error_names_the_section() {
+        let err = SectionPath::sink("fake").error("producer creation failed");
+        assert!(
+            matches!(&err, ConfigError::Component { context, message }
+                if context == "sink.fake" && message == "producer creation failed"),
+            "{err:?}"
+        );
+        assert_eq!(err.to_string(), "sink.fake: producer creation failed");
     }
 
     /// A section placed in a config starts at its position; one built in

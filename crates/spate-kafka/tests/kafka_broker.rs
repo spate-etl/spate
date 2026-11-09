@@ -15,6 +15,7 @@ use spate_core::record::PartitionId;
 use spate_core::source::{Source, SourceCtx, SourceEvent, SourceLane};
 use spate_kafka::{KafkaSource, KafkaSourceConfig};
 use spate_test::HANG;
+use spate_test_support::{KAFKA_PORT, KafkaBroker};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -25,7 +26,6 @@ use support::{
 };
 use testcontainers::Container;
 use testcontainers::runners::SyncRunner;
-use testcontainers_modules::kafka::apache::{KAFKA_PORT, Kafka};
 
 const TOPIC: &str = "orders";
 
@@ -368,7 +368,7 @@ fn real_broker_revocation_commits_every_consumers_offsets() {
 
 /// A broker that takes transactions, and its bootstrap address. The container
 /// stops when the handle drops.
-fn transaction_broker() -> (Container<Kafka>, String) {
+fn transaction_broker() -> (Container<KafkaBroker>, String) {
     let container = transactional_broker()
         .start()
         .expect("start kafka container");
@@ -674,7 +674,6 @@ mod latest_start {
     use rdkafka::producer::{BaseRecord, Producer as _};
     use spate_test::HANG;
     use support::latest;
-    use testcontainers::ImageExt as _;
 
     fn on_a_broker(partitions: i32, body: impl FnOnce(&str, &str)) {
         let container = broker().start().expect("start kafka container");
@@ -846,9 +845,7 @@ mod latest_start {
     #[test]
     #[ignore = "requires Docker"]
     fn an_open_transaction_is_not_skipped_by_a_new_group() {
-        let container = broker()
-            .with_env_var("KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR", "1")
-            .with_env_var("KAFKA_TRANSACTION_STATE_LOG_MIN_ISR", "1")
+        let container = transactional_broker()
             .start()
             .expect("start kafka container");
         let port = container.get_host_port_ipv4(KAFKA_PORT).expect("port");

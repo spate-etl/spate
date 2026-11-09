@@ -21,13 +21,12 @@ use spate_core::source::{
 };
 use spate_kafka::{KafkaSource, KafkaSourceConfig};
 use spate_test::HANG;
-use spate_test_support::container_image;
+use spate_test_support::KafkaBroker;
 use std::mem::ManuallyDrop;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use testcontainers::{ContainerRequest, ImageExt};
-use testcontainers_modules::kafka::apache::Kafka;
+use testcontainers::ContainerRequest;
 
 pub(crate) mod feed;
 pub(crate) mod latest;
@@ -247,18 +246,14 @@ impl Raw for ClientConfig {
     }
 }
 
-/// A broker on the image `ci/kafka/` pins, pulled by digest.
-pub(crate) fn broker() -> ContainerRequest<Kafka> {
-    let (name, tag) = container_image(&["--pull", "kafka"]);
-    Kafka::default().with_name(name).with_tag(tag)
+/// The broker the selected `ci/kafka/` lane pins, pulled by digest.
+pub(crate) fn broker() -> ContainerRequest<KafkaBroker> {
+    KafkaBroker::selected().into()
 }
 
-/// [`broker`] with the transaction state topic on one replica. Its defaults
-/// ask for three, which one broker cannot satisfy.
-pub(crate) fn transactional_broker() -> ContainerRequest<Kafka> {
-    broker()
-        .with_env_var("KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR", "1")
-        .with_env_var("KAFKA_TRANSACTION_STATE_LOG_MIN_ISR", "1")
+/// [`broker`], taking transactions.
+pub(crate) fn transactional_broker() -> ContainerRequest<KafkaBroker> {
+    KafkaBroker::selected().transactional().into()
 }
 
 /// The config of a producer on `brokers` that gives up on a record after 30

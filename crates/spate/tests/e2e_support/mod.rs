@@ -46,7 +46,7 @@ use spate::pipeline::{
 };
 use spate::sink::KeyHashRouter;
 use spate_test::{metric_series, metric_value};
-use spate_test_support::{container_image, http};
+use spate_test_support::{Broker, KAFKA_PORT, KafkaBroker, container_image, http};
 use std::net::SocketAddr;
 use std::ops::Range;
 use std::process::Command;
@@ -58,7 +58,6 @@ use std::time::Duration;
 use testcontainers::core::ContainerPort;
 use testcontainers::runners::SyncRunner;
 use testcontainers::{Container, GenericImage, ImageExt};
-use testcontainers_modules::kafka::apache::{KAFKA_PORT, Kafka};
 
 /// The record that travels end to end: Avro in (field names), RowBinary out
 /// (field order is `#[derive(ClickHouseRow)]`'s generated column list).
@@ -85,7 +84,7 @@ pub fn event_id(partition: i32, seq: i64) -> i64 {
 
 /// The Kafka containers a harness runs.
 enum Brokers {
-    One(Box<Container<Kafka>>),
+    One(Box<Container<KafkaBroker>>),
     /// Node ids are the index plus one.
     Cluster(Vec<Container<GenericImage>>),
 }
@@ -116,32 +115,26 @@ impl Harness {
     /// Start Kafka + ClickHouse + the stub schema registry. Slow on first
     /// use (image pulls); panics with context on any failure.
     pub fn up() -> Self {
-        // The broker `ci/kafka/` pins, fetched by digest and re-tagged so this
-        // starts the pinned bytes.
-        let (kafka_image, kafka_tag) = container_image(&["--pull", "kafka"]);
-        let kafka = Kafka::default()
-            .with_name(&kafka_image)
-            .with_tag(&kafka_tag)
-            // The image's defaults ask for three replicas, which one broker
-            // cannot satisfy.
-            .with_env_var("KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR", "1")
-            .with_env_var("KAFKA_TRANSACTION_STATE_LOG_MIN_ISR", "1")
+        let kafka = KafkaBroker::selected().transactional();
+        let broker = kafka.broker();
+        let kafka = kafka
             .start()
-            .unwrap_or_else(|e| panic!("start Kafka container {kafka_image}:{kafka_tag}: {e}"));
+            .unwrap_or_else(|e| panic!("start {broker} container: {e}"));
         let kafka_port = kafka.get_host_port_ipv4(KAFKA_PORT).expect("kafka port");
         let brokers = format!("127.0.0.1:{kafka_port}");
         Self::around(Brokers::One(Box::new(kafka)), brokers, 1)
     }
 
-    /// [`Self::up`] with three brokers in one KRaft quorum, on the same pinned
-    /// image, publishing Kafka on `host_ports`.
+    /// [`Self::up`] with three Apache Kafka brokers in one KRaft quorum,
+    /// publishing Kafka on `host_ports`. The cluster runs the `apache` lane's
+    /// image under every lane, since its configuration is Apache's.
     ///
     /// A client reaches a broker on the address it advertises, which has to be
     /// known before the broker starts and has to survive its restart, so the
     /// caller names the ports. The containers start with no ready condition, since
     /// a node cannot finish starting before it has a quorum.
     pub fn up_cluster(host_ports: [u16; 3]) -> Self {
-        let (image, tag) = container_image(&["--pull", "kafka"]);
+        let (image, tag) = container_image(&["--pull", "kafka", Broker::Apache.lane()]);
         let network = spate_test::unique_name("e2e-kafka");
         let host = |node: usize| format!("{network}-k{node}");
         let voters = (1..=host_ports.len())
@@ -323,7 +316,7 @@ impl Harness {
         docker(&["unpause", self.single_broker().id()]);
     }
 
-    fn single_broker(&self) -> &Container<Kafka> {
+    fn single_broker(&self) -> &Container<KafkaBroker> {
         match &self.kafka {
             Brokers::One(kafka) => kafka,
             Brokers::Cluster(_) => panic!("the scenario runs a cluster"),

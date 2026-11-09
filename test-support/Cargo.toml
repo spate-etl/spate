@@ -22,8 +22,10 @@ tls = [
     "dep:tokio",
     "dep:tokio-rustls",
 ]
-# `S3Store`.
-s3 = ["dep:http", "dep:object_store", "dep:testcontainers", "dep:tokio"]
+# `KafkaBroker`.
+kafka = ["dep:testcontainers"]
+# `S3Store`. A notifying store reaches the broker on `BROKER_FROM_INSIDE`.
+s3 = ["kafka", "dep:http", "dep:object_store", "dep:tokio"]
 # `ElasticMq`.
 elasticmq = ["dep:testcontainers"]
 
@@ -41,9 +43,10 @@ tokio-rustls = { workspace = true, optional = true }
 
 [dev-dependencies]
 futures-util = { workspace = true }
+rdkafka = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt"] }
 
 [[test]]
 name = "containers"
-required-features = ["elasticmq", "s3"]
+required-features = ["elasticmq", "kafka", "s3"]

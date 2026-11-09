@@ -4878,12 +4878,11 @@ mod docker {
     use spate_core::clock::SyncClock;
     use spate_core::feed::Unit;
     use spate_test::{HANG, wait_until};
+    use spate_test_support::{KAFKA_PORT, KafkaBroker};
     use std::num::NonZeroU32;
     use std::sync::Arc;
     use std::time::Duration;
-    use testcontainers::ImageExt;
     use testcontainers::runners::SyncRunner;
-    use testcontainers_modules::kafka::apache::{KAFKA_PORT, Kafka};
 
     /// Units on the work topic, fewer than the buffer holds.
     const UNITS: usize = 5;
@@ -4895,14 +4894,7 @@ mod docker {
     #[test]
     #[ignore = "requires Docker"]
     fn a_revocation_commits_before_it_unassigns() {
-        let (name, tag) = spate_test_support::container_image(&["--pull", "kafka"]);
-        let container = Kafka::default()
-            .with_name(name)
-            .with_tag(tag)
-            .start()
-            .expect("start kafka container");
-        let port = container.get_host_port_ipv4(KAFKA_PORT).expect("port");
-        let brokers = format!("127.0.0.1:{port}");
+        let (_container, brokers) = start_broker();
         let io = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -5154,11 +5146,8 @@ mod docker {
         })
     }
 
-    fn start_broker() -> (testcontainers::Container<Kafka>, String) {
-        let (name, tag) = spate_test_support::container_image(&["--pull", "kafka"]);
-        let container = Kafka::default()
-            .with_name(name)
-            .with_tag(tag)
+    fn start_broker() -> (testcontainers::Container<KafkaBroker>, String) {
+        let container = KafkaBroker::selected()
             .start()
             .expect("start kafka container");
         let port = container.get_host_port_ipv4(KAFKA_PORT).expect("port");

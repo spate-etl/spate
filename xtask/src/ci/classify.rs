@@ -313,10 +313,11 @@ pub(crate) fn classify(
                 image_suites.extend(graph.container_suites_for("spate-clickhouse"));
                 out.container_pkgs.extend(image_suites.iter().cloned());
             }
-            // The broker the Kafka suites run against, and the end-to-end
-            // suites through them.
+            // The broker the Kafka suites run against, the end-to-end suites
+            // through them, and the shared helpers' smoke test.
             if glob(path, "ci/kafka/*") {
                 image_suites.extend(graph.container_suites_for("spate-kafka"));
+                image_suites.insert("spate-test-support".to_string());
                 out.container_pkgs.extend(image_suites.iter().cloned());
             }
             // The S3 store lanes the spate-s3 suites run against, and the
@@ -989,21 +990,21 @@ mod tests {
         assert_eq!(suites(&out), ["spate-kafka"]);
     }
 
-    /// A broker bump selects the Kafka suite and `spate`'s end-to-end suites,
-    /// on a Dependabot pull request too.
+    /// A broker bump selects the Kafka suite, `spate`'s end-to-end suites and
+    /// the broker smoke test, on a Dependabot pull request too.
     #[test]
     fn a_broker_image_bump_selects_the_suites_that_boot_kafka() {
         assert_eq!(
-            suites(&run(&["ci/kafka/stable/Dockerfile"])),
-            ["spate", "spate-kafka"]
+            suites(&run(&["ci/kafka/apache/Dockerfile"])),
+            ["spate", "spate-kafka", "spate-test-support"]
         );
 
         let ctx = Context {
             author: "dependabot[bot]".into(),
         };
-        let image = vec!["ci/kafka/stable/Dockerfile".to_string()];
+        let image = vec!["ci/kafka/apache/Dockerfile".to_string()];
         let out = classify(&image, Event::PullRequest, &ctx, &graph(), NONE);
-        assert_eq!(suites(&out), ["spate", "spate-kafka"]);
+        assert_eq!(suites(&out), ["spate", "spate-kafka", "spate-test-support"]);
     }
 
     /// A bump of any S3 store lane, or a change of the primary store, selects

@@ -26,7 +26,7 @@ use spate_core::feed::{ConnectError, DEFAULT_SETTLING_WINDOW, DepthOf, Feed, STO
 use spate_core::pipeline::ExitState;
 use spate_kafka::feed::{KafkaFeed, KafkaFeedPublisher};
 use spate_test::{HANG, WriteOutcome, wait_until};
-use spate_test_support::ChildTest;
+use spate_test_support::{ChildTest, KAFKA_PORT};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use support::feed::{
@@ -40,7 +40,6 @@ use support::{
     TRANSACTION_TIMEOUT, Transaction, broker, log_end, produce_transaction, transactional_broker,
 };
 use testcontainers::runners::SyncRunner;
-use testcontainers_modules::kafka::apache::KAFKA_PORT;
 
 /// The members' session timeout. A member that dies holds its partitions
 /// for this long after its last heartbeat.

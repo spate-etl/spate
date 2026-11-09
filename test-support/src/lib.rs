@@ -7,6 +7,8 @@ mod corpus;
 #[cfg(feature = "elasticmq")]
 mod elasticmq;
 mod http;
+#[cfg(feature = "kafka")]
+mod kafka;
 #[cfg(feature = "s3")]
 mod s3;
 #[cfg(feature = "tls")]
@@ -17,6 +19,8 @@ pub use corpus::{fnv1a, pin};
 #[cfg(feature = "elasticmq")]
 pub use elasticmq::{ElasticMq, Message, QUERY_PORT};
 pub use http::{http, http_with_body, http_with_headers};
+#[cfg(feature = "kafka")]
+pub use kafka::{BROKER_FROM_INSIDE, Broker, KAFKA_PORT, KafkaBroker};
 #[cfg(feature = "s3")]
 pub use s3::{ACCESS_KEY, REGION, RGW_OPAQUE_DATA, S3Store, SECRET_KEY, Store};
 #[cfg(feature = "tls")]
@@ -67,6 +71,21 @@ fn xtask_container_image(args: &[&str]) -> String {
         String::from_utf8_lossy(&out.stderr)
     );
     String::from_utf8_lossy(&out.stdout).trim().to_owned()
+}
+
+/// The lane directories under `ci/<service>/`. Only directories are listed;
+/// the task runner stays the one parser of the pins.
+#[cfg(all(test, any(feature = "kafka", feature = "s3")))]
+fn lane_dirs(service: &str) -> Vec<String> {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../ci")
+        .join(service);
+    std::fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|e| e.path().is_dir())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect()
 }
 
 fn split_reference(reference: &str) -> (String, String) {

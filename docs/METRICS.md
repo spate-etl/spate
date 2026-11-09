@@ -418,7 +418,8 @@ Configured on the exporter, by name suffix or full name:
 - `max by (pipeline) (spate_feed_dead_letter_units) > 0` — work units have
   reached the feed's dead-letter destination and are not delivered again. A
   bounded job ends stalled over them, and a job that runs until a shutdown
-  keeps running past them. On a backend whose count never falls, alert on a
+  keeps running past them. A run on a seeded in-process feed can end
+  `Completed` with them. On a backend whose count never falls, alert on a
   rise instead.
 - `spate_sink_replica_healthy == 0` — replica down; sustained across all
   replicas of a shard means the shard channel will fill and pause the source.

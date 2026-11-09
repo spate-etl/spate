@@ -309,6 +309,8 @@ Your source follows these rules:
   as the reader holds work again, and drop every read outstanding: the check
   tells answers apart only by kind. Report `Drained` on `Completed`, and fail
   the run on `Stalled` or `Failed`, and on a marker read that cannot succeed.
+  On a `Seeded` feed you can report `Drained` on `Stalled` as well, since the
+  code that seeded the feed reads its dead letters from it.
   A feed whose `read_depth` returns `None` cannot end a bounded job, so refuse
   it in `open`.
 - **On a feed that hands back, read on what you hold when the stop begins.**

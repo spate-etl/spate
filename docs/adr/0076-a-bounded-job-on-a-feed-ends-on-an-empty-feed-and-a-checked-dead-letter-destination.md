@@ -8,7 +8,8 @@ description: "A bounded feed job ends after the lister's end marker and an empty
 - **Date:** 2026-10-23
 - **Supersedes:** [ADR-0027](0027-split-delivery-attempts-and-quarantine.md)
   (in part: a quarantined split blocks completion)
-- **Superseded by:** —
+- **Superseded by:** [ADR-0095](0095-a-seeded-run-ends-on-an-empty-feed-and-completes-over-its-dead-letters.md)
+  (in part: a run on a seeded in-process feed)
 
 ## Context and problem statement
 

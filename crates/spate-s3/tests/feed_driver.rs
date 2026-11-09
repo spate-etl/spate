@@ -712,6 +712,42 @@ fn the_open_log_states_units_held_and_its_origin() {
     }
 }
 
+/// Pins that `open` on a seeded in-process feed logs at INFO that it lists
+/// nothing, and logs neither the solo lister's WARN nor a durable feed's.
+#[test]
+fn the_open_log_on_a_seeded_feed_is_info() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    let config =
+        PipelineConfig::from_str(&PipelineYaml::file("s3-feed-seeded-log", &data).build()).unwrap();
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    let mut source =
+        line_framer(S3Source::from_component_config(&config.source, rt.handle().clone()).unwrap());
+    let section = FeedSection::new(spate_test::component_config("memory", "{}"));
+    source
+        .configure_feed(&section, Arc::new(MemoryFeed::new()), FeedOrigin::Seeded)
+        .unwrap();
+    let lines = spate_test::capture_logs(tracing::Level::INFO, || {
+        source
+            .open(SourceCtx::new(Checkpointer::new().handle()))
+            .unwrap();
+    });
+    let lists: Vec<&String> = lines.iter().filter(|l| l.contains(" lists ")).collect();
+    assert_eq!(lists.len(), 1, "{lines:#?}");
+    assert!(
+        lists[0].contains("INFO")
+            && lists[0].ends_with(
+                "the S3 source lists nothing on a seeded feed: it reads the units the feed \
+                 holds, and ends the run once each is acknowledged or dead-lettered"
+            ),
+        "{lines:#?}"
+    );
+}
+
 /// Launch over `feed` with one record per source batch and one row per sink
 /// write, so an object's records span many sink writes.
 fn launch_one_row_writes(

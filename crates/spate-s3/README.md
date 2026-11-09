@@ -133,7 +133,12 @@ A solo run on the in-process feed the runtime built ends once its listing is
 read. If that feed holds dead letters at the end, the run fails with the
 `bounded feed job stalled:` error. That feed keeps nothing across a restart, so
 a restarted solo run lists and reads the whole prefix again, and a startup
-`WARN` says so. Any other job runs until it is shut down.
+`WARN` says so.
+
+A run on a `MemoryFeed` passed with `Pipeline::seeded_feed` lists nothing and
+ends once every unit is acknowledged or dead-lettered. It exits `Completed`
+with dead letters, which the code that seeded the feed reads from
+`MemoryFeed::dead_letters`. Any other job runs until it is shut down.
 
 [How a bounded job ends](https://spate.kainth.dev/docs/user-guide/connectors/sources/s3#how-a-bounded-job-ends)
 and

@@ -1,0 +1,3 @@
+**The S3 source reads a seeded in-process feed without listing, and ends the run once the feed settles** (`spate-s3`)
+
+On a `MemoryFeed` passed with `Pipeline::seeded_feed` the source lists nothing. The run ends by itself once every unit is acknowledged or dead-lettered, with no settling window. A dead-lettered unit does not fail the run: the source logs the count at `WARN` and the run exits `ExitState::Completed`, so the code that seeded the feed reads `MemoryFeed::dead_letters` and `MemoryFeed::unsettled` to learn which units were not read. The source refuses a seeded feed on any other backend at startup. A feed passed with `Pipeline::feed` behaves as before.

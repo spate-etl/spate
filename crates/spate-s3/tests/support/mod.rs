@@ -251,7 +251,19 @@ pub(crate) fn launch_with_feed(
     feed: Arc<dyn Feed>,
     make_source: impl FnOnce(S3Source, tokio::runtime::Handle) -> S3Source,
 ) -> Launched {
-    launch_inner(yaml, options, pre, Some(feed), None, make_source)
+    launch_inner(yaml, options, pre, Some((feed, false)), None, make_source)
+}
+
+/// [`launch_customized`] with `feed` passed to `Pipeline::seeded_feed`, for
+/// the config's `feed:` section to name.
+pub(crate) fn launch_with_seeded_feed(
+    yaml: &str,
+    options: RuntimeOptions,
+    pre: impl FnOnce(&SinkScript),
+    feed: Arc<dyn Feed>,
+    make_source: impl FnOnce(S3Source, tokio::runtime::Handle) -> S3Source,
+) -> Launched {
+    launch_inner(yaml, options, pre, Some((feed, true)), None, make_source)
 }
 
 /// [`launch_with_feed`] with the runtime's stop timed on `clock`, which the
@@ -264,14 +276,22 @@ pub(crate) fn launch_with_feed_on_clock(
     clock: Arc<TestClock>,
     make_source: impl FnOnce(S3Source, tokio::runtime::Handle) -> S3Source,
 ) -> Launched {
-    launch_inner(yaml, options, pre, Some(feed), Some(clock), make_source)
+    launch_inner(
+        yaml,
+        options,
+        pre,
+        Some((feed, false)),
+        Some(clock),
+        make_source,
+    )
 }
 
 fn launch_inner(
     yaml: &str,
     options: RuntimeOptions,
     pre: impl FnOnce(&SinkScript),
-    feed: Option<Arc<dyn Feed>>,
+    // The feed code passes in, and whether it passes it as seeded.
+    feed: Option<(Arc<dyn Feed>, bool)>,
     stop_clock: Option<Arc<TestClock>>,
     make_source: impl FnOnce(S3Source, tokio::runtime::Handle) -> S3Source,
 ) -> Launched {
@@ -284,9 +304,11 @@ fn launch_inner(
     config.pipeline.name = spate_test::unique_name(&config.pipeline.name);
     let name = config.pipeline.name.clone();
     let mut pipeline = Pipeline::from_config(config).expect("pipeline builds");
-    if let Some(feed) = feed {
-        pipeline = pipeline.feed(feed);
-    }
+    pipeline = match feed {
+        Some((feed, true)) => pipeline.seeded_feed(feed),
+        Some((feed, false)) => pipeline.feed(feed),
+        None => pipeline,
+    };
     let io = pipeline.io_handle();
     let source = make_source(
         S3Source::from_component_config(&pipeline.config().source, io.clone())

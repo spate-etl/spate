@@ -508,7 +508,9 @@ impl SinkBundle for KafkaSink {
 ///
 /// [`ConfigError::Component`] when the section does not deserialize into
 /// [`KafkaSinkConfig`], and otherwise as [`build`]. Every error starts at the
-/// section's path, such as `sinks.eu.kafka` for a `sinks:` entry named `eu`.
+/// section's [`path`](ComponentConfig::path), such as `sinks.eu.kafka` for a
+/// `sinks:` entry named `eu`, or `kafka` for a section built with
+/// [`ComponentConfig::new`] and never placed in a pipeline config.
 pub fn from_component_config(section: &ComponentConfig) -> Result<KafkaSink, ConfigError> {
     let cfg: KafkaSinkConfig = section.deserialize_into()?;
     build_on(
@@ -684,6 +686,16 @@ mod tests {
             msg.starts_with("sinks.eu.kafka: producer creation failed: "),
             "{msg}"
         );
+    }
+
+    /// A section built in code and never placed reports at its tag alone,
+    /// as its decode errors do.
+    #[test]
+    fn an_unplaced_section_reports_at_its_tag() {
+        let msg = refusal(
+            from_component_config(&section("  brokers: localhost:9092\n  topic: \"\"\n")).map(drop),
+        );
+        assert_eq!(msg, "kafka.topic: must not be empty");
     }
 
     /// A config built in code has no section, so `build` reports at the

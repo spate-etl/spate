@@ -638,19 +638,11 @@ impl<W: ShardWriter> ShardWorker<W> {
                             // window is known but further away.
                             let heartbeat = now + backstop;
                             let until = probe_at.map_or(heartbeat, |t| t.min(heartbeat));
-                            tokio::select! {
-                                biased;
-
-                                // Serving the deadline on `Err` costs a stall
-                                // rather than a spinning core if the sender
-                                // ever stops outliving this receiver.
-                                changed = wake.changed() => {
-                                    if changed.is_err() {
-                                        clock.sleep_until(until).await;
-                                    }
-                                }
-
-                                () = clock.sleep_until(until) => {}
+                            // Serving the deadline on `Err` costs a stall
+                            // rather than a spinning core if the sender ever
+                            // stops outliving this receiver.
+                            if let Some(Err(_)) = before(&*clock, until, wake.changed()).await {
+                                clock.sleep_until(until).await;
                             }
                         }
                     }

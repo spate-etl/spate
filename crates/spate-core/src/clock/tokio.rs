@@ -77,9 +77,10 @@ impl Stopwatch {
 
 /// Runs `fut` until it ends, or returns `None` once `clock` reaches `at`.
 ///
-/// `fut` is polled first, so an output ready as `at` passes counts. The
-/// deadline is read outside tokio's coop budget, so it fires over a `fut` that
-/// spends the budget on every poll. The sleep is built on the first poll, so
+/// `fut` is polled first, so an output ready as `at` passes counts. A poll on
+/// which `fut` spends tokio's coop budget reads the deadline outside the
+/// budget, so it fires over a `fut` that spends it every time. The sleep is
+/// built on the first poll, so
 /// the returned future may be created outside the runtime that awaits it.
 ///
 /// # Examples

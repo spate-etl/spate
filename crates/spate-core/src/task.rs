@@ -170,17 +170,25 @@ async fn logged<F: Future>(name: &'static str, future: F) -> F::Output {
 
 /// Runs `fut` until it ends, or until `stop` ends first with `Err`.
 ///
-/// `fut` is polled first, so an output ready as `stop` fires counts. `stop` is
-/// polled outside tokio's coop budget, as `tokio::time::timeout` polls its
-/// deadline, or a `fut` that spends the budget on every poll never ends.
+/// `fut` is polled first, so an output ready as `stop` fires counts. As
+/// `tokio::time::timeout` does with its deadline, `stop` is polled outside
+/// tokio's coop budget when `fut` spent the budget on that poll, so a `fut`
+/// that spends it on every poll still ends.
 pub(crate) async fn first<F: Future, S: Future>(fut: F, stop: S) -> Result<F::Output, S::Output> {
     let mut fut = pin!(fut);
-    let mut stop = pin!(coop::unconstrained(stop));
+    let mut stop = pin!(stop);
     poll_fn(|cx| {
+        let had_budget = coop::has_budget_remaining();
         if let Poll::Ready(output) = fut.as_mut().poll(cx) {
             return Poll::Ready(Ok(output));
         }
-        stop.as_mut().poll(cx).map(Err)
+        // With no budget on entry, `fut` may be ready on the next poll, so
+        // `stop` stays inside the budget and waits for it.
+        if had_budget && !coop::has_budget_remaining() {
+            pin!(coop::unconstrained(stop.as_mut())).poll(cx).map(Err)
+        } else {
+            stop.as_mut().poll(cx).map(Err)
+        }
     })
     .await
 }

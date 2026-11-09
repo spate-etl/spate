@@ -194,8 +194,8 @@ from `serde_json`'s in two places:
 - An exponent carries no `+`, so `serde_json`'s `1e+300` is written `1e300`.
 
 A map whose keys are `bool`, `f32`, `f64` or `Option` values fails the record,
-and the sink stage's Skip/Fail policy applies to it. A serialization error carries `simd-json`'s message after
-`JSON encoding failed:`.
+and the sink stage's Skip/Fail policy applies to it. A serialization error
+carries `simd-json`'s message after `JSON encoding failed:`.
 
 :::danger
 A record type that holds `serde_json::value::RawValue` is written wrong under

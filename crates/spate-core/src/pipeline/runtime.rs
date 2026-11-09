@@ -188,7 +188,7 @@ pub struct PipelineRuntime<S: Source> {
     chase_window: Option<Duration>,
     options: RuntimeOptions,
     io: Option<tokio::runtime::Runtime>,
-    feed: Option<Arc<dyn Feed>>,
+    feed: Option<(Arc<dyn Feed>, FeedOrigin)>,
     io_busy_interval: Duration,
     io_busy_window: Duration,
 }
@@ -274,7 +274,17 @@ impl<S: Source + 'static> PipelineRuntime<S> {
     /// the rules `run` checks.
     #[must_use]
     pub fn with_feed(mut self, feed: Arc<dyn Feed>) -> Self {
-        self.feed = Some(feed);
+        self.feed = Some((feed, FeedOrigin::Given));
+        self
+    }
+
+    /// Hand the source a feed code filled before the run, for the config's
+    /// `feed:` section to name; see
+    /// [`Pipeline::seeded_feed`](super::Pipeline::seeded_feed) for what the
+    /// source may then assume.
+    #[must_use]
+    pub fn with_seeded_feed(mut self, feed: Arc<dyn Feed>) -> Self {
+        self.feed = Some((feed, FeedOrigin::Seeded));
         self
     }
 
@@ -356,11 +366,12 @@ impl<S: Source + 'static> PipelineRuntime<S> {
         self.config
             .reject_bad_settling_window()
             .map_err(|e| StartError::Config(e.to_string()))?;
-        if let (Some(section), Some(feed)) = (&self.config.feed, &self.feed) {
+        if let (Some(section), Some((feed, origin))) = (&self.config.feed, &self.feed) {
             let named = section.backend().type_tag();
             if feed.backend() != named {
                 return Err(StartError::Config(format!(
-                    "the feed passed to `Pipeline::feed` is `{}`, but `feed:` names `{named}`",
+                    "the feed passed to `{}` is `{}`, but `feed:` names `{named}`",
+                    passed_to(*origin),
                     feed.backend()
                 )));
             }
@@ -369,7 +380,7 @@ impl<S: Source + 'static> PipelineRuntime<S> {
         match (&self.config.feed, self.feed.take()) {
             (Some(section), given) => {
                 let (feed, origin) = match given {
-                    Some(feed) => (feed, FeedOrigin::Given),
+                    Some(given) => given,
                     None if section.backend().type_tag() == memory::BACKEND => {
                         let feed = MemoryFeed::from_section(section)
                             .map_err(|e| StartError::Config(e.to_string()))?;
@@ -393,12 +404,11 @@ impl<S: Source + 'static> PipelineRuntime<S> {
                 }
                 resolved_feed = Some((section, feed, origin));
             }
-            (None, Some(_)) => {
-                return Err(StartError::Config(
-                    "a feed was given with `Pipeline::feed`, but the file has no `feed:` section \
-                     naming it"
-                        .into(),
-                ));
+            (None, Some((_, origin))) => {
+                return Err(StartError::Config(format!(
+                    "a feed was given with `{}`, but the file has no `feed:` section naming it",
+                    passed_to(origin)
+                )));
             }
             (None, None) => {}
         }
@@ -931,6 +941,14 @@ pub(super) fn sample_io_busy(
 
 /// Close `feed` and wait for it at most `within`. A close that fails or does
 /// not settle in time leaves the units the feed held to its redelivery.
+/// The setter a feed of `origin` was passed to, for startup errors.
+fn passed_to(origin: FeedOrigin) -> &'static str {
+    match origin {
+        FeedOrigin::Seeded => "Pipeline::seeded_feed",
+        FeedOrigin::Section | FeedOrigin::Given => "Pipeline::feed",
+    }
+}
+
 fn close_feed(io: &tokio::runtime::Runtime, feed: &dyn Feed, within: Duration) {
     let Some(confirmation) = feed.close(within) else {
         return;

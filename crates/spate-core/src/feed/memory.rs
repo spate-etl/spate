@@ -143,6 +143,28 @@ impl MemoryFeed {
         self.lock().dead.clone()
     }
 
+    /// The units neither acknowledged nor dead-lettered: those waiting to be
+    /// received, in delivery order, then those received and not yet settled,
+    /// in the order they were received.
+    ///
+    /// With [`dead_letters`](Self::dead_letters) it names every unit the feed
+    /// has not acknowledged, so a caller that stopped a run early reports
+    /// these as not done. An id can appear more than once, since a source may
+    /// re-enqueue a unit under its own id.
+    #[must_use]
+    pub fn unsettled(&self) -> Vec<Unit> {
+        let state = self.lock();
+        let mut held: Vec<_> = state.held.iter().collect();
+        held.sort_unstable_by_key(|(receipt, _)| receipt.0);
+        state
+            .visible
+            .iter()
+            .map(|(unit, _)| unit)
+            .chain(held.into_iter().map(|(_, (unit, _))| unit))
+            .cloned()
+            .collect()
+    }
+
     fn lock(&self) -> MutexGuard<'_, State> {
         // Nothing panics while holding the lock, so a poisoned lock still
         // guards consistent state.
@@ -301,6 +323,59 @@ mod tests {
         let mut got = feed.receive(usize::MAX).unwrap();
         assert_eq!(got.len(), 1, "expected exactly one delivery, got {got:?}");
         got.remove(0)
+    }
+
+    fn ids(units: &[Unit]) -> Vec<&str> {
+        units.iter().map(|unit| unit.id.as_str()).collect()
+    }
+
+    /// Pins what `unsettled` names: waiting units in delivery order, then
+    /// held units in the order they were received, and neither an
+    /// acknowledged nor a dead-lettered unit.
+    #[test]
+    fn unsettled_names_the_waiting_then_the_held_units() {
+        let feed = MemoryFeed::with_attempt_cap(NonZeroU32::new(2).unwrap());
+        let names: Vec<String> = (0..10).map(|i| format!("u{i}")).collect();
+        for name in &names {
+            drop(feed.publish(unit(name)));
+        }
+        // Eight held units, so a map's own order would show.
+        let held = feed.receive(8).unwrap();
+        feed.acknowledge(held[0].receipt).unwrap();
+        assert_eq!(
+            ids(&feed.unsettled()),
+            ["u8", "u9", "u1", "u2", "u3", "u4", "u5", "u6", "u7"]
+        );
+
+        // A failed unit below the cap waits again, at the back.
+        feed.fail(held[1].receipt, "retry").unwrap();
+        assert_eq!(
+            ids(&feed.unsettled()),
+            ["u8", "u9", "u1", "u2", "u3", "u4", "u5", "u6", "u7"]
+        );
+
+        // A unit failed at its cap leaves for the dead-letter list.
+        let waiting = feed.receive(3).unwrap();
+        assert_eq!(waiting[2].unit.id, "u1");
+        feed.fail(waiting[2].receipt, "unreadable").unwrap();
+        assert_eq!(ids(&feed.dead_letters()), ["u1"]);
+        assert!(!ids(&feed.unsettled()).contains(&"u1"));
+    }
+
+    /// Pins that `unsettled` names each copy of an id published twice, as a
+    /// source's re-enqueue publishes, so a caller sees the copy not done.
+    #[test]
+    fn unsettled_names_each_copy_of_a_repeated_id() {
+        let feed = MemoryFeed::new();
+        drop(feed.publish(unit("same")));
+        let held = receive_one_of(&feed, "same");
+        drop(feed.publish(Unit::new("same", b"again".to_vec())));
+        assert_eq!(
+            feed.unsettled(),
+            [Unit::new("same", b"again".to_vec()), unit("same")]
+        );
+        feed.acknowledge(held.receipt).unwrap();
+        assert_eq!(feed.unsettled(), [Unit::new("same", b"again".to_vec())]);
     }
 
     /// Pins the attempt cap: a unit failed on deliveries 1 through 9 is

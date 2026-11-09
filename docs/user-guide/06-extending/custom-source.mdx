@@ -258,7 +258,11 @@ The pipeline file names the feed in its
 `configure_feed`. The runtime calls it before `open`, with the section, the feed
 it names, and the feed's `FeedOrigin`: `Section` when the runtime built the
 feed, `Given` when code passed it to `Pipeline::feed` and may still publish into
-it. Keep the feed, and read the section's common keys, such as `units_held`.
+it, and `Seeded` when code filled it before the run and passed it to
+`Pipeline::seeded_feed`. Nothing publishes into a seeded feed after the run
+starts, apart from your source's own re-enqueues, so a source may list nothing
+into it and may end the run once the feed holds no visible or held unit.
+Keep the feed, and read the section's common keys, such as `units_held`.
 `SourceCtx::threads` gives the pipeline thread count at `open`, for a source
 that sizes its read parallelism from it; it is `None` when the source is opened
 by hand, as in [Testing](#testing). The

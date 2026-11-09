@@ -2825,11 +2825,11 @@ fn the_default_configure_feed_refuses_the_section() {
 
 /// Pins the origin `run` hands `configure_feed`: `Section` for the in-process
 /// feed it builds from the section, `Given` for a feed passed to
-/// `Pipeline::feed`.
+/// `with_feed`, and `Seeded` for one passed to `with_seeded_feed`.
 #[test]
 fn the_source_learns_where_its_feed_came_from() {
     use crate::feed::FeedOrigin;
-    for (given, origin) in [(false, FeedOrigin::Section), (true, FeedOrigin::Given)] {
+    for origin in [FeedOrigin::Section, FeedOrigin::Given, FeedOrigin::Seeded] {
         let mut cfg = test_config(1);
         cfg.feed = feed_section("memory: {}");
         let (source, shared, script) = FakeSource::new();
@@ -2849,16 +2849,15 @@ fn the_source_learns_where_its_feed_came_from() {
             Arc::new(crate::backpressure::InflightBudget::new()),
         )
         .with_options(test_options());
-        if given {
-            runtime = runtime.with_feed(Arc::new(MemoryFeed::new()));
-        }
+        let feed = Arc::new(MemoryFeed::new());
+        runtime = match origin {
+            FeedOrigin::Given => runtime.with_feed(feed),
+            FeedOrigin::Seeded => runtime.with_seeded_feed(feed),
+            _ => runtime,
+        };
         let report = runtime.run().expect("the source accepts the section");
         assert_eq!(report.state, ExitState::Completed);
-        assert_eq!(
-            shared.lock().unwrap().feed_origin,
-            Some(origin),
-            "given: {given}"
-        );
+        assert_eq!(shared.lock().unwrap().feed_origin, Some(origin));
     }
 }
 
@@ -3282,6 +3281,24 @@ fn a_feed_given_without_a_feed_section_fails_startup() {
     );
     let err = config_error_before_open(h);
     assert!(err.contains("no `feed:` section"), "{err}");
+    assert!(err.contains("`Pipeline::feed`"), "{err}");
+}
+
+/// Pins that a seeded feed passed in with no `feed:` section fails startup,
+/// naming the setter it was passed to.
+#[test]
+fn a_seeded_feed_without_a_feed_section_names_its_setter() {
+    let h = start_with(
+        test_config(1),
+        test_options(),
+        |runtime| runtime.with_seeded_feed(Arc::new(MemoryFeed::new())),
+        ok_chain,
+    );
+    let err = config_error_before_open(h);
+    assert!(
+        err.contains("no `feed:` section") && err.contains("`Pipeline::seeded_feed`"),
+        "{err}"
+    );
 }
 
 /// Pins that a feed passed in whose backend differs from the section's key

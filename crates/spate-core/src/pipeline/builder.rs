@@ -42,6 +42,7 @@
 //! | `.sink(bundle)` | [`SinkBundle::into_parts`](crate::sink::SinkBundle::into_parts) → [`SinkPoolConfig::validate`](crate::sink::SinkPoolConfig::validate) → [`shard_queues`](crate::sink::shard_queues) → [`ShardQueues::with_frame_codec`](crate::sink::ShardQueues::with_frame_codec) when the parts carry a [`frame_codec`](crate::sink::SinkParts::frame_codec) → [`SinkShardMetrics::try_new`](crate::metrics::SinkShardMetrics::try_new) per shard → [`SinkPool::spawn`](crate::sink::SinkPool::spawn) → a boxed drain closure. It also resolves this sink's [`ChunkConfig`] from the YAML `chunk:` block / [`SinkOptions::with_chunk`]. This is the one builder step without a manual-assembly equivalent, since the config layer is what carries `chunk:`. |
 //! | `.chains(f)` | the factory handed to [`PipelineRuntime::new`], with queue/budget/name plumbing pre-threaded per call |
 //! | `.feed(feed)` | [`PipelineRuntime::with_feed`] |
+//! | `.seeded_feed(feed)` | [`PipelineRuntime::with_seeded_feed`] |
 //! | `.into_runtime(source)` / `.run(source)` | [`PipelineRuntime::new`]`(config, source, factory, `[`SinkRuntime`]`{..}, budget)` + [`PipelineRuntime::with_io_runtime`] |
 //!
 //! # Shutdown and drop ordering
@@ -61,7 +62,7 @@ use super::runtime::{
 };
 use crate::backpressure::InflightBudget;
 use crate::config::{ConfigError, PipelineConfig};
-use crate::feed::Feed;
+use crate::feed::{Feed, FeedOrigin};
 use crate::framing::FramingContract;
 use crate::metrics::{
     ComponentLabels, Meter, MetricRole, MetricsHandle, SharedString, SinkShardMetrics,
@@ -352,7 +353,7 @@ pub struct Pipeline {
     sinks: Vec<(String, SinkAssembly)>,
     chains: Option<ChainFactoryFn>,
     options: RuntimeOptions,
-    feed: Option<Arc<dyn Feed>>,
+    feed: Option<(Arc<dyn Feed>, FeedOrigin)>,
 }
 
 impl std::fmt::Debug for Pipeline {
@@ -720,10 +721,29 @@ impl Pipeline {
     /// builds the in-process feed itself for `feed: { memory: {} }` and
     /// refuses any other backend. To publish to
     /// the in-process feed, keep a handle to a `MemoryFeed` and pass it here.
-    /// Calls on a handle kept this way are not recorded.
+    /// Calls on a handle kept this way are not recorded. A feed the code
+    /// fills before the run and never publishes into again goes to
+    /// [`seeded_feed`](Self::seeded_feed) instead.
     #[must_use]
     pub fn feed(mut self, feed: Arc<dyn Feed>) -> Self {
-        self.feed = Some(feed);
+        self.feed = Some((feed, FeedOrigin::Given));
+        self
+    }
+
+    /// Hand the source a feed that holds the run's whole input: code
+    /// publishes every unit before `run`, and nothing after. The source
+    /// learns this as [`FeedOrigin::Seeded`], and may then list nothing into
+    /// the feed and end the run once its units have settled. The rules
+    /// `run` checks are those of [`feed`](Self::feed).
+    ///
+    /// A run that ends with [`ExitState::Completed`](super::ExitState) may
+    /// have stopped before every unit settled. Keep a handle to the feed
+    /// and read which units did not: on a `MemoryFeed`,
+    /// [`unsettled`](crate::feed::memory::MemoryFeed::unsettled) and
+    /// [`dead_letters`](crate::feed::memory::MemoryFeed::dead_letters).
+    #[must_use]
+    pub fn seeded_feed(mut self, feed: Arc<dyn Feed>) -> Self {
+        self.feed = Some((feed, FeedOrigin::Seeded));
         self
     }
 
@@ -815,7 +835,8 @@ impl Pipeline {
         .with_options(self.options)
         .with_io_runtime(self.io);
         Ok(match self.feed {
-            Some(feed) => runtime.with_feed(feed),
+            Some((feed, FeedOrigin::Seeded)) => runtime.with_seeded_feed(feed),
+            Some((feed, _)) => runtime.with_feed(feed),
             None => runtime,
         })
     }
@@ -892,6 +913,7 @@ mod tests {
     use super::*;
     use crate::config::ComponentConfig;
     use crate::error::SinkError;
+    use crate::feed::memory::MemoryFeed;
     use crate::pipeline::ExitState;
     use crate::pipeline::fakes::{
         ChainMode, ChainShared, FakeChain, FakeSource, LaneSpec, Script, SourceLog, batches,
@@ -1207,6 +1229,37 @@ mod tests {
         let mut threads = seen_threads.lock().unwrap().clone();
         threads.sort_unstable();
         assert_eq!(threads, vec![0, 1], "one ChainCtx per pipeline thread");
+    }
+
+    /// Pins that `Pipeline::feed` and `Pipeline::seeded_feed` reach the
+    /// source as `Given` and `Seeded`.
+    #[test]
+    fn each_feed_setter_hands_the_source_its_origin() {
+        type Setter = fn(Pipeline, Arc<dyn Feed>) -> Pipeline;
+        let setters: [(Setter, FeedOrigin); 2] = [
+            (Pipeline::feed, FeedOrigin::Given),
+            (Pipeline::seeded_feed, FeedOrigin::Seeded),
+        ];
+        for (set, origin) in setters {
+            let (source, shared, script) = FakeSource::new();
+            shared.lock().unwrap().accept_feed = true;
+            script.lock().unwrap().push_back(Script::Drained);
+            let chain_shared = Arc::new(ChainShared::default());
+            let log = Arc::clone(&shared);
+            let mut config = test_config(1);
+            config.feed = Some(serde_yaml::from_str("memory: {}").expect("section"));
+            let pipeline = Pipeline::from_config(config)
+                .expect("builder")
+                .sink(null_sink(1))
+                .expect("sink")
+                .chains(move |_ctx| fake_chain(&chain_shared, &log))
+                .runtime_options(test_options());
+            let report = set(pipeline, Arc::new(MemoryFeed::new()))
+                .run(source)
+                .expect("run");
+            assert_eq!(report.state, ExitState::Completed);
+            assert_eq!(shared.lock().unwrap().feed_origin, Some(origin));
+        }
     }
 
     /// A `chunk:` body peeled onto a `ComponentConfig`, the shape the framework

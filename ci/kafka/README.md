@@ -64,15 +64,17 @@ The image is `redpandadata/redpanda`. Its arm runs one node with
 starts a new group with no rebalance delay. Redpanda reads no `KAFKA_*`
 variable, so `transactional` and `without_rebalance_delay` set nothing on it.
 
-Dev-container mode raises a topic's `segment.ms` to ten minutes and compacts
-every ten seconds. The compaction suites roll a segment and wait for the cleaner
-within the test, so the arm writes a bootstrap file lowering
-`log_segment_ms_min` to 100 ms and `log_compaction_interval_ms` to 500 ms before
-the node starts. It is ready on the "Successfully started Redpanda!" line, which
-Redpanda logs to stderr.
+The node is ready on the "Successfully started Redpanda!" line, which Redpanda
+logs to stderr. Dev-container mode raises a topic's `segment.ms` to ten minutes
+and compacts every ten seconds, and the compaction suites roll a segment and
+wait for the cleaner within the test. Once the node is ready, the arm runs
+`rpk cluster config set` to lower `log_segment_ms_min` to 100 ms and
+`log_compaction_interval_ms` to 500 ms. A bootstrap file would replace every
+cluster setting dev-container mode applies, topic auto-creation among them.
 
 Redpanda takes one offset ahead of each transaction's records on a partition,
-so the transaction suites read positions from the broker.
+so the transaction suites read positions from the broker once each ended
+transaction's marker is in the log.
 
 The `kafka-brokers` leg leaves three suites to the primary lane.
 `BROKER_LANE_SUITES` in `xtask/src/ci/outputs.rs` lists them:

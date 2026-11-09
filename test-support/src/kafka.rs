@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::net::SocketAddr;
 
-use testcontainers::core::{ContainerPort, ContainerState, ExecCommand, WaitFor};
+use testcontainers::core::{CmdWaitFor, ContainerPort, ContainerState, ExecCommand, WaitFor};
 use testcontainers::{Image, TestcontainersError};
 
 use crate::{container_image, selected_lane};
@@ -194,16 +194,35 @@ impl KafkaBroker {
                 "export KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://{client},BROKER://{BROKER_FROM_INSIDE}\n\
                  exec /etc/kafka/docker/run\n"
             ),
-            // Dev-container mode raises a topic's `segment.ms` to at least ten
-            // minutes and runs compaction every ten seconds. The compaction
-            // suites roll a segment within the test and wait for the cleaner.
             Broker::Redpanda => format!(
-                "echo log_segment_ms_min: 100 > /etc/redpanda/.bootstrap.yaml\n\
-                 echo log_compaction_interval_ms: 500 >> /etc/redpanda/.bootstrap.yaml\n\
-                 exec rpk redpanda start --mode dev-container --smp 1 --memory 1G --overprovisioned \
+                "exec rpk redpanda start --mode dev-container --smp 1 --memory 1G --overprovisioned \
                  --kafka-addr PLAINTEXT://0.0.0.0:9092,BROKER://0.0.0.0:9093 \
                  --advertise-kafka-addr PLAINTEXT://{client},BROKER://{BROKER_FROM_INSIDE}\n"
             ),
+        }
+    }
+
+    /// The commands run once the broker is ready, each expected to exit 0.
+    fn after_ready(&self) -> Vec<Vec<String>> {
+        match self.broker {
+            Broker::Apache => Vec::new(),
+            // Dev-container mode raises a topic's `segment.ms` to at least ten
+            // minutes and compacts every ten seconds, and the compaction suites
+            // roll a segment and wait for the cleaner within the test. A
+            // bootstrap file would replace every setting the mode applies, so
+            // these are set once the node runs.
+            Broker::Redpanda => vec![
+                [
+                    "rpk",
+                    "cluster",
+                    "config",
+                    "set",
+                    "log_segment_ms_min=100",
+                    "log_compaction_interval_ms=500",
+                ]
+                .map(str::to_owned)
+                .to_vec(),
+            ],
         }
     }
 
@@ -282,10 +301,14 @@ impl Image for KafkaBroker {
         let write = format!(
             "printf '%s' '{script}' > {START_SCRIPT}.part && mv {START_SCRIPT}.part {START_SCRIPT}"
         );
-        Ok(vec![
+        let mut commands = vec![
             ExecCommand::new(["sh".to_owned(), "-c".to_owned(), write])
                 .with_container_ready_conditions(vec![self.ready_condition()]),
-        ])
+        ];
+        commands.extend(self.after_ready().into_iter().map(|command| {
+            ExecCommand::new(command).with_cmd_ready_condition(CmdWaitFor::exit_code(0))
+        }));
+        Ok(commands)
     }
 }
 
@@ -301,9 +324,7 @@ mod tests {
         KafkaBroker::new(Broker::Redpanda, "redpandadata/redpanda".into(), "1".into())
     }
 
-    const REDPANDA_START: &str = "echo log_segment_ms_min: 100 > /etc/redpanda/.bootstrap.yaml\n\
-         echo log_compaction_interval_ms: 500 >> /etc/redpanda/.bootstrap.yaml\n\
-         exec rpk redpanda start --mode dev-container --smp 1 --memory 1G --overprovisioned \
+    const REDPANDA_START: &str = "exec rpk redpanda start --mode dev-container --smp 1 --memory 1G --overprovisioned \
          --kafka-addr PLAINTEXT://0.0.0.0:9092,BROKER://0.0.0.0:9093 \
          --advertise-kafka-addr PLAINTEXT://ADDRESS,BROKER://localhost:9093\n";
 
@@ -328,10 +349,9 @@ mod tests {
         );
     }
 
-    /// Redpanda advertises the same two listeners, after lowering the floors
-    /// the compaction suites run under.
+    /// Redpanda advertises the same two listeners.
     #[test]
-    fn redpanda_advertises_the_same_listeners_after_its_bootstrap() {
+    fn redpanda_advertises_the_same_listeners() {
         assert_eq!(
             redpanda().start_script(31092),
             REDPANDA_START.replace("ADDRESS", "127.0.0.1:31092")
@@ -351,6 +371,24 @@ mod tests {
             let script = KafkaBroker::new(broker, "image".into(), "1".into()).start_script(31092);
             assert!(!script.contains('\''), "{lane}: {script}");
         }
+    }
+
+    /// Once ready, Redpanda lowers the floors the compaction suites run under,
+    /// and Apache Kafka runs nothing.
+    #[test]
+    fn redpanda_lowers_its_compaction_floors_once_ready() {
+        assert!(apache().after_ready().is_empty());
+        assert_eq!(
+            redpanda().after_ready(),
+            [[
+                "rpk",
+                "cluster",
+                "config",
+                "set",
+                "log_segment_ms_min=100",
+                "log_compaction_interval_ms=500",
+            ]]
+        );
     }
 
     /// Each broker is waited on for the stream it logs its ready line to.

@@ -988,10 +988,8 @@ mod refused_starts {
     /// assignment deadlines together end it within 16 s.
     fn ends(consumers: usize) {
         let cluster = MockKafka::new();
-        if consumers > 1 {
-            cluster.hold_first_rebalance();
-        }
         cluster.create_topic(TOPIC, 1, 1).expect("create topic");
+        let _leader = (consumers > 1).then(|| cluster.lead_group("refused", TOPIC, 1));
         let brokers = cluster.bootstrap_servers();
         cluster.request_errors(RDKafkaApiKey::OffsetCommit, &[REFUSED; 1000]);
         cluster.request_errors(RDKafkaApiKey::Heartbeat, &[REFUSED; 1000]);
@@ -1025,9 +1023,8 @@ mod refused_starts {
     }
 
     /// A consumer the group assigns nothing does not keep a run alive whose every
-    /// offered partition was discarded. The refused heartbeats rebalance the
-    /// group every round, so a follower whose `SyncGroup` the mock refuses reaches
-    /// the same accept a generation later.
+    /// offered partition was discarded. The test leads the group, so each
+    /// generation offers the partition to one consumer and nothing to the other.
     #[test]
     fn an_empty_peer_does_not_hold_off_the_deadline() {
         ends(2);

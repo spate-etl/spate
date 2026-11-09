@@ -11,7 +11,7 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 /// The session timeout the leader joins with. The mock applies the latest
-/// joiner's to the whole group, and these suites' consumers use 6 s.
+/// joiner's to the whole group, and the consumers join after the leader.
 const SESSION_MS: i32 = 6_000;
 
 /// How often the leader heartbeats: the mock removes a member that sends

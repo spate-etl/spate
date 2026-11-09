@@ -76,11 +76,11 @@ Use one consumer in a mock test unless the test is about several members of one 
 The mock refuses a follower's `SyncGroup` that arrives after the leader's, so that follower rejoins, and the group waits `session.timeout.ms` minus one second before it forms again.
 A group of one has no follower, so no `SyncGroup` can arrive after the leader's.
 When a test needs several members, write its waits to accept a stable group in any generation, because each lost race adds one such wait.
+[Wait for a signal the code publishes](05-flaky-tests.md#wait-for-a-signal-the-code-publishes) says how a test settles a group of several consumers.
 
 When a test's path depends on which member's offer arrives first, lead the group from the test with `MockKafka::lead_group` in [`support/group.rs`](repo:crates/spate-kafka/tests/support/group.rs).
 The test's member joins before the consumers, so the mock elects it leader.
 In each generation it waits for the mock to receive a `SyncGroup` from every other member before it sends its own, so none of theirs arrives after the leader's.
-[Wait for a signal the code publishes](05-flaky-tests.md#wait-for-a-signal-the-code-publishes) says how a test settles a group of several consumers.
 
 The ClickHouse sink's harness at this step is the `clickhouse` crate's mock server, `clickhouse::test::Mock`.
 Building a sink sends each replica two requests: it reads `system.columns`, then sends a `SELECT 1` carrying the insert settings.

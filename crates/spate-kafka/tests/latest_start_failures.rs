@@ -729,12 +729,11 @@ mod slow_listing {
     /// A lookup that leaves part of the bound to the listing.
     const LOOKUP_MS: i32 = 5_000;
 
-    /// A slow lookup, then three consumers' listings that each answer past the
-    /// bound, and the source starts.
+    /// A slow lookup, then three listings that each answer past the bound, and
+    /// the source starts.
     #[test]
     fn a_slow_listing_is_retried_until_the_source_starts() {
         let cluster = MockKafka::new();
-        cluster.hold_first_rebalance();
         cluster.create_topic("orders", 3, 1).expect("create topic");
         cluster.track_requests();
         // SAFETY: the pointer is valid while `cluster` lives. The call reads one
@@ -764,7 +763,6 @@ mod slow_listing {
             assert_eq!(code, NO_ERROR);
         }
         let mut cfg = KafkaSourceConfig::new(cluster.bootstrap_servers(), "orders", "slow-list");
-        cfg.consumers = 3;
         cfg.statistics_interval = Duration::ZERO;
         cfg.startup_timeout = Duration::from_secs(120);
         let cp = Checkpointer::new();
@@ -1324,7 +1322,9 @@ mod refused_starts {
     /// assignment deadlines together end it within 16 s.
     fn ends(consumers: usize) {
         let cluster = MockKafka::new();
-        cluster.hold_first_rebalance();
+        if consumers > 1 {
+            cluster.hold_first_rebalance();
+        }
         cluster.create_topic(TOPIC, 1, 1).expect("create topic");
         let brokers = cluster.bootstrap_servers();
         cluster.request_errors(RDKafkaApiKey::OffsetCommit, &[REFUSED; 1000]);

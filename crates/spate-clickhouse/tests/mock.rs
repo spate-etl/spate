@@ -556,6 +556,43 @@ async fn fetch_failures_fail_startup_distinguishably() {
     }
 }
 
+/// A replica that refuses a setting fails startup with the server's code and
+/// that replica's URL, after an earlier replica accepted it.
+#[tokio::test]
+async fn a_replica_refusing_a_setting_fails_startup() {
+    let (accepts, refuses) = (Mock::new(), Mock::new());
+    for mock in [&accepts, &refuses] {
+        mock.add(handlers::provide(matching_columns()));
+    }
+    accepts.add(handlers::provide::<u8>([1u8]));
+    // 115 = UNKNOWN_SETTING.
+    refuses.add(handlers::exception(115));
+    let cfg: ClickHouseSinkConfig = serde_yaml::from_str(&format!(
+        r#"
+table: orders
+compression: off
+shards:
+  - replicas: ["{}", "{}"]
+settings: {{ insert_qourum: "2" }}
+"#,
+        accepts.url(),
+        refuses.url(),
+    ))
+    .expect("config yaml");
+    let err = config::build(cfg)
+        .expect("valid sink config")
+        .with_row::<Owned<TestRow>>()
+        .await
+        .expect_err("a refused setting must fail startup");
+    match err {
+        spate_clickhouse::SchemaError::Settings { url, reason } => {
+            assert_eq!(url, refuses.url());
+            assert!(reason.contains("115"), "{reason}");
+        }
+        other => panic!("expected Settings, got {other:?}"),
+    }
+}
+
 #[tokio::test]
 async fn replica_disagreement_fails_startup() {
     let a = Mock::new();

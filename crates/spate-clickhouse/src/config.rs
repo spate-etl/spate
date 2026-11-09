@@ -503,11 +503,22 @@ impl ClickHouseSinkBuilder {
     /// against that list, failing with a readable diff for a missing or
     /// non-insertable column, replica drift, or a missing table. The fetched
     /// types describe the rows on the wire in both formats, so there is no
-    /// sink without them.
+    /// sink without them. When `settings` is not empty, every replica is sent
+    /// them on a `SELECT 1`, and a setting one refuses fails the build with
+    /// the server's message.
     ///
     /// Run it on the builder's I/O runtime before the chain exists, via
     /// `pipeline.block_on`. `F` is not inferable from context, so name it:
     /// `builder.with_row::<Owned<OrderRow>>()`.
+    ///
+    /// # Errors
+    ///
+    /// [`SchemaError::Columns`] when `F::COLUMNS` cannot produce an `INSERT`
+    /// or its header cannot be compressed, [`SchemaError::Fetch`] when a
+    /// replica's columns cannot be read, [`SchemaError::Mismatch`] when the
+    /// table is missing, the replicas disagree or a declared column does not
+    /// fit it, and [`SchemaError::Settings`] when a replica answers the
+    /// settings check with an error.
     pub async fn with_row<F: crate::ClickHouseRowFamily>(
         self,
     ) -> Result<ClickHouseSink, SchemaError> {
@@ -549,6 +560,17 @@ impl ClickHouseSinkBuilder {
             self.cfg.timeouts.send,
             self.cfg.timeouts.end,
         );
+        if !self.cfg.settings.is_empty() {
+            for endpoint in self.endpoints.iter().flatten() {
+                writer
+                    .check_settings(endpoint)
+                    .await
+                    .map_err(|e| SchemaError::Settings {
+                        url: endpoint.display_url().to_string(),
+                        reason: crate::http::error_reason(&e),
+                    })?;
+            }
+        }
         tracing::info!(
             table = %self.cfg.table,
             columns = ?F::COLUMNS,

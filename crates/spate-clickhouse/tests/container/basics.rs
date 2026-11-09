@@ -79,3 +79,47 @@ async fn probe_reflects_connectivity() {
             .is_err()
     );
 }
+
+/// A setting the server refuses fails the sink when it is built, with the
+/// server's message: an unknown name and a value that does not parse.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn a_refused_setting_fails_the_build() {
+    let srv = server().await;
+    for (setting, code) in [
+        ("insert_qourum: \"2\"", "UNKNOWN_SETTING"),
+        ("async_insert: \"maybe\"", "CANNOT_PARSE_BOOL"),
+    ] {
+        let err = try_sink_with::<Owned<Order>>(
+            &srv.url,
+            "orders",
+            &format!("{SERVER_CREDENTIALS}settings: {{ {setting} }}\n"),
+        )
+        .await
+        .expect_err(&format!("{setting} must not build"));
+        assert!(
+            matches!(err, spate_clickhouse::SchemaError::Settings { .. }),
+            "{err:?}"
+        );
+        assert!(err.to_string().contains(code), "{setting}: {err}");
+    }
+}
+
+/// A setting that leaves `SELECT 1` with no row still builds the sink, and
+/// the insert carrying it lands.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn a_setting_that_empties_select_one_builds() {
+    let srv = server().await;
+    let sink = sink_with::<Owned<Order>>(
+        &srv.url,
+        "orders",
+        &format!("{SERVER_CREDENTIALS}settings: {{ offset: \"5\" }}\n"),
+    )
+    .await;
+    sink.writer
+        .write_batch(&sink.endpoints[0][0], &sealed(&orders(0..10), "offset", 1))
+        .await
+        .expect("write");
+    assert_eq!(count(&srv.admin).await, 10);
+}

@@ -449,11 +449,12 @@ mod late_offers {
     }
 }
 
-/// Start commits whose replies are slow: one accept sends every consumer's commit
-/// before it waits, so the source starts while each reply takes 5 s. The source's
-/// unit tests pin the bound the waits share.
+/// A start commit whose reply is slow. The group has one member: the mock refuses
+/// a follower's SyncGroup that arrives after the leader's, and the rejoin holds the
+/// group for most of a session timeout. The source's unit tests pin the bound that
+/// several commits of one accept share.
 mod slow_commits {
-    use crate::support;
+    use crate::support::MockKafka;
     use rdkafka::types::{RDKafkaApiKey, RDKafkaRespErr};
     use spate_core::checkpoint::Checkpointer;
     use spate_core::error::ErrorClass;
@@ -462,45 +463,32 @@ mod slow_commits {
     use spate_test::{HANG, wait_until};
     use std::collections::BTreeMap;
     use std::time::Duration;
-    use support::MockKafka;
 
     const TOPIC: &str = "orders";
-    const CONSUMERS: usize = 6;
-    const REPLY_MS: i32 = 5_000;
 
-    /// `consumers` consumers, one partition each, with only `OffsetCommit` replies
-    /// slowed to `reply_ms`, driven until lanes arrive. The mock keeps a group in a
-    /// rebalance for most of a session timeout after a late joiner, so the session
-    /// is short and the deadline far.
-    fn starts(policy: &str, consumers: usize, reply_ms: i32) {
+    /// `latest` starts while the reply to its start commit takes 5 s.
+    #[test]
+    fn latest_starts_while_its_commit_reply_is_slow() {
         let cluster = MockKafka::new();
-        cluster.hold_first_rebalance();
-        cluster
-            .create_topic(TOPIC, i32::try_from(consumers).expect("partitions"), 1)
-            .expect("create topic");
-        for _ in 0..consumers {
-            // SAFETY: the pointer is valid while `cluster` lives, and the arguments
-            // match the (error, rtt in ms) pair the variadic reads.
-            let err = unsafe {
-                rdkafka::bindings::rd_kafka_mock_broker_push_request_error_rtts(
-                    cluster.native(),
-                    1,
-                    RDKafkaApiKey::OffsetCommit as i16,
-                    1,
-                    RDKafkaRespErr::RD_KAFKA_RESP_ERR_NO_ERROR,
-                    reply_ms,
-                )
-            };
-            assert_eq!(err, RDKafkaRespErr::RD_KAFKA_RESP_ERR_NO_ERROR);
-        }
+        cluster.create_topic(TOPIC, 1, 1).expect("create topic");
+        // SAFETY: the pointer is valid while `cluster` lives, and the arguments
+        // match the (error, rtt in ms) pair the variadic reads.
+        let err = unsafe {
+            rdkafka::bindings::rd_kafka_mock_broker_push_request_error_rtts(
+                cluster.native(),
+                1,
+                RDKafkaApiKey::OffsetCommit as i16,
+                1,
+                RDKafkaRespErr::RD_KAFKA_RESP_ERR_NO_ERROR,
+                5_000i32,
+            )
+        };
+        assert_eq!(err, RDKafkaRespErr::RD_KAFKA_RESP_ERR_NO_ERROR);
         let mut cfg = KafkaSourceConfig::new(cluster.bootstrap_servers(), TOPIC, "series");
-        cfg.consumers = consumers;
         cfg.statistics_interval = Duration::ZERO;
+        // Far past `HANG`, so a slow runner fails on the test's wait, which names it.
         cfg.startup_timeout = Duration::from_secs(300);
-        cfg.rdkafka = BTreeMap::from([
-            ("auto.offset.reset".to_string(), policy.to_string()),
-            ("session.timeout.ms".to_string(), "20000".to_string()),
-        ]);
+        cfg.rdkafka = BTreeMap::from([("auto.offset.reset".to_string(), "latest".to_string())]);
         let mut source = KafkaSource::new(cfg);
         let cp = Checkpointer::new();
         source.open(SourceCtx::new(cp.handle())).expect("open");
@@ -511,24 +499,6 @@ mod slow_commits {
                 _ => false,
             }
         });
-    }
-
-    /// The control: `earliest` sends no start commit and starts on the same broker.
-    #[test]
-    fn slow_commit_replies_start_under_earliest() {
-        starts("earliest", CONSUMERS, REPLY_MS);
-    }
-
-    /// The control: `latest` starts when commit replies come at once.
-    #[test]
-    fn fast_commit_replies_start_under_latest() {
-        starts("latest", CONSUMERS, 0);
-    }
-
-    /// `latest` starts while every commit reply takes 5 s.
-    #[test]
-    fn slow_commit_replies_start_under_latest() {
-        starts("latest", CONSUMERS, REPLY_MS);
     }
 }
 

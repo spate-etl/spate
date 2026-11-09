@@ -1797,12 +1797,15 @@ fn more_consumers_than_partitions_keeps_running() {
 
 /// A member told its generation is gone fails the flush that follows the
 /// drained revocation, and the source then holds and reads every partition
-/// again.
+/// again. With two consumers, the peer drains beside the lost member and its
+/// flush does not fail.
 #[test]
 fn a_lost_assignment_fails_the_flush_and_the_source_recovers() {
     for consumers in [1, 2] {
         let cluster = MockKafka::new();
-        cluster.hold_first_rebalance();
+        if consumers > 1 {
+            cluster.hold_first_rebalance();
+        }
         cluster.create_topic(TOPIC, 4, 1).expect("create topic");
         let brokers = cluster.bootstrap_servers();
         produce(&brokers, TOPIC, 5, 4, "l");
@@ -2152,7 +2155,8 @@ fn two_consumers_publish_their_own_statistics() {
 }
 
 /// The `client` label is the consumer's index: a `client.id` set in the
-/// passthrough reaches neither the series nor the source's own logs.
+/// passthrough reaches neither the series nor the source's own logs. The label
+/// exists only above one consumer, so the source runs two.
 #[test]
 fn consumer_series_carry_no_passthrough_value() {
     let cluster = MockKafka::new();
@@ -2220,11 +2224,10 @@ fn await_revocation(source: &mut KafkaSource, what: &str) {
 )]
 fn dropping_mid_revoke_returns() {
     let cluster = MockKafka::new();
-    cluster.hold_first_rebalance();
     cluster.create_topic(TOPIC, 4, 1).expect("create topic");
     let brokers = cluster.bootstrap_servers();
 
-    let mut driver = Driver::open(consumers_config(&brokers, "drop-revoke", 2));
+    let mut driver = Driver::open(config(&brokers, "drop-revoke"));
     driver.settle(4);
     let stop = Arc::new(AtomicBool::new(false));
     let joiner = {
@@ -2260,9 +2263,8 @@ fn dropping_mid_revoke_returns() {
 fn dropping_mid_lost_revoke_returns() {
     use rdkafka::types::{RDKafkaApiKey, RDKafkaRespErr};
     let cluster = MockKafka::new();
-    cluster.hold_first_rebalance();
     cluster.create_topic(TOPIC, 2, 1).expect("create topic");
-    let mut cfg = consumers_config(&cluster.bootstrap_servers(), "drop-lost-revoke", 2);
+    let mut cfg = config(&cluster.bootstrap_servers(), "drop-lost-revoke");
     cfg.rdkafka.insert("debug".into(), "cgrp".into());
     let mut driver = Driver::open(cfg);
     driver.settle(2);
@@ -2293,11 +2295,10 @@ fn dropping_mid_lost_revoke_returns() {
 #[test]
 fn dropping_the_source_before_its_lanes_completes() {
     let cluster = MockKafka::new();
-    cluster.hold_first_rebalance();
     cluster.create_topic(TOPIC, 2, 1).expect("create topic");
     let brokers = cluster.bootstrap_servers();
 
-    let mut driver = Driver::open(consumers_config(&brokers, "drop-order", 2));
+    let mut driver = Driver::open(config(&brokers, "drop-order"));
     driver.settle(2);
     let Driver { source, lanes, .. } = driver;
     returns_within("dropping the source, then its lanes", move || {
@@ -2311,12 +2312,11 @@ fn dropping_the_source_before_its_lanes_completes() {
 #[test]
 fn dropping_an_unpolled_source_with_a_backlog_returns() {
     let cluster = MockKafka::new();
-    cluster.hold_first_rebalance();
     cluster.create_topic(TOPIC, 2, 1).expect("create topic");
     let brokers = cluster.bootstrap_servers();
     produce(&brokers, TOPIC, 100, 2, "b");
 
-    let Driver { source, .. } = Driver::open(consumers_config(&brokers, "drop-unpolled", 2));
+    let Driver { source, .. } = Driver::open(config(&brokers, "drop-unpolled"));
     returns_within("dropping an unpolled source", move || drop(source));
 }
 
@@ -2325,15 +2325,14 @@ fn dropping_an_unpolled_source_with_a_backlog_returns() {
 #[test]
 fn a_partial_refusal_stores_the_owned_offsets() {
     let cluster = MockKafka::new();
-    cluster.hold_first_rebalance();
     cluster.create_topic(TOPIC, 4, 1).expect("create topic");
     let brokers = cluster.bootstrap_servers();
     produce(&brokers, TOPIC, 10, 4, "r");
 
-    let mut cfg = watched_config(&brokers, "partial-refusal", 2);
+    let mut cfg = config(&brokers, "partial-refusal");
     cfg.commit_interval = Duration::from_hours(1);
-    let mut driver = Driver::open_watched(KafkaSource::new(cfg), "partial-refusal");
-    driver.settle_group(2, 4);
+    let mut driver = Driver::open(cfg);
+    driver.settle(4);
     driver.read(10);
     driver.cp.drain();
     let mut watermarks = driver.cp.take_watermarks();
@@ -2347,13 +2346,13 @@ fn a_partial_refusal_stores_the_owned_offsets() {
     );
 }
 
-/// Several consumers start while the coordinator answers every committed-offset
-/// lookup with "load in progress": the accept's one lookup bound runs out and
-/// librdkafka resolves the starts. The source's unit tests pin that bound.
+/// A consumer starts while the coordinator answers every committed-offset
+/// lookup with "load in progress": the accept's lookup bound runs out and
+/// librdkafka resolves the starts. The source's unit tests pin the bound that
+/// several consumers' lookups share.
 #[test]
 fn one_assignment_starts_while_the_coordinator_loads_offsets() {
     let cluster = MockKafka::new();
-    cluster.hold_first_rebalance();
     cluster.create_topic(TOPIC, 3, 1).expect("create topic");
     // A coordinator still loading its offsets: librdkafka retries every
     // OffsetFetch until the caller's timeout.
@@ -2364,14 +2363,12 @@ fn one_assignment_starts_while_the_coordinator_loads_offsets() {
             100_000
         ],
     );
-    let mut cfg = consumers_config(&cluster.bootstrap_servers(), "slow-lookup", 3);
+    let mut cfg = config(&cluster.bootstrap_servers(), "slow-lookup");
     cfg.startup_timeout = Duration::from_secs(120);
     let mut source = KafkaSource::new(cfg);
     let cp = Checkpointer::new();
     source.open(SourceCtx::new(cp.handle())).expect("open");
 
-    // A consumer that joins after the hold ended starts a later epoch, so this
-    // waits for the accept that carries every lane.
     wait_until(HANG, "every lane", || {
         matches!(
             source.poll_events(Duration::from_millis(100)),
@@ -3561,7 +3558,9 @@ mod latest_start {
     fn a_removed_member_under_latest_loses_no_record() {
         for consumers in [1, 2] {
             let (cluster, brokers) = cluster_with_records(2);
-            cluster.hold_first_rebalance();
+            if consumers > 1 {
+                cluster.hold_first_rebalance();
+            }
             let group: &'static str = if consumers == 1 {
                 "removed-one"
             } else {
@@ -3931,17 +3930,16 @@ mod latest_start {
         });
     }
 
-    /// Several consumers start under `latest` through listings the leader
-    /// refuses at first.
+    /// A source starts under `latest` through listings the leader refuses at
+    /// first.
     #[test]
     fn one_assignment_under_latest_starts_through_refused_listings() {
         let (cluster, brokers) = cluster_with_records(3);
-        cluster.hold_first_rebalance();
         cluster.request_errors(
             RDKafkaApiKey::ListOffsets,
             &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_NOT_LEADER_FOR_PARTITION; 3],
         );
-        let mut cfg = latest_config(&brokers, "slow-list", 3);
+        let mut cfg = latest_config(&brokers, "slow-list", 1);
         cfg.statistics_interval = Duration::ZERO;
         let mut source = KafkaSource::new(cfg);
         let cp = Checkpointer::new();

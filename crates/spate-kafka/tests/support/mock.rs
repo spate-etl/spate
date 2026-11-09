@@ -24,6 +24,11 @@ const INITIAL_REBALANCE_DELAY_MS: i32 = 3000;
 /// several members of one group restores the hold with
 /// [`MockKafka::hold_first_rebalance`].
 ///
+/// A group of several members can lose a race whenever it forms. The mock
+/// refuses a follower's `SyncGroup` that arrives after the leader's, and the
+/// follower's rejoin holds the group for `session.timeout.ms - 1000`. A test
+/// gives its source one consumer unless several members are what it tests.
+///
 /// Its methods are [`MockCluster`]'s. The cluster lives in a client of its
 /// own and is destroyed with it.
 pub(crate) struct MockKafka {

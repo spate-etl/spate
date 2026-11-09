@@ -71,6 +71,11 @@ The first consumer then forms the group alone, and each later consumer rebalance
 A test whose consumers must join one generation turns the wait back on with `hold_first_rebalance`.
 The wait lasts 3 s of real time.
 A consumer that joins after the wait has ended starts another rebalance and joins a later generation.
+
+Use one consumer in a mock test unless the test is about several members of one group.
+The mock refuses a follower's `SyncGroup` that arrives after the leader's, so that follower rejoins, and the group waits `session.timeout.ms` minus one second before it forms again.
+A group of one has no follower, so the race cannot happen in it.
+When a test needs several members, write its waits to accept a stable group in any generation, because each lost race adds one such wait.
 [Wait for a signal the code publishes](05-flaky-tests.md#wait-for-a-signal-the-code-publishes) says how a test settles a group of several consumers.
 
 The ClickHouse sink's harness at this step is the `clickhouse` crate's mock server, `clickhouse::test::Mock`.

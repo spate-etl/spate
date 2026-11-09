@@ -3989,23 +3989,27 @@ mod tests {
         }
     }
 
-    /// Dropping the source while one consumer's assignment is held, before
-    /// the others have theirs, returns. Consumer close completes a held
-    /// assignment on its own.
+    /// Dropping the source while its consumer's assignment is held returns.
+    /// Consumer close completes a held assignment on its own. Every
+    /// committed-offset lookup fails, so under `latest` the offer stays held
+    /// for a retry.
     #[test]
     fn dropping_with_a_held_assignment_returns() {
         use crate::testutil::mock::MockKafka;
+        use rdkafka::types::{RDKafkaApiKey, RDKafkaRespErr};
         let cluster = MockKafka::new();
-        cluster.hold_first_rebalance();
         cluster.create_topic("orders", 4, 1).expect("create topic");
+        cluster.request_errors(
+            RDKafkaApiKey::OffsetFetch,
+            &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_UNKNOWN; 1000],
+        );
         let mut cfg = test_config();
         cfg.brokers = cluster.bootstrap_servers();
         cfg.group_id = "drop-held".into();
-        cfg.consumers = 3;
-        cfg.rdkafka = std::collections::BTreeMap::from([(
-            "session.timeout.ms".to_string(),
-            "6000".to_string(),
-        )]);
+        cfg.rdkafka = std::collections::BTreeMap::from([
+            ("auto.offset.reset".to_string(), "latest".to_string()),
+            ("session.timeout.ms".to_string(), "6000".to_string()),
+        ]);
         let mut source = KafkaSource::new(cfg);
         let cp = Checkpointer::new();
         source.open(SourceCtx::new(cp.handle())).expect("open");
@@ -4036,13 +4040,20 @@ mod tests {
 
         type Calls = Arc<Mutex<Vec<BrokerCall>>>;
 
-        /// A mock cluster with one `orders` partition per consumer.
+        /// A mock cluster with one `orders` partition per consumer, on which no
+        /// group forms. The tests set each generation by hand, and the mock
+        /// reads nothing more from a member whose join it holds, which would
+        /// leave that member's calls waiting in real time.
         fn mock() -> MockKafka {
             let cluster = MockKafka::new();
             let partitions = i32::try_from(CONSUMERS).expect("partitions");
             cluster
                 .create_topic("orders", partitions, 1)
                 .expect("create topic");
+            cluster.request_errors(
+                RDKafkaApiKey::JoinGroup,
+                &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_COORDINATOR_LOAD_IN_PROGRESS; 100_000],
+            );
             cluster
         }
 
@@ -4523,7 +4534,8 @@ mod tests {
 
         /// The drop serves each consumer's queued assignment with no `assign`
         /// and ahead of its `unassign`, whether or not a leave is pending. A
-        /// static member has none. Regression for #1683.
+        /// static member has none. Two consumers check that the drop serves
+        /// every consumer and names each one. Regression for #1683.
         #[test]
         fn dropping_with_a_queued_assignment_returns() {
             for (group, consumers, static_id) in [
@@ -4531,7 +4543,9 @@ mod tests {
                 ("drop-queued-assign-static", 1, Some("worker-a")),
             ] {
                 let cluster = mock();
-                cluster.hold_first_rebalance();
+                if consumers > 1 {
+                    cluster.hold_first_rebalance();
+                }
                 let mut cfg = config(&cluster, group, consumers);
                 if let Some(id) = static_id {
                     cfg.rdkafka.insert("group.instance.id".into(), id.into());
@@ -4847,7 +4861,8 @@ mod tests {
         );
     }
 
-    /// Each consumer whose commit the broker refuses logs its own line.
+    /// Each consumer whose commit the broker refuses logs its own line. Two
+    /// consumers own partitions, so each line has to name its own.
     #[test]
     fn a_failed_commit_names_each_consumer() {
         use crate::testutil::mock::MockKafka;

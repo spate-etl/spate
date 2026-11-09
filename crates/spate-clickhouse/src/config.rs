@@ -1271,6 +1271,22 @@ settings: { insert_quorum: "auto" }
         );
     }
 
+    /// The server reads the last `database` in an insert's URL, and the
+    /// client writes the typed one before the settings, so a `database` key in
+    /// `settings` fails validation.
+    #[test]
+    fn database_is_a_reserved_setting() {
+        let err = refusal(from_component_config(&component(&format!(
+            "{MINIMAL}database: analytics\nsettings: {{database: \"default\"}}\n"
+        ))));
+        assert_eq!(
+            err,
+            "sink.clickhouse: settings.\"database\" cannot be overridden: owned by the typed \
+             `database` field: the startup checks read the table in that database, and inserts \
+             go to the table they checked"
+        );
+    }
+
     #[test]
     fn every_setting_an_insert_carries_is_refused_in_settings() {
         for (name, _) in crate::writer::owned_settings("token", true) {

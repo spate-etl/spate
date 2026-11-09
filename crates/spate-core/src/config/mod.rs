@@ -69,7 +69,7 @@ mod interpolate;
 pub mod redact;
 mod reserved;
 
-pub use component::ComponentConfig;
+pub use component::{ComponentConfig, SectionPath};
 pub use duration::{DurationBounds, DurationBoundsError, check_duration};
 pub use error::ConfigError;
 pub use feed::FeedSection;
@@ -424,9 +424,18 @@ mod defaults {
 
 /// Tag a component with the section it sits in, so its error paths read the
 /// same whether the config was parsed or built in code.
-fn labelled(mut component: ComponentConfig, section: &'static str) -> ComponentConfig {
+fn labelled(
+    mut component: ComponentConfig,
+    section: impl Into<Cow<'static, str>>,
+) -> ComponentConfig {
     component.set_section(section);
     component
+}
+
+/// The position of the `sinks:` entry `name`, which its section's error paths
+/// start from.
+fn sinks_entry(name: &str) -> String {
+    format!("sinks.{name}")
 }
 
 impl PipelineConfig {
@@ -496,7 +505,10 @@ impl PipelineConfig {
     ) -> PipelineConfig {
         let sinks = sinks
             .into_iter()
-            .map(|(name, sink)| (name, labelled(sink, "sink")))
+            .map(|(name, sink)| {
+                let section = sinks_entry(&name);
+                (name, labelled(sink, section))
+            })
             .collect();
         Self::assemble(pipeline, source, None, Some(sinks))
     }
@@ -587,8 +599,8 @@ impl PipelineConfig {
             sink.set_section("sink");
         }
         if let Some(sinks) = cfg.sinks.as_mut() {
-            for sink in sinks.values_mut() {
-                sink.set_section("sink");
+            for (name, sink) in sinks.iter_mut() {
+                sink.set_section(sinks_entry(name));
             }
         }
         if let Some(deser) = cfg.deserializer.as_mut() {
@@ -694,12 +706,11 @@ impl PipelineConfig {
         // block is rejected at load, including for a `sinks:` entry this
         // binary never installs (nothing later would resolve it).
         if let Some(sink) = &self.sink {
-            sink.resolved_chunk()?;
+            sink.resolved_sink_chunk(&self.sink_address("default"))?;
         }
         if let Some(sinks) = &self.sinks {
             for (name, sink) in sinks {
-                sink.resolved_chunk()
-                    .map_err(|e| name_sinks_entry_error(name, e))?;
+                sink.resolved_sink_chunk(&self.sink_address(name))?;
             }
         }
         Ok(())
@@ -791,6 +802,18 @@ impl PipelineConfig {
         }
     }
 
+    /// Where the sink named `name` sits in the config, for an error about it:
+    /// `sink` for the single `sink:` form, `sinks.<name>` otherwise. A sink
+    /// installed in code under a name the config does not declare reads as a
+    /// `sinks:` entry.
+    pub(crate) fn sink_address(&self, name: &str) -> Cow<'static, str> {
+        if self.sinks.is_none() && name == "default" {
+            Cow::Borrowed("sink")
+        } else {
+            Cow::Owned(sinks_entry(name))
+        }
+    }
+
     /// The configured sink names, sorted. A single-sink config reports
     /// `["default"]`.
     #[must_use]
@@ -799,23 +822,6 @@ impl PipelineConfig {
             Some(sinks) => sinks.keys().cloned().collect(),
             None => vec!["default".to_string()],
         }
-    }
-}
-
-/// Re-anchor a `sinks:` entry's chunk error onto its map key. The entry's
-/// section prefix is the shared `sink.<type>`, which cannot distinguish two
-/// entries of the same connector type. `sinks.<name>.<...>` can.
-fn name_sinks_entry_error(name: &str, e: ConfigError) -> ConfigError {
-    match e {
-        ConfigError::Validation(m) => ConfigError::Validation(format!("sinks.{name}: {m}")),
-        ConfigError::Component { context, message } => ConfigError::Component {
-            context: match context.strip_prefix("sink.") {
-                Some(rest) => format!("sinks.{name}.{rest}"),
-                None => format!("sinks.{name}.{context}"),
-            },
-            message,
-        },
-        other => other,
     }
 }
 
@@ -1514,5 +1520,43 @@ sinks:
         )
         .unwrap();
         assert_ne!(a, c);
+    }
+
+    /// A `sinks:` entry's errors start at `sinks.<name>`, whether the config
+    /// was loaded or built in code.
+    #[test]
+    fn a_sinks_entry_path_names_the_entry() {
+        #[derive(Debug, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        #[allow(dead_code)]
+        struct Body {
+            topic: String,
+        }
+        let loaded = PipelineConfig::from_str(
+            "pipeline: { name: demo }\nsource: { memory: {} }\nsinks:\n  eu: { fake: { topik: x } }\n",
+        )
+        .expect("loads");
+        let built = PipelineConfig::new_multi_sink(
+            PipelineSection::new("demo"),
+            ComponentConfig::new("memory", YamlValue::Mapping(Default::default())),
+            BTreeMap::from([(
+                "eu".to_owned(),
+                ComponentConfig::new("fake", serde_yaml::from_str("topik: x").expect("yaml")),
+            )]),
+        );
+        for cfg in [loaded, built] {
+            let sink = cfg.sink_config("eu").expect("declared");
+            assert_eq!(
+                sink.path()
+                    .invalid("topic", "must not be empty")
+                    .to_string(),
+                "sinks.eu.fake.topic: must not be empty"
+            );
+            let err = sink.deserialize_into::<Body>().expect_err("unknown key");
+            assert!(
+                matches!(&err, ConfigError::Component { context, .. } if context == "sinks.eu.fake.topik"),
+                "{err:?}"
+            );
+        }
     }
 }

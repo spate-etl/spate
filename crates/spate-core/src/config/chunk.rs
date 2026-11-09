@@ -12,7 +12,7 @@
 //! [`ChunkConfig`] at assembly time, so connectors never see it and need no
 //! `chunk` field of their own.
 
-use super::ConfigError;
+use super::{ConfigError, SectionPath};
 use crate::error::ErrorPolicy;
 use crate::ops::ChunkConfig;
 use bytesize::ByteSize;
@@ -79,18 +79,20 @@ impl ChunkSection {
     /// Resolve into the runtime [`ChunkConfig`], validating bounds with
     /// field-named errors (the load-time counterpart to the cold-path
     /// `assert!` in `SinkHandoff::new`).
-    pub(crate) fn resolve(&self) -> Result<ChunkConfig, ConfigError> {
+    /// `at` is the path of the sink section holding the block.
+    pub(crate) fn resolve(&self, at: &SectionPath) -> Result<ChunkConfig, ConfigError> {
         if self.target_bytes == 0 {
-            return Err(ConfigError::Validation(
-                "chunk.target_bytes must be greater than zero".into(),
-            ));
+            return Err(at.invalid("chunk.target_bytes", "must be greater than zero"));
         }
         // `usize` on a 32-bit target is narrower than the `u64` wire value.
         let target_bytes = usize::try_from(self.target_bytes).map_err(|_| {
-            ConfigError::Validation(format!(
-                "chunk.target_bytes ({}) exceeds the addressable range on this platform",
-                self.target_bytes
-            ))
+            at.invalid(
+                "chunk.target_bytes",
+                format!(
+                    "({}) exceeds the addressable range on this platform",
+                    self.target_bytes
+                ),
+            )
         })?;
         Ok(ChunkConfig {
             target_bytes,
@@ -107,18 +109,25 @@ mod tests {
         serde_yaml::from_str(yaml)
     }
 
+    fn at() -> SectionPath {
+        SectionPath::sink("fake")
+    }
+
     #[test]
     fn empty_block_is_the_runtime_default_including_skip() {
         // An omitted/empty `chunk:` must land on 64 KiB AND `Skip`, not
         // `ErrorPolicy::default()` which is `Fail`.
-        let cfg = parse("{}").unwrap().resolve().unwrap();
+        let cfg = parse("{}").unwrap().resolve(&at()).unwrap();
         assert_eq!(cfg.target_bytes, 64 * 1024);
         assert_eq!(cfg.encode_policy, ErrorPolicy::Skip);
     }
 
     #[test]
     fn partial_block_keeps_the_skip_default() {
-        let cfg = parse("target_bytes: 512KiB").unwrap().resolve().unwrap();
+        let cfg = parse("target_bytes: 512KiB")
+            .unwrap()
+            .resolve(&at())
+            .unwrap();
         assert_eq!(cfg.target_bytes, 512 * 1024);
         assert_eq!(cfg.encode_policy, ErrorPolicy::Skip);
     }
@@ -127,19 +136,25 @@ mod tests {
     fn parses_bytesize_and_encode_policy() {
         let cfg = parse("target_bytes: 128KiB\nencode_policy: fail")
             .unwrap()
-            .resolve()
+            .resolve(&at())
             .unwrap();
         assert_eq!(cfg.target_bytes, 128 * 1024);
         assert_eq!(cfg.encode_policy, ErrorPolicy::Fail);
         // Plain integers are bytes.
-        let cfg = parse("target_bytes: 4096").unwrap().resolve().unwrap();
+        let cfg = parse("target_bytes: 4096").unwrap().resolve(&at()).unwrap();
         assert_eq!(cfg.target_bytes, 4096);
     }
 
     #[test]
     fn zero_target_is_a_field_named_error() {
-        let err = parse("target_bytes: 0B").unwrap().resolve().unwrap_err();
-        assert!(err.to_string().contains("chunk.target_bytes"), "{err}");
+        let err = parse("target_bytes: 0B")
+            .unwrap()
+            .resolve(&at())
+            .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "sink.fake.chunk.target_bytes: must be greater than zero"
+        );
     }
 
     #[test]

@@ -43,12 +43,16 @@ pub enum ConfigError {
         source: serde_yaml::Error,
     },
 
-    /// A component section (`source:`, `sink:`, `deserializer:`) is not a
-    /// single-key mapping, or its opaque body failed to deserialize into
-    /// the component's typed config.
+    /// A component section (`source:`, `sink:`, a `sinks:` entry,
+    /// `deserializer:`, a `feed:` backend) is not a single-key mapping, its
+    /// opaque body failed to deserialize into the component's typed config,
+    /// or a value in it breaks one of the component's rules.
+    /// [`SectionPath::invalid`](super::SectionPath::invalid) builds the last
+    /// kind.
     #[error("{context}: {message}")]
     Component {
-        /// Where in the config the problem is, e.g. `source.kafka.brokers`.
+        /// Where in the config the problem is, e.g. `source.kafka.brokers` or
+        /// `sinks.eu.clickhouse.chunk.target_bytes`.
         context: String,
         /// What went wrong.
         message: String,

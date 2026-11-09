@@ -1,7 +1,7 @@
 //! The `feed:` section: the work feed a feed-reading source reads from, and
 //! the keys every backend shares.
 
-use super::{ComponentConfig, ConfigError, redact};
+use super::{ComponentConfig, ConfigError, SectionPath, redact};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use std::num::{NonZeroU32, NonZeroUsize};
@@ -188,10 +188,7 @@ impl FeedSection {
     /// `feed.<tag>`.
     #[must_use]
     pub fn backend_error(tag: &str, message: impl Into<String>) -> ConfigError {
-        ConfigError::Component {
-            context: format!("feed.{tag}"),
-            message: message.into(),
-        }
+        SectionPath::feed(tag).error(message)
     }
 }
 

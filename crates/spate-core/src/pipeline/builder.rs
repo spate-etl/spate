@@ -547,22 +547,9 @@ impl Pipeline {
         // a config error can't leak a running SinkPool. Decl-once: the per-sink
         // YAML `chunk:` block and `SinkOptions::with_chunk` are mutually
         // exclusive.
+        let address = self.config.sink_address(&sink_name);
         let yaml_chunk = match self.config.sink_config(&sink_name) {
-            // Prefix the sink name onto the error so a multi-sink pipeline
-            // says *which* sink is misconfigured (the dotted Component path
-            // alone is `sink.<type>.…`, identical for same-typed sinks).
-            Ok(cc) => cc.resolved_chunk().map_err(|e| {
-                BuildError::Config(match e {
-                    ConfigError::Validation(m) => {
-                        ConfigError::Validation(format!("sink {sink_name:?}: {m}"))
-                    }
-                    ConfigError::Component { context, message } => ConfigError::Component {
-                        context: format!("sink {sink_name:?}: {context}"),
-                        message,
-                    },
-                    other => other,
-                })
-            })?,
+            Ok(cc) => cc.resolved_sink_chunk(&address)?,
             // No YAML section under this name. The sink is configured purely
             // in code (capture sinks in tests, named programmatic sinks beside
             // a placeholder `sink:`). A declared `chunk:` block that nothing
@@ -573,7 +560,7 @@ impl Pipeline {
         let chunk = match (yaml_chunk, options.chunk) {
             (Some(_), Some(_)) => {
                 return Err(BuildError::Config(ConfigError::Validation(format!(
-                    "sink {sink_name:?}: set the chunk config in exactly one place — the \
+                    "{address}: set the chunk config in exactly one place — the \
                      YAML `chunk:` block or `SinkOptions::with_chunk`, not both"
                 ))));
             }
@@ -589,7 +576,7 @@ impl Pipeline {
         // tuning docs).
         if chunk.target_bytes == 0 {
             return Err(BuildError::Config(ConfigError::Validation(format!(
-                "sink {sink_name:?}: chunk.target_bytes must be greater than zero"
+                "{address}: chunk.target_bytes must be greater than zero"
             ))));
         }
         let parts = bundle.into_parts();
@@ -613,7 +600,7 @@ impl Pipeline {
         // before `shard_queues`, returns before any metric series is claimed.
         if let Err(e) = parts.pool.validate() {
             return Err(BuildError::Config(ConfigError::Validation(format!(
-                "sink {sink_name:?}: {e}"
+                "{address}: {e}"
             ))));
         }
 
@@ -1228,6 +1215,87 @@ mod tests {
         ComponentConfig::new("fake", serde_yaml::from_str(yaml).expect("chunk yaml"))
     }
 
+    /// A sink section assigned to the config in code carries no label, and
+    /// its `chunk:` errors still name the sink, at install and from
+    /// `validate`.
+    #[test]
+    fn a_chunk_mistake_names_a_sink_assigned_in_code() {
+        use crate::config::{PipelineConfig, PipelineSection, YamlValue};
+        let memory = || ComponentConfig::new("memory", YamlValue::Mapping(Default::default()));
+        let zero = || chunk_body("chunk: { target_bytes: 0 }");
+        let base = || PipelineConfig::new(PipelineSection::new("demo"), memory(), memory());
+        let mut multi = base();
+        multi.sink = None;
+        multi.sinks = Some(std::collections::BTreeMap::from([(
+            "eu".to_owned(),
+            zero(),
+        )]));
+        let mut single = base();
+        single.sink = Some(zero());
+        for (config, name, want) in [
+            (multi, "eu", "sinks.eu.fake.chunk.target_bytes"),
+            (single, "default", "sink.fake.chunk.target_bytes"),
+        ] {
+            let want = format!("{want}: must be greater than zero");
+            assert_eq!(config.validate().expect_err("refused").to_string(), want);
+            let err = Pipeline::from_config(config)
+                .expect("builder")
+                .add_sink(name, null_sink(1))
+                .map(drop)
+                .expect_err("refused at install");
+            assert_eq!(err.to_string(), want);
+        }
+    }
+
+    /// A `chunk:` mistake on a `sinks:` entry reads the same whether config
+    /// load or the builder catches it, and on the `sink:` form names the
+    /// section.
+    #[test]
+    fn a_chunk_mistake_reads_the_same_at_load_and_at_install() {
+        use crate::config::{PipelineConfig, PipelineSection, YamlValue};
+        use std::collections::BTreeMap;
+        let load = |sinks: &str| {
+            let yaml = format!("pipeline: {{ name: demo }}\nsource: {{ memory: {{}} }}\n{sinks}");
+            PipelineConfig::from_str(&yaml)
+                .expect_err("refused at load")
+                .to_string()
+        };
+        let install = |body: &str| {
+            let cfg = PipelineConfig::new_multi_sink(
+                PipelineSection::new("demo"),
+                ComponentConfig::new("memory", YamlValue::Mapping(Default::default())),
+                BTreeMap::from([("eu".to_owned(), chunk_body(body))]),
+            );
+            Pipeline::from_config(cfg)
+                .expect("builder")
+                .add_sink_with("eu", null_sink(1), SinkOptions::default())
+                .map(drop)
+                .expect_err("refused at install")
+                .to_string()
+        };
+        for (body, want) in [
+            (
+                "chunk: { target_bytes: 0 }",
+                "sinks.eu.fake.chunk.target_bytes: must be greater than zero",
+            ),
+            (
+                "chunk: { bogus: 1 }",
+                "sinks.eu.fake.chunk.bogus: unknown field `bogus`, expected `target_bytes` or \
+                 `encode_policy`",
+            ),
+        ] {
+            assert_eq!(
+                load(&format!("sinks:\n  eu: {{ fake: {{ {body} }} }}\n")),
+                want
+            );
+            assert_eq!(install(body), want);
+        }
+        assert_eq!(
+            load("sink: { fake: { chunk: { target_bytes: 0 } } }\n"),
+            "sink.fake.chunk.target_bytes: must be greater than zero"
+        );
+    }
+
     #[test]
     fn yaml_and_programmatic_chunk_on_one_sink_collide() {
         // Decl-once: setting the YAML `chunk:` block AND `SinkOptions::with_chunk`
@@ -1298,12 +1366,28 @@ mod tests {
                 .expect("builder")
                 .sink(sink)
                 .err();
-            let want = format!("sink \"default\": {key}");
+            let want = format!("sink: {key}");
             assert!(
                 matches!(&err, Some(BuildError::Config(ConfigError::Validation(m))) if *m == want),
                 "{err:?}"
             );
         }
+        // A named sink installed beside the `sink:` form reads as a `sinks:`
+        // entry.
+        let sink = SinkParts::new(NullWriter, vec![vec![()]], pool(|c| c.batch.max_rows = 0))
+            .with_component_type("null");
+        let err = Pipeline::from_config(test_config(1))
+            .expect("builder")
+            .add_sink_with("eu", sink, SinkOptions::default())
+            .err();
+        assert!(
+            matches!(
+                &err,
+                Some(BuildError::Config(ConfigError::Validation(m)))
+                    if m == "sinks.eu: batch.max_rows must be at least 1"
+            ),
+            "{err:?}"
+        );
     }
 
     /// Pins that an invalid pool fails before the builder claims any metric
@@ -1331,7 +1415,7 @@ mod tests {
             matches!(
                 &err,
                 Some(BuildError::Config(ConfigError::Validation(m)))
-                    if m == "sink \"default\": batch.max_rows must be at least 1"
+                    if m == "sink: batch.max_rows must be at least 1"
             ),
             "{err:?}"
         );

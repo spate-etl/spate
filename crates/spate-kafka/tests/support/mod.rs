@@ -357,9 +357,26 @@ pub(crate) fn produce_transaction(
 /// The end of `partition`'s log. A `read_committed` client reads the last stable
 /// offset here instead, which an open transaction holds below the log's end.
 pub(crate) fn log_end(brokers: &str, topic: &str, partition: i32) -> i64 {
+    high_watermark(brokers, topic, partition, "read_uncommitted")
+}
+
+/// The end of `partition`'s log once no transaction on it is open, so the
+/// marker of each ended transaction is in it. A producer's commit or abort
+/// returns before the broker writes the markers.
+pub(crate) fn settled_end(brokers: &str, topic: &str, partition: i32) -> i64 {
+    let mut end = 0;
+    spate_test::wait_until(HANG, "the transaction markers", || {
+        end = log_end(brokers, topic, partition);
+        high_watermark(brokers, topic, partition, "read_committed") == end
+    });
+    end
+}
+
+/// The high watermark of `partition` as a client at `isolation` reads it.
+fn high_watermark(brokers: &str, topic: &str, partition: i32, isolation: &str) -> i64 {
     let probe: BaseConsumer = raw_config()
         .set("bootstrap.servers", brokers)
-        .set("isolation.level", "read_uncommitted")
+        .set("isolation.level", isolation)
         .build()
         .expect("probe");
     probe

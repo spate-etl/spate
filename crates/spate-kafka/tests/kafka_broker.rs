@@ -22,7 +22,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use support::{
     Transaction, Watched, await_assignment, broker, drain_lane, log_end, produce,
-    produce_transaction, transactional_broker,
+    produce_transaction, settled_end, transactional_broker,
 };
 use testcontainers::Container;
 use testcontainers::runners::SyncRunner;
@@ -428,7 +428,7 @@ fn real_broker_lag_reaches_zero_after_a_committed_transaction() {
         &brokers,
         topic_config(&brokers, "txn", "txn-group"),
         100,
-        log_end(&brokers, "txn", 0),
+        settled_end(&brokers, "txn", 0),
     );
 }
 
@@ -440,7 +440,7 @@ fn real_broker_lag_reaches_zero_after_an_aborted_transaction() {
     let (_container, brokers) = transaction_broker();
     let _ = produce_transaction(&brokers, TOPIC, 100, "kept", Transaction::Commit);
     let _ = produce_transaction(&brokers, TOPIC, 100, "dropped", Transaction::Abort);
-    let end = log_end(&brokers, TOPIC, 0);
+    let end = settled_end(&brokers, TOPIC, 0);
     lag_reaches_zero_across_a_restart(&brokers, config(&brokers, "aborted"), 100, end);
 }
 
@@ -455,7 +455,7 @@ fn real_broker_lag_reaches_zero_reading_uncommitted() {
     let mut cfg = config(&brokers, "uncommitted");
     cfg.rdkafka
         .insert("isolation.level".into(), "read_uncommitted".into());
-    lag_reaches_zero_across_a_restart(&brokers, cfg, 200, log_end(&brokers, TOPIC, 0));
+    lag_reaches_zero_across_a_restart(&brokers, cfg, 200, settled_end(&brokers, TOPIC, 0));
 }
 
 /// An open transaction holds the readable end at the last stable offset: lag
@@ -488,7 +488,7 @@ fn real_broker_an_open_transaction_holds_lag_at_the_last_stable_offset() {
     let later = watched.read(0, 60);
     assert_eq!(later.len(), 60);
     assert!(later.is_sorted() && later[0] >= 100, "{later:?}");
-    let end = log_end(&brokers, TOPIC, 0);
+    let end = settled_end(&brokers, TOPIC, 0);
     watched.poll_until_committed(0, 0, end);
     watched.wait_lag(0, 0.0);
 }
@@ -511,7 +511,7 @@ fn real_broker_alternating_writes_settle_at_zero() {
         watched.read(0, 5);
         let tag = format!("dropped-{round}");
         let _ = produce_transaction(&brokers, TOPIC, 5, &tag, Transaction::Abort);
-        let end = log_end(&brokers, TOPIC, 0);
+        let end = settled_end(&brokers, TOPIC, 0);
         seen.extend(watched.poll_until_committed(0, 0, end));
     }
     assert!(seen.is_sorted(), "the watermark fell: {seen:?}");
@@ -532,7 +532,7 @@ fn real_broker_a_commit_past_a_marker_restarts_at_the_next_record() {
     let _ = produce_transaction(&brokers, TOPIC, 10, "kept", Transaction::Commit);
     let mut watched = Watched::open(config(&brokers, "restarts"));
     watched.read(0, 10);
-    let end = log_end(&brokers, TOPIC, 0);
+    let end = settled_end(&brokers, TOPIC, 0);
     watched.poll_until_committed(0, 0, end);
     drop(watched);
 
@@ -563,7 +563,7 @@ fn real_broker_latest_on_a_marker_only_partition_retires_nothing() {
     assert!(watched.commit().is_empty());
     assert_eq!(
         support::committed_by(&brokers, "latest", TOPIC, 1),
-        [rdkafka::Offset::Offset(log_end(&brokers, TOPIC, 0))]
+        [rdkafka::Offset::Offset(settled_end(&brokers, TOPIC, 0))]
     );
 }
 
@@ -575,7 +575,7 @@ fn real_broker_earliest_on_an_aborted_only_partition_commits_past_its_marker() {
     let (_container, brokers) = transaction_broker();
     let _ = produce_transaction(&brokers, TOPIC, 100, "dropped", Transaction::Abort);
     let mut watched = Watched::open(config(&brokers, "aborted-only"));
-    let end = log_end(&brokers, TOPIC, 0);
+    let end = settled_end(&brokers, TOPIC, 0);
     assert_eq!(watched.poll_until_committed(0, 0, end), [end]);
     watched.wait_lag(0, 0.0);
 }
@@ -589,7 +589,7 @@ fn real_broker_a_switch_to_read_uncommitted_delivers_nothing_it_passed() {
     let (_container, brokers) = transaction_broker();
     let _ = produce_transaction(&brokers, TOPIC, 5, "dropped", Transaction::Abort);
     let mut watched = Watched::open(config(&brokers, "switch"));
-    let end = log_end(&brokers, TOPIC, 0);
+    let end = settled_end(&brokers, TOPIC, 0);
     assert_eq!(watched.poll_until_committed(0, 0, end), [end]);
     drop(watched);
 
@@ -623,7 +623,7 @@ fn real_broker_revocation_before_a_marker_loses_nothing() {
     let (_container, brokers) = transaction_broker();
     let _ = produce_transaction(&brokers, "unserved", 5, "kept", Transaction::Commit);
     // The marker takes the last offset, so the last record ends one short.
-    let end = log_end(&brokers, "unserved", 0);
+    let end = settled_end(&brokers, "unserved", 0);
     let cfg = topic_config(&brokers, "unserved", "unserved-group");
     let mut watched = Watched::open(cfg.clone());
     // Stops at the fifth record, ahead of the marker: the lane fills a batch only
@@ -655,7 +655,7 @@ fn real_broker_revocation_before_a_marker_loses_nothing() {
     owner.wait_lag(0, 0.0);
 
     let _ = produce_transaction(&brokers, "served", 5, "kept", Transaction::Commit);
-    let end = log_end(&brokers, "served", 0);
+    let end = settled_end(&brokers, "served", 0);
     let mut watched = Watched::open(topic_config(&brokers, "served", "served-group"));
     watched.read(0, 5);
     assert_eq!(watched.commit(), [(PartitionId(0), end - 1)]);

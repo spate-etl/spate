@@ -248,4 +248,29 @@ mod tests {
             "hung after 0ns waiting for: the offsets\n--- last read ---\n[\n    4,\n    9,\n]"
         );
     }
+
+    /// The panic carries the final read, however many reads the bound
+    /// allowed: each read returns its own count, so the message must end
+    /// with the count after the wait.
+    #[test]
+    fn a_value_wait_that_reaches_its_bound_carries_the_final_read() {
+        let mut reads = 0_u32;
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            wait_for_value(
+                Duration::from_millis(20),
+                "a count",
+                || {
+                    reads += 1;
+                    reads
+                },
+                |_| false,
+            )
+        }))
+        .expect_err("the wait reaches its bound");
+        let message = panic.downcast_ref::<String>().expect("a formatted panic");
+        assert_eq!(
+            message,
+            &format!("hung after 20ms waiting for: a count\n--- last read ---\n{reads}")
+        );
+    }
 }

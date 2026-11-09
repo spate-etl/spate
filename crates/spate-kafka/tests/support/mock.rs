@@ -9,6 +9,7 @@ use rdkafka::error::KafkaResult;
 use rdkafka::mocking::{MockCluster, MockCoordinator};
 use rdkafka::producer::{BaseProducer, DefaultProducerContext, Producer as _};
 use rdkafka::types::{RDKafkaApiKey, RDKafkaMockCluster, RDKafkaRespErr};
+use std::sync::Arc;
 use std::time::Duration;
 
 /// The mock's default hold on an empty group's first rebalance, in
@@ -30,9 +31,10 @@ const INITIAL_REBALANCE_DELAY_MS: i32 = 3000;
 /// gives its source one consumer unless several members are what it tests.
 ///
 /// Its methods are [`MockCluster`]'s. The cluster lives in a client of its
-/// own and is destroyed with it.
+/// own, which every clone shares, and is destroyed with the last clone.
+#[derive(Clone)]
 pub(crate) struct MockKafka {
-    client: BaseProducer,
+    client: Arc<BaseProducer>,
 }
 
 impl MockKafka {
@@ -61,7 +63,9 @@ impl MockKafka {
             .set("test.mock.num.brokers", brokers.to_string())
             .create()
             .expect("mock cluster");
-        let kafka = Self { client };
+        let kafka = Self {
+            client: Arc::new(client),
+        };
         kafka.set_initial_rebalance_delay(0);
         kafka
     }
@@ -205,9 +209,24 @@ impl MockKafka {
         self.count_requests(|key, id| key == api as i16 && id == broker)
     }
 
+    /// The API key of each request the cluster has received since
+    /// [`MockKafka::track_requests`], in the order it received them.
+    pub(crate) fn received_keys(&self) -> Vec<i16> {
+        self.tracked().into_iter().map(|(key, _)| key).collect()
+    }
+
     /// How many tracked requests `keep` accepts, given each one's API key and
     /// the id of the broker that received it.
     fn count_requests(&self, keep: impl Fn(i16, i32) -> bool) -> usize {
+        self.tracked()
+            .into_iter()
+            .filter(|(key, broker)| keep(*key, *broker))
+            .count()
+    }
+
+    /// Each tracked request's API key and the id of the broker that received
+    /// it, in the order received.
+    fn tracked(&self) -> Vec<(i16, i32)> {
         let mut count = 0;
         // SAFETY: the pointer is valid while `self` lives, and the array holds
         // `count` requests until it is destroyed.
@@ -215,14 +234,14 @@ impl MockKafka {
             let requests =
                 rdkafka::bindings::rd_kafka_mock_get_requests(self.native(), &raw mut count);
             let seen = (0..count)
-                .filter(|i| {
-                    let request = *requests.add(*i);
-                    keep(
+                .map(|i| {
+                    let request = *requests.add(i);
+                    (
                         rdkafka::bindings::rd_kafka_mock_request_api_key(request),
                         rdkafka::bindings::rd_kafka_mock_request_id(request),
                     )
                 })
-                .count();
+                .collect();
             rdkafka::bindings::rd_kafka_mock_request_destroy_array(requests, count);
             seen
         }

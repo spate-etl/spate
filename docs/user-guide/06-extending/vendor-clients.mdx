@@ -44,8 +44,9 @@ appears to work
 Refuse an owned key with `spate::config::Denylist`. It holds each owned key and
 the reason your connector owns it. Give `normalized_by` the library's mapping
 of a key to one spelling per setting, so the check refuses every spelling the
-library accepts. Put your section's path, such as `source.s3`, in front of the
-error that `Denylist::check` returns.
+library accepts. Pass the error that `Denylist::check` returns to
+`SectionPath::error`, which puts your section's path in front of it, such as
+`source.s3: store."Bucket" cannot be overridden: …`.
 
 ## Keep the client out of public signatures
 

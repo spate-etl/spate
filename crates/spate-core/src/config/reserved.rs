@@ -4,8 +4,9 @@
 //! optionally the library's normalisation, so every spelling the library
 //! accepts for an owned key is refused. [`Denylist::check`] returns a
 //! [`ReservedKeyError`] whose message starts at the passthrough's path. The
-//! caller puts the section in front of it in its own style, so every
-//! connector refuses an owned key in one wording.
+//! caller puts its section in front of it with
+//! [`SectionPath::error`](super::SectionPath::error), so every connector
+//! refuses an owned key in one wording.
 
 use std::borrow::Cow;
 
@@ -62,7 +63,7 @@ impl<'a> Denylist<'a> {
     /// # Examples
     ///
     /// ```
-    /// use spate_core::config::Denylist;
+    /// use spate_core::config::{Denylist, SectionPath};
     /// use std::borrow::Cow;
     /// use std::collections::BTreeMap;
     ///
@@ -73,8 +74,8 @@ impl<'a> Denylist<'a> {
     /// let store = BTreeMap::from([("Bucket".to_owned(), "logs".to_owned())]);
     /// let err = STORE.check("store", store.keys()).unwrap_err();
     /// assert_eq!(
-    ///     format!("source.s3.{err}"),
-    ///     "source.s3.store.\"Bucket\" cannot be overridden: owned by the typed `url` field \
+    ///     SectionPath::source("s3").error(err.to_string()).to_string(),
+    ///     "source.s3: store.\"Bucket\" cannot be overridden: owned by the typed `url` field \
     ///      (`Bucket` sets the same store option as `bucket`)"
     /// );
     /// ```

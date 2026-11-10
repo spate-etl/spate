@@ -117,11 +117,15 @@ Writing your own components against the v1 contracts.
 | [`custom_source_sink`](custom_source_sink.rs) | How to write a source, a payload-aware router and a sink from scratch with **no infrastructure** | — | nothing |
 | [`manual_assembly`](manual_assembly.rs) | How to drop below the builder to the primitives it composes with **no infrastructure** | — | nothing |
 
-## Containers
+## Deployment
 
 [`examples/docker`](https://github.com/spate-etl/spate/tree/main/examples/docker)
 builds the flagship example into a distroless image, and its README covers
 probes, drain timeouts and sizing.
+
+[`examples/lambda-s3`](https://github.com/spate-etl/spate/tree/main/examples/lambda-s3)
+is an AWS Lambda function that reads one SQS batch of S3 notifications per
+invocation, and its README covers the build and the queue settings.
 
 ## Related
 

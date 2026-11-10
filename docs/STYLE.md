@@ -575,12 +575,13 @@ An exemption is a claim review checks, not a default.
 ### Sources outside `crates/`
 
 A page may also render a fence from a file under `examples/`, the tree a reader
-deploys from. Nothing compiles those files, so the clippy argument above does
-not reach them. `cargo xtask tidy transclusions` still fails when the region
-moves. Dependency automation edits these files and reads no documentation page,
-so a copy of the lines it maintains falls behind at the next bump (§ 5).
-`examples/docker/Dockerfile` is the worked case, with image pins that move on a
-schedule the page cannot follow.
+deploys from. `examples/lambda-s3` is a workspace member, so clippy compiles it
+as it does `crates/`. Nothing compiles the other files there, so the clippy
+argument above does not reach them. `cargo xtask tidy transclusions` still fails
+when the region moves. Dependency automation edits these files and reads no
+documentation page, so a copy of the lines it maintains falls behind at the next
+bump (§ 5). `examples/docker/Dockerfile` is the worked case, with image pins
+that move on a schedule the page cannot follow.
 
 `file=` accepts `crates/` and `examples/`.
 

@@ -345,7 +345,9 @@ impl<S: Source + 'static> PipelineRuntime<S> {
     }
 
     /// Run the pipeline to completion (blocking). Returns when the
-    /// pipeline drained after a shutdown trigger/signal or failed.
+    /// pipeline drained after a shutdown trigger/signal or failed. Once the
+    /// drain has ended, it shuts the I/O runtime down, waiting at most 2s for
+    /// its tasks.
     pub fn run(mut self) -> Result<ExitReport, StartError> {
         let threads = self.thread_count();
         if threads == 0 || self.config.pipeline.io_threads == 0 {

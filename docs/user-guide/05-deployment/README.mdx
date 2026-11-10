@@ -18,6 +18,12 @@ as the template: the
 endpoints on the admin server, and aligning the SIGTERM grace period with
 the drain timeout.
 
+## [AWS Lambda](../04-connectors/sources/s3/README.mdx#running-on-aws-lambda)
+
+Reading storage notifications in a function that runs one batch of messages
+per invocation: the messages reported for delivery again, the stop before the
+invocation's deadline, sizing an invocation and its metrics.
+
 ## [Monitoring](monitoring.mdx)
 
 The metrics model: the `metrics` facade as the one instrumentation API, the

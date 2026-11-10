@@ -135,14 +135,18 @@ share them.
 
 "#;
 
-/// The container link is absolute, and must stay absolute: this file ships
+/// The deployment links are absolute, and must stay absolute: this file ships
 /// inside the published crate, where a relative path climbing out of
 /// `crates/spate` resolves to nothing.
-const FOOTER: &str = r#"## Containers
+const FOOTER: &str = r#"## Deployment
 
 [`examples/docker`](https://github.com/spate-etl/spate/tree/main/examples/docker)
 builds the flagship example into a distroless image, and its README covers
 probes, drain timeouts and sizing.
+
+[`examples/lambda-s3`](https://github.com/spate-etl/spate/tree/main/examples/lambda-s3)
+is an AWS Lambda function that reads one SQS batch of S3 notifications per
+invocation, and its README covers the build and the queue settings.
 
 ## Related
 

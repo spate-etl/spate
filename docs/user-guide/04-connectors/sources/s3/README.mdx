@@ -1044,6 +1044,141 @@ unit lets the rest of the backfill finish first. An overwrite of a notification
 unit's object is re-enqueued instead, as
 [Reading a notification's object](#reading-a-notifications-object) describes.
 
+## Running on AWS Lambda
+
+An AWS Lambda function can read one SQS batch of storage notifications per
+invocation. Lambda's SQS event source mapping delivers the batch, and SQS keeps
+each message until the function reports it done.
+[`examples/lambda-s3`](repo:examples/lambda-s3) is a worked function that
+writes to ClickHouse, and its README covers the build and the event source
+mapping.
+
+The function's role needs the store permissions of a worker that reads storage
+notifications, which [Security](#security-credentials-and-region) lists.
+
+### One batch per invocation
+
+The example's `run_seeded` publishes each message body unchanged into a
+`MemoryFeed` built with an attempt cap of 1, under the message id, and hands
+the feed to a closure that passes it with `Pipeline::seeded_feed`. The run is a
+[run on a seeded feed](#a-run-on-a-seeded-feed), so the source lists nothing
+and reads each message as a [storage notification](#storage-notifications). A
+unit that fails once is dead-lettered, so SQS owns the retry.
+`Pipeline::from_config` refuses an async context, so `run_seeded` calls that
+closure and runs the pipeline on a thread of its own. `run_batch` builds that
+closure for a pipeline built from config:
+
+```rust file=examples/lambda-s3/src/lib.rs region=run_batch
+```
+
+The pipeline file still names the in-process feed. The feed passed in code
+keeps its cap of 1, and the section's
+[`attempt_cap`](../../../07-reference/configuration.mdx#feed) caps only the
+source's re-enqueues:
+
+```yaml file=examples/lambda-s3/src/lib.rs region=config
+```
+
+A message is done only when the run exits `Completed` and neither
+`MemoryFeed::dead_letters` nor `MemoryFeed::unsettled` names its unit. The
+function returns every other message as a batch item failure, and every
+message when the run fails or cannot start. SQS delivers those messages again,
+and the queue's redrive policy moves a message to its dead-letter queue after
+`maxReceiveCount` receives.
+
+:::danger Turn on `ReportBatchItemFailures`
+Lambda reads the batch item failures only when the event source mapping sets
+`FunctionResponseTypes` to `ReportBatchItemFailures`
+([AWS](https://docs.aws.amazon.com/lambda/latest/dg/services-sqs-errorhandling.html)).
+Without it, a function that returns normally has its whole batch deleted, so
+the messages it reported as failed are lost.
+:::
+
+### Stopping before the deadline
+
+A function with no extension gets no shutdown phase
+([AWS](https://docs.aws.amazon.com/lambda/latest/dg/lambda-runtime-environment.html#runtimes-lifecycle-shutdown)),
+so every write has to finish before the handler returns. The handler stops the
+run before the invocation's deadline, leaving `checkpoint.drain_timeout` for
+the drain, 2s for the pipeline's runtime to shut down, and 1s to answer
+Lambda:
+
+```rust file=examples/lambda-s3/src/lib.rs region=handler
+```
+
+An invocation that starts with less time left than that fails with an error
+naming the function timeout and `checkpoint.drain_timeout`, and Lambda
+delivers the whole batch again. The stop counts from the invocation's start,
+and a run can stop only once its pipeline is built. A build that outlasts the
+time before the stop, such as one waiting on a slow ClickHouse replica, delays
+the stop, and the invocation can then time out. Lambda delivers the whole batch
+again after a timeout too. A stop leaves the units the run did not
+finish in the feed, and `MemoryFeed::unsettled` names them.
+
+A unit whose batch the sink abandons, after a write error the sink does not
+retry, stays held. The run does not end by itself while it holds that unit, so
+the function reports the unit only once the stop comes.
+
+### Sizing an invocation
+
+- **Retry covers a whole unit.** A large object is one unit, read in byte
+  ranges inside one invocation, so the model suits objects that are read well
+  inside the 15-minute limit on an invocation
+  ([AWS](https://docs.aws.amazon.com/lambda/latest/dg/gettingstarted-limits.html)).
+- **Each invocation starts from nothing.** It builds a new I/O runtime, store
+  client and sink connections with their TLS handshakes. The ClickHouse sink
+  reads the table's columns and checks its settings on every replica before
+  the first insert.
+- **Lambda sizes CPU by memory.** A function has the equivalent of one vCPU at
+  1,769 MB, and 625 Mbps of network bandwidth
+  ([AWS](https://docs.aws.amazon.com/lambda/latest/dg/gettingstarted-limits.html)).
+  Throughput measured on the benchmark hosts does not carry over.
+- **ClickHouse writes at least one part per insert**, as
+  [Batch size](../../sinks/clickhouse/performance-tuning.mdx#batch-size)
+  explains. Set `MaximumBatchingWindowInSeconds` and a `BatchSize` above 10 on
+  the event source mapping, so that one invocation carries many small objects.
+  AWS requires a batching window of at least 1 second once `BatchSize` is above
+  10
+  ([AWS](https://docs.aws.amazon.com/lambda/latest/api/API_CreateEventSourceMapping.html)).
+- **The queue outlasts the function.** Set the queue's visibility timeout to at
+  least six times the function timeout, plus the batching window, and
+  `maxReceiveCount` to at least 5
+  ([AWS](https://docs.aws.amazon.com/lambda/latest/dg/services-sqs-configure.html)).
+
+### What a Lambda deployment leaves out
+
+Spate does not re-list to find a notification the store never sent, as
+[Storage notifications](#storage-notifications) says. Pair a Lambda deployment
+with a scheduled [lister run](#the-lister-run) and a
+[bounded job](#bounded-jobs-and-the-job-location), run as a separate job on a
+queue of its own.
+
+The source decodes S3 notifications that the bucket sends straight to SQS. An
+EventBridge event or an SNS envelope is neither a notification nor a
+descriptor, so the source fails it back, as
+[Storage notifications](#storage-notifications) describes.
+
+### Metrics on Lambda
+
+With `metrics: { exporter: none }` the pipeline records into the recorder the
+process installed, and with `admin: { listen: none }` it starts no admin
+server. The
+example installs `metrics_cloudwatch_embedded`, which writes CloudWatch
+Embedded Metric Format to stdout after each invocation:
+
+```rust file=examples/lambda-s3/src/main.rs region=metrics
+```
+
+That recorder emits each counter as the change since the last invocation. It
+keeps the first 100 values of a histogram in each invocation and drops the
+rest. Spate records some histograms once per poll, such as
+`spate_source_poll_duration_seconds`, so those histograms describe the start
+of each invocation. The recorder logs an error for each value it drops, and the
+example's log filter turns the recorder's errors off. That also hides its error
+for a metric it refuses to register, which `RUST_LOG` brings back. Lambda's own
+metrics, with the queue's `ApproximateAgeOfOldestMessage` and its dead-letter
+queue's depth, show delivery health without Spate's metrics.
+
 ## Supported stores
 
 | Store | Basis |

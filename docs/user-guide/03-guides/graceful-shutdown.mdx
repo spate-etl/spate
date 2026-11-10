@@ -129,7 +129,8 @@ what was written, and the abandoned data **replays after restart**. An
 abandon costs duplicate-tolerant replay, never silent loss.
 
 Batch dedup tokens do not survive a restart, because each carries an id minted
-once per process run, so replayed rows land again. Design target tables to tolerate duplicates. See
+once per process run, so replayed rows land again. Design target tables to
+tolerate duplicates. See
 [Delivery guarantees](../02-concepts/02-delivery-guarantees.mdx) and the
 [ClickHouse connector](../04-connectors/sinks/clickhouse/README.mdx)
 deduplication notes.

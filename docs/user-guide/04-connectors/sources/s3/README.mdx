@@ -1058,14 +1058,15 @@ notifications, which [Security](#security-credentials-and-region) lists.
 
 ### One batch per invocation
 
-The function publishes each message body unchanged into a `MemoryFeed` built
-with an attempt cap of 1, under the message id, and passes it with
-`Pipeline::seeded_feed`. The run is a
+The example's `run_seeded` publishes each message body unchanged into a
+`MemoryFeed` built with an attempt cap of 1, under the message id, and passes
+it with `Pipeline::seeded_feed`. The run is a
 [run on a seeded feed](#a-run-on-a-seeded-feed), so the source lists nothing
 and reads each message as a [storage notification](#storage-notifications). A
 unit that fails once is dead-lettered, so SQS owns the retry.
-`Pipeline::from_config` refuses an async context, so the function builds and
-runs the pipeline on a thread of its own:
+`Pipeline::from_config` refuses an async context, so `run_seeded` builds and
+runs the pipeline on a thread of its own. `run_batch` hands it the pipeline and
+the source:
 
 ```rust file=examples/lambda-s3/src/lib.rs region=run_batch
 ```
@@ -1107,7 +1108,11 @@ Lambda:
 
 An invocation that starts with less time left than that fails with an error
 naming the function timeout and `checkpoint.drain_timeout`, and Lambda
-delivers the whole batch again. A stop leaves the units the run did not
+delivers the whole batch again. The stop counts from the invocation's start,
+and a run can stop only once its pipeline is built. A build that outlasts the
+time before the stop, such as one waiting on a slow ClickHouse replica, delays
+the stop, and the invocation can then time out. Lambda delivers the whole batch
+again after a timeout too. A stop leaves the units the run did not
 finish in the feed, and `MemoryFeed::unsettled` names them.
 
 A unit whose batch the sink abandons, after a write error the sink does not
@@ -1165,9 +1170,11 @@ Embedded Metric Format to stdout after each invocation:
 ```
 
 That recorder emits each counter as the change since the last invocation. It
-keeps at most 100 values of a histogram between two flushes and drops the
-rest, and Spate records some histograms once per poll, such as
-`spate_source_poll_duration_seconds`, so histograms are sampled. Lambda's own
+keeps the first 100 values of a histogram in each invocation and drops the
+rest. Spate records some histograms once per poll, such as
+`spate_source_poll_duration_seconds`, so those histograms describe the start
+of each invocation. The recorder logs an error for each value it drops, and the
+example's log filter turns that line off. Lambda's own
 metrics, with the queue's `ApproximateAgeOfOldestMessage` and its dead-letter
 queue's depth, show delivery health without Spate's metrics.
 

@@ -141,7 +141,9 @@ order to run. `kafka_avro_to_clickhouse` is the fully-commented production
 assembly, `custom_source_sink` is the connector-author tutorial, and
 `s3_backfill` runs a bounded object-storage backfill that ends on its own.
 [`examples/docker`](examples/docker) covers containers and Kubernetes:
-probes, drain timeouts, sizing.
+probes, drain timeouts, sizing. [`examples/lambda-s3`](examples/lambda-s3) is
+an AWS Lambda function that reads one SQS batch of S3 notifications per
+invocation.
 
 ## Delivery semantics
 
@@ -214,6 +216,8 @@ The user guide is published at **<https://spate.kainth.dev/>** (source in
 - [docs/METRICS.md](docs/METRICS.md) — every metric, its labels, and
   alerting starting points.
 - [examples/docker](examples/docker) — containers and Kubernetes.
+- [examples/lambda-s3](examples/lambda-s3) — AWS Lambda, one SQS batch of S3
+  notifications per invocation.
 
 ## Status
 

@@ -85,6 +85,9 @@ The `kafka-brokers` leg leaves three suites to the primary lane.
   variables.
 - `e2e_leader_move`: its cluster runs the `apache` lane's image on every lane.
 
+`cargo xtask integration-test` leaves the same three out when
+`SPATE_KAFKA_LANE` names a broker other than the primary one.
+
 The image index carries `linux/amd64` and `linux/arm64`. CI runs the lane on
 x86_64.
 

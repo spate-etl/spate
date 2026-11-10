@@ -423,9 +423,7 @@ pub trait Source: Send {
     /// another read. Otherwise `checkpoint.stalled_fail_after` fails the run,
     /// and its input replays after a restart. Never waits. The default does
     /// nothing.
-    fn stalled(&mut self, partitions: &[PartitionId]) {
-        let _ = partitions;
-    }
+    fn stalled(&mut self, _partitions: &[PartitionId]) {}
 
     /// Renew the feed units the source holds, and nothing else.
     ///

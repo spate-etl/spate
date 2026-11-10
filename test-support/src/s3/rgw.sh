@@ -65,7 +65,10 @@ stage "monitor up"
 
 ceph osd create >/dev/null
 ceph-osd -i 0 --mkfs --setuser root --setgroup root
-ceph-osd -i 0 --setuser root --setgroup root
+# Without the config fetch the OSD's monitor client starts with this fsid, and
+# its first command does not race the monmap that carries it. A command sent
+# with fsid 0 is refused, and the OSD exits.
+ceph-osd -i 0 --no-mon-config --setuser root --setgroup root
 until ceph osd stat 2>/dev/null | grep -q '1 up'; do :; done
 stage "OSD up"
 

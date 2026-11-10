@@ -348,6 +348,13 @@ impl<S: Source + 'static> PipelineRuntime<S> {
     /// pipeline drained after a shutdown trigger/signal or failed. Once the
     /// drain has ended, it shuts the I/O runtime down, waiting at most 2s for
     /// its tasks.
+    ///
+    /// # Errors
+    ///
+    /// [`StartError::Config`] before the source opens for a zero thread
+    /// count, a zero [`RuntimeOptions::max_records`], a current-thread I/O
+    /// runtime, or a configuration the source or the feed refuses. Each other
+    /// [`StartError`] variant for the startup step it names.
     pub fn run(mut self) -> Result<ExitReport, StartError> {
         let threads = self.thread_count();
         if threads == 0 || self.config.pipeline.io_threads == 0 {
@@ -355,9 +362,7 @@ impl<S: Source + 'static> PipelineRuntime<S> {
         }
         if self.options.max_records == 0 {
             return Err(StartError::Config(
-                "`RuntimeOptions::max_records` must be at least 1: a lane polled for no payloads \
-                 reads nothing"
-                    .into(),
+                "`RuntimeOptions::max_records` must be at least 1".into(),
             ));
         }
         if self.io.as_ref().is_some_and(|io| {

@@ -2894,8 +2894,8 @@ fn feed_section(yaml: &str) -> Option<crate::config::FeedSection> {
     Some(serde_yaml::from_str(yaml).expect("section"))
 }
 
-/// A run whose `max_records` is zero is refused before its source opens: a
-/// lane polled for no payloads reads nothing. Regression for #1717.
+/// A run whose `max_records` is zero is refused before its source opens.
+/// Regression for #1717.
 #[test]
 fn zero_max_records_is_refused_at_start() {
     let options = RuntimeOptions {
@@ -2906,8 +2906,7 @@ fn zero_max_records_is_refused_at_start() {
     let err = config_error_before_open(h);
     assert_eq!(
         err,
-        "invalid runtime configuration: `RuntimeOptions::max_records` must be at least 1: a \
-         lane polled for no payloads reads nothing"
+        "invalid runtime configuration: `RuntimeOptions::max_records` must be at least 1"
     );
 }
 

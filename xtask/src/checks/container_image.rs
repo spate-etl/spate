@@ -228,6 +228,20 @@ pub(crate) fn selected_capabilities(root: &Path, service: &str) -> Result<Vec<Ca
     lane_capabilities(root, service, &selected_lane(root, service)?)
 }
 
+/// Whether the lane `SPATE_<SERVICE>_LANE` selects is the primary lane.
+///
+/// # Errors
+///
+/// As [`selected_capabilities`] does.
+pub(crate) fn selected_is_primary(root: &Path, service: &str) -> Result<bool, Error> {
+    is_primary(root, service, &selected_lane(root, service)?)
+}
+
+/// Whether `lane` is the primary lane of `service`.
+fn is_primary(root: &Path, service: &str, lane: &str) -> Result<bool, Error> {
+    Ok(lane == primary_lane(root, service)?)
+}
+
 /// Fetches a lane by digest, re-tags it locally, and returns the local
 /// `name:tag`. A pull failing on a transport error runs again, up to
 /// [`PULL_ATTEMPTS`] runs in all.
@@ -666,6 +680,13 @@ mod tests {
             selected_capabilities(s.root(), "db").unwrap(),
             [Capability::Notifications]
         );
+    }
+
+    #[test]
+    fn only_the_primary_lane_reads_as_primary() {
+        let s = Scratch::new("is-primary");
+        assert!(is_primary(s.root(), "db", "vendor-main").unwrap());
+        assert!(!is_primary(s.root(), "db", "old").unwrap());
     }
 
     #[test]

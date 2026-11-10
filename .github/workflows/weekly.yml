@@ -137,7 +137,10 @@ jobs:
         with:
           tools: cargo-hack
           shared-key: dev-allfeatures
-      - run: cargo hack check --workspace --feature-powerset --no-dev-deps
+      # A warning only one combination raises fails no other job.
+      - env:
+          CARGO_BUILD_WARNINGS: deny
+        run: cargo hack check --workspace --feature-powerset --no-dev-deps
 
   coverage-containers:
     name: Coverage (with containers)

@@ -16,7 +16,7 @@ use bytes::Bytes;
 use rustls::ClientConfig;
 use rustls_native_certs::CertificateResult;
 use serde::{Deserialize, Deserializer, de};
-use spate_core::config::{ComponentConfig, ConfigError, SectionPath, redact};
+use spate_core::config::{ComponentConfig, ConfigError, SectionPath, UrlRule, redact};
 use spate_core::deser::RecFamily;
 use spate_core::sink::{
     BatchConfig, BreakerConfig, FrameCodecFactory, InflightConfig, RetryConfig, SinkBundle,
@@ -867,19 +867,9 @@ fn validate(cfg: &ClickHouseSinkConfig, at: &SectionPath) -> Result<(), ConfigEr
             return Err(at.invalid(&format!("shards[{i}].replicas"), "must not be empty"));
         }
         for (j, url) in shard.replicas.iter().enumerate() {
-            let key = format!("shards[{i}].replicas[{j}]");
-            if !(url.starts_with("http://") || url.starts_with("https://")) {
-                return Err(at.invalid(
-                    &key,
-                    format!("`{}` is not an http(s) URL", redact::url(url)),
-                ));
-            }
-            if has_credentials(url) {
-                return Err(at.invalid(
-                    &key,
-                    "URL contains credentials; set them in user and password",
-                ));
-            }
+            ENDPOINT
+                .check(url)
+                .map_err(|e| at.invalid(&format!("shards[{i}].replicas[{j}]"), e.to_string()))?;
         }
         // Weights are ClickHouse interval widths: a zero-weight shard
         // receives nothing under Distributed parity and breaks the
@@ -966,18 +956,9 @@ fn validate(cfg: &ClickHouseSinkConfig, at: &SectionPath) -> Result<(), ConfigEr
             _ => {}
         }
         if let Some(url) = &check.endpoint {
-            if !(url.starts_with("http://") || url.starts_with("https://")) {
-                return Err(at.invalid(
-                    "distributed_check.endpoint",
-                    format!("`{}` is not an http(s) URL", redact::url(url)),
-                ));
-            }
-            if has_credentials(url) {
-                return Err(at.invalid(
-                    "distributed_check.endpoint",
-                    "URL contains credentials; set them in user and password",
-                ));
-            }
+            ENDPOINT
+                .check(url)
+                .map_err(|e| at.invalid("distributed_check.endpoint", e.to_string()))?;
         }
     }
     if cfg.tls.root_ca.is_some() && !uses_https(cfg) {
@@ -989,20 +970,20 @@ fn validate(cfg: &ClickHouseSinkConfig, at: &SectionPath) -> Result<(), ConfigEr
     Ok(())
 }
 
-/// Whether `url` carries userinfo, as the `clickhouse` client's URL parser
-/// reads it.
-fn has_credentials(url: &str) -> bool {
-    url::Url::parse(url).is_ok_and(|u| !u.username().is_empty() || u.password().is_some())
-}
+/// The rule each replica and `distributed_check.endpoint` URL meets. The
+/// `clickhouse` client parses its URL with the same parser.
+const ENDPOINT: UrlRule<'static> =
+    UrlRule::new("set them in user and password").schemes(&["http", "https"]);
 
-/// Whether any replica or the `distributed_check` endpoint is `https://`.
+/// Whether any replica or the `distributed_check` endpoint is `https://`, in
+/// any case.
 fn uses_https(cfg: &ClickHouseSinkConfig) -> bool {
     let check = cfg.distributed_check.as_ref();
     cfg.shards
         .iter()
         .flat_map(|shard| &shard.replicas)
         .chain(check.and_then(|c| c.endpoint.as_ref()))
-        .any(|url| url.starts_with("https://"))
+        .any(|url| ENDPOINT.check(url).is_ok_and(|url| url.scheme() == "https"))
 }
 
 /// Strict identifier: `[A-Za-z_][A-Za-z0-9_]*`. Validated before being
@@ -1161,7 +1142,7 @@ shards:
         )));
         assert_eq!(
             err,
-            "sink.clickhouse.shards[0].replicas[0]: `<redacted>@a:8123` is not an http(s) URL"
+            "sink.clickhouse.shards[0].replicas[0]: has no `//` after its scheme"
         );
     }
 
@@ -1174,6 +1155,10 @@ shards:
         let cases = [
             (
                 "shards: [{replicas: ['http://svc:hunter2@a:8123']}]\n".to_owned(),
+                "shards[0].replicas[0]",
+            ),
+            (
+                "shards: [{replicas: ['HTTP://svc:hunter2@a:8123']}]\n".to_owned(),
                 "shards[0].replicas[0]",
             ),
             (
@@ -1199,9 +1184,7 @@ shards:
             ))));
             assert_eq!(
                 err,
-                format!(
-                    "sink.clickhouse.{key}: URL contains credentials; set them in user and password"
-                )
+                format!("sink.clickhouse.{key}: carries userinfo; set them in user and password")
             );
         }
 
@@ -1794,6 +1777,12 @@ settings: { insert_quorum: "auto" }
 
     #[test]
     fn tls_root_ca_parses_and_requires_an_https_url() {
+        // The scheme is read in any case, as the client reads it.
+        let upper =
+            "table: t\nshards: [{replicas: [\"HTTPS://a\"]}]\ntls: {root_ca: /etc/ca.pem}\n";
+        let cfg: ClickHouseSinkConfig = serde_yaml::from_str(upper).unwrap();
+        validate(&cfg, &SectionPath::sink("clickhouse")).expect("an HTTPS:// replica is https");
+
         let yaml = "table: t\nshards: [{replicas: [\"https://a\"]}]\ntls: {root_ca: /etc/ca.pem}\n";
         let cfg: ClickHouseSinkConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(cfg.tls.root_ca, Some(PathBuf::from("/etc/ca.pem")));
@@ -2015,7 +2004,7 @@ settings: { insert_quorum: "auto" }
             (
                 "shards:\n  - replicas: [\"http://a\"]\n  - replicas: [\"http://b\", \"ftp://c\"]\n"
                     .to_owned(),
-                "shards[1].replicas[1]: `ftp://c` is not an http(s) URL",
+                "shards[1].replicas[1]: must be a URL with scheme http or https; found ftp",
             ),
             (
                 "shards:\n  - replicas: [\"http://a\"]\n  - replicas: [\"http://b\"]\n    weight: 0\n"
@@ -2048,11 +2037,15 @@ settings: { insert_quorum: "auto" }
             ),
             (
                 check("cluster: c, table: d, sharding_key: id, endpoint: \"ftp://e\""),
-                "distributed_check.endpoint: `ftp://e` is not an http(s) URL",
+                "distributed_check.endpoint: must be a URL with scheme http or https; found ftp",
             ),
             (
                 "shards: [{replicas: [\"http://a\"]}]\ntls: {root_ca: /etc/ca.pem}\n".to_owned(),
                 "tls.root_ca: is set, but no replica or distributed_check.endpoint is https://",
+            ),
+            (
+                "shards: [{replicas: [\"http://u:hunter2@exa mple:8123\"]}]\n".to_owned(),
+                "shards[0].replicas[0]: is not a URL: invalid international domain name",
             ),
         ];
         for (body, want) in cases {

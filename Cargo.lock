@@ -4532,6 +4532,7 @@ dependencies = [
  "rustls-native-certs",
  "serde",
  "serde_json",
+ "spate-bench",
  "tempfile",
  "testcontainers",
  "tokio",

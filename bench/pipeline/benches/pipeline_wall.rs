@@ -7,11 +7,16 @@
 //! and is mostly strings, with an array of strings and a string map
 //! (`spate_test_support::events`). The run is a bounded backfill: the
 //! in-process lister lists the directory and the pipeline exits by itself once
-//! every unit is acknowledged. The sink's linger is 5 ms (the default is 1 s).
+//! every unit is acknowledged. The split target is 25 MiB, so a unit packs two
+//! uncompressed objects or sixteen zstd ones, and the setup refuses a corpus
+//! whose unit count the case's thread count does not divide: a thread takes
+//! whole units, so an uneven share would leave threads idle at the end. The
+//! sink's linger is 5 ms (the default is 1 s).
 //!
-//! The figure is lines per second. Decompression, framing, decoding,
-//! flattening and encoding all run on the pipeline threads, so lines per
-//! second per pipeline core is the figure divided by the case's thread count.
+//! The figures are lines and uncompressed bytes per second. Decompression,
+//! framing, decoding, flattening and encoding all run on the pipeline threads,
+//! so lines per second per pipeline core is the lines figure divided by the
+//! case's thread count.
 //! The GET is a local file read on the I/O runtime.
 //!
 //! Run: `cargo xtask bench ab --ref main --package spate-pipeline-bench --filter pipeline/`
@@ -45,7 +50,7 @@ mod pipeline_bench;
 
 use pipeline_bench::{Rig, Shape, Stored};
 
-/// Objects in the corpus, a multiple of every case's thread count.
+/// Objects in the corpus.
 const OBJECTS: usize = 64;
 
 /// Lines in every object.
@@ -67,11 +72,13 @@ fn case(suite: Suite, stored: Stored, threads: usize) -> Suite {
         .case(
             &id,
             move |corpus, _seed| {
-                let mut bytes = 0;
-                let rig = Rig::new(shape, DEADLINE, |object| {
-                    bytes += object.len() as u64;
-                    corpus.absorb("object", object);
-                });
+                let rig = Rig::new(shape, DEADLINE, |object| corpus.absorb("object", object));
+                let units = rig.units();
+                assert_eq!(
+                    units % threads as u64,
+                    0,
+                    "{units} units do not share evenly over {threads} threads"
+                );
                 corpus.absorb(
                     "run",
                     format!("stored={} threads={threads}", stored.name()).as_bytes(),
@@ -91,6 +98,7 @@ fn case(suite: Suite, stored: Stored, threads: usize) -> Suite {
             },
         )
         .items(shape.total_lines())
+        .bytes_of(Rig::bytes)
         .iters(1)
         .done()
 }

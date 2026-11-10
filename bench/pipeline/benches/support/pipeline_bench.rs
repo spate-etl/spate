@@ -38,6 +38,17 @@ const MAX_LINE_BYTES: usize = 4_096;
 /// default is 1 s).
 const LINGER: Duration = Duration::from_millis(5);
 
+/// The split target every run sets, in MiB. The lister packs whole objects
+/// into a unit until the next would pass the target or the unit holds 16
+/// (`spate_s3`'s `Packer`), and a pipeline thread takes whole units. At the
+/// bench's object sizes this packs two uncompressed objects or sixteen zstd
+/// objects to a unit, so every case's thread count divides the unit count;
+/// [`Rig::units`] checks that against the staged sizes.
+const SPLIT_TARGET_MIB: u64 = 25;
+
+/// Most objects one unit packs.
+const PACK_MEMBERS: u64 = 16;
+
 /// How the staged objects are stored.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Stored {
@@ -159,6 +170,10 @@ pub(crate) struct Rig {
     data: PathBuf,
     shape: Shape,
     deadline: Duration,
+    /// Smallest and largest stored object, in bytes.
+    stored_bytes: (u64, u64),
+    /// Uncompressed bytes in the whole corpus.
+    bytes: u64,
 }
 
 impl Rig {
@@ -174,6 +189,7 @@ impl Rig {
         let data = dir.path().join("data");
         fs::create_dir_all(&data).expect("the data directory");
         let mut object = Vec::new();
+        let (mut stored_bytes, mut bytes) = ((u64::MAX, 0), 0);
         for o in 0..shape.objects {
             object.clear();
             let first = (o * shape.lines) as u64;
@@ -181,22 +197,64 @@ impl Rig {
                 event_line(line, &mut object);
             }
             absorb(&object);
+            bytes += object.len() as u64;
+            let stored = match shape.stored {
+                Stored::Zstd => zstd::encode_all(&object[..], 3).expect("the object compresses"),
+                Stored::Plain => object.clone(),
+            };
+            let len = stored.len() as u64;
+            stored_bytes = (stored_bytes.0.min(len), stored_bytes.1.max(len));
             let path = data.join(format!("obj-{o:05}.{}", shape.stored.extension()));
-            match shape.stored {
-                Stored::Zstd => fs::write(
-                    path,
-                    zstd::encode_all(&object[..], 3).expect("the object compresses"),
-                ),
-                Stored::Plain => fs::write(path, &object),
-            }
-            .expect("the object is written");
+            fs::write(path, stored).expect("the object is written");
         }
         Rig {
             _dir: dir,
             data,
             shape,
             deadline,
+            stored_bytes,
+            bytes,
         }
+    }
+
+    /// Uncompressed bytes in the whole corpus.
+    pub(crate) fn bytes(&self) -> u64 {
+        self.bytes
+    }
+
+    /// How many units the lister packs the staged objects into.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the staged sizes do not pack into units of one fixed
+    /// member count: two uncompressed objects, each at most the target and
+    /// three of them past it, or sixteen zstd objects within the target.
+    pub(crate) fn units(&self) -> u64 {
+        let target = SPLIT_TARGET_MIB << 20;
+        let (min, max) = self.stored_bytes;
+        let members = match self.shape.stored {
+            Stored::Plain => {
+                assert!(
+                    2 * max <= target && 3 * min > target,
+                    "uncompressed objects of {min}..={max} bytes do not pack two to a unit"
+                );
+                2
+            }
+            Stored::Zstd => {
+                assert!(
+                    PACK_MEMBERS * max <= target,
+                    "zstd objects of up to {max} bytes do not pack {PACK_MEMBERS} to a unit"
+                );
+                PACK_MEMBERS
+            }
+        };
+        let objects = self.shape.objects as u64;
+        assert_eq!(
+            objects % members,
+            0,
+            "{objects} objects in units of {members}"
+        );
+        objects / members
     }
 
     /// Builds one run: a uniquely named bounded pipeline over the staged
@@ -261,7 +319,7 @@ impl Rig {
             "pipeline: {{ name: s3-pipeline-bench, threads: {} }}\n\
              admin: {{ listen: none }}\n\
              metrics: {{ exporter: none }}\n\
-             source:\n  s3:\n    url: \"file://{}/\"\n\
+             source:\n  s3:\n    url: \"file://{}/\"\n    split_target_bytes: {SPLIT_TARGET_MIB}MiB\n\
              sink: {{ discard: {{}} }}\n\
              feed:\n  memory: {{}}\n",
             self.shape.threads,

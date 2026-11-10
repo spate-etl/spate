@@ -18,7 +18,7 @@ fn corpus() -> Vec<u8> {
 /// corpus on two revisions measures the same input.
 #[test]
 fn the_corpus_bytes_are_pinned() {
-    assert_eq!(pin(&corpus()), (2_570_627, 216_228_632_647_653_001));
+    assert_eq!(pin(&corpus()), (2_567_516, 16_179_727_331_478_610_702));
 }
 
 /// Every line ends in its only newline and decodes into [`Event`].
@@ -31,6 +31,7 @@ fn every_line_is_one_event() {
         assert_eq!(line.iter().filter(|b| **b == b'\n').count(), 1, "line {i}");
         let event: Event = serde_json::from_slice(line)
             .unwrap_or_else(|e| panic!("line {i} does not decode: {e}"));
+        assert!((30..=100).contains(&event.message.len()), "line {i}");
         assert!(!event.tags.is_empty() && event.tags.len() <= 4, "line {i}");
         assert!((2..=4).contains(&event.labels.len()), "line {i}");
     }

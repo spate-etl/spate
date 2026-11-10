@@ -12,6 +12,7 @@
 )]
 
 use serde::Deserialize;
+use spate_bench::rng::SplitMix64;
 use std::collections::HashMap;
 
 /// One log event, as a line of the corpus decodes.
@@ -25,7 +26,7 @@ pub struct Event {
     pub service: String,
     /// Severity: `debug`, `info`, `warn` or `error`.
     pub level: String,
-    /// Free text of 30 to 90 bytes.
+    /// Free text of 30 to 100 bytes.
     pub message: String,
     /// 32 hex digits.
     pub trace_id: String,
@@ -172,23 +173,18 @@ const ZONES: &[&str] = &["euw2-az1", "euw2-az2", "euw2-az3"];
 
 const TEAMS: &[&str] = &["payments", "storefront", "platform", "search"];
 
-/// A splitmix64 stream seeded from a line index: a pure function of the seed,
-/// with no dependency on a random-number crate.
-struct Draw(u64);
+/// The draws of one line, from [`SplitMix64`] seeded with the line index.
+struct Draw(SplitMix64);
 
 impl Draw {
     fn next(&mut self) -> u64 {
-        self.0 = self.0.wrapping_add(0x9e37_79b9_7f4a_7c15);
-        let mut z = self.0;
-        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-        z ^ (z >> 31)
+        self.0.next_u64()
     }
 
     /// A value in `0..n`.
     fn below(&mut self, n: usize) -> usize {
-        // `n` is a table length, far below `u64::MAX`, so the result fits.
-        (self.next() % n as u64) as usize
+        // `n` is a table length or a small bound, so both casts are lossless.
+        self.0.below(n as u64) as usize
     }
 
     fn pick<'a, T>(&mut self, from: &'a [T]) -> &'a T {
@@ -198,7 +194,7 @@ impl Draw {
 
 /// Appends line `i` of the corpus to `out`, its newline included.
 pub fn event_line(i: u64, out: &mut Vec<u8>) {
-    let mut d = Draw(i);
+    let mut d = Draw(SplitMix64::new(i));
     let mut line = String::with_capacity(768);
     let ms = 1_793_000_000_000 + i * 7;
     let (secs, millis) = (ms / 1_000, ms % 1_000);

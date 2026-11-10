@@ -124,7 +124,7 @@ fn prepare(plan: &Plan, git_describe: Option<String>, dirty: bool) -> Result<Pre
     if discovery.targets.is_empty() {
         return Err(format!(
             "{} declares no wall-clock bench targets. They are named \
-             `crates/<pkg>/benches/<name>{}.rs` and need `harness = false`.",
+             `benches/<name>{}.rs` in a workspace member and need `harness = false`.",
             plan.dir.display(),
             cargo::WALL_SUFFIX
         ));

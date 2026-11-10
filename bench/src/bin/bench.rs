@@ -410,7 +410,7 @@ fn list(args: &ArgMatches) -> Result<(), Failure> {
     if discovery.targets.is_empty() {
         return Err(format!(
             "no wall-clock bench targets in {}. They are named \
-             `crates/<pkg>/benches/<name>{}.rs`.",
+             `benches/<name>{}.rs` in a workspace member.",
             repo.display(),
             cargo::WALL_SUFFIX
         )

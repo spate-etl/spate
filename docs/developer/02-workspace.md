@@ -20,12 +20,13 @@ An application depends on `spate` alone, and turns a connector on by its feature
 
 ## The unpublished members
 
-Five members set `publish = false`:
+These members set `publish = false`:
 
 | Path | Package | What it holds |
 | --- | --- | --- |
 | `xtask/` | `spate-xtask` | The repository automation that `cargo xtask` runs: the gates, CI's change detection and the release tooling |
 | `bench/` | `spate-bench` | The wall-clock A/B benchmark harness |
+| `bench/pipeline/` | `spate-pipeline-bench` | Wall-clock benches of pipelines that run through more than one connector crate |
 | `fuzz/` | `spate-fuzz` | The libFuzzer targets, which build on nightly |
 | `test-support/` | `spate-test-support` | Helpers that only this repository's tests and benches use, such as reading a pinned container image |
 | `examples/lambda-s3/` | `spate-example-lambda-s3` | An AWS Lambda function that reads one SQS batch of S3 notifications per invocation |

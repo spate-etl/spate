@@ -344,7 +344,11 @@ impl Source for FakeSource {
     }
 
     fn stalled(&mut self, partitions: &[PartitionId]) {
-        self.shared.lock().unwrap().stalled.push(partitions.to_vec());
+        self.shared
+            .lock()
+            .unwrap()
+            .stalled
+            .push(partitions.to_vec());
     }
 
     fn reading_on_stop(&mut self) -> bool {

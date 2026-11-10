@@ -661,7 +661,11 @@ fn each_tick_names_the_stalled_partition_to_the_source() {
     assert_eq!(stalled, [vec![failed], vec![failed]]);
     h.shutdown.trigger();
     let report = h.join.join().unwrap().unwrap();
-    assert!(matches!(report.state, ExitState::Completed), "{:?}", report.state);
+    assert!(
+        matches!(report.state, ExitState::Completed),
+        "{:?}",
+        report.state
+    );
 }
 
 /// A run whose batches all deliver never calls `Source::stalled`.
@@ -687,7 +691,11 @@ fn a_run_with_no_failed_batch_names_no_stall() {
     }
     h.shutdown.trigger();
     let report = h.join.join().unwrap().unwrap();
-    assert!(matches!(report.state, ExitState::Completed), "{:?}", report.state);
+    assert!(
+        matches!(report.state, ExitState::Completed),
+        "{:?}",
+        report.state
+    );
 }
 
 /// Pins that revoking a stalled partition's lanes ends its stall: the source
@@ -734,11 +742,18 @@ fn revoking_a_stalled_partition_ends_its_stall() {
     passes(&h, 3);
     tick(&h, &clock, Duration::from_secs(180));
 
-    assert!(!h.join.is_finished(), "a revoked stall must not fail the run");
+    assert!(
+        !h.join.is_finished(),
+        "a revoked stall must not fail the run"
+    );
     assert_eq!(h.shared.lock().unwrap().stalled, [vec![PartitionId(0)]]);
     h.shutdown.trigger();
     let report = h.join.join().unwrap().unwrap();
-    assert!(matches!(report.state, ExitState::Completed), "{:?}", report.state);
+    assert!(
+        matches!(report.state, ExitState::Completed),
+        "{:?}",
+        report.state
+    );
 }
 
 /// `max_pending_batches` is a hard per-partition bound, enforced at the

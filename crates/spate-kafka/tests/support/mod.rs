@@ -29,6 +29,7 @@ use std::time::{Duration, Instant};
 use testcontainers::ContainerRequest;
 
 pub(crate) mod feed;
+pub(crate) mod group;
 pub(crate) mod latest;
 pub(crate) mod mock;
 pub(crate) mod wire;

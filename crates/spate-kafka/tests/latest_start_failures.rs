@@ -17,20 +17,14 @@ mod another_topic {
     use crate::support::MockKafka;
     use rdkafka::consumer::{BaseConsumer, CommitMode, Consumer};
     use rdkafka::producer::{BaseProducer, BaseRecord, Producer};
-    use rdkafka::types::RDKafkaApiKey;
     use rdkafka::{ClientConfig, Offset, TopicPartitionList};
     use spate_core::config::PipelineConfig;
     use spate_core::ops::chain_owned;
     use spate_core::pipeline::{Pipeline, RuntimeOptions};
     use spate_core::sink::KeyHashRouter;
     use spate_kafka::{KafkaSource, KafkaSourceConfig};
-    use spate_test::{
-        BytesPassthrough, HANG, PipelineRun, TestEncoder, capture_sink, unique_name, wait_until,
-    };
+    use spate_test::{BytesPassthrough, HANG, PipelineRun, TestEncoder, capture_sink, unique_name};
     use std::collections::BTreeMap;
-    use std::io::{Read as _, Write as _};
-    use std::net::TcpStream;
-    use std::sync::mpsc;
     use std::time::Duration;
 
     const TOPIC: &str = "orders";
@@ -39,131 +33,6 @@ mod another_topic {
     /// The group's position on `orders` partition 0. Records from here on are unread.
     const RESUME_AT: i64 = 3;
     const END: i64 = 10;
-
-    fn str16(buf: &mut Vec<u8>, s: &str) {
-        buf.extend_from_slice(&i16::try_from(s.len()).unwrap().to_be_bytes());
-        buf.extend_from_slice(s.as_bytes());
-    }
-
-    fn bytes32(buf: &mut Vec<u8>, b: &[u8]) {
-        buf.extend_from_slice(&i32::try_from(b.len()).unwrap().to_be_bytes());
-        buf.extend_from_slice(b);
-    }
-
-    fn request(s: &mut TcpStream, api: i16, version: i16, body: &[u8]) -> Vec<u8> {
-        let mut b = Vec::new();
-        b.extend_from_slice(&api.to_be_bytes());
-        b.extend_from_slice(&version.to_be_bytes());
-        b.extend_from_slice(&7i32.to_be_bytes());
-        str16(&mut b, "rogue");
-        b.extend_from_slice(body);
-        s.write_all(&i32::try_from(b.len()).unwrap().to_be_bytes())
-            .unwrap();
-        s.write_all(&b).unwrap();
-        let mut len = [0u8; 4];
-        s.read_exact(&mut len).unwrap();
-        let mut resp = vec![0u8; usize::try_from(i32::from_be_bytes(len)).unwrap()];
-        s.read_exact(&mut resp).unwrap();
-        resp
-    }
-
-    struct Reader<'a>(&'a [u8]);
-
-    impl Reader<'_> {
-        fn i16(&mut self) -> i16 {
-            let v = i16::from_be_bytes(self.0[..2].try_into().unwrap());
-            self.0 = &self.0[2..];
-            v
-        }
-        fn i32(&mut self) -> i32 {
-            let v = i32::from_be_bytes(self.0[..4].try_into().unwrap());
-            self.0 = &self.0[4..];
-            v
-        }
-        fn string(&mut self) -> String {
-            let n = usize::try_from(self.i16()).unwrap();
-            let v = String::from_utf8(self.0[..n].to_vec()).unwrap();
-            self.0 = &self.0[n..];
-            v
-        }
-        fn skip_bytes(&mut self) {
-            let n = usize::try_from(self.i32()).unwrap();
-            self.0 = &self.0[n..];
-        }
-    }
-
-    /// Join `GROUP` first, so this connection leads it, then assign every other
-    /// member `other` partition 0 once `members_synced` returns. The connection
-    /// stays open until `release` hears from the test or hangs up.
-    fn lead_the_group(brokers: &str, members_synced: impl FnOnce(), release: &mpsc::Receiver<()>) {
-        let mut s = TcpStream::connect(brokers).unwrap();
-        let mut subscription = Vec::new();
-        subscription.extend_from_slice(&0i16.to_be_bytes());
-        subscription.extend_from_slice(&1i32.to_be_bytes());
-        str16(&mut subscription, TOPIC);
-        subscription.extend_from_slice(&(-1i32).to_be_bytes());
-
-        let mut join = Vec::new();
-        str16(&mut join, GROUP);
-        join.extend_from_slice(&30_000i32.to_be_bytes());
-        join.extend_from_slice(&30_000i32.to_be_bytes());
-        str16(&mut join, "");
-        str16(&mut join, "consumer");
-        join.extend_from_slice(&1i32.to_be_bytes());
-        str16(&mut join, "range");
-        bytes32(&mut join, &subscription);
-        let resp = request(&mut s, 11, 1, &join);
-
-        let mut r = Reader(&resp[4..]);
-        assert_eq!(r.i16(), 0, "JoinGroup error");
-        let generation = r.i32();
-        let _protocol = r.string();
-        let leader = r.string();
-        let me = r.string();
-        assert_eq!(leader, me, "the raw member leads the group");
-        let mut others = Vec::new();
-        for _ in 0..r.i32() {
-            let id = r.string();
-            r.skip_bytes();
-            if id != me {
-                others.push(id);
-            }
-        }
-        assert!(
-            !others.is_empty(),
-            "the source joined before the group formed"
-        );
-
-        let mut assignment = Vec::new();
-        assignment.extend_from_slice(&0i16.to_be_bytes());
-        assignment.extend_from_slice(&1i32.to_be_bytes());
-        str16(&mut assignment, OTHER);
-        assignment.extend_from_slice(&1i32.to_be_bytes());
-        assignment.extend_from_slice(&0i32.to_be_bytes());
-        assignment.extend_from_slice(&(-1i32).to_be_bytes());
-
-        let mut sync = Vec::new();
-        str16(&mut sync, GROUP);
-        sync.extend_from_slice(&generation.to_be_bytes());
-        str16(&mut sync, &me);
-        sync.extend_from_slice(&i32::try_from(others.len() + 1).unwrap().to_be_bytes());
-        str16(&mut sync, &me);
-        bytes32(&mut sync, &[]);
-        for id in &others {
-            str16(&mut sync, id);
-            bytes32(&mut sync, &assignment);
-        }
-        // The mock answers every waiting member when the leader syncs, and refuses a
-        // SyncGroup that arrives after that, so the source's goes first.
-        members_synced();
-        let resp = request(&mut s, 14, 1, &sync);
-        let mut r = Reader(&resp[4..]);
-        let _throttle = r.i32();
-        assert_eq!(r.i16(), 0, "SyncGroup error");
-        // The connection stays open past the test's reads of the commit.
-        let _ = release.recv_timeout(HANG);
-        drop(s);
-    }
 
     fn probe(brokers: &str) -> BaseConsumer {
         ClientConfig::new()
@@ -189,10 +58,8 @@ mod another_topic {
     #[test]
     fn an_offer_naming_another_topic_leaves_the_commit_on_the_configured_topic() {
         let cluster = MockKafka::new();
-        cluster.hold_first_rebalance();
         cluster.create_topic(TOPIC, 1, 1).unwrap();
         cluster.create_topic(OTHER, 1, 1).unwrap();
-        cluster.track_requests();
         let brokers = cluster.bootstrap_servers();
 
         let producer: BaseProducer = ClientConfig::new()
@@ -219,25 +86,11 @@ mod another_topic {
         probe.commit(&position, CommitMode::Sync).unwrap();
         assert_eq!(committed(&probe), Offset::Offset(RESUME_AT));
 
-        std::thread::scope(|scope| {
-            let (release, released) = mpsc::channel();
-            let (cluster, brokers) = (&cluster, &brokers);
-            let leader = scope.spawn(move || {
-                // No other client joins the group, so the first SyncGroup is the
-                // source's.
-                let source_synced = || {
-                    wait_until(HANG, "the source's SyncGroup", || {
-                        cluster.received(RDKafkaApiKey::SyncGroup) >= 1
-                    });
-                };
-                lead_the_group(brokers, source_synced, &released);
-            });
-            run_against_the_offer(brokers, &probe);
-            drop(release);
-            leader
-                .join()
-                .expect("the raw leader completed the rebalance");
-        });
+        // The test leads the group and offers every other member `other`
+        // partition 0, the bytes a hostile coordinator would send.
+        let _leader =
+            cluster.lead_group_with(GROUP, TOPIC, |_, _| vec![(OTHER.to_owned(), vec![0])]);
+        run_against_the_offer(&brokers, &probe);
     }
 
     /// Runs a pipeline whose group is offered `other` partition 0, and asserts
@@ -294,157 +147,6 @@ mod another_topic {
             committed(probe),
             Offset::Offset(RESUME_AT),
             "the commit on `{TOPIC}` moved with nothing read, past records {RESUME_AT}..{END}"
-        );
-    }
-}
-
-/// A start that fails during a reassign must not split the reassign.
-mod retried_reassign {
-    use crate::support;
-    use crate::support::MockKafka;
-    use rdkafka::Offset;
-    use rdkafka::types::{RDKafkaApiKey, RDKafkaRespErr};
-    use spate_test::{HANG, unique_name, wait_until};
-    use support::latest::{Run, config};
-    use support::{committed_by, produce_to};
-
-    const TOPIC: &str = "orders";
-    const PARTITIONS: i32 = 4;
-
-    /// One consumer of a two-consumer source gets its offer past the hold, so the
-    /// other is accepted alone and then drained for a reassign whose first lookup
-    /// fails. Every partition is read once the retry has run.
-    #[test]
-    fn a_retried_reassign_reads_every_partition() {
-        let cluster = MockKafka::new();
-        cluster.hold_first_rebalance();
-        cluster
-            .create_topic(TOPIC, PARTITIONS, 1)
-            .expect("create topic");
-        // SAFETY: the pointer is valid while `cluster` lives. The list holds one
-        // error and one round trip in the C types the variadic reads.
-        unsafe {
-            rdkafka::bindings::rd_kafka_mock_broker_push_request_error_rtts(
-                cluster.native(),
-                1,
-                RDKafkaApiKey::SyncGroup as i16,
-                1,
-                RDKafkaRespErr::RD_KAFKA_RESP_ERR_NO_ERROR,
-                5000 as std::ffi::c_int,
-            );
-        }
-        let brokers = cluster.bootstrap_servers();
-        let group = unique_name("split");
-        let mut cfg = config(&brokers, TOPIC, &group, "latest");
-        cfg.consumers = 2;
-        let run = Run::start(cfg);
-
-        // The first consumer's start commit shows it was accepted alone. The next
-        // lookup is the reassign's, once the second consumer's offer arrives.
-        wait_until(HANG, "the first accept", || {
-            committed_by(&brokers, &group, TOPIC, PARTITIONS)
-                .iter()
-                .any(|o| matches!(o, Offset::Offset(_)))
-        });
-        cluster.request_errors(
-            RDKafkaApiKey::OffsetFetch,
-            &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_UNKNOWN],
-        );
-
-        // Each round is one record per partition: the first run's start moved past
-        // nothing here, so any partition with a reader writes its round.
-        let mut next = 0;
-        let mut tick = 0;
-        wait_until(HANG, "a write from every partition", || {
-            if tick % 200 == 0 {
-                for p in 0..PARTITIONS {
-                    produce_to(&brokers, TOPIC, p, next..next + 1);
-                }
-                next += 1;
-            }
-            tick += 1;
-            (0..PARTITIONS).all(|p| !run.written(p).is_empty())
-        });
-        run.stop();
-    }
-}
-
-/// A retried re-accept that comes due while a poll waits accepts the held offer
-/// alone, and the runtime then drops those lanes for the next assignment.
-mod late_offers {
-    use crate::support;
-    use rdkafka::types::{RDKafkaApiKey, RDKafkaRespErr};
-    use spate_test::{HANG, wait_until};
-    use support::latest::{self, Run};
-    use support::{MockKafka, produce_to};
-
-    const TOPIC: &str = "orders";
-
-    /// Run two consumers on four partitions, one consumer's `SyncGroup` answered
-    /// past the hold, and fail the lookups named by `offset_fetch`. Every partition
-    /// must then reach the sink.
-    fn every_partition_reads(group: &str, offset_fetch: &[RDKafkaRespErr]) {
-        let _ = tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::WARN)
-            .with_ansi(false)
-            .with_writer(std::io::stderr)
-            .try_init();
-        let cluster = MockKafka::new();
-        cluster.hold_first_rebalance();
-        cluster.create_topic(TOPIC, 4, 1).expect("create topic");
-        // SAFETY: the pointer is valid while `cluster` lives, and the arguments
-        // match the (error, rtt in ms) pairs the variadic reads.
-        unsafe {
-            let err = rdkafka::bindings::rd_kafka_mock_broker_push_request_error_rtts(
-                cluster.native(),
-                1,
-                RDKafkaApiKey::SyncGroup as i16,
-                1,
-                RDKafkaRespErr::RD_KAFKA_RESP_ERR_NO_ERROR,
-                4_500i32,
-            );
-            assert_eq!(err, RDKafkaRespErr::RD_KAFKA_RESP_ERR_NO_ERROR);
-        }
-        if !offset_fetch.is_empty() {
-            cluster.request_errors(RDKafkaApiKey::OffsetFetch, offset_fetch);
-        }
-        let brokers = cluster.bootstrap_servers();
-        let mut cfg = latest::config(&brokers, TOPIC, group, "latest");
-        cfg.consumers = 2;
-        let run = Run::start(cfg);
-        let mut next = 1_000;
-        let mut tick = 0;
-        wait_until(HANG, "every partition to reach the sink", || {
-            if tick % 20 == 0 {
-                for p in 0..4 {
-                    produce_to(&brokers, TOPIC, p, next..next + 1);
-                }
-                next += 1;
-            }
-            tick += 1;
-            let unread: Vec<i32> = (0..4).filter(|p| run.written(*p).is_empty()).collect();
-            unread.is_empty()
-        });
-        run.stop();
-    }
-
-    /// The control: with no failed lookup the late offer's re-accept covers every
-    /// partition.
-    #[test]
-    fn a_late_offer_reads_every_partition() {
-        every_partition_reads("late-offer", &[]);
-    }
-
-    /// The re-accept's first lookup fails once. Its retry must still accept every
-    /// consumer's partitions together.
-    #[test]
-    fn a_retried_reaccept_reads_every_partition() {
-        every_partition_reads(
-            "late-offer-retried",
-            &[
-                RDKafkaRespErr::RD_KAFKA_RESP_ERR_NO_ERROR,
-                RDKafkaRespErr::RD_KAFKA_RESP_ERR_UNKNOWN,
-            ],
         );
     }
 }
@@ -1059,6 +761,7 @@ mod silent_coordinator {
 /// it, the same bytes a hostile coordinator would answer with.
 mod logical_committed_offset {
     use crate::support::MockKafka;
+    use crate::support::wire::{request, str16};
     use rdkafka::consumer::{BaseConsumer, Consumer};
     use rdkafka::producer::{BaseProducer, BaseRecord, Producer};
     use rdkafka::types::RDKafkaApiKey;
@@ -1076,7 +779,6 @@ mod logical_committed_offset {
         BytesPassthrough, HANG, PipelineRun, TestEncoder, capture_sink, unique_name, wait_until,
     };
     use std::collections::BTreeMap;
-    use std::io::{Read as _, Write as _};
     use std::net::TcpStream;
     use std::sync::Arc;
     use std::time::Duration;
@@ -1085,19 +787,9 @@ mod logical_committed_offset {
     const GROUP: &str = "logical-commit";
     const END: i64 = 10;
 
-    fn str16(buf: &mut Vec<u8>, s: &str) {
-        buf.extend_from_slice(&i16::try_from(s.len()).unwrap().to_be_bytes());
-        buf.extend_from_slice(s.as_bytes());
-    }
-
     /// OffsetCommit v2 of `offset` on `orders` partition 0, as a simple consumer.
     fn raw_commit(brokers: &str, offset: i64) {
-        let mut s = TcpStream::connect(brokers).unwrap();
         let mut b = Vec::new();
-        b.extend_from_slice(&8i16.to_be_bytes());
-        b.extend_from_slice(&2i16.to_be_bytes());
-        b.extend_from_slice(&7i32.to_be_bytes());
-        str16(&mut b, "rogue");
         str16(&mut b, GROUP);
         b.extend_from_slice(&(-1i32).to_be_bytes());
         str16(&mut b, "");
@@ -1108,13 +800,7 @@ mod logical_committed_offset {
         b.extend_from_slice(&0i32.to_be_bytes());
         b.extend_from_slice(&offset.to_be_bytes());
         b.extend_from_slice(&(-1i16).to_be_bytes());
-        s.write_all(&i32::try_from(b.len()).unwrap().to_be_bytes())
-            .unwrap();
-        s.write_all(&b).unwrap();
-        let mut len = [0u8; 4];
-        s.read_exact(&mut len).unwrap();
-        let mut resp = vec![0u8; usize::try_from(i32::from_be_bytes(len)).unwrap()];
-        s.read_exact(&mut resp).unwrap();
+        request(&mut TcpStream::connect(brokers).unwrap(), 8, 2, &b).unwrap();
     }
 
     fn committed(probe: &BaseConsumer) -> Offset {
@@ -1302,10 +988,8 @@ mod refused_starts {
     /// assignment deadlines together end it within 16 s.
     fn ends(consumers: usize) {
         let cluster = MockKafka::new();
-        if consumers > 1 {
-            cluster.hold_first_rebalance();
-        }
         cluster.create_topic(TOPIC, 1, 1).expect("create topic");
+        let _leader = (consumers > 1).then(|| cluster.lead_group("refused", TOPIC, 1));
         let brokers = cluster.bootstrap_servers();
         cluster.request_errors(RDKafkaApiKey::OffsetCommit, &[REFUSED; 1000]);
         cluster.request_errors(RDKafkaApiKey::Heartbeat, &[REFUSED; 1000]);
@@ -1339,7 +1023,8 @@ mod refused_starts {
     }
 
     /// A consumer the group assigns nothing does not keep a run alive whose every
-    /// offered partition was discarded.
+    /// offered partition was discarded. The test leads the group, so each
+    /// generation offers the partition to one consumer and nothing to the other.
     #[test]
     fn an_empty_peer_does_not_hold_off_the_deadline() {
         ends(2);

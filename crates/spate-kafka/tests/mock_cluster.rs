@@ -3635,12 +3635,19 @@ mod latest_start {
         });
     }
 
+    /// The `consumer` field of a source log line.
+    fn consumer_of(line: &str) -> Option<&str> {
+        line.split_whitespace()
+            .find_map(|field| field.strip_prefix("consumer="))
+    }
+
     /// A commit refused for one consumer discards that consumer's offer alone:
-    /// the consumer settled before it in the same accept gets its lanes.
+    /// the consumer settled before it in the same accept gets its lanes. The
+    /// test leads the group, so both offers arrive in one generation.
     #[test]
     fn a_stale_offer_leaves_a_settled_one_accepted() {
         let (cluster, brokers) = cluster_with_records(4);
-        cluster.hold_first_rebalance();
+        let _leader = cluster.lead_group("stale-beside-settled", TOPIC, 4);
         cluster.request_errors(
             RDKafkaApiKey::OffsetCommit,
             &[
@@ -3650,7 +3657,7 @@ mod latest_start {
         );
         let mut cfg = latest_config(&brokers, "stale-beside-settled", 2);
         cfg.statistics_interval = Duration::ZERO;
-        let lines = spate_test::capture_logs(tracing::Level::WARN, || {
+        let lines = spate_test::capture_logs(tracing::Level::INFO, || {
             let mut driver = Driver::open(cfg);
             wait_until(HANG, "the settled consumer's lanes", || {
                 driver.step(Duration::from_millis(50));
@@ -3658,8 +3665,19 @@ mod latest_start {
             });
             assert_eq!(driver.lanes.len(), 2, "{:?}", driver.partitions());
         });
+        // The first accept discards one consumer's offer and accepts the other's.
+        let outcomes: Vec<&String> = lines
+            .iter()
+            .filter(|l| l.contains("discarded an assignment") || l.contains("accepted assignment"))
+            .take(2)
+            .collect();
         assert!(
-            lines.iter().any(|l| l.contains("discarded an assignment")),
+            matches!(
+                outcomes[..],
+                [discarded, accepted] if discarded.contains("discarded an assignment")
+                    && accepted.contains("accepted assignment")
+                    && consumer_of(discarded) != consumer_of(accepted)
+            ),
             "{lines:#?}"
         );
     }
@@ -3707,7 +3725,8 @@ mod latest_start {
 
     /// A lookup that fails for one consumer of an accept keeps the offer of the
     /// consumer settled before it and of the consumer after it, and each one's
-    /// partitions get a lane.
+    /// partitions get a lane. The test leads the group, so both offers arrive in
+    /// one generation.
     #[test]
     fn a_failed_lookup_keeps_every_consumers_offer() {
         for (api, errors, group) in [
@@ -3726,18 +3745,28 @@ mod latest_start {
             ),
         ] {
             let (cluster, brokers) = cluster_with_records(4);
-            cluster.hold_first_rebalance();
+            let _leader = cluster.lead_group(group, TOPIC, 4);
             cluster.request_errors(api, errors);
             let mut cfg = latest_config(&brokers, group, 2);
             cfg.statistics_interval = Duration::ZERO;
-            let lines = spate_test::capture_logs(tracing::Level::WARN, || {
+            let lines = spate_test::capture_logs(tracing::Level::INFO, || {
                 let mut driver = Driver::open(cfg);
                 driver.settle(4);
             });
+            // The failure holds both offers, and the retry accepts both.
+            let retry = lines
+                .iter()
+                .position(|l| l.contains("could not settle a start position"))
+                .unwrap_or_else(|| panic!("{group}: no failed start: {lines:#?}"));
+            let mut accepted: Vec<&str> = lines[retry..]
+                .iter()
+                .filter(|l| l.contains("accepted assignment"))
+                .filter_map(|l| consumer_of(l))
+                .collect();
+            accepted.sort_unstable();
+            assert_eq!(accepted, ["0", "1"], "{group}: {lines:#?}");
             assert!(
-                lines
-                    .iter()
-                    .any(|l| l.contains("could not settle a start position")),
+                !lines.iter().any(|l| l.contains("discarded an assignment")),
                 "{group}: {lines:#?}"
             );
             assert_eq!(

@@ -1,5 +1,6 @@
-//! Kafka wire bytes written by hand: record batches no client would write and
-//! the Produce request that carries them to a MockCluster broker.
+//! Kafka wire bytes written by hand: record batches no client would write, the
+//! Produce request that carries them to a MockCluster broker, and the framing
+//! and field encoding a raw protocol client shares.
 
 use std::io::{self, Read as _, Write as _};
 use std::net::TcpStream;
@@ -178,30 +179,86 @@ pub(crate) fn try_produce_batch(
     batch: &[u8],
 ) -> io::Result<i16> {
     let mut b = Vec::new();
-    b.extend_from_slice(&0i16.to_be_bytes());
-    b.extend_from_slice(&3i16.to_be_bytes());
-    b.extend_from_slice(&7i32.to_be_bytes());
-    b.extend_from_slice(&5i16.to_be_bytes());
-    b.extend_from_slice(b"spate");
     b.extend_from_slice(&(-1i16).to_be_bytes());
     b.extend_from_slice(&1i16.to_be_bytes());
     b.extend_from_slice(&10_000i32.to_be_bytes());
     b.extend_from_slice(&1i32.to_be_bytes());
-    b.extend_from_slice(&(topic.len() as i16).to_be_bytes());
-    b.extend_from_slice(topic.as_bytes());
+    str16(&mut b, topic);
     b.extend_from_slice(&1i32.to_be_bytes());
     b.extend_from_slice(&partition.to_be_bytes());
-    b.extend_from_slice(&(batch.len() as i32).to_be_bytes());
-    b.extend_from_slice(batch);
-    let mut s = TcpStream::connect(broker)?;
-    s.write_all(&(b.len() as i32).to_be_bytes())?;
+    bytes32(&mut b, batch);
+    let resp = request(&mut TcpStream::connect(broker)?, 0, 3, &b)?;
+    let at = 4 + 2 + topic.len() + 4 + 4;
+    Ok(i16::from_be_bytes([resp[at], resp[at + 1]]))
+}
+
+/// Append `s` as a protocol `STRING`: an `i16` length, then the bytes.
+pub(crate) fn str16(buf: &mut Vec<u8>, s: &str) {
+    buf.extend_from_slice(&i16::try_from(s.len()).unwrap().to_be_bytes());
+    buf.extend_from_slice(s.as_bytes());
+}
+
+/// Append `b` as protocol `BYTES`: an `i32` length, then the bytes.
+pub(crate) fn bytes32(buf: &mut Vec<u8>, b: &[u8]) {
+    buf.extend_from_slice(&i32::try_from(b.len()).unwrap().to_be_bytes());
+    buf.extend_from_slice(b);
+}
+
+/// Send one request for `api` at `version` with `body` over `s`, and return the
+/// response after its correlation id.
+///
+/// # Errors
+///
+/// Any failure of the connection.
+pub(crate) fn request(
+    s: &mut TcpStream,
+    api: i16,
+    version: i16,
+    body: &[u8],
+) -> io::Result<Vec<u8>> {
+    let mut b = Vec::new();
+    b.extend_from_slice(&api.to_be_bytes());
+    b.extend_from_slice(&version.to_be_bytes());
+    b.extend_from_slice(&7i32.to_be_bytes());
+    str16(&mut b, "spate");
+    b.extend_from_slice(body);
+    s.write_all(&i32::try_from(b.len()).unwrap().to_be_bytes())?;
     s.write_all(&b)?;
     let mut len = [0u8; 4];
     s.read_exact(&mut len)?;
     let mut resp = vec![0u8; usize::try_from(i32::from_be_bytes(len)).unwrap()];
     s.read_exact(&mut resp)?;
-    let at = 4 + 4 + 2 + topic.len() + 4 + 4;
-    Ok(i16::from_be_bytes([resp[at], resp[at + 1]]))
+    resp.drain(..4);
+    Ok(resp)
+}
+
+/// Reads protocol fields from the front of a response.
+pub(crate) struct Reader<'a>(pub(crate) &'a [u8]);
+
+impl Reader<'_> {
+    pub(crate) fn i16(&mut self) -> i16 {
+        let v = i16::from_be_bytes(self.0[..2].try_into().unwrap());
+        self.0 = &self.0[2..];
+        v
+    }
+
+    pub(crate) fn i32(&mut self) -> i32 {
+        let v = i32::from_be_bytes(self.0[..4].try_into().unwrap());
+        self.0 = &self.0[4..];
+        v
+    }
+
+    pub(crate) fn string(&mut self) -> String {
+        let n = usize::try_from(self.i16()).unwrap();
+        let v = String::from_utf8(self.0[..n].to_vec()).unwrap();
+        self.0 = &self.0[n..];
+        v
+    }
+
+    pub(crate) fn skip_bytes(&mut self) {
+        let n = usize::try_from(self.i32()).unwrap();
+        self.0 = &self.0[n..];
+    }
 }
 
 /// CRC-32 (IEEE), the checksum of a magic-0/1 message.

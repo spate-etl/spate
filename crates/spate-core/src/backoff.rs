@@ -50,7 +50,8 @@ pub struct Backoff {
 }
 
 /// The xorshift state for `seed`: the first SplitMix64 draw, which avalanches
-/// adjacent seeds, so seed `n` and seed `n + 1` start from unrelated states.
+/// adjacent seeds so seed `n` and seed `n + 1` start from unrelated states, or
+/// a fixed nonzero state when that draw is zero.
 const fn rng_state(seed: u64) -> u64 {
     // Seeds are often consecutive sequence numbers. XOR-ing the seed into the
     // state instead of mixing it leaves every seed's first draw inside the

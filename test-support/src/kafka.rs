@@ -558,11 +558,21 @@ impl KafkaCluster {
     }
 
     fn node(&self, node: i32) -> &Container<KafkaBroker> {
-        usize::try_from(node - 1)
-            .ok()
-            .and_then(|index| self.nodes.get(index))
-            .unwrap_or_else(|| panic!("no node {node} in a {CLUSTER_NODES}-node cluster"))
+        &self.nodes[node_index(node)]
     }
+}
+
+/// Where node `node` sits in [`KafkaCluster`]'s nodes.
+///
+/// # Panics
+///
+/// Panics when `node` is not a node id of the cluster.
+fn node_index(node: i32) -> usize {
+    (1..=CLUSTER_NODES)
+        .contains(&node)
+        .then(|| usize::try_from(node - 1).ok())
+        .flatten()
+        .unwrap_or_else(|| panic!("no node {node} in a {CLUSTER_NODES}-node cluster"))
 }
 
 /// The command a node runs to move `topic`'s `partition` to node `node`.
@@ -798,6 +808,34 @@ mod tests {
         );
         let err = transfer_command(Broker::Apache, "t", 4, 3).unwrap_err();
         assert!(err.contains("Apache Kafka"), "{err}");
+    }
+
+    /// Node ids run from 1, and an id outside the cluster names no node.
+    #[test]
+    fn node_ids_index_the_nodes_from_one() {
+        assert_eq!(node_index(1), 0);
+        assert_eq!(node_index(3), 2);
+        for outside in [0, 4] {
+            let err = std::panic::catch_unwind(|| node_index(outside)).unwrap_err();
+            let message = err.downcast_ref::<String>().unwrap();
+            assert_eq!(*message, format!("no node {outside} in a 3-node cluster"));
+        }
+    }
+
+    /// One Apache Kafka broker is a KRaft quorum of one, with the inside
+    /// listener on 9093 and its controller on 9094.
+    #[test]
+    fn a_single_apache_broker_is_its_own_quorum() {
+        let env = apache().env;
+        assert_eq!(
+            env["KAFKA_LISTENERS"],
+            "PLAINTEXT://0.0.0.0:9092,BROKER://0.0.0.0:9093,CONTROLLER://0.0.0.0:9094"
+        );
+        assert_eq!(env["KAFKA_CONTROLLER_QUORUM_VOTERS"], "1@localhost:9094");
+        assert_eq!(env["KAFKA_BROKER_ID"], "1");
+        assert_eq!(env["KAFKA_PROCESS_ROLES"], "broker,controller");
+        assert_eq!(env["KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR"], "1");
+        assert_eq!(env.len(), 9, "{env:?}");
     }
 
     /// Each node gets its own port, so no two nodes map the same one.

@@ -9,6 +9,10 @@
 //! ASCII.
 //!
 //! This is not a cryptographic generator and must not be used as one.
+//!
+//! `spate_core::rng::SplitMix64` is the same generator. This crate keeps its
+//! own because spate-core dev-depends on it, so depending on spate-core would
+//! form a cycle.
 
 /// The SplitMix64 generator, seeded per case by the driver.
 ///

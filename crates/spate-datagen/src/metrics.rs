@@ -18,6 +18,7 @@
 //! set.
 
 use crate::events::StorefrontEvent;
+use spate_core::metrics::names::L_PARTITION;
 use spate_core::metrics::{Counter, Gauge, Meter};
 
 /// The counters a lane increments. Cloned into every lane; `metrics` handles
@@ -101,7 +102,7 @@ impl DatagenMetrics {
             committed_offset: if per_partition_detail {
                 (0..partitions)
                     .map(|p| {
-                        meter.gauge("committed_offset", &[("partition", p.to_string().into())])
+                        meter.gauge("committed_offset", &[(L_PARTITION, p.to_string().into())])
                     })
                     .collect()
             } else {

@@ -53,9 +53,9 @@ impl<'a> UrlRule<'a> {
     ///
     /// # Errors
     ///
-    /// [`UrlRuleError`] when `value` is not a URL, when its scheme is not
-    /// one of the rule's, or when it names a user or a password. The checks
-    /// run in that order.
+    /// [`UrlRuleError`] when `value` is not a URL, when no `//` follows its
+    /// scheme, when its scheme is not one of the rule's, or when it names a
+    /// user or a password. The checks run in that order.
     ///
     /// # Examples
     ///
@@ -70,12 +70,17 @@ impl<'a> UrlRule<'a> {
     ///
     /// let err = ENDPOINT.check("https://svc:hunter2@ch-0:8443").unwrap_err();
     /// assert_eq!(
-    ///     SectionPath::sink("clickhouse").invalid("distributed_check.endpoint", err.to_string()).to_string(),
-    ///     "sink.clickhouse.distributed_check.endpoint: carries userinfo; set them in user and password"
+    ///     SectionPath::sink("example").invalid("endpoint", err.to_string()).to_string(),
+    ///     "sink.example.endpoint: carries userinfo; set them in user and password"
     /// );
     /// ```
     pub fn check(&self, value: &str) -> Result<Url, UrlRuleError> {
         let url = Url::parse(value).map_err(|e| UrlRuleError(Refusal::NotAUrl(e)))?;
+        // `user:pass@host` parses with `user` as the scheme and the rest as an
+        // opaque path, so neither the scheme nor the userinfo test sees it.
+        if url.cannot_be_a_base() {
+            return Err(UrlRuleError(Refusal::NoAuthority));
+        }
         if !self.schemes.is_empty()
             && !self
                 .schemes
@@ -108,6 +113,7 @@ pub struct UrlRuleError(Refusal);
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Refusal {
     NotAUrl(url::ParseError),
+    NoAuthority,
     Scheme {
         found: String,
         accepted: Vec<String>,
@@ -122,6 +128,7 @@ impl fmt::Display for Refusal {
         match self {
             // A parse error names its kind only, never the input.
             Refusal::NotAUrl(e) => write!(f, "is not a URL: {e}"),
+            Refusal::NoAuthority => f.write_str("has no `//` after its scheme"),
             Refusal::Scheme { found, accepted } => {
                 f.write_str("must be a URL with scheme ")?;
                 for (i, scheme) in accepted.iter().enumerate() {
@@ -217,6 +224,28 @@ mod tests {
             refused(ANY, "s3://svc:hunter2@bucket/data/"),
             "carries userinfo; set them in user and password"
         );
+    }
+
+    /// A value without its scheme reads its user name as the scheme, so it is
+    /// refused before the scheme is named.
+    #[test]
+    fn userinfo_without_a_scheme_is_refused_without_naming_the_user() {
+        for rule in [ANY, HTTP] {
+            assert_eq!(
+                refused(rule, "svc:hunter2@ch-0:8123"),
+                "has no `//` after its scheme"
+            );
+        }
+        assert_eq!(
+            refused(ANY, "mailto:ops@example.com"),
+            "has no `//` after its scheme"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "a URL rule needs at least one scheme")]
+    fn an_empty_scheme_list_panics() {
+        let _ = UrlRule::new(HINT).schemes(&[]);
     }
 
     /// The scheme is reported before the userinfo.

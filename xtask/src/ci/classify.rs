@@ -7,7 +7,7 @@
 use std::collections::BTreeSet;
 
 use super::graph::Graph;
-use super::outputs::{Lane, Outputs, Shard, StoreLane};
+use super::outputs::{BrokerLane, Lane, Outputs, Shard, StoreLane};
 
 /// The webhook event a run was started from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -242,6 +242,8 @@ pub(crate) struct ExtraLanes {
     pub(crate) clickhouse: Vec<String>,
     /// S3 store lanes, each with the tests its store supports.
     pub(crate) s3: Vec<StoreLane>,
+    /// Kafka broker lanes, each with the tests a second broker runs.
+    pub(crate) kafka: Vec<BrokerLane>,
 }
 
 /// The container suites that boot an S3 store.
@@ -250,6 +252,11 @@ const S3_STORE_SUITES: [&str; 3] = ["spate-kafka", "spate-s3", "spate-test-suppo
 /// The suites whose selection schedules the extra S3 store lanes. The shared
 /// helpers' suite is also selected by an image bump that boots no store.
 const S3_LANE_SUITES: [&str; 2] = ["spate-kafka", "spate-s3"];
+
+/// The suites whose selection schedules the extra Kafka broker lanes. The
+/// shared helpers' suite is also selected by an image bump that boots no
+/// broker.
+const KAFKA_LANE_SUITES: [&str; 2] = ["spate", "spate-kafka"];
 
 /// Classify a change. Pure: no git, no environment, no filesystem beyond the
 /// graph handed in.
@@ -477,6 +484,12 @@ pub(crate) fn classify(
     {
         out.s3_lanes.clone_from(&extra_lanes.s3);
     }
+    if KAFKA_LANE_SUITES
+        .iter()
+        .any(|suite| out.container_pkgs.contains(*suite))
+    {
+        out.kafka_lanes.clone_from(&extra_lanes.kafka);
+    }
 
     out
 }
@@ -524,6 +537,7 @@ mod tests {
     const NONE: &ExtraLanes = &ExtraLanes {
         clickhouse: Vec::new(),
         s3: Vec::new(),
+        kafka: Vec::new(),
     };
 
     fn graph() -> Graph {
@@ -1161,6 +1175,7 @@ mod tests {
         let lanes = ExtraLanes {
             clickhouse: vec!["lts-previous".to_string()],
             s3: Vec::new(),
+            kafka: Vec::new(),
         };
         let paths = vec!["crates/spate-clickhouse/src/lib.rs".to_string()];
         let out = classify(
@@ -1190,6 +1205,7 @@ mod tests {
         let lanes = ExtraLanes {
             clickhouse: Vec::new(),
             s3: vec![StoreLane::new("other", &[])],
+            kafka: Vec::new(),
         };
         for author in ["", "dependabot[bot]"] {
             let ctx = Context {
@@ -1214,6 +1230,7 @@ mod tests {
         let lanes = ExtraLanes {
             clickhouse: vec!["lts-previous".to_string()],
             s3: vec![StoreLane::new("other", &[])],
+            kafka: Vec::new(),
         };
         let classified = |path: &str, author: &str| {
             let ctx = Context {
@@ -1255,6 +1272,48 @@ mod tests {
             classified("crates/spate-sqs/src/lib.rs", ""),
             (Vec::new(), Vec::new())
         );
+    }
+
+    /// The extra Kafka broker lanes run whenever a suite that boots a broker
+    /// runs, on a Dependabot broker bump too. An ElasticMQ bump selects only
+    /// the SQS suite and the shared helpers' smoke tests, so it runs none.
+    #[test]
+    fn kafka_lanes_follow_the_suites_that_boot_a_broker() {
+        let lanes = ExtraLanes {
+            clickhouse: Vec::new(),
+            s3: Vec::new(),
+            kafka: vec![BrokerLane::new("other")],
+        };
+        let classified = |path: &str, author: &str| {
+            let ctx = Context {
+                author: author.into(),
+            };
+            let out = classify(
+                &[path.to_string()],
+                Event::PullRequest,
+                &ctx,
+                &graph(),
+                &lanes,
+            );
+            out.kafka_lanes
+                .iter()
+                .map(|l| l.lane.clone())
+                .collect::<Vec<_>>()
+        };
+        for path in [
+            "crates/spate-kafka/src/feed/consumer.rs",
+            "crates/spate/src/lib.rs",
+            "test-support/src/kafka.rs",
+        ] {
+            assert_eq!(classified(path, ""), ["other"], "{path}");
+        }
+        assert_eq!(
+            classified("ci/kafka/other/Dockerfile", "dependabot[bot]"),
+            ["other"]
+        );
+        for path in ["ci/elasticmq/Dockerfile", "docs/developer/README.md"] {
+            assert!(classified(path, "").is_empty(), "{path}");
+        }
     }
 
     /// The release's own tooling and the selector that gates it select the

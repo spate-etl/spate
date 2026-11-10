@@ -92,7 +92,7 @@ Its other jobs run commands of their own, so a green `cargo xtask ci` on your ma
 | `Rustdoc as docs.rs builds it` | Rustdoc per crate on nightly |
 | `Check (MSRV)` | The type check on the declared minimum Rust version |
 | `Allocation assertions`, `Allocation snapshots` | The per-record allocation tests and the committed counts |
-| `Container suites`, `ClickHouse <lane>`, `S3 <lane>` | The container suites the change can reach |
+| `Container suites`, `ClickHouse <lane>`, `S3 <lane>`, `Kafka <lane>` | The container suites the change can reach |
 | `Instruction counts` | The counted benches the change can reach |
 | `Semver` | `cargo semver-checks` on the crates whose public API the change can move |
 | `Declared version floors build` | The type check with each direct dependency at its lowest declared version, when a manifest changes |
@@ -174,6 +174,7 @@ SPATE_CLICKHOUSE_LANE=stable cargo xtask integration-test
 ```
 
 When the selected S3 store declares no notifications, the command leaves out the notification suite.
+When the selected Kafka broker is not the primary one, it leaves out the suites that run only on the primary broker.
 See [`ci/README.md`](repo:ci/README.md) for the services, their lanes and what CI runs of each.
 
 The `e2e_examples` suite in `spate` runs each example whose stanza carries no `test = true`, as the shipped binary against real servers.

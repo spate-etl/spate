@@ -16,14 +16,16 @@ use std::path::Path;
 
 use clap::Subcommand;
 
-use crate::checks::container_image::{Capability, Mode, pull_all, selected_capabilities};
+use crate::checks::container_image::{
+    Capability, Mode, pull_all, selected_capabilities, selected_is_primary,
+};
 use crate::checks::{adr, attribution, changelog, docsrs, site_check, subject, sync_labels};
 use crate::run::{self, Error, Outcome, Step};
 
 pub(crate) use lint::TidyCheck;
 
 use crate::ci::Scope;
-use crate::ci::outputs::NOTIFICATION_SUITE;
+use crate::ci::outputs::{NOTIFICATION_SUITE, primary_broker_suites};
 
 #[derive(Subcommand)]
 pub(crate) enum Command {
@@ -286,7 +288,12 @@ pub(crate) fn dispatch(root: &Path, explain: bool, cmd: Command) -> Outcome {
         Command::IntegrationTest => {
             pull_all(root, explain)?;
             let capabilities = selected_capabilities(root, "s3")?;
-            run::run(root, explain, &integration_test(&capabilities))
+            let primary_broker = selected_is_primary(root, "kafka")?;
+            run::run(
+                root,
+                explain,
+                &integration_test(&capabilities, primary_broker),
+            )
         }
         // `--lib` matters: the models are unit tests inside the crate, and a
         // `--test` run builds integration targets the cfg leaves empty.
@@ -619,8 +626,9 @@ fn hack(root: &Path, explain: bool, sel: &Select) -> Outcome {
 }
 
 /// Every Docker-gated suite, leaving out those the selected S3 store's
-/// `capabilities` do not declare.
-fn integration_test(capabilities: &[Capability]) -> Step<'static> {
+/// `capabilities` do not declare, and those only the primary Kafka broker
+/// runs when it is not `primary_broker`.
+fn integration_test(capabilities: &[Capability], primary_broker: bool) -> Step<'static> {
     let step = Step::new(
         "cargo",
         [
@@ -635,11 +643,18 @@ fn integration_test(capabilities: &[Capability]) -> Step<'static> {
             "ignored-only",
         ],
     );
-    if capabilities.contains(&Capability::Notifications) {
-        step
-    } else {
-        step.args(["-E".to_owned(), format!("not ({})", NOTIFICATION_SUITE)])
+    let mut left_out = Vec::new();
+    if !capabilities.contains(&Capability::Notifications) {
+        left_out.push(NOTIFICATION_SUITE.to_owned());
     }
+    if !primary_broker {
+        left_out.push(primary_broker_suites());
+    }
+    if left_out.is_empty() {
+        return step;
+    }
+    let filter: Vec<String> = left_out.iter().map(|c| format!("not ({c})")).collect();
+    step.args(["-E".to_owned(), filter.join(" & ")])
 }
 
 #[cfg(test)]
@@ -657,12 +672,32 @@ mod tests {
         let all = "cargo nextest run --profile docker --workspace --all-features --locked \
                    --run-ignored ignored-only";
         assert_eq!(
-            super::integration_test(&[Capability::Notifications]).display(),
+            super::integration_test(&[Capability::Notifications], true).display(),
             all
         );
         assert_eq!(
-            super::integration_test(&[]).display(),
+            super::integration_test(&[], true).display(),
             format!("{all} -E 'not (package(spate-kafka) & binary(feed_notifications))'")
+        );
+    }
+
+    /// A Kafka broker other than the primary one leaves out the suites only
+    /// the primary broker runs, beside what the S3 store leaves out.
+    #[test]
+    fn integration_test_leaves_out_the_primary_broker_suites_on_another_broker() {
+        let all = "cargo nextest run --profile docker --workspace --all-features --locked \
+                   --run-ignored ignored-only";
+        let broker = "not ((package(spate-kafka) & (binary(feed_notifications) \
+                      | binary(tls_system_ca))) | (package(spate) & binary(e2e_leader_move)))";
+        assert_eq!(
+            super::integration_test(&[Capability::Notifications], false).display(),
+            format!("{all} -E '{broker}'")
+        );
+        assert_eq!(
+            super::integration_test(&[], false).display(),
+            format!(
+                "{all} -E 'not (package(spate-kafka) & binary(feed_notifications)) & {broker}'"
+            )
         );
     }
 

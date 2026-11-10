@@ -32,7 +32,7 @@ startup in `spate_test_support::S3Store`.
 | [`clickhouse`](clickhouse/README.md) | `lts-previous`, `lts`, `stable` | `spate-clickhouse`, and `spate`'s examples tier |
 | [`debian`](debian/README.md) | `trixie` | `spate-kafka`'s `tls_system_ca`, as its vendored OpenSSL client image |
 | [`elasticmq`](elasticmq/README.md) | `stable` | `spate-sqs`, `spate-test-support`'s smoke tests, and `spate`'s examples tier |
-| [`kafka`](kafka/README.md) | `apache` | `spate-kafka`, `spate`'s end-to-end suites, and `spate-test-support`'s smoke test |
+| [`kafka`](kafka/README.md) | `apache`, `redpanda` | `spate-kafka`, `spate`'s end-to-end suites, and `spate-test-support`'s smoke test |
 | [`rust`](rust/README.md) | `stable` | `spate-kafka`'s `tls_system_ca`, as its system OpenSSL builder and client image |
 | [`s3`](s3/README.md) | `rustfs`, `rgw`, `garage` | `spate-s3`, `spate-kafka`'s notification suite on a lane declaring `notifications`, and `spate-test-support`'s smoke test |
 

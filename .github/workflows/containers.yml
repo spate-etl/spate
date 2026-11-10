@@ -1,7 +1,7 @@
 name: Containers
 
-# The Docker container suites, and the extra ClickHouse server and S3 store
-# lanes.
+# The Docker container suites, and the extra ClickHouse server, S3 store and
+# Kafka broker lanes.
 # Called from ci.yml, whose `changes` job computes every input.
 on:
   workflow_call:
@@ -16,6 +16,9 @@ on:
         type: string
         required: true
       s3-lanes:
+        type: string
+        required: true
+      kafka-lanes:
         type: string
         required: true
 
@@ -210,4 +213,59 @@ jobs:
         if: always()
         with:
           name: junit-nextest-s3-${{ matrix.lane }}
+          path: target/nextest/docker/junit.xml
+
+  # The Kafka brokers beyond the one `containers` runs. `ci/kafka/<broker>/`
+  # pins each, and Dependabot moves them. The lane's filter leaves out the
+  # suites that run only on the primary broker.
+  kafka-brokers:
+    name: Kafka ${{ matrix.lane }}
+    runs-on: ubuntu-latest
+    # A false `if:` prevents a zero-leg matrix, as in `clickhouse-versions`.
+    if: inputs.kafka-lanes != '[]'
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      checks: write
+    strategy:
+      # As in `clickhouse-versions`: a cancelled leg fails `CI gate` too.
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(inputs.kafka-lanes) }}
+    env:
+      SPATE_KAFKA_LANE: ${{ matrix.lane }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          tools: nextest
+          shared-key: docker
+          # A consumer of the entry `containers` owns; see `clickhouse-versions`.
+          cache-save: never
+      # The suites pull their broker by digest through
+      # `spate_test_support::KafkaBroker`, so there is no pull step.
+      - name: Kafka broker suites
+        env:
+          FILTER: ${{ matrix.filter }}
+        run: |
+          cargo nextest run --profile docker -p spate-kafka -p spate \
+            -p spate-test-support --all-features --locked \
+            --run-ignored ignored-only --test-threads 1 -E "$FILTER"
+
+      - name: Publish Kafka broker test report
+        uses: mikepenz/action-junit-report@8a133bfa3ecb0ea9024c1e2ae788b4c25f6cdb9d # v6.6.2
+        if: always()
+        with:
+          report_paths: target/nextest/docker/junit.xml
+          check_name: Kafka ${{ matrix.lane }} test results
+          detailed_summary: true
+          include_passed: false
+          flaky_summary: true
+          fail_on_failure: false
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: junit-nextest-kafka-${{ matrix.lane }}
           path: target/nextest/docker/junit.xml

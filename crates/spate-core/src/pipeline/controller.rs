@@ -236,6 +236,7 @@ pub(crate) fn run_controller<S: Source>(ctx: ControllerContext<S>) {
         // The commit tick.
         let now = clock.now();
         if now.saturating_duration_since(last_commit) >= commit_interval {
+            let previous_tick = last_commit;
             last_commit = now;
             // Seal partial chain buffers before harvesting acknowledgments. A
             // below-target chunk (a low-volume split branch under sustained
@@ -261,7 +262,9 @@ pub(crate) fn run_controller<S: Source>(ctx: ControllerContext<S>) {
             // limit, a sink leg is permanently broken (fatal write error,
             // dropped table); fail the pipeline so it restarts and replays.
             // The source hears of each stall first, and can end it by revoking
-            // the partition's lanes.
+            // the partition's lanes. A stall stamped since the previous tick
+            // may be named here for the first time, so it fails no earlier than
+            // the next tick, after a poll in which the source can revoke it.
             let now = checkpointer.now();
             let stalled = checkpointer.stalled_partitions();
             if !stalled.is_empty() {
@@ -270,7 +273,7 @@ pub(crate) fn run_controller<S: Source>(ctx: ControllerContext<S>) {
             }
             for (partition, since) in stalled {
                 let age = now.saturating_duration_since(since);
-                if age > stalled_fail_after {
+                if age > stalled_fail_after && since < previous_tick {
                     state.failure.get_or_insert(FatalError {
                         component: "checkpoint".into(),
                         reason: with_sink_failures(

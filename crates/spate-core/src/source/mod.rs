@@ -421,9 +421,11 @@ pub trait Source: Send {
     /// the partition leaves the run, when its lanes are revoked or a new
     /// assignment replaces them. A source can let the partition go through
     /// [`SourceEvent::LanesRevoked`] and give its input back for another read.
-    /// Otherwise `checkpoint.stalled_fail_after` fails the run,
-    /// and its input replays after a restart. Never waits. The default does
-    /// nothing.
+    /// Otherwise `checkpoint.stalled_fail_after` fails the run, and its input
+    /// replays after a restart. The run fails no earlier than the tick after
+    /// the first call that names the partition, so the source has a
+    /// [`poll_events`](Self::poll_events) call in which to revoke it. Never
+    /// waits. The default does nothing.
     fn stalled(&mut self, _partitions: &[PartitionId]) {}
 
     /// Renew the feed units the source holds, and nothing else.

@@ -115,7 +115,9 @@ them wherever your source resumes from instead.
   assignment replaces them. To give a partition's input
   back for another read, return `LanesRevoked` for its lanes from
   `poll_events`. Otherwise `checkpoint.stalled_fail_after` fails the run, and
-  the input replays after a restart. Never wait here.
+  the input replays after a restart. The run fails no earlier than the tick
+  after the first `stalled` call that names the partition, so `poll_events`
+  runs at least once in between. Never wait here.
 
 **Class a rejected credential or TLS handshake `Fatal`.** That covers a
 certificate your TLS stack fails to verify, a fatal TLS alert from the server

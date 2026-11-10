@@ -756,6 +756,98 @@ fn revoking_a_stalled_partition_ends_its_stall() {
     );
 }
 
+/// A harness on a frozen clock with a 5s commit interval, a 3s stall limit,
+/// and one lane whose first batch's ack fails.
+fn short_stall_limit(clock: &Arc<crate::clock::TestClock>) -> Harness {
+    let mut cfg = test_config(1);
+    cfg.checkpoint.interval = Duration::from_secs(5);
+    cfg.checkpoint.stalled_fail_after = Duration::from_secs(3);
+    let h = start_on_clock(
+        cfg,
+        clock,
+        |runtime| runtime,
+        |shared, log| FakeChain {
+            shared,
+            log,
+            mode: ChainMode::FailAckAtBatch(1),
+            batches_seen: 0,
+        },
+    );
+    assign_one_lane(&h, &[0..5, 5..10]);
+    wait_for("every batch consumed", Duration::from_secs(5), || {
+        h.chain.consumed.load(Ordering::Relaxed) == 10
+    });
+    passes(&h, 3);
+    h
+}
+
+/// With `stalled_fail_after` below the commit interval, the tick that first
+/// names a stall does not fail the run, so a source that revokes the
+/// partition on the next poll ends the stall.
+#[test]
+fn a_short_stall_limit_leaves_the_source_a_poll_to_revoke() {
+    let clock = crate::clock::TestClock::frozen();
+    let h = short_stall_limit(&clock);
+
+    tick(&h, &clock, Duration::from_secs(5));
+    assert!(
+        !h.join.is_finished(),
+        "the first notice must not fail the run"
+    );
+    assert_eq!(h.shared.lock().unwrap().stalled, [vec![PartitionId(0)]]);
+
+    h.script
+        .lock()
+        .unwrap()
+        .push_back(Script::Revoke(vec![LaneId(0)]));
+    wait_for("the revoke", Duration::from_secs(5), || {
+        h.shared
+            .lock()
+            .unwrap()
+            .log
+            .iter()
+            .any(|e| e == "revoke-delivered")
+    });
+    passes(&h, 3);
+    tick(&h, &clock, Duration::from_secs(5));
+    assert!(
+        !h.join.is_finished(),
+        "a revoked stall must not fail the run"
+    );
+    h.shutdown.trigger();
+    let report = h.join.join().unwrap().unwrap();
+    assert!(
+        matches!(report.state, ExitState::Completed),
+        "{:?}",
+        report.state
+    );
+}
+
+/// With `stalled_fail_after` below the commit interval, a stall the source
+/// keeps fails the run on the tick after the one that first named it.
+#[test]
+fn a_short_stall_limit_fails_a_kept_stall_on_the_next_tick() {
+    let clock = crate::clock::TestClock::frozen();
+    let h = short_stall_limit(&clock);
+
+    tick(&h, &clock, Duration::from_secs(5));
+    assert!(
+        !h.join.is_finished(),
+        "the first notice must not fail the run"
+    );
+
+    clock.advance(Duration::from_secs(5));
+    let report = h.join.join().unwrap().unwrap();
+    let ExitState::Failed(failure) = report.state else {
+        panic!("a kept stall must fail the run");
+    };
+    assert_eq!(failure.component, "checkpoint");
+    assert_eq!(
+        h.shared.lock().unwrap().stalled,
+        [vec![PartitionId(0)], vec![PartitionId(0)]]
+    );
+}
+
 /// `max_pending_batches` is a hard per-partition bound, enforced at the
 /// driver's poll boundary (the regression #196 pins). With every ack
 /// withheld, exactly `limit` batches enter the chain and no more, however

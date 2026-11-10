@@ -242,7 +242,8 @@ pub struct CheckpointSection {
     /// permanent sink failure (a dropped table, revoked credentials) into a
     /// clean `Failed` exit and a restart instead of a process that runs on
     /// forever, consuming the source but committing nothing for that
-    /// partition.
+    /// partition. The check runs on each commit tick, and a stall fails the
+    /// pipeline no earlier than the second tick that finds it.
     #[serde(with = "humantime_serde")]
     pub stalled_fail_after: Duration,
 }

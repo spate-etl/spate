@@ -735,15 +735,19 @@ mod tests {
         }
     }
 
-    /// A fixed-schema mode rejects a password-only `registry` section as a
-    /// section the mode does not use.
+    /// A fixed-schema mode rejects a password-only `registry` section, or one
+    /// whose URL carries userinfo, as a section the mode does not use.
     #[test]
     fn a_fixed_schema_mode_rejects_a_password_only_registry_as_unused() {
         let rt = runtime();
-        for mode in ["raw", "single_object"] {
+        for (mode, registry) in [
+            ("raw", "{url: http://sr, password: s3cret}"),
+            ("single_object", "{url: http://sr, password: s3cret}"),
+            ("raw", "{url: 'http://u:s3cret@sr'}"),
+            ("single_object", "{url: 'http://u:s3cret@sr'}"),
+        ] {
             let cfg = component(&format!(
-                "mode: {mode}\nschema: {{inline: '{SCHEMA}'}}\n\
-                 registry: {{url: http://sr, password: s3cret}}"
+                "mode: {mode}\nschema: {{inline: '{SCHEMA}'}}\nregistry: {registry}"
             ));
             let err = AvroDeserializerBuilder::from_component(&cfg, rt.handle()).unwrap_err();
             assert!(

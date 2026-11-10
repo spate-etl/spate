@@ -1197,8 +1197,7 @@ mod tests {
             ),
         ] {
             let err = registry_url(url)
-                .err()
-                .expect("the URL is rejected")
+                .expect_err("the URL is rejected")
                 .to_string();
             assert_eq!(err, format!("avro configuration: {expected}"), "{url}");
         }

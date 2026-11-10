@@ -202,11 +202,27 @@ impl S3Store {
         let container = request.start().map_err(|e| format!("start {store}: {e}"))?;
         let port = container
             .get_host_port_ipv4(store.container_port())
-            .map_err(|e| reported(store, &container, format!("{store} port: {e}")))?;
+            .map_err(|e| {
+                let failure = format!("{store} port: {e}");
+                reported(
+                    store,
+                    failure,
+                    container.stdout_to_vec(),
+                    container.stderr_to_vec(),
+                )
+            })?;
         let api = SocketAddr::from(([127, 0, 0, 1], port));
         let ready_port = container
             .get_host_port_ipv4(store.ready_port())
-            .map_err(|e| reported(store, &container, format!("{store} readiness port: {e}")))?;
+            .map_err(|e| {
+                let failure = format!("{store} readiness port: {e}");
+                reported(
+                    store,
+                    failure,
+                    container.stdout_to_vec(),
+                    container.stderr_to_vec(),
+                )
+            })?;
         ready(
             store,
             SocketAddr::from(([127, 0, 0, 1], ready_port)),
@@ -466,28 +482,31 @@ fn ready(store: Store, api: SocketAddr, container: &Container<GenericImage>) -> 
         if let Some(ending) = ending {
             return Err(reported(
                 store,
-                container,
                 start_failure(store, ending, &probe),
+                container.stdout_to_vec(),
+                container.stderr_to_vec(),
             ));
         }
         std::thread::sleep(Duration::from_millis(50));
     }
 }
 
-/// Writes `failure` and the tail of `container`'s output to stderr, where the
-/// test's captured output keeps its lines, and returns `failure`.
+/// Writes `failure` and the tail of a container's `stdout` and `stderr` to
+/// stderr, where the test's captured output keeps its lines, and returns
+/// `failure`.
 #[expect(
     clippy::print_stderr,
     reason = "a failed start's container output is read from the test's output"
 )]
-fn reported(store: Store, container: &Container<GenericImage>, failure: String) -> String {
+fn reported<E: fmt::Display>(
+    store: Store,
+    failure: String,
+    stdout: Result<Vec<u8>, E>,
+    stderr: Result<Vec<u8>, E>,
+) -> String {
     eprintln!(
         "{failure}\n{}",
-        container_tails(
-            store,
-            &container_output(container.stdout_to_vec()),
-            &container_output(container.stderr_to_vec()),
-        )
+        container_tails(store, &container_output(stdout), &container_output(stderr))
     );
     failure
 }
@@ -720,6 +739,25 @@ mod tests {
             "---- last 200 lines of Garage stdout ----\nout line\n\
              ---- last 200 lines of Garage stderr ----\nerr line"
         );
+    }
+
+    /// A failed start's report returns the failure it was given.
+    #[test]
+    fn a_report_returns_its_failure() {
+        let read: Result<Vec<u8>, String> = Ok(b"err line".to_vec());
+        assert_eq!(
+            reported(Store::Rgw, "failure".to_owned(), Ok(Vec::new()), read),
+            "failure"
+        );
+    }
+
+    /// A container stream reads as its text, or as why it could not be read.
+    #[test]
+    fn a_container_stream_reads_as_text_or_its_error() {
+        let read: Result<Vec<u8>, String> = Ok(b"a line".to_vec());
+        assert_eq!(container_output(read), "a line");
+        let unread: Result<Vec<u8>, String> = Err("no such container".to_owned());
+        assert_eq!(container_output(unread), "(unreadable: no such container)");
     }
 
     /// A container log longer than the tail keeps only its last lines.

@@ -493,6 +493,18 @@ On any other feed such a unit stays held until a stop, or until
 `checkpoint.stalled_fail_after` fails the run and its records replay after a
 restart.
 
+The fail-back waits for writes the sink is still retrying. The source reads a
+unit in batches, and the records of one source batch can be split across
+several sink batches. The unit fails back only once the sink has written or
+abandoned each of those sink batches, so while the sink retries one of them, the
+unit stays held.
+
+Once the unit is back in the feed, the source waits for the unit's lanes to
+drain. While the sink takes no records, for example while every replica is
+down, that wait lasts up to `checkpoint.drain_timeout`. The run receives no
+unit and commits nothing until the wait ends. No record is lost, because the
+unit is already back in the feed when the wait starts.
+
 :::danger `Completed` does not mean every unit was read
 On a seeded run the exit state is not a per-unit status. A unit is done only
 when neither `MemoryFeed::dead_letters` nor `MemoryFeed::unsettled` names it.

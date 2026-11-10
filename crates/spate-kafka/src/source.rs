@@ -1922,10 +1922,10 @@ impl Source for KafkaSource {
 
     fn flush_commits(&mut self) -> Result<(), SourceError> {
         self.opened()?;
-        // Every commit is in flight before the first wait, so a flush waits for
-        // the slowest answer and not their sum. Every consumer commits, even
-        // after one fails, so one consumer's failure does not hold back the
-        // others' stored offsets.
+        // Every commit is in flight before the first wait, so a flush takes as
+        // long as the slowest answer. Every consumer commits, even after one
+        // fails, so one consumer's failure does not hold back the others'
+        // stored offsets.
         let mut sent = Vec::with_capacity(self.members.len());
         for k in 0..self.members.len() {
             #[cfg(test)]
@@ -4230,8 +4230,8 @@ mod tests {
         }
 
         /// A flush sends every consumer's commit before the first wait, so it
-        /// waits for the slowest answer and not their sum. Consumers with nothing
-        /// stored answer `NoOffset`, which is not a failure.
+        /// takes as long as the slowest answer. A consumer with nothing stored
+        /// answers `NoOffset`, and the flush still succeeds.
         #[test]
         fn a_flush_sends_every_commit_before_the_first_wait() {
             let cluster = mock();

@@ -260,8 +260,15 @@ pub(crate) fn run_controller<S: Source>(ctx: ControllerContext<S>) {
             // only ever fail, never un-fail. If one has been stalled past the
             // limit, a sink leg is permanently broken (fatal write error,
             // dropped table); fail the pipeline so it restarts and replays.
+            // The source hears of each stall first, and can end it by revoking
+            // the partition's lanes.
             let now = checkpointer.now();
-            for (partition, since) in checkpointer.stalled_partitions() {
+            let stalled = checkpointer.stalled_partitions();
+            if !stalled.is_empty() {
+                let partitions: Vec<PartitionId> = stalled.iter().map(|&(p, _)| p).collect();
+                source.stalled(&partitions);
+            }
+            for (partition, since) in stalled {
                 let age = now.saturating_duration_since(since);
                 if age > stalled_fail_after {
                     state.failure.get_or_insert(FatalError {

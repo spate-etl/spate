@@ -413,6 +413,20 @@ pub trait Source: Send {
         Ok(())
     }
 
+    /// Hear which `partitions` have a watermark stalled behind a failed
+    /// batch, such as one the sink abandoned.
+    ///
+    /// The controller calls this on each commit tick while any partition is
+    /// stalled, naming every stalled partition each time. A stall lasts until
+    /// the partition's lanes are revoked, so a source can let the partition go
+    /// through [`SourceEvent::LanesRevoked`] and give its input back for
+    /// another read. Otherwise `checkpoint.stalled_fail_after` fails the run,
+    /// and its input replays after a restart. Never waits. The default does
+    /// nothing.
+    fn stalled(&mut self, partitions: &[PartitionId]) {
+        let _ = partitions;
+    }
+
     /// Renew the feed units the source holds, and nothing else.
     ///
     /// The controller calls this on each pass of a revocation's wait for its

@@ -108,6 +108,13 @@ them wherever your source resumes from instead.
   and restart fetching for specific lanes. Sources that can't pause rely on
   bounded-queue pushback alone, but a pausable source keeps memory flat
   under sink pressure.
+- **`stalled`** (default no-op) names the partitions whose watermark is
+  stalled behind a failed batch, such as one the sink abandoned. The runtime
+  calls it on each commit tick while any partition is stalled, and the stall
+  lasts until the partition's lanes are revoked. To give a partition's input
+  back for another read, return `LanesRevoked` for its lanes from
+  `poll_events`. Otherwise `checkpoint.stalled_fail_after` fails the run, and
+  the input replays after a restart. Never wait here.
 
 **Class a rejected credential or TLS handshake `Fatal`.** That covers a
 certificate your TLS stack fails to verify, a fatal TLS alert from the server

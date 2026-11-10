@@ -614,6 +614,133 @@ fn a_stall_fails_only_past_its_limit_on_the_injected_clock() {
     assert!(failure.reason.contains("stalled"), "{}", failure.reason);
 }
 
+/// The source hears of a partition stalled behind a failed batch on each
+/// commit tick, and of no other partition: the lane whose batch delivered
+/// commits to its end and is never named.
+#[test]
+fn each_tick_names_the_stalled_partition_to_the_source() {
+    let clock = crate::clock::TestClock::frozen();
+    let mut cfg = test_config(1);
+    cfg.checkpoint.interval = Duration::from_secs(60);
+    let h = start_on_clock(
+        cfg,
+        &clock,
+        |runtime| runtime,
+        |shared, log| FakeChain {
+            shared,
+            log,
+            mode: ChainMode::FailAckAtBatch(1),
+            batches_seen: 0,
+        },
+    );
+    h.script.lock().unwrap().push_back(Script::Assign(
+        [0, 1]
+            .map(|n| LaneSpec {
+                id: LaneId(n),
+                partition: PartitionId(n),
+                batches: batches(&[0..5, 5..10]),
+            })
+            .into(),
+    ));
+    wait_for("every batch consumed", Duration::from_secs(5), || {
+        h.chain.consumed.load(Ordering::Relaxed) == 20
+    });
+    passes(&h, 3);
+
+    tick(&h, &clock, Duration::from_secs(60));
+    tick(&h, &clock, Duration::from_secs(60));
+
+    let (stalled, delivered) = {
+        let log = h.shared.lock().unwrap();
+        // One thread takes both lanes, so either one's batch can be first.
+        let delivered: Vec<PartitionId> = log.committed.keys().copied().collect();
+        (log.stalled.clone(), delivered)
+    };
+    assert_eq!(delivered.len(), 1, "one lane's batch delivers");
+    let failed = PartitionId(1 - delivered[0].0);
+    assert_eq!(stalled, [vec![failed], vec![failed]]);
+    h.shutdown.trigger();
+    let report = h.join.join().unwrap().unwrap();
+    assert!(matches!(report.state, ExitState::Completed), "{:?}", report.state);
+}
+
+/// A run whose batches all deliver never calls `Source::stalled`.
+#[test]
+fn a_run_with_no_failed_batch_names_no_stall() {
+    let clock = crate::clock::TestClock::frozen();
+    let mut cfg = test_config(1);
+    cfg.checkpoint.interval = Duration::from_secs(60);
+    let h = start_on_clock(cfg, &clock, |runtime| runtime, ok_chain);
+    assign_one_lane(&h, &[0..10, 10..20]);
+    wait_for("every batch consumed", Duration::from_secs(5), || {
+        h.chain.consumed.load(Ordering::Relaxed) == 20
+    });
+    passes(&h, 3);
+
+    tick(&h, &clock, Duration::from_secs(60));
+    tick(&h, &clock, Duration::from_secs(60));
+
+    {
+        let log = h.shared.lock().unwrap();
+        assert_eq!(log.committed.get(&PartitionId(0)), Some(&20));
+        assert_eq!(log.stalled, Vec::<Vec<PartitionId>>::new());
+    }
+    h.shutdown.trigger();
+    let report = h.join.join().unwrap().unwrap();
+    assert!(matches!(report.state, ExitState::Completed), "{:?}", report.state);
+}
+
+/// Pins that revoking a stalled partition's lanes ends its stall: the source
+/// hears of it no more, and `stalled_fail_after` passing does not fail the
+/// run. A source that is told of a stall relies on this to give the
+/// partition's input back.
+#[test]
+fn revoking_a_stalled_partition_ends_its_stall() {
+    let clock = crate::clock::TestClock::frozen();
+    let mut cfg = test_config(1);
+    cfg.checkpoint.interval = Duration::from_secs(60);
+    cfg.checkpoint.stalled_fail_after = Duration::from_secs(120);
+    let h = start_on_clock(
+        cfg,
+        &clock,
+        |runtime| runtime,
+        |shared, log| FakeChain {
+            shared,
+            log,
+            mode: ChainMode::FailAckAtBatch(1),
+            batches_seen: 0,
+        },
+    );
+    assign_one_lane(&h, &[0..5, 5..10]);
+    wait_for("every batch consumed", Duration::from_secs(5), || {
+        h.chain.consumed.load(Ordering::Relaxed) == 10
+    });
+    passes(&h, 3);
+    tick(&h, &clock, Duration::from_secs(60));
+    assert_eq!(h.shared.lock().unwrap().stalled, [vec![PartitionId(0)]]);
+
+    h.script
+        .lock()
+        .unwrap()
+        .push_back(Script::Revoke(vec![LaneId(0)]));
+    wait_for("the revoke", Duration::from_secs(5), || {
+        h.shared
+            .lock()
+            .unwrap()
+            .log
+            .iter()
+            .any(|e| e == "revoke-delivered")
+    });
+    passes(&h, 3);
+    tick(&h, &clock, Duration::from_secs(180));
+
+    assert!(!h.join.is_finished(), "a revoked stall must not fail the run");
+    assert_eq!(h.shared.lock().unwrap().stalled, [vec![PartitionId(0)]]);
+    h.shutdown.trigger();
+    let report = h.join.join().unwrap().unwrap();
+    assert!(matches!(report.state, ExitState::Completed), "{:?}", report.state);
+}
+
 /// `max_pending_batches` is a hard per-partition bound, enforced at the
 /// driver's poll boundary (the regression #196 pins). With every ack
 /// withheld, exactly `limit` batches enter the chain and no more, however

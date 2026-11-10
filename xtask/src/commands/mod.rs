@@ -776,7 +776,10 @@ mod tests {
             )
         );
         assert_eq!(refusal("cargo 1.97.0 (0a1b2c3d4 2026-08-07)"), None);
-        assert_eq!(refusal("cargo 1.100.0-nightly (5f94df478 2026-11-01)"), None);
+        assert_eq!(
+            refusal("cargo 1.100.0-nightly (5f94df478 2026-11-01)"),
+            None
+        );
         assert_eq!(refusal("cargo 2.0.0"), None);
         for unreadable in ["cargo", "cargo 1.x.0", "cargo 1"] {
             assert_eq!(

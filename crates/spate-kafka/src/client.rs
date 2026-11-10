@@ -474,7 +474,8 @@ impl<C: ConsumerContext + 'static> Drop for PendingCommit<C> {
     }
 }
 
-/// Sends a commit of exactly `tpl` without waiting for its answer, so several
+/// Sends a commit of exactly `tpl`, or with `None` of every offset stored for
+/// the consumer's current assignment, without waiting for its answer, so several
 /// clients' commits can be in flight together. `rd_kafka_commit` in its sync form
 /// has no bound: a request queued to a broker that has stopped answering is
 /// requeued for as long as the broker stays silent.
@@ -484,17 +485,18 @@ impl<C: ConsumerContext + 'static> Drop for PendingCommit<C> {
 /// When the commit cannot be queued.
 pub(crate) fn send_commit<C: ConsumerContext + 'static>(
     consumer: &Arc<BaseConsumer<C>>,
-    tpl: &TopicPartitionList,
+    tpl: Option<&TopicPartitionList>,
 ) -> KafkaResult<PendingCommit<C>> {
+    let offsets = tpl.map_or(std::ptr::null_mut(), TopicPartitionList::ptr);
     // SAFETY: the client pointer is valid while `consumer` is borrowed, and
-    // `rd_kafka_commit_queue` copies `tpl`. The queue is owned by the returned
-    // value, or destroyed here when nothing was queued.
+    // `rd_kafka_commit_queue` copies `offsets`, which may be null. The queue is
+    // owned by the returned value, or destroyed here when nothing was queued.
     unsafe {
         let rk = consumer.client().native_ptr();
         let queue = rdkafka::bindings::rd_kafka_queue_new(rk);
         let code = rdkafka::bindings::rd_kafka_commit_queue(
             rk,
-            tpl.ptr(),
+            offsets,
             queue,
             None,
             std::ptr::null_mut(),

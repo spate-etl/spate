@@ -82,11 +82,11 @@ impl StoreLane {
 ///   and RustFS's Kafka client does not reach Redpanda.
 /// - `tls_system_ca` configures Apache Kafka's SSL listener through its
 ///   `KAFKA_*` variables.
-/// - `e2e_leader_move`'s cluster runs the `apache` lane's image whichever lane
-///   is selected.
+///
+/// `spate` leaves none out.
 pub(crate) const BROKER_LANE_SUITES: [(&str, &[&str]); 2] = [
     ("spate-kafka", &["feed_notifications", "tls_system_ca"]),
-    ("spate", &["e2e_leader_move"]),
+    ("spate", &[]),
 ];
 
 /// The nextest filterset of the suites [`BROKER_LANE_SUITES`] leaves to the
@@ -94,6 +94,7 @@ pub(crate) const BROKER_LANE_SUITES: [(&str, &[&str]); 2] = [
 pub(crate) fn primary_broker_suites() -> String {
     BROKER_LANE_SUITES
         .iter()
+        .filter(|(_, left_out)| !left_out.is_empty())
         .map(|(package, left_out)| {
             let binaries: Vec<String> = left_out.iter().map(|b| format!("binary({b})")).collect();
             if binaries.len() == 1 {
@@ -212,11 +213,11 @@ mod tests {
     }
 
     #[test]
-    fn a_broker_lane_filter_leaves_three_suites_to_the_primary_lane() {
+    fn a_broker_lane_filter_leaves_two_suites_to_the_primary_lane() {
         assert_eq!(
             BrokerLane::new("other").filter,
             "(package(spate-kafka) & !binary(feed_notifications) & !binary(tls_system_ca)) \
-             | (package(spate) & !binary(e2e_leader_move)) \
+             | (package(spate)) \
              | (package(spate-test-support) & binary(containers) \
              & test(=kafka_broker_round_trips_a_record))"
         );
@@ -226,8 +227,7 @@ mod tests {
     fn the_primary_broker_suites_are_the_ones_a_broker_lane_leaves_out() {
         assert_eq!(
             primary_broker_suites(),
-            "(package(spate-kafka) & (binary(feed_notifications) | binary(tls_system_ca))) \
-             | (package(spate) & binary(e2e_leader_move))"
+            "(package(spate-kafka) & (binary(feed_notifications) | binary(tls_system_ca)))"
         );
     }
 

@@ -46,7 +46,9 @@ use spate::pipeline::{
 };
 use spate::sink::KeyHashRouter;
 use spate_test::{metric_series, metric_value};
-use spate_test_support::{Broker, KAFKA_PORT, KafkaBroker, container_image, http};
+use spate_test_support::{
+    CLUSTER_NODES, KAFKA_PORT, KafkaBroker, KafkaCluster, container_image, http,
+};
 use std::net::SocketAddr;
 use std::ops::Range;
 use std::process::Command;
@@ -55,7 +57,6 @@ use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
-use testcontainers::core::ContainerPort;
 use testcontainers::runners::SyncRunner;
 use testcontainers::{Container, GenericImage, ImageExt};
 
@@ -85,8 +86,7 @@ pub fn event_id(partition: i32, seq: i64) -> i64 {
 /// The Kafka containers a harness runs.
 enum Brokers {
     One(Box<Container<KafkaBroker>>),
-    /// Node ids are the index plus one.
-    Cluster(Vec<Container<GenericImage>>),
+    Cluster(KafkaCluster),
 }
 
 /// One partition as the cluster's metadata reports it.
@@ -125,70 +125,19 @@ impl Harness {
         Self::around(Brokers::One(Box::new(kafka)), brokers, 1)
     }
 
-    /// [`Self::up`] with three Apache Kafka brokers in one KRaft quorum,
-    /// publishing Kafka on `host_ports`. The cluster runs the `apache` lane's
-    /// image under every lane, since its configuration is Apache's.
-    ///
-    /// A client reaches a broker on the address it advertises, which has to be
-    /// known before the broker starts and has to survive its restart, so the
-    /// caller names the ports. The containers start with no ready condition, since
-    /// a node cannot finish starting before it has a quorum.
-    pub fn up_cluster(host_ports: [u16; 3]) -> Self {
-        let (image, tag) = container_image(&["--pull", "kafka", Broker::Apache.lane()]);
-        let network = spate_test::unique_name("e2e-kafka");
-        let host = |node: usize| format!("{network}-k{node}");
-        let voters = (1..=host_ports.len())
-            .map(|node| format!("{node}@{}:9093", host(node)))
-            .collect::<Vec<_>>()
-            .join(",");
-        let containers: Vec<_> = host_ports
-            .iter()
-            .zip(1..)
-            .map(|(port, node)| {
-                GenericImage::new(&image, &tag)
-                    .with_exposed_port(ContainerPort::Tcp(9092))
-                    .with_network(&network)
-                    .with_container_name(host(node))
-                    .with_mapped_port(*port, ContainerPort::Tcp(9092))
-                    .with_env_var("KAFKA_NODE_ID", node.to_string())
-                    .with_env_var("CLUSTER_ID", "5L6g3nShT-eMCtK--X86sw")
-                    .with_env_var("KAFKA_PROCESS_ROLES", "broker,controller")
-                    .with_env_var("KAFKA_CONTROLLER_QUORUM_VOTERS", voters.as_str())
-                    .with_env_var("KAFKA_CONTROLLER_LISTENER_NAMES", "CONTROLLER")
-                    .with_env_var("KAFKA_INTER_BROKER_LISTENER_NAME", "BROKER")
-                    .with_env_var(
-                        "KAFKA_LISTENERS",
-                        "PLAINTEXT://0.0.0.0:9092,BROKER://0.0.0.0:9094,CONTROLLER://0.0.0.0:9093",
-                    )
-                    .with_env_var(
-                        "KAFKA_ADVERTISED_LISTENERS",
-                        format!("PLAINTEXT://127.0.0.1:{port},BROKER://{}:9094", host(node)),
-                    )
-                    .with_env_var(
-                        "KAFKA_LISTENER_SECURITY_PROTOCOL_MAP",
-                        "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,BROKER:PLAINTEXT",
-                    )
-                    .with_env_var("KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR", "3")
-                    .with_env_var("KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR", "3")
-                    .with_env_var("KAFKA_TRANSACTION_STATE_LOG_MIN_ISR", "2")
-                    .with_env_var("KAFKA_MIN_INSYNC_REPLICAS", "2")
-                    .with_env_var("KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS", "0")
-                    .start()
-                    .unwrap_or_else(|e| panic!("start Kafka node {node}: {e}"))
-            })
-            .collect();
-        let brokers = host_ports
-            .iter()
-            .map(|port| format!("127.0.0.1:{port}"))
-            .collect::<Vec<_>>()
-            .join(",");
+    /// [`Self::up`] with a three-node cluster of the selected broker. Waits
+    /// until a client sees all three nodes, since none of them is ready alone.
+    pub fn up_cluster() -> Self {
+        let cluster = KafkaCluster::start(&spate_test::unique_name("e2e-kafka"))
+            .unwrap_or_else(|e| panic!("{e}"));
+        let brokers = cluster.bootstrap().to_owned();
         let probe = probe_consumer(&brokers, "e2e-metadata");
         wait_until(Duration::from_secs(120), "all three brokers", || {
             probe
                 .fetch_metadata(None, PROBE_TIMEOUT)
-                .is_ok_and(|metadata| metadata.brokers().len() == host_ports.len())
+                .is_ok_and(|metadata| i32::try_from(metadata.brokers().len()) == Ok(CLUSTER_NODES))
         });
-        Self::around(Brokers::Cluster(containers), brokers, 3)
+        Self::around(Brokers::Cluster(cluster), brokers, CLUSTER_NODES)
     }
 
     /// Start ClickHouse and the stub registry around running brokers.
@@ -324,31 +273,26 @@ impl Harness {
     }
 
     /// Stop cluster node `node` as a rolling restart does, and return its exit code.
-    ///
-    /// The generous timeout lets a broker under load finish its controlled
-    /// shutdown, where the runtime's default could end in a kill.
     pub fn stop_broker(&self, node: i32) -> i64 {
-        let broker = self.cluster_node(node);
-        broker
-            .stop_with_timeout(Some(120))
-            .unwrap_or_else(|e| panic!("stop node {node}: {e}"));
-        broker
-            .exit_code()
-            .unwrap_or_else(|e| panic!("exit code of node {node}: {e}"))
-            .expect("a stopped container has an exit code")
+        self.cluster().stop(node).unwrap_or_else(|e| panic!("{e}"))
     }
 
     pub fn start_broker(&self, node: i32) {
-        self.cluster_node(node)
-            .start()
-            .unwrap_or_else(|e| panic!("start node {node}: {e}"));
+        self.cluster()
+            .restart(node)
+            .unwrap_or_else(|e| panic!("{e}"));
     }
 
-    fn cluster_node(&self, node: i32) -> &Container<GenericImage> {
+    /// Move the leadership of `topic`'s `partition` to cluster node `node`.
+    pub fn transfer_leader(&self, topic: &str, partition: i32, node: i32) {
+        self.cluster()
+            .transfer_leadership(topic, partition, node)
+            .unwrap_or_else(|e| panic!("{e}"));
+    }
+
+    fn cluster(&self) -> &KafkaCluster {
         match &self.kafka {
-            Brokers::Cluster(nodes) => {
-                &nodes[usize::try_from(node - 1).expect("node ids start at 1")]
-            }
+            Brokers::Cluster(cluster) => cluster,
             Brokers::One(_) => panic!("the scenario runs one broker"),
         }
     }

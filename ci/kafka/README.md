@@ -76,16 +76,15 @@ Redpanda takes one offset ahead of each transaction's records on a partition,
 so the transaction suites read positions from the broker once each ended
 transaction's marker is in the log.
 
-The `kafka-brokers` leg leaves three suites to the primary lane.
+The `kafka-brokers` leg leaves two suites to the primary lane.
 `BROKER_LANE_SUITES` in `xtask/src/ci/outputs.rs` lists them:
 
 - `feed_notifications`: the primary S3 store, RustFS, does not deliver its
   notifications to Redpanda.
 - `tls_system_ca`: it configures Apache Kafka's SSL listener through `KAFKA_*`
   variables.
-- `e2e_leader_move`: its cluster runs the `apache` lane's image on every lane.
 
-`cargo xtask integration-test` leaves the same three out when
+`cargo xtask integration-test` leaves the same two out when
 `SPATE_KAFKA_LANE` names a broker other than the primary one.
 
 The image index carries `linux/amd64` and `linux/arm64`. CI runs the lane on
@@ -98,6 +97,24 @@ as v26.1.20 after v26.2.6, sorts below the pin and is not proposed.
 
 ## The three-node cluster
 
-The three-node cluster in spate's `e2e_leader_move` starts the `apache` lane's
-image as a `GenericImage` with its own `KAFKA_*` variables, whichever lane is
-selected.
+`spate_test_support::KafkaCluster` starts three nodes of the selected broker on
+a Docker network the caller names, with node ids 1 to 3. Spate's
+`e2e_leader_move` runs on it. Each node is a `KafkaBroker` with a cluster arm
+per broker:
+
+- Apache Kafka runs three KRaft nodes, each a broker and a controller. Its
+  internal topics go on all three nodes, and an `acks=all` write needs two in
+  sync.
+- Redpanda sets each node's id before it starts, because it numbers nodes from
+  0 when none is set. Every node seeds all three.
+
+A node advertises a host port chosen before it starts, and a restart keeps the
+port, the node id and the data. A node cannot finish starting before the others
+are up, so the cluster waits for no ready line, and the caller waits until its
+client sees three brokers. A node runs no command once ready: a restart would
+run it again before the node had rejoined.
+
+Redpanda places leaders unevenly, and a restarted node leads nothing until its
+balancer moves leaders back. `KafkaCluster::transfer_leadership` moves one
+through `rpk`. Apache Kafka has no transfer a test can ask for, so it returns an
+error there.

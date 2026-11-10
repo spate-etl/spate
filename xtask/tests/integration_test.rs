@@ -48,7 +48,7 @@ fn integration_test_on_redpanda_leaves_out_the_primary_broker_suites() {
         nextest_line("rgw", "redpanda"),
         format!(
             "{ALL} -E 'not ((package(spate-kafka) & (binary(feed_notifications) \
-             | binary(tls_system_ca))) | (package(spate) & binary(e2e_leader_move)))'"
+             | binary(tls_system_ca))))'"
         )
     );
 }

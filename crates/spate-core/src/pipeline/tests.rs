@@ -757,7 +757,7 @@ fn revoking_a_stalled_partition_ends_its_stall() {
 }
 
 /// A harness on a frozen clock with a 5s commit interval, a 3s stall limit,
-/// and one lane whose first batch's ack fails.
+/// and one lane of two batches whose first batch's ack fails.
 fn short_stall_limit(clock: &Arc<crate::clock::TestClock>) -> Harness {
     let mut cfg = test_config(1);
     cfg.checkpoint.interval = Duration::from_secs(5);
@@ -774,10 +774,6 @@ fn short_stall_limit(clock: &Arc<crate::clock::TestClock>) -> Harness {
         },
     );
     assign_one_lane(&h, &[0..5, 5..10]);
-    wait_for("every batch consumed", Duration::from_secs(5), || {
-        h.chain.consumed.load(Ordering::Relaxed) == 10
-    });
-    passes(&h, 3);
     h
 }
 
@@ -788,6 +784,10 @@ fn short_stall_limit(clock: &Arc<crate::clock::TestClock>) -> Harness {
 fn a_short_stall_limit_leaves_the_source_a_poll_to_revoke() {
     let clock = crate::clock::TestClock::frozen();
     let h = short_stall_limit(&clock);
+    wait_for("every batch consumed", Duration::from_secs(5), || {
+        h.chain.consumed.load(Ordering::Relaxed) == 10
+    });
+    passes(&h, 3);
 
     tick(&h, &clock, Duration::from_secs(5));
     assert!(
@@ -829,6 +829,10 @@ fn a_short_stall_limit_leaves_the_source_a_poll_to_revoke() {
 fn a_short_stall_limit_fails_a_kept_stall_on_the_next_tick() {
     let clock = crate::clock::TestClock::frozen();
     let h = short_stall_limit(&clock);
+    wait_for("every batch consumed", Duration::from_secs(5), || {
+        h.chain.consumed.load(Ordering::Relaxed) == 10
+    });
+    passes(&h, 3);
 
     tick(&h, &clock, Duration::from_secs(5));
     assert!(
@@ -837,6 +841,9 @@ fn a_short_stall_limit_fails_a_kept_stall_on_the_next_tick() {
     );
 
     clock.advance(Duration::from_secs(5));
+    wait_for("the run fails", Duration::from_secs(5), || {
+        h.join.is_finished()
+    });
     let report = h.join.join().unwrap().unwrap();
     let ExitState::Failed(failure) = report.state else {
         panic!("a kept stall must fail the run");

@@ -68,6 +68,7 @@ Rustdoc runs as `cargo xtask doc`, with warnings denied, so a broken intra-doc l
 It does not reach bench support modules, because `cargo doc` never builds them.
 
 The feature matrix runs as `cargo xtask hack`, which checks every feature alone and the feature-off combinations, type-checks every target, and runs the tests on default features.
+Its checks deny warnings, so a warning that appears on one feature set alone fails the command.
 
 The `cargo deny` step fails on a license, ban or source finding.
 It reports an advisory without failing.

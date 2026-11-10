@@ -421,7 +421,6 @@ mod tests {
     use crate::sink::frame::write_message;
     use spate_core::clock::tokio::SystemClock as IoSystemClock;
     use spate_core::metrics::Meter;
-    use spate_test::HANG;
 
     fn test_writer(statistics_enabled: bool) -> KafkaWriter {
         KafkaWriter::new(
@@ -728,7 +727,7 @@ mod tests {
             crate::sink::build_on_clocks(cfg, Arc::clone(&clock) as _, Arc::new(IoSystemClock))
                 .expect("sink");
         let endpoint = &sink.endpoints[0][0];
-        spate_test::wait_until(HANG, "the rejection", || {
+        spate_test::wait_until(spate_test::HANG, "the rejection", || {
             endpoint.producer.context().latest_rejection().is_some()
         });
         assert!(sink.writer.rejection(endpoint).is_some());

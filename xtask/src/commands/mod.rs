@@ -20,6 +20,7 @@ use crate::checks::container_image::{
     Capability, Mode, pull_all, selected_capabilities, selected_is_primary,
 };
 use crate::checks::{adr, attribution, changelog, docsrs, site_check, subject, sync_labels};
+use crate::release::version::version_lt;
 use crate::run::{self, Error, Outcome, Step};
 
 pub(crate) use lint::TidyCheck;
@@ -580,8 +581,46 @@ fn doc(root: &Path, explain: bool, sel: &Select) -> Outcome {
     )
 }
 
+/// Fails a build on any warning. `cargo xtask clippy` denies warnings only
+/// under `--all-features`, so a warning another feature set raises fails
+/// nowhere else. Unlike `RUSTFLAGS`, it leaves the build cache valid.
+const DENY_WARNINGS: (&str, &str) = ("CARGO_BUILD_WARNINGS", "deny");
+
+/// The first cargo release that reads `build.warnings`. An older cargo ignores
+/// it without a word and passes the build.
+const DENY_WARNINGS_SINCE: &str = "1.97";
+
 /// The feature matrix, and the test suite on default features.
 fn hack(root: &Path, explain: bool, sel: &Select) -> Outcome {
+    let probe = Step::new("cargo", ["--version"]);
+    if explain {
+        println!("{}", probe.display());
+    } else {
+        require_deny_warnings(&run::capture(root, &probe)?)?;
+    }
+    run::steps(root, explain, &hack_steps(sel))
+}
+
+/// Refuses the cargo that printed `version` when it ignores `build.warnings`.
+fn require_deny_warnings(version: &str) -> Outcome {
+    let unreadable = || Error::msg(format!("cannot read a cargo version from {version:?}"));
+    // `cargo 1.100.0-nightly (…)` names its release before the hyphen.
+    let release = version
+        .split_whitespace()
+        .nth(1)
+        .and_then(|word| word.split('-').next())
+        .ok_or_else(unreadable)?;
+    if !version_lt(release, DENY_WARNINGS_SINCE).map_err(|_| unreadable())? {
+        return Ok(());
+    }
+    Err(Error::msg(format!(
+        "the feature matrix needs cargo {DENY_WARNINGS_SINCE} or later to deny warnings \
+         (rustup update stable)"
+    )))
+}
+
+fn hack_steps(sel: &Select) -> Vec<Step<'static>> {
+    let (key, value) = DENY_WARNINGS;
     // `--exclude` needs `--workspace`, so a package selection already names
     // what to leave out.
     let (fuzz, fuzz_and_xtask): (&[&str], &[&str]) = match sel {
@@ -599,7 +638,8 @@ fn hack(root: &Path, explain: bool, sel: &Select) -> Outcome {
         Step::new("cargo", ["hack", "check"])
             .args(sel.args())
             .args(["--each-feature", "--no-dev-deps"])
-            .args(fuzz_and_xtask),
+            .args(fuzz_and_xtask)
+            .env(key, value),
     ];
     // Stripping dev-dependencies drops test and bench targets, so the run
     // above reaches no test target in any crate. This step builds them on the
@@ -611,18 +651,20 @@ fn hack(root: &Path, explain: bool, sel: &Select) -> Outcome {
         Step::new("cargo", ["check"])
             .args(sel.args())
             .args(["--all-targets", "--locked"])
-            .args(fuzz),
+            .args(fuzz)
+            .env(key, value),
     );
     // The test suite on default features, which runs the feature-off arm of
     // tests that `--all-features` skips. spate-fuzz has no tests, and
-    // spate-xtask has no features.
+    // spate-xtask has no features. It builds the targets the step above
+    // already checked, so it adds no warning to deny.
     steps.push(
         Step::new("cargo", ["nextest", "run"])
             .args(sel.args())
             .args(["--locked"])
             .args(fuzz_and_xtask),
     );
-    run::steps(root, explain, &steps)
+    steps
 }
 
 /// Every Docker-gated suite, leaving out those the selected S3 store's
@@ -699,6 +741,52 @@ mod tests {
                 "{all} -E 'not (package(spate-kafka) & binary(feed_notifications)) & {broker}'"
             )
         );
+    }
+
+    /// Both builds in the feature matrix deny warnings. The test run builds
+    /// targets the second step already checked.
+    #[test]
+    fn the_feature_matrix_builds_deny_warnings() {
+        let steps: Vec<String> = super::hack_steps(&super::Select::Workspace)
+            .iter()
+            .map(super::Step::display)
+            .collect();
+        assert_eq!(
+            steps,
+            [
+                "CARGO_BUILD_WARNINGS=\"deny\" cargo hack check --workspace --each-feature \
+                 --no-dev-deps --exclude spate-xtask --exclude spate-fuzz",
+                "CARGO_BUILD_WARNINGS=\"deny\" cargo check --workspace --all-targets --locked \
+                 --exclude spate-fuzz",
+                "cargo nextest run --workspace --locked --exclude spate-xtask --exclude spate-fuzz",
+            ]
+        );
+    }
+
+    /// Cargo reads `build.warnings` from 1.97, and an older one is refused
+    /// because it would pass a build with warnings.
+    #[test]
+    fn the_feature_matrix_refuses_a_cargo_that_ignores_build_warnings() {
+        let refusal = |v: &str| super::require_deny_warnings(v).err().map(|e| e.message);
+        assert_eq!(
+            refusal("cargo 1.96.1 (356927216 2026-06-26)").as_deref(),
+            Some(
+                "the feature matrix needs cargo 1.97 or later to deny warnings \
+                 (rustup update stable)"
+            )
+        );
+        assert_eq!(refusal("cargo 1.97.0 (0a1b2c3d4 2026-08-07)"), None);
+        assert_eq!(
+            refusal("cargo 1.100.0-nightly (5f94df478 2026-11-01)"),
+            None
+        );
+        assert_eq!(refusal("cargo 2.0.0"), None);
+        for unreadable in ["cargo", "cargo 1.x.0", "cargo 1"] {
+            assert_eq!(
+                refusal(unreadable),
+                Some(format!("cannot read a cargo version from {unreadable:?}"))
+            );
+        }
     }
 
     /// Whether what precedes an occurrence puts it where a shell would run it.

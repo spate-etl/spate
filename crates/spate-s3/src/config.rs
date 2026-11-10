@@ -363,7 +363,10 @@ mod tests {
             let err = S3SourceConfig::from_component_config(&section(&body)).unwrap_err();
             let err = err.to_string();
             assert!(err.starts_with("source.s3.url"), "{url}: {err}");
-            assert!(err.contains("host form the store does not read"), "{url}: {err}");
+            assert!(
+                err.contains("host form the store does not read"),
+                "{url}: {err}"
+            );
             assert!(err.contains(url), "{url}: {err}");
         }
         for url in [

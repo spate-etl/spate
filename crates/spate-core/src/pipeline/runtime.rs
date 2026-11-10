@@ -884,6 +884,8 @@ impl<S: Source + 'static> PipelineRuntime<S> {
         // there).
         let _ = controller_handle.join();
         drop((signal_task, probe_task, admin_task, upkeep_task));
+        // `examples/lambda-s3` budgets its stop on this timeout
+        // (`RUNTIME_SHUTDOWN`), so a change here changes that example too.
         io.shutdown_timeout(Duration::from_secs(2));
 
         Ok(ExitReport {

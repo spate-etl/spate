@@ -232,7 +232,7 @@ pub(crate) fn selected_capabilities(root: &Path, service: &str) -> Result<Vec<Ca
 ///
 /// # Errors
 ///
-/// As [`selected_capabilities`] does.
+/// When the variable is not UTF-8 or the service has no primary lane.
 pub(crate) fn selected_is_primary(root: &Path, service: &str) -> Result<bool, Error> {
     is_primary(root, service, &selected_lane(root, service)?)
 }

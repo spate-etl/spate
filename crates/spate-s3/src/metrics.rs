@@ -7,6 +7,7 @@
 //! hot-path discipline.
 
 use crate::lane_ctx::PoisonKind;
+use spate_core::metrics::names::L_REASON;
 use spate_core::metrics::{Counter, Gauge, Meter};
 
 /// Pre-registered `spate_s3_source_*` handles.
@@ -53,7 +54,7 @@ impl S3Metrics {
     /// only.
     pub(crate) fn new(meter: &Meter) -> S3Metrics {
         let failed = |reason: &'static str| {
-            meter.counter("objects_failed_total", &[("reason", reason.into())])
+            meter.counter("objects_failed_total", &[(L_REASON, reason.into())])
         };
         S3Metrics {
             objects_completed: meter.counter("objects_completed_total", &[]),

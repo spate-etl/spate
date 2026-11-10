@@ -110,8 +110,9 @@ them wherever your source resumes from instead.
   under sink pressure.
 - **`stalled`** (default no-op) names the partitions whose watermark is
   stalled behind a failed batch, such as one the sink abandoned. The runtime
-  calls it on each commit tick while any partition is stalled, and the stall
-  lasts until the partition's lanes are revoked. To give a partition's input
+  calls it on each commit tick while any partition is stalled. The stall lasts
+  until the partition leaves the run, when its lanes are revoked or a new
+  assignment replaces them. To give a partition's input
   back for another read, return `LanesRevoked` for its lanes from
   `poll_events`. Otherwise `checkpoint.stalled_fail_after` fails the run, and
   the input replays after a restart. Never wait here.

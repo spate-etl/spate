@@ -418,9 +418,10 @@ pub trait Source: Send {
     ///
     /// The controller calls this on each commit tick while any partition is
     /// stalled, naming every stalled partition each time. A stall lasts until
-    /// the partition's lanes are revoked, so a source can let the partition go
-    /// through [`SourceEvent::LanesRevoked`] and give its input back for
-    /// another read. Otherwise `checkpoint.stalled_fail_after` fails the run,
+    /// the partition leaves the run, when its lanes are revoked or a new
+    /// assignment replaces them. A source can let the partition go through
+    /// [`SourceEvent::LanesRevoked`] and give its input back for another read.
+    /// Otherwise `checkpoint.stalled_fail_after` fails the run,
     /// and its input replays after a restart. Never waits. The default does
     /// nothing.
     fn stalled(&mut self, _partitions: &[PartitionId]) {}

@@ -467,8 +467,10 @@ Those units are not lost. The group's consumer fetches from the same broker and
 never reads them, so the group's commit stays below them. Once the cut heals, a
 later worker on the group reads them.
 
-On Redpanda, a cut-off broker refuses the read, so the read fails and the window
-starts again ([What a read needs](#what-a-read-needs)).
+On Redpanda, a cut-off broker stops answering as leader, so a read through it
+fails or reaches the new leader. A failed read starts the window again, or reads
+the dead-letter topic again 15 seconds later
+([What a read needs](#what-a-read-needs)).
 
 ### What a read needs
 

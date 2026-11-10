@@ -15,6 +15,7 @@ use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use spate_clickhouse::{Compression, NativeEncoder, serialize_row};
 use spate_core::error::ErrorClass;
+use spate_core::rng::SplitMix64;
 use std::sync::{Arc, Mutex};
 
 /// The sink settings for `format` and `compression`, with the fixture's
@@ -193,22 +194,15 @@ struct Noise {
     d: u64,
 }
 
-/// `n` rows of pseudo-random words from a fixed seed (splitmix64).
+/// `n` rows of pseudo-random words from a fixed seed.
 fn noise(n: usize) -> Vec<Noise> {
-    let mut state = 0x5eed_u64;
-    let mut next = || {
-        state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
-        let mut z = state;
-        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-        z ^ (z >> 31)
-    };
+    let mut rng = SplitMix64::new(0x5eed);
     (0..n)
         .map(|_| Noise {
-            a: next(),
-            b: next(),
-            c: next(),
-            d: next(),
+            a: rng.next_u64(),
+            b: rng.next_u64(),
+            c: rng.next_u64(),
+            d: rng.next_u64(),
         })
         .collect()
 }

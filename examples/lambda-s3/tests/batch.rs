@@ -115,10 +115,11 @@ async fn the_units_a_stop_leaves_are_reported() {
     assert_eq!(rows(&script), Vec::<String>::new());
 }
 
-/// Pins that a unit whose batch the sink abandons stays held, and is reported
-/// once the stop comes: a fatal write fails neither the run nor the unit.
+/// A unit whose batch the sink abandons is reported without a stop: the
+/// source fails it back, the feed dead-letters it, and the test event is
+/// done.
 #[tokio::test]
-async fn a_unit_whose_batch_the_sink_abandons_is_reported_at_the_stop() {
+async fn a_unit_whose_batch_the_sink_abandons_is_reported() {
     let dir = tempfile::tempdir().unwrap();
     let data = stage(dir.path(), "a.ndjson", &["a1"]);
     let (sink, script) = capture_sink(1, 1);
@@ -127,38 +128,12 @@ async fn a_unit_whose_batch_the_sink_abandons_is_reported_at_the_stop() {
         message("t", TEST_EVENT),
         message("a", descriptor(&data, "a.ndjson")),
     ];
-    let clock = TestClock::frozen();
-    let handle: Arc<Mutex<Option<ShutdownHandle>>> = Arc::default();
-    let kept = Arc::clone(&handle);
-    let stop_clock = Arc::clone(&clock);
-    let assembled = assemble(yaml(&data, "{ memory: {} }"), sink);
-    let start = move |feed: Arc<dyn Feed>| {
-        let (pipeline, source) = assembled()?;
-        let runtime = pipeline
-            .seeded_feed(feed)
-            .into_runtime(source)?
-            .with_stop_clock(stop_clock);
-        *kept.lock().unwrap() = Some(runtime.shutdown_handle());
-        Ok::<_, BoxError>(runtime)
-    };
-    let written = script.clone();
-    let stop = async move {
-        while !written
-            .writes()
-            .iter()
-            .any(|w| matches!(w.result, spate_test::ScriptedResult::Fatal(_)))
-        {
-            tokio::task::yield_now().await;
-        }
-        handle
-            .lock()
-            .unwrap()
-            .as_ref()
-            .expect("assembled")
-            .trigger();
-        clock.advance(DRAIN_TIMEOUT + Duration::from_secs(1));
-    };
-    let failed = bounded(run_seeded(batch, start, stop)).await;
+    let failed = bounded(run_batch(
+        batch,
+        assemble(yaml(&data, "{ memory: {} }"), sink),
+        pending(),
+    ))
+    .await;
     assert_eq!(failed, ["a"]);
 }
 

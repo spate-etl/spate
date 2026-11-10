@@ -795,6 +795,13 @@ impl Source for S3Source {
         Ok(())
     }
 
+    fn stalled(&mut self, partitions: &[PartitionId]) {
+        match &mut self.state {
+            State::Feed(reader) => reader.stalled(partitions),
+            State::Created => {}
+        }
+    }
+
     fn renew_held(&mut self) {
         match &mut self.state {
             State::Feed(reader) => reader.renew_held(),

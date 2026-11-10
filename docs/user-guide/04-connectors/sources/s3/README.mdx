@@ -1148,9 +1148,10 @@ with a scheduled [lister run](#the-lister-run) and a
 [bounded job](#bounded-jobs-and-the-job-location), run as a separate job on a
 queue of its own.
 
-The source decodes S3 notifications that the bucket sends straight to SQS. A
-notification inside an EventBridge or SNS envelope is failed back, as
-[Storage notifications](#storage-notifications) lists.
+The source decodes S3 notifications that the bucket sends straight to SQS. An
+EventBridge event or an SNS envelope is neither a notification nor a
+descriptor, so the source fails it back, as
+[Storage notifications](#storage-notifications) describes.
 
 ### Metrics on Lambda
 

@@ -49,9 +49,9 @@ const REDPANDA_READY: &str = "Successfully started Redpanda!";
 /// A broker a Kafka lane runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Broker {
-    /// Apache Kafka, in KRaft mode as one combined broker and controller.
+    /// Apache Kafka in KRaft mode, each node a combined broker and controller.
     Apache,
-    /// Redpanda, one node in dev-container mode.
+    /// Redpanda in dev-container mode.
     Redpanda,
 }
 

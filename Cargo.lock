@@ -4334,6 +4334,7 @@ version = "0.4.0"
 dependencies = [
  "aws_lambda_events",
  "lambda_runtime",
+ "metrics",
  "metrics_cloudwatch_embedded",
  "serde",
  "spate",

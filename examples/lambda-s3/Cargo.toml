@@ -19,6 +19,7 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "ti
 tracing = { workspace = true }
 
 [dev-dependencies]
+metrics = { workspace = true }
 # `testing` adds the stop clock a test moves by hand.
 spate-core = { workspace = true, features = ["testing"] }
 spate-test = { workspace = true }

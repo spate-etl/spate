@@ -46,8 +46,9 @@ impl<'a> MakeWriter<'a> for Buffer {
 }
 
 /// Pins that the function's filter drops the recorder's line for each
-/// histogram value past 100 and keeps the handler's own lines. A layer at
-/// `info` beside it shows the recorder dropped values in the same run.
+/// histogram value past 100 and keeps the handler's own lines. The test
+/// records 101 values itself, so the recorder drops one whatever the run's
+/// poll count, and a layer at `info` beside the filter shows that it did.
 #[tokio::test]
 async fn the_log_filter_drops_the_recorders_lines_and_keeps_the_handlers() {
     let (function, control) = (Buffer::default(), Buffer::default());
@@ -67,6 +68,9 @@ async fn the_log_filter_drops_the_recorders_lines_and_keeps_the_handlers() {
         .cloudwatch_namespace("Spate")
         .init()
         .unwrap();
+    for value in 0..101 {
+        metrics::histogram!("lambda_s3_test_seconds").record(f64::from(value));
+    }
 
     let dir = tempfile::tempdir().unwrap();
     let data = stage(dir.path(), "a.ndjson", &["a1"]);

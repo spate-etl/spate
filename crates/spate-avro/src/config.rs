@@ -24,7 +24,9 @@
 use crate::cache::CompiledSchema;
 use crate::datum::AvroDatumDeserializer;
 use crate::deser::{AvroSerdeDeserializer, AvroValueDeserializer, DecoderCore, SchemaSourceMode};
-use crate::registry::{Endpoint, RegistryConfig, Rejection, http_client, spawn_fetcher};
+use crate::registry::{
+    Endpoint, RegistryConfig, Rejection, http_client, registry_url, spawn_fetcher,
+};
 use apache_avro::Schema;
 use apache_avro::rabin::Rabin;
 use serde::Deserialize;
@@ -310,17 +312,12 @@ impl AvroDeserializerBuilder {
         runtime: &tokio::runtime::Handle,
         clock: SyncClock,
     ) -> Result<Self, AvroConfigError> {
-        if settings.mode == AvroMode::Confluent
-            && settings.registry.as_ref().is_some_and(|registry| {
-                reqwest::Url::parse(&registry.url)
-                    .is_ok_and(|url| !url.username().is_empty() || url.password().is_some())
-            })
-        {
-            return Err(AvroConfigError::Invalid {
-                detail: "registry.url contains credentials; set them in registry.username and registry.password"
-                    .into(),
-            });
-        }
+        let confluent = match settings.registry.as_ref() {
+            Some(registry) if settings.mode == AvroMode::Confluent => {
+                Some((registry, registry_url(&registry.url)?))
+            }
+            _ => None,
+        };
         if settings.mode == AvroMode::Confluent
             && settings
                 .registry
@@ -349,7 +346,7 @@ impl AvroDeserializerBuilder {
             .transpose()?;
         let mode = match settings.mode {
             AvroMode::Confluent => {
-                let registry = settings.registry.as_ref().ok_or(AvroConfigError::Invalid {
+                let (registry, url) = confluent.ok_or(AvroConfigError::Invalid {
                     detail: "mode `confluent` requires a `registry` section".into(),
                 })?;
                 if settings.schema.is_some() {
@@ -360,9 +357,7 @@ impl AvroDeserializerBuilder {
                             .into(),
                     });
                 }
-                if registry.tls.root_ca.is_some()
-                    && !reqwest::Url::parse(&registry.url).is_ok_and(|url| url.scheme() == "https")
-                {
+                if registry.tls.root_ca.is_some() && url.scheme() != "https" {
                     return Err(AvroConfigError::Invalid {
                         detail: "registry.tls.root_ca is set, but registry.url is not https://"
                             .into(),
@@ -377,7 +372,7 @@ impl AvroDeserializerBuilder {
                     root_ca: registry.tls.root_ca.clone(),
                 };
                 let rejection = Rejection::default();
-                let endpoint = Arc::new(Endpoint::new(&registry)?);
+                let endpoint = Arc::new(Endpoint::new(&registry, url));
                 let http = http_client(registry.root_ca.as_deref())?;
                 let handle = spawn_fetcher(
                     http.clone(),
@@ -1046,7 +1041,7 @@ mod tests {
         for (settings, expected) in [
             (
                 with_registry(RegistrySection::new("http://urluser:urlsecret@sr")),
-                "avro configuration: registry.url contains credentials; set them in \
+                "avro configuration: registry.url carries userinfo; set them in \
                  registry.username and registry.password",
             ),
             (

@@ -50,6 +50,8 @@ sink:
 /// The function's log filter when `RUST_LOG` is unset. The CloudWatch recorder
 /// logs an error for each histogram value past 100 in one invocation, which a
 /// per-poll histogram passes in every invocation, so its collector is off.
+/// That also hides the collector's error for a metric it refuses to register.
+/// Set `RUST_LOG` to see it.
 pub const LOG_FILTER: &str = "info,metrics_cloudwatch_embedded::collector=off";
 
 /// The longest NDJSON record the framer reads.
@@ -103,8 +105,8 @@ pub fn messages(event: SqsEvent) -> Result<Vec<Message>, MissingId> {
         .collect()
 }
 
-/// The longest `run` takes to return once its drain has ended: it shuts its
-/// I/O runtime down with this timeout.
+/// The longest [`PipelineRuntime::run`] takes to return once its drain has
+/// ended, as its documentation states.
 pub const RUNTIME_SHUTDOWN: Duration = Duration::from_secs(2);
 
 /// The time left to answer Lambda once `run` has returned.

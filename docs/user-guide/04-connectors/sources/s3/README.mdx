@@ -1059,14 +1059,14 @@ notifications, which [Security](#security-credentials-and-region) lists.
 ### One batch per invocation
 
 The example's `run_seeded` publishes each message body unchanged into a
-`MemoryFeed` built with an attempt cap of 1, under the message id, and passes
-it with `Pipeline::seeded_feed`. The run is a
+`MemoryFeed` built with an attempt cap of 1, under the message id, and hands
+the feed to a closure that passes it with `Pipeline::seeded_feed`. The run is a
 [run on a seeded feed](#a-run-on-a-seeded-feed), so the source lists nothing
 and reads each message as a [storage notification](#storage-notifications). A
 unit that fails once is dead-lettered, so SQS owns the retry.
-`Pipeline::from_config` refuses an async context, so `run_seeded` builds and
-runs the pipeline on a thread of its own. `run_batch` hands it the pipeline and
-the source:
+`Pipeline::from_config` refuses an async context, so `run_seeded` calls that
+closure and runs the pipeline on a thread of its own. `run_batch` builds that
+closure for a pipeline built from config:
 
 ```rust file=examples/lambda-s3/src/lib.rs region=run_batch
 ```
@@ -1174,7 +1174,8 @@ keeps the first 100 values of a histogram in each invocation and drops the
 rest. Spate records some histograms once per poll, such as
 `spate_source_poll_duration_seconds`, so those histograms describe the start
 of each invocation. The recorder logs an error for each value it drops, and the
-example's log filter turns that line off. Lambda's own
+example's log filter turns the recorder's errors off. That also hides its error
+for a metric it refuses to register, which `RUST_LOG` brings back. Lambda's own
 metrics, with the queue's `ApproximateAgeOfOldestMessage` and its dead-letter
 queue's depth, show delivery health without Spate's metrics.
 

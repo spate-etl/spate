@@ -375,9 +375,11 @@ async fn an_invocation_answers_with_its_failures() {
     assert_eq!(ids, ["n"]);
 }
 
-/// Pins that an invocation stops its run before the deadline. The write is
+/// Pins that an invocation stops its run at the stop instant. The write is
 /// held for good, so only the handler's stop ends the run, and the unit is
-/// unsettled whether the stop comes before or after its read.
+/// unsettled whether the stop comes before or after its read. The deadline is
+/// an hour out and the drain budget leaves 200ms before the stop, so a handler
+/// that waits for the deadline runs into the hang bound.
 #[tokio::test]
 async fn an_invocation_stops_its_run_before_the_deadline() {
     let dir = tempfile::tempdir().unwrap();
@@ -386,12 +388,12 @@ async fn an_invocation_stops_its_run_before_the_deadline() {
     script.enqueue_global(WriteOutcome::ok().held());
     let pipeline = yaml(&data, "{ memory: {} }") + "checkpoint: { drain_timeout: 100ms }\n";
     let body = descriptor(&data, "a.ndjson");
-    let deadline =
-        SystemTime::now() + RUNTIME_SHUTDOWN + RESPONSE_MARGIN + Duration::from_millis(200);
+    let hour = Duration::from_secs(3_600);
+    let drain = hour - RUNTIME_SHUTDOWN - RESPONSE_MARGIN - Duration::from_millis(200);
     let response = bounded(handle_batch(
         event(&[(Some("a"), &body)]),
-        deadline,
-        Duration::ZERO,
+        SystemTime::now() + hour,
+        drain,
         assemble(pipeline, sink),
     ))
     .await

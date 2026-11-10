@@ -163,8 +163,9 @@ The framework never uses librdkafka's position-based auto-commit. Instead:
   covering unwritten data.
 - That synchronous commit waits up to 10 seconds for the group's answer, so a
   coordinator that stops answering holds a revocation or a stop for no longer.
-  A commit with no answer in that time counts as failed, and its offsets replay
-  on the next start. A run that ends because its source drained then exits
+  A commit with no answer in that time counts as failed. It can still land
+  later, and if it does not, its partitions are read again from their last
+  committed offset. A run that ends because its source drained then exits
   `Failed`. The source's close waits up to another 10 seconds for the consumer,
   which then closes in the background.
 - A rebalance *error* (an event that is neither an assignment nor a

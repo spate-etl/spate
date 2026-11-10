@@ -145,7 +145,7 @@ const ASSIGN_HOLD: Duration = Duration::from_secs(3);
 /// Bound on waiting for the commits sent together, by one accept's starts or
 /// one flush, and on the drop's wait for a close held by a commit that went
 /// unanswered. An unanswered start leaves the offers held for the next attempt,
-/// and an unanswered flush counts as failed, so its offsets replay.
+/// and an unanswered flush counts as failed.
 const COMMIT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// How long an offer whose start could not be settled waits for its next
@@ -799,16 +799,8 @@ impl KafkaSource {
         let mut offers = Vec::with_capacity(kept.len());
         let mut starts = Vec::with_capacity(kept.len());
         for ((k, tpl, start), commit) in kept.into_iter().zip(sent) {
-            let waited = commit.map(|commit| {
-                let budget = until.saturating_duration_since(self.clock.now());
-                #[cfg(test)]
-                self.before_call(BrokerCall::CommitWait { k, budget });
-                commit.wait(budget)
-            });
+            let waited = commit.map(|commit| self.await_commit(k, &commit, until));
             if let Some(Err(e)) = waited {
-                if e.rdkafka_error_code() == Some(RDKafkaErrorCode::OperationTimedOut) {
-                    self.commit_unanswered = true;
-                }
                 match start_failure("committing a start offset", &e)? {
                     StartFailure::Discard => {
                         self.discard_refused(k, &tpl)?;
@@ -821,6 +813,29 @@ impl KafkaSource {
             starts.push(start);
         }
         Ok((offers, starts, retry))
+    }
+
+    /// Wait until `until` for the answer to consumer `k`'s `commit`. A commit left
+    /// unanswered marks the source, so the consumers' close runs off the dropping
+    /// thread.
+    fn await_commit(
+        &mut self,
+        k: usize,
+        commit: &PendingCommit<SourceContext>,
+        until: Instant,
+    ) -> KafkaResult<()> {
+        let budget = until.saturating_duration_since(self.clock.now());
+        #[cfg(test)]
+        self.before_call(BrokerCall::CommitWait { k, budget });
+        #[cfg(not(test))]
+        let _ = k;
+        let waited = commit.wait(budget);
+        if let Err(e) = &waited
+            && e.rdkafka_error_code() == Some(RDKafkaErrorCode::OperationTimedOut)
+        {
+            self.commit_unanswered = true;
+        }
+        waited
     }
 
     /// Discard consumer `k`'s offer for a start the group has refused.
@@ -1937,12 +1952,7 @@ impl Source for KafkaSource {
         let until = self.clock.now() + COMMIT_TIMEOUT;
         let mut first_error = None;
         for (k, commit) in sent.into_iter().enumerate() {
-            let waited = commit.and_then(|commit| {
-                let budget = until.saturating_duration_since(self.clock.now());
-                #[cfg(test)]
-                self.before_call(BrokerCall::CommitWait { k, budget });
-                commit.wait(budget)
-            });
+            let waited = commit.and_then(|commit| self.await_commit(k, &commit, until));
             match waited {
                 // Nothing stored since the last commit: not an error.
                 Ok(())
@@ -1950,9 +1960,6 @@ impl Source for KafkaSource {
                     rdkafka::error::RDKafkaErrorCode::NoOffset,
                 )) => {}
                 Err(e) => {
-                    if e.rdkafka_error_code() == Some(RDKafkaErrorCode::OperationTimedOut) {
-                        self.commit_unanswered = true;
-                    }
                     // With one consumer the controller's line on the returned
                     // error says the same.
                     if self.members.len() > 1 {

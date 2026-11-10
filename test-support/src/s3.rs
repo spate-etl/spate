@@ -476,6 +476,10 @@ fn ready(store: Store, api: SocketAddr, container: &Container<GenericImage>) -> 
 
 /// Writes `failure` and the tail of `container`'s output to stderr, where the
 /// test's captured output keeps its lines, and returns `failure`.
+#[expect(
+    clippy::print_stderr,
+    reason = "a failed start's container output is read from the test's output"
+)]
 fn reported(store: Store, container: &Container<GenericImage>, failure: String) -> String {
     eprintln!(
         "{failure}\n{}",

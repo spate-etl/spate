@@ -151,7 +151,6 @@ The profiles live in `.config/nextest.toml`:
 | `mutants` | cargo-mutants | 30 s | 120 s |
 
 No profile retries a failed test.
-The one retry in CI is on the `S3 rgw` lane, set by `NEXTEST_RETRIES` in its job.
 
 The `docker` profile never kills a test.
 

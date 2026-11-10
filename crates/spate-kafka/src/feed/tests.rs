@@ -695,6 +695,19 @@ fn idle_publisher() -> KafkaFeedPublisher {
     idle_publisher_over(&unreachable_config(""))
 }
 
+/// A latched feed answers a depth read with the latched error itself, since
+/// the depth thread may be the thread that ended. Regression for #1760.
+#[test]
+fn a_latched_feed_answers_a_depth_read_with_its_error() {
+    use spate_core::feed::DepthOf;
+    let feed = idle_feed();
+    feed.core.latch("the depth thread ended");
+    let mut reading = feed.read_depth(DepthOf::DeadLetters).expect("a reading");
+    let e = reading.try_outcome().expect("settled").unwrap_err();
+    assert_eq!(e.kind, FeedErrorKind::Fatal);
+    assert!(e.reason.contains("the depth thread ended"), "{e}");
+}
+
 /// Pins that the publish-only handle reports no depth, since it reads
 /// nothing, so a bounded job refuses it at startup.
 #[test]

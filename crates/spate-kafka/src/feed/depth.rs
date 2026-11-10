@@ -14,7 +14,7 @@
 //! end offset counts offsets: a transaction marker, an aborted record and a
 //! record behind an open transaction each read as one.
 
-use super::{Core, Topics};
+use super::{Core, LatchOnPanic, Topics};
 use crate::client::list_offsets;
 use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::error::{KafkaError, RDKafkaErrorCode};
@@ -202,10 +202,14 @@ pub(crate) fn dead_letter_depth(
 /// Answer each depth request from `requests` until the feed drops its
 /// sender or stops.
 pub(crate) fn run(
-    core: &Core,
+    core: &Arc<Core>,
     offsets: &dyn Offsets,
     requests: &Receiver<(DepthOf, DepthReporter)>,
 ) {
+    let _guard = LatchOnPanic {
+        core: Arc::clone(core),
+        thread: "depth",
+    };
     let mut hold = Hold::default();
     loop {
         let (of, reporter) = match requests.recv_timeout(SERVE_EVERY) {
@@ -499,7 +503,7 @@ mod tests {
     /// over a job.
     #[test]
     fn the_depth_thread_serves_its_client_between_requests() {
-        let core = core(3);
+        let core = Arc::new(core(3));
         let serving = Serving::default();
         let (requests, received) = mpsc::channel::<(DepthOf, DepthReporter)>();
         std::thread::scope(|s| {
@@ -516,7 +520,7 @@ mod tests {
     /// so the reader's park ends on the answer.
     #[test]
     fn an_answered_depth_read_wakes_the_reader() {
-        let core = core(3);
+        let core = Arc::new(core(3));
         let (waker, park) = spate_core::feed::wake_channel();
         core.lock().signal.set_waker(waker, false);
         let offsets = Scripted::default().topic("units-dead", &[(0, Offset::Invalid, 0, 0)]);
@@ -609,7 +613,7 @@ mod tests {
     /// job's line reaches the log.
     #[test]
     fn the_depth_thread_counts_a_hold_across_requests() {
-        let core = core(3);
+        let core = Arc::new(core(3));
         let offsets = Scripted::default()
             .topic("units", &[(0, Offset::Offset(3), 0, 9)])
             .topic("units-retry", &[(0, Offset::Invalid, 0, 0)]);
@@ -899,11 +903,42 @@ mod tests {
         assert!(e.reason.contains("`dead`"), "{e}");
     }
 
+    /// A panic on the depth thread latches the feed, so the run fails where
+    /// it would otherwise read a depth nothing answers. Regression for #1760.
+    #[test]
+    #[expect(clippy::disallowed_methods, reason = "the test joins the thread")]
+    fn a_panic_on_the_depth_thread_latches_the_feed() {
+        struct Panics;
+        impl Offsets for Panics {
+            fn partitions(&self, _: &Arc<str>) -> Result<Vec<i32>, FeedError> {
+                panic!("scripted")
+            }
+            fn committed(&self, _: &[Partition]) -> Result<Vec<Offset>, FeedError> {
+                unreachable!()
+            }
+            fn listed(&self, _: &[Partition], _: Offset) -> Result<Vec<i64>, FeedError> {
+                unreachable!()
+            }
+        }
+        let core = Arc::new(core(3));
+        let (requests, received) = mpsc::channel();
+        let (reporter, _reading) = spate_core::feed::depth_reading();
+        requests.send((DepthOf::DeadLetters, reporter)).unwrap();
+        let thread = {
+            let core = Arc::clone(&core);
+            std::thread::spawn(move || run(&core, &Panics, &received))
+        };
+        assert!(thread.join().is_err(), "the read panics");
+        let latched = core.lock().signal.latched().cloned().expect("latched");
+        assert_eq!(latched.kind, FeedErrorKind::Fatal);
+        assert_eq!(latched.reason, "the Kafka feed's depth thread panicked");
+    }
+
     /// Pins that the depth thread reads nothing once the feed has stopped,
     /// and the reading it drops settles Retryable.
     #[test]
     fn a_stopped_feed_reads_no_depth() {
-        let core = core(3);
+        let core = Arc::new(core(3));
         core.stop.store(true, Ordering::Release);
         let offsets = Scripted::default().topic("units-dead", &[(0, Offset::Invalid, 0, 0)]);
         let (requests, received) = mpsc::channel();
@@ -920,7 +955,7 @@ mod tests {
     /// with that error, whatever the offsets read.
     #[test]
     fn a_latched_feed_answers_a_depth_read_with_its_error() {
-        let core = core(3);
+        let core = Arc::new(core(3));
         core.latch("the broker rejected the credential");
         let offsets = Scripted::default().topic("units-dead", &[(0, Offset::Invalid, 0, 0)]);
         let (requests, received) = mpsc::channel();

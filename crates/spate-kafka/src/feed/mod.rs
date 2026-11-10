@@ -1045,6 +1045,12 @@ impl Feed for KafkaFeed {
 
     fn read_depth(&self, of: DepthOf) -> Option<DepthReading> {
         let (reporter, reading) = depth_reading();
+        // The depth thread may be the one that latched the feed, and then
+        // nothing is left to answer.
+        if let Some(fatal) = self.lock().signal.latched().cloned() {
+            reporter.report(Err(fatal));
+            return Some(reading);
+        }
         if let Some(depth) = &self.depth {
             // A depth thread that has ended drops the reporter, and the
             // reading settles Retryable.

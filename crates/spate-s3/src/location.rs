@@ -13,11 +13,10 @@ use crate::config::Compression;
 use crate::error::store_error;
 use bytes::Bytes;
 use futures_util::StreamExt as _;
-use futures_util::future::{Either, select};
 use object_store::aws::AmazonS3Builder;
 use object_store::path::Path;
 use object_store::{ObjectStore, ObjectStoreExt, ObjectStoreScheme};
-use spate_core::clock::tokio::Clock;
+use spate_core::clock::tokio::{Clock, before};
 use spate_core::config::{ConfigError, redact};
 use spate_core::error::{ErrorClass, SourceError};
 use spate_core::source::StopSignal;
@@ -441,24 +440,21 @@ pub(crate) async fn await_fingerprint(
         // each poll step, so neither waits on a store that does not answer.
         let outcome = loop {
             let tick = (next + FINGERPRINT_POLL).min(deadline);
-            match select(read, clock.sleep_until(tick)).await {
-                Either::Left((outcome, _)) => break outcome,
-                Either::Right(((), pending)) => {
-                    next = tick;
-                    if clock.now() >= deadline {
-                        if answered {
-                            return Err(timed_out(&last_error));
-                        }
-                        return Err(location.fatal(
-                            &object,
-                            format_args!("the store answered no read of it within {window:?}"),
-                        ));
-                    }
-                    if stop.is_set() {
-                        return Ok(());
-                    }
-                    read = pending;
+            if let Some(outcome) = before(clock, tick, &mut read).await {
+                break outcome;
+            }
+            next = tick;
+            if clock.now() >= deadline {
+                if answered {
+                    return Err(timed_out(&last_error));
                 }
+                return Err(location.fatal(
+                    &object,
+                    format_args!("the store answered no read of it within {window:?}"),
+                ));
+            }
+            if stop.is_set() {
+                return Ok(());
             }
         };
         answered = true;

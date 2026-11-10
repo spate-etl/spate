@@ -408,6 +408,36 @@ fn a_stop_during_a_read_that_never_answers_ends_the_run() {
     assert!(script.delivered().is_empty(), "nothing was received");
 }
 
+/// Pins that a read in flight is kept across poll steps: a store slower
+/// than one step is not asked again while it has not answered.
+#[test]
+fn a_read_in_flight_is_kept_across_poll_steps() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    let (store, hooks) = location_store();
+    hooks.hang_gets();
+    let (feed, _script) = scripted_feed();
+    let clock = TestClock::frozen();
+    let l = launch_worker(
+        &data,
+        feed,
+        Some(LOCATION),
+        Some(store),
+        Some(Arc::clone(&clock)),
+    );
+    wait_for_gets(&hooks, 1);
+    clock.advance_stepped(3 * POLL, POLL, || {
+        let next = clock.now() + POLL;
+        wait_until(DEADLINE, "the wait re-arms at the next step", || {
+            clock.has_slept_until(next)
+        });
+    });
+    assert_eq!(hooks.gets(), 1, "the read in flight is not issued again");
+    l.shutdown.trigger();
+    clock.advance(POLL);
+    assert_eq!(exit(&l).state, ExitState::Completed);
+}
+
 /// A test clock that counts wakeups and notes any asked for at an instant
 /// already reached.
 #[derive(Debug)]

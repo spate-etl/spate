@@ -6,139 +6,24 @@
 //! object it names and the S3 test event is acknowledged with nothing read.
 
 use aws_lambda_events::event::sqs::{SqsEvent, SqsMessage};
-use serde::Deserialize;
 use spate::clickhouse::ClickHouseSinkConfig;
 use spate::clock::TestClock;
 use spate::feed::Feed;
-use spate::json::{JsonDeserializerBuilder, NdjsonFramer};
 use spate::pipeline::ShutdownHandle;
 use spate::prelude::*;
-use spate::s3::{DescriptorObject, S3Source, S3SourceConfig, SplitDescriptor};
+use spate::s3::{S3Source, S3SourceConfig};
 use spate_example_lambda_s3::{
-    BoxError, CONFIG, MAX_RECORD_BYTES, Message, MissingId, RESPONSE_MARGIN, RUNTIME_SHUTDOWN,
-    TooShort, handle_batch, messages, run_batch, run_seeded, stop_at,
+    BoxError, CONFIG, MissingId, RESPONSE_MARGIN, RUNTIME_SHUTDOWN, TooShort, handle_batch,
+    messages, run_batch, run_seeded, stop_at,
 };
-use spate_test::{HANG, SinkScript, WriteOutcome, capture_sink, decode_rows};
+use spate_test::{WriteOutcome, capture_sink};
 use std::fs;
-use std::future::{Future, pending};
-use std::path::{Path, PathBuf};
+use std::future::pending;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
-#[derive(Debug, Deserialize)]
-struct Rec {
-    id: String,
-}
-
-/// A record id the chain fails on, which stops the run.
-const POISON: &str = "poison";
-
-const TEST_EVENT: &str = r#"{"Service":"Amazon S3","Event":"s3:TestEvent","Bucket":"b"}"#;
-const FOREIGN: &str = r#"{"Records":[{"eventName":"ObjectCreated:Put","s3":{"bucket":{"name":"b"},"object":{"key":"a.ndjson","size":3}}}]}"#;
-
-fn message(id: &str, body: impl Into<String>) -> Message {
-    Message {
-        id: id.to_owned(),
-        body: body.into(),
-    }
-}
-
-/// A data directory holding `name` with one record per id.
-fn stage(dir: &Path, name: &str, ids: &[&str]) -> PathBuf {
-    let data = dir.join("data");
-    fs::create_dir_all(&data).unwrap();
-    let body: String = ids
-        .iter()
-        .map(|id| format!("{{\"id\":\"{id}\"}}\n"))
-        .collect();
-    fs::write(data.join(name), body).unwrap();
-    data
-}
-
-/// A descriptor body naming the staged object `name`.
-fn descriptor(data: &Path, name: &str) -> String {
-    let path = data.join(name);
-    let object = DescriptorObject {
-        key: path.to_string_lossy().trim_start_matches('/').to_owned(),
-        size: fs::metadata(&path).unwrap().len(),
-        etag: None,
-        last_modified_ms: 1,
-    };
-    String::from_utf8(SplitDescriptor::new(vec![object]).encode().unwrap()).unwrap()
-}
-
-fn yaml(data: &Path, feed: &str) -> String {
-    format!(
-        r#"
-pipeline: {{ name: lambda-s3-test, threads: 1 }}
-admin: {{ listen: none }}
-metrics: {{ exporter: none }}
-feed: {feed}
-source: {{ s3: {{ url: "file://{}/" }} }}
-deserializer: {{ json: {{}} }}
-sink: {{ capture: {{}} }}
-"#,
-        data.display()
-    )
-}
-
-/// The pipeline over `yaml` with `sink`, writing each record's id.
-fn assemble(
-    yaml: String,
-    sink: spate_test::CaptureSink,
-) -> impl FnOnce() -> Result<(Pipeline, S3Source), BoxError> + Send + 'static {
-    move || {
-        let pipeline = Pipeline::from_config(PipelineConfig::from_str(&yaml)?)?;
-        let source =
-            S3Source::from_component_config(&pipeline.config().source, pipeline.io_handle())?
-                .with_framer(|| Box::new(NdjsonFramer::new(MAX_RECORD_BYTES)));
-        let section = pipeline
-            .config()
-            .deserializer
-            .clone()
-            .ok_or("deserializer")?;
-        let pipeline = pipeline.sink(sink)?.chains(move |ctx| {
-            let chunk = ctx.chunk();
-            let deser = JsonDeserializerBuilder::from_component(&section)
-                .and_then(|b| b.for_source_framing(ctx.source_framing))
-                .expect("deserializer section")
-                .build_serde::<Rec>();
-            chain_owned::<Rec, _>(deser)
-                .try_map(
-                    |r: Rec| match r.id.as_str() {
-                        POISON => Err("a poison record"),
-                        _ => Ok(r.id.into_bytes()),
-                    },
-                    ErrorPolicy::Fail,
-                )
-                .sink(
-                    spate_test::TestEncoder,
-                    KeyHashRouter,
-                    chunk,
-                    ctx.queues,
-                    ctx.budget,
-                )
-                .build()
-        });
-        Ok((pipeline, source))
-    }
-}
-
-fn rows(script: &SinkScript) -> Vec<String> {
-    let mut rows: Vec<String> = script
-        .writes()
-        .iter()
-        .filter(|w| w.result == spate_test::ScriptedResult::Ok)
-        .flat_map(|w| decode_rows(&w.payload))
-        .map(|r| String::from_utf8(r).unwrap())
-        .collect();
-    rows.sort();
-    rows
-}
-
-async fn bounded<F: Future>(f: F) -> F::Output {
-    tokio::time::timeout(HANG, f).await.expect("the batch ends")
-}
+mod support;
+use support::*;
 
 /// Pins that acknowledged units are not reported: a test event and a
 /// readable object leave no failure, and the object's rows are written.

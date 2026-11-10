@@ -47,6 +47,11 @@ sink:
 # ANCHOR_END: config
 "#;
 
+/// The function's log filter when `RUST_LOG` is unset. The CloudWatch recorder
+/// logs an error for each histogram value past 100 in one invocation, which a
+/// per-poll histogram passes in every invocation, so its collector is off.
+pub const LOG_FILTER: &str = "info,metrics_cloudwatch_embedded::collector=off";
+
 /// The longest NDJSON record the framer reads.
 pub const MAX_RECORD_BYTES: usize = 1 << 20;
 

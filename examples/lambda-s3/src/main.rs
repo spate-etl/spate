@@ -22,7 +22,7 @@ use spate::clickhouse::{
 use spate::json::{JsonDeserializerBuilder, NdjsonFramer};
 use spate::prelude::*;
 use spate::s3::S3Source;
-use spate_example_lambda_s3::{BoxError, CONFIG, MAX_RECORD_BYTES, handle_batch};
+use spate_example_lambda_s3::{BoxError, CONFIG, LOG_FILTER, MAX_RECORD_BYTES, handle_batch};
 
 /// One NDJSON record.
 #[derive(Debug, Deserialize)]
@@ -85,7 +85,7 @@ fn assemble() -> Result<(Pipeline, S3Source), BoxError> {
 #[tokio::main]
 async fn main() -> Result<(), Error> {
     // Before the first pipeline, so the handler's own lines are logged too.
-    spate::telemetry::init(LogFormat::Json, "info");
+    spate::telemetry::init(LogFormat::Json, LOG_FILTER);
     let drain_timeout = PipelineConfig::from_str(CONFIG)?.checkpoint.drain_timeout;
     // ANCHOR: metrics
     let metrics = metrics_cloudwatch_embedded::Builder::new()

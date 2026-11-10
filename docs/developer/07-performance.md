@@ -97,6 +97,26 @@ The `bench counted` command runs the guard after the benches.
 CI runs it on each shard as a gate, while the counts themselves stay advisory.
 The guard's tests run under `cargo xtask tidy self-test`, against captured profiles of both shapes, and need no valgrind.
 
+### Rerun a moved case at one codegen unit
+
+When a counted case moves on a change that did not touch its code, run that case's bench at base and at head again with one codegen unit.
+Set `CARGO_PROFILE_BENCH_CODEGEN_UNITS=1` on the bench's own command, as this command does for the checkpoint bench:
+
+```sh
+CARGO_PROFILE_BENCH_CODEGEN_UNITS=1 cargo bench -p spate-core --locked --bench checkpoint_gungraun
+```
+
+If base and head agree at one codegen unit, the case did not regress, because the difference came from how rustc divided the crate into codegen units.
+
+**Why:** the bench profile builds each crate as 16 codegen units, and whether a call is inlined can depend on which unit each function lands in.
+Adding functions anywhere in a crate can move that split.
+A change that added functions to `spate-core`'s `feed` and `pipeline` modules moved the `narrow_ticks` case of `checkpoint_gungraun` by 5.2% on aarch64 in CI, because two `crossbeam-channel` `send` calls on the ack path stopped being inlined.
+Built at one codegen unit in an aarch64 container, base and head counted within 0.06% of each other.
+
+Leave the bench profile at the default number of codegen units.
+
+**Why:** a downstream build uses the default unless the user's own build sets one, so a bench at one codegen unit would count code that users do not run.
+
 ### Add a feature arm only when a feature swaps an implementation
 
 CI runs one counted job per package, feature arm and architecture, on Linux x86_64 and aarch64.

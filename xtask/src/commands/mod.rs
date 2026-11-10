@@ -594,18 +594,14 @@ fn hack(root: &Path, explain: bool, sel: &Select) -> Outcome {
     let probe = Step::new("cargo", ["--version"]);
     if explain {
         println!("{}", probe.display());
-    } else if !denies_warnings(&run::capture(root, &probe)?)? {
-        let (major, minor) = DENY_WARNINGS_SINCE;
-        return Err(Error::msg(format!(
-            "the feature matrix needs cargo {major}.{minor} or later to deny warnings \
-             (rustup update stable)"
-        )));
+    } else {
+        require_deny_warnings(&run::capture(root, &probe)?)?;
     }
     run::steps(root, explain, &hack_steps(sel))
 }
 
-/// Whether the cargo that printed `version` reads `build.warnings`.
-fn denies_warnings(version: &str) -> Result<bool, Error> {
+/// Refuses the cargo that printed `version` when it ignores `build.warnings`.
+fn require_deny_warnings(version: &str) -> Outcome {
     let unreadable = || Error::msg(format!("cannot read a cargo version from {version:?}"));
     let number = version.split_whitespace().nth(1).ok_or_else(unreadable)?;
     let mut parts = number.split(['.', '-']);
@@ -615,7 +611,14 @@ fn denies_warnings(version: &str) -> Result<bool, Error> {
             .and_then(|p| p.parse().ok())
             .ok_or_else(unreadable)
     };
-    Ok((next()?, next()?) >= DENY_WARNINGS_SINCE)
+    if (next()?, next()?) >= DENY_WARNINGS_SINCE {
+        return Ok(());
+    }
+    let (major, minor) = DENY_WARNINGS_SINCE;
+    Err(Error::msg(format!(
+        "the feature matrix needs cargo {major}.{minor} or later to deny warnings \
+         (rustup update stable)"
+    )))
 }
 
 fn hack_steps(sel: &Select) -> Vec<Step<'static>> {
@@ -766,14 +769,23 @@ mod tests {
     /// because it would pass a build with warnings.
     #[test]
     fn the_feature_matrix_refuses_a_cargo_that_ignores_build_warnings() {
-        let reads = |v: &str| super::denies_warnings(v).expect(v);
-        assert!(!reads("cargo 1.96.1 (356927216 2026-06-26)"));
-        assert!(reads("cargo 1.97.0 (0a1b2c3d4 2026-08-07)"));
-        assert!(reads("cargo 1.100.0-nightly (5f94df478 2026-11-01)"));
-        assert!(reads("cargo 2.0.0"));
-        assert!(super::denies_warnings("cargo").is_err());
-        assert!(super::denies_warnings("cargo 1.x.0").is_err());
-        assert!(super::denies_warnings("cargo 1").is_err());
+        let refusal = |v: &str| super::require_deny_warnings(v).err().map(|e| e.message);
+        assert_eq!(
+            refusal("cargo 1.96.1 (356927216 2026-06-26)").as_deref(),
+            Some(
+                "the feature matrix needs cargo 1.97 or later to deny warnings \
+                 (rustup update stable)"
+            )
+        );
+        assert_eq!(refusal("cargo 1.97.0 (0a1b2c3d4 2026-08-07)"), None);
+        assert_eq!(refusal("cargo 1.100.0-nightly (5f94df478 2026-11-01)"), None);
+        assert_eq!(refusal("cargo 2.0.0"), None);
+        for unreadable in ["cargo", "cargo 1.x.0", "cargo 1"] {
+            assert_eq!(
+                refusal(unreadable),
+                Some(format!("cannot read a cargo version from {unreadable:?}"))
+            );
+        }
     }
 
     /// Whether what precedes an occurrence puts it where a shell would run it.

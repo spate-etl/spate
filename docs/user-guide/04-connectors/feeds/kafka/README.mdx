@@ -461,11 +461,22 @@ The depth reader asks the leader its metadata names, and it takes that metadata
 from the broker it used last. When the cut-off broker is the group's coordinator
 and leads the work, retry and dead-letter topics, the depth reader can read
 every end offset from it. A job can then end `Completed` over units written
-since the cut, and a unit dead-lettered since the cut does not fail the job.
+since the cut. A unit that a peer reaching the new leaders dead-lettered since
+the cut does not fail the job either.
 
-Those units are not lost. The group's consumer fetches from the same broker and
-never reads them, so the group's commit stays below them. Once the cut heals, a
-later worker on the group reads them.
+A unit written to the work or retry topic since the cut that no peer has read
+stays above the group's commit, because this worker's consumer fetches from the
+same broker and never reads it. A later worker on the same group reads it.
+
+A unit a peer dead-lettered since the cut is in the dead-letter topic.
+`spate_feed_dead_letter_units` reads through the same depth reader, so it counts
+that unit only once a read reaches the new leader.
+
+Once the cut heals, check the group's lag on the work and retry topics and the
+dead-letter topic's end offsets. Run a worker of the same job on the same group
+to read the units left on the work and retry topics, and copy a dead-lettered
+unit back as
+[Copying dead-lettered units back](#copying-dead-lettered-units-back) describes.
 
 On Redpanda, a cut-off broker stops answering as leader, so a read through it
 fails or reaches the new leader. A failed read starts the window again, or reads

@@ -490,6 +490,35 @@ async fn an_invocation_answers_with_its_failures() {
     assert_eq!(ids, ["n"]);
 }
 
+/// Pins that an invocation stops its run before the deadline. The write is
+/// held for good, so only the handler's stop ends the run, and the unit is
+/// unsettled whether the stop comes before or after its read.
+#[tokio::test]
+async fn an_invocation_stops_its_run_before_the_deadline() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = stage(dir.path(), "a.ndjson", &["a1"]);
+    let (sink, script) = capture_sink(1, 1);
+    script.enqueue_global(WriteOutcome::ok().held());
+    let pipeline = yaml(&data, "{ memory: {} }") + "checkpoint: { drain_timeout: 100ms }\n";
+    let body = descriptor(&data, "a.ndjson");
+    let deadline =
+        SystemTime::now() + RUNTIME_SHUTDOWN + RESPONSE_MARGIN + Duration::from_millis(200);
+    let response = bounded(handle_batch(
+        event(&[(Some("a"), &body)]),
+        deadline,
+        Duration::ZERO,
+        assemble(pipeline, sink),
+    ))
+    .await
+    .unwrap();
+    let ids: Vec<&str> = response
+        .batch_item_failures
+        .iter()
+        .map(|f| f.item_identifier.as_str())
+        .collect();
+    assert_eq!(ids, ["a"]);
+}
+
 /// Pins that an invocation with too little time left fails before it builds
 /// a pipeline.
 #[tokio::test]

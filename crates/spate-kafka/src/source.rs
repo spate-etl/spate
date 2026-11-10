@@ -737,7 +737,7 @@ impl KafkaSource {
         Ok(Ok(starts))
     }
 
-    /// Report `call` to a test's hook before the accept makes it.
+    /// Report `call` to a test's hook before the source makes it.
     #[cfg(test)]
     fn before_call(&mut self, call: BrokerCall) {
         if let Some(hook) = self.on_broker_call.as_mut() {
@@ -4042,8 +4042,9 @@ mod tests {
         );
     }
 
-    /// The bounds one accept spends at sixteen consumers, read on a frozen clock
-    /// that the hook moves by what each broker call costs.
+    /// The broker calls one accept or one commit flush makes at sixteen
+    /// consumers, read on a frozen clock that the hook moves by what each call
+    /// costs.
     mod accept_bounds {
         use super::*;
         use crate::testutil::mock::MockKafka;
@@ -4055,10 +4056,11 @@ mod tests {
         type Calls = Arc<Mutex<Vec<BrokerCall>>>;
 
         /// A mock cluster with one `orders` partition per consumer, on which no
-        /// group forms. No test here needs a group, since the one that commits
-        /// sets its generation by hand. The mock reads nothing more from a
-        /// member whose join it holds, which would leave that member's calls
-        /// waiting in real time.
+        /// group forms. No test here needs a group: the start commit's test sets
+        /// its generation by hand, and a flush's consumers hold no assignment, so
+        /// each answers `NoOffset` before any request. The mock reads nothing
+        /// more from a member whose join it holds, which would leave that
+        /// member's calls waiting in real time.
         fn mock() -> MockKafka {
             let cluster = MockKafka::new();
             let partitions = i32::try_from(CONSUMERS).expect("partitions");

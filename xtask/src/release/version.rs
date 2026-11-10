@@ -150,7 +150,7 @@ fn component(s: &str) -> Option<u64> {
 
 /// Whether `a < b`, component-wise. `X.Y` reads as `X.Y.0`, so an MSRV pair
 /// compares directly.
-fn version_lt(a: &str, b: &str) -> Result<bool, Error> {
+pub(crate) fn version_lt(a: &str, b: &str) -> Result<bool, Error> {
     Ok(loose(a)? < loose(b)?)
 }
 

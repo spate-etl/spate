@@ -20,6 +20,7 @@ use crate::checks::container_image::{
     Capability, Mode, pull_all, selected_capabilities, selected_is_primary,
 };
 use crate::checks::{adr, attribution, changelog, docsrs, site_check, subject, sync_labels};
+use crate::release::version::version_lt;
 use crate::run::{self, Error, Outcome, Step};
 
 pub(crate) use lint::TidyCheck;
@@ -587,7 +588,7 @@ const DENY_WARNINGS: (&str, &str) = ("CARGO_BUILD_WARNINGS", "deny");
 
 /// The first cargo release that reads `build.warnings`. An older cargo ignores
 /// it without a word and passes the build.
-const DENY_WARNINGS_SINCE: (u32, u32) = (1, 97);
+const DENY_WARNINGS_SINCE: &str = "1.97";
 
 /// The feature matrix, and the test suite on default features.
 fn hack(root: &Path, explain: bool, sel: &Select) -> Outcome {
@@ -603,20 +604,17 @@ fn hack(root: &Path, explain: bool, sel: &Select) -> Outcome {
 /// Refuses the cargo that printed `version` when it ignores `build.warnings`.
 fn require_deny_warnings(version: &str) -> Outcome {
     let unreadable = || Error::msg(format!("cannot read a cargo version from {version:?}"));
-    let number = version.split_whitespace().nth(1).ok_or_else(unreadable)?;
-    let mut parts = number.split(['.', '-']);
-    let mut next = || -> Result<u32, Error> {
-        parts
-            .next()
-            .and_then(|p| p.parse().ok())
-            .ok_or_else(unreadable)
-    };
-    if (next()?, next()?) >= DENY_WARNINGS_SINCE {
+    // `cargo 1.100.0-nightly (…)` names its release before the hyphen.
+    let release = version
+        .split_whitespace()
+        .nth(1)
+        .and_then(|word| word.split('-').next())
+        .ok_or_else(unreadable)?;
+    if !version_lt(release, DENY_WARNINGS_SINCE).map_err(|_| unreadable())? {
         return Ok(());
     }
-    let (major, minor) = DENY_WARNINGS_SINCE;
     Err(Error::msg(format!(
-        "the feature matrix needs cargo {major}.{minor} or later to deny warnings \
+        "the feature matrix needs cargo {DENY_WARNINGS_SINCE} or later to deny warnings \
          (rustup update stable)"
     )))
 }

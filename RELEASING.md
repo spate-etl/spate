@@ -21,7 +21,9 @@ single commit carrying every generated artifact.
 Pre-1.0, **a breaking change ships in a minor bump**. Cargo treats `0.x`
 minors as incompatible, so `0.2 -> 0.3` is the breaking step and `0.2.0 ->
 0.2.1` must not be. An MSRV move is a minor bump for the same reason: the
-Cargo book calls raising `rust-version` a minor incompatibility. Only the
+Cargo book calls raising `rust-version` a minor incompatibility. A new feature
+or a deprecation is a minor bump too, as SemVer has it, so a patch release
+carries fixes and each feature ships in the minor its milestone plans. Only the
 newest `0.x` minor is supported.
 
 ## Milestones and priorities
@@ -59,9 +61,9 @@ gh workflow run release.yml -f version=0.3.0
 ```
 
 The workflow derives the version independently and fails when the two
-disagree: a changelog fragment that opens with `**Breaking:**`, or a
-`rust-version` raise since the last tag, means a minor bump; anything else
-means a patch. Commit subjects play no part.
+disagree: a changelog fragment that opens with `**Breaking:**`, an `added` or
+`deprecated` fragment, or a `rust-version` raise since the last tag, means a
+minor bump; anything else means a patch. Commit subjects play no part.
 `cargo xtask release version derive` prints the same answer locally.
 
 Everything after the input runs unattended. The release pull request

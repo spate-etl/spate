@@ -20,7 +20,7 @@ pub use corpus::{fnv1a, pin};
 pub use elasticmq::{ElasticMq, Message, QUERY_PORT};
 pub use http::{http, http_with_body, http_with_headers};
 #[cfg(feature = "kafka")]
-pub use kafka::{BROKER_FROM_INSIDE, Broker, KAFKA_PORT, KafkaBroker};
+pub use kafka::{BROKER_FROM_INSIDE, Broker, CLUSTER_NODES, KAFKA_PORT, KafkaBroker, KafkaCluster};
 #[cfg(feature = "s3")]
 pub use s3::{ACCESS_KEY, REGION, RGW_OPAQUE_DATA, S3Store, SECRET_KEY, Store};
 #[cfg(feature = "tls")]

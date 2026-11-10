@@ -1,7 +1,7 @@
-//! E2E scenario: a rolling restart of three brokers under load. Each controlled
-//! stop moves that broker's partition leaders, and restarting all three moves the
-//! group coordinator too. The pipeline reads on through the new leaders and loses
-//! nothing.
+//! E2E scenario: a rolling restart of three brokers under load, on the broker
+//! the selected Kafka lane runs. Each controlled stop moves that broker's
+//! partition leaders, and restarting all three moves the group coordinator too.
+//! The pipeline reads on through the new leaders and loses nothing.
 //!
 //! Selecting it:
 //!
@@ -13,12 +13,12 @@
 #[path = "e2e_support/mod.rs"]
 mod support;
 
+use spate_test_support::CLUSTER_NODES;
 use std::time::Duration;
 use support::*;
 
 /// The exit code of a container the runtime had to kill.
 const KILLED: i64 = 137;
-const BROKERS: i32 = 3;
 const IN_SYNC: usize = 3;
 const WAVE: usize = 15_000;
 const DEADLINE: Duration = Duration::from_secs(180);
@@ -29,10 +29,10 @@ const DEADLINE: Duration = Duration::from_secs(180);
 #[test]
 #[ignore = "requires Docker"]
 fn a_rolling_restart_moves_leaders_and_loses_nothing() {
-    let h = Harness::up_cluster([19201, 19202, 19203]);
+    let h = Harness::up_cluster();
     let params = PipelineParams::defaults("e2e-leader-move", 19194);
     let partitions = 6;
-    let waves = 1 + BROKERS as usize;
+    let waves = 1 + usize::try_from(CLUSTER_NODES).expect("a node count");
     let total = waves * WAVE;
 
     h.create_topic(&params.topic, partitions);
@@ -46,7 +46,17 @@ fn a_rolling_restart_moves_leaders_and_loses_nothing() {
         h.uniq(&params.table) == WAVE as u64
     });
 
-    for (node, wave) in (1..=BROKERS).zip(waves) {
+    for (node, wave) in (1..=CLUSTER_NODES).zip(waves) {
+        // Redpanda places leaders unevenly, and leaves a restarted node leading
+        // nothing until its balancer runs.
+        let states = h.partition_states(&params.topic).expect("partition states");
+        if states.iter().all(|p| p.leader != node) {
+            h.transfer_leader(&params.topic, 0, node);
+            wait_until(DEADLINE, "the moved leader", || {
+                h.partition_states(&params.topic)
+                    .is_some_and(|states| states.iter().any(|p| p.leader == node))
+            });
+        }
         let states = h.partition_states(&params.topic).expect("partition states");
         assert!(
             states.iter().any(|p| p.leader == node),

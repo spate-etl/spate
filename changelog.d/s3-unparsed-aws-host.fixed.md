@@ -1,0 +1,3 @@
+**S3 URL on an unread `amazonaws.com` host** (`spate-s3`)
+
+An S3 source `url` on an `amazonaws.com` host the client does not parse now fails when the pipeline loads, with an error at `source.s3.url` that lists the host forms the source reads. This covers `https://s3.amazonaws.com/<bucket>/`, the `s3-<region>` forms and the host of another AWS service. In previous versions such a URL loaded, and the source failed at start with `URL did not match any known pattern for scheme`, which did not name the setting. Write `https://s3.<region>.amazonaws.com/<bucket>/<prefix>` or `s3://<bucket>/<prefix>` with the region under `store`.

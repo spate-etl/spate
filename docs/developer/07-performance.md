@@ -99,14 +99,14 @@ The guard's tests run under `cargo xtask tidy self-test`, against captured profi
 
 ### Rerun a moved case at one codegen unit
 
-When a counted case moves on a change that did not touch its code, run that case at base and at head again with one codegen unit:
+When a counted case moves on a change that did not touch its code, run that case's bench at base and at head again with one codegen unit.
+Set `CARGO_PROFILE_BENCH_CODEGEN_UNITS=1` on the bench's own command, as this command does for the checkpoint bench:
 
 ```sh
 CARGO_PROFILE_BENCH_CODEGEN_UNITS=1 cargo bench -p spate-core --locked --bench checkpoint_gungraun
 ```
 
-If base and head then agree, the case did not regress.
-The change moved how rustc split the crate.
+If base and head agree at one codegen unit, the case did not regress, because the difference came from how rustc divided the crate into codegen units.
 
 **Why:** the bench profile builds each crate as 16 codegen units, and whether a call is inlined can depend on which unit each function lands in.
 Adding functions anywhere in a crate can move that split.
@@ -115,7 +115,7 @@ Built at one codegen unit in an aarch64 container, base and head counted within 
 
 Leave the bench profile at the default number of codegen units.
 
-**Why:** a downstream build uses the default unless its own manifest sets one, so a bench at one codegen unit would count code that users do not run.
+**Why:** a downstream build uses the default unless the user's own build sets one, so a bench at one codegen unit would count code that users do not run.
 
 ### Add a feature arm only when a feature swaps an implementation
 

@@ -145,10 +145,10 @@ of [Metrics](../../METRICS.md).
   watermark rather than silently advancing (the at-least-once invariant), so
   this is the primary "data is flowing but nothing is committing" signal. The
   pipeline self-terminates after `checkpoint.stalled_fail_after` (default 120s)
-  behind a permanently failed batch, but you want the alert regardless. Restarts
-  that don't clear the cause will loop. A
+  behind a permanently failed batch. On a
   [seeded S3 run](../04-connectors/sources/s3/README.mdx#a-run-on-a-seeded-feed)
-  fails each unit in the batch back to its feed instead.
+  the source fails each unit in the batch back to its feed. You want the alert
+  regardless. Restarts that don't clear the cause will loop.
 - **Abandoned sink batches** —
   `increase(spate_sink_abandoned_batches_total[10m]) > 0`. A batch is
   abandoned when a fatal error class or exhausted `retry.max_attempts`

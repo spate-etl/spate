@@ -123,11 +123,13 @@ poll loop). Report errors map onto the framework taxonomy:
   unknown codes): the framework retries the whole sealed batch with capped
   exponential backoff. Messages already delivered in the failed attempt
   are re-produced, which duplicates records but never loses them.
-- **Fatal** (unknown topic, authorization failures, a message over the
-  broker limit, the idempotent producer's fenced states, and timed-out
-  reports after a broker rejected the connection): the batch is
-  abandoned, its partition watermark stalls, and the pipeline fails once
-  `checkpoint.stalled_fail_after` elapses. A batch whose reports time out
+- **Fatal** (unknown topic, authorization failures, a message over the broker
+  limit, the idempotent producer's fenced states, and timed-out reports after a
+  broker rejected the connection): the batch is abandoned, its partition
+  watermark stalls, and the pipeline fails once `checkpoint.stalled_fail_after`
+  elapses. On a
+  [seeded S3 run](../../sources/s3/README.mdx#a-run-on-a-seeded-feed) the source
+  fails each unit in the batch back to its feed. A batch whose reports time out
   fails once `delivery_timeout` passes.
 
 Oversized records never reach the writer. The encoder's

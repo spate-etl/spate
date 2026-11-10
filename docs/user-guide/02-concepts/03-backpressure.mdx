@@ -98,9 +98,11 @@ control cycle and well inside a commit interval.
 Consequences worth designing around:
 
 - A partition stalled behind a permanently failed batch accumulates at most
-  `max_pending_batches` of replay before `checkpoint.stalled_fail_after`
-  fails the pipeline. The restart replays a bounded tail rather than
-  everything fetched during the stall.
+  `max_pending_batches` of replay before `checkpoint.stalled_fail_after` fails
+  the pipeline. The restart replays a bounded tail rather than everything
+  fetched during the stall. A
+  [seeded S3 run](../04-connectors/sources/s3/README.mdx#a-run-on-a-seeded-feed)
+  has no restart, and the source fails each unit in the batch back to its feed.
 - `spate_checkpoint_pending_batches` reads at or below the configured
   limit; a value above it is a defect, not a tuning signal.
 

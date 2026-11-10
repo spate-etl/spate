@@ -1470,6 +1470,21 @@ mod tests {
         assert!(reader.deliveries.is_empty() && reader.lanes.is_empty());
     }
 
+    /// A stall fails back only the units on the partitions it names: a unit
+    /// whose batches the sink wrote stays held.
+    #[test]
+    fn a_unit_off_the_stalled_partitions_stays_held() {
+        let (mut reader, script, rt) = reader();
+        end_with(&mut reader, &rt, crate::job_end::Finish::Seeded);
+        start(&mut reader);
+        let (p, receipt, _tracker) = hold_one(&mut reader, &script);
+        let (q, _other, _tracker) = hold_one(&mut reader, &script);
+        reader.stalled(&[p]);
+        assert_eq!(lanes_revoked(poll(&mut reader)), [LaneId(p.0)]);
+        assert_eq!(script.failed(), [(receipt, SINK_FAILED.to_owned())]);
+        assert!(reader.lanes.contains_key(&q));
+    }
+
     /// A unit already failing back keeps its first reason when its partition
     /// stalls too, and is failed once. A unit named after it in the same call
     /// fails back too.

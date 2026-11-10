@@ -151,8 +151,8 @@ const START_COMMIT_TIMEOUT: Duration = Duration::from_secs(10);
 /// attempt. Without a pace every poll repeats a blocking broker round trip.
 const START_RETRY_PACE: Duration = Duration::from_secs(1);
 
-/// A broker call an accept is about to make, with the time it may take, for a
-/// test that moves the source's clock between calls.
+/// A broker call an accept or a commit flush is about to make, with the time it
+/// may take, for a test that moves the source's clock between calls.
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BrokerCall {
@@ -160,9 +160,9 @@ enum BrokerCall {
     Lookup { k: usize, budget: Duration },
     /// A listing of end offsets on consumer `k`.
     Listing { k: usize, budget: Duration },
-    /// Consumer `k` sends its start commit.
+    /// Consumer `k` sends a commit.
     CommitSent { k: usize },
-    /// The accept waits for consumer `k`'s start commit.
+    /// The source waits for consumer `k`'s commit.
     CommitWait { k: usize, budget: Duration },
 }
 
@@ -737,7 +737,7 @@ impl KafkaSource {
         Ok(Ok(starts))
     }
 
-    /// Report `call` to a test's hook before the accept makes it.
+    /// Report `call` to a test's hook before the source makes it.
     #[cfg(test)]
     fn before_call(&mut self, call: BrokerCall) {
         if let Some(hook) = self.on_broker_call.as_mut() {
@@ -782,7 +782,7 @@ impl KafkaSource {
                 }
                 #[cfg(test)]
                 self.before_call(BrokerCall::CommitSent { k });
-                match send_commit(&self.members[k].consumer, &start.to_commit) {
+                match send_commit(&self.members[k].consumer, Some(&start.to_commit)) {
                     Ok(pending) => commit = Some(pending),
                     // Nothing reached the group, so nothing here says it moved on.
                     Err(e) => {
@@ -1922,14 +1922,28 @@ impl Source for KafkaSource {
 
     fn flush_commits(&mut self) -> Result<(), SourceError> {
         self.opened()?;
-        // Every consumer commits, even after one fails, so one consumer's
-        // failure does not hold back the others' stored offsets.
+        // Every commit is in flight before the first wait, so a flush takes as
+        // long as the slowest answer. Every consumer commits, even after one
+        // fails, so one consumer's failure does not hold back the others'
+        // stored offsets.
+        let mut sent = Vec::with_capacity(self.members.len());
+        for k in 0..self.members.len() {
+            #[cfg(test)]
+            self.before_call(BrokerCall::CommitSent { k });
+            sent.push(send_commit(&self.members[k].consumer, None));
+        }
         let mut first_error = None;
-        for (k, member) in self.members.iter().enumerate() {
-            match member
-                .consumer
-                .commit_consumer_state(rdkafka::consumer::CommitMode::Sync)
-            {
+        for (k, commit) in sent.into_iter().enumerate() {
+            let waited = commit.and_then(|commit| {
+                #[cfg(test)]
+                self.before_call(BrokerCall::CommitWait {
+                    k,
+                    budget: Duration::MAX,
+                });
+                // No bound, as with librdkafka's sync commit.
+                commit.wait(Duration::MAX)
+            });
+            match waited {
                 // Nothing stored since the last commit: not an error.
                 Ok(())
                 | Err(rdkafka::error::KafkaError::ConsumerCommit(
@@ -4028,8 +4042,9 @@ mod tests {
         );
     }
 
-    /// The bounds one accept spends at sixteen consumers, read on a frozen clock
-    /// that the hook moves by what each broker call costs.
+    /// The broker calls one accept or one commit flush makes at sixteen
+    /// consumers, read on a frozen clock that the hook moves by what each call
+    /// costs.
     mod accept_bounds {
         use super::*;
         use crate::testutil::mock::MockKafka;
@@ -4041,10 +4056,11 @@ mod tests {
         type Calls = Arc<Mutex<Vec<BrokerCall>>>;
 
         /// A mock cluster with one `orders` partition per consumer, on which no
-        /// group forms. No test here needs a group, since the one that commits
-        /// sets its generation by hand. The mock reads nothing more from a
-        /// member whose join it holds, which would leave that member's calls
-        /// waiting in real time.
+        /// group forms. No test here needs a group: the start commit's test sets
+        /// its generation by hand, and a flush's consumers hold no assignment, so
+        /// each answers `NoOffset` before any request. The mock reads nothing
+        /// more from a member whose join it holds, which would leave that
+        /// member's calls waiting in real time.
         fn mock() -> MockKafka {
             let cluster = MockKafka::new();
             let partitions = i32::try_from(CONSUMERS).expect("partitions");
@@ -4211,6 +4227,25 @@ mod tests {
             let waits = (0..CONSUMERS).map(|k| BrokerCall::CommitWait {
                 k,
                 budget: START_COMMIT_TIMEOUT - WAIT * u32::try_from(k).expect("index"),
+            });
+            assert_eq!(calls(&recorded), sent.chain(waits).collect::<Vec<_>>());
+        }
+
+        /// A flush sends every consumer's commit before the first wait, so it
+        /// takes as long as the slowest answer. A consumer with nothing stored
+        /// answers `NoOffset`, and the flush still succeeds.
+        #[test]
+        fn a_flush_sends_every_commit_before_the_first_wait() {
+            let cluster = mock();
+            let (mut source, _clock, recorded) =
+                recording(&cluster, "latest", CONSUMERS, |_| Duration::ZERO);
+            source
+                .flush_commits()
+                .expect("nothing stored is not a failure");
+            let sent = (0..CONSUMERS).map(|k| BrokerCall::CommitSent { k });
+            let waits = (0..CONSUMERS).map(|k| BrokerCall::CommitWait {
+                k,
+                budget: Duration::MAX,
             });
             assert_eq!(calls(&recorded), sent.chain(waits).collect::<Vec<_>>());
         }

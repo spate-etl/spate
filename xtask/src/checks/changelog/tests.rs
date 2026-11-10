@@ -2489,6 +2489,72 @@ fn a_derived_reference_goes_on_its_own_line() {
     );
 }
 
+/// Whether `block` renders `needle` as link text outside any HTML block.
+fn links_outside_html(block: &str, needle: &str) -> bool {
+    use pulldown_cmark::{Event, Parser, Tag, TagEnd};
+    let (mut in_link, mut found) = (false, false);
+    for event in Parser::new(block) {
+        match event {
+            Event::Start(Tag::Link { .. }) => in_link = true,
+            Event::End(TagEnd::Link) => in_link = false,
+            Event::Text(text) | Event::Code(text) if in_link && text.contains(needle) => {
+                found = true;
+            }
+            _ => {}
+        }
+    }
+    found
+}
+
+/// A derived reference after a fragment's closing HTML block gets a blank
+/// line before it, so it renders as a link. An HTML block runs to the next
+/// blank line and would hold the reference as literal text. Regression for
+/// #1801.
+#[test]
+fn a_derived_reference_after_an_html_block_is_set_apart() {
+    let release = Release::new("a_derived_reference_after_an_html_block_is_set_apart");
+    release.0.write(
+        "changelog.d/a.fixed.md",
+        "A thing that ends in HTML.\n\n<div>note</div>\n",
+    );
+    release.0.commit("core: an html thing (#12)");
+    let block = assemble(release.path(), "nothing..HEAD", None, None, &unanswered).unwrap();
+    assert_eq!(
+        block,
+        "\
+### Fixed
+
+- A thing that ends in HTML.
+
+  <div>note</div>
+
+  ([#12])
+
+[#12]: https://github.com/spate-etl/spate/pull/12
+"
+    );
+    assert!(links_outside_html(&block, "#12"), "{block}");
+}
+
+/// The commit form after a closing HTML block gets the same blank line.
+#[test]
+fn a_commit_reference_after_an_html_block_is_set_apart() {
+    let release = Release::new("a_commit_reference_after_an_html_block_is_set_apart");
+    release
+        .0
+        .write("changelog.d/a.fixed.md", "A thing.\n\n<div>note</div>\n");
+    let sha = release.0.commit("core: an html thing with no number");
+    let block = assemble(release.path(), "nothing..HEAD", None, None, &unanswered).unwrap();
+    assert_eq!(
+        block,
+        format!(
+            "### Fixed\n\n- A thing.\n\n  <div>note</div>\n\n  ([`{}`](https://github.com/spate-etl/spate/commit/{sha}))\n",
+            &sha[..7]
+        )
+    );
+    assert!(links_outside_html(&block, &sha[..7]), "{block}");
+}
+
 /// An entry ending in a reference of its own keeps that one, and the reference
 /// the commit would have derived is neither appended nor defined.
 #[test]

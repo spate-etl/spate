@@ -120,9 +120,11 @@ What the token covers, and what it does not:
 
 - **Covered — same-batch retries.** A batch that fails and is retried carries
   the same token, so the destination can recognize and drop the repeat.
-- **NOT covered — crash replay.** After a restart, replayed records re-batch
-  with different boundaries and therefore different tokens. Those rows land
-  twice, and no deduplication window will catch them.
+- **NOT covered — crash replay.** Every token carries an id minted once per
+  process run, so after a restart replayed records carry different tokens.
+  Those rows land twice, and no deduplication window will catch them. Two
+  runs' ids colliding is improbable. Inside the deduplication window, a
+  collision makes the destination discard the later run's rows as repeats.
 
 :::danger
 Nothing in Spate is exactly-once, and no configuration makes it so.

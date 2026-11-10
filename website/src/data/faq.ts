@@ -3,7 +3,7 @@ export function faq(msrv: string, edition: string): Array<{q: string; a: string}
   return [
     {
       q: 'Is delivery exactly-once?',
-      a: 'No. Delivery is at-least-once: an offset commits only after every record derived from it is durably written or intentionally dropped. Crash replay re-batches with new boundaries and can land rows twice, so design target tables to tolerate duplicates.',
+      a: 'No. Delivery is at-least-once: an offset commits only after every record derived from it is durably written or intentionally dropped. Crash replay can land rows twice, so design target tables to tolerate duplicates.',
     },
     {
       q: 'Which Rust version does it need?',

@@ -91,7 +91,8 @@ A deterministic string minted per [sealed batch](#sealed-batch)
 (`SealedBatch::dedup_token`) and reused unchanged across retries of that
 batch. A sink whose destination supports insert deduplication hands the token
 over to make **same-boundary retries** idempotent. It does not cover crash
-replay, because after restart data re-batches with new boundaries and new tokens
+replay, because every token carries an id minted once per process run, so
+replayed data carries new tokens
 ([Delivery guarantees](../02-concepts/02-delivery-guarantees.mdx)).
 
 *Connector mapping:*

@@ -17,7 +17,7 @@ use object_store::aws::AmazonS3Builder;
 use object_store::path::Path;
 use object_store::{ObjectStore, ObjectStoreExt, ObjectStoreScheme};
 use spate_core::clock::tokio::{Clock, before};
-use spate_core::config::{ConfigError, redact};
+use spate_core::config::{ConfigError, UrlRule, redact};
 use spate_core::error::{ErrorClass, SourceError};
 use spate_core::source::StopSignal;
 use std::fmt;
@@ -28,10 +28,12 @@ use url::Url;
 pub(crate) const BAD_PREFIX: &str =
     "has a prefix with an empty segment, a control character or bytes that are not UTF-8";
 
-/// Whether `url` names a user or a password.
-pub(crate) fn has_userinfo(url: &Url) -> bool {
-    !url.username().is_empty() || url.password().is_some()
-}
+/// The rule the source URL, the location and the store endpoint meet. The
+/// store reads no userinfo, and `object_store` quotes the URL whole in its
+/// errors.
+pub(crate) const STORE_URL: UrlRule<'static> = UrlRule::new(
+    "the store does not read it; set credentials under the source's `store` or the environment",
+);
 
 /// The step between a waiting worker's reads of the fingerprint.
 pub(crate) const FINGERPRINT_POLL: Duration = Duration::from_secs(5);
@@ -60,7 +62,7 @@ impl Location {
     /// # Errors
     ///
     /// A [`ConfigError`] naming the key, with the value redacted, for an
-    /// empty value, one that is not a URL, one with userinfo, a query or a
+    /// empty value, one [`STORE_URL`] refuses, one with a query or a
     /// fragment, any scheme but `s3`, `s3a` and `file`, an `s3` or `s3a`
     /// location naming no bucket, a `file` location naming a host, a prefix
     /// with an empty segment, a control character or bytes that are not
@@ -77,15 +79,15 @@ impl Location {
                 message: "`location` must not be empty".into(),
             });
         }
-        let url = Url::parse(location).map_err(|e| refuse(format!("is not a URL: {e}")))?;
-        // The location's store reads none of these, `object_store` quotes the
-        // whole URL in its errors, and a fragment would silently name a
-        // shorter prefix.
-        if has_userinfo(&url) || url.query().is_some() || url.fragment().is_some() {
+        let url = STORE_URL
+            .check(location)
+            .map_err(|e| refuse(e.to_string()))?;
+        // The location's store reads neither, `object_store` quotes the whole
+        // URL in its errors, and a fragment would silently name a shorter
+        // prefix.
+        if url.query().is_some() || url.fragment().is_some() {
             return Err(refuse(
-                "carries userinfo, a query or a fragment, which name nothing in the location's \
-                 store; set credentials under the source's `store`"
-                    .into(),
+                "carries a query or a fragment, which name nothing in the location's store".into(),
             ));
         }
         // Only these forms name the bucket in the same place for every

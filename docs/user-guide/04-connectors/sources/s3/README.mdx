@@ -63,7 +63,7 @@ source:
 | `split_target_bytes` | bytes | `64MiB` | Objects read whole are packed into shared units of at most this many bytes and 16 objects, in listing order, except one whose key is longer than 1,024 bytes or whose ETag is longer than 256. A larger object is [cut into byte ranges](#large-objects-and-byte-ranges) of at most this size when it qualifies, one unit each, and any other is one unit. Floor `1MiB`. Part of the job fingerprint. |
 | `prefetch_bytes` | bytes | `8MiB` | Target window size for ETag-pinned ranged GETs; see [read-ahead memory sizing](#read-parallelism). Must be at least `chunk_bytes`; a smaller value fails at load. |
 | `chunk_bytes` | bytes | `512KiB` | Target size of one buffered chunk. Read-ahead does not depend on it. Zero fails at load. |
-| `store` | string map | `{}` | Raw `object_store` options, applied on top of the environment. Bucket keys fail at load, and so do an `endpoint` carrying userinfo and keys `object_store` does not recognize under an S3 URL — see [the `store` denylist](#the-store-passthrough-and-the-denylist). |
+| `store` | string map | `{}` | Raw `object_store` options, applied on top of the environment. Bucket keys fail at load, and so do an `endpoint` that is not a URL or carries userinfo, and keys `object_store` does not recognize under an S3 URL — see [the `store` denylist](#the-store-passthrough-and-the-denylist). |
 
 Mind the units on the fingerprinted keys: `MB` and `MiB` parse to
 different byte counts (`64MB` = 64,000,000; `64MiB` = 67,108,864), and
@@ -139,8 +139,10 @@ records as a whole arrive in no fixed order.
 field: `region`, `endpoint`, static credentials, `allow_http`, timeouts. Its
 values are applied **on top of the environment** when the client is built from
 `url`, so anything set here overrides what the environment resolved.
-An `endpoint` carrying userinfo fails at load, under any spelling of the key,
-because the client never reads it and its errors quote each request URI.
+An `endpoint` that is not a URL fails at load, under any spelling of the key,
+because the client builds each request URI from it. So does an `endpoint`
+carrying userinfo, because the client never reads it and its errors quote each
+request URI.
 
 Bucket keys are **rejected at load time with an explanation**. The client is
 built from `url`, so a passthrough bucket could never take effect. Rejecting it

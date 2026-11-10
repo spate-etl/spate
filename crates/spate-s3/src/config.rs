@@ -16,7 +16,7 @@ use std::borrow::Cow;
 use std::collections::BTreeMap;
 use url::Url;
 
-use crate::location::{BAD_PREFIX, has_userinfo};
+use crate::location::{BAD_PREFIX, STORE_URL};
 
 /// The source's component type, and the tag its section sits under.
 pub(crate) const TAG: &str = "s3";
@@ -211,14 +211,10 @@ impl S3SourceConfig {
         // The request URIs `object_store` quotes in its errors start with the
         // endpoint.
         for (key, value) in &self.store {
-            if s3_store_key(key) == Some(AmazonS3ConfigKey::Endpoint)
-                && Url::parse(value).is_ok_and(|u| has_userinfo(&u))
-            {
-                return Err(at.invalid(
-                    &format!("store.\"{key}\""),
-                    "carries userinfo, which the store does not read; set credentials \
-                     under the source's `store` or the environment",
-                ));
+            if s3_store_key(key) == Some(AmazonS3ConfigKey::Endpoint) {
+                STORE_URL
+                    .check(value)
+                    .map_err(|e| at.invalid(&format!("store.\"{key}\""), e.to_string()))?;
             }
         }
         // Only the S3 client's keys are checked: `file://` reads no options.
@@ -247,15 +243,16 @@ fn parse_url(at: &SectionPath, field: &str, value: &str) -> Result<Url, ConfigEr
     if value.trim().is_empty() {
         return Err(at.invalid(field, "must not be empty"));
     }
-    let url =
-        Url::parse(value).map_err(|e| at.invalid(field, format!("is not a valid URL: {e}")))?;
-    // The store reads no userinfo or query, and its errors quote the URL whole.
-    if has_userinfo(&url) || url.query().is_some() {
+    let url = STORE_URL
+        .check(value)
+        .map_err(|e| at.invalid(field, e.to_string()))?;
+    // The store reads no query, and its errors quote the URL whole.
+    if url.query().is_some() {
         return Err(at.invalid(
             field,
             format!(
-                "{} carries userinfo or a query, which the store does not read; set \
-                 credentials under the source's `store` or the environment",
+                "{} carries a query, which the store does not read; set credentials under \
+                 the source's `store` or the environment",
                 redact::url(value)
             ),
         ));
@@ -415,15 +412,21 @@ mod tests {
             ),
             (
                 "  url: data\n".to_owned(),
-                "url: is not a valid URL: relative URL without a base".to_owned(),
+                "url: is not a URL: relative URL without a base".to_owned(),
             ),
             (
                 "  url: \"s3://bucket/data/?token=t\"\n".to_owned(),
                 format!(
-                    "url: {} carries userinfo or a query, which the store does not read; \
-                     set credentials under the source's `store` or the environment",
+                    "url: {} carries a query, which the store does not read; set credentials \
+                     under the source's `store` or the environment",
                     redact::url("s3://bucket/data/?token=t")
                 ),
+            ),
+            (
+                "  url: \"s3://u:p@bucket/data/\"\n".to_owned(),
+                "url: carries userinfo; the store does not read it; set credentials under the \
+                 source's `store` or the environment"
+                    .to_owned(),
             ),
             (
                 "  url: memory:///data/\n".to_owned(),
@@ -456,9 +459,23 @@ mod tests {
                     "{}  store:\n    endpoint: \"http://u:p@127.0.0.1:9000\"\n",
                     minimal()
                 ),
-                "store.\"endpoint\": carries userinfo, which the store does not read; set \
+                "store.\"endpoint\": carries userinfo; the store does not read it; set \
                  credentials under the source's `store` or the environment"
                     .to_owned(),
+            ),
+            (
+                format!(
+                    "{}  store:\n    endpoint: \"http://u:p@exa mple:9000\"\n",
+                    minimal()
+                ),
+                "store.\"endpoint\": is not a URL: invalid international domain name".to_owned(),
+            ),
+            (
+                format!(
+                    "{}  store:\n    endpoint: \"u:p@127.0.0.1:9000\"\n",
+                    minimal()
+                ),
+                "store.\"endpoint\": has no `//` after its scheme".to_owned(),
             ),
             (
                 format!(
@@ -650,7 +667,13 @@ mod tests {
             "aws_container_credentials_full_uri",
             "aws_container_authorization_token_file",
         ] {
-            let body = format!("{}  store:\n    {key}: x\n", minimal());
+            // An endpoint key is checked as a URL.
+            let value = if key.to_ascii_lowercase().contains("endpoint") {
+                "http://127.0.0.1:9000"
+            } else {
+                "x"
+            };
+            let body = format!("{}  store:\n    {key}: {value}\n", minimal());
             S3SourceConfig::from_component_config(&section(&body))
                 .unwrap_or_else(|e| panic!("{key} is an object_store S3 option: {e}"));
         }

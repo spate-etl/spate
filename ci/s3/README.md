@@ -29,10 +29,10 @@ store, such as its credential settings, its S3 port and its readiness check, is
 that store's arm in `spate_test_support::Store`. A lane with no arm there fails
 `every_s3_lane_names_a_known_store` without Docker.
 
-A start fails when the store is not ready within 60 seconds, and as soon as its
-container exits. The error gives the container's exit code, or says it was still
-running. The last 200 lines of the container's stdout and stderr go to the
-test's stderr.
+A start fails when the store is not ready within 60 seconds, or within a second
+of its container exiting. The error says which, with the exit code when Docker
+reports one. Once the container has started, a failed start writes the last 200
+lines of the container's stdout and stderr to the test's stderr.
 
 ## Capabilities
 

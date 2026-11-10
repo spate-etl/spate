@@ -74,7 +74,7 @@ jobs:
           flags: unit
 
       - name: Publish test report
-        uses: mikepenz/action-junit-report@8a133bfa3ecb0ea9024c1e2ae788b4c25f6cdb9d # v6.6.2
+        uses: mikepenz/action-junit-report@4a26df3e2ae132254ba12a53f65a388d0961e786 # v6.7.0
         if: always()
         with:
           report_paths: target/nextest/ci/junit.xml
@@ -114,7 +114,7 @@ jobs:
         run: cargo nextest run --profile ci --workspace --all-features --locked
 
       - name: Publish test report
-        uses: mikepenz/action-junit-report@8a133bfa3ecb0ea9024c1e2ae788b4c25f6cdb9d # v6.6.2
+        uses: mikepenz/action-junit-report@4a26df3e2ae132254ba12a53f65a388d0961e786 # v6.7.0
         if: always()
         with:
           report_paths: target/nextest/ci/junit.xml
@@ -155,7 +155,7 @@ jobs:
         run: cargo nextest run --profile ci --workspace --all-features --locked
 
       - name: Publish test report
-        uses: mikepenz/action-junit-report@8a133bfa3ecb0ea9024c1e2ae788b4c25f6cdb9d # v6.6.2
+        uses: mikepenz/action-junit-report@4a26df3e2ae132254ba12a53f65a388d0961e786 # v6.7.0
         if: always()
         with:
           report_paths: target/nextest/ci/junit.xml

@@ -81,7 +81,7 @@ jobs:
             --run-ignored ignored-only --test-threads 1
 
       - name: Publish container test report
-        uses: mikepenz/action-junit-report@8a133bfa3ecb0ea9024c1e2ae788b4c25f6cdb9d # v6.6.2
+        uses: mikepenz/action-junit-report@4a26df3e2ae132254ba12a53f65a388d0961e786 # v6.7.0
         if: always()
         with:
           report_paths: target/nextest/docker/junit.xml
@@ -141,7 +141,7 @@ jobs:
       # Both names carry the lane: upload-artifact rejects a duplicate name
       # within one run, and two checks sharing a name are unattributable.
       - name: Publish ClickHouse test report
-        uses: mikepenz/action-junit-report@8a133bfa3ecb0ea9024c1e2ae788b4c25f6cdb9d # v6.6.2
+        uses: mikepenz/action-junit-report@4a26df3e2ae132254ba12a53f65a388d0961e786 # v6.7.0
         if: always()
         with:
           report_paths: target/nextest/docker/junit.xml
@@ -200,7 +200,7 @@ jobs:
             --run-ignored ignored-only --test-threads 1 -E "$FILTER"
 
       - name: Publish S3 store test report
-        uses: mikepenz/action-junit-report@8a133bfa3ecb0ea9024c1e2ae788b4c25f6cdb9d # v6.6.2
+        uses: mikepenz/action-junit-report@4a26df3e2ae132254ba12a53f65a388d0961e786 # v6.7.0
         if: always()
         with:
           report_paths: target/nextest/docker/junit.xml
@@ -255,7 +255,7 @@ jobs:
             --run-ignored ignored-only --test-threads 1 -E "$FILTER"
 
       - name: Publish Kafka broker test report
-        uses: mikepenz/action-junit-report@8a133bfa3ecb0ea9024c1e2ae788b4c25f6cdb9d # v6.6.2
+        uses: mikepenz/action-junit-report@4a26df3e2ae132254ba12a53f65a388d0961e786 # v6.7.0
         if: always()
         with:
           report_paths: target/nextest/docker/junit.xml

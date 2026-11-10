@@ -1,3 +1,3 @@
-**A refused S3 job location names userinfo apart from a query or fragment** (`spate-s3`)
+**A refused S3 job location names userinfo, a query and a fragment apart** (`spate-s3`)
 
 The refusal of a `location` carrying a user or password ends ``carries userinfo; the store does not read it; set credentials under the source's `store` or the environment``. One carrying a query ends ``carries a query, which the store does not read; set credentials under the source's `store` or the environment``, and one carrying a fragment ends `carries a fragment, which names nothing in the location's store`. In previous versions all three read ``carries userinfo, a query or a fragment, which name nothing in the location's store; set credentials under the source's `store` ``. A location written as `user:pass@host/…`, with no `//` after its scheme, ends ``has no `//` after its scheme``, where it was refused for its scheme before.

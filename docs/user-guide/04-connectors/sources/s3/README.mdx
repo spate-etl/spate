@@ -486,12 +486,26 @@ that seeded the feed still holds it and reads the units from
 finish.
 
 A unit whose batch the sink abandons, after a write error the sink does not
-retry, is failed back to the feed at a later commit tick. The feed delivers it
-again or dead-letters it at its cap, and the run goes on with the other units.
+retry, is failed back to the feed at a later commit tick. The waits below can
+delay the fail-back and hold up the run. The feed delivers the unit again or
+dead-letters it at its cap, and the run goes on with the other units.
 A sink batch can hold records from several units, and each of them fails back.
 On any other feed such a unit stays held until a stop, or until
 `checkpoint.stalled_fail_after` fails the run and its records replay after a
 restart.
+
+The fail-back waits for writes the sink is still retrying. The source reads
+each lane of a unit in batches, and the records of one source batch can be split
+across several sink batches. The unit fails back only once each sink has
+written or abandoned every sink batch holding records from the refused source
+batch or from an earlier one on the same lane. While a sink retries one of those
+sink batches, the unit stays held.
+
+Once the unit is back in the feed, the source waits for the unit's lanes to
+drain. While the sink takes no records, for example while every replica is
+down, that wait lasts up to `checkpoint.drain_timeout`. The run receives no
+unit and commits nothing until the wait ends. No record is lost, because the
+unit is already back in the feed when the wait starts.
 
 :::danger `Completed` does not mean every unit was read
 On a seeded run the exit state is not a per-unit status. A unit is done only
@@ -1126,8 +1140,10 @@ finish in the feed, and `MemoryFeed::unsettled` names them.
 A unit whose batch the sink abandons, after a write error the sink does not
 retry, is failed back to the feed, and the cap of 1 dead-letters it. A sink
 batch can hold records from several units, and each of them fails back. The
-run does not wait for the stop to settle them, and the function reports only
-the units in that batch.
+run does not wait for the stop to settle them, except while the sink still
+retries a write that the fail-back waits for, as
+[a run on a seeded feed](#a-run-on-a-seeded-feed) describes. The function
+reports only the units in that batch.
 
 ### Sizing an invocation
 

@@ -211,7 +211,10 @@ impl S3SourceConfig {
         // The request URIs `object_store` quotes in its errors start with the
         // endpoint.
         for (key, value) in &self.store {
-            if s3_store_key(key) == Some(AmazonS3ConfigKey::Endpoint) {
+            if matches!(
+                s3_store_key(key),
+                Some(AmazonS3ConfigKey::Endpoint | AmazonS3ConfigKey::S3Endpoint)
+            ) {
                 STORE_URL
                     .check(value)
                     .map_err(|e| at.invalid(&format!("store.\"{key}\""), e.to_string()))?;
@@ -364,7 +367,12 @@ mod tests {
             assert!(err.contains("`store`"), "{url}: {err}");
             assert!(!err.contains("urlsecret"), "{url}: {err}");
         }
-        for key in ["endpoint", "aws_endpoint", "AWS_ENDPOINT_URL"] {
+        for key in [
+            "endpoint",
+            "aws_endpoint",
+            "AWS_ENDPOINT_URL",
+            "aws_endpoint_url_s3",
+        ] {
             let body = format!(
                 "  url: s3://bucket/data/\n  store:\n    {key}: \"http://u:urlsecret@127.0.0.1:9000\"\n"
             );
@@ -476,6 +484,13 @@ mod tests {
                     minimal()
                 ),
                 "store.\"endpoint\": has no `//` after its scheme".to_owned(),
+            ),
+            (
+                format!(
+                    "{}  store:\n    aws_endpoint_url_s3: \"u:p@127.0.0.1:9000\"\n",
+                    minimal()
+                ),
+                "store.\"aws_endpoint_url_s3\": has no `//` after its scheme".to_owned(),
             ),
             (
                 format!(

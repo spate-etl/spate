@@ -139,10 +139,10 @@ records as a whole arrive in no fixed order.
 field: `region`, `endpoint`, static credentials, `allow_http`, timeouts. Its
 values are applied **on top of the environment** when the client is built from
 `url`, so anything set here overrides what the environment resolved.
-An `endpoint` that is not a URL fails at load, under any spelling of the key,
-because the client builds each request URI from it. So does an `endpoint`
-carrying userinfo, because the client never reads it and its errors quote each
-request URI.
+An `endpoint` or `aws_endpoint_url_s3` that is not a URL fails at load, under
+any spelling of either key, because the client builds each request URI from it.
+So does one carrying userinfo, because the client never reads it and its errors
+quote each request URI.
 
 Bucket keys are **rejected at load time with an explanation**. The client is
 built from `url`, so a passthrough bucket could never take effect. Rejecting it

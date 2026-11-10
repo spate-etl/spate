@@ -84,10 +84,18 @@ impl Location {
             .map_err(|e| refuse(e.to_string()))?;
         // The location's store reads neither, `object_store` quotes the whole
         // URL in its errors, and a fragment would silently name a shorter
-        // prefix.
-        if url.query().is_some() || url.fragment().is_some() {
+        // prefix. A signed query is a credential, so its refusal says where
+        // credentials go.
+        if url.query().is_some() {
             return Err(refuse(
-                "carries a query or a fragment, which name nothing in the location's store".into(),
+                "carries a query, which the store does not read; set credentials under the \
+                 source's `store` or the environment"
+                    .into(),
+            ));
+        }
+        if url.fragment().is_some() {
+            return Err(refuse(
+                "carries a fragment, which names nothing in the location's store".into(),
             ));
         }
         // Only these forms name the bucket in the same place for every
@@ -617,9 +625,14 @@ mod tests {
              read it; set credentials under the source's `store` or the environment"
         );
         assert_eq!(
+            refused("s3://ops/jobs/a/?X-Amz-Signature=tok3n", SOURCE),
+            "feed: `location` s3://ops/jobs/a/?<redacted>: carries a query, which the store \
+             does not read; set credentials under the source's `store` or the environment"
+        );
+        assert_eq!(
             refused("s3://ops/jobs/run#1/", SOURCE),
-            "feed: `location` s3://ops/jobs/run#<redacted>: carries a query or a fragment, \
-             which name nothing in the location's store"
+            "feed: `location` s3://ops/jobs/run#<redacted>: carries a fragment, which names \
+             nothing in the location's store"
         );
         assert_eq!(
             refused("user:hunter2@ops/jobs/a/", SOURCE),

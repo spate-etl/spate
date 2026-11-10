@@ -143,9 +143,9 @@ const COMMITTED_LOOKUP_TIMEOUT: Duration = Duration::from_secs(10);
 const ASSIGN_HOLD: Duration = Duration::from_secs(3);
 
 /// Bound on waiting for the commits sent together, by one accept's starts or
-/// one flush, and on the drop's wait for a close held by a commit that went
-/// unanswered. An unanswered start leaves the offers held for the next attempt,
-/// and an unanswered flush counts as failed.
+/// one flush, and on the drop's wait for the consumers' close. An unanswered
+/// start leaves the offers held for the next attempt, and an unanswered flush
+/// counts as failed.
 const COMMIT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// How long an offer whose start could not be settled waits for its next
@@ -297,10 +297,6 @@ pub struct KafkaSource {
     pending_error: Option<(usize, rdkafka::error::RDKafkaErrorCode)>,
     /// When the first held assignment of the current rebalance arrived.
     hold_since: Option<Instant>,
-    /// A commit went unanswered inside its bound. Consumer close waits for
-    /// every outstanding commit, and one to a silent coordinator stays outstanding
-    /// for as long as the coordinator is silent.
-    commit_unanswered: bool,
     /// When an accept that could not settle a start may run again. `None`
     /// outside such a wait, and cleared when an accept gets past the starts.
     start_retry_at: Option<Instant>,
@@ -428,7 +424,6 @@ impl KafkaSource {
             after_drain: None,
             pending_error: None,
             hold_since: None,
-            commit_unanswered: false,
             start_retry_at: None,
             poll_start: 0,
             assignment_wait: None,
@@ -815,9 +810,7 @@ impl KafkaSource {
         Ok((offers, starts, retry))
     }
 
-    /// Wait until `until` for the answer to consumer `k`'s `commit`. A commit left
-    /// unanswered marks the source, so the consumers' close runs off the dropping
-    /// thread.
+    /// Wait until `until` for the answer to consumer `k`'s `commit`.
     fn await_commit(
         &mut self,
         k: usize,
@@ -829,13 +822,7 @@ impl KafkaSource {
         self.before_call(BrokerCall::CommitWait { k, budget });
         #[cfg(not(test))]
         let _ = k;
-        let waited = commit.wait(budget);
-        if let Err(e) = &waited
-            && e.rdkafka_error_code() == Some(RDKafkaErrorCode::OperationTimedOut)
-        {
-            self.commit_unanswered = true;
-        }
-        waited
+        commit.wait(budget)
     }
 
     /// Discard consumer `k`'s offer for a start the group has refused.
@@ -2078,11 +2065,8 @@ impl Drop for KafkaSource {
                 tracing::warn!(consumer = k, error = %e, "unassign during source teardown failed");
             }
         }
-        if !self.commit_unanswered {
-            return;
-        }
-        // Close waits for an unanswered commit with no bound, so it runs off this
-        // thread and the pipeline still ends when its deadline says so.
+        // Close can wait on a silent group coordinator with no bound, so it runs
+        // off this thread and the pipeline still ends when its deadline says so.
         let members = std::mem::take(&mut self.members);
         let (closed, wait) = mpsc::channel();
         #[expect(
@@ -2100,7 +2084,7 @@ impl Drop for KafkaSource {
                 if wait.recv_timeout(COMMIT_TIMEOUT).is_err() {
                     tracing::warn!(
                         topic = %self.config.topic,
-                        "a commit has no answer; its consumer closes in the background"
+                        "the group has not answered the close; its consumers close in the background"
                     );
                 }
             }
@@ -4940,6 +4924,22 @@ mod tests {
         assert_eq!(err.class(), ErrorClass::Retryable, "{err}");
         assert!(err.reason().starts_with("sync commit: "), "{err}");
         assert!(err.reason().contains("OperationTimedOut"), "{err}");
+    }
+
+    /// A source whose offsets are all committed drops while its coordinator is
+    /// silent: close waits on the coordinator, and the drop does not wait it out.
+    #[test]
+    fn a_source_with_nothing_to_commit_drops_while_its_coordinator_is_silent() {
+        use crate::testutil::mock::MockKafka;
+        let cluster = MockKafka::new();
+        cluster.create_topic("orders", 4, 1).expect("create topic");
+        let brokers = cluster.bootstrap_servers();
+        let mut source = settled_with_stored_offsets(&brokers, "silent-close", 1);
+        source.flush_commits().expect("the stored offsets commit");
+        cluster
+            .broker_round_trip_time(1, Duration::from_hours(1))
+            .expect("hold every reply");
+        crate::testutil::assert_returns(cluster, HANG, "a drop", move || drop(source));
     }
 
     /// Each consumer whose commit the broker refuses logs its own line. Two

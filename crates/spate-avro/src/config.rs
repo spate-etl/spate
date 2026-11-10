@@ -24,9 +24,7 @@
 use crate::cache::CompiledSchema;
 use crate::datum::AvroDatumDeserializer;
 use crate::deser::{AvroSerdeDeserializer, AvroValueDeserializer, DecoderCore, SchemaSourceMode};
-use crate::registry::{
-    Endpoint, RegistryConfig, Rejection, http_client, registry_url, spawn_fetcher,
-};
+use crate::registry::{Endpoint, Rejection, http_client, registry_url, spawn_fetcher};
 use apache_avro::Schema;
 use apache_avro::rabin::Rabin;
 use serde::Deserialize;
@@ -363,17 +361,13 @@ impl AvroDeserializerBuilder {
                             .into(),
                     });
                 }
-                let registry = RegistryConfig {
-                    url: registry.url.clone(),
-                    basic_auth: registry
-                        .username
-                        .as_ref()
-                        .map(|u| (u.clone(), registry.password.clone())),
-                    root_ca: registry.tls.root_ca.clone(),
-                };
+                let basic_auth = registry
+                    .username
+                    .as_ref()
+                    .map(|u| (u.clone(), registry.password.clone()));
                 let rejection = Rejection::default();
-                let endpoint = Arc::new(Endpoint::new(&registry, url));
-                let http = http_client(registry.root_ca.as_deref())?;
+                let endpoint = Arc::new(Endpoint::new(url, basic_auth));
+                let http = http_client(registry.tls.root_ca.as_deref())?;
                 let handle = spawn_fetcher(
                     http.clone(),
                     Arc::clone(&endpoint),

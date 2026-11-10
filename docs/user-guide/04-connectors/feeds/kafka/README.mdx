@@ -449,6 +449,27 @@ too, whether or not that transaction has resolved. Give each bounded job fresh
 work, retry, dead-letter and attempt topics: a dead-letter topic an earlier job
 wrote fails a later job as stalled.
 
+### A broker cut off from its cluster
+
+On Apache Kafka, a broker cut off from the controller and the other brokers
+keeps answering as the leader of its partitions until it reaches the controller
+again. The controller elects new leaders, and producers write to them. A client
+that still reaches the cut-off broker reads each end offset as it stood when
+the broker was cut off.
+
+The depth reader asks the leader its metadata names, and it takes that metadata
+from the broker it used last. When the cut-off broker is the group's coordinator
+and leads the work, retry and dead-letter topics, the depth reader can read
+every end offset from it. A job can then end `Completed` over units written
+since the cut, and a unit dead-lettered since the cut does not fail the job.
+
+Those units are not lost. The group's consumer fetches from the same broker and
+never reads them, so the group's commit stays below them. Once the cut heals, a
+later worker on the group reads them.
+
+On Redpanda, a cut-off broker refuses the read, so the read fails and the window
+starts again ([What a read needs](#what-a-read-needs)).
+
 ### What a read needs
 
 The reads need `Describe` on the work, retry and dead-letter topics, which the

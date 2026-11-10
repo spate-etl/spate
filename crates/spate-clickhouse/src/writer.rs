@@ -113,6 +113,7 @@ const OWNED: [(&str, &str); 8] = [
 pub(crate) const RESERVED: Denylist<'static> = Denylist::new(&OWNED);
 
 /// The names [`RESERVED`] refuses, each from [`OWNED`].
+#[cfg(any(test, feature = "testing"))]
 pub(crate) fn reserved_names() -> impl Iterator<Item = &'static str> {
     OWNED.into_iter().map(|(name, _)| name)
 }

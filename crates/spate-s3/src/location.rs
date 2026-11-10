@@ -611,8 +611,20 @@ mod tests {
             assert!(err.contains("`location`"), "{err}");
             assert!(!err.contains("hunter2") && !err.contains("tok3n"), "{err}");
         }
-        assert!(refused("s3://user:hunter2@ops/jobs/a/", SOURCE).contains("userinfo"));
-        assert!(refused("s3://ops/jobs/run#1/", SOURCE).contains("fragment"));
+        assert_eq!(
+            refused("s3://user:hunter2@ops/jobs/a/", SOURCE),
+            "feed: `location` s3://<redacted>@ops/jobs/a/: carries userinfo; the store does not \
+             read it; set credentials under the source's `store` or the environment"
+        );
+        assert_eq!(
+            refused("s3://ops/jobs/run#1/", SOURCE),
+            "feed: `location` s3://ops/jobs/run#<redacted>: carries a query or a fragment, \
+             which name nothing in the location's store"
+        );
+        assert_eq!(
+            refused("user:hunter2@ops/jobs/a/", SOURCE),
+            "feed: `location` <redacted>@ops/jobs/a/: has no `//` after its scheme"
+        );
     }
 
     /// Pins that an S3 location that names no bucket is refused when the

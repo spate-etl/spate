@@ -24,12 +24,9 @@ use rdkafka::error::RDKafkaErrorCode;
 use rdkafka::message::DeliveryResult;
 use rdkafka::statistics::Statistics;
 use spate_core::clock::SyncClock;
-use spate_core::clock::tokio::Clock as IoClock;
-use std::future::Future as _;
-use std::pin::pin;
+use spate_core::clock::tokio::{Clock as IoClock, before};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::task::Poll;
 use std::time::{Duration, Instant};
 use tokio::sync::Notify;
 
@@ -76,29 +73,17 @@ impl BatchInflight {
     /// each re-check of the countdown, so a `notify_one` racing the check is
     /// stored as a permit and observed by the next await.
     pub(crate) async fn wait(&self, deadline: tokio::time::Instant, clock: &dyn IoClock) -> bool {
-        let mut timeout = clock.sleep_until(deadline);
-        loop {
-            let notified = self.done.notified();
-            if self.remaining.load(Ordering::Acquire) == 0 {
-                return true;
-            }
-            let mut notified = pin!(notified);
-            // The report first, so a countdown finished as the deadline
-            // comes due still counts.
-            let reported = std::future::poll_fn(|cx| {
-                if notified.as_mut().poll(cx).is_ready() {
-                    Poll::Ready(true)
-                } else if timeout.as_mut().poll(cx).is_ready() {
-                    Poll::Ready(false)
-                } else {
-                    Poll::Pending
+        let reported = before(clock, deadline, async {
+            loop {
+                let notified = self.done.notified();
+                if self.remaining.load(Ordering::Acquire) == 0 {
+                    return;
                 }
-            })
-            .await;
-            if !reported {
-                return self.remaining.load(Ordering::Acquire) == 0;
+                notified.await;
             }
-        }
+        })
+        .await;
+        reported.is_some() || self.remaining.load(Ordering::Acquire) == 0
     }
 
     /// The first failed report, when any report failed.
@@ -319,6 +304,27 @@ pub(crate) mod tests {
         armed(&clock, deadline).await;
         clock.advance(window);
         assert!(!waiter.await.unwrap(), "one report missing → false");
+    }
+
+    /// A last report whose decrement has landed but whose wake has not still
+    /// completes the batch when the deadline fires in between.
+    #[tokio::test]
+    async fn a_countdown_finished_before_its_wake_counts_at_the_deadline() {
+        let clock = IoTestClock::frozen();
+        let window = Duration::from_secs(5);
+        let inflight = Arc::new(BatchInflight::new(1));
+        let deadline = clock.now() + window;
+        let waiter = tokio::spawn({
+            let (inflight, clock) = (Arc::clone(&inflight), Arc::clone(&clock));
+            async move { inflight.wait(deadline, &*clock).await }
+        });
+        armed(&clock, deadline).await;
+        inflight.remaining.fetch_sub(1, Ordering::AcqRel);
+        clock.advance(window);
+        assert!(
+            waiter.await.unwrap(),
+            "the batch finished before the deadline"
+        );
     }
 
     #[tokio::test]

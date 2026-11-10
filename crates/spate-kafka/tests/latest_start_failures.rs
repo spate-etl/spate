@@ -507,6 +507,7 @@ mod silent_coordinator {
 
     const OFFSET_COMMIT: i16 = 8;
     const OFFSET_FETCH: i16 = 9;
+    const HEARTBEAT: i16 = 12;
     const TOPIC: &str = "silent";
 
     /// Forwards every connection to `upstream` until `silent`, then holds every
@@ -727,6 +728,31 @@ mod silent_coordinator {
         let silent = proxy.silent.load(Ordering::SeqCst);
         proxy.release();
         assert!(silent, "the stop sent no commit");
+        let exit = exit.unwrap_or_else(|| panic!("the run had not ended {HANG:?} after its stop"));
+        exit.expect("the run started");
+    }
+
+    /// A pipeline ends after its stop with the coordinator silent from a heartbeat
+    /// after its last commit landed, so the stop has nothing to commit.
+    #[test]
+    #[ignore = "requires Docker"]
+    fn a_stop_with_nothing_to_commit_and_a_silent_coordinator_ends_the_run() {
+        let (_container, proxy, brokers) = broker_behind_a_proxy();
+        support::create_topic(&brokers, TOPIC, 1);
+        support::produce_to(&brokers, TOPIC, 0, 0..10);
+        let cfg = latest::config(&brokers, TOPIC, "idle", "earliest");
+        let run = latest::Run::start(cfg);
+        spate_test::wait_until(HANG, "all ten committed", || {
+            support::committed_by(&brokers, "idle", TOPIC, 1)[0] == rdkafka::Offset::Offset(10)
+        });
+        proxy.trigger.store(HEARTBEAT, Ordering::SeqCst);
+        proxy.armed.store(true, Ordering::SeqCst);
+        spate_test::wait_until(HANG, "the coordinator silent", || {
+            proxy.silent.load(Ordering::SeqCst)
+        });
+        run.trigger_stop();
+        let exit = run.wait_exit(HANG);
+        proxy.release();
         let exit = exit.unwrap_or_else(|| panic!("the run had not ended {HANG:?} after its stop"));
         exit.expect("the run started");
     }

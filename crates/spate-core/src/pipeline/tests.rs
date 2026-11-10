@@ -606,6 +606,9 @@ fn a_stall_fails_only_past_its_limit_on_the_injected_clock() {
     assert!(!h.join.is_finished(), "a stall at its limit must not fail");
 
     clock.advance(Duration::from_secs(60));
+    wait_for("the run fails", Duration::from_secs(5), || {
+        h.join.is_finished()
+    });
     let report = h.join.join().unwrap().unwrap();
     let ExitState::Failed(failure) = report.state else {
         panic!("a permanent stall must fail the pipeline");

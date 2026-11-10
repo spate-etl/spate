@@ -68,6 +68,10 @@ process exits non-zero. A stalled job never reports success over a unit it did
 not read. A restart does not help, since the units sit in the dead-letter
 destination; fix what made them fail, then re-run the job with them.
 
+On Apache Kafka, a job can end `Completed` over a dead-lettered unit while a
+broker is cut off from its cluster
+([Kafka feed: A broker cut off from its cluster](../04-connectors/feeds/kafka/README.mdx#a-broker-cut-off-from-its-cluster)).
+
 A run on an in-process feed that code
 [seeded](09-work-feed.mdx#how-a-bounded-job-ends) is not a bounded job. Its
 source can end it without failing over dead letters, because the code that

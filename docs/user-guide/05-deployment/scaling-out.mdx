@@ -70,7 +70,7 @@ run and its end marker.
 | Worker killed (OOM, node loss) | The units it held come back after the feed's redelivery delay and another worker reads each again from its start. The records it had not yet acknowledged replay: duplicates, never loss. |
 | Worker drained (SIGTERM) | It reads the units it holds that it can finish by 5s before the drain deadline, and hands back the rest, which another worker reads again from its start. |
 | Worker stopped, then another reads its unit | Nothing fences a stopped worker, so two workers can emit the same unit. The sink sees those records twice. |
-| A unit that fails on every read | The feed delivers it until the delivery cap and then moves it to its dead-letter destination. A bounded job with dead letters ends **stalled**, never falsely complete. |
+| A unit that fails on every read | The feed delivers it until the delivery cap and then moves it to its dead-letter destination. A bounded job with dead letters ends **stalled**, except on Apache Kafka while a broker is cut off from its cluster ([Kafka feed](../04-connectors/feeds/kafka/README.mdx#a-broker-cut-off-from-its-cluster)). |
 | Lister run fails | It exits non-zero. Run again, it resumes after its checkpoint at the job location. |
 
 ## Observability

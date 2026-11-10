@@ -119,9 +119,15 @@ because that code still holds the feed and reads them. The source's page says
 whether it does.
 
 A unit the feed itself deletes before anyone reads it, at the end of the feed's
-retention, leaves no trace, and the job can end over it. A bounded job cannot
-share its feed with storage notifications: notifications keep the window from
-closing, and an object both announce is read twice.
+retention, leaves no trace, and the job can end over it.
+
+A depth read that answers from stale state can end the job over units written
+after that state. On Apache Kafka, a broker cut off from its cluster answers
+this way
+([Kafka feed: A broker cut off from its cluster](../04-connectors/feeds/kafka/README.mdx#a-broker-cut-off-from-its-cluster)).
+
+A bounded job cannot share its feed with storage notifications: notifications
+keep the window from closing, and an object both announce is read twice.
 
 :::note Connector specifics
 Re-running a stalled job:

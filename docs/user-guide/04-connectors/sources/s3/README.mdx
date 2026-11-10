@@ -17,7 +17,9 @@ itself: `run()` returns `ExitState::Completed` once the feed has given out every
 unit and the sink has acknowledged every record. `Completed` is a strong claim
 here. Every record was durably written by the sink(s) *and* committed. An
 unacknowledged tail converts the exit into a failure, so an incomplete backfill
-is never reported as done.
+is never reported as done. The exception is a feed depth read that answers from
+stale state, as on Apache Kafka while a broker is cut off from its cluster
+([Kafka feed: A broker cut off from its cluster](../../feeds/kafka/README.mdx#a-broker-cut-off-from-its-cluster)).
 
 Built on the [`object_store`](https://crates.io/crates/object_store)
 client (internal only, with no `object_store` types in the public API), so
@@ -1033,7 +1035,9 @@ dead-lettered unit ends **stalled**, which is fatal, so `run()` returns
 `ExitState::Failed` rather than a silently partial `Completed`, as
 [How a bounded job ends](#how-a-bounded-job-ends) describes. A run on a
 [seeded feed](#a-run-on-a-seeded-feed) exits `Completed` with the unit on the
-feed's dead-letter list.
+feed's dead-letter list. On Apache Kafka, a unit dead-lettered while a broker is
+cut off from its cluster can go uncounted, and the job exits `Completed`
+([Kafka feed: A broker cut off from its cluster](../../feeds/kafka/README.mdx#a-broker-cut-off-from-its-cluster)).
 
 A unit moved back from the dead-letter destination, as the
 [SQS feed](../../feeds/sqs/README.mdx#redriving-dead-lettered-units) and the

@@ -41,7 +41,9 @@ two of them pin two counts for the same case, and the comparator drops every
 case that happens to — leaving an empty table and a non-zero exit. Nor does
 anything interleave them.
 
-Targets live at `crates/<pkg>/benches/<name>_wall.rs`, and `cargo xtask bench list` is
+Targets live at `crates/<pkg>/benches/<name>_wall.rs`. A target that runs a pipeline
+through more than one connector crate belongs to none of them, and lives in
+`bench/pipeline/benches/`. `cargo xtask bench list` is
 what says which exist — the case list comes from the compiled target rather than
 from a manifest, which is what stops the list and the run ever disagreeing.
 

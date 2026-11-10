@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "bench",
+    "bench/pipeline",
     "crates/spate",
     "crates/spate-core",
     "crates/spate-avro",

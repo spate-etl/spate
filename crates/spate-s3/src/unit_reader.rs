@@ -82,6 +82,10 @@ use tokio::sync::mpsc;
 /// fewer.
 pub(crate) const UNITS_HELD: NonZeroUsize = NonZeroUsize::new(96).expect("non-zero");
 
+/// The reason a seeded run gives the feed for a unit whose batch the sink
+/// failed.
+const SINK_FAILED: &str = "the sink failed a batch read from this unit";
+
 /// What the reader needs to open a lane, fixed at `open`.
 pub(crate) struct LaneParts {
     pub(crate) store: Arc<dyn object_store::ObjectStore>,
@@ -111,8 +115,9 @@ struct HeldUnit {
     pending: VecDeque<Cursor>,
     /// The partitions of the delivery's lanes that have not left.
     lanes: BTreeSet<PartitionId>,
-    /// A lane hit poison, and this reason waits for a `fail` the feed
-    /// accepts.
+    /// Why the unit fails back to the feed: a lane hit poison, an
+    /// overwrite's re-enqueue failed, or the sink failed a batch. The reason
+    /// waits for a `fail` the feed accepts.
     failing: Option<String>,
     /// The keys an overwrite cut short, each with its re-enqueue.
     overwritten: BTreeMap<String, ReEnqueue>,
@@ -526,6 +531,38 @@ impl UnitReader {
         Ok(())
     }
 
+    /// On a seeded run, fail back each held unit with a lane on one of
+    /// `partitions`, whose watermark is stalled behind a batch the sink
+    /// failed. The run has no restart to replay the unit, so the feed
+    /// delivers it again or dead-letters it. On any other run the unit stays
+    /// held until `checkpoint.stalled_fail_after` fails the run. The next
+    /// poll sends the fail and revokes the unit's lanes.
+    pub(crate) fn stalled(&mut self, partitions: &[PartitionId]) {
+        if !self.end.as_ref().is_some_and(JobEnd::seeded) {
+            return;
+        }
+        for &partition in partitions {
+            let Some(held) = self.held_on(partition) else {
+                continue;
+            };
+            if held.failing.is_some() {
+                continue;
+            }
+            tracing::warn!(
+                unit = %held.unit,
+                reason = SINK_FAILED,
+                "failing the unit back to the feed"
+            );
+            held.failing = Some(SINK_FAILED.to_owned());
+        }
+    }
+
+    /// The held unit with a lane on `partition`, if the reader holds one.
+    fn held_on(&mut self, partition: PartitionId) -> Option<&mut HeldUnit> {
+        let lane = self.lanes.get(&partition)?;
+        self.deliveries.get_mut(&lane.delivery)
+    }
+
     /// Flip the pause flag of every held lane named.
     pub(crate) fn set_paused(&self, lanes: &[LaneId], paused: bool) {
         for lane in self.lanes.values() {
@@ -668,11 +705,7 @@ impl UnitReader {
             if let Some(m) = &self.parts.metrics {
                 m.objects_failed(report.kind).increment(1);
             }
-            let partition = report.partition;
-            let Some(lane) = self.lanes.get(&partition) else {
-                continue;
-            };
-            let Some(held) = self.deliveries.get_mut(&lane.delivery) else {
+            let Some(held) = self.held_on(report.partition) else {
                 continue;
             };
             tracing::warn!(
@@ -1229,8 +1262,17 @@ mod tests {
     /// the job ends on the first poll that finds the reader holding nothing
     /// and the feed empty.
     fn end_solo(reader: &mut UnitReader, rt: &tokio::runtime::Runtime) {
+        end_with(reader, rt, crate::job_end::Finish::Solo { finished: true });
+    }
+
+    /// Give `reader` the end check `finish` names, on a frozen clock.
+    fn end_with(
+        reader: &mut UnitReader,
+        rt: &tokio::runtime::Runtime,
+        finish: crate::job_end::Finish,
+    ) {
         let mut end = JobEnd::new(
-            crate::job_end::Finish::Solo { finished: true },
+            finish,
             TestClock::frozen(),
             rt.handle().clone(),
             spate_core::source::StopSignal::default(),
@@ -1411,6 +1453,81 @@ mod tests {
             1,
             "the window went on over the retired lane"
         );
+    }
+
+    /// On a seeded run, a stall on a held lane's partition fails the unit
+    /// back to the feed with the sink's reason, and the next poll revokes the
+    /// lane. A partition the reader does not hold is skipped.
+    #[test]
+    fn a_seeded_run_fails_back_a_unit_on_a_stalled_partition() {
+        let (mut reader, script, rt) = reader();
+        end_with(&mut reader, &rt, crate::job_end::Finish::Seeded);
+        start(&mut reader);
+        let (p, receipt, _tracker) = hold_one(&mut reader, &script);
+        reader.stalled(&[PartitionId(p.0 + 1), p]);
+        assert_eq!(lanes_revoked(poll(&mut reader)), [LaneId(p.0)]);
+        assert_eq!(script.failed(), [(receipt, SINK_FAILED.to_owned())]);
+        assert!(reader.deliveries.is_empty() && reader.lanes.is_empty());
+    }
+
+    /// A stall fails back only the units on the partitions it names: a unit
+    /// whose batches the sink wrote stays held.
+    #[test]
+    fn a_unit_off_the_stalled_partitions_stays_held() {
+        let (mut reader, script, rt) = reader();
+        end_with(&mut reader, &rt, crate::job_end::Finish::Seeded);
+        start(&mut reader);
+        let (p, receipt, _tracker) = hold_one(&mut reader, &script);
+        let (q, _other, _tracker) = hold_one(&mut reader, &script);
+        reader.stalled(&[p]);
+        assert_eq!(lanes_revoked(poll(&mut reader)), [LaneId(p.0)]);
+        assert_eq!(script.failed(), [(receipt, SINK_FAILED.to_owned())]);
+        assert!(reader.lanes.contains_key(&q));
+    }
+
+    /// A unit already failing back keeps its first reason when its partition
+    /// stalls too, and is failed once. A unit named after it in the same call
+    /// fails back too.
+    #[test]
+    fn a_failing_unit_keeps_its_reason_on_a_stall() {
+        let (mut reader, script, rt) = reader();
+        end_with(&mut reader, &rt, crate::job_end::Finish::Seeded);
+        start(&mut reader);
+        let (p, receipt, _tracker) = hold_one(&mut reader, &script);
+        let (q, other, _tracker) = hold_one(&mut reader, &script);
+        let d = delivery_of(&reader, p);
+        reader.deliveries.get_mut(&d).unwrap().failing = Some("unreadable".into());
+        reader.stalled(&[p, q]);
+        let mut revoked = lanes_revoked(poll(&mut reader));
+        revoked.sort();
+        assert_eq!(revoked, [LaneId(p.0), LaneId(q.0)]);
+        let mut failed = script.failed();
+        failed.sort();
+        let mut expected = vec![
+            (receipt, "unreadable".to_owned()),
+            (other, SINK_FAILED.to_owned()),
+        ];
+        expected.sort();
+        assert_eq!(failed, expected);
+    }
+
+    /// Off a seeded run a stall leaves the unit held, for
+    /// `checkpoint.stalled_fail_after` to fail the run and replay it: on a
+    /// continuous run with no end check, and on a solo run.
+    #[test]
+    fn a_stall_off_a_seeded_run_leaves_the_unit_held() {
+        for solo in [false, true] {
+            let (mut reader, script, rt) = reader();
+            if solo {
+                end_solo(&mut reader, &rt);
+            }
+            start(&mut reader);
+            let (p, _receipt, _tracker) = hold_one(&mut reader, &script);
+            reader.stalled(&[p]);
+            poll(&mut reader);
+            assert_eq!(script.failed(), [], "solo: {solo}");
+            assert!(reader.lanes.contains_key(&p), "solo: {solo}");
+        }
     }
 
     /// Pins that a poll finding the reader holding only a revoked lane, for

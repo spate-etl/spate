@@ -130,7 +130,10 @@ messages are being skipped. See
   whole pipeline, so it restarts and replays instead of running indefinitely
   while committing nothing for that partition. The failure names each sink
   that abandoned a batch, with the error that ended its latest one. Alert on
-  `spate_checkpoint_watermark_age_seconds` well before that deadline.
+  `spate_checkpoint_watermark_age_seconds` well before that deadline. On a
+  [seeded S3 run](../04-connectors/sources/s3/README.mdx#a-run-on-a-seeded-feed),
+  which has no restart, the source fails each unit with records in the batch
+  back to its feed instead.
 - **Exit codes are the contract with the orchestrator**: `run` returns an
   exit report; `report.exit_code()` is non-zero for any failed state. Wire
   it through `std::process::exit` as the examples do.

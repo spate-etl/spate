@@ -89,7 +89,10 @@ The class and the stage that meets the failure decide what you see:
   warning and the `abandoning sink batch` error carry the reason. The pipeline
   fails once a partition's watermark has stalled behind that batch for
   `checkpoint.stalled_fail_after`, and the exit report names the partition, the
-  sink and the reason. `spate_sink_abandoned_batches_total` counts the batch.
+  sink and the reason. A
+  [seeded S3 run](../04-connectors/sources/s3/README.mdx#a-run-on-a-seeded-feed)
+  fails each unit in the batch back to its feed instead, and goes on.
+  `spate_sink_abandoned_batches_total` counts the batch.
 - **Retryable, in a source.** The source retries. Its connector page names any
   deadline or attempt budget that ends the retries. The error at that limit
   names the limit, and the reason is in the warnings logged before it. The

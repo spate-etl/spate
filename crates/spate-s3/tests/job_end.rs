@@ -1185,13 +1185,22 @@ fn a_solo_run_given_a_feed_in_code_keeps_running() {
 /// A run over `data` on `feed`, passed as seeded, with the end check on a
 /// clock that never moves.
 fn launch_seeded(data: &Path, feed: &MemoryFeed) -> Launched {
+    launch_seeded_scripted(data, feed, |_| {})
+}
+
+/// [`launch_seeded`] with `pre` run on the sink's script first.
+fn launch_seeded_scripted(
+    data: &Path,
+    feed: &MemoryFeed,
+    pre: impl FnOnce(&SinkScript),
+) -> Launched {
     let yaml = PipelineYaml::file("s3-job-end-seeded", data)
         .section("feed:\n  memory: {}\n")
         .build();
     launch_with_seeded_feed(
         &yaml,
         options(),
-        |_| {},
+        pre,
         Arc::new(feed.clone()),
         |source, _io| line_framer(source).with_clock(TestClock::frozen()),
     )
@@ -1247,6 +1256,26 @@ fn a_seeded_run_with_a_dead_letter_ends_completed() {
     );
     assert_eq!(feed.unsettled(), Vec::new());
     assert_eq!(counts(&feed), (0, 0, 1, 1));
+}
+
+/// A seeded run fails back a unit whose only batch the sink abandoned, so
+/// the feed dead-letters it at a cap of 1 and the run ends `Completed` with
+/// no stop. The unit is never acknowledged.
+#[test]
+fn a_seeded_run_fails_back_a_unit_whose_batch_the_sink_abandoned() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    fs::write(data.join("a.ndjson"), lines_bytes(&recs("a", 5))).unwrap();
+    let feed = MemoryFeed::with_attempt_cap(std::num::NonZeroU32::MIN);
+    drop(feed.publish(unit_over(&data, "a.ndjson")));
+    let l = launch_seeded_scripted(&data, &feed, |sink| {
+        sink.enqueue_global(WriteOutcome::fatal("refused"));
+    });
+    let report = exit(&l);
+    assert_eq!(report.state, ExitState::Completed);
+    assert_eq!(feed.dead_letters(), vec![unit_over(&data, "a.ndjson")]);
+    assert_eq!(feed.unsettled(), Vec::new());
+    assert_eq!(counts(&feed), (0, 0, 1, 0));
 }
 
 /// Pins that a seeded run waits for no lister: on an empty feed it ends at

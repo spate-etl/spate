@@ -109,10 +109,12 @@ the frames) happens when the worker calls it, not when the future is polled:
   `SinkError::fatal`. A retryable error is retried; an error of any other class
   abandons the batch (its acks fail, the partition watermark stalls, and
   `checkpoint.stalled_fail_after` eventually fails the pipeline so the data
-  replays after restart). The error's message is the reason that failure
-  reports, so make it name the cause. A rejected credential or TLS handshake is
-  `Fatal`, and a failure to obtain credentials or reach the server is
-  `Retryable`
+  replays after restart). A
+  [seeded S3 run](../04-connectors/sources/s3/README.mdx#a-run-on-a-seeded-feed)
+  fails each unit in the batch back to its feed instead. The error's message is
+  the reason that failure reports, so make it name the cause. A rejected
+  credential or TLS handshake is `Fatal`, and a failure to obtain credentials or
+  reach the server is `Retryable`
   ([ADR-0081](../../adr/0081-a-rejected-credential-or-tls-handshake-is-fatal-unless-throttled.md)).
   `spate::error::find_source` finds the TLS library's error behind the client's
   wrappers, and `spate::error::TLS_REJECTION_ALERTS` lists the alerts that

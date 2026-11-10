@@ -141,6 +141,11 @@ impl JobEnd {
         }
     }
 
+    /// Whether code seeded the run's feed, so the run has no restart.
+    pub(crate) fn seeded(&self) -> bool {
+        matches!(self.finish, Finish::Seeded)
+    }
+
     /// Whether the check ended the job stalled.
     pub(crate) fn stalled(&self) -> bool {
         matches!(

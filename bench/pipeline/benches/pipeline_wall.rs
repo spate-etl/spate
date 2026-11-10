@@ -75,7 +75,7 @@ fn case(suite: Suite, stored: Stored, threads: usize) -> Suite {
                 let rig = Rig::new(shape, DEADLINE, |object| corpus.absorb("object", object));
                 let units = rig.units();
                 assert_eq!(
-                    units % threads as u64,
+                    units % threads,
                     0,
                     "{units} units do not share evenly over {threads} threads"
                 );

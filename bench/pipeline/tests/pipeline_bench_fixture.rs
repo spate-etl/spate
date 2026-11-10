@@ -71,30 +71,30 @@ fn the_rig_counts_the_uncompressed_bytes() {
     );
 }
 
-/// Objects too small to fill a unit two at a time are refused: a thread takes
-/// whole units, so the case could not say how evenly its threads shared them.
+/// Pins that the rig reports the lister's packing: eight small objects share
+/// one unit.
 #[test]
-#[should_panic(expected = "do not pack two to a unit")]
-fn small_uncompressed_objects_are_refused() {
+fn the_rig_reports_the_listers_units() {
     let shape = Shape {
         objects: 8,
         lines: 512,
         stored: Stored::Plain,
         threads: 2,
     };
-    Rig::new(shape, DEADLINE, |_| {}).units();
+    assert_eq!(Rig::new(shape, DEADLINE, |_| {}).units(), 1);
 }
 
-/// A zstd object count that does not fill whole sixteen-object units is
-/// refused for the same reason.
+/// Pins that seventeen small zstd objects, a unit of sixteen and one of one,
+/// are refused: a thread takes whole units, so the case could not say how
+/// evenly its threads shared them.
 #[test]
-#[should_panic(expected = "8 objects in units of 16")]
-fn a_partial_zstd_unit_is_refused() {
+#[should_panic(expected = "unequal size: [16, 1]")]
+fn objects_that_pack_unevenly_are_refused() {
     let shape = Shape {
-        objects: 8,
-        lines: 512,
+        objects: 17,
+        lines: 8,
         stored: Stored::Zstd,
-        threads: 2,
+        threads: 1,
     };
     Rig::new(shape, DEADLINE, |_| {}).units();
 }

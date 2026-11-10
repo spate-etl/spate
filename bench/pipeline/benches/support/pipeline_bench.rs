@@ -22,6 +22,7 @@ use spate_core::pipeline::{ExitState, Pipeline, PipelineRuntime, RuntimeOptions}
 use spate_core::sink::{KeyHashRouter, SealedBatch, ShardWriter, SinkParts, SinkPoolConfig};
 use spate_json::{JsonDeserializerBuilder, JsonSettings, NdjsonFramer};
 use spate_s3::S3Source;
+use spate_s3::bench_seams::pack_members;
 use spate_test::PipelineRun;
 use spate_test_support::events::{Event, event_line};
 use std::collections::HashMap;
@@ -38,16 +39,11 @@ const MAX_LINE_BYTES: usize = 4_096;
 /// default is 1 s).
 const LINGER: Duration = Duration::from_millis(5);
 
-/// The split target every run sets, in MiB. The lister packs whole objects
-/// into a unit until the next would pass the target or the unit holds 16
-/// (`spate_s3`'s `Packer`), and a pipeline thread takes whole units. At the
-/// bench's object sizes this packs two uncompressed objects or sixteen zstd
-/// objects to a unit, so every case's thread count divides the unit count;
-/// [`Rig::units`] checks that against the staged sizes.
+/// The split target every run sets, in MiB. At the bench's object sizes the
+/// lister packs two uncompressed objects or sixteen zstd objects to a unit,
+/// so every case's thread count divides the unit count; [`Rig::units`] checks
+/// the staged objects against the lister's own packing.
 const SPLIT_TARGET_MIB: u64 = 25;
-
-/// Most objects one unit packs.
-const PACK_MEMBERS: u64 = 16;
 
 /// How the staged objects are stored.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -170,8 +166,8 @@ pub(crate) struct Rig {
     data: PathBuf,
     shape: Shape,
     deadline: Duration,
-    /// Smallest and largest stored object, in bytes.
-    stored_bytes: (u64, u64),
+    /// Each staged object's key, as the lister lists it, and stored size.
+    stored: Vec<(String, u64)>,
     /// Uncompressed bytes in the whole corpus.
     bytes: u64,
 }
@@ -189,7 +185,7 @@ impl Rig {
         let data = dir.path().join("data");
         fs::create_dir_all(&data).expect("the data directory");
         let mut object = Vec::new();
-        let (mut stored_bytes, mut bytes) = ((u64::MAX, 0), 0);
+        let (mut stored, mut bytes) = (Vec::with_capacity(shape.objects), 0);
         for o in 0..shape.objects {
             object.clear();
             let first = (o * shape.lines) as u64;
@@ -198,21 +194,21 @@ impl Rig {
             }
             absorb(&object);
             bytes += object.len() as u64;
-            let stored = match shape.stored {
+            let body = match shape.stored {
                 Stored::Zstd => zstd::encode_all(&object[..], 3).expect("the object compresses"),
                 Stored::Plain => object.clone(),
             };
-            let len = stored.len() as u64;
-            stored_bytes = (stored_bytes.0.min(len), stored_bytes.1.max(len));
             let path = data.join(format!("obj-{o:05}.{}", shape.stored.extension()));
-            fs::write(path, stored).expect("the object is written");
+            let key = path.to_string_lossy().trim_start_matches('/').to_owned();
+            stored.push((key, body.len() as u64));
+            fs::write(path, body).expect("the object is written");
         }
         Rig {
             _dir: dir,
             data,
             shape,
             deadline,
-            stored_bytes,
+            stored,
             bytes,
         }
     }
@@ -222,39 +218,24 @@ impl Rig {
         self.bytes
     }
 
-    /// How many units the lister packs the staged objects into.
+    /// How many units the lister packs the staged objects into, by
+    /// `spate_s3`'s own packing at the run's split target.
     ///
     /// # Panics
     ///
-    /// Panics when the staged sizes do not pack into units of one fixed
-    /// member count: two uncompressed objects, each at most the target and
-    /// three of them past it, or sixteen zstd objects within the target.
-    pub(crate) fn units(&self) -> u64 {
-        let target = SPLIT_TARGET_MIB << 20;
-        let (min, max) = self.stored_bytes;
-        let members = match self.shape.stored {
-            Stored::Plain => {
-                assert!(
-                    2 * max <= target && 3 * min > target,
-                    "uncompressed objects of {min}..={max} bytes do not pack two to a unit"
-                );
-                2
-            }
-            Stored::Zstd => {
-                assert!(
-                    PACK_MEMBERS * max <= target,
-                    "zstd objects of up to {max} bytes do not pack {PACK_MEMBERS} to a unit"
-                );
-                PACK_MEMBERS
-            }
-        };
-        let objects = self.shape.objects as u64;
-        assert_eq!(
-            objects % members,
-            0,
-            "{objects} objects in units of {members}"
+    /// Panics when the units do not all hold the same number of objects.
+    pub(crate) fn units(&self) -> usize {
+        let objects: Vec<(&str, u64)> = self
+            .stored
+            .iter()
+            .map(|(key, size)| (key.as_str(), *size))
+            .collect();
+        let members = pack_members(&objects, SPLIT_TARGET_MIB << 20);
+        assert!(
+            members.iter().all(|m| *m == members[0]),
+            "the objects pack into units of unequal size: {members:?}"
         );
-        objects / members
+        members.len()
     }
 
     /// Builds one run: a uniquely named bounded pipeline over the staged

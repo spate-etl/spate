@@ -1,4 +1,5 @@
-//! Measurable entry points into work this crate does not otherwise expose.
+//! Entry points the benches in this workspace need into work this crate does
+//! not otherwise expose.
 //!
 //! Benches in this workspace drive their crate's public API. This module is
 //! an exception.
@@ -152,4 +153,77 @@ pub fn frame_range(
         records += 1;
     }
     Ok(records)
+}
+
+/// The member count of each unit the lister packs `objects` into at a split
+/// target of `target_bytes`, in listing order.
+///
+/// Each object is `(key, size)` and carries an ETag, as a listed object does.
+/// The compression is resolved from each key and the framer cuts on a newline,
+/// as the NDJSON framer does. An object cut into ranges yields one unit per
+/// range, each with one member.
+///
+/// For a bench whose cases divide work over pipeline threads: a thread takes
+/// whole units, so the case's setup can check the share is even against the
+/// packing the lister does rather than a copy of it.
+///
+/// # Panics
+///
+/// Panics when a unit's descriptor cannot be built, which no listed object
+/// causes.
+#[must_use]
+pub fn pack_members(objects: &[(&str, u64)], target_bytes: u64) -> Vec<usize> {
+    let mut packer = crate::unit::Packer::new(crate::split::Packing {
+        target_bytes,
+        compression: Compression::Auto,
+        delimiter: Some(b'\n'),
+    });
+    let mut members = Vec::new();
+    for (key, size) in objects {
+        let entry = crate::fetch::ObjectEntry {
+            key: (*key).to_owned(),
+            size: *size,
+            etag: Some("\"etag\"".to_owned()),
+            last_modified_ms: 0,
+        };
+        for minted in packer.push(entry) {
+            members.push(minted.expect("a listed object mints its unit").objects);
+        }
+    }
+    if let Some(minted) = packer.close() {
+        members.push(minted.expect("a listed object mints its unit").objects);
+    }
+    members
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pack_members;
+
+    /// Pins that objects pack until the next would pass the target.
+    #[test]
+    fn objects_pack_until_the_next_would_pass_the_target() {
+        let objects = [("a.ndjson", 10), ("b.ndjson", 10), ("c.ndjson", 10)];
+        assert_eq!(pack_members(&objects, 25), vec![2, 1]);
+    }
+
+    /// Pins that a unit closes at sixteen members whatever room it has left.
+    #[test]
+    fn a_unit_closes_at_sixteen_members() {
+        let keys: Vec<String> = (0..17).map(|i| format!("o{i:02}.ndjson.zst")).collect();
+        let objects: Vec<(&str, u64)> = keys.iter().map(|k| (k.as_str(), 1)).collect();
+        assert_eq!(pack_members(&objects, 1 << 20), vec![16, 1]);
+    }
+
+    /// Pins that an uncompressed object over the target is cut into ranges,
+    /// one single-member unit each, and a zstd one is read whole.
+    #[test]
+    fn only_an_uncompressed_object_over_the_target_is_cut() {
+        let cut = pack_members(&[("big.ndjson", 4 << 20)], 1 << 20);
+        assert!(cut.len() > 1 && cut.iter().all(|m| *m == 1), "{cut:?}");
+        assert_eq!(
+            pack_members(&[("big.ndjson.zst", 4 << 20)], 1 << 20),
+            vec![1]
+        );
+    }
 }

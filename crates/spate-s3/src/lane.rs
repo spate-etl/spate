@@ -34,15 +34,13 @@ use crate::framer::{Codec, FramerFactory, ObjectFramer};
 use crate::lane_ctx::{PoisonKind, PoisonReport, SplitTracker};
 use crate::metrics::S3Metrics;
 use crate::offset::{MAX_RECORD_INDEX, Position};
-use futures_util::future::{Either, select};
 use spate_core::checkpoint::{AckIssuer, AckRef};
-use spate_core::clock::tokio::Clock;
+use spate_core::clock::tokio::{Clock, before};
 use spate_core::error::{ErrorClass, SourceError};
 use spate_core::feed::FeedWaker;
 use spate_core::record::{PartitionId, RawPayload};
 use spate_core::source::{LaneId, PayloadBatch, SourceLane};
 use spate_core::task::TaskHandle;
-use std::pin::pin;
 use std::sync::Arc;
 use std::sync::mpsc as std_mpsc;
 use std::time::Duration;
@@ -542,19 +540,12 @@ impl SourceLane for S3Lane {
                     if remaining.is_zero() {
                         return Ok(None);
                     }
-                    let rx = &mut self.rx;
-                    let clock = &self.clock;
-                    // The sleep is built inside `block_on` because a tokio
-                    // timer registers with the runtime it is created in.
-                    // Blocks this pipeline thread only, bounded by the poll
-                    // timeout.
-                    let received = self.handle.block_on(async {
-                        let sleep = clock.sleep_until(deadline);
-                        match select(pin!(rx.recv()), sleep).await {
-                            Either::Left((received, _)) => Some(received),
-                            Either::Right(_) => None,
-                        }
-                    });
+                    let wait = before(&*self.clock, deadline, self.rx.recv());
+                    // A tokio timer registers with the runtime it is created
+                    // in, and `before` creates its sleep on the first poll,
+                    // inside `block_on`. Blocks this pipeline thread only,
+                    // bounded by the poll timeout.
+                    let received = self.handle.block_on(wait);
                     match received {
                         Some(Some(m)) => Some(m),
                         Some(None) => None,

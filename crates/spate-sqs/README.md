@@ -37,13 +37,14 @@ feed:
 
 - `visibility` takes whole seconds from `3s` to `12h`. The feed extends units
   every third of it, as Unit lifecycle describes.
-- `queue_url` takes an `http` or `https` URL. A URL whose path ends in `.fifo`
-  is refused, because the feed reads standard queues only.
+- `queue_url` takes an `http` or `https` URL with no user or password. A URL
+  whose path ends in `.fifo` is refused, because the feed reads standard queues
+  only.
 - Unset, `region` comes from the queue URL's host when the AWS SDK builds that
   host for the region. Otherwise it comes from `AWS_REGION`, the shared config
   file or instance metadata, and connecting fails when none of them names one.
 - `endpoint` replaces the region's endpoint, for a local emulator or a VPC
-  endpoint.
+  endpoint. It takes an `http` or `https` URL with no user or password.
 - `attempt_cap` is refused on `sqs`, because the queue's `maxReceiveCount`
   counts deliveries. A `settling_window` below `1m` is refused too, because
   AWS documents SQS's message counts as taking at least a minute to settle.

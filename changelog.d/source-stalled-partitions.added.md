@@ -1,0 +1,3 @@
+**`Source::stalled` tells a source which partitions are stalled behind a failed batch** (`spate-core`)
+
+The runtime calls `Source::stalled` on each commit tick while a partition's watermark is stalled behind a failed batch, such as one the sink abandoned, and names every stalled partition. A source can revoke the partition's lanes to end the stall and give its input back for another read. A source that does nothing keeps the existing behaviour: `checkpoint.stalled_fail_after` fails the run, and the input replays after a restart. The default implementation does nothing, so existing sources need no change.

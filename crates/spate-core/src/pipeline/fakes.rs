@@ -91,6 +91,8 @@ pub(crate) struct SourceLog {
     pub(crate) reading_on_stop_calls: usize,
     /// How many times the controller called `renew_held`.
     pub(crate) renew_held_calls: usize,
+    /// The partitions of each `stalled` call, in order.
+    pub(crate) stalled: Vec<Vec<PartitionId>>,
     /// How many times the controller called `stop_reading`.
     pub(crate) stop_reading_calls: usize,
     /// When set, a dropped lane logs `lane-dropped`, which a stop's drain
@@ -339,6 +341,14 @@ impl Source for FakeSource {
 
     fn renew_held(&mut self) {
         self.shared.lock().unwrap().renew_held_calls += 1;
+    }
+
+    fn stalled(&mut self, partitions: &[PartitionId]) {
+        self.shared
+            .lock()
+            .unwrap()
+            .stalled
+            .push(partitions.to_vec());
     }
 
     fn reading_on_stop(&mut self) -> bool {

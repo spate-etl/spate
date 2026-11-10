@@ -1,0 +1,3 @@
+**A stalled partition fails the pipeline no earlier than the second commit tick that finds it** (`spate-core`)
+
+A partition stalled behind a failed batch now fails the pipeline under `checkpoint.stalled_fail_after` only on a commit tick after the one that first finds the stall. This gives the source a `poll_events` call in which to release the partition through `Source::stalled`. In previous versions, the first tick that found the stall past its limit failed the pipeline. A stall can now fail on a later commit tick than before: when `checkpoint.stalled_fail_after` is shorter than `checkpoint.interval`, when a tick runs late, or when the stall begins during a tick's own commit. A stall that no source releases still fails the pipeline, and no record is lost.

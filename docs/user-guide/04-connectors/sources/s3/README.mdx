@@ -1138,8 +1138,10 @@ finish in the feed, and `MemoryFeed::unsettled` names them.
 A unit whose batch the sink abandons, after a write error the sink does not
 retry, is failed back to the feed, and the cap of 1 dead-letters it. A sink
 batch can hold records from several units, and each of them fails back. The
-run does not wait for the stop to settle them, and the function reports only
-the units in that batch.
+run does not wait for the stop to settle them, except while the sink still
+retries another write that holds their records, as
+[a run on a seeded feed](#a-run-on-a-seeded-feed) describes. The function
+reports only the units in that batch.
 
 ### Sizing an invocation
 

@@ -68,6 +68,10 @@ async fn the_log_filter_drops_the_recorders_lines_and_keeps_the_handlers() {
         .cloudwatch_namespace("Spate")
         .init()
         .unwrap();
+    #[expect(
+        clippy::disallowed_macros,
+        reason = "the test feeds the recorder directly, outside any pipeline"
+    )]
     for value in 0..101 {
         metrics::histogram!("lambda_s3_test_seconds").record(f64::from(value));
     }

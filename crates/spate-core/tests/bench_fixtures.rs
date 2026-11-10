@@ -500,11 +500,7 @@ fn a_thread_count_must_divide_the_partitions() {
     else {
         panic!("three threads over {PARTITIONS} partitions was accepted");
     };
-    let message = panic
-        .downcast_ref::<String>()
-        .map(String::as_str)
-        .or_else(|| panic.downcast_ref::<&str>().copied())
-        .unwrap_or_default();
+    let message = spate_core::task::panic_text(&*panic);
     // Check which panic, not only that one happened. Raising `PARTITIONS` to six
     // would make three threads legal, and a test that only counted panics
     // would go on passing while proving nothing about divisibility.

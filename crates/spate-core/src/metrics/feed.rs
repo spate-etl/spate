@@ -23,10 +23,11 @@ use std::time::Duration;
 /// # Examples
 ///
 /// ```
+/// use spate_core::metrics::names::L_OP;
 /// use spate_core::metrics::{FeedOp, Meter};
 ///
 /// let meter = Meter::with_namespace("queue_feed", "orders", "feed", "queue");
-/// let retries = FeedOp::ALL.map(|op| meter.counter("retries_total", &[("op", op.label().into())]));
+/// let retries = FeedOp::ALL.map(|op| meter.counter("retries_total", &[(L_OP, op.label().into())]));
 /// retries[FeedOp::Publish as usize].increment(1);
 /// assert_eq!(FeedOp::HandBack.label(), "hand_back");
 /// ```

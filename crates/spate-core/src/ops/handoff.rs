@@ -95,7 +95,7 @@ impl std::fmt::Debug for CodecSlot {
     }
 }
 
-static ENCODE_SKIP_WARN: RateLimit = RateLimit::new(5, Duration::from_secs(10));
+static ENCODE_SKIP_WARN: RateLimit = RateLimit::hot_path();
 
 /// The chain's terminal stage. Owns one accumulation buffer per shard,
 /// seals [`EncodedChunk`]s at [`ChunkConfig::target_bytes`], and hands

@@ -29,6 +29,10 @@ store, such as its credential settings, its S3 port and its readiness check, is
 that store's arm in `spate_test_support::Store`. A lane with no arm there fails
 `every_s3_lane_names_a_known_store` without Docker.
 
+A start fails when the store is not ready within 60 seconds, and as soon as its
+container exits. The error gives the container's exit code, or says it was still
+running, and ends with the last 200 lines of its stdout and stderr.
+
 ## Capabilities
 
 A lane's `CAPABILITIES` file names one capability per line. An absent file
@@ -56,6 +60,11 @@ copies in a bootstrap, `test-support/src/s3/rgw.sh`, that starts one monitor and
 one memstore OSD on loopback, creates the fixed key pair's user, then runs
 `radosgw` on port 7480. It waits on `GET /`, which RGW answers without
 credentials once it listens.
+
+The bootstrap writes a line to stderr as each stage completes, and `radosgw`
+logs to stderr. When a step fails or `radosgw` stops, the bootstrap writes its
+exit status, `ceph -s` and the last 40 lines of each Ceph log to stderr before
+the container exits.
 
 Once RGW is ready, `S3Store::start_notifying` creates a persistent topic named
 for the work topic, with the push endpoint `kafka://localhost:9093`, and a

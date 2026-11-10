@@ -40,6 +40,14 @@ pub const RGW_OPAQUE_DATA: &str = rgw::OPAQUE_DATA;
 
 const READY: Duration = Duration::from_secs(60);
 
+/// How often a failed readiness probe asks Docker whether the container
+/// still runs.
+const LIVENESS_EVERY: Duration = Duration::from_secs(1);
+
+/// The lines of each container stream a failed start carries. A store's
+/// reason for stopping is the last thing it writes.
+const LOG_TAIL: usize = 200;
+
 /// The service whose lanes are stores.
 const SERVICE: &str = "s3";
 
@@ -167,7 +175,9 @@ impl S3Store {
     /// # Errors
     ///
     /// Fails when the selected lane is pinned but names no store, or the
-    /// container does not start or is not ready within 60 seconds.
+    /// container does not start, exits, or is not ready within 60 seconds.
+    /// A container that exits or is not ready fails with the tail of its
+    /// output.
     ///
     /// # Panics
     ///
@@ -197,7 +207,11 @@ impl S3Store {
         let ready_port = container
             .get_host_port_ipv4(store.ready_port())
             .map_err(|e| format!("{store} readiness port: {e}"))?;
-        ready(store, SocketAddr::from(([127, 0, 0, 1], ready_port)))?;
+        ready(
+            store,
+            SocketAddr::from(([127, 0, 0, 1], ready_port)),
+            &container,
+        )?;
         Ok(S3Store {
             container,
             store,
@@ -219,9 +233,10 @@ impl S3Store {
     /// # Errors
     ///
     /// Fails when the selected lane is pinned but names no store, the store
-    /// sends no notifications, the container does not start or is not ready
-    /// within 60 seconds, or a store that takes its Kafka target through its
-    /// topic API refuses the topic.
+    /// sends no notifications, the container does not start, exits, or is
+    /// not ready within 60 seconds, or a store that takes its Kafka target
+    /// through its topic API refuses the topic. A container that exits or is
+    /// not ready fails with the tail of its output.
     ///
     /// # Panics
     ///
@@ -249,7 +264,7 @@ impl S3Store {
         });
         let container = request.start().map_err(|e| format!("start {store}: {e}"))?;
         let api = SocketAddr::from(([127, 0, 0, 1], s3_host_port));
-        ready(store, api)?;
+        ready(store, api, &container)?;
         let mut started = S3Store {
             container,
             store,
@@ -424,19 +439,89 @@ fn pinned(store: Store) -> GenericImage {
 }
 
 /// Waits until the store at `api` answers its readiness path with `200`.
-fn ready(store: Store, api: SocketAddr) -> Result<(), String> {
+///
+/// Fails as soon as Docker reports `container` exited, or once [`READY`]
+/// passes, with the tail of the container's output.
+fn ready(store: Store, api: SocketAddr, container: &Container<GenericImage>) -> Result<(), String> {
     let until = Instant::now() + READY;
+    let mut asked = Instant::now();
     loop {
-        match http(api, "GET", store.ready_path()) {
+        let probe = match http(api, "GET", store.ready_path()) {
             Ok((200, _)) => return Ok(()),
-            failure if Instant::now() >= until => {
-                return Err(format!(
-                    "{store} was not ready within {READY:?}: {failure:?}"
-                ));
+            probe => probe,
+        };
+        let now = Instant::now();
+        let ending = if now >= until {
+            Some(Ending::NotReady)
+        } else if now.duration_since(asked) >= LIVENESS_EVERY {
+            asked = now;
+            // Docker not answering leaves the deadline to decide.
+            match container.is_running() {
+                Ok(false) => Some(Ending::Exited(container.exit_code().ok().flatten())),
+                _ => None,
             }
-            _ => std::thread::sleep(Duration::from_millis(50)),
+        } else {
+            None
+        };
+        if let Some(ending) = ending {
+            return Err(start_failure(
+                store,
+                ending,
+                &probe,
+                &container_output(container.stdout_to_vec()),
+                &container_output(container.stderr_to_vec()),
+            ));
         }
+        std::thread::sleep(Duration::from_millis(50));
     }
+}
+
+/// How a start that never became ready ended.
+#[derive(Clone, Copy, Debug)]
+enum Ending {
+    /// Docker reported the container exited, with its exit code when Docker
+    /// gave one.
+    Exited(Option<i64>),
+    /// The container still ran when [`READY`] passed.
+    NotReady,
+}
+
+/// A container stream read for a failure message, or why it could not be.
+fn container_output<E: fmt::Display>(read: Result<Vec<u8>, E>) -> String {
+    match read {
+        Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+        Err(e) => format!("(unreadable: {e})"),
+    }
+}
+
+/// The error of a start that never became ready: how it ended, the last
+/// probe's result, and the last [`LOG_TAIL`] lines of each container stream.
+fn start_failure(
+    store: Store,
+    ending: Ending,
+    probe: &std::io::Result<(u16, String)>,
+    stdout: &str,
+    stderr: &str,
+) -> String {
+    let head = match ending {
+        Ending::Exited(Some(code)) => {
+            format!("{store} exited with code {code} before it was ready: {probe:?}")
+        }
+        Ending::Exited(None) => format!("{store} exited before it was ready: {probe:?}"),
+        Ending::NotReady => format!("{store} was not ready within {READY:?}: {probe:?}"),
+    };
+    format!(
+        "{head}\n---- last {LOG_TAIL} lines of {store} stdout ----\n{}\n\
+         ---- last {LOG_TAIL} lines of {store} stderr ----\n{}",
+        tail(stdout),
+        tail(stderr),
+    )
+}
+
+/// The last [`LOG_TAIL`] lines of `log`.
+fn tail(log: &str) -> String {
+    let lines: Vec<&str> = log.lines().collect();
+    lines[lines.len().saturating_sub(LOG_TAIL)..].join("\n")
 }
 
 #[cfg(test)]
@@ -586,5 +671,54 @@ mod tests {
             let store = Store::from_lane(&lane).unwrap();
             assert_eq!(store.lane(), lane);
         }
+    }
+
+    /// A start whose container exited says so with its exit code, and ends
+    /// with the last line the container wrote to stderr.
+    #[test]
+    fn an_exited_start_names_its_exit_code_and_ends_with_its_stderr() {
+        let refused = Err(std::io::ErrorKind::ConnectionRefused.into());
+        let stderr = "rgw.sh: monitor up\nrgw.sh: exiting with status 1";
+        let err = start_failure(Store::Rgw, Ending::Exited(Some(1)), &refused, "", stderr);
+        assert!(
+            err.starts_with("Ceph RGW exited with code 1 before it was ready: Err("),
+            "{err}"
+        );
+        assert!(err.contains("ConnectionRefused"), "{err}");
+        assert!(err.ends_with("rgw.sh: exiting with status 1"), "{err}");
+
+        let err = start_failure(Store::Rgw, Ending::Exited(None), &refused, "", stderr);
+        assert!(
+            err.starts_with("Ceph RGW exited before it was ready: Err("),
+            "{err}"
+        );
+    }
+
+    /// A start still running at the deadline keeps the not-ready wording,
+    /// with both streams after it.
+    #[test]
+    fn a_start_still_running_at_the_deadline_carries_both_streams() {
+        let err = start_failure(
+            Store::Rustfs,
+            Ending::NotReady,
+            &Ok((503, String::new())),
+            "out line",
+            "err line",
+        );
+        assert_eq!(
+            err,
+            "RustFS was not ready within 60s: Ok((503, \"\"))\n\
+             ---- last 200 lines of RustFS stdout ----\nout line\n\
+             ---- last 200 lines of RustFS stderr ----\nerr line"
+        );
+    }
+
+    /// A container log longer than the tail keeps only its last lines.
+    #[test]
+    fn a_long_log_keeps_its_last_lines() {
+        let log: Vec<String> = (0..=LOG_TAIL).map(|n| n.to_string()).collect();
+        let kept = tail(&log.join("\n"));
+        assert_eq!(kept, log[1..].join("\n"));
+        assert_eq!(tail("one\ntwo"), "one\ntwo");
     }
 }

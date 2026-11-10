@@ -483,8 +483,9 @@ mod slow_listing {
     }
 }
 
-/// A start commit left unanswered by a silent coordinator, against the run
-/// ending, on a real broker behind a proxy that holds every byte once told to.
+/// A commit left unanswered by a silent coordinator, at a start or at a stop,
+/// against the run ending, on a real broker behind a proxy that holds every byte
+/// once told to.
 mod silent_coordinator {
     use crate::support;
 
@@ -703,6 +704,31 @@ mod silent_coordinator {
             exit.is_some(),
             "silent={silent}: the run had not ended {HANG:?} after its start, past a 15 s startup_timeout"
         );
+    }
+
+    /// A pipeline ends after its stop with the coordinator silent from the first
+    /// commit the stop sends.
+    #[test]
+    #[ignore = "requires Docker"]
+    fn a_stop_with_a_silent_coordinator_ends_the_run() {
+        let (_container, proxy, brokers) = broker_behind_a_proxy();
+        support::create_topic(&brokers, TOPIC, 1);
+        support::produce_to(&brokers, TOPIC, 0, 0..10);
+        let mut cfg = latest::config(&brokers, TOPIC, "stop", "earliest");
+        // Only the stop's flush commits.
+        cfg.commit_interval = Duration::from_secs(3600);
+        cfg.rdkafka
+            .insert("socket.timeout.ms".to_string(), "5000".to_string());
+        let run = latest::Run::start(cfg);
+        spate_test::wait_until(HANG, "all ten written", || run.written(0).len() == 10);
+        proxy.armed.store(true, Ordering::SeqCst);
+        run.trigger_stop();
+        let exit = run.wait_exit(HANG);
+        let silent = proxy.silent.load(Ordering::SeqCst);
+        proxy.release();
+        assert!(silent, "the stop sent no commit");
+        let exit = exit.unwrap_or_else(|| panic!("the run had not ended {HANG:?} after its stop"));
+        exit.expect("the run started");
     }
 
     /// A source drops once the startup deadline has ended it, with its broker killed

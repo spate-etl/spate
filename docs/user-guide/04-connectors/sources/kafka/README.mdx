@@ -161,6 +161,12 @@ The framework never uses librdkafka's position-based auto-commit. Instead:
   **synchronously** while the member still owns the partitions (the removed
   member below is the exception), so another member never starts from an offset
   covering unwritten data.
+- That synchronous commit waits up to 10 seconds for the group's answer, so a
+  coordinator that stops answering holds a revocation or a stop for no longer.
+  A commit with no answer in that time counts as failed, and its offsets replay
+  on the next start. A run that ends because its source drained then exits
+  `Failed`. The source's close waits up to another 10 seconds for the consumer,
+  which then closes in the background.
 - A rebalance *error* (an event that is neither an assignment nor a
   revocation) releases ownership immediately, as the client library's
   contract requires. The lanes still drain, but their offsets can no longer

@@ -4912,6 +4912,7 @@ mod tests {
     #[test]
     fn a_flush_to_a_silent_coordinator_fails_and_the_source_drops() {
         use crate::testutil::mock::MockKafka;
+        use std::sync::mpsc;
         let cluster = MockKafka::new();
         cluster.create_topic("orders", 4, 1).expect("create topic");
         let brokers = cluster.bootstrap_servers();
@@ -4919,7 +4920,7 @@ mod tests {
         cluster
             .broker_round_trip_time(1, Duration::from_hours(1))
             .expect("hold every reply");
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx, rx) = mpsc::channel();
         crate::testutil::assert_returns(cluster, HANG, "a flush and drop", move || {
             let flushed = source.flush_commits();
             drop(source);

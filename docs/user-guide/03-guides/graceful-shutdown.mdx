@@ -80,6 +80,8 @@ one, raise the other. With a feed that hands back, the stop's reading and the
 feed's close also run inside the budget, and startup refuses a `drain_timeout`
 of 5s or less. A feed's close that outlasts what is left of the budget falls
 into the gap too.
+A source whose backend stops answering spends a bounded time on its final
+commit and on its close, and the source's connector page states that bound.
 :::
 
 ```yaml

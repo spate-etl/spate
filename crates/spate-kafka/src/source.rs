@@ -4237,7 +4237,9 @@ mod tests {
             let cluster = mock();
             let (mut source, _clock, recorded) =
                 recording(&cluster, "latest", CONSUMERS, |_| Duration::ZERO);
-            source.flush_commits().expect("nothing stored is not a failure");
+            source
+                .flush_commits()
+                .expect("nothing stored is not a failure");
             let sent = (0..CONSUMERS).map(|k| BrokerCall::CommitSent { k });
             let waits = (0..CONSUMERS).map(|k| BrokerCall::CommitWait {
                 k,

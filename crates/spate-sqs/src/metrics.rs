@@ -6,6 +6,7 @@
 //! name per event.
 
 use crate::error::code_is;
+use spate_core::metrics::names::L_OP;
 use spate_core::metrics::{Counter, FeedOp, Meter};
 
 /// Why SQS refused to extend one entry, as the `code` label names it.
@@ -65,7 +66,7 @@ impl SqsFeedMetrics {
             refused_other: refused("other"),
             fails_dropped: meter.counter("fails_dropped_total", &[]),
             retried: FeedOp::ALL
-                .map(|op| meter.counter("retries_total", &[("op", op.label().into())])),
+                .map(|op| meter.counter("retries_total", &[(L_OP, op.label().into())])),
         }
     }
 

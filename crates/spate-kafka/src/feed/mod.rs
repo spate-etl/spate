@@ -490,7 +490,7 @@ impl Core {
                     %topic,
                     error = %failure.reason,
                     ?retry_in,
-                    "writing {what} failed; sending it again",
+                    "writing {what} failed; queued to send again after the backoff",
                 );
             }
         }

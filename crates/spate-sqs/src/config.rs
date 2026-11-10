@@ -2,7 +2,8 @@
 
 use aws_sdk_sqs::config::endpoint::{DefaultResolver, Params, ResolveEndpoint as _};
 use serde::Deserialize;
-use spate_core::config::{ConfigError, FeedSection, SectionPath};
+use spate_core::config::{ConfigError, FeedSection, SectionPath, UrlRule, redact};
+use std::fmt;
 use std::time::Duration;
 use url::Url;
 
@@ -27,18 +28,25 @@ fn default_visibility() -> Duration {
     Duration::from_secs(60)
 }
 
+/// The rule `queue_url` and `endpoint` meet. The SDK signs each request with
+/// credentials from its provider chain, so a URL's userinfo is never sent.
+const URL: UrlRule<'static> =
+    UrlRule::new("credentials come from the AWS SDK's default provider chain")
+        .schemes(&["http", "https"]);
+
 /// `queue_url` parsed as a URL.
 ///
 /// # Errors
 ///
-/// [`ConfigError::Component`] at `feed.sqs.queue_url` when it does not parse.
+/// [`ConfigError::Component`] at `feed.sqs.queue_url` when it is not an
+/// `http` or `https` URL, or carries userinfo.
 pub(crate) fn queue_url(queue_url: &str) -> Result<Url, ConfigError> {
-    Url::parse(queue_url)
-        .map_err(|e| SectionPath::feed(BACKEND).invalid("queue_url", format!("is not a URL: {e}")))
+    URL.check(queue_url)
+        .map_err(|e| SectionPath::feed(BACKEND).invalid("queue_url", e.to_string()))
 }
 
 /// The keys under `feed: { sqs: … }`.
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct SqsFeedConfig {
     /// The queue's URL, as `GetQueueUrl` returns it.
@@ -54,6 +62,25 @@ pub(crate) struct SqsFeedConfig {
     /// An endpoint in place of the region's, such as a local emulator.
     #[serde(default)]
     pub(crate) endpoint: Option<String>,
+}
+
+// A hand-written `Debug`, so the URLs print through `redact::url`. The
+// destructure lists every field so a new one cannot reach `Debug` unplaced.
+impl fmt::Debug for SqsFeedConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let SqsFeedConfig {
+            queue_url,
+            visibility,
+            region,
+            endpoint,
+        } = self;
+        f.debug_struct("SqsFeedConfig")
+            .field("queue_url", &redact::url(queue_url))
+            .field("visibility", visibility)
+            .field("region", region)
+            .field("endpoint", &endpoint.as_deref().map(redact::url))
+            .finish()
+    }
 }
 
 impl SqsFeedConfig {
@@ -91,15 +118,6 @@ impl SqsFeedConfig {
             ));
         }
         let url = queue_url(&self.queue_url)?;
-        if !matches!(url.scheme(), "http" | "https") {
-            return Err(at.invalid(
-                "queue_url",
-                format!(
-                    "must be an http or https URL; got scheme `{}`",
-                    url.scheme()
-                ),
-            ));
-        }
         if url.path().trim_end_matches('/').ends_with(".fifo") {
             return Err(at.invalid(
                 "queue_url",
@@ -107,8 +125,8 @@ impl SqsFeedConfig {
             ));
         }
         if let Some(endpoint) = &self.endpoint {
-            Url::parse(endpoint)
-                .map_err(|e| at.invalid("endpoint", format!("is not a URL: {e}")))?;
+            URL.check(endpoint)
+                .map_err(|e| at.invalid("endpoint", e.to_string()))?;
         }
         Ok(())
     }
@@ -379,7 +397,13 @@ pub(crate) mod tests {
             (
                 "sqs: { queue_url: \"ftp://x/1/q\" }",
                 at("queue_url"),
-                "feed.sqs.queue_url: must be an http or https URL; got scheme `ftp`",
+                "feed.sqs.queue_url: must be a URL with scheme http or https; found ftp",
+            ),
+            (
+                "sqs: { queue_url: \"https://u:hunter2@sqs.eu-west-2.amazonaws.com/1/q\" }",
+                at("queue_url"),
+                "feed.sqs.queue_url: carries userinfo; credentials come from the AWS SDK's \
+                 default provider chain",
             ),
             (
                 "sqs: { queue_url: \"https://sqs.eu-west-2.amazonaws.com/1/q.fifo\" }",
@@ -391,10 +415,37 @@ pub(crate) mod tests {
                 at("endpoint"),
                 "feed.sqs.endpoint: is not a URL: relative URL without a base",
             ),
+            (
+                "sqs: { queue_url: \"https://sqs.eu-west-2.amazonaws.com/1/q\", endpoint: \"ftp://localhost:9324\" }",
+                at("endpoint"),
+                "feed.sqs.endpoint: must be a URL with scheme http or https; found ftp",
+            ),
+            (
+                "sqs: { queue_url: \"https://sqs.eu-west-2.amazonaws.com/1/q\", endpoint: \"https://u:hunter2@localhost:9324\" }",
+                at("endpoint"),
+                "feed.sqs.endpoint: carries userinfo; credentials come from the AWS SDK's \
+                 default provider chain",
+            ),
         ];
         for (yaml, context, text) in cases {
             assert_eq!(refusal(parse(yaml)), (context, text.to_owned()), "{yaml}");
         }
+    }
+
+    /// Pins that `Debug` prints both URLs without their query.
+    #[test]
+    fn debug_redacts_the_urls() {
+        let config = parse(
+            "sqs: { queue_url: \"https://sqs.eu-west-2.amazonaws.com/1/q?token=hunter2\", \
+             endpoint: \"http://127.0.0.1:9324/?token=hunter2\" }",
+        )
+        .unwrap();
+        let debug = format!("{config:?}");
+        assert!(!debug.contains("hunter2"), "{debug}");
+        assert!(
+            debug.contains("https://sqs.eu-west-2.amazonaws.com/1/q?<redacted>"),
+            "{debug}"
+        );
     }
 
     /// Pins that the keys beside `sqs:` are refused at the section, since

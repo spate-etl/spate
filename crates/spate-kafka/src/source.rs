@@ -1940,7 +1940,7 @@ impl Source for KafkaSource {
                     k,
                     budget: Duration::MAX,
                 });
-                // The sync commit this replaces had no bound either.
+                // No bound, as with librdkafka's sync commit.
                 commit.wait(Duration::MAX)
             });
             match waited {

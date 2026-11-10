@@ -23,7 +23,7 @@ is Kubernetes-native: scrape-based Prometheus metrics, `/healthz` and
 | Guarantee | What it means |
 |---|---|
 | At-least-once delivery | A source offset commits only after every record derived from it was durably written to the sink (or intentionally dropped). This holds across consumer rebalances, graceful shutdown, and crashes. See [Delivery guarantees](02-concepts/02-delivery-guarantees.mdx). |
-| Duplicates are possible | At-least-once means replays happen. Dedup tokens make same-batch retries idempotent, but crash replay re-batches with new boundaries — design target tables to tolerate duplicates. |
+| Duplicates are possible | At-least-once means replays happen. Dedup tokens make same-batch retries idempotent. Crash replay carries new tokens, so design target tables to tolerate duplicates. |
 | Sources never block | Backpressure pauses lanes and keeps polling; a source thread never parks in a channel send, so sink slowness never triggers a consumer-group eviction. See [Backpressure](02-concepts/03-backpressure.mdx). |
 | Errors are Skip or Fail | Record-level error policies are Skip (count and continue) or Fail (stop the pipeline) — never silent, always surfaced through metrics. See [Error handling](02-concepts/04-error-handling.mdx). |
 | No hidden costs on the hot path | Operator chains are fully monomorphized (one virtual call per batch, not per record); metric handles are pre-registered at build time. |

@@ -166,8 +166,8 @@ the same shard on every *processing*, across restarts, rebalances, and
 replays. These guarantees depend on it:
 
 - **Duplicates must colocate to be collapsible.** At-least-once delivery
-  means a reprocessed record lands again, and it lands with new batch
-  boundaries and a new dedup token, so no dedup window catches it (see
+  means a reprocessed record lands again, and it lands in a new batch with a
+  new dedup token, so no dedup window catches it (see
   [Delivery guarantees](02-delivery-guarantees.mdx)). What absorbs those
   duplicates is a destination-side collapse pattern (last-write-wins on a
   key), and collapse works **within one shard's table**, absorbing only a

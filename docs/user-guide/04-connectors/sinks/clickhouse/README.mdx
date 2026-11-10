@@ -264,8 +264,8 @@ SETTINGS non_replicated_deduplication_window = 100;
 ```
 :::
 
-Tokens cover *same-batch retries* only. Crash replay
-re-batches with different boundaries and different tokens, so replayed rows
+Tokens cover *same-batch retries* only. Every token carries an id minted once
+per process run, so crash replay carries different tokens and replayed rows
 land again. Design target tables to tolerate duplicates;
 `ReplacingMergeTree` with a version column is the sanctioned pattern. See
 [Delivery guarantees](../../../02-concepts/02-delivery-guarantees.mdx).
@@ -345,8 +345,7 @@ acknowledgment**. The sink always sets `wait_end_of_query=1`, so a
 successful write means the server fully processed the insert, materialized
 views included; that success is the durable-ack point that lets watermarks
 advance. Sharding across shards is the pipeline's job (the chain's router,
-e.g. `KeyHashRouter`), which also makes batch boundaries deterministic for
-the dedup tokens.
+e.g. `KeyHashRouter`).
 
 ## `SinkBundle` and the readiness probe
 

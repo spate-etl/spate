@@ -485,6 +485,14 @@ that seeded the feed still holds it and reads the units from
 `Completed`, and `MemoryFeed::unsettled` then names the units it did not
 finish.
 
+A unit whose batch the sink abandons, after a write error the sink does not
+retry, is failed back to the feed at a later commit tick. The feed delivers it
+again or dead-letters it at its cap, and the run goes on with the other units.
+A sink batch can hold records from several units, and each of them fails back.
+On any other feed such a unit stays held until
+`checkpoint.stalled_fail_after` fails the run, and its records replay after a
+restart.
+
 :::danger `Completed` does not mean every unit was read
 On a seeded run the exit state is not a per-unit status. A unit is done only
 when neither `MemoryFeed::dead_letters` nor `MemoryFeed::unsettled` names it.
@@ -1116,8 +1124,9 @@ again after a timeout too. A stop leaves the units the run did not
 finish in the feed, and `MemoryFeed::unsettled` names them.
 
 A unit whose batch the sink abandons, after a write error the sink does not
-retry, stays held. The run does not end by itself while it holds that unit, so
-the function reports the unit only once the stop comes.
+retry, is failed back to the feed, and the cap of 1 dead-letters it. The run
+does not wait for the stop to settle it, and the function reports that unit
+alone.
 
 ### Sizing an invocation
 

@@ -241,7 +241,10 @@ thread, never on the record path.
 The conventions match the Kafka source's families: counters are
 **absolute-mapped librdkafka totals** scoped to one producer lifetime
 (sound because a sink builds exactly one producer; restarts read as
-ordinary counter resets to PromQL), the `broker` label is bounded by
+ordinary counter resets to PromQL), the request, byte, retry, timeout and
+per-broker error counters add each broker's growth between snapshots, so they
+keep counting when a broker leaves the statistics and returns, the `broker`
+label is bounded by
 cluster topology, and the latency gauges are per-broker rolling-window
 estimates over the last statistics interval that **cannot be aggregated**
 across brokers or processes (`max()` is the only defensible cross-series

@@ -1,0 +1,3 @@
+**Kafka broker counters across a broker leaving** (`spate-kafka`)
+
+The Kafka source, sink and feed counters `tx_requests_total`, `tx_bytes_total`, `rx_responses_total`, `rx_bytes_total`, `broker_tx_retries_total`, `broker_req_timeouts_total`, `broker_connects_total`, `broker_disconnects_total` and the per-broker `broker_tx_errors_total` now count every event through a broker leaving the client's statistics and returning. In previous versions each of these held at its highest value after a broker left, until the remaining brokers' totals passed that value, so retries, timeouts and requests in that window were not counted. A returning broker's `broker_tx_errors_total` had the same gap. Dashboards and alerts that use `rate()` or `increase()` on these series need no change.

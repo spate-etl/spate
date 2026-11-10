@@ -13,14 +13,14 @@
 //!
 //! # Counter identity
 //!
-//! As on the source side, librdkafka reports cumulative totals; they are
-//! mirrored through [`Counter::absolute`] (fetch-max: idempotent under
-//! duplicate delivery, PromQL `rate()` works natively). The mapping is
-//! sound only while totals are monotonic, i.e. scoped to a single
-//! producer client. The sink guarantees this by construction: `build()`
-//! creates exactly one producer per sink instance, shared by every shard.
-//! If in-process producer recreation is ever introduced, switch to delta
-//! accumulation (see the source metrics module for the full rationale).
+//! As on the source side, librdkafka reports cumulative totals. The
+//! producer's own message totals are mirrored through [`Counter::absolute`]
+//! (fetch-max: idempotent under duplicate delivery, PromQL `rate()` works
+//! natively). The mapping is sound only while totals are monotonic, i.e.
+//! scoped to a single producer client. The sink guarantees this by
+//! construction: `build()` creates exactly one producer per sink instance,
+//! shared by every shard. The per-broker totals are accumulated as growth
+//! (see the source metrics module for the full rationale).
 //!
 //! # Windows
 //!
@@ -37,9 +37,9 @@
 
 use crate::metrics::{
     BROKER_REQ_TIMEOUTS_TOTAL, BROKER_RTT_AVG_SECONDS, BROKER_RTT_P99_SECONDS,
-    BROKER_TX_ERRORS_TOTAL, BROKER_TX_RETRIES_TOTAL, BROKER_UP, ExtraLabels, L_BROKER, L_CLIENT,
-    RX_BYTES_TOTAL, RX_RESPONSES_TOTAL, TX_BYTES_TOTAL, TX_REQUESTS_TOTAL, WindowGauges, to_u64,
-    us_to_secs, with_extra,
+    BROKER_TX_ERRORS_TOTAL, BROKER_TX_RETRIES_TOTAL, BROKER_UP, BrokerGrowth, ExtraLabels,
+    L_BROKER, L_CLIENT, RX_BYTES_TOTAL, RX_RESPONSES_TOTAL, TX_BYTES_TOTAL, TX_REQUESTS_TOTAL,
+    WindowGauges, to_u64, us_to_secs, with_extra,
 };
 use rdkafka::statistics::Statistics;
 use spate_core::hash::{FastMap, FastSet};
@@ -73,6 +73,7 @@ pub(crate) struct KafkaSinkStatsMetrics {
     broker_tx_retries: Counter,
     broker_req_timeouts: Counter,
     brokers: FastMap<String, BrokerHandles>,
+    broker_growth: BrokerGrowth,
 }
 
 /// Per-broker series, labeled `broker="<host:port/id>"`, bounded by
@@ -137,6 +138,7 @@ impl KafkaSinkStatsMetrics {
             broker_tx_retries: meter.counter(BROKER_TX_RETRIES_TOTAL, e),
             broker_req_timeouts: meter.counter(BROKER_REQ_TIMEOUTS_TOTAL, e),
             brokers: FastMap::default(),
+            broker_growth: BrokerGrowth::default(),
             meter,
             extra,
         }
@@ -145,17 +147,11 @@ impl KafkaSinkStatsMetrics {
     /// Translate one statistics snapshot. Poll thread, or a feed's consumer
     /// thread during its close flush; not on the record path.
     pub(crate) fn update(&mut self, stats: &Statistics) {
-        self.tx_requests.absolute(to_u64(stats.tx));
-        self.tx_bytes.absolute(to_u64(stats.tx_bytes));
-        self.rx_responses.absolute(to_u64(stats.rx));
-        self.rx_bytes.absolute(to_u64(stats.rx_bytes));
         self.tx_messages.absolute(to_u64(stats.txmsgs));
         self.tx_message_bytes.absolute(to_u64(stats.txmsg_bytes));
         self.produce_queue_messages.set(stats.msg_cnt as f64);
         self.produce_queue_bytes.set(stats.msg_size as f64);
 
-        let mut retries: u64 = 0;
-        let mut timeouts: u64 = 0;
         let mut seen: FastSet<&str> = FastSet::default();
         let meter = &self.meter;
         let extra = self.extra.as_slice();
@@ -170,15 +166,20 @@ impl KafkaSinkStatsMetrics {
             .filter(|b| b.source == "logical" && !b.nodename.is_empty() && b.state == "UP")
             .map(|b| b.nodename.as_str())
             .collect();
-        for broker in stats.brokers.values() {
+        for (broker, grown) in self.broker_growth.advance(stats) {
+            // librdkafka's own request and byte totals sum every entry.
+            self.tx_requests.increment(grown.tx);
+            self.tx_bytes.increment(grown.tx_bytes);
+            self.rx_responses.increment(grown.rx);
+            self.rx_bytes.increment(grown.rx_bytes);
             // Same filters as the source: `internal` is the `:0/internal`
             // pseudo-broker; `logical` entries fold into `broker_up` above
             // and count nowhere else.
             if broker.source == "internal" || broker.source == "logical" {
                 continue;
             }
-            retries += broker.txretries;
-            timeouts += broker.req_timeouts;
+            self.broker_tx_retries.increment(grown.tx_retries);
+            self.broker_req_timeouts.increment(grown.req_timeouts);
 
             // Per-broker series only once the entry resolves to a real
             // broker id (no short-lived `/-1` bootstrap series).
@@ -192,7 +193,7 @@ impl KafkaSinkStatsMetrics {
                 .or_insert_with(|| BrokerHandles::new(meter, extra, &broker.name));
             let up = broker.state == "UP" || logical_up.contains(broker.nodename.as_str());
             handles.up.set(if up { 1.0 } else { 0.0 });
-            handles.tx_errors.absolute(broker.txerrs);
+            handles.tx_errors.increment(grown.tx_errors);
             for (window, slot, avg_name, p99_name) in [
                 (
                     &broker.rtt,
@@ -221,8 +222,6 @@ impl KafkaSinkStatsMetrics {
                 }
             }
         }
-        self.broker_tx_retries.absolute(retries);
-        self.broker_req_timeouts.absolute(timeouts);
         // The exporter renders a series for the life of the process, so a
         // broker that left the snapshot is zeroed before its handles go.
         self.brokers.retain(|name, handles| {
@@ -259,11 +258,13 @@ mod tests {
     fn producer_totals_and_queue_gauges_render() {
         let rendered = render_metrics(|| {
             let mut m = KafkaSinkStatsMetrics::new(meter());
+            let mut b = broker("k1:9092/1", "learned", 1);
+            b.tx = 42;
+            b.txbytes = 8_192;
+            b.rx = 41;
+            b.rxbytes = 1_024;
             let stats = Statistics {
-                tx: 42,
-                tx_bytes: 8_192,
-                rx: 41,
-                rx_bytes: 1_024,
+                brokers: HashMap::from([(b.name.clone(), b)]),
                 txmsgs: 900,
                 txmsg_bytes: 131_072,
                 msg_cnt: 17,
@@ -283,6 +284,52 @@ mod tests {
             &format!("spate_kafka_produce_queue_bytes{{{STD}}} 4096"),
         ] {
             assert!(rendered.contains(needle), "missing `{needle}`:\n{rendered}");
+        }
+    }
+
+    /// The summed counters and a broker's error counter keep counting when a
+    /// broker leaves the snapshot and returns with its totals back at zero.
+    /// Regression for #1845.
+    #[test]
+    fn counters_keep_counting_across_a_broker_leaving_and_returning() {
+        let counting = |name: &str, nodeid: i32, n: u64| {
+            let mut b = broker(name, "learned", nodeid);
+            b.tx = n;
+            b.txbytes = n;
+            b.rx = n;
+            b.rxbytes = n;
+            b.txerrs = n;
+            b.txretries = n;
+            b.req_timeouts = n;
+            b
+        };
+        let rendered = render_metrics(|| {
+            let mut m = KafkaSinkStatsMetrics::new(meter());
+            for brokers in [
+                vec![counting("k1:9092/1", 1, 1), counting("k2:9092/2", 2, 5)],
+                vec![counting("k1:9092/1", 1, 5)],
+                vec![counting("k1:9092/1", 1, 5), counting("k2:9092/2", 2, 2)],
+            ] {
+                let stats = Statistics {
+                    brokers: brokers.into_iter().map(|b| (b.name.clone(), b)).collect(),
+                    ..Default::default()
+                };
+                m.update(&stats);
+            }
+        });
+        for needle in [
+            format!("spate_kafka_tx_requests_total{{{STD}}} 12\n"),
+            format!("spate_kafka_tx_bytes_total{{{STD}}} 12\n"),
+            format!("spate_kafka_rx_responses_total{{{STD}}} 12\n"),
+            format!("spate_kafka_rx_bytes_total{{{STD}}} 12\n"),
+            format!("spate_kafka_broker_tx_retries_total{{{STD}}} 12\n"),
+            format!("spate_kafka_broker_req_timeouts_total{{{STD}}} 12\n"),
+            format!("spate_kafka_broker_tx_errors_total{{{STD},broker=\"k2:9092/2\"}} 7\n"),
+        ] {
+            assert!(
+                rendered.contains(&needle),
+                "missing `{needle}`:\n{rendered}"
+            );
         }
     }
 

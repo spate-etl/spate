@@ -13,17 +13,21 @@
 //!
 //! # Counter identity
 //!
-//! librdkafka reports **cumulative totals** inside each snapshot; they are
+//! librdkafka reports **cumulative totals** inside each snapshot. The
+//! totals a client keeps for itself (messages, message bytes, rebalances) are
 //! mirrored through [`Counter::absolute`], whose fetch-max contract makes
 //! duplicate delivery idempotent and lets PromQL `rate()`/`increase()` work
 //! natively. That mapping is sound only while the totals are monotonic, i.e.
 //! scoped to a single consumer handle: `KafkaSource::open` creates each of its
 //! consumers exactly once per source lifetime, each with a translator of its
 //! own (a second `open` is a hard error), and a `KafkaFeed` builds one
-//! consumer for its life. If in-process consumer recreation is ever introduced, these
-//! series would restart at zero and the fetch-max guard would silently
-//! flat-line them at the old high-water mark (see Vector issue #20697);
-//! switch to delta accumulation against the previous snapshot instead.
+//! consumer for its life.
+//!
+//! The totals a client keeps per broker are not monotonic in sum: librdkafka
+//! drops a broker that a Metadata response no longer lists, and one that
+//! returns starts from zero. Request, byte, retry, timeout, connect and
+//! error counts are therefore accumulated as each broker's growth since the
+//! previous snapshot (see [`BrokerGrowth`]).
 //!
 //! # Windows
 //!
@@ -36,7 +40,7 @@
 //!
 //! [the metrics reference]: https://spate.kainth.dev/docs/METRICS
 
-use rdkafka::statistics::{Partition, Statistics};
+use rdkafka::statistics::{Broker, Partition, Statistics};
 use spate_core::hash::{FastMap, FastSet};
 use spate_core::metrics::{Counter, Gauge, Meter, SharedString};
 use spate_core::record::PartitionId;
@@ -127,8 +131,107 @@ pub(crate) struct KafkaStatsMetrics {
     group_assignment_size: Gauge,
     group_healthy: Gauge,
     brokers: FastMap<String, BrokerHandles>,
+    broker_growth: BrokerGrowth,
     partitions: FastMap<TopicPartition, PartitionHandles>,
     not_fetching: FastMap<TopicPartition, NotFetching>,
+}
+
+/// The cumulative totals one broker entry of a snapshot carries.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct BrokerTotals {
+    pub(crate) tx: u64,
+    pub(crate) tx_bytes: u64,
+    pub(crate) rx: u64,
+    pub(crate) rx_bytes: u64,
+    pub(crate) tx_errors: u64,
+    pub(crate) tx_retries: u64,
+    pub(crate) req_timeouts: u64,
+    pub(crate) connects: u64,
+    pub(crate) disconnects: u64,
+}
+
+impl BrokerTotals {
+    fn of(broker: &Broker) -> Self {
+        BrokerTotals {
+            tx: broker.tx,
+            tx_bytes: broker.txbytes,
+            rx: broker.rx,
+            rx_bytes: broker.rxbytes,
+            tx_errors: broker.txerrs,
+            tx_retries: broker.txretries,
+            req_timeouts: broker.req_timeouts,
+            connects: to_u64(broker.connects.unwrap_or(0)),
+            disconnects: to_u64(broker.disconnects.unwrap_or(0)),
+        }
+    }
+
+    /// Each total's growth since `last`. A total below its last value
+    /// restarted from zero, so its whole value is growth.
+    fn since(self, last: BrokerTotals) -> Self {
+        let grown = |now: u64, last: u64| now.checked_sub(last).unwrap_or(now);
+        BrokerTotals {
+            tx: grown(self.tx, last.tx),
+            tx_bytes: grown(self.tx_bytes, last.tx_bytes),
+            rx: grown(self.rx, last.rx),
+            rx_bytes: grown(self.rx_bytes, last.rx_bytes),
+            tx_errors: grown(self.tx_errors, last.tx_errors),
+            tx_retries: grown(self.tx_retries, last.tx_retries),
+            req_timeouts: grown(self.req_timeouts, last.req_timeouts),
+            connects: grown(self.connects, last.connects),
+            disconnects: grown(self.disconnects, last.disconnects),
+        }
+    }
+}
+
+/// A broker entry's identity from one snapshot to the next. librdkafka keeps
+/// an entry's counters when the broker's address, and with it the entry's
+/// name, changes, so a broker with a node id is known by the id. A `logical`
+/// entry is a connection of its own and is known by its name.
+#[derive(Debug, Hash, PartialEq, Eq)]
+enum BrokerKey {
+    Id(i32),
+    Name(String),
+}
+
+impl BrokerKey {
+    fn of(broker: &Broker) -> Self {
+        if broker.nodeid >= 0 && broker.source != "logical" {
+            BrokerKey::Id(broker.nodeid)
+        } else {
+            BrokerKey::Name(broker.name.clone())
+        }
+    }
+}
+
+/// Each broker entry's totals as of the previous snapshot, to turn the
+/// cumulative totals of the next one into growth.
+///
+/// An entry absent from a snapshot is forgotten: librdkafka has dropped the
+/// broker, and adds it back with zeroed counters.
+#[derive(Debug, Default)]
+pub(crate) struct BrokerGrowth {
+    last: FastMap<BrokerKey, BrokerTotals>,
+}
+
+impl BrokerGrowth {
+    /// What each entry's totals grew by since the previous snapshot, in the
+    /// order `stats.brokers` yields them.
+    pub(crate) fn advance<'a>(&mut self, stats: &'a Statistics) -> Vec<(&'a Broker, BrokerTotals)> {
+        let mut next = FastMap::default();
+        let grown = stats
+            .brokers
+            .values()
+            .map(|broker| {
+                let key = BrokerKey::of(broker);
+                let now = BrokerTotals::of(broker);
+                let last = self.last.get(&key).copied().unwrap_or_default();
+                next.insert(key, now);
+                (broker, now.since(last))
+            })
+            .collect();
+        self.last = next;
+        grown
+    }
 }
 
 /// `extra` followed by `more`, the label set of one series.
@@ -310,6 +413,7 @@ impl KafkaStatsMetrics {
             group_assignment_size: meter.gauge(GROUP_ASSIGNMENT_SIZE, e),
             group_healthy: meter.gauge(GROUP_HEALTHY, e),
             brokers: FastMap::default(),
+            broker_growth: BrokerGrowth::default(),
             partitions: FastMap::default(),
             not_fetching: FastMap::default(),
             meter,
@@ -353,10 +457,6 @@ impl KafkaStatsMetrics {
         topics: &[&str],
         owned: &[(&str, i32)],
     ) {
-        self.tx_requests.absolute(to_u64(stats.tx));
-        self.tx_bytes.absolute(to_u64(stats.tx_bytes));
-        self.rx_responses.absolute(to_u64(stats.rx));
-        self.rx_bytes.absolute(to_u64(stats.rx_bytes));
         self.rx_messages.absolute(to_u64(stats.rxmsgs));
         self.rx_message_bytes.absolute(to_u64(stats.rxmsg_bytes));
         self.reply_queue_depth.set(to_u64(stats.replyq) as f64);
@@ -385,10 +485,6 @@ impl KafkaStatsMetrics {
     }
 
     fn update_brokers(&mut self, stats: &Statistics) {
-        let mut retries: u64 = 0;
-        let mut timeouts: u64 = 0;
-        let mut connects: u64 = 0;
-        let mut disconnects: u64 = 0;
         let mut seen: FastSet<&str> = FastSet::default();
         let meter = &self.meter;
         let extra = self.extra.as_slice();
@@ -407,16 +503,22 @@ impl KafkaStatsMetrics {
             .filter(|b| b.source == "logical" && !b.nodename.is_empty() && b.state == "UP")
             .map(|b| b.nodename.as_str())
             .collect();
-        for broker in stats.brokers.values() {
+        for (broker, grown) in self.broker_growth.advance(stats) {
+            // librdkafka's own request and byte totals sum every entry.
+            self.tx_requests.increment(grown.tx);
+            self.tx_bytes.increment(grown.tx_bytes);
+            self.rx_responses.increment(grown.rx);
+            self.rx_bytes.increment(grown.rx_bytes);
             // `internal` is the `:0/internal` pseudo-broker; `logical`
             // entries fold into `broker_up` above and count nowhere else.
             if broker.source == "internal" || broker.source == "logical" {
                 continue;
             }
-            retries += broker.txretries;
-            timeouts += broker.req_timeouts;
-            connects += to_u64(broker.connects.unwrap_or(0));
-            disconnects += to_u64(broker.disconnects.unwrap_or(0));
+            // Summed across brokers (no label).
+            self.broker_tx_retries.increment(grown.tx_retries);
+            self.broker_req_timeouts.increment(grown.req_timeouts);
+            self.broker_connects.increment(grown.connects);
+            self.broker_disconnects.increment(grown.disconnects);
 
             // Per-broker series only once the entry resolves to a real
             // broker id, so unresolved bootstrap placeholders don't mint
@@ -431,7 +533,7 @@ impl KafkaStatsMetrics {
                 .or_insert_with(|| BrokerHandles::new(meter, extra, &broker.name));
             let up = broker.state == "UP" || logical_up.contains(broker.nodename.as_str());
             handles.up.set(if up { 1.0 } else { 0.0 });
-            handles.tx_errors.absolute(broker.txerrs);
+            handles.tx_errors.increment(grown.tx_errors);
             // Publish window estimates only when the window sampled
             // anything (see `BrokerHandles`).
             if let Some(rtt) = broker.rtt.as_ref().filter(|w| w.cnt > 0) {
@@ -463,13 +565,6 @@ impl KafkaStatsMetrics {
                     .set(ms_to_secs(throttle.avg), ms_to_secs(throttle.p99));
             }
         }
-        // Summed across brokers (no label). A broker that leaves the snapshot
-        // takes its totals out of the sum, and `absolute` holds each counter
-        // at its peak until the sum passes it.
-        self.broker_tx_retries.absolute(retries);
-        self.broker_req_timeouts.absolute(timeouts);
-        self.broker_connects.absolute(connects);
-        self.broker_disconnects.absolute(disconnects);
         // The exporter renders a series for the life of the process, so a
         // broker that left the snapshot is zeroed before its handles go.
         self.brokers.retain(|name, handles| {
@@ -795,15 +890,27 @@ mod tests {
         }
     }
 
+    /// The request and byte totals sum every broker entry, as librdkafka's
+    /// own totals do.
     #[test]
-    fn transport_counters_render_absolute_totals() {
+    fn transport_counters_render_totals() {
         let rendered = render_metrics(|| {
             let mut m = KafkaStatsMetrics::new(meter(), false);
+            let mut learned = broker("k1:9092/1", "learned", 1);
+            learned.tx = 30;
+            learned.txbytes = 4_000;
+            learned.rx = 29;
+            learned.rxbytes = 2_000;
+            let mut internal = broker(":0/internal", "internal", -1);
+            internal.tx = 1;
+            internal.txbytes = 96;
+            internal.rx = 1;
+            internal.rxbytes = 48;
             let stats = Statistics {
-                tx: 31,
-                tx_bytes: 4_096,
-                rx: 30,
-                rx_bytes: 2_048,
+                brokers: HashMap::from([
+                    (learned.name.clone(), learned),
+                    (internal.name.clone(), internal),
+                ]),
                 rxmsgs: 500,
                 rxmsg_bytes: 65_536,
                 replyq: 3,
@@ -911,6 +1018,149 @@ mod tests {
         // cgrp they render at their unset default of 0; assert only that
         // health was never set to 1.
         assert!(!rendered.contains(&format!("spate_kafka_group_healthy{{{STD}}} 1")));
+    }
+
+    /// One broker entry with every total at `n`.
+    fn counting(name: &str, source: &str, nodeid: i32, n: u64) -> Broker {
+        let mut b = broker(name, source, nodeid);
+        b.tx = n;
+        b.txbytes = n;
+        b.rx = n;
+        b.rxbytes = n;
+        b.txerrs = n;
+        b.txretries = n;
+        b.req_timeouts = n;
+        b.connects = Some(n as i64);
+        b.disconnects = Some(n as i64);
+        b
+    }
+
+    fn snapshot(brokers: impl IntoIterator<Item = Broker>) -> Statistics {
+        Statistics {
+            brokers: brokers.into_iter().map(|b| (b.name.clone(), b)).collect(),
+            ..Default::default()
+        }
+    }
+
+    /// Asserts each summed broker counter renders `total`.
+    fn assert_summed(rendered: &str, total: u64) {
+        for name in [
+            "tx_requests_total",
+            "tx_bytes_total",
+            "rx_responses_total",
+            "rx_bytes_total",
+            "broker_tx_retries_total",
+            "broker_req_timeouts_total",
+            "broker_connects_total",
+            "broker_disconnects_total",
+        ] {
+            let needle = format!("spate_kafka_{name}{{{STD}}} {total}\n");
+            assert!(
+                rendered.contains(&needle),
+                "missing `{needle}`:\n{rendered}"
+            );
+        }
+    }
+
+    /// A broker that leaves the snapshot takes nothing out of the summed
+    /// counters, and what the brokers left do afterwards still counts.
+    /// Regression for #1845.
+    #[test]
+    fn summed_counters_keep_counting_after_a_broker_leaves() {
+        let rendered = render_metrics(|| {
+            let mut m = KafkaStatsMetrics::new(meter(), false);
+            let both = snapshot([
+                counting("k1:9092/1", "learned", 1, 1),
+                counting("k2:9092/2", "learned", 2, 5),
+            ]);
+            m.update(&both, "orders", &owned(&[0]));
+            let one = snapshot([counting("k1:9092/1", "learned", 1, 5)]);
+            m.update(&one, "orders", &owned(&[0]));
+        });
+        assert_summed(&rendered, 10);
+    }
+
+    /// A broker that returns with its totals back at zero adds what it did
+    /// since, to the summed counters and to its own error counter.
+    /// Regression for #1845.
+    #[test]
+    fn a_returning_broker_counts_from_zero() {
+        let rendered = render_metrics(|| {
+            let mut m = KafkaStatsMetrics::new(meter(), false);
+            for brokers in [
+                vec![counting("k1:9092/1", "learned", 1, 7)],
+                vec![],
+                vec![counting("k1:9092/1", "learned", 1, 2)],
+            ] {
+                m.update(&snapshot(brokers), "orders", &owned(&[0]));
+            }
+        });
+        assert_summed(&rendered, 9);
+        let needle =
+            format!("spate_kafka_broker_tx_errors_total{{{STD},broker=\"k1:9092/1\"}} 9\n");
+        assert!(
+            rendered.contains(&needle),
+            "missing `{needle}`:\n{rendered}"
+        );
+    }
+
+    /// A broker whose totals did not move adds nothing, and one whose total
+    /// fell without leaving the snapshot counts from zero.
+    #[test]
+    fn a_broker_adds_only_what_its_totals_grew_by() {
+        let rendered = render_metrics(|| {
+            let mut m = KafkaStatsMetrics::new(meter(), false);
+            for n in [4, 4, 6, 1] {
+                let stats = snapshot([counting("k1:9092/1", "learned", 1, n)]);
+                m.update(&stats, "orders", &owned(&[0]));
+            }
+        });
+        assert_summed(&rendered, 7);
+    }
+
+    /// A broker whose address changes keeps its node id and its totals, so
+    /// its new name adds only what it did since.
+    #[test]
+    fn a_renamed_broker_keeps_its_totals() {
+        let rendered = render_metrics(|| {
+            let mut m = KafkaStatsMetrics::new(meter(), false);
+            let before = snapshot([counting("old:9092/1", "learned", 1, 5)]);
+            m.update(&before, "orders", &owned(&[0]));
+            let after = snapshot([counting("new:9092/1", "learned", 1, 6)]);
+            m.update(&after, "orders", &owned(&[0]));
+        });
+        assert_summed(&rendered, 6);
+    }
+
+    /// A logical entry is a connection of its own: it shares no totals with
+    /// a broker of the same node id, and neither does a bootstrap entry with
+    /// another of a different name.
+    #[test]
+    fn entries_without_an_id_of_their_own_are_told_apart_by_name() {
+        let rendered = render_metrics(|| {
+            let mut m = KafkaStatsMetrics::new(meter(), false);
+            for n in [5, 6] {
+                let stats = snapshot([
+                    counting("k1:9092/1", "learned", 1, n),
+                    counting("GroupCoordinator", "logical", 1, 50),
+                    counting("seed-a:9092/bootstrap", "configured", -1, n),
+                    counting("seed-b:9092/bootstrap", "configured", -1, 40),
+                ]);
+                m.update(&stats, "orders", &owned(&[0]));
+            }
+        });
+        // Retries leave the logical entry out: 6 + 6 + 40.
+        let needle = format!("spate_kafka_broker_tx_retries_total{{{STD}}} 52\n");
+        assert!(
+            rendered.contains(&needle),
+            "missing `{needle}`:\n{rendered}"
+        );
+        // Requests count every entry: 6 + 50 + 6 + 40.
+        let needle = format!("spate_kafka_tx_requests_total{{{STD}}} 102\n");
+        assert!(
+            rendered.contains(&needle),
+            "missing `{needle}`:\n{rendered}"
+        );
     }
 
     #[test]

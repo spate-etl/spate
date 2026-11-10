@@ -123,7 +123,8 @@ What the token covers, and what it does not:
 - **NOT covered — crash replay.** Every token carries an id minted once per
   process run, so after a restart replayed records carry different tokens.
   Those rows land twice, and no deduplication window will catch them. Two
-  runs' ids colliding is improbable.
+  runs' ids colliding is improbable. Inside the deduplication window, a
+  collision makes the destination discard the later run's rows as repeats.
 
 :::danger
 Nothing in Spate is exactly-once, and no configuration makes it so.

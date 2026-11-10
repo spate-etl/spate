@@ -34,8 +34,9 @@
 //! Tokens cover *same-batch retries* (including on another replica after a
 //! timeout). They do **not** cover crash replay: every token carries an id
 //! minted once per process run, so after a restart replayed rows carry
-//! different tokens and land again, barring an improbable collision between
-//! two runs' ids. Design target tables to tolerate duplicates;
+//! different tokens and land again. Two runs' ids colliding is improbable;
+//! inside the deduplication window, a collision makes the server discard the
+//! later run's rows as repeats. Design target tables to tolerate duplicates;
 //! `ReplacingMergeTree` with a version column is the sanctioned pattern.
 //!
 //! Re-homing is a different hazard: a key that moves to another shard

@@ -51,6 +51,7 @@ pub mod ops;
 #[cfg(not(loom))]
 pub mod pipeline;
 pub mod record;
+pub mod rng;
 #[cfg(not(loom))]
 pub mod sink;
 #[cfg(not(loom))]

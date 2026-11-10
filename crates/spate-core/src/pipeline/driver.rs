@@ -24,8 +24,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-static POLL_ERROR_WARN: RateLimit = RateLimit::new(5, Duration::from_secs(10));
-static GATE_WARN: RateLimit = RateLimit::new(5, Duration::from_secs(10));
+static POLL_ERROR_WARN: RateLimit = RateLimit::hot_path();
+static GATE_WARN: RateLimit = RateLimit::hot_path();
 
 /// Tuning for one driver thread. Constructed by the runtime; exposed to
 /// tests.

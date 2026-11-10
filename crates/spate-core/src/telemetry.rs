@@ -28,9 +28,8 @@
 //! ```
 //! use spate_core::rate_limited_warn;
 //! use spate_core::telemetry::RateLimit;
-//! use std::time::Duration;
 //!
-//! static DESER_WARN: RateLimit = RateLimit::new(5, Duration::from_secs(10));
+//! static DESER_WARN: RateLimit = RateLimit::hot_path();
 //!
 //! // In the record loop:
 //! rate_limited_warn!(DESER_WARN, reason = "malformed", "payload skipped");
@@ -206,6 +205,13 @@ impl RateLimit {
             window_end_nanos: AtomicU64::new(0),
             fast_suppressed: AtomicU64::new(0),
         }
+    }
+
+    /// The limiter for a warning on the record path: five events per ten
+    /// seconds.
+    #[must_use]
+    pub const fn hot_path() -> Self {
+        RateLimit::new(5, Duration::from_secs(10))
     }
 
     /// Decide whether to log an event happening now, on the system clock.
@@ -422,6 +428,31 @@ mod tests {
             limit.check_at(t0 + Duration::from_secs(10)),
             Decision::Allow {
                 suppressed_before: 100
+            }
+        );
+    }
+
+    #[test]
+    fn hot_path_allows_five_per_ten_seconds() {
+        let limit = RateLimit::hot_path();
+        let t0 = Instant::now();
+        for _ in 0..5 {
+            assert_eq!(
+                limit.check_at(t0),
+                Decision::Allow {
+                    suppressed_before: 0
+                }
+            );
+        }
+        assert_eq!(limit.check_at(t0), Decision::Suppress);
+        assert_eq!(
+            limit.check_at(t0 + Duration::from_millis(9_999)),
+            Decision::Suppress
+        );
+        assert_eq!(
+            limit.check_at(t0 + Duration::from_secs(10)),
+            Decision::Allow {
+                suppressed_before: 2
             }
         );
     }

@@ -1,6 +1,7 @@
 //! Capped exponential backoff with deterministic pseudo-jitter, for retry
 //! loops in the engine and in connectors.
 
+use crate::rng::SplitMix64;
 use std::time::Duration;
 
 /// A capped exponential sequence of retry delays.
@@ -48,22 +49,15 @@ pub struct Backoff {
     rng: u64,
 }
 
-/// SplitMix64 finalizer. Avalanches adjacent inputs, so seed `n` and seed
-/// `n + 1` start from unrelated states.
-const fn splitmix64(seed: u64) -> u64 {
-    let mut z = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
-    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-    z ^ (z >> 31)
-}
-
-/// The xorshift state for `seed`.
+/// The xorshift state for `seed`: the first SplitMix64 draw, which avalanches
+/// adjacent seeds so seed `n` and seed `n + 1` start from unrelated states, or
+/// a fixed nonzero state when that draw is zero.
 const fn rng_state(seed: u64) -> u64 {
     // Seeds are often consecutive sequence numbers. XOR-ing the seed into the
     // state instead of mixing it leaves every seed's first draw inside the
     // same thousandth of the jitter window, and relocates xorshift's
     // absorbing zero state rather than removing it.
-    match splitmix64(seed) {
+    match SplitMix64::new(seed).next_u64() {
         0 => 0x9E37_79B9_7F4A_7C15,
         mixed => mixed,
     }
@@ -280,7 +274,7 @@ mod tests {
 
     #[test]
     fn the_seed_splitmix64_maps_to_zero_still_jitters() {
-        // `splitmix64(0x61C8_8646_80B5_83EB) == 0`, xorshift's absorbing state.
+        // This seed's first SplitMix64 draw is 0, xorshift's absorbing state.
         let full = Duration::from_millis(100);
         let mut b = Backoff::new(full, full)
             .with_jitter(1.0)

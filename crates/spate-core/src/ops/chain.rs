@@ -238,7 +238,7 @@ where
     }
 }
 
-static TRY_MAP_SKIP_WARN: RateLimit = RateLimit::new(5, Duration::from_secs(10));
+static TRY_MAP_SKIP_WARN: RateLimit = RateLimit::hot_path();
 
 /// `try_map`: fallible transform with a per-stage [`ErrorPolicy`].
 /// `Skip` drops the record (releasing its ack share) and counts it;
@@ -495,7 +495,7 @@ where
     }
 }
 
-static DESER_SKIP_WARN: RateLimit = RateLimit::new(5, Duration::from_secs(10));
+static DESER_SKIP_WARN: RateLimit = RateLimit::hot_path();
 
 /// An owned copy of a payload whose deserialization returned
 /// [`DeserError::NotReady`], replayed on the next push. Owned because the

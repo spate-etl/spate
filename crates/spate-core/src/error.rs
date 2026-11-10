@@ -299,6 +299,30 @@ pub fn find_source<'a, T: std::error::Error + 'static>(
     None
 }
 
+/// `err` and each error in its source chain, joined by `": "`.
+///
+/// It walks [`source`](std::error::Error::source) alone. An
+/// [`std::io::Error`]'s `Display` already prints the error it wraps, so
+/// following that error as well would print its text twice.
+///
+/// ```
+/// use spate_core::error::chain;
+///
+/// let err = std::io::Error::other("connection reset");
+/// assert_eq!(chain(&err), "connection reset");
+/// ```
+#[must_use]
+pub fn chain(err: &(dyn std::error::Error + 'static)) -> String {
+    let mut rendered = err.to_string();
+    let mut next = err.source();
+    while let Some(source) = next {
+        rendered.push_str(": ");
+        rendered.push_str(&source.to_string());
+        next = source.source();
+    }
+    rendered
+}
+
 /// The TLS rejection in an error's source chain, as an
 /// `Option<&rustls::Error>`: a certificate the client failed to verify, an
 /// alert in [`TLS_REJECTION_ALERTS`](crate::error::TLS_REJECTION_ALERTS), or a
@@ -460,5 +484,26 @@ mod tests {
         )));
         assert_eq!(find_source::<Target>(&err).map(|t| t.0), Some(7));
         assert!(find_source::<FatalError>(&err).is_none());
+    }
+
+    #[derive(Debug, thiserror::Error)]
+    #[error("outer")]
+    struct Outer(#[source] Middle);
+
+    #[derive(Debug, thiserror::Error)]
+    #[error("middle")]
+    struct Middle(#[source] Target);
+
+    #[test]
+    fn chain_joins_every_link() {
+        assert_eq!(chain(&Outer(Middle(Target(3)))), "outer: middle: target 3");
+    }
+
+    /// The error an `io::Error` wraps renders once, through the `io::Error`'s
+    /// own text, and its source follows.
+    #[test]
+    fn chain_renders_the_error_an_io_error_wraps_once() {
+        let err = Wrapper(std::io::Error::other(Middle(Target(9))));
+        assert_eq!(chain(&err), "wrapper: middle: target 9");
     }
 }

@@ -70,8 +70,8 @@ impl<'a> UrlRule<'a> {
     ///
     /// let err = ENDPOINT.check("https://svc:hunter2@ch-0:8443").unwrap_err();
     /// assert_eq!(
-    ///     SectionPath::sink("clickhouse").invalid("endpoint", err.to_string()).to_string(),
-    ///     "sink.clickhouse.endpoint: carries userinfo; set them in user and password"
+    ///     SectionPath::sink("clickhouse").invalid("distributed_check.endpoint", err.to_string()).to_string(),
+    ///     "sink.clickhouse.distributed_check.endpoint: carries userinfo; set them in user and password"
     /// );
     /// ```
     pub fn check(&self, value: &str) -> Result<Url, UrlRuleError> {

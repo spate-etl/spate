@@ -116,9 +116,10 @@ Check each URL key at load with `spate::config::UrlRule`. Give `UrlRule::new`
 the place credentials go instead of the URL, and give `schemes` the schemes
 your client reads. `UrlRule::check` returns the parsed URL. It refuses a value
 that is not a URL, a scheme off the list and a URL that carries a user or a
-password, so a credential written into a URL fails at load and never reaches
-a log. Pass its error to `SectionPath::invalid` with the key, such as
-`sink.clickhouse.endpoint: carries userinfo; set them in user and password`.
+password, so a credential written into a URL fails at load, before a client
+can log it. Pass its error to `SectionPath::invalid` with the key, such as
+`sink.clickhouse.distributed_check.endpoint: carries userinfo; set them in user
+and password`.
 
 [Securing connections](../03-guides/securing-connections.mdx) describes what
 an operator then sees.

@@ -142,12 +142,13 @@ of [Metrics](../../METRICS.md).
   `spate_checkpoint_watermark_age_seconds > 300` while
   `rate(spate_source_records_total[5m]) > 0`. The watermark age is the age of
   the oldest unacknowledged batch; a failed batch stalls its partition's
-  watermark rather than silently advancing (the at-least-once invariant),
-  so this is the primary "data is flowing but nothing is committing"
-  signal. The pipeline self-terminates after
-  `checkpoint.stalled_fail_after` (default 120s) behind a permanently
-  failed batch, but you want the alert regardless. Restarts that don't
-  clear the cause will loop.
+  watermark rather than silently advancing (the at-least-once invariant), so
+  this is the primary "data is flowing but nothing is committing" signal. The
+  pipeline self-terminates after `checkpoint.stalled_fail_after` (default 120s)
+  behind a permanently failed batch, but you want the alert regardless. Restarts
+  that don't clear the cause will loop. A
+  [seeded S3 run](../04-connectors/sources/s3/README.mdx#a-run-on-a-seeded-feed)
+  fails each unit in the batch back to its feed instead.
 - **Abandoned sink batches** —
   `increase(spate_sink_abandoned_batches_total[10m]) > 0`. A batch is
   abandoned when a fatal error class or exhausted `retry.max_attempts`

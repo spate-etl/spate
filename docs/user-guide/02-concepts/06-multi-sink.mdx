@@ -151,17 +151,19 @@ These levers soften it:
 
 Because the source is shared and records are typed to their destination, a
 destination that is **hard-down** (its shard unreachable, circuit breaker open
-past retries) stalls the whole pipeline: its records cannot be
-written, their batches cannot resolve, and the source cannot advance past them.
-This is fail-stop, not data loss. Whether the stall also ends the process
-follows from the [`retry`](../07-reference/configuration.mdx#sink-pool) policy:
-a bounded `max_attempts`, or an error the sink does not classify as retryable,
-abandons the batch, and `checkpoint.stalled_fail_after` then converts the
-permanent stall behind it into a clean `Failed` exit and a restart. Under the
-default unbounded `max_attempts` the batch stays pending instead, and the
-pipeline back-pressures for as long as the outage lasts, committing nothing.
-Transient failures are absorbed by the sink's retry + circuit breaker; only a
-genuine outage halts progress.
+past retries) stalls the whole pipeline: its records cannot be written, their
+batches cannot resolve, and the source cannot advance past them. This is
+fail-stop, not data loss. Whether the stall also ends the process follows from
+the [`retry`](../07-reference/configuration.mdx#sink-pool) policy: a bounded
+`max_attempts`, or an error the sink does not classify as retryable, abandons
+the batch, and `checkpoint.stalled_fail_after` then converts the permanent stall
+behind it into a clean `Failed` exit and a restart. A
+[seeded S3 run](../04-connectors/sources/s3/README.mdx#a-run-on-a-seeded-feed)
+fails each unit in the batch back to its feed instead. Under the default
+unbounded `max_attempts` the batch stays pending instead, and the pipeline
+back-pressures for as long as the outage lasts, committing nothing. Transient
+failures are absorbed by the sink's retry + circuit breaker; only a genuine
+outage halts progress.
 
 ## Split vs. fan-out at the destination
 

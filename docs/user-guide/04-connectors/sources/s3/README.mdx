@@ -1124,9 +1124,10 @@ again after a timeout too. A stop leaves the units the run did not
 finish in the feed, and `MemoryFeed::unsettled` names them.
 
 A unit whose batch the sink abandons, after a write error the sink does not
-retry, is failed back to the feed, and the cap of 1 dead-letters it. The run
-does not wait for the stop to settle it, and the function reports that unit
-alone.
+retry, is failed back to the feed, and the cap of 1 dead-letters it. A sink
+batch can hold records from several units, and each of them fails back. The
+run does not wait for the stop to settle them, and the function reports only
+the units in that batch.
 
 ### Sizing an invocation
 

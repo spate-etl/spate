@@ -301,10 +301,12 @@ is the lever, not `chunk.target_bytes`.
   inside it too, and it must be more than 5s.
   Keep it below `terminationGracePeriodSeconds`. See [Docker](docker.mdx)
   and [Graceful shutdown](../03-guides/graceful-shutdown.mdx).
-- `stalled_fail_after` (default **120s**): a partition watermark stalled
-  behind a *failed* batch this long fails the pipeline, converting a
-  permanent sink failure into a restart-and-replay instead of a process
-  that consumes but commits nothing.
+- `stalled_fail_after` (default **120s**): a partition watermark stalled behind
+  a *failed* batch this long fails the pipeline, converting a permanent sink
+  failure into a restart-and-replay instead of a process that consumes but
+  commits nothing. A
+  [seeded S3 run](../04-connectors/sources/s3/README.mdx#a-run-on-a-seeded-feed)
+  fails each unit in the batch back to its feed instead.
 
 ## Pinning: `pipeline.pinning`
 

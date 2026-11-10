@@ -1,5 +1,5 @@
 ---
-description: "On a seeded S3 run, a unit whose batch the sink abandons is failed back to its feed, so the run ends by itself and reports that unit alone."
+description: "On a seeded S3 run, a unit whose batch the sink abandons is failed back to its feed, so the run ends by itself and reports only the units with records in the abandoned batch."
 ---
 
 # ADR-0096 — A seeded run fails back a unit the sink abandoned
@@ -36,10 +36,11 @@ rejected that outcome for dead letters.
 ## Decision outcome
 
 Chosen option: "The controller tells the source which partitions are stalled,
-and the S3 source fails a seeded run's units on them back to the feed",
-because the unit then fails alone. The feed delivers it again or dead-letters
-it at its cap. The run goes on with the other units and exits `Completed`, and
-the seeding code reads the dead letter as it reads any other.
+and the S3 source fails a seeded run's units on them back to the feed", because
+then only the units with records in the abandoned batch fail. The feed delivers
+each again or dead-letters it at its cap. The run goes on with the other units
+and exits `Completed`, and the seeding code reads the dead letter as it reads
+any other.
 
 `Source::stalled` names every stalled partition on each commit tick, and its
 default does nothing. The S3 source marks the unit failing and revokes its
@@ -53,8 +54,8 @@ each ends `Failed`, which reports every unit, including those the sink wrote.
 
 ### Consequences
 
-- Good, because one unit the sink refused fails only itself on a seeded run,
-  and the run ends without waiting for its stop.
+- Good, because on a seeded run a refused batch fails only the units with
+  records in it, and the run ends without waiting for its stop.
 - Good, because a source that does nothing with the hook keeps
   ADR-0002's restart-and-replay.
 - Bad, because the same event has two outcomes in the S3 source, depending on

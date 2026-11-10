@@ -68,12 +68,14 @@ mod feed;
 mod interpolate;
 pub mod redact;
 mod reserved;
+mod url_rule;
 
 pub use component::{ComponentConfig, SectionPath};
 pub use duration::{DurationBounds, DurationBoundsError, check_duration};
 pub use error::ConfigError;
 pub use feed::FeedSection;
 pub use reserved::{Denylist, ReservedKeyError};
+pub use url_rule::{UrlRule, UrlRuleError};
 
 /// Re-export of `serde_yaml::Value`, the opaque body type carried by a
 /// [`ComponentConfig`]. `serde_yaml` is a 0.x dependency, so exposing its

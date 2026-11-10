@@ -1,0 +1,30 @@
+[package]
+name = "spate-pipeline-bench"
+description = "Wall-clock benchmarks of whole Spate pipelines that span connector crates (not published)."
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dev-dependencies]
+async-trait = { workspace = true }
+futures-util = { workspace = true }
+object_store = { workspace = true }
+serde_json = { workspace = true }
+spate-bench = { workspace = true }
+spate-core = { workspace = true, features = ["testing"] }
+spate-json = { workspace = true }
+spate-s3 = { workspace = true, features = ["testing"] }
+spate-test = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["rt", "time"] }
+
+[[bench]]
+name = "feed_small_objects_wall"
+harness = false
+
+[lints]
+workspace = true

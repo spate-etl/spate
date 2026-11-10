@@ -156,7 +156,7 @@ Leave out a case whose pass reads the clock.
 
 ## Run the wall-clock tier
 
-The wall-clock tier is the `spate-bench` harness in [`bench/`](repo:bench/README.md), plus `*_wall.rs` targets in the crates.
+The wall-clock tier is the `spate-bench` harness in [`bench/`](repo:bench/README.md), plus `*_wall.rs` targets in the crates and in `bench/pipeline/`.
 It stores nothing and gates nothing.
 A wall-clock number answers whether a change moved the time, on a machine you control.
 CI's weekly workflow runs the same comparison on one hosted runner, `main` against the `main` of a week earlier, and writes the report to the job summary.
@@ -177,6 +177,9 @@ Name the file `benches/<name>_wall.rs`, and declare it as a `[[bench]]` with `ha
 Without the stanza, cargo builds the target under libtest, which rejects the harness's arguments.
 The driver then names the stanza to add.
 Expect that error minutes into a run, because the driver builds both legs before it starts either.
+
+Put a bench that runs a pipeline through more than one connector crate in [`bench/pipeline/`](repo:bench/pipeline/Cargo.toml).
+**Why:** it belongs to none of the crates it runs.
 
 ### Interleave the arms you measure by hand
 

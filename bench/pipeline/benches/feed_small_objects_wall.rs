@@ -87,7 +87,7 @@ fn case(suite: Suite, id: &str, hold_ms: u64, linger: Duration) -> Suite {
 }
 
 fn suite() -> Suite {
-    let suite = spate_bench::suite("spate-s3");
+    let suite = spate_bench::suite("spate-pipeline-bench");
     let suite = case(suite, "small_objects/feed/get_0ms", 0, SHORT_LINGER);
     case(suite, "small_objects/feed/get_20ms", 20, SHORT_LINGER)
 }

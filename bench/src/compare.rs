@@ -2294,6 +2294,7 @@ mod tests {
         }
         let err = compare(base.clone(), head.clone(), &[]).expect_err("two feature sets");
         assert!(err.contains("host_simd"), "{err}");
+        assert!(allowable().contains(&"host_simd"), "{:?}", allowable());
         assert!(compare(base, head, &["host_simd".to_owned()]).is_ok());
     }
 

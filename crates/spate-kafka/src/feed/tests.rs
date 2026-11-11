@@ -11,9 +11,7 @@
 use super::FeedRole;
 use super::attempt::{self, Entry, PublishId, decode, partition_of};
 use super::config::KafkaFeedConfig;
-use super::consumer::{
-    Read, commit_moved, commit_revoked, committed_lookup_timeout, read, retire_offsets, take_due,
-};
+use super::consumer::{Read, commit_moved, commit_revoked, read, retire_offsets, take_due};
 use super::events::Cause;
 use super::gate::admission;
 use super::inflight::Tp;
@@ -256,11 +254,20 @@ fn a_failed_write_is_classified_by_the_sink_table() {
 #[test]
 fn the_committed_offset_read_is_bounded_by_the_poll_interval() {
     let mut cc = raw_config();
-    assert_eq!(committed_lookup_timeout(&cc), Duration::from_secs(10));
+    assert_eq!(
+        crate::client::committed_lookup_timeout(&cc),
+        Duration::from_secs(10)
+    );
     cc.set("max.poll.interval.ms", "6000");
-    assert_eq!(committed_lookup_timeout(&cc), Duration::from_millis(1500));
+    assert_eq!(
+        crate::client::committed_lookup_timeout(&cc),
+        Duration::from_millis(1500)
+    );
     cc.set("max.poll.interval.ms", "600000");
-    assert_eq!(committed_lookup_timeout(&cc), Duration::from_secs(10));
+    assert_eq!(
+        crate::client::committed_lookup_timeout(&cc),
+        Duration::from_secs(10)
+    );
 }
 
 /// A move of `receipt`'s delivery to the retry topic.

@@ -1963,10 +1963,10 @@ async fn a_settled_depth_read_wakes_the_reader() {
 }
 
 /// Pins that a depth reading and its error name the queues with the URL's
-/// userinfo redacted.
+/// query redacted.
 #[tokio::test(start_paused = true)]
-async fn depth_text_carries_no_queue_url_userinfo() {
-    const SECRET_URL: &str = "https://ops:hunter2@sqs.eu-west-2.amazonaws.com/111122223333/jobs";
+async fn depth_text_carries_no_queue_url_query() {
+    const SECRET_URL: &str = "https://sqs.eu-west-2.amazonaws.com/111122223333/jobs?token=hunter2";
     let section: FeedSection =
         serde_yaml::from_str(&format!("sqs: {{ queue_url: \"{SECRET_URL}\" }}")).unwrap();
     let config = SqsFeedConfig::from_section(&section).expect("the section is accepted");

@@ -16,7 +16,7 @@ use std::borrow::Cow;
 use std::collections::BTreeMap;
 use url::Url;
 
-use crate::location::{BAD_PREFIX, STORE_URL};
+use crate::location::{BAD_PREFIX, STORE_URL, offline_store};
 
 /// The source's component type, and the tag its section sits under.
 pub(crate) const TAG: &str = "s3";
@@ -290,6 +290,20 @@ fn parse_url(at: &SectionPath, field: &str, value: &str) -> Result<Url, ConfigEr
             ),
         ));
     }
+    // The scheme check passes every `amazonaws.com` and
+    // `r2.cloudflarestorage.com` host, and the client parses only some of
+    // them.
+    if url.scheme() == "https" && offline_store(&url).is_err() {
+        return Err(at.invalid(
+            field,
+            format!(
+                "{} is on a host form the store does not read; write the host as the S3 \
+                 source's `url` documentation lists it, or s3://<bucket>/<prefix> with the \
+                 region or endpoint under the source's `store`",
+                redact::url(value)
+            ),
+        ));
+    }
     Ok(url)
 }
 
@@ -327,6 +341,41 @@ mod tests {
             "s3a://bucket/data/",
             "https://s3.us-east-1.amazonaws.com/bucket/data/",
             "file:///tmp/data/",
+        ] {
+            let body = format!("  url: {url}\n");
+            S3SourceConfig::from_component_config(&section(&body)).expect(url);
+        }
+    }
+
+    /// An S3 or R2 host the client does not parse fails at load and names
+    /// the field, and each host form it parses loads. Regression for #1821.
+    #[test]
+    fn an_s3_host_the_client_cannot_parse_is_refused_at_load() {
+        for url in [
+            "https://s3.amazonaws.com/bucket/data/",
+            "https://s3-us-west-2.amazonaws.com/bucket/data/",
+            "https://bucket.s3-us-west-2.amazonaws.com/data/",
+            "https://sqs.us-east-1.amazonaws.com/bucket/data/",
+            "https://r2.cloudflarestorage.com/bucket/data/",
+        ] {
+            let body = format!("  url: {url}\n");
+            let err = S3SourceConfig::from_component_config(&section(&body)).unwrap_err();
+            let err = err.to_string();
+            assert!(err.starts_with("source.s3.url"), "{url}: {err}");
+            assert!(
+                err.contains("host form the store does not read"),
+                "{url}: {err}"
+            );
+            assert!(err.contains(url), "{url}: {err}");
+        }
+        for url in [
+            "https://s3.us-east-1.amazonaws.com/bucket/data/",
+            "https://s3.dualstack.us-east-1.amazonaws.com/bucket/data/",
+            "https://bucket.s3.amazonaws.com/data/",
+            "https://bucket.s3.us-east-1.amazonaws.com/data/",
+            "https://bucket.s3.dualstack.us-east-1.amazonaws.com/data/",
+            "https://account.r2.cloudflarestorage.com/bucket/data/",
+            "https://account.eu.r2.cloudflarestorage.com/bucket/data/",
         ] {
             let body = format!("  url: {url}\n");
             S3SourceConfig::from_component_config(&section(&body)).expect(url);

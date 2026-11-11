@@ -190,16 +190,19 @@ fn continuation_token(query: &str) -> Option<String> {
         .map(|(_, token)| token.into_owned())
 }
 
-/// The `NextContinuationToken` of a listing page, unescaped.
+/// The part of a `ListBucketResult` page the token comparison reads.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct NextPage {
+    next_continuation_token: Option<String>,
+}
+
+/// The `NextContinuationToken` of a listing page.
 fn next_token(page: &[u8]) -> Option<String> {
-    const OPEN: &[u8] = b"<NextContinuationToken>";
-    const CLOSE: &[u8] = b"</NextContinuationToken>";
-    let start = find(page, OPEN)? + OPEN.len();
-    let len = find(&page[start..], CLOSE)?;
-    let raw = std::str::from_utf8(&page[start..start + len]).ok()?;
-    quick_xml::escape::unescape(raw)
-        .ok()
-        .map(|t| t.into_owned())
+    // The same decoder `object_store` runs over the page, so the token
+    // compared is the token it would follow.
+    let page: NextPage = quick_xml::de::from_str(std::str::from_utf8(page).ok()?).ok()?;
+    page.next_continuation_token
 }
 
 /// One `<Contents>` element, decoded the way `object_store` decodes it.
@@ -510,10 +513,22 @@ mod tests {
             Some("a/b+c= d&e")
         );
         assert_eq!(continuation_token("list-type=2&prefix=data%2F"), None);
-        assert_eq!(
-            next_token(b"<NextContinuationToken>a/b+c= d&amp;e</NextContinuationToken>").as_deref(),
-            Some("a/b+c= d&e")
-        );
-        assert_eq!(next_token(b"<IsTruncated>false</IsTruncated>"), None);
+        let page = |token: &str| {
+            format!(
+                "<ListBucketResult><Name>b</Name>{token}<IsTruncated>true</IsTruncated>\
+                 </ListBucketResult>"
+            )
+        };
+        for element in [
+            "<NextContinuationToken>a/b+c= d&amp;e</NextContinuationToken>",
+            "<NextContinuationToken><![CDATA[a/b+c= d&e]]></NextContinuationToken>",
+        ] {
+            assert_eq!(
+                next_token(page(element).as_bytes()).as_deref(),
+                Some("a/b+c= d&e"),
+                "{element}"
+            );
+        }
+        assert_eq!(next_token(page("").as_bytes()), None);
     }
 }

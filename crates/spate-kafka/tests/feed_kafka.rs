@@ -1174,3 +1174,41 @@ fn a_stop_during_a_hold_on(brokers: &str) {
     wait_for_end(&job, &next, &rows, WORK);
     assert_eq!(run_to_exit(&next, &clock).state, ExitState::Completed);
 }
+
+/// A dead-letter topic deleted while a bounded job runs fails the job at its
+/// next read of the topic, naming it. Regression for #1756.
+#[test]
+#[ignore = "requires Docker"]
+fn a_deleted_dead_letter_topic_fails_the_bounded_job() {
+    on_transactional_broker(|brokers| {
+        let job = listed(brokers, "dead-deleted", "");
+        let rows = recs("kept", 2);
+        job.publish("kept.ndjson", &rows);
+
+        let clock = TestClock::frozen();
+        let worker = launch_bounded(KafkaFeed::connect, &job.data, &job.section, &clock);
+        wait_until(HANG, "the unit is read and committed", || {
+            written(&worker.script) == sorted(rows.clone()) && job.committed(WORK) == Some(1)
+        });
+        let admin: AdminClient<DefaultClientContext> = support::raw_config()
+            .set("bootstrap.servers", brokers)
+            .build()
+            .expect("admin client");
+        let io = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        for deleted in io
+            .block_on(admin.delete_topics(&[DEAD], &AdminOptions::new()))
+            .expect("delete the dead-letter topic")
+        {
+            deleted.expect("the dead-letter topic is deleted");
+        }
+
+        let report = run_to_exit(&worker, &clock);
+        let ExitState::Failed(failure) = &report.state else {
+            panic!("expected a failed run, got {:?}", report.state);
+        };
+        assert!(failure.reason.contains(DEAD), "{}", failure.reason);
+    });
+}

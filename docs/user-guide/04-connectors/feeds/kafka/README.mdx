@@ -487,9 +487,11 @@ the dead-letter topic again 15 seconds later
 
 The reads need `Describe` on the work, retry and dead-letter topics, which the
 [startup checks](#startup-checks) already need, and `Describe` on the feed's
-group, which the `Read` a member needs on the group includes. An
-authorization failure fails the job; any other failed read starts the window
-again, or reads the dead-letter topic again 15 seconds later.
+group, which the `Read` a member needs on the group includes. A read fails the
+job when retrying cannot fix it: a refused authorization, a rejected
+credential, or a topic the cluster no longer knows, as after the topic is
+deleted while the job runs. Any other failed read starts the window again, or
+reads the dead-letter topic again 15 seconds later.
 
 ## Backpressure
 

@@ -167,7 +167,8 @@
 //!   what the driver decides rather than the author.
 //! - [`record`] — why an absent metric is absent rather than zero, and why a leg
 //!   needs no index or manifest.
-//! - [`alloc`] — the counting allocator, and how a `realloc` is charged.
+//! - [`alloc`] — the counting allocator, how a `realloc` is charged, and why
+//!   each thread counts on a line of its own.
 //! - [`rusage`] — the resident-set validity gate, and the limits of the kernel's
 //!   CPU accounting.
 //! - [`fingerprint`] — the guarded fields, and what makes two legs the same
@@ -202,6 +203,7 @@ pub mod case;
 pub mod clock;
 pub mod corpus;
 pub mod fingerprint;
+pub mod padded;
 pub mod protocol;
 pub mod record;
 pub mod rng;
@@ -254,3 +256,4 @@ pub(crate) fn quoted<'a>(names: impl IntoIterator<Item = &'a str>) -> String {
 
 pub use case::{Bencher, Case, CaseBuilder, Suite, suite};
 pub use corpus::Corpus;
+pub use padded::Padded;

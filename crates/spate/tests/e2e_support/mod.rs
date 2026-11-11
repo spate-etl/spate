@@ -819,15 +819,17 @@ impl RunningPipeline {
                 Lag::Read => self.lags(),
                 Lag::Ignored => Vec::new(),
             };
-            let committed = read_committed(&probe, &self.topic, self.partitions, PROBE_TIMEOUT)
-                .expect("committed offsets");
-            let ends = read_ends(&probe, &self.topic, self.partitions);
+            // A read fails while a broker restart moves the group coordinator
+            // or a leader, so a failed read is not drained yet.
+            let committed = read_committed(&probe, &self.topic, self.partitions, PROBE_TIMEOUT);
+            let ends = try_read_ends(&probe, &self.topic, self.partitions);
             let state = format!("lag {lags:?}, committed {committed:?}, end {ends:?}");
             if state != seen {
                 println!("all {rows} rows written: {state}");
                 seen = state;
             }
-            lags.iter().all(|lag| *lag == Some(0.0)) && committed == ends
+            lags.iter().all(|lag| *lag == Some(0.0))
+                && matches!((committed, ends), (Ok(c), Ok(e)) if c == e)
         });
     }
 
@@ -1168,12 +1170,20 @@ fn read_committed(
 
 /// The offset after each partition's last record.
 fn read_ends(probe: &BaseConsumer, topic: &str, partitions: i32) -> Vec<i64> {
+    try_read_ends(probe, topic, partitions).expect("watermarks")
+}
+
+/// [`read_ends`], returning the first failed read.
+fn try_read_ends(
+    probe: &BaseConsumer,
+    topic: &str,
+    partitions: i32,
+) -> rdkafka::error::KafkaResult<Vec<i64>> {
     (0..partitions)
         .map(|p| {
-            let (_, high) = probe
+            probe
                 .fetch_watermarks(topic, p, PROBE_TIMEOUT)
-                .expect("watermarks");
-            high
+                .map(|(_, high)| high)
         })
         .collect()
 }

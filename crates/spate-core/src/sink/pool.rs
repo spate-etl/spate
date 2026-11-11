@@ -1,9 +1,10 @@
 //! The sink pool: one worker task per shard on the I/O runtime.
 
-use super::config::{LONGEST_DEADLINE, SinkPoolConfig};
+use super::config::SinkPoolConfig;
 use super::worker::{ShardWorker, WorkerReport};
 use super::{EncodedChunk, ShardWriter, SinkFailures};
 use crate::backpressure::InflightBudget;
+use crate::clock::deadline_after;
 use crate::clock::tokio::{Clock, SystemClock, before};
 use crate::error::SinkError;
 use crate::metrics::SinkShardMetrics;
@@ -71,8 +72,9 @@ impl<W: ShardWriter> SinkPool<W> {
     /// # Panics
     ///
     /// Panics when the lengths disagree, a shard has no replicas, or
-    /// `inflight.max_per_shard` is zero (construction-time configuration
-    /// errors).
+    /// `inflight.max_per_shard` is zero or above tokio's
+    /// [`Semaphore::MAX_PERMITS`](tokio::sync::Semaphore::MAX_PERMITS)
+    /// (construction-time configuration errors).
     #[must_use]
     #[expect(
         clippy::too_many_arguments,
@@ -138,8 +140,9 @@ impl<W: ShardWriter> SinkPool<W> {
             "every shard needs at least one replica"
         );
         // The builder rejects this at install through
-        // `SinkPoolConfig::validate`; a pool spawned directly skips that, and
-        // a zero-permit semaphore would park every sealed batch forever.
+        // `SinkPoolConfig::validate`; a pool spawned directly skips that. A
+        // zero-permit semaphore would park every sealed batch forever, and
+        // tokio panics in the worker on one above its limit.
         if let Err(e) = config.inflight.check() {
             panic!("{e}");
         }
@@ -251,7 +254,7 @@ impl<W: ShardWriter> SinkPool<W> {
     /// [`ShardQueues`](super::ShardQueues) clone first. Workers only enter
     /// their drain phase once their queue closes.
     pub async fn drain(self, deadline: Duration) -> DrainReport {
-        let deadline_at = self.clock.now() + deadline.min(LONGEST_DEADLINE);
+        let deadline_at = deadline_after(self.clock.now(), deadline);
         let _ = self.drain_tx.send(Some(deadline_at));
         // Absolute, so joining the shards in sequence still bounds the whole
         // drain. One wedged shard spends the budget once, and the shards

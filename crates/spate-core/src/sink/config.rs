@@ -10,9 +10,11 @@
 //! (or [`SinkPoolConfig::new`]) and assign the fields you are tuning; a knob
 //! added later arrives as a new default and existing code keeps compiling.
 
+use crate::clock::LONGEST_DEADLINE;
 use bytesize::ByteSize;
 use serde::{Deserialize, Deserializer};
 use std::time::Duration;
+use tokio::sync::Semaphore;
 
 /// Accept `128MiB`-style sizes on the wire while keeping the field a plain
 /// `u64`. `ByteSize` is a parsing convenience, not part of the batching API.
@@ -38,6 +40,9 @@ pub struct BatchConfig {
     pub max_bytes: u64,
     /// Seal a non-empty batch this long after its first chunk arrived,
     /// bounding latency at low throughput.
+    ///
+    /// At most a year ([`LONGEST_DEADLINE`]); [`SinkPoolConfig::validate`]
+    /// rejects more, and a pool spawned without it seals at a year.
     #[serde(with = "humantime_serde")]
     pub linger: Duration,
 }
@@ -61,7 +66,9 @@ pub struct InflightConfig {
     /// different replicas). While all permits are taken the worker stops
     /// consuming its queue, which fills and surfaces as backpressure.
     ///
-    /// Must be at least 1; [`SinkPoolConfig::validate`] rejects `0`.
+    /// Must be at least 1 and at most tokio's [`Semaphore::MAX_PERMITS`];
+    /// [`SinkPoolConfig::validate`] rejects anything else, and
+    /// [`SinkPool::spawn`](super::SinkPool::spawn) panics on it.
     pub max_per_shard: usize,
 }
 
@@ -229,8 +236,8 @@ pub struct BreakerConfig {
     ///
     /// Also bounds how long a batch parked behind a fully-probing shard waits
     /// before re-checking of its own accord (clamped to `[100ms, 30s]`).
-    /// Capped at a year on the way in: it is stamped into a deadline, and
-    /// `Instant + Duration` panics rather than saturating.
+    /// At most [`MAX_OPEN_FOR`](Self::MAX_OPEN_FOR); a breaker built without
+    /// [`validate`](Self::validate) re-probes after a year.
     #[serde(with = "humantime_serde")]
     pub open_for: Duration,
     /// Concurrent probe writes allowed while half-open.
@@ -251,11 +258,6 @@ impl Default for BreakerConfig {
         }
     }
 }
-
-/// The longest span the sink stamps into a deadline. `Instant + Duration`
-/// panics rather than saturating, and a clock reading plus a year and a few
-/// seconds of grace stays inside `Instant`'s range.
-pub(crate) const LONGEST_DEADLINE: Duration = Duration::from_secs(365 * 24 * 60 * 60);
 
 impl BreakerConfig {
     /// Ceiling on [`open_for`](Self::open_for).
@@ -403,6 +405,9 @@ impl BatchConfig {
         if self.max_bytes == 0 {
             return Err(SinkPoolConfigError::ZeroMaxBytes);
         }
+        if self.linger > LONGEST_DEADLINE {
+            return Err(SinkPoolConfigError::LingerTooLong(self.linger));
+        }
         Ok(())
     }
 }
@@ -412,6 +417,9 @@ impl InflightConfig {
     pub(crate) fn check(&self) -> Result<(), SinkPoolConfigError> {
         if self.max_per_shard == 0 {
             return Err(SinkPoolConfigError::ZeroMaxPerShard);
+        }
+        if self.max_per_shard > Semaphore::MAX_PERMITS {
+            return Err(SinkPoolConfigError::MaxPerShardTooLarge(self.max_per_shard));
         }
         Ok(())
     }
@@ -431,9 +439,17 @@ pub enum SinkPoolConfigError {
     /// `batch.max_bytes` is zero, which seals every chunk as its own batch.
     #[error("batch.max_bytes must be at least 1")]
     ZeroMaxBytes,
+    /// `batch.linger` exceeds a year, past the longest deadline the worker
+    /// arms.
+    #[error("batch.linger must not exceed a year (got {0:?})")]
+    LingerTooLong(Duration),
     /// `inflight.max_per_shard` is zero, which parks every sealed batch.
     #[error("inflight.max_per_shard must be at least 1")]
     ZeroMaxPerShard,
+    /// `inflight.max_per_shard` exceeds tokio's [`Semaphore::MAX_PERMITS`],
+    /// which the worker's in-flight semaphore cannot hold.
+    #[error("inflight.max_per_shard must not exceed {max} (got {0})", max = Semaphore::MAX_PERMITS)]
+    MaxPerShardTooLarge(usize),
     /// The `retry` section failed [`RetryConfig::validate`].
     #[error(transparent)]
     Retry(#[from] RetryConfigError),
@@ -673,7 +689,8 @@ mod tests {
         let upper = pool(|c| {
             c.batch.max_rows = u64::MAX;
             c.batch.max_bytes = u64::MAX;
-            c.inflight.max_per_shard = usize::MAX;
+            c.batch.linger = LONGEST_DEADLINE;
+            c.inflight.max_per_shard = Semaphore::MAX_PERMITS;
             c.breaker.failure_threshold = u32::MAX;
         });
         assert_eq!(upper.validate(), Ok(()), "{upper:?}");
@@ -683,6 +700,30 @@ mod tests {
             c.retry.max = Duration::from_secs(3600);
         });
         assert_eq!(unbounded.validate(), Ok(()), "{unbounded:?}");
+    }
+
+    #[test]
+    fn pool_validate_rejects_values_past_their_ceilings() {
+        let linger = LONGEST_DEADLINE + Duration::from_nanos(1);
+        assert_eq!(
+            pool(|c| c.batch.linger = linger).validate(),
+            Err(SinkPoolConfigError::LingerTooLong(linger))
+        );
+        let permits = Semaphore::MAX_PERMITS + 1;
+        assert_eq!(
+            pool(|c| c.inflight.max_per_shard = permits).validate(),
+            Err(SinkPoolConfigError::MaxPerShardTooLarge(permits))
+        );
+    }
+
+    /// Pins that a `linger` the YAML loader parses but no deadline can hold
+    /// is refused, naming the key.
+    #[test]
+    fn a_yaml_linger_past_a_year_is_refused() {
+        let batch: BatchConfig = serde_yaml::from_str("linger: 300000000000y").expect("parses");
+        let err = pool(|c| c.batch = batch).validate().unwrap_err();
+        assert!(matches!(err, SinkPoolConfigError::LingerTooLong(_)), "{err:?}");
+        assert!(err.to_string().starts_with("batch.linger "), "{err}");
     }
 
     /// Pins the section order: batch, inflight, retry, breaker.

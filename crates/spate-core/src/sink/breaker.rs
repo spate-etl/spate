@@ -15,6 +15,7 @@
 //! reporting. [`BreakerSet::subscribe`] is that event.
 
 use super::config::BreakerConfig;
+use crate::clock::deadline_after;
 use crate::metrics::SinkShardMetrics;
 use std::sync::Arc;
 use tokio::sync::watch;
@@ -95,9 +96,9 @@ impl BreakerSet {
         metrics: Arc<SinkShardMetrics>,
     ) -> Self {
         assert!(replicas > 0, "a shard needs at least one replica");
-        // `BreakerConfig::validate` rejects both of these, and the builder
-        // runs it when it installs a sink. A pool spawned directly with
-        // `SinkPool::spawn` skips it; these clamps cover that path.
+        // `BreakerConfig::validate` rejects this, and the builder runs it when
+        // it installs a sink. A pool spawned directly with `SinkPool::spawn`
+        // skips it; this clamp covers that path.
         //
         // `half_open_probes: 0` wedges the replica shut. The open→half-open
         // promotion admits its first probe unconditionally, and once that slot
@@ -105,11 +106,6 @@ impl BreakerSet {
         // of `0` can re-admit and no deadline covers, because half-open
         // schedules nothing.
         cfg.half_open_probes = cfg.half_open_probes.max(1);
-        // `on_failure` stamps `now + open_for`, and `Instant + Duration`
-        // *panics* on overflow rather than saturating. The heartbeat's own
-        // clamp does not cover this; it bounds how long a parked task waits,
-        // not what gets written into the state.
-        cfg.open_for = cfg.open_for.min(BreakerConfig::MAX_OPEN_FOR);
         for r in 0..replicas {
             metrics.set_replica_healthy(r, true);
         }
@@ -308,7 +304,7 @@ impl BreakerSet {
                 let failures = consecutive_failures + 1;
                 if failures >= self.cfg.failure_threshold {
                     State::Open {
-                        until: now + self.cfg.open_for,
+                        until: deadline_after(now, self.cfg.open_for),
                     }
                 } else {
                     State::Closed {
@@ -318,7 +314,7 @@ impl BreakerSet {
             }
             // A failed half-open probe re-opens immediately.
             State::HalfOpen { .. } => State::Open {
-                until: now + self.cfg.open_for,
+                until: deadline_after(now, self.cfg.open_for),
             },
             State::Open { until } => State::Open { until },
         };
@@ -700,9 +696,8 @@ mod tests {
     }
 
     /// An unbounded `open_for` reaches the breaker on a pool spawned without
-    /// validation, and `Instant + Duration` panics on overflow rather than
-    /// saturating, so an absurd value would take the shard worker down at the
-    /// first failure.
+    /// validation. Pins that the first failure opens the replica for a year
+    /// and does not panic the shard worker.
     #[tokio::test(start_paused = true)]
     async fn an_absurd_open_for_does_not_panic_the_state_machine() {
         let labels = ComponentLabels::new("p", breaker_component(), "test");
@@ -723,9 +718,10 @@ mod tests {
         let t0 = Instant::now();
         b.on_failure(0, t0);
         assert!(matches!(b.states[0], State::Open { .. }));
-        assert!(
-            b.next_probe_at(t0).is_some(),
-            "an open breaker still names a deadline, however distant"
+        assert_eq!(
+            b.next_probe_at(t0),
+            Some(t0 + crate::clock::LONGEST_DEADLINE),
+            "an open breaker re-probes a year out"
         );
     }
 

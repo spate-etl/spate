@@ -116,6 +116,31 @@ pub fn wall_now() -> SystemTime {
     SystemTime::now()
 }
 
+/// The longest span [`deadline_after`] adds to a clock reading. A reading
+/// plus a year, and a few seconds of grace on top, stays inside `Instant`'s
+/// range.
+pub const LONGEST_DEADLINE: Duration = Duration::from_secs(365 * 24 * 60 * 60);
+
+/// The instant `after` past `at`, with `after` capped at
+/// [`LONGEST_DEADLINE`].
+///
+/// `Instant + Duration` panics when the sum leaves the clock's range, so
+/// every deadline built from a caller's duration goes through this. A span
+/// past a year reads as a year, which no deadline here means literally.
+/// It serves `std::time::Instant` and `tokio::time::Instant` alike.
+///
+/// ```
+/// use spate_core::clock::{LONGEST_DEADLINE, deadline_after};
+/// use std::time::{Duration, Instant};
+///
+/// let now = Instant::now();
+/// assert_eq!(deadline_after(now, Duration::MAX), now + LONGEST_DEADLINE);
+/// ```
+#[must_use]
+pub fn deadline_after<I: std::ops::Add<Duration, Output = I>>(at: I, after: Duration) -> I {
+    at + after.min(LONGEST_DEADLINE)
+}
+
 /// A clock that only moves when a test moves it.
 #[cfg(any(test, feature = "testing"))]
 #[doc(hidden)]
@@ -183,6 +208,21 @@ mod tests {
     #[test]
     fn a_sync_clock_debugs_as_its_name() {
         assert_eq!(format!("{:?}", SyncClock::system()), "SyncClock");
+    }
+
+    /// Pins the cap's value on both sides, and that a span past the clock's
+    /// range does not panic.
+    #[test]
+    fn deadline_after_caps_the_span_at_a_year() {
+        let at = Instant::now();
+        let under = LONGEST_DEADLINE - Duration::from_nanos(1);
+        assert_eq!(deadline_after(at, under), at + under);
+        assert_eq!(deadline_after(at, LONGEST_DEADLINE), at + LONGEST_DEADLINE);
+        assert_eq!(
+            deadline_after(at, LONGEST_DEADLINE + Duration::from_nanos(1)),
+            at + LONGEST_DEADLINE
+        );
+        assert_eq!(deadline_after(at, Duration::MAX), at + LONGEST_DEADLINE);
     }
 
     /// `advance_stepped` lands exactly on `total`, with a short last step,

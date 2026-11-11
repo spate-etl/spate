@@ -69,7 +69,7 @@ spate-bench = { workspace = true }
 tempfile = { workspace = true }
 serde_yaml = { workspace = true }
 testcontainers-modules = { workspace = true, features = ["clickhouse"] }
-tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "time"] }
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "test-util", "time"] }
 
 [[bench]]
 name = "encode_gungraun"

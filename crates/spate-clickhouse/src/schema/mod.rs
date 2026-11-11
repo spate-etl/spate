@@ -37,6 +37,7 @@ use probe::{FieldShape, Shape, compatible};
 use serde::{Deserialize, Serialize};
 use std::fmt::Write as _;
 use std::sync::Arc;
+use std::time::Duration;
 use typeparse::ChType;
 
 /// A check against the replicas failed at sink startup.
@@ -167,6 +168,7 @@ impl SchemaCheck {
 async fn fetch_columns(
     endpoint: &ClickHouseEndpoint,
     check: &SchemaCheck,
+    startup: Option<Duration>,
 ) -> Result<Vec<ColumnRow>, SchemaError> {
     let (db, table) = check.target();
     let query = match db {
@@ -186,13 +188,12 @@ async fn fetch_columns(
             )
             .bind(table),
     };
-    query
-        .fetch_all::<ColumnRow>()
+    crate::http::startup_request(startup, query.fetch_all::<ColumnRow>())
         .await
-        .map_err(|e| SchemaError::Fetch {
+        .map_err(|reason| SchemaError::Fetch {
             table: check.display_table(),
             url: endpoint.display_url().to_string(),
-            reason: crate::http::error_reason(&e),
+            reason,
         })
 }
 
@@ -254,6 +255,7 @@ fn aggregate_function_remedy(col: &str, type_: &str) -> Option<String> {
 pub(crate) async fn validate(
     check: &SchemaCheck,
     endpoints: &[Vec<ClickHouseEndpoint>],
+    startup: Option<Duration>,
 ) -> Result<Arc<RowSchema>, SchemaError> {
     // Every replica must agree: shard-local tables drift independently,
     // and a broken replica should surface now, not at its first rotated
@@ -261,7 +263,7 @@ pub(crate) async fn validate(
     let mut reference: Option<(String, Vec<ColumnRow>)> = None;
     for shard in endpoints {
         for endpoint in shard {
-            let cols = fetch_columns(endpoint, check).await?;
+            let cols = fetch_columns(endpoint, check, startup).await?;
             if cols.is_empty() {
                 return Err(SchemaError::Mismatch(format!(
                     "sink.clickhouse: table {} not found (or not visible to this user) \
@@ -590,7 +592,7 @@ mod tests {
             table: "t".into(),
             columns: &["id"],
         };
-        let err = validate(&check, &[vec![endpoint_trusting(&other, &url)]])
+        let err = validate(&check, &[vec![endpoint_trusting(&other, &url)]], None)
             .await
             .unwrap_err();
         assert!(matches!(err, SchemaError::Fetch { .. }), "{err:?}");

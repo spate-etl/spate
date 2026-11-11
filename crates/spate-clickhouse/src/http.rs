@@ -10,6 +10,7 @@ use rustls::pki_types::CertificateDer;
 use rustls::pki_types::pem::PemObject;
 use rustls::{CertificateError, ClientConfig, RootCertStore};
 use rustls_native_certs::CertificateResult;
+use spate_core::clock::tokio::{Clock as _, SystemClock, before};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -100,6 +101,24 @@ pub(crate) fn client(tls: &ClientConfig) -> clickhouse::Client {
     )
 }
 
+/// One startup request to a replica under the `timeouts.startup` bound: its
+/// answer, or the reason it has none. `None` waits with no bound.
+pub(crate) async fn startup_request<T>(
+    limit: Option<Duration>,
+    request: impl Future<Output = Result<T, clickhouse::error::Error>>,
+) -> Result<T, String> {
+    // A bound past the clock's range is no bound.
+    let Some((limit, at)) = limit.and_then(|l| Some((l, SystemClock.now().checked_add(l)?))) else {
+        return request.await.map_err(|e| error_reason(&e));
+    };
+    match before(&SystemClock, at, request).await {
+        Some(answer) => answer.map_err(|e| error_reason(&e)),
+        None => Err(format!(
+            "no answer within {limit:?}, the `timeouts.startup` bound"
+        )),
+    }
+}
+
 /// `err`'s message, with the TLS rejection behind it appended.
 pub(crate) fn error_reason(err: &clickhouse::error::Error) -> String {
     match spate_core::tls_rejection!(rustls, err) {
@@ -122,6 +141,30 @@ mod tests {
     use super::*;
     use crate::test_tls::{TestCa, is_unknown_issuer, serve};
     use spate_test_support::native_certs;
+
+    /// A startup request with no answer fails at its bound and names the
+    /// key, one that answers passes its answer through, and a bound past the
+    /// clock's range, or none, waits for the answer.
+    #[tokio::test(start_paused = true)]
+    async fn a_startup_request_is_bounded() {
+        type Answer = Result<u8, clickhouse::error::Error>;
+        let silent = std::future::pending::<Answer>();
+        assert_eq!(
+            startup_request(Some(Duration::from_secs(30)), silent).await,
+            Err("no answer within 30s, the `timeouts.startup` bound".to_owned())
+        );
+        for limit in [Some(Duration::from_secs(30)), Some(Duration::MAX), None] {
+            let answered = std::future::ready::<Answer>(Ok(7));
+            assert_eq!(startup_request(limit, answered).await, Ok(7), "{limit:?}");
+        }
+        let refused = std::future::ready::<Answer>(Err(clickhouse::error::Error::Custom(
+            "refused".to_owned(),
+        )));
+        let reason = startup_request(Some(Duration::from_secs(30)), refused)
+            .await
+            .unwrap_err();
+        assert!(reason.ends_with("refused"), "{reason}");
+    }
 
     fn with_root_ca(path: &Path) -> TlsSection {
         TlsSection {

@@ -35,7 +35,7 @@ sink:
     password: ${CLICKHOUSE_PASSWORD}
     compression: lz4               # off | none | lz4 | zstd | zstd:<1-22>
     format: rowbinary              # rowbinary | native
-    timeouts: { send: 30s, end: 180s }
+    timeouts: { send: 30s, end: 180s, startup: 30s }
     settings: { insert_quorum: "auto" }   # extra per-insert settings
     # batch, inflight, retry and breaker are the framework's sink-pool sections
 ```

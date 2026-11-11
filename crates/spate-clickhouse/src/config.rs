@@ -46,7 +46,7 @@ pub(crate) const TAG: &str = "clickhouse";
 ///     inflight: { max_per_shard: 2 }
 ///     retry: { initial: 100ms, max: 10s, multiplier: 2.0, jitter: 0.2, max_attempts: 0 }
 ///     breaker: { failure_threshold: 3, open_for: 5s, half_open_probes: 1 }
-///     timeouts: { send: 30s, end: 180s }
+///     timeouts: { send: 30s, end: 180s, startup: 30s }
 ///     compression: lz4               # off | lz4 | zstd | zstd:<1-22>
 ///     settings: { insert_quorum: "auto" }   # extra per-insert settings
 /// ```
@@ -452,7 +452,7 @@ pub struct TlsSection {
     pub root_ca: Option<PathBuf>,
 }
 
-/// Client-side timeouts for one insert.
+/// Client-side timeouts for one insert, and for one startup request.
 ///
 /// Construct with [`TimeoutSection::default`] and set the fields. The
 /// struct is `#[non_exhaustive]` so new knobs can be added without breaking
@@ -468,6 +468,11 @@ pub struct TimeoutSection {
     /// materialized views included.
     #[serde(with = "humantime_serde")]
     pub end: Option<Duration>,
+    /// Timeout of each request the sink sends a replica while it is built:
+    /// the schema read, the settings check and the `distributed_check`
+    /// queries.
+    #[serde(with = "humantime_serde")]
+    pub startup: Option<Duration>,
 }
 
 impl Default for TimeoutSection {
@@ -475,6 +480,7 @@ impl Default for TimeoutSection {
         TimeoutSection {
             send: Some(Duration::from_secs(30)),
             end: Some(Duration::from_secs(180)),
+            startup: Some(Duration::from_secs(30)),
         }
     }
 }
@@ -520,7 +526,9 @@ impl ClickHouseSinkBuilder {
     /// replica's columns cannot be read, [`SchemaError::Mismatch`] when the
     /// table is missing, the replicas disagree or a declared column does not
     /// fit it, and [`SchemaError::Settings`] when a replica answers the
-    /// settings check with an error.
+    /// settings check with an error. A replica that gives a request no
+    /// answer within `timeouts.startup` fails that request's variant,
+    /// [`SchemaError::Fetch`] or [`SchemaError::Settings`].
     pub async fn with_row<F: crate::ClickHouseRowFamily>(
         self,
     ) -> Result<ClickHouseSink, SchemaError> {
@@ -536,7 +544,8 @@ impl ClickHouseSinkBuilder {
             table: self.cfg.table.clone(),
             columns: F::COLUMNS,
         };
-        let schema = schema::validate(&check, &self.endpoints).await?;
+        let startup = self.cfg.timeouts.startup;
+        let schema = schema::validate(&check, &self.endpoints, startup).await?;
 
         let insert_sql = insert_statement(&self.cfg.table, F::COLUMNS, self.cfg.format);
         let frame_codec = BlockCodec::factory(self.cfg.compression);
@@ -563,12 +572,11 @@ impl ClickHouseSinkBuilder {
             self.cfg.timeouts.end,
         );
         for endpoint in self.endpoints.iter().flatten() {
-            writer
-                .check_settings(endpoint)
+            crate::http::startup_request(startup, writer.check_settings(endpoint))
                 .await
-                .map_err(|e| SchemaError::Settings {
+                .map_err(|reason| SchemaError::Settings {
                     url: endpoint.display_url().to_string(),
-                    reason: crate::http::error_reason(&e),
+                    reason,
                 })?;
         }
         tracing::info!(
@@ -795,6 +803,7 @@ fn build_with(
         };
         distributed::DistributedCheck {
             endpoint,
+            startup: cfg.timeouts.startup,
             cluster: section.cluster.clone(),
             database: cfg.database.clone(),
             table: section.table.clone(),
@@ -1372,6 +1381,50 @@ settings: { insert_quorum: "auto" }
             "INSERT INTO `events` (`id`, `tags.key`, `tags.value`) \
              FORMAT RowBinaryWithNamesAndTypes"
         );
+    }
+
+    /// A replica that accepts the connection and never answers fails the
+    /// build once `timeouts.startup` has passed, with an error naming the
+    /// replica and the bound. Regression for #1953.
+    #[tokio::test(start_paused = true)]
+    async fn a_replica_that_never_answers_fails_the_build_at_the_startup_bound() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        // Accepts every connection and keeps it open without a byte.
+        let silent = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((connection, _)) = listener.accept().await {
+                held.push(connection);
+            }
+        });
+        let err = from_component_config(&component(&format!(
+            "table: t\nshards: [{{replicas: [\"http://{addr}\"]}}]\ntimeouts: {{ startup: 7s }}"
+        )))
+        .unwrap()
+        .with_row::<spate_core::deser::Owned<IdOnly>>()
+        .await
+        .unwrap_err();
+        silent.abort();
+        let SchemaError::Fetch { url, reason, .. } = err else {
+            panic!("expected the schema read to fail: {err}");
+        };
+        assert!(url.contains(&addr.to_string()), "{url}");
+        assert_eq!(reason, "no answer within 7s, the `timeouts.startup` bound");
+    }
+
+    /// The startup bound is 30 s unless `timeouts.startup` sets it.
+    #[test]
+    fn the_startup_bound_defaults_to_thirty_seconds() {
+        assert_eq!(
+            TimeoutSection::default().startup,
+            Some(Duration::from_secs(30))
+        );
+        let sink = from_component_config(&component(
+            "table: t\nshards: [{replicas: [\"http://a:8123\"]}]\ntimeouts: { startup: 5s }",
+        ))
+        .unwrap();
+        assert_eq!(sink.cfg.timeouts.startup, Some(Duration::from_secs(5)));
+        assert_eq!(sink.cfg.timeouts.send, Some(Duration::from_secs(30)));
     }
 
     /// `ClickHouseRowFamily` can be hand-written for a borrowed record

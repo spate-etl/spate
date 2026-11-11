@@ -1,0 +1,3 @@
+**ClickHouse startup timeout** (`spate-clickhouse`)
+
+The ClickHouse sink has a new setting, `timeouts.startup`, with a default of `30s`. It bounds each request the sink sends a replica while it is built: the schema read, the settings check and the `distributed_check` queries. A replica that accepts the connection and gives no answer within the bound fails startup with an error naming the replica and the setting. In previous versions these requests had no bound, so such a replica left the pipeline waiting in startup with no log line. Raise the value if a replica takes longer than 30 seconds to answer `system.columns`.

@@ -49,10 +49,13 @@ year ago still means what it said.
   outside its `select!`.** Anything it blocks on sits in a branch alongside the
   drain-deadline branch, or the deadline is not polled while it waits and
   shutdown deadlocks.
-- <Anchor id="inv-6" />**INV-6 — no connector types in `spate-core`'s public
-  API**, and no 0.x dependency types in any public trait bound. Those cannot
-  enter our semver surface. The `metrics` facade is the one sanctioned
-  exception, because the instrumentation API *is* that facade.
+- <Anchor id="inv-6" />**INV-6 — no connector types and no 0.x dependency types
+  in `spate-core`'s public API**, and no 0.x dependency types in any public
+  trait bound. Those cannot enter our semver surface. The rule covers documented
+  items, so an item marked `#[doc(hidden)]` is outside it. The `metrics` facade
+  is a sanctioned exception, because the instrumentation API *is* that facade.
+  The YAML crate's value and parse error are another, because a component body
+  is a YAML document.
 - <Anchor id="inv-7" />**INV-7 — record error policies are Skip or Fail only**,
   and both are surfaced through metrics rather than only logged. There is no
   third policy that drops a record without counting it.

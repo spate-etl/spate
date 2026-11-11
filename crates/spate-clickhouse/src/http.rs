@@ -165,6 +165,7 @@ mod tests {
     use super::*;
     use crate::test_tls::{TestCa, is_unknown_issuer, serve};
     use spate_test_support::native_certs;
+    use std::sync::mpsc;
 
     /// A startup request with no answer fails at its bound and names the
     /// key, one that answers passes its answer through, and a bound past the
@@ -179,7 +180,7 @@ mod tests {
             clock: given.clone(),
         };
         let limit = Duration::from_secs(30);
-        let (sent, held) = std::sync::mpsc::channel();
+        let (sent, held) = mpsc::channel();
         let silent = bound(Some(limit));
         let reason = crate::test_startup::past_the_bound(&io, &clock, limit, &held, async move {
             silent

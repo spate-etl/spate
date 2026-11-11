@@ -1,6 +1,11 @@
 //! Replicas that stop answering, and a clock moved past the startup bound,
 //! for the crate's unit tests.
 
+#![expect(
+    clippy::disallowed_methods,
+    reason = "the replica and the call under test end with the test's runtime"
+)]
+
 use spate_core::clock::{SyncClock, TestClock};
 use std::future::Future;
 use std::sync::Arc;

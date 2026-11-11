@@ -13,7 +13,8 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 use support::MockKafka;
 use support::{
-    Marker, RawBatch, await_assignment, control_batch, corrupt_batch, offsets_of, produce_batch,
+    BatchCrc, Marker, RawBatch, await_assignment, control_batch, corrupt_batch, offsets_of,
+    produce_batch,
 };
 
 const TOPIC: &str = "orders";
@@ -224,6 +225,85 @@ fn an_unknown_codec_first_in_a_poll_names_the_codec() {
     let reason = reason.expect("reason");
     assert!(reason.contains("codec 0x5"), "{reason}");
     assert!(reason.contains("cannot read"), "{reason}");
+}
+
+/// A record at the top of the offset range fails the lane as fatal, and the
+/// watermark stays below it: no position exists to commit past it. It is
+/// refused as the first record of a poll, and as a later record of a poll
+/// whose earlier record is still delivered. Regression for #1735.
+#[test]
+fn a_record_at_the_top_of_the_offset_range_fails_the_lane() {
+    for (name, before) in [("top-first", 0_i64), ("top-later", 1)] {
+        let cluster = MockKafka::new();
+        cluster.create_topic(TOPIC, 1, 1).expect("create topic");
+        let brokers = cluster.bootstrap_servers();
+        if before == 1 {
+            support::produce(&brokers, TOPIC, 1, 1, "good");
+        }
+        // The mock stores the batch at base offset `before`, and librdkafka
+        // adds the record's delta to it.
+        let top = RawBatch {
+            crc: BatchCrc::Computed,
+            record_offset_delta: i64::MAX - before,
+            value: b"top",
+            ..RawBatch::default()
+        }
+        .encode();
+        assert_eq!(produce_batch(&brokers, TOPIC, 0, &top), 0);
+
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let _recorder = metrics::set_default_local_recorder(&recorder);
+        let mut cp = Checkpointer::new();
+        let mut source = KafkaSource::new(source_cfg(&brokers, name));
+        source
+            .open(
+                SourceCtx::new(cp.handle())
+                    .with_meter(Some(spate_core::metrics::Meter::with_namespace(
+                        "kafka", name, "source", "kafka",
+                    )))
+                    .with_partition_detail(true),
+            )
+            .expect("open");
+        let mut lanes = await_assignment(&mut source, HANG);
+        cp.begin_epoch(&[lanes[0].partition()], 1);
+        // One version barrier and each record, so one poll finds them all.
+        wait_for_fetch_queue(&mut source, &handle, name, 1.0 + before as f64 + 1.0);
+
+        let mut delivered = Vec::new();
+        let mut reason = None;
+        spate_test::wait_until(HANG, "the lane fails", || {
+            source
+                .poll_events(Duration::from_millis(10))
+                .expect("poll_events");
+            match lanes[0].poll(64, Duration::from_millis(100)) {
+                Ok(b) => delivered.extend(offsets_of(b).unwrap_or_default()),
+                Err(e) => {
+                    assert_eq!(e.class(), ErrorClass::Fatal, "{name}: {e}");
+                    reason = Some(e.reason().to_owned());
+                }
+            }
+            reason.is_some()
+        });
+        let reason = reason.expect("set by the wait");
+        assert!(
+            reason.contains("the top of the offset range"),
+            "{name}: {reason}"
+        );
+        drop(lanes);
+        cp.drain();
+        if before == 1 {
+            assert_eq!(delivered, [0], "{name}");
+            assert_eq!(
+                cp.take_watermarks(),
+                [(spate_core::record::PartitionId(0), 1)],
+                "{name}"
+            );
+        } else {
+            assert_eq!(delivered, [0_i64; 0], "{name}");
+            assert_eq!(cp.take_watermarks(), [], "{name}");
+        }
+    }
 }
 
 /// A marker behind a batch the lane cannot read stays unpassed: the lane delivers

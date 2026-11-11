@@ -155,6 +155,19 @@ impl KafkaLane {
         Some(self.issue_batch(last_offset))
     }
 
+    /// The fatal error for a record at `i64::MAX`. The position that commits
+    /// past a record is one above its offset, and none exists above this one,
+    /// so the record is refused and the partition replays from its last
+    /// commit.
+    fn top_of_range(&self) -> SourceError {
+        SourceError::fatal(format!(
+            "partition {}: the broker returned a record at offset {}, the top of the offset \
+             range, which leaves no position to commit past it",
+            self.partition.0,
+            i64::MAX
+        ))
+    }
+
     /// The source error for a queue error, read on the thread that polled
     /// the queue, where librdkafka's error callback left its text.
     fn poll_error(&self, e: &KafkaError) -> SourceError {
@@ -249,6 +262,10 @@ impl SourceLane for KafkaLane {
                 self.saw_error = true;
                 return Err(self.poll_error(&e));
             }
+            Some(Ok(msg)) if msg.offset() == i64::MAX => {
+                self.saw_error = true;
+                return Err(self.top_of_range());
+            }
             Some(Ok(msg)) => {
                 // SAFETY: see `erase_lifetime`; the queue (and through it
                 // the consumer) outlives `held` within this lane.
@@ -257,6 +274,10 @@ impl SourceLane for KafkaLane {
         }
         while self.held.len() < max_records {
             match self.queue.poll(Duration::ZERO) {
+                Some(Ok(msg)) if msg.offset() == i64::MAX => {
+                    self.pending = Some(self.top_of_range());
+                    break;
+                }
                 Some(Ok(msg)) => {
                     // SAFETY: as above.
                     self.held.push(unsafe { erase_lifetime(msg) });

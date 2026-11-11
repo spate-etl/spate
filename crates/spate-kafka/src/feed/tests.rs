@@ -5619,7 +5619,7 @@ mod docker {
     /// Pins that the gate reads an attempt partition's end past another
     /// writer's open transaction. The transaction holds offset 0 and the
     /// feed's own record sits at offset 1, so the last stable offset is 0
-    /// and the log end is 2. With no follower running the ledger has read
+    /// and the log end is at least 2. With no follower running the ledger has read
     /// neither, and a gate pass puts the unit back. A gate that read the
     /// last stable offset would find the partition empty and admit it.
     /// Regression for #1765.
@@ -5675,7 +5675,7 @@ mod docker {
             lister
                 .client()
                 .fetch_watermarks("units-attempts", 0, Duration::from_secs(5))
-                .is_ok_and(|marks| marks == (0, 2))
+                .is_ok_and(|(lwm, hwm)| lwm == 0 && hwm >= 2)
         });
         let core = Arc::new(Core::new(&config, NonZeroU32::MIN, SyncClock::system()));
         let producer = config

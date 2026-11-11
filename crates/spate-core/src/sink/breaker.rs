@@ -696,8 +696,8 @@ mod tests {
     }
 
     /// An unbounded `open_for` reaches the breaker on a pool spawned without
-    /// validation. Pins that the first failure opens the replica for a year
-    /// and does not panic the shard worker.
+    /// validation. Pins that the first failure, and a failed probe after it,
+    /// open the replica for a year and do not panic the shard worker.
     #[tokio::test(start_paused = true)]
     async fn an_absurd_open_for_does_not_panic_the_state_machine() {
         let labels = ComponentLabels::new("p", breaker_component(), "test");
@@ -722,6 +722,18 @@ mod tests {
             b.next_probe_at(t0),
             Some(t0 + crate::clock::LONGEST_DEADLINE),
             "an open breaker re-probes a year out"
+        );
+        // A failed half-open probe re-opens for a year too.
+        let t1 = t0 + crate::clock::LONGEST_DEADLINE;
+        b.states[0] = State::HalfOpen {
+            probes_in_flight: 1,
+            episode: 1,
+        };
+        b.on_failure(0, t1);
+        assert_eq!(
+            b.next_probe_at(t1),
+            Some(t1 + crate::clock::LONGEST_DEADLINE),
+            "a failed probe re-opens a year out"
         );
     }
 

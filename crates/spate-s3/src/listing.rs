@@ -1,4 +1,5 @@
-//! The S3 listing's handling of keys `object_store` cannot address.
+//! The S3 listing's handling of keys `object_store` cannot address, and the
+//! cap on a failure answer's body.
 //!
 //! `object_store` turns each listed key into a [`Path`], and a key that does
 //! not parse fails the whole `ListObjectsV2` page, losing its continuation
@@ -7,7 +8,8 @@
 //! client: it takes each such object out of a listing page before
 //! `object_store` parses it and records it in [`UnaddressableKeys`], so the
 //! listing returns every other key, and the lister still publishes this one
-//! as a unit of its own.
+//! as a unit of its own. The same wrapper hands the client at most 64 KiB of
+//! any failure answer's body.
 
 use crate::fetch::ObjectEntry;
 use bytes::Bytes;
@@ -56,8 +58,8 @@ impl UnaddressableKeys {
 }
 
 /// An [`HttpConnector`] that builds `object_store`'s own client and filters
-/// the S3 listing responses it returns. Every other request and response
-/// passes through unchanged.
+/// the S3 listing responses it returns and cuts the body of a failure answer.
+/// Every other request and response passes through unchanged.
 #[derive(Debug)]
 pub(crate) struct UnaddressableConnector {
     keys: UnaddressableKeys,
@@ -123,8 +125,8 @@ impl HttpService for FilteringService {
 /// of it.
 const FAILURE_BODY_MAX_BYTES: usize = 64 * 1024;
 
-/// `response` with its body cut to [`FAILURE_BODY_MAX_BYTES`] and the rest
-/// left unread.
+/// `response` with its body cut to [`FAILURE_BODY_MAX_BYTES`], on a character
+/// boundary, and the rest left unread.
 ///
 /// `object_store` reads a failure answer's body whole, into a buffer sized
 /// from the length the store declared, so a declared length alone can abort
@@ -141,6 +143,13 @@ async fn bounded_failure(response: HttpResponse) -> HttpResponse {
         };
         let room = FAILURE_BODY_MAX_BYTES - kept.len();
         kept.extend_from_slice(&frame[..frame.len().min(room)]);
+    }
+    // A cut inside a character fails the client's decode of the body, and
+    // the error then loses the store's status.
+    if let Err(e) = std::str::from_utf8(&kept)
+        && e.error_len().is_none()
+    {
+        kept.truncate(e.valid_up_to());
     }
     // The body is no longer the length the store declared.
     parts.headers.remove("content-length");
@@ -215,9 +224,15 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
 
-    /// A store behind the connector, with one runtime to drive it.
+    /// A store behind the connector, with the client's own request timeout
+    /// off so a read that waits on a held connection hangs.
     fn store_behind_the_connector(url: &str) -> object_store::aws::AmazonS3 {
         crate::test_servers::builder_at(url)
+            .with_client_options(
+                object_store::ClientOptions::new()
+                    .with_allow_http(true)
+                    .with_timeout_disabled(),
+            )
             .with_access_key_id("AKIDTEST")
             .with_secret_access_key("secret")
             .with_http_connector(UnaddressableConnector::new(UnaddressableKeys::default()))
@@ -240,8 +255,12 @@ mod tests {
         for declared in [1_u64 << 63, SENT as u64] {
             let url = crate::test_servers::oversized_failure_server(declared, SENT);
             let store = store_behind_the_connector(&url);
+            // The server holds the connection, so a read past the cap hangs.
             let err = rt
-                .block_on(store.get(&Path::from("data/a")))
+                .block_on(async {
+                    tokio::time::timeout(spate_test::HANG, store.get(&Path::from("data/a"))).await
+                })
+                .expect("the read stops at the cap")
                 .expect_err("the store answers 403");
             let text = err.to_string();
             assert!(text.contains("403 Forbidden"), "{declared}: {text:.300}");
@@ -252,6 +271,34 @@ mod tests {
                 "{declared}"
             );
         }
+    }
+
+    /// A failure body cut inside a multibyte character keeps the store's
+    /// status and class: the cut moves back to the character's start.
+    #[test]
+    fn a_cut_inside_a_character_keeps_the_status() {
+        use object_store::ObjectStoreExt as _;
+        // A 41-byte prefix, then a 3-byte character: byte 65,536 is inside one.
+        let body = format!(
+            "<Error><Code>AccessDenied</Code><Message>{}</Message></Error>",
+            "\u{20ac}".repeat(30_000)
+        );
+        let url = crate::test_servers::sequence_server(vec![("403 Forbidden", body)]);
+        let store = store_behind_the_connector(&url);
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let err = rt
+            .block_on(store.get(&Path::from("data/a")))
+            .expect_err("the store answers 403");
+        let text = crate::error::bounded_reason(&err);
+        assert!(
+            matches!(err, object_store::Error::PermissionDenied { .. }),
+            "{text}"
+        );
+        assert!(text.contains("403 Forbidden"), "{text}");
+        assert_eq!(err.to_string().matches('\u{20ac}').count(), 21_831);
     }
 
     fn contents(key: &str) -> String {

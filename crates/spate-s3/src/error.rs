@@ -119,8 +119,8 @@ pub(crate) fn store_error(doing: impl fmt::Display, e: &object_store::Error) -> 
 }
 
 /// The most of a store's response body an S3 source error carries. A store
-/// can answer an error with a body of any size, which `object_store` quotes
-/// whole.
+/// can answer an error with a body of any size, and `object_store` quotes
+/// what it is handed: up to 64 KiB behind the source's connector.
 const ERROR_TEXT_MAX_CHARS: usize = 512;
 
 /// The text `object_store` writes between the request it sent and the status

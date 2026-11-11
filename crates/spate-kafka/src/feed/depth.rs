@@ -1239,6 +1239,7 @@ mod tests {
 
     /// The depth client's serve returns a broker's refused SASL login as
     /// Fatal, with the broker's text.
+    #[cfg(feature = "tls")]
     #[test]
     fn serving_the_depth_client_returns_a_refused_login() {
         let brokers = crate::testutil::refuses_sasl_login().to_string();

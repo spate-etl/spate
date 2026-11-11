@@ -104,7 +104,7 @@ impl RecordFramer for NdjsonFramer {
     fn push(&mut self, bytes: &[u8]) -> io::Result<()> {
         self.decoded_bytes += bytes.len() as u64;
         let mut rest = bytes;
-        while let Some(nl) = rest.iter().position(|&b| b == b'\n') {
+        while let Some(nl) = memchr::memchr(b'\n', rest) {
             self.push_partial(&rest[..nl])?;
             self.complete_line();
             rest = &rest[nl + 1..];
@@ -133,7 +133,7 @@ impl RecordFramer for NdjsonFramer {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use proptest::prelude::*;
 
@@ -233,7 +233,8 @@ mod tests {
         )
     }
 
-    fn arb_stream() -> impl Strategy<Value = Vec<u8>> {
+    /// Arbitrary lines joined by `\n`, with or without a final newline.
+    pub(crate) fn arb_stream() -> impl Strategy<Value = Vec<u8>> {
         (
             proptest::collection::vec(arb_line(), 0..40),
             any::<bool>(), // terminated by a final newline or not

@@ -114,10 +114,7 @@ impl DecoderCore {
             // Skip streams line by line: a malformed line is dropped on its own
             // and the good lines around it still flow.
             OnError::Skip => {
-                for line in raw.bytes.split(|&b| b == b'\n') {
-                    if is_blank(line) {
-                        continue;
-                    }
+                for line in ndjson_lines(raw.bytes) {
                     if let Some(payload) = self.decode_item::<P>(line)? {
                         let _ = out.emit(Record {
                             payload,
@@ -135,10 +132,7 @@ impl DecoderCore {
             // un-emitted tail, silently losing the records after the bad line.
             OnError::Fail => {
                 let mut decoded = Vec::new();
-                for line in raw.bytes.split(|&b| b == b'\n') {
-                    if is_blank(line) {
-                        continue;
-                    }
+                for line in ndjson_lines(raw.bytes) {
                     if let Some(payload) = self.decode_item::<P>(line)? {
                         decoded.push(payload);
                     }
@@ -237,6 +231,19 @@ fn is_blank(bytes: &[u8]) -> bool {
     bytes.iter().all(u8::is_ascii_whitespace)
 }
 
+/// The lines of an NDJSON payload that are not blank, split on `\n`.
+fn ndjson_lines(bytes: &[u8]) -> impl Iterator<Item = &[u8]> {
+    let mut start = 0;
+    memchr::memchr_iter(b'\n', bytes)
+        .chain(std::iter::once(bytes.len()))
+        .map(move |end| {
+            let line = &bytes[start..end];
+            start = end + 1;
+            line
+        })
+        .filter(|line| !is_blank(line))
+}
+
 /// Typed deserializer: decodes each JSON document into your own
 /// `T: serde::de::DeserializeOwned`. No `serde_json` types appear in the
 /// pipeline. This is the flagship path.
@@ -315,6 +322,8 @@ impl Deserializer<Owned<Value>> for JsonValueDeserializer {
 mod tests {
     use super::*;
     use crate::config::{JsonDeserializerBuilder, JsonSettings};
+    use crate::framing::tests::arb_stream;
+    use proptest::prelude::*;
     use serde::Deserialize;
     use spate_core::record::Flow;
     use spate_test::render_metrics;
@@ -532,5 +541,21 @@ mod tests {
             rendered.contains(&needle),
             "missing `{needle}`:\n{rendered}"
         );
+    }
+
+    proptest! {
+        /// `ndjson_lines` yields what `split` on `\n` yields once blank lines
+        /// are dropped, including the segment after the last `\n`.
+        #[test]
+        fn ndjson_lines_match_a_split_on_newline(
+            stream in arb_stream(),
+        ) {
+            let expected: Vec<&[u8]> = stream
+                .split(|&b| b == b'\n')
+                .filter(|line| !is_blank(line))
+                .collect();
+            let lines: Vec<&[u8]> = ndjson_lines(&stream).collect();
+            prop_assert_eq!(lines, expected);
+        }
     }
 }

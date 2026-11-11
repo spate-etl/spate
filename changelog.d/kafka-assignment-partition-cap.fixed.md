@@ -1,0 +1,3 @@
+**Kafka source and feed: an assignment's size and partition numbers** (`spate-kafka`)
+
+The Kafka source and the Kafka feed now stop with a fatal error, before the consumer is assigned, when their consumer group assigns one consumer more than 10,000 partitions or a partition numbered below zero. In previous versions an assignment of any size was accepted. Each partition took about 6 KiB, so a large enough assignment could exhaust the process's memory, and checking its topics took time in proportion to the square of its size. The source read a negative partition number as partition 0, so an assignment of partitions -1 and 0 gave two lanes that both reported partition 0. A topic with more than 10,000 partitions needs enough members in the group that none is assigned more.

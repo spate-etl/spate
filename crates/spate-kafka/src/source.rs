@@ -109,7 +109,7 @@
 //! the contract.
 
 use crate::client::{
-    CLOSE_WAIT, PendingCommit, close_in_background, list_offsets, listed_offset, only_on_topics,
+    CLOSE_WAIT, PendingCommit, check_assignment, close_in_background, list_offsets, listed_offset,
     send_commit,
 };
 use crate::config::KafkaSourceConfig;
@@ -648,14 +648,11 @@ impl KafkaSource {
         // Every list built from an offer names the configured topic, and
         // `assign` would fetch whatever topic the offer named. The check
         // below compares partition numbers whatever their topic.
-        if !offers
-            .iter()
-            .all(|(_, tpl)| only_on_topics(tpl, &[&self.config.topic]))
-        {
-            return Err(SourceError::fatal(format!(
-                "the group offered a partition of a topic other than `{}`",
-                self.config.topic
-            )));
+        let topics = [self.config.topic.as_str()];
+        for (_, tpl) in &offers {
+            if let Err(refused) = check_assignment(tpl, &topics) {
+                return Err(SourceError::fatal(refused.reason(&topics)));
+            }
         }
         if first_repeat(&offers).is_some() {
             offers = self.discard_stale_offers(offers)?;

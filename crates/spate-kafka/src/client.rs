@@ -449,24 +449,77 @@ pub(crate) fn read_position<C: ConsumerContext>(
     }
 }
 
-/// Whether every element of `tpl` is a distinct partition of one of `topics`.
-/// It looks each one up through the list, since `elem.topic()` panics on a name
-/// that is not UTF-8, and a group's reply can carry one. Each topic found at a
-/// partition number is a distinct element, so the list passes when they account
-/// for all of it.
-pub(crate) fn only_on_topics(tpl: &TopicPartitionList, topics: &[&str]) -> bool {
-    let mut seen = FastSet::default();
-    let mut found = 0;
-    for elem in tpl.elements() {
-        let partition = elem.partition();
-        if seen.insert(partition) {
-            found += topics
-                .iter()
-                .filter(|topic| tpl.find_partition(topic, partition).is_some())
-                .count();
+/// The most partitions one consumer takes in one assignment. Each takes a
+/// lane or a tracker entry and a librdkafka toppar, about 6 KiB resident, and
+/// the source pauses and resumes each one in turn as it accepts them.
+pub(crate) const MAX_ASSIGNED: usize = 10_000;
+
+/// Why [`check_assignment`] refused a group's assignment.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Refused {
+    /// More partitions than [`MAX_ASSIGNED`].
+    Count(usize),
+    /// A partition of a topic other than the ones the consumer reads.
+    Topic,
+    /// A partition number below zero.
+    Negative(i32),
+    /// The same partition listed twice.
+    Repeated(i32),
+}
+
+impl Refused {
+    /// The reason a fatal stop gives, naming the topics read.
+    pub(crate) fn reason(&self, topics: &[&str]) -> String {
+        match self {
+            Self::Count(n) => format!(
+                "the group assigned {n} partitions to one consumer, above the limit of \
+                 {MAX_ASSIGNED}"
+            ),
+            Self::Topic => {
+                let names: Vec<String> = topics.iter().map(|t| format!("`{t}`")).collect();
+                format!(
+                    "the group offered a partition of a topic other than {}",
+                    names.join(" or ")
+                )
+            }
+            Self::Negative(p) => format!("the group assigned partition {p}, below zero"),
+            Self::Repeated(p) => format!("the group assigned partition {p} twice"),
         }
     }
-    found == tpl.count()
+}
+
+/// Check a group's assignment `tpl` for a consumer of `topics`: at most
+/// [`MAX_ASSIGNED`] elements, each a distinct partition, numbered from zero,
+/// of one of `topics`. It reads each name through the list's `elems` pointer,
+/// since `elem.topic()` panics on a name that is not UTF-8, and a group's
+/// reply can carry one.
+pub(crate) fn check_assignment(tpl: &TopicPartitionList, topics: &[&str]) -> Result<(), Refused> {
+    let count = tpl.count();
+    if count > MAX_ASSIGNED {
+        return Err(Refused::Count(count));
+    }
+    if count == 0 {
+        return Ok(());
+    }
+    // SAFETY: `tpl` owns a valid list of `count` elements, which nothing
+    // writes while it is borrowed here.
+    let elems = unsafe { std::slice::from_raw_parts((*tpl.ptr()).elems, count) };
+    let mut seen = FastSet::default();
+    for elem in elems {
+        // SAFETY: librdkafka stores each element's name as a NUL-terminated
+        // string the list owns.
+        let name = unsafe { std::ffi::CStr::from_ptr(elem.topic) }.to_bytes();
+        let Some(topic) = topics.iter().position(|t| t.as_bytes() == name) else {
+            return Err(Refused::Topic);
+        };
+        if elem.partition < 0 {
+            return Err(Refused::Negative(elem.partition));
+        }
+        if !seen.insert((topic, elem.partition)) {
+            return Err(Refused::Repeated(elem.partition));
+        }
+    }
+    Ok(())
 }
 
 /// The last offset no record holds when the position reads `position` and
@@ -801,10 +854,11 @@ mod tests {
     use rdkafka::producer::BaseProducer;
     use spate_core::config::ConfigError;
 
-    /// A list passes when each element is a distinct partition of one of the
-    /// topics, the same partition number on two of them included.
+    /// An assignment passes when each element is a distinct partition,
+    /// numbered from zero, of one of the topics, the same partition number on
+    /// two of them included. Each refusal names its cause.
     #[test]
-    fn a_list_is_only_on_its_topics() {
+    fn an_assignment_is_checked_against_its_topics() {
         let list = |entries: &[(&str, i32)]| {
             let mut tpl = TopicPartitionList::new();
             for (topic, partition) in entries {
@@ -813,22 +867,80 @@ mod tests {
             tpl
         };
         let both = ["units", "units-retry"];
-        for (entries, topics, passes) in [
-            (&[][..], &both[..], true),
-            (&[("units", 0), ("units-retry", 0)][..], &both[..], true),
-            (&[("units", 0), ("units", 1)][..], &both[..], true),
-            (&[("units", 0), ("units", 0)][..], &both[..], false),
-            (&[("other", 0)][..], &both[..], false),
-            (&[("units", 0), ("other", 0)][..], &both[..], false),
-            (&[("units", 0), ("units-retry", 0)][..], &both[..1], false),
-            (&[("units", 0)][..], &both[..1], true),
+        for (entries, topics, expected) in [
+            (&[][..], &both[..], Ok(())),
+            (&[("units", 0), ("units-retry", 0)][..], &both[..], Ok(())),
+            (&[("units", 0), ("units", 1)][..], &both[..], Ok(())),
+            (&[("units", 0)][..], &both[..1], Ok(())),
+            (
+                &[("units", 0), ("units", 0)][..],
+                &both[..],
+                Err(Refused::Repeated(0)),
+            ),
+            (&[("other", 0)][..], &both[..], Err(Refused::Topic)),
+            (
+                &[("units", 0), ("other", 0)][..],
+                &both[..],
+                Err(Refused::Topic),
+            ),
+            (
+                &[("units", 0), ("units-retry", 0)][..],
+                &both[..1],
+                Err(Refused::Topic),
+            ),
+            (&[("units", -1)][..], &both[..], Err(Refused::Negative(-1))),
+            (
+                &[("units", -1), ("units", 0)][..],
+                &both[..],
+                Err(Refused::Negative(-1)),
+            ),
         ] {
             assert_eq!(
-                only_on_topics(&list(entries), topics),
-                passes,
+                check_assignment(&list(entries), topics),
+                expected,
                 "{entries:?} on {topics:?}"
             );
         }
+    }
+
+    /// An assignment of [`MAX_ASSIGNED`] partitions passes and one more is
+    /// refused before any element is read.
+    #[test]
+    fn an_assignment_above_the_cap_is_refused() {
+        let mut tpl = TopicPartitionList::new();
+        tpl.add_partition_range("units", 0, i32::try_from(MAX_ASSIGNED).unwrap() - 1);
+        assert_eq!(check_assignment(&tpl, &["units"]), Ok(()));
+        tpl.add_partition("other", 0);
+        assert_eq!(
+            check_assignment(&tpl, &["units"]),
+            Err(Refused::Count(MAX_ASSIGNED + 1))
+        );
+    }
+
+    /// Each refusal's reason names its cause, and a topic refusal the topics
+    /// read.
+    #[test]
+    fn each_refusal_names_its_cause() {
+        assert_eq!(
+            Refused::Count(10_001).reason(&["orders"]),
+            "the group assigned 10001 partitions to one consumer, above the limit of 10000"
+        );
+        assert_eq!(
+            Refused::Topic.reason(&["orders"]),
+            "the group offered a partition of a topic other than `orders`"
+        );
+        assert_eq!(
+            Refused::Topic.reason(&["units", "units-retry"]),
+            "the group offered a partition of a topic other than `units` or `units-retry`"
+        );
+        assert_eq!(
+            Refused::Negative(-1).reason(&["orders"]),
+            "the group assigned partition -1, below zero"
+        );
+        assert_eq!(
+            Refused::Repeated(3).reason(&["orders"]),
+            "the group assigned partition 3 twice"
+        );
     }
 
     /// A topic name that is not UTF-8 is refused, with no read of the name
@@ -840,7 +952,10 @@ mod tests {
         unsafe {
             rdkafka::bindings::rd_kafka_topic_partition_list_add(tpl.ptr(), c"\xff".as_ptr(), 0);
         }
-        assert!(!only_on_topics(&tpl, &["units", "units-retry"]));
+        assert_eq!(
+            check_assignment(&tpl, &["units", "units-retry"]),
+            Err(Refused::Topic)
+        );
     }
 
     /// A value whose drop waits until it is released, or for `HANG`.

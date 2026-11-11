@@ -23,6 +23,11 @@ spate-test = "0.4"
 pipelines against (see [Testing pipelines](../03-guides/testing-pipelines.mdx)
 and the [memory connector](../04-connectors/memory.mdx)).
 
+A production build takes its release profile and its allocator from your own
+crate.
+[Build the binary for throughput](../05-deployment/tuning.mdx#build-the-binary-for-throughput)
+shows what to set.
+
 ## Feature matrix
 
 The default feature set is empty. A bare `spate` gives you the full engine

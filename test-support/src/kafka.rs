@@ -26,8 +26,15 @@ pub const BROKER_FROM_INSIDE: &str = "localhost:9093";
 /// The container port Apache Kafka's KRaft controllers reach each other on.
 const CONTROLLER_PORT: u16 = 9094;
 
-/// The container port Redpanda nodes reach each other on.
-const REDPANDA_RPC_PORT: u16 = 33145;
+/// The container port Redpanda nodes reach each other on. It sits below
+/// Linux's default ephemeral range, 32768 to 60999, so no socket the
+/// container opens with a kernel-chosen port can take it before the node
+/// listens.
+const REDPANDA_RPC_PORT: u16 = 9095;
+const _: () = assert!(
+    REDPANDA_RPC_PORT < 32_768,
+    "REDPANDA_RPC_PORT is inside the ephemeral range"
+);
 
 /// How many nodes a [`KafkaCluster`] runs. Node ids run from 1 to this.
 pub const CLUSTER_NODES: i32 = 3;
@@ -288,8 +295,7 @@ impl KafkaBroker {
                         (
                             format!("rpk redpanda config set redpanda.node_id {} && ", m.node),
                             format!(
-                                "--seeds {seeds} --rpc-addr 0.0.0.0:{REDPANDA_RPC_PORT} \
-                                 --advertise-rpc-addr {}:{REDPANDA_RPC_PORT} ",
+                                "--seeds {seeds} --advertise-rpc-addr {}:{REDPANDA_RPC_PORT} ",
                                 m.host()
                             ),
                         )
@@ -297,7 +303,7 @@ impl KafkaBroker {
                 );
                 format!(
                     "{node_id}exec rpk redpanda start --mode dev-container --smp 1 --memory 1G \
-                     --overprovisioned {cluster}\
+                     --overprovisioned --rpc-addr 0.0.0.0:{REDPANDA_RPC_PORT} {cluster}\
                      --kafka-addr PLAINTEXT://0.0.0.0:9092,BROKER://0.0.0.0:9093 \
                      --advertise-kafka-addr PLAINTEXT://{client},BROKER://{inside}\n"
                 )
@@ -557,9 +563,46 @@ impl KafkaCluster {
             })
     }
 
+    /// The first node whose container has stopped, named with its exit code
+    /// and the last lines of its log, or `None` while every node runs. A node
+    /// [`KafkaCluster::stop`] stopped counts, so a caller asks while every
+    /// node should be running. A node whose state the runtime cannot report
+    /// counts as running.
+    #[must_use]
+    pub fn exited(&self) -> Option<String> {
+        (1..=CLUSTER_NODES).find_map(|node| {
+            let container = self.node(node);
+            if container.is_running().unwrap_or(true) {
+                return None;
+            }
+            let log = match self.broker {
+                Broker::Apache => container.stdout_to_vec(),
+                Broker::Redpanda => container.stderr_to_vec(),
+            };
+            Some(exited_message(
+                self.broker,
+                node,
+                container.exit_code().ok().flatten(),
+                &log.unwrap_or_default(),
+            ))
+        })
+    }
+
     fn node(&self, node: i32) -> &Container<KafkaBroker> {
         &self.nodes[node_index(node)]
     }
+}
+
+/// How many of an exited node's last log lines [`KafkaCluster::exited`] keeps.
+const EXIT_LOG_LINES: usize = 20;
+
+/// What [`KafkaCluster::exited`] says of node `node`.
+fn exited_message(broker: Broker, node: i32, code: Option<i64>, log: &[u8]) -> String {
+    let log = String::from_utf8_lossy(log);
+    let lines = log.lines().collect::<Vec<_>>();
+    let tail = lines[lines.len().saturating_sub(EXIT_LOG_LINES)..].join("\n");
+    let code = code.map_or_else(|| "no exit code".to_owned(), |c| format!("exit code {c}"));
+    format!("{broker} node {node} exited with {code}; its last log lines:\n{tail}")
 }
 
 /// Where node `node` sits in [`KafkaCluster`]'s nodes.
@@ -633,7 +676,7 @@ mod tests {
     }
 
     const REDPANDA_START: &str = "exec rpk redpanda start --mode dev-container --smp 1 --memory 1G --overprovisioned \
-         --kafka-addr PLAINTEXT://0.0.0.0:9092,BROKER://0.0.0.0:9093 \
+         --rpc-addr 0.0.0.0:9095 --kafka-addr PLAINTEXT://0.0.0.0:9092,BROKER://0.0.0.0:9093 \
          --advertise-kafka-addr PLAINTEXT://ADDRESS,BROKER://localhost:9093\n";
 
     /// A client on the host is advertised the port mapped to [`KAFKA_PORT`],
@@ -733,10 +776,29 @@ mod tests {
             node_two(redpanda()).start_script(31092),
             "rpk redpanda config set redpanda.node_id 2 && \
              exec rpk redpanda start --mode dev-container --smp 1 --memory 1G --overprovisioned \
-             --seeds net-k1:33145,net-k2:33145,net-k3:33145 \
-             --rpc-addr 0.0.0.0:33145 --advertise-rpc-addr net-k2:33145 \
+             --rpc-addr 0.0.0.0:9095 --seeds net-k1:9095,net-k2:9095,net-k3:9095 \
+             --advertise-rpc-addr net-k2:9095 \
              --kafka-addr PLAINTEXT://0.0.0.0:9092,BROKER://0.0.0.0:9093 \
              --advertise-kafka-addr PLAINTEXT://127.0.0.1:40002,BROKER://net-k2:9093\n"
+        );
+    }
+
+    /// An exited node is named with its exit code and its last twenty log
+    /// lines.
+    #[test]
+    fn an_exited_node_names_itself_and_its_last_log_lines() {
+        let log = (1..=25).map(|n| format!("line {n}\n")).collect::<String>();
+        let tail = (6..=25)
+            .map(|n| format!("line {n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(
+            exited_message(Broker::Redpanda, 2, Some(1), log.as_bytes()),
+            format!("Redpanda node 2 exited with exit code 1; its last log lines:\n{tail}")
+        );
+        assert_eq!(
+            exited_message(Broker::Apache, 3, None, b"only line\n"),
+            "Apache Kafka node 3 exited with no exit code; its last log lines:\nonly line"
         );
     }
 

@@ -72,6 +72,7 @@ fn a_rolling_restart_moves_leaders_and_loses_nothing() {
 
         h.start_broker(node);
         wait_until(DEADLINE, "the replicas to catch up", || {
+            h.assert_brokers_running();
             h.partition_states(&params.topic)
                 .is_some_and(|states| states.iter().all(|p| p.in_sync == IN_SYNC))
         });

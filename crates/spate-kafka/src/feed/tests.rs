@@ -5104,8 +5104,7 @@ mod cluster {
         slow(&cluster);
         let (tx, rx) = mpsc::channel();
         let returned = returns_within(HANG, move || {
-            let warned =
-                spate_test::capture_logs(tracing::Level::WARN, move || consumer::run(d));
+            let warned = spate_test::capture_logs(tracing::Level::WARN, move || consumer::run(d));
             let _ = tx.send(warned);
         });
         if !returned {

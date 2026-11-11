@@ -258,7 +258,7 @@ fn record_of<'a>(
 /// attempt partition.
 #[derive(Debug)]
 pub(crate) struct Ledger {
-    /// Per partition, one past the last offset read.
+    /// Per partition, one past the last offset read or passed.
     next: Vec<Option<i64>>,
     counts: FastMap<Box<[u8]>, u32>,
     /// How many waits on the ledger's condvar the gate has begun, counted
@@ -267,7 +267,8 @@ pub(crate) struct Ledger {
     pub(crate) gate_waits: usize,
 }
 
-/// The ledger and the condvar the follower notifies after each record.
+/// The ledger and the condvar the follower notifies after each record and
+/// each read of its positions.
 pub(crate) type SharedLedger = Arc<(Mutex<Ledger>, Condvar)>;
 
 /// Lock the ledger, whatever a panicking holder left: each `apply` leaves
@@ -286,12 +287,16 @@ impl Ledger {
         }
     }
 
-    /// Take in the record at `offset` of `partition`.
-    pub(crate) fn apply(&mut self, partition: i32, offset: i64, identity: &[u8], entry: Entry) {
-        if let Some(next) = usize::try_from(partition)
+    /// `partition`'s place in `next`, `None` for a partition the topic lacks.
+    fn slot(&mut self, partition: i32) -> Option<&mut Option<i64>> {
+        usize::try_from(partition)
             .ok()
             .and_then(|p| self.next.get_mut(p))
-        {
+    }
+
+    /// Take in the record at `offset` of `partition`.
+    pub(crate) fn apply(&mut self, partition: i32, offset: i64, identity: &[u8], entry: Entry) {
+        if let Some(next) = self.slot(partition) {
             *next = Some(offset + 1);
         }
         match entry {
@@ -307,10 +312,7 @@ impl Ledger {
     /// Take in that every offset of `partition` below `position` has been
     /// read or holds no record. A position behind what was read moves nothing.
     pub(crate) fn advance_to(&mut self, partition: i32, position: i64) {
-        if let Some(next) = usize::try_from(partition)
-            .ok()
-            .and_then(|p| self.next.get_mut(p))
-        {
+        if let Some(next) = self.slot(partition) {
             *next = (*next).max(Some(position));
         }
     }
@@ -320,8 +322,8 @@ impl Ledger {
         self.counts.get(identity).copied().unwrap_or(0)
     }
 
-    /// One past the last offset of `partition` read, `None` before the
-    /// first.
+    /// One past the last offset of `partition` read or passed, `None`
+    /// before the first.
     pub(crate) fn read_to(&self, partition: i32) -> Option<i64> {
         usize::try_from(partition)
             .ok()

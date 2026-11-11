@@ -26,6 +26,11 @@ const CLOSING: &str = "Closing consumer";
 /// revocation.
 const ANSWERED: &str = "received op ASSIGN in state up (join-state wait-unassign-call)";
 
+/// librdkafka's line as the group answers the member's leave. A member that
+/// rejoins after the `unassign` holds its leave behind the join, and the leave
+/// times out instead.
+const LEFT: &str = "LeaveGroup response received";
+
 /// A log writer that keeps the lines the feed's consumer thread writes, and
 /// holds that thread at its first [`ACCEPTED`] line until the test releases
 /// it.
@@ -91,7 +96,8 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Hold {
 }
 
 /// Pins that the feed's drop answers a revocation queued after the consumer
-/// thread's last poll before the consumer's close starts, and returns. Left
+/// thread's last poll before the consumer's close starts, that the member
+/// then leaves the group without rejoining, and that the drop returns. Left
 /// for the close, the revocation of a member that holds no partition can meet
 /// a terminated group, and its `unassign` then never returns. The test leads
 /// the group to give the feed's member nothing, and holds the consumer thread
@@ -183,6 +189,11 @@ fn the_drop_answers_a_revocation_queued_after_the_last_poll() {
     assert!(
         answered.is_some_and(|a| closing.is_some_and(|c| a < c)),
         "the revocation was not answered before the close: {:#?}",
+        hold.lines.lock().unwrap()
+    );
+    assert!(
+        hold.first(LEFT).is_some(),
+        "the group did not answer the member's leave: {:#?}",
         hold.lines.lock().unwrap()
     );
     drop(joiner);

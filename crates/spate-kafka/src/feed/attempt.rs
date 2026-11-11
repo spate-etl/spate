@@ -358,7 +358,10 @@ pub(crate) fn lister(config: &KafkaFeedConfig) -> Result<Lister, ConnectError> {
         .base(crate::security::openssl_env_overrides())
         .create(&config.client(FeedRole::Follower), SourceHooks::default())
         .map_err(|reason| {
-            ConnectError::refused(NAME, format!("creating the gate's attempt reader: {reason}"))
+            ConnectError::refused(
+                NAME,
+                format!("creating the gate's attempt reader: {reason}"),
+            )
         })
 }
 

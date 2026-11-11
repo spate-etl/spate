@@ -439,6 +439,7 @@ mod tests {
     use crate::context::SourceHooks;
     use crate::feed::KafkaFeed;
     use crate::feed::tests::core;
+    use crate::testutil::mock::MockKafka;
     use spate_core::hash::FastMap;
     use spate_test::HANG;
     use std::sync::Mutex;
@@ -866,7 +867,6 @@ mod tests {
     /// committed-offset read fails the read, naming the partition.
     #[test]
     fn a_partition_error_in_a_committed_read_fails_it() {
-        use crate::testutil::mock::MockKafka;
         let cluster = MockKafka::new();
         cluster.create_topic("work", 1, 1).expect("create topic");
         let consumer = raw(
@@ -886,7 +886,6 @@ mod tests {
     /// through a serve.
     #[test]
     fn serving_the_depth_client_drains_its_events() {
-        use crate::testutil::mock::MockKafka;
         use rdkafka::consumer::Consumer as _;
         let cluster = MockKafka::new();
         let consumer = raw(
@@ -923,7 +922,6 @@ mod tests {
     /// drained.
     #[test]
     fn a_topic_reporting_no_partitions_fails_the_read() {
-        use crate::testutil::mock::MockKafka;
         use rdkafka::types::RDKafkaRespErr;
         let cluster = MockKafka::new();
         cluster.create_topic("dead", 1, 1).expect("create topic");
@@ -1059,9 +1057,7 @@ mod tests {
     }
 
     /// A feed connected on `cluster`, and the runtime its clients use.
-    fn connected(
-        cluster: &crate::testutil::mock::MockKafka,
-    ) -> (KafkaFeed, tokio::runtime::Runtime) {
+    fn connected(cluster: &MockKafka) -> (KafkaFeed, tokio::runtime::Runtime) {
         for (topic, partitions) in [
             ("units", 1),
             ("units-retry", 1),
@@ -1090,7 +1086,7 @@ mod tests {
     /// returns: its share of the feed's core is gone. Regression for #1761.
     #[test]
     fn the_depth_thread_ends_before_the_feed_s_drop_returns() {
-        let cluster = crate::testutil::mock::MockKafka::new();
+        let cluster = MockKafka::new();
         let (feed, _io) = connected(&cluster);
         let core = Arc::clone(&feed.core);
         drop(feed);
@@ -1111,7 +1107,7 @@ mod tests {
         use rdkafka::types::RDKafkaApiKey;
         use spate_core::feed::Feed as _;
         use spate_test::{HANG, wait_until};
-        let cluster = crate::testutil::mock::MockKafka::new();
+        let cluster = MockKafka::new();
         cluster.track_requests();
         let (feed, _io) = connected(&cluster);
         // The group member fetches its committed offsets at assignment, and
@@ -1164,7 +1160,6 @@ mod tests {
     /// topic lacks failing, naming the kind of read.
     #[test]
     fn the_brokers_read_each_partition_of_a_topic() {
-        use crate::testutil::mock::MockKafka;
         use rdkafka::producer::{BaseProducer, BaseRecord, Producer as _};
         let cluster = MockKafka::new();
         cluster.create_topic("work", 2, 1).expect("create topic");
@@ -1229,7 +1224,6 @@ mod tests {
     /// committed and end offset reads: both are Fatal.
     #[test]
     fn a_broker_refusing_an_offset_read_on_authorization_fails_it_as_fatal() {
-        use crate::testutil::mock::MockKafka;
         use rdkafka::types::{RDKafkaApiKey, RDKafkaRespErr};
         let cluster = MockKafka::new();
         cluster.create_topic("work", 1, 1).expect("create topic");

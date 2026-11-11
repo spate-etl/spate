@@ -4,9 +4,10 @@ description: "Splitting one stream across several typed sinks, each with its own
 
 # Multi-sink split
 
-A pipeline can write to **more than one destination**, routing each record to
-exactly one of several typed sinks, each with its own schema, encoder, router,
-and batch/linger tuning. Where [sink sharding](05-sink-sharding.mdx) fans one
+A pipeline can write to **more than one destination**, routing each record
+among several typed sinks, each with its own schema, encoder, router, and
+batch/linger tuning. A record usually goes to one of them. The routing closure
+may also send it to several, or to none. Where [sink sharding](05-sink-sharding.mdx) fans one
 destination's writes across a cluster, the **split terminal** fans a
 heterogeneous stream across *different destinations*: one per record kind, so
 each is laid out and indexed for the shape of the records it holds.
@@ -24,7 +25,7 @@ write sizing under its own configuration.
 Each branch is an ordinary sink, the same route → encode → per-shard queue →
 worker path as a single `.sink(...)`, one per destination. The addition is
 the **classifier**: a single closure that inspects each record and dispatches it
-to one branch. Classification and the (per-branch, differently-typed) row
+to a branch, with one `emit` call per branch the record belongs in. Classification and the (per-branch, differently-typed) row
 extraction are the *same* `match` arm, so there is no double-dispatch.
 
 ## The routing DSL

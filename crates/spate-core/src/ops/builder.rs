@@ -513,9 +513,10 @@ impl<DF: RecFamily, CurF: RecFamily, D, P> ChainBuilder<DF, CurF, D, P> {
         }
     }
 
-    /// Terminate the chain into a **split sink**. Each record is routed to
-    /// exactly one of several typed sink branches (each its own
-    /// table/schema/encoder), declared with [`SplitBuilder::add`] and
+    /// Terminate the chain into a **split sink**. Each record is routed
+    /// among several typed sink branches (each its own
+    /// table/schema/encoder), to as many of them as the routing closure
+    /// emits it to. The branches are declared with [`SplitBuilder::add`] and
     /// dispatched by the closure passed to [`SplitBuilder::route`]. Each
     /// branch's chunking comes from its own
     /// [`SplitTarget`](crate::ops::SplitTarget) (resolved from that sink's
@@ -777,9 +778,10 @@ impl<DF: RecFamily, CurF: RecFamily, D, P> SplitBuilder<DF, CurF, D, P> {
     }
 
     /// Supply the routing closure (classify + extract per record in one
-    /// `match`) and finish the split. The closure emits each record to exactly
-    /// one branch via [`SplitEmitter::emit`]; emitting to none invokes the
-    /// `unmatched` policy from [`ChainBuilder::split`].
+    /// `match`) and finish the split. The closure emits each record with one
+    /// [`SplitEmitter::emit`] call per branch it belongs in, usually one;
+    /// emitting to none invokes the `unmatched` policy from
+    /// [`ChainBuilder::split`].
     #[must_use]
     pub fn route<G>(self, route: G) -> RoutedSplit<DF, CurF, D, P, G>
     where

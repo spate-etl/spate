@@ -124,10 +124,9 @@ pub const LONGEST_DEADLINE: Duration = Duration::from_secs(365 * 24 * 60 * 60);
 /// The instant `after` past `at`, with `after` capped at
 /// [`LONGEST_DEADLINE`].
 ///
-/// `Instant + Duration` panics when the sum leaves the clock's range, so
-/// every deadline built from a caller's duration goes through this. A span
-/// past a year reads as a year, which no deadline here means literally.
-/// It serves `std::time::Instant` and `tokio::time::Instant` alike.
+/// `Instant + Duration` panics when the sum leaves the clock's range; the cap
+/// keeps it inside, and a span past a year reads as a year. It serves
+/// `std::time::Instant` and `tokio::time::Instant` alike.
 ///
 /// # Panics
 ///

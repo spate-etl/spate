@@ -210,16 +210,32 @@ impl BrokerTotals {
 /// own totals is below them. A broker that is being dropped can stay in the
 /// snapshot beside its replacement under the same node id, and each then
 /// keeps its own totals.
+///
+/// A snapshot older than the one before it adds nothing. Two threads can
+/// serve one client's statistics, and a snapshot taken first can then be
+/// translated second, where its lower totals would read as every broker
+/// restarting.
 #[derive(Debug, Default)]
 pub(crate) struct BrokerGrowth {
     /// Node id and totals by entry name.
     last: FastMap<String, (i32, BrokerTotals)>,
+    /// The `ts` of the newest snapshot translated, on librdkafka's monotonic
+    /// clock.
+    newest: i64,
 }
 
 impl BrokerGrowth {
     /// What each entry's totals grew by since the previous snapshot, in the
     /// order `stats.brokers` yields them.
     pub(crate) fn advance<'a>(&mut self, stats: &'a Statistics) -> Vec<(&'a Broker, BrokerTotals)> {
+        if stats.ts < self.newest {
+            return stats
+                .brokers
+                .values()
+                .map(|broker| (broker, BrokerTotals::default()))
+                .collect();
+        }
+        self.newest = stats.ts;
         let present = |name: &str| stats.brokers.values().any(|b| b.name == name);
         let mut next = FastMap::default();
         let grown = stats
@@ -1147,6 +1163,27 @@ mod tests {
             m.update(&after, "orders", &owned(&[0]));
         });
         assert_summed(&rendered, 6);
+    }
+
+    /// A snapshot translated after a newer one adds nothing, and the next
+    /// snapshot counts from the newer one's totals.
+    #[test]
+    fn a_snapshot_older_than_the_last_adds_nothing() {
+        let rendered = render_metrics(|| {
+            let mut m = KafkaStatsMetrics::new(meter(), false);
+            for (ts, n) in [(2, 10), (1, 4), (3, 12)] {
+                let mut stats = snapshot([counting("k1:9092/1", "learned", 1, n)]);
+                stats.ts = ts;
+                m.update(&stats, "orders", &owned(&[0]));
+            }
+        });
+        assert_summed(&rendered, 12);
+        let needle =
+            format!("spate_kafka_broker_tx_errors_total{{{STD},broker=\"k1:9092/1\"}} 12\n");
+        assert!(
+            rendered.contains(&needle),
+            "missing `{needle}`:\n{rendered}"
+        );
     }
 
     /// A broker being dropped can stay in the snapshot beside its replacement

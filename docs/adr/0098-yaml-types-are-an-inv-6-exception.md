@@ -47,7 +47,7 @@ the argument [ADR-0008](0008-metrics-facade.md) makes for `metrics`.
 Replacing the types would change `ComponentConfig::new` and `ConfigError::Parse`
 for every caller. It would also need a new way to build a body that holds
 settings. At this record's date, `yaml_serde` has published 0.10 releases only,
-so that cost would buy protection from a breaking release that has not happened.
+so the change would guard against a breaking release that has not happened.
 
 Reading the rule as covering trait bounds only would loosen the rule that
 ADR-0008 and [ADR-0089](0089-std-maps-take-seeded-fast-or-quality-aliases.md)

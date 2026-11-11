@@ -10,7 +10,8 @@ use rustls::pki_types::CertificateDer;
 use rustls::pki_types::pem::PemObject;
 use rustls::{CertificateError, ClientConfig, RootCertStore};
 use rustls_native_certs::CertificateResult;
-use spate_core::clock::tokio::{Clock as _, SystemClock, before};
+use spate_core::clock::SyncClock;
+use spate_core::task::{BoundError, ThreadBound};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -101,21 +102,44 @@ pub(crate) fn client(tls: &ClientConfig) -> clickhouse::Client {
     )
 }
 
-/// One startup request to a replica under the `timeouts.startup` bound: its
-/// answer, or the reason it has none. `None` waits with no bound.
-pub(crate) async fn startup_request<T>(
-    limit: Option<Duration>,
-    request: impl Future<Output = Result<T, clickhouse::error::Error>>,
-) -> Result<T, String> {
-    // A bound past the clock's range is no bound.
-    let Some((limit, at)) = limit.and_then(|l| Some((l, SystemClock.now().checked_add(l)?))) else {
-        return request.await.map_err(|e| error_reason(&e));
-    };
-    match before(&SystemClock, at, request).await {
-        Some(answer) => answer.map_err(|e| error_reason(&e)),
-        None => Err(format!(
-            "no answer within {limit:?}, the `timeouts.startup` bound"
-        )),
+/// The `timeouts.startup` bound on each request a sink sends a replica at
+/// startup.
+///
+/// A [`ThreadBound`] times it, so it fires on a runtime built without its
+/// timer.
+#[derive(Clone, Debug)]
+pub(crate) struct StartupBound {
+    /// `None` waits with no bound.
+    pub(crate) limit: Option<Duration>,
+    pub(crate) clock: SyncClock,
+}
+
+impl StartupBound {
+    /// A bound of `limit` on the system clock.
+    pub(crate) fn new(limit: Option<Duration>) -> Self {
+        StartupBound {
+            limit,
+            clock: SyncClock::system(),
+        }
+    }
+
+    /// `request`'s answer, or the reason it has none.
+    pub(crate) async fn request<T>(
+        &self,
+        request: impl Future<Output = Result<T, clickhouse::error::Error>>,
+    ) -> Result<T, String> {
+        let Some(limit) = self.limit else {
+            return request.await.map_err(|e| error_reason(&e));
+        };
+        let bound = ThreadBound::new("spate-clickhouse-startup-bound", limit)
+            .with_clock(self.clock.clone());
+        match bound.run(request).await {
+            Ok(answer) => answer.map_err(|e| error_reason(&e)),
+            Err(BoundError::Elapsed) => Err(format!(
+                "no answer within {limit:?}, the `timeouts.startup` bound"
+            )),
+            Err(other) => Err(other.to_string()),
+        }
     }
 }
 
@@ -145,23 +169,43 @@ mod tests {
     /// A startup request with no answer fails at its bound and names the
     /// key, one that answers passes its answer through, and a bound past the
     /// clock's range, or none, waits for the answer.
-    #[tokio::test(start_paused = true)]
-    async fn a_startup_request_is_bounded() {
+    #[test]
+    fn a_startup_request_is_bounded() {
         type Answer = Result<u8, clickhouse::error::Error>;
-        let silent = std::future::pending::<Answer>();
+        let io = crate::test_startup::runtime();
+        let (clock, given) = crate::test_startup::frozen();
+        let bound = |limit| StartupBound {
+            limit,
+            clock: given.clone(),
+        };
+        let limit = Duration::from_secs(30);
+        let (sent, held) = std::sync::mpsc::channel();
+        let silent = bound(Some(limit));
+        let reason = crate::test_startup::past_the_bound(&io, &clock, limit, &held, async move {
+            silent
+                .request(async move {
+                    let _ = sent.send(());
+                    std::future::pending::<Answer>().await
+                })
+                .await
+        });
         assert_eq!(
-            startup_request(Some(Duration::from_secs(30)), silent).await,
+            reason,
             Err("no answer within 30s, the `timeouts.startup` bound".to_owned())
         );
-        for limit in [Some(Duration::from_secs(30)), Some(Duration::MAX), None] {
+        for limit in [Some(limit), Some(Duration::MAX), None] {
             let answered = std::future::ready::<Answer>(Ok(7));
-            assert_eq!(startup_request(limit, answered).await, Ok(7), "{limit:?}");
+            assert_eq!(
+                io.block_on(bound(limit).request(answered)),
+                Ok(7),
+                "{limit:?}"
+            );
         }
         let refused = std::future::ready::<Answer>(Err(clickhouse::error::Error::Custom(
             "refused".to_owned(),
         )));
-        let reason = startup_request(Some(Duration::from_secs(30)), refused)
-            .await
+        let reason = io
+            .block_on(bound(Some(limit)).request(refused))
             .unwrap_err();
         assert!(reason.ends_with("refused"), "{reason}");
     }

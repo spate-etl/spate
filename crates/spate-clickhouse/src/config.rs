@@ -9,6 +9,7 @@
 
 use crate::codec::{BlockCodec, BlockMethod};
 use crate::distributed::{self, DistributedCheckError};
+use crate::http::StartupBound;
 use crate::router::{DistributedRouter, KeyExtractor};
 use crate::schema::{self, RowSchema, SchemaError};
 use crate::writer::{ClickHouseEndpoint, ClickHouseWriter};
@@ -92,7 +93,7 @@ pub struct ClickHouseSinkConfig {
     /// Per-replica circuit breaker.
     #[serde(default)]
     pub breaker: BreakerConfig,
-    /// Client-side send/end timeouts.
+    /// Client-side timeouts for one insert, and for one startup request.
     #[serde(default)]
     pub timeouts: TimeoutSection,
     /// Transport compression of insert bodies. `lz4` by
@@ -497,6 +498,7 @@ pub struct ClickHouseSinkBuilder {
     shard_weights: Arc<[u32]>,
     pool: SinkPoolConfig,
     distributed: Option<distributed::DistributedCheck>,
+    startup: StartupBound,
 }
 
 impl ClickHouseSinkBuilder {
@@ -544,8 +546,7 @@ impl ClickHouseSinkBuilder {
             table: self.cfg.table.clone(),
             columns: F::COLUMNS,
         };
-        let startup = self.cfg.timeouts.startup;
-        let schema = schema::validate(&check, &self.endpoints, startup).await?;
+        let schema = schema::validate(&check, &self.endpoints, &self.startup).await?;
 
         let insert_sql = insert_statement(&self.cfg.table, F::COLUMNS, self.cfg.format);
         let frame_codec = BlockCodec::factory(self.cfg.compression);
@@ -572,7 +573,8 @@ impl ClickHouseSinkBuilder {
             self.cfg.timeouts.end,
         );
         for endpoint in self.endpoints.iter().flatten() {
-            crate::http::startup_request(startup, writer.check_settings(endpoint))
+            self.startup
+                .request(writer.check_settings(endpoint))
                 .await
                 .map_err(|reason| SchemaError::Settings {
                     url: endpoint.display_url().to_string(),
@@ -790,6 +792,7 @@ fn build_with(
     let probe_endpoints = Arc::new(make_endpoints(&cfg, &tls));
 
     let shard_weights: Arc<[u32]> = cfg.shards.iter().map(|s| s.weight).collect();
+    let startup = StartupBound::new(cfg.timeouts.startup);
     let distributed = cfg.distributed_check.as_ref().map(|section| {
         let url = section
             .endpoint
@@ -803,7 +806,7 @@ fn build_with(
         };
         distributed::DistributedCheck {
             endpoint,
-            startup: cfg.timeouts.startup,
+            startup: startup.clone(),
             cluster: section.cluster.clone(),
             database: cfg.database.clone(),
             table: section.table.clone(),
@@ -831,6 +834,7 @@ fn build_with(
         shard_weights,
         pool,
         distributed,
+        startup,
     })
 }
 
@@ -1076,7 +1080,10 @@ fn insert_statement(table: &str, columns: &[&str], format: Format) -> String {
 mod tests {
     use super::*;
     use crate::ClickHouseRow;
+    use crate::test_startup;
+    use clickhouse::test::{Mock, handlers};
     use serde::Serialize;
+    use spate_core::clock::SyncClock;
     use spate_core::config::ComponentConfig;
     use spate_core::deser::Owned;
     use spate_core::sink::{BreakerConfigError, RetryConfigError, SinkPoolConfigError};
@@ -1383,28 +1390,139 @@ settings: { insert_quorum: "auto" }
         );
     }
 
-    /// A replica that accepts the connection and never answers fails the
+    /// `builder` with its startup bound, and its `distributed_check`'s, on
+    /// `clock`.
+    fn on_clock(mut builder: ClickHouseSinkBuilder, clock: &SyncClock) -> ClickHouseSinkBuilder {
+        builder.startup.clock = clock.clone();
+        if let Some(check) = &mut builder.distributed {
+            check.startup.clock = clock.clone();
+        }
+        builder
+    }
+
+    /// A builder for table `t` on one replica at `url`, with a 7 s startup
+    /// bound on `clock` and `extra` appended to its section.
+    fn bounded_builder(url: &str, clock: &SyncClock, extra: &str) -> ClickHouseSinkBuilder {
+        let section = format!(
+            "table: t\nshards: [{{replicas: [\"{url}\"]}}]\ntimeouts: {{ startup: 7s }}\n{extra}"
+        );
+        on_clock(from_component_config(&component(&section)).unwrap(), clock)
+    }
+
+    const STARTUP: Duration = Duration::from_secs(7);
+    const NO_ANSWER: &str = "no answer within 7s, the `timeouts.startup` bound";
+
+    fn id_column() -> Vec<crate::schema::ColumnRow> {
+        crate::testing::system_columns(&[("id", "UInt64", "")])
+    }
+
+    /// A replica that accepts the schema read and never answers it fails the
     /// build once `timeouts.startup` has passed, with an error naming the
     /// replica and the bound. Regression for #1953.
-    #[tokio::test(start_paused = true)]
-    async fn a_replica_that_never_answers_fails_the_build_at_the_startup_bound() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        // Never accepted: the kernel completes the connection from the
-        // backlog, and nothing reads the request or answers it.
-        let err = from_component_config(&component(&format!(
-            "table: t\nshards: [{{replicas: [\"http://{addr}\"]}}]\ntimeouts: {{ startup: 7s }}"
-        )))
-        .unwrap()
-        .with_row::<spate_core::deser::Owned<IdOnly>>()
-        .await
-        .unwrap_err();
-        drop(listener);
-        let SchemaError::Fetch { url, reason, .. } = err else {
+    #[test]
+    fn a_replica_that_never_answers_fails_the_build_at_the_startup_bound() {
+        let io = test_startup::runtime();
+        let (clock, given) = test_startup::frozen();
+        let _in = io.enter();
+        let mock = Mock::new();
+        let (url, held) = test_startup::silent_after(&io, &mock, 0);
+        let build =
+            bounded_builder(&url, &given, "").with_row::<spate_core::deser::Owned<IdOnly>>();
+        let err = test_startup::past_the_bound(&io, &clock, STARTUP, &held, build).unwrap_err();
+        let SchemaError::Fetch {
+            url: named, reason, ..
+        } = err
+        else {
             panic!("expected the schema read to fail: {err}");
         };
-        assert!(url.contains(&addr.to_string()), "{url}");
-        assert_eq!(reason, "no answer within 7s, the `timeouts.startup` bound");
+        assert_eq!((named, reason.as_str()), (url, NO_ANSWER));
+    }
+
+    /// A replica that answers the schema read and never answers the settings
+    /// check fails the build at the startup bound.
+    #[test]
+    fn a_settings_check_with_no_answer_fails_the_build_at_the_startup_bound() {
+        let io = test_startup::runtime();
+        let (clock, given) = test_startup::frozen();
+        let _in = io.enter();
+        let mock = Mock::new();
+        mock.add(handlers::provide(id_column()));
+        let (url, held) = test_startup::silent_after(&io, &mock, 1);
+        let build =
+            bounded_builder(&url, &given, "").with_row::<spate_core::deser::Owned<IdOnly>>();
+        let err = test_startup::past_the_bound(&io, &clock, STARTUP, &held, build).unwrap_err();
+        let SchemaError::Settings { url: named, reason } = err else {
+            panic!("expected the settings check to fail: {err}");
+        };
+        assert_eq!((named, reason.as_str()), (url, NO_ANSWER));
+    }
+
+    /// Each `distributed_check` query that gets no answer fails the check at
+    /// the startup bound, naming the query.
+    #[test]
+    fn a_distributed_check_query_with_no_answer_fails_at_the_startup_bound() {
+        #[derive(Serialize, clickhouse::Row)]
+        struct ClusterRow {
+            shard_num: u32,
+            shard_weight: u32,
+            host_name: String,
+        }
+        const CHECK: &str = "distributed_check: { cluster: prod, table: t_dist, sharding_key: id }";
+        for (answered, query) in [(0, "cluster topology"), (1, "table engine")] {
+            let io = test_startup::runtime();
+            let (clock, given) = test_startup::frozen();
+            let _in = io.enter();
+            let mock = Mock::new();
+            mock.add(handlers::provide(id_column()));
+            mock.add(handlers::provide::<u8>([1u8]));
+            if answered == 1 {
+                mock.add(handlers::provide([ClusterRow {
+                    shard_num: 1,
+                    shard_weight: 1,
+                    host_name: "127.0.0.1".into(),
+                }]));
+            }
+            let (url, held) = test_startup::silent_after(&io, &mock, 2 + answered);
+            let sink = io
+                .block_on(
+                    bounded_builder(&url, &given, CHECK)
+                        .with_row::<spate_core::deser::Owned<IdOnly>>(),
+                )
+                .expect("the replica answers the build");
+            let checked = async move { sink.validate_distributed().await };
+            let err =
+                test_startup::past_the_bound(&io, &clock, STARTUP, &held, checked).unwrap_err();
+            let DistributedCheckError::Fetch {
+                what,
+                url: named,
+                reason,
+            } = err
+            else {
+                panic!("expected the {query} query to fail: {err}");
+            };
+            assert_eq!((what, named, reason.as_str()), (query, url, NO_ANSWER));
+        }
+    }
+
+    /// A build on a runtime with no timer returns the replica's error.
+    #[test]
+    fn a_build_on_a_runtime_without_a_timer_returns_the_replicas_error() {
+        let refusing = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = refusing.local_addr().unwrap();
+        drop(refusing);
+        let io = tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .build()
+            .unwrap();
+        let section = format!("table: t\nshards: [{{replicas: [\"http://{addr}\"]}}]");
+        let err = io
+            .block_on(
+                from_component_config(&component(&section))
+                    .unwrap()
+                    .with_row::<spate_core::deser::Owned<IdOnly>>(),
+            )
+            .unwrap_err();
+        assert!(matches!(err, SchemaError::Fetch { .. }), "{err}");
     }
 
     /// The startup bound is 30 s unless `timeouts.startup` sets it.

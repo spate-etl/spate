@@ -29,6 +29,7 @@
 pub(crate) mod probe;
 pub(crate) mod typeparse;
 
+use crate::http::StartupBound;
 use crate::native::leaf::{put_leb128, put_string};
 use crate::writer::ClickHouseEndpoint;
 use bytes::{Bytes, BytesMut};
@@ -37,7 +38,6 @@ use probe::{FieldShape, Shape, compatible};
 use serde::{Deserialize, Serialize};
 use std::fmt::Write as _;
 use std::sync::Arc;
-use std::time::Duration;
 use typeparse::ChType;
 
 /// A check against the replicas failed at sink startup.
@@ -62,14 +62,14 @@ pub enum SchemaError {
     #[error("{0}")]
     Mismatch(String),
     /// A replica answered the `SELECT 1` that carries `deduplicate_insert` and
-    /// the `settings` passthrough with an error. The usual cause is a setting
-    /// it refuses, by name or by value, or a constraint pinning
-    /// `deduplicate_insert`.
+    /// the `settings` passthrough with an error, or gave no answer within
+    /// `timeouts.startup`. The usual cause is a setting it refuses, by name
+    /// or by value, or a constraint pinning `deduplicate_insert`.
     #[error("sink.clickhouse: replica {url} failed the settings check: {reason}")]
     Settings {
         /// The replica URL, redacted.
         url: String,
-        /// The server's answer.
+        /// The server's answer, or the bound that passed without one.
         reason: String,
     },
     /// The declared column list cannot produce an `INSERT`. Reachable only
@@ -168,7 +168,7 @@ impl SchemaCheck {
 async fn fetch_columns(
     endpoint: &ClickHouseEndpoint,
     check: &SchemaCheck,
-    startup: Option<Duration>,
+    startup: &StartupBound,
 ) -> Result<Vec<ColumnRow>, SchemaError> {
     let (db, table) = check.target();
     let query = match db {
@@ -188,7 +188,8 @@ async fn fetch_columns(
             )
             .bind(table),
     };
-    crate::http::startup_request(startup, query.fetch_all::<ColumnRow>())
+    startup
+        .request(query.fetch_all::<ColumnRow>())
         .await
         .map_err(|reason| SchemaError::Fetch {
             table: check.display_table(),
@@ -255,7 +256,7 @@ fn aggregate_function_remedy(col: &str, type_: &str) -> Option<String> {
 pub(crate) async fn validate(
     check: &SchemaCheck,
     endpoints: &[Vec<ClickHouseEndpoint>],
-    startup: Option<Duration>,
+    startup: &StartupBound,
 ) -> Result<Arc<RowSchema>, SchemaError> {
     // Every replica must agree: shard-local tables drift independently,
     // and a broken replica should surface now, not at its first rotated
@@ -592,9 +593,13 @@ mod tests {
             table: "t".into(),
             columns: &["id"],
         };
-        let err = validate(&check, &[vec![endpoint_trusting(&other, &url)]], None)
-            .await
-            .unwrap_err();
+        let err = validate(
+            &check,
+            &[vec![endpoint_trusting(&other, &url)]],
+            &StartupBound::new(None),
+        )
+        .await
+        .unwrap_err();
         assert!(matches!(err, SchemaError::Fetch { .. }), "{err:?}");
         assert!(err.to_string().contains("UnknownIssuer"), "{err}");
     }

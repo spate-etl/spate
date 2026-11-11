@@ -54,6 +54,7 @@ testing = []
 
 [dev-dependencies]
 spate-clickhouse = { path = ".", features = ["testing"] }
+spate-core = { workspace = true, features = ["testing"] }
 gungraun = { workspace = true }
 # The codec features serve the stock client the insert tests and benches
 # compare the sink's frames against.

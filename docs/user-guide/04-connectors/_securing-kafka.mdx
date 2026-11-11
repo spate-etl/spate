@@ -118,7 +118,9 @@ of:
 
 A rejection by any broker the source connects to fails it. Any other TLS
 failure, such as a connection reset or closed during the handshake, a
-malformed message or an `internal error` alert (80), is retryable.
+malformed message or an `internal error` alert (80), is retryable. So is a
+connection that drops or times out during the SASL mechanism handshake, before
+the broker has answered the login.
 `startup_timeout` bounds the wait for a first partition assignment, and
 `assignment_timeout` the wait after an assignment is lost. Either ends in a
 `no partition assignment` error that also names the last consumer error, such

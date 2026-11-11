@@ -191,7 +191,9 @@ pub(crate) fn poll_error(
 /// [`KafkaError::MessageConsumptionFatal`] is [`ErrorClass::Fatal`] whatever
 /// its code: librdkafka has failed the client. `text` is the error callback's
 /// text for the same event, when known; a [`tls_rejection`] in it is
-/// [`ErrorClass::Fatal`].
+/// [`ErrorClass::Fatal`], and an `Authentication` error whose text is no
+/// [`rejection`] is [`ErrorClass::Retryable`]. With no text, `Authentication`
+/// is [`ErrorClass::Fatal`].
 ///
 /// [`RDKafkaErrorCode::BadMessage`], a message librdkafka reports as corrupt,
 /// is [`ErrorClass::Fatal`]. librdkafka does not stop on it, and reports it
@@ -212,6 +214,13 @@ pub(crate) fn classify_poll_error(
     match err.rdkafka_error_code() {
         Some(RDKafkaErrorCode::BadMessage) => ErrorClass::Fatal,
         Some(code) if text.is_some_and(|text| tls_rejection(code, text)) => ErrorClass::Fatal,
+        // A SASL handshake that ended on a local transport failure or timeout
+        // refused nothing, and the next connection can pass.
+        Some(code @ RDKafkaErrorCode::Authentication)
+            if text.is_some_and(|text| !rejection(code, text)) =>
+        {
+            ErrorClass::Retryable
+        }
         Some(code) => classify_consumer_error(code, after_startup),
         None => ErrorClass::Retryable,
     }
@@ -462,7 +471,39 @@ mod tests {
         }
     }
 
-    /// A poll error librdkafka marks fatal is fatal, whatever its code.
+    /// A SASL handshake the connection dropped under is retryable, while a
+    /// refused login under the same code, and the code with no text, stay
+    /// fatal. Regression for #1269.
+    #[test]
+    fn a_sasl_handshake_dropped_locally_is_retryable() {
+        const DROPPED: &str = "sasl_ssl://127.0.0.1:9093/bootstrap: SASL SCRAM-SHA-256 mechanism \
+            handshake failed: Local: Broker transport failure: broker's supported mechanisms: \
+            (n/a) (after 0ms in state DOWN)";
+        const REFUSED: &str = "sasl_ssl://127.0.0.1:9093/bootstrap: SASL SCRAM-SHA-256 mechanism \
+            handshake failed: Broker: Unsupported SASL mechanism: broker's supported mechanisms: \
+            PLAIN (after 3ms in state AUTH_HANDSHAKE)";
+        let err = KafkaError::MessageConsumption(C::Authentication);
+        for after_startup in [false, true] {
+            assert_eq!(
+                classify_poll_error(&err, after_startup, Some(DROPPED)),
+                ErrorClass::Retryable
+            );
+            assert_eq!(
+                classify_poll_error(&err, after_startup, Some(REFUSED)),
+                ErrorClass::Fatal
+            );
+            assert_eq!(
+                classify_poll_error(&err, after_startup, None),
+                ErrorClass::Fatal
+            );
+        }
+        let failed = KafkaError::MessageConsumption(C::SaslAuthenticationFailed);
+        assert_eq!(
+            classify_poll_error(&failed, true, Some(DROPPED)),
+            ErrorClass::Fatal
+        );
+    }
+
     /// Regression for #727.
     #[test]
     fn a_fatal_poll_error_is_fatal() {

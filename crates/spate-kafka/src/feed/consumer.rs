@@ -61,7 +61,7 @@ use super::events::Cause;
 use super::inflight::{Position, Tp};
 use super::write::{self, Destination, Finish, Move, Outgoing, Producer, Tombstone, Write};
 use super::{Closing, Core, Gating, LatchOnPanic, READY_CAPACITY, State, Topics};
-use crate::client::{only_on_topics, read_position};
+use crate::client::{close_in_background, only_on_topics, read_position};
 use crate::context::{Intent, SourceContext};
 use rdkafka::consumer::{BaseConsumer, CommitMode, Consumer};
 use rdkafka::error::{KafkaError, RDKafkaErrorCode};
@@ -181,7 +181,13 @@ pub(crate) fn run(mut d: Driver) {
     });
     // The consumer leaves the group as it drops, before the close settles,
     // so a settled close means this worker no longer holds its partitions.
-    drop(d);
+    // After a fatal error librdkafka's group can run on and the drop wait
+    // with no bound, and the close is rejected with that error anyway.
+    if !core.latched() {
+        drop(d);
+    } else if !close_in_background(d) {
+        tracing::warn!("the feed's consumer has not closed; it closes in the background");
+    }
     if let Some(close) = close {
         settle_close(&core, close, flushed, committed);
     }

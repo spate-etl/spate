@@ -1390,13 +1390,8 @@ settings: { insert_quorum: "auto" }
     async fn a_replica_that_never_answers_fails_the_build_at_the_startup_bound() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        // Accepts every connection and keeps it open without a byte.
-        let silent = tokio::spawn(async move {
-            let mut held = Vec::new();
-            while let Ok((connection, _)) = listener.accept().await {
-                held.push(connection);
-            }
-        });
+        // Never accepted: the kernel completes the connection from the
+        // backlog, and nothing reads the request or answers it.
         let err = from_component_config(&component(&format!(
             "table: t\nshards: [{{replicas: [\"http://{addr}\"]}}]\ntimeouts: {{ startup: 7s }}"
         )))
@@ -1404,7 +1399,7 @@ settings: { insert_quorum: "auto" }
         .with_row::<spate_core::deser::Owned<IdOnly>>()
         .await
         .unwrap_err();
-        silent.abort();
+        drop(listener);
         let SchemaError::Fetch { url, reason, .. } = err else {
             panic!("expected the schema read to fail: {err}");
         };

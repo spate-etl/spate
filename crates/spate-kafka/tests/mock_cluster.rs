@@ -4000,3 +4000,53 @@ mod latest_start {
         });
     }
 }
+
+/// A source whose group's JoinGroup is answered `FENCED_INSTANCE_ID` reports
+/// the fatal error, and its drop returns although its member has no
+/// `group.instance.id` and librdkafka's group runs on, so the consumer's
+/// close never does, and it logs that the close goes on in the background.
+/// Regression for #1697.
+#[test]
+fn a_dynamic_member_fenced_on_join_still_drops() {
+    let lines = spate_test::capture_logs(tracing::Level::WARN, || {
+        let cluster = MockKafka::new();
+        cluster.create_topic(TOPIC, 2, 1).expect("create topic");
+        cluster.request_errors(
+            RDKafkaApiKey::JoinGroup,
+            &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_FENCED_INSTANCE_ID],
+        );
+        let cp = Checkpointer::new();
+        let mut source = KafkaSource::new(config(&cluster.bootstrap_servers(), "fenced"));
+        source.open(SourceCtx::new(cp.handle())).expect("open");
+        let mut fatal = None;
+        wait_until(HANG, "the fenced join's fatal error", || {
+            if let Err(e) = source.poll_events(Duration::from_millis(100))
+                && e.class() == ErrorClass::Fatal
+            {
+                fatal = Some(e.to_string());
+            }
+            fatal.is_some()
+        });
+        let fatal = fatal.unwrap();
+        assert!(fatal.contains("FencedInstanceId"), "{fatal}");
+        let (dropped, on_drop) = mpsc::channel();
+        let dropping = spate_core::task::spawn_thread("drop-source", move || {
+            drop(source);
+            let _ = dropped.send(());
+        })
+        .unwrap();
+        if on_drop.recv_timeout(HANG).is_err() {
+            // Joining or dropping either would wait on the same close.
+            std::mem::forget(dropping);
+            std::mem::forget(cluster);
+            panic!("the source's drop has not returned");
+        }
+        dropping.join().unwrap();
+    });
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("they close in the background")),
+        "{lines:#?}"
+    );
+}

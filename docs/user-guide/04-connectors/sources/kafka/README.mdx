@@ -167,10 +167,12 @@ The framework never uses librdkafka's position-based auto-commit. Instead:
   later, and if it does not, its partitions are read again from their last
   committed offset. A failed final commit does not fail the run: the controller
   logs `final commit flush failed; offsets will replay` at `ERROR`.
-- When the source closes, it waits up to 10 seconds for its consumers' close.
-  A close the coordinator has not answered by then goes on in the background,
-  so a stop ends while the coordinator is silent, with or without a commit to
-  make.
+- When the source closes, it waits up to 10 seconds for its consumers' close. A
+  close the coordinator has not answered by then goes on in the background, so a
+  stop ends while the coordinator is silent, with or without a commit to make.
+  After some fatal errors, such as a broker fencing a member, a consumer's close
+  never returns. It goes on in the background the same way, and librdkafka's
+  main thread then holds one core until the process exits.
 - A rebalance *error* (an event that is neither an assignment nor a
   revocation) releases ownership immediately, as the client library's
   contract requires. The lanes still drain, but their offsets can no longer

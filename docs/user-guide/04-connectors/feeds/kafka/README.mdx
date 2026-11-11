@@ -667,7 +667,11 @@ killed before it leaves keeps its partitions until `session.timeout.ms` lapses
 A feed dropped without a close waits up to 1 s for its writes in flight, then
 commits and leaves the group the same way. A feed that stopped on an error
 commits nothing more and leaves the group at once, so every unit since its last
-commit is read again.
+commit is read again. After some fatal errors, such as a broker fencing the
+feed's member, its consumer's close never returns. This includes one raised on
+the last commit of a stop or a close. Dropping the feed waits up to 10 seconds
+for that close, which then goes on in the background, and librdkafka's main
+thread holds one core until the process exits.
 
 Startup refuses a `checkpoint.drain_timeout` of `5s` or less with the Kafka
 feed (see [`checkpoint:`](../../../07-reference/configuration.mdx#checkpoint)).

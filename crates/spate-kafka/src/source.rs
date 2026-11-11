@@ -108,7 +108,9 @@
 //! [`Source::poll_events`] stands against a librdkafka that stops holding
 //! the contract.
 
-use crate::client::{PendingCommit, list_offsets, listed_offset, only_on_topics, send_commit};
+use crate::client::{
+    PendingCommit, close_in_background, list_offsets, listed_offset, only_on_topics, send_commit,
+};
 use crate::config::KafkaSourceConfig;
 use crate::context::{Intent, SourceContext, SourceHooks};
 use crate::error::{StartFailure, classify_start_error};
@@ -129,8 +131,8 @@ use spate_core::hash::FastMap;
 use spate_core::metrics::SourceMetrics;
 use spate_core::record::PartitionId;
 use spate_core::source::{DrainBarrier, LaneId, Source, SourceCtx, SourceEvent};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 /// How long the source holds one consumer's assignment for the others of the
@@ -139,7 +141,7 @@ use std::time::{Duration, Instant};
 const ASSIGN_HOLD: Duration = Duration::from_secs(3);
 
 /// Bound on waiting for the commits sent together, by one accept's starts or
-/// one flush, and on the drop's wait for the consumers' close. An unanswered
+/// one flush. An unanswered
 /// start leaves the offers held for the next attempt, and an unanswered flush
 /// counts as failed.
 const COMMIT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -2065,30 +2067,13 @@ impl Drop for KafkaSource {
                 tracing::warn!(consumer = k, error = %e, "unassign during source teardown failed");
             }
         }
-        // Close can wait on a silent group coordinator with no bound, so it runs
-        // off this thread and the pipeline still ends when its deadline says so.
-        let members = std::mem::take(&mut self.members);
-        let (closed, wait) = mpsc::channel();
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "joining would wait out the silence; the thread ends when close does"
-        )]
-        let spawned = std::thread::Builder::new()
-            .name("spate-kafka-close".to_owned())
-            .spawn(move || {
-                drop(members);
-                let _ = closed.send(());
-            });
-        match spawned {
-            Ok(_) => {
-                if wait.recv_timeout(COMMIT_TIMEOUT).is_err() {
-                    tracing::warn!(
-                        topic = %self.config.topic,
-                        "the group has not answered the close; its consumers close in the background"
-                    );
-                }
-            }
-            Err(e) => tracing::warn!(error = %e, "could not start the consumers' close"),
+        // Close can wait with no bound, on a silent group coordinator or after
+        // a fatal error, so the pipeline still ends when its deadline says so.
+        if !close_in_background(std::mem::take(&mut self.members)) {
+            tracing::warn!(
+                topic = %self.config.topic,
+                "the consumers have not closed; they close in the background"
+            );
         }
     }
 }

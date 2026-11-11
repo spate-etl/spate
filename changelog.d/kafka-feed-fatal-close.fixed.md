@@ -1,0 +1,3 @@
+**Dropping a Kafka source or feed returns after a fatal consumer error** (`spate-kafka`)
+
+Dropping a `KafkaSource` or a `KafkaFeed` whose consumer took a fatal error now returns within 10 seconds, and the consumer's close goes on in the background after that. In previous versions the drop waited for that close, which after some fatal errors never returns, such as a broker answering a member with no `group.instance.id` with `FENCED_INSTANCE_ID`. A pipeline then never returned from `run`. librdkafka's main thread still holds one core until the process exits when the close never returns. No record was lost: nothing is committed after a fatal error, and the next owner reads on from the last commit.

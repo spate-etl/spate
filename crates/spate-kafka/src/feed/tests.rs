@@ -4912,6 +4912,25 @@ mod cluster {
         );
     }
 
+    /// A feed fenced on its join leaves nothing holding its core once the
+    /// drop returns, while its consumer's close goes on in the background:
+    /// the driver drops its producer clone ahead of the consumer, so the
+    /// feed's producer ends with the feed. Regression for #1697.
+    #[test]
+    fn a_fenced_feed_releases_its_core_on_drop() {
+        let cluster = cluster_with(0);
+        cluster.request_errors(
+            RDKafkaApiKey::JoinGroup,
+            &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_FENCED_INSTANCE_ID],
+        );
+        let io = io();
+        let feed = connect(&cluster.bootstrap_servers(), "fenced-core", &io);
+        wait_until(HANG, "the feed latches", || feed.core.latched());
+        let core = Arc::downgrade(&feed.core);
+        drop(feed);
+        wait_until(HANG, "nothing holds the core", || core.strong_count() == 0);
+    }
+
     /// Pins the publisher's start line: its own message, the work topic and
     /// the two values its checks read of it, and no group.
     #[test]

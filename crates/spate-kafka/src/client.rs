@@ -31,8 +31,38 @@ use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::ops::Deref;
-use std::sync::Arc;
+use std::sync::{Arc, mpsc};
 use std::time::Duration;
+
+/// How long dropping a client may hold the thread that drops it.
+pub(crate) const CLOSE_WAIT: Duration = Duration::from_secs(10);
+
+/// Drop `clients` on a thread of their own, and wait up to [`CLOSE_WAIT`]
+/// for the drop to return. Returns whether it returned in time.
+///
+/// A consumer's close can wait with no bound, as on a silent group
+/// coordinator or after a fatal error leaves librdkafka's group running. The
+/// thread then ends when the close does, or with the process.
+pub(crate) fn close_in_background<T: Send + 'static>(clients: T) -> bool {
+    let (closed, wait) = mpsc::channel();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "joining would wait out the close; the thread ends when close does"
+    )]
+    let spawned = std::thread::Builder::new()
+        .name("spate-kafka-close".to_owned())
+        .spawn(move || {
+            drop(clients);
+            let _ = closed.send(());
+        });
+    match spawned {
+        Ok(_) => wait.recv_timeout(CLOSE_WAIT).is_ok(),
+        Err(e) => {
+            tracing::warn!(error = %e, "could not start the clients' close");
+            true
+        }
+    }
+}
 
 /// The longest the committed-offset read before an assignment may take.
 pub(crate) const COMMITTED_LOOKUP_MAX: Duration = Duration::from_secs(10);

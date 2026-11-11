@@ -180,6 +180,28 @@ impl MockKafka {
         self.cluster().apiversion(api_key, min_version, max_version)
     }
 
+    /// Hold broker `broker`'s reply to its next `api` request for `held`.
+    ///
+    /// # Panics
+    ///
+    /// When the cluster refuses the hold.
+    pub(crate) fn hold_next_reply(&self, broker: i32, api: RDKafkaApiKey, held: Duration) {
+        let millis = i32::try_from(held.as_millis()).expect("a hold that fits in i32 ms");
+        // SAFETY: the pointer is valid while `self` lives, and the variadic
+        // reads one (error, round-trip ms) pair, as the count says.
+        let err = unsafe {
+            rdkafka::bindings::rd_kafka_mock_broker_push_request_error_rtts(
+                self.native(),
+                broker,
+                api as i16,
+                1,
+                RDKafkaRespErr::RD_KAFKA_RESP_ERR_NO_ERROR,
+                millis,
+            )
+        };
+        assert_eq!(err, RDKafkaRespErr::RD_KAFKA_RESP_ERR_NO_ERROR);
+    }
+
     /// The cluster's native handle, for the mock calls rdkafka does not wrap. It
     /// is valid while `self` lives.
     pub(crate) fn native(&self) -> *mut RDKafkaMockCluster {

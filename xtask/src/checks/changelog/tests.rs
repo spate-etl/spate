@@ -2536,6 +2536,35 @@ fn a_derived_reference_after_an_html_block_is_set_apart() {
     assert!(links_outside_html(&block, "#12"), "{block}");
 }
 
+/// A derived reference after a fragment's closing table gets a blank line
+/// before it. Without one the table takes the reference as a row.
+#[test]
+fn a_derived_reference_after_a_table_is_set_apart() {
+    let release = Release::new("a_derived_reference_after_a_table_is_set_apart");
+    release.0.write(
+        "changelog.d/a.fixed.md",
+        "A thing with a table.\n\n| a | b |\n| - | - |\n| 1 | 2 |\n",
+    );
+    release.0.commit("core: a table thing (#12)");
+    let block = assemble(release.path(), "nothing..HEAD", None, None, &unanswered).unwrap();
+    assert_eq!(
+        block,
+        "\
+### Fixed
+
+- A thing with a table.
+
+  | a | b |
+  | - | - |
+  | 1 | 2 |
+
+  ([#12])
+
+[#12]: https://github.com/spate-etl/spate/pull/12
+"
+    );
+}
+
 /// The commit form after a closing HTML block gets the same blank line.
 #[test]
 fn a_commit_reference_after_an_html_block_is_set_apart() {

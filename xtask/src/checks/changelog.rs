@@ -1414,9 +1414,10 @@ fn assemble(
                 // Each form goes on its own line. A fragment may end in a
                 // fenced code block, and CommonMark allows only whitespace after
                 // a closing fence, so appending leaves it unclosed and swallows
-                // every section below. An HTML block runs to the next blank
-                // line, so the form after one needs that blank line too.
-                let gap = if ends_in_html_block(&body) {
+                // every section below. A table takes the next line as a row,
+                // and an HTML block that ends at a blank line takes it as
+                // its own, so the form after either gets a blank line first.
+                let gap = if last_block_takes_the_next_line(&body) {
                     "\n\n"
                 } else {
                     "\n"
@@ -1562,13 +1563,14 @@ fn entry_body(text: &str) -> String {
     lines.join("\n")
 }
 
-/// Whether `body`'s last block is an HTML block, which a line appended with no
-/// blank line before it would join.
-fn ends_in_html_block(body: &str) -> bool {
-    use pulldown_cmark::{Event, Parser, TagEnd};
+/// Whether `body`'s last block is a table or an HTML block, which a line
+/// appended with no blank line before it would join. Parsed with tables on,
+/// as the fragment gate parses.
+fn last_block_takes_the_next_line(body: &str) -> bool {
+    use pulldown_cmark::{Event, Options, Parser, TagEnd};
     matches!(
-        Parser::new(body).last(),
-        Some(Event::End(TagEnd::HtmlBlock))
+        Parser::new_ext(body, Options::ENABLE_TABLES).last(),
+        Some(Event::End(TagEnd::HtmlBlock | TagEnd::Table))
     )
 }
 

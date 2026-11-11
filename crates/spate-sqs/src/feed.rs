@@ -1181,7 +1181,7 @@ async fn receive_task(shared: Arc<Shared>) {
                 }
                 shared.progress.notify_one();
             }
-            Err(e) if e.class == ErrorClass::Fatal => {
+            Err(e) if e.class != ErrorClass::Retryable => {
                 shared.set_fatal(&e);
                 return;
             }
@@ -1408,7 +1408,7 @@ async fn extend_chunk(
             }
             Extended::Done
         }
-        Err(e) if e.class == ErrorClass::Fatal => {
+        Err(e) if e.class != ErrorClass::Retryable => {
             shared.set_fatal(&e);
             Extended::Done
         }
@@ -1738,7 +1738,7 @@ where
                 }
                 return Ok(outcome.failed.len());
             }
-            Err(e) if e.class == ErrorClass::Fatal => {
+            Err(e) if e.class != ErrorClass::Retryable => {
                 shared.set_fatal(&e);
                 return Err(());
             }
@@ -1851,7 +1851,7 @@ async fn publish_batch(shared: &Shared, entries: Vec<SendEntry>) -> Result<(), (
                 }
                 return Ok(());
             }
-            Err(e) if e.class == ErrorClass::Fatal => {
+            Err(e) if e.class != ErrorClass::Retryable => {
                 let error = if e.batch_shape {
                     FeedError::new(FeedErrorKind::Refused, e.message.clone())
                 } else if retried {

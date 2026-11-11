@@ -695,8 +695,9 @@ commits nothing more and leaves the group at once, so every unit since its last
 commit is read again. After some fatal errors, such as a broker fencing the
 feed's member, its consumer's close never returns. This includes one raised on
 the last commit of a stop or a close. A close waits for the consumer's close
-until the close's deadline at most, and a feed dropped without a close waits up
-to 10 seconds. The consumer's close then goes on in the background, and
+until the close's deadline at most. A feed dropped without a close waits up to
+10 seconds, and so does one dropped after a close it refused at once because it
+had already stopped. The consumer's close then goes on in the background, and
 librdkafka's main thread holds one core until the process exits.
 
 Startup refuses a `checkpoint.drain_timeout` of `5s` or less with the Kafka

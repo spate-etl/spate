@@ -854,16 +854,16 @@ mod tests {
 
     /// Pins that a close ending inside its wait reports that it ended.
     #[test]
-    fn a_close_off_thread_that_ends_reports_it() {
-        assert!(close_off_thread((), spate_test::HANG));
+    fn a_close_in_background_that_ends_reports_it() {
+        assert!(close_in_background((), spate_test::HANG));
     }
 
     /// Pins that a close still running at the end of its wait reports it, and
     /// is left running.
     #[test]
-    fn a_close_off_thread_still_running_reports_it() {
+    fn a_close_in_background_still_running_reports_it() {
         let (release, held) = mpsc::channel();
-        assert!(!close_off_thread(Held(held), Duration::ZERO));
+        assert!(!close_in_background(Held(held), Duration::ZERO));
         release.send(()).expect("the close is still running");
     }
 

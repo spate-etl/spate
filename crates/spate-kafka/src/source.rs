@@ -5011,7 +5011,7 @@ mod tests {
         assert!(
             warned
                 .iter()
-                .any(|l| l.contains("its consumers close in the background")),
+                .any(|l| l.contains("they close in the background")),
             "{warned:#?}"
         );
         let err = flushed.expect_err("an unanswered commit is a failed one");

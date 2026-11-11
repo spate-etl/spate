@@ -214,6 +214,16 @@ offset is moved past it. Under `latest` a partition the group has been assigned
 has one. A partition with no committed offset under `earliest` stops at the same
 message too.
 
+The source leaves `check.crcs` at librdkafka's default, which is off, unless
+the `rdkafka` passthrough sets it. With it off, librdkafka does not verify a
+record batch's checksum, so a batch whose bytes changed after the checksum was
+computed is delivered as read, and the committed offset moves past it. Set
+`check.crcs: "true"` under `rdkafka` to have the source stop on such a batch as
+described above.
+
+The check covers accidental corruption. A party able to change a batch can also
+write a checksum that matches.
+
 This is the mechanical heart of at-least-once; see
 [Delivery guarantees](../../../02-concepts/02-delivery-guarantees.mdx).
 

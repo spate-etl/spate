@@ -641,9 +641,11 @@ at the cap and moves another copy to the dead-letter topic without reading it.
 The commit can wait up to `session.timeout.ms` for a coordinator and up to
 `socket.timeout.ms` for each attempt once sent, and the leave up to 5 seconds
 for its answer. Either can run past the drain deadline, on the feed's consumer
-thread, and dropping the feed waits for them. A worker killed before it leaves
-keeps its partitions until `session.timeout.ms` lapses (see
-[No lease](#no-lease)).
+thread, and dropping the feed waits for them. Dropping the feed also waits for
+the depth thread, which sends no request once the feed has stopped: a depth
+read in flight ends after the request it is on, 5 seconds at most. A worker
+killed before it leaves keeps its partitions until `session.timeout.ms` lapses
+(see [No lease](#no-lease)).
 
 A feed dropped without a close waits up to 1 s for its writes in flight, then
 commits and leaves the group the same way. A feed that stopped on an error

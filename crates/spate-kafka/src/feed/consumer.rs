@@ -133,6 +133,9 @@ pub(crate) enum CommitWait {
     Held(Duration),
     /// For a commit just sent.
     Sent(Duration),
+    /// For the consumer's close, before a close behind a held commit moves
+    /// to a thread of its own.
+    Leave(Duration),
 }
 
 /// The feed's group member: its consumer, and the commit the group has not

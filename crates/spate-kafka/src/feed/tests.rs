@@ -5142,7 +5142,70 @@ mod cluster {
         clock.advance(Duration::from_secs(11));
         slow(&cluster);
         ends(&cluster, d);
-        assert_eq!(*waits.lock().unwrap(), [CommitWait::Sent(Duration::ZERO)]);
+        assert_eq!(
+            *waits.lock().unwrap(),
+            [
+                CommitWait::Sent(Duration::ZERO),
+                CommitWait::Leave(Duration::ZERO)
+            ]
+        );
+        let err = closing
+            .try_outcome()
+            .expect("settled")
+            .expect_err("unanswered");
+        assert_eq!(err.kind, FeedErrorKind::Retryable, "{err}");
+        drop(feed);
+    }
+
+    /// Pins that the last commit and the consumer's close wait at most one
+    /// group-call bound, 2 s here, however long the close is given.
+    #[test]
+    fn the_last_commit_waits_at_most_the_bound() {
+        let clock = TestClock::frozen();
+        let (cluster, _, core, producer, d) =
+            past_a_marker("close-cap", SyncClock::new(clock.clone()));
+        let waits = Arc::clone(&d.waits);
+        let feed = feed_over(&core, &producer, None);
+        let mut closing = feed.close(Duration::from_secs(10)).expect("a close");
+        slow(&cluster);
+        ends(&cluster, d);
+        let bound = Duration::from_secs(2);
+        assert_eq!(
+            *waits.lock().unwrap(),
+            [CommitWait::Sent(bound), CommitWait::Leave(bound)]
+        );
+        let err = closing
+            .try_outcome()
+            .expect("settled")
+            .expect_err("unanswered");
+        assert_eq!(err.kind, FeedErrorKind::Retryable, "{err}");
+        drop(feed);
+    }
+
+    /// Pins that a close behind a held commit waits for it until the close's
+    /// deadline, where a periodic commit only checks it.
+    #[test]
+    fn a_close_waits_for_the_held_commit() {
+        let clock = TestClock::frozen();
+        let (cluster, _, core, producer, d) =
+            past_a_marker("close-held", SyncClock::new(clock.clone()));
+        slow(&cluster);
+        let (cluster, d, _) = on_driver(cluster, d, "the periodic commit", |d| {
+            d.commit_finished("periodic")
+        });
+        let waits = Arc::clone(&d.waits);
+        let feed = feed_over(&core, &producer, None);
+        let mut closing = feed.close(Duration::from_secs(10)).expect("a close");
+        ends(&cluster, d);
+        let bound = Duration::from_secs(2);
+        assert_eq!(
+            *waits.lock().unwrap(),
+            [
+                CommitWait::Sent(bound),
+                CommitWait::Held(bound),
+                CommitWait::Leave(bound)
+            ]
+        );
         let err = closing
             .try_outcome()
             .expect("settled")

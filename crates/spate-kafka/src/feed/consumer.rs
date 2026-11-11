@@ -184,9 +184,9 @@ pub(crate) fn run(mut d: Driver) {
     // The consumer leaves the group as it drops, before the close settles,
     // so a settled close means this worker no longer holds its partitions.
     // After a fatal error librdkafka's group can run on and the drop wait
-    // with no bound, and the close is rejected with that error anyway. The
-    // client can hold a fatal error the feed has not latched, as one raised
-    // on the last commit after the loop ended.
+    // with no bound, so a close can then settle before the consumer leaves.
+    // The client can hold a fatal error the feed has not latched, as one
+    // raised on the last commit after the loop ended.
     if !core.latched() && d.consumer.client().fatal_error().is_none() {
         drop(d);
     } else {

@@ -2546,6 +2546,65 @@ mod cluster {
         admission.stop();
     }
 
+    /// An assignment naming a partition of a topic other than the work and
+    /// retry topics stops the feed ahead of the assign, which would fetch that
+    /// topic. Regression for #2029.
+    #[test]
+    fn an_assignment_on_another_topic_is_fatal() {
+        let cluster = cluster_with(0);
+        cluster.create_topic("other", 1, 1).unwrap();
+        let brokers = cluster.bootstrap_servers();
+        let list = |entries: &[(&str, i32)]| {
+            let mut tpl = TopicPartitionList::new();
+            for (topic, partition) in entries {
+                tpl.add_partition(topic, *partition);
+            }
+            tpl
+        };
+        // librdkafka crashes or hangs assigning a name past its 512-byte limit.
+        let long = "t".repeat(600);
+        let not_utf8 = TopicPartitionList::new();
+        // SAFETY: `not_utf8` owns a valid list, and librdkafka copies the name.
+        unsafe {
+            rdkafka::bindings::rd_kafka_topic_partition_list_add(
+                not_utf8.ptr(),
+                c"\xff".as_ptr(),
+                0,
+            );
+        }
+        for offered in [
+            list(&[("other", 0)]),
+            list(&[("units", 0), ("other", 0)]),
+            list(&[(&long, 0)]),
+            not_utf8,
+        ] {
+            let group = spate_test::unique_name("another-topic");
+            let (_, core, _producer, mut d) = parts_for(&brokers, &group);
+            d.consumer
+                .context()
+                .intents
+                .lock()
+                .unwrap()
+                .push_back(Intent::Assign(offered));
+            d.serve_intents();
+            let assigned = d.consumer.assignment().unwrap();
+            let Some(error) = core.lock().signal.latched().cloned() else {
+                panic!("the assignment was accepted: {assigned:?}");
+            };
+            assert_eq!(error.kind, FeedErrorKind::Fatal);
+            assert!(
+                error.reason.contains(
+                    "the group offered a partition of a topic other than `units` or \
+                     `units-retry`"
+                ),
+                "{}",
+                error.reason
+            );
+            assert_eq!(assigned.count(), 0, "{assigned:?}");
+            assert_eq!(owns(&d), 0);
+        }
+    }
+
     /// Pins that a thread started on a latched feed ends without committing
     /// an offset finished before the latch.
     #[test]

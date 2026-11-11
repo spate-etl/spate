@@ -26,6 +26,7 @@ use rdkafka::types::RDKafkaRespErr;
 use rdkafka::util::IntoOpaque;
 use rdkafka::{ClientConfig, Offset, TopicPartitionList};
 use spate_core::config::{Denylist, DurationBounds, ReservedKeyError, check_duration, redact};
+use spate_core::hash::FastSet;
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fmt;
@@ -415,6 +416,26 @@ pub(crate) fn read_position<C: ConsumerContext>(
     }
 }
 
+/// Whether every element of `tpl` is a distinct partition of one of `topics`.
+/// It looks each one up through the list, since `elem.topic()` panics on a name
+/// that is not UTF-8, and a group's reply can carry one. Each topic found at a
+/// partition number is a distinct element, so the list passes when they account
+/// for all of it.
+pub(crate) fn only_on_topics(tpl: &TopicPartitionList, topics: &[&str]) -> bool {
+    let mut seen = FastSet::default();
+    let mut found = 0;
+    for elem in tpl.elements() {
+        let partition = elem.partition();
+        if seen.insert(partition) {
+            found += topics
+                .iter()
+                .filter(|topic| tpl.find_partition(topic, partition).is_some())
+                .count();
+        }
+    }
+    found == tpl.count()
+}
+
 /// The last offset no record holds when the position reads `position` and
 /// everything below `covered_to` is accounted for, or `None` when nothing lies
 /// between them. A logical position means no served op has set it, and with
@@ -733,6 +754,48 @@ mod tests {
     use rdkafka::consumer::BaseConsumer;
     use rdkafka::producer::BaseProducer;
     use spate_core::config::ConfigError;
+
+    /// A list passes when each element is a distinct partition of one of the
+    /// topics, the same partition number on two of them included.
+    #[test]
+    fn a_list_is_only_on_its_topics() {
+        let list = |entries: &[(&str, i32)]| {
+            let mut tpl = TopicPartitionList::new();
+            for (topic, partition) in entries {
+                tpl.add_partition(topic, *partition);
+            }
+            tpl
+        };
+        let both = ["units", "units-retry"];
+        for (entries, topics, passes) in [
+            (&[][..], &both[..], true),
+            (&[("units", 0), ("units-retry", 0)][..], &both[..], true),
+            (&[("units", 0), ("units", 1)][..], &both[..], true),
+            (&[("units", 0), ("units", 0)][..], &both[..], false),
+            (&[("other", 0)][..], &both[..], false),
+            (&[("units", 0), ("other", 0)][..], &both[..], false),
+            (&[("units", 0), ("units-retry", 0)][..], &both[..1], false),
+            (&[("units", 0)][..], &both[..1], true),
+        ] {
+            assert_eq!(
+                only_on_topics(&list(entries), topics),
+                passes,
+                "{entries:?} on {topics:?}"
+            );
+        }
+    }
+
+    /// A topic name that is not UTF-8 is refused, with no read of the name
+    /// through `elem.topic()`, which panics on one.
+    #[test]
+    fn a_name_that_is_not_utf8_is_not_on_the_topics() {
+        let tpl = TopicPartitionList::new();
+        // SAFETY: `tpl` owns a valid list, and librdkafka copies the name.
+        unsafe {
+            rdkafka::bindings::rd_kafka_topic_partition_list_add(tpl.ptr(), c"\xff".as_ptr(), 0);
+        }
+        assert!(!only_on_topics(&tpl, &["units", "units-retry"]));
+    }
 
     /// The position rule: only a concrete position past what is covered
     /// retires offsets, and it retires through the offset below the position.

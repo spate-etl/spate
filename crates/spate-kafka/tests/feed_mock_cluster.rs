@@ -18,7 +18,9 @@ use spate_core::feed::ConnectError;
 use spate_core::feed::{DepthOf, Feed, FeedError, FeedErrorKind, FeedMetricsCtx, Receipt, Unit};
 use spate_core::metrics::Meter;
 use spate_core::pipeline::ExitState;
+use spate_core::task::spawn_thread;
 use spate_test::{HANG, WriteOutcome, wait_until};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 use support::feed::{
     ATTEMPT, ATTEMPT_PARTITIONS, BoundedJob, DEAD, FeedClock, ON_MOCK, RETRY, WORK, assert_stalled,
@@ -697,6 +699,50 @@ fn a_stalled_offset_fetch_does_not_exceed_the_max_poll_interval() {
             .any(|e| e.to_lowercase().contains("poll interval")),
         "a member exceeded max.poll.interval.ms: {errors:#?}"
     );
+}
+
+/// A group leader that assigns the feed a partition of another topic stops
+/// the feed before any of that topic's messages is delivered, and the feed
+/// still leaves the group on drop with the assignment unanswered. The test
+/// leads the group, so the feed's consumer receives the bytes a hostile member
+/// would send. Regression for #2029.
+#[test]
+fn an_assignment_on_another_topic_stops_the_feed() {
+    const OTHER: &str = "other";
+    let cluster = cluster(1);
+    cluster.create_topic(OTHER, 1, 1).unwrap();
+    let brokers = cluster.bootstrap_servers();
+    produce_raw(&brokers, OTHER, &[(Some(&b"foreign"[..]), &b"body"[..])]);
+    let group = spate_test::unique_name("another-topic");
+    let leader = cluster.lead_group_with(&group, WORK, |_, _| vec![(OTHER.to_owned(), vec![0])]);
+    let worker = direct(&feed_yaml(&brokers, &group, "", ""));
+
+    let mut error = None;
+    wait_until(HANG, "the feed stops on the assignment", || {
+        match worker.feed.receive(1) {
+            Ok(units) => assert!(units.is_empty(), "delivered from `{OTHER}`: {units:?}"),
+            Err(e) => error = Some(e),
+        }
+        error
+            .as_ref()
+            .is_some_and(|e| e.kind == FeedErrorKind::Fatal)
+    });
+    let error = error.unwrap();
+    assert!(
+        error.reason.contains(&format!(
+            "the group offered a partition of a topic other than `{WORK}` or `{RETRY}`"
+        )),
+        "{error}"
+    );
+    let (dropped, on_drop) = mpsc::channel();
+    let dropping = spawn_thread("drop-feed", move || {
+        drop(worker);
+        let _ = dropped.send(());
+    })
+    .unwrap();
+    on_drop.recv_timeout(HANG).expect("the feed drops");
+    dropping.join().unwrap();
+    drop(leader);
 }
 
 /// Pins that a record batch librdkafka reports as corrupt stops the feed,

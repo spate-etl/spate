@@ -61,7 +61,7 @@ use super::events::Cause;
 use super::inflight::{Position, Tp};
 use super::write::{self, Destination, Finish, Move, Outgoing, Producer, Tombstone, Write};
 use super::{Closing, Core, Gating, LatchOnPanic, READY_CAPACITY, State, Topics};
-use crate::client::read_position;
+use crate::client::{only_on_topics, read_position};
 use crate::context::{Intent, SourceContext};
 use rdkafka::consumer::{BaseConsumer, CommitMode, Consumer};
 use rdkafka::error::{KafkaError, RDKafkaErrorCode};
@@ -356,6 +356,16 @@ impl Driver {
     }
 
     fn assign(&mut self, tpl: &TopicPartitionList) {
+        // Ahead of the lookup and the assign, which would fetch whatever topic
+        // the group named, and of `tps`.
+        let topics = self.core.topics();
+        if !only_on_topics(tpl, &[&topics.work, &topics.retry]) {
+            self.core.latch(&format!(
+                "the group offered a partition of a topic other than `{}` or `{}`",
+                topics.work, topics.retry
+            ));
+            return;
+        }
         let start = if tpl.count() == 0 {
             tpl.clone()
         } else {

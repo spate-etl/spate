@@ -338,6 +338,10 @@ unit again and every unit read after it.
 A rebalance that fails gives up every partition with nothing committed. The
 units read since the last commit are delivered again.
 
+An assignment that names a partition of a topic other than `topic` or
+`retry_topic` stops the feed with a fatal error before the feed reads from it.
+A stock assignor never sends one.
+
 ### Transaction markers
 
 A transaction marker takes an offset and is never delivered, and the group's

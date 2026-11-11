@@ -108,7 +108,7 @@
 //! [`Source::poll_events`] stands against a librdkafka that stops holding
 //! the contract.
 
-use crate::client::{PendingCommit, list_offsets, listed_offset, send_commit};
+use crate::client::{PendingCommit, list_offsets, listed_offset, only_on_topics, send_commit};
 use crate::config::KafkaSourceConfig;
 use crate::context::{Intent, SourceContext, SourceHooks};
 use crate::error::{StartFailure, classify_start_error};
@@ -125,7 +125,7 @@ use spate_core::clock::Stopwatch;
 use spate_core::clock::SyncClock;
 use spate_core::config::SectionPath;
 use spate_core::error::{ErrorClass, SourceError};
-use spate_core::hash::{FastMap, FastSet};
+use spate_core::hash::FastMap;
 use spate_core::metrics::SourceMetrics;
 use spate_core::record::PartitionId;
 use spate_core::source::{DrainBarrier, LaneId, Source, SourceCtx, SourceEvent};
@@ -647,7 +647,7 @@ impl KafkaSource {
         // below compares partition numbers whatever their topic.
         if !offers
             .iter()
-            .all(|(_, tpl)| only_on_topic(tpl, &self.config.topic))
+            .all(|(_, tpl)| only_on_topics(tpl, &[&self.config.topic]))
         {
             return Err(SourceError::fatal(format!(
                 "the group offered a partition of a topic other than `{}`",
@@ -1502,16 +1502,6 @@ pub(crate) fn start_offset(
         (Ok(()), Offset::Invalid) => Some(uncommitted),
         _ => Some(Offset::Stored),
     }
-}
-
-/// Whether every element of `tpl` is a distinct partition of `topic`. It looks
-/// each one up through the list, since `elem.topic()` panics on a name that is
-/// not UTF-8, and a group's reply can carry one.
-fn only_on_topic(tpl: &TopicPartitionList, topic: &str) -> bool {
-    let mut seen = FastSet::default();
-    tpl.elements().iter().all(|elem| {
-        seen.insert(elem.partition()) && tpl.find_partition(topic, elem.partition()).is_some()
-    })
 }
 
 /// The start offset a listing names for one partition: only a concrete offset,

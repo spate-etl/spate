@@ -1,0 +1,3 @@
+**Kafka feed: an assignment on another topic** (`spate-kafka`)
+
+The Kafka feed now stops with a fatal error when its consumer group assigns it a partition of a topic other than `topic` or `retry_topic`, before the consumer is assigned. In previous versions the feed read the other topic with the pipeline's credentials and delivered its messages as units, or wrote them to the dead-letter topic. A topic name that is not UTF-8 panicked the feed's consumer thread, and a name longer than 512 bytes could crash the process or hang the consumer thread inside librdkafka. A group whose members all use a stock assignor never sends such an assignment.

@@ -317,19 +317,23 @@ statistics snapshot, emitted every `statistics_interval` (default `5s`; `0s`
 disables the whole family) and drained on the controller thread, never on the
 record path.
 
-Counters are **absolute-mapped librdkafka totals** scoped to one consumer
-lifetime. With `consumers` above 1, every family carries a `client` label,
-`consumer-0`, `consumer-1` and so on, one series per consumer, so a total across
-the source is a `sum without (client)` in the query. The handles mirror the
-client's cumulative values (idempotent under duplicate delivery;
-`rate()`/`increase()` work natively), and after a process restart the series
+Counters follow librdkafka's cumulative totals over one consumer lifetime, so
+`rate()` and `increase()` work natively. After a process restart the series
 restart from the new consumer's totals, an ordinary counter reset to PromQL.
+With `consumers` above 1, every family carries a `client` label, `consumer-0`,
+`consumer-1` and so on, one series per consumer, so a total across the source
+is a `sum without (client)` in the query.
+
+The message, message byte and rebalance counters are **absolute-mapped**: each
+mirrors the client's own total.
 
 The request, byte, retry, timeout, connect, disconnect and per-broker error
-counters add what each broker's totals grew by between snapshots. A broker that
-a Metadata response drops leaves the snapshot and returns with its totals at
-zero, so these counters keep counting through it. The
-`broker` label is the librdkafka broker name (`host:port/id`), bounded by
+counters add what each broker's totals grew by between snapshots. They do not
+mirror a client total, because a broker that a Metadata response drops leaves
+the snapshot and returns with its totals at zero, and these counters keep
+counting through that.
+
+The `broker` label is the librdkafka broker name (`host:port/id`), bounded by
 cluster topology and always on. The `rtt`/ `throttle` gauges are librdkafka's
 HDR-histogram rolling-window estimates, converted to seconds; they are
 per-broker sampled quantiles and **cannot be aggregated** across brokers or

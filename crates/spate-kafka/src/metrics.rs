@@ -165,6 +165,20 @@ impl BrokerTotals {
         }
     }
 
+    /// Whether no total is below its value in `last`, as holds for one
+    /// entry's totals at a later time.
+    fn reaches(self, last: BrokerTotals) -> bool {
+        self.tx >= last.tx
+            && self.tx_bytes >= last.tx_bytes
+            && self.rx >= last.rx
+            && self.rx_bytes >= last.rx_bytes
+            && self.tx_errors >= last.tx_errors
+            && self.tx_retries >= last.tx_retries
+            && self.req_timeouts >= last.req_timeouts
+            && self.connects >= last.connects
+            && self.disconnects >= last.disconnects
+    }
+
     /// Each total's growth since `last`. A total below its last value
     /// restarted from zero, so its whole value is growth.
     fn since(self, last: BrokerTotals) -> Self {
@@ -183,49 +197,52 @@ impl BrokerTotals {
     }
 }
 
-/// A broker entry's identity from one snapshot to the next. librdkafka keeps
-/// an entry's counters when the broker's address, and with it the entry's
-/// name, changes, so a broker with a node id is known by the id. A `logical`
-/// entry is a connection of its own and is known by its name.
-#[derive(Debug, Hash, PartialEq, Eq)]
-enum BrokerKey {
-    Id(i32),
-    Name(String),
-}
-
-impl BrokerKey {
-    fn of(broker: &Broker) -> Self {
-        if broker.nodeid >= 0 && broker.source != "logical" {
-            BrokerKey::Id(broker.nodeid)
-        } else {
-            BrokerKey::Name(broker.name.clone())
-        }
-    }
-}
-
 /// Each broker entry's totals as of the previous snapshot, to turn the
 /// cumulative totals of the next one into growth.
 ///
-/// An entry absent from a snapshot is forgotten: librdkafka has dropped the
+/// An entry is known by its name, which is unique within a snapshot. An
+/// entry absent from a snapshot is forgotten: librdkafka has dropped the
 /// broker, and adds it back with zeroed counters.
+///
+/// librdkafka also renames an entry in place, counters kept, when a known
+/// node's address changes. A new name therefore takes over the totals of an
+/// entry with its node id that has just left the snapshot, when none of its
+/// own totals is below them. A broker that is being dropped can stay in the
+/// snapshot beside its replacement under the same node id, and each then
+/// keeps its own totals.
 #[derive(Debug, Default)]
 pub(crate) struct BrokerGrowth {
-    last: FastMap<BrokerKey, BrokerTotals>,
+    /// Node id and totals by entry name.
+    last: FastMap<String, (i32, BrokerTotals)>,
 }
 
 impl BrokerGrowth {
     /// What each entry's totals grew by since the previous snapshot, in the
     /// order `stats.brokers` yields them.
     pub(crate) fn advance<'a>(&mut self, stats: &'a Statistics) -> Vec<(&'a Broker, BrokerTotals)> {
+        let present = |name: &str| stats.brokers.values().any(|b| b.name == name);
         let mut next = FastMap::default();
         let grown = stats
             .brokers
             .values()
             .map(|broker| {
-                let key = BrokerKey::of(broker);
                 let now = BrokerTotals::of(broker);
-                let last = self.last.get(&key).copied().unwrap_or_default();
-                next.insert(key, now);
+                let last = match self.last.get(&broker.name) {
+                    Some((_, last)) => *last,
+                    None => self
+                        .last
+                        .iter()
+                        .find(|(name, (id, last))| {
+                            broker.nodeid >= 0
+                                && broker.source != "logical"
+                                && *id == broker.nodeid
+                                && !present(name)
+                                && now.reaches(*last)
+                        })
+                        .map(|(_, (_, last))| *last)
+                        .unwrap_or_default(),
+                };
+                next.insert(broker.name.clone(), (broker.nodeid, now));
                 (broker, now.since(last))
             })
             .collect();
@@ -1124,12 +1141,49 @@ mod tests {
     fn a_renamed_broker_keeps_its_totals() {
         let rendered = render_metrics(|| {
             let mut m = KafkaStatsMetrics::new(meter(), false);
-            let before = snapshot([counting("old:9092/1", "learned", 1, 5)]);
+            let before = snapshot([counting("old:9092/0", "learned", 0, 5)]);
             m.update(&before, "orders", &owned(&[0]));
-            let after = snapshot([counting("new:9092/1", "learned", 1, 6)]);
+            let after = snapshot([counting("new:9092/0", "learned", 0, 6)]);
             m.update(&after, "orders", &owned(&[0]));
         });
         assert_summed(&rendered, 6);
+    }
+
+    /// A broker being dropped can stay in the snapshot beside its replacement
+    /// under one node id. Each keeps its own totals, whatever order the
+    /// snapshot yields them in.
+    #[test]
+    fn two_entries_sharing_a_node_id_keep_their_own_totals() {
+        let rendered = render_metrics(|| {
+            let mut m = KafkaStatsMetrics::new(meter(), false);
+            let leaving = snapshot([counting("old:9092/1", "learned", 1, 100)]);
+            m.update(&leaving, "orders", &owned(&[0]));
+            for n in 1..=20 {
+                let both = snapshot([
+                    counting("old:9092/1", "learned", 1, 100),
+                    counting("new:9092/1", "learned", 1, n),
+                ]);
+                m.update(&both, "orders", &owned(&[0]));
+            }
+        });
+        assert_summed(&rendered, 120);
+    }
+
+    /// A new name under a node id whose entry just left takes over that
+    /// entry's totals only when none of its own is below them. A replacement
+    /// that starts lower counts from zero.
+    #[test]
+    fn a_replacement_under_the_same_node_id_counts_from_zero() {
+        let rendered = render_metrics(|| {
+            let mut m = KafkaStatsMetrics::new(meter(), false);
+            let before = snapshot([counting("old:9092/0", "learned", 0, 5)]);
+            m.update(&before, "orders", &owned(&[0]));
+            let mut replacement = counting("new:9092/0", "learned", 0, 6);
+            replacement.txerrs = 2;
+            m.update(&snapshot([replacement]), "orders", &owned(&[0]));
+        });
+        // Every total of the replacement is new: 5 + 6.
+        assert_summed(&rendered, 11);
     }
 
     /// A logical entry is a connection of its own: it shares no totals with

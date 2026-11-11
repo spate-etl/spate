@@ -23,7 +23,7 @@ use spate_core::error::ErrorClass;
 use spate_core::feed::{Depth, DepthOf, DepthReporter, FeedError, FeedErrorKind};
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// The bound on each metadata and offset request.
 const REQUEST_BOUND: Duration = Duration::from_secs(5);
@@ -37,7 +37,7 @@ const HOLD_READS: u32 = 20;
 /// client's queued events.
 const SERVE_EVERY: Duration = Duration::from_secs(1);
 
-/// How long an idle serve waits for an event.
+/// How long a serve takes the client's events.
 const SERVE_WAIT: Duration = Duration::from_millis(50);
 
 /// One partition of one of the feed's topics.
@@ -57,9 +57,9 @@ pub(crate) trait Offsets {
     /// their order, read in one request.
     fn listed(&self, partitions: &[Partition], at: Offset) -> Result<Vec<i64>, FeedError>;
 
-    /// Serve the client's queued statistics, log lines and errors, waiting
-    /// up to `wait` for one. Returns the Fatal error of a credential or TLS
-    /// rejection the client reported.
+    /// Serve the client's queued statistics, log lines and errors for `wait`.
+    /// Returns the first error among them that retrying cannot fix, such as
+    /// a credential or TLS rejection.
     fn serve(&self, _wait: Duration) -> Option<FeedError> {
         None
     }
@@ -282,7 +282,7 @@ pub(crate) fn run(
         // Requests that follow one another leave no idle serve, and a
         // rejection reaches this client's poll as the read's requests fail on
         // a timeout or a transport error.
-        if let Some(rejected) = offsets.serve(Duration::ZERO) {
+        if let Some(rejected) = offsets.serve(SERVE_WAIT) {
             core.latch(&rejected.reason);
         }
         // A credential or TLS rejection latches the feed, and the depth read
@@ -390,15 +390,21 @@ impl Offsets for Brokers {
     fn serve(&self, wait: Duration) -> Option<FeedError> {
         // The consumer carries a `group.id`, so librdkafka queues its
         // statistics, log lines and errors where only a poll drains them.
-        let error = self.consumer.poll(wait)?.err()?;
-        let code = error.rdkafka_error_code();
-        let text = code.and_then(|code| self.consumer.context().take_error(code));
-        let reason = crate::error::poll_reason("the depth client's poll", &error, text.as_deref());
-        match crate::error::classify_poll_error(&error, true, text.as_deref()) {
-            ErrorClass::Fatal => Some(FeedError::new(FeedErrorKind::Fatal, reason)),
-            _ => {
-                tracing::warn!(error = %reason, "the depth client's poll failed");
-                None
+        let until = Instant::now() + wait;
+        loop {
+            // A poll that waits takes every queued event until its time is
+            // up. One that does not wait returns after a single log line.
+            let left = until.saturating_duration_since(Instant::now());
+            let Err(error) = self.consumer.poll(left)? else {
+                continue;
+            };
+            let code = error.rdkafka_error_code();
+            let text = code.and_then(|code| self.consumer.context().take_error(code));
+            // The error callback has logged the event already.
+            let error =
+                crate::error::poll_error("the depth reader's poll", &error, true, text.as_deref());
+            if error.class() == ErrorClass::Fatal {
+                return Some(FeedError::new(FeedErrorKind::Fatal, error.reason()));
             }
         }
     }
@@ -1196,7 +1202,7 @@ mod tests {
         fn serve(&self, _: Duration) -> Option<FeedError> {
             Some(FeedError::new(
                 FeedErrorKind::Fatal,
-                "the depth client's poll: certificate verify failed",
+                "the depth reader's poll: certificate verify failed",
             ))
         }
     }
@@ -1263,6 +1269,46 @@ mod tests {
         let e = rejected.expect("a rejection");
         assert_eq!(e.kind, FeedErrorKind::Fatal, "{e}");
         assert!(e.reason.contains("Authentication failed"), "{e}");
+    }
+
+    /// The depth client's serve returns a broker certificate the client
+    /// cannot verify as Fatal, which takes the error callback's text.
+    #[cfg(feature = "tls")]
+    #[test]
+    fn serving_the_depth_client_returns_a_rejected_certificate() {
+        let server = spate_test_support::TestCa::new("depth-server-ca");
+        let other = spate_test_support::TestCa::new("depth-other-ca");
+        let dir = tempfile::tempdir().unwrap();
+        let ca = other.write(dir.path()).display().to_string();
+        let io = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let addr = io
+            .block_on(spate_test_support::serve_tls(
+                server.server_config(None),
+                |_| async {},
+            ))
+            .to_string();
+        let consumer = raw(
+            &[
+                ("bootstrap.servers", &addr),
+                ("group.id", "depth-rejected-tls"),
+                ("security.protocol", "ssl"),
+                ("ssl.ca.location", &ca),
+            ],
+            SourceHooks::default(),
+        );
+        let reads = Brokers { consumer };
+        let mut rejected = None;
+        spate_test::wait_until(HANG, "the serve returns the rejection", || {
+            rejected = reads.serve(SERVE_WAIT);
+            rejected.is_some()
+        });
+        let e = rejected.expect("a rejection");
+        assert_eq!(e.kind, FeedErrorKind::Fatal, "{e}");
+        assert!(e.reason.contains("certificate verify failed"), "{e}");
     }
 
     /// Pins that a feed which has latched a Fatal error answers a depth read

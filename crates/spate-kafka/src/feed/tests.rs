@@ -5102,7 +5102,23 @@ mod cluster {
         let feed = feed_over(&core, &producer, None);
         let mut closing = feed.close(Duration::from_secs(10)).expect("a close");
         slow(&cluster);
-        ends(&cluster, d);
+        let (tx, rx) = mpsc::channel();
+        let returned = returns_within(HANG, move || {
+            let warned =
+                spate_test::capture_logs(tracing::Level::WARN, move || consumer::run(d));
+            let _ = tx.send(warned);
+        });
+        if !returned {
+            std::mem::forget(cluster.clone());
+        }
+        assert!(returned, "the consumer thread did not end");
+        let warned = rx.recv().expect("sent");
+        assert!(
+            warned
+                .iter()
+                .any(|l| l.contains("its consumer leaves the group in the background")),
+            "{warned:#?}"
+        );
         let err = closing
             .try_outcome()
             .expect("settled")

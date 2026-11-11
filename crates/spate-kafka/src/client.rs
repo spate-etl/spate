@@ -842,6 +842,30 @@ mod tests {
         assert!(!only_on_topics(&tpl, &["units", "units-retry"]));
     }
 
+    /// A value whose drop waits until it is released, or for `HANG`.
+    struct Held(mpsc::Receiver<()>);
+
+    impl Drop for Held {
+        fn drop(&mut self) {
+            let _ = self.0.recv_timeout(spate_test::HANG);
+        }
+    }
+
+    /// Pins that a close ending inside its wait reports that it ended.
+    #[test]
+    fn a_close_off_thread_that_ends_reports_it() {
+        assert!(close_off_thread((), spate_test::HANG));
+    }
+
+    /// Pins that a close still running at the end of its wait reports it, and
+    /// is left running.
+    #[test]
+    fn a_close_off_thread_still_running_reports_it() {
+        let (release, held) = mpsc::channel();
+        assert!(!close_off_thread(Held(held), Duration::ZERO));
+        release.send(()).expect("the close is still running");
+    }
+
     /// The position rule: only a concrete position past what is covered
     /// retires offsets, and it retires through the offset below the position.
     /// Regression for #1709.

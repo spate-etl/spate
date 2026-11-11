@@ -5004,13 +5004,17 @@ mod tests {
         let (tx, rx) = mpsc::channel();
         crate::testutil::assert_returns(cluster, HANG, "a flush and drop", move || {
             let flushed = source.flush_commits();
-            drop(source);
-            tx.send(flushed).expect("send");
+            let warned = spate_test::capture_logs(tracing::Level::WARN, || drop(source));
+            tx.send((flushed, warned)).expect("send");
         });
-        let err = rx
-            .recv()
-            .expect("flushed")
-            .expect_err("an unanswered commit is a failed one");
+        let (flushed, warned) = rx.recv().expect("flushed");
+        assert!(
+            warned
+                .iter()
+                .any(|l| l.contains("its consumers close in the background")),
+            "{warned:#?}"
+        );
+        let err = flushed.expect_err("an unanswered commit is a failed one");
         assert_eq!(err.class(), ErrorClass::Retryable, "{err}");
         assert!(err.reason().starts_with("sync commit: "), "{err}");
         assert!(err.reason().contains("OperationTimedOut"), "{err}");

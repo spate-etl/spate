@@ -59,24 +59,29 @@ impl DrainBarrier {
     }
 
     /// Block until every party arrived or `timeout` elapsed. Returns
-    /// whether the drain completed.
+    /// whether the drain completed. A `timeout` past what the clock can
+    /// represent waits with no deadline.
     #[must_use]
     pub fn wait(&self, timeout: Duration) -> bool {
         // Real time: a test clock cannot wake the condvar. Callers own the
         // deadline and pass what is left of it.
-        let deadline = SystemClock.now() + timeout;
+        let deadline = SystemClock.now().checked_add(timeout);
         let mut done = self.inner.done.lock().expect("barrier lock");
         while !*done {
-            let now = SystemClock.now();
-            if now >= deadline {
-                return false;
-            }
-            let (guard, _timeout) = self
-                .inner
-                .cv
-                .wait_timeout(done, deadline - now)
-                .expect("barrier lock");
-            done = guard;
+            done = match deadline {
+                None => self.inner.cv.wait(done).expect("barrier lock"),
+                Some(deadline) => {
+                    let left = deadline.saturating_duration_since(SystemClock.now());
+                    if left.is_zero() {
+                        return false;
+                    }
+                    self.inner
+                        .cv
+                        .wait_timeout(done, left)
+                        .expect("barrier lock")
+                        .0
+                }
+            };
         }
         true
     }
@@ -106,6 +111,18 @@ mod tests {
         barrier.arrive();
         assert!(!barrier.wait(Duration::from_millis(50)));
         assert_eq!(barrier.remaining(), 1);
+    }
+
+    /// A bound past the clock's range waits with no deadline. Regression for
+    /// #1844.
+    #[test]
+    #[expect(clippy::disallowed_methods, reason = "the test joins the thread")]
+    fn a_bound_past_the_clock_range_waits_for_the_last_party() {
+        let barrier = DrainBarrier::new(1);
+        let party = barrier.clone();
+        let t = std::thread::spawn(move || party.arrive());
+        assert!(barrier.wait(Duration::MAX));
+        t.join().unwrap();
     }
 
     #[test]

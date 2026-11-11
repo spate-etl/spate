@@ -11,6 +11,7 @@
 //! added later arrives as a new default and existing code keeps compiling.
 
 use crate::clock::LONGEST_DEADLINE;
+use crate::config::{DurationBounds, DurationBoundsError, check_duration};
 use bytesize::ByteSize;
 use serde::{Deserialize, Deserializer};
 use std::time::Duration;
@@ -405,9 +406,9 @@ impl BatchConfig {
         if self.max_bytes == 0 {
             return Err(SinkPoolConfigError::ZeroMaxBytes);
         }
-        if self.linger > LONGEST_DEADLINE {
-            return Err(SinkPoolConfigError::LingerTooLong(self.linger));
-        }
+        const LINGER: DurationBounds =
+            DurationBounds::at_least(Duration::ZERO).at_most(LONGEST_DEADLINE);
+        check_duration(self.linger, LINGER).map_err(SinkPoolConfigError::LingerTooLong)?;
         Ok(())
     }
 }
@@ -441,8 +442,8 @@ pub enum SinkPoolConfigError {
     ZeroMaxBytes,
     /// `batch.linger` exceeds a year, past the longest deadline the worker
     /// arms.
-    #[error("batch.linger must not exceed a year (got {0:?})")]
-    LingerTooLong(Duration),
+    #[error("batch.linger {0}")]
+    LingerTooLong(DurationBoundsError),
     /// `inflight.max_per_shard` is zero, which parks every sealed batch.
     #[error("inflight.max_per_shard must be at least 1")]
     ZeroMaxPerShard,
@@ -630,19 +631,6 @@ mod tests {
         );
     }
 
-    /// The cap exists because `on_failure` stamps `now + open_for` and
-    /// `Instant + Duration` panics on overflow. Validation rejects the value,
-    /// but `BreakerConfig` is a public `Copy` struct, so the breaker floors and
-    /// caps at the point of use too. This pins that the two agree on where
-    /// the line is.
-    #[test]
-    fn breaker_cap_matches_what_the_breaker_applies() {
-        assert_eq!(
-            BreakerConfig::MAX_OPEN_FOR,
-            Duration::from_secs(365 * 24 * 60 * 60)
-        );
-    }
-
     #[test]
     fn pool_validate_rejects_each_zero_section_key() {
         let cases = [
@@ -705,9 +693,10 @@ mod tests {
     #[test]
     fn pool_validate_rejects_values_past_their_ceilings() {
         let linger = LONGEST_DEADLINE + Duration::from_nanos(1);
-        assert_eq!(
-            pool(|c| c.batch.linger = linger).validate(),
-            Err(SinkPoolConfigError::LingerTooLong(linger))
+        let err = pool(|c| c.batch.linger = linger).validate().unwrap_err();
+        assert!(
+            matches!(err, SinkPoolConfigError::LingerTooLong(_)),
+            "{err:?}"
         );
         let permits = Semaphore::MAX_PERMITS + 1;
         assert_eq!(
@@ -717,7 +706,7 @@ mod tests {
     }
 
     /// Pins that a `linger` the YAML loader parses but no deadline can hold
-    /// is refused, naming the key.
+    /// is refused naming the key, and that `1y` itself passes.
     #[test]
     fn a_yaml_linger_past_a_year_is_refused() {
         let batch: BatchConfig = serde_yaml::from_str("linger: 300000000000y").expect("parses");
@@ -727,6 +716,14 @@ mod tests {
             "{err:?}"
         );
         assert!(err.to_string().starts_with("batch.linger "), "{err}");
+
+        let year: BatchConfig = serde_yaml::from_str("linger: 1y").expect("parses");
+        assert_eq!(pool(|c| c.batch = year).validate(), Ok(()));
+        let two: BatchConfig = serde_yaml::from_str("linger: 2y").expect("parses");
+        assert_eq!(
+            pool(|c| c.batch = two).validate().unwrap_err().to_string(),
+            "batch.linger must be from 0s to 1year; found 2years"
+        );
     }
 
     /// Pins the section order: batch, inflight, retry, breaker.

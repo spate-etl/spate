@@ -3200,7 +3200,7 @@ fn sink_errors_metric_counts_each_write_error_under_its_class() {
 async fn drain_counts_the_largest_deadline_as_a_year() {
     let clock = TestClock::frozen();
     let f = one_blocked_write(&clock);
-    let year = Duration::from_secs(365 * 24 * 60 * 60);
+    let year = crate::clock::LONGEST_DEADLINE;
 
     let t0 = clock.now();
     let drain = tokio::spawn(f.pool.drain(Duration::MAX));

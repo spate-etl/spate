@@ -116,10 +116,10 @@ pub fn wall_now() -> SystemTime {
     SystemTime::now()
 }
 
-/// The longest span [`deadline_after`] adds to a clock reading. A reading
-/// plus a year, and a few seconds of grace on top, stays inside `Instant`'s
-/// range.
-pub const LONGEST_DEADLINE: Duration = Duration::from_secs(365 * 24 * 60 * 60);
+/// The longest span [`deadline_after`] adds to a clock reading: a year as a
+/// config file writes it, `1y`, which is 365.25 days. A reading plus a year,
+/// and a few seconds of grace on top, stays inside `Instant`'s range.
+pub const LONGEST_DEADLINE: Duration = Duration::from_secs(31_557_600);
 
 /// The instant `after` past `at`, with `after` capped at
 /// [`LONGEST_DEADLINE`].
@@ -204,6 +204,8 @@ impl Clock for &TestClock {
 
 #[cfg(test)]
 mod tests {
+    use humantime_serde::re::humantime::parse_duration;
+
     use super::*;
 
     /// Pins that a holder's derived `Debug` names the clock field without
@@ -212,6 +214,14 @@ mod tests {
     #[test]
     fn a_sync_clock_debugs_as_its_name() {
         assert_eq!(format!("{:?}", SyncClock::system()), "SyncClock");
+    }
+
+    /// Pins that a ceiling stated as a year accepts `1y` as a config file
+    /// writes it.
+    #[test]
+    fn the_longest_deadline_is_a_config_year() {
+        let year = parse_duration("1y").expect("parses");
+        assert_eq!(LONGEST_DEADLINE, year);
     }
 
     /// Pins the cap's value on both sides, and that a span past the clock's

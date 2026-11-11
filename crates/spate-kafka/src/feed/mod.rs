@@ -1127,9 +1127,9 @@ impl Feed for KafkaFeed {
     /// commits nothing more, and as [`Retryable`](FeedErrorKind::Retryable)
     /// when writes other than the gate's fences were still in flight at the
     /// wait's end or the commit failed; the units those writes or that commit
-    /// would have finished are delivered again. The commit waits for the group's answer until
-    /// `within` ends, and at most a quarter of `max.poll.interval.ms` or 10
-    /// seconds, whichever is less. One left unanswered fails the close, and
+    /// would have finished are delivered again. The commit waits for the
+    /// group's answer until `within` ends, and at most a quarter of
+    /// `max.poll.interval.ms` or 10 seconds, whichever is less. One left unanswered fails the close, and
     /// the consumer leaves the group on a thread of its own, since its close
     /// waits for that commit. With every commit answered, a leave that
     /// outlasts `within` still runs on the consumer thread, and dropping the

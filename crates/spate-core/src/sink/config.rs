@@ -722,7 +722,10 @@ mod tests {
     fn a_yaml_linger_past_a_year_is_refused() {
         let batch: BatchConfig = serde_yaml::from_str("linger: 300000000000y").expect("parses");
         let err = pool(|c| c.batch = batch).validate().unwrap_err();
-        assert!(matches!(err, SinkPoolConfigError::LingerTooLong(_)), "{err:?}");
+        assert!(
+            matches!(err, SinkPoolConfigError::LingerTooLong(_)),
+            "{err:?}"
+        );
         assert!(err.to_string().starts_with("batch.linger "), "{err}");
     }
 

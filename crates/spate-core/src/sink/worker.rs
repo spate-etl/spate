@@ -255,7 +255,9 @@ impl<W: ShardWriter> ShardWorker<W> {
         // batch boxes a single sleep.
         let mut linger: Option<(Instant, Sleep)> = None;
         loop {
-            let linger_at = acc.first_at.map(|t| deadline_after(t, self.cfg.batch.linger));
+            let linger_at = acc
+                .first_at
+                .map(|t| deadline_after(t, self.cfg.batch.linger));
             tokio::select! {
                 biased;
 

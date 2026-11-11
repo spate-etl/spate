@@ -491,6 +491,7 @@ mod silent_coordinator {
 
     use spate_core::checkpoint::Checkpointer;
     use spate_core::error::ErrorClass;
+    use spate_core::pipeline::ExitState;
     use spate_core::source::{Source, SourceCtx, SourceEvent};
     use spate_kafka::{KafkaSource, KafkaSourceConfig};
     use spate_test::HANG;
@@ -729,7 +730,13 @@ mod silent_coordinator {
         proxy.release();
         assert!(silent, "the stop sent no commit");
         let exit = exit.unwrap_or_else(|| panic!("the run had not ended {HANG:?} after its stop"));
-        exit.expect("the run started");
+        let report = exit.expect("the run started");
+        // The final commit timed out, and a failed final commit does not fail the run.
+        assert!(
+            matches!(report.state, ExitState::Completed),
+            "{:?}",
+            report.state
+        );
     }
 
     /// A pipeline ends after its stop with the coordinator silent from a heartbeat

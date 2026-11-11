@@ -235,7 +235,9 @@ pub(crate) enum Write {
     Tombstone(Tombstone),
     /// A fence the gate writes past the end of an attempt partition (see
     /// the `attempt` module). It finishes nothing.
-    Fence { message: Outgoing },
+    Fence {
+        message: Outgoing,
+    },
 }
 
 impl Write {

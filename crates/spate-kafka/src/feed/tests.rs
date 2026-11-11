@@ -5704,17 +5704,17 @@ mod cluster {
                 .unwrap();
             consumer.assign(&tpl).unwrap();
             let mut fences = Vec::new();
-            wait_until(HANG, "the end of the attempt partition", || {
-                match consumer.poll(Duration::from_millis(100)) {
-                    Some(Ok(m)) if m.key() == Some(attempt::FENCE_KEY.as_bytes()) => {
-                        assert!(m.payload().is_none(), "a fence with a value");
-                        fences.push(m.offset());
-                        false
-                    }
-                    Some(Err(KafkaError::PartitionEOF(_))) => true,
-                    Some(Err(e)) => panic!("{e}"),
-                    Some(Ok(_)) | None => false,
+            wait_until(HANG, "the end of the attempt partition", || match consumer
+                .poll(Duration::from_millis(100))
+            {
+                Some(Ok(m)) if m.key() == Some(attempt::FENCE_KEY.as_bytes()) => {
+                    assert!(m.payload().is_none(), "a fence with a value");
+                    fences.push(m.offset());
+                    false
                 }
+                Some(Err(KafkaError::PartitionEOF(_))) => true,
+                Some(Err(e)) => panic!("{e}"),
+                Some(Ok(_)) | None => false,
             });
             fences
         }
@@ -5767,7 +5767,11 @@ mod cluster {
             rig.clock.advance(PASS_BOUND);
             pass.join().expect("the pass returns");
         });
-        assert_eq!(rig.core.lock().gating.len(), 2, "admitted with the ledger behind");
+        assert_eq!(
+            rig.core.lock().gating.len(),
+            2,
+            "admitted with the ledger behind"
+        );
     }
 
     /// Pins that a pass fences no partition the follower has read to the
@@ -6225,7 +6229,11 @@ mod docker {
         let topic = "removed-tail";
         create_compacted(&brokers, &io, topic);
         let one: &[u8] = br#"{"v":1,"attempts":1}"#;
-        write(&brokers, topic, &[("units/0/0", Some(one)), ("units/0/0", None)]);
+        write(
+            &brokers,
+            topic,
+            &[("units/0/0", Some(one)), ("units/0/0", None)],
+        );
         let reader: BaseConsumer = raw_config()
             .set("bootstrap.servers", &brokers)
             .build()

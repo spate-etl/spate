@@ -326,9 +326,7 @@ impl Gate {
             if self.core.lock().stopping {
                 return;
             }
-            self.core
-                .fences
-                .fetch_add(stalled.len(), Ordering::AcqRel);
+            self.core.fences.fetch_add(stalled.len(), Ordering::AcqRel);
         }
         for (partition, read_to, hwm) in stalled {
             tracing::debug!(

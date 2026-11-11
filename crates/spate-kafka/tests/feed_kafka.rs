@@ -1242,7 +1242,9 @@ fn a_deleted_topic_fails_the_job_on(brokers: &str, topic: &str) {
     let ExitState::Failed(failure) = &report.state else {
         panic!("expected a failed run, got {:?}", report.state);
     };
-    assert!(failure.reason.contains(topic), "{}", failure.reason);
+    // The work topic's name is inside the other two, so the quoted name.
+    let named = format!("reading the partitions of `{topic}`");
+    assert!(failure.reason.contains(&named), "{}", failure.reason);
 }
 
 /// Partitions added to the work, retry and dead-letter topics while a bounded

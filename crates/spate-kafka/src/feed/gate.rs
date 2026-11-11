@@ -17,8 +17,8 @@
 //! thread (INV-2), and it sends nothing under the state lock: a refused
 //! enqueue settles inline, and settling takes that lock.
 //!
-//! When a step of the wait passes with the follower still on the same
-//! offset below a partition's high watermark, the pass writes a fence to
+//! When the follower stays on the same offset below a partition's high
+//! watermark for a step at any point in the wait, the pass writes a fence to
 //! that partition, once, and keeps waiting for the watermark it read. A
 //! broker can remove a partition's last records and keep its watermark, and
 //! the follower reads past the end only once the fence lands there.
@@ -52,6 +52,13 @@ pub(crate) struct Gate {
     /// The bound on a pass, from the moment it takes its deliveries. A pass
     /// can run up to two steps past it.
     delivery_timeout: Duration,
+}
+
+/// Where the follower stood on a partition a pass waits for, and since when.
+struct Stall {
+    at: Option<i64>,
+    since: Instant,
+    fenced: bool,
 }
 
 /// Why a pass ended without admitting what it took.
@@ -254,11 +261,17 @@ impl Gate {
             unread.reasons.push(reason);
         }
         let waited_from = self.core.clock().now();
-        let read_from: Vec<Option<i64>> = {
+        let mut stalls: Vec<Stall> = {
             let ledger = attempt::lock(&self.core.ledger);
-            marks.iter().map(|&(p, _, _)| ledger.read_to(p)).collect()
+            marks
+                .iter()
+                .map(|&(p, _, _)| Stall {
+                    at: ledger.read_to(p),
+                    since: waited_from,
+                    fenced: false,
+                })
+                .collect()
         };
-        let mut fenced = false;
         for &(partition, lwm, hwm) in &marks {
             loop {
                 {
@@ -288,33 +301,38 @@ impl Gate {
                 // With the ledger's lock released: `latched` takes the
                 // state lock, which is never taken under it.
                 self.check(started, partition)?;
-                let waited = self
-                    .core
-                    .clock()
-                    .now()
-                    .saturating_duration_since(waited_from);
-                if !fenced && waited >= self.step {
-                    fenced = true;
-                    self.fence(&marks, &read_from);
-                }
+                self.fence(&marks, &mut stalls);
             }
         }
         Ok(unread)
     }
 
-    /// Write a fence to each partition of `marks` that is behind its high
-    /// watermark on the offset it was at in `read_from`, when the pass began
-    /// to wait. A stopping feed writes none.
-    fn fence(&self, marks: &[(i32, i64, i64)], read_from: &[Option<i64>]) {
+    /// Note where the follower stands on each partition of `marks`, and write
+    /// a fence to each one it has stood on, below the high watermark, for a
+    /// step. A pass fences a partition once, and a stopping feed writes none.
+    fn fence(&self, marks: &[(i32, i64, i64)], stalls: &mut [Stall]) {
+        let now = self.core.clock().now();
         let stalled: Vec<(i32, Option<i64>, i64)> = {
             let ledger = attempt::lock(&self.core.ledger);
             marks
                 .iter()
-                .zip(read_from)
-                .filter(|&(&(p, lwm, hwm), &from)| {
-                    !ledger.caught_up(p, lwm, hwm) && ledger.read_to(p) == from
+                .zip(stalls.iter_mut())
+                .filter_map(|(&(p, lwm, hwm), stall)| {
+                    if stall.fenced || ledger.caught_up(p, lwm, hwm) {
+                        return None;
+                    }
+                    let at = ledger.read_to(p);
+                    if at != stall.at {
+                        stall.at = at;
+                        stall.since = now;
+                        return None;
+                    }
+                    if now.saturating_duration_since(stall.since) < self.step {
+                        return None;
+                    }
+                    stall.fenced = true;
+                    Some((p, at, hwm))
                 })
-                .map(|(&(p, _, hwm), &from)| (p, from, hwm))
                 .collect()
         };
         if stalled.is_empty() {

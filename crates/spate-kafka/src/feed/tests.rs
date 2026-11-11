@@ -5784,7 +5784,8 @@ mod cluster {
 
     /// Pins that a pass fences no partition the follower has read to the
     /// high watermark or is still reading: one caught up before the pass,
-    /// and one whose read moves within the step.
+    /// and one whose read moves half a step before the pass has waited a
+    /// step.
     #[test]
     fn a_partition_the_follower_reads_gets_no_fence() {
         let rig = fencing(&[0, 1]);
@@ -5795,14 +5796,42 @@ mod cluster {
             let _stop = super::StopOnDrop(Arc::clone(&rig.core));
             let pass = scope.spawn(|| rig.gate.pass());
             rig.waits(1);
+            rig.advance(STEP / 2);
             rig.read(0, 0, b"other");
-            rig.advance(STEP);
+            rig.waits(1);
+            rig.advance(STEP / 2);
             assert_eq!((rig.fences(0), rig.fences(1)), (vec![], vec![]));
             rig.read(0, 1, b"other");
             pass.join().expect("the pass returns");
         });
         wait_until(HANG, "both units are admitted", || {
             rig.core.lock().ready.len() == 2
+        });
+    }
+
+    /// Pins that a pass fences a partition its follower stops on after
+    /// moving within the pass, a step after the move, and the unit is
+    /// admitted once the follower reads to the watermark.
+    #[test]
+    fn a_follower_that_stops_after_moving_gets_a_fence() {
+        let rig = fencing(&[0]);
+        std::thread::scope(|scope| {
+            // Ends the pass if an assertion fails, so the scope can join it.
+            let _stop = super::StopOnDrop(Arc::clone(&rig.core));
+            let pass = scope.spawn(|| rig.gate.pass());
+            rig.waits(1);
+            rig.advance(STEP / 2);
+            rig.read(0, 0, b"other");
+            rig.waits(1);
+            rig.advance(STEP / 2);
+            assert_eq!(rig.fences(0), Vec::<i64>::new(), "a fence before a step");
+            rig.advance(STEP / 2);
+            assert_eq!(rig.fences(0), vec![2]);
+            rig.read(0, 1, b"other");
+            pass.join().expect("the pass returns");
+        });
+        wait_until(HANG, "the unit is admitted", || {
+            rig.core.lock().ready.len() == 1
         });
     }
 

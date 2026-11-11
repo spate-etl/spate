@@ -18,8 +18,8 @@
 //! The build fingerprint travels *down* to the child through the environment so
 //! a record is self-describing wherever it is written, and is stamped back onto
 //! every record the driver collects with the SIMD features the driver detected;
-//! see [`Runner::measure`] for why the round trip cannot be trusted across two
-//! checkouts.
+//! the private `Runner::stamp` says why the round trip cannot be trusted across
+//! two checkouts.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};

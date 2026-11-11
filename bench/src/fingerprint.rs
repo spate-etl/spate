@@ -324,11 +324,11 @@ macro_rules! simd_probes {
 /// The SIMD features a leg's host records, in the order it lists them.
 ///
 /// The features the decode and decompression paths dispatch on at run time:
-/// `memchr` and `simdutf8` on `avx2`, `simdutf8` and `simd-json` on `sse4.2`,
-/// `simd-json` and `zlib-rs` on `pclmulqdq`, `zlib-rs` on `sse4.1`, `avx512f`,
-/// `neon` and `crc`, and `zlib-rs` and libzstd on `bmi1` with `bmi2`. Then the
-/// wider AVX-512 and SVE features a later path may take, so a host that hides
-/// part of AVX-512 still records it.
+/// `memchr` and `simdutf8` on `avx2`, `simd-json` on `avx2` with `pclmulqdq`
+/// and then `sse4.2`, `simdutf8` on `sse4.2`, `zlib-rs` on `avx2` with `bmi1`
+/// and `bmi2`, and on `pclmulqdq`, `sse4.1`, `avx512f`, `neon` and `crc`, and
+/// libzstd on `bmi1` with `bmi2`. Then the wider AVX-512 and SVE features a
+/// later path may take, so a host that hides part of AVX-512 still records it.
 #[cfg(target_arch = "x86_64")]
 pub const SIMD_FEATURES: &[SimdProbe] = simd_probes!(
     is_x86_feature_detected;

@@ -1,0 +1,3 @@
+**Kafka feed: a rejection only the depth client meets** (`spate-kafka`)
+
+A Kafka feed now stops with the broker's reason when the client that reads its depth has its credential or TLS handshake rejected, as it does when its consumer, attempt follower or producer meets the same rejection. In previous versions that client only logged the rejection. Its reads then failed on a timeout or a transport error and were repeated, so a bounded job whose work was done neither ended nor failed. This could happen when the rejecting broker was one no other client of the feed talked to, such as the leader of the dead-letter partition after a certificate or password rotation.

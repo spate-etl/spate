@@ -211,16 +211,16 @@ impl BrokerTotals {
 /// snapshot beside its replacement under the same node id, and each then
 /// keeps its own totals.
 ///
-/// A snapshot older than the one before it adds nothing. Two threads can
-/// serve one client's statistics, and a snapshot taken first can then be
+/// A snapshot older than the newest one translated adds nothing. Two threads
+/// can serve one client's statistics, and a snapshot taken first can then be
 /// translated second, where its lower totals would read as every broker
 /// restarting.
 #[derive(Debug, Default)]
 pub(crate) struct BrokerGrowth {
     /// Node id and totals by entry name.
     last: FastMap<String, (i32, BrokerTotals)>,
-    /// The `ts` of the newest snapshot translated, on librdkafka's monotonic
-    /// clock.
+    /// The `ts` of the newest snapshot translated. librdkafka reads it from
+    /// a monotonic clock on Linux and from the wall clock on macOS.
     newest: i64,
 }
 
@@ -1204,6 +1204,52 @@ mod tests {
             }
         });
         assert_summed(&rendered, 120);
+    }
+
+    /// A new name takes no totals from an entry still in the snapshot, from
+    /// a bootstrap entry, or as a logical entry, even when its own totals
+    /// reach them.
+    #[test]
+    fn a_new_name_carries_only_from_a_departed_entry_with_its_node_id() {
+        let cases: [(&str, [Vec<Broker>; 2]); 3] = [
+            (
+                "still present",
+                [
+                    vec![counting("old:9092/1", "learned", 1, 5)],
+                    vec![
+                        counting("old:9092/1", "learned", 1, 5),
+                        counting("new:9092/1", "learned", 1, 6),
+                    ],
+                ],
+            ),
+            (
+                "bootstrap",
+                [
+                    vec![counting("seed-a:9092/bootstrap", "configured", -1, 5)],
+                    vec![counting("seed-b:9092/bootstrap", "configured", -1, 6)],
+                ],
+            ),
+            (
+                "logical",
+                [
+                    vec![counting("k1:9092/1", "learned", 1, 5)],
+                    vec![counting("GroupCoordinator", "logical", 1, 6)],
+                ],
+            ),
+        ];
+        for (case, snapshots) in cases {
+            let rendered = render_metrics(|| {
+                let mut m = KafkaStatsMetrics::new(meter(), false);
+                for brokers in snapshots {
+                    m.update(&snapshot(brokers), "orders", &owned(&[0]));
+                }
+            });
+            let needle = format!("spate_kafka_tx_requests_total{{{STD}}} 11\n");
+            assert!(
+                rendered.contains(&needle),
+                "{case}: missing `{needle}`:\n{rendered}"
+            );
+        }
     }
 
     /// A new name under a node id whose entry just left takes over that

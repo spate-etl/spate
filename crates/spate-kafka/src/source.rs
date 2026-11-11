@@ -2406,7 +2406,11 @@ mod tests {
                 "{e}"
             );
             let assigned = source.members[0].consumer.assignment().expect("assignment");
-            assert_eq!(assigned.count(), 0, "the consumer was assigned {assigned:?}");
+            assert_eq!(
+                assigned.count(),
+                0,
+                "the consumer was assigned {assigned:?}"
+            );
         }
     }
 

@@ -20,6 +20,7 @@ use spate_core::metrics::Meter;
 use spate_core::pipeline::ExitState;
 use spate_core::task::spawn_thread;
 use spate_test::{HANG, WriteOutcome, wait_until};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 use support::feed::{
     ATTEMPT, ATTEMPT_PARTITIONS, BoundedJob, DEAD, FeedClock, ON_MOCK, RETRY, WORK, assert_stalled,
@@ -733,7 +734,7 @@ fn an_assignment_on_another_topic_stops_the_feed() {
         )),
         "{error}"
     );
-    let (dropped, on_drop) = std::sync::mpsc::channel();
+    let (dropped, on_drop) = mpsc::channel();
     let dropping = spawn_thread("drop-feed", move || {
         drop(worker);
         let _ = dropped.send(());

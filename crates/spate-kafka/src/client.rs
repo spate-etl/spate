@@ -37,14 +37,15 @@ use std::time::Duration;
 /// How long dropping a client may hold the thread that drops it.
 pub(crate) const CLOSE_WAIT: Duration = Duration::from_secs(10);
 
-/// Drop `clients` on a thread of their own, and wait up to [`CLOSE_WAIT`]
-/// for the drop to return. Returns whether it returned in time.
+/// Drop `clients` on a thread of their own, and wait up to `wait` for the
+/// drop to return. Returns whether it returned in time.
 ///
 /// A consumer's close can wait with no bound, as on a silent group
-/// coordinator or after a fatal error leaves librdkafka's group running. The
-/// thread then ends when the close does, or with the process.
-pub(crate) fn close_in_background<T: Send + 'static>(clients: T) -> bool {
-    let (closed, wait) = mpsc::channel();
+/// coordinator, behind an unanswered commit, or after a fatal error leaves
+/// librdkafka's group running. The thread then ends when the close does, or
+/// with the process.
+pub(crate) fn close_in_background<T: Send + 'static>(clients: T, wait: Duration) -> bool {
+    let (closed, done) = mpsc::channel();
     #[expect(
         clippy::disallowed_methods,
         reason = "joining would wait out the close; the thread ends when close does"
@@ -56,7 +57,8 @@ pub(crate) fn close_in_background<T: Send + 'static>(clients: T) -> bool {
             let _ = closed.send(());
         });
     match spawned {
-        Ok(_) => wait.recv_timeout(CLOSE_WAIT).is_ok(),
+        Ok(_) => done.recv_timeout(wait).is_ok(),
+        // The refused closure, and the clients in it, dropped here.
         Err(e) => {
             tracing::warn!(error = %e, "could not start the clients' close");
             true
@@ -512,6 +514,11 @@ pub(crate) struct PendingCommit<C: ConsumerContext + 'static> {
     queue: *mut rdkafka::bindings::rd_kafka_queue_t,
 }
 
+// SAFETY: librdkafka's API may be called from any thread
+// (librdkafka 2.12.1 INTRODUCTION.md, "Threads and callbacks"), and the queue
+// is owned by one value, used by one thread at a time.
+unsafe impl<C: ConsumerContext + 'static> Send for PendingCommit<C> {}
+
 impl<C: ConsumerContext + 'static> PendingCommit<C> {
     /// Waits up to `timeout` for the group's answer.
     ///
@@ -519,23 +526,30 @@ impl<C: ConsumerContext + 'static> PendingCommit<C> {
     ///
     /// The commit's failure, or `OperationTimedOut` when no answer came in time.
     pub(crate) fn wait(&self, timeout: Duration) -> KafkaResult<()> {
+        self.poll(timeout).unwrap_or(Err(KafkaError::ConsumerCommit(
+            RDKafkaErrorCode::OperationTimedOut,
+        )))
+    }
+
+    /// Waits up to `timeout` for the group's answer, and `None` when none came.
+    /// An answer is taken once: after `Some`, the next call waits for nothing.
+    pub(crate) fn poll(&self, timeout: Duration) -> Option<KafkaResult<()>> {
         let timeout = i32::try_from(timeout.as_millis()).unwrap_or(i32::MAX);
         // SAFETY: `queue` is valid until `drop`. The event is owned here and
         // destroyed before the block ends.
         let code = unsafe {
             let event = rdkafka::bindings::rd_kafka_queue_poll(self.queue, timeout);
             if event.is_null() {
-                RDKafkaRespErr::RD_KAFKA_RESP_ERR__TIMED_OUT
-            } else {
-                let code = rdkafka::bindings::rd_kafka_event_error(event);
-                rdkafka::bindings::rd_kafka_event_destroy(event);
-                code
+                return None;
             }
+            let code = rdkafka::bindings::rd_kafka_event_error(event);
+            rdkafka::bindings::rd_kafka_event_destroy(event);
+            code
         };
         if code.is_error() {
-            return Err(KafkaError::ConsumerCommit(code.into()));
+            return Some(Err(KafkaError::ConsumerCommit(code.into())));
         }
-        Ok(())
+        Some(Ok(()))
     }
 }
 

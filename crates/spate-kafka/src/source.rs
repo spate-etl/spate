@@ -109,7 +109,8 @@
 //! the contract.
 
 use crate::client::{
-    PendingCommit, close_in_background, list_offsets, listed_offset, only_on_topics, send_commit,
+    CLOSE_WAIT, PendingCommit, close_in_background, list_offsets, listed_offset, only_on_topics,
+    send_commit,
 };
 use crate::config::KafkaSourceConfig;
 use crate::context::{Intent, SourceContext, SourceHooks};
@@ -2069,7 +2070,7 @@ impl Drop for KafkaSource {
         }
         // Close can wait with no bound, on a silent group coordinator or after
         // a fatal error, so the pipeline still ends when its deadline says so.
-        if !close_in_background(std::mem::take(&mut self.members)) {
+        if !close_in_background(std::mem::take(&mut self.members), CLOSE_WAIT) {
             tracing::warn!(
                 topic = %self.config.topic,
                 "the consumers have not closed; they close in the background"

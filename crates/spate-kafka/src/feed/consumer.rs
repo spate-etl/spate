@@ -61,7 +61,7 @@ use super::events::Cause;
 use super::inflight::{Position, Tp};
 use super::write::{self, Destination, Finish, Move, Outgoing, Producer, Tombstone, Write};
 use super::{Closing, Core, Gating, LatchOnPanic, READY_CAPACITY, State, Topics};
-use crate::client::{close_in_background, only_on_topics, read_position};
+use crate::client::{CLOSE_WAIT, close_in_background, only_on_topics, read_position};
 use crate::context::{Intent, SourceContext};
 use rdkafka::consumer::{BaseConsumer, CommitMode, Consumer};
 use rdkafka::error::{KafkaError, RDKafkaErrorCode};
@@ -191,7 +191,7 @@ pub(crate) fn run(mut d: Driver) {
         drop(d);
     } else {
         let topic = Arc::clone(&core.topics().work);
-        if !close_in_background(d) {
+        if !close_in_background(d, CLOSE_WAIT) {
             tracing::warn!(%topic, "the feed's consumer has not closed; it closes in the background");
         }
     }

@@ -109,7 +109,8 @@
 //! the contract.
 
 use crate::client::{
-    PendingCommit, close_in_background, list_offsets, listed_offset, only_on_topics, send_commit,
+    CLOSE_WAIT, PendingCommit, close_in_background, list_offsets, listed_offset, only_on_topics,
+    send_commit,
 };
 use crate::config::KafkaSourceConfig;
 use crate::context::{Intent, SourceContext, SourceHooks};
@@ -2069,7 +2070,7 @@ impl Drop for KafkaSource {
         }
         // Close can wait with no bound, on a silent group coordinator or after
         // a fatal error, so the pipeline still ends when its deadline says so.
-        if !close_in_background(std::mem::take(&mut self.members)) {
+        if !close_in_background(std::mem::take(&mut self.members), CLOSE_WAIT) {
             tracing::warn!(
                 topic = %self.config.topic,
                 "the consumers have not closed; they close in the background"
@@ -5003,13 +5004,17 @@ mod tests {
         let (tx, rx) = mpsc::channel();
         crate::testutil::assert_returns(cluster, HANG, "a flush and drop", move || {
             let flushed = source.flush_commits();
-            drop(source);
-            tx.send(flushed).expect("send");
+            let warned = spate_test::capture_logs(tracing::Level::WARN, || drop(source));
+            tx.send((flushed, warned)).expect("send");
         });
-        let err = rx
-            .recv()
-            .expect("flushed")
-            .expect_err("an unanswered commit is a failed one");
+        let (flushed, warned) = rx.recv().expect("flushed");
+        assert!(
+            warned
+                .iter()
+                .any(|l| l.contains("they close in the background")),
+            "{warned:#?}"
+        );
+        let err = flushed.expect_err("an unanswered commit is a failed one");
         assert_eq!(err.class(), ErrorClass::Retryable, "{err}");
         assert!(err.reason().starts_with("sync commit: "), "{err}");
         assert!(err.reason().contains("OperationTimedOut"), "{err}");

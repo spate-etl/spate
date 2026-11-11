@@ -26,13 +26,27 @@
 //!
 //! # Commits
 //!
-//! Every commit is synchronous and made from this thread, so no two are
-//! ever in flight: a lower commit point, after the fetch position moved
-//! back, cannot be overtaken by an earlier, higher one that librdkafka
-//! retried. librdkafka bounds a commit by the session timeout while it
-//! waits for a coordinator, and by `socket.timeout.ms` for each of the
-//! request's attempts once sent. The tracker lock is never held across a
-//! commit or any other broker call.
+//! Every commit is made from this thread, and no two are ever in flight: a
+//! lower commit point, after the fetch position moved back, cannot be
+//! overtaken by an earlier, higher one that librdkafka retried. The thread
+//! waits for a commit's answer up to the group-call bound, a quarter of
+//! `max.poll.interval.ms` and at most 10 s, since librdkafka waits for it with
+//! no bound while the coordinator is silent or slower than
+//! `socket.timeout.ms`. A commit left unanswered counts as failed and is held,
+//! and no other is sent until the group answers it:
+//!
+//! - A periodic commit checks the held commit without waiting, so the thread
+//!   goes on polling.
+//! - A revocation waits for it, and then for its own commit, within one bound.
+//!   When it stays unanswered, the revocation commits nothing, and the next
+//!   owner reads the revoked partitions from their last commit.
+//! - The last commit waits for it, and then for its own, until the close's
+//!   deadline, at most one bound away. When one stays unanswered, the
+//!   consumer leaves the group on a thread of its own, since its close waits
+//!   for every outstanding commit, and the feed's drop waits for that thread
+//!   until the deadline at most.
+//!
+//! The tracker lock is never held across a commit or any other broker call.
 //!
 //! A transaction marker takes an offset and is never delivered, and under
 //! `read_committed` the consumer skips an aborted transaction's records the
@@ -61,9 +75,11 @@ use super::events::Cause;
 use super::inflight::{Position, Tp};
 use super::write::{self, Destination, Finish, Move, Outgoing, Producer, Tombstone, Write};
 use super::{Closing, Core, Gating, LatchOnPanic, READY_CAPACITY, State, Topics};
-use crate::client::{close_in_background, only_on_topics, read_position};
+use crate::client::{
+    CLOSE_WAIT, PendingCommit, close_in_background, only_on_topics, read_position, send_commit,
+};
 use crate::context::{Intent, SourceContext};
-use rdkafka::consumer::{BaseConsumer, CommitMode, Consumer};
+use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::error::{KafkaError, RDKafkaErrorCode};
 use rdkafka::message::{BorrowedMessage, Headers, Message};
 use rdkafka::producer::Producer as _;
@@ -71,6 +87,7 @@ use rdkafka::{Offset, TopicPartitionList};
 use spate_core::error::ErrorClass;
 use spate_core::feed::{FeedError, FeedErrorKind, Unit};
 use std::collections::BTreeSet;
+use std::ops::Deref;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
@@ -95,14 +112,58 @@ pub(crate) struct Driver {
     /// Declared before the consumer, so a consumer close that never returns
     /// does not hold this producer clone, and with it the feed's producer.
     producer: Producer,
-    pub(crate) consumer: BaseConsumer<SourceContext>,
+    pub(crate) consumer: Member,
     /// The partitions this thread paused, and only those: a resume never
     /// touches a partition it did not pause.
     pub(crate) paused: BTreeSet<Tp>,
-    /// The bound on each committed-offset read.
-    lookup_timeout: Duration,
+    /// The bound on each blocking group call.
+    call_bound: Duration,
     assigned_once: bool,
     last_commit: Instant,
+    /// Each wait for a commit's answer, for a test to read.
+    #[cfg(test)]
+    pub(crate) waits: Arc<std::sync::Mutex<Vec<CommitWait>>>,
+}
+
+/// A wait for the group's answer to a commit, and its budget.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CommitWait {
+    /// For the held commit.
+    Held(Duration),
+    /// For a commit just sent.
+    Sent(Duration),
+    /// For the consumer's close, as the drop hands a close held by an
+    /// unanswered commit to a thread of its own.
+    Leave(Duration),
+}
+
+/// The feed's group member: its consumer, and the commit the group has not
+/// answered.
+pub(crate) struct Member {
+    /// Taken only by the drop, to close off this thread.
+    consumer: Option<Arc<BaseConsumer<SourceContext>>>,
+    pub(crate) held: Option<PendingCommit<SourceContext>>,
+    /// How long the drop waits for a close held by an unanswered commit.
+    close_wait: Duration,
+    #[cfg(test)]
+    waits: Arc<std::sync::Mutex<Vec<CommitWait>>>,
+}
+
+impl Deref for Member {
+    type Target = BaseConsumer<SourceContext>;
+
+    fn deref(&self) -> &Self::Target {
+        self.client()
+    }
+}
+
+impl Member {
+    fn client(&self) -> &Arc<BaseConsumer<SourceContext>> {
+        self.consumer
+            .as_ref()
+            .expect("only the drop takes the consumer")
+    }
 }
 
 impl Driver {
@@ -110,17 +171,27 @@ impl Driver {
         core: Arc<Core>,
         consumer: BaseConsumer<SourceContext>,
         producer: Producer,
-        lookup_timeout: Duration,
+        call_bound: Duration,
     ) -> Driver {
         let core_now = core.clock().now();
+        #[cfg(test)]
+        let waits: Arc<std::sync::Mutex<Vec<CommitWait>>> = Arc::default();
         Driver {
             core,
-            consumer,
+            consumer: Member {
+                consumer: Some(Arc::new(consumer)),
+                held: None,
+                close_wait: call_bound,
+                #[cfg(test)]
+                waits: Arc::clone(&waits),
+            },
             producer,
             paused: BTreeSet::new(),
-            lookup_timeout,
+            call_bound,
             assigned_once: false,
             last_commit: core_now,
+            #[cfg(test)]
+            waits,
         }
     }
 
@@ -176,22 +247,25 @@ pub(crate) fn run(mut d: Driver) {
         // producer error can be logged twice.
         d.producer.flush(wait).is_ok()
     };
-    let committed = d.commit_finished(if close.is_some() {
+    let until = d.last_deadline(close.as_ref());
+    let what = if close.is_some() {
         "on close"
     } else {
         "on stop"
-    });
+    };
+    let committed = d.commit_until(what, until, until);
+    d.consumer.close_wait = until.saturating_duration_since(core.clock().now());
     // The consumer leaves the group as it drops, before the close settles,
-    // so a settled close means this worker no longer holds its partitions.
+    // so a confirmed close means this worker no longer holds its partitions.
     // After a fatal error librdkafka's group can run on and the drop wait
     // with no bound, so a close can then settle before the consumer leaves.
     // The client can hold a fatal error the feed has not latched, as one
     // raised on the last commit after the loop ended.
-    if !core.latched() && d.consumer.client().fatal_error().is_none() {
+    if !core.latched() && (*d.consumer).client().fatal_error().is_none() {
         drop(d);
     } else {
         let topic = Arc::clone(&core.topics().work);
-        if !close_in_background(d) {
+        if !close_in_background(d, CLOSE_WAIT) {
             tracing::warn!(%topic, "the feed's consumer has not closed; it closes in the background");
         }
     }
@@ -206,9 +280,10 @@ pub(crate) fn close_flush(within: Duration) -> Duration {
     within / 2
 }
 
-/// Settle `close` once the consumer has left: rejected with the latched
-/// error if the feed latched, `Retryable` if writes were still in flight
-/// at the flush's end or the last commit failed, and confirmed otherwise.
+/// Settle `close` once the consumer has left, or its leave runs on a thread of
+/// its own behind an unanswered commit: rejected with the latched error if the
+/// feed latched, `Retryable` if writes were still in flight at the flush's end
+/// or the last commit failed, and confirmed otherwise.
 fn settle_close(core: &Core, close: Closing, flushed: bool, committed: bool) {
     if let Some(fatal) = core.lock().signal.latched().cloned() {
         close.confirmer.reject(fatal);
@@ -416,7 +491,7 @@ impl Driver {
     fn start_positions(&self, tpl: &TopicPartitionList) -> TopicPartitionList {
         let committed = match self
             .consumer
-            .committed_offsets(tpl.clone(), self.lookup_timeout)
+            .committed_offsets(tpl.clone(), self.call_bound)
         {
             Ok(committed) => committed,
             Err(e) => {
@@ -439,10 +514,21 @@ impl Driver {
 
     fn revoke(&mut self, tpl: &TopicPartitionList) {
         let tps = self.tps(tpl);
-        commit_revoked(&self.core, &tps, |points| {
+        let until = self.deadline(self.call_bound);
+        let core = Arc::clone(&self.core);
+        commit_revoked(&core, &tps, |points| {
             // A latched feed commits nothing, as in `commit_finished`.
-            if !self.core.latched() {
-                commit(&self.consumer, points, "on revocation");
+            if core.latched() {
+                return;
+            }
+            if self.answered(until) {
+                self.commit(points, "on revocation", until);
+            } else {
+                tracing::warn!(
+                    partitions = points.len(),
+                    "a commit the group has not answered holds back the revocation's; the next \
+                     owner reads the revoked partitions from their last commit"
+                );
             }
         });
         let paused: Vec<Tp> = tps
@@ -525,29 +611,137 @@ impl Driver {
         }
     }
 
-    /// Commit the commit points that moved. `false` when the feed has
-    /// latched or the commit failed, `true` when it succeeded or nothing
-    /// moved. `what` names the commit in a failure's log line.
+    /// Commit the commit points that moved, waiting up to the group-call
+    /// bound for the answer. A held commit is checked without waiting, and
+    /// while it is unanswered nothing is sent. `false` when the feed has
+    /// latched, a commit is held, or the commit failed, and `true` when it
+    /// succeeded or nothing moved. `what` names the commit in a failure's log
+    /// line.
     pub(crate) fn commit_finished(&mut self, what: &str) -> bool {
+        let now = self.core.clock().now();
+        let until = self.deadline(self.call_bound);
+        self.commit_until(what, now, until)
+    }
+
+    /// [`commit_finished`](Self::commit_finished), waiting for a held commit
+    /// until `held_until` and for this commit's answer until `until`.
+    fn commit_until(&mut self, what: &str, held_until: Instant, until: Instant) -> bool {
         // After a `BadMessage` latch, librdkafka may have skipped an offset,
         // and a commit point could pass the unit there.
         if self.core.latched() {
             return false;
         }
         self.last_commit = self.core.clock().now();
+        if !self.answered(held_until) {
+            return false;
+        }
         retire_offsets(&self.core, |tp| {
             read_position(&self.consumer, &mut tpl_of(std::slice::from_ref(tp)))
         });
-        commit_moved(&self.core, |points| commit(&self.consumer, points, what))
+        let core = Arc::clone(&self.core);
+        commit_moved(&core, |points| self.commit(points, what, until))
+    }
+
+    /// When the last commit and the consumer's close stop waiting for the
+    /// group: the close's own deadline, at most one group-call bound away.
+    fn last_deadline(&self, close: Option<&Closing>) -> Instant {
+        let cap = self.deadline(self.call_bound);
+        close
+            .and_then(|c| c.since.checked_add(c.within))
+            .map_or(cap, |end| end.min(cap))
+    }
+
+    /// `wait` from now on the feed's clock.
+    fn deadline(&self, wait: Duration) -> Instant {
+        let now = self.core.clock().now();
+        now.checked_add(wait).unwrap_or(now)
+    }
+
+    /// What is left until `until` on the feed's clock.
+    fn budget(&self, until: Instant) -> Duration {
+        until.saturating_duration_since(self.core.clock().now())
+    }
+
+    /// `true` once no commit is held. A held commit's answer is waited for
+    /// until `until`, and taken when it comes.
+    fn answered(&mut self, until: Instant) -> bool {
+        let budget = self.budget(until);
+        let Some(held) = &self.consumer.held else {
+            return true;
+        };
+        #[cfg(test)]
+        self.waits
+            .lock()
+            .expect("waits lock")
+            .push(CommitWait::Held(budget));
+        let Some(answer) = held.poll(budget) else {
+            return false;
+        };
+        self.consumer.held = None;
+        match answer {
+            Ok(()) | Err(KafkaError::ConsumerCommit(RDKafkaErrorCode::NoOffset)) => {
+                tracing::info!("the group answered the feed's held commit");
+            }
+            Err(e) => tracing::warn!(
+                error = %e,
+                "the group refused the feed's held commit; a later commit sends its offsets again"
+            ),
+        }
+        true
+    }
+
+    /// Commit `points` and wait until `until` for the group's answer. `false`
+    /// when the commit failed, which is logged and never fatal, or went
+    /// unanswered, in which case it is held.
+    fn commit(&mut self, points: &[(Tp, i64)], what: &str, until: Instant) -> bool {
+        let mut tpl = TopicPartitionList::new();
+        for (tp, point) in points {
+            if let Err(e) =
+                tpl.add_partition_offset(&tp.topic, tp.partition, Offset::Offset(*point))
+            {
+                tracing::warn!(error = %e, "building a commit failed");
+                return false;
+            }
+        }
+        let sent = match send_commit(self.consumer.client(), Some(&tpl)) {
+            Ok(sent) => sent,
+            Err(e) => {
+                tracing::warn!(error = %e, commit = what, "committing the feed's offsets failed");
+                return false;
+            }
+        };
+        let budget = self.budget(until);
+        #[cfg(test)]
+        self.waits
+            .lock()
+            .expect("waits lock")
+            .push(CommitWait::Sent(budget));
+        match sent.poll(budget) {
+            Some(Ok(()) | Err(KafkaError::ConsumerCommit(RDKafkaErrorCode::NoOffset))) => true,
+            Some(Err(e)) => {
+                tracing::warn!(error = %e, commit = what, "committing the feed's offsets failed");
+                false
+            }
+            None => {
+                tracing::warn!(
+                    commit = what,
+                    partitions = points.len(),
+                    "the group has not answered the feed's commit; no other is sent until it does"
+                );
+                self.consumer.held = Some(sent);
+                false
+            }
+        }
     }
 }
 
 /// Leaves the group as the consumer drops, on a normal stop and on a panic
 /// alike: without `closing` set, the consumer's close waits on a final
-/// revocation that no poll of this thread will serve.
-impl Drop for Driver {
+/// revocation that no poll of this thread will serve. With a commit held, the
+/// close waits for it with no bound, so it runs off this thread.
+impl Drop for Member {
     fn drop(&mut self) {
-        let context = self.consumer.context();
+        let context = self.context();
         // The context completes the final revocation inline from here on.
         context.closing.store(true, Ordering::Release);
         // A panic under the lock leaves the queue's contents unknown, so a
@@ -559,8 +753,23 @@ impl Drop for Driver {
             .lock()
             .map(|q| q.iter().any(|i| matches!(i, Intent::Revoke(_))))
             .unwrap_or(true);
-        if deferred_revoke && let Err(e) = self.consumer.unassign() {
+        if deferred_revoke && let Err(e) = self.unassign() {
             tracing::warn!(error = %e, "unassign while the feed stops failed");
+        }
+        let Some(held) = self.held.take() else {
+            return;
+        };
+        let wait = self.close_wait;
+        #[cfg(test)]
+        self.waits
+            .lock()
+            .expect("waits lock")
+            .push(CommitWait::Leave(wait));
+        if !close_in_background((held, self.consumer.take()), wait) {
+            tracing::warn!(
+                "the group has not answered the feed's commit; its consumer leaves the group \
+                 in the background"
+            );
         }
     }
 }
@@ -657,25 +866,6 @@ pub(crate) fn commit_moved(core: &Core, commit: impl FnOnce(&[(Tp, i64)]) -> boo
         core.lock().tracker.untake(&points);
     }
     committed
-}
-
-/// Commit `points` synchronously. `false` when the commit failed, which is
-/// logged and never fatal: the units are delivered again.
-fn commit(consumer: &BaseConsumer<SourceContext>, points: &[(Tp, i64)], what: &str) -> bool {
-    let mut tpl = TopicPartitionList::new();
-    for (tp, point) in points {
-        if let Err(e) = tpl.add_partition_offset(&tp.topic, tp.partition, Offset::Offset(*point)) {
-            tracing::warn!(error = %e, "building a commit failed");
-            return false;
-        }
-    }
-    match consumer.commit(&tpl, CommitMode::Sync) {
-        Ok(()) | Err(KafkaError::ConsumerCommit(RDKafkaErrorCode::NoOffset)) => true,
-        Err(e) => {
-            tracing::warn!(error = %e, commit = what, "committing the feed's offsets failed");
-            false
-        }
-    }
 }
 
 pub(super) fn tpl_of(tps: &[Tp]) -> TopicPartitionList {

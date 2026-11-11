@@ -1955,7 +1955,7 @@ mod cluster {
 
     use super::super::attempt::{self, Follower};
     use super::super::config::KafkaFeedConfig;
-    use super::super::consumer::{self, COMMIT_INTERVAL, Driver, POLL_BATCH, tpl_of};
+    use super::super::consumer::{self, COMMIT_INTERVAL, CommitWait, Driver, POLL_BATCH, tpl_of};
     use super::super::gate::Gate;
     use super::super::inflight::Tp;
     use super::super::producer::FeedProducerHooks;
@@ -4956,6 +4956,291 @@ mod cluster {
                 .any(|l| l.contains("the Kafka feed started") || l.contains("group_id")),
             "{lines:#?}"
         );
+    }
+
+    /// A feed's consumer thread past a marker on the work topic, so its next
+    /// commit moves, with `socket.timeout.ms` 1000 and a group-call bound of 2 s.
+    fn past_a_marker(
+        group: &str,
+        clock: SyncClock,
+    ) -> (MockKafka, String, Arc<Core>, Producer, Driver) {
+        let cluster = cluster_with(0);
+        let brokers = cluster.bootstrap_servers();
+        write_marker(&brokers);
+        let group = spate_test::unique_name(group);
+        let config = KafkaFeedConfig::from_section(&section_with(
+            &brokers,
+            &group,
+            "    socket.timeout.ms: \"1000\"\n    max.poll.interval.ms: \"8000\"\n",
+        ))
+        .unwrap();
+        let (core, producer, mut d) = super::super::parts(&config, TWO, clock).unwrap();
+        drive(&mut d, "the marker is served", |d| {
+            position(d) == Offset::Offset(1)
+        });
+        (cluster, group, core, producer, d)
+    }
+
+    /// Answer every request after 4 s, past `socket.timeout.ms`, so a commit
+    /// is never answered.
+    fn slow(cluster: &MockKafka) {
+        cluster
+            .broker_round_trip_time(-1, Duration::from_secs(4))
+            .unwrap();
+    }
+
+    /// Run `f` on `d` on a thread of its own, and hand `d` back with what `f`
+    /// returned. Fails naming `what` when `f` does not return.
+    fn on_driver<T: Send + 'static>(
+        cluster: MockKafka,
+        d: Driver,
+        what: &str,
+        f: impl FnOnce(&mut Driver) -> T + Send + 'static,
+    ) -> (MockKafka, Driver, T) {
+        let (tx, rx) = mpsc::channel();
+        let returned = returns_within(HANG, move || {
+            let mut d = d;
+            let out = f(&mut d);
+            let _ = tx.send((d, out));
+        });
+        if !returned {
+            std::mem::forget(cluster);
+            panic!("{what} did not return");
+        }
+        let (d, out) = rx.recv().expect("handed back");
+        (cluster, d, out)
+    }
+
+    fn waits(d: &Driver) -> Vec<CommitWait> {
+        d.waits.lock().unwrap().clone()
+    }
+
+    /// Pins that a commit the group does not answer returns, counts as failed,
+    /// and is held. Regression for #1772.
+    #[test]
+    fn an_unanswered_commit_returns_and_is_held() {
+        let (cluster, _, _, _, d) = past_a_marker("unanswered", SyncClock::system());
+        slow(&cluster);
+        let (cluster, d, committed) =
+            on_driver(cluster, d, "a commit to a slow coordinator", |d| {
+                d.commit_finished("periodic")
+            });
+        assert!(!committed, "an unanswered commit counted as made");
+        assert!(
+            d.consumer.held.is_some(),
+            "the unanswered commit was let go"
+        );
+        drop((d, cluster));
+    }
+
+    /// Pins that a held commit holds back the next: a periodic commit checks it
+    /// without waiting and sends nothing while it is unanswered.
+    #[test]
+    fn a_held_commit_holds_back_the_next() {
+        let (cluster, _, _, _, d) = past_a_marker("held-holds", SyncClock::system());
+        slow(&cluster);
+        let (cluster, d, _) = on_driver(cluster, d, "the first commit", |d| {
+            d.commit_finished("periodic")
+        });
+        let (cluster, d, committed) = on_driver(cluster, d, "the second commit", |d| {
+            d.commit_finished("periodic")
+        });
+        assert!(!committed);
+        let waits = waits(&d);
+        assert!(
+            matches!(
+                waits[..],
+                [CommitWait::Sent(_), CommitWait::Held(Duration::ZERO)]
+            ),
+            "{waits:?}"
+        );
+        drop((d, cluster));
+    }
+
+    /// Pins that a held commit answered once the coordinator recovers lets the
+    /// next commit through, so holding never stops commits for good.
+    #[test]
+    fn a_held_commit_answered_lets_the_next_through() {
+        let (cluster, group, _, _, d) = past_a_marker("held-answered", SyncClock::system());
+        let brokers = cluster.bootstrap_servers();
+        slow(&cluster);
+        let (cluster, mut d, _) = on_driver(cluster, d, "the first commit", |d| {
+            d.commit_finished("periodic")
+        });
+        cluster.broker_round_trip_time(-1, Duration::ZERO).unwrap();
+        wait_until(HANG, "a commit after the held one", || {
+            d.commit_finished("periodic");
+            d.consumer.held.is_none()
+                && waits(&d)
+                    .iter()
+                    .filter(|w| matches!(w, CommitWait::Sent(_)))
+                    .count()
+                    >= 2
+        });
+        assert_eq!(committed(&brokers, &group), Some(1));
+        drop((d, cluster));
+    }
+
+    /// Run the consumer thread's end, `d` on a thread of its own, and fail when
+    /// it does not return.
+    fn ends(cluster: &MockKafka, d: Driver) {
+        let returned = returns_within(HANG, move || consumer::run(d));
+        if !returned {
+            // Its clients are still connected, and dropping it would wait on them.
+            std::mem::forget(cluster.clone());
+        }
+        assert!(returned, "the consumer thread did not end");
+    }
+
+    /// Pins that a close whose last commit the group does not answer settles as
+    /// retryable, and that the consumer thread and the feed's drop return.
+    /// Regression for #1772.
+    #[test]
+    fn a_close_with_an_unanswered_commit_settles_and_drops() {
+        let (cluster, _, core, producer, d) =
+            past_a_marker("close-unanswered", SyncClock::system());
+        let feed = feed_over(&core, &producer, None);
+        let mut closing = feed.close(Duration::from_secs(10)).expect("a close");
+        slow(&cluster);
+        let (tx, rx) = mpsc::channel();
+        let returned = returns_within(HANG, move || {
+            let warned = spate_test::capture_logs(tracing::Level::WARN, move || consumer::run(d));
+            let _ = tx.send(warned);
+        });
+        if !returned {
+            std::mem::forget(cluster.clone());
+        }
+        assert!(returned, "the consumer thread did not end");
+        let warned = rx.recv().expect("sent");
+        assert!(
+            warned
+                .iter()
+                .any(|l| l.contains("its consumer leaves the group in the background")),
+            "{warned:#?}"
+        );
+        let err = closing
+            .try_outcome()
+            .expect("settled")
+            .expect_err("an unanswered commit is a failed one");
+        assert_eq!(err.kind, FeedErrorKind::Retryable, "{err}");
+        assert!(
+            returns_within(HANG, move || drop(feed)),
+            "the feed's drop did not return"
+        );
+    }
+
+    /// Pins that the last commit waits only for what is left of the close: with
+    /// the close's time spent before the commit, the commit gets no wait.
+    #[test]
+    fn the_last_commit_waits_only_for_what_is_left_of_the_close() {
+        let clock = TestClock::frozen();
+        let (cluster, _, core, producer, d) =
+            past_a_marker("close-budget", SyncClock::new(clock.clone()));
+        let waits = Arc::clone(&d.waits);
+        let feed = feed_over(&core, &producer, None);
+        let mut closing = feed.close(Duration::from_secs(10)).expect("a close");
+        clock.advance(Duration::from_secs(11));
+        slow(&cluster);
+        ends(&cluster, d);
+        assert_eq!(
+            *waits.lock().unwrap(),
+            [
+                CommitWait::Sent(Duration::ZERO),
+                CommitWait::Leave(Duration::ZERO)
+            ]
+        );
+        let err = closing
+            .try_outcome()
+            .expect("settled")
+            .expect_err("unanswered");
+        assert_eq!(err.kind, FeedErrorKind::Retryable, "{err}");
+        drop(feed);
+    }
+
+    /// Pins that the last commit, and the drop's wait for a consumer close
+    /// held by it, each take at most one group-call bound, 2 s here, however
+    /// long the close is given.
+    #[test]
+    fn the_last_commit_waits_at_most_the_bound() {
+        let clock = TestClock::frozen();
+        let (cluster, _, core, producer, d) =
+            past_a_marker("close-cap", SyncClock::new(clock.clone()));
+        let waits = Arc::clone(&d.waits);
+        let feed = feed_over(&core, &producer, None);
+        let mut closing = feed.close(Duration::from_secs(10)).expect("a close");
+        slow(&cluster);
+        ends(&cluster, d);
+        let bound = Duration::from_secs(2);
+        assert_eq!(
+            *waits.lock().unwrap(),
+            [CommitWait::Sent(bound), CommitWait::Leave(bound)]
+        );
+        let err = closing
+            .try_outcome()
+            .expect("settled")
+            .expect_err("unanswered");
+        assert_eq!(err.kind, FeedErrorKind::Retryable, "{err}");
+        drop(feed);
+    }
+
+    /// Pins that a close behind a held commit waits for it until the close's
+    /// deadline, where a periodic commit only checks it.
+    #[test]
+    fn a_close_waits_for_the_held_commit() {
+        let clock = TestClock::frozen();
+        let (cluster, _, core, producer, d) =
+            past_a_marker("close-held", SyncClock::new(clock.clone()));
+        slow(&cluster);
+        let (cluster, d, _) = on_driver(cluster, d, "the periodic commit", |d| {
+            d.commit_finished("periodic")
+        });
+        let waits = Arc::clone(&d.waits);
+        let feed = feed_over(&core, &producer, None);
+        let mut closing = feed.close(Duration::from_secs(10)).expect("a close");
+        ends(&cluster, d);
+        let bound = Duration::from_secs(2);
+        assert_eq!(
+            *waits.lock().unwrap(),
+            [
+                CommitWait::Sent(bound),
+                CommitWait::Held(bound),
+                CommitWait::Leave(bound)
+            ]
+        );
+        let err = closing
+            .try_outcome()
+            .expect("settled")
+            .expect_err("unanswered");
+        assert_eq!(err.kind, FeedErrorKind::Retryable, "{err}");
+        drop(feed);
+    }
+
+    /// Pins that a revocation returns while a commit is held, and sends no
+    /// commit of its own behind it. Regression for #1772.
+    #[test]
+    fn a_revocation_behind_a_held_commit_returns_and_sends_nothing() {
+        let (cluster, _, _, _, d) = past_a_marker("revoke-held", SyncClock::system());
+        slow(&cluster);
+        let (cluster, d, _) = on_driver(cluster, d, "the periodic commit", |d| {
+            d.commit_finished("periodic")
+        });
+        d.consumer
+            .context()
+            .intents
+            .lock()
+            .unwrap()
+            .push_back(Intent::Revoke(tpl_of(&[work()])));
+        let (cluster, d, ()) = on_driver(cluster, d, "the revocation", Driver::serve_intents);
+        assert!(
+            !d.core.lock().tracker.owned().any(|tp| *tp == work()),
+            "the revocation did not give the partition up"
+        );
+        let waits = waits(&d);
+        assert!(
+            matches!(waits[..], [CommitWait::Sent(_), CommitWait::Held(b)] if b > Duration::ZERO),
+            "{waits:?}"
+        );
+        drop((d, cluster));
     }
 }
 

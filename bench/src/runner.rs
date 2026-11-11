@@ -17,8 +17,9 @@
 //!
 //! The build fingerprint travels *down* to the child through the environment so
 //! a record is self-describing wherever it is written, and is stamped back onto
-//! every record the driver collects; see [`Runner::measure`] for why the round
-//! trip cannot be trusted across two checkouts.
+//! every record the driver collects with the SIMD features the driver detected;
+//! the private `Runner::stamp` says why the round trip cannot be trusted across
+//! two checkouts.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -28,7 +29,7 @@ use std::time::Duration;
 
 use serde::de::DeserializeOwned;
 
-use crate::fingerprint::{BuildFingerprint, FINGERPRINT_ENV};
+use crate::fingerprint::{BuildFingerprint, FINGERPRINT_ENV, detected_simd};
 use crate::note;
 use crate::protocol::{Calibration, Listing, PROTOCOL_VERSION, ProtocolVersion};
 use crate::record::Record;
@@ -64,6 +65,7 @@ pub struct Runner {
     dir: PathBuf,
     fingerprint: BuildFingerprint,
     fingerprint_json: String,
+    simd: Vec<String>,
     period: Duration,
 }
 
@@ -96,6 +98,7 @@ impl Runner {
             dir: dir.to_owned(),
             fingerprint: fingerprint.clone(),
             fingerprint_json,
+            simd: detected_simd(),
             period,
         };
         let version: ProtocolVersion = runner.ask(&["--protocol-version".to_owned()])?;
@@ -156,17 +159,27 @@ impl Runner {
         if request.priming {
             args.push("--priming".to_owned());
         }
-        let mut record: Record = self.ask(&args)?;
-        // The driver's fingerprint wins over the one that came back, which is
-        // the same value round-tripped through the child. The round trip is not
-        // lossless across checkouts: a base leg compiled from an older commit
-        // deserialises the fingerprint with *its* struct definition, drops any
-        // field it does not know, and emits a record missing it, which the
-        // comparator then reads as the two legs disagreeing about a guarded
-        // field. The driver knows what it built; the binary is only carrying
-        // the value back.
+        let record: Record = self.ask(&args)?;
+        Ok(self.stamp(record))
+    }
+
+    /// Writes the driver's own values over the ones a child sent back.
+    ///
+    /// The fingerprint that came back is the driver's, round-tripped through
+    /// the child. The round trip is not lossless across checkouts: a base leg
+    /// compiled from an older commit deserialises the fingerprint with *its*
+    /// struct definition, drops any field it does not know, and emits a record
+    /// missing it, which the comparator then reads as the two legs disagreeing
+    /// about a guarded field. The driver knows what it built; the binary is only
+    /// carrying the value back.
+    ///
+    /// The SIMD features take the same path for the same reason: a child
+    /// compiled before the host recorded them reports none. Both legs run on the
+    /// driver's machine, so its detection is the child's.
+    fn stamp(&self, mut record: Record) -> Record {
         record.build = self.fingerprint.clone();
-        Ok(record)
+        record.host.simd.clone_from(&self.simd);
+        record
     }
 
     /// How a child is named while it is still running: its leg, its target, and
@@ -409,8 +422,30 @@ mod tests {
             dir: std::env::temp_dir(),
             fingerprint,
             fingerprint_json: "{}".to_owned(),
+            simd: vec!["neon".to_owned(), "crc".to_owned()],
             period,
         }
+    }
+
+    /// A child built before the host recorded its SIMD features sends a record
+    /// with none, and a base leg built from such a commit would otherwise
+    /// refuse to compare with a head leg run on the same machine.
+    #[test]
+    fn the_driver_stamps_its_simd_features_over_a_child_that_sent_none() {
+        const OLDER_CHILD: &str = concat!(
+            r#"{"schema":1,"#,
+            r#""case":{"crate":"spate-bench","target":"selftest_wall","case":"sort_u64_16k"},"#,
+            r#""replicate":0,"priming":false,"iters":1,"erratic":false,"seed":1,"#,
+            r#""corpus_digest":"0","build_digest":"0","metrics":{},"#,
+            r#""build":{"protocol":1,"leg":"base","dirty":false},"#,
+            r#""host":{"os":"macos/aarch64","cpu":"Apple M5 Max","cores":16,"label":"local"},"#,
+            r#""ts_ms":0}"#,
+        );
+        let record = serde_json::from_str(OLDER_CHILD).expect("an older child's record loads");
+
+        let stamped = stub(SLOW_PERIOD).stamp(record);
+
+        assert_eq!(stamped.host.simd, ["neon", "crc"]);
     }
 
     #[test]

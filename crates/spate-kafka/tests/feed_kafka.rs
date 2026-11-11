@@ -1177,7 +1177,9 @@ fn a_stop_during_a_hold_on(brokers: &str) {
 
 /// An aborted transaction at the end of each attempt partition leaves the
 /// gate caught up on a real broker: the unit is admitted and read, and the
-/// job completes. Regression for #1765.
+/// job completes. Regression for #1765. The aborted payload is a valid
+/// attempt record, because the follower reads aborted records and one that
+/// is not an attempt record stops the feed.
 #[test]
 #[ignore = "requires Docker"]
 fn an_aborted_transaction_at_the_end_of_the_attempt_topic_ends_a_bounded_job() {

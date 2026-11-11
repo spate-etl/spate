@@ -103,7 +103,7 @@ is denied, because passthrough and feed values apply in unspecified order.
 | `auto.commit.enable` | librdkafka's legacy topic-level auto-commit property; the feed commits each partition up to its first unfinished unit itself. |
 | `enable.auto.offset.store` | The feed decides which offsets may be committed. |
 | `enable.partition.eof` | The feed reads only messages from the consumer. |
-| `isolation.level` | The feed sets it: the depth reader lists ends at the high watermark so a confirmed write behind an open transaction counts, and the group member reads committed records so a commit cannot pass that transaction. |
+| `isolation.level` | The feed sets it: the depth reader lists ends at the high watermark so a confirmed write behind an open transaction counts, the attempt follower and the gate read the attempt topic to its high watermark so another writer's open transaction there cannot hide the feed's attempt writes, and the group member reads committed records so a commit cannot pass that transaction. |
 | `acks`, `request.required.acks` | Forced to `all`: a unit is read once the delivery report confirms its attempt write, and its offset completes once the report confirms its tombstone or retry write. |
 | `enable.idempotence` | Forced on, so librdkafka's own retries neither reorder nor duplicate a write. |
 | `transactional.id` | The feed does not use transactions; a write is confirmed by its delivery report. |
@@ -252,6 +252,10 @@ retention after a read (see [Counting deliveries](#counting-deliveries)):
 - `delete.retention.ms` must exceed the longest time a worker takes to read
   the attempt topic. A worker still reading when the cleaner removes a
   tombstone keeps the count the tombstone cleared;
+- another writer's records on it count whether their transaction commits or
+  aborts, because the feed reads it past an open transaction. One that is not
+  an attempt record stops the feed, and one keyed by a unit's publish identity
+  changes that unit's count;
 - each group and work topic needs an attempt topic of its own, and a work
   topic that is deleted and created again needs a fresh one. A publish
   identity names the work topic and the message's position in it, and

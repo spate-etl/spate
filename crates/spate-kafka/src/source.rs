@@ -718,11 +718,23 @@ impl KafkaSource {
     ///
     /// # Errors
     ///
-    /// As [`KafkaSource::read_latest_starts`].
+    /// An offer naming a partition of another topic, and under `latest` as
+    /// [`KafkaSource::read_latest_starts`].
     fn prepare_starts(
         &mut self,
         offers: &[(usize, TopicPartitionList)],
     ) -> Result<Result<Vec<Prepared>, String>, SourceError> {
+        // Every list built from an offer names the configured topic, and
+        // `assign` would fetch whatever topic the offer named.
+        if !offers
+            .iter()
+            .all(|(_, tpl)| only_on_topic(tpl, &self.config.topic))
+        {
+            return Err(SourceError::fatal(format!(
+                "the group offered a partition of a topic other than `{}`",
+                self.config.topic
+            )));
+        }
         let lookup_until = self.clock.now() + self.lookup_timeout;
         if self.config.uncommitted_start() == Some(Offset::End) {
             return self.read_latest_starts(offers, lookup_until);
@@ -933,24 +945,12 @@ impl KafkaSource {
     ///
     /// # Errors
     ///
-    /// A failure [`classify_start_error`] classes as fatal, or an offer naming a
-    /// partition of another topic.
+    /// A failure [`classify_start_error`] classes as fatal.
     fn read_latest_starts(
         &mut self,
         offers: &[(usize, TopicPartitionList)],
         lookup_until: Instant,
     ) -> Result<Result<Vec<Prepared>, String>, SourceError> {
-        // The lists below name the configured topic whatever the offer named, so
-        // a partition of another topic would commit a position on this one.
-        if !offers
-            .iter()
-            .all(|(_, tpl)| only_on_topic(tpl, &self.config.topic))
-        {
-            return Err(SourceError::fatal(format!(
-                "the group offered a partition of a topic other than `{}`",
-                self.config.topic
-            )));
-        }
         for (k, _) in offers {
             self.members[*k].committed_at_assign.clear();
         }
@@ -2380,17 +2380,28 @@ mod tests {
         );
     }
 
-    /// An offer of a partition of another topic stops the run under `latest`: the
-    /// lists name the configured topic, so it would commit a position there.
+    /// An offer of a partition of another topic stops the run under every
+    /// start policy and ahead of the assign, which would fetch that topic.
+    /// Regression for #1779.
     #[test]
     fn an_offer_on_another_topic_is_fatal() {
-        let (mut source, _clock) = opened_unassigned(latest_config(), 1);
-        let mut other = TopicPartitionList::new();
-        other.add_partition("other", 0);
-        assert!(matches!(
-            source.read_latest_starts(&[(0, other)], source.clock.now()),
-            Err(e) if e.class() == ErrorClass::Fatal
-        ));
+        for config in [test_config(), latest_config()] {
+            let (mut source, _clock) = opened_unassigned(config, 1);
+            let mut other = TopicPartitionList::new();
+            other.add_partition("other", 0);
+            source.members[0].phase = Phase::Held(other);
+            let Err(e) = source.accept_held(false) else {
+                panic!("the offer was accepted");
+            };
+            assert_eq!(e.class(), ErrorClass::Fatal, "{e}");
+            assert!(
+                e.to_string()
+                    .contains("a partition of a topic other than `orders`"),
+                "{e}"
+            );
+            let assigned = source.members[0].consumer.assignment().expect("assignment");
+            assert_eq!(assigned.count(), 0, "the consumer was assigned {assigned:?}");
+        }
     }
 
     /// An empty offer is answered with no lookup, so a consumer with no

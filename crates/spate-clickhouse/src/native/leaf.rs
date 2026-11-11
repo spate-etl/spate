@@ -12,8 +12,10 @@ use bytes::{BufMut, BytesMut};
 #[inline]
 pub(crate) fn put_leb128(buf: &mut BytesMut, value: u64) {
     // Most lengths and counts are below 128, so they take one byte.
+    // `extend_from_slice` stays inline without LTO, where `put_u8` calls
+    // `BytesMut`'s out-of-line `put_slice`.
     if value < 0x80 {
-        buf.put_u8(value as u8);
+        buf.extend_from_slice(&[value as u8]);
     } else {
         put_leb128_multi(buf, value);
     }
@@ -43,8 +45,9 @@ pub(crate) fn put_string(buf: &mut BytesMut, bytes: &[u8]) {
     put_bytes(buf, bytes);
 }
 
-/// Appends `src`, copying up to 32 bytes with two overlapping fixed-width
-/// moves so that a short string makes no call into libc's `memcpy`.
+/// Appends `src`, copying 4 to 32 bytes with two overlapping fixed-width
+/// moves and 1 to 3 bytes one byte at a time, so that a short string makes
+/// no call into libc's `memcpy`.
 #[inline]
 fn put_bytes(buf: &mut BytesMut, src: &[u8]) {
     let n = src.len();

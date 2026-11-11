@@ -22,11 +22,10 @@ use spate_core::error::DeserError;
 use spate_core::record::{RawPayload, Record};
 use spate_core::telemetry::RateLimit;
 use std::marker::PhantomData;
-use std::time::Duration;
 
 /// Rate-limits the per-record skip warning so a poison storm can't flood the
 /// logs; the exact drop count is always in `spate_json_deser_records_dropped_total`.
-static SKIP_WARN: RateLimit = RateLimit::new(5, Duration::from_secs(10));
+static SKIP_WARN: RateLimit = RateLimit::hot_path();
 
 /// Why a record was dropped, for the metric label and log field.
 #[derive(Clone, Copy)]

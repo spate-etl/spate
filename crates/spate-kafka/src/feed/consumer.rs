@@ -756,6 +756,11 @@ impl Drop for Member {
         let context = self.context();
         // The context completes the final revocation inline from here on.
         context.closing.store(true, Ordering::Release);
+        // A revocation queued since the last poll is completed here, while the
+        // group can still answer. Left for the consumer's close, it is served
+        // after a member with no partitions has left the group, and its
+        // `unassign` then never returns.
+        crate::client::serve_queued(self);
         // A panic under the lock leaves the queue's contents unknown, so a
         // poisoned lock reads as a deferred revocation. Under the feed's eager
         // assignment an unassign with nothing pending costs nothing, and a

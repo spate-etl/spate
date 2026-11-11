@@ -5318,11 +5318,17 @@ mod feed_metrics {
         ))
     }
 
-    fn snapshot(tx: i64) -> Statistics {
-        Statistics {
-            tx,
-            ..Default::default()
-        }
+    fn snapshot(tx: u64) -> Statistics {
+        let mut stats = Statistics::default();
+        sent(&mut stats, tx);
+        stats
+    }
+
+    /// Gives `stats` one broker that has sent `tx` requests.
+    fn sent(stats: &mut Statistics, tx: u64) {
+        let mut broker = crate::testutil::broker("k1:9092/1", "learned", 1);
+        broker.tx = tx;
+        stats.brokers.insert(broker.name.clone(), broker);
     }
 
     /// A consumer snapshot carrying the work and retry topics' partition 0,
@@ -5572,9 +5578,9 @@ mod feed_metrics {
             core.attach_metrics(FeedMetricsCtx::new(Some(meter)).with_partition_detail(detail));
         };
         let mut later = consumer_snapshot(6);
-        later.tx = 31;
+        sent(&mut later, 31);
         let mut last = consumer_snapshot(6);
-        last.tx = 50;
+        sent(&mut last, 50);
         let rendered = render_metrics(|| {
             attach(&first, false);
             attach(&second, true);
@@ -5643,7 +5649,7 @@ mod feed_metrics {
         let core = Arc::new(core_with_statistics("5s"));
         let hooks = FeedProducerHooks::new(Arc::clone(&core));
         let mut consumer = consumer_snapshot(0);
-        consumer.tx = 31;
+        sent(&mut consumer, 31);
         let rendered = render_metrics(|| {
             core.attach_metrics(attached(false));
             core.publish_consumer_stats(&consumer, &[]);

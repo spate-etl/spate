@@ -726,6 +726,13 @@ mod tests {
         );
     }
 
+    /// Pins that `breaker.open_for: 1y`, refused by v0.4.0, now loads.
+    #[test]
+    fn a_yaml_open_for_of_a_year_validates() {
+        let breaker: BreakerConfig = serde_yaml::from_str("open_for: 1y").expect("parses");
+        assert_eq!(breaker.validate(), Ok(()));
+    }
+
     /// Pins the section order: batch, inflight, retry, breaker.
     #[test]
     fn pool_validate_reports_the_first_invalid_section() {

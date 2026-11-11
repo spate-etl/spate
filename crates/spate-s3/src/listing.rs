@@ -1,5 +1,6 @@
-//! The S3 listing's handling of keys `object_store` cannot address, and the
-//! cap on a failure answer's body.
+//! The S3 listing's handling of keys `object_store` cannot address, the cap on
+//! a failure answer's body, and the refusal of a listing page whose
+//! continuation token does not advance.
 //!
 //! `object_store` turns each listed key into a [`Path`], and a key that does
 //! not parse fails the whole `ListObjectsV2` page, losing its continuation
@@ -9,14 +10,15 @@
 //! `object_store` parses it and records it in [`UnaddressableKeys`], so the
 //! listing returns every other key, and the lister still publishes this one
 //! as a unit of its own. The same wrapper hands the client at most 64 KiB of
-//! any failure answer's body.
+//! any failure answer's body, and fails a listing request whose page names
+//! the request's own continuation token with [`ListingStalled`].
 
 use crate::fetch::ObjectEntry;
 use bytes::Bytes;
 use object_store::ClientOptions;
 use object_store::client::{
-    HttpClient, HttpConnector, HttpError, HttpRequest, HttpResponse, HttpResponseBody, HttpService,
-    ReqwestConnector,
+    HttpClient, HttpConnector, HttpError, HttpErrorKind, HttpRequest, HttpResponse,
+    HttpResponseBody, HttpService, ReqwestConnector,
 };
 use object_store::path::Path;
 use std::sync::{Arc, Mutex};
@@ -58,7 +60,8 @@ impl UnaddressableKeys {
 }
 
 /// An [`HttpConnector`] that builds `object_store`'s own client and filters
-/// the S3 listing responses it returns and cuts the body of a failure answer.
+/// the S3 listing responses it returns, fails a listing page that repeats its
+/// request's continuation token, and cuts the body of a failure answer.
 /// Every other request and response passes through unchanged.
 #[derive(Debug)]
 pub(crate) struct UnaddressableConnector {
@@ -95,6 +98,10 @@ impl HttpService for FilteringService {
                 .uri()
                 .query()
                 .is_some_and(|q| q.split('&').any(|pair| pair == "list-type=2"));
+        // The token this request continues from, when it is not a first page.
+        let asked = listing
+            .then(|| continuation_token(req.uri().query().unwrap_or_default()))
+            .flatten();
         let response = self.inner.execute(req).await?;
         if !response.status().is_success() {
             return Ok(bounded_failure(response).await);
@@ -104,6 +111,9 @@ impl HttpService for FilteringService {
         }
         let (mut parts, body) = response.into_parts();
         let page = body.bytes().await?;
+        if asked.is_some() && next_token(&page) == asked {
+            return Err(HttpError::new(HttpErrorKind::Decode, ListingStalled));
+        }
         let page = match filter_page(&page) {
             Some((filtered, removed)) => {
                 self.keys.record(removed);
@@ -154,6 +164,45 @@ async fn bounded_failure(response: HttpResponse) -> HttpResponse {
     // The body is no longer the length the store declared.
     parts.headers.remove("content-length");
     HttpResponse::from_parts(parts, HttpResponseBody::from(kept))
+}
+
+/// A listing page named, as the token for the next page, the token of the
+/// request that fetched it. `object_store` follows any token that is not
+/// empty, so such a store would be asked for the same page without end.
+#[derive(Debug)]
+pub(crate) struct ListingStalled;
+
+impl std::fmt::Display for ListingStalled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(
+            "the store answered a listing page with the continuation token it was asked with, \
+             so the listing cannot advance",
+        )
+    }
+}
+
+impl std::error::Error for ListingStalled {}
+
+/// The `continuation-token` of a listing request's query, decoded.
+fn continuation_token(query: &str) -> Option<String> {
+    url::form_urlencoded::parse(query.as_bytes())
+        .find(|(name, _)| name == "continuation-token")
+        .map(|(_, token)| token.into_owned())
+}
+
+/// The part of a `ListBucketResult` page the token comparison reads.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct NextPage {
+    next_continuation_token: Option<String>,
+}
+
+/// The `NextContinuationToken` of a listing page.
+fn next_token(page: &[u8]) -> Option<String> {
+    // The decoder `object_store` runs over the page, from bytes as it does,
+    // so the token compared is the token it would follow.
+    let page: NextPage = quick_xml::de::from_reader(page).ok()?;
+    page.next_continuation_token
 }
 
 /// One `<Contents>` element, decoded the way `object_store` decodes it.
@@ -452,5 +501,43 @@ mod tests {
             prop_assume!(keys.iter().all(|k| addressable(k)));
             prop_assert!(filter_page(page(&keys, Some("t")).as_bytes()).is_none());
         }
+    }
+
+    /// The two sides of the token comparison decode to the same string: the
+    /// query's form encoding and the page's XML escapes. A token from AWS is
+    /// base64 and carries `/`, `+` and `=`.
+    #[test]
+    fn a_token_decodes_the_same_from_the_query_and_the_page() {
+        assert_eq!(
+            continuation_token("continuation-token=a%2Fb%2Bc%3D+d%26e&list-type=2").as_deref(),
+            Some("a/b+c= d&e")
+        );
+        assert_eq!(continuation_token("list-type=2&prefix=data%2F"), None);
+        let page = |token: &str| {
+            format!(
+                "<ListBucketResult><Name>b</Name>{token}<IsTruncated>true</IsTruncated>\
+                 </ListBucketResult>"
+            )
+        };
+        for element in [
+            "<NextContinuationToken>a/b+c= d&amp;e</NextContinuationToken>",
+            "<NextContinuationToken><![CDATA[a/b+c= d&e]]></NextContinuationToken>",
+        ] {
+            assert_eq!(
+                next_token(page(element).as_bytes()).as_deref(),
+                Some("a/b+c= d&e"),
+                "{element}"
+            );
+        }
+        assert_eq!(next_token(page("").as_bytes()), None);
+        // `object_store` accepts a byte that is not UTF-8 in an element it
+        // skips, and follows the page's token.
+        let mut skipped = page("<NextContinuationToken>t</NextContinuationToken>").into_bytes();
+        let name = skipped
+            .iter()
+            .position(|b| *b == b'b')
+            .expect("the bucket name");
+        skipped[name] = 0xff;
+        assert_eq!(next_token(&skipped).as_deref(), Some("t"));
     }
 }

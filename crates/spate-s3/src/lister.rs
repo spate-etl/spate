@@ -2985,6 +2985,54 @@ mod tests {
         lister
     }
 
+    /// A store that answers a page with the continuation token the request
+    /// carried fails the lister run as fatal, after the two requests that
+    /// show it, where following the token would list the same page without
+    /// end. Regression for #1778.
+    #[test]
+    fn a_listing_whose_token_does_not_advance_fails_the_run() {
+        let rt = runtime();
+        let (feed, _script) = spate_test::scripted_feed();
+        let lister = served_lister(
+            vec![
+                list_page(&[("data/a", 7)], Some("1")),
+                list_page(&[("data/b", 7)], Some("1")),
+            ],
+            Arc::new(feed),
+        );
+        // Without the check the listing never ends.
+        let err = rt
+            .block_on(async { tokio::time::timeout(spate_test::HANG, lister.run()).await })
+            .expect("the run ends")
+            .unwrap_err();
+        assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
+        assert!(
+            err.reason()
+                .contains("the continuation token it was asked with"),
+            "{err}"
+        );
+    }
+
+    /// A listing whose tokens advance is followed to its last page.
+    #[test]
+    fn a_listing_whose_token_advances_is_followed() {
+        let rt = runtime();
+        let (feed, script) = spate_test::scripted_feed();
+        let lister = served_lister(
+            vec![
+                list_page(&[("data/a", 7)], Some("1")),
+                list_page(&[("data/b", 7)], Some("2")),
+                list_page(&[("data/c", 7)], None),
+            ],
+            Arc::new(feed),
+        );
+        rt.block_on(lister.run()).unwrap();
+        assert_eq!(
+            members(&script.published()),
+            [vec!["data/a", "data/b", "data/c"]]
+        );
+    }
+
     /// Pins that a key the S3 client cannot address is a unit of its own,
     /// and that the keys listed around it share a unit without it.
     #[test]

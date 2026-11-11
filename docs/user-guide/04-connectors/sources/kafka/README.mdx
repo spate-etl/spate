@@ -229,9 +229,9 @@ message too.
 
 A record at offset `i64::MAX`, the top of the offset range, also fails the
 source with a fatal error, since no position above it exists to commit past it.
-Records before it in the same poll are still delivered. After a restart the
-source stops again at the same record until the group's committed offset is
-moved past it.
+Records before it in the same poll are still delivered. No committed offset
+lies past it, so after each restart the source stops again at the same record
+for as long as the broker returns it.
 
 The source leaves `check.crcs` at librdkafka's default, which is off, unless
 the `rdkafka` passthrough sets it. With it off, librdkafka does not verify a

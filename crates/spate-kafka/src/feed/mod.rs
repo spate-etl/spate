@@ -549,8 +549,14 @@ pub struct KafkaFeed {
     thread: Option<ThreadHandle<()>>,
     gate: Option<ThreadHandle<()>>,
     follower: Option<ThreadHandle<()>>,
-    /// Hands depth reads to the depth thread, which ends once this drops.
-    depth: Option<Mutex<mpsc::Sender<(DepthOf, DepthReporter)>>>,
+    depth: Option<DepthThread>,
+}
+
+/// The depth thread and the sender that hands it reads. The thread ends once
+/// the sender drops, after at most one request of a read in flight.
+struct DepthThread {
+    requests: Mutex<mpsc::Sender<(DepthOf, DepthReporter)>>,
+    thread: ThreadHandle<()>,
 }
 
 impl std::fmt::Debug for KafkaFeed {
@@ -716,7 +722,7 @@ impl KafkaFeed {
                 ConnectError::unavailable(NAME, format!("starting the feed's consumer thread: {e}"))
             })?,
         );
-        feed.depth = Some(Mutex::new(start_depth(&config, &feed.core)?));
+        feed.depth = Some(start_depth(&config, &feed.core)?);
         log_started(&config, &checked);
         Ok(feed)
     }
@@ -726,12 +732,8 @@ impl KafkaFeed {
     }
 }
 
-/// Start the depth thread, detached: it ends once the feed drops the
-/// returned sender, after any read in flight.
-fn start_depth(
-    config: &KafkaFeedConfig,
-    core: &Arc<Core>,
-) -> Result<mpsc::Sender<(DepthOf, DepthReporter)>, ConnectError> {
+/// Start the depth thread.
+fn start_depth(config: &KafkaFeedConfig, core: &Arc<Core>) -> Result<DepthThread, ConnectError> {
     let openssl_env = crate::security::openssl_env_overrides();
     // The feed's group, never subscribed: it reads the group's committed
     // offsets without joining the group.
@@ -743,20 +745,17 @@ fn start_depth(
         })?;
     let (tx, rx) = mpsc::channel();
     let core = Arc::clone(core);
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "the depth thread ends once the feed drops the returned sender, after any read in flight"
-    )]
-    std::thread::Builder::new()
-        .name("spate-kafka-feed-depth".to_owned())
-        .spawn(move || {
-            let brokers = depth::Brokers { consumer };
-            depth::run(&core, &brokers, &rx);
-        })
-        .map_err(|e| {
-            ConnectError::unavailable(NAME, format!("starting the feed's depth thread: {e}"))
-        })?;
-    Ok(tx)
+    let thread = spawn_thread("spate-kafka-feed-depth", move || {
+        let brokers = depth::Brokers { consumer };
+        depth::run(&core, &brokers, &rx);
+    })
+    .map_err(|e| {
+        ConnectError::unavailable(NAME, format!("starting the feed's depth thread: {e}"))
+    })?;
+    Ok(DepthThread {
+        requests: Mutex::new(tx),
+        thread,
+    })
 }
 
 /// Log the INFO line a feed that connected writes: its section and what the
@@ -868,10 +867,17 @@ fn parts(
 impl Drop for KafkaFeed {
     fn drop(&mut self) {
         stop(&self.core);
+        // The depth thread ends on its sender's drop, so its last request
+        // runs out while the other threads are joined.
+        let depth = self.depth.take().map(|depth| {
+            drop(depth.requests);
+            depth.thread
+        });
         // Each drop joins its thread; a panic in one was logged as it ended.
         drop(self.gate.take());
         drop(self.follower.take());
         drop(self.thread.take());
+        drop(depth);
     }
 }
 
@@ -1055,6 +1061,7 @@ impl Feed for KafkaFeed {
             // A depth thread that has ended drops the reporter, and the
             // reading settles Retryable.
             let _ = depth
+                .requests
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .send((of, reporter));

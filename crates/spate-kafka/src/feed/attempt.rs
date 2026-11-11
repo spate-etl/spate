@@ -26,6 +26,7 @@ use super::config::KafkaFeedConfig;
 use super::config::NAME;
 use super::consumer::POLL_TIMEOUT;
 use super::{Core, LatchOnPanic, Topics};
+use crate::client::read_position;
 use crate::context::{SourceContext, SourceHooks};
 use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::error::KafkaError;
@@ -303,6 +304,22 @@ impl Ledger {
         }
     }
 
+    /// Take in that every offset of `partition` below `position` has been
+    /// read or holds no record. Returns whether that moved the partition.
+    pub(crate) fn advance_to(&mut self, partition: i32, position: i64) -> bool {
+        let Some(next) = usize::try_from(partition)
+            .ok()
+            .and_then(|p| self.next.get_mut(p))
+        else {
+            return false;
+        };
+        let moved = *next < Some(position);
+        if moved {
+            *next = Some(position);
+        }
+        moved
+    }
+
     /// The attempts recorded for `identity`, 0 when none are.
     pub(crate) fn count(&self, identity: &[u8]) -> u32 {
         self.counts.get(identity).copied().unwrap_or(0)
@@ -319,7 +336,8 @@ impl Ledger {
 
     /// Whether the ledger holds every record of `partition` below `hwm`,
     /// given the partition's watermarks `(lwm, hwm)`. Partition EOF carries
-    /// no offset, so the offsets read are the only measure.
+    /// no offset, so the measure is the offsets read and the follower's
+    /// position past offsets that hold no record.
     pub(crate) fn caught_up(&self, partition: i32, lwm: i64, hwm: i64) -> bool {
         hwm <= lwm || self.read_to(partition) >= Some(hwm)
     }
@@ -331,6 +349,8 @@ pub(crate) struct Follower {
     core: Arc<Core>,
     consumer: BaseConsumer<SourceContext>,
     ledger: SharedLedger,
+    /// One list per attempt partition, to read its position into.
+    positions: Vec<TopicPartitionList>,
 }
 
 impl Follower {
@@ -360,11 +380,18 @@ impl Follower {
         consumer
             .assign(&tpl)
             .map_err(|e| ConnectError::refused(NAME, format!("assigning `{topic}`: {e}")))?;
+        let mut positions = Vec::with_capacity(partitions.get() as usize);
+        for partition in (0..=i32::MAX).take(partitions.get() as usize) {
+            let mut one = TopicPartitionList::new();
+            one.add_partition(topic, partition);
+            positions.push(one);
+        }
         let ledger = Arc::clone(&core.ledger);
         Ok(Follower {
             core,
             consumer,
             ledger,
+            positions,
         })
     }
 
@@ -383,14 +410,14 @@ impl Follower {
         spawn_thread("spate-kafka-feed-follower", move || self.run())
     }
 
-    fn run(self) {
+    fn run(mut self) {
         let _guard = LatchOnPanic {
             core: Arc::clone(&self.core),
             thread: "follower",
         };
         while !self.core.stopped() && !self.core.latched() {
             match self.consumer.poll(POLL_TIMEOUT) {
-                None => {}
+                None => self.note_positions(),
                 Some(Ok(message)) => {
                     if let Err(e) = self.on_message(&message) {
                         // Latched with no ledger guard held.
@@ -399,6 +426,22 @@ impl Follower {
                 }
                 Some(Err(error)) => self.on_error(&error),
             }
+        }
+    }
+
+    /// Move the ledger to each partition's position. A transaction marker
+    /// takes an offset and is never delivered, so one at a partition's end
+    /// leaves the offsets read below the high watermark for good, and only
+    /// the position passes it.
+    fn note_positions(&mut self) {
+        let mut moved = false;
+        for (partition, list) in (0..).zip(self.positions.iter_mut()) {
+            if let Offset::Offset(position) = read_position(&self.consumer, list) {
+                moved |= lock(&self.ledger).advance_to(partition, position);
+            }
+        }
+        if moved {
+            self.ledger.1.notify_all();
         }
     }
 
@@ -581,6 +624,22 @@ mod tests {
         // Each partition is measured alone.
         assert!(!ledger.caught_up(1, 0, 5));
         assert!(!ledger.caught_up(2, 0, 5));
+    }
+
+    /// The follower's position moves a partition forward and never back, and
+    /// a position at the high watermark is caught up with no record read.
+    #[test]
+    fn a_position_moves_the_ledger_forward_only() {
+        let mut ledger = Ledger::new(NonZeroU32::new(2).unwrap());
+        assert!(ledger.advance_to(0, 1));
+        assert!(ledger.caught_up(0, 0, 1));
+        assert_eq!(ledger.read_to(0), Some(1));
+        assert!(!ledger.advance_to(0, 1), "an equal position moves nothing");
+        ledger.apply(0, 4, b"a", Entry::Count(1));
+        assert!(!ledger.advance_to(0, 3), "a position behind the read");
+        assert_eq!(ledger.read_to(0), Some(5));
+        assert!(!ledger.advance_to(2, 9), "no such partition");
+        assert_eq!(ledger.read_to(1), None);
     }
 
     /// Pins that a tombstone removes the count, and that the read position

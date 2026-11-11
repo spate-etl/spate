@@ -5735,6 +5735,8 @@ mod cluster {
     fn a_gate_fences_an_attempt_partition_its_follower_stopped_below() {
         let rig = fencing(&[0]);
         std::thread::scope(|scope| {
+            // Ends the pass if an assertion fails, so the scope can join it.
+            let _stop = super::StopOnDrop(Arc::clone(&rig.core));
             let pass = scope.spawn(|| rig.gate.pass());
             rig.waits(3);
             assert_eq!(rig.fences(0), Vec::<i64>::new(), "a fence before the step");
@@ -5754,6 +5756,8 @@ mod cluster {
     fn a_gate_pass_fences_each_stalled_partition_once() {
         let rig = fencing(&[0, 1]);
         std::thread::scope(|scope| {
+            // Ends the pass if an assertion fails, so the scope can join it.
+            let _stop = super::StopOnDrop(Arc::clone(&rig.core));
             let pass = scope.spawn(|| rig.gate.pass());
             rig.waits(1);
             for _ in 0..3 {
@@ -5775,6 +5779,8 @@ mod cluster {
         rig.read(1, 0, b"other");
         rig.read(1, 1, b"other");
         std::thread::scope(|scope| {
+            // Ends the pass if an assertion fails, so the scope can join it.
+            let _stop = super::StopOnDrop(Arc::clone(&rig.core));
             let pass = scope.spawn(|| rig.gate.pass());
             rig.waits(1);
             rig.read(0, 0, b"other");
@@ -5794,6 +5800,8 @@ mod cluster {
     fn a_stopping_feed_writes_no_fence() {
         let rig = fencing(&[0]);
         std::thread::scope(|scope| {
+            // Ends the pass if an assertion fails, so the scope can join it.
+            let _stop = super::StopOnDrop(Arc::clone(&rig.core));
             let pass = scope.spawn(|| rig.gate.pass());
             rig.waits(1);
             rig.core.lock().stopping = true;

@@ -1715,17 +1715,16 @@ impl Source for KafkaSource {
                 let why = format!("{} consumers cannot be allocated", self.config.consumers);
                 SourceError::fatal(at.invalid("consumers", why).to_string())
             })?;
+        // Every consumer has the one `rdkafka` passthrough, so the first one's
+        // bound is each one's.
+        let first = crate::config::Consumer::member(&self.config, 0);
+        let cc = self
+            .config
+            .base(crate::security::openssl_env_overrides())
+            .config(&first);
+        self.lookup_timeout = crate::client::committed_lookup_timeout(&cc);
         for k in 0..self.config.consumers {
             let role = crate::config::Consumer::member(&self.config, k);
-            // Every consumer has the one `rdkafka` passthrough, so the first
-            // one's bound is each one's.
-            if k == 0 {
-                let cc = self
-                    .config
-                    .base(crate::security::openssl_env_overrides())
-                    .config(&role);
-                self.lookup_timeout = crate::client::committed_lookup_timeout(&cc);
-            }
             // Resolve the connector-owned metric handles once, before the
             // poll loop, and only when statistics are enabled. With
             // `statistics_interval: 0s` librdkafka never emits a snapshot, so

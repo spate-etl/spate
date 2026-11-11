@@ -101,6 +101,14 @@ use std::time::Duration;
 /// above any working value, and keeps the sum inside `Instant`'s range.
 const ONE_DAY: Duration = Duration::from_secs(24 * 60 * 60);
 
+/// `checkpoint.interval`. The commit loop adds it to a clock reading.
+const COMMIT_INTERVAL: DurationBounds =
+    DurationBounds::at_least(Duration::from_millis(100)).at_most(ONE_DAY);
+
+/// `checkpoint.drain_timeout`. The controller adds it to a clock reading.
+const DRAIN_TIMEOUT: DurationBounds =
+    DurationBounds::at_least(Duration::from_nanos(1)).at_most(ONE_DAY);
+
 /// Root of a pipeline's configuration file.
 ///
 /// One process runs one pipeline; one file configures one process.
@@ -634,8 +642,6 @@ impl PipelineConfig {
         // A floor keeps sub-100ms intervals from hammering the source's
         // offset store for no durability gain. The sink write is the
         // durability boundary, not the checkpoint.
-        // The ceiling keeps the interval, which is added to a clock reading,
-        // inside the clock's range.
         const COMMIT_INTERVAL_FLOOR: DurationBounds =
             DurationBounds::at_least(Duration::from_millis(100));
         if let Err(e) = check_duration(self.checkpoint.interval, COMMIT_INTERVAL_FLOOR) {
@@ -645,18 +651,12 @@ impl PipelineConfig {
                  improving durability"
             ));
         }
-        if let Err(e) = check_duration(
-            self.checkpoint.interval,
-            COMMIT_INTERVAL_FLOOR.at_most(ONE_DAY),
-        ) {
+        if let Err(e) = check_duration(self.checkpoint.interval, COMMIT_INTERVAL) {
             return fail(format!("checkpoint.interval {e}"));
         }
         if self.checkpoint.max_pending_batches == 0 {
             return fail("checkpoint.max_pending_batches must be at least 1".into());
         }
-        // The timeout is added to a clock reading as well.
-        const DRAIN_TIMEOUT: DurationBounds =
-            DurationBounds::at_least(Duration::from_nanos(1)).at_most(ONE_DAY);
         if let Err(e) = check_duration(self.checkpoint.drain_timeout, DRAIN_TIMEOUT) {
             return fail(format!("checkpoint.drain_timeout {e}"));
         }
@@ -759,6 +759,31 @@ impl PipelineConfig {
             }
             _ => Ok(()),
         }
+    }
+
+    /// Reject a `checkpoint.interval` or `checkpoint.drain_timeout` above a
+    /// day, which is past what the controller can add to a clock reading.
+    /// Split out of [`validate`](Self::validate) so the runtime, which a
+    /// programmatic config reaches without validation, enforces it too. A
+    /// value under its floor passes here.
+    pub(crate) fn reject_checkpoint_above_a_day(&self) -> Result<(), ConfigError> {
+        for (key, value, bounds) in [
+            (
+                "checkpoint.interval",
+                self.checkpoint.interval,
+                COMMIT_INTERVAL,
+            ),
+            (
+                "checkpoint.drain_timeout",
+                self.checkpoint.drain_timeout,
+                DRAIN_TIMEOUT,
+            ),
+        ] {
+            // Raised to a day, a value under its floor is in range.
+            check_duration(value.max(ONE_DAY), bounds)
+                .map_err(|e| ConfigError::Validation(format!("{key} {e}")))?;
+        }
+        Ok(())
     }
 
     /// Reject a `feed.settling_window` outside 20 s to 24 h: shorter than the

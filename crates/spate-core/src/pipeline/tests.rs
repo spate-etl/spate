@@ -3052,6 +3052,36 @@ fn a_settling_window_above_a_day_passed_in_is_refused() {
     );
 }
 
+/// Pins that `run` refuses a `checkpoint.interval` or
+/// `checkpoint.drain_timeout` above a day set on a config built in code,
+/// naming the key, and takes each at a day and under its load-time floor.
+/// Regression for #1830.
+#[test]
+fn a_checkpoint_duration_above_a_day_passed_in_is_refused() {
+    const DAY: Duration = Duration::from_secs(24 * 60 * 60);
+    type Set = fn(&mut PipelineConfig, Duration);
+    let keys: [(&str, Set); 2] = [
+        ("checkpoint.interval", |cfg, d| cfg.checkpoint.interval = d),
+        ("checkpoint.drain_timeout", |cfg, d| {
+            cfg.checkpoint.drain_timeout = d;
+        }),
+    ];
+    for (key, set) in keys {
+        for over in [DAY + Duration::from_nanos(1), Duration::MAX] {
+            let mut cfg = test_config(1);
+            set(&mut cfg, over);
+            let err = config_error_before_open(start_with_config(cfg, ok_chain));
+            assert!(err.contains(key) && err.contains("1day"), "{err}");
+        }
+        for within in [DAY, Duration::from_nanos(1)] {
+            let mut cfg = test_config(1);
+            set(&mut cfg, within);
+            cfg.reject_checkpoint_above_a_day()
+                .unwrap_or_else(|e| panic!("{key} {within:?}: {e}"));
+        }
+    }
+}
+
 /// Pins that `Source::configure_feed`'s default refuses the section, naming
 /// the source, so a source that reads no feed fails at startup.
 #[test]

@@ -380,6 +380,9 @@ impl<S: Source + 'static> PipelineRuntime<S> {
         self.config
             .reject_bad_settling_window()
             .map_err(|e| StartError::Config(e.to_string()))?;
+        self.config
+            .reject_checkpoint_above_a_day()
+            .map_err(|e| StartError::Config(e.to_string()))?;
         if let (Some(section), Some((feed, origin))) = (&self.config.feed, &self.feed) {
             let named = section.backend().type_tag();
             if feed.backend() != named {

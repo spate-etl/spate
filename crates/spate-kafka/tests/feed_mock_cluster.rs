@@ -746,15 +746,24 @@ fn an_assignment_on_another_topic_stops_the_feed() {
 }
 
 /// A message at offset `i64::MAX`, the top of the offset range, stops the
-/// feed before it is delivered: no position exists to commit past it.
+/// feed before it is delivered: no position exists to commit past it. The
+/// unit read in the same fetch before it is not handed out either.
 #[test]
 fn a_message_at_the_top_of_the_offset_range_stops_the_feed() {
     let cluster = cluster(1);
     let brokers = cluster.bootstrap_servers();
     let first = brokers.split(',').next().unwrap().to_owned();
+    let before = RawBatch {
+        crc: support::BatchCrc::Computed,
+        key: Some(b"before"),
+        value: b"body",
+        ..RawBatch::default()
+    }
+    .encode();
+    assert_eq!(produce_batch(&first, WORK, 0, &before), 0);
     let top = RawBatch {
         crc: support::BatchCrc::Computed,
-        record_offset_delta: i64::MAX,
+        record_offset_delta: i64::MAX - 1,
         key: Some(b"top"),
         value: b"body",
         ..RawBatch::default()

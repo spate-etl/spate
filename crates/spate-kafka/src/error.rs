@@ -118,6 +118,26 @@ pub(crate) fn classify_consumer_error(code: RDKafkaErrorCode, after_startup: boo
     }
 }
 
+/// Whether `code` ends an idempotent producer for good: librdkafka's own
+/// fatal error, or a cause it makes fatal for such a producer. rdkafka
+/// reports a fatal error under its cause's code, `Fenced` among them, the
+/// code librdkafka gives a producer id refused for an old epoch.
+pub(crate) fn ends_idempotent_producer(code: RDKafkaErrorCode) -> bool {
+    use RDKafkaErrorCode as C;
+    matches!(
+        code,
+        C::Fatal
+            | C::ClusterAuthorizationFailed
+            | C::OutOfOrderSequenceNumber
+            | C::InvalidProducerEpoch
+            | C::InvalidProducerIdMapping
+            | C::UnknownProducerId
+            | C::Fenced
+            | C::Inconsistent
+            | C::GaplessGuarantee
+    )
+}
+
 /// Whether an error callback's `code` and `text` report a rejection: a SASL
 /// authentication failure or a [`tls_rejection`]. An `Authentication` error
 /// whose text says the SASL mechanism handshake failed on a local error, such

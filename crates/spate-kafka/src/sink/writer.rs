@@ -399,17 +399,13 @@ pub(crate) fn report_class(code: Option<RDKafkaErrorCode>) -> ErrorClass {
         Some(
             C::UnknownTopicOrPartition
             | C::TopicAuthorizationFailed
-            | C::ClusterAuthorizationFailed
             | C::Authentication
             | C::SaslAuthenticationFailed
             | C::InvalidRequiredAcks
             | C::MessageSizeTooLarge
-            | C::PolicyViolation
-            | C::Fatal
-            | C::OutOfOrderSequenceNumber
-            | C::InvalidProducerEpoch
-            | C::InvalidProducerIdMapping,
+            | C::PolicyViolation,
         ) => ErrorClass::Fatal,
+        Some(code) if crate::error::ends_idempotent_producer(code) => ErrorClass::Fatal,
         _ => ErrorClass::Retryable,
     }
 }
@@ -449,6 +445,10 @@ mod tests {
             C::OutOfOrderSequenceNumber,
             C::InvalidProducerEpoch,
             C::InvalidProducerIdMapping,
+            C::UnknownProducerId,
+            C::Fenced,
+            C::Inconsistent,
+            C::GaplessGuarantee,
         ];
         for code in fatal {
             assert_eq!(

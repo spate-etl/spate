@@ -116,8 +116,8 @@ together. That build was 6–24% faster than Cargo's defaults on two hosts.
 
 Rust builds for a baseline CPU of each architecture unless you pass
 `-C target-cpu`. Every raised target stayed within 2% of the default on the
-measured pipeline. A binary built for a newer CPU can stop with an illegal
-instruction on an older one. Leave the target at its default.
+measured pipeline. Running a binary built for a newer CPU on an older one is
+undefined behavior. Leave the target at its default.
 
 :::note Connector specifics
 What the build changes in one connector:

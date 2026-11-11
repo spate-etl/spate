@@ -39,7 +39,7 @@
 use crate::config::{Clock, DatagenSourceConfig};
 use crate::dims::{CUSTOMERS, REFUND_REASONS, REGIONS, SKUS, UNIT_CENTS};
 use crate::events::{OrderLine, OrderPlaced, PaymentCaptured, RefundIssued, StorefrontEvent};
-use crate::rng::SplitMix64;
+use crate::rng::{self, SplitMix64};
 use std::borrow::Cow;
 use std::time::UNIX_EPOCH;
 
@@ -47,7 +47,7 @@ use std::time::UNIX_EPOCH;
 /// lane's footprint does not grow with its runtime.
 const RING_CAPACITY: usize = 256;
 
-/// The categorical mix, as cumulative thresholds over `rng.below(100)`.
+/// The categorical mix, as cumulative thresholds over `rng::below(_, 100)`.
 const PLACE_THRESHOLD: u32 = 60;
 const CAPTURE_THRESHOLD: u32 = 95;
 
@@ -96,7 +96,7 @@ impl Ring {
         if self.slots.is_empty() {
             return None;
         }
-        let index = rng.below(self.slots.len() as u32) as usize;
+        let index = rng::below(rng, self.slots.len() as u32) as usize;
         Some(self.slots.swap_remove(index))
     }
 }
@@ -164,7 +164,7 @@ impl EventPlan {
     pub(crate) fn next(&mut self) -> (StorefrontEvent, i64) {
         let at = self.event_time();
         self.produced += 1;
-        let draw = self.rng.below(100);
+        let draw = rng::below(&mut self.rng, 100);
         let event = if draw < PLACE_THRESHOLD {
             self.place(at)
         } else if draw < CAPTURE_THRESHOLD {
@@ -200,12 +200,12 @@ impl EventPlan {
         let order_id = self.minted * self.partitions + self.lane_index;
         self.minted += 1;
 
-        let line_count = self.rng.between(1, 5);
+        let line_count = rng::between(&mut self.rng, 1, 5);
         let mut lines = Vec::with_capacity(line_count as usize);
         let mut amount_cents = 0u64;
         for _ in 0..line_count {
-            let item = self.rng.below(SKUS.len() as u32) as usize;
-            let qty = self.rng.between(1, 5);
+            let item = rng::below(&mut self.rng, SKUS.len() as u32) as usize;
+            let qty = rng::between(&mut self.rng, 1, 5);
             let unit_cents = UNIT_CENTS[item];
             amount_cents += u64::from(qty) * u64::from(unit_cents);
             lines.push(OrderLine {
@@ -221,8 +221,10 @@ impl EventPlan {
         });
         StorefrontEvent::OrderPlaced(OrderPlaced {
             order_id,
-            customer_id: self.rng.below(CUSTOMERS),
-            region: Cow::Borrowed(REGIONS[self.rng.below(REGIONS.len() as u32) as usize]),
+            customer_id: rng::below(&mut self.rng, CUSTOMERS),
+            region: Cow::Borrowed(
+                REGIONS[rng::below(&mut self.rng, REGIONS.len() as u32) as usize],
+            ),
             placed_at: at,
             lines,
         })
@@ -243,8 +245,9 @@ impl EventPlan {
         // The whole of what was captured, or its half, third or quarter
         // rounded down, never more, which is the property a downstream
         // balance check depends on.
-        let share = u64::from(self.rng.between(1, 4));
-        let reason = REFUND_REASONS[self.rng.below(REFUND_REASONS.len() as u32) as usize];
+        let share = u64::from(rng::between(&mut self.rng, 1, 4));
+        let reason =
+            REFUND_REASONS[rng::below(&mut self.rng, REFUND_REASONS.len() as u32) as usize];
         Some(StorefrontEvent::RefundIssued(RefundIssued {
             order_id: pending.order_id,
             amount_cents: pending.amount_cents / share,
@@ -520,7 +523,7 @@ mod tests {
         for index in 0..10_000 {
             // A fall-through is a draw outside the placement band that
             // produced a placement anyway.
-            let draw_is_placement = plan.rng.clone().below(100) < PLACE_THRESHOLD;
+            let draw_is_placement = rng::below(&mut plan.rng.clone(), 100) < PLACE_THRESHOLD;
             let event = plan.next().0;
             if !draw_is_placement && matches!(event, StorefrontEvent::OrderPlaced(_)) {
                 fell_through.push(index);

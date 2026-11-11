@@ -9,6 +9,7 @@
 
 use crate::codec::{BlockCodec, BlockMethod};
 use crate::distributed::{self, DistributedCheckError};
+use crate::http::StartupBound;
 use crate::router::{DistributedRouter, KeyExtractor};
 use crate::schema::{self, RowSchema, SchemaError};
 use crate::writer::{ClickHouseEndpoint, ClickHouseWriter};
@@ -16,7 +17,7 @@ use bytes::Bytes;
 use rustls::ClientConfig;
 use rustls_native_certs::CertificateResult;
 use serde::{Deserialize, Deserializer, de};
-use spate_core::config::{ComponentConfig, ConfigError, SectionPath, redact};
+use spate_core::config::{ComponentConfig, ConfigError, SectionPath, UrlRule, redact};
 use spate_core::deser::RecFamily;
 use spate_core::sink::{
     BatchConfig, BreakerConfig, FrameCodecFactory, InflightConfig, RetryConfig, SinkBundle,
@@ -46,7 +47,7 @@ pub(crate) const TAG: &str = "clickhouse";
 ///     inflight: { max_per_shard: 2 }
 ///     retry: { initial: 100ms, max: 10s, multiplier: 2.0, jitter: 0.2, max_attempts: 0 }
 ///     breaker: { failure_threshold: 3, open_for: 5s, half_open_probes: 1 }
-///     timeouts: { send: 30s, end: 180s }
+///     timeouts: { send: 30s, end: 180s, startup: 30s }
 ///     compression: lz4               # off | lz4 | zstd | zstd:<1-22>
 ///     settings: { insert_quorum: "auto" }   # extra per-insert settings
 /// ```
@@ -92,7 +93,7 @@ pub struct ClickHouseSinkConfig {
     /// Per-replica circuit breaker.
     #[serde(default)]
     pub breaker: BreakerConfig,
-    /// Client-side send/end timeouts.
+    /// Client-side timeouts for one insert, and for one startup request.
     #[serde(default)]
     pub timeouts: TimeoutSection,
     /// Transport compression of insert bodies. `lz4` by
@@ -452,7 +453,7 @@ pub struct TlsSection {
     pub root_ca: Option<PathBuf>,
 }
 
-/// Client-side timeouts for one insert.
+/// Client-side timeouts for one insert, and for one startup request.
 ///
 /// Construct with [`TimeoutSection::default`] and set the fields. The
 /// struct is `#[non_exhaustive]` so new knobs can be added without breaking
@@ -468,6 +469,11 @@ pub struct TimeoutSection {
     /// materialized views included.
     #[serde(with = "humantime_serde")]
     pub end: Option<Duration>,
+    /// Timeout of each request the sink sends a replica while it is built:
+    /// the schema read, the settings check and the `distributed_check`
+    /// queries.
+    #[serde(with = "humantime_serde")]
+    pub startup: Option<Duration>,
 }
 
 impl Default for TimeoutSection {
@@ -475,6 +481,7 @@ impl Default for TimeoutSection {
         TimeoutSection {
             send: Some(Duration::from_secs(30)),
             end: Some(Duration::from_secs(180)),
+            startup: Some(Duration::from_secs(30)),
         }
     }
 }
@@ -491,6 +498,7 @@ pub struct ClickHouseSinkBuilder {
     shard_weights: Arc<[u32]>,
     pool: SinkPoolConfig,
     distributed: Option<distributed::DistributedCheck>,
+    startup: StartupBound,
 }
 
 impl ClickHouseSinkBuilder {
@@ -520,7 +528,9 @@ impl ClickHouseSinkBuilder {
     /// replica's columns cannot be read, [`SchemaError::Mismatch`] when the
     /// table is missing, the replicas disagree or a declared column does not
     /// fit it, and [`SchemaError::Settings`] when a replica answers the
-    /// settings check with an error.
+    /// settings check with an error. A replica that gives a request no
+    /// answer within `timeouts.startup` fails that request's variant,
+    /// [`SchemaError::Fetch`] or [`SchemaError::Settings`].
     pub async fn with_row<F: crate::ClickHouseRowFamily>(
         self,
     ) -> Result<ClickHouseSink, SchemaError> {
@@ -536,7 +546,7 @@ impl ClickHouseSinkBuilder {
             table: self.cfg.table.clone(),
             columns: F::COLUMNS,
         };
-        let schema = schema::validate(&check, &self.endpoints).await?;
+        let schema = schema::validate(&check, &self.endpoints, &self.startup).await?;
 
         let insert_sql = insert_statement(&self.cfg.table, F::COLUMNS, self.cfg.format);
         let frame_codec = BlockCodec::factory(self.cfg.compression);
@@ -563,12 +573,12 @@ impl ClickHouseSinkBuilder {
             self.cfg.timeouts.end,
         );
         for endpoint in self.endpoints.iter().flatten() {
-            writer
-                .check_settings(endpoint)
+            self.startup
+                .request(writer.check_settings(endpoint))
                 .await
-                .map_err(|e| SchemaError::Settings {
+                .map_err(|reason| SchemaError::Settings {
                     url: endpoint.display_url().to_string(),
-                    reason: crate::http::error_reason(&e),
+                    reason,
                 })?;
         }
         tracing::info!(
@@ -782,6 +792,7 @@ fn build_with(
     let probe_endpoints = Arc::new(make_endpoints(&cfg, &tls));
 
     let shard_weights: Arc<[u32]> = cfg.shards.iter().map(|s| s.weight).collect();
+    let startup = StartupBound::new(cfg.timeouts.startup);
     let distributed = cfg.distributed_check.as_ref().map(|section| {
         let url = section
             .endpoint
@@ -795,6 +806,7 @@ fn build_with(
         };
         distributed::DistributedCheck {
             endpoint,
+            startup: startup.clone(),
             cluster: section.cluster.clone(),
             database: cfg.database.clone(),
             table: section.table.clone(),
@@ -822,6 +834,7 @@ fn build_with(
         shard_weights,
         pool,
         distributed,
+        startup,
     })
 }
 
@@ -867,19 +880,9 @@ fn validate(cfg: &ClickHouseSinkConfig, at: &SectionPath) -> Result<(), ConfigEr
             return Err(at.invalid(&format!("shards[{i}].replicas"), "must not be empty"));
         }
         for (j, url) in shard.replicas.iter().enumerate() {
-            let key = format!("shards[{i}].replicas[{j}]");
-            if !(url.starts_with("http://") || url.starts_with("https://")) {
-                return Err(at.invalid(
-                    &key,
-                    format!("`{}` is not an http(s) URL", redact::url(url)),
-                ));
-            }
-            if has_credentials(url) {
-                return Err(at.invalid(
-                    &key,
-                    "URL contains credentials; set them in user and password",
-                ));
-            }
+            ENDPOINT
+                .check(url)
+                .map_err(|e| at.invalid(&format!("shards[{i}].replicas[{j}]"), e.to_string()))?;
         }
         // Weights are ClickHouse interval widths: a zero-weight shard
         // receives nothing under Distributed parity and breaks the
@@ -966,18 +969,9 @@ fn validate(cfg: &ClickHouseSinkConfig, at: &SectionPath) -> Result<(), ConfigEr
             _ => {}
         }
         if let Some(url) = &check.endpoint {
-            if !(url.starts_with("http://") || url.starts_with("https://")) {
-                return Err(at.invalid(
-                    "distributed_check.endpoint",
-                    format!("`{}` is not an http(s) URL", redact::url(url)),
-                ));
-            }
-            if has_credentials(url) {
-                return Err(at.invalid(
-                    "distributed_check.endpoint",
-                    "URL contains credentials; set them in user and password",
-                ));
-            }
+            ENDPOINT
+                .check(url)
+                .map_err(|e| at.invalid("distributed_check.endpoint", e.to_string()))?;
         }
     }
     if cfg.tls.root_ca.is_some() && !uses_https(cfg) {
@@ -989,20 +983,20 @@ fn validate(cfg: &ClickHouseSinkConfig, at: &SectionPath) -> Result<(), ConfigEr
     Ok(())
 }
 
-/// Whether `url` carries userinfo, as the `clickhouse` client's URL parser
-/// reads it.
-fn has_credentials(url: &str) -> bool {
-    url::Url::parse(url).is_ok_and(|u| !u.username().is_empty() || u.password().is_some())
-}
+/// The rule each replica and `distributed_check.endpoint` URL meets. The
+/// `clickhouse` client parses its URL with the same parser.
+const ENDPOINT: UrlRule<'static> =
+    UrlRule::new("set them in user and password").schemes(&["http", "https"]);
 
-/// Whether any replica or the `distributed_check` endpoint is `https://`.
+/// Whether any replica or the `distributed_check` endpoint is `https://`, in
+/// any case.
 fn uses_https(cfg: &ClickHouseSinkConfig) -> bool {
     let check = cfg.distributed_check.as_ref();
     cfg.shards
         .iter()
         .flat_map(|shard| &shard.replicas)
         .chain(check.and_then(|c| c.endpoint.as_ref()))
-        .any(|url| url.starts_with("https://"))
+        .any(|url| ENDPOINT.check(url).is_ok_and(|url| url.scheme() == "https"))
 }
 
 /// Strict identifier: `[A-Za-z_][A-Za-z0-9_]*`. Validated before being
@@ -1067,7 +1061,10 @@ fn insert_statement(table: &str, columns: &[&str], format: Format) -> String {
 mod tests {
     use super::*;
     use crate::ClickHouseRow;
+    use crate::test_startup;
+    use clickhouse::test::{Mock, handlers};
     use serde::Serialize;
+    use spate_core::clock::SyncClock;
     use spate_core::config::ComponentConfig;
     use spate_core::deser::Owned;
     use spate_core::sink::{BreakerConfigError, RetryConfigError, SinkPoolConfigError};
@@ -1161,7 +1158,7 @@ shards:
         )));
         assert_eq!(
             err,
-            "sink.clickhouse.shards[0].replicas[0]: `<redacted>@a:8123` is not an http(s) URL"
+            "sink.clickhouse.shards[0].replicas[0]: has no `//` after its scheme"
         );
     }
 
@@ -1174,6 +1171,10 @@ shards:
         let cases = [
             (
                 "shards: [{replicas: ['http://svc:hunter2@a:8123']}]\n".to_owned(),
+                "shards[0].replicas[0]",
+            ),
+            (
+                "shards: [{replicas: ['HTTP://svc:hunter2@a:8123']}]\n".to_owned(),
                 "shards[0].replicas[0]",
             ),
             (
@@ -1199,9 +1200,7 @@ shards:
             ))));
             assert_eq!(
                 err,
-                format!(
-                    "sink.clickhouse.{key}: URL contains credentials; set them in user and password"
-                )
+                format!("sink.clickhouse.{key}: carries userinfo; set them in user and password")
             );
         }
 
@@ -1372,6 +1371,156 @@ settings: { insert_quorum: "auto" }
             "INSERT INTO `events` (`id`, `tags.key`, `tags.value`) \
              FORMAT RowBinaryWithNamesAndTypes"
         );
+    }
+
+    /// `builder` with its startup bound, and its `distributed_check`'s, on
+    /// `clock`.
+    fn on_clock(mut builder: ClickHouseSinkBuilder, clock: &SyncClock) -> ClickHouseSinkBuilder {
+        builder.startup.clock = clock.clone();
+        if let Some(check) = &mut builder.distributed {
+            check.startup.clock = clock.clone();
+        }
+        builder
+    }
+
+    /// A builder for table `t` on one replica at `url`, with a 7 s startup
+    /// bound on `clock` and `extra` appended to its section.
+    fn bounded_builder(url: &str, clock: &SyncClock, extra: &str) -> ClickHouseSinkBuilder {
+        let section = format!(
+            "table: t\nshards: [{{replicas: [\"{url}\"]}}]\ntimeouts: {{ startup: 7s }}\n{extra}"
+        );
+        on_clock(from_component_config(&component(&section)).unwrap(), clock)
+    }
+
+    const STARTUP: Duration = Duration::from_secs(7);
+    const NO_ANSWER: &str = "no answer within 7s, the `timeouts.startup` bound";
+
+    fn id_column() -> Vec<crate::schema::ColumnRow> {
+        crate::testing::system_columns(&[("id", "UInt64", "")])
+    }
+
+    /// A replica that accepts the schema read and never answers it fails the
+    /// build once `timeouts.startup` has passed, with an error naming the
+    /// replica and the bound. Regression for #1953.
+    #[test]
+    fn a_replica_that_never_answers_fails_the_build_at_the_startup_bound() {
+        let io = test_startup::runtime();
+        let (clock, given) = test_startup::frozen();
+        let _in = io.enter();
+        let mock = Mock::new();
+        let (url, held) = test_startup::silent_after(&io, &mock, 0);
+        let build =
+            bounded_builder(&url, &given, "").with_row::<spate_core::deser::Owned<IdOnly>>();
+        let err = test_startup::past_the_bound(&io, &clock, STARTUP, &held, build).unwrap_err();
+        let SchemaError::Fetch {
+            url: named, reason, ..
+        } = err
+        else {
+            panic!("expected the schema read to fail: {err}");
+        };
+        assert_eq!((named, reason.as_str()), (url, NO_ANSWER));
+    }
+
+    /// A replica that answers the schema read and never answers the settings
+    /// check fails the build at the startup bound.
+    #[test]
+    fn a_settings_check_with_no_answer_fails_the_build_at_the_startup_bound() {
+        let io = test_startup::runtime();
+        let (clock, given) = test_startup::frozen();
+        let _in = io.enter();
+        let mock = Mock::new();
+        mock.add(handlers::provide(id_column()));
+        let (url, held) = test_startup::silent_after(&io, &mock, 1);
+        let build =
+            bounded_builder(&url, &given, "").with_row::<spate_core::deser::Owned<IdOnly>>();
+        let err = test_startup::past_the_bound(&io, &clock, STARTUP, &held, build).unwrap_err();
+        let SchemaError::Settings { url: named, reason } = err else {
+            panic!("expected the settings check to fail: {err}");
+        };
+        assert_eq!((named, reason.as_str()), (url, NO_ANSWER));
+    }
+
+    /// Each `distributed_check` query that gets no answer fails the check at
+    /// the startup bound, naming the query.
+    #[test]
+    fn a_distributed_check_query_with_no_answer_fails_at_the_startup_bound() {
+        #[derive(Serialize, clickhouse::Row)]
+        struct ClusterRow {
+            shard_num: u32,
+            shard_weight: u32,
+            host_name: String,
+        }
+        const CHECK: &str = "distributed_check: { cluster: prod, table: t_dist, sharding_key: id }";
+        for (answered, query) in [(0, "cluster topology"), (1, "table engine")] {
+            let io = test_startup::runtime();
+            let (clock, given) = test_startup::frozen();
+            let _in = io.enter();
+            let mock = Mock::new();
+            mock.add(handlers::provide(id_column()));
+            mock.add(handlers::provide::<u8>([1u8]));
+            if answered == 1 {
+                mock.add(handlers::provide([ClusterRow {
+                    shard_num: 1,
+                    shard_weight: 1,
+                    host_name: "127.0.0.1".into(),
+                }]));
+            }
+            let (url, held) = test_startup::silent_after(&io, &mock, 2 + answered);
+            let sink = io
+                .block_on(
+                    bounded_builder(&url, &given, CHECK)
+                        .with_row::<spate_core::deser::Owned<IdOnly>>(),
+                )
+                .expect("the replica answers the build");
+            let checked = async move { sink.validate_distributed().await };
+            let err =
+                test_startup::past_the_bound(&io, &clock, STARTUP, &held, checked).unwrap_err();
+            let DistributedCheckError::Fetch {
+                what,
+                url: named,
+                reason,
+            } = err
+            else {
+                panic!("expected the {query} query to fail: {err}");
+            };
+            assert_eq!((what, named, reason.as_str()), (query, url, NO_ANSWER));
+        }
+    }
+
+    /// A build on a runtime with no timer returns the replica's error.
+    #[test]
+    fn a_build_on_a_runtime_without_a_timer_returns_the_replicas_error() {
+        let refusing = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = refusing.local_addr().unwrap();
+        drop(refusing);
+        let io = tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .build()
+            .unwrap();
+        let section = format!("table: t\nshards: [{{replicas: [\"http://{addr}\"]}}]");
+        let err = io
+            .block_on(
+                from_component_config(&component(&section))
+                    .unwrap()
+                    .with_row::<spate_core::deser::Owned<IdOnly>>(),
+            )
+            .unwrap_err();
+        assert!(matches!(err, SchemaError::Fetch { .. }), "{err}");
+    }
+
+    /// The startup bound is 30 s unless `timeouts.startup` sets it.
+    #[test]
+    fn the_startup_bound_defaults_to_thirty_seconds() {
+        assert_eq!(
+            TimeoutSection::default().startup,
+            Some(Duration::from_secs(30))
+        );
+        let sink = from_component_config(&component(
+            "table: t\nshards: [{replicas: [\"http://a:8123\"]}]\ntimeouts: { startup: 5s }",
+        ))
+        .unwrap();
+        assert_eq!(sink.cfg.timeouts.startup, Some(Duration::from_secs(5)));
+        assert_eq!(sink.cfg.timeouts.send, Some(Duration::from_secs(30)));
     }
 
     /// `ClickHouseRowFamily` can be hand-written for a borrowed record
@@ -1794,6 +1943,12 @@ settings: { insert_quorum: "auto" }
 
     #[test]
     fn tls_root_ca_parses_and_requires_an_https_url() {
+        // The scheme is read in any case, as the client reads it.
+        let upper =
+            "table: t\nshards: [{replicas: [\"HTTPS://a\"]}]\ntls: {root_ca: /etc/ca.pem}\n";
+        let cfg: ClickHouseSinkConfig = serde_yaml::from_str(upper).unwrap();
+        validate(&cfg, &SectionPath::sink("clickhouse")).expect("an HTTPS:// replica is https");
+
         let yaml = "table: t\nshards: [{replicas: [\"https://a\"]}]\ntls: {root_ca: /etc/ca.pem}\n";
         let cfg: ClickHouseSinkConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(cfg.tls.root_ca, Some(PathBuf::from("/etc/ca.pem")));
@@ -2015,7 +2170,7 @@ settings: { insert_quorum: "auto" }
             (
                 "shards:\n  - replicas: [\"http://a\"]\n  - replicas: [\"http://b\", \"ftp://c\"]\n"
                     .to_owned(),
-                "shards[1].replicas[1]: `ftp://c` is not an http(s) URL",
+                "shards[1].replicas[1]: must be a URL with scheme http or https; found ftp",
             ),
             (
                 "shards:\n  - replicas: [\"http://a\"]\n  - replicas: [\"http://b\"]\n    weight: 0\n"
@@ -2048,11 +2203,15 @@ settings: { insert_quorum: "auto" }
             ),
             (
                 check("cluster: c, table: d, sharding_key: id, endpoint: \"ftp://e\""),
-                "distributed_check.endpoint: `ftp://e` is not an http(s) URL",
+                "distributed_check.endpoint: must be a URL with scheme http or https; found ftp",
             ),
             (
                 "shards: [{replicas: [\"http://a\"]}]\ntls: {root_ca: /etc/ca.pem}\n".to_owned(),
                 "tls.root_ca: is set, but no replica or distributed_check.endpoint is https://",
+            ),
+            (
+                "shards: [{replicas: [\"http://u:hunter2@exa mple:8123\"]}]\n".to_owned(),
+                "shards[0].replicas[0]: is not a URL: invalid international domain name",
             ),
         ];
         for (body, want) in cases {

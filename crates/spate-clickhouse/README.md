@@ -35,7 +35,7 @@ sink:
     password: ${CLICKHOUSE_PASSWORD}
     compression: lz4               # off | none | lz4 | zstd | zstd:<1-22>
     format: rowbinary              # rowbinary | native
-    timeouts: { send: 30s, end: 180s }
+    timeouts: { send: 30s, end: 180s, startup: 30s }
     settings: { insert_quorum: "auto" }   # extra per-insert settings
     # batch, inflight, retry and breaker are the framework's sink-pool sections
 ```
@@ -46,9 +46,10 @@ which the
 [sink-pool reference](https://spate.kainth.dev/docs/user-guide/reference/configuration#sink-pool)
 lists.
 
-Loading fails when a shard has no replicas, a replica URL is not `http://` or
-`https://` or carries credentials, a `weight` is 0, or `table` or `database` is
-not a plain identifier. It also fails when `settings` names a setting the sink
+Loading fails when a shard has no replicas, a replica or
+`distributed_check.endpoint` URL does not parse, has a scheme other than `http`
+or `https` in any case, or carries credentials, a `weight` is 0, or `table` or
+`database` is not a plain identifier. It also fails when `settings` names a setting the sink
 manages (listed under [Writes and retries](#writes-and-retries)), and when
 `tls.root_ca` is set and no URL is `https://`. `tls.root_ca` names a PEM bundle
 of CAs trusted beside the system store.

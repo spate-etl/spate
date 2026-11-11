@@ -12,10 +12,10 @@
 //! [`Meter`](spate_core::metrics::Meter) scoped to the `json_deser` namespace;
 //! the per-record path only touches the resolved `Counter`.
 
+use spate_core::metrics::names::L_REASON;
 use spate_core::metrics::{Counter, Meter};
 
 const RECORDS_DROPPED_TOTAL: &str = "records_dropped_total";
-const L_REASON: &str = "reason";
 const REASON_MALFORMED: &str = "malformed";
 const REASON_DUPLICATE_KEY: &str = "duplicate_key";
 

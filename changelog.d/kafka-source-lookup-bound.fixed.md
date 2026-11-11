@@ -1,0 +1,3 @@
+**Kafka source committed-offset read and a short poll interval** (`spate-kafka`)
+
+The Kafka source now bounds the committed-offset reads it makes before an assignment by a quarter of `max.poll.interval.ms`, at most 10 seconds. In previous versions the bound was 10 seconds whatever the interval. With `max.poll.interval.ms` set under 10 seconds, a coordinator that answered slowly could hold the read past the interval, and librdkafka then left the group and the group rebalanced again. No record was lost. Under the shorter bound a read that does not finish in time holds the offered partitions and is tried again. The Kafka feed already bounded its read this way. With the default interval of 300 seconds the bound stays 10 seconds.

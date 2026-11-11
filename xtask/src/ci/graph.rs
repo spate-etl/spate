@@ -13,7 +13,9 @@ use crate::checks::gungraun;
 
 /// The wall-clock benchmark harness. Crates dev-depend on it for their
 /// `benches/*_wall.rs` targets, and cargo builds no bench target for an
-/// `#[ignore]`d test, so the edge reaches no container suite.
+/// `#[ignore]`d test. `spate-test-support` takes it only under its `events`
+/// feature, and no container suite uses what that feature adds. So the edge
+/// reaches no container suite.
 const WALL_BENCH_HARNESS: &str = "spate-bench";
 
 /// The libFuzzer harness. It sits outside `crates/` and owns no `#[ignore]`d

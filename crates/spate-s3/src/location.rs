@@ -13,7 +13,7 @@ use crate::config::Compression;
 use crate::error::store_error;
 use bytes::Bytes;
 use futures_util::StreamExt as _;
-use object_store::aws::AmazonS3Builder;
+use object_store::aws::{AmazonS3, AmazonS3Builder};
 use object_store::path::Path;
 use object_store::{ObjectStore, ObjectStoreExt, ObjectStoreScheme};
 use spate_core::clock::tokio::{Clock, before};
@@ -179,6 +179,12 @@ impl Location {
     }
 }
 
+/// The S3 client `url` alone builds, with nothing read from the environment
+/// and nothing sent. Fails for a host form the client does not parse.
+pub(crate) fn offline_store(url: &Url) -> object_store::Result<AmazonS3> {
+    AmazonS3Builder::new().with_url(url.as_str()).build()
+}
+
 /// The store a URL names, as far as telling two URLs' stores apart needs.
 #[derive(PartialEq, Eq)]
 enum Root {
@@ -189,11 +195,8 @@ enum Root {
 fn root(url: &Url) -> Option<Root> {
     match ObjectStoreScheme::parse(url).ok()?.0 {
         // The builder parses the bucket out of every S3 URL form, so
-        // `object_store` stays the only parser of it. Building reads nothing
-        // and sends nothing.
-        ObjectStoreScheme::AmazonS3 => AmazonS3Builder::new()
-            .with_url(url.as_str())
-            .build()
+        // `object_store` stays the only parser of it.
+        ObjectStoreScheme::AmazonS3 => offline_store(url)
             .ok()
             .and_then(|store| crate::source::scope_bucket(&store))
             .map(Root::Bucket),

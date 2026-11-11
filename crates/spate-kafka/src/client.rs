@@ -33,6 +33,29 @@ use std::ops::Deref;
 use std::sync::Arc;
 use std::time::Duration;
 
+/// The longest the committed-offset read before an assignment may take.
+pub(crate) const COMMITTED_LOOKUP_MAX: Duration = Duration::from_secs(10);
+
+/// librdkafka's default `max.poll.interval.ms`.
+const DEFAULT_MAX_POLL_INTERVAL: Duration = Duration::from_secs(300);
+
+/// The bound on the committed-offset read made before each assignment, for
+/// a consumer configured by `cc`: a quarter of its `max.poll.interval.ms`,
+/// at most 10 s. librdkafka's poll-interval clock keeps running during the
+/// read, and a member that outlasts the interval leaves the group.
+///
+/// The interval is read back from librdkafka, which takes spellings a plain
+/// parse refuses, such as `8000ms`.
+pub(crate) fn committed_lookup_timeout(cc: &ClientConfig) -> Duration {
+    let max_poll = cc
+        .create_native_config()
+        .ok()
+        .and_then(|native| native.get("max.poll.interval.ms").ok())
+        .and_then(|v| v.parse::<u64>().ok())
+        .map_or(DEFAULT_MAX_POLL_INTERVAL, Duration::from_millis);
+    (max_poll / 4).min(COMMITTED_LOOKUP_MAX)
+}
+
 /// Global librdkafka properties whose names start with `topic.`. librdkafka
 /// looks a name up as a global property before it strips `topic.`, so these
 /// keep their prefix.

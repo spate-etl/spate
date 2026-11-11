@@ -1,5 +1,7 @@
-//! The split terminal: route each record to exactly one of N typed sink
-//! branches, each with its own schema, encoder, router, and shard queues.
+//! The split terminal: route each record among N typed sink branches, each
+//! with its own schema, encoder, router, and shard queues. The routing
+//! closure emits a record to any number of branches: usually one, several
+//! for a record that belongs in each, or none.
 //!
 //! Where [`SinkHandoff`](super::handoff::SinkHandoff) is one table, the split
 //! terminal fans a heterogeneously-typed stream out across many. The user

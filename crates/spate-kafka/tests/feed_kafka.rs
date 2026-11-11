@@ -1175,6 +1175,44 @@ fn a_stop_during_a_hold_on(brokers: &str) {
     assert_eq!(run_to_exit(&next, &clock).state, ExitState::Completed);
 }
 
+/// An aborted transaction at the end of each attempt partition leaves the
+/// gate caught up on a real broker: the unit is admitted and read, and the
+/// job completes. Regression for #1765.
+#[test]
+#[ignore = "requires Docker"]
+fn an_aborted_transaction_at_the_end_of_the_attempt_topic_ends_a_bounded_job() {
+    on_transactional_broker(|brokers| {
+        let job = listed(brokers, "attempt-aborted", "");
+        for partition in 0..ATTEMPT_PARTITIONS {
+            let producer =
+                support::transactional_producer(brokers, ATTEMPT, &format!("aborted-{partition}"));
+            producer.begin_transaction().expect("begin");
+            producer
+                .send(
+                    rdkafka::producer::BaseRecord::to(ATTEMPT)
+                        .partition(partition)
+                        .payload(&b"gone"[..])
+                        .key(&b"gone"[..]),
+                )
+                .expect("enqueue");
+            producer.flush(TRANSACTION_TIMEOUT).expect("flush");
+            producer
+                .abort_transaction(TRANSACTION_TIMEOUT)
+                .expect("abort");
+            support::settled_end(brokers, ATTEMPT, partition);
+        }
+        let rows = recs("kept", 2);
+        job.publish("kept.ndjson", &rows);
+
+        let clock = TestClock::frozen();
+        let worker = launch_bounded(KafkaFeed::connect, &job.data, &job.section, &clock);
+        wait_until(HANG, "the unit is admitted and read", || {
+            written(&worker.script) == sorted(rows.clone())
+        });
+        assert_eq!(run_to_exit(&worker, &clock).state, ExitState::Completed);
+    });
+}
+
 /// A dead-letter topic deleted while a bounded job runs fails the job at its
 /// next read of the topic, naming it. Regression for #1756.
 #[test]

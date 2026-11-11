@@ -490,7 +490,7 @@ impl Core {
                     %topic,
                     error = %failure.reason,
                     ?retry_in,
-                    "writing {what} failed; sending it again",
+                    "writing {what} failed; queued to send again after the backoff",
                 );
             }
         }
@@ -847,7 +847,7 @@ fn parts(
     let (core, producer) = producer_parts(config, attempt_partitions, clock)?;
     let base = config.base(openssl_env);
     let role = config.client(FeedRole::Consumer);
-    let lookup_timeout = consumer::committed_lookup_timeout(&base.config(&role));
+    let lookup_timeout = crate::client::committed_lookup_timeout(&base.config(&role));
     let consumer: BaseConsumer<crate::context::SourceContext> = base
         .create(&role, SourceHooks::default())
         .map_err(|reason| {
@@ -1045,6 +1045,12 @@ impl Feed for KafkaFeed {
 
     fn read_depth(&self, of: DepthOf) -> Option<DepthReading> {
         let (reporter, reading) = depth_reading();
+        // The depth thread may be the one that latched the feed, and then
+        // nothing is left to answer.
+        if let Some(fatal) = self.lock().signal.latched().cloned() {
+            reporter.report(Err(fatal));
+            return Some(reading);
+        }
         if let Some(depth) = &self.depth {
             // A depth thread that has ended drops the reporter, and the
             // reading settles Retryable.

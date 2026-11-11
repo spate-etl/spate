@@ -1,0 +1,3 @@
+**Kafka feed and a transaction marker on the attempt topic** (`spate-kafka`)
+
+The Kafka feed now admits units when the last offset of an attempt partition is a transaction marker. A marker takes an offset and is never delivered, so the feed's follower now passes it by its read position. In previous versions the follower never counted that offset as read, the gate waited for it for ever, every unit that hashed to that partition stayed unread, and a bounded job never ended. The feed's own clients write no transactions, so this takes another transactional producer writing to the attempt topic. An open transaction on the attempt topic is a separate case and is unchanged.

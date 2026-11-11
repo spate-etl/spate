@@ -568,8 +568,10 @@ without being read.
 A unit's offset finishes only once the write that settles it is confirmed. An
 attempt, tombstone, retry or dead-letter write that fails transiently, or gets
 no report within `delivery_timeout`, is sent again after a backoff from 200 ms
-up to 5 s, and its partition's commits wait for it. An attempt write is sent
-again only while the worker still owns the unit's partition. A write that
+up to 5 s, and its partition's commits wait for it. A write waiting out its
+backoff is sent only while the worker still owns the unit's partition and the
+feed is running. Otherwise it is dropped, the unit's offset stays unfinished,
+and the unit is read again. A write that
 retrying cannot fix stops the feed and the pipeline: a refused authorization,
 a message over the topic's size limit, or a fenced producer. [Topics](#topics)
 covers a write to a missing topic. A unit written to the retry topic is a new
@@ -602,6 +604,11 @@ would read no further on that partition, or moves its fetch position to an
 offset read from the wrong bytes, where `auto.offset.reset` decides what is read
 next. A feed that has stopped commits nothing more, so the next owner of the
 partition reads it again from the last commit.
+
+The feed leaves `check.crcs` off unless the `rdkafka` passthrough sets it. With
+it off, a batch whose bytes no longer match its checksum is delivered as read,
+as it is for the
+[Kafka source](../../sources/kafka/README.mdx#how-offsets-are-committed).
 
 ## What counting costs
 

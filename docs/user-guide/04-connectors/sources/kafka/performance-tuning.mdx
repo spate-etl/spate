@@ -265,6 +265,8 @@ it. It is on the framework-owned denylist, because EOF events would pollute the
 partition queues the pipeline polls, so you cannot change it either way.
 Advice to disable both for throughput is written for the Java client, where
 `check.crcs` defaults to true. There is nothing to win.
+[How offsets are committed](README.mdx#how-offsets-are-committed) says what a
+corrupt batch does with the check off.
 
 ## Sizing threads for the chain
 

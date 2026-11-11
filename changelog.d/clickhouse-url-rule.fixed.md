@@ -1,0 +1,5 @@
+**The ClickHouse sink reads a replica URL's scheme in any case, and refuses one that does not parse** (`spate-clickhouse`)
+
+A replica or `distributed_check.endpoint` URL is parsed at load, the way the ClickHouse client parses it. A URL whose scheme is written in capitals, such as `HTTPS://ch-1:8443`, loads and counts as `https://` for `tls.root_ca`. A URL that does not parse fails at load, such as `sink.clickhouse.shards[0].replicas[0]: is not a URL: invalid international domain name`. In previous versions a URL in capitals was refused, and one that did not parse loaded, even when it carried a password.
+
+The refusals read `must be a URL with scheme http or https; found ftp` and `carries userinfo; set them in user and password` after the key. In previous versions they read `URL contains credentials; set them in user and password` and quoted the redacted URL in ``…is not an http(s) URL``. A value written without its scheme, such as `svc:secret@ch-1:8123`, reads ``has no `//` after its scheme``.

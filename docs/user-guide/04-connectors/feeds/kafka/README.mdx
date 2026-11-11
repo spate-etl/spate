@@ -597,9 +597,9 @@ offset read from the wrong bytes, where `auto.offset.reset` decides what is read
 next. A feed that has stopped commits nothing more, so the next owner of the
 partition reads it again from the last commit.
 
-`check.crcs` is off unless the `rdkafka` passthrough sets it. With it off, a
-batch whose bytes no longer match its checksum is delivered as read, as it is
-for the
+The feed leaves `check.crcs` off unless the `rdkafka` passthrough sets it. With
+it off, a batch whose bytes no longer match its checksum is delivered as read,
+as it is for the
 [Kafka source](../../sources/kafka/README.mdx#how-offsets-are-committed).
 
 ## What counting costs

@@ -745,6 +745,50 @@ fn an_assignment_on_another_topic_stops_the_feed() {
     drop(leader);
 }
 
+/// A message at offset `i64::MAX`, the top of the offset range, stops the
+/// feed before it is delivered: no position exists to commit past it. The
+/// unit read in the same fetch before it is not handed out either.
+#[test]
+fn a_message_at_the_top_of_the_offset_range_stops_the_feed() {
+    let cluster = cluster(1);
+    let brokers = cluster.bootstrap_servers();
+    let first = brokers.split(',').next().unwrap().to_owned();
+    let before = RawBatch {
+        crc: support::BatchCrc::Computed,
+        key: Some(b"before"),
+        value: b"body",
+        ..RawBatch::default()
+    }
+    .encode();
+    assert_eq!(produce_batch(&first, WORK, 0, &before), 0);
+    let top = RawBatch {
+        crc: support::BatchCrc::Computed,
+        record_offset_delta: i64::MAX - 1,
+        key: Some(b"top"),
+        value: b"body",
+        ..RawBatch::default()
+    }
+    .encode();
+    assert_eq!(produce_batch(&first, WORK, 0, &top), 0);
+    let group = spate_test::unique_name("top-offset");
+    let worker = direct(&feed_yaml(&brokers, &group, "", ""));
+    let mut error = None;
+    wait_until(HANG, "the feed stops on the message", || {
+        match worker.feed.receive(1) {
+            Ok(units) => assert!(units.is_empty(), "delivered: {units:?}"),
+            Err(e) => error = Some(e),
+        }
+        error
+            .as_ref()
+            .is_some_and(|e| e.kind == FeedErrorKind::Fatal)
+    });
+    let error = error.unwrap();
+    assert!(
+        error.reason.contains("the top of the offset range"),
+        "{error}"
+    );
+}
+
 /// Pins that a record batch librdkafka reports as corrupt stops the feed,
 /// with the reason naming the bad message.
 #[test]

@@ -258,7 +258,8 @@ fn record_of<'a>(
 /// attempt partition.
 #[derive(Debug)]
 pub(crate) struct Ledger {
-    /// Per partition, one past the last offset read or passed.
+    /// Per partition, one past the last offset read or passed, or
+    /// `i64::MAX` once a record there is read.
     next: Vec<Option<i64>>,
     counts: FastMap<Box<[u8]>, u32>,
     /// How many waits on the ledger's condvar the gate has begun, counted
@@ -297,7 +298,9 @@ impl Ledger {
     /// Take in the record at `offset` of `partition`.
     pub(crate) fn apply(&mut self, partition: i32, offset: i64, identity: &[u8], entry: Entry) {
         if let Some(next) = self.slot(partition) {
-            *next = Some(offset + 1);
+            // The follower commits nothing, so a record at the top of the
+            // offset range only leaves its read position there.
+            *next = Some(offset.saturating_add(1));
         }
         match entry {
             Entry::Count(n) => {
@@ -322,8 +325,8 @@ impl Ledger {
         self.counts.get(identity).copied().unwrap_or(0)
     }
 
-    /// One past the last offset of `partition` read or passed, `None`
-    /// before the first.
+    /// One past the last offset of `partition` read or passed, or
+    /// `i64::MAX` once a record there is read. `None` before the first.
     pub(crate) fn read_to(&self, partition: i32) -> Option<i64> {
         usize::try_from(partition)
             .ok()
@@ -648,6 +651,15 @@ mod tests {
         ledger.apply(0, 3, b"a", Entry::Removed);
         assert_eq!((ledger.count(b"a"), ledger.next[0]), (0, Some(4)));
         assert_eq!(ledger.count(b"b"), 5);
+    }
+
+    /// Pins that a record at the top of the offset range leaves the read
+    /// position at that offset.
+    #[test]
+    fn a_record_at_the_top_of_the_offset_range_holds_the_read_position() {
+        let mut ledger = Ledger::new(NonZeroU32::MIN);
+        ledger.apply(0, i64::MAX, b"a", Entry::Count(1));
+        assert_eq!((ledger.count(b"a"), ledger.next[0]), (1, Some(i64::MAX)));
     }
 
     /// Pins which identity a message counts under: a work message its own

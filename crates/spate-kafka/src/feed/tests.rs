@@ -6202,8 +6202,9 @@ mod docker {
     #[ignore = "requires Docker"]
     fn a_gate_admits_past_a_tail_the_broker_removed() {
         let broker = KafkaBroker::selected();
+        // Apache Kafka keeps a partition's last record, so there is nothing
+        // to pin on its lane.
         if broker.broker() != Broker::Redpanda {
-            println!("{} keeps a partition's last record; nothing to pin", broker.broker());
             return;
         }
         // A fixed host port, so the address the broker advertises holds

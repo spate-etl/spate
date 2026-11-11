@@ -857,6 +857,7 @@ mod tests {
         use super::super::*;
         use crate::client::testing::{Raw as _, raw_config};
         use crate::testutil::mock::MockKafka;
+        use crate::testutil::wire::{self, Marker};
         use rdkafka::producer::{BaseProducer, BaseRecord, Producer};
         use spate_core::clock::SyncClock;
         use spate_core::config::FeedSection;
@@ -999,11 +1000,11 @@ mod tests {
             let rig = rig();
             // `units/0/2` hashes to partition 0 of 2.
             rig.write(b"units/0/2", Some(&encode(1)));
-            crate::testutil::wire::write_marker(
+            wire::write_marker(
                 &rig.cluster.bootstrap_servers(),
                 ATTEMPTS,
                 0,
-                crate::testutil::wire::Marker::Commit,
+                Marker::Commit,
             );
             let (running, ledger) = Running::start(&rig);
             rig.caught_up(&ledger);

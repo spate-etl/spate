@@ -94,7 +94,10 @@ impl HttpService for FilteringService {
                 .query()
                 .is_some_and(|q| q.split('&').any(|pair| pair == "list-type=2"));
         let response = self.inner.execute(req).await?;
-        if !listing || !response.status().is_success() {
+        if !response.status().is_success() {
+            return Ok(bounded_failure(response).await);
+        }
+        if !listing {
             return Ok(response);
         }
         let (mut parts, body) = response.into_parts();
@@ -113,6 +116,35 @@ impl HttpService for FilteringService {
             HttpResponseBody::from(page),
         ))
     }
+}
+
+/// The most of a failure answer's body the client is handed. An S3 error
+/// document is a few hundred bytes, and a source error keeps 512 characters
+/// of it.
+const FAILURE_BODY_MAX_BYTES: usize = 64 * 1024;
+
+/// `response` with its body cut to [`FAILURE_BODY_MAX_BYTES`] and the rest
+/// left unread.
+///
+/// `object_store` reads a failure answer's body whole, into a buffer sized
+/// from the length the store declared, so a declared length alone can abort
+/// the process. A body that fails part-way keeps what arrived: the status is
+/// already known.
+async fn bounded_failure(response: HttpResponse) -> HttpResponse {
+    use futures_util::StreamExt as _;
+    let (mut parts, body) = response.into_parts();
+    let mut frames = body.bytes_stream();
+    let mut kept = Vec::new();
+    while kept.len() < FAILURE_BODY_MAX_BYTES {
+        let Some(Ok(frame)) = frames.next().await else {
+            break;
+        };
+        let room = FAILURE_BODY_MAX_BYTES - kept.len();
+        kept.extend_from_slice(&frame[..frame.len().min(room)]);
+    }
+    // The body is no longer the length the store declared.
+    parts.headers.remove("content-length");
+    HttpResponse::from_parts(parts, HttpResponseBody::from(kept))
 }
 
 /// One `<Contents>` element, decoded the way `object_store` decodes it.
@@ -182,6 +214,48 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    /// A store behind the connector, with one runtime to drive it.
+    fn store_behind_the_connector(url: &str) -> object_store::aws::AmazonS3 {
+        crate::test_servers::builder_at(url)
+            .with_access_key_id("AKIDTEST")
+            .with_secret_access_key("secret")
+            .with_http_connector(UnaddressableConnector::new(UnaddressableKeys::default()))
+            .build()
+            .expect("build the S3 store")
+    }
+
+    /// A failure answer that declares a body past any allocation is read up
+    /// to the cap, and the read fails with the store's status. Unbounded, the
+    /// client sizes a buffer from the declared length and the process panics
+    /// or aborts. Regression for #1775.
+    #[test]
+    fn a_failure_answer_is_read_up_to_the_cap() {
+        use object_store::ObjectStoreExt as _;
+        const SENT: usize = 4 * FAILURE_BODY_MAX_BYTES;
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        for declared in [1_u64 << 63, SENT as u64] {
+            let url = crate::test_servers::oversized_failure_server(declared, SENT);
+            let store = store_behind_the_connector(&url);
+            let err = rt
+                .block_on(store.get(&Path::from("data/a")))
+                .expect_err("the store answers 403");
+            let text = err.to_string();
+            assert!(text.contains("403 Forbidden"), "{declared}: {text:.300}");
+            let body = text.matches('~').count();
+            assert!(
+                (1..=FAILURE_BODY_MAX_BYTES).contains(&body),
+                "{declared}: {body} body bytes kept"
+            );
+            assert!(
+                crate::error::bounded_reason(&err).contains("403 Forbidden"),
+                "{declared}"
+            );
+        }
+    }
 
     fn contents(key: &str) -> String {
         format!(

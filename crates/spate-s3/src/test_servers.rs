@@ -29,6 +29,41 @@ pub(crate) fn status_server(status_line: &'static str) -> String {
     url
 }
 
+/// An HTTP server on `127.0.0.1` that answers every request `403 Forbidden`,
+/// declares a body of `declared` bytes and sends `sent` bytes of it in two
+/// writes before it closes the connection.
+///
+/// Returns the server's `http://` URL. The server runs on a detached thread
+/// for the life of the process.
+pub(crate) fn oversized_failure_server(declared: u64, sent: usize) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind a local port");
+    let url = format!("http://{}", listener.local_addr().expect("local address"));
+    std::thread::spawn(move || {
+        for mut stream in listener.incoming().flatten() {
+            std::thread::spawn(move || {
+                let mut request = [0u8; 8192];
+                let _ = stream.read(&mut request);
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 403 Forbidden\r\ncontent-type: application/xml\r\n\
+                     content-length: {declared}\r\n\r\n"
+                );
+                let half = vec![b'~'; sent / 2];
+                for _ in 0..2 {
+                    if stream
+                        .write_all(&half)
+                        .and_then(|()| stream.flush())
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+            });
+        }
+    });
+    url
+}
+
 fn answer(mut stream: TcpStream, status_line: &str) -> std::io::Result<()> {
     let mut request = [0u8; 8192];
     let _ = stream.read(&mut request)?;

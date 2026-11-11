@@ -14,6 +14,7 @@ use testcontainers::core::{CmdWaitFor, ContainerPort, ContainerState, ExecComman
 use testcontainers::runners::SyncRunner;
 use testcontainers::{Container, Image, ImageExt, TestcontainersError};
 
+use crate::container_log::{container_output, container_tails};
 use crate::{container_image, selected_lane};
 
 /// The container port of the listener a client on the host reaches.
@@ -26,8 +27,15 @@ pub const BROKER_FROM_INSIDE: &str = "localhost:9093";
 /// The container port Apache Kafka's KRaft controllers reach each other on.
 const CONTROLLER_PORT: u16 = 9094;
 
-/// The container port Redpanda nodes reach each other on.
-const REDPANDA_RPC_PORT: u16 = 33145;
+/// The container port Redpanda nodes reach each other on. It sits below
+/// Linux's default ephemeral range, 32768 to 60999, so no socket the
+/// container opens with a kernel-chosen port can take it before the node
+/// listens.
+const REDPANDA_RPC_PORT: u16 = 9095;
+const _: () = assert!(
+    REDPANDA_RPC_PORT < 32_768,
+    "REDPANDA_RPC_PORT is inside the ephemeral range"
+);
 
 /// How many nodes a [`KafkaCluster`] runs. Node ids run from 1 to this.
 pub const CLUSTER_NODES: i32 = 3;
@@ -288,8 +296,7 @@ impl KafkaBroker {
                         (
                             format!("rpk redpanda config set redpanda.node_id {} && ", m.node),
                             format!(
-                                "--seeds {seeds} --rpc-addr 0.0.0.0:{REDPANDA_RPC_PORT} \
-                                 --advertise-rpc-addr {}:{REDPANDA_RPC_PORT} ",
+                                "--seeds {seeds} --advertise-rpc-addr {}:{REDPANDA_RPC_PORT} ",
                                 m.host()
                             ),
                         )
@@ -297,7 +304,7 @@ impl KafkaBroker {
                 );
                 format!(
                     "{node_id}exec rpk redpanda start --mode dev-container --smp 1 --memory 1G \
-                     --overprovisioned {cluster}\
+                     --overprovisioned --rpc-addr 0.0.0.0:{REDPANDA_RPC_PORT} {cluster}\
                      --kafka-addr PLAINTEXT://0.0.0.0:9092,BROKER://0.0.0.0:9093 \
                      --advertise-kafka-addr PLAINTEXT://{client},BROKER://{inside}\n"
                 )
@@ -557,9 +564,39 @@ impl KafkaCluster {
             })
     }
 
+    /// The first node whose container has stopped, named with its exit code
+    /// and the tail of its output, or `None` while every node runs. A node
+    /// [`KafkaCluster::stop`] stopped counts, so a caller asks while every
+    /// node should be running. A node whose state Docker cannot report counts
+    /// as running.
+    #[must_use]
+    pub fn exited(&self) -> Option<String> {
+        (1..=CLUSTER_NODES).find_map(|node| {
+            let container = self.node(node);
+            if container.is_running().unwrap_or(true) {
+                return None;
+            }
+            Some(exited_message(
+                &format!("{} node {node}", self.broker),
+                container.exit_code().ok().flatten(),
+                &container_output(container.stdout_to_vec()),
+                &container_output(container.stderr_to_vec()),
+            ))
+        })
+    }
+
     fn node(&self, node: i32) -> &Container<KafkaBroker> {
         &self.nodes[node_index(node)]
     }
+}
+
+/// What [`KafkaCluster::exited`] says of the node `what` names.
+fn exited_message(what: &str, code: Option<i64>, stdout: &str, stderr: &str) -> String {
+    let ended = code.map_or_else(
+        || format!("{what} exited"),
+        |code| format!("{what} exited with code {code}"),
+    );
+    format!("{ended}\n{}", container_tails(what, stdout, stderr))
 }
 
 /// Where node `node` sits in [`KafkaCluster`]'s nodes.
@@ -633,7 +670,7 @@ mod tests {
     }
 
     const REDPANDA_START: &str = "exec rpk redpanda start --mode dev-container --smp 1 --memory 1G --overprovisioned \
-         --kafka-addr PLAINTEXT://0.0.0.0:9092,BROKER://0.0.0.0:9093 \
+         --rpc-addr 0.0.0.0:9095 --kafka-addr PLAINTEXT://0.0.0.0:9092,BROKER://0.0.0.0:9093 \
          --advertise-kafka-addr PLAINTEXT://ADDRESS,BROKER://localhost:9093\n";
 
     /// A client on the host is advertised the port mapped to [`KAFKA_PORT`],
@@ -733,10 +770,26 @@ mod tests {
             node_two(redpanda()).start_script(31092),
             "rpk redpanda config set redpanda.node_id 2 && \
              exec rpk redpanda start --mode dev-container --smp 1 --memory 1G --overprovisioned \
-             --seeds net-k1:33145,net-k2:33145,net-k3:33145 \
-             --rpc-addr 0.0.0.0:33145 --advertise-rpc-addr net-k2:33145 \
+             --rpc-addr 0.0.0.0:9095 --seeds net-k1:9095,net-k2:9095,net-k3:9095 \
+             --advertise-rpc-addr net-k2:9095 \
              --kafka-addr PLAINTEXT://0.0.0.0:9092,BROKER://0.0.0.0:9093 \
              --advertise-kafka-addr PLAINTEXT://127.0.0.1:40002,BROKER://net-k2:9093\n"
+        );
+    }
+
+    /// An exited node is named with its exit code, when Docker gave one, and
+    /// the tail of each of its streams.
+    #[test]
+    fn an_exited_node_names_itself_its_code_and_its_output() {
+        let tails = "---- last 200 lines of Redpanda node 2 stdout ----\nout line\n\
+                     ---- last 200 lines of Redpanda node 2 stderr ----\nerr line";
+        assert_eq!(
+            exited_message("Redpanda node 2", Some(1), "out line", "err line"),
+            format!("Redpanda node 2 exited with code 1\n{tails}")
+        );
+        assert_eq!(
+            exited_message("Redpanda node 2", None, "out line", "err line"),
+            format!("Redpanda node 2 exited\n{tails}")
         );
     }
 

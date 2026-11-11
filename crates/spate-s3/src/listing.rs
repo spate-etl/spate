@@ -246,10 +246,7 @@ mod tests {
             let text = err.to_string();
             assert!(text.contains("403 Forbidden"), "{declared}: {text:.300}");
             let body = text.matches('~').count();
-            assert!(
-                (1..=FAILURE_BODY_MAX_BYTES).contains(&body),
-                "{declared}: {body} body bytes kept"
-            );
+            assert_eq!(body, 65_536, "{declared}: body bytes kept");
             assert!(
                 crate::error::bounded_reason(&err).contains("403 Forbidden"),
                 "{declared}"

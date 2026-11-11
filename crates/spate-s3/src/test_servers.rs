@@ -30,8 +30,8 @@ pub(crate) fn status_server(status_line: &'static str) -> String {
 }
 
 /// An HTTP server on `127.0.0.1` that answers every request `403 Forbidden`,
-/// declares a body of `declared` bytes and sends `sent` bytes of it in two
-/// writes before it closes the connection.
+/// declares a body of `declared` bytes, sends `sent` bytes of it in two
+/// writes and then holds the connection open.
 ///
 /// Returns the server's `http://` URL. The server runs on a detached thread
 /// for the life of the process.
@@ -58,6 +58,8 @@ pub(crate) fn oversized_failure_server(declared: u64, sent: usize) -> String {
                         return;
                     }
                 }
+                // Held open, so a client reading past what was sent waits.
+                std::thread::park();
             });
         }
     });

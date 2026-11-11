@@ -11,6 +11,8 @@ mod http;
 mod kafka;
 #[cfg(feature = "s3")]
 mod s3;
+#[cfg(any(feature = "s3", feature = "elasticmq"))]
+mod started;
 #[cfg(feature = "tls")]
 mod tls;
 

@@ -11,7 +11,7 @@ mod rustfs;
 
 use std::fmt;
 use std::net::SocketAddr;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use ::http::Method;
 use object_store::aws::{AmazonS3Builder, AwsAuthorizer, AwsCredential};
@@ -23,7 +23,7 @@ use testcontainers::runners::SyncRunner;
 use testcontainers::{Container, GenericImage, ImageExt};
 
 use crate::kafka::BROKER_FROM_INSIDE;
-use crate::{container_image, http, http_with_headers, selected_lane};
+use crate::{container_image, http, http_with_headers, selected_lane, started};
 
 /// The access key id every store accepts.
 pub const ACCESS_KEY: &str = "spate-test";
@@ -39,14 +39,6 @@ pub const REGION: &str = "us-east-1";
 pub const RGW_OPAQUE_DATA: &str = rgw::OPAQUE_DATA;
 
 const READY: Duration = Duration::from_secs(60);
-
-/// How often a failed readiness probe asks Docker whether the container
-/// still runs.
-const LIVENESS_EVERY: Duration = Duration::from_secs(1);
-
-/// The lines of each container stream a failed start carries. A store's
-/// reason for stopping is the last thing it writes.
-const LOG_TAIL: usize = 200;
 
 /// The service whose lanes are stores.
 const SERVICE: &str = "s3";
@@ -200,29 +192,11 @@ impl S3Store {
             _ => request,
         };
         let container = request.start().map_err(|e| format!("start {store}: {e}"))?;
-        let port = container
-            .get_host_port_ipv4(store.container_port())
-            .map_err(|e| {
-                let failure = format!("{store} port: {e}");
-                reported(
-                    store,
-                    failure,
-                    container.stdout_to_vec(),
-                    container.stderr_to_vec(),
-                )
-            })?;
+        let what = store.to_string();
+        let port = started::host_port(&what, &container, store.container_port(), "port")?;
         let api = SocketAddr::from(([127, 0, 0, 1], port));
-        let ready_port = container
-            .get_host_port_ipv4(store.ready_port())
-            .map_err(|e| {
-                let failure = format!("{store} readiness port: {e}");
-                reported(
-                    store,
-                    failure,
-                    container.stdout_to_vec(),
-                    container.stderr_to_vec(),
-                )
-            })?;
+        let ready_port =
+            started::host_port(&what, &container, store.ready_port(), "readiness port")?;
         ready(
             store,
             SocketAddr::from(([127, 0, 0, 1], ready_port)),
@@ -454,108 +428,18 @@ fn pinned(store: Store) -> GenericImage {
     GenericImage::new(image, tag)
 }
 
-/// Waits until the store at `api` answers its readiness path with `200`.
-///
-/// Fails as soon as Docker reports `container` exited, or once [`READY`]
-/// passes, after writing the tail of the container's output to stderr.
+/// Waits until the store at `api` answers its readiness path with `200`, as
+/// [`started::ready`] waits.
 fn ready(store: Store, api: SocketAddr, container: &Container<GenericImage>) -> Result<(), String> {
-    let until = Instant::now() + READY;
-    let mut asked = Instant::now();
-    loop {
-        let probe = match http(api, "GET", store.ready_path()) {
-            Ok((200, _)) => return Ok(()),
-            probe => probe,
-        };
-        let now = Instant::now();
-        let ending = if now >= until {
-            Some(Ending::NotReady)
-        } else if now.duration_since(asked) >= LIVENESS_EVERY {
-            asked = now;
-            // Docker not answering leaves the deadline to decide.
-            match container.is_running() {
-                Ok(false) => Some(Ending::Exited(container.exit_code().ok().flatten())),
-                _ => None,
-            }
-        } else {
-            None
-        };
-        if let Some(ending) = ending {
-            return Err(reported(
-                store,
-                start_failure(store, ending, &probe),
-                container.stdout_to_vec(),
-                container.stderr_to_vec(),
-            ));
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-}
-
-/// Writes `failure` and the tail of a container's `stdout` and `stderr` to
-/// stderr, where the test's captured output keeps its lines, and returns
-/// `failure`.
-#[expect(
-    clippy::print_stderr,
-    reason = "a failed start's container output is read from the test's output"
-)]
-fn reported<E: fmt::Display>(
-    store: Store,
-    failure: String,
-    stdout: Result<Vec<u8>, E>,
-    stderr: Result<Vec<u8>, E>,
-) -> String {
-    eprintln!(
-        "{failure}\n{}",
-        container_tails(store, &container_output(stdout), &container_output(stderr))
-    );
-    failure
-}
-
-/// How a start that never became ready ended.
-#[derive(Clone, Copy, Debug)]
-enum Ending {
-    /// Docker reported the container exited, with its exit code when Docker
-    /// gave one.
-    Exited(Option<i64>),
-    /// The container still ran when [`READY`] passed.
-    NotReady,
-}
-
-/// A container stream as text, or why it could not be read.
-fn container_output<E: fmt::Display>(read: Result<Vec<u8>, E>) -> String {
-    match read {
-        Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
-        Err(e) => format!("(unreadable: {e})"),
-    }
-}
-
-/// The error of a start that never became ready: how it ended, and the last
-/// probe's result.
-fn start_failure(store: Store, ending: Ending, probe: &std::io::Result<(u16, String)>) -> String {
-    match ending {
-        Ending::Exited(Some(code)) => {
-            format!("{store} exited with code {code} before it was ready: {probe:?}")
-        }
-        Ending::Exited(None) => format!("{store} exited before it was ready: {probe:?}"),
-        Ending::NotReady => format!("{store} was not ready within {READY:?}: {probe:?}"),
-    }
-}
-
-/// The last [`LOG_TAIL`] lines of a container's stdout and stderr, each
-/// under a heading.
-fn container_tails(store: Store, stdout: &str, stderr: &str) -> String {
-    format!(
-        "---- last {LOG_TAIL} lines of {store} stdout ----\n{}\n\
-         ---- last {LOG_TAIL} lines of {store} stderr ----\n{}",
-        tail(stdout),
-        tail(stderr),
+    started::ready(
+        &store.to_string(),
+        READY,
+        || match http(api, "GET", store.ready_path()) {
+            Ok((200, _)) => Ok(()),
+            probe => Err(format!("{probe:?}")),
+        },
+        container,
     )
-}
-
-/// The last [`LOG_TAIL`] lines of `log`.
-fn tail(log: &str) -> String {
-    let lines: Vec<&str> = log.lines().collect();
-    lines[lines.len().saturating_sub(LOG_TAIL)..].join("\n")
 }
 
 #[cfg(test)]
@@ -705,67 +589,5 @@ mod tests {
             let store = Store::from_lane(&lane).unwrap();
             assert_eq!(store.lane(), lane);
         }
-    }
-
-    /// A start whose container exited says so with its exit code, or
-    /// without one when Docker gave none, and keeps the last probe's error.
-    #[test]
-    fn an_exited_start_names_its_exit_code() {
-        let refused = Err(std::io::ErrorKind::ConnectionRefused.into());
-        assert_eq!(
-            start_failure(Store::Rgw, Ending::Exited(Some(1)), &refused),
-            "Ceph RGW exited with code 1 before it was ready: Err(Kind(ConnectionRefused))"
-        );
-        assert_eq!(
-            start_failure(Store::Rgw, Ending::Exited(None), &refused),
-            "Ceph RGW exited before it was ready: Err(Kind(ConnectionRefused))"
-        );
-    }
-
-    /// A start still running at the deadline says it was not ready.
-    #[test]
-    fn a_start_still_running_at_the_deadline_was_not_ready() {
-        assert_eq!(
-            start_failure(Store::Rustfs, Ending::NotReady, &Ok((503, String::new()))),
-            "RustFS was not ready within 60s: Ok((503, \"\"))"
-        );
-    }
-
-    /// The report after a failed start carries each stream under its heading.
-    #[test]
-    fn the_container_tails_carry_both_streams() {
-        assert_eq!(
-            container_tails(Store::Garage, "out line", "err line"),
-            "---- last 200 lines of Garage stdout ----\nout line\n\
-             ---- last 200 lines of Garage stderr ----\nerr line"
-        );
-    }
-
-    /// A failed start's report returns the failure it was given.
-    #[test]
-    fn a_report_returns_its_failure() {
-        let read: Result<Vec<u8>, String> = Ok(b"err line".to_vec());
-        assert_eq!(
-            reported(Store::Rgw, "failure".to_owned(), Ok(Vec::new()), read),
-            "failure"
-        );
-    }
-
-    /// A container stream reads as its text, or as why it could not be read.
-    #[test]
-    fn a_container_stream_reads_as_text_or_its_error() {
-        let read: Result<Vec<u8>, String> = Ok(b"a line".to_vec());
-        assert_eq!(container_output(read), "a line");
-        let unread: Result<Vec<u8>, String> = Err("no such container".to_owned());
-        assert_eq!(container_output(unread), "(unreadable: no such container)");
-    }
-
-    /// A container log longer than the tail keeps only its last lines.
-    #[test]
-    fn a_long_log_keeps_its_last_lines() {
-        let log: Vec<String> = (0..=LOG_TAIL).map(|n| n.to_string()).collect();
-        let kept = tail(&log.join("\n"));
-        assert_eq!(kept, log[1..].join("\n"));
-        assert_eq!(tail("one\ntwo"), "one\ntwo");
     }
 }

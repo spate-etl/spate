@@ -129,6 +129,11 @@ pub const LONGEST_DEADLINE: Duration = Duration::from_secs(365 * 24 * 60 * 60);
 /// past a year reads as a year, which no deadline here means literally.
 /// It serves `std::time::Instant` and `tokio::time::Instant` alike.
 ///
+/// # Panics
+///
+/// When `at` is within a year of the end of its type's range, which no clock
+/// reading is.
+///
 /// ```
 /// use spate_core::clock::{LONGEST_DEADLINE, deadline_after};
 /// use std::time::{Duration, Instant};

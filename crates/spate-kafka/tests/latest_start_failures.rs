@@ -854,16 +854,18 @@ mod silent_coordinator {
             .expect("io");
         let feed = spate_kafka::feed::KafkaFeed::connect(&section, io.handle()).expect("connect");
         proxy.trigger.store(trigger, Ordering::SeqCst);
-        // Nothing commits before a unit finishes.
-        proxy.armed.store(!committed, Ordering::SeqCst);
-        let mut acknowledged = 0;
-        spate_test::wait_until(HANG, "every unit acknowledged", || {
-            for delivery in feed.receive(16).unwrap_or_default() {
-                feed.acknowledge(delivery.receipt).expect("acknowledge");
-                acknowledged += 1;
-            }
-            acknowledged == 3
+        let mut received = Vec::new();
+        spate_test::wait_until(HANG, "every unit received", || {
+            received.extend(feed.receive(16).unwrap_or_default());
+            received.len() == 3
         });
+        // A unit's offset is committed once it is read, before its attempt is
+        // written and it reaches the reader, so the proxy goes silent only
+        // once every unit is here.
+        proxy.armed.store(!committed, Ordering::SeqCst);
+        for delivery in received {
+            feed.acknowledge(delivery.receipt).expect("acknowledge");
+        }
         if committed {
             spate_test::wait_until(HANG, "the units committed", || {
                 support::committed_by(&brokers, &group, "units", 1)[0] == rdkafka::Offset::Offset(3)

@@ -42,39 +42,32 @@ pub(crate) fn leb128_len(value: u64) -> usize {
 #[inline]
 pub(crate) fn put_string(buf: &mut BytesMut, bytes: &[u8]) {
     let n = bytes.len();
-    if n >= 0x80 {
+    if n < 0x80 {
+        put_short_string(buf, n as u8, bytes);
+    } else {
         put_leb128_multi(buf, n as u64);
         buf.extend_from_slice(bytes);
-        return;
-    }
-    // One reservation covers the one-byte length and the bytes.
-    buf.reserve(1 + n);
-    let dst = buf.spare_capacity_mut().as_mut_ptr().cast::<u8>();
-    // SAFETY: `reserve(1 + n)` leaves at least `1 + n` bytes of spare
-    // capacity at `dst`. The length goes to `dst[0]` and `copy_short` writes
-    // every byte of `dst[1..1 + n]`, so `set_len` exposes only initialized
-    // bytes.
-    unsafe {
-        dst.write(n as u8);
-        copy_short(dst.add(1), bytes.as_ptr(), n);
-        buf.set_len(buf.len() + 1 + n);
     }
 }
 
-/// Copies `n` bytes from `src` to `dst`. Lengths from 4 to 32 take two
-/// overlapping fixed-width moves and lengths 1 to 3 take single bytes, so a
-/// short string makes no call into libc's `memcpy`.
-///
-/// # Safety
-///
-/// `src` is valid for reads of `n` bytes, `dst` is valid for writes of `n`
-/// bytes, and the two do not overlap.
+/// Appends a string shorter than 128 bytes and its one-byte length `len`
+/// under one reservation. Lengths from 4 to 32 copy with two overlapping
+/// fixed-width moves and lengths 1 to 3 copy single bytes, so a short string
+/// makes no call into libc's `memcpy`.
 #[inline]
-unsafe fn copy_short(dst: *mut u8, src: *const u8, n: usize) {
-    // SAFETY: each branch reads only inside `src[..n]` and writes only inside
-    // `dst[..n]`, which the caller guarantees, and its writes cover every byte
-    // of `dst[..n]`.
+fn put_short_string(buf: &mut BytesMut, len: u8, src: &[u8]) {
+    let n = src.len();
+    buf.reserve(1 + n);
+    let base = buf.spare_capacity_mut().as_mut_ptr().cast::<u8>();
+    let src = src.as_ptr();
+    // SAFETY: `reserve(1 + n)` leaves at least `1 + n` bytes of spare
+    // capacity at `base`. The length goes to `base[0]`. Each branch reads only
+    // inside `src[..n]` and writes only inside `dst[..n]`, which is
+    // `base[1..1 + n]`, and its writes cover every byte of it, so `set_len`
+    // exposes only initialized bytes.
     unsafe {
+        *base = len;
+        let dst = base.add(1);
         if n > 32 {
             ptr::copy_nonoverlapping(src, dst, n);
         } else if n >= 16 {
@@ -97,6 +90,7 @@ unsafe fn copy_short(dst: *mut u8, src: *const u8, n: usize) {
             *dst.add(n / 2) = *src.add(n / 2);
             *dst.add(n - 1) = *src.add(n - 1);
         }
+        buf.set_len(buf.len() + 1 + n);
     }
 }
 

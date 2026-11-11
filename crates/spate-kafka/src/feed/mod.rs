@@ -176,6 +176,8 @@ pub(crate) struct Closing {
     pub(crate) confirmer: Confirmer,
     /// What the runtime gave the close.
     pub(crate) within: Duration,
+    /// When the close began, on the feed's clock.
+    pub(crate) since: Instant,
 }
 
 impl State {
@@ -846,7 +848,7 @@ fn parts(
     let (core, producer) = producer_parts(config, attempt_partitions, clock)?;
     let base = config.base(openssl_env);
     let role = config.client(FeedRole::Consumer);
-    let lookup_timeout = crate::client::committed_lookup_timeout(&base.config(&role));
+    let call_bound = crate::client::committed_lookup_timeout(&base.config(&role));
     let consumer: BaseConsumer<crate::context::SourceContext> = base
         .create(&role, SourceHooks::default())
         .map_err(|reason| {
@@ -855,12 +857,7 @@ fn parts(
     consumer
         .subscribe(&[&config.topic, &config.retry_topic])
         .map_err(|e| ConnectError::refused(NAME, format!("subscribing: {e}")))?;
-    let driver = Driver::new(
-        Arc::clone(&core),
-        consumer,
-        producer.clone(),
-        lookup_timeout,
-    );
+    let driver = Driver::new(Arc::clone(&core), consumer, producer.clone(), call_bound);
     Ok((core, producer, driver))
 }
 
@@ -1105,8 +1102,11 @@ impl Feed for KafkaFeed {
     /// error, which commits nothing more, and as
     /// [`Retryable`](FeedErrorKind::Retryable) when writes were still in
     /// flight at the wait's end or the commit failed; the units those
-    /// writes or that commit would have finished are delivered again. A
-    /// commit or a leave that outlasts `within` still runs on the consumer
+    /// writes or that commit would have finished are delivered again. The
+    /// commit waits for the group's answer until `within` ends, at most the
+    /// group-call bound. One left unanswered fails the close, and the consumer
+    /// leaves the group on a thread of its own, since its close waits for that
+    /// commit. A leave that outlasts `within` still runs on the consumer
     /// thread, and dropping the feed waits for it.
     fn close(&self, within: Duration) -> Option<Confirmation> {
         let (confirmer, confirmation) = confirmation();
@@ -1117,7 +1117,11 @@ impl Feed for KafkaFeed {
                 return Some(confirmation);
             }
             st.stopping = true;
-            st.close = Some(Closing { confirmer, within });
+            st.close = Some(Closing {
+                confirmer,
+                within,
+                since: self.core.clock().now(),
+            });
         }
         // With the state lock released: `stop` takes it.
         stop(&self.core);

@@ -78,7 +78,8 @@ const DEFAULT_MAX_POLL_INTERVAL: Duration = Duration::from_secs(300);
 /// read, and a member that outlasts the interval leaves the group.
 ///
 /// The interval is read back from librdkafka, which takes spellings a plain
-/// parse refuses, such as `8000ms`.
+/// parse refuses, such as `8000ms`. The Kafka feed's consumer thread waits
+/// for a commit's answer up to the same bound, for the same reason.
 pub(crate) fn committed_lookup_timeout(cc: &ClientConfig) -> Duration {
     let max_poll = cc
         .create_native_config()

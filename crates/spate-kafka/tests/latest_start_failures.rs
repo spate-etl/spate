@@ -483,9 +483,9 @@ mod slow_listing {
     }
 }
 
-/// A commit left unanswered by a silent coordinator, at a start or at a stop,
-/// against the run ending, on a real broker behind a proxy that holds every byte
-/// once told to.
+/// A commit left unanswered by a silent coordinator, at a source's start or stop
+/// against the run ending, and at a work feed's close against the close
+/// settling, on a real broker behind a proxy that holds every byte once told to.
 mod silent_coordinator {
     use crate::support;
 
@@ -812,6 +812,109 @@ mod silent_coordinator {
         // The driver is left behind on failure: its drop has no end with the broker gone.
         assert!(ended, "after {waited:?}: {seen:?}");
         driver.join().expect("driver");
+    }
+
+    /// A work feed behind the proxy, its three units acknowledged, closed with
+    /// the coordinator silent from the first `trigger` request after the
+    /// proxy is armed. `committed` waits for the units' commit to land before
+    /// it arms the proxy. Returns the close's outcome, `None` when it had not
+    /// settled within `HANG`, and whether the feed's drop then returned.
+    fn feed_closed_in_silence(
+        trigger: i16,
+        committed: bool,
+    ) -> (Option<Result<(), spate_core::feed::FeedError>>, bool) {
+        use rdkafka::admin::{NewTopic, TopicReplication};
+        use spate_core::feed::Feed as _;
+        let (container, proxy, brokers) = broker_behind_a_proxy();
+        support::create_visible(
+            &brokers,
+            &[
+                NewTopic::new("units", 1, TopicReplication::Fixed(1))
+                    .set("message.timestamp.type", "LogAppendTime"),
+                NewTopic::new("units-retry", 1, TopicReplication::Fixed(1)),
+                NewTopic::new("units-dead", 1, TopicReplication::Fixed(1)),
+                NewTopic::new("units-attempts", 2, TopicReplication::Fixed(1))
+                    .set("cleanup.policy", "compact"),
+            ],
+        );
+        support::produce_to(&brokers, "units", 0, 0..3);
+        let group = spate_test::unique_name("feed-silent");
+        // A group-call bound of 2 s, a quarter of `max.poll.interval.ms`.
+        let section: spate_core::config::FeedSection = serde_yaml::from_str(&format!(
+            "kafka:\n  brokers: \"{brokers}\"\n  group_id: {group}\n  topic: units\n  \
+             retry_topic: units-retry\n  dead_letter_topic: units-dead\n  \
+             attempt_topic: units-attempts\n  statistics_interval: 0s\n  rdkafka:\n    \
+             session.timeout.ms: \"6000\"\n    heartbeat.interval.ms: \"2000\"\n    \
+             max.poll.interval.ms: \"8000\"\n    socket.timeout.ms: \"5000\"\n"
+        ))
+        .expect("section");
+        let io = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("io");
+        let feed = spate_kafka::feed::KafkaFeed::connect(&section, io.handle()).expect("connect");
+        proxy.trigger.store(trigger, Ordering::SeqCst);
+        // Nothing commits before a unit finishes.
+        proxy.armed.store(!committed, Ordering::SeqCst);
+        let mut acknowledged = 0;
+        spate_test::wait_until(HANG, "every unit acknowledged", || {
+            for delivery in feed.receive(16).unwrap_or_default() {
+                feed.acknowledge(delivery.receipt).expect("acknowledge");
+                acknowledged += 1;
+            }
+            acknowledged == 3
+        });
+        if committed {
+            spate_test::wait_until(HANG, "the units committed", || {
+                support::committed_by(&brokers, &group, "units", 1)[0] == rdkafka::Offset::Offset(3)
+            });
+            proxy.armed.store(true, Ordering::SeqCst);
+        }
+        spate_test::wait_until(HANG, "silent", || proxy.silent.load(Ordering::SeqCst));
+        let closing = feed.close(Duration::from_secs(10)).expect("a close");
+        let settled = io
+            .block_on(async { tokio::time::timeout(HANG, closing).await })
+            .ok();
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            drop(feed);
+            let _ = tx.send(());
+        });
+        let dropped = rx.recv_timeout(HANG).is_ok();
+        proxy.release();
+        if !dropped {
+            // The feed's clients are still connected.
+            std::mem::forget(io);
+            std::mem::forget(container);
+        }
+        (settled, dropped)
+    }
+
+    /// A work feed closed with the coordinator silent from its first commit
+    /// settles its close as retryable and drops. Regression for #1772.
+    #[test]
+    #[ignore = "requires Docker"]
+    fn a_feed_closed_behind_a_silent_commit_settles_and_drops() {
+        let (settled, dropped) = feed_closed_in_silence(OFFSET_COMMIT, false);
+        let settled = settled.expect("the close did not settle");
+        let err = settled.expect_err("an unanswered commit is a failed one");
+        assert_eq!(
+            err.kind,
+            spate_core::feed::FeedErrorKind::Retryable,
+            "{err}"
+        );
+        assert!(dropped, "the feed's drop did not return");
+    }
+
+    /// Pins that a work feed with nothing left to commit closes and drops with
+    /// the coordinator silent, on its own thread.
+    #[test]
+    #[ignore = "requires Docker"]
+    fn a_feed_with_nothing_to_commit_closes_while_the_coordinator_is_silent() {
+        let (settled, dropped) = feed_closed_in_silence(HEARTBEAT, true);
+        let settled = settled.expect("the close did not settle");
+        settled.expect("a close with nothing outstanding");
+        assert!(dropped, "the feed's drop did not return");
     }
 }
 

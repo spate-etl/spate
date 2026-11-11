@@ -335,6 +335,13 @@ revoked, and past offsets that hold no record
 the commits of its partition, so the next owner of the partition reads that
 unit again and every unit read after it.
 
+A commit waits for the group's answer for a quarter of `max.poll.interval.ms`,
+at most 10 seconds. A commit with no answer by then counts as failed, and the
+feed sends no other commit until the group answers it. This means that while
+the coordinator is silent, or answers slower than `socket.timeout.ms`, the
+worker's partitions commit nothing. A revocation in that time commits nothing
+either, so the next owner reads the revoked partitions from their last commit.
+
 A rebalance that fails gives up every partition with nothing committed. The
 units read since the last commit are delivered again.
 
@@ -655,14 +662,20 @@ topic without being read instead. A dead-letter write confirmed during the
 close is not followed by a tombstone, so the next owner finds the unit's record
 at the cap and moves another copy to the dead-letter topic without reading it.
 
-The commit can wait up to `session.timeout.ms` for a coordinator and up to
-`socket.timeout.ms` for each attempt once sent, and the leave up to 5 seconds
-for its answer. Either can run past the drain deadline, on the feed's consumer
-thread, and dropping the feed waits for them. Dropping the feed also waits for
-the depth thread, which sends no request once the feed has stopped: a depth
-read in flight ends after the request it is on, 5 seconds at most. A worker
-killed before it leaves keeps its partitions until `session.timeout.ms` lapses
-(see [No lease](#no-lease)).
+The close's commit waits for the group's answer until the close's deadline, and
+at most for a quarter of `max.poll.interval.ms` or 10 seconds, whichever is
+less. A commit with no answer by then counts as failed, so the close settles as
+failed and the units the commit would have finished are read again. The
+consumer then leaves the group on a thread of its own, because its close waits
+for that commit, and dropping the feed does not wait for that thread.
+
+With every commit answered, the leave waits up to 5 seconds for its answer. The
+leave can run past the drain deadline on the feed's consumer thread, and
+dropping the feed waits for it. Dropping the feed also waits for the depth
+thread, which sends no request once the feed has stopped: a depth read in
+flight ends after the request it is on, 5 seconds at most. A worker killed
+before it leaves keeps its partitions until `session.timeout.ms` lapses (see
+[No lease](#no-lease)).
 
 A feed dropped without a close waits up to 1 s for its writes in flight, then
 commits and leaves the group the same way. A feed that stopped on an error

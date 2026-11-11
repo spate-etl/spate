@@ -2894,6 +2894,22 @@ fn feed_section(yaml: &str) -> Option<crate::config::FeedSection> {
     Some(serde_yaml::from_str(yaml).expect("section"))
 }
 
+/// A run whose `max_records` is zero is refused before its source opens.
+/// Regression for #1717.
+#[test]
+fn zero_max_records_is_refused_at_start() {
+    let options = RuntimeOptions {
+        max_records: 0,
+        ..test_options()
+    };
+    let h = start_with_options(test_config(1), options, ok_chain);
+    let err = config_error_before_open(h);
+    assert_eq!(
+        err,
+        "invalid runtime configuration: `RuntimeOptions::max_records` must be at least 1"
+    );
+}
+
 /// Pins that the runtime hands a `feed:` section to the source, whose default
 /// `configure_feed` refuses it before the source opens.
 #[test]

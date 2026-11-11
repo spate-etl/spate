@@ -37,7 +37,7 @@ pub struct RuntimeOptions {
     /// Install SIGTERM/SIGINT handlers that trigger a graceful drain.
     /// Disable in tests and drive [`ShutdownHandle`] instead.
     pub handle_signals: bool,
-    /// Max payloads per lane poll.
+    /// Max payloads per lane poll. [`PipelineRuntime::run`] refuses zero.
     pub max_records: usize,
     /// Lane poll timeout (also the paused/idle loop sleep).
     pub poll_timeout: Duration,
@@ -348,10 +348,22 @@ impl<S: Source + 'static> PipelineRuntime<S> {
     /// pipeline drained after a shutdown trigger/signal or failed. Once the
     /// drain has ended, it shuts the I/O runtime down, waiting at most 2s for
     /// its tasks.
+    ///
+    /// # Errors
+    ///
+    /// [`StartError::Config`] before the source opens for a zero thread
+    /// count, a zero [`RuntimeOptions::max_records`], a current-thread I/O
+    /// runtime, or a configuration the source or the feed refuses. Each other
+    /// [`StartError`] variant for the startup step it names.
     pub fn run(mut self) -> Result<ExitReport, StartError> {
         let threads = self.thread_count();
         if threads == 0 || self.config.pipeline.io_threads == 0 {
             return Err(StartError::Config("thread counts must be non-zero".into()));
+        }
+        if self.options.max_records == 0 {
+            return Err(StartError::Config(
+                "`RuntimeOptions::max_records` must be at least 1".into(),
+            ));
         }
         if self.io.as_ref().is_some_and(|io| {
             io.handle().runtime_flavor() == tokio::runtime::RuntimeFlavor::CurrentThread

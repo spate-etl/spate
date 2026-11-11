@@ -1,5 +1,6 @@
-//! The S3 listing's handling of keys `object_store` cannot address, and the
-//! cap on a failure answer's body.
+//! The S3 listing's handling of keys `object_store` cannot address, the cap on
+//! a failure answer's body, and the refusal of a listing page whose
+//! continuation token does not advance.
 //!
 //! `object_store` turns each listed key into a [`Path`], and a key that does
 //! not parse fails the whole `ListObjectsV2` page, losing its continuation
@@ -9,7 +10,8 @@
 //! `object_store` parses it and records it in [`UnaddressableKeys`], so the
 //! listing returns every other key, and the lister still publishes this one
 //! as a unit of its own. The same wrapper hands the client at most 64 KiB of
-//! any failure answer's body.
+//! any failure answer's body, and fails a listing request whose page names
+//! the request's own continuation token with [`ListingStalled`].
 
 use crate::fetch::ObjectEntry;
 use bytes::Bytes;
@@ -58,7 +60,8 @@ impl UnaddressableKeys {
 }
 
 /// An [`HttpConnector`] that builds `object_store`'s own client and filters
-/// the S3 listing responses it returns and cuts the body of a failure answer.
+/// the S3 listing responses it returns, fails a listing page that repeats its
+/// request's continuation token, and cuts the body of a failure answer.
 /// Every other request and response passes through unchanged.
 #[derive(Debug)]
 pub(crate) struct UnaddressableConnector {
@@ -495,5 +498,22 @@ mod tests {
             prop_assume!(keys.iter().all(|k| addressable(k)));
             prop_assert!(filter_page(page(&keys, Some("t")).as_bytes()).is_none());
         }
+    }
+
+    /// The two sides of the token comparison decode to the same string: the
+    /// query's form encoding and the page's XML escapes. A token from AWS is
+    /// base64 and carries `/`, `+` and `=`.
+    #[test]
+    fn a_token_decodes_the_same_from_the_query_and_the_page() {
+        assert_eq!(
+            continuation_token("continuation-token=a%2Fb%2Bc%3D+d%26e&list-type=2").as_deref(),
+            Some("a/b+c= d&e")
+        );
+        assert_eq!(continuation_token("list-type=2&prefix=data%2F"), None);
+        assert_eq!(
+            next_token(b"<NextContinuationToken>a/b+c= d&amp;e</NextContinuationToken>").as_deref(),
+            Some("a/b+c= d&e")
+        );
+        assert_eq!(next_token(b"<IsTruncated>false</IsTruncated>"), None);
     }
 }

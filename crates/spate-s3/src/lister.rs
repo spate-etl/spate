@@ -3000,7 +3000,11 @@ mod tests {
             ],
             Arc::new(feed),
         );
-        let err = rt.block_on(lister.run()).unwrap_err();
+        // Without the check the listing never ends.
+        let err = rt
+            .block_on(async { tokio::time::timeout(spate_test::HANG, lister.run()).await })
+            .expect("the run ends")
+            .unwrap_err();
         assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
         assert!(
             err.reason()

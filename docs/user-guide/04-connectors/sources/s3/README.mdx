@@ -223,6 +223,10 @@ immediately, because no peer would fare better. So does a listing answered
 `404`, which a store sends for a bucket that does not exist. The error names
 the status.
 
+A listing page that carries the continuation token its request was sent with
+also fails the pipeline immediately, because asking again returns the same
+page.
+
 A worker that reads [storage notifications](#storage-notifications) needs
 these permissions besides `s3:GetObject`:
 
@@ -1234,6 +1238,11 @@ it. When a store omits it, a backfill completes without the remaining objects
 and reports no error. SeaweedFS 4.48 omits the token when a page ends on a
 folder marker, a key ending in `/`, and every key after it sits under that
 marker.
+
+The token on each page must also differ from the one the page was asked with.
+A page that repeats its request's token fails the lister run with a fatal
+error. A store that cycles through two or more tokens is not detected, and its
+listing does not end.
 
 ## Metrics
 

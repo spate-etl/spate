@@ -626,6 +626,7 @@ impl KafkaSource {
     /// every consumer's lanes, or `Idle` when they hold none. When any two
     /// offers overlap, each offer below the newest generation is discarded
     /// first, overlapping or not, and a partition still in two offers is fatal.
+    /// An offer naming a partition of another topic is fatal ahead of both.
     fn accept_held(&mut self, reassign: bool) -> Result<SourceEvent<KafkaLane>, SourceError> {
         let mut offers: Vec<(usize, TopicPartitionList)> = Vec::new();
         let mut held = Vec::new();
@@ -644,6 +645,18 @@ impl KafkaSource {
                 }
                 phase => member.phase = phase,
             }
+        }
+        // Every list built from an offer names the configured topic, and
+        // `assign` would fetch whatever topic the offer named. The check
+        // below compares partition numbers whatever their topic.
+        if !offers
+            .iter()
+            .all(|(_, tpl)| only_on_topic(tpl, &self.config.topic))
+        {
+            return Err(SourceError::fatal(format!(
+                "the group offered a partition of a topic other than `{}`",
+                self.config.topic
+            )));
         }
         if first_repeat(&offers).is_some() {
             offers = self.discard_stale_offers(offers)?;
@@ -718,23 +731,11 @@ impl KafkaSource {
     ///
     /// # Errors
     ///
-    /// An offer naming a partition of another topic, and under `latest` as
-    /// [`KafkaSource::read_latest_starts`].
+    /// As [`KafkaSource::read_latest_starts`].
     fn prepare_starts(
         &mut self,
         offers: &[(usize, TopicPartitionList)],
     ) -> Result<Result<Vec<Prepared>, String>, SourceError> {
-        // Every list built from an offer names the configured topic, and
-        // `assign` would fetch whatever topic the offer named.
-        if !offers
-            .iter()
-            .all(|(_, tpl)| only_on_topic(tpl, &self.config.topic))
-        {
-            return Err(SourceError::fatal(format!(
-                "the group offered a partition of a topic other than `{}`",
-                self.config.topic
-            )));
-        }
         let lookup_until = self.clock.now() + self.lookup_timeout;
         if self.config.uncommitted_start() == Some(Offset::End) {
             return self.read_latest_starts(offers, lookup_until);
@@ -2418,6 +2419,27 @@ mod tests {
                 "the consumer was assigned {assigned:?}"
             );
         }
+    }
+
+    /// An offer on another topic is named as that, where its partition number
+    /// is also in a peer's offer on the configured topic.
+    #[test]
+    fn an_offer_on_another_topic_is_named_beside_a_peer_s_same_partition() {
+        let (mut source, _clock) = opened_unassigned(test_config(), 2);
+        let mut ours = TopicPartitionList::new();
+        ours.add_partition("orders", 0);
+        let mut other = TopicPartitionList::new();
+        other.add_partition("other", 0);
+        source.members[0].phase = Phase::Held(ours);
+        source.members[1].phase = Phase::Held(other);
+        let Err(e) = source.accept_held(false) else {
+            panic!("the offers were accepted");
+        };
+        assert!(
+            e.to_string()
+                .contains("a partition of a topic other than `orders`"),
+            "{e}"
+        );
     }
 
     /// An empty offer is answered with no lookup, so a consumer with no

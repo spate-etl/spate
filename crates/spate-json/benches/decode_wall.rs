@@ -425,18 +425,29 @@ fn serde_value(bytes: &[u8]) -> Value {
     serde_json::from_slice(bytes).expect("the fixture is a valid document")
 }
 
-/// The parser over a newline-delimited batch, split the way the crate's
-/// `Skip` path splits it: `is_blank` is all-ASCII-whitespace, not only empty.
+/// The non-blank lines of a newline-delimited batch, split the way the crate's
+/// `ndjson` framing splits them: on `memchr` positions, dropping lines that are
+/// all ASCII whitespace.
+fn ndjson_lines(bytes: &[u8]) -> impl Iterator<Item = &[u8]> {
+    let mut start = 0;
+    memchr::memchr_iter(b'\n', bytes)
+        .chain(std::iter::once(bytes.len()))
+        .map(move |end| {
+            let line = &bytes[start..end];
+            start = end + 1;
+            line
+        })
+        .filter(|line| !line.iter().all(u8::is_ascii_whitespace))
+}
+
+/// The parser over a newline-delimited batch, split by [`ndjson_lines`].
 ///
 /// Counting rather than collecting is the parity choice: the crate's sink
 /// increments a counter and drops the record, so this does the same. The count
 /// is also what keeps the loop alive.
 fn serde_ndjson(bytes: &[u8]) -> u64 {
     let mut decoded = 0u64;
-    for line in bytes.split(|&b| b == b'\n') {
-        if line.iter().all(u8::is_ascii_whitespace) {
-            continue;
-        }
+    for line in ndjson_lines(bytes) {
         let _: LineItem = serde_json::from_slice(line).expect("the fixture is a valid order line");
         decoded += 1;
     }
@@ -562,10 +573,7 @@ fn simd_value(state: &SimdFloor) -> Value {
 #[cfg(feature = "simd")]
 fn simd_ndjson(state: &SimdFloor) -> u64 {
     let mut decoded = 0u64;
-    for line in state.payload.split(|&b| b == b'\n') {
-        if line.iter().all(u8::is_ascii_whitespace) {
-            continue;
-        }
+    for line in ndjson_lines(&state.payload) {
         let _: LineItem = simd_decode(state, line);
         decoded += 1;
     }

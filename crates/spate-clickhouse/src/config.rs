@@ -111,8 +111,10 @@ pub struct ClickHouseSinkConfig {
     pub distributed_check: Option<DistributedCheckSection>,
 }
 
-// Hand-written: `password` and the `settings` values are credentials. The
-// destructure lists every field so a new one cannot reach `Debug` unredacted.
+// Hand-written: `password` is a credential, and a `settings` value can be one.
+// ClickHouse reads `user` and `password` URL parameters as a login, and
+// `format_avro_schema_registry_url` can carry userinfo. The destructure lists
+// every field so a new one cannot reach `Debug` unredacted.
 impl std::fmt::Debug for ClickHouseSinkConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let ClickHouseSinkConfig {

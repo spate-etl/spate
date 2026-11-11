@@ -77,15 +77,12 @@ pub use feed::FeedSection;
 pub use reserved::{Denylist, ReservedKeyError};
 pub use url_rule::{UrlRule, UrlRuleError};
 
-/// Re-export of `serde_yaml::Value`, the opaque body type carried by a
-/// [`ComponentConfig`]. `serde_yaml` is a 0.x dependency, so exposing its
-/// `Value` directly in `spate-core`'s public API would tie our semver to
-/// theirs; this alias is the documented exemption (mirroring the [`bytes`]
-/// and `AvroValue` re-export pattern, INV-6).
-/// A major bump of the YAML crate becomes a breaking change here,
-/// and only here.
+/// Re-export of `yaml_serde`'s `Value`, the opaque body a [`ComponentConfig`]
+/// carries.
 ///
-/// [`bytes`]: crate::bytes
+/// `yaml_serde` is a 0.x dependency. This type and the source of
+/// [`ConfigError::Parse`] are an INV-6 exception, so a breaking `yaml_serde`
+/// release is a breaking release of this crate.
 pub use serde_yaml::Value as YamlValue;
 
 use crate::feed::memory;

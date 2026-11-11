@@ -1,5 +1,5 @@
 ---
-description: "Holds a rolling N-2 MSRV and bans 0.x dependency types from the public API, so a connector's breaking upgrade never becomes a breaking one for spate."
+description: "Holds a rolling N-2 MSRV and bans 0.x dependency types from the public API, except metrics. ADR-0098 adds the YAML types as a second exception."
 ---
 
 # ADR-0011 — A rolling N-2 MSRV, and no 0.x types in the public API
@@ -7,7 +7,8 @@ description: "Holds a rolling N-2 MSRV and bans 0.x dependency types from the pu
 - **Status:** accepted
 - **Date:** 2026-07-05 (recorded 2026-08-06 from the decision log)
 - **Supersedes:** —
-- **Superseded by:** —
+- **Superseded by:** [ADR-0098](0098-yaml-types-are-an-inv-6-exception.md),
+  for naming the `metrics` facade as the only exception
 
 ## Context and problem statement
 

@@ -407,9 +407,9 @@ fn a_failed_attempt_write_is_due_after_its_backoff_on_the_feed_clock() {
 }
 
 /// Pins how a gate fence settles: confirmed, it changes nothing the feed
-/// holds; failed transiently, it is not queued to be sent again; refused as
-/// Fatal, it stops the feed naming the fence. Each settle takes it out of
-/// the count of fences in flight.
+/// holds; failed transiently, it is logged and not queued to be sent again;
+/// refused as Fatal, it stops the feed naming the fence. Each settle takes it
+/// out of the count of fences in flight.
 #[test]
 fn a_fence_settles_without_finishing_anything() {
     let core = core(10);
@@ -424,9 +424,17 @@ fn a_fence_settles_without_finishing_anything() {
         assert!(st.ready.is_empty());
         assert!(st.tracker.held(entry.receipt).is_some());
     }
-    core.settle(fence(), Err(failure(C::MessageTimedOut)));
+    let lines = spate_test::capture_logs(tracing::Level::DEBUG, || {
+        core.settle(fence(), Err(failure(C::MessageTimedOut)));
+    });
     assert!(core.lock().resends.is_empty(), "queued to be sent again");
     assert!(!core.latched());
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("writing a fence failed; it is not sent again")),
+        "{lines:#?}"
+    );
     core.settle(fence(), Err(failure(C::TopicAuthorizationFailed)));
     let reason = core.lock().signal.latched().cloned().unwrap().reason;
     assert!(

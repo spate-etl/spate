@@ -489,6 +489,13 @@ impl Core {
             }
             WriteClass::Retryable => {
                 let Some(backoff) = write.backoff_mut() else {
+                    // A fence: the next pass that stalls writes another.
+                    tracing::debug!(
+                        %topic,
+                        error = %failure.reason,
+                        "writing {} failed; it is not sent again",
+                        write.what()
+                    );
                     return;
                 };
                 let retry_in = backoff.next_delay();

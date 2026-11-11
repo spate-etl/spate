@@ -47,9 +47,9 @@ revocation, one choreography tested constantly by every rebalance:
    in-flight writes. At the deadline a worker aborts whatever is still
    writing and abandons it (see below); a worker that somehow fails to do
    that is force-aborted a second later, so this step terminates. The one
-   exception is a writer that blocks its thread, which
-   [Why the drain always terminates](#why-the-drain-always-terminates)
-   covers.
+   exception is writers that block their threads on every I/O worker at
+   once; see
+   [When the drain terminates](#why-the-drain-always-terminates).
    With a feed that hands back, this step ends one second before the
    deadline, which leaves that second for the feed's close in step 4.
 4. **Offsets commit.** The controller drains the checkpointer and runs a final
@@ -137,7 +137,7 @@ replayed rows land again. Design target tables to tolerate duplicates. See
 [ClickHouse connector](../04-connectors/sinks/clickhouse/README.mdx)
 deduplication notes.
 
-## Why the drain always terminates
+## When the drain terminates {#why-the-drain-always-terminates}
 
 The deadline is **cooperative**: each sink worker watches it and, when it
 fires, aborts its in-flight writes and abandons what is left. Underneath

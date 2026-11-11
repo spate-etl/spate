@@ -63,10 +63,11 @@ The figures in this section come from one pipeline, run by the
 [pipeline bench](repo:bench/pipeline). It decodes 627-byte line-delimited
 records into a typed struct, which allocates about 26 times a record, and
 encodes them into a columnar format for a sink that discards them. It ran on
-one pipeline thread on four Linux hosts with glibc, three x86_64 and one
-aarch64. Each figure compares two builds over 20 interleaved runs. Other
-pipeline shapes, operating systems and C libraries were not measured. The build
-times come from a clean build of that bench crate with debug info, on 32 vCPUs.
+four Linux hosts with glibc, three x86_64 and one aarch64, on one pipeline
+thread unless a figure names four. Each figure compares two builds over 20
+interleaved runs. Other pipeline shapes, operating systems and C libraries were
+not measured. The build times come from a clean build of that bench crate with
+debug info, on 32 vCPUs.
 
 ### Set thin LTO in your own profile
 
@@ -81,7 +82,7 @@ lto = "thin"
 ```
 
 Thin LTO made the measured pipeline 1–5% faster, and the build took 11–18%
-longer.
+longer. At four pipeline threads, thin LTO was 1–3% faster on two hosts.
 
 Fat LTO with `codegen-units = 1` came within three percentage points of thin LTO
 on the measured pipeline. Its build took about three times as long as Cargo's
@@ -109,8 +110,9 @@ measured pipeline. Each allocator also slowed some encoder benchmark cases on
 one architecture: jemalloc by 8–11% on x86_64, and `mimalloc` by 13% on
 aarch64 in one run.
 
-At four pipeline threads, the only reliable figure is for fat LTO and jemalloc
-together. That build was 6–24% faster than Cargo's defaults on two hosts.
+At four pipeline threads, the allocator was measured only together with fat
+LTO. That build, with jemalloc, was 6–24% faster than Cargo's defaults on two
+hosts.
 
 ### Leave the target CPU at its default
 

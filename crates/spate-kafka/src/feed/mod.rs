@@ -1118,9 +1118,9 @@ impl Feed for KafkaFeed {
     /// handed its leave to a thread of its own. It is rejected with the
     /// latched error when the feed has stopped on a Fatal error, which
     /// commits nothing more, and as [`Retryable`](FeedErrorKind::Retryable)
-    /// when writes were still in flight at the wait's end or the commit
-    /// failed; the units those writes or that commit would have finished are
-    /// delivered again. The commit waits for the group's answer until
+    /// when writes other than the gate's fences were still in flight at the
+    /// wait's end or the commit failed; the units those writes or that commit
+    /// would have finished are delivered again. The commit waits for the group's answer until
     /// `within` ends, and at most a quarter of `max.poll.interval.ms` or 10
     /// seconds, whichever is less. One left unanswered fails the close, and
     /// the consumer leaves the group on a thread of its own, since its close

@@ -335,7 +335,7 @@ pub(crate) fn close_flush(within: Duration) -> Duration {
 
 /// Settle `close` once the consumer has left, or its leave runs on a thread of
 /// its own behind an unanswered commit: rejected with the latched error if the
-/// feed latched, `Retryable` if writes were still in flight at the flush's end
+/// feed latched, `Retryable` if [`flush_writes`] found writes still in flight
 /// or the last commit failed, and confirmed otherwise.
 fn settle_close(core: &Core, close: Closing, flushed: bool, committed: bool) {
     if let Some(fatal) = core.lock().signal.latched().cloned() {

@@ -369,9 +369,9 @@ export default function SplitDiagram(): React.JSX.Element {
       caption={
         <>
           One pipeline thread splits a stream across two destinations. After deserialize and the
-          operator chain, one classifier sends each record to one branch, here payments or refunds.
-          Each branch routes the record to a shard and encodes it into that sink&apos;s own queues and
-          shard workers. A record that reaches no branch follows the unmatched policy: Fail stops the
+          operator chain, one classifier sends each record to the branches it belongs in, here
+          payments or refunds. Each branch routes the record to a shard and encodes it into that
+          sink&apos;s own queues and shard workers. A record that reaches no branch follows the unmatched policy: Fail stops the
           pipeline, Skip drops and counts it and releases its share of the ack. Every branch the batch
           reached holds a clone of its ack, and each branch&apos;s shard worker resolves its clones
           from the write outcome, so the acks fan back in to one batch ack. The batch commits through

@@ -5385,6 +5385,62 @@ mod tests {
         }
     }
 
+    /// The source polls through SASL handshakes its broker drops, each a
+    /// retryable error, and the startup deadline then names the handshake as
+    /// the last consumer error. Regression for #1269.
+    #[cfg(feature = "tls")]
+    #[test]
+    fn a_dropped_sasl_handshake_is_retried_until_the_startup_bound() {
+        use spate_test::HANG;
+        let mut cfg = test_config();
+        cfg.brokers = crate::testutil::drops_during_sasl_handshake().to_string();
+        for (key, value) in [
+            ("security.protocol", "sasl_plaintext"),
+            ("sasl.mechanism", "PLAIN"),
+            ("sasl.username", "u"),
+            ("sasl.password", "p"),
+        ] {
+            cfg.rdkafka.insert(key.into(), value.into());
+        }
+        cfg.startup_timeout = Duration::from_secs(30);
+        let mut source = KafkaSource::new(cfg);
+        let clock = freeze(&mut source);
+        let cp = Checkpointer::new();
+        source.open(SourceCtx::new(cp.handle())).expect("open");
+        let mut dropped = 0;
+        spate_test::wait_until(HANG, "three dropped handshakes", || {
+            if let Err(e) = source.poll_events(Duration::from_millis(50)) {
+                assert_eq!(e.class(), ErrorClass::Retryable, "{e}");
+                if e.reason().contains("mechanism handshake failed: Local: ") {
+                    dropped += 1;
+                }
+            }
+            dropped >= 3
+        });
+        clock.advance(Duration::from_secs(31));
+        let mut deadline = None;
+        spate_test::wait_until(HANG, "the startup deadline", || {
+            match source.poll_events(Duration::from_millis(50)) {
+                Err(e) if e.class() == ErrorClass::Fatal => deadline = Some(e),
+                _ => {}
+            }
+            deadline.is_some()
+        });
+        let deadline = deadline.expect("set by the wait");
+        assert!(
+            deadline
+                .reason()
+                .starts_with("no partition assignment within"),
+            "{deadline}"
+        );
+        assert!(
+            deadline
+                .reason()
+                .contains("mechanism handshake failed: Local: "),
+            "{deadline}"
+        );
+    }
+
     mod assignment_deadline {
         use super::*;
         use spate_test::HANG;

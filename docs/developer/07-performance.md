@@ -137,7 +137,8 @@ The command runs on Linux x86_64 and aarch64 only, and refuses any other host.
 
 Each figure is defined in [`spate_test_support::alloc`](repo:test-support/src/alloc.rs).
 The figures leave out allocations that C code makes through `malloc`, as libzstd and librdkafka do.
-The counted tier's DHAT rows include them.
+They also leave out what a case allocates on any thread other than the one that runs it.
+The counted tier's DHAT rows include both.
 
 ### Accept a count that moved
 
@@ -152,6 +153,7 @@ A bump that needed new files is rebased by hand from then on.
 
 Name the file `benches/<name>_alloc.rs`, declare it as a `[[bench]]` with `harness = false`, and call `spate_test_support::alloc::main_with` from its `main`.
 The command finds it by that name.
+Run each case's work on the thread that calls it, because only that thread's allocations are counted.
 Leave out a case whose pass reads the clock.
 
 ## Run the wall-clock tier

@@ -5157,8 +5157,9 @@ mod cluster {
         drop(feed);
     }
 
-    /// Pins that the last commit and the consumer's close wait at most one
-    /// group-call bound, 2 s here, however long the close is given.
+    /// Pins that the last commit, and the drop's wait for a consumer close
+    /// held by it, each take at most one group-call bound, 2 s here, however
+    /// long the close is given.
     #[test]
     fn the_last_commit_waits_at_most_the_bound() {
         let clock = TestClock::frozen();

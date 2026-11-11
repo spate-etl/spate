@@ -133,8 +133,8 @@ pub(crate) enum CommitWait {
     Held(Duration),
     /// For a commit just sent.
     Sent(Duration),
-    /// For the consumer's close, before a close behind a held commit moves
-    /// to a thread of its own.
+    /// For the consumer's close, as the drop hands a close held by an
+    /// unanswered commit to a thread of its own.
     Leave(Duration),
 }
 
@@ -146,6 +146,8 @@ pub(crate) struct Member {
     pub(crate) held: Option<PendingCommit<SourceContext>>,
     /// How long the drop waits for a close held by an unanswered commit.
     close_wait: Duration,
+    #[cfg(test)]
+    waits: Arc<std::sync::Mutex<Vec<CommitWait>>>,
 }
 
 impl Deref for Member {
@@ -172,12 +174,16 @@ impl Driver {
         call_bound: Duration,
     ) -> Driver {
         let core_now = core.clock().now();
+        #[cfg(test)]
+        let waits: Arc<std::sync::Mutex<Vec<CommitWait>>> = Arc::default();
         Driver {
             core,
             consumer: Member {
                 consumer: Some(Arc::new(consumer)),
                 held: None,
                 close_wait: call_bound,
+                #[cfg(test)]
+                waits: Arc::clone(&waits),
             },
             producer,
             paused: BTreeSet::new(),
@@ -185,7 +191,7 @@ impl Driver {
             assigned_once: false,
             last_commit: core_now,
             #[cfg(test)]
-            waits: Arc::default(),
+            waits,
         }
     }
 
@@ -753,7 +759,13 @@ impl Drop for Member {
         let Some(held) = self.held.take() else {
             return;
         };
-        if !close_in_background((held, self.consumer.take()), self.close_wait) {
+        let wait = self.close_wait;
+        #[cfg(test)]
+        self.waits
+            .lock()
+            .expect("waits lock")
+            .push(CommitWait::Leave(wait));
+        if !close_in_background((held, self.consumer.take()), wait) {
             tracing::warn!(
                 "the group has not answered the feed's commit; its consumer leaves the group \
                  in the background"

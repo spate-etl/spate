@@ -1107,8 +1107,9 @@ impl Feed for KafkaFeed {
     /// `within` ends, and at most a quarter of `max.poll.interval.ms` or 10
     /// seconds, whichever is less. One left unanswered fails the close, and
     /// the consumer leaves the group on a thread of its own, since its close
-    /// waits for that commit. A leave that outlasts `within` still runs on the consumer
-    /// thread, and dropping the feed waits for it.
+    /// waits for that commit. With every commit answered, a leave that
+    /// outlasts `within` still runs on the consumer thread, and dropping the
+    /// feed waits for it.
     fn close(&self, within: Duration) -> Option<Confirmation> {
         let (confirmer, confirmation) = confirmation();
         {

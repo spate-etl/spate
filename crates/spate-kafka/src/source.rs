@@ -133,10 +133,6 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
-/// Bound on the committed-offset reads made before one assignment, shared by
-/// every consumer it accepts.
-const COMMITTED_LOOKUP_TIMEOUT: Duration = Duration::from_secs(10);
-
 /// How long the source holds one consumer's assignment for the others of the
 /// same rebalance. librdkafka's default `heartbeat.interval.ms`, the longest a
 /// steady member goes before it learns of a rebalance.
@@ -316,6 +312,10 @@ pub struct KafkaSource {
     last_consumer_error: Option<(Stopwatch, String)>,
     /// Messages that leaked onto a main queue and were rewound.
     main_queue_rewinds: u64,
+    /// Bound on the committed-offset reads made before one assignment, shared
+    /// by every consumer it accepts. Set from the client configuration at
+    /// `open`.
+    lookup_timeout: Duration,
     /// The clock the assignment windows, the hold, the accept's lookup and
     /// commit bounds and the error's age read.
     clock: SyncClock,
@@ -433,6 +433,7 @@ impl KafkaSource {
             assignment_wait: None,
             last_consumer_error: None,
             main_queue_rewinds: 0,
+            lookup_timeout: crate::client::COMMITTED_LOOKUP_MAX,
             clock: SyncClock::system(),
             #[cfg(test)]
             on_broker_call: None,
@@ -722,7 +723,7 @@ impl KafkaSource {
         &mut self,
         offers: &[(usize, TopicPartitionList)],
     ) -> Result<Result<Vec<Prepared>, String>, SourceError> {
-        let lookup_until = self.clock.now() + COMMITTED_LOOKUP_TIMEOUT;
+        let lookup_until = self.clock.now() + self.lookup_timeout;
         if self.config.uncommitted_start() == Some(Offset::End) {
             return self.read_latest_starts(offers, lookup_until);
         }
@@ -1714,6 +1715,14 @@ impl Source for KafkaSource {
                 let why = format!("{} consumers cannot be allocated", self.config.consumers);
                 SourceError::fatal(at.invalid("consumers", why).to_string())
             })?;
+        // Every consumer has the one `rdkafka` passthrough, so the first one's
+        // bound is each one's.
+        let first = crate::config::Consumer::member(&self.config, 0);
+        let cc = self
+            .config
+            .base(crate::security::openssl_env_overrides())
+            .config(&first);
+        self.lookup_timeout = crate::client::committed_lookup_timeout(&cc);
         for k in 0..self.config.consumers {
             let role = crate::config::Consumer::member(&self.config, k);
             // Resolve the connector-owned metric handles once, before the
@@ -4082,7 +4091,21 @@ mod tests {
             consumers: usize,
             cost: impl Fn(&BrokerCall) -> Duration + Send + Sync + 'static,
         ) -> (KafkaSource, Arc<TestClock>, Calls) {
+            recording_with(cluster, policy, consumers, &[], cost)
+        }
+
+        /// [`recording`], with `extra` in the `rdkafka` passthrough.
+        fn recording_with(
+            cluster: &MockKafka,
+            policy: &str,
+            consumers: usize,
+            extra: &[(&str, &str)],
+            cost: impl Fn(&BrokerCall) -> Duration + Send + Sync + 'static,
+        ) -> (KafkaSource, Arc<TestClock>, Calls) {
             let mut cfg = test_config();
+            for (key, value) in extra {
+                cfg.rdkafka.insert((*key).to_owned(), (*value).to_owned());
+            }
             cfg.brokers = cluster.bootstrap_servers();
             cfg.group_id = spate_test::unique_name("bounds");
             cfg.consumers = consumers;
@@ -4113,7 +4136,7 @@ mod tests {
         }
 
         /// The lookups of one accept under `earliest` share one
-        /// `COMMITTED_LOOKUP_TIMEOUT`: once it is spent, the consumers left make
+        /// `crate::client::COMMITTED_LOOKUP_MAX`: once it is spent, the consumers left make
         /// none, so a slow coordinator holds the controller thread for one bound
         /// whatever the consumer count.
         #[test]
@@ -4141,6 +4164,48 @@ mod tests {
                     BrokerCall::Lookup {
                         k: 2,
                         budget: secs(2)
+                    },
+                ]
+            );
+        }
+
+        /// The accept's bound is a quarter of `max.poll.interval.ms` when that is
+        /// under the 10 s cap, so the lookups end before librdkafka evicts the
+        /// member for not polling. Regression for #1529.
+        #[test]
+        fn the_lookup_bound_follows_a_short_poll_interval() {
+            let cluster = mock();
+            let short = [
+                ("max.poll.interval.ms", "8000"),
+                ("session.timeout.ms", "6000"),
+            ];
+            let (mut source, _clock, recorded) =
+                recording_with(&cluster, "earliest", CONSUMERS, &short, |_| {
+                    Duration::from_millis(500)
+                });
+            source
+                .prepare_starts(&offers())
+                .expect("no fatal")
+                .expect("earliest leaves a start it cannot read to librdkafka");
+            let millis = Duration::from_millis;
+            assert_eq!(
+                calls(&recorded),
+                [
+                    BrokerCall::Lookup {
+                        k: 0,
+                        budget: millis(2000)
+                    },
+                    BrokerCall::Lookup {
+                        k: 1,
+                        budget: millis(1500)
+                    },
+                    BrokerCall::Lookup {
+                        k: 2,
+                        budget: millis(1000)
+                    },
+                    BrokerCall::Lookup {
+                        k: 3,
+                        budget: millis(500)
                     },
                 ]
             );
@@ -4219,7 +4284,7 @@ mod tests {
                 })
                 .collect();
             // The lookups have spent their whole bound.
-            clock.advance(COMMITTED_LOOKUP_TIMEOUT);
+            clock.advance(crate::client::COMMITTED_LOOKUP_MAX);
             source
                 .commit_starts(offers(), starts)
                 .expect("an unknown error is retried");
@@ -4454,7 +4519,7 @@ mod tests {
                     .insert("auto.offset.reset".to_string(), policy.to_string());
                 open(cfg).0
             };
-            let until = || Instant::now() + COMMITTED_LOOKUP_TIMEOUT;
+            let until = || Instant::now() + crate::client::COMMITTED_LOOKUP_MAX;
             let mut latest = open_on("latest");
             assert!(matches!(
                 latest.read_latest_starts(&[(0, tpl_of(&[99]))], until()),

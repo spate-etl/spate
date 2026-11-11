@@ -212,7 +212,9 @@ with `gh`, `cargo-about` and `cargo-cyclonedx` installed as a release gets
 them, so a packaging problem or a change in those tools surfaces before
 release day. `release-checks.yml` runs the same rehearsal on a pull request
 that changes the release workflows, `.github/actions/setup-rust/`,
-`xtask/src/release/`, `ci.yml`, `release-checks.yml` or `xtask/src/ci/`. While
+`xtask/src/release/`, the changelog assembly in `xtask/src/checks/changelog.rs`
+and `xtask/src/checks/changelog/requirements.rs`, `ci.yml`,
+`release-checks.yml` or `xtask/src/ci/`. While
 a release is in flight, after its `release: vX.Y.Z` commit lands and before the
 publish tags it, that run fails in `derive`; a re-run after the tag lands
 passes. A re-run keeps the run's

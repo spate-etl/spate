@@ -233,21 +233,15 @@ fn is_blank(bytes: &[u8]) -> bool {
 
 /// The lines of an NDJSON payload that are not blank, split on `\n`.
 fn ndjson_lines(bytes: &[u8]) -> impl Iterator<Item = &[u8]> {
-    let mut rest = Some(bytes);
-    std::iter::from_fn(move || {
-        let r = rest?;
-        Some(match memchr::memchr(b'\n', r) {
-            Some(nl) => {
-                rest = Some(&r[nl + 1..]);
-                &r[..nl]
-            }
-            None => {
-                rest = None;
-                r
-            }
+    let mut start = 0;
+    memchr::memchr_iter(b'\n', bytes)
+        .chain(std::iter::once(bytes.len()))
+        .map(move |end| {
+            let line = &bytes[start..end];
+            start = end + 1;
+            line
         })
-    })
-    .filter(|line| !is_blank(line))
+        .filter(|line| !is_blank(line))
 }
 
 /// Typed deserializer: decodes each JSON document into your own

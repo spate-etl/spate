@@ -527,6 +527,12 @@ mod tests {
             "{:?} is not a subset of {known:?}",
             host.simd
         );
+        // Every aarch64 target Rust supports has NEON, and every x86_64 host
+        // made since 2011 has SSE4.2.
+        #[cfg(target_arch = "aarch64")]
+        assert!(host.simd.iter().any(|f| f == "neon"), "{:?}", host.simd);
+        #[cfg(target_arch = "x86_64")]
+        assert!(host.simd.iter().any(|f| f == "sse4.2"), "{:?}", host.simd);
     }
 
     /// Pins that only the features whose probe reports them are listed, in

@@ -98,6 +98,10 @@ pub struct JsonDeserializerBuilder {
 
 impl JsonDeserializerBuilder {
     /// Build from the pipeline's `deserializer` component section.
+    ///
+    /// # Errors
+    ///
+    /// [`JsonConfigError::Config`] for a section that does not deserialize.
     pub fn from_component(cfg: &ComponentConfig) -> Result<Self, JsonConfigError> {
         let settings: JsonSettings = cfg.deserialize_into()?;
         Ok(Self::from_settings(settings))
@@ -125,6 +129,11 @@ impl JsonDeserializerBuilder {
     /// - [`WholePayload`](FramingContract::WholePayload): the deserializer owns
     ///   framing, and the configured `framing` (`single` / `ndjson` / `array`)
     ///   is honored unchanged.
+    ///
+    /// # Errors
+    ///
+    /// [`JsonConfigError::DoubleFraming`] for a `PerRecord` source with a
+    /// `framing` other than `single`.
     pub fn for_source_framing(self, contract: FramingContract) -> Result<Self, JsonConfigError> {
         match contract {
             FramingContract::PerRecord if self.settings.framing != JsonFraming::Single => {

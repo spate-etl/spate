@@ -261,6 +261,11 @@ impl AvroDeserializerBuilder {
     ///
     /// `runtime` hosts the registry fetcher task and the startup pre-warm
     /// (Confluent mode); pass the pipeline's I/O runtime handle.
+    ///
+    /// # Errors
+    ///
+    /// [`AvroConfigError::Config`] for a section that does not deserialize,
+    /// and every error [`from_settings`](Self::from_settings) returns.
     pub fn from_component(
         cfg: &ComponentConfig,
         runtime: &tokio::runtime::Handle,

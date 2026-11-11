@@ -110,6 +110,10 @@ impl<F: RecFamily> DistributedRouter<F> {
     /// Programmatic constructor: weights in shard-config order, each
     /// `>= 1`. Prefer [`ClickHouseSink::router`](crate::ClickHouseSink::router),
     /// which sources weights from the validated YAML.
+    ///
+    /// # Errors
+    ///
+    /// [`ConfigError::Validation`] when `weights` is empty or holds a `0`.
     pub fn new(extract: KeyExtractor<F>, weights: &[u32]) -> Result<Self, ConfigError> {
         if weights.is_empty() {
             return Err(ConfigError::Validation(

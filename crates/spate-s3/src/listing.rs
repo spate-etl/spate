@@ -15,8 +15,8 @@ use crate::fetch::ObjectEntry;
 use bytes::Bytes;
 use object_store::ClientOptions;
 use object_store::client::{
-    HttpClient, HttpConnector, HttpError, HttpRequest, HttpResponse, HttpResponseBody, HttpService,
-    ReqwestConnector,
+    HttpClient, HttpConnector, HttpError, HttpErrorKind, HttpRequest, HttpResponse,
+    HttpResponseBody, HttpService, ReqwestConnector,
 };
 use object_store::path::Path;
 use std::sync::{Arc, Mutex};
@@ -95,6 +95,10 @@ impl HttpService for FilteringService {
                 .uri()
                 .query()
                 .is_some_and(|q| q.split('&').any(|pair| pair == "list-type=2"));
+        // The token this request continues from, when it is not a first page.
+        let asked = listing
+            .then(|| continuation_token(req.uri().query().unwrap_or_default()))
+            .flatten();
         let response = self.inner.execute(req).await?;
         if !response.status().is_success() {
             return Ok(bounded_failure(response).await);
@@ -104,6 +108,9 @@ impl HttpService for FilteringService {
         }
         let (mut parts, body) = response.into_parts();
         let page = body.bytes().await?;
+        if asked.is_some() && next_token(&page) == asked {
+            return Err(HttpError::new(HttpErrorKind::Decode, ListingStalled));
+        }
         let page = match filter_page(&page) {
             Some((filtered, removed)) => {
                 self.keys.record(removed);
@@ -154,6 +161,42 @@ async fn bounded_failure(response: HttpResponse) -> HttpResponse {
     // The body is no longer the length the store declared.
     parts.headers.remove("content-length");
     HttpResponse::from_parts(parts, HttpResponseBody::from(kept))
+}
+
+/// A listing page named, as the token for the next page, the token of the
+/// request that fetched it. `object_store` follows any token that is not
+/// empty, so such a store would be asked for the same page without end.
+#[derive(Debug)]
+pub(crate) struct ListingStalled;
+
+impl std::fmt::Display for ListingStalled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(
+            "the store answered a listing page with the continuation token it was asked with, \
+             so the listing cannot advance",
+        )
+    }
+}
+
+impl std::error::Error for ListingStalled {}
+
+/// The `continuation-token` of a listing request's query, decoded.
+fn continuation_token(query: &str) -> Option<String> {
+    url::form_urlencoded::parse(query.as_bytes())
+        .find(|(name, _)| name == "continuation-token")
+        .map(|(_, token)| token.into_owned())
+}
+
+/// The `NextContinuationToken` of a listing page, unescaped.
+fn next_token(page: &[u8]) -> Option<String> {
+    const OPEN: &[u8] = b"<NextContinuationToken>";
+    const CLOSE: &[u8] = b"</NextContinuationToken>";
+    let start = find(page, OPEN)? + OPEN.len();
+    let len = find(&page[start..], CLOSE)?;
+    let raw = std::str::from_utf8(&page[start..start + len]).ok()?;
+    quick_xml::escape::unescape(raw)
+        .ok()
+        .map(|t| t.into_owned())
 }
 
 /// One `<Contents>` element, decoded the way `object_store` decodes it.

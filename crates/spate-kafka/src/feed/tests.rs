@@ -6234,6 +6234,11 @@ mod docker {
     /// have sufficed on Redpanda v26.2.
     const TAIL_RESTARTS: usize = 12;
 
+    /// How long each leader term in that test is watched for the removal
+    /// before the next restart: ten passes of the lane's cleaner, which runs
+    /// every `log_compaction_interval_ms`, 500 ms.
+    const TERM_WATCH: Duration = Duration::from_secs(5);
+
     /// Pins that a gate pass admits a unit on an attempt partition whose
     /// last record the broker removed while keeping its high watermark. A
     /// follower started afterwards is fetched nothing, and reaches the
@@ -6288,15 +6293,29 @@ mod docker {
                     .map(|m| marks = m)
                     .is_ok()
             });
-            let mut from_start = TopicPartitionList::new();
-            from_start
-                .add_partition_offset(topic, 0, Offset::Offset(0))
-                .unwrap();
-            let first = reader
-                .offsets_for_times(from_start, Duration::from_secs(5))
-                .ok()
-                .and_then(|tpl| tpl.find_partition(topic, 0).map(|e| e.offset()));
-            marks.0 < marks.1 && first == Some(Offset::End)
+            // Elapsed time is the property: the cleaner removes the record
+            // on its own timer, `log_compaction_interval_ms`.
+            let term = std::time::Instant::now();
+            loop {
+                let mut from_start = TopicPartitionList::new();
+                from_start
+                    .add_partition_offset(topic, 0, Offset::Offset(0))
+                    .unwrap();
+                let first = reader
+                    .offsets_for_times(from_start, Duration::from_secs(5))
+                    .ok()
+                    .and_then(|tpl| tpl.find_partition(topic, 0).map(|e| e.offset()));
+                if marks.0 < marks.1 && first == Some(Offset::End) {
+                    return true;
+                }
+                if term.elapsed() >= TERM_WATCH {
+                    return false;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+                if let Ok(m) = reader.fetch_watermarks(topic, 0, Duration::from_secs(5)) {
+                    marks = m;
+                }
+            }
         });
         assert!(
             removed,

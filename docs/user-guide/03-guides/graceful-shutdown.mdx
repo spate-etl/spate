@@ -83,6 +83,9 @@ one, raise the other. With a feed that hands back, the stop's reading and the
 feed's close also run inside the budget, and startup refuses a `drain_timeout`
 of 5s or less. A feed's close that outlasts what is left of the budget falls
 into the gap too.
+A source that bounds its final commit and its close against a backend that
+stops answering states the bound on its connector page:
+[Kafka](../04-connectors/sources/kafka/README.mdx#how-offsets-are-committed).
 :::
 
 ```yaml

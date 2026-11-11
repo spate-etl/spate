@@ -406,6 +406,36 @@ fn a_failed_attempt_write_is_due_after_its_backoff_on_the_feed_clock() {
     assert_eq!(take_due(&mut st, now + first).len(), 1);
 }
 
+/// Pins how a gate fence settles: confirmed, it changes nothing the feed
+/// holds; failed transiently, it is not queued to be sent again; refused as
+/// Fatal, it stops the feed naming the fence. Each settle takes it out of
+/// the count of fences in flight.
+#[test]
+fn a_fence_settles_without_finishing_anything() {
+    let core = core(10);
+    let fence = || Write::fence(&core.topics.attempt, 0);
+    core.fences.store(3, Ordering::Release);
+    core.lock().tracker.assign([tp(0)]);
+    let entry = gated(&core, 0);
+    core.settle(fence(), Ok(()));
+    {
+        let mut st = core.lock();
+        assert_eq!(st.admitting, 1);
+        assert!(st.ready.is_empty());
+        assert!(st.tracker.held(entry.receipt).is_some());
+    }
+    core.settle(fence(), Err(failure(C::MessageTimedOut)));
+    assert!(core.lock().resends.is_empty(), "queued to be sent again");
+    assert!(!core.latched());
+    core.settle(fence(), Err(failure(C::TopicAuthorizationFailed)));
+    let reason = core.lock().signal.latched().cloned().unwrap().reason;
+    assert!(
+        reason.contains("writing a fence to `units-attempts` failed"),
+        "{reason}"
+    );
+    assert_eq!(core.fences.load(Ordering::Acquire), 0);
+}
+
 /// Pins that a write failed transiently is not queued to be sent again once
 /// the feed has stopped.
 #[test]
@@ -5560,6 +5590,261 @@ mod cluster {
         assert_eq!(err.kind, FeedErrorKind::Fatal, "{}", err.reason);
         drop((feed, cluster));
     }
+
+    /// The bound on a pass in the fence tests, which only the test's last
+    /// advance reaches.
+    const PASS_BOUND: Duration = Duration::from_secs(3600);
+
+    /// A gate on a frozen clock over a two-partition attempt topic and no
+    /// follower: two records on each partition of `stalled`, and a unit at
+    /// the gate on each.
+    struct Fencing {
+        cluster: MockKafka,
+        core: Arc<Core>,
+        clock: Arc<TestClock>,
+        gate: Gate,
+    }
+
+    fn fencing(stalled: &[i32]) -> Fencing {
+        let cluster = cluster_with(0);
+        let brokers = cluster.bootstrap_servers();
+        let records: BaseProducer = raw_config()
+            .set("bootstrap.servers", &brokers)
+            .build()
+            .unwrap();
+        for &partition in stalled {
+            for _ in 0..2 {
+                records
+                    .send(
+                        BaseRecord::to(ATTEMPTS)
+                            .partition(partition)
+                            .key("other")
+                            .payload(&attempt::encode(1)),
+                    )
+                    .map_err(|(e, _)| e)
+                    .unwrap();
+            }
+        }
+        records.flush(Duration::from_secs(30)).unwrap();
+        let group = spate_test::unique_name("fence");
+        let config = KafkaFeedConfig::from_section(&section(&brokers, &group)).unwrap();
+        let clock = TestClock::frozen();
+        let core = Arc::new(Core::new(&config, TWO, SyncClock::new(clock.clone())));
+        let producer: Producer = config
+            .base(false)
+            .create::<Producer, _>(
+                &config.client(FeedRole::Producer),
+                FeedProducerHooks::new(Arc::clone(&core)),
+            )
+            .unwrap();
+        {
+            let mut st = core.lock();
+            st.tracker.assign([super::tp(0)]);
+            for &partition in stalled {
+                let offset = (0..)
+                    .find(|&o| {
+                        super::attempt_partition(&core, &super::identity(&core, o)) == partition
+                    })
+                    .unwrap();
+                let receipt = st.tracker.deliver(&super::tp(0), offset).unwrap();
+                st.gating.push_back(Gating {
+                    receipt,
+                    unit: Unit::new(format!("u{offset}"), Vec::new()),
+                    identity: super::identity(&core, offset),
+                });
+            }
+        }
+        producer
+            .client()
+            .fetch_metadata(Some(ATTEMPTS), Duration::from_secs(10))
+            .unwrap();
+        let gate = Gate::new(Arc::clone(&core), producer, PASS_BOUND)
+            .with_step(STEP)
+            .with_request_bound(HANG);
+        Fencing {
+            cluster,
+            core,
+            clock,
+            gate,
+        }
+    }
+
+    impl Fencing {
+        /// Wait until the pass has begun `n` more waits on the ledger, and
+        /// every fence it sent before them has settled.
+        fn waits(&self, n: usize) {
+            let begun = attempt::lock(&self.core.ledger).gate_waits;
+            wait_until(HANG, "the pass waits again", || {
+                attempt::lock(&self.core.ledger).gate_waits >= begun + n
+            });
+            wait_until(HANG, "the fences settle", || {
+                self.core.fences.load(Ordering::Acquire) == 0
+            });
+        }
+
+        /// Advance the feed's clock by `by`, and wait until the pass has
+        /// checked the clock since.
+        fn advance(&self, by: Duration) {
+            self.clock.advance(by);
+            self.waits(2);
+        }
+
+        /// The offsets of the fences on attempt `partition`.
+        fn fences(&self, partition: i32) -> Vec<i64> {
+            use rdkafka::Message as _;
+            use rdkafka::error::KafkaError;
+            let consumer: BaseConsumer = raw_config()
+                .set("bootstrap.servers", self.cluster.bootstrap_servers())
+                .set("group.id", spate_test::unique_name("fences"))
+                .set("enable.partition.eof", "true")
+                .build()
+                .unwrap();
+            let mut tpl = TopicPartitionList::new();
+            tpl.add_partition_offset(ATTEMPTS, partition, Offset::Beginning)
+                .unwrap();
+            consumer.assign(&tpl).unwrap();
+            let mut fences = Vec::new();
+            wait_until(HANG, "the end of the attempt partition", || {
+                match consumer.poll(Duration::from_millis(100)) {
+                    Some(Ok(m)) if m.key() == Some(attempt::FENCE_KEY.as_bytes()) => {
+                        assert!(m.payload().is_none(), "a fence with a value");
+                        fences.push(m.offset());
+                        false
+                    }
+                    Some(Err(KafkaError::PartitionEOF(_))) => true,
+                    Some(Err(e)) => panic!("{e}"),
+                    Some(Ok(_)) | None => false,
+                }
+            });
+            fences
+        }
+
+        /// Take in the record keyed `key` at `offset` of `partition`, as the
+        /// follower would.
+        fn read(&self, partition: i32, offset: i64, key: &[u8]) {
+            attempt::lock(&self.core.ledger).apply(partition, offset, key, attempt::Entry::Removed);
+            self.core.ledger.1.notify_all();
+        }
+    }
+
+    /// Pins that a pass writes a fence to an attempt partition whose
+    /// follower has stood below the high watermark for a step, and none
+    /// before the step: the fence lands at the watermark, and once the
+    /// follower reads it the unit is admitted. Regression for #1771.
+    #[test]
+    fn a_gate_fences_an_attempt_partition_its_follower_stopped_below() {
+        let rig = fencing(&[0]);
+        std::thread::scope(|scope| {
+            let pass = scope.spawn(|| rig.gate.pass());
+            rig.waits(3);
+            assert_eq!(rig.fences(0), Vec::<i64>::new(), "a fence before the step");
+            rig.advance(STEP);
+            assert_eq!(rig.fences(0), vec![2]);
+            rig.read(0, 2, attempt::FENCE_KEY.as_bytes());
+            pass.join().expect("the pass returns");
+        });
+        wait_until(HANG, "the unit is admitted", || {
+            rig.core.lock().ready.len() == 1
+        });
+    }
+
+    /// Pins that a pass fences every stalled partition at the same step,
+    /// while it still waits on the first, and each one once.
+    #[test]
+    fn a_gate_pass_fences_each_stalled_partition_once() {
+        let rig = fencing(&[0, 1]);
+        std::thread::scope(|scope| {
+            let pass = scope.spawn(|| rig.gate.pass());
+            rig.waits(1);
+            for _ in 0..3 {
+                rig.advance(STEP);
+            }
+            assert_eq!((rig.fences(0), rig.fences(1)), (vec![2], vec![2]));
+            rig.clock.advance(PASS_BOUND);
+            pass.join().expect("the pass returns");
+        });
+        assert_eq!(rig.core.lock().gating.len(), 2, "admitted with the ledger behind");
+    }
+
+    /// Pins that a pass fences no partition the follower has read to the
+    /// high watermark or is still reading: one caught up before the pass,
+    /// and one whose read moves within the step.
+    #[test]
+    fn a_partition_the_follower_reads_gets_no_fence() {
+        let rig = fencing(&[0, 1]);
+        rig.read(1, 0, b"other");
+        rig.read(1, 1, b"other");
+        std::thread::scope(|scope| {
+            let pass = scope.spawn(|| rig.gate.pass());
+            rig.waits(1);
+            rig.read(0, 0, b"other");
+            rig.advance(STEP);
+            assert_eq!((rig.fences(0), rig.fences(1)), (vec![], vec![]));
+            rig.read(0, 1, b"other");
+            pass.join().expect("the pass returns");
+        });
+        wait_until(HANG, "both units are admitted", || {
+            rig.core.lock().ready.len() == 2
+        });
+    }
+
+    /// Pins that a stopping feed writes no fence: a pass still waiting when
+    /// the feed stops receiving fences nothing at its step.
+    #[test]
+    fn a_stopping_feed_writes_no_fence() {
+        let rig = fencing(&[0]);
+        std::thread::scope(|scope| {
+            let pass = scope.spawn(|| rig.gate.pass());
+            rig.waits(1);
+            rig.core.lock().stopping = true;
+            rig.advance(STEP);
+            assert_eq!(rig.fences(0), Vec::<i64>::new());
+            rig.clock.advance(PASS_BOUND);
+            pass.join().expect("the pass returns");
+        });
+    }
+
+    /// Pins that a close waits for no gate fence: with a fence alone in
+    /// flight the writes count as settled, and with another write beside it
+    /// they do not. Attempt partition 0 has no leader, so neither is sent.
+    #[test]
+    fn a_close_does_not_wait_for_a_fence() {
+        use super::super::write::{self, Outgoing, Write};
+        let cluster = cluster_with(0);
+        cluster.partition_leader(ATTEMPTS, 0, None).unwrap();
+        let brokers = cluster.bootstrap_servers();
+        let group = spate_test::unique_name("close-fence");
+        let config = KafkaFeedConfig::from_section(&section(&brokers, &group)).unwrap();
+        let core = Arc::new(Core::new(&config, TWO, SyncClock::system()));
+        let producer: Producer = config
+            .base(false)
+            .create::<Producer, _>(
+                &config.client(FeedRole::Producer),
+                FeedProducerHooks::new(Arc::clone(&core)),
+            )
+            .unwrap();
+        core.fences.fetch_add(1, Ordering::AcqRel);
+        write::send(
+            &core,
+            &producer,
+            Box::new(Write::fence(&core.topics.attempt, 0)),
+        );
+        assert!(consumer::flush_writes(&core, &producer, STEP));
+        let (confirmer, _confirmation) = spate_core::feed::confirmation();
+        let message = Outgoing {
+            topic: Arc::clone(&core.topics.attempt),
+            partition: Some(0),
+            key: Some(b"units/0/0".to_vec()),
+            payload: None,
+            headers: Vec::new(),
+        };
+        write::send(
+            &core,
+            &producer,
+            Box::new(Write::Publish { message, confirmer }),
+        );
+        assert!(!consumer::flush_writes(&core, &producer, STEP));
+    }
 }
 
 mod docker {
@@ -5587,10 +5872,11 @@ mod docker {
     use spate_core::clock::SyncClock;
     use spate_core::feed::Unit;
     use spate_test::{HANG, wait_until};
-    use spate_test_support::{KAFKA_PORT, KafkaBroker};
+    use spate_test_support::{Broker, KAFKA_PORT, KafkaBroker};
     use std::num::NonZeroU32;
     use std::sync::Arc;
     use std::time::Duration;
+    use testcontainers::ImageExt as _;
     use testcontainers::runners::SyncRunner;
 
     /// Units on the work topic, fewer than the buffer holds.
@@ -5891,6 +6177,94 @@ mod docker {
             || first_offset(&brokers, "live-tail").is_some_and(|o| o > 0),
         );
         follower_catches_up(&brokers, "live-tail");
+    }
+
+    /// The restarts a removed-tail test makes before it gives up on the
+    /// broker removing the partition's last record. Each one starts a new
+    /// leader term, which rolls the segment the cleaner then empties; four
+    /// have sufficed on Redpanda v26.2.
+    const TAIL_RESTARTS: usize = 12;
+
+    /// Pins that a gate pass admits a unit on an attempt partition whose
+    /// last record the broker removed while keeping its high watermark. A
+    /// follower started afterwards is fetched nothing, and reaches the
+    /// watermark only once the gate's fence lands past it. Only Redpanda
+    /// removes that record. Regression for #1771.
+    #[test]
+    #[ignore = "requires Docker"]
+    fn a_gate_admits_past_a_tail_the_broker_removed() {
+        let broker = KafkaBroker::selected();
+        if broker.broker() != Broker::Redpanda {
+            println!("{} keeps a partition's last record; nothing to pin", broker.broker());
+            return;
+        }
+        // A fixed host port, so the address the broker advertises holds
+        // across its restarts.
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .and_then(|l| l.local_addr())
+            .expect("a free port")
+            .port();
+        let container = broker
+            .with_mapped_port(port, KAFKA_PORT)
+            .start()
+            .expect("start kafka container");
+        let brokers = format!("127.0.0.1:{port}");
+        let io = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let topic = "removed-tail";
+        create_compacted(&brokers, &io, topic);
+        let one: &[u8] = br#"{"v":1,"attempts":1}"#;
+        write(&brokers, topic, &[("units/0/0", Some(one)), ("units/0/0", None)]);
+        let reader: BaseConsumer = raw_config()
+            .set("bootstrap.servers", &brokers)
+            .build()
+            .unwrap();
+        let removed = (0..TAIL_RESTARTS).any(|_| {
+            let status = std::process::Command::new("docker")
+                .args(["restart", container.id()])
+                .status()
+                .expect("run docker");
+            assert!(status.success(), "docker restart: {status}");
+            let mut marks = (0, 0);
+            wait_until(HANG, "the broker answers after its restart", || {
+                reader
+                    .fetch_watermarks(topic, 0, Duration::from_secs(5))
+                    .map(|m| marks = m)
+                    .is_ok()
+            });
+            let mut from_start = TopicPartitionList::new();
+            from_start
+                .add_partition_offset(topic, 0, Offset::Offset(0))
+                .unwrap();
+            let first = reader
+                .offsets_for_times(from_start, Duration::from_secs(5))
+                .ok()
+                .and_then(|tpl| tpl.find_partition(topic, 0).map(|e| e.offset()));
+            marks.0 < marks.1 && first == Some(Offset::End)
+        });
+        assert!(
+            removed,
+            "the broker kept the partition's last record over {TAIL_RESTARTS} restarts"
+        );
+        let section: spate_core::config::FeedSection = serde_yaml::from_str(&format!(
+            "kafka:\n  brokers: \"{brokers}\"\n  group_id: {}\n  topic: units\n  \
+             retry_topic: units-retry\n  dead_letter_topic: units-dead\n  \
+             attempt_topic: {topic}\n  statistics_interval: 0s\n",
+            spate_test::unique_name("removed-tail")
+        ))
+        .unwrap();
+        let config = KafkaFeedConfig::from_section(&section).unwrap();
+        let core = Arc::new(Core::new(&config, NonZeroU32::MIN, SyncClock::system()));
+        let thread = Follower::new(&config, Arc::clone(&core))
+            .unwrap()
+            .spawn()
+            .unwrap();
+        let _stop = super::StopOnDrop(Arc::clone(&core));
+        gate_admits(&config, &core);
+        crate::feed::stop(&core);
+        thread.join().unwrap();
     }
 
     /// Pins that a follower catches up on a compacted attempt partition

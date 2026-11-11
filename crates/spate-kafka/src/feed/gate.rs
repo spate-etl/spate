@@ -16,6 +16,12 @@
 //! deliveries fill that buffer. The gate never runs on the consumer's poll
 //! thread (INV-2), and it sends nothing under the state lock: a refused
 //! enqueue settles inline, and settling takes that lock.
+//!
+//! When a step of the wait passes with the follower still on the same
+//! offset below a partition's high watermark, the pass writes a fence to
+//! that partition, once, and keeps waiting for the watermark it read. A
+//! broker can remove a partition's last records and keep its watermark, and
+//! the follower reads past the end only once the fence lands there.
 
 use super::attempt::{self, partition_of};
 use super::events::Cause;
@@ -29,7 +35,6 @@ use spate_core::clock::Stopwatch;
 use spate_core::error::ErrorClass;
 use spate_core::task::{ThreadHandle, spawn_thread};
 use std::collections::BTreeSet;
-#[cfg(test)]
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, PoisonError};
 use std::time::{Duration, Instant};
@@ -248,7 +253,13 @@ impl Gate {
             unread.partitions.extend(late);
             unread.reasons.push(reason);
         }
-        for (partition, lwm, hwm) in marks {
+        let waited_from = self.core.clock().now();
+        let read_from: Vec<Option<i64>> = {
+            let ledger = attempt::lock(&self.core.ledger);
+            marks.iter().map(|&(p, _, _)| ledger.read_to(p)).collect()
+        };
+        let mut fenced = false;
+        for &(partition, lwm, hwm) in &marks {
             loop {
                 {
                     let ledger = attempt::lock(&self.core.ledger);
@@ -277,9 +288,62 @@ impl Gate {
                 // With the ledger's lock released: `latched` takes the
                 // state lock, which is never taken under it.
                 self.check(started, partition)?;
+                let waited = self
+                    .core
+                    .clock()
+                    .now()
+                    .saturating_duration_since(waited_from);
+                if !fenced && waited >= self.step {
+                    fenced = true;
+                    self.fence(&marks, &read_from);
+                }
             }
         }
         Ok(unread)
+    }
+
+    /// Write a fence to each partition of `marks` that is behind its high
+    /// watermark on the offset it was at in `read_from`, when the pass began
+    /// to wait. A stopping feed writes none.
+    fn fence(&self, marks: &[(i32, i64, i64)], read_from: &[Option<i64>]) {
+        let stalled: Vec<(i32, Option<i64>, i64)> = {
+            let ledger = attempt::lock(&self.core.ledger);
+            marks
+                .iter()
+                .zip(read_from)
+                .filter(|&(&(p, lwm, hwm), &from)| {
+                    !ledger.caught_up(p, lwm, hwm) && ledger.read_to(p) == from
+                })
+                .map(|(&(p, _, hwm), &from)| (p, from, hwm))
+                .collect()
+        };
+        if stalled.is_empty() {
+            return;
+        }
+        {
+            // Counted under the state lock that `close` sets `stopping`
+            // under, so a close sees every fence it does not wait for.
+            if self.core.lock().stopping {
+                return;
+            }
+            self.core
+                .fences
+                .fetch_add(stalled.len(), Ordering::AcqRel);
+        }
+        for (partition, read_to, hwm) in stalled {
+            tracing::debug!(
+                partition,
+                ?read_to,
+                hwm,
+                "the attempt follower has not moved below the high watermark for a step; \
+                 writing a fence"
+            );
+            write::send(
+                &self.core,
+                &self.producer,
+                Box::new(Write::fence(&self.core.topics.attempt, partition)),
+            );
+        }
     }
 
     /// Read the low and high watermarks of attempt `partition` for the

@@ -2,7 +2,7 @@
 //! failed unit goes.
 
 use super::Core;
-use super::attempt::{ORIGIN_HEADER, PublishId, encode};
+use super::attempt::{FENCE_KEY, ORIGIN_HEADER, PublishId, encode};
 use super::events::Cause;
 use super::inflight::Position;
 use super::producer::FeedProducerContext;
@@ -70,18 +70,18 @@ impl Outgoing {
         }
     }
 
-    /// The attempt record for `identity` on `partition` of the attempt
-    /// topic `topic`: `attempts`, or a tombstone for `None`.
+    /// The record keyed `key` on `partition` of the attempt topic `topic`:
+    /// `attempts`, or a tombstone for `None`.
     fn attempt_record(
         topic: &Arc<str>,
-        identity: &PublishId,
+        key: &[u8],
         partition: i32,
         attempts: Option<u32>,
     ) -> Outgoing {
         Outgoing {
             topic: Arc::clone(topic),
             partition: Some(partition),
-            key: Some(identity.as_bytes().to_vec()),
+            key: Some(key.to_vec()),
             payload: attempts.map(encode),
             headers: Vec::new(),
         }
@@ -178,7 +178,12 @@ impl Attempt {
         clock: &dyn Clock,
     ) -> Attempt {
         Attempt {
-            message: Outgoing::attempt_record(topic, &identity, partition, Some(attempts)),
+            message: Outgoing::attempt_record(
+                topic,
+                identity.as_bytes(),
+                partition,
+                Some(attempts),
+            ),
             attempts,
             receipt,
             unit,
@@ -209,7 +214,7 @@ impl Tombstone {
         position: Position,
     ) -> Tombstone {
         Tombstone {
-            message: Outgoing::attempt_record(topic, identity, partition, None),
+            message: Outgoing::attempt_record(topic, identity.as_bytes(), partition, None),
             position,
             backoff: RESEND_BACKOFF,
         }
@@ -228,23 +233,35 @@ pub(crate) enum Write {
     Move(Move),
     Attempt(Attempt),
     Tombstone(Tombstone),
+    /// A fence the gate writes past the end of an attempt partition (see
+    /// the `attempt` module). It finishes nothing.
+    Fence { message: Outgoing },
 }
 
 impl Write {
+    /// The fence for `partition` of the attempt topic `topic`.
+    pub(crate) fn fence(topic: &Arc<str>, partition: i32) -> Write {
+        Write::Fence {
+            message: Outgoing::attempt_record(topic, FENCE_KEY.as_bytes(), partition, None),
+        }
+    }
+
     pub(crate) fn message(&self) -> &Outgoing {
         match self {
             Write::Publish { message, .. }
             | Write::Move(Move { message, .. })
             | Write::Attempt(Attempt { message, .. })
-            | Write::Tombstone(Tombstone { message, .. }) => message,
+            | Write::Tombstone(Tombstone { message, .. })
+            | Write::Fence { message } => message,
         }
     }
 
     /// The resend schedule of a write the feed sends again; `None` for a
-    /// publish, whose failure goes to its publisher.
+    /// publish, whose failure goes to its publisher, and for a fence, which
+    /// the gate's next stalled pass writes again.
     pub(crate) fn backoff_mut(&mut self) -> Option<&mut Backoff> {
         match self {
-            Write::Publish { .. } => None,
+            Write::Publish { .. } | Write::Fence { .. } => None,
             Write::Move(Move { backoff, .. })
             | Write::Attempt(Attempt { backoff, .. })
             | Write::Tombstone(Tombstone { backoff, .. }) => Some(backoff),
@@ -257,6 +274,7 @@ impl Write {
             Write::Publish { .. } | Write::Move(_) => "a unit",
             Write::Attempt(_) => "an attempt record",
             Write::Tombstone(_) => "an attempt record's tombstone",
+            Write::Fence { .. } => "a fence",
         }
     }
 }

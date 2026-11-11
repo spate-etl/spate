@@ -275,7 +275,7 @@ pub(crate) fn run(mut d: Driver) {
         // but two pollers' callbacks can interleave on the producer
         // context's one unpaired-error slot, so within this window a
         // producer error can be logged twice.
-        d.producer.flush(wait).is_ok()
+        flush_writes(&core, &d.producer, wait)
     };
     let until = d.last_deadline(close.as_ref());
     let what = if close.is_some() {
@@ -312,6 +312,19 @@ pub(crate) fn run(mut d: Driver) {
     if let Some(close) = close {
         settle_close(&core, close, flushed, committed);
     }
+}
+
+/// Whether `producer`'s writes settle within `wait`. A gate fence still in
+/// flight at the end is not counted, since it finishes no unit.
+pub(crate) fn flush_writes(core: &Core, producer: &Producer, wait: Duration) -> bool {
+    if producer.flush(wait).is_ok() {
+        return true;
+    }
+    // Read before the fences: no fence is counted once the feed is stopping,
+    // so one settled between the reads can only make this answer `false`.
+    let queued = producer.in_flight_count();
+    let fences = core.fences.load(Ordering::Acquire);
+    usize::try_from(queued).is_ok_and(|queued| queued <= fences)
 }
 
 /// How long a close given `within` waits for the feed's writes in flight:
@@ -933,7 +946,7 @@ pub(crate) fn take_due(st: &mut State, now: Instant) -> Vec<Write> {
                 }
                 held
             }
-            Write::Publish { .. } => true,
+            Write::Publish { .. } | Write::Fence { .. } => true,
         };
         if keep {
             taken.push(w);

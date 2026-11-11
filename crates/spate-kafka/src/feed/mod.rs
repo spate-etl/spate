@@ -80,9 +80,7 @@ use spate_core::hash::FastMap;
 use spate_core::task::{ThreadHandle, spawn_thread};
 use std::collections::VecDeque;
 use std::num::NonZeroU32;
-#[cfg(test)]
-use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
@@ -246,6 +244,9 @@ pub(crate) struct Core {
     attempt_partitions: NonZeroU32,
     /// The attempt counts the follower reads and the gate answers from.
     ledger: SharedLedger,
+    /// The gate's fences sent and not yet settled, which the close does not
+    /// wait for.
+    fences: AtomicUsize,
     /// The clock the feed's timed reads take: the commit cadence, resend due
     /// times, the gate's pass bound and the durations it logs.
     clock: SyncClock,
@@ -276,6 +277,7 @@ impl Core {
             attempt_cap: config.attempt_cap,
             attempt_partitions,
             ledger: Arc::new((Mutex::new(Ledger::new(attempt_partitions)), Condvar::new())),
+            fences: AtomicUsize::new(0),
             clock,
             statistics_enabled: !config.statistics_interval.is_zero(),
             metrics: Mutex::new(None),
@@ -386,6 +388,9 @@ impl Core {
     /// enqueue, gave it.
     pub(crate) fn settle(&self, write: Write, outcome: Result<(), Failure>) {
         events::delivery_report(outcome.is_ok());
+        if matches!(write, Write::Fence { .. }) {
+            self.fences.fetch_sub(1, Ordering::AcqRel);
+        }
         match outcome {
             Ok(()) => self.confirmed(write),
             Err(failure) => self.failed(write, failure),
@@ -441,6 +446,7 @@ impl Core {
                 self.lock().tracker.complete(&tombstone.position);
                 events::tombstoned();
             }
+            Write::Fence { .. } => {}
         }
     }
 

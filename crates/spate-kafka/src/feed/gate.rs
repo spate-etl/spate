@@ -386,10 +386,7 @@ impl Gate {
             "reading the watermarks of `{}` partition {partition}: {error}",
             self.core.topics.attempt
         );
-        let class = error
-            .rdkafka_error_code()
-            .map(|code| crate::error::classify_consumer_error(code, true));
-        if class == Some(ErrorClass::Fatal) {
+        if crate::error::classify_kafka_error(error, true) == ErrorClass::Fatal {
             self.core.latch(&reason);
             return Halt::Ended;
         }

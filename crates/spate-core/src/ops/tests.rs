@@ -3444,3 +3444,50 @@ fn split_branches_keep_their_queues_codec() {
         chunk.acks.deliver();
     }
 }
+
+/// Pins that a split routes a record to every branch the closure emits it
+/// to: one emitted to two branches reaches both under one acknowledgment,
+/// and one emitted to none under `Skip` reaches no branch.
+#[test]
+fn a_split_record_reaches_each_branch_it_is_emitted_to() {
+    let (sub_q, mut sub_rx) = shard_queues(1, 64);
+    let (key_q, mut key_rx) = shard_queues(1, 64);
+    let budget = Arc::new(InflightBudget::new());
+
+    let mut split = chain(LogDeser).split(ErrorPolicy::Skip);
+    let sub = split.add::<SubF, _, _>(
+        SubEncoder,
+        ToZero,
+        SplitTarget::new("sub".into(), sub_q, Arc::clone(&budget)),
+    );
+    let key = split.add::<KeyF, _, _>(
+        KeyEncoder,
+        ToZero,
+        SplitTarget::new("key".into(), key_q, Arc::clone(&budget)),
+    );
+    let mut c = split
+        .route(move |e: LogEvent<'_>, out| {
+            if e.key.starts_with('a') {
+                out.emit(sub, SubEvent { chunk: e.body });
+                out.emit(
+                    key,
+                    KeyEvent {
+                        key: e.key.as_bytes(),
+                    },
+                );
+            }
+        })
+        .build();
+
+    let bufs = payloads(&["a1:both", "z9:neither"]);
+    let (mut batch, ack_rx) = TestBatch::new(&bufs);
+    assert!(matches!(c.push_batch(&mut batch, 0), PushOutcome::Done));
+    assert!(matches!(c.flush(), PushOutcome::Done));
+
+    let sub_rows = drain_rows(&mut sub_rx[0]);
+    let key_rows = drain_rows(&mut key_rx[0]);
+    drop(batch);
+    assert_eq!(sub_rows, vec![b"both".to_vec()]);
+    assert_eq!(key_rows, vec![b"a1".to_vec()]);
+    assert_eq!(ack_rx.try_recv().unwrap().status, AckStatus::Delivered);
+}

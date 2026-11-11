@@ -6,11 +6,15 @@ mod child;
 mod corpus;
 #[cfg(feature = "elasticmq")]
 mod elasticmq;
+#[cfg(feature = "events")]
+pub mod events;
 mod http;
 #[cfg(feature = "kafka")]
 mod kafka;
 #[cfg(feature = "s3")]
 mod s3;
+#[cfg(any(feature = "s3", feature = "elasticmq"))]
+mod started;
 #[cfg(feature = "tls")]
 mod tls;
 

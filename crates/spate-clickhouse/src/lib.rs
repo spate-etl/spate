@@ -143,6 +143,8 @@ pub mod rowbinary;
 mod schema;
 pub mod serde;
 #[cfg(test)]
+mod test_startup;
+#[cfg(test)]
 mod test_tls;
 #[cfg(feature = "testing")]
 #[doc(hidden)]

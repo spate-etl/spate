@@ -1174,3 +1174,135 @@ fn a_stop_during_a_hold_on(brokers: &str) {
     wait_for_end(&job, &next, &rows, WORK);
     assert_eq!(run_to_exit(&next, &clock).state, ExitState::Completed);
 }
+
+/// An aborted transaction at the end of each attempt partition leaves the
+/// gate caught up on a real broker: the unit is admitted and read, and the
+/// job completes. Regression for #1765.
+#[test]
+#[ignore = "requires Docker"]
+fn an_aborted_transaction_at_the_end_of_the_attempt_topic_ends_a_bounded_job() {
+    on_transactional_broker(|brokers| {
+        let job = listed(brokers, "attempt-aborted", "");
+        for partition in 0..ATTEMPT_PARTITIONS {
+            let producer =
+                support::transactional_producer(brokers, ATTEMPT, &format!("aborted-{partition}"));
+            producer.begin_transaction().expect("begin");
+            producer
+                .send(
+                    rdkafka::producer::BaseRecord::to(ATTEMPT)
+                        .partition(partition)
+                        .payload(&b"gone"[..])
+                        .key(&b"gone"[..]),
+                )
+                .expect("enqueue");
+            producer.flush(TRANSACTION_TIMEOUT).expect("flush");
+            producer
+                .abort_transaction(TRANSACTION_TIMEOUT)
+                .expect("abort");
+            support::settled_end(brokers, ATTEMPT, partition);
+        }
+        let rows = recs("kept", 2);
+        job.publish("kept.ndjson", &rows);
+
+        let clock = TestClock::frozen();
+        let worker = launch_bounded(KafkaFeed::connect, &job.data, &job.section, &clock);
+        wait_until(HANG, "the unit is admitted and read", || {
+            written(&worker.script) == sorted(rows.clone())
+        });
+        assert_eq!(run_to_exit(&worker, &clock).state, ExitState::Completed);
+    });
+}
+
+/// A dead-letter topic deleted while a bounded job runs fails the job at its
+/// next read of the topic, naming it. Regression for #1756.
+#[test]
+#[ignore = "requires Docker"]
+fn a_deleted_dead_letter_topic_fails_the_bounded_job() {
+    on_transactional_broker(|brokers| a_deleted_topic_fails_the_job_on(brokers, DEAD));
+}
+
+/// A deleted retry topic fails the job as a deleted dead-letter topic does.
+#[test]
+#[ignore = "requires Docker"]
+fn a_deleted_retry_topic_fails_the_bounded_job() {
+    on_transactional_broker(|brokers| a_deleted_topic_fails_the_job_on(brokers, RETRY));
+}
+
+/// A deleted work topic fails the job as a deleted dead-letter topic does.
+#[test]
+#[ignore = "requires Docker"]
+fn a_deleted_work_topic_fails_the_bounded_job() {
+    on_transactional_broker(|brokers| a_deleted_topic_fails_the_job_on(brokers, WORK));
+}
+
+/// An admin client on `brokers`, and a runtime to wait on its requests.
+fn admin_on(brokers: &str) -> (AdminClient<DefaultClientContext>, tokio::runtime::Runtime) {
+    let admin = support::raw_config()
+        .set("bootstrap.servers", brokers)
+        .build()
+        .expect("admin client");
+    let io = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    (admin, io)
+}
+
+/// A bounded job on `brokers` with its one unit read and committed, and its
+/// worker.
+fn job_with_its_unit_read(
+    brokers: &str,
+    tag: &str,
+    clock: &std::sync::Arc<TestClock>,
+) -> (BoundedJob, Worker) {
+    let job = listed(brokers, tag, "");
+    let rows = recs("kept", 2);
+    job.publish("kept.ndjson", &rows);
+    let worker = launch_bounded(KafkaFeed::connect, &job.data, &job.section, clock);
+    wait_until(HANG, "the unit is read and committed", || {
+        written(&worker.script) == sorted(rows.clone()) && job.committed(WORK) == Some(1)
+    });
+    (job, worker)
+}
+
+fn a_deleted_topic_fails_the_job_on(brokers: &str, topic: &str) {
+    let clock = TestClock::frozen();
+    let (_job, worker) = job_with_its_unit_read(brokers, "topic-deleted", &clock);
+    let (admin, io) = admin_on(brokers);
+    for deleted in io
+        .block_on(admin.delete_topics(&[topic], &AdminOptions::new()))
+        .expect("delete the topic")
+    {
+        deleted.expect("the topic is deleted");
+    }
+
+    let report = run_to_exit(&worker, &clock);
+    let ExitState::Failed(failure) = &report.state else {
+        panic!("expected a failed run, got {:?}", report.state);
+    };
+    // The work topic's name is inside the other two, so the quoted name.
+    let named = format!("reading the partitions of `{topic}`");
+    assert!(failure.reason.contains(&named), "{}", failure.reason);
+}
+
+/// Partitions added to the work, retry and dead-letter topics while a bounded
+/// job runs leave the job to complete. Redpanda answers an offset read of a
+/// partition just added with `UnknownTopicOrPartition`, which the job reads
+/// again. Regression for #1756.
+#[test]
+#[ignore = "requires Docker"]
+fn partitions_added_during_a_bounded_job_let_it_complete() {
+    on_transactional_broker(|brokers| {
+        let clock = TestClock::frozen();
+        let (_job, worker) = job_with_its_unit_read(brokers, "grown", &clock);
+        let (admin, io) = admin_on(brokers);
+        let more = [WORK, RETRY, DEAD].map(|t| rdkafka::admin::NewPartitions::new(t, 6));
+        for added in io
+            .block_on(admin.create_partitions(&more, &AdminOptions::new()))
+            .expect("add partitions")
+        {
+            added.expect("partitions are added");
+        }
+        assert_eq!(run_to_exit(&worker, &clock).state, ExitState::Completed);
+    });
+}

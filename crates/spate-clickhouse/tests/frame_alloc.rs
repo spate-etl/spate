@@ -1,7 +1,6 @@
 //! Steady-state allocation of the sink's frame codec.
 //!
-//! One test per binary, because `Counting` counts every thread in the process
-//! while a case runs.
+//! Its own binary, because the global allocator is the binary's.
 
 use spate_clickhouse::Compression;
 use spate_clickhouse::testing::frame_codec;

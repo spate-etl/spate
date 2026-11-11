@@ -656,7 +656,8 @@ pub(crate) fn missing_metadata(metadata: &str) -> Result<Vec<String>, Error> {
 /// Pre-1.0 a breaking change is a minor bump, since cargo treats `0.x` minors
 /// as incompatible. A raised `rust-version` is a minor under the same rule,
 /// judged by comparing the two values, so an annotation or a lowering is not a
-/// raise.
+/// raise. An `added` or `deprecated` fragment is a minor too, so a patch
+/// release carries no new feature.
 pub(crate) fn derive(root: &Path) -> Result<(Version, String), Error> {
     let last = semver_checks::last_tag(root)?;
     if last.is_empty() {
@@ -691,6 +692,12 @@ pub(crate) fn derive(root: &Path) -> Result<(Version, String), Error> {
             "minor bump (a changelog fragment opens with **Breaking:**)".to_owned(),
         ));
     }
+    if let Some((kind, file)) = changelog::minor_fragment(root)? {
+        return Ok((
+            cur.next(Bump::Minor),
+            format!("minor bump (the changelog fragment {file} is of type {kind})"),
+        ));
+    }
     let old = run::capture(
         root,
         &Step::new("git", ["show"]).arg(format!("{last}:{MANIFEST}")),
@@ -707,7 +714,7 @@ pub(crate) fn derive(root: &Path) -> Result<(Version, String), Error> {
     }
     Ok((
         cur.next(Bump::Patch),
-        format!("patch bump (no breaking change since {last})"),
+        format!("patch bump (no breaking change, feature or deprecation since {last})"),
     ))
 }
 

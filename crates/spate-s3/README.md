@@ -43,7 +43,9 @@ their defaults.
 - `url` takes `s3://`, `s3a://`, `file://`, or `https://` on an S3 or R2
   endpoint host. Another S3-compatible store takes `s3://<bucket>/<prefix>` with
   its endpoint under `store`. A URL carrying userinfo or a query fails at load,
-  and so does `memory://`.
+  and so do `memory://` and an S3 or R2 host in a form the client does not
+  parse, such as `s3.amazonaws.com`. The `url` row of the page linked below
+  lists the forms it parses.
 - `compression: auto` decides per object by extension. `.gz` and `.gzip` are
   gzip, `.zst` and `.zstd` are zstd, and any other key is read uncompressed.
 - `store` options apply on top of the AWS environment variables. A bucket key

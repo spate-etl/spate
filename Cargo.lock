@@ -4426,14 +4426,18 @@ dependencies = [
  "async-trait",
  "futures-util",
  "object_store",
+ "serde",
  "serde_json",
  "spate-bench",
+ "spate-clickhouse",
  "spate-core",
  "spate-json",
  "spate-s3",
  "spate-test",
+ "spate-test-support",
  "tempfile",
  "tokio",
+ "zstd 0.14.3",
 ]
 
 [[package]]
@@ -4527,6 +4531,9 @@ dependencies = [
  "rdkafka",
  "rustls",
  "rustls-native-certs",
+ "serde",
+ "serde_json",
+ "spate-bench",
  "tempfile",
  "testcontainers",
  "tokio",

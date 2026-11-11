@@ -1141,6 +1141,34 @@ fn listed(brokers: &str, tag: &str) -> BoundedJob {
     BoundedJob::listed(brokers, tag, "", publisher_on_mock)
 }
 
+/// A transaction marker at the end of each attempt partition leaves the gate
+/// caught up: the unit behind it is admitted and read, and the job completes.
+/// A marker takes an offset and is never delivered, so the follower passes it
+/// by position. Regression for #1765.
+#[test]
+fn a_marker_on_the_attempt_topic_leaves_the_gate_caught_up() {
+    let cluster = cluster(1);
+    let brokers = cluster.bootstrap_servers();
+    let group = spate_test::unique_name("attempt-marker");
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    let section = bounded_section(&brokers, &group, &dir);
+    list_once(publisher_on_mock(&section), &data, &section);
+    for partition in 0..ATTEMPT_PARTITIONS {
+        write_marker(&brokers, ATTEMPT, partition, Marker::Commit);
+    }
+    let rows = recs("a", 2);
+    let unit = stage(&data, "a.ndjson", &rows);
+    produce_raw(&brokers, WORK, &[(Some(unit.id.as_bytes()), &unit.body)]);
+
+    let clock = TestClock::frozen();
+    let worker = launch_bounded(ON_MOCK, &data, &section, &clock);
+    wait_until(HANG, "the unit is admitted and read", || {
+        written(&worker.script) == sorted(rows.clone())
+    });
+    assert_eq!(run_to_exit(&worker, &clock).state, ExitState::Completed);
+}
+
 /// Pins that a bounded job ends `Completed` once its unit is read and the
 /// group has committed past the marker behind it, for either marker.
 /// Regression for #1728.

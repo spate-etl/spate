@@ -62,6 +62,15 @@ pub(crate) fn classify_start_error(code: RDKafkaErrorCode) -> StartFailure {
     }
 }
 
+/// [`classify_consumer_error`] for a client error. One that carries no code
+/// is Retryable.
+pub(crate) fn classify_kafka_error(e: &KafkaError, after_startup: bool) -> ErrorClass {
+    e.rdkafka_error_code()
+        .map_or(ErrorClass::Retryable, |code| {
+            classify_consumer_error(code, after_startup)
+        })
+}
+
 /// Classify a single librdkafka consumer/queue error code.
 ///
 /// `after_startup` gates [`RDKafkaErrorCode::UnknownTopicOrPartition`]:

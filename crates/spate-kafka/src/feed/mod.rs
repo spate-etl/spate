@@ -846,7 +846,7 @@ fn parts(
     let (core, producer) = producer_parts(config, attempt_partitions, clock)?;
     let base = config.base(openssl_env);
     let role = config.client(FeedRole::Consumer);
-    let lookup_timeout = consumer::committed_lookup_timeout(&base.config(&role));
+    let lookup_timeout = crate::client::committed_lookup_timeout(&base.config(&role));
     let consumer: BaseConsumer<crate::context::SourceContext> = base
         .create(&role, SourceHooks::default())
         .map_err(|reason| {

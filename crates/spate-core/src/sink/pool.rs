@@ -45,7 +45,9 @@ pub struct SinkPool<W: ShardWriter> {
 /// The deadline itself is cooperative. Workers watch it, abort their in-flight
 /// writes and abandon what is left. This constant is the backstop under that,
 /// so a worker that cannot honor the deadline degrades shutdown to a lost
-/// drain report rather than an unbounded hang.
+/// drain report rather than an unbounded hang. The I/O runtime's timer fires
+/// it, so it needs an I/O worker that is not blocked, as
+/// [`SinkPool::drain`] says.
 ///
 /// The tightest constraint is the controller rather than the pod's
 /// `terminationGracePeriodSeconds`. The controller waits only `deadline + 2s`
@@ -237,10 +239,13 @@ impl<W: ShardWriter> SinkPool<W> {
     /// writes get until `deadline` before being aborted and abandoned.
     ///
     /// `deadline` runs on the pool's clock and counts as at most a year.
-    /// Always returns. A worker that does not stop by `deadline` is
-    /// force-aborted `BACKSTOP_GRACE` later; its acknowledgments fail with it
-    /// (so at-least-once holds and the data replays), but its counts are
-    /// missing from the returned report.
+    /// A worker that does not stop by `deadline` is force-aborted
+    /// `BACKSTOP_GRACE` later; its acknowledgments fail with it (so
+    /// at-least-once holds and the data replays), but its counts are missing
+    /// from the returned report. So the drain returns as long as the I/O
+    /// runtime can fire that deadline. Writers that block their thread on
+    /// every I/O worker leave nothing to fire it, and the drain then does not
+    /// return.
     ///
     /// Contract: the caller must have dropped every
     /// [`ShardQueues`](super::ShardQueues) clone first. Workers only enter

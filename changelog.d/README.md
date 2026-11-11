@@ -75,7 +75,8 @@ it in words.
 
 The marker is also what the tooling reads. The release derives a minor bump
 when any fragment opens with it, and the semver gate lets an API break through
-only while one does. It has to be the first thing in the file.
+only while one does. It has to be the first thing in the file. The type is read
+too: an `added` or `deprecated` fragment also derives a minor bump.
 
 ## The conventions
 

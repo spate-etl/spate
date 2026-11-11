@@ -11,7 +11,7 @@ mod rustfs;
 
 use std::fmt;
 use std::net::SocketAddr;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use ::http::Method;
 use object_store::aws::{AmazonS3Builder, AwsAuthorizer, AwsCredential};
@@ -23,7 +23,7 @@ use testcontainers::runners::SyncRunner;
 use testcontainers::{Container, GenericImage, ImageExt};
 
 use crate::kafka::BROKER_FROM_INSIDE;
-use crate::{container_image, http, http_with_headers, selected_lane};
+use crate::{container_image, http, http_with_headers, selected_lane, started};
 
 /// The access key id every store accepts.
 pub const ACCESS_KEY: &str = "spate-test";
@@ -167,7 +167,9 @@ impl S3Store {
     /// # Errors
     ///
     /// Fails when the selected lane is pinned but names no store, or the
-    /// container does not start or is not ready within 60 seconds.
+    /// container does not start, exits, or is not ready within 60 seconds.
+    /// A container that exits or is not ready writes the tail of its output
+    /// to stderr.
     ///
     /// # Panics
     ///
@@ -190,14 +192,16 @@ impl S3Store {
             _ => request,
         };
         let container = request.start().map_err(|e| format!("start {store}: {e}"))?;
-        let port = container
-            .get_host_port_ipv4(store.container_port())
-            .map_err(|e| format!("{store} port: {e}"))?;
+        let what = store.to_string();
+        let port = started::host_port(&what, &container, store.container_port(), "port")?;
         let api = SocketAddr::from(([127, 0, 0, 1], port));
-        let ready_port = container
-            .get_host_port_ipv4(store.ready_port())
-            .map_err(|e| format!("{store} readiness port: {e}"))?;
-        ready(store, SocketAddr::from(([127, 0, 0, 1], ready_port)))?;
+        let ready_port =
+            started::host_port(&what, &container, store.ready_port(), "readiness port")?;
+        ready(
+            store,
+            SocketAddr::from(([127, 0, 0, 1], ready_port)),
+            &container,
+        )?;
         Ok(S3Store {
             container,
             store,
@@ -219,9 +223,10 @@ impl S3Store {
     /// # Errors
     ///
     /// Fails when the selected lane is pinned but names no store, the store
-    /// sends no notifications, the container does not start or is not ready
-    /// within 60 seconds, or a store that takes its Kafka target through its
-    /// topic API refuses the topic.
+    /// sends no notifications, the container does not start, exits, or is
+    /// not ready within 60 seconds, or a store that takes its Kafka target
+    /// through its topic API refuses the topic. A container that exits or is
+    /// not ready writes the tail of its output to stderr.
     ///
     /// # Panics
     ///
@@ -249,7 +254,7 @@ impl S3Store {
         });
         let container = request.start().map_err(|e| format!("start {store}: {e}"))?;
         let api = SocketAddr::from(([127, 0, 0, 1], s3_host_port));
-        ready(store, api)?;
+        ready(store, api, &container)?;
         let mut started = S3Store {
             container,
             store,
@@ -423,20 +428,18 @@ fn pinned(store: Store) -> GenericImage {
     GenericImage::new(image, tag)
 }
 
-/// Waits until the store at `api` answers its readiness path with `200`.
-fn ready(store: Store, api: SocketAddr) -> Result<(), String> {
-    let until = Instant::now() + READY;
-    loop {
-        match http(api, "GET", store.ready_path()) {
-            Ok((200, _)) => return Ok(()),
-            failure if Instant::now() >= until => {
-                return Err(format!(
-                    "{store} was not ready within {READY:?}: {failure:?}"
-                ));
-            }
-            _ => std::thread::sleep(Duration::from_millis(50)),
-        }
-    }
+/// Waits until the store at `api` answers its readiness path with `200`, as
+/// [`started::ready`] waits.
+fn ready(store: Store, api: SocketAddr, container: &Container<GenericImage>) -> Result<(), String> {
+    started::ready(
+        &store.to_string(),
+        READY,
+        || match http(api, "GET", store.ready_path()) {
+            Ok((200, _)) => Ok(()),
+            probe => Err(format!("{probe:?}")),
+        },
+        container,
+    )
 }
 
 #[cfg(test)]

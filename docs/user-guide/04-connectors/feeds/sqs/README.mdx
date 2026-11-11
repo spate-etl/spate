@@ -329,6 +329,15 @@ delete not sent by then leaves its unit to return after one visibility period
 and be read again, and so does every unit of a worker killed before its
 hand-back reaches SQS.
 
+The close sets its units visible ten to a call, one call after another. When
+the sink is still writing at the drain deadline, the close has at most the one
+second that
+[the drain choreography](../../../03-guides/graceful-shutdown.mdx#the-drain-choreography)
+leaves it. The close then reaches every unit only when each call is answered
+within that time divided by the number of calls, which is at most 250 ms for 40
+held units. A lower `units_held` means fewer calls, so each has longer. A unit
+the close does not reach returns when its visibility lapses.
+
 Startup refuses a `checkpoint.drain_timeout` of `5s` or less with the SQS feed
 (see [`checkpoint:`](../../../07-reference/configuration.mdx#checkpoint)).
 

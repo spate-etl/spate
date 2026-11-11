@@ -11,9 +11,7 @@
 use super::FeedRole;
 use super::attempt::{self, Entry, PublishId, decode, partition_of};
 use super::config::KafkaFeedConfig;
-use super::consumer::{
-    Read, commit_moved, commit_revoked, committed_lookup_timeout, read, retire_offsets, take_due,
-};
+use super::consumer::{Read, commit_moved, commit_revoked, read, retire_offsets, take_due};
 use super::events::Cause;
 use super::gate::admission;
 use super::inflight::Tp;
@@ -252,15 +250,32 @@ fn a_failed_write_is_classified_by_the_sink_table() {
 
 /// Pins the bound on the committed-offset read: a quarter of
 /// `max.poll.interval.ms`, at most 10 s, which librdkafka's 300 s default
-/// reaches.
+/// reaches. The interval counts in each spelling librdkafka takes.
 #[test]
 fn the_committed_offset_read_is_bounded_by_the_poll_interval() {
     let mut cc = raw_config();
-    assert_eq!(committed_lookup_timeout(&cc), Duration::from_secs(10));
+    assert_eq!(
+        crate::client::committed_lookup_timeout(&cc),
+        Duration::from_secs(10)
+    );
     cc.set("max.poll.interval.ms", "6000");
-    assert_eq!(committed_lookup_timeout(&cc), Duration::from_millis(1500));
+    assert_eq!(
+        crate::client::committed_lookup_timeout(&cc),
+        Duration::from_millis(1500)
+    );
     cc.set("max.poll.interval.ms", "600000");
-    assert_eq!(committed_lookup_timeout(&cc), Duration::from_secs(10));
+    assert_eq!(
+        crate::client::committed_lookup_timeout(&cc),
+        Duration::from_secs(10)
+    );
+    for spelling in ["8000ms", "0x1F40", "8000.5"] {
+        cc.set("max.poll.interval.ms", spelling);
+        assert_eq!(
+            crate::client::committed_lookup_timeout(&cc),
+            Duration::from_secs(2),
+            "{spelling}"
+        );
+    }
 }
 
 /// A move of `receipt`'s delivery to the retry topic.
@@ -5318,11 +5333,17 @@ mod feed_metrics {
         ))
     }
 
-    fn snapshot(tx: i64) -> Statistics {
-        Statistics {
-            tx,
-            ..Default::default()
-        }
+    fn snapshot(tx: u64) -> Statistics {
+        let mut stats = Statistics::default();
+        sent(&mut stats, tx);
+        stats
+    }
+
+    /// Gives `stats` one broker that has sent `tx` requests.
+    fn sent(stats: &mut Statistics, tx: u64) {
+        let mut broker = crate::testutil::broker("k1:9092/1", "learned", 1);
+        broker.tx = tx;
+        stats.brokers.insert(broker.name.clone(), broker);
     }
 
     /// A consumer snapshot carrying the work and retry topics' partition 0,
@@ -5572,9 +5593,9 @@ mod feed_metrics {
             core.attach_metrics(FeedMetricsCtx::new(Some(meter)).with_partition_detail(detail));
         };
         let mut later = consumer_snapshot(6);
-        later.tx = 31;
+        sent(&mut later, 31);
         let mut last = consumer_snapshot(6);
-        last.tx = 50;
+        sent(&mut last, 50);
         let rendered = render_metrics(|| {
             attach(&first, false);
             attach(&second, true);
@@ -5643,7 +5664,7 @@ mod feed_metrics {
         let core = Arc::new(core_with_statistics("5s"));
         let hooks = FeedProducerHooks::new(Arc::clone(&core));
         let mut consumer = consumer_snapshot(0);
-        consumer.tx = 31;
+        sent(&mut consumer, 31);
         let rendered = render_metrics(|| {
             core.attach_metrics(attached(false));
             core.publish_consumer_stats(&consumer, &[]);

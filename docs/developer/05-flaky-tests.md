@@ -377,7 +377,6 @@ Fix the test by giving it a signal or a clock it controls.
 Add no retry, no `#[ignore]` and no wider bound.
 
 **Why:** the `ci` profile does not retry a failed test, so each flake fails the pull request or merge-queue entry it lands in.
-The one retry in CI is on the Ceph RGW lane of the S3 container suite.
 
 ### Report it
 

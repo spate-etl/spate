@@ -13,17 +13,25 @@ repository.workspace = true
 async-trait = { workspace = true }
 futures-util = { workspace = true }
 object_store = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 spate-bench = { workspace = true }
+spate-clickhouse = { workspace = true }
 spate-core = { workspace = true, features = ["testing"] }
 spate-json = { workspace = true }
 spate-s3 = { workspace = true, features = ["testing"] }
 spate-test = { workspace = true }
+spate-test-support = { workspace = true, features = ["events"] }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["rt", "time"] }
+zstd = { workspace = true }
 
 [[bench]]
 name = "feed_small_objects_wall"
+harness = false
+
+[[bench]]
+name = "pipeline_wall"
 harness = false
 
 [lints]

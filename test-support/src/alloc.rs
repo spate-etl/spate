@@ -18,18 +18,42 @@
 //! platform `malloc` changes no figure. Only the Rust global allocator is seen:
 //! what C code allocates through `malloc` directly, as libzstd does, is absent.
 //!
-//! Counting is gated by one process-wide flag. The binaries run every case on
-//! the main thread with no harness threads, so nothing else allocates while a
-//! window is open.
+//! A window belongs to the thread that opens it, and counts what that thread
+//! allocates. Another thread allocating meanwhile, such as a test harness's,
+//! moves no figure.
 
 use std::alloc::{GlobalAlloc, Layout, System};
+use std::cell::Cell;
 use std::io::Write as _;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-static WINDOW: AtomicBool = AtomicBool::new(false);
-static ALLOCS: AtomicU64 = AtomicU64::new(0);
-static REALLOCS: AtomicU64 = AtomicU64::new(0);
-static BYTES: AtomicU64 = AtomicU64::new(0);
+thread_local! {
+    /// Whether this thread's window is open.
+    static WINDOW: Cell<bool> = const { Cell::new(false) };
+    /// What this thread's windows have counted.
+    static COUNTED: Cell<Counts> = const { Cell::new(Counts::ZERO) };
+}
+
+/// Adds to this thread's figures while its window is open.
+fn record(allocs: u64, reallocs: u64, bytes: u64) {
+    // A thread allocates and frees after its locals are gone, and the
+    // allocator must not panic there.
+    let _ = WINDOW.try_with(|window| {
+        if window.get() {
+            let _ = COUNTED.try_with(|counted| {
+                let c = counted.get();
+                counted.set(Counts {
+                    allocs: c.allocs + allocs,
+                    reallocs: c.reallocs + reallocs,
+                    bytes: c.bytes + bytes,
+                });
+            });
+        }
+    });
+}
+
+fn set_window(open: bool) {
+    WINDOW.with(|window| window.set(open));
+}
 
 /// A `System` allocator that counts what it hands out while a window is open.
 ///
@@ -39,16 +63,16 @@ static BYTES: AtomicU64 = AtomicU64::new(0);
 pub struct Counting;
 
 // SAFETY: every method forwards to `System`, a valid `GlobalAlloc`, with the
-// layout and pointer arguments it was given. The counters are plain atomics
-// touched only after a successful call, so they add no requirement of their
-// own.
+// layout and pointer arguments it was given. The counters are const-initialized
+// thread-local cells with no destructor, so reading them allocates nothing,
+// and they are touched only after a successful call.
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         // SAFETY: `layout` is forwarded unchanged, under the contract this
         // method is called with.
         let ptr = unsafe { System.alloc(layout) };
         if !ptr.is_null() {
-            record_alloc(layout.size());
+            record(1, 0, layout.size() as u64);
         }
         ptr
     }
@@ -57,7 +81,7 @@ unsafe impl GlobalAlloc for Counting {
         // SAFETY: as `alloc`.
         let ptr = unsafe { System.alloc_zeroed(layout) };
         if !ptr.is_null() {
-            record_alloc(layout.size());
+            record(1, 0, layout.size() as u64);
         }
         ptr
     }
@@ -73,20 +97,10 @@ unsafe impl GlobalAlloc for Counting {
         // and `new_size` meets the caller's obligations, all forwarded
         // unchanged.
         let out = unsafe { System.realloc(ptr, layout, new_size) };
-        if !out.is_null() && WINDOW.load(Ordering::Relaxed) {
-            REALLOCS.fetch_add(1, Ordering::Relaxed);
-            if new_size > layout.size() {
-                BYTES.fetch_add((new_size - layout.size()) as u64, Ordering::Relaxed);
-            }
+        if !out.is_null() {
+            record(0, 1, new_size.saturating_sub(layout.size()) as u64);
         }
         out
-    }
-}
-
-fn record_alloc(size: usize) {
-    if WINDOW.load(Ordering::Relaxed) {
-        ALLOCS.fetch_add(1, Ordering::Relaxed);
-        BYTES.fetch_add(size as u64, Ordering::Relaxed);
     }
 }
 
@@ -102,12 +116,15 @@ pub struct Counts {
 }
 
 impl Counts {
+    const ZERO: Self = Self {
+        allocs: 0,
+        reallocs: 0,
+        bytes: 0,
+    };
+
+    /// What the calling thread's windows have counted so far.
     fn read() -> Self {
-        Self {
-            allocs: ALLOCS.load(Ordering::Relaxed),
-            reallocs: REALLOCS.load(Ordering::Relaxed),
-            bytes: BYTES.load(Ordering::Relaxed),
-        }
+        COUNTED.with(Cell::get)
     }
 
     const fn since(self, earlier: Self) -> Self {
@@ -125,7 +142,7 @@ impl Counts {
 pub struct NotInstalled;
 
 /// Runs `f` once uncounted, then once counted, and returns what the second
-/// pass allocated.
+/// pass allocated on the calling thread.
 ///
 /// The first pass absorbs first-touch state such as lazily built scratch
 /// buffers, so the figures are the steady state.
@@ -140,19 +157,19 @@ pub fn measure(mut f: impl FnMut()) -> Result<Counts, NotInstalled> {
         return Err(NotInstalled);
     }
     let before = Counts::read();
-    WINDOW.store(true, Ordering::SeqCst);
+    set_window(true);
     f();
-    WINDOW.store(false, Ordering::SeqCst);
+    set_window(false);
     Ok(Counts::read().since(before))
 }
 
 /// Whether an allocation in an open window moves the counters.
 fn installed() -> bool {
     let before = Counts::read();
-    WINDOW.store(true, Ordering::SeqCst);
+    set_window(true);
     let probe: Vec<u8> = Vec::with_capacity(64);
     std::hint::black_box(&probe);
-    WINDOW.store(false, Ordering::SeqCst);
+    set_window(false);
     drop(probe);
     Counts::read().allocs > before.allocs
 }
@@ -228,14 +245,8 @@ pub fn main_with(f: impl FnOnce(&mut Report)) {
 #[cfg(test)]
 mod tests {
     use std::alloc::{GlobalAlloc, Layout};
-    use std::sync::Mutex;
-    use std::sync::atomic::Ordering;
 
-    use super::{Counting, Counts, NotInstalled, Report, WINDOW, main_with, measure};
-
-    /// The window and counters are process-wide and libtest runs tests on
-    /// several threads, so each test that opens a window holds this.
-    static SERIAL: Mutex<()> = Mutex::new(());
+    use super::{Counting, Counts, NotInstalled, Report, WINDOW, main_with, measure, set_window};
 
     fn layout(size: usize) -> Layout {
         Layout::from_size_align(size, 8).expect("valid layout")
@@ -246,9 +257,6 @@ mod tests {
     /// `Counting`, so the test is its direct caller.
     #[test]
     fn the_snapshot_allocator_counts_each_kind() {
-        let _serial = SERIAL
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let start = Counts::read();
         let at = |allocs, reallocs, bytes| Counts {
             allocs: start.allocs + allocs,
@@ -260,7 +268,7 @@ mod tests {
         // alignment, and each pointer is freed once with the layout it was
         // last allocated or reallocated under.
         unsafe {
-            WINDOW.store(true, Ordering::SeqCst);
+            set_window(true);
             let a = Counting.alloc(layout(100));
             assert_eq!(Counts::read(), at(1, 0, 100));
             let z = Counting.alloc_zeroed(layout(50));
@@ -275,7 +283,7 @@ mod tests {
             Counting.dealloc(z, layout(50));
             assert_eq!(Counts::read(), at(2, 3, 210));
 
-            WINDOW.store(false, Ordering::SeqCst);
+            set_window(false);
             let closed = Counting.alloc(layout(100));
             let closed = Counting.realloc(closed, layout(100), 200);
             Counting.dealloc(closed, layout(200));
@@ -287,21 +295,15 @@ mod tests {
     /// allocation counts nothing.
     #[test]
     fn measure_refuses_an_allocator_that_is_not_installed() {
-        let _serial = SERIAL
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut runs = 0;
         assert_eq!(measure(|| runs += 1), Err(NotInstalled));
-        assert!(!WINDOW.load(Ordering::SeqCst));
+        assert!(!WINDOW.with(std::cell::Cell::get));
         assert_eq!(runs, 1);
     }
 
     #[test]
     #[should_panic(expected = "the global allocator is not `Counting`")]
     fn a_case_refuses_an_allocator_that_is_not_installed() {
-        let _serial = SERIAL
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         Report::default().case("a", || {});
     }
 

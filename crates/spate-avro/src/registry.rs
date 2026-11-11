@@ -42,9 +42,9 @@ use serde::Deserialize;
 use spate_core::backoff::Backoff;
 use spate_core::clock::SyncClock;
 use spate_core::config::UrlRule;
+use spate_core::error::chain;
 use spate_core::hash::{QualityMap, QualitySet};
 use spate_core::telemetry::RateLimit;
-use std::error::Error;
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
@@ -65,7 +65,7 @@ const ERROR_BODY_LIMIT: usize = 256;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// Bounds the per-404 warning. Schema ids are wire data, and an id evicted
 /// from the negative cache is fetched again, so a 404 can recur per record.
-static UNKNOWN_ID_WARN: RateLimit = RateLimit::new(5, Duration::from_secs(10));
+static UNKNOWN_ID_WARN: RateLimit = RateLimit::hot_path();
 
 /// Why the registry rejected this client, set at most once.
 pub(crate) type Rejection = Arc<OnceLock<String>>;
@@ -282,18 +282,6 @@ fn excerpt(body: &[u8]) -> String {
         end -= 1;
     }
     text[..end].trim_end().to_owned()
-}
-
-/// `e` and each error in its source chain, joined by `": "`.
-fn chain(e: &(dyn Error + 'static)) -> String {
-    let mut rendered = e.to_string();
-    let mut next = e.source();
-    while let Some(source) = next {
-        rendered.push_str(": ");
-        rendered.push_str(&source.to_string());
-        next = source.source();
-    }
-    rendered
 }
 
 /// The HTTP client for the registry, verifying an `https://` registry

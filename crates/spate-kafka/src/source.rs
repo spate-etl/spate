@@ -133,19 +133,16 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
-/// Bound on the committed-offset reads made before one assignment, shared by
-/// every consumer it accepts.
-const COMMITTED_LOOKUP_TIMEOUT: Duration = Duration::from_secs(10);
-
 /// How long the source holds one consumer's assignment for the others of the
 /// same rebalance. librdkafka's default `heartbeat.interval.ms`, the longest a
 /// steady member goes before it learns of a rebalance.
 const ASSIGN_HOLD: Duration = Duration::from_secs(3);
 
-/// Bound on waiting for the start commits of one accept, which are in flight
-/// together. An answer that takes longer leaves the offers held for the next
-/// attempt, which sends the same offsets again.
-const START_COMMIT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Bound on waiting for the commits sent together, by one accept's starts or
+/// one flush, and on the drop's wait for the consumers' close. An unanswered
+/// start leaves the offers held for the next attempt, and an unanswered flush
+/// counts as failed.
+const COMMIT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// How long an offer whose start could not be settled waits for its next
 /// attempt. Without a pace every poll repeats a blocking broker round trip.
@@ -296,10 +293,6 @@ pub struct KafkaSource {
     pending_error: Option<(usize, rdkafka::error::RDKafkaErrorCode)>,
     /// When the first held assignment of the current rebalance arrived.
     hold_since: Option<Instant>,
-    /// A start commit went unanswered inside its bound. Consumer close waits for
-    /// every outstanding commit, and one to a silent coordinator stays outstanding
-    /// for as long as the coordinator is silent.
-    commit_unanswered: bool,
     /// When an accept that could not settle a start may run again. `None`
     /// outside such a wait, and cleared when an accept gets past the starts.
     start_retry_at: Option<Instant>,
@@ -316,6 +309,10 @@ pub struct KafkaSource {
     last_consumer_error: Option<(Stopwatch, String)>,
     /// Messages that leaked onto a main queue and were rewound.
     main_queue_rewinds: u64,
+    /// Bound on the committed-offset reads made before one assignment, shared
+    /// by every consumer it accepts. Set from the client configuration at
+    /// `open`.
+    lookup_timeout: Duration,
     /// The clock the assignment windows, the hold, the accept's lookup and
     /// commit bounds and the error's age read.
     clock: SyncClock,
@@ -427,12 +424,12 @@ impl KafkaSource {
             after_drain: None,
             pending_error: None,
             hold_since: None,
-            commit_unanswered: false,
             start_retry_at: None,
             poll_start: 0,
             assignment_wait: None,
             last_consumer_error: None,
             main_queue_rewinds: 0,
+            lookup_timeout: crate::client::COMMITTED_LOOKUP_MAX,
             clock: SyncClock::system(),
             #[cfg(test)]
             on_broker_call: None,
@@ -625,6 +622,7 @@ impl KafkaSource {
     /// every consumer's lanes, or `Idle` when they hold none. When any two
     /// offers overlap, each offer below the newest generation is discarded
     /// first, overlapping or not, and a partition still in two offers is fatal.
+    /// An offer naming a partition of another topic is fatal ahead of both.
     fn accept_held(&mut self, reassign: bool) -> Result<SourceEvent<KafkaLane>, SourceError> {
         let mut offers: Vec<(usize, TopicPartitionList)> = Vec::new();
         let mut held = Vec::new();
@@ -643,6 +641,18 @@ impl KafkaSource {
                 }
                 phase => member.phase = phase,
             }
+        }
+        // Every list built from an offer names the configured topic, and
+        // `assign` would fetch whatever topic the offer named. The check
+        // below compares partition numbers whatever their topic.
+        if !offers
+            .iter()
+            .all(|(_, tpl)| only_on_topic(tpl, &self.config.topic))
+        {
+            return Err(SourceError::fatal(format!(
+                "the group offered a partition of a topic other than `{}`",
+                self.config.topic
+            )));
         }
         if first_repeat(&offers).is_some() {
             offers = self.discard_stale_offers(offers)?;
@@ -722,7 +732,7 @@ impl KafkaSource {
         &mut self,
         offers: &[(usize, TopicPartitionList)],
     ) -> Result<Result<Vec<Prepared>, String>, SourceError> {
-        let lookup_until = self.clock.now() + COMMITTED_LOOKUP_TIMEOUT;
+        let lookup_until = self.clock.now() + self.lookup_timeout;
         if self.config.uncommitted_start() == Some(Offset::End) {
             return self.read_latest_starts(offers, lookup_until);
         }
@@ -794,20 +804,12 @@ impl KafkaSource {
             sent.push(commit);
             kept.push((k, tpl, start));
         }
-        let until = self.clock.now() + START_COMMIT_TIMEOUT;
+        let until = self.clock.now() + COMMIT_TIMEOUT;
         let mut offers = Vec::with_capacity(kept.len());
         let mut starts = Vec::with_capacity(kept.len());
         for ((k, tpl, start), commit) in kept.into_iter().zip(sent) {
-            let waited = commit.map(|commit| {
-                let budget = until.saturating_duration_since(self.clock.now());
-                #[cfg(test)]
-                self.before_call(BrokerCall::CommitWait { k, budget });
-                commit.wait(budget)
-            });
+            let waited = commit.map(|commit| self.await_commit(k, &commit, until));
             if let Some(Err(e)) = waited {
-                if e.rdkafka_error_code() == Some(RDKafkaErrorCode::OperationTimedOut) {
-                    self.commit_unanswered = true;
-                }
                 match start_failure("committing a start offset", &e)? {
                     StartFailure::Discard => {
                         self.discard_refused(k, &tpl)?;
@@ -820,6 +822,21 @@ impl KafkaSource {
             starts.push(start);
         }
         Ok((offers, starts, retry))
+    }
+
+    /// Wait until `until` for the answer to consumer `k`'s `commit`.
+    fn await_commit(
+        &mut self,
+        k: usize,
+        commit: &PendingCommit<SourceContext>,
+        until: Instant,
+    ) -> KafkaResult<()> {
+        let budget = until.saturating_duration_since(self.clock.now());
+        #[cfg(test)]
+        self.before_call(BrokerCall::CommitWait { k, budget });
+        #[cfg(not(test))]
+        let _ = k;
+        commit.wait(budget)
     }
 
     /// Discard consumer `k`'s offer for a start the group has refused.
@@ -932,24 +949,12 @@ impl KafkaSource {
     ///
     /// # Errors
     ///
-    /// A failure [`classify_start_error`] classes as fatal, or an offer naming a
-    /// partition of another topic.
+    /// A failure [`classify_start_error`] classes as fatal.
     fn read_latest_starts(
         &mut self,
         offers: &[(usize, TopicPartitionList)],
         lookup_until: Instant,
     ) -> Result<Result<Vec<Prepared>, String>, SourceError> {
-        // The lists below name the configured topic whatever the offer named, so
-        // a partition of another topic would commit a position on this one.
-        if !offers
-            .iter()
-            .all(|(_, tpl)| only_on_topic(tpl, &self.config.topic))
-        {
-            return Err(SourceError::fatal(format!(
-                "the group offered a partition of a topic other than `{}`",
-                self.config.topic
-            )));
-        }
         for (k, _) in offers {
             self.members[*k].committed_at_assign.clear();
         }
@@ -1714,6 +1719,14 @@ impl Source for KafkaSource {
                 let why = format!("{} consumers cannot be allocated", self.config.consumers);
                 SourceError::fatal(at.invalid("consumers", why).to_string())
             })?;
+        // Every consumer has the one `rdkafka` passthrough, so the first one's
+        // bound is each one's.
+        let first = crate::config::Consumer::member(&self.config, 0);
+        let cc = self
+            .config
+            .base(crate::security::openssl_env_overrides())
+            .config(&first);
+        self.lookup_timeout = crate::client::committed_lookup_timeout(&cc);
         for k in 0..self.config.consumers {
             let role = crate::config::Consumer::member(&self.config, k);
             // Resolve the connector-owned metric handles once, before the
@@ -1922,8 +1935,9 @@ impl Source for KafkaSource {
 
     fn flush_commits(&mut self) -> Result<(), SourceError> {
         self.opened()?;
-        // Every commit is in flight before the first wait, so a flush takes as
-        // long as the slowest answer. Every consumer commits, even after one
+        // Every commit is in flight before the first wait, and the waits share
+        // one bound, so a flush takes as long as the slowest answer, up to
+        // `COMMIT_TIMEOUT`. Every consumer commits, even after one
         // fails, so one consumer's failure does not hold back the others'
         // stored offsets.
         let mut sent = Vec::with_capacity(self.members.len());
@@ -1932,17 +1946,10 @@ impl Source for KafkaSource {
             self.before_call(BrokerCall::CommitSent { k });
             sent.push(send_commit(&self.members[k].consumer, None));
         }
+        let until = self.clock.now() + COMMIT_TIMEOUT;
         let mut first_error = None;
         for (k, commit) in sent.into_iter().enumerate() {
-            let waited = commit.and_then(|commit| {
-                #[cfg(test)]
-                self.before_call(BrokerCall::CommitWait {
-                    k,
-                    budget: Duration::MAX,
-                });
-                // No bound, as with librdkafka's sync commit.
-                commit.wait(Duration::MAX)
-            });
+            let waited = commit.and_then(|commit| self.await_commit(k, &commit, until));
             match waited {
                 // Nothing stored since the last commit: not an error.
                 Ok(())
@@ -2068,11 +2075,8 @@ impl Drop for KafkaSource {
                 tracing::warn!(consumer = k, error = %e, "unassign during source teardown failed");
             }
         }
-        if !self.commit_unanswered {
-            return;
-        }
-        // Close waits for an unanswered commit with no bound, so it runs off this
-        // thread and the pipeline still ends when its deadline says so.
+        // Close can wait on a silent group coordinator with no bound, so it runs
+        // off this thread and the pipeline still ends when its deadline says so.
         let members = std::mem::take(&mut self.members);
         let (closed, wait) = mpsc::channel();
         #[expect(
@@ -2087,10 +2091,10 @@ impl Drop for KafkaSource {
             });
         match spawned {
             Ok(_) => {
-                if wait.recv_timeout(START_COMMIT_TIMEOUT).is_err() {
+                if wait.recv_timeout(COMMIT_TIMEOUT).is_err() {
                     tracing::warn!(
                         topic = %self.config.topic,
-                        "a start commit has no answer; its consumer closes in the background"
+                        "the group has not answered the close; its consumers close in the background"
                     );
                 }
             }
@@ -2371,17 +2375,65 @@ mod tests {
         );
     }
 
-    /// An offer of a partition of another topic stops the run under `latest`: the
-    /// lists name the configured topic, so it would commit a position there.
+    /// An offer of a partition of another topic stops the run under every
+    /// `auto.offset.reset` and ahead of the assign, which would fetch that
+    /// topic. Regression for #1779.
     #[test]
     fn an_offer_on_another_topic_is_fatal() {
-        let (mut source, _clock) = opened_unassigned(latest_config(), 1);
+        // librdkafka crashes assigning a name past its 512-byte limit.
+        let long = "t".repeat(600);
+        // `test_config` sets `earliest`.
+        let mut on_error = test_config();
+        on_error
+            .rdkafka
+            .insert("auto.offset.reset".to_string(), "error".to_string());
+        for (config, topic) in [
+            (test_config(), "other"),
+            (on_error, "other"),
+            (latest_config(), "other"),
+            (test_config(), long.as_str()),
+        ] {
+            let (mut source, _clock) = opened_unassigned(config, 1);
+            let mut other = TopicPartitionList::new();
+            other.add_partition(topic, 0);
+            source.members[0].phase = Phase::Held(other);
+            let Err(e) = source.accept_held(false) else {
+                panic!("the offer was accepted");
+            };
+            assert_eq!(e.class(), ErrorClass::Fatal, "{e}");
+            assert!(
+                e.to_string()
+                    .contains("a partition of a topic other than `orders`"),
+                "{e}"
+            );
+            let assigned = source.members[0].consumer.assignment().expect("assignment");
+            assert_eq!(
+                assigned.count(),
+                0,
+                "the consumer was assigned {assigned:?}"
+            );
+        }
+    }
+
+    /// An offer on another topic is named as that, where its partition number
+    /// is also in a peer's offer on the configured topic.
+    #[test]
+    fn an_offer_on_another_topic_is_named_beside_a_peer_s_same_partition() {
+        let (mut source, _clock) = opened_unassigned(test_config(), 2);
+        let mut ours = TopicPartitionList::new();
+        ours.add_partition("orders", 0);
         let mut other = TopicPartitionList::new();
         other.add_partition("other", 0);
-        assert!(matches!(
-            source.read_latest_starts(&[(0, other)], source.clock.now()),
-            Err(e) if e.class() == ErrorClass::Fatal
-        ));
+        source.members[0].phase = Phase::Held(ours);
+        source.members[1].phase = Phase::Held(other);
+        let Err(e) = source.accept_held(false) else {
+            panic!("the offers were accepted");
+        };
+        assert!(
+            e.to_string()
+                .contains("a partition of a topic other than `orders`"),
+            "{e}"
+        );
     }
 
     /// An empty offer is answered with no lookup, so a consumer with no
@@ -4082,7 +4134,21 @@ mod tests {
             consumers: usize,
             cost: impl Fn(&BrokerCall) -> Duration + Send + Sync + 'static,
         ) -> (KafkaSource, Arc<TestClock>, Calls) {
+            recording_with(cluster, policy, consumers, &[], cost)
+        }
+
+        /// [`recording`], with `extra` in the `rdkafka` passthrough.
+        fn recording_with(
+            cluster: &MockKafka,
+            policy: &str,
+            consumers: usize,
+            extra: &[(&str, &str)],
+            cost: impl Fn(&BrokerCall) -> Duration + Send + Sync + 'static,
+        ) -> (KafkaSource, Arc<TestClock>, Calls) {
             let mut cfg = test_config();
+            for (key, value) in extra {
+                cfg.rdkafka.insert((*key).to_owned(), (*value).to_owned());
+            }
             cfg.brokers = cluster.bootstrap_servers();
             cfg.group_id = spate_test::unique_name("bounds");
             cfg.consumers = consumers;
@@ -4113,7 +4179,7 @@ mod tests {
         }
 
         /// The lookups of one accept under `earliest` share one
-        /// `COMMITTED_LOOKUP_TIMEOUT`: once it is spent, the consumers left make
+        /// `crate::client::COMMITTED_LOOKUP_MAX`: once it is spent, the consumers left make
         /// none, so a slow coordinator holds the controller thread for one bound
         /// whatever the consumer count.
         #[test]
@@ -4141,6 +4207,48 @@ mod tests {
                     BrokerCall::Lookup {
                         k: 2,
                         budget: secs(2)
+                    },
+                ]
+            );
+        }
+
+        /// The accept's bound is a quarter of `max.poll.interval.ms` when that is
+        /// under the 10 s cap, so the lookups end before librdkafka evicts the
+        /// member for not polling. Regression for #1529.
+        #[test]
+        fn the_lookup_bound_follows_a_short_poll_interval() {
+            let cluster = mock();
+            let short = [
+                ("max.poll.interval.ms", "8000"),
+                ("session.timeout.ms", "6000"),
+            ];
+            let (mut source, _clock, recorded) =
+                recording_with(&cluster, "earliest", CONSUMERS, &short, |_| {
+                    Duration::from_millis(500)
+                });
+            source
+                .prepare_starts(&offers())
+                .expect("no fatal")
+                .expect("earliest leaves a start it cannot read to librdkafka");
+            let millis = Duration::from_millis;
+            assert_eq!(
+                calls(&recorded),
+                [
+                    BrokerCall::Lookup {
+                        k: 0,
+                        budget: millis(2000)
+                    },
+                    BrokerCall::Lookup {
+                        k: 1,
+                        budget: millis(1500)
+                    },
+                    BrokerCall::Lookup {
+                        k: 2,
+                        budget: millis(1000)
+                    },
+                    BrokerCall::Lookup {
+                        k: 3,
+                        budget: millis(500)
                     },
                 ]
             );
@@ -4185,7 +4293,7 @@ mod tests {
         }
 
         /// The start commits of one accept are all sent before the first wait, and
-        /// the waits share one `START_COMMIT_TIMEOUT` of their own, from after the
+        /// the waits share one `COMMIT_TIMEOUT` of their own, from after the
         /// lookups: an accept waits for the slowest answer and not their sum.
         #[test]
         fn the_start_commits_of_one_accept_wait_together_on_their_own_bound() {
@@ -4219,33 +4327,40 @@ mod tests {
                 })
                 .collect();
             // The lookups have spent their whole bound.
-            clock.advance(COMMITTED_LOOKUP_TIMEOUT);
+            clock.advance(crate::client::COMMITTED_LOOKUP_MAX);
             source
                 .commit_starts(offers(), starts)
                 .expect("an unknown error is retried");
             let sent = (0..CONSUMERS).map(|k| BrokerCall::CommitSent { k });
             let waits = (0..CONSUMERS).map(|k| BrokerCall::CommitWait {
                 k,
-                budget: START_COMMIT_TIMEOUT - WAIT * u32::try_from(k).expect("index"),
+                budget: COMMIT_TIMEOUT - WAIT * u32::try_from(k).expect("index"),
             });
             assert_eq!(calls(&recorded), sent.chain(waits).collect::<Vec<_>>());
         }
 
-        /// A flush sends every consumer's commit before the first wait, so it
-        /// takes as long as the slowest answer. A consumer with nothing stored
-        /// answers `NoOffset`, and the flush still succeeds.
+        /// A flush sends every consumer's commit before the first wait, and the
+        /// waits share one `COMMIT_TIMEOUT` from after the sends, so it takes as
+        /// long as the slowest answer. A consumer with nothing stored answers
+        /// `NoOffset`, and the flush still succeeds.
         #[test]
         fn a_flush_sends_every_commit_before_the_first_wait() {
+            const SEND: Duration = Duration::from_millis(100);
+            const WAIT: Duration = Duration::from_millis(500);
             let cluster = mock();
             let (mut source, _clock, recorded) =
-                recording(&cluster, "latest", CONSUMERS, |_| Duration::ZERO);
+                recording(&cluster, "latest", CONSUMERS, |call| match call {
+                    BrokerCall::CommitSent { .. } => SEND,
+                    BrokerCall::CommitWait { .. } => WAIT,
+                    _ => Duration::ZERO,
+                });
             source
                 .flush_commits()
                 .expect("nothing stored is not a failure");
             let sent = (0..CONSUMERS).map(|k| BrokerCall::CommitSent { k });
             let waits = (0..CONSUMERS).map(|k| BrokerCall::CommitWait {
                 k,
-                budget: Duration::MAX,
+                budget: COMMIT_TIMEOUT - WAIT * u32::try_from(k).expect("index"),
             });
             assert_eq!(calls(&recorded), sent.chain(waits).collect::<Vec<_>>());
         }
@@ -4454,7 +4569,7 @@ mod tests {
                     .insert("auto.offset.reset".to_string(), policy.to_string());
                 open(cfg).0
             };
-            let until = || Instant::now() + COMMITTED_LOOKUP_TIMEOUT;
+            let until = || Instant::now() + crate::client::COMMITTED_LOOKUP_MAX;
             let mut latest = open_on("latest");
             assert!(matches!(
                 latest.read_latest_starts(&[(0, tpl_of(&[99]))], until()),
@@ -4895,6 +5010,50 @@ mod tests {
             !warned.iter().any(|l| l.contains("sync commit failed")),
             "{warned:#?}"
         );
+    }
+
+    /// A flush whose commit the coordinator never answers fails once its bound
+    /// ends, so the offsets it carried replay, and the source still drops.
+    #[test]
+    fn a_flush_to_a_silent_coordinator_fails_and_the_source_drops() {
+        use crate::testutil::mock::MockKafka;
+        use std::sync::mpsc;
+        let cluster = MockKafka::new();
+        cluster.create_topic("orders", 4, 1).expect("create topic");
+        let brokers = cluster.bootstrap_servers();
+        let mut source = settled_with_stored_offsets(&brokers, "silent-flush", 1);
+        cluster
+            .broker_round_trip_time(1, Duration::from_hours(1))
+            .expect("hold every reply");
+        let (tx, rx) = mpsc::channel();
+        crate::testutil::assert_returns(cluster, HANG, "a flush and drop", move || {
+            let flushed = source.flush_commits();
+            drop(source);
+            tx.send(flushed).expect("send");
+        });
+        let err = rx
+            .recv()
+            .expect("flushed")
+            .expect_err("an unanswered commit is a failed one");
+        assert_eq!(err.class(), ErrorClass::Retryable, "{err}");
+        assert!(err.reason().starts_with("sync commit: "), "{err}");
+        assert!(err.reason().contains("OperationTimedOut"), "{err}");
+    }
+
+    /// A source whose offsets are all committed drops while its coordinator is
+    /// silent: close waits on the coordinator, and the drop does not wait it out.
+    #[test]
+    fn a_source_with_nothing_to_commit_drops_while_its_coordinator_is_silent() {
+        use crate::testutil::mock::MockKafka;
+        let cluster = MockKafka::new();
+        cluster.create_topic("orders", 4, 1).expect("create topic");
+        let brokers = cluster.bootstrap_servers();
+        let mut source = settled_with_stored_offsets(&brokers, "silent-close", 1);
+        source.flush_commits().expect("the stored offsets commit");
+        cluster
+            .broker_round_trip_time(1, Duration::from_hours(1))
+            .expect("hold every reply");
+        crate::testutil::assert_returns(cluster, HANG, "a drop", move || drop(source));
     }
 
     /// Each consumer whose commit the broker refuses logs its own line. Two

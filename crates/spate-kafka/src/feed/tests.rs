@@ -1424,7 +1424,7 @@ fn a_write_failing_again_backs_off_further_each_time() {
     assert_eq!(waits, schedule);
     let logged: Vec<&String> = lines
         .iter()
-        .filter(|line| line.contains("sending it again"))
+        .filter(|line| line.contains("queued to send again after the backoff"))
         .collect();
     assert_eq!(logged.len(), schedule.len(), "{lines:#?}");
     for (line, wait) in logged.iter().zip(schedule) {
@@ -1455,7 +1455,7 @@ fn a_dropped_resend_logs_no_send_again_line() {
         assert!(core.lock().resends.is_empty(), "the feed drops it");
         let resent: Vec<&String> = lines
             .iter()
-            .filter(|line| line.contains("sending it again"))
+            .filter(|line| line.contains("queued to send again after the backoff"))
             .collect();
         assert!(resent.is_empty(), "{resent:#?}");
     }

@@ -19,6 +19,7 @@ use crate::client::list_offsets;
 use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::error::{KafkaError, RDKafkaErrorCode};
 use rdkafka::{Offset, TopicPartitionList};
+use spate_core::error::ErrorClass;
 use spate_core::feed::{Depth, DepthOf, DepthReporter, FeedError, FeedErrorKind};
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
@@ -240,21 +241,36 @@ pub(crate) fn run(
     }
 }
 
-/// The class of a failed offset read: an authorization failure cannot clear
-/// on its own, and anything else may.
-fn class(e: &KafkaError) -> FeedErrorKind {
-    match e.rdkafka_error_code() {
-        Some(
-            RDKafkaErrorCode::GroupAuthorizationFailed
-            | RDKafkaErrorCode::TopicAuthorizationFailed
-            | RDKafkaErrorCode::ClusterAuthorizationFailed,
-        ) => FeedErrorKind::Fatal,
+/// What a failed read asked the cluster about.
+#[derive(Clone, Copy, Debug)]
+enum Asked {
+    /// A topic's metadata. Startup found every topic before the first read,
+    /// so a topic the cluster does not know has been deleted.
+    Topic,
+    /// The offsets of partitions the metadata listed. A broker can answer
+    /// that it does not know a partition just added to its topic.
+    Partitions,
+}
+
+/// The class of a failed read, from the crate's table of consumer codes.
+fn class(e: &KafkaError, asked: Asked) -> FeedErrorKind {
+    match crate::error::classify_kafka_error(e, matches!(asked, Asked::Topic)) {
+        ErrorClass::Fatal => FeedErrorKind::Fatal,
         _ => FeedErrorKind::Retryable,
     }
 }
 
+/// A failed read of partitions' offsets.
 fn error(doing: &str, e: &KafkaError) -> FeedError {
-    FeedError::new(class(e), format!("{doing}: {e}"))
+    FeedError::new(class(e, Asked::Partitions), format!("{doing}: {e}"))
+}
+
+/// A failed read of `topic`'s metadata.
+fn topic_error(topic: &str, e: &KafkaError) -> FeedError {
+    FeedError::new(
+        class(e, Asked::Topic),
+        format!("reading the partitions of `{topic}`: {e}"),
+    )
 }
 
 /// [`Offsets`] through a consumer with the feed's `group.id` that never
@@ -324,7 +340,7 @@ impl Offsets for Brokers {
         let metadata = self
             .consumer
             .fetch_metadata(Some(topic), REQUEST_BOUND)
-            .map_err(|e| error(&format!("reading the partitions of `{topic}`"), &e))?;
+            .map_err(|e| topic_error(topic, &e))?;
         let found: Vec<_> = metadata
             .topics()
             .iter()
@@ -332,8 +348,8 @@ impl Offsets for Brokers {
             .collect();
         // A refusal arrives as the topic's own error in an answered request.
         if let Some(err) = found.iter().find_map(|t| t.error()) {
-            return Err(error(
-                &format!("reading the partitions of `{topic}`"),
+            return Err(topic_error(
+                topic,
                 &KafkaError::MetadataFetch(RDKafkaErrorCode::from(err)),
             ));
         }
@@ -875,11 +891,11 @@ mod tests {
         assert_eq!(named(&partitions[..1]), "`units`");
     }
 
-    /// Pins that a topic whose metadata lists no partitions, as an unknown
-    /// topic's does, fails the read as Retryable, so it never reads as
-    /// drained.
+    /// Pins that a topic the cluster no longer knows fails the read for good,
+    /// so a deleted topic never reads as drained and is not read again.
+    /// Regression for #1756.
     #[test]
-    fn a_topic_reporting_no_partitions_fails_the_read() {
+    fn a_topic_the_cluster_does_not_know_fails_the_read_for_good() {
         use crate::testutil::mock::MockKafka;
         use rdkafka::types::RDKafkaRespErr;
         let cluster = MockKafka::new();
@@ -899,7 +915,7 @@ mod tests {
         );
         let reads = Brokers { consumer };
         let e = reads.partitions(&Arc::from("dead")).unwrap_err();
-        assert_eq!(e.kind, FeedErrorKind::Retryable, "{e}");
+        assert_eq!(e.kind, FeedErrorKind::Fatal, "{e}");
         assert!(e.reason.contains("`dead`"), "{e}");
     }
 
@@ -1021,16 +1037,19 @@ mod tests {
             RDKafkaErrorCode::TopicAuthorizationFailed,
             RDKafkaErrorCode::ClusterAuthorizationFailed,
         ] {
-            assert_eq!(
-                class(&KafkaError::MetadataFetch(code)),
-                FeedErrorKind::Fatal,
-                "{code:?}"
-            );
+            for asked in [Asked::Topic, Asked::Partitions] {
+                assert_eq!(
+                    class(&KafkaError::MetadataFetch(code), asked),
+                    FeedErrorKind::Fatal,
+                    "{code:?} {asked:?}"
+                );
+            }
         }
         assert_eq!(
-            class(&KafkaError::MetadataFetch(
-                RDKafkaErrorCode::RequestTimedOut
-            )),
+            class(
+                &KafkaError::MetadataFetch(RDKafkaErrorCode::RequestTimedOut),
+                Asked::Topic
+            ),
             FeedErrorKind::Retryable
         );
     }
@@ -1064,5 +1083,54 @@ mod tests {
         );
         let e = reads.listed(&one, Offset::End).unwrap_err();
         assert_eq!(e.kind, FeedErrorKind::Fatal, "{e}");
+    }
+
+    /// A read classes its failure by the crate's table of consumer codes: a
+    /// code no retry clears is fatal. A topic the cluster does not know is
+    /// one of them for a metadata read, where it means a deleted topic, and
+    /// is retried for an offset read, where a partition just added answers
+    /// the same code. Regression for #1756.
+    #[test]
+    fn a_read_classes_its_failure_by_the_consumer_table() {
+        use FeedErrorKind::{Fatal, Retryable};
+        for (code, of_topic, of_partitions) in [
+            (RDKafkaErrorCode::UnknownTopicOrPartition, Fatal, Retryable),
+            (RDKafkaErrorCode::Authentication, Fatal, Fatal),
+            (RDKafkaErrorCode::SaslAuthenticationFailed, Fatal, Fatal),
+            (RDKafkaErrorCode::InvalidTopic, Fatal, Fatal),
+            (RDKafkaErrorCode::LeaderNotAvailable, Retryable, Retryable),
+        ] {
+            let e = KafkaError::MetadataFetch(code);
+            assert_eq!(class(&e, Asked::Topic), of_topic, "{code:?}");
+            assert_eq!(class(&e, Asked::Partitions), of_partitions, "{code:?}");
+        }
+        let no_code = KafkaError::Subscription("no code".into());
+        assert_eq!(class(&no_code, Asked::Topic), Retryable);
+    }
+
+    /// Pins that an offset read a broker answers `UnknownTopicOrPartition`
+    /// is retried: Redpanda answers it for a partition just added to a topic.
+    /// Regression for #1756.
+    #[test]
+    fn an_offset_read_answered_unknown_partition_is_retried() {
+        use crate::testutil::mock::MockKafka;
+        use rdkafka::types::{RDKafkaApiKey, RDKafkaRespErr};
+        let cluster = MockKafka::new();
+        cluster.create_topic("work", 1, 1).expect("create topic");
+        let consumer = raw(
+            &[
+                ("bootstrap.servers", &cluster.bootstrap_servers()),
+                ("group.id", "depth-added"),
+            ],
+            SourceHooks::default(),
+        );
+        let reads = Brokers { consumer };
+        let one = [(Arc::from("work"), 0)];
+        cluster.request_errors(
+            RDKafkaApiKey::ListOffsets,
+            &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_UNKNOWN_TOPIC_OR_PART],
+        );
+        let e = reads.listed(&one, Offset::End).unwrap_err();
+        assert_eq!(e.kind, FeedErrorKind::Retryable, "{e}");
     }
 }

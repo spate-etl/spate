@@ -162,7 +162,7 @@ pub(crate) struct State {
     /// partition paused and the gate admits nothing.
     pub(crate) stopping: bool,
     /// The runtime's close, for the consumer thread to settle once it has
-    /// left the group.
+    /// left the group, or has handed its leave to a thread of its own.
     pub(crate) close: Option<Closing>,
     /// How many step waits on `gate_wake` the gate has begun, counted under
     /// this lock just before each.
@@ -1097,16 +1097,17 @@ impl Feed for KafkaFeed {
     /// partition up to its first unfinished unit, leave the group and stop
     /// the feed's threads, all on the consumer thread.
     ///
-    /// The confirmation settles once the consumer has left the group. It is
-    /// rejected with the latched error when the feed has stopped on a Fatal
-    /// error, which commits nothing more, and as
-    /// [`Retryable`](FeedErrorKind::Retryable) when writes were still in
-    /// flight at the wait's end or the commit failed; the units those
-    /// writes or that commit would have finished are delivered again. The
-    /// commit waits for the group's answer until `within` ends, at most the
-    /// group-call bound. One left unanswered fails the close, and the consumer
-    /// leaves the group on a thread of its own, since its close waits for that
-    /// commit. A leave that outlasts `within` still runs on the consumer
+    /// The confirmation settles once the consumer has left the group, or has
+    /// handed its leave to a thread of its own. It is rejected with the
+    /// latched error when the feed has stopped on a Fatal error, which
+    /// commits nothing more, and as [`Retryable`](FeedErrorKind::Retryable)
+    /// when writes were still in flight at the wait's end or the commit
+    /// failed; the units those writes or that commit would have finished are
+    /// delivered again. The commit waits for the group's answer until
+    /// `within` ends, and at most a quarter of `max.poll.interval.ms` or 10
+    /// seconds, whichever is less. One left unanswered fails the close, and
+    /// the consumer leaves the group on a thread of its own, since its close
+    /// waits for that commit. A leave that outlasts `within` still runs on the consumer
     /// thread, and dropping the feed waits for it.
     fn close(&self, within: Duration) -> Option<Confirmation> {
         let (confirmer, confirmation) = confirmation();

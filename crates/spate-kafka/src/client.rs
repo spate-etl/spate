@@ -533,7 +533,8 @@ impl<C: ConsumerContext + 'static> PendingCommit<C> {
     }
 
     /// Waits up to `timeout` for the group's answer, and `None` when none came.
-    /// An answer is taken once: after `Some`, the next call waits for nothing.
+    /// An answer is taken once, so a call after `Some` waits out `timeout`
+    /// and returns `None`.
     pub(crate) fn poll(&self, timeout: Duration) -> Option<KafkaResult<()>> {
         let timeout = i32::try_from(timeout.as_millis()).unwrap_or(i32::MAX);
         // SAFETY: `queue` is valid until `drop`. The event is owned here and

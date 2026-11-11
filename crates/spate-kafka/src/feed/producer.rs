@@ -59,10 +59,6 @@ impl Hooks for FeedProducerHooks {
     /// [`rejection`](crate::error::rejection). librdkafka raises a fatal
     /// error before it purges the queue, so the latch is in place when the
     /// purged writes settle and every later publish fails with the cause.
-    /// rdkafka reports a fatal error under its cause's code, so the codes
-    /// librdkafka makes fatal for an idempotent producer are named here,
-    /// `Fenced` among them, the code librdkafka gives a producer id refused
-    /// for an old epoch.
     fn error(&self, error: rdkafka::error::KafkaError, reason: &str, instance: Option<usize>) {
         let code = error.rdkafka_error_code();
         if self.repeats_previous(code, reason) {
@@ -70,17 +66,10 @@ impl Hooks for FeedProducerHooks {
         }
         log_error(&error, reason, instance);
         match code {
-            Some(
-                RDKafkaErrorCode::Fatal
-                | RDKafkaErrorCode::ClusterAuthorizationFailed
-                | RDKafkaErrorCode::OutOfOrderSequenceNumber
-                | RDKafkaErrorCode::InvalidProducerEpoch
-                | RDKafkaErrorCode::InvalidProducerIdMapping
-                | RDKafkaErrorCode::UnknownProducerId
-                | RDKafkaErrorCode::Fenced
-                | RDKafkaErrorCode::Inconsistent
-                | RDKafkaErrorCode::GaplessGuarantee,
-            ) => {
+            Some(code)
+                if code == RDKafkaErrorCode::ClusterAuthorizationFailed
+                    || crate::error::ends_idempotent_producer(code) =>
+            {
                 self.core
                     .latch(&format!("the feed's producer stopped: {reason}"));
             }

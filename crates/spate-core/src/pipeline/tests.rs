@@ -5383,6 +5383,14 @@ fn polls_of(h: &Harness, id: u32) -> usize {
         .count()
 }
 
+/// Wait for the poll after `lane`'s one batch, which the driver makes only
+/// once it has read the clock for that batch's lull.
+fn through_batch(h: &Harness, lane: u32) {
+    wait_for("the poll after the batch", Duration::from_secs(5), || {
+        polls_of(h, lane) >= 2
+    });
+}
+
 fn finished_calls(h: &Harness) -> usize {
     h.shared.lock().unwrap().finished_calls.values().sum()
 }
@@ -6326,9 +6334,7 @@ fn idle_flush_fires_once_at_its_lull_on_the_injected_clock() {
     };
     let h = start_on_clock_with(cfg, options, &clock, |runtime| runtime, ok_chain);
     assign_one_lane(&h, std::slice::from_ref(&(0..10)));
-    wait_for("the batch consumed", Duration::from_secs(5), || {
-        h.chain.consumed.load(Ordering::Relaxed) == 10
-    });
+    through_batch(&h, 0);
     let lane_polls = |n: usize| {
         let target = polls_of(&h, 0) + n;
         wait_for("lane polls", Duration::from_secs(5), || {
@@ -6417,9 +6423,7 @@ fn the_lull_ends_on_time_beside(sibling: Vec<(i64, Vec<u8>)>) -> bool {
     let lull = Duration::from_secs(600);
     let h = start_idle_on_clock(&clock, lull, &[]);
     assign(&h, &[(0, 1)]);
-    wait_for("the record", Duration::from_secs(5), || {
-        h.chain.consumed.load(Ordering::Relaxed) > 0
-    });
+    through_batch(&h, 0);
     let before = flushes(&h);
     clock.advance(lull - Duration::from_millis(1));
     h.script
@@ -6430,10 +6434,7 @@ fn the_lull_ends_on_time_beside(sibling: Vec<(i64, Vec<u8>)>) -> bool {
             partition: PartitionId(1),
             batches: vec![sibling],
         }]));
-    // The poll after the batch shows the driver has been through it.
-    wait_for("the sibling's batch", Duration::from_secs(5), || {
-        polls_of(&h, 1) >= 2
-    });
+    through_batch(&h, 1);
     clock.advance(Duration::from_millis(1));
     let seen = polls_of(&h, 1);
     wait_for("the next pass", Duration::from_secs(5), || {

@@ -653,7 +653,7 @@ mod tests {
     }
 
     /// Pins that a record at the top of the offset range leaves the read
-    /// position there instead of overflowing.
+    /// position at that offset.
     #[test]
     fn a_record_at_the_top_of_the_offset_range_holds_the_read_position() {
         let mut ledger = Ledger::new(NonZeroU32::MIN);

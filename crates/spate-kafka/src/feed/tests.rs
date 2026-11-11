@@ -5685,6 +5685,14 @@ mod docker {
                 FeedProducerHooks::new(Arc::clone(&core)),
             )
             .unwrap();
+        // Each client has read the partition once, so neither connects
+        // inside the gate's one-second read.
+        wait_until(HANG, "the producer reads the partition", || {
+            producer
+                .client()
+                .fetch_watermarks("units-attempts", 0, Duration::from_secs(5))
+                .is_ok()
+        });
         {
             let mut st = core.lock();
             st.tracker.assign([super::tp(0)]);

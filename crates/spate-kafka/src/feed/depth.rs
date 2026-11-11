@@ -37,6 +37,9 @@ const HOLD_READS: u32 = 20;
 /// client's queued events.
 const SERVE_EVERY: Duration = Duration::from_secs(1);
 
+/// How long an idle serve waits for an event.
+const SERVE_WAIT: Duration = Duration::from_millis(50);
+
 /// One partition of one of the feed's topics.
 pub(crate) type Partition = (Arc<str>, i32);
 
@@ -54,8 +57,12 @@ pub(crate) trait Offsets {
     /// their order, read in one request.
     fn listed(&self, partitions: &[Partition], at: Offset) -> Result<Vec<i64>, FeedError>;
 
-    /// Serve the client's queued statistics, log lines and errors.
-    fn serve(&self) {}
+    /// Serve the client's queued statistics, log lines and errors, waiting
+    /// up to `wait` for one. Returns the Fatal error of a credential or TLS
+    /// rejection the client reported.
+    fn serve(&self, _wait: Duration) -> Option<FeedError> {
+        None
+    }
 }
 
 /// How long the group's commits have stood still with offsets above them, so
@@ -236,8 +243,8 @@ impl Offsets for UntilStopped<'_> {
         self.offsets.listed(partitions, at)
     }
 
-    fn serve(&self) {
-        self.offsets.serve();
+    fn serve(&self, wait: Duration) -> Option<FeedError> {
+        self.offsets.serve(wait)
     }
 }
 
@@ -258,7 +265,9 @@ pub(crate) fn run(
         let (of, reporter) = match requests.recv_timeout(SERVE_EVERY) {
             Ok(request) => request,
             Err(RecvTimeoutError::Timeout) => {
-                offsets.serve();
+                if let Some(rejected) = offsets.serve(SERVE_WAIT) {
+                    core.latch(&rejected.reason);
+                }
                 continue;
             }
             Err(RecvTimeoutError::Disconnected) => return,
@@ -270,6 +279,12 @@ pub(crate) fn run(
             DepthOf::DeadLetters => dead_letter_depth(offsets, core.topics()),
             _ => feed_depth(offsets, core.topics(), &mut hold),
         };
+        // Requests that follow one another leave no idle serve, and a
+        // rejection reaches this client's poll as the read's requests fail on
+        // a timeout or a transport error.
+        if let Some(rejected) = offsets.serve(Duration::ZERO) {
+            core.latch(&rejected.reason);
+        }
         // A credential or TLS rejection latches the feed, and the depth read
         // then reports it, whatever the read itself returned.
         let read = match core.lock().signal.latched().cloned() {
@@ -372,10 +387,20 @@ fn elements(
 }
 
 impl Offsets for Brokers {
-    fn serve(&self) {
+    fn serve(&self, wait: Duration) -> Option<FeedError> {
         // The consumer carries a `group.id`, so librdkafka queues its
         // statistics, log lines and errors where only a poll drains them.
-        let _ = self.consumer.poll(Duration::from_millis(50));
+        let error = self.consumer.poll(wait)?.err()?;
+        let code = error.rdkafka_error_code();
+        let text = code.and_then(|code| self.consumer.context().take_error(code));
+        let reason = crate::error::poll_reason("the depth client's poll", &error, text.as_deref());
+        match crate::error::classify_poll_error(&error, true, text.as_deref()) {
+            ErrorClass::Fatal => Some(FeedError::new(FeedErrorKind::Fatal, reason)),
+            _ => {
+                tracing::warn!(error = %reason, "the depth client's poll failed");
+                None
+            }
+        }
     }
 
     fn partitions(&self, topic: &Arc<str>) -> Result<Vec<i32>, FeedError> {
@@ -553,8 +578,9 @@ mod tests {
         fn listed(&self, _: &[Partition], _: Offset) -> Result<Vec<i64>, FeedError> {
             Ok(Vec::new())
         }
-        fn serve(&self) {
+        fn serve(&self, _: Duration) -> Option<FeedError> {
             self.0.fetch_add(1, Ordering::SeqCst);
+            None
         }
     }
 
@@ -914,7 +940,7 @@ mod tests {
         );
         let reads = Brokers { consumer };
         spate_test::wait_until(HANG, "a statistics event reaches the context", || {
-            reads.serve();
+            reads.serve(SERVE_WAIT);
             reads.consumer.context().stats.lock().unwrap().is_some()
         });
     }
@@ -1151,6 +1177,91 @@ mod tests {
             listed,
             "the read sent a request after the stop"
         );
+    }
+
+    /// A client whose every serve reports a rejection, and whose reads
+    /// succeed.
+    struct Rejected;
+
+    impl Offsets for Rejected {
+        fn partitions(&self, _: &Arc<str>) -> Result<Vec<i32>, FeedError> {
+            Ok(Vec::new())
+        }
+        fn committed(&self, _: &[Partition]) -> Result<Vec<Offset>, FeedError> {
+            Ok(Vec::new())
+        }
+        fn listed(&self, _: &[Partition], _: Offset) -> Result<Vec<i64>, FeedError> {
+            Ok(Vec::new())
+        }
+        fn serve(&self, _: Duration) -> Option<FeedError> {
+            Some(FeedError::new(
+                FeedErrorKind::Fatal,
+                "the depth client's poll: certificate verify failed",
+            ))
+        }
+    }
+
+    /// A rejection only the depth client meets fails the read that follows
+    /// it, where the read's own requests succeeded, and latches the feed.
+    /// Regression for #1757.
+    #[test]
+    fn a_rejection_the_depth_client_reports_fails_the_read_after_it() {
+        let core = Arc::new(core(3));
+        let (requests, received) = mpsc::channel();
+        let (reporter, mut reading) = spate_core::feed::depth_reading();
+        requests.send((DepthOf::DeadLetters, reporter)).unwrap();
+        drop(requests);
+        run(&core, &Rejected, &received);
+        let e = reading.try_outcome().unwrap().unwrap_err();
+        assert_eq!(e.kind, FeedErrorKind::Fatal, "{e}");
+        assert!(e.reason.contains("certificate verify failed"), "{e}");
+        assert!(core.latched());
+    }
+
+    /// A rejection the depth client reports between requests latches the
+    /// feed with no read asked for.
+    #[test]
+    fn a_rejection_the_idle_depth_client_reports_latches_the_feed() {
+        let core = Arc::new(core(3));
+        let (requests, received) = mpsc::channel::<(DepthOf, DepthReporter)>();
+        std::thread::scope(|s| {
+            let core = &core;
+            s.spawn(move || run(core, &Rejected, &received));
+            spate_test::wait_until(HANG, "the feed latches", || core.latched());
+            drop(requests);
+        });
+        let latched = core.lock().signal.latched().cloned().expect("latched");
+        assert!(
+            latched.reason.contains("certificate verify failed"),
+            "{latched}"
+        );
+    }
+
+    /// The depth client's serve returns a broker's refused SASL login as
+    /// Fatal, with the broker's text.
+    #[test]
+    fn serving_the_depth_client_returns_a_refused_login() {
+        let brokers = crate::testutil::refuses_sasl_login().to_string();
+        let consumer = raw(
+            &[
+                ("bootstrap.servers", &brokers),
+                ("group.id", "depth-rejected"),
+                ("security.protocol", "sasl_plaintext"),
+                ("sasl.mechanism", "PLAIN"),
+                ("sasl.username", "u"),
+                ("sasl.password", "wrong"),
+            ],
+            SourceHooks::default(),
+        );
+        let reads = Brokers { consumer };
+        let mut rejected = None;
+        spate_test::wait_until(HANG, "the serve returns the rejection", || {
+            rejected = reads.serve(SERVE_WAIT);
+            rejected.is_some()
+        });
+        let e = rejected.expect("a rejection");
+        assert_eq!(e.kind, FeedErrorKind::Fatal, "{e}");
+        assert!(e.reason.contains("Authentication failed"), "{e}");
     }
 
     /// Pins that a feed which has latched a Fatal error answers a depth read

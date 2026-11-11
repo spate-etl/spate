@@ -6,8 +6,8 @@ description: "spate-core's public API carries the YAML crate's value and parse e
 
 - **Status:** accepted
 - **Date:** 2026-11-11
-- **Supersedes:** [ADR-0011](0011-msrv-and-dependency-policy.md) (in part: the
-  `metrics` facade as the one sanctioned exception)
+- **Supersedes:** [ADR-0011](0011-msrv-and-dependency-policy.md) (in part:
+  naming the `metrics` facade as the only exception)
 - **Superseded by:** —
 
 ## Context and problem statement
@@ -16,12 +16,12 @@ description: "spate-core's public API carries the YAML crate's value and parse e
 `spate-core`'s public API and out of any public trait bound. It names the
 `metrics` facade as the one sanctioned exception.
 
-Two public items in `spate-core` carry types from `yaml_serde`, a 0.x crate. The
-`YamlValue` re-export is its `Value`, and `ComponentConfig::new` takes one as a
-component body. The `source` field of `ConfigError::Parse` holds its `Error`.
-The `spate` crate re-exports both under `spate::config`. Neither type sits in a
-trait bound. The alias's rustdoc called it an exemption, but INV-6 and ADR-0011
-recorded no such exception.
+Two types from `yaml_serde`, a 0.x crate, appear in `spate-core`'s public
+API. The `YamlValue` re-export is its `Value`, and `ComponentConfig::new`
+takes one as a component body. The `source` field of `ConfigError::Parse`
+holds its `Error`. The `spate` crate re-exports both under `spate::config`.
+Neither type sits in a trait bound. The alias's rustdoc called it an exemption,
+but INV-6 and ADR-0011 recorded no such exception.
 
 [ADR-0009](0009-yaml-configuration-with-opaque-passthrough.md) made the
 configuration YAML, with an opaque section per component that each connector
@@ -62,10 +62,12 @@ were written to meet. ADR-0089 wraps `foldhash` in newtypes to keep it out of
   `spate-core` and `spate`. Before 1.0 that costs a minor release, as any other
   break does. After 1.0 it would cost a major release, so this record is to be
   revisited before 1.0.
-- Neutral, because the rule covers documented items. The developer guide keeps
-  an item marked `#[doc(hidden)]` outside the semver surface, so
-  `AckRef::test_pair`, a hidden test constructor that returns a
-  `crossbeam_channel` receiver, needs no exception.
+- Neutral, because INV-6 covers documented items, so an item marked
+  `#[doc(hidden)]` is outside it. The developer guide hides the items behind
+  the `testing` feature to keep them outside the semver surface, and INV-6
+  gives every hidden item the same scope. `AckRef::test_pair` is a hidden test
+  constructor outside `testing` that returns a `crossbeam_channel` receiver, so
+  it needs no exception.
 
 ### Confirmation
 

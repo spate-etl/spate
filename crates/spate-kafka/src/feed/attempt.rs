@@ -305,19 +305,14 @@ impl Ledger {
     }
 
     /// Take in that every offset of `partition` below `position` has been
-    /// read or holds no record. Returns whether that moved the partition.
-    pub(crate) fn advance_to(&mut self, partition: i32, position: i64) -> bool {
-        let Some(next) = usize::try_from(partition)
+    /// read or holds no record. A position behind what was read moves nothing.
+    pub(crate) fn advance_to(&mut self, partition: i32, position: i64) {
+        if let Some(next) = usize::try_from(partition)
             .ok()
             .and_then(|p| self.next.get_mut(p))
-        else {
-            return false;
-        };
-        let moved = *next < Some(position);
-        if moved {
-            *next = Some(position);
+        {
+            *next = (*next).max(Some(position));
         }
-        moved
     }
 
     /// The attempts recorded for `identity`, 0 when none are.
@@ -434,15 +429,12 @@ impl Follower {
     /// leaves the offsets read below the high watermark for good, and only
     /// the position passes it.
     fn note_positions(&mut self) {
-        let mut moved = false;
         for (partition, list) in (0..).zip(self.positions.iter_mut()) {
             if let Offset::Offset(position) = read_position(&self.consumer, list) {
-                moved |= lock(&self.ledger).advance_to(partition, position);
+                lock(&self.ledger).advance_to(partition, position);
             }
         }
-        if moved {
-            self.ledger.1.notify_all();
-        }
+        self.ledger.1.notify_all();
     }
 
     fn on_message(&self, message: &BorrowedMessage<'_>) -> Result<(), RecordError> {
@@ -631,15 +623,14 @@ mod tests {
     #[test]
     fn a_position_moves_the_ledger_forward_only() {
         let mut ledger = Ledger::new(NonZeroU32::new(2).unwrap());
-        assert!(ledger.advance_to(0, 1));
+        ledger.advance_to(0, 1);
         assert!(ledger.caught_up(0, 0, 1));
         assert_eq!(ledger.read_to(0), Some(1));
-        assert!(!ledger.advance_to(0, 1), "an equal position moves nothing");
         ledger.apply(0, 4, b"a", Entry::Count(1));
-        assert!(!ledger.advance_to(0, 3), "a position behind the read");
-        assert_eq!(ledger.read_to(0), Some(5));
-        assert!(!ledger.advance_to(2, 9), "no such partition");
-        assert_eq!(ledger.read_to(1), None);
+        ledger.advance_to(0, 3);
+        assert_eq!(ledger.read_to(0), Some(5), "a position behind the read");
+        ledger.advance_to(2, 9);
+        assert_eq!(ledger.read_to(1), None, "no such partition");
     }
 
     /// Pins that a tombstone removes the count, and that the read position

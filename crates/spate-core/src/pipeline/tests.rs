@@ -1789,6 +1789,11 @@ fn a_stored_commit_counts_an_ok_outcome() {
     wait_for("all payloads consumed", Duration::from_secs(5), || {
         h.chain.consumed.load(Ordering::Relaxed) == 10
     });
+    wait_for(
+        "all ten positions committed",
+        Duration::from_secs(5),
+        || h.shared.lock().unwrap().committed.get(&PartitionId(0)) == Some(&10),
+    );
     h.shutdown.trigger();
     h.join.join().unwrap().unwrap();
 

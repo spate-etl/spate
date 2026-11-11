@@ -199,9 +199,9 @@ struct NextPage {
 
 /// The `NextContinuationToken` of a listing page.
 fn next_token(page: &[u8]) -> Option<String> {
-    // The same decoder `object_store` runs over the page, so the token
-    // compared is the token it would follow.
-    let page: NextPage = quick_xml::de::from_str(std::str::from_utf8(page).ok()?).ok()?;
+    // The decoder `object_store` runs over the page, from bytes as it does,
+    // so the token compared is the token it would follow.
+    let page: NextPage = quick_xml::de::from_reader(page).ok()?;
     page.next_continuation_token
 }
 
@@ -530,5 +530,14 @@ mod tests {
             );
         }
         assert_eq!(next_token(page("").as_bytes()), None);
+        // `object_store` accepts a byte that is not UTF-8 in an element it
+        // skips, and follows the page's token.
+        let mut skipped = page("<NextContinuationToken>t</NextContinuationToken>").into_bytes();
+        let name = skipped
+            .iter()
+            .position(|b| *b == b'b')
+            .expect("the bucket name");
+        skipped[name] = 0xff;
+        assert_eq!(next_token(&skipped).as_deref(), Some("t"));
     }
 }

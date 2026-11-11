@@ -693,14 +693,11 @@ impl KafkaFeed {
         let config = KafkaFeedConfig::from_section(section)?;
         let checked = check_topics(&config, io, scope, bound, clock.clone())?;
         let (core, producer, driver) = parts(&config, checked.attempt_partitions, clock)?;
-        let follower = Follower::new(&config, Arc::clone(&core))?
-            .spawn()
-            .map_err(|e| {
-                ConnectError::unavailable(
-                    NAME,
-                    format!("starting the attempt follower's thread: {e}"),
-                )
-            })?;
+        let follower = Follower::new(&config, Arc::clone(&core))?;
+        let lister = follower.lister();
+        let follower = follower.spawn().map_err(|e| {
+            ConnectError::unavailable(NAME, format!("starting the attempt follower's thread: {e}"))
+        })?;
         // Built before the gate and consumer start, so a failed start
         // returns through `Drop`, which stops and joins what has started.
         let mut feed = KafkaFeed {
@@ -714,6 +711,7 @@ impl KafkaFeed {
         let gate = gate::Gate::new(
             Arc::clone(&feed.core),
             feed.producer.clone(),
+            lister,
             config.delivery_timeout,
         );
         feed.gate = Some(gate.spawn().map_err(|e| {

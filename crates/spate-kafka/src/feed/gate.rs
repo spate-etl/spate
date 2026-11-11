@@ -17,13 +17,13 @@
 //! thread (INV-2), and it sends nothing under the state lock: a refused
 //! enqueue settles inline, and settling takes that lock.
 
-use super::attempt::{self, partition_of};
+use super::attempt::{self, Lister, partition_of};
 use super::events::Cause;
 use super::write::{self, Attempt, Destination, Finish, Move, Outgoing, Producer, Write};
 use super::{Core, Gating, LatchOnPanic};
 use crate::client::{list_offsets, listed_offset};
+use rdkafka::consumer::Consumer as _;
 use rdkafka::error::{KafkaError, KafkaResult, RDKafkaErrorCode};
-use rdkafka::producer::Producer as _;
 use rdkafka::{Offset, TopicPartitionList};
 use spate_core::clock::Stopwatch;
 use spate_core::error::ErrorClass;
@@ -41,6 +41,9 @@ pub(crate) const GATE_STEP: Duration = Duration::from_secs(1);
 pub(crate) struct Gate {
     core: Arc<Core>,
     producer: Producer,
+    /// The follower's consumer, through which the gate reads the attempt
+    /// partitions' ends at the follower's isolation level.
+    lister: Lister,
     step: Duration,
     /// The bound on each watermark request.
     request: Duration,
@@ -76,10 +79,16 @@ struct Unread {
 }
 
 impl Gate {
-    pub(crate) fn new(core: Arc<Core>, producer: Producer, delivery_timeout: Duration) -> Gate {
+    pub(crate) fn new(
+        core: Arc<Core>,
+        producer: Producer,
+        lister: Lister,
+        delivery_timeout: Duration,
+    ) -> Gate {
         Gate {
             core,
             producer,
+            lister,
             step: GATE_STEP,
             request: GATE_STEP,
             delivery_timeout,
@@ -297,7 +306,7 @@ impl Gate {
         }
         #[cfg(test)]
         self.core.gate_reads.fetch_add(1, Ordering::SeqCst);
-        let (lwm, hwm) = match self.producer.client().fetch_watermarks(
+        let (lwm, hwm) = match self.lister.client().fetch_watermarks(
             &self.core.topics.attempt,
             partition,
             self.request,
@@ -354,7 +363,7 @@ impl Gate {
         let topic = &*self.core.topics.attempt;
         let mut tpl = TopicPartitionList::new();
         tpl.add_partition_offset(topic, partition, at)?;
-        list_offsets(self.producer.client(), &mut tpl, self.request)?;
+        list_offsets(self.lister.client(), &mut tpl, self.request)?;
         let read = tpl
             .find_partition(topic, partition)
             .ok_or(KafkaError::MetadataFetch(RDKafkaErrorCode::BadMessage))?;
@@ -485,6 +494,7 @@ pub(crate) fn admission(core: &Core, entry: Gating) -> Option<Write> {
 mod tests {
     use super::*;
     use crate::feed::FeedRole;
+    use crate::feed::attempt::test_lister;
     use crate::feed::config::KafkaFeedConfig;
     use crate::feed::producer::FeedProducerHooks;
     use crate::feed::tests::{gated, tp};
@@ -519,8 +529,13 @@ mod tests {
                     FeedProducerHooks::new(Arc::clone(&core)),
                 )
                 .unwrap();
-            let gate = Gate::new(Arc::clone(&core), producer, config.delivery_timeout)
-                .with_step(Duration::from_secs(3600));
+            let gate = Gate::new(
+                Arc::clone(&core),
+                producer,
+                test_lister(&config),
+                config.delivery_timeout,
+            )
+            .with_step(Duration::from_secs(3600));
             if how == "stopped" {
                 crate::feed::stop(&core);
             } else {
@@ -557,7 +572,12 @@ mod tests {
                 FeedProducerHooks::new(Arc::clone(&core)),
             )
             .unwrap();
-        let gate = Gate::new(Arc::clone(&core), producer, config.delivery_timeout);
+        let gate = Gate::new(
+            Arc::clone(&core),
+            producer,
+            test_lister(&config),
+            config.delivery_timeout,
+        );
         core.lock().tracker.assign([tp(0)]);
         let entry = gated(&core, 0);
         core.lock().gating.push_back(entry);
@@ -590,7 +610,12 @@ mod tests {
                 FeedProducerHooks::new(Arc::clone(&core)),
             )
             .unwrap();
-        let gate = Gate::new(Arc::clone(&core), producer, config.delivery_timeout);
+        let gate = Gate::new(
+            Arc::clone(&core),
+            producer,
+            test_lister(&config),
+            config.delivery_timeout,
+        );
 
         let halt = gate.watermark_error(0, &KafkaError::MetadataFetch(C::OperationTimedOut));
         assert!(matches!(halt, Halt::Behind(_)));

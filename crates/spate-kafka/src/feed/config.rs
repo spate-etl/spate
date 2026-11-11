@@ -100,7 +100,16 @@ impl Role for Client<'_> {
             // librdkafka refuses `assign` on a consumer with no group. It
             // assigns its partitions itself, so it never takes part in a
             // rebalance, and it commits nothing.
-            FeedRole::Follower => group(keys, cfg),
+            FeedRole::Follower => {
+                group(keys, cfg);
+                keys.own(
+                    "isolation.level",
+                    "read_uncommitted",
+                    "the feed sets it: the attempt follower and the gate read \
+                     past another writer's open transaction, so a unit's count \
+                     keeps up with the feed's own attempt writes behind it",
+                );
+            }
             FeedRole::Producer => {
                 keys.own(
                     "acks",
@@ -432,15 +441,17 @@ mod tests {
         assert_eq!(config.rdkafka["max.poll.interval.ms"], "60000");
     }
 
-    /// Pins that only the depth client reads at `read_uncommitted`: every
-    /// other client keeps librdkafka's default, so the group member cannot read
-    /// past an open transaction. Regression for #1763.
+    /// Pins that only the depth client and the attempt follower read at
+    /// `read_uncommitted`: every other client keeps librdkafka's default, so
+    /// the group member cannot read past an open transaction. Regression for
+    /// #1763 and #1765.
     #[test]
-    fn only_the_depth_client_lists_ends_at_the_high_watermark() {
+    fn only_the_depth_client_and_the_follower_read_uncommitted() {
         let config = parse(MINIMAL).unwrap();
         for role in FeedRole::ALL {
             let client = config.config(role, true);
-            let expected = (role == FeedRole::Depth).then_some("read_uncommitted");
+            let expected =
+                matches!(role, FeedRole::Depth | FeedRole::Follower).then_some("read_uncommitted");
             assert_eq!(client.get("isolation.level"), expected, "{role:?}");
         }
     }

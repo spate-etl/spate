@@ -1191,7 +1191,7 @@ fn an_aborted_transaction_at_the_end_of_the_attempt_topic_ends_a_bounded_job() {
                 .send(
                     rdkafka::producer::BaseRecord::to(ATTEMPT)
                         .partition(partition)
-                        .payload(&b"gone"[..])
+                        .payload(&br#"{"v":1,"attempts":1}"#[..])
                         .key(&b"gone"[..]),
                 )
                 .expect("enqueue");
@@ -1210,6 +1210,139 @@ fn an_aborted_transaction_at_the_end_of_the_attempt_topic_ends_a_bounded_job() {
             written(&worker.script) == sorted(rows.clone())
         });
         assert_eq!(run_to_exit(&worker, &clock).state, ExitState::Completed);
+    });
+}
+
+/// The key of the attempt record another writer's transaction holds.
+const FOREIGN: &[u8] = b"foreign/0/0";
+
+/// A reader of the attempt topic at `read_uncommitted`, from the start of each
+/// partition, that keeps the count of each record not keyed [`FOREIGN`],
+/// `None` for a tombstone.
+struct FeedAttempts {
+    consumer: BaseConsumer,
+    counts: Vec<Option<u32>>,
+}
+
+impl FeedAttempts {
+    fn new(brokers: &str) -> FeedAttempts {
+        let consumer: BaseConsumer = support::raw_config()
+            .set("bootstrap.servers", brokers)
+            .set("group.id", spate_test::unique_name("attempts-uncommitted"))
+            .set("isolation.level", "read_uncommitted")
+            .build()
+            .expect("reader");
+        let mut tpl = rdkafka::TopicPartitionList::new();
+        for partition in 0..ATTEMPT_PARTITIONS {
+            tpl.add_partition_offset(ATTEMPT, partition, rdkafka::Offset::Beginning)
+                .unwrap();
+        }
+        consumer.assign(&tpl).unwrap();
+        FeedAttempts {
+            consumer,
+            counts: Vec::new(),
+        }
+    }
+
+    /// Take in every record the consumer has ready.
+    fn poll(&mut self) {
+        use rdkafka::message::Message as _;
+        while let Some(polled) = self.consumer.poll(Duration::from_millis(100)) {
+            let message = polled.expect("read");
+            if message.key() == Some(FOREIGN) {
+                continue;
+            }
+            self.counts.push(message.payload().map(|value| {
+                let record: serde_json::Value = serde_json::from_slice(value).unwrap();
+                u32::try_from(record["attempts"].as_u64().unwrap()).unwrap()
+            }));
+        }
+    }
+
+    /// Read until each partition's position reaches its log end.
+    fn drain(&mut self, brokers: &str) {
+        let ends: Vec<i64> = (0..ATTEMPT_PARTITIONS)
+            .map(|partition| log_end(brokers, ATTEMPT, partition))
+            .collect();
+        wait_until(HANG, "the attempt topic read to its end", || {
+            self.poll();
+            let position = self.consumer.position().unwrap();
+            (0..ATTEMPT_PARTITIONS).all(|partition| {
+                matches!(
+                    position.find_partition(ATTEMPT, partition).map(|e| e.offset()),
+                    Some(rdkafka::Offset::Offset(at)) if at >= ends[usize::try_from(partition).unwrap()]
+                )
+            })
+        });
+    }
+
+    /// The records read that carry a count.
+    fn written(&self) -> usize {
+        self.counts.iter().flatten().count()
+    }
+}
+
+/// An open transaction on each attempt partition leaves the gate counting a
+/// unit's reads: a unit whose read fails every time reaches the dead-letter
+/// topic at `attempt_cap`, after that many reads. Regression for #1765.
+#[test]
+#[ignore = "requires Docker"]
+fn an_open_transaction_on_the_attempt_topic_keeps_the_attempt_cap() {
+    on_transactional_broker(|brokers| {
+        const CAP: u32 = 2;
+        let job = listed(brokers, "attempt-open", &format!("  attempt_cap: {CAP}\n"));
+        let open: Vec<_> = (0..ATTEMPT_PARTITIONS)
+            .map(|partition| {
+                let producer =
+                    support::transactional_producer(brokers, ATTEMPT, &format!("open-{partition}"));
+                producer.begin_transaction().expect("begin");
+                producer
+                    .send(
+                        rdkafka::producer::BaseRecord::to(ATTEMPT)
+                            .partition(partition)
+                            .key(FOREIGN)
+                            .payload(&br#"{"v":1,"attempts":1}"#[..]),
+                    )
+                    .expect("enqueue");
+                producer.flush(TRANSACTION_TIMEOUT).expect("flush");
+                producer
+            })
+            .collect();
+
+        let rows = recs("failing", 2);
+        let object = job.data.join("failing.ndjson");
+        job.publish("failing.ndjson", &rows);
+        std::fs::rename(&object, job.dir.path().join("failing.away")).unwrap();
+        let clock = TestClock::frozen();
+        let worker = launch_bounded(KafkaFeed::connect, &job.data, &job.section, &clock);
+        // Twice the cap, plus one, attempt writes, or the dead-letter write.
+        let enough = usize::try_from(2 * CAP + 1).unwrap();
+        let mut attempts = FeedAttempts::new(brokers);
+        wait_until(
+            HANG,
+            "the dead-letter write or more reads than the cap",
+            || {
+                attempts.poll();
+                log_end(brokers, DEAD, 0) > 0 || attempts.written() >= enough
+            },
+        );
+        worker.stop();
+        attempts.drain(brokers);
+        let dead = log_end(brokers, DEAD, 0);
+        let highest = attempts.counts.iter().flatten().max().copied();
+        for producer in open {
+            producer
+                .abort_transaction(TRANSACTION_TIMEOUT)
+                .expect("abort");
+        }
+        assert!(
+            dead > 0,
+            "the unit was read {} times at a cap of {CAP} and never dead-lettered; \
+             the highest count written is {highest:?}",
+            attempts.written()
+        );
+        assert_eq!(attempts.written(), usize::try_from(CAP).unwrap());
+        assert_eq!(highest, Some(CAP));
     });
 }
 

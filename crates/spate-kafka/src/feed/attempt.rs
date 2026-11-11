@@ -343,11 +343,27 @@ impl Ledger {
     }
 }
 
+/// The follower's consumer, which the gate lists the attempt partitions
+/// through, so the two read at the same isolation level.
+pub(crate) type Lister = Arc<BaseConsumer<SourceContext>>;
+
+/// A consumer as the follower builds it, unassigned, for a test's gate to
+/// list through.
+#[cfg(test)]
+pub(crate) fn test_lister(config: &KafkaFeedConfig) -> Lister {
+    Arc::new(
+        config
+            .base(false)
+            .create(&config.client(FeedRole::Follower), SourceHooks::default())
+            .expect("the follower's client"),
+    )
+}
+
 /// An assign-only consumer in the feed's group that reads every attempt
 /// partition from its start into the ledger.
 pub(crate) struct Follower {
     core: Arc<Core>,
-    consumer: BaseConsumer<SourceContext>,
+    consumer: Lister,
     ledger: SharedLedger,
     /// One list per attempt partition, to read its position into.
     positions: Vec<TopicPartitionList>,
@@ -389,10 +405,15 @@ impl Follower {
         let ledger = Arc::clone(&core.ledger);
         Ok(Follower {
             core,
-            consumer,
+            consumer: Arc::new(consumer),
             ledger,
             positions,
         })
+    }
+
+    /// The consumer the gate lists the attempt partitions through.
+    pub(crate) fn lister(&self) -> Lister {
+        Arc::clone(&self.consumer)
     }
 
     #[cfg(test)]

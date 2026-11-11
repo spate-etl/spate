@@ -1402,6 +1402,13 @@ fn the_mutants_run_is_off_the_gate_and_stops_inside_its_limits() {
         })
         .expect("a step runs mutants");
     let run = step["run"].as_str().unwrap();
+    // The checkout of a `pull_request` run is the merge ref, whose first
+    // parent is the base the merge was built on. The event's `base.sha` can
+    // be older, and a diff from it takes in other pull requests.
+    assert!(
+        run.contains("--since 'HEAD^1'"),
+        "the diff starts at the merge ref's first parent: {run}"
+    );
     let budget: u64 = run
         .split_once("--budget ")
         .and_then(|(_, rest)| rest.split_whitespace().next())

@@ -114,6 +114,8 @@ use bytes::{BufMut, BytesMut};
 use serde::ser::{self, Serialize};
 use std::fmt;
 
+use crate::native::leaf::{put_leb128, put_string};
+
 /// A row failed to serialize. Record-level: subject to the sink stage's
 /// error policy, never fatal to the pipeline by itself.
 #[derive(Debug, thiserror::Error)]
@@ -187,18 +189,6 @@ pub fn serialize_row<T: Serialize + ?Sized>(
 }
 
 pub use crate::types::{DateTime64Millis, DateTimeSeconds};
-
-fn put_leb128(buf: &mut BytesMut, mut value: u64) {
-    loop {
-        let byte = (value & 0x7f) as u8;
-        value >>= 7;
-        if value == 0 {
-            buf.put_u8(byte);
-            break;
-        }
-        buf.put_u8(byte | 0x80);
-    }
-}
 
 struct RowBinarySer<'a> {
     buf: &'a mut BytesMut,
@@ -314,15 +304,13 @@ impl<'a, 'b> ser::Serializer for &'a mut RowBinarySer<'b> {
 
     #[inline]
     fn serialize_str(self, v: &str) -> Result<(), RowBinaryError> {
-        put_leb128(self.buf, v.len() as u64);
-        self.buf.put_slice(v.as_bytes());
+        put_string(self.buf, v.as_bytes());
         Ok(())
     }
 
     #[inline]
     fn serialize_bytes(self, v: &[u8]) -> Result<(), RowBinaryError> {
-        put_leb128(self.buf, v.len() as u64);
-        self.buf.put_slice(v);
+        put_string(self.buf, v);
         Ok(())
     }
 

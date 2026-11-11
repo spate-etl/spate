@@ -250,7 +250,7 @@ fn a_failed_write_is_classified_by_the_sink_table() {
 
 /// Pins the bound on the committed-offset read: a quarter of
 /// `max.poll.interval.ms`, at most 10 s, which librdkafka's 300 s default
-/// reaches.
+/// reaches. The interval counts in each spelling librdkafka takes.
 #[test]
 fn the_committed_offset_read_is_bounded_by_the_poll_interval() {
     let mut cc = raw_config();
@@ -268,6 +268,14 @@ fn the_committed_offset_read_is_bounded_by_the_poll_interval() {
         crate::client::committed_lookup_timeout(&cc),
         Duration::from_secs(10)
     );
+    for spelling in ["8000ms", "0x1F40", "8000.5"] {
+        cc.set("max.poll.interval.ms", spelling);
+        assert_eq!(
+            crate::client::committed_lookup_timeout(&cc),
+            Duration::from_secs(2),
+            "{spelling}"
+        );
+    }
 }
 
 /// A move of `receipt`'s delivery to the retry topic.

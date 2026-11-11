@@ -614,6 +614,19 @@ mod tests {
     }
 
     #[test]
+    fn bytes_are_leb128_prefixed_like_strings() {
+        /// Serializes through `serialize_bytes`, as `serde_bytes` does.
+        struct Raw<'a>(&'a [u8]);
+        impl Serialize for Raw<'_> {
+            fn serialize<S: ser::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+                s.serialize_bytes(self.0)
+            }
+        }
+        assert_eq!(enc(&Raw(&[0xff, 0x00, 0x7f])), [3, 0xff, 0x00, 0x7f]);
+        assert_eq!(enc(&Raw(&[])), [0]);
+    }
+
+    #[test]
     fn options_use_null_prefix_bytes() {
         // Matches the clickhouse crate: 1 = NULL, 0 = value follows.
         assert_eq!(enc(&Option::<u8>::None), [1]);

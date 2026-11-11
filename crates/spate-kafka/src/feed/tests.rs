@@ -5473,6 +5473,45 @@ mod cluster {
         drop((d, cluster, feed));
     }
 
+    /// Pins that a close ending no earlier than a revocation's own bound leaves
+    /// the revocation's wait alone.
+    #[test]
+    fn a_close_no_earlier_than_the_revocation_bound_leaves_its_wait_alone() {
+        let clock = TestClock::frozen();
+        let (cluster, group, core, producer, mut d) =
+            past_a_marker("revoke-close-tie", SyncClock::new(clock));
+        let brokers = cluster.bootstrap_servers();
+        d.call_bound = Duration::from_secs(10);
+        retire(&d);
+        revoke_work(&d);
+        let waits = Arc::clone(&d.waits);
+        let feed = feed_over(&core, &producer, None);
+        let _closing = feed.close(Duration::from_secs(10)).expect("a close");
+        answering_late(&cluster);
+        let (cluster, d, ()) = on_driver(cluster, d, "the revocation", Driver::serve_intents);
+        assert_eq!(
+            *waits.lock().unwrap(),
+            [Wait::Sent(Duration::from_secs(10))]
+        );
+        assert_eq!(committed(&brokers, &group), Some(1));
+        drop((d, cluster, feed));
+    }
+
+    /// Pins that a feed that latches with no close hands its consumer's close
+    /// off for the whole close wait.
+    #[test]
+    fn a_latched_stop_hands_off_for_the_close_wait() {
+        let clock = TestClock::frozen();
+        let (cluster, _, core, _, d) = past_a_marker("latch-stop", SyncClock::new(clock));
+        let waits = Arc::clone(&d.waits);
+        core.latch("a test latch");
+        ends(&cluster, d);
+        assert_eq!(
+            waits.lock().unwrap().last(),
+            Some(&Wait::Handoff(crate::client::CLOSE_WAIT))
+        );
+    }
+
     /// Pins that a commit's wait goes on past its first slice: an answer that
     /// comes after it counts.
     #[test]

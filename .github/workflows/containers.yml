@@ -191,9 +191,6 @@ jobs:
       - name: S3 store suites
         env:
           FILTER: ${{ matrix.filter }}
-          # The Ceph RGW image often fails to start (#1744). Only this lane
-          # retries, so a retry elsewhere cannot hide a test's own failure.
-          NEXTEST_RETRIES: ${{ matrix.lane == 'rgw' && '1' || '0' }}
         run: |
           cargo nextest run --profile docker -p spate-s3 -p spate-kafka \
             -p spate-test-support --all-features --locked \

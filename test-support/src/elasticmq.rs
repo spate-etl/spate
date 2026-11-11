@@ -7,13 +7,13 @@
 
 use std::fmt;
 use std::net::SocketAddr;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use testcontainers::core::IntoContainerPort;
 use testcontainers::runners::SyncRunner;
 use testcontainers::{Container, GenericImage};
 
-use crate::{container_image, http};
+use crate::{container_image, http, started};
 
 /// The container port of the SQS query API.
 pub const QUERY_PORT: u16 = 9324;
@@ -50,8 +50,9 @@ impl ElasticMq {
     ///
     /// # Errors
     ///
-    /// Fails when the container does not start or its API does not answer
-    /// within 30 seconds.
+    /// Fails when the container does not start, exits, or its API does not
+    /// answer within 30 seconds. A container that exits or does not answer
+    /// writes the tail of its output to stderr.
     ///
     /// # Panics
     ///
@@ -62,22 +63,14 @@ impl ElasticMq {
             .with_exposed_port(QUERY_PORT.tcp())
             .start()
             .map_err(|e| format!("start ElasticMQ: {e}"))?;
-        let port = container
-            .get_host_port_ipv4(QUERY_PORT)
-            .map_err(|e| format!("ElasticMQ port: {e}"))?;
+        let port = started::host_port("ElasticMQ", &container, QUERY_PORT, "port")?;
         let api = SocketAddr::from(([127, 0, 0, 1], port));
-        let until = Instant::now() + READY;
-        loop {
-            match call(api, "/", &[("Action", "ListQueues")]) {
-                Ok(_) => break,
-                Err(failure) if Instant::now() >= until => {
-                    return Err(format!(
-                        "the ElasticMQ API did not answer within {READY:?}: {failure}"
-                    ));
-                }
-                Err(_) => std::thread::sleep(Duration::from_millis(50)),
-            }
-        }
+        started::ready(
+            "ElasticMQ",
+            READY,
+            || call(api, "/", &[("Action", "ListQueues")]).map(|_| ()),
+            &container,
+        )?;
         Ok(ElasticMq { container, api })
     }
 

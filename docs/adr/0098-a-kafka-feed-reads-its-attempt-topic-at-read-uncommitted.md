@@ -35,18 +35,18 @@ own attempt topic.
 
 ## Decision outcome
 
-Chosen option: "The follower and the gate read at `read_uncommitted`",
-because it is the only option that keeps both the cap and the feed's progress
-while a transaction is open. The follower's role owns `isolation.level`, and
-the gate lists the attempt topic's ends through a consumer of its own, built
-with the follower's settings and never assigned. The producer keeps
-librdkafka's default and logs no warning for a consumer property. Listing
-through the follower's own consumer would queue each ListOffsets behind the
-follower's Fetch, which the broker holds for up to `fetch.wait.max.ms` once the
-follower is caught up: one pass over 80 attempt partitions then took 31 s and
-put back 20 units, where a consumer of its own took 22 ms. Both halves are needed: with only the follower changed, a gate that
-lists the last stable offset admits a unit before the follower has read the
-feed's own write.
+Chosen option: "The follower and the gate read at `read_uncommitted`", because
+it is the only option that keeps both the cap and the feed's progress while a
+transaction is open. The follower's role owns `isolation.level`, and the gate
+lists the attempt topic's ends through a consumer of its own, built with the
+follower's settings and never assigned. The producer keeps librdkafka's default
+and logs no warning for a consumer property. Listing through the follower's own
+consumer would queue each ListOffsets behind the follower's Fetch, which the
+broker holds for up to `fetch.wait.max.ms` once the follower is caught up: one
+pass over 80 attempt partitions then took 31 s and put back 20 units, where a
+consumer of its own took 22 ms. Both halves are needed: with only the follower
+changed, a gate that lists the last stable offset admits a unit before the
+follower has read the feed's own write.
 
 The group member keeps `read_committed`, so
 [ADR-0093](0093-a-kafka-feed-commits-past-offsets-with-no-record.md)'s commit

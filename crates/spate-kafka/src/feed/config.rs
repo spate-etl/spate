@@ -27,20 +27,21 @@ pub(crate) enum FeedRole {
     Admin,
     /// The startup checks' metadata reader.
     Reader,
-    /// The attempt follower, which assigns its own partitions, and the gate's
-    /// reader of the attempt topic's ends, built the same way and never
-    /// assigned.
+    /// The attempt follower, which assigns its own partitions.
     Follower,
+    /// The gate's reader of the attempt topic's ends, never assigned.
+    Gate,
 }
 
 impl FeedRole {
-    pub(crate) const ALL: [FeedRole; 6] = [
+    pub(crate) const ALL: [FeedRole; 7] = [
         FeedRole::Consumer,
         FeedRole::Producer,
         FeedRole::Depth,
         FeedRole::Admin,
         FeedRole::Reader,
         FeedRole::Follower,
+        FeedRole::Gate,
     ];
 }
 
@@ -70,6 +71,7 @@ impl Role for Client<'_> {
             FeedRole::Admin => "admin",
             FeedRole::Reader => "reader",
             FeedRole::Follower => "follower",
+            FeedRole::Gate => "gate",
         }
     }
 
@@ -106,8 +108,9 @@ impl Role for Client<'_> {
             // The follower joins the feed's group by `group.id` only:
             // librdkafka refuses `assign` on a consumer with no group. It
             // assigns its partitions itself, so it never takes part in a
-            // rebalance, and it commits nothing.
-            FeedRole::Follower => {
+            // rebalance, and it commits nothing. The gate's reader takes the
+            // same settings, so the two read at one isolation level.
+            FeedRole::Follower | FeedRole::Gate => {
                 group(keys, cfg);
                 keys.own("isolation.level", "read_uncommitted", ISOLATION_LEVEL);
             }
@@ -442,17 +445,17 @@ mod tests {
         assert_eq!(config.rdkafka["max.poll.interval.ms"], "60000");
     }
 
-    /// Pins that only the depth client and the attempt follower read at
-    /// `read_uncommitted`: every other client keeps librdkafka's default, so
-    /// the group member cannot read past an open transaction. Regression for
-    /// #1763 and #1765.
+    /// Pins that only the depth client, the attempt follower and the gate's
+    /// reader read at `read_uncommitted`: every other client keeps
+    /// librdkafka's default, so the group member cannot read past an open
+    /// transaction. Regression for #1763 and #1765.
     #[test]
-    fn only_the_depth_client_and_the_follower_read_uncommitted() {
+    fn only_the_depth_client_and_the_attempt_readers_read_uncommitted() {
         let config = parse(MINIMAL).unwrap();
         for role in FeedRole::ALL {
             let client = config.config(role, true);
-            let expected =
-                matches!(role, FeedRole::Depth | FeedRole::Follower).then_some("read_uncommitted");
+            let expected = matches!(role, FeedRole::Depth | FeedRole::Follower | FeedRole::Gate)
+                .then_some("read_uncommitted");
             assert_eq!(client.get("isolation.level"), expected, "{role:?}");
         }
     }

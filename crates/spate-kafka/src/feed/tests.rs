@@ -5686,7 +5686,7 @@ mod docker {
             )
             .unwrap();
         // Each client has read the partition once, so neither connects
-        // inside the gate's one-second read.
+        // inside the pass.
         wait_until(HANG, "the producer reads the partition", || {
             producer
                 .client()
@@ -5705,6 +5705,7 @@ mod docker {
         }
         Gate::new(Arc::clone(&core), producer, lister, Duration::from_secs(1))
             .with_step(Duration::from_millis(1))
+            .with_request_bound(HANG)
             .pass();
         assert_eq!(core.lock().gating.len(), 1, "the gate admitted the unit");
         open.abort_transaction(Duration::from_secs(30)).unwrap();

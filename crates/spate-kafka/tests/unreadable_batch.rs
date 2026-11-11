@@ -226,6 +226,46 @@ fn an_unknown_codec_first_in_a_poll_names_the_codec() {
     assert!(reason.contains("cannot read"), "{reason}");
 }
 
+/// Pins that a record batch whose CRC does not match is delivered when
+/// `check.crcs` is left at librdkafka's default, and the watermark moves past
+/// it. The source page states this.
+#[test]
+fn a_batch_that_fails_its_crc_is_delivered_by_default() {
+    let cluster = MockKafka::new();
+    cluster.create_topic(TOPIC, 1, 1).expect("create topic");
+    let brokers = cluster.bootstrap_servers();
+    support::produce(&brokers, TOPIC, 1, 1, "good");
+    assert_eq!(
+        produce_batch(&brokers, TOPIC, 0, &corrupt_batch(b"changed", b"body")),
+        0
+    );
+
+    let mut cp = Checkpointer::new();
+    let mut source = KafkaSource::new(source_cfg(&brokers, "crc-default"));
+    source.open(SourceCtx::new(cp.handle())).expect("open");
+    let mut lanes = await_assignment(&mut source, HANG);
+    cp.begin_epoch(&[lanes[0].partition()], 1);
+
+    let mut delivered = Vec::new();
+    spate_test::wait_until(HANG, "both records are delivered", || {
+        source
+            .poll_events(Duration::from_millis(10))
+            .expect("poll_events");
+        let batch = lanes[0]
+            .poll(64, Duration::from_millis(100))
+            .expect("no check, so no error");
+        delivered.extend(offsets_of(batch).unwrap_or_default());
+        delivered.len() >= 2
+    });
+    assert_eq!(delivered, [0, 1]);
+    drop(lanes);
+    cp.drain();
+    assert_eq!(
+        cp.take_watermarks(),
+        [(spate_core::record::PartitionId(0), 2)]
+    );
+}
+
 /// A marker behind a batch the lane cannot read stays unpassed: the lane delivers
 /// the record before it and fails, the poll after that serves the marker, and the
 /// watermark stops at that record. The same holds for a batch that fails its CRC.

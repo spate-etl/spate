@@ -1596,3 +1596,45 @@ fn a_feed_fenced_on_join_still_drops() {
         "{lines:#?}"
     );
 }
+
+/// A feed whose stop commit is answered `FENCED_INSTANCE_ID` drops although
+/// librdkafka raises the fatal error after the consumer loop has ended, so
+/// the feed never latches it. The feed's clock is frozen, so the stop commit
+/// is the group's first OffsetCommit. Regression for #1697.
+#[test]
+fn a_feed_fenced_on_its_stop_commit_still_drops() {
+    use rdkafka::types::{RDKafkaApiKey, RDKafkaRespErr};
+    let lines = spate_test::capture_logs(tracing::Level::WARN, || {
+        let cluster = cluster(1);
+        let brokers = cluster.bootstrap_servers();
+        let group = spate_test::unique_name("fenced-commit");
+        let clock = FeedClock::frozen();
+        let worker = direct_on(&clock, &feed_yaml(&brokers, &group, "", ""));
+        publish(&worker.feed, Unit::new("u1", b"x".to_vec()));
+        let delivery = worker.take("the unit");
+        worker.feed.acknowledge(delivery.receipt).unwrap();
+        cluster.request_errors(
+            RDKafkaApiKey::OffsetCommit,
+            &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_FENCED_INSTANCE_ID; 4],
+        );
+        let (dropped, on_drop) = mpsc::channel();
+        let dropping = spawn_thread("drop-feed", move || {
+            drop(worker);
+            let _ = dropped.send(());
+        })
+        .unwrap();
+        if on_drop.recv_timeout(HANG).is_err() {
+            // Joining or dropping either would wait on the same close.
+            std::mem::forget(dropping);
+            std::mem::forget(cluster);
+            panic!("the feed's drop has not returned");
+        }
+        dropping.join().unwrap();
+    });
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("the feed's consumer has not closed")),
+        "{lines:#?}"
+    );
+}

@@ -4046,7 +4046,7 @@ fn a_dynamic_member_fenced_on_join_still_drops() {
     assert!(
         lines
             .iter()
-            .any(|line| line.contains("its consumers close in the background")),
+            .any(|line| line.contains("they close in the background")),
         "{lines:#?}"
     );
 }

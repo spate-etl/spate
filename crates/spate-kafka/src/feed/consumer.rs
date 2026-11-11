@@ -92,8 +92,10 @@ pub(crate) const STOP_SETTLE: Duration = Duration::from_secs(1);
 /// The consumer thread's own state.
 pub(crate) struct Driver {
     pub(crate) core: Arc<Core>,
-    pub(crate) consumer: BaseConsumer<SourceContext>,
+    /// Declared before the consumer, so a consumer close that never returns
+    /// does not hold this producer clone, and with it the feed's producer.
     producer: Producer,
+    pub(crate) consumer: BaseConsumer<SourceContext>,
     /// The partitions this thread paused, and only those: a resume never
     /// touches a partition it did not pause.
     pub(crate) paused: BTreeSet<Tp>,
@@ -182,11 +184,16 @@ pub(crate) fn run(mut d: Driver) {
     // The consumer leaves the group as it drops, before the close settles,
     // so a settled close means this worker no longer holds its partitions.
     // After a fatal error librdkafka's group can run on and the drop wait
-    // with no bound, and the close is rejected with that error anyway.
-    if !core.latched() {
+    // with no bound, and the close is rejected with that error anyway. The
+    // client can hold a fatal error the feed has not latched, as one raised
+    // on the last commit after the loop ended.
+    if !core.latched() && d.consumer.client().fatal_error().is_none() {
         drop(d);
-    } else if !close_in_background(d) {
-        tracing::warn!("the feed's consumer has not closed; it closes in the background");
+    } else {
+        let topic = Arc::clone(&core.topics().work);
+        if !close_in_background(d) {
+            tracing::warn!(%topic, "the feed's consumer has not closed; it closes in the background");
+        }
     }
     if let Some(close) = close {
         settle_close(&core, close, flushed, committed);

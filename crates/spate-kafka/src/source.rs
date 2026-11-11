@@ -141,7 +141,7 @@ use std::time::{Duration, Instant};
 const ASSIGN_HOLD: Duration = Duration::from_secs(3);
 
 /// Bound on waiting for the commits sent together, by one accept's starts or
-/// one flush, and on the drop's wait for the consumers' close. An unanswered
+/// one flush. An unanswered
 /// start leaves the offers held for the next attempt, and an unanswered flush
 /// counts as failed.
 const COMMIT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -2067,12 +2067,12 @@ impl Drop for KafkaSource {
                 tracing::warn!(consumer = k, error = %e, "unassign during source teardown failed");
             }
         }
-        // Close can wait on a silent group coordinator with no bound, so the
-        // pipeline still ends when its deadline says so.
+        // Close can wait with no bound, on a silent group coordinator or after
+        // a fatal error, so the pipeline still ends when its deadline says so.
         if !close_in_background(std::mem::take(&mut self.members)) {
             tracing::warn!(
                 topic = %self.config.topic,
-                "the group has not answered the close; its consumers close in the background"
+                "the consumers have not closed; they close in the background"
             );
         }
     }

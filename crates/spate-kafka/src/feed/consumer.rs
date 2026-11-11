@@ -664,10 +664,10 @@ impl Driver {
     }
 
     /// Commit the commit points that moved, waiting up to the group-call
-    /// bound for the answer. A held commit is checked without waiting, and
-    /// while it is unanswered nothing is sent. `false` when the feed has
-    /// latched, a commit is held, or the commit failed, and `true` when it
-    /// succeeded or nothing moved. `what` names the commit in a failure's log
+    /// bound for the answer, and no longer once the feed stops. A held commit
+    /// is checked without waiting, and while it is unanswered nothing is
+    /// sent. `false` when the feed has latched, a commit is held, or the
+    /// commit failed, and `true` when it succeeded or nothing moved. `what` names the commit in a failure's log
     /// line.
     pub(crate) fn commit_finished(&mut self, what: &str) -> bool {
         let now = self.core.clock().now();

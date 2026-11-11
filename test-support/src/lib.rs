@@ -3,6 +3,8 @@
 
 pub mod alloc;
 mod child;
+#[cfg(any(feature = "kafka", feature = "elasticmq"))]
+mod container_log;
 mod corpus;
 #[cfg(feature = "elasticmq")]
 mod elasticmq;

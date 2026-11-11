@@ -14,7 +14,7 @@ use testcontainers::core::{CmdWaitFor, ContainerPort, ContainerState, ExecComman
 use testcontainers::runners::SyncRunner;
 use testcontainers::{Container, Image, ImageExt, TestcontainersError};
 
-use crate::started::{container_output, container_tails};
+use crate::container_log::{container_output, container_tails};
 use crate::{container_image, selected_lane};
 
 /// The container port of the listener a client on the host reaches.

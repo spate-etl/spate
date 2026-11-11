@@ -14,6 +14,7 @@
 //! stays the operator's contract. A best-effort hostname cross-check
 //! warns (never fails) on apparent cross-wiring.
 
+use crate::http::StartupBound;
 use crate::writer::ClickHouseEndpoint;
 use serde::Deserialize;
 use std::fmt::Write as _;
@@ -61,6 +62,8 @@ pub(crate) struct DistributedCheck {
     /// The endpoint to query (`distributed_check.endpoint`, defaulting to
     /// the first replica of shard 0).
     pub(crate) endpoint: ClickHouseEndpoint,
+    /// The bound on each query, `timeouts.startup`.
+    pub(crate) startup: StartupBound,
     /// The cluster named by the `Distributed` DDL.
     pub(crate) cluster: String,
     /// Default database for an unqualified `table`.
@@ -98,7 +101,7 @@ impl DistributedCheck {
     /// Run the guard. Query order is fixed at cluster topology then table
     /// engine, and the mock tests depend on it.
     pub(crate) async fn verify(&self) -> Result<(), DistributedCheckError> {
-        let replicas = self
+        let topology = self
             .endpoint
             .client()
             .query(
@@ -106,13 +109,14 @@ impl DistributedCheck {
                  WHERE cluster = ? ORDER BY shard_num, replica_num",
             )
             .bind(&self.cluster)
-            .fetch_all::<ClusterReplicaRow>()
-            .await
-            .map_err(|e| DistributedCheckError::Fetch {
+            .fetch_all::<ClusterReplicaRow>();
+        let replicas = self.startup.request(topology).await.map_err(|reason| {
+            DistributedCheckError::Fetch {
                 what: "cluster topology",
                 url: self.endpoint.display_url().to_string(),
-                reason: crate::http::error_reason(&e),
-            })?;
+                reason,
+            }
+        })?;
         if replicas.is_empty() {
             return Err(self.mismatch(format!(
                 "cluster `{}` not found in system.clusters on {}",
@@ -216,13 +220,15 @@ impl DistributedCheck {
                 )
                 .bind(table),
         };
-        let engines = query.fetch_all::<TableEngineRow>().await.map_err(|e| {
-            DistributedCheckError::Fetch {
+        let engines = self
+            .startup
+            .request(query.fetch_all::<TableEngineRow>())
+            .await
+            .map_err(|reason| DistributedCheckError::Fetch {
                 what: "table engine",
                 url: self.endpoint.display_url().to_string(),
-                reason: crate::http::error_reason(&e),
-            }
-        })?;
+                reason,
+            })?;
         let Some(row) = engines.first() else {
             return Err(self.mismatch(format!(
                 "table {} not found (or not visible to this user) on {}",
@@ -547,6 +553,7 @@ mod tests {
         let url = serve(&server, None).await;
         let check = DistributedCheck {
             endpoint: endpoint_trusting(&other, &url),
+            startup: StartupBound::new(None),
             cluster: "prod".into(),
             database: None,
             table: "t_dist".into(),

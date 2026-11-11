@@ -229,6 +229,12 @@ offset is moved past it. Under `latest` a partition the group has been assigned
 has one. A partition with no committed offset under `earliest` stops at the same
 message too.
 
+A record at offset `i64::MAX`, the top of the offset range, also fails the
+source with a fatal error, since no position above it exists to commit past it.
+Records before it in the same poll are still delivered. No committed offset
+lies past it, so after each restart the source stops again at the same record
+for as long as the broker returns it.
+
 The source leaves `check.crcs` at librdkafka's default, which is off, unless
 the `rdkafka` passthrough sets it. With it off, librdkafka does not verify a
 record batch's checksum, so a batch whose bytes changed after the checksum was

@@ -41,6 +41,9 @@ pub(crate) struct RawBatch<'a> {
     /// The count the mock reserves offsets by, which need not match the one
     /// record the batch holds.
     pub(crate) record_count: i32,
+    /// The record's own offset delta, which librdkafka adds to the batch's
+    /// base offset unchecked.
+    pub(crate) record_offset_delta: i64,
     pub(crate) key: Option<&'a [u8]>,
     pub(crate) value: &'a [u8],
 }
@@ -56,6 +59,7 @@ impl Default for RawBatch<'_> {
             last_offset_delta: 0,
             timestamp: 0,
             record_count: 1,
+            record_offset_delta: 0,
             key: None,
             value: b"",
         }
@@ -67,7 +71,7 @@ impl RawBatch<'_> {
     pub(crate) fn encode(&self) -> Vec<u8> {
         let mut rec = vec![0u8];
         zigzag(&mut rec, 0);
-        zigzag(&mut rec, 0);
+        zigzag(&mut rec, self.record_offset_delta);
         match self.key {
             Some(key) => {
                 zigzag(&mut rec, key.len() as i64);

@@ -255,6 +255,18 @@ impl Driver {
     fn on_message(&self, message: &BorrowedMessage<'_>) {
         let tp = Tp::new(&self.core.topics().of(message.topic()), message.partition());
         let offset = message.offset();
+        if offset == i64::MAX {
+            // The commit past a message is one above its offset, and none
+            // exists above this one.
+            self.core.latch(&format!(
+                "`{}` partition {}: the broker returned a message at offset {}, the top of the \
+                 offset range, which leaves no position to commit past it",
+                message.topic(),
+                message.partition(),
+                i64::MAX
+            ));
+            return;
+        }
         let read = read_message(message, self.core.topics());
         let dead_letter = {
             let mut st = self.core.lock();

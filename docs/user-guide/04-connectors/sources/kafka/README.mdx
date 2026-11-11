@@ -204,6 +204,9 @@ The framework never uses librdkafka's position-based auto-commit. Instead:
   start to librdkafka.
 - A held assignment from a generation the group has left is answered empty, and
   the consumer rejoins after one more drain.
+- An assignment that names a partition of a topic other than `topic` stops the
+  run with a fatal error, under every `auto.offset.reset`. A stock assignor
+  never sends one.
 
 :::danger
 Under `latest` a partition added to the topic starts at its end, and records

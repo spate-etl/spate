@@ -1,0 +1,3 @@
+**The Avro deserializer's `registry.url` refusals are reworded** (`spate-avro`)
+
+A `registry.url` carrying a user or password reads `avro configuration: registry.url carries userinfo; set them in registry.username and registry.password`, and one with another scheme reads `registry.url must be a URL with scheme http or https; found ftp`. A value written without `//` after its scheme, such as `localhost:8081`, reads ``registry.url has no `//` after its scheme``. In previous versions they read `registry.url contains credentials; …` and `registry.url must be an http:// or https:// URL`. The set of values refused is unchanged.

@@ -41,11 +41,11 @@ use rustls_native_certs::CertificateResult;
 use serde::Deserialize;
 use spate_core::backoff::Backoff;
 use spate_core::clock::SyncClock;
-use spate_core::config::redact;
+use spate_core::config::UrlRule;
 use spate_core::hash::{QualityMap, QualitySet};
 use spate_core::telemetry::RateLimit;
 use std::error::Error;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
@@ -88,50 +88,22 @@ impl RegistryHandle {
     }
 }
 
-/// Registry connection settings.
-#[derive(Clone)]
-pub(crate) struct RegistryConfig {
-    pub url: String,
-    pub basic_auth: Option<(String, Option<String>)>,
-    pub root_ca: Option<PathBuf>,
-}
+/// The rule `registry.url` meets.
+const REGISTRY_URL: UrlRule<'static> =
+    UrlRule::new("set them in registry.username and registry.password").schemes(&["http", "https"]);
 
-// Hand-written: the password and the URL userinfo are credentials. The
-// destructure lists every field so a new one cannot reach `Debug` unredacted.
-impl std::fmt::Debug for RegistryConfig {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let RegistryConfig {
-            url,
-            basic_auth,
-            root_ca,
-        } = self;
-        f.debug_struct("RegistryConfig")
-            .field("url", &redact::url(url))
-            .field(
-                "basic_auth",
-                &basic_auth
-                    .as_ref()
-                    .map(|(user, password)| (user, redact::option(password))),
-            )
-            .field("root_ca", root_ca)
-            .finish()
-    }
-}
-
-impl RegistryConfig {
-    /// The URL without userinfo, query or fragment, for error messages.
-    pub(crate) fn display_url(&self) -> String {
-        match reqwest::Url::parse(&self.url) {
-            Ok(mut url) => {
-                let _ = url.set_username("");
-                let _ = url.set_password(None);
-                url.set_query(None);
-                url.set_fragment(None);
-                url.to_string()
-            }
-            Err(_) => "(unparseable URL)".to_owned(),
-        }
-    }
+/// `registry.url` parsed and checked.
+///
+/// # Errors
+///
+/// [`AvroConfigError::Invalid`] naming `registry.url` when it is not an
+/// `http` or `https` URL, or carries userinfo.
+pub(crate) fn registry_url(url: &str) -> Result<Url, AvroConfigError> {
+    REGISTRY_URL
+        .check(url)
+        .map_err(|e| AvroConfigError::Invalid {
+            detail: format!("registry.url {e}"),
+        })
 }
 
 /// Where one schema registry is and how to authenticate to it. Requests go
@@ -200,23 +172,18 @@ impl std::fmt::Display for Failure {
 }
 
 impl Endpoint {
-    /// The endpoint at `cfg.url`. Fails when the URL is not an `http://` or
-    /// `https://` URL.
-    pub(crate) fn new(cfg: &RegistryConfig) -> Result<Endpoint, AvroConfigError> {
-        // The detail never echoes the URL, which may carry credentials.
-        let base = Url::parse(&cfg.url).map_err(|e| AvroConfigError::Invalid {
-            detail: format!("registry.url is not a URL: {e}"),
-        })?;
-        if !matches!(base.scheme(), "http" | "https") {
-            return Err(AvroConfigError::Invalid {
-                detail: "registry.url must be an http:// or https:// URL".into(),
-            });
-        }
-        Ok(Endpoint {
+    /// The endpoint at `base`, a URL [`registry_url`] returned.
+    pub(crate) fn new(base: Url, basic_auth: Option<(String, Option<String>)>) -> Endpoint {
+        // `registry_url` refused userinfo, so only the query and fragment
+        // stay out of messages.
+        let mut registry = base.clone();
+        registry.set_query(None);
+        registry.set_fragment(None);
+        Endpoint {
             base,
-            basic_auth: cfg.basic_auth.clone(),
-            registry: cfg.display_url().into(),
-        })
+            basic_auth,
+            registry: registry.as_str().into(),
+        }
     }
 
     /// The registry's URL, without credentials.
@@ -244,7 +211,7 @@ impl Endpoint {
         url.set_query(None);
         url.set_fragment(None);
         url.path_segments_mut()
-            .expect("Endpoint::new admits only http(s) URLs")
+            .expect("registry_url admits only http(s) URLs")
             .pop_if_empty()
             .extend(segments);
         url
@@ -748,12 +715,9 @@ mod tests {
 
     const SCHEMA: &str = r#"{"type":"record","name":"E","fields":[{"name":"id","type":"long"}]}"#;
 
-    fn config(url: &str, root_ca: Option<&Path>) -> RegistryConfig {
-        RegistryConfig {
-            url: url.to_owned(),
-            basic_auth: None,
-            root_ca: root_ca.map(Path::to_path_buf),
-        }
+    /// The endpoint at `url`, which must pass `registry_url`.
+    fn endpoint(url: &str) -> Endpoint {
+        Endpoint::new(registry_url(url).unwrap(), None)
     }
 
     /// An id's fetch delay starts at 200 ms and doubles on each transient
@@ -861,14 +825,15 @@ mod tests {
         format!("https://{addr}")
     }
 
-    /// Fetches schema 1 from `cfg`, with `system` standing in for the system
-    /// trust store where the platform reads one.
+    /// Fetches schema 1 from `url`, trusting `root_ca`, with `system`
+    /// standing in for the system trust store where the platform reads one.
     async fn fetch(
-        cfg: &RegistryConfig,
+        url: &str,
+        root_ca: Option<&Path>,
         system: Vec<CertificateDer<'static>>,
     ) -> Result<String, Failure> {
-        let http = http_client_with(cfg.root_ca.as_deref(), || native_certs(system)).unwrap();
-        let endpoint = Endpoint::new(cfg).unwrap();
+        let http = http_client_with(root_ca, || native_certs(system)).unwrap();
+        let endpoint = endpoint(url);
         endpoint
             .get(&http, endpoint.schema_url(1))
             .await
@@ -902,7 +867,7 @@ mod tests {
         let start = tokio::time::Instant::now();
         let fetched = tokio::time::timeout(
             REQUEST_TIMEOUT * 2,
-            fetch(&config(&format!("http://{addr}"), None), vec![]),
+            fetch(&format!("http://{addr}"), None, vec![]),
         )
         .await
         .expect("the request timeout ends the fetch");
@@ -969,7 +934,7 @@ mod tests {
             }
         });
         let start = tokio::time::Instant::now();
-        let fetched = tokio::time::timeout(REQUEST_TIMEOUT * 2, fetch(&config(&url, None), vec![]))
+        let fetched = tokio::time::timeout(REQUEST_TIMEOUT * 2, fetch(&url, None, vec![]))
             .await
             .expect("the request timeout ends the fetch");
         assert!(
@@ -996,10 +961,9 @@ mod tests {
             None,
         )
         .await;
-        let fetched =
-            tokio::time::timeout(Duration::from_secs(10), fetch(&config(&url, None), vec![]))
-                .await
-                .expect("the fetch ends once the limit is read");
+        let fetched = tokio::time::timeout(Duration::from_secs(10), fetch(&url, None, vec![]))
+            .await
+            .expect("the fetch ends once the limit is read");
         match fetched {
             Err(Failure::Status { status, body }) => {
                 assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
@@ -1037,10 +1001,9 @@ mod tests {
                         None,
                     )
                     .await;
-                    let cfg = config(&url, None);
                     let handle = spawn_fetcher(
                         http_client(None).unwrap(),
-                        Arc::new(Endpoint::new(&cfg).unwrap()),
+                        Arc::new(endpoint(&url)),
                         Rejection::default(),
                         Duration::from_secs(60),
                         SyncClock::new(Arc::new(PanickingClock)),
@@ -1092,11 +1055,10 @@ mod tests {
                         None,
                     )
                     .await;
-                    let cfg = config(&url, None);
                     let read = Arc::new(AtomicBool::new(false));
                     let handle = spawn_fetcher(
                         http_client(None).unwrap(),
-                        Arc::new(Endpoint::new(&cfg).unwrap()),
+                        Arc::new(endpoint(&url)),
                         Rejection::default(),
                         Duration::from_secs(60),
                         SyncClock::new(Arc::new(FlaggingPanicClock(Arc::clone(&read)))),
@@ -1151,7 +1113,7 @@ mod tests {
     #[test]
     fn request_urls_extend_the_configured_path() {
         for base in ["https://sr:8081/registry", "https://sr:8081/registry/"] {
-            let endpoint = Endpoint::new(&config(base, None)).unwrap();
+            let endpoint = endpoint(base);
             assert_eq!(
                 endpoint.schema_url(7).as_str(),
                 "https://sr:8081/registry/schemas/ids/7?deleted=true"
@@ -1163,23 +1125,48 @@ mod tests {
         }
     }
 
-    /// A URL that does not parse, or whose scheme is not `http` or `https`,
-    /// fails at startup without echoing the URL.
+    /// Pins each refusal of `registry.url` by its text, none echoing the URL.
     #[test]
     fn an_unusable_url_fails() {
-        for url in [
-            "not a url",
-            "https://user:secret@sr:99999",
-            "localhost:8081",
-            "ftp://user:secret@sr",
+        for (url, expected) in [
+            (
+                "not a url",
+                "registry.url is not a URL: relative URL without a base",
+            ),
+            (
+                "https://user:secret@sr:99999",
+                "registry.url is not a URL: invalid port number",
+            ),
+            (
+                "localhost:8081",
+                "registry.url has no `//` after its scheme",
+            ),
+            (
+                "user:secret@sr:8081",
+                "registry.url has no `//` after its scheme",
+            ),
+            (
+                "ftp://user:secret@sr",
+                "registry.url must be a URL with scheme http or https; found ftp",
+            ),
+            (
+                "https://user:secret@sr",
+                "registry.url carries userinfo; set them in registry.username and \
+                 registry.password",
+            ),
         ] {
-            let err = Endpoint::new(&config(url, None))
-                .err()
-                .expect("the URL is rejected")
+            let err = registry_url(url)
+                .expect_err("the URL is rejected")
                 .to_string();
-            assert!(err.contains("registry.url"), "{err}");
-            assert!(!err.contains("secret"), "{err}");
+            assert_eq!(err, format!("avro configuration: {expected}"), "{url}");
         }
+    }
+
+    /// Messages name the registry without the URL's query or fragment.
+    #[test]
+    fn the_registry_name_drops_the_query_and_fragment() {
+        let endpoint = endpoint("https://sr:8081/registry?token=t#f");
+        assert_eq!(endpoint.registry(), "https://sr:8081/registry");
     }
 
     /// A store that yielded only certificates rustls refuses says so, and an
@@ -1227,8 +1214,7 @@ mod tests {
         let malformed = dir.path().join("malformed.pem");
         std::fs::write(&malformed, pem("CERTIFICATE", b"not DER")).unwrap();
         for path in [dir.path().join("missing.pem"), empty, malformed] {
-            let cfg = config("https://sr", Some(&path));
-            let err = http_client_with(cfg.root_ca.as_deref(), CertificateResult::default)
+            let err = http_client_with(Some(&path), CertificateResult::default)
                 .expect_err("the root CA is rejected")
                 .to_string();
             assert!(err.contains("registry.tls.root_ca"), "{err}");
@@ -1243,7 +1229,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let ca = TestCa::new("private");
         let url = serve(&ca, None).await;
-        let fetched = fetch(&config(&url, Some(&ca.write(dir.path()))), vec![]).await;
+        let fetched = fetch(&url, Some(&ca.write(dir.path())), vec![]).await;
         assert_eq!(fetched.expect("the private CA is trusted"), SCHEMA);
     }
 
@@ -1254,7 +1240,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (registry, other) = (TestCa::new("registry"), TestCa::new("other"));
         let url = serve(&registry, None).await;
-        let reason = rejected(fetch(&config(&url, Some(&other.write(dir.path()))), vec![]).await);
+        let reason = rejected(fetch(&url, Some(&other.write(dir.path())), vec![]).await);
         assert!(reason.contains("registry.tls.root_ca"), "{reason}");
     }
 
@@ -1269,7 +1255,7 @@ mod tests {
             (A::DecodeError, false),
         ] {
             let addr = spate_test::tls_alert_server(b"", u8::from(alert));
-            match fetch(&config(&format!("https://{addr}"), None), vec![]).await {
+            match fetch(&format!("https://{addr}"), None, vec![]).await {
                 Err(Failure::Rejected(reason)) => {
                     assert!(is_rejection, "{alert:?} rejected: {reason}");
                     assert!(reason.contains(&format!("{alert:?}")), "{reason}");
@@ -1287,8 +1273,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let registry = TestCa::new("registry");
         let url = serve(&registry, Some(&TestCa::new("clients"))).await;
-        let reason =
-            rejected(fetch(&config(&url, Some(&registry.write(dir.path()))), vec![]).await);
+        let reason = rejected(fetch(&url, Some(&registry.write(dir.path())), vec![]).await);
         assert!(reason.contains("CertificateRequired"), "{reason}");
         assert!(reason.contains("requires a client certificate"), "{reason}");
     }
@@ -1304,8 +1289,7 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let (system, extra) = (TestCa::new("system"), TestCa::new("extra"));
             let url = serve(&system, None).await;
-            let cfg = config(&url, Some(&extra.write(dir.path())));
-            let fetched = fetch(&cfg, vec![system.der()]).await;
+            let fetched = fetch(&url, Some(&extra.write(dir.path())), vec![system.der()]).await;
             assert_eq!(fetched.expect("the system CA is trusted"), SCHEMA);
         }
 
@@ -1332,7 +1316,7 @@ mod tests {
                 }
             });
             let url = format!("http://127.0.0.1:{port}");
-            let fetched = fetch(&config(&url, None), vec![registry.der()]).await;
+            let fetched = fetch(&url, None, vec![registry.der()]).await;
             assert_eq!(fetched.expect("the redirect target is trusted"), SCHEMA);
         }
 
@@ -1342,9 +1326,9 @@ mod tests {
         async fn an_https_registry_is_verified_against_the_system_roots() {
             let (registry, other) = (TestCa::new("registry"), TestCa::new("other"));
             let url = serve(&registry, None).await;
-            let fetched = fetch(&config(&url, None), vec![registry.der()]).await;
+            let fetched = fetch(&url, None, vec![registry.der()]).await;
             assert_eq!(fetched.expect("the registry's CA is trusted"), SCHEMA);
-            rejected(fetch(&config(&url, None), vec![other.der()]).await);
+            rejected(fetch(&url, None, vec![other.der()]).await);
         }
     }
 }

@@ -951,6 +951,26 @@ mod tests {
         });
     }
 
+    /// A serve takes the client's events for the whole wait, where a poll
+    /// with no wait returns after one log line and leaves an error queued
+    /// behind it.
+    #[test]
+    fn a_serve_with_nothing_to_return_lasts_its_wait() {
+        let cluster = MockKafka::new();
+        let consumer = raw(
+            &[
+                ("bootstrap.servers", &cluster.bootstrap_servers()),
+                ("group.id", "depth-serve-wait"),
+                ("statistics.interval.ms", "10"),
+            ],
+            SourceHooks::default(),
+        );
+        let reads = Brokers { consumer };
+        let started = Instant::now();
+        assert!(reads.serve(SERVE_WAIT).is_none());
+        assert!(started.elapsed() >= SERVE_WAIT, "{:?}", started.elapsed());
+    }
+
     /// Pins the topics a whole-request failure names: each once, in the
     /// order the request lists them.
     #[test]

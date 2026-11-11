@@ -2385,10 +2385,16 @@ mod tests {
     /// Regression for #1779.
     #[test]
     fn an_offer_on_another_topic_is_fatal() {
-        for config in [test_config(), latest_config()] {
+        // librdkafka crashes assigning a name past its 512-byte limit.
+        let long = "t".repeat(600);
+        for (config, topic) in [
+            (test_config(), "other"),
+            (latest_config(), "other"),
+            (test_config(), long.as_str()),
+        ] {
             let (mut source, _clock) = opened_unassigned(config, 1);
             let mut other = TopicPartitionList::new();
-            other.add_partition("other", 0);
+            other.add_partition(topic, 0);
             source.members[0].phase = Phase::Held(other);
             let Err(e) = source.accept_held(false) else {
                 panic!("the offer was accepted");

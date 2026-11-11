@@ -625,7 +625,7 @@ impl KafkaSource {
     /// every consumer's lanes, or `Idle` when they hold none. When any two
     /// offers overlap, each offer below the newest generation is discarded
     /// first, overlapping or not, and a partition still in two offers is fatal.
-    /// An offer naming a partition of another topic is fatal ahead of both.
+    /// An offer that [`check_assignment`] refuses is fatal ahead of both.
     fn accept_held(&mut self, reassign: bool) -> Result<SourceEvent<KafkaLane>, SourceError> {
         let mut offers: Vec<(usize, TopicPartitionList)> = Vec::new();
         let mut held = Vec::new();

@@ -901,6 +901,11 @@ mod tests {
                 "{entries:?} on {topics:?}"
             );
         }
+        // librdkafka builds a group's empty assignment with no element storage.
+        assert_eq!(
+            check_assignment(&TopicPartitionList::with_capacity(0), &both),
+            Ok(())
+        );
     }
 
     /// An assignment of [`MAX_ASSIGNED`] partitions passes and one more is

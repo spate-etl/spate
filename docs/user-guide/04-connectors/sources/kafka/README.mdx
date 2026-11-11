@@ -211,8 +211,10 @@ The framework never uses librdkafka's position-based auto-commit. Instead:
   never sends one.
 - An assignment that gives one consumer more than 10,000 partitions, or a
   partition numbered below zero, also stops the run before the consumer is
-  assigned. A topic with more partitions than that needs enough members in the
-  group, through `consumers` or more processes, that none is assigned more.
+  assigned. A member's share grows when another leaves, and a member alone in
+  the group is assigned every partition. A topic with more partitions than that
+  needs enough members, through `consumers` or more processes, that none is
+  assigned more with one member gone.
 
 :::danger
 Under `latest` a partition added to the topic starts at its end, and records

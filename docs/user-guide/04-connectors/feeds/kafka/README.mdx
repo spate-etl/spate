@@ -349,8 +349,10 @@ An assignment that names a partition of a topic other than `topic` or
 `retry_topic` stops the feed with a fatal error before the feed reads from it.
 A stock assignor never sends one. An assignment of more than 10,000 partitions
 across the two topics, or of a partition numbered below zero, stops the feed the
-same way. Work and retry topics with more partitions than that together need
-enough workers that none is assigned more.
+same way. A worker's share grows when another leaves, and a worker alone in
+the group is assigned every partition. Work and retry topics with more
+partitions than that together need enough workers that none is assigned more
+with one worker gone.
 
 ### Transaction markers
 

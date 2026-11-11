@@ -501,6 +501,7 @@ mod tests {
     use crate::feed::config::KafkaFeedConfig;
     use crate::feed::producer::FeedProducerHooks;
     use crate::feed::tests::{gated, tp};
+    use crate::testutil::mock::MockKafka;
     use rdkafka::error::RDKafkaErrorCode as C;
     use spate_core::clock::SyncClock;
     use spate_test::HANG;
@@ -561,7 +562,7 @@ mod tests {
     /// drains them.
     #[test]
     fn a_pass_drains_what_the_listings_queued() {
-        let cluster = crate::testutil::mock::MockKafka::new();
+        let cluster = MockKafka::new();
         cluster.create_topic("units-attempts", 1, 1).unwrap();
         let section: spate_core::config::FeedSection = serde_yaml::from_str(&format!(
             "kafka:\n  brokers: \"{}\"\n  group_id: workers\n  topic: units\n  \

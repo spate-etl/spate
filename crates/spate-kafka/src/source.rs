@@ -2381,14 +2381,20 @@ mod tests {
     }
 
     /// An offer of a partition of another topic stops the run under every
-    /// start policy and ahead of the assign, which would fetch that topic.
-    /// Regression for #1779.
+    /// `auto.offset.reset` and ahead of the assign, which would fetch that
+    /// topic. Regression for #1779.
     #[test]
     fn an_offer_on_another_topic_is_fatal() {
         // librdkafka crashes assigning a name past its 512-byte limit.
         let long = "t".repeat(600);
+        // `test_config` sets `earliest`.
+        let mut on_error = test_config();
+        on_error
+            .rdkafka
+            .insert("auto.offset.reset".to_string(), "error".to_string());
         for (config, topic) in [
             (test_config(), "other"),
+            (on_error, "other"),
             (latest_config(), "other"),
             (test_config(), long.as_str()),
         ] {

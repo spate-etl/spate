@@ -230,7 +230,8 @@ pub enum PinningMode {
 #[non_exhaustive]
 pub struct CheckpointSection {
     /// How often committable watermarks are flushed to the source. From
-    /// 100ms to one day, as [`PipelineConfig::validate`] checks.
+    /// 100ms to one day, as [`PipelineConfig::validate`] checks. A run
+    /// refuses a value above one day.
     #[serde(with = "humantime_serde")]
     pub interval: Duration,
     /// Hard per-partition ceiling on unacknowledged batches. A partition at
@@ -243,7 +244,8 @@ pub struct CheckpointSection {
     /// `terminationGracePeriodSeconds`, and more than
     /// [`STOP_RESERVE`](crate::feed::STOP_RESERVE) with a feed that
     /// [hands back](crate::feed::Feed::hands_back). Above zero and at most
-    /// one day, as [`PipelineConfig::validate`] checks.
+    /// one day, as [`PipelineConfig::validate`] checks. A run refuses a
+    /// value above one day.
     #[serde(with = "humantime_serde")]
     pub drain_timeout: Duration,
     /// A partition watermark stalled behind a failed batch for longer than
@@ -763,9 +765,9 @@ impl PipelineConfig {
 
     /// Reject a `checkpoint.interval` or `checkpoint.drain_timeout` above a
     /// day, which is past what the controller can add to a clock reading.
-    /// Split out of [`validate`](Self::validate) so the runtime, which a
-    /// programmatic config reaches without validation, enforces it too. A
-    /// value under its floor passes here.
+    /// The runtime calls it, since a programmatic config reaches a run
+    /// without [`validate`](Self::validate), which checks the same ceilings
+    /// with each key's floor. A value under its floor passes here.
     pub(crate) fn reject_checkpoint_above_a_day(&self) -> Result<(), ConfigError> {
         for (key, value, bounds) in [
             (

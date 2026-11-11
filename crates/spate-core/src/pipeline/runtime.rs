@@ -353,7 +353,8 @@ impl<S: Source + 'static> PipelineRuntime<S> {
     ///
     /// [`StartError::Config`] before the source opens for a zero thread
     /// count, a zero [`RuntimeOptions::max_records`], a current-thread I/O
-    /// runtime, or a configuration the source or the feed refuses. Each other
+    /// runtime, a `checkpoint.interval` or `checkpoint.drain_timeout` above
+    /// one day, or a configuration the source or the feed refuses. Each other
     /// [`StartError`] variant for the startup step it names.
     pub fn run(mut self) -> Result<ExitReport, StartError> {
         let threads = self.thread_count();

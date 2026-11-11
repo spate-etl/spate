@@ -329,6 +329,13 @@ delete not sent by then leaves its unit to return after one visibility period
 and be read again, and so does every unit of a worker killed before its
 hand-back reaches SQS.
 
+The close sets its units visible ten to a call, one call after another. A sink
+that uses its whole drain budget leaves the close one second of
+`checkpoint.drain_timeout`. The close then reaches every unit only when each
+call is answered within one second divided by the number of calls, which is
+250 ms for 40 held units. A unit it does not reach returns after one visibility
+period. `units_held` sets how many units a worker can hold when it closes.
+
 Startup refuses a `checkpoint.drain_timeout` of `5s` or less with the SQS feed
 (see [`checkpoint:`](../../../07-reference/configuration.mdx#checkpoint)).
 

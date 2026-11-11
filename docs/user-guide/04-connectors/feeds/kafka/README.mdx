@@ -667,7 +667,8 @@ at most for a quarter of `max.poll.interval.ms` or 10 seconds, whichever is
 less. A commit with no answer by then counts as failed, so the close settles as
 failed and the units the commit would have finished are read again. The
 consumer then leaves the group on a thread of its own, because its close waits
-for that commit, and dropping the feed does not wait for that thread.
+for that commit. Dropping the feed waits for that thread until the close's
+deadline at most.
 
 With every commit answered, the leave waits up to 5 seconds for its answer. The
 leave can run past the drain deadline on the feed's consumer thread, and

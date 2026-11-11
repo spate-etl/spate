@@ -43,7 +43,8 @@
 //! - The last commit waits for it, and then for its own, until the close's
 //!   deadline, at most one bound away. When one stays unanswered, the
 //!   consumer leaves the group on a thread of its own, since its close waits
-//!   for every outstanding commit, and the feed's drop does not wait for it.
+//!   for every outstanding commit, and the feed's drop waits for that thread
+//!   until the deadline at most.
 //!
 //! The tracker lock is never held across a commit or any other broker call.
 //!

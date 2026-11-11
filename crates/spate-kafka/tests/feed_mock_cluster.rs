@@ -746,9 +746,7 @@ fn an_assignment_on_another_topic_stops_the_feed() {
 }
 
 /// A message at offset `i64::MAX`, the top of the offset range, stops the
-/// feed before it is delivered: no position exists to commit past it. The
-/// mock stores the batch as sent, and librdkafka adds the record's offset
-/// delta to the batch's base offset.
+/// feed before it is delivered: no position exists to commit past it.
 #[test]
 fn a_message_at_the_top_of_the_offset_range_stops_the_feed() {
     let cluster = cluster(1);

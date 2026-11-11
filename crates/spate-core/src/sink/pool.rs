@@ -237,10 +237,13 @@ impl<W: ShardWriter> SinkPool<W> {
     /// writes get until `deadline` before being aborted and abandoned.
     ///
     /// `deadline` runs on the pool's clock and counts as at most a year.
-    /// Always returns. A worker that does not stop by `deadline` is
-    /// force-aborted `BACKSTOP_GRACE` later; its acknowledgments fail with it
-    /// (so at-least-once holds and the data replays), but its counts are
-    /// missing from the returned report.
+    /// A worker that does not stop by `deadline` is force-aborted
+    /// `BACKSTOP_GRACE` later; its acknowledgments fail with it (so
+    /// at-least-once holds and the data replays), but its counts are missing
+    /// from the returned report. So the drain returns as long as the I/O
+    /// runtime can fire that deadline. Writers that block their thread on
+    /// every I/O worker leave nothing to fire it, and the drain then does not
+    /// return.
     ///
     /// Contract: the caller must have dropped every
     /// [`ShardQueues`](super::ShardQueues) clone first. Workers only enter

@@ -46,7 +46,10 @@ revocation, one choreography tested constantly by every rebalance:
    force-seal partial batches, and get the remaining deadline to finish
    in-flight writes. At the deadline a worker aborts whatever is still
    writing and abandons it (see below); a worker that somehow fails to do
-   that is force-aborted a second later, so this step always terminates.
+   that is force-aborted a second later, so this step terminates. The one
+   exception is a writer that blocks its thread, which
+   [Why the drain always terminates](#why-the-drain-always-terminates)
+   covers.
    With a feed that hands back, this step ends one second before the
    deadline, which leaves that second for the feed's close in step 4.
 4. **Offsets commit.** The controller drains the checkpointer and runs a final

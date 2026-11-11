@@ -81,9 +81,10 @@ crossbeam-channel = "0.5.15"
 bytes = "1.11.1"
 core_affinity = "0.8"
 foldhash = "0.2"
-# 2.6 adds the aarch64 NEON search. Default features carry `std`, which the
-# runtime AVX2 check on x86_64 needs.
-memchr = "2.6"
+# The floor is 2.7.2 because testcontainers requires it; the aarch64 NEON
+# search arrived in 2.6. Default features carry `std`, which the runtime AVX2
+# check on x86_64 needs.
+memchr = "2.7.2"
 twox-hash = { version = "2.1.4", default-features = false, features = ["xxhash64"] }
 # Split identity in spate-s3. Ids are persisted and a collision drops work
 # silently, so this must resist adversarially-named keys.

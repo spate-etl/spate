@@ -28,6 +28,8 @@ kafka = ["dep:testcontainers"]
 s3 = ["kafka", "dep:http", "dep:object_store", "dep:tokio"]
 # `ElasticMq`.
 elasticmq = ["dep:testcontainers"]
+# The `events` corpus.
+events = ["dep:serde", "dep:spate-bench"]
 
 [dependencies]
 base64 = { workspace = true, optional = true }
@@ -37,6 +39,8 @@ object_store = { workspace = true, optional = true, features = ["aws"] }
 rcgen = { workspace = true, optional = true }
 rustls = { workspace = true, optional = true }
 rustls-native-certs = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
+spate-bench = { workspace = true, optional = true }
 testcontainers = { workspace = true, optional = true, features = ["blocking"] }
 tokio = { workspace = true, optional = true, features = ["io-util", "net", "rt"] }
 tokio-rustls = { workspace = true, optional = true }
@@ -44,9 +48,14 @@ tokio-rustls = { workspace = true, optional = true }
 [dev-dependencies]
 futures-util = { workspace = true }
 rdkafka = { workspace = true }
+serde_json = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt"] }
 
 [[test]]
 name = "containers"
 required-features = ["elasticmq", "kafka", "s3"]
+
+[[test]]
+name = "events"
+required-features = ["events"]

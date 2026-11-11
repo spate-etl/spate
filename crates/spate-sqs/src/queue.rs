@@ -5,7 +5,7 @@
 //! stands in for SQS.
 
 use crate::client;
-use crate::error::{CallError, Class, classify};
+use crate::error::{CallError, classify};
 use crate::startup::QueueAttributes;
 use aws_sdk_sqs::Client;
 use aws_sdk_sqs::config::retry::RetryConfig;
@@ -14,6 +14,7 @@ use aws_sdk_sqs::types::{
     MessageAttributeValue, MessageSystemAttributeName, QueueAttributeName,
     SendMessageBatchRequestEntry,
 };
+use spate_core::error::ErrorClass;
 use spate_core::hash::FastMap;
 use std::future::Future;
 use std::pin::Pin;
@@ -159,7 +160,7 @@ impl QueueAttributes for SdkQueue {
 /// An SDK builder refused an entry the feed built: a batcher bug.
 fn built<T>(entry: Result<T, aws_sdk_sqs::error::BuildError>) -> Result<T, CallError> {
     entry.map_err(|e| CallError {
-        class: Class::Fatal,
+        class: ErrorClass::Fatal,
         batch_shape: true,
         message: format!("building a batch entry: {e}"),
     })
@@ -456,7 +457,7 @@ mod tests {
             .attributes(&queue.queue_url, &["QueueArn"])
             .await
             .unwrap_err();
-        assert_eq!(e.class, Class::Fatal, "{}", e.message);
+        assert_eq!(e.class, ErrorClass::Fatal, "{}", e.message);
         assert!(e.message.contains("UnknownIssuer"), "{}", e.message);
     }
 
@@ -499,7 +500,7 @@ mod tests {
             .await
             .unwrap_err();
         let elapsed = started.elapsed();
-        assert_eq!(e.class, Class::Retryable, "{}", e.message);
+        assert_eq!(e.class, ErrorClass::Retryable, "{}", e.message);
         assert!(
             elapsed >= within && elapsed < within * 2,
             "ended after {elapsed:?}: {}",
@@ -523,7 +524,7 @@ mod tests {
             .await
             .unwrap_err();
         let elapsed = started.elapsed();
-        assert_eq!(e.class, Class::Retryable, "{}", e.message);
+        assert_eq!(e.class, ErrorClass::Retryable, "{}", e.message);
         assert!(
             elapsed >= within && elapsed < within * 2,
             "ended after {elapsed:?}: {}",
@@ -568,7 +569,7 @@ mod tests {
             let started = tokio::time::Instant::now();
             let e = one_entry(&queue, op, within).await.unwrap_err();
             let elapsed = started.elapsed();
-            assert_eq!(e.class, Class::Retryable, "{op}: {}", e.message);
+            assert_eq!(e.class, ErrorClass::Retryable, "{op}: {}", e.message);
             assert!(
                 elapsed >= Duration::from_secs(1) && elapsed < Duration::from_secs(2),
                 "{op}: ended after {elapsed:?}"
@@ -620,7 +621,7 @@ mod tests {
         let e = one_entry(&queue, "visibility", Some(Duration::from_secs(1)))
             .await
             .unwrap_err();
-        assert_eq!(e.class, Class::Retryable, "{}", e.message);
+        assert_eq!(e.class, ErrorClass::Retryable, "{}", e.message);
         assert!(e.message.contains("no profile named ops"), "{}", e.message);
     }
 
@@ -637,7 +638,7 @@ mod tests {
         let e = one_entry(&queue, "visibility", Some(Duration::from_secs(1)))
             .await
             .unwrap_err();
-        assert_eq!(e.class, Class::Fatal, "{}", e.message);
+        assert_eq!(e.class, ErrorClass::Fatal, "{}", e.message);
         assert!(e.message.contains("UnknownIssuer"), "{}", e.message);
     }
 

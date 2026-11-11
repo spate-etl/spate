@@ -165,6 +165,11 @@ impl Run {
         !self.offsets(partition, false).is_empty()
     }
 
+    /// Start the run's stop and return without waiting for it.
+    pub(crate) fn trigger_stop(&self) {
+        self.shutdown.trigger();
+    }
+
     /// Stop the run and wait for it to exit.
     pub(crate) fn stop(self) {
         self.shutdown.trigger();

@@ -13,11 +13,11 @@ use crate::config::Compression;
 use crate::error::store_error;
 use bytes::Bytes;
 use futures_util::StreamExt as _;
-use object_store::aws::AmazonS3Builder;
+use object_store::aws::{AmazonS3, AmazonS3Builder};
 use object_store::path::Path;
 use object_store::{ObjectStore, ObjectStoreExt, ObjectStoreScheme};
 use spate_core::clock::tokio::{Clock, before};
-use spate_core::config::{ConfigError, redact};
+use spate_core::config::{ConfigError, UrlRule, redact};
 use spate_core::error::{ErrorClass, SourceError};
 use spate_core::source::StopSignal;
 use std::fmt;
@@ -28,10 +28,12 @@ use url::Url;
 pub(crate) const BAD_PREFIX: &str =
     "has a prefix with an empty segment, a control character or bytes that are not UTF-8";
 
-/// Whether `url` names a user or a password.
-pub(crate) fn has_userinfo(url: &Url) -> bool {
-    !url.username().is_empty() || url.password().is_some()
-}
+/// The rule the source URL, the location and the store endpoint meet. The
+/// store reads no userinfo, and `object_store` quotes the URL whole in its
+/// errors.
+pub(crate) const STORE_URL: UrlRule<'static> = UrlRule::new(
+    "the store does not read it; set credentials under the source's `store` or the environment",
+);
 
 /// The step between a waiting worker's reads of the fingerprint.
 pub(crate) const FINGERPRINT_POLL: Duration = Duration::from_secs(5);
@@ -60,7 +62,7 @@ impl Location {
     /// # Errors
     ///
     /// A [`ConfigError`] naming the key, with the value redacted, for an
-    /// empty value, one that is not a URL, one with userinfo, a query or a
+    /// empty value, one [`STORE_URL`] refuses, one with a query or a
     /// fragment, any scheme but `s3`, `s3a` and `file`, an `s3` or `s3a`
     /// location naming no bucket, a `file` location naming a host, a prefix
     /// with an empty segment, a control character or bytes that are not
@@ -77,15 +79,23 @@ impl Location {
                 message: "`location` must not be empty".into(),
             });
         }
-        let url = Url::parse(location).map_err(|e| refuse(format!("is not a URL: {e}")))?;
-        // The location's store reads none of these, `object_store` quotes the
-        // whole URL in its errors, and a fragment would silently name a
-        // shorter prefix.
-        if has_userinfo(&url) || url.query().is_some() || url.fragment().is_some() {
+        let url = STORE_URL
+            .check(location)
+            .map_err(|e| refuse(e.to_string()))?;
+        // The location's store reads neither, `object_store` quotes the whole
+        // URL in its errors, and a fragment would silently name a shorter
+        // prefix. A signed query is a credential, so its refusal says where
+        // credentials go.
+        if url.query().is_some() {
             return Err(refuse(
-                "carries userinfo, a query or a fragment, which name nothing in the location's \
-                 store; set credentials under the source's `store`"
+                "carries a query, which the store does not read; set credentials under the \
+                 source's `store` or the environment"
                     .into(),
+            ));
+        }
+        if url.fragment().is_some() {
+            return Err(refuse(
+                "carries a fragment, which names nothing in the location's store".into(),
             ));
         }
         // Only these forms name the bucket in the same place for every
@@ -169,6 +179,12 @@ impl Location {
     }
 }
 
+/// The S3 client `url` alone builds, with nothing read from the environment
+/// and nothing sent. Fails for a host form the client does not parse.
+pub(crate) fn offline_store(url: &Url) -> object_store::Result<AmazonS3> {
+    AmazonS3Builder::new().with_url(url.as_str()).build()
+}
+
 /// The store a URL names, as far as telling two URLs' stores apart needs.
 #[derive(PartialEq, Eq)]
 enum Root {
@@ -179,11 +195,8 @@ enum Root {
 fn root(url: &Url) -> Option<Root> {
     match ObjectStoreScheme::parse(url).ok()?.0 {
         // The builder parses the bucket out of every S3 URL form, so
-        // `object_store` stays the only parser of it. Building reads nothing
-        // and sends nothing.
-        ObjectStoreScheme::AmazonS3 => AmazonS3Builder::new()
-            .with_url(url.as_str())
-            .build()
+        // `object_store` stays the only parser of it.
+        ObjectStoreScheme::AmazonS3 => offline_store(url)
             .ok()
             .and_then(|store| crate::source::scope_bucket(&store))
             .map(Root::Bucket),
@@ -609,8 +622,25 @@ mod tests {
             assert!(err.contains("`location`"), "{err}");
             assert!(!err.contains("hunter2") && !err.contains("tok3n"), "{err}");
         }
-        assert!(refused("s3://user:hunter2@ops/jobs/a/", SOURCE).contains("userinfo"));
-        assert!(refused("s3://ops/jobs/run#1/", SOURCE).contains("fragment"));
+        assert_eq!(
+            refused("s3://user:hunter2@ops/jobs/a/", SOURCE),
+            "feed: `location` s3://<redacted>@ops/jobs/a/: carries userinfo; the store does not \
+             read it; set credentials under the source's `store` or the environment"
+        );
+        assert_eq!(
+            refused("s3://ops/jobs/a/?X-Amz-Signature=tok3n", SOURCE),
+            "feed: `location` s3://ops/jobs/a/?<redacted>: carries a query, which the store \
+             does not read; set credentials under the source's `store` or the environment"
+        );
+        assert_eq!(
+            refused("s3://ops/jobs/run#1/", SOURCE),
+            "feed: `location` s3://ops/jobs/run#<redacted>: carries a fragment, which names \
+             nothing in the location's store"
+        );
+        assert_eq!(
+            refused("user:hunter2@ops/jobs/a/", SOURCE),
+            "feed: `location` <redacted>@ops/jobs/a/: has no `//` after its scheme"
+        );
     }
 
     /// Pins that an S3 location that names no bucket is refused when the

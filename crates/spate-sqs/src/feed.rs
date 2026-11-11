@@ -24,7 +24,7 @@
 
 use crate::client;
 use crate::config::{BACKEND, NAME, SqsFeedConfig};
-use crate::error::{CallError, Class};
+use crate::error::CallError;
 use crate::metrics::{Refusal, SqsFeedMetrics};
 use crate::queue::{
     BatchOutcome, DeleteEntry, Queue, ReceiveRequest, Received, SendEntry, UNIT_ATTRIBUTE,
@@ -35,6 +35,7 @@ use spate_core::backoff::Backoff;
 use spate_core::clock::SyncClock;
 use spate_core::clock::tokio::{Clock, SystemClock, before};
 use spate_core::config::{FeedSection, redact};
+use spate_core::error::ErrorClass;
 use spate_core::feed::ConnectError;
 use spate_core::feed::{
     Confirmation, Confirmer, Delivery, Depth, DepthOf, DepthReading, Feed, FeedError,
@@ -900,8 +901,8 @@ impl Feed for SqsFeed {
                     .map_err(|e| FeedError::new(FeedErrorKind::Fatal, format!("{e}: {what}"))),
                 Err(e) => Err(FeedError::new(
                     match e.class {
-                        Class::Fatal => FeedErrorKind::Fatal,
-                        Class::Retryable => FeedErrorKind::Retryable,
+                        ErrorClass::Retryable => FeedErrorKind::Retryable,
+                        _ => FeedErrorKind::Fatal,
                     },
                     format!("reading the counts of {what}: {}", e.message),
                 )),
@@ -1180,7 +1181,7 @@ async fn receive_task(shared: Arc<Shared>) {
                 }
                 shared.progress.notify_one();
             }
-            Err(e) if e.class == Class::Fatal => {
+            Err(e) if e.class != ErrorClass::Retryable => {
                 shared.set_fatal(&e);
                 return;
             }
@@ -1407,7 +1408,7 @@ async fn extend_chunk(
             }
             Extended::Done
         }
-        Err(e) if e.class == Class::Fatal => {
+        Err(e) if e.class != ErrorClass::Retryable => {
             shared.set_fatal(&e);
             Extended::Done
         }
@@ -1737,7 +1738,7 @@ where
                 }
                 return Ok(outcome.failed.len());
             }
-            Err(e) if e.class == Class::Fatal => {
+            Err(e) if e.class != ErrorClass::Retryable => {
                 shared.set_fatal(&e);
                 return Err(());
             }
@@ -1850,7 +1851,7 @@ async fn publish_batch(shared: &Shared, entries: Vec<SendEntry>) -> Result<(), (
                 }
                 return Ok(());
             }
-            Err(e) if e.class == Class::Fatal => {
+            Err(e) if e.class != ErrorClass::Retryable => {
                 let error = if e.batch_shape {
                     FeedError::new(FeedErrorKind::Refused, e.message.clone())
                 } else if retried {

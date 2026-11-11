@@ -1,10 +1,10 @@
 //! The credentials provider the SDK client loads through: it runs each load
 //! on a task of its own, so a load outlives the call that started it.
 
-use crate::error::chain;
 use aws_credential_types::Credentials;
 use aws_credential_types::provider::error::CredentialsError;
 use aws_credential_types::provider::{ProvideCredentials, SharedCredentialsProvider, future};
+use spate_core::error::chain;
 use spate_core::task::{self, TaskHandle};
 use std::error::Error;
 use std::fmt;

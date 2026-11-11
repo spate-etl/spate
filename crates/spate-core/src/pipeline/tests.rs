@@ -2894,6 +2894,22 @@ fn feed_section(yaml: &str) -> Option<crate::config::FeedSection> {
     Some(serde_yaml::from_str(yaml).expect("section"))
 }
 
+/// A run whose `max_records` is zero is refused before its source opens.
+/// Regression for #1717.
+#[test]
+fn zero_max_records_is_refused_at_start() {
+    let options = RuntimeOptions {
+        max_records: 0,
+        ..test_options()
+    };
+    let h = start_with_options(test_config(1), options, ok_chain);
+    let err = config_error_before_open(h);
+    assert_eq!(
+        err,
+        "invalid runtime configuration: `RuntimeOptions::max_records` must be at least 1"
+    );
+}
+
 /// Pins that the runtime hands a `feed:` section to the source, whose default
 /// `configure_feed` refuses it before the source opens.
 #[test]
@@ -3034,6 +3050,36 @@ fn a_settling_window_above_a_day_passed_in_is_refused() {
         err.contains("`feed.settling_window`") && err.contains("1day"),
         "{err}"
     );
+}
+
+/// Pins that `run` refuses a `checkpoint.interval` or
+/// `checkpoint.drain_timeout` above a day set on a config built in code,
+/// naming the key, and takes each at a day and under its load-time floor.
+/// Regression for #1830.
+#[test]
+fn a_checkpoint_duration_above_a_day_passed_in_is_refused() {
+    const DAY: Duration = Duration::from_secs(24 * 60 * 60);
+    type Set = fn(&mut PipelineConfig, Duration);
+    let keys: [(&str, Set); 2] = [
+        ("checkpoint.interval", |cfg, d| cfg.checkpoint.interval = d),
+        ("checkpoint.drain_timeout", |cfg, d| {
+            cfg.checkpoint.drain_timeout = d;
+        }),
+    ];
+    for (key, set) in keys {
+        for over in [DAY + Duration::from_nanos(1), Duration::MAX] {
+            let mut cfg = test_config(1);
+            set(&mut cfg, over);
+            let err = config_error_before_open(start_with_config(cfg, ok_chain));
+            assert!(err.contains(key) && err.contains("1day"), "{err}");
+        }
+        for within in [DAY, Duration::from_nanos(1)] {
+            let mut cfg = test_config(1);
+            set(&mut cfg, within);
+            cfg.reject_checkpoint_above_a_day()
+                .unwrap_or_else(|e| panic!("{key} {within:?}: {e}"));
+        }
+    }
 }
 
 /// Pins that `Source::configure_feed`'s default refuses the section, naming
@@ -5337,6 +5383,14 @@ fn polls_of(h: &Harness, id: u32) -> usize {
         .count()
 }
 
+/// Wait for the poll after `lane`'s one batch, which the driver makes only
+/// once it has read the clock for that batch's lull.
+fn through_batch(h: &Harness, lane: u32) {
+    wait_for("the poll after the batch", Duration::from_secs(5), || {
+        polls_of(h, lane) >= 2
+    });
+}
+
 fn finished_calls(h: &Harness) -> usize {
     h.shared.lock().unwrap().finished_calls.values().sum()
 }
@@ -6280,9 +6334,7 @@ fn idle_flush_fires_once_at_its_lull_on_the_injected_clock() {
     };
     let h = start_on_clock_with(cfg, options, &clock, |runtime| runtime, ok_chain);
     assign_one_lane(&h, std::slice::from_ref(&(0..10)));
-    wait_for("the batch consumed", Duration::from_secs(5), || {
-        h.chain.consumed.load(Ordering::Relaxed) == 10
-    });
+    through_batch(&h, 0);
     let lane_polls = |n: usize| {
         let target = polls_of(&h, 0) + n;
         wait_for("lane polls", Duration::from_secs(5), || {
@@ -6371,9 +6423,7 @@ fn the_lull_ends_on_time_beside(sibling: Vec<(i64, Vec<u8>)>) -> bool {
     let lull = Duration::from_secs(600);
     let h = start_idle_on_clock(&clock, lull, &[]);
     assign(&h, &[(0, 1)]);
-    wait_for("the record", Duration::from_secs(5), || {
-        h.chain.consumed.load(Ordering::Relaxed) > 0
-    });
+    through_batch(&h, 0);
     let before = flushes(&h);
     clock.advance(lull - Duration::from_millis(1));
     h.script
@@ -6384,10 +6434,7 @@ fn the_lull_ends_on_time_beside(sibling: Vec<(i64, Vec<u8>)>) -> bool {
             partition: PartitionId(1),
             batches: vec![sibling],
         }]));
-    // The poll after the batch shows the driver has been through it.
-    wait_for("the sibling's batch", Duration::from_secs(5), || {
-        polls_of(&h, 1) >= 2
-    });
+    through_batch(&h, 1);
     clock.advance(Duration::from_millis(1));
     let seen = polls_of(&h, 1);
     wait_for("the next pass", Duration::from_secs(5), || {

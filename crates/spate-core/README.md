@@ -70,7 +70,8 @@ touches one of them cites its number and says how the property still holds.
   depends on exactly that version of `spate-core`.
 - Before 1.0, a breaking change ships in a minor release, such as 0.4 to 0.5. A
   patch release, such as 0.4.0 to 0.4.1, does not break. Raising the minimum
-  supported Rust version is a minor release too. Only the newest minor release
+  supported Rust version is a minor release too, and so is a new feature or a
+  deprecation, so a patch release carries fixes. Only the newest minor release
   is supported.
 - CI compares the public API with the last published release. A break fails that
   check until a changelog entry marked `**Breaking:**` announces a break for the

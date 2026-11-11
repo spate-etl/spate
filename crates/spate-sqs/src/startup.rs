@@ -11,9 +11,10 @@
 //! dead-letter queue's on every job. The checks run once, at connect.
 
 use crate::config::NAME;
-use crate::error::{CallError, Class};
+use crate::error::CallError;
 use crate::queue::BoxFuture;
 use serde::Deserialize;
+use spate_core::error::ErrorClass;
 use spate_core::feed::ConnectError;
 use spate_core::hash::FastMap;
 use url::Url;
@@ -154,7 +155,7 @@ pub(crate) async fn check(
     let source = queue
         .attributes(queue_url, SOURCE_ATTRIBUTES)
         .await
-        .map_err(|e| ConnectError::from_class(NAME, e.class.into(), e.message))?;
+        .map_err(|e| ConnectError::from_class(NAME, e.class, e.message))?;
     let arn = source.get("QueueArn").cloned().unwrap_or_default();
     // SQS requires a FIFO queue's name to end in `.fifo`.
     if arn.ends_with(".fifo") {
@@ -205,17 +206,17 @@ pub(crate) async fn check(
         .attributes(dead_letter.as_str(), DEAD_LETTER_ATTRIBUTES)
         .await
         .map_err(|e| match e.class {
-            Class::Fatal => ConnectError::refused(
-                NAME,
-                format!(
-                    "cannot read the dead-letter queue {dead_letter_arn}: {}",
-                    e.message
-                ),
-            ),
-            Class::Retryable => ConnectError::unavailable(
+            ErrorClass::Retryable => ConnectError::unavailable(
                 NAME,
                 format!(
                     "reading the dead-letter queue {dead_letter_arn}: {}",
+                    e.message
+                ),
+            ),
+            _ => ConnectError::refused(
+                NAME,
+                format!(
+                    "cannot read the dead-letter queue {dead_letter_arn}: {}",
                     e.message
                 ),
             ),

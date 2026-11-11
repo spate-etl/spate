@@ -20,7 +20,8 @@ use std::fmt;
 ///   object on every instance: non-retryable *and* pipeline-fatal. A listing
 ///   the store answers 401, 403 or 404 is non-retryable, and the lister run
 ///   fails on it. A store answers a listing 404 for a bucket that does not
-///   exist.
+///   exist. A listing page that names its own request's continuation token
+///   is non-retryable too: asking again fetches the same page.
 /// - A TLS rejection ([`tls_rejection!`](spate_core::tls_rejection)) by the
 ///   store or the credential endpoint is non-retryable and pipeline-fatal.
 /// - Everything else (other `Generic` failures, timeouts, 5xx) is retryable.
@@ -29,6 +30,7 @@ pub(crate) fn classify(e: &object_store::Error) -> ErrorClass {
     match e {
         _ if list_rejected(e)
             || delete_rejected(e)
+            || spate_core::error::find_source::<crate::listing::ListingStalled>(e).is_some()
             || spate_core::tls_rejection!(rustls, e).is_some() =>
         {
             ErrorClass::Fatal
@@ -119,8 +121,9 @@ pub(crate) fn store_error(doing: impl fmt::Display, e: &object_store::Error) -> 
 }
 
 /// The most of a store's response body an S3 source error carries. A store
-/// can answer an error with a body of any size, which `object_store` quotes
-/// whole.
+/// can answer an error with a body of any size, and `object_store` quotes
+/// what it is handed: up to 64 KiB of a failure answer behind the source's
+/// connector, and the whole of a `200` answer that names an error.
 const ERROR_TEXT_MAX_CHARS: usize = 512;
 
 /// The text `object_store` writes between the request it sent and the status

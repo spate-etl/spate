@@ -15,7 +15,7 @@
 //!
 //! The sink builds exactly **one** producer per instance: librdkafka
 //! already routes and batches per broker internally, and the connector's
-//! statistics translation maps the client's cumulative counters
+//! statistics translation maps the producer's own message totals
 //! absolutely, which is only sound with a single client (see the source's
 //! metrics module). The framework's `shards` are worker-side parallelism
 //! over clones of that producer, one replica per shard, so replica

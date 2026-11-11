@@ -1,0 +1,3 @@
+**A Kafka source's stop ends while its group coordinator is silent** (`spate-kafka`)
+
+The synchronous commit a Kafka source makes at a revocation and at a stop waits up to 10 seconds for the group's answer. A commit with no answer in that time counts as failed. It can still land later, and if it does not, its partitions are read again from their last committed offset. When the source closes, it waits up to 10 seconds for its consumers' close, which goes on in the background if the coordinator has not answered. In previous versions both the commit and the close waited for as long as the coordinator stayed silent, so a stop never ended and `checkpoint.drain_timeout` did not bound it, and a revocation could hold the run past `assignment_timeout`.

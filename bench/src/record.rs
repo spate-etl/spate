@@ -228,6 +228,7 @@ mod tests {
                 cpu: "Apple M5 Max".to_owned(),
                 cores: 16,
                 label: "local".to_owned(),
+                simd: vec!["neon".to_owned(), "crc".to_owned()],
             },
             ts_ms: 1_754_000_000_000,
         }
@@ -253,7 +254,7 @@ mod tests {
             r#""host_triple":"aarch64-apple-darwin","profile":"bench","#,
             r#""codegen":"0f1e2d3c4b5a6978","features":["simd"],"#,
             r#""feature_args":["--features","simd"],"git_describe":"v0.1.0-3-gabc1234","dirty":true},"#,
-            r#""host":{"os":"macos/aarch64","cpu":"Apple M5 Max","cores":16,"label":"local"},"#,
+            r#""host":{"os":"macos/aarch64","cpu":"Apple M5 Max","cores":16,"label":"local","simd":["neon","crc"]},"#,
             r#""ts_ms":1754000000000}"#,
         );
 

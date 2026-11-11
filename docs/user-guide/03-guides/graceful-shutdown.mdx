@@ -46,7 +46,10 @@ revocation, one choreography tested constantly by every rebalance:
    force-seal partial batches, and get the remaining deadline to finish
    in-flight writes. At the deadline a worker aborts whatever is still
    writing and abandons it (see below); a worker that somehow fails to do
-   that is force-aborted a second later, so this step always terminates.
+   that is force-aborted a second later, so this step terminates. The one
+   exception is writers that block their threads on every I/O worker at
+   once; see
+   [When the drain terminates](#why-the-drain-always-terminates).
    With a feed that hands back, this step ends one second before the
    deadline, which leaves that second for the feed's close in step 4.
 4. **Offsets commit.** The controller drains the checkpointer and runs a final
@@ -80,6 +83,9 @@ one, raise the other. With a feed that hands back, the stop's reading and the
 feed's close also run inside the budget, and startup refuses a `drain_timeout`
 of 5s or less. A feed's close that outlasts what is left of the budget falls
 into the gap too.
+A source that bounds its final commit and its close against a backend that
+stops answering states the bound on its connector page:
+[Kafka](../04-connectors/sources/kafka/README.mdx#how-offsets-are-committed).
 :::
 
 ```yaml
@@ -135,7 +141,7 @@ tolerate duplicates. See
 [ClickHouse connector](../04-connectors/sinks/clickhouse/README.mdx)
 deduplication notes.
 
-## Why the drain always terminates
+## When the drain terminates {#why-the-drain-always-terminates}
 
 The deadline is **cooperative**: each sink worker watches it and, when it
 fires, aborts its in-flight writes and abandons what is left. Underneath

@@ -11,9 +11,7 @@
 use super::FeedRole;
 use super::attempt::{self, Entry, PublishId, decode, partition_of};
 use super::config::KafkaFeedConfig;
-use super::consumer::{
-    Read, commit_moved, commit_revoked, committed_lookup_timeout, read, retire_offsets, take_due,
-};
+use super::consumer::{Read, commit_moved, commit_revoked, read, retire_offsets, take_due};
 use super::events::Cause;
 use super::gate::admission;
 use super::inflight::Tp;
@@ -252,15 +250,32 @@ fn a_failed_write_is_classified_by_the_sink_table() {
 
 /// Pins the bound on the committed-offset read: a quarter of
 /// `max.poll.interval.ms`, at most 10 s, which librdkafka's 300 s default
-/// reaches.
+/// reaches. The interval counts in each spelling librdkafka takes.
 #[test]
 fn the_committed_offset_read_is_bounded_by_the_poll_interval() {
     let mut cc = raw_config();
-    assert_eq!(committed_lookup_timeout(&cc), Duration::from_secs(10));
+    assert_eq!(
+        crate::client::committed_lookup_timeout(&cc),
+        Duration::from_secs(10)
+    );
     cc.set("max.poll.interval.ms", "6000");
-    assert_eq!(committed_lookup_timeout(&cc), Duration::from_millis(1500));
+    assert_eq!(
+        crate::client::committed_lookup_timeout(&cc),
+        Duration::from_millis(1500)
+    );
     cc.set("max.poll.interval.ms", "600000");
-    assert_eq!(committed_lookup_timeout(&cc), Duration::from_secs(10));
+    assert_eq!(
+        crate::client::committed_lookup_timeout(&cc),
+        Duration::from_secs(10)
+    );
+    for spelling in ["8000ms", "0x1F40", "8000.5"] {
+        cc.set("max.poll.interval.ms", spelling);
+        assert_eq!(
+            crate::client::committed_lookup_timeout(&cc),
+            Duration::from_secs(2),
+            "{spelling}"
+        );
+    }
 }
 
 /// A move of `receipt`'s delivery to the retry topic.
@@ -693,6 +708,19 @@ fn idle_publisher_over(config: &KafkaFeedConfig) -> KafkaFeedPublisher {
 
 fn idle_publisher() -> KafkaFeedPublisher {
     idle_publisher_over(&unreachable_config(""))
+}
+
+/// A latched feed answers a depth read with the latched error itself, since
+/// the depth thread may be the thread that ended. Regression for #1760.
+#[test]
+fn a_latched_feed_answers_a_depth_read_with_its_error() {
+    use spate_core::feed::DepthOf;
+    let feed = idle_feed();
+    feed.core.latch("the depth thread ended");
+    let mut reading = feed.read_depth(DepthOf::DeadLetters).expect("a reading");
+    let e = reading.try_outcome().expect("settled").unwrap_err();
+    assert_eq!(e.kind, FeedErrorKind::Fatal);
+    assert!(e.reason.contains("the depth thread ended"), "{e}");
 }
 
 /// Pins that the publish-only handle reports no depth, since it reads
@@ -1424,7 +1452,7 @@ fn a_write_failing_again_backs_off_further_each_time() {
     assert_eq!(waits, schedule);
     let logged: Vec<&String> = lines
         .iter()
-        .filter(|line| line.contains("sending it again"))
+        .filter(|line| line.contains("queued to send again after the backoff"))
         .collect();
     assert_eq!(logged.len(), schedule.len(), "{lines:#?}");
     for (line, wait) in logged.iter().zip(schedule) {
@@ -1455,7 +1483,7 @@ fn a_dropped_resend_logs_no_send_again_line() {
         assert!(core.lock().resends.is_empty(), "the feed drops it");
         let resent: Vec<&String> = lines
             .iter()
-            .filter(|line| line.contains("sending it again"))
+            .filter(|line| line.contains("queued to send again after the backoff"))
             .collect();
         assert!(resent.is_empty(), "{resent:#?}");
     }
@@ -2516,6 +2544,65 @@ mod cluster {
             !d.core.lock().ready.is_empty()
         });
         admission.stop();
+    }
+
+    /// An assignment naming a partition of a topic other than the work and
+    /// retry topics stops the feed ahead of the assign, which would fetch that
+    /// topic. Regression for #2029.
+    #[test]
+    fn an_assignment_on_another_topic_is_fatal() {
+        let cluster = cluster_with(0);
+        cluster.create_topic("other", 1, 1).unwrap();
+        let brokers = cluster.bootstrap_servers();
+        let list = |entries: &[(&str, i32)]| {
+            let mut tpl = TopicPartitionList::new();
+            for (topic, partition) in entries {
+                tpl.add_partition(topic, *partition);
+            }
+            tpl
+        };
+        // librdkafka crashes or hangs assigning a name past its 512-byte limit.
+        let long = "t".repeat(600);
+        let not_utf8 = TopicPartitionList::new();
+        // SAFETY: `not_utf8` owns a valid list, and librdkafka copies the name.
+        unsafe {
+            rdkafka::bindings::rd_kafka_topic_partition_list_add(
+                not_utf8.ptr(),
+                c"\xff".as_ptr(),
+                0,
+            );
+        }
+        for offered in [
+            list(&[("other", 0)]),
+            list(&[("units", 0), ("other", 0)]),
+            list(&[(&long, 0)]),
+            not_utf8,
+        ] {
+            let group = spate_test::unique_name("another-topic");
+            let (_, core, _producer, mut d) = parts_for(&brokers, &group);
+            d.consumer
+                .context()
+                .intents
+                .lock()
+                .unwrap()
+                .push_back(Intent::Assign(offered));
+            d.serve_intents();
+            let assigned = d.consumer.assignment().unwrap();
+            let Some(error) = core.lock().signal.latched().cloned() else {
+                panic!("the assignment was accepted: {assigned:?}");
+            };
+            assert_eq!(error.kind, FeedErrorKind::Fatal);
+            assert!(
+                error.reason.contains(
+                    "the group offered a partition of a topic other than `units` or \
+                     `units-retry`"
+                ),
+                "{}",
+                error.reason
+            );
+            assert_eq!(assigned.count(), 0, "{assigned:?}");
+            assert_eq!(owns(&d), 0);
+        }
     }
 
     /// Pins that a thread started on a latched feed ends without committing
@@ -5305,11 +5392,17 @@ mod feed_metrics {
         ))
     }
 
-    fn snapshot(tx: i64) -> Statistics {
-        Statistics {
-            tx,
-            ..Default::default()
-        }
+    fn snapshot(tx: u64) -> Statistics {
+        let mut stats = Statistics::default();
+        sent(&mut stats, tx);
+        stats
+    }
+
+    /// Gives `stats` one broker that has sent `tx` requests.
+    fn sent(stats: &mut Statistics, tx: u64) {
+        let mut broker = crate::testutil::broker("k1:9092/1", "learned", 1);
+        broker.tx = tx;
+        stats.brokers.insert(broker.name.clone(), broker);
     }
 
     /// A consumer snapshot carrying the work and retry topics' partition 0,
@@ -5559,9 +5652,9 @@ mod feed_metrics {
             core.attach_metrics(FeedMetricsCtx::new(Some(meter)).with_partition_detail(detail));
         };
         let mut later = consumer_snapshot(6);
-        later.tx = 31;
+        sent(&mut later, 31);
         let mut last = consumer_snapshot(6);
-        last.tx = 50;
+        sent(&mut last, 50);
         let rendered = render_metrics(|| {
             attach(&first, false);
             attach(&second, true);
@@ -5630,7 +5723,7 @@ mod feed_metrics {
         let core = Arc::new(core_with_statistics("5s"));
         let hooks = FeedProducerHooks::new(Arc::clone(&core));
         let mut consumer = consumer_snapshot(0);
-        consumer.tx = 31;
+        sent(&mut consumer, 31);
         let rendered = render_metrics(|| {
             core.attach_metrics(attached(false));
             core.publish_consumer_stats(&consumer, &[]);

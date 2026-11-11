@@ -387,11 +387,14 @@ impl Repo {
     }
 }
 
-/// With no break and no MSRV raise since the tag, the next version is a patch.
+/// With no break, no MSRV raise and no `added` or `deprecated` fragment since
+/// the tag, the next version is a patch.
 #[test]
 fn derive_answers_a_patch_by_default() {
     let repo = Repo::new("derive_answers_a_patch_by_default");
-    repo.write("changelog.d/a.fixed.md", "A fix.\n");
+    for kind in ["changed", "removed", "fixed", "security"] {
+        repo.write(&format!("changelog.d/a.{kind}.md"), "An entry.\n");
+    }
     repo.commit("core: a fix");
     assert_eq!(derive(repo.path()).unwrap().0, v("0.2.1"));
 }
@@ -405,6 +408,29 @@ fn derive_answers_a_minor_for_a_breaking_fragment() {
     let (next, reason) = derive(repo.path()).unwrap();
     assert_eq!(next, v("0.3.0"));
     assert!(reason.contains("Breaking"), "{reason}");
+}
+
+/// An `added` fragment makes the next version a minor, beside a `fixed` one.
+#[test]
+fn derive_answers_a_minor_for_an_added_fragment() {
+    let repo = Repo::new("derive_answers_a_minor_for_an_added_fragment");
+    repo.write("changelog.d/a.fixed.md", "A fix.\n");
+    repo.write("changelog.d/b.added.md", "A feature.\n");
+    repo.commit("core: a feature and a fix");
+    let (next, reason) = derive(repo.path()).unwrap();
+    assert_eq!(next, v("0.3.0"));
+    assert!(reason.contains("b.added.md is of type added"), "{reason}");
+}
+
+/// A `deprecated` fragment makes the next version a minor.
+#[test]
+fn derive_answers_a_minor_for_a_deprecated_fragment() {
+    let repo = Repo::new("derive_answers_a_minor_for_a_deprecated_fragment");
+    repo.write("changelog.d/a.deprecated.md", "A deprecation.\n");
+    repo.commit("core: a deprecation");
+    let (next, reason) = derive(repo.path()).unwrap();
+    assert_eq!(next, v("0.3.0"));
+    assert!(reason.contains("type deprecated"), "{reason}");
 }
 
 /// A raised `rust-version` makes the next version a minor; a lowered one does

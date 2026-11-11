@@ -1,4 +1,6 @@
-//! The S3 listing's handling of keys `object_store` cannot address.
+//! The S3 listing's handling of keys `object_store` cannot address, the cap on
+//! a failure answer's body, and the refusal of a listing page whose
+//! continuation token does not advance.
 //!
 //! `object_store` turns each listed key into a [`Path`], and a key that does
 //! not parse fails the whole `ListObjectsV2` page, losing its continuation
@@ -7,14 +9,16 @@
 //! client: it takes each such object out of a listing page before
 //! `object_store` parses it and records it in [`UnaddressableKeys`], so the
 //! listing returns every other key, and the lister still publishes this one
-//! as a unit of its own.
+//! as a unit of its own. The same wrapper hands the client at most 64 KiB of
+//! any failure answer's body, and fails a listing request whose page names
+//! the request's own continuation token with [`ListingStalled`].
 
 use crate::fetch::ObjectEntry;
 use bytes::Bytes;
 use object_store::ClientOptions;
 use object_store::client::{
-    HttpClient, HttpConnector, HttpError, HttpRequest, HttpResponse, HttpResponseBody, HttpService,
-    ReqwestConnector,
+    HttpClient, HttpConnector, HttpError, HttpErrorKind, HttpRequest, HttpResponse,
+    HttpResponseBody, HttpService, ReqwestConnector,
 };
 use object_store::path::Path;
 use std::sync::{Arc, Mutex};
@@ -56,8 +60,9 @@ impl UnaddressableKeys {
 }
 
 /// An [`HttpConnector`] that builds `object_store`'s own client and filters
-/// the S3 listing responses it returns. Every other request and response
-/// passes through unchanged.
+/// the S3 listing responses it returns, fails a listing page that repeats its
+/// request's continuation token, and cuts the body of a failure answer.
+/// Every other request and response passes through unchanged.
 #[derive(Debug)]
 pub(crate) struct UnaddressableConnector {
     keys: UnaddressableKeys,
@@ -93,12 +98,22 @@ impl HttpService for FilteringService {
                 .uri()
                 .query()
                 .is_some_and(|q| q.split('&').any(|pair| pair == "list-type=2"));
+        // The token this request continues from, when it is not a first page.
+        let asked = listing
+            .then(|| continuation_token(req.uri().query().unwrap_or_default()))
+            .flatten();
         let response = self.inner.execute(req).await?;
-        if !listing || !response.status().is_success() {
+        if !response.status().is_success() {
+            return Ok(bounded_failure(response).await);
+        }
+        if !listing {
             return Ok(response);
         }
         let (mut parts, body) = response.into_parts();
         let page = body.bytes().await?;
+        if asked.is_some() && next_token(&page) == asked {
+            return Err(HttpError::new(HttpErrorKind::Decode, ListingStalled));
+        }
         let page = match filter_page(&page) {
             Some((filtered, removed)) => {
                 self.keys.record(removed);
@@ -113,6 +128,81 @@ impl HttpService for FilteringService {
             HttpResponseBody::from(page),
         ))
     }
+}
+
+/// The most of a failure answer's body the client is handed. An S3 error
+/// document is a few hundred bytes, and a source error keeps 512 characters
+/// of it.
+const FAILURE_BODY_MAX_BYTES: usize = 64 * 1024;
+
+/// `response` with its body cut to [`FAILURE_BODY_MAX_BYTES`], on a character
+/// boundary, and the rest left unread.
+///
+/// `object_store` reads a failure answer's body whole, into a buffer sized
+/// from the length the store declared, so a declared length alone can abort
+/// the process. A body that fails part-way keeps what arrived: the status is
+/// already known.
+async fn bounded_failure(response: HttpResponse) -> HttpResponse {
+    use futures_util::StreamExt as _;
+    let (mut parts, body) = response.into_parts();
+    let mut frames = body.bytes_stream();
+    let mut kept = Vec::new();
+    while kept.len() < FAILURE_BODY_MAX_BYTES {
+        let Some(Ok(frame)) = frames.next().await else {
+            break;
+        };
+        let room = FAILURE_BODY_MAX_BYTES - kept.len();
+        kept.extend_from_slice(&frame[..frame.len().min(room)]);
+    }
+    // A cut inside a character fails the client's decode of the body, and
+    // the error then loses the store's status.
+    if let Err(e) = std::str::from_utf8(&kept)
+        && e.error_len().is_none()
+    {
+        kept.truncate(e.valid_up_to());
+    }
+    // The body is no longer the length the store declared.
+    parts.headers.remove("content-length");
+    HttpResponse::from_parts(parts, HttpResponseBody::from(kept))
+}
+
+/// A listing page named, as the token for the next page, the token of the
+/// request that fetched it. `object_store` follows any token that is not
+/// empty, so such a store would be asked for the same page without end.
+#[derive(Debug)]
+pub(crate) struct ListingStalled;
+
+impl std::fmt::Display for ListingStalled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(
+            "the store answered a listing page with the continuation token it was asked with, \
+             so the listing cannot advance",
+        )
+    }
+}
+
+impl std::error::Error for ListingStalled {}
+
+/// The `continuation-token` of a listing request's query, decoded.
+fn continuation_token(query: &str) -> Option<String> {
+    url::form_urlencoded::parse(query.as_bytes())
+        .find(|(name, _)| name == "continuation-token")
+        .map(|(_, token)| token.into_owned())
+}
+
+/// The part of a `ListBucketResult` page the token comparison reads.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct NextPage {
+    next_continuation_token: Option<String>,
+}
+
+/// The `NextContinuationToken` of a listing page.
+fn next_token(page: &[u8]) -> Option<String> {
+    // The decoder `object_store` runs over the page, from bytes as it does,
+    // so the token compared is the token it would follow.
+    let page: NextPage = quick_xml::de::from_reader(page).ok()?;
+    page.next_continuation_token
 }
 
 /// One `<Contents>` element, decoded the way `object_store` decodes it.
@@ -182,6 +272,83 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    /// A store behind the connector, with the client's own request timeout
+    /// off so a read that waits on a held connection hangs.
+    fn store_behind_the_connector(url: &str) -> object_store::aws::AmazonS3 {
+        crate::test_servers::builder_at(url)
+            .with_client_options(
+                object_store::ClientOptions::new()
+                    .with_allow_http(true)
+                    .with_timeout_disabled(),
+            )
+            .with_access_key_id("AKIDTEST")
+            .with_secret_access_key("secret")
+            .with_http_connector(UnaddressableConnector::new(UnaddressableKeys::default()))
+            .build()
+            .expect("build the S3 store")
+    }
+
+    /// A failure answer that declares a body past any allocation is read up
+    /// to the cap, and the read fails with the store's status. Unbounded, the
+    /// client sizes a buffer from the declared length and the process panics
+    /// or aborts. Regression for #1775.
+    #[test]
+    fn a_failure_answer_is_read_up_to_the_cap() {
+        use object_store::ObjectStoreExt as _;
+        const SENT: usize = 4 * FAILURE_BODY_MAX_BYTES;
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        for declared in [1_u64 << 63, SENT as u64] {
+            let url = crate::test_servers::oversized_failure_server(declared, SENT);
+            let store = store_behind_the_connector(&url);
+            // The server holds the connection, so a read past the cap hangs.
+            let err = rt
+                .block_on(async {
+                    tokio::time::timeout(spate_test::HANG, store.get(&Path::from("data/a"))).await
+                })
+                .expect("the read stops at the cap")
+                .expect_err("the store answers 403");
+            let text = err.to_string();
+            assert!(text.contains("403 Forbidden"), "{declared}: {text:.300}");
+            let body = text.matches('~').count();
+            assert_eq!(body, 65_536, "{declared}: body bytes kept");
+            assert!(
+                crate::error::bounded_reason(&err).contains("403 Forbidden"),
+                "{declared}"
+            );
+        }
+    }
+
+    /// A failure body cut inside a multibyte character keeps the store's
+    /// status and class: the cut moves back to the character's start.
+    #[test]
+    fn a_cut_inside_a_character_keeps_the_status() {
+        use object_store::ObjectStoreExt as _;
+        // A 41-byte prefix, then a 3-byte character: byte 65,536 is inside one.
+        let body = format!(
+            "<Error><Code>AccessDenied</Code><Message>{}</Message></Error>",
+            "\u{20ac}".repeat(30_000)
+        );
+        let url = crate::test_servers::sequence_server(vec![("403 Forbidden", body)]);
+        let store = store_behind_the_connector(&url);
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let err = rt
+            .block_on(store.get(&Path::from("data/a")))
+            .expect_err("the store answers 403");
+        let text = crate::error::bounded_reason(&err);
+        assert!(
+            matches!(err, object_store::Error::PermissionDenied { .. }),
+            "{text}"
+        );
+        assert!(text.contains("403 Forbidden"), "{text}");
+        assert_eq!(err.to_string().matches('\u{20ac}').count(), 21_831);
+    }
 
     fn contents(key: &str) -> String {
         format!(
@@ -334,5 +501,43 @@ mod tests {
             prop_assume!(keys.iter().all(|k| addressable(k)));
             prop_assert!(filter_page(page(&keys, Some("t")).as_bytes()).is_none());
         }
+    }
+
+    /// The two sides of the token comparison decode to the same string: the
+    /// query's form encoding and the page's XML escapes. A token from AWS is
+    /// base64 and carries `/`, `+` and `=`.
+    #[test]
+    fn a_token_decodes_the_same_from_the_query_and_the_page() {
+        assert_eq!(
+            continuation_token("continuation-token=a%2Fb%2Bc%3D+d%26e&list-type=2").as_deref(),
+            Some("a/b+c= d&e")
+        );
+        assert_eq!(continuation_token("list-type=2&prefix=data%2F"), None);
+        let page = |token: &str| {
+            format!(
+                "<ListBucketResult><Name>b</Name>{token}<IsTruncated>true</IsTruncated>\
+                 </ListBucketResult>"
+            )
+        };
+        for element in [
+            "<NextContinuationToken>a/b+c= d&amp;e</NextContinuationToken>",
+            "<NextContinuationToken><![CDATA[a/b+c= d&e]]></NextContinuationToken>",
+        ] {
+            assert_eq!(
+                next_token(page(element).as_bytes()).as_deref(),
+                Some("a/b+c= d&e"),
+                "{element}"
+            );
+        }
+        assert_eq!(next_token(page("").as_bytes()), None);
+        // `object_store` accepts a byte that is not UTF-8 in an element it
+        // skips, and follows the page's token.
+        let mut skipped = page("<NextContinuationToken>t</NextContinuationToken>").into_bytes();
+        let name = skipped
+            .iter()
+            .position(|b| *b == b'b')
+            .expect("the bucket name");
+        skipped[name] = 0xff;
+        assert_eq!(next_token(&skipped).as_deref(), Some("t"));
     }
 }

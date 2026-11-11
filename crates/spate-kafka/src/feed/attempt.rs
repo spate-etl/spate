@@ -26,6 +26,7 @@ use super::config::KafkaFeedConfig;
 use super::config::NAME;
 use super::consumer::POLL_TIMEOUT;
 use super::{Core, LatchOnPanic, Topics};
+use crate::client::read_position;
 use crate::context::{SourceContext, SourceHooks};
 use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::error::KafkaError;
@@ -257,7 +258,7 @@ fn record_of<'a>(
 /// attempt partition.
 #[derive(Debug)]
 pub(crate) struct Ledger {
-    /// Per partition, one past the last offset read.
+    /// Per partition, one past the last offset read or passed.
     next: Vec<Option<i64>>,
     counts: FastMap<Box<[u8]>, u32>,
     /// How many waits on the ledger's condvar the gate has begun, counted
@@ -266,7 +267,8 @@ pub(crate) struct Ledger {
     pub(crate) gate_waits: usize,
 }
 
-/// The ledger and the condvar the follower notifies after each record.
+/// The ledger and the condvar the follower notifies after each record and
+/// each read of its positions.
 pub(crate) type SharedLedger = Arc<(Mutex<Ledger>, Condvar)>;
 
 /// Lock the ledger, whatever a panicking holder left: each `apply` leaves
@@ -285,12 +287,16 @@ impl Ledger {
         }
     }
 
-    /// Take in the record at `offset` of `partition`.
-    pub(crate) fn apply(&mut self, partition: i32, offset: i64, identity: &[u8], entry: Entry) {
-        if let Some(next) = usize::try_from(partition)
+    /// `partition`'s place in `next`, `None` for a partition the topic lacks.
+    fn slot(&mut self, partition: i32) -> Option<&mut Option<i64>> {
+        usize::try_from(partition)
             .ok()
             .and_then(|p| self.next.get_mut(p))
-        {
+    }
+
+    /// Take in the record at `offset` of `partition`.
+    pub(crate) fn apply(&mut self, partition: i32, offset: i64, identity: &[u8], entry: Entry) {
+        if let Some(next) = self.slot(partition) {
             *next = Some(offset + 1);
         }
         match entry {
@@ -303,13 +309,21 @@ impl Ledger {
         }
     }
 
+    /// Take in that every offset of `partition` below `position` has been
+    /// read or holds no record. A position behind what was read moves nothing.
+    pub(crate) fn advance_to(&mut self, partition: i32, position: i64) {
+        if let Some(next) = self.slot(partition) {
+            *next = (*next).max(Some(position));
+        }
+    }
+
     /// The attempts recorded for `identity`, 0 when none are.
     pub(crate) fn count(&self, identity: &[u8]) -> u32 {
         self.counts.get(identity).copied().unwrap_or(0)
     }
 
-    /// One past the last offset of `partition` read, `None` before the
-    /// first.
+    /// One past the last offset of `partition` read or passed, `None`
+    /// before the first.
     pub(crate) fn read_to(&self, partition: i32) -> Option<i64> {
         usize::try_from(partition)
             .ok()
@@ -319,7 +333,8 @@ impl Ledger {
 
     /// Whether the ledger holds every record of `partition` below `hwm`,
     /// given the partition's watermarks `(lwm, hwm)`. Partition EOF carries
-    /// no offset, so the offsets read are the only measure.
+    /// no offset, so the measure is the offsets read and the follower's
+    /// position past offsets that hold no record.
     pub(crate) fn caught_up(&self, partition: i32, lwm: i64, hwm: i64) -> bool {
         hwm <= lwm || self.read_to(partition) >= Some(hwm)
     }
@@ -331,6 +346,8 @@ pub(crate) struct Follower {
     core: Arc<Core>,
     consumer: BaseConsumer<SourceContext>,
     ledger: SharedLedger,
+    /// One list per attempt partition, to read its position into.
+    positions: Vec<TopicPartitionList>,
 }
 
 impl Follower {
@@ -360,11 +377,18 @@ impl Follower {
         consumer
             .assign(&tpl)
             .map_err(|e| ConnectError::refused(NAME, format!("assigning `{topic}`: {e}")))?;
+        let mut positions = Vec::with_capacity(partitions.get() as usize);
+        for partition in (0..=i32::MAX).take(partitions.get() as usize) {
+            let mut one = TopicPartitionList::new();
+            one.add_partition(topic, partition);
+            positions.push(one);
+        }
         let ledger = Arc::clone(&core.ledger);
         Ok(Follower {
             core,
             consumer,
             ledger,
+            positions,
         })
     }
 
@@ -383,14 +407,14 @@ impl Follower {
         spawn_thread("spate-kafka-feed-follower", move || self.run())
     }
 
-    fn run(self) {
+    fn run(mut self) {
         let _guard = LatchOnPanic {
             core: Arc::clone(&self.core),
             thread: "follower",
         };
         while !self.core.stopped() && !self.core.latched() {
             match self.consumer.poll(POLL_TIMEOUT) {
-                None => {}
+                None => self.note_positions(),
                 Some(Ok(message)) => {
                     if let Err(e) = self.on_message(&message) {
                         // Latched with no ledger guard held.
@@ -400,6 +424,19 @@ impl Follower {
                 Some(Err(error)) => self.on_error(&error),
             }
         }
+    }
+
+    /// Move the ledger to each partition's position. A transaction marker
+    /// takes an offset and is never delivered, so one at a partition's end
+    /// leaves the offsets read below the high watermark for good, and only
+    /// the position passes it.
+    fn note_positions(&mut self) {
+        for (partition, list) in (0..).zip(self.positions.iter_mut()) {
+            if let Offset::Offset(position) = read_position(&self.consumer, list) {
+                lock(&self.ledger).advance_to(partition, position);
+            }
+        }
+        self.ledger.1.notify_all();
     }
 
     fn on_message(&self, message: &BorrowedMessage<'_>) -> Result<(), RecordError> {
@@ -581,6 +618,21 @@ mod tests {
         // Each partition is measured alone.
         assert!(!ledger.caught_up(1, 0, 5));
         assert!(!ledger.caught_up(2, 0, 5));
+    }
+
+    /// The follower's position moves a partition forward and never back, and
+    /// a position at the high watermark is caught up with no record read.
+    #[test]
+    fn a_position_moves_the_ledger_forward_only() {
+        let mut ledger = Ledger::new(NonZeroU32::new(2).unwrap());
+        ledger.advance_to(0, 1);
+        assert!(ledger.caught_up(0, 0, 1));
+        assert_eq!(ledger.read_to(0), Some(1));
+        ledger.apply(0, 4, b"a", Entry::Count(1));
+        ledger.advance_to(0, 3);
+        assert_eq!(ledger.read_to(0), Some(5), "a position behind the read");
+        ledger.advance_to(2, 9);
+        assert_eq!(ledger.read_to(1), None, "no such partition");
     }
 
     /// Pins that a tombstone removes the count, and that the read position

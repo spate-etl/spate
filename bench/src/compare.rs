@@ -92,6 +92,7 @@ pub fn allowable() -> Vec<&'static str> {
                 cpu: String::new(),
                 cores: 0,
                 label: String::new(),
+                simd: Vec::new(),
             }
             .guarded_fields()
             .into_keys(),
@@ -1087,6 +1088,7 @@ mod tests {
             cpu: "Apple M5 Max".to_owned(),
             cores: 16,
             label: "local".to_owned(),
+            simd: vec!["neon".to_owned(), "crc".to_owned()],
         }
     }
 
@@ -2277,6 +2279,23 @@ mod tests {
         let err = compare(base.clone(), head.clone(), &[]).expect_err("two machines");
         assert!(err.contains("host_label"), "{err}");
         assert!(compare(base, head, &["host_label".to_owned()]).is_ok());
+    }
+
+    /// One CPU brand can take different code paths when a hypervisor hides a
+    /// feature, so two legs that detected different SIMD features do not
+    /// compare.
+    #[test]
+    fn two_hosts_that_detected_different_simd_features_do_not_compare() {
+        let base = Builder::new("base").series("a", &ten(1000.0)).build();
+        let mut head = Builder::new("head").series("a", &ten(1000.0)).build();
+        head.host.simd = vec!["neon".to_owned()];
+        for record in &mut head.records {
+            record.host.simd = vec!["neon".to_owned()];
+        }
+        let err = compare(base.clone(), head.clone(), &[]).expect_err("two feature sets");
+        assert!(err.contains("host_simd"), "{err}");
+        assert!(allowable().contains(&"host_simd"), "{:?}", allowable());
+        assert!(compare(base, head, &["host_simd".to_owned()]).is_ok());
     }
 
     /// Transposing the two arguments inverts every sign. Nothing else in the

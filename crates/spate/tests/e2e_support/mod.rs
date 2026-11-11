@@ -32,6 +32,7 @@ use hyper::{Request, Response, StatusCode};
 use rdkafka::ClientConfig;
 use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
 use rdkafka::consumer::{BaseConsumer, Consumer};
+use rdkafka::error::KafkaResult;
 use rdkafka::producer::{BaseProducer, BaseRecord, Producer};
 use serde::{Deserialize, Serialize};
 use spate::avro::AvroDeserializerBuilder;
@@ -45,7 +46,7 @@ use spate::pipeline::{
     ExitReport, Pipeline, RuntimeOptions, ShutdownHandle, SinkOptions, StartError,
 };
 use spate::sink::KeyHashRouter;
-use spate_test::{metric_series, metric_value};
+use spate_test::{metric_series, metric_value, wait_for_value};
 use spate_test_support::{
     CLUSTER_NODES, KAFKA_PORT, KafkaBroker, KafkaCluster, container_image, http,
 };
@@ -127,16 +128,42 @@ impl Harness {
 
     /// [`Self::up`] with a three-node cluster of the selected broker. Waits
     /// until a client sees all three nodes, since none of them is ready alone.
+    ///
+    /// # Panics
+    ///
+    /// When a node exits first, naming it with its log; when the wait hangs,
+    /// with the node ids metadata last listed.
     pub fn up_cluster() -> Self {
         let cluster = KafkaCluster::start(&spate_test::unique_name("e2e-kafka"))
             .unwrap_or_else(|e| panic!("{e}"));
         let brokers = cluster.bootstrap().to_owned();
         let probe = probe_consumer(&brokers, "e2e-metadata");
-        wait_until(Duration::from_secs(120), "all three brokers", || {
-            probe
-                .fetch_metadata(None, PROBE_TIMEOUT)
-                .is_ok_and(|metadata| i32::try_from(metadata.brokers().len()) == Ok(CLUSTER_NODES))
-        });
+        let all_listed = |ids: &KafkaResult<Vec<i32>>| {
+            ids.as_ref()
+                .is_ok_and(|ids| i32::try_from(ids.len()) == Ok(CLUSTER_NODES))
+        };
+        let _listed = wait_for_value(
+            Duration::from_secs(120),
+            "all three brokers",
+            || {
+                let ids = probe.fetch_metadata(None, PROBE_TIMEOUT).map(|metadata| {
+                    let mut ids = metadata
+                        .brokers()
+                        .iter()
+                        .map(|b| b.id())
+                        .collect::<Vec<_>>();
+                    ids.sort_unstable();
+                    ids
+                });
+                if !all_listed(&ids)
+                    && let Some(exited) = cluster.exited()
+                {
+                    panic!("{exited}");
+                }
+                ids
+            },
+            all_listed,
+        );
         Self::around(Brokers::Cluster(cluster), brokers, CLUSTER_NODES)
     }
 
@@ -281,6 +308,13 @@ impl Harness {
         self.cluster()
             .restart(node)
             .unwrap_or_else(|e| panic!("{e}"));
+    }
+
+    /// Panics naming the first cluster node that has exited, with its log.
+    pub fn assert_brokers_running(&self) {
+        if let Some(exited) = self.cluster().exited() {
+            panic!("{exited}");
+        }
     }
 
     /// Move the leadership of `topic`'s `partition` to cluster node `node`.
@@ -819,15 +853,17 @@ impl RunningPipeline {
                 Lag::Read => self.lags(),
                 Lag::Ignored => Vec::new(),
             };
-            let committed = read_committed(&probe, &self.topic, self.partitions, PROBE_TIMEOUT)
-                .expect("committed offsets");
-            let ends = read_ends(&probe, &self.topic, self.partitions);
+            // A read fails while a broker restart moves the group coordinator
+            // or a leader, so a failed read is not drained yet.
+            let committed = read_committed(&probe, &self.topic, self.partitions, PROBE_TIMEOUT);
+            let ends = try_read_ends(&probe, &self.topic, self.partitions);
             let state = format!("lag {lags:?}, committed {committed:?}, end {ends:?}");
             if state != seen {
                 println!("all {rows} rows written: {state}");
                 seen = state;
             }
-            lags.iter().all(|lag| *lag == Some(0.0)) && committed == ends
+            lags.iter().all(|lag| *lag == Some(0.0))
+                && matches!((committed, ends), (Ok(c), Ok(e)) if c == e)
         });
     }
 
@@ -1168,12 +1204,20 @@ fn read_committed(
 
 /// The offset after each partition's last record.
 fn read_ends(probe: &BaseConsumer, topic: &str, partitions: i32) -> Vec<i64> {
+    try_read_ends(probe, topic, partitions).expect("watermarks")
+}
+
+/// [`read_ends`], returning the first failed read.
+fn try_read_ends(
+    probe: &BaseConsumer,
+    topic: &str,
+    partitions: i32,
+) -> rdkafka::error::KafkaResult<Vec<i64>> {
     (0..partitions)
         .map(|p| {
-            let (_, high) = probe
+            probe
                 .fetch_watermarks(topic, p, PROBE_TIMEOUT)
-                .expect("watermarks");
-            high
+                .map(|(_, high)| high)
         })
         .collect()
 }

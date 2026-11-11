@@ -401,8 +401,16 @@ fn header_lines(comparison: &Comparison) -> Vec<String> {
             },
         ),
         format!(
-            "head host {} · {} · {} core(s) · label {}",
-            head.host.os, head.host.cpu, head.host.cores, head.host.label
+            "head host {} · {} · {} core(s) · label {} · simd {}",
+            head.host.os,
+            head.host.cpu,
+            head.host.cores,
+            head.host.label,
+            if head.host.simd.is_empty() {
+                "none".to_owned()
+            } else {
+                head.host.simd.join(",")
+            },
         ),
     ];
 
@@ -744,6 +752,7 @@ mod tests {
                 cpu: "Apple M5 Max".to_owned(),
                 cores: 16,
                 label: "local".to_owned(),
+                simd: vec!["neon".to_owned(), "crc".to_owned()],
             },
             records: Vec::<Record>::new(),
         }
@@ -806,7 +815,7 @@ mod tests {
 - head v0.1.0-3-gbbbbbbb (dirty) · /legs/head
 - 10 replicate(s)
 - head rustc 1.94.0 · aarch64-apple-darwin · bench · default features
-- head host macos/aarch64 · Apple M5 Max · 16 core(s) · label local
+- head host macos/aarch64 · Apple M5 Max · 16 core(s) · label local · simd neon,crc
 - corpus digests: every compared case matched
 
 ### Significant changes

@@ -141,11 +141,11 @@ A refused or reset connection stays retryable: the checks wait for a broker the
 client can use, and fail with `ConnectError::Unavailable` once their bound
 passes.
 
-Once the feed has connected, its consumer, its attempt follower and its
-producer treat a SASL authentication failure and a rejected handshake as the
-source does, and the feed stops with the reason. A publish-only handle stops
-the same way through its producer. An attempt, tombstone, retry or dead-letter
-write that times out is sent again.
+Once the feed has connected, its consumer, its attempt follower, its producer
+and its depth reader treat a SASL authentication failure and a rejected
+handshake as the source does, and the feed stops with the reason. A publish-only
+handle stops the same way through its producer. An attempt, tombstone, retry or
+dead-letter write that times out is sent again.
 
 <LoggingKafka />
 
@@ -199,7 +199,9 @@ attempt, tombstone, retry or dead-letter write is sent again until the topic
 exists, with its partition committing nothing past it meanwhile. A write that
 times out while held is handled the same way. A deleted attempt topic also stops
 the feed through its follower, whose read of the topic then fails with an error
-the feed treats as fatal.
+the feed treats as fatal. A bounded job also fails at its next depth read of a
+deleted work, retry or dead-letter topic (see
+[What a read needs](#what-a-read-needs)).
 
 The work topic's partitions bound how many workers read at once: each partition
 of the work and retry topics is read by one member of the group.
@@ -335,6 +337,10 @@ unit again and every unit read after it.
 
 A rebalance that fails gives up every partition with nothing committed. The
 units read since the last commit are delivered again.
+
+An assignment that names a partition of a topic other than `topic` or
+`retry_topic` stops the feed with a fatal error before the feed reads from it.
+A stock assignor never sends one.
 
 ### Transaction markers
 
@@ -487,9 +493,15 @@ the dead-letter topic again 15 seconds later
 
 The reads need `Describe` on the work, retry and dead-letter topics, which the
 [startup checks](#startup-checks) already need, and `Describe` on the feed's
-group, which the `Read` a member needs on the group includes. An
-authorization failure fails the job; any other failed read starts the window
-again, or reads the dead-letter topic again 15 seconds later.
+group, which the `Read` a member needs on the group includes. A read fails the
+job when retrying cannot fix it: a refused authorization, a rejected credential
+or TLS handshake, or a topic the cluster no longer knows, as after the topic is
+deleted while the job runs. A rejection fails the job when the depth reader is
+the only client that meets it, as when it comes from a broker no other client of
+the feed talks to. Any other failed read starts the window again, or reads the
+dead-letter topic again 15 seconds later. That includes an offset read of a
+partition just added to a topic, which a broker can answer as unknown until it
+has the partition.
 
 ## Backpressure
 
@@ -562,8 +574,10 @@ without being read.
 A unit's offset finishes only once the write that settles it is confirmed. An
 attempt, tombstone, retry or dead-letter write that fails transiently, or gets
 no report within `delivery_timeout`, is sent again after a backoff from 200 ms
-up to 5 s, and its partition's commits wait for it. An attempt write is sent
-again only while the worker still owns the unit's partition. A write that
+up to 5 s, and its partition's commits wait for it. A write waiting out its
+backoff is sent only while the worker still owns the unit's partition and the
+feed is running. Otherwise it is dropped, the unit's offset stays unfinished,
+and the unit is read again. A write that
 retrying cannot fix stops the feed and the pipeline: a refused authorization,
 a message over the topic's size limit, or a fenced producer. [Topics](#topics)
 covers a write to a missing topic. A unit written to the retry topic is a new
@@ -596,6 +610,11 @@ would read no further on that partition, or moves its fetch position to an
 offset read from the wrong bytes, where `auto.offset.reset` decides what is read
 next. A feed that has stopped commits nothing more, so the next owner of the
 partition reads it again from the last commit.
+
+The feed leaves `check.crcs` off unless the `rdkafka` passthrough sets it. With
+it off, a batch whose bytes no longer match its checksum is delivered as read,
+as it is for the
+[Kafka source](../../sources/kafka/README.mdx#how-offsets-are-committed).
 
 ## What counting costs
 
@@ -639,9 +658,11 @@ at the cap and moves another copy to the dead-letter topic without reading it.
 The commit can wait up to `session.timeout.ms` for a coordinator and up to
 `socket.timeout.ms` for each attempt once sent, and the leave up to 5 seconds
 for its answer. Either can run past the drain deadline, on the feed's consumer
-thread, and dropping the feed waits for them. A worker killed before it leaves
-keeps its partitions until `session.timeout.ms` lapses (see
-[No lease](#no-lease)).
+thread, and dropping the feed waits for them. Dropping the feed also waits for
+the depth thread, which sends no request once the feed has stopped: a depth
+read in flight ends after the request it is on, 5 seconds at most. A worker
+killed before it leaves keeps its partitions until `session.timeout.ms` lapses
+(see [No lease](#no-lease)).
 
 A feed dropped without a close waits up to 1 s for its writes in flight, then
 commits and leaves the group the same way. A feed that stopped on an error

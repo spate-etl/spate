@@ -14,15 +14,16 @@
 //! end offset counts offsets: a transaction marker, an aborted record and a
 //! record behind an open transaction each read as one.
 
-use super::{Core, Topics};
+use super::{Core, LatchOnPanic, Topics};
 use crate::client::list_offsets;
 use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::error::{KafkaError, RDKafkaErrorCode};
 use rdkafka::{Offset, TopicPartitionList};
+use spate_core::error::{ErrorClass, SourceError};
 use spate_core::feed::{Depth, DepthOf, DepthReporter, FeedError, FeedErrorKind};
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// The bound on each metadata and offset request.
 const REQUEST_BOUND: Duration = Duration::from_secs(5);
@@ -36,11 +37,14 @@ const HOLD_READS: u32 = 20;
 /// client's queued events.
 const SERVE_EVERY: Duration = Duration::from_secs(1);
 
+/// How long a serve takes the client's events.
+const SERVE_WAIT: Duration = Duration::from_millis(50);
+
 /// One partition of one of the feed's topics.
 pub(crate) type Partition = (Arc<str>, i32);
 
 /// The offset reads a depth read takes.
-pub(crate) trait Offsets: Send {
+pub(crate) trait Offsets {
     /// The partitions of `topic`.
     fn partitions(&self, topic: &Arc<str>) -> Result<Vec<i32>, FeedError>;
 
@@ -53,8 +57,12 @@ pub(crate) trait Offsets: Send {
     /// their order, read in one request.
     fn listed(&self, partitions: &[Partition], at: Offset) -> Result<Vec<i64>, FeedError>;
 
-    /// Serve the client's queued statistics, log lines and errors.
-    fn serve(&self) {}
+    /// Serve the client's queued statistics, log lines and errors for `wait`.
+    /// Returns the first error among them that retrying cannot fix, such as
+    /// a credential or TLS rejection.
+    fn serve(&self, _wait: Duration) -> Option<FeedError> {
+        None
+    }
 }
 
 /// How long the group's commits have stood still with offsets above them, so
@@ -199,19 +207,67 @@ pub(crate) fn dead_letter_depth(
     Ok(depth)
 }
 
+/// [`Offsets`] that refuses a request once the feed has stopped, so a read
+/// in flight ends after the request it is on and the feed's drop waits for
+/// one request at most.
+struct UntilStopped<'a> {
+    offsets: &'a dyn Offsets,
+    core: &'a Core,
+}
+
+impl UntilStopped<'_> {
+    fn check(&self) -> Result<(), FeedError> {
+        if self.core.stopped() {
+            return Err(FeedError::new(
+                FeedErrorKind::Retryable,
+                "the feed stopped during the read",
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl Offsets for UntilStopped<'_> {
+    fn partitions(&self, topic: &Arc<str>) -> Result<Vec<i32>, FeedError> {
+        self.check()?;
+        self.offsets.partitions(topic)
+    }
+
+    fn committed(&self, partitions: &[Partition]) -> Result<Vec<Offset>, FeedError> {
+        self.check()?;
+        self.offsets.committed(partitions)
+    }
+
+    fn listed(&self, partitions: &[Partition], at: Offset) -> Result<Vec<i64>, FeedError> {
+        self.check()?;
+        self.offsets.listed(partitions, at)
+    }
+
+    fn serve(&self, wait: Duration) -> Option<FeedError> {
+        self.offsets.serve(wait)
+    }
+}
+
 /// Answer each depth request from `requests` until the feed drops its
 /// sender or stops.
 pub(crate) fn run(
-    core: &Core,
+    core: &Arc<Core>,
     offsets: &dyn Offsets,
     requests: &Receiver<(DepthOf, DepthReporter)>,
 ) {
+    let _guard = LatchOnPanic {
+        core: Arc::clone(core),
+        thread: "depth",
+    };
     let mut hold = Hold::default();
+    let offsets: &dyn Offsets = &UntilStopped { offsets, core };
     loop {
         let (of, reporter) = match requests.recv_timeout(SERVE_EVERY) {
             Ok(request) => request,
             Err(RecvTimeoutError::Timeout) => {
-                offsets.serve();
+                if let Some(rejected) = offsets.serve(SERVE_WAIT) {
+                    core.latch(&rejected.reason);
+                }
                 continue;
             }
             Err(RecvTimeoutError::Disconnected) => return,
@@ -223,6 +279,12 @@ pub(crate) fn run(
             DepthOf::DeadLetters => dead_letter_depth(offsets, core.topics()),
             _ => feed_depth(offsets, core.topics(), &mut hold),
         };
+        // Requests that follow one another leave no idle serve, and a
+        // rejection reaches this client's poll as the read's requests fail on
+        // a timeout or a transport error.
+        if let Some(rejected) = offsets.serve(SERVE_WAIT) {
+            core.latch(&rejected.reason);
+        }
         // A credential or TLS rejection latches the feed, and the depth read
         // then reports it, whatever the read itself returned.
         let read = match core.lock().signal.latched().cloned() {
@@ -236,21 +298,36 @@ pub(crate) fn run(
     }
 }
 
-/// The class of a failed offset read: an authorization failure cannot clear
-/// on its own, and anything else may.
-fn class(e: &KafkaError) -> FeedErrorKind {
-    match e.rdkafka_error_code() {
-        Some(
-            RDKafkaErrorCode::GroupAuthorizationFailed
-            | RDKafkaErrorCode::TopicAuthorizationFailed
-            | RDKafkaErrorCode::ClusterAuthorizationFailed,
-        ) => FeedErrorKind::Fatal,
+/// What a failed read asked the cluster about.
+#[derive(Clone, Copy, Debug)]
+enum Asked {
+    /// A topic's metadata. Startup found every topic before the first read,
+    /// so a topic the cluster does not know has been deleted.
+    Topic,
+    /// The offsets of partitions the metadata listed. A broker can answer
+    /// that it does not know a partition just added to its topic.
+    Partitions,
+}
+
+/// The class of a failed read, from the crate's table of consumer codes.
+fn class(e: &KafkaError, asked: Asked) -> FeedErrorKind {
+    match crate::error::classify_kafka_error(e, matches!(asked, Asked::Topic)) {
+        ErrorClass::Fatal => FeedErrorKind::Fatal,
         _ => FeedErrorKind::Retryable,
     }
 }
 
+/// A failed read of partitions' offsets.
 fn error(doing: &str, e: &KafkaError) -> FeedError {
-    FeedError::new(class(e), format!("{doing}: {e}"))
+    FeedError::new(class(e, Asked::Partitions), format!("{doing}: {e}"))
+}
+
+/// A failed read of `topic`'s metadata.
+fn topic_error(topic: &str, e: &KafkaError) -> FeedError {
+    FeedError::new(
+        class(e, Asked::Topic),
+        format!("reading the partitions of `{topic}`: {e}"),
+    )
 }
 
 /// [`Offsets`] through a consumer with the feed's `group.id` that never
@@ -309,18 +386,50 @@ fn elements(
         .collect()
 }
 
+/// The first Fatal error among those `poll` returns within `wait`, where
+/// `poll` takes how long it may wait and returns `None` once nothing is left.
+///
+/// A consumer poll that waits takes every queued event until its time is up.
+/// One that does not wait returns after a single log line, and an error
+/// behind that line stays queued.
+fn first_fatal(
+    wait: Duration,
+    mut poll: impl FnMut(Duration) -> Option<SourceError>,
+) -> Option<FeedError> {
+    let until = Instant::now() + wait;
+    loop {
+        let error = poll(until.saturating_duration_since(Instant::now()))?;
+        if error.class() == ErrorClass::Fatal {
+            return Some(FeedError::new(FeedErrorKind::Fatal, error.reason()));
+        }
+    }
+}
+
 impl Offsets for Brokers {
-    fn serve(&self) {
+    fn serve(&self, wait: Duration) -> Option<FeedError> {
         // The consumer carries a `group.id`, so librdkafka queues its
         // statistics, log lines and errors where only a poll drains them.
-        let _ = self.consumer.poll(Duration::from_millis(50));
+        first_fatal(wait, |left| {
+            // This consumer has no assignment, so its poll returns no message.
+            let error = self.consumer.poll(left)?.err()?;
+            let code = error.rdkafka_error_code();
+            let text = code.and_then(|code| self.consumer.context().take_error(code));
+            // The error callback has logged the event already.
+            let prefix = "the depth reader's poll";
+            Some(crate::error::poll_error(
+                prefix,
+                &error,
+                true,
+                text.as_deref(),
+            ))
+        })
     }
 
     fn partitions(&self, topic: &Arc<str>) -> Result<Vec<i32>, FeedError> {
         let metadata = self
             .consumer
             .fetch_metadata(Some(topic), REQUEST_BOUND)
-            .map_err(|e| error(&format!("reading the partitions of `{topic}`"), &e))?;
+            .map_err(|e| topic_error(topic, &e))?;
         let found: Vec<_> = metadata
             .topics()
             .iter()
@@ -328,8 +437,8 @@ impl Offsets for Brokers {
             .collect();
         // A refusal arrives as the topic's own error in an answered request.
         if let Some(err) = found.iter().find_map(|t| t.error()) {
-            return Err(error(
-                &format!("reading the partitions of `{topic}`"),
+            return Err(topic_error(
+                topic,
                 &KafkaError::MetadataFetch(RDKafkaErrorCode::from(err)),
             ));
         }
@@ -391,7 +500,9 @@ mod tests {
     use crate::client::SpateContext;
     use crate::client::testing::raw;
     use crate::context::SourceHooks;
+    use crate::feed::KafkaFeed;
     use crate::feed::tests::core;
+    use crate::testutil::mock::MockKafka;
     use spate_core::hash::FastMap;
     use spate_test::HANG;
     use std::sync::Mutex;
@@ -489,8 +600,9 @@ mod tests {
         fn listed(&self, _: &[Partition], _: Offset) -> Result<Vec<i64>, FeedError> {
             Ok(Vec::new())
         }
-        fn serve(&self) {
+        fn serve(&self, _: Duration) -> Option<FeedError> {
             self.0.fetch_add(1, Ordering::SeqCst);
+            None
         }
     }
 
@@ -499,7 +611,7 @@ mod tests {
     /// over a job.
     #[test]
     fn the_depth_thread_serves_its_client_between_requests() {
-        let core = core(3);
+        let core = Arc::new(core(3));
         let serving = Serving::default();
         let (requests, received) = mpsc::channel::<(DepthOf, DepthReporter)>();
         std::thread::scope(|s| {
@@ -516,7 +628,7 @@ mod tests {
     /// so the reader's park ends on the answer.
     #[test]
     fn an_answered_depth_read_wakes_the_reader() {
-        let core = core(3);
+        let core = Arc::new(core(3));
         let (waker, park) = spate_core::feed::wake_channel();
         core.lock().signal.set_waker(waker, false);
         let offsets = Scripted::default().topic("units-dead", &[(0, Offset::Invalid, 0, 0)]);
@@ -609,7 +721,7 @@ mod tests {
     /// job's line reaches the log.
     #[test]
     fn the_depth_thread_counts_a_hold_across_requests() {
-        let core = core(3);
+        let core = Arc::new(core(3));
         let offsets = Scripted::default()
             .topic("units", &[(0, Offset::Offset(3), 0, 9)])
             .topic("units-retry", &[(0, Offset::Invalid, 0, 0)]);
@@ -819,7 +931,6 @@ mod tests {
     /// committed-offset read fails the read, naming the partition.
     #[test]
     fn a_partition_error_in_a_committed_read_fails_it() {
-        use crate::testutil::mock::MockKafka;
         let cluster = MockKafka::new();
         cluster.create_topic("work", 1, 1).expect("create topic");
         let consumer = raw(
@@ -839,7 +950,6 @@ mod tests {
     /// through a serve.
     #[test]
     fn serving_the_depth_client_drains_its_events() {
-        use crate::testutil::mock::MockKafka;
         use rdkafka::consumer::Consumer as _;
         let cluster = MockKafka::new();
         let consumer = raw(
@@ -852,9 +962,29 @@ mod tests {
         );
         let reads = Brokers { consumer };
         spate_test::wait_until(HANG, "a statistics event reaches the context", || {
-            reads.serve();
+            reads.serve(SERVE_WAIT);
             reads.consumer.context().stats.lock().unwrap().is_some()
         });
+    }
+
+    /// A serve takes the client's events for the whole wait, where a poll
+    /// with no wait returns after one log line and leaves an error queued
+    /// behind it.
+    #[test]
+    fn a_serve_with_nothing_to_return_lasts_its_wait() {
+        let cluster = MockKafka::new();
+        let consumer = raw(
+            &[
+                ("bootstrap.servers", &cluster.bootstrap_servers()),
+                ("group.id", "depth-serve-wait"),
+                ("statistics.interval.ms", "10"),
+            ],
+            SourceHooks::default(),
+        );
+        let reads = Brokers { consumer };
+        let started = Instant::now();
+        assert!(reads.serve(SERVE_WAIT).is_none());
+        assert!(started.elapsed() >= SERVE_WAIT, "{:?}", started.elapsed());
     }
 
     /// Pins the topics a whole-request failure names: each once, in the
@@ -871,12 +1001,11 @@ mod tests {
         assert_eq!(named(&partitions[..1]), "`units`");
     }
 
-    /// Pins that a topic whose metadata lists no partitions, as an unknown
-    /// topic's does, fails the read as Retryable, so it never reads as
-    /// drained.
+    /// Pins that a topic the cluster no longer knows fails the read for good,
+    /// so a deleted topic never reads as drained and is not read again.
+    /// Regression for #1756.
     #[test]
-    fn a_topic_reporting_no_partitions_fails_the_read() {
-        use crate::testutil::mock::MockKafka;
+    fn a_topic_the_cluster_does_not_know_fails_the_read_for_good() {
         use rdkafka::types::RDKafkaRespErr;
         let cluster = MockKafka::new();
         cluster.create_topic("dead", 1, 1).expect("create topic");
@@ -895,15 +1024,46 @@ mod tests {
         );
         let reads = Brokers { consumer };
         let e = reads.partitions(&Arc::from("dead")).unwrap_err();
-        assert_eq!(e.kind, FeedErrorKind::Retryable, "{e}");
+        assert_eq!(e.kind, FeedErrorKind::Fatal, "{e}");
         assert!(e.reason.contains("`dead`"), "{e}");
+    }
+
+    /// A panic on the depth thread latches the feed, so the run fails where
+    /// it would otherwise read a depth nothing answers. Regression for #1760.
+    #[test]
+    #[expect(clippy::disallowed_methods, reason = "the test joins the thread")]
+    fn a_panic_on_the_depth_thread_latches_the_feed() {
+        struct Panics;
+        impl Offsets for Panics {
+            fn partitions(&self, _: &Arc<str>) -> Result<Vec<i32>, FeedError> {
+                panic!("scripted")
+            }
+            fn committed(&self, _: &[Partition]) -> Result<Vec<Offset>, FeedError> {
+                unreachable!()
+            }
+            fn listed(&self, _: &[Partition], _: Offset) -> Result<Vec<i64>, FeedError> {
+                unreachable!()
+            }
+        }
+        let core = Arc::new(core(3));
+        let (requests, received) = mpsc::channel();
+        let (reporter, _reading) = spate_core::feed::depth_reading();
+        requests.send((DepthOf::DeadLetters, reporter)).unwrap();
+        let thread = {
+            let core = Arc::clone(&core);
+            std::thread::spawn(move || run(&core, &Panics, &received))
+        };
+        assert!(thread.join().is_err(), "the read panics");
+        let latched = core.lock().signal.latched().cloned().expect("latched");
+        assert_eq!(latched.kind, FeedErrorKind::Fatal);
+        assert_eq!(latched.reason, "the Kafka feed's depth thread panicked");
     }
 
     /// Pins that the depth thread reads nothing once the feed has stopped,
     /// and the reading it drops settles Retryable.
     #[test]
     fn a_stopped_feed_reads_no_depth() {
-        let core = core(3);
+        let core = Arc::new(core(3));
         core.stop.store(true, Ordering::Release);
         let offsets = Scripted::default().topic("units-dead", &[(0, Offset::Invalid, 0, 0)]);
         let (requests, received) = mpsc::channel();
@@ -916,11 +1076,330 @@ mod tests {
         assert_eq!(e.kind, FeedErrorKind::Retryable);
     }
 
+    /// Pins that a feed stopped during any request of a read, of the feed or
+    /// of the dead letters, sends none of the requests after it. The read
+    /// settles Retryable, and the feed's drop waits for one request at most.
+    /// Regression for #1761.
+    #[test]
+    fn a_feed_stopped_at_any_request_of_a_read_sends_no_further_request() {
+        struct StopsAt {
+            scripted: Scripted,
+            core: Arc<Core>,
+            at: usize,
+            seen: AtomicUsize,
+        }
+        impl StopsAt {
+            fn tick(&self) {
+                if self.seen.fetch_add(1, Ordering::SeqCst) + 1 == self.at {
+                    self.core.stop.store(true, Ordering::Release);
+                }
+            }
+        }
+        impl Offsets for StopsAt {
+            fn partitions(&self, topic: &Arc<str>) -> Result<Vec<i32>, FeedError> {
+                self.tick();
+                self.scripted.partitions(topic)
+            }
+            fn committed(&self, partitions: &[Partition]) -> Result<Vec<Offset>, FeedError> {
+                self.tick();
+                self.scripted.committed(partitions)
+            }
+            fn listed(&self, partitions: &[Partition], at: Offset) -> Result<Vec<i64>, FeedError> {
+                self.tick();
+                self.scripted.listed(partitions, at)
+            }
+        }
+        for (of, requests_in_a_read) in [(DepthOf::Feed, 5), (DepthOf::DeadLetters, 2)] {
+            for at in 1..requests_in_a_read {
+                let core = Arc::new(core(3));
+                let t = core.topics();
+                let offsets = StopsAt {
+                    scripted: Scripted::default()
+                        .topic(&t.work, &[(0, Offset::Invalid, 0, 0)])
+                        .topic(&t.retry, &[(0, Offset::Invalid, 0, 0)])
+                        .topic(&t.dead_letter, &[(0, Offset::Invalid, 0, 0)]),
+                    core: Arc::clone(&core),
+                    at,
+                    seen: AtomicUsize::new(0),
+                };
+                let (requests, received) = mpsc::channel();
+                let (reporter, mut reading) = spate_core::feed::depth_reading();
+                requests.send((of, reporter)).unwrap();
+                drop(requests);
+                run(&core, &offsets, &received);
+                assert_eq!(
+                    offsets.scripted.calls().len(),
+                    at,
+                    "{of:?} stopped at request {at}: {:?}",
+                    offsets.scripted.calls()
+                );
+                let e = reading.try_outcome().unwrap().unwrap_err();
+                assert_eq!(e.kind, FeedErrorKind::Retryable);
+                assert!(e.reason.contains("stopped during the read"), "{e}");
+            }
+        }
+    }
+
+    /// A feed connected on `cluster`, and the runtime its clients use.
+    fn connected(cluster: &MockKafka) -> (KafkaFeed, tokio::runtime::Runtime) {
+        for (topic, partitions) in [
+            ("units", 1),
+            ("units-retry", 1),
+            ("units-dead", 1),
+            ("units-attempts", 2),
+        ] {
+            cluster.create_topic(topic, partitions, 1).unwrap();
+        }
+        let section: spate_core::config::FeedSection = serde_yaml::from_str(&format!(
+            "attempt_cap: 3\nkafka:\n  brokers: \"{}\"\n  group_id: workers\n  topic: units\n  \
+             retry_topic: units-retry\n  dead_letter_topic: units-dead\n  attempt_topic: \
+             units-attempts\n  statistics_interval: 0s\n",
+            cluster.bootstrap_servers()
+        ))
+        .unwrap();
+        let io = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let feed = KafkaFeed::connect_without_config_checks(&section, io.handle()).unwrap();
+        (feed, io)
+    }
+
+    /// Pins that the depth thread has ended when a connected feed's drop
+    /// returns: its share of the feed's core is gone. Regression for #1761.
+    #[test]
+    fn the_depth_thread_ends_before_the_feed_s_drop_returns() {
+        let cluster = MockKafka::new();
+        let (feed, _io) = connected(&cluster);
+        let core = Arc::clone(&feed.core);
+        drop(feed);
+        assert_eq!(
+            Arc::strong_count(&core),
+            1,
+            "the depth thread outlives the feed's drop"
+        );
+    }
+
+    /// Pins that the feed's drop joins the depth thread while a request of
+    /// its read is in flight: the coordinator holds the thread's OffsetFetch
+    /// reply past the request's bound, and the thread's share of the core is
+    /// gone when the drop returns. Regression for #1761.
+    #[test]
+    fn the_drop_waits_for_a_depth_request_in_flight() {
+        use crate::testutil::assert_returns;
+        use rdkafka::types::RDKafkaApiKey;
+        use spate_core::feed::Feed as _;
+        use spate_test::{HANG, wait_until};
+        let cluster = MockKafka::new();
+        cluster.track_requests();
+        let (feed, _io) = connected(&cluster);
+        // The group member fetches its committed offsets at assignment, and
+        // the hold below is for the request after that one.
+        wait_until(HANG, "the member's OffsetFetch", || {
+            cluster.received(RDKafkaApiKey::OffsetFetch) >= 1
+        });
+        cluster.hold_next_reply(1, RDKafkaApiKey::OffsetFetch, 2 * REQUEST_BOUND);
+        let fetches = cluster.received(RDKafkaApiKey::OffsetFetch);
+        let _reading = feed.read_depth(DepthOf::Feed).expect("a reading");
+        wait_until(HANG, "the depth thread's OffsetFetch", || {
+            cluster.received(RDKafkaApiKey::OffsetFetch) > fetches
+        });
+        let listed = cluster.received(RDKafkaApiKey::ListOffsets);
+        let core = Arc::clone(&feed.core);
+        let handle = cluster.native() as usize;
+        assert_returns(handle, HANG, "the feed's drop", move || drop(feed));
+        assert_eq!(
+            Arc::strong_count(&core),
+            1,
+            "the depth thread outlives the feed's drop"
+        );
+        assert_eq!(
+            cluster.received(RDKafkaApiKey::ListOffsets),
+            listed,
+            "the read sent a request after the stop"
+        );
+    }
+
+    /// A client whose every serve reports a rejection, and whose reads
+    /// succeed.
+    struct Rejected;
+
+    impl Offsets for Rejected {
+        fn partitions(&self, _: &Arc<str>) -> Result<Vec<i32>, FeedError> {
+            Ok(Vec::new())
+        }
+        fn committed(&self, _: &[Partition]) -> Result<Vec<Offset>, FeedError> {
+            Ok(Vec::new())
+        }
+        fn listed(&self, _: &[Partition], _: Offset) -> Result<Vec<i64>, FeedError> {
+            Ok(Vec::new())
+        }
+        fn serve(&self, _: Duration) -> Option<FeedError> {
+            Some(FeedError::new(
+                FeedErrorKind::Fatal,
+                "the depth reader's poll: certificate verify failed",
+            ))
+        }
+    }
+
+    /// A rejection only the depth client meets fails the read that follows
+    /// it, where the read's own requests succeeded, and latches the feed.
+    /// Regression for #1757.
+    #[test]
+    fn a_rejection_the_depth_client_reports_fails_the_read_after_it() {
+        let core = Arc::new(core(3));
+        let (requests, received) = mpsc::channel();
+        let (reporter, mut reading) = spate_core::feed::depth_reading();
+        requests.send((DepthOf::DeadLetters, reporter)).unwrap();
+        drop(requests);
+        run(&core, &Rejected, &received);
+        let e = reading.try_outcome().unwrap().unwrap_err();
+        assert_eq!(e.kind, FeedErrorKind::Fatal, "{e}");
+        assert!(e.reason.contains("certificate verify failed"), "{e}");
+        assert!(core.latched());
+    }
+
+    /// Records the wait of each serve.
+    #[derive(Default)]
+    struct Waits(Mutex<Vec<Duration>>);
+
+    impl Offsets for Waits {
+        fn partitions(&self, _: &Arc<str>) -> Result<Vec<i32>, FeedError> {
+            Ok(Vec::new())
+        }
+        fn committed(&self, _: &[Partition]) -> Result<Vec<Offset>, FeedError> {
+            Ok(Vec::new())
+        }
+        fn listed(&self, _: &[Partition], _: Offset) -> Result<Vec<i64>, FeedError> {
+            Ok(Vec::new())
+        }
+        fn serve(&self, wait: Duration) -> Option<FeedError> {
+            self.0.lock().unwrap().push(wait);
+            None
+        }
+    }
+
+    /// The serve after a read waits, so it takes a rejection queued behind
+    /// the client's log lines.
+    #[test]
+    fn the_serve_after_a_read_waits() {
+        let core = Arc::new(core(3));
+        let waits = Waits::default();
+        let (requests, received) = mpsc::channel();
+        let (reporter, _reading) = spate_core::feed::depth_reading();
+        requests.send((DepthOf::DeadLetters, reporter)).unwrap();
+        drop(requests);
+        run(&core, &waits, &received);
+        assert_eq!(*waits.0.lock().unwrap(), [SERVE_WAIT]);
+    }
+
+    /// A serve goes on past an error retrying can fix and returns the
+    /// rejection behind it.
+    #[test]
+    fn a_serve_returns_a_rejection_behind_a_retryable_error() {
+        let mut queued = vec![
+            SourceError::new(ErrorClass::Fatal, "login refused"),
+            SourceError::new(ErrorClass::Retryable, "all brokers down"),
+        ];
+        let e = first_fatal(Duration::ZERO, |_| queued.pop()).expect("the rejection");
+        assert_eq!(e.kind, FeedErrorKind::Fatal, "{e}");
+        assert_eq!(e.reason, "login refused");
+        assert!(queued.is_empty());
+    }
+
+    /// A rejection the depth client reports between requests latches the
+    /// feed with no read asked for.
+    #[test]
+    fn a_rejection_the_idle_depth_client_reports_latches_the_feed() {
+        let core = Arc::new(core(3));
+        let (requests, received) = mpsc::channel::<(DepthOf, DepthReporter)>();
+        std::thread::scope(|s| {
+            let core = &core;
+            s.spawn(move || run(core, &Rejected, &received));
+            spate_test::wait_until(HANG, "the feed latches", || core.latched());
+            drop(requests);
+        });
+        let latched = core.lock().signal.latched().cloned().expect("latched");
+        assert!(
+            latched.reason.contains("certificate verify failed"),
+            "{latched}"
+        );
+    }
+
+    /// The depth client's serve returns a broker's refused SASL login as
+    /// Fatal, with the broker's text.
+    #[cfg(feature = "tls")]
+    #[test]
+    fn serving_the_depth_client_returns_a_refused_login() {
+        let brokers = crate::testutil::refuses_sasl_login().to_string();
+        let consumer = raw(
+            &[
+                ("bootstrap.servers", &brokers),
+                ("group.id", "depth-rejected"),
+                ("security.protocol", "sasl_plaintext"),
+                ("sasl.mechanism", "PLAIN"),
+                ("sasl.username", "u"),
+                ("sasl.password", "wrong"),
+            ],
+            SourceHooks::default(),
+        );
+        let reads = Brokers { consumer };
+        let mut rejected = None;
+        spate_test::wait_until(HANG, "the serve returns the rejection", || {
+            rejected = reads.serve(SERVE_WAIT);
+            rejected.is_some()
+        });
+        let e = rejected.expect("a rejection");
+        assert_eq!(e.kind, FeedErrorKind::Fatal, "{e}");
+        assert!(e.reason.contains("Authentication failed"), "{e}");
+    }
+
+    /// The depth client's serve returns a broker certificate the client
+    /// cannot verify as Fatal, which takes the error callback's text.
+    #[cfg(feature = "tls")]
+    #[test]
+    fn serving_the_depth_client_returns_a_rejected_certificate() {
+        let server = spate_test_support::TestCa::new("depth-server-ca");
+        let other = spate_test_support::TestCa::new("depth-other-ca");
+        let dir = tempfile::tempdir().unwrap();
+        let ca = other.write(dir.path()).display().to_string();
+        let io = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let addr = io
+            .block_on(spate_test_support::serve_tls(
+                server.server_config(None),
+                |_| async {},
+            ))
+            .to_string();
+        let consumer = raw(
+            &[
+                ("bootstrap.servers", &addr),
+                ("group.id", "depth-rejected-tls"),
+                ("security.protocol", "ssl"),
+                ("ssl.ca.location", &ca),
+            ],
+            SourceHooks::default(),
+        );
+        let reads = Brokers { consumer };
+        let mut rejected = None;
+        spate_test::wait_until(HANG, "the serve returns the rejection", || {
+            rejected = reads.serve(SERVE_WAIT);
+            rejected.is_some()
+        });
+        let e = rejected.expect("a rejection");
+        assert_eq!(e.kind, FeedErrorKind::Fatal, "{e}");
+        assert!(e.reason.contains("certificate verify failed"), "{e}");
+    }
+
     /// Pins that a feed which has latched a Fatal error answers a depth read
     /// with that error, whatever the offsets read.
     #[test]
     fn a_latched_feed_answers_a_depth_read_with_its_error() {
-        let core = core(3);
+        let core = Arc::new(core(3));
         core.latch("the broker rejected the credential");
         let offsets = Scripted::default().topic("units-dead", &[(0, Offset::Invalid, 0, 0)]);
         let (requests, received) = mpsc::channel();
@@ -939,7 +1418,6 @@ mod tests {
     /// topic lacks failing, naming the kind of read.
     #[test]
     fn the_brokers_read_each_partition_of_a_topic() {
-        use crate::testutil::mock::MockKafka;
         use rdkafka::producer::{BaseProducer, BaseRecord, Producer as _};
         let cluster = MockKafka::new();
         cluster.create_topic("work", 2, 1).expect("create topic");
@@ -986,16 +1464,19 @@ mod tests {
             RDKafkaErrorCode::TopicAuthorizationFailed,
             RDKafkaErrorCode::ClusterAuthorizationFailed,
         ] {
-            assert_eq!(
-                class(&KafkaError::MetadataFetch(code)),
-                FeedErrorKind::Fatal,
-                "{code:?}"
-            );
+            for asked in [Asked::Topic, Asked::Partitions] {
+                assert_eq!(
+                    class(&KafkaError::MetadataFetch(code), asked),
+                    FeedErrorKind::Fatal,
+                    "{code:?} {asked:?}"
+                );
+            }
         }
         assert_eq!(
-            class(&KafkaError::MetadataFetch(
-                RDKafkaErrorCode::RequestTimedOut
-            )),
+            class(
+                &KafkaError::MetadataFetch(RDKafkaErrorCode::RequestTimedOut),
+                Asked::Topic
+            ),
             FeedErrorKind::Retryable
         );
     }
@@ -1004,7 +1485,6 @@ mod tests {
     /// committed and end offset reads: both are Fatal.
     #[test]
     fn a_broker_refusing_an_offset_read_on_authorization_fails_it_as_fatal() {
-        use crate::testutil::mock::MockKafka;
         use rdkafka::types::{RDKafkaApiKey, RDKafkaRespErr};
         let cluster = MockKafka::new();
         cluster.create_topic("work", 1, 1).expect("create topic");
@@ -1029,5 +1509,53 @@ mod tests {
         );
         let e = reads.listed(&one, Offset::End).unwrap_err();
         assert_eq!(e.kind, FeedErrorKind::Fatal, "{e}");
+    }
+
+    /// A read classes its failure by the crate's table of consumer codes: a
+    /// code no retry clears is fatal. A topic the cluster does not know is
+    /// one of them for a metadata read, where it means a deleted topic, and
+    /// is retried for an offset read, where a partition just added answers
+    /// the same code. Regression for #1756.
+    #[test]
+    fn a_read_classes_its_failure_by_the_consumer_table() {
+        use FeedErrorKind::{Fatal, Retryable};
+        for (code, of_topic, of_partitions) in [
+            (RDKafkaErrorCode::UnknownTopicOrPartition, Fatal, Retryable),
+            (RDKafkaErrorCode::Authentication, Fatal, Fatal),
+            (RDKafkaErrorCode::SaslAuthenticationFailed, Fatal, Fatal),
+            (RDKafkaErrorCode::InvalidTopic, Fatal, Fatal),
+            (RDKafkaErrorCode::LeaderNotAvailable, Retryable, Retryable),
+        ] {
+            let e = KafkaError::MetadataFetch(code);
+            assert_eq!(class(&e, Asked::Topic), of_topic, "{code:?}");
+            assert_eq!(class(&e, Asked::Partitions), of_partitions, "{code:?}");
+        }
+        let no_code = KafkaError::Subscription("no code".into());
+        assert_eq!(class(&no_code, Asked::Topic), Retryable);
+    }
+
+    /// Pins that an offset read a broker answers `UnknownTopicOrPartition`
+    /// is retried: Redpanda answers it for a partition just added to a topic.
+    /// Regression for #1756.
+    #[test]
+    fn an_offset_read_answered_unknown_partition_is_retried() {
+        use rdkafka::types::{RDKafkaApiKey, RDKafkaRespErr};
+        let cluster = MockKafka::new();
+        cluster.create_topic("work", 1, 1).expect("create topic");
+        let consumer = raw(
+            &[
+                ("bootstrap.servers", &cluster.bootstrap_servers()),
+                ("group.id", "depth-added"),
+            ],
+            SourceHooks::default(),
+        );
+        let reads = Brokers { consumer };
+        let one = [(Arc::from("work"), 0)];
+        cluster.request_errors(
+            RDKafkaApiKey::ListOffsets,
+            &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_UNKNOWN_TOPIC_OR_PART],
+        );
+        let e = reads.listed(&one, Offset::End).unwrap_err();
+        assert_eq!(e.kind, FeedErrorKind::Retryable, "{e}");
     }
 }

@@ -60,12 +60,12 @@ source:
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `url` | string | `required` | Bucket and prefix to backfill. Every object under the prefix is read. `s3://`, `s3a://`, `https://` on an S3 endpoint host, and `file://`, which works for local runs, are read. The endpoint hosts are `s3.<region>.amazonaws.com/<bucket>`, `<bucket>.s3.amazonaws.com`, `<bucket>.s3.<region>.amazonaws.com`, their `dualstack` forms, and `<account>.r2.cloudflarestorage.com/<bucket>`. Another `amazonaws.com` host, such as `s3.amazonaws.com` or `s3-<region>.amazonaws.com`, loads and fails when the source starts. Another S3-compatible store takes `s3://` with its endpoint under [`store`](#the-store-passthrough-and-the-denylist). A URL carrying userinfo or a query fails at load, because the store reads neither. Credentials go under `store` or the environment. `memory://` fails at load, because it builds a fresh empty store per component and so cannot be shared, and so does any other scheme. Part of the job fingerprint — byte-identical across every worker of a [bounded job](#bounded-jobs-and-the-job-location). |
+| `url` | string | `required` | Bucket and prefix to backfill. Every object under the prefix is read. `s3://`, `s3a://`, `https://` on an S3 endpoint host, and `file://`, which works for local runs, are read. The endpoint hosts are `s3.<region>.amazonaws.com/<bucket>`, `<bucket>.s3.amazonaws.com`, `<bucket>.s3.<region>.amazonaws.com`, their `dualstack` forms, `<account>.r2.cloudflarestorage.com/<bucket>` and `<account>.<jurisdiction>.r2.cloudflarestorage.com/<bucket>`. Another `amazonaws.com` or `r2.cloudflarestorage.com` host, such as `s3.amazonaws.com` or `s3-<region>.amazonaws.com`, fails at load. Another S3-compatible store takes `s3://` with its endpoint under [`store`](#the-store-passthrough-and-the-denylist). A URL carrying userinfo or a query fails at load, because the store reads neither. Credentials go under `store` or the environment. `memory://` fails at load, because it builds a fresh empty store per component and so cannot be shared, and so does any other scheme. Part of the job fingerprint — byte-identical across every worker of a [bounded job](#bounded-jobs-and-the-job-location). |
 | `compression` | `auto` \| `none` \| `gzip` \| `zstd` | `auto` | Object codec. `auto` decides per object by extension (`.gz`/`.gzip`, `.zst`/`.zstd`, else uncompressed). Multi-member gzip and multi-frame zstd are read fully; truncated or corrupt streams [fail their unit](#object-errors-fail-the-unit). Part of the job fingerprint. |
 | `split_target_bytes` | bytes | `64MiB` | Objects read whole are packed into shared units of at most this many bytes and 16 objects, in listing order, except one whose key is longer than 1,024 bytes or whose ETag is longer than 256. A larger object is [cut into byte ranges](#large-objects-and-byte-ranges) of at most this size when it qualifies, one unit each, and any other is one unit. Floor `1MiB`. Part of the job fingerprint. |
 | `prefetch_bytes` | bytes | `8MiB` | Target window size for ETag-pinned ranged GETs; see [read-ahead memory sizing](#read-parallelism). Must be at least `chunk_bytes`; a smaller value fails at load. |
 | `chunk_bytes` | bytes | `512KiB` | Target size of one buffered chunk. Read-ahead does not depend on it. Zero fails at load. |
-| `store` | string map | `{}` | Raw `object_store` options, applied on top of the environment. Bucket keys fail at load, and so do an `endpoint` carrying userinfo and keys `object_store` does not recognize under an S3 URL — see [the `store` denylist](#the-store-passthrough-and-the-denylist). |
+| `store` | string map | `{}` | Raw `object_store` options, applied on top of the environment. Bucket keys fail at load, and so do an `endpoint` that is not a URL or carries userinfo, and keys `object_store` does not recognize under an S3 URL — see [the `store` denylist](#the-store-passthrough-and-the-denylist). |
 
 Mind the units on the fingerprinted keys: `MB` and `MiB` parse to
 different byte counts (`64MB` = 64,000,000; `64MiB` = 67,108,864), and
@@ -141,8 +141,10 @@ records as a whole arrive in no fixed order.
 field: `region`, `endpoint`, static credentials, `allow_http`, timeouts. Its
 values are applied **on top of the environment** when the client is built from
 `url`, so anything set here overrides what the environment resolved.
-An `endpoint` carrying userinfo fails at load, under any spelling of the key,
-because the client never reads it and its errors quote each request URI.
+An `endpoint` or `aws_endpoint_url_s3` that is not a URL fails at load, under
+any spelling of either key, because the client builds each request URI from it.
+So does one carrying userinfo, because the client never reads it and its errors
+quote each request URI.
 
 Bucket keys are **rejected at load time with an explanation**. The client is
 built from `url`, so a passthrough bucket could never take effect. Rejecting it
@@ -220,6 +222,10 @@ the [job location](#bounded-jobs-and-the-job-location) the store answers with
 immediately, because no peer would fare better. So does a listing answered
 `404`, which a store sends for a bucket that does not exist. The error names
 the status.
+
+A listing page that carries the continuation token its request was sent with
+also fails the pipeline immediately, because asking again returns the same
+page.
 
 A worker that reads [storage notifications](#storage-notifications) needs
 these permissions besides `s3:GetObject`:
@@ -1232,6 +1238,11 @@ it. When a store omits it, a backfill completes without the remaining objects
 and reports no error. SeaweedFS 4.48 omits the token when a page ends on a
 folder marker, a key ending in `/`, and every key after it sits under that
 marker.
+
+The token on each page must also differ from the one the page was asked with.
+A page that repeats its request's token fails the lister run with a fatal
+error. A store that cycles through two or more tokens is not detected, and its
+listing does not end.
 
 ## Metrics
 

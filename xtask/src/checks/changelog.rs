@@ -1,7 +1,8 @@
 //! The changelog fragments: the gate, the scaffolder that writes one, the
 //! release assembly that consumes them and adds the moved root dependency
 //! requirements, one version's release body, and whether the release being
-//! prepared announces a breaking change.
+//! prepared announces a breaking change or carries a fragment that makes it a
+//! minor.
 //!
 //! A change somebody upgrading would care about carries a file under
 //! `changelog.d/`, and `changelog.d/README.md` states the format and the
@@ -36,6 +37,10 @@ const TYPES: &[&str] = &[
     "fixed",
     "security",
 ];
+
+/// The types the release derives a minor bump from, since SemVer puts a new
+/// feature and a deprecation in a minor release.
+const MINOR_TYPES: &[&str] = &["added", "deprecated"];
 
 /// What a fragment opens with when its change breaks something. The release
 /// derives a minor bump from it.
@@ -1414,17 +1419,24 @@ fn assemble(
                 // Each form goes on its own line. A fragment may end in a
                 // fenced code block, and CommonMark allows only whitespace after
                 // a closing fence, so appending leaves it unclosed and swallows
-                // every section below.
+                // every section below. A table takes the next line as a row,
+                // and an HTML block that ends at a blank line takes it as
+                // its own, so the form after either gets a blank line first.
+                let gap = if last_block_takes_the_next_line(&body) {
+                    "\n\n"
+                } else {
+                    "\n"
+                };
                 match fragment_reference(root, &file, lookup)? {
                     Some(Reference::Pull(number)) => {
                         links.push(link_line(&number));
-                        body = format!("{body}\n([#{number}])");
+                        body = format!("{body}{gap}([#{number}])");
                     }
                     // An inline link. The definition list holds `[#N]` alone and
                     // sorts on that number.
                     Some(Reference::Commit(sha)) => {
                         let short = sha.get(..7).unwrap_or(&sha);
-                        body = format!("{body}\n([`{short}`]({REPO_URL}/commit/{sha}))");
+                        body = format!("{body}{gap}([`{short}`]({REPO_URL}/commit/{sha}))");
                     }
                     None => {}
                 }
@@ -1554,6 +1566,17 @@ fn entry_body(text: &str) -> String {
         lines = &lines[1..];
     }
     lines.join("\n")
+}
+
+/// Whether `body`'s last block is a table or an HTML block, which a line
+/// appended with no blank line before it would join. Parsed with tables on,
+/// as the fragment gate parses.
+fn last_block_takes_the_next_line(body: &str) -> bool {
+    use pulldown_cmark::{Event, Options, Parser, TagEnd};
+    matches!(
+        Parser::new_ext(body, Options::ENABLE_TABLES).last(),
+        Some(Event::End(TagEnd::HtmlBlock | TagEnd::Table))
+    )
 }
 
 /// The entry as a list item. Blank lines stay blank, since indenting them
@@ -1872,11 +1895,7 @@ fn today(root: &Path) -> Result<String, Error> {
 /// the fragments, and its tag. Reads `HEAD` through git, so an uncommitted
 /// fragment does not count.
 pub(crate) fn breaking_announced(root: &Path) -> Result<bool, Error> {
-    let listing = run::capture(
-        root,
-        &Step::new("git", ["ls-tree", "--name-only", "HEAD"]).arg(format!("{FRAGMENTS}/")),
-    )?;
-    for file in listing.split('\n').filter(|f| fragment_type(f).is_some()) {
+    for file in committed_fragments(root)? {
         let text = run::capture(
             root,
             &Step::new("git", ["show"]).arg(format!("HEAD:{file}")),
@@ -1900,6 +1919,29 @@ pub(crate) fn breaking_announced(root: &Path) -> Result<bool, Error> {
     )?;
     Ok(scan(&changelog, &format!("## [{version}] "))
         .is_ok_and(|section| section.contains(BREAKING)))
+}
+
+/// The first fragment at `HEAD` whose type is one of [`MINOR_TYPES`], as its
+/// type and its path. Reads `HEAD` through git, so an uncommitted fragment does
+/// not count.
+pub(crate) fn minor_fragment(root: &Path) -> Result<Option<(String, String)>, Error> {
+    Ok(committed_fragments(root)?.into_iter().find_map(|file| {
+        let kind = fragment_type(&file).filter(|kind| in_list(MINOR_TYPES, kind))?;
+        Some((kind.to_owned(), file))
+    }))
+}
+
+/// The paths of the fragments committed at `HEAD`.
+fn committed_fragments(root: &Path) -> Result<Vec<String>, Error> {
+    let listing = run::capture(
+        root,
+        &Step::new("git", ["ls-tree", "--name-only", "HEAD"]).arg(format!("{FRAGMENTS}/")),
+    )?;
+    Ok(listing
+        .split('\n')
+        .filter(|f| fragment_type(f).is_some())
+        .map(str::to_owned)
+        .collect())
 }
 
 /// Whether a fragment's text opens with the breaking marker.

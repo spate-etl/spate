@@ -18,7 +18,9 @@ use spate_core::feed::ConnectError;
 use spate_core::feed::{DepthOf, Feed, FeedError, FeedErrorKind, FeedMetricsCtx, Receipt, Unit};
 use spate_core::metrics::Meter;
 use spate_core::pipeline::ExitState;
+use spate_core::task::spawn_thread;
 use spate_test::{HANG, WriteOutcome, wait_until};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 use support::feed::{
     ATTEMPT, ATTEMPT_PARTITIONS, BoundedJob, DEAD, FeedClock, ON_MOCK, RETRY, WORK, assert_stalled,
@@ -699,6 +701,50 @@ fn a_stalled_offset_fetch_does_not_exceed_the_max_poll_interval() {
     );
 }
 
+/// A group leader that assigns the feed a partition of another topic stops
+/// the feed before any of that topic's messages is delivered, and the feed
+/// still leaves the group on drop with the assignment unanswered. The test
+/// leads the group, so the feed's consumer receives the bytes a hostile member
+/// would send. Regression for #2029.
+#[test]
+fn an_assignment_on_another_topic_stops_the_feed() {
+    const OTHER: &str = "other";
+    let cluster = cluster(1);
+    cluster.create_topic(OTHER, 1, 1).unwrap();
+    let brokers = cluster.bootstrap_servers();
+    produce_raw(&brokers, OTHER, &[(Some(&b"foreign"[..]), &b"body"[..])]);
+    let group = spate_test::unique_name("another-topic");
+    let leader = cluster.lead_group_with(&group, WORK, |_, _| vec![(OTHER.to_owned(), vec![0])]);
+    let worker = direct(&feed_yaml(&brokers, &group, "", ""));
+
+    let mut error = None;
+    wait_until(HANG, "the feed stops on the assignment", || {
+        match worker.feed.receive(1) {
+            Ok(units) => assert!(units.is_empty(), "delivered from `{OTHER}`: {units:?}"),
+            Err(e) => error = Some(e),
+        }
+        error
+            .as_ref()
+            .is_some_and(|e| e.kind == FeedErrorKind::Fatal)
+    });
+    let error = error.unwrap();
+    assert!(
+        error.reason.contains(&format!(
+            "the group offered a partition of a topic other than `{WORK}` or `{RETRY}`"
+        )),
+        "{error}"
+    );
+    let (dropped, on_drop) = mpsc::channel();
+    let dropping = spawn_thread("drop-feed", move || {
+        drop(worker);
+        let _ = dropped.send(());
+    })
+    .unwrap();
+    on_drop.recv_timeout(HANG).expect("the feed drops");
+    dropping.join().unwrap();
+    drop(leader);
+}
+
 /// Pins that a record batch librdkafka reports as corrupt stops the feed,
 /// with the reason naming the bad message.
 #[test]
@@ -1139,6 +1185,34 @@ fn a_message_with_no_unit_ends_a_bounded_job_stalled() {
 /// A bounded job on the mock, its lister run.
 fn listed(brokers: &str, tag: &str) -> BoundedJob {
     BoundedJob::listed(brokers, tag, "", publisher_on_mock)
+}
+
+/// A transaction marker at the end of each attempt partition leaves the gate
+/// caught up: the unit behind it is admitted and read, and the job completes.
+/// A marker takes an offset and is never delivered, so the follower passes it
+/// by position. Regression for #1765.
+#[test]
+fn a_marker_on_the_attempt_topic_leaves_the_gate_caught_up() {
+    let cluster = cluster(1);
+    let brokers = cluster.bootstrap_servers();
+    let group = spate_test::unique_name("attempt-marker");
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    let section = bounded_section(&brokers, &group, &dir);
+    list_once(publisher_on_mock(&section), &data, &section);
+    for partition in 0..ATTEMPT_PARTITIONS {
+        write_marker(&brokers, ATTEMPT, partition, Marker::Commit);
+    }
+    let rows = recs("a", 2);
+    let unit = stage(&data, "a.ndjson", &rows);
+    produce_raw(&brokers, WORK, &[(Some(unit.id.as_bytes()), &unit.body)]);
+
+    let clock = TestClock::frozen();
+    let worker = launch_bounded(ON_MOCK, &data, &section, &clock);
+    wait_until(HANG, "the unit is admitted and read", || {
+        written(&worker.script) == sorted(rows.clone())
+    });
+    assert_eq!(run_to_exit(&worker, &clock).state, ExitState::Completed);
 }
 
 /// Pins that a bounded job ends `Completed` once its unit is read and the

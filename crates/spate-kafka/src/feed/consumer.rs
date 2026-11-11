@@ -61,13 +61,13 @@ use super::events::Cause;
 use super::inflight::{Position, Tp};
 use super::write::{self, Destination, Finish, Move, Outgoing, Producer, Tombstone, Write};
 use super::{Closing, Core, Gating, LatchOnPanic, READY_CAPACITY, State, Topics};
-use crate::client::read_position;
+use crate::client::{only_on_topics, read_position};
 use crate::context::{Intent, SourceContext};
 use rdkafka::consumer::{BaseConsumer, CommitMode, Consumer};
 use rdkafka::error::{KafkaError, RDKafkaErrorCode};
 use rdkafka::message::{BorrowedMessage, Headers, Message};
 use rdkafka::producer::Producer as _;
-use rdkafka::{ClientConfig, Offset, TopicPartitionList};
+use rdkafka::{Offset, TopicPartitionList};
 use spate_core::error::ErrorClass;
 use spate_core::feed::{FeedError, FeedErrorKind, Unit};
 use std::collections::BTreeSet;
@@ -88,12 +88,6 @@ pub(crate) const POLL_BATCH: usize = 64;
 /// How long a feed dropped without a close waits for its writes in flight
 /// before its last commit.
 pub(crate) const STOP_SETTLE: Duration = Duration::from_secs(1);
-
-/// The longest the committed-offset read before an assignment may take.
-const COMMITTED_LOOKUP_MAX: Duration = Duration::from_secs(10);
-
-/// librdkafka's default `max.poll.interval.ms`.
-const DEFAULT_MAX_POLL_INTERVAL: Duration = Duration::from_secs(300);
 
 /// The consumer thread's own state.
 pub(crate) struct Driver {
@@ -362,6 +356,16 @@ impl Driver {
     }
 
     fn assign(&mut self, tpl: &TopicPartitionList) {
+        // Ahead of the lookup and the assign, which would fetch whatever topic
+        // the group named, and of `tps`.
+        let topics = self.core.topics();
+        if !only_on_topics(tpl, &[&topics.work, &topics.retry]) {
+            self.core.latch(&format!(
+                "the group offered a partition of a topic other than `{}` or `{}`",
+                topics.work, topics.retry
+            ));
+            return;
+        }
         let start = if tpl.count() == 0 {
             tpl.clone()
         } else {
@@ -546,18 +550,6 @@ impl Drop for Driver {
             tracing::warn!(error = %e, "unassign while the feed stops failed");
         }
     }
-}
-
-/// The bound on the committed-offset read made before each assignment, for
-/// a consumer configured by `cc`: a quarter of its `max.poll.interval.ms`,
-/// at most 10 s. librdkafka's poll-interval clock keeps running during the
-/// read, and a member that outlasts the interval is evicted from the group.
-pub(crate) fn committed_lookup_timeout(cc: &ClientConfig) -> Duration {
-    let max_poll = cc
-        .get("max.poll.interval.ms")
-        .and_then(|v| v.trim().parse::<u64>().ok())
-        .map_or(DEFAULT_MAX_POLL_INTERVAL, Duration::from_millis);
-    (max_poll / 4).min(COMMITTED_LOOKUP_MAX)
 }
 
 /// Take the writes due at `now` out of `st`'s resend queue. A move or a

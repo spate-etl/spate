@@ -114,6 +114,8 @@ use bytes::{BufMut, BytesMut};
 use serde::ser::{self, Serialize};
 use std::fmt;
 
+use crate::native::leaf::{put_leb128, put_string};
+
 /// A row failed to serialize. Record-level: subject to the sink stage's
 /// error policy, never fatal to the pipeline by itself.
 #[derive(Debug, thiserror::Error)]
@@ -187,18 +189,6 @@ pub fn serialize_row<T: Serialize + ?Sized>(
 }
 
 pub use crate::types::{DateTime64Millis, DateTimeSeconds};
-
-fn put_leb128(buf: &mut BytesMut, mut value: u64) {
-    loop {
-        let byte = (value & 0x7f) as u8;
-        value >>= 7;
-        if value == 0 {
-            buf.put_u8(byte);
-            break;
-        }
-        buf.put_u8(byte | 0x80);
-    }
-}
 
 struct RowBinarySer<'a> {
     buf: &'a mut BytesMut,
@@ -314,15 +304,13 @@ impl<'a, 'b> ser::Serializer for &'a mut RowBinarySer<'b> {
 
     #[inline]
     fn serialize_str(self, v: &str) -> Result<(), RowBinaryError> {
-        put_leb128(self.buf, v.len() as u64);
-        self.buf.put_slice(v.as_bytes());
+        put_string(self.buf, v.as_bytes());
         Ok(())
     }
 
     #[inline]
     fn serialize_bytes(self, v: &[u8]) -> Result<(), RowBinaryError> {
-        put_leb128(self.buf, v.len() as u64);
-        self.buf.put_slice(v);
+        put_string(self.buf, v);
         Ok(())
     }
 
@@ -623,6 +611,19 @@ mod tests {
         let bytes = enc(&long);
         assert_eq!(&bytes[..2], &[0xac, 0x02]);
         assert_eq!(bytes.len(), 302);
+    }
+
+    #[test]
+    fn bytes_are_leb128_prefixed_like_strings() {
+        /// Serializes through `serialize_bytes`, as `serde_bytes` does.
+        struct Raw<'a>(&'a [u8]);
+        impl Serialize for Raw<'_> {
+            fn serialize<S: ser::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+                s.serialize_bytes(self.0)
+            }
+        }
+        assert_eq!(enc(&Raw(&[0xff, 0x00, 0x7f])), [3, 0xff, 0x00, 0x7f]);
+        assert_eq!(enc(&Raw(&[])), [0]);
     }
 
     #[test]

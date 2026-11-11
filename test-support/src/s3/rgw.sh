@@ -9,6 +9,25 @@ set -eu
 ACCESS_KEY="$1"
 SECRET_KEY="$2"
 
+# Each stage names itself on stderr, and a failed step leaves the cluster's
+# state and the tail of each daemon's log there: the container's log is all a
+# failed start keeps.
+stage() { echo "rgw.sh: $*" >&2; }
+# shellcheck disable=SC2329 # the EXIT trap below calls it
+report() {
+  status=$?
+  if [ "$status" -ne 0 ]; then
+    stage "exiting with status $status"
+    timeout 10 ceph --connect-timeout 5 -s >&2 || true
+    for log in /var/log/ceph/*.log; do
+      [ -e "$log" ] || continue
+      echo "---- last 40 lines of $log ----" >&2
+      tail -n 40 "$log" >&2 || true
+    done
+  fi
+}
+trap 'report' EXIT
+
 fsid=$(cat /proc/sys/kernel/random/uuid)
 mkdir -p /etc/ceph /var/lib/ceph/mon/ceph-a /var/lib/ceph/osd/ceph-0 /var/log/ceph /var/run/ceph
 cat > /etc/ceph/ceph.conf <<EOF
@@ -42,15 +61,24 @@ monmaptool --create --add a v1:127.0.0.1:6789 --fsid "$fsid" /tmp/monmap >/dev/n
 ceph-mon --mkfs -i a --monmap /tmp/monmap --setuser root --setgroup root
 ceph-mon -i a --setuser root --setgroup root
 until ceph mon stat >/dev/null 2>&1; do :; done
+stage "monitor up"
 
 ceph osd create >/dev/null
-ceph-osd -i 0 --mkfs --setuser root --setgroup root 2>/dev/null
-ceph-osd -i 0 --setuser root --setgroup root
+ceph-osd -i 0 --mkfs --setuser root --setgroup root
+# Without the config fetch the OSD's monitor client starts with this fsid, and
+# its first command does not race the monmap that carries it. A command sent
+# with fsid 0 is refused, and the OSD exits.
+ceph-osd -i 0 --no-mon-config --setuser root --setgroup root
 until ceph osd stat 2>/dev/null | grep -q '1 up'; do :; done
+stage "OSD up"
 
 # The user exists before radosgw listens, so its first 200 means the key
 # pair signs.
 radosgw-admin user create --uid=spate-test --display-name=spate-test \
   --access-key="$ACCESS_KEY" --secret-key="$SECRET_KEY" >/dev/null
+stage "user created, starting radosgw"
 
-exec radosgw -f -n client.rgw.a --setuser root --setgroup root
+# radosgw logs to stderr and runs as a child, so the report covers it too.
+# It returns only when it stops, which fails the start even at status 0.
+radosgw -d -n client.rgw.a --setuser root --setgroup root
+exit 1

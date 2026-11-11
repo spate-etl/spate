@@ -19,9 +19,9 @@ on:
       version:
         description: >-
           The version to release, as X.Y.Z. Checked against the derivation:
-          a changelog fragment opening with **Breaking:**, or a raised
-          rust-version, means a minor bump, anything else a patch. The run
-          fails when the two disagree.
+          a changelog fragment opening with **Breaking:**, an added or
+          deprecated fragment, or a raised rust-version, means a minor bump,
+          anything else a patch. The run fails when the two disagree.
         required: true
         type: string
   push:

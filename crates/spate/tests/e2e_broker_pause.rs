@@ -1,7 +1,7 @@
-//! E2E scenario: a silent coordinator. The broker is paused mid-stream, so its
-//! sockets stay open and answer nothing, for long enough that the member's session
-//! expires. The pipeline survives the silence, rejoins once the broker answers,
-//! and loses nothing.
+//! E2E scenarios: a silent coordinator. The broker is paused mid-stream, so its
+//! sockets stay open and answer nothing. Paused long enough that the member's
+//! session expires, the pipeline survives the silence, rejoins once the broker
+//! answers, and loses nothing. Paused before a stop, the run still ends.
 //!
 //! Selecting it:
 //!
@@ -74,4 +74,43 @@ fn a_silent_broker_mid_stream_loses_nothing() {
         sampled.discarded > 0,
         "the sampler's own probes met the silence: {sampled:?}"
     );
+}
+
+/// Pins that a stop with the broker silent ends the run: the final commit and the
+/// consumer's close each wait a bounded time for the group's answer.
+#[test]
+#[ignore = "requires Docker"]
+fn a_stop_during_a_silent_broker_ends_the_run() {
+    let h = Harness::up();
+    let mut params = PipelineParams::defaults("e2e-stop-pause", 19197);
+    params.rdkafka = vec![
+        ("socket.timeout.ms", "5000"),
+        ("session.timeout.ms", "6000"),
+        ("heartbeat.interval.ms", "2000"),
+    ];
+    h.create_topic(&params.topic, 3);
+    h.create_table(&params.table);
+    h.produce(&params.topic, &events(3, 20_000));
+    let pipeline = h.spawn_pipeline(&params);
+    wait_until(Duration::from_secs(60), "mid-stream", || {
+        h.count(&params.table) >= 5_000
+    });
+    let RunningPipeline {
+        shutdown,
+        join,
+        sampler,
+        ..
+    } = pipeline;
+    h.pause_broker();
+    let started = std::time::Instant::now();
+    shutdown.trigger();
+    while !join.is_finished() && started.elapsed() < Duration::from_secs(120) {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let waited = started.elapsed();
+    let finished = join.is_finished();
+    h.unpause_broker();
+    join.join().expect("thread").expect("start");
+    sampler.finish();
+    assert!(finished, "the run had not ended {waited:?} after its stop");
 }

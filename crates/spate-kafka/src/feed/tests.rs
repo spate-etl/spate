@@ -1978,7 +1978,7 @@ mod cluster {
 
     use super::super::attempt::{self, Follower};
     use super::super::config::KafkaFeedConfig;
-    use super::super::consumer::{self, COMMIT_INTERVAL, CommitWait, Driver, POLL_BATCH, tpl_of};
+    use super::super::consumer::{self, COMMIT_INTERVAL, Driver, POLL_BATCH, Wait, tpl_of};
     use super::super::gate::Gate;
     use super::super::inflight::Tp;
     use super::super::producer::FeedProducerHooks;
@@ -5102,7 +5102,7 @@ mod cluster {
         (cluster, d, out)
     }
 
-    fn waits(d: &Driver) -> Vec<CommitWait> {
+    fn waits(d: &Driver) -> Vec<Wait> {
         d.waits.lock().unwrap().clone()
     }
 
@@ -5139,10 +5139,7 @@ mod cluster {
         assert!(!committed);
         let waits = waits(&d);
         assert!(
-            matches!(
-                waits[..],
-                [CommitWait::Sent(_), CommitWait::Held(Duration::ZERO)]
-            ),
+            matches!(waits[..], [Wait::Sent(_), Wait::Held(Duration::ZERO)]),
             "{waits:?}"
         );
         drop((d, cluster));
@@ -5164,7 +5161,7 @@ mod cluster {
             d.consumer.held.is_none()
                 && waits(&d)
                     .iter()
-                    .filter(|w| matches!(w, CommitWait::Sent(_)))
+                    .filter(|w| matches!(w, Wait::Sent(_)))
                     .count()
                     >= 2
         });
@@ -5236,8 +5233,9 @@ mod cluster {
         assert_eq!(
             *waits.lock().unwrap(),
             [
-                CommitWait::Sent(Duration::ZERO),
-                CommitWait::Leave(Duration::ZERO)
+                Wait::Flush(Duration::ZERO),
+                Wait::Sent(Duration::ZERO),
+                Wait::Leave(Duration::ZERO)
             ]
         );
         let err = closing
@@ -5264,7 +5262,11 @@ mod cluster {
         let bound = Duration::from_secs(2);
         assert_eq!(
             *waits.lock().unwrap(),
-            [CommitWait::Sent(bound), CommitWait::Leave(bound)]
+            [
+                Wait::Flush(Duration::from_secs(5)),
+                Wait::Sent(bound),
+                Wait::Leave(bound)
+            ]
         );
         let err = closing
             .try_outcome()
@@ -5293,9 +5295,10 @@ mod cluster {
         assert_eq!(
             *waits.lock().unwrap(),
             [
-                CommitWait::Sent(bound),
-                CommitWait::Held(bound),
-                CommitWait::Leave(bound)
+                Wait::Sent(bound),
+                Wait::Flush(Duration::from_secs(5)),
+                Wait::Held(bound),
+                Wait::Leave(bound)
             ]
         );
         let err = closing
@@ -5315,12 +5318,7 @@ mod cluster {
         let (cluster, d, _) = on_driver(cluster, d, "the periodic commit", |d| {
             d.commit_finished("periodic")
         });
-        d.consumer
-            .context()
-            .intents
-            .lock()
-            .unwrap()
-            .push_back(Intent::Revoke(tpl_of(&[work()])));
+        revoke_work(&d);
         let (cluster, d, ()) = on_driver(cluster, d, "the revocation", Driver::serve_intents);
         assert!(
             !d.core.lock().tracker.owned().any(|tp| *tp == work()),
@@ -5328,10 +5326,330 @@ mod cluster {
         );
         let waits = waits(&d);
         assert!(
-            matches!(waits[..], [CommitWait::Sent(_), CommitWait::Held(b)] if b > Duration::ZERO),
+            matches!(waits[..], [Wait::Sent(_), Wait::Held(b)] if b > Duration::ZERO),
             "{waits:?}"
         );
         drop((d, cluster));
+    }
+
+    /// A group-call bound no test outlasts, so only an answer, the stop or the
+    /// clock ends a commit's wait.
+    const HOUR: Duration = Duration::from_secs(3600);
+
+    /// Answer every request after 300 ms: past the first slice of a commit's
+    /// wait, and inside `socket.timeout.ms`.
+    fn answering_late(cluster: &MockKafka) {
+        cluster
+            .broker_round_trip_time(-1, Duration::from_millis(300))
+            .unwrap();
+    }
+
+    /// Queue a revocation of the work topic's partition for `d` to serve.
+    fn revoke_work(d: &Driver) {
+        d.consumer
+            .context()
+            .intents
+            .lock()
+            .unwrap()
+            .push_back(Intent::Revoke(tpl_of(&[work()])));
+    }
+
+    /// Raise the work topic's partition to the consumer's position, as a
+    /// periodic commit does, so a revocation has a point to commit.
+    fn retire(d: &Driver) {
+        consumer::retire_offsets(&d.core, |_| position(d));
+    }
+
+    /// Run `f` on `d` on a thread of its own. [`finish`] takes `d` back with
+    /// what `f` returned.
+    fn start<T: Send + 'static>(
+        d: Driver,
+        f: impl FnOnce(&mut Driver) -> T + Send + 'static,
+    ) -> mpsc::Receiver<(Driver, T)> {
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut d = d;
+            let out = f(&mut d);
+            let _ = tx.send((d, out));
+        });
+        rx
+    }
+
+    /// Take back what [`start`] ran, failing naming `what` when it has not
+    /// returned.
+    fn finish<T>(
+        cluster: &MockKafka,
+        started: &mpsc::Receiver<(Driver, T)>,
+        what: &str,
+    ) -> (Driver, T) {
+        if let Ok(back) = started.recv_timeout(HANG) {
+            return back;
+        }
+        // Its clients are still connected, and dropping them would wait on them.
+        std::mem::forget(cluster.clone());
+        panic!("{what} did not return");
+    }
+
+    /// Wait until `waits` holds `wait`.
+    fn recorded(waits: &std::sync::Mutex<Vec<Wait>>, wait: Wait) {
+        wait_until(HANG, &format!("{wait:?} is recorded"), || {
+            waits.lock().unwrap().contains(&wait)
+        });
+    }
+
+    /// Pins that a close's flush waits until half of `within` past the close's
+    /// start, so time the close spent before the consumer thread took it comes
+    /// off the flush. Regression for #2042.
+    #[test]
+    fn the_flush_waits_until_half_the_close() {
+        let clock = TestClock::frozen();
+        let (cluster, _, core, producer, d) =
+            past_a_marker("flush-since", SyncClock::new(clock.clone()));
+        let waits = Arc::clone(&d.waits);
+        let feed = feed_over(&core, &producer, None);
+        let _closing = feed.close(Duration::from_secs(10)).expect("a close");
+        clock.advance(Duration::from_secs(4));
+        ends(&cluster, d);
+        assert_eq!(
+            waits.lock().unwrap().first(),
+            Some(&Wait::Flush(Duration::from_secs(1)))
+        );
+        drop(feed);
+    }
+
+    /// Pins that a close whose half-way point is past the clock's range gets
+    /// no flush, where the producer's flush would panic adding the wait to
+    /// the clock.
+    #[test]
+    fn the_flush_of_a_close_past_the_clock_does_not_wait() {
+        let clock = TestClock::frozen();
+        let (cluster, _, core, producer, d) =
+            past_a_marker("flush-edge", SyncClock::new(clock.clone()));
+        let waits = Arc::clone(&d.waits);
+        let feed = feed_over(&core, &producer, None);
+        let _closing = feed.close(Duration::MAX).expect("a close");
+        ends(&cluster, d);
+        assert_eq!(
+            waits.lock().unwrap().first(),
+            Some(&Wait::Flush(Duration::ZERO))
+        );
+        drop(feed);
+    }
+
+    /// Pins that a feed stopped without a close flushes for `STOP_SETTLE`.
+    #[test]
+    fn a_stop_without_a_close_flushes_for_the_settle() {
+        let clock = TestClock::frozen();
+        let (cluster, _, core, _, d) = past_a_marker("flush-stop", SyncClock::new(clock));
+        let waits = Arc::clone(&d.waits);
+        super::super::stop(&core);
+        ends(&cluster, d);
+        assert_eq!(
+            waits.lock().unwrap().first(),
+            Some(&Wait::Flush(consumer::STOP_SETTLE))
+        );
+    }
+
+    /// Pins that a periodic commit's wait under way ends when the feed closes:
+    /// the commit counts as failed and is held for the last commit, with no
+    /// warning. Regression for #2042.
+    #[test]
+    fn a_periodic_commit_wait_ends_when_the_feed_closes() {
+        let clock = TestClock::frozen();
+        let (cluster, _, core, producer, mut d) =
+            past_a_marker("periodic-close", SyncClock::new(clock));
+        d.call_bound = HOUR;
+        let waits = Arc::clone(&d.waits);
+        let feed = feed_over(&core, &producer, None);
+        slow(&cluster);
+        let started = start(d, |d| {
+            let mut committed = None;
+            let warned = spate_test::capture_logs(tracing::Level::WARN, || {
+                committed = Some(d.commit_finished("periodic"));
+            });
+            (committed.expect("the commit ran"), warned)
+        });
+        recorded(&waits, Wait::Sent(HOUR));
+        let _closing = feed.close(Duration::from_secs(10)).expect("a close");
+        let (d, (committed, warned)) = finish(&cluster, &started, "the periodic commit");
+        assert!(!committed, "a commit the close cut short counted as made");
+        assert!(d.consumer.held.is_some(), "the cut commit was let go");
+        assert_eq!(*waits.lock().unwrap(), [Wait::Sent(HOUR), Wait::Stopped]);
+        let unanswered: Vec<&String> = warned
+            .iter()
+            .filter(|l| l.contains("has not answered"))
+            .collect();
+        assert!(unanswered.is_empty(), "{unanswered:#?}");
+        drop((d, cluster, feed));
+    }
+
+    /// Pins that a revocation's commit wait under way ends at the close's
+    /// deadline, here before its own bound. Regression for #2042.
+    #[test]
+    fn a_revocation_commit_waits_no_later_than_the_close() {
+        let clock = TestClock::frozen();
+        let (cluster, _, core, producer, mut d) =
+            past_a_marker("revoke-close", SyncClock::new(clock.clone()));
+        d.call_bound = HOUR;
+        retire(&d);
+        revoke_work(&d);
+        let waits = Arc::clone(&d.waits);
+        let feed = feed_over(&core, &producer, None);
+        slow(&cluster);
+        let started = start(d, Driver::serve_intents);
+        recorded(&waits, Wait::Sent(HOUR));
+        let _closing = feed.close(Duration::from_secs(10)).expect("a close");
+        clock.advance(Duration::from_secs(10));
+        let (d, ()) = finish(&cluster, &started, "the revocation");
+        let waits = waits.lock().unwrap().clone();
+        assert!(
+            matches!(waits[..], [Wait::Sent(HOUR), Wait::Capped(_)]),
+            "{waits:?}"
+        );
+        assert!(
+            d.consumer.held.is_some(),
+            "the unanswered commit was let go"
+        );
+        drop((d, cluster, feed));
+    }
+
+    /// Pins that a revocation's wait for a held commit ends at the close's
+    /// deadline, here before its own bound. Regression for #2042.
+    #[test]
+    fn a_revocation_held_wait_waits_no_later_than_the_close() {
+        let clock = TestClock::frozen();
+        let (cluster, _, core, producer, d) =
+            past_a_marker("revoke-held-close", SyncClock::new(clock.clone()));
+        slow(&cluster);
+        let (cluster, mut d, _) = on_driver(cluster, d, "the periodic commit", |d| {
+            d.commit_finished("periodic")
+        });
+        d.call_bound = HOUR;
+        revoke_work(&d);
+        let waits = Arc::clone(&d.waits);
+        let feed = feed_over(&core, &producer, None);
+        let started = start(d, Driver::serve_intents);
+        recorded(&waits, Wait::Held(HOUR));
+        let _closing = feed.close(Duration::from_secs(10)).expect("a close");
+        clock.advance(Duration::from_secs(10));
+        let (d, ()) = finish(&cluster, &started, "the revocation");
+        let waits = waits.lock().unwrap().clone();
+        assert!(
+            matches!(
+                waits[..],
+                [Wait::Sent(_), Wait::Held(HOUR), Wait::Capped(_)]
+            ),
+            "{waits:?}"
+        );
+        drop((d, cluster, feed));
+    }
+
+    /// Pins that a revocation during a close still commits when the group
+    /// answers before the close's deadline, past the wait's first slice.
+    #[test]
+    fn a_revocation_during_a_close_commits_when_answered_in_time() {
+        let clock = TestClock::frozen();
+        let (cluster, group, core, producer, mut d) =
+            past_a_marker("revoke-close-answered", SyncClock::new(clock));
+        let brokers = cluster.bootstrap_servers();
+        d.call_bound = HOUR;
+        retire(&d);
+        revoke_work(&d);
+        let feed = feed_over(&core, &producer, None);
+        let _closing = feed.close(HOUR).expect("a close");
+        answering_late(&cluster);
+        let (cluster, d, ()) = on_driver(cluster, d, "the revocation", Driver::serve_intents);
+        assert!(d.consumer.held.is_none(), "the answered commit is held");
+        assert_eq!(committed(&brokers, &group), Some(1));
+        drop((d, cluster, feed));
+    }
+
+    /// Pins that a close ending no earlier than a revocation's own bound leaves
+    /// the revocation's wait alone.
+    #[test]
+    fn a_close_no_earlier_than_the_revocation_bound_leaves_its_wait_alone() {
+        let clock = TestClock::frozen();
+        let (cluster, group, core, producer, mut d) =
+            past_a_marker("revoke-close-tie", SyncClock::new(clock));
+        let brokers = cluster.bootstrap_servers();
+        d.call_bound = Duration::from_secs(10);
+        retire(&d);
+        revoke_work(&d);
+        let waits = Arc::clone(&d.waits);
+        let feed = feed_over(&core, &producer, None);
+        let _closing = feed.close(Duration::from_secs(10)).expect("a close");
+        answering_late(&cluster);
+        let (cluster, d, ()) = on_driver(cluster, d, "the revocation", Driver::serve_intents);
+        assert_eq!(
+            *waits.lock().unwrap(),
+            [Wait::Sent(Duration::from_secs(10))]
+        );
+        assert_eq!(committed(&brokers, &group), Some(1));
+        drop((d, cluster, feed));
+    }
+
+    /// Pins that a feed that latches with no close hands its consumer's close
+    /// off for the whole close wait.
+    #[test]
+    fn a_latched_stop_hands_off_for_the_close_wait() {
+        let clock = TestClock::frozen();
+        let (cluster, _, core, _, d) = past_a_marker("latch-stop", SyncClock::new(clock));
+        let waits = Arc::clone(&d.waits);
+        core.latch("a test latch");
+        ends(&cluster, d);
+        assert_eq!(
+            waits.lock().unwrap().last(),
+            Some(&Wait::Handoff(crate::client::CLOSE_WAIT))
+        );
+    }
+
+    /// Pins that a commit's wait goes on past its first slice: an answer that
+    /// comes after it counts.
+    #[test]
+    fn a_commit_answered_after_the_first_slice_is_made() {
+        let clock = TestClock::frozen();
+        let (cluster, group, _, _, mut d) = past_a_marker("answered-late", SyncClock::new(clock));
+        let brokers = cluster.bootstrap_servers();
+        d.call_bound = HOUR;
+        answering_late(&cluster);
+        let (cluster, d, committed_now) = on_driver(cluster, d, "the periodic commit", |d| {
+            d.commit_finished("periodic")
+        });
+        assert!(committed_now, "an answered commit counted as failed");
+        assert!(d.consumer.held.is_none(), "the answered commit is held");
+        assert_eq!(committed(&brokers, &group), Some(1));
+        drop((d, cluster));
+    }
+
+    /// Pins that a feed that latches during its close hands its consumer's
+    /// close off with no more than what is left of the close.
+    #[test]
+    fn a_latched_close_hands_off_within_what_is_left() {
+        let clock = TestClock::frozen();
+        let (cluster, _, core, producer, mut d) =
+            past_a_marker("latch-handoff", SyncClock::new(clock.clone()));
+        d.call_bound = HOUR;
+        let waits = Arc::clone(&d.waits);
+        let feed = feed_over(&core, &producer, None);
+        let mut closing = feed.close(HOUR).expect("a close");
+        slow(&cluster);
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            consumer::run(d);
+            let _ = tx.send(());
+        });
+        recorded(&waits, Wait::Sent(HOUR));
+        core.latch("a test latch");
+        clock.advance(HOUR);
+        if rx.recv_timeout(HANG).is_err() {
+            std::mem::forget(cluster.clone());
+            panic!("the consumer thread did not end");
+        }
+        let waits = waits.lock().unwrap().clone();
+        assert!(waits.contains(&Wait::Handoff(Duration::ZERO)), "{waits:?}");
+        let err = closing.try_outcome().expect("settled").unwrap_err();
+        assert_eq!(err.kind, FeedErrorKind::Fatal, "{}", err.reason);
+        drop((feed, cluster));
     }
 }
 

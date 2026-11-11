@@ -4,10 +4,10 @@ description: "Packaging, monitoring, tuning, and scaling a pipeline into a deplo
 
 # Deployment
 
-Everything after `cargo build`. Your pipeline compiles to a single binary
-that reads one YAML file, serves its own probes and metrics, and drains
-cleanly on SIGTERM. Deployment is packaging that binary, watching it, and
-sizing it.
+Everything from the release build onward. Your pipeline compiles to a single
+binary that reads one YAML file, serves its own probes and metrics, and drains
+cleanly on SIGTERM. Deployment is building that binary for throughput,
+packaging it, watching it, and sizing it.
 
 ## [Docker](docker.mdx)
 
@@ -33,7 +33,8 @@ taxonomy lives in [Metrics](../../METRICS.md).
 
 ## [Tuning](tuning.mdx)
 
-Sizing a pipeline: thread counts, batch thresholds, in-flight limits, the
+Building and sizing a pipeline: the release profile, allocator and target
+CPU, thread counts, batch thresholds, in-flight limits, the
 backpressure budget and its sizing rule, queue capacities, checkpoint
 timing, and core pinning, with the exact defaults and why each knob moves
 what it moves.

@@ -2,7 +2,7 @@
 description: "The Kafka feed's attempt follower and its gate read the attempt topic at read_uncommitted, so another writer's open transaction there does not suspend attempt_cap."
 ---
 
-# ADR-0098 — A Kafka feed reads its attempt topic at read_uncommitted, so an open transaction keeps the attempt cap
+# ADR-0099 — A Kafka feed reads its attempt topic at read_uncommitted, so an open transaction keeps the attempt cap
 
 - **Status:** accepted
 - **Date:** 2026-11-11

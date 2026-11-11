@@ -218,8 +218,8 @@ impl ComponentConfig {
     /// `spate-test` pipelines that skip YAML).
     ///
     /// `raw` is the opaque connector body as a [`YamlValue`](super::YamlValue)
-    /// (an `spate-core` re-export of `serde_yaml::Value`; see its docs for the
-    /// dependency-policy exemption). The framework-reserved `chunk` key is
+    /// (a `spate-core` re-export of `yaml_serde`'s `Value`, an INV-6
+    /// exception). The framework-reserved `chunk` key is
     /// peeled out of `raw` here, as on the YAML path. See the struct docs.
     pub fn new(type_tag: impl Into<String>, mut raw: super::YamlValue) -> Self {
         let chunk = peel_chunk(&mut raw);

@@ -1,12 +1,13 @@
 ---
-description: "Sizing thread counts, batch thresholds, the backpressure budget, queue depth, and checkpoint timing together."
+description: "Building the binary for throughput, then sizing thread counts, batch thresholds, the backpressure budget, queue depth, and checkpoint timing together."
 ---
 
 # Tuning
 
 Every knob below has a safe default; most pipelines change two or three of
 them. This page covers what each one moves and how to size them together.
-The defaults quoted are the exact values from
+The build settings take their defaults from Cargo and your platform. The
+defaults quoted for the pipeline's own settings are the exact values from
 [`spate-core/src/config/mod.rs`](repo:crates/spate-core/src/config/mod.rs) and
 the sink config structs (also tabulated in the
 [configuration reference](../07-reference/configuration.mdx)).
@@ -50,6 +51,81 @@ depends on the sink, and its page says so.
 replica is another member of the source's assignment, another set of
 connections, and another participant in every rebalance. Extract the vertical
 throughput first.
+
+## Build the binary for throughput
+
+Your pipeline binary builds with your own crate's release profile and your
+platform's allocator. Two build settings made the measured pipeline faster: thin
+link-time optimization (LTO) and a replacement allocator. A raised target CPU
+did not.
+
+The figures in this section come from one pipeline, run by the
+[pipeline bench](repo:bench/pipeline). It decodes 627-byte line-delimited
+records into a typed struct, which allocates about 26 times a record, and
+encodes them into a columnar format for a sink that discards them. It ran on
+four Linux hosts with glibc, three x86_64 and one aarch64, on one pipeline
+thread unless a figure names four. Each figure compares two builds over 20
+interleaved runs. Other pipeline shapes, operating systems and C libraries were
+not measured. The build times come from a clean build of that bench crate with
+debug info, on 32 vCPUs.
+
+### Set thin LTO in your own profile
+
+Cargo reads profiles only from your workspace's root `Cargo.toml`, so the
+`lto = "thin"` in Spate's repository does not reach your binary. Cargo's default
+release profile does no link-time optimization across crates. Set thin LTO in
+your own `Cargo.toml`:
+
+```toml
+[profile.release]
+lto = "thin"
+```
+
+Thin LTO made the measured pipeline 1–5% faster, and the build took 11–18%
+longer. At four pipeline threads, thin LTO was 1–3% faster on two hosts.
+
+Fat LTO with `codegen-units = 1` came within three percentage points of thin LTO
+on the measured pipeline. Its build took about three times as long as Cargo's
+default, with about three times the peak memory.
+
+### Replace the system allocator
+
+Replacing glibc's allocator made the measured pipeline 8–16% faster on every
+host. To use `mimalloc`, add it to your dependencies:
+
+```toml
+[dependencies]
+mimalloc = "0.1"
+```
+
+Then declare it as the global allocator in your binary:
+
+```rust
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+```
+
+The jemalloc allocator, through `tikv-jemallocator`, gave the same gain on the
+measured pipeline. Each allocator also slowed some encoder benchmark cases on
+one architecture: jemalloc by 8–11% on x86_64, and `mimalloc` by 13% on
+aarch64 in one run.
+
+At four pipeline threads, the allocator was measured only together with fat
+LTO. That build, with jemalloc, was 6–24% faster than Cargo's defaults on two
+hosts.
+
+### Leave the target CPU at its default
+
+Rust builds for a baseline CPU of each architecture unless you pass
+`-C target-cpu`. Every raised target stayed within 2% of the default on the
+measured pipeline. Running a binary built for a newer CPU on an older one is
+undefined behavior. Leave the target at its default.
+
+:::note Connector specifics
+What the build changes in one connector:
+[ClickHouse sink encoding](../04-connectors/sinks/clickhouse/performance-tuning.mdx#link-time-optimization)
+· [JSON format SIMD parser](../04-connectors/formats/json/README.mdx#backends).
+:::
 
 ## Threads: `pipeline.threads` vs `pipeline.io_threads`
 

@@ -37,6 +37,13 @@ Why this shape:
   the first build to take several minutes; for CI, layer a
   [cargo-chef](https://github.com/LukeMathWalker/cargo-chef) stage in front
   to cache dependencies.
+- **Build settings come from this repository.** The image builds inside the
+  repository, so it takes `lto = "thin"` from the repository's `Cargo.toml`. A
+  copy of this Dockerfile in your own project builds with your own release
+  profile. The image also keeps the system allocator. Set both in your own
+  crate as
+  [Build the binary for throughput](tuning.mdx#build-the-binary-for-throughput)
+  describes.
 - **One image, one pipeline.** The framework's operational unit is one
   process running one pipeline; scale by replicas, not by packing pipelines
   into a pod.

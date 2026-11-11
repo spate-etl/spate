@@ -180,6 +180,14 @@ pub(crate) struct Closing {
     pub(crate) since: Instant,
 }
 
+impl Closing {
+    /// When `within` ends on the feed's clock, or `None` past the clock's
+    /// range.
+    pub(crate) fn deadline(&self) -> Option<Instant> {
+        self.since.checked_add(self.within)
+    }
+}
+
 impl State {
     /// Forget the deliveries `receipts` name, at the gate, buffered or
     /// handed out.
@@ -530,11 +538,11 @@ impl Drop for LatchOnPanic {
 /// by its position, `<topic>/<partition>/<offset>`. A message whose key is
 /// not UTF-8 names no unit and goes to the dead-letter topic at once.
 ///
-/// The runtime's [`close`](Feed::close) waits up to half of what it is
-/// given for the feed's writes in flight, commits each partition up to its
-/// first unfinished unit, leaves the group and stops the feed's threads. A
-/// feed dropped without a close does the same with a 1 s wait for its
-/// writes. Units not yet finished are delivered again to the next owner of
+/// The runtime's [`close`](Feed::close) waits for the feed's writes in
+/// flight until half of what it is given has passed, commits each partition
+/// up to its first unfinished unit, leaves the group and stops the feed's
+/// threads. A feed dropped without a close does the same with a 1 s wait for
+/// its writes. Units not yet finished are delivered again to the next owner of
 /// their partition. A feed that stopped on a Fatal error commits nothing
 /// more, so every unit since its last commit is delivered again.
 ///
@@ -1095,9 +1103,12 @@ impl Feed for KafkaFeed {
         );
     }
 
-    /// Wait up to half of `within` for the writes in flight, commit each
-    /// partition up to its first unfinished unit, leave the group and stop
-    /// the feed's threads, all on the consumer thread.
+    /// Wait for the writes in flight until half of `within` has passed since
+    /// the close began, commit each partition up to its first unfinished
+    /// unit, leave the group and stop the feed's threads, all on the consumer
+    /// thread. A periodic commit waiting for the group's answer when the close
+    /// arrives stops waiting, and the close's commit waits for that answer
+    /// first.
     ///
     /// The confirmation settles once the consumer has left the group, or has
     /// handed its leave to a thread of its own. It is rejected with the

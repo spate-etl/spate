@@ -72,7 +72,11 @@ pub(crate) fn silent_after(
     (url, held)
 }
 
-/// `call`'s output, with `clock` moved past `limit` once `held` has yielded.
+/// `call`'s output, with `clock` moved by `limit` once `held` has yielded. A
+/// call that ends before any request is held returns its output at once.
+///
+/// One move is enough: the bound reads the clock when the request is first
+/// polled, which is before the replica can hold it.
 pub(crate) fn past_the_bound<T: Send + 'static>(
     io: &Runtime,
     clock: &TestClock,
@@ -84,13 +88,15 @@ pub(crate) fn past_the_bound<T: Send + 'static>(
     io.spawn(async move {
         let _ = tx.send(call.await);
     });
-    held.recv_timeout(spate_test::HANG)
-        .expect("the request is held");
-    let mut got = None;
-    spate_test::wait_until(spate_test::HANG, "the call ends", || {
-        clock.advance(limit);
-        got = done.recv_timeout(Duration::from_millis(100)).ok();
-        got.is_some()
+    let mut early = None;
+    spate_test::wait_until(spate_test::HANG, "a request is held", || {
+        early = done.try_recv().ok();
+        early.is_some() || held.try_recv().is_ok()
     });
-    got.expect("the call ended")
+    if let Some(output) = early {
+        return output;
+    }
+    clock.advance(limit);
+    done.recv_timeout(spate_test::HANG)
+        .expect("the call ends at the bound")
 }

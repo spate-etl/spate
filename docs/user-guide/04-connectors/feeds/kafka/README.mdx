@@ -80,11 +80,11 @@ attempts have reached it, which moves without being read (see
 
 ## The `rdkafka` passthrough and the denylist
 
-One map configures the feed's consumer, its attempt follower, its depth
-reader, its producer, and the two clients its startup checks read the topics
-with. A property that
+One map configures the feed's consumer, its attempt follower, the gate's reader
+of the attempt topic's ends, its depth reader, its producer, and the two clients
+its startup checks read the topics with. A property that
 applies to one client only draws a warning from librdkafka in the others. A
-`client.id` in the map puts all six clients under one identity, and so in one
+`client.id` in the map puts all seven clients under one identity, and so in one
 broker quota.
 Properties the feed owns are **rejected at load time with an explanation**,
 under their own name and under `topic.<name>`. librdkafka reads

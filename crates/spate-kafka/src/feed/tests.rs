@@ -5616,6 +5616,92 @@ mod docker {
         gate_admits(&config, &core);
     }
 
+    /// Pins that the gate reads an attempt partition's end past another
+    /// writer's open transaction. The transaction holds offset 0 and the
+    /// feed's own record sits at offset 1, so the last stable offset is 0
+    /// and the log end is 2. With no follower running the ledger has read
+    /// neither, and a gate pass puts the unit back. A gate that read the
+    /// last stable offset would find the partition empty and admit it.
+    /// Regression for #1765.
+    #[test]
+    #[ignore = "requires Docker"]
+    fn a_gate_pass_waits_for_a_write_behind_an_open_transaction() {
+        let container = KafkaBroker::selected()
+            .transactional()
+            .start()
+            .expect("start kafka container");
+        let port = container.get_host_port_ipv4(KAFKA_PORT).expect("port");
+        let brokers = format!("127.0.0.1:{port}");
+        let io = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let admin: AdminClient<DefaultClientContext> = raw_config()
+            .set("bootstrap.servers", &brokers)
+            .build()
+            .unwrap();
+        let topic = NewTopic::new("units-attempts", 1, TopicReplication::Fixed(1));
+        for created in io
+            .block_on(admin.create_topics(&[topic], &AdminOptions::new()))
+            .unwrap()
+        {
+            created.unwrap();
+        }
+        let open: BaseProducer = raw_config()
+            .set("bootstrap.servers", &brokers)
+            .set("transactional.id", spate_test::unique_name("foreign"))
+            .set("transaction.timeout.ms", "600000")
+            .build()
+            .unwrap();
+        open.init_transactions(Duration::from_secs(30)).unwrap();
+        open.begin_transaction().unwrap();
+        open.send(
+            BaseRecord::to("units-attempts")
+                .partition(0)
+                .key("foreign/0/0")
+                .payload(&attempt::encode(1)),
+        )
+        .map_err(|(e, _)| e)
+        .unwrap();
+        open.flush(Duration::from_secs(30)).unwrap();
+        write(
+            &brokers,
+            "units-attempts",
+            &[("units/0/0", Some(&attempt::encode(1)[..]))],
+        );
+        let config = KafkaFeedConfig::from_section(&section(&brokers, "open")).unwrap();
+        let lister = attempt::test_lister(&config);
+        wait_until(HANG, "the log end is above the open transaction", || {
+            lister
+                .client()
+                .fetch_watermarks("units-attempts", 0, Duration::from_secs(5))
+                .is_ok_and(|marks| marks == (0, 2))
+        });
+        let core = Arc::new(Core::new(&config, NonZeroU32::MIN, SyncClock::system()));
+        let producer = config
+            .base(false)
+            .create::<super::write::Producer, _>(
+                &config.client(FeedRole::Producer),
+                FeedProducerHooks::new(Arc::clone(&core)),
+            )
+            .unwrap();
+        {
+            let mut st = core.lock();
+            st.tracker.assign([super::tp(0)]);
+            let receipt = st.tracker.deliver(&super::tp(0), 0).unwrap();
+            st.gating.push_back(Gating {
+                receipt,
+                unit: Unit::new("u0", Vec::new()),
+                identity: super::identity(&core, 0),
+            });
+        }
+        Gate::new(Arc::clone(&core), producer, lister, Duration::from_secs(1))
+            .with_step(Duration::from_millis(1))
+            .pass();
+        assert_eq!(core.lock().gating.len(), 1, "the gate admitted the unit");
+        open.abort_transaction(Duration::from_secs(30)).unwrap();
+    }
+
     /// The offset of the first record a fresh read of `topic` finds.
     fn first_offset(brokers: &str, topic: &str) -> Option<i64> {
         let consumer: BaseConsumer = raw_config()

@@ -343,27 +343,36 @@ impl Ledger {
     }
 }
 
-/// The follower's consumer, which the gate lists the attempt partitions
-/// through, so the two read at the same isolation level.
-pub(crate) type Lister = Arc<BaseConsumer<SourceContext>>;
+/// A consumer built as the follower's and never assigned, which the gate lists
+/// the attempt partitions through. It reads at the follower's isolation level,
+/// and holds no Fetch that a listing would wait behind on its connection.
+pub(crate) type Lister = BaseConsumer<SourceContext>;
 
-/// A consumer as the follower builds it, unassigned, for a test's gate to
-/// list through.
+/// The gate's [`Lister`].
+///
+/// # Errors
+///
+/// [`ConnectError::Refused`] when librdkafka refuses the client configuration.
+pub(crate) fn lister(config: &KafkaFeedConfig) -> Result<Lister, ConnectError> {
+    config
+        .base(crate::security::openssl_env_overrides())
+        .create(&config.client(FeedRole::Follower), SourceHooks::default())
+        .map_err(|reason| {
+            ConnectError::refused(NAME, format!("creating the gate's attempt reader: {reason}"))
+        })
+}
+
+/// The gate's [`Lister`] for a test.
 #[cfg(test)]
 pub(crate) fn test_lister(config: &KafkaFeedConfig) -> Lister {
-    Arc::new(
-        config
-            .base(false)
-            .create(&config.client(FeedRole::Follower), SourceHooks::default())
-            .expect("the follower's client"),
-    )
+    lister(config).expect("the gate's attempt reader")
 }
 
 /// An assign-only consumer in the feed's group that reads every attempt
 /// partition from its start into the ledger.
 pub(crate) struct Follower {
     core: Arc<Core>,
-    consumer: Lister,
+    consumer: BaseConsumer<SourceContext>,
     ledger: SharedLedger,
     /// One list per attempt partition, to read its position into.
     positions: Vec<TopicPartitionList>,
@@ -405,15 +414,10 @@ impl Follower {
         let ledger = Arc::clone(&core.ledger);
         Ok(Follower {
             core,
-            consumer: Arc::new(consumer),
+            consumer,
             ledger,
             positions,
         })
-    }
-
-    /// The consumer the gate lists the attempt partitions through.
-    pub(crate) fn lister(&self) -> Lister {
-        Arc::clone(&self.consumer)
     }
 
     #[cfg(test)]

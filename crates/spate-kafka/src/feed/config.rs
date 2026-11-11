@@ -13,7 +13,7 @@ pub(crate) const BACKEND: &str = TAG;
 /// The backend's name in the text a person reads.
 pub(crate) const NAME: &str = "Kafka";
 
-/// One of the feed's six clients.
+/// The role of a feed client, each of which owns its own properties.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum FeedRole {
     /// The group member that reads the work and retry topics.
@@ -27,7 +27,9 @@ pub(crate) enum FeedRole {
     Admin,
     /// The startup checks' metadata reader.
     Reader,
-    /// The attempt follower, which assigns its own partitions.
+    /// The attempt follower, which assigns its own partitions, and the gate's
+    /// reader of the attempt topic's ends, built the same way and never
+    /// assigned.
     Follower,
 }
 
@@ -43,13 +45,21 @@ impl FeedRole {
 }
 
 /// A feed client, and the properties it owns beyond the base in
-/// [`crate::client`]. One passthrough map feeds all six clients, so the
+/// [`crate::client`]. One passthrough map feeds every client, so the
 /// passthrough refuses the union of what any of them owns, each with the
 /// reason given here.
 pub(crate) struct Client<'a> {
     pub(crate) config: &'a KafkaFeedConfig,
     pub(crate) role: FeedRole,
 }
+
+/// Why the feed owns `isolation.level`, one text for every role that sets it,
+/// since a refusal names the first owner it finds.
+const ISOLATION_LEVEL: &str = "the feed sets it: the depth reader lists ends at the high \
+     watermark so a confirmed write behind an open transaction counts, the attempt \
+     follower and the gate read past another writer's open transaction so a unit's \
+     count keeps up with the feed's own attempt writes, and the group member reads \
+     committed records so a commit cannot pass that transaction";
 
 impl Role for Client<'_> {
     fn name(&self) -> &'static str {
@@ -76,10 +86,7 @@ impl Role for Client<'_> {
                     self.role == FeedRole::Depth,
                     "isolation.level",
                     || "read_uncommitted".to_owned(),
-                    "the feed sets it: the depth reader lists ends at the high \
-                     watermark so a confirmed write behind an open transaction \
-                     counts, and the group member reads committed records so a \
-                     commit cannot pass that transaction",
+                    ISOLATION_LEVEL,
                 );
                 keys.own(
                     "group.protocol",
@@ -102,13 +109,7 @@ impl Role for Client<'_> {
             // rebalance, and it commits nothing.
             FeedRole::Follower => {
                 group(keys, cfg);
-                keys.own(
-                    "isolation.level",
-                    "read_uncommitted",
-                    "the feed sets it: the attempt follower and the gate read \
-                     past another writer's open transaction, so a unit's count \
-                     keeps up with the feed's own attempt writes behind it",
-                );
+                keys.own("isolation.level", "read_uncommitted", ISOLATION_LEVEL);
             }
             FeedRole::Producer => {
                 keys.own(

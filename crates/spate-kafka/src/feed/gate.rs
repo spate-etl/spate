@@ -41,8 +41,8 @@ pub(crate) const GATE_STEP: Duration = Duration::from_secs(1);
 pub(crate) struct Gate {
     core: Arc<Core>,
     producer: Producer,
-    /// The follower's consumer, through which the gate reads the attempt
-    /// partitions' ends at the follower's isolation level.
+    /// The client the gate reads the attempt partitions' ends through, at
+    /// the follower's isolation level.
     lister: Lister,
     step: Duration,
     /// The bound on each watermark request.

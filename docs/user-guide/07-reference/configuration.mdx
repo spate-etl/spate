@@ -157,8 +157,8 @@ a `batch.linger` over a year seals at a year, a zero `batch.max_rows` or
 `batch.max_bytes` seals every chunk as its own batch, a
 `breaker.failure_threshold` of `0` opens on the first failure, an
 `inflight.max_per_shard` out of range panics at spawn, and a zero retry delay
-retries without sleeping. A zero `breaker.open_for` ends a failed replica's quarantine
-at once, and the replica takes a probe write on its next turn.
+retries without sleeping. A zero `breaker.open_for` ends a failed replica's
+quarantine at once, and the replica takes a probe write on its next turn.
 
 There is **no upper bound on `retry.max`**, because a sink fronting an
 expensive or rate-limited destination may want a very patient

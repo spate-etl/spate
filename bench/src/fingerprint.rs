@@ -9,17 +9,19 @@
 //! # The guarded fields
 //!
 //! `protocol`, `rustc`, `host_triple`, `profile`, `codegen`, `features`,
-//! `host_os`, `host_cpu`, `host_cores` and `host_label`.
+//! `host_os`, `host_cpu`, `host_cores`, `host_label` and `host_simd`.
 //!
-//! Six of the ten are checked as soon as both legs have been built, before a
+//! Six of the eleven are checked as soon as both legs have been built, before a
 //! single replicate is measured. A table drawn across two builds describes the
 //! toolchain rather than the change, and finding that out after ten minutes of
-//! measuring helps no one. The four `host_*` fields are checked when the records
+//! measuring helps no one. The five `host_*` fields are checked when the records
 //! are compared instead: one process builds both legs, so it is the same machine
 //! by construction, and that check exists for two legs that were *not* produced
 //! together, which a bare `compare` accepts by design. `host_label` comes from
 //! `SPATE_BENCH_HOST`, and two runs from differently-labeled machines do not
-//! compare.
+//! compare. `host_simd` lists the SIMD features the process detected, which
+//! pick the code paths of the SIMD dependencies; two hosts with one CPU brand
+//! can differ in them, as a hypervisor that hides AVX-512 makes them.
 //!
 //! `codegen` is the one that is not obvious. Both legs are built with `cargo
 //! bench`, so the profile *name* agrees by construction; `codegen` is a digest
@@ -266,6 +268,11 @@ pub struct Host {
     pub cores: usize,
     /// A label for the machine: `SPATE_BENCH_HOST`, or `local` when unset.
     pub label: String,
+    /// The SIMD features this process detected at run time, from
+    /// [`SIMD_FEATURES`], in its order. Empty on another architecture, and for
+    /// a record written before the field existed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub simd: Vec<String>,
 }
 
 impl Host {
@@ -277,6 +284,7 @@ impl Host {
             cpu: cpu_brand(),
             cores: std::thread::available_parallelism().map_or(0, std::num::NonZeroUsize::get),
             label: std::env::var("SPATE_BENCH_HOST").unwrap_or_else(|_| "local".to_owned()),
+            simd: detected(SIMD_FEATURES),
         }
     }
 
@@ -295,8 +303,61 @@ impl Host {
         // takes, so without this the one field whose purpose is naming the
         // machine would be the one field that could not tell two apart.
         fields.insert("host_label", self.label.clone());
+        // The detected features pick each SIMD dependency's code path, and a
+        // hypervisor can hide some of them from a CPU whose brand matches.
+        fields.insert("host_simd", self.simd.join(","));
         fields
     }
+}
+
+/// A SIMD feature and its run-time probe.
+type SimdProbe = (&'static str, fn() -> bool);
+
+/// Builds a [`SimdProbe`] table for one architecture's detection macro, which
+/// takes only a literal.
+macro_rules! simd_probes {
+    ($detect:ident; $($name:tt),+ $(,)?) => {
+        &[$(($name, || $detect!($name))),+]
+    };
+}
+
+/// The SIMD features a leg's host records, in the order it lists them.
+///
+/// Every feature the locked dependencies dispatch on at run time, beyond the
+/// architecture's baseline: `memchr` and `simdutf8` on `avx2`, `simdutf8` and
+/// `simd-json` on `sse4.2`, `simd-json` and `zlib-rs` on `pclmulqdq`, `zlib-rs`
+/// on `sse4.1`, `bmi1`, `bmi2`, `avx512f`, `neon` and `crc`, and libzstd on
+/// `bmi2`. Then the wider AVX-512 and SVE features a later path may take, so a
+/// host that hides part of AVX-512 still records it.
+#[cfg(target_arch = "x86_64")]
+pub const SIMD_FEATURES: &[SimdProbe] = simd_probes!(
+    is_x86_feature_detected;
+    "sse4.1", "sse4.2", "pclmulqdq", "avx2", "bmi1", "bmi2",
+    "avx512f", "avx512bw", "avx512vl", "avx512vbmi", "vpclmulqdq",
+);
+
+/// The SIMD features a leg's host records, in the order it lists them.
+///
+/// See the x86_64 table for the consumers behind each entry.
+#[cfg(target_arch = "aarch64")]
+pub const SIMD_FEATURES: &[SimdProbe] =
+    simd_probes!(is_aarch64_feature_detected; "neon", "crc", "sve", "sve2");
+
+#[cfg(target_arch = "aarch64")]
+use std::arch::is_aarch64_feature_detected;
+
+/// No SIMD feature is recorded on another architecture.
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+pub const SIMD_FEATURES: &[SimdProbe] = &[];
+
+/// The names in `table` whose probe reports the feature present, in table
+/// order.
+fn detected(table: &[SimdProbe]) -> Vec<String> {
+    table
+        .iter()
+        .filter(|(_, present)| present())
+        .map(|(name, _)| (*name).to_owned())
+        .collect()
 }
 
 /// The CPU brand, read from whichever interface the platform offers.
@@ -373,7 +434,7 @@ fn sysctl_string(name: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Axis, BuildFingerprint, Host, LOCAL_LEG};
+    use super::{Axis, BuildFingerprint, Host, LOCAL_LEG, SIMD_FEATURES, SimdProbe, detected};
 
     #[test]
     fn a_local_fingerprint_leaves_the_unknowable_absent() {
@@ -452,7 +513,36 @@ mod tests {
         let host = Host::detect();
         assert!(!host.os.is_empty());
         assert!(!host.cpu.is_empty());
-        assert_eq!(host.guarded_fields().len(), 4);
+        assert_eq!(host.guarded_fields().len(), 5);
         assert_eq!(host.guarded_fields(), Host::detect().guarded_fields());
+        let known: Vec<&str> = SIMD_FEATURES.iter().map(|(name, _)| *name).collect();
+        assert!(
+            host.simd.iter().all(|f| known.contains(&f.as_str())),
+            "{:?} is not a subset of {known:?}",
+            host.simd
+        );
+    }
+
+    /// Pins that only the features whose probe reports them are listed, in
+    /// the table's order.
+    #[test]
+    fn only_the_detected_features_are_listed_in_table_order() {
+        const TABLE: &[SimdProbe] = &[("a", || true), ("b", || false), ("c", || true)];
+        assert_eq!(detected(TABLE), vec!["a".to_owned(), "c".to_owned()]);
+    }
+
+    /// A record written before `simd` existed loads with an empty list, so it
+    /// still compares against another such record.
+    #[test]
+    fn a_host_without_simd_loads_as_an_empty_list() {
+        let host: Host =
+            serde_json::from_str(r#"{"os":"linux/x86_64","cpu":"x","cores":4,"label":"local"}"#)
+                .expect("parses");
+        assert!(host.simd.is_empty());
+        assert!(
+            !serde_json::to_string(&host)
+                .expect("serialises")
+                .contains("simd")
+        );
     }
 }

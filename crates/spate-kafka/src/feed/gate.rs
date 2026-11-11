@@ -139,6 +139,9 @@ impl Gate {
     /// wait. A pass whose follower does not catch up within its bound puts
     /// all its deliveries back.
     pub(crate) fn pass(&self) {
+        // The lister carries a `group.id`, so librdkafka queues its log lines
+        // and errors where only a poll drains them.
+        crate::source::serve_queued(&self.lister);
         let entries = self.take();
         if entries.is_empty() {
             return;
@@ -551,6 +554,48 @@ mod tests {
                 "the gate of a {how} feed waited a step"
             );
         }
+    }
+
+    /// Pins that a pass drains the lister's queue: with a `debug` category
+    /// set, librdkafka queues log lines for each listing where only a poll
+    /// drains them.
+    #[test]
+    fn a_pass_drains_what_the_listings_queued() {
+        let cluster = crate::testutil::mock::MockKafka::new();
+        cluster.create_topic("units-attempts", 1, 1).unwrap();
+        let section: spate_core::config::FeedSection = serde_yaml::from_str(&format!(
+            "kafka:\n  brokers: \"{}\"\n  group_id: workers\n  topic: units\n  \
+             retry_topic: units-retry\n  dead_letter_topic: units-dead\n  \
+             attempt_topic: units-attempts\n  statistics_interval: 0s\n  \
+             rdkafka:\n    debug: broker,topic\n",
+            cluster.bootstrap_servers()
+        ))
+        .unwrap();
+        let config = KafkaFeedConfig::from_section(&section).unwrap();
+        let core = Arc::new(Core::new(&config, NonZeroU32::MIN, SyncClock::system()));
+        let producer = config
+            .base(false)
+            .create::<Producer, _>(
+                &config.client(FeedRole::Producer),
+                FeedProducerHooks::new(Arc::clone(&core)),
+            )
+            .unwrap();
+        let gate = Gate::new(
+            Arc::clone(&core),
+            producer,
+            test_lister(&config),
+            config.delivery_timeout,
+        )
+        .with_step(Duration::from_millis(1));
+        for _ in 0..20 {
+            gate.lister
+                .client()
+                .fetch_watermarks("units-attempts", 0, HANG)
+                .unwrap();
+        }
+        assert!(crate::source::queued_events(&gate.lister) > 0);
+        gate.pass();
+        assert_eq!(crate::source::queued_events(&gate.lister), 0);
     }
 
     /// Pins that a latched feed's gate takes none of the deliveries waiting

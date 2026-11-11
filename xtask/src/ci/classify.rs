@@ -217,7 +217,8 @@ pub(crate) fn is_macos_input(path: &str) -> bool {
 }
 
 /// Files that can change whether a release assembles: the release workflows,
-/// the action that installs its tools, and its xtask sequence. The selector's
+/// the action that installs its tools, its xtask sequence, and the changelog
+/// code that sequence calls to build the release section. The selector's
 /// own files and the workflow holding the rehearsal job are included, so a
 /// change to either runs the rehearsal on its pull request. An edit that drops
 /// those entries deselects its own pull request, so
@@ -230,6 +231,8 @@ pub(crate) fn is_release_tooling(path: &str) -> bool {
             ".github/workflows/release-build.yml",
             ".github/actions/setup-rust/*",
             "xtask/src/release/*",
+            "xtask/src/checks/changelog.rs",
+            "xtask/src/checks/changelog/requirements.rs",
             ".github/workflows/ci.yml",
             ".github/workflows/release-checks.yml",
             "xtask/src/ci/*",
@@ -1329,6 +1332,8 @@ mod tests {
             ".github/workflows/release-build.yml",
             ".github/actions/setup-rust/action.yml",
             "xtask/src/release/io.rs",
+            "xtask/src/checks/changelog.rs",
+            "xtask/src/checks/changelog/requirements.rs",
             ".github/workflows/ci.yml",
             ".github/workflows/release-checks.yml",
             "xtask/src/ci/classify.rs",
@@ -1341,6 +1346,7 @@ mod tests {
             ".github/workflows/site.yml",
             ".github/actions/file-issue/action.yml",
             "xtask/src/checks/adr.rs",
+            "xtask/src/checks/changelog/tests.rs",
             "crates/spate-core/src/lib.rs",
             "docs/a.md",
         ] {

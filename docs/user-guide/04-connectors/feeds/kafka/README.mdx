@@ -141,11 +141,11 @@ A refused or reset connection stays retryable: the checks wait for a broker the
 client can use, and fail with `ConnectError::Unavailable` once their bound
 passes.
 
-Once the feed has connected, its consumer, its attempt follower and its
-producer treat a SASL authentication failure and a rejected handshake as the
-source does, and the feed stops with the reason. A publish-only handle stops
-the same way through its producer. An attempt, tombstone, retry or dead-letter
-write that times out is sent again.
+Once the feed has connected, its consumer, its attempt follower, its producer
+and its depth reader treat a SASL authentication failure and a rejected
+handshake as the source does, and the feed stops with the reason. A publish-only
+handle stops the same way through its producer. An attempt, tombstone, retry or
+dead-letter write that times out is sent again.
 
 <LoggingKafka />
 
@@ -494,12 +494,14 @@ the dead-letter topic again 15 seconds later
 The reads need `Describe` on the work, retry and dead-letter topics, which the
 [startup checks](#startup-checks) already need, and `Describe` on the feed's
 group, which the `Read` a member needs on the group includes. A read fails the
-job when retrying cannot fix it: a refused authorization, a rejected
-credential, or a topic the cluster no longer knows, as after the topic is
-deleted while the job runs. Any other failed read starts the window again, or
-reads the dead-letter topic again 15 seconds later. That includes an offset
-read of a partition just added to a topic, which a broker can answer as
-unknown until it has the partition.
+job when retrying cannot fix it: a refused authorization, a rejected credential
+or TLS handshake, or a topic the cluster no longer knows, as after the topic is
+deleted while the job runs. A rejection fails the job when the depth reader is
+the only client that meets it, as when it comes from a broker no other client of
+the feed talks to. Any other failed read starts the window again, or reads the
+dead-letter topic again 15 seconds later. That includes an offset read of a
+partition just added to a topic, which a broker can answer as unknown until it
+has the partition.
 
 ## Backpressure
 

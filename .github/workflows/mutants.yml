@@ -43,7 +43,6 @@ jobs:
         continue-on-error: true
         timeout-minutes: 85
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
           # Caps each test process's writable memory. A mutant that loops
           # while allocating then fails its test, where uncapped it fills the
           # runner's 16 GB and the runner shuts down. 4 tests at a time at
@@ -51,4 +50,7 @@ jobs:
           # the same runner, so cargo-mutants and the build inherit the cap:
           # each rustc and linker process gets 3 GiB of its own.
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: prlimit --data=3221225472 --
-        run: cargo xtask mutants --since "$BASE_SHA" --in-place --budget 82
+        # The checkout is the pull request's merge ref, so its first parent is
+        # the base commit the merge was built on. The event's `base.sha` can
+        # be older, and a diff from there takes in other pull requests.
+        run: cargo xtask mutants --since 'HEAD^1' --in-place --budget 82

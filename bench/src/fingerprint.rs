@@ -284,7 +284,7 @@ impl Host {
             cpu: cpu_brand(),
             cores: std::thread::available_parallelism().map_or(0, std::num::NonZeroUsize::get),
             label: std::env::var("SPATE_BENCH_HOST").unwrap_or_else(|_| "local".to_owned()),
-            simd: detected(SIMD_FEATURES),
+            simd: detected_simd(),
         }
     }
 
@@ -323,12 +323,12 @@ macro_rules! simd_probes {
 
 /// The SIMD features a leg's host records, in the order it lists them.
 ///
-/// Every feature the locked dependencies dispatch on at run time, beyond the
-/// architecture's baseline: `memchr` and `simdutf8` on `avx2`, `simdutf8` and
-/// `simd-json` on `sse4.2`, `simd-json` and `zlib-rs` on `pclmulqdq`, `zlib-rs`
-/// on `sse4.1`, `bmi1`, `bmi2`, `avx512f`, `neon` and `crc`, and libzstd on
-/// `bmi2`. Then the wider AVX-512 and SVE features a later path may take, so a
-/// host that hides part of AVX-512 still records it.
+/// The features the decode and decompression paths dispatch on at run time:
+/// `memchr` and `simdutf8` on `avx2`, `simdutf8` and `simd-json` on `sse4.2`,
+/// `simd-json` and `zlib-rs` on `pclmulqdq`, `zlib-rs` on `sse4.1`, `avx512f`,
+/// `neon` and `crc`, and `zlib-rs` and libzstd on `bmi1` with `bmi2`. Then the
+/// wider AVX-512 and SVE features a later path may take, so a host that hides
+/// part of AVX-512 still records it.
 #[cfg(target_arch = "x86_64")]
 pub const SIMD_FEATURES: &[SimdProbe] = simd_probes!(
     is_x86_feature_detected;
@@ -349,6 +349,12 @@ use std::arch::is_aarch64_feature_detected;
 /// No SIMD feature is recorded on another architecture.
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 pub const SIMD_FEATURES: &[SimdProbe] = &[];
+
+/// The features in [`SIMD_FEATURES`] this process detects, in table order.
+#[must_use]
+pub fn detected_simd() -> Vec<String> {
+    detected(SIMD_FEATURES)
+}
 
 /// The names in `table` whose probe reports the feature present, in table
 /// order.

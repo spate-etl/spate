@@ -399,7 +399,6 @@ pub(crate) fn report_class(code: Option<RDKafkaErrorCode>) -> ErrorClass {
         Some(
             C::UnknownTopicOrPartition
             | C::TopicAuthorizationFailed
-            | C::ClusterAuthorizationFailed
             | C::Authentication
             | C::SaslAuthenticationFailed
             | C::InvalidRequiredAcks

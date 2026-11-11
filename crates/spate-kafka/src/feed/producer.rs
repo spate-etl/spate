@@ -66,10 +66,7 @@ impl Hooks for FeedProducerHooks {
         }
         log_error(&error, reason, instance);
         match code {
-            Some(code)
-                if code == RDKafkaErrorCode::ClusterAuthorizationFailed
-                    || crate::error::ends_idempotent_producer(code) =>
-            {
+            Some(code) if crate::error::ends_idempotent_producer(code) => {
                 self.core
                     .latch(&format!("the feed's producer stopped: {reason}"));
             }

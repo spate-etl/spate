@@ -127,6 +127,7 @@ pub(crate) fn ends_idempotent_producer(code: RDKafkaErrorCode) -> bool {
     matches!(
         code,
         C::Fatal
+            | C::ClusterAuthorizationFailed
             | C::OutOfOrderSequenceNumber
             | C::InvalidProducerEpoch
             | C::InvalidProducerIdMapping

@@ -14,6 +14,7 @@ use testcontainers::core::{CmdWaitFor, ContainerPort, ContainerState, ExecComman
 use testcontainers::runners::SyncRunner;
 use testcontainers::{Container, Image, ImageExt, TestcontainersError};
 
+use crate::started::{container_output, container_tails};
 use crate::{container_image, selected_lane};
 
 /// The container port of the listener a client on the host reaches.
@@ -564,10 +565,10 @@ impl KafkaCluster {
     }
 
     /// The first node whose container has stopped, named with its exit code
-    /// and the last lines of its log, or `None` while every node runs. A node
+    /// and the tail of its output, or `None` while every node runs. A node
     /// [`KafkaCluster::stop`] stopped counts, so a caller asks while every
-    /// node should be running. A node whose state the runtime cannot report
-    /// counts as running.
+    /// node should be running. A node whose state Docker cannot report counts
+    /// as running.
     #[must_use]
     pub fn exited(&self) -> Option<String> {
         (1..=CLUSTER_NODES).find_map(|node| {
@@ -575,15 +576,11 @@ impl KafkaCluster {
             if container.is_running().unwrap_or(true) {
                 return None;
             }
-            let log = match self.broker {
-                Broker::Apache => container.stdout_to_vec(),
-                Broker::Redpanda => container.stderr_to_vec(),
-            };
             Some(exited_message(
-                self.broker,
-                node,
+                &format!("{} node {node}", self.broker),
                 container.exit_code().ok().flatten(),
-                &log.unwrap_or_default(),
+                &container_output(container.stdout_to_vec()),
+                &container_output(container.stderr_to_vec()),
             ))
         })
     }
@@ -593,16 +590,13 @@ impl KafkaCluster {
     }
 }
 
-/// How many of an exited node's last log lines [`KafkaCluster::exited`] keeps.
-const EXIT_LOG_LINES: usize = 20;
-
-/// What [`KafkaCluster::exited`] says of node `node`.
-fn exited_message(broker: Broker, node: i32, code: Option<i64>, log: &[u8]) -> String {
-    let log = String::from_utf8_lossy(log);
-    let lines = log.lines().collect::<Vec<_>>();
-    let tail = lines[lines.len().saturating_sub(EXIT_LOG_LINES)..].join("\n");
-    let code = code.map_or_else(|| "no exit code".to_owned(), |c| format!("exit code {c}"));
-    format!("{broker} node {node} exited with {code}; its last log lines:\n{tail}")
+/// What [`KafkaCluster::exited`] says of the node `what` names.
+fn exited_message(what: &str, code: Option<i64>, stdout: &str, stderr: &str) -> String {
+    let ended = code.map_or_else(
+        || format!("{what} exited"),
+        |code| format!("{what} exited with code {code}"),
+    );
+    format!("{ended}\n{}", container_tails(what, stdout, stderr))
 }
 
 /// Where node `node` sits in [`KafkaCluster`]'s nodes.
@@ -783,22 +777,19 @@ mod tests {
         );
     }
 
-    /// An exited node is named with its exit code and its last twenty log
-    /// lines.
+    /// An exited node is named with its exit code, when Docker gave one, and
+    /// the tail of each of its streams.
     #[test]
-    fn an_exited_node_names_itself_and_its_last_log_lines() {
-        let log = (1..=25).map(|n| format!("line {n}\n")).collect::<String>();
-        let tail = (6..=25)
-            .map(|n| format!("line {n}"))
-            .collect::<Vec<_>>()
-            .join("\n");
+    fn an_exited_node_names_itself_its_code_and_its_output() {
+        let tails = "---- last 200 lines of Redpanda node 2 stdout ----\nout line\n\
+                     ---- last 200 lines of Redpanda node 2 stderr ----\nerr line";
         assert_eq!(
-            exited_message(Broker::Redpanda, 2, Some(1), log.as_bytes()),
-            format!("Redpanda node 2 exited with exit code 1; its last log lines:\n{tail}")
+            exited_message("Redpanda node 2", Some(1), "out line", "err line"),
+            format!("Redpanda node 2 exited with code 1\n{tails}")
         );
         assert_eq!(
-            exited_message(Broker::Apache, 3, None, b"only line\n"),
-            "Apache Kafka node 3 exited with no exit code; its last log lines:\nonly line"
+            exited_message("Redpanda node 2", None, "out line", "err line"),
+            format!("Redpanda node 2 exited\n{tails}")
         );
     }
 

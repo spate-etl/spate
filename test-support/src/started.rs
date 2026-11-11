@@ -118,7 +118,7 @@ fn reported<E: fmt::Display>(
 }
 
 /// A container stream as text, or why it could not be read.
-fn container_output<E: fmt::Display>(read: Result<Vec<u8>, E>) -> String {
+pub(crate) fn container_output<E: fmt::Display>(read: Result<Vec<u8>, E>) -> String {
     match read {
         Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
         Err(e) => format!("(unreadable: {e})"),
@@ -127,7 +127,7 @@ fn container_output<E: fmt::Display>(read: Result<Vec<u8>, E>) -> String {
 
 /// The last [`LOG_TAIL`] lines of a container's stdout and stderr, each
 /// under a heading.
-fn container_tails(what: &str, stdout: &str, stderr: &str) -> String {
+pub(crate) fn container_tails(what: &str, stdout: &str, stderr: &str) -> String {
     format!(
         "---- last {LOG_TAIL} lines of {what} stdout ----\n{}\n\
          ---- last {LOG_TAIL} lines of {what} stderr ----\n{}",

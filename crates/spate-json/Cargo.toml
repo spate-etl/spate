@@ -24,6 +24,7 @@ simd = ["dep:simd-json"]
 
 [dependencies]
 spate-core = { workspace = true }
+memchr = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 simd-json = { workspace = true, optional = true }

@@ -183,6 +183,62 @@ fn lowcardinality_nullable_uses_key_zero_for_null() {
     assert_eq!(got, want);
 }
 
+/// An empty string takes the reserved default slot, 0 or 1 by nullability,
+/// and adds no dictionary entry.
+#[test]
+fn lowcardinality_empty_string_takes_the_reserved_default_slot() {
+    #[derive(Serialize)]
+    struct R {
+        c: String,
+        n: Option<String>,
+    }
+    let got = block(
+        &[
+            ("c", "LowCardinality(String)"),
+            ("n", "LowCardinality(Nullable(String))"),
+        ],
+        &[
+            R {
+                c: String::new(),
+                n: Some(String::new()),
+            },
+            R {
+                c: "a".into(),
+                n: None,
+            },
+            R {
+                c: String::new(),
+                n: Some("x".into()),
+            },
+        ],
+    );
+
+    let mut want = header(2, 3);
+    want.extend(string_bytes("c"));
+    want.extend(string_bytes("LowCardinality(String)"));
+    want.extend_from_slice(&1i64.to_le_bytes()); // version
+    want.extend_from_slice(&0x600u64.to_le_bytes()); // metadata
+    // dict_size: reserved "" + "a" = 2.
+    want.extend_from_slice(&2u64.to_le_bytes());
+    want.extend(string_bytes(""));
+    want.extend(string_bytes("a"));
+    want.extend_from_slice(&3u64.to_le_bytes()); // keys_count
+    want.extend_from_slice(&[0, 1, 0]);
+
+    want.extend(string_bytes("n"));
+    want.extend(string_bytes("LowCardinality(Nullable(String))"));
+    want.extend_from_slice(&1i64.to_le_bytes()); // version
+    want.extend_from_slice(&0x600u64.to_le_bytes()); // metadata
+    // dict_size: reserved NULL and default, plus "x" = 3.
+    want.extend_from_slice(&3u64.to_le_bytes());
+    want.extend(string_bytes(""));
+    want.extend(string_bytes(""));
+    want.extend(string_bytes("x"));
+    want.extend_from_slice(&3u64.to_le_bytes()); // keys_count
+    want.extend_from_slice(&[1, 0, 2]);
+    assert_eq!(got, want);
+}
+
 #[test]
 fn multi_column_row_interleaves_into_separate_column_streams() {
     #[derive(Serialize)]

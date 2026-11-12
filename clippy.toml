@@ -36,6 +36,8 @@ disallowed-methods = [
 disallowed-types = [
     { path = "std::collections::HashMap", reason = "use `spate_core::hash::FastMap` (`FastSet`), or `QualityMap` (`QualitySet`) for keys an outside party chooses; a site that keeps a std map takes an `expect` naming why" },
     { path = "std::collections::HashSet", reason = "use `spate_core::hash::FastMap` (`FastSet`), or `QualityMap` (`QualitySet`) for keys an outside party chooses; a site that keeps a std map takes an `expect` naming why" },
+    { path = "hashbrown::HashMap", reason = "use `spate_core::hash::FastMap` (`FastSet`), or `QualityMap` (`QualitySet`) for keys an outside party chooses; a site that keeps a hashbrown map takes an `expect` naming why" },
+    { path = "hashbrown::HashSet", reason = "use `spate_core::hash::FastMap` (`FastSet`), or `QualityMap` (`QualitySet`) for keys an outside party chooses; a site that keeps a hashbrown map takes an `expect` naming why" },
 ]
 
 await-holding-invalid-types = [

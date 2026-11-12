@@ -4240,6 +4240,7 @@ dependencies = [
  "cityhash-rs",
  "clickhouse",
  "gungraun",
+ "hashbrown 0.17.1",
  "http-body-util",
  "humantime-serde",
  "hyper",

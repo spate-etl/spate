@@ -81,6 +81,7 @@ crossbeam-channel = "0.5.15"
 bytes = "1.11.1"
 core_affinity = "0.8"
 foldhash = "0.2"
+hashbrown = { version = "0.17.1", default-features = false }
 # The floor is 2.7.2 because testcontainers requires it; the aarch64 NEON
 # search arrived in 2.6. Default features carry `std`, which the runtime AVX2
 # check on x86_64 needs.

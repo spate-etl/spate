@@ -1,5 +1,5 @@
-//! The `absolute_paths` lint, the thread spawn bans and the std map bans as
-//! the workspace configures them, and the `-D warnings` the clippy gate
+//! The `absolute_paths` lint, the thread spawn bans and the std and
+//! `hashbrown` map bans as the workspace configures them, and the `-D warnings` the clippy gate
 //! appends, which a warn-level entry relies on.
 
 use std::fs;
@@ -62,18 +62,54 @@ fn line_of(source: &str, needle: &str) -> usize {
 /// library, which takes the workspace's clippy lint table and the
 /// repository's `clippy.toml`, and returns whether it passed and its stderr.
 fn clippy_probe(name: &str, source: &str) -> (bool, String) {
+    clippy_probe_with_stub(name, source, None)
+}
+
+/// As [`clippy_probe`], with `stub` as a dependency: a crate of that name
+/// whose library is that source. The stub is built offline from the scratch
+/// directory and is not linted itself.
+fn clippy_probe_with_stub(name: &str, source: &str, stub: Option<(&str, &str)>) -> (bool, String) {
     let scratch = Scratch::new(name);
     let root = &scratch.0;
 
+    let (dependencies, locked) = match stub {
+        None => (String::new(), String::new()),
+        Some((dep, lib)) => {
+            fs::create_dir_all(root.join(dep).join("src")).unwrap();
+            fs::write(
+                root.join(dep).join("Cargo.toml"),
+                format!("[package]\nname = \"{dep}\"\nversion = \"0.0.0\"\nedition = \"2024\"\n"),
+            )
+            .unwrap();
+            fs::write(root.join(dep).join("src/lib.rs"), lib).unwrap();
+            (
+                format!(
+                    "exclude = [\"{dep}\"]\n\n[dependencies]\n{dep} = {{ path = \"{dep}\" }}\n"
+                ),
+                format!("dependencies = [\n \"{dep}\",\n]\n"),
+            )
+        }
+    };
     let manifest = format!(
         "[package]\nname = \"{name}\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n\
-         [workspace]\n\n[lints.clippy]\n{}",
+         [workspace]\n{dependencies}\n[lints.clippy]\n{}",
         workspace_clippy_lints()
     );
     fs::write(root.join("Cargo.toml"), manifest).unwrap();
+    // Cargo writes packages sorted by name, and `--locked` refuses a lockfile
+    // it would write differently.
+    let mut packages = vec![format!(
+        "[[package]]\nname = \"{name}\"\nversion = \"0.0.0\"\n{locked}"
+    )];
+    if let Some((dep, _)) = stub {
+        packages.push(format!(
+            "[[package]]\nname = \"{dep}\"\nversion = \"0.0.0\"\n"
+        ));
+    }
+    packages.sort();
     fs::write(
         root.join("Cargo.lock"),
-        format!("version = 4\n\n[[package]]\nname = \"{name}\"\nversion = \"0.0.0\"\n"),
+        format!("version = 4\n\n{}", packages.join("\n")),
     )
     .unwrap();
     fs::copy(repo_root().join("clippy.toml"), root.join("clippy.toml")).unwrap();
@@ -227,6 +263,54 @@ pub fn imported(set: &HashSet<u8>) -> usize {
         ),
         ("HashMap::<u8, u8>::new()", "std::collections::HashMap"),
         ("hash_map::HashMap<u8, u8>", "std::collections::HashMap"),
+    ] {
+        let line = line_of(source, needle);
+        let reported = format!("src/lib.rs:{line}:");
+        let message = format!("use of a disallowed type `{path}`");
+        assert!(
+            stderr
+                .lines()
+                .any(|l| l.starts_with(&reported) && l.contains(&message)),
+            "no `{path}` finding at line {line}\n{stderr}"
+        );
+    }
+}
+
+/// A crate under the repository's `clippy.toml` that names `hashbrown`'s
+/// `HashMap` or `HashSet`, by import, by annotation or through the `set`
+/// module, fails `clippy -D warnings` with `disallowed_types` at each line,
+/// which pins both entries. The stub has the crate's name and re-exports
+/// both types from modules at its root, as `hashbrown` does.
+#[test]
+fn disallowed_hashbrown_maps_fail_the_gate() {
+    let stub = "\
+pub mod map {
+    pub struct HashMap<K, V>(core::marker::PhantomData<(K, V)>);
+}
+pub mod set {
+    pub struct HashSet<T>(core::marker::PhantomData<T>);
+}
+pub use map::HashMap;
+pub use set::HashSet;
+";
+    let source = "\
+use hashbrown::HashMap;
+
+pub fn imported(_map: &HashMap<u8, u8>) {}
+
+pub fn annotated(_set: &hashbrown::HashSet<u8>) {}
+
+pub fn through_module(_set: &hashbrown::set::HashSet<u8>) {}
+";
+    let (passed, stderr) =
+        clippy_probe_with_stub("hashbrown-probe", source, Some(("hashbrown", stub)));
+
+    assert!(!passed, "{stderr}");
+    for (needle, path) in [
+        ("use hashbrown::HashMap;", "hashbrown::HashMap"),
+        ("_map: &HashMap<u8, u8>", "hashbrown::HashMap"),
+        ("_set: &hashbrown::HashSet", "hashbrown::HashSet"),
+        ("set::HashSet<u8>", "hashbrown::HashSet"),
     ] {
         let line = line_of(source, needle);
         let reported = format!("src/lib.rs:{line}:");

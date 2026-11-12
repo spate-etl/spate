@@ -24,9 +24,12 @@ use super::NativeError;
 use super::leaf::put_string;
 use crate::schema::typeparse::ChType;
 use bytes::{BufMut, BytesMut};
-use spate_core::hash::QualityMap;
+use hashbrown::HashTable;
+use hashbrown::hash_table::Entry;
+use spate_core::hash::QualityState;
+use std::hash::BuildHasher;
 
-// `map` is keyed by row values a producer chooses, so it takes the quality
+// `table` is keyed by row values a producer chooses, so it takes the quality
 // hasher.
 //   1. Wire bytes are hasher-independent. Dictionary order is first-seen
 //      append order into `dict`, so the encoded block is byte-identical
@@ -38,8 +41,10 @@ use spate_core::hash::QualityMap;
 
 pub(crate) struct LowCard {
     nullable: bool,
-    /// Dictionary-entry raw bytes → assigned index.
-    map: QualityMap<Vec<u8>, u32>,
+    /// One slot per dictionary entry. A slot points at its bytes in `dict`,
+    /// so a new entry is not copied a second time.
+    table: HashTable<Slot>,
+    state: QualityState,
     /// Accumulated dictionary entries, each `[VarUInt len][bytes]`.
     dict: BytesMut,
     /// At most 2^32, the most entries a `u32` key indexes.
@@ -62,7 +67,8 @@ impl LowCard {
         };
         let mut lc = LowCard {
             nullable,
-            map: QualityMap::default(),
+            table: HashTable::new(),
+            state: QualityState::default(),
             dict: BytesMut::new(),
             dict_count: 0,
             keys: Vec::new(),
@@ -77,15 +83,13 @@ impl LowCard {
             // [0] = NULL placeholder (default bytes), [1] = default; real
             // values start at 2. Null-ness is a key of 0.
             put_string(&mut self.dict, b"");
-            put_string(&mut self.dict, b"");
-            self.dict_count = 2;
-            self.map.insert(Vec::new(), 1);
+            self.dict_count = 1;
         } else {
             // [0] = default (""); real values start at 1.
-            put_string(&mut self.dict, b"");
-            self.dict_count = 1;
-            self.map.insert(Vec::new(), 0);
+            self.dict_count = 0;
         }
+        self.index_of(b"")
+            .expect("a fresh dictionary has room for its default entry");
     }
 
     /// Intern a string value and push its key.
@@ -94,19 +98,40 @@ impl LowCard {
     /// and leaves the dictionary and keys as they were.
     #[inline]
     pub(crate) fn intern(&mut self, value: &[u8]) -> Result<(), NativeError> {
-        let idx = match self.map.get(value) {
-            Some(&idx) => idx,
-            None => {
+        let idx = self.index_of(value)?;
+        self.keys.push(idx);
+        Ok(())
+    }
+
+    /// The dictionary index of `value`, appending it as a new entry if the
+    /// block has not seen it.
+    ///
+    /// Refuses a new value once the dictionary holds 2^32 entries, and leaves
+    /// the dictionary as it was.
+    #[inline]
+    fn index_of(&mut self, value: &[u8]) -> Result<u32, NativeError> {
+        let hash = self.state.hash_one(value);
+        let dict = &self.dict;
+        match self
+            .table
+            .entry(hash, |s| &dict[s.start..s.end] == value, |s| s.hash)
+        {
+            Entry::Occupied(slot) => Ok(slot.get().idx),
+            Entry::Vacant(slot) => {
                 let idx = u32::try_from(self.dict_count)
                     .map_err(|_| NativeError::LowCardinalityDictionaryFull)?;
                 put_string(&mut self.dict, value);
+                let end = self.dict.len();
+                slot.insert(Slot {
+                    start: end - value.len(),
+                    end,
+                    idx,
+                    hash,
+                });
                 self.dict_count += 1;
-                self.map.insert(value.to_vec(), idx);
-                idx
+                Ok(idx)
             }
-        };
-        self.keys.push(idx);
-        Ok(())
+        }
     }
 
     /// Push a NULL (only valid for a nullable dictionary): key 0.
@@ -172,10 +197,9 @@ impl LowCard {
     }
 
     pub(crate) fn reset(&mut self) {
-        self.map.clear();
+        self.table.clear();
         self.dict.clear();
         self.keys.clear();
-        self.dict_count = 0;
         self.seed();
     }
 
@@ -189,6 +213,16 @@ impl LowCard {
         // Flags, dictionary size and key count are a UInt64 each.
         prefix + 24 + self.dict.len() + (self.keys.len() << key_width_code(self.dict_count))
     }
+}
+
+/// A dictionary entry's bytes in `dict` and its index. The hash is kept so
+/// that growing the table reads no `dict` bytes.
+#[derive(Clone, Copy)]
+struct Slot {
+    start: usize,
+    end: usize,
+    idx: u32,
+    hash: u64,
 }
 
 /// The smallest key-width code that indexes `dict_size` entries:
@@ -207,9 +241,8 @@ fn key_width_code(dict_size: u64) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::hash::BuildHasher;
 
-    /// `reset` clears the dictionary for the next block and keeps the map's
+    /// `reset` clears the dictionary for the next block and keeps the hasher's
     /// per-instance seed.
     #[test]
     fn reset_keeps_the_dictionary_seed() {
@@ -217,10 +250,10 @@ mod tests {
         for i in 0..64 {
             lc.intern(format!("v{i}").as_bytes()).expect("interns");
         }
-        let before = lc.map.hasher().hash_one(b"probe".as_slice());
+        let before = lc.state.hash_one(b"probe".as_slice());
         lc.reset();
-        assert_eq!(lc.map.len(), 1, "only the reserved default slot remains");
-        assert_eq!(lc.map.hasher().hash_one(b"probe".as_slice()), before);
+        assert_eq!(lc.table.len(), 1, "only the reserved default slot remains");
+        assert_eq!(lc.state.hash_one(b"probe".as_slice()), before);
     }
 
     /// The key bytes `write_data` emits for a block whose dictionary holds
@@ -290,7 +323,7 @@ mod tests {
         assert_eq!(lc.dict, dict);
         assert_eq!(lc.keys, [u32::MAX]);
         assert_eq!(lc.dict_count, 1 << 32);
-        assert_eq!(lc.map.len(), 2);
+        assert_eq!(lc.table.len(), 2);
 
         lc.intern(b"last")
             .expect("an interned value needs no new entry");

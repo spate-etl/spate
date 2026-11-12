@@ -200,8 +200,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: ${{ matrix.job-minutes }}
     env:
-      # Its cases each build a corpus of 64 objects per replicate, so they get a
-      # runner and a budget of their own.
+      # Its cases stage a corpus of objects and run whole pipelines on every
+      # replicate, so they get a runner and a budget of their own.
       PIPELINE: spate-pipeline-bench
     strategy:
       fail-fast: false

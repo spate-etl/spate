@@ -71,9 +71,10 @@
 //! which `--allow features` waives.
 //!
 //! `--filter` and the feature flags also apply to `list --cases`: a filter is a
-//! filter on case ids, so it needs the case list to filter. `--package` names
-//! targets rather than cases, so it applies to a bare `list` as well. `run`
-//! takes `--leg NAME` (default `head`) for the name stamped into every record.
+//! filter on case ids, so it needs the case list to filter. `--package` and
+//! `--exclude` name targets rather than cases, so they apply to a bare `list`
+//! as well. `run` takes `--leg NAME` (default `head`) for the name stamped into
+//! every record.
 //!
 //! `arms` builds each arm into its own directory under the bench cache, keyed by
 //! the flags it was given and kept between runs. Neither arm uses the
@@ -109,9 +110,9 @@
 //! # Exit codes, and three refusals worth knowing in advance
 //!
 //! Exit code 2 means the thing you named does not exist: anything the parser
-//! rejects, a reference or directory that is not there, a `--package` the
-//! *working tree* declares no wall-clock target in, and not being inside a git
-//! repository at all. Exit code 1 means something failed while running, which
+//! rejects, a reference or directory that is not there, a `--package` or
+//! `--exclude` the *working tree* declares no wall-clock target in, and not
+//! being inside a git repository at all. Exit code 1 means something failed while running, which
 //! includes a selected package the working tree declares a target in and the
 //! reference does not: the name is right and the comparison is impossible.
 //!

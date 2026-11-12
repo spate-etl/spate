@@ -1028,9 +1028,11 @@ fn the_weekly_summary_runs_after_a_cut_measurement() {
     );
 }
 
-/// The weekly bench's two rows split the targets on one package: one row
-/// measures only that package and the other measures everything else, so no
-/// target is measured twice or left out.
+/// The weekly bench's rows split the targets on one package: exactly one row
+/// measures only that package and another measures everything else, so no
+/// target is measured twice or left out. Each row's side is read through the
+/// row name the script branches on, so a renamed row cannot drop a side. The
+/// `bench check` step names a row that exists.
 #[test]
 fn the_weekly_bench_rows_split_on_one_package() {
     let parsed = yaml(&read_workflow("weekly.yml"));
@@ -1039,27 +1041,57 @@ fn the_weekly_bench_rows_split_on_one_package() {
         .as_str()
         .expect("the job names the package");
     assert!(!package.is_empty());
-    let measure = job["steps"]
+    let rows: Vec<&str> = job["strategy"]["matrix"]["include"]
         .as_sequence()
-        .unwrap()
+        .expect("the job runs a matrix of rows")
         .iter()
-        .map(|s| s["run"].as_str().unwrap_or(""))
+        .map(|row| row["name"].as_str().expect("each row is named"))
+        .collect();
+    let steps = job["steps"].as_sequence().unwrap();
+    let run = |s: &serde_yaml::Value| s["run"].as_str().unwrap_or("").to_owned();
+    let measure = steps
+        .iter()
+        .map(run)
         .find(|r| r.contains("cargo xtask bench ab "))
         .expect("a step runs bench ab");
-    let selections: Vec<&str> = measure
-        .lines()
-        .filter(|l| l.contains("cargo xtask bench ab "))
-        .map(|l| {
-            if l.contains(r#"--package "$PIPELINE""#) {
-                "package"
-            } else if l.contains(r#"--exclude "$PIPELINE""#) {
-                "exclude"
-            } else {
-                panic!("an invocation selects no side of the split: {l}")
-            }
-        })
+    let lines: Vec<&str> = measure.lines().map(str::trim).collect();
+    let at = lines
+        .iter()
+        .position(|l| l.starts_with(r#"if [ "$ROW" = "#))
+        .expect("the script branches on the row");
+    let narrowed = lines[at]
+        .strip_prefix(r#"if [ "$ROW" = "#)
+        .and_then(|rest| rest.strip_suffix(" ]; then"))
+        .expect("the branch compares the row with one name");
+    assert_eq!((lines[at + 2], lines[at + 4]), ("else", "fi"));
+    let side = |line: &str| {
+        assert!(line.starts_with("cargo xtask bench ab "), "{line}");
+        if line.contains(r#"--package "$PIPELINE""#) {
+            "package"
+        } else if line.contains(r#"--exclude "$PIPELINE""#) {
+            "exclude"
+        } else {
+            panic!("an invocation selects no side of the split: {line}")
+        }
+    };
+    let (then, otherwise) = (side(lines[at + 1]), side(lines[at + 3]));
+    let mut sides: Vec<&str> = rows
+        .iter()
+        .map(|&row| if row == narrowed { then } else { otherwise })
         .collect();
-    assert_eq!(selections, ["package", "exclude"]);
+    sides.sort_unstable();
+    assert_eq!(sides, ["exclude", "package"], "rows {rows:?}");
+
+    let check = steps
+        .iter()
+        .find(|s| run(s).trim() == "cargo xtask bench check")
+        .expect("a step runs bench check");
+    let only = check["if"]
+        .as_str()
+        .and_then(|cond| cond.trim().strip_prefix("matrix.name == '"))
+        .and_then(|rest| rest.strip_suffix('\''))
+        .expect("bench check runs in one named row");
+    assert!(rows.contains(&only), "{only} is not a row of {rows:?}");
 }
 
 /// Each scheduled workflow queues a second run behind the first and never

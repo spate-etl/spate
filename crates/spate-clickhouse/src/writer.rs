@@ -164,8 +164,9 @@ pub struct ClickHouseWriter {
     end_timeout: Option<Duration>,
 }
 
-// Hand-written: the `settings` values can carry credentials. The destructure
-// lists every field so a new one cannot reach `Debug` unredacted.
+// Hand-written: a `settings` value can be a credential, such as a `password`
+// parameter or a schema registry URL with userinfo. The destructure lists
+// every field so a new one cannot reach `Debug` unredacted.
 impl fmt::Debug for ClickHouseWriter {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let ClickHouseWriter {

@@ -973,9 +973,27 @@ fn each_scheduled_reporter_runs_when_a_need_failed() {
     }
 }
 
-/// The step that runs `bench ab` times out below its job, and the step that
-/// writes the job summary runs under `always()`, so a failed or cut
-/// measurement still reports what the kept legs hold.
+/// A limit written as a number, or as `${{ matrix.<key> }}` read from `row`.
+fn minutes(limit: &serde_yaml::Value, row: &serde_yaml::Value) -> u64 {
+    if let Some(n) = limit.as_u64() {
+        return n;
+    }
+    let expr = limit
+        .as_str()
+        .expect("a limit is a number or an expression");
+    let key = expr
+        .trim()
+        .strip_prefix("${{ matrix.")
+        .and_then(|k| k.strip_suffix(" }}"))
+        .unwrap_or_else(|| panic!("{expr} names no matrix key"));
+    row[key]
+        .as_u64()
+        .unwrap_or_else(|| panic!("the row has no number at {key}"))
+}
+
+/// The step that runs `bench ab` times out below its job in every matrix row,
+/// and the step that writes the job summary runs under `always()`, so a failed
+/// or cut measurement still reports what the kept legs hold.
 #[test]
 fn the_weekly_summary_runs_after_a_cut_measurement() {
     let parsed = yaml(&read_workflow("weekly.yml"));
@@ -990,15 +1008,58 @@ fn the_weekly_summary_runs_after_a_cut_measurement() {
         .iter()
         .find(|s| run(s).contains("GITHUB_STEP_SUMMARY"))
         .expect("a step writes the summary");
-    let job_limit = job["timeout-minutes"].as_u64().unwrap();
-    let step_limit = measure["timeout-minutes"].as_u64().unwrap();
-    assert!(step_limit < job_limit, "{step_limit} >= {job_limit}");
+    let rows = job["strategy"]["matrix"]["include"]
+        .as_sequence()
+        .expect("the job runs a matrix of rows");
+    assert!(!rows.is_empty());
+    for row in rows {
+        let job_limit = minutes(&job["timeout-minutes"], row);
+        let step_limit = minutes(&measure["timeout-minutes"], row);
+        assert!(
+            step_limit < job_limit,
+            "{row:?}: {step_limit} >= {job_limit}"
+        );
+    }
     let cond = summary["if"].as_str().unwrap_or("");
     assert!(cond.trim_start().starts_with("always() &&"), "{cond}");
     assert!(
         run(summary).contains("bench compare"),
         "the summary re-renders from the legs"
     );
+}
+
+/// The weekly bench's two rows split the targets on one package: one row
+/// measures only that package and the other measures everything else, so no
+/// target is measured twice or left out.
+#[test]
+fn the_weekly_bench_rows_split_on_one_package() {
+    let parsed = yaml(&read_workflow("weekly.yml"));
+    let job = &parsed["jobs"]["bench"];
+    let package = job["env"]["PIPELINE"]
+        .as_str()
+        .expect("the job names the package");
+    assert!(!package.is_empty());
+    let measure = job["steps"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .map(|s| s["run"].as_str().unwrap_or(""))
+        .find(|r| r.contains("cargo xtask bench ab "))
+        .expect("a step runs bench ab");
+    let selections: Vec<&str> = measure
+        .lines()
+        .filter(|l| l.contains("cargo xtask bench ab "))
+        .map(|l| {
+            if l.contains(r#"--package "$PIPELINE""#) {
+                "package"
+            } else if l.contains(r#"--exclude "$PIPELINE""#) {
+                "exclude"
+            } else {
+                panic!("an invocation selects no side of the split: {l}")
+            }
+        })
+        .collect();
+    assert_eq!(selections, ["package", "exclude"]);
 }
 
 /// Each scheduled workflow queues a second run behind the first and never

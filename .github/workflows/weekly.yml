@@ -196,11 +196,25 @@ jobs:
           flags: with-containers
 
   bench:
-    name: Wall-clock A/B against last week's main
+    name: Wall-clock A/B against last week's main (${{ matrix.name }})
     runs-on: ubuntu-latest
-    # `bench check` takes about 21 minutes, so the measuring step's 85 ends
-    # before this does.
-    timeout-minutes: 120
+    timeout-minutes: ${{ matrix.job-minutes }}
+    env:
+      # Its cases each build a corpus of 64 objects per replicate, so they get a
+      # runner and a budget of their own.
+      PIPELINE: spate-pipeline-bench
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # `bench check` takes about 21 minutes, so the measuring step's 85
+          # ends before the job's 120.
+          - name: components
+            job-minutes: 120
+            step-minutes: 85
+          - name: pipeline
+            job-minutes: 240
+            step-minutes: 200
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -212,7 +226,9 @@ jobs:
           # Release-profile artifacts; shares nothing with the dev-profile jobs.
           shared-key: release
 
-      - run: cargo xtask bench check
+      # Builds every bench target, so one row is enough.
+      - if: matrix.name == 'components'
+        run: cargo xtask bench check
 
       - name: Resolve last week's main
         id: base
@@ -241,9 +257,10 @@ jobs:
         if: steps.base.outputs.sha != ''
         # Below the job's, so a slow run fails this step and the summary still
         # runs.
-        timeout-minutes: 85
+        timeout-minutes: ${{ matrix.step-minutes }}
         env:
           BASE: ${{ steps.base.outputs.sha }}
+          ROW: ${{ matrix.name }}
           OUT: ${{ runner.temp }}/wall
           REPORT: ${{ runner.temp }}/report.md
           ERR: ${{ runner.temp }}/bench.err
@@ -251,7 +268,11 @@ jobs:
         run: |
           set +e -u
           # Redirected, never piped, so `rc` is the driver's own exit code.
-          cargo xtask bench ab --ref "$BASE" --replicates 20 --format markdown --out "$OUT" >"$REPORT" 2>"$ERR"
+          if [ "$ROW" = pipeline ]; then
+            cargo xtask bench ab --ref "$BASE" --replicates 20 --package "$PIPELINE" --format markdown --out "$OUT" >"$REPORT" 2>"$ERR"
+          else
+            cargo xtask bench ab --ref "$BASE" --replicates 20 --exclude "$PIPELINE" --format markdown --out "$OUT" >"$REPORT" 2>"$ERR"
+          fi
           rc=$?
           cat "$ERR" >&2
           echo "bench ab exited $rc"
@@ -272,6 +293,7 @@ jobs:
       - name: Write the job summary
         if: always() && steps.base.outputs.sha != ''
         env:
+          ROW: ${{ matrix.name }}
           BASE: ${{ steps.base.outputs.sha }}
           HEAD: ${{ steps.base.outputs.head }}
           COUNT: ${{ steps.base.outputs.count }}
@@ -285,7 +307,7 @@ jobs:
             fi
           fi
           {
-            echo "## Wall clock: \`$HEAD\` against \`$BASE\`"
+            echo "## Wall clock, $ROW: \`$HEAD\` against \`$BASE\`"
             echo
             echo "$COUNT commits on main since the base."
             echo

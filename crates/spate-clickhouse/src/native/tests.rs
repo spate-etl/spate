@@ -22,6 +22,15 @@ fn header(cols: u64, rows: u64) -> Vec<u8> {
     vec![cols as u8, rows as u8]
 }
 
+/// A value that serializes through `serialize_bytes`.
+struct Raw(&'static [u8]);
+
+impl Serialize for Raw {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_bytes(self.0)
+    }
+}
+
 fn string_bytes(s: &str) -> Vec<u8> {
     let mut v = vec![s.len() as u8];
     v.extend_from_slice(s.as_bytes());
@@ -93,6 +102,18 @@ fn array_uint32_writes_cumulative_u64_offsets_then_flattened() {
     want.extend_from_slice(&7u32.to_le_bytes());
     want.extend_from_slice(&8u32.to_le_bytes());
     want.extend_from_slice(&9u32.to_le_bytes());
+    assert_eq!(got, want);
+}
+
+/// A byte value into a `String` column is written as a string.
+#[test]
+fn bytes_into_a_string_column_write_as_a_string() {
+    let got = block(&[("s", "String")], &[(Raw(b"ab"),)]);
+
+    let mut want = header(1, 1);
+    want.extend(string_bytes("s"));
+    want.extend(string_bytes("String"));
+    want.extend(string_bytes("ab"));
     assert_eq!(got, want);
 }
 
@@ -700,15 +721,6 @@ mod lowcard_limit {
 
     const REFUSED: &str = "native encoding failed: a LowCardinality column holds 2^32 \
                            distinct values in one block; lower chunk.target_bytes";
-
-    /// A value that serializes through `serialize_bytes`.
-    struct Raw(&'static [u8]);
-
-    impl Serialize for Raw {
-        fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-            s.serialize_bytes(self.0)
-        }
-    }
 
     /// An encoder over one `LowCardinality(String)` column whose dictionary
     /// holds 2^32 entries.

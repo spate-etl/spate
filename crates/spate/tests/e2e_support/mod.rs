@@ -132,7 +132,9 @@ impl Harness {
     /// # Panics
     ///
     /// When a node exits first, naming it with its log; when the wait hangs,
-    /// with the node ids metadata last listed.
+    /// with the node ids metadata last listed. On a panic while the cluster
+    /// runs, the cluster also writes each node's state, health and log tail
+    /// to stderr.
     pub fn up_cluster() -> Self {
         let cluster = KafkaCluster::start(&spate_test::unique_name("e2e-kafka"))
             .unwrap_or_else(|e| panic!("{e}"));

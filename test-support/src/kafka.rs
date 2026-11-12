@@ -10,6 +10,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::net::{SocketAddr, TcpListener};
 
+use testcontainers::bollard::models::HostConfig;
 use testcontainers::core::{CmdWaitFor, ContainerPort, ContainerState, ExecCommand, WaitFor};
 use testcontainers::runners::SyncRunner;
 use testcontainers::{Container, Image, ImageExt, TestcontainersError};
@@ -23,6 +24,13 @@ pub const KAFKA_PORT: ContainerPort = ContainerPort::Tcp(9092);
 /// The broker address another container reaches from inside the broker's
 /// network namespace: the listener the broker advertises to other containers.
 pub const BROKER_FROM_INSIDE: &str = "localhost:9093";
+
+/// The address a cluster node asks for a name Docker does not know. Nothing
+/// listens on it, so the lookup fails at once.
+const NO_UPSTREAM: &str = "127.0.0.1";
+
+/// The admin API `rpk` reaches from inside a Redpanda node.
+const ADMIN_HOSTS: &str = "admin.hosts=localhost:9644";
 
 /// The container port Apache Kafka's KRaft controllers reach each other on.
 const CONTROLLER_PORT: u16 = 9094;
@@ -444,6 +452,11 @@ impl Image for KafkaBroker {
 /// restarted node keeps its port, its id and its data, so it rejoins at the
 /// address clients already hold. The nodes start with no ready condition, so
 /// the caller waits until its client sees all three.
+///
+/// A node has no DNS server outside Docker, so it finds a peer once the peer
+/// runs, whatever resolver the host has. A cluster dropped while its thread
+/// panics writes each node's state, Redpanda's view of the cluster's health,
+/// and the tail of each node's output to stderr.
 #[derive(Debug)]
 pub struct KafkaCluster {
     broker: Broker,
@@ -477,6 +490,7 @@ impl KafkaCluster {
                     .with_network(network)
                     .with_container_name(node_host(network, node))
                     .with_mapped_port(port, KAFKA_PORT)
+                    .with_host_config_modifier(no_upstream_dns)
                     .start()
                     .map_err(|e| format!("start {broker} node {node}: {e}"))
             })
@@ -541,7 +555,8 @@ impl KafkaCluster {
     /// # Errors
     ///
     /// Fails on Apache Kafka, which has no transfer a test can ask for, and
-    /// when the command fails.
+    /// when the command fails, naming its exit code and the tail of its
+    /// output.
     ///
     /// # Panics
     ///
@@ -553,15 +568,8 @@ impl KafkaCluster {
         node: i32,
     ) -> Result<(), String> {
         let command = transfer_command(self.broker, topic, partition, node)?;
-        self.node(node)
-            .exec(ExecCommand::new(command).with_cmd_ready_condition(CmdWaitFor::exit_code(0)))
-            .map(drop)
-            .map_err(|e| {
-                format!(
-                    "move {topic}/{partition} to {} node {node}: {e}",
-                    self.broker
-                )
-            })
+        let what = format!("move {topic}/{partition} to {} node {node}", self.broker);
+        self.run(node, &what, command).map(drop)
     }
 
     /// The first node whose container has stopped, named with its exit code
@@ -585,18 +593,132 @@ impl KafkaCluster {
         })
     }
 
+    /// Each node's state, Redpanda's view of the cluster's health from each
+    /// running node, and the tail of each node's output. Every Docker read
+    /// that fails is shown as text, since this runs while a test unwinds.
+    fn report(&self) -> String {
+        (1..=CLUSTER_NODES)
+            .map(|node| {
+                let container = self.node(node);
+                let what = format!("{} node {node}", self.broker);
+                let running = container.is_running().unwrap_or(true);
+                let health = health_command(self.broker)
+                    .filter(|_| running)
+                    .map(|command| {
+                        self.run(node, &format!("rpk cluster health on {what}"), command)
+                            .unwrap_or_else(|e| e)
+                    });
+                node_report(
+                    &what,
+                    running,
+                    container.exit_code().ok().flatten(),
+                    health.as_deref(),
+                    &container_output(container.stdout_to_vec()),
+                    &container_output(container.stderr_to_vec()),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Runs `command` on node `node` until it exits, and gives its stdout, or
+    /// an error naming `what` with the exit code and both streams.
+    fn run(&self, node: i32, what: &str, command: Vec<String>) -> Result<String, String> {
+        let mut exec = self
+            .node(node)
+            .exec(ExecCommand::new(command).with_cmd_ready_condition(CmdWaitFor::exit()))
+            .map_err(|e| format!("{what}: {e}"))?;
+        let stdout = container_output(exec.stdout_to_vec());
+        let stderr = container_output(exec.stderr_to_vec());
+        exec_result(what, exec.exit_code().ok().flatten(), &stdout, &stderr)
+    }
+
     fn node(&self, node: i32) -> &Container<KafkaBroker> {
         &self.nodes[node_index(node)]
     }
 }
 
+impl Drop for KafkaCluster {
+    #[expect(
+        clippy::print_stderr,
+        reason = "a failed cluster test's node report is read from the test's output"
+    )]
+    fn drop(&mut self) {
+        if let Some(report) = report_on_drop(std::thread::panicking(), || self.report()) {
+            eprintln!("{report}");
+        }
+    }
+}
+
+/// The report a dropped cluster writes: one only while its thread panics.
+fn report_on_drop(panicking: bool, report: impl FnOnce() -> String) -> Option<String> {
+    panicking.then(report)
+}
+
+/// Leaves Docker's embedded DNS no server to forward a name to. A node looks
+/// up a peer before the peer starts and while it is stopped, and Docker then
+/// answers with a server failure, which Redpanda does not cache. Some host
+/// resolvers answer with a not-found that Redpanda keeps for up to an hour.
+fn no_upstream_dns(host: &mut HostConfig) {
+    host.dns = Some(vec![NO_UPSTREAM.to_owned()]);
+}
+
+/// What a command `what` names gives once it ends with `code`: its stdout on
+/// 0, otherwise an error with the code and both streams.
+fn exec_result(
+    what: &str,
+    code: Option<i64>,
+    stdout: &str,
+    stderr: &str,
+) -> Result<String, String> {
+    if code == Some(0) {
+        return Ok(stdout.to_owned());
+    }
+    let heading = code.map_or_else(
+        || format!("{what}: no exit code"),
+        |code| format!("{what}: exit code {code}"),
+    );
+    Err(with_tails(&heading, what, stdout, stderr))
+}
+
+/// One node's part of [`KafkaCluster::report`].
+fn node_report(
+    what: &str,
+    running: bool,
+    code: Option<i64>,
+    health: Option<&str>,
+    stdout: &str,
+    stderr: &str,
+) -> String {
+    let state = if running {
+        format!("{what} is running")
+    } else {
+        ended(what, code)
+    };
+    let heading = health.map_or_else(
+        || state.clone(),
+        |health| format!("{state}\n---- cluster health from {what} ----\n{health}"),
+    );
+    with_tails(&heading, what, stdout, stderr)
+}
+
 /// What [`KafkaCluster::exited`] says of the node `what` names.
 fn exited_message(what: &str, code: Option<i64>, stdout: &str, stderr: &str) -> String {
-    let ended = code.map_or_else(
+    with_tails(&ended(what, code), what, stdout, stderr)
+}
+
+/// That the node `what` names has stopped, with its exit code when Docker
+/// gave one.
+fn ended(what: &str, code: Option<i64>) -> String {
+    code.map_or_else(
         || format!("{what} exited"),
         |code| format!("{what} exited with code {code}"),
-    );
-    format!("{ended}\n{}", container_tails(what, stdout, stderr))
+    )
+}
+
+/// `heading` over the tail of each of `what`'s streams.
+fn with_tails(heading: &str, what: &str, stdout: &str, stderr: &str) -> String {
+    format!("{heading}\n{}", container_tails(what, stdout, stderr))
 }
 
 /// Where node `node` sits in [`KafkaCluster`]'s nodes.
@@ -628,7 +750,7 @@ fn transfer_command(
             "partitions",
             "transfer-leadership",
             "-X",
-            "admin.hosts=localhost:9644",
+            ADMIN_HOSTS,
             "--partition",
         ]
         .into_iter()
@@ -638,6 +760,28 @@ fn transfer_command(
         Broker::Apache => Err(format!(
             "{broker} has no leadership transfer a test can run"
         )),
+    }
+}
+
+/// The command a node runs to report the cluster's health. `timeout` bounds
+/// it, since a report runs while a test fails and the `docker` profile ends
+/// no slow test. Apache Kafka's image has no such command.
+fn health_command(broker: Broker) -> Option<Vec<String>> {
+    match broker {
+        Broker::Redpanda => Some(
+            [
+                "timeout",
+                "20",
+                "rpk",
+                "cluster",
+                "health",
+                "-X",
+                ADMIN_HOSTS,
+            ]
+            .map(str::to_owned)
+            .to_vec(),
+        ),
+        Broker::Apache => None,
     }
 }
 
@@ -861,6 +1005,109 @@ mod tests {
         );
         let err = transfer_command(Broker::Apache, "t", 4, 3).unwrap_err();
         assert!(err.contains("Apache Kafka"), "{err}");
+    }
+
+    /// A cluster node's lookups of a name Docker does not know go nowhere,
+    /// and nothing else in its host config changes.
+    #[test]
+    fn a_cluster_node_has_no_dns_server_outside_docker() {
+        let mut host = HostConfig::default();
+        no_upstream_dns(&mut host);
+        assert_eq!(
+            host,
+            HostConfig {
+                dns: Some(vec!["127.0.0.1".to_owned()]),
+                ..HostConfig::default()
+            }
+        );
+    }
+
+    /// A command that exits 0 gives its stdout. Any other code, or none, is an
+    /// error naming the command, the code and both streams.
+    #[test]
+    fn a_command_exit_decides_its_result() {
+        assert_eq!(
+            exec_result("move t/0 to Redpanda node 1", Some(0), "out", "err"),
+            Ok("out".to_owned())
+        );
+        let tails = "---- last 200 lines of move t/0 to Redpanda node 1 stdout ----\nout\n\
+                     ---- last 200 lines of move t/0 to Redpanda node 1 stderr ----\nerr";
+        assert_eq!(
+            exec_result("move t/0 to Redpanda node 1", Some(1), "out", "err"),
+            Err(format!("move t/0 to Redpanda node 1: exit code 1\n{tails}"))
+        );
+        assert_eq!(
+            exec_result("move t/0 to Redpanda node 1", None, "out", "err"),
+            Err(format!(
+                "move t/0 to Redpanda node 1: no exit code\n{tails}"
+            ))
+        );
+    }
+
+    /// Redpanda reports the cluster's health through rpk under a bound, and
+    /// Apache Kafka has no command for it.
+    #[test]
+    fn only_redpanda_reports_cluster_health() {
+        assert_eq!(
+            health_command(Broker::Redpanda).unwrap(),
+            [
+                "timeout",
+                "20",
+                "rpk",
+                "cluster",
+                "health",
+                "-X",
+                "admin.hosts=localhost:9644",
+            ]
+        );
+        assert_eq!(health_command(Broker::Apache), None);
+    }
+
+    /// A dropped cluster reports only while its thread panics, and builds no
+    /// report otherwise.
+    #[test]
+    fn a_report_prints_only_while_panicking() {
+        assert_eq!(
+            report_on_drop(false, || panic!("a passing test built a report")),
+            None
+        );
+        assert_eq!(
+            report_on_drop(true, || "the report".to_owned()),
+            Some("the report".to_owned())
+        );
+    }
+
+    /// A running node's part carries the cluster's health, and a stopped
+    /// node's its exit code, each over the tail of the node's streams.
+    #[test]
+    fn a_node_report_carries_its_state_health_and_log() {
+        let tails = "---- last 200 lines of Redpanda node 2 stdout ----\nout line\n\
+                     ---- last 200 lines of Redpanda node 2 stderr ----\nerr line";
+        assert_eq!(
+            node_report(
+                "Redpanda node 2",
+                true,
+                None,
+                Some("Nodes down: [1]"),
+                "out line",
+                "err line"
+            ),
+            format!(
+                "Redpanda node 2 is running\n\
+                 ---- cluster health from Redpanda node 2 ----\nNodes down: [1]\n{tails}"
+            )
+        );
+        assert_eq!(
+            node_report(
+                "Redpanda node 2",
+                false,
+                Some(1),
+                None,
+                "out line",
+                "err line"
+            ),
+            format!("Redpanda node 2 exited with code 1\n{tails}")
+        );
     }
 
     /// Node ids run from 1, and an id outside the cluster names no node.

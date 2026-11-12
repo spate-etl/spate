@@ -114,7 +114,18 @@ are up, so the cluster waits for no ready line, and the caller waits until its
 client sees three brokers. A node runs no command once ready: a restart would
 run it again before the node had rejoined.
 
+A node has no DNS server outside Docker. It looks up each peer by container
+name, before the peer starts and again while one is stopped. Docker answers a
+name it does not know with a server failure, which Redpanda does not cache, so
+the node finds the peer once it runs. Given a DNS server, Docker would pass the
+lookup to the host's resolver, and some answer with a not-found that Redpanda
+keeps for up to an hour.
+
 Redpanda places leaders unevenly, and a restarted node leads nothing until its
 balancer moves leaders back. `KafkaCluster::transfer_leadership` moves one
-through `rpk`. Apache Kafka has no transfer a test can ask for, so it returns an
-error there.
+through `rpk`, and a failed move names rpk's exit code and output. Apache Kafka
+has no transfer a test can ask for, so it returns an error there.
+
+When a test panics while a cluster runs, the cluster writes each node's state
+and the tail of its output to stderr as it drops, with `rpk cluster health` from
+each running Redpanda node.

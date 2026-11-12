@@ -635,11 +635,14 @@ fn hack_steps(sel: &Select) -> Vec<Step<'static>> {
         // which a locked build refuses. Do not add `--locked`; it fails.
         // It restores each Cargo.toml only when it is finished, so every
         // locked step goes after it.
+        // The stripped manifests inherit no dev-only workspace dependency, and
+        // cargo warns that each is unused. `RUSTFLAGS` denies rustc's warnings
+        // and leaves that false one a warning.
         Step::new("cargo", ["hack", "check"])
             .args(sel.args())
             .args(["--each-feature", "--no-dev-deps"])
             .args(fuzz_and_xtask)
-            .env(key, value),
+            .env("RUSTFLAGS", "-D warnings"),
     ];
     // Stripping dev-dependencies drops test and bench targets, so the run
     // above reaches no test target in any crate. This step builds them on the
@@ -754,7 +757,7 @@ mod tests {
         assert_eq!(
             steps,
             [
-                "CARGO_BUILD_WARNINGS=\"deny\" cargo hack check --workspace --each-feature \
+                "RUSTFLAGS=\"-D warnings\" cargo hack check --workspace --each-feature \
                  --no-dev-deps --exclude spate-xtask --exclude spate-fuzz",
                 "CARGO_BUILD_WARNINGS=\"deny\" cargo check --workspace --all-targets --locked \
                  --exclude spate-fuzz",

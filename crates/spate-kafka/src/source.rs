@@ -749,8 +749,8 @@ impl KafkaSource {
 
     /// Report `call` to a test's hook before the source makes it.
     #[cfg(test)]
-    fn before_call(&mut self, call: BrokerCall) {
-        if let Some(hook) = self.on_broker_call.as_mut() {
+    fn before_call(hook: &mut Option<Box<dyn FnMut(BrokerCall) + Send + Sync>>, call: BrokerCall) {
+        if let Some(hook) = hook.as_mut() {
             hook(call);
         }
     }
@@ -791,7 +791,7 @@ impl KafkaSource {
                     continue;
                 }
                 #[cfg(test)]
-                self.before_call(BrokerCall::CommitSent { k });
+                Self::before_call(&mut self.on_broker_call, BrokerCall::CommitSent { k });
                 match send_commit(&self.members[k].consumer, Some(&start.to_commit)) {
                     Ok(pending) => commit = Some(pending),
                     // Nothing reached the group, so nothing here says it moved on.
@@ -833,7 +833,10 @@ impl KafkaSource {
     ) -> KafkaResult<()> {
         let budget = until.saturating_duration_since(self.clock.now());
         #[cfg(test)]
-        self.before_call(BrokerCall::CommitWait { k, budget });
+        Self::before_call(
+            &mut self.on_broker_call,
+            BrokerCall::CommitWait { k, budget },
+        );
         #[cfg(not(test))]
         let _ = k;
         commit.wait(budget)
@@ -978,7 +981,10 @@ impl KafkaSource {
             ));
         }
         #[cfg(test)]
-        self.before_call(BrokerCall::Lookup { k: *reader, budget });
+        Self::before_call(
+            &mut self.on_broker_call,
+            BrokerCall::Lookup { k: *reader, budget },
+        );
         let committed = match consumer.committed_offsets(wanted, budget) {
             Ok(committed) => committed,
             Err(e) => return read_failure("reading committed offsets", &e),
@@ -1015,7 +1021,10 @@ impl KafkaSource {
                 return Ok(Err("no time left to list end offsets".to_owned()));
             }
             #[cfg(test)]
-            self.before_call(BrokerCall::Listing { k: *reader, budget });
+            Self::before_call(
+                &mut self.on_broker_call,
+                BrokerCall::Listing { k: *reader, budget },
+            );
             if let Err(e) = list_offsets(consumer.client(), &mut ends, budget) {
                 return read_failure("listing end offsets", &e);
             }
@@ -1082,7 +1091,7 @@ impl KafkaSource {
             return tpl.clone();
         }
         #[cfg(test)]
-        self.before_call(BrokerCall::Lookup { k, budget });
+        Self::before_call(&mut self.on_broker_call, BrokerCall::Lookup { k, budget });
         let member = &mut self.members[k];
         let committed = match member.consumer.committed_offsets(tpl.clone(), budget) {
             Ok(committed) => committed,
@@ -1931,10 +1940,12 @@ impl Source for KafkaSource {
         // fails, so one consumer's failure does not hold back the others'
         // stored offsets.
         let mut sent = Vec::with_capacity(self.members.len());
-        for k in 0..self.members.len() {
+        for (k, member) in self.members.iter().enumerate() {
             #[cfg(test)]
-            self.before_call(BrokerCall::CommitSent { k });
-            sent.push(send_commit(&self.members[k].consumer, None));
+            Self::before_call(&mut self.on_broker_call, BrokerCall::CommitSent { k });
+            #[cfg(not(test))]
+            let _ = k;
+            sent.push(send_commit(&member.consumer, None));
         }
         let until = self.clock.now() + COMMIT_TIMEOUT;
         let mut first_error = None;
@@ -3957,16 +3968,15 @@ mod tests {
             let handle = recorder.handle();
             metrics::with_local_recorder(&recorder, || {
                 let mut source = opened_consumers(test_config(), &[&[(0, 0)], &[]]);
-                for k in 0..2 {
+                for (k, member) in source.members.iter_mut().enumerate() {
                     let meter = spate_core::metrics::Meter::with_namespace(
                         "kafka", "moved", "source", "kafka",
                     );
-                    source.members[k].stats =
-                        Some(crate::metrics::KafkaStatsMetrics::for_source_consumer(
-                            meter,
-                            true,
-                            Some(k),
-                        ));
+                    member.stats = Some(crate::metrics::KafkaStatsMetrics::for_source_consumer(
+                        meter,
+                        true,
+                        Some(k),
+                    ));
                 }
                 let owned = source.members[0].live_partition_ids();
                 source.members[0]

@@ -175,6 +175,30 @@ pub(crate) fn reach(diff: &dyn Diff, selects: fn(&str) -> bool) -> Option<bool> 
         .map(|paths| paths.iter().any(|p| selects(p)))
 }
 
+/// A path list given on the command line, for asserting what each arm selects.
+#[derive(Debug)]
+pub(crate) struct PathList(Vec<String>);
+
+impl PathList {
+    pub(crate) fn from_nul_separated(text: &str) -> Self {
+        Self(
+            text.split('\0')
+                .filter(|p| !p.is_empty())
+                .map(str::to_string)
+                .collect(),
+        )
+    }
+}
+
+impl Diff for PathList {
+    fn changed_paths(&self) -> Option<Vec<String>> {
+        Some(self.0.clone())
+    }
+    fn push_paths(&self) -> Option<Vec<String>> {
+        Some(self.0.clone())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -333,29 +357,5 @@ mod tests {
             push: Some(vec!["docs/a.md".into()]),
         };
         assert_eq!(reach(&fake, is_advisory_input), Some(false));
-    }
-}
-
-/// A path list given on the command line, for asserting what each arm selects.
-#[derive(Debug)]
-pub(crate) struct PathList(Vec<String>);
-
-impl PathList {
-    pub(crate) fn from_nul_separated(text: &str) -> Self {
-        Self(
-            text.split('\0')
-                .filter(|p| !p.is_empty())
-                .map(str::to_string)
-                .collect(),
-        )
-    }
-}
-
-impl Diff for PathList {
-    fn changed_paths(&self) -> Option<Vec<String>> {
-        Some(self.0.clone())
-    }
-    fn push_paths(&self) -> Option<Vec<String>> {
-        Some(self.0.clone())
     }
 }

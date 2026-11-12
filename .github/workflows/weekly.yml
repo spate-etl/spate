@@ -137,9 +137,11 @@ jobs:
         with:
           tools: cargo-hack
           shared-key: dev-allfeatures
-      # A warning only one combination raises fails no other job.
+      # A warning only one combination raises fails no other job. `RUSTFLAGS`
+      # denies rustc's warnings, and leaves cargo's on the dev-only workspace
+      # dependencies that `--no-dev-deps` strips.
       - env:
-          CARGO_BUILD_WARNINGS: deny
+          RUSTFLAGS: "-D warnings"
         run: cargo hack check --workspace --feature-powerset --no-dev-deps
 
   coverage-containers:

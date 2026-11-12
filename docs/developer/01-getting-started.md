@@ -13,7 +13,7 @@ Install the current stable Rust through [rustup](https://rustup.rs), with the `r
 CI builds and tests on the current stable release.
 
 Run `cargo xtask ci` with cargo 1.97 or later.
-The feature matrix denies warnings through cargo's `build.warnings` setting.
+The feature matrix's build on default features denies warnings through cargo's `build.warnings` setting.
 An older cargo ignores that setting, so `cargo xtask hack` stops with an error before it builds anything.
 
 The workspace's minimum supported Rust version is the `rust-version` in the root `Cargo.toml`, currently 1.96.

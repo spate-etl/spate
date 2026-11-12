@@ -268,7 +268,7 @@ fn declares_target(manifest: &str, bench: &str) -> bool {
                 return harness_false;
             }
             in_bench = trimmed.starts_with("[[bench]]");
-            name = String::new();
+            name.clear();
             harness_false = false;
             continue;
         }

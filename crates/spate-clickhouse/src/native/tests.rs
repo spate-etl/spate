@@ -707,8 +707,6 @@ mod first_record_check {
     }
 }
 
-// The terminal stage seals a chunk on `buffered_bytes`, so the encoder's size
-// must be the length of the block it would write.
 // A LowCardinality column at its dictionary limit fails the row through
 // either dispatch arm.
 mod lowcard_limit {
@@ -762,6 +760,8 @@ mod lowcard_limit {
     }
 }
 
+// The terminal stage seals a chunk on `buffered_bytes`, so the encoder's size
+// must be the length of the block it would write.
 mod block_size {
     use super::*;
     use bytes::BytesMut;

@@ -60,7 +60,7 @@
 //! Every case above decodes a keyless payload. These three carry a 36-byte
 //! key, a UUID in text form, over the corpora of `ndjson_clean`,
 //! `ndjson_fail_clean` and `array_clean`. Each has a keyless twin, so the
-//! difference between the two is what the key costs per record:
+//! difference between the two is what the key costs over [`RECORDS`] records:
 //!
 //! - `ndjson_keyed`, `ndjson_fail_keyed` and `array_keyed`.
 //!

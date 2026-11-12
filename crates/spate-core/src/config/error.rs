@@ -38,7 +38,8 @@ pub enum ConfigError {
         /// the error is not attributable to a specific field).
         path: String,
         /// Underlying YAML/serde error, with any offending value removed. Its
-        /// message carries the position, and `location()` may be `None`.
+        /// message carries the position, and `location()` may be `None`. Its
+        /// type is `yaml_serde`'s error, an INV-6 exception.
         #[source]
         source: serde_yaml::Error,
     },

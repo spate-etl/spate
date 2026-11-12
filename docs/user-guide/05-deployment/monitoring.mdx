@@ -231,15 +231,23 @@ message `cpu features`. Its fields are:
   target turns on by default.
 - `detected`: the SIMD features the process can use on this host.
 
+Both lists cover only the SIMD features that the parsing and decompression
+libraries choose their code by, so a feature outside that set appears in
+neither.
+
 The libraries a pipeline uses for parsing and decompression choose their SIMD
 code at run time, from the features the CPU reports. A virtual machine can hide
 features that its physical CPU has, so two hosts with the same CPU model can
 report different `detected` lists.
 
 Every feature in `compiled` also appears in `detected`, because a feature the
-build compiles in is reported as present without asking the CPU. On x86_64
-Linux, `compiled` is empty unless the build raised the target CPU or added a
-target feature ([Tuning](tuning.mdx#leave-the-target-cpu-at-its-default)).
+build compiles in is reported as present without asking the CPU.
+
+On x86_64 Linux, a non-empty `compiled` means the build raised the target CPU
+or added a target feature
+([Tuning](tuning.mdx#leave-the-target-cpu-at-its-default)). An empty
+`compiled` does not rule that out, because a raised target can add only
+features outside the set.
 
 ## Related
 

@@ -5,8 +5,9 @@
 //! time, so the host decides which one runs. A virtual machine's CPU model can
 //! hide features the physical CPU has.
 //!
-//! `compiled` lists the features the build compiles in, the target's defaults
-//! included, so a raised `-C target-cpu` or `-C target-feature` shows there.
+//! Both lists cover only the rows of [`SIMD_FEATURES`]. `compiled` lists the
+//! rows the build compiles in, the target's defaults included, so a raised
+//! `-C target-cpu` or `-C target-feature` shows there when it adds a row.
 //! `detected` comes from std's detection macros, which read a compiled-in
 //! feature as present without asking the CPU, so every name in `compiled` is
 //! also in `detected`, whatever the host.

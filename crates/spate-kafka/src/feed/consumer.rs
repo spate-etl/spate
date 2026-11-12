@@ -78,7 +78,7 @@ use super::inflight::{Position, Tp};
 use super::write::{self, Destination, Finish, Move, Outgoing, Producer, Tombstone, Write};
 use super::{Closing, Core, Gating, LatchOnPanic, READY_CAPACITY, State, Topics};
 use crate::client::{
-    CLOSE_WAIT, PendingCommit, close_in_background, only_on_topics, read_position, send_commit,
+    CLOSE_WAIT, PendingCommit, check_assignment, close_in_background, read_position, send_commit,
 };
 use crate::context::{Intent, SourceContext};
 use rdkafka::consumer::{BaseConsumer, Consumer};
@@ -512,11 +512,9 @@ impl Driver {
         // Ahead of the lookup and the assign, which would fetch whatever topic
         // the group named, and of `tps`.
         let topics = self.core.topics();
-        if !only_on_topics(tpl, &[&topics.work, &topics.retry]) {
-            self.core.latch(&format!(
-                "the group offered a partition of a topic other than `{}` or `{}`",
-                topics.work, topics.retry
-            ));
+        let names = [&*topics.work, &*topics.retry];
+        if let Err(refused) = check_assignment(tpl, &names) {
+            self.core.latch(&refused.reason(&names));
             return;
         }
         let start = if tpl.count() == 0 {

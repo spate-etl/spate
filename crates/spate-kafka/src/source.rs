@@ -1999,37 +1999,6 @@ impl KafkaSource {
     }
 }
 
-/// The events waiting on `consumer`'s queue, of every kind.
-pub(crate) fn queued_events(consumer: &BaseConsumer<SourceContext>) -> usize {
-    let rk = consumer.client().native_ptr();
-    // SAFETY: `consumer` keeps `rk` live for the call. `BaseConsumer::new`
-    // refuses a client with no consumer queue when `group.id` is set, and
-    // every consumer this crate builds sets it, so the handle is not null. The
-    // handle is released before return.
-    unsafe {
-        let q = rdkafka::bindings::rd_kafka_queue_get_consumer(rk);
-        let n = rdkafka::bindings::rd_kafka_queue_length(q);
-        rdkafka::bindings::rd_kafka_queue_destroy(q);
-        n
-    }
-}
-
-/// Serves as many events as `consumer`'s queue holds at the time of the call.
-///
-/// One poll serves one event of any kind and cannot report an empty queue, so
-/// the count comes from one read of the queue's length, and the serve cannot
-/// follow a growing queue. librdkafka sorts log and statistics events ahead of
-/// a rebalance, so one arriving during the serve takes a poll of the count and
-/// can leave a rebalance for close.
-pub(crate) fn serve_queued(consumer: &BaseConsumer<SourceContext>) {
-    for _ in 0..queued_events(consumer) {
-        // A served message stores no offset, since the source owns
-        // `enable.auto.offset.store`, so it is dropped with no rewind. The error
-        // hook has logged an error.
-        let _ = consumer.poll(Duration::ZERO);
-    }
-}
-
 /// Sets every consumer's context to complete revocations in the callback and
 /// leave assignments to close, then serves the events queued on each consumer
 /// and releases it with `unassign`.
@@ -2060,7 +2029,7 @@ impl Drop for KafkaSource {
         }
         for (k, member) in self.members.iter().enumerate() {
             // After `unassign`, a queued revocation is a stale event for close.
-            serve_queued(&member.consumer);
+            crate::client::serve_queued(&member.consumer);
             if let Err(e) = member.consumer.unassign() {
                 tracing::warn!(consumer = k, error = %e, "unassign during source teardown failed");
             }
@@ -4621,7 +4590,7 @@ mod tests {
         fn empty_queue(consumer: &BaseConsumer<SourceContext>) {
             wait_until(HANG, "an empty queue", || {
                 let _ = consumer.poll(Duration::ZERO);
-                queued_events(consumer) == 0
+                crate::client::queued_events(consumer) == 0
             });
         }
 
@@ -4708,7 +4677,7 @@ mod tests {
             let cluster = mock();
             let (source, members) = open(config(&cluster, "drop-queued-serve", 1));
             stop_at(&members[0], ASSIGN_STOP);
-            serve_queued(&members[0]);
+            crate::client::serve_queued(&members[0]);
             {
                 let intents = members[0].context().intents.lock().expect("intent lock");
                 assert!(
@@ -4734,7 +4703,7 @@ mod tests {
             let consumer = Arc::clone(&source.members[0].consumer);
             // A refused connection queues a log line, then two error events.
             wait_until(HANG, "error events queued", || {
-                queued_events(&consumer) >= 3
+                crate::client::queued_events(&consumer) >= 3
             });
             let ((), lines) = lines_of_drop((), Level::WARN, move || drop(source));
             let errors = lines
@@ -5346,10 +5315,10 @@ mod tests {
             // Leave exactly consumer 0's two retryable errors queued, so it
             // returns one in the call that also polls consumer 1.
             spate_test::wait_until(HANG, "consumer 0's errors", || {
-                queued_events(&source.members[0].consumer) >= 2
+                crate::client::queued_events(&source.members[0].consumer) >= 2
             });
             let c0 = Arc::clone(&source.members[0].consumer);
-            while queued_events(&source.members[0].consumer) > 2 {
+            while crate::client::queued_events(&source.members[0].consumer) > 2 {
                 assert!(
                     c0.poll(Duration::ZERO).is_none(),
                     "only non-error events precede"

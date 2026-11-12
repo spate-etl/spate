@@ -153,7 +153,7 @@ impl Gate {
     pub(crate) fn pass(&self) {
         // The lister carries a `group.id`, so librdkafka queues its log lines
         // and errors where only a poll drains them.
-        crate::source::serve_queued(&self.lister);
+        crate::client::serve_queued(&self.lister);
         let entries = self.take();
         if entries.is_empty() {
             return;
@@ -675,9 +675,9 @@ mod tests {
                 .fetch_watermarks("units-attempts", 0, HANG)
                 .unwrap();
         }
-        let before = crate::source::queued_events(&gate.lister);
+        let before = crate::client::queued_events(&gate.lister);
         gate.pass();
-        let after = crate::source::queued_events(&gate.lister);
+        let after = crate::client::queued_events(&gate.lister);
         assert!(after < before, "{after} of {before} queued lines left");
     }
 

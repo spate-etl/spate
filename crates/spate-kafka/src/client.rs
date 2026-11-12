@@ -430,6 +430,37 @@ pub(crate) trait Hooks: Send + Sync + 'static {
 
 impl Hooks for () {}
 
+/// The events waiting on `consumer`'s queue, of every kind.
+pub(crate) fn queued_events<C: ConsumerContext>(consumer: &BaseConsumer<C>) -> usize {
+    let rk = consumer.client().native_ptr();
+    // SAFETY: `consumer` keeps `rk` live for the call. `BaseConsumer::new`
+    // refuses a client with no consumer queue when `group.id` is set, and
+    // every consumer this crate builds sets it, so the handle is not null. The
+    // handle is released before return.
+    unsafe {
+        let q = rdkafka::bindings::rd_kafka_queue_get_consumer(rk);
+        let n = rdkafka::bindings::rd_kafka_queue_length(q);
+        rdkafka::bindings::rd_kafka_queue_destroy(q);
+        n
+    }
+}
+
+/// Serves as many events as `consumer`'s queue holds at the time of the call.
+///
+/// One poll serves one event of any kind and cannot report an empty queue, so
+/// the count comes from one read of the queue's length, and the serve cannot
+/// follow a growing queue. librdkafka sorts log and statistics events ahead of
+/// a rebalance, so one arriving during the serve takes a poll of the count and
+/// can leave a rebalance for close.
+pub(crate) fn serve_queued<C: ConsumerContext>(consumer: &BaseConsumer<C>) {
+    for _ in 0..queued_events(consumer) {
+        // A served message stores no offset, since the caller owns
+        // `enable.auto.offset.store`, so it is dropped with no rewind. The error
+        // hook has logged an error.
+        let _ = consumer.poll(Duration::ZERO);
+    }
+}
+
 /// The next offset the application reads on the one partition in `list`, or
 /// [`Offset::Invalid`] until a served op sets it.
 ///

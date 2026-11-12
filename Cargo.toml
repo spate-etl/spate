@@ -139,8 +139,8 @@ base64 = "0.23.1"
 # spate-s3 inflates gzip objects through zlib-rs, which picks its SIMD paths
 # at run time under `runtime_detection`. 1.1.10 is the first release with it.
 flate2 = { version = "1.1.10", default-features = false, features = ["zlib-rs", "runtime_detection"] }
-# The pipeline bench writes its gzip objects with these, so the stored bytes
-# stay the same whichever backend flate2 is built with.
+# The pipeline and S3 framing benches write their gzip objects with these, so
+# the stored bytes stay the same whichever backend flate2 is built with.
 crc32fast = "1.5"
 miniz_oxide = "0.9.1"
 # clickhouse requires ^0.13, so its copy stays in the graph beside this one

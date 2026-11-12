@@ -10,8 +10,6 @@
 //! written by hand rather than serialized: this bench measures framing, and
 //! pulling in a serializer would put its cost in the fixture builder.
 
-use std::io::Write as _;
-
 /// Bytes per fetched chunk, the source's default (`chunk_bytes`,
 /// 512 KiB), so the framer's work is split across `push_chunk` calls at the
 /// granularity production uses.
@@ -121,11 +119,19 @@ pub(crate) fn chunks(bytes: &[u8]) -> Vec<bytes::Bytes> {
         .collect()
 }
 
-/// gzip the body, as the object would be stored.
+/// gzip the body, as the object would be stored: one member, deflated by
+/// miniz_oxide at level 6.
+///
+/// Written without flate2, so the stored bytes stay the same whichever
+/// backend flate2 decodes with.
 pub(crate) fn gzip(bytes: &[u8]) -> Vec<u8> {
-    let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
-    enc.write_all(bytes).expect("gzip a vec");
-    enc.finish().expect("finish gzip")
+    // Magic, deflate, no flags, no modification time, no extra flags, unknown OS.
+    let mut member = vec![0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 0, 0xff];
+    member.extend(miniz_oxide::deflate::compress_to_vec(bytes, 6));
+    member.extend(crc32fast::hash(bytes).to_le_bytes());
+    let size = u32::try_from(bytes.len()).expect("a fixture stays under 4 GiB");
+    member.extend(size.to_le_bytes());
+    member
 }
 
 /// zstd the body, as the object would be stored.

@@ -32,8 +32,8 @@ use crate::queue::{
 };
 use crate::startup::{self, COUNT_ATTRIBUTES, QueueAttributes, counts};
 use spate_core::backoff::Backoff;
-use spate_core::clock::SyncClock;
 use spate_core::clock::tokio::{Clock, SystemClock, before};
+use spate_core::clock::{SyncClock, deadline_after};
 use spate_core::config::{FeedSection, redact};
 use spate_core::error::ErrorClass;
 use spate_core::feed::ConnectError;
@@ -297,7 +297,11 @@ impl State {
     fn close_bound(&mut self, clock: &dyn Clock) -> Option<Instant> {
         let close = self.close.as_mut()?;
         let within = close.within;
-        Some(*close.bound.get_or_insert_with(|| clock.now() + within))
+        Some(
+            *close
+                .bound
+                .get_or_insert_with(|| deadline_after(clock.now(), within)),
+        )
     }
 
     /// Count `n` entries given up unapplied, toward a close under way.
@@ -978,9 +982,9 @@ impl Feed for SqsFeed {
 
     /// Stop receiving if no stop came first, send the deletes and fails
     /// still queued, and set every unit still held or buffered visible at
-    /// once, all within `within`. With a receive in flight that may take a
-    /// unit just handed back, it waits up to a second after the last
-    /// hand-back for that receive, and hands back what it took. The
+    /// once, all within `within`, at most a year. With a receive in flight
+    /// that may take a unit just handed back, it waits up to a second after
+    /// the last hand-back for that receive, and hands back what it took. The
     /// confirmation is rejected when an entry was given up unapplied, and
     /// with the feed's Fatal error once it has stopped. `None` after the
     /// test-only `abandon`.

@@ -4225,6 +4225,7 @@ dependencies = [
  "libc",
  "serde",
  "serde_json",
+ "spate-core",
  "tempfile",
  "twox-hash",
 ]

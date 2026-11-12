@@ -69,6 +69,7 @@ use std::collections::BTreeMap;
 use std::env::consts::{ARCH, OS};
 
 use serde::{Deserialize, Serialize};
+pub use spate_core::telemetry::cpu::detected_simd;
 
 /// The environment variable carrying the driver's build fingerprint, as compact
 /// JSON, into every bench process it starts.
@@ -269,7 +270,8 @@ pub struct Host {
     /// A label for the machine: `SPATE_BENCH_HOST`, or `local` when unset.
     pub label: String,
     /// The SIMD features this process detected at run time, from
-    /// [`SIMD_FEATURES`], in its order. Empty on another architecture, and for
+    /// [`SIMD_FEATURES`](spate_core::telemetry::cpu::SIMD_FEATURES), in its
+    /// order. Empty on another architecture, and for
     /// a record written before the field existed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub simd: Vec<String>,
@@ -308,62 +310,6 @@ impl Host {
         fields.insert("host_simd", self.simd.join(","));
         fields
     }
-}
-
-/// A SIMD feature and its run-time probe.
-type SimdProbe = (&'static str, fn() -> bool);
-
-/// Builds a [`SimdProbe`] table for one architecture's detection macro, which
-/// takes only a literal.
-macro_rules! simd_probes {
-    ($detect:ident; $($name:tt),+ $(,)?) => {
-        &[$(($name, || $detect!($name))),+]
-    };
-}
-
-/// The SIMD features a leg's host records, in the order it lists them.
-///
-/// The features the decode and decompression paths dispatch on at run time:
-/// `memchr` and `simdutf8` on `avx2`, `simd-json` on `avx2` with `pclmulqdq`
-/// and then `sse4.2`, `simdutf8` on `sse4.2`, `zlib-rs` on `avx2` with `bmi1`
-/// and `bmi2`, and on `pclmulqdq`, `sse4.1`, `avx512f`, `neon` and `crc`, and
-/// libzstd on `bmi1` with `bmi2`. Then the wider AVX-512 and SVE features a
-/// later path may take, so a host that hides part of AVX-512 still records it.
-#[cfg(target_arch = "x86_64")]
-pub const SIMD_FEATURES: &[SimdProbe] = simd_probes!(
-    is_x86_feature_detected;
-    "sse4.1", "sse4.2", "pclmulqdq", "avx2", "bmi1", "bmi2",
-    "avx512f", "avx512bw", "avx512vl", "avx512vbmi", "vpclmulqdq",
-);
-
-/// The SIMD features a leg's host records, in the order it lists them.
-///
-/// See the x86_64 table for the consumers behind each entry.
-#[cfg(target_arch = "aarch64")]
-pub const SIMD_FEATURES: &[SimdProbe] =
-    simd_probes!(is_aarch64_feature_detected; "neon", "crc", "sve", "sve2");
-
-#[cfg(target_arch = "aarch64")]
-use std::arch::is_aarch64_feature_detected;
-
-/// No SIMD feature is recorded on another architecture.
-#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-pub const SIMD_FEATURES: &[SimdProbe] = &[];
-
-/// The features in [`SIMD_FEATURES`] this process detects, in table order.
-#[must_use]
-pub fn detected_simd() -> Vec<String> {
-    detected(SIMD_FEATURES)
-}
-
-/// The names in `table` whose probe reports the feature present, in table
-/// order.
-fn detected(table: &[SimdProbe]) -> Vec<String> {
-    table
-        .iter()
-        .filter(|(_, present)| present())
-        .map(|(name, _)| (*name).to_owned())
-        .collect()
 }
 
 /// The CPU brand, read from whichever interface the platform offers.
@@ -440,7 +386,8 @@ fn sysctl_string(name: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Axis, BuildFingerprint, Host, LOCAL_LEG, SIMD_FEATURES, SimdProbe, detected};
+    use super::{Axis, BuildFingerprint, Host, LOCAL_LEG};
+    use spate_core::telemetry::cpu::SIMD_FEATURES;
 
     #[test]
     fn a_local_fingerprint_leaves_the_unknowable_absent() {
@@ -521,7 +468,7 @@ mod tests {
         assert!(!host.cpu.is_empty());
         assert_eq!(host.guarded_fields().len(), 5);
         assert_eq!(host.guarded_fields(), Host::detect().guarded_fields());
-        let known: Vec<&str> = SIMD_FEATURES.iter().map(|(name, _)| *name).collect();
+        let known: Vec<&str> = SIMD_FEATURES.iter().map(|f| f.name).collect();
         assert!(
             host.simd.iter().all(|f| known.contains(&f.as_str())),
             "{:?} is not a subset of {known:?}",
@@ -533,14 +480,6 @@ mod tests {
         assert!(host.simd.iter().any(|f| f == "neon"), "{:?}", host.simd);
         #[cfg(target_arch = "x86_64")]
         assert!(host.simd.iter().any(|f| f == "sse4.2"), "{:?}", host.simd);
-    }
-
-    /// Pins that only the features whose probe reports them are listed, in
-    /// the table's order.
-    #[test]
-    fn only_the_detected_features_are_listed_in_table_order() {
-        const TABLE: &[SimdProbe] = &[("a", || true), ("b", || false), ("c", || true)];
-        assert_eq!(detected(TABLE), vec!["a".to_owned(), "c".to_owned()]);
     }
 
     /// A record written before `simd` existed loads with an empty list, so it

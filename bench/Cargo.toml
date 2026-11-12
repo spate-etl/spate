@@ -20,6 +20,8 @@ driver = ["dep:clap"]
 [dependencies]
 # `getrusage`, for the peak resident set and the CPU time in the same call.
 libc = { workspace = true }
+# The SIMD feature table a host records, shared with the pipeline's start-up log.
+spate-core = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 twox-hash = { workspace = true }

@@ -22,6 +22,7 @@ use crate::ops::RunnableChain;
 use crate::sink::SinkProbeFn;
 use crate::source::{DrainBarrier, Source};
 use crate::task;
+use crate::telemetry::cpu;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -349,6 +350,9 @@ impl<S: Source + 'static> PipelineRuntime<S> {
     /// drain has ended, it shuts the I/O runtime down, waiting at most 2s for
     /// its tasks.
     ///
+    /// The first call in a process logs the SIMD features the build compiles
+    /// in and the ones the CPU reports, at `INFO` under `cpu features`.
+    ///
     /// # Errors
     ///
     /// [`StartError::Config`] before the source opens for a zero thread
@@ -357,6 +361,7 @@ impl<S: Source + 'static> PipelineRuntime<S> {
     /// one day, or a configuration the source or the feed refuses. Each other
     /// [`StartError`] variant for the startup step it names.
     pub fn run(mut self) -> Result<ExitReport, StartError> {
+        cpu::log_once();
         let threads = self.thread_count();
         if threads == 0 || self.config.pipeline.io_threads == 0 {
             return Err(StartError::Config("thread counts must be non-zero".into()));

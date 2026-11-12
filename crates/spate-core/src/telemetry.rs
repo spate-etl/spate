@@ -46,6 +46,9 @@ use tracing_subscriber::fmt::format::{DefaultFields, FormatFields, Writer};
 
 use crate::clock::{Clock, SystemClock, deadline_after};
 
+#[doc(hidden)]
+pub mod cpu;
+
 /// Monotonic reference point shared by every [`RateLimit`], so a window
 /// deadline can be stored as a plain `AtomicU64` of nanoseconds and compared
 /// on the lock-free fast path.

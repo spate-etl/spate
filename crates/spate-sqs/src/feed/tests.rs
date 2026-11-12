@@ -6,6 +6,7 @@
 use super::*;
 use crate::queue::BoxFuture;
 use crate::scripted::{Failure, Message, ScriptedQueue};
+use spate_core::clock::LONGEST_DEADLINE;
 use spate_core::clock::TestClock as SyncTestClock;
 use spate_core::clock::tokio::TestClock;
 use spate_core::feed::{FeedPark, wake_channel};
@@ -2600,6 +2601,66 @@ async fn close_sends_queued_deletes_within_its_bound() {
     assert_eq!(queue.delete_within(), [Some(within)]);
     assert!(within <= deadline - Instant::now());
     assert!(closed.try_outcome().unwrap().is_ok());
+}
+
+/// Pins that a close whose bound is past the clock's range still sends a
+/// delete held back past its first try, and settles once it lands.
+#[tokio::test(start_paused = true)]
+async fn a_close_past_the_clock_sends_a_held_back_delete() {
+    let (feed, queue) = start_gated(MINUTE);
+    let (waker, park) = wake_channel();
+    feed.set_waker(waker);
+    queue.inner.ready(Message::new("a"));
+    let got = receive_n(&feed, &park, 1).await;
+    queue.delete_down.store(true, Ordering::SeqCst);
+    for d in &got {
+        feed.acknowledge(d.receipt).unwrap();
+    }
+    settle_tasks().await;
+    let mut closed = feed.close(Duration::MAX).unwrap();
+    settle_tasks().await;
+    assert!(
+        closed.try_outcome().is_none(),
+        "settled with the delete down"
+    );
+    queue.delete_down.store(false, Ordering::SeqCst);
+    tokio::time::advance(first_retry()).await;
+    settle_tasks().await;
+    assert!(closed.try_outcome().unwrap().is_ok());
+}
+
+/// Pins that a close whose bound is past the clock's range gives up a year
+/// out: a delete held past that is counted given up.
+#[tokio::test(start_paused = true)]
+async fn a_close_past_the_clock_gives_up_a_year_out() {
+    let (feed, queue, clock) = start_gated_clocked(MINUTE);
+    let (waker, park) = wake_channel();
+    feed.set_waker(waker);
+    for i in 0..11 {
+        queue.inner.ready(Message::new(&format!("u{i}")));
+    }
+    let got = receive_n(&feed, &park, 11).await;
+    queue.hold_deletes();
+    for d in &got {
+        feed.acknowledge(d.receipt).unwrap();
+    }
+    let mut closed = feed.close(Duration::MAX).unwrap();
+    let bound = clock.now() + LONGEST_DEADLINE;
+    until("the first chunk is held", || {
+        queue.inner.deletes().len() == 1
+    })
+    .await;
+    until("the close waits for its bound", || {
+        clock.has_slept_until(bound)
+    })
+    .await;
+    assert!(closed.try_outcome().is_none());
+    clock.advance(LONGEST_DEADLINE);
+    queue.release_deletes();
+    until("the close settles", || closed.try_outcome().is_some()).await;
+    settle_tasks().await;
+    assert!(closed.try_outcome().unwrap().is_err());
+    assert_eq!(feed.lock().close.as_ref().unwrap().dropped, 1);
 }
 
 /// Pins that `close` waits for the delete batch the settle task is already

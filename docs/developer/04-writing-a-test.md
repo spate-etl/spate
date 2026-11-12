@@ -19,7 +19,7 @@ The tests of `spate-core` use the helpers in `spate-test`, such as `wait_until` 
 The `spate-test` crate depends on `spate-core`, so this edge closes a cycle.
 Packaging drops a dev-dependency that has no version, so the cycle never reaches crates.io.
 
-The dev-dependency is off under `--cfg loom`, so a test module that uses `spate-test` is compiled out under loom too.
+Gate a test module that uses `spate-test` with `#[cfg(all(test, not(loom)))]`, because the dev-dependency is off under `--cfg loom`.
 
 In a `spate-core` unit test, use only `spate-test` items that neither name nor call a `spate-core` item.
 A unit test links a second copy of `spate-core` through `spate-test`.

@@ -52,9 +52,8 @@ tokio = { workspace = true, features = ["macros", "test-util"] }
 
 # spate-test depends on this crate, so the edge has no version: packaging strips
 # it, and a versioned one would close a cycle no publish order satisfies. Off
-# under loom, which compiles out the modules spate-test imports. Unit tests in
-# `src/` link a second copy of this crate through it, so they use only items
-# that neither name nor call a `spate_core` item.
+# under loom, which compiles out the modules spate-test imports. What a unit
+# test in `src/` may use from it is in docs/developer/04-writing-a-test.md.
 [target.'cfg(not(loom))'.dev-dependencies]
 spate-test = { path = "../spate-test" }
 

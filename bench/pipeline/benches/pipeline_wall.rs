@@ -31,7 +31,8 @@
 //!
 //! - `pipeline/ndjson_zst/native/threads_{1,4}`: zstd level 3 objects.
 //! - `pipeline/ndjson_gz/native/threads_{1,4}`: gzip level 6 objects, which
-//!   flate2 inflates in Rust.
+//!   flate2 inflates in Rust. miniz_oxide writes them, so both legs read the
+//!   same bytes when the A/B swaps flate2's backend.
 //! - `pipeline/ndjson/native/threads_{1,4}`: the same lines uncompressed. libzstd
 //!   is C, built outside rustc, so a build setting that reaches only Rust code
 //!   shows here without the zstd share diluting it.
@@ -74,7 +75,7 @@ fn case(suite: Suite, stored: Stored, threads: usize) -> Suite {
         .case(
             &id,
             move |corpus, _seed| {
-                let rig = Rig::new(shape, DEADLINE, |object| corpus.absorb("object", object));
+                let rig = Rig::new(shape, DEADLINE, |label, bytes| corpus.absorb(label, bytes));
                 let units = rig.units();
                 assert_eq!(
                     units % threads,

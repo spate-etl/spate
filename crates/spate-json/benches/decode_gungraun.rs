@@ -55,6 +55,15 @@
 //!   inside `serde` rather than across a holding buffer, and the pair against
 //!   the ndjson one is the only place that difference is priced.
 //!
+//! ## The key
+//!
+//! Every case above decodes a keyless payload. These three carry a 36-byte
+//! key, a UUID in text form, over the corpora of `ndjson_clean`,
+//! `ndjson_fail_clean` and `array_clean`. Each has a keyless twin, so the
+//! difference between the two is what the key costs over [`RECORDS`] records:
+//!
+//! - `ndjson_keyed`, `ndjson_fail_keyed` and `array_keyed`.
+//!
 //! ## Document shape
 //!
 //! Every case above is a flat record of seven to fifteen fields. These are the
@@ -106,13 +115,13 @@
 //! limiter behind the skip warning allows five events per ten *seconds*, so a
 //! poison case whose warm pass and measured pass together straddled a window
 //! roll would emit up to five extra log events on one run and not the next.
-//! Nothing observed comes near it: the whole nineteen-case binary takes 36
-//! seconds on the runner and 15 on a development machine, which bounds any one
-//! case's process (valgrind startup, corpus construction, warm pass and
-//! measured region together) at a small multiple of a second. A poison row
-//! that moved by a few hundred instructions between runs would be this, and
-//! would mean the runner had become several times slower rather than that the
-//! decode had changed.
+//! Nothing observed comes near it: the whole twenty-two-case binary takes 29
+//! seconds in an aarch64 Linux container on a development machine, which
+//! bounds any one case's process (valgrind startup, corpus construction, warm
+//! pass and measured region together) at a small multiple of a second. A
+//! poison row that moved by a few hundred instructions between runs would be
+//! this, and would mean the runner had become several times slower rather than
+//! that the decode had changed.
 //!
 //! ## What is left out
 //!
@@ -146,7 +155,7 @@ mod orders;
 #[path = "support/shapes.rs"]
 mod shapes;
 
-use decode_rig::{Rig, batch_rig, decode_once, decode_run, decode_run_err, rig, shape_rig};
+use decode_rig::{Rig, batch_rig, decode_once, decode_run, decode_run_err, keyed, rig, shape_rig};
 use orders::{BAD_EVERY, Corruption, LineItem, Order, RECORDS};
 
 /// The number of records the batch framings carry. Fifty is the same batch
@@ -299,6 +308,9 @@ fn decode_framed(
 #[bench::ndjson_fail_clean(ndjson_fail_clean_rig())]
 #[bench::array_clean(array_clean_rig())]
 #[bench::array_bad_last(array_bad_last_rig())]
+#[bench::ndjson_keyed(keyed(ndjson_clean_rig()))]
+#[bench::ndjson_fail_keyed(keyed(ndjson_fail_clean_rig()))]
+#[bench::array_keyed(keyed(array_clean_rig()))]
 fn decode_batch(
     mut rig: Rig<spate_json::JsonSerdeDeserializer<LineItem>>,
 ) -> Rig<spate_json::JsonSerdeDeserializer<LineItem>> {

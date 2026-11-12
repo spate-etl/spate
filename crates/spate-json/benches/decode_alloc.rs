@@ -14,6 +14,8 @@
 //! `ndjson_syntax_all`, `array_bad_last`, `dup_guard_hit`) are left out. Each
 //! drop under `on_error: skip` passes the skip warning's rate limiter, which
 //! reads the wall clock, so whether a pass emits an event depends on time.
+//! The keyed cases are left out too: hashing the key allocates nothing, so
+//! each would repeat its keyless twin's counts.
 
 use serde_json::Value;
 use spate_core::deser::Owned;

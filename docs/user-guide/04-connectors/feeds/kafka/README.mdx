@@ -278,8 +278,7 @@ partition then waits at the gate for one second, until the pass writes its
 fence and the follower reads it.
 
 On any broker, a pass also writes a fence when the follower reads nothing
-below the watermark for a second, such as during a leader election or behind
-an open transaction on the attempt topic.
+below the watermark for a second, such as during a leader election.
 
 The attempt follower joins the feed's group by its `group.id` and assigns
 the attempt topic's partitions itself, so it never takes part in a rebalance

@@ -5757,9 +5757,14 @@ mod cluster {
             .client()
             .fetch_metadata(Some(ATTEMPTS), Duration::from_secs(10))
             .unwrap();
-        let gate = Gate::new(Arc::clone(&core), producer, PASS_BOUND)
-            .with_step(STEP)
-            .with_request_bound(HANG);
+        let gate = Gate::new(
+            Arc::clone(&core),
+            producer,
+            attempt::test_lister(&config),
+            PASS_BOUND,
+        )
+        .with_step(STEP)
+        .with_request_bound(HANG);
         Fencing {
             cluster,
             core,

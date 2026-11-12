@@ -7,8 +7,9 @@ exists inside the repository to measure it, and is `publish = false`.
 Benchmarks here answer one question — *did this change move it* — by measuring
 two builds against each other in one sitting, on one machine. Nothing is stored:
 a comparison is produced, read, and thrown away. Nothing here is a gate. A
-weekly CI job runs `cargo xtask bench ab` on one hosted runner against last
-week's `main` and writes the report to its job summary. The instruction-count
+weekly CI job runs `cargo xtask bench ab` against last week's `main` on two
+hosted runners, one for `spate-pipeline-bench` and one for every other target,
+and writes each report to its job summary. The instruction-count
 tier and the allocation snapshots gate a pull request, because counting is
 comparable across shared machines and timing is not.
 
@@ -17,12 +18,14 @@ cargo xtask bench list                              # every case, with its flags
 cargo xtask bench ab --ref main --replicates 20               # compare this tree against a ref
 cargo xtask bench ab --ref main --filter decode         # only cases whose id contains this
 cargo xtask bench ab --ref main --package spate-avro    # only that crate's targets
+cargo xtask bench ab --ref main --exclude spate-pipeline-bench  # every crate's targets but that one's
 cargo xtask bench arms --head-features spate-json/simd   # compare two feature arms
 cargo xtask bench compare <base-dir> <head-dir> --format markdown
 ```
 
 `--package` narrows the *build*, by exact crate name and repeatable;
-`--filter` narrows the case list within whatever was built.
+`--exclude` drops one crate's targets from it the same way, and cannot be given
+with `--package`; `--filter` narrows the case list within whatever was built.
 Narrowing never narrows the resolved features the two legs are guarded on, so a
 narrowed run can be refused over a feature neither leg built; `--allow features`
 waives that, and the report's header says it was waived. `--allow` takes any

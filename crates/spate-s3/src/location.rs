@@ -16,6 +16,7 @@ use futures_util::StreamExt as _;
 use object_store::aws::{AmazonS3, AmazonS3Builder};
 use object_store::path::Path;
 use object_store::{ObjectStore, ObjectStoreExt, ObjectStoreScheme};
+use spate_core::clock::deadline_after;
 use spate_core::clock::tokio::{Clock, before};
 use spate_core::config::{ConfigError, UrlRule, redact};
 use spate_core::error::{ErrorClass, SourceError};
@@ -403,8 +404,9 @@ fn error_with(
 /// `mine`.
 ///
 /// Reads at each [`FINGERPRINT_POLL`] step of `clock` until a fingerprint is
-/// there, `window` has passed, or `stop` is set. The stop and the deadline
-/// are checked at each step, a read in flight included, which is abandoned.
+/// there, `window` has passed, or `stop` is set. A `window` over a year
+/// waits a year. The stop and the deadline are checked at each step, a read
+/// in flight included, which is abandoned.
 ///
 /// # Errors
 ///
@@ -420,7 +422,7 @@ pub(crate) async fn await_fingerprint(
     window: Duration,
 ) -> Result<(), SourceError> {
     let start = clock.now();
-    let deadline = start + window;
+    let deadline = deadline_after(start, window);
     // Reads fall on a fixed schedule from `start`, so a late wakeup does
     // not shift every later read.
     let mut next = start;
@@ -1014,6 +1016,43 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(read.as_deref(), Some(&body[..]));
+    }
+
+    /// Pins that a window past the clock's range still reads at each step:
+    /// an absent fingerprint, then the one written before the next read.
+    #[test]
+    fn a_window_past_the_clock_reads_at_each_step() {
+        use futures_util::FutureExt as _;
+        let store = HookStore::default();
+        let location = accepted("s3://ops/jobs/a/");
+        let clock = TestClock::frozen();
+        let stop = StopSignal::default();
+        let mut wait = Box::pin(await_fingerprint(
+            &store,
+            &location,
+            "mine",
+            clock.as_ref(),
+            &stop,
+            Duration::MAX,
+        ));
+        assert!(
+            (&mut wait).now_or_never().is_none(),
+            "settled with no fingerprint"
+        );
+        assert!(clock.has_slept_until(clock.now() + FINGERPRINT_POLL));
+        store
+            .put(
+                &location.fingerprint(),
+                bytes::Bytes::from_static(b"mine").into(),
+            )
+            .now_or_never()
+            .expect("an in-memory put is ready")
+            .unwrap();
+        clock.advance(FINGERPRINT_POLL);
+        let settled = (&mut wait)
+            .now_or_never()
+            .expect("the next read settles the wait");
+        assert!(settled.is_ok(), "{settled:?}");
     }
 
     /// Pins that a fatal read error ends the wait at once, with no retry on

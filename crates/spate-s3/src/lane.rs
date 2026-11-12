@@ -35,6 +35,7 @@ use crate::lane_ctx::{PoisonKind, PoisonReport, SplitTracker};
 use crate::metrics::S3Metrics;
 use crate::offset::{MAX_RECORD_INDEX, Position};
 use spate_core::checkpoint::{AckIssuer, AckRef};
+use spate_core::clock::deadline_after;
 use spate_core::clock::tokio::{Clock, before};
 use spate_core::error::{ErrorClass, SourceError};
 use spate_core::feed::FeedWaker;
@@ -472,7 +473,7 @@ impl SourceLane for S3Lane {
             return Ok(None);
         }
         self.held.clear();
-        let deadline = self.clock.now() + timeout;
+        let deadline = deadline_after(self.clock.now(), timeout);
         // Whether this poll has already tried the channel or decoded a step
         // of pending input. The deadline
         // must not short-circuit the *first* receive: with `timeout` zero
@@ -650,6 +651,7 @@ mod tests {
     use super::*;
     use crate::testutil::TestLineFramer;
     use spate_core::checkpoint::Checkpointer;
+    use spate_core::clock::LONGEST_DEADLINE;
     use spate_core::clock::tokio::{SystemClock, TestClock};
     use spate_core::feed::wake_channel;
 
@@ -1095,7 +1097,7 @@ mod tests {
     impl Drop for AdvanceOnPanic<'_> {
         fn drop(&mut self) {
             if std::thread::panicking() {
-                self.0.advance(Duration::from_secs(3600));
+                self.0.advance(LONGEST_DEADLINE);
             }
         }
     }
@@ -1120,6 +1122,57 @@ mod tests {
             assert!(idle, "an idle poll returned a batch");
         });
         assert!(r.tracker.terminal().is_none(), "idle is not end-of-input");
+    }
+
+    /// Pins that an idle poll whose timeout is past the clock's range parks
+    /// until a year out, then returns `Ok(None)`.
+    #[test]
+    fn an_idle_poll_past_the_clock_parks_for_a_year() {
+        let (mut r, clock) = frozen_rig();
+        let deadline = clock.now() + LONGEST_DEADLINE;
+        let lane = &mut r.lane;
+        std::thread::scope(|scope| {
+            let polling = scope.spawn(move || lane.poll(512, Duration::MAX).map(|b| b.is_none()));
+            let _release = AdvanceOnPanic(&clock);
+            spate_test::wait_until(ARMED, "the poll arms its deadline", || {
+                clock.has_slept_until(deadline) || polling.is_finished()
+            });
+            assert!(!polling.is_finished(), "returned before the clock moved");
+            clock.advance(LONGEST_DEADLINE);
+            let idle = polling.join().expect("the poll thread").expect("poll");
+            assert!(idle, "an idle poll returned a batch");
+        });
+    }
+
+    /// Pins that a poll whose timeout is past the clock's range still takes
+    /// a chunk sent while it waits.
+    #[test]
+    fn a_poll_past_the_clock_takes_a_chunk_sent_while_it_waits() {
+        let (mut r, clock) = frozen_rig();
+        let deadline = clock.now() + LONGEST_DEADLINE;
+        let tx = r.tx.clone().expect("the rig's sender");
+        let lane = &mut r.lane;
+        std::thread::scope(|scope| {
+            let polling = scope.spawn(move || {
+                let batch = lane.poll(512, Duration::MAX).expect("poll");
+                batch.map(|mut b| b.next_payload().map(|p| p.bytes.to_vec()))
+            });
+            let _release = AdvanceOnPanic(&clock);
+            spate_test::wait_until(ARMED, "the poll arms its deadline", || {
+                clock.has_slept_until(deadline) || polling.is_finished()
+            });
+            assert!(!polling.is_finished(), "returned with nothing sent");
+            tx.try_send(ChunkMsg::ObjectStart {
+                ordinal: 0,
+                key: "p/a.ndjson".into(),
+                last_modified_ms: 1_000,
+            })
+            .unwrap();
+            tx.try_send(ChunkMsg::Chunk(bytes::Bytes::from_static(b"a\n")))
+                .unwrap();
+            let got = polling.join().expect("the poll thread");
+            assert_eq!(got, Some(Some(b"a".to_vec())));
+        });
     }
 
     /// Pins that a zero-timeout poll still takes one ready message, so the

@@ -74,8 +74,9 @@ line after 20 depth reads with the group's commits unchanged.
 `a_unit_behind_an_open_transaction_holds_a_bounded_job_open`,
 `a_retry_write_behind_an_open_transaction_holds_a_bounded_job_open` and
 `a_dead_letter_write_behind_an_open_transaction_stalls_a_bounded_job` pin the
-job on a real broker. `only_the_depth_client_lists_ends_at_the_high_watermark`
-pins the level on each of the six clients.
+job on a real broker.
+`only_the_depth_client_and_the_attempt_readers_read_uncommitted` pins the level
+on each of the six clients.
 
 ## More information
 

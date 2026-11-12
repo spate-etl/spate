@@ -44,7 +44,7 @@ use tracing_subscriber::field::RecordFields;
 use tracing_subscriber::fmt::SubscriberBuilder;
 use tracing_subscriber::fmt::format::{DefaultFields, FormatFields, Writer};
 
-use crate::clock::{Clock, SystemClock};
+use crate::clock::{Clock, SystemClock, deadline_after};
 
 /// Monotonic reference point shared by every [`RateLimit`], so a window
 /// deadline can be stored as a plain `AtomicU64` of nanoseconds and compared
@@ -190,7 +190,8 @@ pub struct RateLimit {
 }
 
 impl RateLimit {
-    /// A limiter allowing `capacity` events per `window`.
+    /// A limiter allowing `capacity` events per `window`. Any `window` is
+    /// accepted; one longer than the process runs never rolls.
     #[must_use]
     pub const fn new(capacity: u32, window: Duration) -> Self {
         RateLimit {
@@ -267,7 +268,7 @@ impl RateLimit {
     /// Arm the fast path for the window that started at `window_start`.
     fn arm(&self, window_start: Instant) {
         self.window_end_nanos.store(
-            nanos_since_base(window_start + self.window),
+            nanos_since_base(deadline_after(window_start, self.window)),
             Ordering::Relaxed,
         );
         self.saturated.store(true, Ordering::Relaxed);
@@ -362,6 +363,23 @@ mod tests {
             lines[0].contains(r"a\u{1b}[1Eb\u{b}c\u{85}d\u{2028}e\tf"),
             "{lines:#?}"
         );
+    }
+
+    /// Pins that a window past the clock's range arms the fast path, which
+    /// counts the suppressions it takes, and does not panic.
+    #[test]
+    fn a_window_past_the_clock_suppresses_on_the_fast_path() {
+        let limit = RateLimit::new(1, Duration::MAX);
+        let t0 = Instant::now();
+        assert_eq!(
+            limit.check_at(t0),
+            Decision::Allow {
+                suppressed_before: 0
+            }
+        );
+        assert_eq!(limit.check_at(t0), Decision::Suppress);
+        assert_eq!(limit.check_at(t0), Decision::Suppress);
+        assert_eq!(limit.fast_suppressed.load(Ordering::Relaxed), 1);
     }
 
     #[test]

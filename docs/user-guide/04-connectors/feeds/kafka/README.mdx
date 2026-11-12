@@ -80,11 +80,11 @@ attempts have reached it, which moves without being read (see
 
 ## The `rdkafka` passthrough and the denylist
 
-One map configures the feed's consumer, its attempt follower, its depth
-reader, its producer, and the two clients its startup checks read the topics
-with. A property that
+One map configures the feed's consumer, its attempt follower, the gate's reader
+of the attempt topic's ends, its depth reader, its producer, and the two clients
+its startup checks read the topics with. A property that
 applies to one client only draws a warning from librdkafka in the others. A
-`client.id` in the map puts all six clients under one identity, and so in one
+`client.id` in the map puts all seven clients under one identity, and so in one
 broker quota.
 Properties the feed owns are **rejected at load time with an explanation**,
 under their own name and under `topic.<name>`. librdkafka reads
@@ -103,7 +103,7 @@ is denied, because passthrough and feed values apply in unspecified order.
 | `auto.commit.enable` | librdkafka's legacy topic-level auto-commit property; the feed commits each partition up to its first unfinished unit itself. |
 | `enable.auto.offset.store` | The feed decides which offsets may be committed. |
 | `enable.partition.eof` | The feed reads only messages from the consumer. |
-| `isolation.level` | The feed sets it: the depth reader lists ends at the high watermark so a confirmed write behind an open transaction counts, and the group member reads committed records so a commit cannot pass that transaction. |
+| `isolation.level` | The feed sets it: the depth reader lists ends at the high watermark so a confirmed write behind an open transaction counts, the attempt follower and the gate read the attempt topic to its high watermark so another writer's open transaction there cannot hide the feed's attempt writes, and the group member reads committed records so a commit cannot pass that transaction. |
 | `acks`, `request.required.acks` | Forced to `all`: a unit is read once the delivery report confirms its attempt write, and its offset completes once the report confirms its tombstone or retry write. |
 | `enable.idempotence` | Forced on, so librdkafka's own retries neither reorder nor duplicate a write. |
 | `transactional.id` | The feed does not use transactions; a write is confirmed by its delivery report. |
@@ -252,10 +252,33 @@ retention after a read (see [Counting deliveries](#counting-deliveries)):
 - `delete.retention.ms` must exceed the longest time a worker takes to read
   the attempt topic. A worker still reading when the cleaner removes a
   tombstone keeps the count the tombstone cleared;
+- another writer's records on it count whether their transaction commits or
+  aborts, because the feed reads it past an open transaction. One that is not
+  an attempt record stops the feed, and one keyed by a unit's publish identity
+  changes that unit's count;
 - each group and work topic needs an attempt topic of its own, and a work
   topic that is deleted and created again needs a fresh one. A publish
   identity names the work topic and the message's position in it, and
   neither the group nor which incarnation of the topic wrote it.
+
+The gate also writes fences to the attempt topic. A gate pass reads the high
+watermark of each attempt partition its units hash to, and waits until the
+follower has read up to it. When the follower stays on the same offset below
+that watermark for one second, the pass writes a fence to the partition: a
+tombstone keyed `spate.fence`. The follower reads the fence, so it reaches the
+watermark even when no record below it is left to read. Each pass writes at
+most one fence to a partition. A fence whose write fails is not sent again,
+and the next pass writes another if the follower is still behind.
+
+Redpanda can remove every record at the end of a compacted partition and keep
+its high watermark. This happens to a tombstone at the end of the attempt
+topic once `delete.retention.ms` has passed and the broker leading the
+partition has restarted. A unit that a worker started afterwards reads on that
+partition then waits at the gate for one second, until the pass writes its
+fence and the follower reads it.
+
+On any broker, a pass also writes a fence when the follower reads nothing
+below the watermark for a second, such as during a leader election.
 
 The attempt follower joins the feed's group by its `group.id` and assigns
 the attempt topic's partitions itself, so it never takes part in a rebalance
@@ -349,7 +372,12 @@ units read since the last commit are delivered again.
 
 An assignment that names a partition of a topic other than `topic` or
 `retry_topic` stops the feed with a fatal error before the feed reads from it.
-A stock assignor never sends one.
+A stock assignor never sends one. An assignment of more than 10,000 partitions
+across the two topics, or of a partition numbered below zero, stops the feed the
+same way. A worker's share grows when another leaves, and a worker alone in
+the group is assigned every partition. Work and retry topics with more
+partitions than that together need enough workers that none is assigned more
+with one worker gone.
 
 ### Transaction markers
 
@@ -730,6 +758,9 @@ that key. Its value is the JSON object `{"v":1,"attempts":n}`, and a null
 value is a tombstone. A worker that reads a record at another version, with
 a field it does not know, or that is not that object, stops the feed with an
 error naming the record's offset.
+
+A fence is a tombstone keyed `spate.fence`. No publish identity equals that
+key, because every identity holds a `/`.
 
 ## Metrics
 

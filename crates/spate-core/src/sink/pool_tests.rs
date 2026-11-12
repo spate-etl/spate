@@ -3113,6 +3113,41 @@ async fn a_zero_inflight_limit_panics_at_spawn() {
     let _f = fixture(1, 1, cfg, 16);
 }
 
+/// Pins that `SinkPool::spawn` refuses an in-flight limit tokio's semaphore
+/// cannot hold, before a worker builds one.
+#[tokio::test]
+#[should_panic(expected = "inflight.max_per_shard must not exceed")]
+async fn an_inflight_limit_past_the_semaphore_panics_at_spawn() {
+    let mut cfg = SinkPoolConfig::default();
+    cfg.inflight.max_per_shard = tokio::sync::Semaphore::MAX_PERMITS + 1;
+    let _f = fixture(1, 1, cfg, 16);
+}
+
+/// A pool spawned without validation takes any `linger`. Pins that the
+/// worker seals on linger a year after the first chunk, and delivers it.
+#[tokio::test(start_paused = true)]
+async fn a_linger_past_a_year_seals_at_a_year() {
+    let cfg = SinkPoolConfig {
+        batch: BatchConfig {
+            linger: Duration::MAX,
+            ..BatchConfig::default()
+        },
+        ..SinkPoolConfig::default()
+    };
+    let f = fixture(1, 1, cfg, 16);
+    let (ack, ack_rx) = AckRef::test_pair();
+    f.queues.try_send(0, chunk(1, 1, &ack)).unwrap();
+    drop(ack);
+
+    tokio::time::sleep(crate::clock::LONGEST_DEADLINE - Duration::from_millis(1)).await;
+    assert!(f.writer.calls().is_empty(), "sealed before a year");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let calls = f.writer.calls();
+    assert_eq!(calls.len(), 1, "linger sealed at a year");
+    assert_eq!(calls[0].rows, 1);
+    assert_eq!(ack_rx.try_recv().unwrap().status, AckStatus::Delivered);
+}
+
 /// `spate_sink_errors_total` counts each failed write under the class its
 /// error carries: a retryable attempt and then a record-level one land one
 /// each on `retryable` and `record_level`, and none on `fatal`.
@@ -3165,7 +3200,7 @@ fn sink_errors_metric_counts_each_write_error_under_its_class() {
 async fn drain_counts_the_largest_deadline_as_a_year() {
     let clock = TestClock::frozen();
     let f = one_blocked_write(&clock);
-    let year = Duration::from_secs(365 * 24 * 60 * 60);
+    let year = crate::clock::LONGEST_DEADLINE;
 
     let t0 = clock.now();
     let drain = tokio::spawn(f.pool.drain(Duration::MAX));

@@ -16,20 +16,25 @@
 //! deliveries fill that buffer. The gate never runs on the consumer's poll
 //! thread (INV-2), and it sends nothing under the state lock: a refused
 //! enqueue settles inline, and settling takes that lock.
+//!
+//! When the follower stays on the same offset below a partition's high
+//! watermark for a step at any point in the wait, the pass writes a fence to
+//! that partition, once, and keeps waiting for the watermark it read. A
+//! broker can remove a partition's last records and keep its watermark, and
+//! the follower reads past the end only once the fence lands there.
 
-use super::attempt::{self, partition_of};
+use super::attempt::{self, Lister, partition_of};
 use super::events::Cause;
 use super::write::{self, Attempt, Destination, Finish, Move, Outgoing, Producer, Write};
 use super::{Core, Gating, LatchOnPanic};
 use crate::client::{list_offsets, listed_offset};
+use rdkafka::consumer::Consumer as _;
 use rdkafka::error::{KafkaError, KafkaResult, RDKafkaErrorCode};
-use rdkafka::producer::Producer as _;
 use rdkafka::{Offset, TopicPartitionList};
 use spate_core::clock::Stopwatch;
 use spate_core::error::ErrorClass;
 use spate_core::task::{ThreadHandle, spawn_thread};
 use std::collections::BTreeSet;
-#[cfg(test)]
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, PoisonError};
 use std::time::{Duration, Instant};
@@ -41,12 +46,22 @@ pub(crate) const GATE_STEP: Duration = Duration::from_secs(1);
 pub(crate) struct Gate {
     core: Arc<Core>,
     producer: Producer,
+    /// The client the gate reads the attempt partitions' ends through, at
+    /// the follower's isolation level.
+    lister: Lister,
     step: Duration,
     /// The bound on each watermark request.
     request: Duration,
     /// The bound on a pass, from the moment it takes its deliveries. A pass
     /// can run up to two steps past it.
     delivery_timeout: Duration,
+}
+
+/// Where the follower stood on a partition a pass waits for, and since when.
+struct Stall {
+    at: Option<i64>,
+    since: Instant,
+    fenced: bool,
 }
 
 /// Why a pass ended without admitting what it took.
@@ -76,10 +91,16 @@ struct Unread {
 }
 
 impl Gate {
-    pub(crate) fn new(core: Arc<Core>, producer: Producer, delivery_timeout: Duration) -> Gate {
+    pub(crate) fn new(
+        core: Arc<Core>,
+        producer: Producer,
+        lister: Lister,
+        delivery_timeout: Duration,
+    ) -> Gate {
         Gate {
             core,
             producer,
+            lister,
             step: GATE_STEP,
             request: GATE_STEP,
             delivery_timeout,
@@ -130,6 +151,9 @@ impl Gate {
     /// wait. A pass whose follower does not catch up within its bound puts
     /// all its deliveries back.
     pub(crate) fn pass(&self) {
+        // The lister carries a `group.id`, so librdkafka queues its log lines
+        // and errors where only a poll drains them.
+        crate::client::serve_queued(&self.lister);
         let entries = self.take();
         if entries.is_empty() {
             return;
@@ -248,7 +272,19 @@ impl Gate {
             unread.partitions.extend(late);
             unread.reasons.push(reason);
         }
-        for (partition, lwm, hwm) in marks {
+        let waited_from = self.core.clock().now();
+        let mut stalls: Vec<Stall> = {
+            let ledger = attempt::lock(&self.core.ledger);
+            marks
+                .iter()
+                .map(|&(p, _, _)| Stall {
+                    at: ledger.read_to(p),
+                    since: waited_from,
+                    fenced: false,
+                })
+                .collect()
+        };
+        for &(partition, lwm, hwm) in &marks {
             loop {
                 {
                     let ledger = attempt::lock(&self.core.ledger);
@@ -277,9 +313,65 @@ impl Gate {
                 // With the ledger's lock released: `latched` takes the
                 // state lock, which is never taken under it.
                 self.check(started, partition)?;
+                self.fence(&marks, &mut stalls);
             }
         }
         Ok(unread)
+    }
+
+    /// Note where the follower stands on each partition of `marks`, and write
+    /// a fence to each one it has stood on, below the high watermark, for a
+    /// step. A pass fences a partition once, and a stopping feed writes none.
+    fn fence(&self, marks: &[(i32, i64, i64)], stalls: &mut [Stall]) {
+        let now = self.core.clock().now();
+        let stalled: Vec<(i32, Option<i64>, i64)> = {
+            let ledger = attempt::lock(&self.core.ledger);
+            marks
+                .iter()
+                .zip(stalls.iter_mut())
+                .filter_map(|(&(p, lwm, hwm), stall)| {
+                    if stall.fenced || ledger.caught_up(p, lwm, hwm) {
+                        return None;
+                    }
+                    let at = ledger.read_to(p);
+                    if at != stall.at {
+                        stall.at = at;
+                        stall.since = now;
+                        return None;
+                    }
+                    if now.saturating_duration_since(stall.since) < self.step {
+                        return None;
+                    }
+                    stall.fenced = true;
+                    Some((p, at, hwm))
+                })
+                .collect()
+        };
+        if stalled.is_empty() {
+            return;
+        }
+        {
+            // Counted under the state lock that `close` sets `stopping`
+            // under, so a close sees every fence it does not wait for.
+            if self.core.lock().stopping {
+                return;
+            }
+            self.core.fences.fetch_add(stalled.len(), Ordering::AcqRel);
+        }
+        for (partition, read_to, hwm) in stalled {
+            tracing::debug!(
+                partition,
+                ?read_to,
+                hwm,
+                "the attempt follower has not moved below the high watermark for a step; \
+                 writing a fence"
+            );
+            write::send(
+                &self.core,
+                &self.producer,
+                Box::new(Write::fence(&self.core.topics.attempt, partition)),
+            );
+        }
     }
 
     /// Read the low and high watermarks of attempt `partition` for the
@@ -297,7 +389,7 @@ impl Gate {
         }
         #[cfg(test)]
         self.core.gate_reads.fetch_add(1, Ordering::SeqCst);
-        let (lwm, hwm) = match self.producer.client().fetch_watermarks(
+        let (lwm, hwm) = match self.lister.client().fetch_watermarks(
             &self.core.topics.attempt,
             partition,
             self.request,
@@ -354,7 +446,7 @@ impl Gate {
         let topic = &*self.core.topics.attempt;
         let mut tpl = TopicPartitionList::new();
         tpl.add_partition_offset(topic, partition, at)?;
-        list_offsets(self.producer.client(), &mut tpl, self.request)?;
+        list_offsets(self.lister.client(), &mut tpl, self.request)?;
         let read = tpl
             .find_partition(topic, partition)
             .ok_or(KafkaError::MetadataFetch(RDKafkaErrorCode::BadMessage))?;
@@ -485,9 +577,11 @@ pub(crate) fn admission(core: &Core, entry: Gating) -> Option<Write> {
 mod tests {
     use super::*;
     use crate::feed::FeedRole;
+    use crate::feed::attempt::test_lister;
     use crate::feed::config::KafkaFeedConfig;
     use crate::feed::producer::FeedProducerHooks;
     use crate::feed::tests::{gated, tp};
+    use crate::testutil::mock::MockKafka;
     use rdkafka::error::RDKafkaErrorCode as C;
     use spate_core::clock::SyncClock;
     use spate_test::HANG;
@@ -519,8 +613,13 @@ mod tests {
                     FeedProducerHooks::new(Arc::clone(&core)),
                 )
                 .unwrap();
-            let gate = Gate::new(Arc::clone(&core), producer, config.delivery_timeout)
-                .with_step(Duration::from_secs(3600));
+            let gate = Gate::new(
+                Arc::clone(&core),
+                producer,
+                test_lister(&config),
+                config.delivery_timeout,
+            )
+            .with_step(Duration::from_secs(3600));
             if how == "stopped" {
                 crate::feed::stop(&core);
             } else {
@@ -536,6 +635,50 @@ mod tests {
                 "the gate of a {how} feed waited a step"
             );
         }
+    }
+
+    /// Pins that a pass drains the lister's queue: with a `debug` category
+    /// set, librdkafka queues log lines for each listing where only a poll
+    /// drains them. Its broker threads go on queueing lines after the pass,
+    /// so the queue only has to shrink.
+    #[test]
+    fn a_pass_drains_what_the_listings_queued() {
+        let cluster = MockKafka::new();
+        cluster.create_topic("units-attempts", 1, 1).unwrap();
+        let section: spate_core::config::FeedSection = serde_yaml::from_str(&format!(
+            "kafka:\n  brokers: \"{}\"\n  group_id: workers\n  topic: units\n  \
+             retry_topic: units-retry\n  dead_letter_topic: units-dead\n  \
+             attempt_topic: units-attempts\n  statistics_interval: 0s\n  \
+             rdkafka:\n    debug: broker,topic\n",
+            cluster.bootstrap_servers()
+        ))
+        .unwrap();
+        let config = KafkaFeedConfig::from_section(&section).unwrap();
+        let core = Arc::new(Core::new(&config, NonZeroU32::MIN, SyncClock::system()));
+        let producer = config
+            .base(false)
+            .create::<Producer, _>(
+                &config.client(FeedRole::Producer),
+                FeedProducerHooks::new(Arc::clone(&core)),
+            )
+            .unwrap();
+        let gate = Gate::new(
+            Arc::clone(&core),
+            producer,
+            test_lister(&config),
+            config.delivery_timeout,
+        )
+        .with_step(Duration::from_millis(1));
+        for _ in 0..20 {
+            gate.lister
+                .client()
+                .fetch_watermarks("units-attempts", 0, HANG)
+                .unwrap();
+        }
+        let before = crate::client::queued_events(&gate.lister);
+        gate.pass();
+        let after = crate::client::queued_events(&gate.lister);
+        assert!(after < before, "{after} of {before} queued lines left");
     }
 
     /// Pins that a latched feed's gate takes none of the deliveries waiting
@@ -557,7 +700,12 @@ mod tests {
                 FeedProducerHooks::new(Arc::clone(&core)),
             )
             .unwrap();
-        let gate = Gate::new(Arc::clone(&core), producer, config.delivery_timeout);
+        let gate = Gate::new(
+            Arc::clone(&core),
+            producer,
+            test_lister(&config),
+            config.delivery_timeout,
+        );
         core.lock().tracker.assign([tp(0)]);
         let entry = gated(&core, 0);
         core.lock().gating.push_back(entry);
@@ -590,7 +738,12 @@ mod tests {
                 FeedProducerHooks::new(Arc::clone(&core)),
             )
             .unwrap();
-        let gate = Gate::new(Arc::clone(&core), producer, config.delivery_timeout);
+        let gate = Gate::new(
+            Arc::clone(&core),
+            producer,
+            test_lister(&config),
+            config.delivery_timeout,
+        );
 
         let halt = gate.watermark_error(0, &KafkaError::MetadataFetch(C::OperationTimedOut));
         assert!(matches!(halt, Halt::Behind(_)));

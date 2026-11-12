@@ -957,6 +957,15 @@ fn reporting_a_fatal_drains_every_stage_that_latched() {
 /// seal in the same `flush_terminal` pass. The sink names are what the reported
 /// `component` distinguishes them by.
 fn finish_failing_split(zero_q: ShardQueues, one_q: ShardQueues) -> Box<dyn RunnableChain> {
+    finish_failing_split_with(zero_q, one_q, ChunkConfig::default())
+}
+
+/// [`finish_failing_split`] with both branches' chunking set to `chunk`.
+fn finish_failing_split_with(
+    zero_q: ShardQueues,
+    one_q: ShardQueues,
+    chunk: ChunkConfig,
+) -> Box<dyn RunnableChain> {
     let budget = Arc::new(InflightBudget::new());
     let mut split = chain(LogDeser)
         .flat_map::<Owned<Vec<u8>>, _>(split_body_owned)
@@ -964,12 +973,12 @@ fn finish_failing_split(zero_q: ShardQueues, one_q: ShardQueues) -> Box<dyn Runn
     let zero = split.add::<Owned<Vec<u8>>, _, _>(
         SelectiveFinishEncoder::default(),
         ToZero,
-        SplitTarget::new("zero".into(), zero_q, Arc::clone(&budget)),
+        SplitTarget::new("zero".into(), zero_q, Arc::clone(&budget)).with_chunk(chunk),
     );
     let one = split.add::<Owned<Vec<u8>>, _, _>(
         SelectiveFinishEncoder::default(),
         ToZero,
-        SplitTarget::new("one".into(), one_q, budget),
+        SplitTarget::new("one".into(), one_q, budget).with_chunk(chunk),
     );
     split
         .route(move |b: Vec<u8>, out| {
@@ -1021,6 +1030,50 @@ fn a_flush_reports_the_first_branch_that_failed_to_finalize() {
         shipped,
         vec![b"zeroOK".to_vec()],
         "a branch that finalized cleanly must still ship its chunk"
+    );
+}
+
+/// A branch that fails to finalize in a flush is reported when a branch sealed
+/// after it finalizes cleanly.
+#[test]
+fn a_flush_reports_a_failed_branch_sealed_before_a_clean_one() {
+    let (zero_q, _zero_rx) = shard_queues(1, 64);
+    let (one_q, mut one_rx) = shard_queues(1, 64);
+    let mut c = finish_failing_split(zero_q, one_q);
+
+    let bufs = payloads(&["a:zeroFATALFINISH|oneOK"]);
+    let (mut batch, _rx) = TestBatch::new(&bufs);
+    assert!(matches!(c.push_batch(&mut batch, 0), PushOutcome::Done));
+    let PushOutcome::Fatal(f) = c.flush() else {
+        panic!("expected fatal");
+    };
+    assert_eq!(f.component, "sink.zero");
+    assert!(f.reason.contains("zeroFATALFINISH"), "{}", f.reason);
+    assert_eq!(drain_rows(&mut one_rx[0]), vec![b"oneOK".to_vec()]);
+}
+
+/// A split branch whose chunk reaches its target inside a push and fails to
+/// finalize is reported for that payload.
+#[test]
+fn a_split_reports_a_seal_that_fails_inside_a_push() {
+    let (zero_q, mut zero_rx) = shard_queues(1, 64);
+    let (one_q, _one_rx) = shard_queues(1, 64);
+    let chunk = ChunkConfig {
+        target_bytes: 1,
+        ..ChunkConfig::default()
+    };
+    let mut c = finish_failing_split_with(zero_q, one_q, chunk);
+
+    let bufs = payloads(&["a:zeroFATALFINISH"]);
+    let (mut batch, _rx) = TestBatch::new(&bufs);
+    let PushOutcome::Fatal(f) = c.push_batch(&mut batch, 0) else {
+        panic!("expected fatal");
+    };
+    assert_eq!(f.component, "sink.zero");
+    assert!(f.reason.contains("zeroFATALFINISH"), "{}", f.reason);
+    assert!(
+        zero_rx[0].try_recv().is_err(),
+        "a chunk whose finalize failed must not be shipped"
     );
 }
 

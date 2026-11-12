@@ -132,8 +132,8 @@ them.
 |---|---|---|---|
 | `batch.max_rows` | integer | `500000` | Row count that seals a batch. Must be at least 1. |
 | `batch.max_bytes` | bytes | `128MiB` | Encoded (uncompressed) byte size that seals a batch. Must be at least 1. |
-| `batch.linger` | duration | `1s` | Max time an unsealed batch waits before flushing — bounds latency at low throughput. |
-| `inflight.max_per_shard` | integer | `2` | In-flight batches allowed per shard worker before backpressure. Must be at least 1. |
+| `batch.linger` | duration | `1s` | Max time an unsealed batch waits before flushing — bounds latency at low throughput. Must be at most one year. |
+| `inflight.max_per_shard` | integer | `2` | In-flight batches allowed per shard worker before backpressure. Must be at least 1 and at most tokio's `Semaphore::MAX_PERMITS` (`usize::MAX >> 3`). |
 | `retry.initial` | duration | `100ms` | First retry backoff after a retryable batch failure. Must be non-zero and no larger than `retry.max`. |
 | `retry.max` | duration | `10s` | Backoff ceiling. Must be non-zero. Once the delay reaches it, it stays there for the rest of that batch's retries. |
 | `retry.multiplier` | float | `2.0` | Exponential backoff growth factor. Must be finite and within `[1.0, 1e9]`. Below `1.0` it would ask for a shrinking delay, which the backoff holds at `retry.max` from the second retry on. |
@@ -153,11 +153,12 @@ They rule out the nonsensical, not the aggressive; `initial: 1ns` passes.
 
 A pool spawned directly with `SinkPool::spawn` skips the check. On that path
 the breaker still floors `half_open_probes` at 1 and caps `open_for` at a year,
-a zero `batch.max_rows` or `batch.max_bytes` seals every chunk as its own
-batch, a `breaker.failure_threshold` of `0` opens on the first failure, a zero
-`inflight.max_per_shard` panics at spawn, and a zero retry delay retries
-without sleeping. A zero `breaker.open_for` ends a failed replica's quarantine
-at once, and the replica takes a probe write on its next turn.
+a `batch.linger` over a year seals at a year, a zero `batch.max_rows` or
+`batch.max_bytes` seals every chunk as its own batch, a
+`breaker.failure_threshold` of `0` opens on the first failure, an
+`inflight.max_per_shard` out of range panics at spawn, and a zero retry delay
+retries without sleeping. A zero `breaker.open_for` ends a failed replica's
+quarantine at once, and the replica takes a probe write on its next turn.
 
 There is **no upper bound on `retry.max`**, because a sink fronting an
 expensive or rate-limited destination may want a very patient

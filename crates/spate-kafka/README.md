@@ -200,7 +200,7 @@ sets how many units a worker holds at once. An `attempt_cap` inside the
 Loading refuses an empty topic, group or broker list. The retry topic has to
 differ from the work topic, the dead-letter topic from both, and the attempt
 topic from the other three. `delivery_timeout` runs from 1ms to about 24.8
-days. One `rdkafka:` map configures all six of the feed's clients, and it
+days. One `rdkafka:` map configures all seven of the feed's clients, and it
 refuses each property any of them owns.
 
 The

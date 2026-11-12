@@ -116,6 +116,35 @@ pub fn wall_now() -> SystemTime {
     SystemTime::now()
 }
 
+/// The longest span [`deadline_after`] adds to a clock reading: a year as a
+/// config file writes it, `1y`, which is 365.25 days. A reading plus a year,
+/// and a few seconds of grace on top, stays inside `Instant`'s range.
+pub const LONGEST_DEADLINE: Duration = Duration::from_secs(31_557_600);
+
+/// The instant `after` past `at`, with `after` capped at
+/// [`LONGEST_DEADLINE`].
+///
+/// `Instant + Duration` panics when the sum leaves the clock's range; the cap
+/// keeps it inside, and a span past a year reads as a year. It serves
+/// `std::time::Instant` and `tokio::time::Instant` alike.
+///
+/// # Panics
+///
+/// When `at` is within a year of the end of its type's range, which no clock
+/// reading is.
+///
+/// ```
+/// use spate_core::clock::{LONGEST_DEADLINE, deadline_after};
+/// use std::time::{Duration, Instant};
+///
+/// let now = Instant::now();
+/// assert_eq!(deadline_after(now, Duration::MAX), now + LONGEST_DEADLINE);
+/// ```
+#[must_use]
+pub fn deadline_after<I: std::ops::Add<Duration, Output = I>>(at: I, after: Duration) -> I {
+    at + after.min(LONGEST_DEADLINE)
+}
+
 /// A clock that only moves when a test moves it.
 #[cfg(any(test, feature = "testing"))]
 #[doc(hidden)]
@@ -175,6 +204,8 @@ impl Clock for &TestClock {
 
 #[cfg(test)]
 mod tests {
+    use humantime_serde::re::humantime::parse_duration;
+
     use super::*;
 
     /// Pins that a holder's derived `Debug` names the clock field without
@@ -183,6 +214,29 @@ mod tests {
     #[test]
     fn a_sync_clock_debugs_as_its_name() {
         assert_eq!(format!("{:?}", SyncClock::system()), "SyncClock");
+    }
+
+    /// Pins that a ceiling stated as a year accepts `1y` as a config file
+    /// writes it.
+    #[test]
+    fn the_longest_deadline_is_a_config_year() {
+        let year = parse_duration("1y").expect("parses");
+        assert_eq!(LONGEST_DEADLINE, year);
+    }
+
+    /// Pins the cap's value on both sides, and that a span past the clock's
+    /// range does not panic.
+    #[test]
+    fn deadline_after_caps_the_span_at_a_year() {
+        let at = Instant::now();
+        let under = LONGEST_DEADLINE - Duration::from_nanos(1);
+        assert_eq!(deadline_after(at, under), at + under);
+        assert_eq!(deadline_after(at, LONGEST_DEADLINE), at + LONGEST_DEADLINE);
+        assert_eq!(
+            deadline_after(at, LONGEST_DEADLINE + Duration::from_nanos(1)),
+            at + LONGEST_DEADLINE
+        );
+        assert_eq!(deadline_after(at, Duration::MAX), at + LONGEST_DEADLINE);
     }
 
     /// `advance_stepped` lands exactly on `total`, with a short last step,

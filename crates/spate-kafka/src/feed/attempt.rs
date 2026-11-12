@@ -20,6 +20,16 @@
 //! after an unknown outcome writes the same value. A null value is a
 //! tombstone: the unit has no attempts recorded. A reader refuses a value at
 //! any other `v`, with a field it does not know, or that is not that object.
+//!
+//! # Fence
+//!
+//! The gate also writes tombstones keyed `spate.fence`, one to a partition
+//! whose follower has stopped below the high watermark for a step. A broker
+//! can remove the records at a partition's end and keep its high watermark,
+//! and a fetch then returns nothing, so the follower reaches the end only
+//! once something is written past it. The key holds no `/`, so it is never
+//! an identity, and a reader takes the fence as the removal of a count it
+//! does not hold.
 
 use super::FeedRole;
 use super::config::KafkaFeedConfig;
@@ -42,6 +52,9 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 
 /// The header that carries a retry copy's publish identity.
 pub(crate) const ORIGIN_HEADER: &str = "spate.origin";
+
+/// The key of the gate's fence records, which no identity equals.
+pub(crate) const FENCE_KEY: &str = "spate.fence";
 
 /// The record version this release writes, and the only one it reads.
 const VERSION: u32 = 1;
@@ -343,6 +356,39 @@ impl Ledger {
     }
 }
 
+/// A consumer with the follower's settings, never assigned, which the gate
+/// lists the attempt partitions through. It reads at the follower's isolation
+/// level, and holds no Fetch that a listing would wait behind on its
+/// connection.
+pub(crate) type Lister = BaseConsumer<SourceContext>;
+
+/// The gate's [`Lister`].
+///
+/// # Errors
+///
+/// [`ConnectError::Refused`] when librdkafka refuses the client configuration.
+pub(crate) fn lister(config: &KafkaFeedConfig) -> Result<Lister, ConnectError> {
+    reader(config, FeedRole::Gate, "the gate's attempt reader")
+}
+
+/// A consumer of the attempt topic in `role`, `what` naming it in an error.
+fn reader(
+    config: &KafkaFeedConfig,
+    role: FeedRole,
+    what: &str,
+) -> Result<BaseConsumer<SourceContext>, ConnectError> {
+    config
+        .base(crate::security::openssl_env_overrides())
+        .create(&config.client(role), SourceHooks::default())
+        .map_err(|reason| ConnectError::refused(NAME, format!("creating {what}: {reason}")))
+}
+
+/// The gate's [`Lister`] for a test.
+#[cfg(test)]
+pub(crate) fn test_lister(config: &KafkaFeedConfig) -> Lister {
+    lister(config).expect("the gate's attempt reader")
+}
+
 /// An assign-only consumer in the feed's group that reads every attempt
 /// partition from its start into the ledger.
 pub(crate) struct Follower {
@@ -364,13 +410,7 @@ impl Follower {
     pub(crate) fn new(config: &KafkaFeedConfig, core: Arc<Core>) -> Result<Follower, ConnectError> {
         let topic = &*core.topics.attempt;
         let partitions = core.attempt_partitions;
-        let openssl_env = crate::security::openssl_env_overrides();
-        let consumer: BaseConsumer<SourceContext> = config
-            .base(openssl_env)
-            .create(&config.client(FeedRole::Follower), SourceHooks::default())
-            .map_err(|reason| {
-                ConnectError::refused(NAME, format!("creating the attempt follower: {reason}"))
-            })?;
+        let consumer = reader(config, FeedRole::Follower, "the attempt follower")?;
         let mut tpl = TopicPartitionList::new();
         // Kafka numbers partitions with an i32, so no topic has more.
         for partition in (0..=i32::MAX).take(partitions.get() as usize) {
@@ -638,6 +678,19 @@ mod tests {
         assert_eq!(ledger.read_to(1), None, "no such partition");
     }
 
+    /// Pins that a fence touches no count: its key parses as no identity,
+    /// and the follower takes it as the removal of a count it does not hold.
+    #[test]
+    fn a_fence_leaves_the_counts_alone() {
+        assert_eq!(PublishId::parse(FENCE_KEY.as_bytes()), None);
+        let mut ledger = Ledger::new(NonZeroU32::new(2).unwrap());
+        ledger.apply(0, 0, b"units/0/0", Entry::Count(2));
+        let (key, entry) = record_of("t", 0, 1, Some(FENCE_KEY.as_bytes()), None).unwrap();
+        ledger.apply(0, 1, key, entry);
+        assert_eq!(ledger.count(b"units/0/0"), 2);
+        assert_eq!(ledger.read_to(0), Some(2));
+    }
+
     /// Pins that a tombstone removes the count, and that the read position
     /// follows every record, tombstones included.
     #[test]
@@ -831,6 +884,7 @@ mod tests {
         use super::super::*;
         use crate::client::testing::{Raw as _, raw_config};
         use crate::testutil::mock::MockKafka;
+        use crate::testutil::wire::{self, Marker};
         use rdkafka::producer::{BaseProducer, BaseRecord, Producer};
         use spate_core::clock::SyncClock;
         use spate_core::config::FeedSection;
@@ -963,6 +1017,26 @@ mod tests {
             let core = Arc::clone(&running.core);
             drop(running);
             assert!(!core.latched(), "{:?}", core.lock().signal.latched());
+        }
+
+        /// Pins that the follower passes a transaction marker at the end of
+        /// a partition by its position, with no record after the marker and
+        /// no gate to write one. Regression for #1765.
+        #[test]
+        fn a_marker_at_the_tail_is_passed_by_position() {
+            let rig = rig();
+            // `units/0/2` hashes to partition 0 of 2.
+            rig.write(b"units/0/2", Some(&encode(1)));
+            wire::write_marker(
+                &rig.cluster.bootstrap_servers(),
+                ATTEMPTS,
+                0,
+                Marker::Commit,
+            );
+            let (running, ledger) = Running::start(&rig);
+            rig.caught_up(&ledger);
+            assert_eq!(lock(&ledger).read_to(0), Some(2));
+            drop(running);
         }
 
         /// Pins that a Fatal error the follower's poll returns stops the

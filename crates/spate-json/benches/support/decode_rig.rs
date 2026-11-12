@@ -29,22 +29,30 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 use spate_core::checkpoint::AckRef;
 use spate_core::deser::{Deserializer, EmitRecord, Owned, RecFamily};
-use spate_core::record::{Flow, PartitionId, RawPayload, Record};
+use spate_core::record::{Flow, RawPayload, Record};
 use spate_json::{JsonDeserializerBuilder, JsonFraming, JsonSettings, OnError};
 use std::hint::black_box;
 
-/// A sink that counts records and nothing else.
+/// A sink that counts records and keeps the key hash of the last one.
 ///
 /// Generic over the record type so one sink serves the typed and the
 /// dynamically-typed arms. `Flow::Continue` unconditionally: the deserializer
 /// discards what `emit` returns, since backpressure is handled between
 /// payloads and not inside one, so a sink that blocked would change nothing
 /// except this file.
-pub(crate) struct Sink(pub(crate) u64);
+///
+/// The key hash lets `tests/bench_fixtures.rs` check that a keyed case reached
+/// the decoder with its key. It costs every case one store per record.
+#[derive(Default)]
+pub(crate) struct Sink {
+    pub(crate) count: u64,
+    pub(crate) key_hash: Option<u64>,
+}
 
 impl<T> EmitRecord<'_, T> for Sink {
-    fn emit(&mut self, _rec: Record<T>) -> Flow {
-        self.0 += 1;
+    fn emit(&mut self, rec: Record<T>) -> Flow {
+        self.count += 1;
+        self.key_hash = rec.meta.key_hash;
         Flow::Continue
     }
 }
@@ -64,16 +72,32 @@ pub(crate) struct Rig<D> {
     /// returned: a framing that silently stopped splitting would otherwise
     /// read as a large improvement.
     pub(crate) expect: u64,
+    /// The source key every payload carries, `None` unless [`keyed`] set it.
+    pub(crate) key: Option<Vec<u8>>,
 }
 
-pub(crate) fn raw_payload(bytes: &[u8]) -> RawPayload<'_> {
+/// The payload a rig hands its deserializer.
+///
+/// Takes the rig's fields rather than the rig, so the caller can hold the
+/// payload while it borrows the deserializer and the sink mutably.
+pub(crate) fn raw_payload<'a>(bytes: &'a [u8], key: Option<&'a [u8]>) -> RawPayload<'a> {
     RawPayload {
-        bytes,
-        key: None,
-        partition: PartitionId(0),
+        key,
         offset: 1,
-        timestamp_ms: 0,
+        ..spate_test::raw_payload(bytes)
     }
+}
+
+/// The key a keyed case carries: 36 bytes, a UUID in text form.
+pub(crate) const KEY: &[u8] = b"0f8e7d6c-5b4a-4392-8170-6f5e4d3c2b1a";
+
+/// `rig` with [`KEY`] on every payload it decodes.
+///
+/// The warm pass has already run without the key. The key hash keeps no state,
+/// so nothing it touches is left cold.
+pub(crate) fn keyed<D>(mut rig: Rig<D>) -> Rig<D> {
+    rig.key = Some(KEY.to_vec());
+    rig
 }
 
 /// The measured work: one payload through one deserializer.
@@ -82,12 +106,15 @@ where
     F: RecFamily,
     D: Deserializer<F>,
 {
-    let raw = raw_payload(&rig.payload);
-    rig.sink.0 = 0;
+    let raw = raw_payload(&rig.payload, rig.key.as_deref());
+    rig.sink = Sink::default();
     rig.deser
         .deserialize(black_box(&raw), &rig.ack, &mut rig.sink)
         .unwrap();
-    assert_eq!(rig.sink.0, rig.expect, "framing emitted a different count");
+    assert_eq!(
+        rig.sink.count, rig.expect,
+        "framing emitted a different count"
+    );
 }
 
 /// The measured work for the cases added after the reference four: one
@@ -123,12 +150,12 @@ where
     F: RecFamily,
     D: Deserializer<F>,
 {
-    let raw = raw_payload(&rig.payload);
-    rig.sink.0 = 0;
+    let raw = raw_payload(&rig.payload, rig.key.as_deref());
+    rig.sink = Sink::default();
     rig.deser
         .deserialize(black_box(&raw), &rig.ack, &mut rig.sink)
         .expect("the fixture decodes under its error policy");
-    rig.sink.0
+    rig.sink.count
 }
 
 /// The measured work for a case whose payload must fail.
@@ -143,8 +170,8 @@ where
     F: RecFamily,
     D: Deserializer<F>,
 {
-    let raw = raw_payload(&rig.payload);
-    rig.sink.0 = 0;
+    let raw = raw_payload(&rig.payload, rig.key.as_deref());
+    rig.sink = Sink::default();
     let res = rig
         .deser
         .deserialize(black_box(&raw), &rig.ack, &mut rig.sink);
@@ -152,7 +179,7 @@ where
         black_box(res).is_err(),
         "the fixture decoded cleanly under on_error: fail"
     );
-    rig.sink.0
+    rig.sink.count
 }
 
 /// Install a real recorder, once per process.
@@ -255,15 +282,16 @@ where
         deser,
         payload,
         ack,
-        sink: Sink(0),
+        sink: Sink::default(),
         expect,
+        key: None,
     };
-    let raw = raw_payload(&rig.payload);
+    let raw = raw_payload(&rig.payload, rig.key.as_deref());
     // The result is ignored: an `on_error: fail` fixture returns here the
     // error its case is about, and the warm pass is not where that is
     // asserted.
     let _ = rig.deser.deserialize(&raw, &rig.ack, &mut rig.sink);
-    rig.sink.0 = 0;
+    rig.sink = Sink::default();
     rig
 }
 
@@ -316,8 +344,9 @@ pub(crate) fn rig<D>(
         deser,
         payload,
         ack,
-        sink: Sink(0),
+        sink: Sink::default(),
         expect,
+        key: None,
     }
 }
 

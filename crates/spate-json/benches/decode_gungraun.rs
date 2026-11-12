@@ -55,6 +55,15 @@
 //!   inside `serde` rather than across a holding buffer, and the pair against
 //!   the ndjson one is the only place that difference is priced.
 //!
+//! ## The key
+//!
+//! Every case above decodes a keyless payload. These three carry a 36-byte
+//! key, a UUID in text form, over the corpora of `ndjson_clean`,
+//! `ndjson_fail_clean` and `array_clean`. Each has a keyless twin, so the
+//! difference between the two is what the key costs per record:
+//!
+//! - `ndjson_keyed`, `ndjson_fail_keyed` and `array_keyed`.
+//!
 //! ## Document shape
 //!
 //! Every case above is a flat record of seven to fifteen fields. These are the
@@ -146,7 +155,7 @@ mod orders;
 #[path = "support/shapes.rs"]
 mod shapes;
 
-use decode_rig::{Rig, batch_rig, decode_once, decode_run, decode_run_err, rig, shape_rig};
+use decode_rig::{Rig, batch_rig, decode_once, decode_run, decode_run_err, keyed, rig, shape_rig};
 use orders::{BAD_EVERY, Corruption, LineItem, Order, RECORDS};
 
 /// The number of records the batch framings carry. Fifty is the same batch
@@ -299,6 +308,9 @@ fn decode_framed(
 #[bench::ndjson_fail_clean(ndjson_fail_clean_rig())]
 #[bench::array_clean(array_clean_rig())]
 #[bench::array_bad_last(array_bad_last_rig())]
+#[bench::ndjson_keyed(keyed(ndjson_clean_rig()))]
+#[bench::ndjson_fail_keyed(keyed(ndjson_fail_clean_rig()))]
+#[bench::array_keyed(keyed(array_clean_rig()))]
 fn decode_batch(
     mut rig: Rig<spate_json::JsonSerdeDeserializer<LineItem>>,
 ) -> Rig<spate_json::JsonSerdeDeserializer<LineItem>> {

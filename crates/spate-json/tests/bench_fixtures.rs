@@ -18,6 +18,7 @@
 use spate_core::checkpoint::AckRef;
 use spate_core::deser::{Deserializer, Owned};
 use spate_core::framing::RecordFramer;
+use spate_core::record::stable_key_hash;
 use spate_json::{JsonDeserializerBuilder, JsonFraming, JsonSettings, NdjsonFramer, OnError};
 use spate_test::raw_payload;
 use spate_test_support::pin;
@@ -43,21 +44,21 @@ use orders::{BAD_EVERY, Corruption, LineItem, RECORDS};
 fn drive(settings: JsonSettings, payload: &[u8]) -> (bool, u64) {
     let mut deser = JsonDeserializerBuilder::from_settings(settings).build_serde::<LineItem>();
     let (ack, _rx) = AckRef::test_pair();
-    let mut sink = Sink(0);
+    let mut sink = Sink::default();
     let failed = deser
         .deserialize(&raw_payload(payload), &ack, &mut sink)
         .is_err();
-    (failed, sink.0)
+    (failed, sink.count)
 }
 
 fn drive_value(settings: JsonSettings, payload: &[u8]) -> (bool, u64) {
     let mut deser = JsonDeserializerBuilder::from_settings(settings).build_value();
     let (ack, _rx) = AckRef::test_pair();
-    let mut sink = Sink(0);
+    let mut sink = Sink::default();
     let failed = deser
         .deserialize(&raw_payload(payload), &ack, &mut sink)
         .is_err();
-    (failed, sink.0)
+    (failed, sink.count)
 }
 
 fn settings(framing: JsonFraming, on_error: OnError, reject_duplicate_keys: bool) -> JsonSettings {
@@ -395,7 +396,7 @@ fn the_two_corruptions_fail_for_different_reasons() {
         ))
         .build_serde::<LineItem>();
         let (ack, _rx) = AckRef::test_pair();
-        let mut sink = Sink(0);
+        let mut sink = Sink::default();
         deser
             .deserialize(&raw_payload(bytes), &ack, &mut sink)
             .expect_err("a poison record decodes cleanly")
@@ -803,14 +804,87 @@ fn the_decode_rig_would_accumulate_without_its_reset() {
         ("fixtures-noreset", "json"),
     );
     for _ in 0..2 {
-        let payload = decode_rig::raw_payload(&rig.payload);
+        let payload = decode_rig::raw_payload(&rig.payload, rig.key.as_deref());
         rig.deser
             .deserialize(&payload, &rig.ack, &mut rig.sink)
             .expect("the corpus is clean");
     }
     assert_eq!(
-        rig.sink.0,
+        rig.sink.count,
         RECORDS * 2,
         "two drives without a reset should have accumulated"
     );
+}
+
+/// A keyed case decodes with its key, and its twin without one.
+///
+/// A rig that dropped the key would leave a keyed case measuring keyless
+/// decode under a keyed name. Each rig goes through `decode_run`, the driver
+/// its case calls, so a driver that builds its payload without the key fails
+/// here too.
+#[test]
+fn a_keyed_rig_decodes_with_its_key() {
+    let keyed = |framing, on_error, payload, label| {
+        decode_rig::keyed(decode_rig::batch_rig::<LineItem>(
+            framing,
+            on_error,
+            payload,
+            RECORDS,
+            (label, "json"),
+        ))
+    };
+    let rigs = [
+        (
+            "ndjson_keyed",
+            keyed(
+                JsonFraming::Ndjson,
+                OnError::Skip,
+                orders::lines_ndjson(RECORDS),
+                "fixtures-keyed-ndjson",
+            ),
+        ),
+        (
+            "ndjson_fail_keyed",
+            keyed(
+                JsonFraming::Ndjson,
+                OnError::Fail,
+                orders::lines_ndjson(RECORDS),
+                "fixtures-keyed-fail",
+            ),
+        ),
+        (
+            "array_keyed",
+            keyed(
+                JsonFraming::Array,
+                OnError::Skip,
+                orders::lines_array(RECORDS),
+                "fixtures-keyed-array",
+            ),
+        ),
+    ];
+    for (case, mut rig) in rigs {
+        assert_eq!(
+            decode_rig::decode_run::<Owned<LineItem>, _>(&mut rig),
+            RECORDS,
+            "{case}"
+        );
+        assert_eq!(
+            rig.sink.key_hash,
+            Some(stable_key_hash(decode_rig::KEY)),
+            "{case} decoded without its key"
+        );
+    }
+
+    let mut twin = decode_rig::batch_rig::<LineItem>(
+        JsonFraming::Ndjson,
+        OnError::Skip,
+        orders::lines_ndjson(RECORDS),
+        RECORDS,
+        ("fixtures-keyless-twin", "json"),
+    );
+    assert_eq!(
+        decode_rig::decode_run::<Owned<LineItem>, _>(&mut twin),
+        RECORDS
+    );
+    assert_eq!(twin.sink.key_hash, None, "the keyless twin carries a key");
 }

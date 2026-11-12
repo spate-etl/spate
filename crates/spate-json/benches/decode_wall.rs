@@ -81,7 +81,7 @@
 //!
 //! ## What is left out
 //!
-//! Fourteen cases where `decode_gungraun.rs` declares nineteen. `single_typed`
+//! Fourteen cases where `decode_gungraun.rs` declares twenty-two. `single_typed`
 //! and `single_value` are dropped because one 265-byte document decodes in
 //! about 360 ns, and at that size a build's code layout moves the figure by
 //! more than the 5% floor, and an A/A comparison of one commit against itself
@@ -93,7 +93,9 @@
 //! second shape does not change what it prices. `array_bad_last` is dropped
 //! because the array framing's atomicity lives inside `serde` rather than in
 //! this crate, and `ndjson_fail_bad_last` already prices the
-//! decode-everything-emit-nothing shape.
+//! decode-everything-emit-nothing shape. The three keyed cases are dropped
+//! because a key adds a few per cent to a batch, below the 5% floor, and the
+//! counted tier already prices it against each case's keyless twin.
 //!
 //! Nothing here pins an iteration count. The harness calibrates every case to
 //! its `--target-ms`, and its degenerate-region guard measures its floor at

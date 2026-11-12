@@ -221,6 +221,26 @@ replica left in the shard; the whole-shard outage escalation, with
 `spate_queue_full_events_total` series described in
 [Metrics](../../METRICS.md).
 
+## Check which SIMD features a host offers
+
+The first pipeline to start in a process logs one line at `INFO`, under the
+message `cpu features`. Its fields are:
+
+- `arch`: the CPU architecture the binary was built for.
+- `compiled`: the SIMD features the build compiles in, including the ones the
+  target turns on by default.
+- `detected`: the SIMD features the process can use on this host.
+
+The libraries a pipeline uses for parsing and decompression choose their SIMD
+code at run time, from the features the CPU reports. A virtual machine can hide
+features that its physical CPU has, so two hosts with the same CPU model can
+report different `detected` lists.
+
+Every feature in `compiled` also appears in `detected`, because a feature the
+build compiles in is reported as present without asking the CPU. On x86_64
+Linux, `compiled` is empty unless the build raised the target CPU or added a
+target feature ([Tuning](tuning.mdx#leave-the-target-cpu-at-its-default)).
+
 ## Related
 
 - [Error handling](../02-concepts/04-error-handling.mdx) — how Skip/Fail

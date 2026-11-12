@@ -121,6 +121,12 @@ Rust builds for a baseline CPU of each architecture unless you pass
 measured pipeline. Running a binary built for a newer CPU on an older one is
 undefined behavior. Leave the target at its default.
 
+To check which target a running binary was built for, read the `compiled`
+field of its `cpu features` log line
+([Monitoring](monitoring.mdx#check-which-simd-features-a-host-offers)). On
+x86_64 Linux, the field is empty unless the build raised the target CPU or
+added a target feature.
+
 :::note Connector specifics
 What the build changes in one connector:
 [ClickHouse sink encoding](../04-connectors/sinks/clickhouse/performance-tuning.mdx#link-time-optimization)

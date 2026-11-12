@@ -73,7 +73,9 @@ body:
       description: >-
         `rustc --version` and your OS/architecture. A throughput number is not
         comparable across architectures, and the reference hardware is named
-        in the methodology.
+        in the methodology. Add the fields of the `cpu features` line the
+        pipeline logs at start, because the SIMD features it lists decide
+        which parsing and decompression code runs.
       placeholder: "rustc 1.97.0, Linux x86_64"
     validations:
       required: true

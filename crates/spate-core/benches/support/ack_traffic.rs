@@ -21,6 +21,7 @@
 
 #![allow(dead_code, reason = "each target uses a different subset")]
 
+use spate_bench::Padded;
 use spate_core::checkpoint::{AckIssuer, AckRef, Checkpointer};
 use spate_core::record::PartitionId;
 use std::sync::Arc;
@@ -303,15 +304,6 @@ const SPIN_LIMIT: u32 = 1024;
 /// realistic cause, a worker panicking mid-tick, and reports it by name; this
 /// is the backstop for everything else.
 const GATE_DEADLINE: Duration = Duration::from_secs(30);
-
-/// Bytes of padding that keep two atomics off one cache line.
-///
-/// The two counters below are written by opposite sides on every tick. Shared
-/// they would ping one line between the controller and every worker; apart
-/// they cost one line each. 128 rather than 64 because Apple Silicon pairs
-/// lines for some coherence traffic.
-#[repr(align(128))]
-struct Padded<T>(T);
 
 /// Released generation meaning "stop", rather than "run tick N".
 const SHUTDOWN: usize = usize::MAX;

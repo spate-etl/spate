@@ -35,21 +35,14 @@
 //!   machine rather than only where valgrind runs. A poll loop that starts
 //!   allocating is the regression these three cases catch.
 //! - **The ack thread axis prices a degradation, not a speed-up.** Adding
-//!   acking threads makes this workload *slower* on the reference machine
-//!   (around 10 M batches/s at one thread against 5 M at two and 6 M at four),
-//!   and the axis measures that degradation. Issuing is wait-free but not
-//!   contention-free. A batch carries two sends on unbounded MPSC channels, an
-//!   `Arc` allocation, and a `Sender` clone whose refcount every issuing
-//!   thread shares, and each of those is a cache line moving between cores
-//!   once more than one thread is on it. The single-owner
-//!   `Checkpointer::drain` on top of that leaves nothing to amortise it
-//!   against. Read the three together. A change to the ack path moves the
-//!   shape of that curve.
-//! - **That curve is not monotonic**, and two threads measure worse than four
-//!   on the reference machine. It reproduces closely run to run, so it is a
-//!   property of the workload on this hardware rather than noise, but nothing
-//!   here explains it and no claim is made about which count is worst in
-//!   general.
+//!   acking threads makes this workload *slower*, and the axis measures that
+//!   degradation. Issuing is wait-free but not contention-free. A batch
+//!   carries two sends on unbounded MPSC channels, an `Arc` allocation, and a
+//!   `Sender` clone whose refcount every issuing thread shares, and each of
+//!   those is a cache line moving between cores once more than one thread is
+//!   on it. The single-owner `Checkpointer::drain` on top of that leaves
+//!   nothing to amortise it against. Read the three together. A change to the
+//!   ack path moves the shape of that curve.
 //! - **`cpu_ns_per_iter` on the threaded cases is occupancy, not work.** The
 //!   workers spin while the controller drains, and spinning is CPU time, so
 //!   the figure runs at roughly the party count times the wall figure. Both

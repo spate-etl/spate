@@ -78,7 +78,7 @@ use super::inflight::{Position, Tp};
 use super::write::{self, Destination, Finish, Move, Outgoing, Producer, Tombstone, Write};
 use super::{Closing, Core, Gating, LatchOnPanic, READY_CAPACITY, State, Topics};
 use crate::client::{
-    CLOSE_WAIT, PendingCommit, close_in_background, only_on_topics, read_position, send_commit,
+    CLOSE_WAIT, PendingCommit, check_assignment, close_in_background, read_position, send_commit,
 };
 use crate::context::{Intent, SourceContext};
 use rdkafka::consumer::{BaseConsumer, Consumer};
@@ -275,7 +275,7 @@ pub(crate) fn run(mut d: Driver) {
         // but two pollers' callbacks can interleave on the producer
         // context's one unpaired-error slot, so within this window a
         // producer error can be logged twice.
-        d.producer.flush(wait).is_ok()
+        flush_writes(&core, &d.producer, wait)
     };
     let until = d.last_deadline(close.as_ref());
     let what = if close.is_some() {
@@ -314,6 +314,19 @@ pub(crate) fn run(mut d: Driver) {
     }
 }
 
+/// Whether `producer`'s writes settle within `wait`. A gate fence still in
+/// flight at the end is not counted, since it finishes no unit.
+pub(crate) fn flush_writes(core: &Core, producer: &Producer, wait: Duration) -> bool {
+    if producer.flush(wait).is_ok() {
+        return true;
+    }
+    // Read before the fences: no fence is counted once the feed is stopping,
+    // so one settled between the reads can only make this answer `false`.
+    let queued = producer.in_flight_count();
+    let fences = core.fences.load(Ordering::Acquire);
+    usize::try_from(queued).is_ok_and(|queued| queued <= fences)
+}
+
 /// How long a close given `within` waits for the feed's writes in flight:
 /// half of it, so the commit and the leave keep the other half.
 pub(crate) fn close_flush(within: Duration) -> Duration {
@@ -322,7 +335,7 @@ pub(crate) fn close_flush(within: Duration) -> Duration {
 
 /// Settle `close` once the consumer has left, or its leave runs on a thread of
 /// its own behind an unanswered commit: rejected with the latched error if the
-/// feed latched, `Retryable` if writes were still in flight at the flush's end
+/// feed latched, `Retryable` if [`flush_writes`] found writes still in flight
 /// or the last commit failed, and confirmed otherwise.
 fn settle_close(core: &Core, close: Closing, flushed: bool, committed: bool) {
     if let Some(fatal) = core.lock().signal.latched().cloned() {
@@ -499,11 +512,9 @@ impl Driver {
         // Ahead of the lookup and the assign, which would fetch whatever topic
         // the group named, and of `tps`.
         let topics = self.core.topics();
-        if !only_on_topics(tpl, &[&topics.work, &topics.retry]) {
-            self.core.latch(&format!(
-                "the group offered a partition of a topic other than `{}` or `{}`",
-                topics.work, topics.retry
-            ));
+        let names = [&*topics.work, &*topics.retry];
+        if let Err(refused) = check_assignment(tpl, &names) {
+            self.core.latch(&refused.reason(&names));
             return;
         }
         let start = if tpl.count() == 0 {
@@ -933,7 +944,7 @@ pub(crate) fn take_due(st: &mut State, now: Instant) -> Vec<Write> {
                 }
                 held
             }
-            Write::Publish { .. } => true,
+            Write::Publish { .. } | Write::Fence { .. } => true,
         };
         if keep {
             taken.push(w);

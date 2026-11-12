@@ -115,13 +115,13 @@
 //! limiter behind the skip warning allows five events per ten *seconds*, so a
 //! poison case whose warm pass and measured pass together straddled a window
 //! roll would emit up to five extra log events on one run and not the next.
-//! Nothing observed comes near it: the whole nineteen-case binary takes 36
-//! seconds on the runner and 15 on a development machine, which bounds any one
-//! case's process (valgrind startup, corpus construction, warm pass and
-//! measured region together) at a small multiple of a second. A poison row
-//! that moved by a few hundred instructions between runs would be this, and
-//! would mean the runner had become several times slower rather than that the
-//! decode had changed.
+//! Nothing observed comes near it: the whole twenty-two-case binary takes 29
+//! seconds in an aarch64 Linux container on a development machine, which
+//! bounds any one case's process (valgrind startup, corpus construction, warm
+//! pass and measured region together) at a small multiple of a second. A
+//! poison row that moved by a few hundred instructions between runs would be
+//! this, and would mean the runner had become several times slower rather than
+//! that the decode had changed.
 //!
 //! ## What is left out
 //!

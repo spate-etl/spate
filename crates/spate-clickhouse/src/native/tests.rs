@@ -22,6 +22,15 @@ fn header(cols: u64, rows: u64) -> Vec<u8> {
     vec![cols as u8, rows as u8]
 }
 
+/// A value that serializes through `serialize_bytes`.
+struct Raw(&'static [u8]);
+
+impl Serialize for Raw {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_bytes(self.0)
+    }
+}
+
 fn string_bytes(s: &str) -> Vec<u8> {
     let mut v = vec![s.len() as u8];
     v.extend_from_slice(s.as_bytes());
@@ -93,6 +102,18 @@ fn array_uint32_writes_cumulative_u64_offsets_then_flattened() {
     want.extend_from_slice(&7u32.to_le_bytes());
     want.extend_from_slice(&8u32.to_le_bytes());
     want.extend_from_slice(&9u32.to_le_bytes());
+    assert_eq!(got, want);
+}
+
+/// A byte value into a `String` column is written as a string.
+#[test]
+fn bytes_into_a_string_column_write_as_a_string() {
+    let got = block(&[("s", "String")], &[(Raw(b"ab"),)]);
+
+    let mut want = header(1, 1);
+    want.extend(string_bytes("s"));
+    want.extend(string_bytes("String"));
+    want.extend(string_bytes("ab"));
     assert_eq!(got, want);
 }
 
@@ -683,6 +704,59 @@ mod first_record_check {
         ref_enc.finish_chunk(&mut ref_buf).expect("finish");
 
         assert_eq!(owned_buf, ref_buf);
+    }
+}
+
+// A LowCardinality column at its dictionary limit fails the row through
+// either dispatch arm.
+mod lowcard_limit {
+    use super::super::column::ColumnWriter;
+    use super::*;
+    use bytes::BytesMut;
+    use spate_core::error::ErrorClass;
+    use spate_core::sink::RowEncoder;
+    use spate_test::record;
+
+    const REFUSED: &str = "native encoding failed: a LowCardinality column holds 2^32 \
+                           distinct values in one block; lower chunk.target_bytes";
+
+    /// An encoder over one `LowCardinality(String)` column whose dictionary
+    /// holds 2^32 entries.
+    fn full<F>() -> NativeEncoder<F> {
+        let mut enc = NativeEncoder::new(schema(&[("c", "LowCardinality(String)")]));
+        let ColumnWriter::LowCard(lc) = &mut enc.columns[0] else {
+            panic!("a LowCardinality column");
+        };
+        lc.set_dict_count(1 << 32);
+        enc
+    }
+
+    #[test]
+    fn a_string_past_the_dictionary_limit_fails_the_row() {
+        let mut enc = full::<Owned<(String,)>>();
+        let mut buf = BytesMut::new();
+        let err = enc
+            .encode(&record(("new".to_owned(),)), &mut buf)
+            .expect_err("the dictionary is full");
+        assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
+        assert_eq!(err.reason(), REFUSED);
+        enc.finish_chunk(&mut buf)
+            .expect_err("the failed row poisoned the block");
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn bytes_past_the_dictionary_limit_fail_the_row() {
+        let mut enc = full::<Owned<(Raw,)>>();
+        let mut buf = BytesMut::new();
+        let err = enc
+            .encode(&record((Raw(b"new"),)), &mut buf)
+            .expect_err("the dictionary is full");
+        assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
+        assert_eq!(err.reason(), REFUSED);
+        enc.finish_chunk(&mut buf)
+            .expect_err("the failed row poisoned the block");
+        assert!(buf.is_empty());
     }
 }
 

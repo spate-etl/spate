@@ -189,6 +189,9 @@ pub(crate) trait ErasedBranch: Send {
     fn relieve(&mut self) -> Flow;
     fn flush_terminal(&mut self) -> Flow;
     fn take_fatal(&mut self) -> Option<FatalError>;
+    /// Whether the branch holds a fatal that [`take_fatal`](Self::take_fatal)
+    /// would return.
+    fn has_fatal(&self) -> bool;
     fn on_batch_end(&mut self, elapsed: Duration);
     fn as_any_mut(&mut self) -> &mut dyn Any;
 }
@@ -209,6 +212,10 @@ where
 
     fn take_fatal(&mut self) -> Option<FatalError> {
         StageLifecycle::take_fatal(self)
+    }
+
+    fn has_fatal(&self) -> bool {
+        self.fatal.0.is_some()
     }
 
     fn on_batch_end(&mut self, elapsed: Duration) {
@@ -282,7 +289,8 @@ impl SplitEmitter<'_> {
     /// record family does not match the branch at that index. A handle minted
     /// by another split's builder whose index and family match a branch of
     /// this split routes to that branch without a panic.
-    #[inline]
+    // `always`: at one codegen unit `#[inline]` leaves this a call per record.
+    #[inline(always)]
     pub fn emit<'buf, F: RecFamily + 'static>(
         &mut self,
         handle: SplitBranch<F>,
@@ -335,6 +343,9 @@ pub struct SplitTerminal<SrcF: RecFamily, G> {
     fatal: FatalSlot,
     /// Whether a branch holds a fatal, so the rest of the payload is dropped
     /// without running the route closure. Cleared with the branches' slots.
+    ///
+    /// Set after every call that can fill a branch's slot, an emit and a
+    /// flush. `take_fatal` reports a branch's fatal only when this is set.
     latched: bool,
     component: Arc<str>,
     _family: PhantomData<fn() -> SrcF>,
@@ -432,6 +443,13 @@ impl<SrcF: RecFamily, G> StageLifecycle for SplitTerminal<SrcF, G> {
         // `flush_terminal`'s seal order. A branch outranks this stage's own
         // slot, since this stage swallows the rest of the payload once a
         // branch latches.
+        //
+        // The chain asks after every payload. Without a latch or a fatal of
+        // this stage's own there is nothing to drain, and the walk costs a
+        // virtual call per branch.
+        if !self.latched && self.fatal.0.is_none() {
+            return None;
+        }
         self.latched = false;
         let mut earliest = None;
         for branch in &mut self.branches {
@@ -461,6 +479,9 @@ impl<SrcF: RecFamily, G> StageLifecycle for SplitTerminal<SrcF, G> {
             if branch.flush_terminal() == Flow::Blocked {
                 flow = Flow::Blocked;
             }
+            // A seal can fill the branch's slot, and `take_fatal` reads the
+            // latch before it reads any branch.
+            self.latched |= branch.has_fatal();
         }
         flow
     }

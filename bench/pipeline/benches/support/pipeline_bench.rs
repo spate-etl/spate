@@ -12,6 +12,7 @@
     reason = "`labels` is the std map the decoded event carries, moved into the row unchanged"
 )]
 
+use flate2::write::GzEncoder;
 use serde::Serialize;
 use spate_clickhouse::{NativeEncoder, NativeSchema};
 use spate_core::config::PipelineConfig;
@@ -27,6 +28,7 @@ use spate_test::PipelineRun;
 use spate_test_support::events::{Event, event_line};
 use std::collections::HashMap;
 use std::fs;
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -40,9 +42,9 @@ const MAX_LINE_BYTES: usize = 4_096;
 const LINGER: Duration = Duration::from_millis(5);
 
 /// The split target every run sets, in MiB. At the bench's object sizes the
-/// lister packs two uncompressed objects or sixteen zstd objects to a unit,
-/// so every case's thread count divides the unit count; [`Rig::units`] checks
-/// the staged objects against the lister's own packing.
+/// lister packs two uncompressed objects or sixteen zstd or gzip objects to a
+/// unit, so every case's thread count divides the unit count; [`Rig::units`]
+/// checks the staged objects against the lister's own packing.
 const SPLIT_TARGET_MIB: u64 = 25;
 
 /// How the staged objects are stored.
@@ -50,6 +52,8 @@ const SPLIT_TARGET_MIB: u64 = 25;
 pub(crate) enum Stored {
     /// `.ndjson.zst`, zstd level 3.
     Zstd,
+    /// `.ndjson.gz`, gzip level 6.
+    Gzip,
     /// `.ndjson`, uncompressed.
     Plain,
 }
@@ -59,6 +63,7 @@ impl Stored {
     pub(crate) fn name(self) -> &'static str {
         match self {
             Stored::Zstd => "ndjson_zst",
+            Stored::Gzip => "ndjson_gz",
             Stored::Plain => "ndjson",
         }
     }
@@ -66,6 +71,7 @@ impl Stored {
     fn extension(self) -> &'static str {
         match self {
             Stored::Zstd => "ndjson.zst",
+            Stored::Gzip => "ndjson.gz",
             Stored::Plain => "ndjson",
         }
     }
@@ -196,6 +202,11 @@ impl Rig {
             bytes += object.len() as u64;
             let body = match shape.stored {
                 Stored::Zstd => zstd::encode_all(&object[..], 3).expect("the object compresses"),
+                Stored::Gzip => {
+                    let mut gz = GzEncoder::new(Vec::new(), flate2::Compression::default());
+                    gz.write_all(&object).expect("the object compresses");
+                    gz.finish().expect("the object compresses")
+                }
                 Stored::Plain => object.clone(),
             };
             let path = data.join(format!("obj-{o:05}.{}", shape.stored.extension()));

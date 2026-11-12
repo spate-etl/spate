@@ -45,6 +45,12 @@ fn the_rig_reads_every_zstd_line_on_every_run() {
     every_run_writes_every_line(Stored::Zstd);
 }
 
+/// Pins that two runs over gzip objects each write every line as a row.
+#[test]
+fn the_rig_reads_every_gzip_line_on_every_run() {
+    every_run_writes_every_line(Stored::Gzip);
+}
+
 /// Pins that two runs over uncompressed objects each write every line as a row.
 #[test]
 fn the_rig_reads_every_plain_line_on_every_run() {

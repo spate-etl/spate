@@ -8,10 +8,10 @@
 //! (`spate_test_support::events`). The run is a bounded backfill: the
 //! in-process lister lists the directory and the pipeline exits by itself once
 //! every unit is acknowledged. The split target is 25 MiB, so a unit packs two
-//! uncompressed objects or sixteen zstd ones, and the setup refuses a corpus
-//! whose unit count the case's thread count does not divide: a thread takes
-//! whole units, so an uneven share would leave threads idle at the end. The
-//! sink's linger is 5 ms (the default is 1 s).
+//! uncompressed objects or sixteen zstd or gzip ones, and the setup refuses a
+//! corpus whose unit count the case's thread count does not divide: a thread
+//! takes whole units, so an uneven share would leave threads idle at the end.
+//! The sink's linger is 5 ms (the default is 1 s).
 //!
 //! The figures are lines and uncompressed bytes per second. Decompression,
 //! framing, decoding, flattening and encoding all run on the pipeline threads,
@@ -30,6 +30,8 @@
 //! # Cases
 //!
 //! - `pipeline/ndjson_zst/native/threads_{1,4}`: zstd level 3 objects.
+//! - `pipeline/ndjson_gz/native/threads_{1,4}`: gzip level 6 objects, which
+//!   flate2 inflates in Rust.
 //! - `pipeline/ndjson/native/threads_{1,4}`: the same lines uncompressed. libzstd
 //!   is C, built outside rustc, so a build setting that reaches only Rust code
 //!   shows here without the zstd share diluting it.
@@ -105,7 +107,7 @@ fn case(suite: Suite, stored: Stored, threads: usize) -> Suite {
 
 fn suite() -> Suite {
     let mut suite = spate_bench::suite("spate-pipeline-bench");
-    for stored in [Stored::Zstd, Stored::Plain] {
+    for stored in [Stored::Zstd, Stored::Gzip, Stored::Plain] {
         for threads in [1, 4] {
             suite = case(suite, stored, threads);
         }

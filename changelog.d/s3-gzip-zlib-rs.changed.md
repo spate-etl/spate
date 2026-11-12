@@ -1,0 +1,3 @@
+**Gzip objects decode through zlib-rs** (`spate-s3`)
+
+The S3 source now decompresses `.gz` objects with zlib-rs, through `flate2`. zlib-rs uses SIMD code on aarch64, and on x86_64 it chooses its SIMD code from the CPU at run time. In previous versions `flate2` used miniz_oxide. Decoding a gzip object now takes about 45% fewer instructions. The records read from an object are unchanged, and a truncated or corrupt object fails with the same error as before. If another crate in the build turns on one of `flate2`'s C zlib features, `flate2` uses that library instead.

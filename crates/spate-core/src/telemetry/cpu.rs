@@ -102,7 +102,8 @@ fn compiled(table: &[SimdFeature]) -> Vec<String> {
 }
 
 /// Log this process's SIMD features, on the first call only.
-pub(crate) fn log_once() {
+#[doc(hidden)]
+pub fn log_once() {
     static LOGGED: Once = Once::new();
     LOGGED.call_once(|| {
         log_features(ARCH, &compiled_simd(), &detected_simd());

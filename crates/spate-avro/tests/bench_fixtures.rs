@@ -227,6 +227,11 @@ fn the_corpora_are_pinned_across_revisions() {
             corpora::digest(&batches::order_batches()),
             0x9db5_1177_0fd1_9e1f,
         ),
+        (
+            "long_text_datums",
+            corpora::digest(&corpora::long_text_datums()),
+            0xe14b_3d17_6dc7_5bdd,
+        ),
     ] {
         // Collected rather than asserted one at a time: a change to a shared
         // derivation moves several corpora at once, and re-running the test
@@ -287,6 +292,14 @@ fn the_decoding_corpora_decode_in_full() {
         "a {}-node list no longer decodes; the datum path's depth guard is \
          the first thing to check",
         corpora::LIST_NODES
+    );
+
+    let deser = builder(&raw_settings(corpora::LONG_TEXT, None), &rt)
+        .build_serde_datum::<corpora::LongText>()
+        .unwrap();
+    assert_eq!(
+        outcomes(deser, &corpora::long_text_datums()),
+        (corpora::BATCH, 0)
     );
 }
 
@@ -557,6 +570,24 @@ fn the_logical_type_fixture_carries_every_shape_it_names() {
         decoded.uuid
     );
     assert!(decoded.created_us > decoded.created_ms);
+}
+
+/// A field that lost its length, or a two-byte field that turned ASCII,
+/// would leave the long-text case measuring the short ASCII strings every
+/// other case already decodes.
+#[test]
+fn the_long_text_fixture_holds_long_ascii_and_two_byte_strings() {
+    for datum in &corpora::long_text_datums() {
+        let decoded: corpora::LongText = decode_one_datum(corpora::LONG_TEXT, datum);
+        assert_eq!(decoded.ascii.len(), corpora::ASCII_BYTES);
+        assert!(decoded.ascii.is_ascii(), "{}", decoded.ascii);
+        assert_eq!(decoded.two_byte.len(), corpora::TWO_BYTE_BYTES);
+        assert!(
+            decoded.two_byte.chars().all(|c| c.len_utf8() == 2),
+            "{}",
+            decoded.two_byte
+        );
+    }
 }
 
 #[test]

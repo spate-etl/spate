@@ -25,7 +25,7 @@
 //! | `raw_` | the decode paths in raw mode: three over a flat record, and over a batch those three plus the borrowed path and two decode-and-flatten arms |
 //! | `mode_` | the wire framings a deployed pipeline runs, and for the Confluent pair the schema cache behind them |
 //! | `resolved_` | reader-schema resolution, the only path that applies a reader schema |
-//! | `shapes_` | logical types, a map, an enum, a fixed, and a recursive named reference |
+//! | `shapes_` | logical types, a map, an enum, a fixed, a recursive named reference, and long ASCII and two-byte strings |
 //! | `err_` | the failure paths, which a stream carrying schema drift runs constantly |
 //! | `lib_` | `apache-avro` over the same bytes |
 //!
@@ -137,9 +137,10 @@ use decode_rig::{
     BatchRig, FlattenRig, TypedFlattenSink, ValueFlattenSink, confluent_cached_rig,
     confluent_mixed_rig, confluent_poisoned_rig, confluent_unknown_rig, decode_and_flatten,
     decode_batch, evolution_rig, flat_corpus_datum_rig, flat_corpus_serde_rig,
-    flat_corpus_value_rig, map_heavy_rig, order_batch_borrowed_rig, order_batch_datum_rig,
-    order_batch_serde_rig, order_batch_value_rig, recursive_rig, shapes_rig, single_object_rig,
-    stale_fingerprint_rig, truncated_datum_rig, truncated_serde_rig, truncated_value_rig,
+    flat_corpus_value_rig, long_text_rig, map_heavy_rig, order_batch_borrowed_rig,
+    order_batch_datum_rig, order_batch_serde_rig, order_batch_value_rig, recursive_rig, shapes_rig,
+    single_object_rig, stale_fingerprint_rig, truncated_datum_rig, truncated_serde_rig,
+    truncated_value_rig,
 };
 
 /// Records in the per-record corpora, the extent those cases declare.
@@ -350,11 +351,17 @@ fn shapes_cases(suite: Suite) -> Suite {
         RECORDS,
         map_heavy_rig,
     );
-    batch_case::<Owned<corpora::LongList>, AvroDatumDeserializer<Owned<corpora::LongList>>>(
+    let s = batch_case::<Owned<corpora::LongList>, AvroDatumDeserializer<Owned<corpora::LongList>>>(
         s,
         "shapes_recursive_refs",
         RECORDS,
         recursive_rig,
+    );
+    batch_case::<Owned<corpora::LongText>, AvroDatumDeserializer<Owned<corpora::LongText>>>(
+        s,
+        "shapes_long_text",
+        RECORDS,
+        long_text_rig,
     )
 }
 

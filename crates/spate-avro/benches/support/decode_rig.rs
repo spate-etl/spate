@@ -609,6 +609,14 @@ pub(crate) fn recursive_rig() -> BatchRig<AvroDatumDeserializer<Owned<corpora::L
     })
 }
 
+pub(crate) fn long_text_rig() -> BatchRig<AvroDatumDeserializer<Owned<corpora::LongText>>> {
+    let settings = raw_settings(corpora::LONG_TEXT, None);
+    batch_rig(&settings, corpora::long_text_datums(), true, |b| {
+        b.build_serde_datum::<corpora::LongText>()
+            .expect("datum builder")
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Error paths
 // ---------------------------------------------------------------------------

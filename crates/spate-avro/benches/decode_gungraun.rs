@@ -67,7 +67,9 @@
 //!   the logical-type map is too small to show; then a recursive named
 //!   reference, which is the only shape that makes the walk resolve a
 //!   `Schema::Ref` and the only one that drives the depth guard past a
-//!   couple of levels.
+//!   couple of levels; then a record of a 256-byte ASCII string and a 64-byte
+//!   string of two-byte characters, the only strings long enough for UTF-8
+//!   validation to work in SIMD blocks.
 //! - **`errors`** — the malformed-datum fixture through the two paths the
 //!   `decode` group does not drive it through, plus a stale single-object
 //!   fingerprint. Under Skip or Fail this is the steady-state cost of a
@@ -101,8 +103,9 @@ mod registry_stub;
 use decode_rig::{
     BatchRig, Rig, batch_datum_rig, batch_value_rig, confluent_cached_rig, confluent_poisoned_rig,
     confluent_unknown_rig, decode_batch, decode_once, decode_once_err, evolution_rig,
-    flat_datum_rig, flat_serde_rig, flat_value_malformed_rig, flat_value_rig, map_heavy_rig,
-    recursive_rig, shapes_rig, stale_fingerprint_rig, truncated_datum_rig, truncated_serde_rig,
+    flat_datum_rig, flat_serde_rig, flat_value_malformed_rig, flat_value_rig, long_text_rig,
+    map_heavy_rig, recursive_rig, shapes_rig, stale_fingerprint_rig, truncated_datum_rig,
+    truncated_serde_rig,
 };
 
 // Each case returns its rig rather than dropping it: a value moved into the
@@ -200,6 +203,15 @@ fn decode_recursive(
 }
 
 #[library_benchmark]
+#[bench::long_text(long_text_rig())]
+fn decode_long_text(
+    mut rig: BatchRig<AvroDatumDeserializer<Owned<corpora::LongText>>>,
+) -> BatchRig<AvroDatumDeserializer<Owned<corpora::LongText>>> {
+    decode_batch(&mut rig);
+    rig
+}
+
+#[library_benchmark]
 #[bench::truncated_datum(truncated_datum_rig())]
 fn decode_malformed_datum_typed(
     mut rig: BatchRig<AvroDatumDeserializer<Owned<orders::Order>>>,
@@ -242,7 +254,7 @@ library_benchmark_group!(name = evolution; benchmarks = decode_resolved);
 
 library_benchmark_group!(
     name = shapes;
-    benchmarks = decode_shapes, decode_map_heavy, decode_recursive
+    benchmarks = decode_shapes, decode_map_heavy, decode_recursive, decode_long_text
 );
 
 library_benchmark_group!(

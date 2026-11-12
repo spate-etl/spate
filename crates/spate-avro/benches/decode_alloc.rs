@@ -30,8 +30,8 @@ mod registry_stub;
 use decode_rig::{
     batch_datum_rig, batch_value_rig, confluent_cached_rig, confluent_unknown_rig, decode_batch,
     decode_once, decode_once_err, evolution_rig, flat_datum_rig, flat_serde_rig,
-    flat_value_malformed_rig, flat_value_rig, map_heavy_rig, recursive_rig, shapes_rig,
-    single_object_rig, stale_fingerprint_rig, truncated_datum_rig, truncated_serde_rig,
+    flat_value_malformed_rig, flat_value_rig, long_text_rig, map_heavy_rig, recursive_rig,
+    shapes_rig, single_object_rig, stale_fingerprint_rig, truncated_datum_rig, truncated_serde_rig,
 };
 
 #[global_allocator]
@@ -100,6 +100,10 @@ fn batches(report: &mut Report) {
     });
     let mut r = recursive_rig();
     report.case("decode_recursive.recursive_refs", || {
+        decode_batch(&mut r);
+    });
+    let mut r = long_text_rig();
+    report.case("decode_long_text.long_text", || {
         decode_batch(&mut r);
     });
     let mut r = truncated_datum_rig();

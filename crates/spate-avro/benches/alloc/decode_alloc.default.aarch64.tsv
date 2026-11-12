@@ -7,6 +7,7 @@ decode_batch_datum_typed.batch50	102	4	4191
 decode_confluent.cached_schema	51000	0	3096520
 decode_confluent.unknown_schema_id	2062	0	177920
 decode_datum_typed.flat_record	8	0	142
+decode_long_text.long_text	4000	0	640000
 decode_malformed_datum_typed.truncated_datum	11666	2000	354161
 decode_malformed_serde_typed.truncated_datum	35844	0	3369272
 decode_map_heavy.map_heavy	2050000	0	143204000

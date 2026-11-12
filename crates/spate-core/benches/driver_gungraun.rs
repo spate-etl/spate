@@ -19,8 +19,14 @@
 //! hold a pause on the real clock, so no count of them would be stable.
 //!
 //! The loop reads the system clock twice per poll, for its poll-duration
-//! histogram. That read is in the code under measurement, so the case counts
-//! it rather than injecting a clock.
+//! histogram. That read is in the code under measurement, so every case
+//! counts it.
+//!
+//! The two 64-lane cases move between runs, by up to 0.05% so far. Each lane's
+//! pending-batch gate sits in a map whose hasher draws a fresh seed each time
+//! it is built, so the 64 partitions hash into a different number of probes on
+//! each run. With that map on a fixed hasher, every case repeated to the
+//! instruction over three runs. The one-lane cases repeat as they are.
 //!
 //! Needs valgrind and a same-version `gungraun-runner`: run it with
 //! `cargo xtask bench counted`.

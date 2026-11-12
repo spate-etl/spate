@@ -1,6 +1,6 @@
 //! Batch-sized decode corpora: Confluent-framed payloads, one writer schema
-//! with the reader schemas it evolves into, the logical-type and recursive
-//! schemas, and the poison payloads.
+//! with the reader schemas it evolves into, the logical-type, recursive and
+//! long-text schemas, and the poison payloads.
 //!
 //! Included with `#[path]` by `benches/decode_gungraun.rs`,
 //! `benches/decode_paths_wall.rs`, `benches/wire_wall.rs` and by
@@ -596,6 +596,64 @@ pub(crate) fn long_list_datums() -> Vec<Vec<u8>> {
                 ]);
             }
             to_avro_datum(&schema, node).expect("long list datum encodes")
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Long and non-ASCII strings
+// ---------------------------------------------------------------------------
+
+/// Two strings per record, each long enough for UTF-8 validation to work in
+/// 64-byte SIMD blocks. Every other corpus holds strings under 64 bytes.
+pub(crate) const LONG_TEXT: &str = r#"{"type":"record","name":"LongText","fields":[
+  {"name":"ascii","type":"string"},
+  {"name":"two_byte","type":"string"}]}"#;
+
+/// Bytes in each `ascii` field.
+pub(crate) const ASCII_BYTES: usize = 256;
+
+/// Bytes in each `two_byte` field, every character two bytes long.
+pub(crate) const TWO_BYTE_BYTES: usize = 64;
+
+const _: () = assert!(
+    ASCII_BYTES >= 64 && TWO_BYTE_BYTES >= 64,
+    "a field under 64 bytes measures the short-string path the other corpora already cover"
+);
+
+/// The text the `ascii` fields are cut from.
+const ASCII_SOURCE: &str = "The parcel was left with the neighbour at number twelve. ";
+
+/// The first of the 25 lowercase Greek letters the `two_byte` fields cycle
+/// through, `α` to `ω`, each two bytes in UTF-8.
+const FIRST_GREEK: u32 = 0x03B1;
+
+#[derive(Debug, serde::Deserialize)]
+pub(crate) struct LongText {
+    pub(crate) ascii: String,
+    pub(crate) two_byte: String,
+}
+
+/// [`BATCH`] bare datums of [`LONG_TEXT`], each field starting at a point
+/// that moves with the index.
+pub(crate) fn long_text_datums() -> Vec<Vec<u8>> {
+    let schema = Schema::parse_str(LONG_TEXT).expect("long text schema parses");
+    (0..BATCH)
+        .map(|i| {
+            let ascii: String = ASCII_SOURCE
+                .chars()
+                .cycle()
+                .skip(i % ASCII_SOURCE.len())
+                .take(ASCII_BYTES)
+                .collect();
+            let two_byte: String = (0..TWO_BYTE_BYTES / 2)
+                .map(|j| char::from_u32(FIRST_GREEK + ((i + j) % 25) as u32).expect("Greek"))
+                .collect();
+            let record = Value::Record(vec![
+                ("ascii".to_owned(), Value::String(ascii)),
+                ("two_byte".to_owned(), Value::String(two_byte)),
+            ]);
+            to_avro_datum(&schema, record).expect("long text datum encodes")
         })
         .collect()
 }

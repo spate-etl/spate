@@ -688,6 +688,68 @@ mod first_record_check {
 
 // The terminal stage seals a chunk on `buffered_bytes`, so the encoder's size
 // must be the length of the block it would write.
+// A LowCardinality column at its dictionary limit fails the row through
+// either dispatch arm.
+mod lowcard_limit {
+    use super::super::column::ColumnWriter;
+    use super::*;
+    use bytes::BytesMut;
+    use spate_core::error::ErrorClass;
+    use spate_core::sink::RowEncoder;
+    use spate_test::record;
+
+    const REFUSED: &str = "native encoding failed: a LowCardinality column holds 2^32 \
+                           distinct values in one block; lower chunk.target_bytes";
+
+    /// A value that serializes through `serialize_bytes`.
+    struct Raw(&'static [u8]);
+
+    impl Serialize for Raw {
+        fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+            s.serialize_bytes(self.0)
+        }
+    }
+
+    /// An encoder over one `LowCardinality(String)` column whose dictionary
+    /// holds 2^32 entries.
+    fn full<F>() -> NativeEncoder<F> {
+        let mut enc = NativeEncoder::new(schema(&[("c", "LowCardinality(String)")]));
+        let ColumnWriter::LowCard(lc) = &mut enc.columns[0] else {
+            panic!("a LowCardinality column");
+        };
+        lc.set_dict_count(1 << 32);
+        enc
+    }
+
+    #[test]
+    fn a_string_past_the_dictionary_limit_fails_the_row() {
+        let mut enc = full::<Owned<(String,)>>();
+        let mut buf = BytesMut::new();
+        let err = enc
+            .encode(&record(("new".to_owned(),)), &mut buf)
+            .expect_err("the dictionary is full");
+        assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
+        assert_eq!(err.reason(), REFUSED);
+        enc.finish_chunk(&mut buf)
+            .expect_err("the failed row poisoned the block");
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn bytes_past_the_dictionary_limit_fail_the_row() {
+        let mut enc = full::<Owned<(Raw,)>>();
+        let mut buf = BytesMut::new();
+        let err = enc
+            .encode(&record((Raw(b"new"),)), &mut buf)
+            .expect_err("the dictionary is full");
+        assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
+        assert_eq!(err.reason(), REFUSED);
+        enc.finish_chunk(&mut buf)
+            .expect_err("the failed row poisoned the block");
+        assert!(buf.is_empty());
+    }
+}
+
 mod block_size {
     use super::*;
     use bytes::BytesMut;

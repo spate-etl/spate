@@ -86,10 +86,7 @@ impl<'a> Serializer for ColumnSerializer<'a> {
                 put_string(buf, v.as_bytes());
                 Ok(())
             }
-            ColumnWriter::LowCard(lc) => {
-                lc.intern(v.as_bytes());
-                Ok(())
-            }
+            ColumnWriter::LowCard(lc) => lc.intern(v.as_bytes()),
             _ => Err(NativeError::TypeMismatch {
                 expected: "String / LowCardinality(String) column",
             }),
@@ -102,10 +99,7 @@ impl<'a> Serializer for ColumnSerializer<'a> {
                 put_string(buf, v);
                 Ok(())
             }
-            ColumnWriter::LowCard(lc) => {
-                lc.intern(v);
-                Ok(())
-            }
+            ColumnWriter::LowCard(lc) => lc.intern(v),
             _ => Err(NativeError::TypeMismatch {
                 expected: "String / LowCardinality(String) column",
             }),

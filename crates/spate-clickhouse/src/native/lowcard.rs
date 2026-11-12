@@ -20,6 +20,7 @@
 //! default (`""`); a nullable one reserves index 0 = NULL and index 1 =
 //! default, with null-ness carried by a key of 0 (no separate null-map).
 
+use super::NativeError;
 use super::leaf::put_string;
 use crate::schema::typeparse::ChType;
 use bytes::{BufMut, BytesMut};
@@ -38,12 +39,13 @@ use spate_core::hash::QualityMap;
 pub(crate) struct LowCard {
     nullable: bool,
     /// Dictionary-entry raw bytes → assigned index.
-    map: QualityMap<Vec<u8>, u64>,
+    map: QualityMap<Vec<u8>, u32>,
     /// Accumulated dictionary entries, each `[VarUInt len][bytes]`.
     dict: BytesMut,
+    /// At most 2^32, the most entries a `u32` key indexes.
     dict_count: u64,
     /// One dictionary index per appended element (flattened for `Array(LC)`).
-    keys: Vec<u64>,
+    keys: Vec<u32>,
 }
 
 impl LowCard {
@@ -87,12 +89,16 @@ impl LowCard {
     }
 
     /// Intern a string value and push its key.
+    ///
+    /// Refuses a new value once the block's dictionary holds 2^32 entries,
+    /// and leaves the dictionary and keys as they were.
     #[inline]
-    pub(crate) fn intern(&mut self, value: &[u8]) {
+    pub(crate) fn intern(&mut self, value: &[u8]) -> Result<(), NativeError> {
         let idx = match self.map.get(value) {
             Some(&idx) => idx,
             None => {
-                let idx = self.dict_count;
+                let idx = u32::try_from(self.dict_count)
+                    .map_err(|_| NativeError::LowCardinalityDictionaryFull)?;
                 put_string(&mut self.dict, value);
                 self.dict_count += 1;
                 self.map.insert(value.to_vec(), idx);
@@ -100,6 +106,7 @@ impl LowCard {
             }
         };
         self.keys.push(idx);
+        Ok(())
     }
 
     /// Push a NULL (only valid for a nullable dictionary): key 0.
@@ -133,30 +140,35 @@ impl LowCard {
         out.put_u64_le(self.dict_count);
         out.put_slice(&self.dict);
         out.put_u64_le(self.keys.len() as u64);
-        // Key width is uniform across the block (fixed by the final dict
-        // size), so branch once rather than per key.
+        // Grow once and narrow into the new tail: a put per key checks
+        // capacity each time and keeps the loop from vectorising.
+        let start = out.len();
+        out.resize(start + (self.keys.len() << code), 0);
+        let tail = &mut out[start..];
         match code {
             0 => {
-                for &k in &self.keys {
-                    out.put_u8(k as u8);
+                for (d, &k) in tail.iter_mut().zip(&self.keys) {
+                    *d = k as u8;
                 }
             }
             1 => {
-                for &k in &self.keys {
-                    out.put_u16_le(k as u16);
-                }
-            }
-            2 => {
-                for &k in &self.keys {
-                    out.put_u32_le(k as u32);
+                for (d, &k) in tail.as_chunks_mut::<2>().0.iter_mut().zip(&self.keys) {
+                    *d = (k as u16).to_le_bytes();
                 }
             }
             _ => {
-                for &k in &self.keys {
-                    out.put_u64_le(k);
+                for (d, &k) in tail.as_chunks_mut::<4>().0.iter_mut().zip(&self.keys) {
+                    *d = k.to_le_bytes();
                 }
             }
         }
+    }
+
+    /// Sets the entry count as if the block had interned that many values,
+    /// so a test reaches the dictionary limit without 2^32 of them.
+    #[cfg(test)]
+    pub(super) fn set_dict_count(&mut self, n: u64) {
+        self.dict_count = n;
     }
 
     pub(crate) fn reset(&mut self) {
@@ -180,16 +192,15 @@ impl LowCard {
 }
 
 /// The smallest key-width code that indexes `dict_size` entries:
-/// 0=UInt8, 1=UInt16, 2=UInt32, 3=UInt64.
+/// 0=UInt8, 1=UInt16, 2=UInt32. [`LowCard::intern`] keeps `dict_size` at or
+/// below 2^32, so UInt64 keys are never needed.
 fn key_width_code(dict_size: u64) -> u8 {
     if dict_size <= (1 << 8) {
         0
     } else if dict_size <= (1 << 16) {
         1
-    } else if dict_size <= (1 << 32) {
-        2
     } else {
-        3
+        2
     }
 }
 
@@ -204,11 +215,85 @@ mod tests {
     fn reset_keeps_the_dictionary_seed() {
         let mut lc = LowCard::build(&ChType::Named("String".into())).expect("builds");
         for i in 0..64 {
-            lc.intern(format!("v{i}").as_bytes());
+            lc.intern(format!("v{i}").as_bytes()).expect("interns");
         }
         let before = lc.map.hasher().hash_one(b"probe".as_slice());
         lc.reset();
         assert_eq!(lc.map.len(), 1, "only the reserved default slot remains");
         assert_eq!(lc.map.hasher().hash_one(b"probe".as_slice()), before);
+    }
+
+    /// The key bytes `write_data` emits for a block whose dictionary holds
+    /// `distinct` entries, read back at the width its flags declare.
+    fn written_keys(distinct: usize) -> (u64, Vec<u64>, Vec<u64>) {
+        let mut lc = LowCard::build(&ChType::Named("String".into())).expect("builds");
+        // Each value once, then the first and last again, then the default.
+        for i in 0..distinct {
+            lc.intern(format!("v{i}").as_bytes()).expect("interns");
+        }
+        lc.intern(b"v0").expect("interns");
+        lc.intern(format!("v{}", distinct - 1).as_bytes())
+            .expect("interns");
+        lc.push_default();
+        let want = lc.keys.iter().map(|&k| u64::from(k)).collect::<Vec<u64>>();
+        let mut out = BytesMut::new();
+        lc.write_data(&mut out);
+        assert_eq!(
+            out.len() + 8,
+            lc.byte_len(),
+            "byte_len counts the written bytes"
+        );
+        let flags = u64::from_le_bytes(out[..8].try_into().unwrap());
+        let width = 1usize << (flags & 0xff);
+        let keys_at = out.len() - want.len() * width;
+        let count = u64::from_le_bytes(out[keys_at - 8..keys_at].try_into().unwrap());
+        assert_eq!(count, want.len() as u64);
+        let got = out[keys_at..]
+            .chunks_exact(width)
+            .map(|c| {
+                let mut b = [0u8; 8];
+                b[..width].copy_from_slice(c);
+                u64::from_le_bytes(b)
+            })
+            .collect();
+        (flags, want, got)
+    }
+
+    /// Keys narrow to one, two and four little-endian bytes as the
+    /// dictionary crosses 256 and 65,536 entries.
+    #[test]
+    fn keys_narrow_to_the_dictionary_width() {
+        for (distinct, code) in [(255, 0), (256, 1), (65_535, 1), (65_536, 2)] {
+            let (flags, want, got) = written_keys(distinct);
+            assert_eq!(flags, 0x600 | code, "{distinct} values");
+            assert_eq!(got, want, "{distinct} values");
+            assert_eq!(*want.last().unwrap(), 0);
+            assert_eq!(want[want.len() - 2], distinct as u64);
+        }
+    }
+
+    /// A new value takes key `u32::MAX`, the next new one is refused with the
+    /// block left as it was, and an interned value still takes its key.
+    #[test]
+    fn a_full_dictionary_refuses_a_new_value() {
+        let mut lc = LowCard::build(&ChType::Named("String".into())).expect("builds");
+        lc.dict_count = u64::from(u32::MAX);
+        lc.intern(b"last").expect("key u32::MAX fits");
+        assert_eq!(lc.keys, [u32::MAX]);
+        assert_eq!(lc.dict_count, 1 << 32);
+
+        let dict = lc.dict.clone();
+        assert!(matches!(
+            lc.intern(b"one more"),
+            Err(NativeError::LowCardinalityDictionaryFull)
+        ));
+        assert_eq!(lc.dict, dict);
+        assert_eq!(lc.keys, [u32::MAX]);
+        assert_eq!(lc.dict_count, 1 << 32);
+        assert_eq!(lc.map.len(), 2);
+
+        lc.intern(b"last")
+            .expect("an interned value needs no new entry");
+        assert_eq!(lc.keys, [u32::MAX, u32::MAX]);
     }
 }

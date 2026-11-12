@@ -1,0 +1,3 @@
+**The ClickHouse sink writes LowCardinality keys with fewer instructions** (`spate-clickhouse`)
+
+The Native encoder writes all of a block's LowCardinality keys in one pass into space it sets aside once, and holds each key in four bytes while the block fills. In previous versions it wrote each key with a separate buffer call and held each key in eight bytes. Tables with LowCardinality columns take fewer instructions to encode, and the bytes sent to ClickHouse are unchanged. A block in which one LowCardinality column reaches 2^32 distinct values, which takes more than 24 GiB, now fails the pipeline with `NativeError::LowCardinalityDictionaryFull`. A smaller `chunk.target_bytes` avoids it.

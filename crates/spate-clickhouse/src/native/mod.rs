@@ -99,6 +99,13 @@ pub enum NativeError {
     /// The row did not serialize as a struct/tuple of columns.
     #[error("row must serialize as a struct or tuple of columns")]
     NotAStruct,
+    /// A `LowCardinality` column reached 2^32 distinct values in one block,
+    /// the most its `UInt32` keys index.
+    #[error(
+        "a LowCardinality column holds 2^32 distinct values in one block; \
+         lower chunk.target_bytes"
+    )]
+    LowCardinalityDictionaryFull,
     /// An internal invariant was violated (a bug).
     #[error("internal Native encoder error: {0}")]
     Internal(&'static str),
@@ -115,9 +122,10 @@ impl serde::ser::Error for NativeError {
 
 impl NativeError {
     /// Map onto the framework's error taxonomy. A columnar encode failure is
-    /// **fatal**: it poisons the pending block (columns of unequal length),
-    /// and a type-driven encoder only fails when the row type disagrees with
-    /// the schema, which recurs for every record. Record-level skipping is
+    /// **fatal**: it poisons the pending block (columns of unequal length).
+    /// A type-driven encoder fails when the row type disagrees with the
+    /// schema, which recurs for every record, or when a block grows past what
+    /// the format can index, which a smaller chunk target avoids. Record-level skipping is
     /// not possible without a mid-block rollback, which the happy path does
     /// not pay for.
     fn into_sink_error(self) -> SinkError {
@@ -227,8 +235,9 @@ pub struct NativeEncoder<F> {
     /// Set if a row failed mid-encode, leaving columns of unequal length. The
     /// pending block is unemittable; [`finish_chunk`](RowEncoder::finish_chunk)
     /// refuses it so the buffered rows fail and replay rather than producing a
-    /// corrupt block. A failed row is fatal anyway (a type-driven encoder only
-    /// fails on a schema/struct mismatch, which recurs), so the pipeline stops.
+    /// corrupt block. A failed row is fatal anyway (a schema/struct mismatch
+    /// recurs, and an oversized block needs a smaller chunk target), so the
+    /// pipeline stops.
     poisoned: bool,
     /// Whether the first-record field-name check has run. Cleared on clone so
     /// each per-shard encoder re-validates its own first record (cheap, and a
@@ -351,8 +360,9 @@ where
         // No per-row buffer bookkeeping on the happy path: route the row's
         // fields straight into the column buffers. A failure part-way leaves
         // columns unequal, so poison the block. The error is fatal (a
-        // type-driven encoder only fails on schema/struct mismatch, which
-        // recurs), the pipeline stops, and the buffered rows fail and replay.
+        // schema/struct mismatch recurs, and an oversized block needs a
+        // smaller chunk target), the pipeline stops, and the buffered rows
+        // fail and replay.
         match rec.payload.serialize(RowDispatchSer {
             columns: &mut self.columns,
         }) {

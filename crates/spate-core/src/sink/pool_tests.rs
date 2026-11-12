@@ -1339,18 +1339,9 @@ fn a_worker_that_ignores_the_deadline_is_force_aborted() {
                 DrainReport::default(),
                 "a force-aborted worker contributes no counts"
             );
+            assert!(overruns() == 1.0, "the backstop counts one overrun");
         });
     });
-
-    let rendered = handle.render();
-    assert_eq!(
-        sample_value(
-            &rendered,
-            "spate_sink_drain_overrun_total",
-            &[("shard", "0")]
-        ),
-        1.0
-    );
 }
 
 #[test]
@@ -3216,7 +3207,7 @@ fn sink_errors_metric_counts_each_write_error_under_its_class() {
         sample_value(
             &rendered,
             "spate_sink_errors_total",
-            &[("error_type", &format!("{class}"))],
+            &[("error_type", class)],
         )
     };
     assert_eq!(errors("retryable"), 1.0, "{rendered}");

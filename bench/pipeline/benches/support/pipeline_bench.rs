@@ -40,9 +40,9 @@ const MAX_LINE_BYTES: usize = 4_096;
 const LINGER: Duration = Duration::from_millis(5);
 
 /// The split target every run sets, in MiB. At the bench's object sizes the
-/// lister packs two uncompressed objects or sixteen zstd objects to a unit,
-/// so every case's thread count divides the unit count; [`Rig::units`] checks
-/// the staged objects against the lister's own packing.
+/// lister packs two uncompressed objects or sixteen zstd or gzip objects to a
+/// unit, so every case's thread count divides the unit count; [`Rig::units`]
+/// checks the staged objects against the lister's own packing.
 const SPLIT_TARGET_MIB: u64 = 25;
 
 /// How the staged objects are stored.
@@ -50,6 +50,8 @@ const SPLIT_TARGET_MIB: u64 = 25;
 pub(crate) enum Stored {
     /// `.ndjson.zst`, zstd level 3.
     Zstd,
+    /// `.ndjson.gz`, gzip level 6, written by [`gzip`].
+    Gzip,
     /// `.ndjson`, uncompressed.
     Plain,
 }
@@ -59,6 +61,7 @@ impl Stored {
     pub(crate) fn name(self) -> &'static str {
         match self {
             Stored::Zstd => "ndjson_zst",
+            Stored::Gzip => "ndjson_gz",
             Stored::Plain => "ndjson",
         }
     }
@@ -66,6 +69,7 @@ impl Stored {
     fn extension(self) -> &'static str {
         match self {
             Stored::Zstd => "ndjson.zst",
+            Stored::Gzip => "ndjson.gz",
             Stored::Plain => "ndjson",
         }
     }
@@ -172,15 +176,33 @@ pub(crate) struct Rig {
     bytes: u64,
 }
 
+/// One gzip member holding `object`, deflated by miniz_oxide at level 6.
+///
+/// Written without flate2, so the bytes stay the same when the A/B swaps
+/// flate2's backend between the legs.
+fn gzip(object: &[u8]) -> Vec<u8> {
+    // Magic, deflate, no flags, no modification time, no extra flags, unknown OS.
+    let mut member = vec![0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 0, 0xff];
+    member.extend(miniz_oxide::deflate::compress_to_vec(object, 6));
+    member.extend(crc32fast::hash(object).to_le_bytes());
+    let size = u32::try_from(object.len()).expect("an object stays under 4 GiB");
+    member.extend(size.to_le_bytes());
+    member
+}
+
 impl Rig {
     /// Stages the corpus `shape` describes and hands `absorb` each object's
-    /// uncompressed bytes. A run that has not finished within `deadline`
-    /// panics.
+    /// uncompressed bytes as `object` and the bytes written for it as `stored`.
+    /// A run that has not finished within `deadline` panics.
     ///
     /// # Panics
     ///
     /// Panics when the corpus cannot be written.
-    pub(crate) fn new(shape: Shape, deadline: Duration, mut absorb: impl FnMut(&[u8])) -> Rig {
+    pub(crate) fn new(
+        shape: Shape,
+        deadline: Duration,
+        mut absorb: impl FnMut(&str, &[u8]),
+    ) -> Rig {
         let dir = tempfile::tempdir().expect("a temporary directory");
         let data = dir.path().join("data");
         fs::create_dir_all(&data).expect("the data directory");
@@ -192,12 +214,14 @@ impl Rig {
             for line in first..first + shape.lines as u64 {
                 event_line(line, &mut object);
             }
-            absorb(&object);
+            absorb("object", &object);
             bytes += object.len() as u64;
             let body = match shape.stored {
                 Stored::Zstd => zstd::encode_all(&object[..], 3).expect("the object compresses"),
+                Stored::Gzip => gzip(&object),
                 Stored::Plain => object.clone(),
             };
+            absorb("stored", &body);
             let path = data.join(format!("obj-{o:05}.{}", shape.stored.extension()));
             let key = path.to_string_lossy().trim_start_matches('/').to_owned();
             stored.push((key, body.len() as u64));

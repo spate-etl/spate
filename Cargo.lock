@@ -4426,7 +4426,9 @@ name = "spate-pipeline-bench"
 version = "0.4.0"
 dependencies = [
  "async-trait",
+ "crc32fast",
  "futures-util",
+ "miniz_oxide",
  "object_store",
  "serde",
  "serde_json",

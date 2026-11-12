@@ -136,6 +136,10 @@ url = "2.5.4"
 futures-util = { version = "0.3.31", default-features = false }
 base64 = "0.23.1"
 flate2 = "1.1"
+# The pipeline bench writes its gzip objects with these, so the stored bytes
+# stay the same whichever backend flate2 is built with.
+crc32fast = "1.5"
+miniz_oxide = "0.9.1"
 # clickhouse requires ^0.13, so its copy stays in the graph beside this one
 # through spate-clickhouse's dev-dependency. Tracked in #562. The floor is the first release whose streaming decoder
 # commits no output from a failed call. Default features are off for

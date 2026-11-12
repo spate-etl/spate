@@ -88,8 +88,10 @@ body:
         - label: INV-1 — delivery semantics, or anything that could commit a watermark past unacknowledged data
         - label: INV-2 — the source poll loop, which must never block on a channel send
         - label: INV-3 — the checkpoint tracker, which is synchronous and free of async runtimes
+        - label: INV-4 — the ack path, which must never queue behind the data it acknowledges
         - label: INV-5 — the sink intake path, which must not await outside its `select!`
         - label: INV-6 — adding a connector or 0.x dependency type to a public signature in `spate-core`
+        - label: INV-7 — record error policies, or any path that drops a record without counting it
         - label: INV-8, INV-9 or INV-10 — metric naming, cardinality, or gauge ownership
 
   - type: dropdown

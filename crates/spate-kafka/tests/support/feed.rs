@@ -570,8 +570,10 @@ pub(crate) fn read_topic(brokers: &str, topic: &str, n: usize) -> Vec<Read> {
 /// `None` for a tombstone.
 pub(crate) type AttemptRecord = (i32, String, Option<u32>);
 
-/// The first `n` records of the attempt topic's `partitions` partitions,
-/// read from their start, in offset order within each partition.
+/// The first `n` attempt records of the attempt topic's `partitions`
+/// partitions, read from their start, in offset order within each
+/// partition. A record whose key is not a publish identity, which always
+/// holds a `/`, is the gate's fence and is skipped.
 pub(crate) fn read_attempts(brokers: &str, partitions: i32, n: usize) -> Vec<AttemptRecord> {
     let consumer: BaseConsumer = super::raw_config()
         .set("bootstrap.servers", brokers)
@@ -589,6 +591,9 @@ pub(crate) fn read_attempts(brokers: &str, partitions: i32, n: usize) -> Vec<Att
         while let Some(message) = consumer.poll(Duration::from_millis(100)) {
             let message = message.expect("read");
             let key = String::from_utf8(message.key().expect("keyed").to_vec()).unwrap();
+            if !key.contains('/') {
+                continue;
+            }
             let count = message.payload().map(|value| {
                 let record: serde_json::Value = serde_json::from_slice(value).unwrap();
                 assert_eq!(record["v"], 1, "{record}");

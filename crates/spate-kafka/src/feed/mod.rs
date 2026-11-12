@@ -7,10 +7,10 @@
 //! the attempt topic into memory. The gate thread records each delivered
 //! unit's attempt before the unit reaches the reader. The depth thread
 //! answers a bounded job's end check and the runtime's dead-letter reads.
-//! One producer writes publishes, attempt records and their tombstones,
-//! retries and dead letters. The [`Feed`] methods lock the shared state,
-//! change it, and hand any write to the producer, so none of them waits on
-//! I/O (INV-2).
+//! One producer writes publishes, attempt records and their tombstones, the
+//! gate's fences, retries and dead letters. The [`Feed`] methods lock the
+//! shared state, change it, and hand any write to the producer, so none of
+//! them waits on I/O (INV-2).
 //!
 //! # Offsets
 //!
@@ -80,9 +80,7 @@ use spate_core::hash::FastMap;
 use spate_core::task::{ThreadHandle, spawn_thread};
 use std::collections::VecDeque;
 use std::num::NonZeroU32;
-#[cfg(test)]
-use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
@@ -246,6 +244,9 @@ pub(crate) struct Core {
     attempt_partitions: NonZeroU32,
     /// The attempt counts the follower reads and the gate answers from.
     ledger: SharedLedger,
+    /// The gate's fences sent and not yet settled, which the close does not
+    /// wait for.
+    fences: AtomicUsize,
     /// The clock the feed's timed reads take: the commit cadence, resend due
     /// times, the gate's pass bound and the durations it logs.
     clock: SyncClock,
@@ -276,6 +277,7 @@ impl Core {
             attempt_cap: config.attempt_cap,
             attempt_partitions,
             ledger: Arc::new((Mutex::new(Ledger::new(attempt_partitions)), Condvar::new())),
+            fences: AtomicUsize::new(0),
             clock,
             statistics_enabled: !config.statistics_interval.is_zero(),
             metrics: Mutex::new(None),
@@ -386,6 +388,9 @@ impl Core {
     /// enqueue, gave it.
     pub(crate) fn settle(&self, write: Write, outcome: Result<(), Failure>) {
         events::delivery_report(outcome.is_ok());
+        if matches!(write, Write::Fence { .. }) {
+            self.fences.fetch_sub(1, Ordering::AcqRel);
+        }
         match outcome {
             Ok(()) => self.confirmed(write),
             Err(failure) => self.failed(write, failure),
@@ -441,6 +446,7 @@ impl Core {
                 self.lock().tracker.complete(&tombstone.position);
                 events::tombstoned();
             }
+            Write::Fence { .. } => {}
         }
     }
 
@@ -483,6 +489,13 @@ impl Core {
             }
             WriteClass::Retryable => {
                 let Some(backoff) = write.backoff_mut() else {
+                    // A fence: the next pass that stalls writes another.
+                    tracing::debug!(
+                        %topic,
+                        error = %failure.reason,
+                        "writing {} failed; it is not sent again",
+                        write.what()
+                    );
                     return;
                 };
                 let retry_in = backoff.next_delay();
@@ -1112,11 +1125,11 @@ impl Feed for KafkaFeed {
     /// handed its leave to a thread of its own. It is rejected with the
     /// latched error when the feed has stopped on a Fatal error, which
     /// commits nothing more, and as [`Retryable`](FeedErrorKind::Retryable)
-    /// when writes were still in flight at the wait's end or the commit
-    /// failed; the units those writes or that commit would have finished are
-    /// delivered again. The commit waits for the group's answer until
-    /// `within` ends, and at most a quarter of `max.poll.interval.ms` or 10
-    /// seconds, whichever is less. One left unanswered fails the close, and
+    /// when writes other than the gate's fences were still in flight at the
+    /// wait's end or the commit failed; the units those writes or that commit
+    /// would have finished are delivered again. The commit waits for the
+    /// group's answer until `within` ends, and at most a quarter of
+    /// `max.poll.interval.ms` or 10 seconds, whichever is less. One left unanswered fails the close, and
     /// the consumer leaves the group on a thread of its own, since its close
     /// waits for that commit. With every commit answered, a leave that
     /// outlasts `within` still runs on the consumer thread, and dropping the

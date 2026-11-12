@@ -17,6 +17,7 @@ use crate::backoff::Backoff;
 use crate::backpressure::InflightBudget;
 use crate::checkpoint::AckSet;
 use crate::clock::Clock as _;
+use crate::clock::deadline_after;
 use crate::clock::tokio::{Clock, Sleep, Stopwatch, before};
 use crate::error::ErrorClass;
 use crate::hash::FastMap;
@@ -254,7 +255,9 @@ impl<W: ShardWriter> ShardWorker<W> {
         // batch boxes a single sleep.
         let mut linger: Option<(Instant, Sleep)> = None;
         loop {
-            let linger_at = acc.first_at.map(|t| t + self.cfg.batch.linger);
+            let linger_at = acc
+                .first_at
+                .map(|t| deadline_after(t, self.cfg.batch.linger));
             tokio::select! {
                 biased;
 

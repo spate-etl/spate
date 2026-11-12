@@ -120,10 +120,9 @@ fn log_features(arch: &str, compiled: &[String], detected: &[String]) {
     );
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(loom)))]
 mod tests {
     use super::*;
-    use crate::telemetry::LogBuf;
 
     fn feature(name: &'static str, compiled: bool, detected: bool) -> SimdFeature {
         SimdFeature {
@@ -182,14 +181,13 @@ mod tests {
     /// comma-joined in the order given.
     #[test]
     fn the_line_carries_the_architecture_and_both_lists() {
-        let buf = LogBuf::default();
-        let writer = buf.clone();
+        let capture = spate_test::LogCapture::new();
         let subscriber = tracing_subscriber::fmt()
             .json()
             .flatten_event(true)
             .with_target(false)
             .without_time()
-            .with_writer(move || writer.clone())
+            .with_writer(capture.clone())
             .finish();
         tracing::subscriber::with_default(subscriber, || {
             log_features(
@@ -198,9 +196,9 @@ mod tests {
                 &["sse4.2".to_owned(), "avx2".to_owned()],
             );
         });
-        let lines: Vec<serde_json::Value> = buf
-            .text()
+        let lines: Vec<serde_json::Value> = capture
             .lines()
+            .iter()
             .map(|l| serde_json::from_str(l).expect("a JSON line"))
             .collect();
         assert_eq!(

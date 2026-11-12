@@ -4309,6 +4309,7 @@ dependencies = [
  "serde_path_to_error",
  "spate-bench",
  "spate-core",
+ "spate-test",
  "spate-test-support",
  "tempfile",
  "thiserror",

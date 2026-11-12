@@ -19,6 +19,7 @@ use crate::pipeline::runtime::{PipelineRuntime, default_thread_count};
 use crate::record::PartitionId;
 use crate::sink::shard_queues;
 use crate::source::{LaneId, Source, SourceCtx, SourceEvent};
+use spate_test::{MetricSample, wait_until};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
@@ -229,7 +230,7 @@ fn controller_passes(h: &Harness) -> usize {
 /// Wait for `n` more controller passes.
 fn passes(h: &Harness, n: usize) {
     let target = controller_passes(h) + n;
-    wait_for("controller passes", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "controller passes", || {
         controller_passes(h) >= target
     });
 }
@@ -240,7 +241,7 @@ fn tick(h: &Harness, clock: &crate::clock::TestClock, by: Duration) {
     let flushed = flushes(h);
     let target = controller_passes(h) + 2;
     clock.advance(by);
-    wait_for("the commit tick", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "the commit tick", || {
         flushes(h) > flushed && controller_passes(h) >= target
     });
 }
@@ -266,11 +267,11 @@ fn commit_tick_flushes_chains_without_an_idle_lull() {
         batches_seen: 0,
     });
     assign_one_lane(&h, &[0..10, 10..20]);
-    wait_for("batches consumed", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "batches consumed", || {
         h.chain.consumed.load(Ordering::Relaxed) >= 20
     });
     let flushes_before = h.chain.flushes.load(Ordering::Relaxed);
-    wait_for("commit-tick flushes", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "commit-tick flushes", || {
         h.chain.flushes.load(Ordering::Relaxed) >= flushes_before + 3
     });
     h.shutdown.trigger();
@@ -287,10 +288,10 @@ fn happy_path_consumes_and_commits() {
         batches_seen: 0,
     });
     assign_one_lane(&h, &[0..10, 10..20, 20..30]);
-    wait_for("all payloads consumed", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "all payloads consumed", || {
         h.chain.consumed.load(Ordering::Relaxed) == 30
     });
-    wait_for("watermark committed", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "watermark committed", || {
         h.shared.lock().unwrap().committed.get(&PartitionId(0)) == Some(&30)
     });
     h.shutdown.trigger();
@@ -353,7 +354,7 @@ fn revocation_drains_flushes_and_commits_in_order() {
         },
     );
     assign_one_lane(&h, &[0..10, 10..20, 20..30]);
-    wait_for("first batch consumed", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "first batch consumed", || {
         h.chain.consumed.load(Ordering::Relaxed) >= 10
     });
     assert!(
@@ -364,12 +365,12 @@ fn revocation_drains_flushes_and_commits_in_order() {
         .lock()
         .unwrap()
         .push_back(Script::Revoke(vec![LaneId(0)]));
-    wait_for("revocation processed", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "revocation processed", || {
         let log = h.shared.lock().unwrap();
         log.log.iter().any(|e| e == "revoke-delivered") && log.flush_commits >= 1
     });
     let consumed_at_revoke = h.chain.consumed.load(Ordering::Relaxed);
-    wait_for("the revoked lane dropped", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "the revoked lane dropped", || {
         let log = h.shared.lock().unwrap();
         let revoke_at = log.log.iter().position(|e| e == "revoke-delivered");
         revoke_at.is_some_and(|at| log.log[at..].iter().any(|e| e == "lane-dropped"))
@@ -434,7 +435,7 @@ fn revocation_flushes_parked_acks_before_committing() {
         batches_seen: 0,
     });
     assign_one_lane(&h, &[0..10, 10..20]);
-    wait_for("batches consumed", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "batches consumed", || {
         h.chain.consumed.load(Ordering::Relaxed) >= 20
     });
     assert!(
@@ -448,9 +449,9 @@ fn revocation_flushes_parked_acks_before_committing() {
         .push_back(Script::Revoke(vec![LaneId(0)]));
     // StopLanes → flush_until resolves the parked acks; the commit that
     // follows inside `revoke_lanes` must then cover everything consumed.
-    wait_for(
-        "revocation committed the drained acks",
+    wait_until(
         Duration::from_secs(5),
+        "revocation committed the drained acks",
         || h.shared.lock().unwrap().committed.get(&PartitionId(0)) == Some(&20),
     );
     h.shutdown.trigger();
@@ -467,10 +468,10 @@ fn blocked_chain_pauses_then_resumes() {
         batches_seen: 0,
     });
     assign_one_lane(&h, &[0..10, 10..20]);
-    wait_for("all payloads consumed", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "all payloads consumed", || {
         h.chain.consumed.load(Ordering::Relaxed) == 20
     });
-    wait_for("pause and resume observed", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "pause and resume observed", || {
         let log = h.shared.lock().unwrap();
         !log.pauses.is_empty() && !log.resumes.is_empty()
     });
@@ -498,9 +499,9 @@ fn shutdown_during_permanently_blocked_batch_exits_promptly_and_fails_the_batch(
     });
     assign_one_lane(&h, std::slice::from_ref(&(0..10)));
     // A block pauses the lane, so the driver is inside its retry loop.
-    wait_for(
-        "the blocked batch pauses the lane",
+    wait_until(
         Duration::from_secs(5),
+        "the blocked batch pauses the lane",
         || !h.shared.lock().unwrap().pauses.is_empty(),
     );
     let begun = std::time::Instant::now();
@@ -597,7 +598,7 @@ fn a_stall_fails_only_past_its_limit_on_the_injected_clock() {
     // The first batch's ack fails, stalling the partition; later batches
     // deliver but their watermark can never pass the failure.
     assign_one_lane(&h, &[0..10, 10..20, 20..30]);
-    wait_for("every batch consumed", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "every batch consumed", || {
         h.chain.consumed.load(Ordering::Relaxed) == 30
     });
     passes(&h, 3);
@@ -606,7 +607,7 @@ fn a_stall_fails_only_past_its_limit_on_the_injected_clock() {
     assert!(!h.join.is_finished(), "a stall at its limit must not fail");
 
     clock.advance(Duration::from_secs(60));
-    wait_for("the run fails", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "the run fails", || {
         h.join.is_finished()
     });
     let report = h.join.join().unwrap().unwrap();
@@ -645,7 +646,7 @@ fn each_tick_names_the_stalled_partition_to_the_source() {
             })
             .into(),
     ));
-    wait_for("every batch consumed", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "every batch consumed", || {
         h.chain.consumed.load(Ordering::Relaxed) == 20
     });
     passes(&h, 3);
@@ -679,7 +680,7 @@ fn a_run_with_no_failed_batch_names_no_stall() {
     cfg.checkpoint.interval = Duration::from_secs(60);
     let h = start_on_clock(cfg, &clock, |runtime| runtime, ok_chain);
     assign_one_lane(&h, &[0..10, 10..20]);
-    wait_for("every batch consumed", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "every batch consumed", || {
         h.chain.consumed.load(Ordering::Relaxed) == 20
     });
     passes(&h, 3);
@@ -723,7 +724,7 @@ fn revoking_a_stalled_partition_ends_its_stall() {
         },
     );
     assign_one_lane(&h, &[0..5, 5..10]);
-    wait_for("every batch consumed", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "every batch consumed", || {
         h.chain.consumed.load(Ordering::Relaxed) == 10
     });
     passes(&h, 3);
@@ -734,7 +735,7 @@ fn revoking_a_stalled_partition_ends_its_stall() {
         .lock()
         .unwrap()
         .push_back(Script::Revoke(vec![LaneId(0)]));
-    wait_for("the revoke", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "the revoke", || {
         h.shared
             .lock()
             .unwrap()
@@ -787,7 +788,7 @@ fn short_stall_limit(clock: &Arc<crate::clock::TestClock>) -> Harness {
 fn a_short_stall_limit_leaves_the_source_a_poll_to_revoke() {
     let clock = crate::clock::TestClock::frozen();
     let h = short_stall_limit(&clock);
-    wait_for("every batch consumed", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "every batch consumed", || {
         h.chain.consumed.load(Ordering::Relaxed) == 10
     });
     passes(&h, 3);
@@ -803,7 +804,7 @@ fn a_short_stall_limit_leaves_the_source_a_poll_to_revoke() {
         .lock()
         .unwrap()
         .push_back(Script::Revoke(vec![LaneId(0)]));
-    wait_for("the revoke", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "the revoke", || {
         h.shared
             .lock()
             .unwrap()
@@ -832,7 +833,7 @@ fn a_short_stall_limit_leaves_the_source_a_poll_to_revoke() {
 fn a_short_stall_limit_fails_a_kept_stall_on_the_next_tick() {
     let clock = crate::clock::TestClock::frozen();
     let h = short_stall_limit(&clock);
-    wait_for("every batch consumed", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "every batch consumed", || {
         h.chain.consumed.load(Ordering::Relaxed) == 10
     });
     passes(&h, 3);
@@ -844,7 +845,7 @@ fn a_short_stall_limit_fails_a_kept_stall_on_the_next_tick() {
     );
 
     clock.advance(Duration::from_secs(5));
-    wait_for("the run fails", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "the run fails", || {
         h.join.is_finished()
     });
     let report = h.join.join().unwrap().unwrap();
@@ -912,7 +913,7 @@ fn a_batch_with_no_payload_retires_through_the_gate() {
         &pipeline_name,
     );
     assert!(
-        counted.len() == 1 && counted[0].ends_with(" 1"),
+        counted.len() == 1 && counted[0].value == 1.0,
         "records counted: {counted:?}"
     );
 }
@@ -923,7 +924,7 @@ fn a_batch_with_no_payload_retires_through_the_gate() {
 fn a_batch_with_no_payload_keeps_the_next_poll_at_zero_timeout() {
     let h = start_with_config(test_config(1), ok_chain);
     assign_one_lane_scripted(&h, vec![no_payload_batch(9), no_payload_batch(19)]);
-    wait_for("the empty poll", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "the empty poll", || {
         polls_of(&h, 0) >= 3
     });
     let timeouts: Vec<Duration> = h.shared.lock().unwrap().lane_polls[..3]
@@ -958,7 +959,7 @@ fn no_payload_batches_stop_at_the_ceiling_behind_a_failed_head() {
     let mut scripted = vec![vec![(0, vec![0u8; 8])]];
     scripted.extend((1..=5).map(|i| no_payload_batch(i * 10 - 1)));
     assign_one_lane_scripted(&h, scripted);
-    wait_for("the ceiling fills", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "the ceiling fills", || {
         polls_of(&h, 0) >= 3
     });
     for _ in 0..10 {
@@ -999,7 +1000,7 @@ fn the_ceiling_holds_three_of(scripted: Vec<Vec<(i64, Vec<u8>)>>) -> i64 {
     // Six batches whose acks are all withheld. The gate closes after the
     // third and the remaining three never leave the lane.
     assign_one_lane_scripted(&h, scripted);
-    wait_for("the ceiling fills", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "the ceiling fills", || {
         held.lock().unwrap().len() == 3
     });
     // Ten commit ticks later the count has not moved. The bound holds
@@ -1023,7 +1024,7 @@ fn the_ceiling_holds_three_of(scripted: Vec<Vec<(i64, Vec<u8>)>>) -> i64 {
     release.store(true, Ordering::Relaxed);
     held.lock().unwrap().clear();
     // Commits ride the tick, so each check moves the clock one interval.
-    wait_for("everything commits", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "everything commits", || {
         clock.advance(interval);
         h.shared
             .lock()
@@ -1062,7 +1063,7 @@ fn a_stalled_partition_plateaus_at_the_ceiling() {
     assign_one_lane(&h, &[0..10, 10..20, 20..30, 30..40, 40..50, 50..60]);
     // The failed head blocks advancement forever; the gate lets exactly
     // the ceiling through and the other three batches stay in the lane.
-    wait_for("the ceiling fills", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "the ceiling fills", || {
         h.chain.consumed.load(Ordering::Relaxed) == 30
     });
     for _ in 0..10 {
@@ -1098,9 +1099,9 @@ fn a_partition_at_the_ceiling_gates_only_its_own_lanes() {
         batches_seen: 0,
     });
     assign_one_lane(&h, &[0..10, 10..20, 20..30, 30..40, 40..50, 50..60]);
-    wait_for(
-        "partition 0 reaches its ceiling",
+    wait_until(
         Duration::from_secs(5),
+        "partition 0 reaches its ceiling",
         || held.lock().unwrap().len() == 3,
     );
 
@@ -1115,9 +1116,9 @@ fn a_partition_at_the_ceiling_gates_only_its_own_lanes() {
             partition: PartitionId(1),
             batches: batches(std::slice::from_ref(&(100..110))),
         }]));
-    wait_for(
-        "the added partition's batch is delivered beside the gated sibling",
+    wait_until(
         Duration::from_secs(5),
+        "the added partition's batch is delivered beside the gated sibling",
         || held.lock().unwrap().len() == 4,
     );
     assert!(
@@ -1128,7 +1129,7 @@ fn a_partition_at_the_ceiling_gates_only_its_own_lanes() {
     // Releasing drains both partitions to completion.
     release.store(true, Ordering::Relaxed);
     held.lock().unwrap().clear();
-    wait_for("both partitions commit", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "both partitions commit", || {
         let shared = h.shared.lock().unwrap();
         shared
             .committed
@@ -1159,7 +1160,7 @@ fn two_committed_partitions(h: &Harness) {
             batches: batches(std::slice::from_ref(&(0..5))),
         },
     ]));
-    wait_for("both partitions commit", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "both partitions commit", || {
         let shared = h.shared.lock().unwrap();
         shared.committed.get(&PartitionId(0)) == Some(&10)
             && shared.committed.get(&PartitionId(1)) == Some(&5)
@@ -1185,7 +1186,7 @@ fn a_retired_partition_leaves_the_final_watermarks() {
         .lock()
         .unwrap()
         .push_back(Script::Retire(vec![LaneId(1)]));
-    wait_for("retirement delivered", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "retirement delivered", || {
         logged(&h, "retire-delivered")
     });
     h.shutdown.trigger();
@@ -1209,7 +1210,7 @@ fn a_revoked_partition_leaves_the_final_watermarks() {
         .lock()
         .unwrap()
         .push_back(Script::Revoke(vec![LaneId(1)]));
-    wait_for("revocation processed", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "revocation processed", || {
         logged(&h, "revoke-delivered") && h.shared.lock().unwrap().flush_commits > flushes
     });
     h.shutdown.trigger();
@@ -1233,7 +1234,7 @@ fn two_lanes_on_one_committed_partition(h: &Harness) {
             batches: Vec::new(),
         },
     ]));
-    wait_for("partition 0 commits", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "partition 0 commits", || {
         h.shared.lock().unwrap().committed.get(&PartitionId(0)) == Some(&10)
     });
 }
@@ -1253,7 +1254,7 @@ fn a_partition_keeps_its_final_watermark_while_a_lane_of_it_remains() {
         .lock()
         .unwrap()
         .push_back(Script::Retire(vec![LaneId(1)]));
-    wait_for("retirement delivered", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "retirement delivered", || {
         logged(&h, "retire-delivered")
     });
     h.shutdown.trigger();
@@ -1278,7 +1279,7 @@ fn a_partition_keeps_its_final_watermark_after_a_revocation() {
         .lock()
         .unwrap()
         .push_back(Script::Revoke(vec![LaneId(1)]));
-    wait_for("revocation processed", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "revocation processed", || {
         logged(&h, "revoke-delivered") && h.shared.lock().unwrap().flush_commits > flushes
     });
     h.shutdown.trigger();
@@ -1312,16 +1313,16 @@ fn a_commit_retried_after_revocation_is_not_listed() {
             batches: batches(std::slice::from_ref(&(0..5))),
         },
     ]));
-    wait_for("all payloads consumed", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "all payloads consumed", || {
         h.chain.consumed.load(Ordering::Relaxed) == 15
     });
     h.script
         .lock()
         .unwrap()
         .push_back(Script::Revoke(vec![LaneId(1)]));
-    wait_for(
-        "the revocation's commit fails",
+    wait_until(
         Duration::from_secs(5),
+        "the revocation's commit fails",
         || {
             let log = h.shared.lock().unwrap();
             log.log
@@ -1331,9 +1332,9 @@ fn a_commit_retried_after_revocation_is_not_listed() {
         },
     );
     h.shared.lock().unwrap().fail_commits = false;
-    wait_for(
-        "the retry commits partition 1",
+    wait_until(
         Duration::from_secs(5),
+        "the retry commits partition 1",
         || {
             h.shared
                 .lock()
@@ -1360,7 +1361,7 @@ fn ok_harness() -> Harness {
 fn revoke_and_wait(h: &Harness, lanes: Vec<LaneId>) {
     let flushes = h.shared.lock().unwrap().flush_commits;
     h.script.lock().unwrap().push_back(Script::Revoke(lanes));
-    wait_for("revocation processed", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "revocation processed", || {
         logged(h, "revoke-delivered") && h.shared.lock().unwrap().flush_commits > flushes
     });
 }
@@ -1374,7 +1375,7 @@ fn lane(id: u32, partition: u32, ranges: &[std::ops::Range<i64>]) -> LaneSpec {
 }
 
 fn wait_committed(h: &Harness, partition: u32, at: i64) {
-    wait_for("the partition commits", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "the partition commits", || {
         h.shared
             .lock()
             .unwrap()
@@ -1441,16 +1442,16 @@ fn a_commit_retried_after_revocation_is_listed_once_assigned_back() {
         lane(0, 0, std::slice::from_ref(&(0..10))),
         lane(1, 1, std::slice::from_ref(&(0..5))),
     ]));
-    wait_for("all payloads consumed", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "all payloads consumed", || {
         h.chain.consumed.load(Ordering::Relaxed) == 15
     });
     h.script
         .lock()
         .unwrap()
         .push_back(Script::Revoke(vec![LaneId(1)]));
-    wait_for(
-        "the revocation's commit fails",
+    wait_until(
         Duration::from_secs(5),
+        "the revocation's commit fails",
         || {
             let log = h.shared.lock().unwrap();
             log.log
@@ -1515,7 +1516,7 @@ fn shutdown_flushes_chain_before_exit() {
         batches_seen: 0,
     });
     assign_one_lane(&h, std::slice::from_ref(&(0..5)));
-    wait_for("payloads consumed", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "payloads consumed", || {
         h.chain.consumed.load(Ordering::Relaxed) == 5
     });
     let flushes_before = h.chain.flushes.load(Ordering::Relaxed);
@@ -1544,7 +1545,7 @@ fn drained_source_completes_pipeline_without_external_trigger() {
     assign_one_lane(&h, &[0..10, 10..20, 20..30]);
     // Model the bounded-source contract: Drained only after every lane's
     // data has been polled and pushed.
-    wait_for("all payloads consumed", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "all payloads consumed", || {
         h.chain.consumed.load(Ordering::Relaxed) == 30
     });
     h.script.lock().unwrap().push_back(Script::Drained);
@@ -1596,7 +1597,7 @@ fn drained_with_unacknowledged_batches_fails_instead_of_completing() {
         batches_seen: 0,
     });
     assign_one_lane(&h, &[0..10, 10..20]);
-    wait_for("all payloads consumed", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "all payloads consumed", || {
         h.chain.consumed.load(Ordering::Relaxed) == 20
     });
     // Acks for both batches are held (never delivered, never failed) for the
@@ -1636,7 +1637,7 @@ fn drained_with_failing_commit_fails_instead_of_completing() {
     });
     h.shared.lock().unwrap().fail_commits = true;
     assign_one_lane(&h, &[0..10, 10..20]);
-    wait_for("all payloads consumed", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "all payloads consumed", || {
         h.chain.consumed.load(Ordering::Relaxed) == 20
     });
     h.script.lock().unwrap().push_back(Script::Drained);
@@ -1668,10 +1669,10 @@ fn the_final_commit_runs_after_the_drain_through_commit() {
     });
     h.shared.lock().unwrap().fail_commits = true;
     assign_one_lane(&h, &[0..10, 10..20]);
-    wait_for("all payloads consumed", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "all payloads consumed", || {
         h.chain.consumed.load(Ordering::Relaxed) == 20
     });
-    wait_for("a tick commit", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "a tick commit", || {
         h.shared
             .lock()
             .unwrap()
@@ -1736,7 +1737,7 @@ fn a_failed_final_commit_counts_one_error_outcome() {
             batches: batches(&[0..10, 10..20]),
         },
     ]));
-    wait_for("all payloads consumed", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "all payloads consumed", || {
         h.chain.consumed.load(Ordering::Relaxed) == 40
     });
     h.script.lock().unwrap().push_back(Script::Drained);
@@ -1786,12 +1787,12 @@ fn a_stored_commit_counts_an_ok_outcome() {
         batches_seen: 0,
     });
     assign_one_lane(&h, std::slice::from_ref(&(0..10)));
-    wait_for("all payloads consumed", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "all payloads consumed", || {
         h.chain.consumed.load(Ordering::Relaxed) == 10
     });
-    wait_for(
-        "all ten positions committed",
+    wait_until(
         Duration::from_secs(5),
+        "all ten positions committed",
         || h.shared.lock().unwrap().committed.get(&PartitionId(0)) == Some(&10),
     );
     h.shutdown.trigger();
@@ -1820,10 +1821,10 @@ fn a_fatal_final_commit_fails_the_run_with_its_reason() {
     });
     h.shared.lock().unwrap().fail_commits = true;
     assign_one_lane(&h, &[0..10, 10..20]);
-    wait_for("all payloads consumed", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "all payloads consumed", || {
         h.chain.consumed.load(Ordering::Relaxed) == 20
     });
-    wait_for("a tick commit", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "a tick commit", || {
         h.shared
             .lock()
             .unwrap()
@@ -1833,7 +1834,7 @@ fn a_fatal_final_commit_fails_the_run_with_its_reason() {
     });
     h.shared.lock().unwrap().fatal_commits = true;
     h.script.lock().unwrap().push_back(Script::Drained);
-    wait_for("the run ends", FINISH_DEADLINE, || h.join.is_finished());
+    wait_until(FINISH_DEADLINE, "the run ends", || h.join.is_finished());
     let report = h.join.join().unwrap().unwrap();
     let ExitState::Failed(failure) = report.state else {
         panic!("a fatal final commit must fail the run");
@@ -1869,7 +1870,7 @@ fn a_commit_ready_hint_commits_only_the_chased_partitions() {
             batches: batches(std::slice::from_ref(&(0..10))),
         },
     ]));
-    wait_for("all payloads consumed", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "all payloads consumed", || {
         h.chain.consumed.load(Ordering::Relaxed) == 20
     });
     {
@@ -1877,9 +1878,9 @@ fn a_commit_ready_hint_commits_only_the_chased_partitions() {
         script.push_back(Script::CommitReady(vec![PartitionId(9)]));
         script.push_back(Script::CommitReady(vec![PartitionId(0)]));
     }
-    wait_for(
-        "the chased partition committed",
+    wait_until(
         Duration::from_secs(5),
+        "the chased partition committed",
         || {
             h.shared
                 .lock()
@@ -1943,21 +1944,21 @@ fn a_hinted_partition_acked_after_its_window_commits_before_the_tick() {
             batches: batches(std::slice::from_ref(&(0..10))),
         },
     ]));
-    wait_for("all payloads consumed", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "all payloads consumed", || {
         h.chain.consumed.load(Ordering::Relaxed) == 20
     });
     h.script
         .lock()
         .unwrap()
         .push_back(Script::CommitReady(vec![PartitionId(0)]));
-    wait_for("the hint delivered", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "the hint delivered", || {
         h.shared.lock().unwrap().hinted_at.is_some()
     });
     release.store(true, Ordering::Relaxed);
     held.lock().unwrap().clear();
-    wait_for(
-        "the hinted partition committed",
+    wait_until(
         Duration::from_secs(5),
+        "the hinted partition committed",
         || h.shared.lock().unwrap().committed.get(&PartitionId(0)) == Some(&10),
     );
     {
@@ -1992,14 +1993,14 @@ fn a_hinted_partition_in_its_window_is_polled_at_the_tightened_cadence() {
         batches_seen: 0,
     });
     assign_one_lane(&h, std::slice::from_ref(&(0..10)));
-    wait_for("all payloads consumed", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "all payloads consumed", || {
         h.chain.consumed.load(Ordering::Relaxed) == 10
     });
     h.script
         .lock()
         .unwrap()
         .push_back(Script::CommitReady(vec![PartitionId(0)]));
-    wait_for("a poll after the hint", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "a poll after the hint", || {
         let log = h.shared.lock().unwrap();
         log.hinted_at
             .is_some_and(|at| log.poll_timeouts.len() > at + 1)
@@ -2016,9 +2017,9 @@ fn a_hinted_partition_in_its_window_is_polled_at_the_tightened_cadence() {
     }
     release.store(true, Ordering::Relaxed);
     held.lock().unwrap().clear();
-    wait_for(
-        "the hinted partition committed",
+    wait_until(
         Duration::from_secs(5),
+        "the hinted partition committed",
         || h.shared.lock().unwrap().committed.get(&PartitionId(0)) == Some(&10),
     );
     h.shutdown.trigger();
@@ -2050,7 +2051,7 @@ fn a_failed_post_window_commit_is_not_retried_every_pass() {
         },
     );
     assign_one_lane(&h, std::slice::from_ref(&(0..10)));
-    wait_for("all payloads consumed", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "all payloads consumed", || {
         h.chain.consumed.load(Ordering::Relaxed) == 10
     });
     h.shared.lock().unwrap().fail_commits = true;
@@ -2058,7 +2059,7 @@ fn a_failed_post_window_commit_is_not_retried_every_pass() {
         .lock()
         .unwrap()
         .push_back(Script::CommitReady(vec![PartitionId(0)]));
-    wait_for("the hint delivered", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "the hint delivered", || {
         h.shared.lock().unwrap().hinted_at.is_some()
     });
     release.store(true, Ordering::Relaxed);
@@ -2072,11 +2073,11 @@ fn a_failed_post_window_commit_is_not_retried_every_pass() {
             .filter(|e| *e == "commit-failed")
             .count()
     };
-    wait_for("the first commit attempt", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "the first commit attempt", || {
         failed(&h) >= 1
     });
     let polls = h.shared.lock().unwrap().poll_timeouts.len();
-    wait_for("forty more passes", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "forty more passes", || {
         h.shared.lock().unwrap().poll_timeouts.len() >= polls + 40
     });
     let attempts = failed(&h);
@@ -2110,7 +2111,7 @@ fn a_post_window_ack_resolved_during_the_poll_commits_on_that_pass() {
         },
     );
     assign_one_lane(&h, std::slice::from_ref(&(0..10)));
-    wait_for("all payloads consumed", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "all payloads consumed", || {
         h.chain.consumed.load(Ordering::Relaxed) == 10
     });
     release.store(true, Ordering::Relaxed);
@@ -2119,9 +2120,9 @@ fn a_post_window_ack_resolved_during_the_poll_commits_on_that_pass() {
         script.push_back(Script::CommitReady(vec![PartitionId(0)]));
         script.push_back(Script::ReleaseHeld(Arc::clone(&held)));
     }
-    wait_for(
-        "the hinted partition committed",
+    wait_until(
         Duration::from_secs(5),
+        "the hinted partition committed",
         || h.shared.lock().unwrap().committed.get(&PartitionId(0)) == Some(&10),
     );
     {
@@ -2151,27 +2152,27 @@ fn a_retired_hinted_partition_leaves_the_tightened_cadence() {
         batches_seen: 0,
     });
     assign_one_lane(&h, std::slice::from_ref(&(0..10)));
-    wait_for("all payloads consumed", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "all payloads consumed", || {
         h.chain.consumed.load(Ordering::Relaxed) == 10
     });
     h.script
         .lock()
         .unwrap()
         .push_back(Script::CommitReady(vec![PartitionId(0)]));
-    wait_for("partition 0 committed", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "partition 0 committed", || {
         h.shared.lock().unwrap().committed.get(&PartitionId(0)) == Some(&10)
     });
     h.script
         .lock()
         .unwrap()
         .push_back(Script::Retire(vec![LaneId(0)]));
-    wait_for("retirement delivered", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "retirement delivered", || {
         logged(&h, "retire-delivered")
     });
     let after = h.shared.lock().unwrap().poll_timeouts.len();
-    wait_for(
-        "two polls after the retirement",
+    wait_until(
         Duration::from_secs(5),
+        "two polls after the retirement",
         || h.shared.lock().unwrap().poll_timeouts.len() > after + 2,
     );
     {
@@ -2199,14 +2200,14 @@ fn a_new_assignment_inside_the_window_ends_the_chase() {
         batches_seen: 0,
     });
     assign_one_lane(&h, std::slice::from_ref(&(0..10)));
-    wait_for("the first epoch consumed", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "the first epoch consumed", || {
         h.chain.consumed.load(Ordering::Relaxed) == 10
     });
     h.script
         .lock()
         .unwrap()
         .push_back(Script::CommitReady(vec![PartitionId(0)]));
-    wait_for("partition 0 committed", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "partition 0 committed", || {
         h.shared.lock().unwrap().committed.get(&PartitionId(0)) == Some(&10)
     });
     h.script.lock().unwrap().push_back(Script::Assign(vec![
@@ -2221,14 +2222,14 @@ fn a_new_assignment_inside_the_window_ends_the_chase() {
             batches: batches(std::slice::from_ref(&(0..10))),
         },
     ]));
-    wait_for("the second epoch consumed", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "the second epoch consumed", || {
         h.chain.consumed.load(Ordering::Relaxed) == 30
     });
     h.script
         .lock()
         .unwrap()
         .push_back(Script::CommitReady(vec![PartitionId(1)]));
-    wait_for("partition 1 committed", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "partition 1 committed", || {
         h.shared.lock().unwrap().committed.get(&PartitionId(1)) == Some(&10)
     });
     {
@@ -2269,14 +2270,14 @@ fn a_chase_past_its_window_returns_to_the_event_poll_timeout() {
         },
     );
     assign_one_lane(&h, std::slice::from_ref(&(0..10)));
-    wait_for("all payloads consumed", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "all payloads consumed", || {
         h.chain.consumed.load(Ordering::Relaxed) == 10
     });
     h.script
         .lock()
         .unwrap()
         .push_back(Script::CommitReady(vec![PartitionId(0)]));
-    wait_for("two polls after the hint", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "two polls after the hint", || {
         let log = h.shared.lock().unwrap();
         log.hinted_at
             .is_some_and(|at| log.poll_timeouts.len() > at + 2)
@@ -2292,9 +2293,9 @@ fn a_chase_past_its_window_returns_to_the_event_poll_timeout() {
     }
     release.store(true, Ordering::Relaxed);
     held.lock().unwrap().clear();
-    wait_for(
-        "the hinted partition committed",
+    wait_until(
         Duration::from_secs(5),
+        "the hinted partition committed",
         || h.shared.lock().unwrap().committed.get(&PartitionId(0)) == Some(&10),
     );
     h.shutdown.trigger();
@@ -2320,14 +2321,14 @@ fn a_new_assignment_ends_the_chase_of_a_reused_partition() {
         },
     );
     assign_one_lane(&h, std::slice::from_ref(&(0..10)));
-    wait_for("the first epoch consumed", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "the first epoch consumed", || {
         h.chain.consumed.load(Ordering::Relaxed) == 10
     });
     h.script
         .lock()
         .unwrap()
         .push_back(Script::CommitReady(vec![PartitionId(0)]));
-    wait_for("partition 0 committed", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "partition 0 committed", || {
         h.shared.lock().unwrap().committed.get(&PartitionId(0)) == Some(&10)
     });
     h.script.lock().unwrap().push_back(Script::Assign(vec![
@@ -2342,14 +2343,14 @@ fn a_new_assignment_ends_the_chase_of_a_reused_partition() {
             batches: batches(std::slice::from_ref(&(0..10))),
         },
     ]));
-    wait_for("the second epoch consumed", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "the second epoch consumed", || {
         h.chain.consumed.load(Ordering::Relaxed) == 30
     });
     h.script
         .lock()
         .unwrap()
         .push_back(Script::CommitReady(vec![PartitionId(1)]));
-    wait_for("partition 1 committed", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "partition 1 committed", || {
         h.shared.lock().unwrap().committed.get(&PartitionId(1)) == Some(&10)
     });
     {
@@ -2376,7 +2377,7 @@ fn a_fatal_commit_fails_the_run() {
     });
     h.shared.lock().unwrap().fatal_commits = true;
     assign_one_lane(&h, std::slice::from_ref(&(0..10)));
-    wait_for("the run ends", FINISH_DEADLINE, || h.join.is_finished());
+    wait_until(FINISH_DEADLINE, "the run ends", || h.join.is_finished());
     let report = h.join.join().unwrap().unwrap();
     let ExitState::Failed(failure) = report.state else {
         panic!("a fatal commit must fail the run");
@@ -2405,13 +2406,13 @@ fn a_non_fatal_commit_error_is_retried() {
         });
         h.shared.lock().unwrap().commit_errors.push_back(error);
         assign_one_lane(&h, std::slice::from_ref(&(0..10)));
-        wait_for("the retried commit lands", FINISH_DEADLINE, || {
+        wait_until(FINISH_DEADLINE, "the retried commit lands", || {
             h.join.is_finished()
                 || h.shared.lock().unwrap().committed.get(&PartitionId(0)) == Some(&10)
         });
         assert!(h.shared.lock().unwrap().commit_errors.is_empty());
         h.script.lock().unwrap().push_back(Script::Drained);
-        wait_for("the run ends", FINISH_DEADLINE, || h.join.is_finished());
+        wait_until(FINISH_DEADLINE, "the run ends", || h.join.is_finished());
         let report = h.join.join().unwrap().unwrap();
         assert!(
             matches!(report.state, ExitState::Completed),
@@ -2423,13 +2424,11 @@ fn a_non_fatal_commit_error_is_retried() {
 
 /// The `spate_checkpoint_commits_total` value for one pipeline and outcome.
 fn commits_counter(rendered: &str, pipeline_name: &str, outcome: &str) -> Option<f64> {
-    rendered
-        .lines()
-        .filter(|l| l.starts_with(&format!("{}{{", names::CHECKPOINT_COMMITS_TOTAL)))
-        .filter(|l| l.contains(&format!(r#"pipeline="{pipeline_name}""#)))
-        .find(|l| l.contains(&format!(r#"outcome="{outcome}""#)))
-        .and_then(|l| l.rsplit(' ').next())
-        .map(|v| v.parse().expect("a numeric sample"))
+    spate_test::metric_value(
+        rendered,
+        names::CHECKPOINT_COMMITS_TOTAL,
+        &[("pipeline", pipeline_name), ("outcome", outcome)],
+    )
 }
 
 /// A fatal lane poll error fails the run from the driver that saw it.
@@ -2447,7 +2446,7 @@ fn a_fatal_lane_poll_error_fails_the_run() {
         .lane_poll_errors
         .push_back(SourceError::fatal("scripted poll failure"));
     assign_one_lane(&h, &[0..5, 5..10]);
-    wait_for("the run ends", FINISH_DEADLINE, || h.join.is_finished());
+    wait_until(FINISH_DEADLINE, "the run ends", || h.join.is_finished());
     let report = h.join.join().unwrap().unwrap();
     let ExitState::Failed(failure) = report.state else {
         panic!("a fatal lane poll error must fail the run");
@@ -2476,7 +2475,7 @@ fn a_non_fatal_lane_poll_error_does_not_fail_the_run() {
         });
         h.shared.lock().unwrap().lane_poll_errors.push_back(error);
         assign_one_lane(&h, &[0..5, 5..10]);
-        wait_for("all payloads consumed", Duration::from_secs(5), || {
+        wait_until(Duration::from_secs(5), "all payloads consumed", || {
             h.chain.consumed.load(Ordering::Relaxed) == 10
         });
         assert!(h.shared.lock().unwrap().lane_poll_errors.is_empty());
@@ -2505,7 +2504,7 @@ fn a_fatal_poll_events_error_fails_the_run() {
         .push_back(Script::PollError(SourceError::fatal(
             "scripted control failure",
         )));
-    wait_for("the run ends", FINISH_DEADLINE, || h.join.is_finished());
+    wait_until(FINISH_DEADLINE, "the run ends", || h.join.is_finished());
     let report = h.join.join().unwrap().unwrap();
     let ExitState::Failed(failure) = report.state else {
         panic!("a fatal poll_events error must fail the run");
@@ -2534,7 +2533,7 @@ fn a_non_fatal_poll_events_error_keeps_the_run_going() {
         });
         h.script.lock().unwrap().push_back(Script::PollError(error));
         assign_one_lane(&h, &[0..5, 5..10]);
-        wait_for("all payloads consumed", Duration::from_secs(5), || {
+        wait_until(Duration::from_secs(5), "all payloads consumed", || {
             h.chain.consumed.load(Ordering::Relaxed) == 10
         });
         h.script.lock().unwrap().push_back(Script::Drained);
@@ -2572,14 +2571,11 @@ fn controller_panic_stops_drivers_and_fails_instead_of_hanging() {
         script.push_back(Script::PanicPoll);
     }
     // Bounded wait: without the fix, main's untimed driver join hangs here.
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while !h.join.is_finished() {
-        assert!(
-            Instant::now() < deadline,
-            "run() hung after the controller thread panicked"
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    wait_until(
+        Duration::from_secs(30),
+        "run() to return after the controller thread panicked",
+        || h.join.is_finished(),
+    );
     let report = h.join.join().unwrap().unwrap();
     let ExitState::Failed(failure) = report.state else {
         panic!("a controller panic must fail the run");
@@ -2850,14 +2846,11 @@ fn startup_error_after_driver_spawn_stops_drivers_and_returns_err() {
         batches_seen: 0,
     });
     // Prompt return proves the driver join completed (threads did not leak).
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !h.join.is_finished() {
-        assert!(
-            Instant::now() < deadline,
-            "run() did not return promptly on a bind failure"
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    wait_until(
+        Duration::from_secs(10),
+        "run() to return on a bind failure",
+        || h.join.is_finished(),
+    );
     let result = h.join.join().unwrap();
     let Err(err @ StartError::AdminBind { .. }) = result else {
         panic!("expected StartError::AdminBind, got {result:?}");
@@ -2875,7 +2868,7 @@ fn startup_error_after_driver_spawn_stops_drivers_and_returns_err() {
 /// opens. Waits for the run under a deadline, so a run that opens the source
 /// and keeps going fails the test there.
 fn config_error_before_open(h: Harness) -> String {
-    wait_for("run() to return", Duration::from_secs(10), || {
+    wait_until(Duration::from_secs(10), "run() to return", || {
         h.join.is_finished()
     });
     let result = h.join.join().unwrap();
@@ -3185,7 +3178,7 @@ fn the_runtime_counts_the_calls_its_source_makes_through_the_feed() {
         move |runtime, _| runtime.with_feed(given).with_clock(injected),
         ok_chain,
     );
-    wait_for("the source's feed", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "the source's feed", || {
         h.shared.lock().unwrap().feed.is_some()
     });
     // The runtime's own install, taken after it: in a process of its own, as
@@ -3205,20 +3198,19 @@ fn the_runtime_counts_the_calls_its_source_makes_through_the_feed() {
     clock.advance(Duration::from_secs(3));
     published.try_outcome().expect("settled").unwrap();
 
-    let series = |name: &str| {
-        format!(r#"{name}{{pipeline="{pipeline_name}",component="feed",component_type="memory"}} "#)
-    };
-    let reads = |name: &str, value: &str| {
-        let line = format!("{}{value}", series(name));
-        handle.render().lines().any(|l| l == line)
-    };
-    wait_for("the dead-letter depth", Duration::from_secs(5), || {
-        reads("spate_feed_dead_letter_units", "1")
+    let labels = [
+        ("pipeline", pipeline_name.as_str()),
+        ("component", "feed"),
+        ("component_type", "memory"),
+    ];
+    let reads = |name: &str| spate_test::metric_value(&handle.render(), name, &labels);
+    wait_until(Duration::from_secs(5), "the dead-letter depth", || {
+        reads("spate_feed_dead_letter_units") == Some(1.0)
     });
-    assert!(reads("spate_feed_units_received_total", "1"));
-    assert!(reads("spate_feed_units_acknowledged_total", "1"));
-    assert!(reads("spate_feed_held_units", "0"));
-    assert!(reads("spate_feed_publish_duration_seconds_sum", "3"));
+    assert_eq!(reads("spate_feed_units_received_total"), Some(1.0));
+    assert_eq!(reads("spate_feed_units_acknowledged_total"), Some(1.0));
+    assert_eq!(reads("spate_feed_held_units"), Some(0.0));
+    assert_eq!(reads("spate_feed_publish_duration_seconds_sum"), Some(3.0));
 
     h.script.lock().unwrap().push_back(Script::Drained);
     let report = h.join.join().unwrap().unwrap();
@@ -3328,11 +3320,11 @@ fn the_runtime_reads_dead_letters_on_its_clock() {
         move |runtime, _| runtime.with_feed(Arc::new(feed)).with_clock(injected),
         ok_chain,
     );
-    wait_for("the startup read", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "the startup read", || {
         reads.load(Ordering::Relaxed) == 1
     });
     clock.advance(crate::feed::DEAD_LETTER_READ_INTERVAL);
-    wait_for("the second read", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "the second read", || {
         reads.load(Ordering::Relaxed) == 2
     });
     h.script.lock().unwrap().push_back(Script::Drained);
@@ -3367,7 +3359,7 @@ fn a_failed_dead_letter_read_warns() {
                     .any(|(name, value)| name == "feed" && value.contains("memory"))
         })
     };
-    wait_for("the warning", Duration::from_secs(5), warned);
+    wait_until(Duration::from_secs(5), "the warning", warned);
     h.script.lock().unwrap().push_back(Script::Drained);
     assert_eq!(h.join.join().unwrap().unwrap().state, ExitState::Completed);
 }
@@ -3467,11 +3459,20 @@ fn a_feed_backend_receives_a_meter_scoped_to_the_feed_role() {
     // nextest runs it, a `Meter` handed over before the recorder existed would
     // render nothing here.
     let handle = crate::metrics::install(&settings).expect("the runtime's exporter");
-    let series = format!(
-        r#"spate_probe_feed_attached_total{{pipeline="{pipeline_name}",component="feed",component_type="probe"}} 1"#
-    );
     let rendered = handle.render();
-    assert!(rendered.lines().any(|l| l == series), "{rendered}");
+    assert_eq!(
+        spate_test::metric_value(
+            &rendered,
+            "spate_probe_feed_attached_total",
+            &[
+                ("pipeline", pipeline_name.as_str()),
+                ("component", "feed"),
+                ("component_type", "probe"),
+            ],
+        ),
+        Some(1.0),
+        "{rendered}"
+    );
 }
 
 /// Pins that the runtime hands a feed backend its pipeline's
@@ -3741,7 +3742,7 @@ fn no_admin_listener_still_drains_and_completes() {
         batches_seen: 0,
     });
     assign_one_lane(&h, std::slice::from_ref(&(0..10)));
-    wait_for("payloads consumed", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "payloads consumed", || {
         h.chain.consumed.load(Ordering::Relaxed) == 10
     });
     h.script.lock().unwrap().push_back(Script::Drained);
@@ -3787,7 +3788,7 @@ fn the_controller_owns_the_source_series_not_the_per_thread_shadows() {
         batches_seen: 0,
     });
     assign_one_lane(&h, std::slice::from_ref(&(0..10)));
-    wait_for("payloads consumed", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "payloads consumed", || {
         h.chain.consumed.load(Ordering::Relaxed) == 10
     });
     h.script.lock().unwrap().push_back(Script::Drained);
@@ -3839,41 +3840,38 @@ fn the_inflight_budget_reaches_the_exposition_as_one_series() {
     const CHARGED: usize = 7 << 20;
     h.budget.add(CHARGED);
 
-    let series = |rendered: &str| -> Vec<String> {
-        rendered
-            .lines()
-            .filter(|l| l.starts_with(&format!("{}{{", names::BACKPRESSURE_INFLIGHT_BYTES)))
-            // Under `cargo test` other tests' pipelines record into this process-wide recorder.
-            .filter(|l| l.contains(&format!(r#"pipeline="{pipeline_name}""#)))
-            .map(str::to_owned)
-            .collect()
+    // Under `cargo test` other tests' pipelines record into this process-wide recorder.
+    let series = |rendered: &str| {
+        family_series(rendered, names::BACKPRESSURE_INFLIGHT_BYTES, &pipeline_name)
     };
+    #[expect(clippy::cast_precision_loss, reason = "7 MiB is exact in an f64")]
+    let charged = CHARGED as f64;
 
-    wait_for(
-        "the budget gauge is published",
+    wait_until(
         Duration::from_secs(5),
-        || {
-            series(&handle.render())
-                .iter()
-                .any(|l| l.ends_with(&format!(" {CHARGED}")))
-        },
+        "the budget gauge is published",
+        || series(&handle.render()).iter().any(|s| s.value == charged),
     );
 
     let rendered = handle.render();
     let published = series(&rendered);
     assert_eq!(
         published,
-        vec![format!(
-            r#"{}{{pipeline="{pipeline_name}",component="runtime",component_type="pipeline"}} {CHARGED}"#,
-            names::BACKPRESSURE_INFLIGHT_BYTES
-        )],
+        vec![MetricSample {
+            labels: owned_labels(&[
+                ("pipeline", &pipeline_name),
+                ("component", "runtime"),
+                ("component_type", "pipeline"),
+            ]),
+            value: charged,
+        }],
         "the budget publishes exactly one series, under the runtime's labels:\n{rendered}"
     );
 
     // A drain is visible too, so the series tracks the budget.
     h.budget.sub(CHARGED);
-    wait_for("the budget gauge drains", Duration::from_secs(5), || {
-        series(&handle.render()).iter().any(|l| l.ends_with(" 0"))
+    wait_until(Duration::from_secs(5), "the budget gauge drains", || {
+        series(&handle.render()).iter().any(|s| s.value == 0.0)
     });
 
     h.script.lock().unwrap().push_back(Script::Drained);
@@ -3884,14 +3882,15 @@ fn the_inflight_budget_reaches_the_exposition_as_one_series() {
 /// The value of one pipeline's `spate_pipeline_io_busy_ratio` line, if the
 /// exposition carries it.
 fn io_busy_ratio(rendered: &str, pipeline_name: &str) -> Option<f64> {
-    let prefix = format!(
-        r#"{}{{pipeline="{pipeline_name}",component="runtime",component_type="pipeline"}} "#,
-        names::PIPELINE_IO_BUSY_RATIO
-    );
-    rendered
-        .lines()
-        .find_map(|l| l.strip_prefix(&prefix))
-        .and_then(|v| v.parse().ok())
+    spate_test::metric_value(
+        rendered,
+        names::PIPELINE_IO_BUSY_RATIO,
+        &[
+            ("pipeline", pipeline_name),
+            ("component", "runtime"),
+            ("component_type", "pipeline"),
+        ],
+    )
 }
 
 fn install_prometheus(cfg: &PipelineConfig) -> crate::metrics::MetricsHandle {
@@ -3920,9 +3919,9 @@ fn the_io_busy_ratio_is_published_from_start() {
         mode: ChainMode::Ok,
         batches_seen: 0,
     });
-    wait_for(
-        "the busy gauge is published",
+    wait_until(
         Duration::from_secs(5),
+        "the busy gauge is published",
         || io_busy_ratio(&handle.render(), &pipeline_name) == Some(0.0),
     );
 
@@ -3973,9 +3972,9 @@ fn a_busy_io_runtime_reaches_the_exposition() {
             batches_seen: 0,
         },
     );
-    wait_for(
-        "a busy sample is published",
+    wait_until(
         Duration::from_secs(10),
+        "a busy sample is published",
         || io_busy_ratio(&handle.render(), &pipeline_name).is_some_and(|r| r > 0.5),
     );
 
@@ -4033,9 +4032,9 @@ fn one_busy_worker_of_two_reads_half_in_the_exposition() {
     // timed because one render of a shared process's exposition can take
     // tens of milliseconds, so a count of polls has no fixed duration.
     let in_band_since = std::cell::Cell::new(None::<Instant>);
-    wait_for(
-        "the gauge to hold near half",
+    wait_until(
         Duration::from_secs(15),
+        "the gauge to hold near half",
         || {
             let half = io_busy_ratio(&handle.render(), &pipeline_name)
                 .is_some_and(|r| (0.3..0.7).contains(&r));
@@ -4161,23 +4160,41 @@ fn a_saturated_io_runtime_logs_one_warning() {
     assert!(half.is_empty(), "half busy warned: {half:?}");
 }
 
-/// One pipeline's `spate_checkpoint_pending_batches` lines, sorted. The
+/// One pipeline's `spate_checkpoint_pending_batches` series, sorted. The
 /// pipeline label keeps the assertion independent of any other pipeline a
 /// sibling test registered in this process.
-fn pending_series(rendered: &str, pipeline_name: &str) -> Vec<String> {
+fn pending_series(rendered: &str, pipeline_name: &str) -> Vec<MetricSample> {
     family_series(rendered, names::CHECKPOINT_PENDING_BATCHES, pipeline_name)
 }
 
-/// One pipeline's lines of the family `name`, sorted.
-fn family_series(rendered: &str, name: &str, pipeline_name: &str) -> Vec<String> {
-    let mut out: Vec<String> = rendered
-        .lines()
-        .filter(|l| l.starts_with(&format!("{name}{{")))
-        .filter(|l| l.contains(&format!(r#"pipeline="{pipeline_name}""#)))
-        .map(str::to_owned)
-        .collect();
-    out.sort();
+/// One pipeline's series of the family `name`, sorted by their labels.
+fn family_series(rendered: &str, name: &str, pipeline_name: &str) -> Vec<MetricSample> {
+    let mut out = spate_test::metric_series(rendered, name, &[("pipeline", pipeline_name)]);
+    out.sort_by(|a, b| a.labels.cmp(&b.labels));
     out
+}
+
+/// Label pairs as a [`MetricSample`] carries them.
+fn owned_labels(labels: &[(&str, &str)]) -> Vec<(String, String)> {
+    labels
+        .iter()
+        .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+        .collect()
+}
+
+/// The `spate_checkpoint_pending_batches` sample of a pipeline's checkpointer,
+/// for one partition or, with `None`, the aggregate.
+fn pending_sample(pipeline_name: &str, partition: Option<&str>, value: f64) -> MetricSample {
+    let mut labels = vec![
+        ("pipeline", pipeline_name),
+        ("component", "checkpoint"),
+        ("component_type", "checkpoint"),
+    ];
+    labels.extend(partition.map(|p| ("partition", p)));
+    MetricSample {
+        labels: owned_labels(&labels),
+        value,
+    }
 }
 
 /// The checkpoint labels a pipeline of this name publishes under.
@@ -4220,13 +4237,13 @@ fn per_partition_pending_reaches_the_exposition_when_detail_is_on() {
 
     // Published on the commit tick, so it is there while the run is live and
     // not only on the final commit at shutdown.
-    wait_for(
-        "the per-partition series is published",
+    wait_until(
         Duration::from_secs(5),
+        "the per-partition series is published",
         || {
             pending_series(&handle.render(), &pipeline_name)
                 .iter()
-                .any(|l| l.contains(r#"partition="0""#))
+                .any(|s| s.labels.iter().any(|(k, v)| k == "partition" && v == "0"))
         },
     );
 
@@ -4235,18 +4252,12 @@ fn per_partition_pending_reaches_the_exposition_when_detail_is_on() {
     assert_eq!(report.state, ExitState::Completed);
 
     let rendered = handle.render();
-    let labels = checkpoint_labels(&pipeline_name);
-    let mut expected = vec![
-        format!("{}{{{labels}}} 0", names::CHECKPOINT_PENDING_BATCHES),
-        format!(
-            r#"{}{{{labels},partition="0"}} 0"#,
-            names::CHECKPOINT_PENDING_BATCHES
-        ),
-    ];
-    expected.sort();
     assert_eq!(
         pending_series(&rendered, &pipeline_name),
-        expected,
+        vec![
+            pending_sample(&pipeline_name, None, 0.0),
+            pending_sample(&pipeline_name, Some("0"), 0.0),
+        ],
         "the aggregate and the one assigned partition:\n{rendered}"
     );
 }
@@ -4308,9 +4319,9 @@ fn per_partition_pending_counts_each_partition_and_zeroes_a_revoked_one() {
     let p0 = format!(r#"{name}{{{labels},partition="0"}} 3"#);
     let p1 = format!(r#"{name}{{{labels},partition="1"}} 1"#);
     let aggregate = format!("{name}{{{labels}}} 3");
-    wait_for(
-        "each partition publishes its own count",
+    wait_until(
         Duration::from_secs(5),
+        "each partition publishes its own count",
         || {
             let rendered = handle.render();
             rendered.contains(&p0) && rendered.contains(&p1) && rendered.contains(&aggregate)
@@ -4324,9 +4335,9 @@ fn per_partition_pending_counts_each_partition_and_zeroes_a_revoked_one() {
         .unwrap()
         .push_back(Script::Revoke(vec![LaneId(1)]));
     let p1_released = format!(r#"{name}{{{labels},partition="1"}} 0"#);
-    wait_for(
-        "the revoked partition is released and the remaining one is not",
+    wait_until(
         Duration::from_secs(10),
+        "the revoked partition is released and the remaining one is not",
         || {
             let rendered = handle.render();
             rendered.contains(&p1_released) && rendered.contains(&p0)
@@ -4336,7 +4347,7 @@ fn per_partition_pending_counts_each_partition_and_zeroes_a_revoked_one() {
     // Releasing retires partition 0's batches so the drain can complete.
     release.store(true, Ordering::Relaxed);
     held.lock().unwrap().clear();
-    wait_for("partition 0 commits", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "partition 0 commits", || {
         h.shared
             .lock()
             .unwrap()
@@ -4373,7 +4384,7 @@ fn per_partition_pending_is_absent_when_detail_is_off() {
         batches_seen: 0,
     });
     assign_one_lane(&h, std::slice::from_ref(&(0..10)));
-    wait_for("payloads consumed", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "payloads consumed", || {
         h.chain.consumed.load(Ordering::Relaxed) == 10
     });
 
@@ -4384,11 +4395,7 @@ fn per_partition_pending_is_absent_when_detail_is_off() {
     let rendered = handle.render();
     assert_eq!(
         pending_series(&rendered, &pipeline_name),
-        vec![format!(
-            "{}{{{}}} 0",
-            names::CHECKPOINT_PENDING_BATCHES,
-            checkpoint_labels(&pipeline_name)
-        )],
+        vec![pending_sample(&pipeline_name, None, 0.0)],
         "the aggregate alone:\n{rendered}"
     );
 }
@@ -4518,7 +4525,7 @@ fn start_stopping(
 }
 
 fn joined(h: &Harness) {
-    wait_for("run() to return", Duration::from_secs(10), || {
+    wait_until(Duration::from_secs(10), "run() to return", || {
         h.join.is_finished()
     });
 }
@@ -4580,26 +4587,28 @@ fn a_stop_reads_on_until_the_reserve_then_hands_back() {
     let clock = crate::clock::TestClock::frozen();
     let h = start_stopping(cfg, true, &clock, |_| None, ok_chain);
     assign_one_lane(&h, std::slice::from_ref(&(0..10)));
-    wait_for("payloads consumed", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "payloads consumed", || {
         h.chain.consumed.load(Ordering::Relaxed) == 10
     });
 
     h.shutdown.trigger();
-    wait_for("the read phase", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "the read phase", || {
         h.shared.lock().unwrap().reading_on_stop_calls > 0
     });
     clock.advance(drain_timeout - crate::feed::STOP_RESERVE - Duration::from_millis(1));
     let asked = h.shared.lock().unwrap().reading_on_stop_calls;
-    wait_for("three more passes", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "three more passes", || {
         h.shared.lock().unwrap().reading_on_stop_calls >= asked + 3
     });
     assert_eq!(h.shared.lock().unwrap().stop_reading_calls, 0);
-    let draining = format!(r#"spate_pipeline_state{{pipeline="{pipeline_name}","#);
     let rendered = handle.render();
-    assert!(
-        rendered.lines().any(|l| l.starts_with(&draining)
-            && l.contains(r#"state="draining""#)
-            && l.ends_with(" 1")),
+    assert_eq!(
+        spate_test::metric_value(
+            &rendered,
+            "spate_pipeline_state",
+            &[("pipeline", pipeline_name.as_str()), ("state", "draining")],
+        ),
+        Some(1.0),
         "{rendered}"
     );
 
@@ -4663,18 +4672,18 @@ fn a_batch_blocked_during_the_read_phase_is_not_abandoned() {
         },
     );
     assign_one_lane(&h, std::slice::from_ref(&(0..10)));
-    wait_for(
-        "the blocked batch pauses the lane",
+    wait_until(
         Duration::from_secs(5),
+        "the blocked batch pauses the lane",
         || !h.shared.lock().unwrap().pauses.is_empty(),
     );
     h.shutdown.trigger();
     let asked = h.shared.lock().unwrap().reading_on_stop_calls;
-    wait_for("the read phase", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "the read phase", || {
         h.shared.lock().unwrap().reading_on_stop_calls >= asked + 3
     });
     open.store(true, Ordering::Relaxed);
-    wait_for("the batch is taken", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "the batch is taken", || {
         h.chain.consumed.load(Ordering::Relaxed) == 10
     });
     h.shared.lock().unwrap().read_on_stop = false;
@@ -4763,7 +4772,7 @@ fn the_runtime_closes_its_feed_after_the_final_commit() {
         ok_chain,
     );
     assign_one_lane(&h, std::slice::from_ref(&(0..10)));
-    wait_for("payloads consumed", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "payloads consumed", || {
         h.chain.consumed.load(Ordering::Relaxed) == 10
     });
     h.shutdown.trigger();
@@ -4805,7 +4814,7 @@ fn the_close_gets_the_rest_of_the_deadline() {
         ok_chain,
     );
     h.shutdown.trigger();
-    wait_for("the read phase", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "the read phase", || {
         h.shared.lock().unwrap().reading_on_stop_calls > 0
     });
     clock.advance(drain_timeout - crate::feed::STOP_RESERVE);
@@ -4840,7 +4849,7 @@ fn a_close_that_never_settles_ends_at_the_deadline() {
         ok_chain,
     );
     h.shutdown.trigger();
-    wait_for("the read phase", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "the read phase", || {
         h.shared.lock().unwrap().reading_on_stop_calls > 0
     });
     clock.advance(drain_timeout + Duration::from_secs(1));
@@ -4892,7 +4901,7 @@ fn a_source_that_does_not_read_on_drains_at_once() {
     .with_stop_clock(crate::clock::TestClock::frozen());
     runtime.shutdown_handle().trigger();
     let join = std::thread::spawn(move || runtime.run());
-    wait_for("run() to return", Duration::from_secs(10), || {
+    wait_until(Duration::from_secs(10), "run() to return", || {
         join.is_finished()
     });
     assert_eq!(join.join().unwrap().unwrap().state, ExitState::Completed);
@@ -4921,18 +4930,18 @@ fn a_source_that_failed_to_open_is_not_asked_to_stop_reading() {
 /// waiting on the blocked driver when this returns.
 fn revoke_a_blocked_lane(h: &Harness) {
     assign_one_lane(h, std::slice::from_ref(&(0..10)));
-    wait_for(
-        "the blocked batch pauses the lane",
+    wait_until(
         Duration::from_secs(5),
+        "the blocked batch pauses the lane",
         || !h.shared.lock().unwrap().pauses.is_empty(),
     );
     h.script
         .lock()
         .unwrap()
         .push_back(Script::Revoke(vec![LaneId(0)]));
-    wait_for(
-        "the revocation is delivered",
+    wait_until(
         Duration::from_secs(5),
+        "the revocation is delivered",
         || {
             h.shared
                 .lock()
@@ -4988,9 +4997,9 @@ fn a_revocation_waiting_on_its_drain_lets_the_source_renew() {
         blocked_chain,
     );
     revoke_a_blocked_lane(&h);
-    wait_for(
-        "the source renews during the wait",
+    wait_until(
         Duration::from_secs(5),
+        "the source renews during the wait",
         || h.shared.lock().unwrap().renew_held_calls >= 2,
     );
     h.shutdown.trigger();
@@ -5014,7 +5023,7 @@ fn a_revocation_during_the_read_phase_renews_on_each_pass() {
         blocked_chain,
     );
     h.shutdown.trigger();
-    wait_for("the read phase", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "the read phase", || {
         h.shared.lock().unwrap().reading_on_stop_calls > 0
     });
     revoke_a_blocked_lane(&h);
@@ -5022,7 +5031,7 @@ fn a_revocation_during_the_read_phase_renews_on_each_pass() {
         let log = h.shared.lock().unwrap();
         (log.reading_on_stop_calls, log.renew_held_calls)
     };
-    wait_for("five passes of the wait", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "five passes of the wait", || {
         h.shared.lock().unwrap().reading_on_stop_calls >= asked + 5
     });
     let (passes, renews) = {
@@ -5091,7 +5100,7 @@ fn a_revocation_during_the_read_phase_ends_at_the_reserve() {
         blocked_chain,
     );
     h.shutdown.trigger();
-    wait_for("the read phase", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "the read phase", || {
         h.shared.lock().unwrap().reading_on_stop_calls > 0
     });
     revoke_a_blocked_lane(&h);
@@ -5160,7 +5169,7 @@ fn a_rejected_close_warns_with_its_reason() {
     );
     let feed = kept.lock().unwrap().clone().unwrap();
     h.shutdown.trigger();
-    wait_for("the close", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "the close", || {
         !feed.closes.lock().unwrap().is_empty()
     });
     feed.reject_held_closes(&crate::feed::FeedError::new(
@@ -5205,7 +5214,7 @@ fn a_close_settled_after_it_is_recorded_ends_the_run_completed() {
     );
     let feed = kept.lock().unwrap().clone().unwrap();
     h.shutdown.trigger();
-    wait_for("the close", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "the close", || {
         !feed.closes.lock().unwrap().is_empty()
     });
     feed.settle_held_closes();
@@ -5247,35 +5256,22 @@ fn an_assignment_during_the_read_phase_keeps_the_pipeline_draining() {
     let clock = crate::clock::TestClock::frozen();
     let h = start_stopping(cfg, true, &clock, |_| None, ok_chain);
     h.shutdown.trigger();
-    wait_for("the read phase", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "the read phase", || {
         h.shared.lock().unwrap().reading_on_stop_calls > 0
     });
     assign_one_lane(&h, std::slice::from_ref(&(0..10)));
-    wait_for("payloads consumed", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "payloads consumed", || {
         h.chain.consumed.load(Ordering::Relaxed) == 10
     });
     let state = |name: &str| {
-        let line = format!(r#"pipeline="{pipeline_name}","#);
-        handle
-            .render()
-            .lines()
-            .find(|l| {
-                l.starts_with("spate_pipeline_state{")
-                    && l.contains(&line)
-                    && l.contains(&format!(r#"state="{name}""#))
-            })
-            .map(str::to_owned)
+        spate_test::metric_value(
+            &handle.render(),
+            "spate_pipeline_state",
+            &[("pipeline", pipeline_name.as_str()), ("state", name)],
+        )
     };
-    assert!(
-        state("draining").is_some_and(|l| l.ends_with(" 1")),
-        "{:?}",
-        state("draining")
-    );
-    assert!(
-        state("running").is_some_and(|l| l.ends_with(" 0")),
-        "{:?}",
-        state("running")
-    );
+    assert_eq!(state("draining"), Some(1.0));
+    assert_eq!(state("running"), Some(0.0));
     clock.advance(drain_timeout);
     joined(&h);
     assert_eq!(h.join.join().unwrap().unwrap().state, ExitState::Completed);
@@ -5297,7 +5293,7 @@ fn a_sigterm_stops_the_run() {
     options.handle_signals = true;
     let h = start_with(test_config(1), options, |runtime| runtime, ok_chain);
     assign_one_lane(&h, std::slice::from_ref(&(0..10)));
-    wait_for("payloads consumed", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "payloads consumed", || {
         h.chain.consumed.load(Ordering::Relaxed) == 10
     });
     let pid = std::process::id().to_string();
@@ -5391,7 +5387,7 @@ fn polls_of(h: &Harness, id: u32) -> usize {
 /// Wait for the poll after `lane`'s one batch, which the driver makes only
 /// once it has read the clock for that batch's lull.
 fn through_batch(h: &Harness, lane: u32) {
-    wait_for("the poll after the batch", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "the poll after the batch", || {
         polls_of(h, lane) >= 2
     });
 }
@@ -5414,7 +5410,7 @@ fn wake(h: &Harness, times: usize) -> usize {
             .lock()
             .unwrap()
             .push_back(Script::CommitReady(vec![PartitionId(0)]));
-        wait_for("the thread serves the wake", FINISH_DEADLINE, || {
+        wait_until(FINISH_DEADLINE, "the thread serves the wake", || {
             flushes(h) >= before + i
         });
     }
@@ -5423,7 +5419,7 @@ fn wake(h: &Harness, times: usize) -> usize {
 
 fn shut_down(h: Harness) {
     h.shutdown.trigger();
-    wait_for("the driver exits", FINISH_DEADLINE, || h.join.is_finished());
+    wait_until(FINISH_DEADLINE, "the driver exits", || h.join.is_finished());
     let report = h.join.join().unwrap().unwrap();
     assert_eq!(report.state, ExitState::Completed);
 }
@@ -5435,7 +5431,7 @@ fn shut_down(h: Harness) {
 fn a_thread_whose_lanes_are_all_finished_parks() {
     let h = start_finishing(parked_options(), None, &[0, 1], || ChainMode::Ok);
     assign(&h, &[(0, 1), (1, 1)]);
-    wait_for("both lanes finish", FINISH_DEADLINE, || {
+    wait_until(FINISH_DEADLINE, "both lanes finish", || {
         polls_of(&h, 0) == 2 && polls_of(&h, 1) == 2
     });
     let calls = finished_calls(&h);
@@ -5458,7 +5454,7 @@ fn a_thread_whose_lanes_are_all_finished_parks() {
 fn a_finished_lane_is_skipped_while_its_sibling_flows() {
     let h = start_finishing(parked_options(), None, &[0], || ChainMode::Ok);
     assign(&h, &[(0, 1), (1, 50)]);
-    wait_for("every batch is consumed", FINISH_DEADLINE, || {
+    wait_until(FINISH_DEADLINE, "every batch is consumed", || {
         h.chain.consumed.load(Ordering::Relaxed) == 510
     });
     assert_eq!(polls_of(&h, 0), 2);
@@ -5484,7 +5480,7 @@ fn a_finished_lane_is_skipped_while_its_sibling_flows() {
 fn a_finished_lane_beside_an_empty_one_lets_the_pass_block() {
     let h = start_finishing(test_options(), None, &[0], || ChainMode::Ok);
     assign(&h, &[(0, 0), (1, 0)]);
-    wait_for("the empty lane is polled 20 times", FINISH_DEADLINE, || {
+    wait_until(FINISH_DEADLINE, "the empty lane is polled 20 times", || {
         polls_of(&h, 1) >= 20
     });
     assert_eq!(polls_of(&h, 0), 1);
@@ -5518,9 +5514,9 @@ fn a_finished_lane_beside_a_gated_one_parks() {
         }
     });
     assign(&h, &[(0, 6), (1, 0)]);
-    wait_for(
-        "the gate closes and the empty lane finishes",
+    wait_until(
         FINISH_DEADLINE,
+        "the gate closes and the empty lane finishes",
         || held.lock().unwrap().len() == 3 && polls_of(&h, 1) == 1,
     );
     let calls = finished_calls(&h);
@@ -5536,7 +5532,7 @@ fn a_finished_lane_beside_a_gated_one_parks() {
     release.store(true, Ordering::Relaxed);
     held.lock().unwrap().clear();
     wake(&h, 1);
-    wait_for("the gated lane drains", FINISH_DEADLINE, || {
+    wait_until(FINISH_DEADLINE, "the gated lane drains", || {
         h.chain.consumed.load(Ordering::Relaxed) == 60
     });
     shut_down(h);
@@ -5555,7 +5551,7 @@ fn a_finished_thread_still_flushes_its_tail_when_idle() {
         }
     });
     assign(&h, &[(0, 1)]);
-    wait_for("the tail is flushed", FINISH_DEADLINE, || {
+    wait_until(FINISH_DEADLINE, "the tail is flushed", || {
         polls_of(&h, 0) == 2 && held.lock().unwrap().is_empty() && flushes(&h) >= 1
     });
     assert_eq!(polls_of(&h, 0), 2);
@@ -5567,7 +5563,7 @@ fn a_finished_thread_still_flushes_its_tail_when_idle() {
 fn a_finished_thread_takes_a_new_lane() {
     let h = start_finishing(parked_options(), None, &[0], || ChainMode::Ok);
     assign(&h, &[(0, 1)]);
-    wait_for("the lane finishes", FINISH_DEADLINE, || {
+    wait_until(FINISH_DEADLINE, "the lane finishes", || {
         polls_of(&h, 0) >= 2
     });
     h.script
@@ -5578,7 +5574,7 @@ fn a_finished_thread_takes_a_new_lane() {
             partition: PartitionId(1),
             batches: tens(1),
         }]));
-    wait_for("the new lane is read", FINISH_DEADLINE, || {
+    wait_until(FINISH_DEADLINE, "the new lane is read", || {
         h.chain.consumed.load(Ordering::Relaxed) == 20
     });
     shut_down(h);
@@ -5590,14 +5586,14 @@ fn a_finished_thread_takes_a_new_lane() {
 fn a_finished_thread_stops_a_revoked_lane() {
     let h = start_finishing(parked_options(), None, &[0], || ChainMode::Ok);
     assign(&h, &[(0, 1)]);
-    wait_for("the lane finishes", FINISH_DEADLINE, || {
+    wait_until(FINISH_DEADLINE, "the lane finishes", || {
         polls_of(&h, 0) >= 2
     });
     h.script
         .lock()
         .unwrap()
         .push_back(Script::Revoke(vec![LaneId(0)]));
-    wait_for("the revocation commits", FINISH_DEADLINE, || {
+    wait_until(FINISH_DEADLINE, "the revocation commits", || {
         logged(&h, "revoke-delivered")
             && h.shared.lock().unwrap().committed.get(&PartitionId(0)) == Some(&10)
     });
@@ -5610,18 +5606,18 @@ fn a_finished_thread_drops_a_retired_lane() {
     let h = start_finishing(parked_options(), None, &[0], || ChainMode::Ok);
     h.shared.lock().unwrap().log_lane_drops = true;
     assign(&h, &[(0, 1)]);
-    wait_for("the lane finishes", FINISH_DEADLINE, || {
+    wait_until(FINISH_DEADLINE, "the lane finishes", || {
         polls_of(&h, 0) >= 2
     });
     wake(&h, 1);
-    wait_for("partition 0 commits", FINISH_DEADLINE, || {
+    wait_until(FINISH_DEADLINE, "partition 0 commits", || {
         h.shared.lock().unwrap().committed.get(&PartitionId(0)) == Some(&10)
     });
     h.script
         .lock()
         .unwrap()
         .push_back(Script::Retire(vec![LaneId(0)]));
-    wait_for("the lane is dropped", FINISH_DEADLINE, || {
+    wait_until(FINISH_DEADLINE, "the lane is dropped", || {
         logged(&h, "lane-dropped")
     });
     shut_down(h);
@@ -5646,7 +5642,7 @@ fn a_retire_between_skips_does_not_park_a_flowing_thread() {
     // thread holds the lanes in the order 0, 1, 2.
     assign(&h, &[(0, 1)]);
     for (id, count) in [(1, 1), (2, 200)] {
-        wait_for("the previous lane is read", FINISH_DEADLINE, || {
+        wait_until(FINISH_DEADLINE, "the previous lane is read", || {
             polls_of(&h, id - 1) >= 1
         });
         h.script
@@ -5666,17 +5662,17 @@ fn a_retire_between_skips_does_not_park_a_flowing_thread() {
         .lock()
         .unwrap()
         .push_back(Script::Retire(vec![LaneId(0)]));
-    wait_for("the retire is delivered", FINISH_DEADLINE, || {
+    wait_until(FINISH_DEADLINE, "the retire is delivered", || {
         logged(&h, "retire-delivered")
     });
     // A `poll_events` call after the delivering one means the retire's
     // `DropLanes` is on the control channel.
     let calls = h.shared.lock().unwrap().poll_timeouts.len();
-    wait_for("the retire is sent to the thread", FINISH_DEADLINE, || {
+    wait_until(FINISH_DEADLINE, "the retire is sent to the thread", || {
         h.shared.lock().unwrap().poll_timeouts.len() > calls
     });
     go_tx.send(()).unwrap();
-    wait_for("lane 2 is read to its end", FINISH_DEADLINE, || {
+    wait_until(FINISH_DEADLINE, "lane 2 is read to its end", || {
         h.chain.consumed.load(Ordering::Relaxed) == 2020
     });
     shut_down(h);
@@ -5688,7 +5684,7 @@ fn a_retire_between_skips_does_not_park_a_flowing_thread() {
 fn a_lane_added_after_a_wake_is_read() {
     let h = start_finishing(parked_options(), None, &[0, 1], || ChainMode::Ok);
     assign(&h, &[(0, 1), (1, 1)]);
-    wait_for("both lanes finish", FINISH_DEADLINE, || {
+    wait_until(FINISH_DEADLINE, "both lanes finish", || {
         polls_of(&h, 0) == 2 && polls_of(&h, 1) == 2
     });
     wake(&h, 1);
@@ -5700,7 +5696,7 @@ fn a_lane_added_after_a_wake_is_read() {
             partition: PartitionId(2),
             batches: tens(1),
         }]));
-    wait_for("the new lane is read", FINISH_DEADLINE, || {
+    wait_until(FINISH_DEADLINE, "the new lane is read", || {
         h.chain.consumed.load(Ordering::Relaxed) == 30
     });
     shut_down(h);
@@ -5743,7 +5739,7 @@ fn the_commit_tick_fires_at_the_interval_on_the_injected_clock() {
     cfg.checkpoint.interval = Duration::from_secs(600);
     let h = start_on_clock_with(cfg, no_idle_flush(), &clock, |runtime| runtime, ok_chain);
     assign_one_lane(&h, std::slice::from_ref(&(0..10)));
-    wait_for("the batch consumed", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "the batch consumed", || {
         h.chain.consumed.load(Ordering::Relaxed) == 10
     });
     let flushed = flushes(&h);
@@ -5754,10 +5750,10 @@ fn the_commit_tick_fires_at_the_interval_on_the_injected_clock() {
     assert!(h.shared.lock().unwrap().committed.is_empty());
 
     clock.advance(Duration::from_millis(1));
-    wait_for("the tick commits", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "the tick commits", || {
         h.shared.lock().unwrap().committed.get(&PartitionId(0)) == Some(&10)
     });
-    wait_for("the tick's FlushNow", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "the tick's FlushNow", || {
         flushes(&h) > flushed
     });
     h.shutdown.trigger();
@@ -5803,7 +5799,7 @@ fn hint(h: &Harness, partition: PartitionId) {
         .lock()
         .unwrap()
         .push_back(Script::CommitReady(vec![partition]));
-    wait_for("a poll after the hint", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "a poll after the hint", || {
         let log = h.shared.lock().unwrap();
         log.hinted_at != before
             && log
@@ -5831,7 +5827,7 @@ fn assert_chase_closes_after(
     let clock = crate::clock::TestClock::frozen();
     let h = start_holding_acks(cfg, &clock, customize);
     assign_one_lane(&h, std::slice::from_ref(&(0..10)));
-    wait_for("the batch consumed", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "the batch consumed", || {
         h.chain.consumed.load(Ordering::Relaxed) == 10
     });
     hint(&h, PartitionId(0));
@@ -5877,7 +5873,7 @@ fn a_repeated_hint_does_not_extend_a_chase() {
     cfg.checkpoint.interval = Duration::from_secs(3600);
     let h = start_holding_acks(cfg, &clock, |runtime| runtime.with_chase_window(window));
     assign_one_lane(&h, std::slice::from_ref(&(0..10)));
-    wait_for("the batch consumed", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "the batch consumed", || {
         h.chain.consumed.load(Ordering::Relaxed) == 10
     });
     hint(&h, PartitionId(0));
@@ -5912,7 +5908,7 @@ fn a_later_hint_gets_a_window_of_its_own() {
             batches: batches(std::slice::from_ref(&(0..10))),
         },
     ]));
-    wait_for("the batches consumed", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "the batches consumed", || {
         h.chain.consumed.load(Ordering::Relaxed) == 20
     });
     hint(&h, PartitionId(0));
@@ -5948,11 +5944,11 @@ fn a_failed_post_window_commit_is_retried_on_the_tick() {
     );
     h.shared.lock().unwrap().fail_commits = true;
     assign_one_lane(&h, std::slice::from_ref(&(0..10)));
-    wait_for("the batch consumed", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "the batch consumed", || {
         h.chain.consumed.load(Ordering::Relaxed) == 10
     });
     hint(&h, PartitionId(0));
-    wait_for("a failed commit", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "a failed commit", || {
         logged(&h, "commit-failed")
     });
 
@@ -5961,7 +5957,7 @@ fn a_failed_post_window_commit_is_retried_on_the_tick() {
     assert!(h.shared.lock().unwrap().committed.is_empty());
 
     clock.advance(interval);
-    wait_for("the tick retries", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "the tick retries", || {
         h.shared.lock().unwrap().committed.get(&PartitionId(0)) == Some(&10)
     });
 
@@ -5999,12 +5995,12 @@ fn a_failed_post_window_commit_waits_while_another_partition_is_chased() {
             batches: batches(&[]),
         },
     ]));
-    wait_for("the batch consumed", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "the batch consumed", || {
         h.chain.consumed.load(Ordering::Relaxed) == 10
     });
     hint(&h, PartitionId(0));
     clock.advance(window);
-    wait_for("a failed commit", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "a failed commit", || {
         logged(&h, "commit-failed")
     });
     passes(&h, 3);
@@ -6029,7 +6025,7 @@ fn a_failed_post_window_commit_waits_while_another_partition_is_chased() {
 
     h.shared.lock().unwrap().fail_commits = false;
     clock.advance(interval - window);
-    wait_for("the tick retries", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "the tick retries", || {
         h.shared.lock().unwrap().committed.get(&PartitionId(0)) == Some(&10)
     });
 
@@ -6077,7 +6073,7 @@ fn a_post_window_advance_commits_while_another_partition_is_chased() {
             batches: batches(&[]),
         },
     ]));
-    wait_for("the batches held", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "the batches held", || {
         held.lock().unwrap().len() == 2
     });
     hint(&h, PartitionId(0));
@@ -6086,13 +6082,13 @@ fn a_post_window_advance_commits_while_another_partition_is_chased() {
     hint(&h, PartitionId(1));
 
     held.lock().unwrap().remove(0);
-    wait_for("a failed commit", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "a failed commit", || {
         logged(&h, "commit-failed")
     });
 
     h.shared.lock().unwrap().fail_commits = false;
     held.lock().unwrap().clear();
-    wait_for("the advance commits", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "the advance commits", || {
         h.shared.lock().unwrap().committed.get(&PartitionId(0)) == Some(&20)
     });
 
@@ -6128,14 +6124,14 @@ fn a_revoked_partitions_failed_commit_waits_while_another_is_chased() {
             batches: batches(std::slice::from_ref(&(0..5))),
         },
     ]));
-    wait_for("the batches consumed", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "the batches consumed", || {
         h.chain.consumed.load(Ordering::Relaxed) == 15
     });
     hint(&h, PartitionId(0));
     clock.advance(window);
     passes(&h, 3);
     hint(&h, PartitionId(1));
-    wait_for("a failed commit", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "a failed commit", || {
         logged(&h, "commit-failed")
     });
 
@@ -6144,7 +6140,7 @@ fn a_revoked_partitions_failed_commit_waits_while_another_is_chased() {
         .lock()
         .unwrap()
         .push_back(Script::Revoke(vec![LaneId(0)]));
-    wait_for("the revocation", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "the revocation", || {
         h.shared.lock().unwrap().flush_commits > flushed
     });
     // The pass handling the revocation finishes before the next poll, and it is
@@ -6152,7 +6148,7 @@ fn a_revoked_partitions_failed_commit_waits_while_another_is_chased() {
     passes(&h, 2);
     h.shared.lock().unwrap().fail_commits = false;
 
-    wait_for("the chase commits", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "the chase commits", || {
         h.shared.lock().unwrap().committed.get(&PartitionId(1)) == Some(&5)
     });
     assert!(
@@ -6190,7 +6186,7 @@ fn a_stuck_watermark_turns_liveness_on_the_injected_clock() {
         },
     );
     assign_one_lane(&h, &[0..10, 10..20, 20..30]);
-    wait_for("every batch consumed", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "every batch consumed", || {
         h.chain.consumed.load(Ordering::Relaxed) == 30
     });
     passes(&h, 3);
@@ -6199,7 +6195,7 @@ fn a_stuck_watermark_turns_liveness_on_the_injected_clock() {
         // A lane poll after the advance beats the driver's heart on the
         // moved clock, so only the watermark decides the answer.
         let polled = polls_of(&h, 0);
-        wait_for("a lane poll", Duration::from_secs(5), || {
+        wait_until(Duration::from_secs(5), "a lane poll", || {
             polls_of(&h, 0) > polled
         });
         http_status(addr, "/healthz")
@@ -6252,16 +6248,16 @@ fn a_blocked_revocation_flush_ends_at_its_deadline_on_the_stop_clock() {
         blocked_flush_chain,
     );
     assign_one_lane(&h, std::slice::from_ref(&(0..10)));
-    wait_for("the batch consumed", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "the batch consumed", || {
         h.chain.consumed.load(Ordering::Relaxed) == 10
     });
     h.script
         .lock()
         .unwrap()
         .push_back(Script::Revoke(vec![LaneId(0)]));
-    wait_for(
-        "the revocation flush running",
+    wait_until(
         Duration::from_secs(5),
+        "the revocation flush running",
         || {
             h.shared
                 .lock()
@@ -6275,13 +6271,13 @@ fn a_blocked_revocation_flush_ends_at_its_deadline_on_the_stop_clock() {
 
     clock.advance(drain - Duration::from_millis(1));
     let flushed = flushes(&h);
-    wait_for("the flush still retrying", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "the flush still retrying", || {
         flushes(&h) >= flushed + 3
     });
     assert!(!committed_after_revoke(&h), "the revocation ended early");
 
     clock.advance(Duration::from_millis(1));
-    wait_for("the revocation completes", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "the revocation completes", || {
         committed_after_revoke(&h)
     });
     assert!(
@@ -6290,7 +6286,7 @@ fn a_blocked_revocation_flush_ends_at_its_deadline_on_the_stop_clock() {
     );
     h.shutdown.trigger();
     // The stop's flush blocks too, until its own deadline on the same clock.
-    wait_for("run() to return", Duration::from_secs(10), || {
+    wait_until(Duration::from_secs(10), "run() to return", || {
         clock.advance(drain);
         h.join.is_finished()
     });
@@ -6313,12 +6309,12 @@ fn a_blocked_flush_ends_at_the_lanes_deadline_on_the_stop_clock() {
         blocked_flush_chain,
     );
     assign_one_lane(&h, std::slice::from_ref(&(0..10)));
-    wait_for("the batch consumed", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "the batch consumed", || {
         h.chain.consumed.load(Ordering::Relaxed) == 10
     });
     let flushed = flushes(&h);
     h.shutdown.trigger();
-    wait_for("the drain's flush retrying", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "the drain's flush retrying", || {
         flushes(&h) >= flushed + 3
     });
     clock.advance(drain);
@@ -6342,7 +6338,7 @@ fn idle_flush_fires_once_at_its_lull_on_the_injected_clock() {
     through_batch(&h, 0);
     let lane_polls = |n: usize| {
         let target = polls_of(&h, 0) + n;
-        wait_for("lane polls", Duration::from_secs(5), || {
+        wait_until(Duration::from_secs(5), "lane polls", || {
             polls_of(&h, 0) >= target
         });
     };
@@ -6352,7 +6348,7 @@ fn idle_flush_fires_once_at_its_lull_on_the_injected_clock() {
     assert_eq!(flushes(&h), 0, "the idle flush fired early");
 
     clock.advance(Duration::from_millis(1));
-    wait_for("the idle flush", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "the idle flush", || {
         flushes(&h) == 1
     });
 
@@ -6381,7 +6377,7 @@ fn a_startup_error_ends_a_blocked_flush_at_the_grace_on_the_stop_clock() {
         move |runtime, _| runtime.with_stop_clock(stop_clock),
         blocked_flush_chain,
     );
-    wait_for("the stop's flush retrying", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "the stop's flush retrying", || {
         flushes(&h) >= 3
     });
     assert!(!h.join.is_finished(), "the flush ended before the grace");
@@ -6442,7 +6438,7 @@ fn the_lull_ends_on_time_beside(sibling: Vec<(i64, Vec<u8>)>) -> bool {
     through_batch(&h, 1);
     clock.advance(Duration::from_millis(1));
     let seen = polls_of(&h, 1);
-    wait_for("the next pass", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "the next pass", || {
         polls_of(&h, 1) >= seen + 2
     });
     let flushed = flushes(&h) > before;
@@ -6472,12 +6468,12 @@ fn a_finished_thread_flushes_at_its_lull_on_the_injected_clock() {
     let lull = Duration::from_secs(600);
     let h = start_idle_on_clock(&clock, lull, &[0]);
     assign(&h, &[(0, 1)]);
-    wait_for("the lane finishes", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "the lane finishes", || {
         polls_of(&h, 0) == 2
     });
     let flushed = flushes(&h);
     clock.advance(lull);
-    wait_for("the idle flush", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "the idle flush", || {
         flushes(&h) > flushed
     });
     h.shutdown.trigger();
@@ -6492,7 +6488,7 @@ fn a_thread_with_no_lanes_flushes_at_its_lull_on_the_injected_clock() {
     let lull = Duration::from_secs(600);
     let h = start_idle_on_clock(&clock, lull, &[]);
     assign_one_lane(&h, std::slice::from_ref(&(0..10)));
-    wait_for("the batch consumed", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "the batch consumed", || {
         h.chain.consumed.load(Ordering::Relaxed) == 10
     });
     h.script
@@ -6500,12 +6496,12 @@ fn a_thread_with_no_lanes_flushes_at_its_lull_on_the_injected_clock() {
         .unwrap()
         .push_back(Script::Revoke(vec![LaneId(0)]));
     // The commit after the revocation follows the drain's own flush.
-    wait_for("the revocation commits", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "the revocation commits", || {
         committed_after_revoke(&h)
     });
     let flushed = flushes(&h);
     clock.advance(lull);
-    wait_for("the idle flush", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "the idle flush", || {
         flushes(&h) > flushed
     });
     h.shutdown.trigger();

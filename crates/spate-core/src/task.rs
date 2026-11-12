@@ -330,18 +330,17 @@ mod tests {
 
     /// The `ERROR` lines logged while `f` runs, without time or target.
     fn error_lines<R>(f: impl FnOnce() -> R) -> (R, Vec<String>) {
-        let buf = crate::telemetry::LogBuf::default();
-        let writer = buf.clone();
+        let capture = spate_test::LogCapture::new();
         let subscriber = tracing_subscriber::fmt()
-            .with_writer(move || writer.clone())
+            .with_writer(capture.clone())
             .with_ansi(false)
             .without_time()
             .with_target(false)
             .finish();
         let out = tracing::subscriber::with_default(subscriber, f);
-        let text = buf.text();
-        let lines = text
+        let lines = capture
             .lines()
+            .iter()
             .filter(|l| l.trim_start().starts_with("ERROR"))
             .map(|l| l.trim().to_owned())
             .collect();

@@ -50,6 +50,14 @@ spate-test-support = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "test-util"] }
 
+# spate-test depends on this crate, so the edge has no version: packaging strips
+# it, and a versioned one would close a cycle no publish order satisfies. Off
+# under loom, which compiles out the modules spate-test imports. Unit tests in
+# `src/` link a second copy of this crate through it, so they use only items
+# that neither name nor call a `spate_core` item.
+[target.'cfg(not(loom))'.dev-dependencies]
+spate-test = { path = "../spate-test" }
+
 # The library swaps to loom atomics under `--cfg loom`; a dev-dependency does
 # not reach the library build.
 [target.'cfg(loom)'.dependencies]

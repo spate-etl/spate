@@ -19,7 +19,7 @@ use serde_json::Value;
 use spate_core::checkpoint::AckRef;
 use spate_core::deser::{Deserializer, EmitRecord, Owned};
 use spate_core::error::DeserError;
-use spate_core::record::{RawPayload, Record};
+use spate_core::record::{RawPayload, Record, RecordMeta};
 use spate_core::telemetry::RateLimit;
 use std::marker::PhantomData;
 
@@ -76,26 +76,30 @@ impl DecoderCore {
     where
         P: DeserializeOwned,
     {
+        if is_blank(raw.bytes) {
+            return Ok(()); // tombstone
+        }
+        // Every record from one payload shares its metadata, and computing it
+        // hashes the whole key.
+        let meta = raw.meta();
         match self.framing {
-            JsonFraming::Single => self.run_single(raw, ack, out),
-            JsonFraming::Ndjson => self.run_ndjson(raw, ack, out),
-            JsonFraming::Array => self.run_array(raw, ack, out),
+            JsonFraming::Single => self.run_single(raw.bytes, meta, ack, out),
+            JsonFraming::Ndjson => self.run_ndjson(raw.bytes, meta, ack, out),
+            JsonFraming::Array => self.run_array(raw.bytes, meta, ack, out),
         }
     }
 
     fn run_single<'buf, P: DeserializeOwned>(
         &self,
-        raw: &RawPayload<'buf>,
+        bytes: &'buf [u8],
+        meta: RecordMeta,
         ack: &AckRef,
         out: &mut dyn EmitRecord<'buf, P>,
     ) -> Result<(), DeserError> {
-        if is_blank(raw.bytes) {
-            return Ok(()); // tombstone
-        }
-        if let Some(payload) = self.decode_item::<P>(raw.bytes)? {
+        if let Some(payload) = self.decode_item::<P>(bytes)? {
             let _ = out.emit(Record {
                 payload,
-                meta: raw.meta(),
+                meta,
                 ack: ack.clone(),
             });
         }
@@ -104,7 +108,8 @@ impl DecoderCore {
 
     fn run_ndjson<'buf, P: DeserializeOwned>(
         &self,
-        raw: &RawPayload<'buf>,
+        bytes: &'buf [u8],
+        meta: RecordMeta,
         ack: &AckRef,
         out: &mut dyn EmitRecord<'buf, P>,
     ) -> Result<(), DeserError> {
@@ -114,11 +119,11 @@ impl DecoderCore {
             // Skip streams line by line: a malformed line is dropped on its own
             // and the good lines around it still flow.
             OnError::Skip => {
-                for line in ndjson_lines(raw.bytes) {
+                for line in ndjson_lines(bytes) {
                     if let Some(payload) = self.decode_item::<P>(line)? {
                         let _ = out.emit(Record {
                             payload,
-                            meta: raw.meta(),
+                            meta,
                             ack: ack.clone(),
                         });
                     }
@@ -132,7 +137,7 @@ impl DecoderCore {
             // un-emitted tail, silently losing the records after the bad line.
             OnError::Fail => {
                 let mut decoded = Vec::new();
-                for line in ndjson_lines(raw.bytes) {
+                for line in ndjson_lines(bytes) {
                     if let Some(payload) = self.decode_item::<P>(line)? {
                         decoded.push(payload);
                     }
@@ -140,7 +145,7 @@ impl DecoderCore {
                 for payload in decoded {
                     let _ = out.emit(Record {
                         payload,
-                        meta: raw.meta(),
+                        meta,
                         ack: ack.clone(),
                     });
                 }
@@ -151,27 +156,25 @@ impl DecoderCore {
 
     fn run_array<'buf, P: DeserializeOwned>(
         &self,
-        raw: &RawPayload<'buf>,
+        bytes: &'buf [u8],
+        meta: RecordMeta,
         ack: &AckRef,
         out: &mut dyn EmitRecord<'buf, P>,
     ) -> Result<(), DeserError> {
-        if is_blank(raw.bytes) {
-            return Ok(());
-        }
         // The array is decoded in one pass, so its error handling is atomic:
         // a malformed element fails the whole payload (per `on_error`). Use
         // `ndjson` when you need per-record isolation.
         if self.reject_duplicate_keys
-            && let Err(e) = backend::check_no_duplicate_keys(raw.bytes)
+            && let Err(e) = backend::check_no_duplicate_keys(bytes)
         {
             return self.on_item_error(&e, dup_check_reason(&e));
         }
-        match backend::decode_one::<Vec<P>>(raw.bytes) {
+        match backend::decode_one::<Vec<P>>(bytes) {
             Ok(items) => {
                 for payload in items {
                     let _ = out.emit(Record {
                         payload,
-                        meta: raw.meta(),
+                        meta,
                         ack: ack.clone(),
                     });
                 }
@@ -325,7 +328,7 @@ mod tests {
     use crate::framing::tests::arb_stream;
     use proptest::prelude::*;
     use serde::Deserialize;
-    use spate_core::record::Flow;
+    use spate_core::record::{Flow, PartitionId, stable_key_hash};
     use spate_test::render_metrics;
 
     #[derive(Debug, Deserialize, PartialEq)]
@@ -410,6 +413,94 @@ mod tests {
         d.deserialize(&raw(b"  \n  "), &test_ack(), &mut out)
             .unwrap();
         assert!(out.0.is_empty());
+    }
+
+    #[test]
+    fn every_record_carries_the_payload_meta() {
+        let key: &[u8] = b"user-7";
+        let cases: [(JsonFraming, OnError, &[u8], usize); 4] = [
+            (
+                JsonFraming::Single,
+                OnError::Skip,
+                br#"{"id":1,"name":"a"}"#,
+                1,
+            ),
+            (
+                JsonFraming::Ndjson,
+                OnError::Skip,
+                b"{\"id\":1,\"name\":\"a\"}\n{\"id\":2,\"name\":\"b\"}",
+                2,
+            ),
+            (
+                JsonFraming::Ndjson,
+                OnError::Fail,
+                b"{\"id\":1,\"name\":\"a\"}\n{\"id\":2,\"name\":\"b\"}",
+                2,
+            ),
+            (
+                JsonFraming::Array,
+                OnError::Skip,
+                br#"[{"id":1,"name":"a"},{"id":2,"name":"b"}]"#,
+                2,
+            ),
+        ];
+        for (framing, on_error, bytes, records) in cases {
+            let payload = RawPayload {
+                bytes,
+                key: Some(key),
+                partition: PartitionId(3),
+                offset: 42,
+                timestamp_ms: 1_700_000_000_000,
+            };
+            let mut d = builder(framing, on_error, false).build_serde::<Ev>();
+            let mut out = Collected(Vec::new());
+            d.deserialize(&payload, &test_ack(), &mut out).unwrap();
+            assert_eq!(out.0.len(), records, "{framing:?} {on_error:?}");
+            for rec in &out.0 {
+                assert_eq!(rec.meta.partition, PartitionId(3), "{framing:?}");
+                assert_eq!(rec.meta.offset, 42, "{framing:?}");
+                assert_eq!(rec.meta.event_time_ms, 1_700_000_000_000, "{framing:?}");
+                assert_eq!(
+                    rec.meta.key_hash,
+                    Some(stable_key_hash(key)),
+                    "{framing:?} {on_error:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_blank_payload_emits_and_counts_nothing_under_any_framing() {
+        const PIPELINE: &str = "blank-payloads";
+        let rendered = render_metrics(|| {
+            for framing in [JsonFraming::Single, JsonFraming::Ndjson, JsonFraming::Array] {
+                for on_error in [OnError::Skip, OnError::Fail] {
+                    let mut d = builder(framing, on_error, false)
+                        .with_metrics(PIPELINE, "main")
+                        .build_value();
+                    for bytes in [&b""[..], b"  \n  "] {
+                        let payload = RawPayload {
+                            key: Some(b"user-7"),
+                            ..raw(bytes)
+                        };
+                        let mut out = Collected(Vec::new());
+                        d.deserialize(&payload, &test_ack(), &mut out)
+                            .unwrap_or_else(|e| panic!("{framing:?} {on_error:?}: {e}"));
+                        assert!(out.0.is_empty(), "{framing:?} {on_error:?}");
+                    }
+                }
+            }
+        });
+        let dropped: Vec<&str> = rendered
+            .lines()
+            .filter(|l| l.contains("spate_json_deser_records_dropped_total"))
+            .filter(|l| l.contains(PIPELINE))
+            .filter(|l| !l.ends_with(" 0"))
+            .collect();
+        assert!(
+            dropped.is_empty(),
+            "a blank payload was counted: {dropped:?}"
+        );
     }
 
     #[test]

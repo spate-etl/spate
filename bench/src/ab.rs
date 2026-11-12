@@ -635,6 +635,43 @@ fn check_interrupt() -> Result<(), String> {
     Ok(())
 }
 
+/// Appends records to one leg's JSONL file.
+#[derive(Debug)]
+struct Writer {
+    path: PathBuf,
+    file: std::fs::File,
+}
+
+impl Writer {
+    fn create(dir: &Path) -> Result<Self, String> {
+        std::fs::create_dir_all(dir)
+            .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+        let path = dir.join("records.jsonl");
+        let file = std::fs::File::create(&path)
+            .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+        Ok(Self { path, file })
+    }
+
+    fn write(&mut self, record: &Record) -> Result<(), String> {
+        // One `write_all` of the line *and* its newline. `writeln!` issues two,
+        // and an interrupt between them leaves a record without its
+        // terminator, which `load_leg` reads as a corrupt leg and refuses
+        // whole, taking every completed replicate with it.
+        let mut line = record.to_line().map_err(|e| e.to_string())?;
+        line.push('\n');
+        self.file
+            .write_all(line.as_bytes())
+            .map_err(|e| format!("cannot write {}: {e}", self.path.display()))
+    }
+
+    /// Flushes, so a reader started immediately afterwards sees every record.
+    fn finish(&mut self) -> Result<(), String> {
+        self.file
+            .flush()
+            .map_err(|e| format!("cannot flush {}: {e}", self.path.display()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{base_first, guard_parity};
@@ -681,42 +718,5 @@ mod tests {
         for even in (2..=20).step_by(2) {
             assert!(guard_parity(even).is_ok(), "at {even}");
         }
-    }
-}
-
-/// Appends records to one leg's JSONL file.
-#[derive(Debug)]
-struct Writer {
-    path: PathBuf,
-    file: std::fs::File,
-}
-
-impl Writer {
-    fn create(dir: &Path) -> Result<Self, String> {
-        std::fs::create_dir_all(dir)
-            .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
-        let path = dir.join("records.jsonl");
-        let file = std::fs::File::create(&path)
-            .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
-        Ok(Self { path, file })
-    }
-
-    fn write(&mut self, record: &Record) -> Result<(), String> {
-        // One `write_all` of the line *and* its newline. `writeln!` issues two,
-        // and an interrupt between them leaves a record without its
-        // terminator, which `load_leg` reads as a corrupt leg and refuses
-        // whole, taking every completed replicate with it.
-        let mut line = record.to_line().map_err(|e| e.to_string())?;
-        line.push('\n');
-        self.file
-            .write_all(line.as_bytes())
-            .map_err(|e| format!("cannot write {}: {e}", self.path.display()))
-    }
-
-    /// Flushes, so a reader started immediately afterwards sees every record.
-    fn finish(&mut self) -> Result<(), String> {
-        self.file
-            .flush()
-            .map_err(|e| format!("cannot flush {}: {e}", self.path.display()))
     }
 }

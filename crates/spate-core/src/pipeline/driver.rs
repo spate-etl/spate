@@ -6,11 +6,13 @@
 //! liveness probe on every iteration, including while paused, while
 //! retrying a blocked batch, and while draining.
 
+use super::runtime::RuntimeOptions;
 use super::{DriverEvent, ThreadControl};
 use crate::admin::HealthState;
-use crate::backpressure::{InflightBudget, Transition, WatermarkController};
+use crate::backpressure::{BackpressureParams, InflightBudget, Transition, WatermarkController};
 use crate::checkpoint::{AckRef, AdvanceCounter};
 use crate::clock::{Clock, Stopwatch, SystemClock};
+use crate::config::{BackpressureSection, CheckpointSection};
 use crate::error::{ErrorClass, FatalError};
 use crate::hash::FastMap;
 use crate::metrics::{BackpressureMetrics, SourceMetrics};
@@ -49,6 +51,38 @@ pub(crate) struct DriverParams {
     /// (`checkpoint.max_pending_batches`). A lane whose partition is at the
     /// ceiling is skipped, not polled, so pending cannot exceed it.
     pub max_pending_batches: usize,
+}
+
+impl DriverParams {
+    /// Tuning for driver thread `thread` from the runtime options and the
+    /// pipeline's backpressure and checkpoint settings.
+    pub(crate) fn new(
+        thread: usize,
+        options: &RuntimeOptions,
+        backpressure: &BackpressureSection,
+        checkpoint: &CheckpointSection,
+    ) -> Self {
+        DriverParams {
+            thread,
+            max_records: options.max_records,
+            poll_timeout: options.poll_timeout,
+            idle_flush: options.idle_flush,
+            blocked_retry: options.blocked_retry,
+            queue_low_ratio: backpressure.low_ratio,
+            max_pending_batches: checkpoint.max_pending_batches,
+        }
+    }
+}
+
+/// The watermark controller's parameters from the pipeline's backpressure
+/// settings. A budget past `usize` saturates.
+pub(crate) fn backpressure_params(section: &BackpressureSection) -> BackpressureParams {
+    BackpressureParams::from_budget(
+        usize::try_from(section.max_inflight_bytes.as_u64()).unwrap_or(usize::MAX),
+        section.high_ratio,
+        section.low_ratio,
+        section.min_pause,
+    )
 }
 
 /// How the driver loop ended.
@@ -714,5 +748,52 @@ fn apply_transition(
                 lanes: owned.to_vec(),
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bytesize::ByteSize;
+
+    /// Each setting reaches the driver field the runtime reads it from. Every
+    /// value differs, so a field read from the wrong setting fails.
+    #[test]
+    fn driver_params_take_each_setting_from_its_own_field() {
+        let options = RuntimeOptions {
+            max_records: 11,
+            poll_timeout: Duration::from_millis(3),
+            idle_flush: Duration::from_millis(5),
+            blocked_retry: Duration::from_millis(7),
+            ..RuntimeOptions::default()
+        };
+        let backpressure = BackpressureSection {
+            max_inflight_bytes: ByteSize::b(1_000),
+            high_ratio: 0.9,
+            low_ratio: 0.3,
+            min_pause: Duration::from_millis(13),
+        };
+        let checkpoint = CheckpointSection {
+            max_pending_batches: 17,
+            ..CheckpointSection::default()
+        };
+
+        let params = DriverParams::new(2, &options, &backpressure, &checkpoint);
+        assert_eq!(params.thread, 2);
+        assert_eq!(params.max_records, 11);
+        assert_eq!(params.poll_timeout, Duration::from_millis(3));
+        assert_eq!(params.idle_flush, Duration::from_millis(5));
+        assert_eq!(params.blocked_retry, Duration::from_millis(7));
+        assert!((params.queue_low_ratio - 0.3).abs() < f64::EPSILON);
+        assert_eq!(params.max_pending_batches, 17);
+
+        assert_eq!(
+            backpressure_params(&backpressure),
+            BackpressureParams {
+                high_bytes: 900,
+                low_bytes: 300,
+                min_pause: Duration::from_millis(13),
+            }
+        );
     }
 }

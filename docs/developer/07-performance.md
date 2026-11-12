@@ -154,7 +154,8 @@ A bump that needed new files is rebased by hand from then on.
 Name the file `benches/<name>_alloc.rs`, declare it as a `[[bench]]` with `harness = false`, and call `spate_test_support::alloc::main_with` from its `main`.
 The command finds it by that name.
 Run each case's work on the thread that calls it, because only that thread's allocations are counted.
-Leave out a case whose pass reads the clock.
+Leave out a case in which a clock read decides whether the pass allocates, such as a pass through a rate-limited warning.
+A case can keep a clock read that only feeds a measurement, such as a poll-duration histogram, because that read cannot move a count.
 
 ## Run the wall-clock tier
 

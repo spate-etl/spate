@@ -32,7 +32,7 @@
 
 mod builder;
 mod controller;
-mod driver;
+pub(crate) mod driver;
 mod runtime;
 
 pub use builder::{BuildError, ChainCtx, Pipeline, PipelineError, SinkOptions};

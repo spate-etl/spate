@@ -1,10 +1,10 @@
 //! Process assembly: threads, runtimes, observability, and the run loop.
 
 use super::controller::{CLOSE_SHARE, ControllerContext, ControllerSignal, run_controller};
-use super::driver::{DriverContext, DriverExit, DriverParams, run_driver};
+use super::driver::{DriverContext, DriverExit, DriverParams, backpressure_params, run_driver};
 use super::{DriverEvent, ExitReport, ExitState, FatalErrorReport, SinkRuntime, ThreadControl};
 use crate::admin::{AdminServer, HealthState, HealthThresholds};
-use crate::backpressure::{BackpressureParams, InflightBudget, WatermarkController};
+use crate::backpressure::{InflightBudget, WatermarkController};
 use crate::checkpoint::Checkpointer;
 use crate::clock::{Clock, SystemClock};
 use crate::config::{MetricsExporter, PinningMode, PipelineConfig};
@@ -580,13 +580,7 @@ impl<S: Source + 'static> PipelineRuntime<S> {
         let mut checkpointer = Checkpointer::new();
         checkpointer.set_clock(Arc::clone(&self.clock));
 
-        let bp_params = BackpressureParams::from_budget(
-            usize::try_from(self.config.backpressure.max_inflight_bytes.as_u64())
-                .unwrap_or(usize::MAX),
-            self.config.backpressure.high_ratio,
-            self.config.backpressure.low_ratio,
-            self.config.backpressure.min_pause,
-        );
+        let bp_params = backpressure_params(&self.config.backpressure);
 
         // Compact pinning: thread i on core i, low cores first, leaving the
         // remaining cores for the I/O runtime and librdkafka's threads.
@@ -619,15 +613,12 @@ impl<S: Source + 'static> PipelineRuntime<S> {
             let (control_tx, control_rx) = crossbeam_channel::unbounded::<ThreadControl<S::Lane>>();
             control_txs.push(control_tx);
             let ctx = DriverContext {
-                params: DriverParams {
-                    thread: i,
-                    max_records: self.options.max_records,
-                    poll_timeout: self.options.poll_timeout,
-                    idle_flush: self.options.idle_flush,
-                    blocked_retry: self.options.blocked_retry,
-                    queue_low_ratio: self.config.backpressure.low_ratio,
-                    max_pending_batches: self.config.checkpoint.max_pending_batches,
-                },
+                params: DriverParams::new(
+                    i,
+                    &self.options,
+                    &self.config.backpressure,
+                    &self.config.checkpoint,
+                ),
                 control: control_rx,
                 events: events_tx.clone(),
                 chain: (self.chains)(i),

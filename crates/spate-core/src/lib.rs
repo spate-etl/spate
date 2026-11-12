@@ -32,6 +32,9 @@ pub use bytes;
 #[cfg(not(loom))]
 pub mod backoff;
 pub mod backpressure;
+#[cfg(all(feature = "testing", not(loom)))]
+#[doc(hidden)]
+pub mod bench_seams;
 pub mod checkpoint;
 pub mod clock;
 // Resolves the reserved `chunk:` block into `ops::ChunkConfig`, so it follows

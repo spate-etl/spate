@@ -45,8 +45,8 @@ macro_rules! simd_features {
 /// The features the decode and decompression paths dispatch on at run time:
 /// `memchr` and `simdutf8` on `avx2`, `simd-json` on `avx2` with `pclmulqdq`
 /// and then `sse4.2`, `simdutf8` on `sse4.2`, `zlib-rs` on `avx2` with `bmi1`
-/// and `bmi2`, and on `pclmulqdq`, `sse4.1`, `avx512f`, `neon` and `crc`, and
-/// libzstd on `bmi1` with `bmi2`. Then the wider AVX-512 and SVE features a
+/// and `bmi2`, and on `pclmulqdq`, `sse4.1`, `neon` and `crc`, and libzstd on
+/// `bmi1` with `bmi2`. Then the wider AVX-512 and SVE features a
 /// later path may take, so a host that hides part of AVX-512 still records it.
 #[doc(hidden)]
 #[cfg(target_arch = "x86_64")]

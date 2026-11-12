@@ -1624,8 +1624,13 @@ fn a_gate_pass_puts_back_the_deliveries_of_each_failed_watermark_read() {
             });
         }
     }
-    let gate = super::gate::Gate::new(Arc::clone(&core), producer, config.delivery_timeout)
-        .with_step(STEP);
+    let gate = super::gate::Gate::new(
+        Arc::clone(&core),
+        producer,
+        attempt::test_lister(&config),
+        config.delivery_timeout,
+    )
+    .with_step(STEP);
     assert!(
         returns_within(HANG, move || gate.pass()),
         "the pass did not return"
@@ -1653,6 +1658,7 @@ fn a_gate_waiting_on_an_unreachable_attempt_partition_lets_the_feed_drop() {
     let gate = super::gate::Gate::new(
         Arc::clone(&feed.core),
         feed.producer.clone(),
+        attempt::test_lister(&unreachable_config("")),
         Duration::from_secs(3600),
     );
     feed.gate = Some(gate.spawn().unwrap());
@@ -1705,8 +1711,13 @@ fn a_delivery_revoked_during_a_pass_is_not_put_back() {
             identity: identity(&core, 0),
         });
     }
-    let gate = super::gate::Gate::new(Arc::clone(&core), producer, config.delivery_timeout)
-        .with_step(Duration::from_secs(1));
+    let gate = super::gate::Gate::new(
+        Arc::clone(&core),
+        producer,
+        attempt::test_lister(&config),
+        config.delivery_timeout,
+    )
+    .with_step(Duration::from_secs(1));
     let pass = std::thread::spawn(move || gate.pass());
     spate_test::wait_until(HANG, "the pass takes the delivery", || {
         core.lock().admitting == 1
@@ -1738,10 +1749,15 @@ fn a_latched_feed_ends_its_gate_thread() {
             FeedProducerHooks::new(Arc::clone(&core)),
         )
         .unwrap();
-    let handle = super::gate::Gate::new(Arc::clone(&core), producer, config.delivery_timeout)
-        .with_step(Duration::from_millis(10))
-        .spawn()
-        .unwrap();
+    let handle = super::gate::Gate::new(
+        Arc::clone(&core),
+        producer,
+        attempt::test_lister(&config),
+        config.delivery_timeout,
+    )
+    .with_step(Duration::from_millis(10))
+    .spawn()
+    .unwrap();
     core.latch("probe");
     let ended = returns_within(HANG, move || handle.join().unwrap());
     super::stop(&core);
@@ -1793,8 +1809,13 @@ fn a_feed_that_ends_during_a_pass_ends_it_before_the_next_read() {
                 });
             }
         }
-        let gate = super::gate::Gate::new(Arc::clone(&core), producer, config.delivery_timeout)
-            .with_step(STEP);
+        let gate = super::gate::Gate::new(
+            Arc::clone(&core),
+            producer,
+            attempt::test_lister(&config),
+            config.delivery_timeout,
+        )
+        .with_step(STEP);
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
             gate.pass();
@@ -1859,6 +1880,7 @@ fn a_unit_at_the_gate_when_the_stop_begins_gets_no_attempt_record() {
     let gate = super::gate::Gate::new(
         Arc::clone(&feed.core),
         feed.producer.clone(),
+        attempt::test_lister(&unreachable_config("")),
         Duration::from_secs(3600),
     )
     .with_step(Duration::from_millis(10));
@@ -1908,6 +1930,7 @@ fn a_gate_pass_with_nothing_to_take_waits_a_step() {
         let gate = super::gate::Gate::new(
             Arc::clone(&feed.core),
             feed.producer.clone(),
+            attempt::test_lister(&unreachable_config("")),
             Duration::from_secs(3600),
         )
         .with_step(Duration::from_secs(3600));
@@ -2237,10 +2260,15 @@ mod cluster {
             .unwrap()
             .spawn()
             .unwrap();
-        let gate = Gate::new(Arc::clone(core), producer.clone(), config.delivery_timeout)
-            .with_step(step)
-            .spawn()
-            .unwrap();
+        let gate = Gate::new(
+            Arc::clone(core),
+            producer.clone(),
+            attempt::test_lister(config),
+            config.delivery_timeout,
+        )
+        .with_step(step)
+        .spawn()
+        .unwrap();
         Admission {
             core: Arc::clone(core),
             threads: vec![follower, gate],
@@ -2935,10 +2963,15 @@ mod cluster {
             .unwrap()
             .spawn()
             .unwrap();
-        let gate = Gate::new(Arc::clone(&core), producer.clone(), config.delivery_timeout)
-            .with_step(Duration::from_secs(3600))
-            .spawn()
-            .unwrap();
+        let gate = Gate::new(
+            Arc::clone(&core),
+            producer.clone(),
+            attempt::test_lister(&config),
+            config.delivery_timeout,
+        )
+        .with_step(Duration::from_secs(3600))
+        .spawn()
+        .unwrap();
         let feed = KafkaFeed {
             core,
             producer,
@@ -3016,9 +3049,14 @@ mod cluster {
             .fetch_metadata(Some(ATTEMPTS), Duration::from_secs(10))
             .unwrap();
         let bound = Duration::from_secs(3600);
-        let gate = Gate::new(Arc::clone(&core), Producer::clone(&producer), bound)
-            .with_step(STEP)
-            .with_request_bound(HANG);
+        let gate = Gate::new(
+            Arc::clone(&core),
+            Producer::clone(&producer),
+            attempt::test_lister(&config),
+            bound,
+        )
+        .with_step(STEP)
+        .with_request_bound(HANG);
         let (ended, end) = mpsc::channel();
         std::thread::spawn(move || {
             gate.pass();
@@ -3086,9 +3124,14 @@ mod cluster {
             .client()
             .fetch_metadata(Some(ATTEMPTS), Duration::from_secs(10))
             .unwrap();
-        let gate = Gate::new(Arc::clone(&core), producer, Duration::from_secs(3600))
-            .with_step(STEP * 100)
-            .with_request_bound(HANG);
+        let gate = Gate::new(
+            Arc::clone(&core),
+            producer,
+            attempt::test_lister(&config),
+            Duration::from_secs(3600),
+        )
+        .with_step(STEP * 100)
+        .with_request_bound(HANG);
         gate.pass();
         let reason = core
             .lock()
@@ -3162,9 +3205,14 @@ mod cluster {
         let mut errors = vec![RDKafkaRespErr::RD_KAFKA_RESP_ERR_NO_ERROR; 2];
         errors.extend([RDKafkaRespErr::RD_KAFKA_RESP_ERR_TOPIC_AUTHORIZATION_FAILED; 50]);
         cluster.request_errors(RDKafkaApiKey::ListOffsets, &errors);
-        let gate = Gate::new(Arc::clone(&core), producer, Duration::from_secs(3600))
-            .with_step(STEP * 100)
-            .with_request_bound(HANG);
+        let gate = Gate::new(
+            Arc::clone(&core),
+            producer,
+            attempt::test_lister(&config),
+            Duration::from_secs(3600),
+        )
+        .with_step(STEP * 100)
+        .with_request_bound(HANG);
         gate.pass();
         let st = core.lock();
         let reason = &st.signal.latched().expect("the feed stopped").reason;
@@ -3221,8 +3269,13 @@ mod cluster {
                 });
             }
         }
-        let gate = Gate::new(Arc::clone(&core), producer, Duration::from_secs(3600))
-            .with_step(Duration::from_millis(500));
+        let gate = Gate::new(
+            Arc::clone(&core),
+            producer,
+            attempt::test_lister(&config),
+            Duration::from_secs(3600),
+        )
+        .with_step(Duration::from_millis(500));
         // Each wait runs a pass, as the gate thread would.
         wait_until(HANG, "the unit on partition 0 is buffered", || {
             gate.pass();
@@ -3273,8 +3326,13 @@ mod cluster {
                 identity: super::identity(&core, offset),
             });
         }
-        let gate = Gate::new(Arc::clone(&core), producer, Duration::from_secs(3600))
-            .with_step(Duration::from_secs(3600));
+        let gate = Gate::new(
+            Arc::clone(&core),
+            producer,
+            attempt::test_lister(&config),
+            Duration::from_secs(3600),
+        )
+        .with_step(Duration::from_secs(3600));
         assert!(
             returns_within(HANG, move || gate.pass()),
             "a pass that read every watermark waited a step"
@@ -3335,9 +3393,14 @@ mod cluster {
             .fetch_metadata(Some(ATTEMPTS), Duration::from_secs(10))
             .unwrap();
         let bound = Duration::from_secs(3600);
-        let gate = Gate::new(Arc::clone(&core), Producer::clone(&producer), bound)
-            .with_step(STEP)
-            .with_request_bound(HANG);
+        let gate = Gate::new(
+            Arc::clone(&core),
+            Producer::clone(&producer),
+            attempt::test_lister(&config),
+            bound,
+        )
+        .with_step(STEP)
+        .with_request_bound(HANG);
         let capture = spate_test::LogCapture::new();
         let dispatch = warnings_to(&capture);
         // librdkafka serves the refusal as the read's error when its reply
@@ -3398,9 +3461,14 @@ mod cluster {
         let mut errors = vec![RDKafkaRespErr::RD_KAFKA_RESP_ERR_NO_ERROR; 2];
         errors.extend([RDKafkaRespErr::RD_KAFKA_RESP_ERR_TOPIC_AUTHORIZATION_FAILED; 50]);
         cluster.request_errors(RDKafkaApiKey::ListOffsets, &errors);
-        let gate = Gate::new(Arc::clone(&core), producer, Duration::from_secs(3600))
-            .with_step(STEP * 100)
-            .with_request_bound(HANG);
+        let gate = Gate::new(
+            Arc::clone(&core),
+            producer,
+            attempt::test_lister(&config),
+            Duration::from_secs(3600),
+        )
+        .with_step(STEP * 100)
+        .with_request_bound(HANG);
         gate.pass();
         let st = core.lock();
         let reason = &st.signal.latched().expect("the feed stopped").reason;
@@ -3501,7 +3569,13 @@ mod cluster {
             .unwrap();
         let capture = spate_test::LogCapture::new();
         let bound = Duration::from_secs(3600);
-        let gate = Gate::new(Arc::clone(&core), producer, bound).with_step(Duration::from_secs(1));
+        let gate = Gate::new(
+            Arc::clone(&core),
+            producer,
+            attempt::test_lister(&config),
+            bound,
+        )
+        .with_step(Duration::from_secs(1));
         // Three requests read empty partition 0; the fourth is partition 1's,
         // which its broker holds past the read's one-second step.
         pass_advancing(&gate, &warnings_to(&capture), &clock, bound, || {
@@ -3588,9 +3662,14 @@ mod cluster {
             .unwrap();
         let capture = spate_test::LogCapture::new();
         let bound = Duration::from_secs(3600);
-        let gate = Gate::new(Arc::clone(&core), producer, bound)
-            .with_step(Duration::from_secs(1))
-            .with_request_bound(HANG);
+        let gate = Gate::new(
+            Arc::clone(&core),
+            producer,
+            attempt::test_lister(&config),
+            bound,
+        )
+        .with_step(Duration::from_secs(1))
+        .with_request_bound(HANG);
         // Advanced while the round trip holds the watermark read.
         pass_advancing(&gate, &warnings_to(&capture), &clock, bound, || {
             core.gate_reads.load(Ordering::SeqCst) == 1
@@ -3641,8 +3720,13 @@ mod cluster {
                 identity: super::identity(&core, offset),
             });
         }
-        let gate = Gate::new(Arc::clone(&core), producer, Duration::from_secs(3600))
-            .with_step(Duration::from_secs(3600));
+        let gate = Gate::new(
+            Arc::clone(&core),
+            producer,
+            attempt::test_lister(&config),
+            Duration::from_secs(3600),
+        )
+        .with_step(Duration::from_secs(3600));
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
             gate.pass();
@@ -3701,6 +3785,7 @@ mod cluster {
         let gate = Gate::new(
             Arc::clone(&core),
             Producer::clone(&producer),
+            attempt::test_lister(&config),
             config.delivery_timeout,
         )
         .with_step(Duration::from_secs(3600))
@@ -3777,6 +3862,7 @@ mod cluster {
         let gate = Gate::new(
             Arc::clone(&core),
             Producer::clone(&producer),
+            attempt::test_lister(&config),
             config.delivery_timeout,
         )
         .with_step(Duration::from_secs(3600))
@@ -4633,9 +4719,14 @@ mod cluster {
         cluster
             .broker_round_trip_time(1, Duration::from_millis(500))
             .unwrap();
-        let gate = Gate::new(Arc::clone(&core), producer.clone(), config.delivery_timeout)
-            .with_step(Duration::from_secs(5))
-            .with_request_bound(HANG);
+        let gate = Gate::new(
+            Arc::clone(&core),
+            producer.clone(),
+            attempt::test_lister(&config),
+            config.delivery_timeout,
+        )
+        .with_step(Duration::from_secs(5))
+        .with_request_bound(HANG);
         let pass = std::thread::spawn(move || gate.pass());
         wait_until(HANG, "the pass takes the unit and begins a read", || {
             core.gate_reads.load(Ordering::SeqCst) > 0
@@ -5666,9 +5757,14 @@ mod cluster {
             .client()
             .fetch_metadata(Some(ATTEMPTS), Duration::from_secs(10))
             .unwrap();
-        let gate = Gate::new(Arc::clone(&core), producer, PASS_BOUND)
-            .with_step(STEP)
-            .with_request_bound(HANG);
+        let gate = Gate::new(
+            Arc::clone(&core),
+            producer,
+            attempt::test_lister(&config),
+            PASS_BOUND,
+        )
+        .with_step(STEP)
+        .with_request_bound(HANG);
         Fencing {
             cluster,
             core,
@@ -6063,7 +6159,13 @@ mod docker {
                 }
             }
         }
-        Gate::new(Arc::clone(core), producer, Duration::from_secs(10)).pass();
+        Gate::new(
+            Arc::clone(core),
+            producer,
+            attempt::test_lister(config),
+            Duration::from_secs(10),
+        )
+        .pass();
         let st = core.lock();
         assert!(
             st.signal.latched().is_none(),
@@ -6170,6 +6272,101 @@ mod docker {
             SyncClock::system(),
         ));
         gate_admits(&config, &core);
+    }
+
+    /// Pins that the gate reads an attempt partition's end past another
+    /// writer's open transaction. The transaction holds offset 0 and the
+    /// feed's own record sits at offset 1, so the last stable offset is 0
+    /// and the log end is at least 2. With no follower running the ledger has read
+    /// neither, and a gate pass puts the unit back. A gate that read the
+    /// last stable offset would find the partition empty and admit it.
+    /// Regression for #1765.
+    #[test]
+    #[ignore = "requires Docker"]
+    fn a_gate_pass_waits_for_a_write_behind_an_open_transaction() {
+        let container = KafkaBroker::selected()
+            .transactional()
+            .start()
+            .expect("start kafka container");
+        let port = container.get_host_port_ipv4(KAFKA_PORT).expect("port");
+        let brokers = format!("127.0.0.1:{port}");
+        let io = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let admin: AdminClient<DefaultClientContext> = raw_config()
+            .set("bootstrap.servers", &brokers)
+            .build()
+            .unwrap();
+        let topic = NewTopic::new("units-attempts", 1, TopicReplication::Fixed(1));
+        for created in io
+            .block_on(admin.create_topics(&[topic], &AdminOptions::new()))
+            .unwrap()
+        {
+            created.unwrap();
+        }
+        let open: BaseProducer = raw_config()
+            .set("bootstrap.servers", &brokers)
+            .set("transactional.id", spate_test::unique_name("foreign"))
+            .set("transaction.timeout.ms", "600000")
+            .build()
+            .unwrap();
+        open.init_transactions(Duration::from_secs(30)).unwrap();
+        open.begin_transaction().unwrap();
+        open.send(
+            BaseRecord::to("units-attempts")
+                .partition(0)
+                .key("foreign/0/0")
+                .payload(&attempt::encode(1)),
+        )
+        .map_err(|(e, _)| e)
+        .unwrap();
+        open.flush(Duration::from_secs(30)).unwrap();
+        write(
+            &brokers,
+            "units-attempts",
+            &[("units/0/0", Some(&attempt::encode(1)[..]))],
+        );
+        let config = KafkaFeedConfig::from_section(&section(&brokers, "open")).unwrap();
+        let lister = attempt::test_lister(&config);
+        wait_until(HANG, "the log end is above the open transaction", || {
+            lister
+                .client()
+                .fetch_watermarks("units-attempts", 0, Duration::from_secs(5))
+                .is_ok_and(|(lwm, hwm)| lwm == 0 && hwm >= 2)
+        });
+        let core = Arc::new(Core::new(&config, NonZeroU32::MIN, SyncClock::system()));
+        let producer = config
+            .base(false)
+            .create::<super::write::Producer, _>(
+                &config.client(FeedRole::Producer),
+                FeedProducerHooks::new(Arc::clone(&core)),
+            )
+            .unwrap();
+        // Each client has read the partition once, so neither connects
+        // inside the pass.
+        wait_until(HANG, "the producer reads the partition", || {
+            producer
+                .client()
+                .fetch_watermarks("units-attempts", 0, Duration::from_secs(5))
+                .is_ok()
+        });
+        {
+            let mut st = core.lock();
+            st.tracker.assign([super::tp(0)]);
+            let receipt = st.tracker.deliver(&super::tp(0), 0).unwrap();
+            st.gating.push_back(Gating {
+                receipt,
+                unit: Unit::new("u0", Vec::new()),
+                identity: super::identity(&core, 0),
+            });
+        }
+        Gate::new(Arc::clone(&core), producer, lister, Duration::from_secs(1))
+            .with_step(Duration::from_millis(1))
+            .with_request_bound(HANG)
+            .pass();
+        assert_eq!(core.lock().gating.len(), 1, "the gate admitted the unit");
+        open.abort_transaction(Duration::from_secs(30)).unwrap();
     }
 
     /// The offset of the first record a fresh read of `topic` finds.

@@ -356,6 +356,39 @@ impl Ledger {
     }
 }
 
+/// A consumer with the follower's settings, never assigned, which the gate
+/// lists the attempt partitions through. It reads at the follower's isolation
+/// level, and holds no Fetch that a listing would wait behind on its
+/// connection.
+pub(crate) type Lister = BaseConsumer<SourceContext>;
+
+/// The gate's [`Lister`].
+///
+/// # Errors
+///
+/// [`ConnectError::Refused`] when librdkafka refuses the client configuration.
+pub(crate) fn lister(config: &KafkaFeedConfig) -> Result<Lister, ConnectError> {
+    reader(config, FeedRole::Gate, "the gate's attempt reader")
+}
+
+/// A consumer of the attempt topic in `role`, `what` naming it in an error.
+fn reader(
+    config: &KafkaFeedConfig,
+    role: FeedRole,
+    what: &str,
+) -> Result<BaseConsumer<SourceContext>, ConnectError> {
+    config
+        .base(crate::security::openssl_env_overrides())
+        .create(&config.client(role), SourceHooks::default())
+        .map_err(|reason| ConnectError::refused(NAME, format!("creating {what}: {reason}")))
+}
+
+/// The gate's [`Lister`] for a test.
+#[cfg(test)]
+pub(crate) fn test_lister(config: &KafkaFeedConfig) -> Lister {
+    lister(config).expect("the gate's attempt reader")
+}
+
 /// An assign-only consumer in the feed's group that reads every attempt
 /// partition from its start into the ledger.
 pub(crate) struct Follower {
@@ -377,13 +410,7 @@ impl Follower {
     pub(crate) fn new(config: &KafkaFeedConfig, core: Arc<Core>) -> Result<Follower, ConnectError> {
         let topic = &*core.topics.attempt;
         let partitions = core.attempt_partitions;
-        let openssl_env = crate::security::openssl_env_overrides();
-        let consumer: BaseConsumer<SourceContext> = config
-            .base(openssl_env)
-            .create(&config.client(FeedRole::Follower), SourceHooks::default())
-            .map_err(|reason| {
-                ConnectError::refused(NAME, format!("creating the attempt follower: {reason}"))
-            })?;
+        let consumer = reader(config, FeedRole::Follower, "the attempt follower")?;
         let mut tpl = TopicPartitionList::new();
         // Kafka numbers partitions with an i32, so no topic has more.
         for partition in (0..=i32::MAX).take(partitions.get() as usize) {

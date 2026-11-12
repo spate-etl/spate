@@ -2000,11 +2000,11 @@ impl KafkaSource {
 }
 
 /// The events waiting on `consumer`'s queue, of every kind.
-fn queued_events(consumer: &BaseConsumer<SourceContext>) -> usize {
+pub(crate) fn queued_events(consumer: &BaseConsumer<SourceContext>) -> usize {
     let rk = consumer.client().native_ptr();
     // SAFETY: `consumer` keeps `rk` live for the call. `BaseConsumer::new`
     // refuses a client with no consumer queue when `group.id` is set, and
-    // `KafkaSourceConfig` always sets it, so the handle is not null. The
+    // every consumer this crate builds sets it, so the handle is not null. The
     // handle is released before return.
     unsafe {
         let q = rdkafka::bindings::rd_kafka_queue_get_consumer(rk);
@@ -2021,7 +2021,7 @@ fn queued_events(consumer: &BaseConsumer<SourceContext>) -> usize {
 /// follow a growing queue. librdkafka sorts log and statistics events ahead of
 /// a rebalance, so one arriving during the serve takes a poll of the count and
 /// can leave a rebalance for close.
-fn serve_queued(consumer: &BaseConsumer<SourceContext>) {
+pub(crate) fn serve_queued(consumer: &BaseConsumer<SourceContext>) {
     for _ in 0..queued_events(consumer) {
         // A served message stores no offset, since the source owns
         // `enable.auto.offset.store`, so it is dropped with no rewind. The error

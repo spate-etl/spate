@@ -714,6 +714,7 @@ impl KafkaFeed {
         let config = KafkaFeedConfig::from_section(section)?;
         let checked = check_topics(&config, io, scope, bound, clock.clone())?;
         let (core, producer, driver) = parts(&config, checked.attempt_partitions, clock)?;
+        let lister = attempt::lister(&config)?;
         let follower = Follower::new(&config, Arc::clone(&core))?
             .spawn()
             .map_err(|e| {
@@ -735,6 +736,7 @@ impl KafkaFeed {
         let gate = gate::Gate::new(
             Arc::clone(&feed.core),
             feed.producer.clone(),
+            lister,
             config.delivery_timeout,
         );
         feed.gate = Some(gate.spawn().map_err(|e| {

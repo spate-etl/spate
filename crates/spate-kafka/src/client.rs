@@ -1456,6 +1456,7 @@ mod tests {
             "spate-feed-admin",
             "spate-feed-reader",
             "spate-feed-follower",
+            "spate-feed-gate",
         ];
         assert_eq!(
             ids.iter().map(|(_, id)| id.as_deref()).collect::<Vec<_>>(),

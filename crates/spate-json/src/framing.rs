@@ -93,8 +93,7 @@ impl NdjsonFramer {
     #[cold]
     #[inline(never)]
     fn check_past_cap(&self, len: usize, bytes: &[u8]) -> io::Result<()> {
-        if len - 1 == self.max_record_bytes
-            && bytes.last().or(self.partial.last()) == Some(&b'\r')
+        if len - 1 == self.max_record_bytes && bytes.last().or(self.partial.last()) == Some(&b'\r')
         {
             return Ok(());
         }
@@ -270,7 +269,10 @@ pub(crate) mod tests {
         ];
         for chunks in over_cap {
             let err = frame_all(8, chunks).unwrap_err();
-            assert!(err.to_string().contains("max_record_bytes"), "{chunks:?}: {err}");
+            assert!(
+                err.to_string().contains("max_record_bytes"),
+                "{chunks:?}: {err}"
+            );
         }
     }
 

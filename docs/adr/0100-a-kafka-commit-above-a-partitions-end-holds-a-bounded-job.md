@@ -67,11 +67,12 @@ offset validation makes.
 - Bad, because a stop during the hold exits `Completed`, exit 0, with the units
   unread, as a stop during ADR-0094's hold does. A later worker on the group
   reads them.
-- Bad, because once units written after a truncation carry the end past the
-  commit, a member assigned the partition starts at the commit and skips the
-  reused offsets below it. The depth cannot see this. Committing with the
-  delivered record's leader epoch would let librdkafka detect the truncation,
-  and rdkafka 0.39 exposes no setter for it.
+- Bad, because once units written after a truncation carry the end to the
+  commit or past it, a member assigned the partition starts at the commit and
+  skips the reused offsets below it. The depth cannot see this. Committing with
+  the delivered record's leader epoch would let librdkafka detect the
+  truncation, and rdkafka 0.39 exposes no setter for it
+  ([#2104](https://github.com/spate-etl/spate/issues/2104)).
 - Neutral, because a partition whose log holds nothing reads as drained, the
   same rule that applies after retention.
 

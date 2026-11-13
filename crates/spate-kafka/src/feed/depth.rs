@@ -146,8 +146,10 @@ impl Hold {
 ///
 /// A partition whose commit is above its end reads from its log start too.
 /// Its log was truncated below the commit, which then shows nothing of what
-/// was read, and the partition stays behind until a member's read brings the
-/// commit to the end or below.
+/// was read. The partition stays behind until a member's read brings the
+/// commit to the end or below, or its log holds nothing. Writes that carry
+/// the end up to the commit make it count from the commit again, so the units
+/// on the reused offsets below it go uncounted.
 pub(crate) fn feed_depth(
     offsets: &dyn Offsets,
     topics: &Topics,

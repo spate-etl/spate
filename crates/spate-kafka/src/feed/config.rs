@@ -180,8 +180,9 @@ fn group(keys: &mut Keys<'_>, cfg: &KafkaFeedConfig) {
     keys.own(
         "auto.offset.reset",
         "earliest",
-        "a partition with no committed offset starts at its earliest offset, \
-         so a group whose offsets expired reads the topic from its start",
+        "a partition with no committed offset, or a committed offset outside its \
+         log, starts at its earliest offset, so a group whose offsets expired, or \
+         whose partition was truncated below its commit, reads it from its start",
     );
     keys.own(
         "enable.auto.commit",

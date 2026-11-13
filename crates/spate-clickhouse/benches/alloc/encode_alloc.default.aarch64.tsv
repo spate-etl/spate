@@ -3,8 +3,8 @@
 # arch: aarch64
 # counts: Rust global allocator only; allocations C code makes through malloc (libzstd) are not counted; steady state after one warm pass
 case	allocs	reallocs	bytes
-native_events	1026	0	7000
-native_exotic	3	0	17
+native_events	0	0	0
+native_exotic	0	0	0
 native_metrics	0	0	0
 rowbinary_events	0	0	0
 rowbinary_metrics	0	0	0

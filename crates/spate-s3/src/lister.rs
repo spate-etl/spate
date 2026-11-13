@@ -2335,7 +2335,7 @@ mod tests {
             rt.handle().clone(),
         )
         .unwrap()
-        .with_framer(|| Box::new(crate::testutil::TestLineFramer::new(1 << 20)))
+        .with_framer(crate::testutil::ndjson_framer)
     }
 
     fn scripted_section() -> spate_core::config::FeedSection {

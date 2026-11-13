@@ -3210,7 +3210,7 @@ mod tests {
             Arc::new(SystemClock),
             spate_core::checkpoint::Checkpointer::new().handle(),
             crate::config::Compression::None,
-            Arc::new(|| Box::new(crate::testutil::TestLineFramer::new(1 << 20))),
+            Arc::new(crate::testutil::ndjson_framer),
             Some(Position {
                 ordinal: 0,
                 record: resume,
@@ -3252,9 +3252,7 @@ mod tests {
 
     /// The records of `object` framed whole, in one chunk.
     fn framed_whole(object: &[u8]) -> Vec<Vec<u8>> {
-        let mut framer = crate::framer::ObjectFramer::new(Arc::new(|| {
-            Box::new(crate::testutil::TestLineFramer::new(1 << 20))
-        }));
+        let mut framer = crate::framer::ObjectFramer::new(Arc::new(crate::testutil::ndjson_framer));
         framer.begin_object(crate::framer::Codec::Plain).unwrap();
         framer.push_chunk(Bytes::copy_from_slice(object)).unwrap();
         framer.finish_object().unwrap();

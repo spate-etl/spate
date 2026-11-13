@@ -1179,7 +1179,7 @@ mod tests {
             rt.handle().clone(),
         )
         .unwrap()
-        .with_framer(|| Box::new(crate::testutil::TestLineFramer::new(1 << 20)))
+        .with_framer(crate::testutil::ndjson_framer)
         .with_feed(Arc::new(feed));
         source.open(ctx()).unwrap();
         let mut added = None;
@@ -1490,7 +1490,7 @@ mod tests {
         use spate_core::feed::memory::MemoryFeed;
         let (source, rt) = source_over(body);
         let source = source
-            .with_framer(|| Box::new(crate::testutil::TestLineFramer::new(1 << 20)))
+            .with_framer(crate::testutil::ndjson_framer)
             .with_feed(Arc::new(MemoryFeed::new()));
         (source, rt)
     }

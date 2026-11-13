@@ -484,8 +484,7 @@ fn renew_held_renews_the_unit_the_source_holds() {
 }
 
 /// A framer that declares no resync delimiter.
-#[derive(Default)]
-struct NoResync(support::LineFramer);
+struct NoResync(spate_json::NdjsonFramer);
 
 impl spate_core::framing::RecordFramer for NoResync {
     fn push(&mut self, bytes: &[u8]) -> std::io::Result<()> {
@@ -521,7 +520,7 @@ fn a_framer_with_no_delimiter_is_reported_when_the_feed_path_opens() {
         let source = if resync {
             line_framer(source)
         } else {
-            source.with_framer(|| Box::new(NoResync::default()))
+            source.with_framer(|| Box::new(NoResync(support::ndjson_framer())))
         };
         let mut source = source.with_feed(Arc::new(MemoryFeed::new()));
         spate_test::capture_logs(tracing::Level::INFO, || {

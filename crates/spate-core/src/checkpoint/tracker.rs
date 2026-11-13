@@ -198,13 +198,11 @@ impl PartitionTracker {
     }
 
     /// Sequences of the registered batches not yet resolved, ascending.
-    #[must_use]
-    pub(crate) fn unresolved_seqs(&self) -> Vec<u64> {
+    pub(crate) fn unresolved_seqs(&self) -> impl Iterator<Item = u64> + '_ {
         (self.head_seq..)
             .zip(&self.ring)
             .filter(|(_, slot)| slot.state == SlotState::Pending)
             .map(|(seq, _)| seq)
-            .collect()
     }
 
     /// Sequence number of the failed batch that caused the stall.

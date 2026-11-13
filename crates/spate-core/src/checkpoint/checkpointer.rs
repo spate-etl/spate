@@ -17,6 +17,7 @@ use crate::clock::{SharedClock, SystemClock};
 use crate::error::FatalError;
 use crate::hash::FastMap;
 use crate::record::PartitionId;
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Instant;
@@ -320,7 +321,7 @@ impl Checkpointer {
         let Some(since) = tracker.head_since() else {
             return;
         };
-        let unresolved = tracker.unresolved_seqs();
+        let unresolved: BTreeSet<u64> = tracker.unresolved_seqs().collect();
         if !unresolved.is_empty() {
             self.carried
                 .insert((self.epoch, partition), Carried { since, unresolved });
@@ -334,11 +335,8 @@ impl Checkpointer {
         let Some(carried) = self.carried.get_mut(&key) else {
             return;
         };
-        if let Ok(i) = carried.unresolved.binary_search(&id.seq) {
-            carried.unresolved.remove(i);
-            if carried.unresolved.is_empty() {
-                self.carried.remove(&key);
-            }
+        if carried.unresolved.remove(&id.seq) && carried.unresolved.is_empty() {
+            self.carried.remove(&key);
         }
     }
 
@@ -512,7 +510,7 @@ impl Checkpointer {
 #[derive(Debug)]
 struct Carried {
     since: Instant,
-    unresolved: Vec<u64>,
+    unresolved: BTreeSet<u64>,
 }
 
 #[cfg(all(test, not(loom)))]

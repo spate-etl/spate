@@ -260,8 +260,9 @@ offset a contiguously acknowledged batch covers, which may hold no record.
 Stored on advance, committed to the source on `checkpoint.interval`, and
 committed synchronously on drain. The
 at-least-once invariant is that it never passes unacknowledged data; a
-failed batch stalls it (alert on `spate_checkpoint_watermark_age_seconds`)
-rather than being skipped. Distinct from the
+failed batch stalls it rather than being skipped.
+`spate_checkpoint_watermark_age_seconds` reports how long it has waited on a
+pending or failed batch. Distinct from the
 [backpressure watermarks](#backpressure-watermarks-high--low).
 
 ### Work unit

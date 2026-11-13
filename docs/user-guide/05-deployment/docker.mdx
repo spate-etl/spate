@@ -79,7 +79,8 @@ The admin server binds `admin.listen` (default `0.0.0.0:9090`) and serves:
   `readinessProbe` so a pod takes traffic-shaped duties (its consumer-group
   membership) only when it can write.
 - `GET /healthz` — 200 while every pipeline thread's poll loop heartbeat is
-  fresh and the checkpoint watermark is not stuck while data flows. Wire
+  fresh and no checkpoint watermark has stalled behind a failed batch for over
+  5 minutes while data flows. Wire
   this to `livenessProbe` so a wedged pipeline gets restarted instead of
   idling forever.
 - `GET /metrics` — Prometheus exposition, when an exporter is installed; 404

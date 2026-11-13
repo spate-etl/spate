@@ -337,7 +337,7 @@ way to reason about where a flush went, not an identity to compute.
 | `spate_checkpoint_pending_batches` | gauge | `partition` ⚠ | Unacknowledged batches tracked. The unlabeled series is the max across partitions; a labeled series is published for every partition the checkpointer tracks, including one with nothing unacknowledged. A partition that leaves the assignment is zeroed rather than deleted, on the first commit cycle after it goes, for the reason in [Absent, zero, and stale](#absent-zero-and-stale). Select the aggregate with `{partition=""}`. A `sum` over the bare name adds the max to the per-partition counts. Bounded by `checkpoint.max_pending_batches` — a reading above the limit is a defect. |
 | `spate_checkpoint_commits_total` | counter | `outcome` (`ok`\|`error`) | Source commit calls. The final commit of a stop counts as one call. |
 | `spate_checkpoint_commit_duration_seconds` | histogram | | Commit round-trip. |
-| `spate_checkpoint_watermark_age_seconds` | gauge | | Age of the oldest unacknowledged batch — the primary "stuck pipeline" alert signal. |
+| `spate_checkpoint_watermark_age_seconds` | gauge | | How long the longest-waiting partition watermark has waited on its head batch, pending or failed. It restarts when the watermark moves and reads 0 when nothing is pending. The primary "stuck pipeline" alert signal. |
 
 Cardinality note: a feed reader mints a checkpoint partition for each lane it
 runs, and a partition id is never reused. Per-partition series under
@@ -405,8 +405,10 @@ Configured on the exporter, by name suffix or full name:
 
 ## Alerting starting points
 
-- `spate_checkpoint_watermark_age_seconds > 5m` while
-  `rate(spate_source_records_total[5m]) > 0` — pipeline is stuck, not idle.
+- `spate_checkpoint_watermark_age_seconds > 5m` — a watermark has waited
+  five minutes on one batch. An idle pipeline reads 0 because nothing is
+  pending. A healthy pipeline reads up to `checkpoint.interval` plus the
+  longest sink `batch.linger` plus the write, so keep the threshold above that.
 - `spate_backpressure_paused == 1` sustained — sink capacity problem.
 - `spate_pipeline_io_busy_ratio > 0.9` sustained while the sink queues fill —
   the I/O runtime's workers are the limit. Raise `pipeline.io_threads` before

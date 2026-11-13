@@ -6,9 +6,9 @@
 //! - **`/readyz`** — 200 once the source has received its assignment and
 //!   the sinks are connected.
 //! - **`/healthz`** — 200 while every pipeline thread's poll-loop heartbeat
-//!   is fresh AND the checkpoint watermark is not stuck while data flows.
-//!   A stalled poll loop or a wedged watermark flips this to 503 so the
-//!   kubelet restarts the pod.
+//!   is fresh AND no checkpoint watermark has stalled behind a failed batch
+//!   past the threshold while data flows. A stalled poll loop or a stalled
+//!   watermark flips this to 503 so the kubelet restarts the pod.
 //!
 //! The server takes the metrics renderer as a plain closure
 //! ([`RenderFn`]) and has no dependency on exporter internals. The probes
@@ -41,8 +41,8 @@ pub struct HealthThresholds {
     /// A pipeline thread whose heartbeat is older than this is considered
     /// stalled.
     pub heartbeat_stale: Duration,
-    /// The watermark is considered stuck when its age exceeds this while
-    /// data is flowing.
+    /// The watermark is considered stuck when it has stalled behind a failed
+    /// batch for longer than this while data is flowing.
     pub watermark_stuck: Duration,
 }
 
@@ -133,9 +133,9 @@ impl HealthState {
         self.sinks_connected.store(connected, Ordering::Relaxed);
     }
 
-    /// Report the checkpointer's oldest-unacknowledged-batch age and
-    /// whether data is currently flowing (a stuck watermark only counts
-    /// against liveness while records move).
+    /// Report how long the longest-stalled watermark has waited behind a
+    /// failed batch, and whether data is currently flowing (a stuck
+    /// watermark only counts against liveness while records move).
     pub fn report_watermark(&self, age: Duration, data_flowing: bool) {
         self.watermark_age_ms.store(
             u64::try_from(age.as_millis()).unwrap_or(u64::MAX),

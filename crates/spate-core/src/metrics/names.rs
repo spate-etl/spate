@@ -209,8 +209,9 @@ metric_names! {
         /// `per_partition_detail` is set, so a sum over the bare name adds the max to
         /// the partitions themselves.
         CHECKPOINT_PENDING_BATCHES = "spate_checkpoint_pending_batches",
-        /// Age of the oldest unacknowledged batch. The primary "stuck pipeline"
-        /// alert signal.
+        /// How long the longest-waiting partition watermark has waited on its
+        /// head batch, pending or failed; it restarts when the watermark moves.
+        /// The primary "stuck pipeline" alert signal.
         CHECKPOINT_WATERMARK_AGE_SECONDS = "spate_checkpoint_watermark_age_seconds",
 
         // Feed.

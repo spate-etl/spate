@@ -38,7 +38,8 @@ acknowledged data.
 source on an interval (`checkpoint.interval`, default 5s). The invariant:
 **never commit past unacknowledged data.** A failed batch stalls its
 partition's watermark rather than being skipped. Watch
-`spate_checkpoint_watermark_age_seconds`, the primary "stuck pipeline" alert
+`spate_checkpoint_watermark_age_seconds`, how long a watermark has waited on a
+pending or failed batch and the primary "stuck pipeline" alert
 (see [Monitoring](../05-deployment/monitoring.mdx) and
 [Metrics](../../METRICS.md)).
 

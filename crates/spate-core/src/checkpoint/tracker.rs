@@ -74,6 +74,9 @@ pub struct PartitionTracker {
     stalled_since: Option<Instant>,
     /// Sequence of the failed batch that caused the stall.
     stalled_seq: Option<u64>,
+    /// When the batch now at the head of the ring became the head; `None`
+    /// while the ring is empty.
+    head_since: Option<Instant>,
 }
 
 impl PartitionTracker {
@@ -142,7 +145,8 @@ impl PartitionTracker {
         self.advance_on(&SystemClock)
     }
 
-    /// [`advance`](Self::advance), stamping a new stall with `clock`.
+    /// [`advance`](Self::advance), stamping a new stall and a new head with
+    /// `clock`.
     pub(crate) fn advance_on(&mut self, clock: &dyn Clock) -> Option<i64> {
         let mut committable = None;
         while let Some(slot) = self.ring.front() {
@@ -162,6 +166,12 @@ impl PartitionTracker {
                 SlotState::Pending => break,
             }
         }
+        if committable.is_some() {
+            self.head_since = None;
+        }
+        if self.head_since.is_none() && !self.ring.is_empty() {
+            self.head_since = Some(clock.now());
+        }
         committable
     }
 
@@ -172,10 +182,19 @@ impl PartitionTracker {
         self.stalled_since.is_some()
     }
 
-    /// When the stall was first observed, for watermark-age alerting.
+    /// When the stall was first observed. The stall watchdog and the
+    /// `/healthz` watermark check age it.
     #[must_use]
     pub fn stalled_since(&self) -> Option<Instant> {
         self.stalled_since
+    }
+
+    /// When the batch now at the head became the head, as of the last
+    /// advance; `None` while nothing is pending. Pending or failed, the head
+    /// holds the watermark, so this is how long the watermark has waited.
+    #[must_use]
+    pub(crate) fn head_since(&self) -> Option<Instant> {
+        self.head_since
     }
 
     /// Sequence number of the failed batch that caused the stall.
@@ -195,6 +214,7 @@ impl PartitionTracker {
 #[cfg(all(test, not(loom)))]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     fn delivered(t: &mut PartitionTracker, seq: u64) {
         assert_eq!(
@@ -348,6 +368,57 @@ mod tests {
         }
         assert_eq!(last, 100 * 7 + 1);
         assert_eq!(t.pending(), 0);
+    }
+
+    #[test]
+    fn an_empty_ring_has_no_head_stamp() {
+        let clock = crate::clock::TestClock::frozen();
+        let mut t = PartitionTracker::new();
+        assert_eq!(t.advance_on(&*clock), None);
+        assert_eq!(t.head_since(), None);
+    }
+
+    #[test]
+    fn a_pending_head_keeps_the_stamp_of_the_advance_that_first_saw_it() {
+        let clock = crate::clock::TestClock::frozen();
+        let mut t = PartitionTracker::new();
+        t.register(0, 9);
+        let _ = t.advance_on(&*clock);
+        let first = clock.now();
+        clock.advance(Duration::from_secs(60));
+        let _ = t.advance_on(&*clock);
+        assert_eq!(t.head_since(), Some(first));
+    }
+
+    #[test]
+    fn a_pop_restamps_the_new_head_and_an_emptied_ring_clears_it() {
+        let clock = crate::clock::TestClock::frozen();
+        let mut t = PartitionTracker::new();
+        t.register(0, 9);
+        t.register(1, 19);
+        let _ = t.advance_on(&*clock);
+        clock.advance(Duration::from_secs(60));
+        delivered(&mut t, 0);
+        assert_eq!(t.advance_on(&*clock), Some(10));
+        assert_eq!(t.head_since(), Some(clock.now()));
+        clock.advance(Duration::from_secs(60));
+        delivered(&mut t, 1);
+        assert_eq!(t.advance_on(&*clock), Some(20));
+        assert_eq!(t.head_since(), None);
+    }
+
+    #[test]
+    fn a_failed_head_keeps_the_stamp_from_its_pending_time() {
+        let clock = crate::clock::TestClock::frozen();
+        let mut t = PartitionTracker::new();
+        t.register(0, 9);
+        let _ = t.advance_on(&*clock);
+        let became_head = clock.now();
+        clock.advance(Duration::from_secs(60));
+        failed(&mut t, 0);
+        let _ = t.advance_on(&*clock);
+        assert_eq!(t.stalled_since(), Some(clock.now()));
+        assert_eq!(t.head_since(), Some(became_head));
     }
 }
 

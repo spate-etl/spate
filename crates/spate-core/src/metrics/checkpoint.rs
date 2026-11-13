@@ -140,7 +140,8 @@ impl CheckpointMetrics {
         self.commit_duration.record(d.as_secs_f64());
     }
 
-    /// Set the age of the oldest unacknowledged batch.
+    /// Set how long the longest-waiting partition watermark has waited on its
+    /// head batch.
     pub fn set_watermark_age(&self, age: Duration) {
         self.watermark_age.set(age.as_secs_f64());
     }

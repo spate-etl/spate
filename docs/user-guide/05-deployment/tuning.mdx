@@ -372,7 +372,8 @@ is the lever, not `chunk.target_bytes`.
   so shortening it narrows the replay window after a crash and tightens
   worst-case commit lag (≈ two intervals + the sink `linger`), at the cost
   of more commit traffic and slightly smaller chunks. Validation floors it
-  at 100ms.
+  at 100ms. `spate_checkpoint_watermark_age_seconds` reads up to that lag on a
+  healthy pipeline, so an alert on it sits above the lag.
 - `max_pending_batches` (default **1024**): hard ceiling on unacknowledged
   batches per partition. At the limit the partition's lanes are skipped at
   the poll boundary until acknowledgments retire batches. Bounds the replay

@@ -136,8 +136,8 @@ pub struct Checkpointer {
     /// enforce this: a revocation removes the tracker, so a re-add would look
     /// fresh.
     admitted_through: Option<PartitionId>,
-    /// Stamps the start of a stall, so a health check that ages it reads
-    /// the same timeline.
+    /// Stamps the start of a stall and of each new head batch, so the checks
+    /// and the gauge that age them read the same timeline.
     clock: SharedClock,
 }
 
@@ -180,13 +180,13 @@ impl Checkpointer {
         }
     }
 
-    /// Stamps stall starts on `clock`, the clock that ages them.
+    /// Stamps stall and head starts on `clock`, the clock that ages them.
     pub(crate) fn set_clock(&mut self, clock: SharedClock) {
         self.clock = clock;
     }
 
-    /// The current instant on the clock that stamps stall starts, for
-    /// ageing them.
+    /// The current instant on the clock that stamps stall and head starts,
+    /// for ageing them.
     pub(crate) fn now(&self) -> Instant {
         self.clock.now()
     }
@@ -452,6 +452,17 @@ impl Checkpointer {
         out.sort_unstable_by_key(|&(p, _)| p);
         out
     }
+
+    /// The earliest instant at which a tracked partition's current head batch
+    /// became its head, pending or failed: the start of the longest wait any
+    /// watermark is in. `None` when nothing is pending.
+    #[must_use]
+    pub(crate) fn oldest_head_since(&self) -> Option<Instant> {
+        self.trackers
+            .values()
+            .filter_map(PartitionTracker::head_since)
+            .min()
+    }
 }
 
 #[cfg(all(test, not(loom)))]
@@ -511,6 +522,45 @@ mod tests {
         cp.begin_epoch(&[P0], 2);
         let fresh = cp.advance_handle(P0).expect("fresh gate");
         assert_eq!(fresh.get(), 0);
+    }
+
+    /// The oldest head is the earliest stamp over the tracked partitions, and
+    /// a partition's stamp leaves with its delivery, its revocation, or the
+    /// epoch that replaces it.
+    #[test]
+    fn the_oldest_head_is_the_earliest_over_tracked_partitions() {
+        use crate::clock::Clock;
+        let clock = crate::clock::TestClock::frozen();
+        let (mut cp, mut issuer) = checkpointer(&[P0, P1]);
+        cp.set_clock(Arc::clone(&clock) as _);
+        let p0_held = issuer.issue(P0, 9);
+        cp.drain();
+        let _ = cp.take_watermarks();
+        let p0_head = clock.now();
+        clock.advance(std::time::Duration::from_secs(60));
+        let p1_held = issuer.issue(P1, 9);
+        cp.drain();
+        let _ = cp.take_watermarks();
+        let p1_head = clock.now();
+        assert_eq!(cp.oldest_head_since(), Some(p0_head));
+
+        drop(p0_held);
+        cp.drain();
+        assert_eq!(cp.take_watermarks(), vec![(P0, 10)]);
+        assert_eq!(cp.oldest_head_since(), Some(p1_head));
+
+        cp.revoke(&[P1]);
+        assert_eq!(cp.oldest_head_since(), None);
+
+        cp.begin_epoch(&[P0, P1], 2);
+        let mut issuer = cp.handle();
+        let held = issuer.issue(P0, 19);
+        cp.drain();
+        let _ = cp.take_watermarks();
+        assert_eq!(cp.oldest_head_since(), Some(clock.now()));
+        cp.begin_epoch(&[P0], 3);
+        assert_eq!(cp.oldest_head_since(), None);
+        drop((held, p1_held));
     }
 
     #[test]

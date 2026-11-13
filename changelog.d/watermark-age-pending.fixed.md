@@ -1,0 +1,3 @@
+**The watermark age gauge counts a batch that stays pending** (`spate-core`)
+
+`spate_checkpoint_watermark_age_seconds` reports how long the longest-waiting partition watermark has waited on its head batch, whether that batch is pending or failed. In previous versions it counted only a batch that had failed, so it read 0 while a sink retried without limit under the default `retry.max_attempts: 0`. The documented alert can now fire during such an outage, and it needs no condition on the source record rate. A healthy pipeline reads up to `checkpoint.interval` plus the longest sink `batch.linger` plus the write, so keep an alert threshold above that. `/healthz` and `checkpoint.stalled_fail_after` are unchanged and still count only a failed batch.

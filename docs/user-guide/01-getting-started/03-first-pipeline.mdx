@@ -228,7 +228,7 @@ Probes and metrics are on the admin listener from the YAML:
 
 ```sh
 curl localhost:9090/readyz    # assignment received and sink connected
-curl localhost:9090/healthz   # poll loop alive, watermarks moving
+curl localhost:9090/healthz   # poll loop alive, no watermark stalled on a failed batch
 curl localhost:9090/metrics   # Prometheus scrape endpoint
 ```
 

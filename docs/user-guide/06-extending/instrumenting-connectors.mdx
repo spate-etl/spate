@@ -68,6 +68,9 @@ at `open` and call `set_partition_lag` and `retain_partitions`. Leave the rest
 alone. Records, bytes, poll duration, rebalance counts, and active lanes are
 all recorded by the runtime from the events your source returns, so a source
 that also increments `rebalance_assigned` makes the counter read double.
+The rebalance counter counts one `assign` for each `LanesAssigned` and one
+`revoke` for each `LanesRevoked`, whatever the lane count. `LanesAdded` and
+`LanesRetired` count nothing.
 
 :::danger Take the handle from `SourceCtx`
 Publish only measured values, and clean up what you lose. Every one of these is

@@ -64,7 +64,8 @@ metric_names! {
         SOURCE_RECORDS_TOTAL = "spate_source_records_total",
         /// Payload bytes emitted by the source.
         SOURCE_BYTES_TOTAL = "spate_source_bytes_total",
-        /// Rebalance events observed, labeled by [`L_EVENT`].
+        /// `LanesAssigned` and `LanesRevoked` events the source returned, one
+        /// count each, labeled by [`L_EVENT`].
         SOURCE_REBALANCES_TOTAL = "spate_source_rebalances_total",
 
         // Deserializer.

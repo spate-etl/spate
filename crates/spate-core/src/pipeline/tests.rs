@@ -1809,6 +1809,79 @@ fn a_stored_commit_counts_an_ok_outcome() {
     );
 }
 
+/// `spate_source_rebalances_total` counts one `assign` per `LanesAssigned`,
+/// an empty one included, and one `revoke` per `LanesRevoked`, whatever
+/// their lane counts. Added and retired lanes, and the runtime's own drain
+/// of an assignment over live lanes, count nothing.
+#[test]
+fn rebalances_count_assigned_and_revoked_events() {
+    let mut cfg = test_config(1);
+    cfg.pipeline.name = spate_test::unique_name("rebalances");
+    cfg.metrics.exporter = crate::config::MetricsExporter::Prometheus;
+    let pipeline_name = cfg.pipeline.name.clone();
+    let handle = crate::metrics::install(&crate::metrics::MetricsSettings {
+        exporter: crate::metrics::Exporter::Prometheus,
+        per_partition_detail: cfg.metrics.per_partition_detail,
+        e2e_basis: crate::metrics::E2eBasis::Ingest,
+    })
+    .expect("install the exporter");
+    let h = start_with_config(cfg, |shared, log| FakeChain {
+        shared,
+        log,
+        mode: ChainMode::Ok,
+        batches_seen: 0,
+    });
+    let pipeline = [("pipeline", pipeline_name.as_str())];
+
+    {
+        let mut script = h.script.lock().unwrap();
+        script.push_back(Script::Assign(Vec::new()));
+        script.push_back(Script::Assign(vec![
+            lane(0, 0, std::slice::from_ref(&(0..10))),
+            lane(1, 1, std::slice::from_ref(&(0..10))),
+        ]));
+        script.push_back(Script::Add(vec![lane(2, 2, std::slice::from_ref(&(0..5)))]));
+    }
+    wait_until(spate_test::HANG, "the added partition commits", || {
+        h.shared.lock().unwrap().committed.get(&PartitionId(2)) == Some(&5)
+    });
+    h.script
+        .lock()
+        .unwrap()
+        .push_back(Script::Retire(vec![LaneId(2)]));
+    {
+        let mut script = h.script.lock().unwrap();
+        script.push_back(Script::Revoke(vec![LaneId(0), LaneId(1)]));
+        script.push_back(Script::Assign(
+            (0..4).map(|p| lane(3 + p, p, &[])).collect(),
+        ));
+        // Over the four live lanes, which the runtime drains itself.
+        script.push_back(Script::Assign(vec![lane(7, 0, &[])]));
+    }
+    // The gauge reads 1 only after the last assignment, and the controller
+    // counts each event before it sets the gauge.
+    wait_until(spate_test::HANG, "the last assignment is live", || {
+        spate_test::metric_value(&handle.render(), names::SOURCE_LANES_ACTIVE, &pipeline)
+            == Some(1.0)
+    });
+    h.shutdown.trigger();
+    h.join.join().unwrap().unwrap();
+
+    let rendered = handle.render();
+    let count = |event: &str| {
+        spate_test::metric_value(
+            &rendered,
+            names::SOURCE_REBALANCES_TOTAL,
+            &[("pipeline", pipeline_name.as_str()), ("event", event)],
+        )
+    };
+    assert_eq!(
+        (count("assign"), count("revoke")),
+        (Some(4.0), Some(1.0)),
+        "{rendered}"
+    );
+}
+
 /// A fatal commit error in the final pass fails the run with the commit's own
 /// reason.
 #[test]

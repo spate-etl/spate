@@ -79,7 +79,7 @@ framework families below, labeled with its `component_type`.
 | `spate_source_bytes_total` | counter | | Payload bytes emitted. |
 | `spate_source_poll_duration_seconds` | histogram | | Time spent inside `poll` per call. |
 | `spate_source_lag_records` | gauge | `partition` | Consumer lag (the end of what the source can read − committed), **always per partition** — there is no aggregate series. Aggregate in the query layer: `sum` for total backlog (comparable with the broker's group lag), `max` for the worst partition. A partition whose lag the client has not measured yet is **absent**; a partition the member no longer owns reads `0`. |
-| `spate_source_rebalances_total` | counter | `event` (`assign`\|`revoke`) | Rebalance events observed. |
+| `spate_source_rebalances_total` | counter | `event` (`assign`\|`revoke`) | Lane-set events the source reported. `assign` counts each new set of lanes that replaces the previous one, an empty set included. `revoke` counts each drain of live lanes the source asks for, whether a rebalance or the source itself started it. One event counts once, however many lanes it carries. Lanes added to or retired from the current set count nothing, and neither does the drain the runtime runs when an assignment arrives over live lanes. |
 | `spate_source_lanes_active` | gauge | | Currently assigned lanes (partitions). |
 
 ### Alerting on consumer lag

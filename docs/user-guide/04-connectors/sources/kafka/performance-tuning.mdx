@@ -383,7 +383,9 @@ has `replicas × consumers` members, and under eager assignment a rebalance
 revokes every member's partitions in every process. The source drains all of
 its consumers' lanes on the first revocation, so a rebalance costs one drain
 whatever the count. A member the group removed before it answered its assignment
-costs one more.
+costs one more. So does a consumer's assignment that arrives more than 3 seconds
+after the first one of the same rebalance, once the others' lanes are live: the
+source drains those lanes and hands over every consumer's partitions together.
 
 ### Compression
 

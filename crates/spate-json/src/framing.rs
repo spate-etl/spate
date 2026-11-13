@@ -44,6 +44,8 @@ use std::io;
 /// - Lines that are empty or all-ASCII-whitespace are skipped and do not
 ///   consume a record index.
 /// - An unterminated final line (no closing `\n`) is a record.
+/// - Every line, blank or not, is held to `max_record_bytes` after its one
+///   trailing `\r` is stripped.
 #[derive(Debug)]
 pub struct NdjsonFramer {
     /// Bytes of the current, not-yet-terminated line.
@@ -52,14 +54,16 @@ pub struct NdjsonFramer {
     ready: VecDeque<Vec<u8>>,
     /// Decoded bytes seen (metrics).
     decoded_bytes: u64,
-    /// Upper bound on one record line (decoded bytes). Without it, a stream
-    /// holding no newline at all would buffer unboundedly and abort the
-    /// process instead of failing the pipeline with a policy error.
+    /// Upper bound on one line after its trailing `\r` is stripped (decoded
+    /// bytes). Without it, a stream holding no newline at all would buffer
+    /// unboundedly and abort the process instead of failing the pipeline with
+    /// a policy error.
     max_record_bytes: usize,
 }
 
 impl NdjsonFramer {
-    /// A line framer bounding each record at `max_record_bytes` decoded bytes.
+    /// A line framer bounding each line at `max_record_bytes` decoded bytes,
+    /// not counting the `\r` of a CRLF line.
     #[must_use]
     pub fn new(max_record_bytes: usize) -> NdjsonFramer {
         NdjsonFramer {
@@ -73,18 +77,34 @@ impl NdjsonFramer {
     /// Extend the current line, enforcing the record-size cap before the bytes
     /// are buffered.
     fn push_partial(&mut self, bytes: &[u8]) -> io::Result<()> {
-        if self.partial.len() + bytes.len() > self.max_record_bytes {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "record line exceeds the configured max_record_bytes ({}); \
-                     is the stream really newline-delimited?",
-                    self.max_record_bytes
-                ),
-            ));
+        let len = self.partial.len() + bytes.len();
+        if len > self.max_record_bytes {
+            self.check_past_cap(len, bytes)?;
         }
         self.partial.extend_from_slice(bytes);
         Ok(())
+    }
+
+    /// The cap check for a line of `len` bytes, past `max_record_bytes`. The
+    /// line's one trailing `\r` is stripped when the line ends, so a line one
+    /// byte past the cap that ends in `\r` still fits.
+    // Out of line: inlined, it costs `push` up to 6% more instructions on
+    // lines that never reach the cap.
+    #[cold]
+    #[inline(never)]
+    fn check_past_cap(&self, len: usize, bytes: &[u8]) -> io::Result<()> {
+        if len - 1 == self.max_record_bytes && bytes.last().or(self.partial.last()) == Some(&b'\r')
+        {
+            return Ok(());
+        }
+        Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "record line exceeds the configured max_record_bytes ({}); \
+                 is the stream really newline-delimited?",
+                self.max_record_bytes
+            ),
+        ))
     }
 
     /// Complete the current line: strip one `\r`, skip whitespace-only.
@@ -142,14 +162,23 @@ pub(crate) mod tests {
     const TEST_CAP: usize = 1 << 20;
 
     /// Reference implementation of the line-framing rules on a whole byte
-    /// stream, used as the proptest oracle.
-    fn reference_frames(decoded: &[u8]) -> Vec<Vec<u8>> {
-        decoded
+    /// stream, used as the proptest oracle. `None` when any line, blank or
+    /// not, is longer than `cap` once its one trailing `\r` is stripped.
+    fn reference_frames(decoded: &[u8], cap: usize) -> Option<Vec<Vec<u8>>> {
+        let lines: Vec<&[u8]> = decoded
             .split(|&b| b == b'\n')
             .map(|line| line.strip_suffix(b"\r").unwrap_or(line))
-            .filter(|line| !line.iter().all(u8::is_ascii_whitespace))
-            .map(<[u8]>::to_vec)
-            .collect()
+            .collect();
+        if lines.iter().any(|line| line.len() > cap) {
+            return None;
+        }
+        Some(
+            lines
+                .into_iter()
+                .filter(|line| !line.iter().all(u8::is_ascii_whitespace))
+                .map(<[u8]>::to_vec)
+                .collect(),
+        )
     }
 
     /// Feed `chunks` through a fresh `NdjsonFramer` and collect every record.
@@ -210,6 +239,43 @@ pub(crate) mod tests {
         assert_eq!(records, vec![b"12345678".to_vec()]);
     }
 
+    /// The cap counts a CRLF line without its `\r`, however the line is
+    /// split across pushes.
+    #[test]
+    fn a_crlf_line_at_the_record_cap_frames() {
+        let at_cap: [&[&[u8]]; 5] = [
+            &[b"12345678\r\n"],
+            &[b"12345678\r", b"\n"],
+            &[b"12345678\r", b"", b"\n"],
+            &[b"12345678\r"],
+            &[b"1234567\r\r\n"],
+        ];
+        for chunks in at_cap {
+            let record = chunks.concat();
+            let record = record.strip_suffix(b"\n").unwrap_or(&record);
+            let record = record.strip_suffix(b"\r").unwrap_or(record);
+            assert_eq!(
+                frame_all(8, chunks).ok(),
+                Some(vec![record.to_vec()]),
+                "{chunks:?}"
+            );
+        }
+
+        let over_cap: [&[&[u8]]; 4] = [
+            &[b"12345678\r\r\n"],
+            &[b"12345678\rx\n"],
+            &[b"12345678\r", b"x"],
+            &[b"1234567\r", b"x"],
+        ];
+        for chunks in over_cap {
+            let err = frame_all(8, chunks).unwrap_err();
+            assert!(
+                err.to_string().contains("max_record_bytes"),
+                "{chunks:?}: {err}"
+            );
+        }
+    }
+
     #[test]
     fn record_framer_is_object_safe() {
         // Compiles only if the trait is dyn-compatible (the seam's contract).
@@ -250,14 +316,21 @@ pub(crate) mod tests {
 
     proptest! {
         /// The framer is a pure function of the byte stream: any two chunkings
-        /// of the same bytes yield the reference framing. This determinism is
-        /// what makes resume-by-record-index safe for every streaming source
-        /// that reuses `NdjsonFramer`.
+        /// of the same bytes yield the reference framing, or the cap error.
+        /// This determinism is what makes resume-by-record-index safe for
+        /// every streaming source that reuses `NdjsonFramer`. The cap sits
+        /// within two bytes of the longest line, so that line, CRLF or not,
+        /// lands on each side of it.
         #[test]
-        fn line_framing_is_chunking_independent(stream in arb_stream()) {
-            let expected = reference_frames(&stream);
+        fn line_framing_is_chunking_independent(
+            stream in arb_stream(),
+            slack in -2..=2isize,
+        ) {
+            let longest = stream.split(|&b| b == b'\n').map(<[u8]>::len).max().unwrap_or(0);
+            let cap = longest.saturating_add_signed(slack);
+            let expected = reference_frames(&stream, cap);
             for split in 0..=stream.len() {
-                let framed = frame_all(TEST_CAP, &[&stream[..split], &stream[split..]]).unwrap();
+                let framed = frame_all(cap, &[&stream[..split], &stream[split..]]).ok();
                 prop_assert_eq!(&framed, &expected, "split at {}", split);
             }
         }

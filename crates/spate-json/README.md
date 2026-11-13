@@ -71,8 +71,8 @@ that payload's offset.
 A source that frames its own byte stream, such as the S3 source, takes this
 crate's `NdjsonFramer`. It is a bounded, chunk-fed framer: the source feeds it
 an object in chunks, and it cuts a record at each `\n`, strips one trailing `\r`
-and skips blank lines. A line longer than the bound it is built with is an
-error. `S3Source::with_framer` takes a factory that builds one per object, and
+and skips blank lines. A line longer than the bound it is built with, not
+counting that `\r`, is an error. `S3Source::with_framer` takes a factory that builds one per object, and
 `s3_backfill.rs` wires one in.
 
 Exactly one side frames. A source with a framer hands over one record per

@@ -231,14 +231,19 @@ message `cpu features`. Its fields are:
   target turns on by default.
 - `detected`: the SIMD features the process can use on this host.
 
-Both lists cover only the SIMD features that the parsing and decompression
-libraries choose their code by, so a feature outside that set appears in
-neither.
+Both lists cover a fixed set of SIMD features: the ones the parsing and
+decompression libraries choose their code by, and a few wider ones that no
+library uses yet. A feature outside that set appears in neither list.
 
-The libraries a pipeline uses for parsing and decompression choose their SIMD
-code at run time, from the features the CPU reports. A virtual machine can hide
-features that its physical CPU has, so two hosts with the same CPU model can
-report different `detected` lists.
+In a default x86_64 build, the parsing and decompression libraries check at run
+time for the features they use, so the host decides which code runs.
+
+On aarch64, NEON is part of the target's baseline, so the build compiles the
+NEON code in. On aarch64 Linux, the CRC instructions are checked for at run
+time.
+
+A virtual machine can hide features that its physical CPU has, so two hosts
+with the same CPU model can report different `detected` lists.
 
 Every feature in `compiled` also appears in `detected`, because a feature the
 build compiles in is reported as present without asking the CPU.

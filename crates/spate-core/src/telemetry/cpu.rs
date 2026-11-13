@@ -1,9 +1,12 @@
 //! The SIMD features the process can use, logged once when the first pipeline
 //! starts.
 //!
-//! Every SIMD path in a pipeline belongs to a dependency that picks it at run
-//! time, so the host decides which one runs. A virtual machine's CPU model can
-//! hide features the physical CPU has.
+//! In a default x86_64 build, each dependency that uses a feature in
+//! [`SIMD_FEATURES`] checks for it at run time, so the host decides which code
+//! runs. On aarch64, NEON is in the target's baseline, so the build compiles
+//! the NEON code in. `crc` is checked at run time on aarch64 Linux and is in
+//! the baseline on macOS. A virtual machine's CPU model can hide features the
+//! physical CPU has.
 //!
 //! Both lists cover only the rows of [`SIMD_FEATURES`]. `compiled` lists the
 //! rows the build compiles in, the target's defaults included, so a raised
@@ -45,9 +48,9 @@ macro_rules! simd_features {
 /// The features the decode and decompression paths dispatch on at run time:
 /// `memchr` and `simdutf8` on `avx2`, `simd-json` on `avx2` with `pclmulqdq`
 /// and then `sse4.2`, `simdutf8` on `sse4.2`, `zlib-rs` on `avx2` with `bmi1`
-/// and `bmi2`, and on `pclmulqdq`, `sse4.1`, `neon` and `crc`, and libzstd on
-/// `bmi1` with `bmi2`. Then the wider AVX-512 and SVE features a
-/// later path may take, so a host that hides part of AVX-512 still records it.
+/// and `bmi2`, and on `pclmulqdq` with `sse4.1`, and libzstd on `bmi1` with
+/// `bmi2`. Then the wider AVX-512 features a later path may take, so a host
+/// that hides part of AVX-512 still records it.
 #[doc(hidden)]
 #[cfg(target_arch = "x86_64")]
 pub const SIMD_FEATURES: &[SimdFeature] = simd_features!(
@@ -58,7 +61,10 @@ pub const SIMD_FEATURES: &[SimdFeature] = simd_features!(
 
 /// The SIMD features the process reports, in the order it lists them.
 ///
-/// See the x86_64 table for the consumers behind each entry.
+/// `neon` is in the target's baseline, and `memchr`, `simdutf8`, `simd-json`,
+/// `zlib-rs` and libzstd compile their NEON code in. `zlib-rs` takes `crc`
+/// for the gzip checksum, and checks for it at run time where the baseline
+/// lacks it, as on Linux. Then the SVE features a later path may take.
 #[doc(hidden)]
 #[cfg(target_arch = "aarch64")]
 pub const SIMD_FEATURES: &[SimdFeature] =

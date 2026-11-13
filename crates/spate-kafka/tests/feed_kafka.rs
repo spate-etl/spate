@@ -1228,18 +1228,12 @@ struct FeedAttempts {
 
 impl FeedAttempts {
     fn new(brokers: &str) -> FeedAttempts {
-        let consumer: BaseConsumer = support::raw_config()
-            .set("bootstrap.servers", brokers)
-            .set("group.id", spate_test::unique_name("attempts-uncommitted"))
-            .set("isolation.level", "read_uncommitted")
-            .build()
-            .expect("reader");
-        let mut tpl = rdkafka::TopicPartitionList::new();
-        for partition in 0..ATTEMPT_PARTITIONS {
-            tpl.add_partition_offset(ATTEMPT, partition, rdkafka::Offset::Beginning)
-                .unwrap();
-        }
-        consumer.assign(&tpl).unwrap();
+        let consumer = support::from_start(
+            brokers,
+            ATTEMPT,
+            ATTEMPT_PARTITIONS,
+            &[("isolation.level", "read_uncommitted")],
+        );
         FeedAttempts {
             consumer,
             counts: Vec::new(),

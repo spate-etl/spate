@@ -18,8 +18,6 @@ mod support;
 
 use support::Raw as _;
 
-use bytes::BytesMut;
-use rdkafka::message::{Headers, Message};
 use rdkafka::types::RDKafkaRespErr;
 use spate_core::clock::SystemClock;
 use spate_core::clock::tokio::{Clock as IoClock, Sleep, TestClock as IoTestClock};
@@ -28,18 +26,19 @@ use spate_core::deser::Owned;
 use spate_core::error::{ErrorClass, SinkError};
 use spate_core::pipeline::{Pipeline, RuntimeOptions};
 use spate_core::record::{PartitionId, Record};
-use spate_core::sink::{RowEncoder, SealedBatch, ShardWriter, SinkMetricsCtx};
+use spate_core::sink::{SealedBatch, ShardWriter, SinkMetricsCtx};
 use spate_core::source::LaneId;
 use spate_kafka::sink::{KafkaEncoder, KafkaMessage, KafkaSink, KafkaSinkConfig, MessageEncoder};
 use spate_test::{
-    HANG, PipelineRun, memory_source, passthrough_runtime, record, unique_name, wait_until,
+    HANG, PipelineRun, memory_source, metric_series, passthrough_runtime, unique_name, wait_until,
 };
 use std::panic::RefUnwindSafe;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use support::MockKafka;
-use support::consume;
+use support::sink::sealed;
+use support::{Read, consume};
 
 const TOPIC: &str = "orders-out";
 
@@ -59,26 +58,11 @@ fn sink(brokers: &str, extra: &str) -> KafkaSink {
     spate_kafka::sink::build(sink_config(brokers, extra)).expect("sink build")
 }
 
-/// One consumed message: key, payload (`None` = tombstone), headers.
-type Consumed = (Option<Vec<u8>>, Option<Vec<u8>>, Vec<(String, Vec<u8>)>);
-
 /// Read `n` messages back from the mock cluster (order within the single
 /// partition is the produce order).
-fn consume_all(brokers: &str, n: usize) -> Vec<Consumed> {
+fn consume_all(brokers: &str, n: usize) -> Vec<Read> {
     consume(brokers, TOPIC, "verify", n, |message| {
-        let headers = message
-            .headers()
-            .map(|hs| {
-                hs.iter()
-                    .map(|h| (h.key.to_string(), h.value.unwrap_or(&[]).to_vec()))
-                    .collect()
-            })
-            .unwrap_or_default();
-        Some((
-            message.key().map(<[u8]>::to_vec),
-            message.payload().map(<[u8]>::to_vec),
-            headers,
-        ))
+        Some(Read::of(message))
     })
 }
 
@@ -119,24 +103,12 @@ async fn write_batch_round_trips_keys_headers_payloads() {
     let brokers = cluster.bootstrap_servers();
     let sink = sink(&brokers, "");
 
-    let mut encoder = KafkaEncoder::new(StructuredEncoder);
-    let mut frame = BytesMut::new();
-    let inputs: &[&[u8]] = &[
+    let inputs: [&[u8]; 3] = [
         b"user-1|trace-a|first payload",
         b"|  |second, keyless",
         b"user-2||__tombstone__",
     ];
-    for input in inputs {
-        encoder
-            .encode(&record(input.to_vec()), &mut frame)
-            .expect("encode");
-    }
-    let batch = SealedBatch {
-        rows: inputs.len() as u64,
-        bytes: frame.len() as u64,
-        frames: vec![frame.freeze()],
-        dedup_token: "unused-by-kafka".to_string(),
-    };
+    let batch = sealed(&mut KafkaEncoder::new(StructuredEncoder), inputs);
 
     sink.writer
         .write_batch(&sink.endpoints[0][0], &batch)
@@ -146,23 +118,27 @@ async fn write_batch_round_trips_keys_headers_payloads() {
     let consumed = consume_all(&brokers, 3);
     assert_eq!(
         consumed[0],
-        (
-            Some(b"user-1".to_vec()),
-            Some(b"first payload".to_vec()),
-            vec![("tag".to_string(), b"trace-a".to_vec())]
-        )
+        Read {
+            key: Some(b"user-1".to_vec()),
+            payload: Some(b"first payload".to_vec()),
+            headers: vec![("tag".to_string(), Some(b"trace-a".to_vec()))],
+        }
     );
     assert_eq!(
         consumed[1],
-        (
-            None,
-            Some(b"second, keyless".to_vec()),
-            vec![("tag".to_string(), b"  ".to_vec())]
-        )
+        Read {
+            key: None,
+            payload: Some(b"second, keyless".to_vec()),
+            headers: vec![("tag".to_string(), Some(b"  ".to_vec()))],
+        }
     );
     assert_eq!(
         consumed[2],
-        (Some(b"user-2".to_vec()), None, vec![]),
+        Read {
+            key: Some(b"user-2".to_vec()),
+            payload: None,
+            headers: vec![],
+        },
         "tombstone arrives as a null payload"
     );
 }
@@ -232,7 +208,7 @@ fn pipeline_commits_only_after_delivery_reports() {
     assert_eq!(report.exit_code(), 0, "clean drain: {report:?}");
 
     let consumed = consume_all(&brokers, 3);
-    let payloads: Vec<_> = consumed.iter().map(|(_, p, _)| p.clone()).collect();
+    let payloads: Vec<_> = consumed.iter().map(|m| m.payload.clone()).collect();
     assert_eq!(
         payloads,
         vec![
@@ -279,9 +255,9 @@ fn shutdown_with_inflight_data_commits_only_delivered() {
     let committed = handle.last_committed(p).unwrap_or(0);
     let expected: &[&[u8]] = &[b"one", b"two", b"three", b"four", b"five"];
     let consumed = consume_all(&brokers, usize::try_from(committed).expect("count"));
-    for (i, (_, payload, _)) in consumed.iter().enumerate() {
+    for (i, message) in consumed.iter().enumerate() {
         assert_eq!(
-            payload.as_deref(),
+            message.payload.as_deref(),
             Some(expected[i]),
             "committed offset {i} must be backed by its message"
         );
@@ -366,17 +342,7 @@ async fn delivery_failure_maps_to_retryable() {
     let sink = sink(&brokers, "delivery_timeout: 2s\n");
     cluster.broker_down(1).expect("broker down");
 
-    let mut encoder = sink.encoder_bytes();
-    let mut frame = BytesMut::new();
-    encoder
-        .encode(&record(b"doomed".to_vec()), &mut frame)
-        .expect("encode");
-    let batch = SealedBatch {
-        rows: 1,
-        bytes: frame.len() as u64,
-        frames: vec![frame.freeze()],
-        dedup_token: "unused".to_string(),
-    };
+    let batch = sealed(&mut sink.encoder_bytes(), [b"doomed".as_slice()]);
 
     let err = sink
         .writer
@@ -484,8 +450,8 @@ fn statistics_populate_kafka_sink_fixed_families() {
     wait_until(HANG, "fixed families rendered", || {
         prom.run_upkeep();
         let rendered = prom.render();
-        rendered.contains("spate_kafka_tx_requests_total")
-            && rendered.contains("spate_kafka_produce_queue_messages")
+        !metric_series(&rendered, "spate_kafka_tx_requests_total", &[]).is_empty()
+            && !metric_series(&rendered, "spate_kafka_produce_queue_messages", &[]).is_empty()
     });
 }
 
@@ -519,19 +485,10 @@ fn sink_on(brokers: &str, extra: &str, io_clock: Arc<dyn IoClock + RefUnwindSafe
 
 /// A batch of `rows` one-byte payloads.
 fn rows_batch(sink: &KafkaSink, rows: u64) -> SealedBatch {
-    let mut encoder = sink.encoder_bytes();
-    let mut frame = BytesMut::new();
-    for _ in 0..rows {
-        encoder
-            .encode(&record(b"x".to_vec()), &mut frame)
-            .expect("encode");
-    }
-    SealedBatch {
-        rows,
-        bytes: frame.len() as u64,
-        frames: vec![frame.freeze()],
-        dedup_token: "unused".to_string(),
-    }
+    sealed(
+        &mut sink.encoder_bytes(),
+        (0..rows).map(|_| b"x".as_slice()),
+    )
 }
 
 /// Runs `write_batch` for `batch` on `io` and returns its handle.

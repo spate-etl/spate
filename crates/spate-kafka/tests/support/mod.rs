@@ -8,7 +8,7 @@ use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
 use rdkafka::client::{ClientContext, DefaultClientContext};
 use rdkafka::config::RDKafkaLogLevel;
 use rdkafka::consumer::{BaseConsumer, CommitMode, Consumer, ConsumerContext};
-use rdkafka::message::BorrowedMessage;
+use rdkafka::message::{BorrowedMessage, Headers as _, Message as _};
 use rdkafka::producer::{BaseProducer, BaseRecord, Producer};
 use rdkafka::types::RDKafkaRespErr;
 use rdkafka::{ClientConfig, Offset, TopicPartitionList};
@@ -25,13 +25,14 @@ use spate_test_support::KafkaBroker;
 use std::mem::ManuallyDrop;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use testcontainers::ContainerRequest;
 
 pub(crate) mod feed;
 pub(crate) mod group;
 pub(crate) mod latest;
 pub(crate) mod mock;
+pub(crate) mod sink;
 pub(crate) mod wire;
 
 #[allow(unused_imports, reason = "each target uses a different subset")]
@@ -753,20 +754,78 @@ pub(crate) fn consume<T>(
         .build()
         .expect("consumer");
     consumer.subscribe(&[topic]).expect("subscribe");
-    let deadline = Instant::now() + HANG;
     let mut out = Vec::new();
-    while out.len() < n {
-        assert!(
-            Instant::now() < deadline,
-            "{topic}: consumed only {} of {n} within {:?}",
-            out.len(),
-            HANG
-        );
-        if let Some(message) = consumer.poll(Duration::from_millis(250)) {
-            out.extend(keep(&message.expect("message")));
+    spate_test::wait_for_value(
+        HANG,
+        &format!("{n} messages kept from {topic}"),
+        || {
+            if let Some(message) = consumer.poll(Duration::from_millis(250)) {
+                out.extend(keep(&message.expect("message")));
+            }
+            out.len()
+        },
+        |kept| *kept >= n,
+    );
+    out
+}
+
+/// One message as read back from a topic: key, value and headers.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Read {
+    pub(crate) key: Option<Vec<u8>>,
+    pub(crate) payload: Option<Vec<u8>>,
+    pub(crate) headers: Vec<(String, Option<Vec<u8>>)>,
+}
+
+impl Read {
+    /// A copy of `message`'s key, value and headers.
+    pub(crate) fn of(message: &BorrowedMessage<'_>) -> Read {
+        Read {
+            key: message.key().map(<[u8]>::to_vec),
+            payload: message.payload().map(<[u8]>::to_vec),
+            headers: message
+                .headers()
+                .map(|hs| {
+                    hs.iter()
+                        .map(|h| (h.key.to_owned(), h.value.map(<[u8]>::to_vec)))
+                        .collect()
+                })
+                .unwrap_or_default(),
         }
     }
-    out
+
+    pub(crate) fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(k, _)| k == name)
+            .and_then(|(_, v)| std::str::from_utf8(v.as_deref()?).ok())
+    }
+}
+
+/// A consumer assigned partitions `0..partitions` of `topic` from their
+/// start, outside any group's coordination, with `settings` added to its
+/// config.
+pub(crate) fn from_start(
+    brokers: &str,
+    topic: &str,
+    partitions: i32,
+    settings: &[(&str, &str)],
+) -> BaseConsumer {
+    let mut config = raw_config();
+    config
+        .set("bootstrap.servers", brokers)
+        .set("group.id", spate_test::unique_name("from-start"));
+    for (key, value) in settings {
+        config.set(*key, *value);
+    }
+    let consumer: BaseConsumer = config.build().expect("reader");
+    let mut tpl = TopicPartitionList::new();
+    for partition in 0..partitions {
+        tpl.add_partition_offset(topic, partition, Offset::Beginning)
+            .expect("tpl entry");
+    }
+    consumer.assign(&tpl).expect("assign");
+    consumer
 }
 
 /// The reason `outcome` failed retryably, which the runtime logs and carries
@@ -847,7 +906,7 @@ pub(crate) fn complete_next_revocation(
     source: &mut KafkaSource,
     mut drain: impl FnMut() -> Vec<(PartitionId, i64)>,
 ) {
-    spate_test::wait_until(Duration::from_secs(120), "the revocation", || {
+    spate_test::wait_until(HANG, "the revocation", || {
         let SourceEvent::LanesRevoked { lanes, barrier } = source
             .poll_events(Duration::from_millis(200))
             .expect("poll_events")
@@ -886,27 +945,50 @@ pub(crate) fn drain_lane(
 ) -> Vec<(Vec<u8>, Vec<u8>, i64)> {
     let mut got = Vec::new();
     let mut errors = Vec::new();
-    let deadline = Instant::now() + timeout;
-    while got.len() < want {
-        assert!(
-            Instant::now() < deadline,
-            "lane delivered {}/{want} before deadline; retryable errors: {errors:?}",
-            got.len()
-        );
-        serve_events(source, &mut errors);
-        let Some(mut batch) = lane
-            .poll(64, Duration::from_millis(500))
-            .expect("lane poll")
-        else {
-            continue;
-        };
-        while let Some(raw) = batch.next_payload() {
-            got.push((
-                raw.bytes.to_vec(),
-                raw.key.unwrap_or(&[]).to_vec(),
-                raw.offset,
-            ));
-        }
-    }
+    spate_test::wait_for_value(
+        timeout,
+        &format!("{want} payloads from the lane"),
+        || {
+            serve_events(source, &mut errors);
+            if let Some(mut batch) = lane
+                .poll(64, Duration::from_millis(500))
+                .expect("lane poll")
+            {
+                while let Some(raw) = batch.next_payload() {
+                    got.push((
+                        raw.bytes.to_vec(),
+                        raw.key.unwrap_or(&[]).to_vec(),
+                        raw.offset,
+                    ));
+                }
+            }
+            (got.len(), errors.clone())
+        },
+        |(delivered, _)| *delivered >= want,
+    );
     got
+}
+
+/// Serve `source` until `partitions` partitions publish
+/// `spate_source_lag_records` in `statistics`, and return those series.
+///
+/// Waiting for the first series is not enough: lag is per partition, so a
+/// snapshot can carry a number for one partition while another still reads
+/// `-1`, which publishes no series.
+pub(crate) fn await_lag_series(
+    source: &mut KafkaSource,
+    statistics: &metrics_exporter_prometheus::PrometheusHandle,
+    partitions: usize,
+) -> Vec<spate_test::MetricSample> {
+    spate_test::wait_for_value(
+        HANG,
+        &format!("consumer lag on {partitions} partitions"),
+        || {
+            source
+                .poll_events(Duration::from_millis(100))
+                .expect("poll_events");
+            spate_test::metric_series(&statistics.render(), names::SOURCE_LAG_RECORDS, &[])
+        },
+        |series| series.len() == partitions,
+    )
 }

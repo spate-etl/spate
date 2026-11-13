@@ -4,13 +4,14 @@
 //! topics.
 
 use super::Raw as _;
+use super::{Read, from_start};
 use object_store::ObjectStoreExt as _;
+use rdkafka::Offset;
 use rdkafka::admin::{AdminClient, NewTopic, TopicReplication};
 use rdkafka::client::DefaultClientContext;
 use rdkafka::consumer::{BaseConsumer, Consumer};
-use rdkafka::message::{Header, Headers, Message, OwnedHeaders};
+use rdkafka::message::{BorrowedMessage, Header, Message, OwnedHeaders};
 use rdkafka::producer::{BaseProducer, BaseRecord, Producer};
-use rdkafka::{Offset, TopicPartitionList};
 use spate_core::clock::TestClock as StopClock;
 use spate_core::clock::tokio::TestClock;
 use spate_core::config::{FeedSection, PipelineConfig};
@@ -516,54 +517,15 @@ pub(crate) fn committed(brokers: &str, group: &str, topic: &str) -> Option<i64> 
     }
 }
 
-/// One message as read back from a topic: key, value and headers.
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) struct Read {
-    pub(crate) key: Option<Vec<u8>>,
-    pub(crate) payload: Option<Vec<u8>>,
-    pub(crate) headers: Vec<(String, Option<Vec<u8>>)>,
-}
-
-impl Read {
-    pub(crate) fn header(&self, name: &str) -> Option<&str> {
-        self.headers
-            .iter()
-            .find(|(k, _)| k == name)
-            .and_then(|(_, v)| std::str::from_utf8(v.as_deref()?).ok())
-    }
-}
-
 /// The first `n` messages of partition 0 of `topic`, read from its start.
 pub(crate) fn read_topic(brokers: &str, topic: &str, n: usize) -> Vec<Read> {
-    let consumer: BaseConsumer = super::raw_config()
-        .set("bootstrap.servers", brokers)
-        .set("group.id", format!("read-{topic}"))
-        .build()
-        .expect("reader");
-    let mut tpl = TopicPartitionList::new();
-    tpl.add_partition_offset(topic, 0, Offset::Beginning)
-        .unwrap();
-    consumer.assign(&tpl).unwrap();
-    let mut got = Vec::new();
-    wait_until(HANG, &format!("{n} messages on {topic}"), || {
-        while let Some(message) = consumer.poll(Duration::from_millis(100)) {
-            let message = message.expect("read");
-            got.push(Read {
-                key: message.key().map(<[u8]>::to_vec),
-                payload: message.payload().map(<[u8]>::to_vec),
-                headers: message
-                    .headers()
-                    .map(|hs| {
-                        hs.iter()
-                            .map(|h| (h.key.to_owned(), h.value.map(<[u8]>::to_vec)))
-                            .collect()
-                    })
-                    .unwrap_or_default(),
-            });
-        }
-        got.len() >= n
-    });
-    got
+    let consumer = from_start(brokers, topic, 1, &[]);
+    read_kept(
+        &consumer,
+        n,
+        &format!("{n} messages on {topic}"),
+        |message| Some(Read::of(message)),
+    )
 }
 
 /// One attempt record as read back: its partition, its key, and its count,
@@ -575,31 +537,33 @@ pub(crate) type AttemptRecord = (i32, String, Option<u32>);
 /// partition. A record whose key is not a publish identity, which always
 /// holds a `/`, is the gate's fence and is skipped.
 pub(crate) fn read_attempts(brokers: &str, partitions: i32, n: usize) -> Vec<AttemptRecord> {
-    let consumer: BaseConsumer = super::raw_config()
-        .set("bootstrap.servers", brokers)
-        .set("group.id", spate_test::unique_name("read-attempts"))
-        .build()
-        .expect("reader");
-    let mut tpl = TopicPartitionList::new();
-    for partition in 0..partitions {
-        tpl.add_partition_offset(ATTEMPT, partition, Offset::Beginning)
-            .unwrap();
-    }
-    consumer.assign(&tpl).unwrap();
+    let consumer = from_start(brokers, ATTEMPT, partitions, &[]);
+    read_kept(&consumer, n, &format!("{n} attempt records"), |message| {
+        let key = String::from_utf8(message.key().expect("keyed").to_vec()).unwrap();
+        if !key.contains('/') {
+            return None;
+        }
+        let count = message.payload().map(|value| {
+            let record: serde_json::Value = serde_json::from_slice(value).unwrap();
+            assert_eq!(record["v"], 1, "{record}");
+            u32::try_from(record["attempts"].as_u64().unwrap()).unwrap()
+        });
+        Some((message.partition(), key, count))
+    })
+}
+
+/// What `keep` returns for the messages `consumer` reads, once it has
+/// returned at least `n` values; `what` names them in a hang.
+fn read_kept<T>(
+    consumer: &BaseConsumer,
+    n: usize,
+    what: &str,
+    mut keep: impl FnMut(&BorrowedMessage<'_>) -> Option<T>,
+) -> Vec<T> {
     let mut got = Vec::new();
-    wait_until(HANG, &format!("{n} attempt records"), || {
+    wait_until(HANG, what, || {
         while let Some(message) = consumer.poll(Duration::from_millis(100)) {
-            let message = message.expect("read");
-            let key = String::from_utf8(message.key().expect("keyed").to_vec()).unwrap();
-            if !key.contains('/') {
-                continue;
-            }
-            let count = message.payload().map(|value| {
-                let record: serde_json::Value = serde_json::from_slice(value).unwrap();
-                assert_eq!(record["v"], 1, "{record}");
-                u32::try_from(record["attempts"].as_u64().unwrap()).unwrap()
-            });
-            got.push((message.partition(), key, count));
+            got.extend(keep(&message.expect("read")));
         }
         got.len() >= n
     });

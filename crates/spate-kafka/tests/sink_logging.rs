@@ -1,13 +1,13 @@
 //! Kafka sink logs emitted from the producer poll thread.
 
-use bytes::BytesMut;
 #[path = "support/mock.rs"]
 mod mock;
+#[path = "support/sink.rs"]
+mod sink;
 
 use mock::MockKafka;
-use spate_core::checkpoint::AckRef;
-use spate_core::record::{PartitionId, Record, RecordMeta};
-use spate_core::sink::{RowEncoder, SealedBatch, ShardWriter};
+use sink::sealed;
+use spate_core::sink::ShardWriter;
 use spate_kafka::sink::KafkaSinkConfig;
 use spate_test::LogCapture;
 use std::time::Duration;
@@ -32,26 +32,7 @@ async fn producer_debug_logs_reach_tracing() {
     cfg.rdkafka.insert("debug".into(), "msg".into());
     let sink = spate_kafka::sink::build(cfg).expect("sink build");
 
-    let (ack, _rx) = AckRef::test_pair();
-    let record = Record {
-        payload: b"payload".to_vec(),
-        meta: RecordMeta {
-            partition: PartitionId(0),
-            offset: 0,
-            event_time_ms: 0,
-            key_hash: None,
-        },
-        ack,
-    };
-    let mut encoder = sink.encoder_bytes();
-    let mut frame = BytesMut::new();
-    encoder.encode(&record, &mut frame).expect("encode");
-    let batch = SealedBatch {
-        rows: 1,
-        bytes: frame.len() as u64,
-        frames: vec![frame.freeze()],
-        dedup_token: "unused-by-kafka".to_string(),
-    };
+    let batch = sealed(&mut sink.encoder_bytes(), [b"payload".as_slice()]);
     sink.writer
         .write_batch(&sink.endpoints[0][0], &batch)
         .await

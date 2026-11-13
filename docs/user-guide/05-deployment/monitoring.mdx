@@ -143,12 +143,12 @@ of [Metrics](../../METRICS.md).
   longest-waiting partition watermark has waited on its head batch. A pending
   batch holds the watermark while a sink retries, and a failed batch holds it
   for good, because the watermark never passes unacknowledged data (the
-  at-least-once invariant). An idle pipeline reads 0 because nothing is
-  pending, so the alert needs no condition on the source record rate. A
-  healthy pipeline at low volume holds its head batch for up to
-  `checkpoint.interval` plus the longest sink `batch.linger` plus the write,
-  so set the threshold above that. The pipeline self-terminates after `checkpoint.stalled_fail_after` (default 120s)
-  behind a permanently failed batch. On a
+  at-least-once invariant). An idle pipeline reads 0 because nothing is pending,
+  so the alert needs no condition on the source record rate. A healthy pipeline
+  at low volume holds its head batch for up to `checkpoint.interval` plus the
+  longest sink `batch.linger` plus the write, so set the threshold above that.
+  The pipeline self-terminates after `checkpoint.stalled_fail_after` (default
+  120s) behind a permanently failed batch. On a
   [seeded S3 run](../04-connectors/sources/s3/README.mdx#a-run-on-a-seeded-feed)
   the source fails each unit in the batch back to its feed. You want the alert
   regardless. Restarts that don't clear the cause will loop.

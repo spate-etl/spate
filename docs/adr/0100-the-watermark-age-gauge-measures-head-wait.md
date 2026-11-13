@@ -54,7 +54,8 @@ limit holds only for pipelines the builder assembles, since a hand-assembled
 runtime brings its own sink pool, and a new key would still restart such a
 pipeline on upgrade. Failing a pending head at `stalled_fail_after` would cap
 the unbounded default retry at 120 s, and would change what `Source::stalled`
-tells a seeded S3 feed under [ADR-0096](0096-a-seeded-run-fails-back-a-unit-the-sink-abandoned.md).
+tells a seeded S3 feed under
+[ADR-0096](0096-a-seeded-run-fails-back-a-unit-the-sink-abandoned.md).
 
 ### Consequences
 
@@ -81,5 +82,6 @@ tells a seeded S3 feed under [ADR-0096](0096-a-seeded-run-fails-back-a-unit-the-
 
 Issue [#1028](https://github.com/spate-etl/spate/issues/1028).
 [ADR-0002](0002-at-least-once-delivery.md) accepts a watermark stalled behind a
-failed batch as the failure mode. [Monitoring](../user-guide/05-deployment/monitoring.mdx)
-gives the alert, and [Metrics](../METRICS.md) describes the gauge.
+failed batch as the failure mode.
+[Monitoring](../user-guide/05-deployment/monitoring.mdx) gives the alert, and
+[Metrics](../METRICS.md) describes the gauge.

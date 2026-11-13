@@ -25,9 +25,9 @@ use std::time::{Duration, Instant};
 use support::feed::{
     ATTEMPT, ATTEMPT_PARTITIONS, BoundedJob, DEAD, FeedClock, ON_MOCK, RETRY, WORK, assert_stalled,
     bounded_section, committed, data_dir, direct, direct_on, exists, feed_yaml, high_watermark,
-    high_watermarks, launch, launch_bounded, launch_customized, launch_on, launch_stopping,
-    list_once, produce_copy, produce_raw, publish, publish_to, publisher_on_mock, read_attempts,
-    read_depth, read_topic, recs, run_to_exit, sorted, stage, written,
+    high_watermarks, hold_open, launch, launch_bounded, launch_customized, launch_on,
+    launch_stopping, list_once, produce_copy, produce_raw, publish, publish_to, publisher_on_mock,
+    read_attempts, read_depth, read_topic, recs, run_to_exit, sorted, stage, written,
 };
 use support::{
     Marker, MockKafka, RawBatch, corrupt_batch, produce_batch, try_produce_batch, write_marker,
@@ -1199,6 +1199,39 @@ fn a_bounded_job_that_published_nothing_ends_completed() {
     let worker = launch_bounded(ON_MOCK, &data, &section, &clock);
     let report = run_to_exit(&worker, &clock);
     assert_eq!(report.state, ExitState::Completed);
+}
+
+/// A group commit above the work partition's end, as an unclean leader
+/// election leaves one, holds a bounded job open while no member reads the
+/// partition. Once the worker joins, its fetch above the end resets to the log
+/// start, it reads every unit and the job ends `Completed`. Regression for
+/// #1759.
+#[test]
+fn a_commit_above_the_end_holds_a_bounded_job_until_a_member_reads() {
+    let cluster = cluster(1);
+    let brokers = cluster.bootstrap_servers();
+    let job = listed(&brokers, "above-end");
+    let (a, b) = (recs("a", 2), recs("b", 2));
+    job.publish("a.ndjson", &a);
+    job.publish("b.ndjson", &b);
+    support::commit_at(&brokers, &job.group, WORK, 5);
+    // Each refusal costs the worker one join interval, about a second, so
+    // these outlast the hold below.
+    cluster.request_errors(
+        rdkafka::types::RDKafkaApiKey::JoinGroup,
+        &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_COORDINATOR_LOAD_IN_PROGRESS; 600],
+    );
+
+    let clock = TestClock::frozen();
+    let worker = launch_bounded(ON_MOCK, &job.data, &job.section, &clock);
+    hold_open(&worker, &clock);
+    assert!(written(&worker.script).is_empty(), "the worker joined");
+    cluster.clear_request_errors(rdkafka::types::RDKafkaApiKey::JoinGroup);
+    wait_until(HANG, "every unit is read and committed", || {
+        written(&worker.script) == sorted([a.clone(), b.clone()].concat())
+            && job.committed(WORK) == Some(2)
+    });
+    assert_eq!(run_to_exit(&worker, &clock).state, ExitState::Completed);
 }
 
 /// Pins that a message with no unit, which goes to the dead-letter topic at

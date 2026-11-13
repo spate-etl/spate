@@ -516,6 +516,20 @@ pub(crate) fn committed_by(
         .collect()
 }
 
+/// Commit `offset` for partition 0 of `topic` in `group` through a new
+/// [`probe`] outside the group, sent again while the broker refuses. The
+/// broker checks no offset, so a commit above the partition's end stands as a
+/// truncation leaves one.
+pub(crate) fn commit_at(brokers: &str, group: &str, topic: &str, offset: i64) {
+    let probe = probe(brokers, group);
+    let mut tpl = TopicPartitionList::new();
+    tpl.add_partition_offset(topic, 0, Offset::Offset(offset))
+        .expect("offset");
+    spate_test::wait_until(HANG, "the commit lands", || {
+        probe.commit(&tpl, CommitMode::Sync).is_ok()
+    });
+}
+
 /// The lag `pipeline` publishes for `partition`, or `None` before it does.
 pub(crate) fn lag_of(rendered: &str, pipeline: &str, partition: i32) -> Option<f64> {
     spate_test::metric_value(

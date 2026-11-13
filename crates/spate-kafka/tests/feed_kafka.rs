@@ -877,6 +877,33 @@ fn staged(job: &BoundedJob, tag: &str) -> (Unit, Vec<String>) {
     (stage(&job.data, &format!("{tag}.ndjson"), &rows), rows)
 }
 
+/// Pins that a worker assigned a work partition whose group commit is above
+/// its end reads every unit from the log start and ends the job `Completed`.
+/// The broker keeps that commit and answers the fetch above the end as out of
+/// range, which is how a bounded job held by such a commit ends.
+#[test]
+#[ignore = "requires Docker"]
+fn a_member_reads_a_partition_whose_commit_is_above_its_end() {
+    let container = broker().start().expect("start kafka container");
+    let port = container.get_host_port_ipv4(KAFKA_PORT).expect("port");
+    let brokers = format!("127.0.0.1:{port}");
+    create_topics(&brokers);
+    let job = listed(&brokers, "above-end", "");
+    let (a, b) = (recs("a", 2), recs("b", 2));
+    job.publish("a.ndjson", &a);
+    job.publish("b.ndjson", &b);
+    support::commit_at(&brokers, &job.group, WORK, 5);
+    assert_eq!(job.committed(WORK), Some(5));
+
+    let clock = TestClock::frozen();
+    let worker = launch_bounded(KafkaFeed::connect, &job.data, &job.section, &clock);
+    wait_until(HANG, "every unit is read and committed", || {
+        written(&worker.script) == sorted([a.clone(), b.clone()].concat())
+            && job.committed(WORK) == Some(2)
+    });
+    assert_eq!(run_to_exit(&worker, &clock).state, ExitState::Completed);
+}
+
 /// Wait until `job` has read `rows` and committed to the end of `topic`'s log,
 /// then until no open transaction holds that end back.
 fn wait_for_end(job: &BoundedJob, worker: &Worker, rows: &[String], topic: &str) {

@@ -94,7 +94,7 @@
 //! because the array framing's atomicity lives inside `serde` rather than in
 //! this crate, and `ndjson_fail_bad_last` already prices the
 //! decode-everything-emit-nothing shape. The three keyed cases are dropped
-//! because a key adds a few per cent to a batch, below the 5% floor, and the
+//! because a key adds one hash to a batch, far below the 5% floor, and the
 //! counted tier already prices it against each case's keyless twin.
 //!
 //! Nothing here pins an iteration count. The harness calibrates every case to

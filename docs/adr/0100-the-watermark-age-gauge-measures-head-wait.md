@@ -68,20 +68,23 @@ tells a seeded S3 feed under
   `batch.linger` plus the write.
 - Bad, because liveness does not restart a pipeline whose sink client is
   wedged on a pending write. The alert is the only signal for that case.
-- Bad, because a new assignment epoch starts a fresh head, so a group that
-  rebalances during an outage restarts the reading at each rebalance.
+- Neutral, because a partition that a rebalance revokes keeps its head's age on
+  the gauge until each batch it had in flight is acknowledged or failed. A group
+  that rebalances during a sink outage keeps the reading rising, and the new
+  assignment's own heads join it once their batches register.
 
 ### Confirmation
 
-`a_pending_head_ages_the_watermark_gauge_until_the_watermark_moves` and
-`a_pending_head_neither_turns_liveness_nor_counts_as_a_stall` in
+`a_pending_head_ages_the_watermark_gauge_until_the_watermark_moves`,
+`a_rebalance_keeps_the_watermark_gauge_aging_until_the_held_batches_resolve`
+and `a_pending_head_neither_turns_liveness_nor_counts_as_a_stall` in
 `crates/spate-core/src/pipeline/tests.rs`, with the head-stamp unit tests in
 `crates/spate-core/src/checkpoint/tracker.rs` and `checkpointer.rs`.
 
 ## More information
 
-Issue [#1028](https://github.com/spate-etl/spate/issues/1028).
-[ADR-0002](0002-at-least-once-delivery.md) accepts a watermark stalled behind a
-failed batch as the failure mode.
-[Monitoring](../user-guide/05-deployment/monitoring.mdx) gives the alert, and
-[Metrics](../METRICS.md) describes the gauge.
+- Landed in the pull request that closes #1028.
+- [ADR-0002](0002-at-least-once-delivery.md) accepts a watermark stalled behind
+  a failed batch as the failure mode.
+- [Monitoring](../user-guide/05-deployment/monitoring.mdx) gives the alert, and
+  [Metrics](../METRICS.md) describes the gauge.

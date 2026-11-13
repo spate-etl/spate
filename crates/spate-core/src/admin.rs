@@ -65,7 +65,8 @@ pub struct HealthState {
     sinks_connected: AtomicBool,
     /// Per-pipeline-thread heartbeat, as millis since `epoch`.
     heartbeats: Vec<AtomicU64>,
-    /// Watermark age reported by the checkpointer, in millis.
+    /// How long the oldest watermark stalled behind a failed batch has
+    /// waited, in millis. Zero when no watermark is stalled.
     watermark_age_ms: AtomicU64,
     data_flowing: AtomicBool,
 }

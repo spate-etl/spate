@@ -6266,6 +6266,62 @@ fn a_pending_head_ages_the_watermark_gauge_until_the_watermark_moves() {
     let _ = h.join.join().unwrap();
 }
 
+/// A rebalance while batches stay pending, as during a sink outage, keeps the
+/// watermark gauge aging from the revoked partition's head: the new
+/// assignment registers nothing while the old batches hold the sink. The
+/// gauge falls to zero once the held batches resolve.
+#[test]
+fn a_rebalance_keeps_the_watermark_gauge_aging_until_the_held_batches_resolve() {
+    let clock = crate::clock::TestClock::frozen();
+    let interval = Duration::from_secs(60);
+    let mut cfg = test_config(1);
+    cfg.metrics.exporter = crate::config::MetricsExporter::Prometheus;
+    cfg.checkpoint.interval = interval;
+    let pipeline_name = cfg.pipeline.name.clone();
+    let handle = install_prometheus(&cfg);
+    let (h, acks) = start_with_pending_head(cfg, &clock);
+    let age = || {
+        family_series(
+            &handle.render(),
+            names::CHECKPOINT_WATERMARK_AGE_SECONDS,
+            &pipeline_name,
+        )
+    };
+
+    tick(&h, &clock, interval);
+    {
+        let mut script = h.script.lock().unwrap();
+        script.push_back(Script::Revoke(vec![LaneId(0)]));
+        script.push_back(Script::Assign(vec![LaneSpec {
+            id: LaneId(1),
+            partition: PartitionId(1),
+            batches: Vec::new(),
+        }]));
+    }
+    wait_until(Duration::from_secs(5), "the rebalance handled", || {
+        h.script.lock().unwrap().is_empty()
+    });
+    passes(&h, 3);
+    for _ in 0..5 {
+        tick(&h, &clock, interval);
+    }
+    let held = age();
+    assert!(
+        held.len() == 1 && held[0].value >= 360.0,
+        "a head pending for six intervals across a rebalance: {held:?}"
+    );
+
+    acks.release();
+    tick(&h, &clock, interval);
+    let resolved = age();
+    assert!(
+        resolved.len() == 1 && resolved[0].value == 0.0,
+        "nothing pending once the held batches resolved: {resolved:?}"
+    );
+    h.shutdown.trigger();
+    let _ = h.join.join().unwrap();
+}
+
 /// Pins that a batch held pending past both `watermark_stuck` and
 /// `stalled_fail_after` neither turns `/healthz` nor fails the run, and is
 /// never named to the source as a stall. Only a failed head does either; a

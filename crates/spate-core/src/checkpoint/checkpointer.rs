@@ -136,6 +136,12 @@ pub struct Checkpointer {
     /// enforce this: a revocation removes the tracker, so a re-add would look
     /// fresh.
     admitted_through: Option<PartitionId>,
+    /// Head stamps of trackers that a new epoch or a revocation dropped while
+    /// batches on them were unresolved, keyed by the epoch and partition their
+    /// late acknowledgments carry. Each stays until the last of those batches
+    /// resolves, so a sink outage that spans a rebalance keeps aging the
+    /// watermark gauge.
+    carried: FastMap<(u32, PartitionId), Carried>,
     /// Stamps the start of a stall and of each new head batch, so the checks
     /// and the gauge that age them read the same timeline.
     clock: SharedClock,
@@ -176,6 +182,7 @@ impl Checkpointer {
             trackers: FastMap::default(),
             gates: FastMap::default(),
             admitted_through: None,
+            carried: FastMap::default(),
             clock: Arc::new(SystemClock),
         }
     }
@@ -217,6 +224,9 @@ impl Checkpointer {
             "assignment epochs must be strictly increasing: {} -> {epoch}",
             self.epoch
         );
+        for (p, tracker) in std::mem::take(&mut self.trackers) {
+            self.carry(p, &tracker);
+        }
         self.epoch = epoch;
         self.trackers = partitions
             .iter()
@@ -298,8 +308,37 @@ impl Checkpointer {
     /// A partition revoked this way can only return in a *new* epoch.
     pub fn revoke(&mut self, partitions: &[PartitionId]) {
         for p in partitions {
-            self.trackers.remove(p);
+            if let Some(tracker) = self.trackers.remove(p) {
+                self.carry(*p, &tracker);
+            }
             self.gates.remove(p);
+        }
+    }
+
+    /// Keep `tracker`'s head stamp while batches on it are unresolved.
+    fn carry(&mut self, partition: PartitionId, tracker: &PartitionTracker) {
+        let Some(since) = tracker.head_since() else {
+            return;
+        };
+        let unresolved = tracker.unresolved_seqs();
+        if !unresolved.is_empty() {
+            self.carried
+                .insert((self.epoch, partition), Carried { since, unresolved });
+        }
+    }
+
+    /// Count a late resolution against the carried stamp it belongs to, and
+    /// drop the stamp once its last batch has resolved.
+    fn resolve_carried(&mut self, id: BatchId) {
+        let key = (id.epoch, id.partition);
+        let Some(carried) = self.carried.get_mut(&key) else {
+            return;
+        };
+        if let Ok(i) = carried.unresolved.binary_search(&id.seq) {
+            carried.unresolved.remove(i);
+            if carried.unresolved.is_empty() {
+                self.carried.remove(&key);
+            }
         }
     }
 
@@ -360,10 +399,12 @@ impl Checkpointer {
     fn apply(&mut self, msg: AckMsg, stats: &mut DrainStats, defer: Option<&mut Vec<AckMsg>>) {
         if msg.id.epoch != self.epoch {
             stats.stale_epoch += 1;
+            self.resolve_carried(msg.id);
             return;
         }
         let Some(tracker) = self.trackers.get_mut(&msg.id.partition) else {
             stats.stale_epoch += 1;
+            self.resolve_carried(msg.id);
             return;
         };
         match tracker.resolve(msg.id.seq, msg.status) {
@@ -453,16 +494,25 @@ impl Checkpointer {
         out
     }
 
-    /// The earliest instant at which a tracked partition's current head batch
-    /// became its head, pending or failed: the start of the longest wait any
-    /// watermark is in. `None` when nothing is pending.
+    /// The earliest instant at which a partition's current head batch became
+    /// its head, pending or failed: the start of the longest wait any
+    /// watermark is in. A tracker dropped by a rebalance counts until its
+    /// unresolved batches resolve. `None` when nothing is pending.
     #[must_use]
     pub(crate) fn oldest_head_since(&self) -> Option<Instant> {
         self.trackers
             .values()
             .filter_map(PartitionTracker::head_since)
+            .chain(self.carried.values().map(|c| c.since))
             .min()
     }
+}
+
+/// A dropped tracker's head stamp, and the sequences still to resolve on it.
+#[derive(Debug)]
+struct Carried {
+    since: Instant,
+    unresolved: Vec<u64>,
 }
 
 #[cfg(all(test, not(loom)))]
@@ -524,9 +574,9 @@ mod tests {
         assert_eq!(fresh.get(), 0);
     }
 
-    /// The oldest head is the earliest stamp over the tracked partitions, and
-    /// a partition's stamp leaves with its delivery, its revocation, or the
-    /// epoch that replaces it.
+    /// The oldest head is the earliest stamp over the tracked partitions, a
+    /// partition's stamp leaves with its delivery, and a partition with
+    /// nothing pending leaves it on its revocation or a new epoch.
     #[test]
     fn the_oldest_head_is_the_earliest_over_tracked_partitions() {
         use crate::clock::Clock;
@@ -549,18 +599,92 @@ mod tests {
         assert_eq!(cp.take_watermarks(), vec![(P0, 10)]);
         assert_eq!(cp.oldest_head_since(), Some(p1_head));
 
+        drop(p1_held);
+        cp.drain();
+        assert_eq!(cp.take_watermarks(), vec![(P1, 10)]);
         cp.revoke(&[P1]);
         assert_eq!(cp.oldest_head_since(), None);
 
         cp.begin_epoch(&[P0, P1], 2);
         let mut issuer = cp.handle();
-        let held = issuer.issue(P0, 19);
+        drop(issuer.issue(P0, 19));
         cp.drain();
         let _ = cp.take_watermarks();
-        assert_eq!(cp.oldest_head_since(), Some(clock.now()));
+        assert_eq!(cp.oldest_head_since(), None);
         cp.begin_epoch(&[P0], 3);
         assert_eq!(cp.oldest_head_since(), None);
-        drop((held, p1_held));
+    }
+
+    /// A tracker that a new epoch or a revocation drops while a batch on it is
+    /// pending keeps its head stamp until that batch's late resolution
+    /// arrives, so a sink outage that spans a rebalance keeps counting.
+    #[test]
+    fn a_dropped_tracker_keeps_its_head_until_its_batches_resolve() {
+        use crate::clock::Clock;
+        let clock = crate::clock::TestClock::frozen();
+        let (mut cp, mut issuer) = checkpointer(&[P0, P1]);
+        cp.set_clock(Arc::clone(&clock) as _);
+        let p0_held = issuer.issue(P0, 9);
+        let p0_second = issuer.issue(P0, 19);
+        cp.drain();
+        let _ = cp.take_watermarks();
+        let p0_head = clock.now();
+        clock.advance(std::time::Duration::from_secs(60));
+        let p1_held = issuer.issue(P1, 9);
+        cp.drain();
+        let _ = cp.take_watermarks();
+        let p1_head = clock.now();
+
+        // A revocation keeps P1's stamp; a new epoch keeps P0's.
+        cp.revoke(&[P1]);
+        cp.begin_epoch(&[P0], 2);
+        let _ = cp.take_watermarks();
+        assert_eq!(cp.oldest_head_since(), Some(p0_head));
+
+        // P0 holds its stamp until the last of its two batches resolves.
+        drop(p0_held);
+        cp.drain();
+        assert_eq!(cp.oldest_head_since(), Some(p0_head));
+        drop(p0_second);
+        cp.drain();
+        assert_eq!(cp.oldest_head_since(), Some(p1_head));
+        drop(p1_held);
+        cp.drain();
+        assert_eq!(cp.oldest_head_since(), None);
+    }
+
+    /// A late resolution for a batch the dropped tracker never registered
+    /// leaves the carried stamp in place.
+    #[test]
+    fn a_late_resolution_of_another_batch_leaves_the_carried_head() {
+        let (mut cp, mut issuer) = checkpointer(&[P0]);
+        let held = issuer.issue(P0, 9);
+        cp.drain();
+        let _ = cp.take_watermarks();
+        let head = cp.oldest_head_since();
+        assert!(head.is_some());
+        // Issued but never drained into the tracker before it is dropped.
+        let unregistered = issuer.issue(P0, 19);
+        cp.revoke(&[P0]);
+        drop(unregistered);
+        cp.drain();
+        assert_eq!(cp.oldest_head_since(), head);
+        drop(held);
+        cp.drain();
+        assert_eq!(cp.oldest_head_since(), None);
+    }
+
+    /// A dropped tracker with nothing unresolved, such as one stalled behind a
+    /// failed batch, carries nothing.
+    #[test]
+    fn a_dropped_tracker_with_nothing_unresolved_carries_nothing() {
+        let (mut cp, mut issuer) = checkpointer(&[P0]);
+        issuer.issue(P0, 9).fail();
+        cp.drain();
+        let _ = cp.take_watermarks();
+        assert!(cp.oldest_head_since().is_some());
+        cp.revoke(&[P0]);
+        assert_eq!(cp.oldest_head_since(), None);
     }
 
     #[test]

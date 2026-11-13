@@ -41,8 +41,9 @@ use std::hash::BuildHasher;
 
 pub(crate) struct LowCard {
     nullable: bool,
-    /// One slot per dictionary entry. A slot points at its bytes in `dict`,
-    /// so a new entry is not copied a second time.
+    /// One slot per dictionary entry except a nullable dictionary's NULL
+    /// placeholder. A slot points at its bytes in `dict`, so a new entry is
+    /// not copied a second time.
     table: HashTable<Slot>,
     state: QualityState,
     /// Accumulated dictionary entries, each `[VarUInt len][bytes]`.

@@ -6417,11 +6417,9 @@ mod docker {
         // segment, which leaves the records above for the cleaner.
         std::thread::sleep(Duration::from_millis(200));
         write(&brokers, "live-tail", &[("c", Some(one))]);
-        wait_until(
-            Duration::from_secs(120),
-            "the cleaner removes the first record",
-            || first_offset(&brokers, "live-tail").is_some_and(|o| o > 0),
-        );
+        wait_until(HANG, "the cleaner removes the first record", || {
+            first_offset(&brokers, "live-tail").is_some_and(|o| o > 0)
+        });
         follower_catches_up(&brokers, "live-tail");
     }
 

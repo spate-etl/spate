@@ -13,11 +13,11 @@ use spate_core::metrics::names;
 use spate_core::record::PartitionId;
 use spate_core::source::{PayloadBatch, Source, SourceCtx, SourceEvent, SourceLane};
 use spate_kafka::{KafkaSource, KafkaSourceConfig};
-use spate_test::{HANG, wait_until};
+use spate_test::{HANG, metric_series, wait_until};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use support::MockKafka;
 use support::{
     Marker, RawBatch, Watched, await_assignment, control_batch, corrupt_batch, drain_lane, produce,
@@ -343,12 +343,7 @@ fn a_restarted_member_publishes_lag_before_committing() {
             .open(SourceCtx::new(cp.handle()).with_stage_metrics(Some(metrics)))
             .expect("open");
         let _lanes = await_assignment(&mut source, HANG);
-        spate_test::wait_until(HANG, "lag published", || {
-            source
-                .poll_events(Duration::from_millis(100))
-                .expect("poll_events");
-            lag_series_count(&handle.render()) == 1
-        });
+        support::await_lag_series(&mut source, &handle, 1);
     });
 
     let rendered = handle.render();
@@ -467,63 +462,32 @@ fn startup_without_brokers_times_out_fatally() {
     });
 }
 
-/// Drive one source one step, mirroring the runtime driver: apply a new
-/// assignment (opening an epoch), or complete a revocation (barrier + final
-/// commit). Returns how many lanes the source now owns, or `None` on an idle
-/// tick.
-fn drive_step(
-    source: &mut KafkaSource,
-    lanes: &mut Vec<<KafkaSource as Source>::Lane>,
-    cp: &mut Checkpointer,
-    epoch: &mut u32,
-    timeout: Duration,
-) -> Option<usize> {
-    match source.poll_events(timeout).expect("poll_events") {
-        SourceEvent::LanesAssigned(new) => {
-            let parts: Vec<PartitionId> = new.iter().map(SourceLane::partition).collect();
-            *epoch += 1;
-            cp.begin_epoch(&parts, *epoch);
-            let n = new.len();
-            *lanes = new;
-            Some(n)
-        }
-        SourceEvent::LanesRevoked {
-            lanes: ids,
-            barrier,
-        } => {
-            lanes.clear();
-            let _ = support::retryable(
-                "flush",
-                support::complete_revocation(source, &ids, &barrier, &[]),
-            );
-            Some(0)
-        }
-        _ => None,
-    }
-}
-
-/// Open `source` with its statistics publishing to a recorder of its own, and
-/// return the handle that renders them. `pipeline` labels the series.
-fn open_watched(
-    source: &mut KafkaSource,
-    cp: &Checkpointer,
-    pipeline: &str,
-) -> metrics_exporter_prometheus::PrometheusHandle {
-    let (recorder, handle, meter) = support::recorded_meter(pipeline.to_owned());
-    metrics::with_local_recorder(&recorder, || {
-        source
-            .open(SourceCtx::new(cp.handle()).with_meter(Some(meter)))
-            .expect("open");
-    });
-    handle
-}
-
-/// Whether the one consumer `statistics` renders last reported itself in a
-/// stable group.
-fn in_stable_group(statistics: &metrics_exporter_prometheus::PrometheusHandle) -> bool {
-    let rendered = statistics.render();
-    let healthy = spate_test::metric_series(&rendered, "spate_kafka_group_healthy", &[]);
-    matches!(healthy.as_slice(), [series] if series.value == 1.0)
+/// Round-robin `a` and `b` until the group settles with one owner and one
+/// empty member, each in a stable group.
+///
+/// Both conditions are required. The counts alone are not settled: if the
+/// two members do not land in the same initial rebalance window, the
+/// second join re-forms an established group, and the mock broker paces
+/// that at `session.timeout.ms - 1000`. The joining member reports itself
+/// unstable for that whole wait, and the empty assignment emits no event.
+///
+/// Takes drivers from [`Driver::open_watched`].
+fn settle_one_owner(a: &mut Driver, b: &mut Driver) {
+    spate_test::wait_for_value(
+        HANG,
+        "one owner and one empty member, both in a stable group",
+        || {
+            a.step(Duration::from_millis(100));
+            b.step(Duration::from_millis(100));
+            (
+                a.lanes.len(),
+                b.lanes.len(),
+                a.in_stable_group(),
+                b.in_stable_group(),
+            )
+        },
+        |&(a_owned, b_owned, a_stable, b_stable)| a_owned + b_owned == 1 && a_stable && b_stable,
+    );
 }
 
 /// Regression: a member that is offered an empty assignment (more group
@@ -542,97 +506,33 @@ fn empty_assignment_completes_rebalance_protocol() {
     let brokers = cluster.bootstrap_servers();
     produce(&brokers, TOPIC, 5, 1, "e");
 
-    let mut cp_a = Checkpointer::new();
-    let mut cp_b = Checkpointer::new();
-    let mut a = KafkaSource::new(watched_config(&brokers, "empty", 1));
-    let mut b = KafkaSource::new(watched_config(&brokers, "empty", 1));
-    let a_stats = open_watched(&mut a, &cp_a, "empty-a");
-    let b_stats = open_watched(&mut b, &cp_b, "empty-b");
-
-    let mut a_lanes: Vec<<KafkaSource as Source>::Lane> = Vec::new();
-    let mut b_lanes: Vec<<KafkaSource as Source>::Lane> = Vec::new();
-    let (mut a_ep, mut b_ep) = (0u32, 0u32);
-    let (mut a_count, mut b_count) = (0usize, 0usize);
-
-    // Round-robin both members from this thread until the group settles with
-    // one owner and one empty member, each in a stable group.
-    //
-    // Both conditions are required. The counts alone are not settled: if the
-    // two members do not land in the same initial rebalance window, the
-    // second join re-forms an established group, and the mock broker paces
-    // that at `session.timeout.ms - 1000`. The joining member reports itself
-    // unstable for that whole wait, and the empty assignment emits no event.
-    let deadline = Instant::now() + HANG;
-    while !(a_count + b_count == 1 && in_stable_group(&a_stats) && in_stable_group(&b_stats)) {
-        // Assert rather than fall out of the loop: on the deadline path the
-        // counts can transiently read 1 mid-flight, which would satisfy the
-        // assertion below and let the test continue against a group that
-        // never settled. Requiring the settled predicate makes reaching the
-        // deadline a failure with a diagnosis attached.
-        assert!(
-            Instant::now() < deadline,
-            "the group never settled: a={a_count}, b={b_count}, stable={:?} \
-             (want one owner, one empty member, both in a stable group)",
-            (in_stable_group(&a_stats), in_stable_group(&b_stats))
-        );
-        let sa = drive_step(
-            &mut a,
-            &mut a_lanes,
-            &mut cp_a,
-            &mut a_ep,
-            Duration::from_millis(100),
-        );
-        let sb = drive_step(
-            &mut b,
-            &mut b_lanes,
-            &mut cp_b,
-            &mut b_ep,
-            Duration::from_millis(100),
-        );
-        if let Some(n) = sa {
-            a_count = n;
-        }
-        if let Some(n) = sb {
-            b_count = n;
-        }
-    }
-    assert_eq!(
-        a_count + b_count,
-        1,
-        "exactly one member owns the single partition (the other is empty)"
-    );
+    let member = |pipeline: &str| {
+        Driver::open_watched(
+            KafkaSource::new(watched_config(&brokers, "empty", 1)),
+            pipeline,
+        )
+    };
+    let mut a = member("empty-a");
+    let mut b = member("empty-b");
+    settle_one_owner(&mut a, &mut b);
 
     // Drop the owner (it leaves the group) and keep driving the previously
     // empty member. If its empty-assignment rebalance was completed, it now
     // acquires the partition; if it was wedged, it never does.
-    let (mut src, mut lanes, mut cp, mut ep) = if a_count == 1 {
-        drop(a_lanes);
+    let mut empty = if a.lanes.len() == 1 {
         drop(a);
-        (b, b_lanes, cp_b, b_ep)
+        b
     } else {
-        drop(b_lanes);
         drop(b);
-        (a, a_lanes, cp_a, a_ep)
+        a
     };
-
-    let mut acquired = 0usize;
-    // The empty member takes the partition once the owner leaves, so its
-    // rebalance protocol was not wedged.
     wait_until(HANG, "the empty member to acquire the partition", || {
-        if let Some(n) = drive_step(
-            &mut src,
-            &mut lanes,
-            &mut cp,
-            &mut ep,
-            Duration::from_millis(200),
-        ) {
-            acquired = n;
-        }
-        acquired == 1
+        empty.step(Duration::from_millis(200));
+        empty.lanes.len() == 1
     });
 
     // Sanity: the recovered member can consume the partition.
-    let rows = drain_lane(&mut src, &mut lanes[0], 5, HANG);
+    let rows = drain_lane(&mut empty.source, &mut empty.lanes[0], 5, HANG);
     assert_eq!(rows.len(), 5, "recovered member drains the partition");
 }
 
@@ -661,72 +561,25 @@ fn an_empty_member_survives_the_assignment_deadline() {
     let brokers = cluster.bootstrap_servers();
 
     let clock = TestClock::frozen();
-    let member = |group: &str| {
-        let mut cfg = watched_config(&brokers, group, 1);
+    let member = |pipeline: &str| {
+        let mut cfg = watched_config(&brokers, "empty-deadline", 1);
         cfg.assignment_timeout = DEADLINE;
-        KafkaSource::new(cfg).with_clock(Arc::clone(&clock) as _)
+        Driver::open_watched(
+            KafkaSource::new(cfg).with_clock(Arc::clone(&clock) as _),
+            pipeline,
+        )
     };
-    let mut cp_a = Checkpointer::new();
-    let mut cp_b = Checkpointer::new();
-    let mut a = member("empty-deadline");
-    let mut b = member("empty-deadline");
-    let a_stats = open_watched(&mut a, &cp_a, "empty-deadline-a");
-    let b_stats = open_watched(&mut b, &cp_b, "empty-deadline-b");
-
-    let mut a_lanes: Vec<<KafkaSource as Source>::Lane> = Vec::new();
-    let mut b_lanes: Vec<<KafkaSource as Source>::Lane> = Vec::new();
-    let (mut a_ep, mut b_ep) = (0u32, 0u32);
-    let (mut a_count, mut b_count) = (0usize, 0usize);
-
-    // Settle the group with one owner and one empty member, on the
-    // conditions `empty_assignment_completes_rebalance_protocol` documents.
-    let deadline = Instant::now() + HANG;
-    while !(a_count + b_count == 1 && in_stable_group(&a_stats) && in_stable_group(&b_stats)) {
-        assert!(
-            Instant::now() < deadline,
-            "the group never settled: a={a_count}, b={b_count}, stable={:?} \
-             (want one owner, one empty member, both in a stable group)",
-            (in_stable_group(&a_stats), in_stable_group(&b_stats))
-        );
-        let sa = drive_step(
-            &mut a,
-            &mut a_lanes,
-            &mut cp_a,
-            &mut a_ep,
-            Duration::from_millis(100),
-        );
-        let sb = drive_step(
-            &mut b,
-            &mut b_lanes,
-            &mut cp_b,
-            &mut b_ep,
-            Duration::from_millis(100),
-        );
-        if let Some(n) = sa {
-            a_count = n;
-        }
-        if let Some(n) = sb {
-            b_count = n;
-        }
-    }
+    let mut a = member("empty-deadline-a");
+    let mut b = member("empty-deadline-b");
+    settle_one_owner(&mut a, &mut b);
 
     // Drive both past the deadline, keeping the owner in the group so the
     // empty member stays empty, and hold the empty one to `Ok`.
-    let (mut empty, mut owner, mut owner_lanes, mut owner_cp, mut owner_ep) = if a_count == 0 {
-        (a, b, b_lanes, cp_b, b_ep)
-    } else {
-        (b, a, a_lanes, cp_a, a_ep)
-    };
+    let (mut empty, mut owner) = if a.lanes.is_empty() { (a, b) } else { (b, a) };
     clock.advance(DEADLINE + Duration::from_secs(2));
     for _ in 0..25 {
-        drive_step(
-            &mut owner,
-            &mut owner_lanes,
-            &mut owner_cp,
-            &mut owner_ep,
-            Duration::from_millis(50),
-        );
-        match empty.poll_events(Duration::from_millis(50)) {
+        owner.step(Duration::from_millis(50));
+        match empty.source.poll_events(Duration::from_millis(50)) {
             Ok(SourceEvent::LanesAssigned(lanes)) => panic!(
                 "the empty member took {} partitions, so the group moved and \
                  the deadline was never exercised",
@@ -776,48 +629,66 @@ fn statistics_populate_kafka_source_metrics() {
             // families appear. The not-fetching series is waited on by value
             // rather than by presence, because the first snapshot after an
             // assignment legitimately catches a partition at `offset-query`.
-            let needles = [
-                "spate_kafka_group_assignment_size".to_owned(),
-                "spate_kafka_rx_responses_total".to_owned(),
-                "spate_kafka_broker_up".to_owned(),
-                not_fetching(0),
-                not_fetching(1),
+            let families = [
+                "spate_kafka_group_assignment_size",
+                "spate_kafka_rx_responses_total",
+                "spate_kafka_broker_up",
             ];
-            let deadline = Instant::now() + HANG;
-            loop {
-                source
-                    .poll_events(Duration::from_millis(100))
-                    .expect("poll_events");
-                let rendered = handle.render();
-                let missing: Vec<&str> = needles
-                    .iter()
-                    .filter(|n| !rendered.contains(n.as_str()))
-                    .map(String::as_str)
-                    .collect();
-                if missing.is_empty() {
-                    break;
-                }
-                assert!(
-                    Instant::now() < deadline,
-                    "statistics series did not appear within deadline, \
-                 missing {missing:?}:\n{rendered}"
-                );
-            }
+            let fetching = [not_fetching(0), not_fetching(1)];
+            spate_test::wait_for_value(
+                HANG,
+                "the statistics families, with both partitions fetching",
+                || {
+                    source
+                        .poll_events(Duration::from_millis(100))
+                        .expect("poll_events");
+                    let rendered = handle.render();
+                    let missing: Vec<&str> = families
+                        .into_iter()
+                        .filter(|family| metric_series(&rendered, family, &[]).is_empty())
+                        .chain(
+                            fetching
+                                .iter()
+                                .map(String::as_str)
+                                .filter(|line| !rendered.contains(line)),
+                        )
+                        .collect();
+                    let series =
+                        metric_series(&rendered, "spate_kafka_partition_not_fetching", &[]);
+                    (missing, series)
+                },
+                |(missing, _)| missing.is_empty(),
+            );
         });
     });
 
     let rendered = handle.render();
-    for needle in [
+    // The whole label set: a lone consumer's series carries no `client` label.
+    let labels: Vec<(String, String)> = [
+        ("pipeline", "stats"),
+        ("component", "source"),
+        ("component_type", "kafka"),
+    ]
+    .map(|(k, v)| (k.to_owned(), v.to_owned()))
+    .into();
+    let rx = metric_series(&rendered, "spate_kafka_rx_responses_total", &[]);
+    assert!(
+        rx.iter().any(|s| s.labels == labels),
+        "no `spate_kafka_rx_responses_total` series with exactly {labels:?}: {rx:?}"
+    );
+    for family in [
         // Fixed families (registered at open).
-        r#"spate_kafka_rx_responses_total{pipeline="stats",component="source",component_type="kafka"}"#,
         "spate_kafka_reply_queue_depth",
         "spate_kafka_fetch_queue_messages",
         "spate_kafka_group_assignment_size",
         "spate_kafka_group_healthy",
         // Lazily-registered per-broker series (the MockCluster broker).
-        "spate_kafka_broker_up{",
+        "spate_kafka_broker_up",
     ] {
-        assert!(rendered.contains(needle), "missing `{needle}`:\n{rendered}");
+        assert!(
+            !metric_series(&rendered, family, &[]).is_empty(),
+            "missing `{family}`:\n{rendered}"
+        );
     }
 }
 
@@ -875,16 +746,6 @@ fn statistics_disabled_registers_no_families() {
         !rendered.contains("spate_kafka_"),
         "statistics disabled must register no `spate_kafka_*` series:\n{rendered}"
     );
-}
-
-/// How many `spate_source_lag_records` series the exposition carries. The family
-/// is per-partition only, so this is the number of partitions that have
-/// reported a measured lag.
-fn lag_series_count(rendered: &str) -> usize {
-    rendered
-        .lines()
-        .filter(|l| l.starts_with("spate_source_lag_records{"))
-        .count()
 }
 
 /// The regression this pins: a consumer that commits a small prefix and then stops
@@ -957,25 +818,9 @@ fn a_backlogged_consumer_publishes_its_lag() {
         source.flush_commits().expect("sync commit");
         committed = watermarks;
 
-        // Stop consuming (lanes stay assigned but unpolled) and drive the
-        // control plane until every partition has reported. Waiting for the
-        // *first* series is not enough: `consumer_lag` is per partition, so a
-        // snapshot can carry a number for p0 while p1 is still `-1`, and the
-        // assertions below require one series each.
-        let deadline = Instant::now() + HANG;
-        loop {
-            source
-                .poll_events(Duration::from_millis(100))
-                .expect("poll_events");
-            if lag_series_count(&handle.render()) == PARTITIONS as usize {
-                break;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "not every partition published consumer lag within deadline:\n{}",
-                handle.render()
-            );
-        }
+        // Stop consuming (lanes stay assigned but unpolled), and serve the
+        // control plane until every partition has reported.
+        support::await_lag_series(&mut source, &handle, PARTITIONS as usize);
     });
 
     let rendered = handle.render();
@@ -992,29 +837,11 @@ fn a_backlogged_consumer_publishes_its_lag() {
     // No aggregate series shares the family name: readers aggregate with
     // `sum`/`max`, which double-counts if an unlabeled series exists.
     assert!(
-        !rendered
-            .lines()
-            .filter(|l| l.starts_with("spate_source_lag_records{"))
-            .any(|l| !l.contains("partition=")),
+        metric_series(&rendered, names::SOURCE_LAG_RECORDS, &[])
+            .iter()
+            .all(|s| s.label("partition").is_some()),
         "every lag series must carry a partition label:\n{rendered}"
     );
-}
-
-/// A directly assigned consumer (no group coordination), positioned at the
-/// beginning of every partition.
-fn assigned_consumer(brokers: &str, group: &str, partitions: i32) -> std::sync::Arc<BaseConsumer> {
-    let consumer: BaseConsumer = support::raw_config()
-        .set("bootstrap.servers", brokers)
-        .set("group.id", group)
-        .build()
-        .expect("consumer");
-    let mut tpl = rdkafka::TopicPartitionList::new();
-    for p in 0..partitions {
-        tpl.add_partition_offset(TOPIC, p, rdkafka::Offset::Beginning)
-            .expect("tpl entry");
-    }
-    consumer.assign(&tpl).expect("assign");
-    std::sync::Arc::new(consumer)
 }
 
 /// Count the messages the consumer's main queue hands back until a Fetch sent
@@ -1058,7 +885,7 @@ fn the_main_queue_delivers_a_partition_that_was_never_split() {
     let brokers = cluster.bootstrap_servers();
     produce(&brokers, TOPIC, 20, 1, "p");
 
-    let consumer = assigned_consumer(&brokers, "plain", 1);
+    let consumer = Arc::new(support::from_start(&brokers, TOPIC, 1, &[]));
     wait_until(HANG, "a delivery for the unsplit partition", || {
         consumer
             .poll(Duration::from_millis(100))
@@ -1078,7 +905,7 @@ fn a_split_partition_never_returns_to_the_main_queue() {
     let brokers = cluster.bootstrap_servers();
     produce(&brokers, TOPIC, 20, 1, "w");
 
-    let consumer = assigned_consumer(&brokers, "fwdapp", 1);
+    let consumer = Arc::new(support::from_start(&brokers, TOPIC, 1, &[]));
     let queue = consumer
         .split_partition_queue(TOPIC, 0)
         .expect("split partition queue");
@@ -1505,11 +1332,23 @@ impl Driver {
                 .expect("a driver from open_watched")
                 .render();
             // Read directly: a lone consumer's series has no `client` label.
-            let healthy = spate_test::metric_series(&rendered, "spate_kafka_group_healthy", &[]);
+            let healthy = metric_series(&rendered, "spate_kafka_group_healthy", &[]);
             self.partitions() == want
                 && healthy.len() == consumers
                 && healthy.iter().all(|s| s.value == 1.0)
         });
+    }
+
+    /// Whether the driver's one consumer last reported itself in a stable
+    /// group. Takes a driver from [`Driver::open_watched`].
+    fn in_stable_group(&self) -> bool {
+        let rendered = self
+            .statistics
+            .as_ref()
+            .expect("a driver from open_watched")
+            .render();
+        let healthy = metric_series(&rendered, "spate_kafka_group_healthy", &[]);
+        matches!(healthy.as_slice(), [series] if series.value == 1.0)
     }
 
     /// Read every live lane, stepping between polls, until each partition has
@@ -2073,7 +1912,7 @@ fn two_consumers_publish_lag_before_committing() {
         driver.settle(2);
         wait_until(HANG, "lag published", || {
             driver.step(Duration::from_millis(100));
-            lag_series_count(&handle.render()) == 2
+            metric_series(&handle.render(), names::SOURCE_LAG_RECORDS, &[]).len() == 2
         });
     });
 
@@ -2089,7 +1928,7 @@ fn two_consumers_publish_lag_before_committing() {
 
 /// The values of every series of `family` labelled with a `client`.
 fn client_values(rendered: &str, family: &str) -> Vec<(String, f64)> {
-    spate_test::metric_series(rendered, family, &[])
+    metric_series(rendered, family, &[])
         .into_iter()
         .filter_map(|s| Some((s.label("client")?.to_owned(), s.value)))
         .collect()
@@ -2141,9 +1980,9 @@ fn two_consumers_publish_their_own_statistics() {
     clients.sort();
     assert_eq!(clients, ["consumer-0", "consumer-1"], "{rendered}");
     assert!(
-        !rendered
-            .lines()
-            .any(|l| l.starts_with("spate_kafka_group_assignment_size{") && !l.contains("client=")),
+        metric_series(&rendered, "spate_kafka_group_assignment_size", &[])
+            .iter()
+            .all(|s| s.label("client").is_some()),
         "no unlabelled series above one consumer:\n{rendered}"
     );
 
@@ -2394,7 +2233,7 @@ fn the_mock_serves_a_control_batch_as_a_marker() {
             "{marker:?}"
         );
 
-        let consumer = assigned_consumer(&brokers, "marker", 1);
+        let consumer = Arc::new(support::from_start(&brokers, TOPIC, 1, &[]));
         let queue = consumer
             .split_partition_queue(TOPIC, 0)
             .expect("split queue");
@@ -3950,12 +3789,7 @@ mod latest_start {
                 .open(SourceCtx::new(cp.handle()).with_stage_metrics(Some(metrics)))
                 .expect("open");
             let _lanes = await_assignment(&mut source, HANG);
-            wait_until(HANG, "lag published", || {
-                source
-                    .poll_events(Duration::from_millis(100))
-                    .expect("poll_events");
-                lag_series_count(&handle.render()) == 1
-            });
+            support::await_lag_series(&mut source, &handle, 1);
         });
     }
 

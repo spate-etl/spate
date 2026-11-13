@@ -6056,7 +6056,7 @@ mod tests {
     mod lag {
         use super::*;
         use rdkafka::statistics::{Partition, Topic};
-        use spate_core::metrics::ComponentLabels;
+        use spate_core::metrics::{ComponentLabels, names};
         use std::collections::HashMap;
 
         /// Run `f` over a `SourceMetrics` whose component name is unique to the
@@ -6139,12 +6139,9 @@ mod tests {
                     m,
                 );
             });
-            let unlabelled = rendered
-                .lines()
-                .filter(|l| l.starts_with("spate_source_lag_records{"))
-                .any(|l| !l.contains("partition="));
+            let series = spate_test::metric_series(&rendered, names::SOURCE_LAG_RECORDS, &[]);
             assert!(
-                !unlabelled,
+                series.iter().all(|s| s.label("partition").is_some()),
                 "every lag series must carry a partition label:\n{rendered}"
             );
         }

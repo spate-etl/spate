@@ -5,8 +5,8 @@
 //! [`QualityMap`] and [`QualitySet`] are for keys an outside party chooses,
 //! such as payload object keys or column values: their hasher adds a final
 //! mix that spreads every input bit into the bits the table indexes on.
-//! The workspace `clippy.toml` bans std's `HashMap` and `HashSet`; a site that
-//! keeps one takes an `expect` naming why.
+//! The workspace `clippy.toml` bans std's and `hashbrown`'s `HashMap` and
+//! `HashSet`; a site that keeps one takes an `expect` naming why.
 //!
 //! Both states draw a fresh seed per instance, so iteration order differs
 //! between maps and between runs. Neither hasher claims resistance against an

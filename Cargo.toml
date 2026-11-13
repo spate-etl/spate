@@ -135,8 +135,9 @@ rustls = { version = "0.23.45", default-features = false, features = ["aws_lc_rs
 url = "2.5.4"
 futures-util = { version = "0.3.31", default-features = false }
 base64 = "0.23.1"
-# spate-s3 inflates gzip objects through zlib-rs, which picks its SIMD paths
-# at run time under `runtime_detection`. 1.1.10 is the first release with it.
+# spate-s3 inflates gzip objects through zlib-rs. Under `runtime_detection` it
+# picks its x86_64 SIMD paths at run time; its aarch64 NEON code is compiled
+# in. 1.1.10 is the first release with `runtime_detection`.
 flate2 = { version = "1.1.10", default-features = false, features = ["zlib-rs", "runtime_detection"] }
 # The pipeline and S3 framing benches write their gzip objects with these, so
 # the stored bytes stay the same whichever backend flate2 is built with.

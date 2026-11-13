@@ -4,8 +4,7 @@ use bytes::BytesMut;
 use spate_core::deser::Owned;
 use spate_core::sink::{RowEncoder, SealedBatch};
 
-/// The batch the runtime would seal from `payloads`, each encoded by
-/// `encoder` into a frame of its own.
+/// A batch of `payloads`, each encoded by `encoder` into a frame of its own.
 pub(crate) fn sealed<P: Into<Vec<u8>>>(
     encoder: &mut impl RowEncoder<Owned<Vec<u8>>>,
     payloads: impl IntoIterator<Item = P>,

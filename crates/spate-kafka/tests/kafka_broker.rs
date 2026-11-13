@@ -11,6 +11,7 @@ use support::Raw as _;
 
 use rdkafka::consumer::{BaseConsumer, Consumer};
 use spate_core::checkpoint::Checkpointer;
+use spate_core::metrics::names;
 use spate_core::record::PartitionId;
 use spate_core::source::{Source, SourceCtx, SourceEvent, SourceLane};
 use spate_kafka::{KafkaSource, KafkaSourceConfig};
@@ -19,7 +20,7 @@ use spate_test_support::{KAFKA_PORT, KafkaBroker};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use support::{
     Transaction, Watched, await_assignment, broker, drain_lane, log_end, produce,
     produce_transaction, settled_end, transactional_broker,
@@ -32,7 +33,8 @@ const TOPIC: &str = "orders";
 fn config(brokers: &str, group: &str) -> KafkaSourceConfig {
     let mut cfg = KafkaSourceConfig::new(brokers, TOPIC, group);
     cfg.commit_interval = Duration::from_millis(200);
-    cfg.startup_timeout = Duration::from_secs(60);
+    // Out of real time's reach, so that only a wait's `HANG` ends a hung start.
+    cfg.startup_timeout = Duration::from_hours(1);
     cfg.statistics_interval = Duration::from_secs(1);
     // Tests produce before the consumer joins; without this, librdkafka's
     // `latest` default correctly delivers nothing (see mock_cluster.rs).
@@ -212,8 +214,7 @@ fn real_broker_backlog_reports_summable_lag() {
             .open(SourceCtx::new(cp.handle()).with_stage_metrics(Some(metrics)))
             .expect("open");
 
-        let deadline = Instant::now() + Duration::from_secs(120);
-        let mut lanes = await_assignment(&mut source, Duration::from_secs(120));
+        let mut lanes = await_assignment(&mut source, HANG);
         assert_eq!(lanes.len(), PARTITIONS as usize, "one lane per partition");
         let partitions: Vec<_> = lanes.iter().map(SourceLane::partition).collect();
         cp.begin_epoch(&partitions, 1);
@@ -221,8 +222,7 @@ fn real_broker_backlog_reports_summable_lag() {
         // Consume a small prefix so a commit lands: `consumer_lag` is measured
         // against the committed offset and stays unknown (`-1`) until then.
         for lane in &mut lanes {
-            let left = deadline.saturating_duration_since(Instant::now());
-            drain_lane(&mut source, lane, CONSUME_PER_LANE, left);
+            drain_lane(&mut source, lane, CONSUME_PER_LANE, HANG);
         }
         cp.drain();
         let watermarks = cp.take_watermarks();
@@ -230,35 +230,15 @@ fn real_broker_backlog_reports_summable_lag() {
         source.commit(&watermarks).expect("store offsets");
         source.flush_commits().expect("sync commit");
 
-        // Stop consuming and drive the control plane until every partition
-        // has reported. Waiting for the first series would race: a snapshot
-        // can carry a number for one partition while another is still `-1`,
-        // and the assertions below need all four.
-        loop {
-            source
-                .poll_events(Duration::from_millis(200))
-                .expect("poll_events");
-            let rendered = handle.render();
-            let reported = rendered
-                .lines()
-                .filter(|l| l.starts_with("spate_source_lag_records{"))
-                .count();
-            if reported == PARTITIONS as usize {
-                break;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "only {reported}/{PARTITIONS} partitions published consumer lag \
-                 within deadline:\n{rendered}"
-            );
-        }
+        // Stop consuming, and serve the control plane until every partition
+        // has reported.
+        support::await_lag_series(&mut source, &handle, PARTITIONS as usize);
     });
 
     let rendered = handle.render();
-    let series: Vec<f64> = rendered
-        .lines()
-        .filter(|l| l.starts_with("spate_source_lag_records{"))
-        .map(|l| l.rsplit(' ').next().expect("value").parse().expect("lag"))
+    let series: Vec<f64> = spate_test::metric_series(&rendered, names::SOURCE_LAG_RECORDS, &[])
+        .iter()
+        .map(|s| s.value)
         .collect();
     assert_eq!(
         series.len(),
@@ -327,7 +307,7 @@ fn real_broker_revocation_commits_every_consumers_offsets() {
     // Settle with both partitions held and each consumer in a stable group,
     // completing any revocation a late consumer's join causes.
     let mut lanes = Vec::new();
-    spate_test::wait_until(Duration::from_secs(90), "both partitions held", || {
+    spate_test::wait_until(HANG, "both partitions held", || {
         match source
             .poll_events(Duration::from_millis(200))
             .expect("poll_events")
@@ -758,7 +738,7 @@ mod latest_start {
             );
             let run = latest::Run::start(cfg);
             let mut sentinel = 0;
-            spate_test::wait_until(Duration::from_secs(120), "the run to read", || {
+            spate_test::wait_until(HANG, "the run to read", || {
                 support::produce_to(brokers, topic, 0, sentinel..sentinel + 1);
                 sentinel += 1;
                 !run.written(0).is_empty()
@@ -781,7 +761,7 @@ mod latest_start {
                 });
             support::produce_to(brokers, topic, 1, 0..20);
             let mut next = 20;
-            spate_test::wait_until(Duration::from_secs(120), "the new partition's read", || {
+            spate_test::wait_until(HANG, "the new partition's read", || {
                 support::produce_to(brokers, topic, 1, next..next + 1);
                 next += 1;
                 !run.written(1).is_empty()
@@ -828,7 +808,7 @@ mod latest_start {
                 let cp = Checkpointer::new();
                 let mut source = KafkaSource::new(latest::config(brokers, topic, &group, "latest"));
                 source.open(SourceCtx::new(cp.handle())).expect("open");
-                let lanes = await_assignment(&mut source, Duration::from_secs(90));
+                let lanes = await_assignment(&mut source, HANG);
                 (source, cp, lanes)
             };
             {
@@ -883,7 +863,7 @@ mod latest_start {
             let cp = Checkpointer::new();
             let mut source = KafkaSource::new(cfg);
             source.open(SourceCtx::new(cp.handle())).expect("open");
-            let lanes = await_assignment(&mut source, Duration::from_secs(90));
+            let lanes = await_assignment(&mut source, HANG);
             let at = support::committed_by(&brokers, group, TOPIC, 1)[0];
             (source, cp, lanes, at)
         };

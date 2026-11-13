@@ -390,7 +390,7 @@ fn rustfs_encoded(key: &str) -> String {
 
 /// The one record of a notification message, inside RustFS's envelope or
 /// not.
-fn record(message: &support::feed::Read) -> Value {
+fn record(message: &support::Read) -> Value {
     let body: Value =
         serde_json::from_slice(message.payload.as_deref().expect("a payload")).expect("JSON");
     body["Records"][0].clone()

@@ -16,13 +16,15 @@ use spate_core::sink::{KeyHashRouter, SinkPoolConfig};
 use spate_core::source::{PayloadBatch, Source, SourceCtx, SourceLane};
 use spate_kafka::{KafkaSource, KafkaSourceConfig};
 use spate_test::{
-    BytesPassthrough, CaptureSink, PipelineRun, ScriptedResult, SinkScript, TestEncoder,
+    BytesPassthrough, CaptureSink, HANG, PipelineRun, ScriptedResult, SinkScript, TestEncoder,
     WriteOutcome, capture_sink, decode_rows, passthrough_runtime, unique_name, wait_until,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
-const DEADLINE: Duration = Duration::from_secs(120);
+/// The source's startup deadline, beyond `HANG` so that only a wait ends a
+/// hung start.
+const STARTUP: Duration = Duration::from_secs(120);
 /// A burst of records on each tick of a wait that has to keep producing.
 const ROUND: i64 = 20;
 /// A sink that stays down outlasts any drain here.
@@ -32,7 +34,7 @@ const DOWN_WRITES: usize = 100_000;
 pub(crate) fn config(brokers: &str, topic: &str, group: &str, policy: &str) -> KafkaSourceConfig {
     let mut cfg = KafkaSourceConfig::new(brokers, topic, group);
     cfg.commit_interval = Duration::from_millis(200);
-    cfg.startup_timeout = DEADLINE;
+    cfg.startup_timeout = STARTUP;
     cfg.statistics_interval = Duration::ZERO;
     cfg.rdkafka = BTreeMap::from([
         ("auto.offset.reset".to_string(), policy.to_string()),
@@ -173,7 +175,7 @@ impl Run {
     /// Stop the run and wait for it to exit.
     pub(crate) fn stop(self) {
         self.shutdown.trigger();
-        self.run.wait_exit(DEADLINE).expect("the run stops").ok();
+        self.run.wait_exit(HANG).expect("the run stops").ok();
     }
 
     /// Wait up to `timeout` for a run that ends on its own.
@@ -194,7 +196,7 @@ impl Run {
 /// to the sink, which shows the run's start is settled and it reads.
 fn await_reading(run: &Run, brokers: &str, topic: &str, partition: i32, next: &mut i64) {
     let mut tick = 0;
-    wait_until(DEADLINE, "the run to read", || {
+    wait_until(HANG, "the run to read", || {
         if tick % 40 == 0 {
             produce_to(brokers, topic, partition, *next..*next + 1);
             *next += 1;
@@ -221,15 +223,11 @@ fn await_commit(
     upto: i64,
 ) -> i64 {
     let mut at = None;
-    wait_until(
-        DEADLINE,
-        "the group's commit to reach the produced end",
-        || {
-            let committed = committed_by(brokers, group, topic, partitions);
-            at = offset_of(committed[usize::try_from(partition).expect("partition")]);
-            at.is_some_and(|at| at >= upto)
-        },
-    );
+    wait_until(HANG, "the group's commit to reach the produced end", || {
+        let committed = committed_by(brokers, group, topic, partitions);
+        at = offset_of(committed[usize::try_from(partition).expect("partition")]);
+        at.is_some_and(|at| at >= upto)
+    });
     at.expect("a commit")
 }
 
@@ -277,7 +275,7 @@ pub(crate) fn a_commit_below_the_log_start_across_a_restart(
     // Producing until the commit moves lets a start at the end commit too, so
     // it fails on the gap and not on the deadline.
     let (mut next, mut tick, mut upto) = (3 * ROUND, 0, 0);
-    wait_until(DEADLINE, "the commit to pass the retained records", || {
+    wait_until(HANG, "the commit to pass the retained records", || {
         if tick % 40 == 0 {
             produce_to(brokers, topic, 0, next..next + 1);
             next += 1;
@@ -363,7 +361,7 @@ pub(crate) fn a_second_process_joining(brokers: &str, topic: &str, policy: &str)
     let mut moved = None;
     let mut tick = 0;
     wait_until(
-        DEADLINE,
+        HANG,
         "the second process to write a moved partition",
         || {
             if tick % 40 == 0 {
@@ -406,7 +404,7 @@ where
 {
     let mut first = None;
     let mut tick = 0;
-    wait_until(DEADLINE, "the lane to deliver", || {
+    wait_until(HANG, "the lane to deliver", || {
         if tick % 40 == 0 {
             produce_to(brokers, topic, 0, *next..*next + ROUND);
             *next += ROUND;
@@ -432,7 +430,7 @@ pub(crate) fn a_removed_single_consumer(brokers: &str, topic: &str, policy: &str
     let first_cp = Checkpointer::new();
     let mut first = KafkaSource::new(config(brokers, topic, &group, policy));
     first.open(SourceCtx::new(first_cp.handle())).expect("open");
-    let mut first_lanes = await_assignment(&mut first, DEADLINE);
+    let mut first_lanes = await_assignment(&mut first, HANG);
     let first_at = first_read(&mut first, &mut first_lanes[0], brokers, topic, &mut next);
 
     // The first member polls no more from here.
@@ -441,7 +439,7 @@ pub(crate) fn a_removed_single_consumer(brokers: &str, topic: &str, policy: &str
     second
         .open(SourceCtx::new(second_cp.handle()))
         .expect("open");
-    let mut second_lanes = await_assignment(&mut second, DEADLINE);
+    let mut second_lanes = await_assignment(&mut second, HANG);
     let second_at = first_read(&mut second, &mut second_lanes[0], brokers, topic, &mut next);
     assert!(
         second_at <= first_at,
@@ -464,10 +462,10 @@ pub(crate) fn a_failing_record_across_a_restart(brokers: &str, topic: &str) {
 
     super::produce_payload(brokers, topic, 0, b"poison");
     produce_to(brokers, topic, 0, 1..1 + ROUND);
-    wait_until(DEADLINE, "the first run to stop", || first.stopped());
+    wait_until(HANG, "the first run to stop", || first.stopped());
 
     let second = Run::start_stopping_on_poison(config(brokers, topic, &group, "latest"));
-    wait_until(DEADLINE, "the second run to stop at the record", || {
+    wait_until(HANG, "the second run to stop at the record", || {
         second.stopped()
     });
     assert_eq!(

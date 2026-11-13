@@ -12,16 +12,14 @@ mod support;
 
 use support::Raw as _;
 
-use bytes::BytesMut;
 use rdkafka::ClientConfig;
 use rdkafka::client::ClientContext;
 use rdkafka::config::RDKafkaLogLevel;
 use rdkafka::consumer::{BaseConsumer, ConsumerContext};
 use rdkafka::error::KafkaError;
 use rdkafka::producer::{BaseProducer, Producer as _};
-use spate_core::checkpoint::{AckRef, Checkpointer};
-use spate_core::record::{PartitionId, Record, RecordMeta};
-use spate_core::sink::{RowEncoder, SealedBatch, ShardWriter};
+use spate_core::checkpoint::Checkpointer;
+use spate_core::sink::ShardWriter;
 use spate_core::source::{Source, SourceCtx, SourceEvent};
 use spate_kafka::sink::KafkaSinkConfig;
 use spate_kafka::{KafkaSource, KafkaSourceConfig};
@@ -32,6 +30,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use std::{collections::BTreeMap, fs};
+use support::sink::sealed;
 use support::{broker, drain_lane};
 use testcontainers::core::wait::ExitWaitStrategy;
 use testcontainers::core::{AccessMode, Mount, WaitFor};
@@ -165,30 +164,10 @@ fn connector_clients(brokers: &str, ca_location: &str) {
     sink_cfg.statistics_interval = Duration::ZERO;
     sink_cfg.rdkafka = tls.clone();
     let sink = spate_kafka::sink::build(sink_cfg).expect("sink build");
-    let mut encoder = sink.encoder_bytes();
-    let mut frames = Vec::new();
-    for i in 0..RECORDS {
-        let (ack, _rx) = AckRef::test_pair();
-        let record = Record {
-            payload: format!("tls-{i}").into_bytes(),
-            meta: RecordMeta {
-                partition: PartitionId(0),
-                offset: i as i64,
-                event_time_ms: 0,
-                key_hash: None,
-            },
-            ack,
-        };
-        let mut frame = BytesMut::new();
-        encoder.encode(&record, &mut frame).expect("encode");
-        frames.push(frame.freeze());
-    }
-    let batch = SealedBatch {
-        rows: RECORDS as u64,
-        bytes: frames.iter().map(|f| f.len() as u64).sum(),
-        frames,
-        dedup_token: "unused-by-kafka".to_string(),
-    };
+    let batch = sealed(
+        &mut sink.encoder_bytes(),
+        (0..RECORDS).map(|i| format!("tls-{i}")),
+    );
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()

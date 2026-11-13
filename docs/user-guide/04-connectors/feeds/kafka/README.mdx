@@ -98,7 +98,7 @@ is denied, because passthrough and feed values apply in unspecified order.
 | `group.instance.id` | A static member sends no LeaveGroup when it closes, so its partitions wait out `session.timeout.ms` before another member reads them. |
 | `group.protocol` | The feed runs the classic consumer group protocol with eager assignment. |
 | `partition.assignment.strategy` | The feed relies on eager assignment, under which a rebalance revokes every partition before it assigns any. Any value is refused. |
-| `auto.offset.reset` | A partition with no committed offset starts at its earliest offset. |
+| `auto.offset.reset` | A partition with no committed offset, or a committed offset outside its log, starts at its earliest offset. |
 | `enable.auto.commit` | The feed commits each partition up to its first unfinished unit itself. |
 | `auto.commit.enable` | librdkafka's legacy topic-level auto-commit property; the feed commits each partition up to its first unfinished unit itself. |
 | `enable.auto.offset.store` | The feed decides which offsets may be committed. |
@@ -345,7 +345,8 @@ is handled as [Topics](#topics) describes.
 The group uses eager assignment: a rebalance takes every partition from every
 member before it hands any out. A member starts each partition it is assigned
 at the group's committed offset, or at the earliest offset where none is
-committed.
+committed. A committed offset above the partition's end is out of range, so the
+member starts that partition at its earliest offset too.
 
 An acknowledged unit's offset finishes once the tombstone of its attempt
 record is confirmed. A failed unit's offset finishes once its write to the
@@ -393,8 +394,19 @@ commit falls to the partition's next owner, as does a marker not yet served when
 a worker stops.
 
 An unclean leader election can truncate a partition below the group's commit.
-A worker that starts at that commit never reads the units written to the reused
-offsets, and the depth reads the partition as drained.
+While the partition's end stays below that commit, the depth counts the
+partition from its log start, so a bounded job waits for a worker to read it
+(see [Ending a bounded job](#ending-a-bounded-job)). A worker assigned the
+partition starts at its earliest offset and reads every unit on it.
+
+A worker that held the partition through the truncation moves to the point of
+truncation and reads the units written after it. With nothing written after it,
+that worker commits nothing on the partition, so the job waits until the group
+next rebalances.
+
+Once units written after the truncation carry the end to the commit or past it,
+a worker that starts at that commit never reads the units written to the reused
+offsets below it, and the depth does not count them.
 
 ## Copying dead-lettered units back
 
@@ -445,7 +457,13 @@ then each partition's log start and end offsets. The depth is the sum of each
 partition's end offset less its committed offset. A partition with no commit,
 or with a commit below its log start, counts from its log start, so a
 partition that never held a unit, or whose records retention deleted unread,
-reads as drained. The committed offsets are read first: a unit failed between
+reads as drained. A partition whose commit is above its end, after a
+[truncation](#transaction-markers), counts from its log start too. It reads as
+drained once a worker has read it and committed at its end or below, or once its
+log holds nothing. Writes that carry its end up to the commit also end the
+count, with the units below the commit unread, as
+[Transaction markers](#transaction-markers) describes. The committed offsets are
+read first: a unit failed between
 the two reads has its retry write confirmed before its work offset is
 committed, so it shows on the retry topic's end offset either way. The window
 guards against a peer still holding a unit.
@@ -480,6 +498,13 @@ API's `mark_transaction_expired`, given that producer's id and epoch, ends it.
 The records of a transaction ended this way are never read. A stop during the
 wait exits as any requested shutdown does, and a later worker on the group reads
 the units.
+
+The same line names a partition whose commit is above its end ahead of the
+first partition behind, and says that the log was truncated below the commit.
+The worker that held that partition through the truncation commits nothing on
+it until a unit is written there. Starting or stopping any worker in the group
+rebalances it, and the worker then assigned the partition reads it from its
+earliest offset.
 
 ### The dead-letter topic
 

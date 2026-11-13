@@ -66,30 +66,34 @@ pub(crate) trait Offsets {
 }
 
 /// How long the group's commits have stood still with offsets above them, so
-/// a job waiting on an open transaction says so. It counts commits and leaves
-/// the lag out, because a live writer behind an open transaction raises the end
-/// on every read.
+/// a held job says why: an open transaction, or a commit above a truncated
+/// partition's end. It counts commits and leaves the lag out, because a live
+/// writer behind an open transaction raises the end on every read.
 #[derive(Debug, Default)]
 pub(crate) struct Hold {
     committed: Vec<Offset>,
     reads: u32,
 }
 
-/// The first partition a depth read found behind.
+/// The partition a held job's line names: the first one behind whose commit
+/// is above its end, or else the first one behind.
 #[derive(Debug)]
 struct Behind<'a> {
     topic: &'a str,
     partition: i32,
     end: i64,
+    /// The group's commit where it is above the end, and otherwise the
+    /// offset the lag counts from.
     committed: i64,
+    above_end: bool,
 }
 
 impl Hold {
     /// Count one depth read of `committed`, with `behind` the partitions it
-    /// found behind, the first of them named. Logs once per stretch of
-    /// [`HOLD_READS`] reads with the same commits.
-    fn read(&mut self, committed: &[Offset], first: Option<Behind<'_>>, behind: usize) {
-        let Some(first) = first else {
+    /// found behind and `named` the one its line names. Logs once per stretch
+    /// of [`HOLD_READS`] reads with the same commits.
+    fn read(&mut self, committed: &[Offset], named: Option<Behind<'_>>, behind: usize) {
+        let Some(named) = named else {
             self.reads = 0;
             return;
         };
@@ -99,12 +103,27 @@ impl Hold {
             self.committed = committed.to_vec();
             self.reads = 1;
         }
-        if self.reads == HOLD_READS {
+        if self.reads != HOLD_READS {
+            return;
+        }
+        if named.above_end {
             tracing::info!(
-                topic = first.topic,
-                partition = first.partition,
-                end = first.end,
-                committed = first.committed,
+                topic = named.topic,
+                partition = named.partition,
+                end = named.end,
+                committed = named.committed,
+                others = behind - 1,
+                "the feed's group has committed above this partition's end offset and its \
+                 commits have not moved: the log was truncated below the commit, as by an \
+                 unclean leader election, and the job waits for a member to read the \
+                 partition; starting or stopping any worker in the group reassigns it"
+            );
+        } else {
+            tracing::info!(
+                topic = named.topic,
+                partition = named.partition,
+                end = named.end,
+                committed = named.committed,
                 others = behind - 1,
                 "the feed's group is behind and its commits have not moved: an open \
                  transaction, a unit a peer holds or a unit at this worker's gate keeps the \
@@ -124,6 +143,13 @@ impl Hold {
 /// A partition with no commit, or a commit below its log start, reads from
 /// its log start: units retention deleted before they were read leave no
 /// trace (INV-1's statement places them outside the property).
+///
+/// A partition whose commit is above its end reads from its log start too.
+/// Its log was truncated below the commit, which then shows nothing of what
+/// was read. The partition stays behind until a member's read brings the
+/// commit to the end or below, or its log holds nothing. Writes that carry
+/// the end up to the commit make it count from the commit again, so the units
+/// on the reused offsets below it go uncounted.
 pub(crate) fn feed_depth(
     offsets: &dyn Offsets,
     topics: &Topics,
@@ -139,13 +165,15 @@ pub(crate) fn feed_depth(
     let starts = offsets.listed(&partitions, Offset::Beginning)?;
     let ends = offsets.listed(&partitions, Offset::End)?;
     let mut lag: u64 = 0;
-    let mut first = None;
+    let mut named: Option<Behind<'_>> = None;
     let mut behind_count = 0;
     for (i, (topic, p)) in partitions.iter().enumerate() {
-        let start = starts[i];
-        let read_from = match committed[i] {
-            Offset::Offset(c) => c.max(start),
-            Offset::Invalid => start,
+        let (start, end) = (starts[i], ends[i]);
+        // `above_end` holds a commit above the end.
+        let (read_from, above_end) = match committed[i] {
+            Offset::Offset(c) if c > end => (start, Some(c)),
+            Offset::Offset(c) => (c.max(start), None),
+            Offset::Invalid => (start, None),
             other => {
                 return Err(FeedError::new(
                     FeedErrorKind::Retryable,
@@ -153,19 +181,25 @@ pub(crate) fn feed_depth(
                 ));
             }
         };
-        let behind = u64::try_from(ends[i].saturating_sub(read_from)).unwrap_or(0);
+        let behind = u64::try_from(end.saturating_sub(read_from)).unwrap_or(0);
         lag = lag.saturating_add(behind);
         if behind > 0 {
             behind_count += 1;
-            first.get_or_insert(Behind {
-                topic,
-                partition: *p,
-                end: ends[i],
-                committed: read_from,
-            });
+            if named
+                .as_ref()
+                .is_none_or(|n| above_end.is_some() && !n.above_end)
+            {
+                named = Some(Behind {
+                    topic,
+                    partition: *p,
+                    end,
+                    committed: above_end.unwrap_or(read_from),
+                    above_end: above_end.is_some(),
+                });
+            }
         }
     }
-    hold.read(&committed, first, behind_count);
+    hold.read(&committed, named, behind_count);
     let mut depth = Depth::new(
         format!(
             "the group's lag on `{}` and `{}`",
@@ -855,6 +889,58 @@ mod tests {
         for other in [Offset::Stored, Offset::End, Offset::Beginning] {
             let e = read(other, 0, 5).unwrap_err();
             assert_eq!(e.kind, FeedErrorKind::Retryable, "{other:?}");
+        }
+    }
+
+    /// A partition whose commit is above its end, as after a truncation, reads
+    /// from its log start, and reads as drained only once its log holds
+    /// nothing. Regression for #1759.
+    #[test]
+    fn a_commit_above_the_end_offset_reads_from_the_log_start() {
+        let read = |start: i64, end: i64| {
+            let offsets = Scripted::default()
+                .topic("work", &[(0, Offset::Offset(6), start, end)])
+                .topic("retry", &[(0, Offset::Invalid, 0, 0)]);
+            feed_depth(&offsets, &topics(), &mut Hold::default())
+                .unwrap()
+                .visible
+        };
+        assert_eq!(read(0, 5), 5);
+        assert_eq!(read(2, 5), 3);
+        assert_eq!(read(5, 5), 0, "an empty log");
+    }
+
+    /// A held job's line names the first partition whose commit is above its
+    /// end, ahead of earlier partitions behind, with the group's commit and
+    /// the truncation as the cause. Regression for #1759.
+    #[test]
+    fn a_held_job_names_a_commit_above_the_end() {
+        let offsets = Scripted::default()
+            .topic(
+                "work",
+                &[
+                    (0, Offset::Offset(3), 0, 9),
+                    (1, Offset::Offset(1), 0, 2),
+                    (2, Offset::Offset(6), 0, 5),
+                    (3, Offset::Offset(8), 0, 4),
+                ],
+            )
+            .topic("retry", &[(0, Offset::Invalid, 0, 0)]);
+        let lines = spate_test::capture_logs(tracing::Level::INFO, || {
+            let mut hold = Hold::default();
+            for _ in 0..HOLD_READS {
+                feed_depth(&offsets, &topics(), &mut hold).unwrap();
+            }
+        });
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        for field in [
+            "partition=2",
+            "end=5",
+            "committed=6",
+            "others=3",
+            "truncated below the commit",
+        ] {
+            assert!(lines[0].contains(field), "{field} in {}", lines[0]);
         }
     }
 

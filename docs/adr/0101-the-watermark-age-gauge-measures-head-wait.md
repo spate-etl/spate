@@ -2,7 +2,7 @@
 description: "The watermark age gauge measures how long a watermark has waited on its head batch, pending or failed. Liveness and the stall watchdog count failed batches only."
 ---
 
-# ADR-0100 — The watermark age gauge measures how long a watermark has waited on its head batch
+# ADR-0101 — The watermark age gauge measures how long a watermark has waited on its head batch
 
 - **Status:** accepted
 - **Date:** 2026-11-13

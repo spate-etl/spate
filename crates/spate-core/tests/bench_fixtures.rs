@@ -29,6 +29,8 @@ use std::sync::atomic::Ordering;
 mod ack_traffic;
 #[path = "../benches/support/chain_rig.rs"]
 mod chain_rig;
+#[path = "../benches/support/driver_rig.rs"]
+mod driver_rig;
 #[path = "../benches/support/poll_traffic.rs"]
 mod poll_traffic;
 #[path = "../benches/support/split_rig.rs"]
@@ -327,6 +329,19 @@ fn the_split_corpora_are_the_same_quantity_of_bytes() {
 fn the_chain_emits_the_row_counts_the_counters_declare() {
     assert_eq!(chain_rig::borrowed_rig().drive(), 1536, "borrowed rows");
     assert_eq!(chain_rig::owned_rig().drive(), 512, "owned rows");
+}
+
+/// Each driver case polls as many times as it declares, visits every lane in
+/// turn, and hands the chain every batch and payload its lanes returned.
+///
+/// The benches run only on Linux, so this is where a case that stopped early,
+/// skipped lanes or lost a batch fails everywhere `cargo test` runs.
+#[test]
+fn the_driver_cases_run_the_polls_they_declare() {
+    for case in driver_rig::CASES {
+        let (counts, _state) = case.build()();
+        assert_eq!(counts, case.expected(), "{}", case.name);
+    }
 }
 
 /// The split rig's `expect_rows` is the row count a driven batch produces, for

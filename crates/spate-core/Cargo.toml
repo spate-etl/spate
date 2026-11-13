@@ -38,6 +38,8 @@ tracing-subscriber = { workspace = true, features = ["fmt", "json", "env-filter"
 url = { workspace = true }
 
 [dev-dependencies]
+# `testing`: `bench_seams`, for the driver benches.
+spate-core = { path = ".", features = ["testing"] }
 gungraun = { workspace = true }
 proptest = { workspace = true }
 # Exercises `tls_rejection!`, which expands against the caller's rustls.
@@ -67,6 +69,15 @@ harness = false
 
 [[bench]]
 name = "backpressure_gungraun"
+harness = false
+
+[[bench]]
+name = "driver_gungraun"
+harness = false
+
+# An allocation snapshot, compared by `cargo xtask bench alloc`.
+[[bench]]
+name = "driver_alloc"
 harness = false
 
 # The wall-clock A/B tier, driven by `cargo xtask bench ab`.

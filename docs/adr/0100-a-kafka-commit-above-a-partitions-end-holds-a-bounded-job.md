@@ -89,7 +89,7 @@ a partition through one rests on librdkafka's source.
 
 ## More information
 
-Landed in the pull request that fixes
+Landed in [#2103](https://github.com/spate-etl/spate/pull/2103), which fixes
 [#1759](https://github.com/spate-etl/spate/issues/1759). The behavior is
 described on the
 [Kafka feed page](../user-guide/04-connectors/feeds/kafka/README.mdx#transaction-markers).

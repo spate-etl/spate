@@ -19,7 +19,7 @@ Under the default `checkpoint.stalled_fail_after` of 120 s, a failed batch also
 ends the run before the gauge reaches the documented 300 s alert, so that alert
 could not fire.
 
-A healthy pipeline also holds a pending head batch: for up to one
+A healthy pipeline at low volume also holds a pending head batch: for up to one
 `checkpoint.interval` before its chunk seals, then up to the sink's
 `batch.linger`, then for the write. The loader accepts an interval up to a day
 and a linger up to a year. The `/healthz` limit is a fixed 300 s.

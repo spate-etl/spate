@@ -407,8 +407,9 @@ Configured on the exporter, by name suffix or full name:
 
 - `spate_checkpoint_watermark_age_seconds > 5m` — a watermark has waited
   five minutes on one batch. An idle pipeline reads 0 because nothing is
-  pending. A healthy pipeline reads up to `checkpoint.interval` plus the
-  longest sink `batch.linger` plus the write, so keep the threshold above that.
+  pending. A healthy pipeline at low volume reads up to `checkpoint.interval`
+  plus the longest sink `batch.linger` plus the write, so keep the threshold
+  above that.
 - `spate_backpressure_paused == 1` sustained — sink capacity problem.
 - `spate_pipeline_io_busy_ratio > 0.9` sustained while the sink queues fill —
   the I/O runtime's workers are the limit. Raise `pipeline.io_threads` before

@@ -1041,6 +1041,7 @@ mod tests {
                 .topic("retry", &[(0, Offset::Invalid, 0, 0)]);
             feed_depth(&offsets, &topics(), &mut Hold::default())
                 .unwrap()
+                .depth
                 .visible
         };
         assert_eq!(read(0, 5), 5);

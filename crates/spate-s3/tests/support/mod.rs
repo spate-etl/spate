@@ -12,15 +12,13 @@ use object_store::ObjectStoreExt as _;
 use spate_core::clock::TestClock;
 use spate_core::config::PipelineConfig;
 use spate_core::feed::{Feed, Unit};
-use spate_core::framing::RecordFramer;
 use spate_core::ops::chain_owned;
 use spate_core::pipeline::{ExitState, Pipeline, RuntimeOptions, ShutdownHandle};
 use spate_core::sink::KeyHashRouter;
+use spate_json::NdjsonFramer;
 use spate_s3::{DescriptorObject, S3Source, SplitDescriptor, SplitRange};
 use spate_test::{BytesPassthrough, PipelineRun, SinkScript, TestEncoder, capture_sink};
-use std::collections::VecDeque;
 use std::fs;
-use std::io;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -133,67 +131,15 @@ impl PipelineYaml {
     }
 }
 
-/// A newline-delimited [`RecordFramer`] for the integration suites: `spate-s3`
-/// no longer ships a framer, so the tests supply one, mirroring `spate-json`'s
-/// `NdjsonFramer` without depending on a format crate. Splits on `\n`, strips
-/// one trailing `\r`, skips whitespace-only lines, keeps an unterminated final
-/// line.
-#[derive(Default)]
-pub(crate) struct LineFramer {
-    partial: Vec<u8>,
-    ready: VecDeque<Vec<u8>>,
-    decoded: u64,
-}
-
-impl RecordFramer for LineFramer {
-    fn push(&mut self, bytes: &[u8]) -> io::Result<()> {
-        self.decoded += bytes.len() as u64;
-        for &b in bytes {
-            if b == b'\n' {
-                self.flush_line();
-            } else {
-                self.partial.push(b);
-            }
-        }
-        Ok(())
-    }
-
-    fn finish(&mut self) -> io::Result<()> {
-        if !self.partial.is_empty() {
-            self.flush_line();
-        }
-        Ok(())
-    }
-
-    fn pop(&mut self) -> Option<Vec<u8>> {
-        self.ready.pop_front()
-    }
-
-    fn decoded_bytes(&self) -> u64 {
-        self.decoded
-    }
-
-    fn resync_delimiter(&self) -> Option<u8> {
-        Some(b'\n')
-    }
-}
-
-impl LineFramer {
-    fn flush_line(&mut self) {
-        if self.partial.last() == Some(&b'\r') {
-            self.partial.pop();
-        }
-        if self.partial.iter().all(u8::is_ascii_whitespace) {
-            self.partial.clear();
-            return;
-        }
-        self.ready.push_back(std::mem::take(&mut self.partial));
-    }
+/// `spate-json`'s NDJSON framer under a 1 MiB record cap, which no suite
+/// reaches.
+pub(crate) fn ndjson_framer() -> NdjsonFramer {
+    NdjsonFramer::new(1 << 20)
 }
 
 /// The default framer every suite wires into its source (NDJSON line framing).
 pub(crate) fn line_framer(source: S3Source) -> S3Source {
-    source.with_framer(|| Box::new(LineFramer::default()))
+    source.with_framer(|| Box::new(ndjson_framer()))
 }
 
 /// A pipeline running in the background plus its observation handles.

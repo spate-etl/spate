@@ -1062,7 +1062,6 @@ mod tests {
     use crate::config::Compression;
     use crate::lane_ctx::PoisonKind;
     use crate::split::{DescriptorObject, SplitDescriptor};
-    use crate::testutil::TestLineFramer;
     use spate_core::checkpoint::Checkpointer;
     use spate_core::clock::tokio::{Clock, SystemClock, TestClock};
     use spate_core::feed::{Confirmation, Unit};
@@ -1091,7 +1090,7 @@ mod tests {
             handle: rt.handle().clone(),
             clock: Arc::new(SystemClock),
             issuer: Checkpointer::new().handle(),
-            make_framer: Arc::new(|| Box::new(TestLineFramer::new(1 << 20))),
+            make_framer: Arc::new(crate::testutil::ndjson_framer),
             packing: Packing {
                 target_bytes: TARGET,
                 compression: Compression::Auto,
@@ -1606,7 +1605,7 @@ mod tests {
             handle: rt.handle().clone(),
             clock: Arc::new(SystemClock),
             issuer: Checkpointer::new().handle(),
-            make_framer: Arc::new(|| Box::new(TestLineFramer::new(1 << 20))),
+            make_framer: Arc::new(crate::testutil::ndjson_framer),
             packing: Packing {
                 target_bytes: TARGET,
                 compression: Compression::Auto,
@@ -2342,7 +2341,7 @@ mod tests {
                     handle: rt.handle().clone(),
                     clock: Arc::new(SystemClock),
                     issuer: Checkpointer::new().handle(),
-                    make_framer: Arc::new(|| Box::new(TestLineFramer::new(1 << 20))),
+                    make_framer: Arc::new(crate::testutil::ndjson_framer),
                     packing: Packing {
                         target_bytes: TARGET,
                         compression: Compression::Auto,

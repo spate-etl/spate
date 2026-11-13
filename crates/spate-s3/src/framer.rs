@@ -293,31 +293,25 @@ impl ObjectFramer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testutil::TestLineFramer;
+    use crate::testutil::ndjson_framer;
     use flate2::Compression as GzLevel;
     use flate2::write::GzEncoder;
     use proptest::prelude::*;
+    use spate_json::NdjsonFramer;
 
-    /// Reference implementation of the framing rules on a whole decoded
-    /// object, used as the proptest oracle. (The pure-framer determinism is
-    /// owned by `spate_core::framing`; here it anchors the codec integration.)
+    /// The records the framer frames from a whole decoded object in one push,
+    /// used as the proptest oracle.
     fn reference_frames(decoded: &[u8]) -> Vec<Vec<u8>> {
-        decoded
-            .split(|&b| b == b'\n')
-            .map(|line| line.strip_suffix(b"\r").unwrap_or(line))
-            .filter(|line| !line.iter().all(u8::is_ascii_whitespace))
-            .map(<[u8]>::to_vec)
-            .collect()
+        let mut framer = ndjson_framer();
+        framer.push(decoded).unwrap();
+        framer.finish().unwrap();
+        std::iter::from_fn(|| framer.pop()).collect()
     }
 
-    /// A cap far above anything the tests feed, so only the dedicated cap
-    /// tests exercise it.
-    const TEST_CAP: usize = 1 << 20;
-
-    /// A newline framer factory (the tests' stand-in for a format's framer),
-    /// bounding each line at `cap`.
+    /// An `NdjsonFramer` factory bounding each line at `cap`, for the tests
+    /// that set the cap.
     fn line_factory(cap: usize) -> FramerFactory {
-        Arc::new(move || Box::new(TestLineFramer::new(cap)))
+        Arc::new(move || Box::new(NdjsonFramer::new(cap)))
     }
 
     /// Push `chunk` and pump it until the codec has consumed it all. Records
@@ -331,7 +325,7 @@ mod tests {
     }
 
     fn frame_all(codec: Codec, chunks: &[&[u8]]) -> io::Result<Vec<Vec<u8>>> {
-        let mut framer = ObjectFramer::new(line_factory(TEST_CAP));
+        let mut framer = ObjectFramer::new(Arc::new(ndjson_framer));
         framer.begin_object(codec)?;
         for chunk in chunks {
             push_all(&mut framer, chunk)?;
@@ -523,7 +517,7 @@ mod tests {
 
     #[test]
     fn records_queue_across_objects_and_bytes_are_counted() {
-        let mut framer = ObjectFramer::new(line_factory(TEST_CAP));
+        let mut framer = ObjectFramer::new(Arc::new(ndjson_framer));
         framer.begin_object(Codec::Plain).unwrap();
         push_all(&mut framer, b"one\n").unwrap();
         framer.finish_object().unwrap();
@@ -550,7 +544,7 @@ mod tests {
     /// The decoded bytes the largest single pump fed the framer, and the
     /// records the object framed, draining between pumps as the lane does.
     fn largest_pump(codec: Codec, chunk: &[u8]) -> (u64, usize) {
-        let mut framer = ObjectFramer::new(line_factory(TEST_CAP));
+        let mut framer = ObjectFramer::new(Arc::new(ndjson_framer));
         framer.begin_object(codec).unwrap();
         let mut records = 0;
         let mut before = framer.decoded_bytes();
@@ -602,7 +596,7 @@ mod tests {
             (Codec::Gzip, gzip_best(&blank)),
             (Codec::Zstd, zstd::encode_all(&blank[..], 19).unwrap()),
         ] {
-            let mut framer = ObjectFramer::new(line_factory(TEST_CAP));
+            let mut framer = ObjectFramer::new(Arc::new(ndjson_framer));
             framer.begin_object(codec).unwrap();
             framer.push_chunk(Bytes::from(chunk)).unwrap();
             let first = framer.decoded_bytes();
@@ -636,13 +630,13 @@ mod tests {
     /// 256 MiB is undecodable.
     #[test]
     fn a_zstd_window_past_the_limit_is_undecodable() {
-        let mut framer = ObjectFramer::new(line_factory(TEST_CAP));
+        let mut framer = ObjectFramer::new(Arc::new(ndjson_framer));
         framer.begin_object(Codec::Zstd).unwrap();
         push_all(&mut framer, &rle_zstd_frame(27)).unwrap();
         framer.finish_object().unwrap();
         assert_eq!(framer.decoded_bytes(), 256 * 1024);
 
-        let mut framer = ObjectFramer::new(line_factory(TEST_CAP));
+        let mut framer = ObjectFramer::new(Arc::new(ndjson_framer));
         framer.begin_object(Codec::Zstd).unwrap();
         let err = push_all(&mut framer, &rle_zstd_frame(28)).unwrap_err();
         assert!(err.to_string().contains("too much memory"), "{err}");
@@ -654,7 +648,7 @@ mod tests {
     fn a_pump_stops_at_the_step_that_reaches_its_budget() {
         let chunk = gzip_best(&vec![b'\n'; 4 << 20]);
         // A second sink, stepped by hand, gives where each pump must stop.
-        let mut sink = Sink::new(Codec::Gzip, Box::new(TestLineFramer::new(TEST_CAP))).unwrap();
+        let mut sink = Sink::new(Codec::Gzip, ndjson_framer()).unwrap();
         let mut rest = &chunk[..];
         let mut want = Vec::new();
         while want.len() < 4 {
@@ -665,7 +659,7 @@ mod tests {
             }
             want.push(sink.framer().decoded_bytes());
         }
-        let mut framer = ObjectFramer::new(line_factory(TEST_CAP));
+        let mut framer = ObjectFramer::new(Arc::new(ndjson_framer));
         framer.begin_object(Codec::Gzip).unwrap();
         framer.push_chunk(Bytes::from(chunk)).unwrap();
         let mut got = vec![framer.decoded_bytes()];
@@ -685,7 +679,7 @@ mod tests {
             .finish()
             .unwrap();
         let members = 4 * PUMP_STEPS;
-        let mut framer = ObjectFramer::new(line_factory(TEST_CAP));
+        let mut framer = ObjectFramer::new(Arc::new(ndjson_framer));
         framer.begin_object(Codec::Gzip).unwrap();
         framer
             .push_chunk(Bytes::from(member.repeat(members)))
@@ -719,7 +713,7 @@ mod tests {
         let expected = reference_frames(&object);
         for codec_pick in 1..3 {
             let (codec, encoded) = encode(codec_pick, &object);
-            let mut framer = ObjectFramer::new(line_factory(TEST_CAP));
+            let mut framer = ObjectFramer::new(Arc::new(ndjson_framer));
             framer.begin_object(codec).unwrap();
             let mut framed = Vec::new();
             let mut resumed = 0;
@@ -745,7 +739,7 @@ mod tests {
     fn a_decode_error_drops_the_pending_input() {
         let mut object = gzip(&short_lines(1 << 16));
         object.extend(vec![0xFF; 64]);
-        let mut framer = ObjectFramer::new(line_factory(TEST_CAP));
+        let mut framer = ObjectFramer::new(Arc::new(ndjson_framer));
         framer.begin_object(Codec::Gzip).unwrap();
         assert!(push_all(&mut framer, &object).is_err());
         assert!(!framer.has_pending_input());
@@ -810,8 +804,8 @@ mod tests {
     proptest! {
         /// The codec + framer integration is a pure function of the object
         /// byte stream: any chunking of any codec's encoding yields the
-        /// reference framing (the shared framer's own determinism is covered
-        /// in `spate_core::framing`).
+        /// reference framing (the framer's own determinism is covered by
+        /// `spate-json`'s `line_framing_is_chunking_independent`).
         #[test]
         fn framing_is_chunking_independent(
             object in arb_object(),

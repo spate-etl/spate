@@ -649,7 +649,6 @@ impl<'a> PayloadBatch<'a> for S3Batch<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testutil::TestLineFramer;
     use spate_core::checkpoint::Checkpointer;
     use spate_core::clock::LONGEST_DEADLINE;
     use spate_core::clock::tokio::{SystemClock, TestClock};
@@ -714,7 +713,7 @@ mod tests {
             clock,
             checkpointer.handle(),
             Compression::Auto,
-            Arc::new(|| Box::new(TestLineFramer::new(1 << 20))),
+            Arc::new(crate::testutil::ndjson_framer),
             resume,
             Arc::clone(&tracker),
             poison_tx,

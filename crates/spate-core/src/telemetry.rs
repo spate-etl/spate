@@ -297,43 +297,19 @@ macro_rules! rate_limited_warn {
     };
 }
 
-/// An in-memory writer for a test's subscriber. Clones share the buffer.
-#[cfg(test)]
-#[derive(Clone, Default)]
-pub(crate) struct LogBuf(std::sync::Arc<Mutex<Vec<u8>>>);
-
-#[cfg(test)]
-impl LogBuf {
-    pub(crate) fn text(&self) -> String {
-        String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
-    }
-}
-
-#[cfg(test)]
-impl std::io::Write for LogBuf {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(bytes);
-        Ok(bytes.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-#[cfg(test)]
+#[cfg(all(test, not(loom)))]
 mod tests {
     use super::*;
 
     fn pretty_lines(f: impl FnOnce()) -> Vec<String> {
-        let buf = LogBuf::default();
-        let writer = buf.clone();
+        let capture = spate_test::LogCapture::new();
         let subscriber = pretty()
-            .with_writer(move || writer.clone())
+            .with_writer(capture.clone())
             .with_ansi(false)
             .without_time()
             .finish();
         tracing::subscriber::with_default(subscriber, f);
-        buf.text().lines().map(str::to_owned).collect()
+        capture.lines()
     }
 
     /// Pins that a line feed or carriage return in an event's message, its

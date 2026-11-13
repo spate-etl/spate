@@ -15,6 +15,18 @@ Put an integration test in the crate's `tests/` directory, and a doc test on the
 
 A helper that only this repository's tests need, such as reading a pinned image, goes in the unpublished `spate-test-support` crate under `test-support/`.
 
+The tests of `spate-core` use the helpers in `spate-test`, such as `wait_until` and `capture_logs`, through a dev-dependency with no version.
+The `spate-test` crate depends on `spate-core`, so this edge closes a cycle.
+Packaging drops a dev-dependency that has no version, so the cycle never reaches crates.io.
+
+Gate a test module that uses `spate-test` with `#[cfg(all(test, not(loom)))]`, because the dev-dependency is off under `--cfg loom`.
+
+In a `spate-core` unit test, use only `spate-test` items that neither name nor call a `spate-core` item.
+A unit test links a second copy of `spate-core` through `spate-test`.
+A `spate-core` type that a `spate-test` item names is the second copy's type, so it does not match the type the test holds and the test fails to compile.
+A `spate-test` function that calls `spate-core`, such as `render_metrics`, compiles and runs the second copy's code and statics.
+An integration test under `tests/` links one copy, so it can use any `spate-test` item.
+
 ## Choose the harness
 
 Use the first harness in this list that can run the code under test:

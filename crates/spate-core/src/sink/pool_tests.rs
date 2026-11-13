@@ -13,9 +13,9 @@ use crate::clock::tokio::{Clock as _, SystemClock, TestClock};
 use crate::error::ErrorClass;
 use crate::hash::FastMap;
 use crate::metrics::{ComponentLabels, E2eBasis, SinkShardMetrics};
-use crate::pipeline::fakes::wait_for;
 use bytes::Bytes;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use spate_test::wait_until;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::{oneshot, watch};
@@ -190,11 +190,6 @@ struct Fixture {
     budget: Arc<InflightBudget>,
 }
 
-fn next_component() -> String {
-    static NEXT: AtomicU64 = AtomicU64::new(0);
-    format!("sink-{}", NEXT.fetch_add(1, Ordering::Relaxed))
-}
-
 fn fixture(shards: usize, replicas: usize, cfg: SinkPoolConfig, queue_cap: usize) -> Fixture {
     fixture_with(None, shards, replicas, cfg, queue_cap)
 }
@@ -225,7 +220,7 @@ fn fixture_with(
     // handle set per series (`metrics::ownership`), and under `cargo test`
     // these fixtures are alive concurrently in one process. Sharing a label
     // set would make all but the first a shadow that publishes no gauge.
-    let labels = ComponentLabels::new("test", next_component(), "mock");
+    let labels = ComponentLabels::new("test", spate_test::unique_name("sink"), "mock");
     queues.attach_metrics(&labels).expect("free queue series");
     let endpoints: Vec<Vec<MockEndpoint>> = (0..shards)
         .map(|s| {
@@ -1188,19 +1183,19 @@ async fn an_unabortable_write_does_not_hold_the_worker_past_its_grace() {
     let t0 = clock.now();
     let deadline = Duration::from_millis(100);
     let drain = tokio::spawn(f.pool.drain(deadline));
-    wait_for(
-        "the worker arms its deadline",
+    wait_until(
         Duration::from_secs(5),
+        "the worker arms its deadline",
         || clock.has_slept_until(t0 + deadline),
     );
     clock.advance(deadline);
     // The sweep's grace timer; the pool's backstop sits a second past the
     // deadline, so the worker's grace must come due first.
-    wait_for("the sweep arms its grace", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "the sweep arms its grace", || {
         clock.has_slept_until(t0 + deadline + worker::ABORT_GRACE)
     });
     clock.advance(worker::ABORT_GRACE);
-    wait_for("the drain returns", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "the drain returns", || {
         drain.is_finished()
     });
     let report = drain.await.unwrap();
@@ -1259,7 +1254,7 @@ fn one_blocked_write(clock: &Arc<TestClock>) -> BlockedWrite {
     let (ack, ack_rx) = AckRef::test_pair();
     f.queues.try_send(0, chunk(1, 8, &ack)).unwrap();
     f.budget.add(8);
-    wait_for("the write starts", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "the write starts", || {
         !f.writer.calls().is_empty()
     });
     BlockedWrite {
@@ -1286,7 +1281,7 @@ fn a_worker_that_ignores_the_deadline_is_force_aborted() {
             .build()
             .expect("runtime");
         rt.block_on(async {
-            let labels = ComponentLabels::new("test", next_component(), "mock");
+            let labels = ComponentLabels::new("test", spate_test::unique_name("sink"), "mock");
             let metrics = vec![Arc::new(SinkShardMetrics::new(
                 &labels,
                 0,
@@ -1308,13 +1303,12 @@ fn a_worker_that_ignores_the_deadline_is_force_aborted() {
             );
             // Read before any overrun, when the counter may not render yet.
             let overruns = || {
-                handle
-                    .render()
-                    .lines()
-                    .find(|l| {
-                        l.starts_with("spate_sink_drain_overrun_total") && l.contains("shard=\"0\"")
-                    })
-                    .map_or(0.0, |l| l.rsplit(' ').next().unwrap().parse().unwrap())
+                spate_test::metric_value(
+                    &handle.render(),
+                    "spate_sink_drain_overrun_total",
+                    &[("shard", "0")],
+                )
+                .unwrap_or(0.0)
             };
 
             let t0 = clock.now();
@@ -1345,14 +1339,9 @@ fn a_worker_that_ignores_the_deadline_is_force_aborted() {
                 DrainReport::default(),
                 "a force-aborted worker contributes no counts"
             );
+            assert!(overruns() == 1.0, "the backstop counts one overrun");
         });
     });
-
-    let rendered = handle.render();
-    assert_eq!(
-        metric_value(&rendered, "spate_sink_drain_overrun_total", "shard=\"0\""),
-        1.0
-    );
 }
 
 #[test]
@@ -1438,16 +1427,16 @@ fn runtime_teardown_without_drain_fails_unwritten_acks() {
         fx.queues
             .try_send(0, chunk(1, 8, &in_flight_ack))
             .expect("send in-flight");
-        wait_for("the first batch is written", Duration::from_secs(5), || {
+        wait_until(Duration::from_secs(5), "the first batch is written", || {
             fx.writer.calls().len() == 1
         });
         // Sealed with no permit free, it waits in the worker and gates intake.
         fx.queues
             .try_send(0, chunk(1, 8, &waiting_ack))
             .expect("send waiting");
-        wait_for(
-            "the worker takes the second chunk",
+        wait_until(
             Duration::from_secs(5),
+            "the worker takes the second chunk",
             || fx.queues.all_below(0.0),
         );
         // Intake is gated, so this one stays in the shard queue.
@@ -1526,7 +1515,7 @@ fn sink_records_metric_matches_rows_written_exactly() {
         });
     });
     let rendered = handle.render();
-    let value = metric_value(&rendered, "spate_sink_records_total", "shard=\"0\"");
+    let value = sample_value(&rendered, "spate_sink_records_total", &[("shard", "0")]);
     assert!(
         (value - 12.0).abs() < f64::EPSILON,
         "metric must equal rows written exactly, got {value}"
@@ -1649,10 +1638,10 @@ fn each_shard_worker_samples_its_own_queue_depth() {
 
 /// `spate_queue_depth` for one shard of a fixture's queues.
 fn queue_depth(rendered: &str, shard: usize) -> u64 {
-    let value = metric_value(
+    let value = sample_value(
         rendered,
         "spate_queue_depth",
-        &format!("queue=\"chain->sink/shard-{shard}\""),
+        &[("queue", &format!("chain->sink/shard-{shard}"))],
     );
     assert!(
         value >= 0.0 && value.fract() == 0.0,
@@ -1661,21 +1650,11 @@ fn queue_depth(rendered: &str, shard: usize) -> u64 {
     value as u64
 }
 
-/// Pull one rendered Prometheus value by metric name plus a distinguishing
-/// label fragment. The value is the last space-separated token of the line
-/// (this exporter renders no trailing timestamp).
-///
-/// This is the **first** matching line, not a sum across series. A family
-/// split by a label the caller does not pin (say `shard`, on a multi-shard
-/// fixture) returns whichever series the exporter happened to emit first. Pin
-/// every label that varies; otherwise the assertion silently covers one series
-/// out of several and passes for the wrong reason.
-fn metric_value(rendered: &str, name: &str, label: &str) -> f64 {
-    let line = rendered
-        .lines()
-        .find(|l| l.starts_with(name) && l.contains(label))
-        .unwrap_or_else(|| panic!("`{name}{{{label}}}` not rendered:\n{rendered}"));
-    line.rsplit(' ').next().unwrap().parse().expect("value")
+/// The value of the one rendered series of `name` carrying `labels`; panics
+/// when none renders.
+fn sample_value(rendered: &str, name: &str, labels: &[(&str, &str)]) -> f64 {
+    spate_test::metric_value(rendered, name, labels)
+        .unwrap_or_else(|| panic!("`{name}` with {labels:?} not rendered:\n{rendered}"))
 }
 
 /// End-to-end wiring of the whole-shard health signal: with every replica of
@@ -1729,7 +1708,7 @@ fn shard_healthy_drops_to_zero_when_every_breaker_opens() {
     let rendered = handle.render();
     // Both breakers open → no circuit-closed replica → shard unhealthy.
     assert_eq!(
-        metric_value(&rendered, "spate_sink_shard_healthy", "shard=\"0\""),
+        sample_value(&rendered, "spate_sink_shard_healthy", &[("shard", "0")]),
         0.0,
         "every replica quarantined ⇒ shard_healthy == 0"
     );
@@ -1786,26 +1765,26 @@ fn replica_errors_attribute_failures_asymmetrically() {
 
     let rendered = handle.render();
     assert_eq!(
-        metric_value(
+        sample_value(
             &rendered,
             "spate_sink_replica_errors_total",
-            "replica=\"r0\""
+            &[("replica", "r0")]
         ),
         2.0,
         "replica 0 took two failures"
     );
     assert_eq!(
-        metric_value(
+        sample_value(
             &rendered,
             "spate_sink_replica_errors_total",
-            "replica=\"r1\""
+            &[("replica", "r1")]
         ),
         1.0,
         "replica 1 took one failure"
     );
     // Replica 1 is below threshold and still circuit-closed.
     assert_eq!(
-        metric_value(&rendered, "spate_sink_shard_healthy", "shard=\"0\""),
+        sample_value(&rendered, "spate_sink_shard_healthy", &[("shard", "0")]),
         1.0,
         "a circuit-closed replica remains ⇒ shard_healthy == 1"
     );
@@ -1858,15 +1837,21 @@ fn permit_wait_separates_queueing_from_a_slow_write() {
     });
 
     let rendered = handle.render();
-    let value = |name: &str, label: &str| metric_value(&rendered, name, label);
+    let value = |name: &str, labels: &[(&str, &str)]| sample_value(&rendered, name, labels);
 
     // Both writes took exactly 2s, and the sink never failed one.
     assert_eq!(
-        value("spate_sink_write_duration_seconds_count", "outcome=\"ok\""),
+        value(
+            "spate_sink_write_duration_seconds_count",
+            &[("outcome", "ok")]
+        ),
         2.0
     );
     assert_eq!(
-        value("spate_sink_write_duration_seconds_sum", "outcome=\"ok\""),
+        value(
+            "spate_sink_write_duration_seconds_sum",
+            &[("outcome", "ok")]
+        ),
         4.0,
         "the sink was equally fast for both batches"
     );
@@ -1876,20 +1861,23 @@ fn permit_wait_separates_queueing_from_a_slow_write() {
     assert_eq!(
         value(
             "spate_sink_permit_wait_duration_seconds_count",
-            "shard=\"0\""
+            &[("shard", "0")]
         ),
         2.0,
         "every sealed batch is observed, including the one that waited 0"
     );
     assert_eq!(
-        value("spate_sink_permit_wait_duration_seconds_sum", "shard=\"0\""),
+        value(
+            "spate_sink_permit_wait_duration_seconds_sum",
+            &[("shard", "0")]
+        ),
         2.0
     );
 
     // And the family the issue is about: 2s + 4s, against a writer that never
     // varied. Reading this as sink latency is the misdiagnosis it invites.
     assert_eq!(
-        value("spate_sink_flush_duration_seconds_sum", "shard=\"0\""),
+        value("spate_sink_flush_duration_seconds_sum", &[("shard", "0")]),
         6.0,
         "seal-to-settle carries the queueing the write histogram excludes"
     );
@@ -1940,24 +1928,30 @@ fn drain_force_seal_observes_the_permit_wait_it_queued_for() {
     });
 
     let rendered = handle.render();
-    let value = |name: &str, label: &str| metric_value(&rendered, name, label);
+    let value = |name: &str, labels: &[(&str, &str)]| sample_value(&rendered, name, labels);
 
     assert_eq!(
         value(
             "spate_sink_permit_wait_duration_seconds_count",
-            "shard=\"0\""
+            &[("shard", "0")]
         ),
         2.0,
         "the dispatched batch and the drain's force-sealed one are both observed"
     );
     assert_eq!(
-        value("spate_sink_permit_wait_duration_seconds_sum", "shard=\"0\""),
+        value(
+            "spate_sink_permit_wait_duration_seconds_sum",
+            &[("shard", "0")]
+        ),
         2.0,
         "the force-sealed batch waited out the in-flight write; the first waited 0"
     );
     // The sink was equally fast for both, so the drain's cost was queueing.
     assert_eq!(
-        value("spate_sink_write_duration_seconds_sum", "outcome=\"ok\""),
+        value(
+            "spate_sink_write_duration_seconds_sum",
+            &[("outcome", "ok")]
+        ),
         4.0
     );
 }
@@ -2000,22 +1994,28 @@ fn drain_force_seal_observes_a_free_permit_as_no_wait() {
     });
 
     let rendered = handle.render();
-    let value = |name: &str, label: &str| metric_value(&rendered, name, label);
+    let value = |name: &str, labels: &[(&str, &str)]| sample_value(&rendered, name, labels);
 
     assert_eq!(
         value(
             "spate_sink_permit_wait_duration_seconds_count",
-            "shard=\"0\""
+            &[("shard", "0")]
         ),
         1.0,
         "the force-sealed batch is observed even though it never waited"
     );
     assert_eq!(
-        value("spate_sink_permit_wait_duration_seconds_sum", "shard=\"0\""),
+        value(
+            "spate_sink_permit_wait_duration_seconds_sum",
+            &[("shard", "0")]
+        ),
         0.0
     );
     assert_eq!(
-        value("spate_sink_write_duration_seconds_sum", "outcome=\"ok\""),
+        value(
+            "spate_sink_write_duration_seconds_sum",
+            &[("outcome", "ok")]
+        ),
         2.0,
         "the write itself is unaffected by the drain path"
     );
@@ -2069,36 +2069,47 @@ fn write_duration_separates_failed_attempts_from_successful_ones() {
     });
 
     let rendered = handle.render();
-    let value = |name: &str, label: &str| metric_value(&rendered, name, label);
+    let value = |name: &str, labels: &[(&str, &str)]| sample_value(&rendered, name, labels);
 
     assert_eq!(
         value(
             "spate_sink_write_duration_seconds_count",
-            "outcome=\"error\""
+            &[("outcome", "error")]
         ),
         1.0
     );
     assert_eq!(
-        value("spate_sink_write_duration_seconds_sum", "outcome=\"error\""),
+        value(
+            "spate_sink_write_duration_seconds_sum",
+            &[("outcome", "error")]
+        ),
         1.0,
         "the attempt that failed took a second to do it"
     );
     assert_eq!(
-        value("spate_sink_write_duration_seconds_count", "outcome=\"ok\""),
+        value(
+            "spate_sink_write_duration_seconds_count",
+            &[("outcome", "ok")]
+        ),
         1.0
     );
     assert!(
-        (value("spate_sink_write_duration_seconds_sum", "outcome=\"ok\"") - 0.1).abs() < 1e-6,
+        (value(
+            "spate_sink_write_duration_seconds_sum",
+            &[("outcome", "ok")]
+        ) - 0.1)
+            .abs()
+            < 1e-6,
         "the successful attempt is 100ms, not the 1.1s the batch spent flushing"
     );
     // One batch, one flush observation, spanning both attempts and the 1ms
     // backoff between them.
     assert_eq!(
-        value("spate_sink_flush_duration_seconds_count", "shard=\"0\""),
+        value("spate_sink_flush_duration_seconds_count", &[("shard", "0")]),
         1.0
     );
     assert!(
-        (value("spate_sink_flush_duration_seconds_sum", "shard=\"0\"") - 1.101).abs() < 1e-6,
+        (value("spate_sink_flush_duration_seconds_sum", &[("shard", "0")]) - 1.101).abs() < 1e-6,
         "seal-to-settle is both attempts plus the backoff between them"
     );
 }
@@ -2150,10 +2161,10 @@ fn retry_backoff_gauge_reads_the_step_a_sleeping_shard_is_serving() {
                 "one attempt made, and the shard is asleep before the next"
             );
             assert_eq!(
-                metric_value(
+                sample_value(
                     &handle.render(),
                     "spate_sink_retry_backoff_seconds",
-                    "shard=\"0\""
+                    &[("shard", "0")]
                 ),
                 60.0,
                 "a shard sleeping between attempts must say how long for"
@@ -2176,10 +2187,10 @@ fn retry_backoff_gauge_reads_the_step_a_sleeping_shard_is_serving() {
     });
 
     assert_eq!(
-        metric_value(
+        sample_value(
             &handle.render(),
             "spate_sink_retry_backoff_seconds",
-            "shard=\"0\""
+            &[("shard", "0")]
         ),
         0.0,
         "an aborted sleep must not strand the gauge at its last step"
@@ -2282,8 +2293,12 @@ fn a_quarantine_wait_neither_retries_nor_advances_the_ladder() {
             );
 
             let rendered = handle.render();
-            let retries = metric_value(&rendered, "spate_sink_retries_total", "shard=\"0\"");
-            let step = metric_value(&rendered, "spate_sink_retry_backoff_seconds", "shard=\"0\"");
+            let retries = sample_value(&rendered, "spate_sink_retries_total", &[("shard", "0")]);
+            let step = sample_value(
+                &rendered,
+                "spate_sink_retry_backoff_seconds",
+                &[("shard", "0")],
+            );
             assert_eq!(
                 retries, 2.0,
                 "one retryable failure each; A's fatal probe is not a retry"
@@ -2751,11 +2766,12 @@ fn retry_backoff_sleeps_on_the_injected_clock() {
             f.queues.try_send(0, chunk(1, 8, &ack)).unwrap();
             drop(ack);
             let backoff = || {
-                handle
-                    .render()
-                    .lines()
-                    .find(|l| l.starts_with("spate_sink_retry_backoff_seconds"))
-                    .map_or(0.0, |l| l.rsplit(' ').next().unwrap().parse().unwrap())
+                spate_test::metric_value(
+                    &handle.render(),
+                    "spate_sink_retry_backoff_seconds",
+                    &[("shard", "0")],
+                )
+                .unwrap_or(0.0)
             };
 
             paused_hour().await;
@@ -2934,17 +2950,23 @@ fn sink_durations_are_measured_on_the_injected_clock() {
     });
 
     let rendered = handle.render();
-    let value = |name: &str, label: &str| metric_value(&rendered, name, label);
+    let value = |name: &str, labels: &[(&str, &str)]| sample_value(&rendered, name, labels);
     assert_eq!(
-        value("spate_sink_write_duration_seconds_sum", "outcome=\"ok\""),
+        value(
+            "spate_sink_write_duration_seconds_sum",
+            &[("outcome", "ok")]
+        ),
         4.0
     );
     assert_eq!(
-        value("spate_sink_permit_wait_duration_seconds_sum", "shard=\"0\""),
+        value(
+            "spate_sink_permit_wait_duration_seconds_sum",
+            &[("shard", "0")]
+        ),
         2.0
     );
     assert_eq!(
-        value("spate_sink_flush_duration_seconds_sum", "shard=\"0\""),
+        value("spate_sink_flush_duration_seconds_sum", &[("shard", "0")]),
         6.0
     );
 }
@@ -2975,7 +2997,7 @@ fn ingest_latency_ignores_the_pool_clock() {
         });
     });
 
-    let sum = metric_value(&handle.render(), "spate_e2e_latency_seconds_sum", "");
+    let sum = sample_value(&handle.render(), "spate_e2e_latency_seconds_sum", &[]);
     assert!(sum < 3600.0, "aged on the pool clock: {sum}");
 }
 
@@ -2990,7 +3012,7 @@ fn sink_pool_keeps_its_auto_traits() {
 /// reports its counts: the drain prefers the joined handle over the timer.
 #[tokio::test(start_paused = true)]
 async fn a_shard_finishing_as_the_backstop_fires_still_reports() {
-    let labels = ComponentLabels::new("test", next_component(), "mock");
+    let labels = ComponentLabels::new("test", spate_test::unique_name("sink"), "mock");
     let metrics = vec![Arc::new(SinkShardMetrics::new(
         &labels,
         0,
@@ -3182,10 +3204,10 @@ fn sink_errors_metric_counts_each_write_error_under_its_class() {
     });
     let rendered = handle.render();
     let errors = |class: &str| {
-        metric_value(
+        sample_value(
             &rendered,
             "spate_sink_errors_total",
-            &format!("error_type=\"{class}\""),
+            &[("error_type", class)],
         )
     };
     assert_eq!(errors("retryable"), 1.0, "{rendered}");
@@ -3204,15 +3226,15 @@ async fn drain_counts_the_largest_deadline_as_a_year() {
 
     let t0 = clock.now();
     let drain = tokio::spawn(f.pool.drain(Duration::MAX));
-    wait_for("the worker arms a year", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "the worker arms a year", || {
         clock.has_slept_until(t0 + year)
     });
     clock.advance(year);
-    wait_for("the sweep arms its grace", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "the sweep arms its grace", || {
         clock.has_slept_until(t0 + year + worker::ABORT_GRACE)
     });
     clock.advance(worker::ABORT_GRACE);
-    wait_for("the drain returns", Duration::from_secs(5), || {
+    wait_until(Duration::from_secs(5), "the drain returns", || {
         drain.is_finished()
     });
     let report = drain.await.unwrap();
@@ -3225,7 +3247,7 @@ async fn drain_counts_the_largest_deadline_as_a_year() {
 #[tokio::test(start_paused = true)]
 async fn finished_shards_behind_an_overrun_still_report() {
     const SHARDS: u32 = 300;
-    let labels = ComponentLabels::new("test", next_component(), "mock");
+    let labels = ComponentLabels::new("test", spate_test::unique_name("sink"), "mock");
     let metrics = (0..SHARDS)
         .map(|s| {
             Arc::new(SinkShardMetrics::new(

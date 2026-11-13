@@ -750,14 +750,10 @@ mod tests {
 
     /// Everything the check logs while `f` runs, as text.
     fn logs(f: impl FnOnce()) -> String {
-        let buf = crate::telemetry::LogBuf::default();
-        let writer = buf.clone();
-        let subscriber = tracing_subscriber::fmt()
-            .with_writer(move || writer.clone())
-            .with_ansi(false)
-            .finish();
-        tracing::subscriber::with_default(subscriber, f);
-        buf.text()
+        spate_test::capture_logs(tracing::Level::INFO, f)
+            .into_iter()
+            .map(|line| line + "\n")
+            .collect()
     }
 
     /// Pins the transitions an operator sees at INFO: a window opening with

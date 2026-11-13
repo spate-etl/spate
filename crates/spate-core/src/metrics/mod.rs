@@ -440,11 +440,7 @@ mod tests {
             shard.e2e_observed(Duration::from_secs(500), an_hour_ago);
             shard.e2e_observed(Duration::from_secs(500), i64::MAX);
         });
-        let sum: f64 = rendered
-            .lines()
-            .find(|l| l.starts_with("spate_e2e_latency_seconds_sum"))
-            .and_then(|l| l.rsplit(' ').next())
-            .and_then(|v| v.parse().ok())
+        let sum = spate_test::metric_value(&rendered, "spate_e2e_latency_seconds_sum", &[])
             .unwrap_or_else(|| panic!("no e2e sum in:\n{rendered}"));
         assert!((4100.0..4101.0).contains(&sum), "{sum}");
     }
@@ -763,14 +759,11 @@ mod tests {
         assert_eq!(divergence, None, "gauge stranded off the live backoff set");
     }
 
-    /// The value of an unlabeled-or-single-series gauge in a rendered
-    /// exposition (the value is the line's last space-separated token).
+    /// The value of the one series of `name` in a rendered exposition;
+    /// panics when none renders.
     fn gauge_value(rendered: &str, name: &str) -> f64 {
-        let line = rendered
-            .lines()
-            .find(|l| l.starts_with(name))
-            .unwrap_or_else(|| panic!("`{name}` not rendered:\n{rendered}"));
-        line.rsplit(' ').next().unwrap().parse().expect("value")
+        spate_test::metric_value(rendered, name, &[])
+            .unwrap_or_else(|| panic!("`{name}` not rendered:\n{rendered}"))
     }
 
     #[test]
@@ -1013,11 +1006,13 @@ mod tests {
             // leave a truthful value behind rather than a stale 5).
             detailed.set_partition_pending(PartitionId(2), 11);
         });
-        let gated_series_leaked = rendered.lines().any(|l| {
-            l.starts_with("spate_checkpoint_pending_batches")
-                && l.contains("gated_checkpoint")
-                && l.contains("partition=")
-        });
+        let gated_series_leaked = spate_test::metric_series(
+            &rendered,
+            "spate_checkpoint_pending_batches",
+            &[("component", "gated_checkpoint")],
+        )
+        .iter()
+        .any(|sample| sample.labels.iter().any(|(key, _)| key == "partition"));
         assert!(
             !gated_series_leaked,
             "per-partition checkpoint detail must be gated off:\n{rendered}"

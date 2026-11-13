@@ -405,22 +405,10 @@ impl ShardHealthTransition {
 mod tests {
     use super::*;
     use crate::metrics::ComponentLabels;
-    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::Duration;
 
-    /// A component name unique to each `set()` call. `SinkShardMetrics` owns
-    /// its gauge series (one live owner per process); these tests run
-    /// concurrently under `cargo test`, and while most read only the cached
-    /// `shard_healthy` bool, which shadowing does not affect, the
-    /// level-drive test below reads the rendered gauge, so it must own the
-    /// series it inspects.
-    fn breaker_component() -> String {
-        static NEXT: AtomicU64 = AtomicU64::new(0);
-        format!("breaker-{}", NEXT.fetch_add(1, Ordering::Relaxed))
-    }
-
     fn set(replicas: usize, threshold: u32) -> BreakerSet {
-        let labels = ComponentLabels::new("p", breaker_component(), "test");
+        let labels = ComponentLabels::new("p", spate_test::unique_name("breaker"), "test");
         let names: Vec<String> = (0..replicas).map(|r| format!("r{r}")).collect();
         BreakerSet::new(
             replicas,
@@ -666,7 +654,7 @@ mod tests {
     /// wait on, so the shard is unwritable for good.
     #[tokio::test(start_paused = true)]
     async fn a_zero_probe_budget_cannot_wedge_a_replica_shut() {
-        let labels = ComponentLabels::new("p", breaker_component(), "test");
+        let labels = ComponentLabels::new("p", spate_test::unique_name("breaker"), "test");
         let mut b = BreakerSet::new(
             1,
             BreakerConfig {
@@ -700,7 +688,7 @@ mod tests {
     /// open the replica for a year and do not panic the shard worker.
     #[tokio::test(start_paused = true)]
     async fn an_absurd_open_for_does_not_panic_the_state_machine() {
-        let labels = ComponentLabels::new("p", breaker_component(), "test");
+        let labels = ComponentLabels::new("p", spate_test::unique_name("breaker"), "test");
         let mut b = BreakerSet::new(
             1,
             BreakerConfig {
@@ -816,14 +804,9 @@ mod tests {
 
         let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
         let handle = recorder.handle();
-        let labels = ComponentLabels::new("p", breaker_component(), "test");
-        let gauge = |name: &str| {
-            handle
-                .render()
-                .lines()
-                .find(|l| l.starts_with(name))
-                .and_then(|l| l.rsplit(' ').next())
-                .and_then(|v| v.parse::<f64>().ok())
+        let labels = ComponentLabels::new("p", spate_test::unique_name("breaker"), "test");
+        let gauge = |name: &str, labels: &[(&str, &str)]| {
+            spate_test::metric_value(&handle.render(), name, labels)
         };
 
         metrics::with_local_recorder(&recorder, || {
@@ -849,14 +832,21 @@ mod tests {
             b.on_failure(0, Instant::now());
             b.on_failure(1, Instant::now());
             assert!(!b.shard_healthy);
-            assert_eq!(gauge(names::SINK_SHARD_HEALTHY), Some(0.0));
-            assert_eq!(gauge(names::SINK_REPLICA_HEALTHY), Some(0.0));
+            assert_eq!(gauge(names::SINK_SHARD_HEALTHY, &[]), Some(0.0));
+            assert_eq!(
+                gauge(names::SINK_REPLICA_HEALTHY, &[("replica", "r0")]),
+                Some(0.0)
+            );
 
             // A scrape target restarts, or a rogue writer intervenes: the
             // gauges now read a healthy shard that is fully down.
             metrics.set_shard_healthy(true);
             metrics.set_replica_healthy(0, true);
-            assert_eq!(gauge(names::SINK_SHARD_HEALTHY), Some(1.0), "clobbered");
+            assert_eq!(
+                gauge(names::SINK_SHARD_HEALTHY, &[]),
+                Some(1.0),
+                "clobbered"
+            );
 
             // One more failed outcome (not a transition, the shard was already
             // down) must put the truth back.
@@ -866,12 +856,12 @@ mod tests {
                 "already quarantined: no edge"
             );
             assert_eq!(
-                gauge(names::SINK_SHARD_HEALTHY),
+                gauge(names::SINK_SHARD_HEALTHY, &[]),
                 Some(0.0),
                 "a non-transition outcome must still republish shard health"
             );
             assert_eq!(
-                gauge(names::SINK_REPLICA_HEALTHY),
+                gauge(names::SINK_REPLICA_HEALTHY, &[("replica", "r0")]),
                 Some(0.0),
                 "and per-replica health with it"
             );

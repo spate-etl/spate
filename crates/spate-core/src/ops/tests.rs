@@ -13,6 +13,7 @@ use crate::sink::{
 };
 use crate::source::PayloadBatch;
 use bytes::BytesMut;
+use spate_test::MetricSample;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::mpsc;
@@ -2354,39 +2355,56 @@ fn stages_flush_batch_metrics() {
 }
 
 /// Every `spate_operator_errors_total` series in `rendered`, sorted.
-fn error_series(rendered: &str) -> Vec<String> {
-    let mut out: Vec<String> = rendered
-        .lines()
-        .filter(|l| l.starts_with(&format!("{}{{", names::OPERATOR_ERRORS_TOTAL)))
-        .map(str::to_owned)
-        .collect();
-    out.sort();
-    out
+fn error_series(rendered: &str) -> Vec<MetricSample> {
+    sorted(spate_test::metric_series(
+        rendered,
+        names::OPERATOR_ERRORS_TOTAL,
+        &[],
+    ))
 }
 
 /// The labels a stage of this index and kind publishes under.
-fn stage_labels(idx: usize, kind: &str) -> String {
-    format!(r#"pipeline="errtest",component="main.{idx}_{kind}",component_type="{kind}""#)
+fn stage_labels(idx: usize, kind: &str) -> [(&'static str, String); 3] {
+    [
+        ("pipeline", "errtest".to_owned()),
+        ("component", format!("main.{idx}_{kind}")),
+        ("component_type", kind.to_owned()),
+    ]
 }
 
 /// The labels a split branch's terminal publishes under.
-fn branch_labels(sink: &str) -> String {
-    format!(r#"pipeline="errtest",component="main.sink.{sink}",component_type="sink_handoff""#)
+fn branch_labels(sink: &str) -> [(&'static str, String); 3] {
+    [
+        ("pipeline", "errtest".to_owned()),
+        ("component", format!("main.sink.{sink}")),
+        ("component_type", "sink_handoff".to_owned()),
+    ]
 }
 
 /// The `spate_operator_errors_total` series one stage publishes, in
 /// [`error_series`] order. Handles register eagerly, so a stage that has not
 /// erred still renders both values at `0`.
-fn stage_errors(labels: &str, record_level: u64, fatal: u64) -> Vec<String> {
-    let name = names::OPERATOR_ERRORS_TOTAL;
-    vec![
-        format!(r#"{name}{{{labels},error_type="fatal"}} {fatal}"#),
-        format!(r#"{name}{{{labels},error_type="record_level"}} {record_level}"#),
-    ]
+fn stage_errors(
+    labels: &[(&'static str, String); 3],
+    record_level: u64,
+    fatal: u64,
+) -> Vec<MetricSample> {
+    [("fatal", fatal), ("record_level", record_level)]
+        .into_iter()
+        .map(|(error_type, value)| MetricSample {
+            labels: labels
+                .iter()
+                .map(|(key, value)| ((*key).to_owned(), value.clone()))
+                .chain([("error_type".to_owned(), error_type.to_owned())])
+                .collect(),
+            #[expect(clippy::cast_precision_loss, reason = "a test count")]
+            value: value as f64,
+        })
+        .collect()
 }
 
-fn sorted(mut v: Vec<String>) -> Vec<String> {
-    v.sort();
+fn sorted(mut v: Vec<MetricSample>) -> Vec<MetricSample> {
+    v.sort_by(|a, b| a.labels.cmp(&b.labels));
     v
 }
 
@@ -2900,16 +2918,6 @@ impl Deserializer<LogF> for FatalDeser {
     }
 }
 
-/// The value of the one series in `rendered` named `name` whose labels
-/// contain `label`, or 0 when none renders.
-fn series_value(rendered: &str, name: &str, label: &str) -> u64 {
-    rendered
-        .lines()
-        .find(|l| l.starts_with(&format!("{name}{{")) && l.contains(label))
-        .and_then(|l| l.rsplit(' ').next())
-        .map_or(0, |v| v.parse().unwrap())
-}
-
 /// A fatal deserializer error stops the chain under the Skip policy, fails
 /// the batch, and counts the payload as an error but not as a skip drop.
 #[test]
@@ -2943,17 +2951,17 @@ fn a_fatal_deser_error_stops_the_chain_under_skip() {
     assert_eq!(ack_status, Some(AckStatus::Failed));
     let name = names::DESER_RECORDS_TOTAL;
     assert_eq!(
-        series_value(&rendered, name, r#"outcome="error""#),
-        1,
+        spate_test::metric_value(&rendered, name, &[("outcome", "error")]),
+        Some(1.0),
         "{rendered}"
     );
     assert_eq!(
-        series_value(
+        spate_test::metric_value(
             &rendered,
             names::DESER_RECORDS_DROPPED_TOTAL,
-            r#"reason="skip_policy""#
+            &[("reason", "skip_policy")]
         ),
-        0,
+        Some(0.0),
         "{rendered}"
     );
 }
@@ -2999,7 +3007,11 @@ fn a_fatal_on_replay_fails_the_batch_and_clears_the_stash() {
     });
     assert_eq!(statuses[0], AckStatus::Failed);
     let name = names::DESER_NOT_READY_TOTAL;
-    assert_eq!(series_value(&rendered, name, "fataltest"), 1, "{rendered}");
+    assert_eq!(
+        spate_test::metric_value(&rendered, name, &[("pipeline", "fataltest")]),
+        Some(1.0),
+        "{rendered}"
+    );
 }
 
 // ---- frame codec -------------------------------------------------------------

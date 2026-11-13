@@ -388,34 +388,32 @@ mod tests {
         }
 
         /// The rendered value of `name` carrying the standard labels and
-        /// then `extra`, such as `,op="renew"`; `None` when absent.
-        fn value(&self, name: &str, extra: &str) -> Option<f64> {
-            let series = format!(
-                "{name}{{pipeline=\"{}\",component=\"feed\",component_type=\"fake\"{extra}}} ",
-                self.pipeline
-            );
-            let text = self.recorder.handle().render();
-            text.lines()
-                .find_map(|line| line.strip_prefix(&series))
-                .map(|value| value.parse().expect("a number"))
+        /// then `extra`, such as `[("op", "renew")]`; `None` when absent.
+        fn value(&self, name: &str, extra: &[(&str, &str)]) -> Option<f64> {
+            let mut labels = vec![
+                ("pipeline", self.pipeline),
+                ("component", "feed"),
+                ("component_type", "fake"),
+            ];
+            labels.extend_from_slice(extra);
+            spate_test::metric_value(&self.recorder.handle().render(), name, &labels)
         }
 
         fn counter(&self, name: &str) -> f64 {
-            self.value(name, "").unwrap_or(0.0)
+            self.value(name, &[]).unwrap_or(0.0)
         }
 
         fn errors(&self, op: &str, error_type: &str) -> f64 {
-            let extra = format!(",op=\"{op}\",error_type=\"{error_type}\"");
+            let extra = [("op", op), ("error_type", error_type)];
             self.value("spate_feed_errors_total", &extra).unwrap_or(0.0)
         }
 
         fn held(&self) -> Option<f64> {
-            self.value("spate_feed_held_units", "")
+            self.value("spate_feed_held_units", &[])
         }
 
         fn calls_timed(&self, op: &str) -> f64 {
-            let extra = format!(",op=\"{op}\"");
-            self.value("spate_feed_call_duration_seconds_count", &extra)
+            self.value("spate_feed_call_duration_seconds_count", &[("op", op)])
                 .unwrap_or(0.0)
         }
     }
@@ -564,9 +562,8 @@ mod tests {
             assert_eq!(rig.calls_timed(op), 1.0, "{op}");
         }
         for op in ["renew", "publish"] {
-            let extra = format!(",op=\"{op}\"");
             assert_eq!(
-                rig.value("spate_feed_call_duration_seconds_sum", &extra),
+                rig.value("spate_feed_call_duration_seconds_sum", &[("op", op)]),
                 Some(0.002),
                 "{op}"
             );
@@ -603,7 +600,7 @@ mod tests {
         let mut checked = rig.feed.publish(Unit::new("a", Vec::new()));
         assert!(checked.try_outcome().is_none());
         assert_eq!(
-            rig.value("spate_feed_publish_duration_seconds_count", ""),
+            rig.value("spate_feed_publish_duration_seconds_count", &[]),
             Some(0.0)
         );
         rig.clock.advance(Duration::from_secs(3));
@@ -612,7 +609,7 @@ mod tests {
         assert!(matches!(checked.try_outcome(), Some(Ok(()))));
         assert_eq!(rig.counter("spate_feed_units_published_total"), 1.0);
         assert_eq!(
-            rig.value("spate_feed_publish_duration_seconds_sum", ""),
+            rig.value("spate_feed_publish_duration_seconds_sum", &[]),
             Some(3.0)
         );
 
@@ -629,7 +626,7 @@ mod tests {
         assert_eq!(rig.counter("spate_feed_units_published_total"), 1.0);
         assert_eq!(rig.errors("publish", "refused"), 1.0);
         assert_eq!(
-            rig.value("spate_feed_publish_duration_seconds_count", ""),
+            rig.value("spate_feed_publish_duration_seconds_count", &[]),
             Some(2.0)
         );
     }
@@ -675,7 +672,7 @@ mod tests {
     #[test]
     fn the_dead_letter_sampler_publishes_each_settled_reading() {
         let rig = counting("metered-dead-letters");
-        let gauge = || rig.value("spate_feed_dead_letter_units", "");
+        let gauge = || rig.value("spate_feed_dead_letter_units", &[]);
         let t0 = Instant::now();
         let mut sampler = DeadLetterSampler::new(Duration::from_secs(60), t0);
 
@@ -725,7 +722,7 @@ mod tests {
         rig.fake.take_reporter().report(Ok(dead_letters(0)));
         sample(&rig, &mut once, t0, Duration::from_secs(1));
         sample(&rig, &mut once, t0, Duration::from_secs(86_400));
-        assert_eq!(rig.value("spate_feed_dead_letter_units", ""), Some(3.0));
+        assert_eq!(rig.value("spate_feed_dead_letter_units", &[]), Some(3.0));
         assert_eq!(dead_letter_reads(&rig), 1, "one read, at startup");
 
         let mut always = DeadLetterSampler::new(Duration::ZERO, t0);
@@ -747,6 +744,6 @@ mod tests {
             sample(&rig, &mut sampler, t0, Duration::from_secs(at));
         }
         assert_eq!(dead_letter_reads(&rig), 2);
-        assert_eq!(rig.value("spate_feed_dead_letter_units", ""), None);
+        assert_eq!(rig.value("spate_feed_dead_letter_units", &[]), None);
     }
 }

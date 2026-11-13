@@ -18,9 +18,9 @@ use crate::source::{
 };
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::num::NonZeroUsize;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// Once `polled` has been polled, the first finished `finished()` read of
 /// `lane` that directly follows a finished read of `after` signals `reached`
@@ -732,23 +732,10 @@ impl RunnableChain for FakeChain {
     }
 }
 
-/// A distinct pipeline name per config.
-///
-/// Metric gauge series are owned by exactly one live handle set per process
-/// (`metrics::ownership`), and the pipeline name is part of every key. Under
-/// nextest each test is its own process, but `cargo test` runs a binary's
-/// tests concurrently in one process, where two pipelines sharing a name
-/// collide and the second fails to start. Naming them apart keeps the two
-/// runners equivalent.
-pub(crate) fn test_pipeline_name() -> String {
-    static NEXT: AtomicU64 = AtomicU64::new(0);
-    format!("test-{}", NEXT.fetch_add(1, Ordering::Relaxed))
-}
-
 pub(crate) fn test_config(threads: usize) -> PipelineConfig {
     PipelineConfig {
         pipeline: PipelineSection {
-            name: test_pipeline_name(),
+            name: spate_test::unique_name("test"),
             threads: Some(threads),
             io_threads: 1,
             pinning: PinningMode::Off,
@@ -803,13 +790,4 @@ const NO_PAYLOAD: &[u8] = b"no-payload";
 /// A scripted batch that covers `offset` and hands out no payloads.
 pub(crate) fn no_payload_batch(offset: i64) -> Vec<(i64, Vec<u8>)> {
     vec![(offset, NO_PAYLOAD.to_vec())]
-}
-
-/// Spin until `cond` holds or the timeout elapses; panic on timeout.
-pub(crate) fn wait_for(what: &str, timeout: Duration, cond: impl Fn() -> bool) {
-    let deadline = Instant::now() + timeout;
-    while !cond() {
-        assert!(Instant::now() < deadline, "timed out waiting for {what}");
-        std::thread::sleep(Duration::from_millis(2));
-    }
 }

@@ -567,20 +567,17 @@ mod tests {
         let metrics = io.handle().metrics();
         let interval = Duration::from_millis(20);
         let mut s = IoBusySampler::new(interval, SECS(1), Instant::now(), busy_total(&metrics));
-        let deadline = Instant::now() + SECS(10);
-        loop {
-            let (busy, workers) = busy_reading(&metrics);
-            if let Some(sample) = s.observe(Instant::now(), busy, workers)
-                && done(sample.ratio)
-            {
-                return sample.ratio;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "no matching sample before the deadline"
-            );
-            std::thread::sleep(Duration::from_millis(5));
-        }
+        spate_test::wait_for_value(
+            SECS(10),
+            "a matching sample",
+            || {
+                let (busy, workers) = busy_reading(&metrics);
+                s.observe(Instant::now(), busy, workers)
+                    .map(|sample| sample.ratio)
+            },
+            |ratio| ratio.is_some_and(&done),
+        )
+        .expect("`done` accepts only a sample")
     }
 
     fn one_worker_runtime() -> tokio::runtime::Runtime {

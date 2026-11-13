@@ -146,9 +146,6 @@ assert!(matches!(source.members[0].phase, Phase::Assigned));
 
 The public seam for the same injection is `KafkaSource::with_clock`, behind the crate's `testing` feature.
 
-The `spate-core` crate cannot depend on `spate-test`, so its tests poll with their own `wait_for` in `pipeline/fakes.rs`.
-Each caller passes the bound, and the rule applies to it as it does to `HANG`.
-
 Real time is allowed in one case: the property is a librdkafka or broker timer running out, such as `session.timeout.ms` or a broker's `segment.ms`.
 No test clock controls those timers, so the test has to let real time pass.
 It may wait past the timer, or assert that at least that much time has passed, and a comment starting `Elapsed time is the property` names the timer.

@@ -741,6 +741,7 @@ mod tests {
                 [
                     "spate-avro",
                     "spate-clickhouse",
+                    "spate-core",
                     "spate-json",
                     "spate-kafka",
                     "spate-s3"

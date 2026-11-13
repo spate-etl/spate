@@ -917,11 +917,12 @@ mod tests {
     use crate::pipeline::ExitState;
     use crate::pipeline::fakes::{
         ChainMode, ChainShared, FakeChain, FakeSource, LaneSpec, Script, SourceLog, batches,
-        test_config, test_options, wait_for,
+        test_config, test_options,
     };
     use crate::record::PartitionId;
     use crate::sink::{SealedBatch, SinkParts, SinkPoolConfig};
     use crate::source::LaneId;
+    use spate_test::wait_until;
     use std::sync::Mutex;
     use std::sync::atomic::Ordering;
     use std::time::Duration;
@@ -1019,12 +1020,18 @@ mod tests {
         let rendered = crate::metrics::render_local(|| {
             meter.counter("probe_total", &[]).increment(1);
         });
-        let expected = format!(
-            "spate_probe_sink_probe_total{{pipeline=\"{name}\",component=\"sink\",component_type=\"probe\"}} 1"
-        );
-        assert!(
-            rendered.lines().any(|line| line == expected),
-            "missing `{expected}` in:\n{rendered}"
+        assert_eq!(
+            spate_test::metric_value(
+                &rendered,
+                "spate_probe_sink_probe_total",
+                &[
+                    ("pipeline", name.as_str()),
+                    ("component", "sink"),
+                    ("component_type", "probe"),
+                ],
+            ),
+            Some(1.0),
+            "{rendered}"
         );
 
         let seen = Arc::new(Mutex::new(Vec::new()));
@@ -1219,7 +1226,7 @@ mod tests {
 
         let shutdown = runtime.shutdown_handle();
         let join = std::thread::spawn(move || runtime.run());
-        wait_for("payloads consumed", Duration::from_secs(5), || {
+        wait_until(Duration::from_secs(5), "payloads consumed", || {
             chain_shared.consumed.load(Ordering::Relaxed) == 20
         });
         shutdown.trigger();
@@ -1523,7 +1530,7 @@ mod tests {
 
         let shutdown = runtime.shutdown_handle();
         let join = std::thread::spawn(move || runtime.run());
-        wait_for("chain factory ran", Duration::from_secs(5), || {
+        wait_until(Duration::from_secs(5), "chain factory ran", || {
             !captured.lock().unwrap().is_empty()
         });
         shutdown.trigger();
@@ -1602,7 +1609,7 @@ mod tests {
 
         let shutdown = runtime.shutdown_handle();
         let join = std::thread::spawn(move || runtime.run());
-        wait_for("every chain factory ran", Duration::from_secs(5), || {
+        wait_until(Duration::from_secs(5), "every chain factory ran", || {
             captured.lock().unwrap().len() == 2
         });
         shutdown.trigger();
@@ -1650,7 +1657,7 @@ mod tests {
 
         let shutdown = runtime.shutdown_handle();
         let join = std::thread::spawn(move || runtime.run());
-        wait_for("chain factory ran", Duration::from_secs(5), || {
+        wait_until(Duration::from_secs(5), "chain factory ran", || {
             !captured.lock().unwrap().is_empty()
         });
         shutdown.trigger();
@@ -1741,7 +1748,7 @@ mod tests {
 
         let shutdown = runtime.shutdown_handle();
         let join = std::thread::spawn(move || runtime.run());
-        wait_for("source opened", Duration::from_secs(5), || {
+        wait_until(Duration::from_secs(5), "source opened", || {
             shared.lock().unwrap().opened
         });
         shutdown.trigger();
@@ -1783,7 +1790,7 @@ mod tests {
         let runtime = pipeline.into_runtime(source).expect("into_runtime");
         let shutdown = runtime.shutdown_handle();
         std::thread::spawn(move || {
-            wait_for("payloads consumed", Duration::from_secs(5), || {
+            wait_until(Duration::from_secs(5), "payloads consumed", || {
                 consumed.consumed.load(Ordering::Relaxed) == 5
             });
             shutdown.trigger();

@@ -91,7 +91,7 @@ call. The feed has no queue and no clock behind it, and its backend key is
   timeout, both panic with every line captured so far.
 - `LogCapture::install_global` installs a subscriber at a chosen level as the
   process's global default and returns its capture, so lines from every
-  thread reach it. A process has one global subscriber, so a test that calls
+  thread without a subscriber of its own reach it. A process has one global subscriber, so a test that calls
   it needs a binary of its own.
 
 ## Property tests

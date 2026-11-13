@@ -28,8 +28,8 @@ impl LogCapture {
     /// Install a subscriber at `level` as the process's global default,
     /// writing to a new capture, and return the capture.
     ///
-    /// Every thread logs to it, including threads the test does not own, such
-    /// as a pipeline's or a client library's. The lines are formatted as
+    /// Every thread without a subscriber of its own logs to it, including
+    /// threads a client library starts. The lines are formatted as
     /// [`capture_logs`] formats them, and go to the capture only.
     ///
     /// # Panics

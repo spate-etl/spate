@@ -305,13 +305,16 @@ pub(crate) mod tests {
         /// The framer is a pure function of the byte stream: any two chunkings
         /// of the same bytes yield the reference framing, or the cap error.
         /// This determinism is what makes resume-by-record-index safe for
-        /// every streaming source that reuses `NdjsonFramer`. Lines are at
-        /// most 79 bytes, so caps from 80 up frame every stream.
+        /// every streaming source that reuses `NdjsonFramer`. The cap sits
+        /// within two bytes of the longest line, so that line, CRLF or not,
+        /// lands on each side of it.
         #[test]
         fn line_framing_is_chunking_independent(
             stream in arb_stream(),
-            cap in 1..160usize,
+            slack in -2..=2isize,
         ) {
+            let longest = stream.split(|&b| b == b'\n').map(<[u8]>::len).max().unwrap_or(0);
+            let cap = longest.saturating_add_signed(slack);
             let expected = reference_frames(&stream, cap);
             for split in 0..=stream.len() {
                 let framed = frame_all(cap, &[&stream[..split], &stream[split..]]).ok();

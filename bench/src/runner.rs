@@ -595,6 +595,19 @@ mod tests {
         assert_eq!(answer.protocol, PROTOCOL_VERSION);
     }
 
+    /// A protocol line followed by a failing exit is still a failure.
+    #[test]
+    fn an_answer_from_a_child_that_then_fails_is_refused() {
+        let runner = stub(SLOW_PERIOD);
+        let err = runner
+            .ask::<ProtocolVersion>(&[
+                "-c".to_owned(),
+                format!("echo '{{\"protocol\":{PROTOCOL_VERSION}}}'; exit 3"),
+            ])
+            .expect_err("a failing child's answer is refused");
+        assert!(err.contains("exit status: 3"), "{err}");
+    }
+
     #[test]
     fn the_slow_line_names_the_leg_the_target_and_the_call() {
         let runner = stub(SLOW_PERIOD);

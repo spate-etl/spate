@@ -78,23 +78,34 @@ impl NdjsonFramer {
     /// are buffered.
     fn push_partial(&mut self, bytes: &[u8]) -> io::Result<()> {
         let len = self.partial.len() + bytes.len();
-        // The line's one trailing `\r` is stripped when the line ends, so it
-        // does not count against the cap.
-        if len > self.max_record_bytes
-            && (len - 1 > self.max_record_bytes
-                || bytes.last().or(self.partial.last()) != Some(&b'\r'))
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "record line exceeds the configured max_record_bytes ({}); \
-                     is the stream really newline-delimited?",
-                    self.max_record_bytes
-                ),
-            ));
+        if len > self.max_record_bytes {
+            self.check_past_cap(len, bytes)?;
         }
         self.partial.extend_from_slice(bytes);
         Ok(())
+    }
+
+    /// The cap check for a line of `len` bytes, past `max_record_bytes`. The
+    /// line's one trailing `\r` is stripped when the line ends, so a line one
+    /// byte past the cap that ends in `\r` still fits.
+    // Out of line: inlined, it costs `push` up to 6% more instructions on
+    // lines that never reach the cap.
+    #[cold]
+    #[inline(never)]
+    fn check_past_cap(&self, len: usize, bytes: &[u8]) -> io::Result<()> {
+        if len - 1 == self.max_record_bytes
+            && bytes.last().or(self.partial.last()) == Some(&b'\r')
+        {
+            return Ok(());
+        }
+        Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "record line exceeds the configured max_record_bytes ({}); \
+                 is the stream really newline-delimited?",
+                self.max_record_bytes
+            ),
+        ))
     }
 
     /// Complete the current line: strip one `\r`, skip whitespace-only.

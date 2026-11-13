@@ -59,7 +59,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
-use crate::cargo::{self, Selection};
+use crate::cargo::{self, BenchTarget, Selection};
 use crate::compare::{Cause, Comparison, Leg, NotComparable, guard_fingerprints, load_leg};
 use crate::fingerprint::BuildFingerprint;
 pub use crate::fingerprint::{Axis, BASE_LEG, HEAD_LEG};
@@ -112,9 +112,9 @@ pub struct Plan {
 struct Prepared {
     name: String,
     out: PathBuf,
-    runners: BTreeMap<String, Runner>,
+    runners: BTreeMap<BenchTarget, Runner>,
     cases: BTreeSet<CaseId>,
-    listings: Vec<(String, Listing)>,
+    listings: Vec<(BenchTarget, Listing)>,
     fingerprint: BuildFingerprint,
 }
 
@@ -140,12 +140,7 @@ fn prepare(plan: &Plan, git_describe: Option<String>, dirty: bool) -> Result<Pre
         plan.leg,
         plan.dir.display()
     ));
-    let binaries = cargo::build(
-        &plan.dir,
-        &plan.target_dir,
-        &discovery.targets,
-        &plan.feature_args,
-    )?;
+    let binaries = cargo::build(&plan.dir, &plan.target_dir, &discovery, &plan.feature_args)?;
 
     let (rustc, host_triple) = cargo::toolchain(&plan.dir)?;
     let fingerprint = BuildFingerprint {
@@ -170,9 +165,9 @@ fn prepare(plan: &Plan, git_describe: Option<String>, dirty: bool) -> Result<Pre
     let period = slow_period(plan.target_ms, plan.warmup_ms);
     for target in &discovery.targets {
         let binary = binaries
-            .get(&target.target)
-            .ok_or_else(|| format!("no binary for '{}'", target.target))?;
-        let runner = Runner::open(binary, &plan.dir, &fingerprint, period)?;
+            .get(target)
+            .ok_or_else(|| format!("no binary for '{target}'"))?;
+        let runner = Runner::open(binary, target, &plan.dir, &fingerprint, period)?;
         let mut listing = runner.list()?;
         if let Some(filter) = &plan.filter {
             listing
@@ -186,8 +181,8 @@ fn prepare(plan: &Plan, git_describe: Option<String>, dirty: bool) -> Result<Pre
                 case: case.id.clone(),
             });
         }
-        runners.insert(target.target.clone(), runner);
-        listings.push((target.target.clone(), listing));
+        runners.insert(target.clone(), runner);
+        listings.push((target.clone(), listing));
     }
 
     Ok(Prepared {
@@ -209,7 +204,7 @@ fn prepare(plan: &Plan, git_describe: Option<String>, dirty: bool) -> Result<Pre
 /// # Errors
 ///
 /// When the tree cannot be built or a binary does not speak the protocol.
-pub fn listings(plan: &Plan) -> Result<Vec<(String, Listing)>, String> {
+pub fn listings(plan: &Plan) -> Result<Vec<(BenchTarget, Listing)>, String> {
     let (describe, dirty) = worktree::describe(&plan.dir);
     Ok(prepare(plan, describe, dirty)?.listings)
 }
@@ -549,12 +544,10 @@ fn measure_one(
 }
 
 fn runner_for<'a>(leg: &'a Prepared, case: &CaseId) -> Result<&'a Runner, String> {
-    leg.runners.get(&case.target).ok_or_else(|| {
-        format!(
-            "the {} leg has no binary for target '{}'",
-            leg.name, case.target
-        )
-    })
+    let target = BenchTarget::from(case);
+    leg.runners
+        .get(&target)
+        .ok_or_else(|| format!("the {} leg has no binary for target '{target}'", leg.name))
 }
 
 /// " within 'a', 'b'" and " outside 'c'" for a narrowed selection, and

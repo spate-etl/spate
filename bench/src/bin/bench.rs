@@ -107,7 +107,7 @@
 //! `cause` fields are tokens a script matches on, where the two human formats
 //! phrase a verdict for a reader and state a cause only as prose.
 //!
-//! # Exit codes, and three refusals worth knowing in advance
+//! # Exit codes, and two refusals worth knowing in advance
 //!
 //! Exit code 2 means the thing you named does not exist: anything the parser
 //! rejects, a reference or directory that is not there, a `--package` or
@@ -122,11 +122,10 @@
 //! gates anything. The report is written either way, since the reason nothing
 //! paired is the part of it worth reading.
 //!
-//! Three refusals are easier to recognize than to diagnose: two packages
-//! declaring a `_wall` target of the same name; a two-leg run whose legs share
-//! no case at all, which a `--filter` matching nothing looks like; and
-//! an `arms` in which every judged case declared the same subject on both arms,
-//! which is usually a feature name spelled for the wrong package.
+//! Two refusals are easier to recognize than to diagnose: a two-leg run whose
+//! legs share no case at all, which a `--filter` matching nothing looks like;
+//! and an `arms` in which every judged case declared the same subject on both
+//! arms, which is usually a feature name spelled for the wrong package.
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -474,7 +473,7 @@ fn list(args: &ArgMatches) -> Result<(), Failure> {
     };
     for (target, listing) in ab::listings(&plan)? {
         for case in listing.cases {
-            let mut line = format!("{} {} {}", listing.krate, target, case.id);
+            let mut line = format!("{} {} {}", listing.krate, target.target, case.id);
             if let Some(why) = case.erratic {
                 line.push_str(&format!("  [erratic: {why}]"));
             }

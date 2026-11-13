@@ -421,8 +421,9 @@ counts each new set of lanes. It does not count librdkafka's rebalances, and it
 has no `client` label.
 
 - Apart from the cases below, one eager rebalance counts one `revoke` and one
-  `assign`, whatever `consumers` is. The first revocation on any consumer drains every consumer's
-  lanes, and the source hands over the consumers' new assignments as one set.
+  `assign`, whatever `consumers` is. The first revocation on any consumer
+  drains every consumer's lanes, and the source hands over the consumers' new
+  assignments as one set.
 - A revocation that finds no live lanes counts no `revoke`, and an assignment
   that leaves the process no partitions counts no `assign`.
 - A rebalance error on a consumer with live lanes counts a `revoke` for that

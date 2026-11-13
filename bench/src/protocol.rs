@@ -121,7 +121,7 @@ pub fn run(suite: &Suite, krate: &str, target: &str, args: &[String]) -> i32 {
             i32::from(stdout.flush().is_err())
         }
         Err(message) => {
-            let _ = writeln!(std::io::stderr(), "{target}: {message}");
+            let _ = writeln!(std::io::stderr(), "{krate}/{target}: {message}");
             ERROR_EXIT
         }
     }

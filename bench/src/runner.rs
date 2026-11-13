@@ -29,6 +29,7 @@ use std::time::Duration;
 
 use serde::de::DeserializeOwned;
 
+use crate::cargo::BenchTarget;
 use crate::fingerprint::{BuildFingerprint, FINGERPRINT_ENV, detected_simd};
 use crate::note;
 use crate::protocol::{Calibration, Listing, PROTOCOL_VERSION, ProtocolVersion};
@@ -62,6 +63,7 @@ pub fn slow_period(target_ms: u64, warmup_ms: u64) -> Duration {
 #[derive(Debug, Clone)]
 pub struct Runner {
     binary: PathBuf,
+    target: BenchTarget,
     dir: PathBuf,
     fingerprint: BuildFingerprint,
     fingerprint_json: String,
@@ -87,6 +89,7 @@ impl Runner {
     /// with a protocol this driver does not speak.
     pub fn open(
         binary: &Path,
+        target: &BenchTarget,
         dir: &Path,
         fingerprint: &BuildFingerprint,
         period: Duration,
@@ -95,6 +98,7 @@ impl Runner {
             .map_err(|e| format!("the build fingerprint does not serialize: {e}"))?;
         let runner = Self {
             binary: binary.to_owned(),
+            target: target.clone(),
             dir: dir.to_owned(),
             fingerprint: fingerprint.clone(),
             fingerprint_json,
@@ -104,7 +108,7 @@ impl Runner {
         let version: ProtocolVersion = runner.ask(&["--protocol-version".to_owned()])?;
         if version.protocol != PROTOCOL_VERSION {
             return Err(format!(
-                "{} speaks protocol {} and this driver speaks {PROTOCOL_VERSION}",
+                "{target} ({}) speaks protocol {} and this driver speaks {PROTOCOL_VERSION}",
                 binary.display(),
                 version.protocol
             ));
@@ -188,7 +192,7 @@ impl Runner {
         format!(
             "{} {} {}",
             self.fingerprint.leg,
-            target_name(&self.binary),
+            self.target,
             args.join(" ")
         )
     }
@@ -228,7 +232,7 @@ impl Runner {
             // A protocol answer is a protocol answer whatever the exit status,
             // but a non-zero status alongside one is still a failure.
             Some(text) if output.status.success() => {
-                serde_json::from_str(text).map_err(|e| hint(&self.binary, args, &e.to_string()))
+                serde_json::from_str(text).map_err(|e| self.hint(args, &e.to_string()))
             }
             // An interrupt reaches the whole process group, so the child dies
             // non-zero and would otherwise earn a manifest hint that has
@@ -243,11 +247,10 @@ impl Runner {
             // arguments fine.
             _ if output.status.code() == Some(crate::protocol::ERROR_EXIT) => Err(format!(
                 "{} refused '{}': its reason is on stderr, above.",
-                target_name(&self.binary),
+                self.target,
                 args.join(" ")
             )),
-            _ => Err(hint(
-                &self.binary,
+            _ => Err(self.hint(
                 args,
                 &format!(
                     "it exited with {} and its last line of stdout was {}",
@@ -367,45 +370,38 @@ fn slow_line(label: &str, elapsed: Duration) -> String {
     format!("SLOW [> {:.3}s] {label}", elapsed.as_secs_f64())
 }
 
-/// The bench target's name, from the binary cargo built for it.
-///
-/// Cargo appends a hash to the file name, which is noise in a message about the
-/// target.
-fn target_name(binary: &Path) -> &str {
-    binary
-        .file_name()
-        .and_then(|n| n.to_str())
-        .and_then(|n| n.rsplit_once('-').map(|(stem, _)| stem))
-        .unwrap_or("<target>")
-}
-
-/// The error any binary that did not answer the protocol earns, naming the
-/// likeliest cause.
-///
-/// This covers a non-zero exit as well as unparseable output: both are "no
-/// record came back", and the manifest stanza is the one cause a message can do
-/// something about. The binary's own
-/// diagnostics have already reached the terminal, since stderr is inherited,
-/// so this adds the part they cannot know.
-fn hint(binary: &Path, args: &[String], why: &str) -> String {
-    format!(
-        "{} {} did not answer the runner protocol ({why}).\n\
-         If this target is a `*_wall.rs`, check its package declares\n\
-         \n    [[bench]]\n    name = \"{}\"\n    harness = false\n\n\
-         Without it cargo runs the target under libtest, which rejects these arguments.",
-        binary.display(),
-        args.join(" "),
-        target_name(binary)
-    )
+impl Runner {
+    /// The error any binary that did not answer the protocol earns, naming the
+    /// likeliest cause.
+    ///
+    /// This covers a non-zero exit as well as unparseable output: both are "no
+    /// record came back", and the manifest stanza is the one cause a message can
+    /// do something about. The binary's own diagnostics have already reached the
+    /// terminal, since stderr is inherited, so this adds the part they cannot
+    /// know.
+    fn hint(&self, args: &[String], why: &str) -> String {
+        format!(
+            "{} ({}) {} did not answer the runner protocol ({why}).\n\
+             If this target is a `*_wall.rs`, check that '{}' declares\n\
+             \n    [[bench]]\n    name = \"{}\"\n    harness = false\n\n\
+             Without it cargo runs the target under libtest, which rejects these arguments.",
+            self.target,
+            self.binary.display(),
+            args.join(" "),
+            self.target.package,
+            self.target.target
+        )
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::path::{Path, PathBuf};
+    use std::path::PathBuf;
     use std::sync::{Arc, mpsc};
     use std::time::Duration;
 
-    use super::{PERIOD_MULTIPLE, Runner, SLOW_PERIOD, Watchdog, hint, slow_line, slow_period};
+    use super::{PERIOD_MULTIPLE, Runner, SLOW_PERIOD, Watchdog, slow_line, slow_period};
+    use crate::cargo::BenchTarget;
     use crate::fingerprint::BuildFingerprint;
     use crate::protocol::{PROTOCOL_VERSION, ProtocolVersion};
 
@@ -419,6 +415,10 @@ mod tests {
         fingerprint.leg = "base".to_owned();
         Runner {
             binary: PathBuf::from("/bin/sh"),
+            target: BenchTarget {
+                package: "spate-json".to_owned(),
+                target: "decode_wall".to_owned(),
+            },
             dir: std::env::temp_dir(),
             fingerprint,
             fingerprint_json: "{}".to_owned(),
@@ -449,15 +449,21 @@ mod tests {
     }
 
     #[test]
-    fn the_hint_names_the_manifest_stanza_and_strips_the_hash_suffix() {
-        let message = hint(
-            Path::new("/t/bench/decode_wall-9f3c1a"),
-            &["--list-cases".to_owned()],
-            "expected value at line 1",
+    fn the_hint_names_the_package_and_the_manifest_stanza() {
+        let mut runner = stub(SLOW_PERIOD);
+        runner.binary = PathBuf::from("/t/bench/decode_wall-9f3c1a");
+        let message = runner.hint(&["--list-cases".to_owned()], "expected value at line 1");
+        assert!(
+            message
+                .starts_with("spate-json/decode_wall (/t/bench/decode_wall-9f3c1a) --list-cases"),
+            "{message}"
         );
-        assert!(message.contains("harness = false"), "{message}");
+        assert!(
+            message.contains("check that 'spate-json' declares"),
+            "{message}"
+        );
         assert!(message.contains("name = \"decode_wall\""), "{message}");
-        assert!(message.contains("--list-cases"), "{message}");
+        assert!(message.contains("harness = false"), "{message}");
     }
 
     /// How long a test waits for a report it has released before failing.
@@ -591,14 +597,13 @@ mod tests {
 
     #[test]
     fn the_slow_line_names_the_leg_the_target_and_the_call() {
-        let mut runner = stub(SLOW_PERIOD);
-        runner.binary = PathBuf::from("/t/bench/decode_wall-9f3c1a");
+        let runner = stub(SLOW_PERIOD);
         let label = runner.label(&["--run".to_owned(), "decode/small".to_owned()]);
 
-        assert_eq!(label, "base decode_wall --run decode/small");
+        assert_eq!(label, "base spate-json/decode_wall --run decode/small");
         assert_eq!(
             slow_line(&label, Duration::from_secs(30)),
-            "SLOW [> 30.000s] base decode_wall --run decode/small"
+            "SLOW [> 30.000s] base spate-json/decode_wall --run decode/small"
         );
     }
 

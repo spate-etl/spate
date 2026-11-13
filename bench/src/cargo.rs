@@ -20,7 +20,7 @@
 //!
 //! # Why not the `cargo_metadata` crate
 //!
-//! Four fields are read. A dependency for four fields would be a dependency
+//! A few fields are read. A dependency for a few fields would be a dependency
 //! this crate has to keep in step with cargo's output across two checkouts that
 //! may be months apart, which is more risk than the parsing it saves.
 
@@ -30,16 +30,36 @@ use std::process::{Command, Stdio};
 
 use serde::Deserialize;
 
+use crate::record::CaseId;
+
 /// The suffix that marks a bench target as belonging to this tier.
 pub const WALL_SUFFIX: &str = "_wall";
 
 /// One wall-clock bench target.
+///
+/// The package and the name together identify it. Two packages can each
+/// declare a target of one name, as the counted tier's targets already do.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct BenchTarget {
     /// The package that declares it.
     pub package: String,
     /// The target's name, ending in [`WALL_SUFFIX`].
     pub target: String,
+}
+
+impl From<&CaseId> for BenchTarget {
+    fn from(case: &CaseId) -> Self {
+        Self {
+            package: case.krate.clone(),
+            target: case.target.clone(),
+        }
+    }
+}
+
+impl std::fmt::Display for BenchTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}/{}", self.package, self.target)
+    }
 }
 
 /// The packages a run is narrowed to, by exact name.
@@ -74,6 +94,12 @@ pub struct Discovery {
     /// resolve differently from identical flags, and that makes them
     /// incomparable however the flags read.
     pub features: Vec<String>,
+    /// Each owning package's cargo package id, by package name.
+    ///
+    /// A build message names its package by id only, and the id leaves the
+    /// name out when the package's directory carries it, so the name is
+    /// looked up here rather than parsed out of the id.
+    pub package_ids: BTreeMap<String, String>,
 }
 
 impl Discovery {
@@ -196,9 +222,7 @@ struct MetaNode {
 ///
 /// # Errors
 ///
-/// When cargo fails, or when two packages declare a target of the same name.
-/// The driver keys build artifacts by target name, and two of them would make
-/// one leg's binary stand in for the other's.
+/// When cargo fails, or when a target's name is not a valid Rust identifier.
 pub fn discover(dir: &Path, feature_args: &[String]) -> Result<Discovery, String> {
     let raw = run(
         dir,
@@ -228,8 +252,7 @@ pub fn discover(dir: &Path, feature_args: &[String]) -> Result<Discovery, String
 /// which is not the property worth pinning.
 fn discovery_from(metadata: &Metadata) -> Result<Discovery, String> {
     let mut targets = Vec::new();
-    let mut owners: BTreeMap<String, String> = BTreeMap::new();
-    let mut owning_ids = BTreeSet::new();
+    let mut package_ids = BTreeMap::new();
 
     let members: BTreeSet<&str> = metadata
         .workspace_members
@@ -258,14 +281,7 @@ fn discovery_from(metadata: &Metadata) -> Result<Discovery, String> {
                     package.name, target.name
                 ));
             }
-            if let Some(other) = owners.insert(target.name.clone(), package.name.clone()) {
-                return Err(format!(
-                    "both '{other}' and '{}' declare a bench target named '{}'; \
-                     wall-clock target names must be unique across the workspace",
-                    package.name, target.name
-                ));
-            }
-            owning_ids.insert(package.id.clone());
+            package_ids.insert(package.name.clone(), package.id.clone());
             targets.push(BenchTarget {
                 package: package.name.clone(),
                 target: target.name.clone(),
@@ -289,8 +305,9 @@ fn discovery_from(metadata: &Metadata) -> Result<Discovery, String> {
             .to_owned()
     })?;
     let mut features = BTreeSet::new();
+    let owning_ids: BTreeSet<&str> = package_ids.values().map(String::as_str).collect();
     for node in &resolve.nodes {
-        if !owning_ids.contains(&node.id) {
+        if !owning_ids.contains(node.id.as_str()) {
             continue;
         }
         let name = by_id.get(node.id.as_str()).copied().unwrap_or("?");
@@ -302,22 +319,25 @@ fn discovery_from(metadata: &Metadata) -> Result<Discovery, String> {
     Ok(Discovery {
         targets,
         features: features.into_iter().collect(),
+        package_ids,
     })
 }
 
-// --- the two fields read out of `cargo bench --message-format=json` ---------
+// --- the fields read out of `cargo bench --message-format=json` --------------
 
 #[derive(Debug, Deserialize)]
 struct Artifact {
     reason: String,
+    #[serde(default)]
+    package_id: Option<String>,
     #[serde(default)]
     target: Option<MetaTarget>,
     #[serde(default)]
     executable: Option<PathBuf>,
 }
 
-/// Builds every named target and returns the executable each produced, keyed by
-/// target name.
+/// Builds every target `discovery` holds and returns the executable each
+/// produced.
 ///
 /// The **bench** profile, not release: `[profile.bench] debug = true` in this
 /// workspace makes them different profiles, and a comparison across two
@@ -329,9 +349,10 @@ struct Artifact {
 pub fn build(
     dir: &Path,
     target_dir: &Path,
-    targets: &[BenchTarget],
+    discovery: &Discovery,
     feature_args: &[String],
-) -> Result<BTreeMap<String, PathBuf>, String> {
+) -> Result<BTreeMap<BenchTarget, PathBuf>, String> {
+    let targets = &discovery.targets;
     if targets.is_empty() {
         return Ok(BTreeMap::new());
     }
@@ -347,6 +368,8 @@ pub fn build(
         args.push("-p".to_owned());
         args.push(package.clone());
     }
+    // A name two packages share is passed twice, which cargo accepts. Each
+    // `--bench` selects that target in every package `-p` named.
     for target in targets {
         args.push("--bench".to_owned());
         args.push(target.target.clone());
@@ -360,26 +383,34 @@ pub fn build(
         &[("CARGO_TARGET_DIR", target_dir.display().to_string())],
     )?;
 
-    let wanted: BTreeSet<&str> = targets.iter().map(|t| t.target.as_str()).collect();
-    let built = executables_in(&stdout, &wanted);
+    let wanted: BTreeSet<&BenchTarget> = targets.iter().collect();
+    let built = executables_in(&stdout, &wanted, &discovery.package_ids);
 
     for target in targets {
-        if !built.contains_key(&target.target) {
-            return Err(format!(
-                "cargo built no executable for '{}' in '{}'",
-                target.target, target.package
-            ));
+        if !built.contains_key(target) {
+            return Err(format!("cargo built no executable for '{target}'"));
         }
     }
     Ok(built)
 }
 
-/// The bench executables cargo reported, keyed by target name.
+/// The bench executables cargo reported for the wanted targets.
+///
+/// An artifact is matched on its package and its target name together, so two
+/// packages' targets of one name each get their own executable.
 ///
 /// Split from the subprocess so a test can drive it with a fixture of the lines
 /// cargo emits, including the ones this crate does not model, which a
 /// future cargo will add and which must be skipped rather than fatal.
-fn executables_in(stdout: &str, wanted: &BTreeSet<&str>) -> BTreeMap<String, PathBuf> {
+fn executables_in(
+    stdout: &str,
+    wanted: &BTreeSet<&BenchTarget>,
+    package_ids: &BTreeMap<String, String>,
+) -> BTreeMap<BenchTarget, PathBuf> {
+    let names: BTreeMap<&str, &str> = package_ids
+        .iter()
+        .map(|(name, id)| (id.as_str(), name.as_str()))
+        .collect();
     let mut built = BTreeMap::new();
     for line in stdout.lines() {
         let Ok(artifact) = serde_json::from_str::<Artifact>(line) else {
@@ -388,11 +419,20 @@ fn executables_in(stdout: &str, wanted: &BTreeSet<&str>) -> BTreeMap<String, Pat
         if artifact.reason != "compiler-artifact" {
             continue;
         }
-        let (Some(target), Some(executable)) = (artifact.target, artifact.executable) else {
+        let (Some(id), Some(target), Some(executable)) =
+            (artifact.package_id, artifact.target, artifact.executable)
+        else {
             continue;
         };
-        if target.kind.iter().any(|k| k == "bench") && wanted.contains(target.name.as_str()) {
-            built.insert(target.name, executable);
+        let Some(&package) = names.get(id.as_str()) else {
+            continue;
+        };
+        let key = BenchTarget {
+            package: package.to_owned(),
+            target: target.name,
+        };
+        if target.kind.iter().any(|k| k == "bench") && wanted.contains(&key) {
+            built.insert(key, executable);
         }
     }
     built
@@ -657,10 +697,13 @@ mod tests {
         assert!(err.contains("valid Rust identifier"), "{err}");
     }
 
-    /// Artifacts are keyed by target name, so two packages sharing one would
-    /// make a leg run the wrong binary.
+    const JSON_ID: &str = "path+file:///w/crates/spate-json#spate-json@0.1.0";
+    const OTHER_ID: &str = "registry+https://github.com/rust-lang/crates.io-index#other@1.0.0";
+
+    /// Two packages may each declare a target of one name. Each is discovered
+    /// under its own package, with the id its build messages will carry.
     #[test]
-    fn a_duplicate_target_name_across_packages_is_refused() {
+    fn a_target_name_shared_by_two_packages_discovers_both() {
         let both_members = FIXTURE
             .replace(
                 r#""workspace_members": ["path+file:///w/crates/spate-json#spate-json@0.1.0"]"#,
@@ -668,8 +711,43 @@ mod tests {
             )
             .replace("someone_elses_wall", "decode_wall");
         let metadata: Metadata = serde_json::from_str(&both_members).expect("parses");
-        let err = super::discovery_from(&metadata).expect_err("refused");
-        assert!(err.contains("must be unique"), "{err}");
+        let found = super::discovery_from(&metadata).expect("discovers");
+
+        assert_eq!(
+            found.targets,
+            [
+                target("other", "decode_wall"),
+                target("spate-json", "decode_wall")
+            ]
+        );
+        assert_eq!(
+            found.package_ids,
+            BTreeMap::from([
+                ("other".to_owned(), OTHER_ID.to_owned()),
+                ("spate-json".to_owned(), JSON_ID.to_owned()),
+            ])
+        );
+    }
+
+    fn target(package: &str, name: &str) -> super::BenchTarget {
+        super::BenchTarget {
+            package: package.to_owned(),
+            target: name.to_owned(),
+        }
+    }
+
+    /// One `compiler-artifact` line for a bench target.
+    fn artifact(id: &str, name: &str, executable: &str) -> String {
+        format!(
+            r#"{{"reason":"compiler-artifact","package_id":"{id}","target":{{"name":"{name}","kind":["bench"]}},"executable":"{executable}"}}"#
+        )
+    }
+
+    fn both_ids() -> BTreeMap<String, String> {
+        BTreeMap::from([
+            ("other".to_owned(), OTHER_ID.to_owned()),
+            ("spate-json".to_owned(), JSON_ID.to_owned()),
+        ])
     }
 
     /// A selection that keeps only the named packages.
@@ -699,7 +777,7 @@ mod tests {
 
     /// Two owning packages, so a selection has something to leave out.
     /// `other` is promoted to a workspace member and given a resolve node of
-    /// its own; its target name stays distinct, unlike the duplicate case.
+    /// its own, and keeps its own target name.
     fn two_owners() -> super::Discovery {
         let both = FIXTURE
             .replace(
@@ -839,26 +917,78 @@ mod tests {
     #[test]
     fn only_bench_artifacts_with_an_executable_are_taken() {
         const LINES: &str = concat!(
-            r#"{"reason":"compiler-artifact","target":{"name":"decode_wall","kind":["bench"]},"executable":"/t/decode_wall-abc"}"#,
+            r#"{"reason":"compiler-artifact","package_id":"path+file:///w/crates/spate-json#spate-json@0.1.0","target":{"name":"decode_wall","kind":["bench"]},"executable":"/t/decode_wall-abc"}"#,
             "\n",
-            r#"{"reason":"compiler-artifact","target":{"name":"spate-json","kind":["lib"]},"executable":null}"#,
+            r#"{"reason":"compiler-artifact","package_id":"path+file:///w/crates/spate-json#spate-json@0.1.0","target":{"name":"spate-json","kind":["lib"]},"executable":null}"#,
             "\n",
-            r#"{"reason":"compiler-artifact","target":{"name":"other_wall","kind":["bench"]},"executable":"/t/other_wall-def"}"#,
+            r#"{"reason":"compiler-artifact","package_id":"path+file:///w/crates/spate-json#spate-json@0.1.0","target":{"name":"other_wall","kind":["bench"]},"executable":"/t/other_wall-def"}"#,
             "\n",
             r#"{"reason":"something-new","extra":{"a":1}}"#,
             "\n",
             "not json at all\n",
         );
 
-        let wanted = BTreeSet::from(["decode_wall"]);
-        let built = super::executables_in(LINES, &wanted);
+        let wanted = target("spate-json", "decode_wall");
+        let built = super::executables_in(LINES, &BTreeSet::from([&wanted]), &both_ids());
         assert_eq!(
             built,
-            BTreeMap::from([(
-                "decode_wall".to_owned(),
-                std::path::PathBuf::from("/t/decode_wall-abc")
-            )])
+            BTreeMap::from([(wanted, std::path::PathBuf::from("/t/decode_wall-abc"))])
         );
+    }
+
+    /// Two packages' targets of one name each get their own executable.
+    #[test]
+    fn a_shared_target_name_maps_each_package_to_its_own_executable() {
+        let lines = [
+            artifact(JSON_ID, "decode_wall", "/t/decode_wall-abc"),
+            artifact(OTHER_ID, "decode_wall", "/t/decode_wall-def"),
+        ]
+        .join("\n");
+        let json = target("spate-json", "decode_wall");
+        let other = target("other", "decode_wall");
+
+        let built = super::executables_in(&lines, &BTreeSet::from([&json, &other]), &both_ids());
+
+        assert_eq!(
+            built,
+            BTreeMap::from([
+                (json, std::path::PathBuf::from("/t/decode_wall-abc")),
+                (other, std::path::PathBuf::from("/t/decode_wall-def")),
+            ])
+        );
+    }
+
+    /// An artifact from a package discovery did not record is skipped, even
+    /// when its target name is wanted under another package.
+    #[test]
+    fn an_artifact_from_an_unknown_package_is_skipped() {
+        let lines = artifact(
+            "path+file:///elsewhere#3.0.0",
+            "decode_wall",
+            "/t/decode_wall-zzz",
+        );
+        let wanted = target("spate-json", "decode_wall");
+
+        let built = super::executables_in(&lines, &BTreeSet::from([&wanted]), &both_ids());
+
+        assert_eq!(built, BTreeMap::new());
+    }
+
+    /// The package and the name are matched as a pair. Each artifact here has
+    /// a wanted package and a wanted name, but not a wanted pair.
+    #[test]
+    fn a_wanted_package_and_a_wanted_name_do_not_make_a_wanted_pair() {
+        let lines = [
+            artifact(JSON_ID, "y_wall", "/t/y_wall-abc"),
+            artifact(OTHER_ID, "x_wall", "/t/x_wall-def"),
+        ]
+        .join("\n");
+        let json = target("spate-json", "x_wall");
+        let other = target("other", "y_wall");
+
+        let built = super::executables_in(&lines, &BTreeSet::from([&json, &other]), &both_ids());
+
+        assert_eq!(built, BTreeMap::new());
     }
 
     /// The digest has to move with a codegen setting and stand still for

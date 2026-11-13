@@ -2,7 +2,7 @@
 description: "A Kafka feed counts lag from a commit below the log start, commits past the deleted offsets, and reports what a new assignment could not read."
 ---
 
-# ADR-0101 — A Kafka feed counts a commit below the log start as lag and reports the offsets it skips
+# ADR-0102 — A Kafka feed counts a commit below the log start as lag and reports the offsets it skips
 
 - **Status:** accepted
 - **Date:** 2026-11-13

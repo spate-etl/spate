@@ -1,5 +1,5 @@
 ---
-description: "A bounded feed job ends on its end marker and an empty feed over a settling window, and Stalled on a dead letter. ADR-0095 and ADR-0101 narrow it."
+description: "A bounded feed job ends on its end marker and an empty feed over a settling window, and Stalled on a dead letter. ADR-0095 and ADR-0102 narrow it."
 ---
 
 # ADR-0076 — A bounded job on a feed ends on an empty feed and a checked dead-letter destination
@@ -11,7 +11,7 @@ description: "A bounded feed job ends on its end marker and an empty feed over a
 - **Superseded by:**
   [ADR-0095](0095-a-seeded-run-ends-on-an-empty-feed-and-completes-over-its-dead-letters.md)
   (in part: a run on a seeded in-process feed);
-  [ADR-0101](0101-a-kafka-feed-counts-a-commit-below-the-log-start-as-lag.md)
+  [ADR-0102](0102-a-kafka-feed-counts-a-commit-below-the-log-start-as-lag.md)
   (in part: on Kafka, a commit below its log start counts from the commit)
 
 ## Context and problem statement

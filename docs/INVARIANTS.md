@@ -40,7 +40,7 @@ year ago still means what it said.
   rebalance moves it before the worker finishes: the next owner starts past it,
   and a bounded job counts the offsets it starts past in
   `spate_kafka_feed_offsets_skipped_total`
-  ([ADR-0101](adr/0101-a-kafka-feed-counts-a-commit-below-the-log-start-as-lag.md)).
+  ([ADR-0102](adr/0102-a-kafka-feed-counts-a-commit-below-the-log-start-as-lag.md)).
   Everything else exists to make this one affordable.
 - <Anchor id="inv-2" />**INV-2 — source threads never block on a channel send.**
   Backpressure is `try_send` plus `Source::pause` plus continuing to poll. A

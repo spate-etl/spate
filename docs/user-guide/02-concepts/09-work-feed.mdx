@@ -121,6 +121,11 @@ whether it does.
 A unit the feed itself deletes before anyone reads it, at the end of the feed's
 retention, leaves no trace, and the job can end over it.
 
+A unit the feed deletes while a reader holds it is lost the same way if it
+moves to another reader before the first one finishes. Each feed's page says
+whether the feed reports such a loss:
+[Kafka feed: When retention deletes a unit's message](../04-connectors/feeds/kafka/README.mdx#when-retention-deletes-a-units-message).
+
 A depth read that answers from stale state can end the job over units written
 after that state. On Apache Kafka, a broker cut off from its cluster answers
 this way

@@ -6739,6 +6739,56 @@ mod feed_metrics {
         }
     }
 
+    /// Pins that offsets an assignment could not read below its log start
+    /// are logged with their partition and range and counted under their
+    /// topic, once, and that the commit point then passes them.
+    #[test]
+    fn offsets_below_the_log_start_are_logged_and_counted() {
+        let core = core(10);
+        {
+            let mut st = core.lock();
+            st.tracker.assign_from([(tp(0), Some(0))]);
+            st.log_starts.insert(tp(0), 3);
+        }
+        let mut lines = Vec::new();
+        let rendered = render_metrics(|| {
+            core.attach_metrics(attached(false));
+            lines = spate_test::capture_logs(tracing::Level::WARN, || {
+                super::super::consumer::retire_below_log_start(&core);
+                super::super::consumer::retire_below_log_start(&core);
+            });
+        });
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        for field in ["topic=\"units\"", "partition=0", "from=0", "to=3"] {
+            assert!(lines[0].contains(field), "{field} in {}", lines[0]);
+        }
+        let skipped = |topic| value(&rendered, "offsets_skipped_total", &[("topic", topic)]);
+        assert_eq!(skipped("units"), Some(3.0));
+        assert_eq!(skipped("units-retry"), Some(0.0));
+        assert_eq!(core.lock().tracker.commit_point(&tp(0)), Some(3));
+    }
+
+    /// Pins that a partition with no log start read yet is left as it was.
+    #[test]
+    fn a_partition_with_no_log_start_read_is_left_alone() {
+        let core = core(10);
+        core.lock().tracker.assign_from([(tp(0), Some(0))]);
+        core.lock().log_starts.insert(tp(1), 3);
+        let mut lines = Vec::new();
+        let rendered = render_metrics(|| {
+            core.attach_metrics(attached(false));
+            lines = spate_test::capture_logs(tracing::Level::WARN, || {
+                super::super::consumer::retire_below_log_start(&core);
+            });
+        });
+        assert_eq!(lines, Vec::<String>::new());
+        assert_eq!(
+            value(&rendered, "offsets_skipped_total", &[("topic", "units")]),
+            Some(0.0)
+        );
+        assert_eq!(core.lock().tracker.commit_point(&tp(0)), None);
+    }
+
     /// Pins that a confirmed move counts under its destination: a retry write
     /// once, and a dead-letter write under its reason.
     #[test]

@@ -3,10 +3,8 @@
 //! its control. The caller creates the topic, since the mock broker takes no
 //! admin request: two partitions, or one for a removed consumer.
 
-use super::{Raw as _, assert_no_gap, await_assignment, committed_by, produce_to, raw_config};
+use super::{assert_no_gap, await_assignment, committed_by, delete_records_below, produce_to};
 use rdkafka::Offset;
-use rdkafka::admin::{AdminClient, AdminOptions};
-use rdkafka::client::DefaultClientContext;
 use spate_core::checkpoint::Checkpointer;
 use spate_core::config::PipelineConfig;
 use spate_core::error::ErrorPolicy;
@@ -287,24 +285,6 @@ pub(crate) fn a_commit_below_the_log_start_across_a_restart(
     let written = second.written(0);
     second.stop();
     assert_no_gap(0, 2 * ROUND, upto, &written);
-}
-
-/// Delete `partition`'s records below `before`, which moves its log start there.
-fn delete_records_below(brokers: &str, topic: &str, partition: i32, before: i64) {
-    let admin: AdminClient<DefaultClientContext> = raw_config()
-        .set("bootstrap.servers", brokers)
-        .build()
-        .expect("admin client");
-    let mut below = rdkafka::TopicPartitionList::new();
-    below
-        .add_partition_offset(topic, partition, Offset::Offset(before))
-        .expect("offset");
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("runtime")
-        .block_on(admin.delete_records(&below, &AdminOptions::new()))
-        .expect("delete records");
 }
 
 /// Route: a new group with its sink down commits nothing past its start, and a

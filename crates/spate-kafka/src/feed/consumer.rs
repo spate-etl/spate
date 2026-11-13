@@ -73,7 +73,7 @@
 //! partition reads it again from the last commit.
 
 use super::attempt::PublishId;
-use super::events::Cause;
+use super::events::{self, Cause};
 use super::inflight::{Position, Tp};
 use super::write::{self, Destination, Finish, Move, Outgoing, Producer, Tombstone, Write};
 use super::{Closing, Core, Gating, LatchOnPanic, READY_CAPACITY, State, Topics};
@@ -529,10 +529,19 @@ impl Driver {
             return;
         }
         self.assigned_once = true;
-        let tps = self.tps(tpl);
+        let started: Vec<(Tp, Option<i64>)> = self
+            .tps(&start)
+            .into_iter()
+            .zip(start.elements())
+            .map(|(tp, e)| match e.offset() {
+                Offset::Offset(committed) => (tp, Some(committed)),
+                _ => (tp, None),
+            })
+            .collect();
+        let tps: Vec<Tp> = started.iter().map(|(tp, _)| tp.clone()).collect();
         let (pause, owned) = {
             let mut st = self.core.lock();
-            st.tracker.assign(tps.iter().cloned());
+            st.tracker.assign_from(started);
             let pause = st.stopping || st.held_for_reader() >= READY_CAPACITY;
             (pause, st.tracker.owned().cloned().collect::<Vec<_>>())
         };
@@ -707,6 +716,7 @@ impl Driver {
         retire_offsets(&self.core, |tp| {
             read_position(&self.consumer, &mut tpl_of(std::slice::from_ref(tp)))
         });
+        retire_below_log_start(&self.core);
         let core = Arc::clone(&self.core);
         commit_moved(&core, |points| self.commit(points, what, until, on_stop))
     }
@@ -1001,6 +1011,37 @@ pub(crate) fn retire_offsets(core: &Core, mut read: impl FnMut(&Tp) -> Offset) {
                 "retiring offsets that hold no record"
             );
         }
+    }
+}
+
+/// For each owned partition with a log start the depth thread read, report
+/// the offsets below it that the partition's assignment could not read, and
+/// raise its next offset to the log start so a commit can pass offsets no
+/// record holds any more. Runs on this thread alone, as the position retire
+/// does, and reports with the state lock released.
+pub(crate) fn retire_below_log_start(core: &Core) {
+    let mut skipped = Vec::new();
+    {
+        let mut st = core.lock();
+        let State {
+            tracker,
+            log_starts,
+            ..
+        } = &mut *st;
+        let owned: Vec<Tp> = tracker.owned().cloned().collect();
+        for tp in owned {
+            let Some(&log_start) = log_starts.get(&tp) else {
+                continue;
+            };
+            if let Some(range) = tracker.skipped_below(&tp, log_start) {
+                skipped.push((tp.clone(), range));
+            }
+            tracker.retire_below(&tp, log_start);
+        }
+    }
+    let metrics = core.event_metrics();
+    for (tp, (from, to)) in skipped {
+        events::offsets_skipped(metrics.as_deref(), core.topics(), &tp, from, to);
     }
 }
 

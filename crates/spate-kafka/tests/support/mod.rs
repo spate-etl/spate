@@ -474,6 +474,31 @@ pub(crate) fn create_visible(brokers: &str, topics: &[NewTopic<'_>]) {
     }
 }
 
+/// Delete `partition`'s records below `before`, which moves its log start there.
+///
+/// # Panics
+///
+/// When the request fails or the broker refuses the partition.
+pub(crate) fn delete_records_below(brokers: &str, topic: &str, partition: i32, before: i64) {
+    let admin: AdminClient<DefaultClientContext> = raw_config()
+        .set("bootstrap.servers", brokers)
+        .build()
+        .expect("admin client");
+    let mut below = TopicPartitionList::new();
+    below
+        .add_partition_offset(topic, partition, Offset::Offset(before))
+        .expect("offset");
+    let deleted = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime")
+        .block_on(admin.delete_records(&below, &AdminOptions::new()))
+        .expect("delete records");
+    for element in deleted.elements() {
+        assert!(element.error().is_ok(), "{:?}", element.error());
+    }
+}
+
 /// What `probe`'s group has committed on `topic`'s partitions `0..partitions`.
 /// No commit reads as `Offset::Invalid`.
 pub(crate) fn committed(probe: &BaseConsumer, topic: &str, partitions: i32) -> Vec<Offset> {

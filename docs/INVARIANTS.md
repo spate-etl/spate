@@ -33,7 +33,14 @@ year ago still means what it said.
   written before that start, and no metric counts them. A
   notification unit acknowledged at its
   [re-enqueue cap](user-guide/04-connectors/sources/s3/README.mdx#reading-a-notifications-object)
-  is an exception, counted in `spate_s3_source_overwrites_dropped_total`.
+  is an exception, counted in `spate_s3_source_overwrites_dropped_total`. A
+  unit a
+  [Kafka feed](user-guide/04-connectors/feeds/kafka/README.mdx#when-retention-deletes-a-units-message)
+  worker holds when retention deletes its message is an exception once a
+  rebalance moves it before the worker finishes: the next owner starts past it,
+  and a bounded job counts the offsets it starts past in
+  `spate_kafka_feed_offsets_skipped_total`
+  ([ADR-0102](adr/0102-a-kafka-feed-counts-a-commit-below-the-log-start-as-lag.md)).
   Everything else exists to make this one affordable.
 - <Anchor id="inv-2" />**INV-2 — source threads never block on a channel send.**
   Backpressure is `try_send` plus `Source::pause` plus continuing to poll. A

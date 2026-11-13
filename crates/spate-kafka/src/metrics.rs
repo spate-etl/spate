@@ -72,7 +72,7 @@ const PARTITION_FETCH_QUEUE_MESSAGES: &str = "partition_fetch_queue_messages";
 const PARTITION_LAG_STORED_RECORDS: &str = "partition_lag_stored_records";
 const PARTITION_NOT_FETCHING: &str = "partition_not_fetching";
 pub(crate) const L_BROKER: &str = "broker";
-const L_TOPIC: &str = "topic";
+pub(crate) const L_TOPIC: &str = "topic";
 /// Which client a statistics series describes: one of a feed's two clients,
 /// or one of a source's consumers when it runs more than one.
 pub(crate) const L_CLIENT: &str = "client";

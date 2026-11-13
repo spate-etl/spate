@@ -39,7 +39,8 @@ The admin server (`admin.listen`, default `:9090`) serves:
 - `GET /readyz` — 200 once the source has an assignment **and** the sink's
   replicas answer probes. Wire this to `readinessProbe`.
 - `GET /healthz` — 200 while every pipeline thread's poll loop beats and
-  the checkpoint watermark isn't stuck while data flows. Wire this to
+  no checkpoint watermark has stalled behind a failed batch for over 5 minutes
+  while data flows. Wire this to
   `livenessProbe`; a wedged pipeline restarts instead of idling.
 - `GET /metrics` — Prometheus exposition (see `docs/METRICS.md` for the
   taxonomy and alerting starting points). Scrape via PodMonitor or

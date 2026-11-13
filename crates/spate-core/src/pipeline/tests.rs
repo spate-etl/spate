@@ -6237,6 +6237,206 @@ fn a_revoked_partitions_failed_commit_waits_while_another_is_chased() {
     h.join.join().unwrap().unwrap();
 }
 
+/// The acks [`start_with_pending_head`] withholds, and the switch that stops
+/// it withholding more.
+struct HeldAcks {
+    held: Arc<Mutex<Vec<crate::checkpoint::AckRef>>>,
+    release: Arc<AtomicBool>,
+}
+
+impl HeldAcks {
+    /// Resolve every held batch Delivered and withhold no more.
+    fn release(&self) {
+        self.release.store(true, Ordering::Relaxed);
+        self.held.lock().unwrap().clear();
+    }
+}
+
+/// Starts a pipeline on `clock` whose chain withholds every ack, assigns one
+/// lane of three batches covering offsets 0..30, and waits until all three
+/// are held pending.
+fn start_with_pending_head(
+    cfg: PipelineConfig,
+    clock: &Arc<crate::clock::TestClock>,
+) -> (Harness, HeldAcks) {
+    let acks = HeldAcks {
+        held: Arc::new(Mutex::new(Vec::new())),
+        release: Arc::new(AtomicBool::new(false)),
+    };
+    let held = Arc::clone(&acks.held);
+    let release = Arc::clone(&acks.release);
+    let h = start_on_clock_with(
+        cfg,
+        no_idle_flush(),
+        clock,
+        |runtime| runtime,
+        move |shared, log| FakeChain {
+            shared,
+            log,
+            mode: ChainMode::HoldAcks {
+                held: Arc::clone(&held),
+                release: Arc::clone(&release),
+            },
+            batches_seen: 0,
+        },
+    );
+    assign_one_lane(&h, &[0..10, 10..20, 20..30]);
+    wait_until(Duration::from_secs(5), "every ack held", || {
+        acks.held.lock().unwrap().len() == 3
+    });
+    passes(&h, 3);
+    (h, acks)
+}
+
+/// A batch that stays pending ages the watermark gauge for as long as it
+/// holds the watermark, and the gauge falls back to zero once the watermark
+/// moves past it and nothing else is pending.
+#[test]
+fn a_pending_head_ages_the_watermark_gauge_until_the_watermark_moves() {
+    let clock = crate::clock::TestClock::frozen();
+    let interval = Duration::from_secs(60);
+    let mut cfg = test_config(1);
+    cfg.metrics.exporter = crate::config::MetricsExporter::Prometheus;
+    cfg.checkpoint.interval = interval;
+    let pipeline_name = cfg.pipeline.name.clone();
+    let handle = install_prometheus(&cfg);
+    let (h, acks) = start_with_pending_head(cfg, &clock);
+    let age = || {
+        family_series(
+            &handle.render(),
+            names::CHECKPOINT_WATERMARK_AGE_SECONDS,
+            &pipeline_name,
+        )
+    };
+
+    for _ in 0..6 {
+        tick(&h, &clock, interval);
+    }
+    let held = age();
+    assert!(
+        held.len() == 1 && held[0].value >= 360.0,
+        "a head pending for six intervals: {held:?}"
+    );
+
+    acks.release();
+    // Commits ride the tick, so each check moves the clock one interval.
+    wait_until(Duration::from_secs(5), "everything commits", || {
+        clock.advance(interval);
+        h.shared
+            .lock()
+            .unwrap()
+            .committed
+            .get(&PartitionId(0))
+            .is_some_and(|&w| w >= 30)
+    });
+    tick(&h, &clock, interval);
+    let moved = age();
+    assert!(
+        moved.len() == 1 && moved[0].value == 0.0,
+        "nothing pending after the watermark moved: {moved:?}"
+    );
+    h.shutdown.trigger();
+    let _ = h.join.join().unwrap();
+}
+
+/// A rebalance while batches stay pending, as during a sink outage, keeps the
+/// watermark gauge aging from the revoked partition's head: the new
+/// assignment registers nothing while the old batches hold the sink. The
+/// gauge falls to zero once the held batches resolve.
+#[test]
+fn a_rebalance_keeps_the_watermark_gauge_aging_until_the_held_batches_resolve() {
+    let clock = crate::clock::TestClock::frozen();
+    let interval = Duration::from_secs(60);
+    let mut cfg = test_config(1);
+    cfg.metrics.exporter = crate::config::MetricsExporter::Prometheus;
+    cfg.checkpoint.interval = interval;
+    let pipeline_name = cfg.pipeline.name.clone();
+    let handle = install_prometheus(&cfg);
+    let (h, acks) = start_with_pending_head(cfg, &clock);
+    let age = || {
+        family_series(
+            &handle.render(),
+            names::CHECKPOINT_WATERMARK_AGE_SECONDS,
+            &pipeline_name,
+        )
+    };
+
+    tick(&h, &clock, interval);
+    {
+        let mut script = h.script.lock().unwrap();
+        script.push_back(Script::Revoke(vec![LaneId(0)]));
+        script.push_back(Script::Assign(vec![LaneSpec {
+            id: LaneId(1),
+            partition: PartitionId(1),
+            batches: Vec::new(),
+        }]));
+    }
+    wait_until(Duration::from_secs(5), "the rebalance handled", || {
+        h.script.lock().unwrap().is_empty()
+    });
+    passes(&h, 3);
+    for _ in 0..5 {
+        tick(&h, &clock, interval);
+    }
+    let held = age();
+    assert!(
+        held.len() == 1 && held[0].value >= 360.0,
+        "a head pending for six intervals across a rebalance: {held:?}"
+    );
+
+    acks.release();
+    tick(&h, &clock, interval);
+    let resolved = age();
+    assert!(
+        resolved.len() == 1 && resolved[0].value == 0.0,
+        "nothing pending once the held batches resolved: {resolved:?}"
+    );
+    h.shutdown.trigger();
+    let _ = h.join.join().unwrap();
+}
+
+/// Pins that a batch held pending past both `watermark_stuck` and
+/// `stalled_fail_after` neither turns `/healthz` nor fails the run, and is
+/// never named to the source as a stall. Only a failed head does either; a
+/// healthy pipeline can hold a pending head that long under a long sink
+/// `batch.linger`.
+#[test]
+fn a_pending_head_neither_turns_liveness_nor_counts_as_a_stall() {
+    let clock = crate::clock::TestClock::frozen();
+    let interval = Duration::from_secs(60);
+    let mut cfg = test_config(1);
+    cfg.checkpoint.interval = interval;
+    cfg.checkpoint.stalled_fail_after = Duration::from_secs(120);
+    let (h, acks) = start_with_pending_head(cfg, &clock);
+    let addr = h.admin_addr.0.lock().unwrap().expect("admin server bound");
+
+    // The default `watermark_stuck` is 300 s.
+    for _ in 0..6 {
+        tick(&h, &clock, interval);
+    }
+    // A lane poll after the advance beats the driver's heart on the moved
+    // clock, so only the watermark decides the answer.
+    let polled = polls_of(&h, 0);
+    wait_until(Duration::from_secs(5), "a lane poll", || {
+        polls_of(&h, 0) > polled
+    });
+    let status = http_status(addr, "/healthz");
+    let finished = h.join.is_finished();
+    let stalled = h.shared.lock().unwrap().stalled.clone();
+    acks.release();
+    h.shutdown.trigger();
+    let report = h.join.join().unwrap().unwrap();
+
+    assert_eq!(status, 200, "a pending head is not a stuck watermark");
+    assert!(!finished, "a pending head must not fail the run");
+    assert_eq!(stalled, Vec::<Vec<PartitionId>>::new());
+    assert!(
+        matches!(report.state, ExitState::Completed),
+        "{:?}",
+        report.state
+    );
+}
+
 /// A watermark stuck past `watermark_stuck` on the pipeline's clock turns
 /// `/healthz` to 503 while data is pending, and not at the threshold itself.
 #[test]

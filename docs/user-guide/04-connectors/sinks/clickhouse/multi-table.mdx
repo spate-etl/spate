@@ -119,7 +119,9 @@ the *pre-batch* half of that hold: a rare table's below-target chunk
 buffer is sealed on every commit tick, so worst-case checkpoint lag is
 `checkpoint.interval` (chunk seal) + that table's `linger` (batch close) +
 the write. The `linger` half is sized in config: sealing on a modest
-`max_rows` keeps `linger` biting only in lulls. (A *pending* batch never
+`max_rows` keeps `linger` biting only in lulls.
+`spate_checkpoint_watermark_age_seconds` reads up to this lag on a healthy
+pipeline, so an alert on it sits above the lag. (A *pending* batch never
 trips `checkpoint.stalled_fail_after`; that watchdog fires only when a
 batch has permanently **failed**.) The full reasoning, including
 segregating the source by kind to dissolve the tension, is in the

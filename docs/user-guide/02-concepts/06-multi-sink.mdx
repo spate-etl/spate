@@ -166,7 +166,9 @@ behind it into a clean `Failed` exit and a restart. On a
 [seeded S3 run](../04-connectors/sources/s3/README.mdx#a-run-on-a-seeded-feed)
 the source fails each unit in the batch back to its feed. Under the default
 unbounded `max_attempts` the batch stays pending instead, and the pipeline
-back-pressures for as long as the outage lasts, committing nothing. Transient
+back-pressures for as long as the outage lasts, committing nothing.
+`spate_checkpoint_watermark_age_seconds` climbs for as long as the batch stays
+pending. Transient
 failures are absorbed by the sink's retry + circuit breaker; only a genuine
 outage halts progress.
 

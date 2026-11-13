@@ -847,15 +847,21 @@ fn commit_cycle<S: Source>(
         metrics.retain_partitions(&live);
     }
 
-    let stalled = checkpointer.stalled_partitions();
     let now = checkpointer.now();
-    let age = stalled
+    let head_age = checkpointer
+        .oldest_head_since()
+        .map_or(Duration::ZERO, |since| now.saturating_duration_since(since));
+    metrics.set_watermark_age(head_age);
+    // Liveness counts only a stall behind a failed batch. A healthy pipeline
+    // can hold a pending head for `checkpoint.interval` plus the sink's
+    // `batch.linger`, either of which may exceed the probe's fixed limit.
+    let stall_age = checkpointer
+        .stalled_partitions()
         .iter()
         .map(|&(_, since)| now.saturating_duration_since(since))
         .max()
         .unwrap_or(Duration::ZERO);
-    metrics.set_watermark_age(age);
-    health.report_watermark(age, max_pending > 0);
+    health.report_watermark(stall_age, max_pending > 0);
 
     if state.pending_commit.is_empty() {
         return;

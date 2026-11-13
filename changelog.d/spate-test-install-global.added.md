@@ -1,0 +1,3 @@
+**A log capture for the whole process** (`spate-test`)
+
+`LogCapture::install_global` installs a `tracing` subscriber at a chosen level as the process's global default and returns its capture. Lines from every thread reach it, including a pipeline's threads and a client library's, which the thread-scoped `capture_logs` does not see. A process has one global subscriber, so a test that calls it needs a test binary of its own, and a second call panics. The lines it captures, and those `capture_logs` and `show_logs` write, carry no ANSI color codes. Before, they carried them when another crate in the build turned on `tracing-subscriber`'s `ansi` feature and `NO_COLOR` was unset or empty, so an assertion on a line's text could fail.

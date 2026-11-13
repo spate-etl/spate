@@ -53,14 +53,9 @@ fn logged_addr(capture: &LogCapture) -> Option<SocketAddr> {
     reason = "the test joins the pipeline thread"
 )]
 fn the_bound_admin_address_is_logged_and_serves() {
-    let capture = LogCapture::new();
     // `info` is the level a deployment runs at, and the level
     // `spate_core::telemetry` assigns to a startup milestone.
-    tracing_subscriber::fmt()
-        .with_writer(capture.clone())
-        .with_max_level(tracing_subscriber::filter::LevelFilter::INFO)
-        .without_time()
-        .init();
+    let capture = LogCapture::install_global(tracing::Level::INFO);
 
     let (source, _handle) = memory_source();
     let (sink, _script) = capture_sink(1, 1);

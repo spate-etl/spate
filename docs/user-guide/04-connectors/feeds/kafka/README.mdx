@@ -213,6 +213,10 @@ batch it cannot read stops the feed in the same cases.
 Kafka deletes a message when its topic's retention ends, whether or not the
 group has read it. A unit deleted before it is read is lost, which INV-1 places
 outside its property (see [the invariants](../../../../INVARIANTS.md#inv-1)).
+A unit a worker already holds when its message is deleted keeps a bounded job
+open until the worker finishes it, and is lost if a rebalance moves it first
+([When retention deletes a unit's message](#when-retention-deletes-a-units-message)).
+A work topic whose retention outlasts the job avoids both.
 
 Create the work topic with `message.timestamp.type=LogAppendTime`, so the
 broker stamps each message as it appends it and retention counts from then. A
@@ -355,7 +359,10 @@ tombstone sent after that write is. A unit waiting at the gate, or with its
 attempt write in flight, holds its offset unfinished. Each partition commits
 up to its first unfinished offset, every second and when the partition is
 revoked, and past offsets that hold no record
-([Transaction markers](#transaction-markers)). A unit still unfinished blocks
+([Transaction markers](#transaction-markers)) or, in a bounded job, that
+retention deleted
+([When retention deletes a unit's message](#when-retention-deletes-a-units-message)).
+A unit still unfinished blocks
 the commits of its partition, so the next owner of the partition reads that
 unit again and every unit read after it.
 
@@ -454,11 +461,13 @@ feed's `group_id` and never joins the group, so the reads take nothing from the
 member's poll interval. One read takes the group's committed offset on every
 partition of the work and retry topics, in one `OffsetFetch` request, and
 then each partition's log start and end offsets. The depth is the sum of each
-partition's end offset less its committed offset. A partition with no commit,
-or with a commit below its log start, counts from its log start, so a
-partition that never held a unit, or whose records retention deleted unread,
-reads as drained. A partition whose commit is above its end, after a
-[truncation](#transaction-markers), counts from its log start too. It reads as
+partition's end offset less its committed offset. A partition with no commit
+counts from its log start, so a partition that never held a unit, or whose
+records retention deleted before the group's first commit on it, reads as
+drained. A commit below the log start counts from the commit
+([When retention deletes a unit's message](#when-retention-deletes-a-units-message)).
+A partition whose commit is above its end, after a
+[truncation](#transaction-markers), counts from its log start. It reads as
 drained once a worker has read it and committed at its end or below, or once its
 log holds nothing. Writes that carry its end up to the commit also end the
 count, with the units below the commit unread, as
@@ -505,6 +514,43 @@ The worker that held that partition through the truncation commits nothing on
 it until a unit is written there. Starting or stopping any worker in the group
 rebalances it, and the worker then assigned the partition reads it from its
 earliest offset.
+
+### When retention deletes a unit's message
+
+Retention can delete a unit's message while a worker holds the unit. The
+group's commit on that partition stays at the unit's offset until the unit
+finishes, so the commit falls below the partition's log start. The depth counts
+from the commit, so every worker reads the partition as behind, and the job
+stays open while the holder reads the unit to its end. A job held this way logs
+the `info` line of [While a transaction is open](#while-a-transaction-is-open).
+
+The commit then passes the deleted offsets. Each depth read records every
+partition's log start. Before each commit, a worker moves each of its
+partitions past the offsets below the log start. It moves from the offset
+after the last one it read, or from the committed offset its assignment
+started at when it has read nothing yet. A unit still unfinished
+keeps the commit at its offset. So a partition whose last messages retention
+deleted commits up to its log start, and the job ends.
+
+A rebalance before the holder finishes loses the unit. The next owner starts
+at the group's commit, which the broker no longer holds, so librdkafka starts
+the partition at its log start under `auto.offset.reset: earliest`. Nothing
+reads the unit again, and the job can end `Completed` without it, which INV-1
+states as an exception. The next owner logs a `warn` line naming the topic, the
+partition and the offsets from its start up to the log start, or up to the
+first offset it read where that is lower. It adds their count to
+`spate_kafka_feed_offsets_skipped_total`.
+
+The report and the commit past the log start run only while a bounded job reads
+its depth, over the settling window. A worker reports its range once per
+assignment, so a later assignment that starts at the same commit counts the
+range again. A transaction marker in the range counts as one offset.
+
+A worker that could not read the group's committed offsets when it was assigned
+its partitions logs a `warn` line. Until it reads a record from a partition, it
+does not move that partition's commit past the log start. A partition whose
+last messages retention deleted, and from which the worker has read nothing,
+then holds the job open until the next rebalance.
 
 ### The dead-letter topic
 
@@ -585,7 +631,9 @@ doing. A worker whose control plane wedges, so that its reader stops
 acknowledging and failing units, keeps its partitions and their unfinished
 units until the process exits. A worker that dies loses them at the group's
 session timeout, `session.timeout.ms` (librdkafka's default is 45 seconds),
-and the next owner reads them again.
+and the next owner reads them again. A unit whose message retention deleted is
+the exception: the next owner cannot read it
+([When retention deletes a unit's message](#when-retention-deletes-a-units-message)).
 
 ## Counting deliveries
 
@@ -805,9 +853,11 @@ framework's `spate_feed_*` families, with `component_type="kafka"`; see
 | `spate_kafka_feed_attempt_write_duration_seconds` | histogram | | Time from an attempt record's first send to its confirmation, resends and their backoff included. Its `_count` is the attempt records written. |
 | `spate_kafka_feed_retry_writes_total` | counter | | Writes to the retry topic the brokers confirmed. |
 | `spate_kafka_feed_dead_letter_writes_total` | counter | `reason` (`attempt_cap`\|`no_unit`) | Writes to the dead-letter topic the brokers confirmed. `attempt_cap` is a unit failed at or past the attempt cap, or moved unread because its recorded attempts reached it; `no_unit` is a message whose key is not UTF-8. |
+| `spate_kafka_feed_offsets_skipped_total` | counter | `topic` | Offsets of the work or retry topic that a worker's assignment started at and could not read, because retention deleted them before the group finished them. A count above zero on a bounded job means a unit may be missing from its output ([When retention deletes a unit's message](#when-retention-deletes-a-units-message)). |
 
-These count each write the brokers confirmed, on this instance. A unit written
-again after a rebalance or a stop counts again, so sum them across instances. A
+The write counters count each write the brokers confirmed, on this instance. A
+unit written again after a rebalance or a stop counts again, so sum them across
+instances. A
 write still in flight when the feed is dropped is not counted, and one confirmed
 after a close or a stop on an error still counts.
 `spate_feed_units_failed_total` counts the fails the feed accepted, before their

@@ -25,8 +25,8 @@ use spate_json::NdjsonFramer;
 use spate_kafka::feed::{KafkaFeed, KafkaFeedPublisher};
 use spate_s3::{DescriptorObject, S3Source, SplitDescriptor};
 use spate_test::{
-    HANG, PipelineRun, ScriptedResult, SinkScript, TestEncoder, capture_sink, decode_rows,
-    passthrough_runtime, wait_until,
+    HANG, PipelineRun, ScriptedResult, SinkScript, TestEncoder, WriteOutcome, capture_sink,
+    decode_rows, passthrough_runtime, wait_until,
 };
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -850,6 +850,120 @@ impl BoundedJob {
     }
 }
 
+/// A publish-only handle on the section's brokers, with the configuration
+/// checks, and the runtime it runs on.
+pub(crate) fn publisher_on(section_yaml: &str) -> Publisher {
+    let io = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    let publisher = KafkaFeedPublisher::connect(&section(section_yaml), io.handle());
+    (publisher, io)
+}
+
+/// Wait until `group` is stable with `members` members. A coordinator still
+/// loading the group, as Redpanda's is after a member leaves, is asked again.
+pub(crate) fn group_stable(brokers: &str, group: &str, members: usize) {
+    use rdkafka::types::RDKafkaErrorCode::{CoordinatorLoadInProgress, CoordinatorNotAvailable};
+    let probe: BaseConsumer = super::raw_config()
+        .set("bootstrap.servers", brokers)
+        .build()
+        .expect("probe");
+    wait_until(HANG, "the group is stable", || {
+        let groups = match probe.fetch_group_list(Some(group), Duration::from_secs(10)) {
+            Ok(groups) => groups,
+            Err(e)
+                if matches!(
+                    e.rdkafka_error_code(),
+                    Some(CoordinatorLoadInProgress | CoordinatorNotAvailable)
+                ) =>
+            {
+                return false;
+            }
+            Err(e) => panic!("group list: {e}"),
+        };
+        groups
+            .groups()
+            .iter()
+            .any(|g| g.state() == "Stable" && g.members().len() == members)
+    });
+}
+
+/// The settling window of a [`HeldUnit`]'s workers, short enough that a
+/// worker ends within a few steps.
+const HELD_SETTLING_WINDOW: &str = "20s";
+
+/// Two bounded workers in one group, on topics of one partition each. B's
+/// client id sorts first, so the range assignor gives B every partition, and
+/// B holds the first write of the one unit published.
+pub(crate) struct HeldUnit {
+    pub(crate) brokers: String,
+    pub(crate) group: String,
+    pub(crate) data: PathBuf,
+    /// The rows of the held unit.
+    pub(crate) rows: Vec<String>,
+    pub(crate) a: Worker,
+    pub(crate) a_clock: Arc<TestClock>,
+    pub(crate) b: Worker,
+    pub(crate) b_clock: Arc<TestClock>,
+    _dir: tempfile::TempDir,
+}
+
+impl HeldUnit {
+    /// Start both workers on `brokers` for a group named from `tag`, publish
+    /// a unit of `rows` rows, and wait until B holds its first write and the
+    /// group has committed the unit's offset, 0.
+    pub(crate) fn start(brokers: &str, tag: &str, rows: usize) -> HeldUnit {
+        let group = spate_test::unique_name(tag);
+        let dir = tempfile::tempdir().unwrap();
+        let data = data_dir(&dir);
+        let extra = format!(
+            "  location: \"file://{}/\"\n  settling_window: {HELD_SETTLING_WINDOW}\n",
+            dir.path().join("jobs").display()
+        );
+        let section = |client: &str| {
+            feed_yaml(
+                brokers,
+                &group,
+                &extra,
+                &format!("      client.id: \"{client}\"\n"),
+            )
+        };
+        let (section_a, section_b) = (section("z-idle"), section("a-holder"));
+        list_once(publisher_on(&section_a), &data, &section_a);
+
+        let a_clock = TestClock::frozen();
+        let b_clock = TestClock::frozen();
+        let a = launch_bounded(KafkaFeed::connect, &data, &section_a, &a_clock);
+        let b = launch_bounded_with(KafkaFeed::connect, &data, &section_b, &b_clock, |sink| {
+            sink.enqueue_global(WriteOutcome::ok().held());
+        });
+        group_stable(brokers, &group, 2);
+        let rows = recs("u", rows);
+        let unit = stage(&data, "u.ndjson", &rows);
+        produce_raw(brokers, WORK, &[(Some(unit.id.as_bytes()), &unit.body)]);
+        wait_until(HANG, "B holds the unit's first write", || {
+            b.script.held_writes() == 1
+        });
+        wait_until(HANG, "the group commits the held unit's offset", || {
+            committed(brokers, &group, WORK) == Some(0)
+        });
+        assert_eq!(*b.recording.seen.lock().unwrap(), [1], "B took the unit");
+        HeldUnit {
+            brokers: brokers.to_owned(),
+            group,
+            data,
+            rows,
+            a,
+            a_clock,
+            b,
+            b_clock,
+            _dir: dir,
+        }
+    }
+}
+
 /// Run the job's lister once through `publisher`, a publish-only handle and
 /// the runtime it runs on: publish a unit per object under `data` and write
 /// the fingerprint and end marker.
@@ -879,13 +993,25 @@ pub(crate) fn launch_bounded(
     section_yaml: &str,
     clock: &Arc<TestClock>,
 ) -> Worker {
+    launch_bounded_with(connect, data, section_yaml, clock, |_| {})
+}
+
+/// [`launch_bounded`] with `pre` run on the sink's script before the run
+/// starts.
+pub(crate) fn launch_bounded_with(
+    connect: Connect,
+    data: &Path,
+    section_yaml: &str,
+    clock: &Arc<TestClock>,
+    pre: impl FnOnce(&SinkScript),
+) -> Worker {
     let source = format!("  s3:\n    url: \"file://{}/\"\n", data.display());
     let clock = Arc::clone(clock);
     launch_customized(
         connect,
         &source,
         section_yaml,
-        |_| {},
+        pre,
         move |s| s.with_clock(clock),
         CHECKPOINT,
         None,

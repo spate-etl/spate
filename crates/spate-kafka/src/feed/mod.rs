@@ -18,7 +18,8 @@
 //! `<topic>/<partition>/<offset>` when it has no key, is the unit's id, and
 //! its value the unit's body. The feed's offset tracker holds every delivered
 //! offset until it finishes, and each partition commits up to its first
-//! unfinished offset, past any offsets that hold no record.
+//! unfinished offset, past any offsets that hold no record or that retention
+//! deleted below its log start.
 //! An acknowledged unit's offset finishes once the tombstone of its attempt
 //! record is confirmed by its delivery report. A failed unit's offset
 //! finishes once its write to the retry topic is confirmed, or, for a write
@@ -162,6 +163,9 @@ pub(crate) struct State {
     /// The runtime's close, for the consumer thread to settle once it has
     /// left the group, or has handed its leave to a thread of its own.
     pub(crate) close: Option<Closing>,
+    /// The log start of each partition of the work and retry topics, as the
+    /// depth thread last read it, for the consumer thread to commit past.
+    pub(crate) log_starts: FastMap<Tp, i64>,
     /// How many step waits on `gate_wake` the gate has begun, counted under
     /// this lock just before each.
     #[cfg(test)]
@@ -298,7 +302,7 @@ impl Core {
         let events = cx
             .meter
             .as_ref()
-            .map(|m| Arc::new(KafkaFeedMetrics::new(m)));
+            .map(|m| Arc::new(KafkaFeedMetrics::new(m, &self.topics)));
         let (consumer, producer) = match cx.meter.filter(|_| self.statistics_enabled) {
             Some(meter) => (
                 Some(KafkaStatsMetrics::for_feed(

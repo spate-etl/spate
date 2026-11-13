@@ -2,8 +2,9 @@
 //! finished, and how far each partition may commit.
 //!
 //! A partition's commit point is one past the offset delivered last, or past
-//! the offsets with no record the consumer's position has moved over, or its
-//! first unfinished offset where that is lower. An offset is finished when
+//! the offsets with no record the consumer's position has moved over or the
+//! partition's log start has passed, or its first unfinished offset where
+//! that is lower. An offset is finished when
 //! the write that settles it is confirmed: the tombstone of an acknowledged
 //! unit's attempt record, or the write that moves it to another topic. An
 //! offset delivered more than once under one assignment finishes when every
@@ -56,10 +57,17 @@ struct Partition {
     /// the number of copies of each still unfinished.
     unfinished: BTreeMap<i64, u32>,
     /// One past the offset delivered last under this assignment, or past
-    /// the offsets with no record retired after it.
+    /// the offsets with no record, or below the log start, retired after it.
     next: Option<i64>,
     /// The commit point [`Tracker::take_commits`] last returned.
     taken: Option<i64>,
+    /// The committed offset this assignment started reading at, where the
+    /// group had one.
+    started_at: Option<i64>,
+    /// The first offset delivered under this assignment.
+    first: Option<i64>,
+    /// Whether [`Tracker::skipped_below`] has answered for this assignment.
+    skip_checked: bool,
 }
 
 impl Partition {
@@ -91,10 +99,18 @@ impl Tracker {
         Tracker::default()
     }
 
-    /// Take ownership of `tps` under a new generation, with nothing delivered.
+    /// Take ownership of `tps` under a new generation, with nothing delivered
+    /// and no committed offset known.
+    #[cfg(test)]
     pub(crate) fn assign(&mut self, tps: impl IntoIterator<Item = Tp>) {
+        self.assign_from(tps.into_iter().map(|tp| (tp, None)));
+    }
+
+    /// Take ownership of each partition under a new generation, with nothing
+    /// delivered, each paired with the committed offset its reads start at.
+    pub(crate) fn assign_from(&mut self, tps: impl IntoIterator<Item = (Tp, Option<i64>)>) {
         self.generation += 1;
-        for tp in tps {
+        for (tp, started_at) in tps {
             self.partitions.insert(
                 tp,
                 Partition {
@@ -102,6 +118,9 @@ impl Tracker {
                     unfinished: BTreeMap::new(),
                     next: None,
                     taken: None,
+                    started_at,
+                    first: None,
+                    skip_checked: false,
                 },
             );
         }
@@ -141,6 +160,7 @@ impl Tracker {
         // copy of an offset must finish before the offset does.
         *partition.unfinished.entry(offset).or_insert(0) += 1;
         partition.next = Some(offset + 1);
+        partition.first.get_or_insert(offset);
         self.next_receipt += 1;
         let receipt = self.next_receipt;
         self.held.insert(
@@ -231,6 +251,42 @@ impl Tracker {
         let last = offset_to_retire(read_to, partition.next)?;
         let from = partition.next.replace(last + 1);
         Some((from, last + 1))
+    }
+
+    /// The offsets `tp`'s assignment could not read because they are below
+    /// its log start `log_start`: from the committed offset its reads started
+    /// at up to the first offset it delivered, or up to the log start where
+    /// that is lower. Answers once per assignment, at the first call with
+    /// the committed offset below the log start. `None` when `tp` is not
+    /// owned, the assignment started with no committed offset, or nothing
+    /// lies between.
+    pub(crate) fn skipped_below(&mut self, tp: &Tp, log_start: i64) -> Option<(i64, i64)> {
+        let partition = self.partitions.get_mut(tp)?;
+        let started_at = partition.started_at?;
+        if partition.skip_checked || started_at >= log_start {
+            return None;
+        }
+        partition.skip_checked = true;
+        let end = partition
+            .first
+            .map_or(log_start, |first| first.min(log_start));
+        (end > started_at).then_some((started_at, end))
+    }
+
+    /// Raise `tp`'s next offset to its log start `log_start`, past offsets no
+    /// record holds any more. The floor is the next offset, or the committed
+    /// offset the assignment started at before anything is delivered, and
+    /// the next offset is raised only from a known floor below the log
+    /// start. Returns the floor and the offset it set, or `None` when `tp` is
+    /// not owned, the floor is unknown or nothing lies between.
+    ///
+    /// The commit point stays capped at the first unfinished offset.
+    pub(crate) fn retire_below(&mut self, tp: &Tp, log_start: i64) -> Option<(i64, i64)> {
+        let partition = self.partitions.get_mut(tp)?;
+        let floor = partition.next.or(partition.started_at)?;
+        let last = offset_to_retire(Offset::Offset(log_start), Some(floor))?;
+        partition.next = Some(last + 1);
+        Some((floor, last + 1))
     }
 
     /// The commit point of every owned partition whose point moved since the
@@ -393,6 +449,93 @@ mod tests {
         assert_eq!(t.commit_point(&tp(0)), Some(11));
         assert!(t.retire_to(&tp(0), Offset::Offset(i64::MAX)).is_some());
         assert_eq!(t.commit_point(&tp(0)), Some(i64::MAX));
+    }
+
+    /// `tp(0)` assigned from the committed offset `at`.
+    fn assigned_at(at: Option<i64>) -> Tracker {
+        let mut t = Tracker::new();
+        t.assign_from([(tp(0), at)]);
+        t
+    }
+
+    /// Pins the range an assignment that started below the log start could
+    /// not read: up to the log start with nothing delivered, up to the first
+    /// delivery when a record above the log start was delivered first, and
+    /// nothing when the first delivery is the committed offset itself.
+    #[test]
+    fn an_assignment_below_the_log_start_skips_up_to_its_first_read() {
+        assert_eq!(assigned_at(Some(0)).skipped_below(&tp(0), 5), Some((0, 5)));
+
+        let mut t = assigned_at(Some(0));
+        t.deliver(&tp(0), 5).unwrap();
+        assert_eq!(t.skipped_below(&tp(0), 5), Some((0, 5)));
+
+        let mut t = assigned_at(Some(0));
+        t.deliver(&tp(0), 0).unwrap();
+        assert_eq!(t.skipped_below(&tp(0), 3), None);
+        t.deliver(&tp(0), 1).unwrap();
+        assert_eq!(
+            t.skipped_below(&tp(0), 3),
+            None,
+            "answered once for the assignment"
+        );
+    }
+
+    /// Pins when an assignment reports nothing: at or above the log start,
+    /// with no committed offset, a second time, and for a partition it does
+    /// not own. A new assignment answers again.
+    #[test]
+    fn a_skipped_range_is_reported_once_per_assignment() {
+        assert_eq!(assigned_at(Some(4)).skipped_below(&tp(0), 4), None);
+        assert_eq!(assigned_at(Some(9)).skipped_below(&tp(0), 5), None);
+        assert_eq!(assigned_at(None).skipped_below(&tp(0), 5), None);
+
+        let mut t = assigned_at(Some(0));
+        assert_eq!(t.skipped_below(&tp(0), 5), Some((0, 5)));
+        assert_eq!(t.skipped_below(&tp(0), 7), None);
+        t.revoke(&[tp(0)]);
+        assert_eq!(t.skipped_below(&tp(0), 7), None, "no longer owned");
+        t.assign_from([(tp(0), Some(0))]);
+        assert_eq!(t.skipped_below(&tp(0), 7), Some((0, 7)));
+    }
+
+    /// Pins the raise to the log start: from the committed offset before any
+    /// delivery, never from one above the log start, from an unknown one only
+    /// after a delivery, never past a held offset's cap, and not for a
+    /// partition it does not own.
+    #[test]
+    fn the_log_start_raises_next_only_from_a_known_floor_below_it() {
+        let mut t = assigned_at(Some(0));
+        assert_eq!(t.retire_below(&tp(0), 5), Some((0, 5)));
+        assert_eq!(t.commit_point(&tp(0)), Some(5));
+        assert_eq!(t.retire_below(&tp(0), 5), None, "already at the log start");
+
+        let mut t = assigned_at(Some(9));
+        assert_eq!(
+            t.retire_below(&tp(0), 5),
+            None,
+            "a commit above the log start"
+        );
+        assert_eq!(t.commit_point(&tp(0)), None);
+
+        let mut t = assigned_at(None);
+        assert_eq!(t.retire_below(&tp(0), 5), None, "no committed offset");
+        assert_eq!(t.commit_point(&tp(0)), None);
+        t.deliver(&tp(0), 0).unwrap();
+        assert_eq!(
+            t.retire_below(&tp(0), 5),
+            Some((1, 5)),
+            "a read gives the floor"
+        );
+
+        let mut t = assigned_at(Some(0));
+        t.deliver(&tp(0), 0).unwrap();
+        assert_eq!(t.retire_below(&tp(0), 3), Some((1, 3)));
+        assert_eq!(t.commit_point(&tp(0)), Some(0), "the held offset caps it");
+
+        let mut t = assigned_at(Some(0));
+        t.revoke(&[tp(0)]);
+        assert_eq!(t.retire_below(&tp(0), 5), None);
     }
 
     /// Pins that a position no served op has set moves nothing, and that a
@@ -685,6 +828,9 @@ mod proptests {
         Marker { p: usize, gap: i64 },
         /// A position read `back` offsets below partition `p`'s next offset.
         Stale { p: usize, back: i64 },
+        /// Partition `p`'s log start read `ahead` offsets past where its
+        /// reader reads next, reported and retired.
+        LogStart { p: usize, ahead: i64 },
     }
 
     fn ops() -> impl Strategy<Value = Vec<Op>> {
@@ -703,6 +849,7 @@ mod proptests {
                 2 => Just(Op::Take),
                 2 => (0..PARTITIONS, 1..4i64).prop_map(|(p, gap)| Op::Marker { p, gap }),
                 1 => (0..PARTITIONS, 0..4i64).prop_map(|(p, back)| Op::Stale { p, back }),
+                2 => (0..PARTITIONS, 0..4i64).prop_map(|(p, ahead)| Op::LogStart { p, ahead }),
             ],
             0..300,
         )
@@ -719,6 +866,12 @@ mod proptests {
         /// Whether a position has moved past the last delivery.
         moved: bool,
         taken: Option<i64>,
+        /// The committed offset the assignment started at, if any.
+        started_at: Option<i64>,
+        /// The first offset delivered under the assignment.
+        first: Option<i64>,
+        /// Whether a log start has been checked for a skipped range.
+        skip_checked: bool,
     }
 
     impl Owned {
@@ -805,6 +958,7 @@ mod proptests {
                                 o.cursor.insert(p, offset + 1);
                                 *owned.unfinished.entry(offset).or_insert(0) += 1;
                                 owned.last = Some(offset);
+                                owned.first.get_or_insert(offset);
                                 let receipt = got.expect("an owned partition takes a delivery");
                                 prop_assert!(
                                     o.receipts.iter().all(|r| r.0 != receipt),
@@ -886,6 +1040,33 @@ mod proptests {
                         let read_to = o.cursor[&p] - back;
                         prop_assert_eq!(t.retire_to(&tp_of(p), Offset::Offset(read_to)), None);
                     }
+                    Op::LogStart { p, ahead } => {
+                        let Some(owned) = o.owned.get_mut(&p) else {
+                            prop_assert_eq!(t.skipped_below(&tp_of(p), ahead), None);
+                            prop_assert_eq!(t.retire_below(&tp_of(p), ahead), None);
+                            continue;
+                        };
+                        let log_start = o.cursor[&p] + ahead;
+                        let skipped = match owned.started_at {
+                            Some(at) if !owned.skip_checked && at < log_start => {
+                                owned.skip_checked = true;
+                                let end = owned.first.map_or(log_start, |f| f.min(log_start));
+                                (end > at).then_some((at, end))
+                            }
+                            _ => None,
+                        };
+                        prop_assert_eq!(t.skipped_below(&tp_of(p), log_start), skipped);
+                        // The tracker's floor is where the reader reads next,
+                        // once anything has set it or a commit started it.
+                        let known = owned.last.is_some() || owned.moved || owned.started_at.is_some();
+                        let floor = o.cursor[&p];
+                        let raised = (known && log_start > floor).then_some((floor, log_start));
+                        prop_assert_eq!(t.retire_below(&tp_of(p), log_start), raised);
+                        if raised.is_some() {
+                            owned.moved = true;
+                            o.cursor.insert(p, log_start);
+                        }
+                    }
                     Op::Revoke => {
                         let tps: Vec<Tp> = o.owned.keys().map(|p| tp_of(*p)).collect();
                         let mut got = t.revoke(&tps);
@@ -911,11 +1092,15 @@ mod proptests {
                         let new: Vec<usize> = (0..PARTITIONS)
                             .filter(|p| mask & (1 << p) != 0 && !o.owned.contains_key(p))
                             .collect();
-                        t.assign(new.iter().map(|p| tp_of(*p)));
+                        t.assign_from(new.iter().map(|p| (tp_of(*p), o.committed.get(p).copied())));
                         o.generation += 1;
                         for p in new {
-                            o.owned.insert(p, Owned { generation: o.generation, ..Owned::default() });
-                            o.cursor.insert(p, o.committed.get(&p).copied().unwrap_or(0));
+                            let started_at = o.committed.get(&p).copied();
+                            o.owned.insert(
+                                p,
+                                Owned { generation: o.generation, started_at, ..Owned::default() },
+                            );
+                            o.cursor.insert(p, started_at.unwrap_or(0));
                         }
                     }
                     Op::Take => {

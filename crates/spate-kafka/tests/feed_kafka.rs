@@ -30,14 +30,16 @@ use spate_test_support::{ChildTest, KAFKA_PORT};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use support::feed::{
-    ATTEMPT, ATTEMPT_PARTITIONS, BoundedJob, DEAD, DRAIN_TIMEOUT, RETRY, TWO_RANGES, WORK, Worker,
-    assert_stalled, bounded_section, committed, create_topics, data_dir, direct_with, exists,
-    feed_yaml, high_watermark, hold_for, hold_open, launch_bounded, launch_source, launch_stopping,
-    launch_with, list_once, open_transaction_with, produce_raw, publish, read_attempts, read_depth,
-    recs, run_to_exit, sorted, stage, two_range_unit, written,
+    ATTEMPT, ATTEMPT_PARTITIONS, BoundedJob, DEAD, DRAIN_TIMEOUT, HeldUnit, RETRY, TWO_RANGES,
+    WORK, Worker, assert_stalled, bounded_section, committed, create_topics, data_dir, direct_with,
+    exists, feed_yaml, group_stable, high_watermark, hold_for, hold_open, launch_bounded,
+    launch_source, launch_stopping, launch_with, list_once, open_transaction_with, produce_raw,
+    publish, publisher_on, read_attempts, read_depth, recs, run_to_exit, sorted, stage,
+    two_range_unit, written,
 };
 use support::{
-    TRANSACTION_TIMEOUT, Transaction, broker, log_end, produce_transaction, transactional_broker,
+    TRANSACTION_TIMEOUT, Transaction, broker, delete_records_below, log_end, produce_transaction,
+    transactional_broker,
 };
 use testcontainers::runners::SyncRunner;
 
@@ -612,23 +614,6 @@ fn the_publisher_runs_the_configuration_checks_at_connect() {
     );
 }
 
-/// A publish-only handle on `brokers`, with the configuration checks, and
-/// the runtime it runs on.
-fn publisher_on(
-    section_yaml: &str,
-) -> (
-    Result<KafkaFeedPublisher, ConnectError>,
-    tokio::runtime::Runtime,
-) {
-    let io = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(1)
-        .enable_all()
-        .build()
-        .unwrap();
-    let publisher = KafkaFeedPublisher::connect(&support::feed::section(section_yaml), io.handle());
-    (publisher, io)
-}
-
 /// Pins that a message with no key, as a broker stores and returns it, is
 /// read as a unit named by its position and committed once acknowledged.
 #[test]
@@ -661,7 +646,6 @@ fn a_keyless_message_is_read_as_a_unit() {
 #[test]
 #[ignore = "requires Docker"]
 fn a_dead_letter_topic_entry_ends_the_job_stalled() {
-    use rdkafka::TopicPartitionList;
     let container = broker().start().expect("start kafka container");
     let port = container.get_host_port_ipv4(KAFKA_PORT).expect("port");
     let brokers = format!("127.0.0.1:{port}");
@@ -682,20 +666,7 @@ fn a_dead_letter_topic_entry_ends_the_job_stalled() {
     wait_until(HANG, "the message is dead-lettered and committed", || {
         high_watermark(&brokers, DEAD) == 1 && committed(&brokers, &group, WORK) == Some(1)
     });
-    let admin: AdminClient<DefaultClientContext> = support::raw_config()
-        .set("bootstrap.servers", &brokers)
-        .build()
-        .expect("admin client");
-    let mut before = TopicPartitionList::new();
-    before
-        .add_partition_offset(DEAD, 0, rdkafka::Offset::Offset(1))
-        .unwrap();
-    let io = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    io.block_on(admin.delete_records(&before, &AdminOptions::new()))
-        .expect("delete records");
+    delete_records_below(&brokers, DEAD, 0, 1);
     assert_stalled(&run_to_exit(&worker, &clock));
 }
 
@@ -748,6 +719,63 @@ fn a_bounded_job_ends_once_every_workers_partitions_are_committed() {
     let rb = run_to_exit(&b, &clock_b).state;
     assert_eq!(rb, ExitState::Completed);
     assert_eq!(ra.join().unwrap(), ExitState::Completed);
+}
+
+/// Pins that a unit a worker holds keeps a bounded job open once retention,
+/// here `DeleteRecords`, removes its record: an idle peer counts the lag from
+/// the group's commit below the log start, stays in the group, and the
+/// holder reads the unit to its end.
+#[test]
+#[ignore = "requires Docker"]
+fn a_unit_whose_record_is_deleted_while_held_is_read_to_its_end() {
+    let container = broker().start().expect("start kafka container");
+    let port = container.get_host_port_ipv4(KAFKA_PORT).expect("port");
+    let brokers = format!("127.0.0.1:{port}");
+    create_topics(&brokers);
+    let held = HeldUnit::start(&brokers, "deleted-held", 50);
+    delete_records_below(&brokers, WORK, 0, 1);
+
+    hold_open(&held.a, &held.a_clock);
+    held.b.script.release_held();
+    wait_until(HANG, "B writes every row", || {
+        written(&held.b.script).len() == held.rows.len()
+    });
+    assert_eq!(
+        run_to_exit(&held.b, &held.b_clock).state,
+        ExitState::Completed
+    );
+    assert_eq!(
+        run_to_exit(&held.a, &held.a_clock).state,
+        ExitState::Completed
+    );
+    assert_eq!(written(&held.b.script), sorted(held.rows.clone()));
+    assert_eq!(committed(&brokers, &held.group, WORK), Some(1));
+    assert_eq!(*held.b.recording.seen.lock().unwrap(), [1]);
+}
+
+/// Pins that a bounded job ends once its group's commit stands below a log
+/// start with no record above it: the owner commits past the deleted offsets
+/// it could not read.
+#[test]
+#[ignore = "requires Docker"]
+fn a_gap_at_a_partitions_end_does_not_hold_a_job_open() {
+    let container = broker().start().expect("start kafka container");
+    let port = container.get_host_port_ipv4(KAFKA_PORT).expect("port");
+    let brokers = format!("127.0.0.1:{port}");
+    create_topics(&brokers);
+    let held = HeldUnit::start(&brokers, "deleted-gap", 5);
+    delete_records_below(&brokers, WORK, 0, 1);
+    // A's exit rebalances the group, B's held receipt is gone, and B's next
+    // assignment starts at the commit below the log start.
+    assert_eq!(held.a.stop(), ExitState::Completed);
+    group_stable(&brokers, &held.group, 1);
+    held.b.script.release_held();
+
+    assert_eq!(
+        run_to_exit(&held.b, &held.b_clock).state,
+        ExitState::Completed
+    );
+    assert_eq!(committed(&brokers, &held.group, WORK), Some(1));
 }
 
 /// Create the topics with a two-partition work topic.

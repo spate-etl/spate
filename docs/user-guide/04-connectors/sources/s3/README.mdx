@@ -894,7 +894,11 @@ A bounded job cannot share its feed with storage notifications, and nothing
 checks that. Notifications keep the window from closing until they stop for a
 whole window, and an object both the lister and a notification announce is
 read twice. A unit the feed deletes at the end of its retention, before any
-worker reads it, leaves no trace, and the job can end over it.
+worker reads it, leaves no trace, and the job can end over it. A unit the feed
+deletes while a worker holds it is lost the same way if it moves to another
+worker before the first one finishes. The
+[Kafka feed](../../feeds/kafka/README.mdx#when-retention-deletes-a-units-message)
+logs and counts such a loss.
 
 ### The lister run
 

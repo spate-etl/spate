@@ -75,10 +75,12 @@ run and its end marker.
 
 ## Observability
 
-Which worker holds how much of the job shows in `spate_feed_held_units`,
-`spate_source_lanes_active` and `spate_source_rebalances_total`, and how fast
-it settles units in the other `spate_feed_*` families (see
-[Metrics](../../METRICS.md)). A bounded job that ends with dead letters
+Which worker holds how much of the job shows in `spate_feed_held_units` and
+`spate_source_lanes_active`, and how fast it settles units in the other
+`spate_feed_*` families (see [Metrics](../../METRICS.md)).
+`spate_source_rebalances_total{event="revoke"}` counts the drains a worker runs
+when it lets go of a unit it had started reading, such as one that failed or
+that it handed back. A bounded job that ends with dead letters
 reports it as a stalled end. `spate_feed_dead_letter_units` reads the depth of
 the feed's dead-letter destination, where its backend can count it.
 

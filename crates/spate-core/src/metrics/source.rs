@@ -152,12 +152,14 @@ impl SourceMetrics {
         self.partition_lag.retain(keep);
     }
 
-    /// Count a rebalance assignment event.
+    /// Count one [`SourceEvent::LanesAssigned`](crate::source::SourceEvent::LanesAssigned),
+    /// whatever its lane count.
     pub fn rebalance_assigned(&self) {
         self.rebalance_assign.increment(1);
     }
 
-    /// Count a rebalance revocation event.
+    /// Count one [`SourceEvent::LanesRevoked`](crate::source::SourceEvent::LanesRevoked),
+    /// whatever its lane count.
     pub fn rebalance_revoked(&self) {
         self.rebalance_revoke.increment(1);
     }

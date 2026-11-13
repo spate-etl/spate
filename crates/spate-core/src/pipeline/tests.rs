@@ -1837,10 +1837,10 @@ fn rebalances_count_assigned_and_revoked_events() {
         let mut script = h.script.lock().unwrap();
         script.push_back(Script::Assign(Vec::new()));
         script.push_back(Script::Assign(vec![
-            lane(0, 0, &[0..10]),
-            lane(1, 1, &[0..10]),
+            lane(0, 0, std::slice::from_ref(&(0..10))),
+            lane(1, 1, std::slice::from_ref(&(0..10))),
         ]));
-        script.push_back(Script::Add(vec![lane(2, 2, &[0..5])]));
+        script.push_back(Script::Add(vec![lane(2, 2, std::slice::from_ref(&(0..5)))]));
     }
     wait_until(spate_test::HANG, "the added partition commits", || {
         h.shared.lock().unwrap().committed.get(&PartitionId(2)) == Some(&5)

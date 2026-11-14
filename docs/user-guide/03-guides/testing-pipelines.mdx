@@ -53,12 +53,17 @@ is process-wide:
   "127.0.0.1:0" }` lets the kernel pick a free port instead. The start logs
   the address it bound ([Monitoring](../05-deployment/monitoring.mdx)). A test
   driving the pipeline as a subprocess reads the port off that line. In
-  process, reading it means installing a `tracing` subscriber that captures
-  the output, which is process-wide in turn, so such a test wants a binary of
-  its own. `LogCapture::install_global(tracing::Level::INFO)` installs that
-  subscriber and returns its capture, and
+  process, the start logs the line on the thread that calls `run`, so a
+  `LogCapture` set on that thread receives it. On the spawned thread, run
+  `capture.during(tracing::Level::INFO, || runtime.run())` with a clone of
+  the capture. On the test thread,
   `capture.wait_for_line(timeout, "admin server listening")` returns the line
-  once it is written.
+  once it is written. The subscriber that `during` installs belongs to the
+  spawned thread alone, so other tests in the binary are unaffected. A line
+  from a thread the test does not start needs
+  `LogCapture::install_global(tracing::Level::INFO)` instead. That call
+  installs the process-wide subscriber, so a test that makes it wants a binary
+  of its own.
 - **Metric series ownership.** A gauge series has one live owner per
   process, keyed on the pipeline and component labels, so two pipelines
   alive at once under the same `pipeline.name` fail to build rather than

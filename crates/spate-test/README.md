@@ -85,6 +85,9 @@ call. The feed has no queue and no clock behind it, and its backend key is
   and returns the lines it logged. `show_logs` sends the lines only to the test
   harness. The harness prints them when the test fails. Both subscribers are
   scoped to the calling thread.
+- `LogCapture::during` runs a closure under the subscriber `capture_logs`
+  uses, writing to a capture the test holds, so the test can read lines while the closure still
+  runs. The subscriber is scoped to the calling thread.
 - `LogCapture` is a writer for a `tracing` subscriber the test installs itself.
   `LogCapture::wait_for` polls a check until it returns a value, and
   `LogCapture::wait_for_line` waits for a line containing a string. On a

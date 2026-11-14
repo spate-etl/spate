@@ -2,8 +2,10 @@
 //!
 //! [`LogCapture`] is a writer a `tracing` subscriber can be pointed at, and
 //! waits on what it has captured. [`capture_logs`] and [`show_logs`] install
-//! one around a call, scoped to the calling thread.
-//! [`LogCapture::install_global`] installs one for the whole process.
+//! one around a call, scoped to the calling thread, and
+//! [`LogCapture::during`] does the same for a capture the test reads while
+//! the call runs. [`LogCapture::install_global`] installs one for the whole
+//! process.
 
 use crate::run::{hung, poll_until};
 use std::sync::{Arc, LazyLock, Mutex};
@@ -49,6 +51,20 @@ impl LogCapture {
                 )
             });
         capture
+    }
+
+    /// Run `f` under a subscriber at `level` writing to this capture, and
+    /// return what `f` returns.
+    ///
+    /// The capture can be read from any thread while `f` runs, so a test can
+    /// wait on a line before `f` ends. The lines are formatted as
+    /// [`capture_logs`] formats them and reach the test harness as well.
+    ///
+    /// The subscriber is scoped to the calling thread. Threads that
+    /// [`spawn_thread`](spate_core::task::spawn_thread) starts inside `f` log
+    /// to it too; any other thread does not.
+    pub fn during<R>(&self, level: Level, f: impl FnOnce() -> R) -> R {
+        under_subscriber(level, self.clone().and(TestWriter::default()), f)
     }
 
     /// The lines formatted so far.
@@ -125,7 +141,7 @@ impl<'a> MakeWriter<'a> for LogCapture {
 /// `cargo test` shares one process across a binary.
 pub fn capture_logs(level: Level, f: impl FnOnce()) -> Vec<String> {
     let capture = LogCapture::new();
-    under_subscriber(level, capture.clone().and(TestWriter::default()), f);
+    capture.during(level, f);
     capture.lines()
 }
 
@@ -159,13 +175,13 @@ where
         .finish()
 }
 
-fn under_subscriber<W>(level: Level, writer: W, f: impl FnOnce())
+fn under_subscriber<W, R>(level: Level, writer: W, f: impl FnOnce() -> R) -> R
 where
     W: for<'a> MakeWriter<'a> + Send + Sync + 'static,
 {
     let subscriber = formatter(level, writer);
     LazyLock::force(&BYSTANDER);
-    tracing::subscriber::with_default(subscriber, f);
+    tracing::subscriber::with_default(subscriber, f)
 }
 
 #[expect(
@@ -239,6 +255,22 @@ mod tests {
             seen = Some(warn_enabled());
         });
         assert_eq!(seen, Some(true));
+    }
+
+    /// Lines at the level given are readable while `f` still runs, and
+    /// `during` returns what `f` returns.
+    #[test]
+    fn during_lets_a_test_read_a_line_while_f_runs() {
+        let capture = LogCapture::new();
+        let read = capture.during(Level::WARN, || {
+            tracing::warn!(at = 1, "mid-run");
+            tracing::info!("below the level");
+            capture.lines()
+        });
+        assert_eq!(
+            read,
+            vec![" WARN spate_test::logs::tests: mid-run at=1".to_owned()]
+        );
     }
 
     /// The bystander dispatcher enables no level.

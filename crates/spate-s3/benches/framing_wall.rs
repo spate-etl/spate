@@ -8,8 +8,9 @@
 //!
 //! Framed cases:
 //!
-//! - `frame_plain_whole` — one 4 MiB NDJSON object in fetch-sized chunks. The
-//!   per-byte cost of framing alone, and the denominator for the rest.
+//! - `frame_plain_whole` — one NDJSON object of about 4 MiB in fetch-sized
+//!   chunks. The per-byte cost of framing alone, and the denominator for the
+//!   rest.
 //! - `frame_gzip_whole`, `frame_zstd_whole` — the same body stored compressed.
 //!   Bodies are compressed in the fixture, so these time decompression and
 //!   framing.

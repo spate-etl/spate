@@ -4408,6 +4408,7 @@ dependencies = [
  "serde",
  "serde_json",
  "simd-json",
+ "spate-bench",
  "spate-core",
  "spate-json",
  "spate-kafka",

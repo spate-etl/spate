@@ -7,8 +7,9 @@
 //! writer does before its first send, and builds each message's librdkafka
 //! header list, as the writer does just before sending that message.
 //!
-//! The send, the delivery reports and the wait for them are out of reach: they
-//! need a broker, and they run inside the async `write_batch`.
+//! The send, the delivery reports and the wait for them need a broker and run
+//! inside the async `write_batch`, so this tier cannot count them.
+//! `produce_wall.rs` times them against librdkafka's mock cluster.
 //!
 //! The cases are the encode benches' message shapes, framed by the same
 //! encoder:

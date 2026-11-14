@@ -32,23 +32,18 @@ pub(crate) fn run(root: &Path, explain: bool, nightly: &str) -> Outcome {
     )?;
 
     let inherited = std::env::var("MIRIFLAGS").unwrap_or_default();
-    let mut failed = 0;
-    for (package, filter) in TARGETS {
-        let step = test_step(&toolchain, package, filter, &inherited);
-        if explain {
-            println!("{}", step.display());
-            continue;
-        }
-        println!("miri: {package} {filter}");
-        if run::run(root, false, &step).is_err() {
-            println!("::error::Miri failed for {package}");
-            failed += 1;
-        }
-    }
+    let rows: Vec<_> = TARGETS
+        .iter()
+        .map(|(package, filter)| (*package, test_step(&toolchain, package, filter, &inherited)))
+        .collect();
     if explain {
+        for (_, step) in &rows {
+            println!("{}", step.display());
+        }
         return Ok(());
     }
 
+    let failed = run_rows(&rows, |step| run::run(root, false, step).is_ok());
     run::tally(
         TARGETS.len(),
         failed,
@@ -57,6 +52,20 @@ pub(crate) fn run(root: &Path, explain: bool, nightly: &str) -> Outcome {
     )?;
     println!("miri: {} package(s) passed under Miri.", TARGETS.len());
     Ok(())
+}
+
+/// Runs each package's step through `passes`, names each package that fails,
+/// and returns how many failed.
+fn run_rows(rows: &[(&str, Step<'_>)], mut passes: impl FnMut(&Step<'_>) -> bool) -> usize {
+    let mut failed = 0;
+    for (package, step) in rows {
+        println!("miri: {package}");
+        if !passes(step) {
+            println!("::error::Miri failed for {package}");
+            failed += 1;
+        }
+    }
+    failed
 }
 
 /// One package's filtered lib tests under Miri.
@@ -90,6 +99,29 @@ mod tests {
                 "--no-tests fail -E 'test(/^m::/)'"
             )
         );
+    }
+
+    /// Every row runs whatever an earlier one did, and each failure counts.
+    #[test]
+    fn each_failing_row_counts_and_later_rows_still_run() {
+        let rows = [
+            ("a", test_step("+nightly", "a", "test(/^m::/)", "")),
+            ("b", test_step("+nightly", "b", "test(/^m::/)", "")),
+            ("c", test_step("+nightly", "c", "test(/^m::/)", "")),
+        ];
+        let mut ran = Vec::new();
+        let failed = run_rows(&rows, |step| {
+            ran.push(step.display());
+            !step.display().contains(" -p b ")
+        });
+        assert_eq!(failed, 1);
+        assert_eq!(ran.len(), 3);
+    }
+
+    #[test]
+    fn rows_that_all_pass_count_no_failure() {
+        let rows = [("a", test_step("+nightly", "a", "test(/^m::/)", ""))];
+        assert_eq!(run_rows(&rows, |_| true), 0);
     }
 
     /// `MIRIFLAGS` already in the environment reaches the run, ahead of the

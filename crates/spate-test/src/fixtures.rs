@@ -60,8 +60,7 @@ pub fn component_config(type_tag: &str, yaml: &str) -> ComponentConfig {
 /// `body` in the Confluent wire format: the magic byte `0x00`, `schema_id`
 /// big-endian, then `body`.
 ///
-/// Schema-registry serializers write this header in front of an Avro datum
-/// or a Protobuf message, so `body` is whatever follows the schema id.
+/// `body` is everything after the schema id, such as an Avro datum.
 #[must_use]
 pub fn confluent_frame(schema_id: u32, body: &[u8]) -> Vec<u8> {
     [&[0x00][..], &schema_id.to_be_bytes(), body].concat()

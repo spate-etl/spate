@@ -4109,6 +4109,8 @@ mod cluster {
         Accept,
         /// Every partition fails for good and reads from its commit.
         Fail,
+        /// The partitions of this topic are refused, and the rest accepted.
+        RefuseOnly(&'static str),
     }
 
     /// A seek answering as `mode` says, counting its calls.
@@ -4117,25 +4119,39 @@ mod cluster {
         calls: &Arc<AtomicUsize>,
     ) -> crate::epoch::SeekWith {
         let (mode, calls) = (Arc::clone(mode), Arc::clone(calls));
-        Box::new(move |mut list, _| {
+        Box::new(move |list, _| {
             calls.fetch_add(1, Ordering::SeqCst);
             match *mode.lock().unwrap() {
                 Seeks::Refuse => Err(rdkafka::error::KafkaError::Seek("refused".to_owned())),
                 Seeks::Accept => Ok(list),
-                Seeks::Fail => {
-                    for elem in list.elements() {
-                        let raw = crate::client::find_elem(&list, elem.topic(), elem.partition());
-                        // SAFETY: `raw` is an element of `list`, which nothing
-                        // else reads while it is written.
-                        unsafe {
-                            (*raw).err = RDKafkaRespErr::RD_KAFKA_RESP_ERR__UNKNOWN_PARTITION;
-                        }
-                    }
-                    let _ = &mut list;
-                    Ok(list)
-                }
+                Seeks::Fail => Ok(answered(list, |_| {
+                    Some(RDKafkaRespErr::RD_KAFKA_RESP_ERR__UNKNOWN_PARTITION)
+                })),
+                Seeks::RefuseOnly(topic) => Ok(answered(list, |t| {
+                    (t == topic).then_some(RDKafkaRespErr::RD_KAFKA_RESP_ERR__STATE)
+                })),
             }
         })
+    }
+
+    /// `list` with each element whose topic `error` maps to an error marked
+    /// with it.
+    fn answered(
+        mut list: TopicPartitionList,
+        error: impl Fn(&str) -> Option<RDKafkaRespErr>,
+    ) -> TopicPartitionList {
+        for elem in list.elements() {
+            if let Some(code) = error(elem.topic()) {
+                let raw = crate::client::find_elem(&list, elem.topic(), elem.partition());
+                // SAFETY: `raw` is an element of `list`, which nothing else
+                // reads while it is written.
+                unsafe {
+                    (*raw).err = code;
+                }
+            }
+        }
+        let _ = &mut list;
+        list
     }
 
     /// The retry topic's partition.
@@ -4220,6 +4236,52 @@ mod cluster {
         });
         assert_eq!(d.core.lock().tracker.first_read_below_start(&work()), None);
         assert_eq!(position(&d), Offset::Offset(5));
+    }
+
+    /// A seek refused for one partition holds that partition alone: a
+    /// partition with the same number on another topic is accepted, at the
+    /// assignment and on a retry.
+    #[test]
+    fn a_seek_refused_for_one_partition_holds_that_partition_alone() {
+        for at_assignment in [true, false] {
+            let group = spate_test::unique_name("one-refused");
+            let cluster = committed_within_the_log(&group);
+            let start: BaseConsumer = raw_config()
+                .set("bootstrap.servers", cluster.bootstrap_servers())
+                .set("group.id", &group)
+                .build()
+                .unwrap();
+            let mut tpl = TopicPartitionList::new();
+            tpl.add_partition_offset("units-retry", 0, Offset::Offset(1))
+                .unwrap();
+            start.commit(&tpl, CommitMode::Sync).unwrap();
+            let (_, _core, _producer, mut d) = parts_for(&cluster.bootstrap_servers(), &group);
+            let first = if at_assignment {
+                Seeks::RefuseOnly("units")
+            } else {
+                Seeks::Refuse
+            };
+            let mode = Arc::new(std::sync::Mutex::new(first));
+            let calls = Arc::new(AtomicUsize::new(0));
+            d.seek_with = Some(scripted(&mode, &calls));
+            let seen = Arc::clone(&calls);
+            drive(&mut d, "the assignment's seek", move |_| {
+                seen.load(Ordering::SeqCst) == 1
+            });
+            if !at_assignment {
+                assert!(d.validating.contains(&retry()));
+                *mode.lock().unwrap() = Seeks::RefuseOnly("units");
+                d.validate();
+            }
+            assert!(
+                d.validating.contains(&work()),
+                "at assignment: {at_assignment}"
+            );
+            assert!(
+                !d.validating.contains(&retry()),
+                "at assignment: {at_assignment}"
+            );
+        }
     }
 
     /// A partition revoked, or lost to a rebalance error, while its seek is

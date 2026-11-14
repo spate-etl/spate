@@ -3685,6 +3685,12 @@ mod tests {
             let lane = lanes[0].id();
             source.resume(&[lane]).expect("resume");
             assert!(source.members[0].validating.contains(&0));
+            source.poll_events(Duration::ZERO).expect("poll_events");
+            assert_eq!(calls.load(Ordering::SeqCst), 2, "the seek is retried");
+            assert!(
+                source.members[0].validating.contains(&0),
+                "a refused retry keeps it waiting"
+            );
 
             // The runtime pauses the lane; an accepted seek leaves it paused.
             source.pause(&[lane]).expect("pause");
@@ -3692,6 +3698,7 @@ mod tests {
             source.poll_events(Duration::ZERO).expect("poll_events");
             assert!(source.members[0].validating.is_empty());
             assert!(source.members[0].engine_paused.contains(&0));
+            assert!(source.members[0].resumable([0]).is_empty());
 
             source.resume(&[lane]).expect("resume");
             assert!(source.members[0].engine_paused.is_empty());
@@ -3728,6 +3735,23 @@ mod tests {
             assert_eq!(logged.len(), 1, "{lines:#?}");
             assert!(logged[0].contains("committed=100"), "{}", logged[0]);
             assert!(logged[0].contains("first=0"), "{}", logged[0]);
+        }
+
+        /// A first batch at the committed offset logs nothing.
+        #[test]
+        fn a_first_batch_at_the_commit_is_not_logged() {
+            let cluster = mock_holding(3);
+            commit_positions(&cluster, 1);
+            let (mut source, mut lanes) = assigned_on(&cluster, "earliest");
+            let lines = spate_test::capture_logs(tracing::Level::INFO, || {
+                assert_eq!(first_offset(&mut source, &mut lanes[0]), 1);
+            });
+            assert!(
+                !lines
+                    .iter()
+                    .any(|l| l.contains("first record is below its committed offset")),
+                "{lines:#?}"
+            );
         }
 
         /// Under `auto.offset.reset: error`, a commit past the log end fails the
@@ -4509,23 +4533,7 @@ mod tests {
             let secs = Duration::from_secs;
             for (listing_cost, seek) in [(secs(0), Some(secs(6))), (secs(6), None)] {
                 let cluster = mock();
-                {
-                    use crate::client::testing::{Raw as _, raw_config};
-                    let producer: rdkafka::producer::BaseProducer = raw_config()
-                        .set("bootstrap.servers", cluster.bootstrap_servers())
-                        .build()
-                        .expect("producer");
-                    for _ in 0..5 {
-                        producer
-                            .send(
-                                rdkafka::producer::BaseRecord::<(), _>::to("orders")
-                                    .partition(0)
-                                    .payload(&b"r"[..]),
-                            )
-                            .expect("enqueue");
-                    }
-                    rdkafka::producer::Producer::flush(&producer, secs(30)).expect("flush");
-                }
+                produce_orders(&cluster, 5);
                 let (mut source, _clock, recorded) =
                     recording(&cluster, "earliest", 1, move |call| match call {
                         BrokerCall::Lookup { .. } => secs(4),
@@ -4533,20 +4541,7 @@ mod tests {
                         _ => Duration::ZERO,
                     });
                 source.seek_with = Some(Box::new(|list, _| Ok(list)));
-                {
-                    use crate::client::testing::{Raw as _, raw_config};
-                    let committer: BaseConsumer = raw_config()
-                        .set("bootstrap.servers", cluster.bootstrap_servers())
-                        .set("group.id", &source.config.group_id)
-                        .build()
-                        .expect("committer");
-                    let mut list = TopicPartitionList::new();
-                    list.add_partition_offset("orders", 0, Offset::Offset(2))
-                        .expect("offset");
-                    committer
-                        .commit(&list, rdkafka::consumer::CommitMode::Sync)
-                        .expect("commit");
-                }
+                commit_orders(&cluster, &source.config.group_id, 2);
                 let until = source.clock.now() + source.lookup_timeout;
                 let offers = [(0, tpl_of(&[0]))];
                 let starts = source
@@ -4571,6 +4566,78 @@ mod tests {
                 assert_eq!(calls(&recorded), want);
                 assert_eq!(source.members[0].validating.contains(&0), seek.is_none());
             }
+        }
+
+        /// Under `latest`, a partition whose commit carries an epoch is sought
+        /// to its commit when its end cannot be read, by a failed listing or
+        /// with no time left, and the offers are not retried: only an
+        /// uncommitted partition needs its end.
+        #[test]
+        fn a_committed_partition_is_sought_when_its_end_cannot_be_read() {
+            use rdkafka::types::{RDKafkaApiKey, RDKafkaRespErr};
+            let secs = Duration::from_secs;
+            for (lookup_cost, refused) in [(secs(10), false), (secs(0), true)] {
+                let cluster = mock();
+                produce_orders(&cluster, 5);
+                let (mut source, _clock, recorded) =
+                    recording(&cluster, "latest", 1, move |call| match call {
+                        BrokerCall::Lookup { .. } => lookup_cost,
+                        _ => Duration::ZERO,
+                    });
+                commit_orders(&cluster, &source.config.group_id, 2);
+                if refused {
+                    cluster.request_errors(
+                        RDKafkaApiKey::ListOffsets,
+                        &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_TOPIC_AUTHORIZATION_FAILED; 50],
+                    );
+                }
+                let until = source.clock.now() + source.lookup_timeout;
+                let starts = source
+                    .prepare_starts(&[(0, tpl_of(&[0]))], until)
+                    .expect("no fatal")
+                    .expect("a start, with no retry");
+                assert_eq!(starts[0].seek.count(), 1, "the commit is sought");
+                let listed = calls(&recorded)
+                    .iter()
+                    .any(|c| matches!(c, BrokerCall::Listing { .. }));
+                assert_eq!(listed, refused, "a lookup that took {lookup_cost:?}");
+            }
+        }
+
+        /// Produce `n` records to partition 0 of `cluster`'s topic `orders`.
+        fn produce_orders(cluster: &MockKafka, n: usize) {
+            use crate::client::testing::{Raw as _, raw_config};
+            let producer: rdkafka::producer::BaseProducer = raw_config()
+                .set("bootstrap.servers", cluster.bootstrap_servers())
+                .build()
+                .expect("producer");
+            for _ in 0..n {
+                producer
+                    .send(
+                        rdkafka::producer::BaseRecord::<(), _>::to("orders")
+                            .partition(0)
+                            .payload(&b"r"[..]),
+                    )
+                    .expect("enqueue");
+            }
+            rdkafka::producer::Producer::flush(&producer, Duration::from_secs(30)).expect("flush");
+        }
+
+        /// Commit `offset` on partition 0 of `cluster`'s topic `orders` for
+        /// `group`.
+        fn commit_orders(cluster: &MockKafka, group: &str, offset: i64) {
+            use crate::client::testing::{Raw as _, raw_config};
+            let committer: BaseConsumer = raw_config()
+                .set("bootstrap.servers", cluster.bootstrap_servers())
+                .set("group.id", group)
+                .build()
+                .expect("committer");
+            let mut list = TopicPartitionList::new();
+            list.add_partition_offset("orders", 0, Offset::Offset(offset))
+                .expect("offset");
+            committer
+                .commit(&list, rdkafka::consumer::CommitMode::Sync)
+                .expect("commit");
         }
 
         /// One offer per consumer, of the partition with its index.

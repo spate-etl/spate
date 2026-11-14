@@ -26,9 +26,9 @@ pub(crate) struct EpochCache {
 
 impl EpochCache {
     /// Records that the record at `offset` carries `epoch`. An epoch below 0
-    /// means the broker sent none and is ignored. A record below the newest
-    /// entry drops the entries above it, because the log it came from
-    /// diverged from theirs.
+    /// means the broker sent none and is ignored. A record drops the entries
+    /// that start at or above it, because the log it came from diverged from
+    /// theirs.
     pub(crate) fn observe(&mut self, offset: i64, epoch: i32) {
         if epoch < 0 {
             return;
@@ -36,18 +36,14 @@ impl EpochCache {
         while self
             .entries
             .back()
-            .is_some_and(|&(start, _)| start > offset)
+            .is_some_and(|&(start, _)| start >= offset)
         {
             self.entries.pop_back();
         }
-        match self.entries.back_mut() {
-            Some((_, last)) if *last == epoch => {}
-            Some((start, last)) if *start == offset => *last = epoch,
-            _ => {
-                self.entries.push_back((offset, epoch));
-                if self.entries.len() > CAP {
-                    self.entries.pop_front();
-                }
+        if self.entries.back().is_none_or(|&(_, last)| last != epoch) {
+            self.entries.push_back((offset, epoch));
+            if self.entries.len() > CAP {
+                self.entries.pop_front();
             }
         }
     }

@@ -899,6 +899,30 @@ mod tests {
         assert_eq!(revoked, [4]);
     }
 
+    /// A point held at an unfinished delivery takes the epoch before it, at
+    /// the start the assignment seeded and after a take, so the revocation
+    /// commits it again with that epoch.
+    #[test]
+    fn a_point_held_at_an_unfinished_delivery_keeps_its_epoch() {
+        let mut t = Tracker::new();
+        t.assign_from([(tp(0), Some(10), 4)]);
+        let _held = t.deliver_at(&tp(0), 10, 5).unwrap();
+        assert_eq!(points(&mut t), [(10, 4)]);
+
+        let mut t = Tracker::new();
+        t.assign([tp(0)]);
+        let r = t.deliver_at(&tp(0), 5, 1).unwrap();
+        assert!(t.acknowledge(r));
+        let _held = t.deliver_at(&tp(0), 6, 2).unwrap();
+        assert_eq!(points(&mut t), [(6, 1)]);
+        let revoked: Vec<(i64, i32)> = t
+            .revoke(&[tp(0)])
+            .into_iter()
+            .map(|(_, p)| (p.offset, p.epoch))
+            .collect();
+        assert_eq!(revoked, [(6, 1)]);
+    }
+
     /// A retire takes the epoch the position carries, that of the record or
     /// marker before it.
     #[test]

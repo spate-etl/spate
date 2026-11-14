@@ -89,6 +89,26 @@ impl Shared {
         }
     }
 
+    /// Record that `offset` carries `epoch`. `noted` is the caller's copy of
+    /// the last epoch it recorded and where, so the lock is taken only when the
+    /// epoch changes or the offset moves below it.
+    fn note(&self, noted: &mut Option<(i64, i32)>, offset: i64, epoch: i32) {
+        if epoch < 0 {
+            return;
+        }
+        if let Some((last_offset, last_epoch)) = *noted
+            && last_epoch == epoch
+            && offset >= last_offset
+        {
+            return;
+        }
+        self.epochs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .observe(offset, epoch);
+        *noted = Some((offset, epoch));
+    }
+
     /// The leader epoch of the record before `watermark`, and forgets the
     /// epochs below it.
     pub(crate) fn epoch_before(&self, watermark: i64) -> i32 {
@@ -212,21 +232,7 @@ impl KafkaLane {
     /// watermark is always one past a batch end, so the commit reads the
     /// epoch of the record before it from these.
     fn note_epoch(&mut self, offset: i64, epoch: i32) {
-        if epoch < 0 {
-            return;
-        }
-        if let Some((last_offset, last_epoch)) = self.noted
-            && last_epoch == epoch
-            && offset >= last_offset
-        {
-            return;
-        }
-        self.shared
-            .epochs
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .observe(offset, epoch);
-        self.noted = Some((offset, epoch));
+        self.shared.note(&mut self.noted, offset, epoch);
     }
 
     /// Log once per assignment when the first batch starts below the
@@ -437,6 +443,42 @@ mod tests {
     use spate_core::checkpoint::Checkpointer;
     use spate_core::error::ErrorClass;
     use spate_core::source::SourceCtx;
+
+    /// A noted epoch reaches the cache when it changes or its offset moves
+    /// below the last one noted, and an epoch below 0 is ignored.
+    #[test]
+    fn a_lane_notes_an_epoch_when_it_changes_or_moves_down() {
+        let shared = Shared::new(None, -1);
+        let mut noted = None;
+        shared.note(&mut noted, 4, -1);
+        assert_eq!(noted, None);
+        shared.note(&mut noted, 4, 1);
+        shared.note(&mut noted, 9, 2);
+        assert_eq!(noted, Some((9, 2)));
+        assert_eq!(shared.epochs.lock().expect("epochs").at(9), 2);
+        // The log diverged below the last noted offset: the entry above goes.
+        shared.note(&mut noted, 6, 2);
+        let epochs = shared.epochs.lock().expect("epochs");
+        assert_eq!((epochs.at(5), epochs.at(6), epochs.at(9)), (1, 2, 2));
+        drop(epochs);
+        assert_eq!(noted, Some((6, 2)));
+        // The same epoch further on changes nothing.
+        shared.note(&mut noted, 20, 2);
+        assert_eq!(noted, Some((6, 2)));
+    }
+
+    /// A watermark commits the epoch of the record before it, and a repeated
+    /// commit of the same watermark reads the same epoch.
+    #[test]
+    fn a_watermark_takes_the_epoch_of_the_record_before_it() {
+        let shared = Shared::new(Some(5), 1);
+        let mut noted = None;
+        shared.note(&mut noted, 9, 2);
+        assert_eq!(shared.epoch_before(9), 1);
+        assert_eq!(shared.epoch_before(9), 1);
+        assert_eq!(shared.epoch_before(10), 2);
+        assert_eq!(shared.epoch_before(i64::MIN + 1), -1);
+    }
 
     /// A lane waits for every batch it issued to reach a watermark, and one that
     /// has issued nothing waits for nothing. Regression for #1709.

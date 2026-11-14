@@ -8,6 +8,7 @@ mod fuzz;
 mod hooks;
 mod issue_form;
 mod lint;
+mod miri;
 mod mutants;
 mod step_summary;
 
@@ -69,6 +70,12 @@ pub(crate) enum Command {
 
     /// Rustdoc as docs.rs builds it: per crate, on nightly
     Docsrs {
+        #[command(flatten)]
+        toolchain: fuzz::Toolchain,
+    },
+
+    /// Lib tests that enter `unsafe` code, under Miri on nightly
+    Miri {
         #[command(flatten)]
         toolchain: fuzz::Toolchain,
     },
@@ -286,6 +293,7 @@ pub(crate) fn dispatch(root: &Path, explain: bool, cmd: Command) -> Outcome {
         Command::Doctest => doctest(root, explain, &Select::Workspace),
         Command::Doc => doc(root, explain, &Select::Workspace),
         Command::Docsrs { toolchain } => docsrs::run(root, explain, toolchain.nightly()),
+        Command::Miri { toolchain } => miri::run(root, explain, toolchain.nightly()),
         Command::IntegrationTest => {
             pull_all(root, explain)?;
             let capabilities = selected_capabilities(root, "s3")?;

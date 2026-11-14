@@ -419,6 +419,28 @@ pub(crate) fn quiet(root: &Path, explain: bool, step: &Step<'_>) -> Outcome {
     Err(exited(&line, describe(&status), status.code()))
 }
 
+/// Runs `probe` quietly and, when it fails, reports that the command needs
+/// `install`. Under `explain` it prints the probe instead.
+pub(crate) fn require(root: &Path, explain: bool, probe: &Step<'_>, install: &str) -> Outcome {
+    if explain {
+        println!("{}", probe.display());
+        return Ok(());
+    }
+    quiet(root, false, probe).map_err(|_| Error::msg(format!("needs {install}")))
+}
+
+/// The outcome of a run over `attempted` items, of which `failed` failed. A
+/// run that attempted nothing fails with `empty`, because it checked nothing.
+pub(crate) fn tally(attempted: usize, failed: usize, unit: &str, empty: &str) -> Outcome {
+    if attempted == 0 {
+        return Err(Error::msg(empty));
+    }
+    if failed != 0 {
+        return Err(Error::msg(format!("{failed} {unit} failed")));
+    }
+    Ok(())
+}
+
 /// The error for a step that finished with a failing status.
 pub(crate) fn exited(line: &str, status: String, code: Option<i32>) -> Error {
     Error {
@@ -449,6 +471,23 @@ fn quote(arg: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_tally_with_nothing_attempted_fails_with_its_message() {
+        let err = tally(0, 0, "crate(s)", "checked nothing").unwrap_err();
+        assert_eq!(err.message, "checked nothing");
+    }
+
+    #[test]
+    fn a_tally_with_a_failure_fails_and_counts_it() {
+        let err = tally(3, 1, "crate(s)", "checked nothing").unwrap_err();
+        assert_eq!(err.message, "1 crate(s) failed");
+    }
+
+    #[test]
+    fn a_tally_with_no_failure_passes() {
+        assert!(tally(3, 0, "crate(s)", "checked nothing").is_ok());
+    }
 
     #[test]
     fn a_printed_line_quotes_what_a_shell_would_split() {

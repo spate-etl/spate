@@ -47,7 +47,7 @@ These commands need more, and `cargo xtask ci` runs none of them:
 | --- | --- |
 | `cargo xtask integration-test` | Docker |
 | `cargo xtask docs` | Node, at the version in `.node-version`, and the `website/benchmark` submodule: run `git submodule update --init website/benchmark` |
-| `cargo xtask fuzz`, `cargo xtask docsrs` | A nightly toolchain; `--nightly <channel>` selects the dated one that `.github/toolchains/nightly/` pins for CI. The fuzz commands also need cargo-fuzz, which `cargo xtask fuzz install` installs |
+| `cargo xtask fuzz`, `cargo xtask docsrs`, `cargo xtask miri` | A nightly toolchain; `--nightly <channel>` selects the dated one that `.github/toolchains/nightly/` pins for CI. The fuzz commands also need cargo-fuzz, which `cargo xtask fuzz install` installs. `cargo xtask miri` also needs the `miri` and `rust-src` components: run `rustup component add --toolchain <channel> miri rust-src` |
 | `cargo xtask bench counted` | Linux, valgrind and `gungraun-runner`, at the versions [Run the counted tier](07-performance.md#run-the-counted-tier) gives |
 | `cargo xtask mutants` | [cargo-mutants](https://mutants.rs) |
 

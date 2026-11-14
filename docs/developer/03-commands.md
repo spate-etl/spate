@@ -91,6 +91,7 @@ Its other jobs run commands of their own, so a green `cargo xtask ci` on your ma
 | `Test and coverage` | The suite under `cargo llvm-cov` on Linux x86_64 |
 | `Test (arm64)`, `Test (macOS)` | The suite on Linux arm64, and on macOS when a build input changes |
 | `Rustdoc as docs.rs builds it` | Rustdoc per crate on nightly |
+| `Miri over unsafe code` | The lib tests that enter an `unsafe` block, under Miri on nightly |
 | `Check (MSRV)` | The type check on the declared minimum Rust version |
 | `Allocation assertions`, `Allocation snapshots` | The per-record allocation tests and the committed counts |
 | `Container suites`, `ClickHouse <lane>`, `S3 <lane>`, `Kafka <lane>` | The container suites the change can reach |
@@ -121,6 +122,7 @@ These sit outside `ci`, by cost or by what they need:
 | `cargo xtask bench ab`, `cargo xtask bench arms`, `cargo xtask bench list`, `cargo xtask bench compare` | Wall clock; never a gate |
 | `cargo xtask attribution` | `THIRD-PARTY.md` is regenerated at release; the nightly tier checks that it still generates |
 | `cargo xtask fuzz build`, `cargo xtask fuzz run` | Needs a nightly toolchain; the nightly tier fuzzes |
+| `cargo xtask miri` | Needs a nightly toolchain with the `miri` and `rust-src` components; CI runs it on each pull request that changes Rust |
 | `cargo xtask mutants` | Runs a package's suite once per mutant; CI runs it on each pull request, advisory |
 
 ## Pass `--locked`, except where cargo cannot take it
@@ -149,6 +151,8 @@ The profiles live in `.config/nextest.toml`:
 | `ci` | `Test and coverage`, `Test (arm64)`, `Test (macOS)` | 60 s | 240 s |
 | `docker` | The container suites | 120 s | Never |
 | `mutants` | cargo-mutants | 30 s | 120 s |
+
+`cargo xtask miri` runs nextest under Miri, and nextest then uses a `default-miri` profile with the `default` profile's limits.
 
 No profile retries a failed test.
 

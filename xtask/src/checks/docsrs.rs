@@ -37,16 +37,16 @@ pub(crate) fn run(root: &Path, explain: bool, nightly: &str) -> Outcome {
         "cargo",
         ["metadata", "--no-deps", "--format-version", "1", "--locked"],
     );
+    run::require(
+        root,
+        explain,
+        &probe,
+        &format!("the {nightly} toolchain (rustup toolchain install {nightly})"),
+    )?;
     if explain {
-        println!("{}", probe.display());
         println!("{}", metadata_step.display());
         println!("(one `cargo doc` per publishable crate that metadata names)");
         return Ok(());
-    }
-    if run::quiet(root, false, &probe).is_err() {
-        return Err(Error::msg(format!(
-            "needs the {nightly} toolchain (rustup toolchain install {nightly})"
-        )));
     }
 
     let metadata = run::capture(root, &metadata_step)?;
@@ -83,14 +83,12 @@ pub(crate) fn run(root: &Path, explain: bool, nightly: &str) -> Outcome {
         }
     }
 
-    if built == 0 && failed == 0 {
-        return Err(Error::msg(
-            "no publishable crate found; this run checked nothing",
-        ));
-    }
-    if failed != 0 {
-        return Err(Error::msg(format!("{failed} crate(s) failed")));
-    }
+    run::tally(
+        plans.len(),
+        failed,
+        "crate(s)",
+        "no publishable crate found; this run checked nothing",
+    )?;
     println!("docsrs: {built} crate(s) documented as docs.rs builds them.");
     Ok(())
 }

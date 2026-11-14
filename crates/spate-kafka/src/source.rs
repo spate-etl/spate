@@ -3612,6 +3612,16 @@ mod tests {
             reset: &str,
             extra: &[(&str, &str)],
         ) -> (KafkaSource, Vec<KafkaLane>) {
+            assigned_seeking(cluster, reset, extra, None)
+        }
+
+        /// [`assigned_with`], with each seek answered by `seek`.
+        fn assigned_seeking(
+            cluster: &MockKafka,
+            reset: &str,
+            extra: &[(&str, &str)],
+            seek: Option<crate::epoch::SeekWith>,
+        ) -> (KafkaSource, Vec<KafkaLane>) {
             let mut cfg = KafkaSourceConfig::new(cluster.bootstrap_servers(), "t", "positions");
             cfg.startup_timeout = Duration::from_secs(30);
             cfg.rdkafka = std::collections::BTreeMap::from([
@@ -3623,11 +3633,100 @@ mod tests {
             }
             let cp = spate_core::checkpoint::Checkpointer::new();
             let mut source = KafkaSource::new(cfg);
+            source.seek_with = seek;
             source
                 .open(SourceCtx::new(cp.handle()))
                 .expect("open the source");
             let lanes = super::queued_rebalance::live_lanes(&mut source);
             (source, lanes)
+        }
+
+        /// The first offset `lane` delivers, polling `source` meanwhile.
+        fn first_offset(source: &mut KafkaSource, lane: &mut KafkaLane) -> i64 {
+            let mut first = None;
+            spate_test::wait_until(HANG, "the lane delivers", || {
+                source
+                    .poll_events(Duration::from_millis(10))
+                    .expect("poll_events");
+                if let Some(mut batch) =
+                    lane.poll(1, Duration::from_millis(100)).expect("lane poll")
+                {
+                    first = spate_core::source::PayloadBatch::next_payload(&mut batch)
+                        .map(|p| p.offset);
+                    return true;
+                }
+                false
+            });
+            first.expect("a batch with a record")
+        }
+
+        /// A partition whose seek to its commit is refused is not resumed by
+        /// the accept or by the runtime's resume, and the first accepted seek
+        /// in `poll_events` resumes it unless the runtime paused its lane.
+        #[test]
+        fn a_refused_seek_holds_its_lane_until_one_is_accepted() {
+            let cluster = mock_holding(5);
+            commit_positions(&cluster, 2);
+            let refuse = Arc::new(std::sync::atomic::AtomicBool::new(true));
+            let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let (r, c) = (Arc::clone(&refuse), Arc::clone(&calls));
+            let seek: crate::epoch::SeekWith = Box::new(move |list, _| {
+                c.fetch_add(1, Ordering::SeqCst);
+                if r.load(Ordering::SeqCst) {
+                    Err(KafkaError::Seek("refused".to_owned()))
+                } else {
+                    Ok(list)
+                }
+            });
+            let (mut source, mut lanes) = assigned_seeking(&cluster, "earliest", &[], Some(seek));
+            assert!(source.members[0].validating.contains(&0));
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            let lane = lanes[0].id();
+            source.resume(&[lane]).expect("resume");
+            assert!(source.members[0].validating.contains(&0));
+
+            // The runtime pauses the lane; an accepted seek leaves it paused.
+            source.pause(&[lane]).expect("pause");
+            refuse.store(false, Ordering::SeqCst);
+            source.poll_events(Duration::ZERO).expect("poll_events");
+            assert!(source.members[0].validating.is_empty());
+            assert!(source.members[0].engine_paused.contains(&0));
+
+            source.resume(&[lane]).expect("resume");
+            assert!(source.members[0].engine_paused.is_empty());
+            assert_eq!(first_offset(&mut source, &mut lanes[0]), 2);
+        }
+
+        /// A batch's last epoch reaches the cache the commit reads, so the
+        /// watermark past it carries the epoch of the record before it.
+        #[test]
+        fn a_batch_notes_the_epoch_its_watermark_commits() {
+            let (_cluster, mut source, mut lanes) = assigned_on_mock(3);
+            assert_eq!(first_offset(&mut source, &mut lanes[0]), 0);
+            let shared = Arc::clone(&source.members[0].watermarks[&0]);
+            let epoch = shared.epochs.lock().expect("epochs").at(0);
+            assert!(epoch >= 0, "the mock sends an epoch with each record");
+            assert_eq!(shared.epoch_before(1), epoch);
+            assert_eq!(shared.epoch_before(i64::MIN + 1), -1);
+        }
+
+        /// A first batch below the committed offset the assignment started at
+        /// is logged once, naming the partition and both offsets.
+        #[test]
+        fn a_first_batch_below_the_commit_is_logged() {
+            let cluster = mock_holding(3);
+            commit_positions(&cluster, 100);
+            let (mut source, mut lanes) = assigned_on(&cluster, "earliest");
+            let lines = spate_test::capture_logs(tracing::Level::INFO, || {
+                assert_eq!(first_offset(&mut source, &mut lanes[0]), 0);
+            });
+            let logged: Vec<&String> = lines
+                .iter()
+                .filter(|l| l.contains("first record is below its committed offset"))
+                .collect();
+            assert_eq!(logged.len(), 1, "{lines:#?}");
+            assert!(logged[0].contains("committed=100"), "{}", logged[0]);
+            assert!(logged[0].contains("first=0"), "{}", logged[0]);
         }
 
         /// Under `auto.offset.reset: error`, a fetch past the log end fails the
@@ -4397,6 +4496,78 @@ mod tests {
             let cp = Checkpointer::new();
             source.open(SourceCtx::new(cp.handle())).expect("open");
             (source, clock, calls)
+        }
+
+        /// The end read and the seek of an accept get what the lookup left of
+        /// its one bound: a seek with time left gets that time, and none is
+        /// sent once the bound is spent, which leaves the partition waiting.
+        #[test]
+        fn the_end_read_and_the_seek_get_what_the_lookup_left() {
+            let secs = Duration::from_secs;
+            for (listing_cost, seek) in [(secs(0), Some(secs(6))), (secs(6), None)] {
+                let cluster = mock();
+                {
+                    use crate::client::testing::{Raw as _, raw_config};
+                    let producer: rdkafka::producer::BaseProducer = raw_config()
+                        .set("bootstrap.servers", cluster.bootstrap_servers())
+                        .build()
+                        .expect("producer");
+                    for _ in 0..5 {
+                        producer
+                            .send(
+                                rdkafka::producer::BaseRecord::<(), _>::to("orders")
+                                    .partition(0)
+                                    .payload(&b"r"[..]),
+                            )
+                            .expect("enqueue");
+                    }
+                    rdkafka::producer::Producer::flush(&producer, secs(30)).expect("flush");
+                }
+                let (mut source, _clock, recorded) =
+                    recording(&cluster, "earliest", 1, move |call| match call {
+                        BrokerCall::Lookup { .. } => secs(4),
+                        BrokerCall::Listing { .. } => listing_cost,
+                        _ => Duration::ZERO,
+                    });
+                source.seek_with = Some(Box::new(|list, _| Ok(list)));
+                {
+                    use crate::client::testing::{Raw as _, raw_config};
+                    let committer: BaseConsumer = raw_config()
+                        .set("bootstrap.servers", cluster.bootstrap_servers())
+                        .set("group.id", &source.config.group_id)
+                        .build()
+                        .expect("committer");
+                    let mut list = TopicPartitionList::new();
+                    list.add_partition_offset("orders", 0, Offset::Offset(2))
+                        .expect("offset");
+                    committer
+                        .commit(&list, rdkafka::consumer::CommitMode::Sync)
+                        .expect("commit");
+                }
+                let until = source.clock.now() + source.lookup_timeout;
+                let offers = [(0, tpl_of(&[0]))];
+                let starts = source
+                    .prepare_starts(&offers, until)
+                    .expect("no fatal")
+                    .expect("a start");
+                assert_eq!(starts[0].seek.count(), 1, "the commit is sought");
+                source
+                    .accept_assignment(0, &offers[0].1, &starts[0], until)
+                    .expect("accept");
+                let mut want = vec![
+                    BrokerCall::Lookup {
+                        k: 0,
+                        budget: secs(10),
+                    },
+                    BrokerCall::Listing {
+                        k: 0,
+                        budget: secs(6),
+                    },
+                ];
+                want.extend(seek.map(|budget| BrokerCall::Seek { k: 0, budget }));
+                assert_eq!(calls(&recorded), want);
+                assert_eq!(source.members[0].validating.contains(&0), seek.is_none());
+            }
         }
 
         /// One offer per consumer, of the partition with its index.

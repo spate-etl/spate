@@ -495,7 +495,7 @@ pub(crate) fn message_epoch(message: &BorrowedMessage<'_>) -> i32 {
 }
 
 /// The element of `tpl` for `partition` of `topic`, or null when it has none.
-fn find_elem(
+pub(crate) fn find_elem(
     tpl: &TopicPartitionList,
     topic: &str,
     partition: i32,
@@ -1417,6 +1417,27 @@ mod tests {
     }
 
     /// A role with no error hook of its own, such as the admin client, logs
+    /// An epoch set on an element reads back, and a partition the list does
+    /// not hold takes none and reads -1.
+    #[test]
+    fn an_epoch_set_on_an_element_reads_back() {
+        let mut tpl = TopicPartitionList::new();
+        tpl.add_partition_offset("t", 0, Offset::Offset(5))
+            .expect("offset");
+        assert_eq!(epoch_of(&tpl, "t", 0), -1);
+        set_epoch(&mut tpl, "t", 0, 7);
+        assert_eq!(epoch_of(&tpl, "t", 0), 7);
+        set_epoch(&mut tpl, "t", 1, 9);
+        set_epoch(&mut tpl, "u", 0, 9);
+        assert_eq!(epoch_of(&tpl, "t", 1), -1);
+        assert_eq!(epoch_of(&tpl, "t", 0), 7);
+        assert_eq!(tpl.count(), 1);
+        assert!(
+            find_elem(&tpl, "t\0", 0).is_null(),
+            "a name with a NUL finds nothing"
+        );
+    }
+
     /// each error event as a warning under the `librdkafka` target.
     #[test]
     fn the_default_error_hook_logs_a_warning() {

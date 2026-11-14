@@ -313,6 +313,7 @@ pub(crate) fn refusals_spanning(bound: Duration, step: Duration) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rdkafka::types::RDKafkaRespErr;
 
     fn cache_of(observed: &[(i64, i32)]) -> EpochCache {
         let mut cache = EpochCache::default();
@@ -380,5 +381,214 @@ mod tests {
         let mut cache = cache_of(&[(10, 1), (20, 3)]);
         cache.clear();
         assert_eq!(cache.at(25), -1);
+    }
+
+    /// The start each commit takes, for each end and policy.
+    #[test]
+    fn each_commit_takes_its_start() {
+        use Start::{AsIs, FromLogStart, Validate};
+        let at = Offset::Offset;
+        for (offset, epoch, end, from_log_start, want) in [
+            (at(15), 3, Some(20), true, Validate),
+            (at(20), 3, Some(20), true, Validate),
+            (at(21), 3, Some(20), true, FromLogStart),
+            (at(21), 3, Some(20), false, Validate),
+            (at(21), 3, None, true, Validate),
+            (at(15), 0, Some(20), true, Validate),
+            (at(15), -1, Some(20), true, AsIs),
+            (at(0), 3, Some(20), true, AsIs),
+            (Offset::Beginning, 3, Some(20), true, AsIs),
+            (Offset::Stored, 3, Some(20), true, AsIs),
+        ] {
+            assert_eq!(
+                plan_start(offset, epoch, end, from_log_start),
+                want,
+                "{offset:?} at epoch {epoch}, end {end:?}, from_log_start {from_log_start}"
+            );
+        }
+    }
+
+    fn committed(entries: &[(i32, Offset, i32)]) -> TopicPartitionList {
+        let mut tpl = TopicPartitionList::new();
+        for &(partition, offset, epoch) in entries {
+            tpl.add_partition_offset("t", partition, offset)
+                .expect("offset");
+            set_epoch(&mut tpl, "t", partition, epoch);
+        }
+        tpl
+    }
+
+    /// Only a commit whose start depends on its end has its end read; a
+    /// commit above its end starts from the log start, one within its log is
+    /// sought with its epoch, and the rest stay as they are.
+    #[test]
+    fn the_planned_starts_follow_the_ends() {
+        let mut list = committed(&[
+            (0, Offset::Offset(15), 3),
+            (1, Offset::Offset(40), 3),
+            (2, Offset::Offset(15), -1),
+            (3, Offset::Beginning, -1),
+        ]);
+        let to_read = ends_to_read(&list);
+        let read: Vec<i32> = to_read.elements().iter().map(|e| e.partition()).collect();
+        assert_eq!(read, [0, 1]);
+        assert!(to_read.elements().iter().all(|e| e.offset() == Offset::End));
+
+        let mut ends = TopicPartitionList::new();
+        ends.add_partition_offset("t", 0, Offset::Offset(20))
+            .expect("end");
+        ends.add_partition_offset("t", 1, Offset::Offset(20))
+            .expect("end");
+        let seek = plan_starts(&mut list, Some(&ends), true);
+
+        let starts: Vec<Offset> = list.elements().iter().map(|e| e.offset()).collect();
+        assert_eq!(
+            starts,
+            [
+                Offset::Offset(15),
+                Offset::Beginning,
+                Offset::Offset(15),
+                Offset::Beginning
+            ]
+        );
+        let sought: Vec<(i32, Offset)> = seek
+            .elements()
+            .iter()
+            .map(|e| (e.partition(), e.offset()))
+            .collect();
+        assert_eq!(sought, [(0, Offset::Offset(15))]);
+        assert_eq!(epoch_of(&seek, "t", 0), 3);
+    }
+
+    /// With the ends unknown, every commit with an epoch is sought.
+    #[test]
+    fn unknown_ends_seek_every_commit_with_an_epoch() {
+        let mut list = committed(&[(0, Offset::Offset(15), 3), (1, Offset::Offset(40), 3)]);
+        let seek = plan_starts(&mut list, None, true);
+        assert_eq!(seek.count(), 2);
+        assert!(
+            list.elements()
+                .iter()
+                .all(|e| matches!(e.offset(), Offset::Offset(_)))
+        );
+    }
+
+    /// `list` with `code` set on partition `partition`'s element.
+    fn answered(
+        mut list: TopicPartitionList,
+        partition: i32,
+        code: RDKafkaRespErr,
+    ) -> TopicPartitionList {
+        let elem = crate::client::find_elem(&list, "t", partition);
+        assert!(!elem.is_null());
+        // SAFETY: `elem` is a non-null element of `list`, written under this
+        // exclusive borrow.
+        unsafe { (*elem).err = code };
+        let _ = &mut list;
+        list
+    }
+
+    fn seeking(partitions: &[i32]) -> TopicPartitionList {
+        let entries: Vec<(i32, Offset, i32)> = partitions
+            .iter()
+            .map(|&p| (p, Offset::Offset(15), 3))
+            .collect();
+        committed(&entries)
+    }
+
+    /// A seek librdkafka could not start, or did not answer in time, is sent
+    /// again; any other failure is logged and not retried.
+    #[test]
+    fn each_seek_answer_is_classed() {
+        for code in [
+            RDKafkaRespErr::RD_KAFKA_RESP_ERR__STATE,
+            RDKafkaRespErr::RD_KAFKA_RESP_ERR__IN_PROGRESS,
+            RDKafkaRespErr::RD_KAFKA_RESP_ERR__PREV_IN_PROGRESS,
+        ] {
+            let again = seek_starts(seeking(&[0, 1]), Duration::from_secs(1), |list, _| {
+                Ok(answered(list, 1, code))
+            });
+            assert_eq!(again, [("t".to_owned(), 1)], "{code:?}");
+        }
+        let lines = spate_test::capture_logs(tracing::Level::WARN, || {
+            let again = seek_starts(seeking(&[0, 1]), Duration::from_secs(1), |list, _| {
+                Ok(answered(
+                    list,
+                    1,
+                    RDKafkaRespErr::RD_KAFKA_RESP_ERR__UNKNOWN_PARTITION,
+                ))
+            });
+            assert_eq!(again, []);
+        });
+        assert_eq!(lines.len(), 1, "{lines:#?}");
+        assert!(lines[0].contains("partition=1"), "{}", lines[0]);
+        assert!(lines[0].contains("reads from it unchecked"), "{}", lines[0]);
+    }
+
+    /// A seek the call as a whole failed is sent again for every partition.
+    #[test]
+    fn a_failed_seek_call_sends_every_seek_again() {
+        let again = seek_starts(seeking(&[0, 1]), Duration::from_secs(1), |_, _| {
+            Err(rdkafka::error::KafkaError::Seek("timed out".to_owned()))
+        });
+        assert_eq!(again, [("t".to_owned(), 0), ("t".to_owned(), 1)]);
+    }
+
+    /// With no time left no seek is sent, and every partition waits for the
+    /// next one; an empty list sends nothing either.
+    #[test]
+    fn a_spent_budget_sends_no_seek() {
+        let again = seek_starts(seeking(&[0]), Duration::ZERO, |_, _| {
+            panic!("a seek with no time left")
+        });
+        assert_eq!(again, [("t".to_owned(), 0)]);
+        let again = seek_starts(TopicPartitionList::new(), Duration::from_secs(1), |_, _| {
+            panic!("a seek of nothing")
+        });
+        assert_eq!(again, []);
+    }
+
+    /// The seek gets the budget it was given.
+    #[test]
+    fn the_seek_gets_its_budget() {
+        let mut got = None;
+        let _ = seek_starts(seeking(&[0]), Duration::from_millis(250), |list, budget| {
+            got = Some(budget);
+            Ok(list)
+        });
+        assert_eq!(got, Some(Duration::from_millis(250)));
+    }
+
+    /// A partition is reported once, when its refusals reach the threshold,
+    /// and again only after it left and came back.
+    #[test]
+    fn a_refused_partition_is_reported_once_at_the_threshold() {
+        let mut v = Validating::new(3);
+        assert!(!v.refused(0, 15, 3));
+        assert!(!v.refused(0, 15, 3));
+        assert!(v.refused(0, 15, 3));
+        assert!(!v.refused(0, 15, 3));
+        assert_eq!(v.entries().collect::<Vec<_>>(), [(&0, 15, 3)]);
+        assert!(v.remove(&0));
+        assert!(!v.remove(&0));
+        assert!(v.is_empty());
+        assert!(!v.refused(0, 15, 3));
+        v.refused(1, 9, 2);
+        v.retain(|p| *p == 1);
+        assert!(!v.contains(&0));
+        assert_eq!(v.take_all(), [1]);
+        assert!(v.is_empty());
+    }
+
+    #[test]
+    fn the_report_threshold_spans_the_bound() {
+        let step = Duration::from_millis(100);
+        assert_eq!(refusals_spanning(Duration::from_secs(10), step), 100);
+        assert_eq!(refusals_spanning(Duration::from_millis(250), step), 2);
+        assert_eq!(refusals_spanning(Duration::from_millis(50), step), 1);
+        assert_eq!(
+            refusals_spanning(Duration::from_secs(1), Duration::ZERO),
+            1000
+        );
     }
 }

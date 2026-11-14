@@ -4100,6 +4100,285 @@ mod cluster {
         assert_eq!(d.paused, owned, "after a rebalance error");
     }
 
+    /// How a scripted seek answers.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Seeks {
+        /// The call fails, so every partition waits for the next seek.
+        Refuse,
+        /// Every partition is accepted.
+        Accept,
+        /// Every partition fails for good and reads from its commit.
+        Fail,
+    }
+
+    /// A seek answering as `mode` says, counting its calls.
+    fn scripted(
+        mode: &Arc<std::sync::Mutex<Seeks>>,
+        calls: &Arc<std::sync::atomic::AtomicUsize>,
+    ) -> crate::epoch::SeekWith {
+        let (mode, calls) = (Arc::clone(mode), Arc::clone(calls));
+        Box::new(move |mut list, _| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            match *mode.lock().unwrap() {
+                Seeks::Refuse => Err(rdkafka::error::KafkaError::Seek("refused".to_owned())),
+                Seeks::Accept => Ok(list),
+                Seeks::Fail => {
+                    for elem in list.elements() {
+                        let raw = crate::client::find_elem(&list, elem.topic(), elem.partition());
+                        // SAFETY: `raw` is an element of `list`, which nothing
+                        // else reads while it is written.
+                        unsafe {
+                            (*raw).err = RDKafkaRespErr::RD_KAFKA_RESP_ERR__UNKNOWN_PARTITION;
+                        }
+                    }
+                    let _ = &mut list;
+                    Ok(list)
+                }
+            }
+        })
+    }
+
+    /// The retry topic's partition.
+    fn retry() -> Tp {
+        Tp::new(&Arc::from("units-retry"), 0)
+    }
+
+    /// A cluster with five units on the work topic, the group's commit at 2
+    /// with the leader's epoch, and one message on the retry topic, which
+    /// has no commit and starts after a ListOffsets round trip, so the work
+    /// partition is fetched first unless it is paused.
+    fn committed_within_the_log(group: &str) -> MockKafka {
+        let cluster = cluster_with(5);
+        let brokers = cluster.bootstrap_servers();
+        let producer: BaseProducer = raw_config()
+            .set("bootstrap.servers", &brokers)
+            .build()
+            .unwrap();
+        producer
+            .send(BaseRecord::<[u8], [u8]>::to("units-retry").payload(b"body"))
+            .unwrap();
+        producer.flush(Duration::from_secs(30)).unwrap();
+        let start: BaseConsumer = raw_config()
+            .set("bootstrap.servers", &brokers)
+            .set("group.id", group)
+            .build()
+            .unwrap();
+        let mut tpl = TopicPartitionList::new();
+        tpl.add_partition_offset("units", 0, Offset::Offset(2))
+            .unwrap();
+        start.commit(&tpl, CommitMode::Sync).unwrap();
+        cluster
+    }
+
+    /// Whether `tp` has delivered anything under its assignment.
+    fn delivered(d: &Driver, tp: &Tp) -> bool {
+        d.core.lock().tracker.commit_point(tp).is_some()
+    }
+
+    fn push_intent(d: &Driver, intent: Intent) {
+        d.consumer
+            .context()
+            .intents
+            .lock()
+            .unwrap()
+            .push_back(intent);
+    }
+
+    /// A partition whose seek to its commit is refused stays paused while the
+    /// rest of the assignment is read, and a later accepted seek resumes it
+    /// from its commit.
+    #[test]
+    fn a_refused_seek_holds_its_partition_until_one_is_accepted() {
+        let group = spate_test::unique_name("refused-seek");
+        let cluster = committed_within_the_log(&group);
+        let (_, _core, _producer, mut d) = parts_for(&cluster.bootstrap_servers(), &group);
+        let mode = Arc::new(std::sync::Mutex::new(Seeks::Refuse));
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        d.seek_with = Some(scripted(&mode, &calls));
+        drive(&mut d, "the retry partition delivers", |d| {
+            delivered(d, &retry())
+        });
+        assert!(d.validating.contains(&work()));
+        assert!(
+            !delivered(&d, &work()),
+            "a partition waiting for its seek was read"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        d.validate();
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert!(
+            d.validating.contains(&work()),
+            "a refused retry keeps it waiting"
+        );
+
+        *mode.lock().unwrap() = Seeks::Accept;
+        d.validate();
+        assert!(d.validating.is_empty());
+        drive(&mut d, "the work partition delivers", |d| {
+            delivered(d, &work())
+        });
+        assert_eq!(d.core.lock().tracker.first_read_below_start(&work()), None);
+        assert_eq!(position(&d), Offset::Offset(5));
+    }
+
+    /// A partition revoked, or lost to a rebalance error, while its seek is
+    /// refused is resumed: a pause outlives the assignment, and the next
+    /// assignment may not seek it.
+    #[test]
+    fn a_partition_given_up_while_its_seek_is_refused_is_resumed() {
+        for lose in [false, true] {
+            let group = spate_test::unique_name("given-up-seek");
+            let cluster = committed_within_the_log(&group);
+            let (_, _core, _producer, mut d) = parts_for(&cluster.bootstrap_servers(), &group);
+            let mode = Arc::new(std::sync::Mutex::new(Seeks::Refuse));
+            let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            d.seek_with = Some(scripted(&mode, &calls));
+            drive(&mut d, "the work partition waits for its seek", |d| {
+                d.validating.contains(&work())
+            });
+            let assigned = d.consumer.assignment().unwrap();
+            if lose {
+                d.consumer.context().rebalance(
+                    &d.consumer,
+                    RDKafkaRespErr::RD_KAFKA_RESP_ERR_REBALANCE_IN_PROGRESS,
+                    &mut TopicPartitionList::new(),
+                );
+            } else {
+                push_intent(&d, Intent::Revoke(assigned.clone()));
+            }
+            d.serve_intents();
+            assert!(d.validating.is_empty(), "lose {lose}");
+            // The next assignment's seek fails for good, so nothing pauses
+            // the partition again.
+            *mode.lock().unwrap() = Seeks::Fail;
+            push_intent(&d, Intent::Assign(assigned));
+            d.serve_intents();
+            assert!(d.validating.is_empty(), "lose {lose}");
+            drive(&mut d, "the work partition delivers", |d| {
+                delivered(d, &work())
+            });
+        }
+    }
+
+    /// A first delivery below the committed offset the assignment started at
+    /// is logged once, naming the partition and both offsets: here the
+    /// commit is above the log's end, and the partition is read from its log
+    /// start.
+    #[test]
+    fn a_first_delivery_below_the_commit_is_logged() {
+        let cluster = cluster_with(3);
+        let brokers = cluster.bootstrap_servers();
+        let group = spate_test::unique_name("first-below");
+        let start: BaseConsumer = raw_config()
+            .set("bootstrap.servers", &brokers)
+            .set("group.id", &group)
+            .build()
+            .unwrap();
+        let mut tpl = TopicPartitionList::new();
+        tpl.add_partition_offset("units", 0, Offset::Offset(10))
+            .unwrap();
+        start.commit(&tpl, CommitMode::Sync).unwrap();
+        let (_, _core, _producer, mut d) = parts_for(&brokers, &group);
+        let lines = spate_test::capture_logs(tracing::Level::INFO, || {
+            drive(&mut d, "the work partition delivers", |d| {
+                delivered(d, &work())
+            });
+        });
+        assert!(
+            d.validating.is_empty(),
+            "a commit above the end is not sought"
+        );
+        let logged: Vec<&String> = lines
+            .iter()
+            .filter(|l| l.contains("first record is below its committed offset"))
+            .collect();
+        assert_eq!(logged.len(), 1, "{lines:#?}");
+        assert!(logged[0].contains("committed=10"), "{}", logged[0]);
+        assert!(logged[0].contains("first=0"), "{}", logged[0]);
+    }
+
+    /// A partition whose seek is accepted while the feed is stopping stays
+    /// paused, as every partition the stop pauses.
+    #[test]
+    fn a_seek_accepted_while_stopping_leaves_the_partition_paused() {
+        let group = spate_test::unique_name("accepted-stopping");
+        let cluster = committed_within_the_log(&group);
+        let (_, core, _producer, mut d) = parts_for(&cluster.bootstrap_servers(), &group);
+        let mode = Arc::new(std::sync::Mutex::new(Seeks::Refuse));
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        d.seek_with = Some(scripted(&mode, &calls));
+        drive(&mut d, "the work partition waits for its seek", |d| {
+            d.validating.contains(&work())
+        });
+        core.lock().stopping = true;
+        *mode.lock().unwrap() = Seeks::Accept;
+        d.validate();
+        assert!(d.validating.is_empty());
+        assert!(d.paused.contains(&work()));
+    }
+
+    /// A partition whose seek keeps being refused is reported once, when the
+    /// refusals reach the threshold.
+    #[test]
+    fn a_seek_refused_again_and_again_is_reported_once() {
+        let group = spate_test::unique_name("refused-report");
+        let cluster = committed_within_the_log(&group);
+        let (_, _core, _producer, mut d) = parts_for(&cluster.bootstrap_servers(), &group);
+        let mode = Arc::new(std::sync::Mutex::new(Seeks::Refuse));
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        d.seek_with = Some(scripted(&mode, &calls));
+        d.validating = crate::epoch::Validating::new(3);
+        drive(&mut d, "the work partition waits for its seek", |d| {
+            d.validating.contains(&work())
+        });
+        let lines = spate_test::capture_logs(tracing::Level::WARN, || {
+            for _ in 0..5 {
+                d.validate();
+            }
+        });
+        assert_eq!(calls.load(Ordering::SeqCst), 6);
+        let reported: Vec<&String> = lines
+            .iter()
+            .filter(|l| l.contains("keeps refusing the seek"))
+            .collect();
+        assert_eq!(reported.len(), 1, "{lines:#?}");
+        assert!(reported[0].contains("partition=0"), "{}", reported[0]);
+    }
+
+    /// The end read and the seek of an assignment share the committed read's
+    /// bound: once the end read has spent it, no seek is sent and the
+    /// partition waits for the next one.
+    #[test]
+    fn the_seek_gets_what_the_end_read_left() {
+        let group = spate_test::unique_name("seek-bound");
+        let cluster = committed_within_the_log(&group);
+        let clock = TestClock::frozen();
+        let (_, _core, _producer, mut d) = parts_on(
+            &cluster.bootstrap_servers(),
+            &group,
+            SyncClock::new(Arc::clone(&clock) as spate_core::clock::SharedClock),
+        );
+        let mode = Arc::new(std::sync::Mutex::new(Seeks::Accept));
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        d.seek_with = Some(scripted(&mode, &calls));
+        let bound = d.call_bound;
+        d.on_call = Some(Box::new(move |wait| {
+            if matches!(wait, Wait::Ends(_)) {
+                clock.advance(bound);
+            }
+        }));
+        drive(&mut d, "the work partition waits for its seek", |d| {
+            d.validating.contains(&work())
+        });
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "a seek with no time left");
+        let calls_made: Vec<Wait> = waits(&d)
+            .into_iter()
+            .filter(|w| matches!(w, Wait::Ends(_) | Wait::Seek(_)))
+            .collect();
+        assert_eq!(calls_made, [Wait::Ends(bound)]);
+    }
+
     /// Pins when the feed releases its per-partition statistics: a
     /// revocation keeps every series, the next assignment zeroes the
     /// partitions it dropped and keeps the rest, and a rebalance error zeroes

@@ -855,6 +855,117 @@ mod tests {
         );
     }
 
+    fn points(t: &mut Tracker) -> Vec<(i64, i32)> {
+        t.take_commits()
+            .into_iter()
+            .map(|(_, p)| (p.offset, p.epoch))
+            .collect()
+    }
+
+    /// A point carries the epoch of the record before it, and a point capped
+    /// at the first unfinished offset the epoch of the record before that.
+    #[test]
+    fn a_point_carries_the_epoch_of_the_record_before_it() {
+        let mut t = Tracker::new();
+        t.assign([tp(0)]);
+        let r5 = t.deliver_at(&tp(0), 5, 1).unwrap();
+        let r6 = t.deliver_at(&tp(0), 6, 2).unwrap();
+        let r7 = t.deliver_at(&tp(0), 7, 2).unwrap();
+        assert!(t.acknowledge(r5));
+        assert_eq!(
+            points(&mut t),
+            [(6, 1)],
+            "capped at 6, after the record at epoch 1"
+        );
+        assert!(t.acknowledge(r6));
+        assert!(t.acknowledge(r7));
+        assert_eq!(points(&mut t), [(8, 2)]);
+    }
+
+    /// Records the broker sent with no epoch leave the commit's epoch in
+    /// force, so a member that reads them commits the epoch it started with.
+    #[test]
+    fn a_seeded_epoch_holds_until_a_record_carries_one() {
+        let mut t = Tracker::new();
+        t.assign_from([(tp(0), Some(10), 4)]);
+        let r = t.deliver_at(&tp(0), 10, -1).unwrap();
+        assert!(t.acknowledge(r));
+        assert_eq!(points(&mut t), [(11, 4)]);
+        let revoked: Vec<i32> = t
+            .revoke(&[tp(0)])
+            .into_iter()
+            .map(|(_, p)| p.epoch)
+            .collect();
+        assert_eq!(revoked, [4]);
+    }
+
+    /// A retire takes the epoch the position carries, that of the record or
+    /// marker before it.
+    #[test]
+    fn a_retire_takes_the_positions_epoch() {
+        let mut t = Tracker::new();
+        t.assign([tp(0)]);
+        let r = t.deliver_at(&tp(0), 5, 1).unwrap();
+        assert!(t.acknowledge(r));
+        t.retire_to(&tp(0), Offset::Offset(9), 3);
+        assert_eq!(points(&mut t), [(9, 3)]);
+    }
+
+    /// A point raised to the log start carries no epoch: the record before
+    /// the log start is gone, and the epoch the assignment started with
+    /// belongs to a lower offset.
+    #[test]
+    fn a_point_raised_to_the_log_start_carries_no_epoch() {
+        let mut t = Tracker::new();
+        t.assign_from([(tp(0), Some(10), 4)]);
+        assert_eq!(t.retire_below(&tp(0), 30), Some((10, 30)));
+        assert_eq!(points(&mut t), [(30, -1)]);
+    }
+
+    /// A take forgets the epochs below its point, and a delivery below the
+    /// point still records its own.
+    #[test]
+    fn a_take_keeps_the_epochs_a_later_point_reads() {
+        let mut t = Tracker::new();
+        t.assign([tp(0)]);
+        for (offset, epoch) in [(5, 1), (6, 2), (7, 3)] {
+            let r = t.deliver_at(&tp(0), offset, epoch).unwrap();
+            assert!(t.acknowledge(r));
+        }
+        assert_eq!(points(&mut t), [(8, 3)]);
+        let r = t.deliver_at(&tp(0), 6, 5).unwrap();
+        assert!(t.acknowledge(r));
+        assert_eq!(points(&mut t), [(7, 5)]);
+    }
+
+    /// The first delivery below the committed start is reported once per
+    /// assignment, and a first delivery at or above it is not.
+    #[test]
+    fn a_first_delivery_below_the_commit_is_reported_once() {
+        let mut t = Tracker::new();
+        t.assign_from([(tp(0), Some(10), 4)]);
+        assert_eq!(
+            t.first_read_below_start(&tp(0)),
+            None,
+            "nothing delivered yet"
+        );
+        t.deliver_at(&tp(0), 3, 4).unwrap();
+        assert_eq!(t.first_read_below_start(&tp(0)), Some((10, 3)));
+        assert_eq!(t.first_read_below_start(&tp(0)), None);
+
+        t.assign_from([(tp(0), Some(10), 4)]);
+        t.deliver_at(&tp(0), 10, 4).unwrap();
+        assert_eq!(t.first_read_below_start(&tp(0)), None);
+
+        t.assign([tp(0)]);
+        t.deliver_at(&tp(0), 3, 4).unwrap();
+        assert_eq!(
+            t.first_read_below_start(&tp(0)),
+            None,
+            "no commit to compare with"
+        );
+    }
+
     /// Pins that a held receipt from an earlier assignment leaves the
     /// tracker when the reader next uses it.
     #[test]

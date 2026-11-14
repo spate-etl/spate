@@ -4414,25 +4414,35 @@ mod cluster {
     fn a_seek_refused_again_and_again_is_reported_once() {
         let group = spate_test::unique_name("refused-report");
         let cluster = committed_within_the_log(&group);
-        let (_, _core, _producer, mut d) = parts_for(&cluster.bootstrap_servers(), &group);
+        let clock = TestClock::frozen();
+        let (_, _core, _producer, mut d) = parts_on(
+            &cluster.bootstrap_servers(),
+            &group,
+            SyncClock::new(Arc::clone(&clock) as spate_core::clock::SharedClock),
+        );
         let mode = Arc::new(std::sync::Mutex::new(Seeks::Refuse));
         let calls = Arc::new(AtomicUsize::new(0));
         d.seek_with = Some(scripted(&mode, &calls));
-        d.validating = crate::epoch::Validating::new(3);
+        d.validating = crate::epoch::Validating::new(Duration::from_secs(3));
         drive(&mut d, "the work partition waits for its seek", |d| {
             d.validating.contains(&work())
         });
-        let lines = spate_test::capture_logs(tracing::Level::WARN, || {
-            for _ in 0..5 {
-                d.validate();
-            }
-        });
+        let mut reports = Vec::new();
+        for _ in 0..5 {
+            clock.advance(Duration::from_secs(1));
+            let lines = spate_test::capture_logs(tracing::Level::WARN, || d.validate());
+            reports.push(
+                lines
+                    .iter()
+                    .filter(|l| l.contains("keeps refusing the seek"))
+                    .cloned()
+                    .collect::<Vec<_>>(),
+            );
+        }
         assert_eq!(calls.load(Ordering::SeqCst), 6);
-        let reported: Vec<&String> = lines
-            .iter()
-            .filter(|l| l.contains("keeps refusing the seek"))
-            .collect();
-        assert_eq!(reported.len(), 1, "{lines:#?}");
+        let counts: Vec<usize> = reports.iter().map(Vec::len).collect();
+        assert_eq!(counts, [0, 0, 1, 0, 0], "{reports:#?}");
+        let reported = &reports[2];
         assert!(reported[0].contains("partition=0"), "{}", reported[0]);
     }
 

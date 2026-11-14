@@ -85,9 +85,7 @@ use crate::client::{
 use crate::context::{Intent, SourceContext};
 #[cfg(test)]
 use crate::epoch::SeekWith;
-use crate::epoch::{
-    RETRY_SEEK_WAIT, Validating, ends_to_read, plan_starts, refusals_spanning, seek_starts,
-};
+use crate::epoch::{RETRY_SEEK_WAIT, Validating, ends_to_read, plan_starts, seek_starts};
 use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::error::{KafkaError, KafkaResult, RDKafkaErrorCode};
 use rdkafka::message::{BorrowedMessage, Headers, Message};
@@ -246,7 +244,7 @@ impl Driver {
             producer,
             paused: BTreeSet::new(),
             call_bound,
-            validating: Validating::new(refusals_spanning(call_bound, POLL_TIMEOUT)),
+            validating: Validating::new(call_bound),
             #[cfg(test)]
             seek_with: None,
             #[cfg(test)]
@@ -592,11 +590,12 @@ impl Driver {
             .collect();
         let budget = self.budget(until);
         let refused = seek_starts(seek, budget, |list, budget| self.seek(list, budget));
+        let now = self.core.clock().now();
         let refused: Vec<Tp> = targets
             .into_iter()
             .filter(|(tp, _, _)| named_in(&refused, tp))
             .map(|(tp, offset, epoch)| {
-                self.validating.refused(tp.clone(), offset, epoch);
+                self.validating.refused(tp.clone(), offset, epoch, now);
                 tp
             })
             .collect();
@@ -782,12 +781,13 @@ impl Driver {
             .entries()
             .map(|(tp, offset, epoch)| (tp.clone(), offset, epoch))
             .collect();
+        let now = self.core.clock().now();
         let mut accepted = Vec::new();
         for (tp, offset, epoch) in pending {
             if !named_in(&refused, &tp) {
                 self.validating.remove(&tp);
                 accepted.push(tp);
-            } else if self.validating.refused(tp.clone(), offset, epoch) {
+            } else if self.validating.refused(tp.clone(), offset, epoch, now) {
                 tracing::warn!(
                     topic = &*tp.topic,
                     partition = tp.partition,

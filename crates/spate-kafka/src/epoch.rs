@@ -10,7 +10,7 @@ use crate::client::{epoch_of, listed_offset, set_epoch};
 use rdkafka::error::{KafkaResult, RDKafkaErrorCode};
 use rdkafka::{Offset, TopicPartitionList};
 use std::collections::{BTreeMap, VecDeque};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// The most epoch changes one partition keeps. An entry needs a leader change,
 /// so the cap is reached only by a partition whose leader changes 64 times
@@ -232,24 +232,27 @@ pub(crate) fn seek_starts(
 }
 
 /// The partitions whose seek librdkafka refused, each with the commit and
-/// epoch to seek to and the refusals in a row. Each stays paused until a
+/// epoch to seek to and when its refusals began. Each stays paused until a
 /// seek is accepted.
 #[derive(Debug)]
 pub(crate) struct Validating<K> {
     pending: BTreeMap<K, Pending>,
-    /// The refusals in a row after which a partition is reported.
-    report_after: u32,
+    /// How long a partition is refused before it is reported. A refusal
+    /// while a commit is in flight can last one group-call bound, so a
+    /// shorter time would report a normal rebalance.
+    report_after: Duration,
 }
 
 #[derive(Debug)]
 struct Pending {
     offset: i64,
     epoch: i32,
-    refusals: u32,
+    since: Instant,
+    reported: bool,
 }
 
 impl<K: Ord + Clone> Validating<K> {
-    pub(crate) fn new(report_after: u32) -> Validating<K> {
+    pub(crate) fn new(report_after: Duration) -> Validating<K> {
         Validating {
             pending: BTreeMap::new(),
             report_after,
@@ -269,16 +272,20 @@ impl<K: Ord + Clone> Validating<K> {
         self.pending.iter().map(|(k, p)| (k, p.offset, p.epoch))
     }
 
-    /// Counts a refused seek of `key` to `offset` at `epoch`. True once,
-    /// when the count reaches the report threshold.
-    pub(crate) fn refused(&mut self, key: K, offset: i64, epoch: i32) -> bool {
+    /// Records a refused seek of `key` to `offset` at `epoch`, at `now`.
+    /// True once, when its refusals have lasted the report time.
+    pub(crate) fn refused(&mut self, key: K, offset: i64, epoch: i32, now: Instant) -> bool {
         let pending = self.pending.entry(key).or_insert(Pending {
             offset,
             epoch,
-            refusals: 0,
+            since: now,
+            reported: false,
         });
-        pending.refusals = pending.refusals.saturating_add(1);
-        pending.refusals == self.report_after
+        if pending.reported || now.saturating_duration_since(pending.since) < self.report_after {
+            return false;
+        }
+        pending.reported = true;
+        true
     }
 
     /// Drops `key`, for an accepted seek or a partition given up. True when
@@ -296,14 +303,6 @@ impl<K: Ord + Clone> Validating<K> {
     pub(crate) fn take_all(&mut self) -> Vec<K> {
         std::mem::take(&mut self.pending).into_keys().collect()
     }
-}
-
-/// The refusals in a row that span `bound` when one is counted every `step`.
-/// A refusal while a commit is in flight can last one group-call bound, so a
-/// lower count would report a normal rebalance.
-pub(crate) fn refusals_spanning(bound: Duration, step: Duration) -> u32 {
-    let steps = bound.as_millis() / step.as_millis().max(1);
-    u32::try_from(steps).unwrap_or(u32::MAX).max(1)
 }
 
 #[cfg(test)]
@@ -551,36 +550,27 @@ mod tests {
         assert_eq!(got, Some(Duration::from_millis(250)));
     }
 
-    /// A partition is reported once, when its refusals reach the threshold,
-    /// and again only after it left and came back.
+    /// A partition is reported once, when its refusals have lasted the
+    /// report time, and again only after it left and came back.
     #[test]
     fn a_refused_partition_is_reported_once_at_the_threshold() {
-        let mut v = Validating::new(3);
-        assert!(!v.refused(0, 15, 3));
-        assert!(!v.refused(0, 15, 3));
-        assert!(v.refused(0, 15, 3));
-        assert!(!v.refused(0, 15, 3));
+        let start = Instant::now();
+        let at = |ms| start + Duration::from_millis(ms);
+        let mut v = Validating::new(Duration::from_secs(3));
+        assert!(!v.refused(0, 15, 3, at(0)));
+        assert!(!v.refused(0, 15, 3, at(2_999)));
+        assert!(v.refused(0, 15, 3, at(3_000)));
+        assert!(!v.refused(0, 15, 3, at(9_000)));
         assert_eq!(v.entries().collect::<Vec<_>>(), [(&0, 15, 3)]);
         assert!(v.remove(&0));
         assert!(!v.remove(&0));
         assert!(v.is_empty());
-        assert!(!v.refused(0, 15, 3));
-        v.refused(1, 9, 2);
+        assert!(!v.refused(0, 15, 3, at(9_000)));
+        assert!(!v.refused(0, 15, 3, at(11_999)));
+        v.refused(1, 9, 2, at(0));
         v.retain(|p| *p == 1);
         assert!(!v.contains(&0));
         assert_eq!(v.take_all(), [1]);
         assert!(v.is_empty());
-    }
-
-    #[test]
-    fn the_report_threshold_spans_the_bound() {
-        let step = Duration::from_millis(100);
-        assert_eq!(refusals_spanning(Duration::from_secs(10), step), 100);
-        assert_eq!(refusals_spanning(Duration::from_millis(250), step), 2);
-        assert_eq!(refusals_spanning(Duration::from_millis(50), step), 1);
-        assert_eq!(
-            refusals_spanning(Duration::from_secs(1), Duration::ZERO),
-            1000
-        );
     }
 }

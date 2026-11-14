@@ -117,8 +117,7 @@ use crate::context::{Intent, SourceContext, SourceHooks};
 #[cfg(test)]
 use crate::epoch::SeekWith;
 use crate::epoch::{
-    RETRY_SEEK_WAIT, Start, Validating, ends_to_read, plan_start, plan_starts, refusals_spanning,
-    seek_starts,
+    RETRY_SEEK_WAIT, Start, Validating, ends_to_read, plan_start, plan_starts, seek_starts,
 };
 use crate::error::{StartFailure, classify_start_error};
 use crate::lane::{KafkaLane, Shared};
@@ -624,13 +623,14 @@ impl KafkaSource {
         let refused = seek_starts(prepared.seek.clone(), budget, |list, budget| {
             self.seek(k, list, budget)
         });
+        let now = self.clock.now();
         for elem in prepared.seek.elements() {
             let partition = elem.partition();
             if refused.iter().any(|(_, p)| *p == partition)
                 && let Offset::Offset(offset) = elem.offset()
             {
                 let epoch = epoch_of(&prepared.seek, &self.config.topic, partition);
-                self.members[k].validating.refused(partition, offset, epoch);
+                self.members[k].validating.refused(partition, offset, epoch, now);
             }
         }
 
@@ -1351,13 +1351,14 @@ impl KafkaSource {
         let refused = seek_starts(list, RETRY_SEEK_WAIT, |list, budget| {
             self.seek(k, list, budget)
         });
+        let now = self.clock.now();
         let member = &mut self.members[k];
         let mut accepted = Vec::new();
         for (p, offset, epoch) in pending {
             if !refused.iter().any(|(_, r)| *r == p) {
                 member.validating.remove(&p);
                 accepted.push(p);
-            } else if member.validating.refused(p, offset, epoch) {
+            } else if member.validating.refused(p, offset, epoch, now) {
                 tracing::warn!(
                     consumer = k,
                     partition = p,
@@ -2017,10 +2018,7 @@ impl Source for KafkaSource {
                 phase: Phase::Joining,
                 committed_at_assign: FastMap::default(),
                 watermarks: FastMap::default(),
-                validating: Validating::new(refusals_spanning(
-                    self.lookup_timeout,
-                    RETRY_SEEK_WAIT,
-                )),
+                validating: Validating::new(self.lookup_timeout),
                 engine_paused: FastSet::default(),
                 #[cfg(test)]
                 generation: None,
@@ -3703,6 +3701,36 @@ mod tests {
             source.resume(&[lane]).expect("resume");
             assert!(source.members[0].engine_paused.is_empty());
             assert_eq!(first_offset(&mut source, &mut lanes[0]), 2);
+        }
+
+        /// A partition whose seek keeps being refused is reported once, when
+        /// the refusals have lasted the committed read's bound.
+        #[test]
+        fn a_seek_refused_for_the_bound_is_reported_once() {
+            let cluster = mock_holding(5);
+            commit_positions(&cluster, 2);
+            let seek: crate::epoch::SeekWith =
+                Box::new(|_, _| Err(KafkaError::Seek("refused".to_owned())));
+            let (mut source, _lanes) = assigned_seeking(&cluster, "earliest", &[], Some(seek));
+            assert!(source.members[0].validating.contains(&0));
+            assert_eq!(source.lookup_timeout, Duration::from_secs(10));
+            // The refusals began on the real clock just before the freeze.
+            let clock = super::freeze(&mut source);
+            let mut counts = Vec::new();
+            for _ in 0..5 {
+                clock.advance(Duration::from_secs(3));
+                let lines = spate_test::capture_logs(tracing::Level::WARN, || {
+                    source.poll_events(Duration::ZERO).expect("poll_events");
+                });
+                counts.push(
+                    lines
+                        .iter()
+                        .filter(|l| l.contains("keeps refusing the seek") && l.contains("partition=0"))
+                        .count(),
+                );
+            }
+            assert_eq!(counts, [0, 0, 0, 1, 0]);
+            assert!(source.members[0].validating.contains(&0));
         }
 
         /// The runtime's resume of a lane whose seek was

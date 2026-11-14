@@ -1,14 +1,19 @@
 //! Test doubles for the SDK client's edges: an SQS endpoint that answers
-//! every call, and a credentials provider whose loads follow a script.
+//! every call in process, and a credentials provider whose loads follow a
+//! script.
 
 use crate::config::SqsFeedConfig;
 use crate::queue::{BoxFuture, SdkQueue};
 use aws_credential_types::Credentials;
 use aws_credential_types::provider::{self, ProvideCredentials, SharedCredentialsProvider};
+use aws_sdk_sqs::config::SharedHttpClient;
+use aws_smithy_runtime_api::client::http::{
+    HttpConnector, HttpConnectorFuture, SharedHttpConnector, http_client_fn,
+};
+use aws_smithy_runtime_api::client::orchestrator::{HttpRequest, HttpResponse};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime};
-use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::sync::watch;
 
 /// The requests the stub answered, by kind.
@@ -18,54 +23,64 @@ pub(crate) struct Answered {
     pub(crate) deleted: AtomicUsize,
 }
 
-/// An SQS endpoint on loopback: one message on the first receive and none
-/// after, and every visibility change and delete accepted.
-#[expect(
-    clippy::disallowed_methods,
-    reason = "the stub server's tasks end when the test's runtime drops"
-)]
-pub(crate) async fn sqs_stub() -> (String, Arc<Answered>) {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let answered = Arc::new(Answered::default());
-    let counts = Arc::clone(&answered);
-    let received = Arc::new(AtomicUsize::new(0));
-    tokio::spawn(async move {
-        while let Ok((tcp, _)) = listener.accept().await {
-            tokio::spawn(serve(tcp, Arc::clone(&counts), Arc::clone(&received)));
-        }
-    });
-    (format!("http://{addr}"), answered)
+/// A client whose every request `answer` handles in process. Paused tokio
+/// time moves past a reply still crossing a socket, so a test that pauses
+/// time answers through this.
+pub(crate) fn in_process(
+    answer: impl Fn(HttpRequest) -> HttpConnectorFuture + Send + Sync + 'static,
+) -> SharedHttpClient {
+    let connector = SharedHttpConnector::new(InProcess(Box::new(answer)));
+    http_client_fn(move |_, _| connector.clone())
 }
 
-async fn serve(
-    mut tcp: tokio::net::TcpStream,
-    answered: Arc<Answered>,
-    received: Arc<AtomicUsize>,
-) {
-    let mut buf = Vec::new();
-    loop {
-        let head_end = loop {
-            if let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
-                break i + 4;
-            }
-            if !read_more(&mut tcp, &mut buf).await {
-                return;
-            }
-        };
-        let head = String::from_utf8_lossy(&buf[..head_end]).to_lowercase();
-        let len: usize = head
-            .lines()
-            .find_map(|l| l.strip_prefix("content-length:"))
-            .map_or(0, |v| v.trim().parse().unwrap());
-        while buf.len() < head_end + len {
-            if !read_more(&mut tcp, &mut buf).await {
-                return;
-            }
-        }
-        let body: serde_json::Value = serde_json::from_slice(&buf[head_end..head_end + len])
+struct InProcess(Box<dyn Fn(HttpRequest) -> HttpConnectorFuture + Send + Sync>);
+
+impl std::fmt::Debug for InProcess {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("InProcess")
+    }
+}
+
+impl HttpConnector for InProcess {
+    fn call(&self, request: HttpRequest) -> HttpConnectorFuture {
+        (self.0)(request)
+    }
+}
+
+/// A JSON reply with `status` and `body`, and `headers` besides its
+/// content type.
+pub(crate) fn reply(
+    status: u16,
+    headers: &[(&'static str, &'static str)],
+    body: String,
+) -> HttpConnectorFuture {
+    let mut response = HttpResponse::new(status.try_into().unwrap(), body.into());
+    response
+        .headers_mut()
+        .insert("content-type", "application/x-amz-json-1.0");
+    for (name, value) in headers {
+        response.headers_mut().insert(*name, *value);
+    }
+    HttpConnectorFuture::ready(Ok(response))
+}
+
+/// An SQS endpoint: one message on the first receive and none after, and
+/// every visibility change and delete accepted.
+pub(crate) fn sqs_stub() -> (SharedHttpClient, Arc<Answered>) {
+    let answered = Arc::new(Answered::default());
+    let counts = Arc::clone(&answered);
+    let received = AtomicUsize::new(0);
+    let http = in_process(move |request| {
+        let target = request
+            .headers()
+            .get("x-amz-target")
+            .unwrap_or_default()
+            .to_lowercase();
+        let body: serde_json::Value = request
+            .body()
+            .bytes()
+            .and_then(|b| serde_json::from_slice(b).ok())
             .unwrap_or(serde_json::Value::Null);
-        buf.drain(..head_end + len);
         let all_accepted = || {
             let ids: Vec<_> = body["Entries"]
                 .as_array()
@@ -75,36 +90,27 @@ async fn serve(
                 .collect();
             serde_json::json!({"Successful": ids, "Failed": []}).to_string()
         };
-        let reply = if head.contains("amazonsqs.receivemessage") {
-            if received.fetch_add(1, Ordering::SeqCst) == 0 {
-                r#"{"Messages":[{"MessageId":"m0","ReceiptHandle":"h0","Body":"b","Attributes":{"ApproximateReceiveCount":"1"}}]}"#.to_owned()
-            } else {
-                r#"{"Messages":[]}"#.to_owned()
+        let body = match target.as_str() {
+            "amazonsqs.receivemessage" => {
+                if received.fetch_add(1, Ordering::SeqCst) == 0 {
+                    r#"{"Messages":[{"MessageId":"m0","ReceiptHandle":"h0","Body":"b","Attributes":{"ApproximateReceiveCount":"1"}}]}"#.to_owned()
+                } else {
+                    r#"{"Messages":[]}"#.to_owned()
+                }
             }
-        } else if head.contains("amazonsqs.changemessagevisibilitybatch") {
-            answered.extended.fetch_add(1, Ordering::SeqCst);
-            all_accepted()
-        } else if head.contains("amazonsqs.deletemessagebatch") {
-            answered.deleted.fetch_add(1, Ordering::SeqCst);
-            all_accepted()
-        } else {
-            "{}".to_owned()
+            "amazonsqs.changemessagevisibilitybatch" => {
+                counts.extended.fetch_add(1, Ordering::SeqCst);
+                all_accepted()
+            }
+            "amazonsqs.deletemessagebatch" => {
+                counts.deleted.fetch_add(1, Ordering::SeqCst);
+                all_accepted()
+            }
+            _ => "{}".to_owned(),
         };
-        let out = format!(
-            "HTTP/1.1 200 OK\r\ncontent-type: application/x-amz-json-1.0\r\ncontent-length: {}\r\n\r\n{reply}",
-            reply.len()
-        );
-        if tcp.write_all(out.as_bytes()).await.is_err() {
-            return;
-        }
-    }
-}
-
-async fn read_more(tcp: &mut tokio::net::TcpStream, buf: &mut Vec<u8>) -> bool {
-    let mut chunk = [0u8; 4096];
-    let n = tcp.read(&mut chunk).await.unwrap_or(0);
-    buf.extend_from_slice(&chunk[..n]);
-    n > 0
+        reply(200, &[], body)
+    });
+    (http, answered)
 }
 
 /// One load: given its index, the future the provider returns.
@@ -221,13 +227,14 @@ pub(crate) fn stale_keys() -> Credentials {
     keys(Some(SystemTime::UNIX_EPOCH + Duration::from_secs(60)))
 }
 
-/// An [`SdkQueue`] over `endpoint` that loads through `credentials`, at
+/// An [`SdkQueue`] over `http` that loads through `credentials`, at
 /// `visibility`.
 pub(crate) async fn queue_with(
-    endpoint: &str,
+    http: SharedHttpClient,
     visibility: Duration,
     credentials: SharedCredentialsProvider,
 ) -> (SdkQueue, SqsFeedConfig) {
+    let endpoint = "http://sqs.test";
     let config = SqsFeedConfig {
         queue_url: format!("{endpoint}/000000000000/jobs"),
         visibility,
@@ -235,8 +242,11 @@ pub(crate) async fn queue_with(
         endpoint: Some(endpoint.to_owned()),
     };
     let step = std::sync::Mutex::new("starting");
-    let queue = crate::client::sdk_queue(&config, Some(credentials), &step)
+    let mut queue = crate::client::sdk_queue(&config, Some(credentials), &step)
         .await
         .unwrap();
+    queue.client = aws_sdk_sqs::Client::from_conf(
+        queue.client.config().to_builder().http_client(http).build(),
+    );
     (queue, config)
 }

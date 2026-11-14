@@ -560,10 +560,10 @@ mod tests {
     async fn a_credentials_load_given_up_by_one_call_finishes_for_the_next() {
         let within = Some(Duration::from_secs(1));
         for op in ["visibility", "delete"] {
-            let (endpoint, answered) = sqs_stub().await;
+            let (http, answered) = sqs_stub();
             let credentials = ScriptedCredentials::slow_reloads(Duration::from_millis(1_200));
             let (queue, _) =
-                queue_with(&endpoint, Duration::from_secs(60), credentials.provider()).await;
+                queue_with(http, Duration::from_secs(60), credentials.provider()).await;
             tokio::time::pause();
             one_entry(&queue, op, None).await.unwrap();
             let started = tokio::time::Instant::now();
@@ -601,13 +601,13 @@ mod tests {
     async fn failing_credentials(
         error: impl Fn() -> CredentialsError + Send + Sync + 'static,
     ) -> SdkQueue {
-        let (endpoint, _) = sqs_stub().await;
+        let (http, _) = sqs_stub();
         let error = Arc::new(error);
         let credentials = ScriptedCredentials::new(move |_| {
             let error = Arc::clone(&error);
             Box::pin(async move { Err(error()) })
         });
-        queue_with(&endpoint, Duration::from_secs(60), credentials.provider())
+        queue_with(http, Duration::from_secs(60), credentials.provider())
             .await
             .0
     }
@@ -646,10 +646,9 @@ mod tests {
     /// prints neither the secret key nor the session token.
     #[tokio::test]
     async fn a_queue_prints_no_secret_after_a_load() {
-        let (endpoint, _) = sqs_stub().await;
+        let (http, _) = sqs_stub();
         let credentials = ScriptedCredentials::slow_reloads(Duration::from_millis(1_200));
-        let (queue, _) =
-            queue_with(&endpoint, Duration::from_secs(60), credentials.provider()).await;
+        let (queue, _) = queue_with(http, Duration::from_secs(60), credentials.provider()).await;
         tokio::time::pause();
         one_entry(&queue, "visibility", None).await.unwrap();
         one_entry(&queue, "visibility", Some(Duration::from_secs(1)))

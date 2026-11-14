@@ -218,6 +218,42 @@ until("the fail is sent", || queue.visibility().len() == 1).await;
 tokio::time::advance(HOLD - secs(70)).await;
 ```
 
+### Answer a client in process under paused tokio time
+
+Under paused tokio time, answer the client under test in process, through the transport seam its library offers.
+The one exception is a test whose result does not depend on when the reply arrives, at the end of this section.
+
+**Why:** when no task can run, paused tokio moves its clock to the next timer.
+A reply still crossing a socket does not count as work, so the clock can reach the client's timeout before the reply arrives.
+A loaded runner delays the reply further, so the test fails there more often than on your machine.
+
+The SQS tests hand the SDK a client built by `in_process` in [`spate-sqs/src/test_stub.rs`](repo:crates/spate-sqs/src/test_stub.rs).
+Each request goes to a closure that returns the answer at once.
+The denied-send test fails its first call as a timeout and answers the second with a 403:
+
+```rust
+let http = crate::test_stub::in_process(move |_| {
+    if seen.fetch_add(1, Ordering::SeqCst) == 0 {
+        // Ends the attempt as the client's read timeout does, inside the
+        // SDK's retry loop.
+        return HttpConnectorFuture::ready(Err(ConnectorError::timeout(
+            "read timed out".into(),
+        )));
+    }
+    crate::test_stub::reply(
+        403,
+        &[("x-amzn-query-error", "AccessDenied;Sender")],
+        r#"{"__type":"com.amazon.coral.service#AccessDeniedException","message":"denied"}"#
+            .to_owned(),
+    )
+});
+```
+
+A test whose result is the same whether or not the reply arrives before the next timer may use a socket.
+A test against a server that never answers is one.
+A test whose reply the client treats the same way as a timeout is another, as in the Avro registry tests in [`spate-avro/src/registry.rs`](repo:crates/spate-avro/src/registry.rs), where a 500 and a timeout both end as a transient failure.
+A test that waits through a timeout and then needs the reply still answers in process.
+
 ### Own every name, port and metric label
 
 Give every topic, table, group, bucket, port and metric label in a test a value that no other test uses.

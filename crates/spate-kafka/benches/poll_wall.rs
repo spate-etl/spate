@@ -7,7 +7,7 @@
 //! corpus. Each input of a region produces 2,048 records before the region
 //! opens, and each iteration polls the lane until it has handed out those
 //! 2,048 payloads. The client fetches them in the background while the inputs
-//! are built, so most wait in the partition queue when the region opens.
+//! are built.
 //!
 //! # Reading these numbers
 //!

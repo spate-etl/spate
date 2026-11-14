@@ -17,24 +17,14 @@ fn a_thread_spawned_before_the_global_subscriber_logs_to_it() {
     })
     .unwrap();
 
-    let capture = spate_test::LogCapture::new();
-    tracing_subscriber::fmt()
-        .with_writer(capture.clone())
-        .with_ansi(false)
-        .without_time()
-        .with_target(false)
-        .init();
+    let capture = spate_test::LogCapture::install_global(tracing::Level::ERROR);
     go_tx.send(()).unwrap();
     assert!(handle.join().is_err());
 
-    let lines = capture.lines();
-    let errors: Vec<&str> = lines
-        .iter()
-        .map(|l| l.trim())
-        .filter(|l| l.starts_with("ERROR"))
-        .collect();
     assert_eq!(
-        errors,
-        vec![r#"ERROR background thread panicked thread="late-global" panic="late boom""#]
+        capture.lines(),
+        vec![
+            r#"ERROR spate_core::task: background thread panicked thread="late-global" panic="late boom""#
+        ]
     );
 }

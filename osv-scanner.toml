@@ -72,8 +72,3 @@ reason = "zstd-safe 7.2.4 reaches this tree only as clickhouse -> zstd 0.13.3, t
 id = "RUSTSEC-2026-0406"
 ignoreUntil = 2027-04-27
 reason = "zstd-safe 7.2.4 reaches this tree only as clickhouse -> zstd 0.13.3, through the codec features of spate-clickhouse's clickhouse dev-dependency, so no published crate builds it. zstd 0.13.3 enables none of zstd-safe's optional features. Multithreaded frames need the `zstdmt` feature, which is off."
-
-[[IgnoredVulns]]
-id = "GHSA-qwgh-2vcv-g2f7"
-ignoreUntil = 2027-04-27
-reason = "block-buffer 0.10.4 reaches this tree through digest 0.10, as object_store -> crc-fast and aws-config -> sha1. The advisory concerns a cursor stored inside the block buffer, which a panicking callback can overwrite. block-buffer 0.10.4 keeps the cursor in a separate field and writes it only after the callback returns, so a caught panic leaves it at its previous valid value. The advisory's `EagerBuffer` proof of concept passes under Miri against 0.10.4, and `ReadBuffer` does not exist in 0.10.4. The fix is in block-buffer 0.12, which needs digest 0.11, and neither crc-fast nor sha1 0.10 uses it."

@@ -4370,6 +4370,44 @@ mod cluster {
         assert!(d.paused.contains(&work()));
     }
 
+    /// Backpressure that resumes the partitions it paused
+    /// leaves a partition waiting for its seek paused, so it reads nothing
+    /// from its commit unchecked.
+    #[test]
+    fn backpressure_leaves_a_partition_waiting_for_its_seek_paused() {
+        let group = spate_test::unique_name("refused-backpressure");
+        let cluster = committed_within_the_log(&group);
+        let (_, _core, _producer, mut d) = parts_for(&cluster.bootstrap_servers(), &group);
+        let mode = Arc::new(std::sync::Mutex::new(Seeks::Refuse));
+        let calls = Arc::new(AtomicUsize::new(0));
+        d.seek_with = Some(scripted(&mode, &calls));
+        drive(&mut d, "the retry partition delivers", |d| {
+            delivered(d, &retry())
+        });
+        assert!(d.validating.contains(&work()));
+        // Backpressure had paused the work partition as well, and the ready
+        // queue has drained, so it resumes what it paused.
+        d.paused.insert(work());
+        d.backpressure();
+        let producer: BaseProducer = raw_config()
+            .set("bootstrap.servers", cluster.bootstrap_servers())
+            .build()
+            .unwrap();
+        producer
+            .send(BaseRecord::<[u8], [u8]>::to("units-retry").payload(b"body"))
+            .unwrap();
+        producer.flush(Duration::from_secs(30)).unwrap();
+        drive(&mut d, "the retry partition reads its second unit", |d| {
+            read_position(&d.consumer, &mut tpl_of(&[retry()])).0 == Offset::Offset(2)
+                || delivered(d, &work())
+        });
+        assert!(
+            !delivered(&d, &work()),
+            "a partition waiting for its seek was read"
+        );
+        assert!(d.validating.contains(&work()));
+    }
+
     /// A partition whose seek keeps being refused is reported once, when the
     /// refusals reach the threshold.
     #[test]

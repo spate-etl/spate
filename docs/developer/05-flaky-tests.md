@@ -250,8 +250,8 @@ let http = crate::test_stub::in_process(move |_| {
 ```
 
 A test whose result is the same whether or not the reply arrives before the next timer may use a socket.
-A server that never answers is one such test.
-A reply that the client treats the same way as a timeout is another, as in the Avro registry tests in [`spate-avro/src/registry.rs`](repo:crates/spate-avro/src/registry.rs), where a 500 and a timeout both end as a transient failure.
+A test against a server that never answers is one.
+A test whose reply the client treats the same way as a timeout is another, as in the Avro registry tests in [`spate-avro/src/registry.rs`](repo:crates/spate-avro/src/registry.rs), where a 500 and a timeout both end as a transient failure.
 A test that waits through a timeout and then needs the reply still answers in process.
 
 ### Own every name, port and metric label

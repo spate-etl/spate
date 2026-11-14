@@ -731,39 +731,13 @@ impl Driver {
         if self.validating.is_empty() {
             return;
         }
-        let mut list = TopicPartitionList::new();
-        for (tp, offset, epoch) in self.validating.entries() {
-            if list
-                .add_partition_offset(&tp.topic, tp.partition, Offset::Offset(offset))
-                .is_ok()
-            {
-                set_epoch(&mut list, &tp.topic, tp.partition, epoch);
-            }
-        }
+        let name = |tp: &Tp| (tp.topic.to_string(), tp.partition);
+        let list = self.validating.seek_list(name);
         let refused = seek_starts(list, RETRY_SEEK_WAIT, |list, budget| {
             self.seek(list, budget)
         });
-        let pending: Vec<(Tp, i64, i32)> = self
-            .validating
-            .entries()
-            .map(|(tp, offset, epoch)| (tp.clone(), offset, epoch))
-            .collect();
         let now = self.core.clock().now();
-        let mut accepted = Vec::new();
-        for (tp, offset, epoch) in pending {
-            if !named_in(&refused, &tp) {
-                self.validating.remove(&tp);
-                accepted.push(tp);
-            } else if self.validating.refused(tp.clone(), offset, epoch, now) {
-                tracing::warn!(
-                    topic = &*tp.topic,
-                    partition = tp.partition,
-                    "librdkafka keeps refusing the seek to this partition's committed offset; \
-                     it stays paused, and reads nothing until a seek is accepted or it is \
-                     assigned again"
-                );
-            }
-        }
+        let accepted = self.validating.settle(&refused, name, now);
         if accepted.is_empty() {
             return;
         }

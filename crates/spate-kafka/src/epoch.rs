@@ -287,6 +287,17 @@ struct Pending {
     reported: bool,
 }
 
+impl Pending {
+    /// True once, when the refusals have lasted `report_after` at `now`.
+    fn due(&mut self, report_after: Duration, now: Instant) -> bool {
+        if self.reported || now.saturating_duration_since(self.since) < report_after {
+            return false;
+        }
+        self.reported = true;
+        true
+    }
+}
+
 impl<K: Ord + Clone> Validating<K> {
     pub(crate) fn new(report_after: Duration) -> Validating<K> {
         Validating {
@@ -303,11 +314,6 @@ impl<K: Ord + Clone> Validating<K> {
         self.pending.is_empty()
     }
 
-    /// Each partition with the commit and epoch its seek goes to.
-    pub(crate) fn entries(&self) -> impl Iterator<Item = (&K, i64, i32)> {
-        self.pending.iter().map(|(k, p)| (k, p.offset, p.epoch))
-    }
-
     /// Records a refused seek of `key` to `offset` at `epoch`, at `now`.
     /// True once, when its refusals have lasted the report time.
     pub(crate) fn refused(&mut self, key: K, offset: i64, epoch: i32, now: Instant) -> bool {
@@ -317,11 +323,54 @@ impl<K: Ord + Clone> Validating<K> {
             since: now,
             reported: false,
         });
-        if pending.reported || now.saturating_duration_since(pending.since) < self.report_after {
-            return false;
+        pending.due(self.report_after, now)
+    }
+
+    /// A seek list holding each partition at its commit and epoch. `name`
+    /// gives a key's topic and partition.
+    pub(crate) fn seek_list(&self, name: impl Fn(&K) -> (String, i32)) -> TopicPartitionList {
+        let mut list = TopicPartitionList::new();
+        for (key, pending) in &self.pending {
+            let (topic, partition) = name(key);
+            if list
+                .add_partition_offset(&topic, partition, Offset::Offset(pending.offset))
+                .is_ok()
+            {
+                set_epoch(&mut list, &topic, partition, pending.epoch);
+            }
         }
-        pending.reported = true;
-        true
+        list
+    }
+
+    /// Settles a seek of [`seek_list`](Self::seek_list): drops and returns
+    /// each partition `refused` does not name. Each one it names stays, and
+    /// is reported once its refusals have lasted the report time.
+    pub(crate) fn settle(
+        &mut self,
+        refused: &[(String, i32)],
+        name: impl Fn(&K) -> (String, i32),
+        now: Instant,
+    ) -> Vec<K> {
+        let mut accepted = Vec::new();
+        let report_after = self.report_after;
+        self.pending.retain(|key, pending| {
+            let (topic, partition) = name(key);
+            if !refused.iter().any(|(t, p)| *t == topic && *p == partition) {
+                accepted.push(key.clone());
+                return false;
+            }
+            if pending.due(report_after, now) {
+                tracing::warn!(
+                    topic,
+                    partition,
+                    "librdkafka keeps refusing the seek to this partition's committed offset; \
+                     it stays paused, and reads nothing until a seek is accepted or it is \
+                     assigned again"
+                );
+            }
+            true
+        });
+        accepted
     }
 
     /// Drops `key`, for an accepted seek or a partition given up. True when
@@ -576,6 +625,58 @@ mod tests {
     }
 
     /// The seek gets the budget it was given.
+    /// A retried seek's list holds each partition at its commit and epoch.
+    /// Settling it drops the accepted partitions, keeps the refused ones,
+    /// and reports a refused one once its refusals have lasted the report
+    /// time.
+    #[test]
+    fn a_settled_seek_keeps_the_refused_partitions() {
+        let start = Instant::now();
+        let at = |ms| start + Duration::from_millis(ms);
+        let name = |p: &i32| ("work".to_owned(), *p);
+        let mut v = Validating::new(Duration::from_secs(3));
+        v.refused(0, 15, 3, at(0));
+        v.refused(1, 9, 2, at(0));
+        let list = v.seek_list(name);
+        let seeks: Vec<(i32, Offset, i32)> = list
+            .elements()
+            .iter()
+            .map(|e| (e.partition(), e.offset(), epoch_of(&list, "work", e.partition())))
+            .collect();
+        assert_eq!(
+            seeks,
+            [(0, Offset::Offset(15), 3), (1, Offset::Offset(9), 2)]
+        );
+        let refused = [("work".to_owned(), 1)];
+        let mut accepted = Vec::new();
+        let lines = spate_test::capture_logs(tracing::Level::WARN, || {
+            accepted = v.settle(&refused, name, at(1_000));
+        });
+        assert_eq!(accepted, [0]);
+        assert!(lines.is_empty(), "{lines:#?}");
+        assert!(!v.contains(&0));
+        assert!(v.contains(&1));
+        // Only the topic and partition together name a refused partition.
+        let lines = spate_test::capture_logs(tracing::Level::WARN, || {
+            accepted = v.settle(&[("other".to_owned(), 1)], name, at(1_000));
+        });
+        assert_eq!(accepted, [1]);
+        assert!(lines.is_empty(), "{lines:#?}");
+        v.refused(1, 9, 2, at(0));
+        let lines = spate_test::capture_logs(tracing::Level::WARN, || {
+            accepted = v.settle(&refused, name, at(3_000));
+        });
+        assert!(accepted.is_empty());
+        assert_eq!(lines.len(), 1, "{lines:#?}");
+        assert!(lines[0].contains("keeps refusing the seek"), "{}", lines[0]);
+        assert!(lines[0].contains(r#"topic="work""#), "{}", lines[0]);
+        assert!(lines[0].contains("partition=1"), "{}", lines[0]);
+        let lines = spate_test::capture_logs(tracing::Level::WARN, || {
+            v.settle(&refused, name, at(9_000));
+        });
+        assert!(lines.is_empty(), "{lines:#?}");
+    }
+
     /// An end read with no time left sends nothing, gives `None`, and warns
     /// with the partitions it could not read.
     #[test]
@@ -623,7 +724,6 @@ mod tests {
         assert!(!v.refused(0, 15, 3, at(2_999)));
         assert!(v.refused(0, 15, 3, at(3_000)));
         assert!(!v.refused(0, 15, 3, at(9_000)));
-        assert_eq!(v.entries().collect::<Vec<_>>(), [(&0, 15, 3)]);
         assert!(v.remove(&0));
         assert!(!v.remove(&0));
         assert!(v.is_empty());

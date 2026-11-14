@@ -1287,45 +1287,18 @@ impl KafkaSource {
             .copied()
             .collect();
         member.validating.retain(|p| held.contains(p));
-        let pending: Vec<(i32, i64, i32)> = member
-            .validating
-            .entries()
-            .map(|(&p, offset, epoch)| (p, offset, epoch))
-            .collect();
-        if pending.is_empty() {
+        if member.validating.is_empty() {
             return;
         }
         let topic = self.config.topic.clone();
-        let mut list = TopicPartitionList::new();
-        for &(p, offset, epoch) in &pending {
-            if list
-                .add_partition_offset(&topic, p, Offset::Offset(offset))
-                .is_ok()
-            {
-                set_epoch(&mut list, &topic, p, epoch);
-            }
-        }
+        let name = |p: &i32| (topic.clone(), *p);
+        let list = member.validating.seek_list(name);
         let refused = seek_starts(list, RETRY_SEEK_WAIT, |list, budget| {
             self.seek(k, list, budget)
         });
         let now = self.clock.now();
         let member = &mut self.members[k];
-        let mut accepted = Vec::new();
-        for (p, offset, epoch) in pending {
-            if !refused.iter().any(|(_, r)| *r == p) {
-                member.validating.remove(&p);
-                accepted.push(p);
-            } else if member.validating.refused(p, offset, epoch, now) {
-                tracing::warn!(
-                    consumer = k,
-                    partition = p,
-                    topic = %topic,
-                    "librdkafka keeps refusing the seek to this partition's committed offset; \
-                     it stays paused, and reads nothing until a seek is accepted or it is \
-                     assigned again"
-                );
-            }
-        }
+        let accepted = member.validating.settle(&refused, name, now);
         let resume = member.resumable(accepted);
         if resume.is_empty() {
             return;

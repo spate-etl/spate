@@ -40,6 +40,7 @@ zstd-sys = { workspace = true }
 # one build.
 spate-kafka = { path = ".", features = ["testing", "json-simd"] }
 gungraun = { workspace = true }
+spate-bench = { workspace = true }
 spate-json = { workspace = true }
 # `testing`: `S3Source::with_clock`, so a bounded job's end check and the
 # lanes' receive deadline run on a test clock.
@@ -78,6 +79,14 @@ harness = false
 
 [[bench]]
 name = "prepare_alloc"
+harness = false
+
+[[bench]]
+name = "poll_wall"
+harness = false
+
+[[bench]]
+name = "produce_wall"
 harness = false
 
 [lints]

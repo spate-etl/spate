@@ -1,5 +1,6 @@
-//! The encode bench's corpora are reproducible, and encode the way the bench
-//! claims.
+//! The encode bench's corpora are reproducible and encode the way the bench
+//! claims, and the produce and poll benches' rigs write and read the records
+//! they name against librdkafka's mock cluster.
 //!
 //! An instruction count only means something if both legs of a comparison ran
 //! on byte-identical input, so "the corpus is a pure function of nothing" is a
@@ -12,6 +13,11 @@
 //! limit, not the payload, and a limit nudged either way would leave a case
 //! that still ran and still produced a number while measuring the opposite
 //! thing. That claim is checked here.
+//!
+//! The wall-clock rigs fail minutes into a comparison run when they go wrong,
+//! or measure a different shape with no error at all. Each produce case's
+//! messages are read back for their key and header count, and each poll drain
+//! must read exactly the records one feed produced.
 
 use bytes::BytesMut;
 use spate_core::deser::Owned;
@@ -22,8 +28,19 @@ use spate_kafka::sink::{KafkaBytesEncoder, KafkaEncoder, KafkaJsonEncoder, Messa
 use spate_test::record;
 use spate_test_support::fnv1a;
 
+#[allow(dead_code, reason = "only the rigs that frame a batch are used here")]
+#[path = "../benches/support/encode_rig.rs"]
+mod encode_rig;
 #[path = "../benches/support/messages.rs"]
 mod messages;
+#[path = "../benches/support/poll_rig.rs"]
+mod poll_rig;
+#[allow(dead_code, reason = "the batches are written, not prepared")]
+#[path = "../benches/support/prepare_rig.rs"]
+mod prepare_rig;
+#[path = "../benches/support/produce_rig.rs"]
+mod produce_rig;
+mod support;
 
 use messages::{
     Article, Event, GUARD_LIMIT, HEADER_BYTES, HeaderStamp, KEY_LEN, PAYLOAD_LEN, RECORDS,
@@ -328,4 +345,63 @@ fn the_typed_corpus_carries_a_key() {
         )
         .0 > 0
     );
+}
+
+/// The produce bench's setup and write work for every case, and each case
+/// writes the message shape its name says.
+///
+/// `produce_wall.rs` builds its sink against the mock cluster in setup, so a
+/// setting the builder refused or a batch the cluster rejected would fail
+/// minutes into a bench run. The read-back checks each case against its own
+/// batch: a key only when keyed, four headers only when stamped.
+#[test]
+fn the_produce_bench_writes_each_case_shape() {
+    for case in &produce_rig::CASES {
+        let id = case.id;
+        let rig = produce_rig::Rig::new((case.batch)());
+        assert_eq!(rig.write(), RECORDS as u64, "{id}");
+        assert_eq!(rig.write(), RECORDS as u64, "{id}");
+        let brokers = rig.cluster.bootstrap_servers();
+        assert_eq!(
+            support::log_end(&brokers, produce_rig::TOPIC, 0),
+            3 * RECORDS as i64,
+            "{id}: the setup write and two more"
+        );
+        let read = support::consume(&brokers, produce_rig::TOPIC, id, 1, |message| {
+            Some(support::Read::of(message))
+        });
+        assert_eq!(read[0].key.is_some(), case.keyed, "{id}: key");
+        assert_eq!(read[0].headers.len(), case.headers, "{id}: headers");
+    }
+}
+
+/// Each drain of the poll bench reads exactly the records one feed produced,
+/// and a region leaves nothing behind for the next.
+///
+/// The lane here polls up to 500 records, which does not divide a drain's
+/// count, so a drain that asked for more than it had left would read into the
+/// next drain's records.
+#[test]
+fn each_poll_bench_drain_reads_exactly_one_feed() {
+    let (mut rig, setup) = poll_rig::Rig::new(500);
+    let first: Vec<i64> = setup.iter().map(|(_, _, offset)| *offset).collect();
+    assert_eq!(first, (0..poll_rig::RECORDS as i64).collect::<Vec<_>>());
+
+    let mut offsets = Vec::new();
+    for _region in 0..2 {
+        rig.settle();
+        for _ in 0..poll_rig::DRAINS {
+            rig.feed();
+        }
+        for _ in 0..poll_rig::DRAINS {
+            let mut drained = Vec::new();
+            let read = rig.drain(|payload| drained.push(payload.offset));
+            assert_eq!(read, poll_rig::RECORDS);
+            assert_eq!(drained.len(), poll_rig::RECORDS);
+            offsets.extend(drained);
+        }
+    }
+    let start = poll_rig::RECORDS as i64;
+    let end = start + (2 * poll_rig::DRAINS * poll_rig::RECORDS) as i64;
+    assert_eq!(offsets, (start..end).collect::<Vec<_>>());
 }

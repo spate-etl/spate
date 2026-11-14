@@ -79,13 +79,15 @@ use super::inflight::{Position, Tp};
 use super::write::{self, Destination, Finish, Move, Outgoing, Producer, Tombstone, Write};
 use super::{Closing, Core, Gating, LatchOnPanic, READY_CAPACITY, State, Topics};
 use crate::client::{
-    CLOSE_WAIT, PendingCommit, check_assignment, close_in_background, epoch_of, list_offsets,
-    message_epoch, read_position, send_commit, set_epoch,
+    CLOSE_WAIT, PendingCommit, check_assignment, close_in_background, epoch_of, message_epoch,
+    read_position, send_commit, set_epoch,
 };
 use crate::context::{Intent, SourceContext};
 #[cfg(test)]
 use crate::epoch::SeekWith;
-use crate::epoch::{RETRY_SEEK_WAIT, Validating, ends_to_read, plan_starts, seek_starts};
+use crate::epoch::{
+    RETRY_SEEK_WAIT, Validating, ends_to_read, plan_starts, read_ends, seek_starts,
+};
 use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::error::{KafkaError, KafkaResult, RDKafkaErrorCode};
 use rdkafka::message::{BorrowedMessage, Headers, Message};
@@ -669,48 +671,13 @@ impl Driver {
         let ends = if ends.count() == 0 {
             None
         } else {
-            self.read_ends(ends, until)
+            let budget = self.budget(until);
+            #[cfg(test)]
+            self.called(Wait::Ends(budget));
+            read_ends(Consumer::client(&*self.consumer), ends, budget)
         };
         let seek = plan_starts(&mut committed, ends.as_ref(), true);
         (committed, seek, started)
-    }
-
-    /// The end offsets of `ends`' partitions, read by `until`, or `None` when
-    /// the read failed or no time was left. Each of those partitions is then
-    /// sought to its commit, and none starts from its log start.
-    fn read_ends(
-        &mut self,
-        mut ends: TopicPartitionList,
-        until: Instant,
-    ) -> Option<TopicPartitionList> {
-        let budget = self.budget(until);
-        #[cfg(test)]
-        self.called(Wait::Ends(budget));
-        let read = if budget.is_zero() {
-            Err(KafkaError::MetadataFetch(
-                RDKafkaErrorCode::OperationTimedOut,
-            ))
-        } else {
-            list_offsets(Consumer::client(&*self.consumer), &mut ends, budget)
-        };
-        match read {
-            Ok(()) => Some(ends),
-            Err(e) => {
-                let partitions: Vec<(String, i32)> = ends
-                    .elements()
-                    .iter()
-                    .map(|e| (e.topic().to_owned(), e.partition()))
-                    .collect();
-                tracing::warn!(
-                    error = %e,
-                    ?partitions,
-                    "reading end offsets failed; each of these partitions is sought to its \
-                     commit, and one whose commit is above its end reads only later writes \
-                     until its next assignment"
-                );
-                None
-            }
-        }
     }
 
     /// Seek through the consumer, or through [`seek_with`](Self::seek_with)

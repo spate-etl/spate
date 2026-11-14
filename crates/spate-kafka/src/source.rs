@@ -117,7 +117,8 @@ use crate::context::{Intent, SourceContext, SourceHooks};
 #[cfg(test)]
 use crate::epoch::SeekWith;
 use crate::epoch::{
-    RETRY_SEEK_WAIT, Start, Validating, ends_to_read, plan_start, plan_starts, seek_starts,
+    RETRY_SEEK_WAIT, Start, Validating, ends_to_read, plan_start, plan_starts, read_ends,
+    seek_starts,
 };
 use crate::error::{StartFailure, classify_start_error};
 use crate::lane::{KafkaLane, Shared};
@@ -1093,32 +1094,19 @@ impl KafkaSource {
         let uncommitted = ends.count() > with_epoch.len();
         if ends.count() > 0 {
             let budget = lookup_until.saturating_duration_since(self.clock.now());
-            let read = if budget.is_zero() {
-                Err(None)
-            } else {
-                #[cfg(test)]
+            #[cfg(test)]
+            if !budget.is_zero() {
                 Self::before_call(
                     &mut self.on_broker_call,
                     BrokerCall::Listing { k: *reader, budget },
                 );
-                list_offsets(consumer.client(), &mut ends, budget).map_err(Some)
-            };
-            match read {
-                Ok(()) => {}
-                Err(None) if uncommitted => {
-                    return Ok(Err("no time left to list end offsets".to_owned()));
-                }
-                Err(Some(e)) if uncommitted => return read_failure("listing end offsets", &e),
-                Err(e) => {
-                    tracing::warn!(
-                        error = ?e.map(|e| e.to_string()),
-                        partitions = ?with_epoch,
-                        "reading end offsets failed; each of these partitions is sought to its \
-                         commit, and one whose commit is above its end reads only later writes \
-                         until its next assignment"
-                    );
-                    ends = TopicPartitionList::new();
-                }
+            }
+            if !uncommitted {
+                ends = read_ends(consumer.client(), ends, budget).unwrap_or_default();
+            } else if budget.is_zero() {
+                return Ok(Err("no time left to list end offsets".to_owned()));
+            } else if let Err(e) = list_offsets(consumer.client(), &mut ends, budget) {
+                return read_failure("listing end offsets", &e);
             }
             for elem in ends.elements() {
                 let partition = elem.partition();
@@ -1248,7 +1236,12 @@ impl KafkaSource {
         let ends = if ends.count() == 0 {
             None
         } else {
-            self.read_ends(k, ends, lookup_until)
+            let budget = lookup_until.saturating_duration_since(self.clock.now());
+            #[cfg(test)]
+            if !budget.is_zero() {
+                Self::before_call(&mut self.on_broker_call, BrokerCall::Listing { k, budget });
+            }
+            read_ends(self.members[k].consumer.client(), ends, budget)
         };
         // Under `error` a commit above the end reaches librdkafka's reset,
         // which fails the source.
@@ -1258,42 +1251,6 @@ impl KafkaSource {
             list: committed,
             to_commit: TopicPartitionList::new(),
             seek,
-        }
-    }
-
-    /// The end offsets of `ends`' partitions, read on consumer `k` by
-    /// `lookup_until`, or `None` when the read failed or no time was left.
-    /// Each of those partitions is then sought to its commit.
-    fn read_ends(
-        &mut self,
-        k: usize,
-        mut ends: TopicPartitionList,
-        lookup_until: Instant,
-    ) -> Option<TopicPartitionList> {
-        let budget = lookup_until.saturating_duration_since(self.clock.now());
-        let read = if budget.is_zero() {
-            Err(KafkaError::MetadataFetch(
-                RDKafkaErrorCode::OperationTimedOut,
-            ))
-        } else {
-            #[cfg(test)]
-            Self::before_call(&mut self.on_broker_call, BrokerCall::Listing { k, budget });
-            list_offsets(self.members[k].consumer.client(), &mut ends, budget)
-        };
-        match read {
-            Ok(()) => Some(ends),
-            Err(e) => {
-                let partitions: Vec<i32> = ends.elements().iter().map(|e| e.partition()).collect();
-                tracing::warn!(
-                    consumer = k,
-                    error = %e,
-                    ?partitions,
-                    "reading end offsets failed; each of these partitions is sought to its \
-                     commit, and one whose commit is above its end reads only later writes \
-                     until its next assignment"
-                );
-                None
-            }
         }
     }
 

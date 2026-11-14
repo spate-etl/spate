@@ -6,8 +6,9 @@
 //! leader where that epoch ended and moves the start down when the log was
 //! truncated below it.
 
-use crate::client::{epoch_of, listed_offset, set_epoch};
-use rdkafka::error::{KafkaResult, RDKafkaErrorCode};
+use crate::client::{epoch_of, list_offsets, listed_offset, set_epoch};
+use rdkafka::client::{Client, ClientContext};
+use rdkafka::error::{KafkaError, KafkaResult, RDKafkaErrorCode};
 use rdkafka::{Offset, TopicPartitionList};
 use std::collections::{BTreeMap, VecDeque};
 use std::time::{Duration, Instant};
@@ -134,6 +135,41 @@ pub(crate) fn ends_to_read(committed: &TopicPartitionList) -> TopicPartitionList
         }
     }
     ends
+}
+
+/// The end offset of each partition in `ends`, read within `budget`. A failed
+/// read, or no time left, logs a warning naming the partitions and gives
+/// `None`, and each of them is then sought to its commit.
+pub(crate) fn read_ends<C: ClientContext>(
+    client: &Client<C>,
+    mut ends: TopicPartitionList,
+    budget: Duration,
+) -> Option<TopicPartitionList> {
+    let read = if budget.is_zero() {
+        Err(KafkaError::MetadataFetch(
+            RDKafkaErrorCode::OperationTimedOut,
+        ))
+    } else {
+        list_offsets(client, &mut ends, budget)
+    };
+    match read {
+        Ok(()) => Some(ends),
+        Err(e) => {
+            let partitions: Vec<(String, i32)> = ends
+                .elements()
+                .iter()
+                .map(|e| (e.topic().to_owned(), e.partition()))
+                .collect();
+            tracing::warn!(
+                error = %e,
+                ?partitions,
+                "reading end offsets failed; each of these partitions is sought to its \
+                 commit, and one whose commit is above its end reads only later writes \
+                 until its next assignment"
+            );
+            None
+        }
+    }
 }
 
 /// Applies [`plan_start`] to each element of `committed`, given the end
@@ -540,6 +576,32 @@ mod tests {
     }
 
     /// The seek gets the budget it was given.
+    /// An end read with no time left sends nothing, gives `None`, and warns
+    /// with the partitions it could not read.
+    #[test]
+    fn an_end_read_with_no_time_left_names_its_partitions() {
+        use crate::client::testing::{Raw as _, raw_config};
+        let consumer: rdkafka::consumer::BaseConsumer = raw_config()
+            .set("bootstrap.servers", "127.0.0.1:1")
+            .build()
+            .expect("consumer");
+        let mut ends = TopicPartitionList::new();
+        ends.add_partition_offset("work", 3, Offset::End)
+            .expect("list entry");
+        let mut read = Some(TopicPartitionList::new());
+        let lines = spate_test::capture_logs(tracing::Level::WARN, || {
+            read = read_ends(
+                rdkafka::consumer::Consumer::client(&consumer),
+                ends,
+                Duration::ZERO,
+            );
+        });
+        assert!(read.is_none());
+        assert_eq!(lines.len(), 1, "{lines:#?}");
+        assert!(lines[0].contains("reading end offsets failed"), "{}", lines[0]);
+        assert!(lines[0].contains(r#"("work", 3)"#), "{}", lines[0]);
+    }
+
     #[test]
     fn the_seek_gets_its_budget() {
         let mut got = None;

@@ -65,6 +65,9 @@ call. The feed has no queue and no clock behind it, and its backend key is
 
 - `record` builds a record around a payload, and `raw_payload` builds a keyless
   raw payload. Both carry zeroed metadata.
+- `confluent_frame` writes a payload in the Confluent wire format: the magic
+  byte, the schema id big-endian, then the payload, as a schema-registry
+  serializer writes it.
 - `test_ack` builds an acknowledgement handle whose resolution is discarded. A
   test that checks a resolution polls a batch against a real checkpointer, as
   the crate-level example on docs.rs does.

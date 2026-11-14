@@ -1,0 +1,205 @@
+---
+title: Why four Kafka consumers ran slower than two
+description: "Two librdkafka consumers sped up a Kafka to ClickHouse pipeline by 22% and four by 11%, because librdkafka's fetch.queue.backoff.ms paused full queues for 1 s."
+slug: four-kafka-consumers
+authors: [marcus]
+tags: [engineering]
+draft: true
+---
+
+import GroupedBars from '@site/src/components/charts/GroupedBars';
+
+In a Kafka to ClickHouse benchmark, two librdkafka consumers in one Spate
+process read 22% faster than one, and four read only 11% faster. The four
+consumers were waiting out librdkafka's `fetch.queue.backoff.ms`. It stops
+fetching a full partition queue for a second, and draining the queue does not
+end the wait. With the backoff at 10 ms, four consumers ran 17% faster than at
+the 1000 ms default, so Spate's Kafka source now sets 10 ms itself.
+
+<!-- truncate -->
+
+## One consumer fetched 32 partitions one request at a time
+
+The rig ran the [benchmark](https://spate.kainth.dev/benchmarks)'s Kafka to
+Avro to ClickHouse pipeline on one `c8gd.metal-24xl`, a Graviton4 host. A single
+Redpanda v26.1.13 broker ran on 3 cores and held a 32-partition topic of 40M
+Confluent-framed Avro messages. Each message is about 4 KB and carries a batch
+of sensor events, and the pipeline flattened the topic into 2.94B rows in total.
+ClickHouse 26.8 ran on 48 cores of the same host. Spate ran in a 32-CPU quota
+with 32 pipeline threads and `io_threads: 2`, and inserted in ClickHouse's
+Native format with `compression: lz4`.
+
+Every figure in this post comes from tuning runs on November 2, 2026. Each
+configuration ran twice, interleaved with an A/A control run. All of the
+configurations are on the benchmark repository's
+[`bootstrap/spate-1651-consumers`](https://github.com/spate-etl/benchmark/tree/bootstrap/spate-1651-consumers)
+branch. None of them are on the benchmark page. Spate was pinned to an earlier
+head of [#1653](https://github.com/spate-etl/spate/pull/1653), the pull request
+that added consumers, and the commits that followed that head did not change
+the per-record path.
+
+With one consumer, Spate drained the topic at 34.9M rows/s, averaged over four
+drains. The pipeline threads spent 31–32% of their time in the source's poll,
+while the consumer's fetch queue held fewer than 200 messages and ClickHouse
+delayed under 4% of inserts. The source was waiting on Kafka while the sink had
+room to spare ([#1651](https://github.com/spate-etl/spate/issues/1651)).
+
+The reason is in how librdkafka fetches. Spate's Kafka source ran one librdkafka
+consumer per process and split each partition into a queue of its own that any
+pipeline thread could drain. librdkafka keeps at most one Fetch request in
+flight per broker connection
+([FAQ](https://github.com/confluentinc/librdkafka/wiki/FAQ)), so that one
+consumer fetched all 32 partitions from the one broker a request at a time. This
+meant that throughput was bounded by the bytes in each Fetch response, times the
+requests in flight, divided by a round trip of 8 ms.
+
+## Bigger fetches cost 22% of throughput
+
+The first thing I tried was making each Fetch response carry more bytes. I
+raised `fetch.max.bytes` to 100 MiB, `fetch.message.max.bytes` to 8 MiB, and
+`queued.min.messages` to 1,000,000 on the one consumer. Over two drains it ran
+at 27.3M rows/s, 21.6% slower than the defaults. Each round trip rose from 8 ms
+to 32–33 ms, and the pipeline threads' time in the poll rose from 31% to 50–52%.
+This run kept librdkafka's default refill backoff, `fetch.queue.backoff.ms` at
+1000 ms.
+
+## Two consumers moved the bound to ClickHouse
+
+Spate 0.5 adds a `consumers` key to the
+[Kafka source](/docs/user-guide/connectors/sources/kafka). Each consumer is a
+separate member of the consumer group, with its own share of the partitions and
+its own connection to each broker, so each one adds a Fetch in flight per leader
+broker. Its partitions become lanes that any pipeline thread drains, just as a
+single consumer's partitions do. The reasons for running several consumers in
+one process are in
+[ADR-0090](/docs/adr/a-kafka-source-runs-a-configured-number-of-consumers).
+
+```yaml
+source:
+  kafka:
+    brokers: localhost:9092
+    topic: sensor-events
+    group_id: sensor-etl
+    consumers: 2
+```
+
+On a four-partition topic, each consumer logs the share it accepted:
+
+```text
+2026-11-14T21:53:59.587296Z  INFO spate_kafka::source: accepted assignment consumer=0 partitions=2 started_at_end=2 topic=sensor-events
+2026-11-14T21:53:59.587415Z  INFO spate_kafka::source: accepted assignment consumer=1 partitions=2 started_at_end=2 topic=sensor-events
+```
+
+On the rig, two consumers ran at 42.5M rows/s over two drains, 22.0% faster than
+one. The poll share fell to 8–9%, while ClickHouse delayed 54–67% of inserts
+because the table had too many active parts. The benchmark harness marked both
+drains as bound by the infrastructure, which meant two consumers had moved the
+bound from the source to ClickHouse.
+
+## Four consumers waited on empty partition queues
+
+With ClickHouse as the bound, I expected four consumers to run at about the
+speed of two. They ran at 38.6M rows/s, only 10.8% faster than one, while
+ClickHouse delayed fewer inserts, 22–36%, and the poll share climbed back to
+22–23%. Each consumer's fetch queue held 40,000–58,000 messages, so the data had
+reached the process, yet the pipeline threads were still waiting for it
+([#1659](https://github.com/spate-etl/spate/issues/1659)).
+
+The harness marked the four-consumer drains as bound by the infrastructure too,
+so I swapped the target table for a copy on ClickHouse's `Null` engine, which
+parses each insert and stores nothing. One consumer ran at 37.0M rows/s, two at
+46.9M, four at 39.8M, and eight at 38.7M. Four consumers still trailed two, with
+ClickHouse on about 9 of its 48 cores and Redpanda on at most 1.4 of its 3, so
+nothing outside Spate was near its limit.
+
+A third run recorded the depth of every partition queue, and took a 15-second
+off-CPU profile of the pipeline threads in one four-consumer drain. The threads
+were off the CPU for 23% of their time, and 98% of that was in librdkafka's
+`rd_kafka_q_pop`, waiting for a message to arrive, and none of it was spent on
+a mutex. In both four-consumer drains of that run, 17 of the 32 partition queues
+reached 90% of their byte cap, and 24–55% of the queue samples were empty, so
+the queues were swinging between full and empty.
+
+That pattern is librdkafka's refill backoff. When a partition's queue reaches
+`queued.min.messages` or `queued.max.messages.kbytes`, librdkafka stops fetching
+that partition for `fetch.queue.backoff.ms`, which defaults to 1000 ms, and
+draining the queue does not end the wait early
+([`rdkafka_fetcher.c`](https://github.com/confluentinc/librdkafka/blob/v2.12.1/src/rdkafka_fetcher.c#L1362-L1381)).
+Spate splits a queue per partition, so the byte cap of 65,536 KB, about 16,000
+of these messages, applies to each partition on its own. A pipeline thread
+usually drains one partition, and it empties a full queue well inside a second,
+leaving it to poll an empty queue for the rest of the backoff. One consumer
+never filled its queues, so the 1000 ms default had no effect until more
+consumers filled them.
+
+## Why the source sets `fetch.queue.backoff.ms` to 10 ms
+
+I made 10 ms the Kafka source's default for `fetch.queue.backoff.ms` because the
+refill stall appears the moment you raise `consumers`, the step the tuning page
+tells you to take. Finding the cause took me a per-partition queue record and an
+off-CPU profile, and a note on the tuning page alone would leave you to repeat
+that work. The default gives way to the source's `rdkafka` map, so a
+`fetch.queue.backoff.ms` set there still wins. The
+[refill backoff](/docs/user-guide/connectors/sources/kafka/performance-tuning#refill-backoff)
+section of the tuning page explains the setting and the 10 ms value I measured.
+
+librdkafka's own documentation of the property points the same way. It says to
+decrease it when the
+queue thresholds are low and the application sees delays of about a second
+between messages, and warns that low values may increase CPU use
+([CONFIGURATION.md](https://github.com/confluentinc/librdkafka/blob/v2.12.1/CONFIGURATION.md)).
+
+## What a 10 ms refill backoff bought on the same rig
+
+The last run set `fetch.queue.backoff.ms` through the `rdkafka` map, against the
+`Null` table, with two drains per configuration. Four consumers went from 38.4M
+rows/s at 1000 ms to 44.8M at 10 ms, 16.7% faster. Each poll took 0.33 ms where
+it had taken about 4 ms, and returned 508–510 messages against the source's cap
+of 512 per poll.
+
+<GroupedBars
+  name="Kafka source throughput by consumer count and refill backoff"
+  groups={['1 consumer', '4 consumers']}
+  series={['1000 ms backoff', '10 ms backoff']}
+  values={[
+    [37.2, 37.2],
+    [38.4, 44.8],
+  ]}
+  measure="throughput"
+  unit="M rows/s"
+  decimals={1}
+  caption={<>
+    Mean throughput over each configuration's drains, with ClickHouse writing to
+    a <code>Null</code> table. One consumer ran at 37.2M rows/s at both
+    backoffs. Four consumers ran at 38.4M rows/s with the 1000 ms backoff and
+    44.8M with 10 ms.
+  </>}
+/>
+
+Two consumers ran at 48.2M rows/s at 10 ms, and eight at 48.5M. With the shorter
+backoff, two, four, and eight consumers all used the whole 32-CPU quota and were
+throttled, so on this rig the bound past two consumers is CPU.
+
+## What the shorter backoff and more consumers cost
+
+At one consumer, where the queues never fill, the 10 ms refill backoff changed
+neither throughput nor CPU use. Both settings ran at 37.2M rows/s, on 22.8–23.5
+cores at 1000 ms and 22.9–23.0 at 10 ms. I have not measured a case where the
+low value raises CPU use, as librdkafka warns it may. The consumer count did not
+change the CPU each row costs either: every drain in the last run ran at
+1.67–1.70M rows/s per core.
+
+Each consumer has a fixed cost. It runs a set of librdkafka threads, holds
+broker connections and up to one `fetch.max.bytes` response in flight per leader
+broker, and joins the group as a separate member. The group has
+`replicas × consumers` members, and because the source uses eager assignment,
+every rebalance revokes the partitions of all of them.
+
+Four consumers still ran 7% below two at the quota, 44.8M rows/s against 48.2M,
+and I have not found out why. The rig cannot show what a third or fourth
+consumer buys either, because two already reach the CPU quota.
+
+If your Kafka source spends a large share of its time in the poll,
+[More consumers in one process](/docs/user-guide/connectors/sources/kafka/performance-tuning#more-consumers-in-one-process)
+shows how to confirm that the fetch path is the bound, and how far to raise the
+count.

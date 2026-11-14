@@ -152,7 +152,8 @@ impl Hold {
 /// was read. The partition stays behind until a member's read brings the
 /// commit to the end or below, or its log holds nothing. Writes that carry
 /// the end up to the commit make it count from the commit again, so the units
-/// on the reused offsets below it go uncounted.
+/// on the reused offsets below it go uncounted. A member still reads them when
+/// the commit carries a leader epoch.
 pub(crate) fn feed_depth(
     offsets: &dyn Offsets,
     topics: &Topics,

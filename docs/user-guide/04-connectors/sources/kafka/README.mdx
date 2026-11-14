@@ -204,6 +204,24 @@ The framework never uses librdkafka's position-based auto-commit. Instead:
   group has a valid offset for the partition.
 - A failed read of the committed offsets under `earliest` or `error` leaves the
   start to librdkafka.
+- Each commit carries the leader epoch of the record before the committed
+  offset. A partition whose commit carries an epoch is sought to the commit
+  with that epoch before any lane reads it, so librdkafka asks the leader where
+  the epoch's records end. Under `latest` and `earliest` a commit above the
+  partition's end resumes at the log start instead. When an unclean leader
+  election truncated the log below the commit, the lane starts at the point of
+  truncation, and its first batch below the commit logs the committed offset
+  and the first offset at `INFO`. Under `error` a detected truncation, or an
+  epoch the leader does not know, fails the source with a fatal error.
+- The seek is refused while librdkafka defers the partition's start, such as
+  while a commit is still waiting for the group's answer. The partition stays
+  paused until a seek is accepted. Once the refusals have lasted a quarter of
+  `max.poll.interval.ms`, at most 10 seconds, a warning names the partition.
+- A lane starts at its commit without checking it when the commit carries no
+  epoch, as a commit from an earlier Spate release does. It also starts
+  unchecked when reading the committed offsets fails, or when the seek fails
+  with any error other than a refusal, which a warning names. A truncation
+  below such a commit goes unread on the reused offsets below it.
 - A held assignment from a generation the group has left is answered empty, and
   the consumer rejoins after one more drain.
 - An assignment that names a partition of a topic other than `topic` stops the

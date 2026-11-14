@@ -3729,9 +3729,11 @@ mod tests {
             assert!(logged[0].contains("first=0"), "{}", logged[0]);
         }
 
-        /// Under `auto.offset.reset: error`, a fetch past the log end fails the
-        /// lane with a fatal error naming the partition: librdkafka stops
-        /// fetching the partition after it reports the reset.
+        /// Under `auto.offset.reset: error`, a commit past the log end fails the
+        /// lane with a fatal error naming the partition. The mock answers the
+        /// commit with the partition's current epoch, so the source seeks to it,
+        /// and the leader's answer for that epoch, or a fetch out of range,
+        /// makes librdkafka report the reset and stop fetching the partition.
         /// Regression for #1268.
         #[test]
         fn a_reset_under_the_error_policy_is_fatal() {

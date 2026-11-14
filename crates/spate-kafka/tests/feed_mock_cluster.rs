@@ -1203,8 +1203,9 @@ fn a_bounded_job_that_published_nothing_ends_completed() {
 
 /// A group commit above the work partition's end, as an unclean leader
 /// election leaves one, holds a bounded job open while no member reads the
-/// partition. Once the worker joins, its fetch above the end resets to the log
-/// start, it reads every unit and the job ends `Completed`. Regression for
+/// partition. Once the worker joins, it starts at the log start because the
+/// commit, which the mock answers with the partition's current epoch, is above
+/// the end. It reads every unit and the job ends `Completed`. Regression for
 /// #1759.
 #[test]
 fn a_commit_above_the_end_holds_a_bounded_job_until_a_member_reads() {

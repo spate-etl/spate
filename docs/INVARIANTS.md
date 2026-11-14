@@ -41,6 +41,15 @@ year ago still means what it said.
   and a bounded job counts the offsets it starts past in
   `spate_kafka_feed_offsets_skipped_total`
   ([ADR-0102](adr/0102-a-kafka-feed-counts-a-commit-below-the-log-start-as-lag.md)).
+  A Kafka partition that an unclean leader election truncated below the group's
+  commit is an exception when a
+  [source](user-guide/04-connectors/sources/kafka/README.mdx#how-offsets-are-committed)
+  or [feed](user-guide/04-connectors/feeds/kafka/README.mdx#transaction-markers)
+  member starts at that commit without checking it: the commit carries no
+  leader epoch, the read of the committed offsets failed, or the seek that
+  checks it failed. The member never reads the records written to the reused
+  offsets below that commit
+  ([ADR-0103](adr/0103-kafka-commits-carry-the-leader-epoch.md)).
   Everything else exists to make this one affordable.
 - <Anchor id="inv-2" />**INV-2 — source threads never block on a channel send.**
   Backpressure is `try_send` plus `Source::pause` plus continuing to poll. A

@@ -388,7 +388,7 @@ mod tests {
     use super::*;
     use apache_avro::to_avro_datum;
     use apache_avro::types::Value;
-    use spate_core::record::Flow;
+    use spate_test::EmitCollector;
 
     const WRITER_V1: &str = r#"{"type":"record","name":"Event","fields":[
         {"name":"id","type":"int"},
@@ -397,14 +397,6 @@ mod tests {
         {"name":"id","type":"long"},
         {"name":"name","type":"string"},
         {"name":"region","type":"string","default":"emea"}]}"#;
-
-    struct Collected<T>(Vec<Record<T>>);
-    impl<'buf, T> EmitRecord<'buf, T> for Collected<T> {
-        fn emit(&mut self, rec: Record<T>) -> Flow {
-            self.0.push(rec);
-            Flow::Continue
-        }
-    }
 
     fn raw_payload(bytes: &[u8]) -> RawPayload<'_> {
         RawPayload {
@@ -584,12 +576,12 @@ mod tests {
     #[test]
     fn value_round_trip_and_meta() {
         let payload = datum(7, "orders");
-        let mut out = Collected(Vec::new());
+        let mut out = EmitCollector::new();
         AvroValueDeserializer::new(raw_core(None))
             .deserialize(&raw_payload(&payload), &test_ack(), &mut out)
             .unwrap();
-        assert_eq!(out.0.len(), 1);
-        let rec = &out.0[0];
+        assert_eq!(out.records.len(), 1);
+        let rec = &out.records[0];
         assert_eq!(rec.meta.offset, 42);
         let Value::Record(fields) = &rec.payload else {
             panic!("expected a record value");
@@ -610,12 +602,12 @@ mod tests {
         // Writer v1 (int id, no region) resolved into reader v2:
         // int→long promotion plus a defaulted field.
         let payload = datum(7, "orders");
-        let mut out = Collected(Vec::new());
+        let mut out = EmitCollector::new();
         AvroSerdeDeserializer::<EventV2>::new(raw_core(Some(READER_V2)))
             .deserialize(&raw_payload(&payload), &test_ack(), &mut out)
             .unwrap();
         assert_eq!(
-            out.0[0].payload,
+            out.records[0].payload,
             EventV2 {
                 id: 7,
                 name: "orders".into(),
@@ -626,16 +618,16 @@ mod tests {
 
     #[test]
     fn tombstones_emit_nothing() {
-        let mut out = Collected::<AvroValue>(Vec::new());
+        let mut out = EmitCollector::<AvroValue>::new();
         AvroValueDeserializer::new(raw_core(None))
             .deserialize(&raw_payload(b""), &test_ack(), &mut out)
             .unwrap();
-        assert!(out.0.is_empty());
+        assert!(out.records.is_empty());
     }
 
     #[test]
     fn garbage_is_malformed() {
-        let mut out = Collected::<AvroValue>(Vec::new());
+        let mut out = EmitCollector::<AvroValue>::new();
         let err = AvroValueDeserializer::new(raw_core(None))
             .deserialize(&raw_payload(&[0xFF, 0xFF, 0xFF]), &test_ack(), &mut out)
             .unwrap_err();
@@ -650,7 +642,7 @@ mod tests {
             id: String,
         }
         let payload = datum(1, "x");
-        let mut out = Collected::<Wrong>(Vec::new());
+        let mut out = EmitCollector::<Wrong>::new();
         let err = AvroSerdeDeserializer::<Wrong>::new(raw_core(None))
             .deserialize(&raw_payload(&payload), &test_ack(), &mut out)
             .unwrap_err();
@@ -677,11 +669,11 @@ mod tests {
         framed.extend_from_slice(&fingerprint.to_le_bytes());
         framed.extend_from_slice(&datum(9, "so"));
 
-        let mut out = Collected::<AvroValue>(Vec::new());
+        let mut out = EmitCollector::<AvroValue>::new();
         AvroValueDeserializer::new(core(fingerprint))
             .deserialize(&raw_payload(&framed), &test_ack(), &mut out)
             .unwrap();
-        assert_eq!(out.0.len(), 1);
+        assert_eq!(out.records.len(), 1);
 
         let err = AvroValueDeserializer::new(core(fingerprint ^ 1))
             .deserialize(&raw_payload(&framed), &test_ack(), &mut out)
@@ -704,7 +696,7 @@ mod tests {
             None,
         );
 
-        let mut out = Collected::<AvroValue>(Vec::new());
+        let mut out = EmitCollector::<AvroValue>::new();
         let err = AvroValueDeserializer::new(core)
             .deserialize(&raw_payload(&datum(4, "poison")), &test_ack(), &mut out)
             .unwrap_err();
@@ -712,7 +704,7 @@ mod tests {
             matches!(&err, DeserError::SchemaUnavailable { reason } if reason.contains("nope")),
             "{err}"
         );
-        assert!(out.0.is_empty());
+        assert!(out.records.is_empty());
     }
 }
 

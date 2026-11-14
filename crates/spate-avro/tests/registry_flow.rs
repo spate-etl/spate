@@ -22,8 +22,7 @@ use spate_core::clock::{Clock, TestClock};
 use spate_core::deser::{Deserializer, EmitRecord, RecFamily};
 use spate_core::error::DeserError;
 use spate_core::hash::FastMap;
-use spate_core::record::{Flow, Record};
-use spate_test::raw_payload;
+use spate_test::{EmitCollector, raw_payload};
 use spate_test_support::run_in_child;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -155,14 +154,6 @@ fn confluent_payload(id: u32, event_id: i64) -> Vec<u8> {
     payload
 }
 
-struct Collected(Vec<AvroValue>);
-impl EmitRecord<'_, AvroValue> for Collected {
-    fn emit(&mut self, rec: Record<AvroValue>) -> Flow {
-        self.0.push(rec.payload);
-        Flow::Continue
-    }
-}
-
 fn settings(addr: std::net::SocketAddr, ttl: Duration) -> AvroSettings {
     settings_at(format!("http://{addr}"), ttl)
 }
@@ -259,19 +250,19 @@ async fn miss_reports_not_ready_then_decodes_after_fetch() {
 
     let payload = confluent_payload(42, 7);
     let (ack, _rx) = AckRef::test_pair();
-    let mut out = Collected(Vec::new());
+    let mut out = EmitCollector::new();
 
     // First call: not ready (fetch just triggered), nothing emitted.
     let err = deser
         .deserialize(&raw_payload(&payload), &ack, &mut out)
         .unwrap_err();
     assert!(matches!(err, DeserError::NotReady { .. }), "{err}");
-    assert!(out.0.is_empty());
+    assert!(out.records.is_empty());
 
     // The driver's retry loop, condensed.
     let result = tokio::task::spawn_blocking(move || {
-        let mut out = Collected(Vec::new());
-        drive_until_ready(&mut deser, &payload, &mut out).map(|()| out.0)
+        let mut out = EmitCollector::new();
+        drive_until_ready(&mut deser, &payload, &mut out).map(|()| out.payloads())
     })
     .await
     .unwrap()
@@ -295,8 +286,8 @@ async fn retriable_registry_errors_are_retried() {
     let payload = confluent_payload(9, 1);
 
     let rows = tokio::task::spawn_blocking(move || {
-        let mut out = Collected(Vec::new());
-        drive_until_ready_on(&mut deser, &payload, &mut out, &clock).map(|()| out.0)
+        let mut out = EmitCollector::new();
+        drive_until_ready_on(&mut deser, &payload, &mut out, &clock).map(|()| out.payloads())
     })
     .await
     .unwrap()
@@ -317,7 +308,7 @@ async fn unknown_id_negative_caches_until_ttl_expiry() {
 
     // Drive to the negative-cache verdict.
     let (mut deser, first) = tokio::task::spawn_blocking(move || {
-        let mut out = Collected(Vec::new());
+        let mut out = EmitCollector::new();
         let r = drive_until_ready(&mut deser, &payload, &mut out);
         (deser, r)
     })
@@ -334,7 +325,7 @@ async fn unknown_id_negative_caches_until_ttl_expiry() {
     // cache, no new requests.
     let payload = confluent_payload(5, 1);
     let (ack, _rx) = AckRef::test_pair();
-    let mut out = Collected(Vec::new());
+    let mut out = EmitCollector::new();
     let err = deser
         .deserialize(&raw_payload(&payload), &ack, &mut out)
         .unwrap_err();
@@ -354,8 +345,8 @@ async fn unknown_id_negative_caches_until_ttl_expiry() {
     stub.script("/schemas/ids/5", 200, &schema_body(SCHEMA_V1), 0);
     clock.advance(Duration::from_nanos(1));
     let rows = tokio::task::spawn_blocking(move || {
-        let mut out = Collected(Vec::new());
-        drive_until_ready(&mut deser, &payload, &mut out).map(|()| out.0)
+        let mut out = EmitCollector::new();
+        drive_until_ready(&mut deser, &payload, &mut out).map(|()| out.payloads())
     })
     .await
     .unwrap()
@@ -377,7 +368,7 @@ async fn a_negative_entry_at_the_ttl_floor_refetches_on_expiry() {
     let payload = confluent_payload(6, 1);
 
     let (mut deser, first) = tokio::task::spawn_blocking(move || {
-        let mut out = Collected(Vec::new());
+        let mut out = EmitCollector::new();
         let r = drive_until_ready(&mut deser, &payload, &mut out);
         (deser, r)
     })
@@ -390,8 +381,8 @@ async fn a_negative_entry_at_the_ttl_floor_refetches_on_expiry() {
     clock.advance(Duration::from_millis(100));
     let payload = confluent_payload(6, 1);
     let rows = tokio::task::spawn_blocking(move || {
-        let mut out = Collected(Vec::new());
-        drive_until_ready(&mut deser, &payload, &mut out).map(|()| out.0)
+        let mut out = EmitCollector::new();
+        drive_until_ready(&mut deser, &payload, &mut out).map(|()| out.payloads())
     })
     .await
     .unwrap()
@@ -421,7 +412,7 @@ fn unknown_id_warnings_are_rate_limited() {
                 .build_value()
                 .expect("apache builder");
             let (ack, _rx) = AckRef::test_pair();
-            let mut out = Collected(Vec::new());
+            let mut out = EmitCollector::new();
             for id in 0..IDS {
                 let payload = confluent_payload(100 + id, 1);
                 let deadline = Instant::now() + Duration::from_secs(10);
@@ -465,8 +456,8 @@ async fn transient_503s_then_success_decodes_and_never_drops() {
     let payload = confluent_payload(42, 7);
 
     let rows = tokio::task::spawn_blocking(move || {
-        let mut out = Collected(Vec::new());
-        drive_until_ready_on(&mut deser, &payload, &mut out, &clock).map(|()| out.0)
+        let mut out = EmitCollector::new();
+        drive_until_ready_on(&mut deser, &payload, &mut out, &clock).map(|()| out.payloads())
     })
     .await
     .unwrap()
@@ -492,7 +483,7 @@ async fn no_refetch_while_the_backoff_holds() {
 
     let (frozen_hits, rows) = tokio::task::spawn_blocking(move || {
         let (ack, _rx) = AckRef::test_pair();
-        let mut out = Collected(Vec::new());
+        let mut out = EmitCollector::new();
         let deadline = Instant::now() + Duration::from_secs(10);
         while probe.path_hits("/schemas/ids/13") == 0 && Instant::now() < deadline {
             let _ = deser.deserialize(&raw_payload(&payload), &ack, &mut out);
@@ -505,8 +496,9 @@ async fn no_refetch_while_the_backoff_holds() {
             std::thread::sleep(Duration::from_millis(20));
         }
         let frozen_hits = probe.path_hits("/schemas/ids/13");
-        let mut out = Collected(Vec::new());
-        let r = drive_until_ready_on(&mut deser, &payload, &mut out, &clock).map(|()| out.0);
+        let mut out = EmitCollector::new();
+        let r =
+            drive_until_ready_on(&mut deser, &payload, &mut out, &clock).map(|()| out.payloads());
         (frozen_hits, r)
     })
     .await
@@ -558,7 +550,7 @@ async fn a_transient_failure_is_stamped_on_the_deserializers_clock() {
 
     let rows = tokio::task::spawn_blocking(move || {
         let (ack, _rx) = AckRef::test_pair();
-        let mut out = Collected(Vec::new());
+        let mut out = EmitCollector::new();
         let reads = || clock.reads.load(Ordering::SeqCst);
         // No backoff and no negative entry yet, so the first read is the
         // stamp of the first 503.
@@ -580,7 +572,7 @@ async fn a_transient_failure_is_stamped_on_the_deserializers_clock() {
             reads() >= 3
         });
         test_clock.advance(Duration::from_millis(400));
-        drive_until_ready(&mut deser, &payload, &mut out).map(|()| out.0)
+        drive_until_ready(&mut deser, &payload, &mut out).map(|()| out.payloads())
     })
     .await
     .unwrap()
@@ -606,8 +598,8 @@ async fn a_transient_id_is_refetched_once_its_backoff_passes() {
     let payload = confluent_payload(11, 1);
 
     let rows = tokio::task::spawn_blocking(move || {
-        let mut out = Collected(Vec::new());
-        drive_until_ready_on(&mut deser, &payload, &mut out, &clock).map(|()| out.0)
+        let mut out = EmitCollector::new();
+        drive_until_ready_on(&mut deser, &payload, &mut out, &clock).map(|()| out.payloads())
     })
     .await
     .unwrap()
@@ -638,8 +630,8 @@ async fn non_retriable_5xx_is_transient_not_poison() {
     let payload = confluent_payload(7, 1);
 
     let rows = tokio::task::spawn_blocking(move || {
-        let mut out = Collected(Vec::new());
-        drive_until_ready_on(&mut deser, &payload, &mut out, &clock).map(|()| out.0)
+        let mut out = EmitCollector::new();
+        drive_until_ready_on(&mut deser, &payload, &mut out, &clock).map(|()| out.payloads())
     })
     .await
     .unwrap()
@@ -672,7 +664,7 @@ async fn slow_fetch_does_not_block_other_ids() {
 
     // Kick off the slow (gated) fetch first, then the fast one.
     let (ack, _rx) = AckRef::test_pair();
-    let mut sink = Collected(Vec::new());
+    let mut sink = EmitCollector::new();
     assert!(matches!(
         deser
             .deserialize(&raw_payload(&slow), &ack, &mut sink)
@@ -683,13 +675,17 @@ async fn slow_fetch_does_not_block_other_ids() {
     let slow_probe = slow.clone();
     let mut deser = tokio::task::spawn_blocking(move || {
         // The fast id resolves while the slow id is still gated.
-        let mut out = Collected(Vec::new());
+        let mut out = EmitCollector::new();
         drive_until_ready(&mut deser, &fast, &mut out).unwrap();
-        assert_eq!(out.0.len(), 1, "fast id resolved despite the gated slow id");
+        assert_eq!(
+            out.records.len(),
+            1,
+            "fast id resolved despite the gated slow id"
+        );
 
         // The slow id is still unavailable (its fetch is blocked).
         let (ack, _rx) = AckRef::test_pair();
-        let mut out = Collected(Vec::new());
+        let mut out = EmitCollector::new();
         assert!(matches!(
             deser
                 .deserialize(&raw_payload(&slow_probe), &ack, &mut out)
@@ -704,8 +700,8 @@ async fn slow_fetch_does_not_block_other_ids() {
     // Release the gate: the slow id now resolves too.
     released.store(false, Ordering::Relaxed);
     let rows = tokio::task::spawn_blocking(move || {
-        let mut out = Collected(Vec::new());
-        drive_until_ready(&mut deser, &slow, &mut out).map(|()| out.0)
+        let mut out = EmitCollector::new();
+        drive_until_ready(&mut deser, &slow, &mut out).map(|()| out.payloads())
     })
     .await
     .unwrap()
@@ -745,8 +741,8 @@ async fn prewarm_loads_subjects_at_startup() {
 
     let payload = confluent_payload(42, 7);
     let rows = tokio::task::spawn_blocking(move || {
-        let mut out = Collected(Vec::new());
-        drive_until_ready(&mut deser, &payload, &mut out).map(|()| out.0)
+        let mut out = EmitCollector::new();
+        drive_until_ready(&mut deser, &payload, &mut out).map(|()| out.payloads())
     })
     .await
     .unwrap()
@@ -774,8 +770,8 @@ async fn an_empty_trust_store_does_not_fail_the_build() {
         let mut deser = builder.build_value().expect("apache builder");
         let payload = confluent_payload(42, 7);
         let rows = tokio::task::spawn_blocking(move || {
-            let mut out = Collected(Vec::new());
-            drive_until_ready(&mut deser, &payload, &mut out).map(|()| out.0)
+            let mut out = EmitCollector::new();
+            drive_until_ready(&mut deser, &payload, &mut out).map(|()| out.payloads())
         })
         .await
         .unwrap()
@@ -821,7 +817,7 @@ async fn a_refused_schema_poisons_the_id_rather_than_stalling() {
     let payload = confluent_payload(77, 1);
 
     let err = tokio::task::spawn_blocking(move || {
-        let mut out = Collected(Vec::new());
+        let mut out = EmitCollector::new();
         drive_until_ready(&mut deser, &payload, &mut out)
     })
     .await
@@ -849,7 +845,7 @@ async fn a_schema_that_is_not_avro_poisons_the_id() {
     let mut deser = builder.build_value().expect("apache builder");
     let payload = confluent_payload(78, 1);
     let err = tokio::task::spawn_blocking(move || {
-        let mut out = Collected(Vec::new());
+        let mut out = EmitCollector::new();
         drive_until_ready(&mut deser, &payload, &mut out)
     })
     .await
@@ -894,8 +890,8 @@ async fn prewarm_skips_a_schema_that_is_not_avro() {
     payload.extend_from_slice(&79u32.to_be_bytes());
     payload.extend_from_slice(&[0x02, b'a']);
     let result = tokio::task::spawn_blocking(move || {
-        let mut out = Collected(Vec::new());
-        drive_until_ready(&mut deser, &payload, &mut out).map(|()| out.0.len())
+        let mut out = EmitCollector::new();
+        drive_until_ready(&mut deser, &payload, &mut out).map(|()| out.records.len())
     })
     .await
     .unwrap();
@@ -919,7 +915,7 @@ async fn an_unknown_id_names_the_registry_error() {
     let mut deser = builder.build_value().expect("apache builder");
     let payload = confluent_payload(5, 1);
     let err = tokio::task::spawn_blocking(move || {
-        let mut out = Collected(Vec::new());
+        let mut out = EmitCollector::new();
         drive_until_ready(&mut deser, &payload, &mut out)
     })
     .await
@@ -958,8 +954,8 @@ async fn a_prewarm_forbidden_is_not_a_rejection() {
     .unwrap();
     let payload = confluent_payload(42, 1);
     let rows = tokio::task::spawn_blocking(move || {
-        let mut out = Collected(Vec::new());
-        drive_until_ready(&mut deser, &payload, &mut out).map(|()| out.0.len())
+        let mut out = EmitCollector::new();
+        drive_until_ready(&mut deser, &payload, &mut out).map(|()| out.records.len())
     })
     .await
     .unwrap();
@@ -1032,9 +1028,9 @@ async fn a_fetch_sends_basic_auth() {
         let mut deser = builder.build_value().unwrap();
         let payload = confluent_payload(5, 1);
         let records = tokio::task::spawn_blocking(move || {
-            let mut out = Collected(Vec::new());
+            let mut out = EmitCollector::new();
             drive_until_ready(&mut deser, &payload, &mut out).unwrap();
-            out.0
+            out.payloads()
         })
         .await
         .unwrap();
@@ -1093,7 +1089,7 @@ async fn a_prewarm_sends_basic_auth() {
 async fn fatal_reason(deser: spate_avro::AvroValueDeserializer, payload: Vec<u8>) -> String {
     let mut deser = deser;
     let result = tokio::task::spawn_blocking(move || {
-        let mut out = Collected(Vec::new());
+        let mut out = EmitCollector::new();
         drive_until_ready(&mut deser, &payload, &mut out)
     })
     .await
@@ -1169,11 +1165,11 @@ async fn a_cached_schema_decodes_after_a_rejection() {
     let mut deser = builder.build_value().unwrap();
     let (cached, rejected) = (confluent_payload(1, 7), confluent_payload(2, 8));
     let (first, second, again) = tokio::task::spawn_blocking(move || {
-        let mut out = Collected(Vec::new());
+        let mut out = EmitCollector::new();
         let first = drive_until_ready(&mut deser, &cached, &mut out);
         let second = drive_until_ready(&mut deser, &rejected, &mut out);
         let again = drive_until_ready(&mut deser, &cached, &mut out);
-        (first.map(|()| out.0.len()), second, again)
+        (first.map(|()| out.records.len()), second, again)
     })
     .await
     .unwrap();
@@ -1246,17 +1242,9 @@ async fn a_refused_client_certificate_is_fatal() {
 // The single-pass datum path against the registry
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, serde::Deserialize, PartialEq)]
+#[derive(Clone, Debug, serde::Deserialize, PartialEq)]
 struct EventRec {
     id: i64,
-}
-
-struct CollectedRec(Vec<EventRec>);
-impl EmitRecord<'_, EventRec> for CollectedRec {
-    fn emit(&mut self, rec: Record<EventRec>) -> Flow {
-        self.0.push(rec.payload);
-        Flow::Continue
-    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1296,20 +1284,20 @@ async fn datum_path_not_ready_then_decodes_and_interleaves_ids() {
 
     // First call misses: NotReady, and the contract demands zero emits.
     let (ack, _rx) = AckRef::test_pair();
-    let mut out = CollectedRec(Vec::new());
+    let mut out = EmitCollector::new();
     let err = deser
         .deserialize(&raw_payload(&p61), &ack, &mut out)
         .unwrap_err();
     assert!(matches!(err, DeserError::NotReady { .. }), "{err}");
-    assert!(out.0.is_empty());
+    assert!(out.records.is_empty());
 
     let decoded = tokio::task::spawn_blocking(move || {
-        let mut out = CollectedRec(Vec::new());
+        let mut out = EmitCollector::new();
         drive_until_ready(&mut deser, &p61, &mut out).unwrap();
         drive_until_ready(&mut deser, &p62, &mut out).unwrap();
         // And interleave again from the (now warm) per-deserializer memo.
         drive_until_ready(&mut deser, &p61, &mut out).unwrap();
-        out.0
+        out.payloads()
     })
     .await
     .unwrap();
@@ -1363,9 +1351,9 @@ async fn duration_schema_gates_only_the_datum_path() {
     let mut value_deser = builder.build_value().expect("value builder");
     let p = payload.clone();
     let values = tokio::task::spawn_blocking(move || {
-        let mut out = Collected(Vec::new());
+        let mut out = EmitCollector::new();
         drive_until_ready(&mut value_deser, &p, &mut out).unwrap();
-        out.0
+        out.payloads()
     })
     .await
     .unwrap();
@@ -1377,7 +1365,7 @@ async fn duration_schema_gates_only_the_datum_path() {
         .build_serde_datum::<EventRec>()
         .expect("datum builder");
     let err = tokio::task::spawn_blocking(move || {
-        let mut out = CollectedRec(Vec::new());
+        let mut out = EmitCollector::new();
         drive_until_ready(&mut datum_deser, &payload, &mut out).unwrap_err()
     })
     .await
@@ -1408,23 +1396,23 @@ async fn confluent_truncated_string_is_malformed() {
             p.extend_from_slice(bytes);
             p
         };
-        let mut out = Collected(Vec::new());
+        let mut out = EmitCollector::new();
         drive_until_ready(&mut deser, &frame(&[2, b'a']), &mut out).unwrap();
         assert_eq!(
-            out.0,
+            out.payloads(),
             vec![AvroValue::Record(vec![(
                 "s".into(),
                 AvroValue::String("a".into())
             )])]
         );
-        let mut out = Collected(Vec::new());
+        let mut out = EmitCollector::new();
         let result = drive_until_ready(&mut deser, &frame(&[0x22]), &mut out);
         assert!(
             matches!(result, Err(DeserError::Malformed { .. })),
             "result={result:?}, emitted={:?}",
-            out.0
+            out.payloads()
         );
-        assert!(out.0.is_empty());
+        assert!(out.records.is_empty());
     })
     .await
     .unwrap();
@@ -1447,7 +1435,7 @@ async fn reader_projection_does_not_hide_truncated_writer_string() {
     let b = AvroDeserializerBuilder::from_settings(&settings, &tokio::runtime::Handle::current())
         .unwrap();
     let mut deser = b.build_value().unwrap();
-    let mut out = Collected(Vec::new());
+    let mut out = EmitCollector::new();
     deser
         .deserialize(
             &raw_payload(&[18, 2, b'a']),
@@ -1456,17 +1444,17 @@ async fn reader_projection_does_not_hide_truncated_writer_string() {
         )
         .unwrap();
     assert_eq!(
-        out.0,
+        out.payloads(),
         vec![AvroValue::Record(vec![("a".into(), AvroValue::Long(9))])]
     );
     for bytes in [&[18, 34][..], &[18, 4, b'a'][..]] {
-        let mut out = Collected(Vec::new());
+        let mut out = EmitCollector::new();
         let result = deser.deserialize(&raw_payload(bytes), &spate_test::test_ack(), &mut out);
         assert!(
             matches!(result, Err(DeserError::Malformed { .. })),
             "result={result:?}, emitted={:?}",
-            out.0
+            out.payloads()
         );
-        assert!(out.0.is_empty());
+        assert!(out.records.is_empty());
     }
 }

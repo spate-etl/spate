@@ -145,20 +145,12 @@ mod tests {
     use apache_avro::Schema;
     use apache_avro::to_avro_datum;
     use spate_core::deser::Owned;
-    use spate_core::record::Flow;
+    use spate_test::EmitCollector;
     use std::sync::Arc;
 
     const WRITER: &str = r#"{"type":"record","name":"Event","fields":[
         {"name":"id","type":"int"},
         {"name":"name","type":"string"}]}"#;
-
-    struct Collected<T>(Vec<Record<T>>);
-    impl<'buf, T> EmitRecord<'buf, T> for Collected<T> {
-        fn emit(&mut self, rec: Record<T>) -> Flow {
-            self.0.push(rec);
-            Flow::Continue
-        }
-    }
 
     fn raw_payload(bytes: &[u8]) -> RawPayload<'_> {
         RawPayload {
@@ -195,14 +187,14 @@ mod tests {
     #[test]
     fn owned_round_trip_and_meta() {
         let payload = datum(7, "orders");
-        let mut out = Collected(Vec::new());
+        let mut out = EmitCollector::new();
         AvroDatumDeserializer::<Owned<Event>>::new(raw_core())
             .deserialize(&raw_payload(&payload), &test_ack(), &mut out)
             .unwrap();
-        assert_eq!(out.0.len(), 1);
-        assert_eq!(out.0[0].meta.offset, 42);
+        assert_eq!(out.records.len(), 1);
+        assert_eq!(out.records[0].meta.offset, 42);
         assert_eq!(
-            out.0[0].payload,
+            out.records[0].payload,
             Event {
                 id: 7,
                 name: "orders".into()
@@ -212,16 +204,16 @@ mod tests {
 
     #[test]
     fn tombstones_emit_nothing() {
-        let mut out = Collected::<Event>(Vec::new());
+        let mut out = EmitCollector::<Event>::new();
         AvroDatumDeserializer::<Owned<Event>>::new(raw_core())
             .deserialize(&raw_payload(b""), &test_ack(), &mut out)
             .unwrap();
-        assert!(out.0.is_empty());
+        assert!(out.records.is_empty());
     }
 
     #[test]
     fn garbage_is_malformed() {
-        let mut out = Collected::<Event>(Vec::new());
+        let mut out = EmitCollector::<Event>::new();
         let err = AvroDatumDeserializer::<Owned<Event>>::new(raw_core())
             .deserialize(&raw_payload(&[0xFF, 0xFF, 0xFF]), &test_ack(), &mut out)
             .unwrap_err();
@@ -236,7 +228,7 @@ mod tests {
             id: String,
         }
         let payload = datum(1, "x");
-        let mut out = Collected::<Wrong>(Vec::new());
+        let mut out = EmitCollector::<Wrong>::new();
         let err = AvroDatumDeserializer::<Owned<Wrong>>::new(raw_core())
             .deserialize(&raw_payload(&payload), &test_ack(), &mut out)
             .unwrap_err();
@@ -253,7 +245,7 @@ mod tests {
             },
             None,
         );
-        let mut out = Collected::<Event>(Vec::new());
+        let mut out = EmitCollector::<Event>::new();
         let err = AvroDatumDeserializer::<Owned<Event>>::new(core)
             .deserialize(&raw_payload(&datum(4, "poison")), &test_ack(), &mut out)
             .unwrap_err();
@@ -261,7 +253,7 @@ mod tests {
             matches!(&err, DeserError::SchemaUnavailable { reason } if reason.contains("nope")),
             "{err}"
         );
-        assert!(out.0.is_empty());
+        assert!(out.records.is_empty());
     }
 
     #[test]
@@ -280,10 +272,10 @@ mod tests {
         let mut framed = vec![0xC3, 0x01];
         framed.extend_from_slice(&fingerprint.to_le_bytes());
         framed.extend_from_slice(&datum(9, "so"));
-        let mut out = Collected::<Event>(Vec::new());
+        let mut out = EmitCollector::<Event>::new();
         AvroDatumDeserializer::<Owned<Event>>::new(core)
             .deserialize(&raw_payload(&framed), &test_ack(), &mut out)
             .unwrap();
-        assert_eq!(out.0[0].payload.id, 9);
+        assert_eq!(out.records[0].payload.id, 9);
     }
 }

@@ -54,10 +54,11 @@ is process-wide:
   the address it bound ([Monitoring](../05-deployment/monitoring.mdx)). A test
   driving the pipeline as a subprocess reads the port off that line. In
   process, the start logs the line on the thread that calls `run`, so a
-  `LogCapture` set on that thread receives it. Spawn the run as
-  `std::thread::spawn(move || capture.during(tracing::Level::INFO, || runtime.run()))`
-  with a clone of the capture, and `capture.wait_for_line(timeout, "admin server listening")`
-  returns the line once it is written. That subscriber belongs to the spawned
+  `LogCapture` set on that thread receives it. On the spawned thread, run
+  `capture.during(tracing::Level::INFO, || runtime.run())` with a clone of
+  the capture. On the test thread,
+  `capture.wait_for_line(timeout, "admin server listening")` returns the line
+  once it is written. That subscriber belongs to the spawned
   thread alone, so other tests in the binary are unaffected. A line from a
   thread the test does not start needs
   `LogCapture::install_global(tracing::Level::INFO)` instead. That call

@@ -31,7 +31,7 @@
 //! A case polling up to 32 at a time, so that the per-poll work (the ack and
 //! clearing the batch) weighed more, is left out. It took 2.4% longer than
 //! `poll_default_batch`, under the driver's 5% floor (both legs of a
-//! 6-replicate A/A run, Apple M5 Max).
+//! 6-replicate A/A run on an 18-core Apple silicon laptop).
 //!
 //! The iteration count is pinned at `DRAINS`, because a region's records are
 //! produced before it opens. `poll_rig.rs` holds the count under the client's

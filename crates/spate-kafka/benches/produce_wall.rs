@@ -34,7 +34,7 @@
 //!
 //! A keyed case is left out. With a 16-byte key per record it took 4.9% longer
 //! than `produce_keyless`, under the driver's 5% floor (both legs of a
-//! 6-replicate A/A run, Apple M5 Max).
+//! 6-replicate A/A run on an 18-core Apple silicon laptop).
 //!
 //! Run: `cargo xtask bench ab --ref main --package spate-kafka --filter produce_`
 

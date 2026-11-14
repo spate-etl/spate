@@ -223,6 +223,9 @@ When the value a wait polls would explain a hang, wait with `spate_test::wait_fo
 To see a component's logs in a failing test, run the code under `spate_test::show_logs`.
 The harness prints those lines when the test fails.
 The `capture_logs` function also returns the lines, for a test that asserts on them.
+Both helpers set their subscriber on the calling thread.
+Another thread logs to it only when `spate_core::task::spawn_thread` started that thread inside the helper's closure.
+To assert on lines from any other thread, such as one a client library starts, call `LogCapture::install_global` in a test binary of its own, because the process has one global subscriber.
 
 ## Write the test's doc comment
 

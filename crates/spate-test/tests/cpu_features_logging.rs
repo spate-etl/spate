@@ -46,16 +46,9 @@ sink: {{ capture: {{}} }}
 /// carrying the architecture and the two lists the table reports.
 #[test]
 fn the_first_start_in_a_process_logs_the_cpu_features_once() {
-    let capture = LogCapture::new();
     // `info` is the level a deployment runs at, and the level
     // `spate_core::telemetry` assigns to a startup milestone.
-    tracing_subscriber::fmt()
-        .with_writer(capture.clone())
-        .with_max_level(tracing_subscriber::filter::LevelFilter::INFO)
-        .with_target(false)
-        .with_ansi(false)
-        .without_time()
-        .init();
+    let capture = LogCapture::install_global(tracing::Level::INFO);
 
     run_once("cpu-features-first");
     run_once("cpu-features-second");
@@ -66,7 +59,7 @@ fn the_first_start_in_a_process_logs_the_cpu_features_once() {
         .filter(|l| l.contains("cpu features"))
         .collect();
     let expected = format!(
-        " INFO cpu features arch={} compiled={} detected={}",
+        " INFO spate_core::telemetry::cpu: cpu features arch={} compiled={} detected={}",
         ARCH,
         compiled_simd().join(","),
         detected_simd().join(","),

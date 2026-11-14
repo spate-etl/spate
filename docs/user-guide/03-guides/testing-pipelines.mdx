@@ -55,7 +55,8 @@ is process-wide:
   driving the pipeline as a subprocess reads the port off that line. In
   process, reading it means installing a `tracing` subscriber that captures
   the output, which is process-wide in turn, so such a test wants a binary of
-  its own. Point that subscriber at a `LogCapture`, and
+  its own. `LogCapture::install_global(tracing::Level::INFO)` installs that
+  subscriber and returns its capture, and
   `capture.wait_for_line(timeout, "admin server listening")` returns the line
   once it is written.
 - **Metric series ownership.** A gauge series has one live owner per

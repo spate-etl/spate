@@ -3,6 +3,7 @@
 //! [`LogCapture`] is a writer a `tracing` subscriber can be pointed at, and
 //! waits on what it has captured. [`capture_logs`] and [`show_logs`] install
 //! one around a call, scoped to the calling thread.
+//! [`LogCapture::install_global`] installs one for the whole process.
 
 use crate::run::{hung, poll_until};
 use std::sync::{Arc, LazyLock, Mutex};
@@ -12,6 +13,7 @@ use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::fmt::writer::MakeWriterExt;
 use tracing_subscriber::fmt::{MakeWriter, TestWriter};
 use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 
 /// Everything the subscriber holding it has formatted.
 #[derive(Clone, Debug, Default)]
@@ -21,6 +23,32 @@ impl LogCapture {
     /// An empty capture.
     pub fn new() -> LogCapture {
         LogCapture::default()
+    }
+
+    /// Install a subscriber at `level` as the process's global default,
+    /// writing to a new capture, and return the capture.
+    ///
+    /// Every thread without a subscriber of its own logs to it, including
+    /// threads a client library starts. The lines are formatted as
+    /// [`capture_logs`] formats them, and go to the capture only.
+    ///
+    /// # Panics
+    ///
+    /// When a global subscriber is already installed, or when
+    /// `tracing-subscriber`'s `tracing-log` feature is on and a `log` logger
+    /// is already set. A process has one global subscriber, so a test that
+    /// calls this needs a binary of its own.
+    pub fn install_global(level: Level) -> LogCapture {
+        let capture = LogCapture::new();
+        formatter(level, capture.clone())
+            .try_init()
+            .unwrap_or_else(|e| {
+                panic!(
+                    "could not install the global log capture (one per process: \
+                     give the test a binary of its own): {e}"
+                )
+            });
+        capture
     }
 
     /// The lines formatted so far.
@@ -115,15 +143,27 @@ pub fn show_logs(level: Level, f: impl FnOnce()) {
 static BYSTANDER: LazyLock<tracing::Dispatch> =
     LazyLock::new(|| tracing::Dispatch::new(tracing_subscriber::registry().with(LevelFilter::OFF)));
 
+/// The subscriber every helper here installs: lines at `level` and above,
+/// without the time, written to `writer`.
+fn formatter<W>(level: Level, writer: W) -> impl tracing::Subscriber + Send + Sync + 'static
+where
+    W: for<'a> MakeWriter<'a> + Send + Sync + 'static,
+{
+    tracing_subscriber::fmt()
+        .with_writer(writer)
+        .with_max_level(level)
+        .without_time()
+        // Another crate in the build can turn on `tracing-subscriber`'s
+        // `ansi` feature, which colours every line by default.
+        .with_ansi(false)
+        .finish()
+}
+
 fn under_subscriber<W>(level: Level, writer: W, f: impl FnOnce())
 where
     W: for<'a> MakeWriter<'a> + Send + Sync + 'static,
 {
-    let subscriber = tracing_subscriber::fmt()
-        .with_writer(writer)
-        .with_max_level(level)
-        .without_time()
-        .finish();
+    let subscriber = formatter(level, writer);
     LazyLock::force(&BYSTANDER);
     tracing::subscriber::with_default(subscriber, f);
 }

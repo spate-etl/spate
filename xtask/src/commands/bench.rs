@@ -14,6 +14,9 @@ pub(crate) struct Selection {
     /// Narrow to one crate's targets; repeat for several
     #[arg(long, value_name = "CRATE")]
     package: Vec<String>,
+    /// Leave out one crate's targets; repeat for several
+    #[arg(long, value_name = "CRATE", conflicts_with = "package")]
+    exclude: Vec<String>,
     /// Narrow to cases whose name contains this
     #[arg(long, value_name = "SUBSTR")]
     filter: Option<String>,
@@ -256,6 +259,10 @@ impl Selection {
             out.push("--package".to_owned());
             out.push(p.clone());
         }
+        for p in &self.exclude {
+            out.push("--exclude".to_owned());
+            out.push(p.clone());
+        }
         if let Some(f) = &self.filter {
             out.push("--filter".to_owned());
             out.push(f.clone());
@@ -272,5 +279,32 @@ impl Replication {
             "--format".to_owned(),
             self.format.clone(),
         ]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Selection;
+
+    /// Each selector reaches the driver as one flag per value, in the order
+    /// given, so a dropped `--exclude` cannot pass for a run over everything.
+    #[test]
+    fn the_selection_reaches_the_driver_one_flag_per_value() {
+        let narrowed = Selection {
+            package: vec!["a".to_owned(), "b".to_owned()],
+            exclude: Vec::new(),
+            filter: Some("decode".to_owned()),
+        };
+        assert_eq!(
+            narrowed.flags(),
+            ["--package", "a", "--package", "b", "--filter", "decode"]
+        );
+
+        let excluded = Selection {
+            package: Vec::new(),
+            exclude: vec!["c".to_owned(), "d".to_owned()],
+            filter: None,
+        };
+        assert_eq!(excluded.flags(), ["--exclude", "c", "--exclude", "d"]);
     }
 }

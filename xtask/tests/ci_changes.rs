@@ -973,9 +973,27 @@ fn each_scheduled_reporter_runs_when_a_need_failed() {
     }
 }
 
-/// The step that runs `bench ab` times out below its job, and the step that
-/// writes the job summary runs under `always()`, so a failed or cut
-/// measurement still reports what the kept legs hold.
+/// A limit written as a number, or as `${{ matrix.<key> }}` read from `row`.
+fn minutes(limit: &serde_yaml::Value, row: &serde_yaml::Value) -> u64 {
+    if let Some(n) = limit.as_u64() {
+        return n;
+    }
+    let expr = limit
+        .as_str()
+        .expect("a limit is a number or an expression");
+    let key = expr
+        .trim()
+        .strip_prefix("${{ matrix.")
+        .and_then(|k| k.strip_suffix(" }}"))
+        .unwrap_or_else(|| panic!("{expr} names no matrix key"));
+    row[key]
+        .as_u64()
+        .unwrap_or_else(|| panic!("the row has no number at {key}"))
+}
+
+/// The step that runs `bench ab` times out below its job in every matrix row,
+/// and the step that writes the job summary runs under `always()`, so a failed
+/// or cut measurement still reports what the kept legs hold.
 #[test]
 fn the_weekly_summary_runs_after_a_cut_measurement() {
     let parsed = yaml(&read_workflow("weekly.yml"));
@@ -990,15 +1008,90 @@ fn the_weekly_summary_runs_after_a_cut_measurement() {
         .iter()
         .find(|s| run(s).contains("GITHUB_STEP_SUMMARY"))
         .expect("a step writes the summary");
-    let job_limit = job["timeout-minutes"].as_u64().unwrap();
-    let step_limit = measure["timeout-minutes"].as_u64().unwrap();
-    assert!(step_limit < job_limit, "{step_limit} >= {job_limit}");
+    let rows = job["strategy"]["matrix"]["include"]
+        .as_sequence()
+        .expect("the job runs a matrix of rows");
+    assert!(!rows.is_empty());
+    for row in rows {
+        let job_limit = minutes(&job["timeout-minutes"], row);
+        let step_limit = minutes(&measure["timeout-minutes"], row);
+        assert!(
+            step_limit < job_limit,
+            "{row:?}: {step_limit} >= {job_limit}"
+        );
+    }
     let cond = summary["if"].as_str().unwrap_or("");
     assert!(cond.trim_start().starts_with("always() &&"), "{cond}");
     assert!(
         run(summary).contains("bench compare"),
         "the summary re-renders from the legs"
     );
+}
+
+/// The weekly bench's rows split the targets on one package: exactly one row
+/// measures only that package and another measures everything else, so no
+/// target is measured twice or left out. Each row's side is read through the
+/// row name the script branches on, so a renamed row cannot drop a side. The
+/// `bench check` step names a row that exists.
+#[test]
+fn the_weekly_bench_rows_split_on_one_package() {
+    let parsed = yaml(&read_workflow("weekly.yml"));
+    let job = &parsed["jobs"]["bench"];
+    let package = job["env"]["PIPELINE"]
+        .as_str()
+        .expect("the job names the package");
+    assert!(!package.is_empty());
+    let rows: Vec<&str> = job["strategy"]["matrix"]["include"]
+        .as_sequence()
+        .expect("the job runs a matrix of rows")
+        .iter()
+        .map(|row| row["name"].as_str().expect("each row is named"))
+        .collect();
+    let steps = job["steps"].as_sequence().unwrap();
+    let run = |s: &serde_yaml::Value| s["run"].as_str().unwrap_or("").to_owned();
+    let measure = steps
+        .iter()
+        .map(run)
+        .find(|r| r.contains("cargo xtask bench ab "))
+        .expect("a step runs bench ab");
+    let lines: Vec<&str> = measure.lines().map(str::trim).collect();
+    let at = lines
+        .iter()
+        .position(|l| l.starts_with(r#"if [ "$ROW" = "#))
+        .expect("the script branches on the row");
+    let narrowed = lines[at]
+        .strip_prefix(r#"if [ "$ROW" = "#)
+        .and_then(|rest| rest.strip_suffix(" ]; then"))
+        .expect("the branch compares the row with one name");
+    assert_eq!((lines[at + 2], lines[at + 4]), ("else", "fi"));
+    let side = |line: &str| {
+        assert!(line.starts_with("cargo xtask bench ab "), "{line}");
+        if line.contains(r#"--package "$PIPELINE""#) {
+            "package"
+        } else if line.contains(r#"--exclude "$PIPELINE""#) {
+            "exclude"
+        } else {
+            panic!("an invocation selects no side of the split: {line}")
+        }
+    };
+    let (then, otherwise) = (side(lines[at + 1]), side(lines[at + 3]));
+    let mut sides: Vec<&str> = rows
+        .iter()
+        .map(|&row| if row == narrowed { then } else { otherwise })
+        .collect();
+    sides.sort_unstable();
+    assert_eq!(sides, ["exclude", "package"], "rows {rows:?}");
+
+    let check = steps
+        .iter()
+        .find(|s| run(s).trim() == "cargo xtask bench check")
+        .expect("a step runs bench check");
+    let only = check["if"]
+        .as_str()
+        .and_then(|cond| cond.trim().strip_prefix("matrix.name == '"))
+        .and_then(|rest| rest.strip_suffix('\''))
+        .expect("bench check runs in one named row");
+    assert!(rows.contains(&only), "{only} is not a row of {rows:?}");
 }
 
 /// Each scheduled workflow queues a second run behind the first and never

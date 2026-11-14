@@ -42,6 +42,26 @@ pub struct BenchTarget {
     pub target: String,
 }
 
+/// The packages a run is narrowed to, by exact name.
+///
+/// `packages` keeps only those packages' targets, and an empty list keeps every
+/// one. `excluded` then drops those packages' targets.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Selection {
+    /// Packages whose targets to keep. Empty keeps every package.
+    pub packages: Vec<String>,
+    /// Packages whose targets to drop.
+    pub excluded: Vec<String>,
+}
+
+impl Selection {
+    /// Whether this selection keeps every target.
+    #[must_use]
+    pub fn is_everything(&self) -> bool {
+        self.packages.is_empty() && self.excluded.is_empty()
+    }
+}
+
 /// What one tree offers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Discovery {
@@ -57,7 +77,7 @@ pub struct Discovery {
 }
 
 impl Discovery {
-    /// Narrows [`targets`](Discovery::targets) to the named packages.
+    /// Narrows [`targets`](Discovery::targets) to a [`Selection`].
     ///
     /// Names are exact, and an empty selection keeps everything. `whose` names
     /// the tree the names were looked for in, since the two legs of a
@@ -69,28 +89,64 @@ impl Discovery {
     /// compiled. Held whole it can refuse a narrowed run over a feature neither
     /// leg built, which `--allow features` waives and the report's header names.
     ///
+    /// An excluded name this tree does not declare drops nothing. A base leg
+    /// can predate a package the working tree has, and [`check`](Self::check)
+    /// has already refused a misspelt one there.
+    ///
     /// # Errors
     ///
-    /// When a name owns no wall-clock target here. Every such name is named.
-    pub fn select(&mut self, packages: &[String], whose: &str) -> Result<(), String> {
-        if packages.is_empty() {
+    /// When a kept name owns no wall-clock target here. Every such name is
+    /// named.
+    pub fn select(&mut self, selection: &Selection, whose: &str) -> Result<(), String> {
+        if selection.is_everything() {
             return Ok(());
         }
-        let owners: BTreeSet<&str> = self.targets.iter().map(|t| t.package.as_str()).collect();
-        let wanted: BTreeSet<&str> = packages.iter().map(String::as_str).collect();
-        let unknown: Vec<&str> = wanted.difference(&owners).copied().collect();
-        if !unknown.is_empty() {
-            return Err(format!(
-                "no wall-clock bench target in {whose} belongs to {}. The packages that \
-                 declare one there are {}. A package that declares none and a name that \
-                 is no package at all both look like this.",
-                crate::quoted(unknown),
-                crate::quoted(owners.iter().copied())
-            ));
-        }
-        self.targets
-            .retain(|target| wanted.contains(target.package.as_str()));
+        self.refuse_unknown(&selection.packages, whose)?;
+        let wanted: BTreeSet<&str> = selection.packages.iter().map(String::as_str).collect();
+        let dropped: BTreeSet<&str> = selection.excluded.iter().map(String::as_str).collect();
+        self.targets.retain(|target| {
+            let package = target.package.as_str();
+            (wanted.is_empty() || wanted.contains(package)) && !dropped.contains(package)
+        });
         Ok(())
+    }
+
+    /// Refuses a kept or excluded name that owns no wall-clock target here.
+    ///
+    /// Run against the working tree before anything is built. An exclusion that
+    /// matches nothing would measure the package it meant to drop, so a
+    /// misspelt one is refused like a misspelt narrowing.
+    ///
+    /// # Errors
+    ///
+    /// When any name owns no wall-clock target here. Every such name is named.
+    pub fn check(&self, selection: &Selection, whose: &str) -> Result<(), String> {
+        let named: Vec<String> = selection
+            .packages
+            .iter()
+            .chain(&selection.excluded)
+            .cloned()
+            .collect();
+        self.refuse_unknown(&named, whose)
+    }
+
+    fn refuse_unknown(&self, names: &[String], whose: &str) -> Result<(), String> {
+        let owners: BTreeSet<&str> = self.targets.iter().map(|t| t.package.as_str()).collect();
+        let unknown: BTreeSet<&str> = names
+            .iter()
+            .map(String::as_str)
+            .filter(|name| !owners.contains(name))
+            .collect();
+        if unknown.is_empty() {
+            return Ok(());
+        }
+        Err(format!(
+            "no wall-clock bench target in {whose} belongs to {}. The packages that \
+             declare one there are {}. A package that declares none and a name that \
+             is no package at all both look like this.",
+            crate::quoted(unknown),
+            crate::quoted(owners.iter().copied())
+        ))
     }
 }
 
@@ -616,6 +672,31 @@ mod tests {
         assert!(err.contains("must be unique"), "{err}");
     }
 
+    /// A selection that keeps only the named packages.
+    fn keep(names: &[&str]) -> super::Selection {
+        super::Selection {
+            packages: names.iter().map(|&n| n.to_owned()).collect(),
+            excluded: Vec::new(),
+        }
+    }
+
+    /// A selection that drops the named packages and keeps the rest.
+    fn without(names: &[&str]) -> super::Selection {
+        super::Selection {
+            packages: Vec::new(),
+            excluded: names.iter().map(|&n| n.to_owned()).collect(),
+        }
+    }
+
+    /// Only a selection that names nothing keeps every target, so only it
+    /// skips the check and the narrowing.
+    #[test]
+    fn only_an_empty_selection_keeps_everything() {
+        assert!(super::Selection::default().is_everything());
+        assert!(!keep(&["spate-json"]).is_everything());
+        assert!(!without(&["spate-json"]).is_everything());
+    }
+
     /// Two owning packages, so a selection has something to leave out.
     /// `other` is promoted to a workspace member and given a resolve node of
     /// its own; its target name stays distinct, unlike the duplicate case.
@@ -640,7 +721,7 @@ mod tests {
     fn a_selection_narrows_the_targets_and_leaves_the_features_whole() {
         let mut found = two_owners();
         found
-            .select(&["spate-json".to_owned()], "the tree")
+            .select(&keep(&["spate-json"]), "the tree")
             .expect("selects");
 
         assert_eq!(
@@ -663,7 +744,7 @@ mod tests {
     fn an_unknown_package_is_refused_and_names_the_ones_that_declare_a_target() {
         let mut found = two_owners();
         let err = found
-            .select(&["spate-jsn".to_owned()], "the tree")
+            .select(&keep(&["spate-jsn"]), "the tree")
             .expect_err("refused");
 
         assert!(err.contains("'spate-jsn'"), "{err}");
@@ -680,7 +761,7 @@ mod tests {
     fn an_unknown_name_beside_a_known_one_is_still_refused() {
         let mut found = two_owners();
         let err = found
-            .select(&["spate-json".to_owned(), "nope".to_owned()], "the tree")
+            .select(&keep(&["spate-json", "nope"]), "the tree")
             .expect_err("refused");
 
         // The known name appears in the second clause, which lists what does
@@ -693,11 +774,62 @@ mod tests {
         );
     }
 
+    /// An exclusion drops that package's targets and keeps every other one,
+    /// with the resolved features whole as for a narrowing.
+    #[test]
+    fn an_exclusion_drops_that_packages_targets_and_keeps_the_rest() {
+        let mut found = two_owners();
+        found
+            .select(&without(&["spate-json"]), "the tree")
+            .expect("selects");
+
+        assert_eq!(
+            found.targets,
+            [super::BenchTarget {
+                package: "other".to_owned(),
+                target: "someone_elses_wall".to_owned(),
+            }]
+        );
+        assert_eq!(found.features, two_owners().features);
+    }
+
+    /// An exclusion that matches nothing would measure the package it meant to
+    /// drop, so the working tree's check refuses a misspelt one like a
+    /// misspelt narrowing.
+    #[test]
+    fn the_check_refuses_an_unknown_excluded_package() {
+        let err = two_owners()
+            .check(&without(&["spate-jsn"]), "the tree")
+            .expect_err("refused");
+        assert!(err.contains("'spate-jsn'"), "{err}");
+
+        two_owners()
+            .check(&without(&["spate-json"]), "the tree")
+            .expect("a declared package passes");
+        let err = two_owners()
+            .check(&keep(&["nope"]), "the tree")
+            .expect_err("refused");
+        assert!(err.contains("'nope'"), "{err}");
+    }
+
+    /// A base leg can predate a package the working tree has, so an excluded
+    /// name this tree does not declare drops nothing and refuses nothing.
+    #[test]
+    fn a_leg_without_the_excluded_package_keeps_everything() {
+        let mut found = two_owners();
+        found
+            .select(&without(&["only-in-the-head"]), "the base leg")
+            .expect("selects");
+        assert_eq!(found, two_owners());
+    }
+
     /// The default path, which every unnarrowed run takes.
     #[test]
     fn an_empty_selection_changes_nothing() {
         let mut found = two_owners();
-        found.select(&[], "the tree").expect("selects");
+        found
+            .select(&super::Selection::default(), "the tree")
+            .expect("selects");
         assert_eq!(found, two_owners());
     }
 

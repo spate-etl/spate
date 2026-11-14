@@ -162,7 +162,8 @@ A case can keep a clock read that only feeds a measurement, such as a poll-durat
 The wall-clock tier is the `spate-bench` harness in [`bench/`](repo:bench/README.md), plus `*_wall.rs` targets in the crates and in `bench/pipeline/`.
 It stores nothing and gates nothing.
 A wall-clock number answers whether a change moved the time, on a machine you control.
-CI's weekly workflow runs the same comparison on one hosted runner, `main` against the `main` of a week earlier, and writes the report to the job summary.
+CI's weekly workflow runs the same comparison, `main` against the `main` of a week earlier, on two hosted runners: one for `bench/pipeline/` and one for every other target.
+Each writes its report to its job summary.
 
 ```sh
 cargo xtask bench list                                    # every case, with its flags

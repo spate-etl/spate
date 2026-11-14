@@ -2942,17 +2942,6 @@ mod latest_start {
             latest::a_removed_single_consumer(b, t, "earliest")
         });
     }
-    /// Run `body` with this thread's warnings going to `capture`, which a test
-    /// reads during the run.
-    fn with_warnings(capture: &spate_test::LogCapture, body: impl FnOnce()) {
-        let subscriber = tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::WARN)
-            .with_ansi(false)
-            .with_writer(capture.clone())
-            .finish();
-        tracing::subscriber::with_default(subscriber, body);
-    }
-
     /// Advance `clock` past the hold until `driver`'s first consumer has lanes.
     fn past_the_hold(driver: &mut Driver, clock: &TestClock) {
         wait_until(HANG, "the first consumer's lanes", || {
@@ -3096,7 +3085,7 @@ mod latest_start {
                     .filter(|l| l.contains("discarded an assignment"))
                     .count()
             };
-            with_warnings(&capture, || {
+            capture.during(tracing::Level::WARN, || {
                 let cp = Checkpointer::new();
                 let mut source = KafkaSource::new(quiet_latest(&brokers, group));
                 source.open(SourceCtx::new(cp.handle())).expect("open");
@@ -3146,7 +3135,7 @@ mod latest_start {
                 .filter(|l| l.contains("could not settle a start position"))
                 .count()
         };
-        with_warnings(&capture, || {
+        capture.during(tracing::Level::WARN, || {
             source.open(SourceCtx::new(cp.handle())).expect("open");
             wait_until(HANG, "the first attempt", || {
                 assert!(
@@ -3198,7 +3187,7 @@ mod latest_start {
                     .filter(|l| l.contains("could not settle a start position"))
                     .count()
             };
-            with_warnings(&capture, || {
+            capture.during(tracing::Level::WARN, || {
                 let mut driver = Driver::open_watched(source, "retried-epoch");
                 past_the_hold(&mut driver, &clock);
                 // The second consumer's join revokes these lanes, and the
@@ -3237,7 +3226,7 @@ mod latest_start {
         );
         let clock = TestClock::frozen();
         let capture = spate_test::LogCapture::new();
-        with_warnings(&capture, || {
+        capture.during(tracing::Level::WARN, || {
             let first = KafkaSource::new(quiet_latest(&brokers, "retry-revoked"))
                 .with_clock(Arc::clone(&clock) as _);
             let mut first = Driver::open_with(first, |ctx| ctx);
@@ -3291,7 +3280,7 @@ mod latest_start {
         );
         let clock = TestClock::frozen();
         let capture = spate_test::LogCapture::new();
-        with_warnings(&capture, || {
+        capture.during(tracing::Level::WARN, || {
             let first = KafkaSource::new(config()).with_clock(Arc::clone(&clock) as _);
             let mut first = Driver::open_with(first, |ctx| ctx);
             wait_until(HANG, "the failed start", || {
@@ -3350,7 +3339,7 @@ mod latest_start {
         // Hold the clock until a failed lookup has named the cause, so the
         // deadline reads that cause and not the revocation before it.
         let capture = spate_test::LogCapture::new();
-        with_warnings(&capture, || {
+        capture.during(tracing::Level::WARN, || {
             wait_until(HANG, "the failed lookup", || {
                 if let Ok(SourceEvent::LanesRevoked { lanes, barrier }) =
                     driver.source.poll_events(Duration::from_millis(50))

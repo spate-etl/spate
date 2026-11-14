@@ -473,14 +473,8 @@ fn a_confirmed_move_logs_its_time_on_the_feed_clock() {
     };
     let write = moving(&core, receipt);
     clock.advance(Duration::from_secs(3));
-    let capture = spate_test::LogCapture::new();
-    let subscriber = tracing_subscriber::fmt()
-        .with_writer(capture.clone())
-        .with_max_level(tracing::Level::DEBUG)
-        .with_ansi(false)
-        .finish();
-    tracing::subscriber::with_default(subscriber, || core.settle(*write, Ok(())));
-    let logged = capture.lines().join("\n");
+    let logged =
+        spate_test::capture_logs(tracing::Level::DEBUG, || core.settle(*write, Ok(()))).join("\n");
     assert!(
         logged.contains(
             "a failed unit was written to the retry topic unit=\"u\" deliveries=1 confirmed_in=3s"
@@ -499,14 +493,8 @@ fn a_confirmed_attempt_logs_its_time_on_the_feed_clock() {
     let entry = gated(&core, 0);
     let write = attempt_write(&core, entry);
     clock.advance(Duration::from_secs(3));
-    let capture = spate_test::LogCapture::new();
-    let subscriber = tracing_subscriber::fmt()
-        .with_writer(capture.clone())
-        .with_max_level(tracing::Level::TRACE)
-        .with_ansi(false)
-        .finish();
-    tracing::subscriber::with_default(subscriber, || core.settle(write, Ok(())));
-    let logged = capture.lines().join("\n");
+    let logged =
+        spate_test::capture_logs(tracing::Level::TRACE, || core.settle(write, Ok(()))).join("\n");
     assert!(
         logged.contains("a unit's attempt was recorded confirmed_in=3s"),
         "{logged}"
@@ -2211,34 +2199,23 @@ mod cluster {
         (config, core, producer, d)
     }
 
-    /// Run one pass of `gate` under `dispatch`, and advance `clock` by `by`
-    /// once `at` holds or the pass has ended.
+    /// Run one pass of `gate` with its warnings going to `capture`, and
+    /// advance `clock` by `by` once `at` holds or the pass has ended.
     fn pass_advancing(
         gate: &Gate,
-        dispatch: &tracing::Dispatch,
+        capture: &spate_test::LogCapture,
         clock: &TestClock,
         by: Duration,
         at: impl Fn() -> bool,
     ) {
         std::thread::scope(|scope| {
-            let pass = scope.spawn(|| tracing::dispatcher::with_default(dispatch, || gate.pass()));
+            let pass = scope.spawn(|| capture.during(tracing::Level::WARN, || gate.pass()));
             wait_until(HANG, "the pass reaches the advance", || {
                 at() || pass.is_finished()
             });
             clock.advance(by);
             pass.join().expect("the pass returns");
         });
-    }
-
-    /// A dispatch that writes WARN and above to `capture`.
-    fn warnings_to(capture: &spate_test::LogCapture) -> tracing::Dispatch {
-        tracing::Dispatch::new(
-            tracing_subscriber::fmt()
-                .with_writer(capture.clone())
-                .with_max_level(tracing::Level::WARN)
-                .with_ansi(false)
-                .finish(),
-        )
     }
 
     /// The feed's follower and gate, each on its own thread as `connect`
@@ -3402,7 +3379,6 @@ mod cluster {
         .with_step(STEP)
         .with_request_bound(HANG);
         let capture = spate_test::LogCapture::new();
-        let dispatch = warnings_to(&capture);
         // librdkafka serves the refusal as the read's error when its reply
         // is served alone; only a pass that waits for the follower took the
         // equal watermarks the test is about.
@@ -3415,7 +3391,7 @@ mod cluster {
                 ],
             );
             let waited = attempt::lock(&core.ledger).gate_waits;
-            pass_advancing(&gate, &dispatch, &clock, bound, || {
+            pass_advancing(&gate, &capture, &clock, bound, || {
                 attempt::lock(&core.ledger).gate_waits > waited
             });
             assert_eq!(core.lock().gating.len(), 1, "admitted with an empty ledger");
@@ -3578,7 +3554,7 @@ mod cluster {
         .with_step(Duration::from_secs(1));
         // Three requests read empty partition 0; the fourth is partition 1's,
         // which its broker holds past the read's one-second step.
-        pass_advancing(&gate, &warnings_to(&capture), &clock, bound, || {
+        pass_advancing(&gate, &capture, &clock, bound, || {
             core.gate_reads.load(Ordering::SeqCst) == 4
         });
         let waiting: Vec<String> = core
@@ -3671,7 +3647,7 @@ mod cluster {
         .with_step(Duration::from_secs(1))
         .with_request_bound(HANG);
         // Advanced while the round trip holds the watermark read.
-        pass_advancing(&gate, &warnings_to(&capture), &clock, bound, || {
+        pass_advancing(&gate, &capture, &clock, bound, || {
             core.gate_reads.load(Ordering::SeqCst) == 1
         });
         assert_eq!(core.gate_reads.load(Ordering::SeqCst), 1, "read again");

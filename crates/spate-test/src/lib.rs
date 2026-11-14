@@ -74,6 +74,7 @@
 //!
 //! To test one stage without a source, build its input with [`raw_payload`],
 //! [`record`] and [`test_ack`], and its config with [`component_config`].
+//! [`confluent_frame`] puts a schema-registry header in front of a payload.
 //! To assert on metrics, render them with [`render_metrics`] and read series
 //! back with [`metric_value`], [`metric_sum`] or [`metric_series`].
 
@@ -94,7 +95,7 @@ pub mod strategies;
 pub use deser::{EmitCollector, TestDeserializer};
 pub use exposition::{MetricSample, metric_series, metric_sum, metric_value, render_metrics};
 pub use feed::{FeedScript, ScriptedFeed, scripted_feed};
-pub use fixtures::{component_config, raw_payload, record, test_ack, unique_name};
+pub use fixtures::{component_config, confluent_frame, raw_payload, record, test_ack, unique_name};
 pub use logs::{LogCapture, capture_logs, show_logs};
 pub use pipeline::passthrough_runtime;
 pub use run::{HANG, PipelineRun, wait_for_value, wait_until};

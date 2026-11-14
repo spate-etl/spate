@@ -1,6 +1,6 @@
 //! Constructors for the framework values a stage or connector test feeds in:
-//! records, raw payloads, acknowledgment handles, component configs, and
-//! per-test names.
+//! records, raw payloads, Confluent-framed payloads, acknowledgment handles,
+//! component configs, and per-test names.
 
 use spate_core::checkpoint::AckRef;
 use spate_core::config::ComponentConfig;
@@ -57,6 +57,16 @@ pub fn component_config(type_tag: &str, yaml: &str) -> ComponentConfig {
     ComponentConfig::new(type_tag, raw)
 }
 
+/// `body` in the Confluent wire format: the magic byte `0x00`, `schema_id`
+/// big-endian, then `body`.
+///
+/// Schema-registry serializers write this header in front of an Avro datum
+/// or a Protobuf message, so `body` is whatever follows the schema id.
+#[must_use]
+pub fn confluent_frame(schema_id: u32, body: &[u8]) -> Vec<u8> {
+    [&[0x00][..], &schema_id.to_be_bytes(), body].concat()
+}
+
 /// `prefix` with a suffix no other call in this process returns.
 ///
 /// Gauge ownership is process-wide (INV-10), so tests sharing a binary name
@@ -70,6 +80,19 @@ pub fn unique_name(prefix: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn confluent_frame_writes_magic_then_big_endian_id_then_body() {
+        assert_eq!(
+            confluent_frame(0x0102_0304, &[0xAA, 0xBB]),
+            [0x00, 0x01, 0x02, 0x03, 0x04, 0xAA, 0xBB]
+        );
+    }
+
+    #[test]
+    fn confluent_frame_of_an_empty_body_is_the_header() {
+        assert_eq!(confluent_frame(7, &[]), [0x00, 0x00, 0x00, 0x00, 0x07]);
+    }
 
     #[test]
     fn unique_name_never_repeats() {

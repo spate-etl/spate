@@ -1161,7 +1161,7 @@ impl KafkaSource {
                     return Ok(Err(format!("no start read for partition {partition}")));
                 };
                 let at = match plan {
-                    Start::FromLogStart => Offset::Beginning,
+                    Start::Beginning => Offset::Beginning,
                     Start::Validate => {
                         start
                             .seek
@@ -2716,6 +2716,7 @@ mod tests {
         use super::*;
         use spate_core::source::SourceLane;
         use spate_test::HANG;
+        use std::sync::atomic::{AtomicBool, AtomicUsize};
 
         /// `open` refuses a consumer count of zero on a source built without
         /// `from_component_config`.
@@ -3667,8 +3668,8 @@ mod tests {
         fn a_refused_seek_holds_its_lane_until_one_is_accepted() {
             let cluster = mock_holding(5);
             commit_positions(&cluster, 2);
-            let refuse = Arc::new(std::sync::atomic::AtomicBool::new(true));
-            let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let refuse = Arc::new(AtomicBool::new(true));
+            let calls = Arc::new(AtomicUsize::new(0));
             let (r, c) = (Arc::clone(&refuse), Arc::clone(&calls));
             let seek: crate::epoch::SeekWith = Box::new(move |list, _| {
                 c.fetch_add(1, Ordering::SeqCst);

@@ -188,6 +188,14 @@ enum Answer {
     Stopped,
 }
 
+/// A start list for `assign`, the partitions to seek to their commit, and
+/// each partition with the committed offset and epoch its reads start at.
+type Starts = (
+    TopicPartitionList,
+    TopicPartitionList,
+    Vec<(Tp, Option<i64>, i32)>,
+);
+
 /// The feed's group member: its consumer, and the commit the group has not
 /// answered.
 pub(crate) struct Member {
@@ -624,15 +632,7 @@ impl Driver {
     /// Returns the start list, the partitions to seek to their commit and
     /// epoch, and each partition with the committed offset and epoch its
     /// reads start at. Every read here ends by `until`.
-    fn start_positions(
-        &mut self,
-        tpl: &TopicPartitionList,
-        until: Instant,
-    ) -> (
-        TopicPartitionList,
-        TopicPartitionList,
-        Vec<(Tp, Option<i64>, i32)>,
-    ) {
+    fn start_positions(&mut self, tpl: &TopicPartitionList, until: Instant) -> Starts {
         let unread = |tpl: &TopicPartitionList| {
             let started = self.tps(tpl).into_iter().map(|tp| (tp, None, -1)).collect();
             (tpl.clone(), TopicPartitionList::new(), started)

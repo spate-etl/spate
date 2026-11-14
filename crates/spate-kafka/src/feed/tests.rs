@@ -2037,7 +2037,7 @@ mod cluster {
     use spate_test::{HANG, wait_until};
     use std::collections::BTreeSet;
     use std::sync::Arc;
-    use std::sync::atomic::Ordering;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::mpsc;
     use std::time::Duration;
 
@@ -4114,7 +4114,7 @@ mod cluster {
     /// A seek answering as `mode` says, counting its calls.
     fn scripted(
         mode: &Arc<std::sync::Mutex<Seeks>>,
-        calls: &Arc<std::sync::atomic::AtomicUsize>,
+        calls: &Arc<AtomicUsize>,
     ) -> crate::epoch::SeekWith {
         let (mode, calls) = (Arc::clone(mode), Arc::clone(calls));
         Box::new(move |mut list, _| {
@@ -4193,7 +4193,7 @@ mod cluster {
         let cluster = committed_within_the_log(&group);
         let (_, _core, _producer, mut d) = parts_for(&cluster.bootstrap_servers(), &group);
         let mode = Arc::new(std::sync::Mutex::new(Seeks::Refuse));
-        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let calls = Arc::new(AtomicUsize::new(0));
         d.seek_with = Some(scripted(&mode, &calls));
         drive(&mut d, "the retry partition delivers", |d| {
             delivered(d, &retry())
@@ -4232,7 +4232,7 @@ mod cluster {
             let cluster = committed_within_the_log(&group);
             let (_, _core, _producer, mut d) = parts_for(&cluster.bootstrap_servers(), &group);
             let mode = Arc::new(std::sync::Mutex::new(Seeks::Refuse));
-            let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let calls = Arc::new(AtomicUsize::new(0));
             d.seek_with = Some(scripted(&mode, &calls));
             drive(&mut d, "the work partition waits for its seek", |d| {
                 d.validating.contains(&work())
@@ -4306,7 +4306,7 @@ mod cluster {
         let cluster = committed_within_the_log(&group);
         let (_, core, _producer, mut d) = parts_for(&cluster.bootstrap_servers(), &group);
         let mode = Arc::new(std::sync::Mutex::new(Seeks::Refuse));
-        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let calls = Arc::new(AtomicUsize::new(0));
         d.seek_with = Some(scripted(&mode, &calls));
         drive(&mut d, "the work partition waits for its seek", |d| {
             d.validating.contains(&work())
@@ -4326,7 +4326,7 @@ mod cluster {
         let cluster = committed_within_the_log(&group);
         let (_, _core, _producer, mut d) = parts_for(&cluster.bootstrap_servers(), &group);
         let mode = Arc::new(std::sync::Mutex::new(Seeks::Refuse));
-        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let calls = Arc::new(AtomicUsize::new(0));
         d.seek_with = Some(scripted(&mode, &calls));
         d.validating = crate::epoch::Validating::new(3);
         drive(&mut d, "the work partition waits for its seek", |d| {
@@ -4360,7 +4360,7 @@ mod cluster {
             SyncClock::new(Arc::clone(&clock) as spate_core::clock::SharedClock),
         );
         let mode = Arc::new(std::sync::Mutex::new(Seeks::Accept));
-        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let calls = Arc::new(AtomicUsize::new(0));
         d.seek_with = Some(scripted(&mode, &calls));
         let bound = d.call_bound;
         d.on_call = Some(Box::new(move |wait| {

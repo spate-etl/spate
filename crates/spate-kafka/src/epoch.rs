@@ -96,7 +96,7 @@ pub(crate) enum Start {
     /// the leader before fetching.
     Validate,
     /// Read from the log start: the commit is above the partition's end.
-    FromLogStart,
+    Beginning,
     /// Start where the committed list says, unchecked: no epoch, no concrete
     /// offset, or an offset with nothing below it.
     AsIs,
@@ -118,7 +118,7 @@ pub(crate) fn plan_start(
 ) -> Start {
     match offset {
         Offset::Offset(offset) if offset > 0 && epoch >= 0 => match end {
-            Some(end) if offset > end && above_end_from_log_start => Start::FromLogStart,
+            Some(end) if offset > end && above_end_from_log_start => Start::Beginning,
             _ => Start::Validate,
         },
         _ => Start::AsIs,
@@ -161,7 +161,7 @@ pub(crate) fn plan_starts(
             .and_then(|e| listed_offset(&e).ok());
         match plan_start(elem.offset(), epoch, end, above_end_from_log_start) {
             Start::AsIs => {}
-            Start::FromLogStart => {
+            Start::Beginning => {
                 let _ = elem.set_offset(Offset::Beginning);
             }
             Start::Validate => {
@@ -386,12 +386,12 @@ mod tests {
     /// The start each commit takes, for each end and policy.
     #[test]
     fn each_commit_takes_its_start() {
-        use Start::{AsIs, FromLogStart, Validate};
+        use Start::{AsIs, Beginning, Validate};
         let at = Offset::Offset;
         for (offset, epoch, end, from_log_start, want) in [
             (at(15), 3, Some(20), true, Validate),
             (at(20), 3, Some(20), true, Validate),
-            (at(21), 3, Some(20), true, FromLogStart),
+            (at(21), 3, Some(20), true, Beginning),
             (at(21), 3, Some(20), false, Validate),
             (at(21), 3, None, true, Validate),
             (at(15), 0, Some(20), true, Validate),

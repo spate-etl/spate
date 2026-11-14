@@ -94,7 +94,7 @@ after a real unclean election.
 
 ## More information
 
-Landed in the pull request that fixes
+Landed in [#2117](https://github.com/spate-etl/spate/pull/2117), which fixes
 [#2104](https://github.com/spate-etl/spate/issues/2104).
 [ADR-0100](0100-a-kafka-commit-above-a-partitions-end-holds-a-bounded-job.md)
 still applies to a commit above the end. The behavior is described on the

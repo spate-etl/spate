@@ -18,15 +18,8 @@ const DRAIN: &str = "draining them to admit every consumer's partitions together
 const RETRY: &str = "could not settle a start position";
 
 /// Every line the process logs at `INFO` and above.
-static LOGS: LazyLock<LogCapture> = LazyLock::new(|| {
-    let capture = LogCapture::new();
-    tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::INFO)
-        .with_ansi(false)
-        .with_writer(capture.clone())
-        .init();
-    capture
-});
+static LOGS: LazyLock<LogCapture> =
+    LazyLock::new(|| LogCapture::install_global(tracing::Level::INFO));
 
 /// The tests here share [`LOGS`], and `cargo test` runs a binary's tests on
 /// several threads, so each test holds this while it runs.

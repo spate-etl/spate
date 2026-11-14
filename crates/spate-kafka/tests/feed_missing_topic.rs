@@ -18,12 +18,7 @@ use support::feed::{
 /// write in that window is sent again, and it lands once the window ends.
 #[test]
 fn a_topic_reported_missing_once_does_not_stop_the_feed() {
-    let capture = LogCapture::new();
-    tracing_subscriber::fmt()
-        .with_writer(capture.clone())
-        .with_max_level(tracing::Level::DEBUG)
-        .without_time()
-        .init();
+    let capture = LogCapture::install_global(tracing::Level::DEBUG);
     let cluster = MockKafka::new();
     for topic in [WORK, RETRY, DEAD] {
         cluster.create_topic(topic, 1, 1).expect("create topic");

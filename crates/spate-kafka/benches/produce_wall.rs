@@ -28,9 +28,13 @@
 //! # Cases
 //!
 //! - `produce_keyless`: payload only.
-//! - `produce_keyed`: adds a 16-byte key to each record.
 //! - `produce_stamped`: adds four headers to each record, which the writer
-//!   copies into a librdkafka header list.
+//!   copies into a librdkafka header list. It took 37% longer than
+//!   `produce_keyless` when the cases were chosen.
+//!
+//! A keyed case is left out. With a 16-byte key per record it took 4.9% longer
+//! than `produce_keyless`, under the driver's 5% floor (both legs of a
+//! 6-replicate A/A run, Apple M5 Max).
 //!
 //! Run: `cargo xtask bench ab --ref main --package spate-kafka --filter produce_`
 

@@ -25,10 +25,13 @@
 //!
 //! # Cases
 //!
-//! - `poll_default_batch` polls up to 512 records at a time, the
-//!   `RuntimeOptions` default.
-//! - `poll_small_batch` polls up to 32, so the per-poll work (the ack and
-//!   clearing the batch) weighs more against the per-record work.
+//! `poll_default_batch` polls up to 512 records at a time, the `RuntimeOptions`
+//! default.
+//!
+//! A case polling up to 32 at a time, so that the per-poll work (the ack and
+//! clearing the batch) weighed more, is left out. It took 2.4% longer than
+//! `poll_default_batch`, under the driver's 5% floor (both legs of a
+//! 6-replicate A/A run, Apple M5 Max).
 //!
 //! The iteration count is pinned at `DRAINS`, because a region's records are
 //! produced before it opens. `poll_rig.rs` holds the count under the client's
@@ -83,9 +86,7 @@ fn case(suite: Suite, id: &str, max_records: usize) -> Suite {
 }
 
 fn suite() -> Suite {
-    let suite = spate_bench::suite("spate-kafka");
-    let suite = case(suite, "poll_default_batch", 512);
-    case(suite, "poll_small_batch", 32)
+    case(spate_bench::suite("spate-kafka"), "poll_default_batch", 512)
 }
 
 bench_main!(suite);

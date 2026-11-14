@@ -31,17 +31,11 @@ pub(crate) struct Case {
 
 /// Every case `produce_wall.rs` runs. The fixture test writes each one and
 /// reads back its shape.
-pub(crate) const CASES: [Case; 3] = [
+pub(crate) const CASES: [Case; 2] = [
     Case {
         id: "produce_keyless",
         batch: crate::prepare_rig::keyless,
         keyed: false,
-        headers: 0,
-    },
-    Case {
-        id: "produce_keyed",
-        batch: crate::prepare_rig::keyed,
-        keyed: true,
         headers: 0,
     },
     Case {

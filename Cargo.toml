@@ -136,9 +136,11 @@ rustls = { version = "0.23.45", default-features = false, features = ["aws_lc_rs
 url = "2.5.4"
 futures-util = { version = "0.3.31", default-features = false }
 base64 = "0.23.1"
-flate2 = "1.1"
-# The pipeline bench writes its gzip objects with these, so the stored bytes
-# stay the same whichever backend flate2 is built with.
+# spate-s3 inflates gzip objects through zlib-rs, which picks its SIMD paths
+# at run time under `runtime_detection`. 1.1.10 is the first release with it.
+flate2 = { version = "1.1.10", default-features = false, features = ["zlib-rs", "runtime_detection"] }
+# The pipeline and S3 framing benches write their gzip objects with these, so
+# the stored bytes stay the same whichever backend flate2 is built with.
 crc32fast = "1.5"
 miniz_oxide = "0.9.1"
 # clickhouse requires ^0.13, so its copy stays in the graph beside this one

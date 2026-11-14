@@ -4124,56 +4124,84 @@ mod tests {
         }
 
         /// A main-queue rewind leaves a partition waiting for its seek paused,
-        /// so its lane reads nothing from the rewound offset unchecked.
+        /// so its lane reads nothing from the rewound offset unchecked while
+        /// another partition reads.
         #[test]
         fn a_rewind_leaves_a_partition_waiting_for_its_seek_paused() {
             use crate::client::testing::{Raw as _, raw_config};
             use spate_core::source::SourceLane as _;
-            let cluster = mock_holding(5);
-            commit_positions(&cluster, 2);
-            let seek: crate::epoch::SeekWith =
-                Box::new(|_, _| Err(KafkaError::Seek("refused".to_owned())));
-            let (mut source, mut lanes) = assigned_seeking(&cluster, "earliest", &[], Some(seek));
-            assert!(source.members[0].validating.contains(&0));
+            let cluster = MockKafka::new();
+            cluster.create_topic("t", 2, 1).expect("create topic");
             cluster.create_topic("unsplit", 1, 1).expect("create topic");
             let producer: rdkafka::producer::BaseProducer = raw_config()
                 .set("bootstrap.servers", cluster.bootstrap_servers())
                 .build()
                 .expect("producer");
-            let leak = || {
+            let send = |topic: &str, partition: i32| {
                 producer
                     .send(
-                        rdkafka::producer::BaseRecord::<(), _>::to("unsplit")
-                            .partition(0)
-                            .payload(&b"leak"[..]),
+                        rdkafka::producer::BaseRecord::<(), _>::to(topic)
+                            .partition(partition)
+                            .payload("x"),
                     )
                     .expect("enqueue");
                 rdkafka::producer::Producer::flush(&producer, Duration::from_secs(30))
                     .expect("flush");
             };
-            // An application pause outlives the assignment, so `t` stays
-            // paused, and a message on the never-split partition rewinds
-            // `t`'s partition 0.
-            let mut both = TopicPartitionList::new();
-            both.add_partition_offset("t", 0, Offset::Offset(2))
-                .expect("list entry");
-            both.add_partition_offset("unsplit", 0, Offset::Beginning)
-                .expect("list entry");
-            source.members[0].consumer.assign(&both).expect("assign");
-            // Each round's rewind fetches `unsplit` after the one before, and
-            // that fetch carries `t` too when the rewind resumed it.
-            for round in 1..=3 {
-                leak();
-                spate_test::wait_until(HANG, "the rewind", || {
+            for _ in 0..5 {
+                send("t", 0);
+            }
+            commit_positions(&cluster, 2);
+            // Partition 0's seek is refused; partition 1 has no commit and
+            // is not sought.
+            let seek: crate::epoch::SeekWith =
+                Box::new(|_, _| Err(KafkaError::Seek("refused".to_owned())));
+            let (mut source, mut lanes) = assigned_seeking(&cluster, "earliest", &[], Some(seek));
+            assert!(source.members[0].validating.contains(&0));
+            let at = |p: u32| {
+                lanes
+                    .iter()
+                    .position(|l| l.partition() == PartitionId(p))
+                    .expect("lane")
+            };
+            let (i0, i1) = (at(0), at(1));
+            // An application pause outlives the assignment, so partition 0
+            // stays paused, and a message on the never-split partition
+            // rewinds partition 0 of `t`.
+            let mut all = TopicPartitionList::new();
+            for (topic, partition, offset) in [
+                ("t", 0, Offset::Offset(2)),
+                ("t", 1, Offset::Beginning),
+                ("unsplit", 0, Offset::Beginning),
+            ] {
+                all.add_partition_offset(topic, partition, offset)
+                    .expect("list entry");
+            }
+            source.members[0].consumer.assign(&all).expect("assign");
+            send("unsplit", 0);
+            spate_test::wait_until(HANG, "the rewind", || {
+                source
+                    .poll_events(Duration::from_millis(100))
+                    .expect("poll_events");
+                source.main_queue_rewinds > 0
+            });
+            // Two rounds on partition 1: the fetch after the first carries
+            // partition 0 too when the rewind resumed it.
+            for round in 0..2 {
+                send("t", 1);
+                spate_test::wait_until(HANG, "partition 1 delivers", || {
                     source
-                        .poll_events(Duration::from_millis(100))
+                        .poll_events(Duration::from_millis(10))
                         .expect("poll_events");
-                    source.main_queue_rewinds >= round
+                    lanes[i1]
+                        .poll(1, Duration::from_millis(100))
+                        .expect("lane 1 poll")
+                        .is_some()
                 });
                 assert!(
-                    lanes[0]
+                    lanes[i0]
                         .poll(1, Duration::ZERO)
-                        .expect("lane poll")
+                        .expect("lane 0 poll")
                         .is_none(),
                     "round {round}: a partition waiting for its seek was read"
                 );

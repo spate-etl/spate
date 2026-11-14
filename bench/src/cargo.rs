@@ -222,7 +222,8 @@ struct MetaNode {
 ///
 /// # Errors
 ///
-/// When cargo fails, or when a target's name is not a valid Rust identifier.
+/// When cargo fails, when its metadata has no `resolve` section, or when a
+/// target's name is not a valid Rust identifier.
 pub fn discover(dir: &Path, feature_args: &[String]) -> Result<Discovery, String> {
     let raw = run(
         dir,

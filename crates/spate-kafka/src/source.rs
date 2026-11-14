@@ -4062,19 +4062,14 @@ mod tests {
         /// A mock cluster with one `orders` partition per consumer, on which no
         /// group forms. No test here needs a group: the start commit's test sets
         /// its generation by hand, and a flush's consumers hold no assignment, so
-        /// each answers `NoOffset` before any request. The mock reads nothing
-        /// more from a member whose join it holds, which would leave that
-        /// member's calls waiting in real time.
+        /// each answers `NoOffset` before any request.
         fn mock() -> MockKafka {
             let cluster = MockKafka::new();
             let partitions = i32::try_from(CONSUMERS).expect("partitions");
             cluster
                 .create_topic("orders", partitions, 1)
                 .expect("create topic");
-            cluster.request_errors(
-                RDKafkaApiKey::JoinGroup,
-                &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_COORDINATOR_LOAD_IN_PROGRESS; 100_000],
-            );
+            cluster.refuse_joins();
             cluster
         }
 

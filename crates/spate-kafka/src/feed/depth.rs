@@ -1410,7 +1410,10 @@ mod tests {
     /// Pins that the feed's drop joins the depth thread while a request of
     /// its read is in flight: the coordinator holds the thread's OffsetFetch
     /// reply past the request's bound, and the thread's share of the core is
-    /// gone when the drop returns. Regression for #1761.
+    /// gone when the drop returns. The read failing on its committed offsets
+    /// shows the held request was the depth thread's.
+    /// `a_feed_stopped_at_any_request_of_a_read_sends_no_further_request`
+    /// pins that a stopped read sends nothing more. Regression for #1761.
     #[test]
     fn the_drop_waits_for_a_depth_request_in_flight() {
         use crate::testutil::assert_returns;
@@ -1419,19 +1422,14 @@ mod tests {
         use spate_test::{HANG, wait_until};
         let cluster = MockKafka::new();
         cluster.track_requests();
+        // With no group, the depth thread sends the only OffsetFetch.
+        cluster.refuse_joins();
         let (feed, _io) = connected(&cluster);
-        // The group member fetches its committed offsets at assignment, and
-        // the hold below is for the request after that one.
-        wait_until(HANG, "the member's OffsetFetch", || {
+        cluster.hold_next_reply(1, RDKafkaApiKey::OffsetFetch, 2 * REQUEST_BOUND);
+        let mut reading = feed.read_depth(DepthOf::Feed).expect("a reading");
+        wait_until(HANG, "the depth thread's OffsetFetch", || {
             cluster.received(RDKafkaApiKey::OffsetFetch) >= 1
         });
-        cluster.hold_next_reply(1, RDKafkaApiKey::OffsetFetch, 2 * REQUEST_BOUND);
-        let fetches = cluster.received(RDKafkaApiKey::OffsetFetch);
-        let _reading = feed.read_depth(DepthOf::Feed).expect("a reading");
-        wait_until(HANG, "the depth thread's OffsetFetch", || {
-            cluster.received(RDKafkaApiKey::OffsetFetch) > fetches
-        });
-        let listed = cluster.received(RDKafkaApiKey::ListOffsets);
         let core = Arc::clone(&feed.core);
         let handle = cluster.native() as usize;
         assert_returns(handle, HANG, "the feed's drop", move || drop(feed));
@@ -1440,10 +1438,13 @@ mod tests {
             1,
             "the depth thread outlives the feed's drop"
         );
-        assert_eq!(
-            cluster.received(RDKafkaApiKey::ListOffsets),
-            listed,
-            "the read sent a request after the stop"
+        let e = reading
+            .try_outcome()
+            .expect("the read settled")
+            .expect_err("the read failed on its held request");
+        assert!(
+            e.reason.contains("reading the group's committed offsets"),
+            "{e}"
         );
     }
 

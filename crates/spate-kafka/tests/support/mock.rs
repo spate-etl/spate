@@ -94,6 +94,17 @@ impl MockKafka {
         );
     }
 
+    /// Refuses every `JoinGroup` as a coordinator still loading, so no group
+    /// forms, until [`MockKafka::clear_request_errors`] ends it. A test that
+    /// needs no group calls it: while the mock holds a member's join it reads
+    /// nothing more from that member's connection.
+    pub(crate) fn refuse_joins(&self) {
+        self.request_errors(
+            RDKafkaApiKey::JoinGroup,
+            &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_COORDINATOR_LOAD_IN_PROGRESS; 100_000],
+        );
+    }
+
     fn cluster(&self) -> MockCluster<'_, DefaultProducerContext> {
         self.client
             .client()

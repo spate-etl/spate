@@ -1215,12 +1215,7 @@ fn a_commit_above_the_end_holds_a_bounded_job_until_a_member_reads() {
     job.publish("a.ndjson", &a);
     job.publish("b.ndjson", &b);
     support::commit_at(&brokers, &job.group, WORK, 5);
-    // Each refusal costs the worker one join interval, about a second, so
-    // these outlast the hold below.
-    cluster.request_errors(
-        rdkafka::types::RDKafkaApiKey::JoinGroup,
-        &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_COORDINATOR_LOAD_IN_PROGRESS; 600],
-    );
+    cluster.refuse_joins();
 
     let clock = TestClock::frozen();
     let worker = launch_bounded(ON_MOCK, &job.data, &job.section, &clock);

@@ -19,6 +19,7 @@ use rdkafka::client::{Client, ClientContext};
 use rdkafka::config::{FromClientConfigAndContext, RDKafkaLogLevel};
 use rdkafka::consumer::{BaseConsumer, Consumer as _, ConsumerContext};
 use rdkafka::error::{IsError as _, KafkaError, KafkaResult, RDKafkaErrorCode};
+use rdkafka::message::BorrowedMessage;
 use rdkafka::producer::{DeliveryResult, ProducerContext};
 use rdkafka::statistics::Statistics;
 use rdkafka::topic_partition_list::TopicPartitionListElem;
@@ -29,6 +30,7 @@ use spate_core::config::{Denylist, DurationBounds, ReservedKeyError, check_durat
 use spate_core::hash::FastSet;
 use std::borrow::Cow;
 use std::collections::BTreeMap;
+use std::ffi::CString;
 use std::fmt;
 use std::ops::Deref;
 use std::sync::{Arc, mpsc};
@@ -462,22 +464,74 @@ pub(crate) fn serve_queued<C: ConsumerContext>(consumer: &BaseConsumer<C>) {
 }
 
 /// The next offset the application reads on the one partition in `list`, or
-/// [`Offset::Invalid`] until a served op sets it.
+/// [`Offset::Invalid`] until a served op sets it, with the leader epoch of the
+/// record or marker before it, or -1 when none is known.
 ///
 /// Takes the client, topic and partition locks and makes no broker call. It
 /// reads through the list's `elems` pointer because `elements()` allocates.
 pub(crate) fn read_position<C: ConsumerContext>(
     consumer: &BaseConsumer<C>,
     list: &mut TopicPartitionList,
-) -> Offset {
+) -> (Offset, i32) {
     debug_assert_eq!(list.count(), 1, "one partition per position read");
     // SAFETY: the client pointer is valid while `consumer` is borrowed, and
-    // `list` holds the one element the read below dereferences, written only
+    // `list` holds the one element the reads below dereference, written only
     // under this exclusive borrow.
     unsafe {
         rdkafka::bindings::rd_kafka_position(consumer.client().native_ptr(), list.ptr());
-        Offset::from_raw((*(*list.ptr()).elems).offset)
+        let elem = (*list.ptr()).elems;
+        (
+            Offset::from_raw((*elem).offset),
+            rdkafka::bindings::rd_kafka_topic_partition_get_leader_epoch(elem),
+        )
     }
+}
+
+/// The leader epoch the broker sent with `message`, or -1 when it sent none.
+pub(crate) fn message_epoch(message: &BorrowedMessage<'_>) -> i32 {
+    // SAFETY: `message` keeps the pointer valid while it is borrowed, and the
+    // call only reads it.
+    unsafe { rdkafka::bindings::rd_kafka_message_leader_epoch(message.ptr()) }
+}
+
+/// The element of `tpl` for `partition` of `topic`, or null when it has none.
+fn find_elem(
+    tpl: &TopicPartitionList,
+    topic: &str,
+    partition: i32,
+) -> *mut rdkafka::bindings::rd_kafka_topic_partition_t {
+    let Ok(topic) = CString::new(topic) else {
+        return std::ptr::null_mut();
+    };
+    // SAFETY: `tpl` owns its list while it is borrowed, and `topic` outlives
+    // the call, which keeps neither pointer.
+    unsafe {
+        rdkafka::bindings::rd_kafka_topic_partition_list_find(tpl.ptr(), topic.as_ptr(), partition)
+    }
+}
+
+/// The leader epoch `tpl` holds for `partition` of `topic`, or -1 when it
+/// holds none or has no such element.
+pub(crate) fn epoch_of(tpl: &TopicPartitionList, topic: &str, partition: i32) -> i32 {
+    let elem = find_elem(tpl, topic, partition);
+    if elem.is_null() {
+        return -1;
+    }
+    // SAFETY: `elem` is a non-null element of the list `tpl` owns, which is
+    // borrowed across the read.
+    unsafe { rdkafka::bindings::rd_kafka_topic_partition_get_leader_epoch(elem) }
+}
+
+/// Sets the leader epoch of `tpl`'s element for `partition` of `topic`, and
+/// does nothing when it has no such element. An epoch below 0 sends none.
+pub(crate) fn set_epoch(tpl: &mut TopicPartitionList, topic: &str, partition: i32, epoch: i32) {
+    let elem = find_elem(tpl, topic, partition);
+    if elem.is_null() {
+        return;
+    }
+    // SAFETY: `elem` is a non-null element of the list `tpl` owns, written
+    // under this exclusive borrow.
+    unsafe { rdkafka::bindings::rd_kafka_topic_partition_set_leader_epoch(elem, epoch) }
 }
 
 /// The most partitions one consumer takes in one assignment. Each takes a
@@ -817,6 +871,30 @@ impl<H: ProducerHooks> ProducerContext for SpateContext<H> {
 #[cfg(test)]
 pub(crate) mod testing {
     use super::*;
+
+    /// Marks each element of `list` whose topic `error` maps to an error with
+    /// that error, as a broker's answer would.
+    pub(crate) fn mark_errors(
+        list: &mut TopicPartitionList,
+        error: impl Fn(&str, i32) -> Option<rdkafka::types::RDKafkaRespErr>,
+    ) {
+        let marks: Vec<_> = list
+            .elements()
+            .iter()
+            .map(|e| error(e.topic(), e.partition()))
+            .collect();
+        let count = list.count();
+        // SAFETY: `list` owns `count` elements at `elems`, written only under
+        // this exclusive borrow, and `elements()` above lists them in order.
+        unsafe {
+            let elems = (*list.ptr()).elems;
+            for (i, mark) in marks.into_iter().enumerate().take(count) {
+                if let Some(code) = mark {
+                    (*elems.add(i)).err = code;
+                }
+            }
+        }
+    }
 
     /// A client over exactly `properties`, outside every role, under
     /// `hooks`: for a test that needs a configuration no role builds.
@@ -1363,6 +1441,27 @@ mod tests {
     }
 
     /// A role with no error hook of its own, such as the admin client, logs
+    /// An epoch set on an element reads back, and a partition the list does
+    /// not hold takes none and reads -1.
+    #[test]
+    fn an_epoch_set_on_an_element_reads_back() {
+        let mut tpl = TopicPartitionList::new();
+        tpl.add_partition_offset("t", 0, Offset::Offset(5))
+            .expect("offset");
+        assert_eq!(epoch_of(&tpl, "t", 0), -1);
+        set_epoch(&mut tpl, "t", 0, 7);
+        assert_eq!(epoch_of(&tpl, "t", 0), 7);
+        set_epoch(&mut tpl, "t", 1, 9);
+        set_epoch(&mut tpl, "u", 0, 9);
+        assert_eq!(epoch_of(&tpl, "t", 1), -1);
+        assert_eq!(epoch_of(&tpl, "t", 0), 7);
+        assert_eq!(tpl.count(), 1);
+        assert!(
+            find_elem(&tpl, "t\0", 0).is_null(),
+            "a name with a NUL finds nothing"
+        );
+    }
+
     /// each error event as a warning under the `librdkafka` target.
     #[test]
     fn the_default_error_hook_logs_a_warning() {

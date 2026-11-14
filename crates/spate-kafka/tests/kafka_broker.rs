@@ -545,6 +545,9 @@ fn real_broker_latest_on_a_marker_only_partition_retires_nothing() {
         support::committed_by(&brokers, "latest", TOPIC, 1),
         [rdkafka::Offset::Offset(settled_end(&brokers, TOPIC, 0))]
     );
+    // The start commit carries the epoch the end was listed with.
+    let (_, epoch) = support::committed_epoch(&brokers, "latest", TOPIC);
+    assert!(epoch >= 0, "the start commit carries no epoch");
 }
 
 /// Under `earliest` a partition holding only an aborted transaction delivers
@@ -558,6 +561,75 @@ fn real_broker_earliest_on_an_aborted_only_partition_commits_past_its_marker() {
     let end = settled_end(&brokers, TOPIC, 0);
     assert_eq!(watched.poll_until_committed(0, 0, end), [end]);
     watched.wait_lag(0, 0.0);
+    // No record was delivered, so the epoch is the one the position past the
+    // marker carries.
+    let (offset, epoch) = support::committed_epoch(&brokers, "aborted-only", TOPIC);
+    assert_eq!(offset, rdkafka::Offset::Offset(end));
+    assert!(epoch >= 0, "the commit past the marker carries no epoch");
+}
+
+/// A source's commit carries the leader epoch of the record before it, under
+/// `earliest` and under `latest`, whose start commit carries the epoch the
+/// end was listed with.
+#[test]
+#[ignore = "requires Docker"]
+fn real_broker_a_source_commit_carries_the_epoch_of_the_record_before_it() {
+    let container = broker().start().expect("start kafka container");
+    let port = container.get_host_port_ipv4(KAFKA_PORT).expect("port");
+    let brokers = format!("127.0.0.1:{port}");
+    produce(&brokers, TOPIC, 5, 1, "before");
+    let epoch = support::record_epoch(&brokers, TOPIC, 4);
+    assert!(epoch >= 0, "the broker sends an epoch with each record");
+
+    let mut watched = Watched::open(config(&brokers, "epoch-earliest"));
+    assert_eq!(watched.read(0, 5).len(), 5);
+    watched.poll_until_committed(0, 0, 5);
+    assert_eq!(
+        support::committed_epoch(&brokers, "epoch-earliest", TOPIC),
+        (rdkafka::Offset::Offset(5), epoch)
+    );
+    drop(watched);
+
+    let mut cfg = config(&brokers, "epoch-latest");
+    cfg.rdkafka
+        .insert("auto.offset.reset".into(), "latest".into());
+    let mut watched = Watched::open(cfg);
+    assert_eq!(
+        support::committed_epoch(&brokers, "epoch-latest", TOPIC),
+        (rdkafka::Offset::Offset(5), epoch),
+        "the start commit"
+    );
+    produce(&brokers, TOPIC, 3, 1, "after");
+    assert_eq!(watched.read(0, 3), [5, 6, 7]);
+    watched.poll_until_committed(0, 0, 8);
+    assert_eq!(
+        support::committed_epoch(&brokers, "epoch-latest", TOPIC),
+        (rdkafka::Offset::Offset(8), epoch)
+    );
+}
+
+/// A source assigned a partition whose commit carries an epoch the leader
+/// answers below the commit, as after an unclean election truncated the log,
+/// reads the records below the commit, under `latest` and `earliest`. The
+/// source had the defect #2104 reports for the feed.
+#[test]
+#[ignore = "requires Docker"]
+fn real_broker_a_source_reads_below_a_commit_the_leader_answers_lower() {
+    let container = broker().start().expect("start kafka container");
+    let port = container.get_host_port_ipv4(KAFKA_PORT).expect("port");
+    let brokers = format!("127.0.0.1:{port}");
+    produce(&brokers, TOPIC, 5, 1, "truncated");
+    for reset in ["latest", "earliest"] {
+        let group = format!("truncated-{reset}");
+        // An epoch the leader never had: the leader answers it with an offset
+        // below the commit.
+        support::commit_with_epoch(&brokers, &group, TOPIC, 3, 7);
+        let mut cfg = config(&brokers, &group);
+        cfg.rdkafka.insert("auto.offset.reset".into(), reset.into());
+        let mut watched = Watched::open(cfg);
+        let read = watched.read(0, 1);
+        assert!(read[0] < 3, "{reset}: the first record read is {}", read[0]);
+    }
 }
 
 /// A group that passed an aborted transaction under `read_committed` delivers

@@ -400,20 +400,49 @@ A revocation's commit reads no position, so a marker served since the last
 commit falls to the partition's next owner, as does a marker not yet served when
 a worker stops.
 
+Each commit carries the leader epoch of the record before the committed offset,
+so the partition's next owner can check the commit against the log. A commit
+raised to the log start carries no epoch.
+
 An unclean leader election can truncate a partition below the group's commit.
 While the partition's end stays below that commit, the depth counts the
 partition from its log start, so a bounded job waits for a worker to read it
 (see [Ending a bounded job](#ending-a-bounded-job)). A worker assigned the
-partition starts at its earliest offset and reads every unit on it.
+partition starts at its earliest offset and reads every unit on it, unless
+reading the partition's end fails.
+
+A worker assigned a partition whose commit carries an epoch and is at or below
+its end seeks to the commit with that epoch, so librdkafka asks the leader
+where the epoch's records end before the worker reads anything. When the log
+was truncated below the commit, the worker starts at the point of truncation and
+reads the units written to the reused offsets below the commit. Its first
+delivery below the commit logs the committed offset and the first offset at
+`INFO`.
+
+The seek is refused while librdkafka defers the partition's start, such as
+while a commit is still waiting for the group's answer. The partition stays
+paused until a seek is accepted. Once the refusals have lasted a quarter of
+`max.poll.interval.ms`, at most 10 seconds, a warning names the partition.
 
 A worker that held the partition through the truncation moves to the point of
 truncation and reads the units written after it. With nothing written after it,
 that worker commits nothing on the partition, so the job waits until the group
 next rebalances.
 
-Once units written after the truncation carry the end to the commit or past it,
-a worker that starts at that commit never reads the units written to the reused
-offsets below it, and the depth does not count them.
+A failed read of a partition's end leaves a commit above the end sought as
+well, and a warning names the partition. So does an end read with no time left
+in the committed read's bound. When the leader answers that the epoch's records
+end at the log's end, the worker starts there and reads only units written
+after it. With nothing written after it, that worker commits nothing on the
+partition either, and the job waits until the group next rebalances.
+
+A worker starts at a commit without checking it when the commit carries no
+epoch, as a commit from an earlier Spate release does. It also starts unchecked
+when reading the committed offsets fails, or when the seek fails with any error
+other than a refusal, which a warning names. Once units written after the
+truncation carry the end to such a commit or past it, a worker that starts at
+it never reads the units written to the reused offsets below it, and the depth
+does not count them.
 
 ## Copying dead-lettered units back
 
@@ -470,7 +499,8 @@ A partition whose commit is above its end, after a
 [truncation](#transaction-markers), counts from its log start. It reads as
 drained once a worker has read it and committed at its end or below, or once its
 log holds nothing. Writes that carry its end up to the commit also end the
-count, with the units below the commit unread, as
+count. A worker then reads the units below a commit that carries an epoch, and
+leaves the units below one without an epoch unread, as
 [Transaction markers](#transaction-markers) describes. The committed offsets are
 read first: a unit failed between
 the two reads has its retry write confirmed before its work offset is

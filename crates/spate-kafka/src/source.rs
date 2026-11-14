@@ -1106,7 +1106,10 @@ impl KafkaSource {
                 );
             }
             if !uncommitted {
-                ends = read_ends(consumer.client(), ends, budget).unwrap_or_default();
+                // The span names the consumer in the helper's warning.
+                ends = tracing::warn_span!("consumer", consumer = *reader)
+                    .in_scope(|| read_ends(consumer.client(), ends, budget))
+                    .unwrap_or_default();
             } else if budget.is_zero() {
                 return Ok(Err("no time left to list end offsets".to_owned()));
             } else if let Err(e) = list_offsets(consumer.client(), &mut ends, budget) {
@@ -1249,7 +1252,8 @@ impl KafkaSource {
             if !budget.is_zero() {
                 Self::before_call(&mut self.on_broker_call, BrokerCall::Listing { k, budget });
             }
-            read_ends(self.members[k].consumer.client(), ends, budget)
+            tracing::warn_span!("consumer", consumer = k)
+                .in_scope(|| read_ends(self.members[k].consumer.client(), ends, budget))
         };
         let seek = plan_starts(&mut committed, ends.as_ref(), from_log_start);
         Prepared {
@@ -1303,7 +1307,8 @@ impl KafkaSource {
         });
         let now = self.clock.now();
         let member = &mut self.members[k];
-        let accepted = member.validating.settle(&refused, name, now);
+        let accepted = tracing::warn_span!("consumer", consumer = k)
+            .in_scope(|| member.validating.settle(&refused, name, now));
         let resume = member.resumable(accepted);
         if resume.is_empty() {
             return;
@@ -3661,7 +3666,9 @@ mod tests {
                     lines
                         .iter()
                         .filter(|l| {
-                            l.contains("keeps refusing the seek") && l.contains("partition=0")
+                            l.contains("keeps refusing the seek")
+                                && l.contains("partition=0")
+                                && l.contains("consumer=0")
                         })
                         .count(),
                 );
@@ -4798,11 +4805,20 @@ mod tests {
                     );
                 }
                 let until = source.clock.now() + source.lookup_timeout;
-                let starts = source
-                    .prepare_starts(&[(0, tpl_of(&[0]))], until)
-                    .expect("no fatal")
-                    .expect("a start, with no retry");
+                let mut starts = Vec::new();
+                let lines = spate_test::capture_logs(tracing::Level::WARN, || {
+                    starts = source
+                        .prepare_starts(&[(0, tpl_of(&[0]))], until)
+                        .expect("no fatal")
+                        .expect("a start, with no retry");
+                });
                 assert_eq!(starts[0].seek.count(), 1, "the commit is sought");
+                let unread: Vec<&String> = lines
+                    .iter()
+                    .filter(|l| l.contains("reading end offsets failed"))
+                    .collect();
+                assert_eq!(unread.len(), 1, "{lines:#?}");
+                assert!(unread[0].contains("consumer=0"), "{}", unread[0]);
                 let listed = calls(&recorded)
                     .iter()
                     .any(|c| matches!(c, BrokerCall::Listing { .. }));

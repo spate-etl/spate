@@ -2020,7 +2020,7 @@ mod cluster {
     use super::super::{Core, Gating, KafkaFeed, READY_CAPACITY};
     use super::{TWO, assert_returns, returns_within};
     use crate::client::read_position;
-    use crate::client::testing::{Raw as _, raw_config};
+    use crate::client::testing::{Raw as _, mark_errors, raw_config};
     use crate::context::Intent;
     use crate::feed::FeedRole;
     use crate::testutil::mock::MockKafka;
@@ -4140,17 +4140,7 @@ mod cluster {
         mut list: TopicPartitionList,
         error: impl Fn(&str) -> Option<RDKafkaRespErr>,
     ) -> TopicPartitionList {
-        for elem in list.elements() {
-            if let Some(code) = error(elem.topic()) {
-                let raw = crate::client::find_elem(&list, elem.topic(), elem.partition());
-                // SAFETY: `raw` is an element of `list`, which nothing else
-                // reads while it is written.
-                unsafe {
-                    (*raw).err = code;
-                }
-            }
-        }
-        let _ = &mut list;
+        mark_errors(&mut list, |topic, _| error(topic));
         list
     }
 

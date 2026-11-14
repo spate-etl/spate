@@ -309,6 +309,7 @@ pub(crate) fn refusals_spanning(bound: Duration, step: Duration) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::client::testing::mark_errors;
     use rdkafka::types::RDKafkaRespErr;
 
     fn cache_of(observed: &[(i64, i32)]) -> EpochCache {
@@ -475,12 +476,7 @@ mod tests {
         partition: i32,
         code: RDKafkaRespErr,
     ) -> TopicPartitionList {
-        let elem = crate::client::find_elem(&list, "t", partition);
-        assert!(!elem.is_null());
-        // SAFETY: `elem` is a non-null element of `list`, written under this
-        // exclusive borrow.
-        unsafe { (*elem).err = code };
-        let _ = &mut list;
+        mark_errors(&mut list, |_, p| (p == partition).then_some(code));
         list
     }
 

@@ -495,7 +495,7 @@ pub(crate) fn message_epoch(message: &BorrowedMessage<'_>) -> i32 {
 }
 
 /// The element of `tpl` for `partition` of `topic`, or null when it has none.
-pub(crate) fn find_elem(
+fn find_elem(
     tpl: &TopicPartitionList,
     topic: &str,
     partition: i32,
@@ -871,6 +871,30 @@ impl<H: ProducerHooks> ProducerContext for SpateContext<H> {
 #[cfg(test)]
 pub(crate) mod testing {
     use super::*;
+
+    /// Marks each element of `list` whose topic `error` maps to an error with
+    /// that error, as a broker's answer would.
+    pub(crate) fn mark_errors(
+        list: &mut TopicPartitionList,
+        error: impl Fn(&str, i32) -> Option<rdkafka::types::RDKafkaRespErr>,
+    ) {
+        let marks: Vec<_> = list
+            .elements()
+            .iter()
+            .map(|e| error(e.topic(), e.partition()))
+            .collect();
+        let count = list.count();
+        // SAFETY: `list` owns `count` elements at `elems`, written only under
+        // this exclusive borrow, and `elements()` above lists them in order.
+        unsafe {
+            let elems = (*list.ptr()).elems;
+            for (i, mark) in marks.into_iter().enumerate().take(count) {
+                if let Some(code) = mark {
+                    (*elems.add(i)).err = code;
+                }
+            }
+        }
+    }
 
     /// A client over exactly `properties`, outside every role, under
     /// `hooks`: for a test that needs a configuration no role builds.

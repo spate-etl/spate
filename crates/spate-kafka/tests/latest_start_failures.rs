@@ -281,12 +281,7 @@ mod named_failure {
             .expect("open");
 
         let capture = spate_test::LogCapture::new();
-        let subscriber = tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::WARN)
-            .with_ansi(false)
-            .with_writer(capture.clone())
-            .finish();
-        tracing::subscriber::with_default(subscriber, || {
+        capture.during(tracing::Level::WARN, || {
             wait_until(HANG, "the failed start commit", || {
                 source.poll_events(Duration::from_millis(50)).expect("poll");
                 capture
@@ -388,12 +383,7 @@ mod startup_deadline {
         let mut source = KafkaSource::new(cfg).with_clock(Arc::clone(&clock) as _);
         let cp = Checkpointer::new();
         let capture = spate_test::LogCapture::new();
-        let subscriber = tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::WARN)
-            .with_ansi(false)
-            .with_writer(capture.clone())
-            .finish();
-        tracing::subscriber::with_default(subscriber, || {
+        capture.during(tracing::Level::WARN, || {
             source.open(SourceCtx::new(cp.handle())).expect("open");
             wait_until(HANG, "a failed lookup", || {
                 let _ = source.poll_events(Duration::from_millis(50));
@@ -1009,12 +999,7 @@ mod logical_committed_offset {
         let mut source = KafkaSource::new(cfg).with_clock(Arc::clone(&clock) as _);
         source.open(SourceCtx::new(checkpointer.handle())).unwrap();
         let capture = spate_test::LogCapture::new();
-        let subscriber = tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::WARN)
-            .with_ansi(false)
-            .with_writer(capture.clone())
-            .finish();
-        tracing::subscriber::with_default(subscriber, || {
+        capture.during(tracing::Level::WARN, || {
             wait_until(HANG, "the held start", || {
                 let _ = source.poll_events(Duration::from_millis(50));
                 capture

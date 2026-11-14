@@ -29,13 +29,7 @@ use testcontainers::runners::SyncRunner;
 #[test]
 #[ignore = "requires Docker"]
 fn a_unit_lost_to_a_rebalance_after_its_record_is_deleted_is_reported() {
-    let capture = LogCapture::new();
-    tracing_subscriber::fmt()
-        .with_writer(capture.clone())
-        .with_max_level(tracing::Level::WARN)
-        .with_ansi(false)
-        .without_time()
-        .init();
+    let capture = LogCapture::install_global(tracing::Level::WARN);
 
     let container = broker().start().expect("start kafka container");
     let port = container.get_host_port_ipv4(KAFKA_PORT).expect("port");

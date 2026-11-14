@@ -13,12 +13,7 @@ use spate_test::{HANG, LogCapture, wait_until};
 /// producer's own poll thread.
 #[test]
 fn feed_producer_debug_logs_reach_tracing() {
-    let capture = LogCapture::new();
-    tracing_subscriber::fmt()
-        .with_writer(capture.clone())
-        .with_max_level(tracing::Level::DEBUG)
-        .without_time()
-        .init();
+    let capture = LogCapture::install_global(tracing::Level::DEBUG);
 
     let cluster = MockKafka::new();
     for topic in [

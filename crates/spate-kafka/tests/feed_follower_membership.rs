@@ -45,12 +45,7 @@ fn assignments(capture: &LogCapture) -> usize {
 #[test]
 #[ignore = "requires Docker"]
 fn the_attempt_follower_leaves_the_feed_members_assignment_alone() {
-    let capture = LogCapture::new();
-    tracing_subscriber::fmt()
-        .with_writer(capture.clone())
-        .with_max_level(tracing::Level::INFO)
-        .without_time()
-        .init();
+    let capture = LogCapture::install_global(tracing::Level::INFO);
     let container = broker().start().expect("start kafka container");
     let port = container.get_host_port_ipv4(KAFKA_PORT).expect("port");
     let brokers = format!("127.0.0.1:{port}");

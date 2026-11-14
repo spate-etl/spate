@@ -118,8 +118,8 @@ fn example_bin(name: &str) -> PathBuf {
     if let Some(bin) = cached {
         return bin;
     }
-    let out = Command::new(env!("CARGO"))
-        .args(["build", "-p", "spate", "--example", name])
+    let mut cmd = Command::new(env!("CARGO"));
+    cmd.args(["build", "-p", "spate", "--example", name])
         .args([
             "--all-features",
             "--profile",
@@ -128,7 +128,16 @@ fn example_bin(name: &str) -> PathBuf {
             "--offline",
         ])
         .arg("--message-format=json-render-diagnostics")
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .current_dir(env!("CARGO_MANIFEST_DIR"));
+    // The test runner sets these for this crate. Cargo reruns a build script
+    // that watches one, as `ring`'s does, when the nested build inherits it.
+    for (key, _) in std::env::vars_os() {
+        let key = key.to_string_lossy();
+        if key.starts_with("CARGO_PKG_") || key.starts_with("CARGO_MANIFEST_") {
+            cmd.env_remove(&*key);
+        }
+    }
+    let out = cmd
         .output()
         .unwrap_or_else(|e| panic!("run cargo build --example {name}: {e}"));
     assert!(

@@ -6,7 +6,7 @@ mod graph;
 pub(crate) mod outputs;
 mod scope;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use event::Diff;
 pub(crate) use scope::Scope;
@@ -66,16 +66,29 @@ pub(crate) fn changes(args: &[String]) -> Result<(), String> {
     }
 
     print!("{out}");
-    if let Ok(path) = std::env::var("GITHUB_OUTPUT") {
-        use std::io::Write;
-        let mut f = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .map_err(|e| format!("{path}: {e}"))?;
-        write!(f, "{out}").map_err(|e| format!("{path}: {e}"))?;
+    if let Some(path) = output_file() {
+        append_to(&path, &out.to_string()).map_err(|e| format!("{}: {e}", path.display()))?;
     }
     Ok(())
+}
+
+/// The file a workflow reads its step outputs from, when the runner names one.
+/// An unset or empty `GITHUB_OUTPUT` names none.
+pub(crate) fn output_file() -> Option<PathBuf> {
+    std::env::var_os("GITHUB_OUTPUT")
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+}
+
+/// Appends `text` to the step-output file at `path`, creating it when absent.
+pub(crate) fn append_to(path: &Path, text: &str) -> std::io::Result<()> {
+    use std::io::Write;
+
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?
+        .write_all(text.as_bytes())
 }
 
 /// What a local run needs to cover for the changes since `base`, falling back

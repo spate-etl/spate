@@ -231,7 +231,7 @@ cargo xtask miri --nightly <channel>
 ```
 
 `<channel>` is the dated nightly that `.github/toolchains/nightly/` pins.
-The `Miri over unsafe code` job runs the same command on each pull request that changes Rust.
+The `Miri over unsafe code` job runs the same command whenever CI runs the test suite.
 
 ## Read a failing test's output
 

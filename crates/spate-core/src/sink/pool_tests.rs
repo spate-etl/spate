@@ -3068,42 +3068,27 @@ async fn a_shard_finishing_as_the_backstop_fires_still_reports() {
     );
 }
 
-/// Counts error events whose message names the sweep's missed abort grace.
-#[derive(Clone, Default)]
-struct GraceMisses(Arc<AtomicUsize>);
-
-impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for GraceMisses {
-    fn on_event(
-        &self,
-        event: &tracing::Event<'_>,
-        _ctx: tracing_subscriber::layer::Context<'_, S>,
-    ) {
-        struct Message(String);
-        impl tracing::field::Visit for Message {
-            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-                if field.name() == "message" {
-                    self.0 = format!("{value:?}");
-                }
-            }
-        }
-        let mut message = Message(String::new());
-        event.record(&mut message);
-        if *event.metadata().level() == tracing::Level::ERROR
-            && message.0.contains("did not abort within the grace")
-        {
-            self.0.fetch_add(1, Ordering::SeqCst);
-        }
-    }
+/// A sweep whose aborts all land logs no missed grace.
+#[test]
+fn a_sweep_whose_aborts_land_logs_no_missed_grace() {
+    let lines = spate_test::capture_logs(tracing::Level::ERROR, || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .start_paused(true)
+            .build()
+            .unwrap()
+            .block_on(sweep_whose_aborts_land());
+    });
+    assert!(
+        !lines
+            .iter()
+            .any(|line| line.contains("did not abort within the grace")),
+        "logged a missed grace: {lines:#?}"
+    );
 }
 
-/// A sweep whose aborts all land logs no missed grace.
-#[tokio::test(start_paused = true)]
-async fn a_sweep_whose_aborts_land_logs_no_missed_grace() {
-    use tracing_subscriber::layer::SubscriberExt;
-    let misses = GraceMisses::default();
-    let _guard =
-        tracing::subscriber::set_default(tracing_subscriber::registry().with(misses.clone()));
-
+/// Drains a pool whose one write hangs, with no abort grace.
+async fn sweep_whose_aborts_land() {
     let clock = TestClock::frozen();
     let f = fixture_on(&clock, 1, 1, small_batches(), 16);
     f.writer.set_default(Outcome::Hang);
@@ -3122,7 +3107,6 @@ async fn a_sweep_whose_aborts_land_logs_no_missed_grace() {
         }
     );
     assert_eq!(ack_rx.try_recv().unwrap().status, AckStatus::Failed);
-    assert_eq!(misses.0.load(Ordering::SeqCst), 0, "logged a missed grace");
 }
 
 /// Pins that `SinkPool::spawn` refuses a zero in-flight limit with the

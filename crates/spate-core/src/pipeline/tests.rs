@@ -19,7 +19,7 @@ use crate::pipeline::runtime::{PipelineRuntime, default_thread_count};
 use crate::record::PartitionId;
 use crate::sink::shard_queues;
 use crate::source::{LaneId, Source, SourceCtx, SourceEvent};
-use spate_test::{MetricSample, wait_until};
+use spate_test::{LogCapture, MetricSample, capture_logs, wait_until};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
@@ -68,12 +68,10 @@ struct Harness {
     /// sink worker.
     sink_failures: SinkFailures,
     shutdown: super::runtime::ShutdownHandle,
-    /// Every WARN `run` logged on its own thread.
-    warnings: Warnings,
+    /// Every line at INFO and above that `run` logged on its own thread.
+    logs: LogCapture,
     /// The budget each sink drain was given.
     sink_budgets: Arc<Mutex<Vec<Duration>>>,
-    /// Where the admin server bound, once `run` logs it.
-    admin_addr: AdminAddr,
     join: std::thread::JoinHandle<Result<ExitReport, super::runtime::StartError>>,
 }
 
@@ -146,16 +144,9 @@ fn start_prepared(
     .with_options(options);
     let runtime = customize(runtime, &shared);
     let shutdown = runtime.shutdown_handle();
-    let warnings = Warnings::default();
-    let layer = warnings.clone();
-    let admin_addr = AdminAddr::default();
-    let admin_layer = admin_addr.clone();
-    std::sync::LazyLock::force(&BYSTANDER);
-    let join = std::thread::spawn(move || {
-        use tracing_subscriber::layer::SubscriberExt;
-        let subscriber = tracing_subscriber::registry().with(layer).with(admin_layer);
-        tracing::subscriber::with_default(subscriber, || runtime.run())
-    });
+    let logs = LogCapture::new();
+    let run_logs = logs.clone();
+    let join = std::thread::spawn(move || run_logs.during(tracing::Level::INFO, || runtime.run()));
     Harness {
         budget: budget_for_test,
         shared,
@@ -164,9 +155,8 @@ fn start_prepared(
         drained,
         sink_failures,
         shutdown,
-        warnings,
+        logs,
         sink_budgets,
-        admin_addr,
         join,
     }
 }
@@ -3423,14 +3413,9 @@ fn a_failed_dead_letter_read_warns() {
         ok_chain,
     );
     let warned = || {
-        h.warnings.0.lock().unwrap().iter().any(|fields| {
-            fields
-                .iter()
-                .any(|(name, value)| name == "message" && value.contains("dead-letter destination"))
-                && fields
-                    .iter()
-                    .any(|(name, value)| name == "feed" && value.contains("memory"))
-        })
+        warn_lines(h.logs.lines())
+            .iter()
+            .any(|line| line.contains("dead-letter destination") && line.contains("feed=\"memory"))
     };
     wait_until(Duration::from_secs(5), "the warning", warned);
     h.script.lock().unwrap().push_back(Script::Drained);
@@ -3605,13 +3590,8 @@ fn a_feed_backend_whose_key_cannot_scope_a_family_receives_no_meter() {
         let report = h.join.join().unwrap().unwrap();
         assert_eq!(report.state, ExitState::Completed, "{key}");
         assert_eq!(*attached.lock().unwrap(), [(false, true)], "{key}");
-        let warned = h.warnings.0.lock().unwrap().iter().any(|fields| {
-            fields
-                .iter()
-                .any(|(name, value)| name == "role" && value.contains("feed"))
-                && fields
-                    .iter()
-                    .any(|(name, value)| name == "component_type" && value.contains(key))
+        let warned = warn_lines(h.logs.lines()).iter().any(|line| {
+            line.contains("role=\"feed\"") && line.contains(&format!("component_type=\"{key}\""))
         });
         assert_eq!(warned, warns, "{key}");
     }
@@ -3721,22 +3701,10 @@ fn a_refused_feed_section_builds_no_pipeline_thread() {
     );
 }
 
-/// A second registered dispatcher. With one live dispatcher, tracing-core
-/// caches a callsite's interest from whichever thread reaches it first, and
-/// other tests reach the feed arm on threads with no subscriber.
-static BYSTANDER: std::sync::LazyLock<tracing::Dispatch> = std::sync::LazyLock::new(|| {
-    use tracing_subscriber::layer::SubscriberExt;
-    tracing::Dispatch::new(
-        tracing_subscriber::registry().with(tracing_subscriber::filter::LevelFilter::OFF),
-    )
-});
-
 /// Pins that a `feed: { memory: {} }` section the source refuses fails
 /// startup with the error alone and logs no WARN.
 #[test]
 fn a_refused_feed_section_fails_startup_without_a_warning() {
-    use tracing_subscriber::layer::SubscriberExt;
-    std::sync::LazyLock::force(&BYSTANDER);
     let mut cfg = test_config(1);
     cfg.feed = feed_section("memory: {}");
     let (source, shared, _script) = FakeSource::new();
@@ -3754,15 +3722,16 @@ fn a_refused_feed_section_fails_startup_without_a_warning() {
         Arc::new(crate::backpressure::InflightBudget::new()),
     )
     .with_options(test_options());
-    let warnings = Warnings::default();
-    let subscriber = tracing_subscriber::registry().with(warnings.clone());
-    let result = tracing::subscriber::with_default(subscriber, || runtime.run());
+    let mut result = None;
+    let warnings = warn_lines(capture_logs(tracing::Level::WARN, || {
+        result = Some(runtime.run());
+    }));
+    let result = result.expect("run returned");
     let Err(err @ StartError::Config(_)) = result else {
         panic!("expected StartError::Config, got {result:?}");
     };
     assert!(err.to_string().contains("reads no feed"), "{err}");
     assert!(!shared.lock().unwrap().opened, "the source must not open");
-    let warnings = warnings.0.lock().unwrap().clone();
     assert!(warnings.is_empty(), "{warnings:#?}");
 }
 
@@ -3770,8 +3739,6 @@ fn a_refused_feed_section_fails_startup_without_a_warning() {
 /// completes the run with no WARN from the runtime.
 #[test]
 fn an_accepted_in_process_feed_section_starts_without_a_warning() {
-    use tracing_subscriber::layer::SubscriberExt;
-    std::sync::LazyLock::force(&BYSTANDER);
     let mut cfg = test_config(1);
     cfg.feed = feed_section("memory: {}");
     let (source, shared, script) = FakeSource::new();
@@ -3791,13 +3758,15 @@ fn an_accepted_in_process_feed_section_starts_without_a_warning() {
         Arc::new(crate::backpressure::InflightBudget::new()),
     )
     .with_options(test_options());
-    let warnings = Warnings::default();
-    let subscriber = tracing_subscriber::registry().with(warnings.clone());
-    let report = tracing::subscriber::with_default(subscriber, || runtime.run())
+    let mut result = None;
+    let warnings = warn_lines(capture_logs(tracing::Level::WARN, || {
+        result = Some(runtime.run());
+    }));
+    let report = result
+        .expect("run returned")
         .expect("the source accepts the section");
     assert_eq!(report.state, ExitState::Completed);
     assert!(shared.lock().unwrap().opened, "the source opens");
-    let warnings = warnings.0.lock().unwrap().clone();
     assert!(warnings.is_empty(), "{warnings:#?}");
 }
 
@@ -4124,66 +4093,38 @@ fn one_busy_worker_of_two_reads_half_in_the_exposition() {
     assert_eq!(report.state, ExitState::Completed);
 }
 
-/// One event's fields, as `(name, debug value)` pairs.
-type Fields = Vec<(String, String)>;
-
-/// The fields of every warning event.
-#[derive(Clone, Default)]
-struct Warnings(Arc<Mutex<Vec<Fields>>>);
-
-impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Warnings {
-    fn on_event(
-        &self,
-        event: &tracing::Event<'_>,
-        _ctx: tracing_subscriber::layer::Context<'_, S>,
-    ) {
-        struct Record(Fields);
-        impl tracing::field::Visit for Record {
-            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-                self.0.push((field.name().to_owned(), format!("{value:?}")));
-            }
-        }
-        if *event.metadata().level() == tracing::Level::WARN {
-            let mut fields = Record(Vec::new());
-            event.record(&mut fields);
-            self.0.lock().unwrap().push(fields.0);
-        }
-    }
+/// The WARN lines among `lines`. The formatter pads the level to five
+/// characters.
+fn warn_lines(lines: Vec<String>) -> Vec<String> {
+    lines
+        .into_iter()
+        .filter(|line| line.trim_start().starts_with("WARN"))
+        .collect()
 }
 
 /// The address the admin server logged when it bound.
-#[derive(Clone, Default)]
-struct AdminAddr(Arc<Mutex<Option<std::net::SocketAddr>>>);
-
-impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for AdminAddr {
-    fn on_event(
-        &self,
-        event: &tracing::Event<'_>,
-        _ctx: tracing_subscriber::layer::Context<'_, S>,
-    ) {
-        struct Addr(Option<std::net::SocketAddr>);
-        impl tracing::field::Visit for Addr {
-            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-                if field.name() == "addr" {
-                    self.0 = format!("{value:?}").parse().ok();
-                }
-            }
-        }
-        let mut addr = Addr(None);
-        event.record(&mut addr);
-        if let Some(addr) = addr.0 {
-            *self.0.lock().unwrap() = Some(addr);
-        }
-    }
+fn admin_addr(h: &Harness) -> std::net::SocketAddr {
+    h.logs
+        .lines()
+        .iter()
+        .filter(|line| line.contains("admin server listening"))
+        .find_map(|line| {
+            line.split_once("addr=")?
+                .1
+                .split_whitespace()
+                .next()?
+                .parse()
+                .ok()
+        })
+        .expect("admin server bound")
 }
 
 /// Feeds `sample_io_busy` a sample every 5 s for ten minutes from a
 /// three-worker runtime busy `share` of the time, under a captured subscriber,
-/// and returns the fields of every warning it logged.
-fn io_busy_warnings(pipeline: &'static str, share: f64) -> Vec<Fields> {
+/// and returns every warning it logged.
+fn io_busy_warnings(pipeline: &'static str, share: f64) -> Vec<String> {
     use crate::metrics::{ComponentLabels, IoBusySampler, IoRuntimeMetrics};
     use crate::pipeline::runtime::sample_io_busy;
-    use tracing_subscriber::layer::SubscriberExt;
 
     const WORKERS: usize = 3;
     let labels = ComponentLabels::new(pipeline, "runtime", "pipeline");
@@ -4195,9 +4136,7 @@ fn io_busy_warnings(pipeline: &'static str, share: f64) -> Vec<Fields> {
         t0,
         Duration::ZERO,
     );
-    let warnings = Warnings::default();
-    let subscriber = tracing_subscriber::registry().with(warnings.clone());
-    tracing::subscriber::with_default(subscriber, || {
+    warn_lines(capture_logs(tracing::Level::WARN, || {
         for secs in (5..=600).step_by(5) {
             let busy = Duration::from_secs_f64(share * (WORKERS as u64 * secs) as f64);
             sample_io_busy(
@@ -4209,8 +4148,7 @@ fn io_busy_warnings(pipeline: &'static str, share: f64) -> Vec<Fields> {
                 pipeline,
             );
         }
-    });
-    warnings.0.lock().unwrap().clone()
+    }))
 }
 
 /// Ten minutes of a saturated three-worker I/O runtime log one warning,
@@ -4220,14 +4158,10 @@ fn io_busy_warnings(pipeline: &'static str, share: f64) -> Vec<Fields> {
 fn a_saturated_io_runtime_logs_one_warning() {
     let logged = io_busy_warnings("io-busy-warning", 0.95);
     assert_eq!(logged.len(), 1, "{logged:?}");
-    let field = |name: &str| {
-        logged[0]
-            .iter()
-            .find(|(n, _)| n == name)
-            .map(|(_, v)| v.as_str())
-    };
-    assert_eq!(field("pipeline"), Some("\"io-busy-warning\""));
-    assert_eq!(field("io_workers"), Some("3"));
+    assert!(
+        logged[0].contains("pipeline=\"io-busy-warning\"") && logged[0].contains("io_workers=3 "),
+        "{logged:?}"
+    );
 
     let half = io_busy_warnings("io-busy-half", 0.5);
     assert!(half.is_empty(), "half busy warned: {half:?}");
@@ -4928,13 +4862,11 @@ fn a_close_that_never_settles_ends_at_the_deadline() {
     clock.advance(drain_timeout + Duration::from_secs(1));
     joined(&h);
     assert_eq!(h.join.join().unwrap().unwrap().state, ExitState::Completed);
-    let warnings = h.warnings.0.lock().unwrap().clone();
+    let warnings = warn_lines(h.logs.lines());
     assert!(
         warnings
             .iter()
-            .any(|fields| fields.iter().any(|(name, value)| {
-                name == "message" && value.contains("did not close before the drain deadline")
-            })),
+            .any(|line| line.contains("did not close before the drain deadline")),
         "{warnings:#?}"
     );
 }
@@ -5251,15 +5183,12 @@ fn a_rejected_close_warns_with_its_reason() {
     ));
     joined(&h);
     assert_eq!(h.join.join().unwrap().unwrap().state, ExitState::Completed);
-    let warnings = h.warnings.0.lock().unwrap().clone();
+    let warnings = warn_lines(h.logs.lines());
     assert!(
-        warnings.iter().any(|fields| {
-            fields
-                .iter()
-                .any(|(name, value)| name == "message" && value.contains("did not close cleanly"))
-                && fields.iter().any(|(name, value)| {
-                    name == "error" && value.contains("2 units not handed back")
-                })
+        warnings.iter().any(|line| {
+            line.contains("did not close cleanly")
+                && line.contains("error=")
+                && line.contains("2 units not handed back")
         }),
         "{warnings:#?}"
     );
@@ -5293,11 +5222,9 @@ fn a_close_settled_after_it_is_recorded_ends_the_run_completed() {
     feed.settle_held_closes();
     joined(&h);
     assert_eq!(h.join.join().unwrap().unwrap().state, ExitState::Completed);
-    let warnings = h.warnings.0.lock().unwrap().clone();
+    let warnings = warn_lines(h.logs.lines());
     assert!(
-        !warnings.iter().any(|fields| fields
-            .iter()
-            .any(|(name, value)| name == "message" && value.contains("did not close"))),
+        !warnings.iter().any(|line| line.contains("did not close")),
         "{warnings:#?}"
     );
 }
@@ -6408,7 +6335,7 @@ fn a_pending_head_neither_turns_liveness_nor_counts_as_a_stall() {
     cfg.checkpoint.interval = interval;
     cfg.checkpoint.stalled_fail_after = Duration::from_secs(120);
     let (h, acks) = start_with_pending_head(cfg, &clock);
-    let addr = h.admin_addr.0.lock().unwrap().expect("admin server bound");
+    let addr = admin_addr(&h);
 
     // The default `watermark_stuck` is 300 s.
     for _ in 0..6 {
@@ -6463,7 +6390,7 @@ fn a_stuck_watermark_turns_liveness_on_the_injected_clock() {
         h.chain.consumed.load(Ordering::Relaxed) == 30
     });
     passes(&h, 3);
-    let addr = h.admin_addr.0.lock().unwrap().expect("admin server bound");
+    let addr = admin_addr(&h);
     let healthz = || {
         // A lane poll after the advance beats the driver's heart on the
         // moved clock, so only the watermark decides the answer.

@@ -328,23 +328,11 @@ mod tests {
             .expect("signal sent");
     }
 
-    /// The `ERROR` lines logged while `f` runs, without time or target.
+    /// The `ERROR` lines logged while `f` runs.
     fn error_lines<R>(f: impl FnOnce() -> R) -> (R, Vec<String>) {
         let capture = spate_test::LogCapture::new();
-        let subscriber = tracing_subscriber::fmt()
-            .with_writer(capture.clone())
-            .with_ansi(false)
-            .without_time()
-            .with_target(false)
-            .finish();
-        let out = tracing::subscriber::with_default(subscriber, f);
-        let lines = capture
-            .lines()
-            .iter()
-            .filter(|l| l.trim_start().starts_with("ERROR"))
-            .map(|l| l.trim().to_owned())
-            .collect();
-        (out, lines)
+        let out = capture.during(tracing::Level::ERROR, f);
+        (out, capture.lines())
     }
 
     /// Runs `f` on a paused current-thread runtime on this thread, so its
@@ -473,8 +461,8 @@ mod tests {
         assert_eq!(
             errors,
             vec![
-                r#"ERROR background task panicked task="static-panic" panic="boom""#.to_owned(),
-                r#"ERROR background task panicked task="formatted-panic" panic="boom 1""#
+                r#"ERROR spate_core::task: background task panicked task="static-panic" panic="boom""#.to_owned(),
+                r#"ERROR spate_core::task: background task panicked task="formatted-panic" panic="boom 1""#
                     .to_owned(),
             ]
         );
@@ -517,7 +505,7 @@ mod tests {
         assert_eq!(
             errors,
             vec![
-                r#"ERROR background task panicked task="awaited-panic" panic="awaited boom""#
+                r#"ERROR spate_core::task: background task panicked task="awaited-panic" panic="awaited boom""#
                     .to_owned()
             ]
         );
@@ -587,7 +575,7 @@ mod tests {
         assert_eq!(
             errors,
             vec![
-                r#"ERROR background thread panicked thread="panicking-thread" panic="thread boom""#
+                r#"ERROR spate_core::task: background thread panicked thread="panicking-thread" panic="thread boom""#
                     .to_owned()
             ]
         );

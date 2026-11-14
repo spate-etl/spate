@@ -21,6 +21,9 @@ pub(crate) const CHUNK_BYTES: usize = 512 * 1024;
 /// (`prefetch_bytes`, 8 MiB).
 pub(crate) const RANGE_BYTES: u64 = 8 * 1024 * 1024;
 
+/// The byte that ends a record, which a byte-range read cuts on.
+pub(crate) const DELIMITER: u8 = b'\n';
+
 /// Records per object in the single-object profiles. Chosen so the object
 /// lands around 4 MiB, which is ~16 chunks: enough that per-chunk work
 /// dominates per-object setup, and small enough to stay well inside the

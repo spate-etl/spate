@@ -67,6 +67,11 @@ truncation does.
   the committed read already has.
 - Bad, because under the source's `error` policy a detected truncation, or an
   epoch the leader does not know, fails the source.
+- Bad, because a failed end read leaves a commit above the end sought. When
+  the leader answers that the epoch's records end at the log's end, the member
+  starts there and reads only later writes. With nothing written after it, a
+  feed worker commits nothing on the partition, and a bounded job waits until
+  the next rebalance.
 - Neutral, because a commit with no epoch starts unchecked, as before, and
   INV-1 names it with a failed committed read and a failed seek.
 

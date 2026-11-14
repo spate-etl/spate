@@ -193,9 +193,12 @@ The framework never uses librdkafka's position-based auto-commit. Instead:
   group authorization stops the run at once. A member the group has removed, or
   whose commit it refuses during a rebalance, gets no lanes and rejoins. The
   source passes `earliest` to librdkafka under `latest`, so a committed offset
-  below the log start or past the log end resumes at the log start. librdkafka
-  logs that reset at `WARN` under the `librdkafka` target, naming `BEGINNING`.
-  Under `earliest` the partition starts at its beginning.
+  below the log start or past the log end resumes at the log start. For a
+  commit below the log start, and for a commit with no epoch past the log end,
+  librdkafka logs that reset at `WARN` under the `librdkafka` target, naming
+  `BEGINNING`. The source starts a commit with an epoch past the log end at the
+  log start itself, and the lane's first batch logs it at `INFO`, as described
+  below. Under `earliest` the partition starts at its beginning.
   Under `error` librdkafka applies the policy, and the source fails with a fatal
   error. That covers a partition with no committed offset, such as one added to
   the topic or one whose group offsets expired, and a partition whose fetch
@@ -213,6 +216,11 @@ The framework never uses librdkafka's position-based auto-commit. Instead:
   truncation, and its first batch below the commit logs the committed offset
   and the first offset at `INFO`. Under `error` a detected truncation, or an
   epoch the leader does not know, fails the source with a fatal error.
+- Under `earliest`, and under `latest` when every partition of the assignment
+  has a commit, a failed read of the partitions' ends leaves a commit above the
+  end sought as well, and a warning names those partitions. So does an end read
+  with no time left. When the leader answers that the epoch's records end at
+  the log's end, the lane starts there and reads only records written after it.
 - The seek is refused while librdkafka defers the partition's start, such as
   while a commit is still waiting for the group's answer. The partition stays
   paused until a seek is accepted. Once the refusals have lasted a quarter of

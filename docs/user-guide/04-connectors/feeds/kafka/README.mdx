@@ -408,7 +408,8 @@ An unclean leader election can truncate a partition below the group's commit.
 While the partition's end stays below that commit, the depth counts the
 partition from its log start, so a bounded job waits for a worker to read it
 (see [Ending a bounded job](#ending-a-bounded-job)). A worker assigned the
-partition starts at its earliest offset and reads every unit on it.
+partition starts at its earliest offset and reads every unit on it, unless
+reading the partition's end fails.
 
 A worker assigned a partition whose commit carries an epoch and is at or below
 its end seeks to the commit with that epoch, so librdkafka asks the leader
@@ -427,6 +428,13 @@ A worker that held the partition through the truncation moves to the point of
 truncation and reads the units written after it. With nothing written after it,
 that worker commits nothing on the partition, so the job waits until the group
 next rebalances.
+
+A failed read of a partition's end leaves a commit above the end sought as
+well, and a warning names the partition. So does an end read with no time left
+in the committed read's bound. When the leader answers that the epoch's records
+end at the log's end, the worker starts there and reads only units written
+after it. With nothing written after it, that worker commits nothing on the
+partition either, and the job waits until the group next rebalances.
 
 A worker starts at a commit without checking it when the commit carries no
 epoch, as a commit from an earlier Spate release does. It also starts unchecked

@@ -86,8 +86,7 @@ use crate::context::{Intent, SourceContext};
 #[cfg(test)]
 use crate::epoch::SeekWith;
 use crate::epoch::{
-    RETRY_SEEK_WAIT, Validating, ends_to_read, log_first_below, plan_starts, read_ends,
-    seek_starts,
+    RETRY_SEEK_WAIT, Validating, ends_to_read, log_first_below, plan_starts, read_ends, seek_starts,
 };
 use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::error::{KafkaError, KafkaResult, RDKafkaErrorCode};

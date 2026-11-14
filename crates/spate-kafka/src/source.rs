@@ -631,7 +631,9 @@ impl KafkaSource {
                 && let Offset::Offset(offset) = elem.offset()
             {
                 let epoch = epoch_of(&prepared.seek, &self.config.topic, partition);
-                self.members[k].validating.refused(partition, offset, epoch, now);
+                self.members[k]
+                    .validating
+                    .refused(partition, offset, epoch, now);
             }
         }
 
@@ -3655,7 +3657,9 @@ mod tests {
                 counts.push(
                     lines
                         .iter()
-                        .filter(|l| l.contains("keeps refusing the seek") && l.contains("partition=0"))
+                        .filter(|l| {
+                            l.contains("keeps refusing the seek") && l.contains("partition=0")
+                        })
                         .count(),
                 );
             }
@@ -3695,9 +3699,7 @@ mod tests {
             // is not sought.
             let seek: crate::epoch::SeekWith = Box::new(move |mut list, _| {
                 mark_errors(&mut list, |_, p| {
-                    (p == 0).then_some(
-                        rdkafka::types::RDKafkaRespErr::RD_KAFKA_RESP_ERR__STATE,
-                    )
+                    (p == 0).then_some(rdkafka::types::RDKafkaRespErr::RD_KAFKA_RESP_ERR__STATE)
                 });
                 Ok(list)
             });
@@ -3733,7 +3735,10 @@ mod tests {
                 {
                     read0 = true;
                 }
-                assert!(!read0, "round {round}: a partition waiting for its seek was read");
+                assert!(
+                    !read0,
+                    "round {round}: a partition waiting for its seek was read"
+                );
             }
         }
 

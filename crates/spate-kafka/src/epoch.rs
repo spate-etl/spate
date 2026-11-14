@@ -655,7 +655,13 @@ mod tests {
         let seeks: Vec<(i32, Offset, i32)> = list
             .elements()
             .iter()
-            .map(|e| (e.partition(), e.offset(), epoch_of(&list, "work", e.partition())))
+            .map(|e| {
+                (
+                    e.partition(),
+                    e.offset(),
+                    epoch_of(&list, "work", e.partition()),
+                )
+            })
             .collect();
         assert_eq!(
             seeks,
@@ -713,7 +719,11 @@ mod tests {
         });
         assert!(read.is_none());
         assert_eq!(lines.len(), 1, "{lines:#?}");
-        assert!(lines[0].contains("reading end offsets failed"), "{}", lines[0]);
+        assert!(
+            lines[0].contains("reading end offsets failed"),
+            "{}",
+            lines[0]
+        );
         assert!(lines[0].contains(r#"("work", 3)"#), "{}", lines[0]);
     }
 

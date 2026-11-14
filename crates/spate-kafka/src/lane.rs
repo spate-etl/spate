@@ -39,8 +39,9 @@
 //! covers them all, so markers behind a batch the sink has not acknowledged take
 //! no room under the pending ceiling and leave the lane polling.
 
-use crate::client::{offset_to_retire, read_position};
+use crate::client::{message_epoch, offset_to_retire, read_position};
 use crate::context::SourceContext;
+use crate::epoch::EpochCache;
 use rdkafka::consumer::base_consumer::PartitionQueue;
 use rdkafka::consumer::{BaseConsumer, Consumer as _};
 use rdkafka::error::KafkaError;
@@ -50,8 +51,8 @@ use spate_core::checkpoint::{AckIssuer, AckRef};
 use spate_core::error::SourceError;
 use spate_core::record::{PartitionId, RawPayload};
 use spate_core::source::{LaneId, PayloadBatch, SourceLane};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// How many zero-timeout empty returns pass between position reads. A thread
@@ -59,6 +60,47 @@ use std::time::Duration;
 /// an idle partition would hold its marker. It bounds how many sibling batches
 /// that wait lasts, and has no measured basis.
 const ZERO_TIMEOUT_READ_EVERY: u32 = 256;
+
+/// What a lane shares with the source for its partition.
+#[derive(Debug)]
+pub(crate) struct Shared {
+    /// The latest watermark the source was asked to store.
+    pub(crate) watermark: AtomicI64,
+    /// The leader epoch at each batch end the lane issued, for the epoch a
+    /// commit carries.
+    pub(crate) epochs: Mutex<EpochCache>,
+    /// The committed offset the assignment started at, where the group had
+    /// one.
+    pub(crate) committed: Option<i64>,
+}
+
+impl Shared {
+    /// A partition with no watermark yet, starting at `committed` with leader
+    /// epoch `epoch`.
+    pub(crate) fn new(committed: Option<i64>, epoch: i32) -> Shared {
+        let mut epochs = EpochCache::default();
+        if let Some(start) = committed {
+            epochs.observe(start - 1, epoch);
+        }
+        Shared {
+            watermark: AtomicI64::new(i64::MIN),
+            epochs: Mutex::new(epochs),
+            committed,
+        }
+    }
+
+    /// The leader epoch of the record before `watermark`, and forgets the
+    /// epochs below it.
+    pub(crate) fn epoch_before(&self, watermark: i64) -> i32 {
+        let mut epochs = self
+            .epochs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let epoch = epochs.at(watermark - 1);
+        epochs.prune_below(watermark - 1);
+        epoch
+    }
+}
 
 /// One assigned partition's pollable queue.
 pub struct KafkaLane {
@@ -77,8 +119,13 @@ pub struct KafkaLane {
     position: TopicPartitionList,
     /// One past the last offset this lane issued.
     covered_to: Option<i64>,
-    /// The latest watermark the source was asked to store for this partition.
-    watermark: Arc<AtomicI64>,
+    /// The watermark and epochs this lane shares with the source.
+    shared: Arc<Shared>,
+    /// The last offset and epoch noted in `shared`'s epochs, so the lock is
+    /// taken only when the epoch changes or the offset moves back.
+    noted: Option<(i64, i32)>,
+    /// Whether the first batch was checked against the committed offset.
+    first_checked: bool,
     /// A poll failed since the last record. An error does not move the
     /// position, so a later marker moves it past the offsets that failed.
     saw_error: bool,
@@ -104,7 +151,7 @@ impl KafkaLane {
         consumer: Arc<BaseConsumer<SourceContext>>,
         issuer: AckIssuer,
         position: TopicPartitionList,
-        watermark: Arc<AtomicI64>,
+        shared: Arc<Shared>,
     ) -> Self {
         KafkaLane {
             id,
@@ -116,7 +163,9 @@ impl KafkaLane {
             pending: None,
             position,
             covered_to: None,
-            watermark,
+            shared,
+            noted: None,
+            first_checked: false,
             saw_error: false,
             empty_returns: 0,
         }
@@ -139,13 +188,17 @@ impl KafkaLane {
     fn retire_offsets(&mut self, timeout: Duration) -> Option<KafkaBatch<'_>> {
         if self.saw_error
             || self.consumer.context().rewound()
-            || !issued_batches_settled(self.covered_to, self.watermark.load(Ordering::Acquire))
+            || !issued_batches_settled(
+                self.covered_to,
+                self.shared.watermark.load(Ordering::Acquire),
+            )
             || !read_is_due(timeout, &mut self.empty_returns)
         {
             return None;
         }
-        let position = read_position(&self.consumer, &mut self.position);
+        let (position, epoch) = read_position(&self.consumer, &mut self.position);
         let last_offset = offset_to_retire(position, self.covered_to)?;
+        self.note_epoch(last_offset, epoch);
         self.covered_to = Some(last_offset + 1);
         tracing::debug!(
             partition = self.partition.0,
@@ -153,6 +206,47 @@ impl KafkaLane {
             "retiring offsets that hold no record"
         );
         Some(self.issue_batch(last_offset))
+    }
+
+    /// Record that the offset an issued batch ends at carries `epoch`. A
+    /// watermark is always one past a batch end, so the commit reads the
+    /// epoch of the record before it from these.
+    fn note_epoch(&mut self, offset: i64, epoch: i32) {
+        if epoch < 0 {
+            return;
+        }
+        if let Some((last_offset, last_epoch)) = self.noted
+            && last_epoch == epoch
+            && offset >= last_offset
+        {
+            return;
+        }
+        self.shared
+            .epochs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .observe(offset, epoch);
+        self.noted = Some((offset, epoch));
+    }
+
+    /// Log once per assignment when the first batch starts below the
+    /// committed offset the assignment started at.
+    fn check_first(&mut self, first: i64) {
+        if std::mem::replace(&mut self.first_checked, true) {
+            return;
+        }
+        if let Some(committed) = self.shared.committed
+            && first < committed
+        {
+            tracing::info!(
+                partition = self.partition.0,
+                committed,
+                first,
+                "the partition's first record is below its committed offset; the log was \
+                 truncated below the commit, or the commit is above the log's end, and the \
+                 records from there are read again"
+            );
+        }
     }
 
     /// The fatal error for a record at `i64::MAX`. The position that commits
@@ -290,11 +384,14 @@ impl SourceLane for KafkaLane {
             }
         }
 
-        let last_offset = self
+        let last = self
             .held
             .last()
-            .expect("batch has at least the first message")
-            .offset();
+            .expect("batch has at least the first message");
+        let (last_offset, epoch) = (last.offset(), message_epoch(last));
+        let first = self.held[0].offset();
+        self.note_epoch(last_offset, epoch);
+        self.check_first(first);
         self.covered_to = Some(last_offset.saturating_add(1));
         self.saw_error = false;
         Ok(Some(self.issue_batch(last_offset)))
@@ -439,7 +536,7 @@ mod tests {
             Arc::clone(&consumer),
             SourceCtx::new(cp.handle()).issuer,
             position,
-            Arc::new(AtomicI64::new(i64::MIN)),
+            Arc::new(Shared::new(None, -1)),
         );
         let err = lane.poll_error(&KafkaError::MessageConsumption(
             RDKafkaErrorCode::UnknownTopicOrPartition,

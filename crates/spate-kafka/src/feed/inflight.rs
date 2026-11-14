@@ -18,6 +18,7 @@
 //! uses it.
 
 use crate::client::offset_to_retire;
+use crate::epoch::EpochCache;
 use rdkafka::Offset;
 use spate_core::feed::Receipt;
 use spate_core::hash::FastMap;
@@ -49,6 +50,14 @@ pub(crate) struct Position {
     pub(crate) generation: u64,
 }
 
+/// A commit point: the offset to commit, and the leader epoch of the record
+/// before it, or -1 when that is unknown.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct Point {
+    pub(crate) offset: i64,
+    pub(crate) epoch: i32,
+}
+
 /// What the tracker keeps for one owned partition.
 #[derive(Debug)]
 struct Partition {
@@ -68,6 +77,11 @@ struct Partition {
     first: Option<i64>,
     /// Whether [`Tracker::skipped_below`] has answered for this assignment.
     skip_checked: bool,
+    /// Whether [`Tracker::first_read_below_start`] has answered for this
+    /// assignment.
+    first_checked: bool,
+    /// The leader epoch of each offset delivered or retired to.
+    epochs: EpochCache,
 }
 
 impl Partition {
@@ -79,6 +93,14 @@ impl Partition {
             Some((first, _)) => Some(self.next.map_or(*first, |n| n.min(*first))),
             None => self.next,
         }
+    }
+
+    fn point(&self) -> Option<Point> {
+        let offset = self.commit_point()?;
+        Some(Point {
+            offset,
+            epoch: self.epochs.at(offset - 1),
+        })
     }
 }
 
@@ -103,14 +125,19 @@ impl Tracker {
     /// and no committed offset known.
     #[cfg(test)]
     pub(crate) fn assign(&mut self, tps: impl IntoIterator<Item = Tp>) {
-        self.assign_from(tps.into_iter().map(|tp| (tp, None)));
+        self.assign_from(tps.into_iter().map(|tp| (tp, None, -1)));
     }
 
     /// Take ownership of each partition under a new generation, with nothing
-    /// delivered, each paired with the committed offset its reads start at.
-    pub(crate) fn assign_from(&mut self, tps: impl IntoIterator<Item = (Tp, Option<i64>)>) {
+    /// delivered, each paired with the committed offset its reads start at
+    /// and that commit's leader epoch.
+    pub(crate) fn assign_from(&mut self, tps: impl IntoIterator<Item = (Tp, Option<i64>, i32)>) {
         self.generation += 1;
-        for (tp, started_at) in tps {
+        for (tp, started_at, epoch) in tps {
+            let mut epochs = EpochCache::default();
+            if let Some(start) = started_at {
+                epochs.observe(start - 1, epoch);
+            }
             self.partitions.insert(
                 tp,
                 Partition {
@@ -121,6 +148,8 @@ impl Tracker {
                     started_at,
                     first: None,
                     skip_checked: false,
+                    first_checked: false,
+                    epochs,
                 },
             );
         }
@@ -128,11 +157,11 @@ impl Tracker {
 
     /// Give up `tps`, and return the commit point of each that has one, for
     /// the commit that must precede the release.
-    pub(crate) fn revoke(&mut self, tps: &[Tp]) -> Vec<(Tp, i64)> {
+    pub(crate) fn revoke(&mut self, tps: &[Tp]) -> Vec<(Tp, Point)> {
         self.generation += 1;
         tps.iter()
             .filter_map(|tp| {
-                let point = self.partitions.remove(tp)?.commit_point()?;
+                let point = self.partitions.remove(tp)?.point()?;
                 Some((tp.clone(), point))
             })
             .collect()
@@ -153,8 +182,16 @@ impl Tracker {
 
     /// Record `offset` of `tp` as delivered and unfinished, and mint the
     /// receipt the reader holds it by. `None` when `tp` is not owned.
+    #[cfg(test)]
     pub(crate) fn deliver(&mut self, tp: &Tp, offset: i64) -> Option<Receipt> {
+        self.deliver_at(tp, offset, -1)
+    }
+
+    /// [`deliver`](Tracker::deliver) for a record the broker sent with leader
+    /// epoch `epoch`, or -1 for none.
+    pub(crate) fn deliver_at(&mut self, tp: &Tp, offset: i64, epoch: i32) -> Option<Receipt> {
         let partition = self.partitions.get_mut(tp)?;
+        partition.epochs.observe(offset, epoch);
         // A delivery below `next` means the consumer reads forward from that
         // offset again, so `next` follows the last delivery down, and each
         // copy of an offset must finish before the offset does.
@@ -240,15 +277,22 @@ impl Tracker {
     }
 
     /// Raise `tp`'s next offset to the consumer's position `read_to`, past
-    /// offsets no delivery names. Returns the next offset it replaced and the
-    /// one it set, or `None` when `tp` is not owned or nothing lies between
-    /// them.
+    /// offsets no delivery names. `epoch` is the leader epoch the position
+    /// carries, that of the record or marker before it. Returns the next
+    /// offset it replaced and the one it set, or `None` when `tp` is not
+    /// owned or nothing lies between them.
     ///
     /// The commit point stays capped at the first unfinished offset, and a
     /// later delivery below the raised offset still takes it back down.
-    pub(crate) fn retire_to(&mut self, tp: &Tp, read_to: Offset) -> Option<(Option<i64>, i64)> {
+    pub(crate) fn retire_to(
+        &mut self,
+        tp: &Tp,
+        read_to: Offset,
+        epoch: i32,
+    ) -> Option<(Option<i64>, i64)> {
         let partition = self.partitions.get_mut(tp)?;
         let last = offset_to_retire(read_to, partition.next)?;
+        partition.epochs.observe(last, epoch);
         let from = partition.next.replace(last + 1);
         Some((from, last + 1))
     }
@@ -273,6 +317,22 @@ impl Tracker {
         (end > started_at).then_some((started_at, end))
     }
 
+    /// The committed offset `tp`'s assignment started at and the first offset
+    /// it delivered, when that is below the commit: the leader answered the
+    /// commit's epoch with a lower offset, or the commit was above the log's
+    /// end. Answers once per assignment, at the first call after the first
+    /// delivery.
+    pub(crate) fn first_read_below_start(&mut self, tp: &Tp) -> Option<(i64, i64)> {
+        let partition = self.partitions.get_mut(tp)?;
+        if partition.first_checked {
+            return None;
+        }
+        let first = partition.first?;
+        partition.first_checked = true;
+        let started_at = partition.started_at?;
+        (first < started_at).then_some((started_at, first))
+    }
+
     /// Raise `tp`'s next offset to its log start `log_start`, past offsets no
     /// record holds any more. The floor is the next offset, or the committed
     /// offset the assignment started at before anything is delivered, and
@@ -280,24 +340,30 @@ impl Tracker {
     /// start. Returns the floor and the offset it set, or `None` when `tp` is
     /// not owned, the floor is unknown or nothing lies between.
     ///
-    /// The commit point stays capped at the first unfinished offset.
+    /// The commit point stays capped at the first unfinished offset. The
+    /// epoch of the record before the log start is unknown, so the raised
+    /// point commits with none until a delivery or a retire records one.
     pub(crate) fn retire_below(&mut self, tp: &Tp, log_start: i64) -> Option<(i64, i64)> {
         let partition = self.partitions.get_mut(tp)?;
         let floor = partition.next.or(partition.started_at)?;
         let last = offset_to_retire(Offset::Offset(log_start), Some(floor))?;
+        partition.epochs.clear();
         partition.next = Some(last + 1);
         Some((floor, last + 1))
     }
 
     /// The commit point of every owned partition whose point moved since the
     /// last call, for the periodic commit.
-    pub(crate) fn take_commits(&mut self) -> Vec<(Tp, i64)> {
+    pub(crate) fn take_commits(&mut self) -> Vec<(Tp, Point)> {
         let mut moved = Vec::new();
         for (tp, p) in &mut self.partitions {
-            if let Some(point) = p.commit_point()
-                && p.taken != Some(point)
+            if let Some(point) = p.point()
+                && p.taken != Some(point.offset)
             {
-                p.taken = Some(point);
+                p.taken = Some(point.offset);
+                // Nothing reads an offset below the point again under this
+                // assignment, except a delivery that also observes its epoch.
+                p.epochs.prune_below(point.offset - 1);
                 moved.push((tp.clone(), point));
             }
         }
@@ -308,10 +374,10 @@ impl Tracker {
     /// [`take_commits`](Tracker::take_commits) returns them again. For a
     /// commit that failed. A partition whose point moved since is left as
     /// it is.
-    pub(crate) fn untake(&mut self, points: &[(Tp, i64)]) {
+    pub(crate) fn untake(&mut self, points: &[(Tp, Point)]) {
         for (tp, point) in points {
             if let Some(p) = self.partitions.get_mut(tp)
-                && p.taken == Some(*point)
+                && p.taken == Some(point.offset)
             {
                 p.taken = None;
             }
@@ -357,6 +423,12 @@ impl Tracker {
     }
 }
 
+/// Each point's offset, for a test that compares offsets alone.
+#[cfg(test)]
+pub(crate) fn offsets(points: Vec<(Tp, Point)>) -> Vec<(Tp, i64)> {
+    points.into_iter().map(|(tp, p)| (tp, p.offset)).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -385,8 +457,12 @@ mod tests {
         assert_eq!(t.commit_point(&tp(0)), Some(9), "9 waits for its write");
         assert!(t.complete(&moving));
         assert_eq!(t.commit_point(&tp(0)), Some(10));
-        assert_eq!(t.take_commits(), vec![(tp(0), 10)]);
-        assert_eq!(t.take_commits(), vec![], "unchanged since the last take");
+        assert_eq!(offsets(t.take_commits()), vec![(tp(0), 10)]);
+        assert_eq!(
+            offsets(t.take_commits()),
+            vec![],
+            "unchanged since the last take"
+        );
     }
 
     /// Pins that a position past the last delivery moves the commit point,
@@ -397,9 +473,16 @@ mod tests {
         t.assign([tp(0)]);
         let unit = t.deliver(&tp(0), 5).unwrap();
         assert!(t.acknowledge(unit));
-        assert_eq!(t.retire_to(&tp(0), Offset::Offset(8)), Some((Some(6), 8)));
-        assert_eq!(t.take_commits(), vec![(tp(0), 8)]);
-        assert_eq!(t.take_commits(), vec![], "unchanged since the last take");
+        assert_eq!(
+            t.retire_to(&tp(0), Offset::Offset(8), -1),
+            Some((Some(6), 8))
+        );
+        assert_eq!(offsets(t.take_commits()), vec![(tp(0), 8)]);
+        assert_eq!(
+            offsets(t.take_commits()),
+            vec![],
+            "unchanged since the last take"
+        );
     }
 
     /// Pins that a position does not pass an unfinished offset: the point
@@ -409,7 +492,7 @@ mod tests {
         let mut t = Tracker::new();
         t.assign([tp(0)]);
         let unit = t.deliver(&tp(0), 5).unwrap();
-        t.retire_to(&tp(0), Offset::Offset(9));
+        t.retire_to(&tp(0), Offset::Offset(9), -1);
         assert_eq!(t.commit_point(&tp(0)), Some(5));
         assert!(t.acknowledge(unit));
         assert_eq!(t.commit_point(&tp(0)), Some(9));
@@ -421,10 +504,10 @@ mod tests {
     fn a_partition_with_no_delivery_commits_its_position() {
         let mut t = Tracker::new();
         t.assign([tp(0)]);
-        t.retire_to(&tp(0), Offset::Offset(3));
+        t.retire_to(&tp(0), Offset::Offset(3), -1);
         assert_eq!(t.commit_point(&tp(0)), Some(3));
         let taken = t.take_commits();
-        assert_eq!(taken, vec![(tp(0), 3)]);
+        assert_eq!(offsets(taken.clone()), vec![(tp(0), 3)]);
         t.untake(&taken);
         assert_eq!(t.take_commits(), taken);
     }
@@ -435,26 +518,26 @@ mod tests {
     fn a_retired_position_rejects_what_is_not_above_next() {
         let mut t = Tracker::new();
         t.assign([tp(0)]);
-        assert_eq!(t.retire_to(&tp(0), Offset::Offset(0)), None);
+        assert_eq!(t.retire_to(&tp(0), Offset::Offset(0), -1), None);
         assert_eq!(t.commit_point(&tp(0)), None);
-        assert_eq!(t.retire_to(&tp(0), Offset::Offset(1)), Some((None, 1)));
+        assert_eq!(t.retire_to(&tp(0), Offset::Offset(1), -1), Some((None, 1)));
         assert_eq!(t.commit_point(&tp(0)), Some(1));
         let unit = t.deliver(&tp(0), 9).unwrap();
         assert!(t.acknowledge(unit));
         for position in [9, 10, -5] {
-            assert_eq!(t.retire_to(&tp(0), Offset::Offset(position)), None);
+            assert_eq!(t.retire_to(&tp(0), Offset::Offset(position), -1), None);
         }
         assert_eq!(t.commit_point(&tp(0)), Some(10));
-        assert!(t.retire_to(&tp(0), Offset::Offset(11)).is_some());
+        assert!(t.retire_to(&tp(0), Offset::Offset(11), -1).is_some());
         assert_eq!(t.commit_point(&tp(0)), Some(11));
-        assert!(t.retire_to(&tp(0), Offset::Offset(i64::MAX)).is_some());
+        assert!(t.retire_to(&tp(0), Offset::Offset(i64::MAX), -1).is_some());
         assert_eq!(t.commit_point(&tp(0)), Some(i64::MAX));
     }
 
     /// `tp(0)` assigned from the committed offset `at`.
     fn assigned_at(at: Option<i64>) -> Tracker {
         let mut t = Tracker::new();
-        t.assign_from([(tp(0), at)]);
+        t.assign_from([(tp(0), at, -1)]);
         t
     }
 
@@ -495,7 +578,7 @@ mod tests {
         assert_eq!(t.skipped_below(&tp(0), 7), None);
         t.revoke(&[tp(0)]);
         assert_eq!(t.skipped_below(&tp(0), 7), None, "no longer owned");
-        t.assign_from([(tp(0), Some(0))]);
+        t.assign_from([(tp(0), Some(0), -1)]);
         assert_eq!(t.skipped_below(&tp(0), 7), Some((0, 7)));
     }
 
@@ -551,10 +634,10 @@ mod tests {
             Offset::Beginning,
             Offset::OffsetTail(1),
         ] {
-            assert_eq!(t.retire_to(&tp(0), logical), None, "{logical:?}");
+            assert_eq!(t.retire_to(&tp(0), logical, -1), None, "{logical:?}");
         }
         assert_eq!(t.commit_point(&tp(0)), None);
-        assert_eq!(t.retire_to(&tp(1), Offset::Offset(4)), None);
+        assert_eq!(t.retire_to(&tp(1), Offset::Offset(4), -1), None);
         assert!(!t.owns(&tp(1)));
     }
 
@@ -564,7 +647,7 @@ mod tests {
     fn a_delivery_below_a_retired_position_takes_the_point_back() {
         let mut t = Tracker::new();
         t.assign([tp(0)]);
-        t.retire_to(&tp(0), Offset::Offset(8));
+        t.retire_to(&tp(0), Offset::Offset(8), -1);
         let unit = t.deliver(&tp(0), 5).unwrap();
         assert_eq!(t.commit_point(&tp(0)), Some(5));
         assert!(t.acknowledge(unit));
@@ -577,8 +660,8 @@ mod tests {
     fn a_revocation_commits_past_what_it_retired() {
         let mut t = Tracker::new();
         t.assign([tp(0)]);
-        t.retire_to(&tp(0), Offset::Offset(4));
-        assert_eq!(t.revoke(&[tp(0)]), vec![(tp(0), 4)]);
+        t.retire_to(&tp(0), Offset::Offset(4), -1);
+        assert_eq!(offsets(t.revoke(&[tp(0)])), vec![(tp(0), 4)]);
     }
 
     /// Pins that a retired position does not outlive its assignment.
@@ -586,7 +669,7 @@ mod tests {
     fn a_reassignment_forgets_a_retired_position() {
         let mut t = Tracker::new();
         t.assign([tp(0)]);
-        t.retire_to(&tp(0), Offset::Offset(4));
+        t.retire_to(&tp(0), Offset::Offset(4), -1);
         t.assign([tp(0)]);
         assert_eq!(t.commit_point(&tp(0)), None);
     }
@@ -599,7 +682,7 @@ mod tests {
         t.assign([tp(0)]);
         let unit = t.deliver(&tp(0), 5).unwrap();
         let moving = t.release(unit).unwrap();
-        t.retire_to(&tp(0), Offset::Offset(8));
+        t.retire_to(&tp(0), Offset::Offset(8), -1);
         assert_eq!(t.commit_point(&tp(0)), Some(5));
         assert!(t.complete(&moving));
         assert_eq!(t.commit_point(&tp(0)), Some(8));
@@ -615,7 +698,7 @@ mod tests {
         let old = t.deliver(&tp(0), 5).unwrap();
         let old_write = t.deliver(&tp(0), 6).unwrap();
         let moving = t.release(old_write).unwrap();
-        assert_eq!(t.revoke(&[tp(0)]), vec![(tp(0), 5)]);
+        assert_eq!(offsets(t.revoke(&[tp(0)])), vec![(tp(0), 5)]);
         assert!(!t.owns(&tp(0)));
 
         t.assign([tp(0)]);
@@ -640,7 +723,7 @@ mod tests {
         assert!(!t.owns(&tp(0)) && !t.owns(&tp(1)));
         assert!(t.deliver(&tp(0), 0).is_none());
         assert!(!t.acknowledge(r));
-        assert_eq!(t.take_commits(), vec![]);
+        assert_eq!(offsets(t.take_commits()), vec![]);
     }
 
     /// Pins that a delivery below offsets already finished moves the commit
@@ -654,12 +737,12 @@ mod tests {
             let r = t.deliver(&tp(0), offset).unwrap();
             assert!(t.acknowledge(r));
         }
-        assert_eq!(t.take_commits(), vec![(tp(0), 10)]);
+        assert_eq!(offsets(t.take_commits()), vec![(tp(0), 10)]);
         let again = t.deliver(&tp(0), 5).unwrap();
         assert_eq!(t.commit_point(&tp(0)), Some(5));
         assert!(t.acknowledge(again));
         assert_eq!(t.commit_point(&tp(0)), Some(6));
-        assert_eq!(t.take_commits(), vec![(tp(0), 6)]);
+        assert_eq!(offsets(t.take_commits()), vec![(tp(0), 6)]);
     }
 
     /// Pins that an offset delivered twice under one assignment finishes
@@ -694,7 +777,7 @@ mod tests {
         t.assign([tp(0), tp(1)]);
         let _r0 = t.deliver(&tp(0), 3).unwrap();
         let r1 = t.deliver(&tp(1), 7).unwrap();
-        assert_eq!(t.revoke(&[tp(0)]), vec![(tp(0), 3)]);
+        assert_eq!(offsets(t.revoke(&[tp(0)])), vec![(tp(0), 3)]);
         assert!(t.held(r1).is_some());
         assert!(t.acknowledge(r1));
         assert_eq!(t.commit_point(&tp(1)), Some(8));
@@ -751,15 +834,25 @@ mod tests {
         assert!(t.acknowledge(r1));
         let mut taken = t.take_commits();
         taken.sort();
-        assert_eq!(taken, vec![(tp(0), 4), (tp(1), 9)]);
+        assert_eq!(offsets(taken.clone()), vec![(tp(0), 4), (tp(1), 9)]);
         t.untake(&taken);
         let r1 = t.deliver(&tp(1), 9).unwrap();
         assert!(t.acknowledge(r1));
         let mut again = t.take_commits();
         again.sort();
-        assert_eq!(again, vec![(tp(0), 4), (tp(1), 10)]);
-        t.untake(&[(tp(1), 9)]);
-        assert_eq!(t.take_commits(), vec![], "10 was taken after 9 failed");
+        assert_eq!(offsets(again), vec![(tp(0), 4), (tp(1), 10)]);
+        t.untake(&[(
+            tp(1),
+            Point {
+                offset: 9,
+                epoch: -1,
+            },
+        )]);
+        assert_eq!(
+            offsets(t.take_commits()),
+            vec![],
+            "10 was taken after 9 failed"
+        );
     }
 
     /// Pins that a held receipt from an earlier assignment leaves the
@@ -1021,11 +1114,11 @@ mod proptests {
                     }
                     Op::Marker { p, gap } => {
                         let Some(owned) = o.owned.get_mut(&p) else {
-                            prop_assert!(t.retire_to(&tp_of(p), Offset::Offset(gap)).is_none());
+                            prop_assert!(t.retire_to(&tp_of(p), Offset::Offset(gap), -1).is_none());
                             continue;
                         };
                         let read_to = o.cursor[&p] + gap;
-                        prop_assert!(t.retire_to(&tp_of(p), Offset::Offset(read_to)).is_some());
+                        prop_assert!(t.retire_to(&tp_of(p), Offset::Offset(read_to), -1).is_some());
                         owned.moved = true;
                         o.cursor.insert(p, read_to);
                     }
@@ -1038,7 +1131,7 @@ mod proptests {
                             continue;
                         }
                         let read_to = o.cursor[&p] - back;
-                        prop_assert_eq!(t.retire_to(&tp_of(p), Offset::Offset(read_to)), None);
+                        prop_assert_eq!(t.retire_to(&tp_of(p), Offset::Offset(read_to), -1), None);
                     }
                     Op::LogStart { p, ahead } => {
                         let Some(owned) = o.owned.get_mut(&p) else {
@@ -1069,7 +1162,7 @@ mod proptests {
                     }
                     Op::Revoke => {
                         let tps: Vec<Tp> = o.owned.keys().map(|p| tp_of(*p)).collect();
-                        let mut got = t.revoke(&tps);
+                        let mut got = offsets(t.revoke(&tps));
                         got.sort();
                         let mut expected = Vec::new();
                         for p in o.owned.keys().copied().collect::<Vec<_>>() {
@@ -1092,7 +1185,9 @@ mod proptests {
                         let new: Vec<usize> = (0..PARTITIONS)
                             .filter(|p| mask & (1 << p) != 0 && !o.owned.contains_key(p))
                             .collect();
-                        t.assign_from(new.iter().map(|p| (tp_of(*p), o.committed.get(p).copied())));
+                        t.assign_from(
+                            new.iter().map(|p| (tp_of(*p), o.committed.get(p).copied(), -1)),
+                        );
                         o.generation += 1;
                         for p in new {
                             let started_at = o.committed.get(&p).copied();
@@ -1104,7 +1199,7 @@ mod proptests {
                         }
                     }
                     Op::Take => {
-                        let mut got = t.take_commits();
+                        let mut got = offsets(t.take_commits());
                         got.sort();
                         let mut expected = Vec::new();
                         for p in o.owned.keys().copied().collect::<Vec<_>>() {

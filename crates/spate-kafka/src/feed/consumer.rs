@@ -74,13 +74,20 @@
 
 use super::attempt::PublishId;
 use super::events::{self, Cause};
+use super::inflight::Point;
 use super::inflight::{Position, Tp};
 use super::write::{self, Destination, Finish, Move, Outgoing, Producer, Tombstone, Write};
 use super::{Closing, Core, Gating, LatchOnPanic, READY_CAPACITY, State, Topics};
 use crate::client::{
-    CLOSE_WAIT, PendingCommit, check_assignment, close_in_background, read_position, send_commit,
+    CLOSE_WAIT, PendingCommit, check_assignment, close_in_background, epoch_of, list_offsets,
+    message_epoch, read_position, send_commit, set_epoch,
 };
 use crate::context::{Intent, SourceContext};
+#[cfg(test)]
+use crate::epoch::SeekWith;
+use crate::epoch::{
+    RETRY_SEEK_WAIT, Validating, ends_to_read, plan_starts, refusals_spanning, seek_starts,
+};
 use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::error::{KafkaError, KafkaResult, RDKafkaErrorCode};
 use rdkafka::message::{BorrowedMessage, Headers, Message};
@@ -120,6 +127,15 @@ pub(crate) struct Driver {
     pub(crate) paused: BTreeSet<Tp>,
     /// The bound on each blocking group call.
     pub(crate) call_bound: Duration,
+    /// The partitions whose seek to their commit librdkafka refused. Each is
+    /// paused, apart from [`paused`](Self::paused), until a seek is accepted.
+    pub(crate) validating: Validating<Tp>,
+    /// Answers each seek in place of the consumer, for a test.
+    #[cfg(test)]
+    pub(crate) seek_with: Option<SeekWith>,
+    /// Called before each call that reads end offsets or seeks, for a test.
+    #[cfg(test)]
+    pub(crate) on_call: Option<Box<dyn FnMut(Wait) + Send>>,
     assigned_once: bool,
     last_commit: Instant,
     /// Each wait of the stop path and for a commit's answer, for a test to
@@ -148,6 +164,10 @@ pub(crate) enum Wait {
     /// For the consumer's close, as a feed that latched hands it to a thread
     /// of its own.
     Handoff(Duration),
+    /// For the end offsets of an assignment's partitions with an epoch.
+    Ends(Duration),
+    /// For a seek to the committed offsets.
+    Seek(Duration),
 }
 
 /// How a wait for the group's answer to a commit treats the feed's stop.
@@ -218,6 +238,11 @@ impl Driver {
             producer,
             paused: BTreeSet::new(),
             call_bound,
+            validating: Validating::new(refusals_spanning(call_bound, POLL_TIMEOUT)),
+            #[cfg(test)]
+            seek_with: None,
+            #[cfg(test)]
+            on_call: None,
             assigned_once: false,
             last_commit: core_now,
             #[cfg(test)]
@@ -254,6 +279,7 @@ pub(crate) fn run(mut d: Driver) {
         d.resend_due();
         d.poll();
         d.serve_intents();
+        d.validate();
         d.publish_stats();
         d.backpressure();
         d.commit_if_due();
@@ -413,11 +439,22 @@ impl Driver {
             let mut st = self.core.lock();
             let replaced = st.tracker.replace_copies(&tp, offset);
             st.forget(&replaced);
-            let Some(receipt) = st.tracker.deliver(&tp, offset) else {
+            let Some(receipt) = st.tracker.deliver_at(&tp, offset, message_epoch(message)) else {
                 // Read after its partition was given up; the next owner
                 // reads it again.
                 return;
             };
+            if let Some((committed, first)) = st.tracker.first_read_below_start(&tp) {
+                tracing::info!(
+                    topic = &*tp.topic,
+                    partition = tp.partition,
+                    committed,
+                    first,
+                    "the partition's first record is below its committed offset; the log was \
+                     truncated below the commit, or the commit is above the log's end, and \
+                     the records from there are read again"
+                );
+            }
             match read {
                 Read::Unit { unit, identity } => {
                     st.gating.push_back(Gating {
@@ -517,10 +554,13 @@ impl Driver {
             self.core.latch(&refused.reason(&names));
             return;
         }
-        let start = if tpl.count() == 0 {
-            tpl.clone()
+        // The committed read, the end read and the seek share one bound, so
+        // the thread is away from its stop for at most one group call.
+        let until = self.deadline(self.call_bound);
+        let (start, seek, started) = if tpl.count() == 0 {
+            (tpl.clone(), TopicPartitionList::new(), Vec::new())
         } else {
-            self.start_positions(tpl)
+            self.start_positions(tpl, until)
         };
         // Accepted even when empty: under deferred completion the
         // rebalance stays in progress until `assign` is called.
@@ -529,16 +569,34 @@ impl Driver {
             return;
         }
         self.assigned_once = true;
-        let started: Vec<(Tp, Option<i64>)> = self
-            .tps(&start)
+        let tps: Vec<Tp> = started.iter().map(|(tp, _, _)| tp.clone()).collect();
+        let targets: Vec<(Tp, i64, i32)> = self
+            .tps(&seek)
             .into_iter()
-            .zip(start.elements())
-            .map(|(tp, e)| match e.offset() {
-                Offset::Offset(committed) => (tp, Some(committed)),
-                _ => (tp, None),
+            .zip(seek.elements())
+            .filter_map(|(tp, e)| match e.offset() {
+                Offset::Offset(offset) => {
+                    let epoch = epoch_of(&seek, e.topic(), e.partition());
+                    Some((tp, offset, epoch))
+                }
+                _ => None,
             })
             .collect();
-        let tps: Vec<Tp> = started.iter().map(|(tp, _)| tp.clone()).collect();
+        let budget = self.budget(until);
+        let refused = seek_starts(seek, budget, |list, budget| self.seek(list, budget));
+        let refused: Vec<Tp> = targets
+            .into_iter()
+            .filter(|(tp, _, _)| {
+                refused
+                    .iter()
+                    .any(|(topic, partition)| *tp.topic == **topic && tp.partition == *partition)
+            })
+            .map(|(tp, offset, epoch)| {
+                self.validating.refused(tp.clone(), offset, epoch);
+                tp
+            })
+            .collect();
+        self.hold_validating(refused);
         let (pause, owned) = {
             let mut st = self.core.lock();
             st.tracker.assign_from(started);
@@ -558,20 +616,39 @@ impl Driver {
     }
 
     /// `tpl` with a concrete start offset for each partition: its committed
-    /// offset, or the earliest where none is committed. A partition whose
-    /// lookup failed keeps `Offset::Stored`, which librdkafka resolves.
-    fn start_positions(&self, tpl: &TopicPartitionList) -> TopicPartitionList {
-        let committed = match self
-            .consumer
-            .committed_offsets(tpl.clone(), self.call_bound)
-        {
+    /// offset, the earliest where none is committed, or the log start where
+    /// the commit carries an epoch and is above the partition's end. A
+    /// partition whose lookup failed keeps `Offset::Stored`, which librdkafka
+    /// resolves.
+    ///
+    /// Returns the start list, the partitions to seek to their commit and
+    /// epoch, and each partition with the committed offset and epoch its
+    /// reads start at. Every read here ends by `until`.
+    fn start_positions(
+        &mut self,
+        tpl: &TopicPartitionList,
+        until: Instant,
+    ) -> (
+        TopicPartitionList,
+        TopicPartitionList,
+        Vec<(Tp, Option<i64>, i32)>,
+    ) {
+        let unread = |tpl: &TopicPartitionList| {
+            let started = self.tps(tpl).into_iter().map(|tp| (tp, None, -1)).collect();
+            (tpl.clone(), TopicPartitionList::new(), started)
+        };
+        let budget = self.budget(until);
+        if budget.is_zero() {
+            return unread(tpl);
+        }
+        let mut committed = match self.consumer.committed_offsets(tpl.clone(), budget) {
             Ok(committed) => committed,
             Err(e) => {
                 tracing::warn!(
                     error = %e,
                     "committed offset lookup failed; librdkafka resolves the start offsets"
                 );
-                return tpl.clone();
+                return unread(tpl);
             }
         };
         for mut elem in committed.elements() {
@@ -581,7 +658,168 @@ impl Driver {
                 let _ = elem.set_offset(start);
             }
         }
-        committed
+        let started = self
+            .tps(&committed)
+            .into_iter()
+            .zip(committed.elements())
+            .map(|(tp, e)| match e.offset() {
+                Offset::Offset(offset) => {
+                    let epoch = epoch_of(&committed, e.topic(), e.partition());
+                    (tp, Some(offset), epoch)
+                }
+                _ => (tp, None, -1),
+            })
+            .collect();
+        let ends = ends_to_read(&committed);
+        let ends = if ends.count() == 0 {
+            None
+        } else {
+            self.read_ends(ends, until)
+        };
+        let seek = plan_starts(&mut committed, ends.as_ref(), true);
+        (committed, seek, started)
+    }
+
+    /// The end offsets of `ends`' partitions, read by `until`, or `None` when
+    /// the read failed or no time was left. Each of those partitions is then
+    /// sought to its commit, and none starts from its log start.
+    fn read_ends(
+        &mut self,
+        mut ends: TopicPartitionList,
+        until: Instant,
+    ) -> Option<TopicPartitionList> {
+        let budget = self.budget(until);
+        #[cfg(test)]
+        self.called(Wait::Ends(budget));
+        let read = if budget.is_zero() {
+            Err(KafkaError::MetadataFetch(
+                RDKafkaErrorCode::OperationTimedOut,
+            ))
+        } else {
+            list_offsets(Consumer::client(&*self.consumer), &mut ends, budget)
+        };
+        match read {
+            Ok(()) => Some(ends),
+            Err(e) => {
+                let partitions: Vec<(String, i32)> = ends
+                    .elements()
+                    .iter()
+                    .map(|e| (e.topic().to_owned(), e.partition()))
+                    .collect();
+                tracing::warn!(
+                    error = %e,
+                    ?partitions,
+                    "reading end offsets failed; each of these partitions is sought to its \
+                     commit, and one whose commit is above its end reads only later writes \
+                     until its next assignment"
+                );
+                None
+            }
+        }
+    }
+
+    /// Seek through the consumer, or through [`seek_with`](Self::seek_with)
+    /// under a test.
+    fn seek(
+        &mut self,
+        list: TopicPartitionList,
+        budget: Duration,
+    ) -> KafkaResult<TopicPartitionList> {
+        #[cfg(test)]
+        self.called(Wait::Seek(budget));
+        #[cfg(test)]
+        if let Some(seek) = &mut self.seek_with {
+            return seek(list, budget);
+        }
+        self.consumer.seek_partitions(list, budget)
+    }
+
+    /// Record a call for a test, and hand it to [`on_call`](Self::on_call).
+    #[cfg(test)]
+    fn called(&mut self, wait: Wait) {
+        self.waits.lock().expect("waits lock").push(wait);
+        if let Some(on_call) = &mut self.on_call {
+            on_call(wait);
+        }
+    }
+
+    /// Pause `tps`, whose seek was refused, until a seek is accepted. A
+    /// partition the consumer would not pause reads from its commit
+    /// unchecked.
+    fn hold_validating(&mut self, tps: Vec<Tp>) {
+        if tps.is_empty() {
+            return;
+        }
+        if let Err(e) = self.consumer.pause(&tpl_of(&tps)) {
+            tracing::warn!(
+                error = %e,
+                partitions = ?tps,
+                "pausing partitions until their committed offset is checked failed; they read \
+                 from it unchecked"
+            );
+            for tp in &tps {
+                self.validating.remove(tp);
+            }
+        }
+    }
+
+    /// Seek each partition in [`validating`](Self::validating) again. One
+    /// whose seek is accepted is resumed, unless the feed holds it paused.
+    pub(crate) fn validate(&mut self) {
+        if self.validating.is_empty() {
+            return;
+        }
+        let mut list = TopicPartitionList::new();
+        for (tp, offset, epoch) in self.validating.entries() {
+            if list
+                .add_partition_offset(&tp.topic, tp.partition, Offset::Offset(offset))
+                .is_ok()
+            {
+                set_epoch(&mut list, &tp.topic, tp.partition, epoch);
+            }
+        }
+        let refused = seek_starts(list, RETRY_SEEK_WAIT, |list, budget| {
+            self.seek(list, budget)
+        });
+        let pending: Vec<(Tp, i64, i32)> = self
+            .validating
+            .entries()
+            .map(|(tp, offset, epoch)| (tp.clone(), offset, epoch))
+            .collect();
+        let mut accepted = Vec::new();
+        for (tp, offset, epoch) in pending {
+            let again = refused
+                .iter()
+                .any(|(topic, partition)| *tp.topic == **topic && tp.partition == *partition);
+            if !again {
+                self.validating.remove(&tp);
+                accepted.push(tp);
+            } else if self.validating.refused(tp.clone(), offset, epoch) {
+                tracing::warn!(
+                    topic = &*tp.topic,
+                    partition = tp.partition,
+                    "librdkafka keeps refusing the seek to this partition's committed offset; \
+                     it stays paused, and reads nothing until a seek is accepted or it is \
+                     assigned again"
+                );
+            }
+        }
+        if accepted.is_empty() {
+            return;
+        }
+        let hold = {
+            let st = self.core.lock();
+            st.stopping || st.held_for_reader() >= READY_CAPACITY
+        };
+        if hold {
+            self.paused.extend(accepted);
+        } else {
+            let resume: Vec<Tp> = accepted
+                .into_iter()
+                .filter(|tp| !self.paused.contains(tp))
+                .collect();
+            self.resume(&resume);
+        }
     }
 
     fn revoke(&mut self, tpl: &TopicPartitionList) {
@@ -605,7 +843,10 @@ impl Driver {
         });
         let paused: Vec<Tp> = tps
             .iter()
-            .filter(|tp| self.paused.remove(tp))
+            .filter(|tp| {
+                let validating = self.validating.remove(tp);
+                self.paused.remove(tp) || validating
+            })
             .cloned()
             .collect();
         // An application pause outlives the assignment, so a partition
@@ -625,8 +866,9 @@ impl Driver {
             st.drop_unowned();
         }
         self.core.release_consumer_partitions(&[]);
-        let paused: Vec<Tp> = std::mem::take(&mut self.paused).into_iter().collect();
-        self.resume(&paused);
+        let mut paused: BTreeSet<Tp> = std::mem::take(&mut self.paused);
+        paused.extend(self.validating.take_all());
+        self.resume(&paused.into_iter().collect::<Vec<_>>());
         match crate::error::classify_consumer_error(code, self.assigned_once) {
             ErrorClass::Fatal => {
                 self.core.latch(&format!("rebalance error: {code}"));
@@ -662,7 +904,11 @@ impl Driver {
                 self.pause(more);
             }
         } else if len <= READY_CAPACITY / 2 && !self.paused.is_empty() {
-            let paused: Vec<Tp> = std::mem::take(&mut self.paused).into_iter().collect();
+            // A partition still waiting for its seek stays paused.
+            let paused: Vec<Tp> = std::mem::take(&mut self.paused)
+                .into_iter()
+                .filter(|tp| !self.validating.contains(tp))
+                .collect();
             self.resume(&paused);
         }
     }
@@ -833,7 +1079,7 @@ impl Driver {
     /// unanswered or was cut short by the stop, in which case it is held.
     fn commit(
         &mut self,
-        points: &[(Tp, i64)],
+        points: &[(Tp, Point)],
         what: &str,
         until: Instant,
         on_stop: OnStop,
@@ -841,11 +1087,12 @@ impl Driver {
         let mut tpl = TopicPartitionList::new();
         for (tp, point) in points {
             if let Err(e) =
-                tpl.add_partition_offset(&tp.topic, tp.partition, Offset::Offset(*point))
+                tpl.add_partition_offset(&tp.topic, tp.partition, Offset::Offset(point.offset))
             {
                 tracing::warn!(error = %e, "building a commit failed");
                 return false;
             }
+            set_epoch(&mut tpl, &tp.topic, tp.partition, point.epoch);
         }
         let sent = match send_commit(self.consumer.client(), Some(&tpl)) {
             Ok(sent) => sent,
@@ -973,7 +1220,7 @@ pub(crate) fn take_due(st: &mut State, now: Instant) -> Vec<Write> {
 
 /// Take the revoked partitions out of the tracker and drop their buffered
 /// units, then hand their commit points to `commit` with the lock released.
-pub(crate) fn commit_revoked(core: &Core, tps: &[Tp], commit: impl FnOnce(&[(Tp, i64)])) {
+pub(crate) fn commit_revoked(core: &Core, tps: &[Tp], commit: impl FnOnce(&[(Tp, Point)])) {
     let points = {
         let mut st = core.lock();
         let points = st.tracker.revoke(tps);
@@ -986,14 +1233,14 @@ pub(crate) fn commit_revoked(core: &Core, tps: &[Tp], commit: impl FnOnce(&[(Tp,
 }
 
 /// Raise each owned partition's next offset to the position `read` gives for
-/// it, read with the lock released, so a commit can pass offsets no delivery
-/// names.
+/// it, with the position's leader epoch, read with the lock released, so a
+/// commit can pass offsets no delivery names.
 ///
 /// Only the consumer thread delivers or assigns, so nothing the thread has
 /// popped is missing from the tracker while `read` runs.
-pub(crate) fn retire_offsets(core: &Core, mut read: impl FnMut(&Tp) -> Offset) {
+pub(crate) fn retire_offsets(core: &Core, mut read: impl FnMut(&Tp) -> (Offset, i32)) {
     let owned: Vec<Tp> = core.lock().tracker.owned().cloned().collect();
-    let positions: Vec<(Tp, Offset)> = owned
+    let positions: Vec<(Tp, (Offset, i32))> = owned
         .into_iter()
         .map(|tp| {
             let position = read(&tp);
@@ -1001,8 +1248,8 @@ pub(crate) fn retire_offsets(core: &Core, mut read: impl FnMut(&Tp) -> Offset) {
         })
         .collect();
     let mut st = core.lock();
-    for (tp, position) in positions {
-        if let Some((from, to)) = st.tracker.retire_to(&tp, position) {
+    for (tp, (position, epoch)) in positions {
+        if let Some((from, to)) = st.tracker.retire_to(&tp, position, epoch) {
             tracing::debug!(
                 topic = &*tp.topic,
                 partition = tp.partition,
@@ -1048,7 +1295,7 @@ pub(crate) fn retire_below_log_start(core: &Core) {
 /// Hand the commit points that moved to `commit` with the lock released. A
 /// commit that fails leaves them to be taken again. `false` when the commit
 /// failed.
-pub(crate) fn commit_moved(core: &Core, commit: impl FnOnce(&[(Tp, i64)]) -> bool) -> bool {
+pub(crate) fn commit_moved(core: &Core, commit: impl FnOnce(&[(Tp, Point)]) -> bool) -> bool {
     let points = core.lock().tracker.take_commits();
     if points.is_empty() {
         return true;

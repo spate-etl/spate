@@ -109,13 +109,19 @@
 //! the contract.
 
 use crate::client::{
-    CLOSE_WAIT, PendingCommit, check_assignment, close_in_background, list_offsets, listed_offset,
-    send_commit,
+    CLOSE_WAIT, PendingCommit, check_assignment, close_in_background, epoch_of, list_offsets,
+    listed_offset, send_commit, set_epoch,
 };
 use crate::config::KafkaSourceConfig;
 use crate::context::{Intent, SourceContext, SourceHooks};
+#[cfg(test)]
+use crate::epoch::SeekWith;
+use crate::epoch::{
+    RETRY_SEEK_WAIT, Start, Validating, ends_to_read, plan_start, plan_starts, refusals_spanning,
+    seek_starts,
+};
 use crate::error::{StartFailure, classify_start_error};
-use crate::lane::KafkaLane;
+use crate::lane::{KafkaLane, Shared};
 use crate::metrics::KafkaStatsMetrics;
 use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::error::{KafkaError, KafkaResult, RDKafkaErrorCode};
@@ -128,12 +134,12 @@ use spate_core::clock::Stopwatch;
 use spate_core::clock::SyncClock;
 use spate_core::config::SectionPath;
 use spate_core::error::{ErrorClass, SourceError};
-use spate_core::hash::FastMap;
+use spate_core::hash::{FastMap, FastSet};
 use spate_core::metrics::SourceMetrics;
 use spate_core::record::PartitionId;
 use spate_core::source::{DrainBarrier, LaneId, Source, SourceCtx, SourceEvent};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 /// How long the source holds one consumer's assignment for the others of the
@@ -164,6 +170,8 @@ enum BrokerCall {
     CommitSent { k: usize },
     /// The source waits for consumer `k`'s commit.
     CommitWait { k: usize, budget: Duration },
+    /// Consumer `k` seeks partitions to their committed offsets.
+    Seek { k: usize, budget: Duration },
 }
 
 /// Since when the source has been without an assignment, and what took the
@@ -210,8 +218,15 @@ struct Member {
     /// Stands in for librdkafka's committed position in the lag statistic,
     /// which the lookup does not update.
     committed_at_assign: FastMap<i32, i64>,
-    /// The latest watermark stored for each partition, shared with its lane.
-    watermarks: FastMap<i32, Arc<AtomicI64>>,
+    /// The latest watermark stored for each partition and the epochs its lane
+    /// read, shared with its lane.
+    watermarks: FastMap<i32, Arc<Shared>>,
+    /// The partitions whose seek to their commit librdkafka refused. Each
+    /// stays paused until a seek is accepted.
+    validating: Validating<i32>,
+    /// The partitions whose lanes the runtime paused, which only its resume
+    /// resumes.
+    engine_paused: FastSet<i32>,
     /// The generation [`Member::group_generation`] reads in place of the
     /// client's, since a unit test's consumer never joins a group.
     #[cfg(test)]
@@ -219,6 +234,14 @@ struct Member {
 }
 
 impl Member {
+    /// `partitions` without those waiting for a seek or paused by the runtime.
+    fn resumable(&self, partitions: impl IntoIterator<Item = i32>) -> Vec<i32> {
+        partitions
+            .into_iter()
+            .filter(|p| !self.validating.contains(p) && !self.engine_paused.contains(p))
+            .collect()
+    }
+
     /// Partitions this consumer holds live lanes for.
     fn live_partition_ids(&self) -> Vec<PartitionId> {
         partition_ids(self.assignment.values())
@@ -249,14 +272,17 @@ struct Prepared {
     /// What to commit before assigning: each partition with no commit, at its
     /// listed end.
     to_commit: TopicPartitionList,
+    /// The partitions to seek to their commit and epoch once assigned.
+    seek: TopicPartitionList,
 }
 
 impl Prepared {
-    /// Assign `list`, with nothing to commit.
+    /// Assign `list`, with nothing to commit or seek.
     fn assigning(list: TopicPartitionList) -> Prepared {
         Prepared {
             list,
             to_commit: TopicPartitionList::new(),
+            seek: TopicPartitionList::new(),
         }
     }
 }
@@ -322,6 +348,9 @@ pub struct KafkaSource {
     /// Called before each broker call an accept makes.
     #[cfg(test)]
     on_broker_call: Option<Box<dyn FnMut(BrokerCall) + Send + Sync>>,
+    /// Answers each seek in place of the consumer, for a test.
+    #[cfg(test)]
+    seek_with: Option<SeekWith>,
     /// An error the next poll of this consumer returns in place of
     /// `BaseConsumer::poll`, for a test that needs a poll error in one call.
     #[cfg(test)]
@@ -436,6 +465,8 @@ impl KafkaSource {
             clock: SyncClock::system(),
             #[cfg(test)]
             on_broker_call: None,
+            #[cfg(test)]
+            seek_with: None,
             #[cfg(test)]
             injected_poll_error: None,
         }
@@ -553,15 +584,19 @@ impl KafkaSource {
     }
 
     /// Accept one consumer's assignment from its settled `start` offsets:
-    /// assign → pause → split → resume → lanes. An empty `tpl` acknowledges an
-    /// empty assignment, which the rebalance protocol still requires.
+    /// assign → pause → seek → split → resume → lanes. An empty `tpl`
+    /// acknowledges an empty assignment, which the rebalance protocol still
+    /// requires. A partition whose seek is refused stays paused until a later
+    /// seek is accepted.
     fn accept_assignment(
         &mut self,
         k: usize,
         tpl: &TopicPartitionList,
-        start: &TopicPartitionList,
-        started_at_end: usize,
+        prepared: &Prepared,
+        lookup_until: Instant,
     ) -> Result<Vec<KafkaLane>, SourceError> {
+        let start = &prepared.list;
+        let started_at_end = prepared.to_commit.count();
         let consumer = Arc::clone(&self.members[k].consumer);
         self.members[k].revoking.clear();
         self.members[k].phase = Phase::Assigned;
@@ -572,13 +607,32 @@ impl KafkaSource {
         }
         let issuer = self
             .issuer
-            .as_ref()
+            .clone()
             .ok_or_else(|| SourceError::fatal("assignment before open()"))?;
 
         consumer.assign(start).map_err(fatal("assign"))?;
         // A fetch that completes before this pause is discarded as outdated
         // and refetched, so no pre-split message reaches the main queue.
         consumer.pause(tpl).map_err(fatal("pause new assignment"))?;
+        // A new assignment starts every partition unpaused by the runtime.
+        for elem in tpl.elements() {
+            self.members[k].engine_paused.remove(&elem.partition());
+        }
+        // The seek is sent while paused, and the resume delivers from the
+        // position the leader confirms.
+        let budget = lookup_until.saturating_duration_since(self.clock.now());
+        let refused = seek_starts(prepared.seek.clone(), budget, |list, budget| {
+            self.seek(k, list, budget)
+        });
+        for elem in prepared.seek.elements() {
+            let partition = elem.partition();
+            if refused.iter().any(|(_, p)| *p == partition)
+                && let Offset::Offset(offset) = elem.offset()
+            {
+                let epoch = epoch_of(&prepared.seek, &self.config.topic, partition);
+                self.members[k].validating.refused(partition, offset, epoch);
+            }
+        }
 
         let mut lanes = Vec::new();
         for elem in tpl.elements() {
@@ -593,10 +647,12 @@ impl KafkaSource {
             self.members[k].assignment.insert(lane_id, partition);
             let mut position = TopicPartitionList::with_capacity(1);
             position.add_partition(&self.config.topic, partition);
-            let watermark = Arc::new(AtomicI64::new(i64::MIN));
+            let committed = self.members[k].committed_at_assign.get(&partition).copied();
+            let epoch = epoch_of(start, &self.config.topic, partition);
+            let shared = Arc::new(Shared::new(committed, epoch));
             self.members[k]
                 .watermarks
-                .insert(partition, Arc::clone(&watermark));
+                .insert(partition, Arc::clone(&shared));
             lanes.push(KafkaLane::new(
                 lane_id,
                 PartitionId(u32::try_from(partition).unwrap_or(0)),
@@ -604,11 +660,12 @@ impl KafkaSource {
                 Arc::clone(&consumer),
                 issuer.clone(),
                 position,
-                watermark,
+                shared,
             ));
         }
+        let resume = self.members[k].resumable(tpl.elements().iter().map(|e| e.partition()));
         consumer
-            .resume(tpl)
+            .resume(&self.tpl_for(resume))
             .map_err(fatal("resume new assignment"))?;
         tracing::info!(
             consumer = k,
@@ -665,8 +722,11 @@ impl KafkaSource {
             }
         }
         // Every start settles ahead of the first `assign`, so a start that
-        // fails leaves no consumer accepted.
-        let starts = match self.prepare_starts(&offers)? {
+        // fails leaves no consumer accepted. The lookups, listings and seeks
+        // share one deadline, since the controller thread polls no consumer
+        // meanwhile.
+        let lookup_until = self.clock.now() + self.lookup_timeout;
+        let starts = match self.prepare_starts(&offers, lookup_until)? {
             Ok(starts) => starts,
             Err(reason) => return Ok(self.retry_starts(offers, &held, reassign, &reason)),
         };
@@ -688,8 +748,7 @@ impl KafkaSource {
         self.start_retry_at = None;
         let mut lanes = Vec::new();
         for ((k, tpl), start) in offers.iter().zip(&starts) {
-            let at_end = start.to_commit.count();
-            lanes.extend(self.accept_assignment(*k, tpl, &start.list, at_end)?);
+            lanes.extend(self.accept_assignment(*k, tpl, start, lookup_until)?);
         }
         // An empty peer accepted beside a discarded offer holds nothing the group
         // meant to give, so the deadline keeps running for the discarded partitions.
@@ -731,18 +790,18 @@ impl KafkaSource {
     fn prepare_starts(
         &mut self,
         offers: &[(usize, TopicPartitionList)],
+        lookup_until: Instant,
     ) -> Result<Result<Vec<Prepared>, String>, SourceError> {
-        let lookup_until = self.clock.now() + self.lookup_timeout;
         if self.config.uncommitted_start() == Some(Offset::End) {
             return self.read_latest_starts(offers, lookup_until);
         }
         let mut starts = Vec::with_capacity(offers.len());
         for (k, tpl) in offers {
-            starts.push(Prepared::assigning(if tpl.count() == 0 {
-                TopicPartitionList::new()
+            starts.push(if tpl.count() == 0 {
+                Prepared::assigning(TopicPartitionList::new())
             } else {
                 self.start_positions(*k, tpl, lookup_until)
-            }));
+            });
         }
         Ok(Ok(starts))
     }
@@ -989,8 +1048,11 @@ impl KafkaSource {
             Ok(committed) => committed,
             Err(e) => return read_failure("reading committed offsets", &e),
         };
-        let mut starts: FastMap<i32, i64> = FastMap::default();
+        let mut starts: FastMap<i32, (i64, i32)> = FastMap::default();
         let mut ends = TopicPartitionList::new();
+        // Committed partitions whose start depends on their end, listed beside
+        // the uncommitted ones.
+        let mut with_epoch: FastSet<i32> = FastSet::default();
         for elem in committed.elements() {
             if let Err(e) = elem.error() {
                 return read_failure("reading a committed offset", &e);
@@ -1001,7 +1063,14 @@ impl KafkaSource {
                     .map_err(fatal("build offset list"))?,
                 // rdkafka reads -3 to -999 as `Offset::Offset` too.
                 Offset::Offset(offset) if offset >= 0 => {
-                    starts.insert(elem.partition(), offset);
+                    let partition = elem.partition();
+                    let epoch = epoch_of(&committed, &self.config.topic, partition);
+                    starts.insert(partition, (offset, epoch));
+                    if plan_start(elem.offset(), epoch, None, true) == Start::Validate {
+                        with_epoch.insert(partition);
+                        ends.add_partition_offset(&self.config.topic, partition, Offset::End)
+                            .map_err(fatal("build offset list"))?;
+                    }
                 }
                 // A commit that names no position: taking it as no commit would
                 // commit the end over records nothing read.
@@ -1014,24 +1083,55 @@ impl KafkaSource {
                 }
             }
         }
-        let mut listed: FastMap<i32, i64> = FastMap::default();
+        // Each uncommitted partition's listed end with its epoch, and each
+        // committed partition's end where its start depends on it.
+        let mut listed: FastMap<i32, (i64, i32)> = FastMap::default();
+        let mut committed_ends: FastMap<i32, i64> = FastMap::default();
+        // Only an uncommitted partition makes a listing that fails a reason to
+        // retry. Without one, a committed partition whose end is unknown is
+        // sought to its commit.
+        let uncommitted = ends.count() > with_epoch.len();
         if ends.count() > 0 {
             let budget = lookup_until.saturating_duration_since(self.clock.now());
-            if budget.is_zero() {
-                return Ok(Err("no time left to list end offsets".to_owned()));
-            }
-            #[cfg(test)]
-            Self::before_call(
-                &mut self.on_broker_call,
-                BrokerCall::Listing { k: *reader, budget },
-            );
-            if let Err(e) = list_offsets(consumer.client(), &mut ends, budget) {
-                return read_failure("listing end offsets", &e);
+            let read = if budget.is_zero() {
+                Err(None)
+            } else {
+                #[cfg(test)]
+                Self::before_call(
+                    &mut self.on_broker_call,
+                    BrokerCall::Listing { k: *reader, budget },
+                );
+                list_offsets(consumer.client(), &mut ends, budget).map_err(Some)
+            };
+            match read {
+                Ok(()) => {}
+                Err(None) if uncommitted => {
+                    return Ok(Err("no time left to list end offsets".to_owned()));
+                }
+                Err(Some(e)) if uncommitted => return read_failure("listing end offsets", &e),
+                Err(e) => {
+                    tracing::warn!(
+                        error = ?e.map(|e| e.to_string()),
+                        partitions = ?with_epoch,
+                        "reading end offsets failed; each of these partitions is sought to its \
+                         commit, and one whose commit is above its end reads only later writes \
+                         until its next assignment"
+                    );
+                    ends = TopicPartitionList::new();
+                }
             }
             for elem in ends.elements() {
+                let partition = elem.partition();
+                if with_epoch.contains(&partition) {
+                    if let Ok(end) = listed_offset(&elem) {
+                        committed_ends.insert(partition, end);
+                    }
+                    continue;
+                }
                 match listed_start(&elem) {
                     Ok(offset) => {
-                        listed.insert(elem.partition(), offset);
+                        let epoch = epoch_of(&ends, &self.config.topic, partition);
+                        listed.insert(partition, (offset, epoch));
                     }
                     Err(e) => return read_failure("listing an end offset", &e),
                 }
@@ -1042,25 +1142,41 @@ impl KafkaSource {
             let mut start = Prepared::assigning(TopicPartitionList::new());
             for elem in tpl.elements() {
                 let partition = elem.partition();
-                let offset = if let Some(offset) = listed.get(&partition) {
+                let topic = &self.config.topic;
+                let (offset, epoch, plan) = if let Some(&(offset, epoch)) = listed.get(&partition) {
                     start
                         .to_commit
-                        .add_partition_offset(
-                            &self.config.topic,
-                            partition,
-                            Offset::Offset(*offset),
-                        )
+                        .add_partition_offset(topic, partition, Offset::Offset(offset))
                         .map_err(fatal("build offset list"))?;
-                    *offset
-                } else if let Some(offset) = starts.get(&partition) {
-                    *offset
+                    set_epoch(&mut start.to_commit, topic, partition, epoch);
+                    (offset, epoch, Start::AsIs)
+                } else if let Some(&(offset, epoch)) = starts.get(&partition) {
+                    let end = committed_ends.get(&partition).copied();
+                    (
+                        offset,
+                        epoch,
+                        plan_start(Offset::Offset(offset), epoch, end, true),
+                    )
                 } else {
                     return Ok(Err(format!("no start read for partition {partition}")));
                 };
+                let at = match plan {
+                    Start::FromLogStart => Offset::Beginning,
+                    Start::Validate => {
+                        start
+                            .seek
+                            .add_partition_offset(topic, partition, Offset::Offset(offset))
+                            .map_err(fatal("build offset list"))?;
+                        set_epoch(&mut start.seek, topic, partition, epoch);
+                        Offset::Offset(offset)
+                    }
+                    Start::AsIs => Offset::Offset(offset),
+                };
                 start
                     .list
-                    .add_partition_offset(&self.config.topic, partition, Offset::Offset(offset))
+                    .add_partition_offset(topic, partition, at)
                     .map_err(fatal("build offset list"))?;
+                set_epoch(&mut start.list, topic, partition, epoch);
                 self.members[*k]
                     .committed_at_assign
                     .insert(partition, offset);
@@ -1073,13 +1189,15 @@ impl KafkaSource {
     /// `tpl` with a concrete start offset for each partition, under `earliest` or
     /// `error`, so `assign` starts the fetchers before it returns. A partition
     /// whose committed offset could not be read, or whose reset policy is `error`,
-    /// keeps `Offset::Stored` and is started by librdkafka after the call.
+    /// keeps `Offset::Stored` and is started by librdkafka after the call. A
+    /// commit with an epoch is sought once assigned, or under `earliest` read
+    /// from the log start when it is above the partition's end.
     fn start_positions(
         &mut self,
         k: usize,
         tpl: &TopicPartitionList,
         lookup_until: Instant,
-    ) -> TopicPartitionList {
+    ) -> Prepared {
         self.members[k].committed_at_assign.clear();
         let budget = lookup_until.saturating_duration_since(self.clock.now());
         if budget.is_zero() {
@@ -1088,12 +1206,12 @@ impl KafkaSource {
                 topic = %self.config.topic,
                 "no time left for the committed offset lookup; librdkafka resolves the start offsets"
             );
-            return tpl.clone();
+            return Prepared::assigning(tpl.clone());
         }
         #[cfg(test)]
         Self::before_call(&mut self.on_broker_call, BrokerCall::Lookup { k, budget });
         let member = &mut self.members[k];
-        let committed = match member.consumer.committed_offsets(tpl.clone(), budget) {
+        let mut committed = match member.consumer.committed_offsets(tpl.clone(), budget) {
             Ok(committed) => committed,
             Err(e) => {
                 tracing::warn!(
@@ -1102,7 +1220,7 @@ impl KafkaSource {
                     topic = %self.config.topic,
                     "committed offset lookup failed; librdkafka resolves the start offsets"
                 );
-                return tpl.clone();
+                return Prepared::assigning(tpl.clone());
             }
         };
         let uncommitted = self.config.uncommitted_start().unwrap_or(Offset::Stored);
@@ -1126,7 +1244,138 @@ impl KafkaSource {
                 }
             }
         }
-        committed
+        let ends = ends_to_read(&committed);
+        let ends = if ends.count() == 0 {
+            None
+        } else {
+            self.read_ends(k, ends, lookup_until)
+        };
+        // Under `error` a commit above the end reaches librdkafka's reset,
+        // which fails the source.
+        let from_log_start = uncommitted == Offset::Beginning;
+        let seek = plan_starts(&mut committed, ends.as_ref(), from_log_start);
+        Prepared {
+            list: committed,
+            to_commit: TopicPartitionList::new(),
+            seek,
+        }
+    }
+
+    /// The end offsets of `ends`' partitions, read on consumer `k` by
+    /// `lookup_until`, or `None` when the read failed or no time was left.
+    /// Each of those partitions is then sought to its commit.
+    fn read_ends(
+        &mut self,
+        k: usize,
+        mut ends: TopicPartitionList,
+        lookup_until: Instant,
+    ) -> Option<TopicPartitionList> {
+        let budget = lookup_until.saturating_duration_since(self.clock.now());
+        let read = if budget.is_zero() {
+            Err(KafkaError::MetadataFetch(
+                RDKafkaErrorCode::OperationTimedOut,
+            ))
+        } else {
+            #[cfg(test)]
+            Self::before_call(&mut self.on_broker_call, BrokerCall::Listing { k, budget });
+            list_offsets(self.members[k].consumer.client(), &mut ends, budget)
+        };
+        match read {
+            Ok(()) => Some(ends),
+            Err(e) => {
+                let partitions: Vec<i32> = ends.elements().iter().map(|e| e.partition()).collect();
+                tracing::warn!(
+                    consumer = k,
+                    error = %e,
+                    ?partitions,
+                    "reading end offsets failed; each of these partitions is sought to its \
+                     commit, and one whose commit is above its end reads only later writes \
+                     until its next assignment"
+                );
+                None
+            }
+        }
+    }
+
+    /// Seek on consumer `k`, or through [`seek_with`](Self::seek_with) under
+    /// a test.
+    fn seek(
+        &mut self,
+        k: usize,
+        list: TopicPartitionList,
+        budget: Duration,
+    ) -> KafkaResult<TopicPartitionList> {
+        #[cfg(test)]
+        {
+            Self::before_call(&mut self.on_broker_call, BrokerCall::Seek { k, budget });
+            if let Some(seek) = &mut self.seek_with {
+                return seek(list, budget);
+            }
+        }
+        self.members[k].consumer.seek_partitions(list, budget)
+    }
+
+    /// Seek each partition consumer `k` holds in `validating` again. One whose
+    /// seek is accepted is resumed, unless the runtime paused its lane. A
+    /// partition the consumer no longer holds is dropped.
+    fn validate(&mut self, k: usize) {
+        let member = &mut self.members[k];
+        if member.validating.is_empty() {
+            return;
+        }
+        let held: FastSet<i32> = member
+            .assignment
+            .values()
+            .chain(member.revoking.values())
+            .copied()
+            .collect();
+        member.validating.retain(|p| held.contains(p));
+        let pending: Vec<(i32, i64, i32)> = member
+            .validating
+            .entries()
+            .map(|(&p, offset, epoch)| (p, offset, epoch))
+            .collect();
+        if pending.is_empty() {
+            return;
+        }
+        let topic = self.config.topic.clone();
+        let mut list = TopicPartitionList::new();
+        for &(p, offset, epoch) in &pending {
+            if list
+                .add_partition_offset(&topic, p, Offset::Offset(offset))
+                .is_ok()
+            {
+                set_epoch(&mut list, &topic, p, epoch);
+            }
+        }
+        let refused = seek_starts(list, RETRY_SEEK_WAIT, |list, budget| {
+            self.seek(k, list, budget)
+        });
+        let member = &mut self.members[k];
+        let mut accepted = Vec::new();
+        for (p, offset, epoch) in pending {
+            if !refused.iter().any(|(_, r)| *r == p) {
+                member.validating.remove(&p);
+                accepted.push(p);
+            } else if member.validating.refused(p, offset, epoch) {
+                tracing::warn!(
+                    consumer = k,
+                    partition = p,
+                    topic = %topic,
+                    "librdkafka keeps refusing the seek to this partition's committed offset; \
+                     it stays paused, and reads nothing until a seek is accepted or it is \
+                     assigned again"
+                );
+            }
+        }
+        let resume = member.resumable(accepted);
+        if resume.is_empty() {
+            return;
+        }
+        let tpl = self.tpl_for(resume);
+        if let Err(e) = self.members[k].consumer.resume(&tpl) {
+            tracing::error!(consumer = k, error = %e, "resume after a seek failed");
+        }
     }
 
     /// Record the loss of the source's last partitions, opening the window
@@ -1260,7 +1509,10 @@ impl KafkaSource {
                     ) {
                         tracing::error!(error = %e, "seek for main-queue rewind failed");
                     }
-                    if let Err(e) = consumer.resume(&tpl) {
+                    // The rewind leaves a partition the runtime paused, or one
+                    // waiting for its seek, paused.
+                    let resume = self.members[k].resumable([msg.partition()]);
+                    if let Err(e) = consumer.resume(&self.tpl_for(resume)) {
                         tracing::error!(error = %e, "resume for main-queue rewind failed");
                     }
                 }
@@ -1765,6 +2017,11 @@ impl Source for KafkaSource {
                 phase: Phase::Joining,
                 committed_at_assign: FastMap::default(),
                 watermarks: FastMap::default(),
+                validating: Validating::new(refusals_spanning(
+                    self.lookup_timeout,
+                    RETRY_SEEK_WAIT,
+                )),
+                engine_paused: FastSet::default(),
                 #[cfg(test)]
                 generation: None,
             });
@@ -1838,6 +2095,9 @@ impl Source for KafkaSource {
             Err(e) if e.class() == ErrorClass::Fatal => return Err(e),
             polled => polled,
         };
+        for k in 0..self.members.len() {
+            self.validate(k);
+        }
         self.publish_stats();
 
         // Rebalance intents recorded by the callbacks during the polls above
@@ -1875,9 +2135,6 @@ impl Source for KafkaSource {
         for (p, offset) in watermarks {
             match self.owner(*p) {
                 Some((k, partition)) => {
-                    if let Some(watermark) = self.members[k].watermarks.get(&partition) {
-                        watermark.store(*offset, Ordering::Release);
-                    }
                     lists[k]
                         .add_partition_offset(
                             &self.config.topic,
@@ -1885,6 +2142,11 @@ impl Source for KafkaSource {
                             Offset::Offset(*offset),
                         )
                         .map_err(fatal("build offset list"))?;
+                    if let Some(shared) = self.members[k].watermarks.get(&partition) {
+                        shared.watermark.store(*offset, Ordering::Release);
+                        let epoch = shared.epoch_before(*offset);
+                        set_epoch(&mut lists[k], &self.config.topic, partition, epoch);
+                    }
                 }
                 None => {
                     refused += 1;
@@ -1975,11 +2237,31 @@ impl Source for KafkaSource {
     }
 
     fn pause(&mut self, lanes: &[LaneId]) -> Result<(), SourceError> {
+        for member in &mut self.members {
+            let paused: Vec<i32> = lanes
+                .iter()
+                .filter_map(|l| member.assignment.get(l).copied())
+                .collect();
+            member.engine_paused.extend(paused);
+        }
         self.for_owning_consumers(lanes, "pause", |consumer, tpl| consumer.pause(tpl))
     }
 
     fn resume(&mut self, lanes: &[LaneId]) -> Result<(), SourceError> {
-        self.for_owning_consumers(lanes, "resume", |consumer, tpl| consumer.resume(tpl))
+        let mut resumable = Vec::with_capacity(lanes.len());
+        for lane in lanes {
+            for member in &mut self.members {
+                if let Some(&p) = member.assignment.get(lane) {
+                    member.engine_paused.remove(&p);
+                    // A partition waiting for its seek resumes once it is
+                    // accepted.
+                    if !member.validating.contains(&p) {
+                        resumable.push(*lane);
+                    }
+                }
+            }
+        }
+        self.for_owning_consumers(&resumable, "resume", |consumer, tpl| consumer.resume(tpl))
     }
 }
 
@@ -2321,7 +2603,7 @@ mod tests {
         ));
         let (mut source, _clock) = opened_unassigned(test_config(), 1);
         let now = source.clock.now();
-        let list = source.start_positions(0, &offers[0].1, now);
+        let list = source.start_positions(0, &offers[0].1, now).list;
         assert_eq!(
             list.elements()[0].offset(),
             offers[0].1.elements()[0].offset()
@@ -3555,7 +3837,7 @@ mod tests {
         fn position_of(source: &KafkaSource) -> Offset {
             let mut list = TopicPartitionList::with_capacity(1);
             list.add_partition("t", 0);
-            crate::client::read_position(&source.members[0].consumer, &mut list)
+            crate::client::read_position(&source.members[0].consumer, &mut list).0
         }
 
         /// A fresh assignment's position reads `Invalid` until an op is served,
@@ -3581,7 +3863,10 @@ mod tests {
                 tpl.add_partition("t", 0);
                 tpl
             };
-            let lanes = source.accept_assignment(0, &tpl, &tpl, 0).expect("accept");
+            let now = source.clock.now();
+            let lanes = source
+                .accept_assignment(0, &tpl, &Prepared::assigning(tpl.clone()), now)
+                .expect("accept");
             assert_eq!(position_of(&source), Offset::Invalid);
             drop(lanes);
         }
@@ -3593,7 +3878,7 @@ mod tests {
             let (_cluster, mut source, _lanes) = assigned_on_mock(0);
             source.members[0]
                 .watermarks
-                .insert(7, Arc::new(AtomicI64::new(i64::MIN)));
+                .insert(7, Arc::new(Shared::new(None, -1)));
 
             source.prune_partition_series();
 
@@ -4135,7 +4420,7 @@ mod tests {
             let (mut source, _clock, recorded) =
                 recording(&cluster, "earliest", CONSUMERS, |_| Duration::from_secs(4));
             let starts = source
-                .prepare_starts(&offers())
+                .prepare_starts(&offers(), source.clock.now() + source.lookup_timeout)
                 .expect("no fatal")
                 .expect("earliest leaves a start it cannot read to librdkafka");
             assert_eq!(starts.len(), CONSUMERS);
@@ -4174,7 +4459,7 @@ mod tests {
                     Duration::from_millis(500)
                 });
             source
-                .prepare_starts(&offers())
+                .prepare_starts(&offers(), source.clock.now() + source.lookup_timeout)
                 .expect("no fatal")
                 .expect("earliest leaves a start it cannot read to librdkafka");
             let millis = Duration::from_millis;
@@ -4218,7 +4503,10 @@ mod tests {
                     .map(|p| i32::try_from(p).expect("partition"))
                     .collect::<Vec<_>>();
                 let read = source
-                    .prepare_starts(&[(0, tpl_of(&every))])
+                    .prepare_starts(
+                        &[(0, tpl_of(&every))],
+                        source.clock.now() + source.lookup_timeout,
+                    )
                     .expect("no fatal");
                 let mut want = vec![BrokerCall::Lookup {
                     k: 0,
@@ -4270,6 +4558,7 @@ mod tests {
                     Prepared {
                         list: tpl_of(&[partition]),
                         to_commit,
+                        seek: TopicPartitionList::new(),
                     }
                 })
                 .collect();
@@ -4411,6 +4700,7 @@ mod tests {
                 vec![Prepared {
                     list: tpl_of(&[0]),
                     to_commit: to_commit.clone(),
+                    seek: TopicPartitionList::new(),
                 }]
             };
             source.members[0].generation = Some(-1);
@@ -4523,7 +4813,7 @@ mod tests {
                 Ok(Err(_))
             ));
             let mut earliest = open_on("earliest");
-            let list = earliest.start_positions(0, &tpl_of(&[99]), until());
+            let list = earliest.start_positions(0, &tpl_of(&[99]), until()).list;
             assert_eq!(list.elements()[0].offset(), Offset::Stored);
         }
 

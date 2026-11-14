@@ -14,7 +14,7 @@ use super::config::KafkaFeedConfig;
 use super::consumer::{Read, commit_moved, commit_revoked, read, retire_offsets, take_due};
 use super::events::Cause;
 use super::gate::admission;
-use super::inflight::Tp;
+use super::inflight::{Tp, offsets};
 use super::producer::FeedProducerHooks;
 use super::write::{
     self, Attempt, DELIVERIES_HEADER, Destination, Failure, Finish, Move, Outgoing, Tombstone,
@@ -315,12 +315,19 @@ fn a_move_finishes_its_offset_only_when_confirmed() {
     core.settle(*write, Err(failure(C::MessageTimedOut)));
     let resend = {
         let mut st = core.lock();
-        assert_eq!(st.tracker.take_commits(), vec![(tp(0), 7)], "7 is open");
+        assert_eq!(
+            offsets(st.tracker.take_commits()),
+            vec![(tp(0), 7)],
+            "7 is open"
+        );
         assert_eq!(st.resends.len(), 1, "queued to be sent again");
         Box::new(st.resends.pop().unwrap().1)
     };
     core.settle(*resend, Ok(()));
-    assert_eq!(core.lock().tracker.take_commits(), vec![(tp(0), 8)]);
+    assert_eq!(
+        offsets(core.lock().tracker.take_commits()),
+        vec![(tp(0), 8)]
+    );
     assert!(core.lock().signal.latched().is_none());
 }
 
@@ -521,7 +528,7 @@ fn a_fatal_write_report_stops_the_feed() {
     let mut st = core.lock();
     assert_eq!(st.signal.latched().unwrap().kind, FeedErrorKind::Fatal);
     assert!(st.resends.is_empty());
-    assert_eq!(st.tracker.take_commits(), vec![(tp(0), 1)]);
+    assert_eq!(offsets(st.tracker.take_commits()), vec![(tp(0), 1)]);
 }
 
 /// Pins how a publish settles: confirmed, refused for an over-size message
@@ -583,7 +590,7 @@ fn a_revocation_commits_with_the_lock_released() {
             core.state.try_lock().is_ok(),
             "the lock is held across the commit"
         );
-        committed = Some(points.to_vec());
+        committed = Some(offsets(points.to_vec()));
     });
     assert_eq!(committed, Some(vec![(tp(0), 4)]));
     let st = core.lock();
@@ -609,7 +616,7 @@ fn a_position_is_read_with_the_lock_released() {
             "the lock is held across the read"
         );
         read.push(tp.clone());
-        Offset::Offset(4)
+        (Offset::Offset(4), -1)
     });
     read.sort();
     assert_eq!(read, [tp(0), tp(1)]);
@@ -634,12 +641,12 @@ fn a_failed_periodic_commit_is_taken_again() {
             core.state.try_lock().is_ok(),
             "the lock is held across the commit"
         );
-        assert_eq!(points, [(tp(0), 4)]);
+        assert_eq!(offsets(points.to_vec()), [(tp(0), 4)]);
         false
     });
     let mut again = None;
     commit_moved(&core, |points| {
-        again = Some(points.to_vec());
+        again = Some(offsets(points.to_vec()));
         true
     });
     assert_eq!(again, Some(vec![(tp(0), 4)]));
@@ -1402,7 +1409,7 @@ fn a_fatal_tombstone_report_stops_the_feed() {
     let reason = &st.signal.latched().expect("the feed stopped").reason;
     assert!(reason.contains("tombstone"), "{reason}");
     assert!(st.resends.is_empty());
-    assert_eq!(st.tracker.take_commits(), vec![(tp(0), 0)]);
+    assert_eq!(offsets(st.tracker.take_commits()), vec![(tp(0), 0)]);
 }
 
 /// Pins that an attempt write and a tombstone write the broker refuses for
@@ -2748,7 +2755,7 @@ mod cluster {
             let again = st.ready.pop_front().unwrap();
             assert!(st.tracker.acknowledge(again.receipt));
             assert_eq!(
-                st.tracker.take_commits(),
+                super::offsets(st.tracker.take_commits()),
                 vec![(super::tp(0), 1)],
                 "the offset did not finish with its new copy"
             );
@@ -4285,7 +4292,7 @@ mod cluster {
 
     /// The consumer's position on the work topic's partition.
     fn position(d: &Driver) -> Offset {
-        read_position(&d.consumer, &mut tpl_of(&[work()]))
+        read_position(&d.consumer, &mut tpl_of(&[work()])).0
     }
 
     /// Drive `d` until its position on the work topic's partition reads
@@ -5371,7 +5378,7 @@ mod cluster {
     /// Raise the work topic's partition to the consumer's position, as a
     /// periodic commit does, so a revocation has a point to commit.
     fn retire(d: &Driver) {
-        consumer::retire_offsets(&d.core, |_| position(d));
+        consumer::retire_offsets(&d.core, |_| (position(d), -1));
     }
 
     /// Run `f` on `d` on a thread of its own. [`finish`] takes `d` back with
@@ -6723,7 +6730,7 @@ mod feed_metrics {
         let core = core(10);
         {
             let mut st = core.lock();
-            st.tracker.assign_from([(tp(0), Some(0))]);
+            st.tracker.assign_from([(tp(0), Some(0), -1)]);
             st.log_starts.insert(tp(0), 3);
         }
         let mut lines = Vec::new();
@@ -6748,7 +6755,7 @@ mod feed_metrics {
     #[test]
     fn a_partition_with_no_log_start_read_is_left_alone() {
         let core = core(10);
-        core.lock().tracker.assign_from([(tp(0), Some(0))]);
+        core.lock().tracker.assign_from([(tp(0), Some(0), -1)]);
         core.lock().log_starts.insert(tp(1), 3);
         let mut lines = Vec::new();
         let rendered = render_metrics(|| {

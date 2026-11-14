@@ -69,6 +69,7 @@ pub mod bench_seams;
 mod client;
 mod config;
 mod context;
+mod epoch;
 mod error;
 pub mod feed;
 mod lane;

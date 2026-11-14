@@ -475,7 +475,7 @@ impl Follower {
     /// the position passes it.
     fn note_positions(&mut self) {
         for (partition, list) in (0..).zip(self.positions.iter_mut()) {
-            if let Offset::Offset(position) = read_position(&self.consumer, list) {
+            if let (Offset::Offset(position), _) = read_position(&self.consumer, list) {
                 lock(&self.ledger).advance_to(partition, position);
             }
         }

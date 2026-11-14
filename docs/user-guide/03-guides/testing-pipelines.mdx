@@ -58,8 +58,8 @@ is process-wide:
   `capture.during(tracing::Level::INFO, || runtime.run())` with a clone of
   the capture. On the test thread,
   `capture.wait_for_line(timeout, "admin server listening")` returns the line
-  once it is written. That subscriber belongs to the spawned
-  thread alone, so other tests in the binary are unaffected. A line from a
+  once it is written. The subscriber that `during` installs belongs to the
+  spawned thread alone, so other tests in the binary are unaffected. A line from a
   thread the test does not start needs
   `LogCapture::install_global(tracing::Level::INFO)` instead. That call
   installs the process-wide subscriber, so a test that makes it wants a binary

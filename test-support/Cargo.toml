@@ -30,6 +30,8 @@ s3 = ["kafka", "dep:http", "dep:object_store", "dep:tokio"]
 elasticmq = ["dep:testcontainers"]
 # The `events` corpus.
 events = ["dep:serde", "dep:spate-bench"]
+# `reported_executable`.
+cargo = ["dep:serde_json"]
 
 [dependencies]
 base64 = { workspace = true, optional = true }
@@ -40,6 +42,7 @@ rcgen = { workspace = true, optional = true }
 rustls = { workspace = true, optional = true }
 rustls-native-certs = { workspace = true, optional = true }
 serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
 spate-bench = { workspace = true, optional = true }
 testcontainers = { workspace = true, optional = true, features = ["blocking"] }
 tokio = { workspace = true, optional = true, features = ["io-util", "net", "rt"] }

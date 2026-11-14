@@ -42,10 +42,12 @@ use rdkafka::ClientConfig;
 use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::producer::{BaseProducer, BaseRecord, Producer};
 use spate_test::metric_sum;
-use spate_test_support::{ACCESS_KEY, ElasticMq, REGION, S3Store, SECRET_KEY};
+use spate_test_support::{ACCESS_KEY, ElasticMq, REGION, S3Store, SECRET_KEY, reported_executable};
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 use support::{CH_PASSWORD, Harness, http_get};
 
@@ -98,26 +100,48 @@ const EVENT_UNION_SCHEMA: &str = spate_datagen::EVENT_SCHEMA_JSON;
 
 // ── Locating and running an example ────────────────────────────────────────
 
-/// Path to a built example binary.
+/// Path to a built example binary, from cargo's build report.
 ///
-/// Cargo puts examples in `target/<profile>/examples/<name>` and this test
-/// binary in `target/<profile>/deps/<test>-<hash>`, so the location is derived
-/// from `current_exe`. Keep the existence assertion: if the runner ever stops
-/// building example targets alongside test targets, this suite must fail
-/// loudly instead of testing nothing.
+/// Cargo keeps its build directory's layout internal, so the path cannot be
+/// derived from where this test binary sits. The build uses the documented
+/// command's features and profile, which makes it a no-op after that command.
+/// `env!("CARGO")` is the cargo that built this test, so the build runs on the
+/// same toolchain. The lock is not held across the build, so a failed build
+/// does not poison it.
 fn example_bin(name: &str) -> PathBuf {
-    let mut dir = std::env::current_exe().expect("current_exe");
-    dir.pop();
-    if dir.file_name().is_some_and(|d| d == "deps") {
-        dir.pop();
+    static BUILT: Mutex<BTreeMap<String, PathBuf>> = Mutex::new(BTreeMap::new());
+    let cached = BUILT
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(name)
+        .cloned();
+    if let Some(bin) = cached {
+        return bin;
     }
-    let bin = dir.join("examples").join(name);
+    let out = Command::new(env!("CARGO"))
+        .args(["build", "-p", "spate", "--example", name])
+        .args([
+            "--all-features",
+            "--profile",
+            "test",
+            "--locked",
+            "--offline",
+        ])
+        .arg("--message-format=json-render-diagnostics")
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .unwrap_or_else(|e| panic!("run cargo build --example {name}: {e}"));
     assert!(
-        bin.is_file(),
-        "example binary `{name}` is not at {}: the runner built test targets \
-         without building example targets, so this suite would test nothing",
-        bin.display()
+        out.status.success(),
+        "cargo build --example {name} failed: {}",
+        String::from_utf8_lossy(&out.stderr)
     );
+    let bin = reported_executable(&String::from_utf8_lossy(&out.stdout), "example", name)
+        .unwrap_or_else(|| panic!("cargo built no executable for example `{name}`"));
+    BUILT
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(name.to_owned(), bin.clone());
     bin
 }
 
@@ -155,6 +179,9 @@ fn free_port() -> u16 {
 /// The port comes from [`free_port`] rather than staying `0`, so a caller can
 /// scrape the example's `/metrics` at the returned address.
 fn render_config(name: &str) -> Rendered {
+    // Build the example now, before a port is taken and released: the build
+    // would otherwise sit between the release and the example's own bind.
+    example_bin(name);
     let src = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("examples")
         .join(format!("{name}.yaml"));

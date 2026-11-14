@@ -217,10 +217,21 @@ impl Runner {
             .env(FINGERPRINT_ENV, &self.fingerprint_json)
             .stderr(Stdio::inherit())
             .output()
-            .map_err(|e| format!("could not run {}: {e}", self.binary.display()))?;
+            .map_err(|e| {
+                format!(
+                    "could not run {} ({}): {e}",
+                    self.target,
+                    self.binary.display()
+                )
+            })?;
 
-        let stdout = String::from_utf8(output.stdout)
-            .map_err(|e| format!("{} printed invalid UTF-8: {e}", self.binary.display()))?;
+        let stdout = String::from_utf8(output.stdout).map_err(|e| {
+            format!(
+                "{} ({}) printed invalid UTF-8: {e}",
+                self.target,
+                self.binary.display()
+            )
+        })?;
 
         // The *last* non-empty line, not the whole of stdout. A `println!` left
         // in a benched routine would otherwise take the whole run down with a
@@ -606,6 +617,31 @@ mod tests {
             ])
             .expect_err("a failing child's answer is refused");
         assert!(err.contains("exit status: 3"), "{err}");
+    }
+
+    #[test]
+    fn a_child_that_cannot_start_is_named_by_package_and_target() {
+        let mut runner = stub(SLOW_PERIOD);
+        runner.binary = PathBuf::from("/nonexistent/decode_wall-0");
+        let err = runner
+            .ask::<ProtocolVersion>(&[])
+            .expect_err("a missing binary cannot run");
+        assert!(
+            err.starts_with("could not run spate-json/decode_wall (/nonexistent/decode_wall-0): "),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_child_that_prints_invalid_utf8_is_named_by_package_and_target() {
+        let runner = stub(SLOW_PERIOD);
+        let err = runner
+            .ask::<ProtocolVersion>(&["-c".to_owned(), r"printf '\377'".to_owned()])
+            .expect_err("invalid UTF-8 is refused");
+        assert!(
+            err.starts_with("spate-json/decode_wall (/bin/sh) printed invalid UTF-8: "),
+            "{err}"
+        );
     }
 
     #[test]

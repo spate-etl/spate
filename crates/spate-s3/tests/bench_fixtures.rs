@@ -3,22 +3,21 @@
 //! An instruction count only means something if both legs of a comparison ran
 //! on byte-identical input, so "the corpus is a pure function of nothing" is a
 //! property worth a test rather than an assumption. The benches themselves
-//! cannot carry it: they need Linux, valgrind and a matching runner. This runs
-//! everywhere `cargo test` does.
+//! cannot carry it: the counted tier needs Linux, valgrind and a matching
+//! runner, and no bench runs under `cargo test`. This runs everywhere
+//! `cargo test` does.
 
-use spate_json::NdjsonFramer;
 use spate_s3::Compression;
-use spate_s3::bench_seams::{MakeFramer, frame_objects, frame_range};
-use std::sync::Arc;
+use spate_s3::bench_seams::frame_objects;
 
 #[path = "../benches/support/descriptors.rs"]
 mod descriptors;
+#[path = "../benches/support/framing_rig.rs"]
+mod framing_rig;
 #[path = "../benches/support/ndjson.rs"]
 mod ndjson;
 
-fn framer() -> MakeFramer {
-    Arc::new(|| Box::new(NdjsonFramer::new(ndjson::MAX_RECORD_BYTES)))
-}
+use framing_rig::{Decoder, make_framer};
 
 #[test]
 fn the_descriptor_corpora_are_reproducible() {
@@ -68,7 +67,7 @@ fn every_codec_frames_the_whole_body() {
             format!("part-000000.ndjson{suffix}"),
             ndjson::chunks(&stored),
         )];
-        let records = frame_objects(compression, framer(), &objects).expect("frames cleanly");
+        let records = frame_objects(compression, make_framer(), &objects).expect("frames cleanly");
         assert_eq!(records, expect, "{compression:?} framed a different count");
     }
 }
@@ -117,7 +116,8 @@ fn a_multi_part_object_frames_every_record() {
             format!("part-000000.ndjson{suffix}"),
             ndjson::chunks(&stored),
         )];
-        let records = frame_objects(Compression::Auto, framer(), &objects).expect("frames cleanly");
+        let records =
+            frame_objects(Compression::Auto, make_framer(), &objects).expect("frames cleanly");
         assert_eq!(
             records,
             ndjson::RECORDS,
@@ -156,7 +156,7 @@ fn entering_mid_record_still_counts_the_leading_partial_line() {
     let complete = tail.iter().filter(|&&b| b == b'\n').count();
     let records = frame_objects(
         Compression::Auto,
-        framer(),
+        make_framer(),
         &[("part-000000.ndjson".to_owned(), ndjson::chunks(tail))],
     )
     .expect("frames cleanly");
@@ -179,16 +179,7 @@ fn a_range_entered_mid_record_drops_the_leading_partial_line() {
     let at = ndjson::offset_inside_a_record(&body, body.len() / 2);
     let complete = body[at..].iter().filter(|&&b| b == b'\n').count();
 
-    let records = frame_range(
-        framer(),
-        &body,
-        at as u64,
-        body.len() as u64,
-        b'\n',
-        ndjson::RANGE_BYTES,
-        ndjson::CHUNK_BYTES,
-    )
-    .expect("frames cleanly");
+    let records = framing_rig::frame_one_range(&framing_rig::plain_range());
 
     assert_eq!(records, complete - 1);
 }
@@ -201,6 +192,36 @@ fn a_run_of_objects_frames_every_record() {
             (format!("part-{i:06}.ndjson"), ndjson::chunks(&body))
         })
         .collect();
-    let records = frame_objects(Compression::Auto, framer(), &objects).expect("frames cleanly");
+    let records =
+        frame_objects(Compression::Auto, make_framer(), &objects).expect("frames cleanly");
     assert_eq!(records, ndjson::RUN_OBJECTS * ndjson::RUN_RECORDS_EACH);
+}
+
+/// Each decoder floor reads every stream of its object. A floor that stopped
+/// at the first gzip member or zstd frame, or skipped the end-of-stream flush,
+/// would report a fraction of the framed case's cost and read as a framework
+/// that outruns its own decoder.
+#[test]
+fn every_floor_decodes_the_whole_body() {
+    let whole = ndjson::whole_body().len();
+    for (name, rig, decoder) in [
+        ("gzip_whole", framing_rig::gzip_whole(), Decoder::Gzip),
+        ("zstd_whole", framing_rig::zstd_whole(), Decoder::Zstd),
+        (
+            "gzip_multi_member",
+            framing_rig::gzip_multi_member(),
+            Decoder::Gzip,
+        ),
+        (
+            "zstd_multi_frame",
+            framing_rig::zstd_multi_frame(),
+            Decoder::Zstd,
+        ),
+    ] {
+        assert_eq!(
+            framing_rig::decode(&rig, decoder),
+            whole,
+            "the {name} floor decoded a different byte count"
+        );
+    }
 }

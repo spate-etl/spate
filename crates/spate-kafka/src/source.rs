@@ -4024,8 +4024,8 @@ mod tests {
         }
 
         /// A reassigned partition drops the refused seek left from its
-        /// assignment before: an accepted seek resumes it, and a refused one
-        /// waits to seek the new commit.
+        /// assignment before: a refused one waits to seek the new commit, and
+        /// after an accepted one nothing holds the partition paused.
         #[test]
         fn a_reassign_drops_the_refused_seek_before_it() {
             let cluster = mock_holding(5);
@@ -4069,12 +4069,11 @@ mod tests {
                 .collect();
             assert_eq!(seeks, [(0, Offset::Offset(3))]);
 
-            // Accepted: nothing waits, so the accept resumes the partition. The
-            // scripted seek moves nothing, so the lane reads from the commit.
+            // Accepted: nothing waits, so the accept resumes the partition.
             refuse.store(false, Ordering::SeqCst);
-            let mut lanes = reassign(&mut source);
+            drop(reassign(&mut source));
             assert!(source.members[0].validating.is_empty());
-            assert_eq!(first_offset(&mut source, &mut lanes[0]), 2);
+            assert_eq!(source.members[0].resumable([0]), [0]);
         }
 
         /// Accepting an assignment leaves no position from the one before it on

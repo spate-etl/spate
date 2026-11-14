@@ -594,11 +594,7 @@ impl Driver {
         let refused = seek_starts(seek, budget, |list, budget| self.seek(list, budget));
         let refused: Vec<Tp> = targets
             .into_iter()
-            .filter(|(tp, _, _)| {
-                refused
-                    .iter()
-                    .any(|(topic, partition)| *tp.topic == **topic && tp.partition == *partition)
-            })
+            .filter(|(tp, _, _)| named_in(&refused, tp))
             .map(|(tp, offset, epoch)| {
                 self.validating.refused(tp.clone(), offset, epoch);
                 tp
@@ -788,10 +784,7 @@ impl Driver {
             .collect();
         let mut accepted = Vec::new();
         for (tp, offset, epoch) in pending {
-            let again = refused
-                .iter()
-                .any(|(topic, partition)| *tp.topic == **topic && tp.partition == *partition);
-            if !again {
+            if !named_in(&refused, &tp) {
                 self.validating.remove(&tp);
                 accepted.push(tp);
             } else if self.validating.refused(tp.clone(), offset, epoch) {
@@ -1305,6 +1298,13 @@ pub(crate) fn commit_moved(core: &Core, commit: impl FnOnce(&[(Tp, Point)]) -> b
         core.lock().tracker.untake(&points);
     }
     committed
+}
+
+/// Whether `partitions`, as `seek_starts` returns them, names `tp`.
+fn named_in(partitions: &[(String, i32)], tp: &Tp) -> bool {
+    partitions
+        .iter()
+        .any(|(topic, partition)| *tp.topic == **topic && tp.partition == *partition)
 }
 
 pub(super) fn tpl_of(tps: &[Tp]) -> TopicPartitionList {

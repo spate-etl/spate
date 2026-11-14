@@ -35,7 +35,10 @@ const RECORD_BYTES_MAX: usize = 64;
 // At librdkafka's `queued.min.messages` (100,000) the client stops fetching
 // and backs off. Past 5 MiB the mock cluster drops the oldest records, which
 // the client may not have fetched yet.
-const _: () = assert!(DRAINS * RECORDS <= 50_000, "a region fills the client's queue");
+const _: () = assert!(
+    DRAINS * RECORDS <= 50_000,
+    "a region fills the client's queue"
+);
 const _: () = assert!(
     DRAINS * RECORDS * RECORD_BYTES_MAX <= 5 * 1024 * 1024 / 2,
     "a region outruns the mock cluster's log"

@@ -22,16 +22,16 @@ use spate_kafka::sink::{KafkaBytesEncoder, KafkaEncoder, KafkaJsonEncoder, Messa
 use spate_test::record;
 use spate_test_support::fnv1a;
 
-#[path = "../benches/support/messages.rs"]
-mod messages;
 #[allow(dead_code, reason = "only the rigs that frame a batch are used here")]
 #[path = "../benches/support/encode_rig.rs"]
 mod encode_rig;
+#[path = "../benches/support/messages.rs"]
+mod messages;
+#[path = "../benches/support/poll_rig.rs"]
+mod poll_rig;
 #[allow(dead_code, reason = "the batches are written, not prepared")]
 #[path = "../benches/support/prepare_rig.rs"]
 mod prepare_rig;
-#[path = "../benches/support/poll_rig.rs"]
-mod poll_rig;
 #[path = "../benches/support/produce_rig.rs"]
 mod produce_rig;
 mod support;

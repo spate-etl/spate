@@ -75,9 +75,7 @@ fn case(suite: Suite, case: &Case) -> Suite {
 }
 
 fn suite() -> Suite {
-    CASES
-        .iter()
-        .fold(spate_bench::suite("spate-kafka"), case)
+    CASES.iter().fold(spate_bench::suite("spate-kafka"), case)
 }
 
 bench_main!(suite);

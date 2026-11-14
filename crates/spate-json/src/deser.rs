@@ -328,21 +328,13 @@ mod tests {
     use crate::framing::tests::arb_stream;
     use proptest::prelude::*;
     use serde::Deserialize;
-    use spate_core::record::{Flow, PartitionId, stable_key_hash};
-    use spate_test::render_metrics;
+    use spate_core::record::{PartitionId, stable_key_hash};
+    use spate_test::{EmitCollector, render_metrics};
 
     #[derive(Debug, Deserialize, PartialEq)]
     struct Ev {
         id: i64,
         name: String,
-    }
-
-    struct Collected<T>(Vec<Record<T>>);
-    impl<'buf, T> EmitRecord<'buf, T> for Collected<T> {
-        fn emit(&mut self, rec: Record<T>) -> Flow {
-            self.0.push(rec);
-            Flow::Continue
-        }
     }
 
     fn raw(bytes: &[u8]) -> RawPayload<'_> {
@@ -365,13 +357,13 @@ mod tests {
     #[test]
     fn single_round_trip_and_meta() {
         let mut d = builder(JsonFraming::Single, OnError::Skip, false).build_serde::<Ev>();
-        let mut out = Collected(Vec::new());
+        let mut out = EmitCollector::new();
         d.deserialize(&raw(br#"{"id":7,"name":"orders"}"#), &test_ack(), &mut out)
             .unwrap();
-        assert_eq!(out.0.len(), 1);
-        assert_eq!(out.0[0].meta.offset, 42);
+        assert_eq!(out.records.len(), 1);
+        assert_eq!(out.records[0].meta.offset, 42);
         assert_eq!(
-            out.0[0].payload,
+            out.records[0].payload,
             Ev {
                 id: 7,
                 name: "orders".into()
@@ -382,37 +374,37 @@ mod tests {
     #[test]
     fn ndjson_emits_a_record_per_line() {
         let mut d = builder(JsonFraming::Ndjson, OnError::Skip, false).build_serde::<Ev>();
-        let mut out = Collected(Vec::new());
+        let mut out = EmitCollector::new();
         let payload =
             b"{\"id\":1,\"name\":\"a\"}\n{\"id\":2,\"name\":\"b\"}\n{\"id\":3,\"name\":\"c\"}";
         d.deserialize(&raw(payload), &test_ack(), &mut out).unwrap();
-        assert_eq!(out.0.len(), 3);
-        assert_eq!(out.0[2].payload.id, 3);
+        assert_eq!(out.records.len(), 3);
+        assert_eq!(out.records[2].payload.id, 3);
         // every derived record carries the payload's offset (one Kafka message)
-        assert!(out.0.iter().all(|r| r.meta.offset == 42));
+        assert!(out.records.iter().all(|r| r.meta.offset == 42));
     }
 
     #[test]
     fn array_explodes_elements() {
         let mut d = builder(JsonFraming::Array, OnError::Skip, false).build_serde::<Ev>();
-        let mut out = Collected(Vec::new());
+        let mut out = EmitCollector::new();
         d.deserialize(
             &raw(br#"[{"id":1,"name":"a"},{"id":2,"name":"b"}]"#),
             &test_ack(),
             &mut out,
         )
         .unwrap();
-        assert_eq!(out.0.len(), 2);
+        assert_eq!(out.records.len(), 2);
     }
 
     #[test]
     fn empty_and_blank_payloads_are_tombstones() {
         let mut d = builder(JsonFraming::Single, OnError::Skip, false).build_value();
-        let mut out = Collected(Vec::new());
+        let mut out = EmitCollector::new();
         d.deserialize(&raw(b""), &test_ack(), &mut out).unwrap();
         d.deserialize(&raw(b"  \n  "), &test_ack(), &mut out)
             .unwrap();
-        assert!(out.0.is_empty());
+        assert!(out.records.is_empty());
     }
 
     #[test]
@@ -453,10 +445,10 @@ mod tests {
                 timestamp_ms: 1_700_000_000_000,
             };
             let mut d = builder(framing, on_error, false).build_serde::<Ev>();
-            let mut out = Collected(Vec::new());
+            let mut out = EmitCollector::new();
             d.deserialize(&payload, &test_ack(), &mut out).unwrap();
-            assert_eq!(out.0.len(), records, "{framing:?} {on_error:?}");
-            for rec in &out.0 {
+            assert_eq!(out.records.len(), records, "{framing:?} {on_error:?}");
+            for rec in &out.records {
                 assert_eq!(rec.meta.partition, PartitionId(3), "{framing:?}");
                 assert_eq!(rec.meta.offset, 42, "{framing:?}");
                 assert_eq!(rec.meta.event_time_ms, 1_700_000_000_000, "{framing:?}");
@@ -483,10 +475,10 @@ mod tests {
                             key: Some(b"user-7"),
                             ..raw(bytes)
                         };
-                        let mut out = Collected(Vec::new());
+                        let mut out = EmitCollector::new();
                         d.deserialize(&payload, &test_ack(), &mut out)
                             .unwrap_or_else(|e| panic!("{framing:?} {on_error:?}: {e}"));
-                        assert!(out.0.is_empty(), "{framing:?} {on_error:?}");
+                        assert!(out.records.is_empty(), "{framing:?} {on_error:?}");
                     }
                 }
             }
@@ -506,10 +498,10 @@ mod tests {
     #[test]
     fn malformed_single_skips_or_fails() {
         let mut skip = builder(JsonFraming::Single, OnError::Skip, false).build_serde::<Ev>();
-        let mut out = Collected(Vec::new());
+        let mut out = EmitCollector::new();
         skip.deserialize(&raw(b"{not json"), &test_ack(), &mut out)
             .unwrap();
-        assert!(out.0.is_empty(), "skip drops the bad payload");
+        assert!(out.records.is_empty(), "skip drops the bad payload");
 
         let mut fail = builder(JsonFraming::Single, OnError::Fail, false).build_serde::<Ev>();
         let err = fail
@@ -521,18 +513,18 @@ mod tests {
     #[test]
     fn ndjson_skip_isolates_the_bad_line() {
         let mut d = builder(JsonFraming::Ndjson, OnError::Skip, false).build_serde::<Ev>();
-        let mut out = Collected(Vec::new());
+        let mut out = EmitCollector::new();
         let payload = b"{\"id\":1,\"name\":\"a\"}\nGARBAGE\n{\"id\":3,\"name\":\"c\"}";
         d.deserialize(&raw(payload), &test_ack(), &mut out).unwrap();
-        assert_eq!(out.0.len(), 2, "good lines flow, bad line dropped");
-        assert_eq!(out.0[0].payload.id, 1);
-        assert_eq!(out.0[1].payload.id, 3);
+        assert_eq!(out.records.len(), 2, "good lines flow, bad line dropped");
+        assert_eq!(out.records[0].payload.id, 1);
+        assert_eq!(out.records[1].payload.id, 3);
     }
 
     #[test]
     fn ndjson_fail_stops_on_the_bad_line() {
         let mut d = builder(JsonFraming::Ndjson, OnError::Fail, false).build_serde::<Ev>();
-        let mut out = Collected(Vec::new());
+        let mut out = EmitCollector::new();
         let payload = b"{\"id\":1,\"name\":\"a\"}\nGARBAGE\n{\"id\":3,\"name\":\"c\"}";
         let err = d
             .deserialize(&raw(payload), &test_ack(), &mut out)
@@ -541,7 +533,7 @@ mod tests {
         // Fail is atomic: the good line before GARBAGE must NOT be emitted, or
         // the chain's Skip policy would commit the offset past the lost tail.
         assert!(
-            out.0.is_empty(),
+            out.records.is_empty(),
             "no record may be emitted when the payload fails"
         );
     }
@@ -549,7 +541,7 @@ mod tests {
     #[test]
     fn array_error_is_atomic() {
         let mut d = builder(JsonFraming::Array, OnError::Skip, false).build_serde::<Ev>();
-        let mut out = Collected(Vec::new());
+        let mut out = EmitCollector::new();
         // The second element does not match `Ev`; the whole array is dropped.
         d.deserialize(
             &raw(br#"[{"id":1,"name":"a"},{"oops":true}]"#),
@@ -557,19 +549,19 @@ mod tests {
             &mut out,
         )
         .unwrap();
-        assert!(out.0.is_empty(), "array error handling is atomic");
+        assert!(out.records.is_empty(), "array error handling is atomic");
     }
 
     #[test]
     fn duplicate_keys_last_wins_by_default_reject_when_configured() {
         // Default: serde_json is last-value-wins, one record emitted.
         let mut allow = builder(JsonFraming::Single, OnError::Skip, false).build_value();
-        let mut out = Collected(Vec::new());
+        let mut out = EmitCollector::new();
         allow
             .deserialize(&raw(br#"{"id":1,"id":2}"#), &test_ack(), &mut out)
             .unwrap();
-        assert_eq!(out.0.len(), 1);
-        assert_eq!(out.0[0].payload["id"], serde_json::json!(2));
+        assert_eq!(out.records.len(), 1);
+        assert_eq!(out.records[0].payload["id"], serde_json::json!(2));
 
         // reject_duplicate_keys + fail: hard error, labeled duplicate_key.
         let mut reject = builder(JsonFraming::Single, OnError::Fail, true).build_value();
@@ -588,7 +580,7 @@ mod tests {
     #[test]
     fn nested_duplicate_keys_are_rejected() {
         let mut d = builder(JsonFraming::Single, OnError::Fail, true).build_value();
-        let mut out = Collected(Vec::new());
+        let mut out = EmitCollector::new();
         let err = d
             .deserialize(&raw(br#"{"outer":{"a":1,"a":2}}"#), &test_ack(), &mut out)
             .unwrap_err();
@@ -600,7 +592,7 @@ mod tests {
         // With reject_duplicate_keys on, the structural pass runs first; a plain
         // syntax error (no duplicate key) must still be reported as `malformed`.
         let mut d = builder(JsonFraming::Single, OnError::Fail, true).build_serde::<Ev>();
-        let mut out = Collected(Vec::new());
+        let mut out = EmitCollector::new();
         let err = d
             .deserialize(&raw(b"{not valid json"), &test_ack(), &mut out)
             .unwrap_err();
@@ -620,11 +612,11 @@ mod tests {
             let mut d = builder(JsonFraming::Ndjson, OnError::Skip, false)
                 .with_metrics("orders", "main")
                 .build_serde::<Ev>();
-            let mut out = Collected(Vec::new());
+            let mut out = EmitCollector::new();
             let payload =
                 b"{\"id\":1,\"name\":\"a\"}\nGARBAGE\nALSO BAD\n{\"id\":4,\"name\":\"d\"}";
             d.deserialize(&raw(payload), &test_ack(), &mut out).unwrap();
-            assert_eq!(out.0.len(), 2);
+            assert_eq!(out.records.len(), 2);
         });
         let needle =
             format!(r#"spate_json_deser_records_dropped_total{{{STD},reason="malformed"}} 2"#);

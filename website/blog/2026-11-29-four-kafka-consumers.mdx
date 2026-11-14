@@ -134,11 +134,11 @@ consumers filled them.
 
 ## Why the source sets `fetch.queue.backoff.ms` to 10 ms
 
-I made 10 ms the Kafka source's default for `fetch.queue.backoff.ms` because the
-refill stall appears the moment you raise `consumers`, the step the tuning page
-tells you to take. Finding the cause took me a per-partition queue record and an
-off-CPU profile, and a note on the tuning page alone would leave you to repeat
-that work. The default gives way to the source's `rdkafka` map, so a
+I made 10 ms the Kafka source's default for `fetch.queue.backoff.ms` because
+raising `consumers`, the step the tuning page tells you to take, is what fills
+the partition queues and starts the refill stall. Finding the cause took me a
+per-partition queue record and an off-CPU profile, and a note on the tuning page
+alone would leave you to repeat that work. The default gives way to the source's `rdkafka` map, so a
 `fetch.queue.backoff.ms` set there still wins. The
 [refill backoff](/docs/user-guide/connectors/sources/kafka/performance-tuning#refill-backoff)
 section of the tuning page explains the setting and the 10 ms value I measured.
@@ -185,9 +185,7 @@ throttled, so on this rig the bound past two consumers is CPU.
 At one consumer, where the queues never fill, the 10 ms refill backoff changed
 neither throughput nor CPU use. Both settings ran at 37.2M rows/s, on 22.8–23.5
 cores at 1000 ms and 22.9–23.0 at 10 ms. I have not measured a case where the
-low value raises CPU use, as librdkafka warns it may. The consumer count did not
-change the CPU each row costs either: every drain in the last run ran at
-1.67–1.70M rows/s per core.
+low value raises CPU use, as librdkafka warns it may.
 
 Each consumer has a fixed cost. It runs a set of librdkafka threads, holds
 broker connections and up to one `fetch.max.bytes` response in flight per leader

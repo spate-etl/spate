@@ -1,5 +1,6 @@
-//! The batch both the counted tier and the allocation snapshot prepare: one
-//! frame of encoded messages, as a shard worker receives it.
+//! The batch the counted tier and the allocation snapshot prepare, and
+//! `produce_wall.rs` writes: one frame of encoded messages, as a shard worker
+//! receives it.
 //!
 //! Included with `#[path]`. Each includer also declares `mod encode_rig` from
 //! `support/encode_rig.rs` and `mod messages` from `support/messages.rs`, since

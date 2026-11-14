@@ -1,5 +1,6 @@
-//! The encode bench's corpora are reproducible, and encode the way the bench
-//! claims.
+//! The encode bench's corpora are reproducible and encode the way the bench
+//! claims, and the produce and poll benches' rigs write and read the records
+//! they name against librdkafka's mock cluster.
 //!
 //! An instruction count only means something if both legs of a comparison ran
 //! on byte-identical input, so "the corpus is a pure function of nothing" is a
@@ -12,6 +13,11 @@
 //! limit, not the payload, and a limit nudged either way would leave a case
 //! that still ran and still produced a number while measuring the opposite
 //! thing. That claim is checked here.
+//!
+//! The wall-clock rigs fail minutes into a comparison run when they go wrong,
+//! or measure a different shape with no error at all. Each produce case's
+//! messages are read back for their key and header count, and each poll drain
+//! must read exactly the records one feed produced.
 
 use bytes::BytesMut;
 use spate_core::deser::Owned;

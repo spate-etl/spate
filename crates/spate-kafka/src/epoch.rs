@@ -137,6 +137,20 @@ pub(crate) fn ends_to_read(committed: &TopicPartitionList) -> TopicPartitionList
     ends
 }
 
+/// Logs a partition whose first record read is below the committed offset
+/// its assignment started at.
+pub(crate) fn log_first_below(topic: &str, partition: i32, committed: i64, first: i64) {
+    tracing::info!(
+        topic,
+        partition,
+        committed,
+        first,
+        "the partition's first record is below its committed offset; the log was truncated \
+         below the commit, or the commit is above the log's end, and the records from there \
+         are read again"
+    );
+}
+
 /// The end offset of each partition in `ends`, read within `budget`. A failed
 /// read, or no time left, logs a warning naming the partitions and gives
 /// `None`, and each of them is then sought to its commit.

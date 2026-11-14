@@ -41,7 +41,7 @@
 
 use crate::client::{message_epoch, offset_to_retire, read_position};
 use crate::context::SourceContext;
-use crate::epoch::EpochCache;
+use crate::epoch::{EpochCache, log_first_below};
 use rdkafka::consumer::base_consumer::PartitionQueue;
 use rdkafka::consumer::{BaseConsumer, Consumer as _};
 use rdkafka::error::KafkaError;
@@ -243,15 +243,9 @@ impl KafkaLane {
         }
         if let Some(committed) = self.shared.committed
             && first < committed
+            && let Some(elem) = self.position.elements().first()
         {
-            tracing::info!(
-                partition = self.partition.0,
-                committed,
-                first,
-                "the partition's first record is below its committed offset; the log was \
-                 truncated below the commit, or the commit is above the log's end, and the \
-                 records from there are read again"
-            );
+            log_first_below(elem.topic(), elem.partition(), committed, first);
         }
     }
 

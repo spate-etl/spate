@@ -86,7 +86,8 @@ use crate::context::{Intent, SourceContext};
 #[cfg(test)]
 use crate::epoch::SeekWith;
 use crate::epoch::{
-    RETRY_SEEK_WAIT, Validating, ends_to_read, plan_starts, read_ends, seek_starts,
+    RETRY_SEEK_WAIT, Validating, ends_to_read, log_first_below, plan_starts, read_ends,
+    seek_starts,
 };
 use rdkafka::consumer::{BaseConsumer, Consumer};
 use rdkafka::error::{KafkaError, KafkaResult, RDKafkaErrorCode};
@@ -453,15 +454,7 @@ impl Driver {
                 return;
             };
             if let Some((committed, first)) = st.tracker.first_read_below_start(&tp) {
-                tracing::info!(
-                    topic = &*tp.topic,
-                    partition = tp.partition,
-                    committed,
-                    first,
-                    "the partition's first record is below its committed offset; the log was \
-                     truncated below the commit, or the commit is above the log's end, and \
-                     the records from there are read again"
-                );
+                log_first_below(&tp.topic, tp.partition, committed, first);
             }
             match read {
                 Read::Unit { unit, identity } => {

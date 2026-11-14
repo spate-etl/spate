@@ -4346,6 +4346,8 @@ mod cluster {
             .filter(|l| l.contains("first record is below its committed offset"))
             .collect();
         assert_eq!(logged.len(), 1, "{lines:#?}");
+        assert!(logged[0].contains(r#"topic="units""#), "{}", logged[0]);
+        assert!(logged[0].contains("partition=0"), "{}", logged[0]);
         assert!(logged[0].contains("committed=10"), "{}", logged[0]);
         assert!(logged[0].contains("first=0"), "{}", logged[0]);
     }

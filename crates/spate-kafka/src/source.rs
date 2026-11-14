@@ -614,9 +614,11 @@ impl KafkaSource {
         // A fetch that completes before this pause is discarded as outdated
         // and refetched, so no pre-split message reaches the main queue.
         consumer.pause(tpl).map_err(fatal("pause new assignment"))?;
-        // A new assignment starts every partition unpaused by the runtime.
+        // A new assignment starts every partition unpaused by the runtime, and
+        // with no refused seek left from an assignment before it.
         for elem in tpl.elements() {
             self.members[k].engine_paused.remove(&elem.partition());
+            self.members[k].validating.remove(&elem.partition());
         }
         // The seek is sent while paused, and the resume delivers from the
         // position the leader confirms.
@@ -4011,6 +4013,60 @@ mod tests {
         fn the_position_reads_invalid_before_any_op() {
             let (_cluster, source, _lanes) = assigned_on_mock(1);
             assert_eq!(position_of(&source), Offset::Invalid);
+        }
+
+        /// A reassigned partition drops the refused seek left from its
+        /// assignment before: an accepted seek resumes it, and a refused one
+        /// waits to seek the new commit.
+        #[test]
+        fn a_reassign_drops_the_refused_seek_before_it() {
+            let cluster = mock_holding(5);
+            commit_positions(&cluster, 2);
+            let refuse = Arc::new(AtomicBool::new(true));
+            let r = Arc::clone(&refuse);
+            let seek: crate::epoch::SeekWith = Box::new(move |list, _| {
+                if r.load(Ordering::SeqCst) {
+                    Err(KafkaError::Seek("refused".to_owned()))
+                } else {
+                    Ok(list)
+                }
+            });
+            let (mut source, lanes) = assigned_seeking(&cluster, "earliest", &[], Some(seek));
+            assert!(source.members[0].validating.contains(&0));
+            drop(lanes);
+            let reassign = |source: &mut KafkaSource| {
+                let mut tpl = TopicPartitionList::new();
+                tpl.add_partition("t", 0);
+                let mut prepared = Prepared::assigning(tpl.clone());
+                prepared
+                    .seek
+                    .add_partition_offset("t", 0, Offset::Offset(3))
+                    .expect("list entry");
+                set_epoch(&mut prepared.seek, "t", 0, 0);
+                let until = source.clock.now() + Duration::from_secs(10);
+                source
+                    .accept_assignment(0, &tpl, &prepared, until)
+                    .expect("accept")
+            };
+
+            // Refused again: the retry seeks the new commit.
+            drop(reassign(&mut source));
+            let list = source.members[0]
+                .validating
+                .seek_list(|p| ("t".to_owned(), *p));
+            let seeks: Vec<(i32, Offset)> = list
+                .elements()
+                .iter()
+                .map(|e| (e.partition(), e.offset()))
+                .collect();
+            assert_eq!(seeks, [(0, Offset::Offset(3))]);
+
+            // Accepted: nothing waits, so the accept resumes the partition. The
+            // scripted seek moves nothing, so the lane reads from the commit.
+            refuse.store(false, Ordering::SeqCst);
+            let mut lanes = reassign(&mut source);
+            assert!(source.members[0].validating.is_empty());
+            assert_eq!(first_offset(&mut source, &mut lanes[0]), 2);
         }
 
         /// Accepting an assignment leaves no position from the one before it on

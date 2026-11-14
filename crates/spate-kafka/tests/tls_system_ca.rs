@@ -287,6 +287,8 @@ fn passed(client: &Container<GenericImage>, arm: &str) -> String {
 /// from the host's cargo registry, and returns its path under `out`.
 ///
 /// The build runs as the owner of `out`, so the test can remove what it writes.
+/// Cargo runs the binary through a runner that copies it to `out`, because
+/// where cargo puts a test binary is internal to cargo.
 #[allow(clippy::print_stderr)]
 fn build_system_linked(image: &str, tag: &str, out: &Path) -> PathBuf {
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -306,10 +308,12 @@ fn build_system_linked(image: &str, tag: &str, out: &Path) -> PathBuf {
         "set -eu
         mkdir -p \"$CARGO_HOME/registry\"
         cp -R /registry/index /registry/cache \"$CARGO_HOME/registry/\"
-        cargo test -p spate-kafka --features tls --test tls_system_ca --no-run --offline --locked
+        printf '#!/bin/sh\\ncp \"$1\" /out/tls_system_ca\\n' > /tmp/export
+        chmod +x /tmp/export
+        cargo test -p spate-kafka --features tls --test tls_system_ca --offline --locked \
+          --config \"target.'cfg(all())'.runner = '/tmp/export'\"
         du -sh /registry/cache \"$CARGO_HOME\" {BUILDER_TARGET_DIR}
-        df -h /
-        cp \"$(find {BUILDER_TARGET_DIR}/debug/deps -maxdepth 1 -type f -name 'tls_system_ca-*' ! -name '*.d')\" /out/tls_system_ca"
+        df -h /"
     );
     let mut builder: ContainerRequest<GenericImage> = GenericImage::new(image, tag)
         .with_wait_for(WaitFor::exit(ExitWaitStrategy::new()))

@@ -610,8 +610,8 @@ fn real_broker_a_source_commit_carries_the_epoch_of_the_record_before_it() {
 
 /// A source assigned a partition whose commit carries an epoch the leader
 /// answers below the commit, as after an unclean election truncated the log,
-/// reads the records below the commit, under `latest` and `earliest`.
-/// Regression for #2104.
+/// reads the records below the commit, under `latest` and `earliest`. The
+/// source had the defect #2104 reports for the feed.
 #[test]
 #[ignore = "requires Docker"]
 fn real_broker_a_source_reads_below_a_commit_the_leader_answers_lower() {

@@ -16,6 +16,7 @@ mod support;
 
 use support::Raw as _;
 
+use rdkafka::Offset;
 use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
 use rdkafka::client::DefaultClientContext;
 use rdkafka::consumer::{BaseConsumer, Consumer};
@@ -922,6 +923,95 @@ fn a_member_reads_a_partition_whose_commit_is_above_its_end() {
     job.publish("b.ndjson", &b);
     support::commit_at(&brokers, &job.group, WORK, 5);
     assert_eq!(job.committed(WORK), Some(5));
+
+    let clock = TestClock::frozen();
+    let worker = launch_bounded(KafkaFeed::connect, &job.data, &job.section, &clock);
+    wait_until(HANG, "every unit is read and committed", || {
+        written(&worker.script) == sorted([a.clone(), b.clone()].concat())
+            && job.committed(WORK) == Some(2)
+    });
+    assert_eq!(run_to_exit(&worker, &clock).state, ExitState::Completed);
+}
+
+/// A feed's commit carries the leader epoch of the record before it, so a
+/// member that starts at the commit can check it against the leader.
+#[test]
+#[ignore = "requires Docker"]
+fn a_feed_commit_carries_the_epoch_of_the_record_before_it() {
+    let container = broker().start().expect("start kafka container");
+    let port = container.get_host_port_ipv4(KAFKA_PORT).expect("port");
+    let brokers = format!("127.0.0.1:{port}");
+    create_topics(&brokers);
+    let job = listed(&brokers, "commit-epoch", "");
+    let (a, b) = (recs("a", 2), recs("b", 2));
+    job.publish("a.ndjson", &a);
+    job.publish("b.ndjson", &b);
+
+    let clock = TestClock::frozen();
+    let worker = launch_bounded(KafkaFeed::connect, &job.data, &job.section, &clock);
+    wait_until(HANG, "every unit is read and committed", || {
+        written(&worker.script) == sorted([a.clone(), b.clone()].concat())
+            && job.committed(WORK) == Some(2)
+    });
+    assert_eq!(run_to_exit(&worker, &clock).state, ExitState::Completed);
+    let epoch = support::record_epoch(&brokers, WORK, 1);
+    assert!(epoch >= 0, "the broker sends an epoch with each record");
+    assert_eq!(
+        support::committed_epoch(&brokers, &job.group, WORK),
+        (Offset::Offset(2), epoch)
+    );
+}
+
+/// A worker assigned a work partition whose commit carries an epoch the
+/// leader answers below the commit, as after an unclean election truncated
+/// the log, reads the units below the commit and ends the job `Completed`.
+/// Regression for #2104.
+#[test]
+#[ignore = "requires Docker"]
+fn a_member_reads_the_units_below_a_commit_the_leader_answers_lower() {
+    let container = broker().start().expect("start kafka container");
+    let port = container.get_host_port_ipv4(KAFKA_PORT).expect("port");
+    let brokers = format!("127.0.0.1:{port}");
+    create_topics(&brokers);
+    let job = listed(&brokers, "truncated", "");
+    let (a, b, c) = (recs("a", 2), recs("b", 2), recs("c", 2));
+    job.publish("a.ndjson", &a);
+    job.publish("b.ndjson", &b);
+    job.publish("c.ndjson", &c);
+    // An epoch the leader never had: the leader answers it with an offset
+    // below the commit.
+    support::commit_with_epoch(&brokers, &job.group, WORK, 2, 7);
+    assert_eq!(
+        support::committed_epoch(&brokers, &job.group, WORK),
+        (Offset::Offset(2), 7)
+    );
+
+    let clock = TestClock::frozen();
+    let worker = launch_bounded(KafkaFeed::connect, &job.data, &job.section, &clock);
+    wait_until(HANG, "every unit is read and committed", || {
+        written(&worker.script) == sorted([a.clone(), b.clone(), c.clone()].concat())
+            && job.committed(WORK) == Some(3)
+    });
+    assert_eq!(run_to_exit(&worker, &clock).state, ExitState::Completed);
+}
+
+/// A worker assigned a work partition whose commit is above its end and
+/// carries the records' own epoch reads every unit from the log start and
+/// ends the job `Completed`. A seek to that commit would move the worker to
+/// the epoch's end and read only later writes.
+#[test]
+#[ignore = "requires Docker"]
+fn a_member_reads_a_partition_whose_epoch_carrying_commit_is_above_its_end() {
+    let container = broker().start().expect("start kafka container");
+    let port = container.get_host_port_ipv4(KAFKA_PORT).expect("port");
+    let brokers = format!("127.0.0.1:{port}");
+    create_topics(&brokers);
+    let job = listed(&brokers, "above-end-epoch", "");
+    let (a, b) = (recs("a", 2), recs("b", 2));
+    job.publish("a.ndjson", &a);
+    job.publish("b.ndjson", &b);
+    let epoch = support::record_epoch(&brokers, WORK, 0);
+    support::commit_with_epoch(&brokers, &job.group, WORK, 5, epoch);
 
     let clock = TestClock::frozen();
     let worker = launch_bounded(KafkaFeed::connect, &job.data, &job.section, &clock);

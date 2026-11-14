@@ -547,13 +547,85 @@ pub(crate) fn committed_by(
 /// broker checks no offset, so a commit above the partition's end stands as a
 /// truncation leaves one.
 pub(crate) fn commit_at(brokers: &str, group: &str, topic: &str, offset: i64) {
+    commit_with_epoch(brokers, group, topic, offset, -1);
+}
+
+/// [`commit_at`] with leader epoch `epoch`, or none for -1. The broker checks
+/// no epoch either, so an epoch the partition's leader never had stands as a
+/// commit from before an unclean election does.
+pub(crate) fn commit_with_epoch(brokers: &str, group: &str, topic: &str, offset: i64, epoch: i32) {
     let probe = probe(brokers, group);
     let mut tpl = TopicPartitionList::new();
     tpl.add_partition_offset(topic, 0, Offset::Offset(offset))
         .expect("offset");
+    let elem = find_elem(&tpl, topic, 0);
+    // SAFETY: `elem` is a non-null element of `tpl`, written under this
+    // exclusive borrow.
+    unsafe { rdkafka::bindings::rd_kafka_topic_partition_set_leader_epoch(elem, epoch) };
     spate_test::wait_until(HANG, "the commit lands", || {
         probe.commit(&tpl, CommitMode::Sync).is_ok()
     });
+}
+
+/// `tpl`'s element for `partition` of `topic`, which must be there.
+fn find_elem(
+    tpl: &TopicPartitionList,
+    topic: &str,
+    partition: i32,
+) -> *mut rdkafka::bindings::rd_kafka_topic_partition_t {
+    let name = std::ffi::CString::new(topic).expect("topic name");
+    // SAFETY: `tpl` owns its list while it is borrowed, and `name` outlives
+    // the call, which keeps neither pointer.
+    let elem = unsafe {
+        rdkafka::bindings::rd_kafka_topic_partition_list_find(tpl.ptr(), name.as_ptr(), partition)
+    };
+    assert!(!elem.is_null(), "{topic} [{partition}] is in the list");
+    elem
+}
+
+/// The offset and leader epoch `group` has committed on partition 0 of
+/// `topic`, read again while the broker refuses.
+pub(crate) fn committed_epoch(brokers: &str, group: &str, topic: &str) -> (Offset, i32) {
+    let probe = probe(brokers, group);
+    let mut tpl = TopicPartitionList::new();
+    tpl.add_partition(topic, 0);
+    let mut read = None;
+    spate_test::wait_until(HANG, "the committed offset reads", || {
+        read = probe
+            .committed_offsets(tpl.clone(), Duration::from_secs(10))
+            .ok();
+        read.is_some()
+    });
+    let read = read.expect("read before the wait ended");
+    let elem = find_elem(&read, topic, 0);
+    // SAFETY: `elem` is a non-null element of `read`, borrowed across the read.
+    let epoch = unsafe { rdkafka::bindings::rd_kafka_topic_partition_get_leader_epoch(elem) };
+    (read.elements()[0].offset(), epoch)
+}
+
+/// The leader epoch the broker sends with the record at `offset` on
+/// partition 0 of `topic`.
+pub(crate) fn record_epoch(brokers: &str, topic: &str, offset: i64) -> i32 {
+    let reader: BaseConsumer = raw_config()
+        .set("bootstrap.servers", brokers)
+        .set("group.id", spate_test::unique_name("record-epoch"))
+        .set("enable.auto.commit", "false")
+        .build()
+        .expect("reader");
+    let mut tpl = TopicPartitionList::new();
+    tpl.add_partition_offset(topic, 0, Offset::Offset(offset))
+        .expect("offset");
+    reader.assign(&tpl).expect("assign");
+    let mut epoch = None;
+    spate_test::wait_until(HANG, "the record arrives", || {
+        if let Some(Ok(message)) = reader.poll(Duration::from_millis(100)) {
+            // SAFETY: `message` keeps its pointer valid while it is borrowed.
+            epoch =
+                Some(unsafe { rdkafka::bindings::rd_kafka_message_leader_epoch(message.ptr()) });
+        }
+        epoch.is_some()
+    });
+    epoch.expect("read before the wait ended")
 }
 
 /// The lag `pipeline` publishes for `partition`, or `None` before it does.

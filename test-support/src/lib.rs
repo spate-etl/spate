@@ -2,6 +2,8 @@
 //! depend on this repository's layout and its `cargo xtask` task runner.
 
 pub mod alloc;
+#[cfg(feature = "cargo")]
+mod cargo;
 mod child;
 #[cfg(any(feature = "kafka", feature = "elasticmq"))]
 mod container_log;
@@ -20,6 +22,8 @@ mod started;
 #[cfg(feature = "tls")]
 mod tls;
 
+#[cfg(feature = "cargo")]
+pub use cargo::reported_executable;
 pub use child::{ChildTest, run_in_child};
 pub use corpus::{fnv1a, pin};
 #[cfg(feature = "elasticmq")]

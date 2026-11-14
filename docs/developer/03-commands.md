@@ -188,8 +188,8 @@ cargo nextest run --profile docker -p spate --all-features --locked \
   --ignore-default-filter --test-threads 1
 ```
 
-The `--all-features` flag turns on `spate-kafka/tls`, which compiles OpenSSL from source.
-When your change does not touch TLS, pass the features that the `e2e_examples` stanza in `crates/spate/Cargo.toml` requires.
+Keep `--all-features` in the command.
+The suite builds each example it runs with `--all-features`, so a narrower feature set makes the first test compile the examples again, OpenSSL for `spate-kafka/tls` included.
 
 ## Run the mutants
 

@@ -17,20 +17,11 @@ use apache_avro::{Schema, to_avro_datum};
 use proptest::prelude::*;
 use spate_avro::{AvroDeserializerBuilder, AvroMode, AvroSettings, SchemaSource};
 use spate_core::checkpoint::AckRef;
-use spate_core::deser::{Deserializer, EmitRecord};
-use spate_core::record::{Flow, Record};
-use spate_test::raw_payload;
+use spate_core::deser::Deserializer;
+use spate_test::{EmitCollector, raw_payload};
 use std::collections::HashMap;
 use std::f32::consts::PI;
 use std::fmt::Debug;
-
-struct Collected<T>(Vec<Record<T>>);
-impl<'buf, T> EmitRecord<'buf, T> for Collected<T> {
-    fn emit(&mut self, rec: Record<T>) -> Flow {
-        self.0.push(rec);
-        Flow::Continue
-    }
-}
 
 fn builder(schema_json: &str) -> AvroDeserializerBuilder {
     let settings = AvroSettings {
@@ -55,21 +46,21 @@ where
     let b = builder(schema_json);
     let (ack, _rx) = AckRef::test_pair();
 
-    let mut two_pass = Collected::<T>(Vec::new());
+    let mut two_pass = EmitCollector::<T>::new();
     b.build_serde::<T>()
         .unwrap()
         .deserialize(&raw_payload(datum), &ack, &mut two_pass)
         .expect("two-pass decode");
-    let mut single_pass = Collected::<T>(Vec::new());
+    let mut single_pass = EmitCollector::<T>::new();
     b.build_serde_datum::<T>()
         .unwrap()
         .deserialize(&raw_payload(datum), &ack, &mut single_pass)
         .expect("single-pass decode");
 
-    assert_eq!(two_pass.0.len(), 1);
-    assert_eq!(single_pass.0.len(), 1);
-    let reference = two_pass.0.pop().unwrap().payload;
-    let got = single_pass.0.pop().unwrap().payload;
+    assert_eq!(two_pass.records.len(), 1);
+    assert_eq!(single_pass.records.len(), 1);
+    let reference = two_pass.records.pop().unwrap().payload;
+    let got = single_pass.records.pop().unwrap().payload;
     assert_eq!(got, reference, "single-pass diverged from two-pass");
     got
 }
@@ -613,14 +604,18 @@ fn assert_malformed<T: Debug + Send + 'static>(
     deser: &mut dyn Deserializer<spate_core::deser::Owned<T>>,
     bytes: &[u8],
 ) {
-    let mut out = Collected(Vec::new());
+    let mut out = EmitCollector::new();
     let result = deser.deserialize(&raw_payload(bytes), &spate_test::test_ack(), &mut out);
     assert!(
         matches!(result, Err(spate_core::error::DeserError::Malformed { .. })),
         "result={result:?}, emitted={:?}",
-        out.0
+        out.records
     );
-    assert!(out.0.is_empty(), "malformed datum emitted {:?}", out.0);
+    assert!(
+        out.records.is_empty(),
+        "malformed datum emitted {:?}",
+        out.records
+    );
 }
 
 /// String body truncation is malformed with cold and cached readers.
@@ -632,12 +627,12 @@ fn value_rejects_truncated_string_body() {
         for warm in [false, true] {
             let mut deser = builder(SCH).build_value().unwrap();
             if warm {
-                let mut out = Collected(Vec::new());
+                let mut out = EmitCollector::new();
                 deser
                     .deserialize(&raw_payload(&[2, b'a']), &spate_test::test_ack(), &mut out)
                     .unwrap();
                 assert_eq!(
-                    out.0[0].payload,
+                    out.records[0].payload,
                     Value::Record(vec![("s".into(), Value::String("a".into()))])
                 );
             }
@@ -682,20 +677,20 @@ fn complete_datums_keep_value_backend_semantics() {
             if trailing {
                 datum.push(255);
             }
-            let mut out = Collected(Vec::new());
+            let mut out = EmitCollector::new();
             deser
                 .deserialize(&raw_payload(&datum), &spate_test::test_ack(), &mut out)
                 .unwrap();
             assert_eq!(
-                out.0.iter().map(|r| r.payload.clone()).collect::<Vec<_>>(),
+                out.payloads(),
                 vec![Value::Record(vec![("b".into(), expected.clone())])]
             );
         }
-        let mut out = Collected(Vec::new());
+        let mut out = EmitCollector::new();
         deser
             .deserialize(&raw_payload(&[]), &spate_test::test_ack(), &mut out)
             .unwrap();
-        assert!(out.0.is_empty());
+        assert!(out.records.is_empty());
     }
 }
 
@@ -705,13 +700,13 @@ fn value_big_decimal_round_trip() {
     let sch = r#"{"type":"bytes","logicalType":"big-decimal"}"#;
     let expected = Value::BigDecimal("1234.56".parse().unwrap());
     let bytes = to_avro_datum(&Schema::parse_str(sch).unwrap(), expected.clone()).unwrap();
-    let mut out = Collected(Vec::new());
+    let mut out = EmitCollector::new();
     builder(sch)
         .build_value()
         .unwrap()
         .deserialize(&raw_payload(&bytes), &spate_test::test_ack(), &mut out)
         .unwrap();
-    assert_eq!(out.0[0].payload, expected);
+    assert_eq!(out.records[0].payload, expected);
 }
 
 #[test]
@@ -758,19 +753,19 @@ fn invalid_utf8_in_a_skipped_field_diverges_by_design() {
     let b = builder(SCH);
     let (ack, _rx) = AckRef::test_pair();
 
-    let mut two_pass = Collected::<T>(Vec::new());
+    let mut two_pass = EmitCollector::<T>::new();
     b.build_serde::<T>()
         .unwrap()
         .deserialize(&raw_payload(&datum), &ack, &mut two_pass)
         .unwrap_err();
-    assert!(two_pass.0.is_empty());
+    assert!(two_pass.records.is_empty());
 
-    let mut single_pass = Collected::<T>(Vec::new());
+    let mut single_pass = EmitCollector::<T>::new();
     b.build_serde_datum::<T>()
         .unwrap()
         .deserialize(&raw_payload(&datum), &ack, &mut single_pass)
         .expect("the single-pass path skips the field structurally");
-    assert_eq!(single_pass.0[0].payload, T { keep: 5 });
+    assert_eq!(single_pass.records[0].payload, T { keep: 5 });
 }
 
 #[test]
@@ -788,14 +783,14 @@ fn zero_width_item_bomb_diverges_by_design() {
     let b = builder(SCH);
     let (ack, _rx) = AckRef::test_pair();
 
-    let mut two_pass = Collected::<Vec<()>>(Vec::new());
+    let mut two_pass = EmitCollector::<Vec<()>>::new();
     b.build_serde::<Vec<()>>()
         .unwrap()
         .deserialize(&raw_payload(&datum), &ack, &mut two_pass)
         .expect("the two-pass path walks the bomb");
-    assert_eq!(two_pass.0[0].payload.len(), 100_000);
+    assert_eq!(two_pass.records[0].payload.len(), 100_000);
 
-    let mut single_pass = Collected::<Vec<()>>(Vec::new());
+    let mut single_pass = EmitCollector::<Vec<()>>::new();
     let err = b
         .build_serde_datum::<Vec<()>>()
         .unwrap()
@@ -805,7 +800,7 @@ fn zero_width_item_bomb_diverges_by_design() {
         matches!(err, spate_core::error::DeserError::Malformed { .. }),
         "{err}"
     );
-    assert!(single_pass.0.is_empty());
+    assert!(single_pass.records.is_empty());
 }
 
 #[test]
@@ -826,19 +821,19 @@ fn union_into_map_target_diverges_by_design() {
     let b = builder(SCH);
     let (ack, _rx) = AckRef::test_pair();
 
-    let mut two_pass = Collected::<HashMap<String, i64>>(Vec::new());
+    let mut two_pass = EmitCollector::<HashMap<String, i64>>::new();
     b.build_serde::<HashMap<String, i64>>()
         .unwrap()
         .deserialize(&raw_payload(&datum), &ack, &mut two_pass)
         .unwrap_err();
 
-    let mut single_pass = Collected::<HashMap<String, i64>>(Vec::new());
+    let mut single_pass = EmitCollector::<HashMap<String, i64>>::new();
     b.build_serde_datum::<HashMap<String, i64>>()
         .unwrap()
         .deserialize(&raw_payload(&datum), &ack, &mut single_pass)
         .expect("the single-pass path unwraps the union");
     assert_eq!(
-        single_pass.0[0].payload,
+        single_pass.records[0].payload,
         HashMap::from([("a".to_owned(), 1)])
     );
 }
@@ -848,7 +843,7 @@ fn garbage_errors_on_both_paths() {
     let b = builder(SENSOR_BATCH);
     let (ack, _rx) = AckRef::test_pair();
     let garbage = [0xFF, 0xFF, 0xFF, 0xFF, 0x0F];
-    let mut out = Collected::<SensorBatch>(Vec::new());
+    let mut out = EmitCollector::<SensorBatch>::new();
     b.build_serde::<SensorBatch>()
         .unwrap()
         .deserialize(&raw_payload(&garbage), &ack, &mut out)
@@ -857,7 +852,7 @@ fn garbage_errors_on_both_paths() {
         .unwrap()
         .deserialize(&raw_payload(&garbage), &ack, &mut out)
         .unwrap_err();
-    assert!(out.0.is_empty());
+    assert!(out.records.is_empty());
 }
 
 #[test]
@@ -930,14 +925,14 @@ fn char_and_wide_integer_targets_diverge_by_design() {
         let b = builder(schema_json);
         let (ack, _rx) = AckRef::test_pair();
 
-        let mut two_pass = Collected::<T>(Vec::new());
+        let mut two_pass = EmitCollector::<T>::new();
         b.build_serde::<T>()
             .unwrap()
             .deserialize(&raw_payload(datum), &ack, &mut two_pass)
             .expect("the two-pass path decodes this target");
-        assert_eq!(two_pass.0.len(), 1);
+        assert_eq!(two_pass.records.len(), 1);
 
-        let mut single_pass = Collected::<T>(Vec::new());
+        let mut single_pass = EmitCollector::<T>::new();
         let err = b
             .build_serde_datum::<T>()
             .unwrap()
@@ -947,7 +942,7 @@ fn char_and_wide_integer_targets_diverge_by_design() {
             matches!(err, spate_core::error::DeserError::Malformed { .. }),
             "{err}"
         );
-        assert!(single_pass.0.is_empty());
+        assert!(single_pass.records.is_empty());
     }
 
     const CHAR_SCH: &str = r#"{"type":"record","name":"C","fields":[

@@ -1236,8 +1236,12 @@ impl KafkaSource {
                 }
             }
         }
+        // Under `error` every commit with an epoch is sought, whatever the end,
+        // and one above the end reaches librdkafka's reset, which fails the
+        // source. So only `earliest` reads the ends.
+        let from_log_start = uncommitted == Offset::Beginning;
         let ends = ends_to_read(&committed);
-        let ends = if ends.count() == 0 {
+        let ends = if !from_log_start || ends.count() == 0 {
             None
         } else {
             let budget = lookup_until.saturating_duration_since(self.clock.now());
@@ -1247,9 +1251,6 @@ impl KafkaSource {
             }
             read_ends(self.members[k].consumer.client(), ends, budget)
         };
-        // Under `error` a commit above the end reaches librdkafka's reset,
-        // which fails the source.
-        let from_log_start = uncommitted == Offset::Beginning;
         let seek = plan_starts(&mut committed, ends.as_ref(), from_log_start);
         Prepared {
             list: committed,
@@ -4747,6 +4748,30 @@ mod tests {
                 assert_eq!(calls(&recorded), want);
                 assert_eq!(source.members[0].validating.contains(&0), seek.is_none());
             }
+        }
+
+        /// Under `error`, a commit with an epoch is sought with no end read,
+        /// since the end cannot change its start.
+        #[test]
+        fn the_error_policy_seeks_with_no_end_read() {
+            let cluster = mock();
+            produce_orders(&cluster, 5);
+            let (mut source, _clock, recorded) =
+                recording(&cluster, "error", 1, |_| Duration::ZERO);
+            commit_orders(&cluster, &source.config.group_id, 2);
+            let until = source.clock.now() + source.lookup_timeout;
+            let starts = source
+                .prepare_starts(&[(0, tpl_of(&[0]))], until)
+                .expect("no fatal")
+                .expect("a start");
+            assert_eq!(starts[0].seek.count(), 1, "the commit is sought");
+            assert_eq!(
+                calls(&recorded),
+                [BrokerCall::Lookup {
+                    k: 0,
+                    budget: source.lookup_timeout,
+                }]
+            );
         }
 
         /// Under `latest`, a partition whose commit carries an epoch is sought

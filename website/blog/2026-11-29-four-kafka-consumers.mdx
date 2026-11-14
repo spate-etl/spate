@@ -176,9 +176,10 @@ of 512 per poll.
   </>}
 />
 
-Two consumers ran at 48.2M rows/s at 10 ms, and eight at 48.5M. With the shorter
-backoff, two, four, and eight consumers all used the whole 32-CPU quota and were
-throttled, so on this rig the bound past two consumers is CPU.
+The same run measured two and eight consumers at 10 ms only, so the chart has no
+pair for them. Two consumers ran at 48.2M rows/s and eight at 48.5M. With the
+shorter backoff, two, four, and eight consumers all used the whole 32-CPU quota
+and were throttled, so on this rig the bound past two consumers is CPU.
 
 ## What the shorter backoff and more consumers cost
 

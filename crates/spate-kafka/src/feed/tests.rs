@@ -2506,20 +2506,28 @@ mod cluster {
         clock.advance(Duration::from_secs(3600));
         let (config, core, producer, mut d) =
             parts_on(&brokers, &group, SyncClock::new(clock.clone()));
+        d.call_bound = HOUR;
         let admission = admission(&config, &core, &producer, STEP);
         drive(&mut d, "the unit is buffered", |d| {
             !d.core.lock().ready.is_empty()
         });
-        admission.stop();
         acknowledge_first(&d);
         assert!(!d.commit_if_due(), "due on a clock that has not moved");
         clock.advance(COMMIT_INTERVAL - Duration::from_nanos(1));
         assert!(!d.commit_if_due(), "due before the interval");
         assert_eq!(committed(&brokers, &group), None);
         clock.advance(Duration::from_nanos(1));
-        assert!(d.commit_if_due(), "not due at the interval");
+        let (cluster, mut d, due) =
+            on_driver(cluster, d, "the periodic commit", Driver::commit_if_due);
+        assert!(due, "not due at the interval");
+        assert_eq!(waits(&d), [Wait::Sent(HOUR)]);
+        assert!(d.consumer.held.is_none(), "the periodic commit is held");
         assert_eq!(committed(&brokers, &group), Some(1));
         assert!(!d.commit_if_due(), "due again with no time passed");
+        // Stopped any earlier, the feed holds its periodic commit without
+        // waiting for the group's answer.
+        admission.stop();
+        drop((d, cluster));
     }
 
     /// Pins that a revocation commits the offsets its partitions finished,

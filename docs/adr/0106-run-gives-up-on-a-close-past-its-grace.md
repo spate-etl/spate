@@ -104,6 +104,6 @@ The tests in `crates/spate-core/src/pipeline/tests.rs`:
 
 ## More information
 
-- Landed in REPLACE-ME
+- Landed in the pull request that closed #1702.
 - The behaviour is described in
   [Graceful shutdown](../user-guide/03-guides/graceful-shutdown.mdx#the-drain-choreography).

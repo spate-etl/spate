@@ -50,6 +50,9 @@ pub use config::{
 };
 pub use datum::AvroDatumDeserializer;
 pub use deser::{AvroSerdeDeserializer, AvroValue, AvroValueDeserializer};
+#[cfg(any(test, feature = "testing"))]
+#[doc(hidden)]
+pub use wire::single_object_frame;
 pub use wire::{parse_confluent, parse_single_object};
 
 #[cfg(test)]

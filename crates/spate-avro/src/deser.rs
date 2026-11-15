@@ -665,9 +665,7 @@ mod tests {
             )
         };
 
-        let mut framed = vec![0xC3, 0x01];
-        framed.extend_from_slice(&fingerprint.to_le_bytes());
-        framed.extend_from_slice(&datum(9, "so"));
+        let framed = crate::wire::single_object_frame(fingerprint, &datum(9, "so"));
 
         let mut out = EmitCollector::<AvroValue>::new();
         AvroValueDeserializer::new(core(fingerprint))

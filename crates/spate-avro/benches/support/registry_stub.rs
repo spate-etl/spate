@@ -29,7 +29,6 @@
 
 use spate_avro::AvroValueDeserializer;
 use spate_core::checkpoint::AckRef;
-use spate_core::deser::Deserializer;
 use spate_core::error::DeserError;
 use spate_core::record::{PartitionId, RawPayload};
 use std::io::{Read, Write};
@@ -44,11 +43,6 @@ const ACCEPT_POLL: Duration = Duration::from_millis(1);
 
 /// How long the warm-up parks between replays while a fetch is in flight.
 const WARM_POLL: Duration = Duration::from_millis(2);
-
-/// Replays the warm-up will make before giving up. Generous, because it is
-/// only reached when something is wrong: the failure is a panic naming the
-/// id, not a silent fallback to an unwarmed cache.
-const WARM_ATTEMPTS: usize = 500;
 
 /// A registry that answers the schema ids it was given and 404s everything
 /// else.
@@ -232,18 +226,14 @@ pub(crate) fn warm(
         offset: 0,
         timestamp_ms: 0,
     };
-    for _ in 0..WARM_ATTEMPTS {
-        let outcome = deser.deserialize(&raw, ack, sink);
-        match (&outcome, want) {
-            (Ok(()), Warm::Ready) => return,
-            (Err(DeserError::SchemaUnavailable { .. }), Warm::Poisoned) => return,
-            (Err(DeserError::NotReady { .. }), _) => {
-                rt.block_on(async { tokio::time::sleep(WARM_POLL).await });
-            }
-            _ => panic!("warm-up wanted {want:?} but the payload resolved to {outcome:?}"),
-        }
+    let outcome =
+        spate_test::deserialize_until_ready(spate_test::HANG, deser, &raw, ack, sink, || {
+            rt.block_on(async { tokio::time::sleep(WARM_POLL).await });
+        });
+    match (&outcome, want) {
+        (Ok(()), Warm::Ready) | (Err(DeserError::SchemaUnavailable { .. }), Warm::Poisoned) => {}
+        _ => panic!("warm-up wanted {want:?} but the payload resolved to {outcome:?}"),
     }
-    panic!("the stub registry never brought the schema to {want:?} — {WARM_ATTEMPTS} replays");
 }
 
 /// Warm one payload per id, so a corpus mixing those ids resolves every one of

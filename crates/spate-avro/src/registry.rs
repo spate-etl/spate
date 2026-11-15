@@ -949,7 +949,7 @@ mod tests {
             None,
         )
         .await;
-        let fetched = tokio::time::timeout(Duration::from_secs(10), fetch(&url, None, vec![]))
+        let fetched = tokio::time::timeout(spate_test::HANG, fetch(&url, None, vec![]))
             .await
             .expect("the fetch ends once the limit is read");
         match fetched {
@@ -1032,46 +1032,43 @@ mod tests {
     #[test]
     fn a_fetch_task_panic_is_logged_with_its_text() {
         let lines = spate_test::capture_logs(tracing::Level::ERROR, || {
-            tokio::runtime::Builder::new_current_thread()
+            let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
-                .unwrap()
-                .block_on(async {
-                    let url = serve_raw(
-                        "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n",
-                        Vec::new(),
-                        None,
-                    )
-                    .await;
-                    let read = Arc::new(AtomicBool::new(false));
-                    let handle = spawn_fetcher(
-                        http_client(None).unwrap(),
-                        Arc::new(endpoint(&url)),
-                        Rejection::default(),
-                        Duration::from_secs(60),
-                        SyncClock::new(Arc::new(FlaggingPanicClock(Arc::clone(&read)))),
-                        &tokio::runtime::Handle::current(),
-                    );
-                    handle.request(1);
-                    tokio::time::timeout(Duration::from_secs(10), async {
-                        while !read.load(Ordering::SeqCst) {
-                            tokio::time::sleep(Duration::from_millis(1)).await;
-                        }
-                    })
-                    .await
-                    .expect("the fetch task reads the clock");
-                    // The fetcher drains the finished fetch before it sees the
-                    // closed channel, so it logs before it drops its cache clone.
-                    let cache = Arc::clone(&handle.cache);
-                    drop(handle);
-                    tokio::time::timeout(Duration::from_secs(10), async {
-                        while Arc::strong_count(&cache) > 1 {
-                            tokio::time::sleep(Duration::from_millis(1)).await;
-                        }
-                    })
-                    .await
-                    .expect("the fetcher ends");
-                });
+                .unwrap();
+            let read = Arc::new(AtomicBool::new(false));
+            let handle = rt.block_on(async {
+                let url = serve_raw(
+                    "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n",
+                    Vec::new(),
+                    None,
+                )
+                .await;
+                spawn_fetcher(
+                    http_client(None).unwrap(),
+                    Arc::new(endpoint(&url)),
+                    Rejection::default(),
+                    Duration::from_secs(60),
+                    SyncClock::new(Arc::new(FlaggingPanicClock(Arc::clone(&read)))),
+                    &tokio::runtime::Handle::current(),
+                )
+            });
+            handle.request(1);
+            // The fetcher runs on `rt`, so each check first drives it.
+            let drive =
+                || rt.block_on(async { tokio::time::sleep(Duration::from_millis(1)).await });
+            spate_test::wait_until(spate_test::HANG, "the fetch task reads the clock", || {
+                drive();
+                read.load(Ordering::SeqCst)
+            });
+            // The fetcher drains the finished fetch before it sees the closed
+            // channel, so it logs before it drops its cache clone.
+            let cache = Arc::clone(&handle.cache);
+            drop(handle);
+            spate_test::wait_until(spate_test::HANG, "the fetcher ends", || {
+                drive();
+                Arc::strong_count(&cache) == 1
+            });
         });
         assert_eq!(
             lines,

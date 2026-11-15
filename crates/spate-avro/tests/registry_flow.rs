@@ -191,26 +191,18 @@ where
     F: RecFamily,
     O: for<'buf> EmitRecord<'buf, F::Rec<'buf>>,
 {
-    let (ack, _rx) = AckRef::test_pair();
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        match deser.deserialize(&raw_payload(payload), &ack, out) {
-            Err(DeserError::NotReady { .. }) if Instant::now() < deadline => {
-                clock.advance(Duration::from_secs(5));
-                std::thread::sleep(Duration::from_millis(20));
-            }
-            other => return other,
-        }
-    }
+    spate_test::deserialize_until_ready(
+        spate_test::HANG,
+        deser,
+        &raw_payload(payload),
+        &spate_test::test_ack(),
+        out,
+        || clock.advance(Duration::from_secs(5)),
+    )
 }
 
-/// Retry `deserialize` until the async fetch lands or the deadline passes.
-///
-/// Generic over the deserializer family and emitter so the value path and the
-/// serde-typed path share one driver. The 20ms backoff is a
-/// retry cadence, not a sleep-poll: `deserialize` is itself the readiness
-/// probe (there is no external signal to block on), so no blocking wait helper
-/// applies here.
+/// Replays `payload` until the asynchronous fetch settles, as the driver
+/// does, and returns the first answer other than `NotReady`.
 fn drive_until_ready<F, O>(
     deser: &mut dyn Deserializer<F>,
     payload: &[u8],
@@ -220,16 +212,14 @@ where
     F: RecFamily,
     O: for<'buf> EmitRecord<'buf, F::Rec<'buf>>,
 {
-    let (ack, _rx) = AckRef::test_pair();
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        match deser.deserialize(&raw_payload(payload), &ack, out) {
-            Err(DeserError::NotReady { .. }) if Instant::now() < deadline => {
-                std::thread::sleep(Duration::from_millis(20));
-            }
-            other => return other,
-        }
-    }
+    spate_test::deserialize_until_ready(
+        spate_test::HANG,
+        deser,
+        &raw_payload(payload),
+        &spate_test::test_ack(),
+        out,
+        || {},
+    )
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -402,28 +392,30 @@ fn unknown_id_warnings_are_rate_limited() {
             .enable_all()
             .build()
             .unwrap();
-        rt.block_on(async {
+        let clock = TestClock::frozen();
+        let mut deser = rt.block_on(async {
             let addr = stub.serve().await;
-            let clock = TestClock::frozen();
-            let mut deser = builder_on(addr, Duration::from_secs(3600), &clock)
+            builder_on(addr, Duration::from_secs(3600), &clock)
                 .build_value()
-                .expect("apache builder");
-            let (ack, _rx) = AckRef::test_pair();
-            let mut out = EmitCollector::new();
-            for id in 0..IDS {
-                let payload = confluent_payload(100 + id, 1);
-                let deadline = Instant::now() + Duration::from_secs(10);
-                loop {
-                    match deser.deserialize(&raw_payload(&payload), &ack, &mut out) {
-                        Err(DeserError::NotReady { .. }) if Instant::now() < deadline => {
-                            tokio::time::sleep(Duration::from_millis(1)).await;
-                        }
-                        Err(DeserError::SchemaUnavailable { .. }) => break,
-                        other => panic!("id {id}: {other:?}"),
-                    }
-                }
-            }
+                .expect("apache builder")
         });
+        let mut out = EmitCollector::new();
+        for id in 0..IDS {
+            let payload = confluent_payload(100 + id, 1);
+            // The fetcher runs on `rt`, so each replay first drives it.
+            let result = spate_test::deserialize_until_ready(
+                spate_test::HANG,
+                &mut deser,
+                &raw_payload(&payload),
+                &spate_test::test_ack(),
+                &mut out,
+                || rt.block_on(async { tokio::time::sleep(Duration::from_millis(1)).await }),
+            );
+            assert!(
+                matches!(result, Err(DeserError::SchemaUnavailable { .. })),
+                "id {id}: {result:?}"
+            );
+        }
     });
     let warned = lines
         .iter()
@@ -462,9 +454,9 @@ async fn transient_503s_then_success_decodes_and_never_drops() {
     assert_eq!(rows.len(), 1, "record decodes after the transient blips");
 }
 
-/// After a transient failure the fetcher sends no request for that id while
-/// the deserializer's clock stays short of the backoff, however often the
-/// payload is replayed, and refetches once the clock passes it.
+/// After a transient failure the fetcher refuses each replayed request for
+/// that id while the deserializer's clock stays short of the backoff, and
+/// refetches once the clock passes it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn no_refetch_while_the_backoff_holds() {
     let stub = StubRegistry::default();
@@ -472,31 +464,45 @@ async fn no_refetch_while_the_backoff_holds() {
     stub.script("/schemas/ids/13", 200, &schema_body(SCHEMA_V1), 0);
     let addr = stub.clone().serve().await;
 
-    let clock = TestClock::frozen();
-    let builder = builder_on(addr, Duration::from_secs(30), &clock);
+    let test_clock = TestClock::frozen();
+    let clock = Arc::new(CountingClock {
+        inner: Arc::clone(&test_clock),
+        reads: AtomicUsize::new(0),
+    });
+    let builder = AvroDeserializerBuilder::from_settings_with_clock(
+        &settings(addr, Duration::from_secs(30)),
+        &tokio::runtime::Handle::current(),
+        Arc::clone(&clock) as _,
+    )
+    .unwrap();
     let mut deser = builder.build_value().expect("apache builder");
     let payload = confluent_payload(13, 1);
     let probe = stub.clone();
 
     let (frozen_hits, rows) = tokio::task::spawn_blocking(move || {
-        let (ack, _rx) = AckRef::test_pair();
+        let ack = spate_test::test_ack();
         let mut out = EmitCollector::new();
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while probe.path_hits("/schemas/ids/13") == 0 && Instant::now() < deadline {
-            let _ = deser.deserialize(&raw_payload(&payload), &ack, &mut out);
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        // Elapsed real time is the property: replays over one second on a
-        // frozen clock issue no second request.
-        for _ in 0..50 {
-            let _ = deser.deserialize(&raw_payload(&payload), &ack, &mut out);
-            std::thread::sleep(Duration::from_millis(20));
+        let reads = || clock.reads.load(Ordering::SeqCst);
+        assert!(matches!(
+            deser.deserialize(&raw_payload(&payload), &ack, &mut out),
+            Err(DeserError::NotReady { .. })
+        ));
+        spate_test::wait_until(spate_test::HANG, "the 503 is stamped", || reads() >= 1);
+        // Each replay requests the id once, and the backoff gate reads the
+        // clock once to refuse it.
+        for replay in 1..=10 {
+            assert!(matches!(
+                deser.deserialize(&raw_payload(&payload), &ack, &mut out),
+                Err(DeserError::NotReady { .. })
+            ));
+            spate_test::wait_until(spate_test::HANG, "the backoff refuses the replay", || {
+                reads() > replay
+            });
         }
         let frozen_hits = probe.path_hits("/schemas/ids/13");
-        let mut out = EmitCollector::new();
-        let r =
-            drive_until_ready_on(&mut deser, &payload, &mut out, &clock).map(|()| out.payloads());
-        (frozen_hits, r)
+        test_clock.advance(Duration::from_millis(200));
+        let rows = drive_until_ready(&mut deser, &payload, &mut out).map(|()| out.payloads());
+        (frozen_hits, rows)
     })
     .await
     .unwrap();
@@ -506,6 +512,7 @@ async fn no_refetch_while_the_backoff_holds() {
             .len(),
         1
     );
+    assert_eq!(stub.path_hits("/schemas/ids/13"), 2);
 }
 
 /// A frozen [`TestClock`] that counts its reads.
@@ -555,7 +562,7 @@ async fn a_transient_failure_is_stamped_on_the_deserializers_clock() {
             deser.deserialize(&raw_payload(&payload), &ack, &mut out),
             Err(DeserError::NotReady { .. })
         ));
-        spate_test::wait_until(Duration::from_secs(10), "the first 503 is stamped", || {
+        spate_test::wait_until(spate_test::HANG, "the first 503 is stamped", || {
             reads() >= 1
         });
         test_clock.advance(Duration::from_millis(200));
@@ -565,7 +572,7 @@ async fn a_transient_failure_is_stamped_on_the_deserializers_clock() {
             deser.deserialize(&raw_payload(&payload), &ack, &mut out),
             Err(DeserError::NotReady { .. })
         ));
-        spate_test::wait_until(Duration::from_secs(10), "the second 503 is stamped", || {
+        spate_test::wait_until(spate_test::HANG, "the second 503 is stamped", || {
             reads() >= 3
         });
         test_clock.advance(Duration::from_millis(400));
@@ -581,7 +588,7 @@ async fn a_transient_failure_is_stamped_on_the_deserializers_clock() {
 /// Each refetch of a transiently failing id waits on the deserializer's
 /// clock: six 503s grow the backoff to its cap, and the id decodes as fast as
 /// the clock moves, with one request per failure. On real time the six waits
-/// add up to 11.2 s, past the driver's 10 s deadline.
+/// would add up to 11.2 s.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_transient_id_is_refetched_once_its_backoff_passes() {
     let stub = StubRegistry::default();
@@ -729,15 +736,15 @@ async fn prewarm_loads_subjects_at_startup() {
         AvroDeserializerBuilder::from_settings(&cfg, &tokio::runtime::Handle::current()).unwrap();
     let mut deser = builder.build_value().expect("apache builder");
 
-    // The pre-warm must request the subject's latest version at startup.
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while stub.path_hits("/subjects/events-value/versions/latest") == 0 {
-        assert!(Instant::now() < deadline, "pre-warm never hit the registry");
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-
     let payload = confluent_payload(42, 7);
+    let hits = stub.clone();
     let rows = tokio::task::spawn_blocking(move || {
+        // The pre-warm must request the subject's latest version at startup.
+        spate_test::wait_until(
+            spate_test::HANG,
+            "the pre-warm requests the subject",
+            || hits.path_hits("/subjects/events-value/versions/latest") > 0,
+        );
         let mut out = EmitCollector::new();
         drive_until_ready(&mut deser, &payload, &mut out).map(|()| out.payloads())
     })
@@ -875,7 +882,7 @@ async fn prewarm_skips_a_schema_that_is_not_avro() {
     let hits = stub.clone();
     tokio::task::spawn_blocking(move || {
         spate_test::wait_until(
-            Duration::from_secs(10),
+            spate_test::HANG,
             "the pre-warm reaches the second subject",
             || hits.path_hits("/subjects/sentinel-value/versions/latest") > 0,
         );
@@ -940,7 +947,7 @@ async fn a_prewarm_forbidden_is_not_a_rejection() {
     let hits = stub.clone();
     tokio::task::spawn_blocking(move || {
         spate_test::wait_until(
-            Duration::from_secs(10),
+            spate_test::HANG,
             "the pre-warm reaches the second subject",
             || hits.path_hits("/subjects/sentinel-value/versions/latest") > 0,
         );
@@ -1060,11 +1067,9 @@ async fn a_prewarm_sends_basic_auth() {
         let _builder =
             AvroDeserializerBuilder::from_settings(&cfg, &tokio::runtime::Handle::current())
                 .unwrap();
-        spate_test::wait_until(
-            Duration::from_secs(5),
-            "prewarm request is received",
-            || !seen.lock().unwrap().is_empty(),
-        );
+        spate_test::wait_until(spate_test::HANG, "prewarm request is received", || {
+            !seen.lock().unwrap().is_empty()
+        });
         assert_eq!(
             seen.lock().unwrap().as_slice(),
             [(

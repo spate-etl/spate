@@ -55,6 +55,17 @@ impl SystemRoots {
     ///
     /// Reading blocks on the file system, or on the keychain on macOS, with no
     /// bound of its own; an async caller runs it on a blocking thread.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use spate_core::tls::SystemRoots;
+    ///
+    /// # async fn run() -> Result<(), tokio::task::JoinError> {
+    /// let system = tokio::task::spawn_blocking(SystemRoots::load).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     #[must_use]
     pub fn load() -> Self {
         Self::from_native(rustls_native_certs::load_native_certs())
@@ -96,6 +107,18 @@ impl TrustRoots {
     ///
     /// [`TrustError::RootCa`] when `root_ca` cannot be used, as
     /// [`read_root_ca`] says.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use spate_core::tls::{SystemRoots, TlsSection, TrustError, TrustRoots};
+    ///
+    /// # fn run(tls: &TlsSection) -> Result<(), TrustError> {
+    /// let roots = TrustRoots::load(SystemRoots::load(), tls.root_ca.as_deref())?;
+    /// let bundle = roots.to_pem();
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn load(system: SystemRoots, root_ca: Option<&Path>) -> Result<Self, TrustError> {
         let found = system.certs.len();
         let mut certs: Vec<_> = system.certs.into_iter().filter(usable).collect();
@@ -121,7 +144,22 @@ impl TrustRoots {
     ///
     /// # Errors
     ///
-    /// [`TrustError::NoRoots`] when it holds none.
+    /// [`TrustError::NoRoots`] when it holds none. Its text ends "or set this
+    /// key to the issuing CA", so the caller anchors it at its `root_ca` key.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use spate_core::tls::{SystemRoots, TlsSection, TrustRoots};
+    ///
+    /// # fn run(tls: &TlsSection) -> Result<(), String> {
+    /// let roots = TrustRoots::load(SystemRoots::load(), tls.root_ca.as_deref())
+    ///     .and_then(TrustRoots::require_any)
+    ///     .map_err(|e| format!("sink.example.tls.root_ca: {e}"))?;
+    /// let certs = roots.into_certs();
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn require_any(self) -> Result<Self, TrustError> {
         if self.certs.is_empty() {
             return Err(TrustError::NoRoots {

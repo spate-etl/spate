@@ -67,8 +67,9 @@ the result to the client as DER certificates with `TrustRoots::certs`, or as
 one PEM bundle with `TrustRoots::to_pem`.
 
 When an endpoint the connector reaches is `https://`, call
-`TrustRoots::require_any`. An empty set then fails at load, and the error names
-the fixes. When no endpoint is `https://`, keep the set as loaded, even empty,
+`TrustRoots::require_any`, and put the `root_ca` key around its error. An empty
+set then fails at load, and the error names the fixes, that key among them.
+When no endpoint is `https://`, keep the set as loaded, even empty,
 so a plaintext pipeline runs on an image with no CA bundle. Do not fall back to
 a bundled root set
 ([ADR-0105](../../adr/0105-connectors-share-one-trust-root-loader-in-core.md)).

@@ -785,21 +785,20 @@ impl<W: ShardWriter> ShardWorker<W> {
     }
 }
 
-/// Sleep on `clock` until `at`, or forever when it is `None`.
-///
-/// Its body runs on first poll, so a `select!` branch whose guard is off
-/// builds no sleep.
 /// The jitter seed of batch `seq` on `shard`, for a pool seeded with `base`.
 ///
-/// Pools in different processes take different bases, but two bases taken
-/// close together differ only in low bits. The base and the shard are mixed
-/// before `seq` joins them, so no other base or shard maps any sequence
-/// number onto the same seed.
+/// Two bases taken close together differ only in low bits, as do two shards.
+/// Both are mixed before `seq` joins them, so a nearby base or shard shares a
+/// seed with this one only by chance.
 fn batch_seed(base: u64, shard: u32, seq: u64) -> u64 {
     let base = SplitMix64::new(base).next_u64();
     SplitMix64::new(base ^ u64::from(shard)).next_u64() ^ seq
 }
 
+/// Sleep on `clock` until `at`, or forever when it is `None`.
+///
+/// Its body runs on first poll, so a `select!` branch whose guard is off
+/// builds no sleep.
 async fn sleep_until_set(clock: &dyn Clock, at: Option<Instant>) {
     match at {
         Some(at) => clock.sleep_until(at).await,

@@ -1,8 +1,8 @@
 //! The feature powerset, in shards.
 //!
 //! `cargo hack check --feature-powerset` checks every combination of features.
-//! That is 69,503 checks at the time of writing, more than one job's limit
-//! allows. `plan` counts them and writes one shard per `PER_SHARD_CHECKS`, and
+//! That is more checks than one job's limit allows. `plan` counts them and
+//! writes one shard per `PER_SHARD_CHECKS`, and
 //! `run` checks one shard. The weekly workflow runs the shards as the legs of
 //! a matrix.
 
@@ -14,9 +14,11 @@ use super::{FEATURE_EXCLUDES, FEATURE_RUSTFLAGS};
 use crate::ci;
 use crate::run::{self, Error, Outcome, Step};
 
-/// Checks in one shard. 3000 seconds at 0.37 seconds a check, scaled by the
-/// measured cost of the heaviest checks over the lightest (1.217), and rounded
-/// to 500: 6,662 checks, which rounds to 6,500.
+/// Checks in one shard: 3000 seconds, divided by 0.37 seconds a check times the
+/// cost ratio 1.217, rounded to 500. The 0.37 comes from the cancelled run of
+/// 2026-11-09, which checked 14,496 combinations in 90 minutes. The ratio is
+/// the cost of the heaviest checks over the lightest, from two local runs of
+/// 696 and 599 checks.
 pub(crate) const PER_SHARD_CHECKS: u64 = 6_500;
 
 #[derive(Subcommand)]

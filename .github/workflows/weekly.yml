@@ -123,8 +123,8 @@ jobs:
            steps.test.outcome == 'failure')
         run: exit 1
 
-  # Every combination of features is about 69,500 checks, more than one job's
-  # limit allows. The plan job counts them and writes the shard list; each leg
+  # Every combination of features is more checks than one job's limit allows.
+  # The plan job counts them and writes the shard list; each leg
   # checks one shard. A leg's `timeout` ends its check before the job's limit,
   # and a timed-out leg exits 124, so the job ends `failure` and `report` files it.
   powerset-plan:
@@ -165,7 +165,7 @@ jobs:
         with:
           tools: cargo-hack
           shared-key: dev-allfeatures
-          # Eleven legs on one key race to write it, and the fastest wins
+          # The legs share one key and race to write it, and the fastest wins
           # having built the least.
           cache-save: never
       # The check's `RUSTFLAGS` and exclusions are set by `cargo xtask powerset`.

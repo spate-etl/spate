@@ -1466,8 +1466,8 @@ fn the_powerset_legs_take_derived_shards_and_stop_inside_their_limit() {
     assert_eq!(plan["permissions"]["contents"].as_str(), Some("read"));
     assert_eq!(plan["permissions"].as_mapping().unwrap().len(), 1);
 
-    // Eleven legs on one key race to write it, and the planner has no cache of
-    // its own to save.
+    // The legs share one key and race to write it, and the planner has no cache
+    // of its own to save.
     for job in [plan, legs] {
         let setup = job["steps"]
             .as_sequence()

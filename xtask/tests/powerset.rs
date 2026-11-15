@@ -86,6 +86,17 @@ fn off_a_runner_the_planner_prints_the_list() {
     assert_eq!(String::from_utf8_lossy(&out.stdout), "[\"1/2\",\"2/2\"]\n");
 }
 
+/// A leg checks the shard it names: the argument reaches cargo-hack as
+/// `--partition`, so a leg cannot run the whole powerset.
+#[test]
+fn a_leg_checks_only_its_shard() {
+    let shim = Shim::new("leg");
+    let out = xtask(&shim, &["--explain", "powerset", "run", "2/11"], None);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let shown = String::from_utf8_lossy(&out.stdout);
+    assert!(shown.trim_end().ends_with(" --partition 2/11"), "{shown}");
+}
+
 /// A shard outside `M/N` is refused before any check starts. The fake `cargo`
 /// would list checks and succeed for `hack`, so a success here means the check
 /// ran.

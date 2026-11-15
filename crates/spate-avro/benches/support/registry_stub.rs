@@ -41,7 +41,7 @@ use std::time::Duration;
 /// waiting. Short enough that a fetch is not delayed behind it.
 const ACCEPT_POLL: Duration = Duration::from_millis(1);
 
-/// How long the warm-up parks between replays while a fetch is in flight.
+/// How long the warm-up drives the fetcher's runtime before each replay.
 const WARM_POLL: Duration = Duration::from_millis(2);
 
 /// A registry that answers the schema ids it was given and 404s everything

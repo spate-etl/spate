@@ -6,7 +6,7 @@ use super::{DriverEvent, ExitReport, ExitState, FatalErrorReport, SinkRuntime, T
 use crate::admin::{AdminServer, HealthState, HealthThresholds};
 use crate::backpressure::{InflightBudget, WatermarkController};
 use crate::checkpoint::Checkpointer;
-use crate::clock::{Clock, SystemClock};
+use crate::clock::{Clock, SystemClock, deadline_after};
 use crate::config::{MetricsExporter, PinningMode, PipelineConfig};
 use crate::feed::memory::{self, MemoryFeed};
 use crate::feed::{
@@ -75,6 +75,13 @@ impl Default for RuntimeOptions {
 /// How often the main thread samples `spate_pipeline_io_busy_ratio`; the
 /// upkeep cadence.
 const IO_BUSY_INTERVAL: Duration = Duration::from_secs(5);
+
+/// How long past the drain deadline, or past the final commit when that ends
+/// later, `run` waits for the source and the feed to close and the io runtime
+/// to stop. At the defaults the drain deadline leaves 5 s before an
+/// orchestrator's kill; the pool's backstop takes 1 s of it, and this leaves
+/// 1 s of the rest to the final commit.
+const CLOSE_GRACE: Duration = Duration::from_secs(3);
 
 /// Triggers a graceful drain from anywhere (tests, custom signal wiring).
 #[derive(Clone, Debug)]
@@ -253,9 +260,10 @@ impl<S: Source + 'static> PipelineRuntime<S> {
     /// building one inside [`run`](Self::run). For assemblies whose
     /// connectors needed a handle before the runtime existed (sink workers
     /// spawned at construction, schema-registry fetchers, async pre-flight
-    /// validation). `run` shuts it down on exit as it does the internally
-    /// built one; connector tasks spawned on it earlier keep running until
-    /// then. Without this, assemblies end up running a second runtime,
+    /// validation). `run` shuts it down as it does the internally built one,
+    /// once the source and the feed have closed; connector tasks spawned on it
+    /// earlier keep running until then. A close that outlasts `run`'s grace
+    /// keeps the runtime past `run`'s return. Without this, assemblies end up running a second runtime,
     /// doubling `pipeline.io_threads`.
     ///
     /// The runtime must be multi-thread, built with
@@ -347,8 +355,13 @@ impl<S: Source + 'static> PipelineRuntime<S> {
 
     /// Run the pipeline to completion (blocking). Returns when the
     /// pipeline drained after a shutdown trigger/signal or failed. Once the
-    /// drain has ended, it shuts the I/O runtime down, waiting at most 2s for
-    /// its tasks.
+    /// drain has ended, the source and the feed close and the I/O runtime
+    /// shuts down, waiting at most 2s for its tasks.
+    ///
+    /// `run` waits for that teardown until 3s past the drain deadline, or past
+    /// the final commit when that ends later. A teardown still running then is
+    /// logged at `WARN` and left to finish on a thread of its own, holding the
+    /// source, the feed and the I/O runtime, and `run` returns.
     ///
     /// The first call in a process logs the SIMD features the build compiles
     /// in and the ones the CPU reports, at `INFO` under `cpu features`.
@@ -527,9 +540,9 @@ impl<S: Source + 'static> PipelineRuntime<S> {
         // I/O runtime: sink workers (spawned by the caller-built SinkPool
         // onto this runtime via its own handle), admin server, upkeep,
         // signals, the feed's tasks. A caller-owned runtime
-        // (`with_io_runtime`) is adopted instead of built; either way this
-        // function shuts it down, after the source has dropped once the
-        // controller has started.
+        // (`with_io_runtime`) is adopted instead of built; either way it shuts
+        // down after the source and the feed drop, on the teardown thread once
+        // the controller has started.
         let io = match self.io.take() {
             Some(io) => io,
             None => tokio::runtime::Builder::new_multi_thread()
@@ -543,8 +556,8 @@ impl<S: Source + 'static> PipelineRuntime<S> {
         // the driver threads (below) so a failure in any of them can stop
         // the already-running drivers instead of leaking them.
 
-        // The io tasks' handles live to the end of `run` and drop just before
-        // the io runtime shuts down, since dropping one aborts its task.
+        // The io tasks' handles live until the teardown and drop just before it
+        // starts, since dropping one aborts its task.
         let signal_task = self.options.handle_signals.then(|| {
             let stop = Arc::clone(&self.stop);
             task::spawn_on(
@@ -893,12 +906,30 @@ impl<S: Source + 'static> PipelineRuntime<S> {
         if let Some(tx) = &admin_stop_tx {
             let _ = tx.send(true);
         }
-        // The controller drops the source on its way out, and a source's
-        // `Drop` may still need the io runtime (the S3 source aborts its lister
-        // there).
-        let _ = controller_handle.join();
+        // Each drop aborts its task and returns at once, so the tasks stop even
+        // when the teardown below outlives `run`.
         drop((signal_task, probe_task, admin_task, upkeep_task));
-        io.shutdown_timeout(Duration::from_secs(2));
+        let now = self.stop_clock.now();
+        let give_up_at = deadline_after(close_by.map_or(now, |by| by.max(now)), CLOSE_GRACE);
+        let feed_backend = kept_feed.as_ref().map(|feed| feed.backend().to_owned());
+        // The controller drops the source on its way out. The source's `Drop`
+        // and the feed's may still need the io runtime (the S3 source aborts
+        // its lister there), so both drop before it stops.
+        let teardown = move || {
+            let _ = controller_handle.join();
+            drop(kept_feed);
+            io.shutdown_timeout(Duration::from_secs(2));
+        };
+        if !tear_down_by(teardown, give_up_at, &*self.stop_clock) {
+            tracing::warn!(
+                source = %source_ct,
+                feed = feed_backend.as_deref(),
+                grace = ?CLOSE_GRACE,
+                "the source or the feed had not closed by the drain deadline and its grace; \
+                 they close in the background with the io runtime, and a group the source \
+                 belonged to may wait out its session timeout"
+            );
+        }
 
         Ok(ExitReport {
             state,
@@ -959,6 +990,32 @@ fn passed_to(origin: FeedOrigin) -> &'static str {
         FeedOrigin::Seeded => "Pipeline::seeded_feed",
         FeedOrigin::Section | FeedOrigin::Given => "Pipeline::feed",
     }
+}
+
+/// Run `teardown` on a thread of its own and wait for it until `clock` reads
+/// `by`. Returns whether it ended in time; one that did not runs on with no
+/// owner. A teardown the system refuses a thread for runs here instead.
+fn tear_down_by<F: FnOnce() + Send + 'static>(teardown: F, by: Instant, clock: &dyn Clock) -> bool {
+    // Handed over only once the thread runs, so a refused spawn leaves the
+    // teardown here to run in full.
+    let (hand, take) = crossbeam_channel::bounded::<F>(1);
+    let thread = match task::spawn_thread("spate-close", move || {
+        if let Ok(teardown) = take.recv() {
+            teardown();
+        }
+    }) {
+        Ok(thread) => thread,
+        Err(e) => {
+            tracing::warn!(error = %e, "could not start the teardown thread; tearing down here");
+            teardown();
+            return true;
+        }
+    };
+    if let Err(refused) = hand.send(teardown) {
+        refused.into_inner()();
+        return true;
+    }
+    thread.join_by(by, clock).is_some()
 }
 
 /// Close `feed` and wait for it at most `within`. A close that fails or does

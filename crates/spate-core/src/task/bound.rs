@@ -3,15 +3,11 @@
 //! [`ThreadBound`] holds for a connect or startup step that may run on a
 //! runtime whose timer nothing drives.
 
-use super::spawn_thread;
+use super::{TICK, Waited, spawn_thread, wait_for};
 use crate::clock::SyncClock;
 use std::future::Future;
-use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::Duration;
 use tokio::sync::oneshot;
-
-/// How often the timing thread reads the clock and asks for a rejection.
-const TICK: Duration = Duration::from_millis(50);
 
 /// A check for a rejection that ends the work early.
 type Rejection = Box<dyn Fn() -> Option<String> + Send>;
@@ -98,21 +94,17 @@ impl ThreadBound {
         } = self;
         // `Some` carries a rejection's text, `None` the limit passing.
         let (fire, fired) = oneshot::channel::<Option<String>>();
-        let (finished, done) = mpsc::channel::<()>();
+        let (finished, done) = crossbeam_channel::bounded::<()>(0);
         let deadline = clock.now().checked_add(limit);
         let _timing = spawn_thread(name, move || {
-            loop {
-                let left = deadline.map_or(TICK, |d| d.saturating_duration_since(clock.now()));
-                if done.recv_timeout(left.min(TICK)) != Err(RecvTimeoutError::Timeout) {
-                    return;
-                }
-                if let Some(text) = rejection.as_ref().and_then(|check| check()) {
+            let check = || rejection.as_ref().and_then(|check| check());
+            match wait_for(&done, deadline, &*clock, TICK, check) {
+                Waited::Done => {}
+                Waited::Checked(text) => {
                     let _ = fire.send(Some(text));
-                    return;
                 }
-                if deadline.is_some_and(|d| clock.now() >= d) {
+                Waited::Elapsed => {
                     let _ = fire.send(None);
-                    return;
                 }
             }
         })
@@ -165,6 +157,7 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::task::Poll;
+    use std::sync::mpsc;
     use tokio::runtime::Handle;
     use tokio::sync::mpsc::unbounded_channel;
 

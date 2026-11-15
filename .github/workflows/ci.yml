@@ -38,6 +38,7 @@ jobs:
       manifests: ${{ steps.classify.outputs.manifests }}
       advisories: ${{ steps.classify.outputs.advisories }}
       release-tooling: ${{ steps.classify.outputs.release-tooling }}
+      example-image: ${{ steps.classify.outputs.example-image }}
       macos: ${{ steps.classify.outputs.macos }}
       # A JSON array of `{package, arm, cargo_features, arch, runner}` objects, one per shard.
       bench-shards: ${{ steps.classify.outputs.bench-shards }}
@@ -154,6 +155,15 @@ jobs:
       manifests: ${{ needs.changes.outputs.manifests }}
       release-tooling: ${{ needs.changes.outputs.release-tooling }}
 
+  example-image:
+    name: Example image
+    needs: [changes, checks]
+    permissions:
+      contents: read
+    uses: ./.github/workflows/example-image.yml
+    with:
+      example-image: ${{ needs.changes.outputs.example-image }}
+
   fuzz:
     name: Fuzz
     needs: [changes, checks]
@@ -179,7 +189,7 @@ jobs:
     # was cancelled, so a run superseded by a newer one for the same commit
     # leaves no lingering `failure` for branch protection to keep blocking on.
     if: ${{ !cancelled() }}
-    needs: [changes, checks, policy, tests, containers, perf, release-checks, fuzz, site]
+    needs: [changes, checks, policy, tests, containers, perf, release-checks, example-image, fuzz, site]
     steps:
       - name: Evaluate dependency results
         env:

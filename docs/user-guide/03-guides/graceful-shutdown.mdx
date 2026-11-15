@@ -90,11 +90,11 @@ Keep `drain_timeout` comfortably **below** `terminationGracePeriodSeconds`.
 Steps 1 to 3 run inside the budget; the gap has to absorb what follows it: the
 pool's one-second backstop, the final commit (step 4), the source and the feed
 closing (step 5) and process teardown. `run` stops waiting for step 5 3s past
-the drain deadline, or 3s past a final commit that ends later. The defaults (25s vs 30s)
-encode this; if you raise one, raise the other. With a feed that hands back,
-the stop's reading and the feed's close also run inside the budget, and startup refuses a `drain_timeout`
-of 5s or less. A feed's close that outlasts what is left of the budget falls
-into the gap too.
+the drain deadline, or 3s past a final commit that ends later. The defaults
+(25s vs 30s) encode this; if you raise one, raise the other. With a feed that
+hands back, the stop's reading and the feed's close also run inside the
+budget, and startup refuses a `drain_timeout` of 5s or less. A feed's close
+that outlasts what is left of the budget falls into the gap too.
 A source that bounds its final commit and its close against a backend that
 stops answering states the bound on its connector page:
 [Kafka](../04-connectors/sources/kafka/README.mdx#how-offsets-are-committed).

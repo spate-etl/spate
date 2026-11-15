@@ -4,8 +4,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::run::Error;
-
 /// A directory holding a check's working files, removed with its contents on
 /// drop.
 pub(crate) struct Scratch {
@@ -15,9 +13,12 @@ pub(crate) struct Scratch {
 impl Scratch {
     /// Creates the directory exclusively, and on unix reachable only by its
     /// owner, so no other user can put anything at a path written under it.
-    pub(crate) fn new(prefix: &str) -> Result<Self, Error> {
+    ///
+    /// The error is a `String` so the integration tests can include this file
+    /// by path, outside the crate that defines `run::Error`.
+    pub(crate) fn new(prefix: &str) -> Result<Self, String> {
         let dir = std::env::temp_dir().join(unique_name(prefix));
-        private_dir(&dir).map_err(|e| Error::msg(format!("{}: {e}", dir.display())))?;
+        private_dir(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         Ok(Self { dir })
     }
 

@@ -8,6 +8,8 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+mod support;
+
 /// One summary whose instruction count crossed its threshold.
 const HOT: &str = r#"{"version":"7","package_dir":"/w/crates/spate-json","module_path":"decode_gungraun::decode::decode_value","id":"flat_record","profiles":[{"tool":"Callgrind","data":{"total":{"metrics":{"Ir":{"values":{"new":107000,"old":100000},"change":{"diff_pct":"7.0"}}}}}}]}"#;
 
@@ -46,17 +48,11 @@ const USAGE: &str = "xtask: usage: cargo xtask bench report [--regressions-out F
                      [<baseline-label>]. Needs a non-empty, readable summaries file\n";
 
 /// A directory holding this case's fixtures and whatever flag file it writes.
-struct Scratch(PathBuf);
+struct Scratch(support::Scratch);
 
 impl Scratch {
     fn new(name: &str) -> Self {
-        let dir = std::env::temp_dir().join(format!(
-            "spate-xtask-perf-report-test-{}-{name}",
-            std::process::id()
-        ));
-        drop(std::fs::remove_dir_all(&dir));
-        std::fs::create_dir_all(&dir).unwrap();
-        Self(dir)
+        Self(support::Scratch::new(&format!("spate-xtask-perf-report-test-{name}")).unwrap())
     }
 
     /// Writes one summaries file and answers its path.
@@ -76,19 +72,9 @@ impl Scratch {
     }
 }
 
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        drop(std::fs::remove_dir_all(&self.0));
-    }
-}
-
 fn xtask(args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_spate-xtask"))
-        .args(args)
-        // The annotation prefix would otherwise depend on the host.
-        .env_remove("GITHUB_ACTIONS")
-        .output()
-        .unwrap()
+    // The annotation prefix would otherwise depend on the host.
+    support::run(args, &["GITHUB_ACTIONS"], &[])
 }
 
 fn report(args: &[&str]) -> Output {
@@ -349,11 +335,7 @@ fn a_report_that_cannot_be_rendered_writes_no_flag() {
 /// step swallows still shows up.
 #[test]
 fn a_failure_on_a_runner_carries_the_annotation_prefix() {
-    let out = Command::new(env!("CARGO_BIN_EXE_spate-xtask"))
-        .args(["bench", "report"])
-        .env("GITHUB_ACTIONS", "true")
-        .output()
-        .unwrap();
+    let out = support::run(&["bench", "report"], &[], &[("GITHUB_ACTIONS", "true")]);
     assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
     assert_eq!(stderr(&out), format!("::error::{USAGE}"));
     assert_eq!(stdout(&out), "");
@@ -508,9 +490,8 @@ fn the_stamp_step_writes_the_legs_architecture() {
         }
         out
     };
-    let dir =
-        Path::new(env!("CARGO_TARGET_TMPDIR")).join("the_stamp_step_writes_the_legs_architecture");
-    let _ = std::fs::remove_dir_all(&dir);
+    let scratch = support::Scratch::new("spate-xtask-perf-report-stamp").unwrap();
+    let dir = scratch.dir();
     std::fs::create_dir_all(dir.join("target/gungraun/b")).unwrap();
     std::fs::write(
         dir.join("target/gungraun/b/summary.json"),
@@ -520,7 +501,7 @@ fn the_stamp_step_writes_the_legs_architecture() {
     let mut cmd = Command::new("bash");
     cmd.arg("-c")
         .arg(step["run"].as_str().unwrap())
-        .current_dir(&dir);
+        .current_dir(dir);
     for (k, v) in step["env"].as_mapping().unwrap() {
         cmd.env(k.as_str().unwrap(), expand(v.as_str().unwrap()));
     }

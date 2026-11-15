@@ -2,18 +2,16 @@
 //! runs for the S3 lane `SPATE_S3_LANE` selects and the Kafka lane
 //! `SPATE_KAFKA_LANE` selects.
 
-use std::process::Command;
+mod support;
 
 /// The nextest line `--explain integration-test` prints with the S3 lane
 /// `s3` and the Kafka lane `kafka` selected.
 fn nextest_line(s3: &str, kafka: &str) -> String {
-    let out = Command::new(env!("CARGO_BIN_EXE_spate-xtask"))
-        .args(["--explain", "integration-test"])
-        .env("SPATE_S3_LANE", s3)
-        .env("SPATE_KAFKA_LANE", kafka)
-        .env_remove("GITHUB_ACTIONS")
-        .output()
-        .unwrap();
+    let out = support::run(
+        &["--explain", "integration-test"],
+        &["GITHUB_ACTIONS"],
+        &[("SPATE_S3_LANE", s3), ("SPATE_KAFKA_LANE", kafka)],
+    );
     assert!(
         out.status.success(),
         "{}",

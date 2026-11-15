@@ -7,24 +7,21 @@
 //! does. The shim is a shell script, so this binary is empty off unix.
 #![cfg(unix)]
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Output};
+
+mod support;
 
 const RUN: &str = "https://example.invalid/runs/1";
 
 /// A directory holding a `gh` that records its argv.
-struct Shim(PathBuf);
+struct Shim(support::Scratch);
 
 impl Shim {
     /// A `gh` that answers `issue list` with `list`, prints a URL for `issue
     /// create`, and exits `edit_rc` for `issue edit`.
     fn new(name: &str, list: &str, edit_rc: u8) -> Self {
-        let dir = std::env::temp_dir().join(format!(
-            "spate-xtask-file-issue-{}-{name}",
-            std::process::id()
-        ));
-        drop(std::fs::remove_dir_all(&dir));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = support::Scratch::new(&format!("spate-xtask-file-issue-{name}")).unwrap();
         std::fs::write(dir.join("list.json"), list).unwrap();
         // One NUL-terminated field per argument, one line per invocation.
         let gh = format!(
@@ -39,9 +36,7 @@ impl Shim {
             log = dir.join("argv").display(),
             list = dir.join("list.json").display(),
         );
-        std::fs::write(dir.join("gh"), gh).unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(dir.join("gh"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        support::shim(dir.dir(), "gh", &gh);
         Self(dir)
     }
 
@@ -65,11 +60,9 @@ impl Shim {
             .parent()
             .unwrap()
             .join(".github/actions/file-issue/file-issue.sh");
-        let mut dirs = vec![self.0.clone()];
-        dirs.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
         let mut cmd = Command::new("bash");
         cmd.arg(script)
-            .env("PATH", std::env::join_paths(dirs).unwrap())
+            .env("PATH", support::path_with(self.0.dir()))
             .env("TITLE", title)
             .env("BODY_FILE", body)
             .env("RUN_URL", RUN);
@@ -78,12 +71,6 @@ impl Shim {
             None => cmd.env_remove("COMMENT_FILE"),
         };
         cmd.output().unwrap()
-    }
-}
-
-impl Drop for Shim {
-    fn drop(&mut self) {
-        drop(std::fs::remove_dir_all(&self.0));
     }
 }
 

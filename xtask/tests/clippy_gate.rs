@@ -3,38 +3,17 @@
 //! appends, which a warn-level entry relies on.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Output};
 
-/// A scratch directory removed when it goes out of scope, on a failed
-/// assertion too.
-struct Scratch(PathBuf);
-
-impl Scratch {
-    fn new(name: &str) -> Self {
-        let dir = std::env::temp_dir().join(format!("spate-{name}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(dir.join("src")).unwrap();
-        Self(dir)
-    }
-}
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
-    }
-}
+mod support;
 
 fn repo_root() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
 }
 
 fn xtask(args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_spate-xtask"))
-        .args(args)
-        .env_remove("GITHUB_ACTIONS")
-        .output()
-        .unwrap()
+    support::run(args, &["GITHUB_ACTIONS"], &[])
 }
 
 /// The entries under `[workspace.lints.clippy]` in the root manifest, as the
@@ -69,8 +48,9 @@ fn clippy_probe(name: &str, source: &str) -> (bool, String) {
 /// whose library is that source. The stub is built offline from the scratch
 /// directory and is not linted itself.
 fn clippy_probe_with_stub(name: &str, source: &str, stub: Option<(&str, &str)>) -> (bool, String) {
-    let scratch = Scratch::new(name);
-    let root = &scratch.0;
+    let scratch = support::Scratch::new(&format!("spate-{name}")).unwrap();
+    let root = scratch.dir();
+    fs::create_dir_all(root.join("src")).unwrap();
 
     let (dependencies, locked) = match stub {
         None => (String::new(), String::new()),

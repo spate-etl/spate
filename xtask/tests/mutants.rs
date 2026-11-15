@@ -2,21 +2,15 @@
 //! cargo-mutants: what `--explain` prints, and the job summary a run that
 //! stops early writes.
 
-use std::process::{Command, Output};
+use std::process::Output;
+
+mod support;
 
 /// A base no repository has, so a run stops before cargo-mutants starts.
 const NO_BASE: &str = "spate-no-such-ref";
 
 fn xtask(args: &[&str], env: &[(&str, &str)]) -> Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_spate-xtask"));
-    command
-        .args(args)
-        .env_remove("GITHUB_STEP_SUMMARY")
-        .env_remove("GITHUB_ACTIONS");
-    for (name, value) in env {
-        command.env(name, value);
-    }
-    command.output().unwrap()
+    support::run(args, &["GITHUB_STEP_SUMMARY", "GITHUB_ACTIONS"], env)
 }
 
 /// `--explain` prints the diff and the cargo-mutants command and runs
@@ -38,8 +32,8 @@ fn explain_prints_the_commands_and_runs_nothing() {
 /// `$GITHUB_STEP_SUMMARY` names, and exits non-zero.
 #[test]
 fn an_early_stop_is_written_to_the_step_summary() {
-    let path = std::env::temp_dir().join(format!("spate-mutants-summary-{}", std::process::id()));
-    let _ = std::fs::remove_file(&path);
+    let scratch = support::Scratch::new("spate-mutants-summary").unwrap();
+    let path = scratch.join("summary.md");
     let got = xtask(
         &["mutants", "--since", NO_BASE],
         &[("GITHUB_STEP_SUMMARY", path.to_str().unwrap())],
@@ -55,7 +49,6 @@ fn an_early_stop_is_written_to_the_step_summary() {
         text.contains(&format!("did not finish: {NO_BASE} does not resolve")),
         "{text}"
     );
-    std::fs::remove_file(&path).expect("remove summary");
 }
 
 /// With no `$GITHUB_STEP_SUMMARY`, the summary goes to stdout.

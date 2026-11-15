@@ -314,6 +314,7 @@ impl Mode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::checks::scratch::Scratch;
 
     fn target(pkg: &str, bench: &str) -> Target {
         Target {
@@ -372,11 +373,11 @@ mod tests {
     /// The name in front of the suffix may be empty.
     #[test]
     fn the_suffix_alone_is_a_bench_source() {
-        let scratch = Scratch::new("suffix-only");
+        let scratch = Tree::new("suffix-only");
         scratch.bench("spate-x", "_gungraun.rs");
         scratch.bench("spate-x", "a_gungraun.rs");
         assert_eq!(
-            discover(&scratch.0),
+            discover(scratch.0.dir()),
             vec![
                 target("spate-x", "_gungraun"),
                 target("spate-x", "a_gungraun")
@@ -386,36 +387,36 @@ mod tests {
 
     #[test]
     fn a_source_without_the_suffix_is_not_discovered() {
-        let scratch = Scratch::new("no-suffix");
+        let scratch = Tree::new("no-suffix");
         scratch.bench("spate-x", "throughput.rs");
         scratch.bench("spate-x", "a_gungraun.rs.bak");
         scratch.bench("spate-x", "a_gungraun");
-        assert_eq!(discover(&scratch.0), vec![]);
+        assert_eq!(discover(scratch.0.dir()), vec![]);
     }
 
     #[test]
     fn a_dotfile_is_not_discovered() {
-        let scratch = Scratch::new("dotfile");
+        let scratch = Tree::new("dotfile");
         scratch.bench("spate-x", ".hidden_gungraun.rs");
         scratch.bench(".spate-hidden", "a_gungraun.rs");
-        assert!(discover(&scratch.0).is_empty());
+        assert!(discover(scratch.0.dir()).is_empty());
     }
 
     #[test]
     fn a_crate_without_a_benches_directory_contributes_nothing() {
-        let scratch = Scratch::new("no-benches");
+        let scratch = Tree::new("no-benches");
         std::fs::create_dir_all(scratch.0.join("crates/spate-x/src")).unwrap();
-        assert!(discover(&scratch.0).is_empty());
+        assert!(discover(scratch.0.dir()).is_empty());
     }
 
     #[test]
     fn the_owners_are_the_crates_that_own_a_target_without_repeats() {
-        let scratch = Scratch::new("owners");
+        let scratch = Tree::new("owners");
         scratch.bench("spate-b", "one_gungraun.rs");
         scratch.bench("spate-b", "two_gungraun.rs");
         scratch.bench("spate-a", "one_gungraun.rs");
         assert_eq!(
-            owners(&scratch.0).into_iter().collect::<Vec<_>>(),
+            owners(scratch.0.dir()).into_iter().collect::<Vec<_>>(),
             names(&["spate-a", "spate-b"])
         );
     }
@@ -743,9 +744,9 @@ serde = "1"
 
     #[test]
     fn the_gate_fails_on_a_tree_with_no_bench() {
-        let scratch = Scratch::new("gate-empty");
+        let scratch = Tree::new("gate-empty");
         std::fs::create_dir_all(scratch.0.join("crates")).unwrap();
-        let e = check(&scratch.0, false).unwrap_err();
+        let e = check(scratch.0.dir(), false).unwrap_err();
         assert!(
             e.message
                 .starts_with("no gungraun bench was discovered at all."),
@@ -756,14 +757,14 @@ serde = "1"
 
     #[test]
     fn the_gate_fails_on_an_undeclared_target() {
-        let scratch = Scratch::new("gate-undeclared");
+        let scratch = Tree::new("gate-undeclared");
         scratch.bench("spate-x", "a_gungraun.rs");
         std::fs::write(
             scratch.0.join("crates/spate-x/Cargo.toml"),
             "[package]\nname = \"spate-x\"\n",
         )
         .unwrap();
-        let e = check(&scratch.0, false).unwrap_err();
+        let e = check(scratch.0.dir(), false).unwrap_err();
         assert!(e.message.contains("harness = false"), "{}", e.message);
     }
 
@@ -779,27 +780,17 @@ serde = "1"
     }
 
     /// A directory under the system temporary directory, removed on drop.
-    struct Scratch(std::path::PathBuf);
+    struct Tree(Scratch);
 
-    impl Scratch {
+    impl Tree {
         fn new(name: &str) -> Self {
-            let dir =
-                std::env::temp_dir().join(format!("spate-xtask-gg-{}-{name}", std::process::id()));
-            drop(std::fs::remove_dir_all(&dir));
-            std::fs::create_dir_all(&dir).unwrap();
-            Self(dir)
+            Self(Scratch::new(&format!("spate-xtask-gg-{name}")).unwrap())
         }
 
         fn bench(&self, pkg: &str, file: &str) {
             let dir = self.0.join("crates").join(pkg).join("benches");
             std::fs::create_dir_all(&dir).unwrap();
             std::fs::write(dir.join(file), "").unwrap();
-        }
-    }
-
-    impl Drop for Scratch {
-        fn drop(&mut self) {
-            drop(std::fs::remove_dir_all(&self.0));
         }
     }
 }

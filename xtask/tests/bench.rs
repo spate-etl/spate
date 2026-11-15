@@ -2,7 +2,9 @@
 //!
 //! Run under `--explain`, so nothing builds and the plan is the output.
 
-use std::process::{Command, Output};
+use std::process::Output;
+
+mod support;
 
 /// A ref the wrapper passes through without resolving it.
 const SHA: &str = "0123456789abcdef0123456789abcdef01234567";
@@ -11,11 +13,7 @@ const SHA: &str = "0123456789abcdef0123456789abcdef01234567";
 const DRIVER: &str = "cargo run -p spate-bench --features driver --locked --bin bench -- ab";
 
 fn xtask(args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_spate-xtask"))
-        .arg("--explain")
-        .args(args)
-        .output()
-        .unwrap()
+    support::run(&[&["--explain"], args].concat(), &[], &[])
 }
 
 /// Every flag the wrapper takes reaches the driver, `--out` included, in the

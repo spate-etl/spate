@@ -7,7 +7,9 @@
 
 use std::ffi::OsStr;
 use std::path::PathBuf;
-use std::process::{Command, Output};
+use std::process::Output;
+
+mod support;
 
 /// The service every case resolves.
 const SERVICE: &str = "clickhouse";
@@ -20,7 +22,7 @@ const GHOST: &str = "ghost-lane";
 const PULLED: &str = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
 
 /// A directory holding a `docker` that records its argv and pulls nothing.
-struct Shim(PathBuf);
+struct Shim(support::Scratch);
 
 impl Shim {
     fn new(name: &str) -> Self {
@@ -30,27 +32,20 @@ impl Shim {
     /// A shim that runs `pull` as the shell body of each `docker pull`, and
     /// exits 0 from every invocation that body does not end.
     fn pulling(name: &str, pull: &str) -> Self {
-        let dir =
-            std::env::temp_dir().join(format!("spate-xtask-docker-{}-{name}", std::process::id()));
-        drop(std::fs::remove_dir_all(&dir));
-        std::fs::create_dir_all(&dir).unwrap();
-        let me = Self(dir);
+        let dir = support::Scratch::new(&format!("spate-xtask-docker-{name}")).unwrap();
         // One NUL-terminated field per argument, one line per invocation.
-        std::fs::write(
-            me.0.join("docker"),
-            format!(
+        support::shim(
+            dir.dir(),
+            "docker",
+            &format!(
                 "#!/bin/sh\n\
                  for a in \"$@\"; do printf '%s\\0' \"$a\" >>\"$SPATE_DOCKER_LOG\"; done\n\
                  printf '\\n' >>\"$SPATE_DOCKER_LOG\"\n\
                  if [ \"$1\" = pull ]; then\n{pull}\nfi\n\
                  exit 0\n"
             ),
-        )
-        .unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(me.0.join("docker"), std::fs::Permissions::from_mode(0o755))
-            .unwrap();
-        me
+        );
+        Self(dir)
     }
 
     fn log(&self) -> PathBuf {
@@ -73,28 +68,14 @@ impl Shim {
     }
 }
 
-impl Drop for Shim {
-    fn drop(&mut self) {
-        drop(std::fs::remove_dir_all(&self.0));
-    }
-}
-
 /// One run of the task runner, with the shim ahead of anything else on `PATH`
 /// and the lane variable under the case's control.
 fn xtask(shim: &Shim, lane: Option<&OsStr>, args: &[&str]) -> Output {
-    let path = match std::env::var_os("PATH") {
-        Some(p) => {
-            let mut dirs = vec![shim.0.clone()];
-            dirs.extend(std::env::split_paths(&p));
-            std::env::join_paths(dirs).unwrap()
-        }
-        None => shim.0.clone().into_os_string(),
-    };
-    let mut command = Command::new(env!("CARGO_BIN_EXE_spate-xtask"));
+    let mut command = support::xtask();
     command
         .arg("container-image")
         .args(args)
-        .env("PATH", path)
+        .env("PATH", support::path_with(shim.0.dir()))
         .env("SPATE_DOCKER_LOG", shim.log())
         // The annotation prefix would otherwise depend on the host.
         .env_remove("GITHUB_ACTIONS");

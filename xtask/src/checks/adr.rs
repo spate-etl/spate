@@ -365,6 +365,7 @@ fn civil_date(days: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::checks::scratch::Scratch;
 
     fn record(path: &str, text: &str) -> Record {
         Record {
@@ -659,13 +660,11 @@ description: \"REPLACE-ME\"
     /// A repository root under the system temporary directory, removed on
     /// drop. The name carries the test's, so a shared process runs them in
     /// parallel without collision.
-    struct Scratch(std::path::PathBuf);
+    struct Tree(Scratch);
 
-    impl Scratch {
+    impl Tree {
         fn new(name: &str) -> Self {
-            let dir =
-                std::env::temp_dir().join(format!("spate-xtask-adr-{}-{name}", std::process::id()));
-            drop(std::fs::remove_dir_all(&dir));
+            let dir = Scratch::new(&format!("spate-xtask-adr-{name}")).unwrap();
             std::fs::create_dir_all(dir.join(DIR)).unwrap();
             Self(dir)
         }
@@ -700,62 +699,60 @@ description: \"REPLACE-ME\"
         }
     }
 
-    impl Drop for Scratch {
-        fn drop(&mut self) {
-            drop(std::fs::remove_dir_all(&self.0));
-        }
-    }
-
     fn failure(outcome: Outcome) -> String {
         outcome.unwrap_err().message
     }
 
     #[test]
     fn a_consistent_section_passes() {
-        let scratch = Scratch::section("consistent");
+        let scratch = Tree::section("consistent");
         scratch
             .record("0001-a", "accepted")
             .record("0002-b", "superseded");
-        assert!(check(&scratch.0, false).is_ok());
+        assert!(check(scratch.0.dir(), false).is_ok());
     }
 
     #[test]
     fn a_section_with_no_records_is_refused() {
-        let scratch = Scratch::section("empty");
-        assert!(failure(check(&scratch.0, false)).starts_with("no records found in docs/adr/."));
+        let scratch = Tree::section("empty");
+        assert!(
+            failure(check(scratch.0.dir(), false)).starts_with("no records found in docs/adr/.")
+        );
     }
 
     /// The three preflight files are reported by name, because losing one
     /// leaves the gate with nothing to check.
     #[test]
     fn a_missing_directory_template_or_index_is_reported() {
-        let scratch = Scratch::new("preflight");
+        let scratch = Tree::new("preflight");
         std::fs::remove_dir(scratch.0.join(DIR)).unwrap();
         assert_eq!(
-            failure(check(&scratch.0, false)),
+            failure(check(scratch.0.dir(), false)),
             "docs/adr/ not found. It holds the architecture decision records"
         );
 
-        let scratch = Scratch::section("preflight-template");
+        let scratch = Tree::section("preflight-template");
         std::fs::remove_file(scratch.0.join(TEMPLATE)).unwrap();
-        assert!(failure(check(&scratch.0, false)).starts_with("docs/adr/_template.md not found."));
+        assert!(
+            failure(check(scratch.0.dir(), false)).starts_with("docs/adr/_template.md not found.")
+        );
 
-        let scratch = Scratch::section("preflight-index");
+        let scratch = Tree::section("preflight-index");
         std::fs::remove_file(scratch.0.join(INDEX)).unwrap();
         assert_eq!(
-            failure(check(&scratch.0, false)),
+            failure(check(scratch.0.dir(), false)),
             "docs/adr/README.mdx not found. It is the index every record must appear in"
         );
     }
 
     #[test]
     fn the_failure_counts_both_the_problems_and_the_records() {
-        let scratch = Scratch::section("counts");
+        let scratch = Tree::section("counts");
         scratch
             .record("0001-a", "proposed")
             .record("0002-b", "rejected");
         assert_eq!(
-            failure(check(&scratch.0, false)),
+            failure(check(scratch.0.dir(), false)),
             "2 problem(s) across 2 record(s)"
         );
     }
@@ -764,18 +761,18 @@ description: \"REPLACE-ME\"
     /// counts nor has to appear in the index.
     #[test]
     fn a_file_the_pattern_rejects_is_not_counted() {
-        let scratch = Scratch::section("ignored");
+        let scratch = Tree::section("ignored");
         scratch.record("0001-a", "accepted");
         scratch.write(&format!("{DIR}/0002-B.md"), "not a record");
         scratch.write(&format!("{DIR}/notes.txt"), "REPLACE-ME");
-        assert!(check(&scratch.0, false).is_ok());
+        assert!(check(scratch.0.dir(), false).is_ok());
     }
 
     #[test]
     fn the_scaffolder_writes_the_next_number_and_leaves_the_rest_of_the_template() {
-        let scratch = Scratch::section("write");
+        let scratch = Tree::section("write");
         scratch.record("0001-a", "accepted");
-        new(&scratch.0, false, "a-second-thing").unwrap();
+        new(scratch.0.dir(), false, "a-second-thing").unwrap();
         let written = scratch.read("docs/adr/0002-a-second-thing.md");
         assert!(written.starts_with("---\ndescription: \"REPLACE-ME\"\n"));
         assert!(written.contains("\n# ADR-0002 — REPLACE-ME short title\n"));
@@ -784,10 +781,10 @@ description: \"REPLACE-ME\"
 
     #[test]
     fn the_scaffolder_refuses_a_slug_the_filename_rules_reject() {
-        let scratch = Scratch::section("bad-slug");
-        assert!(failure(new(&scratch.0, false, "A-Thing")).starts_with("'A-Thing' should be"));
-        assert!(failure(new(&scratch.0, false, "a/b")).starts_with("'a/b' should be"));
-        assert!(failure(new(&scratch.0, false, "")).starts_with("usage: cargo xtask adr new"));
+        let scratch = Tree::section("bad-slug");
+        assert!(failure(new(scratch.0.dir(), false, "A-Thing")).starts_with("'A-Thing' should be"));
+        assert!(failure(new(scratch.0.dir(), false, "a/b")).starts_with("'a/b' should be"));
+        assert!(failure(new(scratch.0.dir(), false, "")).starts_with("usage: cargo xtask adr new"));
         assert_eq!(std::fs::read_dir(scratch.0.join(DIR)).unwrap().count(), 2);
     }
 
@@ -796,11 +793,11 @@ description: \"REPLACE-ME\"
     /// file already there.
     #[test]
     fn the_scaffolder_refuses_to_overwrite() {
-        let scratch = Scratch::section("collision");
+        let scratch = Tree::section("collision");
         scratch.record("9999-a", "accepted");
         scratch.write(&format!("{DIR}/10000-b.md"), "held");
         assert_eq!(
-            failure(new(&scratch.0, false, "b")),
+            failure(new(scratch.0.dir(), false, "b")),
             "docs/adr/10000-b.md already exists"
         );
         assert_eq!(scratch.read("docs/adr/10000-b.md"), "held");
@@ -813,14 +810,14 @@ description: \"REPLACE-ME\"
     fn the_scaffolder_reports_a_record_path_it_cannot_check() {
         use std::os::unix::fs::symlink;
 
-        let scratch = Scratch::section("unstattable");
+        let scratch = Tree::section("unstattable");
         scratch.record("9999-a", "accepted");
-        let looped = scratch.0.join(format!("{DIR}/10000-b.md"));
+        let looped = scratch.0.join(&format!("{DIR}/10000-b.md"));
         symlink(&looped, &looped).unwrap();
         let cause = looped.try_exists().unwrap_err();
         for explain in [true, false] {
             assert_eq!(
-                failure(new(&scratch.0, explain, "b")),
+                failure(new(scratch.0.dir(), explain, "b")),
                 format!("docs/adr/10000-b.md: {cause}"),
                 "explain={explain}"
             );
@@ -829,10 +826,10 @@ description: \"REPLACE-ME\"
 
     #[test]
     fn the_scaffolder_reports_a_missing_template() {
-        let scratch = Scratch::section("no-template");
+        let scratch = Tree::section("no-template");
         std::fs::remove_file(scratch.0.join(TEMPLATE)).unwrap();
         assert_eq!(
-            failure(new(&scratch.0, false, "a-thing")),
+            failure(new(scratch.0.dir(), false, "a-thing")),
             "docs/adr/_template.md not found. There is nothing to copy"
         );
     }
@@ -841,7 +838,7 @@ description: \"REPLACE-ME\"
     /// check both read the listing as ordered.
     #[test]
     fn the_listing_is_sorted_whatever_order_the_directory_reports() {
-        let scratch = Scratch::section("order");
+        let scratch = Tree::section("order");
         let names: Vec<String> = (1..=10)
             .rev()
             .map(|n| format!("{n:04}-record-{n}"))
@@ -851,17 +848,17 @@ description: \"REPLACE-ME\"
         }
         let mut want: Vec<String> = names.iter().map(|n| format!("{DIR}/{n}.md")).collect();
         want.sort();
-        assert_eq!(paths(&scratch.0).unwrap(), want);
+        assert_eq!(paths(scratch.0.dir()).unwrap(), want);
     }
 
     #[test]
     fn explaining_a_scaffold_writes_nothing() {
-        let scratch = Scratch::section("explain");
-        new(&scratch.0, true, "a-thing").unwrap();
+        let scratch = Tree::section("explain");
+        new(scratch.0.dir(), true, "a-thing").unwrap();
         assert!(
             !scratch
                 .0
-                .join(format!("{DIR}/0001-a-thing.md"))
+                .join(&format!("{DIR}/0001-a-thing.md"))
                 .try_exists()
                 .unwrap()
         );
@@ -871,13 +868,13 @@ description: \"REPLACE-ME\"
     /// with no such path and a path already taken are refused under the flag.
     #[test]
     fn explaining_a_scaffold_refuses_what_the_scaffold_refuses() {
-        let scratch = Scratch::section("explain-refused");
-        assert!(failure(new(&scratch.0, true, "A-Thing")).starts_with("'A-Thing' should be"));
+        let scratch = Tree::section("explain-refused");
+        assert!(failure(new(scratch.0.dir(), true, "A-Thing")).starts_with("'A-Thing' should be"));
 
         scratch.record("9999-a", "accepted");
         scratch.write(&format!("{DIR}/10000-b.md"), "held");
         assert_eq!(
-            failure(new(&scratch.0, true, "b")),
+            failure(new(scratch.0.dir(), true, "b")),
             "docs/adr/10000-b.md already exists"
         );
     }
@@ -886,9 +883,9 @@ description: \"REPLACE-ME\"
     /// still succeeds.
     #[test]
     fn explaining_the_gate_reads_nothing() {
-        let scratch = Scratch::new("explain-gate");
+        let scratch = Tree::new("explain-gate");
         std::fs::remove_dir(scratch.0.join(DIR)).unwrap();
-        assert!(check(&scratch.0, false).is_err());
-        assert!(check(&scratch.0, true).is_ok());
+        assert!(check(scratch.0.dir(), false).is_err());
+        assert!(check(scratch.0.dir(), true).is_ok());
     }
 }

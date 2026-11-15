@@ -8,46 +8,40 @@
 #![cfg(unix)]
 
 use std::io::{BufRead, BufReader, Write};
-use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 use std::sync::mpsc;
 use std::time::Duration;
+
+mod support;
 
 const DROPPED: &str = "[WARN] failed to validate all files specified in clarification for crate \
                        miniz_oxide 0.9.1: checksum mismatch, expected '00'";
 
 /// A directory holding a `cargo` that runs a script for `about`.
-struct Shim(PathBuf);
+struct Shim(support::Scratch);
 
 impl Shim {
     /// `about` prints to stdout, logs `log` and exits `code`.
     fn new(name: &str, log: &str, code: i32) -> Self {
         Self::running(
-            name,
+            scratch(name),
             &format!("echo on-stdout; echo \"{log}\" >&2; exit {code}"),
         )
     }
 
-    fn running(name: &str, about: &str) -> Self {
-        let dir = std::env::temp_dir().join(format!(
-            "spate-xtask-attribution-{}-{name}",
-            std::process::id()
-        ));
-        drop(std::fs::remove_dir_all(&dir));
-        std::fs::create_dir_all(&dir).unwrap();
+    /// The shim in `dir`, which a case makes first when `about` names a path
+    /// inside it.
+    fn running(dir: support::Scratch, about: &str) -> Self {
         let cargo = env!("CARGO");
-        std::fs::write(
-            dir.join("cargo"),
-            format!(
+        support::shim(
+            dir.dir(),
+            "cargo",
+            &format!(
                 "#!/bin/sh\n\
                  if [ \"$1\" = about ]; then {about}; fi\n\
                  exec '{cargo}' \"$@\"\n"
             ),
-        )
-        .unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(dir.join("cargo"), std::fs::Permissions::from_mode(0o755))
-            .unwrap();
+        );
         Self(dir)
     }
 
@@ -56,20 +50,16 @@ impl Shim {
     }
 
     fn command(&self) -> Command {
-        let mut dirs = vec![self.0.clone()];
-        dirs.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
-        let mut command = Command::new(env!("CARGO_BIN_EXE_spate-xtask"));
+        let mut command = support::xtask();
         command
             .arg("attribution")
-            .env("PATH", std::env::join_paths(dirs).unwrap());
+            .env("PATH", support::path_with(self.0.dir()));
         command
     }
 }
 
-impl Drop for Shim {
-    fn drop(&mut self) {
-        drop(std::fs::remove_dir_all(&self.0));
-    }
+fn scratch(name: &str) -> support::Scratch {
+    support::Scratch::new(&format!("spate-xtask-attribution-{name}")).unwrap()
 }
 
 fn stderr(out: &Output) -> String {
@@ -106,13 +96,10 @@ fn a_failed_generator_keeps_its_status() {
 /// timeout still shows what it printed.
 #[test]
 fn a_log_line_arrives_while_the_generator_runs() {
-    let dir = std::env::temp_dir().join(format!(
-        "spate-xtask-attribution-{}-held",
-        std::process::id()
-    ));
+    let dir = scratch("held");
     let release = dir.join("release");
     let shim = Shim::running(
-        "held",
+        dir,
         &format!(
             "echo holding >&2; read -r _ < '{}'; exit 7",
             release.display()

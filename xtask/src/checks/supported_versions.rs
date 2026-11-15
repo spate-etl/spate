@@ -311,6 +311,7 @@ fn leading_line(text: &str) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::checks::scratch::Scratch;
 
     const PAGE: &str = "\
 ## Supported server versions
@@ -530,15 +531,11 @@ services:
     }
 
     /// A directory under the system temporary directory, removed on drop.
-    struct Scratch(std::path::PathBuf);
+    struct Tree(Scratch);
 
-    impl Scratch {
+    impl Tree {
         fn new(name: &str) -> Self {
-            let dir =
-                std::env::temp_dir().join(format!("spate-xtask-{}-{name}", std::process::id()));
-            drop(std::fs::remove_dir_all(&dir));
-            std::fs::create_dir_all(&dir).unwrap();
-            Self(dir)
+            Self(Scratch::new(&format!("spate-xtask-{name}")).unwrap())
         }
 
         fn service(&self, name: &str) -> &Self {
@@ -547,15 +544,9 @@ services:
         }
     }
 
-    impl Drop for Scratch {
-        fn drop(&mut self) {
-            drop(std::fs::remove_dir_all(&self.0));
-        }
-    }
-
     #[test]
     fn docs_pairs_skip_comments_and_blank_lines() {
-        let scratch = Scratch::new("pairs");
+        let scratch = Tree::new("pairs");
         scratch.service("db");
         std::fs::write(
             scratch.0.join("db/DOCS"),
@@ -563,7 +554,7 @@ services:
         )
         .unwrap();
         assert_eq!(
-            pairs(&scratch.0).unwrap(),
+            pairs(scratch.0.dir()).unwrap(),
             vec![
                 ("db".to_owned(), "docs/page.mdx".to_owned()),
                 ("db".to_owned(), "docs/other.mdx".to_owned()),
@@ -575,7 +566,7 @@ services:
     /// Excluding the fixture keeps that line from passing as supported.
     #[test]
     fn a_floor_move_with_its_fixture_following_is_caught() {
-        let scratch = Scratch::new("floor-move");
+        let scratch = Tree::new("floor-move");
         scratch
             .service("ci/nats/floor")
             .service("ci/nats/below-floor");
@@ -584,7 +575,7 @@ services:
         let ci_root = scratch.0.join("ci");
         let check = |lanes: &[(&str, &str)]| {
             check_page(
-                &scratch.0,
+                scratch.0.dir(),
                 &ci_root,
                 "nats",
                 "page.mdx",
@@ -615,19 +606,19 @@ services:
 
     #[test]
     fn an_unsupported_entry_naming_no_lane_is_an_error() {
-        let scratch = Scratch::new("stale-unsupported");
+        let scratch = Tree::new("stale-unsupported");
         scratch.service("db/lts");
         std::fs::write(scratch.0.join("db/UNSUPPORTED"), "# fixtures\nold\n").unwrap();
         assert_eq!(
-            supported_lanes(&scratch.0, "db").unwrap_err().message,
+            supported_lanes(scratch.0.dir(), "db").unwrap_err().message,
             "ci/db/UNSUPPORTED names old, which is not a lane"
         );
     }
 
     #[test]
     fn a_service_without_docs_is_skipped() {
-        let scratch = Scratch::new("no-docs");
+        let scratch = Tree::new("no-docs");
         scratch.service("db");
-        assert!(pairs(&scratch.0).unwrap().is_empty());
+        assert!(pairs(scratch.0.dir()).unwrap().is_empty());
     }
 }

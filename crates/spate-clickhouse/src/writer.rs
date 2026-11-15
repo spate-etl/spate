@@ -570,8 +570,9 @@ mod tests {
         }
     }
 
-    /// A rustls error that is not a certificate rejection, behind the same
-    /// `io::Error` wrappers, stays `Retryable`.
+    /// A server that answers the handshake in plaintext HTTP fails the client
+    /// with rustls's `InvalidMessage`, which stays `Retryable` behind the same
+    /// `io::Error` wrappers.
     #[tokio::test]
     #[expect(
         clippy::disallowed_methods,

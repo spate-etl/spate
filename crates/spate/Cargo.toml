@@ -201,6 +201,7 @@ clickhouse-uuid = ["clickhouse", "spate-clickhouse/uuid"]
 clickhouse-chrono = ["clickhouse", "spate-clickhouse/chrono"]
 clickhouse-time = ["clickhouse", "spate-clickhouse/time"]
 clickhouse-rust-decimal = ["clickhouse", "spate-clickhouse/rust_decimal"]
+tls-roots = ["spate-core/tls-roots"]
 
 [package.metadata.docs.rs]
 all-features = true

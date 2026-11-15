@@ -1,7 +1,8 @@
 //! Work units of the feed path and their parts: a unit a lister publishes
 //! names one object, one byte range of one object, or up to
 //! [`PACK_MEMBERS`] small objects read whole on one lane, and a storage
-//! notification is one unit with one part per non-empty created object.
+//! notification, a `Records[]` message or an EventBridge event, is one unit
+//! with one part per non-empty created object.
 //! [`Packer`] packs a listing's small objects into shared units.
 //!
 //! [`parts_of`] decides whether an object is read whole or cut, by the rule
@@ -35,7 +36,7 @@ pub(crate) enum Origin {
     /// A storage notification, or a unit a worker re-enqueued after an
     /// overwrite.
     Notification {
-        /// The object version the record names. `None` reads the key.
+        /// The object version the notification names. `None` reads the key.
         version: Option<String>,
         /// How many times the key's unit has been re-enqueued after an
         /// overwrite.
@@ -340,7 +341,8 @@ fn packed_unit(members: &[ObjectEntry]) -> Result<Minted, SplitError> {
     })
 }
 
-/// Where a notification's records must point for the source to read them.
+/// Where the objects a notification names must be for the source to read
+/// them.
 #[derive(Clone, Debug)]
 pub(crate) struct Scope {
     /// The source's bucket. `None` matches no record.
@@ -363,31 +365,45 @@ pub(crate) enum Decoded {
 /// storage notification.
 ///
 /// A notification is an S3 `Records[]` message, the same records inside the
-/// `{"EventName","Key","Records"}` envelope, or the S3 test event, which is
-/// acknowledged. A record with no `eventName`, or one that is not a string,
-/// fails the whole message. Each record whose `eventName` is not
-/// `ObjectCreated:*`, with or without an `s3:` prefix, is dropped whatever its
-/// bucket. A created record that does
-/// not deserialise, or one for another bucket, for a key outside `scope`'s
-/// prefix, with no size, or with a key that does not decode fails the whole
-/// message, as does any other body. A created object of size 0 is then
-/// dropped. Every other record becomes one part with its ETag quoted. Its key
-/// is read as written when the record's `eventSource` is exactly `ceph:s3`,
-/// and is otherwise form-decoded (`+` is a space, then percent-decoding as
-/// UTF-8), so only a form-decoded key can fail to decode. An absent or JSON
-/// null `eventSource` is form-decoded. A record whose `eventSource` is any
-/// other value that is not a string fails the whole message, and so does one
-/// whose key [`addressable`] refuses or whose ETag cannot be an `If-Match`
-/// value. A message with no part left is acknowledged.
+/// `{"EventName","Key","Records"}` envelope, an S3 event EventBridge
+/// delivers, or the S3 test event, which is acknowledged. A body with a
+/// `Records` array is read as records whatever else it carries.
 ///
-/// A record names a version when its `versionId` is a string other than `""`
-/// and `"null"`, and the part reads that version; absent, JSON null, `""` and
-/// `"null"` read the key. A `versionId` that is not a string, is longer than
-/// [`MAX_VERSION_BYTES`], or holds a space or a control byte fails the whole
+/// A record with no `eventName`, or one that is not a string, fails the whole
+/// message. Each record whose `eventName` is not `ObjectCreated:*`, with or
+/// without an `s3:` prefix, is dropped whatever its bucket. A created record
+/// that does not deserialise, or with a key that does not decode, fails the
+/// whole message. Its key is read as written when the record's `eventSource`
+/// is exactly `ceph:s3`, and is otherwise form-decoded (`+` is a space, then
+/// percent-decoding as UTF-8), so only a form-decoded key can fail to decode.
+/// An absent or JSON null `eventSource` is form-decoded. A record whose
+/// `eventSource` is any other value that is not a string fails the whole
 /// message. A record's `spateReEnqueues`, which only a unit
 /// [`re_enqueue_body`] wrote carries, is how many times its key was
 /// re-enqueued; absent or null is 0, and any value other than a `u32` fails
 /// the whole message.
+///
+/// An EventBridge event is a body whose `source` is the string `aws.s3`. Its
+/// `detail-type` must be a string. An `Object Created` event names one
+/// object, read from `detail.bucket.name` and `detail.object`, with its key
+/// as written, its ETag from `etag`, its version from `version-id`, its event
+/// time from the top-level `time`, and a re-enqueue count of 0. It fails
+/// unless its `detail.event-version` is a string of major version 1: `1.`
+/// followed by one or more digits. An event of a type in
+/// [`EVENTBRIDGE_ACKNOWLEDGED`] is acknowledged whatever its bucket, and any
+/// other type fails. An `Object Created` event that does not deserialise,
+/// a field of the wrong type included, fails.
+///
+/// The object a created record or an `Object Created` event names fails its
+/// message when it is in another bucket, has a key outside `scope`'s prefix,
+/// or has no size. An object of size 0 is then dropped. The rest fail the
+/// message when [`addressable`] refuses the key, when the ETag cannot be an
+/// `If-Match` value, or when the version is longer than
+/// [`MAX_VERSION_BYTES`] or holds a space or a control byte. Otherwise the
+/// object becomes one part with its ETag quoted. A version that is a string
+/// other than `""` and `"null"` names the version the part reads; absent,
+/// JSON null, `""` and `"null"` read the key. A message with no part left is
+/// acknowledged.
 pub(crate) fn decode(body: &[u8], scope: &Scope, packing: Packing) -> Decoded {
     let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) else {
         return Decoded::Fail(
@@ -404,6 +420,9 @@ pub(crate) fn decode(body: &[u8], scope: &Scope, packing: Packing) -> Decoded {
         return Decoded::Acknowledge("a storage test event");
     }
     let Some(records) = value.get("Records").and_then(serde_json::Value::as_array) else {
+        if value.get("source").and_then(serde_json::Value::as_str) == Some(EVENTBRIDGE_SOURCE) {
+            return decode_event(&value, scope, packing);
+        }
         return Decoded::Fail(
             "the unit's body is neither a descriptor nor a storage notification".to_owned(),
         );
@@ -417,13 +436,13 @@ pub(crate) fn decode(body: &[u8], scope: &Scope, packing: Packing) -> Decoded {
         }
     }
     if parts.is_empty() {
-        Decoded::Acknowledge("a notification that names no object to read")
+        Decoded::Acknowledge(NOTHING_TO_READ)
     } else {
         Decoded::Read(parts)
     }
 }
 
-/// The longest `versionId` a notification record may carry.
+/// The longest version id a notification may name.
 pub(crate) const MAX_VERSION_BYTES: usize = 1024;
 
 /// The `eventSource` of a record Ceph RGW writes, whose key is the object's
@@ -432,6 +451,33 @@ const CEPH_SOURCE: &str = "ceph:s3";
 
 /// The field of a re-enqueued unit's record that counts its re-enqueues.
 const RE_ENQUEUES: &str = "spateReEnqueues";
+
+/// Why a notification that names no object to read is acknowledged.
+const NOTHING_TO_READ: &str = "a notification that names no object to read";
+
+/// The `source` of an S3 event EventBridge delivers.
+const EVENTBRIDGE_SOURCE: &str = "aws.s3";
+
+/// The `detail-type` of an EventBridge event for a created object.
+const OBJECT_CREATED: &str = "Object Created";
+
+/// The other `detail-type`s S3 sends to EventBridge, as AWS maps its event
+/// types. Each names no new object content, so the source acknowledges it
+/// with nothing to read.
+pub(crate) const EVENTBRIDGE_ACKNOWLEDGED: [&str; 12] = [
+    "Object Deleted",
+    "Object Restore Initiated",
+    "Object Restore Completed",
+    "Object Restore Expired",
+    "Object Storage Class Changed",
+    "Object Access Tier Changed",
+    "Object Tags Added",
+    "Object Tags Deleted",
+    "Object ACL Updated",
+    "Object Annotation Created",
+    "Object Annotation Removed",
+    "Object Retention Updated",
+];
 
 /// The fields of a notification record the source reads.
 #[derive(Deserialize)]
@@ -467,6 +513,42 @@ struct RecordObject {
     version_id: Option<String>,
 }
 
+/// The fields of an EventBridge `Object Created` event the source reads.
+#[derive(Deserialize)]
+struct Event {
+    #[serde(default)]
+    time: Option<String>,
+    detail: EventDetail,
+}
+
+#[derive(Deserialize)]
+struct EventDetail {
+    bucket: RecordBucket,
+    object: EventObject,
+}
+
+#[derive(Deserialize)]
+struct EventObject {
+    key: String,
+    #[serde(default)]
+    size: Option<u64>,
+    #[serde(default)]
+    etag: Option<String>,
+    #[serde(rename = "version-id", default)]
+    version_id: Option<String>,
+}
+
+/// The object a notification names, with its key as the read uses it.
+struct Announced {
+    bucket: String,
+    key: String,
+    size: Option<u64>,
+    etag: Option<String>,
+    version_id: Option<String>,
+    event_time: Option<String>,
+    re_enqueues: u32,
+}
+
 /// The part one notification record names, `None` for a record dropped
 /// without one, or why the record fails its message.
 fn record_part(
@@ -486,12 +568,6 @@ fn record_part(
     }
     let record =
         Record::deserialize(record).map_err(|e| format!("the record is unreadable: {e}"))?;
-    let bucket = record.s3.bucket.name;
-    if scope.bucket.as_deref() != Some(bucket.as_str()) {
-        return Err(format!(
-            "the record names the bucket \"{bucket}\", which this source does not read"
-        ));
-    }
     // A re-enqueued unit's record carries no `eventSource`, so the key
     // `re_enqueue_body` form-encoded is decoded whatever store announced it.
     let key = if record.event_source.as_deref() == Some(CEPH_SOURCE) {
@@ -499,6 +575,98 @@ fn record_part(
     } else {
         form_decoded(&record.s3.object.key)?
     };
+    announced_part(
+        Announced {
+            bucket: record.s3.bucket.name,
+            key,
+            size: record.s3.object.size,
+            etag: record.s3.object.etag,
+            version_id: record.s3.object.version_id,
+            event_time: record.event_time,
+            re_enqueues: record.re_enqueues.unwrap_or(0),
+        },
+        scope,
+        packing,
+    )
+}
+
+/// What the source does with an EventBridge event, `value`, whose `source`
+/// is [`EVENTBRIDGE_SOURCE`].
+fn decode_event(value: &serde_json::Value, scope: &Scope, packing: Packing) -> Decoded {
+    let fail = |reason: String| Decoded::Fail(format!("EventBridge event: {reason}"));
+    let Some(detail_type) = value.get("detail-type").and_then(serde_json::Value::as_str) else {
+        return fail("the event's `detail-type` is missing or not a string".to_owned());
+    };
+    if detail_type != OBJECT_CREATED {
+        if EVENTBRIDGE_ACKNOWLEDGED.contains(&detail_type) {
+            return Decoded::Acknowledge("an EventBridge event that creates no object");
+        }
+        return fail(format!(
+            "the detail type \"{detail_type}\" is not one this source reads"
+        ));
+    }
+    match event_part(value, scope, packing) {
+        Ok(Some(cursor)) => Decoded::Read(vec![cursor]),
+        Ok(None) => Decoded::Acknowledge(NOTHING_TO_READ),
+        Err(reason) => fail(reason),
+    }
+}
+
+/// The part an `Object Created` event names, `None` for an empty object, or
+/// why the event fails.
+fn event_part(
+    value: &serde_json::Value,
+    scope: &Scope,
+    packing: Packing,
+) -> Result<Option<Cursor>, String> {
+    // AWS changes the major version for a change that is not backward
+    // compatible, which could move a field this source reads as optional.
+    let version = value
+        .pointer("/detail/event-version")
+        .and_then(serde_json::Value::as_str);
+    if !version.is_some_and(|v| {
+        v.strip_prefix("1.")
+            .is_some_and(|minor| !minor.is_empty() && minor.bytes().all(|b| b.is_ascii_digit()))
+    }) {
+        return Err("the event's `detail.event-version` is not a version 1 string".to_owned());
+    }
+    let event = Event::deserialize(value).map_err(|e| format!("the event is unreadable: {e}"))?;
+    announced_part(
+        Announced {
+            bucket: event.detail.bucket.name,
+            key: event.detail.object.key,
+            size: event.detail.object.size,
+            etag: event.detail.object.etag,
+            version_id: event.detail.object.version_id,
+            event_time: event.time,
+            re_enqueues: 0,
+        },
+        scope,
+        packing,
+    )
+}
+
+/// The part an announced object names, `None` for an empty object, or why
+/// its notification fails.
+fn announced_part(
+    object: Announced,
+    scope: &Scope,
+    packing: Packing,
+) -> Result<Option<Cursor>, String> {
+    let Announced {
+        bucket,
+        key,
+        size,
+        etag,
+        version_id,
+        event_time,
+        re_enqueues,
+    } = object;
+    if scope.bucket.as_deref() != Some(bucket.as_str()) {
+        return Err(format!(
+            "the object is in the bucket \"{bucket}\", which this source does not read"
+        ));
+    }
     let prefix = scope.prefix.as_ref();
     if !prefix.is_empty()
         && !key
@@ -509,8 +677,8 @@ fn record_part(
             "the key \"{key}\" is outside the source's prefix \"{prefix}/\""
         ));
     }
-    let Some(size) = record.s3.object.size else {
-        return Err(format!("the record for \"{key}\" has no size"));
+    let Some(size) = size else {
+        return Err(format!("the object \"{key}\" has no size"));
     };
     // An empty object has no records, and is read without a request.
     if size == 0 {
@@ -521,24 +689,18 @@ fn record_part(
             "the key \"{key}\" cannot be read under its own name through `object_store`"
         ));
     }
-    if record
-        .s3
-        .object
-        .etag
-        .as_deref()
-        .is_some_and(|etag| !sendable(etag))
-    {
+    if etag.as_deref().is_some_and(|etag| !sendable(etag)) {
         return Err(format!(
-            "the record for \"{key}\" has an ETag that cannot be sent in `If-Match`"
+            "the object \"{key}\" has an ETag that cannot be sent in `If-Match`"
         ));
     }
-    let version = match record.s3.object.version_id {
+    let version = match version_id {
         // Ceph RGW writes `""` for a bucket without versioning, and `"null"`
         // names an object stored without a version id.
         Some(version) if version.is_empty() || version == "null" => None,
         Some(version) if version.len() > MAX_VERSION_BYTES => {
             return Err(format!(
-                "the record for \"{key}\" has a `versionId` longer than {MAX_VERSION_BYTES} bytes"
+                "the object \"{key}\" has a version id longer than {MAX_VERSION_BYTES} bytes"
             ));
         }
         // A space is signed as `%20` but sent as `+` in the query, so the
@@ -546,25 +708,24 @@ fn record_part(
         // pipeline. A control byte cannot be a version either.
         Some(version) if version.bytes().any(|b| b == b' ' || b.is_ascii_control()) => {
             return Err(format!(
-                "the record for \"{key}\" has a `versionId` holding a space or a control byte"
+                "the object \"{key}\" has a version id holding a space or a control byte"
             ));
         }
         version => version,
     };
-    let last_modified_ms = record
-        .event_time
+    let last_modified_ms = event_time
         .as_deref()
         .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
         .map_or(0, |t| t.timestamp_millis());
     let entry = ObjectEntry {
         key,
         size,
-        etag: record.s3.object.etag.map(quoted),
+        etag: etag.map(quoted),
         last_modified_ms,
     };
     let origin = Origin::Notification {
         version,
-        re_enqueues: record.re_enqueues.unwrap_or(0),
+        re_enqueues,
     };
     Ok(Some(parts_of(Arc::new(vec![entry]), packing, origin)))
 }
@@ -1070,6 +1231,360 @@ mod tests {
     fn a_re_enqueued_ceph_unit_reads_the_key_rgw_announced() {
         let key = "data/a+b%2Fc d%25.ndjson";
         let Decoded::Read(cursors) = decoded(&[ceph(key, 10)]) else {
+            panic!("not read");
+        };
+        let parts: Vec<Part> = cursors.into_iter().flatten().collect();
+        let entry = &parts[0].object[0];
+        assert_eq!(entry.key, key);
+        let overwrite = Overwrite {
+            key: entry.key.clone(),
+            etag: entry.etag.clone(),
+            size: entry.size,
+            last_modified_ms: entry.last_modified_ms,
+        };
+        let body = re_enqueue_body("bucket", &overwrite, 1);
+        assert_eq!(keys(decode(&body, &scope(), packing())), [key]);
+    }
+
+    /// An EventBridge event of `detail_type` for `key` in `bucket`, shaped as
+    /// AWS documents its `Object Created` example.
+    fn event(detail_type: &str, bucket: &str, key: &str, size: Option<u64>) -> serde_json::Value {
+        serde_json::json!({
+            "version": "0",
+            "id": "17793124-05d4-b198-2fde-7ededc63b103",
+            "detail-type": detail_type,
+            "source": "aws.s3",
+            "account": "111122223333",
+            "time": "2021-11-12T00:00:00Z",
+            "region": "eu-west-2",
+            "resources": [format!("arn:aws:s3:::{bucket}")],
+            "detail": {
+                "version": "0",
+                "event-version": "1.2",
+                "bucket": { "name": bucket },
+                "object": {
+                    "key": key,
+                    "size": size,
+                    "etag": "b1946ac92492d2347c6235b4d2611184",
+                    "version-id": "IYV3p45BT0ac8hjHg1houSdS1a.Mro8e",
+                    "sequencer": "617f08299329d189",
+                },
+                "request-id": "N4N7GDK58NMKJ12R",
+                "requester": "123456789012",
+                "source-ip-address": "192.0.2.1",
+                "reason": "PutObject",
+            },
+        })
+    }
+
+    /// An `Object Created` event for `key` in the source's bucket.
+    fn object_created(key: &str, size: u64) -> serde_json::Value {
+        event("Object Created", "bucket", key, Some(size))
+    }
+
+    /// `event` decoded by a source over `scope`.
+    fn decoded_event(event: &serde_json::Value, scope: &Scope) -> Decoded {
+        decode(&serde_json::to_vec(event).unwrap(), scope, packing())
+    }
+
+    /// The reason `event` fails for a source over `s3://bucket/data/`, which
+    /// must name the EventBridge event.
+    fn event_failed(event: &serde_json::Value) -> String {
+        let reason = failed(decoded_event(event, &scope()));
+        assert!(reason.starts_with("EventBridge event: "), "{reason}");
+        reason
+    }
+
+    /// One part as `(key, etag, version, re_enqueues, last_modified_ms)`.
+    type EventPart = (String, Option<String>, Option<String>, u32, i64);
+
+    /// Every part `decoded` reads, as [`EventPart`].
+    fn announced(decoded: Decoded) -> Vec<EventPart> {
+        match decoded {
+            Decoded::Read(cursors) => cursors
+                .into_iter()
+                .flatten()
+                .map(|part| {
+                    let entry = &part.object[0];
+                    let Origin::Notification {
+                        version,
+                        re_enqueues,
+                    } = part.origin
+                    else {
+                        panic!("{:?} is not a notification part", part.origin);
+                    };
+                    (
+                        entry.key.clone(),
+                        entry.etag.clone(),
+                        version,
+                        re_enqueues,
+                        entry.last_modified_ms,
+                    )
+                })
+                .collect(),
+            Decoded::Acknowledge(reason) => panic!("acknowledged: {reason}"),
+            Decoded::Fail(reason) => panic!("failed: {reason}"),
+        }
+    }
+
+    /// Pins that an `Object Created` event is read at its key as written,
+    /// with the event's ETag quoted, its `version-id`, its `time` and a
+    /// re-enqueue count of 0, even when the event carries one. The keys are
+    /// those recorded from AWS S3 in eu-west-2, which EventBridge sent as
+    /// written and the direct notification sent form-encoded.
+    #[test]
+    fn an_eventbridge_object_created_event_reads_its_key_as_written() {
+        for key in [
+            "plain.txt",
+            "a b.txt",
+            "a+b.txt",
+            "100%.txt",
+            "café.txt",
+            "q?x=1&y=2#f.txt",
+            "dir/sub dir/k~'(x).txt",
+        ] {
+            assert_eq!(
+                announced(decoded_event(&object_created(key, 10), &whole_bucket())),
+                [(
+                    key.to_owned(),
+                    Some("\"b1946ac92492d2347c6235b4d2611184\"".to_owned()),
+                    Some("IYV3p45BT0ac8hjHg1houSdS1a.Mro8e".to_owned()),
+                    0,
+                    1_636_675_200_000,
+                )],
+                "{key}"
+            );
+        }
+        let mut counted = object_created("data/a.ndjson", 10);
+        counted["spateReEnqueues"] = 5.into();
+        counted["detail"]["spateReEnqueues"] = 5.into();
+        counted["detail"]["object"]["spateReEnqueues"] = 5.into();
+        let parts = announced(decoded_event(&counted, &scope()));
+        assert_eq!(parts[0].3, 0, "{parts:?}");
+    }
+
+    /// Pins that an event's object meets the checks a record's object does:
+    /// bucket, prefix on the key as written, size, `object_store`'s path
+    /// rules, the ETag's header rule and the version rules, each failing
+    /// with a reason that names the event; and that an empty object is
+    /// acknowledged.
+    #[test]
+    fn an_eventbridge_event_meets_the_notification_checks() {
+        let reason = event_failed(&event(
+            "Object Created",
+            "elsewhere",
+            "data/a.ndjson",
+            Some(10),
+        ));
+        assert!(reason.contains("the bucket \"elsewhere\""), "{reason}");
+        for key in ["data%2Fx.ndjson", "database/x", "other/a.ndjson"] {
+            let reason = event_failed(&object_created(key, 10));
+            assert!(
+                reason.contains("outside the source's prefix \"data/\""),
+                "{key}: {reason}"
+            );
+        }
+        for key in ["data/../x", "data//a", "data/a/"] {
+            let reason = event_failed(&object_created(key, 10));
+            assert!(
+                reason.contains("cannot be read under its own name"),
+                "{key}: {reason}"
+            );
+        }
+        let reason = event_failed(&event("Object Created", "bucket", "data/a", None));
+        assert!(reason.contains("has no size"), "{reason}");
+        let mut text_size = object_created("data/a.ndjson", 10);
+        text_size["detail"]["object"]["size"] = "10".into();
+        assert!(event_failed(&text_size).contains("the event is unreadable"));
+        let mut etag = object_created("data/a.ndjson", 10);
+        etag["detail"]["object"]["etag"] = "a\u{1}b".into();
+        assert!(event_failed(&etag).contains("`If-Match`"));
+        for refused in [
+            serde_json::json!(7),
+            "a b".into(),
+            "v".repeat(MAX_VERSION_BYTES + 1).into(),
+        ] {
+            let mut version = object_created("data/a.ndjson", 10);
+            version["detail"]["object"]["version-id"] = refused.clone();
+            event_failed(&version);
+        }
+        for absent in ["", "null"] {
+            let mut version = object_created("data/a.ndjson", 10);
+            version["detail"]["object"]["version-id"] = absent.into();
+            let parts = announced(decoded_event(&version, &scope()));
+            assert_eq!(parts[0].2, None, "{absent:?}");
+        }
+        acknowledged(decoded_event(
+            &object_created("data/empty.ndjson", 0),
+            &scope(),
+        ));
+    }
+
+    /// Pins that an event with no `time`, or one that does not parse as
+    /// RFC 3339, gives its records event time 0.
+    #[test]
+    fn an_eventbridge_event_time_that_is_absent_or_unparsed_is_zero() {
+        let mut absent = object_created("data/a.ndjson", 10);
+        absent
+            .as_object_mut()
+            .expect("an event is an object")
+            .remove("time");
+        let mut unparsed = object_created("data/a.ndjson", 10);
+        unparsed["time"] = "yesterday".into();
+        for event in [absent, unparsed] {
+            let parts = announced(decoded_event(&event, &scope()));
+            assert_eq!(parts[0].4, 0, "{event}");
+        }
+    }
+
+    /// Pins the event-version rule: `1.` followed by one or more digits is
+    /// read, and anything else, absent or not a string included, fails.
+    #[test]
+    fn an_eventbridge_event_version_other_than_major_1_fails() {
+        let with_version = |version: Option<serde_json::Value>| {
+            let mut event = object_created("data/a.ndjson", 10);
+            match version {
+                Some(version) => event["detail"]["event-version"] = version,
+                None => {
+                    event["detail"]
+                        .as_object_mut()
+                        .expect("a detail is an object")
+                        .remove("event-version");
+                }
+            }
+            event
+        };
+        for read in ["1.0", "1.2", "1.10"] {
+            let parts = announced(decoded_event(&with_version(Some(read.into())), &scope()));
+            assert_eq!(parts.len(), 1, "{read}");
+        }
+        for refused in [
+            Some("2.0".into()),
+            Some("0.9".into()),
+            Some("1".into()),
+            Some("1.".into()),
+            Some("1.x".into()),
+            Some("1.2x".into()),
+            Some("1.2.3".into()),
+            Some("01.2".into()),
+            Some("+1.2".into()),
+            Some("".into()),
+            Some(serde_json::json!(1.2)),
+            None,
+        ] {
+            let reason = event_failed(&with_version(refused.clone()));
+            assert!(reason.contains("event-version"), "{refused:?}: {reason}");
+        }
+    }
+
+    /// Pins the `detail-type` rule: each type AWS's S3 mapping lists besides
+    /// `Object Created` is acknowledged for any bucket and with no object,
+    /// any other type fails naming it, a missing or numeric type fails, and
+    /// a `source` other than exactly `aws.s3` is no notification.
+    #[test]
+    fn an_eventbridge_event_detail_type_is_acknowledged_only_from_the_list() {
+        for detail_type in [
+            "Object Deleted",
+            "Object Restore Initiated",
+            "Object Restore Completed",
+            "Object Restore Expired",
+            "Object Storage Class Changed",
+            "Object Access Tier Changed",
+            "Object Tags Added",
+            "Object Tags Deleted",
+            "Object ACL Updated",
+            "Object Annotation Created",
+            "Object Annotation Removed",
+            "Object Retention Updated",
+        ] {
+            let mut event = event(detail_type, "elsewhere", "other/a.ndjson", None);
+            event["detail"]
+                .as_object_mut()
+                .expect("a detail is an object")
+                .remove("object");
+            acknowledged(decoded_event(&event, &scope()));
+        }
+        for detail_type in [
+            "AWS API Call via CloudTrail",
+            "Async Copy Completion",
+            "object created",
+            "Object Created ",
+            "anything",
+        ] {
+            let reason = event_failed(&event(detail_type, "bucket", "data/a.ndjson", Some(10)));
+            assert!(
+                reason.contains(&format!("\"{detail_type}\"")),
+                "{detail_type}: {reason}"
+            );
+        }
+        let mut missing = object_created("data/a.ndjson", 10);
+        missing
+            .as_object_mut()
+            .expect("an event is an object")
+            .remove("detail-type");
+        let mut numeric = object_created("data/a.ndjson", 10);
+        numeric["detail-type"] = 1.into();
+        for event in [missing, numeric] {
+            assert!(event_failed(&event).contains("`detail-type`"));
+        }
+        for source in ["aws.S3", "aws.ec2", "aws.s3 "] {
+            let mut event = object_created("data/a.ndjson", 10);
+            event["source"] = source.into();
+            let reason = failed(decoded_event(&event, &scope()));
+            assert!(
+                reason.contains("neither a descriptor nor a storage notification"),
+                "{source}: {reason}"
+            );
+        }
+    }
+
+    /// Pins the order of the shapes: a body that carries an EventBridge
+    /// event's fields beside a descriptor, the test event or a `Records`
+    /// array is read as that shape.
+    #[test]
+    fn an_event_source_beside_another_shape_keeps_that_shape() {
+        let beside = |body: serde_json::Value| {
+            let mut body = body;
+            let event = object_created("data/event.ndjson", 10);
+            for field in ["source", "detail-type", "detail", "time"] {
+                body[field] = event[field].clone();
+            }
+            serde_json::to_vec(&body).unwrap()
+        };
+        let records = beside(serde_json::json!({ "Records": [created("data/a+b.ndjson", 10)] }));
+        assert_eq!(
+            keys(decode(&records, &scope(), packing())),
+            ["data/a b.ndjson"]
+        );
+        let object = DescriptorObject {
+            key: "data/listed.ndjson".into(),
+            size: 10,
+            etag: None,
+            last_modified_ms: 1,
+        };
+        let descriptor: serde_json::Value =
+            serde_json::from_slice(&SplitDescriptor::new(vec![object]).encode().unwrap()).unwrap();
+        assert_eq!(
+            keys(decode(&beside(descriptor), &scope(), packing())),
+            ["data/listed.ndjson"]
+        );
+        let test_event = beside(serde_json::json!({
+            "Service": "Amazon S3",
+            "Event": "s3:TestEvent",
+            "Bucket": "bucket",
+        }));
+        assert_eq!(
+            acknowledged(decode(&test_event, &scope(), packing())),
+            "a storage test event"
+        );
+    }
+
+    /// Pins that a unit re-enqueued for an object an EventBridge event
+    /// announced decodes to the key the event carried as written.
+    #[test]
+    fn a_re_enqueued_eventbridge_unit_reads_the_key_the_event_announced() {
+        let key = "data/a+b%2Fc d%25.ndjson";
+        let Decoded::Read(cursors) = decoded_event(&object_created(key, 10), &scope()) else {
             panic!("not read");
         };
         let parts: Vec<Part> = cursors.into_iter().flatten().collect();

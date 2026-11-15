@@ -412,7 +412,7 @@ impl S3Source {
     /// The store the source reads: the injected one, or one built from
     /// `config.url`. Returns it with the listing prefix, the unaddressable
     /// keys its client takes out of listings, the bucket a notification's
-    /// records must name, and whether a lister can resume over it.
+    /// objects must be in, and whether a lister can resume over it.
     fn data_store(&mut self) -> Result<DataStore, SourceError> {
         let url = parse(&self.config.url)?;
         Ok(match self.store.take() {
@@ -976,8 +976,8 @@ pub(crate) fn scope_bucket(store: &AmazonS3) -> Option<String> {
 }
 
 /// The store the source reads, its listing prefix, the unaddressable keys
-/// its client takes out of listings, the bucket a notification's records
-/// must name, and whether a lister can resume over the store.
+/// its client takes out of listings, the bucket a notification's objects
+/// must be in, and whether a lister can resume over the store.
 type DataStore = (
     Arc<dyn ObjectStore>,
     object_store::path::Path,
@@ -994,7 +994,7 @@ struct BuiltStore {
     /// The objects the S3 client takes out of each listing; `None` for any
     /// other scheme.
     unaddressable: Option<UnaddressableKeys>,
-    /// The bucket a notification's records must name; `None` for any other
+    /// The bucket a notification's objects must be in; `None` for any other
     /// scheme.
     bucket: Option<String>,
     /// Whether `object_store` lists after an offset with `start-after`,

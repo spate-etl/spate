@@ -58,16 +58,32 @@ promise ([ADR-0011](../../adr/0011-msrv-and-dependency-policy.md)).
 
 ## Trust roots
 
-If the TLS stack verifies against a root store you build, fill it from the
-system trust store. When the system store yields no usable certificate, fall
-back to the Mozilla root bundle and log a warning saying so. If the library
-verifies through the platform's own verifier, keep that verifier.
+Load the roots a TLS client verifies servers against with `spate::tls`, which
+the `tls-roots` feature enables. `SystemRoots::load` reads the system trust
+store. It blocks on file reads, or on the keychain on macOS, so call it from a
+blocking thread in async code. `TrustRoots::load` keeps the system
+certificates rustls accepts and adds the certificates in a `root_ca` file. Give
+the result to the client as DER certificates with `TrustRoots::certs`, or as
+one PEM bundle with `TrustRoots::to_pem`.
+
+When an endpoint the connector reaches is `https://`, call
+`TrustRoots::require_any`, and put the `root_ca` key around its error. An empty
+set then fails at load, and the error names the fixes, that key among them.
+When no endpoint is `https://`, keep the set as loaded, even empty,
+so a plaintext pipeline runs on an image with no CA bundle. Do not fall back to
+a bundled root set
+([ADR-0105](../../adr/0105-connectors-share-one-trust-root-loader-in-core.md)).
+
+If the library verifies through the platform's own verifier, keep it on Apple
+and Windows and add the `root_ca` certificates. On Linux that verifier fails on
+an empty store for any endpoint, so give the client the roots from
+`spate::tls`.
 
 A config key that names a private CA adds its certificates to the system
-roots. When the file holds no usable certificate, fail at load with an error
-naming the key and the path. When no endpoint the connector reaches is
-`https://`, refuse the key. Worked reference:
-[`spate-clickhouse/src/http.rs`](repo:crates/spate-clickhouse/src/http.rs).
+roots. Take its section from `spate::tls::TlsSection`. `TrustRoots::load`
+fails when the file cannot be read, holds no certificate, or holds one that is
+not a trust anchor; put the key around its error. When no endpoint the
+connector reaches is `https://`, refuse the key.
 
 An operator may turn certificate verification off only through the library's
 own setting in the passthrough. Never default it off.
@@ -127,10 +143,13 @@ an operator then sees.
 ## Errors
 
 Choose a TLS stack whose rejections `spate::tls_rejection!` can read, which is
-rustls. Classify the client's errors as
-[Custom sinks](custom-sink.mdx) and [Custom sources](custom-source.mdx)
-describe: a rejected credential or TLS handshake is fatal, and a failure to
-obtain credentials or reach the server is retryable.
+rustls. `spate::tls_reason!` gives the reason text for a rustls error, and for
+a certificate from an unknown issuer adds where to install its CA. Pass it the
+`root_ca` key only when the connector accepts that key. Classify the client's
+errors as [Custom sinks](custom-sink.mdx) and
+[Custom sources](custom-source.mdx) describe: a rejected credential or TLS
+handshake is fatal, and a failure to obtain credentials or reach the server is
+retryable.
 
 ## Related
 
@@ -138,5 +157,7 @@ obtain credentials or reach the server is retryable.
   — why each client is built in one place and its settings layered this way.
 - [ADR-0081](../../adr/0081-a-rejected-credential-or-tls-handshake-is-fatal-unless-throttled.md)
   — how a built client's errors are classified.
+- [ADR-0105](../../adr/0105-connectors-share-one-trust-root-loader-in-core.md)
+  — why trust roots load through `spate::tls` with no fallback bundle.
 - [Securing connections](../03-guides/securing-connections.mdx) — the
   operator's view of TLS, credentials and redaction.

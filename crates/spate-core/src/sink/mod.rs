@@ -126,8 +126,9 @@ pub struct EncodedChunk {
     /// When the oldest record in `frame` entered the terminal stage
     /// (ingest-basis end-to-end latency).
     pub oldest_ingest: Instant,
-    /// Smallest record event time in `frame`, milliseconds since the epoch
-    /// (event-basis end-to-end latency).
+    /// Smallest record event time in `frame`, milliseconds since the epoch,
+    /// or [`crate::record::NO_EVENT_TIME_MS`] when no record in `frame` has
+    /// one (event-basis end-to-end latency).
     pub oldest_event_ms: i64,
 }
 

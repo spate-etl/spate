@@ -1,3 +1,6 @@
+#![cfg_attr(docsrs, feature(doc_cfg))]
+// `loom` is never set in a published build, so its cfg carries no badge.
+#![cfg_attr(docsrs, doc(auto_cfg(hide(loom))))]
 //! The engine of the Spate framework.
 //!
 //! `spate-core` contains the pipeline runtime and every technology-neutral
@@ -61,7 +64,9 @@ pub mod sink;
 pub mod source;
 pub mod task;
 pub mod telemetry;
+#[cfg(feature = "tls-roots")]
+pub mod tls;
 
 pub use error::{DeserError, ErrorClass, ErrorPolicy, FatalError, SinkError, SourceError};
 pub use framing::FramingContract;
-pub use record::{Flow, PartitionId, RawPayload, Record, RecordMeta};
+pub use record::{Flow, NO_EVENT_TIME_MS, PartitionId, RawPayload, Record, RecordMeta};

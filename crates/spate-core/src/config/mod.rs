@@ -422,7 +422,8 @@ pub enum E2eBasis {
     #[default]
     Ingest,
     /// Record event time (e.g. Kafka message timestamp). Measures true
-    /// pipeline lag but is sensitive to upstream clocks.
+    /// pipeline lag but is sensitive to upstream clocks. A batch in
+    /// which no record has an event time is aged from ingest instead.
     Event,
 }
 

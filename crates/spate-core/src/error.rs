@@ -351,9 +351,85 @@ macro_rules! tls_rejection {
     };
 }
 
+/// The reason text for a TLS error, as a `String`: the error's own text, and
+/// for a certificate from an issuer the client does not trust, how to trust
+/// it.
+///
+/// The first argument is the path to the caller's `rustls` crate, as for
+/// [`tls_rejection!`], the second an `&rustls::Error`, and the third an
+/// `Option<&str>` naming the config key that adds a root CA. Pass `None` when
+/// the connector would refuse that key, as it does with no `https://`
+/// endpoint.
+///
+/// ```ignore
+/// let reason = spate::tls_reason!(rustls, tls, Some("tls.root_ca"));
+/// ```
+#[macro_export]
+macro_rules! tls_reason {
+    ($($rustls:ident)::+, $tls:expr, $key:expr) => {{
+        let tls: &$($rustls)::+::Error = $tls;
+        let unknown_issuer = matches!(
+            tls,
+            $($rustls)::+::Error::InvalidCertificate(
+                $($rustls)::+::CertificateError::UnknownIssuer
+            )
+        );
+        $crate::error::tls_reason_text(tls, unknown_issuer, $key)
+    }};
+}
+
+/// The text [`tls_reason!`] returns, given whether the error is an unknown
+/// issuer.
+#[doc(hidden)]
+#[must_use]
+pub fn tls_reason_text(
+    tls: &dyn std::fmt::Display,
+    unknown_issuer: bool,
+    key: Option<&str>,
+) -> String {
+    let mut reason = tls.to_string();
+    if unknown_issuer {
+        reason.push_str("; add the issuing CA to the system trust store");
+        if let Some(key) = key {
+            reason.push_str(" or `");
+            reason.push_str(key);
+            reason.push('`');
+        }
+    }
+    reason
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An unknown issuer names the system trust store, and the key when there
+    /// is one; any other TLS error is its own text.
+    #[test]
+    fn tls_reason_hints_only_for_an_unknown_issuer() {
+        use rustls::{CertificateError, Error as Tls};
+        let unknown = Tls::InvalidCertificate(CertificateError::UnknownIssuer);
+        assert_eq!(
+            crate::tls_reason!(rustls, &unknown, Some("tls.root_ca")),
+            "invalid peer certificate: UnknownIssuer; add the issuing CA to the system \
+             trust store or `tls.root_ca`"
+        );
+        assert_eq!(
+            crate::tls_reason!(rustls, &unknown, None),
+            "invalid peer certificate: UnknownIssuer; add the issuing CA to the system \
+             trust store"
+        );
+        let expired = Tls::InvalidCertificate(CertificateError::Expired);
+        assert_eq!(
+            crate::tls_reason!(rustls, &expired, Some("tls.root_ca")),
+            "invalid peer certificate: Expired"
+        );
+        let general = Tls::General("reset".into());
+        assert_eq!(
+            crate::tls_reason!(rustls, &general, Some("tls.root_ca")),
+            "unexpected error: reset"
+        );
+    }
 
     /// A certificate failure and an incompatible peer are rejections behind an
     /// `io::Error`, and other TLS errors are not. Each alert rustls names is a

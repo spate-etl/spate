@@ -146,7 +146,8 @@ pub enum E2eBasis {
     #[default]
     Ingest,
     /// The record's event time (e.g. Kafka message timestamp). Sensitive to
-    /// clock skew, but reflects true upstream delay.
+    /// clock skew, but reflects true upstream delay. A batch in
+    /// which no record has an event time is aged from ingest instead.
     Event,
 }
 
@@ -381,7 +382,7 @@ pub fn install(settings: &MetricsSettings) -> Result<MetricsHandle, MetricsError
 mod tests {
     use super::*;
     use crate::error::ErrorClass;
-    use crate::record::PartitionId;
+    use crate::record::{NO_EVENT_TIME_MS, PartitionId};
 
     /// Labels for one test's handle sets.
     ///
@@ -438,7 +439,7 @@ mod tests {
             let shard =
                 SinkShardMetrics::new(&labels("e2e_event"), 0, &["r".into()], E2eBasis::Event);
             shard.e2e_observed(Duration::from_secs(500), an_hour_ago);
-            shard.e2e_observed(Duration::from_secs(500), i64::MAX);
+            shard.e2e_observed(Duration::from_secs(500), NO_EVENT_TIME_MS);
         });
         let sum = spate_test::metric_value(&rendered, "spate_e2e_latency_seconds_sum", &[])
             .unwrap_or_else(|| panic!("no e2e sum in:\n{rendered}"));
@@ -1128,7 +1129,7 @@ mod tests {
             E2eBasis::Ingest,
         );
         shard.flushed(FlushReason::Rows, 10, 1_000, Duration::from_millis(3));
-        shard.e2e_observed(Duration::from_millis(25), i64::MAX);
+        shard.e2e_observed(Duration::from_millis(25), NO_EVENT_TIME_MS);
         let second = install(&MetricsSettings::default()).expect("second install reuses");
         let rendered = second.render();
         assert!(

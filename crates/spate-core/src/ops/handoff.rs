@@ -16,7 +16,7 @@ use crate::backpressure::InflightBudget;
 use crate::checkpoint::{AckSet, BatchId};
 use crate::deser::RecFamily;
 use crate::error::{ErrorClass, ErrorPolicy, FatalError};
-use crate::record::{Flow, Record};
+use crate::record::{Flow, NO_EVENT_TIME_MS, Record};
 use crate::sink::{
     ChunkSendError, EncodedChunk, FrameCodec, RecordRouter, RowEncoder, ShardQueues,
 };
@@ -149,7 +149,7 @@ where
                 acks: AckSet::new(),
                 last_batch: None,
                 first_ingest: None,
-                oldest_event_ms: i64::MAX,
+                oldest_event_ms: NO_EVENT_TIME_MS,
                 finished_rows: None,
                 parked: 0,
             })
@@ -256,7 +256,7 @@ where
         };
         shard.rows = 0;
         shard.last_batch = None;
-        shard.oldest_event_ms = i64::MAX;
+        shard.oldest_event_ms = NO_EVENT_TIME_MS;
         // A free slot must not let this chunk overtake one parked before it.
         if shard.parked > 0 {
             shard.parked += 1;

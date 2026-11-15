@@ -542,6 +542,8 @@ object is created. A message is one of:
 - an S3 `Records[]` message;
 - the same records inside the `{"EventName", "Key", "Records"}` envelope
   RustFS sends;
+- an AWS S3 event that an EventBridge rule delivers, whose `source` is
+  `aws.s3`;
 - the S3 test event (`"Event": "s3:TestEvent"`), acknowledged with nothing
   read.
 
@@ -577,6 +579,33 @@ any created record:
 - has an ETag holding a control byte other than a tab, which `If-Match`
   cannot carry, for an object of one byte or more.
 
+A body that carries a `Records` array is read as records, whatever other
+fields it has. An EventBridge event is decided by its `detail-type`:
+
+- an event with no `detail-type`, or one that is not a string, is failed back;
+- an `Object Created` event names one object, by `detail.bucket.name` and
+  `detail.object`. Its key is read as written, because EventBridge sends the
+  key unencoded. Its ETag comes from `etag` and its version from `version-id`;
+- an event of one of the other types S3 sends to EventBridge is acknowledged
+  with nothing read, whatever its bucket. These types are `Object Deleted`,
+  `Object Restore Initiated`, `Object Restore Completed`,
+  `Object Restore Expired`, `Object Storage Class Changed`,
+  `Object Access Tier Changed`, `Object Tags Added`, `Object Tags Deleted`,
+  `Object ACL Updated`, `Object Annotation Created`,
+  `Object Annotation Removed` and `Object Retention Updated`;
+- an event of any other type is failed back. That includes
+  `AWS API Call via CloudTrail` and `Async Copy Completion`.
+
+An `Object Created` event is failed back unless its `detail.event-version` is
+`1.` followed by digits, because AWS changes the major version for a change
+that is not backward compatible. Its object is then checked as a created
+record's object is: the event is failed back when its object is in another
+bucket, is outside the prefix, has no size or a size that is not a
+non-negative integer, or, at one byte or more, has a key `object_store`
+cannot read under its own name or an ETag `If-Match` cannot carry. An event
+whose fields do not match these types is failed back too. An object of size
+0 is acknowledged with nothing read.
+
 A body that is neither a notification nor a descriptor is failed back the same
 way, and that includes an S3 message inside an SNS envelope. So is a
 descriptor whose ETag `If-Match` cannot carry. On a store that
@@ -586,10 +615,11 @@ with its other records. A source whose `url` names the whole bucket
 once, after every part of it has been read and committed.
 
 The records read for a notification take its `eventTime` as their event time,
-and those read for a listed object take the listing's `LastModified`. The
+or an EventBridge event's `time`, and those read for a listed object take the
+listing's `LastModified`. The
 records of a unit the source re-enqueued take the `LastModified` its HEAD
 reported. A
-notification with no `eventTime`, or one that does not parse, gives its records
+notification with no event time, or one that does not parse, gives its records
 event time 0, which under `metrics.e2e_basis: event` counts their end-to-end
 latency from 1970.
 
@@ -600,7 +630,9 @@ during its read is re-enqueued at its current ETag when its notification carries
 an ETag, and is read in its new contents when the notification carries none. A
 notification's unit is a unit of its own, with the feed message's id (the SQS
 `MessageId`, or the Kafka message key, or its position when it has none), so
-an object that both a listing and a notification announce is read twice. A
+an object that both a listing and a notification announce is read twice. So is
+an object in a bucket that sends its notifications both straight to the queue
+and through EventBridge. A
 unit the source re-enqueues keeps the id of the unit it replaces. A store sends
 no notification for an object written before the bucket's notification
 configuration takes effect; on AWS S3 that
@@ -630,6 +662,9 @@ Each store needs its own settings for its notifications to arrive:
   ([AWS](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutBucketNotificationConfiguration.html)).
   The queue's own settings are on the
   [SQS feed](../../feeds/sqs/README.mdx#storage-notifications) page.
+  The bucket can instead send its events to EventBridge, where a rule with
+  the queue as its target forwards them. The same page gives the rule and the
+  queue settings that route needs.
 - **RustFS.** The Kafka notification target needs a `queue_dir`. Without one,
   an event that fails to send is lost
   ([RustFS](https://docs.rustfs.com/en/operations/event-notifications)).
@@ -668,10 +703,11 @@ decides:
 
 - A `404` fails the unit back, and the feed dead-letters it at its cap.
 - A `401` or `403` fails the pipeline, as for any object read.
-- A record whose `versionId` is a string other than `""` and `"null"` names a
-  version, and the read sends that version with the ETag pin. An absent or
-  JSON null `versionId`, `""` and `"null"` read the key. A `versionId` longer
-  than 1,024 bytes, or holding a space or a control byte, fails the message.
+- A record's `versionId`, or an EventBridge event's `version-id`, names a
+  version when it is a string other than `""` and `"null"`, and the read sends
+  that version with the ETag pin. An absent or JSON null version, `""` and
+  `"null"` read the key. A version longer than 1,024 bytes, or holding a space
+  or a control byte, fails the message.
   A failed precondition on a read that names a version fails the unit back.
 - A failed precondition (`412`) on a read that names no version means the
   object was overwritten. So does a `416` on such a read, which RustFS sends
@@ -1193,9 +1229,9 @@ with a scheduled [lister run](#the-lister-run) and a
 [bounded job](#bounded-jobs-and-the-job-location), run as a separate job on a
 queue of its own.
 
-The source decodes S3 notifications that the bucket sends straight to SQS. An
-EventBridge event or an SNS envelope is neither a notification nor a
-descriptor, so the source fails it back, as
+The source decodes S3 notifications that the bucket sends straight to SQS, and
+S3 events that an EventBridge rule sends to SQS. An SNS envelope is neither a
+notification nor a descriptor, so the source fails it back, as
 [Storage notifications](#storage-notifications) describes.
 
 ### Metrics on Lambda

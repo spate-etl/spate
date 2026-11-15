@@ -2518,10 +2518,9 @@ mod cluster {
         assert_eq!(committed(&brokers, &group), None);
         clock.advance(Duration::from_nanos(1));
         let (cluster, mut d, due) =
-            on_driver(cluster, d, "the periodic commit", Driver::commit_if_due);
+            on_driver_answered(cluster, d, "the periodic commit", Driver::commit_if_due);
         assert!(due, "not due at the interval");
         assert_eq!(waits(&d), [Wait::Sent(HOUR)]);
-        assert!(d.consumer.held.is_none(), "the periodic commit is held");
         assert_eq!(committed(&brokers, &group), Some(1));
         assert!(!d.commit_if_due(), "due again with no time passed");
         // Stopped any earlier, the feed holds its periodic commit without
@@ -2544,6 +2543,7 @@ mod cluster {
         drive(&mut d, "the unit is buffered", |d| {
             !d.core.lock().ready.is_empty()
         });
+        d.call_bound = HOUR;
         acknowledge_first(&d);
         let assigned = d.consumer.assignment().unwrap();
         d.consumer
@@ -2552,10 +2552,12 @@ mod cluster {
             .lock()
             .unwrap()
             .push_back(Intent::Revoke(assigned));
-        d.serve_intents();
+        let (cluster, d, ()) =
+            on_driver_answered(cluster, d, "the revocation", Driver::serve_intents);
         assert_eq!(owns(&d), 0);
         assert_eq!(committed(&brokers, &group), Some(1));
         admission.stop();
+        drop((d, cluster));
     }
 
     /// Pins that a rebalance error resumes the partitions the thread paused:
@@ -2783,21 +2785,27 @@ mod cluster {
         drive(&mut d, "the unit is buffered", |d| {
             !d.core.lock().ready.is_empty()
         });
+        d.call_bound = HOUR;
         acknowledge_first(&d);
         // A code librdkafka does not retry on its own.
         cluster.request_errors(
             RDKafkaApiKey::OffsetCommit,
             &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_OFFSET_METADATA_TOO_LARGE],
         );
-        d.commit_finished("periodic");
+        let (cluster, d, _) = on_driver_answered(cluster, d, "the refused commit", |d| {
+            d.commit_finished("periodic")
+        });
         assert_eq!(
             committed(&brokers, &group),
             None,
             "the refused commit landed"
         );
-        d.commit_finished("periodic");
+        let (cluster, d, _) = on_driver_answered(cluster, d, "the commit made again", |d| {
+            d.commit_finished("periodic")
+        });
         assert_eq!(committed(&brokers, &group), Some(1));
         admission.stop();
+        drop((d, cluster));
     }
 
     /// Pins that a message read for a partition the tracker gave up is
@@ -2835,6 +2843,7 @@ mod cluster {
         drive(&mut d, "the unit waits at the gate", |d| {
             !d.core.lock().gating.is_empty()
         });
+        d.call_bound = HOUR;
         let assigned = d.consumer.assignment().unwrap();
         d.consumer
             .context()
@@ -2842,9 +2851,11 @@ mod cluster {
             .lock()
             .unwrap()
             .push_back(Intent::Revoke(assigned));
-        d.serve_intents();
+        let (cluster, d, ()) =
+            on_driver_answered(cluster, d, "the revocation", Driver::serve_intents);
         assert!(d.core.lock().gating.is_empty());
         assert_eq!(committed(&brokers, &group), Some(0), "the unit is open");
+        drop((d, cluster));
     }
 
     /// Pins that units waiting at the gate count against the buffer: with
@@ -4787,6 +4798,7 @@ mod cluster {
         let group = spate_test::unique_name("rebalance-marker");
         let (_, _, _, mut d) = parts_for(&brokers, &group);
         served_to(&mut d, 3);
+        d.call_bound = HOUR;
         let assigned = d.consumer.assignment().unwrap();
         for intent in [Intent::Revoke(assigned.clone()), Intent::Assign(assigned)] {
             d.consumer
@@ -4796,9 +4808,12 @@ mod cluster {
                 .unwrap()
                 .push_back(intent);
         }
-        d.serve_intents();
+        let (cluster, d, ()) =
+            on_driver_answered(cluster, d, "the rebalance", Driver::serve_intents);
         assert_eq!(position(&d), Offset::Invalid, "before the first poll");
-        d.commit_finished("periodic");
+        let (cluster, mut d, _) = on_driver_answered(cluster, d, "the periodic commit", |d| {
+            d.commit_finished("periodic")
+        });
         assert!(
             committed(&brokers, &group).is_none_or(|at| at <= 0),
             "a position from before the rebalance reached a commit"
@@ -4806,6 +4821,7 @@ mod cluster {
         drive(&mut d, "the units come again", |d| {
             d.core.lock().gating.len() == 2
         });
+        drop((d, cluster));
     }
 
     /// Pins that a marker behind a partition paused by a full buffer passes
@@ -4881,21 +4897,33 @@ mod cluster {
             "the fetch error reaches the poll",
             |d| matches!(d.core.lock().signal.check(), Err(e) if e.kind == FeedErrorKind::Retryable),
         );
-        d.commit_finished("periodic");
+        d.call_bound = HOUR;
+        let (cluster, mut d, _) = on_driver_answered(cluster, d, "the first commit", |d| {
+            d.commit_finished("periodic")
+        });
         assert_eq!(committed(&brokers, &group), Some(0));
         let admission = admission(&config, &core, &producer, STEP);
-        let deliveries = received(&mut d, &feed, admission, 1);
-        d.commit_finished("periodic");
+        drive(&mut d, "the unit is buffered", |d| {
+            !d.core.lock().ready.is_empty()
+        });
+        let delivery = feed.receive(1).unwrap().pop().unwrap();
+        // Stopped any earlier, the feed holds its periodic commit without
+        // waiting for the group's answer.
+        let (cluster, mut d, _) = on_driver_answered(cluster, d, "the periodic commit", |d| {
+            d.commit_finished("periodic")
+        });
         assert!(
             committed(&brokers, &group).is_none_or(|at| at <= 0),
             "the commit passed a unit not finished"
         );
-        feed.acknowledge(deliveries[0].receipt).unwrap();
+        admission.stop();
+        feed.acknowledge(delivery.receipt).unwrap();
         served_to(&mut d, 2);
         let mut closing = feed.close(Duration::from_secs(10)).expect("a close");
         consumer::run(d);
         assert_eq!(closing.try_outcome(), Some(Ok(())));
         assert_eq!(committed(&brokers, &group), Some(2));
+        drop(cluster);
     }
 
     /// Pins that a message naming no unit holds a marker behind it until its
@@ -4914,11 +4942,15 @@ mod cluster {
         let group = spate_test::unique_name("no-unit-marker");
         let (_, _, _, mut d) = parts_for(&brokers, &group);
         served_to(&mut d, 2);
-        d.commit_finished("periodic");
+        d.call_bound = HOUR;
+        let (cluster, d, _) = on_driver_answered(cluster, d, "the periodic commit", |d| {
+            d.commit_finished("periodic")
+        });
         assert!(
             committed(&brokers, &group).is_none_or(|at| at <= 0),
             "the commit passed a write not confirmed"
         );
+        drop((d, cluster));
     }
 
     /// Finish every unit waiting at the gate.
@@ -4941,8 +4973,11 @@ mod cluster {
         drive(&mut d, "the units are read", |d| {
             d.core.lock().gating.len() == 2
         });
+        d.call_bound = HOUR;
         finish_gated(&d);
-        d.commit_finished("periodic");
+        let (cluster, mut d, _) = on_driver_answered(cluster, d, "the first commit", |d| {
+            d.commit_finished("periodic")
+        });
         assert_eq!(committed(&brokers, &group), Some(2));
 
         // A first Fetch at the partition's end reports the end in place of an
@@ -4956,7 +4991,9 @@ mod cluster {
             d.core.lock().gating.len() == 2
         });
         served_to(&mut d, 3);
-        d.commit_finished("periodic");
+        let (cluster, d, _) = on_driver_answered(cluster, d, "the commit read again", |d| {
+            d.commit_finished("periodic")
+        });
         assert_eq!(
             committed(&brokers, &group),
             Some(0),
@@ -4964,8 +5001,11 @@ mod cluster {
         );
 
         finish_gated(&d);
-        d.commit_finished("periodic");
+        let (cluster, d, _) = on_driver_answered(cluster, d, "the last commit", |d| {
+            d.commit_finished("periodic")
+        });
         assert_eq!(committed(&brokers, &group), Some(3));
+        drop((d, cluster));
     }
 
     /// Pins that closing a latched feed settles at once with the latched
@@ -5516,6 +5556,28 @@ mod cluster {
         d.waits.lock().unwrap().clone()
     }
 
+    /// Run `f` on `d` as [`on_driver`] does, and assert that the group
+    /// answered each commit `f` sent: each wait had more than `HANG` to run,
+    /// none was cut short, and none is held.
+    fn on_driver_answered<T: Send + 'static>(
+        cluster: MockKafka,
+        d: Driver,
+        what: &str,
+        f: impl FnOnce(&mut Driver) -> T + Send + 'static,
+    ) -> (MockKafka, Driver, T) {
+        let before = waits(&d).len();
+        let (cluster, d, out) = on_driver(cluster, d, what, f);
+        let waits = waits(&d);
+        assert!(
+            waits[before..]
+                .iter()
+                .all(|w| matches!(w, Wait::Sent(b) if *b > HANG)),
+            "{what}: {waits:?}"
+        );
+        assert!(d.consumer.held.is_none(), "{what}: a commit is held");
+        (cluster, d, out)
+    }
+
     /// Pins that a commit the group does not answer returns, counts as failed,
     /// and is held. Regression for #1772.
     #[test]
@@ -5968,8 +6030,8 @@ mod cluster {
         let feed = feed_over(&core, &producer, None);
         let _closing = feed.close(HOUR).expect("a close");
         answering_late(&cluster);
-        let (cluster, d, ()) = on_driver(cluster, d, "the revocation", Driver::serve_intents);
-        assert!(d.consumer.held.is_none(), "the answered commit is held");
+        let (cluster, d, ()) =
+            on_driver_answered(cluster, d, "the revocation", Driver::serve_intents);
         assert_eq!(committed(&brokers, &group), Some(1));
         drop((d, cluster, feed));
     }
@@ -6022,11 +6084,11 @@ mod cluster {
         let brokers = cluster.bootstrap_servers();
         d.call_bound = HOUR;
         answering_late(&cluster);
-        let (cluster, d, committed_now) = on_driver(cluster, d, "the periodic commit", |d| {
-            d.commit_finished("periodic")
-        });
+        let (cluster, d, committed_now) =
+            on_driver_answered(cluster, d, "the periodic commit", |d| {
+                d.commit_finished("periodic")
+            });
         assert!(committed_now, "an answered commit counted as failed");
-        assert!(d.consumer.held.is_none(), "the answered commit is held");
         assert_eq!(committed(&brokers, &group), Some(1));
         drop((d, cluster));
     }

@@ -1364,12 +1364,7 @@ mod tests {
     /// once the clock passes the bound.
     #[test]
     fn the_connect_bound_runs_on_the_clock_connect_is_given() {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let brokers = listener.local_addr().unwrap().to_string();
-        std::thread::spawn(move || {
-            let held: Vec<_> = listener.incoming().collect();
-            drop(held);
-        });
+        let brokers = spate_test_support::silent_server().to_string();
         let section: spate_core::config::FeedSection = serde_yaml::from_str(&format!(
             "kafka:\n  brokers: \"{brokers}\"\n  group_id: workers\n  topic: {WORK}\n  \
              retry_topic: {RETRY}\n  dead_letter_topic: {DEAD}\n  attempt_topic: {ATTEMPTS}\n  \

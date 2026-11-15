@@ -2338,7 +2338,39 @@ mod cluster {
         let brokers = cluster.bootstrap_servers();
         let group = spate_test::unique_name("poisoned-lost-revoke");
         let (_, _core, _producer, mut d) = parts_for(&brokers, &group);
-        drive(&mut d, "the driver owns its partitions", |d| owns(d) == 2);
+        queue_a_lost_revocation(&cluster, &mut d);
+        let context = Arc::clone(d.consumer.context());
+        let _ = std::thread::spawn(move || {
+            let _held = context.intents.lock().unwrap();
+            panic!("poisoning the intent lock");
+        })
+        .join();
+        let dropped = returns_within(HANG, move || drop(d));
+        if !dropped {
+            // Its consumer is still connected; dropping it would wait on it.
+            std::mem::forget(cluster);
+        }
+        assert!(dropped, "dropping the driver did not return");
+    }
+
+    /// Pins that dropping the driver answers a lost assignment's revocation
+    /// it deferred. The consumer's close waits on that answer and has no
+    /// other source of it.
+    #[test]
+    fn dropping_a_driver_with_a_lost_revocation_queued_returns() {
+        let cluster = cluster_with(0);
+        let brokers = cluster.bootstrap_servers();
+        let group = spate_test::unique_name("drop-lost-revoke");
+        let (_, _core, _producer, mut d) = parts_for(&brokers, &group);
+        queue_a_lost_revocation(&cluster, &mut d);
+        assert!(d.consumer.assignment_lost(), "the assignment is not lost");
+        assert_returns(cluster, HANG, "dropping the driver", move || drop(d));
+    }
+
+    /// Leave `d` owning its partitions with a lost assignment's revocation
+    /// deferred on its queue and unserved.
+    fn queue_a_lost_revocation(cluster: &MockKafka, d: &mut Driver) {
+        drive(d, "the driver owns its partitions", |d| owns(d) == 2);
         cluster.request_errors(
             RDKafkaApiKey::Heartbeat,
             &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_UNKNOWN_MEMBER_ID],
@@ -2353,18 +2385,6 @@ mod cluster {
                 .iter()
                 .any(|i| matches!(i, Intent::Revoke(_)))
         });
-        let context = Arc::clone(d.consumer.context());
-        let _ = std::thread::spawn(move || {
-            let _held = context.intents.lock().unwrap();
-            panic!("poisoning the intent lock");
-        })
-        .join();
-        let dropped = returns_within(HANG, move || drop(d));
-        if !dropped {
-            // Its consumer is still connected; dropping it would wait on it.
-            std::mem::forget(cluster);
-        }
-        assert!(dropped, "dropping the driver did not return");
     }
 
     /// Pins that a panic on the feed's thread while it holds partitions

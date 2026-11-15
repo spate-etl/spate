@@ -29,7 +29,7 @@
 //! objects listed beside it while their bytes stay within the target.
 
 use crate::config::Compression;
-use crate::fetch::ObjectEntry;
+use crate::fetch::{ObjectEntry, event_time_ms};
 use crate::framer::Codec;
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -124,7 +124,9 @@ pub struct DescriptorObject {
     /// precondition failure instead of a silent content splice.
     pub etag: Option<String>,
     /// Last-modified time (ms since epoch), used as the records' event time.
-    /// A publisher with no time for the object writes `NO_EVENT_TIME_MS`.
+    /// A publisher with no time for the object writes 0 or
+    /// [`NO_EVENT_TIME_MS`](spate_core::record::NO_EVENT_TIME_MS), and both
+    /// read as no event time.
     pub last_modified_ms: i64,
 }
 
@@ -243,7 +245,7 @@ impl SplitDescriptor {
                 key: o.key.clone(),
                 size: o.size,
                 etag: o.etag.clone(),
-                last_modified_ms: o.last_modified_ms,
+                last_modified_ms: event_time_ms(o.last_modified_ms),
             })
             .collect()
     }
@@ -696,6 +698,17 @@ mod tests {
             etag: etag.map(str::to_owned),
             last_modified_ms: 7,
         }
+    }
+
+    /// A descriptor object at 0, which a publisher writes for no time,
+    /// reads as no event time, and any other time reads as itself.
+    #[test]
+    fn a_descriptor_time_of_zero_reads_as_no_event_time() {
+        let mut objects = vec![ranged_object(10, None), ranged_object(10, None)];
+        objects[0].last_modified_ms = 0;
+        let entries = SplitDescriptor::new(objects).to_entries();
+        let times: Vec<i64> = entries.iter().map(|e| e.last_modified_ms).collect();
+        assert_eq!(times, [spate_core::record::NO_EVENT_TIME_MS, 7]);
     }
 
     #[test]

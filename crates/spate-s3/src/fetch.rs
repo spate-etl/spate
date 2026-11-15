@@ -73,15 +73,19 @@ pub(crate) struct ObjectEntry {
     pub(crate) last_modified_ms: i64,
 }
 
-/// The event time an object's records carry for a store time `t`.
-/// `object_store` gives the epoch for a response with no `Last-Modified`, and
-/// no object dates from it, so the epoch reads as no event time.
-pub(crate) fn event_time_ms(t: chrono::DateTime<chrono::Utc>) -> i64 {
-    if t == chrono::DateTime::UNIX_EPOCH {
-        NO_EVENT_TIME_MS
-    } else {
-        t.timestamp_millis()
-    }
+/// The event time an object's records carry for a store time of `ms`
+/// milliseconds since the epoch. `object_store` gives the epoch for a HEAD with
+/// no `Last-Modified`, and no object dates from it, so the epoch reads as no
+/// event time.
+pub(crate) fn event_time_ms(ms: i64) -> i64 {
+    if ms == 0 { NO_EVENT_TIME_MS } else { ms }
+}
+
+/// The event time for an RFC 3339 time a notification or a listing carries,
+/// [`NO_EVENT_TIME_MS`] when it does not parse.
+pub(crate) fn event_time_rfc3339(t: &str) -> i64 {
+    chrono::DateTime::parse_from_rfc3339(t)
+        .map_or(NO_EVENT_TIME_MS, |t| event_time_ms(t.timestamp_millis()))
 }
 
 /// Messages a fetcher streams to its lane, strictly in stream order.
@@ -93,7 +97,8 @@ pub(crate) enum ChunkMsg {
         ordinal: u32,
         /// Object key.
         key: String,
-        /// The object's last-modified time (ms since epoch).
+        /// The object's last-modified time (ms since epoch), or
+        /// [`NO_EVENT_TIME_MS`] when it has none.
         last_modified_ms: i64,
     },
     /// The next bytes of the current object (at most `chunk_bytes` each).
@@ -143,7 +148,9 @@ pub(crate) struct Overwrite {
     pub(crate) etag: Option<String>,
     /// The current size in bytes.
     pub(crate) size: u64,
-    /// The current last-modified time (ms since epoch).
+    /// The current last-modified time (ms since epoch), or
+    /// [`NO_EVENT_TIME_MS`] when the HEAD carried none. The re-enqueued body
+    /// then holds no `eventTime`, since no time maps to it.
     pub(crate) last_modified_ms: i64,
 }
 
@@ -854,7 +861,7 @@ async fn head_after_overwrite(
                     key: entry.key.clone(),
                     etag,
                     size: meta.size,
-                    last_modified_ms: event_time_ms(meta.last_modified),
+                    last_modified_ms: event_time_ms(meta.last_modified.timestamp_millis()),
                 }));
             }
             Err(e) => {
@@ -3794,13 +3801,9 @@ mod tests {
     /// `Last-Modified`, reads as no event time, and any other time as itself.
     #[test]
     fn the_epoch_reads_as_no_event_time() {
-        let at = |ms| chrono::DateTime::from_timestamp_millis(ms).unwrap();
-        assert_eq!(
-            event_time_ms(chrono::DateTime::UNIX_EPOCH),
-            NO_EVENT_TIME_MS
-        );
-        assert_eq!(event_time_ms(at(1)), 1);
-        assert_eq!(event_time_ms(at(1_760_000_000_000)), 1_760_000_000_000);
+        assert_eq!(event_time_ms(0), NO_EVENT_TIME_MS);
+        assert_eq!(event_time_ms(1), 1);
+        assert_eq!(event_time_ms(1_760_000_000_000), 1_760_000_000_000);
     }
 
     /// Pins that a HEAD answering at the epoch, as one with no

@@ -13,7 +13,7 @@
 //! any failure answer's body, and fails a listing request whose page names
 //! the request's own continuation token with [`ListingStalled`].
 
-use crate::fetch::{ObjectEntry, event_time_ms};
+use crate::fetch::{ObjectEntry, event_time_rfc3339};
 use bytes::Bytes;
 use object_store::ClientOptions;
 use object_store::client::{
@@ -21,7 +21,6 @@ use object_store::client::{
     HttpResponseBody, HttpService, ReqwestConnector,
 };
 use object_store::path::Path;
-use spate_core::record::NO_EVENT_TIME_MS;
 use std::sync::{Arc, Mutex};
 
 const CONTENTS_OPEN: &[u8] = b"<Contents>";
@@ -255,8 +254,7 @@ fn unaddressable(element: &[u8]) -> Option<ObjectEntry> {
     if addressable(&contents.key) {
         return None;
     }
-    let last_modified_ms = chrono::DateTime::parse_from_rfc3339(&contents.last_modified)
-        .map_or(NO_EVENT_TIME_MS, |t| event_time_ms(t.to_utc()));
+    let last_modified_ms = event_time_rfc3339(&contents.last_modified);
     Some(ObjectEntry {
         key: contents.key,
         size: contents.size,
@@ -446,7 +444,10 @@ mod tests {
     fn an_unreadable_last_modified_gives_no_event_time() {
         let input = page(&["d//dbl.ndjson"], None).replace("2026-10-11T13:38:17.000Z", "soon");
         let (_, removed) = filter_page(input.as_bytes()).expect("one key removed");
-        assert_eq!(removed[0].last_modified_ms, NO_EVENT_TIME_MS);
+        assert_eq!(
+            removed[0].last_modified_ms,
+            spate_core::record::NO_EVENT_TIME_MS
+        );
     }
 
     /// A response to a request that is not a `ListObjectsV2` listing passes

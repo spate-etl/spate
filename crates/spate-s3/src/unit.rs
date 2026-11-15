@@ -14,7 +14,7 @@
 //! [`re_enqueue_body`] writes the notification a worker publishes for a key
 //! overwritten while it was read.
 
-use crate::fetch::{ObjectEntry, Overwrite, event_time_ms};
+use crate::fetch::{ObjectEntry, Overwrite, event_time_rfc3339};
 use crate::framer::Codec;
 use crate::listing::addressable;
 use crate::split::{
@@ -716,8 +716,7 @@ fn announced_part(
     };
     let last_modified_ms = event_time
         .as_deref()
-        .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
-        .map_or(NO_EVENT_TIME_MS, |t| event_time_ms(t.to_utc()));
+        .map_or(NO_EVENT_TIME_MS, event_time_rfc3339);
     let entry = ObjectEntry {
         key,
         size,

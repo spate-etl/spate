@@ -223,7 +223,9 @@ impl Lister {
                 key: meta.location.to_string(),
                 size: meta.size,
                 etag: meta.e_tag,
-                last_modified_ms: crate::fetch::event_time_ms(meta.last_modified),
+                last_modified_ms: crate::fetch::event_time_ms(
+                    meta.last_modified.timestamp_millis(),
+                ),
             };
             let fits =
                 addressable(&entry.key) && entry.key.len() as u64 <= LOCATION_OBJECT_MAX_BYTES;
@@ -2373,8 +2375,8 @@ mod tests {
         assert_eq!(keys, ["data/d//dbl.ndjson", "data/a"]);
     }
 
-    /// Pins that a listed object whose `LastModified` is the epoch, the time
-    /// `object_store` gives for none, is published with no event time.
+    /// Pins that a listed object whose `LastModified` the store sent as the
+    /// epoch is published with no event time.
     #[test]
     fn a_listed_object_at_the_epoch_has_no_event_time() {
         let rt = runtime();

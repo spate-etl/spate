@@ -177,6 +177,10 @@ Consequences worth stating outright:
   original still runs) leaves the newcomer a permanent shadow: on the assembly
   path it fails to build; on the direct path it runs gauge-silent for its whole
   life. In-process blue-green is therefore drop-then-build, not build-then-drop.
+- **A close left running keeps its claims.** When a source or feed has not
+  closed by the time `run` gives up on it, the close goes on in the background
+  and keeps the source's and the feed's series claimed. A pipeline rebuilt in
+  the same process with the same name fails to build until that close ends.
 - **Ownership is process-local.** Horizontal replicas never collide: each pod is
   its own recorder and Prometheus attaches `instance` at scrape, so identical
   label sets from different pods are different TSDB series. The one way to

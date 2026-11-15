@@ -59,13 +59,24 @@ revocation, one choreography tested constantly by every rebalance:
    has queued and gives up the units it holds, within what is left of the
    deadline. A unit it cannot give up in time comes back after the feed's
    redelivery delay. A feed whose backend gives a commit or a group leave no
-   bound can finish them after the deadline, and `run` waits for it; the
+   bound can finish them after the deadline, inside the grace of step 5; the
    connector page's "Stop" section says when.
-5. **The source closes.** It releases what it holds, such as a consumer
-   group membership.
+5. **The source and the feed close.** The source releases what it holds, such
+   as a consumer group membership, and then the feed drops. Both happen while
+   the I/O runtime still runs, and the runtime stops after them.
 
-The I/O runtime stops only after the source has closed. Then everything
-joins and `run` returns an `ExitReport`.
+`run` then returns an `ExitReport`.
+
+`run` waits for step 5 until 3s past the drain deadline. When the final commit
+ends after the deadline, the 3s count from the end of the commit instead. A
+source or feed that has not closed by then is logged at `WARN`, and `run`
+returns while the close goes on in the background. The close keeps the I/O
+runtime until it ends.
+
+A process that exits once `run` returns stops that close part way. A consumer
+group the source belonged to then waits out its session timeout before it gives
+the member's partitions to another instance. Nothing is lost, because the final
+commit ran before step 5.
 
 ## Sizing `drain_timeout` for Kubernetes
 
@@ -77,10 +88,11 @@ kubelet sends SIGKILL. The rule:
 :::warning
 Keep `drain_timeout` comfortably **below** `terminationGracePeriodSeconds`.
 Steps 1 to 3 run inside the budget; the gap has to absorb what follows it: the
-pool's one-second backstop, the final commit (step 4), the source closing (step
-5) and process teardown. The defaults (25s vs 30s) encode this; if you raise
-one, raise the other. With a feed that hands back, the stop's reading and the
-feed's close also run inside the budget, and startup refuses a `drain_timeout`
+pool's one-second backstop, the final commit (step 4), the source and the feed
+closing (step 5) and process teardown. `run` stops waiting for step 5 3s past
+the drain deadline, or 3s past a final commit that ends later. The defaults (25s vs 30s)
+encode this; if you raise one, raise the other. With a feed that hands back,
+the stop's reading and the feed's close also run inside the budget, and startup refuses a `drain_timeout`
 of 5s or less. A feed's close that outlasts what is left of the budget falls
 into the gap too.
 A source that bounds its final commit and its close against a backend that

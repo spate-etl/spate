@@ -124,6 +124,7 @@ pub struct DescriptorObject {
     /// precondition failure instead of a silent content splice.
     pub etag: Option<String>,
     /// Last-modified time (ms since epoch), used as the records' event time.
+    /// A publisher with no time for the object writes `NO_EVENT_TIME_MS`.
     pub last_modified_ms: i64,
 }
 

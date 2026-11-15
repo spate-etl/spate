@@ -51,6 +51,7 @@ use object_store::{
 };
 use spate_core::backoff::Backoff;
 use spate_core::error::{ErrorClass, SourceError};
+use spate_core::record::NO_EVENT_TIME_MS;
 use std::future::Future;
 use std::pin::{Pin, pin};
 use std::sync::Arc;
@@ -68,7 +69,19 @@ pub(crate) struct ObjectEntry {
     /// ETag from the listing, if the store reports one.
     pub(crate) etag: Option<String>,
     /// Last-modified time (ms since epoch), used as the records' event time.
+    /// [`NO_EVENT_TIME_MS`] when the object has none.
     pub(crate) last_modified_ms: i64,
+}
+
+/// The event time an object's records carry for a store time `t`.
+/// `object_store` gives the epoch for a response with no `Last-Modified`, and
+/// no object dates from it, so the epoch reads as no event time.
+pub(crate) fn event_time_ms(t: chrono::DateTime<chrono::Utc>) -> i64 {
+    if t == chrono::DateTime::UNIX_EPOCH {
+        NO_EVENT_TIME_MS
+    } else {
+        t.timestamp_millis()
+    }
 }
 
 /// Messages a fetcher streams to its lane, strictly in stream order.
@@ -841,7 +854,7 @@ async fn head_after_overwrite(
                     key: entry.key.clone(),
                     etag,
                     size: meta.size,
-                    last_modified_ms: meta.last_modified.timestamp_millis(),
+                    last_modified_ms: event_time_ms(meta.last_modified),
                 }));
             }
             Err(e) => {
@@ -3775,6 +3788,36 @@ mod tests {
                 last_modified_ms: 1_760_000_000_000,
             }
         );
+    }
+
+    /// Pins that the epoch, which `object_store` gives for a missing
+    /// `Last-Modified`, reads as no event time, and any other time as itself.
+    #[test]
+    fn the_epoch_reads_as_no_event_time() {
+        let at = |ms| chrono::DateTime::from_timestamp_millis(ms).unwrap();
+        assert_eq!(
+            event_time_ms(chrono::DateTime::UNIX_EPOCH),
+            NO_EVENT_TIME_MS
+        );
+        assert_eq!(event_time_ms(at(1)), 1);
+        assert_eq!(event_time_ms(at(1_760_000_000_000)), 1_760_000_000_000);
+    }
+
+    /// Pins that a HEAD answering at the epoch, as one with no
+    /// `Last-Modified` does, reports the overwrite with no event time.
+    #[tokio::test]
+    async fn an_overwrite_whose_head_has_no_time_carries_no_event_time() {
+        let (inner, entry) = thirty_bytes().await;
+        let answer = ObjectMeta {
+            last_modified: chrono::DateTime::UNIX_EPOCH,
+            ..meta(Some("new"), 99)
+        };
+        let store = Arc::new(HeadStore::new(inner, 2).head_answers(vec![Ok(answer)]));
+        let msgs = fetch_from(Arc::clone(&store), entry, notified(None), None).await;
+        let SplitFailure::Overwritten(overwrite) = last_failure(msgs) else {
+            panic!("not an overwrite");
+        };
+        assert_eq!(overwrite.last_modified_ms, NO_EVENT_TIME_MS);
     }
 
     /// Pins that a failed precondition on a lister's unit or on a read that

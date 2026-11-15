@@ -1635,12 +1635,7 @@ impl startup::QueueAttributes for Hangs {
 /// Regression for #1218.
 #[test]
 fn connect_ends_at_the_bound_on_the_clock_it_is_given() {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = listener.local_addr().unwrap();
-    std::thread::spawn(move || {
-        let held: Vec<_> = listener.incoming().collect();
-        drop(held);
-    });
+    let addr = spate_test_support::silent_server();
     let section: FeedSection = serde_yaml::from_str(&format!(
         "sqs: {{ queue_url: \"http://{addr}/000000000000/jobs\", \
          region: eu-west-2, endpoint: \"http://{addr}\" }}"

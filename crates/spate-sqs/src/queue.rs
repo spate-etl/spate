@@ -350,7 +350,7 @@ mod tests {
     use crate::test_stub::{ScriptedCredentials, queue_with, sqs_stub};
     use aws_credential_types::provider::error::CredentialsError;
     use aws_sdk_sqs::config::{BehaviorVersion, Credentials, Region, SharedCredentialsProvider};
-    use spate_test_support::{TestCa, native_certs, serve_tls};
+    use spate_test_support::{TestCa, native_certs, serve_tls, silent_server};
     use std::sync::Arc;
     use std::sync::atomic::Ordering;
     use std::time::Duration;
@@ -463,21 +463,8 @@ mod tests {
 
     /// An [`SdkQueue`] over a listener that reads every request and never
     /// answers, with tokio time paused.
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "the stub server's tasks end when the test's runtime drops"
-    )]
     async fn silent_queue() -> SdkQueue {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            while let Ok((mut tcp, _)) = listener.accept().await {
-                tokio::spawn(async move {
-                    let _ = tokio::io::copy(&mut tcp, &mut tokio::io::sink()).await;
-                });
-            }
-        });
-        let queue = queue_at(&format!("http://{addr}")).await;
+        let queue = queue_at(&format!("http://{}", silent_server())).await;
         tokio::time::pause();
         queue
     }

@@ -45,21 +45,18 @@ fn a_rolling_restart_moves_leaders_and_loses_nothing() {
     });
 
     for (node, wave) in (1..=CLUSTER_NODES).zip(waves) {
-        // Redpanda places leaders unevenly, and leaves a restarted node leading
-        // nothing until its balancer runs.
-        let states = h.partition_states(&params.topic).expect("partition states");
-        if states.iter().all(|p| p.leader != node) {
+        // Redpanda places leaders unevenly, and with its balancer off a
+        // restarted node leads nothing until a test moves a leader to it. One
+        // read decides: another node may still answer with the leaders from
+        // before a move.
+        let leads = || {
+            h.partition_states(&params.topic)
+                .is_some_and(|states| states.iter().any(|p| p.leader == node))
+        };
+        if !leads() {
             h.transfer_leader(&params.topic, 0, node);
-            wait_until(DEADLINE, "the moved leader", || {
-                h.partition_states(&params.topic)
-                    .is_some_and(|states| states.iter().any(|p| p.leader == node))
-            });
+            wait_until(DEADLINE, &format!("node {node} to lead a partition"), leads);
         }
-        let states = h.partition_states(&params.topic).expect("partition states");
-        assert!(
-            states.iter().any(|p| p.leader == node),
-            "node {node} leads a partition before it stops: {states:?}"
-        );
 
         h.stop_broker(node);
         wait_until(DEADLINE, "every partition to lead elsewhere", || {

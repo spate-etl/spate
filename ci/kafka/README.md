@@ -99,7 +99,7 @@ as v26.1.20 after v26.2.6, sorts below the pin and is not proposed.
 
 `spate_test_support::KafkaCluster` starts three nodes of the selected broker on
 a Docker network the caller names, with node ids 1 to 3. Spate's
-`e2e_leader_move` and one test of spate-kafka's `kafka_broker` suite run on it.
+`e2e_leader_move` and two tests of spate-kafka's `kafka_broker` suite run on it.
 Each node is a `KafkaBroker` with a cluster arm per broker:
 
 - Apache Kafka runs three KRaft nodes, each a broker and a controller. Its
@@ -117,6 +117,12 @@ spate-test-support's `kafka-client` feature, which brings in rdkafka. A node
 runs no command once ready: a restart would run it again before the node had
 rejoined.
 
+On Redpanda, `await_brokers` then turns the leader balancer off, so a leader
+moves only when a test moves it or stops its node. The setting is part of the
+cluster's configuration, so it holds when a node restarts.
+`KafkaCluster::leader_balancer` reads it back, and gives `None` on Apache Kafka,
+which has no such setting.
+
 `KafkaCluster::stop` stops a node with a two-minute timeout and fails when the
 runtime had to kill it.
 
@@ -127,10 +133,18 @@ the node finds the peer once it runs. Given a DNS server, Docker would pass the
 lookup to the host's resolver, and some answer with a not-found that Redpanda
 keeps for up to an hour.
 
-Redpanda places leaders unevenly, and a restarted node leads nothing until its
-balancer moves leaders back. `KafkaCluster::transfer_leadership` moves one
-through `rpk`, and a failed move names rpk's exit code and output. Apache Kafka
-has no transfer a test can ask for, so it returns an error there.
+Redpanda places leaders unevenly. With the balancer off, a restarted node leads
+nothing until a test moves a leader to it. `KafkaCluster::transfer_leadership`
+moves one through `rpk`, giving it every node's admin API, because `rpk` sends
+the move to the current leader's. `rpk` exits 0 when it does not begin the move,
+so the method fails unless `rpk` reports that the move began, and the error
+carries what `rpk` printed. Apache Kafka has no transfer a test can ask for, so
+the method returns an error there.
+
+While a partition has no leader, a Redpanda node's metadata names a guess: the
+previous leader, or a random replica when the previous leader was that node.
+Nodes also learn of a new leader at different moments. A test that decides on
+a leader reads `partition_states` once and acts on that read.
 
 When a test panics while a cluster runs, the cluster writes each node's state
 and the tail of its output to stderr as it drops, with `rpk cluster health` from

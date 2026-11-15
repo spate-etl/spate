@@ -34,8 +34,15 @@ pub const BROKER_FROM_INSIDE: &str = "localhost:9093";
 /// listens on it, so the lookup fails at once.
 const NO_UPSTREAM: &str = "127.0.0.1";
 
-/// The admin API `rpk` reaches from inside a Redpanda node.
-const ADMIN_HOSTS: &str = "admin.hosts=localhost:9644";
+/// The container port of a Redpanda node's admin API.
+const REDPANDA_ADMIN_PORT: u16 = 9644;
+
+/// How long an `rpk` command a cluster runs may take. `rpk` retries a request
+/// on its own, and the `docker` profile ends no slow test.
+const RPK_TIMEOUT: &str = "20";
+
+/// The flag that turns Redpanda's leader balancer on.
+const LEADER_BALANCER: &str = "enable_leader_balancer";
 
 /// The container port Apache Kafka's KRaft controllers reach each other on.
 const CONTROLLER_PORT: u16 = 9094;
@@ -159,13 +166,31 @@ impl Member {
 
     /// Each node's address on `port`, in node order.
     fn peers(&self, port: u16) -> impl Iterator<Item = (i32, String)> + '_ {
-        (1..=CLUSTER_NODES)
-            .map(move |node| (node, format!("{}:{port}", node_host(&self.network, node))))
+        node_addresses(&self.network, port)
     }
 }
 
 fn node_host(network: &str, node: i32) -> String {
     format!("{network}-k{node}")
+}
+
+/// Each node's id and address on `port` for a cluster on `network`, in node
+/// order.
+fn node_addresses(network: &str, port: u16) -> impl Iterator<Item = (i32, String)> + '_ {
+    (1..=CLUSTER_NODES).map(move |node| (node, format!("{}:{port}", node_host(network, node))))
+}
+
+/// The `rpk` option that points it at the admin API on each of `hosts`.
+fn admin_hosts(hosts: impl IntoIterator<Item = String>) -> String {
+    format!(
+        "admin.hosts={}",
+        hosts.into_iter().collect::<Vec<_>>().join(",")
+    )
+}
+
+/// The `rpk` option for the admin API of the node a command runs on.
+fn local_admin() -> String {
+    admin_hosts([format!("localhost:{REDPANDA_ADMIN_PORT}")])
 }
 
 impl KafkaBroker {
@@ -457,7 +482,9 @@ impl Image for KafkaBroker {
 /// restarted node keeps its port, its id and its data, so it rejoins at the
 /// address clients already hold. The nodes start with no ready condition, so
 /// the caller waits until a client sees all three, which
-/// `KafkaCluster::await_brokers` does under the `kafka-client` feature.
+/// `KafkaCluster::await_brokers` does under the `kafka-client` feature. It
+/// then turns Redpanda's leader balancer off, so a leader moves only when a
+/// test moves it or stops its node.
 ///
 /// A node has no DNS server outside Docker, so it finds a peer once the peer
 /// runs, whatever resolver the host has. A cluster dropped while its thread
@@ -468,6 +495,7 @@ pub struct KafkaCluster {
     broker: Broker,
     nodes: Vec<Container<KafkaBroker>>,
     bootstrap: String,
+    network: String,
 }
 
 impl KafkaCluster {
@@ -510,6 +538,7 @@ impl KafkaCluster {
             broker,
             nodes,
             bootstrap,
+            network: network.to_owned(),
         })
     }
 
@@ -559,13 +588,14 @@ impl KafkaCluster {
             .map_err(|e| format!("start {} node {node}: {e}", self.broker))
     }
 
-    /// Moves the leadership of `topic`'s `partition` to node `node`.
+    /// Begins moving the leadership of `topic`'s `partition` to node `node`.
     ///
     /// # Errors
     ///
-    /// Fails on Apache Kafka, which has no transfer a test can ask for, and
+    /// Fails on Apache Kafka, which has no transfer a test can ask for. Fails
     /// when the command fails, naming its exit code and the tail of its
-    /// output.
+    /// output, and when `rpk` exits 0 without beginning the transfer, with
+    /// what it printed.
     ///
     /// # Panics
     ///
@@ -576,9 +606,26 @@ impl KafkaCluster {
         partition: i32,
         node: i32,
     ) -> Result<(), String> {
-        let command = transfer_command(self.broker, topic, partition, node)?;
+        let command = transfer_command(self.broker, &self.network, topic, partition, node)?;
         let what = format!("move {topic}/{partition} to {} node {node}", self.broker);
-        self.run(node, &what, command).map(drop)
+        let stdout = self.run(node, &what, command)?;
+        transfer_began(&what, &stdout)
+    }
+
+    /// Whether Redpanda's leader balancer is on, as node 1 reads the cluster's
+    /// configuration, or `None` on Apache Kafka, which has no such flag.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the command fails, naming its exit code and the tail of its
+    /// output, and when it prints neither `true` nor `false`.
+    pub fn leader_balancer(&self) -> Result<Option<bool>, String> {
+        let Some(command) = balancer_command(self.broker, &["get", LEADER_BALANCER]) else {
+            return Ok(None);
+        };
+        let what = format!("read {}'s leader balancer flag", self.broker);
+        let stdout = self.run(1, &what, command)?;
+        balancer_flag(&what, &stdout).map(Some)
     }
 
     /// The first node whose container has stopped, named with its exit code
@@ -609,14 +656,18 @@ impl KafkaCluster {
     }
 
     /// Waits until a client on [`KafkaCluster::bootstrap`] sees every node,
-    /// since none of them is ready alone. `timeout` catches a hang.
+    /// since none of them is ready alone, then turns Redpanda's leader
+    /// balancer off. The flag outlives a node's restart. `timeout` catches a
+    /// hung wait, and the command runs under a 20-second `timeout` of its own.
     ///
     /// # Errors
     ///
     /// Fails when the metadata client cannot be created, when a node exits
     /// first, naming the node, and when `timeout` passes, with the last
-    /// metadata read's error or the node ids it listed. A cluster dropped
-    /// while the caller panics on the error writes each node's state and log.
+    /// metadata read's error or the node ids it listed. Fails when the
+    /// balancer command fails, naming its exit code and the tail of its
+    /// output. A cluster dropped while the caller panics on the error writes
+    /// each node's state and log.
     #[cfg(feature = "kafka-client")]
     pub fn await_brokers(&self, timeout: Duration) -> Result<(), String> {
         let probe = metadata_probe(&self.bootstrap)?;
@@ -635,7 +686,14 @@ impl KafkaCluster {
                 self.first_exited()
                     .map(|(node, code)| format!("node {node} {}", exit_clause(code)))
             },
-        )
+        )?;
+        match balancer_command(self.broker, &["set", LEADER_BALANCER, "false"]) {
+            Some(command) => {
+                let what = format!("turn off {}'s leader balancer", self.broker);
+                self.run(1, &what, command).map(drop)
+            }
+            None => Ok(()),
+        }
     }
 
     /// Each partition of `topic` as the cluster's metadata reports it, or
@@ -855,52 +913,85 @@ fn node_index(node: i32) -> usize {
         .unwrap_or_else(|| panic!("no node {node} in a {CLUSTER_NODES}-node cluster"))
 }
 
-/// The command a node runs to move `topic`'s `partition` to node `node`.
-/// Apache Kafka moves a leader by reordering a partition's replicas and
-/// electing the first, and neither its image nor rdkafka can ask for that.
+/// The command a node of a cluster on `network` runs to move `topic`'s
+/// `partition` to node `node`. `rpk` sends the move to the current leader's
+/// admin API, and finds it only among the hosts it is given. Apache Kafka
+/// moves a leader by reordering a partition's replicas and electing the first,
+/// and neither its image nor rdkafka can ask for that.
 fn transfer_command(
     broker: Broker,
+    network: &str,
     topic: &str,
     partition: i32,
     node: i32,
 ) -> Result<Vec<String>, String> {
     match broker {
         Broker::Redpanda => Ok([
-            "rpk",
-            "cluster",
-            "partitions",
-            "transfer-leadership",
-            "-X",
-            ADMIN_HOSTS,
-            "--partition",
+            "rpk".to_owned(),
+            "cluster".to_owned(),
+            "partitions".to_owned(),
+            "transfer-leadership".to_owned(),
+            "-X".to_owned(),
+            admin_hosts(node_addresses(network, REDPANDA_ADMIN_PORT).map(|(_, address)| address)),
+            "--partition".to_owned(),
+            format!("{topic}/{partition}:{node}"),
         ]
-        .into_iter()
-        .map(str::to_owned)
-        .chain([format!("{topic}/{partition}:{node}")])
-        .collect()),
+        .to_vec()),
         Broker::Apache => Err(format!(
             "{broker} has no leadership transfer a test can run"
         )),
     }
 }
 
-/// The command a node runs to report the cluster's health. `timeout` bounds
-/// it, since a report runs while a test fails and the `docker` profile ends
-/// no slow test. Apache Kafka's image has no such command.
+/// What a transfer `what` names gives once `rpk` exits 0 with `stdout`. `rpk`
+/// prints a refused or failed transfer and still exits 0, so only its line
+/// for a transfer that began counts.
+fn transfer_began(what: &str, stdout: &str) -> Result<(), String> {
+    if stdout.contains("Successfully began the partition leadership transfer") {
+        Ok(())
+    } else {
+        Err(format!("{what}: rpk began no transfer\n{stdout}"))
+    }
+}
+
+/// The command a node runs to reach Redpanda's leader balancer flag through
+/// `rpk cluster config` with `action`, under [`RPK_TIMEOUT`]. Apache Kafka has
+/// no such flag.
+fn balancer_command(broker: Broker, action: &[&str]) -> Option<Vec<String>> {
+    match broker {
+        Broker::Redpanda => Some(
+            ["timeout", RPK_TIMEOUT, "rpk", "cluster", "config"]
+                .iter()
+                .chain(action)
+                .map(|arg| (*arg).to_owned())
+                .chain(["-X".to_owned(), local_admin()])
+                .collect(),
+        ),
+        Broker::Apache => None,
+    }
+}
+
+/// The flag `rpk cluster config get` printed as `stdout`, for the read `what`
+/// names.
+fn balancer_flag(what: &str, stdout: &str) -> Result<bool, String> {
+    match stdout.trim() {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        other => Err(format!("{what}: rpk printed {other:?}")),
+    }
+}
+
+/// The command a node runs to report the cluster's health, under
+/// [`RPK_TIMEOUT`], since a report runs while a test fails. Apache Kafka's
+/// image has no such command.
 fn health_command(broker: Broker) -> Option<Vec<String>> {
     match broker {
         Broker::Redpanda => Some(
-            [
-                "timeout",
-                "20",
-                "rpk",
-                "cluster",
-                "health",
-                "-X",
-                ADMIN_HOSTS,
-            ]
-            .map(str::to_owned)
-            .to_vec(),
+            ["timeout", RPK_TIMEOUT, "rpk", "cluster", "health", "-X"]
+                .map(str::to_owned)
+                .into_iter()
+                .chain([local_admin()])
+                .collect(),
         ),
         Broker::Apache => None,
     }
@@ -1107,25 +1198,107 @@ mod tests {
         }
     }
 
-    /// Redpanda moves a leader through rpk, and Apache Kafka refuses, naming
-    /// itself.
+    /// Redpanda moves a leader through rpk with every node's admin API, and
+    /// Apache Kafka refuses, naming itself.
     #[test]
     fn only_redpanda_transfers_leadership() {
         assert_eq!(
-            transfer_command(Broker::Redpanda, "t", 4, 3).unwrap(),
+            transfer_command(Broker::Redpanda, "net", "t", 4, 3).unwrap(),
             [
                 "rpk",
                 "cluster",
                 "partitions",
                 "transfer-leadership",
                 "-X",
-                "admin.hosts=localhost:9644",
+                "admin.hosts=net-k1:9644,net-k2:9644,net-k3:9644",
                 "--partition",
                 "t/4:3",
             ]
         );
-        let err = transfer_command(Broker::Apache, "t", 4, 3).unwrap_err();
+        let err = transfer_command(Broker::Apache, "net", "t", 4, 3).unwrap_err();
         assert!(err.contains("Apache Kafka"), "{err}");
+    }
+
+    /// Each node's address on a port comes in node order, one per node.
+    #[test]
+    fn node_addresses_run_in_node_order() {
+        assert_eq!(
+            node_addresses("net", 9095).collect::<Vec<_>>(),
+            [
+                (1, "net-k1:9095".to_owned()),
+                (2, "net-k2:9095".to_owned()),
+                (3, "net-k3:9095".to_owned()),
+            ]
+        );
+    }
+
+    /// Only rpk's line for a transfer that began counts. A refusal it prints
+    /// while exiting 0 is an error naming the move and carrying the output.
+    #[test]
+    fn only_a_begun_transfer_counts() {
+        let began = "Successfully began the partition leadership transfer(s).\n\n\
+                     Check the new leader assignment with 'rpk topic describe -p TOPIC'.\n";
+        assert_eq!(transfer_began("move t/0 to Redpanda node 3", began), Ok(()));
+        let refused = "failed to transfer the partition leader: unable to get broker URL: \
+                       failed to map brokerID 2 to URL\n";
+        assert_eq!(
+            transfer_began("move t/0 to Redpanda node 3", refused),
+            Err(format!(
+                "move t/0 to Redpanda node 3: rpk began no transfer\n{refused}"
+            ))
+        );
+        assert!(transfer_began("move t/0 to Redpanda node 3", "").is_err());
+    }
+
+    /// Redpanda reaches its leader balancer flag through rpk under a bound,
+    /// and Apache Kafka has no such flag.
+    #[test]
+    fn only_redpanda_has_a_leader_balancer_flag() {
+        assert_eq!(
+            balancer_command(Broker::Redpanda, &["set", LEADER_BALANCER, "false"]).unwrap(),
+            [
+                "timeout",
+                "20",
+                "rpk",
+                "cluster",
+                "config",
+                "set",
+                "enable_leader_balancer",
+                "false",
+                "-X",
+                "admin.hosts=localhost:9644",
+            ]
+        );
+        assert_eq!(
+            balancer_command(Broker::Redpanda, &["get", LEADER_BALANCER]).unwrap(),
+            [
+                "timeout",
+                "20",
+                "rpk",
+                "cluster",
+                "config",
+                "get",
+                "enable_leader_balancer",
+                "-X",
+                "admin.hosts=localhost:9644",
+            ]
+        );
+        assert_eq!(
+            balancer_command(Broker::Apache, &["get", LEADER_BALANCER]),
+            None
+        );
+    }
+
+    /// The flag reads as rpk prints it, and any other output is an error
+    /// naming the read and the output.
+    #[test]
+    fn the_balancer_flag_reads_as_printed() {
+        assert_eq!(balancer_flag("read", "true\n"), Ok(true));
+        assert_eq!(balancer_flag("read", "false\n"), Ok(false));
+        assert_eq!(
+            balancer_flag("read", "no such property\n"),
+            Err("read: rpk printed \"no such property\"".to_owned())
+        );
     }
 
     /// A cluster node's lookups of a name Docker does not know go nowhere,

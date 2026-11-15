@@ -121,7 +121,7 @@ impl Harness {
     ///
     /// # Panics
     ///
-    /// When a node exits first, naming it with its log; when the wait hangs,
+    /// When a node exits first, naming it; when the wait hangs,
     /// with the node ids metadata last listed. On a panic while the cluster
     /// runs, the cluster also writes each node's state, health and log tail
     /// to stderr.

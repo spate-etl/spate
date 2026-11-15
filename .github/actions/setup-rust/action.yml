@@ -62,14 +62,16 @@ runs:
   using: composite
   steps:
     # Written before rust-cache runs, which hashes `CARGO*` variables into its
-    # key. A full-DWARF build of the `spate` end-to-end test binaries exhausted
-    # the runner: `rustc-LLVM ERROR: ... No space left on device`. Both profile
-    # keys: `cargo test` builds the target under `test`, its dependencies under
-    # `dev`.
+    # key. A CI build is never rebuilt in place, so incremental artifacts only
+    # fill the cache. A full-DWARF build of the `spate` end-to-end test binaries
+    # exhausted the runner: `rustc-LLVM ERROR: ... No space left on device`.
+    # Both profile keys: `cargo test` builds the target under `test`, its
+    # dependencies under `dev`.
     - run: |
         set -euo pipefail
         {
           echo "CARGO_TERM_COLOR=always"
+          echo "CARGO_INCREMENTAL=0"
           echo "CARGO_PROFILE_DEV_DEBUG=line-tables-only"
           echo "CARGO_PROFILE_TEST_DEBUG=line-tables-only"
         } >>"$GITHUB_ENV"
@@ -108,10 +110,11 @@ runs:
         echo "toolchain=$TOOLCHAIN" >>"$GITHUB_OUTPUT"
       shell: bash
 
-    - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
-      with:
-        toolchain: ${{ steps.resolve.outputs.toolchain }}
-        components: ${{ inputs.components }}
+    - env:
+        TOOLCHAIN: ${{ steps.resolve.outputs.toolchain }}
+        COMPONENTS: ${{ inputs.components }}
+      run: '"$GITHUB_ACTION_PATH/install-toolchain.sh"'
+      shell: bash
 
     # Which compiler produced this job's result, on the job's own page. The
     # short form already carries the commit hash and date.

@@ -805,6 +805,9 @@ mod tests {
             })
             .unwrap()
         };
+        // Bound after the waiter so it drops first: a failed assertion then
+        // releases the thread, and the waiter it unblocks can be joined.
+        let release = release;
         clock.wait_for_a_read();
         clock.clock.advance(Duration::from_secs(1) - Duration::from_millis(1));
         clock.wait_for_a_read();
@@ -849,7 +852,14 @@ mod tests {
         })
         .unwrap();
         drop(finished);
-        assert_eq!(result.recv_timeout(spate_test::HANG), Ok(true));
+        let waited = result.recv_timeout(spate_test::HANG);
+        if waited.is_err() {
+            // Joining would hold the failure for the waiter's whole tick.
+            let clock = crate::clock::TestClock::frozen();
+            let _ = waiter.join_by(clock.now(), &*clock);
+            panic!("the wait did not return on the end signal");
+        }
+        assert_eq!(waited, Ok(true));
         waiter.join().unwrap();
     }
 }

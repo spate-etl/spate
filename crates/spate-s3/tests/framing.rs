@@ -10,8 +10,9 @@ use spate_core::source::Source;
 use spate_s3::S3Source;
 use std::collections::VecDeque;
 use std::io;
-use std::time::Duration;
-use support::{PipelineYaml, captured_rows, launch_customized, sorted, test_options};
+use support::{
+    PipelineYaml, captured_rows, data_dir, exit, launch_customized, sorted, test_options,
+};
 
 /// A trivial custom framer that splits records on `;` instead of `\n`, a
 /// non-newline layout, to show the framer is chosen by the caller and the
@@ -79,20 +80,16 @@ fn a_framed_source_reports_per_record() {
 #[test]
 fn a_source_without_a_framer_fails_to_start() {
     let dir = tempfile::tempdir().unwrap();
-    std::fs::create_dir_all(dir.path().join("data")).unwrap();
+    let data = data_dir(&dir);
 
-    let yaml = PipelineYaml::file("s3-no-framer-test", &dir.path().join("data"))
+    let yaml = PipelineYaml::file("s3-no-framer-test", &data)
         .threads(1)
         .build();
 
     // No framer supplied (identity `make_source`): the source must refuse to
     // open rather than silently framing nothing.
     let launched = launch_customized(&yaml, test_options(), |_| {}, |s, _io| s);
-    let report = launched
-        .run
-        .wait_exit(Duration::from_secs(30))
-        .expect("pipeline exits")
-        .expect("no start error");
+    let report = exit(&launched);
     let ExitState::Failed(failure) = report.state else {
         panic!("a source with no framer must fail, got {:?}", report.state);
     };
@@ -106,11 +103,11 @@ fn a_source_without_a_framer_fails_to_start() {
 #[test]
 fn custom_framer_drives_a_non_ndjson_layout_end_to_end() {
     let dir = tempfile::tempdir().unwrap();
-    std::fs::create_dir_all(dir.path().join("data")).unwrap();
+    let data = data_dir(&dir);
     // A single object with `;`-separated records, not newline-delimited.
-    std::fs::write(dir.path().join("data/records.txt"), b"alpha;beta;gamma").unwrap();
+    std::fs::write(data.join("records.txt"), b"alpha;beta;gamma").unwrap();
 
-    let yaml = PipelineYaml::file("s3-framing-test", &dir.path().join("data"))
+    let yaml = PipelineYaml::file("s3-framing-test", &data)
         .threads(1)
         .build();
 
@@ -120,11 +117,7 @@ fn custom_framer_drives_a_non_ndjson_layout_end_to_end() {
         |_| {},
         |source, _io| source.with_framer(|| Box::new(SemicolonSplitter::default())),
     );
-    let report = launched
-        .run
-        .wait_exit(Duration::from_secs(30))
-        .expect("bounded job exits on its own")
-        .expect("no start error");
+    let report = exit(&launched);
     assert_eq!(report.state, ExitState::Completed);
 
     assert_eq!(

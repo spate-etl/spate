@@ -15,28 +15,26 @@ use spate_core::feed::{
     Confirmation, Delivery, Depth, DepthOf, DepthReading, DepthReporter, Feed, FeedError,
     FeedErrorKind, FeedWaker, Receipt, Unit, depth_reading,
 };
-use spate_core::pipeline::{ExitReport, ExitState, RuntimeOptions};
+use spate_core::pipeline::{ExitState, RuntimeOptions};
 use spate_test::{
     FeedScript, HANG, ScriptedFeed, SinkScript, WriteOutcome, scripted_feed, wait_until,
 };
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use support::location::{LocationHooks, location_store};
 use support::{
-    Launched, PipelineYaml, captured_rows, fingerprint, launch_customized, launch_with_feed,
-    launch_with_feed_on_clock, launch_with_seeded_feed, line_framer, lines_bytes, recs, sorted,
-    stop, test_options, two_range_unit, unit_over,
+    DEADLINE, FINGERPRINT_KEY, LOCATION, Launched, PipelineYaml, captured_rows, data_dir, exit,
+    failure_reason, fingerprint, launch_customized, launch_with_feed, launch_with_feed_on_clock,
+    launch_with_seeded_feed, line_framer, lines_bytes, recs, running, sorted, stop, test_options,
+    two_range_unit, unit_over, wait_for_gets,
 };
 
-const DEADLINE: Duration = Duration::from_secs(30);
 const STEP: Duration = Duration::from_secs(15);
 /// Steps in the default five-minute window.
 const STEPS: usize = 20;
-const LOCATION: &str = "s3://ops/jobs/backfill-1/";
-const FINGERPRINT_KEY: &str = "jobs/backfill-1/fingerprint";
 const END_KEY: &str = "jobs/backfill-1/end";
 const RUN_A: &str = "run=0123456789abcdef0123456789abcdef\n";
 const RUN_B: &str = "run=fedcba9876543210fedcba9876543210\n";
@@ -48,12 +46,6 @@ fn options() -> RuntimeOptions {
         dead_letter_read_interval: None,
         ..test_options()
     }
-}
-
-fn data_dir(dir: &tempfile::TempDir) -> PathBuf {
-    let data = dir.path().join("data");
-    fs::create_dir_all(&data).unwrap();
-    data
 }
 
 /// A bounded worker over `data`: its section names `location` and the
@@ -147,24 +139,6 @@ fn step_reads(clock: &TestClock, script: &FeedScript, mut reads: usize, steps: u
     reads
 }
 
-fn running(l: &Launched) -> bool {
-    l.run.wait_exit(Duration::ZERO).is_none()
-}
-
-fn exit(l: &Launched) -> ExitReport {
-    l.run
-        .wait_exit(DEADLINE)
-        .expect("the run exits")
-        .expect("the run starts")
-}
-
-fn failure_reason(report: &ExitReport) -> String {
-    match &report.state {
-        ExitState::Failed(failure) => failure.reason.clone(),
-        other => panic!("expected a failed run, got {other:?}"),
-    }
-}
-
 fn count(n: u64) -> Result<Depth, FeedError> {
     let mut depth = Depth::new("the scripted feed", true);
     depth.in_flight = n;
@@ -219,9 +193,7 @@ fn a_gap_longer_than_the_interval_restarts_the_window() {
     wait_for_reads(&script, DepthOf::Feed, 1);
     let opened = hooks.gets();
     clock.advance(STEP * STEPS as u32);
-    wait_until(DEADLINE, "the marker is read again", || {
-        hooks.gets() > opened
-    });
+    wait_for_gets(&hooks, opened + 1);
     wait_for_reads(&script, DepthOf::Feed, 2);
     assert!(running(&l), "a gap of a whole window restarted it");
     assert_eq!(check_reads(&script, DepthOf::DeadLetters), 0);
@@ -280,9 +252,7 @@ fn a_marker_deleted_during_the_window_does_not_end_the_job() {
     for _ in 0..3 {
         clock.advance(STEP);
         let next = hooks.gets() + 1;
-        wait_until(DEADLINE, "the marker is read again", || {
-            hooks.gets() >= next
-        });
+        wait_for_gets(&hooks, next);
     }
     assert!(hooks.gets() > closing);
     assert!(running(&l), "no marker, no end");
@@ -308,9 +278,7 @@ fn a_nonzero_read_inside_the_window_restarts_it() {
     let reads = step_reads(&clock, &script, reads, 1);
     let restart = hooks.gets() + 1;
     clock.advance(STEP);
-    wait_until(DEADLINE, "the marker is read again", || {
-        hooks.gets() >= restart
-    });
+    wait_for_gets(&hooks, restart);
     wait_for_reads(&script, DepthOf::Feed, reads + 1);
     let reads = step_reads(&clock, &script, reads + 1, STEPS - 1);
     assert!(running(&l), "the window counts from the restart");
@@ -342,7 +310,7 @@ fn a_unit_taken_during_the_window_restarts_it() {
     });
     let gets = hooks.gets();
     clock.advance(STEP);
-    wait_until(DEADLINE, "the marker is read again", || hooks.gets() > gets);
+    wait_for_gets(&hooks, gets + 1);
     wait_for_reads(&script, DepthOf::Feed, reads + 1);
     assert!(running(&l));
     stop(&l);
@@ -390,9 +358,7 @@ fn a_failed_marker_read_at_the_window_end_does_not_end_the_job() {
     hooks.fail_next_gets(1);
     let failed = hooks.gets() + 1;
     let reads = step_reads(&clock, &script, reads, 1);
-    wait_until(DEADLINE, "the closing marker read", || {
-        hooks.gets() >= failed
-    });
+    wait_for_gets(&hooks, failed);
     assert!(running(&l), "a failed closing read ends nothing");
     assert_eq!(check_reads(&script, DepthOf::DeadLetters), 0);
     clock.advance(STEP);
@@ -575,13 +541,11 @@ fn a_settling_window_key_sets_the_fingerprint_wait() {
                 .with_clock(worker_clock)
         },
     );
-    wait_until(DEADLINE, "the first fingerprint read", || hooks.gets() >= 1);
+    wait_for_gets(&hooks, 1);
     let mut reads = 1;
     clock.advance_stepped(Duration::from_secs(55), Duration::from_secs(5), || {
         reads += 1;
-        wait_until(DEADLINE, "the next fingerprint read", || {
-            hooks.gets() >= reads
-        });
+        wait_for_gets(&hooks, reads);
     });
     assert!(running(&l), "five seconds short of the window");
     clock.advance(Duration::from_secs(5));
@@ -955,7 +919,7 @@ fn a_failed_closing_receive_restarts_the_check() {
     let unit = script.deliver(Unit::new("late", b"x".to_vec()));
     let gets = hooks.gets();
     clock.advance(STEP);
-    wait_until(DEADLINE, "the closing marker read", || hooks.gets() > gets);
+    wait_for_gets(&hooks, gets + 1);
     // A restarted window reads again one step after its last read.
     clock.advance(STEP);
     let mut exited = None;

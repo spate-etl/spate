@@ -17,7 +17,8 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::Duration;
 use support::{
-    PipelineYaml, captured_rows, launch, launch_scripted, lines_bytes, recs, sorted, test_options,
+    PipelineYaml, captured_rows, data_dir, exit, launch, launch_scripted, lines_bytes, recs,
+    sorted, test_options,
 };
 
 /// A tempdir holding the object prefix (`data/`).
@@ -28,7 +29,7 @@ struct Fixture {
 impl Fixture {
     fn new() -> Fixture {
         let dir = tempfile::tempdir().expect("tempdir");
-        fs::create_dir_all(dir.path().join("data")).unwrap();
+        data_dir(&dir);
         Fixture { dir }
     }
 
@@ -73,11 +74,7 @@ fn full_backfill_completes_itself() {
     fx.write_plain("d.ndjson", &recs("d", 1));
 
     let l = launch(&fx.config_yaml(""), test_options());
-    let report = l
-        .run
-        .wait_exit(Duration::from_secs(30))
-        .expect("bounded job exits on its own")
-        .expect("no start error");
+    let report = exit(&l);
     assert_eq!(report.state, ExitState::Completed);
 
     let mut expected: Vec<String> = Vec::new();
@@ -96,7 +93,7 @@ fn full_backfill_completes_itself() {
 fn empty_listing_completes_with_zero_records() {
     let fx = Fixture::new();
     let l = launch(&fx.config_yaml(""), test_options());
-    let report = l.run.wait_exit(Duration::from_secs(30)).unwrap().unwrap();
+    let report = exit(&l);
     assert_eq!(
         report.state,
         ExitState::Completed,

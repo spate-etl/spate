@@ -31,22 +31,14 @@ use std::time::Duration;
 use support::scripted_store::{HeadAnswer, ScriptedStore};
 use support::spy::{SpyOptions, spying_local_store};
 use support::{
-    DRAIN_TIMEOUT, Launched, PipelineYaml, captured_rows, etag_of, key_of, launch_customized,
-    launch_customized_on_clock, launch_on_notifications, launch_with_feed,
-    launch_with_feed_on_clock, line_framer, lines_bytes, notification, recs, sorted, stop,
-    test_options, two_range_unit, unit_over,
+    DEADLINE, DRAIN_TIMEOUT, Launched, PipelineYaml, captured_rows, data_dir, etag_of, exit,
+    key_of, launch_customized, launch_customized_on_clock, launch_on_notifications,
+    launch_with_feed, launch_with_feed_on_clock, line_framer, lines_bytes, notification, recs,
+    sorted, stop, test_options, two_range_unit, unit_over,
 };
-
-const DEADLINE: Duration = Duration::from_secs(30);
 
 fn stage(data: &Path, name: &str, rows: &[String]) {
     fs::write(data.join(name), lines_bytes(rows)).unwrap();
-}
-
-fn data_dir(dir: &tempfile::TempDir) -> std::path::PathBuf {
-    let data = dir.path().join("data");
-    fs::create_dir_all(&data).unwrap();
-    data
 }
 
 fn launch_on_feed(data: &Path, feed: Arc<dyn Feed>, pre: impl FnOnce(&SinkScript)) -> Launched {
@@ -349,11 +341,7 @@ fn a_pipeline_with_no_feed_fails_at_start() {
         |_| {},
         move |source, _io| line_framer(source).with_store(spy_store),
     );
-    let report = l
-        .run
-        .wait_exit(DEADLINE)
-        .expect("the run exits")
-        .expect("no start error");
+    let report = exit(&l);
     let ExitState::Failed(failure) = report.state else {
         panic!("a source with no feed must fail, got {:?}", report.state);
     };
@@ -1370,6 +1358,8 @@ fn the_lane_clock_reaches_the_lanes() {
     assert_eq!(sorted(captured_rows(&l.script)), sorted(rows));
 
     l.shutdown.trigger();
+    // The lanes wait out each poll on the frozen lane clock, so the run is
+    // polled between clock steps where `exit` would block.
     let mut report = None;
     wait_until(DEADLINE, "the run exits", || {
         report = l.run.wait_exit(Duration::ZERO);
@@ -1718,7 +1708,7 @@ fn a_head_after_a_412_classifies_404_and_403_as_the_read_does() {
                 assert!(reason.contains("data/a.ndjson"), "{reason}");
             }
             HeadAnswer::Denied => {
-                let report = l.run.wait_exit(DEADLINE).expect("the run exits").unwrap();
+                let report = exit(&l);
                 let ExitState::Failed(failure) = report.state else {
                     panic!(
                         "a 403 on the HEAD must fail the pipeline: {:?}",
@@ -1839,14 +1829,6 @@ fn launch_stopping(data: &Path, feed: Arc<dyn Feed>, clock: Arc<TestClock>) -> L
     )
 }
 
-fn exit_state(l: &Launched) -> ExitState {
-    l.run
-        .wait_exit(DEADLINE)
-        .expect("the run exits")
-        .unwrap()
-        .state
-}
-
 /// Pins the stop on a feed that hands back, end to end: the source receives
 /// nothing more, reads on and renews the unit it holds until the reserve,
 /// then hands it back with a range unread, and the runtime closes the feed
@@ -1881,7 +1863,7 @@ fn a_stopping_reader_reads_on_until_the_reserve_then_hands_back() {
         script.handed_back() == vec![receipt]
     });
     l.script.release_held();
-    assert_eq!(exit_state(&l), ExitState::Completed);
+    assert_eq!(exit(&l).state, ExitState::Completed);
     assert!(script.acknowledged().is_empty());
     assert!(script.gone().is_empty());
     assert_eq!(script.stopped_receiving(), 1);
@@ -1910,7 +1892,7 @@ fn a_unit_finished_during_the_stop_is_acknowledged_and_not_handed_back() {
     });
     script.deliver(unit_over(&data, "late.ndjson"));
     l.script.release_held();
-    assert_eq!(exit_state(&l), ExitState::Completed);
+    assert_eq!(exit(&l).state, ExitState::Completed);
     assert_eq!(script.acknowledged(), vec![receipt]);
     assert!(script.handed_back().is_empty());
     assert_eq!(script.delivered().len(), 1, "received after the stop began");
@@ -1936,7 +1918,7 @@ fn a_feed_that_does_not_hand_back_drains_at_once_on_a_stop() {
     });
     l.shutdown.trigger();
     l.script.release_held();
-    assert_eq!(exit_state(&l), ExitState::Completed);
+    assert_eq!(exit(&l).state, ExitState::Completed);
     assert_eq!(script.stopped_receiving(), 0);
     assert!(script.handed_back().is_empty());
 }
@@ -1962,7 +1944,7 @@ fn a_failed_run_hands_back_its_unread_units_at_once() {
         script.handed_back() == vec![receipt]
     });
     l.script.release_held();
-    assert!(matches!(exit_state(&l), ExitState::Failed(_)));
+    assert!(matches!(exit(&l).state, ExitState::Failed(_)));
     assert!(script.acknowledged().is_empty());
     assert_eq!(script.stopped_receiving(), 1);
 }
@@ -2001,7 +1983,7 @@ fn a_412_unit_still_publishing_at_the_reserve_is_handed_back() {
         } else {
             clock.advance(DRAIN_TIMEOUT - STOP_RESERVE);
         }
-        assert_eq!(exit_state(&l), ExitState::Completed, "confirm: {confirm}");
+        assert_eq!(exit(&l).state, ExitState::Completed, "confirm: {confirm}");
         if confirm {
             assert_eq!(script.acknowledged(), vec![receipt]);
             assert!(script.handed_back().is_empty());
@@ -2045,11 +2027,7 @@ fn a_seeded_run_reads_its_re_enqueue_before_it_ends() {
         Arc::new(feed.clone()),
         move |source, _io| line_framer(source).with_store(store),
     );
-    let report = l
-        .run
-        .wait_exit(DEADLINE)
-        .expect("the run exits")
-        .expect("the run starts");
+    let report = exit(&l);
     assert_eq!(report.state, ExitState::Completed);
     let c = feed.counts();
     assert_eq!(

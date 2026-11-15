@@ -12,7 +12,7 @@ use spate_core::clock::tokio::{Clock, Sleep, TestClock};
 use spate_core::config::{ConfigError, FeedSection, PipelineConfig};
 use spate_core::feed::memory::MemoryFeed;
 use spate_core::feed::{Confirmation, Delivery, Feed, FeedError, FeedWaker, Receipt, Unit};
-use spate_core::pipeline::{ExitReport, ExitState};
+use spate_core::pipeline::ExitState;
 use spate_core::source::{Source, SourceCtx, SourceEvent};
 use spate_s3::{S3Source, SplitDescriptor, split_id_for, split_id_for_range};
 use spate_test::{ScriptedFeed, WriteOutcome, scripted_feed, wait_until};
@@ -22,26 +22,18 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use support::location::{LocationHooks, OnCreate, location_store};
+use support::location::{OnCreate, location_store};
 use support::spy::{SpyOptions, spying_local_store};
 use support::{
-    Launched, PipelineYaml, captured_rows, fingerprint, launch_customized, launch_with_feed,
-    launch_with_feed_on_clock, line_framer, lines_bytes, recs, sorted, stage_two_ranges, stop,
-    test_options, unit_over,
+    DEADLINE, FINGERPRINT_KEY, LOCATION, Launched, PipelineYaml, captured_rows, data_dir, exit,
+    failure_reason, fingerprint, launch_customized, launch_with_feed, launch_with_feed_on_clock,
+    line_framer, lines_bytes, recs, running, sorted, stage_two_ranges, stop, test_options,
+    unit_over, wait_for_gets,
 };
 
-const DEADLINE: Duration = Duration::from_secs(30);
 const WINDOW: Duration = Duration::from_secs(5 * 60);
 const POLL: Duration = Duration::from_secs(5);
-const LOCATION: &str = "s3://ops/jobs/backfill-1/";
-const FINGERPRINT_KEY: &str = "jobs/backfill-1/fingerprint";
 const CHECKPOINT_KEY: &str = "jobs/backfill-1/checkpoint";
-
-fn data_dir(dir: &tempfile::TempDir) -> PathBuf {
-    let data = dir.path().join("data");
-    fs::create_dir_all(&data).unwrap();
-    data
-}
 
 /// A worker over `data` on a scripted feed whose section names `location`,
 /// with the location store and clock injected.
@@ -89,27 +81,6 @@ fn launch_worker_on(
         }
         None => launch_with_feed(&yaml, test_options(), |_| {}, feed, make_source),
     }
-}
-
-fn exit(l: &Launched) -> ExitReport {
-    l.run
-        .wait_exit(DEADLINE)
-        .expect("the run exits")
-        .expect("the run starts")
-}
-
-fn failure_reason(report: &ExitReport) -> String {
-    match &report.state {
-        ExitState::Failed(failure) => failure.reason.clone(),
-        other => panic!("expected a failed run, got {other:?}"),
-    }
-}
-
-/// Wait until the location store has answered `n` reads in all.
-fn wait_for_gets(hooks: &LocationHooks, n: usize) {
-    wait_until(DEADLINE, &format!("{n} location reads"), || {
-        hooks.gets() >= n
-    });
 }
 
 /// Pins the end-to-end refusal through a pipeline file: a worker whose
@@ -168,7 +139,7 @@ fn a_worker_exits_when_no_fingerprint_appears_within_a_settling_window() {
         reads += 1;
         wait_for_gets(&hooks, reads);
     });
-    assert!(l.run.wait_exit(Duration::ZERO).is_none(), "still waiting");
+    assert!(running(&l), "still waiting");
     clock.advance(POLL);
     let report = exit(&l);
     let reason = failure_reason(&report);

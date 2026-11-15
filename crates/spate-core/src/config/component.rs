@@ -136,7 +136,10 @@ impl SectionPath {
     /// `reason` names the setting that leaves the connection unencrypted. The
     /// line reads `<path>.<field>: <reason>; the credential is sent without
     /// TLS`. Call it once, after the section's own checks pass and before the
-    /// client is created. Pass key names only, never a value or a URL.
+    /// client is created.
+    ///
+    /// Both arguments are `'static`, so a value read from the config, such as
+    /// a password or a URL, cannot reach the line.
     ///
     /// ```
     /// use spate_core::config::SectionPath;
@@ -145,7 +148,16 @@ impl SectionPath {
     /// // sent without TLS`.
     /// SectionPath::sink("example").warn_cleartext_credential("password", "endpoint uses http://");
     /// ```
-    pub fn warn_cleartext_credential(&self, field: &str, reason: &str) {
+    ///
+    /// A string read at runtime does not compile:
+    ///
+    /// ```compile_fail
+    /// use spate_core::config::SectionPath;
+    ///
+    /// let password = String::from("hunter2");
+    /// SectionPath::sink("example").warn_cleartext_credential(&password, "endpoint uses http://");
+    /// ```
+    pub fn warn_cleartext_credential(&self, field: &'static str, reason: &'static str) {
         tracing::warn!(
             "{}.{field}: {reason}; the credential is sent without TLS",
             self.0

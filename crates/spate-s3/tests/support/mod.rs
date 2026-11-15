@@ -13,18 +13,33 @@ use spate_core::clock::TestClock;
 use spate_core::config::PipelineConfig;
 use spate_core::feed::{Feed, Unit};
 use spate_core::ops::chain_owned;
-use spate_core::pipeline::{ExitState, Pipeline, RuntimeOptions, ShutdownHandle};
+use spate_core::pipeline::{ExitReport, ExitState, Pipeline, RuntimeOptions, ShutdownHandle};
 use spate_core::sink::KeyHashRouter;
 use spate_json::NdjsonFramer;
 use spate_s3::{DescriptorObject, S3Source, SplitDescriptor, SplitRange};
-use spate_test::{BytesPassthrough, PipelineRun, SinkScript, TestEncoder, capture_sink};
+use spate_test::{
+    BytesPassthrough, PipelineRun, SinkScript, TestEncoder, capture_sink, wait_until,
+};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-/// How long a helper here waits for a run to exit.
-const EXIT_DEADLINE: Duration = Duration::from_secs(30);
+/// How long the suites wait for a run to exit or a double to reach a state.
+/// #1851 moves each wait onto `spate_test::HANG` once its timers are read.
+pub(crate) const DEADLINE: Duration = Duration::from_secs(30);
+
+/// The job location the lister and job-end suites write under.
+pub(crate) const LOCATION: &str = "s3://ops/jobs/backfill-1/";
+/// The fingerprint object under [`LOCATION`].
+pub(crate) const FINGERPRINT_KEY: &str = "jobs/backfill-1/fingerprint";
+
+/// A fresh `data` directory under `dir`, for a run to read objects from.
+pub(crate) fn data_dir(dir: &tempfile::TempDir) -> PathBuf {
+    let data = dir.path().join("data");
+    fs::create_dir_all(&data).unwrap();
+    data
+}
 
 /// Pipeline YAML for an S3 source feeding a capture sink, with the admin
 /// server and exporter off.
@@ -299,12 +314,35 @@ fn launch_inner(
 /// completed.
 pub(crate) fn stop(l: &Launched) {
     l.shutdown.trigger();
-    let report = l
-        .run
-        .wait_exit(EXIT_DEADLINE)
+    assert_eq!(exit(l).state, ExitState::Completed);
+}
+
+/// Wait for a run to exit and return its report.
+pub(crate) fn exit(l: &Launched) -> ExitReport {
+    l.run
+        .wait_exit(DEADLINE)
         .expect("the run exits")
-        .unwrap();
-    assert_eq!(report.state, ExitState::Completed);
+        .expect("the run starts")
+}
+
+/// Whether a run is still going.
+pub(crate) fn running(l: &Launched) -> bool {
+    l.run.wait_exit(Duration::ZERO).is_none()
+}
+
+/// The reason a failed run gives.
+pub(crate) fn failure_reason(report: &ExitReport) -> String {
+    match &report.state {
+        ExitState::Failed(failure) => failure.reason.clone(),
+        other => panic!("expected a failed run, got {other:?}"),
+    }
+}
+
+/// Wait until the location store has answered `n` reads in all.
+pub(crate) fn wait_for_gets(hooks: &location::LocationHooks, n: usize) {
+    wait_until(DEADLINE, &format!("{n} location reads"), || {
+        hooks.gets() >= n
+    });
 }
 
 /// The job fingerprint of a source over `data` with the suite's 1 MiB

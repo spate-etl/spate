@@ -12,14 +12,12 @@ use std::fs;
 use std::num::NonZeroU32;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
 use support::spy::{SpyOptions, spying_local_store};
 use support::{
-    Launched, PipelineYaml, etag_of, launch_customized, launch_on_notifications, line_framer,
-    lines_bytes, notification, recs, stop, test_options, unit_over,
+    DEADLINE, Launched, PipelineYaml, data_dir, etag_of, launch_customized,
+    launch_on_notifications, line_framer, lines_bytes, notification, recs, stop, test_options,
+    unit_over,
 };
-
-const DEADLINE: Duration = Duration::from_secs(30);
 
 /// Each reason the S3 page documents for the counter, in the order the
 /// tests' expected arrays list them.
@@ -58,8 +56,7 @@ fn a_missing_object_counts_not_found_once_per_delivery() {
     const CAP: u32 = 3;
     let handle = install_exporter();
     let dir = tempfile::tempdir().unwrap();
-    let data = dir.path().join("data");
-    fs::create_dir_all(&data).unwrap();
+    let data = data_dir(&dir);
 
     let feed = MemoryFeed::with_attempt_cap(NonZeroU32::new(CAP).unwrap());
     drop(feed.publish(unit_over(&data, "missing.ndjson")));
@@ -100,8 +97,7 @@ fn a_missing_member_fails_its_whole_unit() {
     const CAP: u32 = 2;
     let handle = install_exporter();
     let dir = tempfile::tempdir().unwrap();
-    let data = dir.path().join("data");
-    fs::create_dir_all(&data).unwrap();
+    let data = data_dir(&dir);
     fs::write(data.join("rows.ndjson"), lines_bytes(&recs("r", 3))).unwrap();
 
     let member = |name: &str| {
@@ -181,8 +177,7 @@ fn read_until_dead_lettered(name: &str, data: &Path, unit: Unit) -> Launched {
 fn an_object_changed_under_its_pin_counts_etag_drift() {
     let handle = install_exporter();
     let dir = tempfile::tempdir().unwrap();
-    let data = dir.path().join("data");
-    fs::create_dir_all(&data).unwrap();
+    let data = data_dir(&dir);
     fs::write(data.join("pinned.ndjson"), lines_bytes(&recs("p", 3))).unwrap();
     let mut unit = unit_over(&data, "pinned.ndjson");
     let mut descriptor = SplitDescriptor::decode(&unit.body).unwrap();
@@ -206,8 +201,7 @@ fn an_object_changed_under_its_pin_counts_etag_drift() {
 fn a_corrupt_object_counts_undecodable() {
     let handle = install_exporter();
     let dir = tempfile::tempdir().unwrap();
-    let data = dir.path().join("data");
-    fs::create_dir_all(&data).unwrap();
+    let data = data_dir(&dir);
     fs::write(data.join("corrupt.ndjson.gz"), b"not a gzip stream").unwrap();
 
     let l = read_until_dead_lettered(
@@ -231,7 +225,7 @@ fn a_corrupt_object_counts_undecodable() {
 fn a_notification_naming_a_missing_object_counts_not_found() {
     let handle = install_exporter();
     let dir = tempfile::tempdir().unwrap();
-    fs::create_dir_all(dir.path().join("data")).unwrap();
+    data_dir(&dir);
 
     let (feed, script) = scripted_feed();
     script.deliver(notification(&[("data/missing.ndjson", 10)]));

@@ -23,8 +23,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use support::spy::{GetRecord, RangeKind, SpyOptions, StoreSpy, spying_local_store};
 use support::{
-    Launched, PipelineYaml, captured_rows, fingerprint, launch_customized, launch_with_feed,
-    line_framer, lines_bytes, recs, sorted, stop, test_options, unit_over,
+    Launched, PipelineYaml, captured_rows, data_dir, exit, fingerprint, launch_customized,
+    launch_with_feed, line_framer, lines_bytes, recs, sorted, stop, test_options, unit_over,
 };
 
 /// A bounded backfill over `data` on the in-process feed holding
@@ -65,8 +65,7 @@ impl Staged {
 /// available.
 fn stage(objects: usize, records: usize) -> Staged {
     let dir = tempfile::tempdir().unwrap();
-    let data = dir.path().join("data");
-    fs::create_dir_all(&data).unwrap();
+    let data = data_dir(&dir);
     let mut sizes = BTreeMap::new();
     let mut expected = Vec::new();
     for i in 0..objects {
@@ -272,11 +271,7 @@ fn a_feed_run_ends_holding_at_most_units_held_watermarks() {
         || feed.counts().acknowledged == 8,
     );
     l.shutdown.trigger();
-    let report = l
-        .run
-        .wait_exit(Duration::from_secs(30))
-        .expect("the run exits")
-        .expect("no start error");
+    let report = exit(&l);
     assert_eq!(report.state, ExitState::Completed);
     assert!(
         report.final_watermarks.len() <= 4,

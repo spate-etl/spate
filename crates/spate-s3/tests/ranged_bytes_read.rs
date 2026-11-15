@@ -11,8 +11,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use support::spy::{RangeKind, SpyOptions, spying_local_store};
 use support::{
-    PipelineYaml, launch_customized, line_framer, line_starts, lines_bytes, ranged_spec, recs,
-    stop, test_options,
+    PipelineYaml, data_dir, launch_customized, line_framer, line_starts, lines_bytes, ranged_spec,
+    recs, stop, test_options,
 };
 
 /// A ranged unit's `bytes_read_total` equals the bytes of every window it
@@ -25,8 +25,7 @@ fn a_ranged_split_counts_every_fetched_byte_as_read() {
     })
     .expect("install the exporter");
     let dir = tempfile::tempdir().unwrap();
-    let data = dir.path().join("data");
-    fs::create_dir_all(&data).unwrap();
+    let data = data_dir(&dir);
     let lines = recs("r", 20);
     fs::write(data.join("big.ndjson"), lines_bytes(&lines)).unwrap();
     let starts = line_starts(&lines);

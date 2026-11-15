@@ -34,6 +34,19 @@
 //! // In the record loop:
 //! rate_limited_warn!(DESER_WARN, reason = "malformed", "payload skipped");
 //! ```
+//!
+//! The limiter reads the system clock. Code that runs on an injected clock
+//! passes the event's instant with `at:`, so a test clock decides the window:
+//!
+//! ```
+//! use spate_core::clock::{Clock, SystemClock};
+//! use spate_core::rate_limited_warn;
+//! use spate_core::telemetry::RateLimit;
+//!
+//! let limit = RateLimit::hot_path();
+//! let clock = SystemClock;
+//! rate_limited_warn!(limit, at: clock.now(), reason = "malformed", "payload skipped");
+//! ```
 
 use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -53,8 +66,9 @@ pub mod cpu;
 /// deadline can be stored as a plain `AtomicU64` of nanoseconds and compared
 /// on the lock-free fast path.
 ///
-/// On the system clock: every limiter is a process-wide `static`, so no
-/// pipeline can hand it a clock of its own.
+/// On the system clock, whichever clock feeds a limiter. A reading from
+/// before the base counts as the base, which only keeps that event off the
+/// fast path.
 fn base_instant() -> Instant {
     static BASE: OnceLock<Instant> = OnceLock::new();
     *BASE.get_or_init(|| SystemClock.now())
@@ -162,12 +176,13 @@ struct RateLimitState {
     suppressed: u64,
 }
 
-/// A per-callsite token bucket: up to `capacity` events per `window`, then
-/// suppression with a count carried into the first event of the next
-/// window.
+/// A token bucket: up to `capacity` events per `window`, then suppression
+/// with a count carried into the first event of the next window.
 ///
-/// `const`-constructible for use in `static`s. Under a poison storm every
-/// pinned pipeline thread hits the *same* limiter once per failing record,
+/// `const`-constructible, so a call site can hold one in a `static`. A
+/// component on an injected clock owns one instead and passes its readings
+/// to [`check_at`](Self::check_at). Under a poison storm every pinned
+/// pipeline thread hits the *same* limiter once per failing record,
 /// so the exact-accounting mutex is contended. To keep steady-state
 /// suppression off the shared lock, a relaxed-atomic fast path
 /// short-circuits while the window stays saturated: a single relaxed load
@@ -223,7 +238,7 @@ impl RateLimit {
         self.check_at(SystemClock.now())
     }
 
-    /// Decide for an event at `now` (injectable for tests).
+    /// Decide for an event at `now`, read from the caller's clock.
     pub fn check_at(&self, now: Instant) -> Decision {
         // Fast path: while the window stays saturated, suppress with a single
         // relaxed load and a deadline compare, no mutex. Once the deadline
@@ -281,10 +296,14 @@ impl RateLimit {
 /// `tracing::warn!` behind a [`RateLimit`]. When events were suppressed
 /// since the last allowed one, the emitted line carries a `suppressed`
 /// field with the count.
+///
+/// `rate_limited_warn!(LIMIT, fields.., "message")` decides on the system
+/// clock. `rate_limited_warn!(LIMIT, at: now, fields.., "message")` decides
+/// for an event at `now`, an `Instant` read from the caller's clock.
 #[macro_export]
 macro_rules! rate_limited_warn {
-    ($limiter:expr, $($arg:tt)+) => {
-        match $limiter.check() {
+    (@decided $decision:expr, $($arg:tt)+) => {
+        match $decision {
             $crate::telemetry::Decision::Allow { suppressed_before } => {
                 if suppressed_before > 0 {
                     ::tracing::warn!(suppressed = suppressed_before, $($arg)+);
@@ -294,6 +313,12 @@ macro_rules! rate_limited_warn {
             }
             $crate::telemetry::Decision::Suppress => {}
         }
+    };
+    ($limiter:expr, at: $now:expr, $($arg:tt)+) => {
+        $crate::rate_limited_warn!(@decided $limiter.check_at($now), $($arg)+)
+    };
+    ($limiter:expr, $($arg:tt)+) => {
+        $crate::rate_limited_warn!(@decided $limiter.check(), $($arg)+)
     };
 }
 
@@ -471,6 +496,45 @@ mod tests {
         // No subscriber installed: the macro must still be safe to call.
         rate_limited_warn!(LIMIT, code = 7, "first is allowed");
         rate_limited_warn!(LIMIT, code = 8, "second is suppressed");
+    }
+
+    /// Pins that the plain form emits the first event and suppresses the
+    /// next, and that a field named `at` stays a field.
+    #[test]
+    fn the_plain_form_warns_on_the_system_clock() {
+        static LIMIT: RateLimit = RateLimit::new(1, Duration::from_secs(60));
+        static AT_FIELD: RateLimit = RateLimit::new(1, Duration::from_secs(60));
+        let lines = pretty_lines(|| {
+            rate_limited_warn!(LIMIT, code = 7, "first is allowed");
+            rate_limited_warn!(LIMIT, code = 8, "second is suppressed");
+            rate_limited_warn!(AT_FIELD, at = 5, "a field named at");
+        });
+        assert_eq!(
+            lines,
+            [
+                " WARN spate_core::telemetry::tests: first is allowed code=7",
+                " WARN spate_core::telemetry::tests: a field named at at=5",
+            ],
+        );
+    }
+
+    /// The `at:` form decides on the instant it is given.
+    #[test]
+    fn the_at_form_rolls_the_window_on_the_given_instant() {
+        let limit = RateLimit::new(1, Duration::from_secs(10));
+        let t0 = Instant::now();
+        let lines = pretty_lines(|| {
+            rate_limited_warn!(limit, at: t0, code = 1, "first");
+            rate_limited_warn!(limit, at: t0, code = 2, "second");
+            rate_limited_warn!(limit, at: t0 + Duration::from_secs(10), code = 3, "third");
+        });
+        assert_eq!(
+            lines,
+            [
+                " WARN spate_core::telemetry::tests: first code=1",
+                " WARN spate_core::telemetry::tests: third suppressed=1 code=3",
+            ],
+        );
     }
 
     #[test]

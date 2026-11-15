@@ -15,7 +15,6 @@ use crate::schema::{self, RowSchema, SchemaError};
 use crate::writer::{ClickHouseEndpoint, ClickHouseWriter};
 use bytes::Bytes;
 use rustls::ClientConfig;
-use rustls_native_certs::CertificateResult;
 use serde::{Deserialize, Deserializer, de};
 use spate_core::config::{ComponentConfig, ConfigError, SectionPath, UrlRule, redact};
 use spate_core::deser::RecFamily;
@@ -23,8 +22,8 @@ use spate_core::sink::{
     BatchConfig, BreakerConfig, FrameCodecFactory, InflightConfig, RetryConfig, SinkBundle,
     SinkParts, SinkPoolConfig, SinkProbeFn, endpoint_probe,
 };
+use spate_core::tls::SystemRoots;
 use std::collections::BTreeMap;
-use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -433,27 +432,10 @@ impl DistributedCheckSection {
     }
 }
 
-/// Trust settings for `https://` replicas. The URL scheme decides whether a
-/// connection uses TLS.
-///
-/// ```yaml
-/// sink:
-///   clickhouse:
-///     tls:
-///       root_ca: /etc/spate/clickhouse-ca.pem
-/// ```
-///
-/// Construct with [`TlsSection::default`] and set the fields. The struct is
-/// `#[non_exhaustive]` so new knobs can be added without breaking callers.
-#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
-#[serde(deny_unknown_fields)]
-#[non_exhaustive]
-pub struct TlsSection {
-    /// PEM bundle of root CAs trusted in addition to the system trust store.
-    /// Requires at least one `https://` URL.
-    #[serde(default)]
-    pub root_ca: Option<PathBuf>,
-}
+/// Trust settings for `https://` replicas: `tls.root_ca`, which requires at
+/// least one `https://` URL. The URL scheme decides whether a connection uses
+/// TLS.
+pub use spate_core::tls::TlsSection;
 
 /// Client-side timeouts for one insert, and for one startup request.
 ///
@@ -756,7 +738,7 @@ pub fn from_component_config(
     section: &ComponentConfig,
 ) -> Result<ClickHouseSinkBuilder, ConfigError> {
     let cfg: ClickHouseSinkConfig = section.deserialize_into()?;
-    build_with(cfg, &section.path(), rustls_native_certs::load_native_certs)
+    build_with(cfg, &section.path(), SystemRoots::load)
 }
 
 /// Build from an already-deserialized config (programmatic use).
@@ -771,21 +753,17 @@ pub fn from_component_config(
 /// [`ConfigError::Component`] when `cfg` breaks a configuration rule, or when
 /// `tls.root_ca` cannot be loaded.
 pub fn build(cfg: ClickHouseSinkConfig) -> Result<ClickHouseSinkBuilder, ConfigError> {
-    build_with(
-        cfg,
-        &SectionPath::sink(TAG),
-        rustls_native_certs::load_native_certs,
-    )
+    build_with(cfg, &SectionPath::sink(TAG), SystemRoots::load)
 }
 
 fn build_with(
     cfg: ClickHouseSinkConfig,
     at: &SectionPath,
-    system_roots: impl FnOnce() -> CertificateResult,
+    system_roots: impl FnOnce() -> SystemRoots,
 ) -> Result<ClickHouseSinkBuilder, ConfigError> {
     validate(&cfg, at)?;
     let roots = crate::http::root_store(&cfg.tls, uses_https(&cfg), system_roots)
-        .map_err(|why| at.invalid("tls.root_ca", why))?;
+        .map_err(|why| at.invalid("tls.root_ca", why.to_string()))?;
     let tls = crate::http::client_config(roots);
 
     // Two independent client sets: inserts and readiness probes must not
@@ -1932,15 +1910,32 @@ settings: { insert_quorum: "auto" }
         front.distributed_check = Some(check);
         let https =
             ClickHouseSinkConfig::new("t", vec![ShardConfig::new(vec!["https://a".into()])]);
+        let system = crate::test_tls::TestCa::new("system");
         for cfg in [front, https] {
             let mut read = false;
             let _ = build_with(cfg, &SectionPath::sink(TAG), || {
                 read = true;
-                CertificateResult::default()
+                SystemRoots::from_certs(vec![system.der()])
             })
             .unwrap();
             assert!(read);
         }
+    }
+
+    /// An `https://` sink whose system trust store holds no usable root, and
+    /// with no `tls.root_ca`, fails at that key with the fixes named.
+    #[test]
+    fn an_https_sink_with_no_trust_root_fails_at_root_ca() {
+        let https =
+            ClickHouseSinkConfig::new("t", vec![ShardConfig::new(vec!["https://a".into()])]);
+        let err = refusal(build_with(https, &SectionPath::sink(TAG), || {
+            SystemRoots::from_certs(Vec::new())
+        }));
+        assert_eq!(
+            err,
+            "sink.clickhouse.tls.root_ca: the system trust store has no certificates; install \
+             a CA bundle, point SSL_CERT_FILE at one, or set this key to the issuing CA"
+        );
     }
 
     #[test]
@@ -1953,7 +1948,10 @@ settings: { insert_quorum: "auto" }
 
         let yaml = "table: t\nshards: [{replicas: [\"https://a\"]}]\ntls: {root_ca: /etc/ca.pem}\n";
         let cfg: ClickHouseSinkConfig = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(cfg.tls.root_ca, Some(PathBuf::from("/etc/ca.pem")));
+        assert_eq!(
+            cfg.tls.root_ca,
+            Some(std::path::PathBuf::from("/etc/ca.pem"))
+        );
 
         let err = from_component_config(&component(&yaml.replace("https", "http"))).unwrap_err();
         assert!(err.to_string().contains("tls.root_ca"), "{err}");
@@ -2139,7 +2137,9 @@ settings: { insert_quorum: "auto" }
             "table: t\nshards: [{replicas: [\"https://a\"]}]\ntls: {root_ca: /nonexistent/ca.pem}\n",
         );
         let cfg: ClickHouseSinkConfig = section.deserialize_into().unwrap();
-        let err = refusal(build_with(cfg, &section.path(), CertificateResult::default));
+        let err = refusal(build_with(cfg, &section.path(), || {
+            SystemRoots::from_certs(Vec::new())
+        }));
         assert!(
             err.starts_with("sinks.eu.clickhouse.tls.root_ca: `/nonexistent/ca.pem`: "),
             "{err}"

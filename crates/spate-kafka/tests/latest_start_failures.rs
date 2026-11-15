@@ -19,11 +19,11 @@ mod another_topic {
     use rdkafka::producer::{BaseProducer, BaseRecord, Producer};
     use rdkafka::{ClientConfig, Offset, TopicPartitionList};
     use spate_core::config::PipelineConfig;
-    use spate_core::ops::chain_owned;
     use spate_core::pipeline::{Pipeline, RuntimeOptions};
-    use spate_core::sink::KeyHashRouter;
     use spate_kafka::{KafkaSource, KafkaSourceConfig};
-    use spate_test::{BytesPassthrough, HANG, PipelineRun, TestEncoder, capture_sink, unique_name};
+    use spate_test::{
+        HANG, PipelineRun, TestEncoder, capture_sink, passthrough_runtime, unique_name,
+    };
     use std::collections::BTreeMap;
     use std::time::Duration;
 
@@ -116,21 +116,13 @@ mod another_topic {
             ("session.timeout.ms".to_string(), "30000".to_string()),
             ("heartbeat.interval.ms".to_string(), "2000".to_string()),
         ]);
-        let runtime = pipeline
-            .sink(sink)
-            .expect("sink")
-            .chains(|ctx| {
-                let chunk = ctx.chunk();
-                chain_owned::<Vec<u8>, _>(BytesPassthrough)
-                    .sink(TestEncoder, KeyHashRouter, chunk, ctx.queues, ctx.budget)
-                    .build()
-            })
-            .runtime_options(RuntimeOptions {
-                handle_signals: false,
-                ..RuntimeOptions::default()
-            })
-            .into_runtime(KafkaSource::new(cfg))
-            .expect("runtime");
+        let runtime = passthrough_runtime(
+            pipeline,
+            KafkaSource::new(cfg),
+            sink,
+            TestEncoder,
+            RuntimeOptions::default(),
+        );
         let run = PipelineRun::spawn(move || runtime.run());
 
         let exit = run.wait_exit(HANG).expect("the run stops on the offer");
@@ -924,13 +916,11 @@ mod logical_committed_offset {
     use spate_core::clock::TestClock;
     use spate_core::config::PipelineConfig;
     use spate_core::error::ErrorClass;
-    use spate_core::ops::chain_owned;
     use spate_core::pipeline::{ExitState, Pipeline, RuntimeOptions};
-    use spate_core::sink::KeyHashRouter;
     use spate_core::source::{Source, SourceCtx};
     use spate_kafka::{KafkaSource, KafkaSourceConfig};
     use spate_test::{
-        BytesPassthrough, HANG, PipelineRun, TestEncoder, capture_sink, unique_name, wait_until,
+        HANG, PipelineRun, TestEncoder, capture_sink, passthrough_runtime, unique_name, wait_until,
     };
     use std::collections::BTreeMap;
     use std::net::TcpStream;
@@ -1070,21 +1060,13 @@ mod logical_committed_offset {
         cfg.startup_timeout = Duration::from_secs(60);
         cfg.statistics_interval = Duration::ZERO;
         cfg.rdkafka = BTreeMap::from([("auto.offset.reset".to_string(), "latest".to_string())]);
-        let runtime = pipeline
-            .sink(sink)
-            .expect("sink")
-            .chains(|ctx| {
-                let chunk = ctx.chunk();
-                chain_owned::<Vec<u8>, _>(BytesPassthrough)
-                    .sink(TestEncoder, KeyHashRouter, chunk, ctx.queues, ctx.budget)
-                    .build()
-            })
-            .runtime_options(RuntimeOptions {
-                handle_signals: false,
-                ..RuntimeOptions::default()
-            })
-            .into_runtime(KafkaSource::new(cfg))
-            .expect("runtime");
+        let runtime = passthrough_runtime(
+            pipeline,
+            KafkaSource::new(cfg),
+            sink,
+            TestEncoder,
+            RuntimeOptions::default(),
+        );
         let shutdown = runtime.shutdown_handle();
         let looked_up = cluster.received(RDKafkaApiKey::OffsetFetch);
         let committed_before = cluster.received(RDKafkaApiKey::OffsetCommit);

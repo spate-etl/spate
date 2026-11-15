@@ -592,6 +592,21 @@ fn a_dry_run_writes_nothing() {
     assert_eq!(forge.milestones.borrow().len(), 1);
 }
 
+/// A milestone the run creates is stamped by the number the forge returns.
+#[test]
+fn an_applied_run_stamps_onto_the_milestone_it_creates() {
+    let log = Log::default();
+    let (git, forge) = backfill(&log);
+    forge.milestones.borrow_mut().remove(0);
+    let (registry, workspace, pauses) = idle(&log);
+    let host = host!(&git, &forge, &registry, &workspace, pauses);
+    run(&host, v("0.4.0"), true).unwrap();
+    assert_eq!(
+        log.entries(),
+        ["create v0.4.0 #13", "milestone #1 v0.4.0", "close v0.4.0"]
+    );
+}
+
 /// A failed write stops the run, so the milestone is not closed over the
 /// changes still to make.
 #[test]

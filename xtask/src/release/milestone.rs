@@ -98,7 +98,7 @@ pub(crate) struct Reads {
 /// # Errors
 ///
 /// When an unfinished issue has no later open milestone to move to, or a close
-/// time does not parse.
+/// time or a milestone event's time does not parse.
 pub(crate) fn plan(version: Version, reads: &Reads) -> Result<Vec<Change>, Error> {
     let title = format!("v{version}");
     let release = reads.milestones.iter().find(|m| m.title == title);

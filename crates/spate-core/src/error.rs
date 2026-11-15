@@ -355,12 +355,17 @@ macro_rules! tls_rejection {
 mod tests {
     use super::*;
 
-    /// A certificate failure, a listed alert and an incompatible peer are
-    /// rejections behind an `io::Error`; an unlisted alert and other TLS
-    /// errors are not.
+    /// A certificate failure and an incompatible peer are rejections behind an
+    /// `io::Error`, and other TLS errors are not. Each alert rustls names is a
+    /// rejection as its row says, and no number rustls leaves unnamed is one,
+    /// so every alert value is pinned.
     #[test]
     fn tls_rejection_matches_the_rejection_classes() {
         use rustls::{AlertDescription as A, CertificateError, Error as Tls};
+        let rejects = |tls: Tls| {
+            let err = std::io::Error::new(std::io::ErrorKind::InvalidData, tls);
+            crate::tls_rejection!(rustls, &err).is_some()
+        };
         for (tls, rejected) in [
             (
                 Tls::InvalidCertificate(CertificateError::UnknownIssuer),
@@ -370,19 +375,55 @@ mod tests {
                 Tls::PeerIncompatible(rustls::PeerIncompatible::NoCipherSuitesInCommon),
                 true,
             ),
-            (Tls::AlertReceived(A::HandshakeFailure), true),
-            (Tls::AlertReceived(A::CertificateRequired), true),
-            (Tls::AlertReceived(A::DecodeError), false),
-            (Tls::AlertReceived(A::InternalError), false),
             (Tls::General("reset".into()), false),
         ] {
             let name = format!("{tls:?}");
-            let err = std::io::Error::new(std::io::ErrorKind::InvalidData, tls);
-            assert_eq!(
-                crate::tls_rejection!(rustls, &err).is_some(),
-                rejected,
-                "{name}"
-            );
+            assert_eq!(rejects(tls), rejected, "{name}");
+        }
+        for (alert, rejected) in [
+            (A::CloseNotify, false),
+            (A::UnexpectedMessage, false),
+            (A::BadRecordMac, false),
+            (A::DecryptionFailed, false),
+            (A::RecordOverflow, false),
+            (A::DecompressionFailure, false),
+            (A::HandshakeFailure, true),
+            (A::NoCertificate, false),
+            (A::BadCertificate, true),
+            (A::UnsupportedCertificate, true),
+            (A::CertificateRevoked, true),
+            (A::CertificateExpired, true),
+            (A::CertificateUnknown, true),
+            (A::IllegalParameter, false),
+            (A::UnknownCA, true),
+            (A::AccessDenied, true),
+            (A::DecodeError, false),
+            (A::DecryptError, true),
+            (A::ExportRestriction, false),
+            (A::ProtocolVersion, true),
+            (A::InsufficientSecurity, true),
+            (A::InternalError, false),
+            (A::InappropriateFallback, false),
+            (A::UserCanceled, false),
+            (A::NoRenegotiation, false),
+            (A::MissingExtension, true),
+            (A::UnsupportedExtension, true),
+            (A::CertificateUnobtainable, false),
+            (A::UnrecognisedName, true),
+            (A::BadCertificateStatusResponse, false),
+            (A::BadCertificateHashValue, false),
+            (A::UnknownPSKIdentity, false),
+            (A::CertificateRequired, true),
+            (A::NoApplicationProtocol, true),
+            (A::EncryptedClientHelloRequired, false),
+        ] {
+            assert_eq!(rejects(Tls::AlertReceived(alert)), rejected, "{alert:?}");
+        }
+        for n in 0..=u8::MAX {
+            let alert = A::from(n);
+            if matches!(alert, A::Unknown(_)) {
+                assert!(!rejects(Tls::AlertReceived(alert)), "{alert:?}");
+            }
         }
     }
 

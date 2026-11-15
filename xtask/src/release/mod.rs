@@ -265,9 +265,7 @@ pub(crate) fn dispatch(root: &Path, explain: bool, cmd: ReleaseCommand) -> Outco
         ReleaseCommand::Milestone { version, apply } => {
             let version = Version::parse(&version)
                 .ok_or_else(|| Error::msg(format!("'{version}' is not X.Y.Z")))?;
-            if !run::on_path("gh") {
-                return Err(Error::msg("missing tool(s): gh"));
-            }
+            require_tools(&["gh"], run::on_path)?;
             milestone::run(&host, version, apply)
         }
         ReleaseCommand::DryRun {
@@ -376,18 +374,21 @@ fn gh_version(out: &str) -> Option<(u64, u64, u64)> {
     Some((parts.next()??, parts.next()??, parts.next()??))
 }
 
+/// Fails naming each of `tools` that `on_path` does not find.
+fn require_tools(tools: &[&str], on_path: impl Fn(&str) -> bool) -> Outcome {
+    let missing: Vec<&str> = tools.iter().copied().filter(|t| !on_path(t)).collect();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    Err(Error::msg(format!(
+        "missing tool(s): {}",
+        missing.join(" ")
+    )))
+}
+
 /// Names whatever a local release run is missing before any step starts.
 fn preflight(root: &Path, sbom: bool) -> Outcome {
-    let missing: Vec<&str> = ["gh", "curl"]
-        .into_iter()
-        .filter(|tool| !run::on_path(tool))
-        .collect();
-    if !missing.is_empty() {
-        return Err(Error::msg(format!(
-            "missing tool(s): {}",
-            missing.join(" ")
-        )));
-    }
+    require_tools(&["gh", "curl"], run::on_path)?;
     // The changelog assembly resolves pull-request numbers through the API;
     // unauthenticated, every derived reference degrades.
     let authenticated = std::env::var("GH_TOKEN").is_ok_and(|t| !t.is_empty())
@@ -847,6 +848,26 @@ mod tests {
         assert!(!head_is_detached(root).unwrap());
         git(root, &["checkout", "-q", "--detach"]);
         assert!(head_is_detached(root).unwrap());
+    }
+
+    /// Every missing tool is named; with none missing, nothing is refused.
+    #[test]
+    fn each_missing_tool_is_named() {
+        assert!(require_tools(&["gh", "curl"], |_| true).is_ok());
+        let err = require_tools(&["gh", "curl"], |t| t == "curl").unwrap_err();
+        assert_eq!(err.message, "missing tool(s): gh");
+        let err = require_tools(&["gh", "curl"], |_| false).unwrap_err();
+        assert_eq!(err.message, "missing tool(s): gh curl");
+    }
+
+    /// `--explain` says what the milestone step does.
+    #[test]
+    fn the_milestone_step_explains_itself() {
+        let cmd = ReleaseCommand::Milestone {
+            version: "0.4.0".to_owned(),
+            apply: false,
+        };
+        assert!(describe(&cmd).contains("milestone"), "{}", describe(&cmd));
     }
 
     /// `release milestone` only prints its changes until `--apply` is given.

@@ -3,7 +3,9 @@ use std::collections::BTreeMap;
 
 use super::*;
 use crate::release::fakes::*;
-use crate::release::io::{DryForge, Forge, Issue, Milestone, MilestoneEvent, Target, Tracked};
+use crate::release::io::{
+    DryForge, DryGit, Forge, Git, Issue, Milestone, MilestoneEvent, Target, Tracked,
+};
 
 /// When the previous release and this one landed.
 const AFTER: &str = "2026-10-11T22:40:05Z";
@@ -240,6 +242,14 @@ fn only_a_move_off_an_earlier_release_is_a_slip() {
         added("v0.6.0", "2026-09-02T00:00:00Z"),
     ];
     assert_eq!(fate(off_a_name, &[]), moved(None));
+    // A removal followed by another removal is no move, even within a minute.
+    let removed_twice = vec![
+        added("v0.4.0", "2026-09-01T00:00:00Z"),
+        removed("v0.4.0", "2026-09-02T00:00:00Z"),
+        removed("Later", "2026-09-02T00:00:01Z"),
+        added("v0.6.0", "2026-09-02T00:00:01Z"),
+    ];
+    assert_eq!(fate(removed_twice, &[]), moved(None));
 }
 
 /// The events of one move may fall a second or a minute apart; further apart,
@@ -601,6 +611,31 @@ fn a_version_origin_has_not_tagged_refuses() {
     let host = host!(&git, &forge, &registry, &workspace, pauses);
     assert!(run(&host, v("0.5.0"), true).is_err());
     assert!(log.entries().is_empty());
+}
+
+/// The dry forge and dry git hand each milestone read through, and a dry
+/// create makes nothing and has no number.
+#[test]
+fn the_dry_collaborators_read_through_and_create_nothing() {
+    let log = Log::default();
+    let (git, forge) = backfill(&log);
+    let dry = DryForge(&forge, true);
+    assert_eq!(dry.closed_issues(None).unwrap(), forge.closed_issues(None).unwrap());
+    assert_eq!(dry.open_issues(4).unwrap().len(), 2);
+    assert_eq!(dry.milestone_events(4).unwrap(), slipped_once_at("v0.4.0"));
+    assert_eq!(dry.landed_at("a4").unwrap(), UNTIL);
+    let mut tags = DryGit(&git).remote_tags().unwrap();
+    tags.sort();
+    assert_eq!(
+        tags,
+        [
+            ("v0.3.0".to_owned(), "a3".to_owned()),
+            ("v0.4.0".to_owned(), "a4".to_owned())
+        ]
+    );
+    assert_eq!(dry.create_milestone("v0.4.1").unwrap(), None);
+    assert_eq!(forge.milestones.borrow().len(), 2);
+    assert!(log.entries().is_empty(), "{:?}", log.entries());
 }
 
 /// The dry forge passes a failed read on; it never reads as an empty listing.

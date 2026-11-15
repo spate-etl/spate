@@ -1,13 +1,17 @@
 //! Waiting for a started container's service to answer, and the report a
 //! failed start writes: how the container ended and the tail of its output.
 
+#[cfg(any(feature = "s3", feature = "elasticmq"))]
 use std::fmt;
 use std::time::{Duration, Instant};
 
+#[cfg(any(feature = "s3", feature = "elasticmq"))]
 use testcontainers::core::ContainerPort;
+#[cfg(any(feature = "s3", feature = "elasticmq"))]
 use testcontainers::{Container, GenericImage};
 
-use crate::container_log::{container_output, container_tails};
+#[cfg(any(feature = "s3", feature = "elasticmq"))]
+use crate::container_log::{container_output, container_tails, exit_clause};
 
 /// How often a failed probe asks Docker whether the container still runs.
 const LIVENESS_EVERY: Duration = Duration::from_secs(1);
@@ -18,6 +22,7 @@ const LIVENESS_EVERY: Duration = Duration::from_secs(1);
 /// container still runs. It fails once Docker reports the container exited,
 /// or once `deadline` passes, after writing the tail of the container's
 /// output to stderr.
+#[cfg(any(feature = "s3", feature = "elasticmq"))]
 pub(crate) fn ready(
     what: &str,
     deadline: Duration,
@@ -25,7 +30,7 @@ pub(crate) fn ready(
     container: &Container<GenericImage>,
 ) -> Result<(), String> {
     wait(what, deadline, probe, || match container.is_running() {
-        Ok(false) => Some(container.exit_code().ok().flatten()),
+        Ok(false) => Some(exit_clause(container.exit_code().ok().flatten())),
         // Docker not answering leaves the deadline to decide.
         _ => None,
     })
@@ -36,6 +41,7 @@ pub(crate) fn ready(
 ///
 /// A failed lookup writes the tail of the container's output to stderr, as
 /// [`ready`] does.
+#[cfg(any(feature = "s3", feature = "elasticmq"))]
 pub(crate) fn host_port(
     what: &str,
     container: &Container<GenericImage>,
@@ -47,13 +53,16 @@ pub(crate) fn host_port(
         .map_err(|e| report(what, format!("{what} {name}: {e}"), container))
 }
 
-/// The polling loop of [`ready`]: `exited` gives the container's exit code
-/// once Docker reports it exited, `Some(None)` when Docker gave no code.
-fn wait(
+/// Waits until `probe` succeeds against the service named `what`.
+///
+/// Between failed probes it calls `ended`, at most once a second, which says
+/// how the service's container ended once it has, such as `exited with code
+/// 1`. It fails then, or once `deadline` passes.
+pub(crate) fn wait(
     what: &str,
     deadline: Duration,
     mut probe: impl FnMut() -> Result<(), String>,
-    mut exited: impl FnMut() -> Option<Option<i64>>,
+    mut ended: impl FnMut() -> Option<String>,
 ) -> Result<(), String> {
     let until = Instant::now() + deadline;
     let mut asked: Option<Instant> = None;
@@ -70,14 +79,8 @@ fn wait(
         }
         if asked.is_none_or(|at| now.duration_since(at) >= LIVENESS_EVERY) {
             asked = Some(now);
-            match exited() {
-                Some(Some(code)) => {
-                    return Err(format!(
-                        "{what} exited with code {code} before it was ready: {failure}"
-                    ));
-                }
-                Some(None) => return Err(format!("{what} exited before it was ready: {failure}")),
-                None => {}
+            if let Some(ended) = ended() {
+                return Err(format!("{what} {ended} before it was ready: {failure}"));
             }
         }
         std::thread::sleep(Duration::from_millis(50));
@@ -86,6 +89,7 @@ fn wait(
 
 /// Writes `failure` and the tail of `container`'s output to stderr, and
 /// returns `failure`.
+#[cfg(any(feature = "s3", feature = "elasticmq"))]
 fn report(what: &str, failure: String, container: &Container<GenericImage>) -> String {
     reported(
         what,
@@ -98,6 +102,7 @@ fn report(what: &str, failure: String, container: &Container<GenericImage>) -> S
 /// Writes `failure` and the tail of a container's `stdout` and `stderr` to
 /// stderr, where the test's captured output keeps its lines, and returns
 /// `failure`.
+#[cfg(any(feature = "s3", feature = "elasticmq"))]
 #[expect(
     clippy::print_stderr,
     reason = "a failed start's container output is read from the test's output"
@@ -118,6 +123,7 @@ fn reported<E: fmt::Display>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::container_log::exit_clause;
 
     /// A probe that never succeeds, with the error a refused connection gives.
     fn refused() -> Result<(), String> {
@@ -147,11 +153,13 @@ mod tests {
     fn an_exited_container_fails_the_wait_with_its_exit_code() {
         let deadline = Duration::from_secs(60);
         assert_eq!(
-            wait("Ceph RGW", deadline, refused, || Some(Some(250))),
+            wait("Ceph RGW", deadline, refused, || Some(exit_clause(Some(
+                250
+            )))),
             Err("Ceph RGW exited with code 250 before it was ready: connection refused".to_owned())
         );
         assert_eq!(
-            wait("Ceph RGW", deadline, refused, || Some(None)),
+            wait("Ceph RGW", deadline, refused, || Some(exit_clause(None))),
             Err("Ceph RGW exited before it was ready: connection refused".to_owned())
         );
     }
@@ -181,7 +189,7 @@ mod tests {
             },
             || {
                 asked += 1;
-                (asked > 1).then_some(Some(1))
+                (asked > 1).then(|| exit_clause(Some(1)))
             },
         );
         assert_eq!(
@@ -193,6 +201,7 @@ mod tests {
     }
 
     /// A failed start's report returns the failure it was given.
+    #[cfg(any(feature = "s3", feature = "elasticmq"))]
     #[test]
     fn a_report_returns_its_failure() {
         let read: Result<Vec<u8>, String> = Ok(b"err line".to_vec());

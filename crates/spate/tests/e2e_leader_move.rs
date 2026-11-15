@@ -17,8 +17,6 @@ use spate_test_support::CLUSTER_NODES;
 use std::time::Duration;
 use support::*;
 
-/// The exit code of a container the runtime had to kill.
-const KILLED: i64 = 137;
 const IN_SYNC: usize = 3;
 const WAVE: usize = 15_000;
 const DEADLINE: Duration = Duration::from_secs(180);
@@ -63,8 +61,7 @@ fn a_rolling_restart_moves_leaders_and_loses_nothing() {
             "node {node} leads a partition before it stops: {states:?}"
         );
 
-        let exit = h.stop_broker(node);
-        assert_ne!(exit, KILLED, "node {node} stopped under its own shutdown");
+        h.stop_broker(node);
         wait_until(DEADLINE, "every partition to lead elsewhere", || {
             h.partition_states(&params.topic)
                 .is_some_and(|states| states.iter().all(|p| p.leader > 0 && p.leader != node))

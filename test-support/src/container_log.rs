@@ -26,6 +26,14 @@ pub(crate) fn container_tails(what: &str, stdout: &str, stderr: &str) -> String 
     )
 }
 
+/// How a container ended, given the exit code Docker reported for it.
+pub(crate) fn exit_clause(code: Option<i64>) -> String {
+    code.map_or_else(
+        || "exited".to_owned(),
+        |code| format!("exited with code {code}"),
+    )
+}
+
 /// The last [`LOG_TAIL`] lines of `log`.
 fn tail(log: &str) -> String {
     let lines: Vec<&str> = log.lines().collect();

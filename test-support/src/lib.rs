@@ -17,7 +17,7 @@ mod http;
 mod kafka;
 #[cfg(feature = "s3")]
 mod s3;
-#[cfg(any(feature = "s3", feature = "elasticmq"))]
+#[cfg(any(feature = "s3", feature = "elasticmq", feature = "kafka-client"))]
 mod started;
 #[cfg(feature = "tls")]
 mod tls;
@@ -29,6 +29,8 @@ pub use corpus::{fnv1a, pin};
 #[cfg(feature = "elasticmq")]
 pub use elasticmq::{ElasticMq, Message, QUERY_PORT};
 pub use http::{http, http_with_body, http_with_headers};
+#[cfg(feature = "kafka-client")]
+pub use kafka::PartitionState;
 #[cfg(feature = "kafka")]
 pub use kafka::{BROKER_FROM_INSIDE, Broker, CLUSTER_NODES, KAFKA_PORT, KafkaBroker, KafkaCluster};
 #[cfg(feature = "s3")]

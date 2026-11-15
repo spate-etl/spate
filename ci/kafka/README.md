@@ -99,8 +99,8 @@ as v26.1.20 after v26.2.6, sorts below the pin and is not proposed.
 
 `spate_test_support::KafkaCluster` starts three nodes of the selected broker on
 a Docker network the caller names, with node ids 1 to 3. Spate's
-`e2e_leader_move` runs on it. Each node is a `KafkaBroker` with a cluster arm
-per broker:
+`e2e_leader_move` and one test of spate-kafka's `kafka_broker` suite run on it.
+Each node is a `KafkaBroker` with a cluster arm per broker:
 
 - Apache Kafka runs three KRaft nodes, each a broker and a controller. Its
   internal topics go on all three nodes, and an `acks=all` write needs two in
@@ -110,9 +110,15 @@ per broker:
 
 A node advertises a host port chosen before it starts, and a restart keeps the
 port, the node id and the data. A node cannot finish starting before the others
-are up, so the cluster waits for no ready line, and the caller waits until its
-client sees three brokers. A node runs no command once ready: a restart would
-run it again before the node had rejoined.
+are up, so the cluster waits for no ready line. The caller waits with
+`KafkaCluster::await_brokers`, which reads the cluster's metadata until it lists
+all three nodes. That method and `KafkaCluster::partition_states` need
+spate-test-support's `kafka-client` feature, which brings in rdkafka. A node
+runs no command once ready: a restart would run it again before the node had
+rejoined.
+
+`KafkaCluster::stop` stops a node with a two-minute timeout and fails when the
+runtime had to kill it.
 
 A node has no DNS server outside Docker. It looks up each peer by container
 name, before the peer starts and again while one is stopped. Docker answers a

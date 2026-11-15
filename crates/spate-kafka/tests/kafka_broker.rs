@@ -16,7 +16,7 @@ use spate_core::record::PartitionId;
 use spate_core::source::{Source, SourceCtx, SourceEvent, SourceLane};
 use spate_kafka::{KafkaSource, KafkaSourceConfig};
 use spate_test::HANG;
-use spate_test_support::{KAFKA_PORT, KafkaBroker};
+use spate_test_support::{KAFKA_PORT, KafkaBroker, KafkaCluster};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -630,6 +630,104 @@ fn real_broker_a_source_reads_below_a_commit_the_leader_answers_lower() {
         let read = watched.read(0, 1);
         assert!(read[0] < 3, "{reset}: the first record read is {}", read[0]);
     }
+}
+
+/// A source under `auto.offset.reset: error` starts at its commit after a
+/// leader move that truncated nothing, on a three-node cluster. It does so
+/// again once every record of the commit's epoch is deleted and the log
+/// starts at the commit. The source validates the commit's epoch with the
+/// leader each time.
+#[test]
+#[ignore = "requires Docker"]
+fn real_broker_an_error_source_starts_at_its_commit_after_a_clean_leader_move() {
+    let cluster = KafkaCluster::start(&spate_test::unique_name("leader-move"))
+        .unwrap_or_else(|e| panic!("{e}"));
+    cluster
+        .await_brokers(Duration::from_secs(120))
+        .unwrap_or_else(|e| panic!("{e}"));
+    let brokers = cluster.bootstrap().to_owned();
+    support::create_visible(
+        &brokers,
+        &[rdkafka::admin::NewTopic::new(
+            TOPIC,
+            1,
+            rdkafka::admin::TopicReplication::Fixed(3),
+        )],
+    );
+    let in_sync = |cluster: &KafkaCluster| {
+        cluster
+            .partition_states(TOPIC)
+            .is_some_and(|states| states[0].leader > 0 && states[0].in_sync == 3)
+    };
+    spate_test::wait_until(HANG, "a leader and three in sync", || in_sync(&cluster));
+
+    produce(&brokers, TOPIC, 5, 1, "before");
+    let first = support::record_epoch(&brokers, TOPIC, 4);
+    for group in ["moved", "retained"] {
+        let mut watched = Watched::open(config(&brokers, group));
+        assert_eq!(watched.read(0, 5).len(), 5);
+        watched.poll_until_committed(0, 0, 5);
+        assert_eq!(
+            support::committed_epoch(&brokers, group, TOPIC),
+            (rdkafka::Offset::Offset(5), first)
+        );
+    }
+
+    let leader = cluster.partition_states(TOPIC).expect("partition states")[0].leader;
+    cluster.stop(leader).unwrap_or_else(|e| panic!("{e}"));
+    spate_test::wait_until(HANG, "another leader", || {
+        cluster
+            .partition_states(TOPIC)
+            .is_some_and(|states| states[0].leader > 0 && states[0].leader != leader)
+    });
+    cluster.restart(leader).unwrap_or_else(|e| panic!("{e}"));
+    spate_test::wait_until(HANG, "three in sync again", || in_sync(&cluster));
+    produce(&brokers, TOPIC, 3, 1, "after");
+    let next = support::record_epoch(&brokers, TOPIC, 5);
+    assert!(next > first, "the leader epoch rose from {first} to {next}");
+    for group in ["moved", "retained"] {
+        // The coordinator answers again before the source looks the commit up.
+        assert_eq!(
+            support::committed_epoch(&brokers, group, TOPIC),
+            (rdkafka::Offset::Offset(5), first)
+        );
+    }
+
+    assert_eq!(starts_under_error(&brokers, "moved", first), [5, 6, 7]);
+
+    support::delete_records_below(&brokers, TOPIC, 0, 5);
+    let low = support::probe(&brokers, "watermarks");
+    spate_test::wait_until(HANG, "the log to start at the commit", || {
+        low.fetch_watermarks(TOPIC, 0, Duration::from_secs(10))
+            .is_ok_and(|(start, _)| start == 5)
+    });
+    assert_eq!(starts_under_error(&brokers, "retained", first), [5, 6, 7]);
+}
+
+/// The first three offsets a source under `auto.offset.reset: error` reads
+/// for `group`, once librdkafka has validated the commit at offset 5 with
+/// leader epoch `epoch`. librdkafka's log reaches the capture only while the
+/// source serves its control plane, so the source is served until both lines
+/// arrive.
+fn starts_under_error(brokers: &str, group: &str, epoch: i32) -> Vec<i64> {
+    let mut cfg = config(brokers, group);
+    cfg.rdkafka
+        .insert("auto.offset.reset".into(), "error".into());
+    cfg.rdkafka.insert("debug".into(), "fetch".into());
+    let request =
+        format!("querying broker for epoch validation of offset 5 (leader epoch {epoch})");
+    let capture = spate_test::LogCapture::new();
+    capture.during(tracing::Level::DEBUG, || {
+        let mut watched = Watched::open(cfg);
+        let read = watched.read(0, 3);
+        capture.wait_for(HANG, "the commit's validation", || {
+            watched.serve();
+            let lines = capture.lines();
+            let has = |text: &str| lines.iter().any(|line| line.contains(text));
+            (has(&request) && has("offset and epoch validation succeeded")).then_some(())
+        });
+        read
+    })
 }
 
 /// A group that passed an aborted transaction under `read_committed` delivers

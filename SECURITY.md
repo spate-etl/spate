@@ -110,11 +110,15 @@ Please open a public issue.
 | Newest `0.x` minor | Yes |
 | Anything older | No |
 
-A fix lands on `main` and ships as the next patch of that minor. There are no
-maintenance branches and no backports by default.
+A fix lands on `main` and ships in the next release from `main`. That release is
+a patch or a minor, by the rule in
+[The one decision](RELEASING.md#the-one-decision). It is a minor when `main`
+already holds a change that needs one, or when the fix needs one itself. There
+are no maintenance branches and no backports.
 
-If a specific older version blocks you, say so on the advisory and a branch can
-be cut from its tag. That is a conversation, not a standing commitment.
+A fix that raises a dependency inside the requirement the newest minor already
+declares does not wait for the next release, because
+`cargo update -p <dependency>` picks it up.
 
 All crate versions in lockstep, so "the newest minor" means the same thing
 for every one of them.

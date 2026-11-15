@@ -269,9 +269,7 @@ mod tests {
             },
             None,
         );
-        let mut framed = vec![0xC3, 0x01];
-        framed.extend_from_slice(&fingerprint.to_le_bytes());
-        framed.extend_from_slice(&datum(9, "so"));
+        let framed = crate::wire::single_object_frame(fingerprint, &datum(9, "so"));
         let mut out = EmitCollector::<Event>::new();
         AvroDatumDeserializer::<Owned<Event>>::new(core)
             .deserialize(&raw_payload(&framed), &test_ack(), &mut out)

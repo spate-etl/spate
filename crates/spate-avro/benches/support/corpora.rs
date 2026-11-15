@@ -161,13 +161,7 @@ pub(crate) fn matching_single_object() -> Vec<Vec<u8>> {
 fn single_object(fingerprint: u64) -> Vec<Vec<u8>> {
     order_datums()
         .iter()
-        .map(|datum| {
-            let mut framed = Vec::with_capacity(10 + datum.len());
-            framed.extend_from_slice(&[0xC3, 0x01]);
-            framed.extend_from_slice(&fingerprint.to_le_bytes());
-            framed.extend_from_slice(datum);
-            framed
-        })
+        .map(|datum| spate_avro::single_object_frame(fingerprint, datum))
         .collect()
 }
 

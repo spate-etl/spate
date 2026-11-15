@@ -60,6 +60,18 @@ pub fn parse_single_object(payload: &[u8]) -> Result<(u64, &[u8]), DeserError> {
     Ok((fingerprint, &payload[10..]))
 }
 
+/// `body` in single-object encoding: magic `0xC3 0x01`, `fingerprint`
+/// little-endian, then `body`.
+///
+/// For this crate's tests and benches only. It is compiled for its unit
+/// tests and under the `testing` feature, and is outside the semver surface.
+#[cfg(any(test, feature = "testing"))]
+#[doc(hidden)]
+#[must_use]
+pub fn single_object_frame(fingerprint: u64, body: &[u8]) -> Vec<u8> {
+    [&[0xC3, 0x01][..], &fingerprint.to_le_bytes(), body].concat()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -103,6 +115,24 @@ mod tests {
         let (fp, datum) = parse_single_object(&payload).unwrap();
         assert_eq!(fp, 0x0123_4567_89AB_CDEF);
         assert_eq!(datum, b"datum");
+    }
+
+    #[test]
+    fn single_object_frame_writes_magic_then_little_endian_fingerprint_then_body() {
+        assert_eq!(
+            single_object_frame(0x0102_0304_0506_0708, &[0xAA]),
+            [
+                0xC3, 0x01, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01, 0xAA
+            ]
+        );
+    }
+
+    #[test]
+    fn single_object_frame_of_an_empty_body_is_the_header() {
+        assert_eq!(
+            single_object_frame(7, &[]),
+            [0xC3, 0x01, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
+        );
     }
 
     #[test]

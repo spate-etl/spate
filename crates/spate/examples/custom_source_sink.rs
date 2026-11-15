@@ -33,7 +33,7 @@ use spate::checkpoint::{AckIssuer, AckRef};
 use spate::deser::Owned;
 use spate::error::{ErrorPolicy, SinkError, SourceError};
 use spate::prelude::*;
-use spate::record::{RawPayload, Record};
+use spate::record::{NO_EVENT_TIME_MS, RawPayload, Record};
 use spate::sink::{RecordRouter, RowEncoder, SealedBatch, ShardWriter};
 use spate::source::{LaneId, PayloadBatch, Source, SourceCtx, SourceEvent, SourceLane};
 use std::collections::{BTreeMap, BTreeSet};
@@ -82,7 +82,7 @@ impl<'a> PayloadBatch<'a> for CounterBatch<'a> {
             key: None,
             partition: self.partition,
             offset,
-            timestamp_ms: offset,
+            timestamp_ms: NO_EVENT_TIME_MS,
         })
     }
 

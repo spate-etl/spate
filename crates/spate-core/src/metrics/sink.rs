@@ -8,6 +8,7 @@ use super::queue::QueueMetrics;
 use super::{E2eBasis, MetricsError};
 use crate::error::ErrorClass;
 use crate::hash::FastMap;
+use crate::record::NO_EVENT_TIME_MS;
 use metrics::{Counter, Histogram, SharedString};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -316,11 +317,12 @@ impl SinkShardMetrics {
     /// oldest record. `ingest_age` is time since that record entered the
     /// terminal stage; `oldest_event_ms` is its source event time. The
     /// configured basis picks which one lands in the histogram (event
-    /// basis falls back to ingest when no event time was available).
+    /// basis falls back to ingest when `oldest_event_ms` is
+    /// [`NO_EVENT_TIME_MS`]).
     #[inline]
     pub fn e2e_observed(&self, ingest_age: Duration, oldest_event_ms: i64) {
         let latency = match self.e2e_basis {
-            E2eBasis::Event if oldest_event_ms != i64::MAX => {
+            E2eBasis::Event if oldest_event_ms != NO_EVENT_TIME_MS => {
                 let now_ms = crate::clock::wall_now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))

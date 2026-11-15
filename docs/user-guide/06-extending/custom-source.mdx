@@ -76,6 +76,12 @@ all sharing the batch lifetime:
 `RawPayload.key` feeds the sink's shard routing hash. Populate it if your
 source has message keys.
 
+`RawPayload.timestamp_ms` is the record's event time in milliseconds since
+the epoch. A source with no event time for a payload reports
+`spate::NO_EVENT_TIME_MS`, which the event basis of
+`metrics.e2e_basis` ages from ingest. Any other value is read as an event
+time, so a source must not report a counter such as its offset there.
+
 ## The control plane: `Source`
 
 The control plane owns whatever the lanes are built from, and the `Source` impl

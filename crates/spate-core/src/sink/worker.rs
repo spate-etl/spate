@@ -22,6 +22,7 @@ use crate::clock::tokio::{Clock, Sleep, Stopwatch, before};
 use crate::error::ErrorClass;
 use crate::hash::FastMap;
 use crate::metrics::{AttemptOutcome, FlushReason, SinkShardMetrics};
+use crate::record::NO_EVENT_TIME_MS;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -148,7 +149,7 @@ impl Accumulator {
             acks: AckSet::new(),
             first_at: None,
             oldest_ingest: None,
-            oldest_event_ms: i64::MAX,
+            oldest_event_ms: NO_EVENT_TIME_MS,
         }
     }
 

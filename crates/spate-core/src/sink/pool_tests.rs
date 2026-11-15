@@ -13,6 +13,7 @@ use crate::clock::tokio::{Clock as _, SystemClock, TestClock};
 use crate::error::ErrorClass;
 use crate::hash::FastMap;
 use crate::metrics::{ComponentLabels, E2eBasis, SinkShardMetrics};
+use crate::record::NO_EVENT_TIME_MS;
 use bytes::Bytes;
 use spate_test::wait_until;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -212,6 +213,17 @@ fn fixture_with(
     cfg: SinkPoolConfig,
     queue_cap: usize,
 ) -> Fixture {
+    fixture_with_basis(clock, shards, replicas, cfg, queue_cap, E2eBasis::Ingest)
+}
+
+fn fixture_with_basis(
+    clock: Option<Arc<TestClock>>,
+    shards: usize,
+    replicas: usize,
+    cfg: SinkPoolConfig,
+    queue_cap: usize,
+    basis: E2eBasis,
+) -> Fixture {
     let writer = MockWriter::new();
     writer.clock.lock().unwrap().clone_from(&clock);
     let (mut queues, receivers) = shard_queues(shards, queue_cap);
@@ -235,13 +247,8 @@ fn fixture_with(
     let replica_names: Vec<String> = (0..replicas).map(|r| format!("r{r}")).collect();
     let metrics: Vec<SinkShardMetrics> = (0..shards)
         .map(|s| {
-            SinkShardMetrics::new(
-                &labels,
-                u32::try_from(s).unwrap(),
-                &replica_names,
-                E2eBasis::Ingest,
-            )
-            .with_queue(queues.metrics(), s)
+            SinkShardMetrics::new(&labels, u32::try_from(s).unwrap(), &replica_names, basis)
+                .with_queue(queues.metrics(), s)
         })
         .collect();
     let runtime = tokio::runtime::Handle::current();
@@ -2999,6 +3006,61 @@ fn ingest_latency_ignores_the_pool_clock() {
 
     let sum = sample_value(&handle.render(), "spate_e2e_latency_seconds_sum", &[]);
     assert!(sum < 3600.0, "aged on the pool clock: {sum}");
+}
+
+/// The end-to-end latency one chunk reports on the event basis, when the
+/// chunk's minimum event time is `oldest_event_ms`.
+fn event_basis_latency_sum(oldest_event_ms: i64) -> f64 {
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    metrics::with_local_recorder(&recorder, || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .start_paused(true)
+            .build()
+            .expect("runtime");
+        rt.block_on(async {
+            let clock = TestClock::frozen();
+            let f = fixture_with_basis(
+                Some(Arc::clone(&clock)),
+                1,
+                1,
+                small_batches(),
+                16,
+                E2eBasis::Event,
+            );
+            let (ack, ack_rx) = AckRef::test_pair();
+            let mut sealed = chunk(1, 1, &ack);
+            sealed.oldest_event_ms = oldest_event_ms;
+            f.queues.try_send(0, sealed).unwrap();
+            drop(ack);
+            paused_hour().await;
+            assert_eq!(ack_rx.try_recv().unwrap().status, AckStatus::Delivered);
+            drop(f.queues);
+            f.pool.drain(Duration::ZERO).await;
+        });
+    });
+    sample_value(&handle.render(), "spate_e2e_latency_seconds_sum", &[])
+}
+
+/// On the event basis, a chunk with no event time ages from ingest. The
+/// batch's start must not read 0, which is 1970 and about 1.7e12 ms of age.
+#[test]
+fn a_chunk_without_event_time_ages_from_ingest_on_the_event_basis() {
+    let sum = event_basis_latency_sum(NO_EVENT_TIME_MS);
+    assert!(sum < 3600.0, "aged from 1970: {sum}");
+}
+
+/// On the event basis, a chunk with an event time two hours old ages from
+/// that time. Wall time only adds to the age, so the bound is one-sided.
+#[test]
+fn a_chunk_with_an_event_time_ages_from_that_time_on_the_event_basis() {
+    let two_hours_ago = crate::clock::wall_now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| i64::try_from(d.as_millis()).unwrap_or(0) - 7_200_000)
+        .expect("after the epoch");
+    let sum = event_basis_latency_sum(two_hours_ago);
+    assert!(sum >= 7200.0, "not aged from its event time: {sum}");
 }
 
 /// `SinkPool` stays `Send` and `Sync` with the clock it holds.

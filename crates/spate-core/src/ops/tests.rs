@@ -6,7 +6,7 @@ use crate::checkpoint::{AckMsg, AckRef, AckStatus};
 use crate::deser::{BytesPassthrough, Deserializer, EmitRecord, Owned, RecFamily};
 use crate::error::{DeserError, ErrorPolicy, SinkError};
 use crate::metrics::names;
-use crate::record::{PartitionId, RawPayload, Record};
+use crate::record::{NO_EVENT_TIME_MS, PartitionId, RawPayload, Record};
 use crate::sink::{
     EncodedChunk, FrameCodec, FrameCodecFactory, KeyHashRouter, RecordRouter, RowEncoder,
     ShardQueues, ShardRouter, shard_queues,
@@ -1622,6 +1622,76 @@ fn a_flush_does_not_send_a_new_chunk_ahead_of_a_parked_one() {
     let _ = StageLifecycle::flush_terminal(&mut handoff);
     let order = drain_relieving(&mut handoff, &mut rxs[0]);
     assert_eq!(order, vec![b"BBBB".to_vec(), b"c".to_vec()]);
+}
+
+/// A record carrying `payload` and the event time `event_time_ms`.
+fn timed_rec(
+    payload: &[u8],
+    event_time_ms: i64,
+) -> (Record<Vec<u8>>, crossbeam_channel::Receiver<AckMsg>) {
+    let (mut rec, rx) = probe_rec(payload);
+    rec.meta.event_time_ms = event_time_ms;
+    (rec, rx)
+}
+
+/// Push each `(payload, event time)` pair, flush, and return the oldest event
+/// time of the one chunk the shard sent.
+fn flushed_oldest_event_ms(
+    handoff: &mut SinkHandoff<Owned<Vec<u8>>, VecEncoder, ToZero>,
+    rx: &mut mpsc::Receiver<EncodedChunk>,
+    records: &[(&[u8], i64)],
+) -> i64 {
+    let mut keep = Vec::new();
+    for (payload, event_time_ms) in records {
+        let (rec, ack_rx) = timed_rec(payload, *event_time_ms);
+        keep.push(ack_rx);
+        let _ = Collector::push(handoff, rec);
+    }
+    let _ = StageLifecycle::flush_terminal(handoff);
+    let chunk = rx.try_recv().expect("a chunk was sent");
+    let oldest = chunk.oldest_event_ms;
+    chunk.acks.deliver();
+    oldest
+}
+
+/// A chunk of one record with no event time carries `NO_EVENT_TIME_MS`, so
+/// the event basis ages it from ingest.
+#[test]
+fn a_chunk_of_a_record_without_event_time_carries_the_sentinel() {
+    let (queues, mut rxs) = shard_queues(1, 4);
+    let mut handoff = order_handoff(queues, ToZero, 1024);
+    let oldest = flushed_oldest_event_ms(&mut handoff, &mut rxs[0], &[(b"a", NO_EVENT_TIME_MS)]);
+    assert_eq!(oldest, NO_EVENT_TIME_MS);
+}
+
+/// A chunk's minimum passes over a record with no event time, so a chunk that
+/// also holds a real event time reports that time.
+#[test]
+fn a_chunk_mixing_no_event_time_with_a_real_one_keeps_the_real_one() {
+    let (queues, mut rxs) = shard_queues(1, 4);
+    let mut handoff = order_handoff(queues, ToZero, 1024);
+    let oldest = flushed_oldest_event_ms(
+        &mut handoff,
+        &mut rxs[0],
+        &[
+            (b"a", NO_EVENT_TIME_MS),
+            (b"b", 1_000),
+            (b"c", NO_EVENT_TIME_MS),
+        ],
+    );
+    assert_eq!(oldest, 1_000);
+}
+
+/// The minimum a chunk starts from after a seal is `NO_EVENT_TIME_MS` again,
+/// so a later chunk of records with no event time is not reported as 0.
+#[test]
+fn a_chunk_after_a_seal_starts_again_at_the_sentinel() {
+    let (queues, mut rxs) = shard_queues(1, 4);
+    let mut handoff = order_handoff(queues, ToZero, 1024);
+    let first = flushed_oldest_event_ms(&mut handoff, &mut rxs[0], &[(b"a", 1_000)]);
+    assert_eq!(first, 1_000);
+    let second = flushed_oldest_event_ms(&mut handoff, &mut rxs[0], &[(b"b", NO_EVENT_TIME_MS)]);
+    assert_eq!(second, NO_EVENT_TIME_MS);
 }
 
 /// A chunk sealed by `push` on a shard with a parked chunk goes behind it,

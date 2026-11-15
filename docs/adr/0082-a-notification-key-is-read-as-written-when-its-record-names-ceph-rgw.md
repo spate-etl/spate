@@ -1,5 +1,5 @@
 ---
-description: "A notification record whose eventSource is ceph:s3 is read at its key as written; every other key is form-decoded. Supersedes ADR-0071's key decoding."
+description: "A notification record whose eventSource is ceph:s3 is read at its key as written. ADR-0104 reads an EventBridge event's key as written too."
 ---
 
 # ADR-0082 — A notification key is read as written when its record names Ceph RGW
@@ -9,7 +9,9 @@ description: "A notification record whose eventSource is ceph:s3 is read at its 
 - **Supersedes:**
   [ADR-0071](0071-a-work-unit-is-one-object-or-one-byte-range-of-one-object.md),
   for notification key decoding
-- **Superseded by:** —
+- **Superseded by:**
+  [ADR-0104](0104-an-eventbridge-object-created-event-is-read-as-a-notification.md),
+  for form-decoding every key other than a Ceph RGW record's
 
 ## Context and problem statement
 

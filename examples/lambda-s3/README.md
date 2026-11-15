@@ -56,8 +56,9 @@ also needs the permissions the event source mapping uses on the queue.
 
 ## Connect the queue
 
-- Send the bucket's `s3:ObjectCreated:*` notifications straight to a standard
-  SQS queue. The source does not read an EventBridge or SNS envelope.
+- Send the bucket's `s3:ObjectCreated:*` notifications to a standard SQS queue,
+  straight from the bucket or through an EventBridge rule that matches
+  `Object Created` events. The source does not read an SNS envelope.
 - Give the queue a redrive policy with a dead-letter queue and `maxReceiveCount`
   of at least 5.
 - Set the queue's visibility timeout to at least six times the function timeout,

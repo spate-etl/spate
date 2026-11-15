@@ -377,6 +377,28 @@ queue receives the bucket's notifications only when
 - its maximum message size is at least 64 KB;
 - it is in the bucket's region.
 
+The bucket can instead send its events to EventBridge, where a rule forwards
+them to the queue. The bucket's EventBridge setting sends every event type for
+every object
+([AWS](https://docs.aws.amazon.com/AmazonS3/latest/userguide/enable-event-notifications-eventbridge.html)),
+so give the rule an event pattern on `source` `aws.s3`, `detail-type`
+`Object Created` and the bucket's name. Each event of another type costs a
+receive and a delete, and an event for another bucket is failed back. The
+queue receives the rule's events only when
+([AWS](https://docs.aws.amazon.com/eventbridge/latest/userguide/eb-use-resource-based.html#eb-sqs-permissions)):
+
+- its access policy lets `events.amazonaws.com` send to it, with
+  `aws:SourceArn` set to the rule's ARN;
+- an encrypted queue uses a customer managed KMS key whose key policy lets
+  EventBridge use it
+  ([AWS](https://docs.aws.amazon.com/eventbridge/latest/userguide/eb-targets.html));
+- it is a standard queue, since the feed refuses a FIFO queue.
+
+Leave the target's input as the whole event. A target with an input path or an
+input transformer sends another body
+([AWS](https://docs.aws.amazon.com/eventbridge/latest/APIReference/API_PutTargets.html)),
+and the source fails that body back.
+
 The bucket's side, and which records the source reads, are on the
 [S3 source](../../sources/s3/README.mdx#storage-notifications) page.
 

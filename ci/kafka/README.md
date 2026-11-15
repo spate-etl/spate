@@ -99,8 +99,8 @@ as v26.1.20 after v26.2.6, sorts below the pin and is not proposed.
 
 `spate_test_support::KafkaCluster` starts three nodes of the selected broker on
 a Docker network the caller names, with node ids 1 to 3. Spate's
-`e2e_leader_move` and spate-kafka's `kafka_broker` suite run on it. Each node
-is a `KafkaBroker` with a cluster arm per broker:
+`e2e_leader_move` and one test of spate-kafka's `kafka_broker` suite run on it.
+Each node is a `KafkaBroker` with a cluster arm per broker:
 
 - Apache Kafka runs three KRaft nodes, each a broker and a controller. Its
   internal topics go on all three nodes, and an `acks=all` write needs two in
@@ -118,8 +118,7 @@ runs no command once ready: a restart would run it again before the node had
 rejoined.
 
 `KafkaCluster::stop` stops a node with a two-minute timeout and fails when the
-runtime had to kill it, so a test that stops a node knows its controlled
-shutdown finished.
+runtime had to kill it.
 
 A node has no DNS server outside Docker. It looks up each peer by container
 name, before the peer starts and again while one is stopped. Docker answers a

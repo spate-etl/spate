@@ -613,10 +613,10 @@ impl KafkaCluster {
     ///
     /// # Errors
     ///
-    /// Fails, naming the node, when a node exits first, and when `timeout`
-    /// passes, with the node ids the cluster's metadata last listed. A
-    /// cluster dropped while the caller panics on the error writes each
-    /// node's state and log.
+    /// Fails when the metadata client cannot be created, when a node exits
+    /// first, naming the node, and when `timeout` passes, with the last
+    /// metadata read's error or the node ids it listed. A cluster dropped
+    /// while the caller panics on the error writes each node's state and log.
     #[cfg(feature = "kafka-client")]
     pub fn await_brokers(&self, timeout: Duration) -> Result<(), String> {
         let probe = metadata_probe(&self.bootstrap)?;

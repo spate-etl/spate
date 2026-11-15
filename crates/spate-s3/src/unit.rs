@@ -1477,13 +1477,26 @@ mod tests {
         }
     }
 
-    /// Pins the `detail-type` rule: each listed type is acknowledged for any
-    /// bucket and with no object, any other type fails naming it, a missing
-    /// or numeric type fails, and a `source` other than exactly `aws.s3` is
-    /// no notification.
+    /// Pins the `detail-type` rule: each type AWS's S3 mapping lists besides
+    /// `Object Created` is acknowledged for any bucket and with no object,
+    /// any other type fails naming it, a missing or numeric type fails, and
+    /// a `source` other than exactly `aws.s3` is no notification.
     #[test]
     fn an_eventbridge_event_detail_type_is_acknowledged_only_from_the_list() {
-        for detail_type in EVENTBRIDGE_ACKNOWLEDGED {
+        for detail_type in [
+            "Object Deleted",
+            "Object Restore Initiated",
+            "Object Restore Completed",
+            "Object Restore Expired",
+            "Object Storage Class Changed",
+            "Object Access Tier Changed",
+            "Object Tags Added",
+            "Object Tags Deleted",
+            "Object ACL Updated",
+            "Object Annotation Created",
+            "Object Annotation Removed",
+            "Object Retention Updated",
+        ] {
             let mut event = event(detail_type, "elsewhere", "other/a.ndjson", None);
             event["detail"]
                 .as_object_mut()

@@ -2861,8 +2861,11 @@ async fn first_retries_of(shards: usize) -> Vec<Duration> {
     let f = fixture_on(&clock, shards, 1, one_second_full_jitter(), 16);
     let (ack, _ack_rx) = AckRef::test_pair();
     for shard in 0..shards {
-        f.writer
-            .script(shard, 0, [Outcome::Fail(ErrorClass::Retryable, Duration::ZERO)]);
+        f.writer.script(
+            shard,
+            0,
+            [Outcome::Fail(ErrorClass::Retryable, Duration::ZERO)],
+        );
         f.queues.try_send(shard, chunk(1, 8, &ack)).unwrap();
     }
     drop(ack);

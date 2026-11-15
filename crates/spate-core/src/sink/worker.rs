@@ -899,15 +899,35 @@ mod tests {
     #[test]
     fn adjacent_pool_seeds_share_no_batch_seed() {
         let base = 0x1234_5678_9ABC_DEF0;
-        let seeds = |base| (0..1024).map(|seq| batch_seed(base, 0, seq)).collect::<FastSet<_>>();
+        let seeds = |base| {
+            (0..1024)
+                .map(|seq| batch_seed(base, 0, seq))
+                .collect::<FastSet<_>>()
+        };
         assert!(seeds(base).is_disjoint(&seeds(base + 1)));
+    }
+
+    /// Every batch of one shard takes its own seed. An OR in place of the
+    /// XOR that joins `seq` folds sequence numbers whose bits the mixed base
+    /// already sets onto one seed.
+    #[test]
+    fn each_batch_of_a_shard_takes_its_own_seed() {
+        let base = 0x1234_5678_9ABC_DEF0;
+        let seeds = (0..1024)
+            .map(|seq| batch_seed(base, 0, seq))
+            .collect::<FastSet<_>>();
+        assert_eq!(seeds.len(), 1024);
     }
 
     /// Two shards of one pool share no batch seed either.
     #[test]
     fn two_shards_share_no_batch_seed() {
         let base = 0x1234_5678_9ABC_DEF0;
-        let seeds = |shard| (0..1024).map(|seq| batch_seed(base, shard, seq)).collect::<FastSet<_>>();
+        let seeds = |shard| {
+            (0..1024)
+                .map(|seq| batch_seed(base, shard, seq))
+                .collect::<FastSet<_>>()
+        };
         assert!(seeds(0).is_disjoint(&seeds(1)));
     }
 

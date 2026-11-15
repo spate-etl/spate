@@ -136,9 +136,17 @@ mod tests {
     #[test]
     fn a_fresh_seed_carries_the_clock_and_the_pid() {
         const LOW_40: u64 = (1 << 40) - 1;
-        let before = wall_nanos();
+        // Read apart from `wall_nanos`, so a fault there cannot move both
+        // sides of the comparison together.
+        let now = || {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("the test clock reads after 1970")
+                .as_nanos() as u64
+        };
+        let before = now();
         let seed = fresh_seed();
-        let after = wall_nanos();
+        let after = now();
         let taken = SEEDS_TAKEN.load(Ordering::Relaxed);
 
         // Wrapping, so neither a carry out of bit 40 nor a clock stepped back

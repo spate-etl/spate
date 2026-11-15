@@ -835,4 +835,21 @@ mod tests {
         clock.clock.advance(Duration::from_secs(1));
         assert_eq!(handle.join_by(deadline, &*clock).map(Result::unwrap), Some(7));
     }
+
+    /// With a tick far longer than the hang bound, only the end signal can
+    /// return the wait in time.
+    #[test]
+    fn wait_for_returns_when_the_end_is_signalled() {
+        let clock = CountedClock::new();
+        let (finished, done) = crossbeam_channel::bounded::<()>(0);
+        let (result_tx, result) = mpsc::channel();
+        let waiter = spawn_thread("spate-waiter", move || {
+            let waited = wait_for(&done, None, &*clock, spate_test::HANG * 10, || None::<()>);
+            let _ = result_tx.send(matches!(waited, Waited::Done));
+        })
+        .unwrap();
+        drop(finished);
+        assert_eq!(result.recv_timeout(spate_test::HANG), Ok(true));
+        waiter.join().unwrap();
+    }
 }

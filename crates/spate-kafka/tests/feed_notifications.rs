@@ -11,7 +11,6 @@
 
 mod support;
 
-use object_store::aws::AmazonS3Builder;
 use object_store::path::Path;
 use object_store::{Attribute, ObjectStore as _, ObjectStoreExt as _, PutOptions, TagSet};
 use serde_json::Value;
@@ -507,15 +506,7 @@ fn notifying() -> Notifying {
     assert!(refused.is_err(), "{refused:?}");
     s3.put_bucket_notification(BUCKET)
         .expect("configure notifications");
-    let client = AmazonS3Builder::new()
-        .with_endpoint(s3.endpoint())
-        .with_allow_http(true)
-        .with_bucket_name(BUCKET)
-        .with_region(REGION)
-        .with_access_key_id(ACCESS_KEY)
-        .with_secret_access_key(SECRET_KEY)
-        .build()
-        .expect("S3 client");
+    let client = s3.client_builder(BUCKET).build().expect("S3 client");
     let io = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()

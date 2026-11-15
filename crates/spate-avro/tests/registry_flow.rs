@@ -17,7 +17,8 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
 use spate_avro::{
-    AvroDeserializerBuilder, AvroMode, AvroSettings, AvroValue, AvroValueDeserializer, RegistrySection,
+    AvroDeserializerBuilder, AvroMode, AvroSettings, AvroValue, AvroValueDeserializer,
+    RegistrySection,
 };
 use spate_core::checkpoint::AckRef;
 use spate_core::clock::{Clock, TestClock};

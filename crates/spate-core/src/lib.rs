@@ -64,4 +64,4 @@ pub mod telemetry;
 
 pub use error::{DeserError, ErrorClass, ErrorPolicy, FatalError, SinkError, SourceError};
 pub use framing::FramingContract;
-pub use record::{Flow, PartitionId, RawPayload, Record, RecordMeta};
+pub use record::{Flow, NO_EVENT_TIME_MS, PartitionId, RawPayload, Record, RecordMeta};

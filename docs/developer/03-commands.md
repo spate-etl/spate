@@ -122,6 +122,7 @@ These sit outside `ci`, by cost or by what they need:
 | `cargo xtask attribution` | `THIRD-PARTY.md` is regenerated at release; the nightly tier checks that it still generates |
 | `cargo xtask fuzz build`, `cargo xtask fuzz run` | Needs a nightly toolchain; the nightly tier fuzzes |
 | `cargo xtask mutants` | Runs a package's suite once per mutant; CI runs it on each pull request, advisory |
+| `cargo xtask powerset` | Every combination of features; the weekly workflow runs it in shards, since one run takes longer than a job may |
 
 ## Pass `--locked`, except where cargo cannot take it
 

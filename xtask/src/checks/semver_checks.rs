@@ -21,7 +21,6 @@
 //! review, when code using the macro stops compiling or an item it generates
 //! for the same input changes or goes away.
 
-use std::ffi::OsStr;
 use std::path::Path;
 
 use serde_json::Value;
@@ -514,9 +513,9 @@ pub(crate) fn print_cache_key(root: &Path, explain: bool) -> Outcome {
     let tool = run::capture(root, &Step::new("cargo", ["semver-checks", "--version"]))?;
     let key = cache_key(uname.trim_end_matches('\n'), &tag, &rustc, &tool);
     eprintln!("{TOOL}: {key}");
-    match std::env::var_os("GITHUB_OUTPUT") {
-        Some(path) if !path.is_empty() => append_output(&path, &key),
-        _ => {
+    match crate::ci::output_file() {
+        Some(path) => append_output(&path, &key),
+        None => {
             println!("{key}");
             Ok(())
         }
@@ -524,16 +523,9 @@ pub(crate) fn print_cache_key(root: &Path, explain: bool) -> Outcome {
 }
 
 /// Appends one `key=value` line to a workflow's step-output file.
-fn append_output(path: &OsStr, key: &str) -> Outcome {
-    use std::io::Write;
-
-    let named = |e: std::io::Error| Error::msg(format!("{}: {e}", Path::new(path).display()));
-    let mut file = std::fs::OpenOptions::new()
-        .append(true)
-        .create(true)
-        .open(path)
-        .map_err(named)?;
-    writeln!(file, "key={key}").map_err(named)
+fn append_output(path: &Path, key: &str) -> Outcome {
+    crate::ci::append_to(path, &format!("key={key}\n"))
+        .map_err(|e| Error::msg(format!("{}: {e}", path.display())))
 }
 
 #[cfg(test)]

@@ -883,6 +883,7 @@ fn each_scheduled_job_runs_in_one_file() {
             "beta",
             "coverage-containers",
             "features-powerset",
+            "powerset-plan",
             "report",
         ]
     );
@@ -992,7 +993,7 @@ fn the_weekly_summary_runs_after_a_cut_measurement() {
         .expect("a step writes the summary");
     let job_limit = job["timeout-minutes"].as_u64().unwrap();
     let step_limit = measure["timeout-minutes"].as_u64().unwrap();
-    assert!(step_limit < job_limit, "{step_limit} >= {job_limit}");
+    assert_step_inside_job(step_limit, job_limit);
     let cond = summary["if"].as_str().unwrap_or("");
     assert!(cond.trim_start().starts_with("always() &&"), "{cond}");
     assert!(
@@ -1418,5 +1419,95 @@ fn the_mutants_run_is_off_the_gate_and_stops_inside_its_limits() {
     let step_limit = step["timeout-minutes"].as_u64().unwrap();
     let job_limit = job["timeout-minutes"].as_u64().unwrap();
     assert!(budget < step_limit, "{budget} >= {step_limit}");
+    assert_step_inside_job(step_limit, job_limit);
+}
+
+/// A step's limit sits below its job's. A timed-out step ends `failure`, which
+/// `report` files, and a timed-out job ends `cancelled`, which it does not.
+#[track_caller]
+fn assert_step_inside_job(step_limit: u64, job_limit: u64) {
     assert!(step_limit < job_limit, "{step_limit} >= {job_limit}");
+}
+
+/// The minutes a `timeout NNm` at the head of a step's run allows.
+fn shell_limit(run: &str) -> u64 {
+    run.strip_prefix("timeout ")
+        .and_then(|rest| rest.split_whitespace().next())
+        .and_then(|minutes| minutes.strip_suffix('m'))
+        .and_then(|minutes| minutes.parse().ok())
+        .expect("the step runs under `timeout NNm`")
+}
+
+/// The powerset's legs take their shards from the planner's output, so no count
+/// is written twice. A leg's check stops inside its job's limit with room for
+/// the checkout and toolchain before it, and the planner stops inside its own.
+#[test]
+fn the_powerset_legs_take_derived_shards_and_stop_inside_their_limit() {
+    let parsed = yaml(&read_workflow("weekly.yml"));
+    let plan = &parsed["jobs"]["powerset-plan"];
+    let legs = &parsed["jobs"]["features-powerset"];
+
+    assert_eq!(needs(legs), ["powerset-plan"]);
+    assert_eq!(
+        legs["if"].as_str(),
+        Some("needs.powerset-plan.outputs.shards != ''")
+    );
+    assert_eq!(legs["strategy"]["fail-fast"].as_bool(), Some(false));
+    assert_eq!(
+        legs["strategy"]["matrix"]["shard"].as_str(),
+        Some("${{ fromJSON(needs.powerset-plan.outputs.shards) }}")
+    );
+    assert_eq!(
+        plan["outputs"]["shards"].as_str(),
+        Some("${{ steps.plan.outputs.shards }}")
+    );
+
+    // The planner reads nothing but the repository.
+    assert_eq!(plan["permissions"]["contents"].as_str(), Some("read"));
+    assert_eq!(plan["permissions"].as_mapping().unwrap().len(), 1);
+
+    // The legs share one key and race to write it, and the planner has no cache
+    // of its own to save.
+    for job in [plan, legs] {
+        let setup = job["steps"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .find(|s| s["uses"].as_str() == Some("./.github/actions/setup-rust"))
+            .expect("a step sets up the toolchain");
+        assert_eq!(setup["with"]["cache-save"].as_str(), Some("never"));
+    }
+
+    let run_of = |job: &serde_yaml::Value, needle: &str| {
+        job["steps"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .find_map(|s| s["run"].as_str().filter(|r| r.contains(needle)))
+            .map(str::to_owned)
+            .unwrap_or_else(|| panic!("a step runs `{needle}`"))
+    };
+    let leg = run_of(legs, "powerset run");
+    assert!(!leg.contains("${{"), "{leg}");
+    let leg_shard = legs["steps"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .find(|s| s["run"].as_str() == Some(leg.as_str()))
+        .unwrap();
+    assert_eq!(
+        leg_shard["env"]["SHARD"].as_str(),
+        Some("${{ matrix.shard }}")
+    );
+
+    let plan_limit = shell_limit(&run_of(plan, "powerset plan"));
+    let leg_limit = shell_limit(&leg);
+    assert!(
+        plan_limit + 5 <= plan["timeout-minutes"].as_u64().unwrap(),
+        "the planner's {plan_limit} minutes leave less than its setup"
+    );
+    assert!(
+        leg_limit + 15 <= legs["timeout-minutes"].as_u64().unwrap(),
+        "the leg's {leg_limit} minutes leave less than its setup"
+    );
 }

@@ -9,6 +9,7 @@ mod hooks;
 mod issue_form;
 mod lint;
 mod mutants;
+mod powerset;
 mod step_summary;
 
 use std::collections::BTreeSet;
@@ -97,6 +98,13 @@ pub(crate) enum Command {
     /// Every feature alone, the feature-off combinations, every target, and
     /// the tests on default features
     Hack,
+
+    /// Every combination of features, in shards the weekly workflow runs in
+    /// parallel
+    Powerset {
+        #[command(subcommand)]
+        cmd: powerset::Powerset,
+    },
 
     /// Benchmarks, counted and wall-clock
     Bench {
@@ -308,6 +316,7 @@ pub(crate) fn dispatch(root: &Path, explain: bool, cmd: Command) -> Outcome {
             .env("RUSTFLAGS", "--cfg loom"),
         ),
         Command::Hack => hack(root, explain, &Select::Workspace),
+        Command::Powerset { cmd } => powerset::dispatch(root, explain, cmd),
         Command::Bench { cmd } => bench::dispatch(root, explain, cmd),
         Command::Deny {
             check,
@@ -590,6 +599,15 @@ const DENY_WARNINGS: (&str, &str) = ("CARGO_BUILD_WARNINGS", "deny");
 /// it without a word and passes the build.
 const DENY_WARNINGS_SINCE: &str = "1.97";
 
+/// The packages the feature checks leave out. `spate-xtask` has no features,
+/// and `spate-fuzz` builds under nightly with libFuzzer in `fuzz.yml`.
+const FEATURE_EXCLUDES: [&str; 4] = ["--exclude", "spate-xtask", "--exclude", "spate-fuzz"];
+
+/// The feature checks deny rustc's warnings. `RUSTFLAGS` rather than
+/// `build.warnings`, so a warning from a dev-only workspace dependency that
+/// `--no-dev-deps` strips stays a warning.
+const FEATURE_RUSTFLAGS: (&str, &str) = ("RUSTFLAGS", "-D warnings");
+
 /// The feature matrix, and the test suite on default features.
 fn hack(root: &Path, explain: bool, sel: &Select) -> Outcome {
     let probe = Step::new("cargo", ["--version"]);
@@ -624,10 +642,7 @@ fn hack_steps(sel: &Select) -> Vec<Step<'static>> {
     // `--exclude` needs `--workspace`, so a package selection already names
     // what to leave out.
     let (fuzz, fuzz_and_xtask): (&[&str], &[&str]) = match sel {
-        Select::Workspace => (
-            &["--exclude", "spate-fuzz"],
-            &["--exclude", "spate-xtask", "--exclude", "spate-fuzz"],
-        ),
+        Select::Workspace => (&["--exclude", "spate-fuzz"], &FEATURE_EXCLUDES[..]),
         Select::Packages(_) => (&[], &[]),
     };
     let mut steps = vec![
@@ -642,7 +657,7 @@ fn hack_steps(sel: &Select) -> Vec<Step<'static>> {
             .args(sel.args())
             .args(["--each-feature", "--no-dev-deps"])
             .args(fuzz_and_xtask)
-            .env("RUSTFLAGS", "-D warnings"),
+            .env(FEATURE_RUSTFLAGS.0, FEATURE_RUSTFLAGS.1),
     ];
     // Stripping dev-dependencies drops test and bench targets, so the run
     // above reaches no test target in any crate. This step builds them on the

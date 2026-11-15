@@ -338,8 +338,8 @@ pub(crate) fn prepare(host: &Host<'_>, expected_sha: Option<&str>) -> Result<Pre
 /// Appends `prepare`'s outputs to the file `GITHUB_OUTPUT` names, when it is
 /// set.
 pub(crate) fn write_outputs(prepared: &Prepared) -> Outcome {
-    match std::env::var_os("GITHUB_OUTPUT") {
-        Some(path) => append_outputs(Path::new(&path), prepared),
+    match crate::ci::output_file() {
+        Some(path) => append_outputs(&path, prepared),
         None => Ok(()),
     }
 }
@@ -356,13 +356,7 @@ fn append_outputs(path: &Path, prepared: &Prepared) -> Outcome {
             .map_err(|e| Error::msg(format!("GITHUB_OUTPUT: {e}")))?,
         prepared.stages()
     );
-    use std::io::Write;
-    std::fs::OpenOptions::new()
-        .append(true)
-        .create(true)
-        .open(path)
-        .and_then(|mut f| f.write_all(lines.as_bytes()))
-        .map_err(|e| Error::msg(format!("GITHUB_OUTPUT: {e}")))
+    crate::ci::append_to(path, &lines).map_err(|e| Error::msg(format!("GITHUB_OUTPUT: {e}")))
 }
 
 /// The checksum list `stage` writes beside the artifacts.

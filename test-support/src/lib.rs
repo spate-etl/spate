@@ -40,7 +40,7 @@ pub use s3::{ACCESS_KEY, REGION, RGW_OPAQUE_DATA, S3Store, SECRET_KEY, Store};
 pub use s3_stub::{
     ACCESS_DENIED, bucket_server, listing_server, oversized_failure_server, reply_server,
 };
-pub use serve::{serve_each, serve_each_on};
+pub use serve::{serve_each, serve_each_on, silent_server};
 #[cfg(feature = "tls")]
 pub use tls::{TestCa, native_certs, pem, serve_tls};
 

@@ -1,6 +1,7 @@
 //! A local TCP server that hands each connection to a handler on a thread of
 //! its own.
 
+use std::io;
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;
 
@@ -40,4 +41,46 @@ pub fn serve_each_on(
         }
     });
     addr
+}
+
+/// A server that reads every request and never answers, for running a client
+/// into its timeout. Each connection is read until its client closes it.
+pub fn silent_server() -> SocketAddr {
+    serve_each(|mut stream| {
+        let _ = io::copy(&mut stream, &mut io::sink());
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read as _, Write as _};
+    use std::net::Shutdown;
+    use std::time::Duration;
+
+    /// A socket wait that takes this long has hung.
+    const HANG: Duration = Duration::from_secs(60);
+
+    /// More than a socket's buffers hold, so the write completes only while
+    /// the server reads.
+    const REQUEST: usize = 4 << 20;
+
+    #[test]
+    fn silent_server_reads_every_request_and_never_answers() {
+        let addr = silent_server();
+        for _ in 0..2 {
+            let mut stream = TcpStream::connect(addr).unwrap();
+            stream.set_read_timeout(Some(HANG)).unwrap();
+            stream.set_write_timeout(Some(HANG)).unwrap();
+            stream
+                .write_all(&vec![b'x'; REQUEST])
+                .expect("the server reads the whole request");
+            stream.shutdown(Shutdown::Write).unwrap();
+            let mut answer = Vec::new();
+            stream
+                .read_to_end(&mut answer)
+                .expect("the server closes once the client has");
+            assert!(answer.is_empty(), "{} bytes answered", answer.len());
+        }
+    }
 }

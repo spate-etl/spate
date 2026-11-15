@@ -55,14 +55,15 @@ fn table() -> Vec<(&'static str, String)> {
 }
 
 /// The arguments the shellcheck member carries, which are the shell scripts,
-/// git hooks, filing-action script and store bootstraps present rather than a
-/// list stated anywhere.
+/// git hooks, filing and toolchain action scripts and store bootstraps present
+/// rather than a list stated anywhere.
 fn shell_scripts() -> Vec<String> {
     let mut names = Vec::new();
     for (dir, suffix) in [
         ("scripts", ".sh"),
         (".githooks", ""),
         (".github/actions/file-issue", ".sh"),
+        (".github/actions/setup-rust", ".sh"),
         ("test-support/src/s3", ".sh"),
     ] {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join(dir);

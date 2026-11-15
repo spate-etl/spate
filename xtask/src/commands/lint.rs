@@ -124,14 +124,16 @@ fn script(root: &Path, explain: bool, name: &str, mode: &str) -> Outcome {
     )
 }
 
-/// The shell scripts, the git hooks and the filing action's script, sorted,
-/// so the lint covers whatever is present without a list to keep current.
+/// The shell scripts, the git hooks and the filing and toolchain actions'
+/// scripts, sorted, so the lint covers whatever is present without a list to
+/// keep current.
 fn shell_scripts(root: &Path) -> Result<Vec<String>, crate::run::Error> {
     let mut out = Vec::new();
     for (dir, suffix) in [
         ("scripts", ".sh"),
         (".githooks", ""),
         (".github/actions/file-issue", ".sh"),
+        (".github/actions/setup-rust", ".sh"),
         ("test-support/src/s3", ".sh"),
     ] {
         let path = root.join(dir);

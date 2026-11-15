@@ -1055,23 +1055,30 @@ mod tests {
         );
         assert_eq!(values("run"), ["cargo xtask tidy title"]);
 
-        // setup-rust runs an action beyond the toolchain only for an input
-        // this workflow leaves empty, and reads nothing of the pull request.
-        let text =
-            std::fs::read_to_string(root.join(".github/actions/setup-rust/action.yml")).unwrap();
-        for forbidden in [
-            "github.event",
-            "github.head_ref",
-            "github.token",
-            "secrets.",
-            "GITHUB_EVENT_PATH",
-            "GITHUB_HEAD_REF",
-        ] {
-            assert!(!text.contains(forbidden), "setup-rust reads `{forbidden}`");
+        // setup-rust runs an action only for an input this workflow leaves
+        // empty, and neither it nor its toolchain script reads anything of the
+        // pull request.
+        let dir = root.join(".github/actions/setup-rust");
+        let text = std::fs::read_to_string(dir.join("action.yml")).unwrap();
+        let script = std::fs::read_to_string(dir.join("install-toolchain.sh")).unwrap();
+        for (file, body) in [("action.yml", &text), ("install-toolchain.sh", &script)] {
+            for forbidden in [
+                "github.event",
+                "github.head_ref",
+                "github.token",
+                "secrets.",
+                "GITHUB_EVENT_PATH",
+                "GITHUB_HEAD_REF",
+            ] {
+                assert!(
+                    !body.contains(forbidden),
+                    "setup-rust's {file} reads `{forbidden}`"
+                );
+            }
         }
         let composite = entries(&text);
         for (i, (_, key, value)) in composite.iter().enumerate() {
-            if *key != "uses" || value.starts_with("dtolnay/rust-toolchain@") {
+            if *key != "uses" {
                 continue;
             }
             let guard = if value.starts_with("Swatinem/rust-cache@") {

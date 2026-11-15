@@ -117,6 +117,10 @@ object_store = "0.14.1"
 # version and features follow object_store's.
 quick-xml = { version = "0.41.0", features = ["serialize", "overlapped-lists"] }
 rustls-native-certs = "0.8.4"
+# spate-core's `tls-roots`: the certificate type its trust roots are handed
+# out as, and the trust-anchor check rustls itself runs on a root.
+rustls-pki-types = { version = "1.15.0", default-features = false, features = ["std"] }
+rustls-webpki = { version = "0.103.16", default-features = false, features = ["std"] }
 webpki-roots = "1.0.10"
 # The same Mozilla bundle as whole certificates, for a client that takes PEM.
 webpki-root-certs = "1.0.10"

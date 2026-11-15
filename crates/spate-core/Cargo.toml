@@ -14,8 +14,11 @@ categories.workspace = true
 [features]
 # Test-only. Off by default and outside the semver surface.
 testing = []
+# `spate_core::tls`: the trust roots a connector's TLS client verifies against.
+tls-roots = ["dep:base64", "dep:rustls-native-certs", "dep:rustls-pki-types", "dep:rustls-webpki"]
 
 [dependencies]
+base64 = { workspace = true, optional = true }
 bytes = { workspace = true }
 bytesize = { workspace = true }
 core_affinity = { workspace = true }
@@ -28,6 +31,9 @@ hyper-util = { workspace = true, features = ["http1", "server", "tokio"] }
 metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
 metrics-process = { workspace = true }
+rustls-native-certs = { workspace = true, optional = true }
+rustls-pki-types = { workspace = true, optional = true }
+rustls-webpki = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_path_to_error = { workspace = true }
 serde_yaml = { workspace = true }
@@ -42,7 +48,8 @@ url = { workspace = true }
 spate-core = { path = ".", features = ["testing"] }
 gungraun = { workspace = true }
 proptest = { workspace = true }
-# Exercises `tls_rejection!`, which expands against the caller's rustls.
+# Exercises `tls_rejection!` and `tls_reason!`, which expand against the
+# caller's rustls.
 rustls = { workspace = true }
 serde_json = { workspace = true }
 spate-bench = { workspace = true }
@@ -56,6 +63,9 @@ tokio = { workspace = true, features = ["macros", "test-util"] }
 # test in `src/` may use from it is in docs/developer/04-writing-a-test.md.
 [target.'cfg(not(loom))'.dev-dependencies]
 spate-test = { path = "../spate-test" }
+# `TestCa`, for the `tls` tests. Its TLS helpers use tokio::net, which loom
+# compiles out; the edge above without the feature serves loom builds.
+spate-test-support = { workspace = true, features = ["tls"] }
 
 # The library swaps to loom atomics under `--cfg loom`; a dev-dependency does
 # not reach the library build.
@@ -99,6 +109,10 @@ harness = false
 [[bench]]
 name = "control_plane_wall"
 harness = false
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
 
 [lints]
 workspace = true

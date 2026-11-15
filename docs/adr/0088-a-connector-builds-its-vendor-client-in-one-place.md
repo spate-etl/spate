@@ -135,7 +135,7 @@ of their own. The other connectors' construction points rest on nothing yet;
   signature, unchanged by this record.
 - #1537 — one `spate-core` check for refusing reserved passthrough keys.
 - #1542 — where the shared TLS trust-store code lives, decided in its own
-  record.
+  record: [ADR-0105](0105-connectors-share-one-trust-root-loader-in-core.md).
 - [Building a vendor client](../user-guide/06-extending/vendor-clients.mdx)
   — the conventions for building a vendor client that follow from this and
   earlier records.

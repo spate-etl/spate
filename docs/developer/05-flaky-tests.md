@@ -197,6 +197,8 @@ wait_until(HANG, "the worker arms its deadline", || {
 clock.advance(deadline);
 ```
 
+When the deadline is a jittered draw the test cannot compute, `slept_until` lists every deadline armed so far.
+
 Where the clock has no such probe, wait for the pass the code makes after it reads the clock.
 A controller test waits for one poll after a hint before it moves time:
 

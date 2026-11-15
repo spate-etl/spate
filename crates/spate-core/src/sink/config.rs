@@ -115,7 +115,7 @@ impl Default for RetryConfig {
             initial: Duration::from_millis(100),
             max: Duration::from_secs(10),
             multiplier: 2.0,
-            jitter: 0.2,
+            jitter: crate::backoff::DEFAULT_JITTER,
             max_attempts: 0,
         }
     }

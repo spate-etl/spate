@@ -147,6 +147,12 @@ impl TestClock {
             .contains(&deadline)
     }
 
+    /// Every deadline passed to [`Clock::sleep_until`] so far, in call order.
+    #[must_use]
+    pub fn slept_until(&self) -> Vec<Instant> {
+        self.slept_until.lock().expect("test clock lock").clone()
+    }
+
     /// Move the clock forward, waking everything parked on a deadline this
     /// jump passes.
     ///

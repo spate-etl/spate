@@ -23,6 +23,7 @@ use crate::error::ErrorClass;
 use crate::hash::FastMap;
 use crate::metrics::{AttemptOutcome, FlushReason, SinkShardMetrics};
 use crate::record::NO_EVENT_TIME_MS;
+use crate::rng::SplitMix64;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -185,6 +186,9 @@ pub(crate) struct ShardWorker<W: ShardWriter> {
     /// Deduplication tokens are `"{prefix}{seq}"`; the prefix carries the
     /// pipeline name and shard index.
     pub(crate) token_prefix: String,
+    /// The pool's [`fresh_seed`](crate::rng::fresh_seed), which each batch's
+    /// retry jitter is drawn from with the shard and the sequence number.
+    pub(crate) seed_base: u64,
     /// Every timer and timestamp the worker and its write tasks take.
     pub(crate) clock: Arc<dyn Clock>,
 }
@@ -596,6 +600,7 @@ impl<W: ShardWriter> ShardWorker<W> {
         let retry = self.cfg.retry;
         let backstop = quarantine_backstop(self.cfg.breaker.open_for);
         let shard = self.shard;
+        let seed = batch_seed(self.seed_base, shard, this_seq);
         #[expect(
             clippy::disallowed_methods,
             reason = "the worker joins each write task through its set, and dropping the set aborts the rest"
@@ -605,7 +610,7 @@ impl<W: ShardWriter> ShardWorker<W> {
             let mut backoff = Backoff::new(retry.initial, retry.max)
                 .with_multiplier(retry.multiplier)
                 .with_jitter(retry.jitter)
-                .with_seed(this_seq);
+                .with_seed(seed);
             let mut attempts: u32 = 0;
             loop {
                 // Pick a replica. "Nothing usable" is two conditions that end
@@ -784,6 +789,17 @@ impl<W: ShardWriter> ShardWorker<W> {
 ///
 /// Its body runs on first poll, so a `select!` branch whose guard is off
 /// builds no sleep.
+/// The jitter seed of batch `seq` on `shard`, for a pool seeded with `base`.
+///
+/// Pools in different processes take different bases, but two bases taken
+/// close together differ only in low bits. The base and the shard are mixed
+/// before `seq` joins them, so no other base or shard maps any sequence
+/// number onto the same seed.
+fn batch_seed(base: u64, shard: u32, seq: u64) -> u64 {
+    let base = SplitMix64::new(base).next_u64();
+    SplitMix64::new(base ^ u64::from(shard)).next_u64() ^ seq
+}
+
 async fn sleep_until_set(clock: &dyn Clock, at: Option<Instant>) {
     match at {
         Some(at) => clock.sleep_until(at).await,
@@ -875,6 +891,25 @@ impl Drop for ProbeGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hash::FastSet;
+
+    /// Two pools whose seeds differ by one, as two taken a nanosecond apart
+    /// can, share no batch seed. Combining `seq` with an unmixed base would
+    /// map seq `n` of one onto seq `n ^ 1` of the other.
+    #[test]
+    fn adjacent_pool_seeds_share_no_batch_seed() {
+        let base = 0x1234_5678_9ABC_DEF0;
+        let seeds = |base| (0..1024).map(|seq| batch_seed(base, 0, seq)).collect::<FastSet<_>>();
+        assert!(seeds(base).is_disjoint(&seeds(base + 1)));
+    }
+
+    /// Two shards of one pool share no batch seed either.
+    #[test]
+    fn two_shards_share_no_batch_seed() {
+        let base = 0x1234_5678_9ABC_DEF0;
+        let seeds = |shard| (0..1024).map(|seq| batch_seed(base, shard, seq)).collect::<FastSet<_>>();
+        assert!(seeds(0).is_disjoint(&seeds(1)));
+    }
 
     /// The heartbeat is driven by an operator-set value on a struct with no
     /// validator, so both ends have to be defended. A zero would make

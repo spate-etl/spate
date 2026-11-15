@@ -2828,28 +2828,58 @@ async fn an_unaddable_backoff_waits_instead_of_abandoning() {
     assert_eq!(ack_rx.try_recv().unwrap().status, AckStatus::Failed);
 }
 
-/// Each batch's retry backoff is seeded by its sequence number, so two
-/// batches of one shard failing together draw different jitter.
-#[tokio::test(start_paused = true)]
-async fn two_batches_of_one_shard_retry_at_different_instants() {
+/// A config whose first retry waits a full-jitter draw from one second, so
+/// every retry deadline lies in `(t0, t0 + 1 s]` and differs with its seed.
+fn one_second_full_jitter() -> SinkPoolConfig {
     let mut cfg = small_batches();
     cfg.inflight.max_per_shard = 2;
     cfg.breaker.failure_threshold = u32::MAX;
     cfg.retry.initial = Duration::from_secs(1);
     cfg.retry.max = Duration::from_secs(1);
     cfg.retry.jitter = 1.0;
-    let first_delay = |seed| {
-        crate::backoff::Backoff::new(cfg.retry.initial, cfg.retry.max)
-            .with_jitter(cfg.retry.jitter)
-            .with_seed(seed)
-            .next_delay()
-    };
-    let (d0, d1) = (first_delay(0), first_delay(1));
-    assert_ne!(d0, d1, "seeds 0 and 1 draw different jitter");
+    cfg
+}
 
+/// The retry deadlines `clock` has armed since `t0`: those in
+/// `(t0, t0 + 1 s]`, which [`one_second_full_jitter`] puts every first retry
+/// in and no other timer of these tests reaches.
+fn first_retry_deadlines(clock: &TestClock, t0: tokio::time::Instant) -> Vec<tokio::time::Instant> {
+    let window = t0 + Duration::from_secs(1);
+    clock
+        .slept_until()
+        .into_iter()
+        .filter(|&at| at > t0 && at <= window)
+        .collect()
+}
+
+/// Fails the first write of batch 0 on each of `shards` and returns the
+/// retry deadlines the pool arms.
+async fn first_retries_of(shards: usize) -> Vec<tokio::time::Instant> {
     let clock = TestClock::frozen();
     let t0 = clock.now();
-    let f = fixture_on(&clock, 1, 1, cfg, 16);
+    let f = fixture_on(&clock, shards, 1, one_second_full_jitter(), 16);
+    let (ack, _ack_rx) = AckRef::test_pair();
+    for shard in 0..shards {
+        f.writer
+            .script(shard, 0, [Outcome::Fail(ErrorClass::Retryable, Duration::ZERO)]);
+        f.queues.try_send(shard, chunk(1, 8, &ack)).unwrap();
+    }
+    drop(ack);
+
+    paused_hour().await;
+    assert_eq!(f.writer.calls().len(), shards, "each batch failed once");
+    let deadlines = first_retry_deadlines(&clock, t0);
+    drop(f.queues);
+    f.pool.drain(Duration::ZERO).await;
+    deadlines
+}
+
+/// Two batches of one shard failing together draw different jitter.
+#[tokio::test(start_paused = true)]
+async fn two_batches_of_one_shard_retry_at_different_instants() {
+    let clock = TestClock::frozen();
+    let t0 = clock.now();
+    let f = fixture_on(&clock, 1, 1, one_second_full_jitter(), 16);
     f.writer.script(
         0,
         0,
@@ -2865,17 +2895,31 @@ async fn two_batches_of_one_shard_retry_at_different_instants() {
 
     paused_hour().await;
     assert_eq!(f.writer.calls().len(), 2, "both batches failed once");
-    assert!(
-        clock.has_slept_until(t0 + d0),
-        "batch 0 sleeps its own draw"
-    );
-    assert!(
-        clock.has_slept_until(t0 + d1),
-        "batch 1 sleeps its own draw"
-    );
+    let deadlines = first_retry_deadlines(&clock, t0);
+    assert_eq!(deadlines.len(), 2, "{deadlines:?}");
+    assert_ne!(deadlines[0], deadlines[1], "both batches drew alike");
 
     drop(f.queues);
     f.pool.drain(Duration::ZERO).await;
+}
+
+/// Two pools stand in for two replicas: each one's batch 0 fails, and they
+/// retry at different instants. Seeding by the sequence number alone gives
+/// every replica's batch 0 the same draw.
+#[tokio::test(start_paused = true)]
+async fn two_sink_pools_draw_apart() {
+    let first = first_retries_of(1).await;
+    let second = first_retries_of(1).await;
+    assert_eq!((first.len(), second.len()), (1, 1), "{first:?} {second:?}");
+    assert_ne!(first, second, "two pools' batch 0 drew alike");
+}
+
+/// Batch 0 of two shards in one pool retries at different instants.
+#[tokio::test(start_paused = true)]
+async fn two_shards_draw_apart() {
+    let deadlines = first_retries_of(2).await;
+    assert_eq!(deadlines.len(), 2, "{deadlines:?}");
+    assert_ne!(deadlines[0], deadlines[1], "two shards' batch 0 drew alike");
 }
 
 /// A batch's second retry sleeps `retry.initial * retry.multiplier`, so the

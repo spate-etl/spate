@@ -4,6 +4,14 @@
 use crate::rng::SplitMix64;
 use std::time::Duration;
 
+/// The fraction of each retry delay that jitter can take away, unless a
+/// caller sets another: a delay lies in `[0.8 × step, step]`.
+///
+/// Replicas of a component that fail together retry on the same schedule.
+/// Without jitter they come back at the same instants, and a backend that is
+/// recovering takes every retry at once.
+pub const DEFAULT_JITTER: f64 = 0.2;
+
 /// A capped exponential sequence of retry delays.
 ///
 /// [`new`](Backoff::new) starts at `initial` and doubles each step up to
@@ -15,7 +23,8 @@ use std::time::Duration;
 /// Jitter draws from a xorshift state set by
 /// [`with_seed`](Backoff::with_seed), with no dependency on a random-number
 /// crate. Instances seeded alike retry together, and instances seeded apart
-/// spread out.
+/// spread out. [`with_fresh_seed`](Backoff::with_fresh_seed) seeds each
+/// instance apart on its first delay.
 ///
 /// The constructor and the setters are `const`, so a schedule can be declared
 /// once as a `const` item. Each use of the item starts a fresh sequence.
@@ -37,6 +46,12 @@ use std::time::Duration;
 /// let mut jittered = SCHEDULE.with_jitter(0.2).with_seed(7);
 /// let delay = jittered.next_delay();
 /// assert!(Duration::from_millis(160) <= delay && delay <= Duration::from_millis(200));
+///
+/// // Each use of a schedule declared like this draws its own jitter.
+/// const SPREAD: Backoff = SCHEDULE.with_jitter(0.2).with_fresh_seed();
+/// let mut spread = SPREAD;
+/// let delay = spread.next_delay();
+/// assert!(Duration::from_millis(160) <= delay && delay <= Duration::from_millis(200));
 /// ```
 // No `Copy`: an implicit copy would fork the sequence's state.
 #[derive(Clone, Debug)]
@@ -47,6 +62,9 @@ pub struct Backoff {
     jitter: f64,
     current: Duration,
     rng: u64,
+    /// Seed `rng` from [`fresh_seed`](crate::rng::fresh_seed) on the next
+    /// delay.
+    seed_on_first_delay: bool,
 }
 
 /// The xorshift state for `seed`: the first SplitMix64 draw, which avalanches
@@ -83,6 +101,7 @@ impl Backoff {
             jitter: 0.0,
             current: start,
             rng: rng_state(0),
+            seed_on_first_delay: false,
         }
     }
 
@@ -110,11 +129,29 @@ impl Backoff {
 
     /// This backoff, drawing its jitter from `seed`.
     ///
-    /// An instance given no seed draws as seed `0`.
+    /// An instance given no seed draws as seed `0`. A seed given here replaces
+    /// [`with_fresh_seed`](Backoff::with_fresh_seed).
     #[must_use]
     pub const fn with_seed(self, seed: u64) -> Self {
         Backoff {
             rng: rng_state(seed),
+            seed_on_first_delay: false,
+            ..self
+        }
+    }
+
+    /// This backoff, seeding its jitter from
+    /// [`fresh_seed`](crate::rng::fresh_seed) on its first delay.
+    ///
+    /// Each copy of a `const` schedule built this way draws its own seed, so
+    /// replicas in different processes, and instances in one process, retry
+    /// apart. The seed is taken on the first
+    /// [`next_delay`](Backoff::next_delay), so an instance that never retries
+    /// takes none. [`reset`](Backoff::reset) keeps the seed.
+    #[must_use]
+    pub const fn with_fresh_seed(self) -> Self {
+        Backoff {
+            seed_on_first_delay: true,
             ..self
         }
     }
@@ -142,6 +179,10 @@ impl Backoff {
     /// `max` may lie past the range of an `Instant`, so a caller that adds
     /// the delay to one uses `checked_add`.
     pub fn next_delay(&mut self) -> Duration {
+        if self.seed_on_first_delay {
+            self.rng = rng_state(crate::rng::fresh_seed());
+            self.seed_on_first_delay = false;
+        }
         let base = self.current;
         let cap = self.max;
         // Grow in `f64` seconds and clamp *before* rebuilding the `Duration`:
@@ -436,6 +477,47 @@ mod tests {
             deciles.iter().all(|&n| n > 0),
             "first-retry jitter is not spread across the window: {deciles:?}"
         );
+    }
+
+    const SPREAD: Backoff = Backoff::new(Duration::from_millis(100), Duration::from_millis(100))
+        .with_jitter(1.0)
+        .with_fresh_seed();
+
+    #[test]
+    fn a_fresh_seeded_copy_takes_its_seed_on_its_first_delay() {
+        let mut b = SPREAD;
+        assert!(b.seed_on_first_delay);
+        assert_eq!(b.rng, rng_state(0), "seeded before any delay");
+        b.next_delay();
+        assert!(!b.seed_on_first_delay);
+    }
+
+    #[test]
+    fn two_fresh_seeded_copies_draw_apart() {
+        let (mut a, mut b) = (SPREAD, SPREAD);
+        assert_ne!(millis(&mut a, 8), millis(&mut b, 8));
+    }
+
+    /// The seed is taken once. A clone made after the first delay draws what
+    /// the original draws, which reseeding on a later delay would break.
+    #[test]
+    fn a_fresh_seeded_copy_keeps_its_seed_after_the_first_delay() {
+        let mut b = SPREAD;
+        b.next_delay();
+        let mut clone = b.clone();
+        assert_eq!(millis(&mut b, 8), millis(&mut clone, 8));
+        let rng = b.rng;
+        b.reset();
+        assert_eq!(b.rng, rng, "reset reseeded");
+    }
+
+    #[test]
+    fn a_seed_given_after_a_fresh_seed_wins() {
+        let mut given = SPREAD.with_seed(7);
+        let mut plain = Backoff::new(Duration::from_millis(100), Duration::from_millis(100))
+            .with_jitter(1.0)
+            .with_seed(7);
+        assert_eq!(millis(&mut given, 8), millis(&mut plain, 8));
     }
 
     /// Log-uniform over the whole `Duration` range: `magnitude` picks the

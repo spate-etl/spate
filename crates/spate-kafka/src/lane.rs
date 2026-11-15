@@ -49,7 +49,7 @@ use rdkafka::message::BorrowedMessage;
 use rdkafka::{Message, TopicPartitionList};
 use spate_core::checkpoint::{AckIssuer, AckRef};
 use spate_core::error::SourceError;
-use spate_core::record::{PartitionId, RawPayload};
+use spate_core::record::{NO_EVENT_TIME_MS, PartitionId, RawPayload};
 use spate_core::source::{LaneId, PayloadBatch, SourceLane};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -417,7 +417,7 @@ impl<'a> PayloadBatch<'a> for KafkaBatch<'a> {
             key: msg.key(),
             partition: self.partition,
             offset: msg.offset(),
-            timestamp_ms: msg.timestamp().to_millis().unwrap_or(0),
+            timestamp_ms: msg.timestamp().to_millis().unwrap_or(NO_EVENT_TIME_MS),
         })
     }
 

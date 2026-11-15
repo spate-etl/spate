@@ -16,7 +16,9 @@ use spate_core::feed::{
     FeedErrorKind, FeedWaker, Receipt, Unit, depth_reading,
 };
 use spate_core::pipeline::{ExitReport, ExitState, RuntimeOptions};
-use spate_test::{FeedScript, ScriptedFeed, SinkScript, WriteOutcome, scripted_feed, wait_until};
+use spate_test::{
+    FeedScript, HANG, ScriptedFeed, SinkScript, WriteOutcome, scripted_feed, wait_until,
+};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -826,6 +828,17 @@ impl Feed for Wrapped {
 
 const BOTH: &[DepthOf] = &[DepthOf::Feed, DepthOf::DeadLetters];
 
+/// Throttle the feed, and return once a receive has been refused: the reader
+/// receives one call at a time, so no receive that saw the feed open is still
+/// running.
+fn throttle(throttled: &AtomicBool, refused: &AtomicUsize) {
+    let seen = refused.load(Ordering::SeqCst);
+    throttled.store(true, Ordering::SeqCst);
+    wait_until(HANG, "a receive is refused", || {
+        refused.load(Ordering::SeqCst) > seen
+    });
+}
+
 /// Pins that a bounded job on a feed that reports no depth fails at its
 /// start, naming the backend, before it receives a unit.
 #[test]
@@ -930,6 +943,7 @@ fn a_failed_closing_receive_restarts_the_check() {
     let (inner, script) = scripted_feed();
     let feed = Wrapped::new(inner, BOTH);
     let throttled = Arc::clone(&feed.throttled);
+    let refused = Arc::clone(&feed.refused);
     let clock = TestClock::frozen();
     let l = launch_bounded(&data, Arc::new(feed), &hooks, store, &clock, "");
 
@@ -937,7 +951,7 @@ fn a_failed_closing_receive_restarts_the_check() {
     step_reads(&clock, &script, 1, STEPS - 1);
     // An approximate count can lag a unit that has arrived.
     script.answer_depth(DepthOf::Feed, Ok(Depth::new("the scripted feed", true)));
-    throttled.store(true, Ordering::SeqCst);
+    throttle(&throttled, &refused);
     let unit = script.deliver(Unit::new("late", b"x".to_vec()));
     let gets = hooks.gets();
     clock.advance(STEP);
@@ -1033,7 +1047,7 @@ fn a_failed_receive_during_the_dead_letter_read_restarts_the_check() {
     wait_until(DEADLINE, "the dead-letter read starts", || {
         pending.lock().unwrap().len() == 2
     });
-    throttled.store(true, Ordering::SeqCst);
+    throttle(&throttled, &refused);
     let unit = script.deliver(Unit::new("late", b"x".to_vec()));
     let seen = refused.load(Ordering::SeqCst);
     wait_until(

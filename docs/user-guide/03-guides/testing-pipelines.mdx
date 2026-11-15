@@ -192,6 +192,12 @@ commit polls its batch against a real `Checkpointer` instead.
 `component_config("json", yaml)` builds a component's config section from its
 YAML body, for testing a builder that reads one.
 
+A deserializer that waits on something, such as a schema fetch, returns
+`NotReady` and expects the same payload again later.
+The `deserialize_until_ready(HANG, …)` helper replays the payload as the
+pipeline does and returns the first other answer, so your test asserts on that
+answer.
+
 ## Related
 
 - [Memory connectors](../04-connectors/memory.mdx) — the same mocks as

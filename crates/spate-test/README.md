@@ -60,6 +60,10 @@ call. The feed has no queue and no clock behind it, and its backend key is
 - `EmitCollector` collects what a deserializer emits. `blocking_after` makes it
   report the output as blocked after a number of records, to test the blocked
   path.
+- `deserialize_until_ready` replays a payload through a deserializer until it
+  answers something other than `NotReady`, as the pipeline does, and returns
+  that answer. A closure runs before each replay, for a test that moves a clock
+  or drives a runtime.
 
 ## Building inputs
 

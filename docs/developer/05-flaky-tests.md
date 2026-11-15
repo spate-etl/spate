@@ -397,10 +397,6 @@ cargo nextest run -p spate-kafka --all-features --locked \
   -E 'test(a_later_assignment_does_not_extend_the_hold)' --stress-count 200
 ```
 
-Use nextest 0.9.148 or later for a stress run.
-Earlier versions exit with the last iteration's code when fail-fast is off, so a run with a failed iteration can exit 0.
-From 0.9.104, read the summary line for the count that failed.
-
 A stress run reproduces a failure.
 A stress run that passes proves nothing about a fix.
 

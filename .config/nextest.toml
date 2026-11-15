@@ -4,9 +4,11 @@
 # nextest only *warns* on configuration keys it does not recognize, then runs
 # with its own defaults. An older binary silently ignores `fail-fast = false`
 # below and stops at the first failure.
+#
+# Below 0.9.150, `cargo nextest run --rerun` runs code a portable recording
+# names (GHSA-vc25-qg58-w57c).
 [nextest-version]
-required = "0.9.89"
-recommended = "0.9.148"
+required = "0.9.150"
 
 [profile.default]
 fail-fast = false

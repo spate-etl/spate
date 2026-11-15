@@ -44,6 +44,7 @@ multiple-versions = "warn"
 deny = [
     { crate = "lz4_flex", deny-multiple-versions = true }, # with clickhouse
     { crate = "quick-xml", deny-multiple-versions = true }, # with object_store
+    { crate = "rustls-webpki", deny-multiple-versions = true }, # with rustls
 ]
 wildcards = "deny"
 # Exempts non-registry dependencies, which `spate-bench = { path = "bench" }`

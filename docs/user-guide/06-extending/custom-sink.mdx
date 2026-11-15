@@ -119,7 +119,8 @@ the frames) happens when the worker calls it, not when the future is polled:
   `spate::error::find_source` finds the TLS library's error behind the client's
   wrappers, and `spate::error::TLS_REJECTION_ALERTS` lists the alerts that
   reject a handshake. With a rustls client,
-  `spate::tls_rejection!(rustls, &err)` applies the whole TLS part of the rule.
+  `spate::tls_rejection!(rustls, &err)` applies the whole TLS part of the rule,
+  and `spate::tls_reason!` gives the rejection's reason text.
 - **Bound the write.** Give the underlying client a request timeout and let the
   retry policy handle the failure, and never block the thread inside
   `write_batch`. At the

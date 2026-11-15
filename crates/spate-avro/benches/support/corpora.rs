@@ -99,21 +99,11 @@ pub(crate) const POISON_ID: u32 = 4_212;
 /// `Lookup::Missing` for the whole corpus.
 pub(crate) const UNKNOWN_ID: u32 = 4_213;
 
-/// Wrap a bare datum in the Confluent wire format: magic `0x00`, the schema
-/// id big-endian, then the datum.
-pub(crate) fn confluent(id: u32, datum: &[u8]) -> Vec<u8> {
-    let mut framed = Vec::with_capacity(5 + datum.len());
-    framed.push(0x00);
-    framed.extend_from_slice(&id.to_be_bytes());
-    framed.extend_from_slice(datum);
-    framed
-}
-
 /// [`BATCH`] flat-order datums framed under one schema id.
 pub(crate) fn confluent_orders(id: u32) -> Vec<Vec<u8>> {
     order_datums()
         .iter()
-        .map(|datum| confluent(id, datum))
+        .map(|datum| spate_test::confluent_frame(id, datum))
         .collect()
 }
 
@@ -130,7 +120,7 @@ pub(crate) fn confluent_mixed_orders() -> Vec<Vec<u8>> {
     order_datums()
         .iter()
         .enumerate()
-        .map(|(i, datum)| confluent(MIXED_IDS[i % MIXED_IDS.len()], datum))
+        .map(|(i, datum)| spate_test::confluent_frame(MIXED_IDS[i % MIXED_IDS.len()], datum))
         .collect()
 }
 

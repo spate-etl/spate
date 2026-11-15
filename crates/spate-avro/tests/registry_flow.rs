@@ -148,10 +148,7 @@ fn confluent_payload(id: u32, event_id: i64) -> Vec<u8> {
     let mut rec = apache_avro::types::Record::new(&schema).unwrap();
     rec.put("id", event_id);
     let datum = to_avro_datum(&schema, rec).unwrap();
-    let mut payload = vec![0x00];
-    payload.extend_from_slice(&id.to_be_bytes());
-    payload.extend_from_slice(&datum);
-    payload
+    spate_test::confluent_frame(id, &datum)
 }
 
 fn settings(addr: std::net::SocketAddr, ttl: Duration) -> AvroSettings {
@@ -885,10 +882,8 @@ async fn prewarm_skips_a_schema_that_is_not_avro() {
     })
     .await
     .unwrap();
-    // Confluent framing for id 79, then the Avro string "a".
-    let mut payload = vec![0x00];
-    payload.extend_from_slice(&79u32.to_be_bytes());
-    payload.extend_from_slice(&[0x02, b'a']);
+    // Id 79, then the Avro string "a".
+    let payload = spate_test::confluent_frame(79, &[0x02, b'a']);
     let result = tokio::task::spawn_blocking(move || {
         let mut out = EmitCollector::new();
         drive_until_ready(&mut deser, &payload, &mut out).map(|()| out.records.len())
@@ -1276,10 +1271,7 @@ async fn datum_path_not_ready_then_decodes_and_interleaves_ids() {
         rec.put("id", 8i64);
         rec.put("tag", "extra");
         let datum = to_avro_datum(&schema, rec).unwrap();
-        let mut payload = vec![0x00];
-        payload.extend_from_slice(&62u32.to_be_bytes());
-        payload.extend_from_slice(&datum);
-        payload
+        spate_test::confluent_frame(62, &datum)
     };
 
     // First call misses: NotReady, and the contract demands zero emits.
@@ -1341,10 +1333,7 @@ async fn duration_schema_gates_only_the_datum_path() {
             ])),
         );
         let datum = to_avro_datum(&schema, rec).unwrap();
-        let mut payload = vec![0x00];
-        payload.extend_from_slice(&77u32.to_be_bytes());
-        payload.extend_from_slice(&datum);
-        payload
+        spate_test::confluent_frame(77, &datum)
     };
 
     // Value path: decodes fine once fetched.
@@ -1391,11 +1380,7 @@ async fn confluent_truncated_string_is_malformed() {
     .unwrap();
     let mut deser = b.build_value().unwrap();
     tokio::task::spawn_blocking(move || {
-        let frame = |bytes: &[u8]| {
-            let mut p = vec![0, 0, 0, 0, 83];
-            p.extend_from_slice(bytes);
-            p
-        };
+        let frame = |bytes: &[u8]| spate_test::confluent_frame(83, bytes);
         let mut out = EmitCollector::new();
         drive_until_ready(&mut deser, &frame(&[2, b'a']), &mut out).unwrap();
         assert_eq!(

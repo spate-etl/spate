@@ -523,7 +523,7 @@ pub(crate) fn confluent_mixed_rig() -> BatchRig<AvroValueDeserializer> {
     // One payload per id, so every id is Ready in the memo before the walk.
     let seeds: Vec<Vec<u8>> = corpora::MIXED_IDS
         .iter()
-        .map(|id| corpora::confluent(*id, &corpora::order_datums()[0]))
+        .map(|id| spate_test::confluent_frame(*id, &corpora::order_datums()[0]))
         .collect();
     crate::registry_stub::warm_each(&mut deser, &rt, &ack, &mut sink, &seeds);
     stub.shutdown();

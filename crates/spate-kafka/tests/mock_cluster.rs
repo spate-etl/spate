@@ -10,7 +10,7 @@ use spate_core::checkpoint::Checkpointer;
 use spate_core::clock::TestClock;
 use spate_core::error::ErrorClass;
 use spate_core::metrics::names;
-use spate_core::record::PartitionId;
+use spate_core::record::{NO_EVENT_TIME_MS, PartitionId};
 use spate_core::source::{PayloadBatch, Source, SourceCtx, SourceEvent, SourceLane};
 use spate_kafka::{KafkaSource, KafkaSourceConfig};
 use spate_test::{HANG, metric_series, wait_until};
@@ -3872,4 +3872,34 @@ fn a_dynamic_member_fenced_on_join_still_drops() {
             .any(|line| line.contains("they close in the background")),
         "{lines:#?}"
     );
+}
+
+/// A message whose batch carries timestamp -1, which Kafka uses for none,
+/// reports no event time. A real timestamp passes through.
+#[test]
+fn a_message_with_no_timestamp_reports_no_event_time() {
+    let cluster = marker_cluster(1);
+    let brokers = cluster.bootstrap_servers();
+    for timestamp in [-1, 5] {
+        let batch = RawBatch {
+            timestamp,
+            value: b"v",
+            ..RawBatch::default()
+        };
+        assert_eq!(produce_batch(&brokers, TOPIC, 0, &batch.encode()), 0);
+    }
+    let mut watched = Watched::open(config(&brokers, &spate_test::unique_name("no-timestamp")));
+    let mut seen = Vec::new();
+    wait_until(HANG, "both messages", || {
+        if let Some(mut batch) = watched.lanes[0]
+            .poll(64, Duration::from_millis(100))
+            .expect("lane poll")
+        {
+            while let Some(raw) = batch.next_payload() {
+                seen.push((raw.offset, raw.timestamp_ms));
+            }
+        }
+        seen.len() >= 2
+    });
+    assert_eq!(seen, [(0, NO_EVENT_TIME_MS), (1, 5)]);
 }

@@ -382,8 +382,10 @@ them to the queue. The bucket's EventBridge setting sends every event type for
 every object
 ([AWS](https://docs.aws.amazon.com/AmazonS3/latest/userguide/enable-event-notifications-eventbridge.html)),
 so give the rule an event pattern on `source` `aws.s3`, `detail-type`
-`Object Created` and the bucket's name. Each event of another type costs a
-receive and a delete, and an event for another bucket is failed back. The
+`Object Created` and the bucket's name. Without that pattern, the other types
+S3 sends are acknowledged with nothing read, each at the cost of a receive and
+a delete. An `Object Created` event for another bucket, or an event of a type
+the S3 source does not list, is failed back and dead-lettered at the cap. The
 queue receives the rule's events only when
 ([AWS](https://docs.aws.amazon.com/eventbridge/latest/userguide/eb-use-resource-based.html#eb-sqs-permissions)):
 
@@ -398,6 +400,16 @@ Leave the target's input as the whole event. A target with an input path or an
 input transformer sends another body
 ([AWS](https://docs.aws.amazon.com/eventbridge/latest/APIReference/API_PutTargets.html)),
 and the source fails that body back.
+
+Give the rule's target a dead-letter queue, a standard queue in the rule's
+region
+([AWS](https://docs.aws.amazon.com/eventbridge/latest/userguide/eb-rule-dlq.html)).
+EventBridge drops an event it still cannot deliver once the target's retry
+policy runs out, 24 hours and 185 attempts by default
+([AWS](https://docs.aws.amazon.com/eventbridge/latest/userguide/eb-rule-retry-policy.html)).
+An event that fails on a missing permission or a deleted queue is not retried
+and goes straight to the dead-letter queue. Without one, the source never
+reads the objects those events announce.
 
 The bucket's side, and which records the source reads, are on the
 [S3 source](../../sources/s3/README.mdx#storage-notifications) page.

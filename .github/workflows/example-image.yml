@@ -1,0 +1,32 @@
+name: Example image
+
+# The example image, built from its Dockerfile and started, so a change that
+# leaves the runtime image unable to load the binary fails its pull request.
+# Called from ci.yml, whose `changes` job computes every input.
+on:
+  workflow_call:
+    inputs:
+      example-image:
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  example-image:
+    name: Example image
+    runs-on: ubuntu-latest
+    # Pull requests only, as `release-dry-run` is: a merge queue entry would
+    # build the image again, at several minutes per entry.
+    if: github.event_name == 'pull_request' && inputs.example-image == 'true'
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          shared-key: xtask
+      - name: Build and start the example image
+        run: cargo xtask example-image

@@ -1,7 +1,10 @@
 //! The release: the workspace version and the literals that carry it, and the
 //! sequence that assembles, publishes and closes out a version.
 
+#[cfg(test)]
+mod fakes;
 mod io;
+mod milestone;
 pub(crate) mod post;
 mod sequence;
 pub(crate) mod version;
@@ -83,6 +86,15 @@ pub(crate) enum ReleaseCommand {
         /// The repository, as OWNER/NAME
         #[arg(long, env = "GITHUB_REPOSITORY", default_value = "spate-etl/spate")]
         repo: String,
+    },
+    /// After `finish`: put what the release shipped on its milestone, move or
+    /// return its open issues, and close it
+    Milestone {
+        #[arg(value_name = "X.Y.Z")]
+        version: String,
+        /// Make the changes, which are otherwise only printed
+        #[arg(long)]
+        apply: bool,
     },
     /// The whole release in a throwaway worktree, nothing pushed or uploaded
     DryRun {
@@ -250,6 +262,12 @@ pub(crate) fn dispatch(root: &Path, explain: bool, cmd: ReleaseCommand) -> Outco
             require_gh(root, GH_EXACT_SIGNER)?;
             sequence::verify(&host, version, &repo)
         }
+        ReleaseCommand::Milestone { version, apply } => {
+            let version = Version::parse(&version)
+                .ok_or_else(|| Error::msg(format!("'{version}' is not X.Y.Z")))?;
+            require_tools(&["gh"], run::on_path)?;
+            milestone::run(&host, version, apply)
+        }
         ReleaseCommand::DryRun {
             version,
             keep,
@@ -318,6 +336,9 @@ fn describe(cmd: &ReleaseCommand) -> &'static str {
         ReleaseCommand::Verify { .. } => {
             "(checks the tag, the registry, every attestation and the GitHub release)"
         }
+        ReleaseCommand::Milestone { .. } => {
+            "(stamps what the release shipped on its milestone, moves or returns its open issues, closes it)"
+        }
         ReleaseCommand::DryRun { .. } => {
             "(runs assemble --dry-run and prepare --dry-run in a throwaway worktree)"
         }
@@ -353,18 +374,21 @@ fn gh_version(out: &str) -> Option<(u64, u64, u64)> {
     Some((parts.next()??, parts.next()??, parts.next()??))
 }
 
+/// Fails naming each of `tools` that `on_path` does not find.
+fn require_tools(tools: &[&str], on_path: impl Fn(&str) -> bool) -> Outcome {
+    let missing: Vec<&str> = tools.iter().copied().filter(|t| !on_path(t)).collect();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    Err(Error::msg(format!(
+        "missing tool(s): {}",
+        missing.join(" ")
+    )))
+}
+
 /// Names whatever a local release run is missing before any step starts.
 fn preflight(root: &Path, sbom: bool) -> Outcome {
-    let missing: Vec<&str> = ["gh", "curl"]
-        .into_iter()
-        .filter(|tool| !run::on_path(tool))
-        .collect();
-    if !missing.is_empty() {
-        return Err(Error::msg(format!(
-            "missing tool(s): {}",
-            missing.join(" ")
-        )));
-    }
+    require_tools(&["gh", "curl"], run::on_path)?;
     // The changelog assembly resolves pull-request numbers through the API;
     // unauthenticated, every derived reference degrades.
     let authenticated = std::env::var("GH_TOKEN").is_ok_and(|t| !t.is_empty())
@@ -824,6 +848,46 @@ mod tests {
         assert!(!head_is_detached(root).unwrap());
         git(root, &["checkout", "-q", "--detach"]);
         assert!(head_is_detached(root).unwrap());
+    }
+
+    /// Every missing tool is named; with none missing, nothing is refused.
+    #[test]
+    fn each_missing_tool_is_named() {
+        assert!(require_tools(&["gh", "curl"], |_| true).is_ok());
+        let err = require_tools(&["gh", "curl"], |t| t == "curl").unwrap_err();
+        assert_eq!(err.message, "missing tool(s): gh");
+        let err = require_tools(&["gh", "curl"], |_| false).unwrap_err();
+        assert_eq!(err.message, "missing tool(s): gh curl");
+    }
+
+    /// `--explain` says what the milestone step does.
+    #[test]
+    fn the_milestone_step_explains_itself() {
+        let cmd = ReleaseCommand::Milestone {
+            version: "0.4.0".to_owned(),
+            apply: false,
+        };
+        assert!(describe(&cmd).contains("milestone"), "{}", describe(&cmd));
+    }
+
+    /// `release milestone` only prints its changes until `--apply` is given.
+    #[test]
+    fn the_milestone_step_applies_only_when_asked() {
+        use clap::Parser;
+        let apply = |argv: &[&str]| match crate::Cli::try_parse_from(argv).unwrap().command {
+            crate::commands::Command::Release {
+                cmd: ReleaseCommand::Milestone { version, apply },
+            } => (version, apply),
+            _ => panic!("not the milestone step"),
+        };
+        assert_eq!(
+            apply(&["cargo xtask", "release", "milestone", "0.4.0"]),
+            ("0.4.0".to_owned(), false)
+        );
+        assert_eq!(
+            apply(&["cargo xtask", "release", "milestone", "0.4.0", "--apply"]),
+            ("0.4.0".to_owned(), true)
+        );
     }
 
     /// The version is the third word of `gh --version`'s first line.

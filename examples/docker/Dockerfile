@@ -13,10 +13,12 @@ WORKDIR /build
 COPY . .
 # The runtime image carries no zlib, so link it into the binary.
 ENV LIBZ_SYS_STATIC=1
-RUN cargo build --release -p spate --example kafka_avro_to_clickhouse --features kafka,clickhouse,avro \
+RUN cargo build --release --locked -p spate --example kafka_avro_to_clickhouse --features kafka,clickhouse,avro \
     && cp target/release/examples/kafka_avro_to_clickhouse /build/pipeline
 
-# Distroless: glibc + libgcc only, no shell, runs as nonroot (65532).
+# Distroless: no shell, no package manager, runs as nonroot (65532). The binary
+# needs only glibc and libgcc; the image carries more than that, so
+# `cargo xtask example-image` starts it to catch a missing library.
 FROM gcr.io/distroless/cc-debian12:nonroot@sha256:9dac0a79194e45a7da0158a9c6da57b217585af0786db3845d1f0ec1a0dd182f
 COPY --from=builder /build/pipeline /usr/local/bin/pipeline
 COPY --from=builder /build/crates/spate/examples/kafka_avro_to_clickhouse.yaml /etc/spate/pipeline.yaml

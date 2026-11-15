@@ -4,6 +4,7 @@
 mod bench;
 mod deny;
 mod docs;
+mod example_image;
 mod fuzz;
 mod hooks;
 mod issue_form;
@@ -209,6 +210,9 @@ pub(crate) enum Command {
     /// The digest-pinned container image for a lane
     ContainerImage(ImageArgs),
 
+    /// Build the example image and start it, failing when the binary cannot load
+    ExampleImage,
+
     /// Apply .github/labels.yml to the repository
     SyncLabels {
         #[arg(long)]
@@ -389,6 +393,7 @@ pub(crate) fn dispatch(root: &Path, explain: bool, cmd: Command) -> Outcome {
             }
         }
         Command::ContainerImage(args) => container_image(root, explain, &args),
+        Command::ExampleImage => example_image::run(root, explain),
         Command::SyncLabels { dry_run, repo } => {
             // `DRY_RUN=true` is how the workflow selects it on a pull request.
             let dry_run = dry_run || std::env::var("DRY_RUN").as_deref() == Ok("true");

@@ -24,7 +24,7 @@ const READS: [&str; 9] = [
 ];
 
 /// The keys the workflow reads, in the order the block writes them.
-const KEYS: [&str; 16] = [
+const KEYS: [&str; 17] = [
     "rust",
     "site",
     "fuzz",
@@ -36,6 +36,7 @@ const KEYS: [&str; 16] = [
     "manifests",
     "advisories",
     "release-tooling",
+    "example-image",
     "macos",
     "bench-shards",
     "clickhouse-lanes",
@@ -56,6 +57,7 @@ const SITE_ONLY: &str = "rust=false\n\
      manifests=false\n\
      advisories=false\n\
      release-tooling=false\n\
+     example-image=false\n\
      macos=false\n\
      bench-shards=[]\n\
      clickhouse-lanes=[]\n\
@@ -760,6 +762,20 @@ fn needs(job: &serde_yaml::Value) -> Vec<String> {
     }
 }
 
+/// Neither `job` nor a step of it carries `continue-on-error`, which turns a
+/// failure into a success `CI gate` cannot see. The step whose `id` is
+/// `exempt` alone may.
+#[track_caller]
+fn lets_no_failure_through(label: &str, job: &serde_yaml::Value, exempt: Option<&str>) {
+    assert!(job.get("continue-on-error").is_none(), "{label}");
+    for step in job["steps"].as_sequence().unwrap() {
+        if exempt.is_some_and(|id| step["id"].as_str() == Some(id)) {
+            continue;
+        }
+        assert!(step.get("continue-on-error").is_none(), "{label}: {step:?}");
+    }
+}
+
 /// Each scheduled workflow fires on one cron or a manual dispatch, so no job
 /// has to work out which cron started the run.
 #[test]
@@ -1119,14 +1135,8 @@ fn the_advisory_check_alone_waits_on_a_dependency_change() {
         .find(|u| u.file == "policy.yml")
         .expect("ci.yml calls policy.yml");
     let parsed = yaml(&unit.text);
-    for (name, job) in parsed["jobs"].as_mapping().unwrap() {
-        assert!(job.get("continue-on-error").is_none(), "{name:?}");
-        for step in job["steps"].as_sequence().unwrap() {
-            assert!(
-                step.get("continue-on-error").is_none(),
-                "{name:?}: {step:?}"
-            );
-        }
+    for (name, job) in jobs(&parsed) {
+        lets_no_failure_through(&name, &job, None);
     }
     let steps = parsed["jobs"]["deny"]["steps"].as_sequence().unwrap();
     let at = steps
@@ -1163,11 +1173,7 @@ fn the_arm64_lane_runs_what_the_x64_jobs_run() {
         ("containers.yml", "containers"),
     ] {
         let parsed = yaml(&read_workflow(file));
-        let job = &parsed["jobs"][name];
-        assert!(job.get("continue-on-error").is_none(), "{file}");
-        for step in job["steps"].as_sequence().unwrap() {
-            assert!(step.get("continue-on-error").is_none(), "{file}: {step:?}");
-        }
+        lets_no_failure_through(file, &parsed["jobs"][name], None);
     }
 
     let containers = yaml(&read_workflow("containers.yml"));
@@ -1215,8 +1221,7 @@ fn the_arm64_lane_runs_what_the_x64_jobs_run() {
 
 /// The counted tier runs each shard on the runner the classifier names for its
 /// architecture, keys both caches and each artifact by that architecture, and
-/// warms one cache entry per architecture the shards carry. No job or step
-/// lets a failure through to `CI gate` except the merge-base leg.
+/// warms one cache entry per architecture the shards carry.
 #[test]
 fn the_counted_tier_runs_on_each_architecture() {
     let dir = Dir::new("the_counted_tier_runs_on_each_architecture");
@@ -1269,17 +1274,29 @@ fn the_counted_tier_runs_on_each_architecture() {
         .map(|l| pair(&|k| l[k].as_str().unwrap().to_owned()))
         .collect();
     assert_eq!(legs, emitted);
+}
 
-    for name in ["perf-warm", "perf-counters"] {
-        let job = &perf["jobs"][name];
-        assert!(job.get("continue-on-error").is_none(), "{name}");
-        for step in job["steps"].as_sequence().unwrap() {
-            if step["id"].as_str() == Some("base") {
-                continue;
-            }
-            assert!(step.get("continue-on-error").is_none(), "{name}: {step:?}");
-        }
+/// No counted-tier job or step lets a failure through to `CI gate` except the
+/// merge-base leg, which builds historical code. A report that cannot read the
+/// summaries fails its job, and the regression flag uploads only after a
+/// report that succeeded.
+#[test]
+fn every_counted_tier_failure_reaches_the_gate() {
+    let perf = yaml(&read_workflow("perf.yml"));
+    for (name, job) in jobs(&perf) {
+        let exempt = (name == "perf-counters").then_some("base");
+        lets_no_failure_through(&name, &job, exempt);
     }
+    let upload = perf["jobs"]["perf-report"]["steps"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .find(|s| s["name"].as_str() == Some("Upload the regression flag"))
+        .expect("perf-report uploads the regression flag");
+    assert_eq!(
+        upload["if"].as_str(),
+        Some("github.event_name == 'pull_request'")
+    );
 }
 
 /// The macOS lane runs the arm64 lane's workspace suite on its own runner,
@@ -1293,13 +1310,12 @@ fn the_macos_lane_runs_what_the_arm64_lane_runs() {
     assert_eq!(macos["runs-on"].as_str(), Some("macos-26"));
     assert_eq!(macos["if"].as_str(), Some("inputs.macos == 'true'"));
     assert!(macos["timeout-minutes"].as_u64().is_some());
-    assert!(macos.get("continue-on-error").is_none());
+    lets_no_failure_through("test-macos", macos, None);
     // Every step matches once the check and artifact names, which differ per
     // lane, are set aside.
     let steps = |job: &serde_yaml::Value| -> Vec<serde_yaml::Value> {
         let mut steps = job["steps"].as_sequence().unwrap().clone();
         for step in &mut steps {
-            assert!(step.get("continue-on-error").is_none(), "{step:?}");
             let uses = step["uses"].as_str().unwrap_or_default().to_owned();
             if let Some(with) = step.get_mut("with").and_then(|w| w.as_mapping_mut()) {
                 if uses.starts_with("mikepenz/action-junit-report@") {
@@ -1322,11 +1338,8 @@ fn the_miri_job_gates_every_rust_change() {
     let miri = &tests["jobs"]["miri"];
     assert_eq!(miri["if"].as_str(), Some("inputs.rust == 'true'"));
     assert!(miri["timeout-minutes"].as_u64().is_some());
-    assert!(miri.get("continue-on-error").is_none());
+    lets_no_failure_through("miri", miri, None);
     let steps = miri["steps"].as_sequence().unwrap();
-    for step in steps {
-        assert!(step.get("continue-on-error").is_none(), "{step:?}");
-    }
     assert!(
         steps
             .iter()

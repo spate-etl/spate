@@ -26,8 +26,8 @@ updates:
     ignore:
       # spate-s3 decodes listing pages with the quick-xml decoder object_store
       # runs, so the two must resolve to one copy. object_store requires
-      # quick-xml ^0.41, and a quick-xml bump on its own leaves spate-s3 on a
-      # different decoder with no gate to notice.
+      # quick-xml ^0.41, so a quick-xml bump on its own adds a second copy,
+      # which `deny.toml` refuses.
       #
       # Delete this when object_store moves off ^0.41, and move quick-xml in
       # that same pull request. Tracked in #1193.

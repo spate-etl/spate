@@ -63,9 +63,6 @@ const ERROR_BODY_LIMIT: usize = 256;
 /// Bound on one registry request, from connect to the end of the body. A
 /// fetch holds a slot in [`MAX_CONCURRENT_FETCHES`] until it ends.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-/// Bounds the per-404 warning. Schema ids are wire data, and an id evicted
-/// from the negative cache is fetched again, so a 404 can recur per record.
-static UNKNOWN_ID_WARN: RateLimit = RateLimit::hot_path();
 
 /// Why the registry rejected this client, set at most once.
 pub(crate) type Rejection = Arc<OnceLock<String>>;
@@ -468,6 +465,10 @@ pub(crate) fn spawn_fetcher(
     let (tx, mut rx) = mpsc::unbounded_channel::<u32>();
     let task_cache = Arc::clone(&cache);
     let task_rejection = Arc::clone(&rejection);
+    // Bounds the per-404 warning on the fetcher's clock. Schema ids are wire
+    // data, and an id evicted from the negative cache is fetched again, so a
+    // 404 can recur per record.
+    let unknown_id_warn = Arc::new(RateLimit::hot_path());
     let fetcher = async move {
         // Ids with a fetch currently running: dedup across the concurrency.
         let mut in_flight: QualitySet<u32> = QualitySet::default();
@@ -520,12 +521,23 @@ pub(crate) fn spawn_fetcher(
                     let http = http.clone();
                     let endpoint = Arc::clone(&endpoint);
                     let rejection = Arc::clone(&task_rejection);
+                    let unknown_id_warn = Arc::clone(&unknown_id_warn);
+                    let clock = clock.clone();
                     #[expect(
                         clippy::disallowed_methods,
                         reason = "the set belongs to the fetcher loop, so the loop's end drops it and aborts each per-id fetch"
                     )]
                     tasks.spawn(async move {
-                        let outcome = fetch_one(id, &http, &endpoint, &cache, &rejection).await;
+                        let outcome = fetch_one(
+                            id,
+                            &http,
+                            &endpoint,
+                            &cache,
+                            &rejection,
+                            &unknown_id_warn,
+                            &clock,
+                        )
+                        .await;
                         (id, outcome)
                     });
                 }
@@ -552,6 +564,8 @@ async fn fetch_one(
     endpoint: &Endpoint,
     cache: &SchemaCache,
     rejection: &Rejection,
+    unknown_id_warn: &RateLimit,
+    clock: &SyncClock,
 ) -> FetchOutcome {
     let registry = endpoint.registry();
     match endpoint.get(http, endpoint.schema_url(id)).await {
@@ -581,7 +595,8 @@ async fn fetch_one(
             // Negative-cache the unknown id; the deserializer applies its
             // ErrorPolicy to the poison payload.
             spate_core::rate_limited_warn!(
-                UNKNOWN_ID_WARN,
+                unknown_id_warn,
+                at: clock.now(),
                 schema_id = id,
                 error = %failure,
                 "registry reports schema id unknown"
@@ -1027,8 +1042,8 @@ mod tests {
     }
 
     /// Pins that a panic in a per-id fetch task reaches `tracing` with its
-    /// panic text. A `404` makes the fetch task read the clock when it
-    /// negative-caches the id, so the panic is raised inside the fetch task.
+    /// panic text. A `404` makes the fetch task read the clock for its
+    /// warning, so the panic is raised inside the fetch task.
     #[test]
     fn a_fetch_task_panic_is_logged_with_its_text() {
         let lines = spate_test::capture_logs(tracing::Level::ERROR, || {

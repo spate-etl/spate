@@ -292,7 +292,8 @@ impl AvroDeserializerBuilder {
         Self::from_settings_on(settings, runtime, SyncClock::system())
     }
 
-    /// Test seam: time the negative cache and the fetch backoff on `clock`.
+    /// Test seam: time the negative cache, the fetch backoff and the
+    /// unknown-id warning's rate limit on `clock`.
     ///
     /// Behind the off-by-default `testing` feature, outside the semver
     /// surface.

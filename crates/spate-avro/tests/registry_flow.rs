@@ -16,7 +16,9 @@ use hyper::body::Bytes;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
-use spate_avro::{AvroDeserializerBuilder, AvroMode, AvroSettings, AvroValue, RegistrySection};
+use spate_avro::{
+    AvroDeserializerBuilder, AvroMode, AvroSettings, AvroValue, AvroValueDeserializer, RegistrySection,
+};
 use spate_core::checkpoint::AckRef;
 use spate_core::clock::{Clock, TestClock};
 use spate_core::deser::{Deserializer, EmitRecord, RecFamily};
@@ -378,20 +380,63 @@ async fn a_negative_entry_at_the_ttl_floor_refetches_on_expiry() {
     assert_eq!(stub.path_hits("/schemas/ids/6"), 2);
 }
 
+/// The registry's 404 warning, as the fetcher logs it.
+const UNKNOWN_ID: &str = "registry reports schema id unknown";
+
+/// A current-thread runtime, so the fetcher's warnings reach this thread's
+/// subscriber.
+fn current_thread() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+}
+
+/// Decodes one record per id in `ids`, each naming an id the registry does
+/// not know, until each one fails as unavailable.
+fn decode_unknown_ids(
+    rt: &tokio::runtime::Runtime,
+    deser: &mut AvroValueDeserializer,
+    ids: std::ops::Range<u32>,
+) {
+    let mut out = EmitCollector::new();
+    for id in ids {
+        let payload = confluent_payload(id, 1);
+        // The fetcher runs on `rt`, so each replay first drives it.
+        let result = spate_test::deserialize_until_ready(
+            spate_test::HANG,
+            deser,
+            &raw_payload(&payload),
+            &spate_test::test_ack(),
+            &mut out,
+            || rt.block_on(async { tokio::time::sleep(Duration::from_millis(1)).await }),
+        );
+        assert!(
+            matches!(result, Err(DeserError::SchemaUnavailable { .. })),
+            "id {id}: {result:?}"
+        );
+    }
+}
+
+/// The 404 warnings in `lines`, as the text after the level and target.
+fn unknown_id_warnings(lines: &[String]) -> Vec<&str> {
+    lines
+        .iter()
+        .filter(|l| l.contains(UNKNOWN_ID))
+        .map(|l| l.split_once(UNKNOWN_ID).map_or("", |(_, rest)| rest.trim()))
+        .collect()
+}
+
 /// Records naming many distinct ids the registry does not know log the 404
-/// warning a bounded number of times, while every id is still fetched.
+/// warning five times per window of the deserializer's clock, while every id
+/// is still fetched.
 #[test]
 fn unknown_id_warnings_are_rate_limited() {
     const IDS: u32 = 20;
     let stub = StubRegistry::default();
     let hits = Arc::clone(&stub.hits);
     let lines = spate_test::capture_logs(tracing::Level::WARN, || {
-        // Current-thread, so the fetcher's warnings reach this thread's
-        // subscriber.
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
+        let rt = current_thread();
         let clock = TestClock::frozen();
         let mut deser = rt.block_on(async {
             let addr = stub.serve().await;
@@ -399,33 +444,45 @@ fn unknown_id_warnings_are_rate_limited() {
                 .build_value()
                 .expect("apache builder")
         });
-        let mut out = EmitCollector::new();
-        for id in 0..IDS {
-            let payload = confluent_payload(100 + id, 1);
-            // The fetcher runs on `rt`, so each replay first drives it.
-            let result = spate_test::deserialize_until_ready(
-                spate_test::HANG,
-                &mut deser,
-                &raw_payload(&payload),
-                &spate_test::test_ack(),
-                &mut out,
-                || rt.block_on(async { tokio::time::sleep(Duration::from_millis(1)).await }),
-            );
-            assert!(
-                matches!(result, Err(DeserError::SchemaUnavailable { .. })),
-                "id {id}: {result:?}"
-            );
-        }
+        decode_unknown_ids(&rt, &mut deser, 100..100 + IDS);
+        clock.advance(Duration::from_secs(10));
+        decode_unknown_ids(&rt, &mut deser, 100 + IDS..101 + IDS);
     });
-    let warned = lines
-        .iter()
-        .filter(|l| l.contains("registry reports schema id unknown"))
-        .count();
     assert!(
-        hits.load(Ordering::Relaxed) >= IDS as usize,
+        hits.load(Ordering::Relaxed) > IDS as usize,
         "every id is fetched"
     );
-    assert!(warned <= 5, "{warned} warnings for {IDS} unknown ids");
+    let warned = unknown_id_warnings(&lines);
+    assert_eq!(warned.len(), 6, "{warned:#?}");
+    assert!(
+        warned[5].starts_with("suppressed=15 schema_id=120 "),
+        "{warned:#?}"
+    );
+}
+
+/// Each deserializer builder limits its own 404 warnings: one builder's
+/// full window does not suppress another's first warning.
+#[test]
+fn each_builder_limits_its_own_unknown_id_warnings() {
+    let stub = StubRegistry::default();
+    let lines = spate_test::capture_logs(tracing::Level::WARN, || {
+        let rt = current_thread();
+        let clock = TestClock::frozen();
+        let (mut first, mut second) = rt.block_on(async {
+            let addr = stub.serve().await;
+            let build = || {
+                builder_on(addr, Duration::from_secs(3600), &clock)
+                    .build_value()
+                    .expect("apache builder")
+            };
+            (build(), build())
+        });
+        decode_unknown_ids(&rt, &mut first, 100..106);
+        decode_unknown_ids(&rt, &mut second, 200..201);
+    });
+    let warned = unknown_id_warnings(&lines);
+    assert_eq!(warned.len(), 6, "{warned:#?}");
+    assert!(warned[5].starts_with("schema_id=200 "), "{warned:#?}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

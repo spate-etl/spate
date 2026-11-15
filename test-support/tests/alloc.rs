@@ -1,4 +1,4 @@
-//! `measure` with `Counting` as the global allocator.
+//! `measure` and `count` with `Counting` as the global allocator.
 //!
 //! Its own binary, because the global allocator is the binary's.
 
@@ -7,10 +7,34 @@ use std::sync::atomic::Ordering::SeqCst;
 use std::sync::atomic::{AtomicBool, AtomicU32};
 use std::time::{Duration, Instant};
 
-use spate_test_support::alloc::{Counting, Counts, measure};
+use spate_test_support::alloc::{Counting, Counts, count, measure};
 
 #[global_allocator]
 static ALLOC: Counting = Counting;
+
+/// `count` runs its closure once, returns its value, and counts a known
+/// allocation pattern exactly.
+#[test]
+fn count_counts_one_pass_and_returns_its_value() {
+    let mut runs = 0;
+    let (value, counts) = count(|| {
+        runs += 1;
+        let mut v: Vec<u8> = Vec::with_capacity(100);
+        v.reserve_exact(250);
+        black_box(&v);
+        7
+    })
+    .expect("`Counting` is this binary's global allocator");
+    assert_eq!((runs, value), (1, 7));
+    assert_eq!(
+        counts,
+        Counts {
+            allocs: 1,
+            reallocs: 1,
+            bytes: 250,
+        }
+    );
+}
 
 /// A known allocation pattern is counted exactly, after one uncounted pass,
 /// and a second window starts from zero.

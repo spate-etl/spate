@@ -505,10 +505,8 @@ impl Harness {
             .set("bootstrap.servers", &self.brokers)
             .create()
             .expect("producer");
-        let mut frame = Vec::new();
-        frame.push(0u8);
-        frame.extend_from_slice(&SCHEMA_ID.to_be_bytes());
-        frame.extend_from_slice(&[0x0B]); // torn varint string: length 5, no bytes
+        // Torn varint string: length 5, no bytes.
+        let frame = spate_test::confluent_frame(SCHEMA_ID, &[0x0B]);
         for _ in 0..n {
             producer
                 .send(
@@ -529,11 +527,7 @@ impl Harness {
         rec.put("id", event.id);
         rec.put("name", event.name.as_str());
         let datum = to_avro_datum(&self.schema, rec).expect("avro datum");
-        let mut frame = Vec::with_capacity(5 + datum.len());
-        frame.push(0u8);
-        frame.extend_from_slice(&SCHEMA_ID.to_be_bytes());
-        frame.extend_from_slice(&datum);
-        frame
+        spate_test::confluent_frame(SCHEMA_ID, &datum)
     }
 
     /// Committed offset per partition for a group (0 when none).

@@ -405,15 +405,6 @@ fn produce_raw(brokers: &str, topic: &str, payloads: &[(Vec<u8>, Vec<u8>)]) {
     producer.flush(Duration::from_secs(30)).expect("flush");
 }
 
-/// A Confluent frame: magic byte, big-endian schema id, then the datum.
-fn confluent(id: u32, datum: &[u8]) -> Vec<u8> {
-    let mut frame = Vec::with_capacity(5 + datum.len());
-    frame.push(0u8);
-    frame.extend_from_slice(&id.to_be_bytes());
-    frame.extend_from_slice(datum);
-    frame
-}
-
 fn encode(schema: &Schema, fields: Vec<(&str, Value)>) -> Vec<u8> {
     let record = Value::Record(
         fields
@@ -527,7 +518,7 @@ fn kafka_to_clickhouse_examples_deliver_and_drain() {
             // events on a shard.
             (
                 i.to_string().into_bytes(),
-                confluent(ORDER_SCHEMA_ID, &datum),
+                spate_test::confluent_frame(ORDER_SCHEMA_ID, &datum),
             )
         })
         .collect();

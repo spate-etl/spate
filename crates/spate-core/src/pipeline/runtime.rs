@@ -776,7 +776,7 @@ impl<S: Source + 'static> PipelineRuntime<S> {
         };
         #[expect(
             clippy::disallowed_methods,
-            reason = "`run` joins the controller after the driver threads, and on each early return"
+            reason = "the teardown joins the controller after the driver threads, and `run` waits for it until `CLOSE_GRACE` past the drain deadline"
         )]
         let controller_handle = match std::thread::Builder::new()
             .name("spate-controller".into())

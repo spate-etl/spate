@@ -4,7 +4,6 @@ use spate_avro::{AvroDeserializerBuilder, AvroMode, AvroSettings, RegistrySectio
 use std::fmt::Debug;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::field::{Field, Visit};
 use tracing::span::{Attributes, Id, Record};
@@ -130,7 +129,7 @@ fn a_prewarm_panic_is_logged_with_its_name() {
                     &tokio::runtime::Handle::current(),
                 )
                 .unwrap();
-                tokio::time::timeout(Duration::from_secs(10), seen.notified())
+                tokio::time::timeout(spate_test::HANG, seen.notified())
                     .await
                     .expect("the pre-warm panic is logged");
             });

@@ -658,8 +658,7 @@ description: \"REPLACE-ME\"
     }
 
     /// A repository root under the system temporary directory, removed on
-    /// drop. The name carries the test's, so a shared process runs them in
-    /// parallel without collision.
+    /// drop.
     struct Tree(Scratch);
 
     impl Tree {

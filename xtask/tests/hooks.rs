@@ -33,13 +33,15 @@ impl Repo {
     }
 
     fn install(&self) -> Output {
-        support::xtask()
-            .args(["hooks", "install"])
-            .env("GIT_DIR", self.git_dir())
-            .env("GIT_WORK_TREE", self.0.dir())
-            .env_remove("GITHUB_ACTIONS")
-            .output()
-            .unwrap()
+        let git_dir = self.git_dir();
+        support::run(
+            &["hooks", "install"],
+            &["GITHUB_ACTIONS"],
+            &[
+                ("GIT_DIR", git_dir.to_str().unwrap()),
+                ("GIT_WORK_TREE", self.0.dir().to_str().unwrap()),
+            ],
+        )
     }
 }
 

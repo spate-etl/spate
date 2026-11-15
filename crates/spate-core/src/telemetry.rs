@@ -66,9 +66,10 @@ pub mod cpu;
 /// deadline can be stored as a plain `AtomicU64` of nanoseconds and compared
 /// on the lock-free fast path.
 ///
-/// On the system clock, whichever clock feeds a limiter. A reading from
-/// before the base counts as the base, so a window that ends before it
-/// never arms the fast path and the mutex path decides.
+/// The base is a system-clock reading, whichever clock feeds a limiter. A
+/// reading from before the base counts as the base, so for a window that
+/// ends before it the fast-path compare never passes and the mutex path
+/// decides.
 fn base_instant() -> Instant {
     static BASE: OnceLock<Instant> = OnceLock::new();
     *BASE.get_or_init(|| SystemClock.now())

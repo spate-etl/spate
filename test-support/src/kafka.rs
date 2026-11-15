@@ -9,13 +9,18 @@ use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::net::{SocketAddr, TcpListener};
+#[cfg(feature = "kafka-client")]
+use std::time::Duration;
+
+#[cfg(feature = "kafka-client")]
+use rdkafka::consumer::Consumer as _;
 
 use testcontainers::bollard::models::HostConfig;
 use testcontainers::core::{CmdWaitFor, ContainerPort, ContainerState, ExecCommand, WaitFor};
 use testcontainers::runners::SyncRunner;
 use testcontainers::{Container, Image, ImageExt, TestcontainersError};
 
-use crate::container_log::{container_output, container_tails};
+use crate::container_log::{container_output, container_tails, exit_clause};
 use crate::{container_image, selected_lane};
 
 /// The container port of the listener a client on the host reaches.
@@ -451,7 +456,8 @@ impl Image for KafkaBroker {
 /// Each node advertises a host port chosen before it starts. A stopped and
 /// restarted node keeps its port, its id and its data, so it rejoins at the
 /// address clients already hold. The nodes start with no ready condition, so
-/// the caller waits until its client sees all three.
+/// the caller waits until a client sees all three, which
+/// `KafkaCluster::await_brokers` does under the `kafka-client` feature.
 ///
 /// A node has no DNS server outside Docker, so it finds a peer once the peer
 /// runs, whatever resolver the host has. A cluster dropped while its thread
@@ -519,7 +525,9 @@ impl KafkaCluster {
     ///
     /// # Errors
     ///
-    /// Fails when the runtime cannot stop the container or read its exit code.
+    /// Fails when the runtime cannot stop the container or read its exit code,
+    /// and when it had to kill the node, which then never finished its
+    /// controlled shutdown.
     ///
     /// # Panics
     ///
@@ -529,10 +537,11 @@ impl KafkaCluster {
         container
             .stop_with_timeout(Some(120))
             .map_err(|e| format!("stop {} node {node}: {e}", self.broker))?;
-        container
+        let code = container
             .exit_code()
             .map_err(|e| format!("exit code of {} node {node}: {e}", self.broker))?
-            .ok_or_else(|| format!("{} node {node} stopped with no exit code", self.broker))
+            .ok_or_else(|| format!("{} node {node} stopped with no exit code", self.broker))?;
+        stopped(&format!("{} node {node}", self.broker), code)
     }
 
     /// Starts node `node` again after [`KafkaCluster::stop`].
@@ -579,18 +588,77 @@ impl KafkaCluster {
     /// as running.
     #[must_use]
     pub fn exited(&self) -> Option<String> {
+        let (node, code) = self.first_exited()?;
+        let container = self.node(node);
+        Some(exited_message(
+            &format!("{} node {node}", self.broker),
+            code,
+            &container_output(container.stdout_to_vec()),
+            &container_output(container.stderr_to_vec()),
+        ))
+    }
+
+    /// The id and exit code of the first node whose container has stopped,
+    /// as [`KafkaCluster::exited`] finds it.
+    fn first_exited(&self) -> Option<(i32, Option<i64>)> {
         (1..=CLUSTER_NODES).find_map(|node| {
             let container = self.node(node);
-            if container.is_running().unwrap_or(true) {
-                return None;
-            }
-            Some(exited_message(
-                &format!("{} node {node}", self.broker),
-                container.exit_code().ok().flatten(),
-                &container_output(container.stdout_to_vec()),
-                &container_output(container.stderr_to_vec()),
-            ))
+            (!container.is_running().unwrap_or(true))
+                .then(|| (node, container.exit_code().ok().flatten()))
         })
+    }
+
+    /// Waits until a client on [`KafkaCluster::bootstrap`] sees every node,
+    /// since none of them is ready alone. `timeout` catches a hang.
+    ///
+    /// # Errors
+    ///
+    /// Fails, naming the node, when a node exits first, and when `timeout`
+    /// passes, with the node ids the cluster's metadata last listed. A
+    /// cluster dropped while the caller panics on the error writes each
+    /// node's state and log.
+    #[cfg(feature = "kafka-client")]
+    pub fn await_brokers(&self, timeout: Duration) -> Result<(), String> {
+        let probe = metadata_probe(&self.bootstrap)?;
+        crate::started::wait(
+            &self.broker.to_string(),
+            timeout,
+            || {
+                probe
+                    .fetch_metadata(None, METADATA_TIMEOUT)
+                    .map_err(|e| e.to_string())
+                    .and_then(|metadata| {
+                        all_listed(metadata.brokers().iter().map(|b| b.id()).collect())
+                    })
+            },
+            || {
+                self.first_exited()
+                    .map(|(node, code)| format!("node {node} {}", exit_clause(code)))
+            },
+        )
+    }
+
+    /// Each partition of `topic` as the cluster's metadata reports it, or
+    /// `None` while no node answers for all of them.
+    #[cfg(feature = "kafka-client")]
+    #[must_use]
+    pub fn partition_states(&self, topic: &str) -> Option<Vec<PartitionState>> {
+        let metadata = metadata_probe(&self.bootstrap)
+            .ok()?
+            .fetch_metadata(Some(topic), METADATA_TIMEOUT)
+            .ok()?;
+        let states: Vec<PartitionState> = metadata
+            .topics()
+            .first()?
+            .partitions()
+            .iter()
+            .map(|p| PartitionState {
+                id: p.id(),
+                leader: p.leader(),
+                in_sync: p.isr().len(),
+            })
+            .collect();
+        (!states.is_empty()).then_some(states)
     }
 
     /// Each node's state, Redpanda's view of the cluster's health from each
@@ -649,6 +717,62 @@ impl Drop for KafkaCluster {
         }
     }
 }
+
+/// One partition as a [`KafkaCluster`]'s metadata reports it.
+#[cfg(feature = "kafka-client")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PartitionState {
+    /// The partition's id.
+    pub id: i32,
+    /// The node id, negative while the partition has no leader.
+    pub leader: i32,
+    /// How many replicas are in sync.
+    pub in_sync: usize,
+}
+
+/// How long one metadata request waits on a cluster that may be electing.
+#[cfg(feature = "kafka-client")]
+const METADATA_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// A client that reads a cluster's metadata.
+#[cfg(feature = "kafka-client")]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "a cluster helper reads metadata outside every connector role"
+)]
+fn metadata_probe(bootstrap: &str) -> Result<rdkafka::consumer::BaseConsumer, String> {
+    rdkafka::ClientConfig::new()
+        .set("bootstrap.servers", bootstrap)
+        .create()
+        .map_err(|e| format!("metadata client: {e}"))
+}
+
+/// Whether metadata listing `ids` sees every node of a cluster, or the ids
+/// it listed.
+#[cfg(feature = "kafka-client")]
+fn all_listed(mut ids: Vec<i32>) -> Result<(), String> {
+    ids.sort_unstable();
+    if ids == (1..=CLUSTER_NODES).collect::<Vec<_>>() {
+        Ok(())
+    } else {
+        Err(format!("metadata listed nodes {ids:?}"))
+    }
+}
+
+/// The exit code `code` of the node `what` names, or an error when the
+/// runtime had to kill it.
+fn stopped(what: &str, code: i64) -> Result<i64, String> {
+    if code == KILLED {
+        Err(format!(
+            "{what} was killed (exit code {code}) before its controlled shutdown finished"
+        ))
+    } else {
+        Ok(code)
+    }
+}
+
+/// The exit code of a container the runtime had to kill: 128 + SIGKILL.
+const KILLED: i64 = 137;
 
 /// The report a dropped cluster writes: one only while its thread panics.
 fn report_on_drop(panicking: bool, report: impl FnOnce() -> String) -> Option<String> {
@@ -710,10 +834,7 @@ fn exited_message(what: &str, code: Option<i64>, stdout: &str, stderr: &str) -> 
 /// That the node `what` names has stopped, with its exit code when Docker
 /// gave one.
 fn ended(what: &str, code: Option<i64>) -> String {
-    code.map_or_else(
-        || format!("{what} exited"),
-        |code| format!("{what} exited with code {code}"),
-    )
+    format!("{what} {}", exit_clause(code))
 }
 
 /// `heading` over the tail of each of `what`'s streams.
@@ -1111,6 +1232,40 @@ mod tests {
     }
 
     /// Node ids run from 1, and an id outside the cluster names no node.
+    /// A stopped node gives its exit code, unless the runtime killed it.
+    #[test]
+    fn a_killed_node_fails_its_stop() {
+        assert_eq!(stopped("Apache Kafka node 2", 143), Ok(143));
+        assert_eq!(stopped("Redpanda node 1", 0), Ok(0));
+        assert_eq!(
+            stopped("Apache Kafka node 3", 137),
+            Err(
+                "Apache Kafka node 3 was killed (exit code 137) before its controlled \
+                 shutdown finished"
+                    .to_owned()
+            )
+        );
+    }
+
+    /// Metadata sees the cluster once it lists every node id, in any order.
+    #[cfg(feature = "kafka-client")]
+    #[test]
+    fn metadata_sees_the_cluster_once_it_lists_every_node() {
+        assert_eq!(all_listed(vec![3, 1, 2]), Ok(()));
+        assert_eq!(
+            all_listed(vec![2, 1]),
+            Err("metadata listed nodes [1, 2]".to_owned())
+        );
+        assert_eq!(
+            all_listed(vec![1, 2, 4]),
+            Err("metadata listed nodes [1, 2, 4]".to_owned())
+        );
+        assert_eq!(
+            all_listed(Vec::new()),
+            Err("metadata listed nodes []".to_owned())
+        );
+    }
+
     #[test]
     fn node_ids_index_the_nodes_from_one() {
         assert_eq!(node_index(1), 0);

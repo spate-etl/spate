@@ -24,6 +24,9 @@ tls = [
 ]
 # `KafkaBroker`.
 kafka = ["dep:testcontainers"]
+# `KafkaCluster::await_brokers` and `partition_states`, which read the
+# cluster's metadata through a Kafka client.
+kafka-client = ["kafka", "dep:rdkafka"]
 # `S3Store`. A notifying store reaches the broker on `BROKER_FROM_INSIDE`.
 s3 = ["kafka", "dep:http", "dep:object_store", "dep:tokio"]
 # `ElasticMq`.
@@ -38,6 +41,7 @@ base64 = { workspace = true, optional = true }
 # `object_store` keeps the signer's `Method` private at its declared floor.
 http = { workspace = true, optional = true }
 object_store = { workspace = true, optional = true, features = ["aws"] }
+rdkafka = { workspace = true, optional = true }
 rcgen = { workspace = true, optional = true }
 rustls = { workspace = true, optional = true }
 rustls-native-certs = { workspace = true, optional = true }

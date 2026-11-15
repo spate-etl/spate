@@ -32,7 +32,6 @@ use hyper::{Request, Response, StatusCode};
 use rdkafka::ClientConfig;
 use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
 use rdkafka::consumer::{BaseConsumer, Consumer};
-use rdkafka::error::KafkaResult;
 use rdkafka::producer::{BaseProducer, BaseRecord, Producer};
 use serde::{Deserialize, Serialize};
 use spate::avro::AvroDeserializerBuilder;
@@ -46,9 +45,9 @@ use spate::pipeline::{
     ExitReport, Pipeline, RuntimeOptions, ShutdownHandle, SinkOptions, StartError,
 };
 use spate::sink::KeyHashRouter;
-use spate_test::{metric_series, metric_value, wait_for_value};
+use spate_test::{metric_series, metric_value};
 use spate_test_support::{
-    CLUSTER_NODES, KAFKA_PORT, KafkaBroker, KafkaCluster, container_image, http,
+    CLUSTER_NODES, KAFKA_PORT, KafkaBroker, KafkaCluster, PartitionState, container_image, http,
 };
 use std::net::SocketAddr;
 use std::ops::Range;
@@ -88,15 +87,6 @@ pub fn event_id(partition: i32, seq: i64) -> i64 {
 enum Brokers {
     One(Box<Container<KafkaBroker>>),
     Cluster(KafkaCluster),
-}
-
-/// One partition as the cluster's metadata reports it.
-#[derive(Debug)]
-pub struct PartitionState {
-    pub id: i32,
-    /// The node id, negative while the partition has no leader.
-    pub leader: i32,
-    pub in_sync: usize,
 }
 
 pub struct Harness {
@@ -139,33 +129,9 @@ impl Harness {
         let cluster = KafkaCluster::start(&spate_test::unique_name("e2e-kafka"))
             .unwrap_or_else(|e| panic!("{e}"));
         let brokers = cluster.bootstrap().to_owned();
-        let probe = probe_consumer(&brokers, "e2e-metadata");
-        let all_listed = |ids: &KafkaResult<Vec<i32>>| {
-            ids.as_ref()
-                .is_ok_and(|ids| i32::try_from(ids.len()) == Ok(CLUSTER_NODES))
-        };
-        let _listed = wait_for_value(
-            Duration::from_secs(120),
-            "all three brokers",
-            || {
-                let ids = probe.fetch_metadata(None, PROBE_TIMEOUT).map(|metadata| {
-                    let mut ids = metadata
-                        .brokers()
-                        .iter()
-                        .map(|b| b.id())
-                        .collect::<Vec<_>>();
-                    ids.sort_unstable();
-                    ids
-                });
-                if !all_listed(&ids)
-                    && let Some(exited) = cluster.exited()
-                {
-                    panic!("{exited}");
-                }
-                ids
-            },
-            all_listed,
-        );
+        cluster
+            .await_brokers(Duration::from_secs(120))
+            .unwrap_or_else(|e| panic!("{e}"));
         Self::around(Brokers::Cluster(cluster), brokers, CLUSTER_NODES)
     }
 
@@ -301,9 +267,10 @@ impl Harness {
         }
     }
 
-    /// Stop cluster node `node` as a rolling restart does, and return its exit code.
-    pub fn stop_broker(&self, node: i32) -> i64 {
-        self.cluster().stop(node).unwrap_or_else(|e| panic!("{e}"))
+    /// Stop cluster node `node` as a rolling restart does. Panics when the
+    /// runtime had to kill it.
+    pub fn stop_broker(&self, node: i32) {
+        self.cluster().stop(node).unwrap_or_else(|e| panic!("{e}"));
     }
 
     pub fn start_broker(&self, node: i32) {
@@ -333,23 +300,10 @@ impl Harness {
         }
     }
 
-    /// Each partition of `topic` as metadata reports it, or `None` while no
-    /// broker answers for all of them.
+    /// Each partition of `topic` as the cluster's metadata reports it, or
+    /// `None` while no node answers for all of them.
     pub fn partition_states(&self, topic: &str) -> Option<Vec<PartitionState>> {
-        let probe = probe_consumer(&self.brokers, "e2e-metadata");
-        let metadata = probe.fetch_metadata(Some(topic), PROBE_TIMEOUT).ok()?;
-        let states: Vec<PartitionState> = metadata
-            .topics()
-            .first()?
-            .partitions()
-            .iter()
-            .map(|p| PartitionState {
-                id: p.id(),
-                leader: p.leader(),
-                in_sync: p.isr().len(),
-            })
-            .collect();
-        (!states.is_empty()).then_some(states)
+        self.cluster().partition_states(topic)
     }
 
     /// Produce `events` to `topic` in one transaction, and commit or abort it.

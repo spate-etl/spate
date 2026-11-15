@@ -48,7 +48,7 @@ spate-s3 = { workspace = true, features = ["testing"] }
 # `testing`: `TestClock`.
 spate-core = { workspace = true, features = ["testing"] }
 spate-test = { workspace = true }
-spate-test-support = { workspace = true, features = ["kafka", "s3", "tls"] }
+spate-test-support = { workspace = true, features = ["kafka", "kafka-client", "s3", "tls"] }
 metrics = { workspace = true }
 object_store = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }

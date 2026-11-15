@@ -216,6 +216,9 @@ The framework never uses librdkafka's position-based auto-commit. Instead:
   truncation, and its first batch below the commit logs the committed offset
   and the first offset at `INFO`. Under `error` a detected truncation, or an
   epoch the leader does not know, fails the source with a fatal error.
+  Under `error` a leader change that truncated nothing, such as a broker
+  restart, starts the lane at the commit. So does a commit whose epoch has no
+  records left, while the commit is at or above the log start.
 - Under `earliest`, and under `latest` when every partition of the assignment
   has a commit, a failed read of the partitions' ends leaves a commit above the
   end sought as well, and a warning names those partitions. So does an end read

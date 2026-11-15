@@ -38,6 +38,13 @@ allow = ["NCSA"]
 
 [bans]
 multiple-versions = "warn"
+# Each crate here resolves to one copy shared with a client crate, for the
+# reason its workspace Cargo.toml entry gives. cargo-deny 0.20 drops a `reason`
+# on these entries, so the comment names the client.
+deny = [
+    { crate = "lz4_flex", deny-multiple-versions = true }, # with clickhouse
+    { crate = "quick-xml", deny-multiple-versions = true }, # with object_store
+]
 wildcards = "deny"
 # Exempts non-registry dependencies, which `spate-bench = { path = "bench" }`
 # needs: it is versionless and cargo-deny reads a missing version as a wildcard.

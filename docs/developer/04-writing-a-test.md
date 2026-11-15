@@ -213,13 +213,13 @@ Keep that input under `fuzz/corpus/<target>/` with the fix, so the case stays co
 
 ## Run `unsafe` code under Miri
 
-Give an `unsafe` block that a lib test can enter without a foreign call a test that enters it, and a row in `TARGETS` in [`xtask/src/commands/miri.rs`](repo:xtask/src/commands/miri.rs).
+When a lib test can enter an `unsafe` block without a foreign call, give the block a test that enters it and add a row to `TARGETS` in [`xtask/src/commands/miri.rs`](repo:xtask/src/commands/miri.rs).
 `cargo xtask miri` runs each row's lib tests under [Miri](https://github.com/rust-lang/miri), with strict provenance.
 
 **Why:** an out-of-bounds read or write that leaves the output intact passes the ordinary suite, and Miri reports it.
 
 A row names a package and a nextest filterset, such as `test(/^native::leaf::/)`.
-Point the filter at tests that enter the block, because a filter that matches only other tests passes without checking it.
+Point the filter at tests that enter the block, because a filter that matches only other tests passes without checking the block.
 A filter that matches no test fails the run, so a renamed module shows up as a failure.
 
 Miri cannot run a foreign call, so a block that only runs after one has no row.

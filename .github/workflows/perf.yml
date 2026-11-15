@@ -89,7 +89,7 @@ jobs:
         include: ${{ fromJSON(inputs.bench-shards) }}
     # Advisory in what it reports, blocking in whether it ran: a moved count does
     # not fail a merge, and this unit's caller stays in `CI gate`'s `needs:` so a
-    # bench that stops building does.
+    # bench that stops building does, as does a report that stops rendering.
     steps:
       # Full history: the merge base has to be resolvable and checked out.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -321,11 +321,10 @@ jobs:
           pattern: perf-summaries-*
           path: shards
 
-      # Writes `has_regressions` for `perf-label.yml`, exiting 0 on a moved
-      # metric. `continue-on-error` here, not on the job.
+      # Writes `has_regressions` for `perf-label.yml`. A moved metric exits 0;
+      # a report that cannot read the summaries fails the job.
       - name: Report instruction counts
         id: report
-        continue-on-error: true
         run: |
           set -euo pipefail
           mkdir -p shards
@@ -337,9 +336,9 @@ jobs:
 
       # The one output crossing into `perf-label.yml`. The markdown stays in the
       # step summary; nothing fork-authored is re-posted by a privileged
-      # workflow. Gated on the report's outcome: a dead report writes no flag.
+      # workflow. A failed report skips this step, so no flag is written.
       - name: Upload the regression flag
-        if: github.event_name == 'pull_request' && steps.report.outcome == 'success'
+        if: github.event_name == 'pull_request'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: perf-regressions

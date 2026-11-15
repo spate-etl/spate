@@ -94,7 +94,8 @@ payload.
 - Any other failure, such as another `5xx`, a `429`, a timeout or a refused
   connection, is transient. The id stays uncached and its batch stays held. Each
   later fetch of the id waits a backoff that starts at 200 ms and doubles up to
-  5 s.
+  5 s. Each wait is drawn at random between 80% and 100% of its step, so ids
+  and replicas that fail together spread their fetches.
 - A `401` or `403` on a schema fetch, a `401` on a pre-warm, a certificate that
   fails verification, or a TLS handshake the registry rejects marks the client
   as rejected. The next payload whose schema is not cached then stops the

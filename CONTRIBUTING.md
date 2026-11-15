@@ -44,7 +44,7 @@ An assignment ends 14 days after it is made, or on the target date of the
 issue's milestone if that comes first. It never ends sooner than 7 days after it
 is made. An open pull request for the issue keeps the assignment.
 
-When a milestone passes its target date, its open issues move on as
+When a milestone's release ships, its open issues move on as
 [`RELEASING.md`](RELEASING.md#milestones-and-priorities) describes. An
 assignment with no open pull request ends then, or 7 days after it was made if
 that is later. You can comment on the issue to ask for it again.

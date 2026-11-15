@@ -20,7 +20,8 @@
 #
 # A milestone commits an issue to a release, and `release blocker` marks one
 # that release cannot ship without. An issue with no milestone carries a
-# `priority:` label in its place.
+# `priority:` label in its place. A milestone takes precedence: while an issue
+# has one, its `priority:` label is not read.
 #
 
 - name: "crate: spate"
@@ -163,8 +164,8 @@
 
 # --------------------------------------------------------------- priority ----
 #
-# Only on an issue with no milestone, one at a time. A milestone replaces the
-# label.
+# One at a time. A milestone takes precedence: while an issue has one, the
+# label is not read, and nothing removes it.
 
 - name: "priority: high"
   color: "d93f0b"

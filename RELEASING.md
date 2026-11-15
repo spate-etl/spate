@@ -30,8 +30,10 @@ newest `0.x` minor is supported.
 
 A minor release aims to ship every two to four weeks and carries one feature
 theme. Each release has a milestone named by its version. Its description says
-what the release delivers, and the issues under it are the work committed to it.
-The current and next milestones carry a target date. Later ones show the
+what the release delivers. While it is open, the issues under it are the work
+committed to it. Once the release ships, it lists everything the release
+shipped, planned or not, and closes. The current and next milestones carry a
+target date. Later ones show the
 direction without a date, and say so where a design is still open.
 
 An issue gets a milestone once it is committed to a release: it is part of the
@@ -41,15 +43,41 @@ marks an issue the release cannot ship without. `security` marks a security
 defect on `main` that no release carries yet, and the release refuses to start
 while one is open on its milestone. A maintainer files these issues; anyone
 else reports a security defect privately, as [`SECURITY.md`](SECURITY.md)
-says. Work on CI, benchmarks and tooling carries no milestone unless a release
-depends on it.
+says. Open work on CI, benchmarks and tooling carries no milestone unless a
+release depends on it. Once it is done, it takes the milestone of the release
+that shipped it, as all completed work does.
 
 Everything else carries a priority instead: `priority: high`, `priority: medium`
 or `priority: low`. A maintainer sets the milestone or the priority when the
-issue is opened, so every open issue carries one of the two. Each release takes
-its fixes from `priority: high` first. An issue that misses its release moves to
-the next milestone once; if it misses that one too, it returns to the backlog
-with a priority label.
+issue is opened, so every open issue carries one of the two. A milestone takes
+precedence: while an issue has one, its priority label is not read. Each release
+takes its fixes from `priority: high` first. An issue that misses its release
+moves to the next milestone once; if it misses that one too, it returns to the
+backlog with a priority label.
+
+Once the release finishes, one command applies these rules:
+
+```sh
+cargo xtask release milestone X.Y.Z           # prints each change
+cargo xtask release milestone X.Y.Z --apply   # makes them
+```
+
+- **What shipped.** Every issue closed as completed after the previous release
+  landed on `main`, and up to when this one did, gets the release's milestone,
+  whatever milestone it had. The milestone is created if it does not exist, or
+  reopened if it is closed.
+- **What did not.** Each open issue on the milestone moves to the next open
+  milestone. An issue that was already moved off an earlier release's milestone
+  returns to the backlog instead, with `priority: medium` unless it carries a
+  priority. An issue labeled `security` or `release blocker` always moves. With
+  no later open milestone to move to, the command refuses before it changes
+  anything.
+- **Then** the milestone closes.
+
+The moves an issue has had are read from its timeline, so nothing else records
+them. With `--apply`, the command reads everything again afterwards and fails
+naming any change that did not take: GitHub drops a milestone change from a
+token without push access and reports success. Running it again changes nothing.
 
 ## The one decision
 
@@ -66,7 +94,9 @@ disagree: a changelog fragment that opens with `**Breaking:**`, an `added` or
 minor bump; anything else means a patch. Commit subjects play no part.
 `cargo xtask release version derive` prints the same answer locally.
 
-Everything after the input runs unattended. The release pull request
+Everything after the input runs unattended, until the milestone step in
+[Milestones and priorities](#milestones-and-priorities) once the release
+finishes. The release pull request
 auto-merges when `CI gate` passes, and nobody approves the diff. The controls
 are the version input, the derivation check, and the gates every pull request
 already passes. What is worth reading on that pull request is the assembled
@@ -423,5 +453,5 @@ rather than on each release:
   leaves the site advertising the previous version.
 
 Unless a step failed and this page says otherwise, the workflow run and the
-registry are the record of a release; there is nothing to write down and no
-step to do by hand.
+registry are the record of a release. There is nothing to write down, and the
+milestone step is the one step to do by hand.

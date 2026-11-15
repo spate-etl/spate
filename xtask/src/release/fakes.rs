@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use super::io::{
-    Forge, Git, Index, IndexEntry, Issue, Package, Pull, Registry, ReleaseState, Resolution,
-    Workspace,
+    Forge, Git, Index, IndexEntry, Issue, Milestone, MilestoneEvent, Package, Pull, Registry,
+    ReleaseState, Resolution, Target, Tracked, Workspace,
 };
 use super::sequence::CYCLONEDX;
 use super::version::Version;
@@ -101,6 +101,14 @@ impl Git for FakeGit<'_> {
     fn remote_tag(&self, tag: &str) -> Result<Option<String>, Error> {
         Ok(self.remote.borrow().get(tag).cloned())
     }
+    fn remote_tags(&self) -> Result<Vec<(String, String)>, Error> {
+        Ok(self
+            .remote
+            .borrow()
+            .iter()
+            .map(|(name, sha)| (name.clone(), sha.clone()))
+            .collect())
+    }
     fn tag(&self, name: &str, commit: &str) -> Outcome {
         self.log.push(format!("tag {name} {commit}"));
         Ok(())
@@ -159,6 +167,22 @@ pub(crate) struct FakeForge<'a> {
     pub(crate) security_queried: RefCell<Vec<String>>,
     /// Security issue listings refused.
     pub(crate) security_reads_fail: bool,
+    pub(crate) milestones: RefCell<Vec<Milestone>>,
+    /// Every issue, with whether it is open.
+    pub(crate) issues: RefCell<Vec<(Tracked, bool)>>,
+    /// Each issue's milestone events.
+    pub(crate) events: BTreeMap<u64, Vec<MilestoneEvent>>,
+    /// When each commit reached the default branch.
+    pub(crate) landed: BTreeMap<String, String>,
+    /// The `since` each closed-issue listing was asked for.
+    pub(crate) since_queried: RefCell<Vec<Option<String>>>,
+    /// The issue whose milestone write fails.
+    pub(crate) milestone_write_fails: Option<u64>,
+    /// Milestone writes on issues report success and change nothing, as
+    /// GitHub does for a token without push access.
+    pub(crate) drops_milestone_writes: bool,
+    /// The milestone and issue listings fail.
+    pub(crate) milestone_reads_fail: bool,
 }
 
 impl<'a> FakeForge<'a> {
@@ -321,6 +345,93 @@ impl Forge for FakeForge<'_> {
             "provenance"
         };
         self.log(format!("verify {kind} {name} by {signer_workflow}"));
+        Ok(())
+    }
+    fn milestones(&self) -> Result<Vec<Milestone>, Error> {
+        if self.milestone_reads_fail {
+            return Err(fail("milestones"));
+        }
+        Ok(self.milestones.borrow().clone())
+    }
+    fn closed_issues(&self, since: Option<&str>) -> Result<Vec<Tracked>, Error> {
+        self.since_queried
+            .borrow_mut()
+            .push(since.map(str::to_owned));
+        Ok(self
+            .issues
+            .borrow()
+            .iter()
+            .filter(|(_, open)| !open)
+            .map(|(t, _)| t.clone())
+            .collect())
+    }
+    fn open_issues(&self, milestone: u64) -> Result<Vec<Tracked>, Error> {
+        Ok(self
+            .issues
+            .borrow()
+            .iter()
+            .filter(|(t, open)| *open && t.milestone == Some(milestone))
+            .map(|(t, _)| t.clone())
+            .collect())
+    }
+    fn milestone_events(&self, issue: u64) -> Result<Vec<MilestoneEvent>, Error> {
+        Ok(self.events.get(&issue).cloned().unwrap_or_default())
+    }
+    fn landed_at(&self, sha: &str) -> Result<String, Error> {
+        self.landed
+            .get(sha)
+            .cloned()
+            .ok_or_else(|| fail("no such commit"))
+    }
+    fn create_milestone(&self, title: &str) -> Result<Option<u64>, Error> {
+        let mut milestones = self.milestones.borrow_mut();
+        let number = milestones.iter().map(|m| m.number).max().unwrap_or(0) + 1;
+        milestones.push(Milestone {
+            number,
+            title: title.to_owned(),
+            open: true,
+        });
+        self.log(format!("create {title} #{number}"));
+        Ok(Some(number))
+    }
+    fn set_milestone_open(&self, milestone: &Target, open: bool) -> Outcome {
+        let number = milestone.number.ok_or_else(|| fail("no number"))?;
+        for m in self.milestones.borrow_mut().iter_mut() {
+            if m.number == number {
+                m.open = open;
+            }
+        }
+        let verb = if open { "reopen" } else { "close" };
+        self.log(format!("{verb} {}", milestone.title));
+        Ok(())
+    }
+    fn set_milestone(&self, issue: u64, milestone: Option<&Target>) -> Outcome {
+        if self.milestone_write_fails == Some(issue) {
+            return Err(fail("milestone write"));
+        }
+        let number = milestone
+            .map(|m| m.number.ok_or_else(|| fail("no number")))
+            .transpose()?;
+        self.log(format!(
+            "milestone #{issue} {}",
+            milestone.map_or("none", |m| m.title.as_str())
+        ));
+        if !self.drops_milestone_writes {
+            for (t, _) in self.issues.borrow_mut().iter_mut() {
+                if t.issue.number == issue {
+                    t.milestone = number;
+                }
+            }
+        }
+        Ok(())
+    }
+    fn add_label(&self, issue: u64, label: &str) -> Outcome {
+        self.log(format!("label #{issue} {label}"));
+        for (t, _) in self.issues.borrow_mut().iter_mut() {
+            if t.issue.number == issue {
+                t.labels.push(label.to_owned());
+            }
+        }
         Ok(())
     }
 }

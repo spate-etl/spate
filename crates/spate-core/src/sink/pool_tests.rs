@@ -2853,8 +2853,9 @@ fn first_retry_deadlines(clock: &TestClock, t0: tokio::time::Instant) -> Vec<tok
 }
 
 /// Fails the first write of batch 0 on each of `shards` and returns the
-/// retry deadlines the pool arms.
-async fn first_retries_of(shards: usize) -> Vec<tokio::time::Instant> {
+/// first retry delays the pool draws. Delays, not instants: each call's clock
+/// starts where the last call's paused hour left tokio's time.
+async fn first_retries_of(shards: usize) -> Vec<Duration> {
     let clock = TestClock::frozen();
     let t0 = clock.now();
     let f = fixture_on(&clock, shards, 1, one_second_full_jitter(), 16);
@@ -2868,10 +2869,13 @@ async fn first_retries_of(shards: usize) -> Vec<tokio::time::Instant> {
 
     paused_hour().await;
     assert_eq!(f.writer.calls().len(), shards, "each batch failed once");
-    let deadlines = first_retry_deadlines(&clock, t0);
+    let delays = first_retry_deadlines(&clock, t0)
+        .into_iter()
+        .map(|at| at - t0)
+        .collect();
     drop(f.queues);
     f.pool.drain(Duration::ZERO).await;
-    deadlines
+    delays
 }
 
 /// Two batches of one shard failing together draw different jitter.
@@ -2917,9 +2921,9 @@ async fn two_sink_pools_draw_apart() {
 /// Batch 0 of two shards in one pool retries at different instants.
 #[tokio::test(start_paused = true)]
 async fn two_shards_draw_apart() {
-    let deadlines = first_retries_of(2).await;
-    assert_eq!(deadlines.len(), 2, "{deadlines:?}");
-    assert_ne!(deadlines[0], deadlines[1], "two shards' batch 0 drew alike");
+    let delays = first_retries_of(2).await;
+    assert_eq!(delays.len(), 2, "{delays:?}");
+    assert_ne!(delays[0], delays[1], "two shards' batch 0 drew alike");
 }
 
 /// A batch's second retry sleeps `retry.initial * retry.multiplier`, so the

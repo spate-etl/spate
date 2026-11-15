@@ -8,7 +8,6 @@ use crate::release::io::{DryForge, DryGit, Forge, Git, Issue, Pull, Registry, Wo
 /// A tweak to the fakes before an `assemble` guard case runs.
 type Setup = fn(&mut FakeGit<'_>, &mut FakeWorkspace<'_>);
 
-
 const CRATES: [&str; 3] = ["spate-core", "spate-kafka", "spate"];
 
 /// A release subject names its version, with or without the squash suffix;
@@ -712,7 +711,6 @@ fn published(log: &Log) -> (FakeRegistry, FakeWorkspace<'_>) {
     log.0.borrow_mut().clear();
     (registry, workspace)
 }
-
 
 /// A staged artifacts directory: every crate at 0.3.0 with the bytes the fake
 /// registry serves, an SBOM each, `SHA256SUMS`, and an attestation bundle when

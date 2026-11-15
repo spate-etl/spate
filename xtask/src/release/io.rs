@@ -665,7 +665,10 @@ impl Forge for Gh<'_> {
     }
 
     fn create_milestone(&self, title: &str) -> Result<Option<u64>, Error> {
-        let out = run::capture(self.root, &self.step(&[]).args(create_milestone_args(title)))?;
+        let out = run::capture(
+            self.root,
+            &self.step(&[]).args(create_milestone_args(title)),
+        )?;
         created_number(&out).map(Some)
     }
 
@@ -673,7 +676,9 @@ impl Forge for Gh<'_> {
         run::quiet(
             self.root,
             false,
-            &self.step(&[]).args(milestone_state_args(number_of(milestone)?, open)),
+            &self
+                .step(&[])
+                .args(milestone_state_args(number_of(milestone)?, open)),
         )
     }
 
@@ -687,7 +692,11 @@ impl Forge for Gh<'_> {
     }
 
     fn add_label(&self, issue: u64, label: &str) -> Outcome {
-        run::quiet(self.root, false, &self.step(&[]).args(add_label_args(issue, label)))
+        run::quiet(
+            self.root,
+            false,
+            &self.step(&[]).args(add_label_args(issue, label)),
+        )
     }
 }
 
@@ -791,9 +800,10 @@ pub(crate) fn landed_at(
     struct Person {
         date: String,
     }
-    let pulls: Vec<Vec<Pull>> =
-        serde_json::from_str(&get(&format!("repos/{{owner}}/{{repo}}/commits/{sha}/pulls"))?)
-            .map_err(|e| Error::msg(format!("pulls of {sha}: {e}")))?;
+    let pulls: Vec<Vec<Pull>> = serde_json::from_str(&get(&format!(
+        "repos/{{owner}}/{{repo}}/commits/{sha}/pulls"
+    ))?)
+    .map_err(|e| Error::msg(format!("pulls of {sha}: {e}")))?;
     let merged = pulls
         .into_iter()
         .flatten()
@@ -1934,7 +1944,11 @@ mod tests {
         };
         assert_eq!(
             parse_milestones(raw).unwrap(),
-            [m(5, "v0.6.0", true), m(4, "v0.4.0", false), m(9, "v0.9.0", false)]
+            [
+                m(5, "v0.6.0", true),
+                m(4, "v0.4.0", false),
+                m(9, "v0.9.0", false)
+            ]
         );
     }
 
@@ -2076,24 +2090,49 @@ mod tests {
     fn the_milestone_writes_address_by_number() {
         assert_eq!(
             create_milestone_args("v0.4.1"),
-            ["api", "-X", "POST", "repos/{owner}/{repo}/milestones", "-f", "title=v0.4.1"]
+            [
+                "api",
+                "-X",
+                "POST",
+                "repos/{owner}/{repo}/milestones",
+                "-f",
+                "title=v0.4.1"
+            ]
         );
         assert_eq!(
             milestone_state_args(4, true),
-            ["api", "-X", "PATCH", "repos/{owner}/{repo}/milestones/4", "-f", "state=open"]
+            [
+                "api",
+                "-X",
+                "PATCH",
+                "repos/{owner}/{repo}/milestones/4",
+                "-f",
+                "state=open"
+            ]
         );
-        assert_eq!(
-            milestone_state_args(4, false)[5],
-            "state=closed"
-        );
+        assert_eq!(milestone_state_args(4, false)[5], "state=closed");
         assert_eq!(
             issue_milestone_args(7, Some(4)),
-            ["api", "-X", "PATCH", "repos/{owner}/{repo}/issues/7", "-F", "milestone=4"]
+            [
+                "api",
+                "-X",
+                "PATCH",
+                "repos/{owner}/{repo}/issues/7",
+                "-F",
+                "milestone=4"
+            ]
         );
         assert_eq!(issue_milestone_args(7, None)[5], "milestone=null");
         assert_eq!(
             add_label_args(7, "priority: medium"),
-            ["api", "-X", "POST", "repos/{owner}/{repo}/issues/7/labels", "-f", "labels[]=priority: medium"]
+            [
+                "api",
+                "-X",
+                "POST",
+                "repos/{owner}/{repo}/issues/7/labels",
+                "-f",
+                "labels[]=priority: medium"
+            ]
         );
         let unnumbered = Target {
             title: "v0.4.1".into(),
@@ -2113,7 +2152,10 @@ mod tests {
     /// The created milestone's number is read from the reply.
     #[test]
     fn a_created_milestone_answers_its_number() {
-        assert_eq!(created_number(r#"{"number":13,"title":"v0.4.1"}"#).unwrap(), 13);
+        assert_eq!(
+            created_number(r#"{"number":13,"title":"v0.4.1"}"#).unwrap(),
+            13
+        );
         assert!(created_number(r#"{"message":"Validation Failed"}"#).is_err());
     }
 

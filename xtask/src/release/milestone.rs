@@ -4,8 +4,8 @@
 //! backlog. RELEASING.md is the account of the rule.
 
 use super::io::{
-    DryForge, Forge, Git, Host, Issue, Milestone, MilestoneEvent, RELEASE_BLOCKER,
-    SECURITY_LABEL, Target, Tracked,
+    DryForge, Forge, Git, Host, Issue, Milestone, MilestoneEvent, RELEASE_BLOCKER, SECURITY_LABEL,
+    Target, Tracked,
 };
 use super::version::Version;
 use crate::checks::subject::printable;
@@ -38,7 +38,10 @@ pub(crate) enum Change {
     },
     /// An issue that slipped before returns to the backlog, labeled
     /// [`DEMOTED`] when `label` is set.
-    Demote { issue: Issue, label: bool },
+    Demote {
+        issue: Issue,
+        label: bool,
+    },
     Close,
 }
 

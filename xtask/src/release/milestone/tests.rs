@@ -163,10 +163,7 @@ fn an_unfinished_issue_moves_to_the_next_open_version_milestone() {
 /// What happens at 0.6.0 to one open issue on v0.6.0 with `events` and
 /// `labels`.
 fn fate(events: Vec<MilestoneEvent>, labels: &[&str]) -> Change {
-    let all = vec![
-        milestone(5, "v0.6.0", true),
-        milestone(6, "v0.7.0", true),
-    ];
+    let all = vec![milestone(5, "v0.6.0", true), milestone(6, "v0.7.0", true)];
     let changes = plan(
         v("0.6.0"),
         &reads(all, vec![], vec![(open(9, 5, labels), events)]),
@@ -315,7 +312,11 @@ fn an_issue_with_no_next_milestone_refuses_the_plan() {
         ),
     )
     .unwrap_err();
-    assert!(err.message.contains("no later open milestone"), "{}", err.message);
+    assert!(
+        err.message.contains("no later open milestone"),
+        "{}",
+        err.message
+    );
     assert_eq!(
         plan(v("0.4.0"), &reads(only, vec![], vec![])).unwrap(),
         [Change::Close]
@@ -567,7 +568,11 @@ fn a_write_that_did_not_take_fails_the_run() {
     let host = host!(&git, &forge, &registry, &workspace, pauses);
     let err = run(&host, v("0.4.0"), true).unwrap_err();
     assert!(err.message.contains("did not take"), "{}", err.message);
-    assert!(err.message.contains("stamp #1 on v0.4.0"), "{}", err.message);
+    assert!(
+        err.message.contains("stamp #1 on v0.4.0"),
+        "{}",
+        err.message
+    );
 }
 
 /// Without `--apply` nothing is written, a milestone a real run would create
@@ -620,7 +625,10 @@ fn the_dry_collaborators_read_through_and_create_nothing() {
     let log = Log::default();
     let (git, forge) = backfill(&log);
     let dry = DryForge(&forge, true);
-    assert_eq!(dry.closed_issues(None).unwrap(), forge.closed_issues(None).unwrap());
+    assert_eq!(
+        dry.closed_issues(None).unwrap(),
+        forge.closed_issues(None).unwrap()
+    );
     assert_eq!(dry.open_issues(4).unwrap().len(), 2);
     assert_eq!(dry.milestone_events(4).unwrap(), slipped_once_at("v0.4.0"));
     assert_eq!(dry.landed_at("a4").unwrap(), UNTIL);

@@ -13,6 +13,13 @@
 //! is `ceph:s3`. Each ETag is quoted and accepted by `http` as a header
 //! value. Raw bytes are left to `s3_unit_decode`.
 //!
+//! The same fields can instead build an EventBridge event from the first
+//! record: its event name picks the `detail-type`, its key is written as is
+//! and read back as written, and its `eventSource` and re-enqueue count are
+//! not written, so the part's count is 0. An `Object Created` event is read
+//! only under a `detail.event-version` of `1.` and digits. A type in
+//! `EVENTBRIDGE_ACKNOWLEDGED` is acknowledged, and any other fails.
+//!
 //! The prediction follows the decoder's order where it decides between
 //! dropping a record and failing its message. A record whose fields do not
 //! deserialise, an `eventSource` that is not a string included, fails even at
@@ -26,7 +33,7 @@ use arbitrary::Arbitrary;
 use http::HeaderValue;
 use libfuzzer_sys::fuzz_target;
 use serde_json::{Map, Value, json};
-use spate_s3::fuzz_seams::{DecodedUnit, addressable, decode_unit};
+use spate_s3::fuzz_seams::{DecodedUnit, EVENTBRIDGE_ACKNOWLEDGED, addressable, decode_unit};
 use std::fmt::Write as _;
 
 const BUCKET: &str = "bucket";
@@ -38,7 +45,27 @@ const MAX_VERSION_BYTES: usize = 1024;
 struct Input {
     prefix: u8,
     records: Vec<Record>,
-    envelope: bool,
+    shape: Shape,
+}
+
+/// How the records are sent.
+#[derive(Arbitrary, Debug)]
+enum Shape {
+    Records,
+    /// Inside the envelope RustFS sends.
+    Envelope,
+    /// The first record as an EventBridge event, under this event version.
+    EventBridge(EventVersion),
+}
+
+/// An EventBridge event's `detail.event-version`.
+#[derive(Arbitrary, Debug)]
+enum EventVersion {
+    /// `1.` and this minor version.
+    One(u16),
+    Other(String),
+    NotString(i64),
+    Absent,
 }
 
 #[derive(Arbitrary, Debug)]
@@ -180,18 +207,27 @@ enum Outcome {
 
 fuzz_target!(|input: Input| {
     let prefix = PREFIXES[usize::from(input.prefix) % PREFIXES.len()];
-    let mut values = Vec::with_capacity(input.records.len());
-    let mut outcomes = Vec::with_capacity(input.records.len());
-    for record in &input.records {
-        let (value, outcome) = build(record, prefix);
-        values.push(value);
-        outcomes.push(outcome);
-    }
-    let mut message = json!({ "Records": values });
-    if input.envelope {
-        message["EventName"] = json!("s3:ObjectCreated:Put");
-        message["Key"] = json!("bucket/key");
-    }
+    let (message, outcomes) = match (&input.shape, input.records.first()) {
+        (Shape::EventBridge(version), Some(record)) => {
+            let (event, outcome) = build_event(record, version, prefix);
+            (event, vec![outcome])
+        }
+        _ => {
+            let mut values = Vec::with_capacity(input.records.len());
+            let mut outcomes = Vec::with_capacity(input.records.len());
+            for record in &input.records {
+                let (value, outcome) = build(record, prefix);
+                values.push(value);
+                outcomes.push(outcome);
+            }
+            let mut message = json!({ "Records": values });
+            if matches!(input.shape, Shape::Envelope) {
+                message["EventName"] = json!("s3:ObjectCreated:Put");
+                message["Key"] = json!("bucket/key");
+            }
+            (message, outcomes)
+        }
+    };
     let body = serde_json::to_vec(&message).expect("a JSON value serialises");
     let decoded = decode_unit(&body, BUCKET, prefix);
 
@@ -244,35 +280,9 @@ fuzz_target!(|input: Input| {
 /// One record's JSON and what the decoder must do with it.
 fn build(record: &Record, prefix: &str) -> (Value, Outcome) {
     let (encoded, decoded) = record.key.encode(prefix, record.source.raw());
-    let size = match record.size {
-        Size::Absent | Size::Null => None,
-        Size::Zero => Some(0),
-        Size::Small(n) => Some(u64::from(n.max(1))),
-        Size::Max => Some(u64::MAX),
-    };
-    let etag = match &record.etag {
-        Etag::Absent => None,
-        Etag::Value(e) => Some(e.clone()),
-        Etag::Quoted(e) => Some(format!("\"{e}\"")),
-    };
-
-    let mut object = Map::new();
-    object.insert("key".to_owned(), json!(encoded));
-    match record.size {
-        Size::Absent => {}
-        Size::Null => {
-            object.insert("size".to_owned(), Value::Null);
-        }
-        _ => {
-            object.insert("size".to_owned(), json!(size));
-        }
-    }
-    if let Some(etag) = &etag {
-        object.insert("eTag".to_owned(), json!(etag));
-    }
-    if let Some(version) = record.version.json() {
-        object.insert("versionId".to_owned(), version);
-    }
+    let size = record.size.value();
+    let etag = record.etag.value();
+    let object = object_json(record, &encoded, "eTag", "versionId");
     let bucket = if record.other_bucket { "other" } else { BUCKET };
     let s3 = if record.unreadable {
         json!(7)
@@ -308,9 +318,99 @@ fn build(record: &Record, prefix: &str) -> (Value, Outcome) {
     let outcome = match name {
         None => Outcome::Fail,
         Some(name) if !created(&name) => Outcome::Drop,
-        Some(_) => predict(record, prefix, decoded, size, etag),
+        Some(_) => predict(record, prefix, decoded, size, etag, false),
     };
     (value, outcome)
+}
+
+/// The JSON of `record`'s object with its key written as `key`, spelling
+/// the ETag and version fields as `etag_field` and `version_field`.
+fn object_json(
+    record: &Record,
+    key: &str,
+    etag_field: &str,
+    version_field: &str,
+) -> Map<String, Value> {
+    let mut object = Map::new();
+    object.insert("key".to_owned(), json!(key));
+    match record.size {
+        Size::Absent => {}
+        Size::Null => {
+            object.insert("size".to_owned(), Value::Null);
+        }
+        _ => {
+            object.insert("size".to_owned(), json!(record.size.value()));
+        }
+    }
+    if let Some(etag) = record.etag.value() {
+        object.insert(etag_field.to_owned(), json!(etag));
+    }
+    if let Some(version) = record.version.json() {
+        object.insert(version_field.to_owned(), version);
+    }
+    object
+}
+
+/// An EventBridge event built from `record` under `version`, and what the
+/// decoder must do with it.
+fn build_event(record: &Record, version: &EventVersion, prefix: &str) -> (Value, Outcome) {
+    let (key, read_back) = record.key.encode(prefix, true);
+    let bucket = if record.other_bucket { "other" } else { BUCKET };
+    let detail = if record.unreadable {
+        json!(7)
+    } else {
+        let mut detail = json!({
+            "bucket": { "name": bucket },
+            "object": object_json(record, &key, "etag", "version-id"),
+        });
+        match version {
+            EventVersion::One(minor) => detail["event-version"] = json!(format!("1.{minor}")),
+            EventVersion::Other(text) => detail["event-version"] = json!(text),
+            EventVersion::NotString(n) => detail["event-version"] = json!(n),
+            EventVersion::Absent => {}
+        }
+        detail
+    };
+    let mut event = json!({ "version": "0", "source": "aws.s3", "detail": detail });
+    if let Some(time) = &record.event_time {
+        event["time"] = json!(time);
+    }
+    let detail_type = match &record.event {
+        Event::Created { .. } => Some("Object Created".to_owned()),
+        Event::Removed { .. } => Some("Object Deleted".to_owned()),
+        Event::Other(name) => Some(name.clone()),
+        Event::NotString(n) => {
+            event["detail-type"] = json!(n);
+            None
+        }
+        Event::Missing => None,
+    };
+    if let Some(detail_type) = &detail_type {
+        event["detail-type"] = json!(detail_type);
+    }
+
+    let version_ok = match version {
+        EventVersion::One(_) => true,
+        EventVersion::Other(text) => text
+            .strip_prefix("1.")
+            .is_some_and(|minor| !minor.is_empty() && minor.bytes().all(|b| b.is_ascii_digit())),
+        EventVersion::NotString(_) | EventVersion::Absent => false,
+    };
+    let outcome = match detail_type.as_deref() {
+        None => Outcome::Fail,
+        Some("Object Created") if record.unreadable || !version_ok => Outcome::Fail,
+        Some("Object Created") => predict(
+            record,
+            prefix,
+            read_back,
+            record.size.value(),
+            record.etag.value(),
+            true,
+        ),
+        Some(other) if EVENTBRIDGE_ACKNOWLEDGED.contains(&other) => Outcome::Drop,
+        Some(_) => Outcome::Fail,
+    };
+    (event, outcome)
 }
 
 /// The outcome of a created record that names an object.
@@ -320,12 +420,21 @@ fn predict(
     decoded: Option<String>,
     size: Option<u64>,
     etag: Option<String>,
+    event: bool,
 ) -> Outcome {
-    let (Some(version), Some(re_enqueues)) = (record.version.text(), record.re_enqueues.count())
-    else {
+    // An event writes no `eventSource` or re-enqueue count.
+    let re_enqueues = if event {
+        Some(0)
+    } else {
+        record.re_enqueues.count()
+    };
+    let (Some(version), Some(re_enqueues)) = (record.version.text(), re_enqueues) else {
         return Outcome::Fail;
     };
-    if record.unreadable || record.other_bucket || matches!(record.source, Source::NotString(_)) {
+    if record.unreadable
+        || record.other_bucket
+        || (!event && matches!(record.source, Source::NotString(_)))
+    {
         return Outcome::Fail;
     }
     let Some(key) = decoded else {
@@ -400,6 +509,29 @@ impl Key {
         match self.tail {
             Tail::None => (encoded, Some(decoded)),
             _ => (encoded + self.tail.text(), None),
+        }
+    }
+}
+
+impl Size {
+    /// The size written, `None` for an absent or null one.
+    fn value(&self) -> Option<u64> {
+        match self {
+            Size::Absent | Size::Null => None,
+            Size::Zero => Some(0),
+            Size::Small(n) => Some(u64::from((*n).max(1))),
+            Size::Max => Some(u64::MAX),
+        }
+    }
+}
+
+impl Etag {
+    /// The ETag written, `None` for an absent one.
+    fn value(&self) -> Option<String> {
+        match self {
+            Etag::Absent => None,
+            Etag::Value(e) => Some(e.clone()),
+            Etag::Quoted(e) => Some(format!("\"{e}\"")),
         }
     }
 }

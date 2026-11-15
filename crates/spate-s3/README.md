@@ -166,7 +166,9 @@ pages cover the framework's side.
   config's `Debug` output does not print `store` values. See
   [Security](https://spate.kainth.dev/docs/user-guide/connectors/sources/s3#security-credentials-and-region).
 - **A listing and a notification for one object read it twice.** Their units
-  carry different ids, and the source reads each unit in full. A bounded job's
+  carry different ids, and the source reads each unit in full. A bucket that
+  sends its notifications both straight to the queue and through EventBridge
+  has each object read twice the same way. A bounded job's
   feed should carry no storage notifications, and nothing checks that. See
   [How a bounded job ends](https://spate.kainth.dev/docs/user-guide/connectors/sources/s3#how-a-bounded-job-ends).
 - **An overwrite can be dropped at the re-enqueue cap.** A notification unit

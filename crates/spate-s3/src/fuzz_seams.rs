@@ -153,7 +153,7 @@ pub enum DecodedUnit {
 
 /// Decode `body` as the source over `bucket` and `prefix` does, with no
 /// object cut into ranges, one [`DecodedPart`] per object of each part, so a
-/// notification yields at most one per record.
+/// notification yields at most one per record or event.
 #[must_use]
 pub fn decode_unit(body: &[u8], bucket: &str, prefix: &str) -> DecodedUnit {
     let scope = crate::unit::Scope {
@@ -259,6 +259,10 @@ pub fn notification_body(
     serde_json::to_vec(&serde_json::json!({ "Records": [record] }))
         .expect("a JSON value always serialises")
 }
+
+/// The EventBridge `detail-type`s the source acknowledges with nothing to
+/// read.
+pub const EVENTBRIDGE_ACKNOWLEDGED: [&str; 12] = crate::unit::EVENTBRIDGE_ACKNOWLEDGED;
 
 /// Whether the source can read `key` under its own name through
 /// `object_store`.

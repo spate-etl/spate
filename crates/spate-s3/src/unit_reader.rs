@@ -191,7 +191,7 @@ pub(crate) struct UnitReader {
     /// ends or fails ends the park too.
     waker: FeedWaker,
     parts: LaneParts,
-    /// The bucket and prefix a notification's records must name.
+    /// The bucket and prefix a notification's objects must be under.
     scope: Scope,
     /// Lanes in progress plus idle deliveries: the reader receives only
     /// while it holds fewer.
@@ -2464,6 +2464,43 @@ mod tests {
         start(&mut gzip);
         let reason = failed_reason(&mut gzip, &script, range_unit("a.ndjson", b'\n'));
         assert!(reason.contains("decodes as gzip"), "{reason}");
+    }
+
+    /// Pins the operator's view of an EventBridge event the source cannot
+    /// read: it is failed back, and the warning names the unit and a reason
+    /// that names the event.
+    #[test]
+    fn an_unreadable_eventbridge_event_warns_with_its_reason() {
+        let (mut reader, script, _rt) = reader();
+        start(&mut reader);
+        let body = serde_json::json!({
+            "source": "aws.s3",
+            "detail-type": "Object Created",
+            "time": "2021-11-12T00:00:00Z",
+            "detail": {
+                "event-version": "1.2",
+                "bucket": { "name": "elsewhere" },
+                "object": { "key": "data/a.ndjson", "size": 10 },
+            },
+        });
+        let unit = Unit::new("eventbridge-unit", serde_json::to_vec(&body).unwrap());
+        let mut reason = String::new();
+        let logs = spate_test::capture_logs(tracing::Level::WARN, || {
+            reason = failed_reason(&mut reader, &script, unit);
+        });
+        assert!(
+            reason.starts_with("EventBridge event: the object is in the bucket \"elsewhere\""),
+            "{reason}"
+        );
+        let warned: Vec<_> = logs
+            .iter()
+            .filter(|l| {
+                l.contains("failing an unreadable unit")
+                    && l.contains("eventbridge-unit")
+                    && l.contains("EventBridge event: ")
+            })
+            .collect();
+        assert_eq!(warned.len(), 1, "{logs:?}");
     }
 
     /// Pins that `set_paused` flips the pause flag of the lanes named and of

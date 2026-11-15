@@ -125,9 +125,10 @@ cover each step.
 - A lister run, `S3Source::list_once`, publishes a bounded job's units to the
   queue from the same section. Publishes go out in batches of up to ten units
   and 1 MiB.
-- A bucket's storage notifications, sent to the queue, feed a continuous job. A
-  notification carries no `spate.unit` message attribute, so its unit's id is
-  the message's `MessageId`.
+- A bucket's storage notifications, sent to the queue straight from the bucket
+  or through an EventBridge rule, feed a continuous job. A notification carries
+  no `spate.unit` message attribute, so its unit's id is the message's
+  `MessageId`.
 - A job is bounded when its `feed:` section names a `location`. Its workers read
   the queue's approximate counts of messages ready, delayed and in flight, plus
   the deletes and fails the feed has accepted and not yet sent. The job can end

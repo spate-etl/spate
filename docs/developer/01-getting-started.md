@@ -28,7 +28,7 @@ The gates in `cargo xtask ci` call these tools, and the command fails naming the
 
 | Tool | Called by | Version |
 | --- | --- | --- |
-| [cargo-nextest](https://nexte.st) | the test suite | 0.9.89 or later; 0.9.148 recommended |
+| [cargo-nextest](https://nexte.st) | the test suite | 0.9.150 or later |
 | [cargo-hack](https://github.com/taiki-e/cargo-hack) | the feature matrix | any |
 | [cargo-deny](https://github.com/EmbarkStudios/cargo-deny) | licenses and advisories | any |
 | [rumdl](https://github.com/rvben/rumdl) | `cargo xtask tidy markdown` | 0.3.0, as CI pins |

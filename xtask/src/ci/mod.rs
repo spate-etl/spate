@@ -142,10 +142,10 @@ mod tests {
     fn extra_lanes_reads_each_s3_lane_with_its_capabilities() {
         use super::outputs::{BrokerLane, StoreLane};
         use crate::checks::container_image::Capability;
+        use crate::checks::scratch::Scratch;
 
-        let root =
-            std::env::temp_dir().join(format!("spate-xtask-extra-lanes-{}", std::process::id()));
-        drop(std::fs::remove_dir_all(&root));
+        let tmp = Scratch::new("spate-xtask-extra-lanes").unwrap();
+        let root = tmp.dir();
         let pin = |service: &str, lane: &str, tag: &str| {
             let dir = root.join("ci").join(service).join(lane);
             std::fs::create_dir_all(&dir).unwrap();
@@ -168,9 +168,7 @@ mod tests {
         pin("kafka", "second", "2");
         std::fs::write(root.join("ci/kafka/PRIMARY"), "first\n").unwrap();
 
-        let lanes = super::extra_lanes(&root);
-        drop(std::fs::remove_dir_all(&root));
-        let lanes = lanes.unwrap();
+        let lanes = super::extra_lanes(root).unwrap();
         assert_eq!(lanes.clickhouse, ["old"]);
         assert_eq!(lanes.kafka, [BrokerLane::new("second")]);
         assert_eq!(

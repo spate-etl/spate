@@ -1,7 +1,9 @@
 //! The process-level contract of `cargo xtask release`: the checks a step makes
 //! before it does any work.
 
-use std::process::{Command, Output};
+use std::process::Output;
+
+mod support;
 
 /// The variables the release steps read, cleared so nothing on the host
 /// reaches the child.
@@ -17,13 +19,7 @@ const READS: [&str; 8] = [
 ];
 
 fn xtask(args: &[&str], env: &[(&str, &str)]) -> Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_spate-xtask"));
-    command.args(args);
-    for name in READS {
-        command.env_remove(name);
-    }
-    command.envs(env.iter().copied());
-    command.output().unwrap()
+    support::run(args, &READS, env)
 }
 
 #[track_caller]

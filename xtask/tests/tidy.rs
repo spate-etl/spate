@@ -2,25 +2,17 @@
 //! the members a whole run walks.
 
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::Output;
+
+mod support;
 
 fn xtask(args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_spate-xtask"))
-        .args(args)
-        .env_remove("GITHUB_ACTIONS")
-        .output()
-        .unwrap()
+    support::run(args, &["GITHUB_ACTIONS"], &[])
 }
 
-/// The exit status, stdout and stderr of one run, all three held at once.
 #[track_caller]
 fn held(args: &[&str], code: i32, out: &str, err: &str) {
-    let got = xtask(args);
-    let stdout = String::from_utf8_lossy(&got.stdout);
-    let stderr = String::from_utf8_lossy(&got.stderr);
-    assert_eq!(stdout, out, "stdout of {args:?}");
-    assert_eq!(stderr, err, "stderr of {args:?}");
-    assert_eq!(got.status.code(), Some(code), "{stdout}{stderr}");
+    support::held(args, &xtask(args), code, out, err);
 }
 
 /// Each member of the set `tidy` runs, in that order, and the line `--explain`

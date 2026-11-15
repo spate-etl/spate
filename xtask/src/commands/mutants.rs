@@ -272,7 +272,7 @@ fn unfinished(cause: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use crate::checks::scratch::Scratch;
 
     use super::*;
 
@@ -326,11 +326,8 @@ mod tests {
     }
 
     /// A directory of this test's own, removed with its contents.
-    fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("spate-mutants-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("temp dir");
-        dir
+    fn scratch(name: &str) -> Scratch {
+        Scratch::new(&format!("spate-mutants-{name}")).expect("temp dir")
     }
 
     /// Runs git in `dir` with an identity and no signing, so a commit needs no
@@ -351,10 +348,11 @@ mod tests {
     /// one staged, one unstaged and one untracked edit, a file renamed and
     /// edited on `topic`, and a commit `main` gained after the fork. Its config
     /// sets every diff option `DIFF_FLAGS` overrides.
-    fn fixture(name: &str) -> PathBuf {
-        let dir = scratch(name);
+    fn fixture(name: &str) -> Scratch {
+        let tmp = scratch(name);
+        let dir = tmp.dir();
         let write = |name: &str, text: &str| std::fs::write(dir.join(name), text).expect("write");
-        git(&dir, &["init", "-q", "-b", "main"]);
+        git(dir, &["init", "-q", "-b", "main"]);
         for (key, value) in [
             ("diff.mnemonicPrefix", "true"),
             ("diff.noprefix", "true"),
@@ -363,36 +361,37 @@ mod tests {
             ("diff.external", "false"),
             ("diff.t.textconv", "false"),
         ] {
-            git(&dir, &["config", key, value]);
+            git(dir, &["config", key, value]);
         }
         std::fs::write(dir.join(".git/info/attributes"), "* diff=t\n").expect("attributes");
         for name in ["committed", "staged", "unstaged"] {
             write(name, "base\n");
         }
         write("moved", "one\ntwo\nthree\nfour\nfive\n");
-        git(&dir, &["add", "."]);
-        git(&dir, &["commit", "-q", "-m", "base"]);
-        git(&dir, &["branch", "topic"]);
+        git(dir, &["add", "."]);
+        git(dir, &["commit", "-q", "-m", "base"]);
+        git(dir, &["branch", "topic"]);
         write("main-only", "main-later\n");
-        git(&dir, &["add", "main-only"]);
-        git(&dir, &["commit", "-q", "-m", "main moves on"]);
-        git(&dir, &["checkout", "-q", "topic"]);
+        git(dir, &["add", "main-only"]);
+        git(dir, &["commit", "-q", "-m", "main moves on"]);
+        git(dir, &["checkout", "-q", "topic"]);
         write("committed", "committed-edit\n");
-        git(&dir, &["mv", "moved", "renamed"]);
+        git(dir, &["mv", "moved", "renamed"]);
         write("renamed", "one\ntwo\nthree-edited\nfour\nfive\n");
-        git(&dir, &["commit", "-q", "-am", "topic"]);
+        git(dir, &["commit", "-q", "-am", "topic"]);
         write("staged", "staged-edit\n");
-        git(&dir, &["add", "staged"]);
+        git(dir, &["add", "staged"]);
         write("unstaged", "unstaged-edit\n");
         write("untracked", "untracked-edit\n");
-        dir
+        tmp
     }
 
     /// A previous report is removed, a missing one is not an error, and any
     /// other failure to remove it is.
     #[test]
     fn clearing_removes_a_report_and_refuses_what_it_cannot_remove() {
-        let dir = scratch("clear");
+        let tmp = scratch("clear");
+        let dir = tmp.dir();
         let report = dir.join("mutants.out");
         std::fs::create_dir_all(&report).expect("report dir");
         std::fs::write(report.join("missed.txt"), "stale\n").expect("write");
@@ -405,27 +404,26 @@ mod tests {
         let file = dir.join("a-file");
         std::fs::write(&file, "").expect("write");
         assert!(clear_report(&file.join("child")).is_err());
-        std::fs::remove_dir_all(&dir).expect("remove temp dir");
     }
 
     /// Preparing writes the patch and removes a stale report, and stops when
     /// the report cannot be removed.
     #[test]
     fn preparing_writes_the_patch_and_clears_the_last_report() {
-        let dir = fixture("prepare");
+        let tmp = fixture("prepare");
+        let dir = tmp.dir();
         let out = dir.join("out");
         let diff = out.join("pr.diff");
         std::fs::create_dir_all(out.join("mutants.out")).expect("report dir");
         std::fs::write(out.join("mutants.out/missed.txt"), "stale\n").expect("write");
-        prepare(&dir, "main", &out, &diff).expect("prepared");
+        prepare(dir, "main", &out, &diff).expect("prepared");
         assert!(!out.join("mutants.out").try_exists().unwrap());
         let patch = std::fs::read_to_string(&diff).expect("patch");
         assert!(patch.contains("+committed-edit"), "{patch}");
 
         std::fs::remove_file(&diff).expect("remove patch");
         std::fs::write(out.join("mutants.out"), "").expect("a file in the way");
-        assert!(prepare(&dir, "main", &out, &diff).is_err());
-        std::fs::remove_dir_all(&dir).expect("remove temp dir");
+        assert!(prepare(dir, "main", &out, &diff).is_err());
     }
 
     /// The summary lands after what the file held before the run, replaces
@@ -433,7 +431,8 @@ mod tests {
     /// code passes through unchanged.
     #[test]
     fn the_summary_replaces_the_runs_own_line_and_keeps_the_exit_code() {
-        let dir = scratch("report");
+        let tmp = scratch("report");
+        let dir = tmp.dir();
         std::fs::write(dir.join("missed.txt"), "a.rs:1:1: replace f\n").expect("write");
         std::fs::write(dir.join("timeout.txt"), "c.rs:3:3: replace h\n").expect("write");
         let path = dir.join("summary.md");
@@ -448,7 +447,7 @@ mod tests {
                 .contains("did not finish")
         );
 
-        let err = finish(Ok(Ended::Exited(2)), &dir, Some(&summary)).expect_err("survivors exit 2");
+        let err = finish(Ok(Ended::Exited(2)), dir, Some(&summary)).expect_err("survivors exit 2");
         assert_eq!(err.code, Some(2));
         let text = std::fs::read_to_string(&path).expect("summary");
         assert!(
@@ -459,20 +458,20 @@ mod tests {
         assert!(text.contains("- timeout: `c.rs:3:3: replace h`"), "{text}");
         assert!(!text.contains("did not finish"), "{text}");
 
-        assert!(finish(Ok(Ended::Exited(0)), &dir, None).is_ok());
-        std::fs::remove_dir_all(&dir).expect("remove temp dir");
+        assert!(finish(Ok(Ended::Exited(0)), dir, None).is_ok());
     }
 
     /// A run stopped before cargo-mutants finished still writes a summary,
     /// naming the cause, and returns the same error.
     #[test]
     fn a_failure_before_the_run_is_summarised() {
-        let dir = scratch("early");
+        let tmp = scratch("early");
+        let dir = tmp.dir();
         let path = dir.join("summary.md");
         let summary = Summary::at(path.clone());
         let err = finish(
             Err(Error::msg("main does not resolve")),
-            &dir,
+            dir,
             Some(&summary),
         )
         .expect_err("the error passes through");
@@ -483,7 +482,6 @@ mod tests {
             "{text}"
         );
         assert!(!text.contains("No surviving mutants."), "{text}");
-        std::fs::remove_dir_all(&dir).expect("remove temp dir");
     }
 
     /// A run its budget stopped lists the survivors and timeouts found by
@@ -491,7 +489,8 @@ mod tests {
     /// Regression for #1288.
     #[test]
     fn a_run_stopped_at_its_budget_lists_what_it_found_and_what_it_did_not_reach() {
-        let dir = scratch("stopped");
+        let tmp = scratch("stopped");
+        let dir = tmp.dir();
         let [a, b, c, d] = [
             "a.rs:1:1: replace f",
             "b.rs:2:2: replace g",
@@ -518,7 +517,7 @@ mod tests {
         let summary = Summary::at(path.clone());
 
         let budget = Duration::from_secs(37 * 60);
-        let err = finish(Ok(Ended::Stopped(budget)), &dir, Some(&summary))
+        let err = finish(Ok(Ended::Stopped(budget)), dir, Some(&summary))
             .expect_err("a stopped run fails");
         assert_eq!(err.message, "cargo-mutants stopped at its 37-minute budget");
         let text = std::fs::read_to_string(&path).expect("summary");
@@ -535,7 +534,6 @@ mod tests {
         assert!(!text.contains(b), "a caught mutant is not listed: {text}");
         assert!(!text.contains("No surviving mutants"), "{text}");
         assert!(text.contains("stay a review step"), "{text}");
-        std::fs::remove_dir_all(&dir).expect("remove temp dir");
     }
 
     /// A stopped run with no survivor among the mutants tested says so, and
@@ -578,19 +576,19 @@ mod tests {
     /// A summary that cannot be written leaves the run's own outcome intact.
     #[test]
     fn a_failed_summary_write_keeps_the_outcome() {
-        let dir = scratch("unwritable");
+        let tmp = scratch("unwritable");
+        let dir = tmp.dir();
         // A directory cannot be opened for writing.
-        let summary = Summary::at(dir.clone());
-        let err = finish(Ok(Ended::Exited(2)), &dir, Some(&summary)).expect_err("survivors exit 2");
+        let summary = Summary::at(dir.to_path_buf());
+        let err = finish(Ok(Ended::Exited(2)), dir, Some(&summary)).expect_err("survivors exit 2");
         assert_eq!(err.code, Some(2));
         let err = finish(
             Err(Error::msg("main does not resolve")),
-            &dir,
+            dir,
             Some(&summary),
         )
         .expect_err("the error passes through");
         assert_eq!(err.message, "main does not resolve");
-        std::fs::remove_dir_all(&dir).expect("remove temp dir");
     }
 
     /// cargo-mutants writes its report under `output`, and `run` reads it
@@ -611,8 +609,9 @@ mod tests {
     /// files are not in it, and a renamed file brings only its edited line.
     #[test]
     fn the_patch_holds_the_branch_from_the_merge_base_and_nothing_else() {
-        let dir = fixture("patch");
-        let patch = diff_since(&dir, "main").expect("a readable diff");
+        let tmp = fixture("patch");
+        let dir = tmp.dir();
+        let patch = diff_since(dir, "main").expect("a readable diff");
         for path in ["committed", "staged", "unstaged", "renamed"] {
             assert!(
                 patch.contains(&format!("+++ b/{path}\n")),
@@ -634,7 +633,6 @@ mod tests {
             "unedited lines of a renamed file: {patch}"
         );
         assert!(!patch.contains("untracked-edit"), "{patch}");
-        assert!(diff_since(&dir, "no-such-ref").is_err());
-        std::fs::remove_dir_all(&dir).expect("remove temp dir");
+        assert!(diff_since(dir, "no-such-ref").is_err());
     }
 }

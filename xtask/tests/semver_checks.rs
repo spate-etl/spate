@@ -7,9 +7,10 @@
 //! shell scripts, so this binary is empty off unix.
 #![cfg(unix)]
 
-use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::path::Path;
+use std::process::Output;
+
+mod support;
 
 /// The version `Cargo.toml` declares, which a baseline is compared against.
 /// Read from the manifest: the binary under test reads the same file, and the
@@ -30,15 +31,13 @@ fn index(versions: &[(&str, bool)]) -> String {
 }
 
 /// A directory holding the shims, their fixtures and their recordings.
-struct Shim(PathBuf);
+struct Shim(support::Scratch);
 
 impl Shim {
     fn new(name: &str) -> Self {
-        let dir =
-            std::env::temp_dir().join(format!("spate-xtask-semver-{}-{name}", std::process::id()));
-        drop(std::fs::remove_dir_all(&dir));
-        std::fs::create_dir_all(dir.join("bin")).unwrap();
-        std::fs::create_dir_all(dir.join("fix")).unwrap();
+        let dir = support::Scratch::new(&format!("spate-xtask-semver-{name}")).unwrap();
+        std::fs::create_dir(dir.join("bin")).unwrap();
+        std::fs::create_dir(dir.join("fix")).unwrap();
         let me = Self(dir);
         for (program, body) in [
             ("curl", CURL),
@@ -47,9 +46,7 @@ impl Shim {
             ("rustc", RUSTC),
             ("uname", UNAME),
         ] {
-            let path = me.0.join("bin").join(program);
-            std::fs::write(&path, body).unwrap();
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            support::shim(&me.0.join("bin"), program, body);
         }
         me.fixture("git.tags", &format!("{TAG}\nv0.1.0\n"));
         me.shows(
@@ -100,7 +97,7 @@ impl Shim {
 
     /// Every invocation of one shim so far, in order.
     fn calls(&self, program: &str) -> Vec<Vec<String>> {
-        let path = self.0.join(format!("argv.{program}"));
+        let path = self.0.join(&format!("argv.{program}"));
         let Ok(text) = std::fs::read_to_string(&path) else {
             return Vec::new();
         };
@@ -117,12 +114,6 @@ impl Shim {
 
     fn step_output(&self) -> Option<String> {
         std::fs::read_to_string(self.0.join("step_output")).ok()
-    }
-}
-
-impl Drop for Shim {
-    fn drop(&mut self) {
-        drop(std::fs::remove_dir_all(&self.0));
     }
 }
 
@@ -197,19 +188,11 @@ const UNAME: &str = "#!/bin/sh\necho TestOS\n";
 
 /// One run of the gate with the shims ahead of everything on `PATH`.
 fn xtask(shim: &Shim, args: &[&str], env: &[(&str, &str)]) -> Output {
-    let path = match std::env::var_os("PATH") {
-        Some(p) => {
-            let mut dirs = vec![shim.0.join("bin")];
-            dirs.extend(std::env::split_paths(&p));
-            std::env::join_paths(dirs).unwrap()
-        }
-        None => shim.0.join("bin").into_os_string(),
-    };
-    let mut command = Command::new(env!("CARGO_BIN_EXE_spate-xtask"));
+    let mut command = support::xtask();
     command
         .arg("semver-checks")
         .args(args)
-        .env("PATH", path)
+        .env("PATH", support::path_with(&shim.0.join("bin")))
         .env("SPATE_LOG", shim.0.join("argv"))
         .env("SPATE_FIX", shim.0.join("fix"))
         // The annotation prefix would otherwise depend on the host.

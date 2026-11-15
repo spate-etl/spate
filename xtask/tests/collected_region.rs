@@ -5,8 +5,10 @@
 //! The two measured fixtures are callgrind profiles this repository's benches
 //! produced under valgrind on Linux, reduced to one cost line per function.
 
-use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::path::Path;
+use std::process::Output;
+
+mod support;
 
 /// The s3 descriptor bench with its measured work written inline in the benchmark
 /// function: 99.53% glibc free path.
@@ -114,17 +116,11 @@ const HEAL_CASE: &str =
     "spate-clickhouse/encode_gungraun/encode/encode_rowbinary_events.rowbinary_events";
 
 /// A tree of profiles, removed with its contents.
-struct Tree(PathBuf);
+struct Tree(support::Scratch);
 
 impl Tree {
     fn new(name: &str) -> Self {
-        let dir = std::env::temp_dir().join(format!(
-            "spate-xtask-region-cli-{}-{name}",
-            std::process::id()
-        ));
-        drop(std::fs::remove_dir_all(&dir));
-        std::fs::create_dir_all(&dir).unwrap();
-        Self(dir)
+        Self(support::Scratch::new(&format!("spate-xtask-region-cli-{name}")).unwrap())
     }
 
     /// Writes one profile at `rel` under the tree.
@@ -136,22 +132,16 @@ impl Tree {
     }
 
     fn path(&self) -> &Path {
-        &self.0
+        self.0.dir()
     }
 
     /// The tree's own path.
     fn root(&self) -> String {
-        self.0.display().to_string()
+        self.0.dir().display().to_string()
     }
 
     fn at(&self, rel: &str) -> String {
         self.0.join(rel).display().to_string()
-    }
-}
-
-impl Drop for Tree {
-    fn drop(&mut self) {
-        drop(std::fs::remove_dir_all(&self.0));
     }
 }
 
@@ -165,25 +155,17 @@ fn share(app: i64, total: i64) -> String {
 }
 
 fn xtask(args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_spate-xtask"))
-        .args(["bench", "region"])
-        .args(args)
-        // Both would otherwise depend on the host.
-        .env_remove("GITHUB_ACTIONS")
-        .env_remove("CARGO_TARGET_DIR")
-        .output()
-        .unwrap()
+    // Both would otherwise depend on the host.
+    support::run(
+        &[&["bench", "region"], args].concat(),
+        &["GITHUB_ACTIONS", "CARGO_TARGET_DIR"],
+        &[],
+    )
 }
 
-/// The exit status, stdout and stderr of one run, all three held at once.
 #[track_caller]
 fn held(args: &[&str], code: i32, out: &str, err: &str) {
-    let got = xtask(args);
-    let stdout = String::from_utf8_lossy(&got.stdout);
-    let stderr = String::from_utf8_lossy(&got.stderr);
-    assert_eq!(stdout, out, "stdout");
-    assert_eq!(stderr, err, "stderr");
-    assert_eq!(got.status.code(), Some(code), "{stdout}{stderr}");
+    support::held(args, &xtask(args), code, out, err);
 }
 
 /// The line a passing case reports.

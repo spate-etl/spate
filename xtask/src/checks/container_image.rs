@@ -476,6 +476,7 @@ fn manifest_path(root: &Path, service: &str, lane: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::checks::scratch::Scratch;
 
     // ── The FROM line ──────────────────────────────────────────────────
 
@@ -594,16 +595,13 @@ mod tests {
     // ── Against a fixture tree ─────────────────────────────────────────
 
     /// A directory under the system temporary directory, removed on drop.
-    struct Scratch(PathBuf);
+    struct Tree(Scratch);
 
-    impl Scratch {
+    impl Tree {
         /// One fictional service `db` with three lanes, and a second service
         /// whose only lane carries no digest.
         fn new(name: &str) -> Self {
-            let dir = std::env::temp_dir()
-                .join(format!("spate-xtask-image-{}-{name}", std::process::id()));
-            drop(std::fs::remove_dir_all(&dir));
-            let me = Self(dir);
+            let me = Self(Scratch::new(&format!("spate-xtask-image-{name}")).unwrap());
             let digest = "a".repeat(64);
             me.primary("db", "vendor-main\n");
             me.lane(
@@ -629,7 +627,7 @@ mod tests {
         }
 
         fn root(&self) -> &Path {
-            &self.0
+            self.0.dir()
         }
 
         fn primary(&self, service: &str, text: &str) -> &Self {
@@ -654,15 +652,9 @@ mod tests {
         }
     }
 
-    impl Drop for Scratch {
-        fn drop(&mut self) {
-            drop(std::fs::remove_dir_all(&self.0));
-        }
-    }
-
     #[test]
     fn a_lane_capabilities_file_names_its_capabilities() {
-        let s = Scratch::new("capabilities");
+        let s = Tree::new("capabilities");
         s.file("db/vendor-main/CAPABILITIES", "notifications\n\n");
         assert_eq!(
             lane_capabilities(s.root(), "db", "vendor-main").unwrap(),
@@ -674,7 +666,7 @@ mod tests {
     /// primary lane's.
     #[test]
     fn the_selected_capabilities_are_the_primary_lanes_when_unset() {
-        let s = Scratch::new("selected-capabilities");
+        let s = Tree::new("selected-capabilities");
         s.file("db/vendor-main/CAPABILITIES", "notifications\n");
         assert_eq!(
             selected_capabilities(s.root(), "db").unwrap(),
@@ -684,14 +676,14 @@ mod tests {
 
     #[test]
     fn only_the_primary_lane_reads_as_primary() {
-        let s = Scratch::new("is-primary");
+        let s = Tree::new("is-primary");
         assert!(is_primary(s.root(), "db", "vendor-main").unwrap());
         assert!(!is_primary(s.root(), "db", "old").unwrap());
     }
 
     #[test]
     fn a_capability_word_ignores_surrounding_whitespace() {
-        let s = Scratch::new("capabilities-whitespace");
+        let s = Tree::new("capabilities-whitespace");
         s.file("db/spaced/CAPABILITIES", "  notifications \r\n");
         assert_eq!(
             lane_capabilities(s.root(), "db", "spaced").unwrap(),
@@ -701,13 +693,13 @@ mod tests {
 
     #[test]
     fn a_lane_with_no_capabilities_file_has_none() {
-        let s = Scratch::new("no-capabilities");
+        let s = Tree::new("no-capabilities");
         assert_eq!(lane_capabilities(s.root(), "db", "old").unwrap(), []);
     }
 
     #[test]
     fn an_unknown_capability_is_rejected_naming_it() {
-        let s = Scratch::new("unknown-capability");
+        let s = Tree::new("unknown-capability");
         s.file("db/old/CAPABILITIES", "notifications\nteleport\n");
         assert_eq!(
             lane_capabilities(s.root(), "db", "old")
@@ -719,21 +711,21 @@ mod tests {
 
     #[test]
     fn the_primary_lane_comes_from_the_primary_file() {
-        let s = Scratch::new("primary");
+        let s = Tree::new("primary");
         assert_eq!(primary_lane(s.root(), "db").unwrap(), "vendor-main");
     }
 
     /// The first line only, and trailing whitespace is not part of the name.
     #[test]
     fn the_primary_file_is_read_as_one_trimmed_line() {
-        let s = Scratch::new("primary-trim");
+        let s = Tree::new("primary-trim");
         s.primary("db", "  old \t\nignored\n");
         assert_eq!(primary_lane(s.root(), "db").unwrap(), "  old");
     }
 
     #[test]
     fn a_missing_primary_file_is_rejected() {
-        let s = Scratch::new("primary-missing");
+        let s = Tree::new("primary-missing");
         assert_eq!(
             primary_lane(s.root(), "nope").unwrap_err().message,
             "ci/nope/PRIMARY is missing; every service declares a primary lane"
@@ -742,7 +734,7 @@ mod tests {
 
     #[test]
     fn an_empty_primary_file_is_rejected() {
-        let s = Scratch::new("primary-empty");
+        let s = Tree::new("primary-empty");
         s.primary("db", "\n \n");
         assert_eq!(
             primary_lane(s.root(), "db").unwrap_err().message,
@@ -752,7 +744,7 @@ mod tests {
 
     #[test]
     fn an_unset_variable_falls_back_to_the_primary_lane() {
-        let s = Scratch::new("selected");
+        let s = Tree::new("selected");
         assert_eq!(selected_lane(s.root(), "db").unwrap(), "vendor-main");
     }
 
@@ -760,7 +752,7 @@ mod tests {
     /// that lane, and a value naming none falls back.
     #[test]
     fn the_variable_names_the_lane_and_an_empty_value_names_none() {
-        let s = Scratch::new("selected-from");
+        let s = Tree::new("selected-from");
         let selected =
             |value: &str| selected_lane_from(Some(OsStr::new(value)), s.root(), "db").unwrap();
         assert_eq!(selected("old"), "old");
@@ -781,7 +773,7 @@ mod tests {
     fn a_variable_that_is_not_utf8_is_rejected() {
         use std::os::unix::ffi::OsStrExt;
 
-        let s = Scratch::new("selected-bytes");
+        let s = Tree::new("selected-bytes");
         assert_eq!(
             selected_lane_from(Some(OsStr::from_bytes(b"lt\xffs")), s.root(), "db")
                 .unwrap_err()
@@ -792,7 +784,7 @@ mod tests {
 
     #[test]
     fn a_lane_resolves_to_its_reference_and_its_tagged_half() {
-        let s = Scratch::new("resolve");
+        let s = Tree::new("resolve");
         let digest = "a".repeat(64);
         assert_eq!(
             reference_for(s.root(), "db", "old").unwrap(),
@@ -807,7 +799,7 @@ mod tests {
     /// The reference mode keeps the digest and every other mode drops it.
     #[test]
     fn each_mode_reports_its_own_half_of_the_reference() {
-        let s = Scratch::new("modes");
+        let s = Tree::new("modes");
         let digest = "a".repeat(64);
         assert_eq!(
             resolve(s.root(), Mode::Reference, "db", "old").unwrap(),
@@ -823,7 +815,7 @@ mod tests {
 
     #[test]
     fn an_unknown_lane_is_rejected() {
-        let s = Scratch::new("unknown-lane");
+        let s = Tree::new("unknown-lane");
         assert_eq!(
             reference_for(s.root(), "db", "nope").unwrap_err().message,
             "no such lane: ci/db/nope/Dockerfile"
@@ -832,7 +824,7 @@ mod tests {
 
     #[test]
     fn a_lane_that_is_a_file_is_not_a_lane() {
-        let s = Scratch::new("lane-is-file");
+        let s = Tree::new("lane-is-file");
         s.file("db/notes", "FROM vendor/db:9.4@sha256:aa\n");
         assert!(!lanes(s.root(), "db").contains(&"notes".to_owned()));
         assert_eq!(
@@ -843,7 +835,7 @@ mod tests {
 
     #[test]
     fn a_lane_with_no_digest_is_rejected() {
-        let s = Scratch::new("unpinned");
+        let s = Tree::new("unpinned");
         assert_eq!(
             reference_for(s.root(), "bad", "unpinned")
                 .unwrap_err()
@@ -854,7 +846,7 @@ mod tests {
 
     #[test]
     fn a_manifest_with_no_from_line_is_rejected() {
-        let s = Scratch::new("no-from");
+        let s = Tree::new("no-from");
         s.lane("db", "blank", "# nothing\n");
         s.lane("db", "bare", "FROM \n");
         for lane in ["blank", "bare"] {
@@ -869,7 +861,7 @@ mod tests {
     /// tagged half.
     #[test]
     fn a_lane_pinned_without_a_tag_resolves() {
-        let s = Scratch::new("no-tag");
+        let s = Tree::new("no-tag");
         s.lane("db", "digest-only", "FROM vendor/db@sha256:aa\n");
         assert_eq!(
             tagged_for(s.root(), "db", "digest-only").unwrap(),
@@ -879,7 +871,7 @@ mod tests {
 
     #[test]
     fn the_services_and_lanes_are_the_sorted_directories() {
-        let s = Scratch::new("discovery");
+        let s = Tree::new("discovery");
         s.file("db/DOCS", "docs/page.mdx\n");
         assert_eq!(services(s.root()), vec!["bad", "db"]);
         assert_eq!(
@@ -892,7 +884,7 @@ mod tests {
     /// beside the lanes never reaches the matrix.
     #[test]
     fn a_dotted_directory_is_not_a_lane() {
-        let s = Scratch::new("dotted");
+        let s = Tree::new("dotted");
         s.lane("db", ".scratch", "FROM vendor/db:9.9@sha256:bb\n");
         assert_eq!(
             lanes(s.root(), "db"),
@@ -905,7 +897,7 @@ mod tests {
     /// absent one does.
     #[test]
     fn a_named_lane_wins_and_an_empty_name_falls_back() {
-        let s = Scratch::new("requested");
+        let s = Tree::new("requested");
         assert_eq!(requested_lane(s.root(), "db", Some("old")).unwrap(), "old");
         assert_eq!(
             requested_lane(s.root(), "db", Some("")).unwrap(),
@@ -916,7 +908,7 @@ mod tests {
 
     #[test]
     fn a_service_with_no_lanes_has_none() {
-        let s = Scratch::new("no-lanes");
+        let s = Tree::new("no-lanes");
         s.primary("empty", "only\n");
         assert!(lanes(s.root(), "empty").is_empty());
         assert!(lanes(s.root(), "absent").is_empty());
@@ -925,7 +917,7 @@ mod tests {
     /// Only a lane whose image differs from the primary one needs a job.
     #[test]
     fn the_extra_lanes_drop_the_primary_and_anything_matching_it() {
-        let s = Scratch::new("extra");
+        let s = Tree::new("extra");
         assert_eq!(extra_lanes(s.root(), "db").unwrap(), vec!["old"]);
     }
 
@@ -933,14 +925,14 @@ mod tests {
     /// stays in the matrix.
     #[test]
     fn a_lane_that_does_not_resolve_is_still_an_extra_lane() {
-        let s = Scratch::new("extra-broken");
+        let s = Tree::new("extra-broken");
         s.lane("db", "broken", "# no FROM\n");
         assert_eq!(extra_lanes(s.root(), "db").unwrap(), vec!["broken", "old"]);
     }
 
     #[test]
     fn extra_lanes_of_an_unknown_service_is_rejected() {
-        let s = Scratch::new("extra-unknown");
+        let s = Tree::new("extra-unknown");
         assert_eq!(
             extra_lanes(s.root(), "nope").unwrap_err().message,
             "ci/nope/PRIMARY is missing; every service declares a primary lane"
@@ -950,7 +942,7 @@ mod tests {
     /// A primary lane naming no directory fails before any lane is walked.
     #[test]
     fn a_primary_naming_no_lane_is_rejected() {
-        let s = Scratch::new("primary-not-a-lane");
+        let s = Tree::new("primary-not-a-lane");
         s.primary("db", "ghost\n");
         assert_eq!(
             extra_lanes(s.root(), "db").unwrap_err().message,

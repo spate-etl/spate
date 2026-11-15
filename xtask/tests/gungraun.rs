@@ -8,7 +8,9 @@
 
 use std::io::Write;
 use std::path::PathBuf;
-use std::process::{Command, Output, Stdio};
+use std::process::{Output, Stdio};
+
+mod support;
 
 /// A crate the tree benches, and the number of targets it owns.
 const PKG: &str = "spate-core";
@@ -21,23 +23,18 @@ const GHOST: &str = "__no_such_package__";
 const SENTINEL: &str = "sentinel";
 
 /// A directory holding a `cargo` that records its argv and builds nothing.
-struct Shim(PathBuf);
+struct Shim(support::Scratch);
 
 impl Shim {
     /// A shim whose every invocation exits with `code`.
     fn new(name: &str, code: i32) -> Self {
-        let dir = std::env::temp_dir().join(format!(
-            "spate-xtask-gungraun-{}-{name}",
-            std::process::id()
-        ));
-        drop(std::fs::remove_dir_all(&dir));
-        std::fs::create_dir_all(&dir).unwrap();
-        let me = Self(dir);
+        let dir = support::Scratch::new(&format!("spate-xtask-gungraun-{name}")).unwrap();
         // One NUL-terminated field per argument, one line per invocation, then
         // the GUNGRAUN_* environment and whatever stdin held.
-        std::fs::write(
-            me.0.join("cargo"),
-            format!(
+        support::shim(
+            dir.dir(),
+            "cargo",
+            &format!(
                 "#!/bin/sh\n\
                  for a in \"$@\"; do printf '%s\\0' \"$a\" >>\"$SPATE_CARGO_LOG\"; done\n\
                  printf '\\n' >>\"$SPATE_CARGO_LOG\"\n\
@@ -45,12 +42,8 @@ impl Shim {
                  printf 'stdin=[%s]\\n' \"$(cat)\" >>\"$SPATE_CARGO_LOG.stdin\"\n\
                  exit {code}\n"
             ),
-        )
-        .unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(me.0.join("cargo"), std::fs::Permissions::from_mode(0o755))
-            .unwrap();
-        me
+        );
+        Self(dir)
     }
 
     fn log(&self) -> PathBuf {
@@ -73,28 +66,14 @@ impl Shim {
     }
 
     fn side(&self, suffix: &str) -> String {
-        std::fs::read_to_string(self.0.join(format!("argv.{suffix}"))).unwrap_or_default()
-    }
-}
-
-impl Drop for Shim {
-    fn drop(&mut self) {
-        drop(std::fs::remove_dir_all(&self.0));
+        std::fs::read_to_string(self.0.join(&format!("argv.{suffix}"))).unwrap_or_default()
     }
 }
 
 /// One run of the task runner with the shim ahead of anything else on `PATH`,
 /// its stdin carrying [`SENTINEL`].
 fn xtask(shim: &Shim, args: &[&str]) -> Output {
-    let path = match std::env::var_os("PATH") {
-        Some(p) => {
-            let mut dirs = vec![shim.0.clone()];
-            dirs.extend(std::env::split_paths(&p));
-            std::env::join_paths(dirs).unwrap()
-        }
-        None => shim.0.clone().into_os_string(),
-    };
-    run_with(shim, path, args)
+    run_with(shim, support::path_with(shim.0.dir()), args)
 }
 
 /// One run whose `PATH` holds no `cargo` at all.
@@ -105,7 +84,7 @@ fn xtask_without_cargo(shim: &Shim, args: &[&str]) -> Output {
 }
 
 fn run_with(shim: &Shim, path: std::ffi::OsString, args: &[&str]) -> Output {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_spate-xtask"))
+    let mut child = support::xtask()
         .args(["bench", "gungraun"])
         .args(args)
         .env("PATH", path)
@@ -471,12 +450,11 @@ fn the_counted_tier_runs_the_benches_then_the_region_guard() {
     let shim = Shim::new("counted", 0);
     let expected = listing(&shim).len();
 
-    let out = Command::new(env!("CARGO_BIN_EXE_spate-xtask"))
-        .args(["bench", "counted", "--explain"])
-        .env_remove("GITHUB_ACTIONS")
-        .env_remove("CARGO_TARGET_DIR")
-        .output()
-        .unwrap();
+    let out = support::run(
+        &["bench", "counted", "--explain"],
+        &["GITHUB_ACTIONS", "CARGO_TARGET_DIR"],
+        &[],
+    );
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
     let printed = stdout(&out);
     let lines: Vec<&str> = printed.lines().collect();
@@ -506,13 +484,9 @@ fn the_counted_tier_runs_the_benches_then_the_region_guard() {
 /// One run of the task runner with the shim ahead of anything else on `PATH`,
 /// driven by a whole command line.
 fn shimmed(shim: &Shim, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_spate-xtask"))
+    support::xtask()
         .args(args)
-        .env("PATH", {
-            let mut dirs = vec![shim.0.clone()];
-            dirs.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
-            std::env::join_paths(dirs).unwrap()
-        })
+        .env("PATH", support::path_with(shim.0.dir()))
         .env("SPATE_CARGO_LOG", shim.log())
         .env_remove("GITHUB_ACTIONS")
         .output()
@@ -525,11 +499,7 @@ fn the_tidy_check_runs_the_gate() {
     let shim = Shim::new("tidy", 0);
     let expected = listing(&shim).len();
 
-    let out = Command::new(env!("CARGO_BIN_EXE_spate-xtask"))
-        .args(["tidy", "gungraun-benches"])
-        .env_remove("GITHUB_ACTIONS")
-        .output()
-        .unwrap();
+    let out = support::run(&["tidy", "gungraun-benches"], &["GITHUB_ACTIONS"], &[]);
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
     assert_eq!(
         stdout(&out),

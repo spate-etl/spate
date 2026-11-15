@@ -1,6 +1,8 @@
 use std::fs;
 use std::path::Path;
 
+use crate::checks::scratch::Scratch;
+
 use super::*;
 
 /// One field of an issue form as the form file declares it.
@@ -134,9 +136,8 @@ fn render_fields_are_fenced_in_the_forms_language() {
 /// escapes, so two of them still fit GitHub's 65,536-character body limit.
 #[test]
 fn a_file_answer_keeps_its_tail_inside_the_log_limit() {
-    let dir = std::env::temp_dir().join(format!("xtask-bug-report-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).unwrap();
+    let tmp = Scratch::new("xtask-bug-report").unwrap();
+    let dir = tmp.dir();
     let log: String = (0..20_000)
         .map(|i| format!("\u{1b}[1m\u{1b}[31mline {i}\u{1b}[0m\n"))
         .collect();
@@ -150,9 +151,8 @@ fn a_file_answer_keeps_its_tail_inside_the_log_limit() {
         ],
         out: out.clone(),
     };
-    bug_report(&dir, false, &args).unwrap();
+    bug_report(dir, false, &args).unwrap();
     let body = fs::read_to_string(&out).unwrap();
-    fs::remove_dir_all(&dir).unwrap();
     assert!(body.chars().count() < 65_536, "{}", body.chars().count());
     assert!(body.contains("\nline 19999\n"));
     assert!(!body.contains("\nline 0\n"));
@@ -208,9 +208,8 @@ fn strip_ansi_removes_parameterised_and_non_sgr_csi() {
 /// and only the file part is cut to the log limit.
 #[test]
 fn a_text_answer_stays_whole_before_a_cut_file_answer() {
-    let dir = std::env::temp_dir().join(format!("xtask-bug-report-text-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).unwrap();
+    let tmp = Scratch::new("xtask-bug-report-text").unwrap();
+    let dir = tmp.dir();
     let report: String = (0..5_000).map(|i| format!("| row {i} |\n")).collect();
     assert!(report.chars().count() > MAX_LOG_CHARS);
     fs::write(dir.join("report.md"), &report).unwrap();
@@ -220,9 +219,8 @@ fn a_text_answer_stays_whole_before_a_cut_file_answer() {
         answer_files: vec![format!("what={}", dir.join("report.md").display())],
         out: out.clone(),
     };
-    bug_report(&dir, false, &args).unwrap();
+    bug_report(dir, false, &args).unwrap();
     let body = fs::read_to_string(&out).unwrap();
-    fs::remove_dir_all(&dir).unwrap();
     assert!(
         body.starts_with(
             "### What happened\n\nIt exited 1 on the [run](https://example.invalid/1).\n\n\
@@ -237,9 +235,8 @@ fn a_text_answer_stays_whole_before_a_cut_file_answer() {
 /// Two file answers to one field are refused, as two text answers are.
 #[test]
 fn a_field_given_two_files_is_refused() {
-    let dir = std::env::temp_dir().join(format!("xtask-bug-report-twice-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).unwrap();
+    let tmp = Scratch::new("xtask-bug-report-twice").unwrap();
+    let dir = tmp.dir();
     fs::write(dir.join("log"), "boom\n").unwrap();
     let file = format!("logs={}", dir.join("log").display());
     let args = BugReport {
@@ -247,8 +244,7 @@ fn a_field_given_two_files_is_refused() {
         answer_files: vec![file.clone(), file],
         out: dir.join("body.md"),
     };
-    let result = bug_report(&dir, false, &args);
-    fs::remove_dir_all(&dir).unwrap();
+    let result = bug_report(dir, false, &args);
     assert!(result.is_err());
 }
 

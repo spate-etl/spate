@@ -7,6 +7,8 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+mod support;
+
 /// The variables the classifier and its `git` invocations read, cleared so
 /// nothing on the host reaches the child.
 const READS: [&str; 9] = [
@@ -63,26 +65,12 @@ const SITE_ONLY: &str = "rust=false\n\
      kafka-lanes=[]\n";
 
 fn xtask(args: &[&str], env: &[(&str, &str)]) -> Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_spate-xtask"));
-    command.args(args);
-    for name in READS {
-        command.env_remove(name);
-    }
-    for (name, value) in env {
-        command.env(name, value);
-    }
-    command.output().unwrap()
+    support::run(args, &READS, env)
 }
 
-/// The exit status, stdout and stderr of one run, all three held at once.
 #[track_caller]
 fn held(args: &[&str], env: &[(&str, &str)], code: i32, out: &str, err: &str) {
-    let got = xtask(args, env);
-    let stdout = String::from_utf8_lossy(&got.stdout);
-    let stderr = String::from_utf8_lossy(&got.stderr);
-    assert_eq!(stdout, out, "stdout");
-    assert_eq!(stderr, err, "stderr");
-    assert_eq!(got.status.code(), Some(code), "{stdout}{stderr}");
+    support::held(args, &xtask(args, env), code, out, err);
 }
 
 /// One key's value in a classification block.
@@ -164,18 +152,17 @@ fn git(repo: &Path, args: &[&str]) -> String {
 /// Classifies a push of `before..HEAD` in a scratch repository whose last
 /// commit writes `changed`, or nothing when `changed` is `None`.
 fn push_of(name: &str, changed: Option<&str>) -> String {
-    let repo = std::env::temp_dir().join(format!("spate-push-{name}.{}", std::process::id()));
-    drop(std::fs::remove_dir_all(&repo));
-    std::fs::create_dir_all(&repo).unwrap();
-    git(&repo, &["init", "-q"]);
+    let scratch = support::Scratch::new(&format!("spate-push-{name}")).unwrap();
+    let repo = scratch.dir();
+    git(repo, &["init", "-q"]);
     std::fs::write(repo.join("README.md"), "a\n").unwrap();
-    git(&repo, &["add", "-A"]);
-    git(&repo, &["commit", "-q", "-m", "one"]);
-    let before = git(&repo, &["rev-parse", "HEAD"]);
+    git(repo, &["add", "-A"]);
+    git(repo, &["commit", "-q", "-m", "one"]);
+    let before = git(repo, &["rev-parse", "HEAD"]);
     if let Some(path) = changed {
         std::fs::write(repo.join(path), "\n").unwrap();
-        git(&repo, &["add", "-A"]);
-        git(&repo, &["commit", "-q", "-m", "two"]);
+        git(repo, &["add", "-A"]);
+        git(repo, &["commit", "-q", "-m", "two"]);
     }
     let git_dir = repo.join(".git");
     let got = xtask(
@@ -186,7 +173,6 @@ fn push_of(name: &str, changed: Option<&str>) -> String {
             ("GIT_DIR", git_dir.to_str().unwrap()),
         ],
     );
-    drop(std::fs::remove_dir_all(&repo));
     let stdout = String::from_utf8(got.stdout).unwrap();
     assert_eq!(got.status.code(), Some(0), "{stdout}");
     stdout
@@ -1120,21 +1106,15 @@ fn the_docs_deploy_holds_its_credential_alone() {
 }
 
 /// A directory of this run's own, removed with its contents.
-struct Dir(PathBuf);
+struct Dir(support::Scratch);
 
 impl Dir {
     fn new(name: &str) -> Self {
-        let dir = std::env::temp_dir().join(format!(
-            "spate-xtask-ci-changes-{name}.{}",
-            std::process::id()
-        ));
-        drop(std::fs::remove_dir_all(&dir));
-        std::fs::create_dir_all(&dir).unwrap();
-        Self(dir)
+        Self(support::Scratch::new(&format!("spate-xtask-ci-changes-{name}")).unwrap())
     }
 
     fn path(&self) -> &Path {
-        &self.0
+        self.0.dir()
     }
 
     /// Writes one file, answering the path to give the child.
@@ -1142,12 +1122,6 @@ impl Dir {
         let path = self.0.join(name);
         std::fs::write(&path, body).unwrap();
         path.to_string_lossy().into_owned()
-    }
-}
-
-impl Drop for Dir {
-    fn drop(&mut self) {
-        drop(std::fs::remove_dir_all(&self.0));
     }
 }
 

@@ -1,7 +1,10 @@
 //! The process-level contract of `cargo xtask commit-msg` and `cargo xtask
 //! tidy title`: the exit status each outcome reports and what reaches stderr.
 
+use std::path::PathBuf;
 use std::process::{Command, Output};
+
+mod support;
 
 /// The variables the title gate reads, cleared so nothing on the host reaches
 /// the child.
@@ -15,23 +18,22 @@ const READS: [&str; 6] = [
 ];
 
 fn xtask(args: &[&str], env: &[(&str, &str)]) -> Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_spate-xtask"));
-    command.args(args);
-    for name in READS {
-        command.env_remove(name);
-    }
-    for (name, value) in env {
-        command.env(name, value);
-    }
-    command.output().unwrap()
+    support::run(args, &READS, env)
 }
 
-/// One commit message written to a file of this test's own.
-fn message(name: &str, body: &str) -> std::path::PathBuf {
-    let path =
-        std::env::temp_dir().join(format!("spate-xtask-subject-{name}.{}", std::process::id()));
-    std::fs::write(&path, body).unwrap();
-    path
+/// One commit message written to a file of this test's own, removed with it.
+struct Message(support::Scratch);
+
+impl Message {
+    fn new(name: &str, body: &str) -> Self {
+        let dir = support::Scratch::new(&format!("spate-xtask-subject-{name}")).unwrap();
+        std::fs::write(dir.join("COMMIT_EDITMSG"), body).unwrap();
+        Self(dir)
+    }
+
+    fn path(&self) -> PathBuf {
+        self.0.join("COMMIT_EDITMSG")
+    }
 }
 
 /// A subject following the rule commits, one breaking it is refused with each
@@ -54,9 +56,8 @@ fn the_hook_reads_the_subject_git_will_record() {
         ("capital", "Kafka: Bad.\n", 1),
     ];
     for (name, body, code) in cases {
-        let path = message(name, body);
-        let out = xtask(&["commit-msg", path.to_str().unwrap()], &[]);
-        drop(std::fs::remove_file(&path));
+        let message = Message::new(name, body);
+        let out = xtask(&["commit-msg", message.path().to_str().unwrap()], &[]);
         assert_eq!(
             out.status.code(),
             Some(code),
@@ -65,9 +66,8 @@ fn the_hook_reads_the_subject_git_will_record() {
         );
     }
 
-    let path = message("refusal", "Kafka: Bad.\n");
-    let out = xtask(&["commit-msg", path.to_str().unwrap()], &[]);
-    drop(std::fs::remove_file(&path));
+    let message = Message::new("refusal", "Kafka: Bad.\n");
+    let out = xtask(&["commit-msg", message.path().to_str().unwrap()], &[]);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         stderr.starts_with("subject: Kafka: Bad.\n  - `Kafka` is not an area."),
@@ -133,16 +133,13 @@ fn the_hook_honours_the_configured_comment_character() {
             "# Please enter the commit message\navro: start it\n",
         ),
     ] {
-        let dir = std::env::temp_dir().join(format!(
-            "spate-xtask-subject-comment-{name}.{}",
-            std::process::id()
-        ));
-        drop(std::fs::remove_dir_all(&dir));
-        std::fs::create_dir_all(&dir).unwrap();
+        let scratch =
+            support::Scratch::new(&format!("spate-xtask-subject-comment-{name}")).unwrap();
+        let dir = scratch.dir();
         let git = |args: &[&str]| {
             let status = Command::new("git")
                 .args(args)
-                .current_dir(&dir)
+                .current_dir(dir)
                 .env_remove("GIT_DIR")
                 .status()
                 .unwrap();
@@ -150,15 +147,13 @@ fn the_hook_honours_the_configured_comment_character() {
         };
         git(&["init", "--quiet", "."]);
         git(&["config", "core.commentChar", setting]);
-        let path = message(&format!("message-{name}"), body);
-        let out = Command::new(env!("CARGO_BIN_EXE_spate-xtask"))
-            .args(["commit-msg", path.to_str().unwrap()])
-            .env("GIT_DIR", dir.join(".git"))
-            .env_remove("GITHUB_ACTIONS")
-            .output()
-            .unwrap();
-        drop(std::fs::remove_file(&path));
-        drop(std::fs::remove_dir_all(&dir));
+        let message = Message::new(&format!("message-{name}"), body);
+        let git_dir = dir.join(".git");
+        let out = support::run(
+            &["commit-msg", message.path().to_str().unwrap()],
+            &["GITHUB_ACTIONS"],
+            &[("GIT_DIR", git_dir.to_str().unwrap())],
+        );
         assert_eq!(
             out.status.code(),
             Some(0),

@@ -4,17 +4,15 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+mod support;
+
 /// A repository of this test's own. `GIT_DIR` points the command's `git`
 /// invocations at it.
-struct Repo(PathBuf);
+struct Repo(support::Scratch);
 
 impl Repo {
     fn new(name: &str) -> Self {
-        let dir =
-            std::env::temp_dir().join(format!("spate-xtask-hooks-{name}.{}", std::process::id()));
-        drop(std::fs::remove_dir_all(&dir));
-        std::fs::create_dir_all(&dir).unwrap();
-        let repo = Self(dir);
+        let repo = Self(support::Scratch::new(&format!("spate-xtask-hooks-{name}")).unwrap());
         repo.git(&["init", "--quiet", "-b", "main", "."]);
         repo
     }
@@ -26,7 +24,7 @@ impl Repo {
     fn git(&self, args: &[&str]) -> String {
         let out = Command::new("git")
             .args(args)
-            .current_dir(&self.0)
+            .current_dir(self.0.dir())
             .env_remove("GIT_DIR")
             .env_remove("GIT_WORK_TREE")
             .output()
@@ -35,19 +33,15 @@ impl Repo {
     }
 
     fn install(&self) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_spate-xtask"))
-            .args(["hooks", "install"])
-            .env("GIT_DIR", self.git_dir())
-            .env("GIT_WORK_TREE", &self.0)
-            .env_remove("GITHUB_ACTIONS")
-            .output()
-            .unwrap()
-    }
-}
-
-impl Drop for Repo {
-    fn drop(&mut self) {
-        drop(std::fs::remove_dir_all(&self.0));
+        let git_dir = self.git_dir();
+        support::run(
+            &["hooks", "install"],
+            &["GITHUB_ACTIONS"],
+            &[
+                ("GIT_DIR", git_dir.to_str().unwrap()),
+                ("GIT_WORK_TREE", self.0.dir().to_str().unwrap()),
+            ],
+        )
     }
 }
 

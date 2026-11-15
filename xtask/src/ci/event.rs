@@ -202,6 +202,7 @@ impl Diff for PathList {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::checks::scratch::Scratch;
     use crate::ci::classify::{is_advisory_input, is_manifest};
 
     struct Fake {
@@ -269,30 +270,28 @@ mod tests {
     /// base that shares no history with `HEAD` reads as no diff.
     #[test]
     fn since_lists_everything_that_differs_from_the_merge_base() {
-        let dir = std::env::temp_dir().join(format!("spate-since-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("temp dir");
+        let tmp = Scratch::new("spate-since").expect("temp dir");
+        let dir = tmp.dir();
         let write = |name: &str, text: &str| std::fs::write(dir.join(name), text).expect("write");
-        git(&dir, &["init", "-q", "-b", "main"]);
+        git(dir, &["init", "-q", "-b", "main"]);
         for name in ["committed", "staged", "unstaged"] {
             write(name, "base");
         }
-        git(&dir, &["add", "."]);
-        git(&dir, &["commit", "-q", "-m", "base"]);
-        git(&dir, &["checkout", "-q", "-b", "topic"]);
+        git(dir, &["add", "."]);
+        git(dir, &["commit", "-q", "-m", "base"]);
+        git(dir, &["checkout", "-q", "-b", "topic"]);
         write("committed", "topic");
-        git(&dir, &["commit", "-q", "-am", "topic"]);
+        git(dir, &["commit", "-q", "-am", "topic"]);
         write("staged", "topic");
-        git(&dir, &["add", "staged"]);
+        git(dir, &["add", "staged"]);
         write("unstaged", "topic");
         write("untracked", "topic");
 
-        let diff = GitDiff::new(&dir, Event::PullRequest);
+        let diff = GitDiff::new(dir, Event::PullRequest);
         let mut paths = diff.since("main").expect("a readable diff");
         paths.sort();
         assert_eq!(paths, ["committed", "staged", "unstaged", "untracked"]);
         assert_eq!(diff.since("no-such-ref"), None);
-        std::fs::remove_dir_all(&dir).expect("remove temp dir");
     }
 
     #[test]

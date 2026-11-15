@@ -5,6 +5,8 @@
 use std::path::Path;
 use std::process::{Command, Output};
 
+mod support;
+
 /// The variables the gate reads, and the two its `git` invocations read,
 /// cleared so nothing on the host reaches the child.
 const READS: [&str; 8] = [
@@ -47,26 +49,12 @@ fn refusal(paths: &[&str]) -> String {
 }
 
 fn xtask(args: &[&str], env: &[(&str, &str)]) -> Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_spate-xtask"));
-    command.args(args);
-    for name in READS {
-        command.env_remove(name);
-    }
-    for (name, value) in env {
-        command.env(name, value);
-    }
-    command.output().unwrap()
+    support::run(args, &READS, env)
 }
 
-/// The exit status, stdout and stderr of one run, all three held at once.
 #[track_caller]
 fn held(args: &[&str], env: &[(&str, &str)], code: i32, out: &str, err: &str) {
-    let got = xtask(args, env);
-    let stdout = String::from_utf8_lossy(&got.stdout);
-    let stderr = String::from_utf8_lossy(&got.stderr);
-    assert_eq!(stdout, out, "stdout");
-    assert_eq!(stderr, err, "stderr");
-    assert_eq!(got.status.code(), Some(code), "{stdout}{stderr}");
+    support::held(args, &xtask(args, env), code, out, err);
 }
 
 /// An event the pull request gate did not raise reports that it evaluated no
@@ -200,19 +188,16 @@ fn a_range_shipping_nothing_passes() {
 struct Repo {
     git_dir: String,
     work_tree: String,
+    _dir: support::Scratch,
 }
 
 impl Repo {
     fn new(name: &str) -> Self {
-        let dir = std::env::temp_dir().join(format!(
-            "spate-xtask-changelog-{name}.{}",
-            std::process::id()
-        ));
-        drop(std::fs::remove_dir_all(&dir));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = support::Scratch::new(&format!("spate-xtask-changelog-{name}")).unwrap();
         let repo = Self {
             git_dir: dir.join(".git").to_string_lossy().into_owned(),
-            work_tree: dir.to_string_lossy().into_owned(),
+            work_tree: dir.dir().to_string_lossy().into_owned(),
+            _dir: dir,
         };
         repo.git(&["init", "--quiet", "-b", "main", "."]);
         repo.write("changelog.d/README.md", "the conventions\n");
@@ -263,12 +248,6 @@ impl Repo {
             self.git(&["rev-parse", "HEAD"]),
             self.git(&["log", "-1", "--format=%h"]),
         )
-    }
-}
-
-impl Drop for Repo {
-    fn drop(&mut self) {
-        drop(std::fs::remove_dir_all(self.path()));
     }
 }
 

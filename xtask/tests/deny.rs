@@ -2,22 +2,15 @@
 //! each form runs, and what the advisories check reports and exits with, read
 //! from cargo-deny output recorded under `fixtures/deny/`.
 
-use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Output;
+
+mod support;
 
 const CARGO_DENY: &str = "cargo deny --all-features --locked check";
 const ADVISORIES: &str = "cargo deny --format json --color never --all-features --locked check advisories --hide-inclusion-graph";
 
 fn xtask(args: &[&str], env: &[(&str, &str)]) -> Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_spate-xtask"));
-    command
-        .args(args)
-        .env_remove("GITHUB_STEP_SUMMARY")
-        .env_remove("GITHUB_ACTIONS");
-    for (name, value) in env {
-        command.env(name, value);
-    }
-    command.output().unwrap()
+    support::run(args, &["GITHUB_STEP_SUMMARY", "GITHUB_ACTIONS"], env)
 }
 
 /// `--explain` prints each form's cargo-deny command and runs nothing. Only
@@ -95,16 +88,16 @@ fn the_local_bar_runs_every_deny_check() {
 
 /// A scratch directory holding a `cargo` that records its arguments, writes
 /// a recorded cargo-deny stderr and exits as cargo-deny did.
+#[cfg(unix)]
 struct Shim {
-    dir: PathBuf,
+    dir: support::Scratch,
 }
 
+#[cfg(unix)]
 impl Shim {
     fn new(name: &str, fixture: &str, code: i32) -> Self {
-        let dir = std::env::temp_dir().join(format!("spate-deny-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        let dir = support::Scratch::new(&format!("spate-deny-{name}")).unwrap();
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/deny")
             .join(fixture);
         let argv = dir.join("argv");
@@ -119,13 +112,7 @@ impl Shim {
             argv.display(),
             fixture.display()
         );
-        let cargo = dir.join("cargo");
-        std::fs::write(&cargo, script).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&cargo, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        support::shim(dir.dir(), "cargo", &script);
         Self { dir }
     }
 
@@ -137,10 +124,7 @@ impl Shim {
 
     /// As [`Shim::run`], with no job summary, as a local run has.
     fn run_with(&self, value: &str, on_ci: bool) -> (Output, Option<String>) {
-        let path = std::env::join_paths(std::iter::once(self.dir.clone()).chain(
-            std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
-        ))
-        .unwrap();
+        let path = support::path_with(self.dir.dir());
         let summary = self.dir.join("summary.md");
         let mut env = vec![("PATH", path.to_str().unwrap())];
         if on_ci {
@@ -152,12 +136,6 @@ impl Shim {
 
     fn argv(&self) -> String {
         std::fs::read_to_string(self.dir.join("argv")).expect("cargo ran")
-    }
-}
-
-impl Drop for Shim {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.dir);
     }
 }
 

@@ -4,9 +4,10 @@
 //! checks, which makes two shards at `PER_SHARD_CHECKS`, and it refuses any
 //! other command, so the planner runs without a toolchain or a build.
 
-use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
-use std::process::{Command, Output};
+use std::process::Output;
+
+mod support;
 
 const CARGO: &str = "#!/bin/sh\n\
 if [ \"$1\" = hack ] && [ \"$2\" = check ]; then\n\
@@ -19,19 +20,13 @@ echo \"unexpected: $*\" >&2\n\
 exit 1\n";
 
 /// A directory holding the fake `cargo` in `bin`.
-struct Shim(PathBuf);
+struct Shim(support::Scratch);
 
 impl Shim {
     fn new(name: &str) -> Self {
-        let dir = std::env::temp_dir().join(format!(
-            "spate-xtask-powerset-{}-{name}",
-            std::process::id()
-        ));
-        drop(std::fs::remove_dir_all(&dir));
-        std::fs::create_dir_all(dir.join("bin")).unwrap();
-        let path = dir.join("bin").join("cargo");
-        std::fs::write(&path, CARGO).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let dir = support::Scratch::new(&format!("spate-xtask-powerset-{name}")).unwrap();
+        std::fs::create_dir(dir.join("bin")).unwrap();
+        support::shim(&dir.join("bin"), "cargo", CARGO);
         Self(dir)
     }
 
@@ -43,13 +38,10 @@ impl Shim {
 /// Runs the built `spate-xtask` with the fake `cargo` first on `PATH`, and with
 /// `GITHUB_OUTPUT` set to `output` when one is given.
 fn xtask(shim: &Shim, args: &[&str], output: Option<&PathBuf>) -> Output {
-    let path = std::env::var_os("PATH").unwrap_or_default();
-    let mut paths = vec![shim.bin()];
-    paths.extend(std::env::split_paths(&path));
-    let mut command = Command::new(env!("CARGO_BIN_EXE_spate-xtask"));
+    let mut command = support::xtask();
     command
         .args(args)
-        .env("PATH", std::env::join_paths(paths).unwrap())
+        .env("PATH", support::path_with(&shim.bin()))
         .env_remove("GITHUB_OUTPUT");
     if let Some(file) = output {
         command.env("GITHUB_OUTPUT", file);

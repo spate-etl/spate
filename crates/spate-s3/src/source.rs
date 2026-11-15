@@ -1337,7 +1337,8 @@ mod tests {
     /// answers 403.
     #[test]
     fn the_location_store_uses_the_source_store_options() {
-        let endpoint = crate::test_servers::status_server("403 Forbidden");
+        let endpoint =
+            crate::test_servers::reply_server("403 Forbidden", crate::test_servers::ACCESS_DENIED);
         let (source, rt) = source_with_store(&format!(
             "  endpoint: \"{endpoint}\"\n  allow_http: \"true\"\n  access_key_id: \"AKIDTEST\"\n  \
              secret_access_key: \"test\"\n  region: \"us-east-1\"\n"

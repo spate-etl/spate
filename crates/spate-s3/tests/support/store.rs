@@ -2,7 +2,7 @@
 //! fixture shared by the Docker-gated suites, with one bucket and a signed
 //! client for seeding.
 
-use object_store::aws::{AmazonS3, AmazonS3Builder, AwsAuthorizer, AwsCredential};
+use object_store::aws::{AmazonS3, AwsAuthorizer, AwsCredential};
 use object_store::path::Path as StorePath;
 use object_store::{ObjectStore, ObjectStoreExt as _, PutPayload};
 use spate_test_support::{ACCESS_KEY, REGION, S3Store, SECRET_KEY, Store};
@@ -73,7 +73,8 @@ impl Gateway {
 
     /// The bucket's client as its concrete type, for its paginated listing.
     pub(crate) fn s3(&self) -> AmazonS3 {
-        builder(&self.store, &self.bucket)
+        self.store
+            .client_builder(&self.bucket)
             .build()
             .expect("client builds")
     }
@@ -114,15 +115,5 @@ impl Gateway {
 
 /// A signed `object_store` client for seeding and assertions.
 fn build_client(store: &S3Store, bucket: &str) -> Arc<dyn ObjectStore> {
-    Arc::new(builder(store, bucket).build().expect("client builds"))
-}
-
-fn builder(store: &S3Store, bucket: &str) -> AmazonS3Builder {
-    AmazonS3Builder::new()
-        .with_endpoint(store.endpoint())
-        .with_allow_http(true)
-        .with_bucket_name(bucket)
-        .with_region(REGION)
-        .with_access_key_id(ACCESS_KEY)
-        .with_secret_access_key(SECRET_KEY)
+    Arc::new(store.client_builder(bucket).build().expect("client builds"))
 }

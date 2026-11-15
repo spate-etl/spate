@@ -10,7 +10,6 @@
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use futures_util::TryStreamExt as _;
-use object_store::aws::AmazonS3Builder;
 use object_store::path::Path as StorePath;
 use object_store::{ObjectStore as _, ObjectStoreExt as _, PutPayload};
 use rdkafka::ClientConfig;
@@ -19,9 +18,7 @@ use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
 use rdkafka::client::DefaultClientContext;
 use rdkafka::consumer::{BaseConsumer, Consumer as _};
 use rdkafka::producer::{BaseProducer, BaseRecord, Producer as _};
-use spate_test_support::{
-    ACCESS_KEY, ElasticMq, KAFKA_PORT, KafkaBroker, Message, REGION, S3Store, SECRET_KEY, Store,
-};
+use spate_test_support::{ElasticMq, KAFKA_PORT, KafkaBroker, Message, S3Store, Store};
 use testcontainers::runners::SyncRunner as _;
 
 /// A bucket created through the helper takes a signed put, get, list and
@@ -79,15 +76,7 @@ fn s3_store_round_trips_an_object() {
         }
     }
 
-    let store = AmazonS3Builder::new()
-        .with_endpoint(s3_store.endpoint())
-        .with_allow_http(true)
-        .with_bucket_name("smoke")
-        .with_region(REGION)
-        .with_access_key_id(ACCESS_KEY)
-        .with_secret_access_key(SECRET_KEY)
-        .build()
-        .unwrap();
+    let store = s3_store.client_builder("smoke").build().unwrap();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()

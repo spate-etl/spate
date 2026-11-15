@@ -14,41 +14,12 @@ use spate_core::ops::{ChunkConfig, Emitter, PushOutcome, chain};
 use spate_core::record::{PartitionId, RawPayload, Record, RecordMeta};
 use spate_core::sink::{RowEncoder, ShardRouter, shard_queues};
 use spate_core::source::PayloadBatch;
-use std::alloc::{GlobalAlloc, Layout, System};
+use spate_test_support::alloc::{Counting, count};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tokio::sync::mpsc;
 
-struct CountingAlloc;
-
-static ALLOCS: AtomicU64 = AtomicU64::new(0);
-static COUNTING: AtomicBool = AtomicBool::new(false);
-
-// SAFETY: delegates all allocation to `System`, adding only a relaxed
-// counter increment; layout handling is untouched.
-unsafe impl GlobalAlloc for CountingAlloc {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        if COUNTING.load(Ordering::Relaxed) {
-            ALLOCS.fetch_add(1, Ordering::Relaxed);
-        }
-        // SAFETY: same contract as the caller's; System upholds it.
-        unsafe { System.alloc(layout) }
-    }
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        // SAFETY: same contract as the caller's; System upholds it.
-        unsafe { System.dealloc(ptr, layout) }
-    }
-    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        if COUNTING.load(Ordering::Relaxed) {
-            ALLOCS.fetch_add(1, Ordering::Relaxed);
-        }
-        // SAFETY: same contract as the caller's; System upholds it.
-        unsafe { System.realloc(ptr, layout, new_size) }
-    }
-}
-
 #[global_allocator]
-static GLOBAL: CountingAlloc = CountingAlloc;
+static GLOBAL: Counting = Counting;
 
 // ---- fixtures (mirror the unit-test fixtures; borrowed family) -------------
 
@@ -149,8 +120,7 @@ fn run_iters(
     rx: &mut mpsc::Receiver<spate_core::sink::EncodedChunk>,
     payloads: &[Vec<u8>],
     iters: usize,
-) -> u64 {
-    let start = ALLOCS.load(Ordering::Relaxed);
+) {
     for _ in 0..iters {
         let (ack, _ack_rx): (AckRef, crossbeam_channel::Receiver<AckMsg>) = AckRef::test_pair();
         let mut batch = TestBatch {
@@ -170,7 +140,6 @@ fn run_iters(
         drop(batch);
         while _ack_rx.try_recv().is_ok() {}
     }
-    ALLOCS.load(Ordering::Relaxed) - start
 }
 
 #[test]
@@ -198,14 +167,18 @@ fn steady_state_allocations_do_not_scale_with_records() {
 
     // Warm up buffers and lazy statics outside the counting window.
     for _ in 0..10 {
-        let _ = run_iters(&mut c, &mut rxs[0], &small, 1);
+        run_iters(&mut c, &mut rxs[0], &small, 1);
     }
 
     const ITERS: u64 = 32;
-    COUNTING.store(true, Ordering::Relaxed);
-    let small_allocs = run_iters(&mut c, &mut rxs[0], &small, ITERS as usize);
-    let big_allocs = run_iters(&mut c, &mut rxs[0], &big, ITERS as usize);
-    COUNTING.store(false, Ordering::Relaxed);
+    // Each `realloc` counts as an allocation call, as `alloc` does.
+    let mut calls = |payloads: &[Vec<u8>]| {
+        let ((), counts) = count(|| run_iters(&mut c, &mut rxs[0], payloads, ITERS as usize))
+            .expect("`Counting` is this binary's global allocator");
+        counts.allocs + counts.reallocs
+    };
+    let small_allocs = calls(&small);
+    let big_allocs = calls(&big);
 
     let small_per_iter = small_allocs / ITERS;
     let big_per_iter = big_allocs / ITERS;

@@ -6898,7 +6898,11 @@ impl crate::feed::Feed for HookedFeed {
     fn acknowledge(&self, receipt: crate::feed::Receipt) -> Result<(), crate::feed::FeedError> {
         self.inner.acknowledge(receipt)
     }
-    fn fail(&self, receipt: crate::feed::Receipt, reason: &str) -> Result<(), crate::feed::FeedError> {
+    fn fail(
+        &self,
+        receipt: crate::feed::Receipt,
+        reason: &str,
+    ) -> Result<(), crate::feed::FeedError> {
         self.inner.fail(receipt, reason)
     }
     fn publish(&self, unit: crate::feed::Unit) -> crate::feed::Confirmation {
@@ -6968,7 +6972,9 @@ impl HeldRun {
     }
 
     fn report(self) -> ExitReport {
-        wait_until(spate_test::HANG, "run to return", || self.join.is_finished());
+        wait_until(spate_test::HANG, "run to return", || {
+            self.join.is_finished()
+        });
         self.join.join().unwrap().unwrap()
     }
 
@@ -7024,7 +7030,8 @@ fn run_held(
         cfg,
         source,
         move |_thread| {
-            Box::new(ok_chain(Arc::clone(&chain_shared), Arc::clone(&log))) as Box<dyn RunnableChain>
+            Box::new(ok_chain(Arc::clone(&chain_shared), Arc::clone(&log)))
+                as Box<dyn RunnableChain>
         },
         sink,
         Arc::new(crate::backpressure::InflightBudget::new()),
@@ -7051,7 +7058,11 @@ fn run_held(
 }
 
 /// A drop hook that reports its start, then blocks until released.
-fn blocking_hook() -> (Box<dyn FnOnce() + Send>, mpsc::Receiver<()>, mpsc::Sender<()>) {
+fn blocking_hook() -> (
+    Box<dyn FnOnce() + Send>,
+    mpsc::Receiver<()>,
+    mpsc::Sender<()>,
+) {
     let (entered_tx, entered) = mpsc::channel();
     let (release, released) = mpsc::channel::<()>();
     let hook = Box::new(move || {
@@ -7076,11 +7087,17 @@ fn run_gives_up_on_a_source_drop_at_the_drain_deadline_and_its_grace() {
     assert_eq!(cfg.checkpoint.drain_timeout, TEST_DRAIN);
     let run = run_held(cfg, source, None, None);
     run.shutdown.trigger();
-    entered.recv_timeout(spate_test::HANG).expect("the source drops");
+    entered
+        .recv_timeout(spate_test::HANG)
+        .expect("the source drops");
     run.clock.wait_for_reads();
-    run.clock.advance(TEST_DRAIN + Duration::from_secs(3) - Duration::from_millis(1));
+    run.clock
+        .advance(TEST_DRAIN + Duration::from_secs(3) - Duration::from_millis(1));
     run.clock.wait_for_reads();
-    assert!(!run.join.is_finished(), "run gave up before its grace ended");
+    assert!(
+        !run.join.is_finished(),
+        "run gave up before its grace ended"
+    );
     run.clock.advance(Duration::from_millis(1));
     wait_until(spate_test::HANG, "run to return", || run.join.is_finished());
     let line = run.gave_up_line().expect("run logs the close it left");
@@ -7102,15 +7119,23 @@ fn the_grace_counts_from_a_final_commit_that_ends_after_the_drain_deadline() {
     source.on_flush = Some(flush_hook);
     let run = run_held(test_config(1), source, None, None);
     run.shutdown.trigger();
-    flushing.recv_timeout(spate_test::HANG).expect("the final flush runs");
+    flushing
+        .recv_timeout(spate_test::HANG)
+        .expect("the final flush runs");
     let late = Duration::from_secs(10);
     run.clock.advance(late);
     drop(release_flush);
-    entered.recv_timeout(spate_test::HANG).expect("the source drops");
+    entered
+        .recv_timeout(spate_test::HANG)
+        .expect("the source drops");
     run.clock.wait_for_reads();
-    run.clock.advance(Duration::from_secs(3) - Duration::from_millis(1));
+    run.clock
+        .advance(Duration::from_secs(3) - Duration::from_millis(1));
     run.clock.wait_for_reads();
-    assert!(!run.join.is_finished(), "run gave up before its grace ended");
+    assert!(
+        !run.join.is_finished(),
+        "run gave up before its grace ended"
+    );
     run.clock.advance(Duration::from_millis(1));
     wait_until(spate_test::HANG, "run to return", || run.join.is_finished());
     drop(release);
@@ -7129,7 +7154,9 @@ fn run_gives_up_on_a_feed_drop_at_the_same_bound() {
     cfg.feed = feed_section("memory: {}");
     let run = run_held(cfg, source, Some(HookedFeed::shared(hook)), None);
     run.shutdown.trigger();
-    entered.recv_timeout(spate_test::HANG).expect("the feed drops");
+    entered
+        .recv_timeout(spate_test::HANG)
+        .expect("the feed drops");
     run.clock.wait_for_reads();
     run.clock.advance(TEST_DRAIN + Duration::from_secs(3));
     wait_until(spate_test::HANG, "run to return", || run.join.is_finished());
@@ -7164,13 +7191,16 @@ fn an_abandoned_source_drop_keeps_the_io_runtime() {
     let run = run_held(test_config(1), source, None, None);
     *io_slot.lock().unwrap() = Some(run.io.clone());
     run.shutdown.trigger();
-    entered.recv_timeout(spate_test::HANG).expect("the source drops");
+    entered
+        .recv_timeout(spate_test::HANG)
+        .expect("the source drops");
     run.clock.wait_for_reads();
     run.clock.advance(TEST_DRAIN + Duration::from_secs(3));
     wait_until(spate_test::HANG, "run to return", || run.join.is_finished());
     drop(release);
     assert!(
-        ran.recv_timeout(spate_test::HANG).expect("the drop finishes"),
+        ran.recv_timeout(spate_test::HANG)
+            .expect("the drop finishes"),
         "work the abandoned source's Drop spawned did not run"
     );
     run.wait_for_the_teardown();
@@ -7186,11 +7216,17 @@ fn a_controller_panic_gives_a_blocked_source_drop_the_grace() {
     source.on_drop = Some(hook);
     script.lock().unwrap().push_back(Script::PanicPoll);
     let run = run_held(test_config(1), source, None, None);
-    entered.recv_timeout(spate_test::HANG).expect("the source drops");
+    entered
+        .recv_timeout(spate_test::HANG)
+        .expect("the source drops");
     run.clock.wait_for_reads();
-    run.clock.advance(Duration::from_secs(3) - Duration::from_millis(1));
+    run.clock
+        .advance(Duration::from_secs(3) - Duration::from_millis(1));
     run.clock.wait_for_reads();
-    assert!(!run.join.is_finished(), "run gave up before its grace ended");
+    assert!(
+        !run.join.is_finished(),
+        "run gave up before its grace ended"
+    );
     run.clock.advance(Duration::from_millis(1));
     wait_until(spate_test::HANG, "run to return", || run.join.is_finished());
     drop(release);
@@ -7251,7 +7287,9 @@ fn the_io_tasks_stop_before_a_teardown_that_outlasts_run() {
     });
     let run = run_held(test_config(1), source, None, Some(probe));
     run.shutdown.trigger();
-    entered.recv_timeout(spate_test::HANG).expect("the source drops");
+    entered
+        .recv_timeout(spate_test::HANG)
+        .expect("the source drops");
     run.clock.wait_for_reads();
     run.clock.advance(TEST_DRAIN + Duration::from_secs(3));
     wait_until(spate_test::HANG, "run to return", || run.join.is_finished());

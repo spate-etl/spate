@@ -156,8 +156,8 @@ mod tests {
     use std::future::poll_fn;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::task::Poll;
     use std::sync::mpsc;
+    use std::task::Poll;
     use tokio::runtime::Handle;
     use tokio::sync::mpsc::unbounded_channel;
 

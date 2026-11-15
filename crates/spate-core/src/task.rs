@@ -300,7 +300,13 @@ impl<T> ThreadHandle<T> {
         deadline: Instant,
         clock: &dyn Clock,
     ) -> Option<std::thread::Result<T>> {
-        match wait_for(&self.done, Some(deadline), clock, TICK, || None::<Infallible>) {
+        match wait_for(
+            &self.done,
+            Some(deadline),
+            clock,
+            TICK,
+            || None::<Infallible>,
+        ) {
             Waited::Done => Some(self.join()),
             Waited::Checked(never) => match never {},
             Waited::Elapsed => {
@@ -809,7 +815,9 @@ mod tests {
         // releases the thread, and the waiter it unblocks can be joined.
         let release = release;
         clock.wait_for_a_read();
-        clock.clock.advance(Duration::from_secs(1) - Duration::from_millis(1));
+        clock
+            .clock
+            .advance(Duration::from_secs(1) - Duration::from_millis(1));
         clock.wait_for_a_read();
         assert!(!waiter.is_finished(), "the wait ended before its deadline");
         clock.clock.advance(Duration::from_millis(1));
@@ -836,7 +844,10 @@ mod tests {
             handle.is_finished()
         });
         clock.clock.advance(Duration::from_secs(1));
-        assert_eq!(handle.join_by(deadline, &*clock).map(Result::unwrap), Some(7));
+        assert_eq!(
+            handle.join_by(deadline, &*clock).map(Result::unwrap),
+            Some(7)
+        );
     }
 
     /// With a tick far longer than the hang bound, only the end signal can

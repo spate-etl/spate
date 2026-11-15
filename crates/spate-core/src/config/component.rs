@@ -83,6 +83,19 @@ impl SectionPath {
         SectionPath(format!("feed.{tag}"))
     }
 
+    /// The path of the `deserializer:` section selecting `tag`.
+    ///
+    /// ```
+    /// use spate_core::config::SectionPath;
+    ///
+    /// let err = SectionPath::deserializer("avro").invalid("mode", "is not a mode");
+    /// assert_eq!(err.to_string(), "deserializer.avro.mode: is not a mode");
+    /// ```
+    #[must_use]
+    pub fn deserializer(tag: &str) -> SectionPath {
+        SectionPath(format!("deserializer.{tag}"))
+    }
+
     /// A [`ConfigError::Component`] for a rule `field` breaks, with context
     /// `<path>.<field>`. `field` is the key's path inside the section, such as
     /// `brokers` or `chunk.target_bytes`.
@@ -116,6 +129,27 @@ impl SectionPath {
             context: self.0.clone(),
             message: message.into(),
         }
+    }
+
+    /// Logs a warning that the credential at `field` is sent without TLS.
+    ///
+    /// `reason` names the setting that leaves the connection unencrypted. The
+    /// line reads `<path>.<field>: <reason>; the credential is sent without
+    /// TLS`. Call it once, after the section's own checks pass and before the
+    /// client is created. Pass key names only, never a value or a URL.
+    ///
+    /// ```
+    /// use spate_core::config::SectionPath;
+    ///
+    /// // Logs `sink.example.password: endpoint uses http://; the credential is
+    /// // sent without TLS`.
+    /// SectionPath::sink("example").warn_cleartext_credential("password", "endpoint uses http://");
+    /// ```
+    pub fn warn_cleartext_credential(&self, field: &str, reason: &str) {
+        tracing::warn!(
+            "{}.{field}: {reason}; the credential is sent without TLS",
+            self.0
+        );
     }
 }
 
@@ -355,6 +389,10 @@ mod tests {
             (SectionPath::source("kafka"), "source.kafka.brokers"),
             (SectionPath::sink("kafka"), "sink.kafka.brokers"),
             (SectionPath::feed("kafka"), "feed.kafka.brokers"),
+            (
+                SectionPath::deserializer("kafka"),
+                "deserializer.kafka.brokers",
+            ),
         ] {
             let err = path.invalid("brokers", "must not be empty");
             assert!(
@@ -364,6 +402,24 @@ mod tests {
             );
             assert_eq!(err.to_string(), format!("{want}: must not be empty"));
         }
+    }
+
+    /// The cleartext warning is one WARN line that names the credential's
+    /// key and the reason.
+    #[test]
+    fn a_cleartext_credential_logs_one_warning_naming_the_key() {
+        let lines = spate_test::capture_logs(tracing::Level::INFO, || {
+            SectionPath::sink("example")
+                .warn_cleartext_credential("password", "endpoint uses http://");
+        });
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains("WARN"), "{lines:?}");
+        assert!(
+            lines[0].contains(
+                "sink.example.password: endpoint uses http://; the credential is sent without TLS"
+            ),
+            "{lines:?}"
+        );
     }
 
     /// An error about a whole section is anchored at the section's path,

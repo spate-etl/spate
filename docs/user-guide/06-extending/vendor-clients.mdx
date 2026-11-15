@@ -121,6 +121,19 @@ at load, before a client can log it. Pass its error to `SectionPath::invalid`
 with the key, such as
 `sink.example.endpoint: carries userinfo; set them in user and password`.
 
+When a configured credential will cross a connection without TLS, such as a
+password with an `http://` endpoint, call
+`SectionPath::warn_cleartext_credential` once with the credential's key and
+the setting that leaves the connection unencrypted. Call it after the
+section's checks pass and before the client is created. It logs one warning,
+and the pipeline goes on:
+
+```text
+sink.example.password: endpoint uses http://; the credential is sent without TLS
+```
+
+Pass key names only, never a value or a URL.
+
 [Securing connections](../03-guides/securing-connections.mdx) describes what
 an operator then sees.
 

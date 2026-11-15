@@ -366,18 +366,19 @@ mod tests {
             let err = std::io::Error::new(std::io::ErrorKind::InvalidData, tls);
             crate::tls_rejection!(rustls, &err).is_some()
         };
-        for (tls, rejected) in [
+        for (name, tls, rejected) in [
             (
+                "InvalidCertificate",
                 Tls::InvalidCertificate(CertificateError::UnknownIssuer),
                 true,
             ),
             (
+                "PeerIncompatible",
                 Tls::PeerIncompatible(rustls::PeerIncompatible::NoCipherSuitesInCommon),
                 true,
             ),
-            (Tls::General("reset".into()), false),
+            ("General", Tls::General("reset".into()), false),
         ] {
-            let name = format!("{tls:?}");
             assert_eq!(rejects(tls), rejected, "{name}");
         }
         for (alert, rejected) in [

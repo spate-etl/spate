@@ -1340,6 +1340,27 @@ fn the_macos_lane_runs_what_the_arm64_lane_runs() {
     assert_eq!(steps(macos), steps(arm64));
 }
 
+/// The Miri job runs `cargo xtask miri` on the pinned nightly for every Rust
+/// change, and lets no failure through to `CI gate`.
+#[test]
+fn the_miri_job_gates_every_rust_change() {
+    let tests = yaml(&read_workflow("tests.yml"));
+    let miri = &tests["jobs"]["miri"];
+    assert_eq!(miri["if"].as_str(), Some("inputs.rust == 'true'"));
+    assert!(miri["timeout-minutes"].as_u64().is_some());
+    assert!(miri.get("continue-on-error").is_none());
+    let steps = miri["steps"].as_sequence().unwrap();
+    for step in steps {
+        assert!(step.get("continue-on-error").is_none(), "{step:?}");
+    }
+    assert!(
+        steps
+            .iter()
+            .any(|s| s["run"].as_str() == Some(r#"cargo xtask miri --nightly "$NIGHTLY""#)),
+        "{steps:?}"
+    );
+}
+
 /// Each JUnit check and artifact in a CI run has its own name: upload-artifact
 /// rejects a duplicate within one run, and two checks sharing a name cannot be
 /// told apart. A matrix job's name carries a matrix value, since every leg

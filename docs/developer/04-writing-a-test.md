@@ -211,6 +211,28 @@ The nightly workflow fuzzes each target for five minutes and keeps `fuzz/corpus`
 A crash uploads its input as the `fuzz-artifacts` artifact and opens an issue titled `[bug] A fuzz target found a crashing input`.
 Keep that input under `fuzz/corpus/<target>/` with the fix, so the case stays covered.
 
+## Run `unsafe` code under Miri
+
+When a lib test can enter an `unsafe` block without a foreign call, give the block a test that enters it and add a row to `TARGETS` in [`xtask/src/commands/miri.rs`](repo:xtask/src/commands/miri.rs).
+`cargo xtask miri` runs each row's lib tests under [Miri](https://github.com/rust-lang/miri), with strict provenance.
+
+**Why:** an out-of-bounds read or write that leaves the output intact passes the ordinary suite, and Miri reports it.
+
+A row names a package and a nextest filterset, such as `test(/^native::leaf::/)`.
+Point the filter at tests that enter the block, because a filter that matches only other tests passes without checking the block.
+A filter that matches no test fails the run, so a renamed module shows up as a failure.
+
+Miri cannot run a foreign call, so a block that only runs after one has no row.
+Each `unsafe` block in `spate-kafka` needs librdkafka, so that crate has none.
+
+```sh
+rustup component add --toolchain <channel> miri rust-src
+cargo xtask miri --nightly <channel>
+```
+
+`<channel>` is the dated nightly that `.github/toolchains/nightly/` pins.
+The `Miri over unsafe code` job runs the same command whenever CI runs the test suite.
+
 ## Read a failing test's output
 
 On CI, read the failure in the job's test report.

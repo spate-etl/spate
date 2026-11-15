@@ -372,21 +372,12 @@ fn preflight(root: &Path, sbom: bool) -> Outcome {
     if !authenticated {
         return Err(Error::msg("gh is not authenticated and GH_TOKEN is unset"));
     }
-    let present = |sub: &str| -> Result<bool, Error> {
-        Ok(run::complete(
-            root,
-            &Step::new("cargo", [sub, "--version"]),
-            Streams::Discard,
-        )?
-        .code
-            == 0)
-    };
-    if !present("about")? {
-        return Err(Error::msg(
-            "cargo-about is required and was not found. Install it with:\n  \
-             cargo install cargo-about --locked --features cli",
-        ));
-    }
+    run::require(
+        root,
+        false,
+        &Step::new("cargo", ["about", "--version"]),
+        "cargo-about (cargo install cargo-about --locked --features cli)",
+    )?;
     if sbom {
         preflight_sbom(root)?;
     }
@@ -394,20 +385,12 @@ fn preflight(root: &Path, sbom: bool) -> Outcome {
 }
 
 fn preflight_sbom(root: &Path) -> Outcome {
-    let found = run::complete(
+    run::require(
         root,
+        false,
         &Step::new("cargo", ["cyclonedx", "--version"]),
-        Streams::Discard,
-    )?
-    .code
-        == 0;
-    if !found {
-        return Err(Error::msg(
-            "cargo-cyclonedx is required and was not found. Install it with:\n  \
-             cargo install cargo-cyclonedx --locked",
-        ));
-    }
-    Ok(())
+        "cargo-cyclonedx (cargo install cargo-cyclonedx --locked)",
+    )
 }
 
 /// Runs `assemble --dry-run` and `prepare --dry-run` in a detached worktree of

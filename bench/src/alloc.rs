@@ -284,6 +284,29 @@ mod tests {
         assert!(snapshot().count > before.count);
     }
 
+    /// A zeroed allocation counts once at its full size, as `alloc` does, and
+    /// hands back the zeroed block `System` returned.
+    #[test]
+    fn a_zeroed_allocation_counts_its_full_size() {
+        let _direct = direct();
+        let layout = Layout::from_size_align(256, 8).expect("valid layout");
+        let before = snapshot();
+
+        // SAFETY: `layout` has a non-zero size and a power-of-two alignment.
+        // The read covers only the `layout.size()` bytes just allocated, and
+        // the pointer is freed once with that layout.
+        unsafe {
+            let ptr = Counting.alloc_zeroed(layout);
+            assert!(!ptr.is_null());
+            let after = snapshot();
+            assert_eq!(after.count, before.count + 1);
+            assert_eq!(after.bytes, before.bytes + 256);
+            let block = std::slice::from_raw_parts(ptr, layout.size());
+            assert!(block.iter().all(|&b| b == 0));
+            Counting.dealloc(ptr, layout);
+        }
+    }
+
     /// The unit tests run under this crate's own `bench_main!`-free harness, so
     /// the counting allocator is *not* the global one here, so `installed()` is
     /// therefore asserted only for self-consistency with what the global

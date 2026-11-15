@@ -28,6 +28,7 @@ Write an inline comment where the code cannot show its reason:
 - A `// SAFETY:` comment on every `unsafe` block, naming the invariant that makes it sound.
 
 The workspace lints warn on the clippy lint `undocumented_unsafe_blocks`, so `cargo xtask clippy` fails on an `unsafe` block with no `// SAFETY:` comment.
+[Run `unsafe` code under Miri](04-writing-a-test.md#run-unsafe-code-under-miri) says which `unsafe` blocks also need a test that Miri runs.
 
 Leave self-evident code without a comment.
 When a change removes what a comment defended, remove the comment too.

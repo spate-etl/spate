@@ -213,6 +213,32 @@ jobs:
           NIGHTLY: ${{ steps.rust.outputs.toolchain }}
         run: cargo xtask docsrs --nightly "$NIGHTLY"
 
+  miri:
+    name: Miri over unsafe code
+    runs-on: ubuntu-latest
+    if: inputs.rust == 'true'
+    timeout-minutes: 30
+    # The ordinary suite cannot see an out-of-bounds access that leaves the
+    # output intact. `cargo xtask miri` lists the lib tests that enter an
+    # `unsafe` block.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: rust
+        uses: ./.github/actions/setup-rust
+        with:
+          toolchain-file: .github/toolchains/nightly/rust-toolchain.toml
+          components: miri, rust-src
+          tools: nextest
+          # Its own entry: Miri builds every dependency for its interpreter,
+          # which shares no artefact with the other jobs' trees.
+          shared-key: miri
+      # `+nightly` would name the floating channel and resolve past the pin.
+      - env:
+          NIGHTLY: ${{ steps.rust.outputs.toolchain }}
+        run: cargo xtask miri --nightly "$NIGHTLY"
+
   features:
     name: Feature matrix and default-feature tests
     runs-on: ubuntu-latest

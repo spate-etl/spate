@@ -141,6 +141,23 @@ pub(super) fn is_rust_change(path: &str) -> bool {
 /// declared floors still resolve. Changes to the gate apparatus listed here
 /// select the gated jobs, and classifier tests pin those paths.
 pub(crate) fn is_manifest(path: &str) -> bool {
+    is_dependency_manifest(path)
+        || any_glob(
+            path,
+            &[
+                "fuzz/Cargo.toml",
+                "xtask/*",
+                ".github/workflows/ci.yml",
+                ".github/workflows/release-checks.yml",
+                ".github/toolchains/*",
+            ],
+        )
+}
+
+/// The workspace manifests and the lockfile, which every dependency selector
+/// reads. A manifest the graph gains is listed here, once, and not in each
+/// selector.
+fn is_dependency_manifest(path: &str) -> bool {
     any_glob(
         path,
         &[
@@ -149,13 +166,8 @@ pub(crate) fn is_manifest(path: &str) -> bool {
             "crates/*/Cargo.toml",
             "bench/Cargo.toml",
             "bench/*/Cargo.toml",
-            "fuzz/Cargo.toml",
             "test-support/Cargo.toml",
             "xtask/Cargo.toml",
-            "xtask/*",
-            ".github/workflows/ci.yml",
-            ".github/workflows/release-checks.yml",
-            ".github/toolchains/*",
         ],
     )
 }
@@ -167,25 +179,19 @@ pub(crate) fn is_manifest(path: &str) -> bool {
 /// pull request, and `the_advisory_selector_covers_the_graph_and_its_own_policy`
 /// pins the list.
 pub(crate) fn is_advisory_input(path: &str) -> bool {
-    any_glob(
-        path,
-        &[
-            "Cargo.toml",
-            "Cargo.lock",
-            "crates/*/Cargo.toml",
-            "bench/Cargo.toml",
-            "bench/*/Cargo.toml",
-            "fuzz/Cargo.toml",
-            "test-support/Cargo.toml",
-            "xtask/Cargo.toml",
-            "deny.toml",
-            ".github/workflows/ci.yml",
-            ".github/workflows/policy.yml",
-            ".github/actions/setup-rust/*",
-            "xtask/src/ci/*",
-            "xtask/src/commands/deny.rs",
-        ],
-    )
+    is_dependency_manifest(path)
+        || any_glob(
+            path,
+            &[
+                "fuzz/Cargo.toml",
+                "deny.toml",
+                ".github/workflows/ci.yml",
+                ".github/workflows/policy.yml",
+                ".github/actions/setup-rust/*",
+                "xtask/src/ci/*",
+                "xtask/src/commands/deny.rs",
+            ],
+        )
 }
 
 /// Files that can break a macOS build or test run while the Linux lanes pass:
@@ -195,25 +201,19 @@ pub(crate) fn is_advisory_input(path: &str) -> bool {
 /// request, and `a_build_input_change_runs_the_macos_lane_on_a_pull_request`
 /// pins the list.
 pub(crate) fn is_macos_input(path: &str) -> bool {
-    any_glob(
-        path,
-        &[
-            "Cargo.toml",
-            "Cargo.lock",
-            "crates/*/Cargo.toml",
-            "*/build.rs",
-            "bench/Cargo.toml",
-            "bench/*/Cargo.toml",
-            "test-support/Cargo.toml",
-            "xtask/Cargo.toml",
-            ".cargo/*",
-            ".config/*",
-            ".github/workflows/ci.yml",
-            ".github/workflows/tests.yml",
-            ".github/actions/setup-rust/*",
-            "xtask/src/ci/*",
-        ],
-    )
+    is_dependency_manifest(path)
+        || any_glob(
+            path,
+            &[
+                "*/build.rs",
+                ".cargo/*",
+                ".config/*",
+                ".github/workflows/ci.yml",
+                ".github/workflows/tests.yml",
+                ".github/actions/setup-rust/*",
+                "xtask/src/ci/*",
+            ],
+        )
 }
 
 /// Files that can change whether a release assembles: the release workflows,
@@ -238,6 +238,31 @@ pub(crate) fn is_release_tooling(path: &str) -> bool {
             "xtask/src/ci/*",
         ],
     )
+}
+
+/// Files that can change whether the example image builds or starts: its
+/// Dockerfile and build context, the example it packages, the build scripts and
+/// dependency inputs its graph reads, and the job's own plumbing. The selector's
+/// own files are included, so an edit that drops an entry runs the job on its
+/// own pull request, and `the_example_image_selects_its_inputs` pins the list.
+pub(crate) fn is_example_image_input(path: &str) -> bool {
+    is_dependency_manifest(path)
+        || any_glob(
+            path,
+            &[
+                "examples/docker/*",
+                ".dockerignore",
+                ".cargo/*",
+                "crates/spate/examples/*",
+                "*/build.rs",
+                ".github/workflows/ci.yml",
+                ".github/workflows/example-image.yml",
+                ".github/actions/setup-rust/*",
+                "xtask/src/ci/*",
+                "xtask/src/run.rs",
+                "xtask/src/commands/example_image.rs",
+            ],
+        )
 }
 
 /// The lanes of each multi-lane service that need a CI job beyond the one
@@ -287,6 +312,7 @@ pub(crate) fn classify(
         out.manifests = true;
         out.advisories = true;
         out.release_tooling = true;
+        out.example_image = true;
         out.macos = true;
         bench_pkgs = graph.all_bench_pkgs().clone();
         out.container_pkgs = graph.all_container_pkgs().clone();
@@ -297,6 +323,7 @@ pub(crate) fn classify(
             out.manifests |= is_manifest(path);
             out.advisories |= is_advisory_input(path);
             out.release_tooling |= is_release_tooling(path);
+            out.example_image |= is_example_image_input(path);
             out.macos |= is_macos_input(path);
             // Outside `kind_of` because `scope` widens any crate-less Rust path
             // to the whole workspace.
@@ -1388,6 +1415,95 @@ mod tests {
                 "release-tooling=true",
             ),
             ("docs/a.md", "release-tooling=false"),
+        ] {
+            let rendered = run(&[path]).to_string();
+            assert!(rendered.lines().any(|l| l == line), "{path}: {rendered}");
+        }
+    }
+
+    /// The image's inputs and the job's plumbing select the example image job,
+    /// and the rest of `examples/`, `crates/` and `.github/` does not.
+    #[test]
+    fn the_example_image_selects_its_inputs_and_plumbing() {
+        for path in [
+            "examples/docker/Dockerfile",
+            ".dockerignore",
+            ".cargo/config.toml",
+            "crates/spate/examples/kafka_avro_to_clickhouse.rs",
+            "crates/spate-kafka/build.rs",
+            "Cargo.lock",
+            "crates/spate-kafka/Cargo.toml",
+            ".github/workflows/ci.yml",
+            ".github/workflows/example-image.yml",
+            ".github/actions/setup-rust/action.yml",
+            "xtask/src/ci/classify.rs",
+            "xtask/src/run.rs",
+            "xtask/src/commands/example_image.rs",
+        ] {
+            assert!(run(&[path]).example_image, "{path}");
+        }
+        for path in [
+            "crates/spate/src/lib.rs",
+            "examples/pipeline/src/main.rs",
+            "ci/kafka/apache/Dockerfile",
+            "fuzz/Cargo.toml",
+            ".github/workflows/nightly.yml",
+            "docs/a.md",
+        ] {
+            assert!(!run(&[path]).example_image, "{path}");
+        }
+    }
+
+    /// The seven workspace manifests reach each selector that reads them, and
+    /// `fuzz/Cargo.toml` reaches the two selectors that always read it, not the
+    /// macOS lane or the image job.
+    #[test]
+    fn the_dependency_manifests_reach_each_selector() {
+        for path in [
+            "Cargo.toml",
+            "Cargo.lock",
+            "crates/spate/Cargo.toml",
+            "bench/Cargo.toml",
+            "bench/alloc/Cargo.toml",
+            "test-support/Cargo.toml",
+            "xtask/Cargo.toml",
+        ] {
+            assert!(
+                is_manifest(path)
+                    && is_advisory_input(path)
+                    && is_macos_input(path)
+                    && is_example_image_input(path),
+                "{path}"
+            );
+        }
+        assert!(is_manifest("fuzz/Cargo.toml") && is_advisory_input("fuzz/Cargo.toml"));
+        assert!(!is_macos_input("fuzz/Cargo.toml"));
+        assert!(!is_example_image_input("fuzz/Cargo.toml"));
+    }
+
+    /// A Dependabot bump of an image pin and a release pull request's lockfile
+    /// both select the image job, which the bot deferrals leave in place.
+    #[test]
+    fn a_bot_bump_keeps_the_example_image_job() {
+        for (author, path) in [
+            ("dependabot[bot]", "examples/docker/Dockerfile"),
+            ("spate-release[bot]", "Cargo.lock"),
+        ] {
+            let ctx = Context {
+                author: author.into(),
+            };
+            let paths = vec![path.to_string()];
+            let out = classify(&paths, Event::PullRequest, &ctx, &graph(), NONE);
+            assert!(out.example_image, "{author}: {path}");
+        }
+    }
+
+    /// The selection reaches the `$GITHUB_OUTPUT` block the workflow reads.
+    #[test]
+    fn the_example_image_selection_reaches_the_output() {
+        for (path, line) in [
+            ("examples/docker/Dockerfile", "example-image=true"),
+            ("docs/a.md", "example-image=false"),
         ] {
             let rendered = run(&[path]).to_string();
             assert!(rendered.lines().any(|l| l == line), "{path}: {rendered}");

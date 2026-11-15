@@ -17,6 +17,7 @@ pub(crate) struct Outputs {
     pub(crate) manifests: bool,
     pub(crate) advisories: bool,
     pub(crate) release_tooling: bool,
+    pub(crate) example_image: bool,
     pub(crate) macos: bool,
     pub(crate) container_pkgs: BTreeSet<String>,
     pub(crate) semver_pkgs: BTreeSet<String>,
@@ -175,6 +176,7 @@ impl fmt::Display for Outputs {
         writeln!(f, "manifests={}", self.manifests)?;
         writeln!(f, "advisories={}", self.advisories)?;
         writeln!(f, "release-tooling={}", self.release_tooling)?;
+        writeln!(f, "example-image={}", self.example_image)?;
         writeln!(f, "macos={}", self.macos)?;
         // One line each. `$GITHUB_OUTPUT` is a key=value file, so a multi-line
         // value needs heredoc delimiters that the value can itself contain.

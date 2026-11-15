@@ -100,6 +100,7 @@ Its other jobs run commands of their own, so a green `cargo xtask ci` on your ma
 | `Declared version floors build` | The type check with each direct dependency at its lowest declared version, when a manifest changes |
 | `Fuzz targets build`, `Build site` | The fuzz harness and the website |
 | `Release dry run` | A rehearsal of the release, of up to an hour, when a pull request changes release tooling |
+| `Example image` | `cargo xtask example-image`, when a pull request changes the example image's inputs or its dependencies |
 | `Analyze (<language>)` | CodeQL's analysis, on every pull request |
 
 [How CI differs from your machine](05-flaky-tests.md#how-ci-differs-from-your-machine) says what changes for a test on those runners.
@@ -122,6 +123,7 @@ These sit outside `ci`, by cost or by what they need:
 | `cargo xtask bench ab`, `cargo xtask bench arms`, `cargo xtask bench list`, `cargo xtask bench compare` | Wall clock; never a gate |
 | `cargo xtask attribution` | `THIRD-PARTY.md` is regenerated at release; the nightly tier checks that it still generates |
 | `cargo xtask fuzz build`, `cargo xtask fuzz run` | Needs a nightly toolchain; the nightly tier fuzzes |
+| `cargo xtask example-image` | Needs Docker and builds the image, several minutes cold; CI runs it on pull requests that change the image's inputs |
 | `cargo xtask miri` | Needs a nightly toolchain with the `miri` and `rust-src` components; CI runs it whenever it runs the test suite |
 | `cargo xtask mutants` | Runs a package's suite once per mutant; CI runs it on each pull request, advisory |
 | `cargo xtask powerset` | Every combination of features; the weekly workflow runs it in shards, since one run takes longer than a job may |

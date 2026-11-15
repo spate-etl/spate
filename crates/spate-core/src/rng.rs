@@ -13,14 +13,13 @@ const GAMMA: u64 = 0x9E37_79B9_7F4A_7C15;
 /// Calls to [`fresh_seed`] in this process.
 static SEEDS_TAKEN: AtomicU64 = AtomicU64::new(0);
 
-/// A seed no other call in this process returns, and that another process
-/// returns only by chance.
+/// A seed that another call, in this process or another, returns only by
+/// chance.
 ///
 /// It is the wall-clock time in nanoseconds, XOR the process id shifted to
-/// bit 48, XOR a per-process call count shifted to bit 40. Two calls in one
-/// process differ by the count. Two processes collide only when their clocks
-/// agree in the low 40 bits, which the count and the process id leave
-/// untouched.
+/// bit 48, XOR a per-process call count shifted to bit 40. The low 40 bits
+/// carry the clock alone, so two calls collide only when their clocks agree
+/// in those bits and the higher bits cancel.
 ///
 /// The value is predictable to anyone who knows the time and the process id.
 /// It spreads retries apart and separates runs; it is no secret.

@@ -1,11 +1,13 @@
-//! Capped exponential backoff with deterministic pseudo-jitter, for retry
+//! Capped exponential backoff with seeded pseudo-jitter, for retry
 //! loops in the engine and in connectors.
 
 use crate::rng::SplitMix64;
 use std::time::Duration;
 
-/// The fraction of each retry delay that jitter can take away, unless a
-/// caller sets another: a delay lies in `[0.8 × step, step]`.
+/// The jitter fraction that [`RetryConfig::default`](crate::sink::RetryConfig)
+/// uses and connector retry schedules pass to
+/// [`with_jitter`](Backoff::with_jitter): a delay lies in
+/// `[0.8 × step, step]`. [`Backoff::new`] sets no jitter.
 ///
 /// Replicas of a component that fail together retry on the same schedule.
 /// Without jitter they come back at the same instants, and a backend that is
@@ -118,7 +120,8 @@ impl Backoff {
     ///
     /// `1.0` is full jitter. A fraction above `1.0` acts as `1.0`, and a
     /// negative or non-finite one as no jitter. Instances draw alike unless
-    /// each takes its own [`with_seed`](Backoff::with_seed).
+    /// each takes its own [`with_seed`](Backoff::with_seed) or
+    /// [`with_fresh_seed`](Backoff::with_fresh_seed).
     #[must_use]
     pub const fn with_jitter(self, fraction: f64) -> Self {
         Backoff {
@@ -129,8 +132,9 @@ impl Backoff {
 
     /// This backoff, drawing its jitter from `seed`.
     ///
-    /// An instance given no seed draws as seed `0`. A seed given here replaces
-    /// [`with_fresh_seed`](Backoff::with_fresh_seed).
+    /// An instance given neither this nor
+    /// [`with_fresh_seed`](Backoff::with_fresh_seed) draws as seed `0`. A seed
+    /// given here replaces `with_fresh_seed`.
     #[must_use]
     pub const fn with_seed(self, seed: u64) -> Self {
         Backoff {

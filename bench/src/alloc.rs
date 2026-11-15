@@ -39,6 +39,11 @@
 //! `alloc_count_per_iter` is what catches that one, which is the reason both
 //! figures are reported rather than only the bytes.
 //!
+//! The allocation tests and snapshots count with test-support's allocator,
+//! `spate_test_support::alloc`, which charges the same bytes and keeps every
+//! `realloc` as a call of its own, a shrinking or equal one included. Its call
+//! counts are not compared with the ones here.
+//!
 //! # Why `installed` allocates rather than reading a flag
 //!
 //! A hand-written `fn main` that does not use [`crate::bench_main!`] gets no

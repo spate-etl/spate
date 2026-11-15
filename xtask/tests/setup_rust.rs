@@ -194,13 +194,19 @@ fn a_release_server_checksum_failure_retries() {
     assert!(shim.defaulted());
 }
 
-/// Any other failure ends the step at once with rustup's status.
+/// Any other failure ends the step at once with rustup's status, and its
+/// error reaches the log.
 #[test]
 fn another_failure_does_not_retry() {
     let shim = Shim::new("other");
     shim.fails(1, "error: no such toolchain\n", 7);
     let out = shim.run("");
     assert_eq!(out.status.code(), Some(7), "{}", stderr(&out));
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("error: no such toolchain\n"),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
     assert_eq!(shim.installs(), 1);
     assert!(shim.calls("sleep").is_empty());
     assert!(!shim.defaulted());

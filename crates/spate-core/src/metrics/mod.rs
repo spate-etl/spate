@@ -146,8 +146,8 @@ pub enum E2eBasis {
     #[default]
     Ingest,
     /// The record's event time (e.g. Kafka message timestamp). Sensitive to
-    /// clock skew, but reflects true upstream delay. A batch whose oldest
-    /// record has no event time is aged from ingest instead.
+    /// clock skew, but reflects true upstream delay. A batch in
+    /// which no record has an event time is aged from ingest instead.
     Event,
 }
 

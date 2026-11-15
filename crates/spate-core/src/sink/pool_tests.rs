@@ -3008,11 +3008,19 @@ fn ingest_latency_ignores_the_pool_clock() {
     assert!(sum < 3600.0, "aged on the pool clock: {sum}");
 }
 
-/// The end-to-end latency one chunk reports on the event basis, when the
-/// chunk's minimum event time is `oldest_event_ms`.
-fn event_basis_latency_sum(oldest_event_ms: i64) -> f64 {
+/// The end-to-end latency one batch reports on the event basis. The batch
+/// holds one single-row chunk per entry of `events`, each with that minimum
+/// event time, and its oldest record was ingested `ingest_age` ago.
+fn event_basis_latency_sum(events: &[i64], ingest_age: Duration) -> f64 {
     let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
     let handle = recorder.handle();
+    let config = SinkPoolConfig {
+        batch: BatchConfig {
+            max_rows: events.len().try_into().expect("a small batch"),
+            ..small_batches().batch
+        },
+        ..small_batches()
+    };
     metrics::with_local_recorder(&recorder, || {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -3021,21 +3029,23 @@ fn event_basis_latency_sum(oldest_event_ms: i64) -> f64 {
             .expect("runtime");
         rt.block_on(async {
             let clock = TestClock::frozen();
-            let f = fixture_with_basis(
-                Some(Arc::clone(&clock)),
-                1,
-                1,
-                small_batches(),
-                16,
-                E2eBasis::Event,
-            );
-            let (ack, ack_rx) = AckRef::test_pair();
-            let mut sealed = chunk(1, 1, &ack);
-            sealed.oldest_event_ms = oldest_event_ms;
-            f.queues.try_send(0, sealed).unwrap();
-            drop(ack);
+            let f = fixture_with_basis(Some(Arc::clone(&clock)), 1, 1, config, 16, E2eBasis::Event);
+            let oldest_ingest = std::time::Instant::now()
+                .checked_sub(ingest_age)
+                .expect("the monotonic clock is past the ingest age");
+            let mut acks = Vec::new();
+            for &oldest_event_ms in events {
+                let (ack, ack_rx) = AckRef::test_pair();
+                let mut sealed = chunk(1, 1, &ack);
+                sealed.oldest_event_ms = oldest_event_ms;
+                sealed.oldest_ingest = oldest_ingest;
+                f.queues.try_send(0, sealed).unwrap();
+                acks.push(ack_rx);
+            }
             paused_hour().await;
-            assert_eq!(ack_rx.try_recv().unwrap().status, AckStatus::Delivered);
+            for ack_rx in acks {
+                assert_eq!(ack_rx.try_recv().unwrap().status, AckStatus::Delivered);
+            }
             drop(f.queues);
             f.pool.drain(Duration::ZERO).await;
         });
@@ -3043,24 +3053,39 @@ fn event_basis_latency_sum(oldest_event_ms: i64) -> f64 {
     sample_value(&handle.render(), "spate_e2e_latency_seconds_sum", &[])
 }
 
-/// On the event basis, a chunk with no event time ages from ingest. The
-/// batch's start must not read 0, which is 1970 and about 1.7e12 ms of age.
+/// Milliseconds since the epoch two hours before now on the wall clock.
+fn two_hours_ago_ms() -> i64 {
+    crate::clock::wall_now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| i64::try_from(d.as_millis()).unwrap_or(0) - 7_200_000)
+        .expect("after the epoch")
+}
+
+/// On the event basis, a chunk with no event time ages from ingest. Wall time
+/// only adds to the age, so only a hang reaches the upper bound.
 #[test]
 fn a_chunk_without_event_time_ages_from_ingest_on_the_event_basis() {
-    let sum = event_basis_latency_sum(NO_EVENT_TIME_MS);
-    assert!(sum < 3600.0, "aged from 1970: {sum}");
+    let sum = event_basis_latency_sum(&[NO_EVENT_TIME_MS], Duration::from_secs(600));
+    assert!(
+        (600.0..3600.0).contains(&sum),
+        "not aged from ingest: {sum}"
+    );
 }
 
 /// On the event basis, a chunk with an event time two hours old ages from
 /// that time. Wall time only adds to the age, so the bound is one-sided.
 #[test]
 fn a_chunk_with_an_event_time_ages_from_that_time_on_the_event_basis() {
-    let two_hours_ago = crate::clock::wall_now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| i64::try_from(d.as_millis()).unwrap_or(0) - 7_200_000)
-        .expect("after the epoch");
-    let sum = event_basis_latency_sum(two_hours_ago);
+    let sum = event_basis_latency_sum(&[two_hours_ago_ms()], Duration::ZERO);
     assert!(sum >= 7200.0, "not aged from its event time: {sum}");
+}
+
+/// A later chunk with no event time leaves the batch aged from an earlier
+/// chunk's event time.
+#[test]
+fn a_batch_keeps_its_event_time_past_a_chunk_without_one() {
+    let sum = event_basis_latency_sum(&[two_hours_ago_ms(), NO_EVENT_TIME_MS], Duration::ZERO);
+    assert!(sum >= 7200.0, "aged from ingest: {sum}");
 }
 
 /// `SinkPool` stays `Send` and `Sync` with the clock it holds.

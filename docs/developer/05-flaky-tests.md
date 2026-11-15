@@ -54,6 +54,7 @@ wait_until(HANG, "every consumer in a stable group", || {
 
 When the code returns a retryable error, read again, as a real caller would.
 Assert on the first answer that is not retryable.
+For a deserializer that returns `NotReady`, `spate_test::deserialize_until_ready` replays the payload until it gets another answer.
 A test that checks for the retryable error itself asserts on it directly.
 
 After creating a topic, wait until the broker lists it.

@@ -1,6 +1,8 @@
 //! The release: the workspace version and the literals that carry it, and the
 //! sequence that assembles, publishes and closes out a version.
 
+#[cfg(test)]
+mod fakes;
 mod io;
 pub(crate) mod post;
 mod sequence;

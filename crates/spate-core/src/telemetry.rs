@@ -67,8 +67,8 @@ pub mod cpu;
 /// on the lock-free fast path.
 ///
 /// On the system clock, whichever clock feeds a limiter. A reading from
-/// before the base counts as the base, which only keeps that event off the
-/// fast path.
+/// before the base counts as the base, so a window that ends before it
+/// never arms the fast path and the mutex path decides.
 fn base_instant() -> Instant {
     static BASE: OnceLock<Instant> = OnceLock::new();
     *BASE.get_or_init(|| SystemClock.now())

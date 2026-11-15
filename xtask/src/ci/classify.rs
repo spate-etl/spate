@@ -154,9 +154,9 @@ pub(crate) fn is_manifest(path: &str) -> bool {
         )
 }
 
-/// The workspace manifests and the lockfile, which every dependency selector
-/// reads. A manifest the graph gains is listed here, once, and not in each
-/// selector.
+/// The workspace manifests and the lockfile that the dependency selectors share.
+/// `fuzz/Cargo.toml` and the tooling manifests stay in the selectors that read
+/// them, and a manifest listed here is listed once.
 fn is_dependency_manifest(path: &str) -> bool {
     any_glob(
         path,
@@ -244,7 +244,8 @@ pub(crate) fn is_release_tooling(path: &str) -> bool {
 /// Dockerfile and build context, the example it packages, the build scripts and
 /// dependency inputs its graph reads, and the job's own plumbing. The selector's
 /// own files are included, so an edit that drops an entry runs the job on its
-/// own pull request, and `the_example_image_selects_its_inputs` pins the list.
+/// own pull request, and `the_example_image_selects_its_inputs_and_plumbing`
+/// pins the list.
 pub(crate) fn is_example_image_input(path: &str) -> bool {
     is_dependency_manifest(path)
         || any_glob(
@@ -260,6 +261,7 @@ pub(crate) fn is_example_image_input(path: &str) -> bool {
                 ".github/actions/setup-rust/*",
                 "xtask/src/ci/*",
                 "xtask/src/run.rs",
+                "xtask/src/commands/mod.rs",
                 "xtask/src/commands/example_image.rs",
             ],
         )
@@ -1120,6 +1122,7 @@ mod tests {
                 && out.manifests
                 && out.advisories
                 && out.release_tooling
+                && out.example_image
                 && out.macos
         );
         assert_eq!(out.container_pkgs, *graph().all_container_pkgs());
@@ -1438,6 +1441,7 @@ mod tests {
             ".github/actions/setup-rust/action.yml",
             "xtask/src/ci/classify.rs",
             "xtask/src/run.rs",
+            "xtask/src/commands/mod.rs",
             "xtask/src/commands/example_image.rs",
         ] {
             assert!(run(&[path]).example_image, "{path}");

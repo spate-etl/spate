@@ -1,7 +1,7 @@
 //! A local TCP server that hands each connection to a handler on a thread of
 //! its own.
 
-use std::io;
+use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;
 
@@ -51,10 +51,55 @@ pub fn silent_server() -> SocketAddr {
     })
 }
 
+/// Reads a request up to the end of its headers and returns them, or what
+/// arrived before the client closed.
+pub(crate) fn read_head(stream: &mut TcpStream) -> io::Result<Vec<u8>> {
+    let mut request = Vec::new();
+    let mut buf = [0u8; 4096];
+    while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+        let n = stream.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        request.extend_from_slice(&buf[..n]);
+    }
+    Ok(request)
+}
+
+/// The request target's path and query.
+pub(crate) fn target(request: &[u8]) -> (String, String) {
+    let line = String::from_utf8_lossy(request);
+    let target = line.split_whitespace().nth(1).unwrap_or_default();
+    let (path, query) = target.split_once('?').unwrap_or((target, ""));
+    (path.to_owned(), query.to_owned())
+}
+
+/// A response head of `content_type` declaring `length` body bytes, with
+/// `headers` (each ending `\r\n`) after the content type.
+pub(crate) fn head(status: &str, content_type: &str, headers: &str, length: u64) -> String {
+    format!(
+        "HTTP/1.1 {status}\r\ncontent-type: {content_type}\r\n{headers}\
+         content-length: {length}\r\n\r\n"
+    )
+}
+
+/// Writes a response of `content_type` with `headers` and `body`.
+pub(crate) fn respond(
+    stream: &mut TcpStream,
+    status: &str,
+    content_type: &str,
+    headers: &str,
+    body: &[u8],
+) -> io::Result<()> {
+    let length = u64::try_from(body.len()).expect("a body fits in u64");
+    stream.write_all(head(status, content_type, headers, length).as_bytes())?;
+    stream.write_all(body)?;
+    stream.flush()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::{Read as _, Write as _};
     use std::net::Shutdown;
     use std::time::Duration;
 

@@ -2,11 +2,15 @@
 //! serving until the process exits.
 
 use std::collections::BTreeMap;
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
 use std::net::TcpStream;
 use std::sync::Arc;
 
+use crate::serve::{head, read_head, respond, target};
 use crate::serve_each;
+
+/// The content type of every S3 stub response.
+const XML: &str = "application/xml";
 
 /// The body of an S3 `AccessDenied` error.
 pub const ACCESS_DENIED: &str = "<Error><Code>AccessDenied</Code><Message>denied</Message></Error>";
@@ -22,6 +26,7 @@ pub fn reply_server(status_line: &'static str, body: impl Into<String>) -> Strin
             respond(
                 &mut stream,
                 status_line,
+                XML,
                 "connection: close\r\n",
                 body.as_bytes(),
             )
@@ -35,7 +40,7 @@ pub fn reply_server(status_line: &'static str, body: impl Into<String>) -> Strin
 pub fn oversized_failure_server(declared: u64, sent: usize) -> String {
     url(serve_each(move |mut stream| {
         let _ = read_head(&mut stream);
-        let _ = write!(stream, "{}", head("403 Forbidden", "", declared));
+        let _ = write!(stream, "{}", head("403 Forbidden", XML, "", declared));
         let half = vec![b'~'; sent / 2];
         for _ in 0..2 {
             if stream
@@ -76,6 +81,7 @@ pub fn listing_server(pages: Vec<String>) -> String {
             respond(
                 &mut stream,
                 status,
+                XML,
                 "connection: close\r\n",
                 body.as_bytes(),
             )
@@ -132,6 +138,7 @@ fn serve_bucket(
         respond(
             stream,
             status,
+            XML,
             "last-modified: Sun, 11 Oct 2026 13:38:17 GMT\r\n",
             body,
         )?;
@@ -142,48 +149,10 @@ fn url(addr: std::net::SocketAddr) -> String {
     format!("http://{addr}")
 }
 
-/// Reads a request up to the end of its headers and returns them, or what
-/// arrived before the client closed.
-fn read_head(stream: &mut TcpStream) -> io::Result<Vec<u8>> {
-    let mut request = Vec::new();
-    let mut buf = [0u8; 4096];
-    while !request.windows(4).any(|w| w == b"\r\n\r\n") {
-        let n = stream.read(&mut buf)?;
-        if n == 0 {
-            break;
-        }
-        request.extend_from_slice(&buf[..n]);
-    }
-    Ok(request)
-}
-
-/// The request target's path and query.
-fn target(request: &[u8]) -> (String, String) {
-    let line = String::from_utf8_lossy(request);
-    let target = line.split_whitespace().nth(1).unwrap_or_default();
-    let (path, query) = target.split_once('?').unwrap_or((target, ""));
-    (path.to_owned(), query.to_owned())
-}
-
-/// An XML response head declaring `length` body bytes, with `headers` (each
-/// ending `\r\n`) after the content type.
-fn head(status: &str, headers: &str, length: u64) -> String {
-    format!(
-        "HTTP/1.1 {status}\r\ncontent-type: application/xml\r\n{headers}\
-         content-length: {length}\r\n\r\n"
-    )
-}
-
-fn respond(stream: &mut TcpStream, status: &str, headers: &str, body: &[u8]) -> io::Result<()> {
-    let length = u64::try_from(body.len()).expect("a body fits in u64");
-    stream.write_all(head(status, headers, length).as_bytes())?;
-    stream.write_all(body)?;
-    stream.flush()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Read as _;
     use std::time::Duration;
 
     /// A read that waits this long has hung.

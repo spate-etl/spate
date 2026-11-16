@@ -37,6 +37,9 @@ pub(crate) fn frozen() -> (Arc<TestClock>, SyncClock) {
 ///
 /// Returns the replica's URL, on the mock's host, and a receiver that yields once per held
 /// connection.
+///
+/// It keeps its own accept loop, since one listener decides in accept order whether a
+/// connection is relayed or held, and reports each hold.
 pub(crate) fn silent_after(
     io: &Runtime,
     mock: &clickhouse::test::Mock,

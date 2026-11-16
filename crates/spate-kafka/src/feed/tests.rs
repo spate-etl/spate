@@ -25,7 +25,7 @@ use crate::client::testing::raw_config;
 use crate::testutil::{assert_returns, returns_within};
 use rdkafka::Offset;
 use rdkafka::error::{KafkaError, RDKafkaErrorCode as C};
-use spate_core::backoff::Backoff;
+use spate_core::backoff::{Backoff, DEFAULT_JITTER};
 use spate_core::clock::SyncClock;
 use spate_core::clock::TestClock;
 use spate_core::config::FeedSection;
@@ -369,6 +369,15 @@ fn a_resend_for_a_partition_given_up_is_dropped() {
     assert!(st.resends.is_empty());
 }
 
+/// The first step of the resend schedule. A first wait is never longer.
+const FIRST_STEP: Duration = Duration::from_millis(200);
+
+/// The shortest wait the resend schedule draws for `step`, less a nanosecond
+/// for the `f64` arithmetic the draw is made in.
+fn earliest_wait(step: Duration) -> Duration {
+    step.mul_f64(1.0 - DEFAULT_JITTER) - Duration::from_nanos(1)
+}
+
 /// Pins that a write failed transiently is due again once its backoff has
 /// passed on the feed's clock, and not before.
 #[test]
@@ -383,13 +392,12 @@ fn a_failed_write_is_due_after_its_backoff_on_the_feed_clock() {
     let write = moving(&core, receipt);
     core.settle(*write, Err(failure(C::MessageTimedOut)));
     let mut st = core.lock();
-    let first = Duration::from_millis(200);
-    let early = now + first - Duration::from_nanos(1);
+    let early = now + earliest_wait(FIRST_STEP) - Duration::from_nanos(1);
     assert!(
         take_due(&mut st, early).is_empty(),
         "not due before its backoff"
     );
-    assert_eq!(take_due(&mut st, now + first).len(), 1);
+    assert_eq!(take_due(&mut st, now + FIRST_STEP).len(), 1);
 }
 
 /// Pins that an attempt write failed transiently is due again once the first
@@ -404,13 +412,12 @@ fn a_failed_attempt_write_is_due_after_its_backoff_on_the_feed_clock() {
     let now = core.clock().now();
     core.settle(write, Err(failure(C::MessageTimedOut)));
     let mut st = core.lock();
-    let first = Duration::from_millis(200);
-    let early = now + first - Duration::from_nanos(1);
+    let early = now + earliest_wait(FIRST_STEP) - Duration::from_nanos(1);
     assert!(
         take_due(&mut st, early).is_empty(),
         "not due before its backoff"
     );
-    assert_eq!(take_due(&mut st, now + first).len(), 1);
+    assert_eq!(take_due(&mut st, now + FIRST_STEP).len(), 1);
 }
 
 /// Pins how a gate fence settles: confirmed, it changes nothing the feed
@@ -1452,12 +1459,10 @@ fn a_refused_attempt_or_tombstone_write_stops_the_feed() {
     assert!(st.resends.is_empty());
 }
 
-/// Pins that a write failing again waits longer each time, holding at the
-/// cap: a tombstone failed seven times is due 200 ms, 400 ms, 800 ms, 1.6 s,
-/// 3.2 s, then 5 s twice after each failure, and its warn line logs each
-/// wait.
-#[test]
-fn a_write_failing_again_backs_off_further_each_time() {
+/// Fails a tombstone seven times on a fresh feed at one instant, and returns
+/// how long after that instant each failure queues it to be sent again,
+/// with the warn lines logged.
+fn seven_resend_waits() -> (Vec<Duration>, Vec<String>) {
     let core = core(10);
     let position = {
         let mut st = core.lock();
@@ -1471,26 +1476,51 @@ fn a_write_failing_again_backs_off_further_each_time() {
         0,
         position,
     ));
-    let schedule = [200, 400, 800, 1600, 3200, 5000, 5000].map(Duration::from_millis);
     let now = core.clock().now();
     let mut waits = Vec::new();
     let lines = spate_test::capture_logs(tracing::Level::WARN, || {
-        for _ in schedule {
+        for _ in 0..7 {
             core.settle(write, Err(failure(C::MessageTimedOut)));
             let (due, queued) = core.lock().resends.pop().expect("queued to send again");
             waits.push(due - now);
             write = queued;
         }
     });
-    assert_eq!(waits, schedule);
+    (waits, lines)
+}
+
+/// Pins that a write failing again waits longer each time, holding at the
+/// cap: a tombstone failed seven times is due within 200 ms, 400 ms, 800 ms,
+/// 1.6 s, 3.2 s, then 5 s twice after each failure, each wait shortened by at
+/// most its jitter, and its warn line logs each wait.
+#[test]
+fn a_write_failing_again_backs_off_further_each_time() {
+    let (waits, lines) = seven_resend_waits();
+    let schedule = [200, 400, 800, 1600, 3200, 5000, 5000].map(Duration::from_millis);
+    assert!(
+        waits
+            .iter()
+            .zip(schedule)
+            .all(|(&wait, step)| earliest_wait(step) <= wait && wait <= step),
+        "{waits:?} against {schedule:?}"
+    );
     let logged: Vec<&String> = lines
         .iter()
         .filter(|line| line.contains("queued to send again after the backoff"))
         .collect();
     assert_eq!(logged.len(), schedule.len(), "{lines:#?}");
-    for (line, wait) in logged.iter().zip(schedule) {
+    for (line, wait) in logged.iter().zip(&waits) {
         assert!(line.contains(&format!("retry_in={wait:?}")), "{line}");
     }
+}
+
+/// Two writes failing at the same instants are sent again apart. With no
+/// jitter, or one seed for every copy of the schedule, their waits match.
+#[test]
+fn two_failed_writes_are_sent_again_apart() {
+    let (first, _) = seven_resend_waits();
+    let (second, _) = seven_resend_waits();
+    assert_ne!(first, second, "two writes drew alike");
 }
 
 /// Pins that a write failed transiently on a feed that drops it, stopped or

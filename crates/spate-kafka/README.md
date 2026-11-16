@@ -233,7 +233,8 @@ says how to create each topic.
 
 A write that fails transiently is sent again after a backoff from 200 ms up to
 5 s while the worker still owns its partition, and only its own partition waits
-for it.
+for it. Each wait is drawn at random between 80% and 100% of its step, so writes
+that fail together are sent again apart.
 [How a unit finishes](https://spate.kainth.dev/docs/user-guide/connectors/feeds/kafka#how-a-unit-finishes)
 and
 [Counting deliveries](https://spate.kainth.dev/docs/user-guide/connectors/feeds/kafka#counting-deliveries)

@@ -1,6 +1,7 @@
 //! An S3 store in a container, chosen by `SPATE_S3_LANE`: a fixed access key
-//! pair, the signed call that creates a bucket, and a variant that publishes
-//! a bucket's storage notifications to a Kafka broker.
+//! pair, a client builder signing with it, the signed call that creates a
+//! bucket, and a variant that publishes a bucket's storage notifications to a
+//! Kafka broker.
 //!
 //! Each lane under `ci/s3/` is a store, and each store has an arm in
 //! [`Store`] holding what its startup needs that the S3 API does not carry.
@@ -308,6 +309,19 @@ impl S3Store {
         self.container.is_running().map_err(|e| e.to_string())
     }
 
+    /// An `object_store` client builder for `bucket` on this store, signing
+    /// with [`ACCESS_KEY`] and [`SECRET_KEY`] over plain HTTP.
+    #[must_use]
+    pub fn client_builder(&self, bucket: &str) -> AmazonS3Builder {
+        AmazonS3Builder::new()
+            .with_endpoint(self.endpoint())
+            .with_allow_http(true)
+            .with_bucket_name(bucket)
+            .with_region(REGION)
+            .with_access_key_id(ACCESS_KEY)
+            .with_secret_access_key(SECRET_KEY)
+    }
+
     /// Creates `bucket` with a signed `PUT`. Stores refuse unsigned writes.
     ///
     /// # Errors
@@ -320,13 +334,8 @@ impl S3Store {
     /// Panics when called from async code on a tokio runtime. Call it through
     /// `tokio::task::spawn_blocking` there.
     pub fn create_bucket(&self, bucket: &str) -> Result<(), String> {
-        let store = AmazonS3Builder::new()
-            .with_endpoint(self.endpoint())
-            .with_allow_http(true)
-            .with_bucket_name(bucket)
-            .with_region(REGION)
-            .with_access_key_id(ACCESS_KEY)
-            .with_secret_access_key(SECRET_KEY)
+        let store = self
+            .client_builder(bucket)
             .build()
             .map_err(|e| format!("S3 client for {bucket}: {e}"))?;
         let runtime = tokio::runtime::Builder::new_current_thread()

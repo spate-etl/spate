@@ -48,6 +48,7 @@ spate-test-support = { workspace = true, features = ["s3", "tls"] }
 spate-json = { workspace = true }
 crc32fast = { workspace = true }
 miniz_oxide = { workspace = true }
+spate-bench = { workspace = true }
 gungraun = { workspace = true }
 proptest = { workspace = true }
 tempfile = { workspace = true }
@@ -65,6 +66,11 @@ harness = false
 # The allocation snapshot, driven by `cargo xtask bench alloc`.
 [[bench]]
 name = "framing_alloc"
+harness = false
+
+# The wall-clock A/B tier, driven by `cargo xtask bench ab`.
+[[bench]]
+name = "framing_wall"
 harness = false
 
 [lints]

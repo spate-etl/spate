@@ -1,15 +1,23 @@
-//! The framing rigs both the counted tier and the allocation snapshot drive:
-//! the objects one framing job reads, the codec they are stored under, and
-//! the record count the framer must emit.
+//! The framing rigs the counted tier, the allocation snapshot and the
+//! wall-clock tier drive: the objects one framing job reads, the codec they
+//! are stored under, and the record count the framer must emit. The drives
+//! that run a rig through the crate live here too, so every target measures
+//! the same call.
 //!
 //! Included with `#[path]`: a bench target is its own crate, so two targets
 //! measure one workload only by compiling the same source. Each includer also
 //! declares `mod ndjson` from `support/ndjson.rs`.
 
+#![allow(dead_code, reason = "each bench target uses a different subset")]
+
+use flate2::write::MultiGzDecoder;
 use spate_json::NdjsonFramer;
 use spate_s3::Compression;
-use spate_s3::bench_seams::MakeFramer;
+use spate_s3::bench_seams::{MakeFramer, frame_objects, frame_range};
+use std::hint::black_box;
+use std::io::{self, Write as _};
 use std::sync::Arc;
+use zstd::stream::{raw, zio};
 
 use crate::ndjson;
 
@@ -21,6 +29,8 @@ pub(crate) struct Rig {
     /// What the framer must emit. Asserted rather than returned so a fixture
     /// that silently stops producing records cannot pass as a fast one.
     pub(crate) expect_records: usize,
+    /// The bytes the objects decode to, which a decoder floor must produce.
+    pub(crate) expect_bytes: usize,
 }
 
 pub(crate) fn make_framer() -> MakeFramer {
@@ -46,6 +56,7 @@ fn one_object(compression: Compression, suffix: &str, store: impl Fn(&[u8]) -> V
             ndjson::chunks(&stored),
         )],
         expect_records,
+        expect_bytes: body.len(),
     }
 }
 
@@ -76,6 +87,7 @@ fn multi_part_object(suffix: &str, store: impl Fn(&[u8]) -> Vec<u8>) -> Rig {
             ndjson::chunks(&stored),
         )],
         expect_records: ndjson::RECORDS,
+        expect_bytes: ndjson::whole_body().len(),
     }
 }
 
@@ -104,6 +116,7 @@ pub(crate) fn plain_mid_offset() -> Rig {
         compression: Compression::Auto,
         objects: vec![("part-000000.ndjson".to_owned(), ndjson::chunks(tail))],
         expect_records,
+        expect_bytes: tail.len(),
     }
 }
 
@@ -131,9 +144,11 @@ pub(crate) fn plain_range() -> RangeRig {
 /// Sixteen small members through one framer.
 pub(crate) fn plain_many_small() -> Rig {
     let (objects_n, records_each) = (ndjson::RUN_OBJECTS, ndjson::RUN_RECORDS_EACH);
+    let mut expect_bytes = 0;
     let objects = (0..objects_n)
         .map(|i| {
             let body = ndjson::body(i * records_each, records_each);
+            expect_bytes += body.len();
             (format!("part-{i:06}.ndjson"), ndjson::chunks(&body))
         })
         .collect();
@@ -141,5 +156,108 @@ pub(crate) fn plain_many_small() -> Rig {
         compression: Compression::Auto,
         objects,
         expect_records: objects_n * records_each,
+        expect_bytes,
+    }
+}
+
+/// Frames `rig` through `frame_objects` and returns the record count, which
+/// must be the rig's `expect_records`.
+pub(crate) fn frame(rig: &Rig) -> usize {
+    let records = frame_objects(rig.compression, make_framer(), black_box(&rig.objects))
+        .expect("the fixture frames cleanly");
+    assert_eq!(
+        records, rig.expect_records,
+        "framed record count changed; if that is intended, the fixture's \
+         expectation is the contract being edited"
+    );
+    records
+}
+
+/// Reads `rig`'s range through `frame_range` in the source's default GET
+/// windows and chunks, and returns the record count, which must be the rig's
+/// `expect_records`.
+pub(crate) fn frame_one_range(rig: &RangeRig) -> usize {
+    let records = frame_range(
+        make_framer(),
+        black_box(&rig.body),
+        rig.start,
+        rig.body.len() as u64,
+        ndjson::DELIMITER,
+        ndjson::RANGE_BYTES,
+        ndjson::CHUNK_BYTES,
+    )
+    .expect("the fixture frames cleanly");
+    assert_eq!(
+        records, rig.expect_records,
+        "a range framed a different record count; if that is intended, the \
+         fixture's expectation is the contract being edited"
+    );
+    records
+}
+
+/// The library a decoder floor runs: the one `framer.rs` builds for the
+/// object's codec.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Decoder {
+    /// `flate2::write::MultiGzDecoder`.
+    Gzip,
+    /// `zstd::stream::zio::Writer` over `zstd::stream::raw::Decoder`.
+    Zstd,
+}
+
+/// Counts the bytes written to it and keeps none, so a floor pays for
+/// decoding and nothing after it.
+struct Count(usize);
+
+impl io::Write for Count {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.0 += buf.len();
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Decodes each of `rig`'s objects through `decoder` with no framer, and
+/// returns the decoded byte count, which must be the rig's `expect_bytes`.
+///
+/// The decoder types follow `ObjectFramer`'s in `crates/spate-s3/src/framer.rs`,
+/// fed one chunk at a time and finished the same way, so the floor is the
+/// library's share of the framed case over the same bytes. Library defaults
+/// apply: the framer's zstd window cap is libzstd's default limit.
+pub(crate) fn decode(rig: &Rig, decoder: Decoder) -> usize {
+    let mut decoded = 0;
+    for (_, chunks) in black_box(&rig.objects) {
+        decoded += decode_object(chunks, decoder).expect("the fixture decodes cleanly");
+    }
+    assert_eq!(
+        decoded, rig.expect_bytes,
+        "the floor decoded a different byte count, so it is not reading every \
+         stream of the object"
+    );
+    decoded
+}
+
+fn decode_object(chunks: &[bytes::Bytes], decoder: Decoder) -> io::Result<usize> {
+    match decoder {
+        Decoder::Gzip => {
+            let mut gz = MultiGzDecoder::new(Count(0));
+            for chunk in chunks {
+                gz.write_all(chunk)?;
+            }
+            gz.try_finish()?;
+            Ok(gz.get_ref().0)
+        }
+        Decoder::Zstd => {
+            let decoder = raw::Decoder::new()?;
+            let mut zst = zio::Writer::new(Count(0), decoder);
+            for chunk in chunks {
+                zst.write_all(chunk)?;
+            }
+            zst.finish()?;
+            Ok(zst.writer().0)
+        }
     }
 }

@@ -650,9 +650,7 @@ mod tests {
     }
 
     /// A system trust store the client must leave unread.
-    fn unread() -> SystemRoots {
-        panic!("this client reads no system root")
-    }
+    const UNREAD: fn() -> SystemRoots = || panic!("this client reads no system root");
 
     /// Without the platform verifier the client verifies against the system
     /// roots and `root_ca`'s alone, system ones first.
@@ -697,10 +695,10 @@ mod tests {
         let private = TestCa::new("private");
         let root_ca = private.write(dir.path());
         for needs_root in [true, false] {
-            let roots = roots_for(Platform::Verifier, unread, Some(&root_ca), needs_root).unwrap();
+            let roots = roots_for(Platform::Verifier, UNREAD, Some(&root_ca), needs_root).unwrap();
             assert_eq!(roots, ClientRoots::Add(vec![private.der()]));
             for platform in [Platform::Verifier, Platform::Android] {
-                let roots = roots_for(platform, unread, None, needs_root).unwrap();
+                let roots = roots_for(platform, UNREAD, None, needs_root).unwrap();
                 assert_eq!(roots, ClientRoots::Add(Vec::new()), "{platform:?}");
             }
         }
@@ -714,7 +712,7 @@ mod tests {
             TestCa::new("private").write(dir.path()),
             dir.path().join("missing.pem"),
         ] {
-            let err = roots_for(Platform::Android, unread, Some(&root_ca), true).unwrap_err();
+            let err = roots_for(Platform::Android, UNREAD, Some(&root_ca), true).unwrap_err();
             assert!(matches!(err, TrustError::Unsupported), "{err:?}");
             assert_eq!(err.to_string(), "is not supported on Android");
         }

@@ -132,7 +132,7 @@ pub(crate) fn committed_offsets(
 }
 
 /// Asserts that `lines` hold exactly one cleartext-credential warning, for
-/// the `security.protocol` key of the section at `path`, and no password.
+/// the `sasl.password` key of the section at `path`, and no password.
 #[cfg(feature = "tls")]
 pub(crate) fn assert_one_cleartext_warning(lines: &[String], path: &str) {
     let cleartext: Vec<_> = lines
@@ -141,8 +141,8 @@ pub(crate) fn assert_one_cleartext_warning(lines: &[String], path: &str) {
         .collect();
     assert_eq!(cleartext.len(), 1, "{lines:?}");
     let want = format!(
-        "{path}.rdkafka.\"security.protocol\": is sasl_plaintext; the credential is sent \
-         without TLS"
+        "{path}.rdkafka.\"sasl.password\": rdkafka.\"security.protocol\" is sasl_plaintext; \
+         the credential is sent without TLS"
     );
     assert!(
         cleartext[0].contains("WARN") && cleartext[0].contains(&want),

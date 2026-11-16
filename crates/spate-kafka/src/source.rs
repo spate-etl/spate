@@ -6252,7 +6252,7 @@ mod tests {
     }
 
     /// A source loaded from YAML over `sasl_plaintext` logs one warning
-    /// naming its `security.protocol` key across loading and `open`.
+    /// naming its `sasl.password` key across loading and `open`.
     #[cfg(feature = "tls")]
     #[test]
     fn a_yaml_sasl_plaintext_source_logs_one_cleartext_warning() {

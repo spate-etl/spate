@@ -1785,7 +1785,7 @@ mod tests {
         }
 
         /// Connecting the feed over `sasl_plaintext` logs one warning naming
-        /// its `security.protocol` key.
+        /// its `sasl.password` key.
         #[test]
         fn a_sasl_plaintext_feed_logs_one_cleartext_warning() {
             let lines = sasl_plaintext_connect_lines(|section, io| {
@@ -1802,7 +1802,7 @@ mod tests {
         }
 
         /// Connecting the publisher over `sasl_plaintext` logs one warning
-        /// naming its `security.protocol` key.
+        /// naming its `sasl.password` key.
         #[test]
         fn a_sasl_plaintext_publisher_logs_one_cleartext_warning() {
             let lines = sasl_plaintext_connect_lines(|section, io| {

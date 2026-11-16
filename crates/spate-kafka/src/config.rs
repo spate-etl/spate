@@ -119,6 +119,10 @@ fn default_assignment_timeout() -> Duration {
     Duration::from_mins(5)
 }
 
+fn default_misplaced_partition_timeout() -> Duration {
+    Duration::from_mins(1)
+}
+
 fn default_statistics_interval() -> Duration {
     Duration::from_secs(5)
 }
@@ -174,6 +178,18 @@ pub struct KafkaSourceConfig {
     /// one. Zero disables the deadline.
     #[serde(with = "humantime_serde", default = "default_assignment_timeout")]
     pub assignment_timeout: Duration,
+    /// How long an owned partition may be fetched from a broker other than
+    /// its leader before the source reports a fatal error, which names the
+    /// partition and both brokers. Read from the statistics snapshots, so
+    /// it needs `statistics_interval` above zero, and the error also waits
+    /// for three consecutive snapshots that show it. The check is off when
+    /// the `rdkafka` map sets a non-empty `client.rack`, since fetching from
+    /// a follower is then expected. Zero disables it.
+    #[serde(
+        with = "humantime_serde",
+        default = "default_misplaced_partition_timeout"
+    )]
+    pub misplaced_partition_timeout: Duration,
     /// librdkafka statistics emission interval, feeding the lag metrics and
     /// the connector's `spate_kafka_source_*` families (broker health,
     /// latency, queue saturation, group stability). Zero disables statistics
@@ -230,6 +246,7 @@ impl std::fmt::Debug for KafkaSourceConfig {
             commit_interval,
             startup_timeout,
             assignment_timeout,
+            misplaced_partition_timeout,
             statistics_interval,
             rdkafka,
         } = self;
@@ -241,6 +258,7 @@ impl std::fmt::Debug for KafkaSourceConfig {
             .field("commit_interval", commit_interval)
             .field("startup_timeout", startup_timeout)
             .field("assignment_timeout", assignment_timeout)
+            .field("misplaced_partition_timeout", misplaced_partition_timeout)
             .field("statistics_interval", statistics_interval)
             .field("rdkafka", &redact::map(rdkafka.keys()))
             .finish()
@@ -264,6 +282,7 @@ impl KafkaSourceConfig {
             commit_interval: default_commit_interval(),
             startup_timeout: default_startup_timeout(),
             assignment_timeout: default_assignment_timeout(),
+            misplaced_partition_timeout: default_misplaced_partition_timeout(),
             statistics_interval: default_statistics_interval(),
             rdkafka: BTreeMap::new(),
         }
@@ -578,9 +597,19 @@ mod tests {
         assert_eq!(cfg.commit_interval, Duration::from_secs(5));
         assert_eq!(cfg.startup_timeout, Duration::from_secs(30));
         assert_eq!(cfg.assignment_timeout, Duration::from_mins(5));
+        assert_eq!(cfg.misplaced_partition_timeout, Duration::from_mins(1));
         assert_eq!(cfg.statistics_interval, Duration::from_secs(5));
         assert_eq!(cfg.consumers, 1);
         assert!(cfg.rdkafka.is_empty());
+    }
+
+    #[test]
+    fn misplaced_partition_timeout_reads_a_duration_and_zero() {
+        for (written, want) in [("0s", Duration::ZERO), ("90s", Duration::from_secs(90))] {
+            let body = format!("{}  misplaced_partition_timeout: {written}\n", minimal());
+            let cfg = KafkaSourceConfig::from_component_config(&section(&body)).unwrap();
+            assert_eq!(cfg.misplaced_partition_timeout, want, "{written}");
+        }
     }
 
     /// `new` and the YAML defaults are two spellings of one config, so a

@@ -31,6 +31,7 @@ source:
     commit_interval: 5s       # how often stored offsets are committed
     startup_timeout: 30s      # wait for the first assignment; 0s waits forever
     assignment_timeout: 5m    # time with no partitions before failing; 0s off
+    misplaced_partition_timeout: 60s  # time fetching off the leader before failing; 0s off
     statistics_interval: 5s   # librdkafka statistics; 0s turns them off
     rdkafka: {}               # raw librdkafka properties, checked at load
 ```

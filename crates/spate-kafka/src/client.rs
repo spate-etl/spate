@@ -92,6 +92,12 @@ pub(crate) fn committed_lookup_timeout(cc: &ClientConfig) -> Duration {
     (max_poll / 4).min(COMMITTED_LOOKUP_MAX)
 }
 
+/// Whether the client names its rack (`client.rack`), which lets a broker
+/// send its fetches to a follower (KIP-392).
+pub(crate) fn fetches_from_followers(cc: &ClientConfig) -> bool {
+    cc.get("client.rack").is_some_and(|rack| !rack.is_empty())
+}
+
 /// Global librdkafka properties whose names start with `topic.`. librdkafka
 /// looks a name up as a global property before it strips `topic.`, so these
 /// keep their prefix.

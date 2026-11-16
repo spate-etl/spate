@@ -157,6 +157,11 @@ const COMMIT_TIMEOUT: Duration = Duration::from_secs(10);
 /// attempt. Without a pace every poll repeats a blocking broker round trip.
 const START_RETRY_PACE: Duration = Duration::from_secs(1);
 
+/// Consecutive statistics snapshots that must show a partition off its leader
+/// before `misplaced_partition_timeout` can end the run, so a long
+/// `statistics_interval` cannot end it on two samples.
+const MIN_MISPLACED_SNAPSHOTS: u32 = 3;
+
 /// A broker call an accept or a commit flush is about to make, with the time it
 /// may take, for a test that moves the source's clock between calls.
 #[cfg(test)]
@@ -227,6 +232,9 @@ struct Member {
     /// The partitions whose lanes the runtime paused, which only its resume
     /// resumes.
     engine_paused: FastSet<i32>,
+    /// Owned partitions the latest statistics showed fetched from a broker
+    /// other than their leader.
+    misplaced: FastMap<i32, Misplaced>,
     /// The generation [`Member::group_generation`] reads in place of the
     /// client's, since a unit test's consumer never joins a group.
     #[cfg(test)]
@@ -342,6 +350,9 @@ pub struct KafkaSource {
     /// by every consumer it accepts. Set from the client configuration at
     /// `open`.
     lookup_timeout: Duration,
+    /// `misplaced_partition_timeout`, or zero when `client.rack` lets the
+    /// brokers send fetches to a follower. Set at `open`.
+    misplaced_limit: Duration,
     /// The clock the assignment windows, the hold, the accept's lookup and
     /// commit bounds and the error's age read.
     clock: SyncClock,
@@ -462,6 +473,7 @@ impl KafkaSource {
             last_consumer_error: None,
             main_queue_rewinds: 0,
             lookup_timeout: crate::client::COMMITTED_LOOKUP_MAX,
+            misplaced_limit: Duration::ZERO,
             clock: SyncClock::system(),
             #[cfg(test)]
             on_broker_call: None,
@@ -1369,10 +1381,11 @@ impl KafkaSource {
     }
 
     /// Feed the latest librdkafka statistics into the framework lag metrics
-    /// and each consumer's `spate_kafka_source_*` families.
-    fn publish_stats(&mut self) {
+    /// and each consumer's `spate_kafka_source_*` families, and fail on an
+    /// owned partition left off its leader past `misplaced_partition_timeout`.
+    fn publish_stats(&mut self) -> Result<(), SourceError> {
         let reads_committed = self.config.reads_committed();
-        for member in &mut self.members {
+        for (k, member) in self.members.iter_mut().enumerate() {
             let Some(mut stats) = member
                 .consumer
                 .context()
@@ -1398,7 +1411,17 @@ impl KafkaSource {
             if let Some(stats_metrics) = member.stats.as_mut() {
                 stats_metrics.update(&stats, &self.config.topic, &owned);
             }
+            if let Some(stuck) = track_misplaced(
+                &mut member.misplaced,
+                &stats,
+                &self.config.topic,
+                &owned,
+                self.misplaced_limit,
+            ) {
+                return Err(SourceError::fatal(stuck.reason(k, &self.config.topic)));
+            }
         }
+        Ok(())
     }
 
     /// Poll every consumer once, rewinding any message that reached a main
@@ -1868,6 +1891,108 @@ fn assignment_deadline_error(
     Some(SourceError::fatal(reason))
 }
 
+/// A run of statistics snapshots in which one owned partition was fetched
+/// from a broker other than its leader.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Misplaced {
+    /// The `ts` of the run's first snapshot, librdkafka's monotonic clock in
+    /// microseconds.
+    since_ts: i64,
+    snapshots: u32,
+}
+
+/// A partition that stayed off its leader past the limit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct StuckPartition {
+    partition: i32,
+    broker: i32,
+    leader: i32,
+    elapsed: Duration,
+    snapshots: u32,
+}
+
+impl StuckPartition {
+    fn reason(&self, consumer: usize, topic: &str) -> String {
+        let StuckPartition {
+            partition,
+            broker,
+            leader,
+            elapsed,
+            snapshots,
+        } = self;
+        format!(
+            "consumer {consumer}: partition {partition} of {topic:?} has been fetched from \
+             broker {broker}, which does not lead it (broker {leader} does), for {elapsed:?} \
+             across {snapshots} statistics snapshots; the client does not move it back, so \
+             the partition is not being consumed, and a restart resumes it from its \
+             committed offset"
+        )
+    }
+}
+
+/// Follow each owned partition's broker and leader across statistics
+/// snapshots, and return one that has been fetched from a broker other than
+/// its leader for longer than `limit` and for at least
+/// [`MIN_MISPLACED_SNAPSHOTS`] snapshots. A zero `limit` turns the check off.
+///
+/// librdkafka can leave a partition on a broker that no longer leads it,
+/// where every fetch fails with `NOT_LEADER_OR_FOLLOWER` and nothing moves it
+/// back (confluentinc/librdkafka#5629).
+///
+/// Time is read from the snapshots' own `ts`, so a snapshot consumed late,
+/// after a drain held back the polls, does not shorten the run. A partition
+/// that is back on its leader, or no longer owned, leaves `runs`, which so
+/// never holds more than the owned set.
+///
+/// Free function taking the run map so a unit test drives it snapshot by
+/// snapshot, as `track_fetch_state` is.
+fn track_misplaced(
+    runs: &mut FastMap<i32, Misplaced>,
+    stats: &Statistics,
+    topic: &str,
+    owned: &[PartitionId],
+    limit: Duration,
+) -> Option<StuckPartition> {
+    let partitions = match stats.topics.get(topic) {
+        Some(t) if !limit.is_zero() => &t.partitions,
+        _ => {
+            runs.clear();
+            return None;
+        }
+    };
+    let limit_us = i64::try_from(limit.as_micros()).unwrap_or(i64::MAX);
+    let mut seen = Vec::new();
+    let mut stuck = None;
+    for (&pid, p) in partitions {
+        if !crate::metrics::is_owned(owned, pid) {
+            continue;
+        }
+        // `broker` is -1 while the partition has no fetching broker, and
+        // `leader` is -1 while it has no known leader.
+        if p.broker < 0 || p.leader < 0 || p.broker == p.leader {
+            continue;
+        }
+        seen.push(pid);
+        let run = runs.entry(pid).or_insert(Misplaced {
+            since_ts: stats.ts,
+            snapshots: 0,
+        });
+        run.snapshots = run.snapshots.saturating_add(1);
+        let elapsed_us = stats.ts.saturating_sub(run.since_ts);
+        if stuck.is_none() && run.snapshots >= MIN_MISPLACED_SNAPSHOTS && elapsed_us > limit_us {
+            stuck = Some(StuckPartition {
+                partition: pid,
+                broker: p.broker,
+                leader: p.leader,
+                elapsed: Duration::from_micros(elapsed_us.unsigned_abs()),
+                snapshots: run.snapshots,
+            });
+        }
+    }
+    runs.retain(|pid, _| seen.contains(pid));
+    stuck
+}
+
 fn fatal(what: &'static str) -> impl Fn(rdkafka::error::KafkaError) -> SourceError {
     move |e| SourceError::fatal(format!("{what}: {e}"))
 }
@@ -1923,6 +2048,11 @@ impl Source for KafkaSource {
             .base(crate::security::openssl_env_overrides())
             .config(&first);
         self.lookup_timeout = crate::client::committed_lookup_timeout(&cc);
+        self.misplaced_limit = if crate::client::fetches_from_followers(&cc) {
+            Duration::ZERO
+        } else {
+            self.config.misplaced_partition_timeout
+        };
         for k in 0..self.config.consumers {
             let role = crate::config::Consumer::member(&self.config, k);
             // Resolve the connector-owned metric handles once, before the
@@ -1964,6 +2094,7 @@ impl Source for KafkaSource {
                 watermarks: FastMap::default(),
                 validating: Validating::new(self.lookup_timeout),
                 engine_paused: FastSet::default(),
+                misplaced: FastMap::default(),
                 #[cfg(test)]
                 generation: None,
             });
@@ -2040,7 +2171,7 @@ impl Source for KafkaSource {
         for k in 0..self.members.len() {
             self.validate(k);
         }
-        self.publish_stats();
+        self.publish_stats()?;
 
         // Rebalance intents recorded by the callbacks during the polls above
         // (or earlier ones). One per call: a revocation needs its runtime
@@ -2309,6 +2440,7 @@ mod tests {
             commit_interval: Duration::from_secs(5),
             startup_timeout: Duration::from_secs(30),
             assignment_timeout: Duration::from_mins(5),
+            misplaced_partition_timeout: Duration::from_mins(1),
             statistics_interval: Duration::ZERO,
             // These tests accept offers against a refused broker, which under
             // the default `latest` would retry its committed offset lookup.
@@ -4554,7 +4686,7 @@ mod tests {
                         }
                         *member.consumer.context().stats.lock().unwrap() = Some(Box::new(snapshot));
                     }
-                    source.publish_stats();
+                    source.publish_stats().expect("no partition is misplaced");
                 });
                 let series = format!(
                     r#"spate_source_lag_records{{pipeline="orders",component="{component}",component_type="kafka",partition="0"}} 5"#
@@ -7164,6 +7296,271 @@ mod tests {
         fn nothing_to_measure_from_stays_unknown() {
             assert_eq!(filled(snapshot(-1, 10, 10), &[], true), -1);
             assert_eq!(filled(snapshot(-1, -1, -1), &[(0, 3)], true), -1);
+        }
+    }
+
+    mod misplaced {
+        use super::*;
+        use rdkafka::statistics::{Partition, Topic};
+        use std::collections::HashMap;
+
+        const LIMIT: Duration = Duration::from_mins(1);
+
+        /// A snapshot for `orders` taken at `ts` microseconds, from
+        /// `(partition, broker, leader)` triples.
+        fn snapshot(ts: i64, parts: &[(i32, i32, i32)]) -> Statistics {
+            Statistics {
+                ts,
+                topics: HashMap::from([(
+                    "orders".to_owned(),
+                    Topic {
+                        topic: "orders".to_owned(),
+                        partitions: parts
+                            .iter()
+                            .map(|&(partition, broker, leader)| {
+                                (
+                                    partition,
+                                    Partition {
+                                        partition,
+                                        broker,
+                                        leader,
+                                        ..Default::default()
+                                    },
+                                )
+                            })
+                            .collect(),
+                        ..Default::default()
+                    },
+                )]),
+                ..Default::default()
+            }
+        }
+
+        fn secs(s: i64) -> i64 {
+            s * 1_000_000
+        }
+
+        /// Runs `snapshots` through one tracker over owned partition 0 and
+        /// returns each snapshot's verdict.
+        fn verdicts(limit: Duration, snapshots: &[Statistics]) -> Vec<Option<StuckPartition>> {
+            let mut runs = FastMap::default();
+            snapshots
+                .iter()
+                .map(|s| track_misplaced(&mut runs, s, "orders", &[PartitionId(0)], limit))
+                .collect()
+        }
+
+        #[test]
+        fn the_limit_is_exclusive_and_read_from_the_snapshot_clock() {
+            let mut runs = FastMap::default();
+            let owned = [PartitionId(0)];
+            for ts in [0, secs(30), secs(60)] {
+                let s = snapshot(ts, &[(0, 1, 2)]);
+                assert_eq!(
+                    track_misplaced(&mut runs, &s, "orders", &owned, LIMIT),
+                    None
+                );
+            }
+            let s = snapshot(secs(60) + 1, &[(0, 1, 2)]);
+            assert_eq!(
+                track_misplaced(&mut runs, &s, "orders", &owned, LIMIT),
+                Some(StuckPartition {
+                    partition: 0,
+                    broker: 1,
+                    leader: 2,
+                    elapsed: Duration::from_micros(60_000_001),
+                    snapshots: 4,
+                })
+            );
+        }
+
+        /// Two snapshots further apart than the limit are not enough.
+        #[test]
+        fn the_error_waits_for_three_snapshots() {
+            let got = verdicts(
+                LIMIT,
+                &[
+                    snapshot(0, &[(0, 1, 2)]),
+                    snapshot(secs(120), &[(0, 1, 2)]),
+                    snapshot(secs(240), &[(0, 1, 2)]),
+                ],
+            );
+            assert_eq!(got[..2], [None, None]);
+            assert_eq!(got[2].map(|s| s.snapshots), Some(3));
+        }
+
+        #[test]
+        fn a_snapshot_on_the_leader_restarts_the_run() {
+            let mut runs = FastMap::default();
+            let owned = [PartitionId(0)];
+            for (ts, broker) in [
+                (0, 1),
+                (secs(30), 1),
+                (secs(45), 2),
+                (secs(61), 1),
+                (secs(90), 1),
+            ] {
+                let s = snapshot(ts, &[(0, broker, 2)]);
+                assert_eq!(
+                    track_misplaced(&mut runs, &s, "orders", &owned, LIMIT),
+                    None
+                );
+            }
+            assert_eq!(
+                runs.get(&0),
+                Some(&Misplaced {
+                    since_ts: secs(61),
+                    snapshots: 2,
+                })
+            );
+        }
+
+        /// `broker -1` with a known leader is what a partition shows between
+        /// brokers while it migrates; either id unknown is never misplaced.
+        #[test]
+        fn an_unknown_broker_or_leader_is_not_misplaced() {
+            for (broker, leader) in [(-1, 2), (1, -1)] {
+                let got = verdicts(
+                    LIMIT,
+                    &(0..10)
+                        .map(|i| snapshot(secs(30 * i), &[(0, broker, leader)]))
+                        .collect::<Vec<_>>(),
+                );
+                assert!(got.iter().all(Option::is_none), "{broker} {leader}");
+            }
+        }
+
+        #[test]
+        fn a_negative_partition_id_is_skipped() {
+            let mut runs = FastMap::default();
+            for i in 0..10 {
+                let s = snapshot(secs(30 * i), &[(-1, 1, 2)]);
+                let got = track_misplaced(&mut runs, &s, "orders", &[PartitionId(0)], LIMIT);
+                assert_eq!(got, None);
+            }
+            assert!(runs.is_empty());
+        }
+
+        /// The snapshot carries every partition of the topic; one this
+        /// member does not own is not its to judge, and leaves its map.
+        #[test]
+        fn a_partition_not_owned_is_not_tracked() {
+            let mut runs = FastMap::default();
+            let s = snapshot(0, &[(0, 1, 2)]);
+            let _ = track_misplaced(&mut runs, &s, "orders", &[PartitionId(0)], LIMIT);
+            assert_eq!(runs.len(), 1);
+            for i in 1..10 {
+                let s = snapshot(secs(30 * i), &[(0, 1, 2)]);
+                let got = track_misplaced(&mut runs, &s, "orders", &[PartitionId(1)], LIMIT);
+                assert_eq!(got, None);
+                assert!(runs.is_empty());
+            }
+        }
+
+        #[test]
+        fn a_snapshot_without_the_topic_clears_the_runs() {
+            let mut runs = FastMap::default();
+            let owned = [PartitionId(0)];
+            let s = snapshot(0, &[(0, 1, 2)]);
+            let _ = track_misplaced(&mut runs, &s, "orders", &owned, LIMIT);
+            assert_eq!(runs.len(), 1);
+            let _ = track_misplaced(&mut runs, &s, "payments", &owned, LIMIT);
+            assert!(runs.is_empty());
+        }
+
+        #[test]
+        fn the_largest_limit_never_fails() {
+            let got = verdicts(
+                Duration::MAX,
+                &[
+                    snapshot(i64::MIN, &[(0, 1, 2)]),
+                    snapshot(0, &[(0, 1, 2)]),
+                    snapshot(i64::MAX, &[(0, 1, 2)]),
+                    snapshot(i64::MAX, &[(0, 1, 2)]),
+                ],
+            );
+            assert!(got.iter().all(Option::is_none));
+        }
+
+        /// Places `parts` in consumer `k`'s statistics slot, as librdkafka's
+        /// callback does.
+        fn deliver(source: &KafkaSource, k: usize, ts: i64, parts: &[(i32, i32, i32)]) {
+            *source.members[k].consumer.context().stats.lock().unwrap() =
+                Some(Box::new(snapshot(ts, parts)));
+        }
+
+        /// The poll that reads the snapshot past the limit ends the source.
+        fn assert_fails(source: &mut KafkaSource, consumer: usize, partition: i32) {
+            let err = source.poll_events(Duration::ZERO).unwrap_err();
+            assert_eq!(err.class(), ErrorClass::Fatal, "{err}");
+            let reason = err.reason();
+            for part in [
+                format!("consumer {consumer}: partition {partition} of \"orders\""),
+                "from broker 1, which does not lead it (broker 2 does)".to_owned(),
+                "across 3 statistics snapshots".to_owned(),
+            ] {
+                assert!(reason.contains(&part), "{part:?} not in {reason}");
+            }
+        }
+
+        #[test]
+        fn poll_events_fails_on_a_partition_left_off_its_leader() {
+            let mut source = opened_source(&[(0, 0)]);
+            deliver(&source, 0, 0, &[(0, 1, 2)]);
+            poll_quiet(&mut source);
+            deliver(&source, 0, secs(30), &[(0, 1, 2)]);
+            poll_quiet(&mut source);
+            deliver(&source, 0, secs(61), &[(0, 1, 2)]);
+            assert_fails(&mut source, 0, 0);
+        }
+
+        #[test]
+        fn zero_turns_the_check_off() {
+            let mut cfg = test_config();
+            cfg.misplaced_partition_timeout = Duration::ZERO;
+            let mut source = opened_source_with(cfg, &[(0, 0)]);
+            for i in 0..10 {
+                deliver(&source, 0, secs(60 * i), &[(0, 1, 2)]);
+                poll_quiet(&mut source);
+            }
+        }
+
+        /// Each consumer follows its own partitions: consumer 0's snapshots,
+        /// which show consumer 1's partition on its leader, do not restart
+        /// consumer 1's run.
+        #[test]
+        fn each_consumer_follows_its_own_partitions() {
+            let mut source = opened_consumers(test_config(), &[&[(0, 0)], &[(1, 1)]]);
+            for ts in [0, secs(30)] {
+                deliver(&source, 0, ts, &[(0, 2, 2), (1, 2, 2)]);
+                deliver(&source, 1, ts, &[(0, 2, 2), (1, 1, 2)]);
+                poll_quiet(&mut source);
+            }
+            deliver(&source, 0, secs(61), &[(0, 2, 2), (1, 2, 2)]);
+            deliver(&source, 1, secs(61), &[(0, 2, 2), (1, 1, 2)]);
+            assert_fails(&mut source, 1, 1);
+        }
+
+        /// A named rack lets a broker point fetches at a follower, so the
+        /// check is off; an empty one names no rack.
+        #[test]
+        fn a_client_rack_turns_the_check_off() {
+            for (rack, fails) in [("az1", false), ("", true)] {
+                let mut cfg = test_config();
+                cfg.rdkafka
+                    .insert("client.rack".to_owned(), rack.to_owned());
+                let mut source = opened_source_with(cfg, &[(0, 0)]);
+                for ts in [0, secs(30)] {
+                    deliver(&source, 0, ts, &[(0, 1, 2)]);
+                    poll_quiet(&mut source);
+                }
+                deliver(&source, 0, secs(61), &[(0, 1, 2)]);
+                if fails {
+                    assert_fails(&mut source, 0, 0);
+                } else {
+                    poll_quiet(&mut source);
+                }
+            }
         }
     }
 }

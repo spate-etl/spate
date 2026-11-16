@@ -76,15 +76,20 @@ Redpanda takes one offset ahead of each transaction's records on a partition,
 so the transaction suites read positions from the broker once each ended
 transaction's marker is in the log.
 
-The `kafka-brokers` leg leaves two suites to the primary lane.
+The `kafka-brokers` leg leaves some suites to the primary lane.
 `BROKER_LANE_SUITES` in `xtask/src/ci/outputs.rs` lists them:
 
 - `feed_notifications`: the primary S3 store, RustFS, does not deliver its
   notifications to Redpanda.
 - `tls_system_ca`: it configures Apache Kafka's SSL listener through `KAFKA_*`
   variables.
+- `e2e_leader_move`: a leader move on Redpanda can stall the client in two
+  librdkafka defects, a lock-order deadlock
+  ([confluentinc/librdkafka#5476](https://github.com/confluentinc/librdkafka/issues/5476))
+  and a partition left on a broker that no longer leads it
+  ([confluentinc/librdkafka#5629](https://github.com/confluentinc/librdkafka/issues/5629)).
 
-`cargo xtask integration-test` leaves the same two out when
+`cargo xtask integration-test` leaves the same suites out when
 `SPATE_KAFKA_LANE` names a broker other than the primary one.
 
 The image index carries `linux/amd64` and `linux/arm64`. CI runs the lane on
@@ -99,7 +104,8 @@ as v26.1.20 after v26.2.6, sorts below the pin and is not proposed.
 
 `spate_test_support::KafkaCluster` starts three nodes of the selected broker on
 a Docker network the caller names, with node ids 1 to 3. Spate's
-`e2e_leader_move` and two tests of spate-kafka's `kafka_broker` suite run on it.
+`e2e_leader_move`, on the primary lane only, and two tests of spate-kafka's
+`kafka_broker` suite run on it.
 Each node is a `KafkaBroker` with a cluster arm per broker:
 
 - Apache Kafka runs three KRaft nodes, each a broker and a controller. Its

@@ -754,7 +754,7 @@ impl KafkaStatsMetrics {
 /// partition in the topic's metadata (`rd_kafka_stats_emit_all` walks the
 /// whole partition count), so in a group of several members the partitions
 /// the others hold arrive here reporting `none` or `stopped`.
-fn is_owned(owned: &[PartitionId], pid: i32) -> bool {
+pub(crate) fn is_owned(owned: &[PartitionId], pid: i32) -> bool {
     u32::try_from(pid).is_ok_and(|p| owned.contains(&PartitionId(p)))
 }
 

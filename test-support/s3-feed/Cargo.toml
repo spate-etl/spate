@@ -1,0 +1,29 @@
+[package]
+name = "spate-test-s3-feed"
+description = "The S3 feed-worker harness that the SQS and Kafka feed tests share (not published)."
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+object_store = { workspace = true }
+serde = { workspace = true }
+spate-core = { workspace = true, features = ["testing"] }
+spate-json = { workspace = true }
+spate-s3 = { workspace = true }
+spate-test = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["rt"] }
+
+[dev-dependencies]
+serde_yaml = { workspace = true }
+# `S3Source::with_clock`, for a bounded job's end check.
+spate-s3 = { workspace = true, features = ["testing"] }
+tokio = { workspace = true, features = ["rt-multi-thread"] }

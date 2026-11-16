@@ -15,6 +15,7 @@ members = [
     "crates/spate-sqs",
     "crates/spate-test",
     "test-support",
+    "test-support/s3-feed",
     "fuzz",
     "xtask",
     "examples/lambda-s3",
@@ -46,6 +47,7 @@ spate-test = { version = "=0.4.0", path = "crates/spate-test" }
 # letting a published crate dev-depend on these unpublished crates.
 spate-bench = { path = "bench" }
 spate-test-support = { path = "test-support" }
+spate-test-s3-feed = { path = "test-support/s3-feed" }
 # The facade, for the unpublished Lambda example. Versionless: no published
 # crate depends on it, and a version here would go stale at each release.
 spate = { path = "crates/spate" }

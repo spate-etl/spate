@@ -29,6 +29,7 @@ These members set `publish = false`:
 | `bench/pipeline/` | `spate-pipeline-bench` | Wall-clock benches of pipelines that run through more than one connector crate |
 | `fuzz/` | `spate-fuzz` | The libFuzzer targets, which build on nightly |
 | `test-support/` | `spate-test-support` | Helpers that only this repository's tests and benches use, such as reading a pinned container image |
+| `test-support/s3-feed/` | `spate-test-s3-feed` | The S3 feed-worker harness that the SQS and Kafka feed tests share |
 | `examples/lambda-s3/` | `spate-example-lambda-s3` | An AWS Lambda function that reads one SQS batch of S3 notifications per invocation |
 
 ## Put shared code in `spate-core`, unless its API names a connector type

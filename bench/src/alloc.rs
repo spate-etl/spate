@@ -32,12 +32,15 @@
 //!
 //! # How a `realloc` is charged
 //!
-//! A growing reallocation is counted as its *growth*, and a shrinking one is not
-//! counted at all. So a doubling push-loop does not report quadratic bytes,
-//! but a build that grows a buffer by repeated appends instead of reserving it
-//! once reports roughly the same byte total as one that reserves.
-//! `alloc_count_per_iter` is what catches that one, which is the reason both
-//! figures are reported rather than only the bytes.
+//! A growing reallocation is counted as its *growth*. So a doubling push-loop
+//! does not report quadratic bytes, but a build that grows a buffer by repeated
+//! appends instead of reserving it once reports roughly the same byte total as
+//! one that reserves. `alloc_count_per_iter` is what catches that one, which is
+//! the reason both figures are reported rather than only the bytes.
+//!
+//! A shrinking or equal reallocation is not counted at all, so a per-iteration
+//! `shrink_to_fit` does not read as an allocation-count regression against the
+//! floor.
 //!
 //! The allocation tests and snapshots count with test-support's allocator,
 //! `spate_test_support::alloc`, which charges the same bytes and keeps every

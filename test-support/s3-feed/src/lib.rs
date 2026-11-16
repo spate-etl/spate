@@ -264,8 +264,8 @@ impl<F> Worker<F> {
 ///
 /// # Panics
 ///
-/// Panics when the pipeline file does not load, `connect` fails, or the
-/// source cannot be built.
+/// Panics when the pipeline file does not load, `feed_section` holds no
+/// `feed:` key, `connect` fails, or the source cannot be built.
 pub fn launch_customized<F: Feed + 'static>(
     connect: impl FnOnce(&FeedSection, &Handle) -> Result<F, ConnectError>,
     source_yaml: &str,

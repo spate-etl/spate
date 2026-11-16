@@ -371,17 +371,17 @@ impl AvroDeserializerBuilder {
                     .username
                     .as_ref()
                     .map(|u| (u.clone(), registry.password.clone()));
-                let cleartext_password = url.scheme() == "http"
-                    && registry.password.as_ref().is_some_and(|p| !p.is_empty());
-                let rejection = Rejection::default();
-                let endpoint = Arc::new(Endpoint::new(url, basic_auth));
-                let http = http_client(registry.tls.root_ca.as_deref())?;
-                if cleartext_password {
+                if url.scheme() == "http"
+                    && registry.password.as_ref().is_some_and(|p| !p.is_empty())
+                {
                     SectionPath::deserializer("avro").warn_cleartext_credential(
                         "registry.password",
                         "registry.url uses http://",
                     );
                 }
+                let rejection = Rejection::default();
+                let endpoint = Arc::new(Endpoint::new(url, basic_auth));
+                let http = http_client(registry.tls.root_ca.as_deref())?;
                 let handle = spawn_fetcher(
                     http.clone(),
                     Arc::clone(&endpoint),
@@ -858,7 +858,7 @@ mod tests {
     }
 
     /// A config the builder refuses logs no warning, even when its password
-    /// would cross `http://`.
+    /// would cross `http://`: the warning follows the section's own checks.
     #[test]
     fn a_refused_registry_logs_no_cleartext_warning() {
         let rt = runtime();

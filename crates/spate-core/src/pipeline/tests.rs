@@ -7325,26 +7325,28 @@ fn the_io_tasks_stop_before_a_teardown_that_outlasts_run() {
     let (hook, entered, release) = blocking_hook();
     source.on_drop = Some(hook);
     let (probe_dropped_tx, probe_dropped) = mpsc::channel();
-    let probe_dropped_tx = Mutex::new(probe_dropped_tx);
-    // Each probe holds a guard until its task is aborted.
+    let guard = SendOnDrop(probe_dropped_tx);
+    // The task owns the closure, so the guard drops with the task even when
+    // the abort comes before its first poll.
     let probe: crate::sink::SinkProbeFn = Box::new(move || {
-        let guard = SendOnDrop(probe_dropped_tx.lock().unwrap().clone());
-        Box::pin(async move {
-            let _guard = guard;
-            std::future::pending::<Result<(), crate::error::SinkError>>().await
-        })
+        let _guard = &guard;
+        Box::pin(std::future::pending())
     });
     let run = run_held(test_config(1), source, None, Some(probe));
     run.shutdown.trigger();
     entered
         .recv_timeout(spate_test::HANG)
         .expect("the source drops");
-    run.clock.wait_for_reads();
-    run.clock.advance(TEST_DRAIN + Duration::from_secs(3));
-    wait_until(spate_test::HANG, "run to return", || run.join.is_finished());
     probe_dropped
         .recv_timeout(spate_test::HANG)
         .expect("the sink probe stops while the source's Drop still runs");
+    assert!(
+        !run.join.is_finished(),
+        "the sink probe stopped only when run returned"
+    );
+    run.clock.wait_for_reads();
+    run.clock.advance(TEST_DRAIN + Duration::from_secs(3));
+    wait_until(spate_test::HANG, "run to return", || run.join.is_finished());
     drop(release);
     run.wait_for_the_teardown();
 }

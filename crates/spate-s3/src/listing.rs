@@ -62,21 +62,58 @@ impl UnaddressableKeys {
 /// An [`HttpConnector`] that builds `object_store`'s own client and filters
 /// the S3 listing responses it returns, fails a listing page that repeats its
 /// request's continuation token, and cuts the body of a failure answer.
-/// Every other request and response passes through unchanged.
+/// Every other request and response passes through unchanged. The client
+/// verifies TLS against the [`ClientRoots`] the connector holds.
 #[derive(Debug)]
 pub(crate) struct UnaddressableConnector {
     keys: UnaddressableKeys,
+    roots: ClientRoots,
 }
 
 impl UnaddressableConnector {
     pub(crate) fn new(keys: UnaddressableKeys) -> Self {
-        Self { keys }
+        Self {
+            keys,
+            roots: ClientRoots::default(),
+        }
+    }
+
+    /// The connector, with its client verifying TLS against `roots`.
+    pub(crate) fn trusting(self, roots: ClientRoots) -> Self {
+        Self { roots, ..self }
+    }
+}
+
+/// The certificates an S3 client trusts. Every client the store builds takes
+/// them, the credential providers' included.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ClientRoots {
+    /// Trusted in addition to the system trust store, or in its place when
+    /// `only` is set.
+    pub(crate) certs: Vec<object_store::Certificate>,
+    /// Whether `certs` replace the system trust store the platform verifier
+    /// reads.
+    pub(crate) only: bool,
+}
+
+impl ClientRoots {
+    /// `options` trusting these roots. `options` keeps its own
+    /// `disable_system_certificates` unless `only` is set.
+    fn apply(&self, options: &ClientOptions) -> ClientOptions {
+        let mut options = options.clone();
+        if self.only {
+            options = options.with_no_system_certificates(true);
+        }
+        for cert in &self.certs {
+            options = options.with_root_certificate(cert.clone());
+        }
+        options
     }
 }
 
 impl HttpConnector for UnaddressableConnector {
     fn connect(&self, options: &ClientOptions) -> object_store::Result<HttpClient> {
-        let inner = ReqwestConnector::default().connect(options)?;
+        let inner = ReqwestConnector::default().connect(&self.roots.apply(options))?;
         Ok(HttpClient::new(FilteringService {
             inner,
             keys: self.keys.clone(),
@@ -270,6 +307,30 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The roots replace the system trust store only when they say so, and
+    /// otherwise leave the options' own setting.
+    #[test]
+    fn the_roots_replace_the_system_store_only_when_they_say_so() {
+        use object_store::ClientConfigKey;
+        let set = |roots: &ClientRoots, options: &ClientOptions| {
+            roots
+                .apply(options)
+                .get_config_value(&ClientConfigKey::NoSystemCertificates)
+        };
+        let only = ClientRoots {
+            certs: Vec::new(),
+            only: true,
+        };
+        assert_eq!(set(&only, &ClientOptions::new()).as_deref(), Some("true"));
+        let merged = ClientRoots::default();
+        assert_eq!(
+            set(&merged, &ClientOptions::new()).as_deref(),
+            Some("false")
+        );
+        let operator = ClientOptions::new().with_no_system_certificates(true);
+        assert_eq!(set(&merged, &operator).as_deref(), Some("true"));
+    }
     use proptest::prelude::*;
 
     /// A store behind the connector, with the client's own request timeout

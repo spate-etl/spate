@@ -22,7 +22,7 @@ base64 = { workspace = true }
 bytes = { workspace = true }
 bytesize = { workspace = true }
 chrono = { workspace = true }
-spate-core = { workspace = true }
+spate-core = { workspace = true, features = ["tls-roots"] }
 flate2 = { workspace = true }
 futures-util = { workspace = true }
 object_store = { workspace = true, features = ["aws"] }
@@ -42,7 +42,7 @@ zstd = { workspace = true, features = ["arrays", "legacy", "zdict_builder"] }
 spate-s3 = { path = ".", features = ["testing"] }
 # `clock::tokio::TestClock`, which the job location tests and the lane tests
 # advance.
-spate-core = { workspace = true, features = ["testing"] }
+spate-core = { workspace = true, features = ["testing", "tls-roots"] }
 spate-test = { workspace = true }
 spate-test-support = { workspace = true, features = ["s3", "tls"] }
 spate-json = { workspace = true }

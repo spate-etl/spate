@@ -121,8 +121,7 @@ rustls-native-certs = "0.8.4"
 # out as, and the trust-anchor check rustls itself runs on a root.
 rustls-pki-types = { version = "1.15.0", default-features = false, features = ["std"] }
 rustls-webpki = { version = "0.103.16", default-features = false, features = ["std"] }
-webpki-roots = "1.0.10"
-# The same Mozilla bundle as whole certificates, for a client that takes PEM.
+# The Mozilla root bundle as whole certificates, for a client that takes PEM.
 webpki-root-certs = "1.0.10"
 # spate-sqs's client, internal only (INV-6). Without default features the SDK
 # leaves out its legacy hyper client on ring; `default-https-client` is the

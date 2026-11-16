@@ -43,8 +43,10 @@ Loading fails when `confluent` has no `registry` or sets `schema`, when `raw` or
 when `single_object` sets `reader_schema`. It also fails on a `registry.url`
 that is not `http://` or `https://` or that carries credentials, a `password`
 with no `username`, a `negative_cache_ttl` under `100ms`, and a `tls.root_ca`
-beside a URL that is not `https://`. A fixed `schema` is parsed at load, and one
-that does not parse fails there.
+beside a URL that is not `https://`. On Linux and other Unix systems other than
+macOS it also fails on an `https://` registry when neither the system trust
+store nor `tls.root_ca` holds a usable certificate. A fixed `schema` is parsed
+at load, and one that does not parse fails there.
 
 A non-empty `password` with an `http://` registry URL loads, and logs one
 warning that the credential is sent without TLS.

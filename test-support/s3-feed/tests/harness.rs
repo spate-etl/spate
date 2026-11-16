@@ -96,6 +96,47 @@ fn the_recording_passes_acknowledge_fail_and_publish_on() {
     assert!(Arc::ptr_eq(recording.inner(), &recording.clone().inner().clone()));
 }
 
+/// `publish` returns once the feed has settled the unit, not before.
+#[test]
+fn publish_waits_for_the_confirmation() {
+    let (feed, script) = scripted_feed();
+    script.hold_publishes();
+    std::thread::scope(|scope| {
+        let publishing = scope.spawn(|| publish(&feed, Unit::new("held", b"h".to_vec())));
+        wait_until(HANG, "the publish reaches the feed", || {
+            script.published().len() == 1
+        });
+        script.confirm_held_publishes();
+        publishing.join().expect("the publish settles");
+    });
+}
+
+/// The `checkpoint` a test gives reaches the pipeline: a drain timeout
+/// inside the stop reserve of a feed that hands back is refused at startup.
+#[test]
+fn the_checkpoint_section_reaches_the_pipeline() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir(&dir);
+    let (feed, script) = scripted_feed();
+    script.hand_back_on_stop();
+    let worker = launch_customized(
+        move |_, _| Ok(feed),
+        &file_source(&data, ""),
+        SCRIPTED,
+        |_| {},
+        |source| source,
+        "{ interval: 100ms, drain_timeout: 5s }",
+        None,
+    );
+    let message = worker
+        .run
+        .wait_exit(HANG)
+        .expect("the run exits")
+        .unwrap_err()
+        .to_string();
+    assert!(message.contains("checkpoint.drain_timeout"), "{message}");
+}
+
 /// Two deliveries of one unit are read end to end: each row written, each
 /// delivery acknowledged and recorded with its count.
 #[test]

@@ -1,6 +1,6 @@
 [package]
 name = "spate-test-s3-feed"
-description = "The S3 feed-worker harness that the SQS and Kafka feed tests share (not published)."
+description = "The S3 feed-worker harness for the SQS and Kafka feed tests (not published)."
 publish = false
 version.workspace = true
 edition.workspace = true

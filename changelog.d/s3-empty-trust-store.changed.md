@@ -1,0 +1,3 @@
+**The S3 source opens over `http://` with an empty trust store** (`spate-s3`)
+
+On Linux and other Unix systems other than macOS, the source reads the system trust store through `spate::tls`. A store called over `http://` now opens when the system trust store yields no usable certificate. A store called over `https://` still fails to open, now at `source.s3.tls.root_ca` with an error that names the fixes: install a CA bundle, point `SSL_CERT_FILE` at one, or set `tls.root_ca` to the issuing CA. In previous versions either one failed with "No CA certificates were loaded from the system". macOS and Windows keep the operating system's verifier and are unaffected.

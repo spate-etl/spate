@@ -28,9 +28,11 @@ kafka = ["dep:testcontainers"]
 # cluster's metadata through a Kafka client.
 kafka-client = ["kafka", "dep:rdkafka"]
 # `S3Store`. A notifying store reaches the broker on `BROKER_FROM_INSIDE`.
-s3 = ["kafka", "dep:http", "dep:object_store", "dep:tokio"]
+s3 = ["container", "kafka", "dep:http", "dep:object_store", "dep:tokio"]
 # `ElasticMq`.
-elasticmq = ["dep:testcontainers"]
+elasticmq = ["container"]
+# `ready` and `ready_async`, which wait for a started container's service.
+container = ["dep:testcontainers", "dep:tokio"]
 # The `events` corpus.
 events = ["dep:serde", "dep:spate-bench"]
 # `reported_executable`.
@@ -49,7 +51,7 @@ serde = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
 spate-bench = { workspace = true, optional = true }
 testcontainers = { workspace = true, optional = true, features = ["blocking"] }
-tokio = { workspace = true, optional = true, features = ["io-util", "net", "rt"] }
+tokio = { workspace = true, optional = true, features = ["io-util", "net", "rt", "time"] }
 tokio-rustls = { workspace = true, optional = true }
 
 [dev-dependencies]

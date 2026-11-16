@@ -6,16 +6,11 @@
 #![expect(deprecated, reason = "fixtures call the datum free functions directly")]
 #![expect(
     clippy::disallowed_methods,
-    reason = "the stub registry's tasks end when the test's runtime drops, and each test awaits its blocking decodes"
+    reason = "each test awaits its blocking decodes"
 )]
 
 use apache_avro::Schema;
 use apache_avro::to_avro_datum;
-use http_body_util::Full;
-use hyper::body::Bytes;
-use hyper::server::conn::http1;
-use hyper::service::service_fn;
-use hyper::{Request, Response, StatusCode};
 use spate_avro::{
     AvroDeserializerBuilder, AvroMode, AvroSettings, AvroValue, AvroValueDeserializer,
     RegistrySection,
@@ -24,123 +19,14 @@ use spate_core::checkpoint::AckRef;
 use spate_core::clock::{Clock, TestClock};
 use spate_core::deser::{Deserializer, EmitRecord, RecFamily};
 use spate_core::error::DeserError;
-use spate_core::hash::FastMap;
 use spate_test::{EmitCollector, raw_payload};
-use spate_test_support::run_in_child;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use spate_test_support::{RegistryRequest, RegistryStub, run_in_child};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 const SCHEMA_V1: &str =
     r#"{"type":"record","name":"Event","fields":[{"name":"id","type":"long"}]}"#;
-
-/// A scripted response: repeat `status`/`body` for the first `times`
-/// matching requests (0 = forever).
-#[derive(Clone)]
-struct Scripted {
-    status: u16,
-    body: String,
-    times: usize,
-}
-
-/// Stub registry: path → response script queue; unmatched paths 404.
-#[derive(Clone, Default)]
-struct StubRegistry {
-    routes: Arc<Mutex<FastMap<String, Vec<Scripted>>>>,
-    hits: Arc<AtomicUsize>,
-    paths: Arc<Mutex<Vec<String>>>,
-    /// While `true`, requests to `hold_path` block until released, which
-    /// shows one slow id does not head-of-line-block other fetches.
-    hold: Arc<AtomicBool>,
-    hold_path: Option<String>,
-}
-
-impl StubRegistry {
-    fn script(&self, path: &str, status: u16, body: &str, times: usize) {
-        self.routes
-            .lock()
-            .unwrap()
-            .entry(path.to_string())
-            .or_default()
-            .push(Scripted {
-                status,
-                body: body.to_string(),
-                times,
-            });
-    }
-
-    fn path_hits(&self, path: &str) -> usize {
-        self.paths
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|p| p == &path)
-            .count()
-    }
-
-    fn respond(&self, path: &str) -> (u16, String) {
-        self.hits.fetch_add(1, Ordering::Relaxed);
-        self.paths.lock().unwrap().push(path.to_string());
-        let mut routes = self.routes.lock().unwrap();
-        if let Some(queue) = routes.get_mut(path)
-            && let Some(first) = queue.first_mut()
-        {
-            let response = (first.status, first.body.clone());
-            if first.times > 0 {
-                first.times -= 1;
-                if first.times == 0 {
-                    queue.remove(0);
-                }
-            }
-            return response;
-        }
-        (
-            404,
-            r#"{"error_code":40403,"message":"Schema not found"}"#.into(),
-        )
-    }
-
-    async fn serve(self) -> std::net::SocketAddr {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            loop {
-                let Ok((stream, _)) = listener.accept().await else {
-                    break;
-                };
-                let stub = self.clone();
-                tokio::spawn(async move {
-                    let io = hyper_util::rt::TokioIo::new(stream);
-                    let service = service_fn(move |req: Request<hyper::body::Incoming>| {
-                        let stub = stub.clone();
-                        async move {
-                            let path = req.uri().path().to_string();
-                            // Gate: block this path until the test releases it.
-                            if stub.hold_path.as_deref() == Some(path.as_str()) {
-                                while stub.hold.load(Ordering::Relaxed) {
-                                    tokio::time::sleep(Duration::from_millis(5)).await;
-                                }
-                            }
-                            let (status, body) = stub.respond(&path);
-                            Ok::<_, std::convert::Infallible>(
-                                Response::builder()
-                                    .status(StatusCode::from_u16(status).unwrap())
-                                    .header(
-                                        "content-type",
-                                        "application/vnd.schemaregistry.v1+json",
-                                    )
-                                    .body(Full::new(Bytes::from(body)))
-                                    .unwrap(),
-                            )
-                        }
-                    });
-                    let _ = http1::Builder::new().serve_connection(io, service).await;
-                });
-            }
-        });
-        addr
-    }
-}
 
 fn schema_body(schema: &str) -> String {
     serde_json::json!({ "schema": schema }).to_string()
@@ -227,9 +113,9 @@ where
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn miss_reports_not_ready_then_decodes_after_fetch() {
-    let stub = StubRegistry::default();
-    stub.script("/schemas/ids/42", 200, &schema_body(SCHEMA_V1), 0);
-    let addr = stub.clone().serve().await;
+    let stub = RegistryStub::start();
+    stub.script("/schemas/ids/42", 200, schema_body(SCHEMA_V1), 0);
+    let addr = stub.addr();
 
     let builder = AvroDeserializerBuilder::from_settings(
         &settings(addr, Duration::from_secs(30)),
@@ -262,13 +148,13 @@ async fn miss_reports_not_ready_then_decodes_after_fetch() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn retriable_registry_errors_are_retried() {
-    let stub = StubRegistry::default();
+    let stub = RegistryStub::start();
     // A transient failure leaves the id absent, and the deserializer's replay
     // refetches it (bounded by per-id fetch backoff); it is never negatively
     // cached.
     stub.script("/schemas/ids/9", 503, "shard warming up", 2);
-    stub.script("/schemas/ids/9", 200, &schema_body(SCHEMA_V1), 0);
-    let addr = stub.clone().serve().await;
+    stub.script("/schemas/ids/9", 200, schema_body(SCHEMA_V1), 0);
+    let addr = stub.addr();
 
     let clock = TestClock::frozen();
     let builder = builder_on(addr, Duration::from_secs(30), &clock);
@@ -287,9 +173,9 @@ async fn retriable_registry_errors_are_retried() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unknown_id_negative_caches_until_ttl_expiry() {
-    let stub = StubRegistry::default();
+    let stub = RegistryStub::start();
     // No script for id 5: the stub answers 404 (and counts hits).
-    let addr = stub.clone().serve().await;
+    let addr = stub.addr();
 
     let clock = TestClock::frozen();
     let builder = builder_on(addr, Duration::from_millis(300), &clock);
@@ -309,7 +195,7 @@ async fn unknown_id_negative_caches_until_ttl_expiry() {
         matches!(err, DeserError::SchemaUnavailable { .. }),
         "poison id surfaces as unavailable (policy applies): {err}"
     );
-    let hits_after_first = stub.hits.load(Ordering::Relaxed);
+    let hits_after_first = stub.hits();
 
     // Within the TTL, with the clock unmoved: answered from the negative
     // cache, no new requests.
@@ -320,7 +206,7 @@ async fn unknown_id_negative_caches_until_ttl_expiry() {
         .deserialize(&raw_payload(&payload), &ack, &mut out)
         .unwrap_err();
     assert!(matches!(err, DeserError::SchemaUnavailable { .. }), "{err}");
-    assert_eq!(stub.hits.load(Ordering::Relaxed), hits_after_first);
+    assert_eq!(stub.hits(), hits_after_first);
 
     // A nanosecond short of the configured TTL: still answered from the
     // negative cache.
@@ -329,10 +215,10 @@ async fn unknown_id_negative_caches_until_ttl_expiry() {
         .deserialize(&raw_payload(&payload), &ack, &mut out)
         .unwrap_err();
     assert!(matches!(err, DeserError::SchemaUnavailable { .. }), "{err}");
-    assert_eq!(stub.hits.load(Ordering::Relaxed), hits_after_first);
+    assert_eq!(stub.hits(), hits_after_first);
 
     // After expiry the schema exists now: refetch succeeds.
-    stub.script("/schemas/ids/5", 200, &schema_body(SCHEMA_V1), 0);
+    stub.script("/schemas/ids/5", 200, schema_body(SCHEMA_V1), 0);
     clock.advance(Duration::from_nanos(1));
     let rows = tokio::task::spawn_blocking(move || {
         let mut out = EmitCollector::new();
@@ -348,9 +234,9 @@ async fn unknown_id_negative_caches_until_ttl_expiry() {
 /// the 100 ms TTL floor is refetched as soon as it expires.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_negative_entry_at_the_ttl_floor_refetches_on_expiry() {
-    let stub = StubRegistry::default();
+    let stub = RegistryStub::start();
     // No script for id 6 yet: the stub answers 404.
-    let addr = stub.clone().serve().await;
+    let addr = stub.addr();
 
     let clock = TestClock::frozen();
     let builder = builder_on(addr, Duration::from_millis(100), &clock);
@@ -367,7 +253,7 @@ async fn a_negative_entry_at_the_ttl_floor_refetches_on_expiry() {
     let err = first.unwrap_err();
     assert!(matches!(err, DeserError::SchemaUnavailable { .. }), "{err}");
 
-    stub.script("/schemas/ids/6", 200, &schema_body(SCHEMA_V1), 0);
+    stub.script("/schemas/ids/6", 200, schema_body(SCHEMA_V1), 0);
     clock.advance(Duration::from_millis(100));
     let payload = confluent_payload(6, 1);
     let rows = tokio::task::spawn_blocking(move || {
@@ -434,13 +320,12 @@ fn unknown_id_warnings(lines: &[String]) -> Vec<&str> {
 #[test]
 fn unknown_id_warnings_are_rate_limited() {
     const IDS: u32 = 20;
-    let stub = StubRegistry::default();
-    let hits = Arc::clone(&stub.hits);
+    let stub = RegistryStub::start();
     let lines = spate_test::capture_logs(tracing::Level::WARN, || {
         let rt = current_thread();
         let clock = TestClock::frozen();
         let mut deser = rt.block_on(async {
-            let addr = stub.serve().await;
+            let addr = stub.addr();
             builder_on(addr, Duration::from_secs(3600), &clock)
                 .build_value()
                 .expect("apache builder")
@@ -449,10 +334,7 @@ fn unknown_id_warnings_are_rate_limited() {
         clock.advance(Duration::from_secs(10));
         decode_unknown_ids(&rt, &mut deser, 100 + IDS..101 + IDS);
     });
-    assert!(
-        hits.load(Ordering::Relaxed) > IDS as usize,
-        "every id is fetched"
-    );
+    assert!(stub.hits() > IDS as usize, "every id is fetched");
     let warned = unknown_id_warnings(&lines);
     assert_eq!(warned.len(), 6, "{warned:#?}");
     assert!(
@@ -465,12 +347,12 @@ fn unknown_id_warnings_are_rate_limited() {
 /// full window does not suppress another's first warning.
 #[test]
 fn each_builder_limits_its_own_unknown_id_warnings() {
-    let stub = StubRegistry::default();
+    let stub = RegistryStub::start();
     let lines = spate_test::capture_logs(tracing::Level::WARN, || {
         let rt = current_thread();
         let clock = TestClock::frozen();
         let (mut first, mut second) = rt.block_on(async {
-            let addr = stub.serve().await;
+            let addr = stub.addr();
             let build = || {
                 builder_on(addr, Duration::from_secs(3600), &clock)
                     .build_value()
@@ -492,10 +374,10 @@ async fn transient_503s_then_success_decodes_and_never_drops() {
     // 503s must not poison the id. Each leaves it absent; the deserializer's
     // replay refetches (bounded by per-id backoff) until the schema resolves.
     // The record is never dropped/acked as poison.
-    let stub = StubRegistry::default();
+    let stub = RegistryStub::start();
     stub.script("/schemas/ids/42", 503, "shard warming up", 3);
-    stub.script("/schemas/ids/42", 200, &schema_body(SCHEMA_V1), 0);
-    let addr = stub.clone().serve().await;
+    stub.script("/schemas/ids/42", 200, schema_body(SCHEMA_V1), 0);
+    let addr = stub.addr();
 
     let clock = TestClock::frozen();
     let builder = builder_on(addr, Duration::from_secs(30), &clock);
@@ -517,10 +399,10 @@ async fn transient_503s_then_success_decodes_and_never_drops() {
 /// refetches once the clock passes it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn no_refetch_while_the_backoff_holds() {
-    let stub = StubRegistry::default();
+    let stub = RegistryStub::start();
     stub.script("/schemas/ids/13", 503, "shard warming up", 1);
-    stub.script("/schemas/ids/13", 200, &schema_body(SCHEMA_V1), 0);
-    let addr = stub.clone().serve().await;
+    stub.script("/schemas/ids/13", 200, schema_body(SCHEMA_V1), 0);
+    let addr = stub.addr();
 
     let test_clock = TestClock::frozen();
     let clock = Arc::new(CountingClock {
@@ -591,10 +473,10 @@ impl Clock for CountingClock {
 /// the failure, first 200 ms and then 400 ms.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_transient_failure_is_stamped_on_the_deserializers_clock() {
-    let stub = StubRegistry::default();
+    let stub = RegistryStub::start();
     stub.script("/schemas/ids/11", 503, "shard warming up", 2);
-    stub.script("/schemas/ids/11", 200, &schema_body(SCHEMA_V1), 0);
-    let addr = stub.clone().serve().await;
+    stub.script("/schemas/ids/11", 200, schema_body(SCHEMA_V1), 0);
+    let addr = stub.addr();
 
     let test_clock = TestClock::frozen();
     let clock = Arc::new(CountingClock {
@@ -649,10 +531,10 @@ async fn a_transient_failure_is_stamped_on_the_deserializers_clock() {
 /// would add up to 11.2 s.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_transient_id_is_refetched_once_its_backoff_passes() {
-    let stub = StubRegistry::default();
+    let stub = RegistryStub::start();
     stub.script("/schemas/ids/11", 503, "shard warming up", 6);
-    stub.script("/schemas/ids/11", 200, &schema_body(SCHEMA_V1), 0);
-    let addr = stub.clone().serve().await;
+    stub.script("/schemas/ids/11", 200, schema_body(SCHEMA_V1), 0);
+    let addr = stub.addr();
 
     let clock = TestClock::frozen();
     let builder = builder_on(addr, Duration::from_secs(30), &clock);
@@ -681,10 +563,10 @@ async fn non_retriable_5xx_is_transient_not_poison() {
     // the whole TTL and silently drop valid records under ErrorPolicy::Skip.
     // The id is left absent and refetched. Calling insert_failed on any
     // non-retriable error fails this test.
-    let stub = StubRegistry::default();
+    let stub = RegistryStub::start();
     stub.script("/schemas/ids/7", 500, "internal error", 1);
-    stub.script("/schemas/ids/7", 200, &schema_body(SCHEMA_V1), 0);
-    let addr = stub.clone().serve().await;
+    stub.script("/schemas/ids/7", 200, schema_body(SCHEMA_V1), 0);
+    let addr = stub.addr();
 
     let clock = TestClock::frozen();
     let builder = builder_on(addr, Duration::from_secs(30), &clock);
@@ -707,13 +589,11 @@ async fn slow_fetch_does_not_block_other_ids() {
     // gated (a black-holed registry node); id 200's fetch must still resolve
     // concurrently rather than waiting behind it. On the old serial fetcher,
     // id 200 would never resolve while 100 is stuck.
-    let mut stub = StubRegistry::default();
-    stub.script("/schemas/ids/100", 200, &schema_body(SCHEMA_V1), 0);
-    stub.script("/schemas/ids/200", 200, &schema_body(SCHEMA_V1), 0);
-    stub.hold.store(true, Ordering::Relaxed);
-    stub.hold_path = Some("/schemas/ids/100".into());
-    let released = Arc::clone(&stub.hold);
-    let addr = stub.clone().serve().await;
+    let stub = RegistryStub::start();
+    stub.script("/schemas/ids/100", 200, schema_body(SCHEMA_V1), 0);
+    stub.script("/schemas/ids/200", 200, schema_body(SCHEMA_V1), 0);
+    stub.hold("/schemas/ids/100");
+    let addr = stub.addr();
 
     let builder = AvroDeserializerBuilder::from_settings(
         &settings(addr, Duration::from_secs(30)),
@@ -760,7 +640,7 @@ async fn slow_fetch_does_not_block_other_ids() {
     .unwrap();
 
     // Release the gate: the slow id now resolves too.
-    released.store(false, Ordering::Relaxed);
+    stub.release();
     let rows = tokio::task::spawn_blocking(move || {
         let mut out = EmitCollector::new();
         drive_until_ready(&mut deser, &slow, &mut out).map(|()| out.payloads())
@@ -773,11 +653,11 @@ async fn slow_fetch_does_not_block_other_ids() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn prewarm_loads_subjects_at_startup() {
-    let stub = StubRegistry::default();
+    let stub = RegistryStub::start();
     stub.script(
         "/subjects/events-value/versions/latest",
         200,
-        &serde_json::json!({
+        serde_json::json!({
             "schema": SCHEMA_V1, "id": 42, "version": 3, "subject": "events-value"
         })
         .to_string(),
@@ -785,8 +665,8 @@ async fn prewarm_loads_subjects_at_startup() {
     );
     // Fallback for the startup race: a payload arriving before the
     // pre-warm lands triggers an on-demand by-id fetch.
-    stub.script("/schemas/ids/42", 200, &schema_body(SCHEMA_V1), 0);
-    let addr = stub.clone().serve().await;
+    stub.script("/schemas/ids/42", 200, schema_body(SCHEMA_V1), 0);
+    let addr = stub.addr();
 
     let mut cfg = settings(addr, Duration::from_millis(100));
     cfg.prewarm_subjects = vec!["events-value".into()];
@@ -859,9 +739,9 @@ async fn an_empty_trust_store_fails_only_an_https_build() {
         assert_eq!(rows.len(), 1);
         return;
     }
-    let stub = StubRegistry::default();
-    stub.script("/schemas/ids/42", 200, &schema_body(SCHEMA_V1), 0);
-    let addr = stub.serve().await;
+    let stub = RegistryStub::start();
+    stub.script("/schemas/ids/42", 200, schema_body(SCHEMA_V1), 0);
+    let addr = stub.addr();
     let dir = tempfile::tempdir().unwrap();
     let empty = dir.path().join("empty.pem");
     std::fs::write(&empty, "").unwrap();
@@ -883,10 +763,10 @@ async fn an_empty_trust_store_fails_only_an_https_build() {
 /// prints a backtrace to stderr, which is expected and harmless.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_refused_schema_poisons_the_id_rather_than_stalling() {
-    let stub = StubRegistry::default();
+    let stub = RegistryStub::start();
     let bad = r#"{"type":"record","name":"my-record","fields":[{"name":"id","type":"long"}]}"#;
-    stub.script("/schemas/ids/77", 200, &schema_body(bad), 0);
-    let addr = stub.clone().serve().await;
+    stub.script("/schemas/ids/77", 200, schema_body(bad), 0);
+    let addr = stub.addr();
 
     let builder = AvroDeserializerBuilder::from_settings(
         &settings(addr, Duration::from_secs(30)),
@@ -913,10 +793,10 @@ async fn a_refused_schema_poisons_the_id_rather_than_stalling() {
 /// text also parses as an Avro schema.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_schema_that_is_not_avro_poisons_the_id() {
-    let stub = StubRegistry::default();
+    let stub = RegistryStub::start();
     let body = serde_json::json!({ "schema": r#"{"type":"string"}"#, "schemaType": "JSON" });
-    stub.script("/schemas/ids/78", 200, &body.to_string(), 0);
-    let addr = stub.clone().serve().await;
+    stub.script("/schemas/ids/78", 200, body.to_string(), 0);
+    let addr = stub.addr();
     let builder = AvroDeserializerBuilder::from_settings(
         &settings(addr, Duration::from_secs(30)),
         &tokio::runtime::Handle::current(),
@@ -941,13 +821,13 @@ async fn a_schema_that_is_not_avro_poisons_the_id() {
 /// not cached, so its id is fetched and poisoned on first use.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn prewarm_skips_a_schema_that_is_not_avro() {
-    let stub = StubRegistry::default();
+    let stub = RegistryStub::start();
     let json =
         serde_json::json!({ "schema": r#"{"type":"string"}"#, "schemaType": "JSON", "id": 79 })
             .to_string();
-    stub.script("/subjects/json-value/versions/latest", 200, &json, 0);
-    stub.script("/schemas/ids/79", 200, &json, 0);
-    let addr = stub.clone().serve().await;
+    stub.script("/subjects/json-value/versions/latest", 200, json.clone(), 0);
+    stub.script("/schemas/ids/79", 200, json, 0);
+    let addr = stub.addr();
     let mut cfg = settings(addr, Duration::from_secs(30));
     // Subjects are pre-warmed in order, so a request for the second subject
     // means the first has been handled. The second answers 404.
@@ -982,9 +862,9 @@ async fn prewarm_skips_a_schema_that_is_not_avro() {
 /// An unknown id's poison reason carries the registry's error body.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_unknown_id_names_the_registry_error() {
-    let stub = StubRegistry::default();
+    let stub = RegistryStub::start();
     // Unscripted: the stub answers 404 {"error_code":40403,"message":"Schema not found"}.
-    let addr = stub.clone().serve().await;
+    let addr = stub.addr();
     let builder = AvroDeserializerBuilder::from_settings(
         &settings(addr, Duration::from_secs(30)),
         &tokio::runtime::Handle::current(),
@@ -1009,10 +889,10 @@ async fn an_unknown_id_names_the_registry_error() {
 /// by-id fetch.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_prewarm_forbidden_is_not_a_rejection() {
-    let stub = StubRegistry::default();
+    let stub = RegistryStub::start();
     stub.script("/subjects/events-value/versions/latest", 403, "{}", 0);
-    stub.script("/schemas/ids/42", 200, &schema_body(SCHEMA_V1), 0);
-    let addr = stub.clone().serve().await;
+    stub.script("/schemas/ids/42", 200, schema_body(SCHEMA_V1), 0);
+    let addr = stub.addr();
     let mut cfg = settings(addr, Duration::from_secs(30));
     // Pre-warm is sequential and ends on a recorded rejection, so a request
     // for the second subject means the first was handled and not recorded.
@@ -1040,50 +920,20 @@ async fn a_prewarm_forbidden_is_not_a_rejection() {
     assert_eq!(rows.unwrap(), 1);
 }
 
-/// The target and `Authorization` headers of each request a stub received.
-type Seen = Arc<Mutex<Vec<(String, Vec<String>)>>>;
-
-/// Serves `SCHEMA_V1` to every request and records each request's target and
-/// `Authorization` headers.
-async fn serve_recording() -> (std::net::SocketAddr, Seen) {
-    let seen = Seen::default();
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let record = Arc::clone(&seen);
-    tokio::spawn(async move {
-        while let Ok((stream, _)) = listener.accept().await {
-            let record = Arc::clone(&record);
-            tokio::spawn(async move {
-                let service = service_fn(move |req: Request<hyper::body::Incoming>| {
-                    let record = Arc::clone(&record);
-                    async move {
-                        let auth = req
-                            .headers()
-                            .get_all(hyper::header::AUTHORIZATION)
-                            .iter()
-                            .map(|v| v.to_str().unwrap().to_owned())
-                            .collect();
-                        let target = req
-                            .uri()
-                            .path_and_query()
-                            .map(ToString::to_string)
-                            .unwrap_or_default();
-                        record.lock().unwrap().push((target, auth));
-                        Ok::<_, std::convert::Infallible>(Response::new(Full::new(Bytes::from(
-                            format!(
-                                r#"{{"id":5,"schema":{}}}"#,
-                                serde_json::to_string(SCHEMA_V1).unwrap()
-                            ),
-                        ))))
-                    }
-                });
-                let _ = http1::Builder::new()
-                    .serve_connection(hyper_util::rt::TokioIo::new(stream), service)
-                    .await;
-            });
-        }
-    });
-    (addr, seen)
+/// A stub that serves `SCHEMA_V1` under id 5 at `path`, and records each
+/// request it receives.
+fn recording(path: &str) -> RegistryStub {
+    let stub = RegistryStub::start();
+    stub.script(
+        path,
+        200,
+        format!(
+            r#"{{"id":5,"schema":{}}}"#,
+            serde_json::to_string(SCHEMA_V1).unwrap()
+        ),
+        0,
+    );
+    stub
 }
 
 /// By-id fetches preserve configured basic auth and unauthenticated requests.
@@ -1095,8 +945,8 @@ async fn a_fetch_sends_basic_auth() {
         (Some("svc"), None, vec!["Basic c3ZjOg=="]),
         (Some(""), Some("hunter2"), vec!["Basic Omh1bnRlcjI="]),
     ] {
-        let (addr, seen) = serve_recording().await;
-        let mut cfg = settings_at(format!("http://{addr}"), Duration::from_secs(30));
+        let stub = recording("/schemas/ids/5");
+        let mut cfg = settings_at(stub.endpoint(), Duration::from_secs(30));
         let registry = cfg.registry.as_mut().unwrap();
         registry.username = username.map(Into::into);
         registry.password = password.map(Into::into);
@@ -1118,11 +968,11 @@ async fn a_fetch_sends_basic_auth() {
             AvroValue::Record(vec![("id".into(), AvroValue::Long(1))])
         );
         assert_eq!(
-            seen.lock().unwrap().as_slice(),
-            [(
-                "/schemas/ids/5?deleted=true".to_owned(),
-                expected.into_iter().map(str::to_owned).collect()
-            )]
+            stub.requests(),
+            [RegistryRequest {
+                target: "/schemas/ids/5?deleted=true".to_owned(),
+                authorization: expected.into_iter().map(str::to_owned).collect(),
+            }]
         );
     }
 }
@@ -1134,8 +984,8 @@ async fn a_prewarm_sends_basic_auth() {
         (Some("svc"), vec!["Basic c3ZjOmh1bnRlcjI=".to_owned()]),
         (None, vec![]),
     ] {
-        let (addr, seen) = serve_recording().await;
-        let mut cfg = settings_at(format!("http://{addr}"), Duration::from_secs(30));
+        let stub = recording("/subjects/orders-value/versions/latest");
+        let mut cfg = settings_at(stub.endpoint(), Duration::from_secs(30));
         let registry = cfg.registry.as_mut().unwrap();
         registry.username = username.map(Into::into);
         registry.password = username.map(|_| "hunter2".into());
@@ -1144,14 +994,14 @@ async fn a_prewarm_sends_basic_auth() {
             AvroDeserializerBuilder::from_settings(&cfg, &tokio::runtime::Handle::current())
                 .unwrap();
         spate_test::wait_until(spate_test::HANG, "prewarm request is received", || {
-            !seen.lock().unwrap().is_empty()
+            stub.hits() > 0
         });
         assert_eq!(
-            seen.lock().unwrap().as_slice(),
-            [(
-                "/subjects/orders-value/versions/latest".to_owned(),
-                expected
-            )]
+            stub.requests(),
+            [RegistryRequest {
+                target: "/subjects/orders-value/versions/latest".to_owned(),
+                authorization: expected,
+            }]
         );
     }
 }
@@ -1181,14 +1031,14 @@ async fn fatal_reason(deser: spate_avro::AvroValueDeserializer, payload: Vec<u8>
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_auth_rejection_is_fatal() {
     for status in [401, 403] {
-        let stub = StubRegistry::default();
+        let stub = RegistryStub::start();
         stub.script(
             "/schemas/ids/1",
             status,
             r#"{"error_code":401,"message":"Unauthorized"}"#,
             0,
         );
-        let addr = stub.serve().await;
+        let addr = stub.addr();
         let mut cfg = settings_at(format!("http://{addr}"), Duration::from_secs(30));
         let registry = cfg.registry.as_mut().unwrap();
         registry.username = Some("svc".into());
@@ -1208,7 +1058,7 @@ async fn an_auth_rejection_is_fatal() {
 /// by-id fetch only ever sees a transient `503`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_prewarm_auth_rejection_is_fatal_at_the_first_miss() {
-    let stub = StubRegistry::default();
+    let stub = RegistryStub::start();
     stub.script(
         "/subjects/events-value/versions/latest",
         401,
@@ -1216,7 +1066,7 @@ async fn a_prewarm_auth_rejection_is_fatal_at_the_first_miss() {
         0,
     );
     stub.script("/schemas/ids/42", 503, "{}", 0);
-    let addr = stub.serve().await;
+    let addr = stub.addr();
     let mut cfg = settings(addr, Duration::from_secs(30));
     cfg.prewarm_subjects = vec!["events-value".into()];
     let builder =
@@ -1229,10 +1079,10 @@ async fn a_prewarm_auth_rejection_is_fatal_at_the_first_miss() {
 /// Once a rejection is recorded, a schema already cached keeps decoding.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_cached_schema_decodes_after_a_rejection() {
-    let stub = StubRegistry::default();
-    stub.script("/schemas/ids/1", 200, &schema_body(SCHEMA_V1), 0);
+    let stub = RegistryStub::start();
+    stub.script("/schemas/ids/1", 200, schema_body(SCHEMA_V1), 0);
     stub.script("/schemas/ids/2", 401, "{}", 0);
-    let addr = stub.serve().await;
+    let addr = stub.addr();
     let builder = AvroDeserializerBuilder::from_settings(
         &settings(addr, Duration::from_secs(30)),
         &tokio::runtime::Handle::current(),
@@ -1328,10 +1178,10 @@ async fn datum_path_not_ready_then_decodes_and_interleaves_ids() {
     const SCHEMA_V2: &str = r#"{"type":"record","name":"Event2","fields":[
         {"name":"id","type":"long"},
         {"name":"tag","type":"string"}]}"#;
-    let stub = StubRegistry::default();
-    stub.script("/schemas/ids/61", 200, &schema_body(SCHEMA_V1), 0);
-    stub.script("/schemas/ids/62", 200, &schema_body(SCHEMA_V2), 0);
-    let addr = stub.clone().serve().await;
+    let stub = RegistryStub::start();
+    stub.script("/schemas/ids/61", 200, schema_body(SCHEMA_V1), 0);
+    stub.script("/schemas/ids/62", 200, schema_body(SCHEMA_V2), 0);
+    let addr = stub.addr();
 
     let builder = AvroDeserializerBuilder::from_settings(
         &settings(addr, Duration::from_secs(30)),
@@ -1388,14 +1238,14 @@ async fn duration_schema_gates_only_the_datum_path() {
     const DURATION_SCHEMA: &str = r#"{"type":"record","name":"D","fields":[
         {"name":"id","type":"long"},
         {"name":"d","type":{"type":"fixed","name":"F","size":12,"logicalType":"duration"}}]}"#;
-    let stub = StubRegistry::default();
+    let stub = RegistryStub::start();
     stub.script(
         "/schemas/ids/77",
         200,
-        &schema_body(&DURATION_SCHEMA.replace('\n', " ")),
+        schema_body(&DURATION_SCHEMA.replace('\n', " ")),
         0,
     );
-    let addr = stub.clone().serve().await;
+    let addr = stub.addr();
 
     let builder = AvroDeserializerBuilder::from_settings(
         &settings(addr, Duration::from_secs(30)),
@@ -1451,9 +1301,9 @@ async fn duration_schema_gates_only_the_datum_path() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn confluent_truncated_string_is_malformed() {
     const SCH: &str = r#"{"type":"record","name":"R","fields":[{"name":"s","type":"string"}]}"#;
-    let stub = StubRegistry::default();
-    stub.script("/schemas/ids/83", 200, &schema_body(SCH), 0);
-    let addr = stub.serve().await;
+    let stub = RegistryStub::start();
+    stub.script("/schemas/ids/83", 200, schema_body(SCH), 0);
+    let addr = stub.addr();
     let b = AvroDeserializerBuilder::from_settings(
         &settings(addr, Duration::from_secs(30)),
         &tokio::runtime::Handle::current(),

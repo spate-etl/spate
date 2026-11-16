@@ -1,10 +1,10 @@
 //! A panic in the registry pre-warm task is logged with the task's name.
 
 use spate_avro::{AvroDeserializerBuilder, AvroMode, AvroSettings, RegistrySection};
+use spate_test_support::RegistryStub;
 use std::fmt::Debug;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::field::{Field, Visit};
 use tracing::span::{Attributes, Id, Record};
 use tracing::{Event, Metadata, Subscriber};
@@ -79,10 +79,6 @@ impl Subscriber for PanicOnPrewarm {
 /// Pins that a panic in the pre-warm task is logged with the task name
 /// `avro-registry-prewarm`.
 #[test]
-#[expect(
-    clippy::disallowed_methods,
-    reason = "the stub server's tasks end when the test's runtime drops"
-)]
 fn a_prewarm_panic_is_logged_with_its_name() {
     let panics = Arc::new(Mutex::new(Vec::new()));
     let seen = Arc::new(tokio::sync::Notify::new());
@@ -97,30 +93,19 @@ fn a_prewarm_panic_is_logged_with_its_name() {
             .build()
             .unwrap()
             .block_on(async {
-                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-                let addr = listener.local_addr().unwrap();
-                let body = serde_json::json!({
-                    "schema": SCHEMA, "id": 42, "version": 1, "subject": "e-value"
-                })
-                .to_string();
-                tokio::spawn(async move {
-                    while let Ok((mut tcp, _)) = listener.accept().await {
-                        let body = body.clone();
-                        tokio::spawn(async move {
-                            let mut request = [0u8; 4096];
-                            let _ = tcp.read(&mut request).await;
-                            let out = format!(
-                                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
-                                 Content-Length: {}\r\n\r\n{body}",
-                                body.len()
-                            );
-                            let _ = tcp.write_all(out.as_bytes()).await;
-                        });
-                    }
-                });
+                let stub = RegistryStub::start();
+                stub.script(
+                    "/subjects/e-value/versions/latest",
+                    200,
+                    serde_json::json!({
+                        "schema": SCHEMA, "id": 42, "version": 1, "subject": "e-value"
+                    })
+                    .to_string(),
+                    0,
+                );
                 let settings = AvroSettings {
                     mode: AvroMode::Confluent,
-                    registry: Some(RegistrySection::new(format!("http://{addr}"))),
+                    registry: Some(RegistrySection::new(stub.endpoint())),
                     prewarm_subjects: vec!["e-value".into()],
                     ..AvroSettings::default()
                 };

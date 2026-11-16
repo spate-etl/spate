@@ -167,6 +167,7 @@ fn is_dependency_manifest(path: &str) -> bool {
             "bench/Cargo.toml",
             "bench/*/Cargo.toml",
             "test-support/Cargo.toml",
+            "test-support/*/Cargo.toml",
             "xtask/Cargo.toml",
         ],
     )
@@ -1458,7 +1459,7 @@ mod tests {
         }
     }
 
-    /// The seven workspace manifests reach each selector that reads them, and
+    /// The eight workspace manifests reach each selector that reads them, and
     /// `fuzz/Cargo.toml` reaches the two selectors that always read it, not the
     /// macOS lane or the image job.
     #[test]
@@ -1470,6 +1471,7 @@ mod tests {
             "bench/Cargo.toml",
             "bench/alloc/Cargo.toml",
             "test-support/Cargo.toml",
+            "test-support/s3-feed/Cargo.toml",
             "xtask/Cargo.toml",
         ] {
             assert!(

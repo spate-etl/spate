@@ -15,6 +15,7 @@ members = [
     "crates/spate-sqs",
     "crates/spate-test",
     "test-support",
+    "test-support/s3-feed",
     "fuzz",
     "xtask",
     "examples/lambda-s3",

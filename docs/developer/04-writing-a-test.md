@@ -14,6 +14,7 @@ Put a unit test in a `#[cfg(test)]` module beside the code it tests.
 Put an integration test in the crate's `tests/` directory, and a doc test on the public item it shows.
 
 A helper that only this repository's tests need, such as reading a pinned image, goes in the unpublished `spate-test-support` crate under `test-support/`.
+A helper that needs `spate-core` or a connector crate goes in a crate of its own under `test-support/`, as the S3 feed-worker harness in `spate-test-s3-feed` does, so only the crates whose tests use it depend on it.
 
 The tests of `spate-core` use the helpers in `spate-test`, such as `wait_until` and `capture_logs`, through a dev-dependency with no version.
 The `spate-test` crate depends on `spate-core`, so this edge closes a cycle.

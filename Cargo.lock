@@ -4519,6 +4519,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "spate-test-s3-feed"
+version = "0.4.0"
+dependencies = [
+ "object_store",
+ "serde",
+ "spate-core",
+ "spate-json",
+ "spate-s3",
+ "spate-test",
+ "tempfile",
+ "tokio",
+ "yaml_serde",
+]
+
+[[package]]
 name = "spate-test-support"
 version = "0.4.0"
 dependencies = [

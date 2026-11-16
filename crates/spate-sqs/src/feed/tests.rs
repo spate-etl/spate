@@ -2741,11 +2741,9 @@ async fn a_failing_delete_at_close_is_retried_only_until_within() {
     let within = Duration::from_secs(2);
     let bound = Instant::now() + within;
     let mut closed = feed.close(within).unwrap();
-    // Each retry wakes at its own instant, as in
-    // `a_failed_hand_back_call_is_retried_within_its_bound`.
-    pass(within).await;
+    step(within).await;
     assert!(closed.try_outcome().unwrap().is_err());
-    pass(Duration::from_secs(3)).await;
+    step(Duration::from_secs(3)).await;
     let sent = queue.deletes_at.lock().unwrap().clone();
     assert!(sent.len() > 1, "the delete was not retried");
     assert!(

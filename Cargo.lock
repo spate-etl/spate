@@ -4490,11 +4490,10 @@ dependencies = [
  "aws-sdk-sqs",
  "aws-smithy-http-client",
  "aws-smithy-runtime-api",
- "base64 0.23.1",
+ "aws-types",
  "humantime-serde",
  "object_store",
  "rustls",
- "rustls-native-certs",
  "serde",
  "serde_json",
  "spate-core",
@@ -4507,7 +4506,6 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
- "webpki-root-certs",
  "yaml_serde",
 ]
 

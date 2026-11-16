@@ -26,6 +26,7 @@ fn config(visibility: Duration) -> SqsFeedConfig {
         visibility,
         region: None,
         endpoint: None,
+        tls: spate_core::tls::TlsSection::default(),
     }
 }
 

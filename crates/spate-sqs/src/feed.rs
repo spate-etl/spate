@@ -472,7 +472,9 @@ impl SqsFeed {
     ///
     /// [`ConnectError::Config`] for a section the feed cannot read, a
     /// `queue_url` ending in `.fifo` and a `settling_window` below one
-    /// minute among them.
+    /// minute among them, for a `tls.root_ca` that cannot be used, and for an
+    /// `https://` endpoint when neither the system trust store nor
+    /// `tls.root_ca` holds a usable certificate.
     /// [`ConnectError::Refused`] when SQS refuses the credentials, the queue or a
     /// request no retry can fix, and for a queue the feed cannot dead-letter from: one whose ARN names
     /// a FIFO queue, one with no redrive policy or one the feed cannot read,

@@ -7430,6 +7430,21 @@ mod tests {
             }
         }
 
+        /// Node id 0 is a broker, so a partition fetched from or led by it
+        /// is judged like any other.
+        #[test]
+        fn node_zero_is_a_broker() {
+            for (broker, leader) in [(0, 1), (1, 0)] {
+                let got = verdicts(
+                    LIMIT,
+                    &(0..3)
+                        .map(|i| snapshot(secs(31 * i), &[(0, broker, leader)]))
+                        .collect::<Vec<_>>(),
+                );
+                assert!(got[2].is_some(), "{broker} {leader}");
+            }
+        }
+
         #[test]
         fn a_negative_partition_id_is_skipped() {
             let mut runs = FastMap::default();

@@ -1634,7 +1634,11 @@ mod tests {
         let cases = [
             (r#""string""#, &prefixed, "string is"),
             (r#""bytes""#, &prefixed, "bytes are"),
-            (r#"{"type":"fixed","name":"F","size":128}"#, &bad, "fixed bytes are"),
+            (
+                r#"{"type":"fixed","name":"F","size":128}"#,
+                &bad,
+                "fixed bytes are",
+            ),
         ];
         for (sch, datum, what) in cases {
             let err = decode::<&str>(&schema(sch), datum).unwrap_err();

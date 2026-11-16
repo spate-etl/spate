@@ -1322,18 +1322,21 @@ mod tests {
         }
 
         /// An `http://` registry redirected to an `https://` one whose CA is
-        /// not trusted is rejected with a hint that leaves out
-        /// `registry.tls.root_ca`, which an `http://` URL refuses.
+        /// not trusted, whether the system store holds another CA or none, is
+        /// rejected with a hint that leaves out `registry.tls.root_ca`, which
+        /// an `http://` URL refuses.
         #[tokio::test]
         async fn a_redirect_to_an_unknown_ca_omits_the_root_ca_hint() {
             let (registry, other) = (TestCa::new("registry"), TestCa::new("other"));
             let target = serve(&registry, None).await;
             let url = redirect_to(target).await;
-            let reason = rejected(fetch(&url, None, vec![other.der()]).await);
-            assert!(
-                reason.ends_with("add the issuing CA to the system trust store"),
-                "{reason}"
-            );
+            for system in [vec![other.der()], Vec::new()] {
+                let reason = rejected(fetch(&url, None, system).await);
+                assert!(
+                    reason.ends_with("add the issuing CA to the system trust store"),
+                    "{reason}"
+                );
+            }
         }
     }
 }

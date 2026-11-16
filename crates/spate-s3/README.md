@@ -31,6 +31,8 @@ source:
     chunk_bytes: 512KiB        # one buffered chunk; not zero
     store:                     # object_store options; empty by default
       region: eu-west-2
+    tls:
+      root_ca: /etc/spate/ca.pem  # trusted beside the system store; unset by default
 
 feed:
   memory: {}                   # the in-process feed: this run lists and reads
@@ -51,6 +53,9 @@ their defaults.
 - `store` options apply on top of the AWS environment variables. A bucket key
   fails at load, because the bucket comes from `url`. Under an S3 URL, a key
   that is not an `object_store` S3 option fails at load too.
+- `tls.root_ca` names a PEM bundle the client trusts in addition to the system
+  trust store. It fails at load when `url` is not an S3 store, or when `store`
+  sets an endpoint that is not `https://`.
 - The record format is not a key. `S3Source::with_framer` sets the framer in
   code, and a source built without one fails when it opens.
 

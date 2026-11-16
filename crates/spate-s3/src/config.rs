@@ -12,6 +12,7 @@ use object_store::aws::AmazonS3ConfigKey;
 use object_store::path::Path;
 use serde::{Deserialize, Serialize};
 use spate_core::config::{ComponentConfig, ConfigError, Denylist, SectionPath, redact};
+use spate_core::tls::TlsSection;
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use url::Url;
@@ -125,6 +126,10 @@ pub struct S3SourceConfig {
     /// are rejected; the bucket comes from `url`.
     #[serde(default)]
     pub store: BTreeMap<String, String>,
+    /// Trust settings: `tls.root_ca`, which requires an S3 `url` whose store
+    /// is reached over `https://`.
+    #[serde(default)]
+    pub tls: TlsSection,
 }
 
 // Hand-written: the `store` map carries credentials. The destructure lists
@@ -138,6 +143,7 @@ impl std::fmt::Debug for S3SourceConfig {
             prefetch_bytes,
             chunk_bytes,
             store,
+            tls,
         } = self;
         f.debug_struct("S3SourceConfig")
             .field("url", url)
@@ -146,6 +152,7 @@ impl std::fmt::Debug for S3SourceConfig {
             .field("prefetch_bytes", prefetch_bytes)
             .field("chunk_bytes", chunk_bytes)
             .field("store", &redact::map(store.keys()))
+            .field("tls", tls)
             .finish()
     }
 }
@@ -162,6 +169,7 @@ impl S3SourceConfig {
             prefetch_bytes: default_prefetch_bytes(),
             chunk_bytes: default_chunk_bytes(),
             store: BTreeMap::new(),
+            tls: TlsSection::default(),
         }
     }
 
@@ -220,19 +228,52 @@ impl S3SourceConfig {
                     .map_err(|e| at.invalid(&format!("store.\"{key}\""), e.to_string()))?;
             }
         }
-        // Only the S3 client's keys are checked: `file://` reads no options.
-        if matches!(
+        let s3 = matches!(
             ObjectStoreScheme::parse(&url),
             Ok((ObjectStoreScheme::AmazonS3, _))
-        ) && let Some(key) = self.store.keys().find(|k| s3_store_key(k).is_none())
-        {
+        );
+        // Only the S3 client's keys are checked: `file://` reads no options.
+        if s3 && let Some(key) = self.store.keys().find(|k| s3_store_key(k).is_none()) {
             return Err(at.invalid(
                 &format!("store.\"{key}\""),
                 "is not an object_store S3 option",
             ));
         }
+        if self.tls.root_ca.is_some() {
+            if !s3 {
+                return Err(at.invalid("tls.root_ca", "is set, but `url` is not an S3 store"));
+            }
+            if store_endpoint(&self.store).is_some_and(|e| !is_https(e)) {
+                return Err(at.invalid(
+                    "tls.root_ca",
+                    "is set, but the endpoint `store` sets is not https://",
+                ));
+            }
+        }
         Ok(())
     }
+}
+
+/// The endpoint the `store` options set, read in [`ENDPOINT_KEYS`] order.
+pub(crate) fn store_endpoint(store: &BTreeMap<String, String>) -> Option<&str> {
+    ENDPOINT_KEYS
+        .iter()
+        .find_map(|wanted| {
+            store
+                .iter()
+                .find(|(key, _)| s3_store_key(key).as_ref() == Some(wanted))
+        })
+        .map(|(_, value)| value.as_str())
+}
+
+/// The options that name the store's endpoint, in the order the client reads
+/// them: `aws_endpoint_url_s3` in place of `endpoint`.
+pub(crate) const ENDPOINT_KEYS: [AmazonS3ConfigKey; 2] =
+    [AmazonS3ConfigKey::S3Endpoint, AmazonS3ConfigKey::Endpoint];
+
+/// Whether `url` is an `https://` URL, in any case the URL parser accepts.
+pub(crate) fn is_https(url: &str) -> bool {
+    Url::parse(url).is_ok_and(|url| url.scheme() == "https")
 }
 
 /// The S3 client option a `store` key names, under any spelling and case
@@ -548,10 +589,50 @@ mod tests {
                 ),
                 "store.\"endpont\": is not an object_store S3 option".to_owned(),
             ),
+            (
+                "  url: file:///data/\n  tls: { root_ca: /etc/ca.pem }\n".to_owned(),
+                "tls.root_ca: is set, but `url` is not an S3 store".to_owned(),
+            ),
+            (
+                format!(
+                    "{}  store:\n    endpoint: http://127.0.0.1:9000\n  tls: {{ root_ca: /etc/ca.pem }}\n",
+                    minimal()
+                ),
+                "tls.root_ca: is set, but the endpoint `store` sets is not https://".to_owned(),
+            ),
+            (
+                format!(
+                    "{}  store:\n    aws_endpoint_url_s3: http://127.0.0.1:9000\n    endpoint: \
+                     https://127.0.0.1:9000\n  tls: {{ root_ca: /etc/ca.pem }}\n",
+                    minimal()
+                ),
+                "tls.root_ca: is set, but the endpoint `store` sets is not https://".to_owned(),
+            ),
         ];
         for (body, want) in cases {
             let msg = refusal(S3SourceConfig::from_component_config(&section(&body)));
             assert_eq!(msg, format!("source.s3.{want}"), "{body}");
+        }
+    }
+
+    /// `tls.root_ca` loads when the store is reached over `https://`: AWS's
+    /// endpoint, an `https://` one, or `aws_endpoint_url_s3` over an
+    /// `http://` `endpoint`.
+    #[test]
+    fn root_ca_loads_with_an_https_store() {
+        for store in [
+            "",
+            "  store:\n    ENDPOINT: https://127.0.0.1:9000\n",
+            "  store:\n    endpoint: HTTPS://127.0.0.1:9000\n",
+            "  store:\n    aws_endpoint_url_s3: https://127.0.0.1:9000\n    endpoint: \
+             http://127.0.0.1:9000\n",
+        ] {
+            let body = format!("{}{store}  tls: {{ root_ca: /etc/ca.pem }}\n", minimal());
+            let cfg = S3SourceConfig::from_component_config(&section(&body)).expect(&body);
+            assert_eq!(
+                cfg.tls.root_ca.as_deref(),
+                Some(std::path::Path::new("/etc/ca.pem"))
+            );
         }
     }
 

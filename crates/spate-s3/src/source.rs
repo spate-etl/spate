@@ -12,10 +12,10 @@
 //! feed that hands back, the reader reads on to the stop reserve and hands
 //! back what it has not read to its end; see `unit_reader`.
 
-use crate::config::{S3SourceConfig, s3_store_key};
+use crate::config::{ENDPOINT_KEYS, S3SourceConfig, is_https, s3_store_key, store_endpoint};
 use crate::job_end::{Finish, JobEnd, no_depth};
 use crate::lane::S3Lane;
-use crate::listing::{UnaddressableConnector, UnaddressableKeys};
+use crate::listing::{ClientRoots, TrustHint, UnaddressableConnector, UnaddressableKeys};
 use crate::location::{Location, await_fingerprint, feed_fingerprint};
 use crate::metrics::S3Metrics;
 use crate::split::Packing;
@@ -32,7 +32,9 @@ use spate_core::framing::{FramingContract, RecordFramer};
 use spate_core::record::PartitionId;
 use spate_core::source::{LaneId, Source, SourceCtx, SourceEvent};
 use spate_core::task::{self, TaskHandle};
+use spate_core::tls::{CertificateDer, SystemRoots, TrustError, TrustRoots};
 use std::num::NonZeroUsize;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 use url::Url;
@@ -430,7 +432,7 @@ impl S3Source {
                 (store, path, None, bucket, resumable)
             }
             None => {
-                let built = store_named(&url, &self.config.store, &self.config.url)?;
+                let built = store_named(&url, &self.config, &self.config.url)?;
                 (
                     Arc::from(built.store),
                     built.prefix,
@@ -509,7 +511,7 @@ impl S3Source {
         }
         store_named(
             location.url(),
-            &self.config.store,
+            &self.config,
             format_args!("the job location {}", location.shown()),
         )
         .map(|built| Arc::from(built.store))
@@ -879,14 +881,20 @@ fn opts(map: &std::collections::BTreeMap<String, String>) -> Vec<(String, String
     map.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
 }
 
-/// [`build_store`], with a failure saying which store it was building.
+/// [`build_store`] with `config`'s `store` options and `tls.root_ca`, with a
+/// failure saying which store it was building.
 fn store_named(
     url: &Url,
-    options: &std::collections::BTreeMap<String, String>,
+    config: &S3SourceConfig,
     named: impl std::fmt::Display,
 ) -> Result<BuiltStore, SourceError> {
-    build_store(url, options)
-        .map_err(|e| SourceError::fatal(format!("building the object store for {named}: {e}")))
+    build_store(
+        url,
+        &config.store,
+        config.tls.root_ca.as_deref(),
+        SystemRoots::load,
+    )
+    .map_err(|e| SourceError::fatal(format!("building the object store for {named}: {e}")))
 }
 
 /// Build the object store for `url`, applying the raw `store` passthrough
@@ -897,7 +905,8 @@ fn store_named(
 /// SDK uses, so EKS Pod Identity, IRSA (web identity), ECS task roles, IMDS,
 /// and `AWS_REGION`/`AWS_DEFAULT_REGION` all resolve without configuration.
 /// The explicit `options` are overlaid on top and win over the environment;
-/// the bucket comes from the URL. `object_store::parse_url_opts`, used for
+/// the bucket comes from the URL. The client verifies TLS against
+/// [`client_roots`], which reads the system trust store from `system`. `object_store::parse_url_opts`, used for
 /// `file://`, does *not* read the environment, so the S3 scheme is
 /// special-cased here.
 ///
@@ -905,19 +914,27 @@ fn store_named(
 /// `AmazonS3ConfigKey` parses *unprefixed* keys (`region`, `token`,
 /// `endpoint`, ...), so an unrelated environment variable could hijack the
 /// client. `from_env` guards on the `AWS_` prefix; we rely on that.
+///
+/// # Errors
+///
+/// The text of `object_store`'s error, or of a [`client_roots`] failure
+/// anchored at `tls.root_ca`.
 fn build_store(
     url: &Url,
     options: &std::collections::BTreeMap<String, String>,
-) -> Result<BuiltStore, object_store::Error> {
+    root_ca: Option<&Path>,
+    system: impl FnOnce() -> SystemRoots,
+) -> Result<BuiltStore, String> {
     // `ObjectStoreScheme::parse` returns the scheme and the in-store `Path` —
     // the very call `parse_url_opts` makes, so `path` is the exact listing
     // prefix it would return and every planned descriptor that depends on it
     // stays valid.
-    let (scheme, path) = ObjectStoreScheme::parse(url)?;
+    let (scheme, path) = ObjectStoreScheme::parse(url).map_err(|e| e.to_string())?;
     // `file://`, for infrastructure-free runs and tests, keeps the stock
     // behavior.
     if !matches!(scheme, ObjectStoreScheme::AmazonS3) {
-        let (store, prefix) = object_store::parse_url_opts(url, opts(options))?;
+        let (store, prefix) =
+            object_store::parse_url_opts(url, opts(options)).map_err(|e| e.to_string())?;
         return Ok(BuiltStore {
             store,
             prefix,
@@ -938,9 +955,27 @@ fn build_store(
     // lists the whole prefix and skips the keys at or before the offset,
     // and a directory bucket does not list in key order.
     let resumable = !flag_set(&builder, AmazonS3ConfigKey::S3Express);
+    let no_system = flag_set(
+        &builder,
+        AmazonS3ConfigKey::Client(ClientConfigKey::NoSystemCertificates),
+    );
+    let roots = client_roots(
+        system,
+        root_ca,
+        needs_root(&builder),
+        no_system,
+        PLATFORM_VERIFIER,
+    )
+    .map_err(|e| format!("source.s3.tls.root_ca: {e}"))?;
+    let hint = trust_hint(options, no_system);
     let store = builder
-        .with_http_connector(UnaddressableConnector::new(unaddressable.clone()))
-        .build()?;
+        .with_http_connector(
+            UnaddressableConnector::new(unaddressable.clone())
+                .trusting(roots)
+                .hinting(hint),
+        )
+        .build()
+        .map_err(|e| e.to_string())?;
     Ok(BuiltStore {
         bucket: scope_bucket(&store),
         store: Box::new(store),
@@ -948,6 +983,105 @@ fn build_store(
         unaddressable: Some(unaddressable),
         resumable,
     })
+}
+
+/// Whether the S3 client keeps reqwest's platform verifier, which reads the
+/// system trust store itself. Elsewhere it reads the roots from
+/// `spate_core::tls`, since the platform verifier fails to build on an empty
+/// store whatever the endpoint's scheme.
+const PLATFORM_VERIFIER: bool = cfg!(any(target_vendor = "apple", windows, target_os = "android"));
+
+/// Whether `builder`'s store is called over `https://`: the S3-specific
+/// endpoint wins over the generic one, and with neither the client calls AWS.
+fn calls_https(builder: &AmazonS3Builder) -> bool {
+    ENDPOINT_KEYS
+        .iter()
+        .find_map(|key| builder.get_config_value(key))
+        .is_none_or(|endpoint| is_https(&endpoint))
+}
+
+/// Where the client the `store` options build trusts a CA from. It reads
+/// the system trust store unless `no_system`, and takes `tls.root_ca` unless
+/// the options set an endpoint that is not `https://`, where the config
+/// refuses that key.
+fn trust_hint(options: &std::collections::BTreeMap<String, String>, no_system: bool) -> TrustHint {
+    TrustHint {
+        root_ca_key: store_endpoint(options)
+            .is_none_or(is_https)
+            .then_some("tls.root_ca"),
+        system_roots: !no_system,
+    }
+}
+
+/// Whether `builder`'s client verifies its store against the system roots
+/// alone: the store is called over `https://`, its options leave certificate
+/// checks on, and no proxy CA adds a root.
+fn needs_root(builder: &AmazonS3Builder) -> bool {
+    let set = |key| {
+        builder
+            .get_config_value(&AmazonS3ConfigKey::Client(key))
+            .is_some()
+    };
+    calls_https(builder)
+        && !flag_set(
+            builder,
+            AmazonS3ConfigKey::Client(ClientConfigKey::AllowInvalidCertificates),
+        )
+        && !(set(ClientConfigKey::ProxyUrl) && set(ClientConfigKey::ProxyCaCertificate))
+}
+
+/// The certificates the S3 client trusts: `system`'s and `root_ca`'s, which
+/// replace the system trust store the platform verifier reads. With
+/// `needs_root` and no certificate it fails, since the client could verify no
+/// server.
+///
+/// With `platform_verifier` the client keeps that verifier and adds
+/// `root_ca`'s. So does a client whose options set
+/// `disable_system_certificates`, which then trusts `root_ca`'s alone, and
+/// with none fails each `https` call at the handshake unless certificate
+/// checks are off.
+///
+/// # Errors
+///
+/// `root_ca` cannot be used, or `needs_root` is set and no certificate loads.
+fn client_roots(
+    system: impl FnOnce() -> SystemRoots,
+    root_ca: Option<&Path>,
+    needs_root: bool,
+    no_system: bool,
+    platform_verifier: bool,
+) -> Result<ClientRoots, String> {
+    if cfg!(target_os = "android") && root_ca.is_some() {
+        return Err("is not supported on Android".into());
+    }
+    if no_system || platform_verifier {
+        let extra = match root_ca {
+            Some(path) => spate_core::tls::read_root_ca(path).map_err(|e| e.to_string())?,
+            None => Vec::new(),
+        };
+        return Ok(ClientRoots {
+            certs: certificates(&extra)?,
+            only: false,
+        });
+    }
+    let mut roots = TrustRoots::load(system(), root_ca).map_err(|e| e.to_string())?;
+    if needs_root {
+        roots = roots.require_any().map_err(|e: TrustError| e.to_string())?;
+    }
+    Ok(ClientRoots {
+        certs: certificates(roots.certs())?,
+        only: true,
+    })
+}
+
+/// `certs` as the certificates `object_store` takes.
+fn certificates(
+    certs: &[CertificateDer<'static>],
+) -> Result<Vec<object_store::Certificate>, String> {
+    certs
+        .iter()
+        .map(|cert| object_store::Certificate::from_der(cert).map_err(|e| e.to_string()))
+        .collect()
 }
 
 /// Whether `builder` holds `key` set to true, in any of the spellings
@@ -1055,6 +1189,347 @@ mod tests {
     use super::*;
     use spate_core::error::ErrorClass;
     use std::collections::BTreeMap;
+
+    /// [`build_store`] with no `root_ca`, over a system trust store of one
+    /// test CA.
+    fn build(url: &Url, options: &BTreeMap<String, String>) -> Result<BuiltStore, String> {
+        build_store(url, options, None, || {
+            SystemRoots::from_certs(vec![crate::test_servers::TestCa::new("system").der()])
+        })
+    }
+
+    /// A system trust store holding no certificate.
+    fn empty_system() -> SystemRoots {
+        SystemRoots::from_certs(Vec::new())
+    }
+
+    /// A system trust store the client must leave unread.
+    fn unread() -> SystemRoots {
+        panic!("this client reads no system root")
+    }
+
+    /// Without the platform verifier, an `https` client with no usable system
+    /// root and no `root_ca` fails, and an `http` one keeps the empty set.
+    #[test]
+    fn an_https_client_with_no_trust_root_fails() {
+        assert_eq!(
+            client_roots(empty_system, None, true, false, false).expect_err("no root"),
+            "the system trust store has no certificates; install a CA bundle, point \
+             SSL_CERT_FILE at one, or set this key to the issuing CA"
+        );
+        let roots = client_roots(empty_system, None, false, false, false)
+            .expect("an http client needs no root");
+        assert_eq!((roots.certs.len(), roots.only), (0, true));
+    }
+
+    /// Without the platform verifier the client trusts the system roots and
+    /// `root_ca`'s in place of the system store. With it, or with
+    /// `disable_system_certificates`, it reads no system root and adds
+    /// `root_ca`'s.
+    #[test]
+    fn the_client_takes_the_roots_its_verifier_needs() {
+        let dir = tempfile::tempdir().unwrap();
+        let root_ca = crate::test_servers::TestCa::new("private").write(dir.path());
+        let system =
+            || SystemRoots::from_certs(vec![crate::test_servers::TestCa::new("system").der()]);
+        let roots = client_roots(system, Some(&root_ca), true, false, false).unwrap();
+        assert_eq!((roots.certs.len(), roots.only), (2, true));
+        let roots = client_roots(empty_system, Some(&root_ca), true, false, false).unwrap();
+        assert_eq!((roots.certs.len(), roots.only), (1, true));
+        for (no_system, platform_verifier) in [(true, false), (false, true), (true, true)] {
+            let roots =
+                client_roots(unread, Some(&root_ca), true, no_system, platform_verifier).unwrap();
+            assert_eq!((roots.certs.len(), roots.only), (1, false));
+            let roots = client_roots(unread, None, true, no_system, platform_verifier).unwrap();
+            assert_eq!((roots.certs.len(), roots.only), (0, false));
+        }
+    }
+
+    /// A `root_ca` that cannot be used fails, whichever verifier the client
+    /// keeps.
+    #[test]
+    fn an_unusable_root_ca_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing.pem");
+        for platform_verifier in [false, true] {
+            let err = client_roots(empty_system, Some(&missing), true, false, platform_verifier)
+                .expect_err("the file is missing");
+            assert!(
+                err.starts_with(&format!("`{}`: ", missing.display())),
+                "{err}"
+            );
+        }
+    }
+
+    /// An S3 store called over `http://` builds on an empty system trust
+    /// store. Without the platform verifier, one called over `https://`
+    /// fails at `source.s3.tls.root_ca`.
+    #[test]
+    fn an_empty_trust_store_fails_only_an_https_store() {
+        let url = Url::parse("s3://b/data/").unwrap();
+        let http = map(&[
+            ("endpoint", "http://127.0.0.1:9000"),
+            ("allow_http", "true"),
+        ]);
+        assert!(build_store(&url, &http, None, empty_system).is_ok());
+        let https = build_store(&url, &BTreeMap::new(), None, empty_system);
+        if PLATFORM_VERIFIER {
+            assert!(https.is_ok());
+        } else {
+            let err = https.err().expect("no root to verify AWS against");
+            assert!(
+                err.starts_with(
+                    "source.s3.tls.root_ca: the system trust store has no certificates"
+                ),
+                "{err}"
+            );
+        }
+    }
+
+    /// A store needs a system root only when it verifies an `https://` server
+    /// against them: not with certificate checks off, and not when a proxy CA
+    /// adds a root.
+    #[test]
+    fn a_store_needs_a_root_only_when_it_verifies_against_the_system() {
+        let needs = |pairs: &[(&str, &str)]| {
+            needs_root(&apply_options(AmazonS3Builder::new(), &map(pairs)))
+        };
+        assert!(needs(&[]));
+        assert!(!needs(&[("endpoint", "http://127.0.0.1:9000")]));
+        assert!(!needs(&[("allow_invalid_certificates", "true")]));
+        assert!(needs(&[("allow_invalid_certificates", "false")]));
+        let proxy = ("proxy_url", "https://127.0.0.1:3128");
+        let proxy_ca = ("proxy_ca_certificate", "-----BEGIN CERTIFICATE-----");
+        assert!(!needs(&[proxy, proxy_ca]));
+        assert!(needs(&[proxy]));
+        assert!(needs(&[proxy_ca]));
+    }
+
+    /// A store that turns certificate checks off, or trusts a proxy CA, opens
+    /// on an empty system trust store, as one with `disable_system_certificates`
+    /// does without reading the store.
+    #[test]
+    fn a_store_that_needs_no_system_root_opens_on_an_empty_trust_store() {
+        let url = Url::parse("s3://b/data/").unwrap();
+        let pem = spate_test_support::pem(
+            "CERTIFICATE",
+            &crate::test_servers::TestCa::new("proxy").der(),
+        );
+        for options in [
+            map(&[("allow_invalid_certificates", "true")]),
+            map(&[
+                ("proxy_url", "https://127.0.0.1:3128"),
+                ("proxy_ca_certificate", pem.as_str()),
+            ]),
+        ] {
+            let built = build_store(&url, &options, None, empty_system);
+            assert!(built.is_ok(), "{options:?}: {:?}", built.err());
+        }
+        let options = map(&[("disable_system_certificates", "true")]);
+        assert!(build_store(&url, &options, None, unread).is_ok());
+    }
+
+    /// A store built to trust `tls.root_ca` alone names only that key in the
+    /// hint for an unknown issuer.
+    #[tokio::test]
+    async fn a_built_store_names_where_its_client_trusts_a_ca() {
+        use crate::test_servers::TestCa;
+        use futures_util::StreamExt as _;
+        let (server, other) = (TestCa::new("server"), TestCa::new("other"));
+        let endpoint = crate::test_servers::serve(&server, None).await;
+        let dir = tempfile::tempdir().unwrap();
+        let root_ca = other.write(dir.path());
+        let options = map(&[
+            ("endpoint", endpoint.as_str()),
+            ("aws_access_key_id", "AKIDTEST"),
+            ("aws_secret_access_key", "secret"),
+            ("region", "us-east-1"),
+            ("disable_system_certificates", "true"),
+        ]);
+        let url = Url::parse("s3://b/data/").unwrap();
+        let built = build_store(&url, &options, Some(&root_ca), unread).expect("build the store");
+        let e = built
+            .store
+            .list(None)
+            .next()
+            .await
+            .expect("an entry or an error")
+            .expect_err("the server's CA is not trusted");
+        let reason = crate::error::bounded_reason(&e);
+        assert!(
+            reason.ends_with("UnknownIssuer; add the issuing CA to `tls.root_ca`"),
+            "{reason}"
+        );
+    }
+
+    /// The store is built with the config's `tls.root_ca`.
+    #[test]
+    fn the_store_takes_the_configs_root_ca() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = S3SourceConfig::new("s3://b/data/");
+        config.tls.root_ca = Some(dir.path().join("missing.pem"));
+        let url = Url::parse(&config.url).unwrap();
+        let err = store_named(&url, &config, "the store")
+            .err()
+            .expect("the root_ca file is missing")
+            .to_string();
+        assert!(
+            err.contains("building the object store for the store: source.s3.tls.root_ca: `"),
+            "{err}"
+        );
+    }
+
+    /// Pins which endpoint decides the scheme: `aws_endpoint_url_s3` over
+    /// `endpoint`, and AWS's `https://` with neither.
+    #[test]
+    fn the_store_is_called_over_the_scheme_its_endpoint_names() {
+        let https = |pairs: &[(&str, &str)]| {
+            calls_https(&apply_options(AmazonS3Builder::new(), &map(pairs)))
+        };
+        assert!(https(&[]));
+        assert!(https(&[("endpoint", "https://s3.example")]));
+        assert!(!https(&[("endpoint", "http://s3.example")]));
+        assert!(https(&[("endpoint", "HTTPS://s3.example")]));
+        assert!(!https(&[
+            ("aws_endpoint_url_s3", "http://s3.example"),
+            ("endpoint", "https://s3.example"),
+        ]));
+        assert!(https(&[
+            ("aws_endpoint_url_s3", "https://s3.example"),
+            ("endpoint", "http://s3.example"),
+        ]));
+    }
+
+    /// Whether a listing through a store at `url`, with `roots` and
+    /// `disable_system_certificates` set to `no_system`, fails on a TLS
+    /// rejection. The server closes each connection after the handshake, so a
+    /// trusted one fails the listing too.
+    async fn rejected(url: &str, roots: ClientRoots, no_system: bool) -> bool {
+        let e = list_error(url, roots, no_system, None).await;
+        spate_core::tls_rejection!(rustls, &e).is_some()
+    }
+
+    /// The error a listing fails with through a store at `url`, with
+    /// `roots`, `disable_system_certificates` set to `no_system`, and
+    /// its client's failures carrying `hint`.
+    async fn list_error(
+        url: &str,
+        roots: ClientRoots,
+        no_system: bool,
+        hint: Option<TrustHint>,
+    ) -> object_store::Error {
+        use futures_util::StreamExt as _;
+        let mut connector =
+            UnaddressableConnector::new(UnaddressableKeys::default()).trusting(roots);
+        if let Some(hint) = hint {
+            connector = connector.hinting(hint);
+        }
+        let store = crate::test_servers::builder_at(url)
+            .with_config(
+                AmazonS3ConfigKey::Client(ClientConfigKey::NoSystemCertificates),
+                no_system.to_string(),
+            )
+            .with_access_key_id("AKIDTEST")
+            .with_secret_access_key("secret")
+            .with_http_connector(connector)
+            .build()
+            .expect("build the S3 store");
+        store
+            .list(None)
+            .next()
+            .await
+            .expect("an entry or an error")
+            .expect_err("the server closes after the handshake")
+    }
+
+    /// A certificate from an unknown issuer fails with a hint to add its CA
+    /// where the client trusts one: the system trust store unless
+    /// `disable_system_certificates` drops it, and `tls.root_ca`. The hint
+    /// leaves the failure's own text whole.
+    #[tokio::test]
+    async fn an_unknown_issuer_names_where_the_client_trusts_a_ca() {
+        use crate::test_servers::TestCa;
+        let (server, other) = (TestCa::new("server"), TestCa::new("other"));
+        let url = crate::test_servers::serve(&server, None).await;
+        let roots = || ClientRoots {
+            certs: certificates(&[other.der()]).unwrap(),
+            only: true,
+        };
+        let system = "add the issuing CA to the system trust store";
+        let hint = |system_roots| TrustHint {
+            root_ca_key: Some("tls.root_ca"),
+            system_roots,
+        };
+        let named = list_error(&url, roots(), false, Some(hint(true))).await;
+        let narrowed = list_error(&url, roots(), true, Some(hint(false))).await;
+        let plain = list_error(&url, roots(), false, None).await;
+        // The request's own failure text, which naming the key leaves whole.
+        let request = |e: &object_store::Error| {
+            let text = e.to_string();
+            let (_, rest) = text.split_once("HTTP error: ").expect("an HTTP error");
+            rest.split(": ").next().unwrap_or_default().to_owned()
+        };
+        assert!(!request(&plain).is_empty(), "{plain}");
+        assert_eq!(request(&named), request(&plain));
+        let reason = crate::error::bounded_reason(&named);
+        assert!(
+            reason.ends_with(&format!("{system} or `tls.root_ca`")),
+            "{reason}"
+        );
+        let reason = crate::error::bounded_reason(&narrowed);
+        assert!(
+            reason.ends_with("UnknownIssuer; add the issuing CA to `tls.root_ca`"),
+            "{reason}"
+        );
+        let reason = crate::error::bounded_reason(&plain);
+        assert!(reason.ends_with(system), "{reason}");
+    }
+
+    /// The hint names `tls.root_ca` unless `store` sets an endpoint that is
+    /// not `https://`, as the config check refuses the key there, and the
+    /// system trust store unless `disable_system_certificates` drops it.
+    #[test]
+    fn the_hint_names_where_the_config_lets_a_ca_in() {
+        let key = |pairs: &[(&str, &str)]| trust_hint(&map(pairs), false).root_ca_key;
+        assert_eq!(key(&[]), Some("tls.root_ca"));
+        assert_eq!(
+            key(&[("endpoint", "HTTPS://127.0.0.1:9000")]),
+            Some("tls.root_ca")
+        );
+        assert_eq!(key(&[("endpoint", "http://127.0.0.1:9000")]), None);
+        assert!(trust_hint(&map(&[]), false).system_roots);
+        assert!(!trust_hint(&map(&[]), true).system_roots);
+    }
+
+    /// The client verifies a server against the roots it is given:
+    /// `root_ca`'s, with either verifier, and the system's unless
+    /// `disable_system_certificates` drops them.
+    #[tokio::test]
+    async fn the_client_verifies_against_the_roots_it_is_given() {
+        use crate::test_servers::TestCa;
+        let (server, other) = (TestCa::new("server"), TestCa::new("other"));
+        let url = crate::test_servers::serve(&server, None).await;
+        let dir = tempfile::tempdir().unwrap();
+        let (server_pem, other_pem) = (server.write(dir.path()), other.write(dir.path()));
+        let system = || SystemRoots::from_certs(vec![server.der()]);
+        for platform_verifier in [false, true] {
+            for (case, root_ca, rejects) in [
+                ("the server's CA", &server_pem, false),
+                ("another CA", &other_pem, true),
+            ] {
+                let roots =
+                    client_roots(empty_system, Some(root_ca), true, false, platform_verifier)
+                        .unwrap();
+                assert_eq!(rejected(&url, roots, false).await, rejects, "{case}");
+            }
+        }
+        let roots = client_roots(system, None, true, false, false).unwrap();
+        assert!(!rejected(&url, roots, false).await);
+        let roots = client_roots(system, None, true, true, false).unwrap();
+        assert!(rejected(&url, roots, true).await);
+        let roots = client_roots(system, Some(&server_pem), true, true, false).unwrap();
+        assert!(!rejected(&url, roots, true).await);
+    }
 
     fn map(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
         pairs
@@ -1225,7 +1700,7 @@ mod tests {
     #[test]
     fn build_store_s3_prefix_matches_parse_url_opts() {
         let url = Url::parse("s3://bucket/exports/2026/").unwrap();
-        let got = build_store(&url, &BTreeMap::new()).unwrap().prefix;
+        let got = build(&url, &BTreeMap::new()).unwrap().prefix;
         let (_, want) =
             object_store::parse_url_opts(&url, std::iter::empty::<(String, String)>()).unwrap();
         assert_eq!(got, want);
@@ -1243,7 +1718,7 @@ mod tests {
             "https://s3.eu-west-2.amazonaws.com/my-bucket/data/",
             "https://my-bucket.s3.eu-west-2.amazonaws.com/data/",
         ] {
-            let built = build_store(&Url::parse(url).unwrap(), &BTreeMap::new()).unwrap();
+            let built = build(&Url::parse(url).unwrap(), &BTreeMap::new()).unwrap();
             assert_eq!(built.bucket.as_deref(), Some("my-bucket"), "{url}");
             assert_eq!(built.prefix.as_ref(), "data", "{url}");
         }
@@ -1252,12 +1727,12 @@ mod tests {
             "https://s3.eu-west-2.amazonaws.com//data/",
             "https://.s3.eu-west-2.amazonaws.com/data/",
         ] {
-            let built = build_store(&Url::parse(url).unwrap(), &BTreeMap::new()).unwrap();
+            let built = build(&Url::parse(url).unwrap(), &BTreeMap::new()).unwrap();
             assert_eq!(built.bucket, None, "{url} names no bucket");
         }
         let dir = tempfile::tempdir().unwrap();
         let file = Url::from_directory_path(dir.path()).unwrap();
-        assert_eq!(build_store(&file, &BTreeMap::new()).unwrap().bucket, None);
+        assert_eq!(build(&file, &BTreeMap::new()).unwrap().bucket, None);
     }
 
     /// Pins which built stores a lister resumes over: the S3 client of a
@@ -1265,10 +1740,10 @@ mod tests {
     /// a `file://` store. Building sends nothing.
     #[test]
     fn only_an_s3_client_without_s3_express_resumes() {
-        let built = build_store(&Url::parse("s3://b/data/").unwrap(), &BTreeMap::new()).unwrap();
+        let built = build(&Url::parse("s3://b/data/").unwrap(), &BTreeMap::new()).unwrap();
         assert!(built.resumable);
         let express = BTreeMap::from([("aws_s3_express".to_owned(), "true".to_owned())]);
-        let built = build_store(
+        let built = build(
             &Url::parse("s3://b--usw2-az1--x-s3/data/").unwrap(),
             &express,
         )
@@ -1276,7 +1751,7 @@ mod tests {
         assert!(!built.resumable);
         let dir = tempfile::tempdir().unwrap();
         let file = Url::from_directory_path(dir.path()).unwrap();
-        assert!(!build_store(&file, &BTreeMap::new()).unwrap().resumable);
+        assert!(!build(&file, &BTreeMap::new()).unwrap().resumable);
     }
 
     #[test]
@@ -1305,7 +1780,7 @@ mod tests {
     fn build_store_delegates_non_s3_schemes() {
         let dir = tempfile::tempdir().unwrap();
         let url = Url::from_directory_path(dir.path()).unwrap();
-        let got = build_store(&url, &BTreeMap::new()).unwrap().prefix;
+        let got = build(&url, &BTreeMap::new()).unwrap().prefix;
         let (_, want) =
             object_store::parse_url_opts(&url, std::iter::empty::<(String, String)>()).unwrap();
         assert_eq!(got, want, "file:// delegates to parse_url_opts unchanged");
